@@ -1,5 +1,5 @@
-#include "aetherscan/sfm/reconstruct.hpp"
-#include "aetherscan/sfm/export_mvs.hpp"
+#include "sfm/reconstruct.hpp"
+#include "sfm/export_mvs.hpp"
 
 #include <algorithm>
 #include <cctype>

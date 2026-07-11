@@ -1,8 +1,8 @@
-#include "aetherscan/sfm/reconstruct.hpp"
+#include "sfm/reconstruct.hpp"
 
-#include "aetherscan/sfm/bundle.hpp"
-#include "aetherscan/sfm/tracks.hpp"
-#include "aetherscan/sfm/triangulation.hpp"
+#include "sfm/bundle.hpp"
+#include "sfm/tracks.hpp"
+#include "sfm/triangulation.hpp"
 
 #include <iostream>
 

@@ -1,6 +1,6 @@
-#include "aetherscan/sfm/export_mvs.hpp"
+#include "sfm/export_mvs.hpp"
 
-#include "aetherscan/io/image.hpp"
+#include "io/image.hpp"
 
 #include <algorithm>
 #include <array>

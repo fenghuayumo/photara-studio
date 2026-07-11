@@ -1,4 +1,4 @@
-#include "aetherscan/io/image.hpp"
+#include "io/image.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX

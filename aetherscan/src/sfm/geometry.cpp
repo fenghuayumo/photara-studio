@@ -1,4 +1,4 @@
-#include "aetherscan/sfm/geometry.hpp"
+#include "sfm/geometry.hpp"
 
 #include <Eigen/SVD>
 

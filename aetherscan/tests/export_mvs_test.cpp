@@ -1,5 +1,5 @@
-#include "aetherscan/sfm/export_mvs.hpp"
-#include "aetherscan/sfm/scene.hpp"
+#include "sfm/export_mvs.hpp"
+#include "sfm/scene.hpp"
 
 #include <filesystem>
 #include <fstream>

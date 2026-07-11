@@ -1,7 +1,7 @@
-#include "aetherscan/sfm/resection.hpp"
+#include "sfm/resection.hpp"
 
-#include "aetherscan/sfm/tracks.hpp"
-#include "aetherscan/sfm/triangulation.hpp"
+#include "sfm/tracks.hpp"
+#include "sfm/triangulation.hpp"
 
 #include <algorithm>
 #include <iostream>

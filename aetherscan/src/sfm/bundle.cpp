@@ -1,4 +1,4 @@
-#include "aetherscan/sfm/bundle.hpp"
+#include "sfm/bundle.hpp"
 
 #include <unordered_map>
 #include <unordered_set>

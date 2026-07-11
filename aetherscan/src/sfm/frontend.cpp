@@ -1,8 +1,8 @@
-#include "aetherscan/sfm/frontend.hpp"
+#include "sfm/frontend.hpp"
 
-#include "aetherscan/features/registry.hpp"
-#include "aetherscan/parallel/thread_pool.hpp"
-#include "aetherscan/sfm/tracks.hpp"
+#include "features/registry.hpp"
+#include "parallel/thread_pool.hpp"
+#include "sfm/tracks.hpp"
 
 #include <algorithm>
 #include <chrono>

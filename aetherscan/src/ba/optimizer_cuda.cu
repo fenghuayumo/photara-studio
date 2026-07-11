@@ -1,6 +1,6 @@
-#include "aetherscan/ba/optimizer.hpp"
+#include "ba/optimizer.hpp"
 
-#include "aetherscan/ba/linearizer.hpp"
+#include "ba/linearizer.hpp"
 #include "reprojection_detail.cuh"
 
 #include <cuda_runtime.h>

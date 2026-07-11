@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aetherscan/sfm/scene.hpp"
-#include "aetherscan/sfm/types.hpp"
+#include "sfm/scene.hpp"
+#include "sfm/types.hpp"
 
 #include <vector>
 

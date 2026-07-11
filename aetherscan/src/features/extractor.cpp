@@ -1,6 +1,6 @@
-#include "aetherscan/features/extractor.hpp"
+#include "features/extractor.hpp"
 
-#include "aetherscan/io/image.hpp"
+#include "io/image.hpp"
 
 #include <stdexcept>
 

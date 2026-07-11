@@ -1,14 +1,15 @@
 #pragma once
 
-#include "aetherscan/sfm/scene.hpp"
+#include "sfm/scene.hpp"
 
 namespace aetherscan::sfm {
 
 struct GlobalPositioningOptions {
     unsigned min_views_per_track{3};
+    // Kept for API compatibility with earlier global mapping options.
     unsigned max_irls_iterations{8};
-    unsigned max_linear_iterations{300};
-    double linear_tolerance{1e-7};
+    unsigned max_num_iterations{200};
+    double function_tolerance{1e-5};
     double huber_threshold{0.1};
 };
 

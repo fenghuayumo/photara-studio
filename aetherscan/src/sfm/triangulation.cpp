@@ -1,4 +1,4 @@
-#include "aetherscan/sfm/triangulation.hpp"
+#include "sfm/triangulation.hpp"
 
 #include <Eigen/SVD>
 

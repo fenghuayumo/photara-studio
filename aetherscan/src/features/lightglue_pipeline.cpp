@@ -1,6 +1,6 @@
-#include "aetherscan/features/features.hpp"
+#include "features/features.hpp"
 
-#include "aetherscan/io/image.hpp"
+#include "io/image.hpp"
 
 #if defined(AETHERSCAN_HAS_ONNXRUNTIME)
 #include <onnxruntime_cxx_api.h>

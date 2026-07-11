@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aetherscan/sfm/scene.hpp"
+#include "sfm/scene.hpp"
 
 namespace aetherscan::sfm {
 

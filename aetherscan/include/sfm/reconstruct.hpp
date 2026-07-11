@@ -1,10 +1,10 @@
 #pragma once
 
-#include "aetherscan/sfm/frontend.hpp"
-#include "aetherscan/sfm/global_positioning.hpp"
-#include "aetherscan/sfm/global_rotation.hpp"
-#include "aetherscan/sfm/resection.hpp"
-#include "aetherscan/sfm/star_init.hpp"
+#include "sfm/frontend.hpp"
+#include "sfm/global_positioning.hpp"
+#include "sfm/global_rotation.hpp"
+#include "sfm/resection.hpp"
+#include "sfm/star_init.hpp"
 
 namespace aetherscan::sfm {
 

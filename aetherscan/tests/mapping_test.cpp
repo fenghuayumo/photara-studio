@@ -1,8 +1,8 @@
-#include "aetherscan/sfm/star_init.hpp"
-#include "aetherscan/sfm/reconstruct.hpp"
-#include "aetherscan/sfm/resection.hpp"
-#include "aetherscan/sfm/tracks.hpp"
-#include "aetherscan/sfm/triangulation.hpp"
+#include "sfm/star_init.hpp"
+#include "sfm/reconstruct.hpp"
+#include "sfm/resection.hpp"
+#include "sfm/tracks.hpp"
+#include "sfm/triangulation.hpp"
 
 #include <cmath>
 #include <iostream>

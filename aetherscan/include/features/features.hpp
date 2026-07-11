@@ -1,9 +1,9 @@
 #pragma once
 
-#include "aetherscan/features/extractor.hpp"
-#include "aetherscan/features/matcher.hpp"
-#include "aetherscan/features/registry.hpp"
-#include "aetherscan/features/types.hpp"
+#include "features/extractor.hpp"
+#include "features/matcher.hpp"
+#include "features/registry.hpp"
+#include "features/types.hpp"
 
 #include <cstddef>
 #include <cstdint>

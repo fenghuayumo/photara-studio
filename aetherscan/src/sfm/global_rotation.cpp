@@ -1,4 +1,4 @@
-#include "aetherscan/sfm/global_rotation.hpp"
+#include "sfm/global_rotation.hpp"
 
 #include <Eigen/SparseCholesky>
 

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aetherscan/ba/optimizer.hpp"
-#include "aetherscan/sfm/scene.hpp"
+#include "ba/optimizer.hpp"
+#include "sfm/scene.hpp"
 
 namespace aetherscan::sfm {
 

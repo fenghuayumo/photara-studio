@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aetherscan/features/types.hpp"
-#include "aetherscan/sfm/types.hpp"
+#include "features/types.hpp"
+#include "sfm/types.hpp"
 
 #include <algorithm>
 #include <filesystem>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aetherscan/ba/problem.hpp"
+#include "ba/problem.hpp"
 
 #include <cstddef>
 #include <memory>

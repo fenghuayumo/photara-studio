@@ -1,4 +1,4 @@
-#include "aetherscan/ba/linearizer.hpp"
+#include "ba/linearizer.hpp"
 
 #include "reprojection_detail.cuh"
 

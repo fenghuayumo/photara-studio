@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aetherscan/features/extractor.hpp"
-#include "aetherscan/features/matcher.hpp"
+#include "features/extractor.hpp"
+#include "features/matcher.hpp"
 
 #include <functional>
 #include <memory>

@@ -1,5 +1,5 @@
-#include "aetherscan/features/registry.hpp"
-#include "aetherscan/sfm/geometry.hpp"
+#include "features/registry.hpp"
+#include "sfm/geometry.hpp"
 
 #include <charconv>
 #include <chrono>

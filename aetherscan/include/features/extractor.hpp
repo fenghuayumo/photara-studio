@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aetherscan/features/types.hpp"
+#include "features/types.hpp"
 
 #include <filesystem>
 #include <memory>

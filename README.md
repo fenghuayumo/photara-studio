@@ -30,7 +30,7 @@ AetherScan/
 ├── CMakeLists.txt                 总工程入口
 ├── aetherscan/
 │   ├── CMakeLists.txt             核心库子项目
-│   ├── include/aetherscan/        稳定的公开 C++ API
+│   ├── include/                   稳定的公开 C++ API（ba/features/sfm/...）
 │   ├── third_party/vlfeat/        精简 VLFeat SIFT（BSD）
 │   ├── src/                       BA / features / geometry / sfm
 │   └── tests/                     正确性测试

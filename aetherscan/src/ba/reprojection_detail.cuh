@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aetherscan/ba/linearizer.hpp"
+#include "ba/linearizer.hpp"
 
 #include <cmath>
 

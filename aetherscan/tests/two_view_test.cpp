@@ -1,6 +1,6 @@
-#include "aetherscan/sfm/geometry.hpp"
-#include "aetherscan/sfm/triangulation.hpp"
-#include "aetherscan/sfm/tracks.hpp"
+#include "sfm/geometry.hpp"
+#include "sfm/triangulation.hpp"
+#include "sfm/tracks.hpp"
 
 #include <cmath>
 #include <iostream>

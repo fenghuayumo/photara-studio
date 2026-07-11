@@ -1,6 +1,6 @@
-#include "aetherscan/features/features.hpp"
+#include "features/features.hpp"
 
-#include "aetherscan/parallel/thread_pool.hpp"
+#include "parallel/thread_pool.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX

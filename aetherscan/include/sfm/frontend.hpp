@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aetherscan/sfm/geometry.hpp"
-#include "aetherscan/sfm/scene.hpp"
+#include "sfm/geometry.hpp"
+#include "sfm/scene.hpp"
 
 #include <filesystem>
 #include <string>
