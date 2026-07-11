@@ -65,8 +65,8 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
     };
 
     for (const ImagePair& pair : scene.pairs) {
-        if (pair.matches.empty()) continue;
-        if (pair.composite_weight() < min_pair_weight) continue;
+        if (!pair.active || pair.matches.empty()) continue;
+        if (pair.composite_weight() <= min_pair_weight) continue;
         const Index off1 = feature_offset(scene, pair.id1);
         const Index off2 = feature_offset(scene, pair.id2);
         for (const FeatureMatch& match : pair.matches) {

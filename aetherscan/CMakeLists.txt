@@ -65,6 +65,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
     find_package(freeimage CONFIG REQUIRED)
     find_package(Eigen3 CONFIG REQUIRED)
     find_package(PoseLib CONFIG REQUIRED)
+    find_package(Ceres CONFIG REQUIRED)
 
     set(AETHERSCAN_VLFEAT_SOURCES
         third_party/vlfeat/vl/generic.c
@@ -162,6 +163,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/bundle.cpp
         src/sfm/star_init.cpp
         src/sfm/resection.cpp
+        src/sfm/global_rotation.cpp
+        src/sfm/global_positioning.cpp
         src/sfm/frontend.cpp
         src/sfm/reconstruct.cpp
         src/sfm/export_mvs.cpp)
@@ -174,7 +177,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         AetherScan::Features
         AetherScan::BA
         Eigen3::Eigen
-        PoseLib::PoseLib)
+        PoseLib::PoseLib
+        Ceres::ceres)
     target_compile_definitions(aetherscan_sfm PRIVATE AETHERSCAN_HAS_POSELIB=1)
     if(MSVC)
         target_compile_options(aetherscan_sfm PRIVATE /W4 /permissive- /EHsc)

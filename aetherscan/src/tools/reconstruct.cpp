@@ -51,19 +51,23 @@ void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& 
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 4 || argc > 5) {
-            std::cout << "Usage: aetherscan images_dir focal_pixels output.(mvs|ply) "
+        if (argc < 5 || argc > 6) {
+            std::cout << "Usage: aetherscan images_dir focal_pixels incremental|global output.(mvs|ply) "
                          "[neighbor_window]\n"
-                         "  Incremental SfM (openMVS-style star init + resection).\n"
+                         "  incremental: star initialization + PnP resection\n"
+                         "  global: rotation averaging + global positioning + BA\n"
                          "  .mvs  OpenMVS Interface (open in Viewer)\n"
                          "  .ply  sparse XYZ point cloud\n";
             return argc == 1 ? 0 : 1;
         }
         const std::filesystem::path directory = argv[1];
         const double focal = number(argv[2]);
-        const std::filesystem::path output_path = argv[3];
+        const std::string mode = argv[3];
+        if (mode != "incremental" && mode != "global")
+            throw std::invalid_argument("Mode must be incremental or global");
+        const std::filesystem::path output_path = argv[4];
         const std::size_t window =
-            argc == 5 ? static_cast<std::size_t>(number(argv[4])) : 3;
+            argc == 6 ? static_cast<std::size_t>(number(argv[5])) : 3;
 
         std::vector<std::filesystem::path> files;
         for (const auto& entry : std::filesystem::directory_iterator(directory)) {
@@ -82,6 +86,9 @@ int main(int argc, char** argv) {
         if (files.size() < 2) throw std::runtime_error("Need at least two images");
 
         aetherscan::sfm::ReconstructionConfig config;
+        config.mode = mode == "global"
+            ? aetherscan::sfm::ReconstructionMode::global
+            : aetherscan::sfm::ReconstructionMode::incremental;
         config.frontend.focal_pixels = focal;
         config.frontend.neighbor_window = window;
 
@@ -90,6 +97,13 @@ int main(int argc, char** argv) {
         const auto summary = aetherscan::sfm::reconstruct(scene, files, config);
         const double elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+
+        if (!summary.valid) {
+            std::cerr << "reconstruction failed: registered="
+                      << summary.registered_views << '/' << scene.images.size()
+                      << " landmarks=" << summary.landmarks << '\n';
+            return 2;
+        }
 
         if (lower_extension(output_path) == ".mvs") {
             aetherscan::sfm::export_openmvs_interface(scene, output_path);

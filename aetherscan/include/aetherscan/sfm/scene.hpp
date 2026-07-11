@@ -31,6 +31,7 @@ struct ImagePair {
     std::optional<Mat3> F;
     float weight_spatial{0.F};
     float mean_ray_angle{0.F};  // radians
+    bool active{true};
 
     ImagePair() = default;
     ImagePair(Index a, Index b) : id1(a), id2(b) {
@@ -44,6 +45,7 @@ struct ImagePair {
     // openMVS-style composite weight (spatial * capped inliers); connectivity/triplet
     // filled later when available.
     [[nodiscard]] float composite_weight() const {
+        if (!active) return 0.F;
         const unsigned capped = std::min(num_inliers(), 1000u);
         return static_cast<float>(capped) * std::max(weight_spatial, 0.05F);
     }

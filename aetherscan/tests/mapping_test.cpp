@@ -1,4 +1,5 @@
 #include "aetherscan/sfm/star_init.hpp"
+#include "aetherscan/sfm/reconstruct.hpp"
 #include "aetherscan/sfm/resection.hpp"
 #include "aetherscan/sfm/tracks.hpp"
 #include "aetherscan/sfm/triangulation.hpp"
@@ -97,6 +98,7 @@ int main() {
 
     build_tracks(scene);
     expect(scene.tracks.size() == static_cast<std::size_t>(k_points), "tracks built");
+    Scene global_scene = scene;
 
     StarInitConfig star;
     star.min_views = 3;
@@ -112,6 +114,17 @@ int main() {
         if (t.is_triangulated()) ++landmarks;
     }
     expect(landmarks >= 30, "enough landmarks after star init");
+
+    GlobalPositioningOptions positioning;
+    positioning.min_views_per_track = 3;
+    positioning.max_irls_iterations = 4;
+    ResectionConfig fallback;
+    fallback.min_angle_deg = 0.5F;
+    const ReconstructionSummary global =
+        run_global_mapping(global_scene, {}, positioning, fallback);
+    expect(global.valid, "global mapping");
+    expect(global.registered_views == k_views, "global mapping registers every view");
+    expect(global.landmarks >= 30, "global mapping reconstructs enough landmarks");
 
     if (failures == 0) {
         std::cout << "sfm mapping tests passed\n";
