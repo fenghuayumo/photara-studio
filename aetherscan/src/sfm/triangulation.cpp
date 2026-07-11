@@ -1,106 +1,160 @@
 #include "aetherscan/sfm/triangulation.hpp"
 
-#include "aetherscan/geometry/pose.hpp"
+#include <Eigen/SVD>
 
 #include <algorithm>
 #include <cmath>
-#include <stdexcept>
 #include <vector>
 
 namespace aetherscan::sfm {
 namespace {
 
-geometry::Mat3 pose_rotation(const ba::Pose& pose) {
-    const double w = pose.qw, x = pose.qx, y = pose.qy, z = pose.qz;
-    geometry::Mat3 r;
-    r << 1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
-        2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
-        2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y);
-    return r;
+constexpr double k_rad2deg = 180.0 / 3.14159265358979323846;
+
+Vec2 keypoint_xy(const Image& image, const Index feature_id) {
+    const auto& kp = image.features.keypoints[feature_id];
+    return {kp.x, kp.y};
 }
 
 }  // namespace
 
-TriangulationResult triangulate_track(
-    const Scene& scene, const Track& track, const TriangulationOptions& options) {
-    if (options.minimum_depth <= 0.0 || options.maximum_reprojection_error <= 0.0 ||
-        options.minimum_angle_degrees < 0.0)
-        throw std::invalid_argument("Invalid triangulation options");
-
-    struct Observation {
-        const View* view;
-        const Camera* camera;
-        const features::Keypoint* point;
-    };
-    std::vector<Observation> observations;
-    for (const auto& observation : track.observations) {
-        if (observation.view_id >= scene.views.size())
-            throw std::out_of_range("Track view is invalid");
-        const View& view = scene.views[observation.view_id];
-        if (!view.registered) continue;
-        if (view.camera_id >= scene.cameras.size() ||
-            observation.feature_index >= view.features.keypoints.size())
-            throw std::out_of_range("Track feature or camera is invalid");
-        observations.push_back(
-            {&view, &scene.cameras[view.camera_id],
-             &view.features.keypoints[observation.feature_index]});
-    }
-
-    TriangulationResult result;
-    if (observations.size() < 2) return result;
-
-    std::vector<geometry::Mat34> projections;
-    std::vector<geometry::Vec2> pixels;
-    projections.reserve(observations.size());
-    pixels.reserve(observations.size());
-    for (const auto& value : observations) {
-        const geometry::Mat3 r = pose_rotation(value.view->pose);
-        const geometry::Vec3 center(value.view->pose.cx, value.view->pose.cy, value.view->pose.cz);
-        const geometry::Vec3 t = -r * center;
-        geometry::Mat3 k = geometry::Mat3::Zero();
-        k(0, 0) = value.camera->fx;
-        k(1, 1) = value.camera->fy;
-        k(0, 2) = value.camera->cx;
-        k(1, 2) = value.camera->cy;
-        k(2, 2) = 1.0;
-        geometry::Mat34 rt;
-        rt.leftCols<3>() = r;
-        rt.col(3) = t;
-        projections.push_back(k * rt);
-        pixels.emplace_back(value.point->x, value.point->y);
-    }
-
-    geometry::Vec3 point;
-    if (!geometry::triangulate_dlt(projections, pixels, point)) return result;
-    result.position = {point.x(), point.y(), point.z()};
-
-    double error_sum = 0.0;
-    std::vector<geometry::Vec3> rays;
-    for (const auto& value : observations) {
-        const geometry::Mat3 r = pose_rotation(value.view->pose);
-        const geometry::Vec3 center(value.view->pose.cx, value.view->pose.cy, value.view->pose.cz);
-        const geometry::Vec3 delta = point - center;
-        const geometry::Vec3 camera = r * delta;
-        if (camera.z() <= options.minimum_depth) return result;
-        const double ex = value.camera->fx * camera.x() / camera.z() + value.camera->cx -
-                          value.point->x;
-        const double ey = value.camera->fy * camera.y() / camera.z() + value.camera->cy -
-                          value.point->y;
-        error_sum += std::sqrt(ex * ex + ey * ey);
-        rays.push_back(delta.normalized());
-    }
-    for (std::size_t first = 0; first < rays.size(); ++first)
-        for (std::size_t second = first + 1; second < rays.size(); ++second) {
-            const double cosine =
-                std::clamp(rays[first].dot(rays[second]), -1.0, 1.0);
-            result.maximum_angle_degrees = std::max(
-                result.maximum_angle_degrees, std::acos(cosine) * 180.0 / 3.14159265358979323846);
+float track_min_ray_angle_deg(const Track& track, const Scene& scene) {
+    if (track.num_inliers < 2) return 0.F;
+    double best_cos = 1.0;
+    for (unsigned i = 0; i + 1 < track.num_inliers; ++i) {
+        const Image& img_i = scene.images[track.observations[i].image_id];
+        const Vec3 ray_i = (track.position - img_i.pose.C).normalized();
+        for (unsigned j = i + 1; j < track.num_inliers; ++j) {
+            const Image& img_j = scene.images[track.observations[j].image_id];
+            const Vec3 ray_j = (track.position - img_j.pose.C).normalized();
+            best_cos = std::min(best_cos, ray_i.dot(ray_j));
         }
-    result.supporting_views = observations.size();
-    result.mean_reprojection_error = error_sum / static_cast<double>(observations.size());
-    result.valid = result.mean_reprojection_error <= options.maximum_reprojection_error &&
-                   result.maximum_angle_degrees >= options.minimum_angle_degrees;
-    return result;
+    }
+    return static_cast<float>(std::acos(std::clamp(best_cos, -1.0, 1.0)) * k_rad2deg);
+}
+
+unsigned triangulate_track(
+    Track& track,
+    const Scene& scene,
+    const float reproj_threshold_px,
+    const float min_angle_deg,
+    const unsigned min_inliers) {
+    if (!track.is_valid()) return 0;
+
+    struct CamRow {
+        Mat3 DR;
+        Vec3 Dt;
+        Index obs_index{};
+    };
+    std::vector<CamRow> cams;
+    cams.reserve(track.observations.size());
+
+    for (Index obs_index = 0; obs_index < track.observations.size(); ++obs_index) {
+        const Observation& obs = track.observations[obs_index];
+        const Image& image = scene.images[obs.image_id];
+        if (!image.registered) continue;
+        if (obs.feature_id >= image.features.keypoints.size()) continue;
+        const PinholeCamera& camera = scene.camera_of(image);
+        const Vec3 dir = camera.unproject_normalized(keypoint_xy(image, obs.feature_id));
+        Mat3 Dcross;
+        Dcross << 0, -dir.z(), dir.y(), dir.z(), 0, -dir.x(), -dir.y(), dir.x(), 0;
+        cams.push_back({Dcross * image.pose.R, -Dcross * image.pose.translation(), obs_index});
+    }
+    if (cams.size() < min_inliers) {
+        track.num_inliers = 0;
+        return 0;
+    }
+
+    Eigen::MatrixXd A(2 * static_cast<Eigen::Index>(cams.size()), 3);
+    Eigen::VectorXd b(2 * static_cast<Eigen::Index>(cams.size()));
+    for (std::size_t i = 0; i < cams.size(); ++i) {
+        A.row(static_cast<Eigen::Index>(2 * i)) = cams[i].DR.row(0);
+        b(static_cast<Eigen::Index>(2 * i)) = cams[i].Dt(0);
+        A.row(static_cast<Eigen::Index>(2 * i + 1)) = cams[i].DR.row(1);
+        b(static_cast<Eigen::Index>(2 * i + 1)) = cams[i].Dt(1);
+    }
+    track.position = A.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b);
+    if (!track.position.allFinite()) {
+        track.num_inliers = 0;
+        return 0;
+    }
+
+    std::vector<Index> inlier_obs;
+    std::vector<CamRow> inlier_cams;
+    inlier_obs.reserve(cams.size());
+    inlier_cams.reserve(cams.size());
+    for (const CamRow& cam : cams) {
+        const Observation& obs = track.observations[cam.obs_index];
+        const Image& image = scene.images[obs.image_id];
+        const PinholeCamera& camera = scene.camera_of(image);
+        Vec2 proj;
+        if (!camera.project_checked(image.pose.transform_world_to_camera(track.position), proj))
+            continue;
+        if ((proj - keypoint_xy(image, obs.feature_id)).norm() > reproj_threshold_px) continue;
+        inlier_obs.push_back(cam.obs_index);
+        inlier_cams.push_back(cam);
+    }
+    if (inlier_obs.size() < min_inliers) {
+        track.num_inliers = 0;
+        return 0;
+    }
+
+    std::vector<char> used(track.observations.size(), 0);
+    std::vector<Observation> ordered;
+    ordered.reserve(track.observations.size());
+    for (Index idx : inlier_obs) {
+        ordered.push_back(track.observations[idx]);
+        used[idx] = 1;
+    }
+    for (std::size_t i = 0; i < track.observations.size(); ++i) {
+        if (!used[i]) ordered.push_back(track.observations[i]);
+    }
+    track.observations = std::move(ordered);
+    track.num_inliers =
+        static_cast<std::uint8_t>(std::min<std::size_t>(inlier_obs.size(), 255));
+
+    if (track_min_ray_angle_deg(track, scene) < min_angle_deg) {
+        track.num_inliers = 0;
+        return 0;
+    }
+
+    if (inlier_cams.size() != cams.size()) {
+        Eigen::MatrixXd A2(2 * static_cast<Eigen::Index>(inlier_cams.size()), 3);
+        Eigen::VectorXd b2(2 * static_cast<Eigen::Index>(inlier_cams.size()));
+        for (std::size_t k = 0; k < inlier_cams.size(); ++k) {
+            A2.row(static_cast<Eigen::Index>(2 * k)) = inlier_cams[k].DR.row(0);
+            b2(static_cast<Eigen::Index>(2 * k)) = inlier_cams[k].Dt(0);
+            A2.row(static_cast<Eigen::Index>(2 * k + 1)) = inlier_cams[k].DR.row(1);
+            b2(static_cast<Eigen::Index>(2 * k + 1)) = inlier_cams[k].Dt(1);
+        }
+        track.position = A2.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b2);
+        if (!track.position.allFinite()) {
+            track.num_inliers = 0;
+            return 0;
+        }
+    }
+    return track.num_inliers;
+}
+
+unsigned triangulate_tracks(
+    Scene& scene,
+    const bool outliers_only,
+    const float reproj_threshold_px,
+    const float min_angle_deg) {
+    unsigned inlier_tracks = 0;
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+ : inlier_tracks) schedule(dynamic)
+#endif
+    for (int i = 0; i < static_cast<int>(scene.tracks.size()); ++i) {
+        Track& track = scene.tracks[static_cast<std::size_t>(i)];
+        if (outliers_only && track.is_triangulated()) {
+            ++inlier_tracks;
+            continue;
+        }
+        if (triangulate_track(track, scene, reproj_threshold_px, min_angle_deg) >= 2)
+            ++inlier_tracks;
+    }
+    return inlier_tracks;
 }
 
 }  // namespace aetherscan::sfm

@@ -1,54 +1,123 @@
-#include "aetherscan/sfm/two_view.hpp"
+#include "aetherscan/sfm/geometry.hpp"
 #include "aetherscan/sfm/triangulation.hpp"
+#include "aetherscan/sfm/tracks.hpp"
 
 #include <cmath>
 #include <iostream>
 #include <random>
+#include <vector>
+
+namespace {
+
+using aetherscan::sfm::Index;
+using aetherscan::sfm::Mat3;
+using aetherscan::sfm::PinholeCamera;
+using aetherscan::sfm::Pose3D;
+using aetherscan::sfm::Scene;
+using aetherscan::sfm::Track;
+using aetherscan::sfm::Vec2;
+using aetherscan::sfm::Vec3;
+
+int failures = 0;
+
+void expect(const bool condition, const char* message) {
+    if (!condition) {
+        std::cerr << "FAIL: " << message << '\n';
+        ++failures;
+    }
+}
+
+PinholeCamera make_camera(const double focal = 800.0) {
+    PinholeCamera camera;
+    camera.width = 1280;
+    camera.height = 720;
+    camera.fx = focal;
+    camera.fy = focal;
+    camera.cx = 640.0;
+    camera.cy = 360.0;
+    return camera;
+}
+
+}  // namespace
 
 int main() {
-    using namespace aetherscan;
-    sfm::Camera camera0{0,1280,720,900.0,900.0,640.0,360.0};
-    sfm::Camera camera1=camera0; camera1.id=1;
-    features::FeatureSet first,second;
-    first.image_width=second.image_width=1280; first.image_height=second.image_height=720;
-    features::MatchSet matches;
-    std::mt19937 random(9); std::uniform_real_distribution<double> xy(-2.0,2.0),z(4.0,10.0);
-    std::normal_distribution<double> noise(0.0,0.2);
-    for (std::uint32_t i=0;i<150;++i) {
-        const double x=xy(random),y=xy(random),depth=z(random);
-        first.keypoints.push_back({static_cast<float>(900*x/depth+640+noise(random)),
-                                   static_cast<float>(900*y/depth+360+noise(random))});
-        second.keypoints.push_back({static_cast<float>(900*(x-1.0)/depth+640+noise(random)),
-                                    static_cast<float>(900*y/depth+360+noise(random))});
-        matches.matches.push_back({i,i,1.0F});
+    // Synthetic two-view relative pose
+    const PinholeCamera cam = make_camera();
+    Pose3D pose2;
+    pose2.R = Mat3::Identity();
+    pose2.C = Vec3(0.3, 0.0, 0.0);
+
+    std::mt19937 rng(1);
+    std::uniform_real_distribution<double> xy(-1.0, 1.0);
+    std::uniform_real_distribution<double> z(3.0, 8.0);
+
+    std::vector<Vec2> pixels1, pixels2;
+    for (int i = 0; i < 120; ++i) {
+        const Vec3 X(xy(rng), xy(rng), z(rng));
+        const Vec3 X1 = X;
+        const Vec3 X2 = pose2.transform_world_to_camera(X);
+        pixels1.push_back(cam.project(X1));
+        pixels2.push_back(cam.project(X2));
     }
-    for (std::uint32_t i=0;i<25;++i) matches.matches[i].train=(i*37+11)%150;
-    const auto geometry=sfm::verify_two_view(camera0,camera1,first,second,matches);
-    std::cout << "inliers=" << geometry.inliers.matches.size()
-              << " homography=" << geometry.homography_inliers << '\n';
-    if (!geometry.valid || geometry.inliers.matches.size()<100 ||
-        std::abs(geometry.translation_direction[0])<0.9) return 1;
-    std::vector<sfm::View> views(2);
-    views[0].id=0; views[1].id=1; views[0].features=first; views[1].features=second;
-    sfm::VerifiedPair pair{0,1,geometry.inliers};
-    const auto tracks=sfm::build_tracks(views,{pair});
-    if (tracks.size()<100) return 2;
-    for (const auto& track : tracks)
-        if (track.observations.size()!=2 ||
-            track.observations[0].view_id==track.observations[1].view_id) return 3;
-    sfm::Scene scene;
-    scene.cameras={camera0,camera1}; scene.views=views;
-    scene.views[0].camera_id=0; scene.views[1].camera_id=1;
-    scene.views[0].registered=scene.views[1].registered=true;
-    scene.views[1].pose.cx=1.0;
-    const auto index0=static_cast<features::FeatureIndex>(scene.views[0].features.keypoints.size());
-    const auto index1=static_cast<features::FeatureIndex>(scene.views[1].features.keypoints.size());
-    scene.views[0].features.keypoints.push_back({676.0F,378.0F});
-    scene.views[1].features.keypoints.push_back({496.0F,378.0F});
-    const sfm::Track known_track{0,{{0,index0},{1,index1}}};
-    const auto triangulated=sfm::triangulate_track(scene,known_track);
-    if (!triangulated.valid || std::abs(triangulated.position[0]-0.2)>1e-6 ||
-        std::abs(triangulated.position[1]-0.1)>1e-6 ||
-        std::abs(triangulated.position[2]-5.0)>1e-6) return 4;
-    return 0;
+
+    aetherscan::sfm::RelativePoseOptions options;
+    options.min_inliers = 40;
+    options.max_epipolar_error_px = 2.0;
+    const auto result =
+        aetherscan::sfm::estimate_relative_pose(pixels1, pixels2, cam, cam, options);
+    expect(result.success, "relative pose should succeed");
+    expect(result.num_inliers > 80, "relative pose should have many inliers");
+    expect(result.pose.C.norm() > 0.1, "baseline should be non-trivial");
+
+    // Absolute pose
+    std::vector<Vec3> bearings, points;
+    for (int i = 0; i < 80; ++i) {
+        const Vec3 X(xy(rng), xy(rng), z(rng));
+        points.push_back(X);
+        bearings.push_back(pose2.transform_world_to_camera(X).normalized());
+    }
+    aetherscan::sfm::AbsolutePoseOptions abs_opts;
+    abs_opts.min_inliers = 20;
+    const auto abs =
+        aetherscan::sfm::estimate_absolute_pose(bearings, points, cam, abs_opts);
+    expect(abs.success, "absolute pose should succeed");
+    expect((abs.pose.C - pose2.C).norm() < 0.05, "absolute pose center close");
+
+    // Triangulation + tracks
+    Scene scene;
+    scene.cameras = {cam, cam};
+    scene.images.resize(2);
+    scene.images[0].id = 0;
+    scene.images[0].camera_id = 0;
+    scene.images[0].registered = true;
+    scene.images[0].pose = Pose3D::identity();
+    scene.images[0].features.keypoints.resize(pixels1.size());
+    scene.images[1].id = 1;
+    scene.images[1].camera_id = 1;
+    scene.images[1].registered = true;
+    scene.images[1].pose = pose2;
+    scene.images[1].features.keypoints.resize(pixels2.size());
+    for (std::size_t i = 0; i < pixels1.size(); ++i) {
+        scene.images[0].features.keypoints[i].x = static_cast<float>(pixels1[i].x());
+        scene.images[0].features.keypoints[i].y = static_cast<float>(pixels1[i].y());
+        scene.images[1].features.keypoints[i].x = static_cast<float>(pixels2[i].x());
+        scene.images[1].features.keypoints[i].y = static_cast<float>(pixels2[i].y());
+    }
+    aetherscan::sfm::ImagePair pair(0, 1);
+    pair.relative_pose = pose2;
+    pair.weight_spatial = 1.F;
+    for (Index i = 0; i < pixels1.size(); ++i) pair.matches.push_back({i, i});
+    scene.pairs.push_back(pair);
+    aetherscan::sfm::build_tracks(scene);
+    expect(scene.tracks.size() == pixels1.size(), "one track per correspondence");
+    const unsigned triangulated =
+        aetherscan::sfm::triangulate_tracks(scene, false, 2.F, 0.5F);
+    expect(triangulated > 80, "most tracks triangulate");
+
+    if (failures == 0) {
+        std::cout << "sfm geometry/triangulation tests passed\n";
+        return 0;
+    }
+    std::cerr << failures << " failures\n";
+    return 1;
 }

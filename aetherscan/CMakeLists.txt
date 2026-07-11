@@ -64,6 +64,7 @@ set_target_properties(aetherscan_ba PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(AETHERSCAN_ENABLE_FEATURES)
     find_package(freeimage CONFIG REQUIRED)
     find_package(Eigen3 CONFIG REQUIRED)
+    find_package(PoseLib CONFIG REQUIRED)
 
     set(AETHERSCAN_VLFEAT_SOURCES
         third_party/vlfeat/vl/generic.c
@@ -154,12 +155,15 @@ if(AETHERSCAN_ENABLE_FEATURES)
     endif()
 
     add_library(aetherscan_sfm
-        src/geometry/pose.cpp
         src/sfm/scene.cpp
-        src/sfm/two_view.cpp
+        src/sfm/geometry.cpp
         src/sfm/triangulation.cpp
-        src/sfm/mapping.cpp
+        src/sfm/tracks.cpp
+        src/sfm/bundle.cpp
+        src/sfm/star_init.cpp
+        src/sfm/resection.cpp
         src/sfm/frontend.cpp
+        src/sfm/reconstruct.cpp
         src/sfm/export_mvs.cpp)
     add_library(AetherScan::SfM ALIAS aetherscan_sfm)
     target_include_directories(aetherscan_sfm PUBLIC
@@ -169,7 +173,9 @@ if(AETHERSCAN_ENABLE_FEATURES)
     target_link_libraries(aetherscan_sfm PUBLIC
         AetherScan::Features
         AetherScan::BA
-        Eigen3::Eigen)
+        Eigen3::Eigen
+        PoseLib::PoseLib)
+    target_compile_definitions(aetherscan_sfm PRIVATE AETHERSCAN_HAS_POSELIB=1)
     if(MSVC)
         target_compile_options(aetherscan_sfm PRIVATE /W4 /permissive- /EHsc)
         if(AETHERSCAN_ENABLE_NATIVE_ARCH)

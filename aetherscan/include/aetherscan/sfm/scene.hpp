@@ -1,74 +1,87 @@
 #pragma once
 
-#include "aetherscan/features/features.hpp"
-#include "aetherscan/ba/problem.hpp"
+#include "aetherscan/features/types.hpp"
+#include "aetherscan/sfm/types.hpp"
 
-#include <array>
-#include <cstdint>
+#include <algorithm>
 #include <filesystem>
-#include <limits>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace aetherscan::sfm {
 
-using Id = std::uint32_t;
-inline constexpr Id invalid_id = std::numeric_limits<Id>::max();
-
-struct Camera {
-    Id id{invalid_id};
-    std::uint32_t width{};
-    std::uint32_t height{};
-    double fx{1.0}, fy{1.0}, cx{}, cy{};
-    double k1{}, k2{}, p1{}, p2{};
-};
-
-struct View {
-    Id id{invalid_id};
-    Id camera_id{invalid_id};
-    std::filesystem::path image_path;
+struct Image {
+    Index id{k_invalid};
+    Index camera_id{k_invalid};
+    std::filesystem::path path;
     features::FeatureSet features;
-    ba::Pose pose;
+    Pose3D pose;
     bool registered{false};
+
+    [[nodiscard]] bool has_features() const { return !features.keypoints.empty(); }
 };
 
-struct TrackObservation {
-    Id view_id{invalid_id};
-    features::FeatureIndex feature_index{};
+struct ImagePair {
+    Index id1{k_invalid};
+    Index id2{k_invalid};
+    std::vector<FeatureMatch> matches;  // geometric inliers, ordered
+    std::optional<Pose3D> relative_pose;
+    std::optional<Mat3> E;
+    std::optional<Mat3> F;
+    float weight_spatial{0.F};
+    float mean_ray_angle{0.F};  // radians
+
+    ImagePair() = default;
+    ImagePair(Index a, Index b) : id1(a), id2(b) {
+        if (id1 > id2) std::swap(id1, id2);
+    }
+
+    [[nodiscard]] unsigned num_inliers() const {
+        return static_cast<unsigned>(matches.size());
+    }
+
+    // openMVS-style composite weight (spatial * capped inliers); connectivity/triplet
+    // filled later when available.
+    [[nodiscard]] float composite_weight() const {
+        const unsigned capped = std::min(num_inliers(), 1000u);
+        return static_cast<float>(capped) * std::max(weight_spatial, 0.05F);
+    }
+
+    [[nodiscard]] bool has_geometry() const {
+        return relative_pose.has_value() || E.has_value() || F.has_value();
+    }
 };
 
+// Track mirrors openMVS: inlier observations occupy [0, num_inliers).
 struct Track {
-    Id id{invalid_id};
-    std::vector<TrackObservation> observations;
-};
+    Vec3 position{Vec3::Zero()};
+    std::vector<Observation> observations;
+    std::uint8_t num_inliers{0};
 
-struct Landmark {
-    Id id{invalid_id};
-    std::array<double, 3> position{};
-    Id track_id{invalid_id};
-    double mean_reprojection_error{};
-};
-
-struct VerifiedPair {
-    Id first_view{invalid_id};
-    Id second_view{invalid_id};
-    features::MatchSet inliers;
+    [[nodiscard]] bool is_valid() const { return observations.size() >= 2; }
+    [[nodiscard]] bool is_triangulated() const { return num_inliers >= 2; }
 };
 
 struct Scene {
-    std::vector<Camera> cameras;
-    std::vector<View> views;
-    std::vector<VerifiedPair> verified_pairs;
+    std::vector<PinholeCamera> cameras;
+    std::vector<Image> images;
+    std::vector<ImagePair> pairs;
     std::vector<Track> tracks;
-    std::vector<Landmark> landmarks;
+    unsigned thread_count{0};  // 0 = hardware concurrency
 
-    void validate() const;
+    void clear();
+    [[nodiscard]] bool empty() const { return images.empty(); }
+
+    ImagePair* find_pair(Index a, Index b);
+    [[nodiscard]] const ImagePair* find_pair(Index a, Index b) const;
+
+    [[nodiscard]] const PinholeCamera& camera_of(const Image& image) const {
+        return cameras[image.camera_id];
+    }
+
+    [[nodiscard]] unsigned registered_count() const;
+    bool invalidate_image(Index image_id);
 };
-
-// Merges geometrically verified pair matches with union-find. Components that
-// contain two features from the same view are rejected as ambiguous.
-std::vector<Track> build_tracks(
-    const std::vector<View>& views,
-    const std::vector<VerifiedPair>& pairs,
-    std::size_t minimum_length = 2);
 
 }  // namespace aetherscan::sfm

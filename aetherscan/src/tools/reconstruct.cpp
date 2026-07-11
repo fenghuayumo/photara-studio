@@ -1,5 +1,4 @@
-#include "aetherscan/sfm/mapping.hpp"
-#include "aetherscan/sfm/frontend.hpp"
+#include "aetherscan/sfm/reconstruct.hpp"
 #include "aetherscan/sfm/export_mvs.hpp"
 
 #include <algorithm>
@@ -33,51 +32,38 @@ std::string lower_extension(const std::filesystem::path& path) {
 }
 
 void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& path) {
+    std::size_t count = 0;
+    for (const auto& track : scene.tracks) {
+        if (track.is_triangulated()) ++count;
+    }
     std::ofstream output(path);
     if (!output) throw std::runtime_error("Failed to create PLY: " + path.string());
-    output << "ply\nformat ascii 1.0\nelement vertex " << scene.landmarks.size()
+    output << "ply\nformat ascii 1.0\nelement vertex " << count
            << "\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
-    for (const auto& landmark : scene.landmarks)
-        output << landmark.position[0] << ' ' << landmark.position[1] << ' '
-               << landmark.position[2] << '\n';
-}
-
-void save_scene(
-    const aetherscan::sfm::Scene& scene,
-    const std::filesystem::path& path,
-    const std::filesystem::path& /*image_directory*/) {
-    const std::string extension = lower_extension(path);
-    if (extension == ".mvs") {
-        // Absolute image paths so OpenMVS Viewer resolves them from any cwd.
-        aetherscan::sfm::export_openmvs_interface(scene, path);
-        return;
+    for (const auto& track : scene.tracks) {
+        if (!track.is_triangulated()) continue;
+        output << track.position.x() << ' ' << track.position.y() << ' '
+               << track.position.z() << '\n';
     }
-    if (extension == ".ply") {
-        save_ply(scene, path);
-        return;
-    }
-    throw std::invalid_argument("Output must end with .mvs or .ply");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 5 || argc > 6) {
-            std::cout << "Usage: aetherscan images_dir focal_pixels "
-                         "incremental|global output.(mvs|ply) [neighbor_window]\n"
+        if (argc < 4 || argc > 5) {
+            std::cout << "Usage: aetherscan images_dir focal_pixels output.(mvs|ply) "
+                         "[neighbor_window]\n"
+                         "  Incremental SfM (openMVS-style star init + resection).\n"
                          "  .mvs  OpenMVS Interface (open in Viewer)\n"
                          "  .ply  sparse XYZ point cloud\n";
             return argc == 1 ? 0 : 1;
         }
         const std::filesystem::path directory = argv[1];
-        const std::filesystem::path output_path = argv[4];
         const double focal = number(argv[2]);
-        const std::string mode = argv[3];
+        const std::filesystem::path output_path = argv[3];
         const std::size_t window =
-            argc == 6 ? static_cast<std::size_t>(number(argv[5])) : 3;
-        if (mode != "incremental" && mode != "global")
-            throw std::invalid_argument("Mode must be incremental or global");
+            argc == 5 ? static_cast<std::size_t>(number(argv[4])) : 3;
 
         std::vector<std::filesystem::path> files;
         for (const auto& entry : std::filesystem::directory_iterator(directory)) {
@@ -95,48 +81,32 @@ int main(int argc, char** argv) {
         std::sort(files.begin(), files.end());
         if (files.size() < 2) throw std::runtime_error("Need at least two images");
 
+        aetherscan::sfm::ReconstructionConfig config;
+        config.frontend.focal_pixels = focal;
+        config.frontend.neighbor_window = window;
+
         const auto started = std::chrono::steady_clock::now();
-        aetherscan::sfm::FrontEndOptions frontend_options;
-        frontend_options.focal_pixels = focal;
-        frontend_options.neighbor_window = window;
-        auto frontend = aetherscan::sfm::run_frontend(files, frontend_options);
-        auto& scene = frontend.scene;
-        std::cout << "threads=" << frontend.timing.threads_used
-                  << " extract_s=" << frontend.timing.extract_seconds
-                  << " match_verify_s=" << frontend.timing.match_verify_seconds
-                  << " tracks_s=" << frontend.timing.tracks_seconds
-                  << " verified_pairs=" << frontend.edges.size()
-                  << " tracks=" << scene.tracks.size() << '\n';
-
-        aetherscan::sfm::MapperSummary summary;
-        const auto mapping_started = std::chrono::steady_clock::now();
-        if (mode == "incremental") {
-            aetherscan::sfm::IncrementalMapperOptions options;
-            options.bundle.optimizer.maximum_iterations = 8;
-            summary = aetherscan::sfm::run_incremental_mapping(
-                scene, frontend.edges[frontend.seed_edge_index], options);
-        } else {
-            aetherscan::sfm::GlobalMapperOptions options;
-            options.bundle.maximum_iterations = 12;
-            summary = aetherscan::sfm::run_global_mapping(scene, frontend.edges, options);
-        }
-        const double mapping_seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - mapping_started)
-                .count();
-
-        save_scene(scene, output_path, directory);
-        // Convenience: also emit companion .mvs next to .ply for OpenMVS Viewer.
-        if (lower_extension(output_path) == ".ply") {
-            const auto mvs_path = output_path.parent_path() / (output_path.stem().string() + ".mvs");
-            aetherscan::sfm::export_openmvs_interface(scene, mvs_path);
-            std::cout << "mvs=" << mvs_path << '\n';
-        }
+        aetherscan::sfm::Scene scene;
+        const auto summary = aetherscan::sfm::reconstruct(scene, files, config);
         const double elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-        std::cout << "mode=" << mode << " valid=" << summary.valid
-                  << " registered=" << summary.registered_views << '/' << scene.views.size()
-                  << " landmarks=" << summary.landmarks << " failed=" << summary.failed_views
-                  << " mapping_s=" << mapping_seconds << " elapsed_s=" << elapsed
+
+        if (lower_extension(output_path) == ".mvs") {
+            aetherscan::sfm::export_openmvs_interface(scene, output_path);
+        } else if (lower_extension(output_path) == ".ply") {
+            save_ply(scene, output_path);
+            const auto mvs_path =
+                output_path.parent_path() / (output_path.stem().string() + ".mvs");
+            aetherscan::sfm::export_openmvs_interface(scene, mvs_path);
+            std::cout << "mvs=" << mvs_path << '\n';
+        } else {
+            throw std::invalid_argument("Output must end with .mvs or .ply");
+        }
+
+        std::cout << "valid=" << summary.valid
+                  << " registered=" << summary.registered_views << '/' << scene.images.size()
+                  << " landmarks=" << summary.landmarks
+                  << " failed=" << summary.failed_views << " elapsed_s=" << elapsed
                   << " output=" << output_path << '\n';
         return summary.valid ? 0 : 2;
     } catch (const std::exception& error) {

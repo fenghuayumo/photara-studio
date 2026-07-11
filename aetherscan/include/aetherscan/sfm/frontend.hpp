@@ -1,53 +1,40 @@
 #pragma once
 
-#include "aetherscan/features/features.hpp"
-#include "aetherscan/sfm/mapping.hpp"
-#include "aetherscan/sfm/two_view.hpp"
+#include "aetherscan/sfm/geometry.hpp"
+#include "aetherscan/sfm/scene.hpp"
 
-#include <cstddef>
 #include <filesystem>
-#include <memory>
 #include <string>
 #include <vector>
 
 namespace aetherscan::sfm {
 
 struct FrontEndOptions {
-    // Backend names resolved through features::create_extractor / create_matcher.
-    // Defaults: VLFeat SIFT + mutual-ratio. Swap to "superpoint" once implemented.
-    std::string extractor_name{"sift"};
-    std::string matcher_name{"mutual_ratio"};
-
-    // Optional prototypes. When set, they override extractor_name / matcher_name and
-    // are clone()'d per worker thread (required when !info().thread_safe).
-    std::shared_ptr<features::FeatureExtractor> extractor;
-    std::shared_ptr<features::FeatureMatcher> matcher;
-
-    features::SiftOptions sift;  // used when constructing default "sift" extractor
-    features::DescriptorMatcherOptions matcher_options;
-    TwoViewOptions two_view;
-    double focal_pixels{900.0};
-    std::size_t neighbor_window{3};
-    unsigned thread_count{0};  // 0 = hardware concurrency
+    double focal_pixels{0.0};  // 0 => 1.2 * max(w,h)
+    std::size_t neighbor_window{0};  // 0 => exhaustive for small sets, else sequential window
+    unsigned thread_count{0};
+    std::string extractor{"sift"};
+    std::string matcher{"mutual_ratio"};
+    RelativePoseOptions relative{};
+    float min_pair_weight{0.F};
+    unsigned max_features{8000};
 };
 
 struct FrontEndTiming {
-    double extract_seconds{};
-    double match_verify_seconds{};
-    double tracks_seconds{};
-    unsigned threads_used{1};
+    unsigned threads_used{0};
+    double extract_seconds{0};
+    double match_verify_seconds{0};
+    double tracks_seconds{0};
 };
 
 struct FrontEndResult {
     Scene scene;
-    std::vector<RelativePoseEdge> edges;
-    std::size_t seed_edge_index{0};
     FrontEndTiming timing;
 };
 
-// Parallel extract + neighbor-window match/E-RANSAC + track building.
+// Extract features, match pairs, geometric verification, build tracks.
 FrontEndResult run_frontend(
-    const std::vector<std::filesystem::path>& image_files,
+    const std::vector<std::filesystem::path>& image_paths,
     const FrontEndOptions& options = {});
 
 }  // namespace aetherscan::sfm
