@@ -71,13 +71,12 @@ void append_relative_options(
 }
 
 FrontEndStageKeys make_stage_keys(
-    const std::vector<std::filesystem::path>& image_paths,
-    const FrontEndOptions& options) {
+    const FrontEndOptions& options,
+    const ImageSetFingerprint& images) {
     FingerprintBuilder features;
-    const std::uint64_t images = fingerprint_images(image_paths);
     features.append_string("aetherscan-features-v3");
     append_cache_build_identity(features);
-    features.append(images);
+    features.append(images.value);
     features.append_string(options.extractor);
     features.append(options.sift_contrast_threshold);
     features.append(options.max_features);
@@ -114,16 +113,8 @@ FrontEndStageKeys make_stage_keys(
     tracks.append(geometry.value());
     tracks.append(options.min_pair_weight);
     return {
-        images, features.value(), matches.value(), geometry.value(),
+        images.value, features.value(), matches.value(), geometry.value(),
         tracks.value()};
-}
-
-void verify_image_snapshot(
-    const std::vector<std::filesystem::path>& image_paths,
-    const std::uint64_t expected) {
-    if (fingerprint_images(image_paths) != expected)
-        throw std::runtime_error(
-            "Input images changed while building checkpoints; restart the run");
 }
 
 void initialize_cameras(Scene& scene, const double focal_pixels) {
@@ -233,7 +224,10 @@ FrontEndResult run_frontend(
     if (image_paths.size() < 2) return result;
     core::StageScope frontend_stage("sfm.frontend");
 
-    const FrontEndStageKeys stage_keys = make_stage_keys(image_paths, options);
+    const ImageSetFingerprint image_fingerprint =
+        fingerprint_image_set(image_paths);
+    const FrontEndStageKeys stage_keys =
+        make_stage_keys(options, image_fingerprint);
     result.tracks_checkpoint_key = stage_keys.tracks;
     CheckpointStore checkpoints(options.checkpoint);
     Scene& scene = result.scene;
@@ -242,7 +236,7 @@ FrontEndResult run_frontend(
     if (checkpoints.load_scene(
             CheckpointStage::tracks, stage_keys.tracks, scene)) {
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
-        verify_image_snapshot(image_paths, stage_keys.images);
+        verify_image_snapshot(image_paths, image_fingerprint);
         core::Logger::instance().info("checkpoint hit: tracks");
         return result;
     }
@@ -255,7 +249,7 @@ FrontEndResult run_frontend(
             std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - started)
                 .count();
-        verify_image_snapshot(image_paths, stage_keys.images);
+        verify_image_snapshot(image_paths, image_fingerprint);
         checkpoints.save_scene(
             CheckpointStage::tracks, stage_keys.tracks, scene);
         core::Logger::instance().info("checkpoint hit: geometry");
@@ -348,7 +342,7 @@ FrontEndResult run_frontend(
         });
 
         initialize_cameras(scene, options.focal_pixels);
-        verify_image_snapshot(image_paths, stage_keys.images);
+        verify_image_snapshot(image_paths, image_fingerprint);
         checkpoints.save_scene(
             CheckpointStage::features, stage_keys.features, scene);
     } else {
@@ -396,13 +390,25 @@ FrontEndResult run_frontend(
             threads);
         for (unsigned t = 0; t < threads; ++t)
             match_workers[t] = matcher->clone();
+        std::vector<std::uint8_t> active_images(scene.images.size(), 0);
+        for (const PairCandidate& candidate : candidates) {
+            if (candidate.id1 < active_images.size())
+                active_images[candidate.id1] = 1;
+            if (candidate.id2 < active_images.size())
+                active_images[candidate.id2] = 1;
+        }
+        std::vector<Index> prepare_ids;
+        prepare_ids.reserve(scene.images.size());
+        for (Index image_id = 0; image_id < active_images.size(); ++image_id) {
+            if (active_images[image_id]) prepare_ids.push_back(image_id);
+        }
         core::ProgressReporter prepare_progress(
-            "prepare descriptor indices", scene.images.size());
+            "prepare descriptor indices", prepare_ids.size());
         parallel::parallel_for(
-            scene.images.size(), threads,
-            [&](const std::size_t image_id, const unsigned tid) {
+            prepare_ids.size(), threads,
+            [&](const std::size_t index, const unsigned tid) {
                 match_workers[tid]->prepare(
-                    scene.images[image_id].features);
+                    scene.images[prepare_ids[index]].features);
                 prepare_progress.advance();
             });
         prepare_progress.finish();
@@ -424,6 +430,8 @@ FrontEndResult run_frontend(
                 match_progress.advance();
             });
         match_progress.finish();
+        // Shared across matcher clones; release HNSW graphs before geometry.
+        match_workers.front()->clear_prepared();
         checkpoints.save_matches(stage_keys.matches, raw_pairs);
     } else {
         core::Logger::instance().info("checkpoint hit: matches");
@@ -498,7 +506,8 @@ FrontEndResult run_frontend(
         if (pair.matches.empty()) continue;
         scene.pairs.push_back(std::move(pair));
     }
-    verify_image_snapshot(image_paths, stage_keys.images);
+    verify_image_snapshot(
+        image_paths, image_fingerprint, ImageSnapshotCheck::content);
     checkpoints.save_scene(
         CheckpointStage::geometry, stage_keys.geometry, scene);
     result.timing.match_verify_seconds =

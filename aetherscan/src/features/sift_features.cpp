@@ -256,6 +256,11 @@ public:
                    : found->second.index;
     }
 
+    void clear() {
+        std::lock_guard lock(mutex_);
+        indices_.clear();
+    }
+
 private:
     mutable std::mutex mutex_;
     std::unordered_map<const FeatureSet*, Entry> indices_;
@@ -481,6 +486,10 @@ std::unique_ptr<FeatureMatcher> MutualRatioMatcher::clone() const {
 void MutualRatioMatcher::prepare(const FeatureSet& features) {
     features.validate();
     shared_->prepare(features, options_);
+}
+
+void MutualRatioMatcher::clear_prepared() {
+    shared_->clear();
 }
 
 MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& train) const {

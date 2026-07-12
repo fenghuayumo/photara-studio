@@ -160,6 +160,7 @@ public:
     [[nodiscard]] std::string_view name() const override { return "mutual_ratio"; }
     [[nodiscard]] std::unique_ptr<FeatureMatcher> clone() const override;
     void prepare(const FeatureSet& features) override;
+    void clear_prepared() override;
     [[nodiscard]] MatchSet match(
         const FeatureSet& query, const FeatureSet& train) const override;
 

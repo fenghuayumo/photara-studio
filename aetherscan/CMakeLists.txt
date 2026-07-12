@@ -75,13 +75,27 @@ if(AETHERSCAN_ENABLE_FEATURES)
         third_party/vlfeat/vl/mathop.c
         third_party/vlfeat/vl/random.c
         third_party/vlfeat/vl/sift.c)
+    set(AETHERSCAN_VLFEAT_HAS_SSE2 FALSE)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86)$")
+        list(APPEND AETHERSCAN_VLFEAT_SOURCES
+            third_party/vlfeat/vl/imopv_sse2.c
+            third_party/vlfeat/vl/mathop_sse2.c)
+        set(AETHERSCAN_VLFEAT_HAS_SSE2 TRUE)
+    endif()
     add_library(aetherscan_vlfeat STATIC ${AETHERSCAN_VLFEAT_SOURCES})
     target_include_directories(aetherscan_vlfeat PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vlfeat)
-    # MSVC does not define __SSE2__ the way GCC does; keep the portable path.
-    target_compile_definitions(aetherscan_vlfeat PUBLIC
-        VL_DISABLE_THREADS
-        VL_DISABLE_SSE2)
+    # Outer image-level parallelism owns threading; keep VLFeat itself serial.
+    target_compile_definitions(aetherscan_vlfeat PUBLIC VL_DISABLE_THREADS)
+    if(AETHERSCAN_VLFEAT_HAS_SSE2)
+        # MSVC x64 always has SSE2 but does not define the GCC-style macro that
+        # VLFeat's SSE2 translation units require.
+        if(MSVC)
+            target_compile_definitions(aetherscan_vlfeat PRIVATE __SSE2__)
+        endif()
+    else()
+        target_compile_definitions(aetherscan_vlfeat PUBLIC VL_DISABLE_SSE2)
+    endif()
     if(MSVC)
         target_compile_definitions(aetherscan_vlfeat PRIVATE _CRT_SECURE_NO_WARNINGS)
         target_compile_options(aetherscan_vlfeat PRIVATE /W1)

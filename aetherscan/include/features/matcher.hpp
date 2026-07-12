@@ -18,6 +18,8 @@ public:
     [[nodiscard]] virtual std::unique_ptr<FeatureMatcher> clone() const = 0;
     // Build reusable per-image search data before pair tasks start.
     virtual void prepare(const FeatureSet&) {}
+    // Drop prepared ANN / index state after matching to release peak memory.
+    virtual void clear_prepared() {}
     [[nodiscard]] virtual MatchSet match(
         const FeatureSet& query, const FeatureSet& train) const = 0;
 };

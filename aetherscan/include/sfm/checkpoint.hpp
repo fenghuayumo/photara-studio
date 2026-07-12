@@ -3,6 +3,7 @@
 #include "features/types.hpp"
 #include "sfm/scene.hpp"
 
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <filesystem>
@@ -58,8 +59,35 @@ private:
     std::uint64_t value_{14695981039346656037ULL};
 };
 
+struct ImageFileFingerprint {
+    std::filesystem::path normalized_path;
+    std::uint64_t size{};
+    std::filesystem::file_time_type write_time{};
+    std::array<std::uint8_t, 32> digest{};
+};
+
+struct ImageSetFingerprint {
+    std::uint64_t value{};
+    std::vector<ImageFileFingerprint> files;
+};
+
+enum class ImageSnapshotCheck {
+    identity,  // path / size / mtime only
+    content,   // full SHA-256 rehash
+};
+
+// Hash every image in parallel and build a stable content fingerprint.
+ImageSetFingerprint fingerprint_image_set(
+    const std::vector<std::filesystem::path>& image_paths);
+
 std::uint64_t fingerprint_images(
     const std::vector<std::filesystem::path>& image_paths);
+
+// Reuse digests from fingerprint_image_set; identity checks avoid rehashing.
+void verify_image_snapshot(
+    const std::vector<std::filesystem::path>& image_paths,
+    const ImageSetFingerprint& expected,
+    ImageSnapshotCheck check = ImageSnapshotCheck::identity);
 
 class CheckpointStore {
 public:

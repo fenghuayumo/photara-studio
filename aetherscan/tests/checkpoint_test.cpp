@@ -127,18 +127,32 @@ int main() {
             image << "AAAA";
         }
         const auto timestamp = std::filesystem::last_write_time(image_path);
-        const std::uint64_t first_fingerprint =
-            sfm::fingerprint_images({image_path});
+        const sfm::ImageSetFingerprint first_fingerprint =
+            sfm::fingerprint_image_set({image_path});
         {
             std::ofstream image(
                 image_path, std::ios::binary | std::ios::trunc);
             image << "BBBB";
         }
         std::filesystem::last_write_time(image_path, timestamp);
-        if (first_fingerprint == sfm::fingerprint_images({image_path})) {
+        sfm::verify_image_snapshot(
+            {image_path}, first_fingerprint, sfm::ImageSnapshotCheck::identity);
+        if (first_fingerprint.value == sfm::fingerprint_images({image_path})) {
             std::cerr << "same-size image replacement was not invalidated\n";
             std::filesystem::remove_all(directory);
             return 6;
+        }
+        bool content_caught = false;
+        try {
+            sfm::verify_image_snapshot(
+                {image_path}, first_fingerprint, sfm::ImageSnapshotCheck::content);
+        } catch (const std::runtime_error&) {
+            content_caught = true;
+        }
+        if (!content_caught) {
+            std::cerr << "content snapshot check missed replacement\n";
+            std::filesystem::remove_all(directory);
+            return 8;
         }
         std::filesystem::remove_all(directory);
         return 0;

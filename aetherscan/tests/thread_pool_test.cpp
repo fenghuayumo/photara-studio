@@ -28,6 +28,23 @@ int main() {
         return 1;
     }
 
+    // Chunked scheduling must still cover every index exactly once.
+    std::vector<std::atomic<unsigned>> hits(1000);
+    for (auto& hit : hits) hit.store(0, std::memory_order_relaxed);
+    parallel_for(hits.size(), threads, [&](const std::size_t index) {
+        hits[index].fetch_add(1, std::memory_order_relaxed);
+    });
+    for (const auto& hit : hits) {
+        if (hit.load(std::memory_order_relaxed) != 1U) {
+            std::cerr << "chunked parallel_for missed or duplicated work\n";
+            return 5;
+        }
+    }
+    if (aetherscan::parallel::parallel_for_grain(10000, threads) < 32) {
+        std::cerr << "unexpected parallel_for grain\n";
+        return 6;
+    }
+
     std::atomic<unsigned> nested_workers{0};
     parallel_for(threads, threads, [&](const std::size_t) {
         parallel_for(

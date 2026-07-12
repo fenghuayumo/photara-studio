@@ -147,8 +147,19 @@ inline ThreadPool& global_thread_pool() {
     return pool;
 }
 
-// Dynamic work-stealing style parallel-for over [0, count). Each worker claims the
-// next index with an atomic counter. OS workers persist across calls.
+// Choose a grain large enough to amortize atomic claims while keeping enough
+// chunks for load balancing on irregular work.
+inline std::size_t parallel_for_grain(
+    const std::size_t count, const unsigned thread_count) noexcept {
+    if (count <= thread_count) return 1;
+    constexpr std::size_t k_min_grain = 32;
+    const std::size_t target_chunks =
+        static_cast<std::size_t>(std::max(1U, thread_count)) * 8U;
+    return std::max(k_min_grain, (count + target_chunks - 1) / target_chunks);
+}
+
+// Dynamic chunked parallel-for over [0, count). Workers claim ranges with an
+// atomic counter so small items avoid one atomic op per iteration.
 template <class Function>
 void parallel_for(const std::size_t count, unsigned thread_count, Function&& function) {
     const auto invoke = [&](const std::size_t index, const unsigned worker_id) {
@@ -170,6 +181,7 @@ void parallel_for(const std::size_t count, unsigned thread_count, Function&& fun
     }
 
     const ScopedParallelRegion region(true);
+    const std::size_t grain = parallel_for_grain(count, thread_count);
     std::atomic<std::size_t> next{0};
     std::vector<std::future<void>> workers;
     workers.reserve(thread_count - 1);
@@ -180,9 +192,12 @@ void parallel_for(const std::size_t count, unsigned thread_count, Function&& fun
         const ScopedParallelRegion worker_region(true);
         try {
             for (;;) {
-                const std::size_t index = next.fetch_add(1, std::memory_order_relaxed);
-                if (index >= count) break;
-                invoke(index, worker_id);
+                const std::size_t begin =
+                    next.fetch_add(grain, std::memory_order_relaxed);
+                if (begin >= count) break;
+                const std::size_t end = std::min(begin + grain, count);
+                for (std::size_t index = begin; index < end; ++index)
+                    invoke(index, worker_id);
             }
         } catch (...) {
             std::lock_guard lock(error_mutex);

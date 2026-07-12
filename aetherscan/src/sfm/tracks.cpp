@@ -8,7 +8,6 @@
 #include <limits>
 #include <numeric>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace aetherscan::sfm {
@@ -40,6 +39,37 @@ struct DisjointSet {
         return true;
     }
 };
+
+using ImageIdSet = std::vector<Index>;  // sorted unique image IDs
+
+void insert_sorted(ImageIdSet& images, const Index image_id) {
+    const auto it = std::lower_bound(images.begin(), images.end(), image_id);
+    if (it == images.end() || *it != image_id) images.insert(it, image_id);
+}
+
+bool intersects(const ImageIdSet& first, const ImageIdSet& second) {
+    std::size_t i = 0;
+    std::size_t j = 0;
+    while (i < first.size() && j < second.size()) {
+        if (first[i] == second[j]) return true;
+        if (first[i] < second[j]) ++i;
+        else ++j;
+    }
+    return false;
+}
+
+void merge_smaller_into_larger(ImageIdSet& first, ImageIdSet& second) {
+    if (first.size() < second.size()) first.swap(second);
+    if (second.empty()) return;
+    ImageIdSet merged;
+    merged.reserve(first.size() + second.size());
+    std::set_union(
+        first.begin(), first.end(), second.begin(), second.end(),
+        std::back_inserter(merged));
+    first = std::move(merged);
+    second.clear();
+    second.shrink_to_fit();
+}
 
 }  // namespace
 
@@ -83,12 +113,13 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
     // A valid track contains at most one feature from each image. Store image
     // membership, not the number of pair edges incident on a feature: the same
     // observation commonly appears in several verified image pairs.
-    std::unordered_map<Index, std::unordered_set<Index>> component_images;
+    std::unordered_map<Index, ImageIdSet> component_images;
+    std::vector<std::uint8_t> touched(total_features, 0);
 
     const auto accumulate = [&](const Index global_id, const Index image_id) {
+        touched[global_id] = 1;
         const Index root = ds.find(global_id);
-        auto& images = component_images[root];
-        images.insert(image_id);
+        insert_sorted(component_images[root], image_id);
     };
 
     core::ProgressReporter progress("build tracks", scene.pairs.size());
@@ -110,28 +141,17 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
 
             auto& map1 = component_images[r1];
             auto& map2 = component_images[r2];
-            bool conflict = false;
-            const auto& smaller = map1.size() <= map2.size() ? map1 : map2;
-            const auto& larger = map1.size() <= map2.size() ? map2 : map1;
-            for (const Index image_id : smaller) {
-                if (larger.contains(image_id)) {
-                    conflict = true;
-                    break;
-                }
-            }
-            if (conflict) continue;
+            if (intersects(map1, map2)) continue;
 
             ds.unite(r1, r2);
             const Index root = ds.find(r1);
+            const Index other = root == r1 ? r2 : r1;
             auto& merged = component_images[root];
-            if (root != r1) {
-                merged.insert(map1.begin(), map1.end());
+            auto other_it = component_images.find(other);
+            if (other_it != component_images.end()) {
+                merge_smaller_into_larger(merged, other_it->second);
+                component_images.erase(other_it);
             }
-            if (root != r2) {
-                merged.insert(map2.begin(), map2.end());
-            }
-            if (root != r1) component_images.erase(r1);
-            if (root != r2) component_images.erase(r2);
         }
     }
 
@@ -140,6 +160,7 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
     for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
         const auto& image = scene.images[image_id];
         for (Index feat = 0; feat < image.features.keypoints.size(); ++feat, ++running) {
+            if (!touched[running]) continue;
             const Index root = ds.find(running);
             tracks_by_root[root].observations.push_back({image_id, feat});
         }

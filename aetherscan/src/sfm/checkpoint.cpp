@@ -1,5 +1,6 @@
 #include "sfm/checkpoint.hpp"
 #include "core/logging.hpp"
+#include "parallel/thread_pool.hpp"
 #include "sfm/tracks.hpp"
 
 #include <algorithm>
@@ -158,9 +159,9 @@ std::array<std::uint8_t, 32> hash_file(
     if (!input)
         throw std::runtime_error("Failed to hash image: " + path.string());
     Sha256 hash;
-    std::array<char, 64 * 1024> buffer{};
+    std::array<char, 256 * 1024> buffer{};
     while (input) {
-        input.read(buffer.data(), buffer.size());
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const std::streamsize count = input.gcount();
         if (count > 0)
             hash.update(buffer.data(), static_cast<std::size_t>(count));
@@ -168,6 +169,20 @@ std::array<std::uint8_t, 32> hash_file(
     if (!input.eof())
         throw std::runtime_error("Failed while hashing image: " + path.string());
     return hash.finish();
+}
+
+ImageFileFingerprint fingerprint_image_file(
+    const std::filesystem::path& path) {
+    ImageFileFingerprint file;
+    std::error_code error;
+    std::filesystem::path normalized =
+        std::filesystem::weakly_canonical(path, error);
+    if (error) normalized = std::filesystem::absolute(path, error);
+    file.normalized_path = std::move(normalized);
+    file.size = std::filesystem::file_size(path);
+    file.write_time = std::filesystem::last_write_time(path);
+    file.digest = hash_file(path);
+    return file;
 }
 
 class Writer {
@@ -843,23 +858,67 @@ void FingerprintBuilder::append_string(const std::string_view value) noexcept {
     append_bytes(value.data(), value.size());
 }
 
-std::uint64_t fingerprint_images(
+ImageSetFingerprint fingerprint_image_set(
     const std::vector<std::filesystem::path>& image_paths) {
+    ImageSetFingerprint result;
+    result.files.resize(image_paths.size());
+    const unsigned threads = parallel::resolve_thread_count(0);
+    parallel::parallel_for(
+        image_paths.size(), threads,
+        [&](const std::size_t index) {
+            result.files[index] = fingerprint_image_file(image_paths[index]);
+        });
+
     FingerprintBuilder fingerprint;
     fingerprint.append_string("aetherscan-images-sha256-v2");
     fingerprint.append(static_cast<std::uint64_t>(image_paths.size()));
-    for (const std::filesystem::path& path : image_paths) {
+    for (const ImageFileFingerprint& file : result.files) {
+        fingerprint.append_string(path_utf8(file.normalized_path));
+        fingerprint.append(file.size);
+        fingerprint.append_bytes(file.digest.data(), file.digest.size());
+    }
+    result.value = fingerprint.value();
+    return result;
+}
+
+std::uint64_t fingerprint_images(
+    const std::vector<std::filesystem::path>& image_paths) {
+    return fingerprint_image_set(image_paths).value;
+}
+
+void verify_image_snapshot(
+    const std::vector<std::filesystem::path>& image_paths,
+    const ImageSetFingerprint& expected,
+    const ImageSnapshotCheck check) {
+    if (image_paths.size() != expected.files.size()) {
+        throw std::runtime_error(
+            "Input images changed while building checkpoints; restart the run");
+    }
+    if (check == ImageSnapshotCheck::content) {
+        if (fingerprint_image_set(image_paths).value != expected.value) {
+            throw std::runtime_error(
+                "Input images changed while building checkpoints; restart the run");
+        }
+        return;
+    }
+    for (std::size_t index = 0; index < image_paths.size(); ++index) {
+        const ImageFileFingerprint& expected_file = expected.files[index];
         std::error_code error;
         std::filesystem::path normalized =
-            std::filesystem::weakly_canonical(path, error);
-        if (error) normalized = std::filesystem::absolute(path, error);
-        fingerprint.append_string(path_utf8(normalized));
-        const std::uint64_t size = std::filesystem::file_size(path);
-        fingerprint.append(size);
-        const auto digest = hash_file(path);
-        fingerprint.append_bytes(digest.data(), digest.size());
+            std::filesystem::weakly_canonical(image_paths[index], error);
+        if (error)
+            normalized = std::filesystem::absolute(image_paths[index], error);
+        const std::uint64_t size =
+            std::filesystem::file_size(image_paths[index]);
+        const auto write_time =
+            std::filesystem::last_write_time(image_paths[index]);
+        if (path_utf8(normalized) != path_utf8(expected_file.normalized_path) ||
+            size != expected_file.size ||
+            write_time != expected_file.write_time) {
+            throw std::runtime_error(
+                "Input images changed while building checkpoints; restart the run");
+        }
     }
-    return fingerprint.value();
 }
 
 CheckpointStore::CheckpointStore(CheckpointOptions options)
