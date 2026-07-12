@@ -30,6 +30,41 @@ struct PairDiagnostics {
     bool accepted{false};
 };
 
+void initialize_cameras(Scene& scene, const double focal_pixels) {
+    scene.cameras.clear();
+    scene.cameras.reserve(scene.images.size());
+    for (Index i = 0; i < scene.images.size(); ++i) {
+        const auto& features = scene.images[i].features;
+        PinholeCamera camera;
+        camera.width = features.image_width;
+        camera.height = features.image_height;
+        const double focal =
+            focal_pixels > 0
+                ? focal_pixels
+                : 1.2 * std::max(camera.width, camera.height);
+        camera.fx = focal;
+        camera.fy = focal;
+        camera.cx = 0.5 * camera.width;
+        camera.cy = 0.5 * camera.height;
+        const auto existing = std::find_if(
+            scene.cameras.begin(), scene.cameras.end(),
+            [&](const PinholeCamera& candidate) {
+                return candidate.width == camera.width &&
+                       candidate.height == camera.height &&
+                       std::abs(candidate.fx - camera.fx) < 1e-9 &&
+                       std::abs(candidate.fy - camera.fy) < 1e-9;
+            });
+        if (existing == scene.cameras.end()) {
+            camera.id = static_cast<Index>(scene.cameras.size());
+            scene.images[i].camera_id = camera.id;
+            scene.cameras.push_back(camera);
+        } else {
+            scene.images[i].camera_id =
+                static_cast<Index>(existing - scene.cameras.begin());
+        }
+    }
+}
+
 std::vector<PairCandidate> build_pair_list(
     const std::size_t image_count, const std::size_t neighbor_window) {
     std::vector<PairCandidate> pairs;
@@ -175,27 +210,10 @@ FrontEndResult run_frontend(
         image.id = static_cast<Index>(i);
         image.path = image_paths[i];
         image.features = std::move(features);
-        image.camera_id = static_cast<Index>(i);
         scene.images[i] = std::move(image);
         });
 
-    for (Index i = 0; i < scene.images.size(); ++i) {
-        const auto& feats = scene.images[i].features;
-        PinholeCamera camera;
-        camera.id = i;
-        camera.width = feats.image_width;
-        camera.height = feats.image_height;
-        const double focal =
-            options.focal_pixels > 0
-                ? options.focal_pixels
-                : 1.2 * std::max(camera.width, camera.height);
-        camera.fx = focal;
-        camera.fy = focal;
-        camera.cx = 0.5 * camera.width;
-        camera.cy = 0.5 * camera.height;
-        scene.cameras.push_back(camera);
-        scene.images[i].camera_id = i;
-    }
+    initialize_cameras(scene, options.focal_pixels);
     result.timing.extract_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - extract_started)
             .count();

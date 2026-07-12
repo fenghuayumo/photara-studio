@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <utility>
 
 namespace aetherscan::ba {
@@ -180,7 +181,11 @@ std::string CudaLinearizer::device_name() {
 void CudaLinearizer::upload(const Problem& problem) {
     problem.validate();
     impl_->poses.upload(problem.poses.data(), problem.poses.size());
-    impl_->intrinsics.upload(problem.intrinsics.data(), problem.intrinsics.size());
+    std::vector<PinholeIntrinsics> pose_intrinsics(problem.poses.size());
+    for (std::size_t pose = 0; pose < problem.poses.size(); ++pose)
+        pose_intrinsics[pose] =
+            problem.intrinsics[problem.intrinsic_index(pose)];
+    impl_->intrinsics.upload(pose_intrinsics.data(), pose_intrinsics.size());
     impl_->points.upload(problem.points.data(), problem.points.size());
     impl_->camera_indices.upload(
         problem.observations.camera.data(), problem.observations.size());

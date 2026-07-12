@@ -88,7 +88,10 @@ struct Observations {
 
 struct Problem {
     std::vector<Pose> poses;
+    // Intrinsic parameter blocks. Multiple poses may reference the same block.
     std::vector<PinholeIntrinsics> intrinsics;
+    // pose -> intrinsic block. Empty preserves the legacy one-block-per-pose layout.
+    std::vector<Index> pose_intrinsic;
     std::vector<Point3> points;
     Observations observations;
     // Optional per-pose mask. Constant poses contribute observations and
@@ -101,12 +104,33 @@ struct Problem {
                (!pose_constant.empty() && pose_constant[pose] != 0);
     }
 
+    [[nodiscard]] Index intrinsic_index(const std::size_t pose) const noexcept {
+        return pose_intrinsic.empty() ? static_cast<Index>(pose)
+                                      : pose_intrinsic[pose];
+    }
+
     void validate() const {
         if (poses.empty() || points.empty() || observations.size() == 0) {
             throw std::invalid_argument("BA problem must contain poses, points and observations");
         }
-        if (intrinsics.size() != poses.size()) {
-            throw std::invalid_argument("The first backend version requires one intrinsics block per pose");
+        if (intrinsics.empty()) {
+            throw std::invalid_argument("BA problem must contain intrinsics");
+        }
+        if (pose_intrinsic.empty()) {
+            if (intrinsics.size() != poses.size()) {
+                throw std::invalid_argument(
+                    "Legacy BA layout requires one intrinsics block per pose");
+            }
+        } else if (pose_intrinsic.size() != poses.size()) {
+            throw std::invalid_argument(
+                "Pose-to-intrinsics mapping must match pose count");
+        } else {
+            for (const Index group : pose_intrinsic) {
+                if (group >= intrinsics.size()) {
+                    throw std::out_of_range(
+                        "Pose references an invalid intrinsics block");
+                }
+            }
         }
         if (!pose_constant.empty() && pose_constant.size() != poses.size()) {
             throw std::invalid_argument("Pose constant mask must match pose count");

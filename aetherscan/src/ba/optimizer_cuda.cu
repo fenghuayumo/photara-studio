@@ -512,7 +512,10 @@ void CudaOptimizer::upload(const Problem& problem) {
     problem.validate(); auto& d=*impl_; d.camera_count=problem.poses.size(); d.point_count=problem.points.size();
     d.observation_count=problem.observations.size();
     d.poses.upload(problem.poses.data(),d.camera_count); d.pose_backup.resize(d.camera_count);
-    d.intrinsics.upload(problem.intrinsics.data(),d.camera_count);
+    std::vector<PinholeIntrinsics> pose_intrinsics(d.camera_count);
+    for (std::size_t pose=0; pose<d.camera_count; ++pose)
+        pose_intrinsics[pose]=problem.intrinsics[problem.intrinsic_index(pose)];
+    d.intrinsics.upload(pose_intrinsics.data(),d.camera_count);
     d.points.upload(problem.points.data(),d.point_count); d.point_backup.resize(d.point_count);
     d.cameras.upload(problem.observations.camera.data(),d.observation_count);
     d.point_ids.upload(problem.observations.point.data(),d.observation_count);

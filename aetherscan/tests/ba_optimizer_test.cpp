@@ -33,7 +33,9 @@ std::pair<double, double> project(
 Problem make_problem() {
     Problem problem;
     problem.poses.resize(5);
-    problem.intrinsics.resize(5, PinholeIntrinsics{800.0, 800.0, 640.0, 360.0});
+    problem.intrinsics.assign(
+        1, PinholeIntrinsics{800.0, 800.0, 640.0, 360.0});
+    problem.pose_intrinsic.assign(problem.poses.size(), 0);
     problem.points.resize(80);
     for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
         problem.poses[camera].cx = -1.0 + 0.5 * static_cast<double>(camera);
@@ -45,7 +47,8 @@ Problem make_problem() {
     for (std::size_t point = 0; point < problem.points.size(); ++point) {
         for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
             const auto [x, y] = project(
-                problem.poses[camera], problem.intrinsics[camera], problem.points[point]);
+                problem.poses[camera], problem.intrinsics.front(),
+                problem.points[point]);
             problem.observations.push_back(
                 static_cast<Index>(camera), static_cast<Index>(point), x, y);
         }
@@ -61,6 +64,43 @@ Problem make_problem() {
         problem.points[point].x += point_noise(random);
         problem.points[point].y += point_noise(random);
         problem.points[point].z += point_noise(random);
+    }
+    return problem;
+}
+
+Problem make_grouped_intrinsics_problem() {
+    Problem problem;
+    problem.poses.resize(6);
+    problem.intrinsics = {
+        PinholeIntrinsics{630.0, 630.0, 640.0, 360.0},
+        PinholeIntrinsics{1210.0, 1210.0, 640.0, 360.0}};
+    problem.pose_intrinsic = {0, 0, 0, 1, 1, 1};
+    problem.pose_constant.assign(problem.poses.size(), 1);
+    const PinholeIntrinsics truth[] = {
+        PinholeIntrinsics{700.0, 700.0, 640.0, 360.0},
+        PinholeIntrinsics{1100.0, 1100.0, 640.0, 360.0}};
+    for (std::size_t camera = 0; camera < problem.poses.size(); ++camera)
+        problem.poses[camera].cx =
+            -1.25 + 0.5 * static_cast<double>(camera);
+
+    std::mt19937 random(73);
+    std::uniform_real_distribution<double> xy(-1.2, 1.2);
+    std::uniform_real_distribution<double> z(4.0, 8.0);
+    std::normal_distribution<double> point_noise(0.0, 0.03);
+    problem.points.resize(100);
+    for (std::size_t point = 0; point < problem.points.size(); ++point) {
+        const Point3 exact{xy(random), xy(random), z(random)};
+        problem.points[point] = {
+            exact.x + point_noise(random),
+            exact.y + point_noise(random),
+            exact.z + point_noise(random)};
+        for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
+            const auto [x, y] = project(
+                problem.poses[camera],
+                truth[problem.pose_intrinsic[camera]], exact);
+            problem.observations.push_back(
+                static_cast<Index>(camera), static_cast<Index>(point), x, y);
+        }
     }
     return problem;
 }
@@ -106,6 +146,22 @@ int main() {
         std::cerr << "constant boundary pose was modified or BA did not improve\n";
         return 3;
     }
+    Problem grouped_problem = make_grouped_intrinsics_problem();
+    const double grouped_initial = evaluate_cost(grouped_problem);
+    OptimizerOptions grouped_options = options;
+    grouped_options.fix_first_pose = false;
+    grouped_options.optimize_focal = true;
+    const OptimizerSummary grouped_summary =
+        optimize_cpu(grouped_problem, grouped_options);
+    if (!grouped_summary.usable() ||
+        !(grouped_summary.final_cost < grouped_initial) ||
+        !(std::abs(grouped_problem.intrinsics[0].fx - 700.0) < 70.0) ||
+        !(std::abs(grouped_problem.intrinsics[1].fx - 1100.0) < 110.0) ||
+        !(std::abs(grouped_problem.intrinsics[0].fx -
+                   grouped_problem.intrinsics[1].fx) > 100.0)) {
+        std::cerr << "grouped intrinsics were broadcast or failed to optimize\n";
+        return 4;
+    }
 #if defined(AETHERSCAN_HAS_CUDA)
     if (CudaOptimizer::is_available()) {
         const OptimizerSummary gpu_summary = optimize_cuda(gpu_problem, options);
@@ -113,11 +169,11 @@ int main() {
         if (!gpu_summary.usable() || gpu_summary.successful_steps == 0 ||
             !(gpu_summary.final_cost < initial * 1e-3)) {
             std::cerr << "GPU optimizer failed to reduce synthetic reprojection cost\n";
-            return 4;
+            return 5;
         }
         if (std::abs(gpu_problem.poses.front().cx + 1.0) > 1e-15) {
             std::cerr << "GPU optimizer modified the fixed gauge pose\n";
-            return 5;
+            return 6;
         }
     }
 #endif

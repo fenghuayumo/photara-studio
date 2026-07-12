@@ -25,7 +25,7 @@ EvaluationStats linearize_cpu(
         const auto point_index = problem.observations.point[observation];
         detail::linearize_observation(
             problem.poses[camera_index],
-            problem.intrinsics[camera_index],
+            problem.intrinsics[problem.intrinsic_index(camera_index)],
             problem.points[point_index],
             problem.observations.x[observation],
             problem.observations.y[observation],

@@ -127,7 +127,8 @@ std::pair<double, double> project(
 Problem make_problem(const BenchmarkConfig& config) {
     Problem problem;
     problem.poses.resize(config.cameras);
-    problem.intrinsics.resize(config.cameras);
+    problem.intrinsics.resize(1);
+    problem.pose_intrinsic.assign(config.cameras, 0);
     problem.points.resize(config.points);
     problem.observations.reserve(config.points * config.observations_per_point);
 
@@ -146,7 +147,7 @@ Problem make_problem(const BenchmarkConfig& config) {
                 ? static_cast<double>(camera) / static_cast<double>(config.cameras - 1)
                 : 0.5;
         problem.poses[camera].cx = -2.0 + 4.0 * interpolation;
-        problem.intrinsics[camera] =
+        problem.intrinsics.front() =
             PinholeIntrinsics{1800.0, 1800.0, 1920.0, 1080.0, -0.02, 0.003, 0.0002, -0.0001};
     }
     for (auto& point : problem.points) {
@@ -161,7 +162,7 @@ Problem make_problem(const BenchmarkConfig& config) {
                 (start_camera + view * 17) % config.cameras);
             const auto [x, y] = project(
                 problem.poses[camera],
-                problem.intrinsics[camera],
+                problem.intrinsics.front(),
                 problem.points[point]);
             problem.observations.push_back(
                 camera,

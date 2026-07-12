@@ -41,17 +41,25 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
 
     ba::Problem problem;
     problem.poses.resize(camera_images.size());
-    problem.intrinsics.resize(camera_images.size());
+    problem.pose_intrinsic.resize(camera_images.size());
     problem.pose_constant.resize(camera_images.size(), 0);
+    std::unordered_map<Index, Index> scene_camera_to_group;
+    std::vector<Index> group_to_scene_camera;
     for (std::size_t i = 0; i < camera_images.size(); ++i) {
         const Image& image = scene.images[camera_images[i]];
         const PinholeCamera& camera = scene.camera_of(image);
         const Quat q = image.pose.quaternion();
         problem.poses[i] = {q.w(), q.x(), q.y(), q.z(),
                             image.pose.C.x(), image.pose.C.y(), image.pose.C.z()};
-        problem.intrinsics[i] = {
-            camera.fx, camera.fy, camera.cx, camera.cy,
-            camera.k1, camera.k2, camera.p1, camera.p2};
+        auto [group_it, inserted] = scene_camera_to_group.try_emplace(
+            image.camera_id, static_cast<Index>(problem.intrinsics.size()));
+        if (inserted) {
+            problem.intrinsics.push_back({
+                camera.fx, camera.fy, camera.cx, camera.cy,
+                camera.k1, camera.k2, camera.p1, camera.p2});
+            group_to_scene_camera.push_back(image.camera_id);
+        }
+        problem.pose_intrinsic[i] = group_it->second;
         problem.pose_constant[i] =
             fixed_set.count(camera_images[i]) ? std::uint8_t{1} : std::uint8_t{0};
     }
@@ -108,20 +116,19 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     if (options.write_intrinsics &&
         (opt.optimize_focal || opt.optimize_principal_point || opt.optimize_distortion) &&
         !problem.intrinsics.empty()) {
-        const ba::PinholeIntrinsics& shared = problem.intrinsics.front();
-        std::unordered_set<Index> updated_cameras;
-        for (Index image_id : camera_images) {
-            const Index camera_id = scene.images[image_id].camera_id;
-            if (!updated_cameras.insert(camera_id).second) continue;
+        for (std::size_t group = 0; group < problem.intrinsics.size(); ++group) {
+            const Index camera_id = group_to_scene_camera[group];
+            const ba::PinholeIntrinsics& optimized =
+                problem.intrinsics[group];
             PinholeCamera& camera = scene.cameras[camera_id];
-            camera.fx = shared.fx;
-            camera.fy = shared.fy;
-            camera.cx = shared.cx;
-            camera.cy = shared.cy;
-            camera.k1 = shared.k1;
-            camera.k2 = shared.k2;
-            camera.p1 = shared.p1;
-            camera.p2 = shared.p2;
+            camera.fx = optimized.fx;
+            camera.fy = optimized.fy;
+            camera.cx = optimized.cx;
+            camera.cy = optimized.cy;
+            camera.k1 = optimized.k1;
+            camera.k2 = optimized.k2;
+            camera.p1 = optimized.p1;
+            camera.p2 = optimized.p2;
             camera.trust_intrinsics = true;
         }
     }
