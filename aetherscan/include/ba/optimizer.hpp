@@ -28,6 +28,7 @@ struct OptimizerOptions {
     double pcg_tolerance{1e-4};
     bool fix_first_pose{true};
     bool fix_first_point{true};
+    bool optimize_rotations{true};
 };
 
 struct IterationSummary {

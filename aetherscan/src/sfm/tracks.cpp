@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <unordered_map>
 #include <vector>
@@ -134,56 +135,86 @@ std::pair<float, float> filter_tracks(
     const float min_angle_deg,
     const float mult_depth_near,
     const float mult_depth_far) {
-    std::vector<double> depths;
-    depths.reserve(scene.tracks.size() * 2);
-    for (const Track& track : scene.tracks) {
-        if (!track.is_triangulated()) continue;
-        for (unsigned i = 0; i < track.num_inliers; ++i) {
-            const Image& image = scene.images[track.observations[i].image_id];
-            depths.push_back(image.pose.transform_world_to_camera(track.position).z());
-        }
-    }
-    double median_depth = 1.0;
-    if (!depths.empty()) {
-        std::nth_element(depths.begin(), depths.begin() + depths.size() / 2, depths.end());
-        median_depth = std::max(1e-6, depths[depths.size() / 2]);
-    }
-    const double near_z = mult_depth_near > 0 ? mult_depth_near * median_depth : 0.0;
-    const double far_z = mult_depth_far > 0 ? mult_depth_far * median_depth : 1e12;
-
+    std::vector<double> average_distances;
+    average_distances.reserve(scene.tracks.size());
     double sum_px = 0.0;
-    double sum_deg = 0.0;
+    double sum_cos_angle = 0.0;
     unsigned counted = 0;
     for (Track& track : scene.tracks) {
-        if (!track.is_triangulated()) continue;
+        track.num_inliers = 0;
+        if (!track.is_valid()) continue;
+        double track_px = 0.0;
+        double track_cos_angle = 0.0;
+        double track_distance = 0.0;
         unsigned kept = 0;
-        for (unsigned i = 0; i < track.num_inliers; ++i) {
+        for (unsigned i = 0; i < track.observations.size(); ++i) {
             const Observation& obs = track.observations[i];
+            if (obs.image_id >= scene.images.size()) continue;
             const Image& image = scene.images[obs.image_id];
+            if (!image.registered ||
+                obs.feature_id >= image.features.keypoints.size())
+                continue;
             const PinholeCamera& camera = scene.camera_of(image);
             const Vec3 Xc = image.pose.transform_world_to_camera(track.position);
-            Vec2 proj;
-            if (!camera.project_checked(Xc, proj)) continue;
-            if (Xc.z() < near_z || Xc.z() > far_z) continue;
             const auto& kp = image.features.keypoints[obs.feature_id];
-            const double err = (proj - Vec2(kp.x, kp.y)).norm();
-            if (err > max_reproj_error_px) continue;
+            const Vec3 observed =
+                camera.unproject_normalized({kp.x, kp.y});
+            const double norm = Xc.norm();
+            if (!(norm > 1e-12)) continue;
+            const double cosine =
+                observed.dot(Xc) / norm;
+            const double minimum_cosine =
+                std::cos(camera.pixel_error_to_angular(max_reproj_error_px));
+            if (cosine < minimum_cosine) continue;
+            const Vec2 projected = camera.project(Xc);
+            const double error =
+                (projected - Vec2(kp.x, kp.y)).norm();
             if (kept != i) std::swap(track.observations[kept], track.observations[i]);
             ++kept;
-            sum_px += err;
-            sum_deg += camera.pixel_error_to_angular(err) * 180.0 / 3.14159265358979323846;
-            ++counted;
+            track_px += error;
+            track_cos_angle += cosine;
+            track_distance += norm;
         }
         track.num_inliers = static_cast<std::uint8_t>(std::min<unsigned>(kept, 255));
         if (track.num_inliers < 2 ||
             track_min_ray_angle_deg(track, scene) < min_angle_deg) {
             track.num_inliers = 0;
+            continue;
+        }
+        sum_px += track_px;
+        sum_cos_angle += track_cos_angle;
+        counted += track.num_inliers;
+        average_distances.push_back(
+            track_distance / static_cast<double>(track.num_inliers));
+    }
+
+    if (average_distances.size() > 1000 &&
+        (mult_depth_near > 0.F || mult_depth_far > 0.F)) {
+        std::vector<double> sorted = average_distances;
+        std::nth_element(
+            sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+        const double median = sorted[sorted.size() / 2];
+        const double minimum =
+            mult_depth_near > 0.F ? mult_depth_near * median : 0.0;
+        const double maximum =
+            mult_depth_far > 0.F
+            ? mult_depth_far * median
+            : std::numeric_limits<double>::max();
+        std::size_t distance_index = 0;
+        for (Track& track : scene.tracks) {
+            if (!track.is_triangulated()) continue;
+            const double distance = average_distances[distance_index++];
+            if (distance < minimum || distance > maximum)
+                track.num_inliers = 0;
         }
     }
     if (counted == 0) return {0.F, 0.F};
     return {
         static_cast<float>(sum_px / counted),
-        static_cast<float>(sum_deg / counted)};
+        static_cast<float>(
+            std::acos(std::clamp(
+                sum_cos_angle / counted, -1.0, 1.0)) *
+            180.0 / 3.14159265358979323846)};
 }
 
 }  // namespace aetherscan::sfm

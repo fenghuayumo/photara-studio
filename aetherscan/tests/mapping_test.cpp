@@ -1,4 +1,6 @@
 #include "sfm/star_init.hpp"
+#include "sfm/global_positioning.hpp"
+#include "sfm/global_rotation.hpp"
 #include "sfm/reconstruct.hpp"
 #include "sfm/resection.hpp"
 #include "sfm/tracks.hpp"
@@ -30,9 +32,158 @@ PinholeCamera cam() {
     return c;
 }
 
+Mat3 axis_rotation(const Vec3& axis, double degrees) {
+    constexpr double k_pi = 3.14159265358979323846;
+    return Eigen::AngleAxisd(
+               degrees * k_pi / 180.0, axis.normalized())
+        .toRotationMatrix();
+}
+
+double rotation_error(const Mat3& measured, const Mat3& expected) {
+    return Eigen::AngleAxisd(measured * expected.transpose()).angle();
+}
+
+void test_global_rotation_weighting() {
+    Scene scene;
+    scene.images.resize(3);
+    for (Index i = 0; i < scene.images.size(); ++i)
+        scene.images[i].id = i;
+
+    const Mat3 r0 = Mat3::Identity();
+    const Mat3 r1 = axis_rotation(Vec3(1, 0, 0), 30.0);
+    const Mat3 r2 =
+        axis_rotation(Vec3(0, 1, 0), 25.0) * r1;
+    const Mat3 rotations[] = {r0, r1, r2};
+    auto add_pair = [&](Index a, Index b, const Mat3& relative, float spatial) {
+        ImagePair pair(a, b);
+        pair.relative_pose = Pose3D{relative, Vec3::Zero()};
+        pair.weight_spatial = spatial;
+        pair.matches.resize(1000);
+        scene.pairs.push_back(std::move(pair));
+    };
+    add_pair(0, 1, r1 * r0.transpose(), 1.F);
+    add_pair(1, 2, r2 * r1.transpose(), 1.F);
+    add_pair(
+        0,
+        2,
+        axis_rotation(Vec3(0, 0, 1), 20.0) *
+            r2 * r0.transpose(),
+        0.5F);
+
+    GlobalRotationOptions options;
+    options.max_l1_iterations = 0;
+    options.max_irls_iterations = 1;
+    options.irls_sigma_deg = 1e6;
+    options.max_relative_rotation_error_deg = 0.0;
+    const GlobalRotationSummary summary =
+        estimate_global_rotations(scene, options);
+    expect(summary.success, "global rotation weighting solve");
+
+    const double true_edge_error =
+        rotation_error(
+            scene.images[1].pose.R * scene.images[0].pose.R.transpose(),
+            rotations[1] * rotations[0].transpose()) +
+        rotation_error(
+            scene.images[2].pose.R * scene.images[1].pose.R.transpose(),
+            rotations[2] * rotations[1].transpose());
+    const double bad_edge_error = rotation_error(
+        scene.images[2].pose.R * scene.images[0].pose.R.transpose(),
+        scene.pairs[2].relative_pose->R);
+    expect(true_edge_error < 0.20, "raw pair weights dominate rotation solve");
+    expect(bad_edge_error > 0.14, "rotation outlier retains expected residual");
+}
+
+void test_global_positioning_points_only() {
+    constexpr int k_views = 4;
+    constexpr int k_points = 30;
+    Scene scene;
+    const PinholeCamera camera = cam();
+    std::vector<Vec3> true_centers;
+    for (int view = 0; view < k_views; ++view) {
+        scene.cameras.push_back(camera);
+        Image image;
+        image.id = static_cast<Index>(view);
+        image.camera_id = static_cast<Index>(view);
+        image.registered = true;
+        image.features.keypoints.resize(k_points);
+        image.pose.C = Vec3(
+            1.5 * view,
+            0.2 * (view % 2),
+            0.1 * view);
+        true_centers.push_back(image.pose.C);
+        scene.images.push_back(std::move(image));
+    }
+
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<double> xy(-1.0, 1.0);
+    for (int point = 0; point < k_points; ++point) {
+        const Vec3 position(xy(rng) + 2.0, xy(rng), 5.0 + 0.2 * point);
+        Track track;
+        for (int view = 0; view < k_views; ++view) {
+            const Vec3 camera_point =
+                scene.images[view].pose.transform_world_to_camera(position);
+            const Vec2 pixel = camera.project(camera_point);
+            scene.images[view].features.keypoints[point].x =
+                static_cast<float>(pixel.x());
+            scene.images[view].features.keypoints[point].y =
+                static_cast<float>(pixel.y());
+            track.observations.push_back(
+                {static_cast<Index>(view), static_cast<Index>(point)});
+        }
+        scene.tracks.push_back(std::move(track));
+    }
+
+    // Deliberately inconsistent camera constraints must not affect the
+    // openMVS default (ONLY_POINTS).
+    for (Index view = 0; view + 1 < k_views; ++view) {
+        ImagePair pair(view, view + 1);
+        pair.weight_spatial = 1.F;
+        pair.matches.resize(100);
+        pair.relative_pose = Pose3D{
+            Mat3::Identity(), Vec3(0.0, 10.0, 0.0)};
+        scene.pairs.push_back(std::move(pair));
+    }
+
+    const GlobalPositioningSummary summary = solve_global_positions(scene);
+    expect(summary.success, "global positioning converges");
+    expect(summary.positioned_images == k_views, "global positioning uses all images");
+    expect(summary.positioned_tracks == k_points, "global positioning uses all tracks");
+
+    Vec3 estimated_mean = Vec3::Zero();
+    Vec3 true_mean = Vec3::Zero();
+    for (int view = 0; view < k_views; ++view) {
+        estimated_mean += scene.images[view].pose.C;
+        true_mean += true_centers[view];
+    }
+    estimated_mean /= k_views;
+    true_mean /= k_views;
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (int view = 0; view < k_views; ++view) {
+        const Vec3 estimated = scene.images[view].pose.C - estimated_mean;
+        const Vec3 truth = true_centers[view] - true_mean;
+        numerator += estimated.dot(truth);
+        denominator += estimated.squaredNorm();
+    }
+    const double scale = numerator / denominator;
+    double squared_error = 0.0;
+    for (int view = 0; view < k_views; ++view) {
+        const Vec3 aligned =
+            scale * (scene.images[view].pose.C - estimated_mean);
+        squared_error +=
+            (aligned - (true_centers[view] - true_mean)).squaredNorm();
+    }
+    expect(
+        std::sqrt(squared_error / k_views) < 1e-2,
+        "point-only positioning recovers camera layout");
+}
+
 }  // namespace
 
 int main() {
+    test_global_rotation_weighting();
+    test_global_positioning_points_only();
+
     // 4-camera ring looking at a point cloud; build pairs + tracks, star-init.
     constexpr int k_views = 4;
     constexpr int k_points = 100;

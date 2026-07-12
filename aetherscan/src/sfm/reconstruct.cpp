@@ -33,33 +33,23 @@ ReconstructionSummary run_global_mapping(
     const ResectionConfig& fallback_resection) {
     ReconstructionSummary summary;
 
-    GlobalRotationSummary rotation_summary;
-    unsigned total_filtered_pairs = 0;
-    bool rotation_filter_converged = false;
-    for (unsigned pass = 0; pass < 4; ++pass) {
+    GlobalRotationSummary rotation_summary =
+        estimate_global_rotations(scene, rotation);
+    if (!rotation_summary.success) {
+        std::cerr << "global: rotation averaging pass 1 failed\n";
+        return summary;
+    }
+    const unsigned total_filtered_pairs = rotation_summary.filtered_pairs;
+    if (total_filtered_pairs > 0) {
         rotation_summary = estimate_global_rotations(scene, rotation);
         if (!rotation_summary.success) {
-            std::cerr << "global: rotation averaging pass " << (pass + 1)
-                      << " failed\n";
-            return summary;
-        }
-        total_filtered_pairs += rotation_summary.filtered_pairs;
-        if (rotation_summary.filtered_pairs == 0) {
-            rotation_filter_converged = true;
-            break;
-        }
-    }
-    if (!rotation_filter_converged) {
-        GlobalRotationOptions final_rotation = rotation;
-        final_rotation.max_relative_rotation_error_deg = 0.0;
-        rotation_summary = estimate_global_rotations(scene, final_rotation);
-        if (!rotation_summary.success) {
-            std::cerr << "global: final rotation averaging pass failed\n";
+            std::cerr << "global: rotation averaging pass 2 failed\n";
             return summary;
         }
     }
     rotation_summary.filtered_pairs = total_filtered_pairs;
-    if (total_filtered_pairs > 0) build_tracks(scene);
+    // openMVS always rebuilds tracks after relative-rotation filtering.
+    build_tracks(scene);
     std::cout << "global: rotation_images=" << rotation_summary.estimated_images
               << " used_pairs=" << rotation_summary.used_pairs
               << " filtered_pairs=" << rotation_summary.filtered_pairs
@@ -74,12 +64,12 @@ ReconstructionSummary run_global_mapping(
         return summary;
     }
 
-    triangulate_tracks(scene, false, 6.F, 1.F);
     filter_tracks(scene, 6.F, 1.F, 0.F, 0.F);
 
     BundleOptions bundle;
     bundle.optimizer.maximum_iterations = 12;
     bundle.optimizer.huber_delta = 2.0;
+    bundle.optimizer.optimize_rotations = false;
     if (!run_bundle_adjustment(scene, bundle).success) {
         std::cerr << "global: position/structure bundle adjustment failed\n";
         return summary;
@@ -92,6 +82,7 @@ ReconstructionSummary run_global_mapping(
         fallback_resection.mult_depth_far);
 
     bundle.optimizer.maximum_iterations = 25;
+    bundle.optimizer.optimize_rotations = true;
     if (!run_bundle_adjustment(scene, bundle).success) {
         std::cerr << "global: full bundle adjustment failed\n";
         return summary;
@@ -134,6 +125,12 @@ ReconstructionSummary reconstruct(
     const ReconstructionConfig& config) {
     FrontEndResult frontend = run_frontend(image_paths, config.frontend);
     scene_out = std::move(frontend.scene);
+    if (config.mode == ReconstructionMode::hierarchical) {
+        HierarchicalConfig hierarchical = config.hierarchical;
+        hierarchical.star = config.star;
+        hierarchical.resection = config.resection;
+        return run_hierarchical_mapping(scene_out, hierarchical);
+    }
     if (config.mode == ReconstructionMode::global) {
         return run_global_mapping(
             scene_out,

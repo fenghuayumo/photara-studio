@@ -3,6 +3,7 @@
 #include "sfm/frontend.hpp"
 #include "sfm/global_positioning.hpp"
 #include "sfm/global_rotation.hpp"
+#include "sfm/hierarchical.hpp"
 #include "sfm/resection.hpp"
 #include "sfm/star_init.hpp"
 
@@ -10,6 +11,7 @@ namespace aetherscan::sfm {
 
 enum class ReconstructionMode {
     incremental,
+    hierarchical,
     global,
 };
 
@@ -18,6 +20,7 @@ struct ReconstructionConfig {
     FrontEndOptions frontend{};
     StarInitConfig star{};
     ResectionConfig resection{};
+    HierarchicalConfig hierarchical{};
     GlobalRotationOptions global_rotation{};
     GlobalPositioningOptions global_positioning{};
 };

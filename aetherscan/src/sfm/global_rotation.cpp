@@ -24,7 +24,7 @@ struct Edge {
 
 class DisjointSet {
 public:
-    explicit DisjointSet(const std::size_t size) : parent_(size), rank_(size, 0) {
+    explicit DisjointSet(std::size_t size) : parent_(size), rank_(size, 0) {
         std::iota(parent_.begin(), parent_.end(), Index{0});
     }
 
@@ -49,7 +49,7 @@ private:
 };
 
 Vec3 rotation_log(const Mat3& rotation) {
-    Eigen::AngleAxisd angle_axis(rotation);
+    const Eigen::AngleAxisd angle_axis(rotation);
     if (!std::isfinite(angle_axis.angle()) || angle_axis.angle() < 1e-12)
         return Vec3::Zero();
     return angle_axis.axis() * angle_axis.angle();
@@ -61,77 +61,83 @@ Mat3 rotation_exp(const Vec3& tangent) {
     return Eigen::AngleAxisd(angle, tangent / angle).toRotationMatrix();
 }
 
-std::vector<Edge> collect_edges(const Scene& scene, const bool weighted) {
+std::vector<Edge> collect_edges(const Scene& scene, bool use_pair_weights) {
     std::vector<Edge> edges;
     edges.reserve(scene.pairs.size());
     for (Index pair_index = 0; pair_index < scene.pairs.size(); ++pair_index) {
         const ImagePair& pair = scene.pairs[pair_index];
-        if (!pair.active || !pair.relative_pose || pair.matches.empty()) continue;
-        const double weight =
-            weighted ? pair.composite_weight() : static_cast<double>(pair.num_inliers());
+        if (!pair.active || !pair.relative_pose.has_value()) continue;
+        // HasValidWeight() is checked before openMVS chooses either weight.
+        if (pair.composite_weight() <= 0.F) continue;
+        const double weight = use_pair_weights
+            ? static_cast<double>(pair.composite_weight())
+            : static_cast<double>(pair.num_inliers());
         if (weight <= 0.0) continue;
-        edges.push_back({pair.id1, pair.id2, pair.relative_pose->R, weight, pair_index});
+        edges.push_back(
+            {pair.id1, pair.id2, pair.relative_pose->R, weight, pair_index});
     }
     return edges;
 }
 
-bool initialize_mst(
-    const std::size_t image_count,
+bool initialize_from_mst(
+    std::size_t image_count,
     const std::vector<Edge>& edges,
     std::vector<Mat3>& rotations,
     std::vector<char>& valid,
-    Index& root) {
-    if (edges.empty()) return false;
-
+    Index& fixed) {
     DisjointSet components(image_count);
     for (const Edge& edge : edges) components.unite(edge.a, edge.b);
+
     std::unordered_map<Index, unsigned> component_sizes;
     for (Index i = 0; i < image_count; ++i) ++component_sizes[components.find(i)];
-    Index largest = components.find(edges.front().a);
-    for (const auto& [component, size] : component_sizes) {
-        if (size > component_sizes[largest]) largest = component;
+    Index largest = components.find(0);
+    for (Index i = 1; i < image_count; ++i) {
+        const Index component = components.find(i);
+        if (component_sizes[component] > component_sizes[largest])
+            largest = component;
     }
     if (component_sizes[largest] < 2) return false;
 
     std::vector<Index> order(edges.size());
     std::iota(order.begin(), order.end(), Index{0});
-    std::sort(order.begin(), order.end(), [&](const Index lhs, const Index rhs) {
+    std::stable_sort(order.begin(), order.end(), [&](Index lhs, Index rhs) {
         return edges[lhs].weight > edges[rhs].weight;
     });
 
-    DisjointSet tree_sets(image_count);
-    std::vector<std::vector<std::pair<Index, Index>>> tree(image_count);
+    DisjointSet forest(image_count);
+    std::vector<std::vector<std::pair<Index, Index>>> adjacency(image_count);
     for (Index edge_index : order) {
         const Edge& edge = edges[edge_index];
-        if (components.find(edge.a) != largest || components.find(edge.b) != largest)
-            continue;
-        if (!tree_sets.unite(edge.a, edge.b)) continue;
-        tree[edge.a].push_back({edge.b, edge_index});
-        tree[edge.b].push_back({edge.a, edge_index});
+        if (!forest.unite(edge.a, edge.b)) continue;
+        if (components.find(edge.a) != largest) continue;
+        adjacency[edge.a].push_back({edge.b, edge_index});
+        adjacency[edge.b].push_back({edge.a, edge_index});
     }
 
-    root = k_invalid;
+    fixed = k_invalid;
     for (Index i = 0; i < image_count; ++i) {
         if (components.find(i) != largest) continue;
-        if (root == k_invalid || tree[i].size() > tree[root].size()) root = i;
+        if (fixed == k_invalid || adjacency[i].size() > adjacency[fixed].size())
+            fixed = i;
     }
-    if (root == k_invalid) return false;
+    if (fixed == k_invalid) return false;
 
     rotations.assign(image_count, Mat3::Identity());
     valid.assign(image_count, 0);
-    valid[root] = 1;
+    valid[fixed] = 1;
     std::queue<Index> queue;
-    queue.push(root);
+    queue.push(fixed);
     while (!queue.empty()) {
         const Index current = queue.front();
         queue.pop();
-        for (const auto& [child, edge_index] : tree[current]) {
+        for (const auto [child, edge_index] : adjacency[current]) {
             if (valid[child]) continue;
             const Edge& edge = edges[edge_index];
             if (edge.a == current)
                 rotations[child] = edge.relative * rotations[current];
             else
-                rotations[child] = edge.relative.transpose() * rotations[current];
+                rotations[child] =
+                    edge.relative.transpose() * rotations[current];
             valid[child] = 1;
             queue.push(child);
         }
@@ -139,9 +145,83 @@ bool initialize_mst(
     return true;
 }
 
-double pair_rotation_error(const Edge& edge, const std::vector<Mat3>& rotations) {
-    return rotation_log(
-        rotations[edge.b].transpose() * edge.relative * rotations[edge.a]).norm();
+Eigen::VectorXd shrinkage(const Eigen::VectorXd& value, double kappa) {
+    const Eigen::VectorXd plus = value.array() + kappa;
+    const Eigen::VectorXd minus = value.array() - kappa;
+    return plus.cwiseMin(0.0) + minus.cwiseMax(0.0);
+}
+
+class LadSolver {
+public:
+    explicit LadSolver(const Eigen::SparseMatrix<double>& matrix)
+        : matrix_(matrix) {
+        solver_.compute(matrix_.transpose() * matrix_);
+    }
+
+    bool valid() const { return solver_.info() == Eigen::Success; }
+
+    bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& solution) {
+        Eigen::VectorXd z = Eigen::VectorXd::Zero(matrix_.rows());
+        Eigen::VectorXd old_z(matrix_.rows());
+        Eigen::VectorXd u = Eigen::VectorXd::Zero(matrix_.rows());
+        Eigen::VectorXd ax(matrix_.rows());
+        Eigen::VectorXd relaxed_ax(matrix_.rows());
+        const double rhs_norm = rhs.norm();
+        const double primal_base = std::sqrt(static_cast<double>(matrix_.rows())) * 1e-4;
+        const double dual_base = std::sqrt(static_cast<double>(matrix_.cols())) * 1e-4;
+
+        // openMVS intentionally uses ten inner ADMM iterations here.
+        for (int iteration = 0; iteration < 10; ++iteration) {
+            solution = solver_.solve(matrix_.transpose() * (rhs + z - u));
+            if (solver_.info() != Eigen::Success) return false;
+            ax.noalias() = matrix_ * solution;
+            relaxed_ax = ax;  // rho = alpha = 1
+            std::swap(z, old_z);
+            z = shrinkage(relaxed_ax - rhs + u, 1.0);
+            u.noalias() += relaxed_ax - z - rhs;
+
+            const double primal = (ax - z - rhs).norm();
+            const double dual =
+                (-matrix_.transpose() * (z - old_z)).norm();
+            const double eps_primal = primal_base + 1e-2 *
+                std::max(rhs_norm, std::max(ax.norm(), z.norm()));
+            const double eps_dual =
+                dual_base + 1e-2 * (matrix_.transpose() * u).norm();
+            if (primal < eps_primal && dual < eps_dual) break;
+        }
+        return true;
+    }
+
+private:
+    const Eigen::SparseMatrix<double>& matrix_;
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> solver_;
+};
+
+void compute_residuals(
+    const std::vector<Edge>& edges,
+    const std::vector<Mat3>& rotations,
+    const std::vector<char>& valid,
+    Eigen::VectorXd& residuals) {
+    Index row = 0;
+    for (const Edge& edge : edges) {
+        if (!valid[edge.a] || !valid[edge.b]) continue;
+        residuals.segment<3>(row) = -rotation_log(
+            rotations[edge.b].transpose() * edge.relative * rotations[edge.a]);
+        row += 3;
+    }
+}
+
+double apply_step(
+    const Eigen::VectorXd& step,
+    const std::vector<Index>& free_images,
+    std::vector<Mat3>& rotations) {
+    double total = 0.0;
+    for (Index i = 0; i < free_images.size(); ++i) {
+        const Vec3 update = step.segment<3>(3 * i);
+        rotations[free_images[i]] *= rotation_exp(-update);
+        total += update.norm();
+    }
+    return total / static_cast<double>(free_images.size());
 }
 
 }  // namespace
@@ -150,13 +230,15 @@ GlobalRotationSummary estimate_global_rotations(
     Scene& scene,
     const GlobalRotationOptions& options) {
     GlobalRotationSummary summary;
-    std::vector<Edge> edges = collect_edges(scene, options.use_pair_weights);
-    if (edges.empty()) return summary;
+    const std::vector<Edge> edges = collect_edges(scene, options.use_pair_weights);
+    if (edges.empty() || scene.images.empty()) return summary;
 
     std::vector<Mat3> rotations;
     std::vector<char> valid;
     Index fixed = k_invalid;
-    if (!initialize_mst(scene.images.size(), edges, rotations, valid, fixed)) return summary;
+    if (!initialize_from_mst(
+            scene.images.size(), edges, rotations, valid, fixed))
+        return summary;
 
     std::vector<Index> free_images;
     std::vector<Index> image_to_free(scene.images.size(), k_invalid);
@@ -167,108 +249,121 @@ GlobalRotationSummary estimate_global_rotations(
     }
     if (free_images.empty()) return summary;
 
-    double max_base_weight = 0.0;
-    for (const Edge& edge : edges) max_base_weight = std::max(max_base_weight, edge.weight);
-    max_base_weight = std::max(max_base_weight, 1e-12);
-    const double sigma = options.irls_sigma_deg * k_pi / 180.0;
-    const unsigned total_iterations =
-        options.max_l1_iterations + options.max_irls_iterations;
-
-    for (unsigned iteration = 0; iteration < total_iterations; ++iteration) {
-        std::vector<Eigen::Triplet<double>> normal_triplets;
-        Eigen::VectorXd rhs = Eigen::VectorXd::Zero(3 * free_images.size());
-        std::vector<Eigen::Matrix3d> diagonal(free_images.size(), Mat3::Zero());
-        struct OffDiagonal {
-            Index i{};
-            Index j{};
-            double weight{};
-        };
-        std::vector<OffDiagonal> off_diagonal;
-        off_diagonal.reserve(edges.size());
-
-        for (const Edge& edge : edges) {
-            if (!valid[edge.a] || !valid[edge.b]) continue;
-            const Vec3 residual = -rotation_log(
-                rotations[edge.b].transpose() * edge.relative * rotations[edge.a]);
-            const double residual_norm = residual.norm();
-            double robust_weight = 1.0;
-            if (iteration < options.max_l1_iterations) {
-                robust_weight = 1.0 / std::max(residual_norm, 1e-3);
-            } else {
-                const double sigma_sq = sigma * sigma;
-                const double denominator = sigma_sq + residual.squaredNorm();
-                robust_weight = sigma_sq / (denominator * denominator);
-            }
-            const double base_weight = options.use_pair_weights
-                ? std::sqrt(edge.weight / max_base_weight)
-                : 1.0;
-            const double weight = std::max(robust_weight * base_weight, 1e-12);
-
-            const Index ia = image_to_free[edge.a];
-            const Index ib = image_to_free[edge.b];
-            if (ia != k_invalid) {
-                diagonal[ia].diagonal().array() += weight;
-                rhs.segment<3>(3 * ia) -= weight * residual;
-            }
-            if (ib != k_invalid) {
-                diagonal[ib].diagonal().array() += weight;
-                rhs.segment<3>(3 * ib) += weight * residual;
-            }
-            if (ia != k_invalid && ib != k_invalid)
-                off_diagonal.push_back({ia, ib, weight});
+    std::vector<Eigen::Triplet<double>> triplets;
+    std::vector<double> row_weights;
+    unsigned valid_edge_count = 0;
+    triplets.reserve(edges.size() * 6);
+    row_weights.reserve(edges.size() * 3);
+    for (const Edge& edge : edges) {
+        if (!valid[edge.a] || !valid[edge.b]) continue;
+        const Index row = valid_edge_count * 3;
+        const Index free_a = image_to_free[edge.a];
+        const Index free_b = image_to_free[edge.b];
+        for (int axis = 0; axis < 3; ++axis) {
+            if (free_a != k_invalid)
+                triplets.emplace_back(row + axis, free_a * 3 + axis, -1.0);
+            if (free_b != k_invalid)
+                triplets.emplace_back(row + axis, free_b * 3 + axis, 1.0);
+            row_weights.push_back(options.use_pair_weights ? edge.weight : 1.0);
         }
+        ++valid_edge_count;
+    }
+    if (valid_edge_count == 0) return summary;
 
-        for (Index i = 0; i < diagonal.size(); ++i) {
-            for (int axis = 0; axis < 3; ++axis)
-                normal_triplets.emplace_back(3 * i + axis, 3 * i + axis, diagonal[i](axis, axis));
-        }
-        for (const OffDiagonal& off : off_diagonal) {
-            for (int axis = 0; axis < 3; ++axis) {
-                normal_triplets.emplace_back(3 * off.i + axis, 3 * off.j + axis, -off.weight);
-                normal_triplets.emplace_back(3 * off.j + axis, 3 * off.i + axis, -off.weight);
-            }
-        }
+    Eigen::SparseMatrix<double> tangent_matrix(
+        valid_edge_count * 3, free_images.size() * 3);
+    tangent_matrix.setFromTriplets(triplets.begin(), triplets.end());
+    const Eigen::ArrayXd base_weights =
+        Eigen::Map<const Eigen::ArrayXd>(row_weights.data(), row_weights.size());
+    Eigen::VectorXd residuals(tangent_matrix.rows());
+    Eigen::VectorXd step(tangent_matrix.cols());
+    compute_residuals(edges, rotations, valid, residuals);
 
-        Eigen::SparseMatrix<double> normal(3 * free_images.size(), 3 * free_images.size());
-        normal.setFromTriplets(normal_triplets.begin(), normal_triplets.end());
+    if (options.max_l1_iterations > 0) {
+        const Eigen::SparseMatrix<double> weighted_matrix =
+            base_weights.matrix().asDiagonal() * tangent_matrix;
+        LadSolver lad(weighted_matrix);
+        if (!lad.valid()) return summary;
+        double current_norm = 0.0;
+        for (unsigned iteration = 0; iteration < options.max_l1_iterations;
+             ++iteration) {
+            step.setZero();
+            if (!lad.solve(base_weights.matrix().asDiagonal() * residuals, step) ||
+                !step.allFinite())
+                return summary;
+            const double previous_norm = current_norm;
+            current_norm = step.norm();
+            const double average_step = apply_step(step, free_images, rotations);
+            compute_residuals(edges, rotations, valid, residuals);
+            ++summary.iterations;
+            if (average_step < options.step_convergence_threshold ||
+                std::abs(previous_norm - current_norm) < 1e-10)
+                break;
+        }
+    }
+
+    if (options.max_irls_iterations > 0) {
         Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
-        solver.compute(normal);
-        if (solver.info() != Eigen::Success) return summary;
-        const Eigen::VectorXd step = solver.solve(rhs);
-        if (solver.info() != Eigen::Success || !step.allFinite()) return summary;
-
-        double average_step = 0.0;
-        for (Index i = 0; i < free_images.size(); ++i) {
-            const Vec3 update = step.segment<3>(3 * i);
-            rotations[free_images[i]] *= rotation_exp(-update);
-            average_step += update.norm();
+        solver.analyzePattern(tangent_matrix.transpose() * tangent_matrix);
+        const double sigma = options.irls_sigma_deg * k_pi / 180.0;
+        Eigen::ArrayXd robust_weights(tangent_matrix.rows());
+        for (unsigned iteration = 0; iteration < options.max_irls_iterations;
+             ++iteration) {
+            for (Index row = 0; row < valid_edge_count * 3; row += 3) {
+                const double residual_sq =
+                    residuals.segment<3>(row).squaredNorm();
+                double weight = 0.0;
+                if (options.weight_type ==
+                    GlobalRotationOptions::WeightType::geman_mcclure) {
+                    const double sigma_sq = sigma * sigma;
+                    const double denominator = sigma_sq + residual_sq;
+                    weight = sigma_sq / (denominator * denominator);
+                } else {
+                    weight =
+                        1.0 / std::max(std::sqrt(residual_sq), sigma);
+                }
+                robust_weights.segment<3>(row) =
+                    weight * base_weights.segment<3>(row);
+            }
+            const Eigen::SparseMatrix<double> at_weight =
+                tangent_matrix.transpose() *
+                robust_weights.matrix().asDiagonal();
+            solver.factorize(at_weight * tangent_matrix);
+            if (solver.info() != Eigen::Success) return summary;
+            step = solver.solve(at_weight * residuals);
+            if (solver.info() != Eigen::Success || !step.allFinite())
+                return summary;
+            const double average_step = apply_step(step, free_images, rotations);
+            compute_residuals(edges, rotations, valid, residuals);
+            ++summary.iterations;
+            if (average_step < options.step_convergence_threshold) break;
         }
-        average_step /= static_cast<double>(free_images.size());
-        summary.iterations = iteration + 1;
-        if (average_step < options.step_convergence_threshold) break;
     }
 
     for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
         scene.images[image_id].registered = valid[image_id] != 0;
-        if (valid[image_id]) {
-            scene.images[image_id].pose.R = rotations[image_id];
-            scene.images[image_id].pose.C.setZero();
-            ++summary.estimated_images;
-        }
+        if (!valid[image_id]) continue;
+        scene.images[image_id].pose.R = rotations[image_id];
+        scene.images[image_id].pose.C.setZero();
+        ++summary.estimated_images;
     }
 
-    const double max_error = options.max_relative_rotation_error_deg * k_pi / 180.0;
+    const double max_error =
+        options.max_relative_rotation_error_deg * k_pi / 180.0;
     if (max_error > 0.0) {
         for (const Edge& edge : edges) {
             if (!valid[edge.a] || !valid[edge.b]) continue;
-            if (pair_rotation_error(edge, rotations) <= max_error) continue;
+            const double error = rotation_log(
+                rotations[edge.b].transpose() * edge.relative *
+                rotations[edge.a]).norm();
+            if (error <= max_error) continue;
             scene.pairs[edge.pair_index].active = false;
             ++summary.filtered_pairs;
         }
     }
 
-    summary.success = summary.estimated_images >= 2;
-    summary.used_pairs = static_cast<unsigned>(edges.size());
+    summary.success = true;
+    summary.used_pairs = valid_edge_count;
     summary.fixed_image = fixed;
     return summary;
 }

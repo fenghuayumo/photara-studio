@@ -165,6 +165,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/resection.cpp
         src/sfm/global_rotation.cpp
         src/sfm/global_positioning.cpp
+        src/sfm/hierarchical.cpp
         src/sfm/frontend.cpp
         src/sfm/reconstruct.cpp
         src/sfm/export_mvs.cpp)
@@ -248,6 +249,9 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
         add_executable(aetherscan_mapping_test tests/mapping_test.cpp)
         target_link_libraries(aetherscan_mapping_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.mapping COMMAND aetherscan_mapping_test)
+        add_executable(aetherscan_hierarchical_test tests/hierarchical_test.cpp)
+        target_link_libraries(aetherscan_hierarchical_test PRIVATE AetherScan::SfM)
+        add_test(NAME aetherscan.sfm.hierarchical COMMAND aetherscan_hierarchical_test)
         add_executable(aetherscan_export_mvs_test tests/export_mvs_test.cpp)
         target_link_libraries(aetherscan_export_mvs_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.export_mvs COMMAND aetherscan_export_mvs_test)

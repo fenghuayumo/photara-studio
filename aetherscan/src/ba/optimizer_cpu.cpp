@@ -255,7 +255,8 @@ System assemble_system(
     const LinearizationOutput& linearization,
     const Adjacency& adjacency,
     const double damping,
-    const bool fix_first_point) {
+    const bool fix_first_point,
+    const bool optimize_rotations) {
     const std::size_t camera_count = problem.poses.size();
     const std::size_t point_count = problem.points.size();
     System system;
@@ -355,6 +356,24 @@ System assemble_system(
         for (std::size_t diagonal = 0; diagonal < pose_size; ++diagonal) {
             destination_hessian[diagonal * pose_size + diagonal] +=
                 damping * (destination_hessian[diagonal * pose_size + diagonal] + 1.0);
+        }
+        if (!optimize_rotations) {
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                for (std::size_t column = 0; column < pose_size; ++column) {
+                    destination_hessian[axis * pose_size + column] = 0.0;
+                    destination_hessian[column * pose_size + axis] = 0.0;
+                }
+                destination_hessian[axis * pose_size + axis] = 1.0;
+                destination_rhs[axis] = 0.0;
+            }
+        }
+    }
+    if (!optimize_rotations) {
+        for (std::size_t observation = 0;
+             observation < problem.observations.size(); ++observation) {
+            double* cross =
+                system.cross.data() + observation * cross_block_size;
+            std::fill(cross, cross + 3 * point_size, 0.0);
         }
     }
     return system;
@@ -638,25 +657,42 @@ void recover_point_step(
 }
 
 void apply_step(Problem& problem, const std::vector<double>& camera_step,
-                const std::vector<double>& point_step, const bool fix_first) {
+                const std::vector<double>& point_step, const bool fix_first,
+                const bool optimize_rotations) {
     for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
         if (fix_first && camera == 0) continue;
         Pose& pose = problem.poses[camera];
         const double* step = camera_step.data() + camera * pose_size;
-        const double angle = std::sqrt(step[0] * step[0] + step[1] * step[1] + step[2] * step[2]);
-        double dw = 1.0, dx = 0.5 * step[0], dy = 0.5 * step[1], dz = 0.5 * step[2];
-        if (angle > 1e-12) {
-            dw = std::cos(0.5 * angle);
-            const double scale = std::sin(0.5 * angle) / angle;
-            dx = scale * step[0]; dy = scale * step[1]; dz = scale * step[2];
+        if (optimize_rotations) {
+            const double angle =
+                std::sqrt(step[0] * step[0] + step[1] * step[1] +
+                          step[2] * step[2]);
+            double dw = 1.0;
+            double dx = 0.5 * step[0];
+            double dy = 0.5 * step[1];
+            double dz = 0.5 * step[2];
+            if (angle > 1e-12) {
+                dw = std::cos(0.5 * angle);
+                const double scale = std::sin(0.5 * angle) / angle;
+                dx = scale * step[0];
+                dy = scale * step[1];
+                dz = scale * step[2];
+            }
+            const double qw =
+                dw * pose.qw - dx * pose.qx - dy * pose.qy - dz * pose.qz;
+            const double qx =
+                dw * pose.qx + dx * pose.qw + dy * pose.qz - dz * pose.qy;
+            const double qy =
+                dw * pose.qy - dx * pose.qz + dy * pose.qw + dz * pose.qx;
+            const double qz =
+                dw * pose.qz + dx * pose.qy - dy * pose.qx + dz * pose.qw;
+            const double inverse_norm =
+                1.0 / std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+            pose.qw = qw * inverse_norm;
+            pose.qx = qx * inverse_norm;
+            pose.qy = qy * inverse_norm;
+            pose.qz = qz * inverse_norm;
         }
-        const double qw = dw * pose.qw - dx * pose.qx - dy * pose.qy - dz * pose.qz;
-        const double qx = dw * pose.qx + dx * pose.qw + dy * pose.qz - dz * pose.qy;
-        const double qy = dw * pose.qy - dx * pose.qz + dy * pose.qw + dz * pose.qx;
-        const double qz = dw * pose.qz + dx * pose.qy - dy * pose.qx + dz * pose.qw;
-        const double inverse_norm = 1.0 / std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
-        pose.qw = qw * inverse_norm; pose.qx = qx * inverse_norm;
-        pose.qy = qy * inverse_norm; pose.qz = qz * inverse_norm;
         pose.cx += step[3]; pose.cy += step[4]; pose.cz += step[5];
     }
     for (std::size_t point = 0; point < problem.points.size(); ++point) {
@@ -765,7 +801,8 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
             std::chrono::duration<double, std::milli>(stage_stopped - stage_started).count();
         stage_started = stage_stopped;
         System system = assemble_system(
-            problem, linearization, adjacency, damping, options.fix_first_point);
+            problem, linearization, adjacency, damping,
+            options.fix_first_point, options.optimize_rotations);
         ExplicitSchur explicit_schur = assemble_explicit_schur(
             problem, adjacency, schur_pattern, system);
         stage_stopped = std::chrono::steady_clock::now();
@@ -789,7 +826,9 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         }
         const auto old_poses = problem.poses;
         const auto old_points = problem.points;
-        apply_step(problem, camera_step, point_step, options.fix_first_pose);
+        apply_step(
+            problem, camera_step, point_step, options.fix_first_pose,
+            options.optimize_rotations);
         const double candidate_cost = evaluate_cost(problem, options.huber_delta, options.minimum_depth);
         const bool accepted = std::isfinite(candidate_cost) && candidate_cost < summary.final_cost;
         stage_stopped = std::chrono::steady_clock::now();
