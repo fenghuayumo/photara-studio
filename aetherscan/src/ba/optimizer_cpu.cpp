@@ -502,7 +502,7 @@ void schur_rhs(
          camera_signed < static_cast<std::int64_t>(problem.poses.size()); ++camera_signed) {
         const auto camera = static_cast<std::size_t>(camera_signed);
         double* output = rhs.data() + camera * pose_size;
-        if (fix_first && camera == 0) {
+        if (problem.is_pose_constant(camera, fix_first)) {
             std::fill(output, output + pose_size, 0.0);
             continue;
         }
@@ -538,7 +538,7 @@ void schur_multiply(
              cursor < adjacency.point_offsets[point + 1]; ++cursor) {
             const std::size_t observation = adjacency.point_observations[cursor];
             const std::size_t camera = problem.observations.camera[observation];
-            if (fix_first && camera == 0) continue;
+            if (problem.is_pose_constant(camera, fix_first)) continue;
             const double* cross = system.cross.data() + observation * cross_block_size;
             const double* camera_input = input.data() + camera * pose_size;
             for (std::size_t column = 0; column < point_size; ++column) {
@@ -558,7 +558,7 @@ void schur_multiply(
         const auto camera = static_cast<std::size_t>(camera_signed);
         double* destination = output.data() + camera * pose_size;
         const double* camera_input = input.data() + camera * pose_size;
-        if (fix_first && camera == 0) {
+        if (problem.is_pose_constant(camera, fix_first)) {
             std::copy(camera_input, camera_input + pose_size, destination);
             continue;
         }
@@ -584,7 +584,8 @@ void schur_multiply(
 }
 
 void explicit_schur_multiply(
-    const SchurPattern& pattern, const ExplicitSchur& system, const bool fix_first,
+    const Problem& problem, const SchurPattern& pattern,
+    const ExplicitSchur& system, const bool fix_first,
     const std::vector<double>& input, std::vector<double>& output) {
     const std::size_t camera_count = pattern.row_offsets.size() - 1;
     output.assign(input.size(), 0.0);
@@ -595,14 +596,14 @@ void explicit_schur_multiply(
          camera_signed < static_cast<std::int64_t>(camera_count); ++camera_signed) {
         const auto camera = static_cast<std::size_t>(camera_signed);
         double* destination = output.data() + camera * pose_size;
-        if (fix_first && camera == 0) {
-            std::copy_n(input.data(), pose_size, destination);
+        if (problem.is_pose_constant(camera, fix_first)) {
+            std::copy_n(input.data() + camera * pose_size, pose_size, destination);
             continue;
         }
         for (std::size_t block = pattern.row_offsets[camera];
              block < pattern.row_offsets[camera + 1]; ++block) {
             const std::size_t column_camera = pattern.columns[block];
-            if (fix_first && column_camera == 0) continue;
+            if (problem.is_pose_constant(column_camera, fix_first)) continue;
             const double* matrix = system.blocks.data() + block * pose_block_size;
             const double* vector = input.data() + column_camera * pose_size;
             for (std::size_t row = 0; row < pose_size; ++row)
@@ -613,7 +614,8 @@ void explicit_schur_multiply(
 }
 
 void precondition_explicit(
-    const SchurPattern& pattern, const ExplicitSchur& system, const bool fix_first,
+    const Problem& problem, const SchurPattern& pattern,
+    const ExplicitSchur& system, const bool fix_first,
     const std::vector<double>& residual, std::vector<double>& output) {
     const std::size_t camera_count = pattern.row_offsets.size() - 1;
     output.assign(residual.size(), 0.0);
@@ -623,7 +625,7 @@ void precondition_explicit(
     for (std::int64_t camera_signed = 0;
          camera_signed < static_cast<std::int64_t>(camera_count); ++camera_signed) {
         const auto camera = static_cast<std::size_t>(camera_signed);
-        if (fix_first && camera == 0) continue;
+        if (problem.is_pose_constant(camera, fix_first)) continue;
         const double* diagonal = system.blocks.data() + pattern.diagonal_blocks[camera] * pose_block_size;
         if (!solve_spd6(diagonal, residual.data() + camera * pose_size,
                         output.data() + camera * pose_size)) {
@@ -646,7 +648,7 @@ double dot(const std::vector<double>& first, const std::vector<double>& second) 
 }
 
 void precondition(
-    const System& system, const bool fix_first,
+    const Problem& problem, const System& system, const bool fix_first,
     const std::vector<double>& residual, std::vector<double>& output) {
     const std::size_t camera_count = system.camera_rhs.size() / pose_size;
     output.assign(residual.size(), 0.0);
@@ -656,7 +658,7 @@ void precondition(
     for (std::int64_t camera_signed = 0;
          camera_signed < static_cast<std::int64_t>(camera_count); ++camera_signed) {
         const auto camera = static_cast<std::size_t>(camera_signed);
-        if (fix_first && camera == 0) continue;
+        if (problem.is_pose_constant(camera, fix_first)) continue;
         if (!solve_spd6(system.camera_hessian.data() + camera * pose_block_size,
                         residual.data() + camera * pose_size,
                         output.data() + camera * pose_size)) {
@@ -678,9 +680,10 @@ std::size_t solve_pcg(
     std::vector<double> residual = rhs;
     std::vector<double> z, direction, product, point_temporary;
     if (explicit_system.blocks.empty())
-        precondition(system, options.fix_first_pose, residual, z);
+        precondition(problem, system, options.fix_first_pose, residual, z);
     else
-        precondition_explicit(pattern, explicit_system, options.fix_first_pose, residual, z);
+        precondition_explicit(
+            problem, pattern, explicit_system, options.fix_first_pose, residual, z);
     direction = z;
     double rz = dot(residual, z);
     const double target = options.pcg_tolerance * options.pcg_tolerance *
@@ -693,7 +696,8 @@ std::size_t solve_pcg(
                            direction, product, point_temporary);
         else
             explicit_schur_multiply(
-                pattern, explicit_system, options.fix_first_pose, direction, product);
+                problem, pattern, explicit_system, options.fix_first_pose,
+                direction, product);
         const double denominator = dot(direction, product);
         if (!(denominator > 1e-30) || !std::isfinite(denominator)) break;
         const double alpha = rz / denominator;
@@ -710,9 +714,10 @@ std::size_t solve_pcg(
             break;
         }
         if (explicit_system.blocks.empty())
-            precondition(system, options.fix_first_pose, residual, z);
+            precondition(problem, system, options.fix_first_pose, residual, z);
         else
-            precondition_explicit(pattern, explicit_system, options.fix_first_pose, residual, z);
+            precondition_explicit(
+                problem, pattern, explicit_system, options.fix_first_pose, residual, z);
         const double next_rz = dot(residual, z);
         if (!std::isfinite(next_rz)) break;
         const double beta = next_rz / rz;
@@ -954,7 +959,7 @@ void apply_step(Problem& problem, const std::vector<double>& camera_step,
                 const std::vector<double>& point_step, const bool fix_first,
                 const bool optimize_rotations) {
     for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
-        if (fix_first && camera == 0) continue;
+        if (problem.is_pose_constant(camera, fix_first)) continue;
         Pose& pose = problem.poses[camera];
         const double* step = camera_step.data() + camera * pose_size;
         if (optimize_rotations) {
@@ -1136,7 +1141,7 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
             for (std::size_t param = 0; param < dof; ++param) {
                 std::vector<double> column(rhs.size(), 0.0);
                 for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
-                    if (options.fix_first_pose && camera == 0) continue;
+                    if (problem.is_pose_constant(camera, options.fix_first_pose)) continue;
                     for (std::size_t row = 0; row < pose_size; ++row) {
                         column[camera * pose_size + row] =
                             intrinsic_schur.S_ci[camera * pose_size * dof + row * dof + param];
@@ -1153,7 +1158,7 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
             std::vector<double> S_ii_red = intrinsic_schur.S_ii;
             std::vector<double> b_i_red = intrinsic_schur.b_i;
             for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
-                if (options.fix_first_pose && camera == 0) continue;
+                if (problem.is_pose_constant(camera, options.fix_first_pose)) continue;
                 for (std::size_t row = 0; row < pose_size; ++row) {
                     const std::size_t camera_row = camera * pose_size + row;
                     for (std::size_t i = 0; i < dof; ++i) {
@@ -1172,7 +1177,7 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
 
             std::vector<double> rhs_cameras = rhs;
             for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
-                if (options.fix_first_pose && camera == 0) continue;
+                if (problem.is_pose_constant(camera, options.fix_first_pose)) continue;
                 for (std::size_t row = 0; row < pose_size; ++row) {
                     double value = 0.0;
                     for (std::size_t param = 0; param < dof; ++param) {

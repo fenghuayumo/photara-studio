@@ -30,5 +30,22 @@ int main() {
         if (match.query >= features0.keypoints.size() || match.train >= features1.keypoints.size())
             return 2;
     }
+    aetherscan::features::DescriptorMatcherOptions ann_options;
+    ann_options.ann_min_features = 1;
+    aetherscan::features::MutualRatioMatcher prepared_matcher(ann_options);
+    prepared_matcher.prepare(features0);
+    aetherscan::features::FeatureSet resized_train = features1;
+    prepared_matcher.prepare(resized_train);
+    resized_train.keypoints.resize(32);
+    resized_train.descriptors.resize(
+        resized_train.keypoints.size() * resized_train.descriptor_dimension);
+    resized_train.mark_descriptors_modified();
+    const auto resized_matches =
+        prepared_matcher.match(features0, resized_train);
+    for (const auto& match : resized_matches.matches) {
+        if (match.query >= features0.keypoints.size() ||
+            match.train >= resized_train.keypoints.size())
+            return 3;
+    }
     return 0;
 }

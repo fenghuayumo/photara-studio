@@ -86,6 +86,26 @@ int main() {
         std::cerr << "fixed gauge pose was modified\n";
         return 2;
     }
+    Problem boundary_problem = make_problem();
+    boundary_problem.pose_constant.resize(boundary_problem.poses.size(), 0);
+    boundary_problem.pose_constant[2] = 1;
+    const Pose fixed_boundary = boundary_problem.poses[2];
+    const double boundary_initial = evaluate_cost(boundary_problem);
+    const OptimizerSummary boundary_summary =
+        optimize_cpu(boundary_problem, options);
+    const Pose& boundary_after = boundary_problem.poses[2];
+    if (!boundary_summary.usable() ||
+        !(boundary_summary.final_cost < boundary_initial) ||
+        std::abs(boundary_after.qw - fixed_boundary.qw) > 1e-15 ||
+        std::abs(boundary_after.qx - fixed_boundary.qx) > 1e-15 ||
+        std::abs(boundary_after.qy - fixed_boundary.qy) > 1e-15 ||
+        std::abs(boundary_after.qz - fixed_boundary.qz) > 1e-15 ||
+        std::abs(boundary_after.cx - fixed_boundary.cx) > 1e-15 ||
+        std::abs(boundary_after.cy - fixed_boundary.cy) > 1e-15 ||
+        std::abs(boundary_after.cz - fixed_boundary.cz) > 1e-15) {
+        std::cerr << "constant boundary pose was modified or BA did not improve\n";
+        return 3;
+    }
 #if defined(AETHERSCAN_HAS_CUDA)
     if (CudaOptimizer::is_available()) {
         const OptimizerSummary gpu_summary = optimize_cuda(gpu_problem, options);
@@ -93,11 +113,11 @@ int main() {
         if (!gpu_summary.usable() || gpu_summary.successful_steps == 0 ||
             !(gpu_summary.final_cost < initial * 1e-3)) {
             std::cerr << "GPU optimizer failed to reduce synthetic reprojection cost\n";
-            return 3;
+            return 4;
         }
         if (std::abs(gpu_problem.poses.front().cx + 1.0) > 1e-15) {
             std::cerr << "GPU optimizer modified the fixed gauge pose\n";
-            return 4;
+            return 5;
         }
     }
 #endif

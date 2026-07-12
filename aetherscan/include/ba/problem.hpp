@@ -91,6 +91,15 @@ struct Problem {
     std::vector<PinholeIntrinsics> intrinsics;
     std::vector<Point3> points;
     Observations observations;
+    // Optional per-pose mask. Constant poses contribute observations and
+    // constrain points, but receive no update in the reduced camera system.
+    std::vector<std::uint8_t> pose_constant;
+
+    [[nodiscard]] bool is_pose_constant(
+        const std::size_t pose, const bool fix_first_pose = false) const noexcept {
+        return (fix_first_pose && pose == 0) ||
+               (!pose_constant.empty() && pose_constant[pose] != 0);
+    }
 
     void validate() const {
         if (poses.empty() || points.empty() || observations.size() == 0) {
@@ -98,6 +107,9 @@ struct Problem {
         }
         if (intrinsics.size() != poses.size()) {
             throw std::invalid_argument("The first backend version requires one intrinsics block per pose");
+        }
+        if (!pose_constant.empty() && pose_constant.size() != poses.size()) {
+            throw std::invalid_argument("Pose constant mask must match pose count");
         }
         observations.validate(poses.size(), points.size());
     }

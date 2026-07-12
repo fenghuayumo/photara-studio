@@ -39,21 +39,42 @@ struct DisjointSet {
     }
 };
 
-Index feature_offset(const Scene& scene, const Index image_id) {
-    Index offset = 0;
-    for (Index i = 0; i < image_id; ++i)
-        offset += static_cast<Index>(scene.images[i].features.keypoints.size());
-    return offset;
-}
-
 }  // namespace
+
+void rebuild_track_index(Scene& scene) {
+    scene.image_tracks.assign(scene.images.size(), {});
+    std::vector<std::size_t> counts(scene.images.size(), 0);
+    for (const Track& track : scene.tracks)
+        for (const Observation& observation : track.observations)
+            if (observation.image_id < counts.size())
+                ++counts[observation.image_id];
+    for (std::size_t image_id = 0; image_id < counts.size(); ++image_id)
+        scene.image_tracks[image_id].reserve(counts[image_id]);
+    for (Index track_id = 0; track_id < scene.tracks.size(); ++track_id) {
+        for (const Observation& observation :
+             scene.tracks[track_id].observations) {
+            if (observation.image_id >= scene.image_tracks.size()) continue;
+            scene.image_tracks[observation.image_id].push_back(
+                {track_id, observation.feature_id});
+        }
+    }
+}
 
 void build_tracks(Scene& scene, const float min_pair_weight) {
     scene.tracks.clear();
+    scene.image_tracks.clear();
     std::size_t total_features = 0;
     for (const auto& image : scene.images)
         total_features += image.features.keypoints.size();
     if (total_features == 0) return;
+
+    std::vector<Index> feature_offsets(scene.images.size() + 1, 0);
+    for (std::size_t image_id = 0; image_id < scene.images.size(); ++image_id) {
+        feature_offsets[image_id + 1] =
+            feature_offsets[image_id] +
+            static_cast<Index>(
+                scene.images[image_id].features.keypoints.size());
+    }
 
     DisjointSet ds(total_features);
     // Per-component: image_id -> observation count (must stay <= 1)
@@ -68,8 +89,8 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
     for (const ImagePair& pair : scene.pairs) {
         if (!pair.active || pair.matches.empty()) continue;
         if (pair.composite_weight() <= min_pair_weight) continue;
-        const Index off1 = feature_offset(scene, pair.id1);
-        const Index off2 = feature_offset(scene, pair.id2);
+        const Index off1 = feature_offsets[pair.id1];
+        const Index off2 = feature_offsets[pair.id2];
         for (const FeatureMatch& match : pair.matches) {
             const Index g1 = off1 + match.query;
             const Index g2 = off2 + match.train;
@@ -127,6 +148,7 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
             });
         scene.tracks.push_back(std::move(track));
     }
+    rebuild_track_index(scene);
 }
 
 std::pair<float, float> filter_tracks(
@@ -169,6 +191,7 @@ std::pair<float, float> filter_tracks(
             const Vec2 projected = camera.project(Xc);
             const double error =
                 (projected - Vec2(kp.x, kp.y)).norm();
+            if (!std::isfinite(error) || error > max_reproj_error_px) continue;
             if (kept != i) std::swap(track.observations[kept], track.observations[i]);
             ++kept;
             track_px += error;

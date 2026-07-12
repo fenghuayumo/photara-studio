@@ -1,11 +1,14 @@
 #include "sfm/star_init.hpp"
+#include "sfm/bundle.hpp"
 #include "sfm/global_positioning.hpp"
 #include "sfm/global_rotation.hpp"
 #include "sfm/reconstruct.hpp"
+#include "sfm/retrieval.hpp"
 #include "sfm/resection.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <random>
@@ -178,11 +181,111 @@ void test_global_positioning_points_only() {
         "point-only positioning recovers camera layout");
 }
 
+void test_retrieval_inverted_index() {
+    std::vector<Image> images(6);
+    std::mt19937 random(77);
+    std::uniform_real_distribution<float> prototype_value(0.1F, 0.9F);
+    std::normal_distribution<float> noise(0.F, 0.005F);
+    std::vector<std::vector<float>> prototypes(
+        3, std::vector<float>(128));
+    for (auto& prototype : prototypes)
+        for (float& value : prototype) value = prototype_value(random);
+
+    for (Index image_id = 0; image_id < images.size(); ++image_id) {
+        Image& image = images[image_id];
+        image.id = image_id;
+        image.features.image_width = 640;
+        image.features.image_height = 480;
+        image.features.descriptor_dimension = 128;
+        image.features.keypoints.resize(300);
+        image.features.descriptors.resize(300 * 128);
+        const auto& prototype = prototypes[image_id / 2];
+        for (std::size_t row = 0; row < 300; ++row)
+            for (std::size_t column = 0; column < 128; ++column)
+                image.features.descriptors[row * 128 + column] =
+                    prototype[column] + noise(random);
+    }
+
+    RetrievalOptions options;
+    options.top_k = 1;
+    options.max_descriptors_per_image = 300;
+    const auto pairs = retrieve_image_pairs(images, options);
+    const auto contains = [&](const Index first, const Index second) {
+        return std::any_of(
+            pairs.begin(), pairs.end(),
+            [&](const RetrievedPair& pair) {
+                return pair.first == first && pair.second == second;
+            });
+    };
+    expect(contains(0, 1), "retrieval links first visual cluster");
+    expect(contains(2, 3), "retrieval links second visual cluster");
+    expect(contains(4, 5), "retrieval links third visual cluster");
+}
+
+void test_local_ba_boundary_selection() {
+    Scene scene;
+    scene.cameras.assign(3, cam());
+    scene.images.resize(3);
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        scene.images[image_id].id = image_id;
+        scene.images[image_id].camera_id = image_id;
+        scene.images[image_id].registered = true;
+        scene.images[image_id].pose.C =
+            Vec3(0.5 * static_cast<double>(image_id), 0.0, 0.0);
+    }
+    const auto add_observation = [&](Track& track, const Index image_id,
+                                     const Vec3& true_point) {
+        Image& image = scene.images[image_id];
+        const Vec2 pixel = scene.cameras[image_id].project(
+            image.pose.transform_world_to_camera(true_point));
+        const Index feature_id =
+            static_cast<Index>(image.features.keypoints.size());
+        aetherscan::features::Keypoint keypoint;
+        keypoint.x = static_cast<float>(pixel.x());
+        keypoint.y = static_cast<float>(pixel.y());
+        image.features.keypoints.push_back(keypoint);
+        track.observations.push_back({image_id, feature_id});
+    };
+
+    for (int point_id = 0; point_id < 20; ++point_id) {
+        const Vec3 truth(
+            -0.5 + 0.05 * point_id,
+            -0.2 + 0.02 * (point_id % 5), 4.0 + 0.03 * point_id);
+        Track track;
+        track.position = truth + Vec3(0.01, -0.01, 0.02);
+        add_observation(track, 0, truth);
+        add_observation(track, 1, truth);
+        track.num_inliers = 2;
+        scene.tracks.push_back(std::move(track));
+    }
+    Track boundary_only;
+    const Vec3 boundary_truth(0.4, 0.1, 5.0);
+    boundary_only.position = boundary_truth + Vec3(2.0, 0.0, 0.0);
+    add_observation(boundary_only, 1, boundary_truth);
+    add_observation(boundary_only, 2, boundary_truth);
+    boundary_only.num_inliers = 2;
+    scene.tracks.push_back(std::move(boundary_only));
+    const Vec3 unchanged = scene.tracks.back().position;
+
+    BundleOptions options;
+    options.free_image_ids = {0};
+    options.fixed_image_ids = {1, 2};
+    options.optimize_all_registered = false;
+    options.optimizer.maximum_iterations = 3;
+    const BundleSummary summary = run_bundle_adjustment(scene, options);
+    expect(summary.num_points == 20, "local BA excludes boundary-only tracks");
+    expect(
+        (scene.tracks.back().position - unchanged).norm() == 0.0,
+        "local BA does not modify boundary-only landmarks");
+}
+
 }  // namespace
 
 int main() {
     test_global_rotation_weighting();
     test_global_positioning_points_only();
+    test_retrieval_inverted_index();
+    test_local_ba_boundary_selection();
 
     // 4-camera ring looking at a point cloud; build pairs + tracks, star-init.
     constexpr int k_views = 4;
@@ -249,6 +352,10 @@ int main() {
 
     build_tracks(scene);
     expect(scene.tracks.size() == static_cast<std::size_t>(k_points), "tracks built");
+    expect(
+        scene.image_tracks.size() == scene.images.size() &&
+            scene.image_tracks.front().size() == static_cast<std::size_t>(k_points),
+        "track inverted index built");
     Scene global_scene = scene;
 
     StarInitConfig star;

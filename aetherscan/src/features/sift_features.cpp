@@ -2,6 +2,8 @@
 
 #include "parallel/thread_pool.hpp"
 
+#include <hnswlib/hnswlib.h>
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -13,7 +15,9 @@ extern "C" {
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -178,6 +182,85 @@ void ensure_vl() {
 
 }  // namespace
 
+class MutualRatioMatcher::SharedState {
+public:
+    class Index {
+    public:
+        Index(
+            const FeatureSet& features,
+            const DescriptorMatcherOptions& options)
+            : space(features.descriptor_dimension),
+              graph(
+                  &space, features.keypoints.size(), options.ann_m,
+                  options.ann_ef_construction, 42) {
+            for (std::size_t row = 0; row < features.keypoints.size(); ++row) {
+                graph.addPoint(
+                    features.descriptors.data() +
+                        row * features.descriptor_dimension,
+                    row);
+            }
+            graph.setEf(options.ann_ef_search);
+        }
+
+        hnswlib::L2Space space;
+        hnswlib::HierarchicalNSW<float> graph;
+    };
+
+    struct Entry {
+        const float* descriptors{};
+        std::size_t descriptor_count{};
+        std::size_t keypoint_count{};
+        std::size_t dimension{};
+        std::uint64_t generation{};
+        std::uint64_t identity{};
+        std::shared_ptr<Index> index;
+    };
+
+    static bool matches(const Entry& entry, const FeatureSet& features) {
+        return entry.descriptors == features.descriptors.data() &&
+               entry.descriptor_count == features.descriptors.size() &&
+               entry.keypoint_count == features.keypoints.size() &&
+               entry.dimension == features.descriptor_dimension &&
+               entry.generation == features.descriptor_generation &&
+               entry.identity == features.descriptor_identity;
+    }
+
+    void prepare(
+        const FeatureSet& features,
+        const DescriptorMatcherOptions& options) {
+        if (!options.approximate ||
+            features.keypoints.size() < options.ann_min_features ||
+            features.descriptor_dimension == 0)
+            return;
+        {
+            std::lock_guard lock(mutex_);
+            const auto found = indices_.find(&features);
+            if (found != indices_.end() && matches(found->second, features))
+                return;
+        }
+        auto index = std::make_shared<Index>(features, options);
+        std::lock_guard lock(mutex_);
+        indices_[&features] = {
+            features.descriptors.data(), features.descriptors.size(),
+            features.keypoints.size(), features.descriptor_dimension,
+            features.descriptor_generation, features.descriptor_identity,
+            std::move(index)};
+    }
+
+    [[nodiscard]] std::shared_ptr<Index> find(
+        const FeatureSet& features) const {
+        std::lock_guard lock(mutex_);
+        const auto found = indices_.find(&features);
+        return found == indices_.end() || !matches(found->second, features)
+                   ? nullptr
+                   : found->second.index;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::unordered_map<const FeatureSet*, Entry> indices_;
+};
+
 void FeatureSet::validate() const {
     if (image_width == 0 || image_height == 0)
         throw std::invalid_argument("Feature image dimensions must be non-zero");
@@ -191,7 +274,9 @@ void FeatureSet::validate() const {
 class SiftExtractor::Impl {
 public:
     explicit Impl(SiftOptions value) : options(value) {
-        if (value.maximum_features == 0 || value.octave_layers == 0)
+        if (value.maximum_features == 0 || value.octave_layers == 0 ||
+            value.grid_size == 0 || value.max_features_per_cell == 0 ||
+            value.min_features_per_cell > value.max_features_per_cell)
             throw std::invalid_argument("SIFT feature limits must be positive");
         ensure_vl();
     }
@@ -226,25 +311,6 @@ FeatureSet SiftExtractor::extract_gray(
         pixels.size() < row_stride * static_cast<std::size_t>(height))
         throw std::invalid_argument("Invalid grayscale image view");
 
-    std::vector<float> float_image(static_cast<std::size_t>(width) * height);
-    for (std::uint32_t y = 0; y < height; ++y) {
-        const std::uint8_t* row = pixels.data() + static_cast<std::size_t>(y) * row_stride;
-        float* destination = float_image.data() + static_cast<std::size_t>(y) * width;
-        for (std::uint32_t x = 0; x < width; ++x) destination[x] = static_cast<float>(row[x]);
-    }
-
-    const int octaves = (std::max)(
-        1, static_cast<int>(std::floor(std::log2((std::min)(width, height)))) - 3);
-    VlSiftFilt* filter = vl_sift_new(
-        static_cast<int>(width), static_cast<int>(height), octaves,
-        static_cast<int>(impl_->options.octave_layers), 0);
-    if (!filter) throw std::runtime_error("Failed to create VLFeat SIFT filter");
-    vl_sift_set_edge_thresh(filter, impl_->options.edge_threshold);
-    vl_sift_set_peak_thresh(
-        filter,
-        255.0 * impl_->options.contrast_threshold /
-            static_cast<double>(impl_->options.octave_layers));
-
     FeatureSet result;
     result.image_width = width;
     result.image_height = height;
@@ -254,45 +320,167 @@ FeatureSet SiftExtractor::extract_gray(
     result.keypoints.reserve(impl_->options.maximum_features);
     result.descriptors.reserve(impl_->options.maximum_features * 128);
 
-    vl_sift_process_first_octave(filter, float_image.data());
-    vl_sift_pix descriptor[128];
-    while (true) {
-        vl_sift_detect(filter);
-        const VlSiftKeypoint* keys = vl_sift_get_keypoints(filter);
-        const int key_count = vl_sift_get_nkeypoints(filter);
-        vl_sift_update_gradient(filter);
-        for (int index = 0; index < key_count; ++index) {
-            if (result.keypoints.size() >= impl_->options.maximum_features) break;
-            double angles[4] = {};
-            const int angle_count =
-                vl_sift_calc_keypoint_orientations(filter, angles, keys + index);
-            for (int angle = 0; angle < angle_count; ++angle) {
-                if (result.keypoints.size() >= impl_->options.maximum_features) break;
-                vl_sift_calc_keypoint_descriptor(
-                    filter, descriptor, keys + index, angles[angle]);
-                result.keypoints.push_back(
-                    {keys[index].x, keys[index].y, keys[index].sigma,
-                     static_cast<float>(angles[angle]), 0.0F});
-                result.descriptors.insert(
-                    result.descriptors.end(), descriptor, descriptor + 128);
+    const auto extract_cell = [&](const std::uint32_t roi_x, const std::uint32_t roi_y,
+                                  const std::uint32_t roi_width,
+                                  const std::uint32_t roi_height,
+                                  const std::uint32_t core_x,
+                                  const std::uint32_t core_y,
+                                  const std::uint32_t core_width,
+                                  const std::uint32_t core_height,
+                                  const double contrast) {
+        FeatureSet cell;
+        cell.image_width = width;
+        cell.image_height = height;
+        cell.descriptor_dimension = 128;
+        cell.metric = result.metric;
+        cell.extractor_name = result.extractor_name;
+        cell.keypoints.reserve(impl_->options.max_features_per_cell);
+        cell.descriptors.reserve(impl_->options.max_features_per_cell * 128);
+
+        std::vector<float> float_image(static_cast<std::size_t>(roi_width) * roi_height);
+        for (std::uint32_t y = 0; y < roi_height; ++y) {
+            const std::uint8_t* source =
+                pixels.data() + static_cast<std::size_t>(roi_y + y) * row_stride + roi_x;
+            float* destination =
+                float_image.data() + static_cast<std::size_t>(y) * roi_width;
+            for (std::uint32_t x = 0; x < roi_width; ++x)
+                destination[x] = static_cast<float>(source[x]);
+        }
+
+        const int octaves = (std::max)(
+            1, static_cast<int>(std::floor(
+                   std::log2((std::min)(roi_width, roi_height)))) -
+                   3);
+        VlSiftFilt* filter = vl_sift_new(
+            static_cast<int>(roi_width), static_cast<int>(roi_height), octaves,
+            static_cast<int>(impl_->options.octave_layers),
+            impl_->options.first_octave);
+        if (!filter) throw std::runtime_error("Failed to create VLFeat SIFT filter");
+        vl_sift_set_edge_thresh(filter, impl_->options.edge_threshold);
+        vl_sift_set_peak_thresh(
+            filter, 255.0 * contrast /
+                        static_cast<double>(impl_->options.octave_layers));
+
+        const float local_core_x0 = static_cast<float>(core_x - roi_x);
+        const float local_core_y0 = static_cast<float>(core_y - roi_y);
+        const float local_core_x1 = local_core_x0 + static_cast<float>(core_width);
+        const float local_core_y1 = local_core_y0 + static_cast<float>(core_height);
+        vl_sift_pix descriptor[128];
+        if (vl_sift_process_first_octave(filter, float_image.data()) == 0) {
+            while (true) {
+                vl_sift_detect(filter);
+                const VlSiftKeypoint* keys = vl_sift_get_keypoints(filter);
+                const int key_count = vl_sift_get_nkeypoints(filter);
+                vl_sift_update_gradient(filter);
+                for (int index = 0; index < key_count; ++index) {
+                    if (cell.keypoints.size() >= impl_->options.max_features_per_cell)
+                        break;
+                    const VlSiftKeypoint& key = keys[index];
+                    if (key.x < local_core_x0 || key.x >= local_core_x1 ||
+                        key.y < local_core_y0 || key.y >= local_core_y1)
+                        continue;
+                    double angles[4] = {};
+                    const int angle_count =
+                        vl_sift_calc_keypoint_orientations(filter, angles, &key);
+                    for (int angle = 0; angle < angle_count; ++angle) {
+                        if (cell.keypoints.size() >=
+                            impl_->options.max_features_per_cell)
+                            break;
+                        vl_sift_calc_keypoint_descriptor(
+                            filter, descriptor, &key, angles[angle]);
+                        cell.keypoints.push_back(
+                            {key.x + static_cast<float>(roi_x),
+                             key.y + static_cast<float>(roi_y), key.sigma,
+                             static_cast<float>(angles[angle]), 1.0F});
+                        cell.descriptors.insert(
+                            cell.descriptors.end(), descriptor, descriptor + 128);
+                    }
+                }
+                if (cell.keypoints.size() >= impl_->options.max_features_per_cell ||
+                    vl_sift_process_next_octave(filter))
+                    break;
             }
         }
+        vl_sift_delete(filter);
+        return cell;
+    };
+
+    const std::size_t grid = impl_->options.grid_size;
+    const std::uint32_t cell_width = width / static_cast<std::uint32_t>(grid);
+    const std::uint32_t cell_height = height / static_cast<std::uint32_t>(grid);
+    const std::uint32_t border = static_cast<std::uint32_t>((std::min)(
+        impl_->options.cell_border,
+        static_cast<std::size_t>((std::min)(cell_width, cell_height) / 2)));
+    for (std::size_t row = 0; row < grid; ++row) {
+        for (std::size_t col = 0; col < grid; ++col) {
+            const std::uint32_t core_x =
+                static_cast<std::uint32_t>(col) * cell_width;
+            const std::uint32_t core_y =
+                static_cast<std::uint32_t>(row) * cell_height;
+            const std::uint32_t core_width =
+                col + 1 == grid ? width - core_x : cell_width;
+            const std::uint32_t core_height =
+                row + 1 == grid ? height - core_y : cell_height;
+            const std::uint32_t roi_x = core_x > border ? core_x - border : 0;
+            const std::uint32_t roi_y = core_y > border ? core_y - border : 0;
+            const std::uint32_t roi_x1 =
+                (std::min)(width, core_x + core_width + border);
+            const std::uint32_t roi_y1 =
+                (std::min)(height, core_y + core_height + border);
+
+            FeatureSet selected;
+            for (unsigned retry = 0; retry <= impl_->options.adaptive_retries; ++retry) {
+                const double contrast =
+                    impl_->options.contrast_threshold * std::pow(0.5, retry);
+                selected = extract_cell(
+                    roi_x, roi_y, roi_x1 - roi_x, roi_y1 - roi_y,
+                    core_x, core_y, core_width, core_height, contrast);
+                if (selected.keypoints.size() >=
+                        impl_->options.min_features_per_cell ||
+                    retry == impl_->options.adaptive_retries)
+                    break;
+            }
+            const std::size_t available =
+                impl_->options.maximum_features - result.keypoints.size();
+            const std::size_t count =
+                (std::min)(available, selected.keypoints.size());
+            result.keypoints.insert(
+                result.keypoints.end(), selected.keypoints.begin(),
+                selected.keypoints.begin() + static_cast<std::ptrdiff_t>(count));
+            result.descriptors.insert(
+                result.descriptors.end(), selected.descriptors.begin(),
+                selected.descriptors.begin() +
+                    static_cast<std::ptrdiff_t>(count * result.descriptor_dimension));
+            if (result.keypoints.size() >= impl_->options.maximum_features) break;
+        }
         if (result.keypoints.size() >= impl_->options.maximum_features) break;
-        if (vl_sift_process_next_octave(filter)) break;
     }
-    vl_sift_delete(filter);
     if (impl_->options.root_sift) apply_root_sift(result);
     return result;
 }
 
 MutualRatioMatcher::MutualRatioMatcher(DescriptorMatcherOptions options)
-    : options_(options) {
+    : MutualRatioMatcher(std::move(options), std::make_shared<SharedState>()) {}
+
+MutualRatioMatcher::MutualRatioMatcher(
+    DescriptorMatcherOptions options,
+    std::shared_ptr<SharedState> shared)
+    : options_(std::move(options)), shared_(std::move(shared)) {
     if (!(options_.ratio_threshold > 0.0F && options_.ratio_threshold <= 1.0F))
         throw std::invalid_argument("Descriptor ratio threshold must be in (0, 1]");
+    if (options_.ann_m < 2 || options_.ann_ef_construction < 2 ||
+        options_.ann_ef_search < 2)
+        throw std::invalid_argument("ANN search parameters must be at least 2");
 }
 
 std::unique_ptr<FeatureMatcher> MutualRatioMatcher::clone() const {
-    return std::make_unique<MutualRatioMatcher>(options_);
+    return std::unique_ptr<FeatureMatcher>(
+        new MutualRatioMatcher(options_, shared_));
+}
+
+void MutualRatioMatcher::prepare(const FeatureSet& features) {
+    features.validate();
+    shared_->prepare(features, options_);
 }
 
 MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& train) const {
@@ -305,10 +493,36 @@ MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& tr
 
     std::vector<int> best0, best1;
     std::vector<float> dist0, dist1;
-    knn2_squared_l2(
-        query.descriptors.data(), query.keypoints.size(), train.descriptors.data(),
-        train.keypoints.size(), query.descriptor_dimension, options_.parallel, best0, dist0,
-        best1, dist1);
+    const auto query_index = shared_->find(query);
+    const auto train_index = shared_->find(train);
+    const bool use_ann =
+        query_index && train_index && train.keypoints.size() >= 2;
+    if (use_ann) {
+        best0.assign(query.keypoints.size(), -1);
+        best1.assign(query.keypoints.size(), -1);
+        dist0.assign(query.keypoints.size(), std::numeric_limits<float>::infinity());
+        dist1.assign(query.keypoints.size(), std::numeric_limits<float>::infinity());
+        for (std::size_t row = 0; row < query.keypoints.size(); ++row) {
+            auto nearest = train_index->graph.searchKnn(
+                query.descriptors.data() + row * query.descriptor_dimension, 2);
+            if (nearest.size() < 2) continue;
+            const auto second = nearest.top();
+            nearest.pop();
+            const auto first = nearest.top();
+            if (first.second >= train.keypoints.size() ||
+                second.second >= train.keypoints.size())
+                continue;
+            best0[row] = static_cast<int>(first.second);
+            dist0[row] = first.first;
+            best1[row] = static_cast<int>(second.second);
+            dist1[row] = second.first;
+        }
+    } else {
+        knn2_squared_l2(
+            query.descriptors.data(), query.keypoints.size(), train.descriptors.data(),
+            train.keypoints.size(), query.descriptor_dimension, options_.parallel,
+            best0, dist0, best1, dist1);
+    }
 
     const float ratio_squared = options_.ratio_threshold * options_.ratio_threshold;
     struct Candidate {
@@ -347,10 +561,28 @@ MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& tr
 
     std::vector<int> reverse_best;
     std::vector<float> reverse_distance;
-    knn1_squared_l2_subset(
-        query.descriptors.data(), query.keypoints.size(), train.descriptors.data(),
-        query.descriptor_dimension, unique_trains, options_.parallel, reverse_best,
-        reverse_distance);
+    if (use_ann) {
+        reverse_best.assign(unique_trains.size(), -1);
+        reverse_distance.assign(
+            unique_trains.size(), std::numeric_limits<float>::infinity());
+        for (std::size_t slot = 0; slot < unique_trains.size(); ++slot) {
+            const int train_id = unique_trains[slot];
+            auto nearest = query_index->graph.searchKnn(
+                train.descriptors.data() +
+                    static_cast<std::size_t>(train_id) *
+                        train.descriptor_dimension,
+                1);
+            if (nearest.empty()) continue;
+            if (nearest.top().second >= query.keypoints.size()) continue;
+            reverse_best[slot] = static_cast<int>(nearest.top().second);
+            reverse_distance[slot] = nearest.top().first;
+        }
+    } else {
+        knn1_squared_l2_subset(
+            query.descriptors.data(), query.keypoints.size(), train.descriptors.data(),
+            query.descriptor_dimension, unique_trains, options_.parallel, reverse_best,
+            reverse_distance);
+    }
 
     for (const auto& candidate : candidates) {
         const int slot = train_slot[candidate.train];
@@ -366,7 +598,10 @@ MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& tr
 
 MatchSet match_descriptors(
     const FeatureSet& query, const FeatureSet& train, const DescriptorMatcherOptions& options) {
-    return MutualRatioMatcher(options).match(query, train);
+    MutualRatioMatcher matcher(options);
+    matcher.prepare(query);
+    matcher.prepare(train);
+    return matcher.match(query, train);
 }
 
 void register_sift_feature_backends() {

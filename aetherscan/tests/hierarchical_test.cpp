@@ -113,6 +113,14 @@ int main() {
     expect(summary.valid, "hierarchical reconstruction succeeds");
     expect(summary.registered_views == 6, "all hierarchical views registered");
     expect(summary.landmarks >= 40, "hierarchical reconstruction keeps landmarks");
+    expect(
+        scene.image_tracks.size() == scene.images.size(),
+        "hierarchical merge rebuilds track inverted index");
+    for (const auto& references : scene.image_tracks)
+        for (const ImageTrackRef& reference : references)
+            expect(
+                reference.track_id < scene.tracks.size(),
+                "hierarchical track index references valid track");
 
     if (failures == 0) {
         std::cout << "sfm hierarchical tests passed\n";

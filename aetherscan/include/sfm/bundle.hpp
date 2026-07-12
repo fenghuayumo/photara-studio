@@ -11,8 +11,11 @@ struct BundleOptions {
     // Write optimized shared intrinsics back into Scene::cameras.
     bool write_intrinsics{true};
     // If non-empty, only these image IDs have free poses; others are fixed
-    // by excluding them from the BA problem (held constant outside).
+    // inside the BA problem.
     std::vector<Index> free_image_ids;
+    // Boundary views kept in the local problem as constant poses. Their
+    // observations anchor shared points to the existing reconstruction.
+    std::vector<Index> fixed_image_ids;
     // If true and free_image_ids empty, optimize all registered images.
     bool optimize_all_registered{true};
 };

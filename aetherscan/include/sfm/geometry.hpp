@@ -15,6 +15,7 @@ struct RelativePoseResult {
     Mat3 F{Mat3::Zero()};
     std::optional<Mat3> H;
     std::vector<char> inlier_mask;
+    unsigned num_ransac_inliers{0};  // Before cheirality/reprojection/angle filtering.
     unsigned num_inliers{0};
     unsigned num_homography_inliers{0};
     float mean_ray_angle{0.F};  // radians

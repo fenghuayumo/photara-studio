@@ -75,11 +75,19 @@ struct Track {
     [[nodiscard]] bool is_triangulated() const { return num_inliers >= 2; }
 };
 
+struct ImageTrackRef {
+    Index track_id{k_invalid};
+    Index feature_id{k_invalid};
+};
+
 struct Scene {
     std::vector<PinholeCamera> cameras;
     std::vector<Image> images;
     std::vector<ImagePair> pairs;
     std::vector<Track> tracks;
+    // image_id -> tracks observed in that image; rebuilt whenever track
+    // topology changes and used by resection/covisibility hot paths.
+    std::vector<std::vector<ImageTrackRef>> image_tracks;
     unsigned thread_count{0};  // 0 = hardware concurrency
 
     void clear();

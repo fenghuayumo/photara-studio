@@ -10,30 +10,28 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
 
     std::unordered_set<Index> free_set(
         options.free_image_ids.begin(), options.free_image_ids.end());
-    const bool use_filter = !options.free_image_ids.empty();
+    std::unordered_set<Index> fixed_set(
+        options.fixed_image_ids.begin(), options.fixed_image_ids.end());
+    const bool use_filter = !free_set.empty() || !fixed_set.empty();
 
     std::vector<Index> camera_images;
     std::unordered_map<Index, Index> image_to_ba;
-    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
-        if (!scene.images[image_id].registered) continue;
-        if (use_filter && !free_set.count(image_id) && !options.optimize_all_registered) {
-            // Still include fixed cameras that observe optimized points — for v1
-            // we only include free cameras when filtering is on.
-            if (!free_set.count(image_id)) continue;
-        }
-        if (use_filter && !options.optimize_all_registered && !free_set.count(image_id))
-            continue;
-        image_to_ba[image_id] = static_cast<Index>(camera_images.size());
-        camera_images.push_back(image_id);
-    }
-    // When free list is provided for local BA, also include them explicitly.
     if (use_filter) {
-        camera_images.clear();
-        image_to_ba.clear();
-        for (Index image_id : options.free_image_ids) {
-            if (image_id >= scene.images.size() || !scene.images[image_id].registered)
-                continue;
-            if (image_to_ba.count(image_id)) continue;
+        const auto append = [&](const std::vector<Index>& ids) {
+            for (Index image_id : ids) {
+                if (image_id >= scene.images.size() ||
+                    !scene.images[image_id].registered ||
+                    image_to_ba.count(image_id))
+                    continue;
+                image_to_ba[image_id] = static_cast<Index>(camera_images.size());
+                camera_images.push_back(image_id);
+            }
+        };
+        append(options.free_image_ids);
+        append(options.fixed_image_ids);
+    } else {
+        for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+            if (!scene.images[image_id].registered) continue;
             image_to_ba[image_id] = static_cast<Index>(camera_images.size());
             camera_images.push_back(image_id);
         }
@@ -44,6 +42,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     ba::Problem problem;
     problem.poses.resize(camera_images.size());
     problem.intrinsics.resize(camera_images.size());
+    problem.pose_constant.resize(camera_images.size(), 0);
     for (std::size_t i = 0; i < camera_images.size(); ++i) {
         const Image& image = scene.images[camera_images[i]];
         const PinholeCamera& camera = scene.camera_of(image);
@@ -53,6 +52,8 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         problem.intrinsics[i] = {
             camera.fx, camera.fy, camera.cx, camera.cy,
             camera.k1, camera.k2, camera.p1, camera.p2};
+        problem.pose_constant[i] =
+            fixed_set.count(camera_images[i]) ? std::uint8_t{1} : std::uint8_t{0};
     }
 
     std::unordered_map<Index, Index> track_to_point;
@@ -61,7 +62,11 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         if (!track.is_triangulated()) continue;
         bool visible = false;
         for (unsigned o = 0; o < track.num_inliers; ++o) {
-            if (image_to_ba.count(track.observations[o].image_id)) {
+            const Index image_id = track.observations[o].image_id;
+            const bool activates_point =
+                use_filter ? free_set.count(image_id) != 0
+                           : image_to_ba.count(image_id) != 0;
+            if (activates_point) {
                 visible = true;
                 break;
             }
@@ -85,6 +90,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     if (problem.observations.size() == 0) return summary;
 
     ba::OptimizerOptions opt = options.optimizer;
+    if (!fixed_set.empty()) opt.fix_first_pose = false;
     summary.optimizer = ba::optimize_cpu(problem, opt);
     summary.success = summary.optimizer.usable();
     summary.num_cameras = static_cast<unsigned>(problem.poses.size());

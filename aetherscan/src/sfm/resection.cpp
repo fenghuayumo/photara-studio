@@ -19,13 +19,13 @@ std::vector<Index> select_next_images(
     std::unordered_map<Index, unsigned> scores = unregistered;
     for (auto& [id, score] : scores) score = 0;
 
-    // openMVS: score every observation of triangulated tracks, including views
-    // that are not yet registered (they sit past num_inliers after triangulation).
-    for (const Track& track : scene.tracks) {
-        if (!track.is_triangulated()) continue;
-        for (const Observation& obs : track.observations) {
-            auto it = scores.find(obs.image_id);
-            if (it != scores.end()) ++it->second;
+    // Score only the tracks referenced by each candidate image.
+    for (auto& [image_id, score] : scores) {
+        if (image_id >= scene.image_tracks.size()) continue;
+        for (const ImageTrackRef& reference : scene.image_tracks[image_id]) {
+            if (reference.track_id < scene.tracks.size() &&
+                scene.tracks[reference.track_id].is_triangulated())
+                ++score;
         }
     }
 
@@ -58,16 +58,15 @@ std::pair<unsigned, unsigned> register_image(
     const Image& image = scene.images[image_id];
     const PinholeCamera& camera = scene.camera_of(image);
 
-    for (const Track& track : scene.tracks) {
+    if (image_id >= scene.image_tracks.size()) return {0, 0};
+    for (const ImageTrackRef& reference : scene.image_tracks[image_id]) {
+        if (reference.track_id >= scene.tracks.size()) continue;
+        const Track& track = scene.tracks[reference.track_id];
         if (!track.is_triangulated()) continue;
-        for (const Observation& obs : track.observations) {
-            if (obs.image_id != image_id) continue;
-            if (obs.feature_id >= image.features.keypoints.size()) break;
-            const auto& kp = image.features.keypoints[obs.feature_id];
-            bearings.push_back(camera.unproject_normalized({kp.x, kp.y}));
-            points.push_back(track.position);
-            break;
-        }
+        if (reference.feature_id >= image.features.keypoints.size()) continue;
+        const auto& kp = image.features.keypoints[reference.feature_id];
+        bearings.push_back(camera.unproject_normalized({kp.x, kp.y}));
+        points.push_back(track.position);
     }
 
     const unsigned n = static_cast<unsigned>(bearings.size());
@@ -89,17 +88,17 @@ std::vector<Index> build_local_window(
     const std::vector<Index>& image_ids,
     const ResectionConfig& config) {
     std::unordered_set<Index> target(image_ids.begin(), image_ids.end());
+    std::unordered_set<Index> candidate_tracks;
+    for (Index image_id : image_ids) {
+        if (image_id >= scene.image_tracks.size()) continue;
+        for (const ImageTrackRef& reference : scene.image_tracks[image_id])
+            candidate_tracks.insert(reference.track_id);
+    }
     std::unordered_map<Index, unsigned> counts;
-    for (const Track& track : scene.tracks) {
+    for (Index track_id : candidate_tracks) {
+        if (track_id >= scene.tracks.size()) continue;
+        const Track& track = scene.tracks[track_id];
         if (!track.is_triangulated()) continue;
-        bool hits = false;
-        for (unsigned o = 0; o < track.num_inliers; ++o) {
-            if (target.count(track.observations[o].image_id)) {
-                hits = true;
-                break;
-            }
-        }
-        if (!hits) continue;
         for (unsigned o = 0; o < track.num_inliers; ++o) {
             const Index id = track.observations[o].image_id;
             if (!target.count(id) && scene.images[id].registered) ++counts[id];
@@ -149,6 +148,7 @@ private:
 }  // namespace
 
 unsigned register_images(Scene& scene, const ResectionConfig& config) {
+    rebuild_track_index(scene);
     std::unordered_map<Index, unsigned> unregistered;
     for (Index i = 0; i < scene.images.size(); ++i) {
         if (!scene.images[i].registered) unregistered[i] = 0;
@@ -214,9 +214,8 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                 ba.optimizer = config.local_ba;
                 ba.optimize_all_registered = false;
                 ba.free_image_ids = last_registered;
-                const auto anchors = build_local_window(scene, last_registered, config);
-                ba.free_image_ids.insert(
-                    ba.free_image_ids.end(), anchors.begin(), anchors.end());
+                ba.fixed_image_ids =
+                    build_local_window(scene, last_registered, config);
                 run_bundle_adjustment(scene, ba);
                 filter_tracks(
                     scene, config.max_reproj_error, config.min_angle_deg,

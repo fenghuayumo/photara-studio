@@ -8,6 +8,7 @@ namespace aetherscan::sfm {
 
 // Union-find track building from geometrically verified pair matches (openMVS BuildTracks).
 void build_tracks(Scene& scene, float min_pair_weight = 0.F);
+void rebuild_track_index(Scene& scene);
 
 // Filter triangulated tracks by reprojection / angle / depth bounds.
 // Returns {mean_reproj_px, mean_reproj_deg}.

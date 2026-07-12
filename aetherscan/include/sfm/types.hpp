@@ -119,7 +119,15 @@ struct PinholeCamera {
 
     [[nodiscard]] Vec2 project(const Vec3& camera_point) const {
         const double inv_z = 1.0 / camera_point.z();
-        return {fx * camera_point.x() * inv_z + cx, fy * camera_point.y() * inv_z + cy};
+        const double x = camera_point.x() * inv_z;
+        const double y = camera_point.y() * inv_z;
+        const double r2 = x * x + y * y;
+        const double radial = 1.0 + k1 * r2 + k2 * r2 * r2;
+        const double distorted_x =
+            x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
+        const double distorted_y =
+            y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
+        return {fx * distorted_x + cx, fy * distorted_y + cy};
     }
 
     [[nodiscard]] bool project_checked(const Vec3& camera_point, Vec2& pixel) const {

@@ -23,6 +23,13 @@ double number(const char* text) {
     return value;
 }
 
+bool boolean_flag(const char* text) {
+    const std::string input = text;
+    if (input == "1" || input == "true") return true;
+    if (input == "0" || input == "false") return false;
+    throw std::invalid_argument("Expected boolean flag 0/1: " + input);
+}
+
 std::string lower_extension(const std::filesystem::path& path) {
     std::string extension = path.extension().string();
     std::transform(
@@ -51,9 +58,9 @@ void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& 
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 5 || argc > 6) {
+        if (argc < 5 || argc > 9) {
             std::cout << "Usage: aetherscan images_dir focal_pixels incremental|hierarchical|global output.(mvs|ply) "
-                         "[neighbor_window]\n"
+                         "[neighbor_window] [match_ratio] [mutual_check] [sift_contrast]\n"
                          "  incremental: star initialization + PnP resection\n"
                          "  hierarchical: clustered incremental SfM + Sim(3) merge\n"
                          "  global: rotation averaging + global positioning + BA\n"
@@ -69,7 +76,13 @@ int main(int argc, char** argv) {
                 "Mode must be incremental, hierarchical, or global");
         const std::filesystem::path output_path = argv[4];
         const std::size_t window =
-            argc == 6 ? static_cast<std::size_t>(number(argv[5])) : 3;
+            argc >= 6 ? static_cast<std::size_t>(number(argv[5])) : 3;
+        const float match_ratio =
+            argc >= 7 ? static_cast<float>(number(argv[6])) : 0.85F;
+        if (match_ratio > 1.F)
+            throw std::invalid_argument("match_ratio must be in (0, 1]");
+        const bool mutual_check = argc >= 8 ? boolean_flag(argv[7]) : true;
+        const double sift_contrast = argc >= 9 ? number(argv[8]) : 0.005;
 
         std::vector<std::filesystem::path> files;
         for (const auto& entry : std::filesystem::directory_iterator(directory)) {
@@ -96,6 +109,9 @@ int main(int argc, char** argv) {
             config.mode = aetherscan::sfm::ReconstructionMode::incremental;
         config.frontend.focal_pixels = focal;
         config.frontend.neighbor_window = window;
+        config.frontend.sift_contrast_threshold = sift_contrast;
+        config.frontend.match_ratio = match_ratio;
+        config.frontend.mutual_check = mutual_check;
 
         const auto started = std::chrono::steady_clock::now();
         aetherscan::sfm::Scene scene;

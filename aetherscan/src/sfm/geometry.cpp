@@ -234,7 +234,20 @@ unsigned filter_matches(
 }
 
 #if defined(AETHERSCAN_HAS_POSELIB)
+bool has_distortion(const PinholeCamera& camera) {
+    return camera.k1 != 0.0 || camera.k2 != 0.0 ||
+           camera.p1 != 0.0 || camera.p2 != 0.0;
+}
+
 poselib::Camera to_poselib_camera(const PinholeCamera& camera) {
+    if (has_distortion(camera)) {
+        return poselib::Camera(
+            "OPENCV",
+            {camera.fx, camera.fy, camera.cx, camera.cy,
+             camera.k1, camera.k2, camera.p1, camera.p2},
+            static_cast<int>(camera.width),
+            static_cast<int>(camera.height));
+    }
     return poselib::Camera(
         "PINHOLE",
         {camera.fx, camera.fy, camera.cx, camera.cy},
@@ -255,6 +268,19 @@ void fill_poselib_points(
     }
 }
 
+void undistort_poselib_points(
+    const std::vector<Vec2>& pixels,
+    const PinholeCamera& camera,
+    std::vector<poselib::Point2D>& points) {
+    points.resize(pixels.size());
+    for (std::size_t i = 0; i < pixels.size(); ++i) {
+        const Vec3 ray = camera.unproject(pixels[i]);
+        points[i] = {
+            camera.fx * ray.x() / ray.z() + camera.cx,
+            camera.fy * ray.y() / ray.z() + camera.cy};
+    }
+}
+
 bool estimate_with_poselib(
     const std::vector<Vec2>& pixels1,
     const std::vector<Vec2>& pixels2,
@@ -264,6 +290,12 @@ bool estimate_with_poselib(
     RelativePoseResult& result) {
     std::vector<poselib::Point2D> pts1, pts2;
     fill_poselib_points(pixels1, pixels2, pts1, pts2);
+    std::vector<poselib::Point2D> pinhole_pts1 = pts1;
+    std::vector<poselib::Point2D> pinhole_pts2 = pts2;
+    if (has_distortion(camera1))
+        undistort_poselib_points(pixels1, camera1, pinhole_pts1);
+    if (has_distortion(camera2))
+        undistort_poselib_points(pixels2, camera2, pinhole_pts2);
 
     poselib::RansacOptions ransac;
     ransac.max_iterations = options.max_iterations;
@@ -288,7 +320,11 @@ bool estimate_with_poselib(
         std::abs(camera1.fx - camera2.fx) < 1e-6 &&
         std::abs(camera1.fy - camera2.fy) < 1e-6 &&
         std::abs(camera1.cx - camera2.cx) < 1e-6 &&
-        std::abs(camera1.cy - camera2.cy) < 1e-6;
+        std::abs(camera1.cy - camera2.cy) < 1e-6 &&
+        std::abs(camera1.k1 - camera2.k1) < 1e-12 &&
+        std::abs(camera1.k2 - camera2.k2) < 1e-12 &&
+        std::abs(camera1.p1 - camera2.p1) < 1e-12 &&
+        std::abs(camera1.p2 - camera2.p2) < 1e-12;
 
     const bool use_shared_focal =
         options.force_shared_focal ||
@@ -301,7 +337,7 @@ bool estimate_with_poselib(
         poselib::ImagePair image_pair;
         const poselib::Point2D pp(camera1.cx, camera1.cy);
         const poselib::RansacStats stats = poselib::estimate_shared_focal_relative_pose(
-            pts1, pts2, pp, ransac, bundle, &image_pair, &inliers);
+            pinhole_pts1, pinhole_pts2, pp, ransac, bundle, &image_pair, &inliers);
         if (stats.num_inliers < options.min_inliers) return false;
         pose.set_from_rt(image_pair.pose.R(), image_pair.pose.t);
         E = essential_from_pose(pose);
@@ -326,7 +362,8 @@ bool estimate_with_poselib(
     } else {
         // Uncalibrated: Fundamental matrix.
         const poselib::RansacStats stats =
-            poselib::estimate_fundamental(pts1, pts2, ransac, bundle, &F, &inliers);
+            poselib::estimate_fundamental(
+                pinhole_pts1, pinhole_pts2, ransac, bundle, &F, &inliers);
         if (stats.num_inliers < options.min_inliers) return false;
 
         if (options.decompose_fundamental &&
@@ -356,11 +393,14 @@ bool estimate_with_poselib(
 
     if (!have_pose) return false;
 
+    result.num_ransac_inliers =
+        static_cast<unsigned>(std::count(inliers.begin(), inliers.end(), char{1}));
     float mean_angle = 0.F;
     std::vector<Vec2> inlier_pixels;
     const unsigned filtered = filter_matches(
         pixels1, pixels2, camera1, camera2, pose, options, inliers, mean_angle,
         &inlier_pixels);
+    result.num_inliers = filtered;
     if (filtered < options.min_inliers) return false;
 
     result.success = true;
@@ -368,7 +408,6 @@ bool estimate_with_poselib(
     result.E = E;
     result.F = F;
     result.inlier_mask = std::move(inliers);
-    result.num_inliers = filtered;
     result.mean_ray_angle = mean_angle;
     result.weight_spatial =
         compute_spatial_weight(inlier_pixels, camera1.width, camera1.height);
@@ -379,7 +418,7 @@ bool estimate_with_poselib(
         poselib::RansacOptions h_ransac = ransac;
         h_ransac.max_reproj_error = options.max_reproj_error_px;
         const poselib::RansacStats h_stats = poselib::estimate_homography(
-            pts1, pts2, h_ransac, bundle, &H, &h_inliers);
+            pinhole_pts1, pinhole_pts2, h_ransac, bundle, &H, &h_inliers);
         // Count H inliers among geometric (E/F filtered) inliers only.
         unsigned h_among_e = 0;
         for (std::size_t i = 0; i < result.inlier_mask.size(); ++i) {
@@ -618,11 +657,14 @@ RelativePoseResult estimate_relative_pose(
             best_E, x1, x2, best_mask, min_cos, options.min_inliers, pose, refined))
         return result;
 
+    result.num_ransac_inliers =
+        static_cast<unsigned>(std::count(refined.begin(), refined.end(), char{1}));
     float mean_angle = 0.F;
     std::vector<Vec2> inlier_pixels;
     const unsigned filtered = filter_matches(
         pixels1, pixels2, camera1, camera2, pose, options, refined, mean_angle,
         &inlier_pixels);
+    result.num_inliers = filtered;
     if (filtered < options.min_inliers) return result;
 
     result.success = true;
@@ -630,7 +672,6 @@ RelativePoseResult estimate_relative_pose(
     result.E = essential_from_pose(pose);
     result.F = camera2.K().transpose().inverse() * result.E * camera1.K().inverse();
     result.inlier_mask = std::move(refined);
-    result.num_inliers = filtered;
     result.mean_ray_angle = mean_angle;
     result.weight_spatial =
         compute_spatial_weight(inlier_pixels, camera1.width, camera1.height);

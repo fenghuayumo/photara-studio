@@ -9,6 +9,7 @@ void Scene::clear() {
     images.clear();
     pairs.clear();
     tracks.clear();
+    image_tracks.clear();
 }
 
 ImagePair* Scene::find_pair(Index a, Index b) {
@@ -49,6 +50,7 @@ bool Scene::invalidate_image(const Index image_id) {
             std::min<std::size_t>(track.num_inliers, obs.size()));
         if (track.num_inliers < 2) track.num_inliers = 0;
     }
+    image_tracks.clear();
     return true;
 }
 

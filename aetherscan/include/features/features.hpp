@@ -18,12 +18,18 @@ namespace aetherscan::features {
 // ---- VLFeat CPU SIFT ------------------------------------------------------------
 
 struct SiftOptions {
-    std::size_t maximum_features{8192};
+    std::size_t maximum_features{27000};
     std::size_t octave_layers{3};
+    int first_octave{-1};  // Match OpenCV SIFT's doubled-image first octave.
     // VLFeat peak = 255 * contrast / octave_layers (openMVG mapping).
-    double contrast_threshold{0.01};
+    double contrast_threshold{0.005};
     double edge_threshold{10.0};
     double sigma{1.6};
+    std::size_t grid_size{3};
+    std::size_t min_features_per_cell{500};
+    std::size_t max_features_per_cell{3000};
+    std::size_t cell_border{64};
+    unsigned adaptive_retries{5};
     bool root_sift{true};
 };
 
@@ -137,6 +143,11 @@ private:
 struct DescriptorMatcherOptions {
     float ratio_threshold{0.8F};
     bool mutual_check{true};
+    bool approximate{true};
+    std::size_t ann_min_features{512};
+    std::size_t ann_m{16};
+    std::size_t ann_ef_construction{100};
+    std::size_t ann_ef_search{64};
     // When true, large single-pair matches may use OpenMP. Automatically disabled
     // while an outer AetherScan task pool is already saturating the machine.
     bool parallel{true};
@@ -148,13 +159,20 @@ public:
 
     [[nodiscard]] std::string_view name() const override { return "mutual_ratio"; }
     [[nodiscard]] std::unique_ptr<FeatureMatcher> clone() const override;
+    void prepare(const FeatureSet& features) override;
     [[nodiscard]] MatchSet match(
         const FeatureSet& query, const FeatureSet& train) const override;
 
     [[nodiscard]] const DescriptorMatcherOptions& options() const { return options_; }
 
 private:
+    class SharedState;
+    MutualRatioMatcher(
+        DescriptorMatcherOptions options,
+        std::shared_ptr<SharedState> shared);
+
     DescriptorMatcherOptions options_;
+    std::shared_ptr<SharedState> shared_;
 };
 
 // Backward-compatible free function → MutualRatioMatcher.

@@ -41,6 +41,18 @@ PinholeCamera make_camera(const double focal = 800.0) {
 }  // namespace
 
 int main() {
+    PinholeCamera distorted = make_camera();
+    distorted.k1 = 0.08;
+    distorted.k2 = -0.03;
+    distorted.p1 = 0.001;
+    distorted.p2 = -0.002;
+    const Vec3 distorted_ray(0.45, -0.2, 2.0);
+    const Vec2 distorted_pixel = distorted.project(distorted_ray);
+    expect(
+        (distorted.unproject_normalized(distorted_pixel) -
+         distorted_ray.normalized()).norm() < 1e-7,
+        "distorted project/unproject should be consistent");
+
     // Synthetic two-view relative pose
     const PinholeCamera cam = make_camera();
     Pose3D pose2;
@@ -72,6 +84,30 @@ int main() {
     expect(result.pose.C.norm() > 0.1, "baseline should be non-trivial");
     // Synthetic scene has strong parallax — should not be flagged planar.
     expect(!result.degenerate_planar, "parallax scene should not be H-degenerate");
+
+    std::vector<Vec2> distorted_pixels1, distorted_pixels2;
+    for (int i = 0; i < 120; ++i) {
+        const Vec3 X(xy(rng), xy(rng), z(rng));
+        distorted_pixels1.push_back(distorted.project(X));
+        distorted_pixels2.push_back(
+            distorted.project(pose2.transform_world_to_camera(X)));
+    }
+    const auto distorted_result = aetherscan::sfm::estimate_relative_pose(
+        distorted_pixels1, distorted_pixels2, distorted, distorted, options);
+    expect(
+        distorted_result.success && distorted_result.num_inliers > 80,
+        "distortion-aware relative pose should succeed");
+    auto fundamental_options = options;
+    fundamental_options.force_fundamental = true;
+    fundamental_options.decompose_fundamental = true;
+    const auto distorted_fundamental =
+        aetherscan::sfm::estimate_relative_pose(
+            distorted_pixels1, distorted_pixels2, distorted, distorted,
+            fundamental_options);
+    expect(
+        distorted_fundamental.success &&
+            distorted_fundamental.num_inliers > 80,
+        "distortion-aware fundamental estimation should succeed");
 
     // Absolute pose
     std::vector<Vec3> bearings, points;

@@ -1,5 +1,6 @@
 #include "sfm/hierarchical.hpp"
 
+#include "parallel/thread_pool.hpp"
 #include "sfm/bundle.hpp"
 #include "sfm/reconstruct.hpp"
 #include "sfm/tracks.hpp"
@@ -9,7 +10,6 @@
 #include <Eigen/SVD>
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -935,6 +935,7 @@ void merge_tracks(
     }
 
     parent.tracks.clear();
+    parent.image_tracks.clear();
     parent.tracks.reserve(groups.size());
     for (auto& [root, observations] : groups) {
         if (observations.size() < 2) continue;
@@ -956,6 +957,7 @@ void merge_tracks(
         }
         parent.tracks.push_back(std::move(track));
     }
+    rebuild_track_index(parent);
 }
 
 ReconstructionSummary summarize(const Scene& scene) {
@@ -1150,14 +1152,18 @@ ReconstructionSummary run_hierarchical_mapping(
         : scene.thread_count;
     const unsigned worker_count = std::min<unsigned>(
         available_threads, static_cast<unsigned>(subscenes.size()));
-    std::atomic<std::size_t> next{0};
+    const unsigned threads_per_subscene =
+        std::max(1U, available_threads / std::max(1U, worker_count));
+    for (HierarchicalSubscene& subscene : subscenes)
+        subscene.scene.thread_count = threads_per_subscene;
     std::vector<bool> succeeded(subscenes.size(), false);
     std::mutex result_mutex;
-    auto worker = [&]() {
-        while (true) {
-            const std::size_t index = next.fetch_add(1);
-            if (index >= subscenes.size()) break;
+    parallel::parallel_for(
+        subscenes.size(), worker_count,
+        [&](const std::size_t index) {
             Scene& subscene = subscenes[index].scene;
+            const parallel::ScopedOpenMpThreads openmp_budget(
+                subscene.thread_count);
             build_tracks(subscene, config.cluster.min_pair_weight);
             bool success = star_initialize(subscene, config.star);
             if (success) {
@@ -1174,12 +1180,7 @@ ReconstructionSummary run_hierarchical_mapping(
             }
             std::scoped_lock lock(result_mutex);
             succeeded[index] = success;
-        }
-    };
-    std::vector<std::jthread> workers;
-    workers.reserve(worker_count);
-    for (unsigned i = 0; i < worker_count; ++i) workers.emplace_back(worker);
-    workers.clear();
+        });
 
     std::vector<HierarchicalSubscene> reconstructed;
     reconstructed.reserve(subscenes.size());

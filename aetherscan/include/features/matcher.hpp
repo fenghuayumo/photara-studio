@@ -16,6 +16,8 @@ public:
 
     [[nodiscard]] virtual std::string_view name() const = 0;
     [[nodiscard]] virtual std::unique_ptr<FeatureMatcher> clone() const = 0;
+    // Build reusable per-image search data before pair tasks start.
+    virtual void prepare(const FeatureSet&) {}
     [[nodiscard]] virtual MatchSet match(
         const FeatureSet& query, const FeatureSet& train) const = 0;
 };

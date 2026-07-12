@@ -66,6 +66,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
     find_package(Eigen3 CONFIG REQUIRED)
     find_package(PoseLib CONFIG REQUIRED)
     find_package(Ceres CONFIG REQUIRED)
+    find_package(hnswlib CONFIG REQUIRED)
 
     set(AETHERSCAN_VLFEAT_SOURCES
         third_party/vlfeat/vl/generic.c
@@ -112,6 +113,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
     target_link_libraries(aetherscan_features PUBLIC
         freeimage::FreeImage
         Eigen3::Eigen
+        hnswlib::hnswlib
         aetherscan_vlfeat)
     target_compile_definitions(aetherscan_features PUBLIC AETHERSCAN_HAS_FREEIMAGE=1)
     if(OpenMP_CXX_FOUND)
@@ -157,6 +159,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
 
     add_library(aetherscan_sfm
         src/sfm/scene.cpp
+        src/sfm/retrieval.cpp
         src/sfm/geometry.cpp
         src/sfm/triangulation.cpp
         src/sfm/tracks.cpp
@@ -232,6 +235,9 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
     add_executable(aetherscan_ba_test tests/ba_optimizer_test.cpp)
     target_link_libraries(aetherscan_ba_test PRIVATE AetherScan::BA)
     add_test(NAME aetherscan.ba.optimizer COMMAND aetherscan_ba_test)
+    add_executable(aetherscan_thread_pool_test tests/thread_pool_test.cpp)
+    target_link_libraries(aetherscan_thread_pool_test PRIVATE AetherScan::BA)
+    add_test(NAME aetherscan.parallel.thread_pool COMMAND aetherscan_thread_pool_test)
     if(TARGET aetherscan_features)
         add_executable(aetherscan_features_test tests/features_test.cpp)
         target_link_libraries(aetherscan_features_test PRIVATE AetherScan::Features)
