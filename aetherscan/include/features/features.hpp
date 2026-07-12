@@ -61,10 +61,12 @@ private:
 
 struct SiftGpuOptions {
     std::size_t maximum_features{8192};
-    std::uint32_t maximum_image_dimension{8192};
+    std::uint32_t maximum_image_dimension{5120};
     float peak_threshold{0.005F};
     float edge_threshold{20.0F};
     std::uint32_t maximum_orientations{2};
+    int first_octave{-1};
+    std::uint32_t octave_layers{3};
     int device_index{0};
     bool root_sift{true};
 };
@@ -96,6 +98,40 @@ public:
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+struct SiftGpuMatcherOptions {
+    float ratio_threshold{0.8F};
+    bool mutual_check{true};
+    std::size_t maximum_features{32768};
+    int device_index{0};
+};
+
+// SiftMatchGPU CUDA matcher. The underlying context is thread-affine, so
+// callers must submit pairs from the thread that constructs this matcher.
+class SiftGpuMatcher final : public FeatureMatcher {
+public:
+    explicit SiftGpuMatcher(SiftGpuMatcherOptions options = {});
+    ~SiftGpuMatcher() override;
+    SiftGpuMatcher(SiftGpuMatcher&&) noexcept;
+    SiftGpuMatcher& operator=(SiftGpuMatcher&&) noexcept;
+    SiftGpuMatcher(const SiftGpuMatcher&) = delete;
+    SiftGpuMatcher& operator=(const SiftGpuMatcher&) = delete;
+
+    [[nodiscard]] static bool is_built() noexcept;
+    [[nodiscard]] bool is_available() const noexcept;
+    [[nodiscard]] std::string_view name() const override {
+        return "siftgpu";
+    }
+    [[nodiscard]] bool requires_owner_thread() const override { return true; }
+    [[nodiscard]] std::unique_ptr<FeatureMatcher> clone() const override;
+    [[nodiscard]] MatchSet match(
+        const FeatureSet& query, const FeatureSet& train) const override;
+
+private:
+    class Impl;
+    explicit SiftGpuMatcher(std::shared_ptr<Impl> impl);
+    std::shared_ptr<Impl> impl_;
 };
 
 // ---- SuperPoint (extension point; ONNX wiring comes later) ----------------------

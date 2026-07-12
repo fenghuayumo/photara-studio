@@ -16,6 +16,9 @@ public:
 
     [[nodiscard]] virtual std::string_view name() const = 0;
     [[nodiscard]] virtual std::unique_ptr<FeatureMatcher> clone() const = 0;
+    // True when the backend must be used and destroyed on its construction
+    // thread (for example an OpenGL/CUDA context).
+    [[nodiscard]] virtual bool requires_owner_thread() const { return false; }
     // Build reusable per-image search data before pair tasks start.
     virtual void prepare(const FeatureSet&) {}
     // Drop prepared ANN / index state after matching to release peak memory.

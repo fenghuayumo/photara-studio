@@ -1,9 +1,14 @@
 #include "features/features.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cmath>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -16,17 +21,22 @@ namespace aetherscan::features {
 
 class SiftGpuExtractor::Impl {
 public:
-    explicit Impl(SiftGpuOptions value) : options(value) {
+    explicit Impl(SiftGpuOptions value)
+        : options(value), owner_thread(std::this_thread::get_id()) {
         if (options.maximum_features == 0 || options.maximum_image_dimension == 0 ||
-            options.maximum_orientations == 0)
+            options.maximum_orientations == 0 || options.octave_layers == 0)
             throw std::invalid_argument("Invalid SiftGPU limits");
 #if defined(AETHERSCAN_HAS_SIFTGPU)
+        const unsigned octave_factor =
+            1U << static_cast<unsigned>(std::max(0, -options.first_octave));
         std::vector<std::string> arguments{
             "-cuda", std::to_string(options.device_index), "-maxd",
-            std::to_string(options.maximum_image_dimension), "-t",
+            std::to_string(options.maximum_image_dimension * octave_factor), "-t",
             std::to_string(options.peak_threshold), "-e", std::to_string(options.edge_threshold),
             "-mo", std::to_string(options.maximum_orientations), "-tc2",
-            std::to_string(options.maximum_features), "-v", "0"};
+            std::to_string(options.maximum_features), "-fo",
+            std::to_string(options.first_octave), "-d",
+            std::to_string(options.octave_layers), "-v", "0"};
         std::vector<const char*> argv;
         argv.reserve(arguments.size());
         for (const auto& argument : arguments) argv.push_back(argument.c_str());
@@ -36,6 +46,7 @@ public:
     }
     SiftGpuOptions options;
     bool available{false};
+    std::thread::id owner_thread;
 #if defined(AETHERSCAN_HAS_SIFTGPU)
     SiftGPU gpu;
 #endif
@@ -59,6 +70,7 @@ bool SiftGpuExtractor::is_available() const noexcept { return impl_->available; 
 ExtractorInfo SiftGpuExtractor::info() const {
     ExtractorInfo value;
     value.thread_safe = false;
+    value.thread_affine = true;
     value.accepts_gray = true;
     value.accepts_rgb = false;
     value.metric =
@@ -76,6 +88,9 @@ FeatureSet SiftGpuExtractor::extract_gray(
     const std::uint32_t height, std::size_t row_stride) const {
     if (!impl_->available)
         throw std::runtime_error("SiftGPU is not built or its CUDA/OpenGL context is unavailable");
+    if (std::this_thread::get_id() != impl_->owner_thread)
+        throw std::runtime_error(
+            "SiftGPU extractor must run on its CUDA context owner thread");
     if (row_stride == 0) row_stride = width;
     if (width == 0 || height == 0 || row_stride < width ||
         pixels.size() < row_stride * static_cast<std::size_t>(height))
@@ -133,12 +148,149 @@ FeatureSet SiftGpuExtractor::extract_gray(
 #endif
 }
 
+class SiftGpuMatcher::Impl {
+public:
+    explicit Impl(SiftGpuMatcherOptions value)
+        : options(value), owner_thread(std::this_thread::get_id()) {
+        if (!(options.ratio_threshold > 0.F &&
+              options.ratio_threshold <= 1.F) ||
+            options.maximum_features < 2)
+            throw std::invalid_argument("Invalid SiftGPU matcher options");
+#if defined(AETHERSCAN_HAS_SIFTGPU)
+        (void)options.device_index;
+        gpu.reset(CreateNewSiftMatchGPU(
+            static_cast<int>(options.maximum_features)));
+        if (!gpu) return;
+        gpu->SetLanguage(SiftMatchGPU::SIFTMATCH_CUDA);
+        std::array<std::string, 2> device_arguments{
+            "-cuda", std::to_string(options.device_index)};
+        std::array<char*, 2> device_argv{
+            device_arguments[0].data(), device_arguments[1].data()};
+        gpu->SetDeviceParam(
+            static_cast<int>(device_argv.size()), device_argv.data());
+        if (!gpu->CreateContextGL()) {
+            gpu.reset();
+            return;
+        }
+        if (!gpu->Allocate(
+                static_cast<int>(options.maximum_features),
+                options.mutual_check ? 1 : 0)) {
+            gpu.reset();
+            return;
+        }
+        available = true;
+#endif
+    }
+
+    SiftGpuMatcherOptions options;
+    bool available{false};
+    std::thread::id owner_thread;
+    mutable std::mutex mutex;
+#if defined(AETHERSCAN_HAS_SIFTGPU)
+    std::unique_ptr<SiftMatchGPU> gpu;
+#endif
+};
+
+SiftGpuMatcher::SiftGpuMatcher(SiftGpuMatcherOptions options)
+    : impl_(std::make_shared<Impl>(options)) {}
+SiftGpuMatcher::SiftGpuMatcher(std::shared_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+SiftGpuMatcher::~SiftGpuMatcher() = default;
+SiftGpuMatcher::SiftGpuMatcher(SiftGpuMatcher&&) noexcept = default;
+SiftGpuMatcher& SiftGpuMatcher::operator=(SiftGpuMatcher&&) noexcept = default;
+
+bool SiftGpuMatcher::is_built() noexcept {
+#if defined(AETHERSCAN_HAS_SIFTGPU)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool SiftGpuMatcher::is_available() const noexcept {
+    return impl_->available;
+}
+
+std::unique_ptr<FeatureMatcher> SiftGpuMatcher::clone() const {
+    return std::unique_ptr<FeatureMatcher>(new SiftGpuMatcher(impl_));
+}
+
+MatchSet SiftGpuMatcher::match(
+    const FeatureSet& query, const FeatureSet& train) const {
+    if (!impl_->available)
+        throw std::runtime_error(
+            "SiftGPU matcher is not built or its CUDA context is unavailable");
+    if (std::this_thread::get_id() != impl_->owner_thread)
+        throw std::runtime_error(
+            "SiftGPU matcher must run on its CUDA context owner thread");
+    auto& mutable_query = const_cast<FeatureSet&>(query);
+    auto& mutable_train = const_cast<FeatureSet&>(train);
+    mutable_query.validate();
+    mutable_train.validate();
+    if (query.descriptor_dimension != 128 ||
+        train.descriptor_dimension != 128)
+        throw std::invalid_argument(
+            "SiftGPU matcher requires 128-dimensional descriptors");
+    if (query.keypoints.empty() || train.keypoints.empty()) return {};
+    if (query.keypoints.size() > impl_->options.maximum_features ||
+        train.keypoints.size() > impl_->options.maximum_features)
+        throw std::invalid_argument(
+            "SiftGPU matcher feature count exceeds configured maximum");
+    const auto query_rows = mutable_query.descriptor_rows_float();
+    const auto train_rows = mutable_train.descriptor_rows_float();
+    if (query_rows.empty() || train_rows.empty()) return {};
+
+#if defined(AETHERSCAN_HAS_SIFTGPU)
+    std::lock_guard lock(impl_->mutex);
+    impl_->gpu->SetDescriptors(
+        0, static_cast<int>(query.keypoints.size()), query_rows.data());
+    impl_->gpu->SetDescriptors(
+        1, static_cast<int>(train.keypoints.size()), train_rows.data());
+    const int maximum_matches = static_cast<int>(
+        impl_->options.mutual_check
+            ? std::min(query.keypoints.size(), train.keypoints.size())
+            : query.keypoints.size());
+    std::vector<std::array<std::uint32_t, 2>> pairs(
+        static_cast<std::size_t>(maximum_matches));
+    const int match_count = impl_->gpu->GetSiftMatch(
+        maximum_matches,
+        reinterpret_cast<std::uint32_t (*)[2]>(pairs.data()),
+        0.7F,
+        impl_->options.ratio_threshold,
+        impl_->options.mutual_check ? 1 : 0);
+    MatchSet result;
+    if (match_count < 0)
+        throw std::runtime_error("SiftGPU matching failed");
+    if (match_count == 0) return result;
+    result.matches.reserve(static_cast<std::size_t>(match_count));
+    for (int i = 0; i < match_count; ++i) {
+        const auto [query_index, train_index] =
+            pairs[static_cast<std::size_t>(i)];
+        if (query_index >= query.keypoints.size() ||
+            train_index >= train.keypoints.size())
+            continue;
+        result.matches.push_back(
+            {query_index, train_index, 1.F});
+    }
+    return result;
+#else
+    return {};
+#endif
+}
+
 void register_siftgpu_feature_backends() {
     register_extractor("siftgpu", [] {
         auto extractor = std::make_unique<SiftGpuExtractor>();
         if (!extractor->is_available())
             throw std::runtime_error("SiftGPU backend is not available on this machine");
         return std::unique_ptr<FeatureExtractor>(std::move(extractor));
+    });
+    register_matcher("siftgpu", [] {
+        auto matcher = std::make_unique<SiftGpuMatcher>();
+        if (!matcher->is_available())
+            throw std::runtime_error(
+                "SiftGPU matcher backend is not available on this machine");
+        return std::unique_ptr<FeatureMatcher>(std::move(matcher));
     });
 }
 

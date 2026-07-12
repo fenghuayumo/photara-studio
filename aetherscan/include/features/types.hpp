@@ -134,6 +134,7 @@ struct ImagePairFeatures {
 
 struct ExtractorInfo {
     bool thread_safe{false};   // false → clone one instance per worker thread
+    bool thread_affine{false}; // true → construct/use/destroy on one thread
     bool accepts_rgb{false};   // true if extract_rgb is meaningful
     bool accepts_gray{true};
     DescriptorMetric metric{DescriptorMetric::l2_root};

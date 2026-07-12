@@ -336,8 +336,23 @@ std::span<const float> FeatureSet::descriptor_rows_float() {
     const std::size_t expected = keypoints.size() * descriptor_dimension;
     if (descriptors.size() != expected) {
         descriptors.resize(expected);
-        for (std::size_t i = 0; i < expected; ++i)
-            descriptors[i] = static_cast<float>(descriptors_u8[i]) / 255.F;
+        for (std::size_t row = 0; row < keypoints.size(); ++row) {
+            float* descriptor =
+                descriptors.data() + row * descriptor_dimension;
+            double squared_norm = 0.0;
+            for (std::size_t column = 0; column < descriptor_dimension;
+                 ++column) {
+                const float value = static_cast<float>(
+                    descriptors_u8[row * descriptor_dimension + column]);
+                descriptor[column] = value;
+                squared_norm += static_cast<double>(value) * value;
+            }
+            const float inverse_norm = static_cast<float>(
+                1.0 / std::sqrt(std::max(squared_norm, 1e-24)));
+            for (std::size_t column = 0; column < descriptor_dimension;
+                 ++column)
+                descriptor[column] *= inverse_norm;
+        }
         mark_descriptors_modified();
     }
     return descriptors;

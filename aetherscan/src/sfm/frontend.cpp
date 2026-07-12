@@ -229,10 +229,16 @@ FrontEndResult run_frontend(
     if (image_paths.size() < 2) return result;
     core::StageScope frontend_stage("sfm.frontend");
 
+    FrontEndOptions runtime_options = options;
+    if (runtime_options.retrieval.vocabulary_path.empty() &&
+        !runtime_options.checkpoint.directory.empty()) {
+        runtime_options.retrieval.vocabulary_path =
+            runtime_options.checkpoint.directory / "vocabulary-v1.bin";
+    }
     const ImageSetFingerprint image_fingerprint =
         fingerprint_image_set(image_paths);
     const FrontEndStageKeys stage_keys =
-        make_stage_keys(options, image_fingerprint);
+        make_stage_keys(runtime_options, image_fingerprint);
     result.tracks_checkpoint_key = stage_keys.tracks;
     CheckpointStore checkpoints(options.checkpoint);
     Scene& scene = result.scene;
@@ -276,6 +282,18 @@ FrontEndResult run_frontend(
                            sift_options.max_features_per_cell);
         }
         extractor = std::make_unique<features::SiftExtractor>(sift_options);
+    } else if (options.extractor == "siftgpu") {
+        features::SiftGpuOptions siftgpu_options;
+        siftgpu_options.peak_threshold =
+            static_cast<float>(options.sift_contrast_threshold);
+        if (options.max_features > 0)
+            siftgpu_options.maximum_features = options.max_features;
+        extractor =
+            std::make_unique<features::SiftGpuExtractor>(siftgpu_options);
+        if (!static_cast<features::SiftGpuExtractor*>(extractor.get())
+                 ->is_available())
+            throw std::runtime_error(
+                "SiftGPU extractor requested but CUDA context is unavailable");
     } else {
         extractor = features::create_extractor(options.extractor);
     }
@@ -285,6 +303,18 @@ FrontEndResult run_frontend(
         matcher_options.ratio_threshold = options.match_ratio;
         matcher_options.mutual_check = options.mutual_check;
         matcher = std::make_unique<features::MutualRatioMatcher>(matcher_options);
+    } else if (options.matcher == "siftgpu") {
+        features::SiftGpuMatcherOptions matcher_options;
+        matcher_options.ratio_threshold = options.match_ratio;
+        matcher_options.mutual_check = options.mutual_check;
+        matcher_options.maximum_features =
+            std::max<std::size_t>(32768, options.max_features);
+        matcher =
+            std::make_unique<features::SiftGpuMatcher>(matcher_options);
+        if (!static_cast<features::SiftGpuMatcher*>(matcher.get())
+                 ->is_available())
+            throw std::runtime_error(
+                "SiftGPU matcher requested but CUDA context is unavailable");
     } else {
         matcher = features::create_matcher(options.matcher);
     }
@@ -300,13 +330,19 @@ FrontEndResult run_frontend(
         core::ProgressReporter progress("extract features", image_paths.size());
         scene.images.resize(image_paths.size());
         scene.cameras.reserve(image_paths.size());
-        std::vector<std::unique_ptr<features::FeatureExtractor>> workers(threads);
-        for (unsigned t = 0; t < threads; ++t) {
-            workers[t] =
-                extractor->info().thread_safe ? nullptr : extractor->clone();
+        // SiftGPU owns one thread-affine CUDA/OpenGL context. A single context
+        // already saturates the GPU and avoids constructing one context per CPU
+        // worker.
+        const unsigned extraction_threads =
+            extractor->info().thread_affine ? 1U : threads;
+        std::vector<std::unique_ptr<features::FeatureExtractor>> workers(
+            extraction_threads);
+        if (extraction_threads > 1 && !extractor->info().thread_safe) {
+            for (unsigned t = 0; t < extraction_threads; ++t)
+                workers[t] = extractor->clone();
         }
         parallel::parallel_for(
-            image_paths.size(), threads,
+            image_paths.size(), extraction_threads,
             [&](const std::size_t i, const unsigned tid) {
         features::FeatureExtractor* local =
             workers[tid] ? workers[tid].get() : extractor.get();
@@ -359,13 +395,6 @@ FrontEndResult run_frontend(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - extract_started)
             .count();
 
-    FrontEndOptions runtime_options = options;
-    if (runtime_options.retrieval.vocabulary_path.empty() &&
-        !runtime_options.checkpoint.directory.empty()) {
-        runtime_options.retrieval.vocabulary_path =
-            runtime_options.checkpoint.directory / "vocabulary-v1.bin";
-    }
-
     const auto match_started = std::chrono::steady_clock::now();
     const auto candidates = build_pair_candidates(scene, runtime_options);
     if (runtime_options.compress_descriptors_u8) compress_descriptors(scene);
@@ -399,9 +428,13 @@ FrontEndResult run_frontend(
     }
     if (!match_cache_hit) {
         raw_pairs.resize(candidates.size());
+        // SiftMatchGPU contexts are thread-affine. Submit all GPU pairs from
+        // this thread; each pair is massively parallel on the device.
+        const unsigned match_threads =
+            matcher->requires_owner_thread() ? 1U : threads;
         std::vector<std::unique_ptr<features::FeatureMatcher>> match_workers(
-            threads);
-        for (unsigned t = 0; t < threads; ++t)
+            match_threads);
+        for (unsigned t = 0; t < match_threads; ++t)
             match_workers[t] = matcher->clone();
         auto* ratio_matcher =
             dynamic_cast<features::MutualRatioMatcher*>(match_workers.front().get());
@@ -424,7 +457,7 @@ FrontEndResult run_frontend(
         core::ProgressReporter prepare_progress(
             "prepare descriptor indices", prepare_ids.size());
         parallel::parallel_for(
-            prepare_ids.size(), threads,
+            prepare_ids.size(), match_threads,
             [&](const std::size_t index, const unsigned tid) {
                 match_workers[tid]->prepare(
                     scene.images[prepare_ids[index]].features);
@@ -434,7 +467,7 @@ FrontEndResult run_frontend(
         core::ProgressReporter match_progress(
             "match image pairs", candidates.size());
         parallel::parallel_for(
-            candidates.size(), threads,
+            candidates.size(), match_threads,
             [&](const std::size_t ci, const unsigned tid) {
                 const PairCandidate candidate = candidates[ci];
                 RawPairMatches& cached = raw_pairs[ci];

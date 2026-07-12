@@ -116,9 +116,10 @@ int wmain(int argc, wchar_t** argv) {
 int main(int argc, char** argv) {
 #endif
     try {
-        if (argc < 5 || argc > 10) {
+        if (argc < 5 || argc > 13) {
             std::cout << "Usage: aetherscan images_dir focal_pixels incremental|hierarchical|global output.(mvs|ply) "
-                         "[neighbor_window] [match_ratio] [mutual_check] [sift_contrast] [cache_dir|-]\n"
+                         "[neighbor_window] [match_ratio] [mutual_check] [sift_contrast] [cache_dir|-] "
+                         "[sift|siftgpu] [mutual_ratio|siftgpu] [max_features]\n"
                          "  incremental: star initialization + PnP resection\n"
                          "  hierarchical: clustered incremental SfM + Sim(3) merge\n"
                          "  global: rotation averaging + global positioning + BA\n"
@@ -155,6 +156,14 @@ int main(int argc, char** argv) {
                        ? std::filesystem::path{}
                        : argument_path(argv[9]))
                  : directory / ".aetherscan-cache";
+        const std::string extractor =
+            argc >= 11 ? argument_text(argv[10]) : "sift";
+        const std::string matcher =
+            argc >= 12 ? argument_text(argv[11]) : "mutual_ratio";
+        const unsigned max_features =
+            argc >= 13
+                ? static_cast<unsigned>(number(argument_text(argv[12])))
+                : 27000U;
 
         const char* configured_level = std::getenv("AETHERSCAN_LOG_LEVEL");
         const auto console_level = configured_level
@@ -199,6 +208,9 @@ int main(int argc, char** argv) {
         config.frontend.sift_contrast_threshold = sift_contrast;
         config.frontend.match_ratio = match_ratio;
         config.frontend.mutual_check = mutual_check;
+        config.frontend.extractor = extractor;
+        config.frontend.matcher = matcher;
+        config.frontend.max_features = max_features;
         // Sequential window + BoW retrieval (learned vocabulary).
         config.frontend.augment_sequential_with_retrieval = true;
         config.frontend.checkpoint.directory = cache_directory;

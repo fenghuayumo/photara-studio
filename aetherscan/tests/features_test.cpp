@@ -47,5 +47,27 @@ int main() {
             match.train >= resized_train.keypoints.size())
             return 3;
     }
+    if (aetherscan::features::SiftGpuExtractor::is_built()) {
+        aetherscan::features::SiftGpuOptions gpu_options;
+        gpu_options.maximum_features = 3000;
+        aetherscan::features::SiftGpuExtractor gpu_extractor(gpu_options);
+        aetherscan::features::SiftGpuMatcher gpu_matcher;
+        if (gpu_extractor.is_available() && gpu_matcher.is_available()) {
+            const auto gpu_features0 =
+                gpu_extractor.extract_gray(first, width, height);
+            const auto gpu_features1 =
+                gpu_extractor.extract_gray(second, width, height);
+            const auto gpu_matches =
+                gpu_matcher.match(gpu_features0, gpu_features1);
+            std::cout << " gpu_features=" << gpu_features0.keypoints.size()
+                      << "," << gpu_features1.keypoints.size()
+                      << " gpu_matches=" << gpu_matches.matches.size()
+                      << '\n';
+            if (gpu_features0.keypoints.size() < 150 ||
+                gpu_features1.keypoints.size() < 150 ||
+                gpu_matches.matches.size() < 80)
+                return 4;
+        }
+    }
     return 0;
 }
