@@ -20,8 +20,12 @@ struct GlobalPositioningOptions {
     unsigned tracks_per_registered_image{20};
     unsigned max_tracks_for_positioning{20000};
     unsigned coverage_grid_size{4};
-    // Reserved for a future robust reweighting pass around Ceres positioning.
     unsigned max_irls_iterations{8};
+    unsigned irls_inner_iterations{8};
+    double irls_tuning_constant{4.685};
+    double irls_min_weight{1e-3};
+    unsigned irls_quarantine_after{2};
+    double irls_weight_convergence{1e-2};
     unsigned max_num_iterations{100};
     // Hard wall-clock budget per Ceres attempt (seconds). 0 disables.
     double max_solver_time_sec{45.0};
@@ -48,7 +52,12 @@ struct GlobalPositioningSummary {
     unsigned positioned_tracks{0};
     unsigned observations{0};
     unsigned iterations{0};
+    unsigned irls_iterations{0};
+    unsigned downweighted_constraints{0};
+    unsigned quarantined_constraints{0};
     double final_residual{0.0};
+    double median_residual{0.0};
+    double p90_residual{0.0};
 };
 
 // Fixed-rotation global positioning. Jointly solves camera centers, 3D points,

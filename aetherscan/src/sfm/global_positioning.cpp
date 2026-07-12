@@ -4,6 +4,7 @@
 #include <ceres/ceres.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -123,6 +124,43 @@ struct BaselineLengthCostAnalytic : ceres::SizedCostFunction<1, 3, 3> {
     double baseline;
 };
 
+class AdaptiveHuberLoss final : public ceres::LossFunction {
+public:
+    AdaptiveHuberLoss(double threshold, double base_weight)
+        : huber_(threshold), base_weight_(base_weight) {}
+
+    void Evaluate(double squared_norm, double out[3]) const override {
+        huber_.Evaluate(squared_norm, out);
+        const double scale = base_weight_ * robust_weight_;
+        out[0] *= scale;
+        out[1] *= scale;
+        out[2] *= scale;
+    }
+
+    void set_robust_weight(double weight) {
+        robust_weight_ = std::clamp(weight, 0.0, 1.0);
+    }
+    [[nodiscard]] double robust_weight() const { return robust_weight_; }
+
+private:
+    ceres::HuberLoss huber_;
+    double base_weight_{1.0};
+    double robust_weight_{1.0};
+};
+
+enum class PositioningResidualType : std::uint8_t {
+    camera_camera,
+    camera_point,
+};
+
+struct PositioningResidual {
+    ceres::ResidualBlockId id{nullptr};
+    AdaptiveHuberLoss* loss{nullptr};
+    PositioningResidualType type{PositioningResidualType::camera_point};
+    unsigned outlier_streak{0};
+    bool quarantined{false};
+};
+
 Vec3 random_point(
     std::mt19937& generator,
     std::uniform_real_distribution<double>& distribution) {
@@ -157,9 +195,8 @@ struct PositioningAttempt {
 
 struct BuiltPositioningProblem {
     ceres::Problem problem;
-    std::shared_ptr<ceres::HuberLoss> huber_loss;
-    std::shared_ptr<ceres::LossFunction> untrusted_loss;
-    std::shared_ptr<ceres::LossFunction> trusted_loss;
+    std::vector<std::unique_ptr<AdaptiveHuberLoss>> losses;
+    std::vector<PositioningResidual> residuals;
     std::vector<double> scales;
     unsigned valid_images{0};
     unsigned valid_pairs{0};
@@ -534,8 +571,6 @@ BuiltPositioningProblem build_positioning_problem(
     ceres::Problem::Options problem_options;
     problem_options.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
     built.problem = ceres::Problem(problem_options);
-    built.huber_loss =
-        std::make_shared<ceres::HuberLoss>(options.huber_threshold);
     built.candidate_tracks = static_cast<unsigned>(selected_tracks.size());
 
     std::size_t point_to_camera_capacity = 0;
@@ -548,6 +583,8 @@ BuiltPositioningProblem build_positioning_problem(
     }
 
     built.scales.reserve(scene.pairs.size() + point_to_camera_capacity);
+    built.losses.reserve(scene.pairs.size() + point_to_camera_capacity);
+    built.residuals.reserve(scene.pairs.size() + point_to_camera_capacity);
 
     for (Image& image : scene.images) {
         if (!image.registered) continue;
@@ -573,12 +610,20 @@ BuiltPositioningProblem build_positioning_problem(
             const Vec3 direction = -(
                 image2.pose.R.transpose() *
                 pair.relative_pose->translation());
-            built.problem.AddResidualBlock(
+            auto loss = std::make_unique<AdaptiveHuberLoss>(
+                options.huber_threshold, 1.0);
+            AdaptiveHuberLoss* loss_ptr = loss.get();
+            const ceres::ResidualBlockId residual_id =
+                built.problem.AddResidualBlock(
                 new PairwiseDirectionCostAnalytic(direction),
-                built.huber_loss.get(),
+                loss_ptr,
                 image1.pose.C.data(),
                 image2.pose.C.data(),
                 &scale);
+            built.losses.push_back(std::move(loss));
+            built.residuals.push_back({
+                residual_id, loss_ptr,
+                PositioningResidualType::camera_camera});
             built.problem.SetParameterLowerBound(&scale, 0, 1e-5);
             const double anchor_score = pair.composite_weight();
             if (anchor_score > built.scale_anchor_score) {
@@ -601,20 +646,6 @@ BuiltPositioningProblem build_positioning_problem(
             static_cast<double>(camera_residual_count) /
             static_cast<double>(point_to_camera_capacity);
     }
-    built.untrusted_loss = std::make_shared<ceres::ScaledLoss>(
-        built.huber_loss.get(),
-        0.5 * point_weight,
-        ceres::DO_NOT_TAKE_OWNERSHIP);
-    if (attempt.constraint ==
-        GlobalPositioningConstraint::points_and_cameras_balanced) {
-        built.trusted_loss = std::make_shared<ceres::ScaledLoss>(
-            built.huber_loss.get(),
-            point_weight,
-            ceres::DO_NOT_TAKE_OWNERSHIP);
-    } else {
-        built.trusted_loss = built.huber_loss;
-    }
-
     const bool seed_scales_from_depth =
         attempt.ray_initialize_points && !randomize_points;
 
@@ -643,16 +674,23 @@ BuiltPositioningProblem build_positioning_problem(
                     }
                 }
 
-                ceres::LossFunction* loss =
-                    scene.camera_of(image).trust_intrinsics
-                    ? built.trusted_loss.get()
-                    : built.untrusted_loss.get();
-                built.problem.AddResidualBlock(
+                const double calibration_weight =
+                    scene.camera_of(image).trust_intrinsics ? 1.0 : 0.5;
+                auto loss = std::make_unique<AdaptiveHuberLoss>(
+                    options.huber_threshold,
+                    point_weight * calibration_weight);
+                AdaptiveHuberLoss* loss_ptr = loss.get();
+                const ceres::ResidualBlockId residual_id =
+                    built.problem.AddResidualBlock(
                     new PairwiseDirectionCostAnalytic(ray.direction),
-                    loss,
+                    loss_ptr,
                     image.pose.C.data(),
                     track.position.data(),
                     &scale);
+                built.losses.push_back(std::move(loss));
+                built.residuals.push_back({
+                    residual_id, loss_ptr,
+                    PositioningResidualType::camera_point});
                 built.problem.SetParameterLowerBound(&scale, 0, 1e-5);
                 const double anchor_score =
                     static_cast<double>(count_registered_observations(scene, track)) *
@@ -752,6 +790,139 @@ double mean_residual_norm(ceres::Problem& problem) {
         : residual_sum / static_cast<double>(residual_count);
 }
 
+double percentile(std::vector<double> values, double fraction) {
+    if (values.empty()) return 0.0;
+    const std::size_t index = std::min(
+        values.size() - 1,
+        static_cast<std::size_t>(fraction * (values.size() - 1)));
+    std::nth_element(values.begin(), values.begin() + index, values.end());
+    return values[index];
+}
+
+bool evaluate_positioning_residuals(
+    ceres::Problem& problem,
+    const std::vector<PositioningResidual>& records,
+    std::vector<double>& norms) {
+    norms.clear();
+    if (records.empty()) return false;
+    ceres::Problem::EvaluateOptions options;
+    options.apply_loss_function = false;
+    options.residual_blocks.reserve(records.size());
+    for (const PositioningResidual& record : records)
+        options.residual_blocks.push_back(record.id);
+    double cost = 0.0;
+    std::vector<double> residuals;
+    if (!problem.Evaluate(options, &cost, &residuals, nullptr, nullptr) ||
+        residuals.size() != records.size() * 3)
+        return false;
+    norms.resize(records.size());
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        const std::size_t offset = i * 3;
+        norms[i] = std::sqrt(
+            residuals[offset] * residuals[offset] +
+            residuals[offset + 1] * residuals[offset + 1] +
+            residuals[offset + 2] * residuals[offset + 2]);
+    }
+    return true;
+}
+
+struct RobustDistribution {
+    double median{0.0};
+    double p90{0.0};
+    double sigma{0.0};
+    double cutoff{0.0};
+};
+
+RobustDistribution robust_distribution(
+    const std::vector<double>& residuals,
+    const std::vector<std::size_t>& indices,
+    const GlobalPositioningOptions& options) {
+    RobustDistribution result;
+    if (indices.empty()) return result;
+    std::vector<double> values;
+    values.reserve(indices.size());
+    for (const std::size_t index : indices) values.push_back(residuals[index]);
+    result.median = percentile(values, 0.5);
+    result.p90 = percentile(values, 0.9);
+    std::vector<double> deviations;
+    deviations.reserve(values.size());
+    for (const double value : values)
+        deviations.push_back(std::abs(value - result.median));
+    result.sigma = std::max(1e-6, 1.4826 * percentile(deviations, 0.5));
+    result.cutoff = std::max(
+        options.huber_threshold,
+        options.irls_tuning_constant * result.sigma);
+    return result;
+}
+
+struct IrlsUpdate {
+    bool valid{false};
+    double maximum_weight_change{0.0};
+    double median{0.0};
+    double p90{0.0};
+    unsigned downweighted{0};
+    unsigned quarantined{0};
+};
+
+IrlsUpdate update_irls_weights(
+    ceres::Problem& problem,
+    std::vector<PositioningResidual>& records,
+    const GlobalPositioningOptions& options) {
+    IrlsUpdate update;
+    std::vector<double> norms;
+    if (!evaluate_positioning_residuals(problem, records, norms)) return update;
+    update.valid = true;
+    update.median = percentile(norms, 0.5);
+    update.p90 = percentile(norms, 0.9);
+
+    std::vector<std::size_t> camera_camera;
+    std::vector<std::size_t> camera_point;
+    camera_camera.reserve(records.size());
+    camera_point.reserve(records.size());
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        if (records[i].type == PositioningResidualType::camera_camera)
+            camera_camera.push_back(i);
+        else
+            camera_point.push_back(i);
+    }
+    const RobustDistribution camera_distribution =
+        robust_distribution(norms, camera_camera, options);
+    const RobustDistribution point_distribution =
+        robust_distribution(norms, camera_point, options);
+    const double minimum_weight =
+        std::clamp(options.irls_min_weight, 1e-8, 1.0);
+
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        PositioningResidual& record = records[i];
+        const RobustDistribution& distribution =
+            record.type == PositioningResidualType::camera_camera
+            ? camera_distribution
+            : point_distribution;
+        const double cutoff = std::max(1e-8, distribution.cutoff);
+        if (norms[i] > cutoff) {
+            ++record.outlier_streak;
+        } else if (record.outlier_streak > 0) {
+            --record.outlier_streak;
+        }
+        if (options.irls_quarantine_after > 0 &&
+            record.outlier_streak >= options.irls_quarantine_after)
+            record.quarantined = true;
+
+        const double ratio = norms[i] / cutoff;
+        const double denominator = 1.0 + ratio * ratio;
+        double weight = 1.0 / (denominator * denominator);
+        if (record.quarantined) weight = minimum_weight;
+        weight = std::clamp(weight, minimum_weight, 1.0);
+        update.maximum_weight_change = std::max(
+            update.maximum_weight_change,
+            std::abs(weight - record.loss->robust_weight()));
+        record.loss->set_robust_weight(weight);
+        if (weight < 0.95) ++update.downweighted;
+        if (record.quarantined) ++update.quarantined;
+    }
+    return update;
+}
+
 struct BaselineAnchor {
     Index first{k_invalid};
     Index second{k_invalid};
@@ -838,9 +1009,9 @@ GlobalPositioningSummary refine_only_points_bearings(
 
     ceres::Problem::Options problem_options;
     problem_options.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+    std::vector<std::unique_ptr<AdaptiveHuberLoss>> losses;
+    std::vector<PositioningResidual> residual_records;
     ceres::Problem problem(problem_options);
-    auto loss = std::make_unique<ceres::HuberLoss>(
-        std::min(options.huber_threshold, 0.03));
     unsigned observations = 0;
     for (Index track_id : selected_tracks) {
         Track& track = scene.tracks[track_id];
@@ -850,11 +1021,18 @@ GlobalPositioningSummary refine_only_points_bearings(
             Image& image = scene.images[observation.image_id];
             const WorldRay ray = make_world_ray(scene, image, observation);
             if (!ray.valid) continue;
-            problem.AddResidualBlock(
+            auto loss = std::make_unique<AdaptiveHuberLoss>(
+                std::min(options.huber_threshold, 0.03), 1.0);
+            AdaptiveHuberLoss* loss_ptr = loss.get();
+            const ceres::ResidualBlockId residual_id = problem.AddResidualBlock(
                 new BearingDirectionCostAnalytic(ray.direction),
-                loss.get(),
+                loss_ptr,
                 image.pose.C.data(),
                 track.position.data());
+            losses.push_back(std::move(loss));
+            residual_records.push_back({
+                residual_id, loss_ptr,
+                PositioningResidualType::camera_point});
             ++observations;
         }
     }
@@ -915,14 +1093,67 @@ GlobalPositioningSummary refine_only_points_bearings(
         " center_anchor=", center_anchor,
         " baseline_pair=", baseline.first, '-', baseline.second,
         " baseline=", baseline.length);
-    ceres::Solver::Summary solver_summary;
-    ceres::Solve(solver_options, &problem, &solver_summary);
-    if (!solver_summary.IsSolutionUsable()) {
-        core::Logger::instance().warning(
-            "global positioning attempt failed: only_points/bearing_schur",
-            " message=", solver_summary.message);
-        return result;
+    const auto solve_started = std::chrono::steady_clock::now();
+    double total_solve_seconds = 0.0;
+    bool have_usable_solution = false;
+    for (unsigned pass = 0; pass <= options.max_irls_iterations; ++pass) {
+        double remaining_seconds = options.max_solver_time_sec;
+        if (options.max_solver_time_sec > 0.0) {
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - solve_started).count();
+            remaining_seconds = options.max_solver_time_sec - elapsed;
+            if (remaining_seconds <= 0.05) break;
+            const unsigned remaining_passes =
+                options.max_irls_iterations - pass + 1;
+            solver_options.max_solver_time_in_seconds = std::max(
+                0.05,
+                pass == 0
+                    ? 0.6 * remaining_seconds
+                    : remaining_seconds /
+                        static_cast<double>(remaining_passes));
+        }
+        solver_options.max_num_iterations = static_cast<int>(
+            pass == 0
+            ? std::min(options.max_num_iterations, 30U)
+            : std::max(1U, std::min(
+                options.irls_inner_iterations, options.max_num_iterations)));
+        ceres::Solver::Summary pass_summary;
+        ceres::Solve(solver_options, &problem, &pass_summary);
+        total_solve_seconds += pass_summary.total_time_in_seconds;
+        result.iterations +=
+            static_cast<unsigned>(pass_summary.iterations.size());
+        if (!pass_summary.IsSolutionUsable()) {
+            if (!have_usable_solution) {
+                core::Logger::instance().warning(
+                    "global positioning attempt failed: only_points/bearing_schur",
+                    " message=", pass_summary.message);
+                return result;
+            }
+            break;
+        }
+        have_usable_solution = true;
+        if (options.max_irls_iterations == 0) break;
+        const IrlsUpdate update = update_irls_weights(
+            problem, residual_records, options);
+        if (!update.valid) break;
+        result.irls_iterations = pass;
+        result.downweighted_constraints = update.downweighted;
+        result.quarantined_constraints = update.quarantined;
+        result.median_residual = update.median;
+        result.p90_residual = update.p90;
+        core::Logger::instance().info(
+            "global positioning bearing IRLS: pass=", pass,
+            " median=", update.median,
+            " p90=", update.p90,
+            " downweighted=", update.downweighted,
+            " quarantined=", update.quarantined,
+            " max_weight_change=", update.maximum_weight_change);
+        if (pass == options.max_irls_iterations ||
+            update.maximum_weight_change < options.irls_weight_convergence)
+            break;
+        result.irls_iterations = pass + 1;
     }
+    if (!have_usable_solution) return result;
 
     for (Index track_id : selected_tracks) {
         Track& track = scene.tracks[track_id];
@@ -935,8 +1166,6 @@ GlobalPositioningSummary refine_only_points_bearings(
     result.positioned_images = scene.registered_count();
     result.positioned_tracks = initialized;
     result.observations = observations;
-    result.iterations =
-        static_cast<unsigned>(solver_summary.iterations.size());
     result.final_residual = mean_residual_norm(problem);
     core::Logger::instance().info(
         "global positioning succeeded: only_points/bearing_schur",
@@ -944,7 +1173,12 @@ GlobalPositioningSummary refine_only_points_bearings(
         " tracks=", result.positioned_tracks,
         " observations=", result.observations,
         " iterations=", result.iterations,
-        " solve_s=", solver_summary.total_time_in_seconds,
+        " irls=", result.irls_iterations,
+        " downweighted=", result.downweighted_constraints,
+        " quarantined=", result.quarantined_constraints,
+        " solve_s=", total_solve_seconds,
+        " median=", result.median_residual,
+        " p90=", result.p90_residual,
         " residual=", result.final_residual);
     return result;
 }
@@ -1022,16 +1256,71 @@ bool attempt_positioning(
     }
     solver_options.linear_solver_ordering.reset(ordering);
 
-    ceres::Solver::Summary solver_summary;
-    ceres::Solve(solver_options, &built.problem, &solver_summary);
-    result.iterations =
-        static_cast<unsigned>(solver_summary.iterations.size());
-    if (!solver_summary.IsSolutionUsable()) {
-        core::Logger::instance().warning(
-            "global positioning attempt failed: ", attempt.label,
-            " message=", solver_summary.message);
-        return false;
+    const auto solve_started = std::chrono::steady_clock::now();
+    const unsigned maximum_irls = options.max_irls_iterations;
+    double total_solve_seconds = 0.0;
+    bool have_usable_solution = false;
+    IrlsUpdate final_update;
+    for (unsigned pass = 0; pass <= maximum_irls; ++pass) {
+        double remaining_seconds = options.max_solver_time_sec;
+        if (options.max_solver_time_sec > 0.0) {
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - solve_started).count();
+            remaining_seconds = options.max_solver_time_sec - elapsed;
+            if (remaining_seconds <= 0.05) break;
+            const unsigned remaining_passes = maximum_irls - pass + 1;
+            const double pass_budget = pass == 0
+                ? 0.6 * remaining_seconds
+                : remaining_seconds / static_cast<double>(remaining_passes);
+            solver_options.max_solver_time_in_seconds =
+                std::max(0.05, pass_budget);
+        }
+        solver_options.max_num_iterations = static_cast<int>(
+            pass == 0
+            ? std::min(options.max_num_iterations, 30U)
+            : std::max(1U, std::min(
+                options.irls_inner_iterations, options.max_num_iterations)));
+
+        ceres::Solver::Summary pass_summary;
+        ceres::Solve(solver_options, &built.problem, &pass_summary);
+        total_solve_seconds += pass_summary.total_time_in_seconds;
+        result.iterations +=
+            static_cast<unsigned>(pass_summary.iterations.size());
+        if (!pass_summary.IsSolutionUsable()) {
+            if (!have_usable_solution) {
+                core::Logger::instance().warning(
+                    "global positioning attempt failed: ", attempt.label,
+                    " message=", pass_summary.message);
+                return false;
+            }
+            break;
+        }
+        have_usable_solution = true;
+
+        if (maximum_irls == 0) break;
+
+        final_update = update_irls_weights(
+            built.problem, built.residuals, options);
+        if (!final_update.valid) break;
+        result.irls_iterations = pass;
+        result.downweighted_constraints = final_update.downweighted;
+        result.quarantined_constraints = final_update.quarantined;
+        result.median_residual = final_update.median;
+        result.p90_residual = final_update.p90;
+        core::Logger::instance().info(
+            "global positioning IRLS: pass=", pass,
+            " median=", final_update.median,
+            " p90=", final_update.p90,
+            " downweighted=", final_update.downweighted,
+            " quarantined=", final_update.quarantined,
+            " max_weight_change=", final_update.maximum_weight_change);
+        if (pass == maximum_irls ||
+            final_update.maximum_weight_change <
+                options.irls_weight_convergence)
+            break;
+        result.irls_iterations = pass + 1;
     }
+    if (!have_usable_solution) return false;
 
     result.success = true;
     result.positioned_images = built.valid_images;
@@ -1055,7 +1344,12 @@ bool attempt_positioning(
         " tracks=", result.positioned_tracks,
         " observations=", result.observations,
         " iterations=", result.iterations,
-        " solve_s=", solver_summary.total_time_in_seconds,
+        " irls=", result.irls_iterations,
+        " downweighted=", result.downweighted_constraints,
+        " quarantined=", result.quarantined_constraints,
+        " solve_s=", total_solve_seconds,
+        " median=", result.median_residual,
+        " p90=", result.p90_residual,
         " residual=", result.final_residual);
     return true;
 }
@@ -1178,6 +1472,9 @@ GlobalPositioningSummary solve_global_positions(
             core::Logger::instance().info(
                 "global positioning: camera-only warm start ready, "
                 "continuing with point constraints");
+            if (options.constraint ==
+                GlobalPositioningConstraint::only_cameras)
+                return attempt_summary;
             if (options.constraint != GlobalPositioningConstraint::only_cameras &&
                 options.ray_initialize_points) {
                 GlobalPositioningSummary bearing_summary =

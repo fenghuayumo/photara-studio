@@ -283,6 +283,53 @@ void test_large_point_only_positioning_does_not_require_pairs() {
            "large point-only positioning keeps track constraints primary");
 }
 
+void test_global_positioning_irls_downweights_bad_direction() {
+    Scene scene;
+    scene.cameras.assign(4, cam());
+    scene.images.resize(4);
+    const Vec3 centers[] = {
+        Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0), Vec3(1.0, 1.0, 0.5)};
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        scene.images[image_id].id = image_id;
+        scene.images[image_id].camera_id = image_id;
+        scene.images[image_id].registered = true;
+    }
+    for (Index first = 0; first < scene.images.size(); ++first) {
+        for (Index second = first + 1; second < scene.images.size(); ++second) {
+            Vec3 direction = (centers[second] - centers[first]).normalized();
+            if (first == 0 && second == 1) direction = Vec3::UnitZ();
+            ImagePair pair(first, second);
+            pair.weight_spatial = 1.F;
+            pair.matches.resize(100);
+            pair.relative_pose = Pose3D{
+                Mat3::Identity(), -direction};
+            scene.pairs.push_back(std::move(pair));
+        }
+    }
+
+    GlobalPositioningOptions options;
+    options.constraint = GlobalPositioningConstraint::only_cameras;
+    options.max_num_iterations = 30;
+    options.max_irls_iterations = 3;
+    options.irls_inner_iterations = 8;
+    options.irls_tuning_constant = 2.0;
+    options.irls_quarantine_after = 1;
+    options.huber_threshold = 0.02;
+    options.max_solver_time_sec = 10.0;
+    const GlobalPositioningSummary summary =
+        solve_global_positions(scene, options);
+    expect(summary.success, "camera positioning IRLS succeeds");
+    expect(summary.irls_iterations > 0,
+           "camera positioning executes outer IRLS");
+    expect(summary.downweighted_constraints > 0,
+           "camera positioning downweights inconsistent direction");
+    expect(summary.quarantined_constraints > 0,
+           "persistent direction outlier enters quarantine");
+    expect(summary.p90_residual >= summary.median_residual,
+           "positioning reports robust residual quantiles");
+}
+
 void test_global_positioning_preserves_fixed_initial_positions() {
     Scene scene;
     scene.cameras.assign(2, cam());
@@ -511,6 +558,7 @@ int main() {
     test_global_rotation_weighting();
     test_global_positioning_points_only();
     test_large_point_only_positioning_does_not_require_pairs();
+    test_global_positioning_irls_downweights_bad_direction();
     test_global_positioning_preserves_fixed_initial_positions();
     test_global_positioning_rejects_empty_point_constraints();
     test_long_track_merge();

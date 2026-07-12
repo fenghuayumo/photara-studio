@@ -107,6 +107,11 @@ std::uint64_t reconstruction_key(
     key.append(config.global_positioning.max_tracks_for_positioning);
     key.append(config.global_positioning.coverage_grid_size);
     key.append(config.global_positioning.max_irls_iterations);
+    key.append(config.global_positioning.irls_inner_iterations);
+    key.append(config.global_positioning.irls_tuning_constant);
+    key.append(config.global_positioning.irls_min_weight);
+    key.append(config.global_positioning.irls_quarantine_after);
+    key.append(config.global_positioning.irls_weight_convergence);
     key.append(config.global_positioning.max_num_iterations);
     key.append(config.global_positioning.max_solver_time_sec);
     key.append(config.global_positioning.function_tolerance);
@@ -332,6 +337,13 @@ ReconstructionSummary run_global_mapping(
         " filtered_pairs=", rotation_summary.filtered_pairs,
         " positioned=", position_summary.positioned_images,
         " position_tracks=", position_summary.positioned_tracks,
+        " position_irls=", position_summary.irls_iterations,
+        " position_downweighted=",
+            position_summary.downweighted_constraints,
+        " position_quarantined=",
+            position_summary.quarantined_constraints,
+        " position_median=", position_summary.median_residual,
+        " position_p90=", position_summary.p90_residual,
         " residual=", position_summary.final_residual);
     return summary;
 }
