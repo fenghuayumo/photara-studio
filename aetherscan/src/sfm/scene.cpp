@@ -10,6 +10,7 @@ void Scene::clear() {
     pairs.clear();
     tracks.clear();
     image_tracks.clear();
+    resection_progress = {};
 }
 
 ImagePair* Scene::find_pair(Index a, Index b) {

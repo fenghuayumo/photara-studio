@@ -30,6 +30,99 @@ struct PairDiagnostics {
     bool accepted{false};
 };
 
+struct FrontEndStageKeys {
+    std::uint64_t images{};
+    std::uint64_t features{};
+    std::uint64_t matches{};
+    std::uint64_t geometry{};
+    std::uint64_t tracks{};
+};
+
+void append_cache_build_identity(FingerprintBuilder& key) {
+    key.append_string("aetherscan-cache-abi-20260712-1");
+    key.append(static_cast<std::uint64_t>(__cplusplus));
+#if defined(_MSC_VER)
+    key.append(static_cast<std::uint32_t>(_MSC_VER));
+#endif
+#if defined(AETHERSCAN_HAS_POSELIB)
+    key.append_string("poselib");
+#else
+    key.append_string("fallback-geometry");
+#endif
+}
+
+void append_relative_options(
+    FingerprintBuilder& key, const RelativePoseOptions& options) {
+    key.append(options.max_epipolar_error_px);
+    key.append(options.max_reproj_error_px);
+    key.append(options.min_ray_angle_deg);
+    key.append(options.epipole_filter_px);
+    key.append(options.confidence);
+    key.append(options.max_iterations);
+    key.append(options.min_iterations);
+    key.append(options.min_inliers);
+    key.append(options.force_fundamental);
+    key.append(options.force_shared_focal);
+    key.append(options.decompose_fundamental);
+    key.append(options.estimate_homography);
+    key.append(options.homography_degeneracy_ratio);
+    key.append(options.degenerate_weight_scale);
+}
+
+FrontEndStageKeys make_stage_keys(
+    const std::vector<std::filesystem::path>& image_paths,
+    const FrontEndOptions& options) {
+    FingerprintBuilder features;
+    const std::uint64_t images = fingerprint_images(image_paths);
+    features.append_string("aetherscan-features-v3");
+    append_cache_build_identity(features);
+    features.append(images);
+    features.append_string(options.extractor);
+    features.append(options.sift_contrast_threshold);
+    features.append(options.max_features);
+
+    FingerprintBuilder matches;
+    matches.append_string("aetherscan-matches-v3");
+    append_cache_build_identity(matches);
+    matches.append(features.value());
+    matches.append(options.neighbor_window);
+    matches.append_string(options.matcher);
+    matches.append(options.match_ratio);
+    matches.append(options.mutual_check);
+    matches.append(options.retrieval_min_images);
+    matches.append(options.augment_sequential_with_retrieval);
+    matches.append(options.retrieval.top_k);
+    matches.append(options.retrieval.max_descriptors_per_image);
+    matches.append(options.retrieval.hash_tables);
+    matches.append(options.retrieval.bits_per_word);
+    matches.append(options.retrieval.stop_word_ratio);
+    matches.append(options.retrieval.max_posting_images);
+
+    FingerprintBuilder geometry;
+    geometry.append_string("aetherscan-geometry-v3");
+    append_cache_build_identity(geometry);
+    geometry.append(matches.value());
+    geometry.append(options.focal_pixels);
+    append_relative_options(geometry, options.relative);
+
+    FingerprintBuilder tracks;
+    tracks.append_string("aetherscan-tracks-v3");
+    append_cache_build_identity(tracks);
+    tracks.append(geometry.value());
+    tracks.append(options.min_pair_weight);
+    return {
+        images, features.value(), matches.value(), geometry.value(),
+        tracks.value()};
+}
+
+void verify_image_snapshot(
+    const std::vector<std::filesystem::path>& image_paths,
+    const std::uint64_t expected) {
+    if (fingerprint_images(image_paths) != expected)
+        throw std::runtime_error(
+            "Input images changed while building checkpoints; restart the run");
+}
+
 void initialize_cameras(Scene& scene, const double focal_pixels) {
     scene.cameras.clear();
     scene.cameras.reserve(scene.images.size());
@@ -62,6 +155,14 @@ void initialize_cameras(Scene& scene, const double focal_pixels) {
             scene.images[i].camera_id =
                 static_cast<Index>(existing - scene.cameras.begin());
         }
+    }
+}
+
+void release_descriptors(Scene& scene) {
+    for (Image& image : scene.images) {
+        image.features.descriptors.clear();
+        image.features.descriptors.shrink_to_fit();
+        image.features.mark_descriptors_modified();
     }
 }
 
@@ -128,6 +229,35 @@ FrontEndResult run_frontend(
     FrontEndResult result;
     if (image_paths.size() < 2) return result;
 
+    const FrontEndStageKeys stage_keys = make_stage_keys(image_paths, options);
+    result.tracks_checkpoint_key = stage_keys.tracks;
+    CheckpointStore checkpoints(options.checkpoint);
+    Scene& scene = result.scene;
+    scene.thread_count = parallel::resolve_thread_count(options.thread_count);
+    result.timing.threads_used = scene.thread_count;
+    if (checkpoints.load_scene(
+            CheckpointStage::tracks, stage_keys.tracks, scene)) {
+        scene.thread_count = parallel::resolve_thread_count(options.thread_count);
+        verify_image_snapshot(image_paths, stage_keys.images);
+        std::cout << "checkpoint hit: tracks\n";
+        return result;
+    }
+    if (checkpoints.load_scene(
+            CheckpointStage::geometry, stage_keys.geometry, scene)) {
+        scene.thread_count = parallel::resolve_thread_count(options.thread_count);
+        const auto started = std::chrono::steady_clock::now();
+        build_tracks(scene, options.min_pair_weight);
+        result.timing.tracks_seconds =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+        verify_image_snapshot(image_paths, stage_keys.images);
+        checkpoints.save_scene(
+            CheckpointStage::tracks, stage_keys.tracks, scene);
+        std::cout << "checkpoint hit: geometry\n";
+        return result;
+    }
+
     features::ensure_builtin_feature_backends();
     std::unique_ptr<features::FeatureExtractor> extractor;
     if (options.extractor == "sift") {
@@ -159,23 +289,21 @@ FrontEndResult run_frontend(
         throw std::runtime_error("Failed to create feature extractor/matcher");
     }
 
-    Scene& scene = result.scene;
-    scene.thread_count = parallel::resolve_thread_count(options.thread_count);
-    scene.images.resize(image_paths.size());
-    scene.cameras.reserve(image_paths.size());
-
     const auto extract_started = std::chrono::steady_clock::now();
     const unsigned threads = scene.thread_count;
-    result.timing.threads_used = threads;
-
-    std::vector<std::unique_ptr<features::FeatureExtractor>> workers(threads);
-    for (unsigned t = 0; t < threads; ++t) {
-        workers[t] = extractor->info().thread_safe ? nullptr : extractor->clone();
-    }
-
-    parallel::parallel_for(
-        image_paths.size(), threads,
-        [&](const std::size_t i, const unsigned tid) {
+    const bool feature_cache_hit = checkpoints.load_scene(
+        CheckpointStage::features, stage_keys.features, scene);
+    if (!feature_cache_hit) {
+        scene.images.resize(image_paths.size());
+        scene.cameras.reserve(image_paths.size());
+        std::vector<std::unique_ptr<features::FeatureExtractor>> workers(threads);
+        for (unsigned t = 0; t < threads; ++t) {
+            workers[t] =
+                extractor->info().thread_safe ? nullptr : extractor->clone();
+        }
+        parallel::parallel_for(
+            image_paths.size(), threads,
+            [&](const std::size_t i, const unsigned tid) {
         features::FeatureExtractor* local =
             workers[tid] ? workers[tid].get() : extractor.get();
         features::FeatureSet features = local->extract_file(image_paths[i]);
@@ -213,39 +341,96 @@ FrontEndResult run_frontend(
         scene.images[i] = std::move(image);
         });
 
-    initialize_cameras(scene, options.focal_pixels);
+        initialize_cameras(scene, options.focal_pixels);
+        verify_image_snapshot(image_paths, stage_keys.images);
+        checkpoints.save_scene(
+            CheckpointStage::features, stage_keys.features, scene);
+    } else {
+        scene.thread_count = parallel::resolve_thread_count(options.thread_count);
+        initialize_cameras(scene, options.focal_pixels);
+        std::cout << "checkpoint hit: features\n";
+    }
     result.timing.extract_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - extract_started)
             .count();
 
     const auto match_started = std::chrono::steady_clock::now();
     const auto candidates = build_pair_candidates(scene, options);
+    std::vector<RawPairMatches> raw_pairs;
+    bool match_cache_hit =
+        checkpoints.load_matches(stage_keys.matches, raw_pairs);
+    if (match_cache_hit && raw_pairs.size() == candidates.size()) {
+        for (std::size_t i = 0; i < candidates.size(); ++i) {
+            if (raw_pairs[i].id1 != candidates[i].id1 ||
+                raw_pairs[i].id2 != candidates[i].id2) {
+                match_cache_hit = false;
+                break;
+            }
+            const auto& first =
+                scene.images[candidates[i].id1].features.keypoints;
+            const auto& second =
+                scene.images[candidates[i].id2].features.keypoints;
+            for (const features::FeatureMatch& match :
+                 raw_pairs[i].matches) {
+                if (match.query >= first.size() ||
+                    match.train >= second.size() ||
+                    !std::isfinite(match.score)) {
+                    match_cache_hit = false;
+                    break;
+                }
+            }
+            if (!match_cache_hit) break;
+        }
+    } else {
+        match_cache_hit = false;
+    }
+    if (!match_cache_hit) {
+        raw_pairs.resize(candidates.size());
+        std::vector<std::unique_ptr<features::FeatureMatcher>> match_workers(
+            threads);
+        for (unsigned t = 0; t < threads; ++t)
+            match_workers[t] = matcher->clone();
+        parallel::parallel_for(
+            scene.images.size(), threads,
+            [&](const std::size_t image_id, const unsigned tid) {
+                match_workers[tid]->prepare(
+                    scene.images[image_id].features);
+            });
+        parallel::parallel_for(
+            candidates.size(), threads,
+            [&](const std::size_t ci, const unsigned tid) {
+                const PairCandidate candidate = candidates[ci];
+                RawPairMatches& cached = raw_pairs[ci];
+                cached.id1 = candidate.id1;
+                cached.id2 = candidate.id2;
+                cached.matches =
+                    match_workers[tid]
+                        ->match(
+                            scene.images[candidate.id1].features,
+                            scene.images[candidate.id2].features)
+                        .matches;
+            });
+        checkpoints.save_matches(stage_keys.matches, raw_pairs);
+    } else {
+        std::cout << "checkpoint hit: matches\n";
+    }
+
     std::vector<ImagePair> pairs(candidates.size());
     std::vector<PairDiagnostics> diagnostics(candidates.size());
-    std::vector<std::unique_ptr<features::FeatureMatcher>> match_workers(threads);
-    for (unsigned t = 0; t < threads; ++t) match_workers[t] = matcher->clone();
     parallel::parallel_for(
-        scene.images.size(), threads,
-        [&](const std::size_t image_id, const unsigned tid) {
-            match_workers[tid]->prepare(scene.images[image_id].features);
-        });
-
-    parallel::parallel_for(
-        candidates.size(), threads,
-        [&](const std::size_t ci, const unsigned tid) {
+        candidates.size(), threads, [&](const std::size_t ci) {
         const PairCandidate cand = candidates[ci];
         const Image& img1 = scene.images[cand.id1];
         const Image& img2 = scene.images[cand.id2];
-        features::FeatureMatcher* local = match_workers[tid].get();
-        features::MatchSet raw = local->match(img1.features, img2.features);
-        diagnostics[ci].raw_matches = raw.matches.size();
-        if (raw.matches.size() < options.relative.min_inliers) return;
+        const auto& raw = raw_pairs[ci].matches;
+        diagnostics[ci].raw_matches = raw.size();
+        if (raw.size() < options.relative.min_inliers) return;
         diagnostics[ci].attempted_geometry = true;
 
         std::vector<Vec2> p1, p2;
-        p1.reserve(raw.matches.size());
-        p2.reserve(raw.matches.size());
-        for (const auto& m : raw.matches) {
+        p1.reserve(raw.size());
+        p2.reserve(raw.size());
+        for (const auto& m : raw) {
             const auto& k1 = img1.features.keypoints[m.query];
             const auto& k2 = img2.features.keypoints[m.train];
             p1.emplace_back(k1.x, k1.y);
@@ -274,7 +459,7 @@ FrontEndResult run_frontend(
         for (std::size_t i = 0; i < geo.inlier_mask.size(); ++i) {
             if (!geo.inlier_mask[i]) continue;
             pair.matches.push_back(
-                {raw.matches[i].query, raw.matches[i].train});
+                {raw[i].query, raw[i].train});
         }
         if (pair.matches.size() < options.relative.min_inliers) return;
         diagnostics[ci].accepted = true;
@@ -286,12 +471,18 @@ FrontEndResult run_frontend(
         if (pair.matches.empty()) continue;
         scene.pairs.push_back(std::move(pair));
     }
+    verify_image_snapshot(image_paths, stage_keys.images);
+    checkpoints.save_scene(
+        CheckpointStage::geometry, stage_keys.geometry, scene);
     result.timing.match_verify_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - match_started)
             .count();
 
     const auto tracks_started = std::chrono::steady_clock::now();
+    release_descriptors(scene);
     build_tracks(scene, options.min_pair_weight);
+    checkpoints.save_scene(
+        CheckpointStage::tracks, stage_keys.tracks, scene);
     result.timing.tracks_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - tracks_started)
             .count();

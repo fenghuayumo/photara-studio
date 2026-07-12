@@ -127,7 +127,9 @@ std::vector<Index> build_local_window(
 
 class RunningAverage {
 public:
-    explicit RunningAverage(const std::size_t window) : window_(window) {}
+    RunningAverage(
+        const std::size_t window, std::vector<double>& values)
+        : window_(window), values_(values) {}
     void add(const double value) {
         values_.push_back(value);
         if (values_.size() > window_) values_.erase(values_.begin());
@@ -142,7 +144,7 @@ public:
 
 private:
     std::size_t window_;
-    std::vector<double> values_;
+    std::vector<double>& values_;
 };
 
 }  // namespace
@@ -155,10 +157,14 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
     }
 
     unsigned registered_count = 0;
-    unsigned since_full_ba = 0;
-    unsigned n_ba = 0;
-    std::vector<Index> last_registered;
-    RunningAverage avg_inliers(10);
+    unsigned checkpointed_count = 0;
+    unsigned& since_full_ba = scene.resection_progress.since_full_ba;
+    unsigned& n_ba =
+        scene.resection_progress.bundle_adjustment_stage;
+    std::vector<Index>& last_registered =
+        scene.resection_progress.last_registered;
+    RunningAverage avg_inliers(
+        10, scene.resection_progress.recent_inlier_ratios);
 
     while (!unregistered.empty()) {
         std::vector<Index> next_ids = select_next_images(scene, unregistered, config);
@@ -235,6 +241,12 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
         }
 
         if (registered_count == start_count) break;
+        if (config.checkpoint_callback &&
+            registered_count - checkpointed_count >=
+                std::max(1U, config.checkpoint_interval)) {
+            config.checkpoint_callback(scene);
+            checkpointed_count = registered_count;
+        }
     }
 
     if (registered_count > 0) {
@@ -246,7 +258,14 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
         filter_tracks(
             scene, config.max_reproj_error, config.min_angle_deg, config.mult_depth_near,
             config.mult_depth_far);
+        since_full_ba = 0;
+        n_ba = 0;
+        last_registered.clear();
+        avg_inliers.clear();
     }
+    if (config.checkpoint_callback &&
+        registered_count != checkpointed_count)
+        config.checkpoint_callback(scene);
 
     std::cout << "resection: newly_registered=" << registered_count
               << " total=" << scene.registered_count() << '\n';

@@ -5,6 +5,7 @@
 #include "sfm/scene.hpp"
 
 #include <array>
+#include <functional>
 
 namespace aetherscan::sfm {
 
@@ -23,6 +24,9 @@ struct ResectionConfig {
     AbsolutePoseOptions ransac{};
     ba::OptimizerOptions local_ba{};
     ba::OptimizerOptions full_ba{};
+    // Called after a consistent registration/triangulation update.
+    std::function<void(const Scene&)> checkpoint_callback;
+    unsigned checkpoint_interval{1};
 
     ResectionConfig() {
         ransac.max_reproj_error_px = 4.0;

@@ -1,5 +1,6 @@
 #include "sfm/reconstruct.hpp"
 
+#include "parallel/thread_pool.hpp"
 #include "sfm/bundle.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
@@ -7,13 +8,136 @@
 #include <iostream>
 
 namespace aetherscan::sfm {
+namespace {
+
+void append_optimizer(
+    FingerprintBuilder& key, const ba::OptimizerOptions& options) {
+    key.append(options.maximum_iterations);
+    key.append(options.maximum_pcg_iterations);
+    key.append(options.huber_delta);
+    key.append(options.minimum_depth);
+    key.append(options.initial_damping);
+    key.append(options.minimum_damping);
+    key.append(options.maximum_damping);
+    key.append(options.function_tolerance);
+    key.append(options.step_tolerance);
+    key.append(options.pcg_tolerance);
+    key.append(options.fix_first_pose);
+    key.append(options.fix_first_point);
+    key.append(options.optimize_rotations);
+    key.append(options.optimize_focal);
+    key.append(options.optimize_principal_point);
+    key.append(options.optimize_distortion);
+}
+
+void append_resection(
+    FingerprintBuilder& key, const ResectionConfig& options) {
+    key.append(options.min_correspondences);
+    key.append(options.min_inliers);
+    key.append(options.max_local_window);
+    key.append(options.local_ba_every);
+    for (const unsigned value : options.full_ba_every) key.append(value);
+    key.append(options.ratio_correspondences);
+    key.append(options.avg_inliers_ratio_force_ba);
+    key.append(options.max_reproj_error);
+    key.append(options.min_angle_deg);
+    key.append(options.mult_depth_near);
+    key.append(options.mult_depth_far);
+    key.append(options.ransac.max_reproj_error_px);
+    key.append(options.ransac.confidence);
+    key.append(options.ransac.max_iterations);
+    key.append(options.ransac.min_iterations);
+    key.append(options.ransac.min_inliers);
+    append_optimizer(key, options.local_ba);
+    append_optimizer(key, options.full_ba);
+}
+
+std::uint64_t reconstruction_key(
+    const std::uint64_t tracks_key,
+    const ReconstructionConfig& config) {
+    FingerprintBuilder key;
+    key.append_string("aetherscan-reconstruction-v3");
+    key.append_string("aetherscan-cache-abi-20260712-1");
+    key.append(static_cast<std::uint64_t>(__cplusplus));
+#if defined(_MSC_VER)
+    key.append(static_cast<std::uint32_t>(_MSC_VER));
+#endif
+    key.append(tracks_key);
+    key.append(static_cast<std::uint32_t>(config.mode));
+    key.append(config.star.min_views);
+    key.append(config.star.max_views);
+    key.append(config.star.min_tracks_per_view);
+    key.append(config.star.max_reproj_error);
+    key.append(config.star.min_angle_deg);
+    key.append(config.star.min_initial_tracks);
+    append_resection(key, config.resection);
+    key.append(config.hierarchical.cluster.max_views_per_cluster);
+    key.append(config.hierarchical.cluster.min_views_per_cluster);
+    key.append(config.hierarchical.cluster.max_over_capacity);
+    key.append(config.hierarchical.cluster.min_common_tracks);
+    key.append(config.hierarchical.cluster.min_pair_weight);
+    key.append(config.hierarchical.cluster.refine_weak_edges);
+    key.append(config.hierarchical.cluster.edge_weight_percentile);
+    key.append(config.hierarchical.alignment.min_pair_weight);
+    key.append(config.hierarchical.alignment.min_common_tracks);
+    key.append(config.hierarchical.alignment.merge_track_inliers_only);
+    key.append(config.hierarchical.alignment.ransac_relative_threshold);
+    key.append(config.hierarchical.alignment.minimum_inlier_ratio);
+    key.append(
+        config.hierarchical.alignment.merge_proximity_relative_threshold);
+    key.append(config.hierarchical.alignment.ransac_iterations);
+    key.append(config.hierarchical.alignment.random_seed);
+    key.append(config.hierarchical.final_bundle_adjustment);
+    key.append(config.global_rotation.max_l1_iterations);
+    key.append(config.global_rotation.max_irls_iterations);
+    key.append(config.global_rotation.step_convergence_threshold);
+    key.append(config.global_rotation.irls_sigma_deg);
+    key.append(config.global_rotation.max_relative_rotation_error_deg);
+    key.append(config.global_rotation.use_pair_weights);
+    key.append(
+        static_cast<std::uint32_t>(config.global_rotation.weight_type));
+    key.append(config.global_positioning.min_views_per_track);
+    key.append(config.global_positioning.max_irls_iterations);
+    key.append(config.global_positioning.max_num_iterations);
+    key.append(config.global_positioning.function_tolerance);
+    key.append(config.global_positioning.huber_threshold);
+    key.append(config.global_positioning.random_seed);
+    key.append(config.global_positioning.generate_random_positions);
+    key.append(config.global_positioning.generate_random_points);
+    key.append(config.global_positioning.generate_scales);
+    key.append(config.global_positioning.optimize_positions);
+    key.append(config.global_positioning.optimize_points);
+    key.append(config.global_positioning.optimize_scales);
+    key.append(static_cast<std::uint32_t>(
+        config.global_positioning.constraint));
+    key.append(config.global_positioning.constraint_reweight_scale);
+    return key.value();
+}
+
+ReconstructionSummary summarize_scene(const Scene& scene) {
+    ReconstructionSummary summary;
+    summary.registered_views = scene.registered_count();
+    summary.failed_views =
+        static_cast<unsigned>(scene.images.size()) - summary.registered_views;
+    for (const Track& track : scene.tracks)
+        if (track.is_triangulated()) ++summary.landmarks;
+    summary.valid =
+        summary.registered_views >= 2 && summary.landmarks > 0;
+    return summary;
+}
+
+}  // namespace
 
 ReconstructionSummary run_incremental_mapping(
     Scene& scene,
     const StarInitConfig& star,
     const ResectionConfig& resection) {
     ReconstructionSummary summary;
-    if (!star_initialize(scene, star)) return summary;
+    if (scene.registered_count() < 2) {
+        if (!star_initialize(scene, star)) return summary;
+        if (resection.checkpoint_callback)
+            resection.checkpoint_callback(scene);
+    }
     register_images(scene, resection);
 
     summary.registered_views = scene.registered_count();
@@ -128,20 +252,52 @@ ReconstructionSummary reconstruct(
     const ReconstructionConfig& config) {
     FrontEndResult frontend = run_frontend(image_paths, config.frontend);
     scene_out = std::move(frontend.scene);
+    CheckpointStore checkpoints(config.frontend.checkpoint);
+    const std::uint64_t mapping_key =
+        reconstruction_key(frontend.tracks_checkpoint_key, config);
+    if (checkpoints.load_scene(
+            CheckpointStage::reconstruction, mapping_key, scene_out)) {
+        scene_out.thread_count =
+            parallel::resolve_thread_count(config.frontend.thread_count);
+        std::cout << "checkpoint hit: reconstruction\n";
+        if (config.mode != ReconstructionMode::incremental)
+            return summarize_scene(scene_out);
+    }
+    ReconstructionSummary summary;
     if (config.mode == ReconstructionMode::hierarchical) {
         HierarchicalConfig hierarchical = config.hierarchical;
         hierarchical.star = config.star;
         hierarchical.resection = config.resection;
-        return run_hierarchical_mapping(scene_out, hierarchical);
-    }
-    if (config.mode == ReconstructionMode::global) {
-        return run_global_mapping(
+        summary = run_hierarchical_mapping(scene_out, hierarchical);
+    } else if (config.mode == ReconstructionMode::global) {
+        summary = run_global_mapping(
             scene_out,
             config.global_rotation,
             config.global_positioning,
             config.resection);
+    } else {
+        ResectionConfig resection = config.resection;
+        resection.checkpoint_interval =
+            config.frontend.checkpoint.reconstruction_interval;
+        if (checkpoints.writable()) {
+            const auto application_checkpoint =
+                resection.checkpoint_callback;
+            resection.checkpoint_callback =
+                [&, application_checkpoint](const Scene& scene) {
+                    if (application_checkpoint)
+                        application_checkpoint(scene);
+                    checkpoints.save_scene(
+                        CheckpointStage::reconstruction,
+                        mapping_key, scene);
+                };
+        }
+        summary = run_incremental_mapping(
+            scene_out, config.star, resection);
     }
-    return run_incremental_mapping(scene_out, config.star, config.resection);
+    if (summary.valid)
+        checkpoints.save_scene(
+            CheckpointStage::reconstruction, mapping_key, scene_out);
+    return summary;
 }
 
 }  // namespace aetherscan::sfm

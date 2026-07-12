@@ -159,6 +159,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
 
     add_library(aetherscan_sfm
         src/sfm/scene.cpp
+        src/sfm/checkpoint.cpp
         src/sfm/retrieval.cpp
         src/sfm/geometry.cpp
         src/sfm/triangulation.cpp
@@ -255,6 +256,9 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
         add_executable(aetherscan_mapping_test tests/mapping_test.cpp)
         target_link_libraries(aetherscan_mapping_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.mapping COMMAND aetherscan_mapping_test)
+        add_executable(aetherscan_checkpoint_test tests/checkpoint_test.cpp)
+        target_link_libraries(aetherscan_checkpoint_test PRIVATE AetherScan::SfM)
+        add_test(NAME aetherscan.sfm.checkpoint COMMAND aetherscan_checkpoint_test)
         add_executable(aetherscan_hierarchical_test tests/hierarchical_test.cpp)
         target_link_libraries(aetherscan_hierarchical_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.hierarchical COMMAND aetherscan_hierarchical_test)

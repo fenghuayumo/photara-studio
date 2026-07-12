@@ -12,23 +12,52 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 namespace {
 
-double number(const char* text) {
+double number(const std::string& input) {
     double value = 0;
-    const std::string input = text;
     const auto result = std::from_chars(input.data(), input.data() + input.size(), value);
     if (result.ec != std::errc{} || value <= 0)
         throw std::invalid_argument("Invalid positive number: " + input);
     return value;
 }
 
-bool boolean_flag(const char* text) {
-    const std::string input = text;
+bool boolean_flag(const std::string& input) {
     if (input == "1" || input == "true") return true;
     if (input == "0" || input == "false") return false;
     throw std::invalid_argument("Expected boolean flag 0/1: " + input);
 }
+
+#if defined(_WIN32)
+std::string argument_text(const wchar_t* text) {
+    if (*text == L'\0') return {};
+    const int size = WideCharToMultiByte(
+        CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 1) return {};
+    std::string result(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
+    result.pop_back();
+    return result;
+}
+
+std::filesystem::path argument_path(const wchar_t* text) {
+    return std::filesystem::path(text);
+}
+#else
+std::string argument_text(const char* text) {
+    return text;
+}
+
+std::filesystem::path argument_path(const char* text) {
+    return std::filesystem::path(text);
+}
+#endif
 
 std::string lower_extension(const std::filesystem::path& path) {
     std::string extension = path.extension().string();
@@ -56,11 +85,15 @@ void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& 
 
 }  // namespace
 
+#if defined(_WIN32)
+int wmain(int argc, wchar_t** argv) {
+#else
 int main(int argc, char** argv) {
+#endif
     try {
-        if (argc < 5 || argc > 9) {
+        if (argc < 5 || argc > 10) {
             std::cout << "Usage: aetherscan images_dir focal_pixels incremental|hierarchical|global output.(mvs|ply) "
-                         "[neighbor_window] [match_ratio] [mutual_check] [sift_contrast]\n"
+                         "[neighbor_window] [match_ratio] [mutual_check] [sift_contrast] [cache_dir|-]\n"
                          "  incremental: star initialization + PnP resection\n"
                          "  hierarchical: clustered incremental SfM + Sim(3) merge\n"
                          "  global: rotation averaging + global positioning + BA\n"
@@ -68,21 +101,34 @@ int main(int argc, char** argv) {
                          "  .ply  sparse XYZ point cloud\n";
             return argc == 1 ? 0 : 1;
         }
-        const std::filesystem::path directory = argv[1];
-        const double focal = number(argv[2]);
-        const std::string mode = argv[3];
+        const std::filesystem::path directory = argument_path(argv[1]);
+        const double focal = number(argument_text(argv[2]));
+        const std::string mode = argument_text(argv[3]);
         if (mode != "incremental" && mode != "hierarchical" && mode != "global")
             throw std::invalid_argument(
                 "Mode must be incremental, hierarchical, or global");
-        const std::filesystem::path output_path = argv[4];
+        const std::filesystem::path output_path = argument_path(argv[4]);
         const std::size_t window =
-            argc >= 6 ? static_cast<std::size_t>(number(argv[5])) : 3;
+            argc >= 6
+                ? static_cast<std::size_t>(
+                      number(argument_text(argv[5])))
+                : 3;
         const float match_ratio =
-            argc >= 7 ? static_cast<float>(number(argv[6])) : 0.85F;
+            argc >= 7
+                ? static_cast<float>(number(argument_text(argv[6])))
+                : 0.85F;
         if (match_ratio > 1.F)
             throw std::invalid_argument("match_ratio must be in (0, 1]");
-        const bool mutual_check = argc >= 8 ? boolean_flag(argv[7]) : true;
-        const double sift_contrast = argc >= 9 ? number(argv[8]) : 0.005;
+        const bool mutual_check =
+            argc >= 8 ? boolean_flag(argument_text(argv[7])) : true;
+        const double sift_contrast =
+            argc >= 9 ? number(argument_text(argv[8])) : 0.005;
+        const std::filesystem::path cache_directory =
+            argc >= 10
+                ? (argument_text(argv[9]) == "-"
+                       ? std::filesystem::path{}
+                       : argument_path(argv[9]))
+                : directory / ".aetherscan-cache";
 
         std::vector<std::filesystem::path> files;
         for (const auto& entry : std::filesystem::directory_iterator(directory)) {
@@ -112,6 +158,7 @@ int main(int argc, char** argv) {
         config.frontend.sift_contrast_threshold = sift_contrast;
         config.frontend.match_ratio = match_ratio;
         config.frontend.mutual_check = mutual_check;
+        config.frontend.checkpoint.directory = cache_directory;
 
         const auto started = std::chrono::steady_clock::now();
         aetherscan::sfm::Scene scene;
@@ -130,8 +177,9 @@ int main(int argc, char** argv) {
             aetherscan::sfm::export_openmvs_interface(scene, output_path);
         } else if (lower_extension(output_path) == ".ply") {
             save_ply(scene, output_path);
-            const auto mvs_path =
-                output_path.parent_path() / (output_path.stem().string() + ".mvs");
+            auto mvs_path =
+                output_path.parent_path() / output_path.stem();
+            mvs_path += ".mvs";
             aetherscan::sfm::export_openmvs_interface(scene, mvs_path);
             std::cout << "mvs=" << mvs_path << '\n';
         } else {

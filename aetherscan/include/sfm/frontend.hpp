@@ -1,5 +1,6 @@
 #pragma once
 
+#include "sfm/checkpoint.hpp"
 #include "sfm/geometry.hpp"
 #include "sfm/retrieval.hpp"
 #include "sfm/scene.hpp"
@@ -25,6 +26,7 @@ struct FrontEndOptions {
     std::size_t retrieval_min_images{50};
     bool augment_sequential_with_retrieval{false};
     RetrievalOptions retrieval{};
+    CheckpointOptions checkpoint{};
 };
 
 struct FrontEndTiming {
@@ -37,6 +39,7 @@ struct FrontEndTiming {
 struct FrontEndResult {
     Scene scene;
     FrontEndTiming timing;
+    std::uint64_t tracks_checkpoint_key{0};
 };
 
 // Extract features, match pairs, geometric verification, build tracks.

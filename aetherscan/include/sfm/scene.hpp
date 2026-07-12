@@ -80,6 +80,13 @@ struct ImageTrackRef {
     Index feature_id{k_invalid};
 };
 
+struct ResectionProgress {
+    unsigned since_full_ba{0};
+    unsigned bundle_adjustment_stage{0};
+    std::vector<Index> last_registered;
+    std::vector<double> recent_inlier_ratios;
+};
+
 struct Scene {
     std::vector<PinholeCamera> cameras;
     std::vector<Image> images;
@@ -88,6 +95,7 @@ struct Scene {
     // image_id -> tracks observed in that image; rebuilt whenever track
     // topology changes and used by resection/covisibility hot paths.
     std::vector<std::vector<ImageTrackRef>> image_tracks;
+    ResectionProgress resection_progress;
     unsigned thread_count{0};  // 0 = hardware concurrency
 
     void clear();
