@@ -88,5 +88,45 @@ int main() {
         std::cerr << "worker exception was not propagated\n";
         return 4;
     }
+
+    // Zero-worker pools must run submit() inline instead of deadlocking.
+    {
+        aetherscan::parallel::ThreadPool empty_pool(0);
+        std::atomic<unsigned> ran{0};
+        empty_pool.submit([&] {
+            ran.fetch_add(1, std::memory_order_relaxed);
+        }).get();
+        if (ran.load(std::memory_order_relaxed) != 1U) {
+            std::cerr << "empty pool did not run task inline\n";
+            return 7;
+        }
+    }
+
+    // FutureGroup must drain outstanding work even when wait() sees an error.
+    {
+        aetherscan::parallel::FutureGroup group;
+        std::atomic<unsigned> completed{0};
+        group.submit(pool, [&] {
+            completed.fetch_add(1, std::memory_order_relaxed);
+        });
+        group.submit(pool, [] { throw std::runtime_error("group failure"); });
+        group.submit(pool, [&] {
+            completed.fetch_add(1, std::memory_order_relaxed);
+        });
+        bool group_error = false;
+        try {
+            group.wait();
+        } catch (const std::runtime_error&) {
+            group_error = true;
+        }
+        if (!group_error) {
+            std::cerr << "FutureGroup did not propagate worker error\n";
+            return 8;
+        }
+        if (completed.load(std::memory_order_relaxed) != 2U) {
+            std::cerr << "FutureGroup did not drain sibling tasks\n";
+            return 9;
+        }
+    }
     return 0;
 }

@@ -3,17 +3,22 @@
 #include "core/logging.hpp"
 #include "features/features.hpp"
 #include "features/registry.hpp"
+#include "io/image.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/tracks.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 namespace aetherscan::sfm {
 namespace {
@@ -74,7 +79,7 @@ FrontEndStageKeys make_stage_keys(
     const FrontEndOptions& options,
     const ImageSetFingerprint& images) {
     FingerprintBuilder features;
-    features.append_string("aetherscan-features-v3");
+    features.append_string("aetherscan-features-v4");
     append_cache_build_identity(features);
     features.append(images.value);
     features.append_string(options.extractor);
@@ -82,7 +87,7 @@ FrontEndStageKeys make_stage_keys(
     features.append(options.max_features);
 
     FingerprintBuilder matches;
-    matches.append_string("aetherscan-matches-v3");
+    matches.append_string("aetherscan-matches-v4");
     append_cache_build_identity(matches);
     matches.append(features.value());
     matches.append(options.neighbor_window);
@@ -249,6 +254,306 @@ void release_descriptors(Scene& scene) {
 
 void compress_descriptors(Scene& scene) {
     for (Image& image : scene.images) image.features.compress_descriptors_u8();
+}
+
+float keypoint_selection_weight(const features::Keypoint& keypoint) {
+    if (!(keypoint.response > 0.F)) return 0.F;
+    const float response_weight =
+        keypoint.response / (keypoint.response + 0.03F);
+    const float scale =
+        std::clamp(keypoint.scale, 2.F, 20.F);
+    const float scale_weight = 0.5F + (scale - 2.F) / 18.F;
+    return response_weight * scale_weight;
+}
+
+// openMVS SelectTopKeypoints: 3x3 spatial cells + round-robin by quality.
+features::FeatureSet select_top_features_grid_3x3(
+    features::FeatureSet features, const unsigned max_features) {
+    if (max_features == 0 || features.keypoints.size() <= max_features)
+        return features;
+    if (features.image_width == 0 || features.image_height == 0)
+        return features;
+
+    constexpr int k_grid = 3;
+    const float cell_width =
+        static_cast<float>(features.image_width) / static_cast<float>(k_grid);
+    const float cell_height =
+        static_cast<float>(features.image_height) / static_cast<float>(k_grid);
+    std::array<std::vector<Index>, k_grid * k_grid> cells;
+    for (Index index = 0; index < features.keypoints.size(); ++index) {
+        const auto& keypoint = features.keypoints[index];
+        const int column = std::clamp(
+            static_cast<int>(keypoint.x / cell_width), 0, k_grid - 1);
+        const int row = std::clamp(
+            static_cast<int>(keypoint.y / cell_height), 0, k_grid - 1);
+        cells[static_cast<std::size_t>(row * k_grid + column)].push_back(index);
+    }
+    for (auto& cell : cells) {
+        std::sort(cell.begin(), cell.end(), [&](const Index left, const Index right) {
+            return keypoint_selection_weight(features.keypoints[left]) >
+                   keypoint_selection_weight(features.keypoints[right]);
+        });
+    }
+
+    std::vector<Index> selected;
+    selected.reserve(max_features);
+    std::array<std::size_t, k_grid * k_grid> offsets{};
+    for (int current = 0; selected.size() < max_features;
+         current = (current + 1) % (k_grid * k_grid)) {
+        auto& offset = offsets[static_cast<std::size_t>(current)];
+        const auto& cell = cells[static_cast<std::size_t>(current)];
+        if (offset >= cell.size()) {
+            // All cells exhausted? Round-robin still advances; break if stuck.
+            bool any_remaining = false;
+            for (std::size_t cell_index = 0; cell_index < cells.size();
+                 ++cell_index) {
+                if (offsets[cell_index] < cells[cell_index].size()) {
+                    any_remaining = true;
+                    break;
+                }
+            }
+            if (!any_remaining) break;
+            continue;
+        }
+        selected.push_back(cell[offset++]);
+    }
+    std::sort(selected.begin(), selected.end());
+
+    features::FeatureSet trimmed = features;
+    trimmed.keypoints.clear();
+    trimmed.descriptors.clear();
+    trimmed.descriptors_u8.clear();
+    trimmed.keypoints.reserve(selected.size());
+    const bool has_float =
+        features.storage == features::DescriptorStorage::float32 &&
+        !features.descriptors.empty();
+    const bool has_u8 =
+        features.storage == features::DescriptorStorage::uint8 &&
+        !features.descriptors_u8.empty();
+    if (has_float)
+        trimmed.descriptors.reserve(
+            selected.size() * features.descriptor_dimension);
+    if (has_u8)
+        trimmed.descriptors_u8.reserve(
+            selected.size() * features.descriptor_dimension);
+    for (const Index index : selected) {
+        trimmed.keypoints.push_back(features.keypoints[index]);
+        if (has_float) {
+            const float* row = features.descriptors.data() +
+                               index * features.descriptor_dimension;
+            trimmed.descriptors.insert(
+                trimmed.descriptors.end(), row,
+                row + features.descriptor_dimension);
+        }
+        if (has_u8) {
+            const auto* row = features.descriptors_u8.data() +
+                              index * features.descriptor_dimension;
+            trimmed.descriptors_u8.insert(
+                trimmed.descriptors_u8.end(), row,
+                row + features.descriptor_dimension);
+        }
+    }
+    trimmed.mark_descriptors_modified();
+    return trimmed;
+}
+
+// openMVS OptimizePairsOrder: group by id1 for GPU descriptor cache reuse,
+// then prefer harder (larger descriptor product) pairs within a group.
+void optimize_pairs_order(
+    std::vector<PairCandidate>& pairs, const Scene& scene) {
+    if (pairs.size() < 2) return;
+    struct PairCost {
+        PairCandidate pair{};
+        std::size_t cost{0};
+    };
+    std::vector<PairCost> ranked;
+    ranked.reserve(pairs.size());
+    for (const PairCandidate& pair : pairs) {
+        const std::size_t left =
+            pair.id1 < scene.images.size()
+                ? scene.images[pair.id1].features.keypoints.size()
+                : 0;
+        const std::size_t right =
+            pair.id2 < scene.images.size()
+                ? scene.images[pair.id2].features.keypoints.size()
+                : 0;
+        ranked.push_back({pair, left * right});
+    }
+    std::stable_sort(
+        ranked.begin(), ranked.end(),
+        [](const PairCost& left, const PairCost& right) {
+            if (left.pair.id1 != right.pair.id1)
+                return left.pair.id1 < right.pair.id1;
+            return left.cost > right.cost;
+        });
+    for (std::size_t index = 0; index < pairs.size(); ++index)
+        pairs[index] = ranked[index].pair;
+}
+
+Image make_image_from_features(
+    const Index image_id, const std::filesystem::path& path,
+    features::FeatureSet features) {
+    Image image;
+    image.id = image_id;
+    image.path = path;
+    image.features = std::move(features);
+    return image;
+}
+
+// openMVS-style SiftGPU coordinator: main thread owns the CUDA context while
+// worker threads overlap IO prefetch and CPU post-processing.
+void extract_features_siftgpu_coordinator(
+    Scene& scene, const std::vector<std::filesystem::path>& image_paths,
+    features::FeatureExtractor& extractor, const unsigned max_features,
+    core::ProgressReporter& progress) {
+    const std::size_t count = image_paths.size();
+    scene.images.resize(count);
+    auto& pool = parallel::global_thread_pool();
+    parallel::FutureGroup post_tasks;
+    post_tasks.reserve(count);
+
+    std::future<io::GrayImage> current_load = std::async(
+        std::launch::async,
+        [&image_paths] { return io::load_gray(image_paths[0]); });
+
+    for (std::size_t index = 0; index < count; ++index) {
+        std::future<io::GrayImage> next_load;
+        if (index + 1 < count) {
+            const std::filesystem::path next_path = image_paths[index + 1];
+            next_load = std::async(
+                std::launch::async,
+                [next_path] { return io::load_gray(next_path); });
+        }
+
+        io::GrayImage gray = current_load.get();
+        features::FeatureSet features = extractor.extract_gray(
+            gray.pixels, gray.width, gray.height);
+
+        post_tasks.submit(
+            pool,
+            [&, index, path = image_paths[index],
+             features = std::move(features)]() mutable {
+                features = select_top_features_grid_3x3(
+                    std::move(features), max_features);
+                scene.images[index] = make_image_from_features(
+                    static_cast<Index>(index), path, std::move(features));
+                progress.advance();
+            });
+
+        if (index + 1 < count) current_load = std::move(next_load);
+    }
+
+    post_tasks.wait();
+}
+
+struct GeometryVerifyResult {
+    PairDiagnostics diagnostics;
+    std::optional<ImagePair> pair;
+};
+
+GeometryVerifyResult verify_pair_geometry(
+    const Scene& scene, const PairCandidate& candidate,
+    const std::vector<features::FeatureMatch>& raw,
+    const RelativePoseOptions& relative) {
+    GeometryVerifyResult result;
+    result.diagnostics.raw_matches = raw.size();
+    if (raw.size() < relative.min_inliers) return result;
+
+    const Image& img1 = scene.images[candidate.id1];
+    const Image& img2 = scene.images[candidate.id2];
+    result.diagnostics.attempted_geometry = true;
+
+    std::vector<Vec2> p1, p2;
+    p1.reserve(raw.size());
+    p2.reserve(raw.size());
+    for (const auto& match : raw) {
+        const auto& k1 = img1.features.keypoints[match.query];
+        const auto& k2 = img2.features.keypoints[match.train];
+        p1.emplace_back(k1.x, k1.y);
+        p2.emplace_back(k2.x, k2.y);
+    }
+
+    const RelativePoseResult geo = estimate_relative_pose(
+        p1, p2, scene.cameras[img1.camera_id], scene.cameras[img2.camera_id],
+        relative);
+    result.diagnostics.ransac_inliers = geo.num_ransac_inliers;
+    result.diagnostics.filtered_inliers = geo.num_inliers;
+    if (!geo.success) return result;
+
+    ImagePair pair(candidate.id1, candidate.id2);
+    pair.relative_pose = geo.pose;
+    pair.E = geo.E;
+    pair.F = geo.F;
+    pair.estimated_focal = geo.estimated_focal;
+    pair.H = geo.H;
+    pair.mean_ray_angle = geo.mean_ray_angle;
+    pair.weight_spatial = geo.weight_spatial;
+    pair.homography_ratio = geo.homography_ratio;
+    pair.degenerate_planar = geo.degenerate_planar;
+    pair.weight_geometry =
+        geo.degenerate_planar ? relative.degenerate_weight_scale : 1.F;
+    for (std::size_t i = 0; i < geo.inlier_mask.size(); ++i) {
+        if (!geo.inlier_mask[i]) continue;
+        pair.matches.push_back({raw[i].query, raw[i].train});
+    }
+    if (pair.matches.size() < relative.min_inliers) return result;
+
+    result.diagnostics.accepted = true;
+    result.pair = std::move(pair);
+    return result;
+}
+
+// openMVS-style match coordinator: GPU matching on the owner thread, geometric
+// verification on the CPU thread pool in bounded batches.
+void match_and_verify_siftgpu_coordinator(
+    Scene& scene, const std::vector<PairCandidate>& candidates,
+    features::FeatureMatcher& matcher, const FrontEndOptions& options,
+    const unsigned worker_threads, std::vector<RawPairMatches>& raw_pairs,
+    std::vector<PairDiagnostics>& diagnostics,
+    std::vector<ImagePair>& pair_slots, core::ProgressReporter& match_progress) {
+    raw_pairs.resize(candidates.size());
+    diagnostics.assign(candidates.size(), {});
+    pair_slots.assign(candidates.size(), ImagePair{});
+
+    auto& pool = parallel::global_thread_pool();
+    const std::size_t batch_size =
+        std::max<std::size_t>(static_cast<std::size_t>(worker_threads) * 4U, 64U);
+
+    for (std::size_t batch_begin = 0; batch_begin < candidates.size();
+         batch_begin += batch_size) {
+        const std::size_t batch_end =
+            std::min(batch_begin + batch_size, candidates.size());
+        parallel::FutureGroup batch_tasks;
+        batch_tasks.reserve(batch_end - batch_begin);
+
+        for (std::size_t pair_index = batch_begin; pair_index < batch_end;
+             ++pair_index) {
+            const PairCandidate candidate = candidates[pair_index];
+            RawPairMatches raw;
+            raw.id1 = candidate.id1;
+            raw.id2 = candidate.id2;
+            raw.matches =
+                matcher
+                    .match(
+                        scene.images[candidate.id1].features,
+                        scene.images[candidate.id2].features)
+                    .matches;
+
+            batch_tasks.submit(
+                pool,
+                [&, pair_index, candidate, raw = std::move(raw)]() mutable {
+                    raw_pairs[pair_index] = std::move(raw);
+                    GeometryVerifyResult verified = verify_pair_geometry(
+                        scene, candidate, raw_pairs[pair_index].matches,
+                        options.relative);
+                    diagnostics[pair_index] = verified.diagnostics;
+                    if (verified.pair) pair_slots[pair_index] = *verified.pair;
+                    match_progress.advance();
+                });
+        }
+
+        batch_tasks.wait();
+    }
 }
 
 std::vector<PairCandidate> build_pair_list(
@@ -418,57 +723,32 @@ FrontEndResult run_frontend(
         core::ProgressReporter progress("extract features", image_paths.size());
         scene.images.resize(image_paths.size());
         scene.cameras.reserve(image_paths.size());
-        // SiftGPU owns one thread-affine CUDA/OpenGL context. A single context
-        // already saturates the GPU and avoids constructing one context per CPU
-        // worker.
-        const unsigned extraction_threads =
-            extractor->info().thread_affine ? 1U : threads;
-        std::vector<std::unique_ptr<features::FeatureExtractor>> workers(
-            extraction_threads);
-        if (extraction_threads > 1 && !extractor->info().thread_safe) {
-            for (unsigned t = 0; t < extraction_threads; ++t)
-                workers[t] = extractor->clone();
-        }
-        parallel::parallel_for(
-            image_paths.size(), extraction_threads,
-            [&](const std::size_t i, const unsigned tid) {
-        features::FeatureExtractor* local =
-            workers[tid] ? workers[tid].get() : extractor.get();
-        features::FeatureSet features = local->extract_file(image_paths[i]);
-        if (options.max_features > 0 && features.keypoints.size() > options.max_features) {
-            std::vector<Index> order(features.keypoints.size());
-            std::iota(order.begin(), order.end(), 0);
-            std::partial_sort(
-                order.begin(),
-                order.begin() + static_cast<std::ptrdiff_t>(options.max_features),
-                order.end(),
-                [&](Index a, Index b) {
-                    return features.keypoints[a].response > features.keypoints[b].response;
-                });
-            order.resize(options.max_features);
-            std::sort(order.begin(), order.end());
-            features::FeatureSet trimmed = features;
-            trimmed.keypoints.clear();
-            trimmed.descriptors.clear();
-            trimmed.keypoints.reserve(order.size());
-            trimmed.descriptors.reserve(order.size() * features.descriptor_dimension);
-            for (Index idx : order) {
-                trimmed.keypoints.push_back(features.keypoints[idx]);
-                const float* row =
-                    features.descriptors.data() + idx * features.descriptor_dimension;
-                trimmed.descriptors.insert(
-                    trimmed.descriptors.end(), row, row + features.descriptor_dimension);
+        if (extractor->info().thread_affine) {
+            extract_features_siftgpu_coordinator(
+                scene, image_paths, *extractor, options.max_features, progress);
+        } else {
+            const unsigned extraction_threads = threads;
+            std::vector<std::unique_ptr<features::FeatureExtractor>> workers(
+                extraction_threads);
+            if (extraction_threads > 1 && !extractor->info().thread_safe) {
+                for (unsigned t = 0; t < extraction_threads; ++t)
+                    workers[t] = extractor->clone();
             }
-            features = std::move(trimmed);
+            parallel::parallel_for(
+                image_paths.size(), extraction_threads,
+                [&](const std::size_t i, const unsigned tid) {
+                    features::FeatureExtractor* local =
+                        workers[tid] ? workers[tid].get() : extractor.get();
+                    features::FeatureSet features =
+                        local->extract_file(image_paths[i]);
+                    features = select_top_features_grid_3x3(
+                        std::move(features), options.max_features);
+                    scene.images[i] = make_image_from_features(
+                        static_cast<Index>(i), image_paths[i],
+                        std::move(features));
+                    progress.advance();
+                });
         }
-
-        Image image;
-        image.id = static_cast<Index>(i);
-        image.path = image_paths[i];
-        image.features = std::move(features);
-        scene.images[i] = std::move(image);
-        progress.advance();
-        });
 
         initialize_cameras(
             scene, options.focal_pixels, options.trust_focal_pixels);
@@ -486,7 +766,10 @@ FrontEndResult run_frontend(
             .count();
 
     const auto match_started = std::chrono::steady_clock::now();
-    const auto candidates = build_pair_candidates(scene, runtime_options);
+    auto candidates = build_pair_candidates(scene, runtime_options);
+    // Group by id1 before GPU matching so slot-0 descriptors stay warm.
+    if (matcher->requires_owner_thread())
+        optimize_pairs_order(candidates, scene);
     if (runtime_options.compress_descriptors_u8) compress_descriptors(scene);
     std::vector<RawPairMatches> raw_pairs;
     bool match_cache_hit =
@@ -516,68 +799,83 @@ FrontEndResult run_frontend(
     } else {
         match_cache_hit = false;
     }
+    std::vector<PairDiagnostics> diagnostics(candidates.size());
+    bool geometry_verified_in_pipeline = false;
     if (!match_cache_hit) {
         raw_pairs.resize(candidates.size());
-        // SiftMatchGPU contexts are thread-affine. Submit all GPU pairs from
-        // this thread; each pair is massively parallel on the device.
-        const unsigned match_threads =
-            matcher->requires_owner_thread() ? 1U : threads;
-        std::vector<std::unique_ptr<features::FeatureMatcher>> match_workers(
-            match_threads);
-        for (unsigned t = 0; t < match_threads; ++t)
-            match_workers[t] = matcher->clone();
-        auto* ratio_matcher =
-            dynamic_cast<features::MutualRatioMatcher*>(match_workers.front().get());
-        std::vector<std::uint8_t> active_images(scene.images.size(), 0);
-        for (const PairCandidate& candidate : candidates) {
-            if (candidate.id1 < active_images.size())
-                active_images[candidate.id1] = 1;
-            if (candidate.id2 < active_images.size())
-                active_images[candidate.id2] = 1;
+        if (matcher->requires_owner_thread()) {
+            std::vector<ImagePair> pair_slots;
+            core::ProgressReporter match_progress(
+                "match image pairs", candidates.size());
+            match_and_verify_siftgpu_coordinator(
+                scene, candidates, *matcher, options, threads, raw_pairs,
+                diagnostics, pair_slots, match_progress);
+            match_progress.finish();
+            scene.pairs.reserve(pair_slots.size());
+            for (ImagePair& pair : pair_slots) {
+                if (pair.matches.empty()) continue;
+                scene.pairs.push_back(std::move(pair));
+            }
+            geometry_verified_in_pipeline = true;
+        } else {
+            const unsigned match_threads = threads;
+            std::vector<std::unique_ptr<features::FeatureMatcher>> match_workers(
+                match_threads);
+            for (unsigned t = 0; t < match_threads; ++t)
+                match_workers[t] = matcher->clone();
+            auto* ratio_matcher =
+                dynamic_cast<features::MutualRatioMatcher*>(
+                    match_workers.front().get());
+            std::vector<std::uint8_t> active_images(scene.images.size(), 0);
+            for (const PairCandidate& candidate : candidates) {
+                if (candidate.id1 < active_images.size())
+                    active_images[candidate.id1] = 1;
+                if (candidate.id2 < active_images.size())
+                    active_images[candidate.id2] = 1;
+            }
+            std::vector<Index> prepare_ids;
+            prepare_ids.reserve(scene.images.size());
+            for (Index image_id = 0; image_id < active_images.size(); ++image_id) {
+                if (active_images[image_id]) prepare_ids.push_back(image_id);
+            }
+            if (ratio_matcher) {
+                for (const Index image_id : prepare_ids)
+                    ratio_matcher->pin(scene.images[image_id].features);
+            }
+            core::ProgressReporter prepare_progress(
+                "prepare descriptor indices", prepare_ids.size());
+            parallel::parallel_for(
+                prepare_ids.size(), match_threads,
+                [&](const std::size_t index, const unsigned tid) {
+                    match_workers[tid]->prepare(
+                        scene.images[prepare_ids[index]].features);
+                    prepare_progress.advance();
+                });
+            prepare_progress.finish();
+            core::ProgressReporter match_progress(
+                "match image pairs", candidates.size());
+            parallel::parallel_for(
+                candidates.size(), match_threads,
+                [&](const std::size_t ci, const unsigned tid) {
+                    const PairCandidate candidate = candidates[ci];
+                    RawPairMatches& cached = raw_pairs[ci];
+                    cached.id1 = candidate.id1;
+                    cached.id2 = candidate.id2;
+                    cached.matches =
+                        match_workers[tid]
+                            ->match(
+                                scene.images[candidate.id1].features,
+                                scene.images[candidate.id2].features)
+                            .matches;
+                    match_progress.advance();
+                });
+            match_progress.finish();
+            if (ratio_matcher) {
+                for (const Index image_id : prepare_ids)
+                    ratio_matcher->unpin(scene.images[image_id].features);
+            }
+            match_workers.front()->clear_prepared();
         }
-        std::vector<Index> prepare_ids;
-        prepare_ids.reserve(scene.images.size());
-        for (Index image_id = 0; image_id < active_images.size(); ++image_id) {
-            if (active_images[image_id]) prepare_ids.push_back(image_id);
-        }
-        if (ratio_matcher) {
-            for (const Index image_id : prepare_ids)
-                ratio_matcher->pin(scene.images[image_id].features);
-        }
-        core::ProgressReporter prepare_progress(
-            "prepare descriptor indices", prepare_ids.size());
-        parallel::parallel_for(
-            prepare_ids.size(), match_threads,
-            [&](const std::size_t index, const unsigned tid) {
-                match_workers[tid]->prepare(
-                    scene.images[prepare_ids[index]].features);
-                prepare_progress.advance();
-            });
-        prepare_progress.finish();
-        core::ProgressReporter match_progress(
-            "match image pairs", candidates.size());
-        parallel::parallel_for(
-            candidates.size(), match_threads,
-            [&](const std::size_t ci, const unsigned tid) {
-                const PairCandidate candidate = candidates[ci];
-                RawPairMatches& cached = raw_pairs[ci];
-                cached.id1 = candidate.id1;
-                cached.id2 = candidate.id2;
-                cached.matches =
-                    match_workers[tid]
-                        ->match(
-                            scene.images[candidate.id1].features,
-                            scene.images[candidate.id2].features)
-                        .matches;
-                match_progress.advance();
-            });
-        match_progress.finish();
-        if (ratio_matcher) {
-            for (const Index image_id : prepare_ids)
-                ratio_matcher->unpin(scene.images[image_id].features);
-        }
-        // Shared across matcher clones; release HNSW graphs before geometry.
-        match_workers.front()->clear_prepared();
         checkpoints.save_matches(stage_keys.matches, raw_pairs);
     } else {
         core::Logger::instance().info("checkpoint hit: matches");
@@ -585,75 +883,26 @@ FrontEndResult run_frontend(
     // Descriptors are no longer needed after matching; keep keypoints only.
     release_descriptors(scene);
 
-    std::vector<ImagePair> pairs(candidates.size());
-    std::vector<PairDiagnostics> diagnostics(candidates.size());
-    core::ProgressReporter geometry_progress(
-        "verify pair geometry", candidates.size());
-    parallel::parallel_for(
-        candidates.size(), threads, [&](const std::size_t ci) {
-        const PairCandidate cand = candidates[ci];
-        const Image& img1 = scene.images[cand.id1];
-        const Image& img2 = scene.images[cand.id2];
-        const auto& raw = raw_pairs[ci].matches;
-        diagnostics[ci].raw_matches = raw.size();
-        if (raw.size() < options.relative.min_inliers) {
-            geometry_progress.advance();
-            return;
-        }
-        diagnostics[ci].attempted_geometry = true;
+    if (!geometry_verified_in_pipeline) {
+        std::vector<ImagePair> pairs(candidates.size());
+        core::ProgressReporter geometry_progress(
+            "verify pair geometry", candidates.size());
+        parallel::parallel_for(
+            candidates.size(), threads, [&](const std::size_t ci) {
+                const PairCandidate cand = candidates[ci];
+                GeometryVerifyResult verified = verify_pair_geometry(
+                    scene, cand, raw_pairs[ci].matches, options.relative);
+                diagnostics[ci] = verified.diagnostics;
+                if (verified.pair) pairs[ci] = std::move(*verified.pair);
+                geometry_progress.advance();
+            });
+        geometry_progress.finish();
 
-        std::vector<Vec2> p1, p2;
-        p1.reserve(raw.size());
-        p2.reserve(raw.size());
-        for (const auto& m : raw) {
-            const auto& k1 = img1.features.keypoints[m.query];
-            const auto& k2 = img2.features.keypoints[m.train];
-            p1.emplace_back(k1.x, k1.y);
-            p2.emplace_back(k2.x, k2.y);
+        scene.pairs.reserve(pairs.size());
+        for (auto& pair : pairs) {
+            if (pair.matches.empty()) continue;
+            scene.pairs.push_back(std::move(pair));
         }
-
-        RelativePoseResult geo = estimate_relative_pose(
-            p1, p2, scene.cameras[img1.camera_id], scene.cameras[img2.camera_id],
-            options.relative);
-        diagnostics[ci].ransac_inliers = geo.num_ransac_inliers;
-        diagnostics[ci].filtered_inliers = geo.num_inliers;
-        if (!geo.success) {
-            geometry_progress.advance();
-            return;
-        }
-
-        ImagePair pair(cand.id1, cand.id2);
-        pair.relative_pose = geo.pose;
-        pair.E = geo.E;
-        pair.F = geo.F;
-        pair.estimated_focal = geo.estimated_focal;
-        pair.H = geo.H;
-        pair.mean_ray_angle = geo.mean_ray_angle;
-        pair.weight_spatial = geo.weight_spatial;
-        pair.homography_ratio = geo.homography_ratio;
-        pair.degenerate_planar = geo.degenerate_planar;
-        pair.weight_geometry =
-            geo.degenerate_planar ? options.relative.degenerate_weight_scale : 1.F;
-        // Keep pair for track connectivity; star_init skips planar via usable_for_init().
-        for (std::size_t i = 0; i < geo.inlier_mask.size(); ++i) {
-            if (!geo.inlier_mask[i]) continue;
-            pair.matches.push_back(
-                {raw[i].query, raw[i].train});
-        }
-        if (pair.matches.size() < options.relative.min_inliers) {
-            geometry_progress.advance();
-            return;
-        }
-        diagnostics[ci].accepted = true;
-        pairs[ci] = std::move(pair);
-        geometry_progress.advance();
-        });
-    geometry_progress.finish();
-
-    scene.pairs.reserve(pairs.size());
-    for (auto& pair : pairs) {
-        if (pair.matches.empty()) continue;
-        scene.pairs.push_back(std::move(pair));
     }
     verify_image_snapshot(
         image_paths, image_fingerprint, ImageSnapshotCheck::content);

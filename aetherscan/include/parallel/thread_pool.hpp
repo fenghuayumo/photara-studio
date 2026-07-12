@@ -127,6 +127,12 @@ public:
         auto task = std::make_shared<std::packaged_task<void()>>(
             std::forward<Function>(function));
         std::future<void> result = task->get_future();
+        // Zero-worker pools (single-core hosts) must run inline; otherwise
+        // callers that wait on the returned future deadlock forever.
+        if (workers_.empty()) {
+            (*task)();
+            return result;
+        }
         {
             std::lock_guard lock(mutex_);
             tasks_.emplace_back([task = std::move(task)] { (*task)(); });
@@ -140,6 +146,53 @@ private:
     std::condition_variable_any condition_;
     std::deque<std::function<void()>> tasks_;
     std::vector<std::jthread> workers_;
+};
+
+// Wait for every future even if one throws, then rethrow the first error.
+inline void wait_all(std::vector<std::future<void>>& futures) {
+    std::exception_ptr error;
+    for (std::future<void>& future : futures) {
+        if (!future.valid()) continue;
+        try {
+            future.get();
+        } catch (...) {
+            if (!error) error = std::current_exception();
+        }
+    }
+    futures.clear();
+    if (error) std::rethrow_exception(error);
+}
+
+// Owns outstanding pool futures and always drains them on destruction so
+// stack-capturing tasks cannot outlive their coordinator frame (UAF).
+class FutureGroup {
+public:
+    FutureGroup() = default;
+    FutureGroup(const FutureGroup&) = delete;
+    FutureGroup& operator=(const FutureGroup&) = delete;
+
+    ~FutureGroup() {
+        for (std::future<void>& future : futures_) {
+            if (!future.valid()) continue;
+            try {
+                future.get();
+            } catch (...) {
+                // Destructor must not throw; the owning scope already failed.
+            }
+        }
+    }
+
+    template <class Function>
+    void submit(ThreadPool& pool, Function&& function) {
+        futures_.push_back(pool.submit(std::forward<Function>(function)));
+    }
+
+    void wait() { wait_all(futures_); }
+
+    void reserve(const std::size_t count) { futures_.reserve(count); }
+
+private:
+    std::vector<std::future<void>> futures_;
 };
 
 inline ThreadPool& global_thread_pool() {

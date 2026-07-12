@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -186,6 +187,14 @@ public:
     bool available{false};
     std::thread::id owner_thread;
     mutable std::mutex mutex;
+    // Skip SetDescriptors when the same FeatureSet remains bound to a slot
+    // (openMVS prevImageID1/prevImageID2 cache).
+    mutable std::uint64_t slot0_identity{0};
+    mutable std::uint64_t slot0_generation{
+        std::numeric_limits<std::uint64_t>::max()};
+    mutable std::uint64_t slot1_identity{0};
+    mutable std::uint64_t slot1_generation{
+        std::numeric_limits<std::uint64_t>::max()};
 #if defined(AETHERSCAN_HAS_SIFTGPU)
     std::unique_ptr<SiftMatchGPU> gpu;
 #endif
@@ -242,10 +251,20 @@ MatchSet SiftGpuMatcher::match(
 
 #if defined(AETHERSCAN_HAS_SIFTGPU)
     std::lock_guard lock(impl_->mutex);
-    impl_->gpu->SetDescriptors(
-        0, static_cast<int>(query.keypoints.size()), query_rows.data());
-    impl_->gpu->SetDescriptors(
-        1, static_cast<int>(train.keypoints.size()), train_rows.data());
+    if (impl_->slot0_identity != query.descriptor_identity ||
+        impl_->slot0_generation != query.descriptor_generation) {
+        impl_->gpu->SetDescriptors(
+            0, static_cast<int>(query.keypoints.size()), query_rows.data());
+        impl_->slot0_identity = query.descriptor_identity;
+        impl_->slot0_generation = query.descriptor_generation;
+    }
+    if (impl_->slot1_identity != train.descriptor_identity ||
+        impl_->slot1_generation != train.descriptor_generation) {
+        impl_->gpu->SetDescriptors(
+            1, static_cast<int>(train.keypoints.size()), train_rows.data());
+        impl_->slot1_identity = train.descriptor_identity;
+        impl_->slot1_generation = train.descriptor_generation;
+    }
     const int maximum_matches = static_cast<int>(
         impl_->options.mutual_check
             ? std::min(query.keypoints.size(), train.keypoints.size())
