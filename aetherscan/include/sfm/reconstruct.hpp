@@ -7,6 +7,8 @@
 #include "sfm/resection.hpp"
 #include "sfm/star_init.hpp"
 
+#include <cstdint>
+
 namespace aetherscan::sfm {
 
 enum class ReconstructionMode {
@@ -30,6 +32,9 @@ struct ReconstructionSummary {
     unsigned registered_views{0};
     unsigned landmarks{0};
     unsigned failed_views{0};
+    std::uint64_t reprojection_observations{0};
+    double mean_reprojection_error_pixels{0.0};
+    double rms_reprojection_error_pixels{0.0};
 };
 
 // Full reconstruction using the mode selected in ReconstructionConfig.

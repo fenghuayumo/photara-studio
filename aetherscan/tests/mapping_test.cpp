@@ -509,6 +509,13 @@ int main() {
     expect(global.valid, "global mapping");
     expect(global.registered_views == k_views, "global mapping registers every view");
     expect(global.landmarks >= 30, "global mapping reconstructs enough landmarks");
+    expect(
+        global.reprojection_observations > 0 &&
+            std::isfinite(global.mean_reprojection_error_pixels) &&
+            std::isfinite(global.rms_reprojection_error_pixels) &&
+            global.rms_reprojection_error_pixels >=
+                global.mean_reprojection_error_pixels,
+        "global mapping reports reprojection statistics");
 
     if (failures == 0) {
         std::cout << "sfm mapping tests passed\n";

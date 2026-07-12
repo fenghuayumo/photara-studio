@@ -6,6 +6,7 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -17,9 +18,31 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <psapi.h>
+#else
+#include <sys/resource.h>
 #endif
 
 namespace {
+
+std::uint64_t peak_working_set_bytes() noexcept {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters{};
+    counters.cb = sizeof(counters);
+    if (!K32GetProcessMemoryInfo(
+            GetCurrentProcess(), &counters, sizeof(counters)))
+        return 0;
+    return static_cast<std::uint64_t>(counters.PeakWorkingSetSize);
+#else
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) return 0;
+#if defined(__APPLE__)
+    return static_cast<std::uint64_t>(usage.ru_maxrss);
+#else
+    return static_cast<std::uint64_t>(usage.ru_maxrss) * 1024ULL;
+#endif
+#endif
+}
 
 double number(const std::string& input) {
     double value = 0;
@@ -209,6 +232,14 @@ int main(int argc, char** argv) {
         aetherscan::core::Logger::instance().info(
             "valid=", summary.valid, " registered=", summary.registered_views,
             '/', scene.images.size(), " landmarks=", summary.landmarks,
+            " reprojection_mean_px=",
+            summary.mean_reprojection_error_pixels,
+            " reprojection_rms_px=",
+            summary.rms_reprojection_error_pixels,
+            " reprojection_observations=",
+            summary.reprojection_observations,
+            " peak_working_set_mb=",
+            static_cast<double>(peak_working_set_bytes()) / (1024.0 * 1024.0),
             " failed=", summary.failed_views, " elapsed_s=", elapsed,
             " output=", output_path, " log=", log_path);
         return summary.valid ? 0 : 2;

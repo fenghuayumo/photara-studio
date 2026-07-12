@@ -6,6 +6,7 @@
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 
+#include <cmath>
 #include <iostream>
 
 namespace aetherscan::sfm {
@@ -117,6 +118,48 @@ std::uint64_t reconstruction_key(
     return key.value();
 }
 
+void populate_reprojection_stats(
+    const Scene& scene, ReconstructionSummary& summary) {
+    double error_sum = 0.0;
+    double squared_error_sum = 0.0;
+    std::uint64_t observation_count = 0;
+    for (const Track& track : scene.tracks) {
+        if (!track.is_triangulated() || !track.position.allFinite()) continue;
+        const std::size_t inlier_count = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < inlier_count; ++i) {
+            const Observation& observation = track.observations[i];
+            if (observation.image_id >= scene.images.size()) continue;
+            const Image& image = scene.images[observation.image_id];
+            if (!image.registered || image.camera_id >= scene.cameras.size() ||
+                observation.feature_id >= image.features.keypoints.size())
+                continue;
+            const Vec3 camera_point =
+                image.pose.transform_world_to_camera(track.position);
+            if (!camera_point.allFinite() || camera_point.z() <= 0.0) continue;
+            const Vec2 projected =
+                scene.cameras[image.camera_id].project(camera_point);
+            const auto& keypoint =
+                image.features.keypoints[observation.feature_id];
+            const Vec2 measured(
+                static_cast<double>(keypoint.x),
+                static_cast<double>(keypoint.y));
+            const double error = (projected - measured).norm();
+            if (!std::isfinite(error)) continue;
+            error_sum += error;
+            squared_error_sum += error * error;
+            ++observation_count;
+        }
+    }
+    summary.reprojection_observations = observation_count;
+    if (observation_count == 0) return;
+    const double inverse_count =
+        1.0 / static_cast<double>(observation_count);
+    summary.mean_reprojection_error_pixels = error_sum * inverse_count;
+    summary.rms_reprojection_error_pixels =
+        std::sqrt(squared_error_sum * inverse_count);
+}
+
 ReconstructionSummary summarize_scene(const Scene& scene) {
     ReconstructionSummary summary;
     summary.registered_views = scene.registered_count();
@@ -126,6 +169,7 @@ ReconstructionSummary summarize_scene(const Scene& scene) {
         if (track.is_triangulated()) ++summary.landmarks;
     summary.valid =
         summary.registered_views >= 2 && summary.landmarks > 0;
+    populate_reprojection_stats(scene, summary);
     return summary;
 }
 
@@ -144,14 +188,7 @@ ReconstructionSummary run_incremental_mapping(
     }
     register_images(scene, resection);
 
-    summary.registered_views = scene.registered_count();
-    summary.failed_views =
-        static_cast<unsigned>(scene.images.size()) - summary.registered_views;
-    for (const Track& track : scene.tracks) {
-        if (track.is_triangulated()) ++summary.landmarks;
-    }
-    summary.valid = summary.registered_views >= 2 && summary.landmarks > 0;
-    return summary;
+    return summarize_scene(scene);
 }
 
 ReconstructionSummary run_global_mapping(
@@ -245,6 +282,7 @@ ReconstructionSummary run_global_mapping(
         if (track.is_triangulated()) ++summary.landmarks;
     }
     summary.valid = summary.registered_views >= 2 && summary.landmarks > 0;
+    populate_reprojection_stats(scene, summary);
     core::Logger::instance().info(
         "global: rotations=", rotation_summary.estimated_images,
         " filtered_pairs=", rotation_summary.filtered_pairs,
@@ -306,6 +344,7 @@ ReconstructionSummary reconstruct(
     if (summary.valid)
         checkpoints.save_scene(
             CheckpointStage::reconstruction, mapping_key, scene_out);
+    populate_reprojection_stats(scene_out, summary);
     return summary;
 }
 
