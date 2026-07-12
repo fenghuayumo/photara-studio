@@ -284,12 +284,12 @@ void test_long_track_merge() {
 void test_retrieval_inverted_index() {
     std::vector<Image> images(6);
     std::mt19937 random(77);
-    std::uniform_real_distribution<float> prototype_value(0.1F, 0.9F);
-    std::normal_distribution<float> noise(0.F, 0.005F);
-    std::vector<std::vector<float>> prototypes(
-        3, std::vector<float>(128));
-    for (auto& prototype : prototypes)
-        for (float& value : prototype) value = prototype_value(random);
+    std::normal_distribution<float> noise(0.F, 0.01F);
+    std::vector<std::vector<float>> prototypes(3, std::vector<float>(128, 0.F));
+    for (std::size_t cluster = 0; cluster < prototypes.size(); ++cluster) {
+        for (std::size_t column = 0; column < 32; ++column)
+            prototypes[cluster][cluster * 32 + column] = 1.F;
+    }
 
     for (Index image_id = 0; image_id < images.size(); ++image_id) {
         Image& image = images[image_id];
@@ -300,15 +300,27 @@ void test_retrieval_inverted_index() {
         image.features.keypoints.resize(300);
         image.features.descriptors.resize(300 * 128);
         const auto& prototype = prototypes[image_id / 2];
-        for (std::size_t row = 0; row < 300; ++row)
+        for (std::size_t row = 0; row < 300; ++row) {
+            image.features.keypoints[row].x =
+                static_cast<float>((row % 20) * 30 + 10);
+            image.features.keypoints[row].y =
+                static_cast<float>((row / 20) * 30 + 10);
+            image.features.keypoints[row].response = 1.F;
+            image.features.keypoints[row].scale = 4.F;
             for (std::size_t column = 0; column < 128; ++column)
                 image.features.descriptors[row * 128 + column] =
                     prototype[column] + noise(random);
+        }
     }
 
     RetrievalOptions options;
-    options.top_k = 1;
+    options.top_k = 2;
     options.max_descriptors_per_image = 300;
+    options.sample_grid = 3;
+    options.vocabulary.branching = 2;
+    options.vocabulary.depth = 4;
+    options.vocabulary.max_iterations = 8;
+    options.vocabulary.max_training_descriptors = 2000;
     const auto pairs = retrieve_image_pairs(images, options);
     const auto contains = [&](const Index first, const Index second) {
         return std::any_of(

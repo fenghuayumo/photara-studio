@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,6 +24,11 @@ enum class DescriptorMetric {
     inner_product  // learned descriptors often use IP / cosine
 };
 
+enum class DescriptorStorage : std::uint8_t {
+    float32,
+    uint8,  // quantized RootSIFT / unit-range floats
+};
+
 struct Keypoint {
     float x{};
     float y{};
@@ -40,6 +46,8 @@ struct FeatureSet {
           descriptor_dimension(other.descriptor_dimension),
           keypoints(other.keypoints),
           descriptors(other.descriptors),
+          descriptors_u8(other.descriptors_u8),
+          storage(other.storage),
           metric(other.metric),
           extractor_name(other.extractor_name) {}
     FeatureSet(FeatureSet&& other) noexcept
@@ -48,6 +56,8 @@ struct FeatureSet {
           descriptor_dimension(other.descriptor_dimension),
           keypoints(std::move(other.keypoints)),
           descriptors(std::move(other.descriptors)),
+          descriptors_u8(std::move(other.descriptors_u8)),
+          storage(other.storage),
           descriptor_generation(other.descriptor_generation),
           metric(other.metric),
           extractor_name(std::move(other.extractor_name)) {}
@@ -58,6 +68,8 @@ struct FeatureSet {
         descriptor_dimension = other.descriptor_dimension;
         keypoints = other.keypoints;
         descriptors = other.descriptors;
+        descriptors_u8 = other.descriptors_u8;
+        storage = other.storage;
         descriptor_generation = 0;
         descriptor_identity = next_descriptor_identity();
         metric = other.metric;
@@ -71,6 +83,8 @@ struct FeatureSet {
         descriptor_dimension = other.descriptor_dimension;
         keypoints = std::move(other.keypoints);
         descriptors = std::move(other.descriptors);
+        descriptors_u8 = std::move(other.descriptors_u8);
+        storage = other.storage;
         descriptor_generation = other.descriptor_generation;
         descriptor_identity = next_descriptor_identity();
         metric = other.metric;
@@ -83,6 +97,8 @@ struct FeatureSet {
     std::size_t descriptor_dimension{};
     std::vector<Keypoint> keypoints;
     std::vector<float> descriptors;
+    std::vector<std::uint8_t> descriptors_u8;
+    DescriptorStorage storage{DescriptorStorage::float32};
     // Increment after modifying descriptor values or layout once a matcher may
     // have prepared an index for this FeatureSet.
     std::uint64_t descriptor_generation{};
@@ -92,6 +108,12 @@ struct FeatureSet {
 
     void mark_descriptors_modified() noexcept { ++descriptor_generation; }
     void validate() const;
+
+    // Expand uint8 storage into float descriptors when needed for ANN/matching.
+    std::span<const float> descriptor_rows_float();
+    // Quantize float RootSIFT-like values to 8-bit and drop float storage.
+    void compress_descriptors_u8();
+    void release_descriptors() noexcept;
 };
 
 struct FeatureMatch {

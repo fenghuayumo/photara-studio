@@ -16,6 +16,7 @@ extern "C" {
 #include <cmath>
 #include <limits>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -187,17 +188,15 @@ public:
     class Index {
     public:
         Index(
-            const FeatureSet& features,
+            std::span<const float> rows,
+            const std::size_t keypoint_count,
+            const std::size_t dimension,
             const DescriptorMatcherOptions& options)
-            : space(features.descriptor_dimension),
-              graph(
-                  &space, features.keypoints.size(), options.ann_m,
-                  options.ann_ef_construction, 42) {
-            for (std::size_t row = 0; row < features.keypoints.size(); ++row) {
-                graph.addPoint(
-                    features.descriptors.data() +
-                        row * features.descriptor_dimension,
-                    row);
+            : space(dimension),
+              graph(&space, keypoint_count, options.ann_m,
+                    options.ann_ef_construction, 42) {
+            for (std::size_t row = 0; row < keypoint_count; ++row) {
+                graph.addPoint(rows.data() + row * dimension, row);
             }
             graph.setEf(options.ann_ef_search);
         }
@@ -214,11 +213,17 @@ public:
         std::uint64_t generation{};
         std::uint64_t identity{};
         std::shared_ptr<Index> index;
+        std::uint64_t stamp{};
+        unsigned pins{0};
     };
 
-    static bool matches(const Entry& entry, const FeatureSet& features) {
-        return entry.descriptors == features.descriptors.data() &&
-               entry.descriptor_count == features.descriptors.size() &&
+    static bool matches(
+        const Entry& entry,
+        const FeatureSet& features,
+        const float* rows,
+        const std::size_t row_count) {
+        return entry.descriptors == rows &&
+               entry.descriptor_count == row_count &&
                entry.keypoint_count == features.keypoints.size() &&
                entry.dimension == features.descriptor_dimension &&
                entry.generation == features.descriptor_generation &&
@@ -226,34 +231,58 @@ public:
     }
 
     void prepare(
-        const FeatureSet& features,
+        FeatureSet& features,
         const DescriptorMatcherOptions& options) {
         if (!options.approximate ||
             features.keypoints.size() < options.ann_min_features ||
             features.descriptor_dimension == 0)
             return;
+        const auto rows = features.descriptor_rows_float();
+        if (rows.empty()) return;
         {
             std::lock_guard lock(mutex_);
             const auto found = indices_.find(&features);
-            if (found != indices_.end() && matches(found->second, features))
+            if (found != indices_.end() &&
+                matches(
+                    found->second, features, rows.data(), rows.size())) {
+                found->second.stamp = ++clock_;
                 return;
+            }
         }
-        auto index = std::make_shared<Index>(features, options);
+        auto index = std::make_shared<Index>(
+            rows, features.keypoints.size(), features.descriptor_dimension,
+            options);
         std::lock_guard lock(mutex_);
-        indices_[&features] = {
-            features.descriptors.data(), features.descriptors.size(),
-            features.keypoints.size(), features.descriptor_dimension,
-            features.descriptor_generation, features.descriptor_identity,
-            std::move(index)};
+        Entry& entry = indices_[&features];
+        const unsigned pins = entry.pins;
+        entry = {
+            rows.data(), rows.size(), features.keypoints.size(),
+            features.descriptor_dimension, features.descriptor_generation,
+            features.descriptor_identity, std::move(index), ++clock_, pins};
+        evict_unlocked(options.max_cached_indices);
     }
 
-    [[nodiscard]] std::shared_ptr<Index> find(
-        const FeatureSet& features) const {
+    void pin(const FeatureSet& features) {
+        std::lock_guard lock(mutex_);
+        ++indices_[&features].pins;
+    }
+
+    void unpin(const FeatureSet& features) {
         std::lock_guard lock(mutex_);
         const auto found = indices_.find(&features);
-        return found == indices_.end() || !matches(found->second, features)
-                   ? nullptr
-                   : found->second.index;
+        if (found == indices_.end() || found->second.pins == 0) return;
+        --found->second.pins;
+    }
+
+    [[nodiscard]] std::shared_ptr<Index> find(FeatureSet& features) {
+        const auto rows = features.descriptor_rows_float();
+        std::lock_guard lock(mutex_);
+        const auto found = indices_.find(&features);
+        if (found == indices_.end() ||
+            !matches(found->second, features, rows.data(), rows.size()))
+            return nullptr;
+        found->second.stamp = ++clock_;
+        return found->second.index;
     }
 
     void clear() {
@@ -262,18 +291,86 @@ public:
     }
 
 private:
+    void evict_unlocked(const std::size_t budget) {
+        if (budget == 0 || indices_.size() <= budget) return;
+        while (indices_.size() > budget) {
+            auto victim = indices_.end();
+            for (auto it = indices_.begin(); it != indices_.end(); ++it) {
+                if (it->second.pins > 0 || !it->second.index) continue;
+                if (victim == indices_.end() ||
+                    it->second.stamp < victim->second.stamp)
+                    victim = it;
+            }
+            if (victim == indices_.end()) break;
+            indices_.erase(victim);
+        }
+    }
+
     mutable std::mutex mutex_;
     std::unordered_map<const FeatureSet*, Entry> indices_;
+    std::uint64_t clock_{0};
 };
 
 void FeatureSet::validate() const {
     if (image_width == 0 || image_height == 0)
         throw std::invalid_argument("Feature image dimensions must be non-zero");
     if (descriptor_dimension == 0) {
-        if (!descriptors.empty()) throw std::invalid_argument("Descriptor data has zero dimension");
-    } else if (descriptors.size() != keypoints.size() * descriptor_dimension) {
-        throw std::invalid_argument("Descriptor storage does not match keypoint count");
+        if (!descriptors.empty() || !descriptors_u8.empty())
+            throw std::invalid_argument("Descriptor data has zero dimension");
+        return;
     }
+    const std::size_t expected = keypoints.size() * descriptor_dimension;
+    if (storage == DescriptorStorage::float32) {
+        if (descriptors.size() != expected)
+            throw std::invalid_argument(
+                "Descriptor storage does not match keypoint count");
+    } else if (descriptors_u8.size() != expected) {
+        throw std::invalid_argument(
+            "Uint8 descriptor storage does not match keypoint count");
+    }
+}
+
+std::span<const float> FeatureSet::descriptor_rows_float() {
+    if (storage == DescriptorStorage::float32) return descriptors;
+    if (descriptors_u8.empty() || descriptor_dimension == 0) return {};
+    const std::size_t expected = keypoints.size() * descriptor_dimension;
+    if (descriptors.size() != expected) {
+        descriptors.resize(expected);
+        for (std::size_t i = 0; i < expected; ++i)
+            descriptors[i] = static_cast<float>(descriptors_u8[i]) / 255.F;
+        mark_descriptors_modified();
+    }
+    return descriptors;
+}
+
+void FeatureSet::compress_descriptors_u8() {
+    if (storage == DescriptorStorage::uint8) return;
+    if (descriptors.empty() || descriptor_dimension == 0) {
+        descriptors.clear();
+        descriptors.shrink_to_fit();
+        storage = DescriptorStorage::uint8;
+        mark_descriptors_modified();
+        return;
+    }
+    descriptors_u8.resize(descriptors.size());
+    for (std::size_t i = 0; i < descriptors.size(); ++i) {
+        const float value = std::clamp(descriptors[i], 0.F, 1.F);
+        descriptors_u8[i] =
+            static_cast<std::uint8_t>(std::lround(value * 255.F));
+    }
+    descriptors.clear();
+    descriptors.shrink_to_fit();
+    storage = DescriptorStorage::uint8;
+    mark_descriptors_modified();
+}
+
+void FeatureSet::release_descriptors() noexcept {
+    descriptors.clear();
+    descriptors.shrink_to_fit();
+    descriptors_u8.clear();
+    descriptors_u8.shrink_to_fit();
+    storage = DescriptorStorage::float32;
+    mark_descriptors_modified();
 }
 
 class SiftExtractor::Impl {
@@ -484,26 +581,41 @@ std::unique_ptr<FeatureMatcher> MutualRatioMatcher::clone() const {
 }
 
 void MutualRatioMatcher::prepare(const FeatureSet& features) {
-    features.validate();
-    shared_->prepare(features, options_);
+    auto& mutable_features = const_cast<FeatureSet&>(features);
+    mutable_features.validate();
+    shared_->prepare(mutable_features, options_);
 }
 
 void MutualRatioMatcher::clear_prepared() {
     shared_->clear();
 }
 
+void MutualRatioMatcher::pin(const FeatureSet& features) {
+    shared_->pin(features);
+}
+
+void MutualRatioMatcher::unpin(const FeatureSet& features) {
+    shared_->unpin(features);
+}
+
 MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& train) const {
-    query.validate();
-    train.validate();
+    auto& mutable_query = const_cast<FeatureSet&>(query);
+    auto& mutable_train = const_cast<FeatureSet&>(train);
+    mutable_query.validate();
+    mutable_train.validate();
     if (query.descriptor_dimension == 0 || train.descriptor_dimension == 0) return {};
     if (query.descriptor_dimension != train.descriptor_dimension)
         throw std::invalid_argument("Feature descriptor dimensions differ");
     if (query.keypoints.empty() || train.keypoints.empty()) return {};
 
+    const auto query_rows = mutable_query.descriptor_rows_float();
+    const auto train_rows = mutable_train.descriptor_rows_float();
+    if (query_rows.empty() || train_rows.empty()) return {};
+
     std::vector<int> best0, best1;
     std::vector<float> dist0, dist1;
-    const auto query_index = shared_->find(query);
-    const auto train_index = shared_->find(train);
+    const auto query_index = shared_->find(mutable_query);
+    const auto train_index = shared_->find(mutable_train);
     const bool use_ann =
         query_index && train_index && train.keypoints.size() >= 2;
     if (use_ann) {
@@ -513,7 +625,7 @@ MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& tr
         dist1.assign(query.keypoints.size(), std::numeric_limits<float>::infinity());
         for (std::size_t row = 0; row < query.keypoints.size(); ++row) {
             auto nearest = train_index->graph.searchKnn(
-                query.descriptors.data() + row * query.descriptor_dimension, 2);
+                query_rows.data() + row * query.descriptor_dimension, 2);
             if (nearest.size() < 2) continue;
             const auto second = nearest.top();
             nearest.pop();
@@ -528,7 +640,7 @@ MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& tr
         }
     } else {
         knn2_squared_l2(
-            query.descriptors.data(), query.keypoints.size(), train.descriptors.data(),
+            query_rows.data(), query.keypoints.size(), train_rows.data(),
             train.keypoints.size(), query.descriptor_dimension, options_.parallel,
             best0, dist0, best1, dist1);
     }
@@ -577,7 +689,7 @@ MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& tr
         for (std::size_t slot = 0; slot < unique_trains.size(); ++slot) {
             const int train_id = unique_trains[slot];
             auto nearest = query_index->graph.searchKnn(
-                train.descriptors.data() +
+                train_rows.data() +
                     static_cast<std::size_t>(train_id) *
                         train.descriptor_dimension,
                 1);
@@ -588,7 +700,7 @@ MatchSet MutualRatioMatcher::match(const FeatureSet& query, const FeatureSet& tr
         }
     } else {
         knn1_squared_l2_subset(
-            query.descriptors.data(), query.keypoints.size(), train.descriptors.data(),
+            query_rows.data(), query.keypoints.size(), train_rows.data(),
             query.descriptor_dimension, unique_trains, options_.parallel, reverse_best,
             reverse_distance);
     }

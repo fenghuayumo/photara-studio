@@ -93,10 +93,15 @@ FrontEndStageKeys make_stage_keys(
     matches.append(options.augment_sequential_with_retrieval);
     matches.append(options.retrieval.top_k);
     matches.append(options.retrieval.max_descriptors_per_image);
-    matches.append(options.retrieval.hash_tables);
-    matches.append(options.retrieval.bits_per_word);
+    matches.append(options.retrieval.sample_grid);
     matches.append(options.retrieval.stop_word_ratio);
     matches.append(options.retrieval.max_posting_images);
+    matches.append(options.retrieval.vocabulary.branching);
+    matches.append(options.retrieval.vocabulary.depth);
+    matches.append(options.retrieval.vocabulary.max_iterations);
+    matches.append(options.retrieval.vocabulary.seed);
+    matches.append(options.compress_descriptors_u8);
+    matches.append_string(options.retrieval.vocabulary_path.string());
 
     FingerprintBuilder geometry;
     geometry.append_string("aetherscan-geometry-v3");
@@ -108,7 +113,7 @@ FrontEndStageKeys make_stage_keys(
     FingerprintBuilder tracks;
     // Track component membership semantics changed in v4; never reuse tracks
     // produced by the previous edge-count based union bookkeeping.
-    tracks.append_string("aetherscan-tracks-v4");
+    tracks.append_string("aetherscan-tracks-v6");
     append_cache_build_identity(tracks);
     tracks.append(geometry.value());
     tracks.append(options.min_pair_weight);
@@ -153,11 +158,11 @@ void initialize_cameras(Scene& scene, const double focal_pixels) {
 }
 
 void release_descriptors(Scene& scene) {
-    for (Image& image : scene.images) {
-        image.features.descriptors.clear();
-        image.features.descriptors.shrink_to_fit();
-        image.features.mark_descriptors_modified();
-    }
+    for (Image& image : scene.images) image.features.release_descriptors();
+}
+
+void compress_descriptors(Scene& scene) {
+    for (Image& image : scene.images) image.features.compress_descriptors_u8();
 }
 
 std::vector<PairCandidate> build_pair_list(
@@ -354,8 +359,16 @@ FrontEndResult run_frontend(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - extract_started)
             .count();
 
+    FrontEndOptions runtime_options = options;
+    if (runtime_options.retrieval.vocabulary_path.empty() &&
+        !runtime_options.checkpoint.directory.empty()) {
+        runtime_options.retrieval.vocabulary_path =
+            runtime_options.checkpoint.directory / "vocabulary-v1.bin";
+    }
+
     const auto match_started = std::chrono::steady_clock::now();
-    const auto candidates = build_pair_candidates(scene, options);
+    const auto candidates = build_pair_candidates(scene, runtime_options);
+    if (runtime_options.compress_descriptors_u8) compress_descriptors(scene);
     std::vector<RawPairMatches> raw_pairs;
     bool match_cache_hit =
         checkpoints.load_matches(stage_keys.matches, raw_pairs);
@@ -390,6 +403,8 @@ FrontEndResult run_frontend(
             threads);
         for (unsigned t = 0; t < threads; ++t)
             match_workers[t] = matcher->clone();
+        auto* ratio_matcher =
+            dynamic_cast<features::MutualRatioMatcher*>(match_workers.front().get());
         std::vector<std::uint8_t> active_images(scene.images.size(), 0);
         for (const PairCandidate& candidate : candidates) {
             if (candidate.id1 < active_images.size())
@@ -401,6 +416,10 @@ FrontEndResult run_frontend(
         prepare_ids.reserve(scene.images.size());
         for (Index image_id = 0; image_id < active_images.size(); ++image_id) {
             if (active_images[image_id]) prepare_ids.push_back(image_id);
+        }
+        if (ratio_matcher) {
+            for (const Index image_id : prepare_ids)
+                ratio_matcher->pin(scene.images[image_id].features);
         }
         core::ProgressReporter prepare_progress(
             "prepare descriptor indices", prepare_ids.size());
@@ -430,12 +449,18 @@ FrontEndResult run_frontend(
                 match_progress.advance();
             });
         match_progress.finish();
+        if (ratio_matcher) {
+            for (const Index image_id : prepare_ids)
+                ratio_matcher->unpin(scene.images[image_id].features);
+        }
         // Shared across matcher clones; release HNSW graphs before geometry.
         match_workers.front()->clear_prepared();
         checkpoints.save_matches(stage_keys.matches, raw_pairs);
     } else {
         core::Logger::instance().info("checkpoint hit: matches");
     }
+    // Descriptors are no longer needed after matching; keep keypoints only.
+    release_descriptors(scene);
 
     std::vector<ImagePair> pairs(candidates.size());
     std::vector<PairDiagnostics> diagnostics(candidates.size());
@@ -515,7 +540,6 @@ FrontEndResult run_frontend(
             .count();
 
     const auto tracks_started = std::chrono::steady_clock::now();
-    release_descriptors(scene);
     build_tracks(scene, options.min_pair_weight);
     checkpoints.save_scene(
         CheckpointStage::tracks, stage_keys.tracks, scene);

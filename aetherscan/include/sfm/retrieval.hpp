@@ -1,8 +1,10 @@
 #pragma once
 
 #include "sfm/scene.hpp"
+#include "sfm/vocabulary.hpp"
 
 #include <cstddef>
+#include <filesystem>
 #include <vector>
 
 namespace aetherscan::sfm {
@@ -10,10 +12,12 @@ namespace aetherscan::sfm {
 struct RetrievalOptions {
     std::size_t top_k{20};
     std::size_t max_descriptors_per_image{2000};
-    unsigned hash_tables{4};
-    unsigned bits_per_word{12};
+    unsigned sample_grid{3};
     float stop_word_ratio{0.5F};
     std::size_t max_posting_images{64};
+    VocabularyConfig vocabulary{};
+    // Empty path trains an ephemeral vocabulary for this scene only.
+    std::filesystem::path vocabulary_path;
 };
 
 struct RetrievedPair {
@@ -22,10 +26,15 @@ struct RetrievedPair {
     float score{0.F};
 };
 
-// Lightweight multi-table descriptor LSH + TF-IDF inverted index. This stage
-// only proposes image pairs; descriptor ANN and geometry still verify them.
+// Learned hierarchical vocabulary + TF-IDF inverted index with stop-word /
+// posting-length caps. Only proposes image pairs for descriptor matching.
 std::vector<RetrievedPair> retrieve_image_pairs(
     const std::vector<Image>& images,
     const RetrievalOptions& options = {});
+
+// Load vocabulary from options.path or train+optionally persist.
+VocabularyTree load_or_train_vocabulary(
+    const std::vector<Image>& images,
+    const RetrievalOptions& options);
 
 }  // namespace aetherscan::sfm

@@ -25,6 +25,7 @@ struct FrontEndOptions {
     unsigned max_features{27000};
     std::size_t retrieval_min_images{50};
     bool augment_sequential_with_retrieval{false};
+    bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};
     CheckpointOptions checkpoint{};
 };

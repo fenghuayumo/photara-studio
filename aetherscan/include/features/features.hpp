@@ -148,6 +148,8 @@ struct DescriptorMatcherOptions {
     std::size_t ann_m{16};
     std::size_t ann_ef_construction{100};
     std::size_t ann_ef_search{64};
+    // Soft cap on retained HNSW graphs; pinned images are never evicted.
+    std::size_t max_cached_indices{64};
     // When true, large single-pair matches may use OpenMP. Automatically disabled
     // while an outer AetherScan task pool is already saturating the machine.
     bool parallel{true};
@@ -161,6 +163,8 @@ public:
     [[nodiscard]] std::unique_ptr<FeatureMatcher> clone() const override;
     void prepare(const FeatureSet& features) override;
     void clear_prepared() override;
+    void pin(const FeatureSet& features);
+    void unpin(const FeatureSet& features);
     [[nodiscard]] MatchSet match(
         const FeatureSet& query, const FeatureSet& train) const override;
 

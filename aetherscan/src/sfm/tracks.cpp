@@ -123,8 +123,19 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
     };
 
     core::ProgressReporter progress("build tracks", scene.pairs.size());
-    for (const ImagePair& pair : scene.pairs) {
+    std::vector<Index> pair_order(scene.pairs.size());
+    std::iota(pair_order.begin(), pair_order.end(), Index{0});
+    std::stable_sort(
+        pair_order.begin(), pair_order.end(),
+        [&](const Index left, const Index right) {
+            const float weight_left = scene.pairs[left].composite_weight();
+            const float weight_right = scene.pairs[right].composite_weight();
+            if (weight_left != weight_right) return weight_left > weight_right;
+            return left < right;
+        });
+    for (const Index pair_index : pair_order) {
         progress.advance();
+        const ImagePair& pair = scene.pairs[pair_index];
         if (!pair.active || pair.matches.empty()) continue;
         if (pair.composite_weight() <= min_pair_weight) continue;
         const Index off1 = feature_offsets[pair.id1];
@@ -154,29 +165,47 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
             }
         }
     }
+    // component_images is only needed during union; free before assembly.
+    component_images.clear();
+    component_images.rehash(0);
 
-    std::unordered_map<Index, Track> tracks_by_root;
+    struct RootObservation {
+        Index root{};
+        Observation observation{};
+    };
+    std::vector<RootObservation> packed;
+    packed.reserve(std::count(touched.begin(), touched.end(), std::uint8_t{1}));
     Index running = 0;
     for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
         const auto& image = scene.images[image_id];
         for (Index feat = 0; feat < image.features.keypoints.size(); ++feat, ++running) {
             if (!touched[running]) continue;
-            const Index root = ds.find(running);
-            tracks_by_root[root].observations.push_back({image_id, feat});
+            packed.push_back(
+                {ds.find(running), Observation{image_id, feat}});
         }
     }
+    std::sort(
+        packed.begin(), packed.end(),
+        [](const RootObservation& left, const RootObservation& right) {
+            if (left.root != right.root) return left.root < right.root;
+            if (left.observation.image_id != right.observation.image_id)
+                return left.observation.image_id < right.observation.image_id;
+            return left.observation.feature_id < right.observation.feature_id;
+        });
 
-    scene.tracks.reserve(tracks_by_root.size());
-    for (auto& [root, track] : tracks_by_root) {
-        (void)root;
-        if (track.observations.size() < 2) continue;
-        std::sort(
-            track.observations.begin(), track.observations.end(),
-            [](const Observation& a, const Observation& b) {
-                return a.image_id < b.image_id ||
-                       (a.image_id == b.image_id && a.feature_id < b.feature_id);
-            });
-        scene.tracks.push_back(std::move(track));
+    scene.tracks.reserve(packed.size() / 2);
+    for (std::size_t begin = 0; begin < packed.size();) {
+        std::size_t end = begin + 1;
+        while (end < packed.size() && packed[end].root == packed[begin].root)
+            ++end;
+        if (end - begin >= 2) {
+            Track track;
+            track.observations.reserve(end - begin);
+            for (std::size_t i = begin; i < end; ++i)
+                track.observations.push_back(packed[i].observation);
+            scene.tracks.push_back(std::move(track));
+        }
+        begin = end;
     }
     rebuild_track_index(scene);
 }

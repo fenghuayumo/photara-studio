@@ -14,6 +14,8 @@ struct ResectionConfig {
     unsigned min_inliers{12};
     unsigned max_local_window{25};
     unsigned local_ba_every{10};
+    // Parallel PnP wave size against a fixed triangulation snapshot.
+    unsigned max_pose_wave{8};
     std::array<unsigned, 3> full_ba_every{25, 50, 100};
     float ratio_correspondences{0.3F};
     float avg_inliers_ratio_force_ba{0.6F};

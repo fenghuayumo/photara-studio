@@ -176,6 +176,8 @@ int main(int argc, char** argv) {
         config.frontend.sift_contrast_threshold = sift_contrast;
         config.frontend.match_ratio = match_ratio;
         config.frontend.mutual_check = mutual_check;
+        // Sequential window + BoW retrieval (learned vocabulary).
+        config.frontend.augment_sequential_with_retrieval = true;
         config.frontend.checkpoint.directory = cache_directory;
 
         const auto started = std::chrono::steady_clock::now();

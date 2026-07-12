@@ -38,6 +38,7 @@ void append_resection(
     key.append(options.min_inliers);
     key.append(options.max_local_window);
     key.append(options.local_ba_every);
+    key.append(options.max_pose_wave);
     for (const unsigned value : options.full_ba_every) key.append(value);
     key.append(options.ratio_correspondences);
     key.append(options.avg_inliers_ratio_force_ba);
@@ -58,7 +59,7 @@ std::uint64_t reconstruction_key(
     const std::uint64_t tracks_key,
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
-    key.append_string("aetherscan-reconstruction-v4");
+    key.append_string("aetherscan-reconstruction-v5");
     key.append_string("aetherscan-cache-abi-20260712-1");
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
