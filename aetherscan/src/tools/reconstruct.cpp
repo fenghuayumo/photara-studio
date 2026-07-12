@@ -140,7 +140,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     options.add_options()
         ("h,help", "Print usage")
         ("i,images", "Image directory", cxxopts::value<std::string>())
-        ("f,focal", "Focal length in pixels", cxxopts::value<double>())
+        ("f,focal",
+         "Initial focal length in pixels (0 = 1.2 * max(width,height); "
+         "refined by view-graph consensus + BA unless trusted)",
+         cxxopts::value<double>()->default_value("0"))
         ("m,mode",
          "Reconstruction mode: incremental, hierarchical, or global",
          cxxopts::value<std::string>())
@@ -180,10 +183,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         std::exit(0);
     }
 
-    if (!result.count("images") || !result.count("focal") || !result.count("mode") ||
+    if (!result.count("images") || !result.count("mode") ||
         !result.count("output")) {
         throw std::invalid_argument(
-            "Missing required options: --images, --focal, --mode, --output");
+            "Missing required options: --images, --mode, --output");
     }
 
     ReconstructCli cli;
@@ -212,8 +215,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!cache_text.empty() && cache_text != "-")
         cli.cache_dir = utf8_to_path(cache_text);
 
-    if (cli.focal_pixels <= 0.0)
-        throw std::invalid_argument("--focal must be positive");
+    if (cli.focal_pixels < 0.0)
+        throw std::invalid_argument("--focal must be >= 0");
     if (cli.mode != "incremental" && cli.mode != "hierarchical" &&
         cli.mode != "global") {
         throw std::invalid_argument(
