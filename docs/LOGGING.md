@@ -22,7 +22,7 @@ PowerShell example:
 
 ```powershell
 $env:AETHERSCAN_LOG_LEVEL = "debug"
-.\aetherscan.exe images 900 incremental scene.mvs
+.\aetherscan.exe --images images --focal 900 --mode incremental --output scene.mvs
 ```
 
 The log file always records through `trace`, independently of console

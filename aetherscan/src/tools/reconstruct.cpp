@@ -2,9 +2,10 @@
 #include "sfm/export_mvs.hpp"
 #include "core/logging.hpp"
 
+#include <cxxopts.hpp>
+
 #include <algorithm>
 #include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -25,6 +26,21 @@
 
 namespace {
 
+struct ReconstructCli {
+    std::filesystem::path images_dir;
+    double focal_pixels{};
+    std::string mode;
+    std::filesystem::path output;
+    std::size_t neighbor_window{3};
+    float match_ratio{0.85F};
+    bool mutual_check{true};
+    double sift_contrast{0.005};
+    std::filesystem::path cache_dir;
+    std::string extractor{"sift"};
+    std::string matcher{"mutual_ratio"};
+    unsigned max_features{27000U};
+};
+
 std::uint64_t peak_working_set_bytes() noexcept {
 #if defined(_WIN32)
     PROCESS_MEMORY_COUNTERS counters{};
@@ -44,22 +60,8 @@ std::uint64_t peak_working_set_bytes() noexcept {
 #endif
 }
 
-double number(const std::string& input) {
-    double value = 0;
-    const auto result = std::from_chars(input.data(), input.data() + input.size(), value);
-    if (result.ec != std::errc{} || value <= 0)
-        throw std::invalid_argument("Invalid positive number: " + input);
-    return value;
-}
-
-bool boolean_flag(const std::string& input) {
-    if (input == "1" || input == "true") return true;
-    if (input == "0" || input == "false") return false;
-    throw std::invalid_argument("Expected boolean flag 0/1: " + input);
-}
-
 #if defined(_WIN32)
-std::string argument_text(const wchar_t* text) {
+std::string wide_to_utf8(const wchar_t* text) {
     if (*text == L'\0') return {};
     const int size = WideCharToMultiByte(
         CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
@@ -71,18 +73,135 @@ std::string argument_text(const wchar_t* text) {
     return result;
 }
 
-std::filesystem::path argument_path(const wchar_t* text) {
-    return std::filesystem::path(text);
+std::filesystem::path utf8_to_path(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    const int wide_size = MultiByteToWideChar(
+        CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wide_size <= 1) return {};
+    std::wstring wide(static_cast<std::size_t>(wide_size), L'\0');
+    MultiByteToWideChar(
+        CP_UTF8, 0, utf8.c_str(), -1, wide.data(), wide_size);
+    wide.pop_back();
+    return std::filesystem::path(wide);
 }
 #else
-std::string argument_text(const char* text) {
-    return text;
-}
-
-std::filesystem::path argument_path(const char* text) {
-    return std::filesystem::path(text);
+std::filesystem::path utf8_to_path(const std::string& utf8) {
+    return std::filesystem::path(utf8);
 }
 #endif
+
+struct Utf8Argv {
+    std::vector<std::string> storage;
+    std::vector<char*> pointers;
+
+#if defined(_WIN32)
+    explicit Utf8Argv(int argc, wchar_t** argv) {
+        storage.reserve(static_cast<std::size_t>(argc));
+        for (int i = 0; i < argc; ++i)
+            storage.push_back(wide_to_utf8(argv[i]));
+        pointers.reserve(storage.size());
+        for (auto& argument : storage) pointers.push_back(argument.data());
+    }
+#else
+    explicit Utf8Argv(int argc, char** argv) {
+        storage.reserve(static_cast<std::size_t>(argc));
+        for (int i = 0; i < argc; ++i) storage.emplace_back(argv[i]);
+        pointers.reserve(storage.size());
+        for (auto& argument : storage) pointers.push_back(argument.data());
+    }
+#endif
+
+    int argc() const { return static_cast<int>(pointers.size()); }
+    char** argv() { return pointers.data(); }
+};
+
+void print_help(const cxxopts::Options& options) {
+    std::cout << options.help() << '\n'
+              << "Modes:\n"
+              << "  incremental  star initialization + PnP resection\n"
+              << "  hierarchical clustered incremental SfM + Sim(3) merge\n"
+              << "  global       rotation averaging + global positioning + BA\n"
+              << "Output formats:\n"
+              << "  .mvs  OpenMVS Interface (open in Viewer)\n"
+              << "  .ply  sparse XYZ point cloud\n"
+              << "Log level: set AETHERSCAN_LOG_LEVEL=error|warning|info|debug|trace|off\n";
+}
+
+ReconstructCli parse_cli(int argc, char** argv) {
+    cxxopts::Options options(
+        "aetherscan", "High-performance Structure from Motion reconstruction");
+    options.custom_help("[options]");
+    options.add_options()
+        ("h,help", "Print usage")
+        ("i,images", "Image directory", cxxopts::value<std::string>())
+        ("f,focal", "Focal length in pixels", cxxopts::value<double>())
+        ("m,mode",
+         "Reconstruction mode: incremental, hierarchical, or global",
+         cxxopts::value<std::string>())
+        ("o,output", "Output path (.mvs or .ply)", cxxopts::value<std::string>())
+        ("window", "Sequential neighbor window",
+         cxxopts::value<std::size_t>()->default_value("3"))
+        ("match-ratio", "Lowe ratio test threshold",
+         cxxopts::value<float>()->default_value("0.85"))
+        ("mutual-check", "Mutual match consistency check",
+         cxxopts::value<bool>()->default_value("true"))
+        ("sift-contrast", "SIFT contrast threshold",
+         cxxopts::value<double>()->default_value("0.005"))
+        ("cache-dir", "Feature cache directory (- to disable)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("extractor", "Feature extractor: sift or siftgpu",
+         cxxopts::value<std::string>()->default_value("sift"))
+        ("matcher", "Feature matcher: mutual_ratio or siftgpu",
+         cxxopts::value<std::string>()->default_value("mutual_ratio"))
+        ("max-features", "Maximum SIFT features per image",
+         cxxopts::value<unsigned>()->default_value("27000"));
+
+    const auto result = options.parse(argc, argv);
+    if (result.count("help") || argc <= 1) {
+        print_help(options);
+        std::exit(0);
+    }
+
+    if (!result.count("images") || !result.count("focal") || !result.count("mode") ||
+        !result.count("output")) {
+        throw std::invalid_argument(
+            "Missing required options: --images, --focal, --mode, --output");
+    }
+
+    ReconstructCli cli;
+    cli.images_dir = utf8_to_path(result["images"].as<std::string>());
+    cli.focal_pixels = result["focal"].as<double>();
+    cli.mode = result["mode"].as<std::string>();
+    cli.output = utf8_to_path(result["output"].as<std::string>());
+    cli.neighbor_window = result["window"].as<std::size_t>();
+    cli.match_ratio = result["match-ratio"].as<float>();
+    cli.mutual_check = result["mutual-check"].as<bool>();
+    cli.sift_contrast = result["sift-contrast"].as<double>();
+    cli.extractor = result["extractor"].as<std::string>();
+    cli.matcher = result["matcher"].as<std::string>();
+    cli.max_features = result["max-features"].as<unsigned>();
+
+    const auto cache_text = result["cache-dir"].as<std::string>();
+    if (!cache_text.empty() && cache_text != "-")
+        cli.cache_dir = utf8_to_path(cache_text);
+
+    if (cli.focal_pixels <= 0.0)
+        throw std::invalid_argument("--focal must be positive");
+    if (cli.mode != "incremental" && cli.mode != "hierarchical" &&
+        cli.mode != "global") {
+        throw std::invalid_argument(
+            "--mode must be incremental, hierarchical, or global");
+    }
+    if (cli.match_ratio <= 0.F || cli.match_ratio > 1.F)
+        throw std::invalid_argument("--match-ratio must be in (0, 1]");
+    if (cli.neighbor_window == 0)
+        throw std::invalid_argument("--window must be positive");
+    if (cli.sift_contrast <= 0.0)
+        throw std::invalid_argument("--sift-contrast must be positive");
+    if (cli.max_features == 0U)
+        throw std::invalid_argument("--max-features must be positive");
+    return cli;
+}
 
 std::string lower_extension(const std::filesystem::path& path) {
     std::string extension = path.extension().string();
@@ -116,72 +235,27 @@ int wmain(int argc, wchar_t** argv) {
 int main(int argc, char** argv) {
 #endif
     try {
-        if (argc < 5 || argc > 13) {
-            std::cout << "Usage: aetherscan images_dir focal_pixels incremental|hierarchical|global output.(mvs|ply) "
-                         "[neighbor_window] [match_ratio] [mutual_check] [sift_contrast] [cache_dir|-] "
-                         "[sift|siftgpu] [mutual_ratio|siftgpu] [max_features]\n"
-                         "  incremental: star initialization + PnP resection\n"
-                         "  hierarchical: clustered incremental SfM + Sim(3) merge\n"
-                         "  global: rotation averaging + global positioning + BA\n"
-                         "  .mvs  OpenMVS Interface (open in Viewer)\n"
-                         "  .ply  sparse XYZ point cloud\n"
-                         "  log level: set AETHERSCAN_LOG_LEVEL=error|warning|info|debug|trace|off\n";
-            return argc == 1 ? 0 : 1;
-        }
-        const std::filesystem::path directory = argument_path(argv[1]);
-        const double focal = number(argument_text(argv[2]));
-        const std::string mode = argument_text(argv[3]);
-        if (mode != "incremental" && mode != "hierarchical" && mode != "global")
-            throw std::invalid_argument(
-                "Mode must be incremental, hierarchical, or global");
-        const std::filesystem::path output_path = argument_path(argv[4]);
-        const std::size_t window =
-            argc >= 6
-                ? static_cast<std::size_t>(
-                      number(argument_text(argv[5])))
-                : 3;
-        const float match_ratio =
-            argc >= 7
-                ? static_cast<float>(number(argument_text(argv[6])))
-                : 0.85F;
-        if (match_ratio > 1.F)
-            throw std::invalid_argument("match_ratio must be in (0, 1]");
-        const bool mutual_check =
-            argc >= 8 ? boolean_flag(argument_text(argv[7])) : true;
-        const double sift_contrast =
-            argc >= 9 ? number(argument_text(argv[8])) : 0.005;
-        const std::filesystem::path cache_directory =
-            argc >= 10
-                ? (argument_text(argv[9]) == "-"
-                       ? std::filesystem::path{}
-                       : argument_path(argv[9]))
-                : std::filesystem::path{};
-        const std::string extractor =
-            argc >= 11 ? argument_text(argv[10]) : "sift";
-        const std::string matcher =
-            argc >= 12 ? argument_text(argv[11]) : "mutual_ratio";
-        const unsigned max_features =
-            argc >= 13
-                ? static_cast<unsigned>(number(argument_text(argv[12])))
-                : 27000U;
+        Utf8Argv utf8_argv(argc, argv);
+        const ReconstructCli cli = parse_cli(utf8_argv.argc(), utf8_argv.argv());
 
         const char* configured_level = std::getenv("AETHERSCAN_LOG_LEVEL");
         const auto console_level = configured_level
             ? aetherscan::core::parse_log_level(
                   configured_level, aetherscan::core::LogLevel::info)
             : aetherscan::core::LogLevel::info;
-        std::filesystem::path log_directory = output_path.parent_path();
+        std::filesystem::path log_directory = cli.output.parent_path();
         if (log_directory.empty()) log_directory = std::filesystem::current_path();
         const std::filesystem::path log_path =
             aetherscan::core::Logger::instance().configure(
                 log_directory, "aetherscan", console_level,
                 aetherscan::core::LogLevel::trace);
         aetherscan::core::Logger::instance().info(
-            "AetherScan started: mode=", mode, " images_dir=", directory,
-            " output=", output_path, " log=", log_path);
+            "AetherScan started: mode=", cli.mode, " images_dir=", cli.images_dir,
+            " output=", cli.output, " log=", log_path);
 
         std::vector<std::filesystem::path> files;
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        for (const auto& entry :
+             std::filesystem::directory_iterator(cli.images_dir)) {
             if (!entry.is_regular_file()) continue;
             std::string extension = entry.path().extension().string();
             std::transform(
@@ -197,29 +271,30 @@ int main(int argc, char** argv) {
         if (files.size() < 2) throw std::runtime_error("Need at least two images");
 
         aetherscan::sfm::ReconstructionConfig config;
-        if (mode == "global")
+        if (cli.mode == "global")
             config.mode = aetherscan::sfm::ReconstructionMode::global;
-        else if (mode == "hierarchical")
+        else if (cli.mode == "hierarchical")
             config.mode = aetherscan::sfm::ReconstructionMode::hierarchical;
         else
             config.mode = aetherscan::sfm::ReconstructionMode::incremental;
-        config.frontend.focal_pixels = focal;
-        config.frontend.neighbor_window = window;
-        config.frontend.sift_contrast_threshold = sift_contrast;
-        config.frontend.match_ratio = match_ratio;
-        config.frontend.mutual_check = mutual_check;
-        config.frontend.extractor = extractor;
-        config.frontend.matcher = matcher;
-        config.frontend.max_features = max_features;
+        config.frontend.focal_pixels = cli.focal_pixels;
+        config.frontend.neighbor_window = cli.neighbor_window;
+        config.frontend.sift_contrast_threshold = cli.sift_contrast;
+        config.frontend.match_ratio = cli.match_ratio;
+        config.frontend.mutual_check = cli.mutual_check;
+        config.frontend.extractor = cli.extractor;
+        config.frontend.matcher = cli.matcher;
+        config.frontend.max_features = cli.max_features;
         // Sequential window + BoW retrieval (learned vocabulary).
         config.frontend.augment_sequential_with_retrieval = true;
-        config.frontend.checkpoint.directory = cache_directory;
+        config.frontend.checkpoint.directory = cli.cache_dir;
 
         const auto started = std::chrono::steady_clock::now();
         aetherscan::sfm::Scene scene;
         const auto summary = aetherscan::sfm::reconstruct(scene, files, config);
         const double elapsed =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+                .count();
 
         if (!summary.valid) {
             aetherscan::core::Logger::instance().error(
@@ -228,12 +303,11 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        if (lower_extension(output_path) == ".mvs") {
-            aetherscan::sfm::export_openmvs_interface(scene, output_path);
-        } else if (lower_extension(output_path) == ".ply") {
-            save_ply(scene, output_path);
-            auto mvs_path =
-                output_path.parent_path() / output_path.stem();
+        if (lower_extension(cli.output) == ".mvs") {
+            aetherscan::sfm::export_openmvs_interface(scene, cli.output);
+        } else if (lower_extension(cli.output) == ".ply") {
+            save_ply(scene, cli.output);
+            auto mvs_path = cli.output.parent_path() / cli.output.stem();
             mvs_path += ".mvs";
             aetherscan::sfm::export_openmvs_interface(scene, mvs_path);
             aetherscan::core::Logger::instance().info("mvs=", mvs_path);
@@ -253,7 +327,7 @@ int main(int argc, char** argv) {
             " peak_working_set_mb=",
             static_cast<double>(peak_working_set_bytes()) / (1024.0 * 1024.0),
             " failed=", summary.failed_views, " elapsed_s=", elapsed,
-            " output=", output_path, " log=", log_path);
+            " output=", cli.output, " log=", log_path);
         return summary.valid ? 0 : 2;
     } catch (const std::exception& error) {
         aetherscan::core::Logger::instance().error("error: ", error.what());

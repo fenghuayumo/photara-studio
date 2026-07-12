@@ -79,10 +79,14 @@ cmake -S . -B build `
 
 ```powershell
 .\build\aetherscan\Release\aetherscan.exe `
-  D:\ScanVideo\chuan\images 900 incremental scene.mvs 3
+  --images D:\ScanVideo\chuan\images `
+  --focal 900 `
+  --mode incremental `
+  --output scene.mvs `
+  --window 3
 ```
 
-参数依次为图片目录、像素焦距、重建模式、输出路径和序列邻接窗口。
+必填参数为 `--images`、`--focal`、`--mode`、`--output`；其余选项见 `aetherscan --help`。
 
 - `scene.mvs`：OpenMVS Interface（MVSI），可用 OpenMVS Viewer 打开验证相机与稀疏点
 - `scene.ply`：稀疏 XYZ；写出 PLY 时会额外生成同名 `scene.mvs`

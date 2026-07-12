@@ -236,8 +236,13 @@ if(AETHERSCAN_BUILD_BENCHMARKS)
                     $<TARGET_FILE_DIR:aetherscan_pair_verify>
                 COMMAND_EXPAND_LISTS)
         endif()
+        add_library(aetherscan_cxxopts INTERFACE)
+        add_library(cxxopts::cxxopts ALIAS aetherscan_cxxopts)
+        target_include_directories(aetherscan_cxxopts INTERFACE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxxopts/include)
+
         add_executable(aetherscan src/tools/reconstruct.cpp)
-        target_link_libraries(aetherscan PRIVATE AetherScan::SfM)
+        target_link_libraries(aetherscan PRIVATE AetherScan::SfM cxxopts::cxxopts)
         if(WIN32)
             add_custom_command(TARGET aetherscan POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
