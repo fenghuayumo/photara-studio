@@ -501,6 +501,8 @@ int main() {
 
     GlobalPositioningOptions positioning;
     positioning.min_views_per_track = 3;
+    positioning.max_tracks_for_positioning = 0;
+    positioning.max_solver_time_sec = 30.0;
     positioning.max_irls_iterations = 4;
     ResectionConfig fallback;
     fallback.min_angle_deg = 0.5F;

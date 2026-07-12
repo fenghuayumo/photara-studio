@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
                 ? (argument_text(argv[9]) == "-"
                        ? std::filesystem::path{}
                        : argument_path(argv[9]))
-                 : directory / ".aetherscan-cache";
+                : std::filesystem::path{};
         const std::string extractor =
             argc >= 11 ? argument_text(argv[10]) : "sift";
         const std::string matcher =

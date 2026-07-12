@@ -101,8 +101,10 @@ std::uint64_t reconstruction_key(
     key.append(
         static_cast<std::uint32_t>(config.global_rotation.weight_type));
     key.append(config.global_positioning.min_views_per_track);
+    key.append(config.global_positioning.max_tracks_for_positioning);
     key.append(config.global_positioning.max_irls_iterations);
     key.append(config.global_positioning.max_num_iterations);
+    key.append(config.global_positioning.max_solver_time_sec);
     key.append(config.global_positioning.function_tolerance);
     key.append(config.global_positioning.huber_threshold);
     key.append(config.global_positioning.random_seed);
@@ -112,6 +114,7 @@ std::uint64_t reconstruction_key(
     key.append(config.global_positioning.optimize_positions);
     key.append(config.global_positioning.optimize_points);
     key.append(config.global_positioning.optimize_scales);
+    key.append(config.global_positioning.ray_initialize_points);
     key.append(static_cast<std::uint32_t>(
         config.global_positioning.constraint));
     key.append(config.global_positioning.constraint_reweight_scale);
@@ -214,8 +217,9 @@ ReconstructionSummary run_global_mapping(
         }
     }
     rotation_summary.filtered_pairs = total_filtered_pairs;
-    // openMVS always rebuilds tracks after relative-rotation filtering.
-    build_tracks(scene);
+    // openMVS rebuilds tracks after relative-rotation filtering with
+    // ReconstructionConfig::minPairWeight (default 3).
+    build_tracks(scene, 3.F);
     core::Logger::instance().info(
         "global: rotation_images=", rotation_summary.estimated_images,
         " used_pairs=", rotation_summary.used_pairs,
@@ -229,6 +233,19 @@ ReconstructionSummary run_global_mapping(
             "global: positioning failed after ", position_summary.iterations,
             " iterations, observations=", position_summary.observations);
         return summary;
+    }
+
+    // Densify structure for BA: camera-only needs a full triangulation; a capped
+    // only_points solve only marks a subset, so triangulate the remaining tracks.
+    if (position_summary.positioned_tracks == 0) {
+        triangulate_tracks(scene, false, 6.F, 1.F);
+        core::Logger::instance().info(
+            "global: triangulated after camera-only positioning");
+    } else {
+        triangulate_tracks(scene, true, 6.F, 1.F);
+        core::Logger::instance().info(
+            "global: densified tracks after only_points (",
+            position_summary.positioned_tracks, " positioned)");
     }
 
     filter_tracks(scene, 6.F, 1.F, 0.F, 0.F);
@@ -266,6 +283,26 @@ ReconstructionSummary run_global_mapping(
     filter_tracks(
         scene,
         fallback_resection.max_reproj_error,
+        fallback_resection.min_angle_deg,
+        fallback_resection.mult_depth_near,
+        fallback_resection.mult_depth_far);
+
+    // Newly triangulated tracks were not part of the full BA above. A short
+    // polish pass lowers their residuals, then a 2 px fine filter matches the
+    // quality-oriented final stage used by production SfM pipelines.
+    bundle.optimizer.maximum_iterations = 8;
+    bundle.optimizer.optimize_rotations = true;
+    bundle.optimizer.optimize_focal = true;
+    bundle.optimizer.optimize_distortion = true;
+    if (!run_bundle_adjustment(scene, bundle).success) {
+        core::Logger::instance().warning(
+            "global: final bundle polish failed; keeping previous solution");
+    }
+    const float fine_reproj_error =
+        std::min(fallback_resection.max_reproj_error, 2.F);
+    filter_tracks(
+        scene,
+        fine_reproj_error,
         fallback_resection.min_angle_deg,
         fallback_resection.mult_depth_near,
         fallback_resection.mult_depth_far);
