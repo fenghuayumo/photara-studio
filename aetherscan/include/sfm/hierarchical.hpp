@@ -4,6 +4,7 @@
 #include "sfm/scene.hpp"
 #include "sfm/star_init.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -68,7 +69,8 @@ unsigned estimate_similarity_transform(
     Similarity3& transform,
     double inlier_threshold = 0.0,
     unsigned max_iterations = 2048,
-    std::uint32_t random_seed = 0xA37E5CA1u);
+    std::uint32_t random_seed = 0xA37E5CA1u,
+    std::vector<std::size_t>* final_inlier_ids = nullptr);
 
 // Align reconstructed sub-scenes, transform poses/points and merge guarded tracks.
 bool align_and_merge_hierarchical(

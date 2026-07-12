@@ -464,15 +464,23 @@ struct ScenePair {
     unsigned inliers{};
 };
 
+struct CachedTrackPoint {
+    Index track_id{k_invalid};
+    Vec3 position{Vec3::Zero()};
+};
+
 std::vector<ScenePair> estimate_scene_pairs(
     const Scene& parent,
     const std::vector<HierarchicalSubscene>& subscenes,
     const std::vector<int>& global_owner,
     const std::vector<Index>& global_local,
     const GlobalAlignmentConfig& config) {
-    std::vector<std::unordered_map<std::uint64_t, Vec3>> caches(subscenes.size());
+    std::vector<std::unordered_map<std::uint64_t, CachedTrackPoint>> caches(
+        subscenes.size());
     for (std::size_t scene_id = 0; scene_id < subscenes.size(); ++scene_id) {
-        for (const Track& track : subscenes[scene_id].scene.tracks) {
+        const Scene& subscene = subscenes[scene_id].scene;
+        for (Index track_id = 0; track_id < subscene.tracks.size(); ++track_id) {
+            const Track& track = subscene.tracks[track_id];
             if (!track.is_triangulated()) continue;
             const unsigned count = std::min<unsigned>(
                 track.num_inliers,
@@ -481,7 +489,7 @@ std::vector<ScenePair> estimate_scene_pairs(
                 const Observation& observation = track.observations[i];
                 caches[scene_id].emplace(
                     observation_key(observation.image_id, observation.feature_id),
-                    track.position);
+                    CachedTrackPoint{track_id, track.position});
             }
         }
     }
@@ -526,6 +534,9 @@ std::vector<ScenePair> estimate_scene_pairs(
     for (const auto& [scene_ids, links] : grouped) {
         std::vector<Vec3> source;
         std::vector<Vec3> destination;
+        std::vector<Index> source_track_ids;
+        std::vector<Index> destination_track_ids;
+        std::unordered_set<std::uint64_t> seen_track_pairs;
         for (const Link& link : links) {
             for (const FeatureMatch& match : link.pair->matches) {
                 const Index feature_first =
@@ -540,11 +551,23 @@ std::vector<ScenePair> estimate_scene_pairs(
                     second_it == caches[scene_ids.second].end()) {
                     continue;
                 }
-                source.push_back(first_it->second);
-                destination.push_back(second_it->second);
+                const std::uint64_t track_pair =
+                    (static_cast<std::uint64_t>(first_it->second.track_id) << 32u) |
+                    static_cast<std::uint64_t>(second_it->second.track_id);
+                if (!seen_track_pairs.insert(track_pair).second) continue;
+                source.push_back(first_it->second.position);
+                destination.push_back(second_it->second.position);
+                source_track_ids.push_back(first_it->second.track_id);
+                destination_track_ids.push_back(second_it->second.track_id);
             }
         }
-        if (source.size() < config.min_common_tracks) continue;
+        if (source.size() < config.min_common_tracks) {
+            core::Logger::instance().debug(
+                "hierarchical align skip: scenes=", scene_ids.first, '-',
+                scene_ids.second, " common_points=", source.size(),
+                " < min=", config.min_common_tracks);
+            continue;
+        }
         Vec3 minimum = source.front();
         Vec3 maximum = source.front();
         for (const Vec3& point : source) {
@@ -559,13 +582,41 @@ std::vector<ScenePair> estimate_scene_pairs(
             config.random_seed ^
             static_cast<std::uint32_t>(scene_ids.first * 0x9E3779B1u) ^
             static_cast<std::uint32_t>(scene_ids.second * 0x85EBCA77u);
+        std::vector<std::size_t> final_inlier_ids;
         const unsigned inliers = estimate_similarity_transform(
             source, destination, relative, threshold,
-            config.ransac_iterations, seed);
+            config.ransac_iterations, seed, &final_inlier_ids);
+        const double inlier_ratio =
+            static_cast<double>(inliers) / static_cast<double>(source.size());
+        std::unordered_set<Index> unique_source_inliers;
+        std::unordered_set<Index> unique_destination_inliers;
+        for (const std::size_t inlier : final_inlier_ids) {
+            unique_source_inliers.insert(source_track_ids[inlier]);
+            unique_destination_inliers.insert(destination_track_ids[inlier]);
+        }
+        const unsigned unique_support = static_cast<unsigned>(std::min(
+            unique_source_inliers.size(), unique_destination_inliers.size()));
+        // A large one-to-one-equivalent consensus remains reliable when track
+        // splitting depresses the raw correspondence inlier ratio.
+        const unsigned strong_consensus =
+            std::max(config.min_common_tracks * 2U, 50U);
         if (inliers < config.min_common_tracks ||
-            static_cast<double>(inliers) / static_cast<double>(source.size()) <
-                config.minimum_inlier_ratio) {
+            (inlier_ratio < config.minimum_inlier_ratio &&
+             unique_support < strong_consensus)) {
+            core::Logger::instance().info(
+                "hierarchical align reject: scenes=", scene_ids.first, '-',
+                scene_ids.second, " points=", source.size(),
+                " inliers=", inliers, " ratio=", inlier_ratio,
+                " unique_support=", unique_support,
+                " threshold=", threshold);
             continue;
+        }
+        if (inlier_ratio < config.minimum_inlier_ratio) {
+            core::Logger::instance().info(
+                "hierarchical align accept strong consensus: scenes=",
+                scene_ids.first, '-', scene_ids.second,
+                " inliers=", inliers, " ratio=", inlier_ratio,
+                " unique_support=", unique_support);
         }
         result.push_back(
             {scene_ids.first, scene_ids.second, relative, inliers});
@@ -1001,14 +1052,15 @@ unsigned estimate_similarity_transform(
     Similarity3& transform,
     const double inlier_threshold,
     const unsigned max_iterations,
-    const std::uint32_t random_seed) {
+    const std::uint32_t random_seed,
+    std::vector<std::size_t>* final_inlier_ids) {
     if (source.size() != destination.size() || source.size() < 3) return 0;
     std::vector<std::size_t> all(source.size());
     std::iota(all.begin(), all.end(), std::size_t{0});
     if (inlier_threshold <= 0.0) {
-        return fit_similarity(source, destination, all, transform)
-            ? static_cast<unsigned>(source.size())
-            : 0u;
+        if (!fit_similarity(source, destination, all, transform)) return 0u;
+        if (final_inlier_ids) *final_inlier_ids = all;
+        return static_cast<unsigned>(source.size());
     }
 
     std::mt19937 generator(random_seed);
@@ -1050,6 +1102,7 @@ unsigned estimate_similarity_transform(
     }
     if (final_inliers.size() >= 3)
         fit_similarity(source, destination, final_inliers, transform);
+    if (final_inlier_ids) *final_inlier_ids = final_inliers;
     return static_cast<unsigned>(final_inliers.size());
 }
 
@@ -1064,8 +1117,13 @@ bool align_and_merge_hierarchical(
         const auto& mapping = subscenes[scene_id].local_to_global;
         for (Index local = 0; local < mapping.size(); ++local) {
             const Index global = mapping[local];
-            if (global >= parent.images.size() || global_owner[global] >= 0)
+            if (global >= parent.images.size() || global_owner[global] >= 0) {
+                core::Logger::instance().error(
+                    "hierarchical align: overlapping or invalid image mapping "
+                    "at global=",
+                    global, " scene=", scene_id);
                 return false;
+            }
             global_owner[global] = static_cast<int>(scene_id);
             global_local[global] = local;
         }
@@ -1073,16 +1131,35 @@ bool align_and_merge_hierarchical(
 
     std::vector<ScenePair> pairs =
         estimate_scene_pairs(parent, subscenes, global_owner, global_local, config);
+    core::Logger::instance().info(
+        "hierarchical align: subscenes=", subscenes.size(),
+        " relative_pairs=", pairs.size());
+    for (const ScenePair& pair : pairs) {
+        core::Logger::instance().info(
+            "hierarchical align pair: ", pair.first, '-', pair.second,
+            " inliers=", pair.inliers, " scale=", pair.relative.scale);
+    }
     std::vector<bool> included;
     if (subscenes.size() == 1) {
         included.assign(1, true);
     } else {
-        if (pairs.empty()) return false;
+        if (pairs.empty()) {
+            core::Logger::instance().warning(
+                "hierarchical align: no valid Sim(3) pairs between subscenes");
+            return false;
+        }
         included = largest_connected_component(subscenes.size(), pairs);
     }
+    unsigned included_count = 0;
+    for (const bool value : included) included_count += value ? 1U : 0U;
+    core::Logger::instance().info(
+        "hierarchical align: connected_subscenes=", included_count, '/',
+        subscenes.size());
     std::vector<Similarity3> transforms;
     if (!estimate_global_transforms(
             subscenes.size(), pairs, included, transforms)) {
+        core::Logger::instance().warning(
+            "hierarchical align: global transform solve failed");
         return false;
     }
     for (std::size_t i = 0; i < subscenes.size(); ++i) {
@@ -1138,7 +1215,11 @@ bool align_and_merge_hierarchical(
     }
     merge_tracks(parent, subscenes, included, global_owner, config);
     filter_tracks(parent, 16.F, 0.5F);
-    return parent.registered_count() >= 2;
+    const unsigned registered = parent.registered_count();
+    core::Logger::instance().info(
+        "hierarchical merge: registered=", registered, '/', parent.images.size(),
+        " tracks=", parent.tracks.size());
+    return registered >= 2;
 }
 
 ReconstructionSummary run_hierarchical_mapping(
@@ -1194,8 +1275,27 @@ ReconstructionSummary run_hierarchical_mapping(
         if (succeeded[i]) reconstructed.push_back(std::move(subscenes[i]));
     }
     if (reconstructed.empty()) return {};
-    if (!align_and_merge_hierarchical(scene, reconstructed, config.alignment))
-        return summarize(scene);
+    if (!align_and_merge_hierarchical(scene, reconstructed, config.alignment)) {
+        std::size_t best = reconstructed.size();
+        unsigned best_registered = 0;
+        for (std::size_t i = 0; i < reconstructed.size(); ++i) {
+            const unsigned registered =
+                reconstructed[i].scene.registered_count();
+            if (registered > best_registered) {
+                best_registered = registered;
+                best = i;
+            }
+        }
+        if (best >= reconstructed.size() || best_registered < 2)
+            return summarize(scene);
+        core::Logger::instance().warning(
+            "hierarchical align failed; adopting largest subscene registered=",
+            best_registered, '/', scene.images.size());
+        std::vector<HierarchicalSubscene> singleton;
+        singleton.push_back(std::move(reconstructed[best]));
+        if (!align_and_merge_hierarchical(scene, singleton, config.alignment))
+            return summarize(scene);
+    }
 
     if (config.final_bundle_adjustment) {
         BundleOptions bundle;

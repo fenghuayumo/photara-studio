@@ -40,7 +40,7 @@ struct FrontEndStageKeys {
 };
 
 void append_cache_build_identity(FingerprintBuilder& key) {
-    key.append_string("aetherscan-cache-abi-20260712-1");
+    key.append_string("aetherscan-cache-abi-20260712-5");
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));
@@ -108,6 +108,7 @@ FrontEndStageKeys make_stage_keys(
     append_cache_build_identity(geometry);
     geometry.append(matches.value());
     geometry.append(options.focal_pixels);
+    geometry.append(options.trust_focal_pixels);
     append_relative_options(geometry, options.relative);
 
     FingerprintBuilder tracks;
@@ -128,7 +129,8 @@ FrontEndStageKeys make_stage_keys(
         tracks.value()};
 }
 
-void initialize_cameras(Scene& scene, const double focal_pixels) {
+void initialize_cameras(
+    Scene& scene, const double focal_pixels, const bool trust_focal_pixels) {
     scene.cameras.clear();
     scene.cameras.reserve(scene.images.size());
     for (Index i = 0; i < scene.images.size(); ++i) {
@@ -142,8 +144,10 @@ void initialize_cameras(Scene& scene, const double focal_pixels) {
                 : 1.2 * std::max(camera.width, camera.height);
         camera.fx = focal;
         camera.fy = focal;
+        camera.focal_prior = focal;
         camera.cx = 0.5 * camera.width;
         camera.cy = 0.5 * camera.height;
+        camera.trust_intrinsics = trust_focal_pixels;
         const auto existing = std::find_if(
             scene.cameras.begin(), scene.cameras.end(),
             [&](const PinholeCamera& candidate) {
@@ -160,6 +164,82 @@ void initialize_cameras(Scene& scene, const double focal_pixels) {
             scene.images[i].camera_id =
                 static_cast<Index>(existing - scene.cameras.begin());
         }
+    }
+}
+
+double weighted_median(
+    std::vector<std::pair<double, double>> samples) {
+    if (samples.empty()) return 0.0;
+    std::sort(
+        samples.begin(), samples.end(),
+        [](const auto& left, const auto& right) {
+            return left.first < right.first;
+        });
+    double total = 0.0;
+    for (const auto& sample : samples) total += sample.second;
+    if (!(total > 0.0)) return samples[samples.size() / 2].first;
+    double accumulated = 0.0;
+    for (const auto& sample : samples) {
+        accumulated += sample.second;
+        if (accumulated >= 0.5 * total) return sample.first;
+    }
+    return samples.back().first;
+}
+
+void calibrate_view_graph_focals(Scene& scene) {
+    std::vector<std::vector<std::pair<double, double>>> grouped(
+        scene.cameras.size());
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || pair.degenerate_planar ||
+            !pair.estimated_focal.has_value() ||
+            pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size())
+            continue;
+        const Index first_group = scene.images[pair.id1].camera_id;
+        const Index second_group = scene.images[pair.id2].camera_id;
+        if (first_group != second_group || first_group >= scene.cameras.size())
+            continue;
+        const PinholeCamera& camera = scene.cameras[first_group];
+        if (camera.trust_intrinsics) continue;
+        const double focal = *pair.estimated_focal;
+        const double image_scale =
+            static_cast<double>(std::max(camera.width, camera.height));
+        if (!std::isfinite(focal) || focal < 0.25 * image_scale ||
+            focal > 4.0 * image_scale)
+            continue;
+        const double weight =
+            std::max(static_cast<double>(pair.composite_weight()), 1e-3);
+        grouped[first_group].push_back({std::log(focal), weight});
+    }
+
+    for (std::size_t group = 0; group < grouped.size(); ++group) {
+        auto& samples = grouped[group];
+        if (samples.size() < 8) continue;
+        const double center = weighted_median(samples);
+        std::vector<std::pair<double, double>> deviations;
+        deviations.reserve(samples.size());
+        for (const auto& sample : samples)
+            deviations.push_back(
+                {std::abs(sample.first - center), sample.second});
+        const double mad = weighted_median(std::move(deviations));
+        const double cutoff =
+            std::max(3.0 * 1.4826 * mad, std::log(1.15));
+        std::vector<std::pair<double, double>> inliers;
+        inliers.reserve(samples.size());
+        for (const auto& sample : samples)
+            if (std::abs(sample.first - center) <= cutoff)
+                inliers.push_back(sample);
+        if (inliers.size() < 8) continue;
+        const double focal = std::exp(weighted_median(inliers));
+        PinholeCamera& camera = scene.cameras[group];
+        const double initial = camera.focal();
+        camera.fx = focal;
+        camera.fy = focal;
+        camera.focal_prior = focal;
+        core::Logger::instance().info(
+            "view-graph focal: camera=", group,
+            " initial=", initial, " consensus=", focal,
+            " samples=", samples.size(), " inliers=", inliers.size(),
+            " log_mad=", mad);
     }
 }
 
@@ -262,6 +342,7 @@ FrontEndResult run_frontend(
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
         const auto started = std::chrono::steady_clock::now();
         compute_pair_weights(scene, options.pair_weighting);
+        calibrate_view_graph_focals(scene);
         build_tracks(scene, options.min_pair_weight);
         result.timing.tracks_seconds =
             std::chrono::duration<double>(
@@ -389,13 +470,15 @@ FrontEndResult run_frontend(
         progress.advance();
         });
 
-        initialize_cameras(scene, options.focal_pixels);
+        initialize_cameras(
+            scene, options.focal_pixels, options.trust_focal_pixels);
         verify_image_snapshot(image_paths, image_fingerprint);
         checkpoints.save_scene(
             CheckpointStage::features, stage_keys.features, scene);
     } else {
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
-        initialize_cameras(scene, options.focal_pixels);
+        initialize_cameras(
+            scene, options.focal_pixels, options.trust_focal_pixels);
         core::Logger::instance().info("checkpoint hit: features");
     }
     result.timing.extract_seconds =
@@ -543,6 +626,7 @@ FrontEndResult run_frontend(
         pair.relative_pose = geo.pose;
         pair.E = geo.E;
         pair.F = geo.F;
+        pair.estimated_focal = geo.estimated_focal;
         pair.H = geo.H;
         pair.mean_ray_angle = geo.mean_ray_angle;
         pair.weight_spatial = geo.weight_spatial;
@@ -581,6 +665,7 @@ FrontEndResult run_frontend(
 
     const auto tracks_started = std::chrono::steady_clock::now();
     compute_pair_weights(scene, options.pair_weighting);
+    calibrate_view_graph_focals(scene);
     build_tracks(scene, options.min_pair_weight);
     checkpoints.save_scene(
         CheckpointStage::tracks, stage_keys.tracks, scene);

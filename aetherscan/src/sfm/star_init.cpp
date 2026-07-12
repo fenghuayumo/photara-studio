@@ -219,10 +219,12 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
         return false;
     }
 
+    // Stage 1: poses/structure only — avoid absorbing init scale into focal.
     BundleOptions ba;
     ba.optimizer.maximum_iterations = 10;
     ba.optimizer.huber_delta = 2.0;
-    ba.optimizer.optimize_focal = true;
+    ba.optimizer.optimize_focal = false;
+    ba.optimizer.optimize_distortion = false;
     if (!run_bundle_adjustment(scene, ba).success) {
         core::Logger::instance().error("star_init: initial BA failed");
         return false;
@@ -245,7 +247,14 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
         return false;
     }
 
-    ba.optimizer.maximum_iterations = 25;
+    // Stage 2: open focal with prior/bounds; keep distortion fixed.
+    ba.optimizer.maximum_iterations = 20;
+    ba.optimizer.optimize_focal = true;
+    ba.optimizer.optimize_distortion = false;
+    run_bundle_adjustment(scene, ba);
+
+    // Stage 3: short distortion polish once geometry is stable.
+    ba.optimizer.maximum_iterations = 10;
     ba.optimizer.optimize_focal = true;
     ba.optimizer.optimize_distortion = true;
     run_bundle_adjustment(scene, ba);

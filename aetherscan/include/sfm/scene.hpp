@@ -29,6 +29,7 @@ struct ImagePair {
     std::optional<Pose3D> relative_pose;
     std::optional<Mat3> E;
     std::optional<Mat3> F;
+    std::optional<double> estimated_focal;
     std::optional<Mat3> H;
     float weight_spatial{0.F};
     float weight_geometry{1.F};  // <1 for planar/low-parallax pairs

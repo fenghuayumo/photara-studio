@@ -78,6 +78,8 @@ struct PinholeCamera {
     double k2{};
     double p1{};
     double p2{};
+    // Stable focal anchor for BA priors/bounds. Zero means initialize from fx/fy.
+    double focal_prior{};
     bool trust_intrinsics{true};
 
     [[nodiscard]] Mat3 K() const {

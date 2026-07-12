@@ -16,6 +16,9 @@ struct GlobalRotationOptions {
     double irls_sigma_deg{5.0};
     double max_relative_rotation_error_deg{12.0};
     bool use_pair_weights{true};
+    // Homography-dominant pairs carry ambiguous rotation on weak-parallax
+    // scenes and should not seed the global rotation backbone.
+    bool reject_planar_pairs{true};
     WeightType weight_type{WeightType::geman_mcclure};
 };
 

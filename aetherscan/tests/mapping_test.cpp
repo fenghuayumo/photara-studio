@@ -551,6 +551,64 @@ void test_local_ba_boundary_selection() {
         "local BA does not modify boundary-only landmarks");
 }
 
+void test_robust_triangulation_and_track_split() {
+    Scene scene;
+    scene.cameras.assign(6, cam());
+    scene.images.resize(6);
+    const Vec3 centers[] = {
+        Vec3(-1.5, 0.0, 0.0), Vec3(-0.5, 0.0, 0.0), Vec3(0.5, 0.0, 0.0),
+        Vec3(1.5, 0.0, 0.0), Vec3(-1.0, 1.0, 0.0), Vec3(1.0, 1.0, 0.0)};
+    const Vec3 true_points[] = {
+        Vec3(0.0, 0.0, 4.0),
+        Vec3(0.4, 0.3, 5.5)};
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        Image& image = scene.images[image_id];
+        image.id = image_id;
+        image.camera_id = image_id;
+        image.registered = true;
+        image.pose.C = centers[image_id];
+        image.features.keypoints.resize(2);
+        for (Index point_id = 0; point_id < 2; ++point_id) {
+            const Vec2 pixel = scene.cameras[image_id].project(
+                image.pose.transform_world_to_camera(true_points[point_id]));
+            image.features.keypoints[point_id].x = static_cast<float>(pixel.x());
+            image.features.keypoints[point_id].y = static_cast<float>(pixel.y());
+        }
+    }
+
+    // One union-find track mixes two landmarks: views 0-3 see point A, views
+    // 4-5 see point B. LO-RANSAC keeps A; split recovers B.
+    Track contaminated;
+    for (Index image_id = 0; image_id < 4; ++image_id)
+        contaminated.observations.push_back({image_id, 0});
+    contaminated.observations.push_back({4, 1});
+    contaminated.observations.push_back({5, 1});
+    scene.tracks.push_back(std::move(contaminated));
+
+    TriangulationOptions options;
+    options.reproj_threshold_px = 2.F;
+    options.min_angle_deg = 0.5F;
+    options.min_observations_for_ransac = 4;
+    options.ransac_iterations = 48;
+    options.use_lo_ransac = true;
+    options.refine_nonlinear = true;
+    options.split_tracks = true;
+    options.max_splits_per_track = 2;
+
+    const unsigned triangulated = triangulate_tracks(scene, false, options);
+    expect(triangulated >= 2, "robust triangulation recovers both consensus sets");
+    expect(scene.tracks.size() >= 2, "contaminated track is split");
+
+    unsigned good_tracks = 0;
+    for (const Track& track : scene.tracks) {
+        if (!track.is_triangulated()) continue;
+        const double err0 = (track.position - true_points[0]).norm();
+        const double err1 = (track.position - true_points[1]).norm();
+        if (std::min(err0, err1) < 0.05) ++good_tracks;
+    }
+    expect(good_tracks >= 2, "split tracks recover both true 3D points");
+}
+
 }  // namespace
 
 int main() {
@@ -562,6 +620,7 @@ int main() {
     test_global_positioning_preserves_fixed_initial_positions();
     test_global_positioning_rejects_empty_point_constraints();
     test_long_track_merge();
+    test_robust_triangulation_and_track_split();
     test_retrieval_inverted_index();
     test_local_ba_boundary_selection();
 

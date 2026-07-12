@@ -61,9 +61,12 @@ Mat3 rotation_exp(const Vec3& tangent) {
     return Eigen::AngleAxisd(angle, tangent / angle).toRotationMatrix();
 }
 
-std::vector<Edge> collect_edges(const Scene& scene, bool use_pair_weights) {
+std::vector<Edge> collect_edges(
+    const Scene& scene, bool use_pair_weights, bool reject_planar_pairs) {
     std::vector<Edge> edges;
+    std::vector<Edge> planar_fallbacks;
     edges.reserve(scene.pairs.size());
+    planar_fallbacks.reserve(scene.pairs.size() / 4);
     for (Index pair_index = 0; pair_index < scene.pairs.size(); ++pair_index) {
         const ImagePair& pair = scene.pairs[pair_index];
         if (!pair.active || !pair.relative_pose.has_value()) continue;
@@ -73,8 +76,24 @@ std::vector<Edge> collect_edges(const Scene& scene, bool use_pair_weights) {
             ? static_cast<double>(pair.composite_weight())
             : static_cast<double>(pair.num_inliers());
         if (weight <= 0.0) continue;
-        edges.push_back(
-            {pair.id1, pair.id2, pair.relative_pose->R, weight, pair_index});
+        Edge edge{
+            pair.id1, pair.id2, pair.relative_pose->R, weight, pair_index};
+        if (reject_planar_pairs && pair.degenerate_planar)
+            planar_fallbacks.push_back(std::move(edge));
+        else
+            edges.push_back(std::move(edge));
+    }
+    if (reject_planar_pairs && !planar_fallbacks.empty()) {
+        DisjointSet components(scene.images.size());
+        for (const Edge& edge : edges) components.unite(edge.a, edge.b);
+        std::stable_sort(
+            planar_fallbacks.begin(), planar_fallbacks.end(),
+            [](const Edge& left, const Edge& right) {
+                return left.weight > right.weight;
+            });
+        for (Edge& edge : planar_fallbacks)
+            if (components.unite(edge.a, edge.b))
+                edges.push_back(std::move(edge));
     }
     return edges;
 }
@@ -230,7 +249,8 @@ GlobalRotationSummary estimate_global_rotations(
     Scene& scene,
     const GlobalRotationOptions& options) {
     GlobalRotationSummary summary;
-    const std::vector<Edge> edges = collect_edges(scene, options.use_pair_weights);
+    const std::vector<Edge> edges = collect_edges(
+        scene, options.use_pair_weights, options.reject_planar_pairs);
     if (edges.empty() || scene.images.empty()) return summary;
 
     std::vector<Mat3> rotations;

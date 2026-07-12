@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <random>
 
@@ -281,6 +282,65 @@ void undistort_poselib_points(
     }
 }
 
+double shared_focal_essential_score(
+    const Mat3& F, const double cx, const double cy, const double focal) {
+    Mat3 K = Mat3::Identity();
+    K(0, 0) = K(1, 1) = focal;
+    K(0, 2) = cx;
+    K(1, 2) = cy;
+    const Mat3 E = K.transpose() * F * K;
+    const Eigen::JacobiSVD<Mat3> svd(E);
+    const auto singular = svd.singularValues();
+    const double scale =
+        std::max(singular[0] * singular[0] + singular[1] * singular[1], 1e-30);
+    const double equal =
+        (singular[0] - singular[1]) * (singular[0] - singular[1]) / scale;
+    const double rank =
+        singular[2] * singular[2] / std::max(singular[1] * singular[1], 1e-30);
+    return equal + rank;
+}
+
+std::optional<double> estimate_shared_focal_from_fundamental(
+    const Mat3& F, const PinholeCamera& camera) {
+    const double image_scale =
+        static_cast<double>(std::max(camera.width, camera.height));
+    const double log_min = std::log(std::max(0.25 * image_scale, 1.0));
+    const double log_max = std::log(std::max(4.0 * image_scale, 2.0));
+    constexpr int samples = 80;
+    int best_index = 0;
+    double best_score = std::numeric_limits<double>::infinity();
+    for (int i = 0; i < samples; ++i) {
+        const double alpha =
+            static_cast<double>(i) / static_cast<double>(samples - 1);
+        const double log_focal = log_min + alpha * (log_max - log_min);
+        const double score = shared_focal_essential_score(
+            F, camera.cx, camera.cy, std::exp(log_focal));
+        if (score < best_score) {
+            best_score = score;
+            best_index = i;
+        }
+    }
+    if (best_index <= 1 || best_index >= samples - 2)
+        return std::nullopt;
+    const double step = (log_max - log_min) / static_cast<double>(samples - 1);
+    double left = std::max(log_min, log_min + (best_index - 1) * step);
+    double right = std::min(log_max, log_min + (best_index + 1) * step);
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        const double first = (2.0 * left + right) / 3.0;
+        const double second = (left + 2.0 * right) / 3.0;
+        const double first_score = shared_focal_essential_score(
+            F, camera.cx, camera.cy, std::exp(first));
+        const double second_score = shared_focal_essential_score(
+            F, camera.cx, camera.cy, std::exp(second));
+        if (first_score <= second_score)
+            right = second;
+        else
+            left = first;
+    }
+    const double focal = std::exp(0.5 * (left + right));
+    return std::isfinite(focal) ? std::optional<double>{focal} : std::nullopt;
+}
+
 bool estimate_with_poselib(
     const std::vector<Vec2>& pixels1,
     const std::vector<Vec2>& pixels2,
@@ -313,6 +373,8 @@ bool estimate_with_poselib(
     Pose3D pose;
     Mat3 E = Mat3::Zero();
     Mat3 F = Mat3::Zero();
+    PinholeCamera filter_camera1 = camera1;
+    PinholeCamera filter_camera2 = camera2;
     bool have_pose = false;
 
     const bool shared_camera =
@@ -334,20 +396,33 @@ bool estimate_with_poselib(
         camera1.trust_intrinsics && camera2.trust_intrinsics;
 
     if (use_shared_focal) {
-        poselib::ImagePair image_pair;
-        const poselib::Point2D pp(camera1.cx, camera1.cy);
-        const poselib::RansacStats stats = poselib::estimate_shared_focal_relative_pose(
-            pinhole_pts1, pinhole_pts2, pp, ransac, bundle, &image_pair, &inliers);
+        const poselib::RansacStats stats =
+            poselib::estimate_fundamental(
+                pinhole_pts1, pinhole_pts2, ransac, bundle, &F, &inliers);
         if (stats.num_inliers < options.min_inliers) return false;
-        pose.set_from_rt(image_pair.pose.R(), image_pair.pose.t);
+        const std::optional<double> focal =
+            estimate_shared_focal_from_fundamental(F, camera1);
+        if (!focal.has_value()) return false;
+        const double f = *focal;
+        result.estimated_focal = f;
+        filter_camera1.fx = filter_camera1.fy = f;
+        filter_camera2.fx = filter_camera2.fy = f;
+        E = normalize_essential(
+            filter_camera2.K().transpose() * F * filter_camera1.K());
+        std::vector<Vec3> b1(pixels1.size()), b2(pixels2.size());
+        for (std::size_t i = 0; i < pixels1.size(); ++i) {
+            b1[i] = filter_camera1.unproject(pixels1[i]);
+            b2[i] = filter_camera2.unproject(pixels2[i]);
+        }
+        const double min_cos =
+            std::cos(options.min_ray_angle_deg * k_pi / 180.0);
+        std::vector<char> refined;
+        if (!recover_pose_from_essential(
+                E, b1, b2, inliers, min_cos, options.min_inliers, pose,
+                refined))
+            return false;
+        inliers = std::move(refined);
         E = essential_from_pose(pose);
-        // Approximate F with the estimated shared focal camera.
-        const double f = image_pair.camera1.focal();
-        Mat3 K = Mat3::Identity();
-        K(0, 0) = K(1, 1) = f;
-        K(0, 2) = camera1.cx;
-        K(1, 2) = camera1.cy;
-        F = K.transpose().inverse() * E * K.inverse();
         have_pose = true;
     } else if (use_calibrated) {
         poselib::CameraPose pl_pose;
@@ -398,7 +473,7 @@ bool estimate_with_poselib(
     float mean_angle = 0.F;
     std::vector<Vec2> inlier_pixels;
     const unsigned filtered = filter_matches(
-        pixels1, pixels2, camera1, camera2, pose, options, inliers, mean_angle,
+        pixels1, pixels2, filter_camera1, filter_camera2, pose, options, inliers, mean_angle,
         &inlier_pixels);
     result.num_inliers = filtered;
     if (filtered < options.min_inliers) return false;

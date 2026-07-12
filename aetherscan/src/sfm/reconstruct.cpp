@@ -32,6 +32,9 @@ void append_optimizer(
     key.append(options.optimize_focal);
     key.append(options.optimize_principal_point);
     key.append(options.optimize_distortion);
+    key.append(options.focal_prior_weight);
+    key.append(options.min_focal_ratio);
+    key.append(options.max_focal_ratio);
 }
 
 void append_resection(
@@ -61,8 +64,8 @@ std::uint64_t reconstruction_key(
     const std::uint64_t tracks_key,
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
-    key.append_string("aetherscan-reconstruction-v6");
-    key.append_string("aetherscan-cache-abi-20260712-1");
+    key.append_string("aetherscan-reconstruction-v9");
+    key.append_string("aetherscan-cache-abi-20260712-4");
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));
@@ -99,6 +102,7 @@ std::uint64_t reconstruction_key(
     key.append(config.global_rotation.irls_sigma_deg);
     key.append(config.global_rotation.max_relative_rotation_error_deg);
     key.append(config.global_rotation.use_pair_weights);
+    key.append(config.global_rotation.reject_planar_pairs);
     key.append(
         static_cast<std::uint32_t>(config.global_rotation.weight_type));
     key.append(config.global_positioning.min_views_per_track);
@@ -262,11 +266,14 @@ ReconstructionSummary run_global_mapping(
 
     filter_tracks(scene, 6.F, 1.F, 0.F, 0.F);
 
+    // Stage 1: structure/translation only. Opening focal this early lets a
+    // weak global layout absorb into intrinsics (cloth3: 900 -> ~810).
     BundleOptions bundle;
     bundle.optimizer.maximum_iterations = 12;
     bundle.optimizer.huber_delta = 2.0;
     bundle.optimizer.optimize_rotations = false;
-    bundle.optimizer.optimize_focal = true;
+    bundle.optimizer.optimize_focal = false;
+    bundle.optimizer.optimize_distortion = false;
     if (!run_bundle_adjustment(scene, bundle).success) {
         core::Logger::instance().error(
             "global: position/structure bundle adjustment failed");
@@ -279,10 +286,11 @@ ReconstructionSummary run_global_mapping(
         fallback_resection.mult_depth_near,
         fallback_resection.mult_depth_far);
 
+    // Stage 2: free rotations + focal with prior/bounds; keep distortion fixed.
     bundle.optimizer.maximum_iterations = 25;
     bundle.optimizer.optimize_rotations = true;
     bundle.optimizer.optimize_focal = true;
-    bundle.optimizer.optimize_distortion = true;
+    bundle.optimizer.optimize_distortion = false;
     if (!run_bundle_adjustment(scene, bundle).success) {
         core::Logger::instance().error("global: full bundle adjustment failed");
         return summary;
@@ -299,9 +307,7 @@ ReconstructionSummary run_global_mapping(
         fallback_resection.mult_depth_near,
         fallback_resection.mult_depth_far);
 
-    // Newly triangulated tracks were not part of the full BA above. A short
-    // polish pass lowers their residuals, then a 2 px fine filter matches the
-    // quality-oriented final stage used by production SfM pipelines.
+    // Stage 3: short polish with distortion once geometry is stable.
     bundle.optimizer.maximum_iterations = 8;
     bundle.optimizer.optimize_rotations = true;
     bundle.optimizer.optimize_focal = true;

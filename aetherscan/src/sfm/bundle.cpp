@@ -1,10 +1,44 @@
 #include "sfm/bundle.hpp"
 #include "core/logging.hpp"
+#include "sfm/triangulation.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace aetherscan::sfm {
+namespace {
+
+float median_parallax_deg_for_camera(
+    const Scene& scene,
+    const Index camera_id,
+    const std::unordered_set<Index>& active_images) {
+    std::vector<float> angles;
+    angles.reserve(256);
+    for (const Track& track : scene.tracks) {
+        if (!track.is_triangulated() || track.num_inliers < 2) continue;
+        bool sees_camera = false;
+        for (unsigned o = 0; o < track.num_inliers; ++o) {
+            const Index image_id = track.observations[o].image_id;
+            if (!active_images.count(image_id)) continue;
+            if (scene.images[image_id].camera_id == camera_id) {
+                sees_camera = true;
+                break;
+            }
+        }
+        if (!sees_camera) continue;
+        const float angle = track_min_ray_angle_deg(track, scene);
+        if (angle > 0.F) angles.push_back(angle);
+    }
+    if (angles.empty()) return 0.F;
+    const std::size_t mid = angles.size() / 2;
+    std::nth_element(angles.begin(), angles.begin() + mid, angles.end());
+    return angles[mid];
+}
+
+}  // namespace
 
 BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) {
     BundleSummary summary;
@@ -64,6 +98,18 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         problem.pose_constant[i] =
             fixed_set.count(camera_images[i]) ? std::uint8_t{1} : std::uint8_t{0};
     }
+    problem.initial_intrinsics = problem.intrinsics;
+    problem.intrinsic_constant.assign(problem.intrinsics.size(), 0);
+    for (std::size_t group = 0; group < group_to_scene_camera.size(); ++group) {
+        const PinholeCamera& camera =
+            scene.cameras[group_to_scene_camera[group]];
+        if (camera.focal_prior > 1.0) {
+            problem.initial_intrinsics[group].fx = camera.focal_prior;
+            problem.initial_intrinsics[group].fy = camera.focal_prior;
+        }
+        if (camera.trust_intrinsics)
+            problem.intrinsic_constant[group] = 1;
+    }
 
     std::unordered_map<Index, Index> track_to_point;
     for (Index track_id = 0; track_id < scene.tracks.size(); ++track_id) {
@@ -101,6 +147,48 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     ba::OptimizerOptions opt = options.optimizer;
     opt.optimize_points = opt.optimize_points && options.optimize_points;
     if (!fixed_set.empty()) opt.fix_first_pose = false;
+
+    const bool optimize_any_intrinsics =
+        opt.optimize_focal || opt.optimize_principal_point ||
+        opt.optimize_distortion;
+    if (optimize_any_intrinsics && options.gate_intrinsics_by_observability) {
+        std::unordered_set<Index> active_images(
+            camera_images.begin(), camera_images.end());
+        std::vector<unsigned> views_per_group(problem.intrinsics.size(), 0);
+        for (const Index image_id : camera_images) {
+            if (fixed_set.count(image_id)) continue;
+            const Index group =
+                problem.pose_intrinsic[image_to_ba[image_id]];
+            ++views_per_group[group];
+        }
+        unsigned frozen = 0;
+        for (std::size_t group = 0; group < problem.intrinsics.size(); ++group) {
+            const Index camera_id = group_to_scene_camera[group];
+            const float parallax = median_parallax_deg_for_camera(
+                scene, camera_id, active_images);
+            if (views_per_group[group] < options.min_views_for_intrinsics ||
+                parallax < options.min_median_parallax_deg) {
+                problem.intrinsic_constant[group] = 1;
+                ++frozen;
+            }
+        }
+        if (frozen > 0) {
+            core::Logger::instance().info(
+                "bundle intrinsics gated: frozen=", frozen, '/',
+                problem.intrinsics.size(),
+                " min_views=", options.min_views_for_intrinsics,
+                " min_parallax_deg=", options.min_median_parallax_deg);
+        }
+        bool any_free = false;
+        for (const std::uint8_t flag : problem.intrinsic_constant)
+            if (flag == 0) any_free = true;
+        if (!any_free) {
+            opt.optimize_focal = false;
+            opt.optimize_principal_point = false;
+            opt.optimize_distortion = false;
+        }
+    }
+
     summary.optimizer = ba::optimize_cpu(problem, opt);
     summary.success = summary.optimizer.usable();
     summary.num_cameras = static_cast<unsigned>(problem.poses.size());
@@ -124,6 +212,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         (opt.optimize_focal || opt.optimize_principal_point || opt.optimize_distortion) &&
         !problem.intrinsics.empty()) {
         for (std::size_t group = 0; group < problem.intrinsics.size(); ++group) {
+            if (problem.is_intrinsic_constant(group)) continue;
             const Index camera_id = group_to_scene_camera[group];
             const ba::PinholeIntrinsics& optimized =
                 problem.intrinsics[group];
@@ -136,7 +225,6 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
             camera.k2 = optimized.k2;
             camera.p1 = optimized.p1;
             camera.p2 = optimized.p2;
-            camera.trust_intrinsics = true;
         }
     }
     if (options.optimize_points) {

@@ -13,6 +13,9 @@ struct RelativePoseResult {
     Pose3D pose;
     Mat3 E{Mat3::Zero()};
     Mat3 F{Mat3::Zero()};
+    // Shared focal estimated jointly with the relative pose, when intrinsics
+    // are not trusted. Kept separate from Scene cameras for robust graph consensus.
+    std::optional<double> estimated_focal;
     std::optional<Mat3> H;
     std::vector<char> inlier_mask;
     unsigned num_ransac_inliers{0};  // Before cheirality/reprojection/angle filtering.

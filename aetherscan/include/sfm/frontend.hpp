@@ -14,6 +14,9 @@ namespace aetherscan::sfm {
 
 struct FrontEndOptions {
     double focal_pixels{0.0};  // 0 => 1.2 * max(w,h)
+    // A supplied focal is normally an initialization, not a calibration.
+    // Set true only for externally calibrated/locked intrinsics.
+    bool trust_focal_pixels{false};
     std::size_t neighbor_window{0};  // 0 => exhaustive for small sets, else sequential window
     unsigned thread_count{0};
     std::string extractor{"sift"};

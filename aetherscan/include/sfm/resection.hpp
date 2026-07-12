@@ -38,7 +38,9 @@ struct ResectionConfig {
         ransac.min_inliers = 12;
         local_ba.maximum_iterations = 20;
         local_ba.huber_delta = 2.0;
-        local_ba.optimize_focal = true;
+        // Match openMVS local BA: keep intrinsics fixed while resecting.
+        local_ba.optimize_focal = false;
+        local_ba.optimize_distortion = false;
         full_ba.maximum_iterations = 40;
         full_ba.huber_delta = 2.0;
         full_ba.optimize_focal = true;

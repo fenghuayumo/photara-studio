@@ -85,6 +85,30 @@ int main() {
     // Synthetic scene has strong parallax — should not be flagged planar.
     expect(!result.degenerate_planar, "parallax scene should not be H-degenerate");
 
+    auto untrusted_cam = cam;
+    untrusted_cam.fx = untrusted_cam.fy = 950.0;
+    untrusted_cam.trust_intrinsics = false;
+    Pose3D self_cal_pose = pose2;
+    self_cal_pose.R =
+        Eigen::AngleAxisd(8.0 * 3.14159265358979323846 / 180.0, Vec3::UnitY())
+            .toRotationMatrix();
+    std::vector<Vec2> self_pixels1, self_pixels2;
+    for (int i = 0; i < 200; ++i) {
+        const Vec3 X(xy(rng), xy(rng), z(rng));
+        self_pixels1.push_back(cam.project(X));
+        self_pixels2.push_back(
+            cam.project(self_cal_pose.transform_world_to_camera(X)));
+    }
+    const auto self_calibrated = aetherscan::sfm::estimate_relative_pose(
+        self_pixels1, self_pixels2, untrusted_cam, untrusted_cam, options);
+    expect(self_calibrated.success, "shared-focal self-calibration should succeed");
+    expect(
+        self_calibrated.estimated_focal.has_value(),
+        "shared-focal result should report its focal");
+    expect(
+        std::abs(*self_calibrated.estimated_focal - cam.fx) < 0.25 * cam.fx,
+        "shared-focal estimate should be close to truth");
+
     std::vector<Vec2> distorted_pixels1, distorted_pixels2;
     for (int i = 0; i < 120; ++i) {
         const Vec3 X(xy(rng), xy(rng), z(rng));

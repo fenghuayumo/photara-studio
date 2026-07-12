@@ -34,6 +34,16 @@ struct OptimizerOptions {
     bool optimize_focal{false};            // tied fx = fy
     bool optimize_principal_point{false};  // cx, cy
     bool optimize_distortion{false};       // k1, k2, p1, p2
+    // Soft prior 0.5 * w * N * ((f - f0) / f0)^2 toward Problem::initial_intrinsics,
+    // where N is the observation count. Keep this mild: large corrections from a
+    // wrong EXIF/init focal (e.g. 900 -> ~600) must still be possible; hard ratio
+    // bounds and staged BA are the primary safeguards. 0 disables the prior.
+    // This is deliberately weak for an initialization-only focal; calibrated
+    // cameras should normally keep intrinsics fixed.
+    double focal_prior_weight{5.0};
+    // Hard clamps relative to the initial focal of each intrinsic group.
+    double min_focal_ratio{0.5};
+    double max_focal_ratio{2.0};
 };
 
 struct IterationSummary {

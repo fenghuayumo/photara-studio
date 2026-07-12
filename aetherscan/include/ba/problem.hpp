@@ -90,6 +90,9 @@ struct Problem {
     std::vector<Pose> poses;
     // Intrinsic parameter blocks. Multiple poses may reference the same block.
     std::vector<PinholeIntrinsics> intrinsics;
+    // Snapshot used by soft focal priors / ratio clamps. Filled by the SfM
+    // wrapper or by optimize_cpu when empty.
+    std::vector<PinholeIntrinsics> initial_intrinsics;
     // pose -> intrinsic block. Empty preserves the legacy one-block-per-pose layout.
     std::vector<Index> pose_intrinsic;
     std::vector<Point3> points;
@@ -97,11 +100,19 @@ struct Problem {
     // Optional per-pose mask. Constant poses contribute observations and
     // constrain points, but receive no update in the reduced camera system.
     std::vector<std::uint8_t> pose_constant;
+    // Optional per-intrinsic-group mask. Constant groups keep contributing
+    // projections but are not updated (unobservable / frozen intrinsics).
+    std::vector<std::uint8_t> intrinsic_constant;
 
     [[nodiscard]] bool is_pose_constant(
         const std::size_t pose, const bool fix_first_pose = false) const noexcept {
         return (fix_first_pose && pose == 0) ||
                (!pose_constant.empty() && pose_constant[pose] != 0);
+    }
+
+    [[nodiscard]] bool is_intrinsic_constant(const std::size_t group) const noexcept {
+        return !intrinsic_constant.empty() && group < intrinsic_constant.size() &&
+               intrinsic_constant[group] != 0;
     }
 
     [[nodiscard]] Index intrinsic_index(const std::size_t pose) const noexcept {
@@ -134,6 +145,16 @@ struct Problem {
         }
         if (!pose_constant.empty() && pose_constant.size() != poses.size()) {
             throw std::invalid_argument("Pose constant mask must match pose count");
+        }
+        if (!intrinsic_constant.empty() &&
+            intrinsic_constant.size() != intrinsics.size()) {
+            throw std::invalid_argument(
+                "Intrinsic constant mask must match intrinsic group count");
+        }
+        if (!initial_intrinsics.empty() &&
+            initial_intrinsics.size() != intrinsics.size()) {
+            throw std::invalid_argument(
+                "Initial intrinsics must match intrinsic group count");
         }
         observations.validate(poses.size(), points.size());
     }

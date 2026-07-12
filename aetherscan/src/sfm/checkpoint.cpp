@@ -35,7 +35,7 @@ namespace aetherscan::sfm {
 namespace {
 
 constexpr std::array<char, 8> magic{'A', 'E', 'T', 'H', 'C', 'K', 'P', 'T'};
-constexpr std::uint32_t schema_version = 5;
+constexpr std::uint32_t schema_version = 6;
 constexpr std::uint64_t fnv_offset = 14695981039346656037ULL;
 constexpr std::uint64_t fnv_prime = 1099511628211ULL;
 
@@ -422,6 +422,7 @@ void write_scene(
         writer.value(camera.k2);
         writer.value(camera.p1);
         writer.value(camera.p2);
+        writer.value(camera.focal_prior);
         writer.value(static_cast<std::uint8_t>(camera.trust_intrinsics));
     }
     writer.value_size(scene.images.size());
@@ -450,6 +451,9 @@ void write_scene(
         };
         write_optional(writer, pair.E, write_mat);
         write_optional(writer, pair.F, write_mat);
+        write_optional(
+            writer, pair.estimated_focal,
+            [](Writer& out, const double focal) { out.value(focal); });
         write_optional(writer, pair.H, write_mat);
         writer.value(pair.weight_spatial);
         writer.value(pair.weight_geometry);
@@ -546,6 +550,7 @@ Scene read_scene(Reader& reader) {
         camera.k2 = reader.value<double>();
         camera.p1 = reader.value<double>();
         camera.p2 = reader.value<double>();
+        camera.focal_prior = reader.value<double>();
         camera.trust_intrinsics = reader.value<std::uint8_t>() != 0;
     }
     scene.images.resize(reader.size(32, 10'000'000));
@@ -571,6 +576,8 @@ Scene read_scene(Reader& reader) {
         const auto read_mat = [](Reader& in) { return read_matrix(in); };
         pair.E = read_optional<Mat3>(reader, read_mat);
         pair.F = read_optional<Mat3>(reader, read_mat);
+        pair.estimated_focal = read_optional<double>(
+            reader, [](Reader& in) { return in.value<double>(); });
         pair.H = read_optional<Mat3>(reader, read_mat);
         pair.weight_spatial = reader.value<float>();
         pair.weight_geometry = reader.value<float>();

@@ -182,6 +182,7 @@ int main() {
     OptimizerOptions grouped_options = options;
     grouped_options.fix_first_pose = false;
     grouped_options.optimize_focal = true;
+    grouped_options.focal_prior_weight = 0.0;  // isolate grouping behavior
     const OptimizerSummary grouped_summary =
         optimize_cpu(grouped_problem, grouped_options);
     if (!grouped_summary.usable() ||
@@ -192,6 +193,107 @@ int main() {
                    grouped_problem.intrinsics[1].fx) > 100.0)) {
         std::cerr << "grouped intrinsics were broadcast or failed to optimize\n";
         return 5;
+    }
+
+    // Strong focal prior should keep f near the declared initial value even
+    // when observations prefer a modestly different truth focal.
+    {
+        Problem prior_problem = make_problem();
+        const PinholeIntrinsics truth = prior_problem.intrinsics.front();
+        prior_problem.intrinsics.front() =
+            PinholeIntrinsics{900.0, 900.0, truth.cx, truth.cy};
+        prior_problem.initial_intrinsics = prior_problem.intrinsics;
+        prior_problem.pose_constant.assign(prior_problem.poses.size(), 1);
+        // Rebuild observations at a nearby truth focal with fixed poses/points.
+        prior_problem.observations = Observations{};
+        for (std::size_t point = 0; point < prior_problem.points.size(); ++point) {
+            for (std::size_t camera = 0; camera < prior_problem.poses.size();
+                 ++camera) {
+                const auto [x, y] = project(
+                    prior_problem.poses[camera],
+                    PinholeIntrinsics{880.0, 880.0, truth.cx, truth.cy},
+                    prior_problem.points[point]);
+                prior_problem.observations.push_back(
+                    static_cast<Index>(camera), static_cast<Index>(point), x,
+                    y);
+            }
+        }
+        OptimizerOptions prior_options = options;
+        prior_options.optimize_focal = true;
+        prior_options.optimize_points = false;
+        prior_options.optimize_rotations = false;
+        prior_options.fix_first_pose = false;
+        prior_options.focal_prior_weight = 1e6;
+        prior_options.max_focal_ratio = 2.0;
+        prior_options.min_focal_ratio = 0.5;
+        const OptimizerSummary prior_summary =
+            optimize_cpu(prior_problem, prior_options);
+        const double f =
+            0.5 *
+            (prior_problem.intrinsics[0].fx + prior_problem.intrinsics[0].fy);
+        if (!prior_summary.usable() || std::abs(f - 900.0) > 5.0) {
+            std::cerr << "focal prior failed to restrain focal: f=" << f
+                      << " summary=" << prior_summary.brief_report() << '\n';
+            return 9;
+        }
+    }
+
+    // Hard ratio bounds must clamp updates relative to initial_intrinsics.
+    {
+        Problem bound_problem = make_problem();
+        const PinholeIntrinsics truth = bound_problem.intrinsics.front();
+        bound_problem.intrinsics.front() =
+            PinholeIntrinsics{800.0, 800.0, truth.cx, truth.cy};
+        bound_problem.initial_intrinsics = bound_problem.intrinsics;
+        bound_problem.observations = Observations{};
+        for (std::size_t point = 0; point < bound_problem.points.size();
+             ++point) {
+            for (std::size_t camera = 0; camera < bound_problem.poses.size();
+                 ++camera) {
+                const auto [x, y] = project(
+                    bound_problem.poses[camera],
+                    PinholeIntrinsics{1200.0, 1200.0, truth.cx, truth.cy},
+                    bound_problem.points[point]);
+                bound_problem.observations.push_back(
+                    static_cast<Index>(camera), static_cast<Index>(point), x,
+                    y);
+            }
+        }
+        OptimizerOptions bound_options = options;
+        bound_options.optimize_focal = true;
+        bound_options.optimize_points = false;
+        bound_options.focal_prior_weight = 0.0;
+        bound_options.max_focal_ratio = 1.05;
+        bound_options.min_focal_ratio = 0.95;
+        const OptimizerSummary bound_summary =
+            optimize_cpu(bound_problem, bound_options);
+        const double f =
+            0.5 *
+            (bound_problem.intrinsics[0].fx + bound_problem.intrinsics[0].fy);
+        if (!bound_summary.usable() || f > 800.0 * 1.05 + 1e-6 ||
+            f < 800.0 * 0.95 - 1e-6) {
+            std::cerr << "focal bounds were violated: f=" << f << '\n';
+            return 10;
+        }
+    }
+
+    // Frozen intrinsic groups must stay exactly at their input values.
+    {
+        Problem frozen_problem = make_problem();
+        frozen_problem.initial_intrinsics = frozen_problem.intrinsics;
+        frozen_problem.intrinsic_constant.assign(1, 1);
+        const double f_before = frozen_problem.intrinsics[0].fx;
+        OptimizerOptions frozen_options = options;
+        frozen_options.optimize_focal = true;
+        frozen_options.focal_prior_weight = 0.0;
+        const OptimizerSummary frozen_summary =
+            optimize_cpu(frozen_problem, frozen_options);
+        if (!frozen_summary.usable() ||
+            frozen_problem.intrinsics[0].fx != f_before ||
+            frozen_problem.intrinsics[0].fy != f_before) {
+            std::cerr << "constant intrinsic group was modified\n";
+            return 11;
+        }
     }
 #if defined(AETHERSCAN_HAS_CUDA)
     if (CudaOptimizer::is_available()) {

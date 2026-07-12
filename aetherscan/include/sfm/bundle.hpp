@@ -18,6 +18,10 @@ struct BundleOptions {
     std::vector<Index> fixed_image_ids;
     // If true and free_image_ids empty, optimize all registered images.
     bool optimize_all_registered{true};
+    // Freeze intrinsic groups that lack enough views / parallax support.
+    bool gate_intrinsics_by_observability{true};
+    unsigned min_views_for_intrinsics{3};
+    float min_median_parallax_deg{1.0F};
 };
 
 struct BundleSummary {

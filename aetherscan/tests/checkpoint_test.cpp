@@ -26,6 +26,7 @@ int main() {
         scene.resection_progress.recent_inlier_ratios = {0.75};
         scene.cameras.push_back(
             {0, 1280, 720, 900.0, 900.0, 640.0, 360.0});
+        scene.cameras[0].focal_prior = 875.0;
         sfm::Image image;
         image.id = 0;
         image.camera_id = 0;
@@ -52,6 +53,7 @@ int main() {
         pair.weight_connectivity = 0.6F;
         pair.weight_triplet = 0.4F;
         pair.weight_cycle = 0.2F;
+        pair.estimated_focal = 880.0;
         scene.pairs.push_back(pair);
         sfm::Track track;
         track.position = sfm::Vec3(4.0, 5.0, 6.0);
@@ -66,7 +68,9 @@ int main() {
             restored.thread_count != 7 || restored.images.size() != 2 ||
             restored.images[0].path != scene.images[0].path ||
             restored.images[0].features.descriptors.size() != 2 ||
+            restored.cameras[0].focal_prior != 875.0 ||
             restored.pairs.size() != 1 ||
+            restored.pairs[0].estimated_focal != pair.estimated_focal ||
             restored.pairs[0].weight_connectivity != 0.6F ||
             restored.pairs[0].weight_triplet != 0.4F ||
             restored.pairs[0].weight_cycle != 0.2F ||
