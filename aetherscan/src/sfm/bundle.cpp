@@ -1,4 +1,5 @@
 #include "sfm/bundle.hpp"
+#include "core/logging.hpp"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -105,6 +106,11 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     summary.num_cameras = static_cast<unsigned>(problem.poses.size());
     summary.num_points = static_cast<unsigned>(problem.points.size());
     summary.num_observations = static_cast<unsigned>(problem.observations.size());
+    core::Logger::instance().info(
+        "bundle adjustment: cameras=", summary.num_cameras,
+        " points=", summary.num_points,
+        " observations=", summary.num_observations, ' ',
+        summary.optimizer.brief_report());
     if (!summary.success) return summary;
 
     for (std::size_t i = 0; i < camera_images.size(); ++i) {

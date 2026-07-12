@@ -1,4 +1,5 @@
 #include "sfm/global_positioning.hpp"
+#include "core/logging.hpp"
 
 #include <ceres/ceres.h>
 
@@ -57,6 +58,7 @@ bool uses_cameras(GlobalPositioningConstraint constraint) {
 GlobalPositioningSummary solve_global_positions(
     Scene& scene,
     const GlobalPositioningOptions& options) {
+    core::StageScope stage("sfm.global_positioning");
     GlobalPositioningSummary result;
     if (scene.images.empty()) return result;
     if (scene.pairs.empty() && uses_cameras(options.constraint)) return result;
@@ -331,6 +333,12 @@ GlobalPositioningSummary solve_global_positions(
         ? 0.0
         : residual_sum / static_cast<double>(residual_count);
     static_cast<void>(valid_pairs);
+    core::Logger::instance().info(
+        "global positioning: images=", result.positioned_images,
+        " tracks=", result.positioned_tracks,
+        " observations=", result.observations,
+        " iterations=", result.iterations,
+        " residual=", result.final_residual);
     return result;
 }
 

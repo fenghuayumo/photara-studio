@@ -1,5 +1,6 @@
 #include "sfm/tracks.hpp"
 
+#include "core/logging.hpp"
 #include "sfm/triangulation.hpp"
 
 #include <algorithm>
@@ -62,6 +63,7 @@ void rebuild_track_index(Scene& scene) {
 }
 
 void build_tracks(Scene& scene, const float min_pair_weight) {
+    core::StageScope stage("sfm.build_tracks");
     scene.tracks.clear();
     scene.image_tracks.clear();
     std::size_t total_features = 0;
@@ -89,7 +91,9 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
         images.insert(image_id);
     };
 
+    core::ProgressReporter progress("build tracks", scene.pairs.size());
     for (const ImagePair& pair : scene.pairs) {
+        progress.advance();
         if (!pair.active || pair.matches.empty()) continue;
         if (pair.composite_weight() <= min_pair_weight) continue;
         const Index off1 = feature_offsets[pair.id1];
@@ -162,6 +166,7 @@ std::pair<float, float> filter_tracks(
     const float min_angle_deg,
     const float mult_depth_near,
     const float mult_depth_far) {
+    core::StageScope stage("sfm.filter_tracks", core::LogLevel::debug);
     std::vector<double> average_distances;
     average_distances.reserve(scene.tracks.size());
     double sum_px = 0.0;
@@ -237,12 +242,20 @@ std::pair<float, float> filter_tracks(
         }
     }
     if (counted == 0) return {0.F, 0.F};
-    return {
+    unsigned kept_tracks = 0;
+    for (const Track& track : scene.tracks)
+        kept_tracks += track.is_triangulated() ? 1U : 0U;
+    const std::pair<float, float> result{
         static_cast<float>(sum_px / counted),
         static_cast<float>(
             std::acos(std::clamp(
                 sum_cos_angle / counted, -1.0, 1.0)) *
             180.0 / 3.14159265358979323846)};
+    core::Logger::instance().debug(
+        "track filter: kept=", kept_tracks, '/', scene.tracks.size(),
+        " observations=", counted, " mean_reproj_px=", result.first,
+        " mean_angle_deg=", result.second);
+    return result;
 }
 
 }  // namespace aetherscan::sfm

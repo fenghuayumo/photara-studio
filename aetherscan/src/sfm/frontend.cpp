@@ -1,5 +1,6 @@
 #include "sfm/frontend.hpp"
 
+#include "core/logging.hpp"
 #include "features/features.hpp"
 #include "features/registry.hpp"
 #include "parallel/thread_pool.hpp"
@@ -200,8 +201,8 @@ std::vector<PairCandidate> build_pair_candidates(
     std::vector<PairCandidate> pairs;
     if (options.neighbor_window > 0)
         pairs = build_pair_list(scene.images.size(), options.neighbor_window);
-    const auto retrieved =
-        retrieve_image_pairs(scene.images, options.retrieval);
+    core::StageScope retrieval_stage("sfm.retrieve_image_pairs");
+    const auto retrieved = retrieve_image_pairs(scene.images, options.retrieval);
     pairs.reserve(pairs.size() + retrieved.size());
     for (const RetrievedPair& pair : retrieved)
         pairs.push_back({pair.first, pair.second});
@@ -230,6 +231,7 @@ FrontEndResult run_frontend(
     const FrontEndOptions& options) {
     FrontEndResult result;
     if (image_paths.size() < 2) return result;
+    core::StageScope frontend_stage("sfm.frontend");
 
     const FrontEndStageKeys stage_keys = make_stage_keys(image_paths, options);
     result.tracks_checkpoint_key = stage_keys.tracks;
@@ -241,7 +243,7 @@ FrontEndResult run_frontend(
             CheckpointStage::tracks, stage_keys.tracks, scene)) {
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
         verify_image_snapshot(image_paths, stage_keys.images);
-        std::cout << "checkpoint hit: tracks\n";
+        core::Logger::instance().info("checkpoint hit: tracks");
         return result;
     }
     if (checkpoints.load_scene(
@@ -256,7 +258,7 @@ FrontEndResult run_frontend(
         verify_image_snapshot(image_paths, stage_keys.images);
         checkpoints.save_scene(
             CheckpointStage::tracks, stage_keys.tracks, scene);
-        std::cout << "checkpoint hit: geometry\n";
+        core::Logger::instance().info("checkpoint hit: geometry");
         return result;
     }
 
@@ -296,6 +298,7 @@ FrontEndResult run_frontend(
     const bool feature_cache_hit = checkpoints.load_scene(
         CheckpointStage::features, stage_keys.features, scene);
     if (!feature_cache_hit) {
+        core::ProgressReporter progress("extract features", image_paths.size());
         scene.images.resize(image_paths.size());
         scene.cameras.reserve(image_paths.size());
         std::vector<std::unique_ptr<features::FeatureExtractor>> workers(threads);
@@ -341,6 +344,7 @@ FrontEndResult run_frontend(
         image.path = image_paths[i];
         image.features = std::move(features);
         scene.images[i] = std::move(image);
+        progress.advance();
         });
 
         initialize_cameras(scene, options.focal_pixels);
@@ -350,7 +354,7 @@ FrontEndResult run_frontend(
     } else {
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
         initialize_cameras(scene, options.focal_pixels);
-        std::cout << "checkpoint hit: features\n";
+        core::Logger::instance().info("checkpoint hit: features");
     }
     result.timing.extract_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - extract_started)
@@ -392,12 +396,18 @@ FrontEndResult run_frontend(
             threads);
         for (unsigned t = 0; t < threads; ++t)
             match_workers[t] = matcher->clone();
+        core::ProgressReporter prepare_progress(
+            "prepare descriptor indices", scene.images.size());
         parallel::parallel_for(
             scene.images.size(), threads,
             [&](const std::size_t image_id, const unsigned tid) {
                 match_workers[tid]->prepare(
                     scene.images[image_id].features);
+                prepare_progress.advance();
             });
+        prepare_progress.finish();
+        core::ProgressReporter match_progress(
+            "match image pairs", candidates.size());
         parallel::parallel_for(
             candidates.size(), threads,
             [&](const std::size_t ci, const unsigned tid) {
@@ -411,14 +421,18 @@ FrontEndResult run_frontend(
                             scene.images[candidate.id1].features,
                             scene.images[candidate.id2].features)
                         .matches;
+                match_progress.advance();
             });
+        match_progress.finish();
         checkpoints.save_matches(stage_keys.matches, raw_pairs);
     } else {
-        std::cout << "checkpoint hit: matches\n";
+        core::Logger::instance().info("checkpoint hit: matches");
     }
 
     std::vector<ImagePair> pairs(candidates.size());
     std::vector<PairDiagnostics> diagnostics(candidates.size());
+    core::ProgressReporter geometry_progress(
+        "verify pair geometry", candidates.size());
     parallel::parallel_for(
         candidates.size(), threads, [&](const std::size_t ci) {
         const PairCandidate cand = candidates[ci];
@@ -426,7 +440,10 @@ FrontEndResult run_frontend(
         const Image& img2 = scene.images[cand.id2];
         const auto& raw = raw_pairs[ci].matches;
         diagnostics[ci].raw_matches = raw.size();
-        if (raw.size() < options.relative.min_inliers) return;
+        if (raw.size() < options.relative.min_inliers) {
+            geometry_progress.advance();
+            return;
+        }
         diagnostics[ci].attempted_geometry = true;
 
         std::vector<Vec2> p1, p2;
@@ -444,7 +461,10 @@ FrontEndResult run_frontend(
             options.relative);
         diagnostics[ci].ransac_inliers = geo.num_ransac_inliers;
         diagnostics[ci].filtered_inliers = geo.num_inliers;
-        if (!geo.success) return;
+        if (!geo.success) {
+            geometry_progress.advance();
+            return;
+        }
 
         ImagePair pair(cand.id1, cand.id2);
         pair.relative_pose = geo.pose;
@@ -463,10 +483,15 @@ FrontEndResult run_frontend(
             pair.matches.push_back(
                 {raw[i].query, raw[i].train});
         }
-        if (pair.matches.size() < options.relative.min_inliers) return;
+        if (pair.matches.size() < options.relative.min_inliers) {
+            geometry_progress.advance();
+            return;
+        }
         diagnostics[ci].accepted = true;
         pairs[ci] = std::move(pair);
+        geometry_progress.advance();
         });
+    geometry_progress.finish();
 
     scene.pairs.reserve(pairs.size());
     for (auto& pair : pairs) {
@@ -513,24 +538,21 @@ FrontEndResult run_frontend(
     const auto average = [](const std::size_t total, const std::size_t count) {
         return count > 0 ? static_cast<double>(total) / static_cast<double>(count) : 0.0;
     };
-    std::cout << "frontend diagnostics: features=" << feature_count
-              << " avg_features/image=" << average(feature_count, scene.images.size())
-              << " candidates=" << candidates.size()
-              << " raw_matches=" << raw_matches
-              << " avg_raw/pair=" << average(raw_matches, candidates.size())
-              << " geometry_attempts=" << geometry_attempts
-              << " ransac_inliers=" << ransac_inliers
-              << " filter_inliers=" << filtered_inliers
-              << " accepted_pairs=" << accepted_pairs
-              << " sift_contrast=" << options.sift_contrast_threshold
-              << " ratio=" << options.match_ratio
-              << " mutual=" << options.mutual_check << '\n';
-    std::cout << "frontend: images=" << scene.images.size()
-              << " pairs=" << scene.pairs.size() << " planar=" << planar_pairs
-              << " tracks=" << scene.tracks.size()
-              << " observations=" << observation_count
-              << " avg_views/track=" << average(observation_count, scene.tracks.size())
-              << '\n';
+    core::Logger::instance().info("frontend diagnostics: features=", feature_count,
+        " avg_features/image=", average(feature_count, scene.images.size()),
+        " candidates=", candidates.size(), " raw_matches=", raw_matches,
+        " avg_raw/pair=", average(raw_matches, candidates.size()),
+        " geometry_attempts=", geometry_attempts,
+        " ransac_inliers=", ransac_inliers,
+        " filter_inliers=", filtered_inliers,
+        " accepted_pairs=", accepted_pairs,
+        " sift_contrast=", options.sift_contrast_threshold,
+        " ratio=", options.match_ratio, " mutual=", options.mutual_check);
+    core::Logger::instance().info(
+        "frontend: images=", scene.images.size(), " pairs=", scene.pairs.size(),
+        " planar=", planar_pairs, " tracks=", scene.tracks.size(),
+        " observations=", observation_count, " avg_views/track=",
+        average(observation_count, scene.tracks.size()));
     return result;
 }
 

@@ -1,10 +1,12 @@
 #include "sfm/reconstruct.hpp"
 #include "sfm/export_mvs.hpp"
+#include "core/logging.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -98,7 +100,8 @@ int main(int argc, char** argv) {
                          "  hierarchical: clustered incremental SfM + Sim(3) merge\n"
                          "  global: rotation averaging + global positioning + BA\n"
                          "  .mvs  OpenMVS Interface (open in Viewer)\n"
-                         "  .ply  sparse XYZ point cloud\n";
+                         "  .ply  sparse XYZ point cloud\n"
+                         "  log level: set AETHERSCAN_LOG_LEVEL=error|warning|info|debug|trace|off\n";
             return argc == 1 ? 0 : 1;
         }
         const std::filesystem::path directory = argument_path(argv[1]);
@@ -128,7 +131,22 @@ int main(int argc, char** argv) {
                 ? (argument_text(argv[9]) == "-"
                        ? std::filesystem::path{}
                        : argument_path(argv[9]))
-                : directory / ".aetherscan-cache";
+                 : directory / ".aetherscan-cache";
+
+        const char* configured_level = std::getenv("AETHERSCAN_LOG_LEVEL");
+        const auto console_level = configured_level
+            ? aetherscan::core::parse_log_level(
+                  configured_level, aetherscan::core::LogLevel::info)
+            : aetherscan::core::LogLevel::info;
+        std::filesystem::path log_directory = output_path.parent_path();
+        if (log_directory.empty()) log_directory = std::filesystem::current_path();
+        const std::filesystem::path log_path =
+            aetherscan::core::Logger::instance().configure(
+                log_directory, "aetherscan", console_level,
+                aetherscan::core::LogLevel::trace);
+        aetherscan::core::Logger::instance().info(
+            "AetherScan started: mode=", mode, " images_dir=", directory,
+            " output=", output_path, " log=", log_path);
 
         std::vector<std::filesystem::path> files;
         for (const auto& entry : std::filesystem::directory_iterator(directory)) {
@@ -167,9 +185,9 @@ int main(int argc, char** argv) {
             std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
         if (!summary.valid) {
-            std::cerr << "reconstruction failed: registered="
-                      << summary.registered_views << '/' << scene.images.size()
-                      << " landmarks=" << summary.landmarks << '\n';
+            aetherscan::core::Logger::instance().error(
+                "reconstruction failed: registered=", summary.registered_views,
+                '/', scene.images.size(), " landmarks=", summary.landmarks);
             return 2;
         }
 
@@ -181,19 +199,19 @@ int main(int argc, char** argv) {
                 output_path.parent_path() / output_path.stem();
             mvs_path += ".mvs";
             aetherscan::sfm::export_openmvs_interface(scene, mvs_path);
-            std::cout << "mvs=" << mvs_path << '\n';
+            aetherscan::core::Logger::instance().info("mvs=", mvs_path);
         } else {
             throw std::invalid_argument("Output must end with .mvs or .ply");
         }
 
-        std::cout << "valid=" << summary.valid
-                  << " registered=" << summary.registered_views << '/' << scene.images.size()
-                  << " landmarks=" << summary.landmarks
-                  << " failed=" << summary.failed_views << " elapsed_s=" << elapsed
-                  << " output=" << output_path << '\n';
+        aetherscan::core::Logger::instance().info(
+            "valid=", summary.valid, " registered=", summary.registered_views,
+            '/', scene.images.size(), " landmarks=", summary.landmarks,
+            " failed=", summary.failed_views, " elapsed_s=", elapsed,
+            " output=", output_path, " log=", log_path);
         return summary.valid ? 0 : 2;
     } catch (const std::exception& error) {
-        std::cerr << "error: " << error.what() << '\n';
+        aetherscan::core::Logger::instance().error("error: ", error.what());
         return 1;
     }
 }

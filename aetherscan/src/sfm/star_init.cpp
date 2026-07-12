@@ -1,5 +1,6 @@
 #include "sfm/star_init.hpp"
 
+#include "core/logging.hpp"
 #include "sfm/bundle.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
@@ -54,6 +55,7 @@ Index select_reference_view(const Scene& scene) {
 }
 
 bool star_initialize(Scene& scene, const StarInitConfig& config) {
+    core::StageScope stage("sfm.star_initialize");
     for (auto& image : scene.images) {
         image.registered = false;
         image.pose = Pose3D::identity();
@@ -62,7 +64,7 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
 
     const Index ref = select_reference_view(scene);
     if (ref == k_invalid) {
-        std::cerr << "star_init: no reference view\n";
+        core::Logger::instance().error("star_init: no reference view");
         return false;
     }
 
@@ -90,7 +92,8 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
     if (neighbors.size() > config.max_views)
         neighbors.resize(config.max_views);
     if (neighbors.size() + 1 < config.min_views) {
-        std::cerr << "star_init: insufficient neighbors (" << neighbors.size() << ")\n";
+        core::Logger::instance().error(
+            "star_init: insufficient neighbors (", neighbors.size(), ')');
         return false;
     }
 
@@ -211,7 +214,8 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
     unsigned n_tracks = triangulate_tracks(
         scene, false, config.max_reproj_error, config.min_angle_deg);
     if (n_tracks < config.min_initial_tracks) {
-        std::cerr << "star_init: too few tracks after triangulation (" << n_tracks << ")\n";
+        core::Logger::instance().error(
+            "star_init: too few tracks after triangulation (", n_tracks, ')');
         return false;
     }
 
@@ -220,7 +224,7 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
     ba.optimizer.huber_delta = 2.0;
     ba.optimizer.optimize_focal = true;
     if (!run_bundle_adjustment(scene, ba).success) {
-        std::cerr << "star_init: initial BA failed\n";
+        core::Logger::instance().error("star_init: initial BA failed");
         return false;
     }
 
@@ -236,7 +240,8 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
         if (t.is_triangulated()) ++n_tracks;
     }
     if (n_tracks < config.min_initial_tracks) {
-        std::cerr << "star_init: too few tracks after filter (" << n_tracks << ")\n";
+        core::Logger::instance().error(
+            "star_init: too few tracks after filter (", n_tracks, ')');
         return false;
     }
 
@@ -252,8 +257,9 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
         scene, std::max(config.max_reproj_error - 2.F, 1.F),
         std::min(config.min_angle_deg + 1.F, 3.F));
 
-    std::cout << "star_init: ref=" << ref << " views=" << scene.registered_count()
-              << " tracks=" << n_tracks << '\n';
+    core::Logger::instance().info(
+        "star_init: ref=", ref, " views=", scene.registered_count(),
+        " tracks=", n_tracks);
     return scene.registered_count() >= config.min_views;
 }
 

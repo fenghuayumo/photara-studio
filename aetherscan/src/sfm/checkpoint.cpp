@@ -1,4 +1,5 @@
 #include "sfm/checkpoint.hpp"
+#include "core/logging.hpp"
 #include "sfm/tracks.hpp"
 
 #include <algorithm>
@@ -823,8 +824,8 @@ bool load_file(
         reader.finish(header.payload_checksum);
         return true;
     } catch (const std::exception& error) {
-        std::cerr << "checkpoint ignored: " << path
-                  << " (" << error.what() << ")\n";
+        core::Logger::instance().warning(
+            "checkpoint ignored: ", path, " (", error.what(), ')');
         return false;
     }
 }

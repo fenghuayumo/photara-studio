@@ -1,5 +1,6 @@
 #include "sfm/reconstruct.hpp"
 
+#include "core/logging.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/bundle.hpp"
 #include "sfm/tracks.hpp"
@@ -133,6 +134,7 @@ ReconstructionSummary run_incremental_mapping(
     Scene& scene,
     const StarInitConfig& star,
     const ResectionConfig& resection) {
+    core::StageScope stage("sfm.incremental_mapping");
     ReconstructionSummary summary;
     if (scene.registered_count() < 2) {
         if (!star_initialize(scene, star)) return summary;
@@ -156,36 +158,38 @@ ReconstructionSummary run_global_mapping(
     const GlobalRotationOptions& rotation,
     const GlobalPositioningOptions& positioning,
     const ResectionConfig& fallback_resection) {
+    core::StageScope stage("sfm.global_mapping");
     ReconstructionSummary summary;
 
     GlobalRotationSummary rotation_summary =
         estimate_global_rotations(scene, rotation);
     if (!rotation_summary.success) {
-        std::cerr << "global: rotation averaging pass 1 failed\n";
+        core::Logger::instance().error("global: rotation averaging pass 1 failed");
         return summary;
     }
     const unsigned total_filtered_pairs = rotation_summary.filtered_pairs;
     if (total_filtered_pairs > 0) {
         rotation_summary = estimate_global_rotations(scene, rotation);
         if (!rotation_summary.success) {
-            std::cerr << "global: rotation averaging pass 2 failed\n";
+            core::Logger::instance().error("global: rotation averaging pass 2 failed");
             return summary;
         }
     }
     rotation_summary.filtered_pairs = total_filtered_pairs;
     // openMVS always rebuilds tracks after relative-rotation filtering.
     build_tracks(scene);
-    std::cout << "global: rotation_images=" << rotation_summary.estimated_images
-              << " used_pairs=" << rotation_summary.used_pairs
-              << " filtered_pairs=" << rotation_summary.filtered_pairs
-              << " tracks=" << scene.tracks.size() << '\n';
+    core::Logger::instance().info(
+        "global: rotation_images=", rotation_summary.estimated_images,
+        " used_pairs=", rotation_summary.used_pairs,
+        " filtered_pairs=", rotation_summary.filtered_pairs,
+        " tracks=", scene.tracks.size());
 
     const GlobalPositioningSummary position_summary =
         solve_global_positions(scene, positioning);
     if (!position_summary.success) {
-        std::cerr << "global: positioning failed after "
-                  << position_summary.iterations << " iterations, observations="
-                  << position_summary.observations << '\n';
+        core::Logger::instance().error(
+            "global: positioning failed after ", position_summary.iterations,
+            " iterations, observations=", position_summary.observations);
         return summary;
     }
 
@@ -197,7 +201,8 @@ ReconstructionSummary run_global_mapping(
     bundle.optimizer.optimize_rotations = false;
     bundle.optimizer.optimize_focal = true;
     if (!run_bundle_adjustment(scene, bundle).success) {
-        std::cerr << "global: position/structure bundle adjustment failed\n";
+        core::Logger::instance().error(
+            "global: position/structure bundle adjustment failed");
         return summary;
     }
     filter_tracks(
@@ -212,7 +217,7 @@ ReconstructionSummary run_global_mapping(
     bundle.optimizer.optimize_focal = true;
     bundle.optimizer.optimize_distortion = true;
     if (!run_bundle_adjustment(scene, bundle).success) {
-        std::cerr << "global: full bundle adjustment failed\n";
+        core::Logger::instance().error("global: full bundle adjustment failed");
         return summary;
     }
     triangulate_tracks(
@@ -239,11 +244,12 @@ ReconstructionSummary run_global_mapping(
         if (track.is_triangulated()) ++summary.landmarks;
     }
     summary.valid = summary.registered_views >= 2 && summary.landmarks > 0;
-    std::cout << "global: rotations=" << rotation_summary.estimated_images
-              << " filtered_pairs=" << rotation_summary.filtered_pairs
-              << " positioned=" << position_summary.positioned_images
-              << " position_tracks=" << position_summary.positioned_tracks
-              << " residual=" << position_summary.final_residual << '\n';
+    core::Logger::instance().info(
+        "global: rotations=", rotation_summary.estimated_images,
+        " filtered_pairs=", rotation_summary.filtered_pairs,
+        " positioned=", position_summary.positioned_images,
+        " position_tracks=", position_summary.positioned_tracks,
+        " residual=", position_summary.final_residual);
     return summary;
 }
 
@@ -251,6 +257,7 @@ ReconstructionSummary reconstruct(
     Scene& scene_out,
     const std::vector<std::filesystem::path>& image_paths,
     const ReconstructionConfig& config) {
+    core::StageScope stage("sfm.reconstruct");
     FrontEndResult frontend = run_frontend(image_paths, config.frontend);
     scene_out = std::move(frontend.scene);
     CheckpointStore checkpoints(config.frontend.checkpoint);
@@ -260,7 +267,7 @@ ReconstructionSummary reconstruct(
             CheckpointStage::reconstruction, mapping_key, scene_out)) {
         scene_out.thread_count =
             parallel::resolve_thread_count(config.frontend.thread_count);
-        std::cout << "checkpoint hit: reconstruction\n";
+        core::Logger::instance().info("checkpoint hit: reconstruction");
         if (config.mode != ReconstructionMode::incremental)
             return summarize_scene(scene_out);
     }

@@ -1,5 +1,6 @@
 #include "sfm/triangulation.hpp"
 
+#include "core/logging.hpp"
 #include <Eigen/SVD>
 
 #include <algorithm>
@@ -142,6 +143,10 @@ unsigned triangulate_tracks(
     const float reproj_threshold_px,
     const float min_angle_deg) {
     unsigned inlier_tracks = 0;
+    core::StageScope stage("sfm.triangulate_tracks", core::LogLevel::debug);
+    core::ProgressReporter progress(
+        "triangulate tracks", scene.tracks.size(), std::chrono::seconds(1),
+        core::LogLevel::debug);
 #ifdef _OPENMP
 #pragma omp parallel for reduction(+ : inlier_tracks) schedule(dynamic)
 #endif
@@ -149,11 +154,14 @@ unsigned triangulate_tracks(
         Track& track = scene.tracks[static_cast<std::size_t>(i)];
         if (outliers_only && track.is_triangulated()) {
             ++inlier_tracks;
+            progress.advance();
             continue;
         }
         if (triangulate_track(track, scene, reproj_threshold_px, min_angle_deg) >= 2)
             ++inlier_tracks;
+        progress.advance();
     }
+    progress.finish();
     return inlier_tracks;
 }
 

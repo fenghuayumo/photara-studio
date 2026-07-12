@@ -1,5 +1,6 @@
 #include "sfm/resection.hpp"
 
+#include "core/logging.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 
@@ -161,11 +162,13 @@ void run_required_bundle_adjustment(
 }  // namespace
 
 unsigned register_images(Scene& scene, const ResectionConfig& config) {
+    core::StageScope stage("sfm.resection");
     rebuild_track_index(scene);
     std::unordered_map<Index, unsigned> unregistered;
     for (Index i = 0; i < scene.images.size(); ++i) {
         if (!scene.images[i].registered) unregistered[i] = 0;
     }
+    core::ProgressReporter progress("register images", unregistered.size());
 
     unsigned registered_count = 0;
     unsigned checkpointed_count = 0;
@@ -189,6 +192,9 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                 avg_inliers.add(static_cast<double>(num_inliers) / static_cast<double>(num_points));
 
             if (num_inliers == 0) {
+                core::Logger::instance().debug(
+                    "resection rejected image=", next_id,
+                    " correspondences=", num_points);
                 next_ids.erase(next_ids.begin() + static_cast<std::ptrdiff_t>(n));
                 continue;
             }
@@ -196,6 +202,12 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
             last_registered.push_back(next_id);
             unregistered.erase(next_id);
             ++registered_count;
+            progress.advance();
+            core::Logger::instance().debug(
+                "resection registered image=", next_id,
+                " inliers=", num_inliers, '/', num_points,
+                " ratio=", num_points == 0 ? 0.0
+                    : static_cast<double>(num_inliers) / num_points);
             ++since_full_ba;
             ++n;
 
@@ -259,6 +271,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
             checkpointed_count = registered_count;
         }
     }
+    progress.finish();
 
     if (registered_count > 0) {
         triangulate_tracks(scene, false, config.max_reproj_error, config.min_angle_deg);
@@ -278,8 +291,9 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
         registered_count != checkpointed_count)
         config.checkpoint_callback(scene);
 
-    std::cout << "resection: newly_registered=" << registered_count
-              << " total=" << scene.registered_count() << '\n';
+    core::Logger::instance().info(
+        "resection: newly_registered=", registered_count,
+        " total=", scene.registered_count());
     return registered_count;
 }
 

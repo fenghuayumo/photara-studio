@@ -1,6 +1,7 @@
 #include "ba/optimizer.hpp"
 
 #include "ba/linearizer.hpp"
+#include "core/logging.hpp"
 #include "reprojection_detail.cuh"
 
 #include <cuda_runtime.h>
@@ -537,6 +538,7 @@ void CudaOptimizer::upload(const Problem& problem) {
 }
 
 OptimizerSummary CudaOptimizer::optimize() {
+    core::StageScope stage("ba.cuda");
     auto& d=*impl_; if (!d.observation_count) throw std::logic_error("Upload a BA problem before optimization");
     const auto started=std::chrono::steady_clock::now(); OptimizerSummary summary;
     summary.initial_cost=d.cost(); summary.final_cost=summary.initial_cost; double damping=d.options.initial_damping;
@@ -588,6 +590,10 @@ OptimizerSummary CudaOptimizer::optimize() {
         update_points_kernel<<<blocks(d.point_count),threads>>>(d.points.data(),d.point_step.data(),d.point_count);
         const double candidate=d.cost(); const bool accepted=std::isfinite(candidate)&&candidate<summary.final_cost;
         summary.iterations.push_back({iteration,accepted?candidate:summary.final_cost,damping,norm,pcg,accepted});
+        core::Logger::instance().debug(
+            "CUDA BA iteration=",iteration," cost=",summary.iterations.back().cost,
+            " damping=",damping," step_norm=",norm,
+            " pcg_iterations=",pcg," accepted=",accepted);
         if (accepted) { const double previous=summary.final_cost; summary.final_cost=candidate; ++summary.successful_steps;
             damping=std::max(d.options.minimum_damping,damping/3.0);
             if (norm<=d.options.step_tolerance || previous-candidate<=d.options.function_tolerance*std::max(1.0,previous)) {
@@ -603,7 +609,9 @@ OptimizerSummary CudaOptimizer::optimize() {
             } }
     }
     check(cudaDeviceSynchronize(),"CUDA optimizer synchronize");
-    summary.total_time_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count(); return summary;
+    summary.total_time_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+    stage.finish(summary.brief_report());
+    return summary;
 }
 
 void CudaOptimizer::download(Problem& problem) const {

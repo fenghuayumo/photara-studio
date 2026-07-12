@@ -1,4 +1,5 @@
 #include "sfm/export_mvs.hpp"
+#include "core/logging.hpp"
 
 #include "io/image.hpp"
 
@@ -117,6 +118,7 @@ void export_openmvs_interface(
     const Scene& scene,
     const std::filesystem::path& path,
     const ExportMvsOptions& options) {
+    core::StageScope stage("sfm.export_openmvs");
     std::vector<std::uint32_t> registered;
     registered.reserve(scene.images.size());
     for (std::uint32_t i = 0; i < scene.images.size(); ++i) {
@@ -265,6 +267,10 @@ void export_openmvs_interface(
 
     if (!writer.good())
         throw std::runtime_error("Failed while writing MVS file: " + path.string());
+    core::Logger::instance().info(
+        "OpenMVS export: path=", path, " images=", registered.size(),
+        " vertices=", vertices.size(), " colors=",
+        options.sample_colors && wrote_any_color);
 }
 
 }  // namespace aetherscan::sfm

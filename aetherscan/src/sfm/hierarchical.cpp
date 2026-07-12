@@ -1,5 +1,6 @@
 #include "sfm/hierarchical.hpp"
 
+#include "core/logging.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/bundle.hpp"
 #include "sfm/reconstruct.hpp"
@@ -1143,6 +1144,7 @@ bool align_and_merge_hierarchical(
 ReconstructionSummary run_hierarchical_mapping(
     Scene& scene,
     const HierarchicalConfig& config) {
+    core::StageScope stage("sfm.hierarchical_mapping");
     std::vector<HierarchicalSubscene> subscenes =
         split_hierarchical_scene(scene, config.cluster);
     if (subscenes.empty()) return {};
@@ -1158,6 +1160,8 @@ ReconstructionSummary run_hierarchical_mapping(
         subscene.scene.thread_count = threads_per_subscene;
     std::vector<bool> succeeded(subscenes.size(), false);
     std::mutex result_mutex;
+    core::ProgressReporter progress(
+        "reconstruct subscenes", subscenes.size());
     parallel::parallel_for(
         subscenes.size(), worker_count,
         [&](const std::size_t index) {
@@ -1180,7 +1184,9 @@ ReconstructionSummary run_hierarchical_mapping(
             }
             std::scoped_lock lock(result_mutex);
             succeeded[index] = success;
+            progress.advance();
         });
+    progress.finish();
 
     std::vector<HierarchicalSubscene> reconstructed;
     reconstructed.reserve(subscenes.size());

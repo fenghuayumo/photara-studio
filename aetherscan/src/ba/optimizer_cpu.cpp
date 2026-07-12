@@ -1,4 +1,5 @@
 #include "ba/optimizer.hpp"
+#include "core/logging.hpp"
 
 #include "ba/linearizer.hpp"
 
@@ -1415,6 +1416,7 @@ std::string OptimizerSummary::brief_report() const {
 }
 
 OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options) {
+    core::StageScope stage("ba.cpu");
     problem.validate();
     if (options.maximum_iterations == 0 || options.maximum_pcg_iterations == 0 ||
         options.initial_damping <= 0.0 || options.pcg_tolerance <= 0.0) {
@@ -1600,6 +1602,11 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         summary.iterations.back().cost = accepted ? candidate_cost : summary.final_cost;
         summary.iterations.back().step_norm = norm;
         summary.iterations.back().accepted = accepted;
+        core::Logger::instance().debug(
+            "BA iteration=", iteration, " cost=", summary.iterations.back().cost,
+            " damping=", damping, " step_norm=", norm,
+            " pcg_iterations=", summary.iterations.back().pcg_iterations,
+            " accepted=", accepted);
         if (accepted) {
             const double previous_cost = summary.final_cost;
             summary.final_cost = candidate_cost;
@@ -1630,6 +1637,7 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
     const auto stopped = std::chrono::steady_clock::now();
     summary.total_time_ms =
         std::chrono::duration<double, std::milli>(stopped - started).count();
+    stage.finish(summary.brief_report());
     return summary;
 }
 
