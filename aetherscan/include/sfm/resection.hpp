@@ -32,8 +32,11 @@ struct ResectionConfig {
         ransac.min_inliers = 12;
         local_ba.maximum_iterations = 20;
         local_ba.huber_delta = 2.0;
+        local_ba.optimize_focal = true;
         full_ba.maximum_iterations = 40;
         full_ba.huber_delta = 2.0;
+        full_ba.optimize_focal = true;
+        full_ba.optimize_distortion = true;
     }
 };
 

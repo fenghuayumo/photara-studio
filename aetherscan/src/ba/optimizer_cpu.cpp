@@ -26,6 +26,19 @@ constexpr std::size_t pose_block_size = pose_size * pose_size;
 constexpr std::size_t point_block_size = point_size * point_size;
 constexpr std::size_t cross_block_size = pose_size * point_size;
 
+LinearizerOptions make_linearizer_options(const OptimizerOptions& options) {
+    return LinearizerOptions{
+        options.huber_delta,
+        options.minimum_depth,
+        options.optimize_focal,
+        options.optimize_principal_point,
+        options.optimize_distortion};
+}
+
+std::size_t count_intrinsic_dof(const OptimizerOptions& options) noexcept {
+    return ::aetherscan::ba::intrinsic_dof(make_linearizer_options(options));
+}
+
 struct Adjacency {
     std::vector<std::size_t> point_offsets;
     std::vector<std::size_t> point_observations;
@@ -39,6 +52,19 @@ struct System {
     std::vector<double> point_inverse;
     std::vector<double> point_rhs;
     std::vector<double> cross;
+    // Shared intrinsic blocks (empty when dof == 0).
+    std::size_t intrinsic_dof{0};
+    std::vector<double> intrinsic_hessian;       // dof x dof
+    std::vector<double> intrinsic_rhs;           // dof
+    std::vector<double> pose_intrinsic_cross;    // obs x (6 x dof)
+    std::vector<double> point_intrinsic_cross;   // obs x (3 x dof)
+};
+
+struct IntrinsicSchur {
+    std::size_t dof{0};
+    std::vector<double> S_ii;  // dof x dof
+    std::vector<double> S_ci;  // cameras x (6 x dof)
+    std::vector<double> b_i;   // dof
 };
 
 struct SchurPattern {
@@ -256,7 +282,8 @@ System assemble_system(
     const Adjacency& adjacency,
     const double damping,
     const bool fix_first_point,
-    const bool optimize_rotations) {
+    const bool optimize_rotations,
+    const std::size_t intrinsic_dof) {
     const std::size_t camera_count = problem.poses.size();
     const std::size_t point_count = problem.points.size();
     System system;
@@ -265,6 +292,15 @@ System assemble_system(
     system.point_inverse.assign(point_count * point_block_size, 0.0);
     system.point_rhs.assign(point_count * point_size, 0.0);
     system.cross.assign(problem.observations.size() * cross_block_size, 0.0);
+    system.intrinsic_dof = intrinsic_dof;
+    if (intrinsic_dof > 0) {
+        system.intrinsic_hessian.assign(intrinsic_dof * intrinsic_dof, 0.0);
+        system.intrinsic_rhs.assign(intrinsic_dof, 0.0);
+        system.pose_intrinsic_cross.assign(
+            problem.observations.size() * pose_size * intrinsic_dof, 0.0);
+        system.point_intrinsic_cross.assign(
+            problem.observations.size() * point_size * intrinsic_dof, 0.0);
+    }
 
     int thread_count = 1;
 #if defined(AETHERSCAN_HAS_OPENMP)
@@ -274,6 +310,11 @@ System assemble_system(
 #endif
     std::vector<double> local_cameras(
         static_cast<std::size_t>(thread_count) * camera_count * 42, 0.0);
+    std::vector<double> local_intrinsics(
+        intrinsic_dof > 0
+            ? static_cast<std::size_t>(thread_count) * (intrinsic_dof * intrinsic_dof + intrinsic_dof)
+            : 0,
+        0.0);
 
 #if defined(AETHERSCAN_HAS_OPENMP)
 #pragma omp parallel for schedule(dynamic, 64) num_threads(thread_count)
@@ -287,6 +328,12 @@ System assemble_system(
 #endif
         double* camera_accumulator = local_cameras.data() +
             static_cast<std::size_t>(thread) * camera_count * 42;
+        double* intrinsic_accumulator =
+            intrinsic_dof > 0
+                ? local_intrinsics.data() +
+                      static_cast<std::size_t>(thread) *
+                          (intrinsic_dof * intrinsic_dof + intrinsic_dof)
+                : nullptr;
         double point_hessian[point_block_size]{};
         double* point_rhs = system.point_rhs.data() + point * point_size;
         for (std::size_t cursor = adjacency.point_offsets[point];
@@ -324,6 +371,38 @@ System assemble_system(
                         value.point_jacobian[row] * value.point_jacobian[column] +
                         value.point_jacobian[point_size + row] *
                         value.point_jacobian[point_size + column];
+                }
+            }
+            if (intrinsic_dof > 0) {
+                double* pose_intr =
+                    system.pose_intrinsic_cross.data() +
+                    observation * pose_size * intrinsic_dof;
+                double* point_intr =
+                    system.point_intrinsic_cross.data() +
+                    observation * point_size * intrinsic_dof;
+                for (std::size_t param = 0; param < intrinsic_dof; ++param) {
+                    const double j0 = value.intrinsic_jacobian[param];
+                    const double j1 =
+                        value.intrinsic_jacobian[k_max_intrinsic_params + param];
+                    intrinsic_accumulator[intrinsic_dof * intrinsic_dof + param] -=
+                        j0 * value.residual[0] + j1 * value.residual[1];
+                    for (std::size_t other = 0; other < intrinsic_dof; ++other) {
+                        const double o0 = value.intrinsic_jacobian[other];
+                        const double o1 =
+                            value.intrinsic_jacobian[k_max_intrinsic_params + other];
+                        intrinsic_accumulator[param * intrinsic_dof + other] +=
+                            j0 * o0 + j1 * o1;
+                    }
+                    for (std::size_t row = 0; row < pose_size; ++row) {
+                        pose_intr[row * intrinsic_dof + param] =
+                            value.pose_jacobian[row] * j0 +
+                            value.pose_jacobian[pose_size + row] * j1;
+                    }
+                    for (std::size_t row = 0; row < point_size; ++row) {
+                        point_intr[row * intrinsic_dof + param] =
+                            value.point_jacobian[row] * j0 +
+                            value.point_jacobian[point_size + row] * j1;
+                    }
                 }
             }
         }
@@ -368,12 +447,34 @@ System assemble_system(
             }
         }
     }
+    if (intrinsic_dof > 0) {
+        for (int thread = 0; thread < thread_count; ++thread) {
+            const double* source =
+                local_intrinsics.data() +
+                static_cast<std::size_t>(thread) *
+                    (intrinsic_dof * intrinsic_dof + intrinsic_dof);
+            for (std::size_t i = 0; i < intrinsic_dof * intrinsic_dof; ++i)
+                system.intrinsic_hessian[i] += source[i];
+            for (std::size_t i = 0; i < intrinsic_dof; ++i)
+                system.intrinsic_rhs[i] += source[intrinsic_dof * intrinsic_dof + i];
+        }
+        for (std::size_t diagonal = 0; diagonal < intrinsic_dof; ++diagonal) {
+            system.intrinsic_hessian[diagonal * intrinsic_dof + diagonal] +=
+                damping * (system.intrinsic_hessian[diagonal * intrinsic_dof + diagonal] + 1.0);
+        }
+    }
     if (!optimize_rotations) {
         for (std::size_t observation = 0;
              observation < problem.observations.size(); ++observation) {
             double* cross =
                 system.cross.data() + observation * cross_block_size;
             std::fill(cross, cross + 3 * point_size, 0.0);
+            if (intrinsic_dof > 0) {
+                double* pose_intr =
+                    system.pose_intrinsic_cross.data() +
+                    observation * pose_size * intrinsic_dof;
+                std::fill(pose_intr, pose_intr + 3 * intrinsic_dof, 0.0);
+            }
         }
     }
     return system;
@@ -629,8 +730,10 @@ std::size_t solve_pcg(
 
 void recover_point_step(
     const Problem& problem, const Adjacency& adjacency, const System& system,
-    const std::vector<double>& camera_step, std::vector<double>& point_step) {
+    const std::vector<double>& camera_step, const std::vector<double>& intrinsic_step,
+    std::vector<double>& point_step) {
     point_step.assign(problem.points.size() * point_size, 0.0);
+    const std::size_t dof = system.intrinsic_dof;
 #if defined(AETHERSCAN_HAS_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
@@ -650,10 +753,201 @@ void recover_point_step(
                     rhs[column] -= cross[row * point_size + column] * step[row];
                 }
             }
+            if (dof > 0 && !intrinsic_step.empty()) {
+                const double* point_intr =
+                    system.point_intrinsic_cross.data() +
+                    observation * point_size * dof;
+                for (std::size_t column = 0; column < point_size; ++column) {
+                    for (std::size_t param = 0; param < dof; ++param) {
+                        rhs[column] -=
+                            point_intr[column * dof + param] * intrinsic_step[param];
+                    }
+                }
+            }
         }
         multiply3(system.point_inverse.data() + point * point_block_size,
                   rhs, point_step.data() + point * point_size);
     }
+}
+
+IntrinsicSchur build_intrinsic_schur(
+    const Problem& problem, const Adjacency& adjacency, const System& system) {
+    IntrinsicSchur result;
+    result.dof = system.intrinsic_dof;
+    if (result.dof == 0) return result;
+    const std::size_t dof = result.dof;
+    const std::size_t camera_count = problem.poses.size();
+    result.S_ii = system.intrinsic_hessian;
+    result.b_i = system.intrinsic_rhs;
+    result.S_ci.assign(camera_count * pose_size * dof, 0.0);
+
+    // Accumulate W_ci per camera from pose_intrinsic_cross.
+    for (std::size_t observation = 0; observation < problem.observations.size(); ++observation) {
+        const std::size_t camera = problem.observations.camera[observation];
+        const double* pose_intr =
+            system.pose_intrinsic_cross.data() + observation * pose_size * dof;
+        double* destination = result.S_ci.data() + camera * pose_size * dof;
+        for (std::size_t i = 0; i < pose_size * dof; ++i) destination[i] += pose_intr[i];
+    }
+
+    // Schur complement against points: S_ii -= W_pi^T V^{-1} W_pi, etc.
+    for (std::size_t point = 0; point < problem.points.size(); ++point) {
+        const double* inverse = system.point_inverse.data() + point * point_block_size;
+        // Collect W_pi (3 x dof) summed? Per-observation then reduce.
+        // For each pair of observations of this point, contribute.
+        // Simpler: form W_pi_total isn't right - each obs has its own W_pi.
+        // S_ii -= sum_obs1,obs2? No: V is per-point, W_pi is stacked for all obs of point.
+        // Correct: let W be (3 x dof) accumulated as sum over obs of point of... 
+        // Actually V = sum_obs Jx^T Jx, and the cross W_pi for Schur is for the stacked
+        // observation Jacobians. The formula S_ii = U_i - W^T V^{-1} W where
+        // W = sum_obs Jx_obs^T Ji_obs  (3 x dof), because points have one 3-block.
+        // Yes W_point_intr = sum_{obs of point} Jx^T Ji.
+        double W[3 * 7]{};
+        for (std::size_t cursor = adjacency.point_offsets[point];
+             cursor < adjacency.point_offsets[point + 1]; ++cursor) {
+            const std::size_t observation = adjacency.point_observations[cursor];
+            const double* point_intr =
+                system.point_intrinsic_cross.data() + observation * point_size * dof;
+            for (std::size_t i = 0; i < point_size * dof; ++i) W[i] += point_intr[i];
+        }
+        double VinvW[3 * 7]{};
+        for (std::size_t param = 0; param < dof; ++param) {
+            double column[3] = {W[param], W[dof + param], W[2 * dof + param]};
+            // W is stored row-major 3 x dof: W[row * dof + param]
+            column[0] = W[0 * dof + param];
+            column[1] = W[1 * dof + param];
+            column[2] = W[2 * dof + param];
+            double out[3]{};
+            multiply3(inverse, column, out);
+            VinvW[0 * dof + param] = out[0];
+            VinvW[1 * dof + param] = out[1];
+            VinvW[2 * dof + param] = out[2];
+        }
+        for (std::size_t row = 0; row < dof; ++row) {
+            for (std::size_t column = 0; column < dof; ++column) {
+                result.S_ii[row * dof + column] -=
+                    W[0 * dof + row] * VinvW[0 * dof + column] +
+                    W[1 * dof + row] * VinvW[1 * dof + column] +
+                    W[2 * dof + row] * VinvW[2 * dof + column];
+            }
+        }
+        double reduced_point[3]{};
+        multiply3(inverse, system.point_rhs.data() + point * point_size, reduced_point);
+        for (std::size_t row = 0; row < dof; ++row) {
+            result.b_i[row] -=
+                W[0 * dof + row] * reduced_point[0] +
+                W[1 * dof + row] * reduced_point[1] +
+                W[2 * dof + row] * reduced_point[2];
+        }
+
+        // S_ci -= W_cp V^{-1} W_pi^T for each observation of this point.
+        for (std::size_t cursor = adjacency.point_offsets[point];
+             cursor < adjacency.point_offsets[point + 1]; ++cursor) {
+            const std::size_t observation = adjacency.point_observations[cursor];
+            const std::size_t camera = problem.observations.camera[observation];
+            const double* cross = system.cross.data() + observation * cross_block_size;
+            double* S_ci = result.S_ci.data() + camera * pose_size * dof;
+            // cross is 6x3, VinvW is 3xdof: contribute cross * VinvW
+            for (std::size_t row = 0; row < pose_size; ++row) {
+                for (std::size_t param = 0; param < dof; ++param) {
+                    S_ci[row * dof + param] -=
+                        cross[row * point_size + 0] * VinvW[0 * dof + param] +
+                        cross[row * point_size + 1] * VinvW[1 * dof + param] +
+                        cross[row * point_size + 2] * VinvW[2 * dof + param];
+                }
+            }
+        }
+    }
+    return result;
+}
+
+bool solve_dense_spd(
+    const std::vector<double>& matrix, const std::vector<double>& rhs,
+    std::vector<double>& solution) {
+    const std::size_t n = rhs.size();
+    if (n == 0 || matrix.size() != n * n) return false;
+    std::vector<double> lower(n * n, 0.0);
+    for (std::size_t row = 0; row < n; ++row) {
+        for (std::size_t column = 0; column <= row; ++column) {
+            double value = matrix[row * n + column];
+            for (std::size_t k = 0; k < column; ++k)
+                value -= lower[row * n + k] * lower[column * n + k];
+            if (row == column) {
+                if (!(value > 1e-24) || !std::isfinite(value)) return false;
+                lower[row * n + column] = std::sqrt(value);
+            } else {
+                lower[row * n + column] = value / lower[column * n + column];
+            }
+        }
+    }
+    solution.assign(n, 0.0);
+    std::vector<double> temporary(n, 0.0);
+    for (std::size_t row = 0; row < n; ++row) {
+        double value = rhs[row];
+        for (std::size_t k = 0; k < row; ++k) value -= lower[row * n + k] * temporary[k];
+        temporary[row] = value / lower[row * n + row];
+    }
+    for (std::size_t reverse = n; reverse-- > 0;) {
+        double value = temporary[reverse];
+        for (std::size_t k = reverse + 1; k < n; ++k)
+            value -= lower[k * n + reverse] * solution[k];
+        solution[reverse] = value / lower[reverse * n + reverse];
+    }
+    return true;
+}
+
+void apply_intrinsic_step(
+    Problem& problem, const std::vector<double>& step, const OptimizerOptions& options) {
+    if (step.empty() || problem.intrinsics.empty()) return;
+    PinholeIntrinsics& ref = problem.intrinsics.front();
+    std::size_t index = 0;
+    if (options.optimize_focal) {
+        ref.fx += step[index];
+        ref.fy += step[index];
+        ref.fx = std::max(ref.fx, 1.0);
+        ref.fy = std::max(ref.fy, 1.0);
+        ++index;
+    }
+    if (options.optimize_principal_point) {
+        ref.cx += step[index++];
+        ref.cy += step[index++];
+    }
+    if (options.optimize_distortion) {
+        ref.k1 += step[index++];
+        ref.k2 += step[index++];
+        ref.p1 += step[index++];
+        ref.p2 += step[index++];
+    }
+    for (std::size_t i = 1; i < problem.intrinsics.size(); ++i) problem.intrinsics[i] = ref;
+}
+
+void sync_shared_intrinsics(Problem& problem) {
+    if (problem.intrinsics.empty()) return;
+    // Average then broadcast — keeps a single shared calibration block.
+    PinholeIntrinsics mean{};
+    for (const auto& intrinsics : problem.intrinsics) {
+        mean.fx += intrinsics.fx;
+        mean.fy += intrinsics.fy;
+        mean.cx += intrinsics.cx;
+        mean.cy += intrinsics.cy;
+        mean.k1 += intrinsics.k1;
+        mean.k2 += intrinsics.k2;
+        mean.p1 += intrinsics.p1;
+        mean.p2 += intrinsics.p2;
+    }
+    const double inv = 1.0 / static_cast<double>(problem.intrinsics.size());
+    mean.fx *= inv;
+    mean.fy *= inv;
+    mean.cx *= inv;
+    mean.cy *= inv;
+    mean.k1 *= inv;
+    mean.k2 *= inv;
+    mean.p1 *= inv;
+    mean.p2 *= inv;
+    // Tie focal if we will optimize it as a single parameter.
+    const double focal = 0.5 * (mean.fx + mean.fy);
+    mean.fx = mean.fy = focal;
+    for (auto& intrinsics : problem.intrinsics) intrinsics = mean;
 }
 
 void apply_step(Problem& problem, const std::vector<double>& camera_step,
@@ -702,8 +996,12 @@ void apply_step(Problem& problem, const std::vector<double>& camera_step,
     }
 }
 
-double step_norm(const std::vector<double>& camera, const std::vector<double>& point) {
-    return std::sqrt(dot(camera, camera) + dot(point, point));
+double step_norm(
+    const std::vector<double>& camera, const std::vector<double>& point,
+    const std::vector<double>& intrinsics = {}) {
+    return std::sqrt(
+        dot(camera, camera) + dot(point, point) +
+        (intrinsics.empty() ? 0.0 : dot(intrinsics, intrinsics)));
 }
 
 }  // namespace
@@ -783,9 +1081,13 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         options.initial_damping <= 0.0 || options.pcg_tolerance <= 0.0) {
         throw std::invalid_argument("Invalid BA optimizer options");
     }
+    const std::size_t dof = count_intrinsic_dof(options);
+    if (dof > 0) sync_shared_intrinsics(problem);
+
     const auto started = std::chrono::steady_clock::now();
     const Adjacency adjacency = build_adjacency(problem);
     const SchurPattern schur_pattern = build_schur_pattern(problem, adjacency);
+    const LinearizerOptions linearizer_options = make_linearizer_options(options);
     OptimizerSummary summary;
     summary.initial_cost = evaluate_cost(problem, options.huber_delta, options.minimum_depth);
     summary.final_cost = summary.initial_cost;
@@ -794,28 +1096,103 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
 
     for (std::size_t iteration = 0; iteration < options.maximum_iterations; ++iteration) {
         auto stage_started = std::chrono::steady_clock::now();
-        linearize_cpu(problem, linearization,
-                      LinearizerOptions{options.huber_delta, options.minimum_depth});
+        linearize_cpu(problem, linearization, linearizer_options);
         auto stage_stopped = std::chrono::steady_clock::now();
         summary.linearization_time_ms +=
             std::chrono::duration<double, std::milli>(stage_stopped - stage_started).count();
         stage_started = stage_stopped;
         System system = assemble_system(
             problem, linearization, adjacency, damping,
-            options.fix_first_point, options.optimize_rotations);
+            options.fix_first_point, options.optimize_rotations, dof);
         ExplicitSchur explicit_schur = assemble_explicit_schur(
             problem, adjacency, schur_pattern, system);
+        IntrinsicSchur intrinsic_schur =
+            dof > 0 ? build_intrinsic_schur(problem, adjacency, system) : IntrinsicSchur{};
         stage_stopped = std::chrono::steady_clock::now();
         summary.assembly_time_ms +=
             std::chrono::duration<double, std::milli>(stage_stopped - stage_started).count();
         stage_started = stage_stopped;
-        std::vector<double> rhs, camera_step, point_step;
+
+        std::vector<double> rhs, camera_step, point_step, intrinsic_step;
         schur_rhs(problem, adjacency, system, options.fix_first_pose, rhs);
-        const std::size_t pcg_iterations = solve_pcg(
-            problem, adjacency, system, schur_pattern, explicit_schur,
-            options, rhs, camera_step);
-        recover_point_step(problem, adjacency, system, camera_step, point_step);
-        const double norm = step_norm(camera_step, point_step);
+
+        if (dof == 0) {
+            const std::size_t pcg_iterations = solve_pcg(
+                problem, adjacency, system, schur_pattern, explicit_schur,
+                options, rhs, camera_step);
+            recover_point_step(
+                problem, adjacency, system, camera_step, intrinsic_step, point_step);
+            summary.iterations.push_back(IterationSummary{
+                iteration, 0.0, damping, 0.0, pcg_iterations, false});
+        } else {
+            // Nested Schur: δi = (S_ii - S_ci^T S_cc^{-1} S_ci)^{-1} (b_i - S_ci^T S_cc^{-1} b_c)
+            //               δc = S_cc^{-1} (b_c - S_ci δi)
+            std::vector<double> y;
+            const std::size_t pcg_y = solve_pcg(
+                problem, adjacency, system, schur_pattern, explicit_schur, options, rhs, y);
+
+            std::vector<double> Z(rhs.size() * dof, 0.0);
+            std::size_t pcg_total = pcg_y;
+            for (std::size_t param = 0; param < dof; ++param) {
+                std::vector<double> column(rhs.size(), 0.0);
+                for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
+                    if (options.fix_first_pose && camera == 0) continue;
+                    for (std::size_t row = 0; row < pose_size; ++row) {
+                        column[camera * pose_size + row] =
+                            intrinsic_schur.S_ci[camera * pose_size * dof + row * dof + param];
+                    }
+                }
+                std::vector<double> solved;
+                pcg_total += solve_pcg(
+                    problem, adjacency, system, schur_pattern, explicit_schur,
+                    options, column, solved);
+                for (std::size_t i = 0; i < solved.size(); ++i)
+                    Z[i * dof + param] = solved[i];
+            }
+
+            std::vector<double> S_ii_red = intrinsic_schur.S_ii;
+            std::vector<double> b_i_red = intrinsic_schur.b_i;
+            for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
+                if (options.fix_first_pose && camera == 0) continue;
+                for (std::size_t row = 0; row < pose_size; ++row) {
+                    const std::size_t camera_row = camera * pose_size + row;
+                    for (std::size_t i = 0; i < dof; ++i) {
+                        b_i_red[i] -= intrinsic_schur.S_ci[camera_row * dof + i] * y[camera_row];
+                        for (std::size_t j = 0; j < dof; ++j) {
+                            S_ii_red[i * dof + j] -=
+                                intrinsic_schur.S_ci[camera_row * dof + i] *
+                                Z[camera_row * dof + j];
+                        }
+                    }
+                }
+            }
+            if (!solve_dense_spd(S_ii_red, b_i_red, intrinsic_step)) {
+                intrinsic_step.assign(dof, 0.0);
+            }
+
+            std::vector<double> rhs_cameras = rhs;
+            for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
+                if (options.fix_first_pose && camera == 0) continue;
+                for (std::size_t row = 0; row < pose_size; ++row) {
+                    double value = 0.0;
+                    for (std::size_t param = 0; param < dof; ++param) {
+                        value += intrinsic_schur.S_ci
+                            [camera * pose_size * dof + row * dof + param] *
+                            intrinsic_step[param];
+                    }
+                    rhs_cameras[camera * pose_size + row] -= value;
+                }
+            }
+            pcg_total += solve_pcg(
+                problem, adjacency, system, schur_pattern, explicit_schur,
+                options, rhs_cameras, camera_step);
+            recover_point_step(
+                problem, adjacency, system, camera_step, intrinsic_step, point_step);
+            summary.iterations.push_back(IterationSummary{
+                iteration, 0.0, damping, 0.0, pcg_total, false});
+        }
+
+        const double norm = step_norm(camera_step, point_step, intrinsic_step);
         stage_stopped = std::chrono::steady_clock::now();
         summary.solve_time_ms +=
             std::chrono::duration<double, std::milli>(stage_stopped - stage_started).count();
@@ -826,17 +1203,19 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         }
         const auto old_poses = problem.poses;
         const auto old_points = problem.points;
+        const auto old_intrinsics = problem.intrinsics;
         apply_step(
             problem, camera_step, point_step, options.fix_first_pose,
             options.optimize_rotations);
+        if (dof > 0) apply_intrinsic_step(problem, intrinsic_step, options);
         const double candidate_cost = evaluate_cost(problem, options.huber_delta, options.minimum_depth);
         const bool accepted = std::isfinite(candidate_cost) && candidate_cost < summary.final_cost;
         stage_stopped = std::chrono::steady_clock::now();
         summary.update_and_cost_time_ms +=
             std::chrono::duration<double, std::milli>(stage_stopped - stage_started).count();
-        summary.iterations.push_back(IterationSummary{
-            iteration, accepted ? candidate_cost : summary.final_cost,
-            damping, norm, pcg_iterations, accepted});
+        summary.iterations.back().cost = accepted ? candidate_cost : summary.final_cost;
+        summary.iterations.back().step_norm = norm;
+        summary.iterations.back().accepted = accepted;
         if (accepted) {
             const double previous_cost = summary.final_cost;
             summary.final_cost = candidate_cost;
@@ -851,6 +1230,7 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         } else {
             problem.poses = old_poses;
             problem.points = old_points;
+            problem.intrinsics = old_intrinsics;
             ++summary.unsuccessful_steps;
             damping = std::min(options.maximum_damping, damping * 10.0);
             if (damping >= options.maximum_damping) {

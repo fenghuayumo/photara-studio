@@ -8,6 +8,8 @@ namespace aetherscan::sfm {
 struct BundleOptions {
     ba::OptimizerOptions optimizer{};
     bool optimize_points{true};
+    // Write optimized shared intrinsics back into Scene::cameras.
+    bool write_intrinsics{true};
     // If non-empty, only these image IDs have free poses; others are fixed
     // by excluding them from the BA problem (held constant outside).
     std::vector<Index> free_image_ids;

@@ -70,6 +70,7 @@ ReconstructionSummary run_global_mapping(
     bundle.optimizer.maximum_iterations = 12;
     bundle.optimizer.huber_delta = 2.0;
     bundle.optimizer.optimize_rotations = false;
+    bundle.optimizer.optimize_focal = true;
     if (!run_bundle_adjustment(scene, bundle).success) {
         std::cerr << "global: position/structure bundle adjustment failed\n";
         return summary;
@@ -83,6 +84,8 @@ ReconstructionSummary run_global_mapping(
 
     bundle.optimizer.maximum_iterations = 25;
     bundle.optimizer.optimize_rotations = true;
+    bundle.optimizer.optimize_focal = true;
+    bundle.optimizer.optimize_distortion = true;
     if (!run_bundle_adjustment(scene, bundle).success) {
         std::cerr << "global: full bundle adjustment failed\n";
         return summary;

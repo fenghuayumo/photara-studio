@@ -164,8 +164,14 @@ FrontEndResult run_frontend(
         pair.relative_pose = geo.pose;
         pair.E = geo.E;
         pair.F = geo.F;
+        pair.H = geo.H;
         pair.mean_ray_angle = geo.mean_ray_angle;
         pair.weight_spatial = geo.weight_spatial;
+        pair.homography_ratio = geo.homography_ratio;
+        pair.degenerate_planar = geo.degenerate_planar;
+        pair.weight_geometry =
+            geo.degenerate_planar ? options.relative.degenerate_weight_scale : 1.F;
+        // Keep pair for track connectivity; star_init skips planar via usable_for_init().
         for (std::size_t i = 0; i < geo.inlier_mask.size(); ++i) {
             if (!geo.inlier_mask[i]) continue;
             pair.matches.push_back(
@@ -190,9 +196,13 @@ FrontEndResult run_frontend(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - tracks_started)
             .count();
 
+    unsigned planar_pairs = 0;
+    for (const ImagePair& pair : scene.pairs) {
+        if (pair.degenerate_planar) ++planar_pairs;
+    }
     std::cout << "frontend: images=" << scene.images.size()
-              << " pairs=" << scene.pairs.size() << " tracks=" << scene.tracks.size()
-              << '\n';
+              << " pairs=" << scene.pairs.size() << " planar=" << planar_pairs
+              << " tracks=" << scene.tracks.size() << '\n';
     return result;
 }
 

@@ -91,9 +91,26 @@ struct PinholeCamera {
 
     [[nodiscard]] double focal() const { return 0.5 * (fx + fy); }
 
-    // Pixel -> normalized plane (z=1), no distortion undo for v1.
+    // Pixel -> normalized plane (z=1). Iteratively undo Brown distortion when present.
     [[nodiscard]] Vec3 unproject(const Vec2& pixel) const {
-        return {(pixel.x() - cx) / fx, (pixel.y() - cy) / fy, 1.0};
+        double x = (pixel.x() - cx) / fx;
+        double y = (pixel.y() - cy) / fy;
+        if (k1 != 0.0 || k2 != 0.0 || p1 != 0.0 || p2 != 0.0) {
+            const double xd = x;
+            const double yd = y;
+            for (int iter = 0; iter < 5; ++iter) {
+                const double r2 = x * x + y * y;
+                const double radial = 1.0 + k1 * r2 + k2 * r2 * r2;
+                const double x_distorted =
+                    x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
+                const double y_distorted =
+                    y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
+                // Additive correction toward observed distorted coords.
+                x += xd - x_distorted;
+                y += yd - y_distorted;
+            }
+        }
+        return {x, y, 1.0};
     }
 
     [[nodiscard]] Vec3 unproject_normalized(const Vec2& pixel) const {

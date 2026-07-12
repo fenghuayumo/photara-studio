@@ -29,6 +29,10 @@ struct OptimizerOptions {
     bool fix_first_pose{true};
     bool fix_first_point{true};
     bool optimize_rotations{true};
+    // Shared intrinsics across all cameras in the problem (openMVS-style).
+    bool optimize_focal{false};            // tied fx = fy
+    bool optimize_principal_point{false};  // cx, cy
+    bool optimize_distortion{false};       // k1, k2, p1, p2
 };
 
 struct IterationSummary {
@@ -57,8 +61,7 @@ struct OptimizerSummary {
     [[nodiscard]] std::string brief_report() const;
 };
 
-// Optimizes camera poses and 3D points. Intrinsics are held fixed in this
-// milestone; shared/floating calibration blocks belong to the next layer.
+// Optimizes camera poses, 3D points, and optionally shared intrinsics.
 OptimizerSummary optimize_cpu(
     Problem& problem,
     const OptimizerOptions& options = {});

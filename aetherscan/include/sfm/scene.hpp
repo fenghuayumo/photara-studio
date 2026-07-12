@@ -29,8 +29,12 @@ struct ImagePair {
     std::optional<Pose3D> relative_pose;
     std::optional<Mat3> E;
     std::optional<Mat3> F;
+    std::optional<Mat3> H;
     float weight_spatial{0.F};
+    float weight_geometry{1.F};  // <1 for planar/low-parallax pairs
     float mean_ray_angle{0.F};  // radians
+    float homography_ratio{0.F};  // H_inliers / E_inliers
+    bool degenerate_planar{false};
     bool active{true};
 
     ImagePair() = default;
@@ -42,12 +46,18 @@ struct ImagePair {
         return static_cast<unsigned>(matches.size());
     }
 
-    // openMVS-style composite weight (spatial * capped inliers); connectivity/triplet
-    // filled later when available.
+    // openMVS-style composite weight (spatial * capped inliers * geometry);
+    // connectivity/triplet filled later when available.
     [[nodiscard]] float composite_weight() const {
         if (!active) return 0.F;
         const unsigned capped = std::min(num_inliers(), 1000u);
-        return static_cast<float>(capped) * std::max(weight_spatial, 0.05F);
+        return static_cast<float>(capped) * std::max(weight_spatial, 0.05F) *
+               std::max(weight_geometry, 0.F);
+    }
+
+    // Prefer non-planar pairs for star initialization / seed selection.
+    [[nodiscard]] bool usable_for_init() const {
+        return active && relative_pose.has_value() && !degenerate_planar;
     }
 
     [[nodiscard]] bool has_geometry() const {

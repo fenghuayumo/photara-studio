@@ -38,7 +38,7 @@ bool triangulate_midpoint(
 Index select_reference_view(const Scene& scene) {
     std::vector<unsigned> degree(scene.images.size(), 0);
     for (const ImagePair& pair : scene.pairs) {
-        if (!pair.relative_pose.has_value()) continue;
+        if (!pair.usable_for_init()) continue;
         degree[pair.id1] += pair.num_inliers();
         degree[pair.id2] += pair.num_inliers();
     }
@@ -75,7 +75,8 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
     std::vector<Neighbor> neighbors;
     for (Index pi = 0; pi < scene.pairs.size(); ++pi) {
         const ImagePair& pair = scene.pairs[pi];
-        if (!pair.relative_pose.has_value()) continue;
+        // Exclude H-dominant / low-parallax pairs from star seeds (still in view graph).
+        if (!pair.usable_for_init()) continue;
         Index other = k_invalid;
         if (pair.id1 == ref) other = pair.id2;
         else if (pair.id2 == ref) other = pair.id1;
@@ -217,6 +218,7 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
     BundleOptions ba;
     ba.optimizer.maximum_iterations = 10;
     ba.optimizer.huber_delta = 2.0;
+    ba.optimizer.optimize_focal = true;
     if (!run_bundle_adjustment(scene, ba).success) {
         std::cerr << "star_init: initial BA failed\n";
         return false;
@@ -239,6 +241,8 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
     }
 
     ba.optimizer.maximum_iterations = 25;
+    ba.optimizer.optimize_focal = true;
+    ba.optimizer.optimize_distortion = true;
     run_bundle_adjustment(scene, ba);
 
     triangulate_tracks(

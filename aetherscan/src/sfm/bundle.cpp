@@ -99,6 +99,26 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         pose.C = Vec3(p.cx, p.cy, p.cz);
         scene.images[camera_images[i]].pose = pose;
     }
+    if (options.write_intrinsics &&
+        (opt.optimize_focal || opt.optimize_principal_point || opt.optimize_distortion) &&
+        !problem.intrinsics.empty()) {
+        const ba::PinholeIntrinsics& shared = problem.intrinsics.front();
+        std::unordered_set<Index> updated_cameras;
+        for (Index image_id : camera_images) {
+            const Index camera_id = scene.images[image_id].camera_id;
+            if (!updated_cameras.insert(camera_id).second) continue;
+            PinholeCamera& camera = scene.cameras[camera_id];
+            camera.fx = shared.fx;
+            camera.fy = shared.fy;
+            camera.cx = shared.cx;
+            camera.cy = shared.cy;
+            camera.k1 = shared.k1;
+            camera.k2 = shared.k2;
+            camera.p1 = shared.p1;
+            camera.p2 = shared.p2;
+            camera.trust_intrinsics = true;
+        }
+    }
     if (options.optimize_points) {
         for (const auto& [track_id, point_id] : track_to_point) {
             const ba::Point3& p = problem.points[point_id];

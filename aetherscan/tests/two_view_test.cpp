@@ -63,11 +63,15 @@ int main() {
     aetherscan::sfm::RelativePoseOptions options;
     options.min_inliers = 40;
     options.max_epipolar_error_px = 2.0;
+    options.max_reproj_error_px = 2.0;
+    options.min_ray_angle_deg = 0.5;
     const auto result =
         aetherscan::sfm::estimate_relative_pose(pixels1, pixels2, cam, cam, options);
     expect(result.success, "relative pose should succeed");
     expect(result.num_inliers > 80, "relative pose should have many inliers");
     expect(result.pose.C.norm() > 0.1, "baseline should be non-trivial");
+    // Synthetic scene has strong parallax — should not be flagged planar.
+    expect(!result.degenerate_planar, "parallax scene should not be H-degenerate");
 
     // Absolute pose
     std::vector<Vec3> bearings, points;

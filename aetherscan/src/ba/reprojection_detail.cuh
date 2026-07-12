@@ -31,6 +31,9 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
     for (int i = 0; i < 6; ++i) {
         result.point_jacobian[i] = 0.0;
     }
+    for (int i = 0; i < static_cast<int>(2 * k_max_intrinsic_params); ++i) {
+        result.intrinsic_jacobian[i] = 0.0;
+    }
     result.robust_weight = 0.0;
     result.valid = false;
 
@@ -138,6 +141,44 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
             result.point_jacobian[row * 3 + column] = scale * point_value;
         }
     }
+
+    // Shared intrinsic Jacobians (param order matches intrinsic_dof()).
+    int intrinsic_column = 0;
+    if (options.optimize_focal) {
+        result.intrinsic_jacobian[intrinsic_column] = scale * x_distorted;
+        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
+            scale * y_distorted;
+        ++intrinsic_column;
+    }
+    if (options.optimize_principal_point) {
+        result.intrinsic_jacobian[intrinsic_column] = scale;
+        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] = 0.0;
+        ++intrinsic_column;
+        result.intrinsic_jacobian[intrinsic_column] = 0.0;
+        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] = scale;
+        ++intrinsic_column;
+    }
+    if (options.optimize_distortion) {
+        const double fx = intrinsics.fx;
+        const double fy = intrinsics.fy;
+        result.intrinsic_jacobian[intrinsic_column] = scale * fx * xn * r2;
+        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
+            scale * fy * yn * r2;
+        ++intrinsic_column;
+        result.intrinsic_jacobian[intrinsic_column] = scale * fx * xn * r2 * r2;
+        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
+            scale * fy * yn * r2 * r2;
+        ++intrinsic_column;
+        result.intrinsic_jacobian[intrinsic_column] = scale * fx * (2.0 * xn * yn);
+        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
+            scale * fy * (r2 + 2.0 * yn * yn);
+        ++intrinsic_column;
+        result.intrinsic_jacobian[intrinsic_column] = scale * fx * (r2 + 2.0 * xn * xn);
+        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
+            scale * fy * (2.0 * xn * yn);
+        ++intrinsic_column;
+    }
+    (void)intrinsic_column;
     result.valid = true;
 }
 
