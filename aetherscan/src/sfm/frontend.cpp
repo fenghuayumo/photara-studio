@@ -79,21 +79,34 @@ FrontEndStageKeys make_stage_keys(
     const FrontEndOptions& options,
     const ImageSetFingerprint& images) {
     FingerprintBuilder features;
-    features.append_string("aetherscan-features-v4");
+    features.append_string("aetherscan-features-v5");
     append_cache_build_identity(features);
     features.append(images.value);
     features.append_string(options.extractor);
     features.append(options.sift_contrast_threshold);
     features.append(options.max_features);
+    features.append_string(options.matcher);
+    features.append_string(options.lightglue_model_path.string());
+    features.append_string(options.lightglue_extractor);
+    features.append(options.lightglue_input_width);
+    features.append(options.lightglue_input_height);
+    features.append(options.lightglue_min_score);
+    features.append(options.lightglue_use_cuda);
 
     FingerprintBuilder matches;
-    matches.append_string("aetherscan-matches-v4");
+    matches.append_string("aetherscan-matches-v5");
     append_cache_build_identity(matches);
     matches.append(features.value());
     matches.append(options.neighbor_window);
     matches.append_string(options.matcher);
     matches.append(options.match_ratio);
     matches.append(options.mutual_check);
+    matches.append_string(options.lightglue_model_path.string());
+    matches.append_string(options.lightglue_extractor);
+    matches.append(options.lightglue_input_width);
+    matches.append(options.lightglue_input_height);
+    matches.append(options.lightglue_min_score);
+    matches.append(options.lightglue_use_cuda);
     matches.append(options.retrieval_min_images);
     matches.append(options.augment_sequential_with_retrieval);
     matches.append(options.retrieval.top_k);
@@ -611,6 +624,134 @@ std::vector<PairCandidate> build_pair_candidates(
     return pairs;
 }
 
+features::FeatureIndex merge_lightglue_keypoint(
+    features::FeatureSet& features, const float x, const float y,
+    const float merge_radius_px = 1.5F) {
+    const float radius_sq = merge_radius_px * merge_radius_px;
+    for (std::size_t index = 0; index < features.keypoints.size(); ++index) {
+        const float dx = features.keypoints[index].x - x;
+        const float dy = features.keypoints[index].y - y;
+        if (dx * dx + dy * dy <= radius_sq)
+            return static_cast<features::FeatureIndex>(index);
+    }
+    features.keypoints.push_back({x, y, 1.0F, 0.0F, 0.0F});
+    return static_cast<features::FeatureIndex>(features.keypoints.size() - 1);
+}
+
+features::LightGlueOptions make_lightglue_options(
+    const FrontEndOptions& options) {
+    features::LightGlueOptions lightglue;
+    lightglue.model_path = options.lightglue_model_path;
+    if (options.lightglue_extractor == "superpoint")
+        lightglue.extractor = features::LightGlueExtractor::superpoint;
+    else if (
+        options.lightglue_extractor == "disk" ||
+        options.lightglue_extractor.empty())
+        lightglue.extractor = features::LightGlueExtractor::disk;
+    else
+        throw std::invalid_argument(
+            "lightglue_extractor must be disk or superpoint");
+    lightglue.device = options.lightglue_use_cuda
+        ? features::InferenceDevice::cuda
+        : features::InferenceDevice::cpu;
+    lightglue.input_width = options.lightglue_input_width;
+    lightglue.input_height = options.lightglue_input_height;
+    lightglue.min_score = options.lightglue_min_score;
+    return lightglue;
+}
+
+// Fused LightGlue path: each pair re-detects keypoints, so merge detections
+// into stable per-image FeatureSets before geometric verification / tracks.
+void match_and_verify_lightglue(
+    Scene& scene,
+    const std::vector<PairCandidate>& candidates,
+    features::LightGluePipeline& pipeline,
+    const FrontEndOptions& options,
+    const unsigned worker_threads,
+    std::vector<RawPairMatches>& raw_pairs,
+    std::vector<PairDiagnostics>& diagnostics,
+    std::vector<ImagePair>& pair_slots,
+    core::ProgressReporter& match_progress) {
+    raw_pairs.resize(candidates.size());
+    diagnostics.assign(candidates.size(), {});
+    pair_slots.assign(candidates.size(), ImagePair{});
+
+    std::vector<std::shared_ptr<const io::RgbImage>> rgb_cache(
+        scene.images.size());
+    auto load_rgb = [&](const Index image_id) {
+        auto& slot = rgb_cache[image_id];
+        if (!slot) {
+            slot = std::make_shared<const io::RgbImage>(
+                io::load_rgb(scene.images[image_id].path));
+        }
+        return slot;
+    };
+
+    // Phase 1: sequential ONNX match + keypoint merge (FeatureSets must be
+    // stable before parallel geometry verification).
+    for (std::size_t pair_index = 0; pair_index < candidates.size();
+         ++pair_index) {
+        const PairCandidate candidate = candidates[pair_index];
+        const auto rgb0 = load_rgb(candidate.id1);
+        const auto rgb1 = load_rgb(candidate.id2);
+        features::ImagePairFeatures pair_features =
+            pipeline.match_rgb(*rgb0, *rgb1);
+
+        auto& features0 = scene.images[candidate.id1].features;
+        auto& features1 = scene.images[candidate.id2].features;
+        if (features0.image_width == 0) {
+            features0.image_width = pair_features.first.image_width;
+            features0.image_height = pair_features.first.image_height;
+            features0.extractor_name = "lightglue";
+            features0.metric = features::DescriptorMetric::inner_product;
+        }
+        if (features1.image_width == 0) {
+            features1.image_width = pair_features.second.image_width;
+            features1.image_height = pair_features.second.image_height;
+            features1.extractor_name = "lightglue";
+            features1.metric = features::DescriptorMetric::inner_product;
+        }
+
+        RawPairMatches& raw = raw_pairs[pair_index];
+        raw.id1 = candidate.id1;
+        raw.id2 = candidate.id2;
+        raw.matches.clear();
+        raw.matches.reserve(pair_features.matches.matches.size());
+        for (const features::FeatureMatch& match :
+             pair_features.matches.matches) {
+            if (match.query >= pair_features.first.keypoints.size() ||
+                match.train >= pair_features.second.keypoints.size())
+                throw std::runtime_error(
+                    "LightGlue match index out of range");
+            const auto& kp0 = pair_features.first.keypoints[match.query];
+            const auto& kp1 = pair_features.second.keypoints[match.train];
+            raw.matches.push_back(
+                {merge_lightglue_keypoint(features0, kp0.x, kp0.y),
+                 merge_lightglue_keypoint(features1, kp1.x, kp1.y),
+                 match.score});
+        }
+    }
+
+    // Phase 2: geometry verify in parallel (keypoints are now fixed).
+    auto& pool = parallel::global_thread_pool();
+    parallel::FutureGroup verify_tasks;
+    verify_tasks.reserve(candidates.size());
+    for (std::size_t pair_index = 0; pair_index < candidates.size();
+         ++pair_index) {
+        verify_tasks.submit(pool, [&, pair_index]() {
+            const PairCandidate candidate = candidates[pair_index];
+            GeometryVerifyResult verified = verify_pair_geometry(
+                scene, candidate, raw_pairs[pair_index].matches,
+                options.relative);
+            diagnostics[pair_index] = verified.diagnostics;
+            if (verified.pair) pair_slots[pair_index] = *verified.pair;
+            match_progress.advance();
+        });
+    }
+    verify_tasks.wait();
+    (void)worker_threads;
+}
+
 }  // namespace
 
 FrontEndResult run_frontend(
@@ -621,6 +762,11 @@ FrontEndResult run_frontend(
     core::StageScope frontend_stage("sfm.frontend");
 
     FrontEndOptions runtime_options = options;
+    // Fused LightGlue has no descriptors for BoW retrieval.
+    if (runtime_options.matcher == "lightglue") {
+        runtime_options.augment_sequential_with_retrieval = false;
+        runtime_options.compress_descriptors_u8 = false;
+    }
     if (runtime_options.retrieval.vocabulary_path.empty() &&
         !runtime_options.checkpoint.directory.empty()) {
         runtime_options.retrieval.vocabulary_path =
@@ -661,6 +807,140 @@ FrontEndResult run_frontend(
     }
 
     features::ensure_builtin_feature_backends();
+    const unsigned threads = scene.thread_count;
+
+    if (runtime_options.matcher == "lightglue") {
+        if (runtime_options.lightglue_model_path.empty())
+            throw std::runtime_error(
+                "LightGlue requires --lightglue-model / "
+                "FrontEndOptions::lightglue_model_path");
+        if (!features::LightGluePipeline::is_built())
+            throw std::runtime_error(
+                "LightGlue requires ONNX Runtime "
+                "(AETHERSCAN_ONNXRUNTIME_ROOT)");
+
+        const auto extract_started = std::chrono::steady_clock::now();
+        const bool feature_cache_hit = checkpoints.load_scene(
+            CheckpointStage::features, stage_keys.features, scene);
+        if (!feature_cache_hit) {
+            scene.images.resize(image_paths.size());
+            for (std::size_t i = 0; i < image_paths.size(); ++i) {
+                scene.images[i].id = static_cast<Index>(i);
+                scene.images[i].path = image_paths[i];
+            }
+        } else {
+            scene.thread_count =
+                parallel::resolve_thread_count(options.thread_count);
+            core::Logger::instance().info("checkpoint hit: features");
+        }
+        result.timing.extract_seconds = std::chrono::duration<double>(
+                                            std::chrono::steady_clock::now() -
+                                            extract_started)
+                                            .count();
+
+        const auto match_started = std::chrono::steady_clock::now();
+        auto candidates =
+            build_pair_list(scene.images.size(), runtime_options.neighbor_window);
+        std::vector<RawPairMatches> raw_pairs;
+        std::vector<PairDiagnostics> diagnostics(candidates.size());
+        bool match_cache_hit =
+            feature_cache_hit &&
+            checkpoints.load_matches(stage_keys.matches, raw_pairs);
+        if (match_cache_hit && raw_pairs.size() == candidates.size()) {
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                if (raw_pairs[i].id1 != candidates[i].id1 ||
+                    raw_pairs[i].id2 != candidates[i].id2) {
+                    match_cache_hit = false;
+                    break;
+                }
+            }
+        } else {
+            match_cache_hit = false;
+        }
+
+        if (!match_cache_hit) {
+            features::LightGluePipeline pipeline(
+                make_lightglue_options(runtime_options));
+            if (!pipeline.is_available())
+                throw std::runtime_error(
+                    "LightGlue failed to initialize ONNX session");
+            std::vector<ImagePair> pair_slots;
+            core::ProgressReporter match_progress(
+                "lightglue match pairs", candidates.size());
+            match_and_verify_lightglue(
+                scene, candidates, pipeline, runtime_options, threads,
+                raw_pairs, diagnostics, pair_slots, match_progress);
+            match_progress.finish();
+            scene.pairs.clear();
+            scene.pairs.reserve(pair_slots.size());
+            for (ImagePair& pair : pair_slots) {
+                if (pair.matches.empty()) continue;
+                scene.pairs.push_back(std::move(pair));
+            }
+            initialize_cameras(
+                scene, options.focal_pixels, options.trust_focal_pixels);
+            verify_image_snapshot(image_paths, image_fingerprint);
+            checkpoints.save_scene(
+                CheckpointStage::features, stage_keys.features, scene);
+            checkpoints.save_matches(stage_keys.matches, raw_pairs);
+        } else {
+            core::Logger::instance().info("checkpoint hit: matches");
+            initialize_cameras(
+                scene, options.focal_pixels, options.trust_focal_pixels);
+            std::vector<ImagePair> pairs(candidates.size());
+            core::ProgressReporter geometry_progress(
+                "verify pair geometry", candidates.size());
+            parallel::parallel_for(
+                candidates.size(), threads, [&](const std::size_t ci) {
+                    GeometryVerifyResult verified = verify_pair_geometry(
+                        scene, candidates[ci], raw_pairs[ci].matches,
+                        options.relative);
+                    diagnostics[ci] = verified.diagnostics;
+                    if (verified.pair) pairs[ci] = std::move(*verified.pair);
+                    geometry_progress.advance();
+                });
+            geometry_progress.finish();
+            scene.pairs.clear();
+            scene.pairs.reserve(pairs.size());
+            for (auto& pair : pairs) {
+                if (pair.matches.empty()) continue;
+                scene.pairs.push_back(std::move(pair));
+            }
+        }
+
+        verify_image_snapshot(
+            image_paths, image_fingerprint, ImageSnapshotCheck::content);
+        checkpoints.save_scene(
+            CheckpointStage::geometry, stage_keys.geometry, scene);
+        result.timing.match_verify_seconds =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - match_started)
+                .count();
+
+        const auto tracks_started = std::chrono::steady_clock::now();
+        compute_pair_weights(scene, options.pair_weighting);
+        calibrate_view_graph_focals(scene);
+        build_tracks(scene, options.min_pair_weight);
+        checkpoints.save_scene(
+            CheckpointStage::tracks, stage_keys.tracks, scene);
+        result.timing.tracks_seconds =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - tracks_started)
+                .count();
+
+        std::size_t feature_count = 0;
+        for (const Image& image : scene.images)
+            feature_count += image.features.keypoints.size();
+        core::Logger::instance().info(
+            "frontend lightglue: features=", feature_count,
+            " candidates=", candidates.size(),
+            " accepted_pairs=", scene.pairs.size(),
+            " extract_s=", result.timing.extract_seconds,
+            " match_s=", result.timing.match_verify_seconds,
+            " tracks_s=", result.timing.tracks_seconds);
+        return result;
+    }
+
     std::unique_ptr<features::FeatureExtractor> extractor;
     if (options.extractor == "sift") {
         features::SiftOptions sift_options;
@@ -691,17 +971,17 @@ FrontEndResult run_frontend(
         extractor = features::create_extractor(options.extractor);
     }
     std::unique_ptr<features::FeatureMatcher> matcher;
-    if (options.matcher == "mutual_ratio") {
+    if (runtime_options.matcher == "mutual_ratio") {
         features::DescriptorMatcherOptions matcher_options;
-        matcher_options.ratio_threshold = options.match_ratio;
-        matcher_options.mutual_check = options.mutual_check;
+        matcher_options.ratio_threshold = runtime_options.match_ratio;
+        matcher_options.mutual_check = runtime_options.mutual_check;
         matcher = std::make_unique<features::MutualRatioMatcher>(matcher_options);
-    } else if (options.matcher == "siftgpu") {
+    } else if (runtime_options.matcher == "siftgpu") {
         features::SiftGpuMatcherOptions matcher_options;
-        matcher_options.ratio_threshold = options.match_ratio;
-        matcher_options.mutual_check = options.mutual_check;
+        matcher_options.ratio_threshold = runtime_options.match_ratio;
+        matcher_options.mutual_check = runtime_options.mutual_check;
         matcher_options.maximum_features =
-            std::max<std::size_t>(32768, options.max_features);
+            std::max<std::size_t>(32768, runtime_options.max_features);
         matcher =
             std::make_unique<features::SiftGpuMatcher>(matcher_options);
         if (!static_cast<features::SiftGpuMatcher*>(matcher.get())
@@ -709,14 +989,13 @@ FrontEndResult run_frontend(
             throw std::runtime_error(
                 "SiftGPU matcher requested but CUDA context is unavailable");
     } else {
-        matcher = features::create_matcher(options.matcher);
+        matcher = features::create_matcher(runtime_options.matcher);
     }
     if (!extractor || !matcher) {
         throw std::runtime_error("Failed to create feature extractor/matcher");
     }
 
     const auto extract_started = std::chrono::steady_clock::now();
-    const unsigned threads = scene.thread_count;
     const bool feature_cache_hit = checkpoints.load_scene(
         CheckpointStage::features, stage_keys.features, scene);
     if (!feature_cache_hit) {

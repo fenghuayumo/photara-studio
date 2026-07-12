@@ -21,9 +21,17 @@ struct FrontEndOptions {
     unsigned thread_count{0};
     std::string extractor{"siftgpu"};
     double sift_contrast_threshold{0.005};
+    // "siftgpu" | "mutual_ratio" | "lightglue" (fused image-pair ONNX).
     std::string matcher{"siftgpu"};
     float match_ratio{0.85F};
     bool mutual_check{true};
+    // Fused LightGluePipeline (--matcher lightglue). Requires ONNX Runtime.
+    std::filesystem::path lightglue_model_path;
+    std::string lightglue_extractor{"disk"};  // disk | superpoint
+    std::uint32_t lightglue_input_width{1024};
+    std::uint32_t lightglue_input_height{1024};
+    float lightglue_min_score{0.0F};
+    bool lightglue_use_cuda{true};
     RelativePoseOptions relative{};
     float min_pair_weight{0.F};
     PairWeightingOptions pair_weighting{};

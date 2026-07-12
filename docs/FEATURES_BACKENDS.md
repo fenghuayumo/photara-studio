@@ -20,8 +20,12 @@ descriptor space (L2 / RootSIFT / inner-product).
 
 ```text
 extractors:  siftgpu (default) | sift | superpoint(stub)
-matchers:    siftgpu (default) | mutual_ratio
+matchers:    siftgpu (default) | mutual_ratio | lightglue
 ```
+
+`lightglue` is a fused **image-pair** pipeline (not a descriptor matcher):
+`images[2,C,H,W] → keypoints, matches, mscores`. It is constructed with an
+ONNX model path (requires `AETHERSCAN_ONNXRUNTIME_ROOT`).
 
 ```cpp
 features::ensure_builtin_feature_backends();
@@ -35,10 +39,25 @@ Front-end selection:
 sfm::FrontEndOptions options;
 options.extractor = "siftgpu";
 options.matcher = "siftgpu";
-// or inject prototypes:
-options.extractor = std::make_shared<features::SiftExtractor>(sift_opts);
-options.matcher = std::make_shared<features::MutualRatioMatcher>(match_opts);
+// Fused LightGlue path:
+options.matcher = "lightglue";
+options.lightglue_model_path = "disk-lightglue.onnx";
+options.lightglue_extractor = "disk";  // or "superpoint"
 ```
+
+CLI:
+
+```text
+aetherscan --images ... --focal ... --mode incremental --output scene.mvs \
+  --matcher lightglue --lightglue-model path/to/model.onnx \
+  [--lightglue-extractor disk|superpoint] [--lightglue-width 1024] \
+  [--lightglue-height 1024] [--lightglue-min-score 0] [--lightglue-cpu]
+```
+
+Because fused LightGlue re-detects keypoints per pair, the frontend merges
+detections into stable per-image feature sets (1.5 px radius) before geometry
+verification and track building. BoW retrieval is disabled on this path
+(no descriptors).
 
 ## Adding SuperPoint (or any new extractor)
 
@@ -62,11 +81,13 @@ void register_superpoint_feature_backends() {
 
 ## Adding a fused pair model (LightGlue-style)
 
-Implement `PairFeaturePipeline` and either construct it directly with options or
-bind a factory:
+`LightGluePipeline` already implements `PairFeaturePipeline`. Product code
+builds it with options (model path is required at construction):
 
 ```cpp
-register_pair_pipeline("lightglue", [options] {
-    return std::make_unique<LightGluePipeline>(options);
-});
+features::LightGlueOptions options;
+options.model_path = "disk-lightglue.onnx";
+options.extractor = features::LightGlueExtractor::disk;
+auto pipeline = std::make_unique<features::LightGluePipeline>(options);
+auto result = pipeline->match_files(image0, image1);
 ```

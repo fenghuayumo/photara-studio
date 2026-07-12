@@ -39,6 +39,12 @@ struct ReconstructCli {
     std::string extractor{"siftgpu"};
     std::string matcher{"siftgpu"};
     unsigned max_features{27000U};
+    std::filesystem::path lightglue_model;
+    std::string lightglue_extractor{"disk"};
+    std::uint32_t lightglue_width{1024U};
+    std::uint32_t lightglue_height{1024U};
+    float lightglue_min_score{0.0F};
+    bool lightglue_cpu{false};
 };
 
 std::uint64_t peak_working_set_bytes() noexcept {
@@ -149,12 +155,24 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<double>()->default_value("0.005"))
         ("cache-dir", "Feature cache directory (- to disable)",
          cxxopts::value<std::string>()->default_value(""))
-        ("extractor", "Feature extractor: siftgpu or sift",
+        ("extractor", "Feature extractor: siftgpu or sift (ignored for lightglue)",
          cxxopts::value<std::string>()->default_value("siftgpu"))
-        ("matcher", "Feature matcher: siftgpu or mutual_ratio",
+        ("matcher", "Feature matcher: siftgpu, mutual_ratio, or lightglue",
          cxxopts::value<std::string>()->default_value("siftgpu"))
         ("max-features", "Maximum SIFT features per image",
-         cxxopts::value<unsigned>()->default_value("27000"));
+         cxxopts::value<unsigned>()->default_value("27000"))
+        ("lightglue-model", "Fused LightGlue ONNX model path (--matcher lightglue)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("lightglue-extractor", "LightGlue extractor head: disk or superpoint",
+         cxxopts::value<std::string>()->default_value("disk"))
+        ("lightglue-width", "LightGlue network input width",
+         cxxopts::value<std::uint32_t>()->default_value("1024"))
+        ("lightglue-height", "LightGlue network input height",
+         cxxopts::value<std::uint32_t>()->default_value("1024"))
+        ("lightglue-min-score", "Drop LightGlue matches below this score",
+         cxxopts::value<float>()->default_value("0"))
+        ("lightglue-cpu", "Force LightGlue ONNX on CPU",
+         cxxopts::value<bool>()->default_value("false"));
 
     const auto result = options.parse(argc, argv);
     if (result.count("help") || argc <= 1) {
@@ -180,6 +198,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.extractor = result["extractor"].as<std::string>();
     cli.matcher = result["matcher"].as<std::string>();
     cli.max_features = result["max-features"].as<unsigned>();
+    const auto lightglue_model_text =
+        result["lightglue-model"].as<std::string>();
+    if (!lightglue_model_text.empty())
+        cli.lightglue_model = utf8_to_path(lightglue_model_text);
+    cli.lightglue_extractor = result["lightglue-extractor"].as<std::string>();
+    cli.lightglue_width = result["lightglue-width"].as<std::uint32_t>();
+    cli.lightglue_height = result["lightglue-height"].as<std::uint32_t>();
+    cli.lightglue_min_score = result["lightglue-min-score"].as<float>();
+    cli.lightglue_cpu = result["lightglue-cpu"].as<bool>();
 
     const auto cache_text = result["cache-dir"].as<std::string>();
     if (!cache_text.empty() && cache_text != "-")
@@ -200,6 +227,21 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument("--sift-contrast must be positive");
     if (cli.max_features == 0U)
         throw std::invalid_argument("--max-features must be positive");
+    if (cli.matcher == "lightglue") {
+        if (cli.lightglue_model.empty())
+            throw std::invalid_argument(
+                "--matcher lightglue requires --lightglue-model");
+        if (cli.lightglue_extractor != "disk" &&
+            cli.lightglue_extractor != "superpoint")
+            throw std::invalid_argument(
+                "--lightglue-extractor must be disk or superpoint");
+        if (cli.lightglue_width == 0U || cli.lightglue_height == 0U)
+            throw std::invalid_argument(
+                "--lightglue-width/height must be positive");
+        if (cli.lightglue_min_score < 0.F || cli.lightglue_min_score > 1.F)
+            throw std::invalid_argument(
+                "--lightglue-min-score must be in [0, 1]");
+    }
     return cli;
 }
 
@@ -285,8 +327,16 @@ int main(int argc, char** argv) {
         config.frontend.extractor = cli.extractor;
         config.frontend.matcher = cli.matcher;
         config.frontend.max_features = cli.max_features;
+        config.frontend.lightglue_model_path = cli.lightglue_model;
+        config.frontend.lightglue_extractor = cli.lightglue_extractor;
+        config.frontend.lightglue_input_width = cli.lightglue_width;
+        config.frontend.lightglue_input_height = cli.lightglue_height;
+        config.frontend.lightglue_min_score = cli.lightglue_min_score;
+        config.frontend.lightglue_use_cuda = !cli.lightglue_cpu;
         // Sequential window + BoW retrieval (learned vocabulary).
-        config.frontend.augment_sequential_with_retrieval = true;
+        // Disabled automatically for fused LightGlue (no descriptors).
+        config.frontend.augment_sequential_with_retrieval =
+            cli.matcher != "lightglue";
         config.frontend.checkpoint.directory = cli.cache_dir;
 
         const auto started = std::chrono::steady_clock::now();

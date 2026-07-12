@@ -4,6 +4,7 @@
 #include "features/matcher.hpp"
 #include "features/registry.hpp"
 #include "features/types.hpp"
+#include "io/image.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -227,6 +228,8 @@ MatchSet match_descriptors(
 enum class LightGlueExtractor { disk, superpoint };
 enum class InferenceDevice { cpu, cuda };
 
+// End-to-end image-pair LightGlue (DISK or SuperPoint extractor head + matcher).
+// ONNX signature: images[2,C,H,W] → keypoints[2,N,2], matches[M,3], mscores[M].
 struct LightGlueOptions {
     std::filesystem::path model_path;
     LightGlueExtractor extractor{LightGlueExtractor::disk};
@@ -234,6 +237,8 @@ struct LightGlueOptions {
     bool allow_cpu_fallback{true};
     std::uint32_t input_width{1024};
     std::uint32_t input_height{1024};
+    // Drop matches with score below this threshold (post-model filter).
+    float min_score{0.0F};
 };
 
 class LightGluePipeline final : public PairFeaturePipeline {
@@ -245,10 +250,22 @@ public:
     LightGluePipeline(const LightGluePipeline&) = delete;
     LightGluePipeline& operator=(const LightGluePipeline&) = delete;
 
+    [[nodiscard]] static bool is_built() noexcept;
+    [[nodiscard]] bool is_available() const noexcept;
+    [[nodiscard]] const LightGlueOptions& options() const;
+
     [[nodiscard]] std::string_view name() const override { return "lightglue"; }
+    // Ort::Session::Run is not safe for concurrent use of one session.
+    [[nodiscard]] bool requires_owner_thread() const { return true; }
+
     ImagePairFeatures match_files(
         const std::filesystem::path& first,
         const std::filesystem::path& second) override;
+
+    // Match already-loaded RGB images (avoids a second disk decode when the
+    // caller already probed dimensions).
+    [[nodiscard]] ImagePairFeatures match_rgb(
+        const io::RgbImage& first, const io::RgbImage& second);
 
 private:
     class Impl;
