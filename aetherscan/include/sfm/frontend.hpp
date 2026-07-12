@@ -19,9 +19,9 @@ struct FrontEndOptions {
     bool trust_focal_pixels{false};
     std::size_t neighbor_window{0};  // 0 => exhaustive for small sets, else sequential window
     unsigned thread_count{0};
-    std::string extractor{"sift"};
+    std::string extractor{"siftgpu"};
     double sift_contrast_threshold{0.005};
-    std::string matcher{"mutual_ratio"};
+    std::string matcher{"siftgpu"};
     float match_ratio{0.85F};
     bool mutual_check{true};
     RelativePoseOptions relative{};

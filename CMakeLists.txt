@@ -10,7 +10,7 @@ option(AETHERSCAN_BUILD_TESTS "Build correctness tests" ON)
 option(AETHERSCAN_ENABLE_CUDA "Build CUDA acceleration" ON)
 option(AETHERSCAN_ENABLE_NATIVE_ARCH "Optimize CPU code for the build host" ON)
 option(AETHERSCAN_ENABLE_FEATURES "Build image feature extraction and matching" ON)
-option(AETHERSCAN_ENABLE_SIFTGPU "Enable the optional non-commercial SiftGPU adapter" OFF)
+option(AETHERSCAN_ENABLE_SIFTGPU "Enable the optional non-commercial SiftGPU adapter" ON)
 # OpenCV is intentionally not a dependency. Image IO uses FreeImage; SIFT uses
 # vendored VLFeat; multi-view geometry uses Eigen.
 

@@ -36,8 +36,8 @@ struct ReconstructCli {
     bool mutual_check{true};
     double sift_contrast{0.005};
     std::filesystem::path cache_dir;
-    std::string extractor{"sift"};
-    std::string matcher{"mutual_ratio"};
+    std::string extractor{"siftgpu"};
+    std::string matcher{"siftgpu"};
     unsigned max_features{27000U};
 };
 
@@ -149,10 +149,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<double>()->default_value("0.005"))
         ("cache-dir", "Feature cache directory (- to disable)",
          cxxopts::value<std::string>()->default_value(""))
-        ("extractor", "Feature extractor: sift or siftgpu",
-         cxxopts::value<std::string>()->default_value("sift"))
-        ("matcher", "Feature matcher: mutual_ratio or siftgpu",
-         cxxopts::value<std::string>()->default_value("mutual_ratio"))
+        ("extractor", "Feature extractor: siftgpu or sift",
+         cxxopts::value<std::string>()->default_value("siftgpu"))
+        ("matcher", "Feature matcher: siftgpu or mutual_ratio",
+         cxxopts::value<std::string>()->default_value("siftgpu"))
         ("max-features", "Maximum SIFT features per image",
          cxxopts::value<unsigned>()->default_value("27000"));
 

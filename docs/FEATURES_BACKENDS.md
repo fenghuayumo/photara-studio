@@ -19,22 +19,22 @@ descriptor space (L2 / RootSIFT / inner-product).
 ## Built-in names
 
 ```text
-extractors:  sift | siftgpu | superpoint(stub)
-matchers:    mutual_ratio
+extractors:  siftgpu (default) | sift | superpoint(stub)
+matchers:    siftgpu (default) | mutual_ratio
 ```
 
 ```cpp
 features::ensure_builtin_feature_backends();
-auto extractor = features::create_extractor("sift");
-auto matcher = features::create_matcher("mutual_ratio");
+auto extractor = features::create_extractor("siftgpu");
+auto matcher = features::create_matcher("siftgpu");
 ```
 
 Front-end selection:
 
 ```cpp
 sfm::FrontEndOptions options;
-options.extractor_name = "sift";
-options.matcher_name = "mutual_ratio";
+options.extractor = "siftgpu";
+options.matcher = "siftgpu";
 // or inject prototypes:
 options.extractor = std::make_shared<features::SiftExtractor>(sift_opts);
 options.matcher = std::make_shared<features::MutualRatioMatcher>(match_opts);
