@@ -117,6 +117,12 @@ FrontEndStageKeys make_stage_keys(
     append_cache_build_identity(tracks);
     tracks.append(geometry.value());
     tracks.append(options.min_pair_weight);
+    tracks.append(options.pair_weighting.min_inliers);
+    tracks.append(options.pair_weighting.max_triplet_rotation_error_deg);
+    tracks.append(options.pair_weighting.triplet_saturation);
+    tracks.append(options.pair_weighting.min_triplets_for_penalty);
+    tracks.append(options.pair_weighting.max_inconsistent_triplet_ratio);
+    tracks.append(options.pair_weighting.inconsistent_triplet_scale);
     return {
         images.value, features.value(), matches.value(), geometry.value(),
         tracks.value()};
@@ -255,6 +261,7 @@ FrontEndResult run_frontend(
             CheckpointStage::geometry, stage_keys.geometry, scene)) {
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
         const auto started = std::chrono::steady_clock::now();
+        compute_pair_weights(scene, options.pair_weighting);
         build_tracks(scene, options.min_pair_weight);
         result.timing.tracks_seconds =
             std::chrono::duration<double>(
@@ -573,6 +580,7 @@ FrontEndResult run_frontend(
             .count();
 
     const auto tracks_started = std::chrono::steady_clock::now();
+    compute_pair_weights(scene, options.pair_weighting);
     build_tracks(scene, options.min_pair_weight);
     checkpoints.save_scene(
         CheckpointStage::tracks, stage_keys.tracks, scene);

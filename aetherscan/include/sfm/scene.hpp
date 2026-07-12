@@ -32,6 +32,9 @@ struct ImagePair {
     std::optional<Mat3> H;
     float weight_spatial{0.F};
     float weight_geometry{1.F};  // <1 for planar/low-parallax pairs
+    float weight_connectivity{1.F};  // local importance at both incident views
+    float weight_triplet{0.F};  // consistent rotation-cycle support [0, 1]
+    float weight_cycle{1.F};  // penalty for strongly inconsistent triplets
     float mean_ray_angle{0.F};  // radians
     float homography_ratio{0.F};  // H_inliers / E_inliers
     bool degenerate_planar{false};
@@ -46,13 +49,16 @@ struct ImagePair {
         return static_cast<unsigned>(matches.size());
     }
 
-    // openMVS-style composite weight (spatial * capped inliers * geometry);
-    // connectivity/triplet filled later when available.
+    // Preserve the historical scale for edges without triplet support while
+    // boosting cycle-supported edges and suppressing cycle-inconsistent ones.
     [[nodiscard]] float composite_weight() const {
         if (!active) return 0.F;
         const unsigned capped = std::min(num_inliers(), 1000u);
         return static_cast<float>(capped) * std::max(weight_spatial, 0.05F) *
-               std::max(weight_geometry, 0.F);
+               std::max(weight_geometry, 0.F) *
+               std::clamp(weight_connectivity, 0.F, 1.F) *
+               (1.F + 2.F * std::clamp(weight_triplet, 0.F, 1.F)) *
+               std::clamp(weight_cycle, 0.F, 1.F);
     }
 
     // Prefer non-planar pairs for star initialization / seed selection.

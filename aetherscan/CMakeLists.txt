@@ -177,6 +177,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/retrieval.cpp
         src/sfm/vocabulary.cpp
         src/sfm/geometry.cpp
+        src/sfm/pair_weighting.cpp
         src/sfm/triangulation.cpp
         src/sfm/tracks.cpp
         src/sfm/bundle.cpp

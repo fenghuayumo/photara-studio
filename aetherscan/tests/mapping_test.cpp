@@ -2,6 +2,7 @@
 #include "sfm/bundle.hpp"
 #include "sfm/global_positioning.hpp"
 #include "sfm/global_rotation.hpp"
+#include "sfm/pair_weighting.hpp"
 #include "sfm/reconstruct.hpp"
 #include "sfm/retrieval.hpp"
 #include "sfm/resection.hpp"
@@ -44,6 +45,48 @@ Mat3 axis_rotation(const Vec3& axis, double degrees) {
 
 double rotation_error(const Mat3& measured, const Mat3& expected) {
     return Eigen::AngleAxisd(measured * expected.transpose()).angle();
+}
+
+void test_pair_cycle_weighting() {
+    Scene scene;
+    scene.images.resize(4);
+    for (Index i = 0; i < scene.images.size(); ++i)
+        scene.images[i].id = i;
+
+    const Mat3 rotations[] = {
+        Mat3::Identity(),
+        axis_rotation(Vec3::UnitX(), 10.0),
+        axis_rotation(Vec3::UnitY(), 15.0),
+        axis_rotation(Vec3::UnitZ(), -12.0)};
+    auto add_pair = [&](Index first, Index second, Mat3 relative) {
+        ImagePair pair(first, second);
+        pair.relative_pose = Pose3D{relative, Vec3::Zero()};
+        pair.weight_spatial = 1.F;
+        pair.matches.resize(100);
+        scene.pairs.push_back(std::move(pair));
+    };
+    for (Index first = 0; first < 4; ++first) {
+        for (Index second = first + 1; second < 4; ++second) {
+            Mat3 relative = rotations[second] * rotations[first].transpose();
+            if (first == 0 && second == 1)
+                relative = axis_rotation(Vec3::UnitZ(), 25.0) * relative;
+            add_pair(first, second, relative);
+        }
+    }
+
+    PairWeightingOptions options;
+    options.min_triplets_for_penalty = 2;
+    options.max_inconsistent_triplet_ratio = 0.5F;
+    const PairWeightingSummary summary = compute_pair_weights(scene, options);
+    expect(summary.tested_triplets == 4, "pair weighting counts K4 triplets");
+    expect(summary.inconsistent_pairs == 1, "pair weighting isolates bad edge");
+    expect(scene.pairs[0].weight_cycle < 0.2F,
+           "bad cycle edge receives strong penalty");
+    expect(scene.pairs[5].weight_triplet > 0.F &&
+               scene.pairs[5].weight_cycle == 1.F,
+           "consistent edge retains and gains support");
+    expect(scene.pairs[0].composite_weight() < scene.pairs[5].composite_weight(),
+           "cycle-supported edge outranks inconsistent edge");
 }
 
 void test_global_rotation_weighting() {
@@ -405,6 +448,7 @@ void test_local_ba_boundary_selection() {
 }  // namespace
 
 int main() {
+    test_pair_cycle_weighting();
     test_global_rotation_weighting();
     test_global_positioning_points_only();
     test_global_positioning_preserves_fixed_initial_positions();

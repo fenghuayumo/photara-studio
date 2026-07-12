@@ -2,6 +2,7 @@
 
 #include "sfm/checkpoint.hpp"
 #include "sfm/geometry.hpp"
+#include "sfm/pair_weighting.hpp"
 #include "sfm/retrieval.hpp"
 #include "sfm/scene.hpp"
 
@@ -22,6 +23,7 @@ struct FrontEndOptions {
     bool mutual_check{true};
     RelativePoseOptions relative{};
     float min_pair_weight{0.F};
+    PairWeightingOptions pair_weighting{};
     unsigned max_features{27000};
     std::size_t retrieval_min_images{50};
     bool augment_sequential_with_retrieval{false};

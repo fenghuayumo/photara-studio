@@ -39,6 +39,20 @@ int main() {
         image.features.keypoints.push_back({10.F, 20.F, 2.F, 0.5F, 3.F});
         image.features.descriptors = {0.25F, 0.75F};
         scene.images.push_back(std::move(image));
+        sfm::Image second_image;
+        second_image.id = 1;
+        second_image.camera_id = 0;
+        second_image.path = "second-image.jpg";
+        second_image.features.image_width = 1280;
+        second_image.features.image_height = 720;
+        scene.images.push_back(std::move(second_image));
+        sfm::ImagePair pair(0, 1);
+        pair.weight_spatial = 0.8F;
+        pair.weight_geometry = 0.7F;
+        pair.weight_connectivity = 0.6F;
+        pair.weight_triplet = 0.4F;
+        pair.weight_cycle = 0.2F;
+        scene.pairs.push_back(pair);
         sfm::Track track;
         track.position = sfm::Vec3(4.0, 5.0, 6.0);
         track.observations.push_back({0, 0});
@@ -49,9 +63,13 @@ int main() {
         sfm::Scene restored;
         if (!store.load_scene(
                 sfm::CheckpointStage::features, scene_key, restored) ||
-            restored.thread_count != 7 || restored.images.size() != 1 ||
+            restored.thread_count != 7 || restored.images.size() != 2 ||
             restored.images[0].path != scene.images[0].path ||
             restored.images[0].features.descriptors.size() != 2 ||
+            restored.pairs.size() != 1 ||
+            restored.pairs[0].weight_connectivity != 0.6F ||
+            restored.pairs[0].weight_triplet != 0.4F ||
+            restored.pairs[0].weight_cycle != 0.2F ||
             restored.resection_progress.since_full_ba != 3 ||
             restored.resection_progress.last_registered !=
                 scene.resection_progress.last_registered) {
@@ -64,7 +82,7 @@ int main() {
                 sfm::CheckpointStage::tracks, scene_key, restored) ||
             !restored.images[0].features.descriptors.empty() ||
             restored.tracks.size() != 1 ||
-            restored.image_tracks.size() != 1 ||
+            restored.image_tracks.size() != 2 ||
             restored.image_tracks[0].size() != 1) {
             std::cerr << "scene checkpoint round trip failed\n";
             std::filesystem::remove_all(directory);

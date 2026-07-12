@@ -35,7 +35,7 @@ namespace aetherscan::sfm {
 namespace {
 
 constexpr std::array<char, 8> magic{'A', 'E', 'T', 'H', 'C', 'K', 'P', 'T'};
-constexpr std::uint32_t schema_version = 4;
+constexpr std::uint32_t schema_version = 5;
 constexpr std::uint64_t fnv_offset = 14695981039346656037ULL;
 constexpr std::uint64_t fnv_prime = 1099511628211ULL;
 
@@ -453,6 +453,9 @@ void write_scene(
         write_optional(writer, pair.H, write_mat);
         writer.value(pair.weight_spatial);
         writer.value(pair.weight_geometry);
+        writer.value(pair.weight_connectivity);
+        writer.value(pair.weight_triplet);
+        writer.value(pair.weight_cycle);
         writer.value(pair.mean_ray_angle);
         writer.value(pair.homography_ratio);
         writer.value(static_cast<std::uint8_t>(pair.degenerate_planar));
@@ -571,6 +574,9 @@ Scene read_scene(Reader& reader) {
         pair.H = read_optional<Mat3>(reader, read_mat);
         pair.weight_spatial = reader.value<float>();
         pair.weight_geometry = reader.value<float>();
+        pair.weight_connectivity = reader.value<float>();
+        pair.weight_triplet = reader.value<float>();
+        pair.weight_cycle = reader.value<float>();
         pair.mean_ray_angle = reader.value<float>();
         pair.homography_ratio = reader.value<float>();
         pair.degenerate_planar = reader.value<std::uint8_t>() != 0;

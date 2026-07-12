@@ -3,6 +3,7 @@
 #include "core/logging.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/bundle.hpp"
+#include "sfm/pair_weighting.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 
@@ -220,6 +221,9 @@ ReconstructionSummary run_global_mapping(
         }
     }
     rotation_summary.filtered_pairs = total_filtered_pairs;
+    // Rotation filtering changes triangle support. Refresh graph-local weights
+    // before rebuilding tracks so rejected edges cannot dominate unions.
+    compute_pair_weights(scene);
     // openMVS rebuilds tracks after relative-rotation filtering with
     // ReconstructionConfig::minPairWeight (default 3).
     build_tracks(scene, 3.F);
