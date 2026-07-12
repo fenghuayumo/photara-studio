@@ -16,6 +16,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 namespace aetherscan::sfm {
 namespace {
 
@@ -84,6 +88,32 @@ bool solve_linear_lls(
     const std::vector<std::size_t>& indices,
     Vec3& position) {
     if (indices.size() < 2) return false;
+    Mat3 normal = Mat3::Zero();
+    Vec3 rhs = Vec3::Zero();
+    for (const std::size_t index : indices) {
+        const ObservationGeometry& cam = cams[index];
+        for (Eigen::Index row = 0; row < 2; ++row) {
+            const Eigen::Vector3d a = cam.DR.row(row).transpose();
+            normal.noalias() += a * a.transpose();
+            rhs.noalias() += a * cam.Dt(row);
+        }
+    }
+
+    Eigen::LDLT<Mat3> ldlt(normal);
+    if (ldlt.info() == Eigen::Success && ldlt.isPositive()) {
+        const auto diagonal = ldlt.vectorD().cwiseAbs();
+        const double largest = diagonal.maxCoeff();
+        const double smallest = diagonal.minCoeff();
+        // Normal equations are substantially faster for the common
+        // well-conditioned case. Avoid squaring an already poor condition
+        // number by retaining the previous SVD path as a guarded fallback.
+        if (largest > 0.0 && smallest > largest * 1e-10) {
+            position = ldlt.solve(rhs);
+            if (ldlt.info() == Eigen::Success && position.allFinite())
+                return true;
+        }
+    }
+
     Eigen::MatrixXd A(2 * static_cast<Eigen::Index>(indices.size()), 3);
     Eigen::VectorXd b(2 * static_cast<Eigen::Index>(indices.size()));
     for (std::size_t i = 0; i < indices.size(); ++i) {
@@ -93,7 +123,8 @@ bool solve_linear_lls(
         A.row(static_cast<Eigen::Index>(2 * i + 1)) = cam.DR.row(1);
         b(static_cast<Eigen::Index>(2 * i + 1)) = cam.Dt(1);
     }
-    position = A.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b);
+    position =
+        A.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b);
     return position.allFinite();
 }
 
@@ -493,10 +524,15 @@ unsigned triangulate_tracks(
         "triangulate tracks", initial_track_count, std::chrono::seconds(1),
         core::LogLevel::debug);
 
-#ifdef _OPENMP
-#pragma omp parallel for reduction(+ : inlier_tracks) schedule(dynamic)
+#if defined(_OPENMP)
+    const int worker_count = scene.thread_count > 0
+        ? static_cast<int>(scene.thread_count)
+        : omp_get_max_threads();
+#pragma omp parallel for reduction(+ : inlier_tracks) schedule(dynamic, 16) \
+    num_threads(worker_count)
 #endif
-    for (int i = 0; i < static_cast<int>(initial_track_count); ++i) {
+    for (std::int64_t i = 0;
+         i < static_cast<std::int64_t>(initial_track_count); ++i) {
         Track& track = scene.tracks[static_cast<std::size_t>(i)];
         if (outliers_only && track.is_triangulated()) {
             ++inlier_tracks;

@@ -1349,10 +1349,49 @@ double focal_prior_cost(
     return cost;
 }
 
-double evaluate_total_cost(
-    const Problem& problem, const OptimizerOptions& options) {
-    return evaluate_cost(problem, options.huber_delta, options.minimum_depth) +
-           focal_prior_cost(problem, options);
+double linearized_total_cost(
+    const Problem& problem,
+    const LinearizationOutput& linearization,
+    const OptimizerOptions& options) {
+    if (linearization.observations.size() != problem.observations.size())
+        throw std::invalid_argument(
+            "Linearization size does not match BA observations");
+    double cost = 0.0;
+#if defined(AETHERSCAN_HAS_OPENMP)
+#pragma omp parallel for reduction(+:cost) schedule(static)
+#endif
+    for (std::int64_t observation_signed = 0;
+         observation_signed <
+         static_cast<std::int64_t>(problem.observations.size());
+         ++observation_signed) {
+        const std::size_t observation =
+            static_cast<std::size_t>(observation_signed);
+        const double observation_weight =
+            problem.observations.weight[observation];
+        if (observation_weight == 0.0) continue;
+        const LinearizedObservation& value =
+            linearization.observations[observation];
+        if (!value.valid || !(value.robust_weight > 0.0)) {
+            cost += observation_weight * 1e12;
+            continue;
+        }
+        const double weighted_squared_norm =
+            value.residual[0] * value.residual[0] +
+            value.residual[1] * value.residual[1];
+        const double raw_norm =
+            std::sqrt(weighted_squared_norm / value.robust_weight);
+        if (!std::isfinite(raw_norm)) {
+            cost += observation_weight * 1e12;
+            continue;
+        }
+        const double robust =
+            options.huber_delta > 0.0 && raw_norm > options.huber_delta
+                ? options.huber_delta *
+                      (raw_norm - 0.5 * options.huber_delta)
+                : 0.5 * raw_norm * raw_norm;
+        cost += observation_weight * robust;
+    }
+    return cost + focal_prior_cost(problem, options);
 }
 
 void apply_focal_prior(
@@ -1527,18 +1566,18 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
     const SchurPattern schur_pattern = build_schur_pattern(problem, adjacency);
     const LinearizerOptions linearizer_options = make_linearizer_options(options);
     OptimizerSummary summary;
-    summary.initial_cost = evaluate_total_cost(problem, options);
+    LinearizationOutput linearization;
+    LinearizationOutput candidate_linearization;
+    const EvaluationStats initial_evaluation =
+        linearize_cpu(problem, linearization, linearizer_options);
+    summary.linearization_time_ms += initial_evaluation.elapsed_ms;
+    summary.initial_cost =
+        linearized_total_cost(problem, linearization, options);
     summary.final_cost = summary.initial_cost;
     double damping = options.initial_damping;
-    LinearizationOutput linearization;
 
     for (std::size_t iteration = 0; iteration < options.maximum_iterations; ++iteration) {
         auto stage_started = std::chrono::steady_clock::now();
-        linearize_cpu(problem, linearization, linearizer_options);
-        auto stage_stopped = std::chrono::steady_clock::now();
-        summary.linearization_time_ms +=
-            std::chrono::duration<double, std::milli>(stage_stopped - stage_started).count();
-        stage_started = stage_stopped;
         System system = assemble_system(
             problem, linearization, adjacency, damping,
             options.fix_first_point, options.optimize_points,
@@ -1556,7 +1595,7 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
             use_dense_intrinsic_schur
                 ? build_intrinsic_schur(problem, adjacency, system)
                 : IntrinsicSchur{};
-        stage_stopped = std::chrono::steady_clock::now();
+        auto stage_stopped = std::chrono::steady_clock::now();
         summary.assembly_time_ms +=
             std::chrono::duration<double, std::milli>(stage_stopped - stage_started).count();
         stage_started = stage_stopped;
@@ -1692,11 +1731,20 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
             options.optimize_rotations);
         if (block_dof > 0)
             apply_intrinsic_step(problem, intrinsic_step, options);
-        const double candidate_cost = evaluate_total_cost(problem, options);
+        const EvaluationStats candidate_evaluation =
+            linearize_cpu(
+                problem, candidate_linearization, linearizer_options);
+        const double candidate_cost =
+            linearized_total_cost(problem, candidate_linearization, options);
         const bool accepted = std::isfinite(candidate_cost) && candidate_cost < summary.final_cost;
         stage_stopped = std::chrono::steady_clock::now();
-        summary.update_and_cost_time_ms +=
-            std::chrono::duration<double, std::milli>(stage_stopped - stage_started).count();
+        summary.linearization_time_ms += candidate_evaluation.elapsed_ms;
+        summary.update_and_cost_time_ms += std::max(
+            0.0,
+            std::chrono::duration<double, std::milli>(
+                stage_stopped - stage_started)
+                    .count() -
+                candidate_evaluation.elapsed_ms);
         summary.iterations.back().cost = accepted ? candidate_cost : summary.final_cost;
         summary.iterations.back().step_norm = norm;
         summary.iterations.back().accepted = accepted;
@@ -1708,6 +1756,7 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         if (accepted) {
             const double previous_cost = summary.final_cost;
             summary.final_cost = candidate_cost;
+            std::swap(linearization, candidate_linearization);
             ++summary.successful_steps;
             damping = std::max(options.minimum_damping, damping * 0.333333333333);
             if (norm <= options.step_tolerance ||

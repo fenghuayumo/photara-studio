@@ -58,7 +58,7 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
     const double px = r00 * dx + r01 * dy + r02 * dz;
     const double py = r10 * dx + r11 * dy + r12 * dz;
     const double pz = r20 * dx + r21 * dy + r22 * dz;
-    if (pz <= options.minimum_depth) {
+    if (!(pz > options.minimum_depth) || !::isfinite(pz)) {
         return;
     }
 
@@ -78,6 +78,9 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
     const double projected_y = intrinsics.fy * y_distorted + intrinsics.cy;
     const double raw_rx = projected_x - observed_x;
     const double raw_ry = projected_y - observed_y;
+    if (!::isfinite(raw_rx) || !::isfinite(raw_ry)) {
+        return;
+    }
 
     const double radial_slope = intrinsics.k1 + 2.0 * intrinsics.k2 * r2;
     const double dradial_dx = 2.0 * xn * radial_slope;

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <sstream>
@@ -21,6 +22,8 @@ namespace aetherscan::ba {
 namespace {
 
 constexpr unsigned threads = 256;
+constexpr unsigned warp_size = 32;
+constexpr unsigned warps_per_block = threads / warp_size;
 constexpr std::size_t cross_n = 18;
 
 void check(const cudaError_t status, const char* operation) {
@@ -32,6 +35,12 @@ void check(const cudaError_t status, const char* operation) {
 
 unsigned blocks(const std::size_t count) {
     return static_cast<unsigned>(std::min<std::size_t>((count + threads - 1) / threads, 65535));
+}
+
+unsigned warp_blocks(const std::size_t count) {
+    constexpr std::size_t max_grid_x = 2147483647;
+    return static_cast<unsigned>(std::min<std::size_t>(
+        (count + warps_per_block - 1) / warps_per_block, max_grid_x));
 }
 
 template <class T>
@@ -59,6 +68,10 @@ public:
         if (size) check(cudaMemcpy(destination, data_, size * sizeof(T), cudaMemcpyDeviceToHost), "download");
     }
     void zero() { if (size_) check(cudaMemset(data_, 0, size_ * sizeof(T)), "cudaMemset"); }
+    void swap(Buffer& other) noexcept {
+        std::swap(data_, other.data_);
+        std::swap(size_, other.size_);
+    }
     T* data() { return data_; }
     const T* data() const { return data_; }
     std::size_t size() const { return size_; }
@@ -85,27 +98,43 @@ __global__ void linearize_kernel(
                                       x[i], y[i], weights[i], options, output[i]);
 }
 
-__global__ void assemble_kernel(
-    const LinearizedObservation* values, const Index* cameras, const Index* points,
-    const std::size_t count, double* camera_h, double* camera_b,
-    double* point_h, double* point_b, double* cross) {
-    for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < count; i += static_cast<std::size_t>(blockDim.x) * gridDim.x) {
-        const auto& value = values[i];
-        if (!value.valid) continue;
-        const std::size_t camera = cameras[i], point = points[i];
-        double* w = cross + i * cross_n;
+__device__ double warp_sum(double value) {
+#pragma unroll
+    for (unsigned offset = warp_size / 2; offset > 0; offset /= 2)
+        value += __shfl_down_sync(0xFFFFFFFFu, value, offset);
+    return value;
+}
+
+__global__ void assemble_points_and_cross_kernel(
+    const LinearizedObservation* values,
+    const std::size_t* point_offsets,
+    const std::size_t* point_observations,
+    const std::size_t point_count,
+    double* point_h,
+    double* point_b,
+    double* cross) {
+    const unsigned lane = threadIdx.x % warp_size;
+    const unsigned warp = threadIdx.x / warp_size;
+    const std::size_t point =
+        static_cast<std::size_t>(blockIdx.x) * warps_per_block + warp;
+    if (point >= point_count) return;
+
+    double local_h[9]{};
+    double local_b[3]{};
+    for (std::size_t cursor = point_offsets[point] + lane;
+         cursor < point_offsets[point + 1]; cursor += warp_size) {
+        const std::size_t observation = point_observations[cursor];
+        const auto& value = values[observation];
+        double* w = cross + observation * cross_n;
+        if (!value.valid) {
+#pragma unroll
+            for (int i = 0; i < static_cast<int>(cross_n); ++i) w[i] = 0.0;
+            continue;
+        }
 #pragma unroll
         for (int row = 0; row < 6; ++row) {
             const double jc0 = value.pose_jacobian[row];
             const double jc1 = value.pose_jacobian[6 + row];
-            atomicAdd(camera_b + camera * 6 + row,
-                      -(jc0 * value.residual[0] + jc1 * value.residual[1]));
-#pragma unroll
-            for (int column = 0; column < 6; ++column)
-                atomicAdd(camera_h + camera * 36 + row * 6 + column,
-                          jc0 * value.pose_jacobian[column] +
-                          jc1 * value.pose_jacobian[6 + column]);
 #pragma unroll
             for (int column = 0; column < 3; ++column)
                 w[row * 3 + column] = jc0 * value.point_jacobian[column] +
@@ -115,14 +144,71 @@ __global__ void assemble_kernel(
         for (int row = 0; row < 3; ++row) {
             const double jp0 = value.point_jacobian[row];
             const double jp1 = value.point_jacobian[3 + row];
-            atomicAdd(point_b + point * 3 + row,
-                      -(jp0 * value.residual[0] + jp1 * value.residual[1]));
+            local_b[row] -=
+                jp0 * value.residual[0] + jp1 * value.residual[1];
 #pragma unroll
             for (int column = 0; column < 3; ++column)
-                atomicAdd(point_h + point * 9 + row * 3 + column,
-                          jp0 * value.point_jacobian[column] +
-                          jp1 * value.point_jacobian[3 + column]);
+                local_h[row * 3 + column] +=
+                    jp0 * value.point_jacobian[column] +
+                    jp1 * value.point_jacobian[3 + column];
         }
+    }
+
+#pragma unroll
+    for (int i = 0; i < 9; ++i) {
+        const double total = warp_sum(local_h[i]);
+        if (lane == 0) point_h[point * 9 + i] = total;
+    }
+#pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        const double total = warp_sum(local_b[i]);
+        if (lane == 0) point_b[point * 3 + i] = total;
+    }
+}
+
+__global__ void assemble_cameras_kernel(
+    const LinearizedObservation* values,
+    const std::size_t* camera_offsets,
+    const std::size_t* camera_observations,
+    const std::size_t camera_count,
+    double* camera_h,
+    double* camera_b) {
+    const unsigned lane = threadIdx.x % warp_size;
+    const unsigned warp = threadIdx.x / warp_size;
+    const std::size_t camera =
+        static_cast<std::size_t>(blockIdx.x) * warps_per_block + warp;
+    if (camera >= camera_count) return;
+
+    double local_h[36]{};
+    double local_b[6]{};
+    for (std::size_t cursor = camera_offsets[camera] + lane;
+         cursor < camera_offsets[camera + 1]; cursor += warp_size) {
+        const std::size_t observation = camera_observations[cursor];
+        const auto& value = values[observation];
+        if (!value.valid) continue;
+#pragma unroll
+        for (int row = 0; row < 6; ++row) {
+            const double jc0 = value.pose_jacobian[row];
+            const double jc1 = value.pose_jacobian[6 + row];
+            local_b[row] -=
+                jc0 * value.residual[0] + jc1 * value.residual[1];
+#pragma unroll
+            for (int column = 0; column < 6; ++column)
+                local_h[row * 6 + column] +=
+                    jc0 * value.pose_jacobian[column] +
+                    jc1 * value.pose_jacobian[6 + column];
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < 36; ++i) {
+        const double total = warp_sum(local_h[i]);
+        if (lane == 0) camera_h[camera * 36 + i] = total;
+    }
+#pragma unroll
+    for (int i = 0; i < 6; ++i) {
+        const double total = warp_sum(local_b[i]);
+        if (lane == 0) camera_b[camera * 6 + i] = total;
     }
 }
 
@@ -410,26 +496,33 @@ __global__ void update_points_kernel(Point3* points, const double* step, const s
     }
 }
 
-__global__ void cost_kernel(
-    const Pose* poses, const PinholeIntrinsics* intrinsics, const Point3* points,
-    const Index* cameras, const Index* point_ids, const double* ox, const double* oy,
-    const double* weights, const std::size_t count, const double huber,
-    const double minimum_depth, double* total) {
+__global__ void linearized_cost_kernel(
+    const LinearizedObservation* values,
+    const double* weights,
+    const std::size_t count,
+    const double huber,
+    double* total) {
     double local=0.0;
     for (std::size_t i=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
          i<count; i+=static_cast<std::size_t>(blockDim.x)*gridDim.x) {
-        const Pose p=poses[cameras[i]]; const Point3 point=points[point_ids[i]];
-        const auto k=intrinsics[cameras[i]]; const double dx=point.x-p.cx,dy=point.y-p.cy,dz=point.z-p.cz;
-        const double px=(1-2*(p.qy*p.qy+p.qz*p.qz))*dx+2*(p.qx*p.qy-p.qw*p.qz)*dy+2*(p.qx*p.qz+p.qw*p.qy)*dz;
-        const double py=2*(p.qx*p.qy+p.qw*p.qz)*dx+(1-2*(p.qx*p.qx+p.qz*p.qz))*dy+2*(p.qy*p.qz-p.qw*p.qx)*dz;
-        const double pz=2*(p.qx*p.qz-p.qw*p.qy)*dx+2*(p.qy*p.qz+p.qw*p.qx)*dy+(1-2*(p.qx*p.qx+p.qy*p.qy))*dz;
-        if (!(pz>minimum_depth) || !isfinite(pz)) { local+=weights[i]*1e12; continue; }
-        const double x=px/pz,y=py/pz,r2=x*x+y*y,radial=1+k.k1*r2+k.k2*r2*r2;
-        const double xd=x*radial+2*k.p1*x*y+k.p2*(r2+2*x*x);
-        const double yd=y*radial+k.p1*(r2+2*y*y)+2*k.p2*x*y;
-        const double rx=k.fx*xd+k.cx-ox[i],ry=k.fy*yd+k.cy-oy[i],norm=sqrt(rx*rx+ry*ry);
-        if (!isfinite(norm)) { local+=weights[i]*1e12; continue; }
-        local+=weights[i]*((huber>0 && norm>huber)?huber*(norm-0.5*huber):0.5*norm*norm);
+        if (weights[i] == 0.0) continue;
+        const LinearizedObservation value = values[i];
+        if (!value.valid || !(value.robust_weight > 0.0)) {
+            local += weights[i] * 1e12;
+            continue;
+        }
+        const double weighted_squared =
+            value.residual[0] * value.residual[0] +
+            value.residual[1] * value.residual[1];
+        const double norm = sqrt(weighted_squared / value.robust_weight);
+        if (!isfinite(norm)) {
+            local += weights[i] * 1e12;
+            continue;
+        }
+        local += weights[i] *
+                 ((huber > 0 && norm > huber)
+                      ? huber * (norm - 0.5 * huber)
+                      : 0.5 * norm * norm);
     }
     atomicAdd(total,local);
 }
@@ -447,7 +540,7 @@ public:
     Buffer<Index> cameras, point_ids;
     Buffer<double> ox, oy, weights;
     Buffer<std::size_t> point_offsets, point_observations, camera_offsets, camera_observations;
-    Buffer<LinearizedObservation> linearized;
+    Buffer<LinearizedObservation> linearized, candidate_linearized;
     Buffer<double> camera_h, camera_b, point_inverse, point_b, cross, reduced_point;
     Buffer<double> rhs, solution, residual, z, direction, product, point_temporary, point_step;
     Buffer<double> scalar, pcg_scalars;
@@ -461,11 +554,15 @@ public:
         dot_kernel<<<blocks(count),threads>>>(a.data(),b.data(),count,pcg_scalars.data()+index);
         check(cudaGetLastError(),"PCG dot_kernel");
     }
-    double cost() {
-        scalar.zero(); cost_kernel<<<blocks(observation_count),threads>>>(poses.data(),intrinsics.data(),points.data(),
-            cameras.data(),point_ids.data(),ox.data(),oy.data(),weights.data(),observation_count,
-            options.huber_delta,options.minimum_depth,scalar.data());
-        check(cudaGetLastError(),"cost_kernel"); double result{}; scalar.download(&result,1); return result;
+    double cost(const Buffer<LinearizedObservation>& values) {
+        scalar.zero();
+        linearized_cost_kernel<<<blocks(observation_count),threads>>>(
+            values.data(),weights.data(),observation_count,
+            options.huber_delta,scalar.data());
+        check(cudaGetLastError(),"linearized_cost_kernel");
+        double result{};
+        scalar.download(&result,1);
+        return result;
     }
     void multiply() {
         point_product_kernel<<<blocks(point_count),threads>>>(point_offsets.data(),point_observations.data(),
@@ -529,7 +626,8 @@ void CudaOptimizer::upload(const Problem& problem) {
         pi[pc[problem.observations.point[i]]++]=i; ci[cc[problem.observations.camera[i]]++]=i; }
     d.point_offsets.upload(po.data(),po.size()); d.point_observations.upload(pi.data(),pi.size());
     d.camera_offsets.upload(co.data(),co.size()); d.camera_observations.upload(ci.data(),ci.size());
-    d.linearized.resize(d.observation_count); d.camera_h.resize(d.camera_count*36); d.camera_b.resize(d.camera_count*6);
+    d.linearized.resize(d.observation_count); d.candidate_linearized.resize(d.observation_count);
+    d.camera_h.resize(d.camera_count*36); d.camera_b.resize(d.camera_count*6);
     d.point_inverse.resize(d.point_count*9); d.point_b.resize(d.point_count*3); d.cross.resize(d.observation_count*18);
     d.reduced_point.resize(d.point_count*3); const std::size_t cn=d.camera_count*6;
     d.rhs.resize(cn); d.solution.resize(cn); d.residual.resize(cn); d.z.resize(cn); d.direction.resize(cn);
@@ -541,15 +639,22 @@ OptimizerSummary CudaOptimizer::optimize() {
     core::StageScope stage("ba.cuda");
     auto& d=*impl_; if (!d.observation_count) throw std::logic_error("Upload a BA problem before optimization");
     const auto started=std::chrono::steady_clock::now(); OptimizerSummary summary;
-    summary.initial_cost=d.cost(); summary.final_cost=summary.initial_cost; double damping=d.options.initial_damping;
+    linearize_kernel<<<blocks(d.observation_count),threads>>>(
+        d.poses.data(),d.intrinsics.data(),d.points.data(),
+        d.cameras.data(),d.point_ids.data(),d.ox.data(),d.oy.data(),
+        d.weights.data(),d.observation_count,
+        LinearizerOptions{d.options.huber_delta,d.options.minimum_depth},
+        d.linearized.data());
+    summary.initial_cost=d.cost(d.linearized); summary.final_cost=summary.initial_cost;
+    double damping=d.options.initial_damping;
     const std::size_t camera_values=d.camera_count*6;
     for (std::size_t iteration=0;iteration<d.options.maximum_iterations;++iteration) {
-        linearize_kernel<<<blocks(d.observation_count),threads>>>(d.poses.data(),d.intrinsics.data(),d.points.data(),
-            d.cameras.data(),d.point_ids.data(),d.ox.data(),d.oy.data(),d.weights.data(),d.observation_count,
-            LinearizerOptions{d.options.huber_delta,d.options.minimum_depth},d.linearized.data());
-        d.camera_h.zero(); d.camera_b.zero(); d.point_inverse.zero(); d.point_b.zero(); d.cross.zero();
-        assemble_kernel<<<blocks(d.observation_count),threads>>>(d.linearized.data(),d.cameras.data(),d.point_ids.data(),
-            d.observation_count,d.camera_h.data(),d.camera_b.data(),d.point_inverse.data(),d.point_b.data(),d.cross.data());
+        assemble_points_and_cross_kernel<<<warp_blocks(d.point_count),threads>>>(
+            d.linearized.data(),d.point_offsets.data(),d.point_observations.data(),
+            d.point_count,d.point_inverse.data(),d.point_b.data(),d.cross.data());
+        assemble_cameras_kernel<<<warp_blocks(d.camera_count),threads>>>(
+            d.linearized.data(),d.camera_offsets.data(),d.camera_observations.data(),
+            d.camera_count,d.camera_h.data(),d.camera_b.data());
         damp_cameras<<<blocks(d.camera_count),threads>>>(d.camera_h.data(),d.camera_count,damping);
         invert_points<<<blocks(d.point_count),threads>>>(
             d.point_inverse.data(),d.point_b.data(),d.point_count,damping,
@@ -588,13 +693,21 @@ OptimizerSummary CudaOptimizer::optimize() {
         check(cudaMemcpy(d.point_backup.data(),d.points.data(),d.point_count*sizeof(Point3),cudaMemcpyDeviceToDevice),"point backup");
         update_poses_kernel<<<blocks(d.camera_count),threads>>>(d.poses.data(),d.solution.data(),d.camera_count,d.options.fix_first_pose);
         update_points_kernel<<<blocks(d.point_count),threads>>>(d.points.data(),d.point_step.data(),d.point_count);
-        const double candidate=d.cost(); const bool accepted=std::isfinite(candidate)&&candidate<summary.final_cost;
+        linearize_kernel<<<blocks(d.observation_count),threads>>>(
+            d.poses.data(),d.intrinsics.data(),d.points.data(),
+            d.cameras.data(),d.point_ids.data(),d.ox.data(),d.oy.data(),
+            d.weights.data(),d.observation_count,
+            LinearizerOptions{d.options.huber_delta,d.options.minimum_depth},
+            d.candidate_linearized.data());
+        const double candidate=d.cost(d.candidate_linearized);
+        const bool accepted=std::isfinite(candidate)&&candidate<summary.final_cost;
         summary.iterations.push_back({iteration,accepted?candidate:summary.final_cost,damping,norm,pcg,accepted});
         core::Logger::instance().debug(
             "CUDA BA iteration=",iteration," cost=",summary.iterations.back().cost,
             " damping=",damping," step_norm=",norm,
             " pcg_iterations=",pcg," accepted=",accepted);
-        if (accepted) { const double previous=summary.final_cost; summary.final_cost=candidate; ++summary.successful_steps;
+        if (accepted) { const double previous=summary.final_cost; summary.final_cost=candidate;
+            d.linearized.swap(d.candidate_linearized); ++summary.successful_steps;
             damping=std::max(d.options.minimum_damping,damping/3.0);
             if (norm<=d.options.step_tolerance || previous-candidate<=d.options.function_tolerance*std::max(1.0,previous)) {
                 summary.termination=TerminationReason::converged; break; }

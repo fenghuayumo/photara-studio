@@ -201,6 +201,12 @@ if(AETHERSCAN_ENABLE_FEATURES)
         PoseLib::PoseLib
         Ceres::ceres)
     target_compile_definitions(aetherscan_sfm PRIVATE AETHERSCAN_HAS_POSELIB=1)
+    if(OpenMP_CXX_FOUND)
+        # Link explicitly instead of relying on transitive BA usage
+        # requirements: triangulation and mapping own OpenMP regions.
+        target_link_libraries(aetherscan_sfm PUBLIC OpenMP::OpenMP_CXX)
+        target_compile_definitions(aetherscan_sfm PUBLIC AETHERSCAN_HAS_OPENMP=1)
+    endif()
     if(MSVC)
         target_compile_options(aetherscan_sfm PRIVATE /W4 /permissive- /EHsc)
         if(AETHERSCAN_ENABLE_NATIVE_ARCH)
@@ -234,6 +240,19 @@ if(AETHERSCAN_BUILD_BENCHMARKS)
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     $<TARGET_RUNTIME_DLLS:aetherscan_pair_verify>
                     $<TARGET_FILE_DIR:aetherscan_pair_verify>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        add_executable(
+            aetherscan_triangulation_benchmark
+            src/tools/triangulation_benchmark.cpp)
+        target_link_libraries(
+            aetherscan_triangulation_benchmark PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(
+                TARGET aetherscan_triangulation_benchmark POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_triangulation_benchmark>
+                    $<TARGET_FILE_DIR:aetherscan_triangulation_benchmark>
                 COMMAND_EXPAND_LISTS)
         endif()
         add_library(aetherscan_cxxopts INTERFACE)
