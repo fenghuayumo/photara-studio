@@ -260,6 +260,7 @@ std::vector<Index> select_tracks_for_positioning(
     struct RankedTrack {
         Index track_id{};
         unsigned registered_views{};
+        double max_parallax{};
     };
     std::vector<RankedTrack> ranked;
     ranked.reserve(scene.tracks.size());
@@ -269,22 +270,134 @@ std::vector<Index> select_tracks_for_positioning(
         const unsigned registered =
             count_registered_observations(scene, track);
         if (registered < options.min_views_per_track) continue;
-        ranked.push_back({track_id, registered});
+
+        std::vector<Vec3> directions;
+        directions.reserve(std::min<std::size_t>(
+            track.observations.size(), 8));
+        for (const Observation& observation : track.observations) {
+            if (directions.size() == 8) break;
+            if (observation.image_id >= scene.images.size()) continue;
+            const WorldRay ray = make_world_ray(
+                scene, scene.images[observation.image_id], observation);
+            if (ray.valid) directions.push_back(ray.direction);
+        }
+        double max_parallax = 0.0;
+        for (std::size_t i = 0; i + 1 < directions.size(); ++i) {
+            for (std::size_t j = i + 1; j < directions.size(); ++j) {
+                max_parallax = std::max(
+                    max_parallax,
+                    std::acos(std::clamp(
+                        directions[i].dot(directions[j]), -1.0, 1.0)));
+            }
+        }
+        ranked.push_back({track_id, registered, max_parallax});
     }
     std::stable_sort(
         ranked.begin(), ranked.end(),
         [](const RankedTrack& left, const RankedTrack& right) {
+            // Parallax carries more positional information than track length.
+            if (left.max_parallax != right.max_parallax)
+                return left.max_parallax > right.max_parallax;
             if (left.registered_views != right.registered_views)
                 return left.registered_views > right.registered_views;
             return left.track_id < right.track_id;
         });
-    if (options.max_tracks_for_positioning > 0 &&
-        ranked.size() > options.max_tracks_for_positioning)
-        ranked.resize(options.max_tracks_for_positioning);
 
+    const std::size_t registered_images = scene.registered_count();
+    const std::size_t adaptive_target = std::max<std::size_t>(
+        options.min_tracks_for_positioning,
+        registered_images * options.tracks_per_registered_image);
+    const std::size_t hard_limit =
+        options.max_tracks_for_positioning == 0
+            ? ranked.size()
+            : options.max_tracks_for_positioning;
+    const std::size_t target =
+        std::min({ranked.size(), adaptive_target, hard_limit});
+
+    const unsigned grid = std::max(1U, options.coverage_grid_size);
+    std::vector<std::uint8_t> covered_cells(
+        scene.images.size() * static_cast<std::size_t>(grid) * grid, 0);
+    std::vector<unsigned> image_counts(scene.images.size(), 0);
+    std::vector<std::uint8_t> chosen(scene.tracks.size(), 0);
     std::vector<Index> selected;
-    selected.reserve(ranked.size());
-    for (const RankedTrack& entry : ranked) selected.push_back(entry.track_id);
+    selected.reserve(target);
+
+    const auto for_each_coverage = [&](
+        const Index track_id, const auto& function) {
+        const Track& track = scene.tracks[track_id];
+        for (const Observation& observation : track.observations) {
+            if (observation.image_id >= scene.images.size()) continue;
+            const Image& image = scene.images[observation.image_id];
+            if (!image.registered ||
+                observation.feature_id >= image.features.keypoints.size())
+                continue;
+            const auto& keypoint =
+                image.features.keypoints[observation.feature_id];
+            const double width = std::max(1U, image.features.image_width);
+            const double height = std::max(1U, image.features.image_height);
+            const unsigned x = std::min(
+                grid - 1,
+                static_cast<unsigned>(
+                    std::max(0.0, static_cast<double>(keypoint.x)) /
+                    width * grid));
+            const unsigned y = std::min(
+                grid - 1,
+                static_cast<unsigned>(
+                    std::max(0.0, static_cast<double>(keypoint.y)) /
+                    height * grid));
+            const std::size_t cell =
+                (static_cast<std::size_t>(observation.image_id) * grid + y) *
+                    grid +
+                x;
+            function(observation.image_id, cell);
+        }
+    };
+    const auto select = [&](const Index track_id) {
+        if (chosen[track_id] || selected.size() >= target) return;
+        chosen[track_id] = 1;
+        selected.push_back(track_id);
+        for_each_coverage(
+            track_id,
+            [&](const Index image_id, const std::size_t cell) {
+                covered_cells[cell] = 1;
+                ++image_counts[image_id];
+            });
+    };
+
+    // Pass 1: cover as many image-grid cells as possible.
+    for (const RankedTrack& entry : ranked) {
+        if (selected.size() >= target) break;
+        bool adds_cell = false;
+        for_each_coverage(
+            entry.track_id,
+            [&](const Index, const std::size_t cell) {
+                adds_cell = adds_cell || covered_cells[cell] == 0;
+            });
+        if (adds_cell) select(entry.track_id);
+    }
+
+    // Pass 2: guarantee a useful per-camera quota.
+    const unsigned per_image_quota =
+        std::max(options.min_views_per_track,
+                 options.tracks_per_registered_image);
+    for (const RankedTrack& entry : ranked) {
+        if (selected.size() >= target) break;
+        bool helps_undercovered_image = false;
+        for_each_coverage(
+            entry.track_id,
+            [&](const Index image_id, const std::size_t) {
+                helps_undercovered_image =
+                    helps_undercovered_image ||
+                    image_counts[image_id] < per_image_quota;
+            });
+        if (helps_undercovered_image) select(entry.track_id);
+    }
+
+    // Pass 3: fill remaining budget by geometric information score.
+    for (const RankedTrack& entry : ranked) {
+        if (selected.size() >= target) break;
+        select(entry.track_id);
+    }
     return selected;
 }
 
@@ -815,7 +928,10 @@ GlobalPositioningSummary solve_global_positions(
         " pairs=", scene.pairs.size(),
         " tracks_selected=", selected_tracks.size(),
         " min_views=", options.min_views_per_track,
+        " min_tracks=", options.min_tracks_for_positioning,
+        " tracks_per_image=", options.tracks_per_registered_image,
         " max_tracks=", options.max_tracks_for_positioning,
+        " coverage_grid=", options.coverage_grid_size,
         " max_solver_time_s=", options.max_solver_time_sec);
 
     std::vector<Vec3> original_centers(scene.images.size());

@@ -14,9 +14,12 @@ enum class GlobalPositioningConstraint {
 struct GlobalPositioningOptions {
     // Prefer longer tracks; 4–5 cuts short noisy constraints on real scenes.
     unsigned min_views_per_track{4};
-    // Cap point-to-camera residuals for only_points; 0 keeps every eligible track.
-    // Keep modest: CHOLMOD factorization ignores max_solver_time mid-factorize.
-    unsigned max_tracks_for_positioning{2500};
+    // Coverage-aware selection scales with scene size while retaining a hard
+    // ceiling for predictable solve time.
+    unsigned min_tracks_for_positioning{2500};
+    unsigned tracks_per_registered_image{20};
+    unsigned max_tracks_for_positioning{20000};
+    unsigned coverage_grid_size{4};
     // Reserved for a future robust reweighting pass around Ceres positioning.
     unsigned max_irls_iterations{8};
     unsigned max_num_iterations{100};
