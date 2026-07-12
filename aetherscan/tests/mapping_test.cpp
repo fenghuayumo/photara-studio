@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <random>
 
 namespace {
@@ -222,6 +223,64 @@ void test_global_positioning_points_only() {
     expect(
         std::sqrt(squared_error / k_views) < 1e-2,
         "point-only positioning recovers camera layout");
+    double minimum_center_norm = std::numeric_limits<double>::max();
+    for (const Image& image : scene.images)
+        minimum_center_norm = std::min(minimum_center_norm, image.pose.C.norm());
+    expect(minimum_center_norm < 1e-12,
+           "point-only positioning explicitly fixes translation gauge");
+}
+
+void test_large_point_only_positioning_does_not_require_pairs() {
+    constexpr Index k_tracks = 2000;
+    Scene scene;
+    scene.cameras.assign(2, cam());
+    scene.images.resize(2);
+    const Vec3 centers[] = {Vec3(-0.5, 0.0, 0.0), Vec3(0.5, 0.0, 0.0)};
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        Image& image = scene.images[image_id];
+        image.id = image_id;
+        image.camera_id = image_id;
+        image.registered = true;
+        image.pose.C = centers[image_id];
+        image.features.keypoints.resize(k_tracks);
+    }
+    scene.tracks.reserve(k_tracks);
+    for (Index track_id = 0; track_id < k_tracks; ++track_id) {
+        Track track;
+        track.position = Vec3(
+            (static_cast<double>(track_id % 40) - 20.0) * 0.02,
+            (static_cast<double>((track_id / 40) % 25) - 12.0) * 0.02,
+            4.0 + 0.001 * track_id);
+        for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+            const Vec2 pixel = scene.cameras[image_id].project(
+                scene.images[image_id].pose.transform_world_to_camera(
+                    track.position));
+            scene.images[image_id].features.keypoints[track_id].x =
+                static_cast<float>(pixel.x());
+            scene.images[image_id].features.keypoints[track_id].y =
+                static_cast<float>(pixel.y());
+            track.observations.push_back({image_id, track_id});
+        }
+        track.num_inliers = 2;
+        scene.tracks.push_back(std::move(track));
+    }
+
+    GlobalPositioningOptions options;
+    options.min_views_per_track = 2;
+    options.max_tracks_for_positioning = 0;
+    options.max_num_iterations = 2;
+    options.max_solver_time_sec = 5.0;
+    options.generate_random_positions = false;
+    options.generate_random_points = false;
+    options.generate_scales = false;
+    options.optimize_positions = false;
+    options.optimize_points = false;
+    const GlobalPositioningSummary summary =
+        solve_global_positions(scene, options);
+    expect(summary.success,
+           "large point-only positioning does not require camera pairs");
+    expect(summary.positioned_tracks == k_tracks,
+           "large point-only positioning keeps track constraints primary");
 }
 
 void test_global_positioning_preserves_fixed_initial_positions() {
@@ -451,6 +510,7 @@ int main() {
     test_pair_cycle_weighting();
     test_global_rotation_weighting();
     test_global_positioning_points_only();
+    test_large_point_only_positioning_does_not_require_pairs();
     test_global_positioning_preserves_fixed_initial_positions();
     test_global_positioning_rejects_empty_point_constraints();
     test_long_track_merge();

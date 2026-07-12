@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -92,6 +93,36 @@ struct BearingDirectionCostAnalytic : ceres::SizedCostFunction<3, 3, 3> {
     Vec3 direction;
 };
 
+struct BaselineLengthCostAnalytic : ceres::SizedCostFunction<1, 3, 3> {
+    explicit BaselineLengthCostAnalytic(double baseline) : baseline(baseline) {}
+
+    bool Evaluate(
+        double const* const* parameters,
+        double* residuals,
+        double** jacobians) const override {
+        const Eigen::Map<const Vec3> first(parameters[0]);
+        const Eigen::Map<const Vec3> second(parameters[1]);
+        const Vec3 difference = second - first;
+        const double length = difference.norm();
+        if (!(length > 1e-10) || !std::isfinite(length)) return false;
+        residuals[0] = length - baseline;
+        if (jacobians) {
+            const Eigen::RowVector3d direction = difference.transpose() / length;
+            if (jacobians[0]) {
+                Eigen::Map<Eigen::RowVector3d> first_jacobian(jacobians[0]);
+                first_jacobian = -direction;
+            }
+            if (jacobians[1]) {
+                Eigen::Map<Eigen::RowVector3d> second_jacobian(jacobians[1]);
+                second_jacobian = direction;
+            }
+        }
+        return true;
+    }
+
+    double baseline;
+};
+
 Vec3 random_point(
     std::mt19937& generator,
     std::uniform_real_distribution<double>& distribution) {
@@ -136,6 +167,8 @@ struct BuiltPositioningProblem {
     unsigned observations{0};
     unsigned candidate_tracks{0};
     bool has_point_blocks{false};
+    std::size_t scale_anchor{std::numeric_limits<std::size_t>::max()};
+    double scale_anchor_score{-1.0};
 };
 
 struct WorldRay {
@@ -153,6 +186,52 @@ unsigned count_registered_observations(
             ++count;
     }
     return count;
+}
+
+Index select_anchor_camera(
+    const Scene& scene,
+    const ceres::Problem& problem,
+    const std::vector<Index>& selected_tracks) {
+    std::vector<double> scores(scene.images.size(), 0.0);
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || pair.id1 >= scene.images.size() ||
+            pair.id2 >= scene.images.size())
+            continue;
+        const double weight = std::max(0.F, pair.composite_weight());
+        scores[pair.id1] += weight;
+        scores[pair.id2] += weight;
+    }
+    for (Index track_id : selected_tracks) {
+        if (track_id >= scene.tracks.size()) continue;
+        const Track& track = scene.tracks[track_id];
+        const double support = static_cast<double>(
+            std::max<std::size_t>(1, track.observations.size()));
+        for (const Observation& observation : track.observations)
+            if (observation.image_id < scores.size())
+                scores[observation.image_id] += support;
+    }
+
+    Index best = k_invalid;
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        const Image& image = scene.images[image_id];
+        if (!image.registered ||
+            !problem.HasParameterBlock(image.pose.C.data()))
+            continue;
+        if (best == k_invalid || scores[image_id] > scores[best]) best = image_id;
+    }
+    return best;
+}
+
+void translate_positioning_gauge(
+    Scene& scene,
+    const std::vector<Index>& selected_tracks,
+    const Vec3& offset) {
+    for (Image& image : scene.images)
+        if (image.registered) image.pose.C -= offset;
+    for (Index track_id : selected_tracks)
+        if (track_id < scene.tracks.size() &&
+            scene.tracks[track_id].position.allFinite())
+            scene.tracks[track_id].position -= offset;
 }
 
 WorldRay make_world_ray(
@@ -501,6 +580,11 @@ BuiltPositioningProblem build_positioning_problem(
                 image2.pose.C.data(),
                 &scale);
             built.problem.SetParameterLowerBound(&scale, 0, 1e-5);
+            const double anchor_score = pair.composite_weight();
+            if (anchor_score > built.scale_anchor_score) {
+                built.scale_anchor_score = anchor_score;
+                built.scale_anchor = built.scales.size() - 1;
+            }
             ++built.valid_pairs;
         }
     }
@@ -570,6 +654,13 @@ BuiltPositioningProblem build_positioning_problem(
                     track.position.data(),
                     &scale);
                 built.problem.SetParameterLowerBound(&scale, 0, 1e-5);
+                const double anchor_score =
+                    static_cast<double>(count_registered_observations(scene, track)) *
+                    (scene.camera_of(image).trust_intrinsics ? 1.0 : 0.5);
+                if (anchor_score > built.scale_anchor_score) {
+                    built.scale_anchor_score = anchor_score;
+                    built.scale_anchor = built.scales.size() - 1;
+                }
                 has_valid_observation = true;
                 ++built.observations;
             }
@@ -582,11 +673,22 @@ BuiltPositioningProblem build_positioning_problem(
 
     const bool optimize_positions =
         options.optimize_positions && !attempt.fix_cameras;
+    const bool has_similarity_gauge =
+        !built.has_point_blocks || options.optimize_points;
     if (!optimize_positions) {
         for (Image& image : scene.images) {
             if (image.registered &&
                 built.problem.HasParameterBlock(image.pose.C.data()))
                 built.problem.SetParameterBlockConstant(image.pose.C.data());
+        }
+    } else if (has_similarity_gauge) {
+        const Index anchor =
+            select_anchor_camera(scene, built.problem, selected_tracks);
+        if (anchor != k_invalid) {
+            const Vec3 offset = scene.images[anchor].pose.C;
+            translate_positioning_gauge(scene, selected_tracks, offset);
+            built.problem.SetParameterBlockConstant(
+                scene.images[anchor].pose.C.data());
         }
     }
     if (!options.optimize_points) {
@@ -600,42 +702,127 @@ BuiltPositioningProblem build_positioning_problem(
         for (double& scale : built.scales)
             if (built.problem.HasParameterBlock(&scale))
                 built.problem.SetParameterBlockConstant(&scale);
-    } else {
-        // openMVS removes the global scale gauge by fixing one scale variable.
-        for (double& scale : built.scales) {
-            if (!built.problem.HasParameterBlock(&scale)) continue;
-            built.problem.SetParameterBlockConstant(&scale);
-            break;
-        }
+    } else if (has_similarity_gauge &&
+               built.scale_anchor < built.scales.size() &&
+               built.problem.HasParameterBlock(
+                   &built.scales[built.scale_anchor])) {
+        // Fix the most strongly supported inverse-depth scale instead of the
+        // first observation encountered, which can be a weak graph boundary.
+        built.problem.SetParameterBlockConstant(
+            &built.scales[built.scale_anchor]);
     }
 
     return built;
 }
 
 double mean_residual_norm(ceres::Problem& problem) {
-    double residual_sum = 0.0;
-    unsigned residual_count = 0;
     std::vector<ceres::ResidualBlockId> residual_blocks;
     problem.GetResidualBlocks(&residual_blocks);
-    for (const auto residual_id : residual_blocks) {
-        double cost = 0.0;
-        std::vector<double> residuals;
-        ceres::Problem::EvaluateOptions evaluate_options;
-        evaluate_options.residual_blocks = {residual_id};
-        evaluate_options.apply_loss_function = false;
-        if (problem.Evaluate(
-                evaluate_options, &cost, &residuals, nullptr, nullptr) &&
-            residuals.size() == 3) {
-            residual_sum += std::sqrt(
-                residuals[0] * residuals[0] +
-                residuals[1] * residuals[1] +
-                residuals[2] * residuals[2]);
-            ++residual_count;
-        }
+    if (residual_blocks.empty()) return 0.0;
+    ceres::Problem::EvaluateOptions evaluate_options;
+    evaluate_options.residual_blocks = residual_blocks;
+    evaluate_options.apply_loss_function = false;
+    double cost = 0.0;
+    std::vector<double> residuals;
+    if (!problem.Evaluate(
+            evaluate_options, &cost, &residuals, nullptr, nullptr))
+        return 0.0;
+
+    double residual_sum = 0.0;
+    std::size_t offset = 0;
+    unsigned residual_count = 0;
+    for (const ceres::ResidualBlockId residual_id : residual_blocks) {
+        const ceres::CostFunction* function =
+            problem.GetCostFunctionForResidualBlock(residual_id);
+        if (!function) continue;
+        const int dimension = function->num_residuals();
+        if (dimension <= 0 ||
+            offset + static_cast<std::size_t>(dimension) > residuals.size())
+            return 0.0;
+        double squared_norm = 0.0;
+        for (int i = 0; i < dimension; ++i)
+            squared_norm += residuals[offset + static_cast<std::size_t>(i)] *
+                            residuals[offset + static_cast<std::size_t>(i)];
+        residual_sum += std::sqrt(squared_norm);
+        offset += static_cast<std::size_t>(dimension);
+        ++residual_count;
     }
     return residual_count == 0
         ? 0.0
         : residual_sum / static_cast<double>(residual_count);
+}
+
+struct BaselineAnchor {
+    Index first{k_invalid};
+    Index second{k_invalid};
+    double length{0.0};
+};
+
+BaselineAnchor select_baseline_anchor(
+    const Scene& scene, const ceres::Problem& problem, Index center_anchor) {
+    struct Candidate {
+        Index first{};
+        Index second{};
+        double length{};
+        double reliability{};
+    };
+    std::vector<Candidate> candidates;
+    std::vector<double> lengths;
+    candidates.reserve(scene.pairs.size());
+    lengths.reserve(scene.pairs.size());
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || pair.id1 >= scene.images.size() ||
+            pair.id2 >= scene.images.size())
+            continue;
+        const Image& first = scene.images[pair.id1];
+        const Image& second = scene.images[pair.id2];
+        if (!first.registered || !second.registered ||
+            !problem.HasParameterBlock(first.pose.C.data()) ||
+            !problem.HasParameterBlock(second.pose.C.data()))
+            continue;
+        const double length = (second.pose.C - first.pose.C).norm();
+        if (!(length > 1e-6) || !std::isfinite(length)) continue;
+        candidates.push_back({
+            pair.id1, pair.id2, length,
+            std::max(1e-6F, pair.composite_weight())});
+        lengths.push_back(length);
+    }
+    if (!candidates.empty()) {
+        auto middle = lengths.begin() + lengths.size() / 2;
+        std::nth_element(lengths.begin(), middle, lengths.end());
+        const double median = std::max(1e-6, *middle);
+        const Candidate* best = &candidates.front();
+        double best_score = -1.0;
+        for (const Candidate& candidate : candidates) {
+            const double baseline_factor =
+                std::clamp(candidate.length / median, 0.25, 4.0);
+            const double score = candidate.reliability * baseline_factor;
+            if (score > best_score) {
+                best_score = score;
+                best = &candidate;
+            }
+        }
+        return {best->first, best->second, best->length};
+    }
+
+    // A point-only scene can legitimately have no pair constraints. In that
+    // case anchor scale using the camera farthest from the translation anchor.
+    if (center_anchor == k_invalid) return {};
+    BaselineAnchor result;
+    result.first = center_anchor;
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        if (image_id == center_anchor || !scene.images[image_id].registered ||
+            !problem.HasParameterBlock(scene.images[image_id].pose.C.data()))
+            continue;
+        const double length =
+            (scene.images[image_id].pose.C -
+             scene.images[center_anchor].pose.C).norm();
+        if (std::isfinite(length) && length > result.length) {
+            result.second = image_id;
+            result.length = length;
+        }
+    }
+    return result;
 }
 
 GlobalPositioningSummary refine_only_points_bearings(
@@ -673,16 +860,24 @@ GlobalPositioningSummary refine_only_points_bearings(
     }
     if (observations == 0) return result;
 
-    // Remove translation and global-scale gauges. Rotations already define the
-    // world axes, so two fixed camera centers give a stable baseline.
-    unsigned fixed_cameras = 0;
-    for (Image& image : scene.images) {
-        if (!image.registered ||
-            !problem.HasParameterBlock(image.pose.C.data()))
-            continue;
-        problem.SetParameterBlockConstant(image.pose.C.data());
-        if (++fixed_cameras == 2) break;
-    }
+    // Remove exactly the four unobservable DOFs: one fixed center removes
+    // global translation; one scalar baseline residual removes global scale.
+    // Fixing two complete centers would also freeze two observable directions.
+    const Index center_anchor =
+        select_anchor_camera(scene, problem, selected_tracks);
+    const BaselineAnchor baseline =
+        select_baseline_anchor(scene, problem, center_anchor);
+    if (center_anchor == k_invalid || baseline.first == k_invalid ||
+        baseline.second == k_invalid || !(baseline.length > 1e-6))
+        return result;
+    const Vec3 offset = scene.images[center_anchor].pose.C;
+    translate_positioning_gauge(scene, selected_tracks, offset);
+    problem.SetParameterBlockConstant(
+        scene.images[center_anchor].pose.C.data());
+    problem.AddResidualBlock(
+        new BaselineLengthCostAnalytic(baseline.length), nullptr,
+        scene.images[baseline.first].pose.C.data(),
+        scene.images[baseline.second].pose.C.data());
 
     auto* ordering = new ceres::ParameterBlockOrdering;
     for (Index track_id : selected_tracks) {
@@ -716,7 +911,10 @@ GlobalPositioningSummary refine_only_points_bearings(
         "global positioning attempt: only_points/bearing_schur",
         " tracks=", selected_tracks.size(),
         " observations=", observations,
-        " initialized=", initialized);
+        " initialized=", initialized,
+        " center_anchor=", center_anchor,
+        " baseline_pair=", baseline.first, '-', baseline.second,
+        " baseline=", baseline.length);
     ceres::Solver::Summary solver_summary;
     ceres::Solve(solver_options, &problem, &solver_summary);
     if (!solver_summary.IsSolutionUsable()) {
@@ -746,6 +944,7 @@ GlobalPositioningSummary refine_only_points_bearings(
         " tracks=", result.positioned_tracks,
         " observations=", result.observations,
         " iterations=", result.iterations,
+        " solve_s=", solver_summary.total_time_in_seconds,
         " residual=", result.final_residual);
     return result;
 }
@@ -856,13 +1055,14 @@ bool attempt_positioning(
         " tracks=", result.positioned_tracks,
         " observations=", result.observations,
         " iterations=", result.iterations,
+        " solve_s=", solver_summary.total_time_in_seconds,
         " residual=", result.final_residual);
     return true;
 }
 
 std::vector<PositioningAttempt> fallback_attempts(
     const GlobalPositioningOptions& options,
-    const std::size_t selected_track_count) {
+    const bool allow_camera_fallback) {
     std::vector<PositioningAttempt> attempts;
     const auto push = [&](
         GlobalPositioningConstraint constraint,
@@ -875,20 +1075,6 @@ std::vector<PositioningAttempt> fallback_attempts(
             {constraint, solver, warm_start_positions, fix_cameras,
              ray_initialize_points, label});
     };
-
-    // Large scenes initialize cameras first. The caller then runs a scale-free
-    // bearing-only point/camera refinement on the capped track set.
-    constexpr std::size_t k_large_scene_tracks = 2000;
-    const bool large_scene = selected_track_count >= k_large_scene_tracks;
-    if (large_scene &&
-        options.constraint != GlobalPositioningConstraint::only_cameras) {
-        push(
-            GlobalPositioningConstraint::only_cameras,
-            LinearSolverStrategy::sparse_normal_cholesky,
-            false, false, false,
-            "only_cameras/sparse_normal_cholesky");
-        return attempts;
-    }
 
     push(
         options.constraint,
@@ -906,6 +1092,15 @@ std::vector<PositioningAttempt> fallback_attempts(
             LinearSolverStrategy::sparse_normal_cholesky,
             false, false, false,
             "primary/sparse_normal_cholesky");
+        // Relative translations remain a last-resort initializer, never a
+        // scene-size-driven primary path.
+        if (allow_camera_fallback) {
+            push(
+                GlobalPositioningConstraint::only_cameras,
+                LinearSolverStrategy::sparse_normal_cholesky,
+                false, false, false,
+                "fallback/only_cameras");
+        }
     }
     return attempts;
 }
@@ -959,7 +1154,7 @@ GlobalPositioningSummary solve_global_positions(
     bool have_warm_centers = false;
 
     for (const PositioningAttempt& attempt :
-         fallback_attempts(options, selected_tracks.size())) {
+         fallback_attempts(options, !selected_tracks.empty())) {
         if (attempt.warm_start_positions) {
             if (!have_warm_centers) continue;
             restore_points_only();
