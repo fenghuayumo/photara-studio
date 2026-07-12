@@ -126,6 +126,37 @@ int main() {
         std::cerr << "fixed gauge pose was modified\n";
         return 2;
     }
+    Problem fixed_point_problem = make_problem();
+    const std::vector<Point3> fixed_points = fixed_point_problem.points;
+    OptimizerOptions fixed_point_options = options;
+    fixed_point_options.optimize_points = false;
+    const double fixed_point_initial = evaluate_cost(
+        fixed_point_problem, fixed_point_options.huber_delta,
+        fixed_point_options.minimum_depth);
+    const OptimizerSummary fixed_point_summary =
+        optimize_cpu(fixed_point_problem, fixed_point_options);
+    bool points_unchanged = true;
+    for (std::size_t point = 0; point < fixed_points.size(); ++point) {
+        const Point3& before = fixed_points[point];
+        const Point3& after = fixed_point_problem.points[point];
+        points_unchanged = points_unchanged &&
+            before.x == after.x && before.y == after.y && before.z == after.z;
+    }
+    if (!fixed_point_summary.usable() ||
+        !(fixed_point_summary.final_cost < fixed_point_initial) ||
+        !points_unchanged) {
+        std::cerr << "fixed-point BA modified landmarks or failed to improve cost: "
+                  << fixed_point_summary.brief_report()
+                  << ", unchanged=" << points_unchanged
+                  << ", termination="
+                  << static_cast<int>(fixed_point_summary.termination)
+                  << ", iterations=" << fixed_point_summary.iterations.size();
+        if (!fixed_point_summary.iterations.empty())
+            std::cerr << ", last_step="
+                      << fixed_point_summary.iterations.back().step_norm;
+        std::cerr << '\n';
+        return 3;
+    }
     Problem boundary_problem = make_problem();
     boundary_problem.pose_constant.resize(boundary_problem.poses.size(), 0);
     boundary_problem.pose_constant[2] = 1;
@@ -144,7 +175,7 @@ int main() {
         std::abs(boundary_after.cy - fixed_boundary.cy) > 1e-15 ||
         std::abs(boundary_after.cz - fixed_boundary.cz) > 1e-15) {
         std::cerr << "constant boundary pose was modified or BA did not improve\n";
-        return 3;
+        return 4;
     }
     Problem grouped_problem = make_grouped_intrinsics_problem();
     const double grouped_initial = evaluate_cost(grouped_problem);
@@ -160,7 +191,7 @@ int main() {
         !(std::abs(grouped_problem.intrinsics[0].fx -
                    grouped_problem.intrinsics[1].fx) > 100.0)) {
         std::cerr << "grouped intrinsics were broadcast or failed to optimize\n";
-        return 4;
+        return 5;
     }
 #if defined(AETHERSCAN_HAS_CUDA)
     if (CudaOptimizer::is_available()) {
@@ -169,11 +200,34 @@ int main() {
         if (!gpu_summary.usable() || gpu_summary.successful_steps == 0 ||
             !(gpu_summary.final_cost < initial * 1e-3)) {
             std::cerr << "GPU optimizer failed to reduce synthetic reprojection cost\n";
-            return 5;
+            return 6;
         }
         if (std::abs(gpu_problem.poses.front().cx + 1.0) > 1e-15) {
             std::cerr << "GPU optimizer modified the fixed gauge pose\n";
-            return 6;
+            return 7;
+        }
+        Problem gpu_fixed_point_problem = make_problem();
+        const std::vector<Point3> gpu_fixed_points =
+            gpu_fixed_point_problem.points;
+        OptimizerOptions gpu_fixed_options = options;
+        gpu_fixed_options.optimize_points = false;
+        const double gpu_fixed_initial = evaluate_cost(
+            gpu_fixed_point_problem, gpu_fixed_options.huber_delta,
+            gpu_fixed_options.minimum_depth);
+        const OptimizerSummary gpu_fixed_summary =
+            optimize_cuda(gpu_fixed_point_problem, gpu_fixed_options);
+        bool gpu_points_unchanged = true;
+        for (std::size_t point = 0; point < gpu_fixed_points.size(); ++point) {
+            const Point3& before = gpu_fixed_points[point];
+            const Point3& after = gpu_fixed_point_problem.points[point];
+            gpu_points_unchanged = gpu_points_unchanged &&
+                before.x == after.x && before.y == after.y && before.z == after.z;
+        }
+        if (!gpu_fixed_summary.usable() ||
+            !(gpu_fixed_summary.final_cost < gpu_fixed_initial) ||
+            !gpu_points_unchanged) {
+            std::cerr << "GPU fixed-point BA modified landmarks or failed to improve cost\n";
+            return 8;
         }
     }
 #endif

@@ -137,11 +137,11 @@ __global__ void damp_cameras(double* hessian, const std::size_t count, const dou
 
 __global__ void invert_points(
     double* hessian, double* rhs, const std::size_t count,
-    const double damping, const bool fix_first) {
+    const double damping, const bool fix_first, const bool optimize_points) {
     for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          i < count; i += static_cast<std::size_t>(blockDim.x) * gridDim.x) {
         double* m = hessian + i * 9;
-        if (fix_first && i == 0) {
+        if (!optimize_points || (fix_first && i == 0)) {
             for (int k = 0; k < 9; ++k) m[k] = 0.0;
             for (int k = 0; k < 3; ++k) rhs[i * 3 + k] = 0.0;
             continue;
@@ -549,7 +549,9 @@ OptimizerSummary CudaOptimizer::optimize() {
         assemble_kernel<<<blocks(d.observation_count),threads>>>(d.linearized.data(),d.cameras.data(),d.point_ids.data(),
             d.observation_count,d.camera_h.data(),d.camera_b.data(),d.point_inverse.data(),d.point_b.data(),d.cross.data());
         damp_cameras<<<blocks(d.camera_count),threads>>>(d.camera_h.data(),d.camera_count,damping);
-        invert_points<<<blocks(d.point_count),threads>>>(d.point_inverse.data(),d.point_b.data(),d.point_count,damping,d.options.fix_first_point);
+        invert_points<<<blocks(d.point_count),threads>>>(
+            d.point_inverse.data(),d.point_b.data(),d.point_count,damping,
+            d.options.fix_first_point,d.options.optimize_points);
         reduced_point_rhs_kernel<<<blocks(d.point_count),threads>>>(d.point_inverse.data(),d.point_b.data(),d.point_count,d.reduced_point.data());
         schur_rhs_kernel<<<blocks(d.camera_count),threads>>>(d.camera_offsets.data(),d.camera_observations.data(),d.point_ids.data(),
             d.camera_b.data(),d.reduced_point.data(),d.cross.data(),d.camera_count,d.options.fix_first_pose,d.rhs.data());
@@ -593,7 +595,12 @@ OptimizerSummary CudaOptimizer::optimize() {
         } else { check(cudaMemcpy(d.poses.data(),d.pose_backup.data(),d.camera_count*sizeof(Pose),cudaMemcpyDeviceToDevice),"pose rollback");
             check(cudaMemcpy(d.points.data(),d.point_backup.data(),d.point_count*sizeof(Point3),cudaMemcpyDeviceToDevice),"point rollback");
             ++summary.unsuccessful_steps; damping=std::min(d.options.maximum_damping,damping*10.0);
-            if (damping>=d.options.maximum_damping) { summary.termination=TerminationReason::numerical_failure; break; } }
+            if (damping>=d.options.maximum_damping) {
+                summary.termination=summary.successful_steps>0
+                    ? TerminationReason::maximum_iterations
+                    : TerminationReason::numerical_failure;
+                break;
+            } }
     }
     check(cudaDeviceSynchronize(),"CUDA optimizer synchronize");
     summary.total_time_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count(); return summary;

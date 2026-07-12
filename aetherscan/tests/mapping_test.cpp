@@ -181,6 +181,106 @@ void test_global_positioning_points_only() {
         "point-only positioning recovers camera layout");
 }
 
+void test_global_positioning_preserves_fixed_initial_positions() {
+    Scene scene;
+    scene.cameras.assign(2, cam());
+    scene.images.resize(2);
+    const Vec3 centers[] = {Vec3(-0.5, 0.0, 0.0), Vec3(0.5, 0.0, 0.0)};
+    const Vec3 point(0.0, 0.1, 4.0);
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        Image& image = scene.images[image_id];
+        image.id = image_id;
+        image.camera_id = image_id;
+        image.registered = true;
+        image.pose.C = centers[image_id];
+        image.features.keypoints.resize(1);
+        const Vec2 pixel = scene.cameras[image_id].project(
+            image.pose.transform_world_to_camera(point));
+        image.features.keypoints[0].x = static_cast<float>(pixel.x());
+        image.features.keypoints[0].y = static_cast<float>(pixel.y());
+    }
+    Track track;
+    track.position = point;
+    track.observations = {{0, 0}, {1, 0}};
+    scene.tracks.push_back(track);
+
+    GlobalPositioningOptions options;
+    options.min_views_per_track = 2;
+    options.generate_random_positions = false;
+    options.generate_random_points = false;
+    options.generate_scales = false;
+    options.optimize_positions = false;
+    options.optimize_points = false;
+    options.optimize_scales = true;
+    const GlobalPositioningSummary summary =
+        solve_global_positions(scene, options);
+    expect(summary.success, "fixed-position global solve succeeds");
+    expect(
+        (scene.images[0].pose.C - centers[0]).norm() == 0.0 &&
+            (scene.images[1].pose.C - centers[1]).norm() == 0.0,
+        "global positioning does not randomize fixed initial centers");
+}
+
+void test_global_positioning_rejects_empty_point_constraints() {
+    Scene scene;
+    scene.cameras.assign(2, cam());
+    scene.images.resize(2);
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        scene.images[image_id].id = image_id;
+        scene.images[image_id].camera_id = image_id;
+        scene.images[image_id].registered = true;
+        scene.images[image_id].pose.C = Vec3(static_cast<double>(image_id), 0.0, 0.0);
+    }
+    ImagePair pair(0, 1);
+    pair.relative_pose = Pose3D{Mat3::Identity(), Vec3(1.0, 0.0, 0.0)};
+    pair.weight_spatial = 1.F;
+    pair.matches.resize(20);
+    scene.pairs.push_back(std::move(pair));
+    scene.tracks.emplace_back();
+    const Vec3 first_center = scene.images[0].pose.C;
+    const Vec3 second_center = scene.images[1].pose.C;
+
+    GlobalPositioningOptions options;
+    options.constraint =
+        GlobalPositioningConstraint::points_and_cameras_balanced;
+    const GlobalPositioningSummary summary =
+        solve_global_positions(scene, options);
+    expect(!summary.success, "empty point constraints fail cleanly");
+    expect(
+        scene.images[0].pose.C == first_center &&
+            scene.images[1].pose.C == second_center,
+        "failed balanced positioning preserves input centers");
+}
+
+void test_long_track_merge() {
+    constexpr Index k_views = 8;
+    Scene scene;
+    scene.images.resize(k_views);
+    for (Index image_id = 0; image_id < k_views; ++image_id) {
+        scene.images[image_id].id = image_id;
+        scene.images[image_id].features.keypoints.resize(1);
+    }
+    for (Index image_id = 1; image_id < k_views; ++image_id) {
+        ImagePair pair(0, image_id);
+        pair.weight_spatial = 1.F;
+        pair.matches.push_back({0, 0});
+        scene.pairs.push_back(std::move(pair));
+    }
+    for (Index image_id = 1; image_id + 1 < k_views; ++image_id) {
+        ImagePair pair(image_id, image_id + 1);
+        pair.weight_spatial = 1.F;
+        pair.matches.push_back({0, 0});
+        scene.pairs.push_back(std::move(pair));
+    }
+
+    build_tracks(scene);
+    expect(scene.tracks.size() == 1, "repeated pair edges keep one long track");
+    expect(
+        !scene.tracks.empty() &&
+            scene.tracks.front().observations.size() == k_views,
+        "long track retains one observation per image");
+}
+
 void test_retrieval_inverted_index() {
     std::vector<Image> images(6);
     std::mt19937 random(77);
@@ -266,14 +366,25 @@ void test_local_ba_boundary_selection() {
     boundary_only.num_inliers = 2;
     scene.tracks.push_back(std::move(boundary_only));
     const Vec3 unchanged = scene.tracks.back().position;
+    std::vector<Vec3> local_points_before;
+    local_points_before.reserve(20);
+    for (std::size_t point_id = 0; point_id < 20; ++point_id)
+        local_points_before.push_back(scene.tracks[point_id].position);
 
     BundleOptions options;
     options.free_image_ids = {0};
     options.fixed_image_ids = {1, 2};
     options.optimize_all_registered = false;
+    options.optimize_points = false;
     options.optimizer.maximum_iterations = 3;
     const BundleSummary summary = run_bundle_adjustment(scene, options);
+    expect(summary.success, "fixed-point local BA succeeds");
     expect(summary.num_points == 20, "local BA excludes boundary-only tracks");
+    bool local_points_unchanged = true;
+    for (std::size_t point_id = 0; point_id < local_points_before.size(); ++point_id)
+        local_points_unchanged = local_points_unchanged &&
+            scene.tracks[point_id].position == local_points_before[point_id];
+    expect(local_points_unchanged, "local BA honors optimize_points=false");
     expect(
         (scene.tracks.back().position - unchanged).norm() == 0.0,
         "local BA does not modify boundary-only landmarks");
@@ -284,6 +395,9 @@ void test_local_ba_boundary_selection() {
 int main() {
     test_global_rotation_weighting();
     test_global_positioning_points_only();
+    test_global_positioning_preserves_fixed_initial_positions();
+    test_global_positioning_rejects_empty_point_constraints();
+    test_long_track_merge();
     test_retrieval_inverted_index();
     test_local_ba_boundary_selection();
 

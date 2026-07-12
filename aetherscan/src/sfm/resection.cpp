@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -147,6 +149,15 @@ private:
     std::vector<double>& values_;
 };
 
+void run_required_bundle_adjustment(
+    Scene& scene, const BundleOptions& options, const char* stage) {
+    const BundleSummary summary = run_bundle_adjustment(scene, options);
+    if (!summary.success)
+        throw std::runtime_error(
+            std::string("Incremental ") + stage +
+            " bundle adjustment failed; reconstruction stopped before filtering/checkpointing");
+}
+
 }  // namespace
 
 unsigned register_images(Scene& scene, const ResectionConfig& config) {
@@ -201,7 +212,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                     scene, false, config.max_reproj_error, config.min_angle_deg);
                 BundleOptions ba;
                 ba.optimizer = config.full_ba;
-                run_bundle_adjustment(scene, ba);
+                run_required_bundle_adjustment(scene, ba, "full");
                 filter_tracks(
                     scene, config.max_reproj_error, config.min_angle_deg,
                     config.mult_depth_near, config.mult_depth_far);
@@ -222,7 +233,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                 ba.free_image_ids = last_registered;
                 ba.fixed_image_ids =
                     build_local_window(scene, last_registered, config);
-                run_bundle_adjustment(scene, ba);
+                run_required_bundle_adjustment(scene, ba, "local");
                 filter_tracks(
                     scene, config.max_reproj_error, config.min_angle_deg,
                     config.mult_depth_near, config.mult_depth_far);
@@ -254,7 +265,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
         BundleOptions ba;
         ba.optimizer = config.full_ba;
         ba.optimizer.maximum_iterations = 100;
-        run_bundle_adjustment(scene, ba);
+        run_required_bundle_adjustment(scene, ba, "final");
         filter_tracks(
             scene, config.max_reproj_error, config.min_angle_deg, config.mult_depth_near,
             config.mult_depth_far);

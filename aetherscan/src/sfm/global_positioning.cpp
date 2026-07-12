@@ -71,13 +71,29 @@ GlobalPositioningSummary solve_global_positions(
                 ++point_to_camera_capacity;
         }
     }
+    if (uses_points(options.constraint) && point_to_camera_capacity == 0)
+        return result;
+
+    std::vector<Vec3> original_centers(scene.images.size());
+    for (std::size_t i = 0; i < scene.images.size(); ++i)
+        original_centers[i] = scene.images[i].pose.C;
+    std::vector<Vec3> original_points(scene.tracks.size());
+    for (std::size_t i = 0; i < scene.tracks.size(); ++i)
+        original_points[i] = scene.tracks[i].position;
+    const auto restore_input = [&] {
+        for (std::size_t i = 0; i < scene.images.size(); ++i)
+            scene.images[i].pose.C = original_centers[i];
+        for (std::size_t i = 0; i < scene.tracks.size(); ++i)
+            scene.tracks[i].position = original_points[i];
+    };
 
     std::mt19937 generator(options.random_seed);
     std::uniform_real_distribution<double> distribution(-100.0, 100.0);
     unsigned valid_images = 0;
     for (Image& image : scene.images) {
         if (!image.registered) continue;
-        image.pose.C = random_point(generator, distribution);
+        if (options.optimize_positions && options.generate_random_positions)
+            image.pose.C = random_point(generator, distribution);
         ++valid_images;
     }
 
@@ -229,6 +245,17 @@ GlobalPositioningSummary solve_global_positions(
                 problem.HasParameterBlock(image.pose.C.data()))
                 problem.SetParameterBlockConstant(image.pose.C.data());
         }
+    } else {
+        // All residuals depend only on position differences, so the system has
+        // a three-dimensional translation gauge. Anchor one registered camera
+        // center to keep sparse Cholesky positive definite.
+        for (Image& image : scene.images) {
+            if (!image.registered ||
+                !problem.HasParameterBlock(image.pose.C.data()))
+                continue;
+            problem.SetParameterBlockConstant(image.pose.C.data());
+            break;
+        }
     }
     if (!options.optimize_points) {
         for (Track& track : scene.tracks)
@@ -270,7 +297,10 @@ GlobalPositioningSummary solve_global_positions(
     ceres::Solve(solver_options, &problem, &solver_summary);
     result.iterations =
         static_cast<unsigned>(solver_summary.iterations.size());
-    if (!solver_summary.IsSolutionUsable()) return result;
+    if (!solver_summary.IsSolutionUsable()) {
+        restore_input();
+        return result;
+    }
 
     double residual_sum = 0.0;
     unsigned residual_count = 0;

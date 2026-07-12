@@ -98,6 +98,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     if (problem.observations.size() == 0) return summary;
 
     ba::OptimizerOptions opt = options.optimizer;
+    opt.optimize_points = opt.optimize_points && options.optimize_points;
     if (!fixed_set.empty()) opt.fix_first_pose = false;
     summary.optimizer = ba::optimize_cpu(problem, opt);
     summary.success = summary.optimizer.usable();

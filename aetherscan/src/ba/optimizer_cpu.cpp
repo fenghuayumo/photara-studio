@@ -320,6 +320,7 @@ System assemble_system(
     const Adjacency& adjacency,
     const double damping,
     const bool fix_first_point,
+    const bool optimize_points,
     const bool optimize_rotations,
     const std::size_t intrinsic_dof) {
     const std::size_t camera_count = problem.poses.size();
@@ -461,7 +462,7 @@ System assemble_system(
                 damping * (point_hessian[diagonal * point_size + diagonal] + 1.0);
         }
         double* inverse = system.point_inverse.data() + point * point_block_size;
-        if ((fix_first_point && point == 0) ||
+        if (!optimize_points || (fix_first_point && point == 0) ||
             !invert_symmetric_3x3(point_hessian, inverse)) {
             std::fill(inverse, inverse + point_block_size, 0.0);
             std::fill(point_rhs, point_rhs + point_size, 0.0);
@@ -755,6 +756,8 @@ std::size_t solve_pcg(
     const double target = options.pcg_tolerance * options.pcg_tolerance *
                           std::max(dot(rhs, rhs), 1e-30);
     if (!std::isfinite(rz)) return 0;
+    if (dot(residual, residual) <= target || std::abs(rz) <= 1e-30)
+        return 0;
     std::size_t iteration = 0;
     for (; iteration < options.maximum_pcg_iterations; ++iteration) {
         if (explicit_system.blocks.empty())
@@ -786,6 +789,7 @@ std::size_t solve_pcg(
                 problem, pattern, explicit_system, options.fix_first_pose, residual, z);
         const double next_rz = dot(residual, z);
         if (!std::isfinite(next_rz)) break;
+        if (std::abs(rz) <= 1e-30) break;
         const double beta = next_rz / rz;
 #if defined(AETHERSCAN_HAS_OPENMP)
 #pragma omp parallel for schedule(static)
@@ -1093,6 +1097,8 @@ std::size_t solve_joint_pcg(
         options.pcg_tolerance * options.pcg_tolerance *
         std::max(dot(rhs, rhs), 1e-30);
     if (!std::isfinite(rz)) return 0;
+    if (dot(residual, residual) <= target || std::abs(rz) <= 1e-30)
+        return 0;
     std::size_t iteration = 0;
     for (; iteration < options.maximum_pcg_iterations; ++iteration) {
         joint_multiply(
@@ -1118,6 +1124,7 @@ std::size_t solve_joint_pcg(
             problem, system, options.fix_first_pose, residual, z);
         const double next_rz = dot(residual, z);
         if (!std::isfinite(next_rz)) break;
+        if (std::abs(rz) <= 1e-30) break;
         const double beta = next_rz / rz;
 #if defined(AETHERSCAN_HAS_OPENMP)
 #pragma omp parallel for schedule(static)
@@ -1435,7 +1442,8 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         stage_started = stage_stopped;
         System system = assemble_system(
             problem, linearization, adjacency, damping,
-            options.fix_first_point, options.optimize_rotations, block_dof);
+            options.fix_first_point, options.optimize_points,
+            options.optimize_rotations, block_dof);
         const bool use_dense_intrinsic_schur =
             block_dof > 0 &&
             problem.intrinsics.size() <= dense_intrinsic_group_limit;
@@ -1610,7 +1618,11 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
             ++summary.unsuccessful_steps;
             damping = std::min(options.maximum_damping, damping * 10.0);
             if (damping >= options.maximum_damping) {
-                summary.termination = TerminationReason::numerical_failure;
+                // Rejected candidates are rolled back, so an earlier accepted
+                // state remains usable even if LM later stalls at max damping.
+                summary.termination = summary.successful_steps > 0
+                    ? TerminationReason::maximum_iterations
+                    : TerminationReason::numerical_failure;
                 break;
             }
         }

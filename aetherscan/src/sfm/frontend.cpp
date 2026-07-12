@@ -106,7 +106,9 @@ FrontEndStageKeys make_stage_keys(
     append_relative_options(geometry, options.relative);
 
     FingerprintBuilder tracks;
-    tracks.append_string("aetherscan-tracks-v3");
+    // Track component membership semantics changed in v4; never reuse tracks
+    // produced by the previous edge-count based union bookkeeping.
+    tracks.append_string("aetherscan-tracks-v4");
     append_cache_build_identity(tracks);
     tracks.append(geometry.value());
     tracks.append(options.min_pair_weight);

@@ -7,6 +7,7 @@
 #include <limits>
 #include <numeric>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace aetherscan::sfm {
@@ -77,13 +78,15 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
     }
 
     DisjointSet ds(total_features);
-    // Per-component: image_id -> observation count (must stay <= 1)
-    std::unordered_map<Index, std::unordered_map<Index, unsigned>> component_images;
+    // A valid track contains at most one feature from each image. Store image
+    // membership, not the number of pair edges incident on a feature: the same
+    // observation commonly appears in several verified image pairs.
+    std::unordered_map<Index, std::unordered_set<Index>> component_images;
 
     const auto accumulate = [&](const Index global_id, const Index image_id) {
         const Index root = ds.find(global_id);
         auto& images = component_images[root];
-        ++images[image_id];
+        images.insert(image_id);
     };
 
     for (const ImagePair& pair : scene.pairs) {
@@ -104,8 +107,10 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
             auto& map1 = component_images[r1];
             auto& map2 = component_images[r2];
             bool conflict = false;
-            for (const auto& [image_id, count] : map1) {
-                if (map2.count(image_id) && map2[image_id] + count > 1) {
+            const auto& smaller = map1.size() <= map2.size() ? map1 : map2;
+            const auto& larger = map1.size() <= map2.size() ? map2 : map1;
+            for (const Index image_id : smaller) {
+                if (larger.contains(image_id)) {
                     conflict = true;
                     break;
                 }
@@ -116,10 +121,10 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
             const Index root = ds.find(r1);
             auto& merged = component_images[root];
             if (root != r1) {
-                for (const auto& [image_id, count] : map1) merged[image_id] += count;
+                merged.insert(map1.begin(), map1.end());
             }
             if (root != r2) {
-                for (const auto& [image_id, count] : map2) merged[image_id] += count;
+                merged.insert(map2.begin(), map2.end());
             }
             if (root != r1) component_images.erase(r1);
             if (root != r2) component_images.erase(r2);
