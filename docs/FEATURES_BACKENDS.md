@@ -1,120 +1,65 @@
 # Feature backends
 
-AetherScan treats detection and matching as swappable backends behind stable
-interfaces so product code can add SuperPoint, DISK, ALIKED, SuperGlue, etc.
-without touching the SfM mapper.
+AetherScan treats **extraction** and **matching** as independent, swappable
+backends. Mix any compatible pair; do not treat SuperPoint+LightGlue as one
+bundled algorithm.
 
 ## Model
 
 ```text
-Default (composable):   --extractor × --matcher
-Optional fused recipe:  --pipeline <name>   (mutually exclusive with composition)
+Default:   --extractor × --matcher
+Optional:  --pipeline <fused recipe>   (mutually exclusive with composition)
 ```
 
-| Interface | Header | Role |
-|-----------|--------|------|
-| `FeatureExtractor` | `features/extractor.hpp` | image → `FeatureSet` |
-| `FeatureMatcher` | `features/matcher.hpp` | two `FeatureSet`s → `MatchSet` |
-| `PairFeaturePipeline` | `features/matcher.hpp` | fused pair recipes (end2end LightGlue) |
-| Compat | `features/compat.hpp` | extractor×matcher compatibility checks |
-| Registry | `features/registry.hpp` | name → factory |
-
-`FeatureSet` carries `metric` and `extractor_name` so matchers can validate
-descriptor space (L2 / RootSIFT / inner-product).
+| Interface | Role |
+|-----------|------|
+| `FeatureExtractor` | image → `FeatureSet` |
+| `FeatureMatcher` | two `FeatureSet`s → `MatchSet` |
+| `PairFeaturePipeline` | fused end2end recipes only |
+| `compat.hpp` | which extractor×matcher combos are valid |
 
 ## Built-in names
 
 ```text
-extractors:  siftgpu (default) | sift | superpoint(stub)
-matchers:    gpu_mutual_ratio (default) | mutual_ratio
-             legacy alias: siftgpu → gpu_mutual_ratio
+extractors:  siftgpu (default) | sift | superpoint | disk
+matchers:    gpu_mutual_ratio (default) | mutual_ratio | lightglue
 pipelines:   none (default) | lightglue_end2end
 ```
 
-**Default algorithm is unchanged in behavior:** `extractor=siftgpu` ×
-`matcher=gpu_mutual_ratio` (GPU SIFT extract + GPU descriptor mutual-ratio).
-`pipeline` empty.
+Default behavior is unchanged: `siftgpu` × `gpu_mutual_ratio`.
 
-### Composable path
-
-```cpp
-features::ensure_builtin_feature_backends();
-auto extractor = features::create_extractor("siftgpu");
-auto matcher = features::create_matcher("gpu_mutual_ratio");
-```
-
-```cpp
-sfm::FrontEndOptions options;
-options.extractor = "siftgpu";
-options.matcher = "gpu_mutual_ratio";
-// options.pipeline left empty
-```
-
-Valid combinations today:
-
-| extractor | matcher | notes |
-|-----------|---------|-------|
-| `siftgpu` | `gpu_mutual_ratio` | **default** (SiftMatchGPU) |
-| `siftgpu` | `mutual_ratio` | CPU mutual-ratio on SiftGPU descriptors |
-| `sift` | `mutual_ratio` | VLFeat SIFT |
-| `sift` | `gpu_mutual_ratio` | allowed if descriptors are L2/RootSIFT |
-
-Incompatible combos (e.g. future `superpoint` × `gpu_mutual_ratio`) are rejected by
-`features::validate_extractor_matcher_combo`.
-### Fused pair pipeline
-
-`lightglue_end2end` is a **PairFeaturePipeline**, not an extract×matcher pair.
-It re-detects features per image pair via a fused ONNX model
-(`images → keypoints, matches, mscores`). Requires `AETHERSCAN_ENABLE_ONNX=ON`.
-
-```cpp
-options.pipeline = "lightglue_end2end";
-options.lightglue_model_path = "disk-lightglue.onnx";
-options.lightglue_extractor = "disk";  // or "superpoint"
-// extractor / matcher are ignored for matching (BoW retrieval may still use SiftGPU)
-```
-
-CLI:
+### Compose freely
 
 ```text
-aetherscan --images ... --mode incremental --output scene.mvs \
-  --pipeline lightglue_end2end --lightglue-model path/to/model.onnx \
-  [--lightglue-extractor disk|superpoint] [--lightglue-width 1024] \
-  [--lightglue-height 1024] [--lightglue-min-score 0] [--lightglue-cpu]
+# Classic
+--extractor siftgpu --matcher gpu_mutual_ratio
+
+# Learned extract + learned match
+--extractor superpoint --extractor-model superpoint.onnx \
+--matcher lightglue --lightglue-model superpoint_lightglue_fused.onnx
+
+--extractor disk --extractor-model disk.onnx \
+--matcher lightglue --lightglue-model disk_lightglue_fused.onnx
 ```
 
-Legacy alias (still works): `--matcher lightglue` normalizes to
-`--pipeline lightglue_end2end`.
+Extractor knobs (`--extractor-model/width/height/cpu`) belong to the extractor.
+Matcher knobs (`--lightglue-model/min-score/cpu`) belong to the LightGlue
+matcher (or the optional end2end pipeline). They are not a joint “package”.
 
-Because fused LightGlue re-detects keypoints per pair, the frontend merges
-detections into stable per-image feature sets (1.5 px radius) before geometry
-verification and track building.
+Compatibility today (extend in `compat.hpp`):
 
-## Adding SuperPoint (or any new extractor)
+| extractor | matcher |
+|-----------|---------|
+| siftgpu / sift | gpu_mutual_ratio / mutual_ratio |
+| superpoint / disk | lightglue |
 
-1. Implement `class SuperPointExtractor final : public FeatureExtractor`.
-2. Fill `extract_gray` / `extract_file` with ONNX/TensorRT inference.
-3. Set `info().metric = DescriptorMetric::inner_product`.
-4. Register `"superpoint"` and extend `features/compat.hpp` so only matching
-   matchers (e.g. future `lightglue` descriptor matcher) accept it.
-5. Prefer a dedicated `FeatureMatcher`; do **not** special-case the frontend.
+### Optional fused recipe
 
-## Adding a descriptor LightGlue matcher (future)
+`--pipeline lightglue_end2end` re-detects per pair (slower). Prefer compose.
 
-Implement `LightGlueMatcher : public FeatureMatcher` that takes two
-`FeatureSet`s (keypoints + descriptors). Register as `"lightglue"` matcher
-and allow combos like `disk × lightglue` / `superpoint × lightglue` in
-`compat.hpp`. Keep `lightglue_end2end` as the fused recipe name.
+## Adding a backend
 
-## Adding a fused pair model
-
-`LightGluePipeline` implements `PairFeaturePipeline` (`name() ==
-lightglue_end2end`). Product code builds it with options (model path required):
-
-```cpp
-features::LightGlueOptions options;
-options.model_path = "disk-lightglue.onnx";
-options.extractor = features::LightGlueExtractor::disk;
-auto pipeline = std::make_unique<features::LightGluePipeline>(options);
-auto result = pipeline->match_files(image0, image1);
-```
+1. Implement extractor or matcher.
+2. Register / construct from `run_frontend`.
+3. Update `compat.hpp` for allowed pairs.
+4. Keep CLI options namespaced to that backend.

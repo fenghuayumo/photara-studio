@@ -85,26 +85,26 @@ void normalize_feature_selection(FrontEndOptions& options) {
     if (options.matcher == "siftgpu")
         options.matcher = "gpu_mutual_ratio";
 
-    // Legacy CLI: --matcher lightglue → fused pair pipeline.
-    if (options.matcher == "lightglue") {
-        if (!options.pipeline.empty() &&
-            options.pipeline != features::kLightGlueEnd2EndPipeline)
-            throw std::invalid_argument(
-                "Conflicting --matcher lightglue and --pipeline " +
-                options.pipeline);
-        options.pipeline = std::string(features::kLightGlueEnd2EndPipeline);
+    if (options.pipeline.empty()) {
+        if (options.matcher == "lightglue" || options.extractor == "superpoint" ||
+            options.extractor == "disk")
+            options.compress_descriptors_u8 = false;
+        return;
     }
-
-    if (options.pipeline.empty()) return;
 
     if (!features::is_pair_pipeline_name(options.pipeline))
         throw std::invalid_argument(
             "Unknown --pipeline '" + options.pipeline +
             "' (supported: none, lightglue_end2end)");
 
+    if (options.matcher == "lightglue")
+        throw std::invalid_argument(
+            "Use either --matcher lightglue (descriptor matcher) or "
+            "--pipeline lightglue_end2end (fused), not both");
+
     // Canonical fingerprint fields for fused LightGlue.
     if (options.pipeline == features::kLightGlueEnd2EndPipeline) {
-        options.matcher = "lightglue";
+        options.matcher = "lightglue_end2end";
         options.compress_descriptors_u8 = false;
     }
 }
@@ -126,6 +126,10 @@ FrontEndStageKeys make_stage_keys(
     features.append(options.max_features);
     features.append_string(options.pipeline);
     features.append_string(options.matcher);
+    features.append_string(options.extractor_model_path.string());
+    features.append(options.extractor_input_width);
+    features.append(options.extractor_input_height);
+    features.append(options.extractor_use_cuda);
     features.append_string(options.lightglue_model_path.string());
     features.append_string(options.lightglue_extractor);
     features.append(options.lightglue_input_width);
@@ -142,6 +146,10 @@ FrontEndStageKeys make_stage_keys(
     matches.append_string(options.matcher);
     matches.append(options.match_ratio);
     matches.append(options.mutual_check);
+    matches.append_string(options.extractor_model_path.string());
+    matches.append(options.extractor_input_width);
+    matches.append(options.extractor_input_height);
+    matches.append(options.extractor_use_cuda);
     matches.append_string(options.lightglue_model_path.string());
     matches.append_string(options.lightglue_extractor);
     matches.append(options.lightglue_input_width);
@@ -454,8 +462,8 @@ Image make_image_from_features(
     return image;
 }
 
-// openMVS-style SiftGPU coordinator: main thread owns the CUDA context while
-// worker threads overlap IO prefetch and CPU post-processing.
+// Owner-thread extract coordinator: main thread owns CUDA/ORT context while
+// worker threads overlap CPU post-processing (grid selection / Image packing).
 void extract_features_siftgpu_coordinator(
     Scene& scene, const std::vector<std::filesystem::path>& image_paths,
     features::FeatureExtractor& extractor, const unsigned max_features,
@@ -466,35 +474,55 @@ void extract_features_siftgpu_coordinator(
     parallel::FutureGroup post_tasks;
     post_tasks.reserve(count);
 
-    std::future<io::GrayImage> current_load = std::async(
-        std::launch::async,
-        [&image_paths] { return io::load_gray(image_paths[0]); });
+    const bool use_gray_prefetch =
+        extractor.info().accepts_gray && !extractor.info().accepts_rgb;
 
-    for (std::size_t index = 0; index < count; ++index) {
-        std::future<io::GrayImage> next_load;
-        if (index + 1 < count) {
-            const std::filesystem::path next_path = image_paths[index + 1];
-            next_load = std::async(
-                std::launch::async,
-                [next_path] { return io::load_gray(next_path); });
+    if (use_gray_prefetch) {
+        std::future<io::GrayImage> current_load = std::async(
+            std::launch::async,
+            [&image_paths] { return io::load_gray(image_paths[0]); });
+
+        for (std::size_t index = 0; index < count; ++index) {
+            std::future<io::GrayImage> next_load;
+            if (index + 1 < count) {
+                const std::filesystem::path next_path = image_paths[index + 1];
+                next_load = std::async(
+                    std::launch::async,
+                    [next_path] { return io::load_gray(next_path); });
+            }
+
+            io::GrayImage gray = current_load.get();
+            features::FeatureSet features = extractor.extract_gray(
+                gray.pixels, gray.width, gray.height);
+
+            post_tasks.submit(
+                pool,
+                [&, index, path = image_paths[index],
+                 features = std::move(features)]() mutable {
+                    features = select_top_features_grid_3x3(
+                        std::move(features), max_features);
+                    scene.images[index] = make_image_from_features(
+                        static_cast<Index>(index), path, std::move(features));
+                    progress.advance();
+                });
+
+            if (index + 1 < count) current_load = std::move(next_load);
         }
-
-        io::GrayImage gray = current_load.get();
-        features::FeatureSet features = extractor.extract_gray(
-            gray.pixels, gray.width, gray.height);
-
-        post_tasks.submit(
-            pool,
-            [&, index, path = image_paths[index],
-             features = std::move(features)]() mutable {
-                features = select_top_features_grid_3x3(
-                    std::move(features), max_features);
-                scene.images[index] = make_image_from_features(
-                    static_cast<Index>(index), path, std::move(features));
-                progress.advance();
-            });
-
-        if (index + 1 < count) current_load = std::move(next_load);
+    } else {
+        // Learned RGB extractors (DISK) / SuperPoint via extract_file.
+        // Skip grid selection; models already apply top-k.
+        for (std::size_t index = 0; index < count; ++index) {
+            features::FeatureSet features =
+                extractor.extract_file(image_paths[index]);
+            post_tasks.submit(
+                pool,
+                [&, index, path = image_paths[index],
+                 features = std::move(features)]() mutable {
+                    scene.images[index] = make_image_from_features(
+                        static_cast<Index>(index), path, std::move(features));
+                    progress.advance();
+                });
+        }
     }
 
     post_tasks.wait();
@@ -699,6 +727,124 @@ features::LightGlueOptions make_lightglue_options(
     lightglue.input_height = options.lightglue_input_height;
     lightglue.min_score = options.lightglue_min_score;
     return lightglue;
+}
+
+std::unique_ptr<features::FeatureExtractor> make_frontend_extractor(
+    const FrontEndOptions& options) {
+    if (options.extractor == "sift") {
+        features::SiftOptions sift_options;
+        sift_options.contrast_threshold = options.sift_contrast_threshold;
+        if (options.max_features > 0) {
+            sift_options.maximum_features = options.max_features;
+            sift_options.max_features_per_cell = (std::max)(
+                std::size_t{1},
+                static_cast<std::size_t>(options.max_features) / 9);
+            sift_options.min_features_per_cell = (std::min)(
+                sift_options.min_features_per_cell,
+                sift_options.max_features_per_cell);
+        }
+        return std::make_unique<features::SiftExtractor>(sift_options);
+    }
+    if (options.extractor == "siftgpu") {
+        features::SiftGpuOptions siftgpu_options;
+        siftgpu_options.peak_threshold =
+            static_cast<float>(options.sift_contrast_threshold);
+        if (options.max_features > 0)
+            siftgpu_options.maximum_features = options.max_features;
+        auto extractor =
+            std::make_unique<features::SiftGpuExtractor>(siftgpu_options);
+        if (!extractor->is_available())
+            throw std::runtime_error(
+                "SiftGPU extractor requested but CUDA context is unavailable");
+        return extractor;
+    }
+    if (options.extractor == "superpoint") {
+        if (options.extractor_model_path.empty())
+            throw std::runtime_error(
+                "extractor superpoint requires --extractor-model");
+        if (!features::SuperPointExtractor::is_built())
+            throw std::runtime_error(
+                "SuperPoint requires ONNX Runtime (AETHERSCAN_ENABLE_ONNX)");
+        features::SuperPointOptions sp;
+        sp.model_path = options.extractor_model_path;
+        sp.maximum_features = options.max_features;
+        sp.input_width = options.extractor_input_width;
+        sp.input_height = options.extractor_input_height;
+        sp.cuda = options.extractor_use_cuda;
+        auto extractor = std::make_unique<features::SuperPointExtractor>(sp);
+        if (!extractor->is_available())
+            throw std::runtime_error("SuperPoint failed to initialize ONNX");
+        return extractor;
+    }
+    if (options.extractor == "disk") {
+        if (options.extractor_model_path.empty())
+            throw std::runtime_error(
+                "extractor disk requires --extractor-model");
+        if (!features::DiskExtractor::is_built())
+            throw std::runtime_error(
+                "DISK requires ONNX Runtime (AETHERSCAN_ENABLE_ONNX)");
+        features::DiskOptions disk;
+        disk.model_path = options.extractor_model_path;
+        disk.maximum_features = options.max_features;
+        disk.input_width = options.extractor_input_width;
+        disk.input_height = options.extractor_input_height;
+        disk.cuda = options.extractor_use_cuda;
+        auto extractor = std::make_unique<features::DiskExtractor>(disk);
+        if (!extractor->is_available())
+            throw std::runtime_error("DISK failed to initialize ONNX");
+        return extractor;
+    }
+    return features::create_extractor(options.extractor);
+}
+
+std::unique_ptr<features::FeatureMatcher> make_frontend_matcher(
+    const FrontEndOptions& options) {
+    if (options.matcher == "mutual_ratio") {
+        features::DescriptorMatcherOptions matcher_options;
+        matcher_options.ratio_threshold = options.match_ratio;
+        matcher_options.mutual_check = options.mutual_check;
+        return std::make_unique<features::MutualRatioMatcher>(matcher_options);
+    }
+    if (options.matcher == "gpu_mutual_ratio") {
+        features::SiftGpuMatcherOptions matcher_options;
+        matcher_options.ratio_threshold = options.match_ratio;
+        matcher_options.mutual_check = options.mutual_check;
+        matcher_options.maximum_features =
+            std::max<std::size_t>(32768, options.max_features);
+        auto matcher =
+            std::make_unique<features::SiftGpuMatcher>(matcher_options);
+        if (!matcher->is_available())
+            throw std::runtime_error(
+                "gpu_mutual_ratio matcher requested but CUDA context is "
+                "unavailable");
+        return matcher;
+    }
+    if (options.matcher == "lightglue") {
+        if (options.lightglue_model_path.empty())
+            throw std::runtime_error(
+                "matcher lightglue requires --lightglue-model "
+                "(descriptor matcher ONNX, e.g. *_lightglue_fused.onnx)");
+        if (!features::LightGlueMatcher::is_built())
+            throw std::runtime_error(
+                "LightGlue matcher requires ONNX Runtime "
+                "(AETHERSCAN_ENABLE_ONNX)");
+        features::LightGlueMatcherOptions lg;
+        lg.model_path = options.lightglue_model_path;
+        lg.device = options.lightglue_use_cuda
+            ? features::InferenceDevice::cuda
+            : features::InferenceDevice::cpu;
+        lg.min_score = options.lightglue_min_score;
+        if (options.extractor == "superpoint")
+            lg.descriptor_dimension = 256;
+        else if (options.extractor == "disk")
+            lg.descriptor_dimension = 128;
+        auto matcher = std::make_unique<features::LightGlueMatcher>(lg);
+        if (!matcher->is_available())
+            throw std::runtime_error(
+                "LightGlue matcher failed to initialize ONNX");
+        return matcher;
+    }
+    return features::create_matcher(options.matcher);
 }
 
 // Fused LightGlue path: each pair re-detects keypoints, so merge detections
@@ -1015,61 +1161,14 @@ FrontEndResult run_frontend(
     features::validate_extractor_matcher_combo(
         runtime_options.extractor, runtime_options.matcher);
 
-    std::unique_ptr<features::FeatureExtractor> extractor;
-    if (runtime_options.extractor == "sift") {
-        features::SiftOptions sift_options;
-        sift_options.contrast_threshold = runtime_options.sift_contrast_threshold;
-        if (runtime_options.max_features > 0) {
-            sift_options.maximum_features = runtime_options.max_features;
-            sift_options.max_features_per_cell =
-                (std::max)(
-                    std::size_t{1},
-                    static_cast<std::size_t>(runtime_options.max_features) / 9);
-            sift_options.min_features_per_cell =
-                (std::min)(sift_options.min_features_per_cell,
-                           sift_options.max_features_per_cell);
-        }
-        extractor = std::make_unique<features::SiftExtractor>(sift_options);
-    } else if (runtime_options.extractor == "siftgpu") {
-        features::SiftGpuOptions siftgpu_options;
-        siftgpu_options.peak_threshold =
-            static_cast<float>(runtime_options.sift_contrast_threshold);
-        if (runtime_options.max_features > 0)
-            siftgpu_options.maximum_features = runtime_options.max_features;
-        extractor =
-            std::make_unique<features::SiftGpuExtractor>(siftgpu_options);
-        if (!static_cast<features::SiftGpuExtractor*>(extractor.get())
-                 ->is_available())
-            throw std::runtime_error(
-                "SiftGPU extractor requested but CUDA context is unavailable");
-    } else {
-        extractor = features::create_extractor(runtime_options.extractor);
-    }
-    std::unique_ptr<features::FeatureMatcher> matcher;
-    if (runtime_options.matcher == "mutual_ratio") {
-        features::DescriptorMatcherOptions matcher_options;
-        matcher_options.ratio_threshold = runtime_options.match_ratio;
-        matcher_options.mutual_check = runtime_options.mutual_check;
-        matcher = std::make_unique<features::MutualRatioMatcher>(matcher_options);
-    } else if (runtime_options.matcher == "gpu_mutual_ratio") {
-        features::SiftGpuMatcherOptions matcher_options;
-        matcher_options.ratio_threshold = runtime_options.match_ratio;
-        matcher_options.mutual_check = runtime_options.mutual_check;
-        matcher_options.maximum_features =
-            std::max<std::size_t>(32768, runtime_options.max_features);
-        matcher =
-            std::make_unique<features::SiftGpuMatcher>(matcher_options);
-        if (!static_cast<features::SiftGpuMatcher*>(matcher.get())
-                 ->is_available())
-            throw std::runtime_error(
-                "gpu_mutual_ratio matcher requested but CUDA context is "
-                "unavailable");
-    } else {
-        matcher = features::create_matcher(runtime_options.matcher);
-    }
-    if (!extractor || !matcher) {
-        throw std::runtime_error("Failed to create feature extractor/matcher");
-    }
+    std::unique_ptr<features::FeatureExtractor> extractor =
+        make_frontend_extractor(runtime_options);
+    if (!extractor)
+        throw std::runtime_error("Failed to create feature extractor");
+    std::unique_ptr<features::FeatureMatcher> matcher =
+        make_frontend_matcher(runtime_options);
+    if (!matcher)
+        throw std::runtime_error("Failed to create feature matcher");
 
     const auto extract_started = std::chrono::steady_clock::now();
     const bool feature_cache_hit = checkpoints.load_scene(

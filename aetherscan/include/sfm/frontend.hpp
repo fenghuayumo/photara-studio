@@ -22,18 +22,24 @@ struct FrontEndOptions {
     // Composable path: extractor × matcher (default siftgpu × gpu_mutual_ratio).
     std::string extractor{"siftgpu"};
     double sift_contrast_threshold{0.005};
-    // "gpu_mutual_ratio" (default) | "mutual_ratio" | ...
+    // "gpu_mutual_ratio" (default) | "mutual_ratio" | "lightglue" | ...
     // Legacy alias: "siftgpu" normalizes to "gpu_mutual_ratio".
     std::string matcher{"gpu_mutual_ratio"};
     float match_ratio{0.85F};
     bool mutual_check{true};
     // Empty / "none" => compose extractor×matcher.
-    // "lightglue_end2end" => fused PairFeaturePipeline (ignores extractor).
+    // "lightglue_end2end" => fused PairFeaturePipeline (ignores extractor/matcher).
     std::string pipeline;
-    // Fused LightGluePipeline (--pipeline lightglue_end2end). Requires ONNX.
+    // Learned extractor ONNX (--extractor superpoint|disk). Independent of matcher.
+    std::filesystem::path extractor_model_path;
+    std::uint32_t extractor_input_width{1024};
+    std::uint32_t extractor_input_height{1024};
+    bool extractor_use_cuda{true};
+    // Descriptor LightGlue matcher ONNX (--matcher lightglue), or fused end2end
+    // model when --pipeline lightglue_end2end.
     std::filesystem::path lightglue_model_path;
-    std::string lightglue_extractor{"disk"};  // disk | superpoint
-    std::uint32_t lightglue_input_width{1024};
+    std::string lightglue_extractor{"disk"};  // end2end head only: disk|superpoint
+    std::uint32_t lightglue_input_width{1024};  // end2end network size
     std::uint32_t lightglue_input_height{1024};
     float lightglue_min_score{0.0F};
     bool lightglue_use_cuda{true};
@@ -42,8 +48,8 @@ struct FrontEndOptions {
     PairWeightingOptions pair_weighting{};
     unsigned max_features{27000};
     std::size_t retrieval_min_images{50};
-    // When true, sequential window is augmented with BoW pairs (SiftGPU
-    // descriptors). LightGlue matching still uses the fused ONNX model.
+    // When true, sequential window is augmented with BoW pairs (requires
+    // descriptors; temporary SiftGPU extract may be used for retrieval only).
     bool augment_sequential_with_retrieval{false};
     bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};

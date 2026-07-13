@@ -92,19 +92,19 @@ cmake -S . -B build `
 | `AETHERSCAN_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
 | `AETHERSCAN_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
 
-运行时仍需传入模型，例如：
+特征后端可自由组合（提取 × 匹配），例如：
 
 ```powershell
-.\build\aetherscan\Release\aetherscan.exe `
-  --pipeline lightglue_end2end `
-  --lightglue-model D:\ScanVideo\flower\models\superpoint_1024_lightglue_end2end.onnx `
-  --lightglue-extractor superpoint `
-  ...
+# 默认
+--extractor siftgpu --matcher gpu_mutual_ratio
+
+# SuperPoint 提取 + LightGlue 匹配（两者独立配置）
+--extractor superpoint --extractor-model ...\superpoint.onnx `
+--matcher lightglue --lightglue-model ...\superpoint_lightglue_fused.onnx `
+--max-features 2048
 ```
 
-默认前端仍是 `siftgpu × gpu_mutual_ratio`（不设 `--pipeline`）。
-`--matcher siftgpu` 会归一成 `gpu_mutual_ratio`；`--matcher lightglue` 仍可作为
-`lightglue_end2end` 的旧别名。
+融合端到端仍可用 `--pipeline lightglue_end2end`（可选旁路，不是默认组合方式）。
 ## 运行
 
 ```powershell

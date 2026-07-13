@@ -135,21 +135,19 @@ private:
     std::shared_ptr<Impl> impl_;
 };
 
-// ---- SuperPoint (extension point; ONNX wiring comes later) ----------------------
+// ---- Learned extractors (ONNX) --------------------------------------------------
 
 struct SuperPointOptions {
     std::filesystem::path model_path;
     std::size_t maximum_features{2048};
-    float keypoint_threshold{0.005F};
-    bool remove_borders{true};
+    float keypoint_threshold{0.000F};  // 0 => keep top-k only
     std::uint32_t input_width{1024};
     std::uint32_t input_height{1024};
     bool cuda{true};
     bool allow_cpu_fallback{true};
 };
 
-// Registered as "superpoint". Currently a stub so product code can already
-// select the backend by name; throws until an ONNX/TensorRT implementation lands.
+// fabio-sim SuperPoint ONNX: image[1,1,H,W] → keypoints, scores, descriptors[*,256]
 class SuperPointExtractor final : public FeatureExtractor {
 public:
     explicit SuperPointExtractor(SuperPointOptions options = {});
@@ -159,7 +157,8 @@ public:
     SuperPointExtractor(const SuperPointExtractor&) = delete;
     SuperPointExtractor& operator=(const SuperPointExtractor&) = delete;
 
-    [[nodiscard]] static bool is_implemented() noexcept;
+    [[nodiscard]] static bool is_built() noexcept;
+    [[nodiscard]] bool is_available() const noexcept;
 
     [[nodiscard]] std::string_view name() const override { return "superpoint"; }
     [[nodiscard]] ExtractorInfo info() const override;
@@ -172,7 +171,54 @@ public:
         std::size_t row_stride = 0) const override;
 
 private:
-    SuperPointOptions options_;
+    class Impl;
+    explicit SuperPointExtractor(std::shared_ptr<Impl> impl);
+    std::shared_ptr<Impl> impl_;
+};
+
+struct DiskOptions {
+    std::filesystem::path model_path;
+    std::size_t maximum_features{2048};
+    float keypoint_threshold{0.000F};
+    std::uint32_t input_width{1024};
+    std::uint32_t input_height{1024};
+    bool cuda{true};
+    bool allow_cpu_fallback{true};
+};
+
+// fabio-sim DISK ONNX: image[1,3,H,W] → keypoints, scores, descriptors[*,128]
+class DiskExtractor final : public FeatureExtractor {
+public:
+    explicit DiskExtractor(DiskOptions options = {});
+    ~DiskExtractor() override;
+    DiskExtractor(DiskExtractor&&) noexcept;
+    DiskExtractor& operator=(DiskExtractor&&) noexcept;
+    DiskExtractor(const DiskExtractor&) = delete;
+    DiskExtractor& operator=(const DiskExtractor&) = delete;
+
+    [[nodiscard]] static bool is_built() noexcept;
+    [[nodiscard]] bool is_available() const noexcept;
+
+    [[nodiscard]] std::string_view name() const override { return "disk"; }
+    [[nodiscard]] ExtractorInfo info() const override;
+    [[nodiscard]] std::unique_ptr<FeatureExtractor> clone() const override;
+
+    [[nodiscard]] FeatureSet extract_gray(
+        std::span<const std::uint8_t> pixels,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::size_t row_stride = 0) const override;
+
+    [[nodiscard]] FeatureSet extract_rgb(
+        std::span<const std::uint8_t> pixels,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::size_t row_stride = 0) const override;
+
+private:
+    class Impl;
+    explicit DiskExtractor(std::shared_ptr<Impl> impl);
+    std::shared_ptr<Impl> impl_;
 };
 
 // ---- Descriptor matchers --------------------------------------------------------
@@ -223,10 +269,47 @@ MatchSet match_descriptors(
     const FeatureSet& train,
     const DescriptorMatcherOptions& options = {});
 
-// ---- Fused pair pipelines -------------------------------------------------------
-
-enum class LightGlueExtractor { disk, superpoint };
 enum class InferenceDevice { cpu, cuda };
+enum class LightGlueExtractor { disk, superpoint };
+
+// Descriptor LightGlue matcher (fabio-sim *_lightglue_fused.onnx):
+// kpts0/1 + desc0/1 → matches0[S,2], mscores0[S].
+// Keypoints in FeatureSet are original-image pixels; matcher normalizes to [-1,1].
+struct LightGlueMatcherOptions {
+    std::filesystem::path model_path;
+    InferenceDevice device{InferenceDevice::cuda};
+    bool allow_cpu_fallback{true};
+    float min_score{0.0F};
+    // Expected descriptor dim: 256 (superpoint) or 128 (disk). 0 = accept either.
+    std::size_t descriptor_dimension{0};
+};
+
+class LightGlueMatcher final : public FeatureMatcher {
+public:
+    explicit LightGlueMatcher(LightGlueMatcherOptions options);
+    ~LightGlueMatcher() override;
+    LightGlueMatcher(LightGlueMatcher&&) noexcept;
+    LightGlueMatcher& operator=(LightGlueMatcher&&) noexcept;
+    LightGlueMatcher(const LightGlueMatcher&) = delete;
+    LightGlueMatcher& operator=(const LightGlueMatcher&) = delete;
+
+    [[nodiscard]] static bool is_built() noexcept;
+    [[nodiscard]] bool is_available() const noexcept;
+    [[nodiscard]] const LightGlueMatcherOptions& options() const;
+
+    [[nodiscard]] std::string_view name() const override { return "lightglue"; }
+    [[nodiscard]] bool requires_owner_thread() const override { return true; }
+    [[nodiscard]] std::unique_ptr<FeatureMatcher> clone() const override;
+    [[nodiscard]] MatchSet match(
+        const FeatureSet& query, const FeatureSet& train) const override;
+
+private:
+    class Impl;
+    explicit LightGlueMatcher(std::shared_ptr<Impl> impl);
+    std::shared_ptr<Impl> impl_;
+};
+
+// ---- Fused pair pipelines -------------------------------------------------------
 
 // End-to-end image-pair LightGlue (DISK or SuperPoint extractor head + matcher).
 // ONNX signature: images[2,C,H,W] → keypoints[2,N,2], matches[M,3], mscores[M].

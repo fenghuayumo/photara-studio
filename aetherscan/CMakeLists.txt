@@ -112,6 +112,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/features/sift_features.cpp
         src/features/siftgpu_features.cpp
         src/features/superpoint_extractor.cpp
+        src/features/lightglue_matcher.cpp
         src/features/lightglue_pipeline.cpp)
     add_library(AetherScan::Features ALIAS aetherscan_features)
     target_include_directories(aetherscan_features PUBLIC

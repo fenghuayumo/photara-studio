@@ -40,6 +40,10 @@ struct ReconstructCli {
     std::string matcher{"gpu_mutual_ratio"};
     std::string pipeline;  // empty / none | lightglue_end2end
     unsigned max_features{27000U};
+    std::filesystem::path extractor_model;
+    std::uint32_t extractor_width{1024U};
+    std::uint32_t extractor_height{1024U};
+    bool extractor_cpu{false};
     std::filesystem::path lightglue_model;
     std::string lightglue_extractor{"disk"};
     std::uint32_t lightglue_width{1024U};
@@ -126,8 +130,8 @@ void print_help(const cxxopts::Options& options) {
     std::cout << options.help() << '\n'
               << "Feature backends:\n"
               << "  default   --extractor siftgpu --matcher gpu_mutual_ratio\n"
-              << "  compose   --extractor <name> --matcher <name>\n"
-              << "  fused     --pipeline lightglue_end2end --lightglue-model ...\n"
+              << "  compose   any compatible --extractor × --matcher\n"
+              << "  fused     --pipeline lightglue_end2end (optional recipe)\n"
               << "Modes:\n"
               << "  incremental  star initialization + PnP resection\n"
               << "  hierarchical clustered incremental SfM + Sim(3) merge\n"
@@ -164,32 +168,40 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("cache-dir", "Feature cache directory (- to disable)",
          cxxopts::value<std::string>()->default_value(""))
         ("extractor",
-         "Feature extractor for extract×match: siftgpu (default) or sift "
-         "(ignored when --pipeline is set)",
+         "Feature extractor: siftgpu (default), sift, superpoint, disk",
          cxxopts::value<std::string>()->default_value("siftgpu"))
         ("matcher",
-         "Feature matcher for extract×match: gpu_mutual_ratio (default), "
-         "mutual_ratio. Legacy aliases: siftgpu→gpu_mutual_ratio, "
-         "lightglue→--pipeline lightglue_end2end",
+         "Feature matcher: gpu_mutual_ratio (default), mutual_ratio, lightglue. "
+         "Legacy alias: siftgpu→gpu_mutual_ratio",
          cxxopts::value<std::string>()->default_value("gpu_mutual_ratio"))
         ("pipeline",
-         "Optional fused pair recipe: none (default) or lightglue_end2end. "
-         "When set, overrides extract×match composition",
+         "Optional fused pair recipe: none (default) or lightglue_end2end",
          cxxopts::value<std::string>()->default_value(""))
-        ("max-features", "Maximum SIFT features per image",
+        ("max-features", "Maximum features per image",
          cxxopts::value<unsigned>()->default_value("27000"))
-        ("lightglue-model",
-         "Fused LightGlue ONNX model (--pipeline lightglue_end2end)",
+        ("extractor-model",
+         "ONNX weights for --extractor superpoint|disk",
          cxxopts::value<std::string>()->default_value(""))
-        ("lightglue-extractor", "LightGlue extractor head: disk or superpoint",
-         cxxopts::value<std::string>()->default_value("disk"))
-        ("lightglue-width", "LightGlue network input width",
+        ("extractor-width", "Learned extractor network input width",
          cxxopts::value<std::uint32_t>()->default_value("1024"))
-        ("lightglue-height", "LightGlue network input height",
+        ("extractor-height", "Learned extractor network input height",
+         cxxopts::value<std::uint32_t>()->default_value("1024"))
+        ("extractor-cpu", "Force learned extractor ONNX on CPU",
+         cxxopts::value<bool>()->default_value("false"))
+        ("lightglue-model",
+         "ONNX for --matcher lightglue (*_lightglue_fused.onnx) or "
+         "--pipeline lightglue_end2end",
+         cxxopts::value<std::string>()->default_value(""))
+        ("lightglue-extractor",
+         "End2end pipeline head only: disk or superpoint",
+         cxxopts::value<std::string>()->default_value("disk"))
+        ("lightglue-width", "End2end pipeline network width",
+         cxxopts::value<std::uint32_t>()->default_value("1024"))
+        ("lightglue-height", "End2end pipeline network height",
          cxxopts::value<std::uint32_t>()->default_value("1024"))
         ("lightglue-min-score", "Drop LightGlue matches below this score",
          cxxopts::value<float>()->default_value("0"))
-        ("lightglue-cpu", "Force LightGlue ONNX on CPU",
+        ("lightglue-cpu", "Force LightGlue matcher / end2end ONNX on CPU",
          cxxopts::value<bool>()->default_value("false"));
 
     const auto result = options.parse(argc, argv);
@@ -217,6 +229,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.matcher = result["matcher"].as<std::string>();
     cli.pipeline = result["pipeline"].as<std::string>();
     cli.max_features = result["max-features"].as<unsigned>();
+    const auto extractor_model_text =
+        result["extractor-model"].as<std::string>();
+    if (!extractor_model_text.empty())
+        cli.extractor_model = utf8_to_path(extractor_model_text);
+    cli.extractor_width = result["extractor-width"].as<std::uint32_t>();
+    cli.extractor_height = result["extractor-height"].as<std::uint32_t>();
+    cli.extractor_cpu = result["extractor-cpu"].as<bool>();
     const auto lightglue_model_text =
         result["lightglue-model"].as<std::string>();
     if (!lightglue_model_text.empty())
@@ -247,27 +266,50 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.max_features == 0U)
         throw std::invalid_argument("--max-features must be positive");
 
-    const bool use_lightglue_pipeline =
-        cli.pipeline == "lightglue_end2end" || cli.matcher == "lightglue";
     if (cli.pipeline == "none") cli.pipeline.clear();
     if (!cli.pipeline.empty() && cli.pipeline != "lightglue_end2end")
         throw std::invalid_argument(
             "--pipeline must be empty/none or lightglue_end2end");
-    if (use_lightglue_pipeline) {
+    if (!cli.pipeline.empty() && cli.matcher == "lightglue")
+        throw std::invalid_argument(
+            "Use either --matcher lightglue or --pipeline lightglue_end2end");
+
+    const bool need_lg_model =
+        cli.pipeline == "lightglue_end2end" || cli.matcher == "lightglue";
+    if (need_lg_model) {
         if (cli.lightglue_model.empty())
             throw std::invalid_argument(
-                "--pipeline lightglue_end2end requires --lightglue-model "
-                "(legacy --matcher lightglue is also accepted)");
-        if (cli.lightglue_extractor != "disk" &&
-            cli.lightglue_extractor != "superpoint")
-            throw std::invalid_argument(
-                "--lightglue-extractor must be disk or superpoint");
+                "--lightglue-model is required for matcher lightglue or "
+                "pipeline lightglue_end2end");
         if (cli.lightglue_width == 0U || cli.lightglue_height == 0U)
             throw std::invalid_argument(
                 "--lightglue-width/height must be positive");
         if (cli.lightglue_min_score < 0.F || cli.lightglue_min_score > 1.F)
             throw std::invalid_argument(
                 "--lightglue-min-score must be in [0, 1]");
+    }
+    if (cli.pipeline == "lightglue_end2end") {
+        if (cli.lightglue_extractor != "disk" &&
+            cli.lightglue_extractor != "superpoint")
+            throw std::invalid_argument(
+                "--lightglue-extractor must be disk or superpoint");
+    }
+    if (cli.matcher == "lightglue") {
+        if (cli.extractor != "superpoint" && cli.extractor != "disk")
+            throw std::invalid_argument(
+                "--matcher lightglue currently accepts descriptors from "
+                "--extractor superpoint|disk (see features/compat.hpp)");
+        if (cli.extractor_model.empty())
+            throw std::invalid_argument(
+                "--extractor superpoint|disk requires --extractor-model");
+    }
+    if ((cli.extractor == "superpoint" || cli.extractor == "disk")) {
+        if (cli.extractor_model.empty() && cli.pipeline.empty())
+            throw std::invalid_argument(
+                "--extractor superpoint|disk requires --extractor-model");
+        if (cli.extractor_width == 0U || cli.extractor_height == 0U)
+            throw std::invalid_argument(
+                "--extractor-width/height must be positive");
     }
     return cli;
 }
@@ -355,6 +397,10 @@ int main(int argc, char** argv) {
         config.frontend.matcher = cli.matcher;
         config.frontend.pipeline = cli.pipeline;
         config.frontend.max_features = cli.max_features;
+        config.frontend.extractor_model_path = cli.extractor_model;
+        config.frontend.extractor_input_width = cli.extractor_width;
+        config.frontend.extractor_input_height = cli.extractor_height;
+        config.frontend.extractor_use_cuda = !cli.extractor_cpu;
         config.frontend.lightglue_model_path = cli.lightglue_model;
         config.frontend.lightglue_extractor = cli.lightglue_extractor;
         config.frontend.lightglue_input_width = cli.lightglue_width;
