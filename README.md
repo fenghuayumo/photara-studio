@@ -104,6 +104,30 @@ cmake -S . -B build `
 --max-features 2048
 ```
 
+同一条可组合路径也支持 ALIKED 和 SIFT：
+
+```powershell
+# ALIKED 提取 + ALIKED-LightGlue
+--extractor aliked --extractor-model ...\aliked-n16rot.onnx `
+--matcher lightglue --lightglue-model ...\aliked-lightglue.onnx `
+--extractor-min-score 0.2 --max-features 2048
+
+# SiftGPU 提取 + SIFT-LightGlue
+--extractor siftgpu `
+--matcher lightglue --lightglue-model ...\sift-lightglue.onnx `
+--max-features 4096
+```
+
+质量与速度兼顾时，建议使用选择性 LightGlue 救援：先做 SiftGPU
+互相一致性匹配和几何验证，只将失败的时序近邻或低连接度图像对交给
+LightGlue，并用更严格的几何阈值接纳救援边。
+
+```powershell
+--extractor siftgpu --matcher hybrid_lightglue `
+--lightglue-model ...\sift-lightglue.onnx --lightglue-min-score 0.1 `
+--hybrid-lightglue-max-features 2048
+```
+
 融合端到端仍可用 `--pipeline lightglue_end2end`（可选旁路，不是默认组合方式）。
 ## 运行
 

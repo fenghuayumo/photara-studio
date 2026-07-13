@@ -20,13 +20,15 @@ inline constexpr std::string_view kLightGlueEnd2EndPipeline = "lightglue_end2end
 // Fused pair pipelines are excluded from this table.
 [[nodiscard]] inline bool matcher_accepts_metric(
     std::string_view matcher, DescriptorMetric metric) noexcept {
-    if (matcher == "gpu_mutual_ratio" || matcher == "siftgpu" ||
-        matcher == "mutual_ratio")
+    if (matcher == "gpu_mutual_ratio" || matcher == "hybrid_lightglue" ||
+        matcher == "siftgpu" || matcher == "mutual_ratio")
         return metric == DescriptorMetric::l2 ||
                metric == DescriptorMetric::l2_root;
     if (matcher == "lightglue")
         return metric == DescriptorMetric::inner_product ||
-               metric == DescriptorMetric::cosine;
+               metric == DescriptorMetric::cosine ||
+               metric == DescriptorMetric::l2 ||
+               metric == DescriptorMetric::l2_root;
     (void)metric;
     return false;
 }
@@ -36,8 +38,12 @@ inline constexpr std::string_view kLightGlueEnd2EndPipeline = "lightglue_end2end
     if (matcher == "gpu_mutual_ratio" || matcher == "siftgpu" ||
         matcher == "mutual_ratio")
         return extractor == "siftgpu" || extractor == "sift";
+    if (matcher == "hybrid_lightglue")
+        return extractor == "siftgpu";
     if (matcher == "lightglue")
-        return extractor == "superpoint" || extractor == "disk";
+        return extractor == "superpoint" || extractor == "disk" ||
+               extractor == "aliked" || extractor == "sift" ||
+               extractor == "siftgpu";
     (void)extractor;
     return true;
 }
@@ -49,7 +55,7 @@ inline void validate_extractor_matcher_combo(
             "Incompatible feature combo: extractor='" + std::string(extractor) +
             "' matcher='" + std::string(matcher) +
             "'. Examples: siftgpu×gpu_mutual_ratio, superpoint×lightglue, "
-            "disk×lightglue. For fused images use --pipeline "
+            "aliked×lightglue, sift×lightglue. For fused images use --pipeline "
             "lightglue_end2end.");
 }
 

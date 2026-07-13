@@ -11,7 +11,7 @@
 namespace aetherscan::features {
 
 // Backend-agnostic feature detector + descriptor.
-// Implementations: VLFeat SIFT, SiftGPU, future SuperPoint / DISK / ALIKED, etc.
+// Implementations: VLFeat SIFT, SiftGPU, SuperPoint, DISK, ALIKED, etc.
 class FeatureExtractor {
 public:
     virtual ~FeatureExtractor() = default;

@@ -139,6 +139,7 @@ void ensure_builtin_feature_backends() {
         register_siftgpu_feature_backends();
         register_superpoint_feature_backends();
         register_disk_feature_backends();
+        register_aliked_feature_backends();
         register_lightglue_feature_backends();
         register_lightglue_matcher_backend();
     });

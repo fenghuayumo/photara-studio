@@ -22,7 +22,8 @@ struct FrontEndOptions {
     // Composable path: extractor × matcher (default siftgpu × gpu_mutual_ratio).
     std::string extractor{"siftgpu"};
     double sift_contrast_threshold{0.005};
-    // "gpu_mutual_ratio" (default) | "mutual_ratio" | "lightglue" | ...
+    // "gpu_mutual_ratio" (default) | "mutual_ratio" | "lightglue" |
+    // "hybrid_lightglue" | ...
     // Legacy alias: "siftgpu" normalizes to "gpu_mutual_ratio".
     std::string matcher{"gpu_mutual_ratio"};
     float match_ratio{0.85F};
@@ -30,18 +31,22 @@ struct FrontEndOptions {
     // Empty / "none" => compose extractor×matcher.
     // "lightglue_end2end" => fused PairFeaturePipeline (ignores extractor/matcher).
     std::string pipeline;
-    // Learned extractor ONNX (--extractor superpoint|disk). Independent of matcher.
+    // Learned extractor ONNX (--extractor superpoint|disk|aliked).
     std::filesystem::path extractor_model_path;
     std::uint32_t extractor_input_width{1024};
     std::uint32_t extractor_input_height{1024};
+    // Negative selects the backend default (ALIKED=0.2, SuperPoint/DISK=0).
+    float extractor_min_score{-1.F};
     bool extractor_use_cuda{true};
-    // Descriptor LightGlue matcher ONNX (--matcher lightglue), or fused end2end
-    // model when --pipeline lightglue_end2end.
+    // Descriptor LightGlue matcher ONNX (--matcher lightglue or
+    // hybrid_lightglue), or fused end2end model for lightglue_end2end.
     std::filesystem::path lightglue_model_path;
     std::string lightglue_extractor{"disk"};  // end2end head only: disk|superpoint
     std::uint32_t lightglue_input_width{1024};  // end2end network size
     std::uint32_t lightglue_input_height{1024};
     float lightglue_min_score{0.0F};
+    // Hybrid rescue attention budget; zero disables the cap.
+    unsigned hybrid_lightglue_max_features{2048};
     bool lightglue_use_cuda{true};
     RelativePoseOptions relative{};
     float min_pair_weight{0.F};

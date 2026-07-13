@@ -221,6 +221,50 @@ private:
     std::shared_ptr<Impl> impl_;
 };
 
+struct AlikedOptions {
+    std::filesystem::path model_path;
+    std::size_t maximum_features{2048};
+    float keypoint_threshold{0.2F};
+    bool cuda{true};
+    bool allow_cpu_fallback{true};
+};
+
+// Sparse ALIKED ONNX: image[1,3,H,W] plus scalar max_keypoints/min_score
+// produces normalized keypoints[1,N,2], descriptors[1,N,128], scores[1,N].
+class AlikedExtractor final : public FeatureExtractor {
+public:
+    explicit AlikedExtractor(AlikedOptions options = {});
+    ~AlikedExtractor() override;
+    AlikedExtractor(AlikedExtractor&&) noexcept;
+    AlikedExtractor& operator=(AlikedExtractor&&) noexcept;
+    AlikedExtractor(const AlikedExtractor&) = delete;
+    AlikedExtractor& operator=(const AlikedExtractor&) = delete;
+
+    [[nodiscard]] static bool is_built() noexcept;
+    [[nodiscard]] bool is_available() const noexcept;
+
+    [[nodiscard]] std::string_view name() const override { return "aliked"; }
+    [[nodiscard]] ExtractorInfo info() const override;
+    [[nodiscard]] std::unique_ptr<FeatureExtractor> clone() const override;
+
+    [[nodiscard]] FeatureSet extract_gray(
+        std::span<const std::uint8_t> pixels,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::size_t row_stride = 0) const override;
+
+    [[nodiscard]] FeatureSet extract_rgb(
+        std::span<const std::uint8_t> pixels,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::size_t row_stride = 0) const override;
+
+private:
+    class Impl;
+    explicit AlikedExtractor(std::shared_ptr<Impl> impl);
+    std::shared_ptr<Impl> impl_;
+};
+
 // ---- Descriptor matchers --------------------------------------------------------
 
 struct DescriptorMatcherOptions {
@@ -272,15 +316,20 @@ MatchSet match_descriptors(
 enum class InferenceDevice { cpu, cuda };
 enum class LightGlueExtractor { disk, superpoint };
 
-// Descriptor LightGlue matcher (fabio-sim *_lightglue_fused.onnx):
-// kpts0/1 + desc0/1 → matches0[S,2], mscores0[S].
-// Keypoints in FeatureSet are original-image pixels; matcher normalizes to [-1,1].
+// Descriptor LightGlue matcher. Supported ONNX layouts are:
+//   SuperPoint/DISK: kpts + desc (normalized keypoints, pair-list output)
+//   ALIKED:          kpts + desc + image_size
+//   SIFT:            ALIKED inputs + scale + orientation
 struct LightGlueMatcherOptions {
     std::filesystem::path model_path;
     InferenceDevice device{InferenceDevice::cuda};
     bool allow_cpu_fallback{true};
     float min_score{0.0F};
-    // Expected descriptor dim: 256 (superpoint) or 128 (disk). 0 = accept either.
+    // Zero uses every descriptor. A non-zero prefix limit bounds attention
+    // memory/time while preserving original feature indices.
+    std::size_t maximum_features{0};
+    // Expected descriptor dim: 256 (SuperPoint), 128 (DISK/ALIKED/SIFT).
+    // Zero derives the dimension from the model when possible.
     std::size_t descriptor_dimension{0};
 };
 

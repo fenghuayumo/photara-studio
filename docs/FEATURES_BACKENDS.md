@@ -21,8 +21,8 @@ Optional:  --pipeline <fused recipe>   (mutually exclusive with composition)
 ## Built-in names
 
 ```text
-extractors:  siftgpu (default) | sift | superpoint | disk
-matchers:    gpu_mutual_ratio (default) | mutual_ratio | lightglue
+extractors:  siftgpu (default) | sift | superpoint | disk | aliked
+matchers:    gpu_mutual_ratio (default) | mutual_ratio | lightglue | hybrid_lightglue
 pipelines:   none (default) | lightglue_end2end
 ```
 
@@ -40,18 +40,34 @@ Default behavior is unchanged: `siftgpu` × `gpu_mutual_ratio`.
 
 --extractor disk --extractor-model disk.onnx \
 --matcher lightglue --lightglue-model disk_lightglue_fused.onnx
+
+--extractor aliked --extractor-model aliked-n16rot.onnx \
+--matcher lightglue --lightglue-model aliked-lightglue.onnx
+
+# SIFT and SiftGPU use their existing extractor; only the matcher needs a model.
+--extractor siftgpu \
+--matcher lightglue --lightglue-model sift-lightglue.onnx
+
+# Quality/performance mode: fast SiftGPU matching first, then LightGlue only
+# for nearby or weakly connected pairs that failed geometric verification.
+--extractor siftgpu --matcher hybrid_lightglue \
+--lightglue-model sift-lightglue.onnx --lightglue-min-score 0.1 \
+--hybrid-lightglue-max-features 2048
 ```
 
 Extractor knobs (`--extractor-model/width/height/cpu`) belong to the extractor.
 Matcher knobs (`--lightglue-model/min-score/cpu`) belong to the LightGlue
 matcher (or the optional end2end pipeline). They are not a joint “package”.
+`--hybrid-lightglue-max-features` bounds only the selective rescue pass; the
+primary SiftGPU path still uses `--max-features`.
 
 Compatibility today (extend in `compat.hpp`):
 
 | extractor | matcher |
 |-----------|---------|
-| siftgpu / sift | gpu_mutual_ratio / mutual_ratio |
-| superpoint / disk | lightglue |
+| siftgpu | gpu_mutual_ratio / mutual_ratio / lightglue / hybrid_lightglue |
+| sift | gpu_mutual_ratio / mutual_ratio / lightglue |
+| superpoint / disk / aliked | lightglue |
 
 ### Optional fused recipe
 

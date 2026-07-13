@@ -12,9 +12,11 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <future>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -46,7 +48,7 @@ struct FrontEndStageKeys {
 };
 
 void append_cache_build_identity(FingerprintBuilder& key) {
-    key.append_string("aetherscan-cache-abi-20260712-5");
+    key.append_string("aetherscan-cache-abi-20260713-6");
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));
@@ -86,8 +88,10 @@ void normalize_feature_selection(FrontEndOptions& options) {
         options.matcher = "gpu_mutual_ratio";
 
     if (options.pipeline.empty()) {
-        if (options.matcher == "lightglue" || options.extractor == "superpoint" ||
-            options.extractor == "disk")
+        if (options.matcher == "lightglue" ||
+            options.matcher == "hybrid_lightglue" ||
+            options.extractor == "superpoint" ||
+            options.extractor == "disk" || options.extractor == "aliked")
             options.compress_descriptors_u8 = false;
         return;
     }
@@ -97,9 +101,10 @@ void normalize_feature_selection(FrontEndOptions& options) {
             "Unknown --pipeline '" + options.pipeline +
             "' (supported: none, lightglue_end2end)");
 
-    if (options.matcher == "lightglue")
+    if (options.matcher == "lightglue" ||
+        options.matcher == "hybrid_lightglue")
         throw std::invalid_argument(
-            "Use either --matcher lightglue (descriptor matcher) or "
+            "Use either a LightGlue descriptor matcher or "
             "--pipeline lightglue_end2end (fused), not both");
 
     // Canonical fingerprint fields for fused LightGlue.
@@ -129,12 +134,14 @@ FrontEndStageKeys make_stage_keys(
     features.append_string(options.extractor_model_path.string());
     features.append(options.extractor_input_width);
     features.append(options.extractor_input_height);
+    features.append(options.extractor_min_score);
     features.append(options.extractor_use_cuda);
     features.append_string(options.lightglue_model_path.string());
     features.append_string(options.lightglue_extractor);
     features.append(options.lightglue_input_width);
     features.append(options.lightglue_input_height);
     features.append(options.lightglue_min_score);
+    features.append(options.hybrid_lightglue_max_features);
     features.append(options.lightglue_use_cuda);
 
     FingerprintBuilder matches;
@@ -149,12 +156,14 @@ FrontEndStageKeys make_stage_keys(
     matches.append_string(options.extractor_model_path.string());
     matches.append(options.extractor_input_width);
     matches.append(options.extractor_input_height);
+    matches.append(options.extractor_min_score);
     matches.append(options.extractor_use_cuda);
     matches.append_string(options.lightglue_model_path.string());
     matches.append_string(options.lightglue_extractor);
     matches.append(options.lightglue_input_width);
     matches.append(options.lightglue_input_height);
     matches.append(options.lightglue_min_score);
+    matches.append(options.hybrid_lightglue_max_features);
     matches.append(options.lightglue_use_cuda);
     matches.append(options.retrieval_min_images);
     matches.append(options.augment_sequential_with_retrieval);
@@ -585,8 +594,9 @@ GeometryVerifyResult verify_pair_geometry(
     return result;
 }
 
-// openMVS-style match coordinator: GPU matching on the owner thread, geometric
-// verification on the CPU thread pool in bounded batches.
+// GPU/ORT matching stays on the owner thread while geometric verification is
+// continuously consumed by the CPU pool. A bounded in-flight window prevents
+// an arbitrarily large raw-match backlog without introducing batch barriers.
 void match_and_verify_siftgpu_coordinator(
     Scene& scene, const std::vector<PairCandidate>& candidates,
     features::FeatureMatcher& matcher, const FrontEndOptions& options,
@@ -598,32 +608,45 @@ void match_and_verify_siftgpu_coordinator(
     pair_slots.assign(candidates.size(), ImagePair{});
 
     auto& pool = parallel::global_thread_pool();
-    const std::size_t batch_size =
-        std::max<std::size_t>(static_cast<std::size_t>(worker_threads) * 4U, 64U);
+    const std::size_t max_in_flight = std::max<std::size_t>(
+        static_cast<std::size_t>(worker_threads) * 8U, 64U);
+    std::mutex throttle_mutex;
+    std::condition_variable throttle_condition;
+    std::size_t in_flight = 0;
+    parallel::FutureGroup geometry_tasks;
+    geometry_tasks.reserve(candidates.size());
 
-    for (std::size_t batch_begin = 0; batch_begin < candidates.size();
-         batch_begin += batch_size) {
-        const std::size_t batch_end =
-            std::min(batch_begin + batch_size, candidates.size());
-        parallel::FutureGroup batch_tasks;
-        batch_tasks.reserve(batch_end - batch_begin);
+    for (std::size_t pair_index = 0; pair_index < candidates.size();
+         ++pair_index) {
+        const PairCandidate candidate = candidates[pair_index];
+        RawPairMatches raw;
+        raw.id1 = candidate.id1;
+        raw.id2 = candidate.id2;
+        raw.matches =
+            matcher
+                .match(
+                    scene.images[candidate.id1].features,
+                    scene.images[candidate.id2].features)
+                .matches;
 
-        for (std::size_t pair_index = batch_begin; pair_index < batch_end;
-             ++pair_index) {
-            const PairCandidate candidate = candidates[pair_index];
-            RawPairMatches raw;
-            raw.id1 = candidate.id1;
-            raw.id2 = candidate.id2;
-            raw.matches =
-                matcher
-                    .match(
-                        scene.images[candidate.id1].features,
-                        scene.images[candidate.id2].features)
-                    .matches;
+        {
+            std::unique_lock lock(throttle_mutex);
+            throttle_condition.wait(
+                lock, [&] { return in_flight < max_in_flight; });
+            ++in_flight;
+        }
 
-            batch_tasks.submit(
-                pool,
-                [&, pair_index, candidate, raw = std::move(raw)]() mutable {
+        geometry_tasks.submit(
+            pool,
+            [&, pair_index, candidate, raw = std::move(raw)]() mutable {
+                const auto release_slot = [&] {
+                    {
+                        std::lock_guard lock(throttle_mutex);
+                        --in_flight;
+                    }
+                    throttle_condition.notify_one();
+                };
+                try {
                     raw_pairs[pair_index] = std::move(raw);
                     GeometryVerifyResult verified = verify_pair_geometry(
                         scene, candidate, raw_pairs[pair_index].matches,
@@ -631,11 +654,14 @@ void match_and_verify_siftgpu_coordinator(
                     diagnostics[pair_index] = verified.diagnostics;
                     if (verified.pair) pair_slots[pair_index] = *verified.pair;
                     match_progress.advance();
-                });
-        }
-
-        batch_tasks.wait();
+                } catch (...) {
+                    release_slot();
+                    throw;
+                }
+                release_slot();
+            });
     }
+    geometry_tasks.wait();
 }
 
 std::vector<PairCandidate> build_pair_list(
@@ -770,6 +796,8 @@ std::unique_ptr<features::FeatureExtractor> make_frontend_extractor(
         sp.maximum_features = options.max_features;
         sp.input_width = options.extractor_input_width;
         sp.input_height = options.extractor_input_height;
+        if (options.extractor_min_score >= 0.F)
+            sp.keypoint_threshold = options.extractor_min_score;
         sp.cuda = options.extractor_use_cuda;
         auto extractor = std::make_unique<features::SuperPointExtractor>(sp);
         if (!extractor->is_available())
@@ -788,13 +816,63 @@ std::unique_ptr<features::FeatureExtractor> make_frontend_extractor(
         disk.maximum_features = options.max_features;
         disk.input_width = options.extractor_input_width;
         disk.input_height = options.extractor_input_height;
+        if (options.extractor_min_score >= 0.F)
+            disk.keypoint_threshold = options.extractor_min_score;
         disk.cuda = options.extractor_use_cuda;
         auto extractor = std::make_unique<features::DiskExtractor>(disk);
         if (!extractor->is_available())
             throw std::runtime_error("DISK failed to initialize ONNX");
         return extractor;
     }
+    if (options.extractor == "aliked") {
+        if (options.extractor_model_path.empty())
+            throw std::runtime_error(
+                "extractor aliked requires --extractor-model");
+        if (!features::AlikedExtractor::is_built())
+            throw std::runtime_error(
+                "ALIKED requires ONNX Runtime (AETHERSCAN_ENABLE_ONNX)");
+        features::AlikedOptions aliked;
+        aliked.model_path = options.extractor_model_path;
+        aliked.maximum_features = options.max_features;
+        if (options.extractor_min_score >= 0.F)
+            aliked.keypoint_threshold = options.extractor_min_score;
+        aliked.cuda = options.extractor_use_cuda;
+        auto extractor =
+            std::make_unique<features::AlikedExtractor>(aliked);
+        if (!extractor->is_available())
+            throw std::runtime_error("ALIKED failed to initialize ONNX");
+        return extractor;
+    }
     return features::create_extractor(options.extractor);
+}
+
+std::unique_ptr<features::LightGlueMatcher> make_descriptor_lightglue_matcher(
+    const FrontEndOptions& options) {
+    if (options.lightglue_model_path.empty())
+        throw std::runtime_error(
+            "LightGlue requires --lightglue-model "
+            "(descriptor matcher ONNX, e.g. *_lightglue_fused.onnx)");
+    if (!features::LightGlueMatcher::is_built())
+        throw std::runtime_error(
+            "LightGlue matcher requires ONNX Runtime "
+            "(AETHERSCAN_ENABLE_ONNX)");
+    features::LightGlueMatcherOptions lg;
+    lg.model_path = options.lightglue_model_path;
+    lg.device = options.lightglue_use_cuda
+        ? features::InferenceDevice::cuda
+        : features::InferenceDevice::cpu;
+    lg.min_score = options.lightglue_min_score;
+    if (options.matcher == "hybrid_lightglue")
+        lg.maximum_features = options.hybrid_lightglue_max_features;
+    if (options.extractor == "superpoint")
+        lg.descriptor_dimension = 256;
+    else if (options.extractor == "disk" || options.extractor == "aliked" ||
+             options.extractor == "sift" || options.extractor == "siftgpu")
+        lg.descriptor_dimension = 128;
+    auto matcher = std::make_unique<features::LightGlueMatcher>(lg);
+    if (!matcher->is_available())
+        throw std::runtime_error("LightGlue matcher failed to initialize ONNX");
+    return matcher;
 }
 
 std::unique_ptr<features::FeatureMatcher> make_frontend_matcher(
@@ -805,7 +883,8 @@ std::unique_ptr<features::FeatureMatcher> make_frontend_matcher(
         matcher_options.mutual_check = options.mutual_check;
         return std::make_unique<features::MutualRatioMatcher>(matcher_options);
     }
-    if (options.matcher == "gpu_mutual_ratio") {
+    if (options.matcher == "gpu_mutual_ratio" ||
+        options.matcher == "hybrid_lightglue") {
         features::SiftGpuMatcherOptions matcher_options;
         matcher_options.ratio_threshold = options.match_ratio;
         matcher_options.mutual_check = options.mutual_check;
@@ -819,31 +898,8 @@ std::unique_ptr<features::FeatureMatcher> make_frontend_matcher(
                 "unavailable");
         return matcher;
     }
-    if (options.matcher == "lightglue") {
-        if (options.lightglue_model_path.empty())
-            throw std::runtime_error(
-                "matcher lightglue requires --lightglue-model "
-                "(descriptor matcher ONNX, e.g. *_lightglue_fused.onnx)");
-        if (!features::LightGlueMatcher::is_built())
-            throw std::runtime_error(
-                "LightGlue matcher requires ONNX Runtime "
-                "(AETHERSCAN_ENABLE_ONNX)");
-        features::LightGlueMatcherOptions lg;
-        lg.model_path = options.lightglue_model_path;
-        lg.device = options.lightglue_use_cuda
-            ? features::InferenceDevice::cuda
-            : features::InferenceDevice::cpu;
-        lg.min_score = options.lightglue_min_score;
-        if (options.extractor == "superpoint")
-            lg.descriptor_dimension = 256;
-        else if (options.extractor == "disk")
-            lg.descriptor_dimension = 128;
-        auto matcher = std::make_unique<features::LightGlueMatcher>(lg);
-        if (!matcher->is_available())
-            throw std::runtime_error(
-                "LightGlue matcher failed to initialize ONNX");
-        return matcher;
-    }
+    if (options.matcher == "lightglue")
+        return make_descriptor_lightglue_matcher(options);
     return features::create_matcher(options.matcher);
 }
 
@@ -1260,11 +1316,98 @@ FrontEndResult run_frontend(
         if (matcher->requires_owner_thread()) {
             std::vector<ImagePair> pair_slots;
             core::ProgressReporter match_progress(
-                "match image pairs", candidates.size());
+                runtime_options.matcher == "hybrid_lightglue"
+                    ? "fast match image pairs"
+                    : "match image pairs",
+                candidates.size());
             match_and_verify_siftgpu_coordinator(
                 scene, candidates, *matcher, options, threads, raw_pairs,
                 diagnostics, pair_slots, match_progress);
             match_progress.finish();
+
+            if (runtime_options.matcher == "hybrid_lightglue") {
+                std::vector<PairCandidate> rescue_candidates;
+                std::vector<std::size_t> rescue_indices;
+                std::vector<unsigned> primary_degree(scene.images.size(), 0U);
+                for (const ImagePair& pair : pair_slots) {
+                    if (pair.matches.empty()) continue;
+                    ++primary_degree[pair.id1];
+                    ++primary_degree[pair.id2];
+                }
+                constexpr unsigned k_min_primary_degree = 3U;
+                const std::size_t rescue_window =
+                    std::max<std::size_t>(runtime_options.neighbor_window, 3U);
+                rescue_candidates.reserve(candidates.size());
+                rescue_indices.reserve(candidates.size());
+                for (std::size_t index = 0; index < candidates.size(); ++index) {
+                    if (!pair_slots[index].matches.empty()) continue;
+                    const PairCandidate candidate = candidates[index];
+                    const std::size_t image_gap = candidate.id1 > candidate.id2
+                        ? static_cast<std::size_t>(candidate.id1 - candidate.id2)
+                        : static_cast<std::size_t>(candidate.id2 - candidate.id1);
+                    const bool local_sequence_edge = image_gap <= rescue_window;
+                    const bool strengthens_weak_image =
+                        primary_degree[candidate.id1] < k_min_primary_degree ||
+                        primary_degree[candidate.id2] < k_min_primary_degree;
+                    if (!local_sequence_edge && !strengthens_weak_image)
+                        continue;
+                    rescue_candidates.push_back(candidates[index]);
+                    rescue_indices.push_back(index);
+                }
+
+                std::size_t primary_accepted = 0;
+                for (const ImagePair& pair : pair_slots)
+                    primary_accepted += pair.matches.empty() ? 0U : 1U;
+                if (!rescue_candidates.empty()) {
+                    auto rescue_matcher =
+                        make_descriptor_lightglue_matcher(runtime_options);
+                    FrontEndOptions rescue_options = options;
+                    // LightGlue is used to add graph connectivity, so demand a
+                    // tighter geometric consensus than the primary matcher.
+                    rescue_options.relative.max_epipolar_error_px = std::min(
+                        rescue_options.relative.max_epipolar_error_px, 2.0);
+                    rescue_options.relative.max_reproj_error_px = std::min(
+                        rescue_options.relative.max_reproj_error_px, 3.0);
+                    rescue_options.relative.min_inliers = std::max(
+                        rescue_options.relative.min_inliers, 40U);
+                    std::vector<RawPairMatches> rescue_raw_pairs;
+                    std::vector<PairDiagnostics> rescue_diagnostics;
+                    std::vector<ImagePair> rescue_pair_slots;
+                    core::ProgressReporter rescue_progress(
+                        "rescue difficult pairs with lightglue",
+                        rescue_candidates.size());
+                    match_and_verify_siftgpu_coordinator(
+                        scene, rescue_candidates, *rescue_matcher,
+                        rescue_options,
+                        threads, rescue_raw_pairs, rescue_diagnostics,
+                        rescue_pair_slots, rescue_progress);
+                    rescue_progress.finish();
+
+                    std::size_t rescued = 0;
+                    for (std::size_t rescue_index = 0;
+                         rescue_index < rescue_indices.size(); ++rescue_index) {
+                        const std::size_t original =
+                            rescue_indices[rescue_index];
+                        raw_pairs[original] =
+                            std::move(rescue_raw_pairs[rescue_index]);
+                        diagnostics[original] =
+                            rescue_diagnostics[rescue_index];
+                        if (!rescue_pair_slots[rescue_index].matches.empty()) {
+                            pair_slots[original] =
+                                std::move(rescue_pair_slots[rescue_index]);
+                            ++rescued;
+                        }
+                    }
+                    core::Logger::instance().info(
+                        "hybrid matcher: primary_accepted=", primary_accepted,
+                        " primary_rejected=",
+                        candidates.size() - primary_accepted,
+                        " rescue_attempted=", rescue_candidates.size(),
+                        " rescued=", rescued,
+                        " accepted_total=", primary_accepted + rescued);
+                }
+            }
+
             scene.pairs.reserve(pair_slots.size());
             for (ImagePair& pair : pair_slots) {
                 if (pair.matches.empty()) continue;

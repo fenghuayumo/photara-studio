@@ -40,6 +40,7 @@ void register_sift_feature_backends();
 void register_siftgpu_feature_backends();
 void register_superpoint_feature_backends();
 void register_disk_feature_backends();
+void register_aliked_feature_backends();
 void register_lightglue_feature_backends();
 void register_lightglue_matcher_backend();
 

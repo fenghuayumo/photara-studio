@@ -1,4 +1,6 @@
+#include "features/compat.hpp"
 #include "features/features.hpp"
+#include "features/registry.hpp"
 
 #include <cstdint>
 #include <iostream>
@@ -6,6 +8,22 @@
 #include <vector>
 
 int main() {
+    aetherscan::features::ensure_builtin_feature_backends();
+    if (!aetherscan::features::has_extractor("aliked") ||
+        !aetherscan::features::extractor_matcher_compatible(
+            "aliked", "lightglue") ||
+        !aetherscan::features::extractor_matcher_compatible(
+            "sift", "lightglue") ||
+        !aetherscan::features::extractor_matcher_compatible(
+            "siftgpu", "lightglue") ||
+        !aetherscan::features::extractor_matcher_compatible(
+            "siftgpu", "hybrid_lightglue") ||
+        aetherscan::features::extractor_matcher_compatible(
+            "sift", "hybrid_lightglue") ||
+        aetherscan::features::extractor_matcher_compatible(
+            "aliked", "mutual_ratio"))
+        return 5;
+
     constexpr std::uint32_t width = 512, height = 384;
     std::vector<std::uint8_t> first(static_cast<std::size_t>(width) * height);
     std::vector<std::uint8_t> second(first.size(), 0);
