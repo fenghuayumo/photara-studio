@@ -19,4 +19,13 @@ std::pair<float, float> filter_tracks(
     float mult_depth_near = 0.05F,
     float mult_depth_far = 20.F);
 
+// Incremental filtering for tracks affected by newly registered/locally
+// optimized images. Global median-depth clipping is intentionally deferred to
+// the next full filter because untouched tracks have unchanged geometry.
+std::pair<float, float> filter_tracks(
+    Scene& scene,
+    const std::vector<Index>& track_ids,
+    float max_reproj_error_px = 3.F,
+    float min_angle_deg = 2.F);
+
 }  // namespace aetherscan::sfm

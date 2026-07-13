@@ -11,9 +11,11 @@
 #include <Eigen/SVD>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -1239,34 +1241,70 @@ ReconstructionSummary run_hierarchical_mapping(
         std::max(1U, available_threads / std::max(1U, worker_count));
     for (HierarchicalSubscene& subscene : subscenes)
         subscene.scene.thread_count = threads_per_subscene;
+    core::Logger::instance().info(
+        "hierarchical schedule: subscenes=", subscenes.size(),
+        " workers=", worker_count,
+        " threads_per_subscene=", threads_per_subscene,
+        " available_threads=", available_threads);
     std::vector<bool> succeeded(subscenes.size(), false);
     std::mutex result_mutex;
     core::ProgressReporter progress(
         "reconstruct subscenes", subscenes.size());
-    parallel::parallel_for(
-        subscenes.size(), worker_count,
-        [&](const std::size_t index) {
-            Scene& subscene = subscenes[index].scene;
-            const parallel::ScopedOpenMpThreads openmp_budget(
-                subscene.thread_count);
-            build_tracks(subscene, config.cluster.min_pair_weight);
-            bool success = star_initialize(subscene, config.star);
-            if (success) {
-                register_images(subscene, config.resection);
-                BundleOptions bundle;
-                bundle.optimizer = config.resection.full_ba;
-                success = run_bundle_adjustment(subscene, bundle).success;
-                filter_tracks(
-                    subscene,
-                    config.resection.max_reproj_error,
-                    config.resection.min_angle_deg,
-                    config.resection.mult_depth_near,
-                    config.resection.mult_depth_far);
+
+    const auto reconstruct_subscene = [&](const std::size_t index) {
+        Scene& subscene = subscenes[index].scene;
+        const parallel::ScopedOpenMpThreads openmp_budget(
+            subscene.thread_count);
+        build_tracks(subscene, config.cluster.min_pair_weight);
+        bool success = star_initialize(subscene, config.star);
+        if (success) {
+            register_images(subscene, config.resection);
+            BundleOptions bundle;
+            bundle.optimizer = config.resection.full_ba;
+            success = run_bundle_adjustment(subscene, bundle).success;
+            filter_tracks(
+                subscene,
+                config.resection.max_reproj_error,
+                config.resection.min_angle_deg,
+                config.resection.mult_depth_near,
+                config.resection.mult_depth_far);
+        }
+        std::scoped_lock lock(result_mutex);
+        succeeded[index] = success;
+        progress.advance();
+    };
+
+    // The global task pool deliberately serializes nested parallel_for calls
+    // to avoid self-deadlock. Hierarchical mapping, however, needs each
+    // long-lived subscene worker to run its own PnP/selection parallel loops.
+    // Use coordinator threads here so inner work can borrow the shared pool.
+    std::atomic<std::size_t> next_subscene{0};
+    std::exception_ptr worker_error;
+    std::mutex error_mutex;
+    const auto worker = [&] {
+        for (;;) {
+            const std::size_t index =
+                next_subscene.fetch_add(1, std::memory_order_relaxed);
+            if (index >= subscenes.size()) return;
+            try {
+                reconstruct_subscene(index);
+            } catch (...) {
+                {
+                    std::scoped_lock lock(error_mutex);
+                    if (!worker_error) worker_error = std::current_exception();
+                }
+                next_subscene.store(subscenes.size(), std::memory_order_relaxed);
+                return;
             }
-            std::scoped_lock lock(result_mutex);
-            succeeded[index] = success;
-            progress.advance();
-        });
+        }
+    };
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count > 0 ? worker_count - 1 : 0);
+    for (unsigned i = 1; i < worker_count; ++i)
+        workers.emplace_back(worker);
+    worker();
+    for (std::jthread& thread : workers) thread.join();
+    if (worker_error) std::rethrow_exception(worker_error);
     progress.finish();
 
     std::vector<HierarchicalSubscene> reconstructed;

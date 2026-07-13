@@ -1,6 +1,7 @@
 #include "sfm/tracks.hpp"
 
 #include "core/logging.hpp"
+#include "parallel/thread_pool.hpp"
 #include "sfm/triangulation.hpp"
 
 #include <algorithm>
@@ -210,6 +211,87 @@ void build_tracks(Scene& scene, const float min_pair_weight) {
     rebuild_track_index(scene);
 }
 
+namespace {
+
+struct TrackFilterStats {
+    double sum_px{0.0};
+    double sum_cos_angle{0.0};
+    double average_distance{0.0};
+    unsigned observations{0};
+    bool triangulated{false};
+};
+
+TrackFilterStats filter_track(
+    Scene& scene, Track& track, const float max_reproj_error_px,
+    const float min_angle_deg) {
+    TrackFilterStats stats;
+    track.num_inliers = 0;
+    if (!track.is_valid()) return stats;
+    double track_distance = 0.0;
+    unsigned kept = 0;
+    for (unsigned i = 0; i < track.observations.size(); ++i) {
+        const Observation& obs = track.observations[i];
+        if (obs.image_id >= scene.images.size()) continue;
+        const Image& image = scene.images[obs.image_id];
+        if (!image.registered ||
+            obs.feature_id >= image.features.keypoints.size())
+            continue;
+        const PinholeCamera& camera = scene.camera_of(image);
+        const Vec3 Xc = image.pose.transform_world_to_camera(track.position);
+        const auto& kp = image.features.keypoints[obs.feature_id];
+        const Vec3 observed = camera.unproject_normalized({kp.x, kp.y});
+        const double norm = Xc.norm();
+        if (!(norm > 1e-12)) continue;
+        const double cosine = observed.dot(Xc) / norm;
+        const double minimum_cosine =
+            std::cos(camera.pixel_error_to_angular(max_reproj_error_px));
+        if (cosine < minimum_cosine) continue;
+        const Vec2 projected = camera.project(Xc);
+        const double error = (projected - Vec2(kp.x, kp.y)).norm();
+        if (!std::isfinite(error) || error > max_reproj_error_px) continue;
+        if (kept != i)
+            std::swap(track.observations[kept], track.observations[i]);
+        ++kept;
+        stats.sum_px += error;
+        stats.sum_cos_angle += cosine;
+        track_distance += norm;
+    }
+    track.num_inliers =
+        static_cast<std::uint8_t>(std::min<unsigned>(kept, 255));
+    if (track.num_inliers < 2 ||
+        track_min_ray_angle_deg(track, scene) < min_angle_deg) {
+        track.num_inliers = 0;
+        return {};
+    }
+    stats.observations = track.num_inliers;
+    stats.average_distance =
+        track_distance / static_cast<double>(track.num_inliers);
+    stats.triangulated = true;
+    return stats;
+}
+
+std::pair<float, float> summarize_filter_stats(
+    const std::vector<TrackFilterStats>& stats) {
+    double sum_px = 0.0;
+    double sum_cos_angle = 0.0;
+    unsigned counted = 0;
+    for (const TrackFilterStats& value : stats) {
+        if (!value.triangulated) continue;
+        sum_px += value.sum_px;
+        sum_cos_angle += value.sum_cos_angle;
+        counted += value.observations;
+    }
+    if (counted == 0) return {0.F, 0.F};
+    return {
+        static_cast<float>(sum_px / counted),
+        static_cast<float>(
+            std::acos(std::clamp(
+                sum_cos_angle / counted, -1.0, 1.0)) *
+            180.0 / 3.14159265358979323846)};
+}
+
+}  // namespace
+
 std::pair<float, float> filter_tracks(
     Scene& scene,
     const float max_reproj_error_px,
@@ -217,59 +299,18 @@ std::pair<float, float> filter_tracks(
     const float mult_depth_near,
     const float mult_depth_far) {
     core::StageScope stage("sfm.filter_tracks", core::LogLevel::debug);
+    std::vector<TrackFilterStats> stats(scene.tracks.size());
+    const unsigned threads = parallel::resolve_thread_count(scene.thread_count);
+    parallel::parallel_for(scene.tracks.size(), threads, [&](const std::size_t i) {
+        stats[i] = filter_track(
+            scene, scene.tracks[i], max_reproj_error_px, min_angle_deg);
+    });
+
     std::vector<double> average_distances;
     average_distances.reserve(scene.tracks.size());
-    double sum_px = 0.0;
-    double sum_cos_angle = 0.0;
-    unsigned counted = 0;
-    for (Track& track : scene.tracks) {
-        track.num_inliers = 0;
-        if (!track.is_valid()) continue;
-        double track_px = 0.0;
-        double track_cos_angle = 0.0;
-        double track_distance = 0.0;
-        unsigned kept = 0;
-        for (unsigned i = 0; i < track.observations.size(); ++i) {
-            const Observation& obs = track.observations[i];
-            if (obs.image_id >= scene.images.size()) continue;
-            const Image& image = scene.images[obs.image_id];
-            if (!image.registered ||
-                obs.feature_id >= image.features.keypoints.size())
-                continue;
-            const PinholeCamera& camera = scene.camera_of(image);
-            const Vec3 Xc = image.pose.transform_world_to_camera(track.position);
-            const auto& kp = image.features.keypoints[obs.feature_id];
-            const Vec3 observed =
-                camera.unproject_normalized({kp.x, kp.y});
-            const double norm = Xc.norm();
-            if (!(norm > 1e-12)) continue;
-            const double cosine =
-                observed.dot(Xc) / norm;
-            const double minimum_cosine =
-                std::cos(camera.pixel_error_to_angular(max_reproj_error_px));
-            if (cosine < minimum_cosine) continue;
-            const Vec2 projected = camera.project(Xc);
-            const double error =
-                (projected - Vec2(kp.x, kp.y)).norm();
-            if (!std::isfinite(error) || error > max_reproj_error_px) continue;
-            if (kept != i) std::swap(track.observations[kept], track.observations[i]);
-            ++kept;
-            track_px += error;
-            track_cos_angle += cosine;
-            track_distance += norm;
-        }
-        track.num_inliers = static_cast<std::uint8_t>(std::min<unsigned>(kept, 255));
-        if (track.num_inliers < 2 ||
-            track_min_ray_angle_deg(track, scene) < min_angle_deg) {
-            track.num_inliers = 0;
-            continue;
-        }
-        sum_px += track_px;
-        sum_cos_angle += track_cos_angle;
-        counted += track.num_inliers;
-        average_distances.push_back(
-            track_distance / static_cast<double>(track.num_inliers));
-    }
+    for (const TrackFilterStats& value : stats)
+        if (value.triangulated)
+            average_distances.push_back(value.average_distance);
 
     if (average_distances.size() > 1000 &&
         (mult_depth_near > 0.F || mult_depth_far > 0.F)) {
@@ -283,27 +324,65 @@ std::pair<float, float> filter_tracks(
             mult_depth_far > 0.F
             ? mult_depth_far * median
             : std::numeric_limits<double>::max();
-        std::size_t distance_index = 0;
-        for (Track& track : scene.tracks) {
-            if (!track.is_triangulated()) continue;
-            const double distance = average_distances[distance_index++];
-            if (distance < minimum || distance > maximum)
-                track.num_inliers = 0;
-        }
+        parallel::parallel_for(
+            scene.tracks.size(), threads, [&](const std::size_t i) {
+                if (!stats[i].triangulated) return;
+                if (stats[i].average_distance < minimum ||
+                    stats[i].average_distance > maximum)
+                    scene.tracks[i].num_inliers = 0;
+            });
     }
-    if (counted == 0) return {0.F, 0.F};
     unsigned kept_tracks = 0;
     for (const Track& track : scene.tracks)
         kept_tracks += track.is_triangulated() ? 1U : 0U;
-    const std::pair<float, float> result{
-        static_cast<float>(sum_px / counted),
-        static_cast<float>(
-            std::acos(std::clamp(
-                sum_cos_angle / counted, -1.0, 1.0)) *
-            180.0 / 3.14159265358979323846)};
+    const std::pair<float, float> result = summarize_filter_stats(stats);
+    unsigned counted = 0;
+    for (const TrackFilterStats& value : stats)
+        counted += value.triangulated ? value.observations : 0U;
     core::Logger::instance().debug(
         "track filter: kept=", kept_tracks, '/', scene.tracks.size(),
         " observations=", counted, " mean_reproj_px=", result.first,
+        " mean_angle_deg=", result.second);
+    return result;
+}
+
+std::pair<float, float> filter_tracks(
+    Scene& scene,
+    const std::vector<Index>& track_ids,
+    const float max_reproj_error_px,
+    const float min_angle_deg) {
+    core::StageScope stage(
+        "sfm.filter_dirty_tracks", core::LogLevel::debug);
+    std::vector<Index> candidates = track_ids;
+    candidates.erase(
+        std::remove_if(
+            candidates.begin(), candidates.end(),
+            [&](const Index track_id) {
+                return track_id >= scene.tracks.size();
+            }),
+        candidates.end());
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(
+        std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+    std::vector<TrackFilterStats> stats(candidates.size());
+    const unsigned threads = parallel::resolve_thread_count(scene.thread_count);
+    parallel::parallel_for(candidates.size(), threads, [&](const std::size_t i) {
+        stats[i] = filter_track(
+            scene, scene.tracks[candidates[i]], max_reproj_error_px,
+            min_angle_deg);
+    });
+    unsigned kept = 0;
+    unsigned observations = 0;
+    for (const TrackFilterStats& value : stats) {
+        kept += value.triangulated ? 1U : 0U;
+        observations += value.triangulated ? value.observations : 0U;
+    }
+    const auto result = summarize_filter_stats(stats);
+    core::Logger::instance().debug(
+        "dirty track filter: kept=", kept, '/', candidates.size(),
+        " observations=", observations,
+        " mean_reproj_px=", result.first,
         " mean_angle_deg=", result.second);
     return result;
 }

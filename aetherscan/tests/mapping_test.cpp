@@ -609,6 +609,73 @@ void test_robust_triangulation_and_track_split() {
     expect(good_tracks >= 2, "split tracks recover both true 3D points");
 }
 
+void test_dirty_track_updates_are_isolated() {
+    Scene scene;
+    scene.cameras.assign(3, cam());
+    scene.images.resize(3);
+    const Vec3 centers[] = {
+        Vec3(-1.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0)};
+    const Vec3 points[] = {
+        Vec3(0.1, 0.2, 4.0), Vec3(-0.3, 0.1, 5.0)};
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        Image& image = scene.images[image_id];
+        image.id = image_id;
+        image.camera_id = image_id;
+        image.registered = true;
+        image.pose.C = centers[image_id];
+        image.features.keypoints.resize(2);
+        for (Index point_id = 0; point_id < 2; ++point_id) {
+            const Vec2 pixel = scene.cameras[image_id].project(
+                image.pose.transform_world_to_camera(points[point_id]));
+            image.features.keypoints[point_id].x =
+                static_cast<float>(pixel.x());
+            image.features.keypoints[point_id].y =
+                static_cast<float>(pixel.y());
+        }
+    }
+    for (Index point_id = 0; point_id < 2; ++point_id) {
+        Track track;
+        for (Index image_id = 0; image_id < scene.images.size(); ++image_id)
+            track.observations.push_back({image_id, point_id});
+        scene.tracks.push_back(std::move(track));
+    }
+    scene.tracks[1].position = points[1];
+    scene.tracks[1].num_inliers = 3;
+    const Track untouched_before = scene.tracks[1];
+    const auto observations_equal = [](const Track& left, const Track& right) {
+        if (left.observations.size() != right.observations.size()) return false;
+        for (std::size_t i = 0; i < left.observations.size(); ++i) {
+            if (left.observations[i].image_id != right.observations[i].image_id ||
+                left.observations[i].feature_id !=
+                    right.observations[i].feature_id)
+                return false;
+        }
+        return true;
+    };
+
+    TriangulationOptions options;
+    options.reproj_threshold_px = 1.F;
+    options.min_angle_deg = 0.F;
+    options.split_tracks = false;
+    triangulate_tracks(
+        scene, std::vector<Index>{0, 0, k_invalid}, false, options);
+    expect(scene.tracks[0].is_triangulated(),
+           "dirty triangulation updates the selected track");
+    expect(
+        scene.tracks[1].num_inliers == untouched_before.num_inliers &&
+            scene.tracks[1].position == untouched_before.position &&
+            observations_equal(scene.tracks[1], untouched_before),
+        "dirty triangulation leaves unselected tracks unchanged");
+
+    filter_tracks(scene, std::vector<Index>{0}, 1.F, 0.F);
+    expect(
+        scene.tracks[1].num_inliers == untouched_before.num_inliers &&
+            scene.tracks[1].position == untouched_before.position &&
+            observations_equal(scene.tracks[1], untouched_before),
+        "dirty filtering leaves unselected tracks unchanged");
+}
+
 }  // namespace
 
 int main() {
@@ -621,6 +688,7 @@ int main() {
     test_global_positioning_rejects_empty_point_constraints();
     test_long_track_merge();
     test_robust_triangulation_and_track_split();
+    test_dirty_track_updates_are_isolated();
     test_retrieval_inverted_index();
     test_local_ba_boundary_selection();
 

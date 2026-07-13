@@ -40,8 +40,23 @@ unsigned triangulate_tracks(
     bool outliers_only = false,
     const TriangulationOptions& options = {});
 
+// Incremental variant. Only tracks whose geometry can have changed are
+// revisited; recursive splitting is also restricted to this candidate set.
 unsigned triangulate_tracks(
     Scene& scene,
+    const std::vector<Index>& track_ids,
+    bool outliers_only,
+    const TriangulationOptions& options = {});
+
+unsigned triangulate_tracks(
+    Scene& scene,
+    bool outliers_only,
+    float reproj_threshold_px,
+    float min_angle_deg);
+
+unsigned triangulate_tracks(
+    Scene& scene,
+    const std::vector<Index>& track_ids,
     bool outliers_only,
     float reproj_threshold_px,
     float min_angle_deg);

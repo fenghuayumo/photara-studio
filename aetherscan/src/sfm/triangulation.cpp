@@ -513,15 +513,20 @@ unsigned triangulate_track(
     return triangulate_track_impl(track, scene, options);
 }
 
-unsigned triangulate_tracks(
+static unsigned triangulate_tracks_impl(
     Scene& scene,
+    const std::vector<Index>* selected_track_ids,
     const bool outliers_only,
     const TriangulationOptions& options) {
     unsigned inlier_tracks = 0;
     core::StageScope stage("sfm.triangulate_tracks", core::LogLevel::debug);
     const std::size_t initial_track_count = scene.tracks.size();
+    const std::size_t candidate_count = selected_track_ids
+        ? selected_track_ids->size()
+        : initial_track_count;
     core::ProgressReporter progress(
-        "triangulate tracks", initial_track_count, std::chrono::seconds(1),
+        selected_track_ids ? "triangulate dirty tracks" : "triangulate tracks",
+        candidate_count, std::chrono::seconds(1),
         core::LogLevel::debug);
 
 #if defined(_OPENMP)
@@ -532,8 +537,11 @@ unsigned triangulate_tracks(
     num_threads(worker_count)
 #endif
     for (std::int64_t i = 0;
-         i < static_cast<std::int64_t>(initial_track_count); ++i) {
-        Track& track = scene.tracks[static_cast<std::size_t>(i)];
+         i < static_cast<std::int64_t>(candidate_count); ++i) {
+        const Index track_id = selected_track_ids
+            ? (*selected_track_ids)[static_cast<std::size_t>(i)]
+            : static_cast<Index>(i);
+        Track& track = scene.tracks[track_id];
         if (outliers_only && track.is_triangulated()) {
             ++inlier_tracks;
             progress.advance();
@@ -550,8 +558,11 @@ unsigned triangulate_tracks(
 
     // Breadth-limited peeling of contaminated tracks into new consensus sets.
     std::vector<std::pair<Index, unsigned>> pending;
-    pending.reserve(scene.tracks.size());
-    for (Index track_id = 0; track_id < scene.tracks.size(); ++track_id) {
+    pending.reserve(candidate_count);
+    for (std::size_t candidate = 0; candidate < candidate_count; ++candidate) {
+        const Index track_id = selected_track_ids
+            ? (*selected_track_ids)[candidate]
+            : static_cast<Index>(candidate);
         const Track& track = scene.tracks[track_id];
         if (!track.is_triangulated()) continue;
         if (extract_registered_outliers(track, scene).size() >=
@@ -564,17 +575,19 @@ unsigned triangulate_tracks(
         const auto [parent_id, depth] = pending.back();
         pending.pop_back();
         if (parent_id >= scene.tracks.size()) continue;
-        Track& parent = scene.tracks[parent_id];
-        if (!parent.is_triangulated()) continue;
+        if (!scene.tracks[parent_id].is_triangulated()) continue;
         if (depth >= options.max_splits_per_track) continue;
 
         Track child;
-        if (!build_child_from_registered_outliers(parent, scene, child))
+        if (!build_child_from_registered_outliers(
+                scene.tracks[parent_id], scene, child))
             continue;
         if (triangulate_track_impl(child, scene, options) < options.min_inliers)
             continue;
 
-        commit_peel_registered_outliers(parent, scene);
+        // Do not keep a Track reference across push_back: appending the child
+        // can reallocate scene.tracks and invalidate every reference into it.
+        commit_peel_registered_outliers(scene.tracks[parent_id], scene);
         scene.tracks.push_back(std::move(child));
         const Index child_id = static_cast<Index>(scene.tracks.size() - 1);
         ++split_tracks;
@@ -583,7 +596,7 @@ unsigned triangulate_tracks(
             extract_registered_outliers(scene.tracks[child_id], scene).size() >=
                 options.min_inliers)
             pending.push_back({child_id, depth + 1});
-        if (extract_registered_outliers(parent, scene).size() >=
+        if (extract_registered_outliers(scene.tracks[parent_id], scene).size() >=
             options.min_inliers)
             pending.push_back({parent_id, depth + 1});
     }
@@ -600,12 +613,51 @@ unsigned triangulate_tracks(
 unsigned triangulate_tracks(
     Scene& scene,
     const bool outliers_only,
+    const TriangulationOptions& options) {
+    return triangulate_tracks_impl(scene, nullptr, outliers_only, options);
+}
+
+unsigned triangulate_tracks(
+    Scene& scene,
+    const std::vector<Index>& track_ids,
+    const bool outliers_only,
+    const TriangulationOptions& options) {
+    std::vector<Index> candidates = track_ids;
+    candidates.erase(
+        std::remove_if(
+            candidates.begin(), candidates.end(),
+            [&](const Index track_id) {
+                return track_id >= scene.tracks.size();
+            }),
+        candidates.end());
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(
+        std::unique(candidates.begin(), candidates.end()), candidates.end());
+    return triangulate_tracks_impl(
+        scene, &candidates, outliers_only, options);
+}
+
+unsigned triangulate_tracks(
+    Scene& scene,
+    const bool outliers_only,
     const float reproj_threshold_px,
     const float min_angle_deg) {
     TriangulationOptions options;
     options.reproj_threshold_px = reproj_threshold_px;
     options.min_angle_deg = min_angle_deg;
     return triangulate_tracks(scene, outliers_only, options);
+}
+
+unsigned triangulate_tracks(
+    Scene& scene,
+    const std::vector<Index>& track_ids,
+    const bool outliers_only,
+    const float reproj_threshold_px,
+    const float min_angle_deg) {
+    TriangulationOptions options;
+    options.reproj_threshold_px = reproj_threshold_px;
+    options.min_angle_deg = min_angle_deg;
+    return triangulate_tracks(scene, track_ids, outliers_only, options);
 }
 
 }  // namespace aetherscan::sfm

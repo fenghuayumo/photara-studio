@@ -183,6 +183,46 @@ void run_required_bundle_adjustment(
             " bundle adjustment failed; reconstruction stopped before filtering/checkpointing");
 }
 
+std::vector<Index> collect_tracks_for_images(
+    const Scene& scene, const std::vector<Index>& image_ids) {
+    std::vector<Index> tracks;
+    std::size_t reference_count = 0;
+    for (const Index image_id : image_ids)
+        if (image_id < scene.image_tracks.size())
+            reference_count += scene.image_tracks[image_id].size();
+    tracks.reserve(reference_count);
+    for (const Index image_id : image_ids) {
+        if (image_id >= scene.image_tracks.size()) continue;
+        const auto& references = scene.image_tracks[image_id];
+        for (const ImageTrackRef& reference : references)
+            if (reference.track_id < scene.tracks.size())
+                tracks.push_back(reference.track_id);
+    }
+    std::sort(tracks.begin(), tracks.end());
+    tracks.erase(std::unique(tracks.begin(), tracks.end()), tracks.end());
+    return tracks;
+}
+
+std::vector<Index> triangulate_dirty_tracks(
+    Scene& scene, const std::vector<Index>& dirty_images,
+    const ResectionConfig& config) {
+    std::vector<Index> dirty_tracks =
+        collect_tracks_for_images(scene, dirty_images);
+    if (dirty_tracks.empty()) return dirty_tracks;
+    const std::size_t tracks_before = scene.tracks.size();
+    triangulate_tracks(
+        scene, dirty_tracks, true, config.max_reproj_error,
+        config.min_angle_deg);
+    // Splitting rebuilds image_tracks and may add children observed by a dirty
+    // image. Recollect so local BA/filtering sees the updated topology.
+    if (scene.tracks.size() != tracks_before)
+        dirty_tracks = collect_tracks_for_images(scene, dirty_images);
+    core::Logger::instance().debug(
+        "dirty tracks: images=", dirty_images.size(),
+        " tracks=", dirty_tracks.size(), '/', scene.tracks.size());
+    return dirty_tracks;
+}
+
 }  // namespace
 
 unsigned register_images(Scene& scene, const ResectionConfig& config) {
@@ -205,6 +245,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
         10, scene.resection_progress.recent_inlier_ratios);
     const unsigned threads = parallel::resolve_thread_count(scene.thread_count);
     const unsigned wave_limit = std::max(1U, config.max_pose_wave);
+    std::vector<Index> dirty_images;
 
     while (!unregistered.empty()) {
         std::vector<Index> next_ids = select_next_images(scene, unregistered, config);
@@ -247,6 +288,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                 scene.images[proposal.image_id].pose = proposal.pose.pose;
                 scene.images[proposal.image_id].registered = true;
                 last_registered.push_back(proposal.image_id);
+                dirty_images.push_back(proposal.image_id);
                 unregistered.erase(proposal.image_id);
                 ++registered_count;
                 progress.advance();
@@ -280,6 +322,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                         scene, config.max_reproj_error, config.min_angle_deg,
                         config.mult_depth_near, config.mult_depth_far);
                     last_registered.clear();
+                    dirty_images.clear();
                     avg_inliers.clear();
                     since_full_ba = 0;
                     if (n_ba + 1 < config.full_ba_every.size()) ++n_ba;
@@ -289,9 +332,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
 
                 if (config.local_ba_every > 0 &&
                     last_registered.size() >= config.local_ba_every) {
-                    triangulate_tracks(
-                        scene, true, config.max_reproj_error,
-                        config.min_angle_deg);
+                    triangulate_dirty_tracks(scene, dirty_images, config);
                     BundleOptions ba;
                     ba.optimizer = config.local_ba;
                     ba.optimize_all_registered = false;
@@ -299,21 +340,25 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                     ba.fixed_image_ids =
                         build_local_window(scene, last_registered, config);
                     run_required_bundle_adjustment(scene, ba, "local");
+                    const std::vector<Index> affected_tracks =
+                        collect_tracks_for_images(scene, last_registered);
                     filter_tracks(
-                        scene, config.max_reproj_error, config.min_angle_deg,
-                        config.mult_depth_near, config.mult_depth_far);
+                        scene, affected_tracks, config.max_reproj_error,
+                        config.min_angle_deg);
                     last_registered.clear();
+                    dirty_images.clear();
                     stop_candidate_band = true;
                     break;
                 }
             }
         }
         if (!stop_candidate_band && registered_count > start_count) {
-            triangulate_tracks(
-                scene, true, config.max_reproj_error, config.min_angle_deg);
+            const std::vector<Index> dirty_tracks =
+                triangulate_dirty_tracks(scene, dirty_images, config);
             filter_tracks(
-                scene, config.max_reproj_error, config.min_angle_deg,
-                config.mult_depth_near, config.mult_depth_far);
+                scene, dirty_tracks, config.max_reproj_error,
+                config.min_angle_deg);
+            dirty_images.clear();
         }
 
         if (registered_count == start_count) break;
@@ -338,6 +383,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
         since_full_ba = 0;
         n_ba = 0;
         last_registered.clear();
+        dirty_images.clear();
         avg_inliers.clear();
     }
     if (config.checkpoint_callback &&

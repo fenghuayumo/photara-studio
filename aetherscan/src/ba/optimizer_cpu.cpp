@@ -74,10 +74,21 @@ struct SchurPattern {
     std::vector<std::size_t> row_offsets;
     std::vector<Index> columns;
     std::vector<std::size_t> diagonal_blocks;
+    // Full-matrix block index -> packed upper-triangle block index.
+    // Lower-triangle entries contain max(); they are materialized only after
+    // the thread-local upper triangle has been reduced.
+    std::vector<std::size_t> upper_indices;
+    std::size_t upper_block_count{0};
 };
 
 struct ExplicitSchur {
     std::vector<double> blocks;
+};
+
+struct AssemblyWorkspace {
+    std::vector<double> local_cameras;
+    std::vector<double> local_intrinsics;
+    std::vector<double> local_schur;
 };
 
 Adjacency build_adjacency(const Problem& problem) {
@@ -130,6 +141,15 @@ SchurPattern build_schur_pattern(const Problem& problem, const Adjacency& adjace
             static_cast<std::size_t>(std::lower_bound(row.begin(), row.end(), static_cast<Index>(camera)) - row.begin());
     }
     pattern.row_offsets.back() = pattern.columns.size();
+    pattern.upper_indices.assign(
+        pattern.columns.size(), std::numeric_limits<std::size_t>::max());
+    for (std::size_t row = 0; row < problem.poses.size(); ++row) {
+        for (std::size_t cursor = pattern.row_offsets[row];
+             cursor < pattern.row_offsets[row + 1]; ++cursor) {
+            if (pattern.columns[cursor] >= row)
+                pattern.upper_indices[cursor] = pattern.upper_block_count++;
+        }
+    }
     return pattern;
 }
 
@@ -141,10 +161,10 @@ std::size_t find_schur_block(
     return pattern.row_offsets[row] + static_cast<std::size_t>(found - begin);
 }
 
-ExplicitSchur assemble_explicit_schur(
+void assemble_explicit_schur(
     const Problem& problem, const Adjacency& adjacency, const SchurPattern& pattern,
-    const System& system) {
-    ExplicitSchur reduced;
+    const System& system, AssemblyWorkspace& workspace,
+    ExplicitSchur& reduced) {
     reduced.blocks.assign(pattern.columns.size() * pose_block_size, 0.0);
     for (std::size_t camera = 0; camera < problem.poses.size(); ++camera)
         std::copy_n(system.camera_hessian.data() + camera * pose_block_size, pose_block_size,
@@ -152,27 +172,40 @@ ExplicitSchur assemble_explicit_schur(
 
     int thread_count = 1;
 #if defined(AETHERSCAN_HAS_OPENMP)
-    const std::size_t values_per_thread = std::max<std::size_t>(1, reduced.blocks.size());
-    const std::size_t memory_limited_threads = std::max<std::size_t>(1, 32'000'000 / values_per_thread);
-    thread_count = std::min<int>(omp_get_max_threads(), static_cast<int>(memory_limited_threads));
+    const std::size_t local_values =
+        pattern.upper_block_count * pose_block_size;
+    const std::size_t values_per_thread =
+        std::max<std::size_t>(1, local_values);
+    const std::size_t memory_limited_threads =
+        std::max<std::size_t>(1, 32'000'000 / values_per_thread);
+    thread_count = std::min<int>(
+        omp_get_max_threads(), static_cast<int>(memory_limited_threads));
 #endif
-    std::vector<double> local(static_cast<std::size_t>(thread_count) * reduced.blocks.size(), 0.0);
+    // Retain the large thread-local matrices across LM iterations. Point-major
+    // traversal is important here: it keeps inverse/cross accesses contiguous.
+    workspace.local_schur.assign(
+        static_cast<std::size_t>(thread_count) * local_values, 0.0);
 #if defined(AETHERSCAN_HAS_OPENMP)
 #pragma omp parallel for schedule(dynamic, 64) num_threads(thread_count)
 #endif
     for (std::int64_t point_signed = 0;
-         point_signed < static_cast<std::int64_t>(problem.points.size()); ++point_signed) {
+         point_signed < static_cast<std::int64_t>(problem.points.size());
+         ++point_signed) {
         const auto point = static_cast<std::size_t>(point_signed);
         int thread = 0;
 #if defined(AETHERSCAN_HAS_OPENMP)
         thread = omp_get_thread_num();
 #endif
-        double* destination = local.data() + static_cast<std::size_t>(thread) * reduced.blocks.size();
-        const double* inverse = system.point_inverse.data() + point * point_block_size;
+        double* destination = workspace.local_schur.data() +
+            static_cast<std::size_t>(thread) * local_values;
+        const double* inverse =
+            system.point_inverse.data() + point * point_block_size;
         for (std::size_t first = adjacency.point_offsets[point];
              first < adjacency.point_offsets[point + 1]; ++first) {
-            const std::size_t observation_first = adjacency.point_observations[first];
-            const Index camera_first = problem.observations.camera[observation_first];
+            const std::size_t observation_first =
+                adjacency.point_observations[first];
+            const Index camera_first =
+                problem.observations.camera[observation_first];
             const double* cross_first = system.cross.data() + observation_first * cross_block_size;
             double transformed[cross_block_size]{};
             for (std::size_t row = 0; row < pose_size; ++row)
@@ -184,9 +217,14 @@ ExplicitSchur assemble_explicit_schur(
                  second < adjacency.point_offsets[point + 1]; ++second) {
                 const std::size_t observation_second = adjacency.point_observations[second];
                 const Index camera_second = problem.observations.camera[observation_second];
+                // The reduced camera system is symmetric. Assemble only its
+                // upper triangle, then materialize the lower triangle below.
+                if (camera_second < camera_first) continue;
                 const double* cross_second = system.cross.data() + observation_second * cross_block_size;
+                const std::size_t full_block = find_schur_block(
+                    pattern, camera_first, camera_second);
                 double* block = destination +
-                    find_schur_block(pattern, camera_first, camera_second) * pose_block_size;
+                    pattern.upper_indices[full_block] * pose_block_size;
                 for (std::size_t row = 0; row < pose_size; ++row)
                     for (std::size_t column = 0; column < pose_size; ++column)
                         for (std::size_t k = 0; k < point_size; ++k)
@@ -196,18 +234,58 @@ ExplicitSchur assemble_explicit_schur(
             }
         }
     }
+
+    // Only the upper triangle was evaluated. Reduce it into the persistent
+    // result, then materialize the lower triangle by block transpose.
+#if defined(AETHERSCAN_HAS_OPENMP)
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
+    for (std::int64_t row_signed = 0;
+         row_signed < static_cast<std::int64_t>(problem.poses.size());
+         ++row_signed) {
+        const auto row = static_cast<std::size_t>(row_signed);
+        for (std::size_t cursor = pattern.row_offsets[row];
+             cursor < pattern.row_offsets[row + 1]; ++cursor) {
+            const auto column = static_cast<std::size_t>(pattern.columns[cursor]);
+            if (column < row) continue;
+            const std::size_t upper = pattern.upper_indices[cursor];
+            double* block =
+                reduced.blocks.data() + cursor * pose_block_size;
+            for (std::size_t value = 0; value < pose_block_size; ++value) {
+                double sum = block[value];
+                for (int thread = 0; thread < thread_count; ++thread)
+                    sum += workspace.local_schur
+                        [static_cast<std::size_t>(thread) *
+                             local_values +
+                         upper * pose_block_size + value];
+                block[value] = sum;
+            }
+        }
+    }
 #if defined(AETHERSCAN_HAS_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
-    for (std::int64_t value_signed = 0;
-         value_signed < static_cast<std::int64_t>(reduced.blocks.size()); ++value_signed) {
-        const auto value = static_cast<std::size_t>(value_signed);
-        double sum = reduced.blocks[value];
-        for (int thread = 0; thread < thread_count; ++thread)
-            sum += local[static_cast<std::size_t>(thread) * reduced.blocks.size() + value];
-        reduced.blocks[value] = sum;
+    for (std::int64_t row_signed = 0;
+         row_signed < static_cast<std::int64_t>(problem.poses.size());
+         ++row_signed) {
+        const auto row = static_cast<std::size_t>(row_signed);
+        for (std::size_t cursor = pattern.row_offsets[row];
+             cursor < pattern.row_offsets[row + 1]; ++cursor) {
+            const auto column = static_cast<std::size_t>(pattern.columns[cursor]);
+            if (column >= row) continue;
+            const std::size_t upper = find_schur_block(
+                pattern, column, static_cast<Index>(row));
+            double* lower_block =
+                reduced.blocks.data() + cursor * pose_block_size;
+            const double* upper_block =
+                reduced.blocks.data() + upper * pose_block_size;
+            for (std::size_t block_row = 0; block_row < pose_size; ++block_row)
+                for (std::size_t block_column = 0;
+                     block_column < pose_size; ++block_column)
+                    lower_block[block_row * pose_size + block_column] =
+                        upper_block[block_column * pose_size + block_row];
+        }
     }
-    return reduced;
 }
 
 bool invert_symmetric_3x3(const double* matrix, double* inverse) {
@@ -315,7 +393,7 @@ bool solve_spd(
     return true;
 }
 
-System assemble_system(
+void assemble_system(
     const Problem& problem,
     const LinearizationOutput& linearization,
     const Adjacency& adjacency,
@@ -323,10 +401,11 @@ System assemble_system(
     const bool fix_first_point,
     const bool optimize_points,
     const bool optimize_rotations,
-    const std::size_t intrinsic_dof) {
+    const std::size_t intrinsic_dof,
+    AssemblyWorkspace& workspace,
+    System& system) {
     const std::size_t camera_count = problem.poses.size();
     const std::size_t point_count = problem.points.size();
-    System system;
     system.camera_hessian.assign(camera_count * pose_block_size, 0.0);
     system.camera_rhs.assign(camera_count * pose_size, 0.0);
     system.point_inverse.assign(point_count * point_block_size, 0.0);
@@ -343,6 +422,11 @@ System assemble_system(
             problem.observations.size() * pose_size * intrinsic_dof, 0.0);
         system.point_intrinsic_cross.assign(
             problem.observations.size() * point_size * intrinsic_dof, 0.0);
+    } else {
+        system.intrinsic_hessian.clear();
+        system.intrinsic_rhs.clear();
+        system.pose_intrinsic_cross.clear();
+        system.point_intrinsic_cross.clear();
     }
 
     int thread_count = 1;
@@ -351,9 +435,9 @@ System assemble_system(
     const std::size_t memory_limited_threads = std::max<std::size_t>(1, 32'000'000 / values_per_thread);
     thread_count = std::min<int>(omp_get_max_threads(), static_cast<int>(memory_limited_threads));
 #endif
-    std::vector<double> local_cameras(
+    workspace.local_cameras.assign(
         static_cast<std::size_t>(thread_count) * camera_count * 42, 0.0);
-    std::vector<double> local_intrinsics(
+    workspace.local_intrinsics.assign(
         intrinsic_dof > 0
             ? static_cast<std::size_t>(thread_count) *
                   problem.intrinsics.size() *
@@ -371,11 +455,11 @@ System assemble_system(
 #if defined(AETHERSCAN_HAS_OPENMP)
         thread = omp_get_thread_num();
 #endif
-        double* camera_accumulator = local_cameras.data() +
+        double* camera_accumulator = workspace.local_cameras.data() +
             static_cast<std::size_t>(thread) * camera_count * 42;
         double* intrinsic_accumulator =
             intrinsic_dof > 0
-                ? local_intrinsics.data() +
+                ? workspace.local_intrinsics.data() +
                       static_cast<std::size_t>(thread) *
                           problem.intrinsics.size() *
                           (intrinsic_dof * intrinsic_dof + intrinsic_dof)
@@ -479,7 +563,7 @@ System assemble_system(
         double* destination_hessian = system.camera_hessian.data() + camera * pose_block_size;
         double* destination_rhs = system.camera_rhs.data() + camera * pose_size;
         for (int thread = 0; thread < thread_count; ++thread) {
-            const double* source = local_cameras.data() +
+            const double* source = workspace.local_cameras.data() +
                 static_cast<std::size_t>(thread) * camera_count * 42 + camera * 42;
             for (std::size_t i = 0; i < pose_block_size; ++i) destination_hessian[i] += source[i];
             for (std::size_t i = 0; i < pose_size; ++i) destination_rhs[i] += source[pose_block_size + i];
@@ -510,7 +594,7 @@ System assemble_system(
                 system.intrinsic_rhs.data() + group * intrinsic_dof;
             for (int thread = 0; thread < thread_count; ++thread) {
                 const double* source =
-                    local_intrinsics.data() +
+                    workspace.local_intrinsics.data() +
                     (static_cast<std::size_t>(thread) *
                          problem.intrinsics.size() +
                      group) *
@@ -571,7 +655,6 @@ System assemble_system(
             }
         }
     }
-    return system;
 }
 
 void schur_rhs(
@@ -1575,22 +1658,30 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         linearized_total_cost(problem, linearization, options);
     summary.final_cost = summary.initial_cost;
     double damping = options.initial_damping;
+    // Keep the large observation-sized buffers alive across LM iterations.
+    // assign() below clears their contents while retaining capacity.
+    System system;
+    AssemblyWorkspace assembly_workspace;
+    ExplicitSchur explicit_schur;
 
     for (std::size_t iteration = 0; iteration < options.maximum_iterations; ++iteration) {
         auto stage_started = std::chrono::steady_clock::now();
-        System system = assemble_system(
+        assemble_system(
             problem, linearization, adjacency, damping,
             options.fix_first_point, options.optimize_points,
-            options.optimize_rotations, block_dof);
+            options.optimize_rotations, block_dof, assembly_workspace,
+            system);
         apply_focal_prior(system, problem, options);
         const bool use_dense_intrinsic_schur =
             block_dof > 0 &&
             problem.intrinsics.size() <= dense_intrinsic_group_limit;
-        ExplicitSchur explicit_schur =
-            block_dof == 0 || use_dense_intrinsic_schur
-                ? assemble_explicit_schur(
-                      problem, adjacency, schur_pattern, system)
-                : ExplicitSchur{};
+        if (block_dof == 0 || use_dense_intrinsic_schur) {
+            assemble_explicit_schur(
+                problem, adjacency, schur_pattern, system,
+                assembly_workspace, explicit_schur);
+        } else {
+            explicit_schur.blocks.clear();
+        }
         IntrinsicSchur intrinsic_schur =
             use_dense_intrinsic_schur
                 ? build_intrinsic_schur(problem, adjacency, system)
