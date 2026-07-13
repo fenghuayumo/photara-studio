@@ -105,12 +105,6 @@ if(AETHERSCAN_ENABLE_FEATURES)
         POSITION_INDEPENDENT_CODE ON
         LINKER_LANGUAGE C)
 
-    set(AETHERSCAN_ONNXRUNTIME_ROOT "" CACHE PATH "Optional ONNX Runtime SDK root")
-    find_path(AETHERSCAN_ONNXRUNTIME_INCLUDE onnxruntime_cxx_api.h
-        HINTS "${AETHERSCAN_ONNXRUNTIME_ROOT}/include")
-    find_library(AETHERSCAN_ONNXRUNTIME_LIBRARY onnxruntime
-        HINTS "${AETHERSCAN_ONNXRUNTIME_ROOT}/lib")
-
     add_library(aetherscan_features
         src/io/image_freeimage.cpp
         src/features/extractor.cpp
@@ -150,22 +144,27 @@ if(AETHERSCAN_ENABLE_FEATURES)
                     "$<TARGET_FILE_DIR:aetherscan_features>")
         endif()
     endif()
-    if(AETHERSCAN_ONNXRUNTIME_INCLUDE AND AETHERSCAN_ONNXRUNTIME_LIBRARY)
-        target_include_directories(aetherscan_features PRIVATE ${AETHERSCAN_ONNXRUNTIME_INCLUDE})
-        target_link_libraries(aetherscan_features PRIVATE ${AETHERSCAN_ONNXRUNTIME_LIBRARY})
+    if(AETHERSCAN_HAS_ONNXRUNTIME AND TARGET onnxruntime::onnxruntime)
+        target_link_libraries(aetherscan_features PRIVATE onnxruntime::onnxruntime)
         target_compile_definitions(aetherscan_features PRIVATE AETHERSCAN_HAS_ONNXRUNTIME=1)
-        if(WIN32 AND EXISTS "${AETHERSCAN_ONNXRUNTIME_ROOT}/lib/onnxruntime.dll")
-            add_custom_command(TARGET aetherscan_features POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${AETHERSCAN_ONNXRUNTIME_ROOT}/lib/onnxruntime.dll"
-                    "$<TARGET_FILE_DIR:aetherscan_features>/onnxruntime.dll")
-            if(EXISTS "${AETHERSCAN_ONNXRUNTIME_ROOT}/lib/onnxruntime_providers_shared.dll")
-                add_custom_command(TARGET aetherscan_features POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        "${AETHERSCAN_ONNXRUNTIME_ROOT}/lib/onnxruntime_providers_shared.dll"
-                        "$<TARGET_FILE_DIR:aetherscan_features>/onnxruntime_providers_shared.dll")
-            endif()
+        if(WIN32)
+            set(_ort_lib_dir "${AETHERSCAN_ONNXRUNTIME_ROOT}/lib")
+            foreach(_ort_dll IN ITEMS
+                    onnxruntime.dll
+                    onnxruntime_providers_shared.dll
+                    onnxruntime_providers_cuda.dll)
+                if(EXISTS "${_ort_lib_dir}/${_ort_dll}")
+                    add_custom_command(TARGET aetherscan_features POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${_ort_lib_dir}/${_ort_dll}"
+                            "$<TARGET_FILE_DIR:aetherscan_features>/${_ort_dll}")
+                endif()
+            endforeach()
         endif()
+    elseif(AETHERSCAN_ENABLE_ONNX)
+        message(WARNING
+            "AETHERSCAN_ENABLE_ONNX=ON but onnxruntime::onnxruntime is unavailable; "
+            "LightGlue will not be compiled in")
     endif()
     if(MSVC)
         target_compile_options(aetherscan_features PRIVATE /W4 /permissive- /EHsc)

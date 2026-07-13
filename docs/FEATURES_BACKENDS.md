@@ -23,9 +23,11 @@ extractors:  siftgpu (default) | sift | superpoint(stub)
 matchers:    siftgpu (default) | mutual_ratio | lightglue
 ```
 
-`lightglue` is a fused **image-pair** pipeline (not a descriptor matcher):
-`images[2,C,H,W] → keypoints, matches, mscores`. It is constructed with an
-ONNX model path (requires `AETHERSCAN_ONNXRUNTIME_ROOT`).
+`lightglue` requires a build with `AETHERSCAN_ENABLE_ONNX=ON` (see root
+`CMakeLists.txt` / `cmake/FetchOnnxRuntime.cmake`). It is a fused **image-pair**
+pipeline (not a descriptor matcher):
+`images[2,C,H,W] → keypoints, matches, mscores`. Constructed with an ONNX model
+path at runtime.
 
 ```cpp
 features::ensure_builtin_feature_backends();

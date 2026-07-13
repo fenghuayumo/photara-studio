@@ -67,12 +67,39 @@ cmake -S . -B build-cpu -DAETHERSCAN_ENABLE_CUDA=OFF `
 cmake --build build-cpu --config Release --parallel
 ```
 
-启用 LightGlue 时传入 ONNX Runtime SDK：
+启用 LightGlue / ONNX（默认关闭，与「可选依赖」一致；COLMAP 风格开关）：
 
 ```powershell
+# A) 本地已有 SDK（推荐，跳过下载）
 cmake -S . -B build `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-  -DAETHERSCAN_ONNXRUNTIME_ROOT="C:/sdk/onnxruntime-win-x64-gpu-1.20.1"
+  -DAETHERSCAN_ENABLE_ONNX=ON `
+  -DAETHERSCAN_FETCH_ONNX=OFF `
+  -DAETHERSCAN_ONNXRUNTIME_ROOT="D:/sdk/onnxruntime-win-x64-gpu-1.20.1"
+
+# B) 自动 FetchContent 拉取官方包（需能访问 GitHub）
+cmake -S . -B build `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DAETHERSCAN_ENABLE_ONNX=ON `
+  -DAETHERSCAN_FETCH_ONNX=ON `
+  -DAETHERSCAN_ONNX_VERSION=1.20.1
+```
+
+| CMake 选项 | 默认 | 含义 |
+|------------|------|------|
+| `AETHERSCAN_ENABLE_ONNX` | OFF | 是否编译 ONNX/LightGlue |
+| `AETHERSCAN_FETCH_ONNX` | ON | 开启 ONNX 时是否自动下载 SDK |
+| `AETHERSCAN_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
+| `AETHERSCAN_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
+
+运行时仍需传入模型，例如：
+
+```powershell
+.\build\aetherscan\Release\aetherscan.exe `
+  --matcher lightglue `
+  --lightglue-model D:\ScanVideo\flower\models\superpoint_1024_lightglue_end2end.onnx `
+  --lightglue-extractor superpoint `
+  ...
 ```
 
 ## 运行
