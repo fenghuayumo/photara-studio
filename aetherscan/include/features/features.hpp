@@ -122,7 +122,7 @@ public:
     [[nodiscard]] static bool is_built() noexcept;
     [[nodiscard]] bool is_available() const noexcept;
     [[nodiscard]] std::string_view name() const override {
-        return "siftgpu";
+        return "gpu_mutual_ratio";
     }
     [[nodiscard]] bool requires_owner_thread() const override { return true; }
     [[nodiscard]] std::unique_ptr<FeatureMatcher> clone() const override;
@@ -254,7 +254,9 @@ public:
     [[nodiscard]] bool is_available() const noexcept;
     [[nodiscard]] const LightGlueOptions& options() const;
 
-    [[nodiscard]] std::string_view name() const override { return "lightglue"; }
+    [[nodiscard]] std::string_view name() const override {
+        return "lightglue_end2end";
+    }
     // Ort::Session::Run is not safe for concurrent use of one session.
     [[nodiscard]] bool requires_owner_thread() const { return true; }
 

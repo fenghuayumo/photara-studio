@@ -1,6 +1,7 @@
 #include "sfm/frontend.hpp"
 
 #include "core/logging.hpp"
+#include "features/compat.hpp"
 #include "features/features.hpp"
 #include "features/registry.hpp"
 #include "io/image.hpp"
@@ -75,16 +76,55 @@ void append_relative_options(
     key.append(options.degenerate_weight_scale);
 }
 
+// Canonicalize feature-backend selection without changing the default
+// siftgpu × gpu_mutual_ratio path when pipeline is empty / "none".
+void normalize_feature_selection(FrontEndOptions& options) {
+    if (options.pipeline == "none") options.pipeline.clear();
+
+    // Legacy: --matcher siftgpu meant GPU descriptor mutual-ratio, not "SIFT match".
+    if (options.matcher == "siftgpu")
+        options.matcher = "gpu_mutual_ratio";
+
+    // Legacy CLI: --matcher lightglue → fused pair pipeline.
+    if (options.matcher == "lightglue") {
+        if (!options.pipeline.empty() &&
+            options.pipeline != features::kLightGlueEnd2EndPipeline)
+            throw std::invalid_argument(
+                "Conflicting --matcher lightglue and --pipeline " +
+                options.pipeline);
+        options.pipeline = std::string(features::kLightGlueEnd2EndPipeline);
+    }
+
+    if (options.pipeline.empty()) return;
+
+    if (!features::is_pair_pipeline_name(options.pipeline))
+        throw std::invalid_argument(
+            "Unknown --pipeline '" + options.pipeline +
+            "' (supported: none, lightglue_end2end)");
+
+    // Canonical fingerprint fields for fused LightGlue.
+    if (options.pipeline == features::kLightGlueEnd2EndPipeline) {
+        options.matcher = "lightglue";
+        options.compress_descriptors_u8 = false;
+    }
+}
+
+[[nodiscard]] bool uses_pair_feature_pipeline(
+    const FrontEndOptions& options) noexcept {
+    return features::is_pair_pipeline_name(options.pipeline);
+}
+
 FrontEndStageKeys make_stage_keys(
     const FrontEndOptions& options,
     const ImageSetFingerprint& images) {
     FingerprintBuilder features;
-    features.append_string("aetherscan-features-v5");
+    features.append_string("aetherscan-features-v6");
     append_cache_build_identity(features);
     features.append(images.value);
     features.append_string(options.extractor);
     features.append(options.sift_contrast_threshold);
     features.append(options.max_features);
+    features.append_string(options.pipeline);
     features.append_string(options.matcher);
     features.append_string(options.lightglue_model_path.string());
     features.append_string(options.lightglue_extractor);
@@ -94,10 +134,11 @@ FrontEndStageKeys make_stage_keys(
     features.append(options.lightglue_use_cuda);
 
     FingerprintBuilder matches;
-    matches.append_string("aetherscan-matches-v5");
+    matches.append_string("aetherscan-matches-v6");
     append_cache_build_identity(matches);
     matches.append(features.value());
     matches.append(options.neighbor_window);
+    matches.append_string(options.pipeline);
     matches.append_string(options.matcher);
     matches.append(options.match_ratio);
     matches.append(options.mutual_check);
@@ -730,25 +771,30 @@ void match_and_verify_lightglue(
                  merge_lightglue_keypoint(features1, kp1.x, kp1.y),
                  match.score});
         }
+        match_progress.advance();
     }
+    match_progress.finish();
 
-    // Phase 2: geometry verify in parallel (keypoints are now fixed).
-    auto& pool = parallel::global_thread_pool();
-    parallel::FutureGroup verify_tasks;
-    verify_tasks.reserve(candidates.size());
+    // Cameras must exist before geometry verify (uses scene.cameras[camera_id]).
+    // Image sizes are only known after phase-1 LightGlue merges.
+    initialize_cameras(
+        scene, options.focal_pixels, options.trust_focal_pixels);
+
+    // Phase 2: sequential geometry verify. Parallel submit previously crashed
+    // (0xC0000005) under LightGlue; keep this path simple and robust.
+    core::ProgressReporter geometry_progress(
+        "verify pair geometry", candidates.size());
     for (std::size_t pair_index = 0; pair_index < candidates.size();
          ++pair_index) {
-        verify_tasks.submit(pool, [&, pair_index]() {
-            const PairCandidate candidate = candidates[pair_index];
-            GeometryVerifyResult verified = verify_pair_geometry(
-                scene, candidate, raw_pairs[pair_index].matches,
-                options.relative);
-            diagnostics[pair_index] = verified.diagnostics;
-            if (verified.pair) pair_slots[pair_index] = *verified.pair;
-            match_progress.advance();
-        });
+        const PairCandidate candidate = candidates[pair_index];
+        GeometryVerifyResult verified = verify_pair_geometry(
+            scene, candidate, raw_pairs[pair_index].matches,
+            options.relative);
+        diagnostics[pair_index] = verified.diagnostics;
+        if (verified.pair) pair_slots[pair_index] = *verified.pair;
+        geometry_progress.advance();
     }
-    verify_tasks.wait();
+    geometry_progress.finish();
     (void)worker_threads;
 }
 
@@ -762,11 +808,7 @@ FrontEndResult run_frontend(
     core::StageScope frontend_stage("sfm.frontend");
 
     FrontEndOptions runtime_options = options;
-    // Fused LightGlue has no descriptors for BoW retrieval.
-    if (runtime_options.matcher == "lightglue") {
-        runtime_options.augment_sequential_with_retrieval = false;
-        runtime_options.compress_descriptors_u8 = false;
-    }
+    normalize_feature_selection(runtime_options);
     if (runtime_options.retrieval.vocabulary_path.empty() &&
         !runtime_options.checkpoint.directory.empty()) {
         runtime_options.retrieval.vocabulary_path =
@@ -809,15 +851,15 @@ FrontEndResult run_frontend(
     features::ensure_builtin_feature_backends();
     const unsigned threads = scene.thread_count;
 
-    if (runtime_options.matcher == "lightglue") {
+    if (uses_pair_feature_pipeline(runtime_options)) {
         if (runtime_options.lightglue_model_path.empty())
             throw std::runtime_error(
-                "LightGlue requires --lightglue-model / "
+                "pipeline lightglue_end2end requires --lightglue-model / "
                 "FrontEndOptions::lightglue_model_path");
         if (!features::LightGluePipeline::is_built())
             throw std::runtime_error(
                 "LightGlue requires ONNX Runtime "
-                "(AETHERSCAN_ONNXRUNTIME_ROOT)");
+                "(AETHERSCAN_ENABLE_ONNX / AETHERSCAN_ONNXRUNTIME_ROOT)");
 
         const auto extract_started = std::chrono::steady_clock::now();
         const bool feature_cache_hit = checkpoints.load_scene(
@@ -839,8 +881,38 @@ FrontEndResult run_frontend(
                                             .count();
 
         const auto match_started = std::chrono::steady_clock::now();
-        auto candidates =
-            build_pair_list(scene.images.size(), runtime_options.neighbor_window);
+        const bool use_retrieval =
+            runtime_options.retrieval.top_k > 0 &&
+            image_paths.size() >= runtime_options.retrieval_min_images &&
+            (runtime_options.neighbor_window == 0 ||
+             runtime_options.augment_sequential_with_retrieval);
+        std::vector<PairCandidate> candidates;
+        if (use_retrieval) {
+            // Same pair proposal as the default SiftGPU frontend: sequential
+            // window + BoW. Descriptors here are discarded after retrieval.
+            Scene retrieval_scene;
+            retrieval_scene.thread_count = scene.thread_count;
+            features::SiftGpuOptions siftgpu_options;
+            siftgpu_options.peak_threshold =
+                static_cast<float>(options.sift_contrast_threshold);
+            if (options.max_features > 0)
+                siftgpu_options.maximum_features = options.max_features;
+            features::SiftGpuExtractor extractor(siftgpu_options);
+            if (!extractor.is_available())
+                throw std::runtime_error(
+                    "LightGlue with retrieval requires SiftGPU/CUDA for "
+                    "BoW pair proposals");
+            core::ProgressReporter retrieval_extract(
+                "extract features (lightglue retrieval)", image_paths.size());
+            extract_features_siftgpu_coordinator(
+                retrieval_scene, image_paths, extractor, options.max_features,
+                retrieval_extract);
+            retrieval_extract.finish();
+            candidates = build_pair_candidates(retrieval_scene, runtime_options);
+        } else {
+            candidates = build_pair_list(
+                scene.images.size(), runtime_options.neighbor_window);
+        }
         std::vector<RawPairMatches> raw_pairs;
         std::vector<PairDiagnostics> diagnostics(candidates.size());
         bool match_cache_hit =
@@ -870,7 +942,6 @@ FrontEndResult run_frontend(
             match_and_verify_lightglue(
                 scene, candidates, pipeline, runtime_options, threads,
                 raw_pairs, diagnostics, pair_slots, match_progress);
-            match_progress.finish();
             scene.pairs.clear();
             scene.pairs.reserve(pair_slots.size());
             for (ImagePair& pair : pair_slots) {
@@ -932,7 +1003,7 @@ FrontEndResult run_frontend(
         for (const Image& image : scene.images)
             feature_count += image.features.keypoints.size();
         core::Logger::instance().info(
-            "frontend lightglue: features=", feature_count,
+            "frontend pipeline=lightglue_end2end: features=", feature_count,
             " candidates=", candidates.size(),
             " accepted_pairs=", scene.pairs.size(),
             " extract_s=", result.timing.extract_seconds,
@@ -941,26 +1012,30 @@ FrontEndResult run_frontend(
         return result;
     }
 
+    features::validate_extractor_matcher_combo(
+        runtime_options.extractor, runtime_options.matcher);
+
     std::unique_ptr<features::FeatureExtractor> extractor;
-    if (options.extractor == "sift") {
+    if (runtime_options.extractor == "sift") {
         features::SiftOptions sift_options;
-        sift_options.contrast_threshold = options.sift_contrast_threshold;
-        if (options.max_features > 0) {
-            sift_options.maximum_features = options.max_features;
+        sift_options.contrast_threshold = runtime_options.sift_contrast_threshold;
+        if (runtime_options.max_features > 0) {
+            sift_options.maximum_features = runtime_options.max_features;
             sift_options.max_features_per_cell =
                 (std::max)(
-                    std::size_t{1}, static_cast<std::size_t>(options.max_features) / 9);
+                    std::size_t{1},
+                    static_cast<std::size_t>(runtime_options.max_features) / 9);
             sift_options.min_features_per_cell =
                 (std::min)(sift_options.min_features_per_cell,
                            sift_options.max_features_per_cell);
         }
         extractor = std::make_unique<features::SiftExtractor>(sift_options);
-    } else if (options.extractor == "siftgpu") {
+    } else if (runtime_options.extractor == "siftgpu") {
         features::SiftGpuOptions siftgpu_options;
         siftgpu_options.peak_threshold =
-            static_cast<float>(options.sift_contrast_threshold);
-        if (options.max_features > 0)
-            siftgpu_options.maximum_features = options.max_features;
+            static_cast<float>(runtime_options.sift_contrast_threshold);
+        if (runtime_options.max_features > 0)
+            siftgpu_options.maximum_features = runtime_options.max_features;
         extractor =
             std::make_unique<features::SiftGpuExtractor>(siftgpu_options);
         if (!static_cast<features::SiftGpuExtractor*>(extractor.get())
@@ -968,7 +1043,7 @@ FrontEndResult run_frontend(
             throw std::runtime_error(
                 "SiftGPU extractor requested but CUDA context is unavailable");
     } else {
-        extractor = features::create_extractor(options.extractor);
+        extractor = features::create_extractor(runtime_options.extractor);
     }
     std::unique_ptr<features::FeatureMatcher> matcher;
     if (runtime_options.matcher == "mutual_ratio") {
@@ -976,7 +1051,7 @@ FrontEndResult run_frontend(
         matcher_options.ratio_threshold = runtime_options.match_ratio;
         matcher_options.mutual_check = runtime_options.mutual_check;
         matcher = std::make_unique<features::MutualRatioMatcher>(matcher_options);
-    } else if (runtime_options.matcher == "siftgpu") {
+    } else if (runtime_options.matcher == "gpu_mutual_ratio") {
         features::SiftGpuMatcherOptions matcher_options;
         matcher_options.ratio_threshold = runtime_options.match_ratio;
         matcher_options.mutual_check = runtime_options.mutual_check;
@@ -987,7 +1062,8 @@ FrontEndResult run_frontend(
         if (!static_cast<features::SiftGpuMatcher*>(matcher.get())
                  ->is_available())
             throw std::runtime_error(
-                "SiftGPU matcher requested but CUDA context is unavailable");
+                "gpu_mutual_ratio matcher requested but CUDA context is "
+                "unavailable");
     } else {
         matcher = features::create_matcher(runtime_options.matcher);
     }

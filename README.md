@@ -96,12 +96,15 @@ cmake -S . -B build `
 
 ```powershell
 .\build\aetherscan\Release\aetherscan.exe `
-  --matcher lightglue `
+  --pipeline lightglue_end2end `
   --lightglue-model D:\ScanVideo\flower\models\superpoint_1024_lightglue_end2end.onnx `
   --lightglue-extractor superpoint `
   ...
 ```
 
+默认前端仍是 `siftgpu × gpu_mutual_ratio`（不设 `--pipeline`）。
+`--matcher siftgpu` 会归一成 `gpu_mutual_ratio`；`--matcher lightglue` 仍可作为
+`lightglue_end2end` 的旧别名。
 ## 运行
 
 ```powershell

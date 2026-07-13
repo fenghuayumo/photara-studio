@@ -304,13 +304,16 @@ void register_siftgpu_feature_backends() {
             throw std::runtime_error("SiftGPU backend is not available on this machine");
         return std::unique_ptr<FeatureExtractor>(std::move(extractor));
     });
-    register_matcher("siftgpu", [] {
+    auto make_gpu_mutual_ratio = [] {
         auto matcher = std::make_unique<SiftGpuMatcher>();
         if (!matcher->is_available())
             throw std::runtime_error(
-                "SiftGPU matcher backend is not available on this machine");
+                "gpu_mutual_ratio matcher is not available on this machine");
         return std::unique_ptr<FeatureMatcher>(std::move(matcher));
-    });
+    };
+    register_matcher("gpu_mutual_ratio", make_gpu_mutual_ratio);
+    // Legacy alias: SIFT is an extractor; matching is descriptor mutual-ratio.
+    register_matcher("siftgpu", make_gpu_mutual_ratio);
 }
 
 }  // namespace aetherscan::features

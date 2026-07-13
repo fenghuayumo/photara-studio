@@ -37,7 +37,8 @@ struct ReconstructCli {
     double sift_contrast{0.005};
     std::filesystem::path cache_dir;
     std::string extractor{"siftgpu"};
-    std::string matcher{"siftgpu"};
+    std::string matcher{"gpu_mutual_ratio"};
+    std::string pipeline;  // empty / none | lightglue_end2end
     unsigned max_features{27000U};
     std::filesystem::path lightglue_model;
     std::string lightglue_extractor{"disk"};
@@ -123,6 +124,10 @@ struct Utf8Argv {
 
 void print_help(const cxxopts::Options& options) {
     std::cout << options.help() << '\n'
+              << "Feature backends:\n"
+              << "  default   --extractor siftgpu --matcher gpu_mutual_ratio\n"
+              << "  compose   --extractor <name> --matcher <name>\n"
+              << "  fused     --pipeline lightglue_end2end --lightglue-model ...\n"
               << "Modes:\n"
               << "  incremental  star initialization + PnP resection\n"
               << "  hierarchical clustered incremental SfM + Sim(3) merge\n"
@@ -158,13 +163,23 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<double>()->default_value("0.005"))
         ("cache-dir", "Feature cache directory (- to disable)",
          cxxopts::value<std::string>()->default_value(""))
-        ("extractor", "Feature extractor: siftgpu or sift (ignored for lightglue)",
+        ("extractor",
+         "Feature extractor for extract×match: siftgpu (default) or sift "
+         "(ignored when --pipeline is set)",
          cxxopts::value<std::string>()->default_value("siftgpu"))
-        ("matcher", "Feature matcher: siftgpu, mutual_ratio, or lightglue",
-         cxxopts::value<std::string>()->default_value("siftgpu"))
+        ("matcher",
+         "Feature matcher for extract×match: gpu_mutual_ratio (default), "
+         "mutual_ratio. Legacy aliases: siftgpu→gpu_mutual_ratio, "
+         "lightglue→--pipeline lightglue_end2end",
+         cxxopts::value<std::string>()->default_value("gpu_mutual_ratio"))
+        ("pipeline",
+         "Optional fused pair recipe: none (default) or lightglue_end2end. "
+         "When set, overrides extract×match composition",
+         cxxopts::value<std::string>()->default_value(""))
         ("max-features", "Maximum SIFT features per image",
          cxxopts::value<unsigned>()->default_value("27000"))
-        ("lightglue-model", "Fused LightGlue ONNX model path (--matcher lightglue)",
+        ("lightglue-model",
+         "Fused LightGlue ONNX model (--pipeline lightglue_end2end)",
          cxxopts::value<std::string>()->default_value(""))
         ("lightglue-extractor", "LightGlue extractor head: disk or superpoint",
          cxxopts::value<std::string>()->default_value("disk"))
@@ -200,6 +215,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.sift_contrast = result["sift-contrast"].as<double>();
     cli.extractor = result["extractor"].as<std::string>();
     cli.matcher = result["matcher"].as<std::string>();
+    cli.pipeline = result["pipeline"].as<std::string>();
     cli.max_features = result["max-features"].as<unsigned>();
     const auto lightglue_model_text =
         result["lightglue-model"].as<std::string>();
@@ -230,10 +246,18 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument("--sift-contrast must be positive");
     if (cli.max_features == 0U)
         throw std::invalid_argument("--max-features must be positive");
-    if (cli.matcher == "lightglue") {
+
+    const bool use_lightglue_pipeline =
+        cli.pipeline == "lightglue_end2end" || cli.matcher == "lightglue";
+    if (cli.pipeline == "none") cli.pipeline.clear();
+    if (!cli.pipeline.empty() && cli.pipeline != "lightglue_end2end")
+        throw std::invalid_argument(
+            "--pipeline must be empty/none or lightglue_end2end");
+    if (use_lightglue_pipeline) {
         if (cli.lightglue_model.empty())
             throw std::invalid_argument(
-                "--matcher lightglue requires --lightglue-model");
+                "--pipeline lightglue_end2end requires --lightglue-model "
+                "(legacy --matcher lightglue is also accepted)");
         if (cli.lightglue_extractor != "disk" &&
             cli.lightglue_extractor != "superpoint")
             throw std::invalid_argument(
@@ -329,6 +353,7 @@ int main(int argc, char** argv) {
         config.frontend.mutual_check = cli.mutual_check;
         config.frontend.extractor = cli.extractor;
         config.frontend.matcher = cli.matcher;
+        config.frontend.pipeline = cli.pipeline;
         config.frontend.max_features = cli.max_features;
         config.frontend.lightglue_model_path = cli.lightglue_model;
         config.frontend.lightglue_extractor = cli.lightglue_extractor;
@@ -337,9 +362,8 @@ int main(int argc, char** argv) {
         config.frontend.lightglue_min_score = cli.lightglue_min_score;
         config.frontend.lightglue_use_cuda = !cli.lightglue_cpu;
         // Sequential window + BoW retrieval (learned vocabulary).
-        // Disabled automatically for fused LightGlue (no descriptors).
-        config.frontend.augment_sequential_with_retrieval =
-            cli.matcher != "lightglue";
+        // lightglue_end2end uses a temporary SiftGPU extract for BoW only.
+        config.frontend.augment_sequential_with_retrieval = true;
         config.frontend.checkpoint.directory = cli.cache_dir;
 
         const auto started = std::chrono::steady_clock::now();
