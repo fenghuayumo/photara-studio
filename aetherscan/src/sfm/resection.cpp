@@ -228,6 +228,8 @@ std::vector<Index> triangulate_dirty_tracks(
 unsigned register_images(Scene& scene, const ResectionConfig& config) {
     core::StageScope stage("sfm.resection");
     rebuild_track_index(scene);
+    scene.registration_generation = std::max<std::uint32_t>(
+        scene.registration_generation, scene.registered_count());
     std::unordered_map<Index, unsigned> unregistered;
     for (Index i = 0; i < scene.images.size(); ++i) {
         if (!scene.images[i].registered) unregistered[i] = 0;
@@ -287,6 +289,14 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
 
                 scene.images[proposal.image_id].pose = proposal.pose.pose;
                 scene.images[proposal.image_id].registered = true;
+                ++scene.registration_generation;
+                if (scene.registration_generation == 0) {
+                    // Generation zero means "unchecked". A wrap is extremely
+                    // unlikely, but resetting preserves correctness.
+                    scene.registration_generation = 1;
+                    for (Track& track : scene.tracks)
+                        track.split_generation = 0;
+                }
                 last_registered.push_back(proposal.image_id);
                 dirty_images.push_back(proposal.image_id);
                 unregistered.erase(proposal.image_id);

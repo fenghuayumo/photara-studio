@@ -19,6 +19,14 @@ struct TriangulationOptions {
     // new tracks and triangulate them (bounded recursion depth).
     bool split_tracks{true};
     unsigned max_splits_per_track{3};
+    // Fast split gate: first absorb registered observations supported by the
+    // parent's current 3D point, then require a small alternate consensus
+    // before launching LO-RANSAC for the remaining registered outliers.
+    bool use_fast_split_gate{true};
+    unsigned split_gate_min_support{3};
+    unsigned split_gate_max_observations{16};
+    unsigned split_gate_max_pairs{64};
+    float split_gate_threshold_multiplier{1.5F};
 };
 
 // Skew-symmetric multi-view triangulation with optional LO-RANSAC and

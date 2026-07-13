@@ -7,6 +7,7 @@
 #include <Eigen/SVD>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -49,6 +50,49 @@ struct Consensus {
     double score{std::numeric_limits<double>::infinity()};
 };
 
+bool make_observation_ray_geometry(
+    const Index obs_index,
+    const Observation& obs,
+    const Scene& scene,
+    ObservationGeometry& row,
+    Vec3* bearing_out = nullptr) {
+    if (obs.image_id >= scene.images.size()) return false;
+    const Image& image = scene.images[obs.image_id];
+    if (!image.registered ||
+        obs.feature_id >= image.features.keypoints.size())
+        return false;
+    const PinholeCamera& camera = scene.camera_of(image);
+    const Vec2 pixel = keypoint_xy(image, obs.feature_id);
+    const Vec3 bearing = camera.unproject_normalized(pixel);
+    row.obs_index = obs_index;
+    row.image_id = obs.image_id;
+    row.feature_id = obs.feature_id;
+    row.center = image.pose.C;
+    row.world_dir = (image.pose.R.transpose() * bearing).normalized();
+    row.pixel = pixel;
+    row.camera = &camera;
+    row.image = &image;
+    if (bearing_out) *bearing_out = bearing;
+    return row.world_dir.allFinite();
+}
+
+bool make_observation_geometry(
+    const Index obs_index,
+    const Observation& obs,
+    const Scene& scene,
+    ObservationGeometry& row) {
+    Vec3 bearing;
+    if (!make_observation_ray_geometry(
+            obs_index, obs, scene, row, &bearing))
+        return false;
+    Mat3 Dcross;
+    Dcross << 0, -bearing.z(), bearing.y(), bearing.z(), 0, -bearing.x(),
+        -bearing.y(), bearing.x(), 0;
+    row.DR = Dcross * row.image->pose.R;
+    row.Dt = -Dcross * row.image->pose.translation();
+    return true;
+}
+
 bool collect_observation_geometry(
     const Track& track,
     const Scene& scene,
@@ -57,28 +101,9 @@ bool collect_observation_geometry(
     cams.reserve(track.observations.size());
     for (Index obs_index = 0; obs_index < track.observations.size(); ++obs_index) {
         const Observation& obs = track.observations[obs_index];
-        if (obs.image_id >= scene.images.size()) continue;
-        const Image& image = scene.images[obs.image_id];
-        if (!image.registered) continue;
-        if (obs.feature_id >= image.features.keypoints.size()) continue;
-        const PinholeCamera& camera = scene.camera_of(image);
-        const Vec2 pixel = keypoint_xy(image, obs.feature_id);
-        const Vec3 bearing = camera.unproject_normalized(pixel);
-        Mat3 Dcross;
-        Dcross << 0, -bearing.z(), bearing.y(), bearing.z(), 0, -bearing.x(),
-            -bearing.y(), bearing.x(), 0;
         ObservationGeometry row;
-        row.obs_index = obs_index;
-        row.image_id = obs.image_id;
-        row.feature_id = obs.feature_id;
-        row.center = image.pose.C;
-        row.world_dir = (image.pose.R.transpose() * bearing).normalized();
-        row.DR = Dcross * image.pose.R;
-        row.Dt = -Dcross * image.pose.translation();
-        row.pixel = pixel;
-        row.camera = &camera;
-        row.image = &image;
-        cams.push_back(std::move(row));
+        if (make_observation_geometry(obs_index, obs, scene, row))
+            cams.push_back(std::move(row));
     }
     return !cams.empty();
 }
@@ -414,20 +439,147 @@ unsigned triangulate_track_impl(
     return track.num_inliers;
 }
 
-std::vector<Observation> extract_registered_outliers(
-    const Track& track,
-    const Scene& scene) {
-    std::vector<Observation> outliers;
-    if (track.num_inliers >= track.observations.size()) return outliers;
-    for (std::size_t i = track.num_inliers; i < track.observations.size(); ++i) {
-        const Observation& obs = track.observations[i];
-        if (obs.image_id >= scene.images.size()) continue;
-        const Image& image = scene.images[obs.image_id];
-        if (!image.registered) continue;
-        if (obs.feature_id >= image.features.keypoints.size()) continue;
-        outliers.push_back(obs);
+bool is_registered_observation(
+    const Observation& observation, const Scene& scene) {
+    if (observation.image_id >= scene.images.size()) return false;
+    const Image& image = scene.images[observation.image_id];
+    return image.registered &&
+           observation.feature_id < image.features.keypoints.size();
+}
+
+bool observation_supports_position(
+    const Observation& observation,
+    const Scene& scene,
+    const Vec3& position,
+    const float reproj_threshold_px) {
+    if (!is_registered_observation(observation, scene)) return false;
+    const Image& image = scene.images[observation.image_id];
+    const PinholeCamera& camera = scene.camera_of(image);
+    Vec2 projected;
+    if (!camera.project_checked(
+            image.pose.transform_world_to_camera(position), projected))
+        return false;
+    const double error =
+        (projected - keypoint_xy(image, observation.feature_id)).norm();
+    return std::isfinite(error) &&
+           error <= static_cast<double>(reproj_threshold_px);
+}
+
+// Newly registered observations commonly belong to the existing landmark.
+// Move those directly into the inlier prefix so they never reach the split
+// solver. This is intentionally allocation-free.
+std::size_t absorb_parent_supported_observations(
+    Track& track,
+    const Scene& scene,
+    const float reproj_threshold_px) {
+    std::size_t write = track.num_inliers;
+    const std::size_t max_inliers =
+        std::numeric_limits<decltype(track.num_inliers)>::max();
+    for (std::size_t i = track.num_inliers;
+         i < track.observations.size() && write < max_inliers; ++i) {
+        if (!observation_supports_position(
+                track.observations[i], scene, track.position,
+                reproj_threshold_px))
+            continue;
+        if (write != i)
+            std::swap(track.observations[write], track.observations[i]);
+        ++write;
     }
-    return outliers;
+    const std::size_t absorbed = write - track.num_inliers;
+    track.num_inliers = static_cast<decltype(track.num_inliers)>(write);
+    return absorbed;
+}
+
+std::size_t count_registered_outliers(
+    const Track& track, const Scene& scene) {
+    std::size_t count = 0;
+    for (std::size_t i = track.num_inliers; i < track.observations.size(); ++i) {
+        if (is_registered_observation(track.observations[i], scene)) ++count;
+    }
+    return count;
+}
+
+// A pair always explains its own two rays, so a useful pre-gate must require
+// at least one independent supporting observation. Candidate sets larger than
+// the fixed stack workspace are conservatively allowed through to avoid false
+// negatives on unusually long contaminated tracks.
+bool has_alternate_geometric_consensus(
+    const Track& track,
+    const Scene& scene,
+    const TriangulationOptions& options,
+    const std::size_t registered_outliers) {
+    if (!options.use_fast_split_gate || !options.use_lo_ransac ||
+        registered_outliers < options.min_observations_for_ransac)
+        return true;
+
+    constexpr std::size_t k_max_stack_observations = 64;
+    const std::size_t max_observations = std::min<std::size_t>(
+        options.split_gate_max_observations, k_max_stack_observations);
+    if (max_observations < 3 || registered_outliers > max_observations ||
+        options.split_gate_max_pairs == 0)
+        return true;
+
+    std::array<ObservationGeometry, k_max_stack_observations> observations{};
+    std::size_t observation_count = 0;
+    for (std::size_t i = track.num_inliers; i < track.observations.size(); ++i) {
+        if (!is_registered_observation(track.observations[i], scene)) continue;
+        if (!make_observation_ray_geometry(
+                static_cast<Index>(i), track.observations[i], scene,
+                observations[observation_count]))
+            return true;
+        ++observation_count;
+    }
+    if (observation_count != registered_outliers) return true;
+
+    const std::size_t required_support = std::max<std::size_t>(
+        3, std::max<std::size_t>(
+               options.min_inliers, options.split_gate_min_support));
+    if (observation_count < required_support) return false;
+    const float gate_threshold = options.reproj_threshold_px *
+        std::max(1.F, options.split_gate_threshold_multiplier);
+
+    const std::size_t total_pairs =
+        observation_count * (observation_count - 1) / 2;
+    const std::size_t pair_budget = std::min<std::size_t>(
+        total_pairs, options.split_gate_max_pairs);
+    std::size_t pair_ordinal = 0;
+    std::size_t tested_pairs = 0;
+    for (std::size_t first_index = 0;
+         first_index + 1 < observation_count; ++first_index) {
+        const ObservationGeometry& first = observations[first_index];
+        for (std::size_t second_index = first_index + 1;
+             second_index < observation_count; ++second_index) {
+            const std::size_t target_ordinal =
+                tested_pairs < pair_budget
+                ? tested_pairs * total_pairs / pair_budget
+                : total_pairs;
+            if (pair_ordinal++ != target_ordinal) continue;
+            ++tested_pairs;
+            const ObservationGeometry& second = observations[second_index];
+            Vec3 candidate;
+            if (!triangulate_two_view_midpoint(first, second, candidate))
+                continue;
+
+            const Vec3 first_ray = candidate - first.center;
+            const Vec3 second_ray = candidate - second.center;
+            const double ray_norms = first_ray.norm() * second_ray.norm();
+            if (!(ray_norms > 1e-12)) continue;
+            const double cosine =
+                std::clamp(first_ray.dot(second_ray) / ray_norms, -1.0, 1.0);
+            const float angle =
+                static_cast<float>(std::acos(cosine) * k_rad2deg);
+            if (angle < options.min_angle_deg) continue;
+
+            std::size_t support = 0;
+            for (std::size_t i = 0; i < observation_count; ++i) {
+                if (observation_supports_point(
+                        observations[i], candidate, gate_threshold) &&
+                    ++support >= required_support)
+                    return true;
+            }
+        }
+    }
+    return false;
 }
 
 // Build a child track from registered outliers without mutating the parent.
@@ -437,40 +589,30 @@ bool build_child_from_registered_outliers(
     Track& child) {
     child = Track{};
     if (parent.num_inliers >= parent.observations.size()) return false;
+    child.observations.reserve(
+        parent.observations.size() - parent.num_inliers);
     for (std::size_t i = parent.num_inliers; i < parent.observations.size();
          ++i) {
         const Observation& obs = parent.observations[i];
-        if (obs.image_id >= scene.images.size()) continue;
-        const Image& image = scene.images[obs.image_id];
-        if (!image.registered) continue;
-        if (obs.feature_id >= image.features.keypoints.size()) continue;
-        child.observations.push_back(obs);
+        if (is_registered_observation(obs, scene))
+            child.observations.push_back(obs);
     }
     return child.observations.size() >= 2;
 }
 
 // Commit a successful child peel: drop registered outliers from the parent.
 void commit_peel_registered_outliers(Track& parent, const Scene& scene) {
-    std::vector<Observation> kept;
-    kept.reserve(parent.observations.size());
-    for (unsigned i = 0; i < parent.num_inliers; ++i)
-        kept.push_back(parent.observations[i]);
+    std::size_t kept = parent.num_inliers;
     for (std::size_t i = parent.num_inliers; i < parent.observations.size();
          ++i) {
-        const Observation& obs = parent.observations[i];
-        if (obs.image_id >= scene.images.size()) {
-            kept.push_back(obs);
-            continue;
+        if (!is_registered_observation(parent.observations[i], scene)) {
+            if (kept != i)
+                parent.observations[kept] =
+                    std::move(parent.observations[i]);
+            ++kept;
         }
-        const Image& image = scene.images[obs.image_id];
-        if (!image.registered ||
-            obs.feature_id >= image.features.keypoints.size()) {
-            kept.push_back(obs);
-            continue;
-        }
-        // Registered outlier peeled into the child track.
     }
-    parent.observations = std::move(kept);
+    parent.observations.resize(kept);
 }
 
 }  // namespace
@@ -520,6 +662,8 @@ static unsigned triangulate_tracks_impl(
     const TriangulationOptions& options) {
     unsigned inlier_tracks = 0;
     core::StageScope stage("sfm.triangulate_tracks", core::LogLevel::debug);
+    scene.registration_generation = std::max<std::uint32_t>(
+        scene.registration_generation, scene.registered_count());
     const std::size_t initial_track_count = scene.tracks.size();
     const std::size_t candidate_count = selected_track_ids
         ? selected_track_ids->size()
@@ -559,18 +703,65 @@ static unsigned triangulate_tracks_impl(
     // Breadth-limited peeling of contaminated tracks into new consensus sets.
     std::vector<std::pair<Index, unsigned>> pending;
     pending.reserve(candidate_count);
+    const bool force_split_check = !outliers_only;
+    std::size_t split_checks = 0;
+    std::size_t generation_skips = 0;
+    std::size_t absorbed_parent_observations = 0;
+    std::size_t split_gate_candidates = 0;
+    std::size_t split_gate_passes = 0;
+    std::size_t split_gate_rejections = 0;
+    const auto schedule_split = [&](const Index track_id,
+                                    const unsigned depth) {
+        if (track_id >= scene.tracks.size()) return;
+        Track& track = scene.tracks[track_id];
+        if (!track.is_triangulated()) return;
+        track.split_generation = scene.registration_generation;
+        if (depth >= options.max_splits_per_track) return;
+        absorbed_parent_observations +=
+            absorb_parent_supported_observations(
+                track, scene, options.reproj_threshold_px);
+        const std::size_t registered_outliers =
+            count_registered_outliers(track, scene);
+        if (registered_outliers < options.min_inliers) return;
+        const bool gated = options.use_fast_split_gate &&
+            options.use_lo_ransac &&
+            registered_outliers >= options.min_observations_for_ransac;
+        if (gated) ++split_gate_candidates;
+        if (!has_alternate_geometric_consensus(
+                track, scene, options, registered_outliers)) {
+            if (gated) ++split_gate_rejections;
+            return;
+        }
+        if (gated) ++split_gate_passes;
+        pending.push_back({track_id, depth});
+    };
     for (std::size_t candidate = 0; candidate < candidate_count; ++candidate) {
         const Index track_id = selected_track_ids
             ? (*selected_track_ids)[candidate]
             : static_cast<Index>(candidate);
-        const Track& track = scene.tracks[track_id];
+        Track& track = scene.tracks[track_id];
         if (!track.is_triangulated()) continue;
-        if (extract_registered_outliers(track, scene).size() >=
-            options.min_inliers)
-            pending.push_back({track_id, 0});
+        if (!force_split_check &&
+            track.split_generation == scene.registration_generation) {
+            ++generation_skips;
+            continue;
+        }
+        ++split_checks;
+        schedule_split(track_id, 0);
     }
+    core::Logger::instance().debug(
+        "track split scan: checked=", split_checks,
+        " skipped_generation=", generation_skips,
+        " pending=", pending.size(),
+        " absorbed_parent=", absorbed_parent_observations,
+        " gate_candidates=", split_gate_candidates,
+        " gate_pass=", split_gate_passes,
+        " gate_rejected=", split_gate_rejections,
+        " generation=", scene.registration_generation);
 
     unsigned split_tracks = 0;
+    std::size_t child_consensus_solves = 0;
+    std::size_t child_lo_ransac_launches = 0;
     while (!pending.empty()) {
         const auto [parent_id, depth] = pending.back();
         pending.pop_back();
@@ -582,6 +773,11 @@ static unsigned triangulate_tracks_impl(
         if (!build_child_from_registered_outliers(
                 scene.tracks[parent_id], scene, child))
             continue;
+        ++child_consensus_solves;
+        if (options.use_lo_ransac &&
+            child.observations.size() >=
+                options.min_observations_for_ransac)
+            ++child_lo_ransac_launches;
         if (triangulate_track_impl(child, scene, options) < options.min_inliers)
             continue;
 
@@ -592,21 +788,21 @@ static unsigned triangulate_tracks_impl(
         const Index child_id = static_cast<Index>(scene.tracks.size() - 1);
         ++split_tracks;
         ++inlier_tracks;
-        if (depth + 1 < options.max_splits_per_track &&
-            extract_registered_outliers(scene.tracks[child_id], scene).size() >=
-                options.min_inliers)
-            pending.push_back({child_id, depth + 1});
-        if (extract_registered_outliers(scene.tracks[parent_id], scene).size() >=
-            options.min_inliers)
-            pending.push_back({parent_id, depth + 1});
+        const unsigned next_depth = depth + 1;
+        schedule_split(child_id, next_depth);
+        schedule_split(parent_id, next_depth);
     }
 
-    if (split_tracks > 0) {
-        rebuild_track_index(scene);
-        core::Logger::instance().debug(
-            "track split: created=", split_tracks,
-            " total_tracks=", scene.tracks.size());
-    }
+    if (split_tracks > 0) rebuild_track_index(scene);
+    core::Logger::instance().debug(
+        "track split: created=", split_tracks,
+        " child_solves=", child_consensus_solves,
+        " lo_ransac_launches=", child_lo_ransac_launches,
+        " absorbed_parent=", absorbed_parent_observations,
+        " gate_candidates=", split_gate_candidates,
+        " gate_pass=", split_gate_passes,
+        " gate_rejected=", split_gate_rejections,
+        " total_tracks=", scene.tracks.size());
     return inlier_tracks;
 }
 

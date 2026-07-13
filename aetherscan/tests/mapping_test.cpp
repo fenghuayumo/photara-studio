@@ -609,6 +609,76 @@ void test_robust_triangulation_and_track_split() {
     expect(good_tracks >= 2, "split tracks recover both true 3D points");
 }
 
+void test_fast_split_gate() {
+    Scene scene;
+    scene.cameras.assign(6, cam());
+    scene.images.resize(6);
+    const Vec3 first_point(0.0, 0.0, 5.0);
+    const Vec3 second_point(0.8, 0.4, 6.0);
+    const Vec3 unrelated_points[] = {
+        Vec3(-1.5, -1.2, 3.0), Vec3(1.8, -0.8, 8.0),
+        Vec3(-2.0, 1.3, 4.0), Vec3(2.2, 1.1, 7.0)};
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        Image& image = scene.images[image_id];
+        image.id = image_id;
+        image.camera_id = image_id;
+        image.registered = true;
+        image.pose.C = Vec3(static_cast<double>(image_id) - 2.5, 0.0, 0.0);
+        image.features.keypoints.resize(3);
+        const Vec3 points[] = {
+            first_point, second_point,
+            unrelated_points[image_id >= 2 ? image_id - 2 : 0]};
+        for (Index feature_id = 0; feature_id < 3; ++feature_id) {
+            const Vec2 pixel = scene.cameras[image_id].project(
+                image.pose.transform_world_to_camera(points[feature_id]));
+            image.features.keypoints[feature_id].x =
+                static_cast<float>(pixel.x());
+            image.features.keypoints[feature_id].y =
+                static_cast<float>(pixel.y());
+        }
+    }
+
+    const auto make_parent = [&](const Index suffix_feature) {
+        Track track;
+        track.position = first_point;
+        track.observations.push_back({0, 0});
+        track.observations.push_back({1, 0});
+        track.num_inliers = 2;
+        for (Index image_id = 2; image_id < 6; ++image_id)
+            track.observations.push_back({image_id, suffix_feature});
+        return track;
+    };
+    scene.tracks.push_back(make_parent(0));  // Existing point: absorb all four.
+    scene.tracks.push_back(make_parent(2));  // Incoherent: reject before RANSAC.
+    scene.tracks.push_back(make_parent(1));  // Coherent second point: split.
+
+    TriangulationOptions options;
+    options.reproj_threshold_px = 0.25F;
+    options.min_angle_deg = 0.5F;
+    options.min_observations_for_ransac = 4;
+    options.ransac_iterations = 48;
+    options.refine_nonlinear = false;
+    options.max_splits_per_track = 1;
+    triangulate_tracks(scene, true, options);
+
+    expect(
+        scene.tracks[0].num_inliers == 6 && scene.tracks[0].observations.size() == 6,
+        "fast split gate absorbs observations supported by the parent point");
+    expect(
+        scene.tracks[1].num_inliers == 2 && scene.tracks[1].observations.size() == 6,
+        "fast split gate rejects incoherent registered outliers");
+    expect(
+        scene.tracks.size() == 4,
+        "fast split gate launches consensus only for the coherent candidate");
+    bool recovered_second_point = false;
+    for (std::size_t track_id = 3; track_id < scene.tracks.size(); ++track_id)
+        recovered_second_point = recovered_second_point ||
+            (scene.tracks[track_id].position - second_point).norm() < 0.05;
+    expect(
+        recovered_second_point,
+        "fast split gate preserves a real alternate geometric consensus");
+}
+
 void test_dirty_track_updates_are_isolated() {
     Scene scene;
     scene.cameras.assign(3, cam());
@@ -688,6 +758,7 @@ int main() {
     test_global_positioning_rejects_empty_point_constraints();
     test_long_track_merge();
     test_robust_triangulation_and_track_split();
+    test_fast_split_gate();
     test_dirty_track_updates_are_isolated();
     test_retrieval_inverted_index();
     test_local_ba_boundary_selection();

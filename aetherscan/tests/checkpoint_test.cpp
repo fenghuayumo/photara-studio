@@ -58,7 +58,9 @@ int main() {
         sfm::Track track;
         track.position = sfm::Vec3(4.0, 5.0, 6.0);
         track.observations.push_back({0, 0});
+        track.split_generation = 17;
         scene.tracks.push_back(std::move(track));
+        scene.registration_generation = 17;
 
         constexpr std::uint64_t scene_key = 0x12345678ULL;
         store.save_scene(sfm::CheckpointStage::features, scene_key, scene);
@@ -86,6 +88,8 @@ int main() {
                 sfm::CheckpointStage::tracks, scene_key, restored) ||
             !restored.images[0].features.descriptors.empty() ||
             restored.tracks.size() != 1 ||
+            restored.registration_generation != 0 ||
+            restored.tracks[0].split_generation != 0 ||
             restored.image_tracks.size() != 2 ||
             restored.image_tracks[0].size() != 1) {
             std::cerr << "scene checkpoint round trip failed\n";

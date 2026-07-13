@@ -225,6 +225,8 @@ TrackFilterStats filter_track(
     Scene& scene, Track& track, const float max_reproj_error_px,
     const float min_angle_deg) {
     TrackFilterStats stats;
+    // Reclassification can expose a different registered-outlier suffix.
+    track.split_generation = 0;
     track.num_inliers = 0;
     if (!track.is_valid()) return stats;
     double track_distance = 0.0;

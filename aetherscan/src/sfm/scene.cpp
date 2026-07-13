@@ -11,6 +11,7 @@ void Scene::clear() {
     tracks.clear();
     image_tracks.clear();
     resection_progress = {};
+    registration_generation = 0;
 }
 
 ImagePair* Scene::find_pair(Index a, Index b) {

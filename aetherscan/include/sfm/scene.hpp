@@ -4,6 +4,7 @@
 #include "sfm/types.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <utility>
@@ -77,6 +78,10 @@ struct Track {
     Vec3 position{Vec3::Zero()};
     std::vector<Observation> observations;
     std::uint8_t num_inliers{0};
+    // Runtime-only scheduling metadata. Checkpoints deliberately omit this:
+    // after resume tracks are conservatively checked once, without invalidating
+    // the existing checkpoint schema and large frontend caches.
+    std::uint32_t split_generation{0};
 
     [[nodiscard]] bool is_valid() const { return observations.size() >= 2; }
     [[nodiscard]] bool is_triangulated() const { return num_inliers >= 2; }
@@ -103,6 +108,9 @@ struct Scene {
     // topology changes and used by resection/covisibility hot paths.
     std::vector<std::vector<ImageTrackRef>> image_tracks;
     ResectionProgress resection_progress;
+    // Incremented whenever another image becomes registered. A track whose
+    // split_generation matches this value has no newly registered outliers.
+    std::uint32_t registration_generation{0};
     unsigned thread_count{0};  // 0 = hardware concurrency
 
     void clear();

@@ -134,6 +134,16 @@ int main() {
         "contaminated tracks split without invalidating parent references");
     for (const Track& track : split_tracks_scene.tracks)
         expect(track.is_triangulated(), "split track remains triangulated");
+    for (const Track& track : split_tracks_scene.tracks)
+        expect(
+            track.split_generation ==
+                split_tracks_scene.registration_generation,
+            "split generation records the completed outlier check");
+    const std::size_t checked_track_count = split_tracks_scene.tracks.size();
+    triangulate_tracks(split_tracks_scene, true, split_options);
+    expect(
+        split_tracks_scene.tracks.size() == checked_track_count,
+        "same-generation outlier checks do not split tracks again");
 
     Scene split_scene = make_scene();
     ClusterConfig cluster;
