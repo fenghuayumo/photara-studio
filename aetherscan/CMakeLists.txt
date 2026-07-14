@@ -219,6 +219,38 @@ if(AETHERSCAN_ENABLE_FEATURES)
             target_compile_options(aetherscan_sfm PRIVATE -march=native)
         endif()
     endif()
+
+    add_library(aetherscan_mvs
+        src/mvs/scene_build.cpp
+        src/mvs/neighbors.cpp
+        src/mvs/patchmatch.cpp
+        src/mvs/fuse.cpp
+        src/mvs/mesh.cpp
+        src/mvs/export.cpp
+        src/mvs/densify.cpp)
+    add_library(AetherScan::MVS ALIAS aetherscan_mvs)
+    target_include_directories(aetherscan_mvs PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_compile_features(aetherscan_mvs PUBLIC cxx_std_20)
+    target_link_libraries(aetherscan_mvs PUBLIC
+        AetherScan::SfM
+        Eigen3::Eigen)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(aetherscan_mvs PUBLIC OpenMP::OpenMP_CXX)
+        target_compile_definitions(aetherscan_mvs PUBLIC AETHERSCAN_HAS_OPENMP=1)
+    endif()
+    if(MSVC)
+        target_compile_options(aetherscan_mvs PRIVATE /W4 /permissive- /EHsc)
+        if(AETHERSCAN_ENABLE_NATIVE_ARCH)
+            target_compile_options(aetherscan_mvs PRIVATE /arch:AVX2)
+        endif()
+    else()
+        target_compile_options(aetherscan_mvs PRIVATE -Wall -Wextra -Wpedantic)
+        if(AETHERSCAN_ENABLE_NATIVE_ARCH)
+            target_compile_options(aetherscan_mvs PRIVATE -march=native)
+        endif()
+    endif()
 endif()
 
 if(AETHERSCAN_BUILD_BENCHMARKS)
@@ -262,7 +294,7 @@ if(AETHERSCAN_BUILD_BENCHMARKS)
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxxopts/include)
 
         add_executable(aetherscan src/tools/reconstruct.cpp)
-        target_link_libraries(aetherscan PRIVATE AetherScan::SfM cxxopts::cxxopts)
+        target_link_libraries(aetherscan PRIVATE AetherScan::MVS cxxopts::cxxopts)
         if(WIN32)
             add_custom_command(TARGET aetherscan POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -312,5 +344,8 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
         add_executable(aetherscan_export_mvs_test tests/export_mvs_test.cpp)
         target_link_libraries(aetherscan_export_mvs_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.export_mvs COMMAND aetherscan_export_mvs_test)
+        add_executable(aetherscan_mvs_test tests/mvs_test.cpp)
+        target_link_libraries(aetherscan_mvs_test PRIVATE AetherScan::MVS)
+        add_test(NAME aetherscan.mvs.pipeline COMMAND aetherscan_mvs_test)
     endif()
 endif()

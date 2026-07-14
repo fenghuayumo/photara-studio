@@ -205,10 +205,15 @@ inline ThreadPool& global_thread_pool() {
 inline std::size_t parallel_for_grain(
     const std::size_t count, const unsigned thread_count) noexcept {
     if (count <= thread_count) return 1;
-    constexpr std::size_t k_min_grain = 32;
     const std::size_t target_chunks =
         static_cast<std::size_t>(std::max(1U, thread_count)) * 8U;
-    return std::max(k_min_grain, (count + target_chunks - 1) / target_chunks);
+    // Keep enough independently claimable chunks for all workers. The former
+    // minimum grain of 32 meant 76 image-sized MVS jobs became only three
+    // chunks on a 32-thread CPU, leaving almost the entire machine idle.
+    // One atomic claim per ~1/8 worker wave is negligible compared with the
+    // work in real image/row tasks and still amortizes fine for large loops.
+    return std::max<std::size_t>(
+        1, (count + target_chunks - 1) / target_chunks);
 }
 
 // Dynamic chunked parallel-for over [0, count). Workers claim ranges with an

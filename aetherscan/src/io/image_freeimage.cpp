@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -18,6 +19,11 @@ struct FreeImageRuntime {
     FreeImageRuntime() { FreeImage_Initialise(FALSE); }
     ~FreeImageRuntime() { FreeImage_DeInitialise(); }
 };
+
+std::mutex& freeimage_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
 
 void ensure_freeimage() {
     static FreeImageRuntime runtime;
@@ -60,6 +66,7 @@ void copy_top_left(
 }  // namespace
 
 GrayImage load_gray(const std::filesystem::path& path) {
+    std::lock_guard lock(freeimage_mutex());
     ensure_freeimage();
     const auto format = detect_format(path);
     FIBITMAP* loaded = FreeImage_Load(format, path.string().c_str(), 0);
@@ -80,6 +87,7 @@ GrayImage load_gray(const std::filesystem::path& path) {
 }
 
 RgbImage load_rgb(const std::filesystem::path& path) {
+    std::lock_guard lock(freeimage_mutex());
     ensure_freeimage();
     const auto format = detect_format(path);
     FIBITMAP* loaded = FreeImage_Load(format, path.string().c_str(), 0);

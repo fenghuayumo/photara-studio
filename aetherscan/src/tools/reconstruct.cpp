@@ -1,5 +1,7 @@
 #include "sfm/reconstruct.hpp"
 #include "sfm/export_mvs.hpp"
+#include "mvs/densify.hpp"
+#include "mvs/export.hpp"
 #include "core/logging.hpp"
 
 #include <cxxopts.hpp>
@@ -52,6 +54,11 @@ struct ReconstructCli {
     float lightglue_min_score{0.0F};
     unsigned hybrid_lightglue_max_features{2048U};
     bool lightglue_cpu{false};
+    bool dense{false};
+    bool mesh{false};
+    bool mesh_obj{false};
+    unsigned dense_resolution_level{1};
+    std::filesystem::path masks_dir;
 };
 
 std::uint64_t peak_working_set_bytes() noexcept {
@@ -138,9 +145,15 @@ void print_help(const cxxopts::Options& options) {
               << "  incremental  star initialization + PnP resection\n"
               << "  hierarchical clustered incremental SfM + Sim(3) merge\n"
               << "  global       rotation averaging + global positioning + BA\n"
+              << "Dense (optional Stage A Fast MVS after SfM):\n"
+              << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
+              << "  --mesh       also build scalable projective mesh -> mesh.ply\n"
+              << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
+              << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
               << "Output formats:\n"
               << "  .mvs  OpenMVS Interface (open in Viewer)\n"
               << "  .ply  sparse XYZ point cloud\n"
+              << "  with --dense: also writes dense.ply next to --output\n"
               << "Log level: set AETHERSCAN_LOG_LEVEL=error|warning|info|debug|trace|off\n";
 }
 
@@ -211,7 +224,19 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Maximum descriptors per image in hybrid LightGlue rescue (0 = all)",
          cxxopts::value<unsigned>()->default_value("2048"))
         ("lightglue-cpu", "Force LightGlue matcher / end2end ONNX on CPU",
-         cxxopts::value<bool>()->default_value("false"));
+         cxxopts::value<bool>()->default_value("false"))
+        ("dense", "Run Fast MVS densify after SfM",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("mesh", "Build MVS mesh after densify (implies --dense)",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("mesh-obj", "Additionally export mesh as ASCII OBJ",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("dense-resolution-level",
+         "MVS image downscale steps (0=full, 1~=half)",
+         cxxopts::value<unsigned>()->default_value("1"))
+        ("masks",
+         "Foreground mask directory (auto, - to disable, or explicit path)",
+         cxxopts::value<std::string>()->default_value("auto"));
 
     const auto result = options.parse(argc, argv);
     if (result.count("help") || argc <= 1) {
@@ -257,6 +282,21 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.hybrid_lightglue_max_features =
         result["hybrid-lightglue-max-features"].as<unsigned>();
     cli.lightglue_cpu = result["lightglue-cpu"].as<bool>();
+    cli.dense = result["dense"].as<bool>();
+    cli.mesh = result["mesh"].as<bool>();
+    cli.mesh_obj = result["mesh-obj"].as<bool>();
+    cli.dense_resolution_level =
+        result["dense-resolution-level"].as<unsigned>();
+    const std::string masks_text = result["masks"].as<std::string>();
+    if (masks_text == "auto") {
+        const std::filesystem::path candidate =
+            cli.images_dir.parent_path() / "masks";
+        if (std::filesystem::is_directory(candidate)) cli.masks_dir = candidate;
+    } else if (!masks_text.empty() && masks_text != "-") {
+        cli.masks_dir = utf8_to_path(masks_text);
+    }
+    if (cli.mesh_obj) cli.mesh = true;
+    if (cli.mesh) cli.dense = true;
 
     const auto cache_text = result["cache-dir"].as<std::string>();
     if (!cache_text.empty() && cache_text != "-")
@@ -465,6 +505,56 @@ int main(int argc, char** argv) {
             aetherscan::core::Logger::instance().info("mvs=", mvs_path);
         } else {
             throw std::invalid_argument("Output must end with .mvs or .ply");
+        }
+
+        if (cli.dense) {
+            aetherscan::mvs::DensifyOptions densify_opts;
+            densify_opts.resolution_level = cli.dense_resolution_level;
+            densify_opts.mask_dir = cli.masks_dir;
+            densify_opts.build_mesh = cli.mesh;
+            densify_opts.mesh_method = cli.mesh
+                ? aetherscan::mvs::MeshMethod::depth_projective
+                : aetherscan::mvs::MeshMethod::none;
+            densify_opts.geometric_consistency = true;
+            densify_opts.sub_resolution_levels = 1;
+            densify_opts.thread_count = scene.thread_count;
+            if (!densify_opts.mask_dir.empty())
+                aetherscan::core::Logger::instance().info(
+                    "mvs masks=", densify_opts.mask_dir);
+
+            const auto dense_started = std::chrono::steady_clock::now();
+            aetherscan::mvs::MvsScene mvs_scene =
+                aetherscan::mvs::densify_from_sfm(scene, densify_opts);
+            const double dense_elapsed = std::chrono::duration<double>(
+                                             std::chrono::steady_clock::now() -
+                                             dense_started)
+                                             .count();
+
+            const std::filesystem::path out_dir =
+                cli.output.parent_path().empty()
+                    ? std::filesystem::current_path()
+                    : cli.output.parent_path();
+            const auto dense_ply = out_dir / (cli.output.stem().string() + "_dense.ply");
+            aetherscan::mvs::save_dense_ply(mvs_scene.dense_cloud, dense_ply);
+            aetherscan::core::Logger::instance().info(
+                "dense_ply=", dense_ply,
+                " points=", mvs_scene.dense_cloud.points.size(),
+                " densify_s=", dense_elapsed);
+
+            if (cli.mesh && !mvs_scene.mesh.faces.empty()) {
+                const auto mesh_ply =
+                    out_dir / (cli.output.stem().string() + "_mesh.ply");
+                const auto mesh_obj =
+                    out_dir / (cli.output.stem().string() + "_mesh.obj");
+                aetherscan::mvs::save_mesh_ply(mvs_scene.mesh, mesh_ply);
+                if (cli.mesh_obj)
+                    aetherscan::mvs::save_mesh_obj(mvs_scene.mesh, mesh_obj);
+                aetherscan::core::Logger::instance().info(
+                    "mesh_ply=", mesh_ply,
+                    cli.mesh_obj ? " mesh_obj=" : "",
+                    cli.mesh_obj ? mesh_obj.string() : std::string{},
+                    " faces=", mvs_scene.mesh.faces.size());
+            }
         }
 
         aetherscan::core::Logger::instance().info(

@@ -20,7 +20,7 @@
 - AIHoloImager：`TextureReconstruction`（Flatten → ShadowMap → Project → Resolve → Dilate）
   与图像域 Delighter；
 - GGGS：锁定论文 *Geometry-Grounded Gaussian Splatting*（将 Gaussian 作为随机实体、
-  直接渲染高质量深度并抽取形状）。**不**把 2DGS / SuGaR 等作为并列默认后端；
+  直接渲染高质量深度并抽取形状）；
   若未来扩展，须另开插件接口，默认实现仍为 GGGS。
 
 与 SfM 文档一致：紧凑索引与 SoA、公开 API 与执行布局分离；默认构建不依赖
@@ -334,7 +334,7 @@ run_rebuild(scene, cfg):
 ## 明确非目标（本阶段）
 
 - 默认路径绑定 OpenMVS 式「源图矩形 atlas + LBP 视图选择」（可作实验模式，非默认）；
-- 将 SuGaR / 2DGS 等与 GGGS 并列作为官方几何后端；
+- 将 GGGS 并列作为官方几何后端；
 - 无 CUDA 时强行启用 GGGS；
 - 在粗 MVS mesh 未 Clean/流形时静默 UV（应失败或自动修复并打日志）。
 
