@@ -7,15 +7,21 @@
 #include <cxxopts.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #if defined(_WIN32)
@@ -424,6 +430,187 @@ void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& 
     }
 }
 
+double percentile(std::vector<double> values, const double fraction) {
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    const double position = std::clamp(fraction, 0.0, 1.0) *
+                            static_cast<double>(values.size() - 1);
+    const std::size_t lower = static_cast<std::size_t>(std::floor(position));
+    const std::size_t upper = static_cast<std::size_t>(std::ceil(position));
+    const double alpha = position - static_cast<double>(lower);
+    return values[lower] * (1.0 - alpha) + values[upper] * alpha;
+}
+
+std::string csv_escape(const std::string& value) {
+    if (value.find_first_of(",\"\r\n") == std::string::npos) return value;
+    std::string escaped{"\""};
+    for (const char character : value) {
+        if (character == '"') escaped += '"';
+        escaped += character;
+    }
+    escaped += '"';
+    return escaped;
+}
+
+std::filesystem::path write_sfm_diagnostics(
+    const aetherscan::sfm::Scene& scene,
+    const std::filesystem::path& reconstruction_path) {
+    using aetherscan::sfm::Vec2;
+    using aetherscan::sfm::Vec3;
+
+    struct ImageStats {
+        std::vector<double> errors;
+        double squared_sum{0.0};
+    };
+    std::vector<ImageStats> stats(scene.images.size());
+    std::array<std::vector<double>, 5> radial_errors;
+    std::array<double, 5> radial_signed_sum{};
+
+    for (const auto& track : scene.tracks) {
+        if (!track.is_triangulated() || !track.position.allFinite()) continue;
+        const std::size_t inlier_count = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < inlier_count; ++i) {
+            const auto& observation = track.observations[i];
+            if (observation.image_id >= scene.images.size()) continue;
+            const auto& image = scene.images[observation.image_id];
+            if (!image.registered || image.camera_id >= scene.cameras.size() ||
+                observation.feature_id >= image.features.keypoints.size())
+                continue;
+            const auto& camera = scene.cameras[image.camera_id];
+            const Vec3 camera_point =
+                image.pose.transform_world_to_camera(track.position);
+            if (!camera_point.allFinite() || camera_point.z() <= 0.0) continue;
+            const Vec2 projected = camera.project(camera_point);
+            const auto& keypoint = image.features.keypoints[observation.feature_id];
+            const Vec2 measured(keypoint.x, keypoint.y);
+            const Vec2 residual = projected - measured;
+            const double error = residual.norm();
+            if (!std::isfinite(error)) continue;
+            stats[observation.image_id].errors.push_back(error);
+            stats[observation.image_id].squared_sum += error * error;
+
+            const Vec2 normalized(
+                (measured.x() - camera.cx) / camera.fx,
+                (measured.y() - camera.cy) / camera.fy);
+            const double radius = normalized.norm();
+            const std::size_t bin = std::min<std::size_t>(
+                4, static_cast<std::size_t>(radius / 0.2));
+            radial_errors[bin].push_back(error);
+            if (radius > 1e-8) {
+                const Vec2 radial_pixel(
+                    normalized.x() * camera.fx,
+                    normalized.y() * camera.fy);
+                radial_signed_sum[bin] += residual.dot(radial_pixel.normalized());
+            }
+        }
+    }
+
+    auto csv_path = reconstruction_path.parent_path() /
+                    (reconstruction_path.stem().string() +
+                     "_sfm_diagnostics.csv");
+    std::ofstream output(csv_path);
+    if (!output)
+        throw std::runtime_error(
+            "Failed to create SfM diagnostics: " + csv_path.string());
+    output << std::setprecision(12)
+           << "image_id,name,registered,camera_id,width,height,fx,fy,cx,cy,"
+              "k1,k2,p1,p2,center_x,center_y,center_z,qw,qx,qy,qz,"
+              "observations,reprojection_mean_px,reprojection_rms_px,"
+              "reprojection_p95_px,reprojection_max_px,previous_center_step,"
+              "previous_rotation_deg\n";
+
+    std::vector<std::tuple<double, std::size_t, double, double>> worst_images;
+    std::vector<double> trajectory_steps;
+    std::vector<double> rotation_steps;
+    const double radians_to_degrees = 180.0 / 3.14159265358979323846;
+    for (std::size_t image_index = 0; image_index < scene.images.size(); ++image_index) {
+        const auto& image = scene.images[image_index];
+        const auto& image_stats = stats[image_index];
+        const bool camera_valid = image.camera_id < scene.cameras.size();
+        const auto* camera = camera_valid ? &scene.cameras[image.camera_id] : nullptr;
+        const std::size_t count = image_stats.errors.size();
+        double sum = 0.0;
+        for (const double error : image_stats.errors) sum += error;
+        const double mean = count == 0 ? 0.0 : sum / static_cast<double>(count);
+        const double rms = count == 0
+            ? 0.0
+            : std::sqrt(image_stats.squared_sum / static_cast<double>(count));
+        const double p95 = percentile(image_stats.errors, 0.95);
+        const double maximum = image_stats.errors.empty()
+            ? 0.0
+            : *std::max_element(image_stats.errors.begin(), image_stats.errors.end());
+        worst_images.emplace_back(p95, image_index, rms, maximum);
+
+        double center_step = std::numeric_limits<double>::quiet_NaN();
+        double rotation_step = std::numeric_limits<double>::quiet_NaN();
+        if (image_index > 0 && image.registered &&
+            scene.images[image_index - 1].registered) {
+            const auto& previous = scene.images[image_index - 1];
+            center_step = (image.pose.C - previous.pose.C).norm();
+            const double cosine = std::clamp(
+                0.5 * ((image.pose.R * previous.pose.R.transpose()).trace() - 1.0),
+                -1.0, 1.0);
+            rotation_step = std::acos(cosine) * radians_to_degrees;
+            trajectory_steps.push_back(center_step);
+            rotation_steps.push_back(rotation_step);
+        }
+        const auto quaternion = image.pose.quaternion();
+        output << image_index << ','
+               << csv_escape(image.path.filename().string()) << ','
+               << (image.registered ? 1 : 0) << ',' << image.camera_id << ','
+               << (camera ? camera->width : 0) << ','
+               << (camera ? camera->height : 0) << ','
+               << (camera ? camera->fx : 0.0) << ','
+               << (camera ? camera->fy : 0.0) << ','
+               << (camera ? camera->cx : 0.0) << ','
+               << (camera ? camera->cy : 0.0) << ','
+               << (camera ? camera->k1 : 0.0) << ','
+               << (camera ? camera->k2 : 0.0) << ','
+               << (camera ? camera->p1 : 0.0) << ','
+               << (camera ? camera->p2 : 0.0) << ','
+               << image.pose.C.x() << ',' << image.pose.C.y() << ','
+               << image.pose.C.z() << ',' << quaternion.w() << ','
+               << quaternion.x() << ',' << quaternion.y() << ','
+               << quaternion.z() << ',' << count << ',' << mean << ',' << rms
+               << ',' << p95 << ',' << maximum << ',' << center_step << ','
+               << rotation_step << '\n';
+    }
+
+    std::sort(worst_images.begin(), worst_images.end(), std::greater<>());
+    const std::size_t reported = std::min<std::size_t>(8, worst_images.size());
+    for (std::size_t i = 0; i < reported; ++i) {
+        const auto [p95, image_index, rms, maximum] = worst_images[i];
+        aetherscan::core::Logger::instance().info(
+            "sfm audit worst[", i, "] image=",
+            scene.images[image_index].path.filename(), " observations=",
+            stats[image_index].errors.size(), " rms_px=", rms,
+            " p95_px=", p95, " max_px=", maximum);
+    }
+    aetherscan::core::Logger::instance().info(
+        "sfm audit trajectory: step_median=", percentile(trajectory_steps, 0.5),
+        " step_p95=", percentile(trajectory_steps, 0.95),
+        " rotation_median_deg=", percentile(rotation_steps, 0.5),
+        " rotation_p95_deg=", percentile(rotation_steps, 0.95));
+    for (std::size_t bin = 0; bin < radial_errors.size(); ++bin) {
+        const std::size_t count = radial_errors[bin].size();
+        aetherscan::core::Logger::instance().info(
+            "sfm audit radius_bin=", bin, " observations=", count,
+            " mean_abs_px=",
+            count == 0 ? 0.0
+                       : [&] {
+                             double sum = 0.0;
+                             for (const double value : radial_errors[bin]) sum += value;
+                             return sum / static_cast<double>(count);
+                         }(),
+            " p95_px=", percentile(radial_errors[bin], 0.95),
+            " mean_signed_radial_px=",
+            count == 0 ? 0.0
+                       : radial_signed_sum[bin] / static_cast<double>(count));
+    }
+    return csv_path;
+}
+
 }  // namespace
 
 #if defined(_WIN32)
@@ -515,6 +702,10 @@ int main(int argc, char** argv) {
             return 2;
         }
 
+        const auto diagnostics_path = write_sfm_diagnostics(scene, cli.output);
+        aetherscan::core::Logger::instance().info(
+            "sfm_diagnostics=", diagnostics_path);
+
         if (lower_extension(cli.output) == ".mvs") {
             aetherscan::sfm::export_openmvs_interface(scene, cli.output);
         } else if (lower_extension(cli.output) == ".ply") {
@@ -550,8 +741,8 @@ int main(int argc, char** argv) {
                 " filter_views=", densify_opts.min_views_filter,
                 " fuse_views=", densify_opts.min_views_fuse,
                 " mask_border_px=", densify_opts.mask_border_px,
-                " min_incidence_cos=",
-                densify_opts.min_viewing_incidence_cos);
+                " grazing_weight_floor=",
+                densify_opts.grazing_weight_floor);
             if (!densify_opts.mask_dir.empty())
                 aetherscan::core::Logger::instance().info(
                     "mvs masks=", densify_opts.mask_dir);

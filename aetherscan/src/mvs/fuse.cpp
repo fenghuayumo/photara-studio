@@ -264,10 +264,13 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                     (ref.pose.R.transpose().cast<float>() * normal0).normalized();
                 const Vec3f viewing_ray0 =
                     (world0 - ref.pose.C.cast<float>()).normalized();
-                if (-world_n0.dot(viewing_ray0) <
-                    options.min_viewing_incidence_cos)
-                    continue;
-                const float w0 = std::max(
+                const float reference_incidence =
+                    std::clamp(-world_n0.dot(viewing_ray0), 0.F, 1.F);
+                if (reference_incidence <= 0.F) continue;
+                const float reference_incidence_weight =
+                    options.grazing_weight_floor +
+                    (1.F - options.grazing_weight_floor) * reference_incidence;
+                const float w0 = reference_incidence_weight * std::max(
                     0.02F,
                     1.F - rdm.confidence[index] /
                               std::max(options.ncc_keep_threshold, 1e-3F));
@@ -356,9 +359,9 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                             .cast<float>();
                     const Vec3f source_viewing_ray =
                         (world_point - src.pose.C.cast<float>()).normalized();
-                    if (-world_normal.dot(source_viewing_ray) <
-                        options.min_viewing_incidence_cos)
-                        continue;
+                    const float source_incidence = std::clamp(
+                        -world_normal.dot(source_viewing_ray), 0.F, 1.F);
+                    if (source_incidence <= 0.F) continue;
                     const Vec3f cam_back =
                         ref.pose.transform_world_to_camera(world_point.cast<double>())
                             .cast<float>();
@@ -373,7 +376,10 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
 
                     positions[count] = world_point;
                     normals[count] = world_normal;
-                    weights[count] = std::max(
+                    const float source_incidence_weight =
+                        options.grazing_weight_floor +
+                        (1.F - options.grazing_weight_floor) * source_incidence;
+                    weights[count] = source_incidence_weight * std::max(
                         0.02F,
                         1.F - sdm.confidence[source_index] /
                                   std::max(options.ncc_keep_threshold, 1e-3F));

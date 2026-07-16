@@ -31,7 +31,8 @@ struct OptimizerOptions {
     bool optimize_rotations{true};
     bool optimize_points{true};
     // Optimized independently for every intrinsic group referenced by poses.
-    bool optimize_focal{false};            // tied fx = fy
+    bool optimize_focal{false};            // optimize focal scale
+    bool optimize_aspect_ratio{false};     // independent fx/fy when focal is open
     bool optimize_principal_point{false};  // cx, cy
     bool optimize_distortion{false};       // k1, k2, p1, p2
     // Soft prior 0.5 * w * N * ((f - f0) / f0)^2 toward Problem::initial_intrinsics,

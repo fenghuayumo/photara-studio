@@ -706,14 +706,18 @@ void filter_one_depth_map(
                 (ref.pose.R.transpose().cast<float>() * normal0).normalized();
             const Vec3f viewing_ray0 =
                 (world0 - ref.pose.C.cast<float>()).normalized();
-            if (-world_normal0.dot(viewing_ray0) <
-                options.min_viewing_incidence_cos) {
+            const float reference_incidence =
+                std::clamp(-world_normal0.dot(viewing_ray0), 0.F, 1.F);
+            if (reference_incidence <= 0.F) {
                 output.depth[index] = 0.F;
                 output.normal[index] = Vec3f::Zero();
                 output.confidence[index] = 2.F;
                 continue;
             }
-            const float reference_weight = std::max(
+            const float reference_incidence_weight =
+                options.grazing_weight_floor +
+                (1.F - options.grazing_weight_floor) * reference_incidence;
+            const float reference_weight = reference_incidence_weight * std::max(
                 0.05F, 1.F - input.confidence[index] /
                                    std::max(options.ncc_keep_threshold, 1e-3F));
             float depth_sum = depth0 * reference_weight;
@@ -784,9 +788,9 @@ void filter_one_depth_map(
                         .cast<float>();
                 const Vec3f source_viewing_ray =
                     (source_world - src.pose.C.cast<float>()).normalized();
-                if (-world_normal.dot(source_viewing_ray) <
-                    options.min_viewing_incidence_cos)
-                    continue;
+                const float source_incidence = std::clamp(
+                    -world_normal.dot(source_viewing_ray), 0.F, 1.F);
+                if (source_incidence <= 0.F) continue;
                 const Vec3f back_camera =
                     ref.pose.transform_world_to_camera(source_world.cast<double>())
                         .cast<float>();
@@ -799,7 +803,10 @@ void filter_one_depth_map(
                         options.reprojection_error_px)
                     continue;
 
-                const float weight = std::max(
+                const float source_incidence_weight =
+                    options.grazing_weight_floor +
+                    (1.F - options.grazing_weight_floor) * source_incidence;
+                const float weight = source_incidence_weight * std::max(
                     0.05F, 1.F - source_depth.confidence[source_index] /
                                        std::max(options.ncc_keep_threshold, 1e-3F));
                 depth_sum += back_camera.z() * weight;

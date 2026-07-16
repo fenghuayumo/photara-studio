@@ -11,14 +11,15 @@ namespace aetherscan::ba {
 
 // Jacobians use a six-dimensional local pose increment:
 // left-multiplicative rotation followed by an additive camera-center update.
-// Shared intrinsics (tied focal / principal point / Brown distortion) are optional.
-constexpr std::size_t k_max_intrinsic_params = 7;
+// Shared intrinsics (focal / aspect ratio / principal point / Brown distortion)
+// are optional.
+constexpr std::size_t k_max_intrinsic_params = 8;
 
 struct LinearizedObservation {
     double residual[2]{};          // NOLINT(modernize-avoid-c-arrays)
     double pose_jacobian[12]{};    // NOLINT(modernize-avoid-c-arrays), row-major 2 x 6
     double point_jacobian[6]{};    // NOLINT(modernize-avoid-c-arrays), row-major 2 x 3
-    // Row-major 2 x dof, param order: [f?, cx,cy?, k1,k2,p1,p2?]
+    // Row-major 2 x dof, param order: [f? or fx,fy?, cx,cy?, k1,k2,p1,p2?]
     double intrinsic_jacobian[2 * k_max_intrinsic_params]{};  // NOLINT(modernize-avoid-c-arrays)
     double robust_weight{1.0};
     bool valid{false};
@@ -44,14 +45,16 @@ struct EvaluationStats {
 struct LinearizerOptions {
     double huber_delta{2.0};
     double minimum_depth{1e-8};
-    bool optimize_focal{false};            // tied fx = fy
+    bool optimize_focal{false};            // optimize focal scale
+    bool optimize_aspect_ratio{false};     // independent fx/fy when focal is open
     bool optimize_principal_point{false};  // cx, cy
     bool optimize_distortion{false};       // k1, k2, p1, p2
 };
 
 [[nodiscard]] inline std::size_t intrinsic_dof(const LinearizerOptions& options) noexcept {
     std::size_t count = 0;
-    if (options.optimize_focal) ++count;
+    if (options.optimize_focal)
+        count += options.optimize_aspect_ratio ? 2 : 1;
     if (options.optimize_principal_point) count += 2;
     if (options.optimize_distortion) count += 4;
     return count;

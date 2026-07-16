@@ -195,6 +195,46 @@ int main() {
         return 5;
     }
 
+    // A non-square resize or changing digital stabilization can produce
+    // different horizontal and vertical focal scales. The independent focal
+    // model must recover both instead of forcing the error into camera poses.
+    {
+        Problem aspect_problem = make_problem();
+        aspect_problem.pose_constant.assign(aspect_problem.poses.size(), 1);
+        aspect_problem.observations = Observations{};
+        const PinholeIntrinsics truth{760.0, 920.0, 640.0, 360.0};
+        for (std::size_t point = 0; point < aspect_problem.points.size(); ++point) {
+            for (std::size_t camera = 0; camera < aspect_problem.poses.size();
+                 ++camera) {
+                const auto [x, y] = project(
+                    aspect_problem.poses[camera], truth,
+                    aspect_problem.points[point]);
+                aspect_problem.observations.push_back(
+                    static_cast<Index>(camera), static_cast<Index>(point), x, y);
+            }
+        }
+        aspect_problem.intrinsics.front() =
+            PinholeIntrinsics{840.0, 840.0, 640.0, 360.0};
+        aspect_problem.initial_intrinsics = aspect_problem.intrinsics;
+        OptimizerOptions aspect_options = options;
+        aspect_options.fix_first_pose = false;
+        aspect_options.optimize_points = false;
+        aspect_options.optimize_rotations = false;
+        aspect_options.optimize_focal = true;
+        aspect_options.optimize_aspect_ratio = true;
+        aspect_options.focal_prior_weight = 0.0;
+        const OptimizerSummary aspect_summary =
+            optimize_cpu(aspect_problem, aspect_options);
+        if (!aspect_summary.usable() ||
+            std::abs(aspect_problem.intrinsics[0].fx - truth.fx) > 1e-3 ||
+            std::abs(aspect_problem.intrinsics[0].fy - truth.fy) > 1e-3) {
+            std::cerr << "independent fx/fy optimization failed: fx="
+                      << aspect_problem.intrinsics[0].fx << " fy="
+                      << aspect_problem.intrinsics[0].fy << '\n';
+            return 12;
+        }
+    }
+
     // Strong focal prior should keep f near the declared initial value even
     // when observations prefer a modestly different truth focal.
     {

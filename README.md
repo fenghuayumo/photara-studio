@@ -146,12 +146,18 @@ LightGlue，并用更严格的几何阈值接纳救援边。
 ```powershell
 .\build\aetherscan\Release\aetherscan.exe `
   --images D:\ScanVideo\ori_img\images `
-  --mode incremental `
+  --mode global `
   --output scene.ply `
   --cache-dir cache `
   --dense --mesh `
   --dense-quality default  # preview | default | high
 ```
+
+对于 360° 环拍、转台或首尾视角重叠的数据，优先使用 `--mode global`。
+这类闭环序列若使用 incremental SfM，局部重投影误差即使看起来不高，累计位姿漂移仍可能在
+MVS 中表现为轮廓双层、底座重叠或缺失。程序会在输出旁生成
+`*_sfm_diagnostics.csv`，其中包含逐图 RMS/P95 重投影误差、相机中心、旋转和相邻位姿步长，
+应先通过该报告确认 SfM，再调整 MVS 阈值。
 
 `default` 面向常规交付；`high` 使用全分辨率、更多邻居和更严格的多视图几何/融合约束。`--dense-resolution-level` 可在预设之后单独覆盖工作分辨率。
 

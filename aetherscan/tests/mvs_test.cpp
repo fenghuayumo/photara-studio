@@ -115,10 +115,11 @@ void test_quality_presets() {
     require(options.min_patch_views == 3, "high preset patch support is weak");
     require(options.min_views_filter == 2, "high preset filter support is weak");
     require(options.min_views_fuse == 3, "high preset fusion support is weak");
-    require(options.mask_border_px == 2, "high preset has no silhouette guard");
+    require(options.mask_border_px == 1, "high preset silhouette guard mismatch");
     require(
-        options.min_viewing_incidence_cos >= 0.2F,
-        "high preset accepts unstable grazing samples");
+        options.grazing_weight_floor > 0.F &&
+            options.grazing_weight_floor < 0.2F,
+        "high preset grazing samples are not softly weighted");
     require(options.mesh_pixel_step == 2, "high preset mesh is too large by default");
 
     apply_quality_preset(options, DensifyQuality::preview);

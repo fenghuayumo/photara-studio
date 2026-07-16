@@ -69,9 +69,10 @@ struct DensifyOptions {
     float reprojection_error_px{2.F};
     // Normal agreement at fusion (degrees).
     float normal_diff_threshold_deg{25.F};
-    // Minimum -dot(surface_normal, camera_to_point_ray). Samples viewed closer
-    // to 90 degrees are unstable and must be supported by a less grazing view.
-    float min_viewing_incidence_cos{0.12F};
+    // Soft weight retained for a sample viewed at 90 degrees. Incidence is a
+    // confidence term, not a hard cut: hard rejection caused missing circular
+    // silhouettes even when another view could stabilize the same surface.
+    float grazing_weight_floor{0.12F};
     // Filter/adjust each final depth map against reprojected neighbor maps.
     // This removes free-space conflicts and averages mutually consistent
     // estimates before fusion (OpenMVS AdjustConfidence-style filtering).
@@ -128,7 +129,7 @@ inline void apply_quality_preset(
         options.ncc_keep_threshold = 0.50F;
         options.min_views_fuse = 2;
         options.min_views_filter = 1;
-        options.min_viewing_incidence_cos = 0.05F;
+        options.grazing_weight_floor = 0.20F;
         options.speckle_size = 24;
         options.mesh_pixel_step = 3;
         options.mesh_min_component_faces = 24;
@@ -151,7 +152,7 @@ inline void apply_quality_preset(
         break;
     case DensifyQuality::high:
         options.resolution_level = 0;
-        options.mask_border_px = 2;
+        options.mask_border_px = 1;
         options.sub_resolution_levels = 1;
         options.estimation_iters = 5;
         options.geometric_iters = 3;
@@ -165,7 +166,7 @@ inline void apply_quality_preset(
         options.depth_diff_threshold = 0.008F;
         options.reprojection_error_px = 1.5F;
         options.normal_diff_threshold_deg = 20.F;
-        options.min_viewing_incidence_cos = 0.20F;
+        options.grazing_weight_floor = 0.08F;
         // Full-resolution depth is retained for fusion; sampling every other
         // pixel keeps the default high-quality mesh at a product-manageable
         // size. API callers can still set this to 1 for an ultra-dense mesh.

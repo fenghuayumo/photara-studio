@@ -148,10 +148,23 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
     // Shared intrinsic Jacobians (param order matches intrinsic_dof()).
     int intrinsic_column = 0;
     if (options.optimize_focal) {
-        result.intrinsic_jacobian[intrinsic_column] = scale * x_distorted;
-        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
-            scale * y_distorted;
-        ++intrinsic_column;
+        if (options.optimize_aspect_ratio) {
+            result.intrinsic_jacobian[intrinsic_column] = scale * x_distorted;
+            result.intrinsic_jacobian[
+                k_max_intrinsic_params + intrinsic_column] = 0.0;
+            ++intrinsic_column;
+            result.intrinsic_jacobian[intrinsic_column] = 0.0;
+            result.intrinsic_jacobian[
+                k_max_intrinsic_params + intrinsic_column] =
+                scale * y_distorted;
+            ++intrinsic_column;
+        } else {
+            result.intrinsic_jacobian[intrinsic_column] = scale * x_distorted;
+            result.intrinsic_jacobian[
+                k_max_intrinsic_params + intrinsic_column] =
+                scale * y_distorted;
+            ++intrinsic_column;
+        }
     }
     if (options.optimize_principal_point) {
         result.intrinsic_jacobian[intrinsic_column] = scale;

@@ -250,12 +250,14 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
     // Stage 2: open focal with prior/bounds; keep distortion fixed.
     ba.optimizer.maximum_iterations = 20;
     ba.optimizer.optimize_focal = true;
+    ba.optimizer.optimize_aspect_ratio = true;
     ba.optimizer.optimize_distortion = false;
     run_bundle_adjustment(scene, ba);
 
     // Stage 3: short distortion polish once geometry is stable.
     ba.optimizer.maximum_iterations = 10;
     ba.optimizer.optimize_focal = true;
+    ba.optimizer.optimize_aspect_ratio = true;
     ba.optimizer.optimize_distortion = true;
     run_bundle_adjustment(scene, ba);
 

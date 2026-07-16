@@ -33,6 +33,7 @@ LinearizerOptions make_linearizer_options(const OptimizerOptions& options) {
         options.huber_delta,
         options.minimum_depth,
         options.optimize_focal,
+        options.optimize_aspect_ratio,
         options.optimize_principal_point,
         options.optimize_distortion};
 }
@@ -1371,21 +1372,27 @@ void apply_intrinsic_step(
         PinholeIntrinsics& intrinsics = problem.intrinsics[group];
         std::size_t index = group * block_dof;
         if (options.optimize_focal) {
-            intrinsics.fx += step[index];
-            intrinsics.fy += step[index];
-            double minimum = 1.0;
-            double maximum = std::numeric_limits<double>::infinity();
+            intrinsics.fx += step[index++];
+            if (options.optimize_aspect_ratio)
+                intrinsics.fy += step[index++];
+            else
+                intrinsics.fy += step[index - 1];
+            double minimum_fx = 1.0;
+            double maximum_fx = std::numeric_limits<double>::infinity();
+            double minimum_fy = 1.0;
+            double maximum_fy = std::numeric_limits<double>::infinity();
             if (group < problem.initial_intrinsics.size()) {
-                const double f0 = std::max(
-                    0.5 * (problem.initial_intrinsics[group].fx +
-                           problem.initial_intrinsics[group].fy),
-                    1.0);
-                minimum = std::max(1.0, f0 * options.min_focal_ratio);
-                maximum = f0 * options.max_focal_ratio;
+                const double fx0 =
+                    std::max(problem.initial_intrinsics[group].fx, 1.0);
+                const double fy0 =
+                    std::max(problem.initial_intrinsics[group].fy, 1.0);
+                minimum_fx = std::max(1.0, fx0 * options.min_focal_ratio);
+                maximum_fx = fx0 * options.max_focal_ratio;
+                minimum_fy = std::max(1.0, fy0 * options.min_focal_ratio);
+                maximum_fy = fy0 * options.max_focal_ratio;
             }
-            intrinsics.fx = std::clamp(intrinsics.fx, minimum, maximum);
-            intrinsics.fy = std::clamp(intrinsics.fy, minimum, maximum);
-            ++index;
+            intrinsics.fx = std::clamp(intrinsics.fx, minimum_fx, maximum_fx);
+            intrinsics.fy = std::clamp(intrinsics.fy, minimum_fy, maximum_fy);
         }
         if (options.optimize_principal_point) {
             intrinsics.cx += step[index++];
@@ -1419,15 +1426,28 @@ double focal_prior_cost(
     for (std::size_t group = 0; group < problem.intrinsics.size(); ++group) {
         if (problem.is_intrinsic_constant(group)) continue;
         if (group >= problem.initial_intrinsics.size()) continue;
-        const double f0 = std::max(
-            0.5 * (problem.initial_intrinsics[group].fx +
-                   problem.initial_intrinsics[group].fy),
-            1.0);
-        const double f =
-            0.5 * (problem.intrinsics[group].fx + problem.intrinsics[group].fy);
-        const double relative = (f - f0) / f0;
-        cost += 0.5 * options.focal_prior_weight * observation_scale *
-                relative * relative;
+        if (options.optimize_aspect_ratio) {
+            const double fx0 =
+                std::max(problem.initial_intrinsics[group].fx, 1.0);
+            const double fy0 =
+                std::max(problem.initial_intrinsics[group].fy, 1.0);
+            const double relative_fx =
+                (problem.intrinsics[group].fx - fx0) / fx0;
+            const double relative_fy =
+                (problem.intrinsics[group].fy - fy0) / fy0;
+            cost += 0.25 * options.focal_prior_weight * observation_scale *
+                    (relative_fx * relative_fx + relative_fy * relative_fy);
+        } else {
+            const double f0 = std::max(
+                0.5 * (problem.initial_intrinsics[group].fx +
+                       problem.initial_intrinsics[group].fy),
+                1.0);
+            const double f = 0.5 *
+                (problem.intrinsics[group].fx + problem.intrinsics[group].fy);
+            const double relative = (f - f0) / f0;
+            cost += 0.5 * options.focal_prior_weight * observation_scale *
+                    relative * relative;
+        }
     }
     return cost;
 }
@@ -1487,21 +1507,36 @@ void apply_focal_prior(
     for (std::size_t group = 0; group < problem.intrinsics.size(); ++group) {
         if (problem.is_intrinsic_constant(group)) continue;
         if (group >= problem.initial_intrinsics.size()) continue;
-        const double f0 = std::max(
-            0.5 * (problem.initial_intrinsics[group].fx +
-                   problem.initial_intrinsics[group].fy),
-            1.0);
-        const double f =
-            0.5 * (problem.intrinsics[group].fx + problem.intrinsics[group].fy);
-        const double weight =
-            options.focal_prior_weight * observation_scale / (f0 * f0);
         double* hessian = system.intrinsic_hessian.data() +
                           group * system.intrinsic_dof * system.intrinsic_dof;
         double* rhs =
             system.intrinsic_rhs.data() + group * system.intrinsic_dof;
-        hessian[0] += weight;
-        // System stores rhs = -J^T r and solves H dx = rhs.
-        rhs[0] -= weight * (f - f0);
+        if (options.optimize_aspect_ratio) {
+            const double fx0 =
+                std::max(problem.initial_intrinsics[group].fx, 1.0);
+            const double fy0 =
+                std::max(problem.initial_intrinsics[group].fy, 1.0);
+            const double weight_fx = 0.5 * options.focal_prior_weight *
+                                     observation_scale / (fx0 * fx0);
+            const double weight_fy = 0.5 * options.focal_prior_weight *
+                                     observation_scale / (fy0 * fy0);
+            hessian[0] += weight_fx;
+            hessian[system.intrinsic_dof + 1] += weight_fy;
+            rhs[0] -= weight_fx * (problem.intrinsics[group].fx - fx0);
+            rhs[1] -= weight_fy * (problem.intrinsics[group].fy - fy0);
+        } else {
+            const double f0 = std::max(
+                0.5 * (problem.initial_intrinsics[group].fx +
+                       problem.initial_intrinsics[group].fy),
+                1.0);
+            const double f = 0.5 *
+                (problem.intrinsics[group].fx + problem.intrinsics[group].fy);
+            const double weight =
+                options.focal_prior_weight * observation_scale / (f0 * f0);
+            hessian[0] += weight;
+            // System stores rhs = -J^T r and solves H dx = rhs.
+            rhs[0] -= weight * (f - f0);
+        }
     }
 }
 
@@ -1640,7 +1675,8 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         throw std::invalid_argument("Invalid BA optimizer options");
     }
     const std::size_t block_dof = count_intrinsic_dof(options);
-    if (options.optimize_focal) normalize_group_focals(problem);
+    if (options.optimize_focal && !options.optimize_aspect_ratio)
+        normalize_group_focals(problem);
     if (problem.initial_intrinsics.empty())
         problem.initial_intrinsics = problem.intrinsics;
 

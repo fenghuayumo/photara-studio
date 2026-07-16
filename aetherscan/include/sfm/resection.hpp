@@ -44,6 +44,7 @@ struct ResectionConfig {
         full_ba.maximum_iterations = 40;
         full_ba.huber_delta = 2.0;
         full_ba.optimize_focal = true;
+        full_ba.optimize_aspect_ratio = true;
         full_ba.optimize_distortion = true;
     }
 };

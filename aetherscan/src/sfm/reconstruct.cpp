@@ -30,6 +30,7 @@ void append_optimizer(
     key.append(options.optimize_rotations);
     key.append(options.optimize_points);
     key.append(options.optimize_focal);
+    key.append(options.optimize_aspect_ratio);
     key.append(options.optimize_principal_point);
     key.append(options.optimize_distortion);
     key.append(options.focal_prior_weight);
@@ -290,6 +291,7 @@ ReconstructionSummary run_global_mapping(
     bundle.optimizer.maximum_iterations = 25;
     bundle.optimizer.optimize_rotations = true;
     bundle.optimizer.optimize_focal = true;
+    bundle.optimizer.optimize_aspect_ratio = true;
     bundle.optimizer.optimize_distortion = false;
     if (!run_bundle_adjustment(scene, bundle).success) {
         core::Logger::instance().error("global: full bundle adjustment failed");
@@ -311,6 +313,7 @@ ReconstructionSummary run_global_mapping(
     bundle.optimizer.maximum_iterations = 8;
     bundle.optimizer.optimize_rotations = true;
     bundle.optimizer.optimize_focal = true;
+    bundle.optimizer.optimize_aspect_ratio = true;
     bundle.optimizer.optimize_distortion = true;
     if (!run_bundle_adjustment(scene, bundle).success) {
         core::Logger::instance().warning(
