@@ -141,7 +141,23 @@ LightGlue，并用更严格的几何阈值接纳救援边。
 
 必填参数为 `--images`、`--mode`、`--output`。`--focal` 可选：省略或 `0` 时用 `1.2 * max(宽,高)` 作初始值，再由 view-graph 共识与 BA 精化；已知标定可显式传入。其余选项见 `aetherscan --help`。
 
+稠密重建使用整条流水线质量预设，而不只是调整图像分辨率：
+
+```powershell
+.\build\aetherscan\Release\aetherscan.exe `
+  --images D:\ScanVideo\ori_img\images `
+  --mode incremental `
+  --output scene.ply `
+  --cache-dir cache `
+  --dense --mesh `
+  --dense-quality default  # preview | default | high
+```
+
+`default` 面向常规交付；`high` 使用全分辨率、更多邻居和更严格的多视图几何/融合约束。`--dense-resolution-level` 可在预设之后单独覆盖工作分辨率。
+
 - `scene.mvs`：OpenMVS Interface（MVSI），可用 OpenMVS Viewer 打开验证相机与稀疏点
 - `scene.ply`：稀疏 XYZ；写出 PLY 时会额外生成同名 `scene.mvs`
+- `scene_dense.ply`：多轮几何一致性和深度过滤后的稠密点云
+- `scene_mesh.ply`：启用 `--mesh` 时生成的网格
 
 详细设计见 [docs/SFM_ARCHITECTURE.md](docs/SFM_ARCHITECTURE.md)。

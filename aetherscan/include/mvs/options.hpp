@@ -14,10 +14,20 @@ enum class MeshMethod : std::uint8_t {
     none = 2,
 };
 
+enum class DensifyQuality : std::uint8_t {
+    preview = 0,
+    default_quality = 1,
+    high = 2,
+};
+
 struct DensifyOptions {
     // Optional per-image foreground masks. Files must have the same basename
     // as source images; white is reconstructed and black is ignored.
     std::filesystem::path mask_dir;
+    // Erode foreground masks by this many working-resolution pixels. A small
+    // guard band prevents uncertain segmentation/sampling at silhouettes from
+    // turning into long grazing-angle depth sheets.
+    unsigned mask_border_px{1};
     // Image downscale steps before densify (0 = full res, 1 ~= half, ...).
     unsigned resolution_level{1};
     // Minimum working image dimension after downscale.
@@ -27,7 +37,9 @@ struct DensifyOptions {
     unsigned sub_resolution_levels{1};
     // PatchMatch iterations per pyramid level.
     unsigned estimation_iters{4};
-    // Geometric-consistency refinement iterations (0 = off).
+    // Global geometric-consistency rounds (0 = off). Neighbor depth maps are
+    // snapshotted again after every round, so information propagates between
+    // views instead of repeatedly optimizing against a stale first estimate.
     unsigned geometric_iters{2};
     // Weight of geometric consistency term in score.
     float geometric_weight{0.1F};
@@ -57,6 +69,18 @@ struct DensifyOptions {
     float reprojection_error_px{2.F};
     // Normal agreement at fusion (degrees).
     float normal_diff_threshold_deg{25.F};
+    // Minimum -dot(surface_normal, camera_to_point_ray). Samples viewed closer
+    // to 90 degrees are unstable and must be supported by a less grazing view.
+    float min_viewing_incidence_cos{0.12F};
+    // Filter/adjust each final depth map against reprojected neighbor maps.
+    // This removes free-space conflicts and averages mutually consistent
+    // estimates before fusion (OpenMVS AdjustConfidence-style filtering).
+    bool filter_depth_maps{true};
+    // Number of agreeing neighbor maps required by the final depth filter.
+    // The reference map itself is not included in this count.
+    unsigned min_views_filter{1};
+    // Average consistent reprojected estimates instead of filter-only mode.
+    bool adjust_filtered_depth{true};
     // Enable geometric-consistency pass after photometric densify.
     bool geometric_consistency{true};
     // Build mesh after fusion.
@@ -85,5 +109,72 @@ struct DensifyOptions {
     unsigned mesh_min_component_faces{32};
     unsigned thread_count{0};
 };
+
+// Product presets intentionally tune the whole pipeline rather than only the
+// image resolution. Callers may override individual fields afterwards.
+inline void apply_quality_preset(
+    DensifyOptions& options, const DensifyQuality quality) {
+    options = DensifyOptions{};
+    switch (quality) {
+    case DensifyQuality::preview:
+        options.resolution_level = 2;
+        options.mask_border_px = 0;
+        options.sub_resolution_levels = 1;
+        options.estimation_iters = 3;
+        options.geometric_iters = 1;
+        options.random_iters = 4;
+        options.max_neighbors = 8;
+        options.min_patch_views = 2;
+        options.ncc_keep_threshold = 0.50F;
+        options.min_views_fuse = 2;
+        options.min_views_filter = 1;
+        options.min_viewing_incidence_cos = 0.05F;
+        options.speckle_size = 24;
+        options.mesh_pixel_step = 3;
+        options.mesh_min_component_faces = 24;
+        break;
+    case DensifyQuality::default_quality:
+        options.resolution_level = 1;
+        options.mask_border_px = 1;
+        options.sub_resolution_levels = 1;
+        options.estimation_iters = 4;
+        options.geometric_iters = 2;
+        options.random_iters = 6;
+        options.max_neighbors = 12;
+        options.min_patch_views = 2;
+        options.ncc_keep_threshold = 0.45F;
+        options.min_views_fuse = 3;
+        options.min_views_filter = 1;
+        options.speckle_size = 40;
+        options.mesh_pixel_step = 2;
+        options.mesh_min_component_faces = 32;
+        break;
+    case DensifyQuality::high:
+        options.resolution_level = 0;
+        options.mask_border_px = 2;
+        options.sub_resolution_levels = 1;
+        options.estimation_iters = 5;
+        options.geometric_iters = 3;
+        options.random_iters = 8;
+        options.max_neighbors = 16;
+        options.min_patch_views = 3;
+        options.ncc_keep_threshold = 0.40F;
+        options.min_views_fuse = 3;
+        options.min_views_filter = 2;
+        options.speckle_size = 80;
+        options.depth_diff_threshold = 0.008F;
+        options.reprojection_error_px = 1.5F;
+        options.normal_diff_threshold_deg = 20.F;
+        options.min_viewing_incidence_cos = 0.20F;
+        // Full-resolution depth is retained for fusion; sampling every other
+        // pixel keeps the default high-quality mesh at a product-manageable
+        // size. API callers can still set this to 1 for an ultra-dense mesh.
+        options.mesh_pixel_step = 2;
+        options.mesh_weld_pixel_fraction = 0.55F;
+        options.mesh_depth_diff_threshold = 0.018F;
+        options.mesh_min_component_faces = 64;
+        break;
+    }
+}
 
 }  // namespace aetherscan::mvs

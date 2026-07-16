@@ -108,12 +108,33 @@ void test_projective_mesh() {
     }
 }
 
+void test_quality_presets() {
+    DensifyOptions options;
+    apply_quality_preset(options, DensifyQuality::high);
+    require(options.resolution_level == 0, "high preset is not full resolution");
+    require(options.min_patch_views == 3, "high preset patch support is weak");
+    require(options.min_views_filter == 2, "high preset filter support is weak");
+    require(options.min_views_fuse == 3, "high preset fusion support is weak");
+    require(options.mask_border_px == 2, "high preset has no silhouette guard");
+    require(
+        options.min_viewing_incidence_cos >= 0.2F,
+        "high preset accepts unstable grazing samples");
+    require(options.mesh_pixel_step == 2, "high preset mesh is too large by default");
+
+    apply_quality_preset(options, DensifyQuality::preview);
+    require(options.resolution_level == 2, "preview preset resolution mismatch");
+    require(
+        std::abs(options.depth_diff_threshold - 0.01F) < 1e-6F,
+        "preset application leaked high-quality thresholds");
+}
+
 }  // namespace
 
 int main() {
     try {
         test_parallel_fusion();
         test_projective_mesh();
+        test_quality_presets();
         std::cout << "mvs tests passed\n";
         return 0;
     } catch (const std::exception& error) {

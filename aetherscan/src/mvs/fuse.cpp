@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -261,6 +262,11 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                     ref.pose.transform_camera_to_world(cam0.cast<double>()).cast<float>();
                 const Vec3f world_n0 =
                     (ref.pose.R.transpose().cast<float>() * normal0).normalized();
+                const Vec3f viewing_ray0 =
+                    (world0 - ref.pose.C.cast<float>()).normalized();
+                if (-world_n0.dot(viewing_ray0) <
+                    options.min_viewing_incidence_cos)
+                    continue;
                 const float w0 = std::max(
                     0.02F,
                     1.F - rdm.confidence[index] /
@@ -287,17 +293,50 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                     float u = 0.F;
                     float v = 0.F;
                     if (!src.project(cam_src, u, v)) continue;
-                    const int sx = static_cast<int>(std::lround(u));
-                    const int sy = static_cast<int>(std::lround(v));
-                    if (sx < 0 || sy < 0 || sx >= static_cast<int>(src.width) ||
-                        sy >= static_cast<int>(src.height))
-                        continue;
-                    const std::size_t source_index = sdm.index(sx, sy);
-                    if (!depth_similar(
-                            cam_src.z(), sdm.depth[source_index],
-                            options.depth_diff_threshold) ||
-                        !(sdm.confidence[source_index] <= options.ncc_keep_threshold))
-                        continue;
+                    // Search the projected neighborhood instead of rounding to
+                    // one pixel. This is important at oblique angles, where a
+                    // one-pixel choice can jump to a different depth layer.
+                    int sx = -1;
+                    int sy = -1;
+                    std::size_t source_index = 0;
+                    float best_score = std::numeric_limits<float>::infinity();
+                    const int center_x = static_cast<int>(std::lround(u));
+                    const int center_y = static_cast<int>(std::lround(v));
+                    const int radius = std::max(
+                        1, static_cast<int>(
+                               std::ceil(options.reprojection_error_px)));
+                    for (int oy = -radius; oy <= radius; ++oy) {
+                        for (int ox = -radius; ox <= radius; ++ox) {
+                            const int px = center_x + ox;
+                            const int py = center_y + oy;
+                            if (px < 0 || py < 0 ||
+                                px >= static_cast<int>(src.width) ||
+                                py >= static_cast<int>(src.height))
+                                continue;
+                            const std::size_t candidate_index = sdm.index(px, py);
+                            const float candidate_depth = sdm.depth[candidate_index];
+                            if (!depth_similar(
+                                    cam_src.z(), candidate_depth,
+                                    options.depth_diff_threshold) ||
+                                !(sdm.confidence[candidate_index] <=
+                                  options.ncc_keep_threshold))
+                                continue;
+                            const float relative =
+                                std::abs(cam_src.z() - candidate_depth) /
+                                std::max(cam_src.z(), candidate_depth);
+                            const float pixel = std::hypot(
+                                static_cast<float>(px) - u,
+                                static_cast<float>(py) - v);
+                            const float score = relative + pixel * 1e-3F;
+                            if (score < best_score) {
+                                best_score = score;
+                                sx = px;
+                                sy = py;
+                                source_index = candidate_index;
+                            }
+                        }
+                    }
+                    if (sx < 0) continue;
 
                     const Vec3f source_normal = sdm.normal[source_index];
                     if (!source_normal.allFinite() ||
@@ -315,6 +354,11 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                         src.pose
                             .transform_camera_to_world(source_cam_point.cast<double>())
                             .cast<float>();
+                    const Vec3f source_viewing_ray =
+                        (world_point - src.pose.C.cast<float>()).normalized();
+                    if (-world_normal.dot(source_viewing_ray) <
+                        options.min_viewing_incidence_cos)
+                        continue;
                     const Vec3f cam_back =
                         ref.pose.transform_world_to_camera(world_point.cast<double>())
                             .cast<float>();
@@ -343,14 +387,49 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 }
 
                 if (count < options.min_views_fuse) continue;
+
+                // Robustly choose the consensus layer along the reference
+                // viewing ray. Pairwise-valid samples can still straddle a
+                // thin surface; a weighted median followed by a tight inlier
+                // average avoids turning those samples into a thick shell.
+                std::array<std::pair<float, std::size_t>, k_max_fusion_views>
+                    ordered{};
+                for (std::size_t i = 0; i < count; ++i) {
+                    const Vec3f ref_camera =
+                        ref.pose
+                            .transform_world_to_camera(positions[i].cast<double>())
+                            .cast<float>();
+                    ordered[i] = {ref_camera.z(), i};
+                }
+                std::sort(ordered.begin(), ordered.begin() + count);
+                float total_weight = 0.F;
+                for (std::size_t i = 0; i < count; ++i)
+                    total_weight += weights[i];
+                float cumulative = 0.F;
+                float median_depth = ordered[0].first;
+                for (std::size_t i = 0; i < count; ++i) {
+                    cumulative += weights[ordered[i].second];
+                    if (cumulative >= total_weight * 0.5F) {
+                        median_depth = ordered[i].first;
+                        break;
+                    }
+                }
                 Vec3f position = Vec3f::Zero();
                 Vec3f normal = Vec3f::Zero();
                 float weight = 0.F;
+                std::size_t inlier_count = 0;
                 for (std::size_t i = 0; i < count; ++i) {
-                    position += positions[i] * weights[i];
-                    normal += normals[i] * weights[i];
-                    weight += weights[i];
+                    if (!depth_similar(
+                            ordered[i].first, median_depth,
+                            options.depth_diff_threshold * 0.75F))
+                        continue;
+                    const std::size_t sample = ordered[i].second;
+                    position += positions[sample] * weights[sample];
+                    normal += normals[sample] * weights[sample];
+                    weight += weights[sample];
+                    ++inlier_count;
                 }
+                if (inlier_count < options.min_views_fuse) continue;
                 position /= std::max(weight, 1e-6F);
                 if (!position.allFinite() || normal.squaredNorm() < 1e-10F) continue;
                 normal.normalize();
@@ -365,10 +444,16 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 accumulator.normal += normal * weight;
                 accumulator.weight += weight;
                 for (std::size_t i = 0; i < count; ++i) {
-                    add_view(accumulator, view_ids[i]);
-                    if (has_color[i]) {
-                        accumulator.color += color_samples[i] * weights[i];
-                        accumulator.color_weight += weights[i];
+                    if (!depth_similar(
+                            ordered[i].first, median_depth,
+                            options.depth_diff_threshold * 0.75F))
+                        continue;
+                    const std::size_t sample = ordered[i].second;
+                    add_view(accumulator, view_ids[sample]);
+                    if (has_color[sample]) {
+                        accumulator.color +=
+                            color_samples[sample] * weights[sample];
+                        accumulator.color_weight += weights[sample];
                     }
                 }
             }

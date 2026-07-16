@@ -57,7 +57,10 @@ struct ReconstructCli {
     bool dense{false};
     bool mesh{false};
     bool mesh_obj{false};
+    aetherscan::mvs::DensifyQuality dense_quality{
+        aetherscan::mvs::DensifyQuality::default_quality};
     unsigned dense_resolution_level{1};
+    bool dense_resolution_overridden{false};
     std::filesystem::path masks_dir;
 };
 
@@ -149,6 +152,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
               << "  --mesh       also build scalable projective mesh -> mesh.ply\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
+              << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
               << "Output formats:\n"
               << "  .mvs  OpenMVS Interface (open in Viewer)\n"
@@ -231,6 +235,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mesh-obj", "Additionally export mesh as ASCII OBJ",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("dense-quality",
+         "MVS quality preset: preview, default, or high",
+         cxxopts::value<std::string>()->default_value("default"))
         ("dense-resolution-level",
          "MVS image downscale steps (0=full, 1~=half)",
          cxxopts::value<unsigned>()->default_value("1"))
@@ -285,8 +292,21 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.dense = result["dense"].as<bool>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mesh_obj = result["mesh-obj"].as<bool>();
+    const std::string dense_quality = result["dense-quality"].as<std::string>();
+    if (dense_quality == "preview") {
+        cli.dense_quality = aetherscan::mvs::DensifyQuality::preview;
+    } else if (dense_quality == "default") {
+        cli.dense_quality = aetherscan::mvs::DensifyQuality::default_quality;
+    } else if (dense_quality == "high") {
+        cli.dense_quality = aetherscan::mvs::DensifyQuality::high;
+    } else {
+        throw std::invalid_argument(
+            "--dense-quality must be preview, default, or high");
+    }
     cli.dense_resolution_level =
         result["dense-resolution-level"].as<unsigned>();
+    cli.dense_resolution_overridden =
+        result.count("dense-resolution-level") != 0;
     const std::string masks_text = result["masks"].as<std::string>();
     if (masks_text == "auto") {
         const std::filesystem::path candidate =
@@ -509,15 +529,29 @@ int main(int argc, char** argv) {
 
         if (cli.dense) {
             aetherscan::mvs::DensifyOptions densify_opts;
-            densify_opts.resolution_level = cli.dense_resolution_level;
+            aetherscan::mvs::apply_quality_preset(
+                densify_opts, cli.dense_quality);
+            if (cli.dense_resolution_overridden)
+                densify_opts.resolution_level = cli.dense_resolution_level;
             densify_opts.mask_dir = cli.masks_dir;
             densify_opts.build_mesh = cli.mesh;
             densify_opts.mesh_method = cli.mesh
                 ? aetherscan::mvs::MeshMethod::depth_projective
                 : aetherscan::mvs::MeshMethod::none;
             densify_opts.geometric_consistency = true;
-            densify_opts.sub_resolution_levels = 1;
             densify_opts.thread_count = scene.thread_count;
+            aetherscan::core::Logger::instance().info(
+                "mvs config: resolution_level=", densify_opts.resolution_level,
+                " pyramid_levels=", densify_opts.sub_resolution_levels + 1,
+                " photo_iters=", densify_opts.estimation_iters,
+                " geometric_rounds=", densify_opts.geometric_iters,
+                " neighbors=", densify_opts.max_neighbors,
+                " patch_views=", densify_opts.min_patch_views,
+                " filter_views=", densify_opts.min_views_filter,
+                " fuse_views=", densify_opts.min_views_fuse,
+                " mask_border_px=", densify_opts.mask_border_px,
+                " min_incidence_cos=",
+                densify_opts.min_viewing_incidence_cos);
             if (!densify_opts.mask_dir.empty())
                 aetherscan::core::Logger::instance().info(
                     "mvs masks=", densify_opts.mask_dir);

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -250,13 +251,40 @@ struct PatchRef {
     if (u < 1.F || v < 1.F || u >= static_cast<float>(src.width - 1) ||
         v >= static_cast<float>(src.height - 1))
         return 4.F;
+    // A projected correspondence is sub-pixel. Searching the surrounding
+    // 3x3 neighborhood avoids turning normal projection quantization into a
+    // false geometric inconsistency, while the depth gate prevents crossing
+    // a real discontinuity.
+    int sx = -1;
+    int sy = -1;
     float d1 = 0.F;
-    // Nearest integer sample with depth similarity gate.
-    const int sx = static_cast<int>(std::lround(u));
-    const int sy = static_cast<int>(std::lround(v));
-    d1 = source_depth.depth[source_depth.index(sx, sy)];
-    if (d1 <= 0.F) return 4.F;
-    if (std::abs(cam1.z() - d1) > 0.03F * std::max(cam1.z(), d1)) return 4.F;
+    float best = std::numeric_limits<float>::infinity();
+    const int center_x = static_cast<int>(std::lround(u));
+    const int center_y = static_cast<int>(std::lround(v));
+    for (int oy = -1; oy <= 1; ++oy) {
+        for (int ox = -1; ox <= 1; ++ox) {
+            const int px = center_x + ox;
+            const int py = center_y + oy;
+            if (px < 0 || py < 0 || px >= static_cast<int>(src.width) ||
+                py >= static_cast<int>(src.height))
+                continue;
+            const float candidate = source_depth.depth[source_depth.index(px, py)];
+            if (candidate <= 0.F) continue;
+            const float relative =
+                std::abs(cam1.z() - candidate) / std::max(cam1.z(), candidate);
+            if (relative > 0.03F) continue;
+            const float pixel = std::hypot(
+                static_cast<float>(px) - u, static_cast<float>(py) - v);
+            const float score = relative + pixel * 1e-3F;
+            if (score < best) {
+                best = score;
+                sx = px;
+                sy = py;
+                d1 = candidate;
+            }
+        }
+    }
+    if (sx < 0) return 4.F;
     const Vec3f cam_back = src.unproject(static_cast<float>(sx), static_cast<float>(sy), d1);
     const Vec3f world_back =
         src_pose.transform_camera_to_world(cam_back.cast<double>()).cast<float>();
@@ -414,8 +442,9 @@ void run_patchmatch_level(
         }
     }
 
-    const unsigned iters = use_geo ? std::max(1U, options.geometric_iters)
-                                   : options.estimation_iters;
+    // Geometric rounds are coordinated globally in estimate_depth_maps so
+    // every sweep sees the previous round's updated neighbor maps.
+    const unsigned iters = use_geo ? 1U : options.estimation_iters;
     for (unsigned iter = 0; iter < iters; ++iter) {
         const bool forward = (iter % 2) == 0;
         const int y0 = forward ? 0 : static_cast<int>(ref.height) - 1;
@@ -641,6 +670,168 @@ void refine_one_view_geometric(
     }
 }
 
+void filter_one_depth_map(
+    MvsScene& scene, const std::vector<DepthMap>& depth_snapshot,
+    const Index view_id, const DensifyOptions& options) {
+    MvsView& ref = scene.views[view_id];
+    const DepthMap& input = depth_snapshot[view_id];
+    if (input.depth.empty() || ref.neighbors.empty()) return;
+
+    DepthMap output = input;
+    const unsigned required = std::min<unsigned>(
+        options.min_views_filter, static_cast<unsigned>(ref.neighbors.size()));
+    const float cos_normal = std::cos(
+        options.normal_diff_threshold_deg * 3.14159265358979323846F / 180.F);
+    const float relative_threshold = options.depth_diff_threshold * 1.2F;
+    std::size_t kept = 0;
+
+    for (std::uint32_t y = 0; y < ref.height; ++y) {
+        for (std::uint32_t x = 0; x < ref.width; ++x) {
+            const std::size_t index = input.index(
+                static_cast<int>(x), static_cast<int>(y));
+            const float depth0 = input.depth[index];
+            const Vec3f normal0 = input.normal[index];
+            if (depth0 <= 0.F || !normal0.allFinite() ||
+                normal0.squaredNorm() < 0.5F) {
+                output.depth[index] = 0.F;
+                output.normal[index] = Vec3f::Zero();
+                continue;
+            }
+
+            const Vec3f camera0 = ref.unproject(
+                static_cast<float>(x), static_cast<float>(y), depth0);
+            const Vec3f world0 =
+                ref.pose.transform_camera_to_world(camera0.cast<double>()).cast<float>();
+            const Vec3f world_normal0 =
+                (ref.pose.R.transpose().cast<float>() * normal0).normalized();
+            const Vec3f viewing_ray0 =
+                (world0 - ref.pose.C.cast<float>()).normalized();
+            if (-world_normal0.dot(viewing_ray0) <
+                options.min_viewing_incidence_cos) {
+                output.depth[index] = 0.F;
+                output.normal[index] = Vec3f::Zero();
+                output.confidence[index] = 2.F;
+                continue;
+            }
+            const float reference_weight = std::max(
+                0.05F, 1.F - input.confidence[index] /
+                                   std::max(options.ncc_keep_threshold, 1e-3F));
+            float depth_sum = depth0 * reference_weight;
+            Vec3f world_normal_sum = world_normal0 * reference_weight;
+            float weight_sum = reference_weight;
+            unsigned agreeing = 0;
+
+            for (const NeighborScore& neighbor : ref.neighbors) {
+                if (neighbor.view_id >= scene.views.size()) continue;
+                const MvsView& src = scene.views[neighbor.view_id];
+                const DepthMap& source_depth = depth_snapshot[neighbor.view_id];
+                if (source_depth.depth.empty()) continue;
+
+                const Vec3f predicted =
+                    src.pose.transform_world_to_camera(world0.cast<double>()).cast<float>();
+                float u = 0.F;
+                float v = 0.F;
+                if (!src.project(predicted, u, v)) continue;
+                const int center_x = static_cast<int>(std::lround(u));
+                const int center_y = static_cast<int>(std::lround(v));
+
+                int best_x = -1;
+                int best_y = -1;
+                float best_depth = 0.F;
+                float best_score = std::numeric_limits<float>::infinity();
+                for (int oy = -1; oy <= 1; ++oy) {
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        const int sx = center_x + ox;
+                        const int sy = center_y + oy;
+                        if (sx < 0 || sy < 0 ||
+                            sx >= static_cast<int>(src.width) ||
+                            sy >= static_cast<int>(src.height))
+                            continue;
+                        const std::size_t source_index = source_depth.index(sx, sy);
+                        const float candidate = source_depth.depth[source_index];
+                        if (candidate <= 0.F) continue;
+                        const float relative = std::abs(predicted.z() - candidate) /
+                                               std::max(predicted.z(), candidate);
+                        if (relative > relative_threshold) continue;
+                        const float pixel = std::hypot(
+                            static_cast<float>(sx) - u,
+                            static_cast<float>(sy) - v);
+                        const float score = relative + pixel * 1e-3F;
+                        if (score < best_score) {
+                            best_score = score;
+                            best_x = sx;
+                            best_y = sy;
+                            best_depth = candidate;
+                        }
+                    }
+                }
+                if (best_x < 0) continue;
+
+                const std::size_t source_index =
+                    source_depth.index(best_x, best_y);
+                const Vec3f source_normal = source_depth.normal[source_index];
+                if (!source_normal.allFinite() ||
+                    source_normal.squaredNorm() < 0.5F)
+                    continue;
+                const Vec3f world_normal =
+                    (src.pose.R.transpose().cast<float>() * source_normal).normalized();
+                if (world_normal0.dot(world_normal) < cos_normal) continue;
+
+                const Vec3f source_camera = src.unproject(
+                    static_cast<float>(best_x), static_cast<float>(best_y), best_depth);
+                const Vec3f source_world =
+                    src.pose.transform_camera_to_world(source_camera.cast<double>())
+                        .cast<float>();
+                const Vec3f source_viewing_ray =
+                    (source_world - src.pose.C.cast<float>()).normalized();
+                if (-world_normal.dot(source_viewing_ray) <
+                    options.min_viewing_incidence_cos)
+                    continue;
+                const Vec3f back_camera =
+                    ref.pose.transform_world_to_camera(source_world.cast<double>())
+                        .cast<float>();
+                float back_u = 0.F;
+                float back_v = 0.F;
+                if (!ref.project(back_camera, back_u, back_v) ||
+                    std::hypot(
+                        back_u - static_cast<float>(x),
+                        back_v - static_cast<float>(y)) >
+                        options.reprojection_error_px)
+                    continue;
+
+                const float weight = std::max(
+                    0.05F, 1.F - source_depth.confidence[source_index] /
+                                       std::max(options.ncc_keep_threshold, 1e-3F));
+                depth_sum += back_camera.z() * weight;
+                world_normal_sum += world_normal * weight;
+                weight_sum += weight;
+                ++agreeing;
+            }
+
+            if (agreeing < required || weight_sum <= 0.F) {
+                output.depth[index] = 0.F;
+                output.normal[index] = Vec3f::Zero();
+                output.confidence[index] = 2.F;
+                continue;
+            }
+            if (options.adjust_filtered_depth) {
+                const float adjusted_depth = depth_sum / weight_sum;
+                if (adjusted_depth >= input.depth_min &&
+                    adjusted_depth <= input.depth_max)
+                    output.depth[index] = adjusted_depth;
+                if (world_normal_sum.squaredNorm() > 1e-10F) {
+                    const Vec3f adjusted_world_normal = world_normal_sum.normalized();
+                    output.normal[index] =
+                        (ref.pose.R.cast<float>() * adjusted_world_normal).normalized();
+                }
+            }
+            ++kept;
+        }
+    }
+    ref.depth_map = std::move(output);
+    (void)kept;
+}
+
 }  // namespace
 
 void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
@@ -662,20 +853,41 @@ void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
 
     if (options.geometric_consistency && options.geometric_iters > 0) {
         core::StageScope geo_stage("mvs.geometric_consistency");
-        // Snapshot depths so parallel refine only reads a frozen neighbor state.
+        for (unsigned round = 0; round < options.geometric_iters; ++round) {
+            // Snapshot every global round. Parallel writers never race with
+            // neighbor readers, and the next round observes all updates.
+            std::vector<DepthMap> depth_snapshot(scene.views.size());
+            for (std::size_t i = 0; i < scene.views.size(); ++i)
+                depth_snapshot[i] = scene.views[i].depth_map;
+            core::ProgressReporter progress(
+                "mvs.geometric_consistency", scene.views.size());
+            parallel::parallel_for(
+                scene.views.size(), threads, [&](const std::size_t i) {
+                    std::mt19937 rng(
+                        static_cast<unsigned>(0xC0FFEE + round * 0x10001U) ^
+                        static_cast<unsigned>(i) * 0x9E3779B9u);
+                    refine_one_view_geometric(
+                        scene, images, depth_snapshot, static_cast<Index>(i),
+                        options, rng);
+                    progress.advance();
+                });
+        }
+        geo_stage.finish();
+    }
+
+    if (options.filter_depth_maps && options.min_views_filter > 0) {
+        core::StageScope filter_stage("mvs.filter_depth");
         std::vector<DepthMap> depth_snapshot(scene.views.size());
         for (std::size_t i = 0; i < scene.views.size(); ++i)
             depth_snapshot[i] = scene.views[i].depth_map;
-        core::ProgressReporter progress("mvs.geometric_consistency", scene.views.size());
-        parallel::parallel_for(scene.views.size(), threads, [&](const std::size_t i) {
-            std::mt19937 rng(
-                static_cast<unsigned>(0xC0FFEE) ^
-                static_cast<unsigned>(i) * 0x9E3779B9u);
-            refine_one_view_geometric(
-                scene, images, depth_snapshot, static_cast<Index>(i), options, rng);
-            progress.advance();
-        });
-        geo_stage.finish();
+        core::ProgressReporter progress("mvs.filter_depth", scene.views.size());
+        parallel::parallel_for(
+            scene.views.size(), threads, [&](const std::size_t i) {
+                filter_one_depth_map(
+                    scene, depth_snapshot, static_cast<Index>(i), options);
+                progress.advance();
+            });
+        filter_stage.finish();
     }
 
     std::size_t valid_pixels = 0;

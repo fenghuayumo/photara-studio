@@ -41,6 +41,45 @@ namespace {
     return {view.src_fx * xd + view.src_cx, view.src_fy * yd + view.src_cy};
 }
 
+void erode_mask(
+    std::vector<std::uint8_t>& mask, const std::uint32_t width,
+    const std::uint32_t height, const unsigned radius) {
+    if (mask.empty() || radius == 0 || width == 0 || height == 0) return;
+    const std::uint32_t window = radius * 2U + 1U;
+    std::vector<std::uint8_t> horizontal(mask.size(), 0);
+    std::vector<std::uint32_t> prefix(
+        static_cast<std::size_t>(std::max(width, height)) + 1U, 0U);
+
+    for (std::uint32_t y = 0; y < height; ++y) {
+        prefix[0] = 0;
+        const std::size_t row = static_cast<std::size_t>(y) * width;
+        for (std::uint32_t x = 0; x < width; ++x)
+            prefix[x + 1U] = prefix[x] + (mask[row + x] != 0 ? 1U : 0U);
+        for (std::uint32_t x = radius; x + radius < width; ++x) {
+            const std::uint32_t sum =
+                prefix[x + radius + 1U] - prefix[x - radius];
+            horizontal[row + x] = sum == window ? 1U : 0U;
+        }
+    }
+
+    std::fill(mask.begin(), mask.end(), 0U);
+    for (std::uint32_t x = 0; x < width; ++x) {
+        prefix[0] = 0;
+        for (std::uint32_t y = 0; y < height; ++y)
+            prefix[y + 1U] = prefix[y] +
+                             (horizontal[static_cast<std::size_t>(y) * width + x]
+                                      != 0
+                                  ? 1U
+                                  : 0U);
+        for (std::uint32_t y = radius; y + radius < height; ++y) {
+            const std::uint32_t sum =
+                prefix[y + radius + 1U] - prefix[y - radius];
+            mask[static_cast<std::size_t>(y) * width + x] =
+                sum == window ? 1U : 0U;
+        }
+    }
+}
+
 }  // namespace
 
 namespace detail {
@@ -145,6 +184,9 @@ std::vector<ViewImage> load_view_images(
                     }
                 }
             }
+            erode_mask(
+                images[i].mask, view.width, view.height,
+                options.mask_border_px);
             progress.advance();
         });
     stage.finish();
