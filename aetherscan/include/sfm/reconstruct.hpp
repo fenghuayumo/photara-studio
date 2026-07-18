@@ -23,6 +23,12 @@ struct ReconstructionConfig {
     StarInitConfig star{};
     ResectionConfig resection{};
     HierarchicalConfig hierarchical{};
+    // If a large incremental reconstruction stalls with missing views, retry
+    // from independent submaps and merge them. Small/successful captures stay
+    // on the ordinary incremental path.
+    bool incremental_hierarchical_rescue{true};
+    unsigned incremental_hierarchical_rescue_min_missing{8};
+    double incremental_hierarchical_rescue_min_missing_ratio{0.02};
     GlobalRotationOptions global_rotation{};
     GlobalPositioningOptions global_positioning{};
 };

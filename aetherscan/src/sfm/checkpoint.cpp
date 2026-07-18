@@ -709,23 +709,52 @@ void atomic_replace(
     const std::filesystem::path& temporary,
     const std::filesystem::path& destination) {
 #if defined(_WIN32)
+    DWORD replace_error = ERROR_SUCCESS;
     for (unsigned attempt = 0; attempt < 6; ++attempt) {
         if (MoveFileExW(
                 temporary.c_str(), destination.c_str(),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             return;
-        const DWORD error = GetLastError();
-        if (error != ERROR_SHARING_VIOLATION &&
-            error != ERROR_ACCESS_DENIED)
+        replace_error = GetLastError();
+        if (replace_error != ERROR_SHARING_VIOLATION &&
+            replace_error != ERROR_ACCESS_DENIED)
             throw std::system_error(
-                static_cast<int>(error), std::system_category(),
+                static_cast<int>(replace_error), std::system_category(),
                 "Failed to atomically replace checkpoint");
         std::this_thread::sleep_for(
             std::chrono::milliseconds(5U << attempt));
     }
-    throw std::system_error(
-        static_cast<int>(GetLastError()), std::system_category(),
-        "Failed to atomically replace busy checkpoint");
+
+    // Antivirus/indexers can reopen a multi-GB temporary file without
+    // FILE_SHARE_DELETE immediately after it is flushed. Copying remains
+    // allowed in that state. Publish through a second, closed staging file so
+    // readers still observe an atomic rename at the final destination.
+    static std::atomic<std::uint64_t> publish_counter{0};
+    std::filesystem::path publish = destination;
+    publish +=
+        L".publish." + std::to_wstring(GetCurrentProcessId()) + L"." +
+        std::to_wstring(
+            publish_counter.fetch_add(1, std::memory_order_relaxed));
+    if (!CopyFileW(temporary.c_str(), publish.c_str(), TRUE)) {
+        const DWORD copy_error = GetLastError();
+        throw std::system_error(
+            static_cast<int>(copy_error), std::system_category(),
+            "Failed to stage busy checkpoint for atomic replacement");
+    }
+    if (!MoveFileExW(
+            publish.c_str(), destination.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD publish_error = GetLastError();
+        DeleteFileW(publish.c_str());
+        throw std::system_error(
+            static_cast<int>(publish_error), std::system_category(),
+            "Failed to publish staged checkpoint atomically");
+    }
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    core::Logger::instance().warning(
+        "checkpoint publish used copy fallback after sharing violation: ",
+        destination.filename().string(), " original_error=", replace_error);
 #else
     std::filesystem::rename(temporary, destination);
     const int directory = ::open(

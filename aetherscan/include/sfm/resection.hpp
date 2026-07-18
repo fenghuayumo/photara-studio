@@ -17,6 +17,12 @@ struct ResectionConfig {
     // Parallel PnP wave size against a fixed triangulation snapshot.
     unsigned max_pose_wave{8};
     std::array<unsigned, 3> full_ba_every{25, 50, 100};
+    // Scheduled full BA starts with a cheap probe and only spends the
+    // remaining iteration budget while the probe tail is still improving.
+    // Weak-registration rescue BA bypasses the probe and always runs fully.
+    unsigned periodic_full_ba_probe_iterations{10};
+    unsigned periodic_full_ba_tail_window{4};
+    double periodic_full_ba_tail_relative_improvement{1e-3};
     // Continue the final full BA only while its tail is still making useful
     // progress. This recovers hard scenes without paying 100 iterations on
     // captures that converge in the default 40.

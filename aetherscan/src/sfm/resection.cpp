@@ -346,17 +346,17 @@ BundleSummary run_required_bundle_adjustment(
     return summary;
 }
 
-bool final_bundle_is_still_improving(
-    const BundleSummary& summary, const ResectionConfig& config) {
-    if (config.final_ba_additional_iterations == 0 ||
-        config.final_ba_tail_relative_improvement <= 0.0 ||
+bool bundle_tail_is_still_improving(
+    const BundleSummary& summary, const unsigned tail_window,
+    const double threshold, const char* label) {
+    if (threshold <= 0.0 ||
         summary.optimizer.termination !=
             ba::TerminationReason::maximum_iterations ||
         summary.optimizer.iterations.empty()) {
         return false;
     }
     const std::size_t window = std::min<std::size_t>(
-        std::max(1U, config.final_ba_tail_window),
+        std::max(1U, tail_window),
         summary.optimizer.iterations.size());
     const double earlier = summary.optimizer.iterations[
         summary.optimizer.iterations.size() - window].cost;
@@ -366,12 +366,43 @@ bool final_bundle_is_still_improving(
     const double relative_improvement =
         std::max(0.0, earlier - final) / earlier;
     core::Logger::instance().debug(
-        "final BA tail: window=", window,
+        label, " BA tail: window=", window,
         " relative_improvement=", relative_improvement,
-        " continuation_threshold=",
-            config.final_ba_tail_relative_improvement);
-    return relative_improvement >=
-        config.final_ba_tail_relative_improvement;
+        " continuation_threshold=", threshold);
+    return relative_improvement >= threshold;
+}
+
+void run_periodic_full_bundle_adjustment(
+    Scene& scene, const ResectionConfig& config, const bool force_full) {
+    BundleOptions ba;
+    ba.optimizer = config.full_ba;
+    const unsigned full_iterations = static_cast<unsigned>(
+        ba.optimizer.maximum_iterations);
+    const unsigned probe_iterations = std::min(
+        config.periodic_full_ba_probe_iterations, full_iterations);
+    if (force_full || probe_iterations == 0 ||
+        probe_iterations >= full_iterations) {
+        run_required_bundle_adjustment(scene, ba, "full");
+        return;
+    }
+
+    ba.optimizer.maximum_iterations = probe_iterations;
+    const BundleSummary probe =
+        run_required_bundle_adjustment(scene, ba, "full probe");
+    if (!bundle_tail_is_still_improving(
+            probe, config.periodic_full_ba_tail_window,
+            config.periodic_full_ba_tail_relative_improvement,
+            "periodic full")) {
+        core::Logger::instance().info(
+            "periodic full BA stopped after probe iterations=",
+            probe_iterations, " cameras=", probe.num_cameras,
+            " points=", probe.num_points);
+        return;
+    }
+
+    ba.optimizer = config.full_ba;
+    ba.optimizer.maximum_iterations = full_iterations - probe_iterations;
+    run_required_bundle_adjustment(scene, ba, "full continuation");
 }
 
 std::vector<Index> collect_tracks_for_images(
@@ -531,9 +562,8 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                     triangulate_tracks(
                         scene, false, config.max_reproj_error,
                         config.min_angle_deg);
-                    BundleOptions ba;
-                    ba.optimizer = config.full_ba;
-                    run_required_bundle_adjustment(scene, ba, "full");
+                    run_periodic_full_bundle_adjustment(
+                        scene, config, force_full);
                     filter_tracks(
                         scene, config.max_reproj_error, config.min_angle_deg,
                         config.mult_depth_near, config.mult_depth_far);
@@ -593,7 +623,10 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
         ba.optimizer = config.full_ba;
         const BundleSummary final_summary =
             run_required_bundle_adjustment(scene, ba, "final");
-        if (final_bundle_is_still_improving(final_summary, config)) {
+        if (config.final_ba_additional_iterations > 0 &&
+            bundle_tail_is_still_improving(
+                final_summary, config.final_ba_tail_window,
+                config.final_ba_tail_relative_improvement, "final")) {
             ba.optimizer.maximum_iterations =
                 config.final_ba_additional_iterations;
             run_required_bundle_adjustment(scene, ba, "final polish");
