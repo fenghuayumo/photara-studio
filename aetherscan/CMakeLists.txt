@@ -194,27 +194,53 @@ if(AETHERSCAN_ENABLE_FEATURES)
     # Derive cache invalidation from the implementation itself. This removes
     # the need to manually bump ad-hoc "vN"/dated ABI strings whenever an SfM,
     # feature, or BA algorithm changes.
-    file(GLOB_RECURSE AETHERSCAN_CACHE_ID_FILES CONFIGURE_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/ba/*.hpp"
+    file(GLOB_RECURSE AETHERSCAN_FRONTEND_CACHE_ID_FILES CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/include/features/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/checkpoint.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/frontend.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/geometry.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/pair_weighting.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/retrieval.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/scene.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/tracks.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/types.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/vocabulary.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/features/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/io/image_freeimage.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/checkpoint.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/frontend.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/geometry.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/pair_weighting.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/retrieval.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/tracks.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/vocabulary.cpp")
+    file(GLOB_RECURSE AETHERSCAN_RECONSTRUCTION_CACHE_ID_FILES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ba/*.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/*.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cu"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/features/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/io/image_freeimage.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/*.cpp")
-    list(SORT AETHERSCAN_CACHE_ID_FILES)
-    set(_aetherscan_cache_id_material
+    list(SORT AETHERSCAN_FRONTEND_CACHE_ID_FILES)
+    list(SORT AETHERSCAN_RECONSTRUCTION_CACHE_ID_FILES)
+    set(_aetherscan_cache_build_options
         "cuda=${AETHERSCAN_ENABLE_CUDA};siftgpu=${AETHERSCAN_ENABLE_SIFTGPU};onnx=${AETHERSCAN_HAS_ONNXRUNTIME}\n")
-    foreach(_cache_id_file IN LISTS AETHERSCAN_CACHE_ID_FILES)
-        file(RELATIVE_PATH _cache_id_relative
-            "${CMAKE_CURRENT_SOURCE_DIR}" "${_cache_id_file}")
-        file(SHA256 "${_cache_id_file}" _cache_id_file_hash)
-        string(APPEND _aetherscan_cache_id_material
-            "${_cache_id_relative}:${_cache_id_file_hash}\n")
-    endforeach()
-    string(SHA256 AETHERSCAN_CACHE_BUILD_ID
-        "${_aetherscan_cache_id_material}")
+    function(aetherscan_source_fingerprint output files_variable)
+        set(_material "${_aetherscan_cache_build_options}")
+        foreach(_cache_id_file IN LISTS ${files_variable})
+            file(RELATIVE_PATH _cache_id_relative
+                "${CMAKE_CURRENT_SOURCE_DIR}" "${_cache_id_file}")
+            file(SHA256 "${_cache_id_file}" _cache_id_file_hash)
+            string(APPEND _material
+                "${_cache_id_relative}:${_cache_id_file_hash}\n")
+        endforeach()
+        string(SHA256 _fingerprint "${_material}")
+        set(${output} "${_fingerprint}" PARENT_SCOPE)
+    endfunction()
+    aetherscan_source_fingerprint(
+        AETHERSCAN_FRONTEND_CACHE_BUILD_ID AETHERSCAN_FRONTEND_CACHE_ID_FILES)
+    aetherscan_source_fingerprint(
+        AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID
+        AETHERSCAN_RECONSTRUCTION_CACHE_ID_FILES)
 
     add_library(AetherScan::SfM ALIAS aetherscan_sfm)
     target_include_directories(aetherscan_sfm PUBLIC
@@ -229,7 +255,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         Ceres::ceres)
     target_compile_definitions(aetherscan_sfm PRIVATE
         AETHERSCAN_HAS_POSELIB=1
-        AETHERSCAN_CACHE_BUILD_ID="${AETHERSCAN_CACHE_BUILD_ID}")
+        AETHERSCAN_FRONTEND_CACHE_BUILD_ID="${AETHERSCAN_FRONTEND_CACHE_BUILD_ID}"
+        AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID="${AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID}")
     if(OpenMP_CXX_FOUND)
         # Link explicitly instead of relying on transitive BA usage
         # requirements: triangulation and mapping own OpenMP regions.

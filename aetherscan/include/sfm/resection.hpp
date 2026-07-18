@@ -17,8 +17,28 @@ struct ResectionConfig {
     // Parallel PnP wave size against a fixed triangulation snapshot.
     unsigned max_pose_wave{8};
     std::array<unsigned, 3> full_ba_every{25, 50, 100};
+    // Continue the final full BA only while its tail is still making useful
+    // progress. This recovers hard scenes without paying 100 iterations on
+    // captures that converge in the default 40.
+    unsigned final_ba_additional_iterations{60};
+    unsigned final_ba_tail_window{8};
+    double final_ba_tail_relative_improvement{1e-3};
+    // Do not turn a short burst of weak registrations into a full-BA storm.
+    unsigned min_force_full_ba_samples{5};
+    unsigned min_force_full_ba_interval{10};
     float ratio_correspondences{0.3F};
     float avg_inliers_ratio_force_ba{0.6F};
+    float min_inlier_ratio{0.35F};
+    unsigned inlier_grid_size{4};
+    unsigned min_inlier_grid_cells{4};
+    // Strong, spatially distributed 2D-3D support is more reliable than the
+    // translation direction of low-parallax two-view edges.
+    float consistency_bypass_inlier_ratio{0.5F};
+    float min_consistency_pair_weight{3.F};
+    unsigned min_rotation_consistency_neighbors{2};
+    float max_median_rotation_error_deg{12.F};
+    unsigned min_translation_consistency_neighbors{2};
+    float max_median_translation_error_deg{45.F};
     float max_reproj_error{4.F};
     float min_angle_deg{1.F};
     float mult_depth_near{0.05F};

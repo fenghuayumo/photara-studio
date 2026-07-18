@@ -26,8 +26,8 @@
 namespace aetherscan::sfm {
 namespace {
 
-#if !defined(AETHERSCAN_CACHE_BUILD_ID)
-#define AETHERSCAN_CACHE_BUILD_ID "unconfigured"
+#if !defined(AETHERSCAN_FRONTEND_CACHE_BUILD_ID)
+#define AETHERSCAN_FRONTEND_CACHE_BUILD_ID "unconfigured"
 #endif
 
 struct PairCandidate {
@@ -52,7 +52,7 @@ struct FrontEndStageKeys {
 };
 
 void append_cache_build_identity(FingerprintBuilder& key) {
-    key.append_string(AETHERSCAN_CACHE_BUILD_ID);
+    key.append_string(AETHERSCAN_FRONTEND_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));

@@ -13,8 +13,8 @@
 namespace aetherscan::sfm {
 namespace {
 
-#if !defined(AETHERSCAN_CACHE_BUILD_ID)
-#define AETHERSCAN_CACHE_BUILD_ID "unconfigured"
+#if !defined(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID)
+#define AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID "unconfigured"
 #endif
 
 void append_optimizer(
@@ -50,8 +50,22 @@ void append_resection(
     key.append(options.local_ba_every);
     key.append(options.max_pose_wave);
     for (const unsigned value : options.full_ba_every) key.append(value);
+    key.append(options.final_ba_additional_iterations);
+    key.append(options.final_ba_tail_window);
+    key.append(options.final_ba_tail_relative_improvement);
+    key.append(options.min_force_full_ba_samples);
+    key.append(options.min_force_full_ba_interval);
     key.append(options.ratio_correspondences);
     key.append(options.avg_inliers_ratio_force_ba);
+    key.append(options.min_inlier_ratio);
+    key.append(options.inlier_grid_size);
+    key.append(options.min_inlier_grid_cells);
+    key.append(options.consistency_bypass_inlier_ratio);
+    key.append(options.min_consistency_pair_weight);
+    key.append(options.min_rotation_consistency_neighbors);
+    key.append(options.max_median_rotation_error_deg);
+    key.append(options.min_translation_consistency_neighbors);
+    key.append(options.max_median_translation_error_deg);
     key.append(options.max_reproj_error);
     key.append(options.min_angle_deg);
     key.append(options.mult_depth_near);
@@ -70,7 +84,7 @@ std::uint64_t reconstruction_key(
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
     key.append_string("reconstruction");
-    key.append_string(AETHERSCAN_CACHE_BUILD_ID);
+    key.append_string(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));

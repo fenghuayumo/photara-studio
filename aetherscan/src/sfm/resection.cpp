@@ -6,9 +6,12 @@
 #include "sfm/triangulation.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -20,7 +23,99 @@ struct PoseProposal {
     Index image_id{k_invalid};
     AbsolutePoseResult pose{};
     unsigned num_points{0};
+    double inlier_ratio{0.0};
+    unsigned inlier_grid_cells{0};
+    unsigned rotation_neighbors{0};
+    double median_rotation_error_deg{0.0};
+    unsigned translation_neighbors{0};
+    double median_translation_error_deg{0.0};
 };
+
+double rotation_error_deg(const Mat3& first, const Mat3& second) {
+    const Mat3 delta = first * second.transpose();
+    const double cosine = std::clamp((delta.trace() - 1.0) * 0.5, -1.0, 1.0);
+    return std::acos(cosine) * 180.0 / 3.14159265358979323846;
+}
+
+std::pair<unsigned, double> pose_rotation_consistency(
+    const Scene& scene, const Index image_id, const Pose3D& proposed,
+    const float min_pair_weight) {
+    std::vector<double> errors;
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || !pair.relative_pose.has_value() ||
+            pair.composite_weight() < min_pair_weight) {
+            continue;
+        }
+        Index other_id = k_invalid;
+        Mat3 actual = Mat3::Identity();
+        if (pair.id1 == image_id) {
+            other_id = pair.id2;
+            if (other_id >= scene.images.size() ||
+                !scene.images[other_id].registered) {
+                continue;
+            }
+            actual = scene.images[other_id].pose.R * proposed.R.transpose();
+        } else if (pair.id2 == image_id) {
+            other_id = pair.id1;
+            if (other_id >= scene.images.size() ||
+                !scene.images[other_id].registered) {
+                continue;
+            }
+            actual = proposed.R * scene.images[other_id].pose.R.transpose();
+        } else {
+            continue;
+        }
+        errors.push_back(rotation_error_deg(actual, pair.relative_pose->R));
+    }
+    if (errors.empty()) return {0U, 0.0};
+    const std::size_t middle = errors.size() / 2;
+    std::nth_element(errors.begin(), errors.begin() + middle, errors.end());
+    return {static_cast<unsigned>(errors.size()), errors[middle]};
+}
+
+double vector_error_deg(const Vec3& first, const Vec3& second) {
+    const double denominator = first.norm() * second.norm();
+    if (denominator <= 1e-12) return 180.0;
+    const double cosine = std::clamp(first.dot(second) / denominator, -1.0, 1.0);
+    return std::acos(cosine) * 180.0 / 3.14159265358979323846;
+}
+
+std::pair<unsigned, double> pose_translation_consistency(
+    const Scene& scene, const Index image_id, const Pose3D& proposed,
+    const float min_pair_weight) {
+    std::vector<double> errors;
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || !pair.relative_pose.has_value() ||
+            pair.composite_weight() < min_pair_weight) {
+            continue;
+        }
+        Vec3 expected = Vec3::Zero();
+        Vec3 actual = Vec3::Zero();
+        if (pair.id1 == image_id) {
+            if (pair.id2 >= scene.images.size() ||
+                !scene.images[pair.id2].registered) {
+                continue;
+            }
+            expected = proposed.R.transpose() * pair.relative_pose->C;
+            actual = scene.images[pair.id2].pose.C - proposed.C;
+        } else if (pair.id2 == image_id) {
+            if (pair.id1 >= scene.images.size() ||
+                !scene.images[pair.id1].registered) {
+                continue;
+            }
+            const Pose3D& first = scene.images[pair.id1].pose;
+            expected = first.R.transpose() * pair.relative_pose->C;
+            actual = proposed.C - first.C;
+        } else {
+            continue;
+        }
+        errors.push_back(vector_error_deg(expected, actual));
+    }
+    if (errors.empty()) return {0U, 0.0};
+    const std::size_t middle = errors.size() / 2;
+    std::nth_element(errors.begin(), errors.begin() + middle, errors.end());
+    return {static_cast<unsigned>(errors.size()), errors[middle]};
+}
 
 std::vector<Index> select_next_images(
     const Scene& scene,
@@ -85,6 +180,7 @@ PoseProposal estimate_image_pose(
     proposal.image_id = image_id;
     std::vector<Vec3> bearings;
     std::vector<Vec3> points;
+    std::vector<Vec2> pixels;
     if (image_id >= scene.images.size()) return proposal;
     const Image& image = scene.images[image_id];
     const PinholeCamera& camera = scene.camera_of(image);
@@ -98,6 +194,7 @@ PoseProposal estimate_image_pose(
         const auto& kp = image.features.keypoints[reference.feature_id];
         bearings.push_back(camera.unproject_normalized({kp.x, kp.y}));
         points.push_back(track.position);
+        pixels.emplace_back(kp.x, kp.y);
     }
 
     proposal.num_points = static_cast<unsigned>(bearings.size());
@@ -107,6 +204,70 @@ PoseProposal estimate_image_pose(
     ransac.min_inliers = config.min_inliers;
     proposal.pose =
         estimate_absolute_pose(bearings, points, camera, ransac);
+    if (!proposal.pose.success) return proposal;
+
+    proposal.inlier_ratio = static_cast<double>(proposal.pose.num_inliers) /
+                            static_cast<double>(proposal.num_points);
+    const unsigned grid_size = std::max(1U, config.inlier_grid_size);
+    std::vector<std::uint8_t> occupied(
+        static_cast<std::size_t>(grid_size) * grid_size, 0);
+    const std::size_t mask_count = std::min(
+        pixels.size(), proposal.pose.inlier_mask.size());
+    for (std::size_t i = 0; i < mask_count; ++i) {
+        if (!proposal.pose.inlier_mask[i]) continue;
+        const double normalized_x = std::clamp(
+            pixels[i].x() / static_cast<double>(std::max(camera.width, 1U)),
+            0.0, std::nextafter(1.0, 0.0));
+        const double normalized_y = std::clamp(
+            pixels[i].y() / static_cast<double>(std::max(camera.height, 1U)),
+            0.0, std::nextafter(1.0, 0.0));
+        const unsigned x = std::min(
+            grid_size - 1,
+            static_cast<unsigned>(normalized_x * grid_size));
+        const unsigned y = std::min(
+            grid_size - 1,
+            static_cast<unsigned>(normalized_y * grid_size));
+        occupied[static_cast<std::size_t>(y) * grid_size + x] = 1;
+    }
+    proposal.inlier_grid_cells = static_cast<unsigned>(
+        std::count(occupied.begin(), occupied.end(), std::uint8_t{1}));
+    std::tie(
+        proposal.rotation_neighbors,
+        proposal.median_rotation_error_deg) =
+        pose_rotation_consistency(
+            scene, image_id, proposal.pose.pose,
+            config.min_consistency_pair_weight);
+    std::tie(
+        proposal.translation_neighbors,
+        proposal.median_translation_error_deg) =
+        pose_translation_consistency(
+            scene, image_id, proposal.pose.pose,
+            config.min_consistency_pair_weight);
+
+    const bool ratio_ok =
+        config.min_inlier_ratio <= 0.F ||
+        proposal.inlier_ratio >= config.min_inlier_ratio;
+    const bool coverage_ok =
+        config.min_inlier_grid_cells == 0 ||
+        proposal.inlier_grid_cells >= config.min_inlier_grid_cells;
+    const bool bypass_consistency =
+        config.consistency_bypass_inlier_ratio > 0.F &&
+        proposal.inlier_ratio >= config.consistency_bypass_inlier_ratio;
+    const bool rotation_ok =
+        bypass_consistency ||
+        config.max_median_rotation_error_deg <= 0.F ||
+        proposal.rotation_neighbors < config.min_rotation_consistency_neighbors ||
+        proposal.median_rotation_error_deg <=
+            config.max_median_rotation_error_deg;
+    const bool translation_ok =
+        bypass_consistency ||
+        config.max_median_translation_error_deg <= 0.F ||
+        proposal.translation_neighbors <
+            config.min_translation_consistency_neighbors ||
+        proposal.median_translation_error_deg <=
+            config.max_median_translation_error_deg;
+    if (!ratio_ok || !coverage_ok || !rotation_ok || !translation_ok)
+        proposal.pose.success = false;
     return proposal;
 }
 
@@ -168,19 +329,49 @@ public:
         for (double v : values_) sum += v;
         return sum / static_cast<double>(values_.size());
     }
+    [[nodiscard]] std::size_t size() const { return values_.size(); }
 
 private:
     std::size_t window_;
     std::vector<double>& values_;
 };
 
-void run_required_bundle_adjustment(
+BundleSummary run_required_bundle_adjustment(
     Scene& scene, const BundleOptions& options, const char* stage) {
     const BundleSummary summary = run_bundle_adjustment(scene, options);
     if (!summary.success)
         throw std::runtime_error(
             std::string("Incremental ") + stage +
             " bundle adjustment failed; reconstruction stopped before filtering/checkpointing");
+    return summary;
+}
+
+bool final_bundle_is_still_improving(
+    const BundleSummary& summary, const ResectionConfig& config) {
+    if (config.final_ba_additional_iterations == 0 ||
+        config.final_ba_tail_relative_improvement <= 0.0 ||
+        summary.optimizer.termination !=
+            ba::TerminationReason::maximum_iterations ||
+        summary.optimizer.iterations.empty()) {
+        return false;
+    }
+    const std::size_t window = std::min<std::size_t>(
+        std::max(1U, config.final_ba_tail_window),
+        summary.optimizer.iterations.size());
+    const double earlier = summary.optimizer.iterations[
+        summary.optimizer.iterations.size() - window].cost;
+    const double final = summary.optimizer.final_cost;
+    if (!std::isfinite(earlier) || !std::isfinite(final) || earlier <= 0.0)
+        return false;
+    const double relative_improvement =
+        std::max(0.0, earlier - final) / earlier;
+    core::Logger::instance().debug(
+        "final BA tail: window=", window,
+        " relative_improvement=", relative_improvement,
+        " continuation_threshold=",
+            config.final_ba_tail_relative_improvement);
+    return relative_improvement >=
+        config.final_ba_tail_relative_improvement;
 }
 
 std::vector<Index> collect_tracks_for_images(
@@ -274,18 +465,26 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                 const unsigned num_inliers =
                     proposal.pose.success ? proposal.pose.num_inliers : 0U;
                 const unsigned num_points = proposal.num_points;
-                if (num_points > 0)
-                    avg_inliers.add(
-                        static_cast<double>(num_inliers) /
-                        static_cast<double>(num_points));
 
                 if (num_inliers == 0) {
                     core::Logger::instance().debug(
                         "resection rejected image=", proposal.image_id,
-                        " correspondences=", num_points);
+                        " correspondences=", num_points,
+                        " pnp_inliers=", proposal.pose.num_inliers,
+                        " ratio=", proposal.inlier_ratio,
+                        " grid_cells=", proposal.inlier_grid_cells,
+                        " rotation_neighbors=", proposal.rotation_neighbors,
+                        " rotation_median_deg=",
+                            proposal.median_rotation_error_deg,
+                        " translation_neighbors=",
+                            proposal.translation_neighbors,
+                        " translation_median_deg=",
+                            proposal.median_translation_error_deg);
                     ++n;
                     continue;
                 }
+
+                avg_inliers.add(proposal.inlier_ratio);
 
                 scene.images[proposal.image_id].pose = proposal.pose.pose;
                 scene.images[proposal.image_id].registered = true;
@@ -306,12 +505,19 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
                     "resection registered image=", proposal.image_id,
                     " inliers=", num_inliers, '/', num_points,
                     " ratio=", num_points == 0 ? 0.0
-                        : static_cast<double>(num_inliers) / num_points);
+                        : static_cast<double>(num_inliers) / num_points,
+                    " grid_cells=", proposal.inlier_grid_cells,
+                    " rotation_median_deg=",
+                        proposal.median_rotation_error_deg,
+                    " translation_median_deg=",
+                        proposal.median_translation_error_deg);
                 ++since_full_ba;
                 ++n;
 
                 const bool force_full =
                     config.avg_inliers_ratio_force_ba > 0 &&
+                    avg_inliers.size() >= config.min_force_full_ba_samples &&
+                    since_full_ba >= config.min_force_full_ba_interval &&
                     avg_inliers.average() < config.avg_inliers_ratio_force_ba;
                 const unsigned full_every =
                     n_ba < config.full_ba_every.size()
@@ -385,8 +591,13 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
         triangulate_tracks(scene, false, config.max_reproj_error, config.min_angle_deg);
         BundleOptions ba;
         ba.optimizer = config.full_ba;
-        ba.optimizer.maximum_iterations = 100;
-        run_required_bundle_adjustment(scene, ba, "final");
+        const BundleSummary final_summary =
+            run_required_bundle_adjustment(scene, ba, "final");
+        if (final_bundle_is_still_improving(final_summary, config)) {
+            ba.optimizer.maximum_iterations =
+                config.final_ba_additional_iterations;
+            run_required_bundle_adjustment(scene, ba, "final polish");
+        }
         filter_tracks(
             scene, config.max_reproj_error, config.min_angle_deg, config.mult_depth_near,
             config.mult_depth_far);

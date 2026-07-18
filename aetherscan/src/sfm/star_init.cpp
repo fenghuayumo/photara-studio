@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -32,6 +33,150 @@ bool triangulate_midpoint(
     if (ldlt.info() != Eigen::Success) return false;
     X = ldlt.solve(rhs);
     return X.allFinite();
+}
+
+struct ScaleConstraint {
+    Index first{k_invalid};
+    Index second{k_invalid};
+    double log_ratio{};
+    double weight{1.0};
+};
+
+std::vector<double> solve_pair_scales(
+    const std::size_t pair_count,
+    const Index anchor_pair,
+    const std::vector<ScaleConstraint>& constraints) {
+    std::vector<double> scales(pair_count, 1.0);
+    if (anchor_pair == k_invalid || anchor_pair >= pair_count ||
+        constraints.empty()) {
+        return scales;
+    }
+
+    std::unordered_map<Index, std::vector<std::size_t>> adjacency;
+    adjacency.reserve(constraints.size() * 2);
+    for (std::size_t i = 0; i < constraints.size(); ++i) {
+        adjacency[constraints[i].first].push_back(i);
+        adjacency[constraints[i].second].push_back(i);
+    }
+
+    std::unordered_set<Index> connected;
+    connected.reserve(adjacency.size());
+    std::queue<Index> pending;
+    connected.insert(anchor_pair);
+    pending.push(anchor_pair);
+    while (!pending.empty()) {
+        const Index pair = pending.front();
+        pending.pop();
+        const auto adjacency_it = adjacency.find(pair);
+        if (adjacency_it == adjacency.end()) continue;
+        for (const std::size_t constraint_id : adjacency_it->second) {
+            const ScaleConstraint& constraint = constraints[constraint_id];
+            const Index neighbor =
+                constraint.first == pair ? constraint.second : constraint.first;
+            if (connected.insert(neighbor).second) pending.push(neighbor);
+        }
+    }
+    if (connected.size() <= 1) return scales;
+
+    std::vector<Index> variables;
+    variables.reserve(connected.size() - 1);
+    for (const Index pair : connected)
+        if (pair != anchor_pair) variables.push_back(pair);
+    std::sort(variables.begin(), variables.end());
+    std::unordered_map<Index, std::size_t> variable_index;
+    variable_index.reserve(variables.size());
+    for (std::size_t i = 0; i < variables.size(); ++i)
+        variable_index.emplace(variables[i], i);
+
+    Eigen::VectorXd solution = Eigen::VectorXd::Zero(variables.size());
+    std::vector<double> robust_weights(constraints.size(), 1.0);
+    for (unsigned iteration = 0; iteration < 6; ++iteration) {
+        Eigen::MatrixXd normal =
+            Eigen::MatrixXd::Zero(variables.size(), variables.size());
+        Eigen::VectorXd rhs = Eigen::VectorXd::Zero(variables.size());
+        for (std::size_t constraint_id = 0;
+             constraint_id < constraints.size(); ++constraint_id) {
+            const ScaleConstraint& constraint = constraints[constraint_id];
+            if (!connected.contains(constraint.first) ||
+                !connected.contains(constraint.second)) {
+                continue;
+            }
+            const double weight = std::max(
+                1e-6, constraint.weight * robust_weights[constraint_id]);
+            const auto first = variable_index.find(constraint.first);
+            const auto second = variable_index.find(constraint.second);
+            if (first != variable_index.end()) {
+                normal(first->second, first->second) += weight;
+                rhs(first->second) += weight * constraint.log_ratio;
+            }
+            if (second != variable_index.end()) {
+                normal(second->second, second->second) += weight;
+                rhs(second->second) -= weight * constraint.log_ratio;
+            }
+            if (first != variable_index.end() && second != variable_index.end()) {
+                normal(first->second, second->second) -= weight;
+                normal(second->second, first->second) -= weight;
+            }
+        }
+        normal.diagonal().array() += 1e-10;
+        Eigen::LDLT<Eigen::MatrixXd> ldlt(normal);
+        if (ldlt.info() != Eigen::Success) return scales;
+        const Eigen::VectorXd updated = ldlt.solve(rhs);
+        if (ldlt.info() != Eigen::Success || !updated.allFinite()) return scales;
+        solution = updated;
+
+        std::vector<double> absolute_residuals;
+        absolute_residuals.reserve(constraints.size());
+        std::vector<double> residuals(constraints.size(), 0.0);
+        for (std::size_t constraint_id = 0;
+             constraint_id < constraints.size(); ++constraint_id) {
+            const ScaleConstraint& constraint = constraints[constraint_id];
+            if (!connected.contains(constraint.first) ||
+                !connected.contains(constraint.second)) {
+                continue;
+            }
+            const auto value = [&](const Index pair) {
+                if (pair == anchor_pair) return 0.0;
+                const auto it = variable_index.find(pair);
+                return it == variable_index.end() ? 0.0 : solution(it->second);
+            };
+            const double residual =
+                value(constraint.first) - value(constraint.second) -
+                constraint.log_ratio;
+            residuals[constraint_id] = residual;
+            absolute_residuals.push_back(std::abs(residual));
+        }
+        if (absolute_residuals.empty()) break;
+        const std::size_t middle = absolute_residuals.size() / 2;
+        std::nth_element(
+            absolute_residuals.begin(),
+            absolute_residuals.begin() + middle,
+            absolute_residuals.end());
+        const double sigma = std::max(
+            1e-4, 1.4826 * absolute_residuals[middle]);
+        const double huber = 2.5 * sigma;
+        double max_change = 0.0;
+        for (std::size_t constraint_id = 0;
+             constraint_id < constraints.size(); ++constraint_id) {
+            const double magnitude = std::abs(residuals[constraint_id]);
+            const double updated_weight =
+                magnitude <= huber || magnitude <= 1e-12
+                    ? 1.0
+                    : huber / magnitude;
+            max_change = std::max(
+                max_change,
+                std::abs(updated_weight - robust_weights[constraint_id]));
+            robust_weights[constraint_id] = updated_weight;
+        }
+        if (max_change < 1e-3) break;
+    }
+
+    for (std::size_t i = 0; i < variables.size(); ++i) {
+        const double scale = std::exp(solution(i));
+        if (std::isfinite(scale) && scale > 1e-6 && scale < 1e6)
+            scales[variables[i]] = scale;
+    }
+    return scales;
 }
 
 }  // namespace
@@ -89,6 +234,13 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
     std::sort(neighbors.begin(), neighbors.end(), [](const Neighbor& a, const Neighbor& b) {
         return a.weight > b.weight || (a.weight == b.weight && a.inliers > b.inliers);
     });
+    neighbors.erase(
+        std::remove_if(
+            neighbors.begin(), neighbors.end(),
+            [&](const Neighbor& neighbor) {
+                return neighbor.inliers < config.min_tracks_per_view;
+            }),
+        neighbors.end());
     if (neighbors.size() > config.max_views)
         neighbors.resize(config.max_views);
     if (neighbors.size() + 1 < config.min_views) {
@@ -172,29 +324,28 @@ bool star_initialize(Scene& scene, const StarInitConfig& config) {
         }
     }
 
-    // Initialize scales from spanning constraints with median ratios
-    // Fix scale of strongest ref-connected pair to 1.
+    // Build a global log-scale system. A single propagation pass is order
+    // dependent and leaves valid pairs at the implicit scale 1 when their
+    // constraint is visited before the anchor-connected part of the graph.
+    std::vector<ScaleConstraint> scale_constraints;
     Index anchor_pair = neighbors.empty() ? k_invalid : neighbors.front().pair_index;
-    if (anchor_pair != k_invalid) pair_scales[anchor_pair] = 1.0;
-
     for (const auto& [p1, map] : ratios) {
         for (const auto& [p2, vals] : map) {
             if (vals.size() < 8) continue;
             std::vector<double> sorted = vals;
             std::sort(sorted.begin(), sorted.end());
             const double median = sorted[sorted.size() / 2];
-            // S1/S2 = median => if one known, set the other
-            if (anchor_pair == p1) {
-                pair_scales[p2] = pair_scales[p1] / median;
-            } else if (anchor_pair == p2) {
-                pair_scales[p1] = pair_scales[p2] * median;
-            } else if (pair_scales[p1] != 1.0 || p1 == anchor_pair) {
-                pair_scales[p2] = pair_scales[p1] / median;
-            } else if (pair_scales[p2] != 1.0 || p2 == anchor_pair) {
-                pair_scales[p1] = pair_scales[p2] * median;
-            }
+            if (!std::isfinite(median) || median <= 1e-12) continue;
+            scale_constraints.push_back({
+                p1, p2, std::log(median),
+                std::sqrt(static_cast<double>(vals.size()))});
         }
     }
+    pair_scales = solve_pair_scales(
+        scene.pairs.size(), anchor_pair, scale_constraints);
+    core::Logger::instance().debug(
+        "star scale averaging: constraints=", scale_constraints.size(),
+        " anchor_pair=", anchor_pair);
 
     // relative_pose is the pose of id2 in id1's frame (id1 at identity).
     for (const Neighbor& n : neighbors) {

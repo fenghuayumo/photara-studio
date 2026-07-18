@@ -184,6 +184,23 @@ int main() {
                 reference.track_id < scene.tracks.size(),
                 "hierarchical track index references valid track");
 
+    Scene single_cluster_scene = make_scene();
+    HierarchicalConfig single_cluster_config = config;
+    single_cluster_config.cluster.max_views_per_cluster = 200;
+    single_cluster_config.star.max_views = 6;
+    const ReconstructionSummary single_cluster_summary =
+        run_hierarchical_mapping(single_cluster_scene, single_cluster_config);
+    expect(
+        single_cluster_summary.valid,
+        "single-cluster hierarchical fast path succeeds");
+    expect(
+        single_cluster_summary.registered_views == 6,
+        "single-cluster fast path registers every view");
+    expect(
+        single_cluster_scene.image_tracks.size() ==
+            single_cluster_scene.images.size(),
+        "single-cluster fast path keeps the track index valid");
+
     if (failures == 0) {
         std::cout << "sfm hierarchical tests passed\n";
         return 0;

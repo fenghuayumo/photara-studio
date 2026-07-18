@@ -1232,6 +1232,18 @@ ReconstructionSummary run_hierarchical_mapping(
         split_hierarchical_scene(scene, config.cluster);
     if (subscenes.empty()) return {};
 
+    // The default cluster capacity intentionally covers ordinary captures.
+    // Reconstruct the parent directly in that common case: copying it into a
+    // subscene, aligning it back and optimizing it twice adds no information.
+    if (subscenes.size() == 1) {
+        core::Logger::instance().info(
+            "hierarchical single-cluster fast path: views=", scene.images.size());
+        build_tracks(scene, config.cluster.min_pair_weight);
+        if (!star_initialize(scene, config.star)) return summarize(scene);
+        register_images(scene, config.resection);
+        return summarize(scene);
+    }
+
     const unsigned available_threads = scene.thread_count == 0
         ? std::max(1u, std::thread::hardware_concurrency())
         : scene.thread_count;
@@ -1259,15 +1271,13 @@ ReconstructionSummary run_hierarchical_mapping(
         bool success = star_initialize(subscene, config.star);
         if (success) {
             register_images(subscene, config.resection);
-            BundleOptions bundle;
-            bundle.optimizer = config.resection.full_ba;
-            success = run_bundle_adjustment(subscene, bundle).success;
             filter_tracks(
                 subscene,
                 config.resection.max_reproj_error,
                 config.resection.min_angle_deg,
                 config.resection.mult_depth_near,
                 config.resection.mult_depth_far);
+            success = subscene.registered_count() >= 2;
         }
         std::scoped_lock lock(result_mutex);
         succeeded[index] = success;
