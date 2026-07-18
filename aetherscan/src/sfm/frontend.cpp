@@ -26,6 +26,10 @@
 namespace aetherscan::sfm {
 namespace {
 
+#if !defined(AETHERSCAN_CACHE_BUILD_ID)
+#define AETHERSCAN_CACHE_BUILD_ID "unconfigured"
+#endif
+
 struct PairCandidate {
     Index id1{};
     Index id2{};
@@ -48,7 +52,7 @@ struct FrontEndStageKeys {
 };
 
 void append_cache_build_identity(FingerprintBuilder& key) {
-    key.append_string("aetherscan-cache-abi-20260713-6");
+    key.append_string(AETHERSCAN_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));
@@ -123,7 +127,7 @@ FrontEndStageKeys make_stage_keys(
     const FrontEndOptions& options,
     const ImageSetFingerprint& images) {
     FingerprintBuilder features;
-    features.append_string("aetherscan-features-v6");
+    features.append_string("features");
     append_cache_build_identity(features);
     features.append(images.value);
     features.append_string(options.extractor);
@@ -145,7 +149,7 @@ FrontEndStageKeys make_stage_keys(
     features.append(options.lightglue_use_cuda);
 
     FingerprintBuilder matches;
-    matches.append_string("aetherscan-matches-v6");
+    matches.append_string("matches");
     append_cache_build_identity(matches);
     matches.append(features.value());
     matches.append(options.neighbor_window);
@@ -180,7 +184,7 @@ FrontEndStageKeys make_stage_keys(
     matches.append_string(options.retrieval.vocabulary_path.string());
 
     FingerprintBuilder geometry;
-    geometry.append_string("aetherscan-geometry-v3");
+    geometry.append_string("geometry");
     append_cache_build_identity(geometry);
     geometry.append(matches.value());
     geometry.append(options.focal_pixels);
@@ -188,9 +192,7 @@ FrontEndStageKeys make_stage_keys(
     append_relative_options(geometry, options.relative);
 
     FingerprintBuilder tracks;
-    // Track component membership semantics changed in v4; never reuse tracks
-    // produced by the previous edge-count based union bookkeeping.
-    tracks.append_string("aetherscan-tracks-v6");
+    tracks.append_string("tracks");
     append_cache_build_identity(tracks);
     tracks.append(geometry.value());
     tracks.append(options.min_pair_weight);
@@ -1014,7 +1016,7 @@ FrontEndResult run_frontend(
     if (runtime_options.retrieval.vocabulary_path.empty() &&
         !runtime_options.checkpoint.directory.empty()) {
         runtime_options.retrieval.vocabulary_path =
-            runtime_options.checkpoint.directory / "vocabulary-v1.bin";
+            runtime_options.checkpoint.directory / "vocabulary.bin";
     }
     const ImageSetFingerprint image_fingerprint =
         fingerprint_image_set(image_paths);

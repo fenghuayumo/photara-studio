@@ -190,6 +190,32 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/frontend.cpp
         src/sfm/reconstruct.cpp
         src/sfm/export_mvs.cpp)
+
+    # Derive cache invalidation from the implementation itself. This removes
+    # the need to manually bump ad-hoc "vN"/dated ABI strings whenever an SfM,
+    # feature, or BA algorithm changes.
+    file(GLOB_RECURSE AETHERSCAN_CACHE_ID_FILES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ba/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/features/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/*.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/features/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/io/image_freeimage.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/*.cpp")
+    list(SORT AETHERSCAN_CACHE_ID_FILES)
+    set(_aetherscan_cache_id_material
+        "cuda=${AETHERSCAN_ENABLE_CUDA};siftgpu=${AETHERSCAN_ENABLE_SIFTGPU};onnx=${AETHERSCAN_HAS_ONNXRUNTIME}\n")
+    foreach(_cache_id_file IN LISTS AETHERSCAN_CACHE_ID_FILES)
+        file(RELATIVE_PATH _cache_id_relative
+            "${CMAKE_CURRENT_SOURCE_DIR}" "${_cache_id_file}")
+        file(SHA256 "${_cache_id_file}" _cache_id_file_hash)
+        string(APPEND _aetherscan_cache_id_material
+            "${_cache_id_relative}:${_cache_id_file_hash}\n")
+    endforeach()
+    string(SHA256 AETHERSCAN_CACHE_BUILD_ID
+        "${_aetherscan_cache_id_material}")
+
     add_library(AetherScan::SfM ALIAS aetherscan_sfm)
     target_include_directories(aetherscan_sfm PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -201,7 +227,9 @@ if(AETHERSCAN_ENABLE_FEATURES)
         Eigen3::Eigen
         PoseLib::PoseLib
         Ceres::ceres)
-    target_compile_definitions(aetherscan_sfm PRIVATE AETHERSCAN_HAS_POSELIB=1)
+    target_compile_definitions(aetherscan_sfm PRIVATE
+        AETHERSCAN_HAS_POSELIB=1
+        AETHERSCAN_CACHE_BUILD_ID="${AETHERSCAN_CACHE_BUILD_ID}")
     if(OpenMP_CXX_FOUND)
         # Link explicitly instead of relying on transitive BA usage
         # requirements: triangulation and mapping own OpenMP regions.

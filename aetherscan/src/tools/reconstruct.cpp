@@ -37,7 +37,7 @@ namespace {
 struct ReconstructCli {
     std::filesystem::path images_dir;
     double focal_pixels{};
-    std::string mode;
+    std::string mode{"global"};
     std::filesystem::path output;
     std::size_t neighbor_window{3};
     float match_ratio{0.85F};
@@ -179,8 +179,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "refined by view-graph consensus + BA unless trusted)",
          cxxopts::value<double>()->default_value("0"))
         ("m,mode",
-         "Reconstruction mode: incremental, hierarchical, or global",
-         cxxopts::value<std::string>())
+         "Reconstruction mode: global (default), incremental, or hierarchical",
+         cxxopts::value<std::string>()->default_value("global"))
         ("o,output", "Output path (.mvs or .ply)", cxxopts::value<std::string>())
         ("window", "Sequential neighbor window",
          cxxopts::value<std::size_t>()->default_value("3"))
@@ -257,10 +257,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         std::exit(0);
     }
 
-    if (!result.count("images") || !result.count("mode") ||
-        !result.count("output")) {
+    if (!result.count("images") || !result.count("output")) {
         throw std::invalid_argument(
-            "Missing required options: --images, --mode, --output");
+            "Missing required options: --images, --output");
     }
 
     ReconstructCli cli;

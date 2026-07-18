@@ -18,7 +18,7 @@ enum class ReconstructionMode {
 };
 
 struct ReconstructionConfig {
-    ReconstructionMode mode{ReconstructionMode::incremental};
+    ReconstructionMode mode{ReconstructionMode::global};
     FrontEndOptions frontend{};
     StarInitConfig star{};
     ResectionConfig resection{};

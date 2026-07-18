@@ -883,7 +883,7 @@ ImageSetFingerprint fingerprint_image_set(
         });
 
     FingerprintBuilder fingerprint;
-    fingerprint.append_string("aetherscan-images-sha256-v2");
+    fingerprint.append_string("aetherscan-images-sha256");
     fingerprint.append(static_cast<std::uint64_t>(image_paths.size()));
     for (const ImageFileFingerprint& file : result.files) {
         fingerprint.append_string(path_utf8(file.normalized_path));

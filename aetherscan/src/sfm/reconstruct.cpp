@@ -13,6 +13,10 @@
 namespace aetherscan::sfm {
 namespace {
 
+#if !defined(AETHERSCAN_CACHE_BUILD_ID)
+#define AETHERSCAN_CACHE_BUILD_ID "unconfigured"
+#endif
+
 void append_optimizer(
     FingerprintBuilder& key, const ba::OptimizerOptions& options) {
     key.append(options.maximum_iterations);
@@ -65,8 +69,8 @@ std::uint64_t reconstruction_key(
     const std::uint64_t tracks_key,
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
-    key.append_string("aetherscan-reconstruction-v10");
-    key.append_string("aetherscan-cache-abi-20260712-4");
+    key.append_string("reconstruction");
+    key.append_string(AETHERSCAN_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));
