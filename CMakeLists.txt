@@ -24,6 +24,34 @@ set(AETHERSCAN_ONNXRUNTIME_ROOT "" CACHE PATH
 # OpenCV is intentionally not a dependency. Image IO uses FreeImage; SIFT uses
 # vendored VLFeat; multi-view geometry uses Eigen.
 
+# Texture baking (asdiff_render / UVAtlas / Vulkan) + optional Intrinsic delight.
+# Prefer a single local checkout (sibling ../asdiffrender). Do not vendor a
+# second copy — when asdiffrender has a remote, switch to a git submodule and
+# point AETHERSCAN_ASDIFF_RENDER_ROOT at third_party/asdiffrender.
+option(AETHERSCAN_ENABLE_TEXTURE
+    "Enable mesh UV unwrap + projective texture baking (asdiff_render)" ON)
+set(AETHERSCAN_ASDIFF_RENDER_ROOT "" CACHE PATH
+    "Path to asdiff_render sources (empty = auto-detect sibling / submodule)")
+
+function(aetherscan_resolve_asdiff_render_root out_var)
+    if(AETHERSCAN_ASDIFF_RENDER_ROOT AND
+       EXISTS "${AETHERSCAN_ASDIFF_RENDER_ROOT}/CMakeLists.txt")
+        set(${out_var} "${AETHERSCAN_ASDIFF_RENDER_ROOT}" PARENT_SCOPE)
+        return()
+    endif()
+    set(_candidates
+        "${CMAKE_CURRENT_SOURCE_DIR}/../asdiffrender"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/asdiffrender")
+    foreach(_cand IN LISTS _candidates)
+        get_filename_component(_cand_abs "${_cand}" ABSOLUTE)
+        if(EXISTS "${_cand_abs}/CMakeLists.txt")
+            set(${out_var} "${_cand_abs}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(${out_var} "" PARENT_SCOPE)
+endfunction()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -31,6 +59,38 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(FetchOnnxRuntime)
 aetherscan_setup_onnxruntime()
+
+set(AETHERSCAN_HAS_TEXTURE OFF)
+if(AETHERSCAN_ENABLE_TEXTURE)
+    aetherscan_resolve_asdiff_render_root(_aetherscan_asdiff_root)
+    if(NOT _aetherscan_asdiff_root)
+        message(WARNING
+            "AETHERSCAN_ENABLE_TEXTURE=ON but asdiff_render not found. "
+            "Place a checkout at ../asdiffrender (recommended while local-only), "
+            "or set -DAETHERSCAN_ASDIFF_RENDER_ROOT=. Disabling texture module.")
+        set(AETHERSCAN_ENABLE_TEXTURE OFF)
+    else()
+        set(AETHERSCAN_ASDIFF_RENDER_ROOT "${_aetherscan_asdiff_root}"
+            CACHE PATH "Path to asdiff_render sources" FORCE)
+        message(STATUS "asdiff_render: ${AETHERSCAN_ASDIFF_RENDER_ROOT}")
+        find_package(Vulkan 1.2 QUIET)
+        if(NOT Vulkan_FOUND)
+            message(WARNING
+                "Vulkan SDK 1.2+ not found; disabling AETHERSCAN_ENABLE_TEXTURE")
+            set(AETHERSCAN_ENABLE_TEXTURE OFF)
+        else()
+            set(ASDIFF_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+            set(ASDIFF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+            set(ASDIFF_BUILD_MESH_TOOLS OFF CACHE BOOL "" FORCE)
+            add_subdirectory(
+                "${AETHERSCAN_ASDIFF_RENDER_ROOT}"
+                "${CMAKE_BINARY_DIR}/_deps/asdiff_render")
+            set(AETHERSCAN_HAS_TEXTURE ON)
+            include(FetchIntrinsicModels)
+            aetherscan_setup_intrinsic_models()
+        endif()
+    endif()
+endif()
 
 include(CTest)
 add_subdirectory(aetherscan)

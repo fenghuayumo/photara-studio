@@ -91,6 +91,9 @@ cmake -S . -B build `
 | `AETHERSCAN_FETCH_ONNX` | ON | 开启 ONNX 时是否自动下载 SDK |
 | `AETHERSCAN_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
 | `AETHERSCAN_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
+| `AETHERSCAN_ENABLE_TEXTURE` | ON | UVAtlas + Vulkan 贴图烘焙 |
+| `AETHERSCAN_ASDIFF_RENDER_ROOT` | 自动 | asdiff_render 路径（默认 `../asdiffrender`） |
+| `AETHERSCAN_INTRINSIC_MODELS_DIR` | `${BUILD}/Models/Intrinsic` | Delight 的 `stage_*.onnx` 目录 |
 
 特征后端可自由组合（提取 × 匹配），例如：
 
@@ -175,6 +178,29 @@ projective。全局图的输入上限由 `--mesh-max-points` 控制（默认 2,0
 - `scene.ply`：稀疏 XYZ；写出 PLY 时会额外生成同名 `scene.mvs`
 - `scene_dense.ply`：多轮几何一致性和深度过滤后的稠密点云
 - `scene_mesh.ply`：启用 `--mesh` 时生成的网格
+- `scene_textured.obj` / `.mtl` / `_albedo.png`：启用 `--texture` 时由
+  `asdiff_render` UVAtlas + Vulkan 投影烘焙（可选 `--delight` 去光照）
+
+贴图模块默认开启（`AETHERSCAN_ENABLE_TEXTURE=ON`），依赖 Vulkan SDK（含 `dxc`）与
+同级本地仓库 `../asdiffrender`（不拷贝进本仓库，避免双份维护；日后有远端可改 submodule）。
+
+`--delight` 纯 C++ **ONNX Runtime** 推理（与 LightGlue 相同开关
+`-DAETHERSCAN_ENABLE_ONNX=ON`），无 Python/PyTorch。将 `stage_0..3.onnx` 放到
+`AETHERSCAN_INTRINSIC_MODELS_DIR`（默认 `build-*/Models/Intrinsic`；许可见
+`docs/LICENSE-Intrinsic.md`）。
+
+```powershell
+.\build-cgal\aetherscan\Release\aetherscan.exe `
+  --images D:\ScanVideo\ori_img\images `
+  --output scene.mvs `
+  --dense --mesh --texture --atlas-resolution 2048
+
+# albedo（需 ONNX Runtime + stage_*.onnx）
+.\build-cgal\aetherscan\Release\aetherscan.exe `
+  --images D:\ScanVideo\ori_img\images `
+  --output scene.mvs `
+  --dense --mesh --texture --delight
+```
 
 详细设计见 [SfM 架构](docs/SFM_ARCHITECTURE.md)、
 [稠密重建架构](docs/DENSE_RECONSTRUCTION.md) 与

@@ -3,6 +3,10 @@
 #include "mvs/densify.hpp"
 #include "mvs/export.hpp"
 #include "core/logging.hpp"
+#if defined(AETHERSCAN_HAS_TEXTURE)
+#include "texture/bake.hpp"
+#include "texture/options.hpp"
+#endif
 
 #include <cxxopts.hpp>
 
@@ -72,6 +76,9 @@ struct ReconstructCli {
     unsigned dense_resolution_level{1};
     bool dense_resolution_overridden{false};
     std::filesystem::path masks_dir;
+    bool texture{false};
+    bool delight{false};
+    std::uint32_t atlas_resolution{2048};
 };
 
 std::uint64_t peak_working_set_bytes() noexcept {
@@ -166,10 +173,15 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
+              << "Texture (optional Stage B after --mesh; requires Vulkan + UVAtlas):\n"
+              << "  --texture    UV unwrap + projective bake -> textured OBJ/MTL/PNG\n"
+              << "  --delight    Intrinsic image delighter before bake (albedo)\n"
+              << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "Output formats:\n"
               << "  .mvs  OpenMVS Interface (open in Viewer)\n"
               << "  .ply  sparse XYZ point cloud\n"
               << "  with --dense: also writes dense.ply next to --output\n"
+              << "  with --texture: also writes *_textured.obj/.mtl/_albedo.png\n"
               << "Log level: set AETHERSCAN_LOG_LEVEL=error|warning|info|debug|trace|off\n";
 }
 
@@ -267,7 +279,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("1"))
         ("masks",
          "Foreground mask directory (auto, - to disable, or explicit path)",
-         cxxopts::value<std::string>()->default_value("auto"));
+         cxxopts::value<std::string>()->default_value("auto"))
+        ("texture",
+         "UV unwrap + projective texture bake on MVS mesh (implies --mesh)",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("delight",
+         "Run Intrinsic delighter before texture bake (implies --texture)",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("atlas-resolution", "Texture atlas resolution",
+         cxxopts::value<std::uint32_t>()->default_value("2048"));
 
     const auto result = options.parse(argc, argv);
     if (result.count("help") || argc <= 1) {
@@ -315,6 +335,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.dense = result["dense"].as<bool>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mesh_obj = result["mesh-obj"].as<bool>();
+    cli.texture = result["texture"].as<bool>();
+    cli.delight = result["delight"].as<bool>();
+    cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
     cli.mesh_method = result["mesh-method"].as<std::string>();
     cli.mesh_max_points = result["mesh-max-points"].as<std::uint64_t>();
     cli.patchmatch_tile_rows =
@@ -344,8 +367,20 @@ ReconstructCli parse_cli(int argc, char** argv) {
     } else if (!masks_text.empty() && masks_text != "-") {
         cli.masks_dir = utf8_to_path(masks_text);
     }
+    if (cli.delight) cli.texture = true;
+    if (cli.texture) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
     if (cli.mesh) cli.dense = true;
+#if !defined(AETHERSCAN_HAS_TEXTURE)
+    if (cli.texture || cli.delight) {
+        throw std::invalid_argument(
+            "--texture/--delight require a build with AETHERSCAN_ENABLE_TEXTURE "
+            "(Vulkan SDK + asdiff_render)");
+    }
+#endif
+    if (cli.atlas_resolution < 64) {
+        throw std::invalid_argument("--atlas-resolution must be >= 64");
+    }
     if (cli.mesh_method != "auto" && cli.mesh_method != "projective" &&
         cli.mesh_method != "delaunay") {
         throw std::invalid_argument(
@@ -836,6 +871,44 @@ int main(int argc, char** argv) {
                     cli.mesh_obj ? " mesh_obj=" : "",
                     cli.mesh_obj ? mesh_obj.string() : std::string{},
                     " faces=", mvs_scene.mesh.faces.size());
+
+#if defined(AETHERSCAN_HAS_TEXTURE)
+                if (cli.texture) {
+                    aetherscan::texture::TextureOptions tex_opts;
+                    tex_opts.atlas_resolution = cli.atlas_resolution;
+                    tex_opts.delight = cli.delight;
+                    tex_opts.mask_dir = densify_opts.mask_dir;
+                    if (cli.dense_quality ==
+                        aetherscan::mvs::DensifyQuality::high) {
+                        tex_opts.blend_mode =
+                            aetherscan::texture::BlendMode::weighted_average;
+                        tex_opts.visibility_mode = aetherscan::texture::
+                            VisibilityMode::hybrid_ray_query;
+                    } else if (
+                        cli.dense_quality ==
+                        aetherscan::mvs::DensifyQuality::preview) {
+                        tex_opts.atlas_resolution =
+                            (std::min)(cli.atlas_resolution, 1024U);
+                        tex_opts.visibility_mode =
+                            aetherscan::texture::VisibilityMode::shadow_map;
+                    }
+                    const auto textured_stem =
+                        out_dir / (cli.output.stem().string() + "_textured");
+                    const auto tex_started =
+                        std::chrono::steady_clock::now();
+                    aetherscan::texture::bake_and_export(
+                        mvs_scene, textured_stem, tex_opts);
+                    const double tex_elapsed =
+                        std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - tex_started)
+                            .count();
+                    aetherscan::core::Logger::instance().info(
+                        "textured_obj=", textured_stem.string() + ".obj",
+                        " delight=", cli.delight,
+                        " atlas=", tex_opts.atlas_resolution,
+                        " texture_s=", tex_elapsed);
+                }
+#endif
             }
         }
 

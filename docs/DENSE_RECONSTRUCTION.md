@@ -234,9 +234,10 @@ PatchMatch 已实现以下 CPU 路径：
 
 **时机：图像域、投影之前**（对齐 AIHoloImager）。
 
-- 默认实现：Intrinsic 分解（可移植 AIHoloImager 四段模型为 ONNX）；
-- 回退：多视图统计 delight（无模型时）；
-- `MergeMask`：delighted RGB + 原 alpha/mask。
+- 默认实现：Intrinsic 四段网络，**ONNX Runtime 进程内推理**（无 PyTorch 依赖）；
+- 模型文件：`stage_0.onnx` … `stage_3.onnx`（由上游 `.pt` 离线导出一次即可）；
+- 回退：多视图统计 delight（无模型时，尚未实现）；
+- 前景约束：复用 `--masks`。
 
 关闭时 Project 使用原图 → 带光照贴图；开启 → 更接近 albedo。
 
@@ -363,13 +364,44 @@ run_rebuild(scene, cfg):
 
 1. **MVS P0（已完成）**：缓存金字塔、tile PatchMatch、depth + fuse、projective/global
    Delaunay mesh、Clean、PLY/OBJ；
-2. **Mask + Texture P0**：MVS mesh 上 UVAtlas unwrap + Flatten/Project/Dilate；
-3. **Delight P1**：ONNX Intrinsic + mask；开关接入；
-4. **编排 P0**：配置矩阵、checkpoint、CLI（MVS-only 完整交付）；
+2. **Mask + Texture P0（已完成骨架）**：`aetherscan_texture` 通过外部
+   `asdiff_render`（默认同级 `../asdiffrender`，`asdiff::render`）做 UVAtlas
+   unwrap + Vulkan Flatten/ShadowMap/Project；CLI `--texture` /
+   `--atlas-resolution`；导出 `*_textured.obj` + MTL + albedo PNG。前景 mask
+   目录复用 `--masks`；
+3. **Delight P1（已完成骨架）**：Intrinsic 四段网络以 **C++ ONNX Runtime**
+   进程内推理（与 LightGlue 共用 ORT，无 Python/PyTorch）；CLI `--delight`。
+   模型为 `stage_0..3.onnx`（见 `AETHERSCAN_INTRINSIC_MODELS_DIR`）。权重源自
+   [compphoto/Intrinsic](https://github.com/compphoto/Intrinsic)
+   （**学术/非商用许可**，`docs/LICENSE-Intrinsic.md`）；
+4. **编排 P0**：配置矩阵、checkpoint、CLI（MVS-only 完整交付）——部分完成
+   （CLI 开关已接入；checkpoint 续跑未做）；
 5. **GGGS P1**：dense→init→optimize→extract；`--gggs` 后再跑 texture；
 6. **产品化**：档位、回退、与 OpenMVS densify 质量对比报告。
 
 验收优先级：先保证 **「MVS + 可选 texture/delight」** 闭环可交付，再接入 GGGS。
+
+### Texture / Delight 构建与用法
+
+```powershell
+# 贴图：Vulkan SDK 1.2+（含 dxc）+ UVAtlas
+# Delight：再开 ONNX（与 LightGlue 相同开关），并准备 stage_*.onnx
+cmake -S . -B build-cgal `
+  -DAETHERSCAN_ENABLE_TEXTURE=ON `
+  -DAETHERSCAN_ENABLE_ONNX=ON `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build build-cgal --config Release --parallel
+
+aetherscan --images ... --output out/scene.mvs --dense --mesh --texture
+aetherscan --images ... --output out/scene.mvs --dense --mesh --texture --delight
+```
+
+- asdiff_render：默认使用同级本地仓库 `../asdiffrender`（单一源码，不 vendoring）。
+  可用 `-DAETHERSCAN_ASDIFF_RENDER_ROOT=` 覆盖；有远端后可改为
+  `third_party/asdiffrender` submodule。
+- Delight：C++ ONNX only；将 `stage_*.onnx` 放到
+  `AETHERSCAN_INTRINSIC_MODELS_DIR`。
+- 关闭贴图：`-DAETHERSCAN_ENABLE_TEXTURE=OFF`。
 
 ---
 

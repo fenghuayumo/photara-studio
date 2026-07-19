@@ -107,6 +107,37 @@ RgbImage load_rgb(const std::filesystem::path& path) {
     return image;
 }
 
+void save_rgb_png(const RgbImage& image, const std::filesystem::path& path) {
+    if (image.width == 0 || image.height == 0 ||
+        image.pixels.size() !=
+            static_cast<std::size_t>(image.width) * image.height * 3U)
+        throw std::invalid_argument("Invalid RGB image for PNG export");
+    std::lock_guard lock(freeimage_mutex());
+    ensure_freeimage();
+    FIBITMAP* bitmap = FreeImage_Allocate(
+        static_cast<int>(image.width), static_cast<int>(image.height), 24);
+    if (!bitmap)
+        throw std::runtime_error("Failed to allocate PNG bitmap");
+    for (std::uint32_t y = 0; y < image.height; ++y) {
+        // FreeImage stores bottom-up scanlines for FIT_BITMAP.
+        BYTE* row = FreeImage_GetScanLine(
+            bitmap, static_cast<int>(image.height - 1U - y));
+        const std::uint8_t* source =
+            image.pixels.data() +
+            static_cast<std::size_t>(y) * image.width * 3U;
+        for (std::uint32_t x = 0; x < image.width; ++x) {
+            row[3 * x + FI_RGBA_RED] = source[3 * x + 0];
+            row[3 * x + FI_RGBA_GREEN] = source[3 * x + 1];
+            row[3 * x + FI_RGBA_BLUE] = source[3 * x + 2];
+        }
+    }
+    if (!FreeImage_Save(FIF_PNG, bitmap, path.string().c_str(), 0)) {
+        FreeImage_Unload(bitmap);
+        throw std::runtime_error("Failed to save PNG: " + path.string());
+    }
+    FreeImage_Unload(bitmap);
+}
+
 void resize_bilinear(
     const std::uint8_t* source, const std::uint32_t source_width,
     const std::uint32_t source_height, const std::uint32_t channels, std::uint8_t* destination,

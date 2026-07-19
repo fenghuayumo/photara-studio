@@ -316,6 +316,52 @@ if(AETHERSCAN_ENABLE_FEATURES)
             target_compile_options(aetherscan_mvs PRIVATE -march=native)
         endif()
     endif()
+
+    if(AETHERSCAN_HAS_TEXTURE AND TARGET asdiff::render)
+        add_library(aetherscan_texture
+            src/texture/bake.cpp
+            src/texture/delight.cpp
+            src/texture/export.cpp)
+        add_library(AetherScan::Texture ALIAS aetherscan_texture)
+        target_include_directories(aetherscan_texture PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>)
+        target_compile_features(aetherscan_texture PUBLIC cxx_std_20)
+        target_link_libraries(aetherscan_texture PUBLIC
+            AetherScan::MVS
+            asdiff::render)
+        target_compile_definitions(aetherscan_texture PUBLIC AETHERSCAN_HAS_TEXTURE=1)
+        file(TO_CMAKE_PATH "${AETHERSCAN_INTRINSIC_MODELS_DIR}"
+            AETHERSCAN_INTRINSIC_MODELS_DIR)
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/include/texture/paths.hpp.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/texture/paths.hpp"
+            @ONLY)
+        target_include_directories(aetherscan_texture PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}/generated")
+        if(AETHERSCAN_HAS_ONNXRUNTIME AND TARGET onnxruntime::onnxruntime)
+            target_link_libraries(aetherscan_texture PRIVATE onnxruntime::onnxruntime)
+            target_compile_definitions(aetherscan_texture
+                PRIVATE AETHERSCAN_HAS_ONNXRUNTIME=1)
+            message(STATUS
+                "Enabling texture baking + C++ ONNX Intrinsic delighter")
+        else()
+            message(STATUS
+                "Enabling texture baking; delighter disabled until "
+                "AETHERSCAN_ENABLE_ONNX=ON (stage_*.onnx + ORT)")
+        endif()
+        if(MSVC)
+            target_compile_options(aetherscan_texture PRIVATE /W4 /permissive- /EHsc)
+            if(AETHERSCAN_ENABLE_NATIVE_ARCH)
+                target_compile_options(aetherscan_texture PRIVATE /arch:AVX2)
+            endif()
+        else()
+            target_compile_options(aetherscan_texture PRIVATE -Wall -Wextra -Wpedantic)
+            if(AETHERSCAN_ENABLE_NATIVE_ARCH)
+                target_compile_options(aetherscan_texture PRIVATE -march=native)
+            endif()
+        endif()
+    endif()
 endif()
 
 if(AETHERSCAN_BUILD_BENCHMARKS)
@@ -360,6 +406,10 @@ if(AETHERSCAN_BUILD_BENCHMARKS)
 
         add_executable(aetherscan src/tools/reconstruct.cpp)
         target_link_libraries(aetherscan PRIVATE AetherScan::MVS cxxopts::cxxopts)
+        if(TARGET aetherscan_texture)
+            target_link_libraries(aetherscan PRIVATE AetherScan::Texture)
+            target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_TEXTURE=1)
+        endif()
         if(WIN32)
             add_custom_command(TARGET aetherscan POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
