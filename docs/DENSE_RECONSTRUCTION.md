@@ -414,6 +414,54 @@ aetherscan --images ... --output out/scene.mvs --dense --mesh --texture --deligh
 
 ---
 
+## ROI / Mask 闭环（已实现，2026-07-19）
+
+ROI 与 mask 是两层独立约束：ROI 是世界坐标中的 3D OBB，决定哪些几何允许进入
+深度、融合和网格；mask 是每个工作分辨率视图的 2D 前景，决定哪些像素可以参与匹配。
+两者同时存在时取交集，而不是互相替代。
+
+自动模式采用两阶段 MVS：
+
+```text
+低迭代 PatchMatch → 粗融合点云
+  → RANSAC 桌面/地面 → 删除平面及背面点
+  → 相机视线交汇点引导的 26 邻域体素主体分量
+  → PCA OBB（带 margin）
+  → ROI-aware 粗 projective mesh + Clean
+  → z-buffer 回投影、膨胀并与输入 mask 求交
+  → 最终 PatchMatch → filter → fusion → Delaunay/projective → Clean
+```
+
+完整约束位置：
+
+- PatchMatch：reference patch、source patch 和候选世界点都必须位于有效区域；
+- depth filter：reference/source 像素先过 mask，重投影世界点再过 OBB；
+- fusion：reference/source 样本、稳健融合后的最终点均检查 mask/OBB；
+- global Delaunay：ROI 外点不插入，中心在 OBB 外的 cell 强制为 source/free-space；
+- Clean：删除跨出 OBB 的三角形；ROI 裁剪产生的开边界不执行 hole cap，避免重新封回桌面。
+
+CLI：
+
+```powershell
+# 自动桌面/地面、主体分量、OBB、粗网格 mask，再进行最终重建
+aetherscan --images images --output scene.mvs --dense --mesh --roi auto
+
+# 手动 OBB；文件为 15 个空白分隔浮点数
+# center xyz，axes 的 3x3 row-major，half_extent xyz
+aetherscan --images images --output scene.mvs --dense --mesh --roi roi.txt
+
+# 自动 OBB 每个半轴增加 10%，回投影轮廓在工作图上膨胀 7 px
+aetherscan ... --roi auto --roi-margin 0.10 --roi-mask-dilate 7
+```
+
+手动 OBB 的轴矩阵读入后会以 SVD 投影到最近的正交旋转矩阵；半轴必须全部大于零。
+只在地面检测失败时会退化为「视线目标 + 主体分量」OBB；若连可靠主体 OBB 也无法得到，
+才保留无 ROI 的粗重建并给出 warning，不会输出一个错误裁剪的空模型。
+有效 ROI 会同时写到 `<output_stem>_roi.txt`，可直接作为下一次 `--roi` 的输入，便于
+自动检测后人工微调并复现最终重建。
+
+---
+
 ## 小结
 
 AetherScan 稠密段以 **Fast MVS 为可交付主干**（点云 + mesh，并可按需 texture /

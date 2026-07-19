@@ -76,6 +76,9 @@ struct ReconstructCli {
     unsigned dense_resolution_level{1};
     bool dense_resolution_overridden{false};
     std::filesystem::path masks_dir;
+    std::string roi{"none"};
+    float roi_margin{0.08F};
+    unsigned roi_mask_dilate{5};
     bool texture{false};
     bool delight{false};
     std::uint32_t atlas_resolution{2048};
@@ -173,6 +176,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
+              << "  --roi none|auto|FILE  OBB ROI; FILE contains 15 floats:\n"
+              << "             center(3), row-major axes(9), half extents(3)\n"
               << "Texture (optional Stage B after --mesh; requires Vulkan + UVAtlas):\n"
               << "  --texture    UV unwrap + projective bake -> textured OBJ/MTL/PNG\n"
               << "  --delight    Intrinsic image delighter before bake (albedo)\n"
@@ -280,6 +285,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("masks",
          "Foreground mask directory (auto, - to disable, or explicit path)",
          cxxopts::value<std::string>()->default_value("auto"))
+        ("roi", "Reconstruction ROI: none, auto, or 15-float OBB file",
+         cxxopts::value<std::string>()->default_value("none"))
+        ("roi-margin", "Automatic OBB fractional extent padding",
+         cxxopts::value<float>()->default_value("0.08"))
+        ("roi-mask-dilate", "Coarse-mesh mask dilation in working pixels",
+         cxxopts::value<unsigned>()->default_value("5"))
         ("texture",
          "UV unwrap + projective texture bake on MVS mesh (implies --mesh)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -367,6 +378,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     } else if (!masks_text.empty() && masks_text != "-") {
         cli.masks_dir = utf8_to_path(masks_text);
     }
+    cli.roi = result["roi"].as<std::string>();
+    cli.roi_margin = result["roi-margin"].as<float>();
+    cli.roi_mask_dilate = result["roi-mask-dilate"].as<unsigned>();
+    if (cli.roi_margin < 0.F || cli.roi_margin > 1.F)
+        throw std::invalid_argument("--roi-margin must be in [0,1]");
     if (cli.delight) cli.texture = true;
     if (cli.texture) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
@@ -793,6 +809,11 @@ int main(int argc, char** argv) {
             if (cli.dense_resolution_overridden)
                 densify_opts.resolution_level = cli.dense_resolution_level;
             densify_opts.mask_dir = cli.masks_dir;
+            densify_opts.auto_roi = cli.roi == "auto";
+            if (cli.roi != "none" && cli.roi != "auto" && cli.roi != "-")
+                densify_opts.roi_path = utf8_to_path(cli.roi);
+            densify_opts.roi_margin_fraction = cli.roi_margin;
+            densify_opts.auto_roi_mask_dilate_px = cli.roi_mask_dilate;
             densify_opts.mesh_max_points = cli.mesh_max_points;
             densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
             densify_opts.patchmatch_concurrent_views =
@@ -833,6 +854,9 @@ int main(int argc, char** argv) {
                           ? "projective"
                           : "none",
                 " mask_border_px=", densify_opts.mask_border_px,
+                " roi=", densify_opts.auto_roi
+                    ? "auto"
+                    : densify_opts.roi_path.empty() ? "none" : "manual",
                 " grazing_weight_floor=",
                 densify_opts.grazing_weight_floor);
             if (!densify_opts.mask_dir.empty())
@@ -853,6 +877,14 @@ int main(int argc, char** argv) {
                     : cli.output.parent_path();
             const auto dense_ply = out_dir / (cli.output.stem().string() + "_dense.ply");
             aetherscan::mvs::save_dense_ply(mvs_scene.dense_cloud, dense_ply);
+            if (mvs_scene.roi.valid) {
+                const auto roi_path =
+                    out_dir / (cli.output.stem().string() + "_roi.txt");
+                aetherscan::mvs::save_roi(mvs_scene.roi, roi_path);
+                aetherscan::core::Logger::instance().info(
+                    "mvs roi=", roi_path,
+                    " automatic=", mvs_scene.roi_automatic);
+            }
             aetherscan::core::Logger::instance().info(
                 "dense_ply=", dense_ply,
                 " points=", mvs_scene.dense_cloud.points.size(),

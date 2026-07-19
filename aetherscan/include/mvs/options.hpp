@@ -28,6 +28,18 @@ struct DensifyOptions {
     // guard band prevents uncertain segmentation/sampling at silhouettes from
     // turning into long grazing-angle depth sheets.
     unsigned mask_border_px{1};
+    // Optional manual OBB text file (center/axes/half_extent), or automatic
+    // tabletop/ground removal followed by subject component extraction.
+    std::filesystem::path roi_path;
+    bool auto_roi{false};
+    // Fractional padding applied independently to automatic OBB extents.
+    float roi_margin_fraction{0.08F};
+    // Coarse mesh silhouette expansion at working resolution.
+    unsigned auto_roi_mask_dilate_px{5};
+    // RANSAC distance and component voxel size as scene-diagonal fractions.
+    float auto_roi_plane_threshold_fraction{0.003F};
+    float auto_roi_component_voxel_fraction{0.006F};
+    unsigned auto_roi_ransac_iters{512};
     // Image downscale steps before densify (0 = full res, 1 ~= half, ...).
     unsigned resolution_level{1};
     // Minimum working image dimension after downscale.

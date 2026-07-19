@@ -187,6 +187,14 @@ std::vector<ViewImage> load_view_images(
             erode_mask(
                 images[i].mask, view.width, view.height,
                 options.mask_border_px);
+            const std::size_t working_size =
+                static_cast<std::size_t>(view.width) * view.height;
+            if (view.foreground_mask.size() == working_size) {
+                if (images[i].mask.empty()) images[i].mask.assign(working_size, 1);
+                for (std::size_t j = 0; j < working_size; ++j)
+                    images[i].mask[j] =
+                        (images[i].mask[j] && view.foreground_mask[j]) ? 1 : 0;
+            }
             progress.advance();
         });
     stage.finish();

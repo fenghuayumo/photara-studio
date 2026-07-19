@@ -317,7 +317,19 @@ void smooth_mesh(Mesh& mesh, const DensifyOptions& options) {
 
 }  // namespace
 
-void clean_mesh(Mesh& mesh, const DensifyOptions& options) {
+void clean_mesh(
+    Mesh& mesh, const DensifyOptions& options,
+    const OrientedBoundingBox* roi) {
+    if (roi != nullptr && roi->valid) {
+        std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
+            if (face.minCoeff() < 0 ||
+                face.maxCoeff() >= static_cast<int>(mesh.vertices.size()))
+                return true;
+            return !roi->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
+                   !roi->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
+                   !roi->contains(mesh.vertices[static_cast<std::size_t>(face[2])]);
+        });
+    }
     if (!options.mesh_clean || mesh.faces.empty()) {
         compact_and_compute_normals(mesh);
         return;
@@ -335,6 +347,11 @@ void clean_mesh(Mesh& mesh, const DensifyOptions& options) {
         if (face.minCoeff() < 0 ||
             face.maxCoeff() >= static_cast<int>(mesh.vertices.size()) ||
             face[0] == face[1] || face[1] == face[2] || face[2] == face[0])
+            continue;
+        if (roi != nullptr && roi->valid &&
+            (!roi->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
+             !roi->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
+             !roi->contains(mesh.vertices[static_cast<std::size_t>(face[2])])))
             continue;
         const Vec3f cross =
             (mesh.vertices[static_cast<std::size_t>(face[1])] -
@@ -365,8 +382,19 @@ void clean_mesh(Mesh& mesh, const DensifyOptions& options) {
     orient_components(mesh.faces);
     remove_small_components(mesh.faces, options.mesh_min_component_faces);
     orient_components(mesh.faces);
-    const unsigned holes = close_small_holes(mesh, options.mesh_close_hole_edges);
+    // Cropping creates intentional open boundaries. Closing them would cap the
+    // OBB cut and re-introduce tabletop/background geometry.
+    const unsigned holes = roi != nullptr && roi->valid
+        ? 0U
+        : close_small_holes(mesh, options.mesh_close_hole_edges);
     smooth_mesh(mesh, options);
+    if (roi != nullptr && roi->valid) {
+        std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
+            return !roi->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
+                   !roi->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
+                   !roi->contains(mesh.vertices[static_cast<std::size_t>(face[2])]);
+        });
+    }
     compact_and_compute_normals(mesh);
 
     core::Logger::instance().info(

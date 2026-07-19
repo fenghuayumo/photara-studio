@@ -1116,7 +1116,8 @@ void reconstruct_mesh(MvsScene& scene, const DensifyOptions& options) {
     } else {
         reconstruct_mesh_projective(scene, options);
     }
-    detail::clean_mesh(scene.mesh, options);
+    detail::clean_mesh(
+        scene.mesh, options, scene.roi.valid ? &scene.roi : nullptr);
     stage.finish();
 }
 

@@ -242,7 +242,9 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
             for (std::uint32_t x = 0; x < ref.width; ++x) {
                 const std::size_t index =
                     rdm.index(static_cast<int>(x), static_cast<int>(y));
-                if (rdm.depth[index] <= 0.F ||
+                if ((ref.foreground_mask.size() == rdm.size() &&
+                     ref.foreground_mask[index] == 0) ||
+                    rdm.depth[index] <= 0.F ||
                     !(rdm.confidence[index] <= options.ncc_keep_threshold))
                     continue;
                 const Vec3f normal0 = rdm.normal[index];
@@ -260,6 +262,7 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                     static_cast<float>(x), static_cast<float>(y), rdm.depth[index]);
                 const Vec3f world0 =
                     ref.pose.transform_camera_to_world(cam0.cast<double>()).cast<float>();
+                if (scene.roi.valid && !scene.roi.contains(world0)) continue;
                 const Vec3f world_n0 =
                     (ref.pose.R.transpose().cast<float>() * normal0).normalized();
                 const Vec3f viewing_ray0 =
@@ -317,6 +320,9 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                                 py >= static_cast<int>(src.height))
                                 continue;
                             const std::size_t candidate_index = sdm.index(px, py);
+                            if (src.foreground_mask.size() == sdm.size() &&
+                                src.foreground_mask[candidate_index] == 0)
+                                continue;
                             const float candidate_depth = sdm.depth[candidate_index];
                             if (!depth_similar(
                                     cam_src.z(), candidate_depth,
@@ -438,6 +444,7 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 if (inlier_count < options.min_views_fuse) continue;
                 position /= std::max(weight, 1e-6F);
                 if (!position.allFinite() || normal.squaredNorm() < 1e-10F) continue;
+                if (scene.roi.valid && !scene.roi.contains(position)) continue;
                 normal.normalize();
 
                 const GridKey key{

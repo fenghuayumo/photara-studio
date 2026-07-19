@@ -74,6 +74,26 @@ struct Mesh {
     std::vector<Eigen::Vector3i> faces;
 };
 
+// World-space oriented reconstruction volume. axes columns form an
+// orthonormal local frame and half_extent is expressed in that frame.
+struct OrientedBoundingBox {
+    bool valid{false};
+    Vec3f center{Vec3f::Zero()};
+    Mat3f axes{Mat3f::Identity()};
+    Vec3f half_extent{Vec3f::Zero()};
+
+    [[nodiscard]] Vec3f local(const Vec3f& world) const {
+        return axes.transpose() * (world - center);
+    }
+
+    [[nodiscard]] bool contains(
+        const Vec3f& world, const float margin = 0.F) const {
+        if (!valid) return true;
+        const Vec3f q = local(world).cwiseAbs();
+        return (q.array() <= (half_extent.array() + margin)).all();
+    }
+};
+
 // Working view for densify. Intrinsics are pinhole at working resolution
 // (images are undistorted + optionally downscaled).
 struct MvsView {
@@ -101,6 +121,9 @@ struct MvsView {
     std::uint32_t src_height{};
     std::vector<NeighborScore> neighbors;
     DepthMap depth_map;
+    // Working-resolution effective foreground constraint. Empty means every
+    // pixel is valid. It may come from an input mask or coarse-mesh projection.
+    std::vector<std::uint8_t> foreground_mask;
 
     [[nodiscard]] Mat3f K() const {
         Mat3f k = Mat3f::Identity();
@@ -135,6 +158,11 @@ struct MvsScene {
     std::vector<SparsePoint> sparse_points;
     DenseCloud dense_cloud;
     Mesh mesh;
+    OrientedBoundingBox roi;
+    bool roi_automatic{false};
+    bool has_ground_plane{false};
+    Vec3f ground_normal{Vec3f::Zero()};
+    float ground_offset{0.F};  // ground_normal.dot(X) = ground_offset
     unsigned thread_count{0};
 };
 

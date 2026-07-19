@@ -280,6 +280,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/mvs/scene_build.cpp
         src/mvs/neighbors.cpp
         src/mvs/patchmatch.cpp
+        src/mvs/roi.cpp
         src/mvs/fuse.cpp
         src/mvs/mesh.cpp
         src/mvs/mesh_cgal.cpp

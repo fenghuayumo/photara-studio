@@ -83,6 +83,7 @@ std::vector<GlobalVertex> downsample_global_vertices(
     Vec3f minimum = scene.dense_cloud.points.front().position;
     Vec3f maximum = minimum;
     for (const DensePoint& point : scene.dense_cloud.points) {
+        if (scene.roi.valid && !scene.roi.contains(point.position)) continue;
         minimum = minimum.cwiseMin(point.position);
         maximum = maximum.cwiseMax(point.position);
     }
@@ -96,7 +97,9 @@ std::vector<GlobalVertex> downsample_global_vertices(
     grid.reserve(std::min<std::size_t>(
         scene.dense_cloud.points.size(), 1'000'000));
     for (const DensePoint& point : scene.dense_cloud.points) {
-        if (!point.position.allFinite() || point.views.empty()) continue;
+        if (!point.position.allFinite() || point.views.empty() ||
+            (scene.roi.valid && !scene.roi.contains(point.position)))
+            continue;
         const GridKey key{
             static_cast<std::int64_t>(std::floor(point.position.x() / voxel)),
             static_cast<std::int64_t>(std::floor(point.position.y() / voxel)),
@@ -246,7 +249,9 @@ bool extract_surface(
     // The unbounded Delaunay cells represent known outside/free space.
     for (auto cell = triangulation.all_cells_begin();
          cell != triangulation.all_cells_end(); ++cell)
-        if (triangulation.is_infinite(cell))
+        if (triangulation.is_infinite(cell) ||
+            (scene.roi.valid &&
+             !scene.roi.contains(cell_center(triangulation, cell))))
             cell->info().source = options.mesh_k_inf;
 
     std::size_t rays = 0;
@@ -378,6 +383,11 @@ bool extract_surface(
         const CellHandle first = facet->first;
         const int opposite = facet->second;
         const CellHandle second = first->neighbor(opposite);
+        if (scene.roi.valid &&
+            (!scene.roi.contains(cell_center(triangulation, first)) ||
+             (!triangulation.is_infinite(second) &&
+              !scene.roi.contains(cell_center(triangulation, second)))))
+            continue;
         const bool first_source = graph.is_source_side(
             static_cast<std::size_t>(first->info().node));
         const bool second_source = graph.is_source_side(

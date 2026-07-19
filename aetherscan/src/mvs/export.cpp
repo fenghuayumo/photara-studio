@@ -46,6 +46,20 @@ void write_little_endian(std::ostream& out, const T value) {
 
 }  // namespace
 
+void save_roi(
+    const OrientedBoundingBox& roi, const std::filesystem::path& path) {
+    if (!roi.valid) throw std::invalid_argument("Cannot save an invalid ROI");
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("Failed to create ROI: " + path.string());
+    out.precision(9);
+    out << roi.center.x() << ' ' << roi.center.y() << ' ' << roi.center.z();
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            out << ' ' << roi.axes(row, column);
+    out << ' ' << roi.half_extent.x() << ' ' << roi.half_extent.y() << ' '
+        << roi.half_extent.z() << '\n';
+}
+
 void save_dense_ply(const DenseCloud& cloud, const std::filesystem::path& path) {
     std::ofstream out(path, std::ios::binary);
     if (!out) throw std::runtime_error("Failed to create PLY: " + path.string());

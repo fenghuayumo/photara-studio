@@ -1,10 +1,13 @@
 #include "mvs/densify.hpp"
+#include "mvs/export.hpp"
 #include "mvs/internal.hpp"
 #include "mvs/maxflow.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <numbers>
@@ -84,6 +87,111 @@ void test_parallel_fusion() {
         require(point.normal.allFinite(), "fused normal is non-finite");
         require(point.views.size() >= 2, "fused point lacks multi-view support");
     }
+}
+
+void test_mask_and_roi_constrained_fusion() {
+    MvsScene scene = make_plane_scene();
+    for (auto& view : scene.views) {
+        view.foreground_mask.assign(view.depth_map.size(), 0);
+        for (std::uint32_t y = 0; y < view.height; ++y)
+            for (std::uint32_t x = 0; x < view.width / 2; ++x)
+                view.foreground_mask[view.depth_map.index(x, y)] = 1;
+    }
+    scene.roi.valid = true;
+    scene.roi.center = Vec3f{-0.08F, 0.F, 2.F};
+    scene.roi.half_extent = Vec3f{0.08F, 0.2F, 0.1F};
+    DensifyOptions options;
+    options.speckle_size = 1;
+    options.min_views_fuse = 2;
+    fuse_depth_maps(scene, options);
+    require(!scene.dense_cloud.points.empty(), "masked fusion produced no points");
+    require(scene.dense_cloud.points.size() < 150, "fusion ignored foreground mask");
+    for (const DensePoint& point : scene.dense_cloud.points)
+        require(scene.roi.contains(point.position), "fusion emitted point outside ROI");
+}
+
+void test_projected_mesh_mask() {
+    MvsScene scene;
+    scene.views.push_back(make_plane_view(0, 32));
+    scene.mesh.vertices = {
+        Vec3f{-0.12F, -0.12F, 2.F}, Vec3f{0.12F, -0.12F, 2.F},
+        Vec3f{0.12F, 0.12F, 2.F}, Vec3f{-0.12F, 0.12F, 2.F}};
+    scene.mesh.faces = {Eigen::Vector3i{0,1,2}, Eigen::Vector3i{0,2,3}};
+    DensifyOptions options;
+    options.auto_roi_mask_dilate_px = 0;
+    detail::build_projected_foreground_masks(scene, options);
+    const auto& mask = scene.views[0].foreground_mask;
+    require(mask.size() == 32U * 32U, "projected mask has wrong size");
+    require(mask[16U * 32U + 16U] != 0, "projected mesh missed image center");
+    require(mask[0] == 0, "projected mesh mask filled background corner");
+}
+
+void test_manual_obb_file() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "aetherscan-mvs-test-roi.txt";
+    {
+        std::ofstream output(path);
+        output << "1 2 3  1 0.01 0  0 1 0  0 0 1  4 5 6\n";
+    }
+    OrientedBoundingBox roi;
+    const bool loaded = detail::load_manual_roi(path, roi);
+    std::filesystem::remove(path);
+    require(loaded && roi.valid, "manual OBB file did not load");
+    require((roi.axes.transpose() * roi.axes - Mat3f::Identity()).norm() < 1e-4F,
+            "manual OBB axes were not orthonormalized");
+    require(roi.contains(Vec3f{1.F,2.F,3.F}), "manual OBB missed its center");
+    require(!roi.contains(Vec3f{20.F,2.F,3.F}), "manual OBB accepted far point");
+    save_roi(roi, path);
+    OrientedBoundingBox roundtrip;
+    require(detail::load_manual_roi(path, roundtrip), "saved OBB did not reload");
+    std::filesystem::remove(path);
+    require((roundtrip.center - roi.center).norm() < 1e-5F,
+            "OBB save/load changed its center");
+}
+
+void test_automatic_ground_and_subject_roi() {
+    MvsScene scene;
+    const Vec3f target{0.F, 0.5F, 0.F};
+    const std::array<Vec3f, 4> cameras{
+        Vec3f{2.F, 1.5F, 0.F}, Vec3f{-2.F, 1.5F, 0.F},
+        Vec3f{0.F, 1.5F, 2.F}, Vec3f{0.F, 1.5F, -2.F}};
+    for (std::size_t i = 0; i < cameras.size(); ++i) {
+        MvsView view;
+        view.id = static_cast<Index>(i);
+        view.pose.C = cameras[i].cast<double>();
+        const Vec3f forward = (target - cameras[i]).normalized();
+        Vec3f right = Vec3f::UnitY().cross(forward).normalized();
+        const Vec3f down = forward.cross(right).normalized();
+        view.pose.R.row(0) = right.cast<double>();
+        view.pose.R.row(1) = down.cast<double>();
+        view.pose.R.row(2) = forward.cast<double>();
+        scene.views.push_back(view);
+    }
+    for (int z = -10; z <= 10; ++z)
+        for (int x = -10; x <= 10; ++x) {
+            DensePoint p;
+            p.position = Vec3f{0.1F * x, 0.F, 0.1F * z};
+            p.views = {0,1};
+            scene.dense_cloud.points.push_back(p);
+        }
+    for (int z = -4; z <= 4; ++z)
+        for (int y = 2; y <= 8; ++y)
+            for (int x = -4; x <= 4; ++x) {
+                DensePoint p;
+                p.position = Vec3f{0.05F*x, 0.1F*y, 0.05F*z};
+                p.views = {0,1,2};
+                scene.dense_cloud.points.push_back(p);
+            }
+    DensifyOptions options;
+    options.auto_roi_component_voxel_fraction = 0.04F;
+    options.roi_margin_fraction = 0.05F;
+    require(detail::estimate_automatic_roi(scene, options), "automatic ROI failed");
+    require(scene.has_ground_plane, "automatic ROI missed dominant ground plane");
+    require(scene.roi.contains(target), "automatic ROI missed subject target");
+    require(!scene.roi.contains(Vec3f{0.9F, 0.F, 0.9F}),
+            "automatic ROI retained distant ground");
+    for (const auto& point : scene.dense_cloud.points)
+        require(point.position.y() > 0.05F, "subject component retained ground");
 }
 
 void test_projective_mesh() {
@@ -246,6 +354,24 @@ void test_mesh_clean() {
         "mesh clean did not orient the shared edge consistently");
 }
 
+void test_roi_aware_mesh_clean() {
+    Mesh mesh;
+    mesh.vertices = {
+        Vec3f{-0.2F, -0.2F, 0.F}, Vec3f{0.2F, -0.2F, 0.F},
+        Vec3f{0.F, 0.2F, 0.F}, Vec3f{2.F, 0.F, 0.F}};
+    mesh.faces = {Eigen::Vector3i{0,1,2}, Eigen::Vector3i{1,3,2}};
+    OrientedBoundingBox roi;
+    roi.valid = true;
+    roi.half_extent = Vec3f{0.5F,0.5F,0.5F};
+    DensifyOptions options;
+    options.mesh_min_component_faces = 1;
+    options.mesh_close_hole_edges = 8;
+    detail::clean_mesh(mesh, options, &roi);
+    require(mesh.faces.size() == 1, "ROI Clean kept outside face or capped crop");
+    for (const Vec3f& vertex : mesh.vertices)
+        require(roi.contains(vertex), "ROI Clean kept outside vertex");
+}
+
 #if defined(AETHERSCAN_HAS_CGAL)
 void test_global_delaunay_mesh() {
     MvsScene scene;
@@ -304,10 +430,15 @@ void test_global_delaunay_mesh() {
 int main() {
     try {
         test_parallel_fusion();
+        test_mask_and_roi_constrained_fusion();
+        test_projected_mesh_mask();
+        test_manual_obb_file();
+        test_automatic_ground_and_subject_roi();
         test_projective_mesh();
         test_quality_presets();
         test_scalable_maxflow_cut();
         test_mesh_clean();
+        test_roi_aware_mesh_clean();
 #if defined(AETHERSCAN_HAS_CGAL)
         test_global_delaunay_mesh();
 #endif
