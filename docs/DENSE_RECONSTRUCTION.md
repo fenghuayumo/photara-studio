@@ -244,13 +244,17 @@ PatchMatch 已实现以下 CPU 路径：
 
 对齐 AIHoloImager `TextureReconstruction`：
 
-1. **UvUnwrap**：xatlas（P0 推荐，跨平台）或 Microsoft UVAtlas；
+1. **UvUnwrap**：Microsoft UVAtlas（P0 默认；chart 打包、stretch、gutter 更稳，
+   与 Open3D/`pygsplat` 的 `compute_uvatlas` 同系）；xatlas 作无 UVAtlas 时的回退
+   （跨平台/轻依赖）；
 2. **Flatten**：UV 空间栅格化 → 世界坐标图 + 法向图；
 3. **Per-view**：mesh 深度/ShadowMap → Project（遮挡 + `cos` 置信度）；
 4. **融合**：P0 默认 top-1（max confidence）；high 档 top-K；
-5. **Resolve + Dilate**：置信度阈值 + gutter 外扩。
+5. **Resolve + Dilate**：置信度阈值 + gutter 外扩（UVAtlas `gutter` 与 atlas 外扩配合）。
 
 前置：mesh 须流形（或 unwrap 前自动 FixNonManifold）；失败则明确报错，不静默出坏 UV。
+推荐参数起点（对齐 `pygsplat`）：`gutter=1`、`max_stretch=0.33`、按 atlas 分辨率
+并行 partition。
 
 ### B4. 导出
 
@@ -359,7 +363,7 @@ run_rebuild(scene, cfg):
 
 1. **MVS P0（已完成）**：缓存金字塔、tile PatchMatch、depth + fuse、projective/global
    Delaunay mesh、Clean、PLY/OBJ；
-2. **Mask + Texture P0**：MVS mesh 上 UV + Flatten/Project/Dilate；
+2. **Mask + Texture P0**：MVS mesh 上 UVAtlas unwrap + Flatten/Project/Dilate；
 3. **Delight P1**：ONNX Intrinsic + mask；开关接入；
 4. **编排 P0**：配置矩阵、checkpoint、CLI（MVS-only 完整交付）；
 5. **GGGS P1**：dense→init→optimize→extract；`--gggs` 后再跑 texture；
