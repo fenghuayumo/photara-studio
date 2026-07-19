@@ -56,8 +56,8 @@ PatchMatch 运行期间 Ryzen 9 7950X 的实测平均有效占用约 27–29 个
 
 ## 仍未解决的产品级差距
 
-- 当前默认 mesh 是多深度图局部三角化再焊接；RealityScan 级输出仍需要可扩展的
-  Delaunay/visibility graph-cut 或 TSDF/Poisson 全局表面后端。
+- CGAL Delaunay/visibility graph-cut 与通用 Clean 已接通，但仍需 mask/ROI、DTU/Tanks and
+  Temples 真值评测，以及 decimation/remesh/refine，才能宣称 RealityScan 级最终表面质量。
 - CPU PatchMatch 的 high 档约 10.7 分钟只用于质量上限；产品交互速度需要 CUDA
   PatchMatch、GPU 代价聚合和设备端几何一致性。
 - 仍需 DTU/Tanks and Temples 等有真值数据集验证 accuracy、completeness 和 F-score。
@@ -80,3 +80,58 @@ PatchMatch 运行期间 Ryzen 9 7950X 的实测平均有效占用约 27–29 个
 
 v9 稠密重建耗时 694.0 s，峰值内存 6.67 GB（未生成 mesh）。同坐标、同尺度对比图为
 `D:/ScanVideo/ori_img/aetherscan_out/scene_v8_v9_silhouette_comparison.png`。
+
+## Tile PatchMatch、金字塔缓存与全局表面回归（2026-07-19）
+
+### 实现
+
+- 全场景图像金字塔一次缓存，reference/source 层只读复用；
+- red/black row-tile PatchMatch；默认 8 个参考视图共享 CPU，每视图内部 4 个工作线程
+  （32 逻辑核机器），最后一批自动重分配线程；
+- 几何轮读取不可变深度快照，消除邻图读写竞态；
+- CGAL 3D Delaunay + OpenMVS 同类双向 visibility weight + facet quality + s-t cut；
+- max-flow 改为无递归 FIFO push-relabel；
+- 统一 Clean：非法/重复/退化/非流形面、小分量、朝向、小孔、压缩和法线。
+
+### Preview 性能
+
+机器为 Ryzen 9 7950X，32 逻辑核。旧版是 view-level PatchMatch；新版结果使用
+`tile_rows=8, concurrent_views=8`。金字塔构建在 antman 上仅 0.003 s。
+
+| 数据 | 注册视图 | 旧深度阶段 | 单视图 tile 实验 | 混合 view+tile | 结论 |
+|---|---:|---:|---:|---:|---|
+| antman_nomask | 64 | 57.797 s | 61.660 s | 56.483 s | 比旧版快 2.3% |
+| chuan | 109 | 106.514 s | 121.484 s | 104.019 s | 比旧版快 2.3% |
+| ori_img | 76 | 44.124 s | 未测 | 37.726 s | 比旧版快 14.5% |
+
+单视图 tile 是必要的正确性/尾部构件，但不应独占整机。混合调度恢复了多视图吞吐，
+同时保留 tile 的确定性传播和最后一批扩容。
+
+三组混合调度的金字塔缓存构建分别为 0.003 s、0.004 s、0.007 s；错误日志均为空。
+由于 red/black 传播改变了更新顺序，结果不要求与旧 Gauss-Seidel 路径逐点一致；当前 preview
+分别得到 4.797 M、5.641 M、6.035 M 个有效深度像素，融合点为 2.222 M、1.160 M、
+2.825 M。后续仍应在有真值数据集上以 F-score 而不是点数选择默认并发参数。
+
+### antman 全局网格
+
+命令使用 `--dense-quality preview --mesh-method delaunay --mesh-max-points 250000`。
+像素尺度体素去重后实际插入 65,787 点，生成 418,009 个 Delaunay cell。
+
+| 指标 | 结果 |
+|---|---:|
+| 深度阶段 | 61.660 s |
+| 全局 Delaunay + graph cut + Clean | 约 17.4 s |
+| MVS 总时间 | 82.794 s |
+| 峰值工作集 | 2.47 GiB |
+| 输出面数 | 60,359 |
+| 非流形边 | 0 |
+| 边界边 | 1,313 |
+| 连通分量 | 9 |
+| 最大分量占面数 | 99.3% |
+
+第一版只对有限 cell 建图且使用常数平滑项，虽只有 325 条边界边，却出现跨空洞的大三角封片，
+视觉检查判定失败。修正版把无限 cell、相机 free-space、sample 后方 visibility、
+plane/circumsphere quality 和长边拒绝全部纳入后，封片消失。`antman_nomask` 仍重建出与人物
+相连的桌面，这是输入没有前景 mask/ROI 的预期结果，不应由 Clean 猜测删除。
+
+回归产物位于 `_mvs_next/antman_delaunay_v2/`，包括 PLY、日志和最大连通分量预览图。

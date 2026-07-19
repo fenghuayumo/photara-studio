@@ -1,4 +1,5 @@
 #include "mvs/densify.hpp"
+#include "mvs/internal.hpp"
 #include "mvs/maxflow.hpp"
 
 #include "core/logging.hpp"
@@ -1102,7 +1103,11 @@ void reconstruct_mesh(MvsScene& scene, const DensifyOptions& options) {
     }
     if (options.mesh_method == MeshMethod::delaunay_cut) {
         try {
-            reconstruct_mesh_delaunay(scene, options);
+            if (!detail::reconstruct_mesh_global_cgal(scene, options)) {
+                core::Logger::instance().warning(
+                    "mvs global delaunay unavailable/empty; fallback projective");
+                reconstruct_mesh_projective(scene, options);
+            }
         } catch (const std::exception& ex) {
             core::Logger::instance().warning(
                 "mvs delaunay_cut failed: ", ex.what(), "; fallback projective");
@@ -1111,6 +1116,7 @@ void reconstruct_mesh(MvsScene& scene, const DensifyOptions& options) {
     } else {
         reconstruct_mesh_projective(scene, options);
     }
+    detail::clean_mesh(scene.mesh, options);
     stage.finish();
 }
 

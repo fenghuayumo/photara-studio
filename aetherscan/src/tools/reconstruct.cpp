@@ -63,6 +63,10 @@ struct ReconstructCli {
     bool dense{false};
     bool mesh{false};
     bool mesh_obj{false};
+    std::string mesh_method{"auto"};
+    std::uint64_t mesh_max_points{2'000'000};
+    unsigned patchmatch_tile_rows{8};
+    unsigned patchmatch_concurrent_views{8};
     aetherscan::mvs::DensifyQuality dense_quality{
         aetherscan::mvs::DensifyQuality::default_quality};
     unsigned dense_resolution_level{1};
@@ -156,7 +160,9 @@ void print_help(const cxxopts::Options& options) {
               << "  global       rotation averaging + global positioning + BA\n"
               << "Dense (optional Stage A Fast MVS after SfM):\n"
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
-              << "  --mesh       also build scalable projective mesh -> mesh.ply\n"
+              << "  --mesh       also build a surface mesh -> mesh.ply\n"
+              << "  --mesh-method auto|projective|delaunay\n"
+              << "               auto uses projective for preview, global Delaunay otherwise\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
@@ -239,6 +245,18 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mesh", "Build MVS mesh after densify (implies --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("mesh-method",
+         "Mesh backend: auto, projective, or delaunay",
+         cxxopts::value<std::string>()->default_value("auto"))
+        ("mesh-max-points",
+         "Maximum samples inserted into global Delaunay (0 = unlimited)",
+         cxxopts::value<std::uint64_t>()->default_value("2000000"))
+        ("patchmatch-tile-rows",
+         "Rows per CPU PatchMatch scheduling tile",
+         cxxopts::value<unsigned>()->default_value("8"))
+        ("patchmatch-concurrent-views",
+         "Reference views concurrently sharing the PatchMatch CPU budget",
+         cxxopts::value<unsigned>()->default_value("8"))
         ("mesh-obj", "Additionally export mesh as ASCII OBJ",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("dense-quality",
@@ -297,6 +315,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.dense = result["dense"].as<bool>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mesh_obj = result["mesh-obj"].as<bool>();
+    cli.mesh_method = result["mesh-method"].as<std::string>();
+    cli.mesh_max_points = result["mesh-max-points"].as<std::uint64_t>();
+    cli.patchmatch_tile_rows =
+        result["patchmatch-tile-rows"].as<unsigned>();
+    cli.patchmatch_concurrent_views =
+        result["patchmatch-concurrent-views"].as<unsigned>();
     const std::string dense_quality = result["dense-quality"].as<std::string>();
     if (dense_quality == "preview") {
         cli.dense_quality = aetherscan::mvs::DensifyQuality::preview;
@@ -322,6 +346,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     if (cli.mesh_obj) cli.mesh = true;
     if (cli.mesh) cli.dense = true;
+    if (cli.mesh_method != "auto" && cli.mesh_method != "projective" &&
+        cli.mesh_method != "delaunay") {
+        throw std::invalid_argument(
+            "--mesh-method must be auto, projective, or delaunay");
+    }
+    if (cli.patchmatch_tile_rows == 0)
+        throw std::invalid_argument("--patchmatch-tile-rows must be positive");
+    if (cli.patchmatch_concurrent_views == 0)
+        throw std::invalid_argument(
+            "--patchmatch-concurrent-views must be positive");
 
     const auto cache_text = result["cache-dir"].as<std::string>();
     if (!cache_text.empty() && cache_text != "-")
@@ -724,10 +758,23 @@ int main(int argc, char** argv) {
             if (cli.dense_resolution_overridden)
                 densify_opts.resolution_level = cli.dense_resolution_level;
             densify_opts.mask_dir = cli.masks_dir;
+            densify_opts.mesh_max_points = cli.mesh_max_points;
+            densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
+            densify_opts.patchmatch_concurrent_views =
+                cli.patchmatch_concurrent_views;
             densify_opts.build_mesh = cli.mesh;
-            densify_opts.mesh_method = cli.mesh
-                ? aetherscan::mvs::MeshMethod::depth_projective
-                : aetherscan::mvs::MeshMethod::none;
+            if (!cli.mesh) {
+                densify_opts.mesh_method = aetherscan::mvs::MeshMethod::none;
+            } else if (cli.mesh_method == "projective" ||
+                       (cli.mesh_method == "auto" &&
+                        cli.dense_quality ==
+                            aetherscan::mvs::DensifyQuality::preview)) {
+                densify_opts.mesh_method =
+                    aetherscan::mvs::MeshMethod::depth_projective;
+            } else {
+                densify_opts.mesh_method =
+                    aetherscan::mvs::MeshMethod::delaunay_cut;
+            }
             densify_opts.geometric_consistency = true;
             densify_opts.thread_count = scene.thread_count;
             aetherscan::core::Logger::instance().info(
@@ -739,6 +786,17 @@ int main(int argc, char** argv) {
                 " patch_views=", densify_opts.min_patch_views,
                 " filter_views=", densify_opts.min_views_filter,
                 " fuse_views=", densify_opts.min_views_fuse,
+                " tile_rows=", densify_opts.patchmatch_tile_rows,
+                " concurrent_views=",
+                densify_opts.patchmatch_concurrent_views,
+                " mesh_method=",
+                densify_opts.mesh_method ==
+                        aetherscan::mvs::MeshMethod::delaunay_cut
+                    ? "delaunay"
+                    : densify_opts.mesh_method ==
+                              aetherscan::mvs::MeshMethod::depth_projective
+                          ? "projective"
+                          : "none",
                 " mask_border_px=", densify_opts.mask_border_px,
                 " grazing_weight_floor=",
                 densify_opts.grazing_weight_floor);

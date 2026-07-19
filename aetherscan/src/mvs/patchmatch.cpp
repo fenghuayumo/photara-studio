@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <future>
 #include <limits>
 #include <random>
 #include <vector>
@@ -29,7 +30,6 @@ struct ScaledView {
     std::vector<std::uint8_t> mask;
     const std::vector<std::uint8_t>* mask_external{};
     DepthMap depth;
-    const DepthMap* depth_external{};
 
     [[nodiscard]] const std::vector<float>& gray_pixels() const {
         return gray_external != nullptr ? *gray_external : gray;
@@ -44,10 +44,6 @@ struct ScaledView {
         return pixels.empty() ||
                pixels[static_cast<std::size_t>(y) * width +
                       static_cast<std::size_t>(x)] != 0;
-    }
-
-    [[nodiscard]] const DepthMap& source_depth() const {
-        return depth_external != nullptr ? *depth_external : depth;
     }
 
     [[nodiscard]] Mat3f K() const {
@@ -75,12 +71,15 @@ struct ScaledView {
 struct SourceContext {
     const ScaledView* view{};
     const sfm::Pose3D* pose{};
+    const DepthMap* source_depth{};
     // H = K_src (R + t*n^T/d) K_ref^-1. The constant rotation
     // and translation factors are cached once per source/level.
     Mat3f rotation_h{Mat3f::Identity()};
     Vec3f translation_k{Vec3f::Zero()};
     Mat3f ref_k_inverse{Mat3f::Identity()};
 };
+
+using ImagePyramids = std::vector<std::vector<ScaledView>>;
 
 struct PatchRef {
     float texels[k_texels]{};
@@ -137,6 +136,64 @@ struct PatchRef {
         }
     }
     return out;
+}
+
+[[nodiscard]] ScaledView make_working_view(const ScaledView& cached) {
+    ScaledView out;
+    out.width = cached.width;
+    out.height = cached.height;
+    out.fx = cached.fx;
+    out.fy = cached.fy;
+    out.cx = cached.cx;
+    out.cy = cached.cy;
+    out.gray_external = &cached.gray_pixels();
+    const auto& mask = cached.mask_pixels();
+    if (!mask.empty()) out.mask_external = &mask;
+    return out;
+}
+
+ImagePyramids build_image_pyramids(
+    const MvsScene& scene, const std::vector<detail::ViewImage>& images,
+    const unsigned levels, const unsigned threads) {
+    core::StageScope stage("mvs.build_pyramids");
+    ImagePyramids pyramids(scene.views.size());
+    parallel::parallel_for(
+        scene.views.size(), threads, [&](const std::size_t view_id) {
+            auto& pyramid = pyramids[view_id];
+            pyramid.reserve(levels);
+            for (unsigned level = 0; level < levels; ++level) {
+                const unsigned scale_div = 1U << (levels - 1 - level);
+                pyramid.push_back(
+                    make_scaled(scene.views[view_id], images[view_id], scale_div));
+            }
+        });
+    stage.finish();
+    return pyramids;
+}
+
+template <class Function>
+void run_view_tile_batches(
+    const std::size_t count, const unsigned threads,
+    const unsigned requested_concurrent_views, Function&& function) {
+    if (count == 0) return;
+    const unsigned maximum_groups = std::max(
+        1U, std::min({requested_concurrent_views, threads,
+                      static_cast<unsigned>(count)}));
+    for (std::size_t begin = 0; begin < count; begin += maximum_groups) {
+        const unsigned active = static_cast<unsigned>(
+            std::min<std::size_t>(maximum_groups, count - begin));
+        const unsigned threads_per_view = std::max(1U, threads / active);
+        std::vector<std::future<void>> futures;
+        futures.reserve(active);
+        for (unsigned group = 0; group < active; ++group) {
+            const std::size_t view = begin + group;
+            futures.emplace_back(std::async(
+                std::launch::async, [&, view, threads_per_view] {
+                    function(view, threads_per_view);
+                }));
+        }
+        parallel::wait_all(futures);
+    }
 }
 
 [[nodiscard]] bool fill_patch(
@@ -235,10 +292,13 @@ struct PatchRef {
 }
 
 [[nodiscard]] float geometric_penalty(
-    const ScaledView& ref, const sfm::Pose3D& ref_pose, const ScaledView& src,
+    const ScaledView& ref, const sfm::Pose3D& ref_pose,
+    const SourceContext& source,
     const sfm::Pose3D& src_pose, const int x, const int y, const float depth,
     const Vec3f& /*normal*/) {
-    const DepthMap& source_depth = src.source_depth();
+    const ScaledView& src = *source.view;
+    if (source.source_depth == nullptr) return 4.F;
+    const DepthMap& source_depth = *source.source_depth;
     if (source_depth.depth.empty() || depth <= 0.F) return 4.F;
     const Vec3f cam0 = ref.unproject(static_cast<float>(x), static_cast<float>(y), depth);
     const Vec3f world =
@@ -316,8 +376,7 @@ struct PatchRef {
         float score = photo;
         if (use_geo && geo_weight > 0.F) {
             const float geo = geometric_penalty(
-                ref, ref_pose, *sources[i].view, *sources[i].pose, x, y, depth,
-                normal);
+                ref, ref_pose, sources[i], *sources[i].pose, x, y, depth, normal);
             // A missing/inconsistent neighbor depth is not evidence for this
             // hypothesis; do not let a good photometric match hide it.
             if (!(geo < 4.F)) continue;
@@ -388,10 +447,11 @@ void upsample_depth(const DepthMap& coarse, DepthMap& fine) {
 
 void run_patchmatch_level(
     ScaledView& ref, const sfm::Pose3D& ref_pose,
-    const std::vector<ScaledView>& neighbors,
+    const std::vector<const ScaledView*>& neighbors,
     const std::vector<sfm::Pose3D>& neighbor_poses,
+    const std::vector<const DepthMap*>& neighbor_depths,
     const float d_min, const float d_max, const DensifyOptions& options,
-    std::mt19937& rng, const bool use_geo,
+    const unsigned random_seed, const unsigned threads, const bool use_geo,
     const bool initialize_invalid) {
     DepthMap& dm = ref.depth;
     std::vector<SourceContext> sources;
@@ -402,124 +462,156 @@ void run_patchmatch_level(
             (neighbor_poses[i].R * ref_pose.R.transpose()).cast<float>();
         const Vec3f translation =
             (neighbor_poses[i].R * (ref_pose.C - neighbor_poses[i].C)).cast<float>();
-        const Mat3f source_k = neighbors[i].K();
+        const Mat3f source_k = neighbors[i]->K();
         sources.push_back(SourceContext{
-            &neighbors[i], &neighbor_poses[i], source_k * rotation * ref_k_inverse,
-            source_k * translation, ref_k_inverse});
+            neighbors[i], &neighbor_poses[i],
+            i < neighbor_depths.size() ? neighbor_depths[i] : nullptr,
+            source_k * rotation * ref_k_inverse, source_k * translation,
+            ref_k_inverse});
     }
     constexpr float robust = 2.F;
     const float inv_min = 1.F / d_max;
     const float inv_max = 1.F / d_min;
-    std::uniform_real_distribution<float> uni01(0.F, 1.F);
-    auto random_depth = [&]() {
-        const float t = uni01(rng);
-        // Uniform inverse-depth allocates hypotheses approximately uniformly
-        // in image disparity instead of wasting most trials far from camera.
-        return 1.F / (inv_min + t * (inv_max - inv_min));
-    };
 
-    for (std::uint32_t y = 0; y < ref.height; ++y) {
-        for (std::uint32_t x = 0; x < ref.width; ++x) {
-            const std::size_t idx = dm.index(static_cast<int>(x), static_cast<int>(y));
-            PatchRef patch;
-            if (!fill_patch(ref, static_cast<int>(x), static_cast<int>(y), patch)) {
-                dm.depth[idx] = 0.F;
-                continue;
-            }
-            if (dm.depth[idx] <= 0.F) {
-                if (!initialize_invalid) {
-                    dm.confidence[idx] = robust;
-                    continue;
+    const unsigned tile_rows = std::max(1U, options.patchmatch_tile_rows);
+    const std::size_t tile_count =
+        (static_cast<std::size_t>(ref.height) + tile_rows - 1U) / tile_rows;
+    parallel::parallel_for(
+        tile_count, threads, [&](const std::size_t tile) {
+            std::mt19937 random(
+                random_seed ^ static_cast<unsigned>(tile * 0x9E3779B9u));
+            std::uniform_real_distribution<float> uniform(0.F, 1.F);
+            const std::uint32_t begin = static_cast<std::uint32_t>(tile) * tile_rows;
+            const std::uint32_t end =
+                std::min(ref.height, begin + tile_rows);
+            for (std::uint32_t y = begin; y < end; ++y) {
+                for (std::uint32_t x = 0; x < ref.width; ++x) {
+                    const std::size_t idx =
+                        dm.index(static_cast<int>(x), static_cast<int>(y));
+                    PatchRef patch;
+                    if (!fill_patch(
+                            ref, static_cast<int>(x), static_cast<int>(y), patch)) {
+                        dm.depth[idx] = 0.F;
+                        continue;
+                    }
+                    if (dm.depth[idx] <= 0.F) {
+                        if (!initialize_invalid) {
+                            dm.confidence[idx] = robust;
+                            continue;
+                        }
+                        const float t = uniform(random);
+                        // Uniform inverse depth approximately samples disparity.
+                        dm.depth[idx] =
+                            1.F / (inv_min + t * (inv_max - inv_min));
+                        dm.normal[idx] = random_normal(random, patch.x0);
+                    }
+                    dm.confidence[idx] = score_views(
+                        patch, static_cast<int>(x), static_cast<int>(y), ref,
+                        ref_pose, sources, dm.depth[idx], dm.normal[idx], robust,
+                        use_geo, options.geometric_weight,
+                        options.min_patch_views);
                 }
-                dm.depth[idx] = random_depth();
-                dm.normal[idx] = random_normal(rng, patch.x0);
             }
-            dm.confidence[idx] = score_views(
-                patch, static_cast<int>(x), static_cast<int>(y), ref, ref_pose,
-                sources, dm.depth[idx], dm.normal[idx], robust, use_geo,
-                options.geometric_weight,
-                options.min_patch_views);
-        }
-    }
+        });
 
     // Geometric rounds are coordinated globally in estimate_depth_maps so
     // every sweep sees the previous round's updated neighbor maps.
     const unsigned iters = use_geo ? 1U : options.estimation_iters;
     for (unsigned iter = 0; iter < iters; ++iter) {
-        const bool forward = (iter % 2) == 0;
-        const int y0 = forward ? 0 : static_cast<int>(ref.height) - 1;
-        const int y1 = forward ? static_cast<int>(ref.height) : -1;
-        const int ys = forward ? 1 : -1;
-        const int x0 = forward ? 0 : static_cast<int>(ref.width) - 1;
-        const int x1 = forward ? static_cast<int>(ref.width) : -1;
-        const int xs = forward ? 1 : -1;
+        // Red/black propagation makes every pixel in one phase independent.
+        // This permits view-internal tile parallelism while preserving local
+        // plane propagation between the two phases.
+        for (unsigned parity = 0; parity < 2; ++parity) {
+            parallel::parallel_for(
+                tile_count, threads, [&](const std::size_t tile) {
+                    std::mt19937 random(
+                        random_seed ^ (iter + 1U) * 0x85EBCA6Bu ^
+                        (parity + 1U) * 0xC2B2AE35u ^
+                        static_cast<unsigned>(tile * 0x27D4EB2Du));
+                    const int begin = static_cast<int>(tile * tile_rows);
+                    const int end = std::min(
+                        static_cast<int>(ref.height),
+                        begin + static_cast<int>(tile_rows));
+                    const int direction = (iter & 1U) == 0U ? -1 : 1;
+                    const int offsets[2][2] = {
+                        {direction, 0}, {0, direction}};
+                    for (int y = begin; y < end; ++y) {
+                        for (int x = 0; x < static_cast<int>(ref.width); ++x) {
+                            if ((static_cast<unsigned>(x + y) & 1U) != parity)
+                                continue;
+                            const std::size_t idx = dm.index(x, y);
+                            if (dm.depth[idx] <= 0.F) continue;
+                            PatchRef patch;
+                            if (!fill_patch(ref, x, y, patch)) continue;
 
-        for (int y = y0; y != y1; y += ys) {
-            for (int x = x0; x != x1; x += xs) {
-                const std::size_t idx = dm.index(x, y);
-                if (dm.depth[idx] <= 0.F) continue;
-                PatchRef patch;
-                if (!fill_patch(ref, x, y, patch)) continue;
+                            float best_depth = dm.depth[idx];
+                            Vec3f best_normal = dm.normal[idx];
+                            float best_conf = dm.confidence[idx];
+                            for (const auto& offset : offsets) {
+                                const int px = x + offset[0];
+                                const int py = y + offset[1];
+                                if (px < 0 || py < 0 ||
+                                    px >= static_cast<int>(ref.width) ||
+                                    py >= static_cast<int>(ref.height))
+                                    continue;
+                                const std::size_t nidx = dm.index(px, py);
+                                if (dm.depth[nidx] <= 0.F) continue;
+                                const Vec3f& normal = dm.normal[nidx];
+                                const Vec3f neighbor_ray{
+                                    (static_cast<float>(px) - ref.cx) / ref.fx,
+                                    (static_cast<float>(py) - ref.cy) / ref.fy,
+                                    1.F};
+                                const float plane_distance =
+                                    normal.dot(neighbor_ray) * dm.depth[nidx];
+                                const float denominator = normal.dot(patch.x0);
+                                if (std::abs(denominator) < 1e-8F) continue;
+                                const float candidate_depth =
+                                    plane_distance / denominator;
+                                if (candidate_depth < d_min ||
+                                    candidate_depth > d_max)
+                                    continue;
+                                const float confidence = score_views(
+                                    patch, x, y, ref, ref_pose, sources,
+                                    candidate_depth, normal, robust, use_geo,
+                                    options.geometric_weight,
+                                    options.min_patch_views);
+                                if (confidence < best_conf) {
+                                    best_conf = confidence;
+                                    best_depth = candidate_depth;
+                                    best_normal = normal;
+                                }
+                            }
 
-                float best_depth = dm.depth[idx];
-                Vec3f best_normal = dm.normal[idx];
-                float best_conf = dm.confidence[idx];
-
-                const int nxs[2] = {x - xs, x};
-                const int nys[2] = {y, y - ys};
-                for (int k = 0; k < 2; ++k) {
-                    const int px = nxs[k];
-                    const int py = nys[k];
-                    if (px < 0 || py < 0 || px >= static_cast<int>(ref.width) ||
-                        py >= static_cast<int>(ref.height))
-                        continue;
-                    const std::size_t nidx = dm.index(px, py);
-                    if (dm.depth[nidx] <= 0.F) continue;
-                    const Vec3f& n = dm.normal[nidx];
-                    const Vec3f x0n{
-                        (static_cast<float>(px) - ref.cx) / ref.fx,
-                        (static_cast<float>(py) - ref.cy) / ref.fy, 1.F};
-                    const float plane_d = n.dot(x0n) * dm.depth[nidx];
-                    const float denom = n.dot(patch.x0);
-                    if (std::abs(denom) < 1e-8F) continue;
-                    const float depth_p = plane_d / denom;
-                    if (depth_p < d_min || depth_p > d_max) continue;
-                    const float conf = score_views(
-                        patch, x, y, ref, ref_pose, sources, depth_p, n, robust,
-                        use_geo,
-                        options.geometric_weight, options.min_patch_views);
-                    if (conf < best_conf) {
-                        best_conf = conf;
-                        best_depth = depth_p;
-                        best_normal = n;
+                            float depth_range =
+                                best_depth * (use_geo ? 0.05F : 0.5F);
+                            float angle_range = use_geo ? 0.2F : 1.0F;
+                            for (unsigned trial = 0;
+                                 trial < options.random_iters; ++trial) {
+                                std::uniform_real_distribution<float> depth_offset(
+                                    -depth_range, depth_range);
+                                const float candidate_depth = std::clamp(
+                                    best_depth + depth_offset(random), d_min, d_max);
+                                const Vec3f candidate_normal = perturb_normal(
+                                    random, best_normal, patch.x0, angle_range);
+                                const float confidence = score_views(
+                                    patch, x, y, ref, ref_pose, sources,
+                                    candidate_depth, candidate_normal, robust,
+                                    use_geo, options.geometric_weight,
+                                    options.min_patch_views);
+                                if (confidence < best_conf) {
+                                    best_conf = confidence;
+                                    best_depth = candidate_depth;
+                                    best_normal = candidate_normal;
+                                }
+                                depth_range *= 0.5F;
+                                angle_range *= 0.5F;
+                            }
+                            dm.depth[idx] = best_depth;
+                            dm.normal[idx] = best_normal;
+                            dm.confidence[idx] = best_conf;
+                        }
                     }
-                }
-
-                float depth_range = best_depth * (use_geo ? 0.05F : 0.5F);
-                float angle_range = use_geo ? 0.2F : 1.0F;
-                for (unsigned r = 0; r < options.random_iters; ++r) {
-                    std::uniform_real_distribution<float> depth_off(
-                        -depth_range, depth_range);
-                    float nd = std::clamp(best_depth + depth_off(rng), d_min, d_max);
-                    Vec3f nn =
-                        perturb_normal(rng, best_normal, patch.x0, angle_range);
-                    const float conf = score_views(
-                        patch, x, y, ref, ref_pose, sources, nd, nn, robust,
-                        use_geo,
-                        options.geometric_weight, options.min_patch_views);
-                    if (conf < best_conf) {
-                        best_conf = conf;
-                        best_depth = nd;
-                        best_normal = nn;
-                    }
-                    depth_range *= 0.5F;
-                    angle_range *= 0.5F;
-                }
-
-                dm.depth[idx] = best_depth;
-                dm.normal[idx] = best_normal;
-                dm.confidence[idx] = best_conf;
-            }
+                });
         }
     }
 }
@@ -563,8 +655,9 @@ void init_from_sparse(
 }
 
 void estimate_one_view_photometric(
-    MvsScene& scene, const std::vector<detail::ViewImage>& images,
-    const Index view_id, const DensifyOptions& options, std::mt19937& rng) {
+    MvsScene& scene, const ImagePyramids& pyramids, const Index view_id,
+    const DensifyOptions& options, const unsigned threads,
+    const unsigned random_seed) {
     MvsView& view = scene.views[view_id];
     if (view.neighbors.empty()) return;
 
@@ -598,18 +691,20 @@ void estimate_one_view_photometric(
         d_max *= 1.25F;
     }
 
-    const unsigned levels = options.sub_resolution_levels + 1;
+    const unsigned levels = static_cast<unsigned>(pyramids[view_id].size());
     ScaledView current;
     for (unsigned level = 0; level < levels; ++level) {
-        const unsigned scale_div = 1U << (levels - 1 - level);
-        ScaledView scaled = make_scaled(view, images[view_id], scale_div);
-        std::vector<ScaledView> neighbors;
+        ScaledView scaled = make_working_view(pyramids[view_id][level]);
+        std::vector<const ScaledView*> neighbors;
         std::vector<sfm::Pose3D> neighbor_poses;
+        std::vector<const DepthMap*> neighbor_depths;
         neighbors.reserve(neighbor_ids.size());
         neighbor_poses.reserve(neighbor_ids.size());
+        neighbor_depths.reserve(neighbor_ids.size());
         for (const Index nid : neighbor_ids) {
-            neighbors.push_back(make_scaled(scene.views[nid], images[nid], scale_div));
+            neighbors.push_back(&pyramids[nid][level]);
             neighbor_poses.push_back(scene.views[nid].pose);
+            neighbor_depths.push_back(nullptr);
         }
 
         if (level == 0) {
@@ -620,8 +715,9 @@ void estimate_one_view_photometric(
         }
 
         run_patchmatch_level(
-            scaled, view.pose, neighbors, neighbor_poses, d_min, d_max, options,
-            rng, false, true);
+            scaled, view.pose, neighbors, neighbor_poses, neighbor_depths, d_min,
+            d_max, options, random_seed ^ level * 0x9E3779B9u, threads, false,
+            true);
         current = std::move(scaled);
     }
 
@@ -637,29 +733,31 @@ void estimate_one_view_photometric(
 }
 
 void refine_one_view_geometric(
-    MvsScene& scene, const std::vector<detail::ViewImage>& images,
+    MvsScene& scene, const ImagePyramids& pyramids,
     const std::vector<DepthMap>& depth_snapshot, const Index view_id,
-    const DensifyOptions& options, std::mt19937& rng) {
+    const DensifyOptions& options, const unsigned threads,
+    const unsigned random_seed) {
     MvsView& view = scene.views[view_id];
     if (view.neighbors.empty() || view.depth_map.depth.empty()) return;
 
     std::vector<Index> neighbor_ids;
     for (const auto& n : view.neighbors) neighbor_ids.push_back(n.view_id);
 
-    ScaledView ref = make_scaled(view, images[view_id], 1);
+    ScaledView ref = make_working_view(pyramids[view_id].back());
     ref.depth = depth_snapshot[view_id];
-    std::vector<ScaledView> neighbors;
+    std::vector<const ScaledView*> neighbors;
     std::vector<sfm::Pose3D> neighbor_poses;
+    std::vector<const DepthMap*> neighbor_depths;
     for (const Index nid : neighbor_ids) {
-        ScaledView nb = make_scaled(scene.views[nid], images[nid], 1);
-        nb.depth_external = &depth_snapshot[nid];
-        neighbors.push_back(std::move(nb));
+        neighbors.push_back(&pyramids[nid].back());
         neighbor_poses.push_back(scene.views[nid].pose);
+        neighbor_depths.push_back(&depth_snapshot[nid]);
     }
 
     run_patchmatch_level(
-        ref, view.pose, neighbors, neighbor_poses, view.depth_map.depth_min,
-        view.depth_map.depth_max, options, rng, true, false);
+        ref, view.pose, neighbors, neighbor_poses, neighbor_depths,
+        view.depth_map.depth_min, view.depth_map.depth_max, options, random_seed,
+        threads, true, false);
 
     view.depth_map = std::move(ref.depth);
     for (std::size_t i = 0; i < view.depth_map.depth.size(); ++i) {
@@ -845,37 +943,44 @@ void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.estimate_depth");
     const auto images = detail::load_view_images(scene, options);
     const unsigned threads = parallel::resolve_thread_count(scene.thread_count);
+    const unsigned levels = options.sub_resolution_levels + 1;
+    const ImagePyramids pyramids =
+        build_image_pyramids(scene, images, levels, threads);
 
     {
         core::ProgressReporter progress("mvs.estimate_depth", scene.views.size());
-        parallel::parallel_for(scene.views.size(), threads, [&](const std::size_t i) {
-            std::mt19937 rng(
-                static_cast<unsigned>(0xA37E5CA) ^
-                static_cast<unsigned>(i) * 0x9E3779B9u);
-            estimate_one_view_photometric(
-                scene, images, static_cast<Index>(i), options, rng);
-            progress.advance();
-        });
+        run_view_tile_batches(
+            scene.views.size(), threads, options.patchmatch_concurrent_views,
+            [&](const std::size_t i, const unsigned view_threads) {
+                estimate_one_view_photometric(
+                    scene, pyramids, static_cast<Index>(i), options,
+                    view_threads,
+                    static_cast<unsigned>(0xA37E5CA) ^
+                        static_cast<unsigned>(i) * 0x9E3779B9u);
+                progress.advance();
+            });
     }
 
     if (options.geometric_consistency && options.geometric_iters > 0) {
         core::StageScope geo_stage("mvs.geometric_consistency");
         for (unsigned round = 0; round < options.geometric_iters; ++round) {
-            // Snapshot every global round. Parallel writers never race with
-            // neighbor readers, and the next round observes all updates.
+            // Snapshot every global round. Writers never race with neighbor
+            // readers, and the next round observes all updates.
             std::vector<DepthMap> depth_snapshot(scene.views.size());
             for (std::size_t i = 0; i < scene.views.size(); ++i)
                 depth_snapshot[i] = scene.views[i].depth_map;
             core::ProgressReporter progress(
                 "mvs.geometric_consistency", scene.views.size());
-            parallel::parallel_for(
-                scene.views.size(), threads, [&](const std::size_t i) {
-                    std::mt19937 rng(
-                        static_cast<unsigned>(0xC0FFEE + round * 0x10001U) ^
-                        static_cast<unsigned>(i) * 0x9E3779B9u);
+            run_view_tile_batches(
+                scene.views.size(), threads,
+                options.patchmatch_concurrent_views,
+                [&](const std::size_t i, const unsigned view_threads) {
                     refine_one_view_geometric(
-                        scene, images, depth_snapshot, static_cast<Index>(i),
-                        options, rng);
+                        scene, pyramids, depth_snapshot,
+                        static_cast<Index>(i), options, view_threads,
+                        static_cast<unsigned>(
+                            0xC0FFEE + round * 0x10001U) ^
+                            static_cast<unsigned>(i) * 0x9E3779B9u);
                     progress.advance();
                 });
         }

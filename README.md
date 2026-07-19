@@ -151,6 +151,7 @@ LightGlue，并用更严格的几何阈值接纳救援边。
   --output scene.ply `
   --cache-dir cache `
   --dense --mesh `
+  --mesh-method auto `
   --dense-quality default  # preview | default | high
 ```
 
@@ -160,11 +161,21 @@ MVS 中表现为轮廓双层、底座重叠或缺失。程序会在输出旁生�
 `*_sfm_diagnostics.csv`，其中包含逐图 RMS/P95 重投影误差、相机中心、旋转和相邻位姿步长，
 应先通过该报告确认 SfM，再调整 MVS 阈值。
 
-`default` 面向常规交付；`high` 使用全分辨率、更多邻居和更严格的多视图几何/融合约束。`--dense-resolution-level` 可在预设之后单独覆盖工作分辨率。
+`default` 面向常规交付；`high` 使用全分辨率、更多邻居和更严格的多视图几何/融合约束。
+`--dense-resolution-level` 可在预设之后单独覆盖工作分辨率。
+
+CPU PatchMatch 会一次缓存所有图像金字塔，并默认同时处理 8 个参考视图；每个视图内部再按
+8 行 tile 做 red/black 并行传播。可用 `--patchmatch-concurrent-views` 和
+`--patchmatch-tile-rows` 调整。`--mesh-method auto` 在 preview 使用快速 projective mesh，
+在 default/high 使用 CGAL 全局 Delaunay visibility graph-cut；未构建 CGAL 时明确告警并回退
+projective。全局图的输入上限由 `--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。
+两种 mesh backend 都会经过统一 Clean。
 
 - `scene.mvs`：OpenMVS Interface（MVSI），可用 OpenMVS Viewer 打开验证相机与稀疏点
 - `scene.ply`：稀疏 XYZ；写出 PLY 时会额外生成同名 `scene.mvs`
 - `scene_dense.ply`：多轮几何一致性和深度过滤后的稠密点云
 - `scene_mesh.ply`：启用 `--mesh` 时生成的网格
 
-详细设计见 [docs/SFM_ARCHITECTURE.md](docs/SFM_ARCHITECTURE.md)。
+详细设计见 [SfM 架构](docs/SFM_ARCHITECTURE.md)、
+[稠密重建架构](docs/DENSE_RECONSTRUCTION.md) 与
+[MVS 质量回归](docs/MVS_QUALITY_REPORT.md)。

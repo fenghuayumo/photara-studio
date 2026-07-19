@@ -156,7 +156,7 @@ dense-* / mesh-mvs-* / masks-* / gggs-* / mesh-gggs-* / texture-*
 
 ### 目标
 
-快速、高覆盖的稠密结构与 **可交付的初步 mesh**。CPU 视图级并行 + SIMD NCC；
+快速、高覆盖的稠密结构与 **可交付的初步 mesh**。CPU 混合视图/tile 并行 + NCC；
 质量旋钮偏「快而全」，几何精修留给可选 GGGS。
 
 ### 步骤
@@ -164,8 +164,8 @@ dense-* / mesh-mvs-* / masks-* / gggs-* / mesh-gggs-* / texture-*
 1. **邻域选择**：共视稀疏点、基线角、尺度、重叠；
 2. **PatchMatch 深度**：斜面 (depth+normal)、粗到细、几何一致性可选；
 3. **融合**：多视图一致性 → `DenseCloud`（xyz、rgb、normal、view 列表）；
-4. **MVS mesh**：Delaunay + 可见性图割（主推，对齐 OpenMVS 质量族）或 Poisson
-   （更快预览）；随后 Clean / 可选简化。
+4. **MVS mesh**：Delaunay + 可见性图割（主推，对齐 OpenMVS 质量族）或深度图
+   projective triangulation（更快预览）；随后统一 Clean。
 
 ### 输出
 
@@ -174,6 +174,43 @@ dense-* / mesh-mvs-* / masks-* / gggs-* / mesh-gggs-* / texture-*
 - `.dmap` 缓存（可选保留）。
 
 此时若用户关闭 texture/gggs，流水线即可结束。
+
+### 当前实现状态（2026-07-19）
+
+PatchMatch 已实现以下 CPU 路径：
+
+- 所有视图、所有 coarse-to-fine 层的灰度图和 mask 在进入 PatchMatch 时一次构建并缓存；
+  reference/source 只持有只读引用，不再为每个参考视图重复缩放邻图；
+- 深度传播采用 red/black 两阶段，阶段内以 `patchmatch_tile_rows` 行为一个 tile，避免
+  相邻像素同时读写造成的数据竞争；随机种子由 view/level/iteration/tile 唯一确定；
+- 默认同时调度 8 个参考视图，并在其 row tiles 之间分配总 CPU 预算。最后不足 8 个视图时，
+  每个剩余视图自动获得更多线程，兼顾内存带宽吞吐和尾部利用率；
+- 几何一致性每轮读取不可变的全局深度快照，因此多视图/tile 写入不会与邻图读取竞争。
+
+全局表面重建已实现为可选 CGAL 后端：
+
+1. 以融合点的中位 pixel footprint 建立尺度无关的体素采样，并用
+   `mesh_max_points` 提供显式内存上限；
+2. 构建 3D Delaunay，有限和无限 cell 都进入图；无限 cell 与相机所在 cell 连接 source；
+3. 对 camera→sample 与 sample 后方的线段累计有向 facet visibility weight，质量项使用
+   facet plane / circumsphere angle（与 OpenMVS 同类能量）；
+4. 用无递归 FIFO push-relabel 求 s-t cut，避免百万 cell 图上的递归栈风险；
+5. 提取 inside/outside 分界面，并拒绝相对中位 Delaunay 边过长的跨空洞三角形；
+6. backend-independent Clean 删除非法、重复、退化和非流形面，统一连通分量朝向，删除小岛，
+   封闭小边界环，可选 boundary-preserving smoothing，最后压缩顶点并重算法线。
+
+构建时使用标准 `find_package(CGAL QUIET)`。有 CGAL 时，CLI 的 `--mesh-method auto` 在
+`default/high` 选择全局 Delaunay，在 `preview` 选择 projective；无 CGAL 或图割未抽出有效面时
+明确告警并回退 projective。可用 `--mesh-method projective|delaunay` 强制选择。
+
+关键调优参数：
+
+```text
+--patchmatch-tile-rows 8
+--patchmatch-concurrent-views 8
+--mesh-method auto|projective|delaunay
+--mesh-max-points 2000000       # 0 表示不设上限
+```
 
 ---
 
@@ -309,8 +346,8 @@ run_rebuild(scene, cfg):
 ## 性能原则
 
 1. **端到端墙钟时间** 为判据；分阶段记录 densify / mesh / gggs / delight / project；
-2. Fast MVS：外层 `parallel_for` 吃满核，内层 AVX NCC；遵守现有
-   nested-parallelism guard；
+2. Fast MVS：图像金字塔只构建一次；默认 8 个参考视图并行、每视图内部 row tile 并行；
+   red/black phase 与几何快照保证并行确定性，并在最后一批动态重分配 CPU；
 3. Texture：按 atlas 行块 / chart 并行；图像 LRU；
 4. GGGS：GPU 时间单独计量；初始化与抽 mesh 后处理可 CPU；
 5. 预设档：`preview` / `default` / `high`（分辨率、PM 迭代、是否 GGGS、
@@ -320,7 +357,8 @@ run_rebuild(scene, cfg):
 
 ## 实施顺序
 
-1. **MVS P0**：depth + fuse + MVS mesh + PLY/OBJ；无贴图即可回归；
+1. **MVS P0（已完成）**：缓存金字塔、tile PatchMatch、depth + fuse、projective/global
+   Delaunay mesh、Clean、PLY/OBJ；
 2. **Mask + Texture P0**：MVS mesh 上 UV + Flatten/Project/Dilate；
 3. **Delight P1**：ONNX Intrinsic + mask；开关接入；
 4. **编排 P0**：配置矩阵、checkpoint、CLI（MVS-only 完整交付）；

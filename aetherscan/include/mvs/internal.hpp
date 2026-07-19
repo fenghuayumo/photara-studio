@@ -17,6 +17,14 @@ struct ViewImage {
 std::vector<ViewImage> load_view_images(
     const MvsScene& scene, const DensifyOptions& options);
 
+// Scalable global Delaunay/visibility graph-cut backend. Returns false when
+// CGAL support is not built or a valid global surface cannot be extracted.
+bool reconstruct_mesh_global_cgal(
+    MvsScene& scene, const DensifyOptions& options);
+
+// Backend-independent topology cleanup and normal recomputation.
+void clean_mesh(Mesh& mesh, const DensifyOptions& options);
+
 [[nodiscard]] inline bool sample_gray(
     const std::vector<float>& image, const std::uint32_t width,
     const std::uint32_t height, const float x, const float y, float& value) {

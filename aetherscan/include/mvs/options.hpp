@@ -86,9 +86,18 @@ struct DensifyOptions {
     bool geometric_consistency{true};
     // Build mesh after fusion.
     bool build_mesh{true};
-    // The scalable projective path preserves the full depth-map resolution.
-    // The in-tree Delaunay implementation remains available for small clouds.
-    MeshMethod mesh_method{MeshMethod::depth_projective};
+    // Projective is the fast preview path; delaunay_cut selects the optional
+    // CGAL global visibility graph-cut backend.
+    MeshMethod mesh_method{MeshMethod::delaunay_cut};
+    // Run topology cleanup after either meshing backend: remove duplicate,
+    // degenerate and non-manifold faces, orient connected components, remove
+    // small islands and close small boundary loops.
+    bool mesh_clean{true};
+    // Close boundary loops with at most this many edges (0 = disabled).
+    unsigned mesh_close_hole_edges{16};
+    // Optional boundary-preserving umbrella smoothing after cleanup.
+    unsigned mesh_smooth_iters{0};
+    float mesh_smooth_lambda{0.15F};
     // Skip inserting a fused point if an existing Delaunay vertex projects
     // within this many pixels in every observing view (0 = insert all).
     float mesh_dist_insert_px{2.F};
@@ -97,6 +106,8 @@ struct DensifyOptions {
     // Graph-cut / visibility weights (Jancosek-Pajdla style).
     float mesh_k_sigma{2.F};
     float mesh_k_qual{1.F};
+    // Visibility ray continuation behind a sample, in sigma units.
+    float mesh_k_behind{4.F};
     float mesh_k_inf{1.0e6F};
     // Projective meshing samples every Nth depth pixel.
     unsigned mesh_pixel_step{2};
@@ -108,6 +119,12 @@ struct DensifyOptions {
     float mesh_depth_diff_threshold{0.025F};
     // Drop tiny disconnected triangle islands after welding.
     unsigned mesh_min_component_faces{32};
+    // Number of image rows in a PatchMatch scheduling tile. Propagation uses
+    // red/black phases, so every tile in a phase can execute independently.
+    unsigned patchmatch_tile_rows{8};
+    // Reference views concurrently sharing the CPU budget. Each view still
+    // runs row tiles; the final partial batch receives more threads per view.
+    unsigned patchmatch_concurrent_views{8};
     unsigned thread_count{0};
 };
 
@@ -118,6 +135,7 @@ inline void apply_quality_preset(
     options = DensifyOptions{};
     switch (quality) {
     case DensifyQuality::preview:
+        options.mesh_method = MeshMethod::depth_projective;
         options.resolution_level = 2;
         options.mask_border_px = 0;
         options.sub_resolution_levels = 1;
@@ -133,8 +151,10 @@ inline void apply_quality_preset(
         options.speckle_size = 24;
         options.mesh_pixel_step = 3;
         options.mesh_min_component_faces = 24;
+        options.mesh_close_hole_edges = 8;
         break;
     case DensifyQuality::default_quality:
+        options.mesh_method = MeshMethod::delaunay_cut;
         options.resolution_level = 1;
         options.mask_border_px = 1;
         options.sub_resolution_levels = 1;
@@ -149,8 +169,10 @@ inline void apply_quality_preset(
         options.speckle_size = 40;
         options.mesh_pixel_step = 2;
         options.mesh_min_component_faces = 32;
+        options.mesh_close_hole_edges = 16;
         break;
     case DensifyQuality::high:
+        options.mesh_method = MeshMethod::delaunay_cut;
         options.resolution_level = 0;
         options.mask_border_px = 1;
         options.sub_resolution_levels = 1;
@@ -174,6 +196,7 @@ inline void apply_quality_preset(
         options.mesh_weld_pixel_fraction = 0.55F;
         options.mesh_depth_diff_threshold = 0.018F;
         options.mesh_min_component_faces = 64;
+        options.mesh_close_hole_edges = 24;
         break;
     }
 }

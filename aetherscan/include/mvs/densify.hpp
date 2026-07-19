@@ -19,7 +19,9 @@ void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options);
 // Fuse depth maps into a multi-view consistent DenseCloud.
 void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options);
 
-// Extract a triangle mesh from the dense cloud (SDF + marching cubes by default).
+// Extract a triangle mesh from the dense products. The global backend uses
+// Delaunay tetrahedralization + visibility graph-cut; projective triangulation
+// remains available as the low-latency preview/fallback path.
 void reconstruct_mesh(MvsScene& scene, const DensifyOptions& options);
 
 // Full Stage-A Fast MVS: neighbors -> depth -> fuse -> optional mesh.

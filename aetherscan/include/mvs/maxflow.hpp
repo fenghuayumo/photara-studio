@@ -9,7 +9,9 @@
 
 namespace aetherscan::mvs::maxflow {
 
-// Dinic max-flow with unary source/sink capacities. Nodes are [0, n).
+// FIFO push-relabel max-flow with unary source/sink capacities. Nodes are
+// [0, n). It is iterative (no graph-depth recursion) and therefore remains
+// safe for the million-cell visibility graphs produced by global meshing.
 class Graph {
 public:
     explicit Graph(const std::size_t nodes = 0) { reset(nodes); }
@@ -43,93 +45,119 @@ public:
     }
 
     float maxflow() {
-        float flow = 0.F;
-        std::vector<int> level(n_);
-        std::vector<int> iter(n_);
+        constexpr float epsilon = 1e-12F;
+        if (n_ == 0) return 0.F;
 
-        auto bfs = [&]() -> bool {
-            std::fill(level.begin(), level.end(), -1);
-            std::queue<std::size_t> q;
-            for (std::size_t i = 0; i < n_; ++i) {
-                if (src_[i] > 1e-12F) {
-                    level[i] = 0;
-                    q.push(i);
-                }
-            }
-            bool hit = false;
-            while (!q.empty()) {
-                const std::size_t u = q.front();
-                q.pop();
-                if (snk_[u] > 1e-12F) hit = true;
-                for (int e = head_[u]; e >= 0; e = edges_[static_cast<std::size_t>(e)].next) {
-                    const auto& edge = edges_[static_cast<std::size_t>(e)];
-                    if (edge.cap <= 1e-12F || level[edge.to] >= 0) continue;
-                    level[edge.to] = level[u] + 1;
-                    q.push(edge.to);
-                }
-            }
-            return hit;
+        const std::size_t original_nodes = n_;
+        const std::size_t source = original_nodes;
+        const std::size_t sink = original_nodes + 1;
+        const std::size_t total_nodes = original_nodes + 2;
+        head_.resize(total_nodes, -1);
+        for (std::size_t i = 0; i < original_nodes; ++i) {
+            if (src_[i] > epsilon) add_edge(source, i, src_[i], 0.F);
+            if (snk_[i] > epsilon) add_edge(i, sink, snk_[i], 0.F);
+        }
+
+        std::vector<std::size_t> height(total_nodes, 0);
+        std::vector<std::size_t> height_count(total_nodes * 2 + 1, 0);
+        std::vector<float> excess(total_nodes, 0.F);
+        std::vector<int> current = head_;
+        std::vector<std::uint8_t> active(total_nodes, 0);
+        std::queue<std::size_t> queue;
+        height[source] = total_nodes;
+        height_count[0] = total_nodes - 1;
+        height_count[total_nodes] = 1;
+
+        const auto enqueue = [&](const std::size_t node) {
+            if (node == source || node == sink || active[node] ||
+                excess[node] <= epsilon || height[node] >= total_nodes * 2)
+                return;
+            active[node] = 1;
+            queue.push(node);
         };
 
-        const auto dfs = [&](auto&& self, const std::size_t u, const float f) -> float {
-            if (snk_[u] > 1e-12F) {
-                const float pushed = std::min(f, snk_[u]);
-                snk_[u] -= pushed;
-                return pushed;
-            }
-            for (int& ei = iter[u]; ei >= 0; ei = edges_[static_cast<std::size_t>(ei)].next) {
-                auto& edge = edges_[static_cast<std::size_t>(ei)];
-                if (edge.cap <= 1e-12F || level[edge.to] != level[u] + 1) continue;
-                const float pushed = self(self, edge.to, std::min(f, edge.cap));
-                if (pushed > 1e-12F) {
+        for (int index = head_[source]; index >= 0;
+             index = edges_[static_cast<std::size_t>(index)].next) {
+            Edge& edge = edges_[static_cast<std::size_t>(index)];
+            const float pushed = edge.cap;
+            if (pushed <= epsilon) continue;
+            edge.cap = 0.F;
+            edges_[static_cast<std::size_t>(edge.rev)].cap += pushed;
+            excess[edge.to] += pushed;
+            excess[source] -= pushed;
+            enqueue(edge.to);
+        }
+
+        while (!queue.empty()) {
+            const std::size_t node = queue.front();
+            queue.pop();
+            active[node] = 0;
+            while (excess[node] > epsilon) {
+                int& edge_index = current[node];
+                if (edge_index < 0) {
+                    const std::size_t old_height = height[node];
+                    std::size_t next_height = total_nodes * 2;
+                    for (int index = head_[node]; index >= 0;
+                         index = edges_[static_cast<std::size_t>(index)].next) {
+                        const Edge& edge = edges_[static_cast<std::size_t>(index)];
+                        if (edge.cap > epsilon)
+                            next_height = std::min(next_height, height[edge.to] + 1);
+                    }
+                    --height_count[old_height];
+                    height[node] = next_height;
+                    ++height_count[next_height];
+                    current[node] = head_[node];
+
+                    // Gap relabel: no active path can cross an empty level.
+                    if (old_height < total_nodes &&
+                        height_count[old_height] == 0) {
+                        for (std::size_t i = 0; i < original_nodes; ++i) {
+                            if (height[i] <= old_height ||
+                                height[i] >= total_nodes)
+                                continue;
+                            --height_count[height[i]];
+                            height[i] = total_nodes + 1;
+                            ++height_count[height[i]];
+                            current[i] = head_[i];
+                        }
+                    }
+                    if (next_height >= total_nodes * 2) break;
+                    continue;
+                }
+
+                Edge& edge = edges_[static_cast<std::size_t>(edge_index)];
+                if (edge.cap > epsilon && height[node] == height[edge.to] + 1) {
+                    const float pushed = std::min(excess[node], edge.cap);
                     edge.cap -= pushed;
                     edges_[static_cast<std::size_t>(edge.rev)].cap += pushed;
-                    return pushed;
+                    excess[node] -= pushed;
+                    excess[edge.to] += pushed;
+                    enqueue(edge.to);
+                } else {
+                    edge_index = edge.next;
                 }
             }
-            return 0.F;
-        };
-
-        while (bfs()) {
-            iter = head_;
-            bool any = false;
-            for (std::size_t i = 0; i < n_; ++i) {
-                while (src_[i] > 1e-12F && level[i] == 0) {
-                    const float pushed = dfs(dfs, i, src_[i]);
-                    if (pushed <= 1e-12F) break;
-                    src_[i] -= pushed;
-                    flow += pushed;
-                    any = true;
-                }
-            }
-            if (!any) break;
+            enqueue(node);
         }
 
-        // Min-cut: nodes that can still reach the sink in the residual graph
-        // are sink-side; the rest are source-side.
-        std::vector<char> reach_sink(n_, 0);
-        std::queue<std::size_t> q;
-        for (std::size_t i = 0; i < n_; ++i) {
-            if (snk_[i] > 1e-12F) {
-                reach_sink[i] = 1;
-                q.push(i);
+        std::fill(source_side_.begin(), source_side_.end(), 0);
+        std::vector<std::uint8_t> reachable(total_nodes, 0);
+        reachable[source] = 1;
+        queue.push(source);
+        while (!queue.empty()) {
+            const std::size_t node = queue.front();
+            queue.pop();
+            for (int index = head_[node]; index >= 0;
+                 index = edges_[static_cast<std::size_t>(index)].next) {
+                const Edge& edge = edges_[static_cast<std::size_t>(index)];
+                if (edge.cap <= epsilon || reachable[edge.to]) continue;
+                reachable[edge.to] = 1;
+                queue.push(edge.to);
             }
         }
-        while (!q.empty()) {
-            const std::size_t u = q.front();
-            q.pop();
-            for (int e = head_[u]; e >= 0; e = edges_[static_cast<std::size_t>(e)].next) {
-                const auto& edge = edges_[static_cast<std::size_t>(e)];
-                // Reverse residual: edges_[edge.rev] goes to->u with residual cap.
-                const auto& rev = edges_[static_cast<std::size_t>(edge.rev)];
-                if (rev.cap <= 1e-12F || reach_sink[edge.to]) continue;
-                reach_sink[edge.to] = 1;
-                q.push(edge.to);
-            }
-        }
-        for (std::size_t i = 0; i < n_; ++i)
-            source_side_[i] = reach_sink[i] ? 0 : 1;
-        return flow;
+        for (std::size_t i = 0; i < original_nodes; ++i)
+            source_side_[i] = reachable[i];
+        return excess[sink];
     }
 
     [[nodiscard]] bool is_source_side(const std::size_t node) const {

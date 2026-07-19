@@ -1,11 +1,17 @@
 #include "mvs/densify.hpp"
+#include "mvs/internal.hpp"
+#include "mvs/maxflow.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <numbers>
+#include <random>
 #include <set>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -112,6 +118,9 @@ void test_quality_presets() {
     DensifyOptions options;
     apply_quality_preset(options, DensifyQuality::high);
     require(options.resolution_level == 0, "high preset is not full resolution");
+    require(
+        options.mesh_method == MeshMethod::delaunay_cut,
+        "high preset does not select global meshing");
     require(options.min_patch_views == 3, "high preset patch support is weak");
     require(options.min_views_filter == 2, "high preset filter support is weak");
     require(options.min_views_fuse == 3, "high preset fusion support is weak");
@@ -125,9 +134,170 @@ void test_quality_presets() {
     apply_quality_preset(options, DensifyQuality::preview);
     require(options.resolution_level == 2, "preview preset resolution mismatch");
     require(
+        options.mesh_method == MeshMethod::depth_projective,
+        "preview preset does not select projective meshing");
+    require(
         std::abs(options.depth_diff_threshold - 0.01F) < 1e-6F,
         "preset application leaked high-quality thresholds");
 }
+
+void test_scalable_maxflow_cut() {
+    maxflow::Graph graph(2);
+    graph.add_tweights(0, 5.F, 0.F);
+    graph.add_tweights(1, 0.F, 5.F);
+    graph.add_edge(0, 1, 2.F, 2.F);
+    require(std::abs(graph.maxflow() - 2.F) < 1e-5F, "maxflow value mismatch");
+    require(graph.is_source_side(0), "source-constrained node crossed cut");
+    require(!graph.is_source_side(1), "sink-constrained node crossed cut");
+
+    struct Arc {
+        int a{};
+        int b{};
+        float forward{};
+        float reverse{};
+    };
+    std::mt19937 random(41);
+    std::uniform_int_distribution<int> capacity(0, 5);
+    for (int trial = 0; trial < 40; ++trial) {
+        constexpr int nodes = 7;
+        std::array<float, nodes> source{};
+        std::array<float, nodes> sink{};
+        std::vector<Arc> arcs;
+        maxflow::Graph candidate(nodes);
+        for (int i = 0; i < nodes; ++i) {
+            source[static_cast<std::size_t>(i)] =
+                static_cast<float>(capacity(random));
+            sink[static_cast<std::size_t>(i)] =
+                static_cast<float>(capacity(random));
+            candidate.add_tweights(
+                static_cast<std::size_t>(i),
+                source[static_cast<std::size_t>(i)],
+                sink[static_cast<std::size_t>(i)]);
+        }
+        for (int i = 0; i < nodes; ++i) {
+            for (int j = i + 1; j < nodes; ++j) {
+                if ((capacity(random) & 1) == 0) continue;
+                const Arc arc{
+                    i, j, static_cast<float>(capacity(random)),
+                    static_cast<float>(capacity(random))};
+                arcs.push_back(arc);
+                candidate.add_edge(i, j, arc.forward, arc.reverse);
+            }
+        }
+        const auto cut_energy = [&](const unsigned mask) {
+            float energy = 0.F;
+            for (int i = 0; i < nodes; ++i) {
+                const bool source_side = (mask & (1U << i)) != 0;
+                energy += source_side
+                    ? sink[static_cast<std::size_t>(i)]
+                    : source[static_cast<std::size_t>(i)];
+            }
+            for (const Arc& arc : arcs) {
+                const bool a_source = (mask & (1U << arc.a)) != 0;
+                const bool b_source = (mask & (1U << arc.b)) != 0;
+                if (a_source && !b_source) energy += arc.forward;
+                if (b_source && !a_source) energy += arc.reverse;
+            }
+            return energy;
+        };
+        float optimum = std::numeric_limits<float>::infinity();
+        for (unsigned mask = 0; mask < (1U << nodes); ++mask)
+            optimum = std::min(optimum, cut_energy(mask));
+        candidate.maxflow();
+        unsigned result_mask = 0;
+        for (int i = 0; i < nodes; ++i)
+            if (candidate.is_source_side(static_cast<std::size_t>(i)))
+                result_mask |= 1U << i;
+        require(
+            std::abs(cut_energy(result_mask) - optimum) < 1e-4F,
+            "push-relabel cut differs from brute-force optimum");
+    }
+}
+
+void test_mesh_clean() {
+    Mesh mesh;
+    mesh.vertices = {
+        Vec3f{0.F, 0.F, 0.F}, Vec3f{1.F, 0.F, 0.F},
+        Vec3f{1.F, 1.F, 0.F}, Vec3f{0.F, 1.F, 0.F},
+        Vec3f{5.F, 5.F, 5.F}};
+    mesh.faces = {
+        Eigen::Vector3i{0, 1, 2}, Eigen::Vector3i{0, 3, 2},
+        Eigen::Vector3i{2, 1, 0}, Eigen::Vector3i{0, 0, 1}};
+    DensifyOptions options;
+    options.mesh_min_component_faces = 1;
+    options.mesh_close_hole_edges = 0;
+    detail::clean_mesh(mesh, options);
+    require(mesh.faces.size() == 2, "mesh clean kept invalid faces");
+    require(mesh.vertices.size() == 4, "mesh clean did not compact vertices");
+    require(mesh.normals.size() == 4, "mesh clean did not rebuild normals");
+
+    int shared_forward = 0;
+    int shared_reverse = 0;
+    for (const Eigen::Vector3i& face : mesh.faces) {
+        for (int i = 0; i < 3; ++i) {
+            const int a = face[i];
+            const int b = face[(i + 1) % 3];
+            if (a == 0 && b == 2) ++shared_forward;
+            if (a == 2 && b == 0) ++shared_reverse;
+        }
+    }
+    require(
+        shared_forward == 1 && shared_reverse == 1,
+        "mesh clean did not orient the shared edge consistently");
+}
+
+#if defined(AETHERSCAN_HAS_CGAL)
+void test_global_delaunay_mesh() {
+    MvsScene scene;
+    const std::array<Vec3f, 6> cameras{
+        Vec3f{3.F, 0.F, 0.F}, Vec3f{-3.F, 0.F, 0.F},
+        Vec3f{0.F, 3.F, 0.F}, Vec3f{0.F, -3.F, 0.F},
+        Vec3f{0.F, 0.F, 3.F}, Vec3f{0.F, 0.F, -3.F}};
+    for (std::size_t i = 0; i < cameras.size(); ++i) {
+        MvsView view;
+        view.id = static_cast<Index>(i);
+        view.pose = aetherscan::sfm::Pose3D::identity();
+        view.pose.C = cameras[i].cast<double>();
+        view.fx = view.fy = 500.F;
+        scene.views.push_back(std::move(view));
+    }
+    for (int latitude = 1; latitude < 12; ++latitude) {
+        const float phi = std::numbers::pi_v<float> *
+                          static_cast<float>(latitude) / 12.F;
+        for (int longitude = 0; longitude < 24; ++longitude) {
+            const float theta = 2.F * std::numbers::pi_v<float> *
+                                static_cast<float>(longitude) / 24.F;
+            DensePoint point;
+            point.position = Vec3f{
+                std::sin(phi) * std::cos(theta),
+                std::sin(phi) * std::sin(theta), std::cos(phi)};
+            point.normal = point.position;
+            point.color = (point.position.array() * 0.5F + 0.5F).matrix();
+            point.weight = 1.F;
+            for (std::size_t i = 0; i < cameras.size(); ++i)
+                if (cameras[i].dot(point.position) > 0.F)
+                    point.views.push_back(static_cast<Index>(i));
+            scene.dense_cloud.points.push_back(std::move(point));
+        }
+    }
+    DensifyOptions options;
+    options.mesh_method = MeshMethod::delaunay_cut;
+    options.mesh_max_points = 0;
+    options.mesh_min_component_faces = 1;
+    options.mesh_close_hole_edges = 0;
+    options.mesh_k_inf = 1.0e4F;
+    options.mesh_k_qual = 0.05F;
+    options.mesh_k_behind = 1.F;
+    require(
+        detail::reconstruct_mesh_global_cgal(scene, options),
+        "global Delaunay backend rejected the sphere");
+    detail::clean_mesh(scene.mesh, options);
+    require(!scene.mesh.faces.empty(), "global Delaunay mesh is empty");
+    require(
+        scene.mesh.normals.size() == scene.mesh.vertices.size(),
+        "global Delaunay mesh normals are incomplete");
+}
+#endif
 
 }  // namespace
 
@@ -136,6 +306,11 @@ int main() {
         test_parallel_fusion();
         test_projective_mesh();
         test_quality_presets();
+        test_scalable_maxflow_cut();
+        test_mesh_clean();
+#if defined(AETHERSCAN_HAS_CGAL)
+        test_global_delaunay_mesh();
+#endif
         std::cout << "mvs tests passed\n";
         return 0;
     } catch (const std::exception& error) {

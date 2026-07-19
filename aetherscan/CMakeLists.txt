@@ -1,4 +1,5 @@
 find_package(OpenMP)
+find_package(CGAL QUIET)
 
 set(AETHERSCAN_BA_SOURCES
     src/ba/linearizer_cpu.cpp
@@ -281,6 +282,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/mvs/patchmatch.cpp
         src/mvs/fuse.cpp
         src/mvs/mesh.cpp
+        src/mvs/mesh_cgal.cpp
+        src/mvs/mesh_clean.cpp
         src/mvs/export.cpp
         src/mvs/densify.cpp)
     add_library(AetherScan::MVS ALIAS aetherscan_mvs)
@@ -291,6 +294,13 @@ if(AETHERSCAN_ENABLE_FEATURES)
     target_link_libraries(aetherscan_mvs PUBLIC
         AetherScan::SfM
         Eigen3::Eigen)
+    if(CGAL_FOUND)
+        target_link_libraries(aetherscan_mvs PUBLIC CGAL::CGAL)
+        target_compile_definitions(aetherscan_mvs PUBLIC AETHERSCAN_HAS_CGAL=1)
+        message(STATUS "Enabling CGAL global Delaunay MVS meshing")
+    else()
+        message(STATUS "CGAL not found: global MVS meshing will use projective fallback")
+    endif()
     if(OpenMP_CXX_FOUND)
         target_link_libraries(aetherscan_mvs PUBLIC OpenMP::OpenMP_CXX)
         target_compile_definitions(aetherscan_mvs PUBLIC AETHERSCAN_HAS_OPENMP=1)
