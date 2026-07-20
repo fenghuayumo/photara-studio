@@ -197,59 +197,6 @@ void merge_accumulator(Accumulator& target, const Accumulator& source) {
         add_view(target, source.views[i], source.view_weights[i]);
 }
 
-[[nodiscard]] float median_valid_depth(
-    const MvsView& view, const DensifyOptions& options) {
-    const DepthMap& depth_map = view.depth_map;
-    if (depth_map.depth.empty()) return 0.F;
-    constexpr std::size_t maximum_samples = 65'536;
-    const std::size_t stride = std::max<std::size_t>(
-        1, depth_map.depth.size() / maximum_samples);
-    std::vector<float> samples;
-    samples.reserve(std::min(maximum_samples, depth_map.depth.size()));
-    for (std::size_t index = 0; index < depth_map.depth.size(); index += stride) {
-        const float depth = depth_map.depth[index];
-        if (!(depth > 0.F) || !std::isfinite(depth) ||
-            !(depth_map.confidence[index] <= options.ncc_keep_threshold) ||
-            (view.foreground_mask.size() == depth_map.size() &&
-             view.foreground_mask[index] == 0))
-            continue;
-        samples.push_back(depth);
-    }
-    if (samples.empty()) return 0.F;
-    const std::size_t middle = samples.size() / 2;
-    std::nth_element(
-        samples.begin(), samples.begin() + static_cast<std::ptrdiff_t>(middle),
-        samples.end());
-    return samples[middle];
-}
-
-[[nodiscard]] float visibility_sample_weight(
-    const float cost, const float incidence_weight,
-    const DensifyOptions& options) {
-    const float photometric = std::max(
-        0.02F,
-        1.F - cost / std::max(options.ncc_keep_threshold, 1e-3F));
-    return incidence_weight * photometric;
-}
-
-[[nodiscard]] float calibrated_sample_weight(
-    const float visibility_weight, const float depth,
-    const float reference_depth, const DensifyOptions& options) {
-    if (!(depth > 0.F) || !(reference_depth > 0.F))
-        return visibility_weight;
-    const float minimum_ratio = std::max(
-        std::min(
-            options.fusion_depth_weight_min_ratio,
-            options.fusion_depth_weight_max_ratio),
-        1e-3F);
-    const float maximum_ratio = std::max(
-        options.fusion_depth_weight_min_ratio,
-        options.fusion_depth_weight_max_ratio);
-    const float normalized_depth = std::clamp(
-        depth / reference_depth, minimum_ratio, maximum_ratio);
-    return visibility_weight / (normalized_depth * normalized_depth);
-}
-
 }  // namespace
 
 void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
@@ -263,29 +210,6 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 scene.views[i].depth_map, options.speckle_size,
                 options.depth_diff_threshold * 0.7F);
         });
-
-    std::vector<float> view_depth_medians(scene.views.size(), 0.F);
-    parallel::parallel_for(
-        scene.views.size(), threads, [&](const std::size_t i) {
-            view_depth_medians[i] = median_valid_depth(scene.views[i], options);
-        });
-    std::vector<float> valid_depth_medians;
-    valid_depth_medians.reserve(view_depth_medians.size());
-    for (const float depth : view_depth_medians)
-        if (depth > 0.F && std::isfinite(depth))
-            valid_depth_medians.push_back(depth);
-    float reference_depth = 1.F;
-    if (!valid_depth_medians.empty()) {
-        const std::size_t middle = valid_depth_medians.size() / 2;
-        std::nth_element(
-            valid_depth_medians.begin(),
-            valid_depth_medians.begin() + static_cast<std::ptrdiff_t>(middle),
-            valid_depth_medians.end());
-        reference_depth = valid_depth_medians[middle];
-    }
-    core::Logger::instance().info(
-        "mvs fuse depth_reference=", reference_depth,
-        " calibrated_views=", valid_depth_medians.size());
 
     std::vector<io::RgbImage> colors(scene.views.size());
     parallel::parallel_for(scene.views.size(), threads, [&](const std::size_t i) {
@@ -339,7 +263,6 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 std::array<Vec3f, k_max_fusion_views> normals{};
                 std::array<Vec3f, k_max_fusion_views> color_samples{};
                 std::array<float, k_max_fusion_views> weights{};
-                std::array<float, k_max_fusion_views> visibility_weights{};
                 std::array<Index, k_max_fusion_views> view_ids{};
                 std::array<std::uint8_t, k_max_fusion_views> has_color{};
                 std::size_t count = 1;
@@ -359,11 +282,10 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 const float reference_incidence_weight =
                     options.grazing_weight_floor +
                     (1.F - options.grazing_weight_floor) * reference_incidence;
-                visibility_weights[0] = visibility_sample_weight(
-                    rdm.confidence[index], reference_incidence_weight, options);
-                const float w0 = calibrated_sample_weight(
-                    visibility_weights[0], rdm.depth[index], reference_depth,
-                    options);
+                const float w0 = reference_incidence_weight * std::max(
+                    0.02F,
+                    1.F - rdm.confidence[index] /
+                              std::max(options.ncc_keep_threshold, 1e-3F));
                 positions[0] = world0;
                 normals[0] = world_n0;
                 weights[0] = w0;
@@ -472,12 +394,10 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                     const float source_incidence_weight =
                         options.grazing_weight_floor +
                         (1.F - options.grazing_weight_floor) * source_incidence;
-                    visibility_weights[count] = visibility_sample_weight(
-                        sdm.confidence[source_index], source_incidence_weight,
-                        options);
-                    weights[count] = calibrated_sample_weight(
-                        visibility_weights[count], sdm.depth[source_index],
-                        reference_depth, options);
+                    weights[count] = source_incidence_weight * std::max(
+                        0.02F,
+                        1.F - sdm.confidence[source_index] /
+                                  std::max(options.ncc_keep_threshold, 1e-3F));
                     view_ids[count] = src.id;
                     if (!colors[neighbor.view_id].pixels.empty()) {
                         color_samples[count] = sample_view_color(
@@ -552,8 +472,7 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                         continue;
                     const std::size_t sample = ordered[i].second;
                     add_view(
-                        accumulator, view_ids[sample],
-                        visibility_weights[sample]);
+                        accumulator, view_ids[sample], weights[sample]);
                     if (has_color[sample]) {
                         accumulator.color +=
                             color_samples[sample] * weights[sample];
