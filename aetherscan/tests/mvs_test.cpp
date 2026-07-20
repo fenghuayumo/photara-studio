@@ -279,6 +279,11 @@ void test_quality_presets() {
                 options.descriptor_min_magnitude,
         "weighted NCC texture thresholds are invalid");
     require(
+        options.fusion_depth_weight_min_ratio > 0.F &&
+            options.fusion_depth_weight_min_ratio < 1.F &&
+            options.fusion_depth_weight_max_ratio > 1.F,
+        "fusion depth uncertainty clamp is invalid");
+    require(
         std::abs(options.mesh_dist_insert_px - 0.75F) < 1e-6F,
         "high preset global mesh spacing is too coarse");
 

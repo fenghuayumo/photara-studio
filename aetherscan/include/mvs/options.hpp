@@ -77,6 +77,10 @@ struct DensifyOptions {
     unsigned min_shared_points{3};
     // Fusion: minimum agreeing views.
     unsigned min_views_fuse{2};
+    // Clamp depth/median before inverse-square uncertainty weighting. This
+    // keeps fusion scale invariant and prevents very near samples dominating.
+    float fusion_depth_weight_min_ratio{0.5F};
+    float fusion_depth_weight_max_ratio{2.F};
     // Remove depth-connected components smaller than this many pixels before
     // fusion. Connectivity also requires locally consistent depth.
     unsigned speckle_size{40};
