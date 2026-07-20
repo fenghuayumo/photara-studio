@@ -112,7 +112,7 @@ struct DensifyOptions {
     float mesh_smooth_lambda{0.15F};
     // Skip inserting a fused point if an existing Delaunay vertex projects
     // within this many pixels in every observing view (0 = insert all).
-    float mesh_dist_insert_px{2.F};
+    float mesh_dist_insert_px{1.25F};
     // Cap fused points before meshing (0 = no cap); random subsample.
     std::uint64_t mesh_max_points{2'000'000};
     // Graph-cut / visibility weights (Jancosek-Pajdla style).
@@ -131,6 +131,13 @@ struct DensifyOptions {
     float mesh_depth_diff_threshold{0.025F};
     // Drop tiny disconnected triangle islands after welding.
     unsigned mesh_min_component_faces{32};
+    // OpenMVS-style scale-aware cleanup. Faces with an edge longer than the
+    // 95th-percentile edge times this factor and components whose AABB is
+    // smaller than the 55th-percentile edge times this factor are removed.
+    // Set to 0 to disable the scale-aware pass.
+    float mesh_spurious_factor{20.F};
+    // Iteratively remove vertices incident to at most one face.
+    bool mesh_remove_spikes{true};
     // Number of image rows in a PatchMatch scheduling tile. Propagation uses
     // red/black phases, so every tile in a phase can execute independently.
     unsigned patchmatch_tile_rows{8};
@@ -182,6 +189,7 @@ inline void apply_quality_preset(
         options.mesh_pixel_step = 2;
         options.mesh_min_component_faces = 32;
         options.mesh_close_hole_edges = 16;
+        options.mesh_dist_insert_px = 1.25F;
         break;
     case DensifyQuality::high:
         options.mesh_method = MeshMethod::delaunay_cut;
@@ -209,6 +217,7 @@ inline void apply_quality_preset(
         options.mesh_depth_diff_threshold = 0.018F;
         options.mesh_min_component_faces = 64;
         options.mesh_close_hole_edges = 24;
+        options.mesh_dist_insert_px = 0.75F;
         break;
     }
 }

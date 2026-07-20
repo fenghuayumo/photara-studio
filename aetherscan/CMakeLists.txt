@@ -68,6 +68,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
     find_package(PoseLib CONFIG REQUIRED)
     find_package(Ceres CONFIG REQUIRED)
     find_package(hnswlib CONFIG REQUIRED)
+    find_package(Boost REQUIRED)
 
     set(AETHERSCAN_VLFEAT_SOURCES
         third_party/vlfeat/vl/generic.c
@@ -294,13 +295,16 @@ if(AETHERSCAN_ENABLE_FEATURES)
     target_compile_features(aetherscan_mvs PUBLIC cxx_std_20)
     target_link_libraries(aetherscan_mvs PUBLIC
         AetherScan::SfM
-        Eigen3::Eigen)
+        Eigen3::Eigen
+        Boost::headers)
     if(CGAL_FOUND)
         target_link_libraries(aetherscan_mvs PUBLIC CGAL::CGAL)
         target_compile_definitions(aetherscan_mvs PUBLIC AETHERSCAN_HAS_CGAL=1)
         message(STATUS "Enabling CGAL global Delaunay MVS meshing")
     else()
-        message(STATUS "CGAL not found: global MVS meshing will use projective fallback")
+        message(WARNING
+            "CGAL not found: default/high global MVS meshing is unavailable; "
+            "preview or --mesh-method projective remains supported")
     endif()
     if(OpenMP_CXX_FOUND)
         target_link_libraries(aetherscan_mvs PUBLIC OpenMP::OpenMP_CXX)

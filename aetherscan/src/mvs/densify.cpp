@@ -10,6 +10,14 @@ namespace aetherscan::mvs {
 
 void densify(MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.densify");
+#if !defined(AETHERSCAN_HAS_CGAL)
+    if (options.build_mesh &&
+        options.mesh_method == MeshMethod::delaunay_cut)
+        throw std::runtime_error(
+            "Global Delaunay meshing requires a CGAL-enabled build. "
+            "Install CGAL or explicitly select projective meshing for "
+            "preview.");
+#endif
     if (!options.roi_path.empty()) {
         if (!detail::load_manual_roi(options.roi_path, scene.roi))
             throw std::runtime_error(

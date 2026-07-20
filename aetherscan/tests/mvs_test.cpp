@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <numbers>
 #include <random>
 #include <set>
@@ -126,6 +127,29 @@ void test_projected_mesh_mask() {
     require(mask[0] == 0, "projected mesh mask filled background corner");
 }
 
+void test_input_mask_is_not_cut_by_coarse_mesh_holes() {
+    MvsScene scene;
+    scene.views.push_back(make_plane_view(0, 32));
+    scene.views[0].foreground_mask.assign(32U * 32U, 255);
+    // A deliberately incomplete coarse mesh that does not cover the center.
+    scene.mesh.vertices = {
+        Vec3f{-0.20F, -0.20F, 2.F}, Vec3f{-0.08F, -0.20F, 2.F},
+        Vec3f{-0.20F, -0.08F, 2.F}};
+    scene.mesh.faces = {Eigen::Vector3i{0,1,2}};
+    scene.roi.valid = true;
+    scene.roi.center = Vec3f{0.F, 0.F, 2.F};
+    scene.roi.half_extent = Vec3f{0.25F, 0.25F, 0.25F};
+    DensifyOptions options;
+    options.auto_roi_mask_dilate_px = 0;
+    detail::build_projected_foreground_masks(scene, options);
+    require(
+        scene.views[0].foreground_mask[16U * 32U + 16U] != 0,
+        "coarse mesh hole was baked into the final input mask");
+    require(
+        scene.views[0].foreground_mask[0] == 0,
+        "projected OBB envelope failed to reject distant background");
+}
+
 void test_manual_obb_file() {
     const auto path = std::filesystem::temp_directory_path() /
                       "aetherscan-mvs-test-roi.txt";
@@ -238,6 +262,14 @@ void test_quality_presets() {
             options.grazing_weight_floor < 0.2F,
         "high preset grazing samples are not softly weighted");
     require(options.mesh_pixel_step == 2, "high preset mesh is too large by default");
+    require(
+        std::abs(options.mesh_dist_insert_px - 0.75F) < 1e-6F,
+        "high preset global mesh spacing is too coarse");
+
+    apply_quality_preset(options, DensifyQuality::default_quality);
+    require(
+        std::abs(options.mesh_dist_insert_px - 1.25F) < 1e-6F,
+        "default preset global mesh spacing mismatch");
 
     apply_quality_preset(options, DensifyQuality::preview);
     require(options.resolution_level == 2, "preview preset resolution mismatch");
@@ -249,6 +281,21 @@ void test_quality_presets() {
         "preset application leaked high-quality thresholds");
 }
 
+#if !defined(AETHERSCAN_HAS_CGAL)
+void test_missing_cgal_fails_before_densify() {
+    MvsScene scene;
+    DensifyOptions options;
+    options.mesh_method = MeshMethod::delaunay_cut;
+    bool rejected = false;
+    try {
+        densify(scene, options);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    require(rejected, "missing CGAL did not reject global meshing early");
+}
+#endif
+
 void test_scalable_maxflow_cut() {
     maxflow::Graph graph(2);
     graph.add_tweights(0, 5.F, 0.F);
@@ -257,6 +304,11 @@ void test_scalable_maxflow_cut() {
     require(std::abs(graph.maxflow() - 2.F) < 1e-5F, "maxflow value mismatch");
     require(graph.is_source_side(0), "source-constrained node crossed cut");
     require(!graph.is_source_side(1), "sink-constrained node crossed cut");
+    maxflow::Graph unary_overlap(1);
+    unary_overlap.add_tweights(0, 7.F, 3.F);
+    require(
+        std::abs(unary_overlap.maxflow() - 3.F) < 1e-5F,
+        "maxflow omitted the constant unary offset");
 
     struct Arc {
         int a{};
@@ -334,6 +386,8 @@ void test_mesh_clean() {
     DensifyOptions options;
     options.mesh_min_component_faces = 1;
     options.mesh_close_hole_edges = 0;
+    options.mesh_spurious_factor = 0.F;
+    options.mesh_remove_spikes = false;
     detail::clean_mesh(mesh, options);
     require(mesh.faces.size() == 2, "mesh clean kept invalid faces");
     require(mesh.vertices.size() == 4, "mesh clean did not compact vertices");
@@ -358,18 +412,55 @@ void test_roi_aware_mesh_clean() {
     Mesh mesh;
     mesh.vertices = {
         Vec3f{-0.2F, -0.2F, 0.F}, Vec3f{0.2F, -0.2F, 0.F},
-        Vec3f{0.F, 0.2F, 0.F}, Vec3f{2.F, 0.F, 0.F}};
-    mesh.faces = {Eigen::Vector3i{0,1,2}, Eigen::Vector3i{1,3,2}};
+        Vec3f{0.F, 0.2F, 0.F}, Vec3f{2.F, 0.F, 0.F},
+        Vec3f{-0.2F, -0.2F, -0.2F}, Vec3f{0.2F, -0.2F, -0.2F},
+        Vec3f{0.F, 0.2F, -0.2F}, Vec3f{0.F, 0.F, 0.2F}};
+    mesh.faces = {
+        Eigen::Vector3i{0,1,2}, Eigen::Vector3i{1,3,2},
+        // Tetrahedron with the (4, 6, 5) face missing: this is an internal
+        // reconstruction hole and must still close under an active ROI.
+        Eigen::Vector3i{4,5,7}, Eigen::Vector3i{5,6,7},
+        Eigen::Vector3i{6,4,7}};
     OrientedBoundingBox roi;
     roi.valid = true;
     roi.half_extent = Vec3f{0.5F,0.5F,0.5F};
     DensifyOptions options;
     options.mesh_min_component_faces = 1;
     options.mesh_close_hole_edges = 8;
+    options.mesh_spurious_factor = 0.F;
+    options.mesh_remove_spikes = false;
     detail::clean_mesh(mesh, options, &roi);
-    require(mesh.faces.size() == 1, "ROI Clean kept outside face or capped crop");
+    require(
+        mesh.faces.size() == 7,
+        "ROI Clean did not distinguish an ROI cut from an internal hole");
     for (const Vec3f& vertex : mesh.vertices)
         require(roi.contains(vertex), "ROI Clean kept outside vertex");
+}
+
+void test_bow_tie_holes_are_split_and_closed() {
+    Mesh mesh;
+    mesh.vertices = {
+        Vec3f{0.F, 0.F, 0.F}, Vec3f{1.F, 0.F, 0.F},
+        Vec3f{0.F, 1.F, 0.F}, Vec3f{0.F, 0.F, 1.F},
+        Vec3f{-1.F, 0.F, 0.F}, Vec3f{0.F, -1.F, 0.F},
+        Vec3f{0.F, 0.F, -1.F}};
+    mesh.faces = {
+        Eigen::Vector3i{0,3,1}, Eigen::Vector3i{1,3,2},
+        Eigen::Vector3i{2,3,0}, Eigen::Vector3i{0,6,4},
+        Eigen::Vector3i{4,6,5}, Eigen::Vector3i{5,6,0}};
+    DensifyOptions options;
+    options.mesh_method = MeshMethod::depth_projective;
+    options.mesh_min_component_faces = 1;
+    options.mesh_close_hole_edges = 8;
+    options.mesh_spurious_factor = 0.F;
+    options.mesh_remove_spikes = false;
+    detail::clean_mesh(mesh, options);
+    require(
+        mesh.faces.size() == 12,
+        "bow-tie boundary fans were not split and closed independently");
+    require(
+        mesh.vertices.size() == 10,
+        "bow-tie cleanup did not duplicate the shared vertex and add caps");
 }
 
 #if defined(AETHERSCAN_HAS_CGAL)
@@ -414,9 +505,25 @@ void test_global_delaunay_mesh() {
     options.mesh_k_inf = 1.0e4F;
     options.mesh_k_qual = 0.05F;
     options.mesh_k_behind = 1.F;
+    // A per-facet edge cutoff must not puncture the closed graph-cut surface.
+    options.mesh_max_edge_voxels = 1.F;
     require(
         detail::reconstruct_mesh_global_cgal(scene, options),
         "global Delaunay backend rejected the sphere");
+    std::map<std::pair<int, int>, unsigned> edge_counts;
+    for (const Eigen::Vector3i& face : scene.mesh.faces) {
+        for (int edge = 0; edge < 3; ++edge) {
+            int a = face[edge];
+            int b = face[(edge + 1) % 3];
+            if (a > b) std::swap(a, b);
+            ++edge_counts[{a, b}];
+        }
+    }
+    require(
+        std::none_of(
+            edge_counts.begin(), edge_counts.end(),
+            [](const auto& item) { return item.second == 1; }),
+        "global graph-cut surface was punctured by facet filtering");
     detail::clean_mesh(scene.mesh, options);
     require(!scene.mesh.faces.empty(), "global Delaunay mesh is empty");
     require(
@@ -432,13 +539,18 @@ int main() {
         test_parallel_fusion();
         test_mask_and_roi_constrained_fusion();
         test_projected_mesh_mask();
+        test_input_mask_is_not_cut_by_coarse_mesh_holes();
         test_manual_obb_file();
         test_automatic_ground_and_subject_roi();
         test_projective_mesh();
         test_quality_presets();
+#if !defined(AETHERSCAN_HAS_CGAL)
+        test_missing_cgal_fails_before_densify();
+#endif
         test_scalable_maxflow_cut();
         test_mesh_clean();
         test_roi_aware_mesh_clean();
+        test_bow_tie_holes_are_split_and_closed();
 #if defined(AETHERSCAN_HAS_CGAL)
         test_global_delaunay_mesh();
 #endif

@@ -437,8 +437,7 @@ void build_projected_foreground_masks(
     MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.project_roi_masks");
     Mesh box;
-    const Mesh* source = &scene.mesh;
-    if (source->faces.empty() && scene.roi.valid) {
+    if (scene.roi.valid) {
         box.vertices.resize(8);
         for (int i = 0; i < 8; ++i) {
             const Vec3f local{
@@ -451,10 +450,11 @@ void build_projected_foreground_masks(
             {0,2,3},{0,3,1},{4,5,7},{4,7,6},{0,1,5},{0,5,4},
             {2,6,7},{2,7,3},{0,4,6},{0,6,2},{1,3,7},{1,7,5}};
         for (const auto& face : f) box.faces.emplace_back(face[0], face[1], face[2]);
-        source = &box;
     }
+    const Mesh* source = scene.mesh.faces.empty() ? &box : &scene.mesh;
     for (auto& view : scene.views) {
         const std::size_t size = static_cast<std::size_t>(view.width) * view.height;
+        const bool has_input_mask = view.foreground_mask.size() == size;
         std::vector<std::uint8_t> projected(size, 0);
         std::vector<float> zbuffer(size, std::numeric_limits<float>::max());
         for (const auto& face : source->faces) {
@@ -465,7 +465,29 @@ void build_projected_foreground_masks(
                                source->vertices[c], zbuffer, projected);
         }
         dilate(projected, view.width, view.height, options.auto_roi_mask_dilate_px);
-        if (view.foreground_mask.size() == size) {
+        if (has_input_mask) {
+            // A coarse projective mesh is intentionally incomplete. Using its
+            // silhouette as a hard intersection makes every coarse hole
+            // irreversible in the final PatchMatch pass. An existing input
+            // mask is already the stronger 2D foreground cue, so constrain it
+            // only by the projected OBB envelope. Keep the coarse silhouette
+            // path for datasets without masks.
+            if (!box.faces.empty() && source != &box) {
+                std::vector<std::uint8_t> envelope(size, 0);
+                std::fill(
+                    zbuffer.begin(), zbuffer.end(),
+                    std::numeric_limits<float>::max());
+                for (const auto& face : box.faces)
+                    rasterize_triangle(
+                        view, box.vertices[static_cast<std::size_t>(face.x())],
+                        box.vertices[static_cast<std::size_t>(face.y())],
+                        box.vertices[static_cast<std::size_t>(face.z())],
+                        zbuffer, envelope);
+                dilate(
+                    envelope, view.width, view.height,
+                    options.auto_roi_mask_dilate_px);
+                projected.swap(envelope);
+            }
             for (std::size_t i = 0; i < size; ++i)
                 projected[i] = (projected[i] && view.foreground_mask[i]) ? 255 : 0;
         }

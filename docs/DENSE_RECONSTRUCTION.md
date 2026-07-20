@@ -438,7 +438,8 @@ ROI 与 mask 是两层独立约束：ROI 是世界坐标中的 3D OBB，决定�
 - depth filter：reference/source 像素先过 mask，重投影世界点再过 OBB；
 - fusion：reference/source 样本、稳健融合后的最终点均检查 mask/OBB；
 - global Delaunay：ROI 外点不插入，中心在 OBB 外的 cell 强制为 source/free-space；
-- Clean：删除跨出 OBB 的三角形；ROI 裁剪产生的开边界不执行 hole cap，避免重新封回桌面。
+- Clean：删除跨出 OBB 的三角形；只保护 ROI 裁剪产生的开边界不执行 hole cap，主体内部
+  的小边界环仍会补洞，避免因启用 ROI 而保留大量内部孔洞。
 
 CLI：
 
@@ -469,3 +470,26 @@ delight）；**GGGS（Geometry-Grounded Gaussian Splatting）为可选几何精�
 Mask / UV / Project / Delight 共用一套后处理，作用于用户选定的活跃 mesh。
 这样既满足「MVS 已经够用就停」的产品需求，又保留「需要更高几何质量时再开 GGGS」
 的升级路径。
+
+---
+
+## 可扩展全局表面重建与 Clean（2026-07-20）
+
+默认/高质量档的最终 mesh 现在必须使用 CGAL 全局 Delaunay visibility cut；CGAL
+不可用或全局切割失败时会明确报错，不再静默退回容易产生局部碎片的 projective
+mesh。projective 仅保留为 preview 的显式快速路径。
+
+全局后端的关键实现如下：
+
+- 先按「所有观测视图中的投影距离 + 相对深度差」过滤 Delaunay 插入点，并合并观测；
+- 相机 cell 只定位一次，visibility ray 按 Delaunay segment traversal 计算；每个工作线程
+  使用稀疏局部累加器，达到阈值后批量合并，避免逐 ray 原子写热点；
+- s-t cut 使用 Boost Boykov-Kolmogorov。没有采用 OpenMVS 默认的 IBFS 源码，因为其
+  上游许可证限定研究用途，不适合产品分发；
+- 非 CGAL 构建在 densify 开始前即拒绝 default/high 全局 meshing，避免完成昂贵深度估计
+  后才发现后端不可用。
+
+Clean 与 OpenMVS 的处理尺度对齐：使用 P95 边长识别异常长三角形、使用 P55 边长与
+分量 AABB 对角线剔除尺度异常小的碎片、迭代删除 spike、拆分 bow-tie 顶点、统一绕向并
+补小孔。ROI 不再禁用全部补洞：只有由 OBB 裁切面产生的边界顶点被保护，主体内部的小孔
+仍会关闭。`mesh_spurious_factor=0` 和 `mesh_remove_spikes=false` 可用于关闭相应 API 级步骤。

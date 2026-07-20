@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <random>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1102,17 +1103,11 @@ void reconstruct_mesh(MvsScene& scene, const DensifyOptions& options) {
         return;
     }
     if (options.mesh_method == MeshMethod::delaunay_cut) {
-        try {
-            if (!detail::reconstruct_mesh_global_cgal(scene, options)) {
-                core::Logger::instance().warning(
-                    "mvs global delaunay unavailable/empty; fallback projective");
-                reconstruct_mesh_projective(scene, options);
-            }
-        } catch (const std::exception& ex) {
-            core::Logger::instance().warning(
-                "mvs delaunay_cut failed: ", ex.what(), "; fallback projective");
-            reconstruct_mesh_projective(scene, options);
-        }
+        if (!detail::reconstruct_mesh_global_cgal(scene, options))
+            throw std::runtime_error(
+                "Global Delaunay meshing is unavailable or produced no "
+                "surface. Install CGAL or explicitly select projective "
+                "meshing for preview.");
     } else {
         reconstruct_mesh_projective(scene, options);
     }

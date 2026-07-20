@@ -163,7 +163,235 @@ void remove_small_components(
     faces = std::move(kept);
 }
 
-unsigned close_small_holes(Mesh& mesh, const unsigned maximum_edges) {
+float percentile_edge_length(
+    const Mesh& mesh, const std::vector<Eigen::Vector3i>& faces,
+    const unsigned percentile) {
+    std::vector<float> lengths;
+    lengths.reserve(faces.size() * 3);
+    for (const Eigen::Vector3i& face : faces) {
+        for (int slot = 0; slot < 3; ++slot) {
+            const Vec3f edge =
+                mesh.vertices[static_cast<std::size_t>(face[slot])] -
+                mesh.vertices[static_cast<std::size_t>(face[(slot + 1) % 3])];
+            if (edge.allFinite() && edge.squaredNorm() > 0.F)
+                lengths.push_back(edge.norm());
+        }
+    }
+    if (lengths.empty()) return 0.F;
+    const std::size_t index = std::min(
+        lengths.size() - 1,
+        lengths.size() * static_cast<std::size_t>(percentile) / 100);
+    std::nth_element(
+        lengths.begin(), lengths.begin() + static_cast<std::ptrdiff_t>(index),
+        lengths.end());
+    return lengths[index];
+}
+
+void remove_scale_spurious_geometry(
+    Mesh& mesh, const float factor,
+    const std::vector<std::uint8_t>& roi_boundary) {
+    if (!(factor > 0.F) || mesh.faces.empty()) return;
+    const float edge95 = percentile_edge_length(mesh, mesh.faces, 95);
+    if (edge95 > 0.F) {
+        const float maximum_edge = edge95 * factor;
+        std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
+            for (int slot = 0; slot < 3; ++slot) {
+                const int a = face[slot];
+                const int b = face[(slot + 1) % 3];
+                // Never turn an intentional ROI cut into a larger opening.
+                if ((!roi_boundary.empty() &&
+                     roi_boundary[static_cast<std::size_t>(a)]) ||
+                    (!roi_boundary.empty() &&
+                     roi_boundary[static_cast<std::size_t>(b)]))
+                    continue;
+                if ((mesh.vertices[static_cast<std::size_t>(a)] -
+                     mesh.vertices[static_cast<std::size_t>(b)]).norm() >
+                    maximum_edge)
+                    return true;
+            }
+            return false;
+        });
+    }
+    if (mesh.faces.empty()) return;
+
+    const float edge55 = percentile_edge_length(mesh, mesh.faces, 55);
+    if (!(edge55 > 0.F)) return;
+    const Connectivity connectivity = build_connectivity(mesh.faces);
+    std::vector<int> component(mesh.faces.size(), -1);
+    struct Bounds {
+        Vec3f minimum{Vec3f::Constant(std::numeric_limits<float>::infinity())};
+        Vec3f maximum{Vec3f::Constant(-std::numeric_limits<float>::infinity())};
+        unsigned faces{0};
+        bool touches_roi{false};
+    };
+    std::vector<Bounds> bounds;
+    std::queue<int> queue;
+    for (std::size_t seed = 0; seed < mesh.faces.size(); ++seed) {
+        if (component[seed] >= 0) continue;
+        const int id = static_cast<int>(bounds.size());
+        bounds.emplace_back();
+        component[seed] = id;
+        queue.push(static_cast<int>(seed));
+        while (!queue.empty()) {
+            const int face_id = queue.front();
+            queue.pop();
+            Bounds& box = bounds[static_cast<std::size_t>(id)];
+            ++box.faces;
+            const Eigen::Vector3i& face =
+                mesh.faces[static_cast<std::size_t>(face_id)];
+            for (int slot = 0; slot < 3; ++slot) {
+                const int vertex = face[slot];
+                const Vec3f& point =
+                    mesh.vertices[static_cast<std::size_t>(vertex)];
+                box.minimum = box.minimum.cwiseMin(point);
+                box.maximum = box.maximum.cwiseMax(point);
+                if (!roi_boundary.empty() &&
+                    roi_boundary[static_cast<std::size_t>(vertex)])
+                    box.touches_roi = true;
+            }
+            for (const int adjacent :
+                 connectivity.neighbor[static_cast<std::size_t>(face_id)]) {
+                if (adjacent < 0 ||
+                    component[static_cast<std::size_t>(adjacent)] >= 0)
+                    continue;
+                component[static_cast<std::size_t>(adjacent)] = id;
+                queue.push(adjacent);
+            }
+        }
+    }
+    if (bounds.size() <= 1) return;
+    const auto largest = std::max_element(
+        bounds.begin(), bounds.end(),
+        [](const Bounds& a, const Bounds& b) { return a.faces < b.faces; });
+    const int largest_id = static_cast<int>(largest - bounds.begin());
+    const float minimum_diagonal = edge55 * factor;
+    std::vector<Eigen::Vector3i> kept;
+    kept.reserve(mesh.faces.size());
+    for (std::size_t face = 0; face < mesh.faces.size(); ++face) {
+        const int id = component[face];
+        const Bounds& box = bounds[static_cast<std::size_t>(id)];
+        if (id == largest_id || box.touches_roi ||
+            (box.maximum - box.minimum).norm() >= minimum_diagonal)
+            kept.push_back(mesh.faces[face]);
+    }
+    mesh.faces = std::move(kept);
+}
+
+unsigned remove_spikes(Mesh& mesh, const std::vector<std::uint8_t>& protected_vertices) {
+    unsigned removed = 0;
+    for (unsigned iteration = 0; iteration < 100 && !mesh.faces.empty();
+         ++iteration) {
+        std::vector<unsigned> incidence(mesh.vertices.size(), 0);
+        for (const Eigen::Vector3i& face : mesh.faces)
+            for (int slot = 0; slot < 3; ++slot)
+                ++incidence[static_cast<std::size_t>(face[slot])];
+        std::vector<std::uint8_t> spike(mesh.vertices.size(), 0);
+        unsigned iteration_spikes = 0;
+        for (std::size_t vertex = 0; vertex < incidence.size(); ++vertex) {
+            if (incidence[vertex] > 0 && incidence[vertex] <= 1 &&
+                (protected_vertices.empty() || !protected_vertices[vertex])) {
+                spike[vertex] = 1;
+                ++iteration_spikes;
+            }
+        }
+        if (iteration_spikes == 0) break;
+        std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
+            return spike[static_cast<std::size_t>(face[0])] ||
+                   spike[static_cast<std::size_t>(face[1])] ||
+                   spike[static_cast<std::size_t>(face[2])];
+        });
+        removed += iteration_spikes;
+    }
+    return removed;
+}
+
+unsigned split_bow_tie_vertices(
+    Mesh& mesh, std::vector<std::uint8_t>& protected_vertices) {
+    if (mesh.faces.empty()) return 0;
+    const Connectivity connectivity = build_connectivity(mesh.faces);
+    const std::size_t original_vertices = mesh.vertices.size();
+    std::vector<std::vector<int>> incident(original_vertices);
+    for (std::size_t face = 0; face < mesh.faces.size(); ++face)
+        for (int slot = 0; slot < 3; ++slot)
+            incident[static_cast<std::size_t>(mesh.faces[face][slot])].push_back(
+                static_cast<int>(face));
+
+    std::vector<int> face_to_local(mesh.faces.size(), -1);
+    unsigned split_count = 0;
+    for (std::size_t vertex = 0; vertex < original_vertices; ++vertex) {
+        const std::vector<int>& faces = incident[vertex];
+        if (faces.size() <= 1) continue;
+        std::vector<int> parent(faces.size());
+        for (std::size_t local = 0; local < faces.size(); ++local) {
+            parent[local] = static_cast<int>(local);
+            face_to_local[static_cast<std::size_t>(faces[local])] =
+                static_cast<int>(local);
+        }
+        const auto find = [&](int value) {
+            int root = value;
+            while (parent[static_cast<std::size_t>(root)] != root)
+                root = parent[static_cast<std::size_t>(root)];
+            while (parent[static_cast<std::size_t>(value)] != value) {
+                const int next = parent[static_cast<std::size_t>(value)];
+                parent[static_cast<std::size_t>(value)] = root;
+                value = next;
+            }
+            return root;
+        };
+        const auto unite = [&](int a, int b) {
+            a = find(a);
+            b = find(b);
+            if (a != b) parent[static_cast<std::size_t>(b)] = a;
+        };
+        for (std::size_t local = 0; local < faces.size(); ++local) {
+            const int face_id = faces[local];
+            const Eigen::Vector3i& face =
+                mesh.faces[static_cast<std::size_t>(face_id)];
+            for (int edge_slot = 0; edge_slot < 3; ++edge_slot) {
+                if (face[edge_slot] != static_cast<int>(vertex) &&
+                    face[(edge_slot + 1) % 3] != static_cast<int>(vertex))
+                    continue;
+                const int adjacent = connectivity.neighbor
+                    [static_cast<std::size_t>(face_id)]
+                    [static_cast<std::size_t>(edge_slot)];
+                if (adjacent < 0) continue;
+                const int adjacent_local =
+                    face_to_local[static_cast<std::size_t>(adjacent)];
+                if (adjacent_local >= 0)
+                    unite(static_cast<int>(local), adjacent_local);
+            }
+        }
+
+        const int first_root = find(0);
+        std::unordered_map<int, int> duplicate;
+        for (std::size_t local = 0; local < faces.size(); ++local) {
+            const int root = find(static_cast<int>(local));
+            if (root == first_root) continue;
+            auto [it, inserted] = duplicate.emplace(
+                root, static_cast<int>(mesh.vertices.size()));
+            if (inserted) {
+                mesh.vertices.push_back(mesh.vertices[vertex]);
+                if (mesh.colors.size() == mesh.vertices.size() - 1)
+                    mesh.colors.push_back(mesh.colors[vertex]);
+                if (!protected_vertices.empty())
+                    protected_vertices.push_back(protected_vertices[vertex]);
+                ++split_count;
+            }
+            Eigen::Vector3i& face =
+                mesh.faces[static_cast<std::size_t>(faces[local])];
+            for (int slot = 0; slot < 3; ++slot)
+                if (face[slot] == static_cast<int>(vertex))
+                    face[slot] = it->second;
+        }
+        for (const int face : faces)
+            face_to_local[static_cast<std::size_t>(face)] = -1;
+    }
+    return split_count;
+}
+
+unsigned close_small_holes(
+    Mesh& mesh, const unsigned maximum_edges,
+    const std::vector<std::uint8_t>& protected_vertices = {}) {
     if (maximum_edges < 3 || mesh.faces.empty()) return 0;
     const Connectivity connectivity = build_connectivity(mesh.faces);
     std::vector<std::array<int, 2>> boundary_neighbors(
@@ -219,6 +447,11 @@ unsigned close_small_holes(Mesh& mesh, const unsigned maximum_edges) {
         }
         if (!valid || current != loop.front() || loop.size() < 3 ||
             loop.size() > maximum_edges)
+            continue;
+        if (!protected_vertices.empty() &&
+            std::any_of(loop.begin(), loop.end(), [&](const int vertex) {
+                return protected_vertices[static_cast<std::size_t>(vertex)] != 0;
+            }))
             continue;
 
         Vec3f center = Vec3f::Zero();
@@ -320,7 +553,27 @@ void smooth_mesh(Mesh& mesh, const DensifyOptions& options) {
 void clean_mesh(
     Mesh& mesh, const DensifyOptions& options,
     const OrientedBoundingBox* roi) {
+    std::vector<std::uint8_t> roi_boundary(mesh.vertices.size(), 0);
     if (roi != nullptr && roi->valid) {
+        // Remember vertices on faces cut by the ROI. Boundary loops touching
+        // these vertices are intentional crop contours; other small loops are
+        // reconstruction holes and remain eligible for filling.
+        for (const Eigen::Vector3i& face : mesh.faces) {
+            if (face.minCoeff() < 0 ||
+                face.maxCoeff() >= static_cast<int>(mesh.vertices.size()))
+                continue;
+            std::array<bool, 3> inside{};
+            unsigned inside_count = 0;
+            for (int slot = 0; slot < 3; ++slot) {
+                inside[static_cast<std::size_t>(slot)] = roi->contains(
+                    mesh.vertices[static_cast<std::size_t>(face[slot])]);
+                inside_count += inside[static_cast<std::size_t>(slot)] ? 1U : 0U;
+            }
+            if (inside_count == 0 || inside_count == 3) continue;
+            for (int slot = 0; slot < 3; ++slot)
+                if (inside[static_cast<std::size_t>(slot)])
+                    roi_boundary[static_cast<std::size_t>(face[slot])] = 1;
+        }
         std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
             if (face.minCoeff() < 0 ||
                 face.maxCoeff() >= static_cast<int>(mesh.vertices.size()))
@@ -380,13 +633,21 @@ void clean_mesh(
     }
     mesh.faces = std::move(accepted);
     orient_components(mesh.faces);
+    // The aggressive OpenMVS-style pass targets the closed global cut. A
+    // projective preview is intentionally an open sheet, where iterative
+    // spike removal could peel the surface inward from image boundaries.
+    if (options.mesh_method == MeshMethod::delaunay_cut)
+        remove_scale_spurious_geometry(
+            mesh, options.mesh_spurious_factor, roi_boundary);
     remove_small_components(mesh.faces, options.mesh_min_component_faces);
     orient_components(mesh.faces);
-    // Cropping creates intentional open boundaries. Closing them would cap the
-    // OBB cut and re-introduce tabletop/background geometry.
-    const unsigned holes = roi != nullptr && roi->valid
-        ? 0U
-        : close_small_holes(mesh, options.mesh_close_hole_edges);
+    const unsigned spikes = options.mesh_method == MeshMethod::delaunay_cut &&
+            options.mesh_remove_spikes
+        ? remove_spikes(mesh, roi_boundary)
+        : 0U;
+    const unsigned bow_ties = split_bow_tie_vertices(mesh, roi_boundary);
+    const unsigned holes = close_small_holes(
+        mesh, options.mesh_close_hole_edges, roi_boundary);
     smooth_mesh(mesh, options);
     if (roi != nullptr && roi->valid) {
         std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
@@ -399,7 +660,8 @@ void clean_mesh(
 
     core::Logger::instance().info(
         "mvs mesh clean: faces=", input_faces, " -> ", mesh.faces.size(),
-        " vertices=", mesh.vertices.size(), " holes_closed=", holes);
+        " vertices=", mesh.vertices.size(), " spikes_removed=", spikes,
+        " bow_ties_split=", bow_ties, " holes_closed=", holes);
     stage.finish();
 }
 

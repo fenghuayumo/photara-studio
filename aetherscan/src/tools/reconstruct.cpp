@@ -69,6 +69,7 @@ struct ReconstructCli {
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
     std::uint64_t mesh_max_points{2'000'000};
+    float mesh_dist_insert_px{-1.F};
     unsigned patchmatch_tile_rows{8};
     unsigned patchmatch_concurrent_views{8};
     aetherscan::mvs::DensifyQuality dense_quality{
@@ -173,6 +174,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mesh-method auto|projective|delaunay\n"
               << "               auto uses projective for preview, global Delaunay otherwise\n"
+              << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
@@ -268,6 +270,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh-max-points",
          "Maximum samples inserted into global Delaunay (0 = unlimited)",
          cxxopts::value<std::uint64_t>()->default_value("2000000"))
+        ("mesh-dist-insert-px",
+         "Minimum projection spacing for global Delaunay (-1 = preset)",
+         cxxopts::value<float>()->default_value("-1"))
         ("patchmatch-tile-rows",
          "Rows per CPU PatchMatch scheduling tile",
          cxxopts::value<unsigned>()->default_value("8"))
@@ -351,6 +356,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
     cli.mesh_method = result["mesh-method"].as<std::string>();
     cli.mesh_max_points = result["mesh-max-points"].as<std::uint64_t>();
+    cli.mesh_dist_insert_px =
+        result["mesh-dist-insert-px"].as<float>();
     cli.patchmatch_tile_rows =
         result["patchmatch-tile-rows"].as<unsigned>();
     cli.patchmatch_concurrent_views =
@@ -407,6 +414,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.patchmatch_concurrent_views == 0)
         throw std::invalid_argument(
             "--patchmatch-concurrent-views must be positive");
+    if (cli.mesh_dist_insert_px < -1.F || cli.mesh_dist_insert_px > 16.F)
+        throw std::invalid_argument(
+            "--mesh-dist-insert-px must be -1 or in [0,16]");
 
     const auto cache_text = result["cache-dir"].as<std::string>();
     if (!cache_text.empty() && cache_text != "-")
@@ -815,6 +825,9 @@ int main(int argc, char** argv) {
             densify_opts.roi_margin_fraction = cli.roi_margin;
             densify_opts.auto_roi_mask_dilate_px = cli.roi_mask_dilate;
             densify_opts.mesh_max_points = cli.mesh_max_points;
+            if (cli.mesh_dist_insert_px >= 0.F)
+                densify_opts.mesh_dist_insert_px =
+                    cli.mesh_dist_insert_px;
             densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
             densify_opts.patchmatch_concurrent_views =
                 cli.patchmatch_concurrent_views;
@@ -842,6 +855,7 @@ int main(int argc, char** argv) {
                 " patch_views=", densify_opts.min_patch_views,
                 " filter_views=", densify_opts.min_views_filter,
                 " fuse_views=", densify_opts.min_views_fuse,
+                " mesh_dist_insert_px=", densify_opts.mesh_dist_insert_px,
                 " tile_rows=", densify_opts.patchmatch_tile_rows,
                 " concurrent_views=",
                 densify_opts.patchmatch_concurrent_views,

@@ -155,6 +155,7 @@ LightGlue，并用更严格的几何阈值接纳救援边。
   --cache-dir cache `
   --dense --mesh `
   --mesh-method auto `
+  --mesh-dist-insert-px 1.25 `
   --dense-quality default  # preview | default | high
 ```
 

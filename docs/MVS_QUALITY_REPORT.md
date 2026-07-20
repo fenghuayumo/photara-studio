@@ -135,3 +135,36 @@ plane/circumsphere quality 和长边拒绝全部纳入后，封片消失。`antm
 相连的桌面，这是输入没有前景 mask/ROI 的预期结果，不应由 Clean 猜测删除。
 
 回归产物位于 `_mvs_next/antman_delaunay_v2/`，包括 PLY、日志和最大连通分量预览图。
+
+## ori_img 全局 mesh 与 OpenMVS 对照（2026-07-20）
+
+使用 76 张 `ori_img`、自动 ROI、default 稠密质量和 `mesh_max_points=500000`。本次
+AetherScan 与 OpenMVS 使用同一套 SfM 相机，但采样数和裁切范围不同，因此拓扑统计用于
+判断碎片/破洞趋势，不作为 accuracy/completeness 真值评测。
+
+### 性能
+
+| 阶段 | 旧 AetherScan | 当前 AetherScan |
+|---|---:|---:|
+| visibility（约 160 万 ray） | 串行实测约 2036 s | 0.91 s，32 线程 |
+| max-flow（约 63.5 万 cell） | 51155 s（约 14.2 h） | 2.59 s |
+| global Delaunay + cut | 不可交互 | 6.99 s |
+| Clean | 0.07 s，ROI 时不补洞 | 0.10 s，15 spikes / 19 holes |
+
+max-flow 从自研通用 push-relabel 切换为 Boost Boykov-Kolmogorov；这是本轮从「能跑」到
+「产品可用」的主要性能变化。完整两阶段 ROI MVS 本次为 156.8 s，峰值工作集 3.45 GiB。
+
+### 拓扑
+
+| 输出 | 顶点 | 面 | 连通分量 | 最大分量 | 边界边 | 边界环 | 绕向一致 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 旧 projective preview | 646456 | 1118653 | 258 | 94.28% | 202815 | 13544 | 否 |
+| 当前 global + Clean | 42918 | 85568 | 1 | 100% | 304 | 11 | 是 |
+| OpenMVS full | 401111 | 802140 | 1 | 100% | 136 | 1 | 是 |
+
+当前全局结果已经消除 258 个局部 sheet/碎片和绕向冲突，非流形边为 0。实测剩余 11 个
+边界环中有 4 个小环暴露了 bow-tie 顶点问题，因此 Clean 随后增加了 one-ring fan 拆分并
+加入「双四面体共享顶点、两个孔独立关闭」的回归测试。尚未解决的主要差距转为几何分辨率：
+500k 候选经投影过滤后仅插入约 99k 顶点，输出 85k 面，明显低于 OpenMVS 的 802k 面。
+下一轮应优先评估 `mesh_dist_insert_px`、采样上限与局部 refine/remesh，而不是回到
+projective 拼片或无约束增大补洞阈值。
