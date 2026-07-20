@@ -83,49 +83,9 @@ using ImagePyramids = std::vector<std::vector<ScaledView>>;
 
 struct PatchRef {
     float texels[k_texels]{};
-    float weights[k_texels]{};
-    float sum_weights{0.F};
     float norm_sq{0.F};
     Vec3f x0{Vec3f::Zero()};
 };
-
-[[nodiscard]] const std::array<float, 1025>& color_weight_lut() {
-    static const std::array<float, 1025> table = [] {
-        std::array<float, 1025> values{};
-        constexpr float inverse_two_sigma_squared = 1.F / (2.F * 0.1F * 0.1F);
-        for (std::size_t i = 0; i < values.size(); ++i) {
-            const float delta = static_cast<float>(i) /
-                                static_cast<float>(values.size() - 1);
-            values[i] = std::exp(-delta * delta * inverse_two_sigma_squared);
-        }
-        return values;
-    }();
-    return table;
-}
-
-[[nodiscard]] const std::array<float, k_texels>& spatial_patch_weights() {
-    static const std::array<float, k_texels> weights = [] {
-        std::array<float, k_texels> values{};
-        constexpr float sigma = static_cast<float>(k_half_window - 1);
-        constexpr float inverse_two_sigma_squared = 1.F / (2.F * sigma * sigma);
-        int index = 0;
-        for (int dy = -k_half_window; dy <= k_half_window; dy += k_step)
-            for (int dx = -k_half_window; dx <= k_half_window; dx += k_step)
-                values[static_cast<std::size_t>(index++)] = std::exp(
-                    -static_cast<float>(dx * dx + dy * dy) *
-                    inverse_two_sigma_squared);
-        return values;
-    }();
-    return weights;
-}
-
-[[nodiscard]] float color_patch_weight(const float delta) {
-    const auto& table = color_weight_lut();
-    const std::size_t index = static_cast<std::size_t>(std::lround(
-        std::clamp(std::abs(delta), 0.F, 1.F) *
-        static_cast<float>(table.size() - 1)));
-    return table[index];
-}
 
 [[nodiscard]] ScaledView make_scaled(
     const MvsView& view, const detail::ViewImage& image, const unsigned scale_div) {
@@ -237,53 +197,37 @@ void run_view_tile_batches(
 }
 
 [[nodiscard]] bool fill_patch(
-    const ScaledView& view, const int x, const int y, PatchRef& patch,
-    const float minimum_texture_magnitude,
-    const bool has_low_resolution_prior) {
+    const ScaledView& view, const int x, const int y, PatchRef& patch) {
     if (x < k_half_window || y < k_half_window ||
         x + k_half_window >= static_cast<int>(view.width) ||
         y + k_half_window >= static_cast<int>(view.height))
         return false;
     if (!view.foreground(x, y)) return false;
-    float weighted_sum = 0.F;
+    float sum = 0.F;
     int n = 0;
     int foreground_texels = 0;
     const auto& pixels = view.gray_pixels();
-    const float center =
-        pixels[static_cast<std::size_t>(y) * view.width +
-               static_cast<std::size_t>(x)];
-    const auto& spatial_weights = spatial_patch_weights();
     for (int dy = -k_half_window; dy <= k_half_window; dy += k_step) {
         for (int dx = -k_half_window; dx <= k_half_window; dx += k_step) {
             const float v = pixels
                 [static_cast<std::size_t>(y + dy) * view.width +
                  static_cast<std::size_t>(x + dx)];
             patch.texels[n++] = v;
-            const float weight =
-                spatial_weights[static_cast<std::size_t>(n - 1)] *
-                color_patch_weight(v - center);
-            patch.weights[n - 1] = weight;
-            patch.sum_weights += weight;
-            weighted_sum += v * weight;
+            sum += v;
             foreground_texels += view.foreground(x + dx, y + dy) ? 1 : 0;
         }
     }
     if (foreground_texels < k_texels * 4 / 5) return false;
-    if (!(patch.sum_weights > 1e-6F)) return false;
-    const float mean = weighted_sum / patch.sum_weights;
+    const float mean = sum / static_cast<float>(k_texels);
     patch.norm_sq = 0.F;
     for (int i = 0; i < k_texels; ++i) {
-        const float centered = patch.texels[i] - mean;
-        patch.texels[i] = patch.weights[i] * centered;
-        patch.norm_sq += patch.weights[i] * centered * centered;
+        patch.texels[i] -= mean;
+        patch.norm_sq += patch.texels[i] * patch.texels[i];
     }
     // Near-constant patches have arbitrary NCC optima and create large sheets
     // of random depth. Keep a deliberately low floor so weakly textured
     // surfaces still pass while flat/no-data regions do not.
-    const float minimum_norm =
-        minimum_texture_magnitude * minimum_texture_magnitude;
-    if (patch.norm_sq < minimum_norm && !has_low_resolution_prior)
-        return false;
+    if (patch.norm_sq < 2.5e-4F) return false;
     patch.x0 = {(static_cast<float>(x) - view.cx) / view.fx,
                 (static_cast<float>(y) - view.cy) / view.fy, 1.F};
     return true;
@@ -334,14 +278,13 @@ void run_view_tile_batches(
                     source_pixels, src.width, src.height, source_x, source_y,
                     sample))
                 return robust;
-            const float weight = patch.weights[n];
-            sum += sample * weight;
-            sum_sq += sample * sample * weight;
+            sum += sample;
+            sum_sq += sample * sample;
             num += patch.texels[n++] * sample;
         }
     }
-    const float norm_sq1 =
-        sum_sq - sum * sum / std::max(patch.sum_weights, 1e-6F);
+    const float mean = sum / static_cast<float>(k_texels);
+    const float norm_sq1 = sum_sq - static_cast<float>(k_texels) * mean * mean;
     const float nrm = patch.norm_sq * norm_sq1;
     if (nrm <= 1e-16F) return robust;
     const float ncc = std::clamp(num / std::sqrt(nrm), -1.F, 1.F);
@@ -420,8 +363,7 @@ void run_view_tile_batches(
     const float depth,
     const Vec3f& normal, const float robust, const bool use_geo,
     const float geo_weight, const unsigned min_patch_views,
-    const OrientedBoundingBox* roi, const float low_resolution_depth,
-    const float low_texture_prior_magnitude) {
+    const OrientedBoundingBox* roi) {
     if (roi != nullptr && roi->valid) {
         const Vec3f camera = ref.unproject(
             static_cast<float>(x), static_cast<float>(y), depth);
@@ -460,19 +402,7 @@ void run_view_tile_batches(
     }
     float sum = 0.F;
     for (std::size_t i = 0; i < required; ++i) sum += scores[i];
-    float score = sum / static_cast<float>(required);
-    const float prior_threshold =
-        low_texture_prior_magnitude * low_texture_prior_magnitude;
-    if (low_resolution_depth > 0.F && patch.norm_sq < prior_threshold) {
-        const float relative_depth = std::min(
-            std::abs(low_resolution_depth - depth) /
-                std::max(low_resolution_depth, depth),
-            0.5F);
-        const float prior_weight = std::exp(-patch.norm_sq / 0.02F);
-        score = (1.F - prior_weight) * score +
-                prior_weight * relative_depth;
-    }
-    return score;
+    return sum / static_cast<float>(required);
 }
 
 [[nodiscard]] Vec3f random_normal(std::mt19937& rng, const Vec3f& x0) {
@@ -530,8 +460,7 @@ void run_patchmatch_level(
     const std::vector<const DepthMap*>& neighbor_depths,
     const float d_min, const float d_max, const DensifyOptions& options,
     const unsigned random_seed, const unsigned threads, const bool use_geo,
-    const bool initialize_invalid, const OrientedBoundingBox* roi,
-    const std::vector<float>* low_resolution_prior) {
+    const bool initialize_invalid, const OrientedBoundingBox* roi) {
     DepthMap& dm = ref.depth;
     std::vector<SourceContext> sources;
     sources.reserve(neighbors.size());
@@ -567,16 +496,9 @@ void run_patchmatch_level(
                 for (std::uint32_t x = 0; x < ref.width; ++x) {
                     const std::size_t idx =
                         dm.index(static_cast<int>(x), static_cast<int>(y));
-                    const float prior_depth =
-                        low_resolution_prior != nullptr &&
-                                idx < low_resolution_prior->size()
-                            ? (*low_resolution_prior)[idx]
-                            : 0.F;
                     PatchRef patch;
                     if (!fill_patch(
-                            ref, static_cast<int>(x), static_cast<int>(y), patch,
-                            options.descriptor_min_magnitude,
-                            prior_depth > 0.F)) {
+                            ref, static_cast<int>(x), static_cast<int>(y), patch)) {
                         dm.depth[idx] = 0.F;
                         continue;
                     }
@@ -595,8 +517,7 @@ void run_patchmatch_level(
                         patch, static_cast<int>(x), static_cast<int>(y), ref,
                         ref_pose, sources, dm.depth[idx], dm.normal[idx], robust,
                         use_geo, options.geometric_weight,
-                        options.min_patch_views, roi, prior_depth,
-                        options.low_texture_prior_magnitude);
+                        options.min_patch_views, roi);
                 }
             }
         });
@@ -628,17 +549,8 @@ void run_patchmatch_level(
                                 continue;
                             const std::size_t idx = dm.index(x, y);
                             if (dm.depth[idx] <= 0.F) continue;
-                            const float prior_depth =
-                                low_resolution_prior != nullptr &&
-                                        idx < low_resolution_prior->size()
-                                    ? (*low_resolution_prior)[idx]
-                                    : 0.F;
                             PatchRef patch;
-                            if (!fill_patch(
-                                    ref, x, y, patch,
-                                    options.descriptor_min_magnitude,
-                                    prior_depth > 0.F))
-                                continue;
+                            if (!fill_patch(ref, x, y, patch)) continue;
 
                             float best_depth = dm.depth[idx];
                             Vec3f best_normal = dm.normal[idx];
@@ -670,8 +582,7 @@ void run_patchmatch_level(
                                     patch, x, y, ref, ref_pose, sources,
                                     candidate_depth, normal, robust, use_geo,
                                     options.geometric_weight,
-                                    options.min_patch_views, roi, prior_depth,
-                                    options.low_texture_prior_magnitude);
+                                    options.min_patch_views, roi);
                                 if (confidence < best_conf) {
                                     best_conf = confidence;
                                     best_depth = candidate_depth;
@@ -694,8 +605,7 @@ void run_patchmatch_level(
                                     patch, x, y, ref, ref_pose, sources,
                                     candidate_depth, candidate_normal, robust,
                                     use_geo, options.geometric_weight,
-                                    options.min_patch_views, roi, prior_depth,
-                                    options.low_texture_prior_magnitude);
+                                    options.min_patch_views, roi);
                                 if (confidence < best_conf) {
                                     best_conf = confidence;
                                     best_depth = candidate_depth;
@@ -812,14 +722,11 @@ void estimate_one_view_photometric(
             scaled.depth.resize(scaled.width, scaled.height);
             upsample_depth(current.depth, scaled.depth);
         }
-        const std::vector<float> low_resolution_prior =
-            level > 0 ? scaled.depth.depth : std::vector<float>{};
 
         run_patchmatch_level(
             scaled, view.pose, neighbors, neighbor_poses, neighbor_depths, d_min,
             d_max, options, random_seed ^ level * 0x9E3779B9u, threads, false,
-            true, scene.roi.valid ? &scene.roi : nullptr,
-            low_resolution_prior.empty() ? nullptr : &low_resolution_prior);
+            true, scene.roi.valid ? &scene.roi : nullptr);
         current = std::move(scaled);
     }
 
@@ -859,7 +766,7 @@ void refine_one_view_geometric(
     run_patchmatch_level(
         ref, view.pose, neighbors, neighbor_poses, neighbor_depths,
         view.depth_map.depth_min, view.depth_map.depth_max, options, random_seed,
-        threads, true, false, scene.roi.valid ? &scene.roi : nullptr, nullptr);
+        threads, true, false, scene.roi.valid ? &scene.roi : nullptr);
 
     view.depth_map = std::move(ref.depth);
     for (std::size_t i = 0; i < view.depth_map.depth.size(); ++i) {

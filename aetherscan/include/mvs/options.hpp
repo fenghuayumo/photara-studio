@@ -68,11 +68,6 @@ struct DensifyOptions {
     // Maximum aggregated 1-ZNCC cost. 0.9 accepted essentially unrelated
     // patches and was the main source of floating geometry in the old path.
     float ncc_keep_threshold{0.45F};
-    // Bilateral weighted-NCC texture floor. Patches below this magnitude are
-    // rejected unless a valid coarser-level depth can stabilize them.
-    float descriptor_min_magnitude{0.02F};
-    // Coarse-to-fine depth prior is blended only below this texture magnitude.
-    float low_texture_prior_magnitude{0.05F};
     // Minimum shared sparse points for a neighbor candidate.
     unsigned min_shared_points{3};
     // Fusion: minimum agreeing views.
