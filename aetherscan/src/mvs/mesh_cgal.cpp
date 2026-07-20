@@ -252,11 +252,10 @@ float plane_sphere_angle(
     const Delaunay& triangulation, const CellHandle& cell, const int opposite) {
     if (triangulation.is_infinite(cell)) return 1.F;
     std::array<Vec3f, 3> triangle{};
-    int cursor = 0;
-    for (int i = 0; i < 4; ++i)
-        if (i != opposite)
-            triangle[static_cast<std::size_t>(cursor++)] =
-                to_vec(cell->vertex(i)->point());
+    const std::array<int, 3> oriented =
+        oriented_tetrahedron_facet_vertices(opposite);
+    for (std::size_t i = 0; i < oriented.size(); ++i)
+        triangle[i] = to_vec(cell->vertex(oriented[i])->point());
     const Vec3f normal =
         (triangle[1] - triangle[0]).cross(triangle[2] - triangle[0]);
     if (normal.squaredNorm() <= 1e-20F) return 0.5F;

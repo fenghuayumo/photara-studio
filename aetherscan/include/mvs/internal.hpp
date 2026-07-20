@@ -4,6 +4,7 @@
 #include "mvs/types.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -32,6 +33,35 @@ bool reconstruct_mesh_global_cgal(
 void clean_mesh(
     Mesh& mesh, const DensifyOptions& options,
     const OrientedBoundingBox* roi = nullptr);
+
+// CGAL orients a tetrahedron facet according to the index of its opposite
+// vertex. Keeping that orientation is important for the signed
+// plane/circumsphere angle used by the Delaunay graph-cut regularizer.
+[[nodiscard]] constexpr std::array<int, 3>
+oriented_tetrahedron_facet_vertices(const int opposite) noexcept {
+    return (opposite & 1) == 0
+        ? std::array<int, 3>{
+              (opposite + 2) & 3, (opposite + 1) & 3,
+              (opposite + 3) & 3}
+        : std::array<int, 3>{
+              (opposite + 1) & 3, (opposite + 2) & 3,
+              (opposite + 3) & 3};
+}
+
+struct DepthEvidence {
+    float positive_confidence{0.F};
+    float negative_confidence{0.F};
+    unsigned supporting_views{0};
+    unsigned conflicting_views{0};
+};
+
+// OpenMVS AdjustConfidence accepts a depth only when it has enough agreeing
+// views and their confidence outweighs occlusion/free-space conflicts.
+[[nodiscard]] inline bool accepts_depth_evidence(
+    const DepthEvidence& evidence, const unsigned minimum_support) noexcept {
+    return evidence.supporting_views >= minimum_support &&
+           evidence.positive_confidence > evidence.negative_confidence;
+}
 
 [[nodiscard]] inline bool sample_gray(
     const std::vector<float>& image, const std::uint32_t width,

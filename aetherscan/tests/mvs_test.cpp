@@ -385,6 +385,34 @@ void test_scalable_maxflow_cut() {
     }
 }
 
+void test_openmvs_energy_conventions() {
+    const std::array<std::array<int, 3>, 4> expected{
+        std::array<int, 3>{2, 1, 3}, std::array<int, 3>{2, 3, 0},
+        std::array<int, 3>{0, 3, 1}, std::array<int, 3>{0, 1, 2}};
+    for (int opposite = 0; opposite < 4; ++opposite) {
+        require(
+            detail::oriented_tetrahedron_facet_vertices(opposite) ==
+                expected[static_cast<std::size_t>(opposite)],
+            "Delaunay facet orientation differs from CGAL/OpenMVS");
+    }
+
+    detail::DepthEvidence evidence;
+    evidence.positive_confidence = 1.F;
+    evidence.negative_confidence = 1.1F;
+    evidence.supporting_views = 2;
+    evidence.conflicting_views = 1;
+    require(
+        !detail::accepts_depth_evidence(evidence, 1),
+        "free-space conflict did not outweigh positive depth evidence");
+    evidence.positive_confidence = 1.2F;
+    require(
+        detail::accepts_depth_evidence(evidence, 2),
+        "consistent depth evidence was rejected");
+    require(
+        !detail::accepts_depth_evidence(evidence, 3),
+        "depth evidence ignored the minimum support count");
+}
+
 void test_mesh_clean() {
     Mesh mesh;
     mesh.vertices = {
@@ -559,6 +587,7 @@ int main() {
         test_missing_cgal_fails_before_densify();
 #endif
         test_scalable_maxflow_cut();
+        test_openmvs_energy_conventions();
         test_mesh_clean();
         test_roi_aware_mesh_clean();
         test_bow_tie_holes_are_split_and_closed();
