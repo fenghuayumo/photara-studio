@@ -168,14 +168,23 @@ struct Accumulator {
     float weight{0.F};
     float color_weight{0.F};
     std::array<Index, 32> views{};
+    std::array<float, 32> view_weights{};
     std::uint8_t view_count{0};
 };
 
-void add_view(Accumulator& accumulator, const Index view) {
-    for (std::uint8_t i = 0; i < accumulator.view_count; ++i)
-        if (accumulator.views[i] == view) return;
-    if (accumulator.view_count < accumulator.views.size())
-        accumulator.views[accumulator.view_count++] = view;
+void add_view(
+    Accumulator& accumulator, const Index view, const float weight) {
+    if (!(weight > 0.F) || !std::isfinite(weight)) return;
+    for (std::uint8_t i = 0; i < accumulator.view_count; ++i) {
+        if (accumulator.views[i] != view) continue;
+        accumulator.view_weights[i] += weight;
+        return;
+    }
+    if (accumulator.view_count < accumulator.views.size()) {
+        const std::uint8_t index = accumulator.view_count++;
+        accumulator.views[index] = view;
+        accumulator.view_weights[index] = weight;
+    }
 }
 
 void merge_accumulator(Accumulator& target, const Accumulator& source) {
@@ -185,7 +194,7 @@ void merge_accumulator(Accumulator& target, const Accumulator& source) {
     target.weight += source.weight;
     target.color_weight += source.color_weight;
     for (std::uint8_t i = 0; i < source.view_count; ++i)
-        add_view(target, source.views[i]);
+        add_view(target, source.views[i], source.view_weights[i]);
 }
 
 }  // namespace
@@ -462,7 +471,8 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                             options.depth_diff_threshold * 0.75F))
                         continue;
                     const std::size_t sample = ordered[i].second;
-                    add_view(accumulator, view_ids[sample]);
+                    add_view(
+                        accumulator, view_ids[sample], weights[sample]);
                     if (has_color[sample]) {
                         accumulator.color +=
                             color_samples[sample] * weights[sample];
@@ -496,6 +506,9 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
         point.views.assign(
             accumulator.views.begin(),
             accumulator.views.begin() + accumulator.view_count);
+        point.view_weights.assign(
+            accumulator.view_weights.begin(),
+            accumulator.view_weights.begin() + accumulator.view_count);
         scene.dense_cloud.points.push_back(std::move(point));
     }
 

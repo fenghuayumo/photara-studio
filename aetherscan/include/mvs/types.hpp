@@ -61,6 +61,9 @@ struct DensePoint {
     Vec3f color{Vec3f::Zero()};  // RGB in [0, 1]
     float weight{0.F};
     std::vector<Index> views;
+    // Confidence contributed by each entry in views. Older/imported clouds may
+    // leave this empty, in which case consumers derive uniform weights.
+    std::vector<float> view_weights;
 };
 
 struct DenseCloud {

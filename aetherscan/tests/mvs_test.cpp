@@ -87,6 +87,14 @@ void test_parallel_fusion() {
         require(point.position.allFinite(), "fused position is non-finite");
         require(point.normal.allFinite(), "fused normal is non-finite");
         require(point.views.size() >= 2, "fused point lacks multi-view support");
+        require(
+            point.view_weights.size() == point.views.size(),
+            "fused per-view weights are incomplete");
+        require(
+            std::all_of(
+                point.view_weights.begin(), point.view_weights.end(),
+                [](const float weight) { return weight > 0.F; }),
+            "fused per-view weight is not positive");
     }
 }
 
@@ -262,6 +270,9 @@ void test_quality_presets() {
             options.grazing_weight_floor < 0.2F,
         "high preset grazing samples are not softly weighted");
     require(options.mesh_pixel_step == 2, "high preset mesh is too large by default");
+    require(
+        std::abs(options.mesh_k_behind - 1.F) < 1e-6F,
+        "global mesh surface thickness is not one sigma");
     require(
         std::abs(options.mesh_dist_insert_px - 0.75F) < 1e-6F,
         "high preset global mesh spacing is too coarse");

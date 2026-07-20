@@ -118,8 +118,9 @@ struct DensifyOptions {
     // Graph-cut / visibility weights (Jancosek-Pajdla style).
     float mesh_k_sigma{2.F};
     float mesh_k_qual{1.F};
-    // Visibility ray continuation behind a sample, in sigma units.
-    float mesh_k_behind{4.F};
+    // Visibility ray continuation behind a sample, in sigma units. One sigma
+    // is the base surface-thickness model used by the graph-cut energy.
+    float mesh_k_behind{1.F};
     float mesh_k_inf{1.0e6F};
     // Projective meshing samples every Nth depth pixel.
     unsigned mesh_pixel_step{2};

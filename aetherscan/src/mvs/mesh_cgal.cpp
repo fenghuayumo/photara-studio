@@ -51,18 +51,34 @@ std::vector<GlobalVertex> collect_global_vertices(
         vertex.position = point.position;
         vertex.normal = point.normal;
         vertex.color = point.color;
-        for (const Index view : point.views) {
+        const float fallback_weight = std::max(
+            point.weight /
+                static_cast<float>(std::max<std::size_t>(1, point.views.size())),
+            1e-3F);
+        const bool has_view_weights =
+            point.view_weights.size() == point.views.size();
+        for (std::size_t index = 0; index < point.views.size(); ++index) {
+            const Index view = point.views[index];
             if (view >= scene.views.size()) continue;
-            if (std::find(vertex.views.begin(), vertex.views.end(), view) ==
-                vertex.views.end())
+            const float raw_weight = has_view_weights
+                ? point.view_weights[index]
+                : fallback_weight;
+            const float view_weight =
+                std::isfinite(raw_weight) && raw_weight > 0.F
+                ? std::max(raw_weight, 1e-3F)
+                : fallback_weight;
+            const auto existing =
+                std::find(vertex.views.begin(), vertex.views.end(), view);
+            if (existing == vertex.views.end()) {
                 vertex.views.push_back(view);
+                vertex.view_weights.push_back(view_weight);
+            } else {
+                const std::size_t target_index = static_cast<std::size_t>(
+                    existing - vertex.views.begin());
+                vertex.view_weights[target_index] += view_weight;
+            }
         }
         if (vertex.views.empty()) continue;
-        const float view_weight = std::max(
-            point.weight /
-                static_cast<float>(std::max<std::size_t>(1, vertex.views.size())),
-            1e-3F);
-        vertex.view_weights.assign(vertex.views.size(), view_weight);
         vertices.push_back(std::move(vertex));
     }
     if (options.mesh_max_points > 0 &&
@@ -154,8 +170,7 @@ void merge_observations(GlobalVertex& target, const GlobalVertex& source) {
         } else {
             const std::size_t target_index =
                 static_cast<std::size_t>(existing - target.views.begin());
-            target.view_weights[target_index] =
-                std::max(target.view_weights[target_index], weight);
+            target.view_weights[target_index] += weight;
         }
     }
 }
@@ -263,6 +278,32 @@ int neighbor_slot(const CellHandle& from, const CellHandle& to) {
     for (int i = 0; i < 4; ++i)
         if (from->neighbor(i) == to) return i;
     return -1;
+}
+
+float ray_facet_distance(
+    const Delaunay& triangulation, const CellHandle& cell,
+    const int opposite_vertex, const Vec3f& point,
+    const Vec3f& unit_direction, const Vec3f& fallback_center) {
+    if (opposite_vertex < 0 || opposite_vertex >= 4) return 0.F;
+    std::array<Vec3f, 3> triangle;
+    int index = 0;
+    for (int vertex = 0; vertex < 4; ++vertex) {
+        if (vertex == opposite_vertex) continue;
+        if (triangulation.is_infinite(cell->vertex(vertex)))
+            return (fallback_center - point).norm();
+        triangle[static_cast<std::size_t>(index++)] =
+            to_vec(cell->vertex(vertex)->point());
+    }
+    const Vec3f normal =
+        (triangle[1] - triangle[0]).cross(triangle[2] - triangle[0]);
+    const float denominator = std::abs(normal.dot(unit_direction));
+    if (!(denominator > 1e-12F) || !std::isfinite(denominator))
+        return (fallback_center - point).norm();
+    const float distance =
+        std::abs(normal.dot(point - triangle[0])) / denominator;
+    return std::isfinite(distance)
+        ? distance
+        : (fallback_center - point).norm();
 }
 
 float estimate_sigma(const Delaunay& triangulation, const float multiplier) {
@@ -408,10 +449,10 @@ bool extract_surface(
                         const int facet = neighbor_slot(previous, cell);
                         if (facet >= 0) {
                             const int node = previous->info().node;
-                            const float distance =
-                                (cell_centers[static_cast<std::size_t>(node)] -
-                                 point)
-                                    .norm();
+                            const float distance = ray_facet_distance(
+                                triangulation, previous, facet, point,
+                                direction,
+                                cell_centers[static_cast<std::size_t>(node)]);
                             add_weight(
                                 local, node, static_cast<std::uint64_t>(facet),
                                 alpha *
@@ -444,10 +485,9 @@ bool extract_surface(
                         const int facet = neighbor_slot(cell, previous);
                         if (facet >= 0) {
                             const int node = cell->info().node;
-                            const float distance =
-                                (cell_centers[static_cast<std::size_t>(node)] -
-                                 point)
-                                    .norm();
+                            const float distance = ray_facet_distance(
+                                triangulation, cell, facet, point, direction,
+                                cell_centers[static_cast<std::size_t>(node)]);
                             add_weight(
                                 local, node, static_cast<std::uint64_t>(facet),
                                 alpha *
