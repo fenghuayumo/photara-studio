@@ -194,9 +194,12 @@ PatchMatch 已实现以下 CPU 路径：
 2. 构建 3D Delaunay，有限和无限 cell 都进入图；无限 cell 与相机所在 cell 连接 source；
 3. 对 camera→sample 与 sample 后方的线段累计有向 facet visibility weight，质量项使用
    facet plane / circumsphere angle（与 OpenMVS 同类能量）；
-4. 用无递归 FIFO push-relabel 求 s-t cut，避免百万 cell 图上的递归栈风险；
-5. 提取 inside/outside 分界面，并拒绝相对中位 Delaunay 边过长的跨空洞三角形；
-6. backend-independent Clean 删除非法、重复、退化和非流形面，统一连通分量朝向，删除小岛，
+4. 按 OpenMVS `DELAUNAY_WEAKSURF` 计算 cell 的 incoming free-space support；沿表面前后
+   `3σ/4σ` 区间得到 beta/gamma，并对通过相对差、绝对差和 outlier 检测的 endpoint cell
+   强化 sink t-edge。融合权重先用确定性射线样本归一化到 OpenMVS 的绝对能量尺度；
+5. 用无递归 FIFO push-relabel 求 s-t cut，避免百万 cell 图上的递归栈风险；
+6. 提取 inside/outside 分界面，并拒绝相对中位 Delaunay 边过长的跨空洞三角形；
+7. backend-independent Clean 删除非法、重复、退化和非流形面，统一连通分量朝向，删除小岛，
    封闭小边界环，可选 boundary-preserving smoothing，最后压缩顶点并重算法线。
 
 构建时使用标准 `find_package(CGAL QUIET)`。有 CGAL 时，CLI 的 `--mesh-method auto` 在
@@ -210,7 +213,17 @@ PatchMatch 已实现以下 CPU 路径：
 --patchmatch-concurrent-views 8
 --mesh-method auto|projective|delaunay
 --mesh-max-points 2000000       # 0 表示不设上限
+--mesh-free-space-support true  # OpenMVS weak-surface beta/gamma 强化
+--mesh-free-space-quantile 0.95 # 融合权重到 OpenMVS 能量尺度的校准分位数
 ```
+
+后续几何处理顺序固定为：`Delaunay cut → Clean/manifold → photometric mesh refinement
+→ 可选交付级简化/重拓扑 → UV/贴图`。photometric refinement 前不默认简化，否则会先丢失
+其需要优化的小尺度自由度。当前工程只链接 `asdiff::render`，并显式设置
+`ASDIFF_BUILD_MESH_TOOLS=OFF`；因此 asdiff_render 中 `asdiff::mesh` 提供的
+`remesh_field_aligned` 和 `repair_and_decimate` 尚未进入 AetherScan 调用链。未来接入时，
+默认仅在 refinement 之后调用保边界的 `repair_and_decimate`；Instant Meshes 重拓扑作为
+显式 retopo 模式，不作为高质量扫描默认步骤。
 
 ---
 

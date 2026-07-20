@@ -121,6 +121,21 @@ struct DensifyOptions {
     // Visibility ray continuation behind a sample, in sigma units. One sigma
     // is the base surface-thickness model used by the graph-cut energy.
     float mesh_k_behind{1.F};
+    // OpenMVS/Jancosek-Pajdla weak-surface reinforcement. A second local
+    // traversal compares free-space support before (beta) and behind (gamma)
+    // every observed sample. A strong beta/gamma discontinuity multiplies
+    // the endpoint cell's sink t-edge, preserving weak but coherent sheets.
+    bool mesh_use_free_space_support{true};
+    float mesh_k_free_space_front{3.F};
+    float mesh_k_free_space_back{4.F};
+    float mesh_k_free_space_rel{0.1F};
+    float mesh_k_free_space_abs{1000.F};
+    float mesh_k_free_space_outlier{400.F};
+    // AetherScan's fused visibility weights do not share OpenMVS's absolute
+    // confidence scale. Map this quantile of ratio-qualified beta-gamma
+    // samples onto mesh_k_free_space_abs before applying the OpenMVS test.
+    // Set to zero to use the literal OpenMVS absolute scale.
+    float mesh_k_free_space_calibration_quantile{0.95F};
     float mesh_k_inf{1.0e6F};
     // Projective meshing samples every Nth depth pixel.
     unsigned mesh_pixel_step{2};

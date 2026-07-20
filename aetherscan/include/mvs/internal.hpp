@@ -63,6 +63,34 @@ struct DepthEvidence {
            evidence.positive_confidence > evidence.negative_confidence;
 }
 
+// Return the OpenMVS weak-surface sink multiplier, or zero when beta/gamma do
+// not identify a sufficiently strong free-space discontinuity.
+[[nodiscard]] inline float weak_surface_sink_multiplier(
+    const float beta, const float gamma,
+    const DensifyOptions& options) noexcept {
+    if (!(beta > 0.F) || !std::isfinite(beta) || !std::isfinite(gamma) ||
+        gamma < 0.F)
+        return 0.F;
+    const float difference = beta - gamma;
+    const float ratio = gamma / beta;
+    return ratio < options.mesh_k_free_space_rel &&
+                   difference > options.mesh_k_free_space_abs &&
+                   gamma < options.mesh_k_free_space_outlier
+        ? difference
+        : 0.F;
+}
+
+[[nodiscard]] inline float weak_surface_support_scale(
+    const float calibration_difference,
+    const DensifyOptions& options) noexcept {
+    if (!(calibration_difference > 0.F) ||
+        !(options.mesh_k_free_space_abs > 0.F) ||
+        !std::isfinite(calibration_difference))
+        return 1.F;
+    return std::max(
+        1.F, calibration_difference / options.mesh_k_free_space_abs);
+}
+
 [[nodiscard]] inline bool sample_gray(
     const std::vector<float>& image, const std::uint32_t width,
     const std::uint32_t height, const float x, const float y, float& value) {

@@ -70,6 +70,8 @@ struct ReconstructCli {
     std::string mesh_method{"auto"};
     std::uint64_t mesh_max_points{2'000'000};
     float mesh_dist_insert_px{-1.F};
+    bool mesh_free_space_support{true};
+    float mesh_free_space_quantile{0.95F};
     unsigned patchmatch_tile_rows{8};
     unsigned patchmatch_concurrent_views{8};
     aetherscan::mvs::DensifyQuality dense_quality{
@@ -175,6 +177,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-method auto|projective|delaunay\n"
               << "               auto uses projective for preview, global Delaunay otherwise\n"
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
+              << "  --mesh-free-space-support BOOL  weak-surface beta/gamma cut\n"
+              << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
@@ -273,6 +277,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh-dist-insert-px",
          "Minimum projection spacing for global Delaunay (-1 = preset)",
          cxxopts::value<float>()->default_value("-1"))
+        ("mesh-free-space-support",
+         "OpenMVS weak-surface beta/gamma sink reinforcement",
+         cxxopts::value<bool>()->default_value("true"))
+        ("mesh-free-space-quantile",
+         "Quantile used to calibrate fused support to OpenMVS scale",
+         cxxopts::value<float>()->default_value("0.95"))
         ("patchmatch-tile-rows",
          "Rows per CPU PatchMatch scheduling tile",
          cxxopts::value<unsigned>()->default_value("8"))
@@ -358,6 +368,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.mesh_max_points = result["mesh-max-points"].as<std::uint64_t>();
     cli.mesh_dist_insert_px =
         result["mesh-dist-insert-px"].as<float>();
+    cli.mesh_free_space_support =
+        result["mesh-free-space-support"].as<bool>();
+    cli.mesh_free_space_quantile =
+        result["mesh-free-space-quantile"].as<float>();
     cli.patchmatch_tile_rows =
         result["patchmatch-tile-rows"].as<unsigned>();
     cli.patchmatch_concurrent_views =
@@ -828,6 +842,10 @@ int main(int argc, char** argv) {
             if (cli.mesh_dist_insert_px >= 0.F)
                 densify_opts.mesh_dist_insert_px =
                     cli.mesh_dist_insert_px;
+            densify_opts.mesh_use_free_space_support =
+                cli.mesh_free_space_support;
+            densify_opts.mesh_k_free_space_calibration_quantile =
+                std::clamp(cli.mesh_free_space_quantile, 0.F, 0.999F);
             densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
             densify_opts.patchmatch_concurrent_views =
                 cli.patchmatch_concurrent_views;
@@ -856,6 +874,10 @@ int main(int argc, char** argv) {
                 " filter_views=", densify_opts.min_views_filter,
                 " fuse_views=", densify_opts.min_views_fuse,
                 " mesh_dist_insert_px=", densify_opts.mesh_dist_insert_px,
+                " free_space_support=",
+                densify_opts.mesh_use_free_space_support,
+                " free_space_quantile=",
+                densify_opts.mesh_k_free_space_calibration_quantile,
                 " tile_rows=", densify_opts.patchmatch_tile_rows,
                 " concurrent_views=",
                 densify_opts.patchmatch_concurrent_views,

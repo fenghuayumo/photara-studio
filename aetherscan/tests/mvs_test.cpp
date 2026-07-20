@@ -411,6 +411,32 @@ void test_openmvs_energy_conventions() {
     require(
         !detail::accepts_depth_evidence(evidence, 3),
         "depth evidence ignored the minimum support count");
+
+    DensifyOptions options;
+    require(
+        std::abs(detail::weak_surface_sink_multiplier(1600.F, 100.F, options) -
+                 1500.F) < 1e-5F,
+        "weak-surface beta/gamma evidence was not reinforced");
+    require(
+        detail::weak_surface_sink_multiplier(900.F, 10.F, options) == 0.F,
+        "weak-surface absolute threshold was ignored");
+    require(
+        detail::weak_surface_sink_multiplier(1600.F, 300.F, options) == 0.F,
+        "weak-surface relative threshold was ignored");
+    require(
+        detail::weak_surface_sink_multiplier(6000.F, 500.F, options) == 0.F,
+        "weak-surface outlier threshold was ignored");
+    const float support_scale =
+        detail::weak_surface_support_scale(1'500'000.F, options);
+    require(
+        std::abs(support_scale - 1500.F) < 1e-5F,
+        "weak-surface support calibration did not preserve OpenMVS scale");
+    require(
+        std::abs(detail::weak_surface_sink_multiplier(
+                     2'400'000.F / support_scale,
+                     150'000.F / support_scale, options) -
+                 1500.F) < 1e-5F,
+        "calibrated weak-surface evidence was not reinforced");
 }
 
 void test_mesh_clean() {

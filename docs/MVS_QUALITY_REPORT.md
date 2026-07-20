@@ -168,3 +168,23 @@ max-flow 从自研通用 push-relabel 切换为 Boost Boykov-Kolmogorov；这是
 500k 候选经投影过滤后仅插入约 99k 顶点，输出 85k 面，明显低于 OpenMVS 的 802k 面。
 下一轮应优先评估 `mesh_dist_insert_px`、采样上限与局部 refine/remesh，而不是回到
 projective 拼片或无约束增大补洞阈值。
+
+## DELAUNAY_WEAKSURF 对齐回归（2026-07-20）
+
+在 `ori_img` 的同一 SfM/ROI 配置上，对 OpenMVS weak-surface free-space support、
+beta/gamma 检测和 endpoint sink t-edge 强化做固定输入 A/B。直接使用 OpenMVS 的
+`kAbs=1000` 会在 AetherScan 的融合权重尺度上过度触发：约 58% 的有效射线成为候选，
+并产生明显大三角和孔洞。确定性抽样将 ratio-qualified `beta-gamma` 的 P95 映射到
+OpenMVS 绝对尺度后，候选降到 450,881 / 10,081,895（4.47%）。
+
+| 指标 | weak-surface 关闭 | P95 尺度校准后 |
+|---|---:|---:|
+| 清理后顶点 / 面 | 415144 / 830303 | 412809 / 825643 |
+| 边界边 / 非流形边 | 37 / 0 | 37 / 0 |
+| dense→mesh P50 / P95 | 0.002176 / 0.007384 | 0.002185 / 0.007630 |
+| 法线夹角 P50 / P95 | 19.56° / 53.48° | 19.60° / 54.51° |
+| weak-surface 阶段 | 关闭 | 1.79 s |
+
+该项当前结论是“不再破坏基准拓扑和几何，但尚未证明整体误差下降”。它保留为默认的
+弱表面能量项，并提供 `--mesh-free-space-support=false` 做逐场景 A/B；进入 photometric
+mesh refinement 前仍需在 `antman`、`chuan` 以及有真值的数据集上验证薄片区域。

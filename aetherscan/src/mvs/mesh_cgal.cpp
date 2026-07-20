@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -329,9 +330,35 @@ struct CellAccum {
     std::array<float, 4> facet{};
 };
 
+float free_space_support(
+    const CellHandle& cell, const std::vector<CellAccum>& weights) {
+    if (cell == CellHandle()) return 0.F;
+    float support = 0.F;
+    for (int facet = 0; facet < 4; ++facet) {
+        const CellHandle neighbor = cell->neighbor(facet);
+        const int incoming = neighbor_slot(neighbor, cell);
+        if (incoming < 0) continue;
+        const int node = neighbor->info().node;
+        if (node < 0 || static_cast<std::size_t>(node) >= weights.size())
+            continue;
+        support += weights[static_cast<std::size_t>(node)]
+                       .facet[static_cast<std::size_t>(incoming)];
+    }
+    return support;
+}
+
 struct VisibilityAccum {
     std::unordered_map<std::uint64_t, float> weights;
     std::size_t rays{0};
+};
+
+struct WeakSurfaceStats {
+    std::size_t rays{0};
+    std::size_t measured{0};
+    std::size_t candidates{0};
+    std::size_t reinforced{0};
+    std::size_t zero_sink{0};
+    float maximum_multiplier{0.F};
 };
 
 constexpr std::uint64_t k_cell_weight_slots = 5;
@@ -518,6 +545,256 @@ bool extract_surface(
     core::Logger::instance().info(
         "mvs global mesh visibility_rays=", rays,
         " threads=", thread_count);
+
+    if (options.mesh_use_free_space_support) {
+        core::StageScope weak_stage("mvs.mesh_weak_surface");
+        const float front_distance =
+            sigma * std::max(options.mesh_k_free_space_front, 0.F);
+        const float back_distance =
+            sigma * std::max(options.mesh_k_free_space_back, 0.F);
+        const float near_distance = std::max(sigma * 1e-4F, 1e-8F);
+
+        const auto measure_weak_surface =
+            [&](const VertexHandle& vertex, const Vec3f& point,
+                const Index id, float& beta, float& gamma,
+                CellHandle& endpoint_cell) {
+                const Vec3f camera = scene.views[id].pose.C.cast<float>();
+                const Vec3f ray = point - camera;
+                const float ray_length = ray.norm();
+                if (!(ray_length > 1e-6F) || !(front_distance > 0.F) ||
+                    !(back_distance > 0.F))
+                    return false;
+                const Vec3f direction = ray / ray_length;
+
+                const Point front_near =
+                    to_point(point - direction * near_distance);
+                const Point front_end =
+                    to_point(point - direction * front_distance);
+                const CellHandle front_cell =
+                    triangulation.locate(front_near, vertex->cell());
+                if (front_cell == CellHandle() ||
+                    triangulation.is_infinite(front_cell))
+                    return false;
+                beta = 0.F;
+                std::size_t beta_samples = 0;
+                CellHandle previous;
+                for (const CellHandle& cell :
+                     triangulation.segment_traverser_cell_handles(
+                         front_near, front_end, front_cell)) {
+                    if (previous != CellHandle() &&
+                        !triangulation.is_infinite(previous)) {
+                        beta = std::max(
+                            beta,
+                            free_space_support(previous, cell_weights));
+                        ++beta_samples;
+                    }
+                    previous = cell;
+                }
+                if (beta_samples == 0) return false;
+
+                const Point back_near =
+                    to_point(point + direction * near_distance);
+                const Point back_end =
+                    to_point(point + direction * back_distance);
+                const CellHandle back_cell =
+                    triangulation.locate(back_near, vertex->cell());
+                if (back_cell == CellHandle() ||
+                    triangulation.is_infinite(back_cell))
+                    return false;
+                float gamma_min = std::numeric_limits<float>::infinity();
+                float gamma_max = 0.F;
+                std::size_t gamma_samples = 0;
+                previous = CellHandle();
+                for (const CellHandle& cell :
+                     triangulation.segment_traverser_cell_handles(
+                         back_near, back_end, back_cell)) {
+                    if (previous != CellHandle() &&
+                        !triangulation.is_infinite(previous)) {
+                        const float support =
+                            free_space_support(previous, cell_weights);
+                        gamma_min = std::min(gamma_min, support);
+                        gamma_max = std::max(gamma_max, support);
+                        ++gamma_samples;
+                    }
+                    previous = cell;
+                }
+                endpoint_cell = previous;
+                if (gamma_samples == 0 || endpoint_cell == CellHandle() ||
+                    triangulation.is_infinite(endpoint_cell))
+                    return false;
+                gamma = (gamma_min + gamma_max) * 0.5F;
+                return std::isfinite(beta) && std::isfinite(gamma);
+            };
+
+        const auto quantile = [](std::vector<float> values, const float q) {
+            if (values.empty()) return 0.F;
+            const std::size_t index = std::min(
+                values.size() - 1,
+                static_cast<std::size_t>(
+                    q * static_cast<float>(values.size() - 1)));
+            std::nth_element(
+                values.begin(),
+                values.begin() + static_cast<std::ptrdiff_t>(index),
+                values.end());
+            return values[index];
+        };
+
+        // OpenMVS's fixed absolute beta/gamma thresholds assume its
+        // Conf2Weight scale. Estimate the conversion from a deterministic ray
+        // sample so fused AetherScan weights retain the same geometric test.
+        std::vector<std::vector<std::array<float, 2>>> worker_samples(
+            thread_count);
+        for (auto& samples : worker_samples) samples.reserve(512);
+        if (options.mesh_k_free_space_calibration_quantile > 0.F) {
+            parallel::parallel_for(
+                surface_vertices.size(), thread_count,
+                [&](const std::size_t surface_index,
+                    const unsigned worker_id) {
+                    const VertexHandle vertex = surface_vertices[surface_index];
+                    const std::size_t vertex_index = vertex->info().index;
+                    if (vertex_index >= vertices.size()) return;
+                    const GlobalVertex& sample = vertices[vertex_index];
+                    for (const Index id : sample.views) {
+                        if (id >= scene.views.size()) continue;
+                        const std::uint64_t sample_hash =
+                            static_cast<std::uint64_t>(surface_index) *
+                                0x9E3779B97F4A7C15ULL ^
+                            static_cast<std::uint64_t>(id) *
+                                0xBF58476D1CE4E5B9ULL;
+                        if ((sample_hash & 1023ULL) != 0ULL) continue;
+                        float beta = 0.F;
+                        float gamma = 0.F;
+                        CellHandle endpoint_cell;
+                        if (measure_weak_surface(
+                                vertex, sample.position, id, beta, gamma,
+                                endpoint_cell))
+                            worker_samples[worker_id].push_back({beta, gamma});
+                    }
+                });
+        }
+
+        std::vector<float> calibration_differences;
+        std::vector<float> sampled_beta;
+        std::vector<float> sampled_gamma;
+        std::vector<float> sampled_ratio;
+        std::size_t sample_count = 0;
+        for (const auto& samples : worker_samples)
+            sample_count += samples.size();
+        calibration_differences.reserve(sample_count);
+        sampled_beta.reserve(sample_count);
+        sampled_gamma.reserve(sample_count);
+        sampled_ratio.reserve(sample_count);
+        for (const auto& samples : worker_samples) {
+            for (const auto& sample : samples) {
+                const float beta = sample[0];
+                const float gamma = sample[1];
+                const float ratio = beta > 0.F ? gamma / beta : 1.F;
+                sampled_beta.push_back(beta);
+                sampled_gamma.push_back(gamma);
+                sampled_ratio.push_back(ratio);
+                if (ratio < options.mesh_k_free_space_rel && beta > gamma)
+                    calibration_differences.push_back(beta - gamma);
+            }
+        }
+        const float calibration_difference = quantile(
+            calibration_differences,
+            std::clamp(
+                options.mesh_k_free_space_calibration_quantile, 0.F,
+                0.999F));
+        const float support_scale = weak_surface_support_scale(
+            calibration_difference, options);
+
+        std::vector<WeakSurfaceStats> worker_stats(thread_count);
+
+        parallel::parallel_for(
+            surface_vertices.size(), thread_count,
+            [&](const std::size_t surface_index, const unsigned worker_id) {
+                const VertexHandle vertex = surface_vertices[surface_index];
+                const std::size_t vertex_index = vertex->info().index;
+                if (vertex_index >= vertices.size()) return;
+                const GlobalVertex& sample = vertices[vertex_index];
+                const Vec3f point = sample.position;
+                WeakSurfaceStats& stats = worker_stats[worker_id];
+
+                for (const Index id : sample.views) {
+                    if (id >= scene.views.size()) continue;
+                    ++stats.rays;
+                    float beta = 0.F;
+                    float gamma = 0.F;
+                    CellHandle endpoint_cell;
+                    if (!measure_weak_surface(
+                            vertex, point, id, beta, gamma, endpoint_cell))
+                        continue;
+                    ++stats.measured;
+
+                    const float multiplier = weak_surface_sink_multiplier(
+                        beta / support_scale, gamma / support_scale, options);
+                    if (!(multiplier > 0.F)) continue;
+                    ++stats.candidates;
+                    stats.maximum_multiplier =
+                        std::max(stats.maximum_multiplier, multiplier);
+
+                    const int endpoint_node = endpoint_cell->info().node;
+                    if (endpoint_node < 0 ||
+                        static_cast<std::size_t>(endpoint_node) >=
+                            cell_weights.size())
+                        continue;
+                    float& sink_value =
+                        cell_weights[static_cast<std::size_t>(endpoint_node)]
+                            .sink;
+                    std::atomic_ref<float> sink(sink_value);
+                    float current = sink.load(std::memory_order_relaxed);
+                    if (!(current > 0.F)) {
+                        ++stats.zero_sink;
+                        continue;
+                    }
+                    float desired = 0.F;
+                    do {
+                        desired = std::min(
+                            current * multiplier, options.mesh_k_inf);
+                    } while (!sink.compare_exchange_weak(
+                        current, desired, std::memory_order_relaxed,
+                        std::memory_order_relaxed));
+                    ++stats.reinforced;
+                }
+            });
+
+        WeakSurfaceStats total;
+        for (const WeakSurfaceStats& stats : worker_stats) {
+            total.rays += stats.rays;
+            total.measured += stats.measured;
+            total.candidates += stats.candidates;
+            total.reinforced += stats.reinforced;
+            total.zero_sink += stats.zero_sink;
+            total.maximum_multiplier =
+                std::max(total.maximum_multiplier, stats.maximum_multiplier);
+        }
+        for (auto cell = triangulation.all_cells_begin();
+             cell != triangulation.all_cells_end(); ++cell)
+            cell->info().sink =
+                cell_weights[static_cast<std::size_t>(cell->info().node)].sink;
+        core::Logger::instance().info(
+            "mvs weak surface: rays=", total.rays,
+            " measured=", total.measured,
+            " candidates=", total.candidates,
+            " reinforced=", total.reinforced,
+            " zero_sink=", total.zero_sink,
+            " max_multiplier=", total.maximum_multiplier,
+            " support_scale=", support_scale,
+            " calibration_difference=", calibration_difference);
+        core::Logger::instance().info(
+            "mvs weak surface sample: count=", sample_count,
+            " beta_p50=", quantile(sampled_beta, 0.5F),
+            " beta_p95=", quantile(sampled_beta, 0.95F),
+            " gamma_p50=", quantile(sampled_gamma, 0.5F),
+            " qualified_difference_p50=",
+            quantile(calibration_differences, 0.5F),
+            " qualified_difference_p95=",
+            quantile(calibration_differences, 0.95F),
+            " ratio_p50=", quantile(sampled_ratio, 0.5F),
+            " ratio_p95=", quantile(sampled_ratio, 0.95F));
+        weak_stage.finish();
+    }
 
     maxflow::Graph graph(static_cast<std::size_t>(node_count));
     for (auto cell = triangulation.all_cells_begin();
