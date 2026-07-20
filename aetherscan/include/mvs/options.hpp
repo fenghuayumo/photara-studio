@@ -112,7 +112,7 @@ struct DensifyOptions {
     float mesh_smooth_lambda{0.15F};
     // Skip inserting a fused point if an existing Delaunay vertex projects
     // within this many pixels in every observing view (0 = insert all).
-    float mesh_dist_insert_px{1.25F};
+    float mesh_dist_insert_px{0.75F};
     // Cap fused points before meshing (0 = no cap); random subsample.
     std::uint64_t mesh_max_points{2'000'000};
     // Graph-cut / visibility weights (Jancosek-Pajdla style).
@@ -190,7 +190,7 @@ inline void apply_quality_preset(
         options.mesh_pixel_step = 2;
         options.mesh_min_component_faces = 32;
         options.mesh_close_hole_edges = 16;
-        options.mesh_dist_insert_px = 1.25F;
+        options.mesh_dist_insert_px = 0.75F;
         break;
     case DensifyQuality::high:
         options.mesh_method = MeshMethod::delaunay_cut;

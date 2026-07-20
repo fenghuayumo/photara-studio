@@ -279,7 +279,7 @@ void test_quality_presets() {
 
     apply_quality_preset(options, DensifyQuality::default_quality);
     require(
-        std::abs(options.mesh_dist_insert_px - 1.25F) < 1e-6F,
+        std::abs(options.mesh_dist_insert_px - 0.75F) < 1e-6F,
         "default preset global mesh spacing mismatch");
 
     apply_quality_preset(options, DensifyQuality::preview);
