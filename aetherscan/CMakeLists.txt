@@ -17,6 +17,7 @@ if(AETHERSCAN_ENABLE_CUDA)
     else()
         message(WARNING "CUDA compiler not found; building CPU-only AetherScan")
         set(AETHERSCAN_ENABLE_CUDA OFF)
+        set(AETHERSCAN_ENABLE_GGGS OFF)
     endif()
 endif()
 
@@ -306,6 +307,69 @@ if(AETHERSCAN_ENABLE_FEATURES)
             "CGAL not found: default/high global MVS meshing is unavailable; "
             "preview or --mesh-method projective remains supported")
     endif()
+
+    if(AETHERSCAN_ENABLE_GGGS AND AETHERSCAN_ENABLE_CUDA)
+        find_package(glm CONFIG REQUIRED)
+        add_subdirectory(
+            third_party/tinytensor
+            ${CMAKE_CURRENT_BINARY_DIR}/third_party/tinytensor)
+
+        add_library(aetherscan_gggs_reference STATIC
+            third_party/gggs_reference/src/rasterizer_impl.cu
+            third_party/gggs_reference/src/render_backward.cu
+            third_party/gggs_reference/src/render_forward.cu
+            third_party/gggs_reference/src/sample_backward.cu
+            third_party/gggs_reference/src/sample_forward.cu)
+        target_include_directories(aetherscan_gggs_reference PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/gggs_reference/include)
+        target_link_libraries(aetherscan_gggs_reference PUBLIC
+            CUDA::cudart
+            glm::glm)
+        target_compile_features(aetherscan_gggs_reference PUBLIC cxx_std_20)
+        target_compile_options(aetherscan_gggs_reference PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
+        set_target_properties(aetherscan_gggs_reference PROPERTIES
+            CUDA_ARCHITECTURES native
+            CUDA_SEPARABLE_COMPILATION OFF
+            POSITION_INDEPENDENT_CODE ON
+            FOLDER "external")
+
+        add_library(aetherscan_splat_cuda STATIC
+            src/splat/rasterizer.cu
+            src/splat/cuda_ops.cu)
+        target_include_directories(aetherscan_splat_cuda
+            PUBLIC
+                $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+                $<INSTALL_INTERFACE:include>
+            PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
+        target_compile_features(aetherscan_splat_cuda PUBLIC cxx_std_20)
+        target_link_libraries(aetherscan_splat_cuda PUBLIC
+            tinytensor::tinytensor
+            aetherscan_gggs_reference
+            CUDA::cudart)
+        target_compile_definitions(aetherscan_splat_cuda PUBLIC AETHERSCAN_HAS_GGGS=1)
+        target_compile_options(aetherscan_splat_cuda PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
+        set_target_properties(aetherscan_splat_cuda PROPERTIES
+            CUDA_ARCHITECTURES native
+            CUDA_SEPARABLE_COMPILATION OFF
+            POSITION_INDEPENDENT_CODE ON)
+
+        add_library(aetherscan_splat src/splat/trainer.cpp)
+        add_library(AetherScan::Splat ALIAS aetherscan_splat)
+        target_include_directories(aetherscan_splat
+            PUBLIC
+                $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+                $<INSTALL_INTERFACE:include>
+            PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/splat)
+        target_compile_features(aetherscan_splat PUBLIC cxx_std_20)
+        target_link_libraries(aetherscan_splat PUBLIC
+            AetherScan::MVS
+            aetherscan_splat_cuda)
+        target_compile_definitions(aetherscan_splat PUBLIC AETHERSCAN_HAS_GGGS=1)
+    endif()
     if(OpenMP_CXX_FOUND)
         target_link_libraries(aetherscan_mvs PUBLIC OpenMP::OpenMP_CXX)
         target_compile_definitions(aetherscan_mvs PUBLIC AETHERSCAN_HAS_OPENMP=1)
@@ -411,6 +475,10 @@ if(AETHERSCAN_BUILD_BENCHMARKS)
 
         add_executable(aetherscan src/tools/reconstruct.cpp)
         target_link_libraries(aetherscan PRIVATE AetherScan::MVS cxxopts::cxxopts)
+        if(TARGET aetherscan_splat)
+            target_link_libraries(aetherscan PRIVATE AetherScan::Splat)
+            target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_GGGS=1)
+        endif()
         if(TARGET aetherscan_texture)
             target_link_libraries(aetherscan PRIVATE AetherScan::Texture)
             target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_TEXTURE=1)
@@ -435,6 +503,11 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
     add_executable(aetherscan_logging_test tests/logging_test.cpp)
     target_link_libraries(aetherscan_logging_test PRIVATE AetherScan::BA)
     add_test(NAME aetherscan.core.logging COMMAND aetherscan_logging_test)
+    if(TARGET aetherscan_splat)
+        add_executable(aetherscan_splat_test tests/splat_test.cpp)
+        target_link_libraries(aetherscan_splat_test PRIVATE AetherScan::Splat)
+        add_test(NAME aetherscan.splat.rasterizer COMMAND aetherscan_splat_test)
+    endif()
     if(TARGET aetherscan_features)
         add_executable(aetherscan_features_test tests/features_test.cpp)
         target_link_libraries(aetherscan_features_test PRIVATE AetherScan::Features)

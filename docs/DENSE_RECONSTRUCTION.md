@@ -484,6 +484,17 @@ Mask / UV / Project / Delight 共用一套后处理，作用于用户选定的�
 这样既满足「MVS 已经够用就停」的产品需求，又保留「需要更高几何质量时再开 GGGS」
 的升级路径。
 
+### GGGS C++ 后端落地状态（2026-07-21）
+
+已新增 `splat` 模块并完成 GGGS 原生 CUDA rasterizer 的 forward/backward、TinyTensor
+参数激活与显式梯度、RGB/depth/normal loss、融合 Adam、MVS dense-cloud 初始化和
+Gaussian PLY 导出。CLI 使用 `--gggs --gggs-iterations N`，会在 dense fusion 后直接训练。
+
+当前交付边界是“固定数量 Gaussian 的可训练后端”；动态 densify/prune、out-of-core view
+cache、GGGS mesh extraction 与 `active_mesh` 切换尚未完成。因此目前 `--gggs` 输出
+`*_gggs.ply`，纹理阶段仍使用 MVS mesh。实现、构建方法、性能边界和许可证风险见
+[GGGS_CPP.md](GGGS_CPP.md)。
+
 ---
 
 ## 可扩展全局表面重建与 Clean（2026-07-20）

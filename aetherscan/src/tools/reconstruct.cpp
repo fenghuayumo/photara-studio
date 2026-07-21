@@ -3,6 +3,9 @@
 #include "mvs/densify.hpp"
 #include "mvs/export.hpp"
 #include "core/logging.hpp"
+#if defined(AETHERSCAN_HAS_GGGS)
+#include "splat/trainer.hpp"
+#endif
 #if defined(AETHERSCAN_HAS_TEXTURE)
 #include "texture/bake.hpp"
 #include "texture/options.hpp"
@@ -65,6 +68,9 @@ struct ReconstructCli {
     unsigned hybrid_lightglue_max_features{2048U};
     bool lightglue_cpu{false};
     bool dense{false};
+    bool gggs{false};
+    unsigned gggs_iterations{30'000};
+    std::uint64_t gggs_max_gaussians{500'000};
     bool mesh{false};
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
@@ -173,6 +179,9 @@ void print_help(const cxxopts::Options& options) {
               << "  global       rotation averaging + global positioning + BA\n"
               << "Dense (optional Stage A Fast MVS after SfM):\n"
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
+              << "  --gggs       train CUDA GGGS from the fused cloud -> *_gggs.ply\n"
+              << "  --gggs-iterations N  GGGS optimizer steps (default 30000)\n"
+              << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mesh-method auto|projective|delaunay\n"
               << "               auto uses projective for preview, global Delaunay otherwise\n"
@@ -266,6 +275,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false"))
         ("dense", "Run Fast MVS densify after SfM",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("gggs", "Train CUDA GGGS after densify (implies --dense)",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("gggs-iterations", "GGGS optimizer iterations",
+         cxxopts::value<unsigned>()->default_value("30000"))
+        ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
+         cxxopts::value<std::uint64_t>()->default_value("500000"))
         ("mesh", "Build MVS mesh after densify (implies --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mesh-method",
@@ -359,6 +374,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["hybrid-lightglue-max-features"].as<unsigned>();
     cli.lightglue_cpu = result["lightglue-cpu"].as<bool>();
     cli.dense = result["dense"].as<bool>();
+    cli.gggs = result["gggs"].as<bool>();
+    cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
+    cli.gggs_max_gaussians =
+        result["gggs-max-gaussians"].as<std::uint64_t>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mesh_obj = result["mesh-obj"].as<bool>();
     cli.texture = result["texture"].as<bool>();
@@ -408,6 +427,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.texture) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
     if (cli.mesh) cli.dense = true;
+    if (cli.gggs) cli.dense = true;
+#if !defined(AETHERSCAN_HAS_GGGS)
+    if (cli.gggs) {
+        throw std::invalid_argument(
+            "--gggs requires CUDA and AETHERSCAN_ENABLE_GGGS=ON");
+    }
+#endif
+    if (cli.gggs_iterations == 0)
+        throw std::invalid_argument("--gggs-iterations must be positive");
 #if !defined(AETHERSCAN_HAS_TEXTURE)
     if (cli.texture || cli.delight) {
         throw std::invalid_argument(
@@ -925,6 +953,69 @@ int main(int argc, char** argv) {
                 "dense_ply=", dense_ply,
                 " points=", mvs_scene.dense_cloud.points.size(),
                 " densify_s=", dense_elapsed);
+
+#if defined(AETHERSCAN_HAS_GGGS)
+            if (cli.gggs) {
+                aetherscan::splat::TrainingOptions gggs_options;
+                gggs_options.iterations = cli.gggs_iterations;
+                gggs_options.max_gaussians = static_cast<std::size_t>(
+                    std::min<std::uint64_t>(
+                        cli.gggs_max_gaussians,
+                        (std::numeric_limits<std::size_t>::max)()));
+                aetherscan::core::Logger::instance().info(
+                    "gggs training: iterations=", gggs_options.iterations,
+                    " dense_points=", mvs_scene.dense_cloud.points.size(),
+                    " max_gaussians=", gggs_options.max_gaussians,
+                    " views=", mvs_scene.views.size());
+                const auto gggs_started = std::chrono::steady_clock::now();
+                const aetherscan::splat::GaussianModel gaussians =
+                    aetherscan::splat::Trainer(gggs_options).train(
+                        mvs_scene,
+                        [](const aetherscan::splat::TrainingProgress& progress) {
+                            aetherscan::core::Logger::instance().info(
+                                "gggs iteration=", progress.iteration, '/',
+                                progress.total_iterations,
+                                " loss=", progress.loss,
+                                " rgb=", progress.rgb_loss,
+                                " depth=", progress.depth_loss,
+                                " normal=", progress.normal_loss,
+                                " step_ms=", progress.milliseconds);
+                            return true;
+                        });
+                const auto gggs_ply =
+                    out_dir / (cli.output.stem().string() + "_gggs.ply");
+                aetherscan::splat::save_gaussians_ply(gaussians, gggs_ply);
+                std::vector<std::size_t> evaluation_views{
+                    0, mvs_scene.views.size() / 2,
+                    mvs_scene.views.size() - 1};
+                std::sort(evaluation_views.begin(), evaluation_views.end());
+                evaluation_views.erase(
+                    std::unique(
+                        evaluation_views.begin(), evaluation_views.end()),
+                    evaluation_views.end());
+                for (const std::size_t view_index : evaluation_views) {
+                    const auto render_path = out_dir /
+                        (cli.output.stem().string() + "_gggs_view_" +
+                         std::to_string(view_index) + ".png");
+                    const auto metrics =
+                        aetherscan::splat::render_evaluation_png(
+                            gaussians, mvs_scene.views[view_index],
+                            render_path);
+                    aetherscan::core::Logger::instance().info(
+                        "gggs_render=", render_path,
+                        " view=", view_index,
+                        " psnr=", metrics.psnr,
+                        " mae=", metrics.mae,
+                        " alpha_coverage=", metrics.alpha_coverage);
+                }
+                const double gggs_elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - gggs_started).count();
+                aetherscan::core::Logger::instance().info(
+                    "gggs_ply=", gggs_ply,
+                    " gaussians=", gaussians.size(),
+                    " training_s=", gggs_elapsed);
+            }
+#endif
 
             if (cli.mesh && !mvs_scene.mesh.faces.empty()) {
                 const auto mesh_ply =
