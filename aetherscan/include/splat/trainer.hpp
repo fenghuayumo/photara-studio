@@ -16,6 +16,7 @@ struct TrainingProgress {
     std::size_t gaussian_count{};
     float loss{};
     float rgb_loss{};
+    float alpha_loss{};
     float depth_loss{};
     float normal_loss{};
     double milliseconds{};
@@ -34,7 +35,8 @@ Camera camera_from_mvs_view(const mvs::MvsView& view);
 GaussianModel initialize_from_dense_cloud(
     const mvs::MvsScene& scene, const TrainingOptions& options = {});
 
-TrainingView make_training_view(const mvs::MvsView& view);
+TrainingView make_training_view(
+    const mvs::MvsView& view, const TrainingOptions& options = {});
 
 class Trainer {
 public:
@@ -52,6 +54,7 @@ void save_gaussians_ply(
 
 RenderMetrics render_evaluation_png(
     const GaussianModel& model, const mvs::MvsView& view,
-    const std::filesystem::path& path);
+    const std::filesystem::path& path,
+    const TrainingOptions& options = {});
 
 }  // namespace aetherscan::splat

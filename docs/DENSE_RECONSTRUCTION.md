@@ -489,6 +489,8 @@ Mask / UV / Project / Delight 共用一套后处理，作用于用户选定的�
 已新增 `splat` 模块并完成 GGGS 原生 CUDA rasterizer 的 forward/backward、TinyTensor
 参数激活与显式梯度、RGB/depth/normal loss、融合 Adam、MVS dense-cloud 初始化和
 Gaussian PLY 导出。CLI 使用 `--gggs --gggs-iterations N`，会在 dense fusion 后直接训练。
+`--gggs-use-mask` 已支持与 pygsplat 一致的 `transparent`（前景 RGB + alpha BCE）和
+`masked`（前景 RGB + 背景 alpha 泄漏惩罚）模式，复用 `--masks` 或源图 alpha channel。
 
 当前交付边界是“固定数量 Gaussian 的可训练后端”；动态 densify/prune、out-of-core view
 cache、GGGS mesh extraction 与 `active_mesh` 切换尚未完成。因此目前 `--gggs` 输出

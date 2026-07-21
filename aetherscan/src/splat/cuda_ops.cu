@@ -81,10 +81,11 @@ __global__ void loss_kernel(
     float* grad_depth, float* grad_normal, float* terms,
     const std::size_t pixels, const float photo_weight,
     const float depth_weight, const float normal_weight,
-    const float alpha_weight, const float epsilon) {
+    const bool mask_enabled, const int alpha_mode,
+    const float match_alpha_weight, const float epsilon) {
     const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
     if (pixel >= pixels) return;
-    const float valid = mask[pixel];
+    const float valid = mask_enabled ? mask[pixel] : 1.F;
     const float inverse_pixels = 1.F / static_cast<float>(pixels);
     float rgb_loss = 0.F;
     for (int channel = 0; channel < 3; ++channel) {
@@ -132,12 +133,20 @@ __global__ void loss_kernel(
         grad_normal[2 * pixels + pixel] = -normal_weight * tz * inverse_target_length * inverse_pixels;
     }
 
-    if (alpha_weight > 0.F) {
+    if (mask_enabled && alpha_mode == 0) {
+        // pygsplat alpha_mode="masked": discourage any opacity outside the
+        // foreground without forcing the foreground itself to be opaque.
+        grad_alpha[pixel] = (1.F - valid) * inverse_pixels;
+        if (terms)
+            atomicAdd(
+                terms + 3, alpha[pixel] * (1.F - valid) * inverse_pixels);
+    } else if (mask_enabled && alpha_mode == 1 && match_alpha_weight > 0.F) {
+        // pygsplat alpha_mode="transparent": full-image BCE(alpha, mask).
         const float prediction = fminf(fmaxf(alpha[pixel], 1e-6F), 1.F - 1e-6F);
-        grad_alpha[pixel] = alpha_weight * inverse_pixels *
+        grad_alpha[pixel] = match_alpha_weight * inverse_pixels *
             (prediction - valid) / (prediction * (1.F - prediction));
         if (terms)
-            atomicAdd(terms + 3, -alpha_weight * inverse_pixels *
+            atomicAdd(terms + 3, -match_alpha_weight * inverse_pixels *
                 (valid * logf(prediction) +
                  (1.F - valid) * logf(1.F - prediction)));
     }
@@ -234,6 +243,7 @@ LossGradients compute_training_loss(
     tinytensor::Tensor terms;
     if (collect_scalar_terms)
         terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
+    const bool mask_enabled = options.use_mask && target.has_mask;
     loss_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
         rendered.color.ptr<float>(), rendered.alpha.ptr<float>(),
         rendered.median_depth.ptr<float>(), rendered.normal.ptr<float>(),
@@ -245,7 +255,9 @@ LossGradients compute_training_loss(
         pixels, options.photometric_weight,
         options.use_mvs_depth ? options.depth_weight : 0.F,
         options.use_mvs_normals ? options.normal_weight : 0.F,
-        options.alpha_weight, options.charbonnier_epsilon);
+        mask_enabled,
+        options.alpha_mode == AlphaMode::masked ? 0 : 1,
+        options.match_alpha_weight, options.charbonnier_epsilon);
     check_cuda(cudaGetLastError(), "compute GGGS training loss");
     if (collect_scalar_terms) {
         std::array<float, 4> host{};
@@ -253,6 +265,7 @@ LossGradients compute_training_loss(
             host.data(), terms.ptr<float>(), sizeof(host), cudaMemcpyDeviceToHost),
             "download GGGS loss");
         result.rgb = host[0];
+        result.alpha_value = host[3];
         result.depth_value = host[1];
         result.normal_value = host[2];
         result.total = host[0] + host[1] + host[2] + host[3];

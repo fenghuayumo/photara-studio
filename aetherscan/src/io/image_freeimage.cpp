@@ -86,6 +86,36 @@ GrayImage load_gray(const std::filesystem::path& path) {
     return image;
 }
 
+GrayImage load_alpha(const std::filesystem::path& path) {
+    std::lock_guard lock(freeimage_mutex());
+    ensure_freeimage();
+    const auto format = detect_format(path);
+    FIBITMAP* loaded = FreeImage_Load(format, path.string().c_str(), 0);
+    if (!loaded) throw std::runtime_error("Failed to load image: " + path.string());
+    if (!FreeImage_IsTransparent(loaded) && FreeImage_GetBPP(loaded) != 32) {
+        FreeImage_Unload(loaded);
+        return {};
+    }
+    FIBITMAP* rgba = FreeImage_ConvertTo32Bits(loaded);
+    FreeImage_Unload(loaded);
+    if (!rgba)
+        throw std::runtime_error("Failed to read image alpha: " + path.string());
+    GrayImage image;
+    image.width = FreeImage_GetWidth(rgba);
+    image.height = FreeImage_GetHeight(rgba);
+    image.pixels.resize(static_cast<std::size_t>(image.width) * image.height);
+    const bool top_down = FreeImage_GetInfoHeader(rgba)->biHeight < 0;
+    for (std::uint32_t y = 0; y < image.height; ++y) {
+        const std::uint32_t source_y = top_down ? y : image.height - 1 - y;
+        const BYTE* row = FreeImage_GetScanLine(rgba, static_cast<int>(source_y));
+        for (std::uint32_t x = 0; x < image.width; ++x)
+            image.pixels[static_cast<std::size_t>(y) * image.width + x] =
+                row[4 * x + FI_RGBA_ALPHA];
+    }
+    FreeImage_Unload(rgba);
+    return image;
+}
+
 RgbImage load_rgb(const std::filesystem::path& path) {
     std::lock_guard lock(freeimage_mutex());
     ensure_freeimage();

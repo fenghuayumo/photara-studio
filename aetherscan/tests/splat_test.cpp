@@ -1,10 +1,12 @@
 #include "splat/trainer.hpp"
 #include "../src/splat/cuda_ops.hpp"
+#include "io/image.hpp"
 
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -132,6 +134,95 @@ void test_adam_rejects_non_finite_gradients() {
         "Adam changed parameters for rejected gradients");
 }
 
+void test_mask_loading() {
+    using namespace aetherscan;
+    const auto root = std::filesystem::temp_directory_path() /
+                      "aetherscan_splat_mask_test";
+    const auto masks = root / "masks";
+    std::filesystem::create_directories(masks);
+    io::RgbImage source{2, 2, std::vector<std::uint8_t>(12, 128)};
+    io::RgbImage mask{2, 2, {
+        255, 255, 255, 0, 0, 0,
+        0, 0, 0, 255, 255, 255}};
+    const auto image_path = root / "frame.png";
+    io::save_rgb_png(source, image_path);
+    io::save_rgb_png(mask, masks / "frame.png");
+    mvs::MvsView view;
+    view.path = image_path;
+    view.width = view.src_width = 2;
+    view.height = view.src_height = 2;
+    view.fx = view.fy = view.src_fx = view.src_fy = 1.F;
+    view.cx = view.cy = view.src_cx = view.src_cy = 0.5F;
+    splat::TrainingOptions options;
+    options.use_mask = true;
+    options.mask_dir = masks;
+    const splat::TrainingView training =
+        splat::make_training_view(view, options);
+    require(training.has_mask, "GGGS did not load the matching mask file");
+    require(
+        training.mask.to_vector() == std::vector<float>({1.F, 0.F, 0.F, 1.F}),
+        "GGGS mask threshold or pixel mapping differs from pygsplat");
+    std::filesystem::remove_all(root);
+}
+
+void test_mask_loss_modes() {
+    using namespace aetherscan::splat;
+    RenderResult rendered;
+    rendered.color = tinytensor::Tensor::from_vector(
+        std::vector<float>(6, 0.8F), {3, 1, 2}, tinytensor::Device::CUDA);
+    rendered.alpha = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.8F, 0.8F}, {1, 2}, tinytensor::Device::CUDA);
+    rendered.median_depth = tinytensor::Tensor::zeros(
+        {1, 2}, tinytensor::Device::CUDA);
+    rendered.normal = tinytensor::Tensor::zeros(
+        {3, 1, 2}, tinytensor::Device::CUDA);
+    TrainingView target;
+    target.camera.width = 2;
+    target.camera.height = 1;
+    target.rgb = tinytensor::Tensor::from_vector(
+        std::vector<float>(6, 0.2F), {3, 1, 2}, tinytensor::Device::CUDA);
+    target.depth = tinytensor::Tensor::zeros({1, 2}, tinytensor::Device::CUDA);
+    target.normal = tinytensor::Tensor::zeros(
+        {3, 1, 2}, tinytensor::Device::CUDA);
+    target.mask = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F}, {1, 2}, tinytensor::Device::CUDA);
+    target.has_mask = true;
+    TrainingOptions options;
+    options.use_mask = true;
+    options.use_mvs_depth = false;
+    options.use_mvs_normals = false;
+
+    options.alpha_mode = AlphaMode::masked;
+    auto loss = detail::compute_training_loss(rendered, target, options, true);
+    auto rgb_gradient = loss.color.to_vector();
+    auto alpha_gradient = loss.alpha.to_vector();
+    require(rgb_gradient[0] != 0.F && rgb_gradient[1] == 0.F,
+            "masked mode did not restrict RGB supervision to foreground");
+    require(std::abs(alpha_gradient[0]) < 1e-6F &&
+                std::abs(alpha_gradient[1] - 0.5F) < 1e-6F,
+            "masked mode background-alpha penalty differs from pygsplat");
+    require(std::abs(loss.alpha_value - 0.4F) < 1e-6F,
+            "masked mode reported the wrong alpha loss");
+
+    options.alpha_mode = AlphaMode::transparent;
+    options.match_alpha_weight = 0.25F;
+    loss = detail::compute_training_loss(rendered, target, options, true);
+    alpha_gradient = loss.alpha.to_vector();
+    require(std::abs(alpha_gradient[0] + 0.15625F) < 1e-5F &&
+                std::abs(alpha_gradient[1] - 0.625F) < 1e-5F,
+            "transparent mode BCE gradient differs from pygsplat");
+
+    target.has_mask = false;
+    loss = detail::compute_training_loss(rendered, target, options, false);
+    rgb_gradient = loss.color.to_vector();
+    alpha_gradient = loss.alpha.to_vector();
+    require(rgb_gradient[0] != 0.F && rgb_gradient[1] != 0.F,
+            "missing per-view mask incorrectly suppressed RGB training");
+    require(std::all_of(alpha_gradient.begin(), alpha_gradient.end(),
+                        [](float value) { return value == 0.F; }),
+            "missing per-view mask incorrectly enabled alpha supervision");
+}
+
 }  // namespace
 
 int main() {
@@ -144,6 +235,8 @@ int main() {
         test_mvs_camera_conversion();
         test_forward_backward();
         test_adam_rejects_non_finite_gradients();
+        test_mask_loading();
+        test_mask_loss_modes();
         std::cout << "splat tests passed\n";
         return 0;
     } catch (const std::exception& error) {

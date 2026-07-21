@@ -113,6 +113,47 @@ void write_float(std::ofstream& stream, const float value) {
     stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
+std::filesystem::path find_mask_path(
+    const std::filesystem::path& directory,
+    const std::filesystem::path& image_path) {
+    if (directory.empty() || !std::filesystem::is_directory(directory))
+        return {};
+    const auto exact = directory / image_path.filename();
+    if (std::filesystem::is_regular_file(exact)) return exact;
+    static constexpr std::array<const char*, 6> extensions{
+        ".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"};
+    for (const char* extension : extensions) {
+        const auto candidate = directory / (image_path.stem().string() + extension);
+        if (std::filesystem::is_regular_file(candidate)) return candidate;
+    }
+    return {};
+}
+
+std::filesystem::path resolve_mask_path(
+    const mvs::MvsView& view, const TrainingOptions& options) {
+    if (!options.mask_dir.empty())
+        return find_mask_path(options.mask_dir, view.path);
+    const auto nested = find_mask_path(view.path.parent_path() / "masks", view.path);
+    if (!nested.empty()) return nested;
+    return find_mask_path(
+        view.path.parent_path().parent_path() / "masks", view.path);
+}
+
+float sample_binary_mask(
+    const io::GrayImage& mask, const io::RgbImage& source,
+    const float source_x, const float source_y) {
+    const float x = (source_x + 0.5F) * mask.width / source.width - 0.5F;
+    const float y = (source_y + 0.5F) * mask.height / source.height - 0.5F;
+    const int ix = static_cast<int>(std::lround(x));
+    const int iy = static_cast<int>(std::lround(y));
+    if (ix < 0 || iy < 0 || ix >= static_cast<int>(mask.width) ||
+        iy >= static_cast<int>(mask.height))
+        return 0.F;
+    return mask.pixels[static_cast<std::size_t>(iy) * mask.width + ix] > 127
+        ? 1.F
+        : 0.F;
+}
+
 }  // namespace
 
 Camera camera_from_mvs_view(const mvs::MvsView& view) {
@@ -212,12 +253,26 @@ GaussianModel initialize_from_dense_cloud(
     return model;
 }
 
-TrainingView make_training_view(const mvs::MvsView& view) {
+TrainingView make_training_view(
+    const mvs::MvsView& view, const TrainingOptions& options) {
     if (view.width == 0 || view.height == 0)
         throw std::invalid_argument("Cannot build a GGGS training view with empty dimensions");
     const io::RgbImage source = io::load_rgb(view.path);
     const std::size_t pixels = static_cast<std::size_t>(view.width) * view.height;
+    io::GrayImage source_mask;
+    bool has_source_mask = false;
+    if (options.use_mask) {
+        const auto mask_path = resolve_mask_path(view, options);
+        if (!mask_path.empty()) {
+            source_mask = io::load_gray(mask_path);
+            has_source_mask = true;
+        } else {
+            source_mask = io::load_alpha(view.path);
+            has_source_mask = !source_mask.pixels.empty();
+        }
+    }
     std::vector<float> rgb(3 * pixels);
+    std::vector<float> mask(pixels, 1.F);
     for (std::uint32_t y = 0; y < view.height; ++y) {
         for (std::uint32_t x = 0; x < view.width; ++x) {
             const auto [sx, sy] = source_coordinate(view, x, y, source);
@@ -225,6 +280,8 @@ TrainingView make_training_view(const mvs::MvsView& view) {
             for (int channel = 0; channel < 3; ++channel)
                 rgb[static_cast<std::size_t>(channel) * pixels + pixel] =
                     sample_rgb(source, sx, sy, channel);
+            if (has_source_mask)
+                mask[pixel] = sample_binary_mask(source_mask, source, sx, sy);
         }
     }
 
@@ -238,8 +295,10 @@ TrainingView make_training_view(const mvs::MvsView& view) {
                     view.depth_map.normal[pixel](axis);
         }
     }
-    std::vector<float> mask(pixels, 1.F);
-    if (view.foreground_mask.size() == pixels) {
+    bool has_mask = has_source_mask;
+    if (options.use_mask && !has_source_mask &&
+        view.foreground_mask.size() == pixels) {
+        has_mask = true;
         for (std::size_t pixel = 0; pixel < pixels; ++pixel)
             mask[pixel] = view.foreground_mask[pixel] != 0 ? 1.F : 0.F;
     }
@@ -254,6 +313,7 @@ TrainingView make_training_view(const mvs::MvsView& view) {
         normals, {3, view.height, view.width}, tinytensor::Device::CUDA);
     result.mask = tinytensor::Tensor::from_vector(
         mask, {view.height, view.width}, tinytensor::Device::CUDA);
+    result.has_mask = has_mask;
     return result;
 }
 
@@ -266,7 +326,14 @@ GaussianModel Trainer::train(
     GaussianModel model = initialize_from_dense_cloud(scene, options_);
     std::vector<TrainingView> views;
     views.reserve(scene.views.size());
-    for (const auto& view : scene.views) views.push_back(make_training_view(view));
+    for (const auto& view : scene.views)
+        views.push_back(make_training_view(view, options_));
+    if (options_.use_mask &&
+        std::none_of(views.begin(), views.end(),
+                     [](const TrainingView& view) { return view.has_mask; }))
+        throw std::invalid_argument(
+            "GGGS mask training was requested, but no matching mask files or "
+            "source alpha channels were found");
 
     detail::AdamState means_state = detail::make_adam_state(model.means);
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
@@ -338,7 +405,8 @@ GaussianModel Trainer::train(
             const double milliseconds = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count();
             if (!progress({iteration, options_.iterations, model.size(), loss.total,
-                           loss.rgb, loss.depth_value, loss.normal_value,
+                           loss.rgb, loss.alpha_value, loss.depth_value,
+                           loss.normal_value,
                            milliseconds}))
                 break;
         }
@@ -353,8 +421,8 @@ GaussianModel Trainer::train(
 
 RenderMetrics render_evaluation_png(
     const GaussianModel& model, const mvs::MvsView& view,
-    const std::filesystem::path& path) {
-    const TrainingView target = make_training_view(view);
+    const std::filesystem::path& path, const TrainingOptions& training_options) {
+    const TrainingView target = make_training_view(view, training_options);
     RasterizeOptions options;
     options.active_sh_degree = model.sh_degree;
     options.require_depth = false;

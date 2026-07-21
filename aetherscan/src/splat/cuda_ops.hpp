@@ -20,6 +20,7 @@ struct LossGradients {
     tinytensor::Tensor normal;
     float total{};
     float rgb{};
+    float alpha_value{};
     float depth_value{};
     float normal_value{};
 };

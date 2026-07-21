@@ -42,6 +42,7 @@ struct TrainingView {
     tinytensor::Tensor depth;   // [H,W], zero when unavailable
     tinytensor::Tensor normal;  // [3,H,W], camera space
     tinytensor::Tensor mask;    // [H,W], 0 or 1
+    bool has_mask{false};
 };
 
 struct ModelGradients {

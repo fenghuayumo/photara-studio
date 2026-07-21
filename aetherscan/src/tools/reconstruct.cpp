@@ -71,6 +71,9 @@ struct ReconstructCli {
     bool gggs{false};
     unsigned gggs_iterations{30'000};
     std::uint64_t gggs_max_gaussians{500'000};
+    bool gggs_use_mask{false};
+    std::string gggs_alpha_mode{"transparent"};
+    float gggs_match_alpha_weight{0.25F};
     bool mesh{false};
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
@@ -182,6 +185,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs       train CUDA GGGS from the fused cloud -> *_gggs.ply\n"
               << "  --gggs-iterations N  GGGS optimizer steps (default 30000)\n"
               << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
+              << "  --gggs-use-mask BOOL  train from masks/ or source alpha\n"
+              << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
+              << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mesh-method auto|projective|delaunay\n"
               << "               auto uses projective for preview, global Delaunay otherwise\n"
@@ -281,6 +287,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("30000"))
         ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
          cxxopts::value<std::uint64_t>()->default_value("500000"))
+        ("gggs-use-mask", "Enable pygsplat-compatible foreground-mask training",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("gggs-alpha-mode", "Mask alpha mode: masked or transparent",
+         cxxopts::value<std::string>()->default_value("transparent"))
+        ("gggs-match-alpha-weight", "Alpha BCE weight in transparent mode",
+         cxxopts::value<float>()->default_value("0.25"))
         ("mesh", "Build MVS mesh after densify (implies --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mesh-method",
@@ -378,6 +390,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
     cli.gggs_max_gaussians =
         result["gggs-max-gaussians"].as<std::uint64_t>();
+    cli.gggs_use_mask = result["gggs-use-mask"].as<bool>();
+    cli.gggs_alpha_mode = result["gggs-alpha-mode"].as<std::string>();
+    cli.gggs_match_alpha_weight =
+        result["gggs-match-alpha-weight"].as<float>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mesh_obj = result["mesh-obj"].as<bool>();
     cli.texture = result["texture"].as<bool>();
@@ -436,6 +452,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
 #endif
     if (cli.gggs_iterations == 0)
         throw std::invalid_argument("--gggs-iterations must be positive");
+    if (cli.gggs_alpha_mode != "masked" &&
+        cli.gggs_alpha_mode != "transparent")
+        throw std::invalid_argument(
+            "--gggs-alpha-mode must be masked or transparent");
+    if (cli.gggs_match_alpha_weight < 0.F)
+        throw std::invalid_argument(
+            "--gggs-match-alpha-weight must be non-negative");
 #if !defined(AETHERSCAN_HAS_TEXTURE)
     if (cli.texture || cli.delight) {
         throw std::invalid_argument(
@@ -962,10 +985,21 @@ int main(int argc, char** argv) {
                     std::min<std::uint64_t>(
                         cli.gggs_max_gaussians,
                         (std::numeric_limits<std::size_t>::max)()));
+                gggs_options.use_mask = cli.gggs_use_mask;
+                gggs_options.mask_dir = cli.masks_dir;
+                gggs_options.alpha_mode = cli.gggs_alpha_mode == "masked"
+                    ? aetherscan::splat::AlphaMode::masked
+                    : aetherscan::splat::AlphaMode::transparent;
+                gggs_options.match_alpha_weight =
+                    cli.gggs_match_alpha_weight;
                 aetherscan::core::Logger::instance().info(
                     "gggs training: iterations=", gggs_options.iterations,
                     " dense_points=", mvs_scene.dense_cloud.points.size(),
                     " max_gaussians=", gggs_options.max_gaussians,
+                    " use_mask=", gggs_options.use_mask,
+                    " mask_dir=", gggs_options.mask_dir,
+                    " alpha_mode=", cli.gggs_alpha_mode,
+                    " match_alpha_weight=", gggs_options.match_alpha_weight,
                     " views=", mvs_scene.views.size());
                 const auto gggs_started = std::chrono::steady_clock::now();
                 const aetherscan::splat::GaussianModel gaussians =
@@ -977,6 +1011,7 @@ int main(int argc, char** argv) {
                                 progress.total_iterations,
                                 " loss=", progress.loss,
                                 " rgb=", progress.rgb_loss,
+                                " alpha=", progress.alpha_loss,
                                 " depth=", progress.depth_loss,
                                 " normal=", progress.normal_loss,
                                 " step_ms=", progress.milliseconds);
@@ -1000,7 +1035,7 @@ int main(int argc, char** argv) {
                     const auto metrics =
                         aetherscan::splat::render_evaluation_png(
                             gaussians, mvs_scene.views[view_index],
-                            render_path);
+                            render_path, gggs_options);
                     aetherscan::core::Logger::instance().info(
                         "gggs_render=", render_path,
                         " view=", view_index,

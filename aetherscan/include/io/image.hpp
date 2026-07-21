@@ -20,6 +20,9 @@ struct GrayImage {
 // Loads any FreeImage-supported format as 8-bit grayscale, top-left origin.
 GrayImage load_gray(const std::filesystem::path& path);
 
+// Returns an empty image when the source has no alpha channel/transparency.
+GrayImage load_alpha(const std::filesystem::path& path);
+
 struct RgbImage {
     std::uint32_t width{};
     std::uint32_t height{};

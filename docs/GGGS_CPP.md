@@ -27,8 +27,9 @@ SfM → CPU/OpenMP PatchMatch MVS → fused dense cloud
 
 模型使用可训练的世界坐标均值、log-scale、四元数、opacity logit 和最高三阶 SH。
 稠密点云法线用于初始化 Gaussian 朝向，像素足迹用于初始化尺度，点色用于初始化 SH0。
-训练损失包含 Charbonnier RGB、相对 MVS depth、camera-space normal consistency，以及可选
-alpha BCE；所有参数通过显式 GGGS backward 和 TinyTensor Adam 更新。
+训练损失包含 Charbonnier RGB、相对 MVS depth、camera-space normal consistency，以及与
+`pygsplat/simple_trainer.py` 对齐的可选 mask/alpha loss；所有参数通过显式 GGGS backward 和
+TinyTensor Adam 更新。
 
 ## 构建与运行
 
@@ -57,6 +58,27 @@ viewer/mesh-extraction 接入。
 `--gggs-max-gaussians N` 修改，`0` 表示使用全部 dense points。未实现动态 pruning 前不建议
 对百万级 dense cloud 使用 `0`。训练结束还会保存第一个、中间和最后相机的
 `*_gggs_view_*.png`，并在日志记录 PSNR、MAE 和 alpha coverage。
+
+Mask 训练复用 `--masks` 指定的目录（默认寻找 `images/` 的同级 `masks/`），并支持 Python
+数据集相同的 stem 匹配、`.png/.jpg/.jpeg` 大小写扩展名、`>127` 二值阈值、最近邻重采样，
+找不到独立 mask 时回退到源图 alpha channel：
+
+```powershell
+aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
+  --dense --gggs --gggs-use-mask `
+  --gggs-alpha-mode transparent --gggs-match-alpha-weight 0.25
+```
+
+- `transparent`（默认）：前景 RGB loss + `0.25 * BCE(render_alpha, mask)`；
+- `masked`：仅前景 RGB loss + 背景 alpha leakage penalty。
+
+若个别视图缺少 mask，该视图按无 mask 图像训练；若所有视图均缺少 mask，则立即报错，避免
+用户以为 mask 已生效。日志会单独输出 `rgb/alpha/depth/normal` 四项 loss。
+
+`D:\ScanVideo\ori_img` 的 76/76 个 sibling masks 已用 `transparent` 模式完成 preview MVS +
+500,000 Gaussian / 300 步真实回归：alpha loss 从 0.03934 降到第 200 步的 0.00223，三个
+mask 内诊断视角 PSNR 为 22.87 / 22.32 / 24.55 dB，导出 PLY 的 31,000,000 个 float 标量
+全部 finite。300 步仅用于验证 mask 数据链路和梯度，不能替代正式 30,000 步训练。
 
 ## 实拍端到端验证（2026-07-21）
 

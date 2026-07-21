@@ -2,8 +2,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 
 namespace aetherscan::splat {
+
+enum class AlphaMode {
+    masked,
+    transparent,
+};
 
 struct TrainingOptions {
     unsigned iterations{30'000};
@@ -26,7 +32,14 @@ struct TrainingOptions {
     float photometric_weight{1.F};
     float depth_weight{0.05F};
     float normal_weight{0.01F};
-    float alpha_weight{0.0F};
+    // Match pygsplat's mask-training controls. In masked mode RGB is supervised
+    // only in the foreground and background alpha leakage is penalized. In
+    // transparent mode the same foreground RGB loss is combined with full-image
+    // BCE(predicted alpha, mask) * match_alpha_weight.
+    bool use_mask{false};
+    AlphaMode alpha_mode{AlphaMode::transparent};
+    float match_alpha_weight{0.25F};
+    std::filesystem::path mask_dir;
     float charbonnier_epsilon{1e-3F};
     float kernel_size{0.3F};
     float scale_modifier{1.F};
