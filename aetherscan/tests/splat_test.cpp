@@ -173,6 +173,104 @@ void test_mask_loading() {
     std::filesystem::remove_all(root);
 }
 
+void test_source_resolution_and_knn_initialization() {
+    using namespace aetherscan;
+    const auto root = std::filesystem::temp_directory_path() /
+                      "aetherscan_splat_source_resolution_test";
+    std::filesystem::create_directories(root);
+    io::RgbImage source;
+    source.width = source.height = 4;
+    source.pixels.resize(4 * 4 * 3);
+    std::iota(source.pixels.begin(), source.pixels.end(), std::uint8_t{0});
+    const auto image_path = root / "frame.png";
+    io::save_rgb_png(source, image_path);
+    const io::RgbImage loaded_source = io::load_rgb(image_path);
+
+    mvs::MvsView view;
+    view.path = image_path;
+    view.width = view.height = 2;
+    view.fx = view.fy = 2.F;
+    view.cx = view.cy = 0.5F;
+    view.src_width = view.src_height = 4;
+    view.src_fx = view.src_fy = 4.F;
+    view.src_cx = view.src_cy = 1.5F;
+    view.k1 = 0.1F;
+    splat::TrainingOptions options;
+    options.use_source_resolution = true;
+    const auto training = splat::make_training_view(view, options);
+    require(
+        training.camera.width == 4 && training.camera.height == 4 &&
+            std::abs(training.camera.fx - 4.F) < 1e-6F,
+        "GGGS training did not restore source-resolution intrinsics");
+    const auto rgb = training.rgb.to_vector();
+    const float xn = (2.F - view.src_cx) / view.src_fx;
+    const float yn = (1.F - view.src_cy) / view.src_fy;
+    const float radial = 1.F + view.k1 * (xn * xn + yn * yn);
+    const float sx = view.src_fx * xn * radial + view.src_cx;
+    const float sy = view.src_fy * yn * radial + view.src_cy;
+    const int x0 = static_cast<int>(sx);
+    const int y0 = static_cast<int>(sy);
+    const int x1 = std::min(x0 + 1, 3);
+    const int y1 = std::min(y0 + 1, 3);
+    const float tx = sx - x0;
+    const float ty = sy - y0;
+    const auto red = [&](const int x, const int y) {
+        return loaded_source.pixels[
+                   (static_cast<std::size_t>(y) * 4 + x) * 3] /
+               255.F;
+    };
+    const float expected_red =
+        (red(x0, y0) * (1.F - tx) + red(x1, y0) * tx) * (1.F - ty) +
+        (red(x0, y1) * (1.F - tx) + red(x1, y1) * tx) * ty;
+    if (std::abs(rgb[6] - expected_red) >= 1e-6F)
+        throw std::runtime_error(
+            "GGGS source-resolution Brown mapping differs: actual=" +
+            std::to_string(rgb[6]) +
+            " expected=" + std::to_string(expected_red));
+
+    mvs::MvsScene scene;
+    for (const mvs::Vec3f& position : {
+             mvs::Vec3f(0.F, 0.F, 0.F),
+             mvs::Vec3f(1.F, 0.F, 0.F),
+             mvs::Vec3f(0.F, 1.F, 0.F),
+             mvs::Vec3f(0.F, 0.F, 1.F)}) {
+        mvs::DensePoint point;
+        point.position = position;
+        point.color = mvs::Vec3f::Constant(0.5F);
+        scene.dense_cloud.points.push_back(point);
+    }
+    options.max_gaussians = 0;
+    options.sh_degree = 0;
+    options.initialize_scale_from_knn = true;
+    options.constrain_scale_range = false;
+    const auto model = splat::initialize_from_dense_cloud(scene, options);
+    const auto scales = model.log_scales.to_vector();
+    const float expected_offset_scale = std::sqrt(5.F / 3.F);
+    require(
+        std::abs(std::exp(scales[0]) - 1.F) < 1e-5F &&
+            std::abs(std::exp(scales[1]) - 1.F) < 1e-5F &&
+            std::abs(std::exp(scales[2]) - 1.F) < 1e-5F &&
+            std::abs(std::exp(scales[3]) - expected_offset_scale) < 1e-5F &&
+            std::abs(std::exp(scales[6]) - expected_offset_scale) < 1e-5F &&
+            std::abs(std::exp(scales[9]) - expected_offset_scale) < 1e-5F,
+        "GGGS KNN initialization does not match three-neighbour RMS scale");
+    options.constrain_scale_range = true;
+    options.minimum_scale_fraction = 1e-4F;
+    options.maximum_scale_fraction = 0.1F;
+    const auto clamped_model =
+        splat::initialize_from_dense_cloud(scene, options);
+    const auto clamped_scales = clamped_model.log_scales.to_vector();
+    const float maximum_scale = std::sqrt(3.F) * 0.1F;
+    require(
+        std::all_of(
+            clamped_scales.begin(), clamped_scales.end(),
+            [maximum_scale](const float log_scale) {
+                return std::exp(log_scale) <= maximum_scale + 1e-5F;
+            }),
+        "GGGS KNN initialization ignored the configured maximum scale");
+    std::filesystem::remove_all(root);
+}
+
 void test_colmap_text_loading() {
     using namespace aetherscan;
     const auto root = std::filesystem::temp_directory_path() /
@@ -308,6 +406,24 @@ void test_mask_loss_modes() {
     require(std::abs(alpha_gradient[0] + 0.15625F) < 1e-5F &&
                 std::abs(alpha_gradient[1] - 0.625F) < 1e-5F,
             "transparent mode BCE gradient differs from pygsplat");
+    constexpr float finite_difference_step = 1e-3F;
+    const auto alpha_loss_at = [&](const float foreground_alpha) {
+        rendered.alpha = tinytensor::Tensor::from_vector(
+            std::vector<float>{foreground_alpha, 0.8F}, {1, 2},
+            tinytensor::Device::CUDA);
+        return detail::compute_training_loss(
+                   rendered, target, options, true).alpha_value;
+    };
+    const float numerical_gradient =
+        (alpha_loss_at(0.8F + finite_difference_step) -
+         alpha_loss_at(0.8F - finite_difference_step)) /
+        (2.F * finite_difference_step);
+    require(
+        std::abs(numerical_gradient - alpha_gradient[0]) < 2e-4F,
+        "transparent BCE analytic gradient failed finite differences");
+    rendered.alpha = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.8F, 0.8F}, {1, 2},
+        tinytensor::Device::CUDA);
 
     target.has_mask = false;
     loss = detail::compute_training_loss(rendered, target, options, false);
@@ -438,10 +554,29 @@ void test_densification_strategies_and_dense_bypass() {
     }
     options.input_is_dense = true;
     options.densification_strategy = splat::DensificationStrategy::adc_igs;
-    const auto dense_model = splat::Trainer(options).train(scene);
+    options.evaluation_iterations = {2};
+    std::size_t evaluations = 0;
+    const auto dense_model = splat::Trainer(options).train(
+        scene, {},
+        [&](const unsigned iteration, const splat::GaussianModel&) {
+            require(iteration == 2, "GGGS evaluation callback used wrong iteration");
+            ++evaluations;
+        });
     require(
         dense_model.size() == scene.dense_cloud.points.size(),
         "dense point-cloud initialization incorrectly enabled densification");
+    require(evaluations == 1, "GGGS evaluation callback was not invoked");
+
+    options.evaluation_iterations.clear();
+    options.densification_strategy =
+        splat::DensificationStrategy::dense_adaptive;
+    options.dense_growth_fraction = 1.F;
+    const auto adaptive_dense_model = splat::Trainer(options).train(scene);
+    require(
+        adaptive_dense_model.size() > scene.dense_cloud.points.size(),
+        "dense_adaptive did not allocate Gaussians to high-gradient regions");
+    require(adaptive_dense_model.size() <= options.densification_cap,
+            "dense_adaptive exceeded its hard Gaussian cap");
     std::filesystem::remove_all(root);
 }
 
@@ -458,6 +593,7 @@ int main() {
         test_forward_backward();
         test_adam_rejects_non_finite_gradients();
         test_mask_loading();
+        test_source_resolution_and_knn_initialization();
         test_colmap_text_loading();
         test_mask_loss_modes();
         test_ssim_loss_and_scale_constraint();

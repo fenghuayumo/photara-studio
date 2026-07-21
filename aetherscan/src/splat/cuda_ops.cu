@@ -261,7 +261,21 @@ __global__ void split_gaussians_kernel(
     const float* parent_quaternion = parent_quaternions + 4 * parent;
     float local[3]{};
     float log_scale_delta[3]{};
-    if (mode == 3) {
+    if (mode == 4) {
+        // Dense MVS already constrains the surface normal accurately. Split
+        // only in the local tangent plane (local Z is initialized from the
+        // fused-cloud normal) and preserve the normal-axis thickness.
+        constexpr float tangent_offset = 0.5F;
+        constexpr float tangent_scale = 0.7071067811865475F;
+        local[0] = expf(parent_log_scales[3 * parent]) *
+                   random_samples[3 * child] * tangent_offset;
+        local[1] = expf(parent_log_scales[3 * parent + 1]) *
+                   random_samples[3 * child + 1] * tangent_offset;
+        local[2] = 0.F;
+        log_scale_delta[0] = logf(tangent_scale);
+        log_scale_delta[1] = logf(tangent_scale);
+        log_scale_delta[2] = 0.F;
+    } else if (mode == 3) {
         int largest = 0;
         if (parent_log_scales[3 * parent + 1] >
             parent_log_scales[3 * parent + largest]) largest = 1;

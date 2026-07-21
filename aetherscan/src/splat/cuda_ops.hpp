@@ -74,7 +74,8 @@ void accumulate_densification_stats(
     bool use_maximum);
 
 // Mutate selected parents and their already-cloned children in place.
-// mode: 1=default split, 2=ADC+ split, 3=ADC-IGS split.
+// mode: 1=default split, 2=ADC+ split, 3=ADC-IGS split,
+//       4=dense-MVS tangent-plane split.
 void split_gaussians(
     GaussianModel& parents,
     GaussianModel& children,

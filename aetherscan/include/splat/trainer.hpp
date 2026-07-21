@@ -32,6 +32,8 @@ struct RenderMetrics {
 };
 
 using ProgressCallback = std::function<bool(const TrainingProgress&)>;
+using EvaluationCallback =
+    std::function<void(unsigned iteration, const GaussianModel& model)>;
 
 Camera camera_from_mvs_view(const mvs::MvsView& view);
 
@@ -46,7 +48,8 @@ public:
     explicit Trainer(TrainingOptions options = {});
 
     GaussianModel train(
-        const mvs::MvsScene& scene, ProgressCallback progress = {}) const;
+        const mvs::MvsScene& scene, ProgressCallback progress = {},
+        EvaluationCallback evaluate = {}) const;
 
 private:
     TrainingOptions options_;

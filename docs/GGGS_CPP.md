@@ -53,7 +53,7 @@ build/aetherscan/Release/aetherscan.exe `
   --images data/images `
   --output output/scene.mvs `
   --gggs `
-  --gggs-iterations 30000
+  --gggs-iterations 10000
 ```
 
 `--gggs` 隐含 `--dense`。输出包括 `scene_dense.ply` 和 `scene_gggs.ply`。当前 Gaussian
@@ -62,7 +62,9 @@ viewer/mesh-extraction 接入。
 
 稠密 MVS 输入默认从 fused cloud 均匀选取最多 500,000 个初始 Gaussian，可用
 `--gggs-max-gaussians N` 修改，`0` 表示使用全部 dense points。稠密点云已经具有高采样密度，
-因此自动关闭动态致密化；稀疏 COLMAP 输入则启用动态 Gaussian 管理。训练结束还会保存
+因此默认关闭动态致密化；显式选择 `--gggs-strategy dense_adaptive` 时，训练器会小批量回收
+低 opacity 点，并把预算重新分配到高屏幕梯度/大投影贡献区域。稀疏 COLMAP 输入则启用原有
+动态 Gaussian 管理。训练结束还会保存
 第一个、中间和最后相机的
 `*_gggs_view_*.png`，并在日志记录 PSNR、MAE 和 alpha coverage。
 
@@ -82,18 +84,28 @@ aetherscan --images D:\ScanVideo\ori_img\images `
 当前精确支持 `SIMPLE_PINHOLE`、`PINHOLE`、`SIMPLE_RADIAL`、`RADIAL`、`OPENCV`；无法由
 现有 Brown/pinhole 相机准确表达的 fisheye、FOV、FULL_OPENCV 会明确拒绝，不做静默近似。
 
-稀疏输入支持三种策略：
+当前支持四种策略，前三种用于稀疏输入，`dense_adaptive` 专用于 MVS 稠密输入：
 
 | `--gggs-strategy` | 统计与增长 | 默认调度 |
 |---|---|---|
 | `default` | 平均屏幕梯度；小 Gaussian clone，大 Gaussian split；opacity reset | 500–15k，每 100 步 |
 | `adc_plus` | 最大 refine weight、可见度和屏幕半径；预算回收、ADC split/decay/noise | 600–15k，每 200 步 |
 | `adc_igs` | ADC+ pruning + Gumbel Top-K + 投影优先级 + 最大轴二分 | 增长至 15k，裁剪至 25k，每 200 步 |
+| `dense_adaptive` | 每轮最多回收 1% 低贡献点（异常/越界点另行删除）、额外增长 0.5%，按最大 refine weight 和投影半径做表面切平面二分；不使用 ADC noise/decay | 1k–5k，每 500 步；1k 后冻结结构 Adam，仅继续 SH |
 
 所有策略均受 `--gggs-densification-cap` 硬上限约束，新增/裁剪数量写入训练日志。
 
-Mask 训练复用 `--masks` 指定的目录（默认寻找 `images/` 的同级 `masks/`），并支持 Python
-数据集相同的 stem 匹配、`.png/.jpg/.jpeg` 大小写扩展名、`>127` 二值阈值、最近邻重采样，
+稠密点云建议配置：
+
+```powershell
+aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
+  --dense --gggs --gggs-strategy dense_adaptive `
+  --gggs-max-gaussians 500000 --gggs-densification-cap 600000
+```
+
+GGGS 默认启用 Mask 训练，只重建主体并抑制背景；可用 `--gggs-use-mask=false` 显式关闭。
+Mask 复用 `--masks` 指定的目录（默认寻找 `images/` 的同级 `masks/`），并支持 Python
+数据集相同的 stem 匹配、`.png/.jpg/.jpeg` 大小写扩展名，以及双线性软覆盖重采样，
 找不到独立 mask 时回退到源图 alpha channel：
 
 ```powershell
@@ -101,20 +113,25 @@ aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
   --dense --gggs --gggs-use-mask `
   --gggs-alpha-mode transparent --gggs-match-alpha-weight 0.25 `
   --gggs-ssim-weight 0.2 `
-  --gggs-min-scale-fraction 0.0001 --gggs-max-scale-fraction 0.02 `
+  --gggs-min-scale-fraction 0.0001 --gggs-max-scale-fraction 0.002 `
   --gggs-max-scale-ratio 10
 ```
 
 - `transparent`（默认）：前景 RGB loss + `0.25 * BCE(render_alpha, mask)`；
 - `masked`：仅前景 RGB loss + 背景 alpha leakage penalty。
 
-若个别视图缺少 mask，该视图按无 mask 图像训练；若所有视图均缺少 mask，则立即报错，避免
-用户以为 mask 已生效。日志会单独输出 `rgb/alpha/depth/normal` 四项 loss。
+主体模式要求每个训练视图都有匹配 mask 或源图 alpha channel；任何视图缺失都会立即报错，
+避免背景意外进入模型。日志会单独输出 `rgb/alpha/depth/normal` 四项 loss。
+默认将最大 Gaussian 尺度限制为场景范围的 `0.002`，防止 splat 扩张到背景并形成不透明
+雾层；可通过 `--gggs-max-scale-fraction` 显式调整。
+稠密输入的结构参数在前 1,000 步完成 warm-up，随后冻结 mean/scale/quaternion/opacity Adam，
+避免长训练破坏已经较准确的 MVS 表面；SH 颜色参数继续训练，`dense_adaptive` 的受限回收和
+切平面二分也仍可执行。
 
 `D:\ScanVideo\ori_img` 的 76/76 个 sibling masks 已用 `transparent` 模式完成 preview MVS +
 500,000 Gaussian / 300 步真实回归：alpha loss 从 0.03934 降到第 200 步的 0.00223，三个
 mask 内诊断视角 PSNR 为 22.87 / 22.32 / 24.55 dB，导出 PLY 的 31,000,000 个 float 标量
-全部 finite。300 步仅用于验证 mask 数据链路和梯度，不能替代正式 30,000 步训练。
+全部 finite。300 步仅用于验证 mask 数据链路和梯度，不能替代正式 10,000 步训练。
 
 ## 实拍端到端验证（2026-07-21）
 
@@ -138,6 +155,13 @@ scale 从 `8.89e-8` 提升到 `8.89e-5`。两个版本 31,000,000 个 float 标�
 训练日志会输出当前随机采样的 `view`，因此单步 loss 不应被误读为同一张图上的单调曲线。
 当前渲染已明显稳定，但仍有 floaters；修复后约 23.6% Gaussian 的 opacity 低于 `1/255`，
 该 A/B 使用的是动态管理加入前的固定 Gaussian 版本，不能视为最终商业画质。
+
+`dense_adaptive` 已在相同 76 视角数据上完成 preview MVS + 5,000 步真实验证：以 500,000
+Gaussian 启动、硬上限 600,000，8 次受限 refine 后得到 520,150 Gaussian，GGGS 训练耗时
+23.79 秒。第 1,000→5,000 步三个固定视角的前景内 PSNR 从 22.36 / 22.47 / 25.25 dB
+变为 22.68 / 23.07 / 25.16 dB，alpha coverage 最终保持 0.323 / 0.333 / 0.325，没有出现
+结构/opacity 塌缩。当前 C++ 诊断采用更严格的“仅前景像素平均”口径；按 pygsplat 将 mask
+外像素置零后再对整图平均的口径，同一最终误差约为 27.6 / 27.8 / 30.0 dB。
 
 新增 COLMAP/ADC-IGS 路径已在同一数据集实测：文本模型加载 76 个相机和 83,993 个稀疏点，
 以 10,000 个 Gaussian 启动、硬上限 15,000，1000 步训练在第 800 步新增 3,987、裁剪 21，
