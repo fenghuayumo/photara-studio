@@ -351,8 +351,12 @@ GaussianModel Trainer::train(
     }
     const float scene_extent = std::max(
         (scene_maximum - scene_minimum).norm(), 1e-6F);
-    const float minimum_log_scale = std::log(scene_extent * 1e-7F);
-    const float maximum_log_scale = std::log(scene_extent * 0.02F);
+    const float minimum_log_scale = std::log(
+        scene_extent * std::max(options_.minimum_scale_fraction, 1e-8F));
+    const float maximum_log_scale = std::log(
+        scene_extent * std::max(
+            options_.maximum_scale_fraction,
+            options_.minimum_scale_fraction));
 
     for (unsigned iteration = 1; iteration <= options_.iterations; ++iteration) {
         const auto started = std::chrono::steady_clock::now();
@@ -360,7 +364,8 @@ GaussianModel Trainer::train(
             (iteration == 1 || iteration == options_.iterations ||
              (options_.log_interval != 0 &&
               iteration % options_.log_interval == 0));
-        const auto& target = views[choose_view(random)];
+        const std::size_t view_index = choose_view(random);
+        const auto& target = views[view_index];
         RasterizeOptions raster_options;
         raster_options.active_sh_degree = std::min(
             options_.sh_degree,
@@ -379,13 +384,16 @@ GaussianModel Trainer::train(
 
         const float progress_fraction = static_cast<float>(iteration - 1) /
                                         std::max(1U, options_.iterations);
-        const float means_lr = options_.means_lr * std::pow(0.01F, progress_fraction);
+        const float means_lr = options_.means_lr * scene_extent *
+                               std::pow(0.01F, progress_fraction);
         detail::adam_step(
             model.means, gradients.means, means_state, means_lr, iteration, options_);
         detail::adam_step(
             model.log_scales, gradients.log_scales, scales_state,
             options_.scales_lr, iteration, options_, 0, 0.F,
             minimum_log_scale, maximum_log_scale);
+        detail::constrain_scale_ratio(
+            model.log_scales, options_.max_scale_ratio);
         detail::adam_step(
             model.quaternions, gradients.quaternions, rotations_state,
             options_.quaternions_lr, iteration, options_);
@@ -404,10 +412,9 @@ GaussianModel Trainer::train(
                     cudaGetErrorString(report_error));
             const double milliseconds = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count();
-            if (!progress({iteration, options_.iterations, model.size(), loss.total,
-                           loss.rgb, loss.alpha_value, loss.depth_value,
-                           loss.normal_value,
-                           milliseconds}))
+            if (!progress({iteration, options_.iterations, model.size(), view_index,
+                           loss.total, loss.rgb, loss.alpha_value,
+                           loss.depth_value, loss.normal_value, milliseconds}))
                 break;
         }
     }

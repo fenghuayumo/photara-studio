@@ -82,7 +82,8 @@ __global__ void loss_kernel(
     const std::size_t pixels, const float photo_weight,
     const float depth_weight, const float normal_weight,
     const bool mask_enabled, const int alpha_mode,
-    const float match_alpha_weight, const float epsilon) {
+    const float match_alpha_weight, const float l1_weight,
+    const float geometry_epsilon) {
     const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
     if (pixel >= pixels) return;
     const float valid = mask_enabled ? mask[pixel] : 1.F;
@@ -91,21 +92,21 @@ __global__ void loss_kernel(
     for (int channel = 0; channel < 3; ++channel) {
         const std::size_t offset = static_cast<std::size_t>(channel) * pixels + pixel;
         const float difference = color[offset] - target_color[offset];
-        const float robust = sqrtf(difference * difference + epsilon * epsilon);
-        rgb_loss += robust;
-        grad_color[offset] = photo_weight * valid * inverse_pixels / 3.F *
-                             difference / robust;
+        rgb_loss += fabsf(difference);
+        grad_color[offset] = photo_weight * l1_weight * valid * inverse_pixels /
+                             3.F * ((difference > 0.F) - (difference < 0.F));
     }
     if (terms)
         atomicAdd(
             terms + 0,
-            photo_weight * valid * rgb_loss * inverse_pixels / 3.F);
+            photo_weight * l1_weight * valid * rgb_loss * inverse_pixels / 3.F);
 
     const bool has_depth = target_depth[pixel] > 0.F && depth[pixel] > 0.F;
     if (has_depth && valid > 0.F && depth_weight > 0.F) {
         const float scale = fmaxf(target_depth[pixel], 1e-4F);
         const float difference = (depth[pixel] - target_depth[pixel]) / scale;
-        const float robust = sqrtf(difference * difference + epsilon * epsilon);
+        const float robust = sqrtf(
+            difference * difference + geometry_epsilon * geometry_epsilon);
         grad_depth[pixel] = depth_weight * inverse_pixels * difference /
                             (robust * scale);
         if (terms)
@@ -152,6 +153,82 @@ __global__ void loss_kernel(
     }
 }
 
+// A compact SSIM window keeps the native training path fast while restoring
+// the structure-aware term used by pygsplat. Inputs are masked before the
+// statistics, matching colors*mask / pixels*mask in simple_trainer.py.
+__global__ void ssim3x3_kernel(
+    const float* color, const float* target_color, const float* mask,
+    float* grad_color, float* terms, const std::uint32_t width,
+    const std::uint32_t height, const bool mask_enabled,
+    const float weight) {
+    const std::size_t centers_x = width - 2U;
+    const std::size_t centers_y = height - 2U;
+    const std::size_t centers = centers_x * centers_y;
+    const std::size_t task = blockIdx.x * blockDim.x + threadIdx.x;
+    if (task >= 3U * centers) return;
+    const int channel = static_cast<int>(task / centers);
+    const std::size_t center = task % centers;
+    const std::uint32_t cx = static_cast<std::uint32_t>(center % centers_x) + 1U;
+    const std::uint32_t cy = static_cast<std::uint32_t>(center / centers_x) + 1U;
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    constexpr float inverse_window = 1.F / 9.F;
+    constexpr float c1 = 0.0001F;
+    constexpr float c2 = 0.0009F;
+    float mean_x = 0.F, mean_y = 0.F;
+    float mean_x2 = 0.F, mean_y2 = 0.F, mean_xy = 0.F;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const std::size_t pixel =
+                static_cast<std::size_t>(cy + dy) * width + (cx + dx);
+            const float valid = mask_enabled ? mask[pixel] : 1.F;
+            const float x = color[static_cast<std::size_t>(channel) * pixels + pixel] * valid;
+            const float y = target_color[static_cast<std::size_t>(channel) * pixels + pixel] * valid;
+            mean_x += x; mean_y += y;
+            mean_x2 += x * x; mean_y2 += y * y; mean_xy += x * y;
+        }
+    }
+    mean_x *= inverse_window; mean_y *= inverse_window;
+    mean_x2 *= inverse_window; mean_y2 *= inverse_window;
+    mean_xy *= inverse_window;
+    const float variance_x = fmaxf(mean_x2 - mean_x * mean_x, 0.F);
+    const float variance_y = fmaxf(mean_y2 - mean_y * mean_y, 0.F);
+    const float covariance = mean_xy - mean_x * mean_y;
+    const float a = 2.F * mean_x * mean_y + c1;
+    const float b = 2.F * covariance + c2;
+    const float c = mean_x * mean_x + mean_y * mean_y + c1;
+    const float d = variance_x + variance_y + c2;
+    const float numerator = a * b;
+    const float denominator = c * d;
+    const float ssim = numerator / denominator;
+    const float normalization = weight /
+        (3.F * static_cast<float>(centers));
+    if (terms) atomicAdd(terms, normalization * (1.F - ssim));
+
+    const float denominator2 = denominator * denominator;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const std::size_t pixel =
+                static_cast<std::size_t>(cy + dy) * width + (cx + dx);
+            const float valid = mask_enabled ? mask[pixel] : 1.F;
+            if (valid == 0.F) continue;
+            const float x = color[static_cast<std::size_t>(channel) * pixels + pixel];
+            const float y = target_color[static_cast<std::size_t>(channel) * pixels + pixel];
+            const float da = 2.F * mean_y * inverse_window;
+            const float db = 2.F * (y - mean_y) * inverse_window;
+            const float dc = 2.F * mean_x * inverse_window;
+            const float dd = 2.F * (x - mean_x) * inverse_window;
+            const float d_numerator = da * b + a * db;
+            const float d_denominator = dc * d + c * dd;
+            const float d_ssim =
+                (d_numerator * denominator - numerator * d_denominator) /
+                denominator2;
+            atomicAdd(
+                grad_color + static_cast<std::size_t>(channel) * pixels + pixel,
+                -normalization * d_ssim);
+        }
+    }
+}
+
 __global__ void adam_kernel(
     float* parameter, const float* gradient, float* first, float* second,
     const std::size_t count, const float learning_rate,
@@ -191,6 +268,21 @@ __global__ void adam_kernel(
                           (sqrtf(v / correction2) + epsilon);
     const float updated = isfinite(candidate) ? candidate : previous;
     parameter[index] = fminf(fmaxf(updated, clamp_min), clamp_max);
+}
+
+__global__ void constrain_scale_ratio_kernel(
+    float* log_scales, const std::size_t count, const float maximum_log_ratio) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    float* values = log_scales + 3 * index;
+    const float minimum = fminf(values[0], fminf(values[1], values[2]));
+    const float maximum = fmaxf(values[0], fmaxf(values[1], values[2]));
+    if (maximum - minimum <= maximum_log_ratio) return;
+    const float midpoint = 0.5F * (minimum + maximum);
+    const float half_range = 0.5F * maximum_log_ratio;
+    for (int axis = 0; axis < 3; ++axis)
+        values[axis] = fminf(fmaxf(values[axis], midpoint - half_range),
+                             midpoint + half_range);
 }
 
 }  // namespace
@@ -244,6 +336,9 @@ LossGradients compute_training_loss(
     if (collect_scalar_terms)
         terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
     const bool mask_enabled = options.use_mask && target.has_mask;
+    const float ssim_weight = target.camera.width >= 3 && target.camera.height >= 3
+        ? std::clamp(options.ssim_weight, 0.F, 1.F)
+        : 0.F;
     loss_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
         rendered.color.ptr<float>(), rendered.alpha.ptr<float>(),
         rendered.median_depth.ptr<float>(), rendered.normal.ptr<float>(),
@@ -257,8 +352,21 @@ LossGradients compute_training_loss(
         options.use_mvs_normals ? options.normal_weight : 0.F,
         mask_enabled,
         options.alpha_mode == AlphaMode::masked ? 0 : 1,
-        options.match_alpha_weight, options.charbonnier_epsilon);
+        options.match_alpha_weight, 1.F - ssim_weight,
+        options.geometry_epsilon);
     check_cuda(cudaGetLastError(), "compute GGGS training loss");
+    if (ssim_weight > 0.F) {
+        const std::size_t centers =
+            static_cast<std::size_t>(target.camera.width - 2U) *
+            (target.camera.height - 2U);
+        ssim3x3_kernel<<<(3 * centers + k_threads - 1) / k_threads, k_threads>>>(
+            rendered.color.ptr<float>(), target.rgb.ptr<float>(),
+            target.mask.ptr<float>(), result.color.ptr<float>(),
+            collect_scalar_terms ? terms.ptr<float>() : nullptr,
+            target.camera.width, target.camera.height, mask_enabled,
+            options.photometric_weight * ssim_weight);
+        check_cuda(cudaGetLastError(), "compute GGGS SSIM loss");
+    }
     if (collect_scalar_terms) {
         std::array<float, 4> host{};
         check_cuda(cudaMemcpy(
@@ -294,6 +402,16 @@ void adam_step(
         secondary_learning_rate, group_stride, options.beta1, options.beta2,
         correction1, correction2, options.adam_epsilon, clamp_min, clamp_max);
     check_cuda(cudaGetLastError(), "GGGS Adam update");
+}
+
+void constrain_scale_ratio(
+    tinytensor::Tensor& log_scales, const float maximum_ratio) {
+    if (maximum_ratio <= 1.F || log_scales.numel() == 0) return;
+    const std::size_t count = log_scales.numel() / 3;
+    constrain_scale_ratio_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        log_scales.ptr<float>(), count, std::log(maximum_ratio));
+    check_cuda(cudaGetLastError(), "constrain GGGS scale ratio");
 }
 
 }  // namespace aetherscan::splat::detail

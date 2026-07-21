@@ -74,6 +74,10 @@ struct ReconstructCli {
     bool gggs_use_mask{false};
     std::string gggs_alpha_mode{"transparent"};
     float gggs_match_alpha_weight{0.25F};
+    float gggs_ssim_weight{0.2F};
+    float gggs_min_scale_fraction{1e-4F};
+    float gggs_max_scale_fraction{0.02F};
+    float gggs_max_scale_ratio{10.F};
     bool mesh{false};
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
@@ -188,6 +192,10 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-use-mask BOOL  train from masks/ or source alpha\n"
               << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
               << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
+              << "  --gggs-ssim-weight W  structural loss blend (default 0.2)\n"
+              << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
+              << "  --gggs-max-scale-fraction F  maximum scale / scene extent (default 0.02)\n"
+              << "  --gggs-max-scale-ratio R  maximum Gaussian anisotropy (default 10)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mesh-method auto|projective|delaunay\n"
               << "               auto uses projective for preview, global Delaunay otherwise\n"
@@ -293,6 +301,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("transparent"))
         ("gggs-match-alpha-weight", "Alpha BCE weight in transparent mode",
          cxxopts::value<float>()->default_value("0.25"))
+        ("gggs-ssim-weight", "SSIM blend in the photometric loss",
+         cxxopts::value<float>()->default_value("0.2"))
+        ("gggs-min-scale-fraction", "Minimum Gaussian scale / scene extent",
+         cxxopts::value<float>()->default_value("0.0001"))
+        ("gggs-max-scale-fraction", "Maximum Gaussian scale / scene extent",
+         cxxopts::value<float>()->default_value("0.02"))
+        ("gggs-max-scale-ratio", "Maximum Gaussian axis ratio (0 disables)",
+         cxxopts::value<float>()->default_value("10"))
         ("mesh", "Build MVS mesh after densify (implies --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mesh-method",
@@ -394,6 +410,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_alpha_mode = result["gggs-alpha-mode"].as<std::string>();
     cli.gggs_match_alpha_weight =
         result["gggs-match-alpha-weight"].as<float>();
+    cli.gggs_ssim_weight = result["gggs-ssim-weight"].as<float>();
+    cli.gggs_min_scale_fraction =
+        result["gggs-min-scale-fraction"].as<float>();
+    cli.gggs_max_scale_fraction =
+        result["gggs-max-scale-fraction"].as<float>();
+    cli.gggs_max_scale_ratio =
+        result["gggs-max-scale-ratio"].as<float>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mesh_obj = result["mesh-obj"].as<bool>();
     cli.texture = result["texture"].as<bool>();
@@ -459,6 +482,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.gggs_match_alpha_weight < 0.F)
         throw std::invalid_argument(
             "--gggs-match-alpha-weight must be non-negative");
+    if (cli.gggs_ssim_weight < 0.F || cli.gggs_ssim_weight > 1.F)
+        throw std::invalid_argument("--gggs-ssim-weight must be in [0,1]");
+    if (cli.gggs_min_scale_fraction <= 0.F ||
+        cli.gggs_max_scale_fraction < cli.gggs_min_scale_fraction)
+        throw std::invalid_argument(
+            "GGGS scale fractions must satisfy 0 < min <= max");
+    if (cli.gggs_max_scale_ratio != 0.F && cli.gggs_max_scale_ratio < 1.F)
+        throw std::invalid_argument(
+            "--gggs-max-scale-ratio must be 0 or >= 1");
 #if !defined(AETHERSCAN_HAS_TEXTURE)
     if (cli.texture || cli.delight) {
         throw std::invalid_argument(
@@ -992,6 +1024,13 @@ int main(int argc, char** argv) {
                     : aetherscan::splat::AlphaMode::transparent;
                 gggs_options.match_alpha_weight =
                     cli.gggs_match_alpha_weight;
+                gggs_options.ssim_weight = cli.gggs_ssim_weight;
+                gggs_options.minimum_scale_fraction =
+                    cli.gggs_min_scale_fraction;
+                gggs_options.maximum_scale_fraction =
+                    cli.gggs_max_scale_fraction;
+                gggs_options.max_scale_ratio =
+                    cli.gggs_max_scale_ratio;
                 aetherscan::core::Logger::instance().info(
                     "gggs training: iterations=", gggs_options.iterations,
                     " dense_points=", mvs_scene.dense_cloud.points.size(),
@@ -1000,6 +1039,10 @@ int main(int argc, char** argv) {
                     " mask_dir=", gggs_options.mask_dir,
                     " alpha_mode=", cli.gggs_alpha_mode,
                     " match_alpha_weight=", gggs_options.match_alpha_weight,
+                    " ssim_weight=", gggs_options.ssim_weight,
+                    " scale_fraction=[", gggs_options.minimum_scale_fraction,
+                    ',', gggs_options.maximum_scale_fraction, ']',
+                    " max_scale_ratio=", gggs_options.max_scale_ratio,
                     " views=", mvs_scene.views.size());
                 const auto gggs_started = std::chrono::steady_clock::now();
                 const aetherscan::splat::GaussianModel gaussians =
@@ -1009,6 +1052,7 @@ int main(int argc, char** argv) {
                             aetherscan::core::Logger::instance().info(
                                 "gggs iteration=", progress.iteration, '/',
                                 progress.total_iterations,
+                                " view=", progress.view_index,
                                 " loss=", progress.loss,
                                 " rgb=", progress.rgb_loss,
                                 " alpha=", progress.alpha_loss,

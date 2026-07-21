@@ -28,8 +28,11 @@ struct TrainingOptions {
     float sh_rest_lr{1.25e-4F};
     float beta1{0.9F};
     float beta2{0.999F};
-    float adam_epsilon{1e-8F};
+    // Match pygsplat/FusedAdam. The raster gradients are averaged over every
+    // image pixel, so 1e-8 suppresses useful geometry updates.
+    float adam_epsilon{1e-15F};
     float photometric_weight{1.F};
+    float ssim_weight{0.2F};
     float depth_weight{0.05F};
     float normal_weight{0.01F};
     // Match pygsplat's mask-training controls. In masked mode RGB is supervised
@@ -40,7 +43,10 @@ struct TrainingOptions {
     AlphaMode alpha_mode{AlphaMode::transparent};
     float match_alpha_weight{0.25F};
     std::filesystem::path mask_dir;
-    float charbonnier_epsilon{1e-3F};
+    float minimum_scale_fraction{1e-4F};
+    float maximum_scale_fraction{0.02F};
+    float max_scale_ratio{10.F};
+    float geometry_epsilon{1e-3F};
     float kernel_size{0.3F};
     float scale_modifier{1.F};
     bool use_mvs_depth{true};

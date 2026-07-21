@@ -223,6 +223,54 @@ void test_mask_loss_modes() {
             "missing per-view mask incorrectly enabled alpha supervision");
 }
 
+void test_ssim_loss_and_scale_constraint() {
+    using namespace aetherscan::splat;
+    std::vector<float> prediction(27, 0.4F);
+    std::vector<float> reference(27, 0.4F);
+    prediction[4] = 0.8F;
+    RenderResult rendered;
+    rendered.color = tinytensor::Tensor::from_vector(
+        prediction, {3, 3, 3}, tinytensor::Device::CUDA);
+    rendered.alpha = tinytensor::Tensor::zeros({3, 3}, tinytensor::Device::CUDA);
+    rendered.median_depth = tinytensor::Tensor::zeros(
+        {3, 3}, tinytensor::Device::CUDA);
+    rendered.normal = tinytensor::Tensor::zeros(
+        {3, 3, 3}, tinytensor::Device::CUDA);
+    TrainingView target;
+    target.camera.width = target.camera.height = 3;
+    target.rgb = tinytensor::Tensor::from_vector(
+        reference, {3, 3, 3}, tinytensor::Device::CUDA);
+    target.depth = tinytensor::Tensor::zeros({3, 3}, tinytensor::Device::CUDA);
+    target.normal = tinytensor::Tensor::zeros(
+        {3, 3, 3}, tinytensor::Device::CUDA);
+    target.mask = tinytensor::Tensor::from_vector(
+        std::vector<float>(9, 1.F), {3, 3}, tinytensor::Device::CUDA);
+    TrainingOptions options;
+    options.ssim_weight = 1.F;
+    options.use_mvs_depth = false;
+    options.use_mvs_normals = false;
+    const auto loss = detail::compute_training_loss(
+        rendered, target, options, true);
+    require(loss.rgb > 0.F, "SSIM did not detect a structural difference");
+    require_finite(loss.color, "SSIM produced a non-finite gradient");
+    const auto gradients = loss.color.to_vector();
+    require(
+        std::any_of(gradients.begin(), gradients.end(),
+                    [](float value) { return std::abs(value) > 1e-6F; }),
+        "SSIM did not backpropagate into rendered color");
+
+    auto log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{std::log(0.01F), std::log(1.F), std::log(0.001F)},
+        {1, 3}, tinytensor::Device::CUDA);
+    detail::constrain_scale_ratio(log_scales, 10.F);
+    const auto constrained = log_scales.to_vector();
+    const auto [minimum, maximum] = std::minmax_element(
+        constrained.begin(), constrained.end());
+    require(
+        std::exp(*maximum - *minimum) <= 10.0001F,
+        "Gaussian scale-ratio constraint was not applied");
+}
+
 }  // namespace
 
 int main() {
@@ -237,6 +285,7 @@ int main() {
         test_adam_rejects_non_finite_gradients();
         test_mask_loading();
         test_mask_loss_modes();
+        test_ssim_loss_and_scale_constraint();
         std::cout << "splat tests passed\n";
         return 0;
     } catch (const std::exception& error) {

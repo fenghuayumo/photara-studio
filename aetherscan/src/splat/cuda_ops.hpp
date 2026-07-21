@@ -53,4 +53,7 @@ void adam_step(
     float clamp_min = -std::numeric_limits<float>::infinity(),
     float clamp_max = std::numeric_limits<float>::infinity());
 
+void constrain_scale_ratio(
+    tinytensor::Tensor& log_scales, float maximum_ratio);
+
 }  // namespace aetherscan::splat::detail
