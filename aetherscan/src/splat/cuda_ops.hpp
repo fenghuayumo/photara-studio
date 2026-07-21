@@ -30,6 +30,13 @@ struct AdamState {
     tinytensor::Tensor second;
 };
 
+struct DensificationStats {
+    tinytensor::Tensor gradient;
+    tinytensor::Tensor count;
+    tinytensor::Tensor max_screen_radius;
+    tinytensor::Tensor priority;
+};
+
 ActivatedParameters activate_parameters(const GaussianModel& model);
 
 void chain_parameter_gradients(
@@ -55,5 +62,37 @@ void adam_step(
 
 void constrain_scale_ratio(
     tinytensor::Tensor& log_scales, float maximum_ratio);
+
+DensificationStats make_densification_stats(std::size_t count);
+
+void accumulate_densification_stats(
+    const tinytensor::Tensor& refine_weight,
+    const tinytensor::Tensor& radii,
+    DensificationStats& stats,
+    std::uint32_t width,
+    std::uint32_t height,
+    bool use_maximum);
+
+// Mutate selected parents and their already-cloned children in place.
+// mode: 1=default split, 2=ADC+ split, 3=ADC-IGS split.
+void split_gaussians(
+    GaussianModel& parents,
+    GaussianModel& children,
+    const tinytensor::Tensor& parent_indices,
+    const tinytensor::Tensor& random_samples,
+    int mode,
+    float minimum_opacity);
+
+void apply_adc_decay(
+    GaussianModel& model, float opacity_decay, float scale_decay);
+
+void inject_adc_noise(
+    GaussianModel& model,
+    const tinytensor::Tensor& radii,
+    float standard_deviation,
+    float maximum_noise,
+    unsigned seed);
+
+void reset_opacity(GaussianModel& model, float maximum_opacity);
 
 }  // namespace aetherscan::splat::detail

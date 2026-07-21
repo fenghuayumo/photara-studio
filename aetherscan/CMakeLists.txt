@@ -336,7 +336,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
 
         add_library(aetherscan_splat_cuda STATIC
             src/splat/rasterizer.cu
-            src/splat/cuda_ops.cu)
+            src/splat/cuda_ops.cu
+            src/splat/fused_ssim.cu)
         target_include_directories(aetherscan_splat_cuda
             PUBLIC
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -356,7 +357,9 @@ if(AETHERSCAN_ENABLE_FEATURES)
             CUDA_SEPARABLE_COMPILATION OFF
             POSITION_INDEPENDENT_CODE ON)
 
-        add_library(aetherscan_splat src/splat/trainer.cpp)
+        add_library(aetherscan_splat
+            src/splat/colmap.cpp
+            src/splat/trainer.cpp)
         add_library(AetherScan::Splat ALIAS aetherscan_splat)
         target_include_directories(aetherscan_splat
             PUBLIC

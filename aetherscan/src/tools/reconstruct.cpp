@@ -4,6 +4,7 @@
 #include "mvs/export.hpp"
 #include "core/logging.hpp"
 #if defined(AETHERSCAN_HAS_GGGS)
+#include "splat/colmap.hpp"
 #include "splat/trainer.hpp"
 #endif
 #if defined(AETHERSCAN_HAS_TEXTURE)
@@ -69,6 +70,7 @@ struct ReconstructCli {
     bool lightglue_cpu{false};
     bool dense{false};
     bool gggs{false};
+    std::filesystem::path colmap_model;
     unsigned gggs_iterations{30'000};
     std::uint64_t gggs_max_gaussians{500'000};
     bool gggs_use_mask{false};
@@ -78,6 +80,8 @@ struct ReconstructCli {
     float gggs_min_scale_fraction{1e-4F};
     float gggs_max_scale_fraction{0.02F};
     float gggs_max_scale_ratio{10.F};
+    std::string gggs_strategy{"default"};
+    std::uint64_t gggs_densification_cap{4'000'000};
     bool mesh{false};
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
@@ -186,7 +190,8 @@ void print_help(const cxxopts::Options& options) {
               << "  global       rotation averaging + global positioning + BA\n"
               << "Dense (optional Stage A Fast MVS after SfM):\n"
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
-              << "  --gggs       train CUDA GGGS from the fused cloud -> *_gggs.ply\n"
+              << "  --gggs       train CUDA GGGS -> *_gggs.ply\n"
+              << "  --colmap PATH  load COLMAP sparse model, bypass SfM/MVS, enable GGGS\n"
               << "  --gggs-iterations N  GGGS optimizer steps (default 30000)\n"
               << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --gggs-use-mask BOOL  train from masks/ or source alpha\n"
@@ -196,6 +201,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --gggs-max-scale-fraction F  maximum scale / scene extent (default 0.02)\n"
               << "  --gggs-max-scale-ratio R  maximum Gaussian anisotropy (default 10)\n"
+              << "  --gggs-strategy default|adc_plus|adc_igs (sparse input only)\n"
+              << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 4M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mesh-method auto|projective|delaunay\n"
               << "               auto uses projective for preview, global Delaunay otherwise\n"
@@ -289,8 +296,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false"))
         ("dense", "Run Fast MVS densify after SfM",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("gggs", "Train CUDA GGGS after densify (implies --dense)",
+        ("gggs", "Train CUDA GGGS (MVS dense input disables GS densification)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("colmap", "COLMAP root/sparse/0 model; bypass internal SfM and MVS",
+         cxxopts::value<std::string>()->default_value(""))
         ("gggs-iterations", "GGGS optimizer iterations",
          cxxopts::value<unsigned>()->default_value("30000"))
         ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
@@ -309,6 +318,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.02"))
         ("gggs-max-scale-ratio", "Maximum Gaussian axis ratio (0 disables)",
          cxxopts::value<float>()->default_value("10"))
+        ("gggs-strategy", "Sparse-input densification: default, adc_plus, adc_igs",
+         cxxopts::value<std::string>()->default_value("default"))
+        ("gggs-densification-cap", "Dynamic Gaussian hard cap",
+         cxxopts::value<std::uint64_t>()->default_value("4000000"))
         ("mesh", "Build MVS mesh after densify (implies --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mesh-method",
@@ -403,6 +416,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.lightglue_cpu = result["lightglue-cpu"].as<bool>();
     cli.dense = result["dense"].as<bool>();
     cli.gggs = result["gggs"].as<bool>();
+    const std::string colmap_text = result["colmap"].as<std::string>();
+    if (!colmap_text.empty()) cli.colmap_model = utf8_to_path(colmap_text);
     cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
     cli.gggs_max_gaussians =
         result["gggs-max-gaussians"].as<std::uint64_t>();
@@ -417,6 +432,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["gggs-max-scale-fraction"].as<float>();
     cli.gggs_max_scale_ratio =
         result["gggs-max-scale-ratio"].as<float>();
+    cli.gggs_strategy = result["gggs-strategy"].as<std::string>();
+    cli.gggs_densification_cap =
+        result["gggs-densification-cap"].as<std::uint64_t>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mesh_obj = result["mesh-obj"].as<bool>();
     cli.texture = result["texture"].as<bool>();
@@ -466,7 +484,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.texture) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
     if (cli.mesh) cli.dense = true;
-    if (cli.gggs) cli.dense = true;
+    if (!cli.colmap_model.empty()) cli.gggs = true;
+    if (cli.gggs && cli.colmap_model.empty()) cli.dense = true;
+    if (!cli.colmap_model.empty() && cli.mesh)
+        throw std::invalid_argument(
+            "--colmap sparse GGGS cannot be combined with --mesh/--texture; "
+            "run MVS explicitly when a mesh is required");
 #if !defined(AETHERSCAN_HAS_GGGS)
     if (cli.gggs) {
         throw std::invalid_argument(
@@ -491,6 +514,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.gggs_max_scale_ratio != 0.F && cli.gggs_max_scale_ratio < 1.F)
         throw std::invalid_argument(
             "--gggs-max-scale-ratio must be 0 or >= 1");
+    if (cli.gggs_strategy != "default" &&
+        cli.gggs_strategy != "adc_plus" &&
+        cli.gggs_strategy != "adc_igs")
+        throw std::invalid_argument(
+            "--gggs-strategy must be default, adc_plus, or adc_igs");
+    if (cli.gggs_densification_cap == 0)
+        throw std::invalid_argument(
+            "--gggs-densification-cap must be positive");
 #if !defined(AETHERSCAN_HAS_TEXTURE)
     if (cli.texture || cli.delight) {
         throw std::invalid_argument(
@@ -802,6 +833,122 @@ std::filesystem::path write_sfm_diagnostics(
     return csv_path;
 }
 
+#if defined(AETHERSCAN_HAS_GGGS)
+void run_gggs_training(
+    const aetherscan::mvs::MvsScene& scene,
+    const ReconstructCli& cli,
+    const bool dense_input) {
+    aetherscan::splat::TrainingOptions options;
+    options.iterations = cli.gggs_iterations;
+    options.max_gaussians = static_cast<std::size_t>(
+        std::min<std::uint64_t>(
+            cli.gggs_max_gaussians,
+            (std::numeric_limits<std::size_t>::max)()));
+    options.input_is_dense = dense_input;
+    options.densification_cap = static_cast<std::size_t>(
+        std::min<std::uint64_t>(
+            cli.gggs_densification_cap,
+            (std::numeric_limits<std::size_t>::max)()));
+    if (!dense_input)
+        options.max_gaussians = (std::min)(
+            options.max_gaussians, options.densification_cap);
+    if (cli.gggs_strategy == "adc_plus")
+        options.densification_strategy =
+            aetherscan::splat::DensificationStrategy::adc_plus;
+    else if (cli.gggs_strategy == "adc_igs")
+        options.densification_strategy =
+            aetherscan::splat::DensificationStrategy::adc_igs;
+    else
+        options.densification_strategy =
+            aetherscan::splat::DensificationStrategy::default_strategy;
+    if (options.densification_strategy !=
+        aetherscan::splat::DensificationStrategy::default_strategy)
+        options.opacities_lr = 0.025F;
+    options.use_mask = cli.gggs_use_mask;
+    options.mask_dir = cli.masks_dir;
+    options.alpha_mode = cli.gggs_alpha_mode == "masked"
+        ? aetherscan::splat::AlphaMode::masked
+        : aetherscan::splat::AlphaMode::transparent;
+    options.match_alpha_weight = cli.gggs_match_alpha_weight;
+    options.ssim_weight = cli.gggs_ssim_weight;
+    options.minimum_scale_fraction = cli.gggs_min_scale_fraction;
+    options.maximum_scale_fraction = cli.gggs_max_scale_fraction;
+    options.max_scale_ratio = cli.gggs_max_scale_ratio;
+    options.use_mvs_depth = dense_input;
+    options.use_mvs_normals = dense_input;
+    const char* effective_strategy = dense_input
+        ? "disabled(dense-input)"
+        : cli.gggs_strategy.c_str();
+    aetherscan::core::Logger::instance().info(
+        "gggs training: iterations=", options.iterations,
+        " input=", dense_input ? "dense_mvs" : "sparse_colmap",
+        " input_points=", scene.dense_cloud.points.size(),
+        " max_initial_gaussians=", options.max_gaussians,
+        " densification_strategy=", effective_strategy,
+        " densification_cap=", options.densification_cap,
+        " use_mask=", options.use_mask,
+        " mask_dir=", options.mask_dir,
+        " alpha_mode=", cli.gggs_alpha_mode,
+        " match_alpha_weight=", options.match_alpha_weight,
+        " ssim=fused_11x11_valid weight=", options.ssim_weight,
+        " scale_fraction=[", options.minimum_scale_fraction,
+        ',', options.maximum_scale_fraction, ']',
+        " max_scale_ratio=", options.max_scale_ratio,
+        " views=", scene.views.size());
+    const auto started = std::chrono::steady_clock::now();
+    const aetherscan::splat::GaussianModel gaussians =
+        aetherscan::splat::Trainer(options).train(
+            scene,
+            [](const aetherscan::splat::TrainingProgress& progress) {
+                aetherscan::core::Logger::instance().info(
+                    "gggs iteration=", progress.iteration, '/',
+                    progress.total_iterations,
+                    " view=", progress.view_index,
+                    " gaussians=", progress.gaussian_count,
+                    " grown=", progress.grown_count,
+                    " pruned=", progress.pruned_count,
+                    " loss=", progress.loss,
+                    " rgb=", progress.rgb_loss,
+                    " alpha=", progress.alpha_loss,
+                    " depth=", progress.depth_loss,
+                    " normal=", progress.normal_loss,
+                    " step_ms=", progress.milliseconds);
+                return true;
+            });
+    const std::filesystem::path out_dir = cli.output.parent_path().empty()
+        ? std::filesystem::current_path()
+        : cli.output.parent_path();
+    const auto ply = out_dir /
+        (cli.output.stem().string() + "_gggs.ply");
+    aetherscan::splat::save_gaussians_ply(gaussians, ply);
+    std::vector<std::size_t> evaluation_views{
+        0, scene.views.size() / 2, scene.views.size() - 1};
+    std::sort(evaluation_views.begin(), evaluation_views.end());
+    evaluation_views.erase(
+        std::unique(evaluation_views.begin(), evaluation_views.end()),
+        evaluation_views.end());
+    for (const std::size_t view_index : evaluation_views) {
+        const auto render_path = out_dir /
+            (cli.output.stem().string() + "_gggs_view_" +
+             std::to_string(view_index) + ".png");
+        const auto metrics = aetherscan::splat::render_evaluation_png(
+            gaussians, scene.views[view_index], render_path, options);
+        aetherscan::core::Logger::instance().info(
+            "gggs_render=", render_path,
+            " view=", view_index,
+            " psnr=", metrics.psnr,
+            " mae=", metrics.mae,
+            " alpha_coverage=", metrics.alpha_coverage);
+    }
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    aetherscan::core::Logger::instance().info(
+        "gggs_ply=", ply,
+        " gaussians=", gaussians.size(),
+        " training_s=", elapsed);
+}
+#endif
+
 }  // namespace
 
 #if defined(_WIN32)
@@ -827,6 +974,20 @@ int main(int argc, char** argv) {
         aetherscan::core::Logger::instance().info(
             "AetherScan started: mode=", cli.mode, " images_dir=", cli.images_dir,
             " output=", cli.output, " log=", log_path);
+
+#if defined(AETHERSCAN_HAS_GGGS)
+        if (!cli.colmap_model.empty()) {
+            const auto loaded = aetherscan::splat::load_colmap_scene(
+                cli.colmap_model, cli.images_dir);
+            aetherscan::core::Logger::instance().info(
+                "colmap_model=", loaded.model_directory,
+                " format=", loaded.binary ? "binary" : "text",
+                " cameras=", loaded.scene.views.size(),
+                " sparse_points=", loaded.scene.dense_cloud.points.size());
+            run_gggs_training(loaded.scene, cli, false);
+            return 0;
+        }
+#endif
 
         std::vector<std::filesystem::path> files;
         for (const auto& entry :
@@ -1010,90 +1171,7 @@ int main(int argc, char** argv) {
                 " densify_s=", dense_elapsed);
 
 #if defined(AETHERSCAN_HAS_GGGS)
-            if (cli.gggs) {
-                aetherscan::splat::TrainingOptions gggs_options;
-                gggs_options.iterations = cli.gggs_iterations;
-                gggs_options.max_gaussians = static_cast<std::size_t>(
-                    std::min<std::uint64_t>(
-                        cli.gggs_max_gaussians,
-                        (std::numeric_limits<std::size_t>::max)()));
-                gggs_options.use_mask = cli.gggs_use_mask;
-                gggs_options.mask_dir = cli.masks_dir;
-                gggs_options.alpha_mode = cli.gggs_alpha_mode == "masked"
-                    ? aetherscan::splat::AlphaMode::masked
-                    : aetherscan::splat::AlphaMode::transparent;
-                gggs_options.match_alpha_weight =
-                    cli.gggs_match_alpha_weight;
-                gggs_options.ssim_weight = cli.gggs_ssim_weight;
-                gggs_options.minimum_scale_fraction =
-                    cli.gggs_min_scale_fraction;
-                gggs_options.maximum_scale_fraction =
-                    cli.gggs_max_scale_fraction;
-                gggs_options.max_scale_ratio =
-                    cli.gggs_max_scale_ratio;
-                aetherscan::core::Logger::instance().info(
-                    "gggs training: iterations=", gggs_options.iterations,
-                    " dense_points=", mvs_scene.dense_cloud.points.size(),
-                    " max_gaussians=", gggs_options.max_gaussians,
-                    " use_mask=", gggs_options.use_mask,
-                    " mask_dir=", gggs_options.mask_dir,
-                    " alpha_mode=", cli.gggs_alpha_mode,
-                    " match_alpha_weight=", gggs_options.match_alpha_weight,
-                    " ssim_weight=", gggs_options.ssim_weight,
-                    " scale_fraction=[", gggs_options.minimum_scale_fraction,
-                    ',', gggs_options.maximum_scale_fraction, ']',
-                    " max_scale_ratio=", gggs_options.max_scale_ratio,
-                    " views=", mvs_scene.views.size());
-                const auto gggs_started = std::chrono::steady_clock::now();
-                const aetherscan::splat::GaussianModel gaussians =
-                    aetherscan::splat::Trainer(gggs_options).train(
-                        mvs_scene,
-                        [](const aetherscan::splat::TrainingProgress& progress) {
-                            aetherscan::core::Logger::instance().info(
-                                "gggs iteration=", progress.iteration, '/',
-                                progress.total_iterations,
-                                " view=", progress.view_index,
-                                " loss=", progress.loss,
-                                " rgb=", progress.rgb_loss,
-                                " alpha=", progress.alpha_loss,
-                                " depth=", progress.depth_loss,
-                                " normal=", progress.normal_loss,
-                                " step_ms=", progress.milliseconds);
-                            return true;
-                        });
-                const auto gggs_ply =
-                    out_dir / (cli.output.stem().string() + "_gggs.ply");
-                aetherscan::splat::save_gaussians_ply(gaussians, gggs_ply);
-                std::vector<std::size_t> evaluation_views{
-                    0, mvs_scene.views.size() / 2,
-                    mvs_scene.views.size() - 1};
-                std::sort(evaluation_views.begin(), evaluation_views.end());
-                evaluation_views.erase(
-                    std::unique(
-                        evaluation_views.begin(), evaluation_views.end()),
-                    evaluation_views.end());
-                for (const std::size_t view_index : evaluation_views) {
-                    const auto render_path = out_dir /
-                        (cli.output.stem().string() + "_gggs_view_" +
-                         std::to_string(view_index) + ".png");
-                    const auto metrics =
-                        aetherscan::splat::render_evaluation_png(
-                            gaussians, mvs_scene.views[view_index],
-                            render_path, gggs_options);
-                    aetherscan::core::Logger::instance().info(
-                        "gggs_render=", render_path,
-                        " view=", view_index,
-                        " psnr=", metrics.psnr,
-                        " mae=", metrics.mae,
-                        " alpha_coverage=", metrics.alpha_coverage);
-                }
-                const double gggs_elapsed = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - gggs_started).count();
-                aetherscan::core::Logger::instance().info(
-                    "gggs_ply=", gggs_ply,
-                    " gaussians=", gaussians.size(),
-                    " training_s=", gggs_elapsed);
-            }
+            if (cli.gggs) run_gggs_training(mvs_scene, cli, true);
 #endif
 
             if (cli.mesh && !mvs_scene.mesh.faces.empty()) {

@@ -1,4 +1,5 @@
 #include "cuda_ops.hpp"
+#include "fused_ssim.hpp"
 
 #include <cuda_runtime.h>
 
@@ -153,82 +154,6 @@ __global__ void loss_kernel(
     }
 }
 
-// A compact SSIM window keeps the native training path fast while restoring
-// the structure-aware term used by pygsplat. Inputs are masked before the
-// statistics, matching colors*mask / pixels*mask in simple_trainer.py.
-__global__ void ssim3x3_kernel(
-    const float* color, const float* target_color, const float* mask,
-    float* grad_color, float* terms, const std::uint32_t width,
-    const std::uint32_t height, const bool mask_enabled,
-    const float weight) {
-    const std::size_t centers_x = width - 2U;
-    const std::size_t centers_y = height - 2U;
-    const std::size_t centers = centers_x * centers_y;
-    const std::size_t task = blockIdx.x * blockDim.x + threadIdx.x;
-    if (task >= 3U * centers) return;
-    const int channel = static_cast<int>(task / centers);
-    const std::size_t center = task % centers;
-    const std::uint32_t cx = static_cast<std::uint32_t>(center % centers_x) + 1U;
-    const std::uint32_t cy = static_cast<std::uint32_t>(center / centers_x) + 1U;
-    const std::size_t pixels = static_cast<std::size_t>(width) * height;
-    constexpr float inverse_window = 1.F / 9.F;
-    constexpr float c1 = 0.0001F;
-    constexpr float c2 = 0.0009F;
-    float mean_x = 0.F, mean_y = 0.F;
-    float mean_x2 = 0.F, mean_y2 = 0.F, mean_xy = 0.F;
-    for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            const std::size_t pixel =
-                static_cast<std::size_t>(cy + dy) * width + (cx + dx);
-            const float valid = mask_enabled ? mask[pixel] : 1.F;
-            const float x = color[static_cast<std::size_t>(channel) * pixels + pixel] * valid;
-            const float y = target_color[static_cast<std::size_t>(channel) * pixels + pixel] * valid;
-            mean_x += x; mean_y += y;
-            mean_x2 += x * x; mean_y2 += y * y; mean_xy += x * y;
-        }
-    }
-    mean_x *= inverse_window; mean_y *= inverse_window;
-    mean_x2 *= inverse_window; mean_y2 *= inverse_window;
-    mean_xy *= inverse_window;
-    const float variance_x = fmaxf(mean_x2 - mean_x * mean_x, 0.F);
-    const float variance_y = fmaxf(mean_y2 - mean_y * mean_y, 0.F);
-    const float covariance = mean_xy - mean_x * mean_y;
-    const float a = 2.F * mean_x * mean_y + c1;
-    const float b = 2.F * covariance + c2;
-    const float c = mean_x * mean_x + mean_y * mean_y + c1;
-    const float d = variance_x + variance_y + c2;
-    const float numerator = a * b;
-    const float denominator = c * d;
-    const float ssim = numerator / denominator;
-    const float normalization = weight /
-        (3.F * static_cast<float>(centers));
-    if (terms) atomicAdd(terms, normalization * (1.F - ssim));
-
-    const float denominator2 = denominator * denominator;
-    for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            const std::size_t pixel =
-                static_cast<std::size_t>(cy + dy) * width + (cx + dx);
-            const float valid = mask_enabled ? mask[pixel] : 1.F;
-            if (valid == 0.F) continue;
-            const float x = color[static_cast<std::size_t>(channel) * pixels + pixel];
-            const float y = target_color[static_cast<std::size_t>(channel) * pixels + pixel];
-            const float da = 2.F * mean_y * inverse_window;
-            const float db = 2.F * (y - mean_y) * inverse_window;
-            const float dc = 2.F * mean_x * inverse_window;
-            const float dd = 2.F * (x - mean_x) * inverse_window;
-            const float d_numerator = da * b + a * db;
-            const float d_denominator = dc * d + c * dd;
-            const float d_ssim =
-                (d_numerator * denominator - numerator * d_denominator) /
-                denominator2;
-            atomicAdd(
-                grad_color + static_cast<std::size_t>(channel) * pixels + pixel,
-                -normalization * d_ssim);
-        }
-    }
-}
-
 __global__ void adam_kernel(
     float* parameter, const float* gradient, float* first, float* second,
     const std::size_t count, const float learning_rate,
@@ -285,6 +210,156 @@ __global__ void constrain_scale_ratio_kernel(
                              midpoint + half_range);
 }
 
+__global__ void accumulate_densification_kernel(
+    const float* refine_weight, const int* radii, float* gradient,
+    float* count, float* max_screen_radius, float* priority,
+    const std::size_t gaussian_count, const float inverse_resolution,
+    const bool use_maximum) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= gaussian_count || radii[index] <= 0) return;
+    const float weight = isfinite(refine_weight[index])
+        ? fmaxf(refine_weight[index], 0.F)
+        : 0.F;
+    if (use_maximum)
+        gradient[index] = fmaxf(gradient[index], weight);
+    else
+        gradient[index] += weight;
+    count[index] += 1.F;
+    const float screen = radii[index] * inverse_resolution;
+    max_screen_radius[index] = fmaxf(max_screen_radius[index], screen);
+    priority[index] += weight * (1.F + screen);
+}
+
+__device__ void rotate_quaternion(
+    const float* raw, const float x, const float y, const float z,
+    float& out_x, float& out_y, float& out_z) {
+    const float inverse_norm = rsqrtf(fmaxf(
+        raw[0] * raw[0] + raw[1] * raw[1] +
+        raw[2] * raw[2] + raw[3] * raw[3], 1e-20F));
+    const float w = raw[0] * inverse_norm;
+    const float qx = raw[1] * inverse_norm;
+    const float qy = raw[2] * inverse_norm;
+    const float qz = raw[3] * inverse_norm;
+    const float tx = 2.F * (qy * z - qz * y);
+    const float ty = 2.F * (qz * x - qx * z);
+    const float tz = 2.F * (qx * y - qy * x);
+    out_x = x + w * tx + (qy * tz - qz * ty);
+    out_y = y + w * ty + (qz * tx - qx * tz);
+    out_z = z + w * tz + (qx * ty - qy * tx);
+}
+
+__global__ void split_gaussians_kernel(
+    float* parent_means, float* parent_log_scales,
+    float* parent_opacity_logits, const float* parent_quaternions,
+    float* child_means, float* child_log_scales,
+    float* child_opacity_logits, const int* parent_indices,
+    const float* random_samples, const std::size_t split_count,
+    const int mode, const float minimum_opacity) {
+    const std::size_t child = blockIdx.x * blockDim.x + threadIdx.x;
+    if (child >= split_count) return;
+    const std::size_t parent = static_cast<std::size_t>(parent_indices[child]);
+    const float* parent_quaternion = parent_quaternions + 4 * parent;
+    float local[3]{};
+    float log_scale_delta[3]{};
+    if (mode == 3) {
+        int largest = 0;
+        if (parent_log_scales[3 * parent + 1] >
+            parent_log_scales[3 * parent + largest]) largest = 1;
+        if (parent_log_scales[3 * parent + 2] >
+            parent_log_scales[3 * parent + largest]) largest = 2;
+        for (int axis = 0; axis < 3; ++axis) {
+            local[axis] = expf(parent_log_scales[3 * parent + axis]) *
+                          random_samples[3 * child];
+            log_scale_delta[axis] = axis == largest ? logf(0.5F) : 0.F;
+        }
+    } else {
+        const float scale_factor = mode == 2 ? rsqrtf(2.F) : 1.F / 1.6F;
+        const float sample_factor = mode == 2 ? rsqrtf(2.F) : 1.F;
+        for (int axis = 0; axis < 3; ++axis) {
+            local[axis] = expf(parent_log_scales[3 * parent + axis]) *
+                          random_samples[3 * child + axis] * sample_factor;
+            log_scale_delta[axis] = logf(scale_factor);
+        }
+    }
+    float offset_x{}, offset_y{}, offset_z{};
+    rotate_quaternion(
+        parent_quaternion, local[0], local[1], local[2],
+        offset_x, offset_y, offset_z);
+    const float offsets[3]{offset_x, offset_y, offset_z};
+    for (int axis = 0; axis < 3; ++axis) {
+        const float center = parent_means[3 * parent + axis];
+        parent_means[3 * parent + axis] = center - offsets[axis];
+        child_means[3 * child + axis] = center + offsets[axis];
+        parent_log_scales[3 * parent + axis] += log_scale_delta[axis];
+        child_log_scales[3 * child + axis] += log_scale_delta[axis];
+    }
+    const float opacity = sigmoid(parent_opacity_logits[parent]);
+    const float revised = fminf(fmaxf(
+        1.F - sqrtf(fmaxf(1.F - opacity, 0.F)),
+        minimum_opacity), 1.F - minimum_opacity);
+    const float revised_logit = logf(revised / (1.F - revised));
+    parent_opacity_logits[parent] = revised_logit;
+    child_opacity_logits[child] = revised_logit;
+}
+
+__global__ void adc_decay_kernel(
+    float* log_scales, float* opacity_logits, const std::size_t count,
+    const float opacity_decay, const float log_scale_decay) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float opacity = fminf(fmaxf(
+        sigmoid(opacity_logits[index]) - opacity_decay, 1e-12F),
+        1.F - 1e-12F);
+    opacity_logits[index] = logf(opacity / (1.F - opacity));
+    for (int axis = 0; axis < 3; ++axis)
+        log_scales[3 * index + axis] += log_scale_decay;
+}
+
+__device__ std::uint32_t hash_u32(std::uint32_t value) {
+    value ^= value >> 16;
+    value *= 0x7feb352dU;
+    value ^= value >> 15;
+    value *= 0x846ca68bU;
+    value ^= value >> 16;
+    return value;
+}
+
+__device__ float normal_sample(
+    const std::uint32_t index, const std::uint32_t seed,
+    const std::uint32_t axis) {
+    const float u1 = (hash_u32(index * 3U + axis + seed * 17U) + 1.F) /
+                     4294967297.F;
+    const float u2 = (hash_u32(index * 7U + axis + seed * 29U) + 1.F) /
+                     4294967297.F;
+    return sqrtf(-2.F * logf(fmaxf(u1, 1e-12F))) *
+           cosf(6.283185307179586F * u2);
+}
+
+__global__ void inject_adc_noise_kernel(
+    float* means, const float* opacity_logits, const int* radii,
+    const std::size_t count, const float standard_deviation,
+    const float maximum_noise, const unsigned seed) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count || radii[index] <= 0) return;
+    const float inverse_opacity = 1.F - sigmoid(opacity_logits[index]);
+    const float weight = powf(inverse_opacity, 150.F);
+    for (std::uint32_t axis = 0; axis < 3; ++axis) {
+        const float noise = fminf(fmaxf(
+            normal_sample(static_cast<std::uint32_t>(index), seed, axis) *
+                weight * standard_deviation,
+            -maximum_noise), maximum_noise);
+        means[3 * index + axis] += noise;
+    }
+}
+
+__global__ void reset_opacity_kernel(
+    float* opacity_logits, const std::size_t count,
+    const float maximum_logit) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count)
+        opacity_logits[index] = fminf(opacity_logits[index], maximum_logit);
+}
+
 }  // namespace
 
 ActivatedParameters activate_parameters(const GaussianModel& model) {
@@ -336,9 +411,9 @@ LossGradients compute_training_loss(
     if (collect_scalar_terms)
         terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
     const bool mask_enabled = options.use_mask && target.has_mask;
-    const float ssim_weight = target.camera.width >= 3 && target.camera.height >= 3
-        ? std::clamp(options.ssim_weight, 0.F, 1.F)
-        : 0.F;
+    const bool use_fused_photometric =
+        target.camera.width > 10 && target.camera.height > 10;
+    const float ssim_weight = std::clamp(options.ssim_weight, 0.F, 1.F);
     loss_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
         rendered.color.ptr<float>(), rendered.alpha.ptr<float>(),
         rendered.median_depth.ptr<float>(), rendered.normal.ptr<float>(),
@@ -347,26 +422,20 @@ LossGradients compute_training_loss(
         result.color.ptr<float>(), result.alpha.ptr<float>(),
         result.depth.ptr<float>(), result.normal.ptr<float>(),
         collect_scalar_terms ? terms.ptr<float>() : nullptr,
-        pixels, options.photometric_weight,
+        pixels, use_fused_photometric ? 0.F : options.photometric_weight,
         options.use_mvs_depth ? options.depth_weight : 0.F,
         options.use_mvs_normals ? options.normal_weight : 0.F,
         mask_enabled,
         options.alpha_mode == AlphaMode::masked ? 0 : 1,
-        options.match_alpha_weight, 1.F - ssim_weight,
+        options.match_alpha_weight, 1.F,
         options.geometry_epsilon);
     check_cuda(cudaGetLastError(), "compute GGGS training loss");
-    if (ssim_weight > 0.F) {
-        const std::size_t centers =
-            static_cast<std::size_t>(target.camera.width - 2U) *
-            (target.camera.height - 2U);
-        ssim3x3_kernel<<<(3 * centers + k_threads - 1) / k_threads, k_threads>>>(
-            rendered.color.ptr<float>(), target.rgb.ptr<float>(),
-            target.mask.ptr<float>(), result.color.ptr<float>(),
+    if (use_fused_photometric)
+        fused_l1_ssim_loss(
+            rendered.color, target.rgb, target.mask, mask_enabled,
+            ssim_weight, options.photometric_weight, result.color,
             collect_scalar_terms ? terms.ptr<float>() : nullptr,
-            target.camera.width, target.camera.height, mask_enabled,
-            options.photometric_weight * ssim_weight);
-        check_cuda(cudaGetLastError(), "compute GGGS SSIM loss");
-    }
+            target.camera.width, target.camera.height);
     if (collect_scalar_terms) {
         std::array<float, 4> host{};
         check_cuda(cudaMemcpy(
@@ -412,6 +481,91 @@ void constrain_scale_ratio(
         (count + k_threads - 1) / k_threads, k_threads>>>(
         log_scales.ptr<float>(), count, std::log(maximum_ratio));
     check_cuda(cudaGetLastError(), "constrain GGGS scale ratio");
+}
+
+DensificationStats make_densification_stats(const std::size_t count) {
+    return {
+        tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
+        tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
+        tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
+        tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA)};
+}
+
+void accumulate_densification_stats(
+    const tinytensor::Tensor& refine_weight,
+    const tinytensor::Tensor& radii,
+    DensificationStats& stats,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    const bool use_maximum) {
+    const std::size_t count = refine_weight.numel();
+    if (count == 0) return;
+    const float inverse_resolution = 1.F /
+        static_cast<float>(std::max<std::uint32_t>(1, std::min(width, height)));
+    accumulate_densification_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        refine_weight.ptr<float>(), radii.ptr<int>(),
+        stats.gradient.ptr<float>(), stats.count.ptr<float>(),
+        stats.max_screen_radius.ptr<float>(), stats.priority.ptr<float>(),
+        count, inverse_resolution, use_maximum);
+    check_cuda(cudaGetLastError(), "accumulate GGGS densification stats");
+}
+
+void split_gaussians(
+    GaussianModel& parents,
+    GaussianModel& children,
+    const tinytensor::Tensor& parent_indices,
+    const tinytensor::Tensor& random_samples,
+    const int mode,
+    const float minimum_opacity) {
+    const std::size_t count = parent_indices.numel();
+    if (count == 0) return;
+    split_gaussians_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        parents.means.ptr<float>(), parents.log_scales.ptr<float>(),
+        parents.opacity_logits.ptr<float>(), parents.quaternions.ptr<float>(),
+        children.means.ptr<float>(), children.log_scales.ptr<float>(),
+        children.opacity_logits.ptr<float>(), parent_indices.ptr<int>(),
+        random_samples.ptr<float>(), count, mode,
+        std::clamp(minimum_opacity, 1e-8F, 0.49F));
+    check_cuda(cudaGetLastError(), "split GGGS Gaussians");
+}
+
+void apply_adc_decay(
+    GaussianModel& model, const float opacity_decay,
+    const float scale_decay) {
+    if (model.size() == 0) return;
+    const float scale_factor = std::max(1.F - scale_decay, 1e-6F);
+    adc_decay_kernel<<<
+        (model.size() + k_threads - 1) / k_threads, k_threads>>>(
+        model.log_scales.ptr<float>(), model.opacity_logits.ptr<float>(),
+        model.size(), std::max(opacity_decay, 0.F), std::log(scale_factor));
+    check_cuda(cudaGetLastError(), "decay ADC Gaussian parameters");
+}
+
+void inject_adc_noise(
+    GaussianModel& model,
+    const tinytensor::Tensor& radii,
+    const float standard_deviation,
+    const float maximum_noise,
+    const unsigned seed) {
+    if (model.size() == 0 || standard_deviation <= 0.F) return;
+    inject_adc_noise_kernel<<<
+        (model.size() + k_threads - 1) / k_threads, k_threads>>>(
+        model.means.ptr<float>(), model.opacity_logits.ptr<float>(),
+        radii.ptr<int>(), model.size(), standard_deviation,
+        std::max(maximum_noise, 0.F), seed);
+    check_cuda(cudaGetLastError(), "inject ADC exploration noise");
+}
+
+void reset_opacity(GaussianModel& model, const float maximum_opacity) {
+    if (model.size() == 0) return;
+    const float opacity = std::clamp(maximum_opacity, 1e-8F, 1.F - 1e-8F);
+    reset_opacity_kernel<<<
+        (model.size() + k_threads - 1) / k_threads, k_threads>>>(
+        model.opacity_logits.ptr<float>(), model.size(),
+        std::log(opacity / (1.F - opacity)));
+    check_cuda(cudaGetLastError(), "reset GGGS opacity");
 }
 
 }  // namespace aetherscan::splat::detail

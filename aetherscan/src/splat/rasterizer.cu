@@ -195,6 +195,7 @@ ModelGradients Rasterizer::backward(
     detail::chain_parameter_gradients(
         model, context.activated, grad_scales, grad_quaternions,
         grad_opacities, gradients);
+    gradients.refine_weight = std::move(refine_weight);
     return gradients;
 }
 

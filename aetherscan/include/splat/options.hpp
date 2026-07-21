@@ -11,6 +11,12 @@ enum class AlphaMode {
     transparent,
 };
 
+enum class DensificationStrategy {
+    default_strategy,
+    adc_plus,
+    adc_igs,
+};
+
 struct TrainingOptions {
     unsigned iterations{30'000};
     unsigned sh_degree{3};
@@ -18,6 +24,25 @@ struct TrainingOptions {
     unsigned seed{42};
     unsigned log_interval{100};
     std::size_t max_gaussians{500'000};
+    // Sparse COLMAP initialization enables dynamic Gaussian management.
+    // Dense MVS initialization always disables it to preserve the fused cloud.
+    bool input_is_dense{true};
+    DensificationStrategy densification_strategy{
+        DensificationStrategy::default_strategy};
+    std::size_t densification_cap{4'000'000};
+    unsigned refine_start_iter{0};  // 0 selects the strategy preset
+    unsigned refine_stop_iter{0};   // 0 selects 15k (default/ADC+) or 25k (ADC-IGS)
+    unsigned grow_stop_iter{15'000};
+    unsigned refine_every{0};       // 0 selects 100 (default) or 200 (ADC)
+    unsigned opacity_reset_every{3'000};
+    float densify_gradient_threshold{0.003F};
+    float densify_select_fraction{0.4F};
+    float densify_scale_threshold{0.01F};
+    float densify_screen_threshold{0.25F};
+    float prune_opacity{1.F / 255.F};
+    float opacity_decay{0.004F};
+    float scale_decay{0.002F};
+    float mean_noise_weight{50.F};
     float initial_opacity{0.1F};
     float initial_scale{1.F};
     float means_lr{1.6e-4F};

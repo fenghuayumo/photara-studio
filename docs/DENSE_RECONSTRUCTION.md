@@ -487,8 +487,9 @@ Mask / UV / Project / Delight 共用一套后处理，作用于用户选定的�
 ### GGGS C++ 后端落地状态（2026-07-21）
 
 已新增 `splat` 模块并完成 GGGS 原生 CUDA rasterizer 的 forward/backward、TinyTensor
-参数激活与显式梯度、L1+SSIM/depth/normal loss、融合 Adam、MVS dense-cloud 初始化和
-Gaussian PLY 导出。CLI 使用 `--gggs --gggs-iterations N`，会在 dense fusion 后直接训练。
+参数激活与显式梯度、完整 11×11 fused SSIM CUDA forward/backward、融合 Adam、MVS
+dense-cloud 初始化、COLMAP 文本/二进制相机/稀疏点加载和 Gaussian PLY 导出。CLI 使用
+`--gggs --gggs-iterations N` 在 dense fusion 后训练，也可用 `--colmap PATH` 跳过内部 SfM/MVS。
 `--gggs-use-mask` 已支持与 pygsplat 一致的 `transparent`（前景 RGB + alpha BCE）和
 `masked`（前景 RGB + 背景 alpha 泄漏惩罚）模式，复用 `--masks` 或源图 alpha channel。
 
@@ -496,8 +497,10 @@ Gaussian PLY 导出。CLI 使用 `--gggs --gggs-iterations N`，会在 dense fus
 10:1 三轴比例约束。`D:\ScanVideo\ori_img` 上相同的 500k Gaussian / 4000 步 mask A/B 中，
 三个诊断视角相对旧实现提升 `1.45 / 2.39 / 2.67 dB`，极端轴比例 p99.9 从约 170k 降到 10。
 
-当前交付边界是“固定数量 Gaussian 的可训练后端”；动态 densify/prune、out-of-core view
-cache、GGGS mesh extraction 与 `active_mesh` 切换尚未完成。因此目前 `--gggs` 输出
+稀疏 COLMAP 初始化已支持 `default`、`adc_plus`、`adc_igs` 三种动态 split/clone/prune、
+opacity 管理和数量硬上限；MVS 稠密点云初始化会自动关闭致密化。当前未完成的是 ADC-IGS
+逐像素 edge/error ownership、out-of-core view cache、GGGS mesh extraction 与 `active_mesh`
+切换。因此目前 `--gggs` 输出
 `*_gggs.ply`，纹理阶段仍使用 MVS mesh。实现、构建方法、性能边界和许可证风险见
 [GGGS_CPP.md](GGGS_CPP.md)。
 

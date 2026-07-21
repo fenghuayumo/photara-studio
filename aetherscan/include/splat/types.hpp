@@ -51,6 +51,9 @@ struct ModelGradients {
     tinytensor::Tensor quaternions;
     tinytensor::Tensor opacity_logits;
     tinytensor::Tensor sh;
+    // Per-Gaussian image-plane refine weight emitted by the GGGS backward
+    // kernel. This drives default/ADC+/ADC-IGS densification.
+    tinytensor::Tensor refine_weight;
 };
 
 struct RasterContextImpl;
