@@ -27,6 +27,10 @@ struct TrainingProgress {
     float opacity_gradient_positive_fraction{};
     float opacity_mean{};
     double milliseconds{};
+    float multi_view_geometry_loss{};
+    float multi_view_ncc_loss{};
+    std::size_t multi_view_geometry_pixels{};
+    std::size_t multi_view_ncc_pixels{};
 };
 
 struct RenderMetrics {

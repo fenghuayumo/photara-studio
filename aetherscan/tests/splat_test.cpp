@@ -60,6 +60,176 @@ void test_mvs_camera_conversion() {
         "MVS to GGGS camera conversion changed projection");
 }
 
+void test_gggs_3d_filter() {
+    using namespace aetherscan::splat;
+    Camera camera;
+    camera.world_to_camera[0] = 1.F;
+    camera.world_to_camera[5] = 1.F;
+    camera.world_to_camera[10] = 1.F;
+    camera.world_to_camera[15] = 1.F;
+    camera.fx = camera.fy = 50.F;
+    camera.width = camera.height = 100;
+    const auto means = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 0.F, 2.F, 0.F, 0.F, 4.F,
+                           100.F, 0.F, 1.F},
+        {3, 3}, tinytensor::Device::CUDA);
+    const auto filter = detail::compute_3d_filter(means, {camera}).to_vector();
+    const float unit = std::sqrt(0.2F) / 50.F;
+    require(
+        filter.size() == 3 && std::abs(filter[0] - 2.F * unit) < 1e-6F &&
+            std::abs(filter[1] - 4.F * unit) < 1e-6F &&
+            std::abs(filter[2] - 4.F * unit) < 1e-6F,
+        "GGGS 3D filter differs from pygsplat visibility/focal formula");
+
+    GaussianModel model;
+    model.means = means;
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{std::log(0.1F), std::log(0.2F), std::log(0.3F),
+                           std::log(0.1F), std::log(0.2F), std::log(0.3F),
+                           std::log(0.1F), std::log(0.2F), std::log(0.3F)},
+        {3, 3}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F, 1.F, 0.F, 0.F, 0.F,
+                           1.F, 0.F, 0.F, 0.F},
+        {3, 4}, tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::zeros(
+        {3, 1}, tinytensor::Device::CUDA);
+    model.filter_3d = filter.size() == 3
+        ? tinytensor::Tensor::from_vector(filter, {3, 1}, tinytensor::Device::CUDA)
+        : tinytensor::Tensor{};
+    const auto activated = detail::activate_parameters(model);
+    const auto scales = activated.scales.to_vector();
+    const auto opacities = activated.opacities.to_vector();
+    for (std::size_t row = 0; row < 3; ++row) {
+        float determinant_ratio = 1.F;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const float raw = 0.1F * static_cast<float>(axis + 1);
+            const float expected = std::sqrt(raw * raw + filter[row] * filter[row]);
+            require(std::abs(scales[3 * row + axis] - expected) < 1e-6F,
+                    "GGGS filtered scale formula differs from pygsplat");
+            determinant_ratio *= raw / expected;
+        }
+        require(std::abs(opacities[row] - 0.5F * determinant_ratio) < 1e-6F,
+                "GGGS filtered opacity compensation differs from pygsplat");
+    }
+    ModelGradients chained;
+    detail::chain_parameter_gradients(
+        model, activated,
+        tinytensor::Tensor::from_vector(
+            std::vector<float>(9, 1.F), {3, 3}, tinytensor::Device::CUDA),
+        tinytensor::Tensor::zeros({3, 4}, tinytensor::Device::CUDA),
+        tinytensor::Tensor::from_vector(
+            std::vector<float>(3, 1.F), {3, 1}, tinytensor::Device::CUDA),
+        chained);
+    const auto scale_gradients = chained.log_scales.to_vector();
+    const auto opacity_gradients = chained.opacity_logits.to_vector();
+    for (std::size_t row = 0; row < 3; ++row) {
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const float raw = 0.1F * static_cast<float>(axis + 1);
+            const float filtered = scales[3 * row + axis];
+            const float expected = raw * raw / filtered +
+                opacities[row] * filter[row] * filter[row] /
+                    (filtered * filtered);
+            require(std::abs(scale_gradients[3 * row + axis] - expected) < 1e-6F,
+                    "GGGS 3D-filter scale/opacity chain gradient is incorrect");
+        }
+        require(std::abs(opacity_gradients[row] - 0.5F * opacities[row]) < 1e-6F,
+                "GGGS filtered-opacity logit gradient is incorrect");
+    }
+}
+
+void test_gggs_multi_view_geometry_and_ncc() {
+    using namespace aetherscan::splat;
+    constexpr std::uint32_t width = 32;
+    constexpr std::uint32_t height = 32;
+    constexpr std::size_t pixels = width * height;
+    auto make_camera = [](const float center_x) {
+        Camera camera;
+        camera.world_to_camera[0] = 1.F;
+        camera.world_to_camera[5] = 1.F;
+        camera.world_to_camera[10] = 1.F;
+        camera.world_to_camera[15] = 1.F;
+        camera.world_to_camera[12] = -center_x;
+        camera.position[0] = center_x;
+        camera.fx = camera.fy = 40.F;
+        camera.cx = camera.cy = 15.5F;
+        camera.width = width;
+        camera.height = height;
+        return camera;
+    };
+    TrainingView reference;
+    TrainingView neighbour;
+    reference.camera = make_camera(0.F);
+    neighbour.camera = make_camera(0.1F);
+    std::vector<float> reference_rgb(3 * pixels);
+    std::vector<float> neighbour_rgb(3 * pixels);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
+            const float ref_value = 0.5F + 0.22F * std::sin(0.37F * x) +
+                                    0.18F * std::cos(0.29F * y);
+            // A fronto-parallel plane at z=2 moves left by fx*b/z=2 pixels
+            // in the translated camera.
+            const float world_x_pixel = static_cast<float>(x) + 2.F;
+            const float neighbour_value =
+                0.5F + 0.22F * std::sin(0.37F * world_x_pixel) +
+                0.18F * std::cos(0.29F * y);
+            for (int channel = 0; channel < 3; ++channel) {
+                reference_rgb[static_cast<std::size_t>(channel) * pixels + pixel] =
+                    ref_value;
+                neighbour_rgb[static_cast<std::size_t>(channel) * pixels + pixel] =
+                    neighbour_value;
+            }
+        }
+    }
+    reference.rgb = tinytensor::Tensor::from_vector(
+        reference_rgb, {3, height, width}, tinytensor::Device::CUDA);
+    neighbour.rgb = tinytensor::Tensor::from_vector(
+        neighbour_rgb, {3, height, width}, tinytensor::Device::CUDA);
+    RenderResult reference_render;
+    reference_render.median_depth = tinytensor::Tensor::from_vector(
+        std::vector<float>(pixels, 2.F), {height, width},
+        tinytensor::Device::CUDA);
+    std::vector<float> normals(3 * pixels, 0.F);
+    std::fill(normals.begin() + 2 * pixels, normals.end(), 1.F);
+    reference_render.normal = tinytensor::Tensor::from_vector(
+        normals, {3, height, width}, tinytensor::Device::CUDA);
+    detail::LossGradients gradients;
+    gradients.depth = tinytensor::Tensor::zeros(
+        {height, width}, tinytensor::Device::CUDA);
+    gradients.normal = tinytensor::Tensor::zeros(
+        {3, height, width}, tinytensor::Device::CUDA);
+    TrainingOptions options;
+    options.multi_view_geo_weight = 0.02F;
+    options.multi_view_ncc_weight = 0.6F;
+    std::vector<float> sampled_points(3 * pixels);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
+            sampled_points[3 * pixel] =
+                (static_cast<float>(x) - 15.5F) / 40.F * 2.F - 0.1F;
+            sampled_points[3 * pixel + 1] =
+                (static_cast<float>(y) - 15.5F) / 40.F * 2.F;
+            sampled_points[3 * pixel + 2] = 2.F;
+        }
+    }
+    const auto sampled = tinytensor::Tensor::from_vector(
+        sampled_points, {pixels, std::size_t{3}}, tinytensor::Device::CUDA);
+    const auto inside = tinytensor::Tensor::ones_bool(
+        {pixels}, tinytensor::Device::CUDA);
+    tinytensor::Tensor grad_sampled;
+    const auto loss = detail::add_multi_view_loss(
+        sampled, inside, reference_render, reference, neighbour,
+        options, gradients, grad_sampled, true);
+    require(loss.geometry_pixels > 0 && loss.ncc_pixels > 0,
+            "GGGS multi-view consistency rejected a valid planar pair");
+    require(loss.geometry < 1e-3F && loss.ncc < 2e-3F,
+            "GGGS multi-view geometry/NCC does not preserve a consistent plane");
+    require_finite(gradients.depth, "Non-finite multi-view depth gradient");
+    require_finite(gradients.normal, "Non-finite multi-view normal gradient");
+    require_finite(grad_sampled, "Non-finite multi-view sampled-point gradient");
+}
+
 void test_forward_backward() {
     using namespace aetherscan::splat;
     GaussianModel model;
@@ -895,6 +1065,8 @@ int main() {
             return 0;
         }
         test_mvs_camera_conversion();
+        test_gggs_3d_filter();
+        test_gggs_multi_view_geometry_and_ncc();
         test_forward_backward();
         test_alpha_parameter_gradients();
         test_adam_rejects_non_finite_gradients();

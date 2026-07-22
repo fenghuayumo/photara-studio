@@ -24,6 +24,15 @@ public:
         const tinytensor::Tensor& grad_alpha,
         const tinytensor::Tensor& grad_depth,
         const tinytensor::Tensor& grad_normal) const;
+
+    DepthSampleResult sample_depth(
+        const GaussianModel& model, const tinytensor::Tensor& world_points,
+        const Camera& camera,
+        const RasterizeOptions& options = {}) const;
+
+    DepthSampleGradients sample_depth_backward(
+        const GaussianModel& model, const DepthSampleResult& sampled,
+        const tinytensor::Tensor& grad_camera_points) const;
 };
 
 }  // namespace aetherscan::splat

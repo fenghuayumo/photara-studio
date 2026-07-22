@@ -25,6 +25,22 @@ struct RasterContextImpl {
     int rendered_instances{};
 };
 
+struct DepthSampleContextImpl {
+    detail::ActivatedParameters activated;
+    tinytensor::Tensor world_points;
+    tinytensor::Tensor view_matrix;
+    tinytensor::Tensor camera_position;
+    tinytensor::Tensor geometry_buffer;
+    tinytensor::Tensor binning_buffer;
+    tinytensor::Tensor point_buffer;
+    tinytensor::Tensor point_binning_buffer;
+    tinytensor::Tensor tile_buffer;
+    tinytensor::Tensor duplicated_tile_buffer;
+    RasterizeOptions options;
+    Camera camera;
+    int3 counts{};
+};
+
 namespace {
 
 void require_cuda_float_contiguous(
@@ -68,6 +84,8 @@ RenderResult Rasterizer::forward(
     require_cuda_float_contiguous(model.quaternions, "model.quaternions");
     require_cuda_float_contiguous(model.opacity_logits, "model.opacity_logits");
     require_cuda_float_contiguous(model.sh, "model.sh");
+    if (model.filter_3d.is_valid())
+        require_cuda_float_contiguous(model.filter_3d, "model.filter_3d");
     if (camera.width == 0 || camera.height == 0)
         throw std::invalid_argument("GGGS camera dimensions must be positive");
     if (model.means.shape().rank() != 2 || model.means.shape()[1] != 3 ||
@@ -77,7 +95,11 @@ RenderResult Rasterizer::forward(
         model.quaternions.shape()[1] != 4 ||
         model.opacity_logits.numel() != model.size() ||
         model.sh.shape().rank() != 3 || model.sh.shape()[0] != model.size() ||
-        model.sh.shape()[2] != 3)
+        model.sh.shape()[2] != 3 ||
+        (model.filter_3d.is_valid() &&
+         (model.filter_3d.shape().rank() != 2 ||
+          model.filter_3d.shape()[0] != model.size() ||
+          model.filter_3d.shape()[1] != 1)))
         throw std::invalid_argument("Invalid GGGS model tensor shapes");
 
     RenderResult result;
@@ -211,6 +233,111 @@ ModelGradients Rasterizer::backward(
         grad_opacities, gradients);
     gradients.refine_weight = std::move(refine_weight);
     return gradients;
+}
+
+DepthSampleResult Rasterizer::sample_depth(
+    const GaussianModel& model, const tinytensor::Tensor& world_points,
+    const Camera& camera, const RasterizeOptions& requested_options) const {
+    require_cuda_float_contiguous(world_points, "world_points");
+    if (world_points.shape().rank() != 2 || world_points.shape()[1] != 3)
+        throw std::invalid_argument("GGGS sample_depth points must have shape [P,3]");
+    if (model.size() == 0 || world_points.shape()[0] == 0)
+        throw std::invalid_argument("GGGS sample_depth requires Gaussians and points");
+    auto context = std::make_shared<DepthSampleContextImpl>();
+    context->camera = camera;
+    context->options = requested_options;
+    context->world_points = world_points;
+    context->activated = detail::activate_parameters(model);
+    context->view_matrix = tinytensor::Tensor::from_vector(
+        std::vector<float>(camera.world_to_camera.begin(), camera.world_to_camera.end()),
+        {4, 4}, tinytensor::Device::CUDA);
+    context->camera_position = tinytensor::Tensor::from_vector(
+        std::vector<float>(camera.position.begin(), camera.position.end()),
+        {3}, tinytensor::Device::CUDA);
+    const std::size_t point_count = world_points.shape()[0];
+    DepthSampleResult result;
+    result.camera_points = tinytensor::Tensor::zeros(
+        {point_count, std::size_t{3}}, tinytensor::Device::CUDA);
+    result.inside = tinytensor::Tensor::zeros(
+        {point_count}, tinytensor::Device::CUDA, tinytensor::DataType::Bool);
+    context->counts = CudaRasterizer::Rasterizer::sampleDepth(
+        resize_buffer(context->geometry_buffer),
+        resize_buffer(context->binning_buffer),
+        resize_buffer(context->point_buffer),
+        resize_buffer(context->point_binning_buffer),
+        resize_buffer(context->tile_buffer),
+        resize_buffer(context->duplicated_tile_buffer),
+        static_cast<int>(point_count), static_cast<int>(model.size()),
+        static_cast<int>(camera.width), static_cast<int>(camera.height),
+        world_points.ptr<float>(), model.means.ptr<float>(),
+        context->activated.opacities.ptr<float>(),
+        context->activated.scales.ptr<float>(), requested_options.scale_modifier,
+        context->activated.quaternions.ptr<float>(), nullptr,
+        context->view_matrix.ptr<float>(), context->camera_position.ptr<float>(),
+        camera.fx, camera.fy, camera.cx, camera.cy,
+        requested_options.kernel_size, false,
+        result.camera_points.ptr<float>(), result.inside.ptr<bool>(),
+        requested_options.debug);
+    result.context = std::move(context);
+    return result;
+}
+
+DepthSampleGradients Rasterizer::sample_depth_backward(
+    const GaussianModel& model, const DepthSampleResult& sampled,
+    const tinytensor::Tensor& grad_camera_points) const {
+    if (!sampled.context)
+        throw std::invalid_argument("GGGS sample_depth backward requires a live context");
+    require_cuda_float_contiguous(grad_camera_points, "grad_camera_points");
+    const auto& context = *sampled.context;
+    const std::size_t point_count = context.world_points.shape()[0];
+    const std::size_t count = model.size();
+    DepthSampleGradients result;
+    result.model.means = tinytensor::Tensor::zeros_like(model.means);
+    result.model.sh = tinytensor::Tensor::zeros_like(model.sh);
+    result.model.refine_weight = tinytensor::Tensor::zeros(
+        {count}, tinytensor::Device::CUDA);
+    result.points = tinytensor::Tensor::zeros_like(context.world_points);
+    auto grad_means2d = tinytensor::Tensor::zeros(
+        {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    auto grad_points2d = tinytensor::Tensor::zeros(
+        {point_count, std::size_t{2}}, tinytensor::Device::CUDA);
+    auto grad_opacities = tinytensor::Tensor::zeros(
+        {count, std::size_t{1}}, tinytensor::Device::CUDA);
+    auto grad_scales = tinytensor::Tensor::zeros(
+        {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    auto grad_quaternions = tinytensor::Tensor::zeros(
+        {count, std::size_t{4}}, tinytensor::Device::CUDA);
+    auto grad_covariance = tinytensor::Tensor::zeros(
+        {count, std::size_t{6}}, tinytensor::Device::CUDA);
+    tinytensor::Tensor scratch;
+    CudaRasterizer::Rasterizer::sampleDepthBackward(
+        resize_zeroed_buffer(scratch), static_cast<int>(point_count),
+        static_cast<int>(count), context.counts.y, context.counts.x,
+        context.counts.z, static_cast<int>(context.camera.width),
+        static_cast<int>(context.camera.height),
+        context.world_points.ptr<float>(), model.means.ptr<float>(),
+        context.activated.opacities.ptr<float>(),
+        context.activated.scales.ptr<float>(), context.options.scale_modifier,
+        context.activated.quaternions.ptr<float>(), nullptr,
+        context.view_matrix.ptr<float>(), context.camera_position.ptr<float>(),
+        context.camera.fx, context.camera.fy, context.camera.cx,
+        context.camera.cy, context.options.kernel_size,
+        const_cast<char*>(reinterpret_cast<const char*>(context.geometry_buffer.data_ptr())),
+        const_cast<char*>(reinterpret_cast<const char*>(context.binning_buffer.data_ptr())),
+        const_cast<char*>(reinterpret_cast<const char*>(context.point_buffer.data_ptr())),
+        const_cast<char*>(reinterpret_cast<const char*>(context.point_binning_buffer.data_ptr())),
+        const_cast<char*>(reinterpret_cast<const char*>(context.tile_buffer.data_ptr())),
+        const_cast<char*>(reinterpret_cast<const char*>(context.duplicated_tile_buffer.data_ptr())),
+        sampled.inside.ptr<bool>(), grad_camera_points.ptr<float>(),
+        grad_means2d.ptr<float>(), grad_points2d.ptr<float>(),
+        grad_opacities.ptr<float>(), result.model.means.ptr<float>(),
+        grad_covariance.ptr<float>(), grad_scales.ptr<float>(),
+        grad_quaternions.ptr<float>(), result.points.ptr<float>(),
+        context.options.debug);
+    detail::chain_parameter_gradients(
+        model, context.activated, grad_scales, grad_quaternions,
+        grad_opacities, result.model);
+    return result;
 }
 
 }  // namespace aetherscan::splat

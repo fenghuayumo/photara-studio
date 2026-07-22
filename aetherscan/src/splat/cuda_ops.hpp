@@ -37,7 +37,41 @@ struct DensificationStats {
     tinytensor::Tensor priority;
 };
 
+struct MultiViewLoss {
+    float geometry{};
+    float ncc{};
+    std::size_t geometry_pixels{};
+    std::size_t ncc_pixels{};
+};
+
 ActivatedParameters activate_parameters(const GaussianModel& model);
+
+tinytensor::Tensor compute_3d_filter(
+    const tinytensor::Tensor& means,
+    const std::vector<Camera>& cameras);
+
+MultiViewLoss add_multi_view_loss(
+    const tinytensor::Tensor& sampled_neighbour_points,
+    const tinytensor::Tensor& sampled_inside,
+    const RenderResult& reference_render,
+    const TrainingView& reference,
+    const TrainingView& neighbour,
+    const TrainingOptions& options,
+    LossGradients& gradients,
+    tinytensor::Tensor& grad_sampled_points,
+    bool collect_scalar_terms);
+
+tinytensor::Tensor unproject_depth_to_world(
+    const tinytensor::Tensor& depth, const Camera& camera);
+
+void add_sample_depth_point_gradients(
+    const Camera& reference_camera,
+    const tinytensor::Tensor& grad_world_points,
+    LossGradients& image_gradients);
+
+void add_sample_depth_model_gradients(
+    const DepthSampleGradients& sample_gradients,
+    ModelGradients& model_gradients);
 
 void chain_parameter_gradients(
     const GaussianModel& model, const ActivatedParameters& activated,

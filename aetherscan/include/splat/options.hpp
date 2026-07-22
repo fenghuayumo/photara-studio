@@ -85,6 +85,24 @@ struct TrainingOptions {
     bool use_depth_normal_loss{false};
     float depth_normal_weight{0.05F};
     unsigned depth_normal_from_iter{7'000};
+    // Reference GGGS/Mip-Splatting low-pass filter. It expands sub-pixel
+    // Gaussians and compensates opacity so the integrated density is stable.
+    bool use_3d_filter{true};
+    unsigned filter_3d_update_interval{100};
+    // GGGS multi-view PatchMatch supervision. Geometry uses a differentiable
+    // depth round trip through a nearby camera; NCC uses the reference
+    // plane-induced homography and the original image pair.
+    float multi_view_geo_weight{0.F};
+    float multi_view_ncc_weight{0.F};
+    unsigned multi_view_num{8};
+    float multi_view_max_angle{30.F};
+    float multi_view_min_distance{0.01F};
+    float multi_view_max_distance{1.5F};
+    float multi_view_pixel_noise_threshold{1.F};
+    bool multi_view_robust_ncc{true};
+    float multi_view_ncc_lambda_reference{0.45F};
+    float multi_view_ncc_sharpness{12.F};
+    float multi_view_ncc_min_weight{0.F};
     // Match pygsplat's mask-training controls. In masked mode RGB is supervised
     // only in the foreground and background alpha leakage is penalized. In
     // transparent mode the same foreground RGB loss is combined with full-image

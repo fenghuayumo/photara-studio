@@ -15,6 +15,7 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 
 namespace aetherscan::splat {
@@ -129,6 +130,47 @@ Camera make_camera_impl(const mvs::MvsView& view) {
     camera.width = view.width;
     camera.height = view.height;
     return camera;
+}
+
+std::vector<std::vector<std::size_t>> compute_multi_view_neighbours(
+    const std::vector<TrainingView>& views,
+    const TrainingOptions& options) {
+    std::vector<std::vector<std::size_t>> result(views.size());
+    for (std::size_t reference = 0; reference < views.size(); ++reference) {
+        std::vector<std::tuple<float, float, std::size_t>> candidates;
+        const auto& camera = views[reference].camera;
+        const Eigen::Vector3f center(
+            camera.position[0], camera.position[1], camera.position[2]);
+        Eigen::Vector3f forward(
+            camera.world_to_camera[2], camera.world_to_camera[6],
+            camera.world_to_camera[10]);
+        forward.normalize();
+        for (std::size_t index = 0; index < views.size(); ++index) {
+            if (index == reference) continue;
+            const auto& other = views[index].camera;
+            const Eigen::Vector3f other_center(
+                other.position[0], other.position[1], other.position[2]);
+            const float distance = (center - other_center).norm();
+            Eigen::Vector3f other_forward(
+                other.world_to_camera[2], other.world_to_camera[6],
+                other.world_to_camera[10]);
+            other_forward.normalize();
+            const float angle = std::acos(std::clamp(
+                forward.dot(other_forward), -1.F, 1.F)) *
+                57.29577951308232F;
+            if (angle < options.multi_view_max_angle &&
+                distance > options.multi_view_min_distance &&
+                distance < options.multi_view_max_distance)
+                candidates.emplace_back(distance, angle, index);
+        }
+        std::sort(candidates.begin(), candidates.end());
+        const std::size_t count = std::min<std::size_t>(
+            options.multi_view_num, candidates.size());
+        result[reference].reserve(count);
+        for (std::size_t slot = 0; slot < count; ++slot)
+            result[reference].push_back(std::get<2>(candidates[slot]));
+    }
+    return result;
 }
 
 float sample_rgb(
@@ -992,6 +1034,16 @@ GaussianModel Trainer::train(
             "GGGS subject-only training requires a matching mask file or "
             "source alpha channel for every selected view");
 
+    std::vector<Camera> filter_cameras;
+    filter_cameras.reserve(views.size());
+    for (const TrainingView& view : views)
+        filter_cameras.push_back(view.camera);
+    if (options_.use_3d_filter)
+        model.filter_3d = detail::compute_3d_filter(
+            model.means, filter_cameras);
+    const auto multi_view_neighbours = compute_multi_view_neighbours(
+        views, options_);
+
     detail::AdamState means_state = detail::make_adam_state(model.means);
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
     detail::AdamState rotations_state = detail::make_adam_state(model.quaternions);
@@ -1067,15 +1119,59 @@ GaussianModel Trainer::train(
         const bool depth_normal_active = options_.use_depth_normal_loss &&
             options_.depth_normal_weight > 0.F &&
             iteration >= options_.depth_normal_from_iter;
+        const bool multi_view_active =
+            (options_.multi_view_geo_weight > 0.F ||
+             options_.multi_view_ncc_weight > 0.F) &&
+            iteration >= options_.depth_normal_from_iter &&
+            !multi_view_neighbours[view_index].empty();
         raster_options.require_depth = options_.use_mvs_depth ||
                                        options_.use_mvs_normals ||
-                                       depth_normal_active;
+                                       depth_normal_active ||
+                                       multi_view_active;
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
         detail::LossGradients loss = detail::compute_training_loss(
             rendered, target, options_, report_progress,
             depth_normal_active);
+        detail::MultiViewLoss multi_view_loss;
+        DepthSampleGradients multi_view_sample_gradients;
+        bool has_multi_view_sample_gradients = false;
+        if (multi_view_active) {
+            const auto& candidates = multi_view_neighbours[view_index];
+            std::uniform_int_distribution<std::size_t> select_neighbour(
+                0, candidates.size() - 1);
+            const std::size_t neighbour_index =
+                candidates[select_neighbour(random)];
+            const auto world_points = detail::unproject_depth_to_world(
+                rendered.median_depth, target.camera);
+            const DepthSampleResult sampled = rasterizer.sample_depth(
+                model, world_points, views[neighbour_index].camera,
+                raster_options);
+            tinytensor::Tensor grad_sampled_points;
+            multi_view_loss = detail::add_multi_view_loss(
+                sampled.camera_points, sampled.inside, rendered, target,
+                views[neighbour_index], options_, loss,
+                grad_sampled_points, report_progress);
+            multi_view_sample_gradients = rasterizer.sample_depth_backward(
+                model, sampled, grad_sampled_points);
+            detail::add_sample_depth_point_gradients(
+                target.camera, multi_view_sample_gradients.points, loss);
+            has_multi_view_sample_gradients = true;
+            if (report_progress) {
+                loss.total += options_.multi_view_geo_weight *
+                                  multi_view_loss.geometry +
+                              options_.multi_view_ncc_weight *
+                                  multi_view_loss.ncc;
+                loss.depth_value += options_.multi_view_geo_weight *
+                                    multi_view_loss.geometry;
+                loss.normal_value += options_.multi_view_ncc_weight *
+                                     multi_view_loss.ncc;
+            }
+        }
         ModelGradients gradients = rasterizer.backward(
             model, rendered, loss.color, loss.alpha, loss.depth, loss.normal);
+        if (has_multi_view_sample_gradients)
+            detail::add_sample_depth_model_gradients(
+                multi_view_sample_gradients, gradients);
         if (densification_enabled)
             detail::accumulate_densification_stats(
                 gradients.refine_weight, rendered.radii,
@@ -1162,6 +1258,18 @@ GaussianModel Trainer::train(
                 model.log_scales, options_.max_scale_ratio);
         }
 
+        // The Mip-Splatting radius depends on Gaussian positions and count.
+        // Refresh immediately after topology changes and periodically while
+        // the means continue to move, matching pygsplat's GGGS schedule.
+        if (options_.use_3d_filter &&
+            (latest_refinement.grown != 0 || latest_refinement.pruned != 0 ||
+             (options_.filter_3d_update_interval != 0 &&
+              iteration % options_.filter_3d_update_interval == 0 &&
+              iteration + options_.filter_3d_update_interval <
+                  options_.iterations)))
+            model.filter_3d = detail::compute_3d_filter(
+                model.means, filter_cameras);
+
         bool continue_training = true;
         if (report_progress) {
             const cudaError_t report_error = cudaDeviceSynchronize();
@@ -1196,7 +1304,9 @@ GaussianModel Trainer::train(
                 static_cast<float>(positive_opacity_gradients *
                                    inverse_gaussians),
                 static_cast<float>(opacity_sum * inverse_gaussians),
-                milliseconds});
+                milliseconds, multi_view_loss.geometry, multi_view_loss.ncc,
+                multi_view_loss.geometry_pixels,
+                multi_view_loss.ncc_pixels});
         }
         if (!continue_training) break;
         if (evaluate &&
@@ -1211,6 +1321,9 @@ GaussianModel Trainer::train(
         throw std::runtime_error(
             std::string("GGGS training synchronization failed: ") +
             cudaGetErrorString(error));
+    if (options_.use_3d_filter)
+        model.filter_3d = detail::compute_3d_filter(
+            model.means, filter_cameras);
     return model;
 }
 
@@ -1293,6 +1406,11 @@ void save_gaussians_ply(
     const auto rotations = download<float>(model.quaternions);
     const auto opacities = download<float>(model.opacity_logits);
     const auto sh = download<float>(model.sh);
+    const bool has_filter = model.filter_3d.is_valid() &&
+        model.filter_3d.numel() == count;
+    const auto filter_3d = has_filter
+        ? download<float>(model.filter_3d)
+        : std::vector<float>{};
     const auto require_finite = [](const std::vector<float>& values,
                                    const char* name) {
         const auto invalid = std::find_if(
@@ -1311,6 +1429,7 @@ void save_gaussians_ply(
     require_finite(rotations, "quaternions");
     require_finite(opacities, "opacity_logits");
     require_finite(sh, "SH");
+    if (has_filter) require_finite(filter_3d, "filter_3D");
     std::ofstream output(path, std::ios::binary);
     if (!output) throw std::runtime_error("Failed to create Gaussian PLY: " + path.string());
     output << "ply\nformat binary_little_endian 1.0\n"
@@ -1324,6 +1443,7 @@ void save_gaussians_ply(
     output << "property float opacity\n"
            << "property float scale_0\nproperty float scale_1\nproperty float scale_2\n"
            << "property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n"
+           << (has_filter ? "property float filter_3D\n" : "")
            << "end_header\n";
     for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
         for (int axis = 0; axis < 3; ++axis) write_float(output, means[3 * gaussian + axis]);
@@ -1339,6 +1459,7 @@ void save_gaussians_ply(
             write_float(output, log_scales[3 * gaussian + axis]);
         for (int component = 0; component < 4; ++component)
             write_float(output, rotations[4 * gaussian + component]);
+        if (has_filter) write_float(output, filter_3d[gaussian]);
     }
     if (!output) throw std::runtime_error("Failed while writing Gaussian PLY: " + path.string());
 }

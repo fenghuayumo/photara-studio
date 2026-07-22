@@ -31,8 +31,15 @@ images + COLMAP sparse model ─────────────────
 模型使用可训练的世界坐标均值、log-scale、四元数、opacity logit 和最高三阶 SH。
 稠密点云法线用于初始化 Gaussian 朝向，像素足迹用于初始化尺度，点色用于初始化 SH0。
 训练损失包含与 `pygsplat/simple_trainer.py` 对齐的 `0.8 * L1 + 0.2 * SSIM` 光度项和可选
-mask/alpha loss。mesh 模式默认在第 7,000 步启用权重 `0.05` 的 GGGS depth-normal
-self-consistency：从 median depth 反投影中心四邻域，以 `cross(dy, dx)` 求 depth normal，
+mask/alpha loss。mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 GGGS depth-normal、
+权重 `0.02` 的多视图几何往返和权重 `0.6` 的平面单应 NCC。多视图几何通过 GGGS 原生
+`sampleDepth` 前后向在相邻视图查询表面点，梯度同时回传参考深度、查询点以及邻视图
+Gaussian；NCC 使用半像素 7×7 patch、鲁棒 diffuse confidence 和深度/法线解析梯度。
+此外默认启用 Mip-Splatting 3D filter，按所有训练相机可见距离扩大亚像素 Gaussian，并以
+行列式比例补偿 opacity；filter 在拓扑变化后和训练期间周期重算，并写入 PLY 的 `filter_3D`。
+
+depth-normal self-consistency：从 median depth 反投影中心四邻域，以
+`cross(dy, dx)` 求 depth normal，
 再最小化 `mean(1-dot(rendered_normal, depth_normal))`；梯度同时回传 rendered normal 和
 median depth。所有参数通过显式
 GGGS backward 和 TinyTensor Adam 更新。SSIM 已完整移植 Python fused-ssim 的 11×11
@@ -58,6 +65,10 @@ build/aetherscan/Release/aetherscan.exe `
   --gggs `
   --gggs-iterations 10000
 ```
+
+mesh 质量路径可用 `--gggs-3d-filter`、`--gggs-mv-geo-weight`、
+`--gggs-mv-ncc-weight`、`--gggs-mv-neighbors`、`--gggs-mv-pixel-noise` 和
+`--gggs-geometry-from-iter` 调整；将两个 multi-view weight 设为 0 可做关闭 A/B。
 
 `--gggs` 隐含 `--dense`。输出包括 `scene_dense.ply` 和 `scene_gggs.ply`。当前 Gaussian
 PLY 保存训练参数（opacity 和 scale 仍是 logit/log-domain），可用于检查训练结果和后续
@@ -221,6 +232,24 @@ CUDA 前反向冒烟测试：
 ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-failure
 ```
 
+### 3D filter + multi-view 回归（2026-07-22）
+
+`D:\ScanVideo\ori_img` 的 1,249,605 点稠密初始化、76 视角、10,000 步完整训练耗时
+283.6 秒；第 3,000 步后启用 `sampleDepth` 几何、NCC 和 depth-normal，单步约 60–70 ms，
+每步约 11–31 万有效 multi-view 像素。最终 TSDF mesh 为 890,029 顶点 / 1,766,231 面；
+pygsplat pseudo-reference 为 887,781 / 1,762,164。
+
+按两侧各 750,000 个均匀表面样本做精确点到三角面距离，voxel=`0.00408112`：
+
+| 版本 | symmetric Chamfer-L1 | F@0.25 voxel | F@0.5 voxel | F@1 voxel | F@2 voxel |
+|---|---:|---:|---:|---:|---:|
+| depth/TSDF 修复基线 | 0.002866 | 0.2934 | 0.5280 | 0.8040 | 0.9517 |
+| + 3D filter + multi-view | **0.000566** | **0.8722** | **0.9730** | **0.9936** | **0.9983** |
+
+这里 pygsplat mesh 只是无真值条件下的实现对齐参照，不等价于真实几何精度。新 mesh 到输入
+稠密点的距离 p50/p90/p99 为 `0.001889 / 0.006033 / 0.015141`，也与 pygsplat 的
+`0.001873 / 0.005981 / 0.015087` 基本一致。
+
 ## 性能设计
 
 - MVS 沿用现有并发 view/tile 调度和 OpenMP CPU 并行；
@@ -258,8 +287,8 @@ PSNR 为 `30.44 / 36.96 / 35.98 dB`。depth-normal 提取过滤拒绝 `146,061 /
 
 仍未完成的产品工作：
 
-- 未移植 Python wrapper 中的 PatchMatch sample-depth/refine 分支；默认几何目标是与 Python
-  GGGS 对齐的自监督 depth-normal consistency，AetherScan MVS depth/normal 直接监督仅为可选项；
+- 3D filter、PatchMatch sample-depth、多视图几何与 plane-warp NCC 已移植；尚未加入 Python
+  glossy normal TV 分支，AetherScan MVS depth/normal 直接监督仍为可选项；
 - ADC-IGS 当前以 raster refine weight、可见度和屏幕半径构造投影优先级，尚未实现 Python
   版本基于 Sobel/逐像素误差反投影的完整 edge/error ownership map；
 - 未实现 checkpoint/resume、out-of-core view cache、多 GPU 和 mixed precision；

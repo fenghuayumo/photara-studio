@@ -522,6 +522,9 @@ dense-cloud 初始化、COLMAP 文本/二进制相机/稀疏点加载和 Gaussia
 opacity 管理和数量硬上限；MVS/外部 PLY 稠密点云初始化默认关闭致密化，也可显式选择
 `dense_adaptive`。GGGS median-depth/normal/alpha → TSDF → Clean 的 mesh extraction 与
 `active_mesh` 切换已经接通；外部稠密 PLY 可通过 `--colmap ... --dense-ply ...` 绕过 SfM/MVS。
+mesh 训练现在还默认启用 Mip-Splatting 3D filter，并从第 3,000 步加入 GGGS `sampleDepth`
+多视图几何往返与 7×7 plane-warp NCC；对应权重可用 `--gggs-mv-geo-weight` 和
+`--gggs-mv-ncc-weight` 做 A/B，训练日志会输出两项原始 loss 和有效像素数。
 当前仍未完成的是 ADC-IGS 逐像素 edge/error ownership、out-of-core view cache，以及 direct
 COLMAP 分支的 texture 编排。实现、构建方法、性能边界和许可证风险见
 [GGGS_CPP.md](GGGS_CPP.md)。

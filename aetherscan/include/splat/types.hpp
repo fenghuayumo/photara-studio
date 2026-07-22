@@ -29,6 +29,9 @@ struct GaussianModel {
     tinytensor::Tensor quaternions;     // [N,4], scalar-first
     tinytensor::Tensor opacity_logits;  // [N,1]
     tinytensor::Tensor sh;              // [N,K,3]
+    // Mip-Splatting screen-space footprint converted to a world-space radius.
+    // This is derived state (no gradient) and is recomputed as means change.
+    tinytensor::Tensor filter_3d;        // [N,1], optional
     unsigned sh_degree{3};
 
     [[nodiscard]] std::size_t size() const noexcept {
@@ -70,6 +73,19 @@ struct RenderResult {
     tinytensor::Tensor radii;         // [N], int32
     RasterContext context;
     int rendered_instances{};
+};
+
+struct DepthSampleContextImpl;
+
+struct DepthSampleResult {
+    tinytensor::Tensor camera_points;  // [P,3], neighbour camera space
+    tinytensor::Tensor inside;         // [P], bool
+    std::shared_ptr<DepthSampleContextImpl> context;
+};
+
+struct DepthSampleGradients {
+    ModelGradients model;
+    tinytensor::Tensor points;         // [P,3], world space
 };
 
 }  // namespace aetherscan::splat

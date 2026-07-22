@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cfloat>
+#include <cstring>
 #include <stdexcept>
 
 namespace aetherscan::splat::detail {
@@ -25,13 +27,23 @@ __device__ float sigmoid(const float value) {
 
 __global__ void activate_kernel(
     const float* log_scales, const float* raw_quaternions,
-    const float* opacity_logits, float* scales, float* quaternions,
-    float* opacities, const std::size_t count) {
+    const float* opacity_logits, const float* filter_3d,
+    float* scales, float* quaternions, float* opacities,
+    const std::size_t count) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
-    scales[3 * index + 0] = expf(log_scales[3 * index + 0]);
-    scales[3 * index + 1] = expf(log_scales[3 * index + 1]);
-    scales[3 * index + 2] = expf(log_scales[3 * index + 2]);
+    float determinant_ratio = 1.F;
+    const float filter_squared = filter_3d != nullptr
+        ? filter_3d[index] * filter_3d[index]
+        : 0.F;
+    for (int axis = 0; axis < 3; ++axis) {
+        const std::size_t offset = 3 * index + axis;
+        const float raw_scale = expf(log_scales[offset]);
+        const float filtered_scale = sqrtf(
+            raw_scale * raw_scale + filter_squared);
+        scales[offset] = filtered_scale;
+        determinant_ratio *= raw_scale / filtered_scale;
+    }
     const float w = raw_quaternions[4 * index + 0];
     const float x = raw_quaternions[4 * index + 1];
     const float y = raw_quaternions[4 * index + 2];
@@ -41,20 +53,35 @@ __global__ void activate_kernel(
     quaternions[4 * index + 1] = x * inverse_norm;
     quaternions[4 * index + 2] = y * inverse_norm;
     quaternions[4 * index + 3] = z * inverse_norm;
-    opacities[index] = sigmoid(opacity_logits[index]);
+    opacities[index] =
+        sigmoid(opacity_logits[index]) * determinant_ratio;
 }
 
 __global__ void chain_gradient_kernel(
     const float* log_scales, const float* raw_quaternions,
-    const float* opacities, const float* grad_scales,
+    const float* opacity_logits, const float* filter_3d,
+    const float* filtered_scales, const float* filtered_opacities,
+    const float* grad_scales,
     const float* grad_quaternions, const float* grad_opacities,
     float* grad_log_scales, float* grad_raw_quaternions,
     float* grad_opacity_logits, const std::size_t count) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
+    const float filter_squared = filter_3d != nullptr
+        ? filter_3d[index] * filter_3d[index]
+        : 0.F;
     for (int axis = 0; axis < 3; ++axis) {
         const std::size_t offset = 3 * index + axis;
-        grad_log_scales[offset] = grad_scales[offset] * expf(log_scales[offset]);
+        const float raw_scale = expf(log_scales[offset]);
+        const float filtered_scale = filtered_scales[offset];
+        const float filtered_scale_squared =
+            filtered_scale * filtered_scale;
+        // d sqrt(s^2+f^2) / d log(s), plus the scale/opacity
+        // cross-term introduced by density-preserving opacity compensation.
+        grad_log_scales[offset] =
+            grad_scales[offset] * raw_scale * raw_scale / filtered_scale +
+            grad_opacities[index] * filtered_opacities[index] *
+                filter_squared / filtered_scale_squared;
     }
     const float rw = raw_quaternions[4 * index + 0];
     const float rx = raw_quaternions[4 * index + 1];
@@ -69,9 +96,374 @@ __global__ void chain_gradient_kernel(
     for (int component = 0; component < 4; ++component)
         grad_raw_quaternions[4 * index + component] = inverse_norm *
             (grad_quaternions[4 * index + component] - q[component] * dot);
-    const float opacity = opacities[index];
+    const float opacity = sigmoid(opacity_logits[index]);
     grad_opacity_logits[index] =
-        grad_opacities[index] * opacity * (1.F - opacity);
+        grad_opacities[index] * filtered_opacities[index] * (1.F - opacity);
+}
+
+__global__ void compute_3d_filter_distance_kernel(
+    const float* means, const float* cameras, const std::size_t count,
+    const std::size_t camera_count, float* distances,
+    unsigned* maximum_distance_bits) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float x = means[3 * index];
+    const float y = means[3 * index + 1];
+    const float z = means[3 * index + 2];
+    float minimum_distance = FLT_MAX;
+    for (std::size_t view = 0; view < camera_count; ++view) {
+        // 16 column-major world-to-camera values followed by fx, fy, W, H.
+        const float* camera = cameras + 20 * view;
+        const float camera_x = camera[0] * x + camera[4] * y +
+                               camera[8] * z + camera[12];
+        const float camera_y = camera[1] * x + camera[5] * y +
+                               camera[9] * z + camera[13];
+        const float camera_z = camera[2] * x + camera[6] * y +
+                               camera[10] * z + camera[14];
+        if (!(camera_z > 0.2F)) continue;
+        const float boundary_x = camera[18] / camera[16] * 0.575F;
+        const float boundary_y = camera[19] / camera[17] * 0.575F;
+        if (fabsf(camera_x / camera_z) > boundary_x ||
+            fabsf(camera_y / camera_z) > boundary_y)
+            continue;
+        minimum_distance = fminf(minimum_distance, camera_z);
+    }
+    distances[index] = minimum_distance;
+    if (minimum_distance < FLT_MAX)
+        atomicMax(maximum_distance_bits, __float_as_uint(minimum_distance));
+}
+
+__global__ void finalize_3d_filter_kernel(
+    float* distances, const std::size_t count, const float maximum_distance,
+    const float inverse_maximum_focal) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float distance = distances[index] < FLT_MAX
+        ? distances[index]
+        : maximum_distance;
+    distances[index] = distance * inverse_maximum_focal *
+                       0.4472135954999579F;
+}
+
+__device__ float sample_plane_bilinear(
+    const float* image, const int width, const int height,
+    const float u, const float v) {
+    const int x0 = max(0, min(width - 1, static_cast<int>(floorf(u))));
+    const int y0 = max(0, min(height - 1, static_cast<int>(floorf(v))));
+    const int x1 = min(x0 + 1, width - 1);
+    const int y1 = min(y0 + 1, height - 1);
+    const float tx = u - floorf(u);
+    const float ty = v - floorf(v);
+    return (image[y0 * width + x0] * (1.F - tx) +
+            image[y0 * width + x1] * tx) * (1.F - ty) +
+           (image[y1 * width + x0] * (1.F - tx) +
+            image[y1 * width + x1] * tx) * ty;
+}
+
+__device__ float sample_gray_bilinear(
+    const float* rgb, const int width, const int height,
+    const float u, const float v) {
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    return 0.299F * sample_plane_bilinear(rgb, width, height, u, v) +
+           0.587F * sample_plane_bilinear(rgb + pixels, width, height, u, v) +
+           0.114F * sample_plane_bilinear(rgb + 2 * pixels, width, height, u, v);
+}
+
+__device__ bool plane_warp_ncc(
+    const float depth, float nx, float ny, float nz,
+    const int center_x, const int center_y,
+    const float* transform, const Camera reference,
+    const Camera neighbour, const float* reference_rgb,
+    const float* neighbour_rgb, float& ncc, float& grad_depth,
+    float& grad_nx, float& grad_ny, float& grad_nz) {
+    constexpr int radius = 3;
+    constexpr float radius_scaled = 1.5F;
+    constexpr int samples = 49;
+    constexpr float inverse_samples = 1.F / samples;
+    if (center_x - radius_scaled <= 0.F ||
+        center_x + radius_scaled >= reference.width - 1 ||
+        center_y - radius_scaled <= 0.F ||
+        center_y + radius_scaled >= reference.height - 1)
+        return false;
+    const float normal_length = sqrtf(nx * nx + ny * ny + nz * nz);
+    if (!(normal_length > 1e-8F)) return false;
+    nx /= normal_length;
+    ny /= normal_length;
+    nz /= normal_length;
+    const float qcx = (center_x - reference.cx) / reference.fx;
+    const float qcy = (center_y - reference.cy) / reference.fy;
+    const float distance = -(qcx * nx + qcy * ny + nz) * depth;
+    if (!(fabsf(distance) > 1e-7F)) return false;
+    float homography[9];
+    for (int row = 0; row < 3; ++row) {
+        const float translation = transform[9 + row];
+        homography[3 * row] = transform[3 * row] - translation * nx / distance;
+        homography[3 * row + 1] = transform[3 * row + 1] - translation * ny / distance;
+        homography[3 * row + 2] = transform[3 * row + 2] - translation * nz / distance;
+    }
+    float sum_r = 0.F, sum_n = 0.F, sum_r2 = 0.F, sum_n2 = 0.F,
+          sum_rn = 0.F;
+    float3 derivative_sum = make_float3(0.F, 0.F, 0.F);
+    float3 derivative_sum2 = make_float3(0.F, 0.F, 0.F);
+    float3 derivative_cross = make_float3(0.F, 0.F, 0.F);
+    const float aux_x = transform[9] / distance;
+    const float aux_y = transform[10] / distance;
+    const float aux_z = transform[11] / distance;
+    for (int dv_i = -radius; dv_i <= radius; ++dv_i) {
+        const float vr = center_y + 0.5F * dv_i;
+        for (int du_i = -radius; du_i <= radius; ++du_i) {
+            const float ur = center_x + 0.5F * du_i;
+            const float qx = (ur - reference.cx) / reference.fx;
+            const float qy = (vr - reference.cy) / reference.fy;
+            const float hx = homography[0] * qx + homography[1] * qy + homography[2];
+            const float hy = homography[3] * qx + homography[4] * qy + homography[5];
+            const float hz = homography[6] * qx + homography[7] * qy + homography[8];
+            if (!(hz > 1e-7F)) return false;
+            const float un = neighbour.fx * hx / hz + neighbour.cx;
+            const float vn = neighbour.fy * hy / hz + neighbour.cy;
+            if (!(un - radius_scaled > 0.F &&
+                  un + radius_scaled < neighbour.width - 1 &&
+                  vn - radius_scaled > 0.F &&
+                  vn + radius_scaled < neighbour.height - 1))
+                return false;
+            const float cr = sample_gray_bilinear(
+                reference_rgb, static_cast<int>(reference.width),
+                static_cast<int>(reference.height), ur, vr);
+            const int x0 = static_cast<int>(floorf(un));
+            const int y0 = static_cast<int>(floorf(vn));
+            const float tx = un - x0;
+            const float ty = vn - y0;
+            const float cn = sample_gray_bilinear(
+                neighbour_rgb, static_cast<int>(neighbour.width),
+                static_cast<int>(neighbour.height), un, vn);
+            const float c00 = sample_gray_bilinear(
+                neighbour_rgb, static_cast<int>(neighbour.width),
+                static_cast<int>(neighbour.height), x0, y0);
+            const float c01 = sample_gray_bilinear(
+                neighbour_rgb, static_cast<int>(neighbour.width),
+                static_cast<int>(neighbour.height), x0 + 1, y0);
+            const float c10 = sample_gray_bilinear(
+                neighbour_rgb, static_cast<int>(neighbour.width),
+                static_cast<int>(neighbour.height), x0, y0 + 1);
+            const float c11 = sample_gray_bilinear(
+                neighbour_rgb, static_cast<int>(neighbour.width),
+                static_cast<int>(neighbour.height), x0 + 1, y0 + 1);
+            const float dc_du = (c01 - c00) * (1.F - ty) +
+                                (c11 - c10) * ty;
+            const float dc_dv = (c10 - c00) * (1.F - tx) +
+                                (c11 - c01) * tx;
+            const float dc_dhx = dc_du * neighbour.fx / hz;
+            const float dc_dhy = dc_dv * neighbour.fy / hz;
+            const float dc_dhz =
+                -(dc_du * (un - neighbour.cx) +
+                  dc_dv * (vn - neighbour.cy)) / hz;
+            const float factor = dc_dhx * aux_x + dc_dhy * aux_y +
+                                 dc_dhz * aux_z;
+            const float3 derivative = make_float3(qx * factor, qy * factor, factor);
+            derivative_sum.x += derivative.x;
+            derivative_sum.y += derivative.y;
+            derivative_sum.z += derivative.z;
+            derivative_sum2.x += 2.F * cn * derivative.x;
+            derivative_sum2.y += 2.F * cn * derivative.y;
+            derivative_sum2.z += 2.F * cn * derivative.z;
+            derivative_cross.x += cr * derivative.x;
+            derivative_cross.y += cr * derivative.y;
+            derivative_cross.z += cr * derivative.z;
+            sum_r += cr;
+            sum_n += cn;
+            sum_r2 += cr * cr;
+            sum_n2 += cn * cn;
+            sum_rn += cr * cn;
+        }
+    }
+    const float cross = sum_rn - sum_r * sum_n * inverse_samples;
+    const float variance_r = sum_r2 - sum_r * sum_r * inverse_samples;
+    const float variance_n = sum_n2 - sum_n * sum_n * inverse_samples;
+    if (!(variance_r > 5e-6F && variance_n > 5e-6F)) return false;
+    const float denominator = variance_r * variance_n + 1e-8F;
+    ncc = cross * cross / denominator;
+    const float grad_cross = 2.F * cross / denominator;
+    const float grad_variance_n = -ncc / (variance_n + 1e-8F);
+    const float coefficient_sum =
+        (-grad_cross * sum_r - 2.F * grad_variance_n * sum_n) *
+        inverse_samples;
+    const float3 derivative = make_float3(
+        coefficient_sum * derivative_sum.x +
+            grad_variance_n * derivative_sum2.x +
+            grad_cross * derivative_cross.x,
+        coefficient_sum * derivative_sum.y +
+            grad_variance_n * derivative_sum2.y +
+            grad_cross * derivative_cross.y,
+        coefficient_sum * derivative_sum.z +
+            grad_variance_n * derivative_sum2.z +
+            grad_cross * derivative_cross.z);
+    grad_nx = -derivative.x;
+    grad_ny = -derivative.y;
+    grad_nz = -derivative.z;
+    const float grad_distance =
+        (derivative.x * nx + derivative.y * ny + derivative.z * nz) /
+        distance;
+    grad_nx -= depth * grad_distance * qcx;
+    grad_ny -= depth * grad_distance * qcy;
+    grad_nz -= depth * grad_distance;
+    grad_depth = -(qcx * nx + qcy * ny + nz) * grad_distance;
+    // Python normalizes the selected raster normal before invoking the NCC
+    // kernel, so its autograd path applies the normalization Jacobian.
+    const float normal_dot_gradient =
+        nx * grad_nx + ny * grad_ny + nz * grad_nz;
+    grad_nx = (grad_nx - nx * normal_dot_gradient) / normal_length;
+    grad_ny = (grad_ny - ny * normal_dot_gradient) / normal_length;
+    grad_nz = (grad_nz - nz * normal_dot_gradient) / normal_length;
+    return isfinite(ncc) && isfinite(grad_depth) && isfinite(grad_nx) &&
+           isfinite(grad_ny) && isfinite(grad_nz);
+}
+
+__global__ void multi_view_raw_kernel(
+    const float* reference_depth, const float* reference_normal,
+    const float* reference_rgb, const float* sampled_neighbour_points,
+    const bool* sampled_inside, const float* neighbour_rgb, const float* transform,
+    const Camera reference, const Camera neighbour,
+    const float pixel_noise_threshold, const bool robust_ncc,
+    const float ncc_lambda_reference, const float ncc_sharpness,
+    const float ncc_min_weight, float* geo_grad_sampled,
+    float* ncc_grad_depth, float* ncc_grad_normal, float* terms,
+    const std::size_t pixels) {
+    const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels) return;
+    const int x = static_cast<int>(pixel % reference.width);
+    const int y = static_cast<int>(pixel / reference.width);
+    const float depth = reference_depth[pixel];
+    if (!sampled_inside[pixel] || !(depth > 0.F))
+        return;
+    const float sx = sampled_neighbour_points[3 * pixel];
+    const float sy = sampled_neighbour_points[3 * pixel + 1];
+    const float sz = sampled_neighbour_points[3 * pixel + 2];
+    if (!(sz > 0.2F)) return;
+    const float dx = sx - transform[9];
+    const float dy = sy - transform[10];
+    const float dz = sz - transform[11];
+    const float rx = transform[0] * dx + transform[3] * dy + transform[6] * dz;
+    const float ry = transform[1] * dx + transform[4] * dy + transform[7] * dz;
+    const float rz = transform[2] * dx + transform[5] * dy + transform[8] * dz;
+    if (!(rz > 0.2F)) return;
+    const float projected_x = reference.fx * rx / rz + reference.cx;
+    const float projected_y = reference.fy * ry / rz + reference.cy;
+    const float du = projected_x - static_cast<float>(x);
+    const float dv = projected_y - static_cast<float>(y);
+    const float noise = sqrtf(du * du + dv * dv + 1e-12F);
+    if (!(noise < pixel_noise_threshold)) return;
+    const float weight = expf(-noise);
+    const float inverse_noise = 1.F / noise;
+    const float grad_rx = du * inverse_noise * reference.fx / rz;
+    const float grad_ry = dv * inverse_noise * reference.fy / rz;
+    const float grad_rz =
+        -(du * reference.fx * rx + dv * reference.fy * ry) *
+        inverse_noise / (rz * rz);
+    geo_grad_sampled[3 * pixel] = weight *
+        (transform[0] * grad_rx + transform[1] * grad_ry +
+         transform[2] * grad_rz);
+    geo_grad_sampled[3 * pixel + 1] = weight *
+        (transform[3] * grad_rx + transform[4] * grad_ry +
+         transform[5] * grad_rz);
+    geo_grad_sampled[3 * pixel + 2] = weight *
+        (transform[6] * grad_rx + transform[7] * grad_ry +
+         transform[8] * grad_rz);
+    atomicAdd(terms, weight * noise);
+    atomicAdd(terms + 1, 1.F);
+
+    const float nx = reference_normal[pixel];
+    const float ny = reference_normal[pixels + pixel];
+    const float nz = reference_normal[2 * pixels + pixel];
+    float ncc{}, gd{}, gnx{}, gny{}, gnz{};
+    if (!plane_warp_ncc(
+            depth, nx, ny, nz, x, y, transform, reference, neighbour,
+            reference_rgb, neighbour_rgb, ncc, gd, gnx, gny, gnz))
+        return;
+    const float error = fminf(fmaxf(1.F - ncc, 0.F), 2.F);
+    if (!robust_ncc && error >= 0.9F) return;
+    float confidence = robust_ncc
+        ? 1.F / (1.F + expf(-(ncc_lambda_reference - error) *
+                             ncc_sharpness))
+        : 1.F;
+    confidence = confidence * (1.F - ncc_min_weight) + ncc_min_weight;
+    const float factor = -weight * confidence;
+    ncc_grad_depth[pixel] = factor * gd;
+    ncc_grad_normal[pixel] = factor * gnx;
+    ncc_grad_normal[pixels + pixel] = factor * gny;
+    ncc_grad_normal[2 * pixels + pixel] = factor * gnz;
+    atomicAdd(terms + 2, weight * confidence * error);
+    atomicAdd(terms + 3, 1.F);
+}
+
+__global__ void add_multi_view_gradients_kernel(
+    float* depth, float* normal, float* geo_sampled,
+    const float* ncc_depth, const float* ncc_normal, const float* terms,
+    const float geometry_weight, const float ncc_weight,
+    const std::size_t pixels) {
+    const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels) return;
+    const float geo_scale = terms[1] > 0.F ? geometry_weight / terms[1] : 0.F;
+    const float ncc_scale = terms[3] > 0.F ? ncc_weight / terms[3] : 0.F;
+    depth[pixel] += ncc_scale * ncc_depth[pixel];
+    for (int axis = 0; axis < 3; ++axis)
+        geo_sampled[3 * pixel + axis] *= geo_scale;
+    for (int axis = 0; axis < 3; ++axis)
+        normal[static_cast<std::size_t>(axis) * pixels + pixel] +=
+            ncc_scale * ncc_normal[static_cast<std::size_t>(axis) * pixels + pixel];
+}
+
+__global__ void unproject_depth_to_world_kernel(
+    const float* depth, float* points, const Camera camera,
+    const std::size_t pixels) {
+    const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels) return;
+    const float z = depth[pixel];
+    const float x = (static_cast<float>(pixel % camera.width) - camera.cx) /
+                    camera.fx * z;
+    const float y = (static_cast<float>(pixel / camera.width) - camera.cy) /
+                    camera.fy * z;
+    const float dx = x - camera.world_to_camera[12];
+    const float dy = y - camera.world_to_camera[13];
+    const float dz = z - camera.world_to_camera[14];
+    points[3 * pixel] = camera.world_to_camera[0] * dx +
+                        camera.world_to_camera[1] * dy +
+                        camera.world_to_camera[2] * dz;
+    points[3 * pixel + 1] = camera.world_to_camera[4] * dx +
+                            camera.world_to_camera[5] * dy +
+                            camera.world_to_camera[6] * dz;
+    points[3 * pixel + 2] = camera.world_to_camera[8] * dx +
+                            camera.world_to_camera[9] * dy +
+                            camera.world_to_camera[10] * dz;
+}
+
+__global__ void add_point_depth_gradients_kernel(
+    const float* point_gradients, float* depth_gradients,
+    const Camera camera, const std::size_t pixels) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < pixels) {
+        const float qx = (static_cast<float>(index % camera.width) - camera.cx) /
+                         camera.fx;
+        const float qy = (static_cast<float>(index / camera.width) - camera.cy) /
+                         camera.fy;
+        const float wx = camera.world_to_camera[0] * qx +
+                         camera.world_to_camera[1] * qy +
+                         camera.world_to_camera[2];
+        const float wy = camera.world_to_camera[4] * qx +
+                         camera.world_to_camera[5] * qy +
+                         camera.world_to_camera[6];
+        const float wz = camera.world_to_camera[8] * qx +
+                         camera.world_to_camera[9] * qy +
+                         camera.world_to_camera[10];
+        depth_gradients[index] += point_gradients[3 * index] * wx +
+                                  point_gradients[3 * index + 1] * wy +
+                                  point_gradients[3 * index + 2] * wz;
+    }
+}
+
+__global__ void add_tensor_in_place_kernel(
+    float* target, const float* added, const std::size_t count) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count) target[index] += added[index];
 }
 
 __global__ void loss_kernel(
@@ -492,10 +884,203 @@ ActivatedParameters activate_parameters(const GaussianModel& model) {
     if (count == 0) return result;
     activate_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
-        model.opacity_logits.ptr<float>(), result.scales.ptr<float>(),
+        model.opacity_logits.ptr<float>(),
+        model.filter_3d.is_valid() ? model.filter_3d.ptr<float>() : nullptr,
+        result.scales.ptr<float>(),
         result.quaternions.ptr<float>(), result.opacities.ptr<float>(), count);
     check_cuda(cudaGetLastError(), "activate GGGS parameters");
     return result;
+}
+
+tinytensor::Tensor compute_3d_filter(
+    const tinytensor::Tensor& means, const std::vector<Camera>& cameras) {
+    if (!means.is_valid() || means.device() != tinytensor::Device::CUDA ||
+        means.dtype() != tinytensor::DataType::Float32 ||
+        means.shape().rank() != 2 || means.shape()[1] != 3)
+        throw std::invalid_argument(
+            "GGGS 3D filter requires CUDA float32 means shaped [N,3]");
+    if (cameras.empty())
+        throw std::invalid_argument(
+            "GGGS 3D filter requires at least one camera");
+    const std::size_t count = means.shape()[0];
+    if (count == 0)
+        return tinytensor::Tensor::empty(
+            {std::size_t{0}, std::size_t{1}}, tinytensor::Device::CUDA);
+    std::vector<float> packed(cameras.size() * 20);
+    float maximum_focal = 0.F;
+    for (std::size_t view = 0; view < cameras.size(); ++view) {
+        const Camera& camera = cameras[view];
+        std::copy(
+            camera.world_to_camera.begin(), camera.world_to_camera.end(),
+            packed.begin() + static_cast<std::ptrdiff_t>(20 * view));
+        packed[20 * view + 16] = camera.fx;
+        packed[20 * view + 17] = camera.fy;
+        packed[20 * view + 18] = static_cast<float>(camera.width);
+        packed[20 * view + 19] = static_cast<float>(camera.height);
+        maximum_focal = std::max(maximum_focal, camera.fx);
+    }
+    maximum_focal = std::max(maximum_focal, 1e-6F);
+    const auto camera_tensor = tinytensor::Tensor::from_vector(
+        packed, {cameras.size(), std::size_t{20}},
+        tinytensor::Device::CUDA);
+    auto result = tinytensor::Tensor::empty(
+        {means.shape()[0], std::size_t{1}}, tinytensor::Device::CUDA);
+    auto maximum_bits = tinytensor::Tensor::zeros(
+        {std::size_t{1}}, tinytensor::Device::CUDA,
+        tinytensor::DataType::Int32);
+    compute_3d_filter_distance_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        means.ptr<float>(), camera_tensor.ptr<float>(), count,
+        cameras.size(), result.ptr<float>(),
+        reinterpret_cast<unsigned*>(maximum_bits.data_ptr()));
+    check_cuda(cudaGetLastError(), "compute GGGS 3D filter distances");
+    unsigned maximum_distance_bits{};
+    check_cuda(cudaMemcpy(
+        &maximum_distance_bits, maximum_bits.data_ptr(), sizeof(unsigned),
+        cudaMemcpyDeviceToHost), "download GGGS 3D filter maximum");
+    float maximum_distance{};
+    std::memcpy(
+        &maximum_distance, &maximum_distance_bits, sizeof(maximum_distance));
+    if (!(maximum_distance > 0.F) || !std::isfinite(maximum_distance))
+        maximum_distance = 1.F;
+    finalize_3d_filter_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        result.ptr<float>(), count, maximum_distance,
+        1.F / maximum_focal);
+    check_cuda(cudaGetLastError(), "finalize GGGS 3D filter");
+    return result;
+}
+
+MultiViewLoss add_multi_view_loss(
+    const tinytensor::Tensor& sampled_neighbour_points,
+    const tinytensor::Tensor& sampled_inside,
+    const RenderResult& reference_render,
+    const TrainingView& reference,
+    const TrainingView& neighbour,
+    const TrainingOptions& options,
+    LossGradients& gradients,
+    tinytensor::Tensor& grad_sampled_points,
+    const bool collect_scalar_terms) {
+    const std::size_t pixels =
+        static_cast<std::size_t>(reference.camera.width) *
+        reference.camera.height;
+    if (pixels == 0 ||
+        (options.multi_view_geo_weight <= 0.F &&
+         options.multi_view_ncc_weight <= 0.F))
+        return {};
+    // Row-major reference-camera -> neighbour-camera rigid transform.
+    float rr[9], rn[9], tr[3], tn[3];
+    for (int row = 0; row < 3; ++row) {
+        tr[row] = reference.camera.world_to_camera[12 + row];
+        tn[row] = neighbour.camera.world_to_camera[12 + row];
+        for (int column = 0; column < 3; ++column) {
+            rr[3 * row + column] =
+                reference.camera.world_to_camera[4 * column + row];
+            rn[3 * row + column] =
+                neighbour.camera.world_to_camera[4 * column + row];
+        }
+    }
+    std::vector<float> transform(12, 0.F);
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            for (int k = 0; k < 3; ++k)
+                transform[3 * row + column] +=
+                    rn[3 * row + k] * rr[3 * column + k];
+        }
+        transform[9 + row] = tn[row];
+        for (int column = 0; column < 3; ++column)
+            transform[9 + row] -=
+                transform[3 * row + column] * tr[column];
+    }
+    const auto transform_tensor = tinytensor::Tensor::from_vector(
+        transform, {std::size_t{12}}, tinytensor::Device::CUDA);
+    grad_sampled_points = tinytensor::Tensor::zeros_like(
+        sampled_neighbour_points);
+    auto ncc_depth = tinytensor::Tensor::zeros_like(
+        reference_render.median_depth);
+    auto ncc_normal = tinytensor::Tensor::zeros_like(reference_render.normal);
+    auto terms = tinytensor::Tensor::zeros(
+        {std::size_t{4}}, tinytensor::Device::CUDA);
+    multi_view_raw_kernel<<<
+        (pixels + k_threads - 1) / k_threads, k_threads>>>(
+        reference_render.median_depth.ptr<float>(),
+        reference_render.normal.ptr<float>(), reference.rgb.ptr<float>(),
+        sampled_neighbour_points.ptr<float>(), sampled_inside.ptr<bool>(),
+        neighbour.rgb.ptr<float>(),
+        transform_tensor.ptr<float>(), reference.camera, neighbour.camera,
+        options.multi_view_pixel_noise_threshold,
+        options.multi_view_robust_ncc,
+        options.multi_view_ncc_lambda_reference,
+        options.multi_view_ncc_sharpness,
+        std::clamp(options.multi_view_ncc_min_weight, 0.F, 1.F),
+        grad_sampled_points.ptr<float>(), ncc_depth.ptr<float>(),
+        ncc_normal.ptr<float>(), terms.ptr<float>(), pixels);
+    check_cuda(cudaGetLastError(), "compute GGGS multi-view loss");
+    add_multi_view_gradients_kernel<<<
+        (pixels + k_threads - 1) / k_threads, k_threads>>>(
+        gradients.depth.ptr<float>(), gradients.normal.ptr<float>(),
+        grad_sampled_points.ptr<float>(), ncc_depth.ptr<float>(),
+        ncc_normal.ptr<float>(), terms.ptr<float>(),
+        options.multi_view_geo_weight, options.multi_view_ncc_weight, pixels);
+    check_cuda(cudaGetLastError(), "accumulate GGGS multi-view gradients");
+    if (!collect_scalar_terms) return {};
+    const std::vector<float> values = terms.to_vector();
+    MultiViewLoss result;
+    result.geometry_pixels = static_cast<std::size_t>(values[1]);
+    result.ncc_pixels = static_cast<std::size_t>(values[3]);
+    result.geometry = result.geometry_pixels != 0
+        ? values[0] / values[1]
+        : 0.F;
+    result.ncc = result.ncc_pixels != 0 ? values[2] / values[3] : 0.F;
+    return result;
+}
+
+tinytensor::Tensor unproject_depth_to_world(
+    const tinytensor::Tensor& depth, const Camera& camera) {
+    const std::size_t pixels =
+        static_cast<std::size_t>(camera.width) * camera.height;
+    if (depth.numel() != pixels)
+        throw std::invalid_argument(
+            "GGGS depth unprojection shape does not match camera");
+    auto result = tinytensor::Tensor::empty(
+        {pixels, std::size_t{3}}, tinytensor::Device::CUDA);
+    unproject_depth_to_world_kernel<<<
+        (pixels + k_threads - 1) / k_threads, k_threads>>>(
+        depth.ptr<float>(), result.ptr<float>(), camera, pixels);
+    check_cuda(cudaGetLastError(), "unproject GGGS reference depth");
+    return result;
+}
+
+void add_sample_depth_point_gradients(
+    const Camera& reference_camera,
+    const tinytensor::Tensor& grad_world_points,
+    LossGradients& image_gradients) {
+    const std::size_t pixels = static_cast<std::size_t>(
+        reference_camera.width) * reference_camera.height;
+    add_point_depth_gradients_kernel<<<
+        (pixels + k_threads - 1) / k_threads, k_threads>>>(
+        grad_world_points.ptr<float>(), image_gradients.depth.ptr<float>(),
+        reference_camera, pixels);
+    check_cuda(cudaGetLastError(),
+               "accumulate GGGS sample-depth point gradients");
+}
+
+void add_sample_depth_model_gradients(
+    const DepthSampleGradients& sample_gradients,
+    ModelGradients& model_gradients) {
+    const auto add = [](tinytensor::Tensor& target,
+                        const tinytensor::Tensor& source) {
+        const std::size_t count = target.numel();
+        add_tensor_in_place_kernel<<<
+            (count + k_threads - 1) / k_threads, k_threads>>>(
+            target.ptr<float>(), source.ptr<float>(), count);
+    };
+    add(model_gradients.means, sample_gradients.model.means);
+    add(model_gradients.log_scales, sample_gradients.model.log_scales);
+    add(model_gradients.quaternions, sample_gradients.model.quaternions);
+    add(model_gradients.opacity_logits,
+        sample_gradients.model.opacity_logits);
+    check_cuda(cudaGetLastError(), "accumulate GGGS sample-depth gradients");
 }
 
 void chain_parameter_gradients(
@@ -511,7 +1096,10 @@ void chain_parameter_gradients(
     if (count == 0) return;
     chain_gradient_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
-        activated.opacities.ptr<float>(), grad_scales.ptr<float>(),
+        model.opacity_logits.ptr<float>(),
+        model.filter_3d.is_valid() ? model.filter_3d.ptr<float>() : nullptr,
+        activated.scales.ptr<float>(), activated.opacities.ptr<float>(),
+        grad_scales.ptr<float>(),
         grad_quaternions.ptr<float>(), grad_opacities.ptr<float>(),
         gradients.log_scales.ptr<float>(), gradients.quaternions.ptr<float>(),
         gradients.opacity_logits.ptr<float>(), count);

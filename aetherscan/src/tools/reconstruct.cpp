@@ -84,7 +84,12 @@ struct ReconstructCli {
     float gggs_match_alpha_weight{0.25F};
     float gggs_ssim_weight{0.2F};
     float gggs_depth_normal_weight{0.05F};
-    unsigned gggs_geometry_from_iter{7'000};
+    bool gggs_3d_filter{true};
+    float gggs_multi_view_geo_weight{0.02F};
+    float gggs_multi_view_ncc_weight{0.6F};
+    unsigned gggs_multi_view_num{8};
+    float gggs_multi_view_pixel_noise{1.F};
+    unsigned gggs_geometry_from_iter{3'000};
     float gggs_min_scale_fraction{1e-4F};
     float gggs_max_scale_fraction{0.002F};
     float gggs_max_scale_ratio{0.F};
@@ -219,7 +224,12 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
               << "  --gggs-ssim-weight W  structural loss blend (default 0.2)\n"
               << "  --gggs-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
-              << "  --gggs-geometry-from-iter N  start geometry loss (default 7000)\n"
+              << "  --gggs-3d-filter BOOL  Mip-Splatting 3D filter (default true)\n"
+              << "  --gggs-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
+              << "  --gggs-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
+              << "  --gggs-mv-neighbors N  nearest camera candidates (default 8)\n"
+              << "  --gggs-mv-pixel-noise P  geometry reprojection gate (default 1px)\n"
+              << "  --gggs-geometry-from-iter N  start geometry loss (default 3000)\n"
               << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --gggs-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
               << "  --gggs-max-scale-ratio R  hard anisotropy clamp (0 disables; default 0)\n"
@@ -347,8 +357,19 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("gggs-depth-normal-weight",
          "GGGS median-depth/raster-normal consistency weight",
          cxxopts::value<float>()->default_value("0.05"))
+        ("gggs-3d-filter", "Enable GGGS/Mip-Splatting 3D filter",
+         cxxopts::value<bool>()->default_value("true")
+             ->implicit_value("true"))
+        ("gggs-mv-geo-weight", "Multi-view depth round-trip loss weight",
+         cxxopts::value<float>()->default_value("0.02"))
+        ("gggs-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
+         cxxopts::value<float>()->default_value("0.6"))
+        ("gggs-mv-neighbors", "Number of nearest multi-view candidates",
+         cxxopts::value<unsigned>()->default_value("8"))
+        ("gggs-mv-pixel-noise", "Multi-view reprojection threshold in pixels",
+         cxxopts::value<float>()->default_value("1"))
         ("gggs-geometry-from-iter", "Iteration to start GGGS geometry loss",
-         cxxopts::value<unsigned>()->default_value("7000"))
+         cxxopts::value<unsigned>()->default_value("3000"))
         ("gggs-min-scale-fraction", "Minimum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.0001"))
         ("gggs-max-scale-fraction", "Maximum Gaussian scale / scene extent",
@@ -496,6 +517,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_ssim_weight = result["gggs-ssim-weight"].as<float>();
     cli.gggs_depth_normal_weight =
         result["gggs-depth-normal-weight"].as<float>();
+    cli.gggs_3d_filter = result["gggs-3d-filter"].as<bool>();
+    cli.gggs_multi_view_geo_weight =
+        result["gggs-mv-geo-weight"].as<float>();
+    cli.gggs_multi_view_ncc_weight =
+        result["gggs-mv-ncc-weight"].as<float>();
+    cli.gggs_multi_view_num = result["gggs-mv-neighbors"].as<unsigned>();
+    cli.gggs_multi_view_pixel_noise =
+        result["gggs-mv-pixel-noise"].as<float>();
     cli.gggs_geometry_from_iter =
         result["gggs-geometry-from-iter"].as<unsigned>();
     cli.gggs_min_scale_fraction =
@@ -608,6 +637,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.gggs_depth_normal_weight < 0.F)
         throw std::invalid_argument(
             "--gggs-depth-normal-weight must be non-negative");
+    if (cli.gggs_multi_view_geo_weight < 0.F ||
+        cli.gggs_multi_view_ncc_weight < 0.F)
+        throw std::invalid_argument(
+            "GGGS multi-view loss weights must be non-negative");
+    if (cli.gggs_multi_view_num == 0)
+        throw std::invalid_argument("--gggs-mv-neighbors must be positive");
+    if (!(cli.gggs_multi_view_pixel_noise > 0.F))
+        throw std::invalid_argument("--gggs-mv-pixel-noise must be positive");
     if (cli.gggs_min_scale_fraction <= 0.F ||
         cli.gggs_max_scale_fraction < cli.gggs_min_scale_fraction)
         throw std::invalid_argument(
@@ -1231,12 +1268,22 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     options.use_depth_normal_loss = cli.mesh &&
         cli.gggs_depth_normal_weight > 0.F;
     options.depth_normal_weight = cli.gggs_depth_normal_weight;
+    options.use_3d_filter = cli.gggs_3d_filter;
+    options.multi_view_geo_weight = cli.mesh
+        ? cli.gggs_multi_view_geo_weight
+        : 0.F;
+    options.multi_view_ncc_weight = cli.mesh
+        ? cli.gggs_multi_view_ncc_weight
+        : 0.F;
+    options.multi_view_num = cli.gggs_multi_view_num;
+    options.multi_view_pixel_noise_threshold =
+        cli.gggs_multi_view_pixel_noise;
     options.depth_normal_from_iter = cli.gggs_geometry_from_iter;
-    // Keep structural parameters trainable while the geometry loss is active.
-    // A 3k start matches the Python run only when its multi-view PatchMatch
-    // losses are also enabled; depth-normal consistency alone was measurably
-    // over-smoothing on the dense initializer, so the C++ default remains 7k.
-    if (options.use_depth_normal_loss && dense_input)
+    // Keep structural parameters trainable while GGGS geometry supervision is
+    // active. The 3k schedule now matches pygsplat's complete loss stack.
+    if ((options.use_depth_normal_loss ||
+         options.multi_view_geo_weight > 0.F ||
+         options.multi_view_ncc_weight > 0.F) && dense_input)
         options.dense_structure_freeze_iter = 0;
     const char* effective_strategy = !options.enable_densification
         ? "disabled"
@@ -1263,6 +1310,12 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         options.dense_structure_freeze_iter,
         " depth_normal_loss=", options.use_depth_normal_loss,
         " depth_normal_weight=", options.depth_normal_weight,
+        " filter_3d=", options.use_3d_filter,
+        " multi_view_geo_weight=", options.multi_view_geo_weight,
+        " multi_view_ncc_weight=", options.multi_view_ncc_weight,
+        " multi_view_neighbours=", options.multi_view_num,
+        " multi_view_pixel_noise=",
+        options.multi_view_pixel_noise_threshold,
         " geometry_from_iter=", options.depth_normal_from_iter,
         " scale_fraction=[", options.minimum_scale_fraction,
         ',', options.maximum_scale_fraction, ']',
@@ -1316,6 +1369,10 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                     " alpha=", progress.alpha_loss,
                     " depth=", progress.depth_loss,
                     " normal=", progress.normal_loss,
+                    " mv_geo=", progress.multi_view_geometry_loss,
+                    " mv_ncc=", progress.multi_view_ncc_loss,
+                    " mv_geo_pixels=", progress.multi_view_geometry_pixels,
+                    " mv_ncc_pixels=", progress.multi_view_ncc_pixels,
                     " opacity_grad_mean=", progress.opacity_gradient_mean,
                     " opacity_grad_positive=",
                     progress.opacity_gradient_positive_fraction,
