@@ -560,6 +560,7 @@ void test_sparse_tsdf_mesh() {
     require(
         detail::reconstruct_mesh_tsdf(scene, options),
         "sparse TSDF rejected a valid depth plane");
+    detail::clean_mesh(scene.mesh, options);
     require(!scene.mesh.faces.empty(), "sparse TSDF plane mesh is empty");
     const auto [minimum, maximum] = std::minmax_element(
         scene.mesh.vertices.begin(), scene.mesh.vertices.end(),

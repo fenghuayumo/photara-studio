@@ -127,13 +127,13 @@ void orient_components(std::vector<Eigen::Vector3i>& faces) {
         if (flip[i] == 1) std::swap(faces[i][1], faces[i][2]);
 }
 
-void remove_small_components(
+void remove_small_components_with_connectivity(
     std::vector<Eigen::Vector3i>& faces, const unsigned minimum_faces,
-    const float minimum_largest_fraction) {
+    const float minimum_largest_fraction,
+    const Connectivity& connectivity) {
     if (faces.empty() ||
         (minimum_faces <= 1 && !(minimum_largest_fraction > 0.F)))
         return;
-    const Connectivity connectivity = build_connectivity(faces);
     std::vector<int> component(faces.size(), -1);
     std::vector<unsigned> sizes;
     std::queue<int> queue;
@@ -172,6 +172,17 @@ void remove_small_components(
         if (sizes[static_cast<std::size_t>(component[i])] >= effective_minimum)
             kept.push_back(faces[i]);
     faces = std::move(kept);
+}
+
+void remove_small_components(
+    std::vector<Eigen::Vector3i>& faces, const unsigned minimum_faces,
+    const float minimum_largest_fraction) {
+    if (faces.empty() ||
+        (minimum_faces <= 1 && !(minimum_largest_fraction > 0.F)))
+        return;
+    const Connectivity connectivity = build_connectivity(faces);
+    remove_small_components_with_connectivity(
+        faces, minimum_faces, minimum_largest_fraction, connectivity);
 }
 
 float percentile_edge_length(
@@ -559,6 +570,84 @@ void smooth_mesh(Mesh& mesh, const DensifyOptions& options) {
     }
 }
 
+struct SmoothingStats {
+    double mean_displacement{};
+    float maximum_displacement{};
+};
+
+SmoothingStats smooth_tsdf_mesh_taubin(
+    Mesh& mesh, const DensifyOptions& options,
+    const Connectivity& connectivity) {
+    if (options.mesh_tsdf_smooth_iters == 0 || mesh.faces.empty()) return {};
+    std::vector<unsigned> degrees(mesh.vertices.size(), 0);
+    std::vector<std::uint8_t> boundary(mesh.vertices.size(), 0);
+    for (const auto& [edge, owner] : connectivity.edges) {
+        ++degrees[static_cast<std::size_t>(edge.a)];
+        ++degrees[static_cast<std::size_t>(edge.b)];
+        if (owner.count == 1) {
+            boundary[static_cast<std::size_t>(edge.a)] = 1;
+            boundary[static_cast<std::size_t>(edge.b)] = 1;
+        }
+    }
+    std::vector<std::size_t> offsets(mesh.vertices.size() + 1, 0);
+    for (std::size_t i = 0; i < degrees.size(); ++i)
+        offsets[i + 1] = offsets[i] + degrees[i];
+    std::vector<int> neighbors(offsets.back());
+    std::vector<std::size_t> cursor = offsets;
+    for (const auto& [edge, owner] : connectivity.edges) {
+        (void)owner;
+        neighbors[cursor[static_cast<std::size_t>(edge.a)]++] = edge.b;
+        neighbors[cursor[static_cast<std::size_t>(edge.b)]++] = edge.a;
+    }
+
+    const std::vector<Vec3f> original = mesh.vertices;
+    std::vector<Vec3f> next(mesh.vertices.size());
+    const auto pass = [&](const float factor) {
+        next = mesh.vertices;
+#if defined(AETHERSCAN_HAS_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+        for (std::int64_t vertex = 0;
+             vertex < static_cast<std::int64_t>(mesh.vertices.size());
+             ++vertex) {
+            const std::size_t i = static_cast<std::size_t>(vertex);
+            if (boundary[i] || offsets[i] == offsets[i + 1]) continue;
+            Vec3f mean = Vec3f::Zero();
+            for (std::size_t slot = offsets[i]; slot < offsets[i + 1]; ++slot)
+                mean += mesh.vertices[static_cast<std::size_t>(
+                    neighbors[slot])];
+            mean /= static_cast<float>(offsets[i + 1] - offsets[i]);
+            next[i] = mesh.vertices[i] + factor * (mean - mesh.vertices[i]);
+        }
+        mesh.vertices.swap(next);
+    };
+
+    const float lambda = std::clamp(
+        options.mesh_tsdf_smooth_lambda, 0.F, 1.F);
+    const float mu = std::clamp(options.mesh_tsdf_smooth_mu, -1.F, 0.F);
+    for (unsigned iteration = 0;
+         iteration < options.mesh_tsdf_smooth_iters; ++iteration) {
+        pass(lambda);
+        pass(mu);
+    }
+
+    double displacement_sum = 0.0;
+    float maximum_displacement = 0.F;
+    for (std::int64_t vertex = 0;
+         vertex < static_cast<std::int64_t>(mesh.vertices.size()); ++vertex) {
+        const float displacement =
+            (mesh.vertices[static_cast<std::size_t>(vertex)] -
+             original[static_cast<std::size_t>(vertex)])
+                .norm();
+        displacement_sum += displacement;
+        maximum_displacement = std::max(maximum_displacement, displacement);
+    }
+    return {
+        displacement_sum /
+            static_cast<double>(std::max<std::size_t>(mesh.vertices.size(), 1)),
+        maximum_displacement};
+}
+
 }  // namespace
 
 void clean_mesh(
@@ -619,13 +708,19 @@ void clean_mesh(
                         mesh.vertices[static_cast<std::size_t>(face[0])]);
             return !cross.allFinite() || cross.squaredNorm() <= 1e-20F;
         });
-        remove_small_components(
+        const Connectivity connectivity = build_connectivity(mesh.faces);
+        const SmoothingStats smoothing =
+            smooth_tsdf_mesh_taubin(mesh, options, connectivity);
+        remove_small_components_with_connectivity(
             mesh.faces, options.mesh_min_component_faces,
-            options.mesh_tsdf_min_component_fraction);
+            options.mesh_tsdf_min_component_fraction, connectivity);
         compact_and_compute_normals(mesh);
         core::Logger::instance().info(
             "mvs mesh TSDF postprocess: faces=", input_faces, " -> ",
-            mesh.faces.size(), " vertices=", mesh.vertices.size());
+            mesh.faces.size(), " vertices=", mesh.vertices.size(),
+            " taubin_iters=", options.mesh_tsdf_smooth_iters,
+            " mean_displacement=", smoothing.mean_displacement,
+            " max_displacement=", smoothing.maximum_displacement);
         stage.finish();
         return;
     }

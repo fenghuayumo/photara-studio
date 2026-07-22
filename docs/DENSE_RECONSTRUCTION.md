@@ -222,6 +222,7 @@ TSDF，在 MVS-only 的 `default/high` 选择全局 Delaunay，在 `preview` 选
 --mesh-target-faces 0           # 默认保留原生 MC；正数开启 asdiff/CGAL 减面
 --mesh-remesh true              # 超过目标面数时先执行 Instant Meshes remesh
 --mesh-tsdf-voxel-scale -1      # -1: gs2mesh 原生 1x；正数显式覆盖
+--mesh-tsdf-smooth-iters 2      # 边界锁定 Taubin 无收缩平滑；0 保留原始 MC
 --uv-parallel-partitions 8      # UVAtlas 空间分区并发；1 为串行
 --mesh-free-space-support true  # OpenMVS weak-surface beta/gamma 强化
 --mesh-free-space-quantile 0.95 # 融合权重到 OpenMVS 能量尺度的校准分位数

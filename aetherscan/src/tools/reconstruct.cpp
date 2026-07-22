@@ -100,6 +100,9 @@ struct ReconstructCli {
     std::uint64_t mesh_target_faces{0};
     bool mesh_remesh{true};
     float mesh_tsdf_voxel_scale{-1.F};
+    unsigned mesh_tsdf_smooth_iters{2};
+    float mesh_tsdf_smooth_lambda{0.5F};
+    float mesh_tsdf_smooth_mu{-0.53F};
     float mesh_dist_insert_px{-1.F};
     bool mesh_free_space_support{true};
     float mesh_free_space_quantile{0.95F};
@@ -234,6 +237,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-target-faces N  asdiff/CGAL repair + decimate target (0 disables)\n"
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
+              << "  --mesh-tsdf-smooth-iters N  boundary-locked Taubin passes (default 2)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
@@ -377,6 +381,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh-tsdf-voxel-scale",
          "Automatic TSDF voxel multiplier (-1 = gs2mesh default 1x)",
          cxxopts::value<float>()->default_value("-1"))
+        ("mesh-tsdf-smooth-iters",
+         "Boundary-locked TSDF Taubin smoothing iterations (0 disables)",
+         cxxopts::value<unsigned>()->default_value("2"))
+        ("mesh-tsdf-smooth-lambda", "TSDF Taubin positive coefficient",
+         cxxopts::value<float>()->default_value("0.5"))
+        ("mesh-tsdf-smooth-mu", "TSDF Taubin negative coefficient",
+         cxxopts::value<float>()->default_value("-0.53"))
         ("mesh-dist-insert-px",
          "Minimum projection spacing for global Delaunay (-1 = preset)",
          cxxopts::value<float>()->default_value("-1"))
@@ -516,6 +527,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.mesh_remesh = result["mesh-remesh"].as<bool>();
     cli.mesh_tsdf_voxel_scale =
         result["mesh-tsdf-voxel-scale"].as<float>();
+    cli.mesh_tsdf_smooth_iters =
+        result["mesh-tsdf-smooth-iters"].as<unsigned>();
+    cli.mesh_tsdf_smooth_lambda =
+        result["mesh-tsdf-smooth-lambda"].as<float>();
+    cli.mesh_tsdf_smooth_mu =
+        result["mesh-tsdf-smooth-mu"].as<float>();
     cli.mesh_dist_insert_px =
         result["mesh-dist-insert-px"].as<float>();
     cli.mesh_free_space_support =
@@ -643,6 +660,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
          !std::isfinite(cli.mesh_tsdf_voxel_scale)))
         throw std::invalid_argument(
             "--mesh-tsdf-voxel-scale must be -1 or positive");
+    if (!std::isfinite(cli.mesh_tsdf_smooth_lambda) ||
+        cli.mesh_tsdf_smooth_lambda < 0.F ||
+        cli.mesh_tsdf_smooth_lambda > 1.F)
+        throw std::invalid_argument(
+            "--mesh-tsdf-smooth-lambda must be in [0,1]");
+    if (!std::isfinite(cli.mesh_tsdf_smooth_mu) ||
+        cli.mesh_tsdf_smooth_mu < -1.F ||
+        cli.mesh_tsdf_smooth_mu > 0.F)
+        throw std::invalid_argument(
+            "--mesh-tsdf-smooth-mu must be in [-1,0]");
 
     const auto cache_text = result["cache-dir"].as<std::string>();
     if (!cache_text.empty() && cache_text != "-")
@@ -1399,6 +1426,11 @@ int main(int argc, char** argv) {
                 cli.mesh_tsdf_voxel_scale > 0.F
                 ? cli.mesh_tsdf_voxel_scale
                 : 1.F;
+            mesh_options.mesh_tsdf_smooth_iters =
+                cli.mesh_tsdf_smooth_iters;
+            mesh_options.mesh_tsdf_smooth_lambda =
+                cli.mesh_tsdf_smooth_lambda;
+            mesh_options.mesh_tsdf_smooth_mu = cli.mesh_tsdf_smooth_mu;
             auto mesh = run_gggs_training(
                 loaded.scene, cli, !cli.dense_ply.empty(),
                 cli.mesh ? &mesh_options : nullptr);
@@ -1523,6 +1555,11 @@ int main(int argc, char** argv) {
                 cli.mesh_tsdf_voxel_scale > 0.F
                 ? cli.mesh_tsdf_voxel_scale
                 : 1.F;
+            densify_opts.mesh_tsdf_smooth_iters =
+                cli.mesh_tsdf_smooth_iters;
+            densify_opts.mesh_tsdf_smooth_lambda =
+                cli.mesh_tsdf_smooth_lambda;
+            densify_opts.mesh_tsdf_smooth_mu = cli.mesh_tsdf_smooth_mu;
             if (cli.mesh_dist_insert_px >= 0.F)
                 densify_opts.mesh_dist_insert_px =
                     cli.mesh_dist_insert_px;

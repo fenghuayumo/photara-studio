@@ -159,6 +159,13 @@ struct DensifyOptions {
     // TSDF can contain tiny closed bubbles where depth maps disagree. Remove
     // components smaller than this fraction of the largest component.
     float mesh_tsdf_min_component_fraction{0.0005F};
+    // Boundary-locked Taubin smoothing after Marching Cubes. The lambda/mu
+    // pair removes sub-voxel stair-stepping without the shrinkage of repeated
+    // positive-only Laplacian smoothing. Set iterations to zero for exact
+    // gs2mesh/Open3D output.
+    unsigned mesh_tsdf_smooth_iters{2};
+    float mesh_tsdf_smooth_lambda{0.5F};
+    float mesh_tsdf_smooth_mu{-0.53F};
     // Weld radius and maximum triangle edge in units of the scene's median
     // pixel footprint. These are scale invariant unlike bbox fractions.
     float mesh_weld_pixel_fraction{0.65F};
