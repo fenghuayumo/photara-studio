@@ -225,7 +225,7 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
     const float inferred_voxel = estimate_voxel_size(scene);
     const float voxel_size = options.mesh_tsdf_voxel_size > 0.F
         ? options.mesh_tsdf_voxel_size
-        : inferred_voxel;
+        : inferred_voxel * options.mesh_tsdf_voxel_scale;
     if (!(voxel_size > 0.F) || !std::isfinite(voxel_size)) {
         core::Logger::instance().warning(
             "mvs mesh TSDF: unable to infer a valid voxel size");
@@ -242,6 +242,8 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
 
     core::Logger::instance().info(
         "mvs mesh TSDF integrate: voxel=", voxel_size,
+        " inferred_voxel=", inferred_voxel,
+        " voxel_scale=", options.mesh_tsdf_voxel_scale,
         " truncation_voxels=", options.mesh_tsdf_truncation_voxels,
         " pixel_step=", options.mesh_tsdf_pixel_step,
         " depth_samples=", valid_pixels, " active_voxels=", field.size());

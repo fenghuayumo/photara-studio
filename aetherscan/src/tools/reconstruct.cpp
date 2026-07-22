@@ -77,7 +77,7 @@ struct ReconstructCli {
     bool gggs{false};
     std::filesystem::path colmap_model;
     unsigned gggs_iterations{10'000};
-    std::uint64_t gggs_max_gaussians{500'000};
+    std::uint64_t gggs_max_gaussians{0};
     bool gggs_use_mask{true};
     std::string gggs_alpha_mode{"transparent"};
     float gggs_match_alpha_weight{0.25F};
@@ -98,6 +98,7 @@ struct ReconstructCli {
     std::uint64_t mesh_max_points{2'000'000};
     std::uint64_t mesh_target_faces{1'000'000};
     bool mesh_remesh{true};
+    float mesh_tsdf_voxel_scale{-1.F};
     float mesh_dist_insert_px{-1.F};
     bool mesh_free_space_support{true};
     float mesh_free_space_quantile{0.95F};
@@ -114,6 +115,8 @@ struct ReconstructCli {
     bool texture{false};
     bool delight{false};
     std::uint32_t atlas_resolution{2048};
+    bool atlas_resolution_overridden{false};
+    std::uint32_t uv_parallel_partitions{8};
 };
 
 std::uint64_t peak_working_set_bytes() noexcept {
@@ -205,7 +208,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs       train CUDA GGGS -> *_gggs.ply\n"
               << "  --colmap PATH  load COLMAP sparse model, bypass SfM/MVS, enable GGGS\n"
               << "  --gggs-iterations N  GGGS steps (dense 10000, COLMAP sparse 5000)\n"
-              << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
+              << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 0)\n"
               << "  --gggs-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
               << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
               << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
@@ -228,6 +231,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
               << "  --mesh-target-faces N  asdiff/CGAL repair + decimate target (0 disables)\n"
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
+              << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
@@ -237,6 +241,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --texture    UV unwrap + projective bake -> textured OBJ/MTL/PNG\n"
               << "  --delight    Intrinsic image delighter before bake (albedo)\n"
               << "  --atlas-resolution N  atlas size (default 2048)\n"
+              << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
               << "Output formats:\n"
               << "  .mvs  OpenMVS Interface (open in Viewer)\n"
               << "  .ply  sparse XYZ point cloud\n"
@@ -322,7 +327,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("gggs-iterations", "GGGS optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
         ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
-         cxxopts::value<std::uint64_t>()->default_value("500000"))
+         cxxopts::value<std::uint64_t>()->default_value("0"))
         ("gggs-use-mask", "Enable pygsplat-compatible foreground-mask training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("gggs-alpha-mode", "Mask alpha mode: masked or transparent",
@@ -365,6 +370,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("1000000"))
         ("mesh-remesh", "Run Instant Meshes before CGAL repair",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("mesh-tsdf-voxel-scale",
+         "Inferred TSDF voxel multiplier (-1 = GGGS target-aware preset)",
+         cxxopts::value<float>()->default_value("-1"))
         ("mesh-dist-insert-px",
          "Minimum projection spacing for global Delaunay (-1 = preset)",
          cxxopts::value<float>()->default_value("-1"))
@@ -404,7 +412,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Run Intrinsic delighter before texture bake (implies --texture)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("atlas-resolution", "Texture atlas resolution",
-         cxxopts::value<std::uint32_t>()->default_value("2048"));
+         cxxopts::value<std::uint32_t>()->default_value("2048"))
+        ("uv-parallel-partitions",
+         "Spatial UVAtlas partitioning level (1 = serial)",
+         cxxopts::value<std::uint32_t>()->default_value("8"));
 
     const auto result = options.parse(argc, argv);
     if (result.count("help") || argc <= 1) {
@@ -487,11 +498,17 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.texture = result["texture"].as<bool>();
     cli.delight = result["delight"].as<bool>();
     cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
+    cli.atlas_resolution_overridden =
+        result.count("atlas-resolution") != 0;
+    cli.uv_parallel_partitions =
+        result["uv-parallel-partitions"].as<std::uint32_t>();
     cli.mesh_method = result["mesh-method"].as<std::string>();
     cli.mesh_max_points = result["mesh-max-points"].as<std::uint64_t>();
     cli.mesh_target_faces =
         result["mesh-target-faces"].as<std::uint64_t>();
     cli.mesh_remesh = result["mesh-remesh"].as<bool>();
+    cli.mesh_tsdf_voxel_scale =
+        result["mesh-tsdf-voxel-scale"].as<float>();
     cli.mesh_dist_insert_px =
         result["mesh-dist-insert-px"].as<float>();
     cli.mesh_free_space_support =
@@ -589,6 +606,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.atlas_resolution < 64) {
         throw std::invalid_argument("--atlas-resolution must be >= 64");
     }
+    if (cli.uv_parallel_partitions == 0)
+        throw std::invalid_argument(
+            "--uv-parallel-partitions must be positive");
     if (cli.mesh_method != "auto" && cli.mesh_method != "tsdf" &&
         cli.mesh_method != "projective" &&
         cli.mesh_method != "delaunay") {
@@ -606,6 +626,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.mesh_target_faces > 0 && cli.mesh_target_faces < 4)
         throw std::invalid_argument(
             "--mesh-target-faces must be 0 or at least 4");
+    if (cli.mesh_tsdf_voxel_scale != -1.F &&
+        (!(cli.mesh_tsdf_voxel_scale > 0.F) ||
+         !std::isfinite(cli.mesh_tsdf_voxel_scale)))
+        throw std::invalid_argument(
+            "--mesh-tsdf-voxel-scale must be -1 or positive");
 
     const auto cache_text = result["cache-dir"].as<std::string>();
     if (!cache_text.empty() && cache_text != "-")
@@ -1442,6 +1467,15 @@ int main(int argc, char** argv) {
             densify_opts.roi_margin_fraction = cli.roi_margin;
             densify_opts.auto_roi_mask_dilate_px = cli.roi_mask_dilate;
             densify_opts.mesh_max_points = cli.mesh_max_points;
+            // Extract the target-scale GGGS mesh directly from the TSDF. On
+            // the reference scan 2.3x reduces roughly 4.8M native faces to
+            // about 1M while keeping local marching-tetrahedra connectivity.
+            // A raw diagnostic run (--mesh-target-faces 0) keeps the native
+            // inferred voxel resolution.
+            densify_opts.mesh_tsdf_voxel_scale =
+                cli.mesh_tsdf_voxel_scale > 0.F
+                ? cli.mesh_tsdf_voxel_scale
+                : (cli.gggs && cli.mesh_target_faces > 0 ? 2.3F : 1.F);
             if (cli.mesh_dist_insert_px >= 0.F)
                 densify_opts.mesh_dist_insert_px =
                     cli.mesh_dist_insert_px;
@@ -1491,6 +1525,8 @@ int main(int argc, char** argv) {
                 " tile_rows=", densify_opts.patchmatch_tile_rows,
                 " concurrent_views=",
                 densify_opts.patchmatch_concurrent_views,
+                " tsdf_voxel_scale=",
+                densify_opts.mesh_tsdf_voxel_scale,
                 " mesh_method=",
                 densify_opts.mesh_method ==
                         aetherscan::mvs::MeshMethod::delaunay_cut
@@ -1587,6 +1623,8 @@ int main(int argc, char** argv) {
                 if (cli.texture) {
                     aetherscan::texture::TextureOptions tex_opts;
                     tex_opts.atlas_resolution = cli.atlas_resolution;
+                    tex_opts.uv_parallel_partitions =
+                        cli.uv_parallel_partitions;
                     tex_opts.delight = cli.delight;
                     tex_opts.mask_dir = densify_opts.mask_dir;
                     if (cli.dense_quality ==
@@ -1598,8 +1636,8 @@ int main(int argc, char** argv) {
                     } else if (
                         cli.dense_quality ==
                         aetherscan::mvs::DensifyQuality::preview) {
-                        tex_opts.atlas_resolution =
-                            (std::min)(cli.atlas_resolution, 1024U);
+                        if (!cli.atlas_resolution_overridden)
+                            tex_opts.atlas_resolution = 1024U;
                         tex_opts.visibility_mode =
                             aetherscan::texture::VisibilityMode::shadow_map;
                     }

@@ -144,6 +144,10 @@ struct DensifyOptions {
     unsigned mesh_pixel_step{2};
     // TSDF voxel size in world units (0 = infer from median pixel footprint).
     float mesh_tsdf_voxel_size{0.F};
+    // Multiplier applied only to the inferred voxel size. Values above one
+    // extract a coarser, locally regular mesh directly from the TSDF instead
+    // of relying on a topology-damaging post-decimation pass.
+    float mesh_tsdf_voxel_scale{1.F};
     // Truncation half-width in voxels and depth-map sampling stride.
     float mesh_tsdf_truncation_voxels{4.F};
     unsigned mesh_tsdf_pixel_step{2};

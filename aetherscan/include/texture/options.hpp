@@ -20,7 +20,10 @@ struct TextureOptions {
     std::uint32_t atlas_resolution{2048};
     float uv_gutter{1.F};
     float uv_max_stretch{1.F / 3.F};
-    std::uint32_t uv_parallel_partitions{1};
+    // UVAtlas charting is otherwise largely serial on large meshes. The
+    // asdiff wrapper partitions faces spatially, unwraps groups concurrently,
+    // then packs the combined charts into one atlas.
+    std::uint32_t uv_parallel_partitions{8};
 
     BlendMode blend_mode{BlendMode::weighted_average};
     VisibilityMode visibility_mode{VisibilityMode::hybrid_ray_query};

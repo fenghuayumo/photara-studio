@@ -178,8 +178,19 @@ Clean；构建了 `asdiff::mesh` 且 GGGS mesh 超过 `--mesh-target-faces` 时�
 Meshes field-aligned remesh 和 CGAL repair/decimate。已经低于目标面数的网格结果会直接保留，
 避免无意义的重采样和修复引入新边界。目标面数默认为 1,000,000；Instant 的 quad 目标自动
 换算为约一半，重拓扑前后会清理微小连通碎片。
+
+GGGS + TSDF 默认把自动估计体素放大到 `2.3x`，直接提取约百万面的局部规则网格后再做 UV
+展开和投影纹理，避免高密 TSDF 经通用减面产生跨孔长三角。可用
+`--mesh-tsdf-voxel-scale` 显式调整；`--mesh-target-faces 0` 保留原始 TSDF 分辨率用于诊断。
+UVAtlas 默认用 `--uv-parallel-partitions 8` 做空间分区并发展开，最后统一打包到单张 atlas；
+设为 `1` 可回到串行展开。
 `--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 asdiff 后处理。GGGS mesh 模式
 默认在第 7,000 步开启权重 0.05 的 median-depth/rendered-normal 几何一致性优化。
+
+稠密 MVS 输入默认使用全部融合点初始化 GGGS（`--gggs-max-gaussians 0`），避免随机截断到
+50 万点后在薄结构和遮挡区域形成永久覆盖缺口；显存受限时可显式设置较小上限。
+GGGS mesh 导出只使用 alpha 0.5 与有效深度掩码，不再默认执行额外的 60° depth-normal 硬过滤；
+这与 pygsplat/GS-2M 的默认 TSDF 输入一致，避免在高曲率和薄结构区域人为打洞。
 
 - `scene.mvs`：OpenMVS Interface（MVSI），可用 OpenMVS Viewer 打开验证相机与稀疏点
 - `scene.ply`：稀疏 XYZ；写出 PLY 时会额外生成同名 `scene.mvs`

@@ -90,6 +90,11 @@ SfM (已有) ──► RebuildScene
 | 几何再精修后贴图 | `mvs + gggs + texture` |
 | 全质量 | `mvs + gggs + texture + delight` |
 
+GGGS 几何提取走 TSDF 时，默认以自动估计体素的 `2.3x` 直接生成接近百万面的局部规则网格，
+再执行 UV 展开与多视角投影纹理。这样避免先生成约 480 万面、再由通用
+remesher/decimator 引入跨孔长三角和瘦三角。`--mesh-tsdf-voxel-scale` 可覆盖该倍率；
+`--mesh-target-faces 0` 保留原始 TSDF 分辨率。
+
 CLI 示意（设计级，非最终参数名）：
 
 ```text
@@ -216,6 +221,8 @@ TSDF，在 MVS-only 的 `default/high` 选择全局 Delaunay，在 `preview` 选
 --mesh-max-points 2000000       # 0 表示不设上限
 --mesh-target-faces 1000000     # asdiff/CGAL repair + decimate；0 关闭
 --mesh-remesh true              # 超过目标面数时先执行 Instant Meshes remesh
+--mesh-tsdf-voxel-scale -1      # -1: GGGS 自动 2.3x；正数显式覆盖
+--uv-parallel-partitions 8      # UVAtlas 空间分区并发；1 为串行
 --mesh-free-space-support true  # OpenMVS weak-surface beta/gamma 强化
 --mesh-free-space-quantile 0.95 # 融合权重到 OpenMVS 能量尺度的校准分位数
 ```
@@ -226,6 +233,11 @@ TSDF，在 MVS-only 的 `default/high` 选择全局 Delaunay，在 `preview` 选
 超过目标面数时先调用 Instant Meshes field-aligned remesh，再调用保边界的
 `repair_and_decimate`；若已经低于目标面数则保留 Clean 结果，不再做目标面数后处理。未找到
 CGAL 时保留 Clean 后的 TSDF 并记录明确告警。可用 `--mesh-remesh=false` 做不重拓扑的质量 A/B。
+
+稠密 MVS 输入默认以全部融合点初始化 GGGS（`--gggs-max-gaussians 0`），而不是随机截断到
+50 万点。这样薄结构和遮挡区域在训练开始时仍有 Gaussian 覆盖；显存受限时再显式设置上限。
+几何导出遵循 pygsplat/GS-2M 的 alpha 0.5 + 有效深度筛选，不额外启用原先 cosine 0.5 的
+depth-normal 硬过滤，避免在薄结构和法线快速变化处直接删除 TSDF 输入像素。
 
 ---
 

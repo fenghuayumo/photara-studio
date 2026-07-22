@@ -274,8 +274,19 @@ TexturedMesh bake_mesh_texture(
     uv_opts.gutter = options.uv_gutter;
     uv_opts.max_stretch = options.uv_max_stretch;
     uv_opts.parallel_partitions = options.uv_parallel_partitions;
+    core::Logger::instance().info(
+        "texture UV config: faces=", scene.mesh.faces.size(),
+        " requested_partitions=", uv_opts.parallel_partitions,
+        " atlas=", uv_opts.width, "x", uv_opts.height,
+        " gutter=", uv_opts.gutter,
+        " max_stretch=", uv_opts.max_stretch);
     const asdiff_render::UvAtlasOutput unwrapped =
         asdiff_render::unwrap_uv(positions, indices, uv_opts);
+    core::Logger::instance().info(
+        "texture UV result: partitions=", unwrapped.partition_count,
+        " charts=", unwrapped.chart_count,
+        " vertices=", unwrapped.positions.size() / 3U,
+        " max_stretch=", unwrapped.max_stretch);
     unwrap_stage.finish();
 
     std::vector<float> normals;

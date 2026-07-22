@@ -50,10 +50,10 @@ struct GggsMeshOptions {
     // Optional directory for representative median-depth, normal and alpha
     // PNGs used to audit geometry before TSDF fusion.
     std::filesystem::path diagnostics_dir;
-    // Reject a rendered depth sample only when its complete four-neighbour
-    // stencil disagrees strongly with the rendered normal. Negative disables
-    // this MVS-inspired extraction guard; 0.5 corresponds to 60 degrees.
-    float min_depth_normal_cosine{0.5F};
+    // Optional MVS-inspired extraction guard. Values below -1 disable it,
+    // matching pygsplat/GS-2M whose abs-dot 100-degree test rejects no sample.
+    // Set 0.5 explicitly to request the former strict 60-degree filter.
+    float min_depth_normal_cosine{-2.F};
     mvs::DensifyOptions fusion;
 };
 

@@ -25,7 +25,9 @@ struct TrainingOptions {
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
     unsigned log_interval{100};
-    std::size_t max_gaussians{500'000};
+    // Zero preserves every dense MVS sample. Callers on constrained GPUs can
+    // set an explicit cap; silently random-subsampling geometry creates holes.
+    std::size_t max_gaussians{0};
     // Sparse COLMAP initialization enables dynamic Gaussian management. Dense
     // MVS initialization only enables it for the explicit dense_adaptive mode.
     bool input_is_dense{true};
