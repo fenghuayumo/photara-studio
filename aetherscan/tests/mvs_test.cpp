@@ -571,6 +571,30 @@ void test_sparse_tsdf_mesh() {
         "sparse TSDF zero crossing does not match the input depth");
 }
 
+void test_dense_ply_round_trip() {
+    DenseCloud source;
+    DensePoint point;
+    point.position = Vec3f{1.25F, -2.5F, 3.75F};
+    point.normal = Vec3f{0.F, 1.F, 0.F};
+    point.color = Vec3f{0.2F, 0.4F, 0.8F};
+    source.points.push_back(point);
+    const auto path = std::filesystem::temp_directory_path() /
+                      "aetherscan_dense_ply_round_trip.ply";
+    save_dense_ply(source, path);
+    const DenseCloud loaded = load_dense_ply(path);
+    std::filesystem::remove(path);
+    require(loaded.points.size() == 1, "dense PLY loader lost a point");
+    require(
+        (loaded.points[0].position - point.position).norm() < 1e-6F,
+        "dense PLY loader changed point position");
+    require(
+        (loaded.points[0].normal - point.normal).norm() < 1e-6F,
+        "dense PLY loader changed point normal");
+    require(
+        (loaded.points[0].color - point.color).cwiseAbs().maxCoeff() < 0.005F,
+        "dense PLY loader changed point color");
+}
+
 #if defined(AETHERSCAN_HAS_CGAL)
 void test_global_delaunay_mesh() {
     MvsScene scene;
@@ -661,6 +685,7 @@ int main() {
         test_roi_aware_mesh_clean();
         test_bow_tie_holes_are_split_and_closed();
         test_sparse_tsdf_mesh();
+        test_dense_ply_round_trip();
 #if defined(AETHERSCAN_HAS_CGAL)
         test_global_delaunay_mesh();
 #endif

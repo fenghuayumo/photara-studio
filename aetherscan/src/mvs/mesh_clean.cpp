@@ -598,6 +598,37 @@ void clean_mesh(
         compact_and_compute_normals(mesh);
         return;
     }
+    if (options.mesh_method == MeshMethod::tsdf) {
+        // Open3D/gs2mesh post-processing only removes degenerate triangles,
+        // unreferenced vertices and all but the requested largest components.
+        // Marching Cubes already provides coherent winding and shared edge
+        // vertices, so the global Delaunay repair pipeline below is redundant.
+        core::StageScope stage("mvs.mesh_clean.tsdf");
+        const std::size_t input_faces = mesh.faces.size();
+        std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
+            if (face.minCoeff() < 0 ||
+                face.maxCoeff() >= static_cast<int>(mesh.vertices.size()) ||
+                face[0] == face[1] || face[1] == face[2] ||
+                face[2] == face[0])
+                return true;
+            const Vec3f cross =
+                (mesh.vertices[static_cast<std::size_t>(face[1])] -
+                 mesh.vertices[static_cast<std::size_t>(face[0])])
+                    .cross(
+                        mesh.vertices[static_cast<std::size_t>(face[2])] -
+                        mesh.vertices[static_cast<std::size_t>(face[0])]);
+            return !cross.allFinite() || cross.squaredNorm() <= 1e-20F;
+        });
+        remove_small_components(
+            mesh.faces, options.mesh_min_component_faces,
+            options.mesh_tsdf_min_component_fraction);
+        compact_and_compute_normals(mesh);
+        core::Logger::instance().info(
+            "mvs mesh TSDF postprocess: faces=", input_faces, " -> ",
+            mesh.faces.size(), " vertices=", mesh.vertices.size());
+        stage.finish();
+        return;
+    }
     core::StageScope stage("mvs.mesh_clean");
     const std::size_t input_faces = mesh.faces.size();
 

@@ -10,8 +10,8 @@ enum class MeshMethod : std::uint8_t {
     delaunay_cut = 0,
     // Projective depth-map triangulation (fast preview fallback).
     depth_projective = 1,
-    // Sparse signed-distance fusion followed by marching tetrahedra. This is
-    // the preferred backend for GGGS median-depth geometry.
+    // Open3D-compatible sparse block TSDF fusion followed by Marching Cubes.
+    // This is the preferred backend for GGGS median-depth geometry.
     tsdf = 2,
     // Skip meshing.
     none = 3,
@@ -143,14 +143,17 @@ struct DensifyOptions {
     // Projective meshing samples every Nth depth pixel.
     unsigned mesh_pixel_step{2};
     // TSDF voxel size in world units (0 = infer from median pixel footprint).
+    // GGGS overrides the automatic value with max_depth / 2048 to match
+    // pygsplat's gs2mesh.py.
     float mesh_tsdf_voxel_size{0.F};
     // Multiplier applied only to the inferred voxel size. Values above one
     // extract a coarser, locally regular mesh directly from the TSDF instead
     // of relying on a topology-damaging post-decimation pass.
     float mesh_tsdf_voxel_scale{1.F};
-    // Truncation half-width in voxels and depth-map sampling stride.
+    // Truncation half-width in voxels. Sparse-block allocation samples depth
+    // every four pixels, matching Open3D ScalableTSDFVolume.
     float mesh_tsdf_truncation_voxels{4.F};
-    unsigned mesh_tsdf_pixel_step{2};
+    unsigned mesh_tsdf_pixel_step{2};  // retained for checkpoint compatibility
     // Ignore field samples whose accumulated integration weight is lower.
     float mesh_tsdf_min_weight{0.25F};
     // TSDF can contain tiny closed bubbles where depth maps disagree. Remove

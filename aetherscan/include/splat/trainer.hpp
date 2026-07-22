@@ -42,10 +42,10 @@ struct RenderMetrics {
 };
 
 struct GggsMeshOptions {
-    // Match the GS-2M/pygsplat TSDF path: only geometry with at least half
-    // accumulated opacity contributes to the extracted surface.
+    // GS-2M/pygsplat fallback threshold when the dataset has no input mask.
+    // With a mask, the mask alone defines valid extraction pixels.
     float alpha_threshold{0.5F};
-    // Zero disables an explicit far-depth cutoff.
+    // Zero selects gs2mesh.py's automatic cutoff (2 * camera scene extent).
     float max_depth{0.F};
     // Optional directory for representative median-depth, normal and alpha
     // PNGs used to audit geometry before TSDF fusion.

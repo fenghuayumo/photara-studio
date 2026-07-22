@@ -13,6 +13,27 @@
 namespace aetherscan::splat {
 namespace {
 
+[[nodiscard]] float camera_scene_extent(const mvs::MvsScene& scene) {
+    mvs::Vec3f center = mvs::Vec3f::Zero();
+    std::size_t count = 0;
+    for (const mvs::MvsView& view : scene.views) {
+        const mvs::Vec3f camera = view.pose.C.cast<float>();
+        if (!camera.allFinite()) continue;
+        center += camera;
+        ++count;
+    }
+    if (count == 0) return 0.F;
+    center /= static_cast<float>(count);
+    float radius = 0.F;
+    for (const mvs::MvsView& view : scene.views) {
+        const mvs::Vec3f camera = view.pose.C.cast<float>();
+        if (camera.allFinite())
+            radius = std::max(radius, (camera - center).norm());
+    }
+    // pygsplat follows the original 3DGS normalization convention.
+    return std::isfinite(radius) ? 1.1F * radius : 0.F;
+}
+
 mvs::MvsView make_geometry_view(const mvs::MvsView& source) {
     mvs::MvsView result;
     result.id = source.id;
@@ -143,6 +164,22 @@ GggsMeshResult extract_gggs_mesh(
 
     mvs::DensifyOptions fusion_options = mesh_options.fusion;
     fusion_options.build_mesh = true;
+    const float scene_extent = camera_scene_extent(scene);
+    const float maximum_depth = mesh_options.max_depth > 0.F
+        ? mesh_options.max_depth
+        : 2.F * scene_extent;
+    if (fusion_options.mesh_method == mvs::MeshMethod::tsdf) {
+        // gs2mesh.py resolves the same automatic values before constructing
+        // Open3D's ScalableTSDFVolume.
+        if (!(fusion_options.mesh_tsdf_voxel_size > 0.F) &&
+            maximum_depth > 0.F)
+            fusion_options.mesh_tsdf_voxel_size =
+                maximum_depth / 2048.F *
+                std::max(fusion_options.mesh_tsdf_voxel_scale, 1e-6F);
+        fusion_options.mesh_tsdf_truncation_voxels = 4.F;
+        fusion_options.mesh_tsdf_min_component_fraction = 1.F;
+        fusion_options.mesh_close_hole_edges = 0;
+    }
     fusion_options.ncc_keep_threshold = std::max(
         1.F - mesh_options.alpha_threshold, 1e-3F);
     // GGGS depths are already a coherent learned surface. Keep the geometric
@@ -151,16 +188,16 @@ GggsMeshResult extract_gggs_mesh(
         fusion_options.depth_diff_threshold, 0.015F);
     fusion_options.normal_diff_threshold_deg = std::max(
         fusion_options.normal_diff_threshold_deg, 30.F);
-
     bool need_neighbors = false;
     for (const auto& view : geometry_scene.views)
         need_neighbors = need_neighbors || view.neighbors.empty();
     if (need_neighbors) mvs::select_neighbors(geometry_scene, fusion_options);
 
     TrainingOptions render_training_options = training_options;
-    // Mesh fusion uses the MVS working calibration. This keeps CPU fusion
-    // bounded while preserving the exact undistorted camera convention.
-    render_training_options.use_source_resolution = false;
+    // gs2mesh.py renders the training dataset at data_factor resolution. The
+    // direct COLMAP path has data_factor=1, so use the source-size undistorted
+    // pinhole view instead of the half-resolution MVS working image.
+    render_training_options.use_source_resolution = true;
     RasterizeOptions raster_options;
     raster_options.active_sh_degree = model.sh_degree;
     raster_options.kernel_size = training_options.kernel_size;
@@ -176,6 +213,12 @@ GggsMeshResult extract_gggs_mesh(
         auto& geometry_view = geometry_scene.views[view_index];
         const TrainingView target = make_training_view(
             scene.views[view_index], render_training_options);
+        geometry_view.fx = target.camera.fx;
+        geometry_view.fy = target.camera.fy;
+        geometry_view.cx = target.camera.cx;
+        geometry_view.cy = target.camera.cy;
+        geometry_view.width = target.camera.width;
+        geometry_view.height = target.camera.height;
         const RenderResult rendered = rasterizer.forward(
             model, target.camera, raster_options);
         const std::vector<float> depth = rendered.median_depth.to_vector();
@@ -208,11 +251,13 @@ GggsMeshResult extract_gggs_mesh(
                 const std::size_t pixel =
                     static_cast<std::size_t>(y) * geometry_view.width + x;
                 const float d = depth[pixel];
+                // pygsplat uses the dataset mask when present and falls back
+                // to alpha>=0.5 only for datasets without masks.
                 if (mask[pixel] <= 0.5F ||
-                    alpha[pixel] < mesh_options.alpha_threshold ||
+                    (!target.has_mask &&
+                     alpha[pixel] < mesh_options.alpha_threshold) ||
                     !std::isfinite(d) || d <= 0.F ||
-                    (mesh_options.max_depth > 0.F &&
-                     d > mesh_options.max_depth))
+                    (maximum_depth > 0.F && d > maximum_depth))
                     continue;
                 mvs::Vec3f n{
                     normal[pixel], normal[pixels + pixel],
@@ -288,13 +333,22 @@ GggsMeshResult extract_gggs_mesh(
         "gggs mesh depth: views=", geometry_scene.views.size(),
         " valid_pixels=", valid_depth_pixels,
         " alpha_threshold=", mesh_options.alpha_threshold,
+        " scene_extent=", scene_extent,
+        " max_depth=", maximum_depth,
+        " tsdf_voxel=", fusion_options.mesh_tsdf_voxel_size,
         " depth_normal_compared=", compared_depth_normal_pixels,
         " depth_normal_rejected=", rejected_depth_normal_pixels,
         " min_depth_normal_cosine=", mesh_options.min_depth_normal_cosine);
-    mvs::fuse_depth_maps(geometry_scene, fusion_options);
-    if (geometry_scene.dense_cloud.points.empty())
-        throw std::runtime_error(
-            "GGGS mesh depth fusion produced no surface points");
+    // ScalableTSDFVolume consumes the rendered depth maps directly. Building
+    // a second fused MVS point cloud first is both redundant and substantially
+    // more expensive on dense full-resolution inputs. Keep it only for the
+    // non-TSDF preview/global backends that actually consume dense_cloud.
+    if (fusion_options.mesh_method != mvs::MeshMethod::tsdf) {
+        mvs::fuse_depth_maps(geometry_scene, fusion_options);
+        if (geometry_scene.dense_cloud.points.empty())
+            throw std::runtime_error(
+                "GGGS mesh depth fusion produced no surface points");
+    }
     mvs::reconstruct_mesh(geometry_scene, fusion_options);
     if (geometry_scene.mesh.vertices.empty() ||
         geometry_scene.mesh.faces.empty())

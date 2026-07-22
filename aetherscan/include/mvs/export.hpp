@@ -6,6 +6,9 @@
 
 namespace aetherscan::mvs {
 
+// Load an ASCII or binary-little-endian PLY point cloud. Position is required;
+// RGB, normal, weight, view_indices and view_weights are imported when present.
+DenseCloud load_dense_ply(const std::filesystem::path& path);
 void save_dense_ply(const DenseCloud& cloud, const std::filesystem::path& path);
 void save_mesh_ply(const Mesh& mesh, const std::filesystem::path& path);
 void save_mesh_obj(const Mesh& mesh, const std::filesystem::path& path);

@@ -1,15 +1,14 @@
 #include "mvs/internal.hpp"
 
 #include "core/logging.hpp"
-
-#include <Eigen/Geometry>
+#include "marching_cubes_const.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <numeric>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -17,22 +16,29 @@
 namespace aetherscan::mvs::detail {
 namespace {
 
-struct VoxelKey {
+// Match Open3D ScalableTSDFVolume, which is the backend used by pygsplat's
+// gs2mesh.py: 16^3 sparse volume units allocated around stride-4 depth points.
+constexpr int k_block_resolution = 16;
+constexpr int k_block_voxel_count =
+    k_block_resolution * k_block_resolution * k_block_resolution;
+constexpr unsigned k_depth_sampling_stride = 4;
+
+struct GridKey {
     std::int64_t x{};
     std::int64_t y{};
     std::int64_t z{};
 
-    [[nodiscard]] bool operator==(const VoxelKey&) const noexcept = default;
+    [[nodiscard]] bool operator==(const GridKey&) const noexcept = default;
 };
 
-[[nodiscard]] bool key_less(const VoxelKey& a, const VoxelKey& b) noexcept {
+[[nodiscard]] bool key_less(const GridKey& a, const GridKey& b) noexcept {
     if (a.x != b.x) return a.x < b.x;
     if (a.y != b.y) return a.y < b.y;
     return a.z < b.z;
 }
 
-struct VoxelHash {
-    [[nodiscard]] std::size_t operator()(const VoxelKey& key) const noexcept {
+struct GridHash {
+    [[nodiscard]] std::size_t operator()(const GridKey& key) const noexcept {
         const auto mix = [](std::uint64_t value) {
             value ^= value >> 30U;
             value *= 0xbf58476d1ce4e5b9ULL;
@@ -48,66 +54,81 @@ struct VoxelHash {
 };
 
 struct EdgeKey {
-    VoxelKey a;
-    VoxelKey b;
+    GridKey a;
+    GridKey b;
 
     [[nodiscard]] bool operator==(const EdgeKey&) const noexcept = default;
 };
 
 struct EdgeHash {
     [[nodiscard]] std::size_t operator()(const EdgeKey& edge) const noexcept {
-        const VoxelHash hash;
+        const GridHash hash;
         const std::size_t a = hash(edge.a);
         const std::size_t b = hash(edge.b);
         return a ^ (b + 0x9e3779b97f4a7c15ULL + (a << 6U) + (a >> 2U));
     }
 };
 
-struct Accumulator {
-    double signed_distance{};
-    double weight{};
+struct TsdfVoxel {
+    float value{};
+    float weight{};
 };
 
-using Field = std::unordered_map<VoxelKey, Accumulator, VoxelHash>;
+struct VolumeBlock {
+    std::array<TsdfVoxel, k_block_voxel_count> voxels{};
+};
 
-constexpr std::array<std::array<int, 3>, 8> k_corners{{
-    {{0, 0, 0}}, {{1, 0, 0}}, {{1, 1, 0}}, {{0, 1, 0}},
-    {{0, 0, 1}}, {{1, 0, 1}}, {{1, 1, 1}}, {{0, 1, 1}},
-}};
+using Volume =
+    std::unordered_map<GridKey, std::unique_ptr<VolumeBlock>, GridHash>;
 
-// Six tetrahedra sharing the 0-6 cube diagonal. The subdivision is identical
-// on shared cube faces, so interpolated edge vertices remain crack-free.
-constexpr std::array<std::array<int, 4>, 6> k_tetrahedra{{
-    {{0, 5, 1, 6}}, {{0, 1, 2, 6}}, {{0, 2, 3, 6}},
-    {{0, 3, 7, 6}}, {{0, 7, 4, 6}}, {{0, 4, 5, 6}},
-}};
+struct TouchedBlock {
+    GridKey key;
+    VolumeBlock* block{};
+};
 
-constexpr std::array<std::array<int, 2>, 6> k_tetra_edges{{
-    {{0, 1}}, {{0, 2}}, {{0, 3}}, {{1, 2}}, {{1, 3}}, {{2, 3}},
-}};
+[[nodiscard]] int voxel_index(const int x, const int y, const int z) noexcept {
+    return (x * k_block_resolution + y) * k_block_resolution + z;
+}
 
-[[nodiscard]] VoxelKey offset_key(
-    const VoxelKey& key, const int x, const int y, const int z) noexcept {
-    return {key.x + x, key.y + y, key.z + z};
+[[nodiscard]] GridKey floor_key(
+    const Vec3f& position, const float inverse_length) noexcept {
+    return {
+        static_cast<std::int64_t>(std::floor(
+            static_cast<double>(position.x() * inverse_length))),
+        static_cast<std::int64_t>(std::floor(
+            static_cast<double>(position.y() * inverse_length))),
+        static_cast<std::int64_t>(std::floor(
+            static_cast<double>(position.z() * inverse_length)))};
+}
+
+[[nodiscard]] GridKey global_key(
+    const GridKey& block, const int x, const int y, const int z) noexcept {
+    return {
+        block.x * k_block_resolution + x,
+        block.y * k_block_resolution + y,
+        block.z * k_block_resolution + z};
+}
+
+[[nodiscard]] std::int64_t floor_div(
+    const std::int64_t value, const std::int64_t divisor) noexcept {
+    std::int64_t quotient = value / divisor;
+    const std::int64_t remainder = value % divisor;
+    if (remainder < 0) --quotient;
+    return quotient;
 }
 
 [[nodiscard]] Vec3f position_of(
-    const VoxelKey& key, const float voxel_size) noexcept {
+    const GridKey& key, const float voxel_size) noexcept {
+    // UniformTSDFVolume stores samples at voxel centers, not grid corners.
     return Vec3f{
-        static_cast<float>(key.x) * voxel_size,
-        static_cast<float>(key.y) * voxel_size,
-        static_cast<float>(key.z) * voxel_size};
+        (static_cast<float>(key.x) + 0.5F) * voxel_size,
+        (static_cast<float>(key.y) + 0.5F) * voxel_size,
+        (static_cast<float>(key.z) + 0.5F) * voxel_size};
 }
 
-[[nodiscard]] VoxelKey key_of(
-    const Vec3f& position, const float inverse_voxel) noexcept {
-    return {
-        static_cast<std::int64_t>(
-            std::llround(static_cast<double>(position.x() * inverse_voxel))),
-        static_cast<std::int64_t>(
-            std::llround(static_cast<double>(position.y() * inverse_voxel))),
-        static_cast<std::int64_t>(
-            std::llround(static_cast<double>(position.z() * inverse_voxel)))};
+[[nodiscard]] EdgeKey edge_key(GridKey a, GridKey b) noexcept {
+    if (key_less(b, a)) std::swap(a, b);
+    return {a, b};
 }
 
 [[nodiscard]] float estimate_voxel_size(const MvsScene& scene) {
@@ -118,7 +139,7 @@ constexpr std::array<std::array<int, 2>, 6> k_tetra_edges{{
         if (map.depth.size() != map.size() || !(view.fx > 0.F) ||
             !(view.fy > 0.F))
             continue;
-        const unsigned stride = 16;
+        constexpr unsigned stride = 16;
         for (unsigned y = 0; y < map.height; y += stride) {
             for (unsigned x = 0; x < map.width; x += stride) {
                 const float depth = map.depth[map.index(x, y)];
@@ -136,86 +157,145 @@ constexpr std::array<std::array<int, 2>, 6> k_tetra_edges{{
     return *middle;
 }
 
-void integrate_view(
-    const MvsView& view, const DensifyOptions& options,
-    const OrientedBoundingBox& roi, const float voxel_size, Field& field,
-    std::size_t& valid_pixels) {
+[[nodiscard]] VolumeBlock* open_block(
+    Volume& volume, const GridKey& key) {
+    auto [entry, inserted] = volume.try_emplace(key);
+    if (inserted) entry->second = std::make_unique<VolumeBlock>();
+    return entry->second.get();
+}
+
+[[nodiscard]] std::vector<TouchedBlock> allocate_view_blocks(
+    const MvsView& view, const OrientedBoundingBox& roi,
+    const float block_length, const float truncation, Volume& volume,
+    std::size_t& valid_depth_samples) {
+    std::unordered_set<GridKey, GridHash> touched;
     const DepthMap& map = view.depth_map;
-    if (map.depth.size() != map.size()) return;
+    if (map.depth.size() != map.size()) return {};
 
-    const float inverse_voxel = 1.F / voxel_size;
-    const float band_voxels = std::max(options.mesh_tsdf_truncation_voxels, 1.F);
-    const float truncation = voxel_size * band_voxels;
-    const int band_steps = std::max(1, static_cast<int>(std::ceil(band_voxels)));
-    const unsigned pixel_step = std::max(options.mesh_tsdf_pixel_step, 1U);
-    const Mat3f camera_to_world = view.pose.R.transpose().cast<float>();
-    const Vec3f camera_center = view.pose.C.cast<float>();
-
-    for (unsigned y = 0; y < map.height; y += pixel_step) {
-        for (unsigned x = 0; x < map.width; x += pixel_step) {
-            const std::size_t index = map.index(x, y);
-            const float surface_depth = map.depth[index];
-            if (!(surface_depth > 0.F) || !std::isfinite(surface_depth))
+    const float inverse_block_length = 1.F / block_length;
+    const Vec3f truncation_vector = Vec3f::Constant(truncation);
+    for (unsigned y = 0; y < map.height; y += k_depth_sampling_stride) {
+        for (unsigned x = 0; x < map.width; x += k_depth_sampling_stride) {
+            const float depth = map.depth[map.index(x, y)];
+            if (!(depth > 0.F) || !std::isfinite(depth)) continue;
+            ++valid_depth_samples;
+            const Vec3f camera_point = view.unproject(
+                static_cast<float>(x), static_cast<float>(y), depth);
+            const Vec3f world_point = view.pose
+                .transform_camera_to_world(camera_point.cast<double>())
+                .cast<float>();
+            if (!world_point.allFinite() ||
+                (roi.valid && !roi.contains(world_point, truncation)))
                 continue;
-            ++valid_pixels;
 
-            const Vec3f ray = view.unproject(
-                static_cast<float>(x) + 0.5F,
-                static_cast<float>(y) + 0.5F, 1.F);
-            const float ray_length = ray.norm();
-            if (!(ray_length > 0.F) || !std::isfinite(ray_length)) continue;
+            const GridKey minimum = floor_key(
+                world_point - truncation_vector, inverse_block_length);
+            const GridKey maximum = floor_key(
+                world_point + truncation_vector, inverse_block_length);
+            for (std::int64_t bx = minimum.x; bx <= maximum.x; ++bx)
+                for (std::int64_t by = minimum.y; by <= maximum.y; ++by)
+                    for (std::int64_t bz = minimum.z; bz <= maximum.z; ++bz)
+                        touched.emplace(GridKey{bx, by, bz});
+        }
+    }
 
-            float weight = 1.F;
-            if (map.confidence.size() == map.size()) {
-                const float confidence = map.confidence[index];
-                if (std::isfinite(confidence))
-                    weight /= 1.F + std::max(confidence, 0.F);
-            }
-            if (map.normal.size() == map.size() &&
-                map.normal[index].squaredNorm() > 1e-12F) {
-                const float incidence = std::abs(
-                    map.normal[index].normalized().dot(ray.normalized()));
-                weight *= std::max(incidence, options.grazing_weight_floor);
-            }
+    std::vector<TouchedBlock> blocks;
+    blocks.reserve(touched.size());
+    for (const GridKey& key : touched)
+        blocks.push_back({key, open_block(volume, key)});
+    return blocks;
+}
 
-            bool have_last = false;
-            VoxelKey last{};
-            const float z_step = voxel_size / ray_length;
-            for (int step = -band_steps; step <= band_steps; ++step) {
-                const float sample_depth =
-                    surface_depth + static_cast<float>(step) * z_step;
-                if (!(sample_depth > 0.F)) continue;
-                const Vec3f camera_point = ray * sample_depth;
-                const Vec3f world_point =
-                    camera_to_world * camera_point + camera_center;
-                const VoxelKey key = key_of(world_point, inverse_voxel);
-                if (have_last && key == last) continue;
-                have_last = true;
-                last = key;
+[[nodiscard]] std::uint64_t integrate_view(
+    const MvsView& view, const OrientedBoundingBox& roi,
+    const float voxel_size, const float truncation,
+    const std::vector<TouchedBlock>& blocks) {
+    const DepthMap& map = view.depth_map;
+    std::uint64_t integrated_voxels = 0;
 
-                const Vec3f center_world = position_of(key, voxel_size);
-                if (roi.valid && !roi.contains(center_world))
-                    continue;
-                const Vec3f center_camera =
-                    view.pose
-                        .transform_world_to_camera(center_world.cast<double>())
+#if defined(AETHERSCAN_HAS_OPENMP)
+#pragma omp parallel for schedule(dynamic, 8) reduction(+ : integrated_voxels)
+#endif
+    for (std::int64_t block_index = 0;
+         block_index < static_cast<std::int64_t>(blocks.size());
+         ++block_index) {
+        const TouchedBlock& touched =
+            blocks[static_cast<std::size_t>(block_index)];
+        VolumeBlock& block = *touched.block;
+        for (int x = 0; x < k_block_resolution; ++x) {
+            for (int y = 0; y < k_block_resolution; ++y) {
+                for (int z = 0; z < k_block_resolution; ++z) {
+                    const GridKey key = global_key(touched.key, x, y, z);
+                    const Vec3f world = position_of(key, voxel_size);
+                    if (roi.valid && !roi.contains(world)) continue;
+                    const Vec3f camera = view.pose
+                        .transform_world_to_camera(world.cast<double>())
                         .cast<float>();
-                const float signed_distance = std::clamp(
-                    (surface_depth - center_camera.z()) * ray_length /
-                        truncation,
-                    -1.F, 1.F);
-                Accumulator& value = field[key];
-                value.signed_distance +=
-                    static_cast<double>(signed_distance * weight);
-                value.weight += static_cast<double>(weight);
+                    if (!(camera.z() > 0.F) || !camera.allFinite()) continue;
+
+                    // Open3D rounds projected coordinates by adding 0.5 and
+                    // truncating to an integer pixel.
+                    const float inverse_z = 1.F / camera.z();
+                    const float uf = view.fx * camera.x() * inverse_z +
+                                     view.cx + 0.5F;
+                    const float vf = view.fy * camera.y() * inverse_z +
+                                     view.cy + 0.5F;
+                    if (!(uf >= 0.F && vf >= 0.F) ||
+                        uf >= static_cast<float>(map.width) ||
+                        vf >= static_cast<float>(map.height))
+                        continue;
+                    const int u = static_cast<int>(uf);
+                    const int v = static_cast<int>(vf);
+                    const float source_depth = map.depth[map.index(u, v)];
+                    if (!(source_depth > 0.F) ||
+                        !std::isfinite(source_depth))
+                        continue;
+                    // RGBDImage.create_from_color_and_depth receives a uint16
+                    // millimetre image in gs2mesh.py.
+                    const float depth = std::floor(source_depth * 1000.F) /
+                        1000.F;
+                    if (!(depth > 0.F)) continue;
+
+                    const float px =
+                        (static_cast<float>(u) - view.cx) / view.fx;
+                    const float py =
+                        (static_cast<float>(v) - view.cy) / view.fy;
+                    const float ray_length =
+                        std::sqrt(1.F + px * px + py * py);
+                    const float sdf = (depth - camera.z()) * ray_length;
+                    if (!(sdf > -truncation)) continue;
+
+                    const float tsdf = std::min(1.F, sdf / truncation);
+                    TsdfVoxel& voxel = block.voxels[static_cast<std::size_t>(
+                        voxel_index(x, y, z))];
+                    voxel.value =
+                        (voxel.value * voxel.weight + tsdf) /
+                        (voxel.weight + 1.F);
+                    voxel.weight += 1.F;
+                    ++integrated_voxels;
+                }
             }
         }
     }
+    return integrated_voxels;
 }
 
-[[nodiscard]] EdgeKey edge_key(VoxelKey a, VoxelKey b) noexcept {
-    if (key_less(b, a)) std::swap(a, b);
-    return {a, b};
+[[nodiscard]] const TsdfVoxel* find_voxel(
+    const Volume& volume, const GridKey& key) noexcept {
+    const GridKey block_key{
+        floor_div(key.x, k_block_resolution),
+        floor_div(key.y, k_block_resolution),
+        floor_div(key.z, k_block_resolution)};
+    const auto found = volume.find(block_key);
+    if (found == volume.end()) return nullptr;
+    const int x = static_cast<int>(
+        key.x - block_key.x * k_block_resolution);
+    const int y = static_cast<int>(
+        key.y - block_key.y * k_block_resolution);
+    const int z = static_cast<int>(
+        key.z - block_key.z * k_block_resolution);
+    return &found->second->voxels[static_cast<std::size_t>(
+        voxel_index(x, y, z))];
 }
 
 }  // namespace
@@ -233,51 +313,53 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
         return false;
     }
 
-    Field field;
-    field.reserve(2'000'000);
-    std::size_t valid_pixels = 0;
-    for (const MvsView& view : scene.views)
-        integrate_view(
-            view, options, scene.roi, voxel_size, field, valid_pixels);
+    const float truncation = voxel_size *
+        std::max(options.mesh_tsdf_truncation_voxels, 1.F);
+    const float block_length = voxel_size * k_block_resolution;
+    Volume volume;
+    volume.reserve(4096);
+    std::size_t valid_depth_samples = 0;
+    std::uint64_t integrated_voxels = 0;
+    std::size_t maximum_view_blocks = 0;
+    for (const MvsView& view : scene.views) {
+        const std::vector<TouchedBlock> blocks = allocate_view_blocks(
+            view, scene.roi, block_length, truncation, volume,
+            valid_depth_samples);
+        maximum_view_blocks = std::max(maximum_view_blocks, blocks.size());
+        integrated_voxels += integrate_view(
+            view, scene.roi, voxel_size, truncation, blocks);
+    }
 
     core::Logger::instance().info(
-        "mvs mesh TSDF integrate: voxel=", voxel_size,
-        " inferred_voxel=", inferred_voxel,
+        "mvs mesh TSDF integrate (gs2mesh/Open3D compatible): voxel=",
+        voxel_size, " inferred_voxel=", inferred_voxel,
         " voxel_scale=", options.mesh_tsdf_voxel_scale,
-        " truncation_voxels=", options.mesh_tsdf_truncation_voxels,
-        " pixel_step=", options.mesh_tsdf_pixel_step,
-        " depth_samples=", valid_pixels, " active_voxels=", field.size());
-    if (field.empty()) {
+        " truncation=", truncation,
+        " depth_sampling_stride=", k_depth_sampling_stride,
+        " depth_samples=", valid_depth_samples,
+        " volume_blocks=", volume.size(),
+        " max_view_blocks=", maximum_view_blocks,
+        " voxel_updates=", integrated_voxels);
+    if (volume.empty()) {
         stage.finish();
         return false;
     }
 
     Mesh mesh;
     std::unordered_map<EdgeKey, int, EdgeHash> edge_vertices;
-    edge_vertices.reserve(field.size() / 2);
-    std::unordered_set<VoxelKey, VoxelHash> processed_cells;
-    processed_cells.reserve(field.size());
-
-    const auto value_at = [&](const VoxelKey& key, float& value) {
-        const auto found = field.find(key);
-        if (found == field.end() ||
-            found->second.weight < options.mesh_tsdf_min_weight)
-            return false;
-        value = static_cast<float>(
-            found->second.signed_distance / found->second.weight);
-        return std::isfinite(value);
-    };
+    edge_vertices.reserve(volume.size() * 256);
+    std::uint64_t scanned_cells = 0;
+    std::uint64_t supported_cells = 0;
 
     const auto vertex_on_edge = [&] (
-        const VoxelKey& a, const VoxelKey& b, const float va,
+        const GridKey& a, const GridKey& b, const float va,
         const float vb) {
         const EdgeKey edge = edge_key(a, b);
         const auto existing = edge_vertices.find(edge);
         if (existing != edge_vertices.end()) return existing->second;
-        const float denominator = va - vb;
-        const float t = std::abs(denominator) > 1e-12F
-            ? std::clamp(va / denominator, 0.F, 1.F)
-            : 0.5F;
+        const float aa = std::abs(va);
+        const float ab = std::abs(vb);
+        const float t = aa + ab > 1e-12F ? aa / (aa + ab) : 0.5F;
         const Vec3f position =
             position_of(a, voxel_size) * (1.F - t) +
             position_of(b, voxel_size) * t;
@@ -287,143 +369,62 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
         return index;
     };
 
-    struct Crossing {
-        int vertex{-1};
-        Vec3f position{Vec3f::Zero()};
-    };
-    const float minimum_area_squared =
-        voxel_size * voxel_size * voxel_size * voxel_size * 1e-8F;
-    const auto append_triangle = [&] (
-        int a, int b, int c, const Vec3f& outside_direction) {
-        if (a == b || b == c || c == a) return;
-        const Vec3f& p0 = mesh.vertices[static_cast<std::size_t>(a)];
-        const Vec3f& p1 = mesh.vertices[static_cast<std::size_t>(b)];
-        const Vec3f& p2 = mesh.vertices[static_cast<std::size_t>(c)];
-        const Vec3f normal = (p1 - p0).cross(p2 - p0);
-        if (!normal.allFinite() ||
-            normal.squaredNorm() <= minimum_area_squared)
-            return;
-        if (normal.dot(outside_direction) < 0.F) std::swap(b, c);
-        mesh.faces.emplace_back(a, b, c);
-    };
-
-    for (const auto& [negative_key, accumulated] : field) {
-        if (!(accumulated.weight >= options.mesh_tsdf_min_weight) ||
-            accumulated.signed_distance / accumulated.weight >= 0.0)
-            continue;
-        for (int dz = -1; dz <= 0; ++dz) {
-            for (int dy = -1; dy <= 0; ++dy) {
-                for (int dx = -1; dx <= 0; ++dx) {
-                    const VoxelKey cell =
-                        offset_key(negative_key, dx, dy, dz);
-                    if (!processed_cells.emplace(cell).second) continue;
-
-                    std::array<VoxelKey, 8> keys{};
+    for (const auto& [block_key, block] : volume) {
+        (void)block;
+        for (int x = 0; x < k_block_resolution; ++x) {
+            for (int y = 0; y < k_block_resolution; ++y) {
+                for (int z = 0; z < k_block_resolution; ++z) {
+                    ++scanned_cells;
+                    const GridKey cell = global_key(block_key, x, y, z);
+                    std::array<GridKey, 8> keys{};
                     std::array<float, 8> values{};
-                    std::array<bool, 8> available{};
-                    for (std::size_t corner = 0; corner < k_corners.size();
-                         ++corner) {
-                        keys[corner] = offset_key(
-                            cell, k_corners[corner][0], k_corners[corner][1],
-                            k_corners[corner][2]);
-                        available[corner] =
-                            value_at(keys[corner], values[corner]);
+                    int cube_index = 0;
+                    bool supported = true;
+                    for (int corner = 0; corner < 8; ++corner) {
+                        keys[static_cast<std::size_t>(corner)] = {
+                            cell.x + shift[corner].x(),
+                            cell.y + shift[corner].y(),
+                            cell.z + shift[corner].z()};
+                        const TsdfVoxel* voxel = find_voxel(
+                            volume, keys[static_cast<std::size_t>(corner)]);
+                        if (voxel == nullptr ||
+                            voxel->weight < options.mesh_tsdf_min_weight) {
+                            supported = false;
+                            break;
+                        }
+                        values[static_cast<std::size_t>(corner)] =
+                            voxel->value;
+                        if (voxel->value < 0.F) cube_index |= 1 << corner;
                     }
+                    if (!supported) continue;
+                    ++supported_cells;
+                    if (cube_index == 0 || cube_index == 255) continue;
 
-                    for (const auto& tetrahedron : k_tetrahedra) {
-                        unsigned positive = 0;
-                        unsigned negative = 0;
-                        for (const int corner : tetrahedron) {
-                            if (!available[static_cast<std::size_t>(corner)])
-                                continue;
-                            if (values[static_cast<std::size_t>(corner)] >= 0.F)
-                                ++positive;
-                            else
-                                ++negative;
-                        }
-                        // Missing samples are tolerated only when this tetra
-                        // already contains observed support on both sides of
-                        // zero. This seals small inter-view gaps without
-                        // inventing a second surface at the back of the TSDF
-                        // truncation band.
-                        if (positive == 0 || negative == 0)
+                    std::array<int, 12> edge_to_index{};
+                    for (int edge = 0; edge < 12; ++edge) {
+                        if ((edge_table[cube_index] & (1 << edge)) == 0)
                             continue;
-                        for (const int corner : tetrahedron)
-                            if (!available[static_cast<std::size_t>(corner)])
-                                values[static_cast<std::size_t>(corner)] = 1.F;
-
-                        Vec3f outside = Vec3f::Zero();
-                        Vec3f inside = Vec3f::Zero();
-                        unsigned outside_count = 0;
-                        unsigned inside_count = 0;
-                        for (const int corner : tetrahedron) {
-                            const Vec3f position = position_of(
-                                keys[static_cast<std::size_t>(corner)],
-                                voxel_size);
-                            if (values[static_cast<std::size_t>(corner)] >= 0.F) {
-                                outside += position;
-                                ++outside_count;
-                            } else {
-                                inside += position;
-                                ++inside_count;
-                            }
-                        }
-                        Vec3f direction =
-                            outside / static_cast<float>(outside_count) -
-                            inside / static_cast<float>(inside_count);
-                        if (direction.squaredNorm() <= 1e-12F) continue;
-                        direction.normalize();
-
-                        std::vector<Crossing> crossings;
-                        crossings.reserve(4);
-                        for (const auto& edge : k_tetra_edges) {
-                            const int ca = tetrahedron[edge[0]];
-                            const int cb = tetrahedron[edge[1]];
-                            const float va = values[static_cast<std::size_t>(ca)];
-                            const float vb = values[static_cast<std::size_t>(cb)];
-                            if ((va >= 0.F) == (vb >= 0.F)) continue;
-                            const int vertex = vertex_on_edge(
-                                keys[static_cast<std::size_t>(ca)],
-                                keys[static_cast<std::size_t>(cb)], va, vb);
-                            if (std::any_of(
-                                    crossings.begin(), crossings.end(),
-                                    [vertex](const Crossing& crossing) {
-                                        return crossing.vertex == vertex;
-                                    }))
-                                continue;
-                            crossings.push_back({
-                                vertex,
-                                mesh.vertices[static_cast<std::size_t>(vertex)]});
-                        }
-                        if (crossings.size() < 3) continue;
-
-                        Vec3f centroid = Vec3f::Zero();
-                        for (const Crossing& crossing : crossings)
-                            centroid += crossing.position;
-                        centroid /= static_cast<float>(crossings.size());
-                        Vec3f basis = crossings.front().position - centroid;
-                        basis -= direction * basis.dot(direction);
-                        if (basis.squaredNorm() <= 1e-12F)
-                            basis = direction.unitOrthogonal();
-                        else
-                            basis.normalize();
-                        const Vec3f tangent = direction.cross(basis).normalized();
-                        std::sort(
-                            crossings.begin(), crossings.end(),
-                            [&](const Crossing& a, const Crossing& b) {
-                                const Vec3f ra = a.position - centroid;
-                                const Vec3f rb = b.position - centroid;
-                                return std::atan2(
-                                           ra.dot(tangent), ra.dot(basis)) <
-                                    std::atan2(rb.dot(tangent), rb.dot(basis));
-                            });
-                        for (std::size_t triangle = 1;
-                             triangle + 1 < crossings.size(); ++triangle) {
-                            append_triangle(
-                                crossings[0].vertex,
-                                crossings[triangle].vertex,
-                                crossings[triangle + 1].vertex, direction);
-                        }
+                        const int a = edge_to_vert[edge][0];
+                        const int b = edge_to_vert[edge][1];
+                        edge_to_index[static_cast<std::size_t>(edge)] =
+                            vertex_on_edge(
+                                keys[static_cast<std::size_t>(a)],
+                                keys[static_cast<std::size_t>(b)],
+                                values[static_cast<std::size_t>(a)],
+                                values[static_cast<std::size_t>(b)]);
+                    }
+                    for (int triangle = 0;
+                         tri_table[cube_index][triangle] != -1;
+                         triangle += 3) {
+                        // Open3D reverses the last two indices relative to the
+                        // classic lookup table to preserve its outward winding.
+                        mesh.faces.emplace_back(
+                            edge_to_index[static_cast<std::size_t>(
+                                tri_table[cube_index][triangle])],
+                            edge_to_index[static_cast<std::size_t>(
+                                tri_table[cube_index][triangle + 2])],
+                            edge_to_index[static_cast<std::size_t>(
+                                tri_table[cube_index][triangle + 1])]);
                     }
                 }
             }
@@ -431,7 +432,8 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
     }
 
     core::Logger::instance().info(
-        "mvs mesh TSDF extract: cells=", processed_cells.size(),
+        "mvs mesh TSDF Marching Cubes: scanned_cells=", scanned_cells,
+        " supported_cells=", supported_cells,
         " vertices=", mesh.vertices.size(), " faces=", mesh.faces.size());
     if (mesh.faces.empty()) {
         stage.finish();

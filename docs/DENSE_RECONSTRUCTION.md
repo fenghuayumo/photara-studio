@@ -90,10 +90,10 @@ SfM (已有) ──► RebuildScene
 | 几何再精修后贴图 | `mvs + gggs + texture` |
 | 全质量 | `mvs + gggs + texture + delight` |
 
-GGGS 几何提取走 TSDF 时，默认以自动估计体素的 `2.3x` 直接生成接近百万面的局部规则网格，
-再执行 UV 展开与多视角投影纹理。这样避免先生成约 480 万面、再由通用
-remesher/decimator 引入跨孔长三角和瘦三角。`--mesh-tsdf-voxel-scale` 可覆盖该倍率；
-`--mesh-target-faces 0` 保留原始 TSDF 分辨率。
+GGGS 几何提取走与 `pygsplat/gs2mesh.py` 对齐的稀疏体素块 TSDF：默认
+`max_depth=2*scene_extent`、`voxel=max_depth/2048`、`sdf_trunc=4*voxel`，逐相机投影融合后用
+标准 Marching Cubes 提取，再仅保留最大连通分量。默认不再执行通用 remesher/decimator；
+`--mesh-tsdf-voxel-scale` 可显式调整质量/速度，`--mesh-target-faces` 可按需开启交付级减面。
 
 CLI 示意（设计级，非最终参数名）：
 
@@ -219,9 +219,9 @@ TSDF，在 MVS-only 的 `default/high` 选择全局 Delaunay，在 `preview` 选
 --patchmatch-concurrent-views 8
 --mesh-method auto|tsdf|projective|delaunay
 --mesh-max-points 2000000       # 0 表示不设上限
---mesh-target-faces 1000000     # asdiff/CGAL repair + decimate；0 关闭
+--mesh-target-faces 0           # 默认保留原生 MC；正数开启 asdiff/CGAL 减面
 --mesh-remesh true              # 超过目标面数时先执行 Instant Meshes remesh
---mesh-tsdf-voxel-scale -1      # -1: GGGS 自动 2.3x；正数显式覆盖
+--mesh-tsdf-voxel-scale -1      # -1: gs2mesh 原生 1x；正数显式覆盖
 --uv-parallel-partitions 8      # UVAtlas 空间分区并发；1 为串行
 --mesh-free-space-support true  # OpenMVS weak-surface beta/gamma 强化
 --mesh-free-space-quantile 0.95 # 融合权重到 OpenMVS 能量尺度的校准分位数
@@ -311,10 +311,9 @@ depth-normal 硬过滤，避免在薄结构和法线快速变化处直接删除 
 2. **优化**：先以 RGB+mask 收敛外观，默认第 7,000 步启用权重 0.05 的 GGGS median-depth /
    rendered-normal self-consistency，并保持 mean/scale/quaternion/opacity 可训练；可选与 MVS
    depth 一致性；
-3. **抽 mesh**：渲染 GGGS median depth / normal / alpha，复用 MVS 相机、mask、邻接与深度
-   融合，稀疏 TSDF + marching tetrahedra 抽取隐式表面，再经 Clean、Instant Meshes
-   quad-dominant remesh、连通分量清理和 CGAL repair/decimate → `gggs_mesh`；该路径不依赖
-   `multi_view_robust_ncc`；
+3. **抽 mesh**：以原图分辨率渲染 GGGS median depth / normal / alpha，复用 COLMAP 相机与 mask，
+   以 Open3D-compatible sparse block TSDF + Marching Cubes 抽取隐式表面，再保留最大连通分量
+   → `gggs_mesh`；默认不重拓扑/减面，该路径不依赖 `multi_view_robust_ncc`；
 4. **切换**：`active_mesh_id = gggs`；若仍 `enable_texture`，对 **gggs_mesh**
    重跑 Stage B（mask 建议重算）。
 
@@ -509,6 +508,8 @@ Mask / UV / Project / Delight 共用一套后处理，作用于用户选定的�
 参数激活与显式梯度、完整 11×11 fused SSIM CUDA forward/backward、融合 Adam、MVS
 dense-cloud 初始化、COLMAP 文本/二进制相机/稀疏点加载和 Gaussian PLY 导出。CLI 使用
 `--gggs --gggs-iterations N` 在 dense fusion 后训练，也可用 `--colmap PATH` 跳过内部 SfM/MVS。
+已有稠密点云可用 `--colmap PATH --dense-ply scene_dense.ply --gggs`，直接复用 COLMAP
+相机与原图、以 PLY 的位置/RGB/法线初始化 GGGS；PLY 中的 `view_indices/view_weights` 会一并读取。
 `--gggs-use-mask` 已支持与 pygsplat 一致的 `transparent`（前景 RGB + alpha BCE）和
 `masked`（前景 RGB + 背景 alpha 泄漏惩罚）模式，复用 `--masks` 或源图 alpha channel。
 
@@ -517,10 +518,11 @@ dense-cloud 初始化、COLMAP 文本/二进制相机/稀疏点加载和 Gaussia
 三个诊断视角相对旧实现提升 `1.45 / 2.39 / 2.67 dB`，极端轴比例 p99.9 从约 170k 降到 10。
 
 稀疏 COLMAP 初始化已支持 `default`、`adc_plus`、`adc_igs` 三种动态 split/clone/prune、
-opacity 管理和数量硬上限；MVS 稠密点云初始化会自动关闭致密化。当前未完成的是 ADC-IGS
-逐像素 edge/error ownership、out-of-core view cache、GGGS mesh extraction 与 `active_mesh`
-切换。因此目前 `--gggs` 输出
-`*_gggs.ply`，纹理阶段仍使用 MVS mesh。实现、构建方法、性能边界和许可证风险见
+opacity 管理和数量硬上限；MVS/外部 PLY 稠密点云初始化默认关闭致密化，也可显式选择
+`dense_adaptive`。GGGS median-depth/normal/alpha → TSDF → Clean 的 mesh extraction 与
+`active_mesh` 切换已经接通；外部稠密 PLY 可通过 `--colmap ... --dense-ply ...` 绕过 SfM/MVS。
+当前仍未完成的是 ADC-IGS 逐像素 edge/error ownership、out-of-core view cache，以及 direct
+COLMAP 分支的 texture 编排。实现、构建方法、性能边界和许可证风险见
 [GGGS_CPP.md](GGGS_CPP.md)。
 
 ---

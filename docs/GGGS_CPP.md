@@ -238,14 +238,14 @@ MVS depth/normal 常驻 GPU。
 
 ## 当前几何交付与后续工作
 
-当前版本已打通 GGGS mesh extraction：训练后渲染每个相机的 median depth、normal 和 alpha，
-使用输入 mask 与 alpha 阈值抑制背景，并以同一 depth-normal 公式拒绝夹角超过 60°的内部
-强不一致样本；随后复用 MVS 相机模型、邻接、深度一致性融合和统一 Clean，
-再用稀疏 TSDF + marching tetrahedra 抽取单一隐式表面。`--gggs --mesh` 会把
+当前版本已打通 GGGS mesh extraction：训练后按原图分辨率渲染每个相机的 median depth、normal
+和 alpha；存在输入 mask 时以 mask 为准，否则回退到 alpha 0.5，与 `gs2mesh.py` 一致。随后按
+`max_depth=2*scene_extent`、`voxel=max_depth/2048`、`sdf_trunc=4*voxel` 做 Open3D-compatible
+稀疏体素块投影融合，并用标准 Marching Cubes 抽取、保留最大连通分量。`--gggs --mesh` 会把
 `active_mesh` 切换为 `*_gggs_mesh.ply`，不再使用 projective MVS patch mesh。
 
-若构建时找到 CGAL，AetherScan 还会先内存调用 asdiff_render 的 Instant Meshes
-field-aligned remesh，再调用 `asdiff::mesh::repair_and_decimate`，默认压到 1,000,000 面；
+若构建时找到 CGAL，可通过非零 `--mesh-target-faces` 显式调用 asdiff_render 的 Instant Meshes
+field-aligned remesh，再调用 `asdiff::mesh::repair_and_decimate`；默认保留原生 Marching Cubes 网格；
 Instant 的 quad-dominant 目标会按最终三角面数的一半设置，remesh 与 CGAL 后都会剔除微小
 边连通碎片。
 `--mesh-remesh=false` 可跳过重拓扑做 A/B，`--mesh-target-faces 0` 可关闭整个后处理。

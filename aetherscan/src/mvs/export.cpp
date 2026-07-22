@@ -7,11 +7,124 @@
 #include <cstring>
 #include <cstdint>
 #include <fstream>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 namespace aetherscan::mvs {
 namespace {
+
+enum class PlyScalar {
+    int8,
+    uint8,
+    int16,
+    uint16,
+    int32,
+    uint32,
+    float32,
+    float64,
+};
+
+struct PlyProperty {
+    std::string name;
+    PlyScalar value_type{};
+    bool list{};
+    PlyScalar count_type{};
+};
+
+[[nodiscard]] PlyScalar parse_ply_scalar(const std::string& name) {
+    if (name == "char" || name == "int8") return PlyScalar::int8;
+    if (name == "uchar" || name == "uint8") return PlyScalar::uint8;
+    if (name == "short" || name == "int16") return PlyScalar::int16;
+    if (name == "ushort" || name == "uint16") return PlyScalar::uint16;
+    if (name == "int" || name == "int32") return PlyScalar::int32;
+    if (name == "uint" || name == "uint32") return PlyScalar::uint32;
+    if (name == "float" || name == "float32") return PlyScalar::float32;
+    if (name == "double" || name == "float64") return PlyScalar::float64;
+    throw std::runtime_error("Unsupported PLY scalar type: " + name);
+}
+
+[[nodiscard]] std::size_t ply_scalar_size(const PlyScalar type) noexcept {
+    switch (type) {
+    case PlyScalar::int8:
+    case PlyScalar::uint8: return 1;
+    case PlyScalar::int16:
+    case PlyScalar::uint16: return 2;
+    case PlyScalar::int32:
+    case PlyScalar::uint32:
+    case PlyScalar::float32: return 4;
+    case PlyScalar::float64: return 8;
+    }
+    return 0;
+}
+
+template <class T>
+[[nodiscard]] T read_ply_binary_value(
+    const std::vector<char>& bytes, std::size_t& offset) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    if (offset > bytes.size() || sizeof(T) > bytes.size() - offset)
+        throw std::runtime_error("Unexpected end of binary PLY payload");
+    T value{};
+    std::memcpy(&value, bytes.data() + offset, sizeof(T));
+    offset += sizeof(T);
+    if constexpr (std::endian::native == std::endian::big) {
+        std::array<char, sizeof(T)> swapped{};
+        std::memcpy(swapped.data(), &value, sizeof(T));
+        std::reverse(swapped.begin(), swapped.end());
+        std::memcpy(&value, swapped.data(), sizeof(T));
+    }
+    return value;
+}
+
+[[nodiscard]] double read_ply_binary_scalar(
+    const std::vector<char>& bytes, std::size_t& offset,
+    const PlyScalar type) {
+    switch (type) {
+    case PlyScalar::int8:
+        return read_ply_binary_value<std::int8_t>(bytes, offset);
+    case PlyScalar::uint8:
+        return read_ply_binary_value<std::uint8_t>(bytes, offset);
+    case PlyScalar::int16:
+        return read_ply_binary_value<std::int16_t>(bytes, offset);
+    case PlyScalar::uint16:
+        return read_ply_binary_value<std::uint16_t>(bytes, offset);
+    case PlyScalar::int32:
+        return read_ply_binary_value<std::int32_t>(bytes, offset);
+    case PlyScalar::uint32:
+        return read_ply_binary_value<std::uint32_t>(bytes, offset);
+    case PlyScalar::float32:
+        return read_ply_binary_value<float>(bytes, offset);
+    case PlyScalar::float64:
+        return read_ply_binary_value<double>(bytes, offset);
+    }
+    return 0.0;
+}
+
+[[nodiscard]] bool ply_integer_type(const PlyScalar type) noexcept {
+    return type != PlyScalar::float32 && type != PlyScalar::float64;
+}
+
+void assign_dense_scalar(
+    DensePoint& point, const std::string& name, const double raw,
+    const PlyScalar type) {
+    const float value = static_cast<float>(raw);
+    if (name == "x") point.position.x() = value;
+    else if (name == "y") point.position.y() = value;
+    else if (name == "z") point.position.z() = value;
+    else if (name == "nx") point.normal.x() = value;
+    else if (name == "ny") point.normal.y() = value;
+    else if (name == "nz") point.normal.z() = value;
+    else if (name == "weight") point.weight = value;
+    else if (name == "red" || name == "green" || name == "blue") {
+        const int channel = name == "red" ? 0 : name == "green" ? 1 : 2;
+        point.color[channel] = ply_integer_type(type) || value > 1.F
+            ? value / 255.F
+            : value;
+    }
+}
 
 void write_ply_header(
     std::ostream& out, const std::size_t vertices, const std::size_t faces,
@@ -45,6 +158,163 @@ void write_little_endian(std::ostream& out, const T value) {
 }
 
 }  // namespace
+
+DenseCloud load_dense_ply(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("Failed to open dense PLY: " + path.string());
+    std::string line;
+    if (!std::getline(in, line))
+        throw std::runtime_error("Invalid PLY header: " + path.string());
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line != "ply")
+        throw std::runtime_error("Invalid PLY header: " + path.string());
+
+    bool ascii = false;
+    bool binary_little = false;
+    bool in_vertex = false;
+    bool vertex_is_first_element = true;
+    bool saw_element = false;
+    bool saw_end_header = false;
+    std::size_t vertex_count = 0;
+    std::vector<PlyProperty> properties;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::istringstream tokens(line);
+        std::string keyword;
+        tokens >> keyword;
+        if (keyword == "format") {
+            std::string format;
+            tokens >> format;
+            ascii = format == "ascii";
+            binary_little = format == "binary_little_endian";
+            if (!ascii && !binary_little)
+                throw std::runtime_error(
+                    "Dense PLY must be ASCII or binary little endian");
+        } else if (keyword == "element") {
+            std::string name;
+            std::size_t count = 0;
+            tokens >> name >> count;
+            in_vertex = name == "vertex";
+            if (in_vertex) {
+                vertex_is_first_element = !saw_element;
+                vertex_count = count;
+                properties.clear();
+            }
+            saw_element = true;
+        } else if (keyword == "property" && in_vertex) {
+            std::string type;
+            tokens >> type;
+            PlyProperty property;
+            if (type == "list") {
+                std::string count_type;
+                std::string value_type;
+                tokens >> count_type >> value_type >> property.name;
+                property.list = true;
+                property.count_type = parse_ply_scalar(count_type);
+                property.value_type = parse_ply_scalar(value_type);
+            } else {
+                tokens >> property.name;
+                property.value_type = parse_ply_scalar(type);
+            }
+            properties.push_back(std::move(property));
+        } else if (keyword == "end_header") {
+            saw_end_header = true;
+            break;
+        }
+    }
+    if (!saw_end_header || (!ascii && !binary_little) || vertex_count == 0 ||
+        properties.empty())
+        throw std::runtime_error("PLY has no readable vertex element: " + path.string());
+    if (!vertex_is_first_element)
+        throw std::runtime_error("PLY vertex element must precede other data elements");
+    const auto has_property = [&](const char* name) {
+        return std::any_of(
+            properties.begin(), properties.end(),
+            [name](const PlyProperty& property) {
+                return !property.list && property.name == name;
+            });
+    };
+    if (!has_property("x") || !has_property("y") || !has_property("z"))
+        throw std::runtime_error("Dense PLY is missing x/y/z properties");
+
+    DenseCloud cloud;
+    cloud.points.reserve(vertex_count);
+    std::vector<char> payload;
+    std::size_t offset = 0;
+    if (binary_little) {
+        const auto start = in.tellg();
+        in.seekg(0, std::ios::end);
+        const auto end = in.tellg();
+        if (start < 0 || end < start)
+            throw std::runtime_error("Unable to size binary PLY payload");
+        payload.resize(static_cast<std::size_t>(end - start));
+        in.seekg(start);
+        if (!payload.empty())
+            in.read(payload.data(), static_cast<std::streamsize>(payload.size()));
+        if (!in) throw std::runtime_error("Failed to read binary PLY payload");
+    }
+
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+        DensePoint point;
+        point.color = Vec3f::Constant(0.5F);
+        for (const PlyProperty& property : properties) {
+            if (!property.list) {
+                double value = 0.0;
+                if (ascii) {
+                    if (!(in >> value))
+                        throw std::runtime_error("Unexpected end of ASCII PLY payload");
+                } else {
+                    value = read_ply_binary_scalar(
+                        payload, offset, property.value_type);
+                }
+                assign_dense_scalar(point, property.name, value, property.value_type);
+                continue;
+            }
+
+            double count_value = 0.0;
+            if (ascii) {
+                if (!(in >> count_value))
+                    throw std::runtime_error("Invalid ASCII PLY list count");
+            } else {
+                count_value = read_ply_binary_scalar(
+                    payload, offset, property.count_type);
+            }
+            if (count_value < 0.0 || count_value > 100'000'000.0)
+                throw std::runtime_error("Invalid PLY list length");
+            const auto count = static_cast<std::size_t>(count_value);
+            const bool read_views = property.name == "view_indices";
+            const bool read_weights = property.name == "view_weights";
+            if (read_views) point.views.reserve(count);
+            if (read_weights) point.view_weights.reserve(count);
+            for (std::size_t item = 0; item < count; ++item) {
+                double value = 0.0;
+                if (ascii) {
+                    if (!(in >> value))
+                        throw std::runtime_error("Invalid ASCII PLY list value");
+                } else {
+                    value = read_ply_binary_scalar(
+                        payload, offset, property.value_type);
+                }
+                if (read_views && value >= 0.0 &&
+                    value <= static_cast<double>((std::numeric_limits<Index>::max)()))
+                    point.views.push_back(static_cast<Index>(value));
+                else if (read_weights && std::isfinite(value))
+                    point.view_weights.push_back(static_cast<float>(value));
+            }
+        }
+        if (!point.position.allFinite() ||
+            (point.position.array().abs() >= 1e10F).any())
+            continue;
+        point.color = point.color.cwiseMax(0.F).cwiseMin(1.F);
+        if (!point.normal.allFinite()) point.normal.setZero();
+        if (point.view_weights.size() != point.views.size())
+            point.view_weights.clear();
+        cloud.points.push_back(std::move(point));
+    }
+    if (cloud.points.empty())
+        throw std::runtime_error("Dense PLY has no finite points: " + path.string());
+    return cloud;
+}
 
 void save_roi(
     const OrientedBoundingBox& roi, const std::filesystem::path& path) {

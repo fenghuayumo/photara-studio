@@ -76,8 +76,9 @@ struct ReconstructCli {
     bool dense{false};
     bool gggs{false};
     std::filesystem::path colmap_model;
+    std::filesystem::path dense_ply;
     unsigned gggs_iterations{10'000};
-    std::uint64_t gggs_max_gaussians{0};
+    std::uint64_t gggs_max_gaussians{500'000};
     bool gggs_use_mask{true};
     std::string gggs_alpha_mode{"transparent"};
     float gggs_match_alpha_weight{0.25F};
@@ -96,7 +97,7 @@ struct ReconstructCli {
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
     std::uint64_t mesh_max_points{2'000'000};
-    std::uint64_t mesh_target_faces{1'000'000};
+    std::uint64_t mesh_target_faces{0};
     bool mesh_remesh{true};
     float mesh_tsdf_voxel_scale{-1.F};
     float mesh_dist_insert_px{-1.F};
@@ -207,8 +208,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
               << "  --gggs       train CUDA GGGS -> *_gggs.ply\n"
               << "  --colmap PATH  load COLMAP sparse model, bypass SfM/MVS, enable GGGS\n"
+              << "  --dense-ply PATH  replace COLMAP sparse points with a dense PLY initializer\n"
               << "  --gggs-iterations N  GGGS steps (dense 10000, COLMAP sparse 5000)\n"
-              << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 0)\n"
+              << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --gggs-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
               << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
               << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
@@ -324,10 +326,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("colmap", "COLMAP root/sparse/0 model; bypass internal SfM and MVS",
          cxxopts::value<std::string>()->default_value(""))
+        ("dense-ply", "Dense PLY initializer used with --colmap",
+         cxxopts::value<std::string>()->default_value(""))
         ("gggs-iterations", "GGGS optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
         ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
-         cxxopts::value<std::uint64_t>()->default_value("0"))
+         cxxopts::value<std::uint64_t>()->default_value("500000"))
         ("gggs-use-mask", "Enable pygsplat-compatible foreground-mask training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("gggs-alpha-mode", "Mask alpha mode: masked or transparent",
@@ -366,12 +370,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Maximum samples inserted into global Delaunay (0 = unlimited)",
          cxxopts::value<std::uint64_t>()->default_value("2000000"))
         ("mesh-target-faces",
-         "asdiff/CGAL repair and decimation target (0 disables)",
-         cxxopts::value<std::uint64_t>()->default_value("1000000"))
+         "Optional asdiff/CGAL repair and decimation target (0 disables)",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
         ("mesh-remesh", "Run Instant Meshes before CGAL repair",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("mesh-tsdf-voxel-scale",
-         "Inferred TSDF voxel multiplier (-1 = GGGS target-aware preset)",
+         "Automatic TSDF voxel multiplier (-1 = gs2mesh default 1x)",
          cxxopts::value<float>()->default_value("-1"))
         ("mesh-dist-insert-px",
          "Minimum projection spacing for global Delaunay (-1 = preset)",
@@ -464,10 +468,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs = result["gggs"].as<bool>();
     const std::string colmap_text = result["colmap"].as<std::string>();
     if (!colmap_text.empty()) cli.colmap_model = utf8_to_path(colmap_text);
+    const std::string dense_ply_text = result["dense-ply"].as<std::string>();
+    if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
     // The native sparse path peaks around 5k; longer runs currently over-prune
     // and reduce fixed-view PSNR. Explicit CLI values still permit long runs.
-    if (!cli.colmap_model.empty() && result.count("gggs-iterations") == 0)
+    if (!cli.colmap_model.empty() && cli.dense_ply.empty() &&
+        result.count("gggs-iterations") == 0)
         cli.gggs_iterations = 5'000;
     cli.gggs_max_gaussians =
         result["gggs-max-gaussians"].as<std::uint64_t>();
@@ -555,10 +562,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.mesh) cli.dense = true;
     if (!cli.colmap_model.empty()) cli.gggs = true;
     if (cli.gggs && cli.colmap_model.empty()) cli.dense = true;
-    if (!cli.colmap_model.empty() && cli.mesh)
+    if (!cli.dense_ply.empty() && cli.colmap_model.empty())
+        throw std::invalid_argument("--dense-ply requires --colmap camera data");
+    if (!cli.colmap_model.empty() && cli.mesh && cli.dense_ply.empty())
         throw std::invalid_argument(
             "--colmap sparse GGGS cannot be combined with --mesh/--texture; "
             "run MVS explicitly when a mesh is required");
+    if (!cli.colmap_model.empty() && cli.texture)
+        throw std::invalid_argument(
+            "--texture is not yet available in the direct COLMAP GGGS path");
 #if !defined(AETHERSCAN_HAS_GGGS)
     if (cli.gggs) {
         throw std::invalid_argument(
@@ -1318,12 +1330,16 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         gaussians, scene, options, extraction_options);
     const auto surface_ply = out_dir /
         (cli.output.stem().string() + "_gggs_surface.ply");
-    aetherscan::mvs::save_dense_ply(
-        extraction.surface_cloud, surface_ply);
+    if (!extraction.surface_cloud.points.empty())
+        aetherscan::mvs::save_dense_ply(
+            extraction.surface_cloud, surface_ply);
     const double mesh_elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - mesh_started).count();
     aetherscan::core::Logger::instance().info(
-        "gggs_surface_ply=", surface_ply,
+        "gggs_surface_ply=",
+        extraction.surface_cloud.points.empty()
+            ? std::filesystem::path{"disabled_for_tsdf"}
+            : surface_ply,
         " valid_depth_pixels=", extraction.valid_depth_pixels,
         " surface_points=", extraction.surface_cloud.points.size(),
         " mesh_vertices=", extraction.mesh.vertices.size(),
@@ -1361,14 +1377,47 @@ int main(int argc, char** argv) {
 
 #if defined(AETHERSCAN_HAS_GGGS)
         if (!cli.colmap_model.empty()) {
-            const auto loaded = aetherscan::splat::load_colmap_scene(
+            auto loaded = aetherscan::splat::load_colmap_scene(
                 cli.colmap_model, cli.images_dir);
+            if (!cli.dense_ply.empty())
+                loaded.scene.dense_cloud =
+                    aetherscan::mvs::load_dense_ply(cli.dense_ply);
             aetherscan::core::Logger::instance().info(
                 "colmap_model=", loaded.model_directory,
                 " format=", loaded.binary ? "binary" : "text",
                 " cameras=", loaded.scene.views.size(),
-                " sparse_points=", loaded.scene.dense_cloud.points.size());
-            run_gggs_training(loaded.scene, cli, false);
+                cli.dense_ply.empty() ? " sparse_points=" : " dense_points=",
+                loaded.scene.dense_cloud.points.size(),
+                cli.dense_ply.empty() ? std::string{} :
+                    " dense_ply=" + cli.dense_ply.string());
+            aetherscan::mvs::DensifyOptions mesh_options;
+            aetherscan::mvs::apply_quality_preset(
+                mesh_options, cli.dense_quality);
+            mesh_options.mask_dir = cli.masks_dir;
+            mesh_options.mesh_method = aetherscan::mvs::MeshMethod::tsdf;
+            mesh_options.mesh_tsdf_voxel_scale =
+                cli.mesh_tsdf_voxel_scale > 0.F
+                ? cli.mesh_tsdf_voxel_scale
+                : 1.F;
+            auto mesh = run_gggs_training(
+                loaded.scene, cli, !cli.dense_ply.empty(),
+                cli.mesh ? &mesh_options : nullptr);
+            if (mesh) {
+#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
+                if (cli.mesh_target_faces > 0)
+                    repair_and_decimate_mesh(
+                        *mesh, cli.mesh_target_faces, cli.mesh_remesh);
+#endif
+                const auto mesh_path = cli.output.parent_path() /
+                    (cli.output.stem().string() + "_gggs_mesh.ply");
+                aetherscan::mvs::save_mesh_ply(*mesh, mesh_path);
+                if (cli.mesh_obj)
+                    aetherscan::mvs::save_mesh_obj(
+                        *mesh, mesh_path.parent_path() /
+                            (mesh_path.stem().string() + ".obj"));
+                aetherscan::core::Logger::instance().info(
+                    "mesh_ply=", mesh_path, " faces=", mesh->faces.size());
+            }
             return 0;
         }
 #endif
@@ -1467,15 +1516,13 @@ int main(int argc, char** argv) {
             densify_opts.roi_margin_fraction = cli.roi_margin;
             densify_opts.auto_roi_mask_dilate_px = cli.roi_mask_dilate;
             densify_opts.mesh_max_points = cli.mesh_max_points;
-            // Extract the target-scale GGGS mesh directly from the TSDF. On
-            // the reference scan 2.3x reduces roughly 4.8M native faces to
-            // about 1M while keeping local marching-tetrahedra connectivity.
-            // A raw diagnostic run (--mesh-target-faces 0) keeps the native
-            // inferred voxel resolution.
+            // GGGS resolves the native voxel to max_depth/2048, matching
+            // gs2mesh.py. A positive scale remains an explicit quality/speed
+            // override; the default keeps the reference resolution.
             densify_opts.mesh_tsdf_voxel_scale =
                 cli.mesh_tsdf_voxel_scale > 0.F
                 ? cli.mesh_tsdf_voxel_scale
-                : (cli.gggs && cli.mesh_target_faces > 0 ? 2.3F : 1.F);
+                : 1.F;
             if (cli.mesh_dist_insert_px >= 0.F)
                 densify_opts.mesh_dist_insert_px =
                     cli.mesh_dist_insert_px;
