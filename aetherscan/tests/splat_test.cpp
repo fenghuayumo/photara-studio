@@ -118,6 +118,111 @@ void test_forward_backward() {
     require_finite(gradients.quaternions, "Non-finite quaternion gradient");
     require_finite(gradients.opacity_logits, "Non-finite opacity gradient");
     require_finite(gradients.sh, "Non-finite SH gradient");
+
+    // The GGGS kernels atomicAdd into a backward-only geometry chunk. Running
+    // the same pass twice must not retain values from the memory pool.
+    const RenderResult rendered_again = rasterizer.forward(model, camera);
+    const ModelGradients gradients_again = rasterizer.backward(
+        model, rendered_again, grad_color, grad_alpha, grad_depth, grad_normal);
+    const auto first_opacity_gradient = gradients.opacity_logits.to_vector();
+    const auto second_opacity_gradient =
+        gradients_again.opacity_logits.to_vector();
+    require(
+        first_opacity_gradient.size() == second_opacity_gradient.size() &&
+            std::equal(
+                first_opacity_gradient.begin(), first_opacity_gradient.end(),
+                second_opacity_gradient.begin(),
+                [](const float first, const float second) {
+                    return std::abs(first - second) < 1e-6F;
+                }),
+        "GGGS backward retained stale geometry gradients between calls");
+}
+
+void test_alpha_parameter_gradients() {
+    using namespace aetherscan::splat;
+    const auto make_model = [](const float log_scale_x,
+                               const float opacity_logit) {
+        GaussianModel model;
+        model.means = tinytensor::Tensor::from_vector(
+            std::vector<float>{0.F, 0.F, 2.F}, {1, 3},
+            tinytensor::Device::CUDA);
+        model.log_scales = tinytensor::Tensor::from_vector(
+            std::vector<float>{log_scale_x, std::log(0.15F),
+                               std::log(0.15F)},
+            {1, 3}, tinytensor::Device::CUDA);
+        model.quaternions = tinytensor::Tensor::from_vector(
+            std::vector<float>{1.F, 0.F, 0.F, 0.F}, {1, 4},
+            tinytensor::Device::CUDA);
+        model.opacity_logits = tinytensor::Tensor::from_vector(
+            std::vector<float>{opacity_logit}, {1, 1},
+            tinytensor::Device::CUDA);
+        model.sh = tinytensor::Tensor::from_vector(
+            std::vector<float>{0.5F, 0.25F, 0.1F}, {1, 1, 3},
+            tinytensor::Device::CUDA);
+        model.sh_degree = 0;
+        return model;
+    };
+    Camera camera;
+    camera.world_to_camera[0] = 1.F;
+    camera.world_to_camera[5] = 1.F;
+    camera.world_to_camera[10] = 1.F;
+    camera.world_to_camera[15] = 1.F;
+    camera.fx = 40.F;
+    camera.fy = 40.F;
+    camera.cx = 15.5F;
+    camera.cy = 15.5F;
+    camera.width = 32;
+    camera.height = 32;
+    const std::size_t pixels =
+        static_cast<std::size_t>(camera.width) * camera.height;
+    const std::size_t sample_pixel =
+        static_cast<std::size_t>(camera.cy) * camera.width +
+        static_cast<std::size_t>(camera.cx) + 2;
+    const auto sampled_alpha = [&](GaussianModel model) {
+        const auto values = Rasterizer().forward(model, camera).alpha.to_vector();
+        return values[sample_pixel];
+    };
+
+    constexpr float base_log_scale = -1.8971199849F;  // log(0.15)
+    // Match training initialization and stay away from the rasterizer's
+    // per-splat alpha=0.99 clamp, whose derivative is intentionally clipped.
+    constexpr float base_opacity_logit = -2.19722458F;
+    GaussianModel model = make_model(base_log_scale, base_opacity_logit);
+    Rasterizer rasterizer;
+    const RenderResult rendered = rasterizer.forward(model, camera);
+    const auto zero_color = tinytensor::Tensor::zeros(
+        {3, camera.height, camera.width}, tinytensor::Device::CUDA);
+    std::vector<float> alpha_chain(pixels, 0.F);
+    alpha_chain[sample_pixel] = 1.F;
+    const auto grad_alpha = tinytensor::Tensor::from_vector(
+        alpha_chain,
+        {camera.height, camera.width}, tinytensor::Device::CUDA);
+    const auto zero_scalar = tinytensor::Tensor::zeros(
+        {camera.height, camera.width}, tinytensor::Device::CUDA);
+    const auto zero_normal = tinytensor::Tensor::zeros(
+        {3, camera.height, camera.width}, tinytensor::Device::CUDA);
+    const ModelGradients gradients = rasterizer.backward(
+        model, rendered, zero_color, grad_alpha, zero_scalar, zero_normal);
+    const float analytic_opacity = gradients.opacity_logits.to_vector()[0];
+    const float analytic_scale = gradients.log_scales.to_vector()[0];
+
+    constexpr float epsilon = 1e-3F;
+    const float numeric_opacity =
+        (sampled_alpha(make_model(base_log_scale, base_opacity_logit + epsilon)) -
+         sampled_alpha(make_model(base_log_scale, base_opacity_logit - epsilon))) /
+        (2.F * epsilon);
+    const float numeric_scale =
+        (sampled_alpha(make_model(base_log_scale + epsilon, base_opacity_logit)) -
+         sampled_alpha(make_model(base_log_scale - epsilon, base_opacity_logit))) /
+        (2.F * epsilon);
+    require(
+        analytic_opacity > 0.F && numeric_opacity > 0.F &&
+            std::isfinite(analytic_opacity) && std::isfinite(numeric_opacity),
+        "GGGS alpha-to-opacity-logit gradient is not a descent direction");
+    require(
+        analytic_scale > 0.F && numeric_scale > 0.F &&
+            std::isfinite(analytic_scale) && std::isfinite(numeric_scale),
+        "GGGS alpha-to-log-scale gradient is not a descent direction");
 }
 
 void test_adam_rejects_non_finite_gradients() {
@@ -140,6 +245,29 @@ void test_adam_rejects_non_finite_gradients() {
     require(
         values == std::vector<float>({1.F, 2.F, 3.F}),
         "Adam changed parameters for rejected gradients");
+}
+
+void test_fused_adam_parity() {
+    using namespace aetherscan::splat;
+    auto parameter = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, -2.F}, {2}, tinytensor::Device::CUDA);
+    const auto gradient = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.25F, -0.5F}, {2}, tinytensor::Device::CUDA);
+    auto state = detail::make_adam_state(parameter);
+    TrainingOptions options;
+    options.adam_epsilon = 1e-15F;
+    detail::adam_step(parameter, gradient, state, 1e-3F, 1, options);
+    const auto values = parameter.to_vector();
+    const auto first = state.first.to_vector();
+    const auto second = state.second.to_vector();
+    require(
+        std::abs(values[0] - 0.999F) < 1e-6F &&
+            std::abs(values[1] + 1.999F) < 1e-6F &&
+            std::abs(first[0] - 0.025F) < 1e-7F &&
+            std::abs(first[1] + 0.05F) < 1e-7F &&
+            std::abs(second[0] - 0.0000625F) < 1e-8F &&
+            std::abs(second[1] - 0.00025F) < 1e-8F,
+        "CUDA Adam differs from FasterGS FusedAdam on its first step");
 }
 
 void test_mask_loading() {
@@ -268,6 +396,26 @@ void test_source_resolution_and_knn_initialization() {
                 return std::exp(log_scale) <= maximum_scale + 1e-5F;
             }),
         "GGGS KNN initialization ignored the configured maximum scale");
+    mvs::MvsView left_camera;
+    left_camera.pose.C = sfm::Vec3(-1.0, 0.0, 0.0);
+    mvs::MvsView right_camera;
+    right_camera.pose.C = sfm::Vec3(1.0, 0.0, 0.0);
+    scene.views = {left_camera, right_camera};
+    options.input_is_dense = false;
+    const auto sparse_model =
+        splat::initialize_from_dense_cloud(scene, options);
+    const auto sparse_scales = sparse_model.log_scales.to_vector();
+    const float sparse_maximum_scale = 1.1F * 0.1F;
+    const float observed_sparse_maximum = std::exp(
+        *std::max_element(sparse_scales.begin(), sparse_scales.end()));
+    require(
+        std::all_of(
+            sparse_scales.begin(), sparse_scales.end(),
+            [sparse_maximum_scale](const float log_scale) {
+                return std::exp(log_scale) <= sparse_maximum_scale + 1e-5F;
+            }) &&
+            std::abs(observed_sparse_maximum - sparse_maximum_scale) < 1e-5F,
+        "Sparse GGGS scale bounds did not use the camera-based scene scale");
     std::filesystem::remove_all(root);
 }
 
@@ -422,6 +570,14 @@ void test_mask_loss_modes() {
         std::abs(numerical_gradient - alpha_gradient[0]) < 2e-4F,
         "transparent BCE analytic gradient failed finite differences");
     rendered.alpha = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 1.F}, {1, 2},
+        tinytensor::Device::CUDA);
+    loss = detail::compute_training_loss(rendered, target, options, true);
+    alpha_gradient = loss.alpha.to_vector();
+    require(
+        alpha_gradient[0] == 0.F && alpha_gradient[1] == 0.F,
+        "transparent BCE did not match torch.clamp's saturated gradient");
+    rendered.alpha = tinytensor::Tensor::from_vector(
         std::vector<float>{0.8F, 0.8F}, {1, 2},
         tinytensor::Device::CUDA);
 
@@ -519,6 +675,9 @@ void test_densification_strategies_and_dense_bypass() {
     view.fx = view.fy = view.src_fx = view.src_fy = 20.F;
     view.cx = view.cy = view.src_cx = view.src_cy = 15.5F;
     scene.views.push_back(view);
+    view.id = 1;
+    view.pose.C.x() = 0.1;
+    scene.views.push_back(view);
     for (const float x : {-1.F, 1.F}) {
         mvs::DensePoint point;
         point.position = mvs::Vec3f(x, 0.F, 2.F);
@@ -533,6 +692,7 @@ void test_densification_strategies_and_dense_bypass() {
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
     options.input_is_dense = false;
+    options.maximum_scale_fraction = 1.F;
     options.densification_cap = 8;
     options.refine_start_iter = 1;
     options.refine_stop_iter = 3;
@@ -591,7 +751,9 @@ int main() {
         }
         test_mvs_camera_conversion();
         test_forward_backward();
+        test_alpha_parameter_gradients();
         test_adam_rejects_non_finite_gradients();
+        test_fused_adam_parity();
         test_mask_loading();
         test_source_resolution_and_knn_initialization();
         test_colmap_text_loading();

@@ -38,6 +38,8 @@ struct TrainingOptions {
     unsigned grow_stop_iter{15'000};
     unsigned refine_every{0};       // 0 selects the strategy preset
     unsigned opacity_reset_every{3'000};
+    // pygsplat DefaultStrategy threshold. With the backward accumulation
+    // buffer correctly cleared, the native refine statistic has parity scale.
     float densify_gradient_threshold{0.003F};
     float densify_select_fraction{0.4F};
     float densify_scale_threshold{0.01F};
@@ -59,6 +61,9 @@ struct TrainingOptions {
     // progressively enabled SH bands. dense_adaptive may still recycle/split
     // rows after this point, without applying further structure Adam steps.
     unsigned dense_structure_freeze_iter{1'000};  // 0 disables the freeze
+    // Optional all-input diagnostic: stop means/scale/quaternion/opacity Adam
+    // after this iteration while continuing SH optimization.
+    unsigned structure_freeze_iter{0};  // 0 disables the freeze
     float means_lr{1.6e-4F};
     float scales_lr{5e-3F};
     float opacities_lr{5e-2F};
@@ -83,16 +88,21 @@ struct TrainingOptions {
     float match_alpha_weight{0.25F};
     std::filesystem::path mask_dir;
     float minimum_scale_fraction{1e-4F};
-    float maximum_scale_fraction{0.02F};
-    float max_scale_ratio{10.F};
+    float maximum_scale_fraction{0.002F};
+    // Disabled for pygsplat parity. Its default strategy does not hard-clamp
+    // anisotropy; it only prunes Gaussians whose largest axis exceeds 10% of
+    // the scene scale during refinement.
+    float max_scale_ratio{0.F};
     bool constrain_scale_range{true};
     float geometry_epsilon{1e-3F};
-    float kernel_size{0.3F};
+    // Match pygsplat's default classic rasterization. A positive kernel enables
+    // antialiasing and must be selected explicitly.
+    float kernel_size{0.F};
     float scale_modifier{1.F};
     // Photometric parity baseline. Geometry supervision is opt-in and can be
     // reintroduced after fixed-model L1+SSIM convergence is verified.
-    bool use_mvs_depth{true};
-    bool use_mvs_normals{true};
+    bool use_mvs_depth{false};
+    bool use_mvs_normals{false};
     // Train against source-resolution undistorted images rather than the MVS
     // working resolution.
     bool use_source_resolution{false};

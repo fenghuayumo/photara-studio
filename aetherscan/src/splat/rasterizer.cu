@@ -44,6 +44,20 @@ std::function<char*(std::size_t)> resize_buffer(tinytensor::Tensor& buffer) {
     };
 }
 
+std::function<char*(std::size_t)> resize_zeroed_buffer(
+    tinytensor::Tensor& buffer) {
+    return [&buffer](const std::size_t bytes) -> char* {
+        // GGGS backward accumulates conic/opacity and other intermediates with
+        // atomicAdd. FasterGS's torch wrapper uses resizeFunctional<true>,
+        // which clears this entire chunk on every call. Recycled uninitialized
+        // memory here corrupts all parameter gradients after the first step.
+        buffer = tinytensor::Tensor::zeros(
+            {bytes}, tinytensor::Device::CUDA,
+            tinytensor::DataType::UInt8);
+        return reinterpret_cast<char*>(buffer.data_ptr());
+    };
+}
+
 }  // namespace
 
 RenderResult Rasterizer::forward(
@@ -159,7 +173,7 @@ ModelGradients Rasterizer::backward(
 
     if (count != 0) {
         CudaRasterizer::Rasterizer::backward(
-            resize_buffer(scratch), static_cast<int>(count),
+            resize_zeroed_buffer(scratch), static_cast<int>(count),
             static_cast<int>(context.options.active_sh_degree),
             static_cast<int>(model.sh.shape()[1]), 0, 0,
             context.rendered_instances, context.background.ptr<float>(),

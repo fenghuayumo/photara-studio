@@ -79,8 +79,11 @@ struct ReconstructCli {
     float gggs_ssim_weight{0.2F};
     float gggs_min_scale_fraction{1e-4F};
     float gggs_max_scale_fraction{0.002F};
-    float gggs_max_scale_ratio{10.F};
+    float gggs_max_scale_ratio{0.F};
+    bool gggs_constrain_scales{false};
     std::string gggs_strategy{"default"};
+    bool gggs_densification{true};
+    unsigned gggs_structure_freeze_iter{0};
     std::uint64_t gggs_densification_cap{4'000'000};
     bool mesh{false};
     bool mesh_obj{false};
@@ -192,7 +195,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
               << "  --gggs       train CUDA GGGS -> *_gggs.ply\n"
               << "  --colmap PATH  load COLMAP sparse model, bypass SfM/MVS, enable GGGS\n"
-              << "  --gggs-iterations N  GGGS optimizer steps (default 10000)\n"
+              << "  --gggs-iterations N  GGGS steps (dense 10000, COLMAP sparse 5000)\n"
               << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --gggs-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
               << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
@@ -200,8 +203,11 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-ssim-weight W  structural loss blend (default 0.2)\n"
               << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --gggs-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
-              << "  --gggs-max-scale-ratio R  maximum Gaussian anisotropy (default 10)\n"
+              << "  --gggs-max-scale-ratio R  hard anisotropy clamp (0 disables; default 0)\n"
+              << "  --gggs-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
               << "  --gggs-strategy default|adc_plus|adc_igs|dense_adaptive\n"
+              << "  --gggs-densification=BOOL  enable split/prune/reset (default true)\n"
+              << "  --gggs-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 4M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mesh-method auto|projective|delaunay\n"
@@ -317,9 +323,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("gggs-max-scale-fraction", "Maximum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.002"))
         ("gggs-max-scale-ratio", "Maximum Gaussian axis ratio (0 disables)",
-         cxxopts::value<float>()->default_value("10"))
+         cxxopts::value<float>()->default_value("0"))
+        ("gggs-constrain-scales", "Clamp sparse KNN scales to configured fractions",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("gggs-strategy", "Densification: default, adc_plus, adc_igs, dense_adaptive",
          cxxopts::value<std::string>()->default_value("default"))
+        ("gggs-densification", "Enable GGGS split/prune/opacity-reset",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("gggs-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
+         cxxopts::value<unsigned>()->default_value("0"))
         ("gggs-densification-cap", "Dynamic Gaussian hard cap",
          cxxopts::value<std::uint64_t>()->default_value("4000000"))
         ("mesh", "Build MVS mesh after densify (implies --dense)",
@@ -419,6 +431,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     const std::string colmap_text = result["colmap"].as<std::string>();
     if (!colmap_text.empty()) cli.colmap_model = utf8_to_path(colmap_text);
     cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
+    // The native sparse path peaks around 5k; longer runs currently over-prune
+    // and reduce fixed-view PSNR. Explicit CLI values still permit long runs.
+    if (!cli.colmap_model.empty() && result.count("gggs-iterations") == 0)
+        cli.gggs_iterations = 5'000;
     cli.gggs_max_gaussians =
         result["gggs-max-gaussians"].as<std::uint64_t>();
     cli.gggs_use_mask = result["gggs-use-mask"].as<bool>();
@@ -432,7 +448,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["gggs-max-scale-fraction"].as<float>();
     cli.gggs_max_scale_ratio =
         result["gggs-max-scale-ratio"].as<float>();
+    cli.gggs_constrain_scales = result["gggs-constrain-scales"].as<bool>();
     cli.gggs_strategy = result["gggs-strategy"].as<std::string>();
+    cli.gggs_densification = result["gggs-densification"].as<bool>();
+    cli.gggs_structure_freeze_iter =
+        result["gggs-structure-freeze-iter"].as<unsigned>();
     cli.gggs_densification_cap =
         result["gggs-densification-cap"].as<std::uint64_t>();
     cli.mesh = result["mesh"].as<bool>();
@@ -851,7 +871,9 @@ void run_gggs_training(
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;
     options.use_source_resolution = true;
-    options.evaluation_iterations = {1'000, 5'000, 10'000};
+    for (const unsigned milestone : {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
+        if (milestone <= options.iterations)
+            options.evaluation_iterations.push_back(milestone);
     options.densification_cap = static_cast<std::size_t>(
         std::min<std::uint64_t>(
             cli.gggs_densification_cap,
@@ -879,7 +901,9 @@ void run_gggs_training(
             aetherscan::splat::DensificationStrategy::dense_adaptive)
         throw std::invalid_argument(
             "--gggs-strategy dense_adaptive requires dense MVS input");
-    options.enable_densification = !dense_input || dense_adaptive;
+    options.enable_densification =
+        cli.gggs_densification && (!dense_input || dense_adaptive);
+    options.structure_freeze_iter = cli.gggs_structure_freeze_iter;
     if (dense_adaptive) {
         options.max_gaussians = options.max_gaussians == 0
             ? options.densification_cap
@@ -898,12 +922,12 @@ void run_gggs_training(
     options.ssim_weight = cli.gggs_ssim_weight;
     options.minimum_scale_fraction = cli.gggs_min_scale_fraction;
     options.maximum_scale_fraction = cli.gggs_max_scale_fraction;
-    options.constrain_scale_range = true;
+    options.constrain_scale_range = dense_input || cli.gggs_constrain_scales;
     options.max_scale_ratio = cli.gggs_max_scale_ratio;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
-    const char* effective_strategy = dense_input && !dense_adaptive
-        ? "disabled(dense-input)"
+    const char* effective_strategy = !options.enable_densification
+        ? "disabled"
         : cli.gggs_strategy.c_str();
     aetherscan::core::Logger::instance().info(
         "gggs training: iterations=", options.iterations,
@@ -911,6 +935,8 @@ void run_gggs_training(
         " input_points=", scene.dense_cloud.points.size(),
         " max_initial_gaussians=", options.max_gaussians,
         " densification_strategy=", effective_strategy,
+        " densification_enabled=", options.enable_densification,
+        " structure_freeze_iter=", options.structure_freeze_iter,
         " densification_cap=", options.densification_cap,
         " dense_recycle_fraction=", options.dense_recycle_fraction,
         " dense_growth_fraction=", options.dense_growth_fraction,
@@ -926,6 +952,7 @@ void run_gggs_training(
         " geometry_loss=disabled",
         " scale_fraction=[", options.minimum_scale_fraction,
         ',', options.maximum_scale_fraction, ']',
+        " constrain_scales=", options.constrain_scale_range,
         " max_scale_ratio=", options.max_scale_ratio,
         " views=", scene.views.size());
     const std::filesystem::path out_dir = cli.output.parent_path().empty()
@@ -950,8 +977,10 @@ void run_gggs_training(
                 aetherscan::core::Logger::instance().info(
                     "gggs_eval_iteration=", iteration,
                     " view=", view_index,
-                    " psnr=", metrics.psnr,
+                    " foreground_psnr=", metrics.psnr,
+                    " masked_psnr=", metrics.masked_psnr,
                     " mae=", metrics.mae,
+                    " alpha_bce=", metrics.alpha_bce,
                     " alpha_coverage=", metrics.alpha_coverage,
                     " render=", render_path);
             }
@@ -973,6 +1002,10 @@ void run_gggs_training(
                     " alpha=", progress.alpha_loss,
                     " depth=", progress.depth_loss,
                     " normal=", progress.normal_loss,
+                    " opacity_grad_mean=", progress.opacity_gradient_mean,
+                    " opacity_grad_positive=",
+                    progress.opacity_gradient_positive_fraction,
+                    " opacity_mean=", progress.opacity_mean,
                     " step_ms=", progress.milliseconds);
                 return true;
             },
@@ -989,8 +1022,10 @@ void run_gggs_training(
         aetherscan::core::Logger::instance().info(
             "gggs_render=", render_path,
             " view=", view_index,
-            " psnr=", metrics.psnr,
+            " foreground_psnr=", metrics.psnr,
+            " masked_psnr=", metrics.masked_psnr,
             " mae=", metrics.mae,
+            " alpha_bce=", metrics.alpha_bce,
             " alpha_coverage=", metrics.alpha_coverage);
     }
     const double elapsed = std::chrono::duration<double>(

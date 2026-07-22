@@ -22,12 +22,21 @@ struct TrainingProgress {
     float alpha_loss{};
     float depth_loss{};
     float normal_loss{};
+    float opacity_gradient_mean{};
+    float opacity_gradient_positive_fraction{};
+    float opacity_mean{};
     double milliseconds{};
 };
 
 struct RenderMetrics {
     float mae{};
+    // Error over foreground samples only. This is stricter than pygsplat's
+    // validation metric because it does not average masked-out zeros.
     float psnr{};
+    // pygsplat-compatible PSNR: prediction and target are masked, then MSE is
+    // averaged over every image pixel.
+    float masked_psnr{};
+    float alpha_bce{};
     float alpha_coverage{};
 };
 

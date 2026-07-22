@@ -144,9 +144,22 @@ __global__ void loss_kernel(
                 terms + 3, alpha[pixel] * (1.F - valid) * inverse_pixels);
     } else if (mask_enabled && alpha_mode == 1 && match_alpha_weight > 0.F) {
         // pygsplat alpha_mode="transparent": full-image BCE(alpha, mask).
-        const float prediction = fminf(fmaxf(alpha[pixel], 1e-6F), 1.F - 1e-6F);
-        grad_alpha[pixel] = match_alpha_weight * inverse_pixels *
-            (prediction - valid) / (prediction * (1.F - prediction));
+        constexpr float clamp_epsilon = 1e-7F;
+        const float raw_prediction = alpha[pixel];
+        const float prediction = fminf(
+            fmaxf(raw_prediction, clamp_epsilon), 1.F - clamp_epsilon);
+        // torch.clamp, used by pygsplat before BCE, has zero derivative outside
+        // its interval. Continuing to differentiate the clamped value produces
+        // enormous gradients at saturated pixels and destabilizes opacity,
+        // refine-weight accumulation, and pruning.
+        const bool inside_clamp =
+            raw_prediction > clamp_epsilon &&
+            raw_prediction < 1.F - clamp_epsilon;
+        grad_alpha[pixel] = inside_clamp
+            ? match_alpha_weight * inverse_pixels *
+                  (prediction - valid) /
+                  (prediction * (1.F - prediction))
+            : 0.F;
         if (terms)
             atomicAdd(terms + 3, -match_alpha_weight * inverse_pixels *
                 (valid * logf(prediction) +
@@ -308,9 +321,10 @@ __global__ void split_gaussians_kernel(
         child_log_scales[3 * child + axis] += log_scale_delta[axis];
     }
     const float opacity = sigmoid(parent_opacity_logits[parent]);
+    const float opacity_floor = mode == 1 ? 1e-8F : minimum_opacity;
     const float revised = fminf(fmaxf(
         1.F - sqrtf(fmaxf(1.F - opacity, 0.F)),
-        minimum_opacity), 1.F - minimum_opacity);
+        opacity_floor), 1.F - opacity_floor);
     const float revised_logit = logf(revised / (1.F - revised));
     parent_opacity_logits[parent] = revised_logit;
     child_opacity_logits[child] = revised_logit;

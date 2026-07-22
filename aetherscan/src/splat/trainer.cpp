@@ -229,22 +229,16 @@ float sample_mask_coverage(
     const float source_x, const float source_y) {
     const float x = (source_x + 0.5F) * mask.width / source.width - 0.5F;
     const float y = (source_y + 0.5F) * mask.height / source.height - 0.5F;
-    const int x0 = static_cast<int>(std::floor(x));
-    const int y0 = static_cast<int>(std::floor(y));
-    const float tx = x - static_cast<float>(x0);
-    const float ty = y - static_cast<float>(y0);
-    const auto at = [&](const int px, const int py) {
-        if (px < 0 || py < 0 || px >= static_cast<int>(mask.width) ||
-            py >= static_cast<int>(mask.height))
-            return 0.F;
-        return static_cast<float>(
-                   mask.pixels[static_cast<std::size_t>(py) * mask.width + px]) /
-               255.F;
-    };
-    const float top = at(x0, y0) * (1.F - tx) + at(x0 + 1, y0) * tx;
-    const float bottom =
-        at(x0, y0 + 1) * (1.F - tx) + at(x0 + 1, y0 + 1) * tx;
-    return std::clamp(top * (1.F - ty) + bottom * ty, 0.F, 1.F);
+    const int px = static_cast<int>(std::round(x));
+    const int py = static_cast<int>(std::round(y));
+    if (px < 0 || py < 0 || px >= static_cast<int>(mask.width) ||
+        py >= static_cast<int>(mask.height))
+        return 0.F;
+    return mask.pixels[
+               static_cast<std::size_t>(py) * mask.width +
+               static_cast<std::size_t>(px)] > 127
+        ? 1.F
+        : 0.F;
 }
 
 struct RefinementCounts {
@@ -257,6 +251,53 @@ struct StrategyPreset {
     unsigned stop{};
     unsigned every{};
 };
+
+struct SceneGeometry {
+    float scale{1.F};
+    mvs::Vec3f center{mvs::Vec3f::Zero()};
+};
+
+SceneGeometry training_scene_geometry(
+    const mvs::MvsScene& scene, const bool dense_input) {
+    mvs::Vec3f minimum = scene.dense_cloud.points.front().position;
+    mvs::Vec3f maximum = minimum;
+    for (const auto& point : scene.dense_cloud.points) {
+        minimum = minimum.cwiseMin(point.position);
+        maximum = maximum.cwiseMax(point.position);
+    }
+    SceneGeometry geometry{
+        std::max((maximum - minimum).norm(), 1e-6F),
+        0.5F * (minimum + maximum)};
+    if (dense_input || scene.views.empty()) return geometry;
+
+    // Match pygsplat's COLMAP convention: optimization scale is measured from
+    // camera centers, not the untrimmed sparse-point AABB. A handful of bad
+    // triangulations can make that AABB tens of times too large, which in turn
+    // inflates both the means LR and the minimum Gaussian scale.
+    mvs::Vec3f camera_center = mvs::Vec3f::Zero();
+    std::size_t finite_cameras = 0;
+    for (const auto& view : scene.views) {
+        const mvs::Vec3f position = view.pose.C.cast<float>();
+        if (!position.allFinite()) continue;
+        camera_center += position;
+        ++finite_cameras;
+    }
+    if (finite_cameras == 0)
+        throw std::invalid_argument(
+            "Sparse GGGS training requires at least one finite camera center");
+    camera_center /= static_cast<float>(finite_cameras);
+    float camera_radius = 0.F;
+    for (const auto& view : scene.views) {
+        const mvs::Vec3f position = view.pose.C.cast<float>();
+        if (position.allFinite())
+            camera_radius = std::max(
+                camera_radius, (position - camera_center).norm());
+    }
+    if (!(camera_radius > 1e-6F) || !std::isfinite(camera_radius))
+        throw std::invalid_argument(
+            "Sparse GGGS training requires non-degenerate camera coverage");
+    return {1.1F * camera_radius, camera_center};
+}
 
 StrategyPreset strategy_preset(const TrainingOptions& options) {
     const bool dense_adaptive = options.densification_strategy ==
@@ -334,6 +375,20 @@ void append_zero_adam(detail::AdamState& state, const std::size_t count) {
 
 using AdamStates = std::array<detail::AdamState*, 5>;
 
+void zero_adam_rows(
+    const std::vector<int>& rows, const AdamStates& states) {
+    if (rows.empty()) return;
+    const auto indices = index_tensor(rows);
+    for (detail::AdamState* state : states) {
+        std::vector<std::size_t> dimensions = state->first.shape().dims();
+        dimensions[0] = rows.size();
+        const auto zeros = tinytensor::Tensor::zeros(
+            tinytensor::TensorShape(dimensions), tinytensor::Device::CUDA);
+        state->first.index_copy_(0, indices, zeros);
+        state->second.index_copy_(0, indices, zeros);
+    }
+}
+
 void select_training_rows(
     GaussianModel& model, const std::vector<int>& keep,
     const AdamStates& states) {
@@ -358,6 +413,10 @@ void grow_training_model(
         detail::split_gaussians(
             model, children, indices, random_tensor, split_mode,
             options.prune_opacity);
+        // Splitting mutates the retained parent as well as creating a child.
+        // Both are new primitives and must start with clean optimizer moments,
+        // matching pygsplat's replacement-based split.
+        zero_adam_rows(parents, states);
     }
     append_model(model, children);
     for (detail::AdamState* state : states)
@@ -711,16 +770,24 @@ GaussianModel initialize_from_dense_cloud(
             ? index
             : std::min(source_count - 1, index * source_count / count);
     };
-    mvs::Vec3f minimum =
-        scene.dense_cloud.points[source_index(0)].position;
-    mvs::Vec3f maximum = minimum;
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto& point = scene.dense_cloud.points[source_index(index)];
-        minimum = minimum.cwiseMin(point.position);
-        maximum = maximum.cwiseMax(point.position);
+    std::vector<mvs::Vec3f> selected_positions(count);
+    for (std::size_t index = 0; index < count; ++index)
+        selected_positions[index] =
+            scene.dense_cloud.points[source_index(index)].position;
+    float initialization_extent{};
+    if (options.input_is_dense) {
+        mvs::Vec3f minimum = selected_positions.front();
+        mvs::Vec3f maximum = minimum;
+        for (const mvs::Vec3f& position : selected_positions) {
+            minimum = minimum.cwiseMin(position);
+            maximum = maximum.cwiseMax(position);
+        }
+        initialization_extent = std::max(
+            (maximum - minimum).norm(), 1e-6F);
+    } else {
+        initialization_extent =
+            training_scene_geometry(scene, false).scale;
     }
-    const float initialization_extent = std::max(
-        (maximum - minimum).norm(), 1e-6F);
     const float fallback_scale = std::max(
         initialization_extent /
             std::sqrt(static_cast<float>(std::max<std::size_t>(count, 1))),
@@ -737,10 +804,6 @@ GaussianModel initialize_from_dense_cloud(
         : std::numeric_limits<float>::infinity();
     const float opacity = std::clamp(options.initial_opacity, 1e-6F, 1.F - 1e-6F);
     const float opacity_logit = std::log(opacity / (1.F - opacity));
-    std::vector<mvs::Vec3f> selected_positions(count);
-    for (std::size_t index = 0; index < count; ++index)
-        selected_positions[index] =
-            scene.dense_cloud.points[source_index(index)].position;
     std::vector<float> knn_scales(count, 0.F);
     if (options.initialize_scale_from_knn && count >= 4) {
         const KdTree tree(selected_positions);
@@ -752,6 +815,8 @@ GaussianModel initialize_from_dense_cloud(
             knn_scales[static_cast<std::size_t>(index)] =
                 tree.three_neighbor_rms(static_cast<std::size_t>(index));
     }
+    std::mt19937 quaternion_random(options.seed);
+    std::uniform_real_distribution<float> quaternion_uniform(0.F, 1.F);
 
     for (std::size_t index = 0; index < count; ++index) {
         const auto& point = scene.dense_cloud.points[source_index(index)];
@@ -781,17 +846,25 @@ GaussianModel initialize_from_dense_cloud(
         for (int axis = 0; axis < 3; ++axis)
             scales[3 * index + axis] = std::log(scale);
 
-        mvs::Vec3f normal = point.normal;
-        if (!normal.allFinite() || normal.squaredNorm() < 1e-12F)
-            normal = mvs::Vec3f::UnitZ();
-        else
-            normal.normalize();
-        Eigen::Quaternionf rotation = Eigen::Quaternionf::FromTwoVectors(
-            mvs::Vec3f::UnitZ(), normal).normalized();
-        quaternions[4 * index + 0] = rotation.w();
-        quaternions[4 * index + 1] = rotation.x();
-        quaternions[4 * index + 2] = rotation.y();
-        quaternions[4 * index + 3] = rotation.z();
+        if (!options.input_is_dense) {
+            // Exact pygsplat sparse-SfM initialization: raw U[0,1) quaternion
+            // parameters. The raster path normalizes them before use.
+            for (int component = 0; component < 4; ++component)
+                quaternions[4 * index + component] = quaternion_uniform(
+                    quaternion_random);
+        } else {
+            mvs::Vec3f normal = point.normal;
+            if (!normal.allFinite() || normal.squaredNorm() < 1e-12F)
+                normal = mvs::Vec3f::UnitZ();
+            else
+                normal.normalize();
+            Eigen::Quaternionf rotation = Eigen::Quaternionf::FromTwoVectors(
+                mvs::Vec3f::UnitZ(), normal).normalized();
+            quaternions[4 * index + 0] = rotation.w();
+            quaternions[4 * index + 1] = rotation.x();
+            quaternions[4 * index + 2] = rotation.y();
+            quaternions[4 * index + 3] = rotation.z();
+        }
         opacities[index] = opacity_logit;
         for (int channel = 0; channel < 3; ++channel)
             sh[(index * bases) * 3 + channel] =
@@ -934,28 +1007,37 @@ GaussianModel Trainer::train(
     RefinementCounts latest_refinement;
     Rasterizer rasterizer;
     std::mt19937 random(options_.seed);
-    std::uniform_int_distribution<std::size_t> choose_view(0, views.size() - 1);
-    mvs::Vec3f scene_minimum = scene.dense_cloud.points.front().position;
-    mvs::Vec3f scene_maximum = scene_minimum;
-    for (const auto& point : scene.dense_cloud.points) {
-        scene_minimum = scene_minimum.cwiseMin(point.position);
-        scene_maximum = scene_maximum.cwiseMax(point.position);
-    }
-    const float scene_extent = std::max(
-        (scene_maximum - scene_minimum).norm(), 1e-6F);
-    const mvs::Vec3f scene_center = 0.5F * (scene_minimum + scene_maximum);
+    std::vector<std::size_t> shuffled_views(views.size());
+    std::iota(
+        shuffled_views.begin(), shuffled_views.end(), std::size_t{0});
+    std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
+    std::size_t shuffled_view_cursor = 0;
+    const SceneGeometry scene_geometry =
+        training_scene_geometry(scene, options_.input_is_dense);
+    const float scene_extent = scene_geometry.scale;
+    const mvs::Vec3f scene_center = scene_geometry.center;
     const float minimum_log_scale = options_.constrain_scale_range
         ? std::log(
               scene_extent *
               std::max(options_.minimum_scale_fraction, 1e-8F))
         : -std::numeric_limits<float>::infinity();
-    const float maximum_log_scale = options_.constrain_scale_range
-        ? std::log(
-              scene_extent *
-              std::max(
+    // pygsplat does not clamp scales to its 0.1*scene prune threshold between
+    // refinements. Clamping exactly at that boundary and then comparing
+    // exp(log_scale) > threshold is numerically unsafe: round-off caused tens
+    // of thousands of boundary Gaussians to be pruned after opacity reset.
+    // Fixed-topology diagnostics still need a ceiling because they have no
+    // prune pass at all.
+    const float fixed_maximum_scale_fraction =
+        options_.structure_freeze_iter != 0
+            ? 0.1F
+            : std::max(
                   options_.maximum_scale_fraction,
-                  options_.minimum_scale_fraction))
-        : std::numeric_limits<float>::infinity();
+                  options_.minimum_scale_fraction);
+    const float maximum_log_scale =
+        options_.constrain_scale_range && !densification_enabled
+            ? std::log(std::max(
+                  fixed_maximum_scale_fraction * scene_extent, 1e-6F))
+            : std::numeric_limits<float>::infinity();
 
     for (unsigned iteration = 1; iteration <= options_.iterations; ++iteration) {
         const auto started = std::chrono::steady_clock::now();
@@ -963,7 +1045,12 @@ GaussianModel Trainer::train(
             (iteration == 1 || iteration == options_.iterations ||
              (options_.log_interval != 0 &&
               iteration % options_.log_interval == 0));
-        const std::size_t view_index = choose_view(random);
+        if (shuffled_view_cursor == shuffled_views.size()) {
+            std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
+            shuffled_view_cursor = 0;
+        }
+        const std::size_t view_index =
+            shuffled_views[shuffled_view_cursor++];
         const auto& target = views[view_index];
         RasterizeOptions raster_options;
         raster_options.active_sh_degree = std::min(
@@ -1001,9 +1088,14 @@ GaussianModel Trainer::train(
             1.F);
         const float means_lr = options_.means_lr * scene_extent *
                                std::pow(0.01F, progress_fraction);
-        const bool update_structure = !options_.input_is_dense ||
+        const bool global_structure_active =
+            options_.structure_freeze_iter == 0 ||
+            iteration <= options_.structure_freeze_iter;
+        const bool dense_structure_active = !options_.input_is_dense ||
             options_.dense_structure_freeze_iter == 0 ||
             iteration <= options_.dense_structure_freeze_iter;
+        const bool update_structure = global_structure_active &&
+            dense_structure_active;
         if (update_structure) {
             detail::adam_step(
                 model.means, gradients.means, means_state, means_lr,
@@ -1070,11 +1162,31 @@ GaussianModel Trainer::train(
                     cudaGetErrorString(report_error));
             const double milliseconds = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count();
+            const auto opacity_gradients = download<float>(
+                gradients.opacity_logits);
+            const auto opacity_logits = download<float>(model.opacity_logits);
+            double opacity_gradient_sum = 0.0;
+            double opacity_sum = 0.0;
+            std::size_t positive_opacity_gradients = 0;
+            for (std::size_t index = 0;
+                 index < opacity_gradients.size(); ++index) {
+                opacity_gradient_sum += opacity_gradients[index];
+                positive_opacity_gradients += opacity_gradients[index] > 0.F;
+                opacity_sum += 1.0 /
+                    (1.0 + std::exp(-static_cast<double>(opacity_logits[index])));
+            }
+            const double inverse_gaussians = 1.0 /
+                static_cast<double>(std::max<std::size_t>(
+                    opacity_gradients.size(), 1));
             continue_training = progress({
                 iteration, options_.iterations, model.size(),
                 view_indices[view_index], latest_refinement.grown,
                 latest_refinement.pruned, loss.total, loss.rgb,
                 loss.alpha_value, loss.depth_value, loss.normal_value,
+                static_cast<float>(opacity_gradient_sum * inverse_gaussians),
+                static_cast<float>(positive_opacity_gradients *
+                                   inverse_gaussians),
+                static_cast<float>(opacity_sum * inverse_gaussians),
                 milliseconds});
         }
         if (!continue_training) break;
@@ -1099,6 +1211,8 @@ RenderMetrics render_evaluation_png(
     const TrainingView target = make_training_view(view, training_options);
     RasterizeOptions options;
     options.active_sh_degree = model.sh_degree;
+    options.kernel_size = training_options.kernel_size;
+    options.scale_modifier = training_options.scale_modifier;
     options.require_depth = false;
     const RenderResult rendered = Rasterizer().forward(
         model, target.camera, options);
@@ -1115,10 +1229,16 @@ RenderMetrics render_evaluation_png(
     image.pixels.resize(3 * pixels);
     double absolute_error = 0.0;
     double squared_error = 0.0;
+    double alpha_bce = 0.0;
     std::size_t samples = 0;
     std::size_t covered = 0;
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
         if (alpha[pixel] > 0.01F) ++covered;
+        const double predicted_alpha = std::clamp(
+            static_cast<double>(alpha[pixel]), 1e-7, 1.0 - 1e-7);
+        const double target_alpha = mask[pixel] > 0.F ? 1.0 : 0.0;
+        alpha_bce -= target_alpha * std::log(predicted_alpha) +
+            (1.0 - target_alpha) * std::log(1.0 - predicted_alpha);
         for (int channel = 0; channel < 3; ++channel) {
             const std::size_t planar =
                 static_cast<std::size_t>(channel) * pixels + pixel;
@@ -1142,6 +1262,13 @@ RenderMetrics render_evaluation_png(
     metrics.psnr = mse > 0.0
         ? static_cast<float>(-10.0 * std::log10(mse))
         : std::numeric_limits<float>::infinity();
+    const double masked_mse = squared_error /
+        static_cast<double>(std::max<std::size_t>(3 * pixels, 1));
+    metrics.masked_psnr = masked_mse > 0.0
+        ? static_cast<float>(-10.0 * std::log10(masked_mse))
+        : std::numeric_limits<float>::infinity();
+    metrics.alpha_bce = static_cast<float>(alpha_bce /
+        static_cast<double>(std::max<std::size_t>(pixels, 1)));
     metrics.alpha_coverage = pixels != 0
         ? static_cast<float>(covered) / static_cast<float>(pixels)
         : 0.F;

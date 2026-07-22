@@ -68,17 +68,46 @@ viewer/mesh-extraction 接入。
 第一个、中间和最后相机的
 `*_gggs_view_*.png`，并在日志记录 PSNR、MAE 和 alpha coverage。
 
-可直接跳过内部 SfM/MVS，加载 COLMAP 相机位姿和稀疏点云：
+可直接跳过内部 SfM/MVS，加载 COLMAP 相机位姿和稀疏点云。稀疏输入默认 30,000 步
+（致密化约至 15k），稠密 MVS 仍默认 10,000 步：
 
 ```powershell
 aetherscan --images D:\ScanVideo\ori_img\images `
   --colmap D:\ScanVideo\ori_img `
   --output out\scene.mvs `
-  --gggs-iterations 30000 `
-  --gggs-strategy adc_igs `
-  --gggs-max-gaussians 10000 `
+  --gggs-strategy default `
+  --gggs-max-gaussians 500000 `
   --gggs-densification-cap 4000000
 ```
+
+调试基础优化收敛时，可用 `--gggs-densification=false` 固定 COLMAP 初始化的
+Gaussian 数量；此模式禁用 split、prune 和 opacity reset，只验证 RGB、mask loss、
+光栅化反向与 CUDA Adam 的参数优化。因为没有 prune，固定拓扑模式也会在整个训练中
+保留 `--gggs-max-scale-fraction` 上限；启用致密化后不逐步硬夹 scale，而与 pygsplat
+一样由 refine 阶段按 `0.1 * scene_scale` 清理过大的 Gaussian。不能先夹到同一个
+阈值再比较，否则 `exp(log(scale))` 的浮点误差会误删边界 Gaussian。
+
+若要验证“结构先优化、随后只收敛外观”，可加
+`--gggs-structure-freeze-iter 5000`。到达该步后 means、scale、quaternion、opacity
+保持不变，但 SH/颜色继续使用 CUDA Adam 更新。
+
+### `ori_img` 收敛回归（2026-07-22）
+
+在 `D:\ScanVideo\ori_img` 的 76 张图、83,993 个 COLMAP 初始点上，默认策略训练
+5,000 步后得到 81,543 个 Gaussian。RGB+mask loss 从 1.62741 降到 0.00939；三个
+固定视角的 masked PSNR 为 30.00 / 35.65 / 35.38 dB，前景像素 PSNR 为
+24.84 / 30.54 / 30.24 dB。对应 Python GGGS 回归为 82,538 个 Gaussian、PSNR
+34.787 dB。
+
+本回归的关键修复是每次 GGGS backward 前清零 geometry-gradient scratch。参考
+FasterGS wrapper 使用 `resizeFunctional<true>`；若 C++ 使用未初始化的 pooled memory，
+`atomicAdd` 会累积旧的 conic/opacity 梯度，使 opacity 中位数错误升到约 0.96，loss
+无法下降。回归测试会连续执行两次相同 backward 并比较 opacity gradient，防止复发。
+
+稀疏 COLMAP 路径默认与 pygsplat 一致：使用原始三近邻 RMS scale 和随机 raw
+quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN scale 很大的离群点，
+正常训练由后续 prune 移除；固定拓扑稳健性实验可显式加
+`--gggs-constrain-scales=true`。`--gggs-max-scale-ratio` 默认 0，不额外限制轴比。
 
 加载器自动解析根目录、`sparse/`、`sparse/0/` 或直接 model 目录中的 `.bin` / `.txt`。
 当前精确支持 `SIMPLE_PINHOLE`、`PINHOLE`、`SIMPLE_RADIAL`、`RADIAL`、`OPENCV`；无法由
