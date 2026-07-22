@@ -29,6 +29,10 @@ void build_projected_foreground_masks(
 bool reconstruct_mesh_global_cgal(
     MvsScene& scene, const DensifyOptions& options);
 
+// Sparse TSDF fusion over the scene depth maps. Populates scene.mesh and
+// returns false when the maps contain insufficient signed-distance support.
+bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options);
+
 // Backend-independent topology cleanup and normal recomputation.
 void clean_mesh(
     Mesh& mesh, const DensifyOptions& options,

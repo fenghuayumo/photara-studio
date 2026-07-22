@@ -11,6 +11,9 @@
 #include "texture/bake.hpp"
 #include "texture/options.hpp"
 #endif
+#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
+#include "asdiff_mesh/mesh_ops.hpp"
+#endif
 
 #include <cxxopts.hpp>
 
@@ -27,9 +30,11 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -77,6 +82,8 @@ struct ReconstructCli {
     std::string gggs_alpha_mode{"transparent"};
     float gggs_match_alpha_weight{0.25F};
     float gggs_ssim_weight{0.2F};
+    float gggs_depth_normal_weight{0.05F};
+    unsigned gggs_geometry_from_iter{7'000};
     float gggs_min_scale_fraction{1e-4F};
     float gggs_max_scale_fraction{0.002F};
     float gggs_max_scale_ratio{0.F};
@@ -89,6 +96,8 @@ struct ReconstructCli {
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
     std::uint64_t mesh_max_points{2'000'000};
+    std::uint64_t mesh_target_faces{1'000'000};
+    bool mesh_remesh{true};
     float mesh_dist_insert_px{-1.F};
     bool mesh_free_space_support{true};
     float mesh_free_space_quantile{0.95F};
@@ -201,6 +210,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
               << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
               << "  --gggs-ssim-weight W  structural loss blend (default 0.2)\n"
+              << "  --gggs-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
+              << "  --gggs-geometry-from-iter N  start geometry loss (default 7000)\n"
               << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --gggs-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
               << "  --gggs-max-scale-ratio R  hard anisotropy clamp (0 disables; default 0)\n"
@@ -210,11 +221,13 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 4M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
-              << "  --mesh-method auto|projective|delaunay\n"
-              << "               auto uses projective for preview, global Delaunay otherwise\n"
+              << "  --mesh-method auto|tsdf|projective|delaunay\n"
+              << "               auto uses TSDF for GGGS, otherwise the quality preset\n"
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
               << "  --mesh-free-space-support BOOL  weak-surface beta/gamma cut\n"
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
+              << "  --mesh-target-faces N  asdiff/CGAL repair + decimate target (0 disables)\n"
+              << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --masks DIR foreground masks (auto: sibling masks/ directory)\n"
@@ -318,6 +331,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.25"))
         ("gggs-ssim-weight", "SSIM blend in the photometric loss",
          cxxopts::value<float>()->default_value("0.2"))
+        ("gggs-depth-normal-weight",
+         "GGGS median-depth/raster-normal consistency weight",
+         cxxopts::value<float>()->default_value("0.05"))
+        ("gggs-geometry-from-iter", "Iteration to start GGGS geometry loss",
+         cxxopts::value<unsigned>()->default_value("7000"))
         ("gggs-min-scale-fraction", "Minimum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.0001"))
         ("gggs-max-scale-fraction", "Maximum Gaussian scale / scene extent",
@@ -337,11 +355,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh", "Build MVS mesh after densify (implies --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mesh-method",
-         "Mesh backend: auto, projective, or delaunay",
+         "Mesh backend: auto, tsdf, projective, or delaunay",
          cxxopts::value<std::string>()->default_value("auto"))
         ("mesh-max-points",
          "Maximum samples inserted into global Delaunay (0 = unlimited)",
          cxxopts::value<std::uint64_t>()->default_value("2000000"))
+        ("mesh-target-faces",
+         "asdiff/CGAL repair and decimation target (0 disables)",
+         cxxopts::value<std::uint64_t>()->default_value("1000000"))
+        ("mesh-remesh", "Run Instant Meshes before CGAL repair",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("mesh-dist-insert-px",
          "Minimum projection spacing for global Delaunay (-1 = preset)",
          cxxopts::value<float>()->default_value("-1"))
@@ -442,6 +465,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_match_alpha_weight =
         result["gggs-match-alpha-weight"].as<float>();
     cli.gggs_ssim_weight = result["gggs-ssim-weight"].as<float>();
+    cli.gggs_depth_normal_weight =
+        result["gggs-depth-normal-weight"].as<float>();
+    cli.gggs_geometry_from_iter =
+        result["gggs-geometry-from-iter"].as<unsigned>();
     cli.gggs_min_scale_fraction =
         result["gggs-min-scale-fraction"].as<float>();
     cli.gggs_max_scale_fraction =
@@ -462,6 +489,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
     cli.mesh_method = result["mesh-method"].as<std::string>();
     cli.mesh_max_points = result["mesh-max-points"].as<std::uint64_t>();
+    cli.mesh_target_faces =
+        result["mesh-target-faces"].as<std::uint64_t>();
+    cli.mesh_remesh = result["mesh-remesh"].as<bool>();
     cli.mesh_dist_insert_px =
         result["mesh-dist-insert-px"].as<float>();
     cli.mesh_free_space_support =
@@ -529,6 +559,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "--gggs-match-alpha-weight must be non-negative");
     if (cli.gggs_ssim_weight < 0.F || cli.gggs_ssim_weight > 1.F)
         throw std::invalid_argument("--gggs-ssim-weight must be in [0,1]");
+    if (cli.gggs_depth_normal_weight < 0.F)
+        throw std::invalid_argument(
+            "--gggs-depth-normal-weight must be non-negative");
     if (cli.gggs_min_scale_fraction <= 0.F ||
         cli.gggs_max_scale_fraction < cli.gggs_min_scale_fraction)
         throw std::invalid_argument(
@@ -556,10 +589,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.atlas_resolution < 64) {
         throw std::invalid_argument("--atlas-resolution must be >= 64");
     }
-    if (cli.mesh_method != "auto" && cli.mesh_method != "projective" &&
+    if (cli.mesh_method != "auto" && cli.mesh_method != "tsdf" &&
+        cli.mesh_method != "projective" &&
         cli.mesh_method != "delaunay") {
         throw std::invalid_argument(
-            "--mesh-method must be auto, projective, or delaunay");
+            "--mesh-method must be auto, tsdf, projective, or delaunay");
     }
     if (cli.patchmatch_tile_rows == 0)
         throw std::invalid_argument("--patchmatch-tile-rows must be positive");
@@ -569,6 +603,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.mesh_dist_insert_px < -1.F || cli.mesh_dist_insert_px > 16.F)
         throw std::invalid_argument(
             "--mesh-dist-insert-px must be -1 or in [0,16]");
+    if (cli.mesh_target_faces > 0 && cli.mesh_target_faces < 4)
+        throw std::invalid_argument(
+            "--mesh-target-faces must be 0 or at least 4");
 
     const auto cache_text = result["cache-dir"].as<std::string>();
     if (!cache_text.empty() && cache_text != "-")
@@ -857,11 +894,202 @@ std::filesystem::path write_sfm_diagnostics(
     return csv_path;
 }
 
+#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
+void retain_largest_edge_component(
+    std::vector<float>& positions, std::vector<std::uint32_t>& indices) {
+    const std::size_t face_count = indices.size() / 3;
+    const std::size_t vertex_count = positions.size() / 3;
+    if (face_count == 0 || vertex_count == 0) return;
+
+    std::vector<std::uint32_t> parent(face_count);
+    std::vector<std::uint32_t> sizes(face_count, 1U);
+    for (std::size_t face = 0; face < face_count; ++face)
+        parent[face] = static_cast<std::uint32_t>(face);
+    const auto find_root = [&](std::uint32_t value) {
+        std::uint32_t root = value;
+        while (parent[root] != root) root = parent[root];
+        while (parent[value] != value) {
+            const std::uint32_t next = parent[value];
+            parent[value] = root;
+            value = next;
+        }
+        return root;
+    };
+    const auto unite = [&](std::uint32_t a, std::uint32_t b) {
+        a = find_root(a);
+        b = find_root(b);
+        if (a == b) return;
+        if (sizes[a] < sizes[b]) std::swap(a, b);
+        parent[b] = a;
+        sizes[a] += sizes[b];
+    };
+    const auto edge_key = [](std::uint32_t a, std::uint32_t b) {
+        if (a > b) std::swap(a, b);
+        return (static_cast<std::uint64_t>(a) << 32U) |
+            static_cast<std::uint64_t>(b);
+    };
+
+    std::unordered_map<std::uint64_t, std::uint32_t> edge_owner;
+    edge_owner.reserve(face_count * 2);
+    for (std::size_t face = 0; face < face_count; ++face) {
+        const auto face_id = static_cast<std::uint32_t>(face);
+        const std::uint32_t a = indices[face * 3];
+        const std::uint32_t b = indices[face * 3 + 1];
+        const std::uint32_t c = indices[face * 3 + 2];
+        for (const auto edge : {edge_key(a, b), edge_key(b, c), edge_key(c, a)}) {
+            const auto [found, inserted] = edge_owner.emplace(edge, face_id);
+            if (!inserted) unite(face_id, found->second);
+        }
+    }
+    std::uint32_t largest_root = find_root(0U);
+    for (std::size_t face = 1; face < face_count; ++face) {
+        const auto root = find_root(static_cast<std::uint32_t>(face));
+        if (sizes[root] > sizes[largest_root]) largest_root = root;
+    }
+    const std::size_t retained_faces = sizes[largest_root];
+    if (retained_faces == face_count) return;
+
+    constexpr std::uint32_t unused = (std::numeric_limits<std::uint32_t>::max)();
+    std::vector<std::uint32_t> remap(vertex_count, unused);
+    std::vector<float> compact_positions;
+    std::vector<std::uint32_t> compact_indices;
+    compact_positions.reserve(positions.size());
+    compact_indices.reserve(retained_faces * 3);
+    for (std::size_t face = 0; face < face_count; ++face) {
+        if (find_root(static_cast<std::uint32_t>(face)) != largest_root) continue;
+        for (std::size_t corner = 0; corner < 3; ++corner) {
+            const std::uint32_t old_index = indices[face * 3 + corner];
+            auto& new_index = remap[old_index];
+            if (new_index == unused) {
+                new_index = static_cast<std::uint32_t>(compact_positions.size() / 3);
+                compact_positions.insert(
+                    compact_positions.end(),
+                    positions.begin() + static_cast<std::ptrdiff_t>(old_index) * 3,
+                    positions.begin() + static_cast<std::ptrdiff_t>(old_index) * 3 + 3);
+            }
+            compact_indices.push_back(new_index);
+        }
+    }
+    aetherscan::core::Logger::instance().info(
+        "instant mesh component clean: faces=", face_count, " -> ",
+        compact_indices.size() / 3, " vertices=", vertex_count, " -> ",
+        compact_positions.size() / 3);
+    positions = std::move(compact_positions);
+    indices = std::move(compact_indices);
+}
+
+bool repair_and_decimate_mesh(
+    aetherscan::mvs::Mesh& mesh, const std::uint64_t target_faces,
+    const bool use_instant_remesh) {
+    if (target_faces == 0 || mesh.faces.empty()) return false;
+    if (mesh.vertices.size() >
+        static_cast<std::size_t>(
+            (std::numeric_limits<std::uint32_t>::max)()))
+        throw std::runtime_error(
+            "asdiff mesh preprocessing requires 32-bit vertex indices");
+
+    aetherscan::core::StageScope stage("mesh.asdiff_repair_decimate");
+    std::vector<float> positions;
+    positions.reserve(mesh.vertices.size() * 3);
+    for (const auto& vertex : mesh.vertices) {
+        positions.push_back(vertex.x());
+        positions.push_back(vertex.y());
+        positions.push_back(vertex.z());
+    }
+    std::vector<std::uint32_t> indices;
+    indices.reserve(mesh.faces.size() * 3);
+    for (const auto& face : mesh.faces) {
+        if (face.minCoeff() < 0 ||
+            face.maxCoeff() >= static_cast<int>(mesh.vertices.size()))
+            continue;
+        indices.push_back(static_cast<std::uint32_t>(face[0]));
+        indices.push_back(static_cast<std::uint32_t>(face[1]));
+        indices.push_back(static_cast<std::uint32_t>(face[2]));
+    }
+
+    if (use_instant_remesh && asdiff_mesh::has_instant_meshes_backend()) {
+        aetherscan::core::StageScope remesh_stage("mesh.instant_remesh");
+        asdiff_mesh::RemeshOptions remesh_options;
+        // PoSy=4 produces approximately one quad per requested face; the
+        // binding triangulates each regular quad for the downstream pipeline.
+        const std::uint64_t instant_faces =
+            (std::max<std::uint64_t>)(4, (target_faces + 1) / 2);
+        remesh_options.face_count = static_cast<int>(std::min<std::uint64_t>(
+            instant_faces,
+            static_cast<std::uint64_t>((std::numeric_limits<int>::max)())));
+        remesh_options.deterministic = true;
+        try {
+            auto remeshed = asdiff_mesh::remesh_field_aligned(
+                positions, indices, remesh_options);
+            aetherscan::core::Logger::instance().info(
+                "instant mesh: vertices=", positions.size() / 3, " -> ",
+                remeshed.positions.size() / 3, " faces=", indices.size() / 3,
+                " -> ", remeshed.indices.size() / 3);
+            positions = std::move(remeshed.positions);
+            indices = std::move(remeshed.indices);
+            retain_largest_edge_component(positions, indices);
+        } catch (const std::exception& error) {
+            aetherscan::core::Logger::instance().warning(
+                "Instant Meshes failed; continuing with CGAL repair: ",
+                error.what());
+        }
+        remesh_stage.finish();
+    } else if (use_instant_remesh) {
+        aetherscan::core::Logger::instance().warning(
+            "Instant Meshes backend unavailable; continuing with CGAL repair");
+    }
+
+    auto result = asdiff_mesh::repair_and_decimate(
+        positions, indices,
+        asdiff_mesh::DecimateOptions{
+            static_cast<std::size_t>(target_faces), false});
+    retain_largest_edge_component(result.positions, result.indices);
+    aetherscan::mvs::Mesh processed;
+    processed.vertices.reserve(result.positions.size() / 3);
+    for (std::size_t vertex = 0; vertex < result.positions.size() / 3;
+         ++vertex) {
+        processed.vertices.emplace_back(
+            result.positions[vertex * 3], result.positions[vertex * 3 + 1],
+            result.positions[vertex * 3 + 2]);
+    }
+    processed.faces.reserve(result.indices.size() / 3);
+    for (std::size_t face = 0; face < result.indices.size() / 3; ++face) {
+        processed.faces.emplace_back(
+            static_cast<int>(result.indices[face * 3]),
+            static_cast<int>(result.indices[face * 3 + 1]),
+            static_cast<int>(result.indices[face * 3 + 2]));
+    }
+    processed.normals.assign(
+        processed.vertices.size(), aetherscan::mvs::Vec3f::Zero());
+    for (const auto& face : processed.faces) {
+        const auto normal =
+            (processed.vertices[static_cast<std::size_t>(face[1])] -
+             processed.vertices[static_cast<std::size_t>(face[0])])
+                .cross(
+                    processed.vertices[static_cast<std::size_t>(face[2])] -
+                    processed.vertices[static_cast<std::size_t>(face[0])]);
+        for (int slot = 0; slot < 3; ++slot)
+            processed.normals[static_cast<std::size_t>(face[slot])] += normal;
+    }
+    for (auto& normal : processed.normals)
+        if (normal.squaredNorm() > 1e-12F) normal.normalize();
+
+    aetherscan::core::Logger::instance().info(
+        "asdiff mesh: vertices=", mesh.vertices.size(), " -> ",
+        processed.vertices.size(), " faces=", mesh.faces.size(), " -> ",
+        processed.faces.size(), " target_faces=", target_faces);
+    mesh = std::move(processed);
+    stage.finish();
+    return true;
+}
+#endif
+
 #if defined(AETHERSCAN_HAS_GGGS)
-void run_gggs_training(
+std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     const aetherscan::mvs::MvsScene& scene,
     const ReconstructCli& cli,
-    const bool dense_input) {
+    const bool dense_input,
+    const aetherscan::mvs::DensifyOptions* mesh_options = nullptr) {
     aetherscan::splat::TrainingOptions options;
     options.iterations = cli.gggs_iterations;
     options.max_gaussians = static_cast<std::size_t>(
@@ -926,6 +1154,15 @@ void run_gggs_training(
     options.max_scale_ratio = cli.gggs_max_scale_ratio;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
+    options.use_depth_normal_loss = cli.mesh &&
+        cli.gggs_depth_normal_weight > 0.F;
+    options.depth_normal_weight = cli.gggs_depth_normal_weight;
+    options.depth_normal_from_iter = cli.gggs_geometry_from_iter;
+    // The Python GGGS meshing preset starts geometry at 7k and keeps the
+    // structural parameters trainable. The photometric-only dense warm-up
+    // freeze would otherwise make this loss a no-op.
+    if (options.use_depth_normal_loss && dense_input)
+        options.dense_structure_freeze_iter = 0;
     const char* effective_strategy = !options.enable_densification
         ? "disabled"
         : cli.gggs_strategy.c_str();
@@ -949,7 +1186,9 @@ void run_gggs_training(
         " knn_scale=", options.initialize_scale_from_knn,
         " dense_structure_freeze_iter=",
         options.dense_structure_freeze_iter,
-        " geometry_loss=disabled",
+        " depth_normal_loss=", options.use_depth_normal_loss,
+        " depth_normal_weight=", options.depth_normal_weight,
+        " geometry_from_iter=", options.depth_normal_from_iter,
         " scale_fraction=[", options.minimum_scale_fraction,
         ',', options.maximum_scale_fraction, ']',
         " constrain_scales=", options.constrain_scale_range,
@@ -1034,6 +1273,32 @@ void run_gggs_training(
         "gggs_ply=", ply,
         " gaussians=", gaussians.size(),
         " training_s=", elapsed);
+    if (!cli.mesh) return std::nullopt;
+    if (mesh_options == nullptr)
+        throw std::invalid_argument(
+            "GGGS mesh extraction requires configured MVS mesh options");
+
+    aetherscan::splat::GggsMeshOptions extraction_options;
+    extraction_options.fusion = *mesh_options;
+    extraction_options.fusion.build_mesh = true;
+    extraction_options.diagnostics_dir = out_dir;
+    const auto mesh_started = std::chrono::steady_clock::now();
+    auto extraction = aetherscan::splat::extract_gggs_mesh(
+        gaussians, scene, options, extraction_options);
+    const auto surface_ply = out_dir /
+        (cli.output.stem().string() + "_gggs_surface.ply");
+    aetherscan::mvs::save_dense_ply(
+        extraction.surface_cloud, surface_ply);
+    const double mesh_elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - mesh_started).count();
+    aetherscan::core::Logger::instance().info(
+        "gggs_surface_ply=", surface_ply,
+        " valid_depth_pixels=", extraction.valid_depth_pixels,
+        " surface_points=", extraction.surface_cloud.points.size(),
+        " mesh_vertices=", extraction.mesh.vertices.size(),
+        " mesh_faces=", extraction.mesh.faces.size(),
+        " mesh_s=", mesh_elapsed);
+    return std::move(extraction.mesh);
 }
 #endif
 
@@ -1181,9 +1446,16 @@ int main(int argc, char** argv) {
             densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
             densify_opts.patchmatch_concurrent_views =
                 cli.patchmatch_concurrent_views;
-            densify_opts.build_mesh = cli.mesh;
+            // With GGGS enabled, the active mesh is extracted from the trained
+            // Gaussian median-depth/normal maps after optimization. Avoid
+            // spending time on an MVS mesh that would immediately be replaced.
+            densify_opts.build_mesh = cli.mesh && !cli.gggs;
             if (!cli.mesh) {
                 densify_opts.mesh_method = aetherscan::mvs::MeshMethod::none;
+            } else if (cli.mesh_method == "tsdf" ||
+                       (cli.mesh_method == "auto" && cli.gggs)) {
+                densify_opts.mesh_method =
+                    aetherscan::mvs::MeshMethod::tsdf;
             } else if (cli.mesh_method == "projective" ||
                        (cli.mesh_method == "auto" &&
                         cli.dense_quality ==
@@ -1217,6 +1489,9 @@ int main(int argc, char** argv) {
                 densify_opts.mesh_method ==
                         aetherscan::mvs::MeshMethod::delaunay_cut
                     ? "delaunay"
+                    : densify_opts.mesh_method ==
+                              aetherscan::mvs::MeshMethod::tsdf
+                          ? "tsdf"
                     : densify_opts.mesh_method ==
                               aetherscan::mvs::MeshMethod::depth_projective
                           ? "projective"
@@ -1259,14 +1534,39 @@ int main(int argc, char** argv) {
                 " densify_s=", dense_elapsed);
 
 #if defined(AETHERSCAN_HAS_GGGS)
-            if (cli.gggs) run_gggs_training(mvs_scene, cli, true);
+            if (cli.gggs) {
+                auto gggs_mesh = run_gggs_training(
+                    mvs_scene, cli, true, &densify_opts);
+                if (gggs_mesh) mvs_scene.mesh = std::move(*gggs_mesh);
+            }
 #endif
 
             if (cli.mesh && !mvs_scene.mesh.faces.empty()) {
+#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
+                if (cli.gggs && cli.mesh_target_faces > 0) {
+                    try {
+                        repair_and_decimate_mesh(
+                            mvs_scene.mesh, cli.mesh_target_faces,
+                            cli.mesh_remesh);
+                    } catch (const std::exception& error) {
+                        aetherscan::core::Logger::instance().warning(
+                            "asdiff mesh postprocess failed; retaining TSDF "
+                            "mesh: ", error.what());
+                    }
+                }
+#else
+                if (cli.gggs && cli.mesh_target_faces > 0)
+                    aetherscan::core::Logger::instance().warning(
+                        "asdiff mesh postprocess unavailable (CGAL mesh tools "
+                        "were not built); retaining cleaned TSDF mesh");
+#endif
+                const std::string mesh_tag = cli.gggs
+                    ? "_gggs_mesh"
+                    : "_mesh";
                 const auto mesh_ply =
-                    out_dir / (cli.output.stem().string() + "_mesh.ply");
+                    out_dir / (cli.output.stem().string() + mesh_tag + ".ply");
                 const auto mesh_obj =
-                    out_dir / (cli.output.stem().string() + "_mesh.obj");
+                    out_dir / (cli.output.stem().string() + mesh_tag + ".obj");
                 aetherscan::mvs::save_mesh_ply(mvs_scene.mesh, mesh_ply);
                 if (cli.mesh_obj)
                     aetherscan::mvs::save_mesh_obj(mvs_scene.mesh, mesh_obj);
@@ -1274,6 +1574,7 @@ int main(int argc, char** argv) {
                     "mesh_ply=", mesh_ply,
                     cli.mesh_obj ? " mesh_obj=" : "",
                     cli.mesh_obj ? mesh_obj.string() : std::string{},
+                    " active_mesh=", cli.gggs ? "gggs" : "mvs",
                     " faces=", mvs_scene.mesh.faces.size());
 
 #if defined(AETHERSCAN_HAS_TEXTURE)

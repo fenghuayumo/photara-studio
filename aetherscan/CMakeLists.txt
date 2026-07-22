@@ -287,6 +287,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/mvs/mesh.cpp
         src/mvs/mesh_cgal.cpp
         src/mvs/mesh_clean.cpp
+        src/mvs/mesh_tsdf.cpp
         src/mvs/export.cpp
         src/mvs/densify.cpp)
     add_library(AetherScan::MVS ALIAS aetherscan_mvs)
@@ -305,7 +306,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
     else()
         message(WARNING
             "CGAL not found: default/high global MVS meshing is unavailable; "
-            "preview or --mesh-method projective remains supported")
+            "preview projective and GGGS TSDF meshing remain supported")
     endif()
 
     if(AETHERSCAN_ENABLE_GGGS AND AETHERSCAN_ENABLE_CUDA)
@@ -359,6 +360,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
 
         add_library(aetherscan_splat
             src/splat/colmap.cpp
+            src/splat/mesh.cpp
             src/splat/trainer.cpp)
         add_library(AetherScan::Splat ALIAS aetherscan_splat)
         target_include_directories(aetherscan_splat
@@ -485,6 +487,11 @@ if(AETHERSCAN_BUILD_BENCHMARKS)
         if(TARGET aetherscan_texture)
             target_link_libraries(aetherscan PRIVATE AetherScan::Texture)
             target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_TEXTURE=1)
+        endif()
+        if(TARGET asdiff::mesh)
+            target_link_libraries(aetherscan PRIVATE asdiff::mesh)
+            target_compile_definitions(
+                aetherscan PRIVATE AETHERSCAN_HAS_ASDIFF_MESH=1)
         endif()
         if(WIN32)
             add_custom_command(TARGET aetherscan POST_BUILD

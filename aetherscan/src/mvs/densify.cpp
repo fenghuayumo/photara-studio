@@ -15,8 +15,7 @@ void densify(MvsScene& scene, const DensifyOptions& options) {
         options.mesh_method == MeshMethod::delaunay_cut)
         throw std::runtime_error(
             "Global Delaunay meshing requires a CGAL-enabled build. "
-            "Install CGAL or explicitly select projective meshing for "
-            "preview.");
+            "Install CGAL or explicitly select TSDF/projective meshing.");
 #endif
     if (!options.roi_path.empty()) {
         if (!detail::load_manual_roi(options.roi_path, scene.roi))

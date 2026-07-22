@@ -202,28 +202,30 @@ PatchMatch 已实现以下 CPU 路径：
 7. backend-independent Clean 删除非法、重复、退化和非流形面，统一连通分量朝向，删除小岛，
    封闭小边界环，可选 boundary-preserving smoothing，最后压缩顶点并重算法线。
 
-构建时使用标准 `find_package(CGAL QUIET)`。有 CGAL 时，CLI 的 `--mesh-method auto` 在
-`default/high` 选择全局 Delaunay，在 `preview` 选择 projective；无 CGAL 或图割未抽出有效面时
-明确告警并回退 projective。可用 `--mesh-method projective|delaunay` 强制选择。
+构建时使用标准 `find_package(CGAL QUIET)`。CLI 的 `--mesh-method auto` 在 GGGS 路径选择
+TSDF，在 MVS-only 的 `default/high` 选择全局 Delaunay，在 `preview` 选择 projective。
+可用 `--mesh-method tsdf|projective|delaunay` 强制选择；显式请求不可用的 Delaunay 时直接报错，
+不静默交付低质量 projective 结果。
 
 关键调优参数：
 
 ```text
 --patchmatch-tile-rows 8
 --patchmatch-concurrent-views 8
---mesh-method auto|projective|delaunay
+--mesh-method auto|tsdf|projective|delaunay
 --mesh-max-points 2000000       # 0 表示不设上限
+--mesh-target-faces 1000000     # asdiff/CGAL repair + decimate；0 关闭
+--mesh-remesh true              # 先执行 Instant Meshes field-aligned remesh
 --mesh-free-space-support true  # OpenMVS weak-surface beta/gamma 强化
 --mesh-free-space-quantile 0.95 # 融合权重到 OpenMVS 能量尺度的校准分位数
 ```
 
 后续几何处理顺序固定为：`Delaunay cut → Clean/manifold → photometric mesh refinement
 → 可选交付级简化/重拓扑 → UV/贴图`。photometric refinement 前不默认简化，否则会先丢失
-其需要优化的小尺度自由度。当前工程只链接 `asdiff::render`，并显式设置
-`ASDIFF_BUILD_MESH_TOOLS=OFF`；因此 asdiff_render 中 `asdiff::mesh` 提供的
-`remesh_field_aligned` 和 `repair_and_decimate` 尚未进入 AetherScan 调用链。未来接入时，
-默认仅在 refinement 之后调用保边界的 `repair_and_decimate`；Instant Meshes 重拓扑作为
-显式 retopo 模式，不作为高质量扫描默认步骤。
+其需要优化的小尺度自由度。工程在找到 CGAL 时同时构建并链接 `asdiff::mesh`，GGGS TSDF +
+Clean 后默认先调用 Instant Meshes field-aligned remesh，再调用保边界的
+`repair_and_decimate`；未找到 CGAL 时保留 Clean 后的 TSDF 并记录明确告警。可用
+`--mesh-remesh=false` 做不重拓扑的质量 A/B。
 
 ---
 
@@ -294,8 +296,13 @@ PatchMatch 已实现以下 CPU 路径：
 
 1. **初始化**：MVS `DenseCloud` → Gaussian  
    （mean=xyz，尺度∝局部间距，短轴沿法向，颜色=点色；体素/曲率下采样控 N）；
-2. **优化**：光度（建议 mask 内）+ GGGS 几何目标；可选与 MVS depth 一致性；
-3. **抽 mesh**：GGGS 方法产出表面 → Clean / manifold / 简化 → `gggs_mesh`；
+2. **优化**：先以 RGB+mask 收敛外观，默认第 7,000 步启用权重 0.05 的 GGGS median-depth /
+   rendered-normal self-consistency，并保持 mean/scale/quaternion/opacity 可训练；可选与 MVS
+   depth 一致性；
+3. **抽 mesh**：渲染 GGGS median depth / normal / alpha，复用 MVS 相机、mask、邻接与深度
+   融合，稀疏 TSDF + marching tetrahedra 抽取隐式表面，再经 Clean、Instant Meshes
+   quad-dominant remesh、连通分量清理和 CGAL repair/decimate → `gggs_mesh`；该路径不依赖
+   `multi_view_robust_ncc`；
 4. **切换**：`active_mesh_id = gggs`；若仍 `enable_texture`，对 **gggs_mesh**
    重跑 Stage B（mask 建议重算）。
 

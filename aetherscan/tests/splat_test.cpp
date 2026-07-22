@@ -657,6 +657,63 @@ void test_ssim_loss_and_scale_constraint() {
         "Gaussian scale-ratio constraint was not applied");
 }
 
+void test_gggs_depth_normal_consistency() {
+    using namespace aetherscan::splat;
+    constexpr std::size_t side = 5;
+    constexpr std::size_t pixels = side * side;
+    RenderResult rendered;
+    rendered.color = tinytensor::Tensor::zeros(
+        {3, side, side}, tinytensor::Device::CUDA);
+    rendered.alpha = tinytensor::Tensor::zeros(
+        {side, side}, tinytensor::Device::CUDA);
+    rendered.median_depth = tinytensor::Tensor::from_vector(
+        std::vector<float>(pixels, 1.F), {side, side},
+        tinytensor::Device::CUDA);
+    std::vector<float> raster_normals(3 * pixels, 0.F);
+    std::fill(
+        raster_normals.begin(), raster_normals.begin() + pixels, 1.F);
+    rendered.normal = tinytensor::Tensor::from_vector(
+        raster_normals, {3, side, side}, tinytensor::Device::CUDA);
+
+    TrainingView target;
+    target.camera.width = target.camera.height = side;
+    target.camera.fx = target.camera.fy = 5.F;
+    target.camera.cx = target.camera.cy = 2.F;
+    target.rgb = tinytensor::Tensor::zeros(
+        {3, side, side}, tinytensor::Device::CUDA);
+    target.depth = tinytensor::Tensor::zeros(
+        {side, side}, tinytensor::Device::CUDA);
+    target.normal = tinytensor::Tensor::zeros(
+        {3, side, side}, tinytensor::Device::CUDA);
+    target.mask = tinytensor::Tensor::from_vector(
+        std::vector<float>(pixels, 1.F), {side, side},
+        tinytensor::Device::CUDA);
+
+    TrainingOptions options;
+    options.ssim_weight = 0.F;
+    options.use_depth_normal_loss = true;
+    options.depth_normal_weight = 0.05F;
+    const auto loss = detail::compute_training_loss(
+        rendered, target, options, true, true);
+    require(
+        std::abs(loss.normal_value - 0.018F) < 1e-5F,
+        "GGGS depth-normal forward differs from the Python definition");
+    const auto normal_gradient = loss.normal.to_vector();
+    const std::size_t center = 2 * side + 2;
+    require(
+        std::abs(normal_gradient[2 * pixels + center] - 0.002F) < 1e-6F,
+        "GGGS depth-normal raster-normal gradient is incorrect");
+    const auto depth_gradient = loss.depth.to_vector();
+    const float maximum_depth_gradient = *std::max_element(
+        depth_gradient.begin(), depth_gradient.end(),
+        [](const float a, const float b) {
+            return std::abs(a) < std::abs(b);
+        });
+    require(
+        std::abs(std::abs(maximum_depth_gradient) - 0.005F) < 1e-6F,
+        "GGGS median-depth gradient differs from Python autograd");
+}
+
 void test_densification_strategies_and_dense_bypass() {
     using namespace aetherscan;
     const auto root = std::filesystem::temp_directory_path() /
@@ -759,6 +816,7 @@ int main() {
         test_colmap_text_loading();
         test_mask_loss_modes();
         test_ssim_loss_and_scale_constraint();
+        test_gggs_depth_normal_consistency();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";
         return 0;

@@ -10,8 +10,11 @@ enum class MeshMethod : std::uint8_t {
     delaunay_cut = 0,
     // Projective depth-map triangulation (fast preview fallback).
     depth_projective = 1,
+    // Sparse signed-distance fusion followed by marching tetrahedra. This is
+    // the preferred backend for GGGS median-depth geometry.
+    tsdf = 2,
     // Skip meshing.
-    none = 2,
+    none = 3,
 };
 
 enum class DensifyQuality : std::uint8_t {
@@ -139,6 +142,16 @@ struct DensifyOptions {
     float mesh_k_inf{1.0e6F};
     // Projective meshing samples every Nth depth pixel.
     unsigned mesh_pixel_step{2};
+    // TSDF voxel size in world units (0 = infer from median pixel footprint).
+    float mesh_tsdf_voxel_size{0.F};
+    // Truncation half-width in voxels and depth-map sampling stride.
+    float mesh_tsdf_truncation_voxels{4.F};
+    unsigned mesh_tsdf_pixel_step{2};
+    // Ignore field samples whose accumulated integration weight is lower.
+    float mesh_tsdf_min_weight{0.25F};
+    // TSDF can contain tiny closed bubbles where depth maps disagree. Remove
+    // components smaller than this fraction of the largest component.
+    float mesh_tsdf_min_component_fraction{0.0005F};
     // Weld radius and maximum triangle edge in units of the scene's median
     // pixel footprint. These are scale invariant unlike bbox fractions.
     float mesh_weld_pixel_fraction{0.65F};

@@ -1108,6 +1108,11 @@ void reconstruct_mesh(MvsScene& scene, const DensifyOptions& options) {
                 "Global Delaunay meshing is unavailable or produced no "
                 "surface. Install CGAL or explicitly select projective "
                 "meshing for preview.");
+    } else if (options.mesh_method == MeshMethod::tsdf) {
+        if (!detail::reconstruct_mesh_tsdf(scene, options))
+            throw std::runtime_error(
+                "TSDF meshing produced no surface. Check GGGS alpha/depth "
+                "coverage or increase the TSDF truncation band.");
     } else {
         reconstruct_mesh_projective(scene, options);
     }

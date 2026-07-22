@@ -528,6 +528,49 @@ void test_bow_tie_holes_are_split_and_closed() {
         "bow-tie cleanup did not duplicate the shared vertex and add caps");
 }
 
+void test_sparse_tsdf_mesh() {
+    MvsScene scene;
+    MvsView view;
+    view.id = 0;
+    view.pose = aetherscan::sfm::Pose3D::identity();
+    view.width = view.height = 32;
+    view.fx = view.fy = 32.F;
+    view.cx = view.cy = 15.5F;
+    view.depth_map.view_id = 0;
+    view.depth_map.resize(view.width, view.height);
+    std::fill(
+        view.depth_map.depth.begin(), view.depth_map.depth.end(), 1.F);
+    std::fill(
+        view.depth_map.normal.begin(), view.depth_map.normal.end(),
+        Vec3f{0.F, 0.F, -1.F});
+    std::fill(
+        view.depth_map.confidence.begin(), view.depth_map.confidence.end(),
+        0.F);
+    scene.views.push_back(std::move(view));
+
+    DensifyOptions options;
+    options.mesh_method = MeshMethod::tsdf;
+    options.mesh_tsdf_voxel_size = 0.025F;
+    options.mesh_tsdf_truncation_voxels = 3.F;
+    options.mesh_tsdf_pixel_step = 1;
+    options.mesh_tsdf_min_weight = 0.01F;
+    options.mesh_tsdf_min_component_fraction = 0.F;
+    options.mesh_min_component_faces = 1;
+    options.mesh_close_hole_edges = 0;
+    require(
+        detail::reconstruct_mesh_tsdf(scene, options),
+        "sparse TSDF rejected a valid depth plane");
+    require(!scene.mesh.faces.empty(), "sparse TSDF plane mesh is empty");
+    const auto [minimum, maximum] = std::minmax_element(
+        scene.mesh.vertices.begin(), scene.mesh.vertices.end(),
+        [](const Vec3f& a, const Vec3f& b) { return a.z() < b.z(); });
+    require(
+        minimum != scene.mesh.vertices.end() &&
+            std::abs(minimum->z() - 1.F) < 0.03F &&
+            std::abs(maximum->z() - 1.F) < 0.03F,
+        "sparse TSDF zero crossing does not match the input depth");
+}
+
 #if defined(AETHERSCAN_HAS_CGAL)
 void test_global_delaunay_mesh() {
     MvsScene scene;
@@ -617,6 +660,7 @@ int main() {
         test_mesh_clean();
         test_roi_aware_mesh_clean();
         test_bow_tie_holes_are_split_and_closed();
+        test_sparse_tsdf_mesh();
 #if defined(AETHERSCAN_HAS_CGAL)
         test_global_delaunay_mesh();
 #endif

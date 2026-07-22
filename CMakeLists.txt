@@ -32,6 +32,10 @@ set(AETHERSCAN_ONNXRUNTIME_ROOT "" CACHE PATH
 # point AETHERSCAN_ASDIFF_RENDER_ROOT at third_party/asdiffrender.
 option(AETHERSCAN_ENABLE_TEXTURE
     "Enable mesh UV unwrap + projective texture baking (asdiff_render)" ON)
+option(AETHERSCAN_ENABLE_ASDIFF_MESH
+    "Use optional CGAL asdiff_render mesh repair/decimation" ON)
+option(AETHERSCAN_ENABLE_INSTANT_REMESH
+    "Use Instant Meshes field-aligned remeshing before CGAL decimation" ON)
 set(AETHERSCAN_ASDIFF_RENDER_ROOT "" CACHE PATH
     "Path to asdiff_render sources (empty = auto-detect sibling / submodule)")
 
@@ -83,7 +87,17 @@ if(AETHERSCAN_ENABLE_TEXTURE)
         else()
             set(ASDIFF_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
             set(ASDIFF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-            set(ASDIFF_BUILD_MESH_TOOLS OFF CACHE BOOL "" FORCE)
+            find_package(CGAL CONFIG QUIET)
+            if(AETHERSCAN_ENABLE_ASDIFF_MESH AND CGAL_FOUND)
+                set(ASDIFF_BUILD_MESH_TOOLS ON CACHE BOOL "" FORCE)
+                set(ASDIFF_ENABLE_INSTANT_MESHES
+                    ${AETHERSCAN_ENABLE_INSTANT_REMESH} CACHE BOOL "" FORCE)
+                message(STATUS
+                    "Enabling asdiff::mesh repair/decimation; Instant Meshes="
+                    "${AETHERSCAN_ENABLE_INSTANT_REMESH}")
+            else()
+                set(ASDIFF_BUILD_MESH_TOOLS OFF CACHE BOOL "" FORCE)
+            endif()
             add_subdirectory(
                 "${AETHERSCAN_ASDIFF_RENDER_ROOT}"
                 "${CMAKE_BINARY_DIR}/_deps/asdiff_render")

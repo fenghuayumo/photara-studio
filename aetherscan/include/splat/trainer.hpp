@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mvs/types.hpp"
+#include "mvs/options.hpp"
 #include "splat/options.hpp"
 #include "splat/rasterizer.hpp"
 
@@ -40,6 +41,28 @@ struct RenderMetrics {
     float alpha_coverage{};
 };
 
+struct GggsMeshOptions {
+    // Match the GS-2M/pygsplat TSDF path: only geometry with at least half
+    // accumulated opacity contributes to the extracted surface.
+    float alpha_threshold{0.5F};
+    // Zero disables an explicit far-depth cutoff.
+    float max_depth{0.F};
+    // Optional directory for representative median-depth, normal and alpha
+    // PNGs used to audit geometry before TSDF fusion.
+    std::filesystem::path diagnostics_dir;
+    // Reject a rendered depth sample only when its complete four-neighbour
+    // stencil disagrees strongly with the rendered normal. Negative disables
+    // this MVS-inspired extraction guard; 0.5 corresponds to 60 degrees.
+    float min_depth_normal_cosine{0.5F};
+    mvs::DensifyOptions fusion;
+};
+
+struct GggsMeshResult {
+    mvs::DenseCloud surface_cloud;
+    mvs::Mesh mesh;
+    std::size_t valid_depth_pixels{};
+};
+
 using ProgressCallback = std::function<bool(const TrainingProgress&)>;
 using EvaluationCallback =
     std::function<void(unsigned iteration, const GaussianModel& model)>;
@@ -71,5 +94,13 @@ RenderMetrics render_evaluation_png(
     const GaussianModel& model, const mvs::MvsView& view,
     const std::filesystem::path& path,
     const TrainingOptions& options = {});
+
+// Render GGGS median-depth/normal maps, fuse them across the registered
+// cameras, then run the selected MVS surface backend and topology cleanup.
+// This path is independent of PatchMatch photometric NCC.
+GggsMeshResult extract_gggs_mesh(
+    const GaussianModel& model, const mvs::MvsScene& scene,
+    const TrainingOptions& training_options = {},
+    const GggsMeshOptions& mesh_options = {});
 
 }  // namespace aetherscan::splat

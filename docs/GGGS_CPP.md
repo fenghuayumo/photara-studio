@@ -1,6 +1,6 @@
 # GGGS C++ / TinyTensor 后端
 
-## 当前实现状态（2026-07-21）
+## 当前实现状态（2026-07-22）
 
 AetherScan 已有一条可编译、可前反向传播、可由 CLI 启动的 GGGS 训练路径：
 
@@ -30,8 +30,11 @@ images + COLMAP sparse model ─────────────────
 
 模型使用可训练的世界坐标均值、log-scale、四元数、opacity logit 和最高三阶 SH。
 稠密点云法线用于初始化 Gaussian 朝向，像素足迹用于初始化尺度，点色用于初始化 SH0。
-训练损失包含与 `pygsplat/simple_trainer.py` 对齐的 `0.8 * L1 + 0.2 * SSIM` 光度项、相对
-MVS depth、camera-space normal consistency，以及可选 mask/alpha loss；所有参数通过显式
+训练损失包含与 `pygsplat/simple_trainer.py` 对齐的 `0.8 * L1 + 0.2 * SSIM` 光度项和可选
+mask/alpha loss。mesh 模式默认在第 7,000 步启用权重 `0.05` 的 GGGS depth-normal
+self-consistency：从 median depth 反投影中心四邻域，以 `cross(dy, dx)` 求 depth normal，
+再最小化 `mean(1-dot(rendered_normal, depth_normal))`；梯度同时回传 rendered normal 和
+median depth。所有参数通过显式
 GGGS backward 和 TinyTensor Adam 更新。SSIM 已完整移植 Python fused-ssim 的 11×11
 Gaussian separable CUDA forward/backward 和 `padding="valid"` 边界语义，不依赖 LibTorch；
 mask 会在计算 L1/SSIM 前同时作用于预测图和目标图。13×13 确定性输入的 loss、中心梯度、
@@ -104,6 +107,21 @@ FasterGS wrapper 使用 `resizeFunctional<true>`；若 C++ 使用未初始化的
 `atomicAdd` 会累积旧的 conic/opacity 梯度，使 opacity 中位数错误升到约 0.96，loss
 无法下降。回归测试会连续执行两次相同 backward 并比较 opacity gradient，防止复发。
 
+同一修复也已在完整稠密路径上回归：preview MVS 融合 2,200,863 个点，均匀选择
+500,000 个 Gaussian，关闭动态致密化，并在前 1,000 步优化结构参数、后续仅优化逐级开放的
+SH。10,000 步训练耗时 47.13 秒，随机训练视图上的总 loss 从 0.06081 降到 0.00433；三个
+固定视角在 1,000 / 5,000 / 10,000 步的 masked PSNR 分别为：
+
+| 步数 | view 0 | view 38 | view 75 |
+|---:|---:|---:|---:|
+| 1,000 | 29.11 dB | 35.64 dB | 33.51 dB |
+| 5,000 | 29.80 dB | 36.68 dB | 34.87 dB |
+| 10,000 | 30.01 dB | 36.86 dB | 35.43 dB |
+
+10,000 步的严格前景像素 PSNR 为 24.82 / 31.71 / 30.25 dB。渲染未出现几何破洞、针刺或
+opacity 塌缩；因此稠密输入的默认 10,000 步、500,000 Gaussian 固定拓扑配置可以作为当前
+质量基线，暂不需要启用 `dense_adaptive`。
+
 稀疏 COLMAP 路径默认与 pygsplat 一致：使用原始三近邻 RMS scale 和随机 raw
 quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN scale 很大的离群点，
 正常训练由后续 prune 移除；固定拓扑稳健性实验可显式加
@@ -153,9 +171,9 @@ aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
 避免背景意外进入模型。日志会单独输出 `rgb/alpha/depth/normal` 四项 loss。
 默认将最大 Gaussian 尺度限制为场景范围的 `0.002`，防止 splat 扩张到背景并形成不透明
 雾层；可通过 `--gggs-max-scale-fraction` 显式调整。
-稠密输入的结构参数在前 1,000 步完成 warm-up，随后冻结 mean/scale/quaternion/opacity Adam，
-避免长训练破坏已经较准确的 MVS 表面；SH 颜色参数继续训练，`dense_adaptive` 的受限回收和
-切平面二分也仍可执行。
+纯光度稠密输入可在前 1,000 步 warm-up 后冻结 mean/scale/quaternion/opacity Adam；启用
+depth-normal 几何目标时会自动取消该冻结，使第 7,000 步后的几何梯度能够继续更新结构参数。
+SH 颜色参数始终继续训练，`dense_adaptive` 的受限回收和切平面二分也仍可执行。
 
 `D:\ScanVideo\ori_img` 的 76/76 个 sibling masks 已用 `transparent` 模式完成 preview MVS +
 500,000 Gaussian / 300 步真实回归：alpha loss 从 0.03934 降到第 200 步的 0.00223，三个
@@ -213,25 +231,42 @@ ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-fai
 - Adam 的一阶矩、二阶矩和参数更新使用单 kernel，SH0/SH-rest 在同一 launch 中使用不同学习率；
 - forward context 保留 geometry/binning/image/tile buffer，backward 不重复预处理。
 
-目前为了避免每步磁盘 IO，训练开始时会把全部训练图、MVS depth、normal、mask 常驻 GPU。
+目前为了避免每步磁盘 IO，训练开始时会把全部训练图、mask，以及启用直接 MVS 监督时所需的
+MVS depth/normal 常驻 GPU。
 中小场景速度优先时合理；大场景需要改成 pinned-host 预取、有限 VRAM cache 和多 CUDA stream，
 否则显存会随视图数量线性增长。
 
-## 尚未完成的产品阶段
+## 当前几何交付与后续工作
 
-当前版本是“可训练 GGGS backend”，还不是文档总流程中的最终几何交付：
+当前版本已打通 GGGS mesh extraction：训练后渲染每个相机的 median depth、normal 和 alpha，
+使用输入 mask 与 alpha 阈值抑制背景，并以同一 depth-normal 公式拒绝夹角超过 60°的内部
+强不一致样本；随后复用 MVS 相机模型、邻接、深度一致性融合和统一 Clean，
+再用稀疏 TSDF + marching tetrahedra 抽取单一隐式表面。`--gggs --mesh` 会把
+`active_mesh` 切换为 `*_gggs_mesh.ply`，不再使用 projective MVS patch mesh。
 
-- 未移植 Python wrapper 中的 PatchMatch sample-depth/refine 分支；目前直接使用 AetherScan MVS
-  depth/normal 监督；
+若构建时找到 CGAL，AetherScan 还会先内存调用 asdiff_render 的 Instant Meshes
+field-aligned remesh，再调用 `asdiff::mesh::repair_and_decimate`，默认压到 1,000,000 面；
+Instant 的 quad-dominant 目标会按最终三角面数的一半设置，remesh 与 CGAL 后都会剔除微小
+边连通碎片。
+`--mesh-remesh=false` 可跳过重拓扑做 A/B，`--mesh-target-faces 0` 可关闭整个后处理。
+
+`D:\ScanVideo\ori_img\images` 的 76 视角稠密初始化 / 500,000 Gaussian / 10,000 步实测中，
+第 7,000 步开启几何项后 normal loss 从 `0.004108` 降至 `0.000700`；三个固定视角 masked
+PSNR 为 `30.44 / 36.96 / 35.98 dB`。depth-normal 提取过滤拒绝 `146,061 / 7,420,379`
+个可比较样本（1.97%）；最终网格为 515,644 顶点、995,937 三角形、单边连通分量、绕序一致、
+0 条非流形边。网格仍有 37,689 条开放边，因此当前交付是开放表面而不是 watertight 实体。
+
+仍未完成的产品工作：
+
+- 未移植 Python wrapper 中的 PatchMatch sample-depth/refine 分支；默认几何目标是与 Python
+  GGGS 对齐的自监督 depth-normal consistency，AetherScan MVS depth/normal 直接监督仅为可选项；
 - ADC-IGS 当前以 raster refine weight、可见度和屏幕半径构造投影优先级，尚未实现 Python
   版本基于 Sobel/逐像素误差反投影的完整 edge/error ownership map；
-- 未实现 GGGS 最终 mesh extraction，因此 `active_mesh` 尚不会切换到 GGGS mesh，纹理仍作用于
-  MVS mesh；
 - 未实现 checkpoint/resume、out-of-core view cache、多 GPU 和 mixed precision；
 - 还需要更多数据集的质量基准和 30k 步动态致密化稳定性验证。
 
-建议后续按“ADC-IGS pixel ownership → checkpoint/streaming → GGGS mesh extraction → active_mesh
-切换 → 多 GPU/图捕获”的顺序推进。
+建议后续按“TSDF 边界/体素参数回归 → ADC-IGS pixel ownership → checkpoint/streaming →
+多 GPU/图捕获”的顺序推进。
 
 ## 许可证边界
 

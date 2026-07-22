@@ -48,7 +48,8 @@ void chain_parameter_gradients(
 
 LossGradients compute_training_loss(
     const RenderResult& rendered, const TrainingView& target,
-    const TrainingOptions& options, bool collect_scalar_terms);
+    const TrainingOptions& options, bool collect_scalar_terms,
+    bool depth_normal_active = false);
 
 AdamState make_adam_state(const tinytensor::Tensor& parameter);
 

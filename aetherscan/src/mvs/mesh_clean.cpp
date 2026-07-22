@@ -128,8 +128,11 @@ void orient_components(std::vector<Eigen::Vector3i>& faces) {
 }
 
 void remove_small_components(
-    std::vector<Eigen::Vector3i>& faces, const unsigned minimum_faces) {
-    if (faces.empty() || minimum_faces <= 1) return;
+    std::vector<Eigen::Vector3i>& faces, const unsigned minimum_faces,
+    const float minimum_largest_fraction) {
+    if (faces.empty() ||
+        (minimum_faces <= 1 && !(minimum_largest_fraction > 0.F)))
+        return;
     const Connectivity connectivity = build_connectivity(faces);
     std::vector<int> component(faces.size(), -1);
     std::vector<unsigned> sizes;
@@ -155,10 +158,18 @@ void remove_small_components(
         }
         sizes.push_back(size);
     }
+    const unsigned largest =
+        sizes.empty() ? 0U : *std::max_element(sizes.begin(), sizes.end());
+    const unsigned relative_minimum = minimum_largest_fraction > 0.F
+        ? static_cast<unsigned>(std::ceil(
+              static_cast<float>(largest) * minimum_largest_fraction))
+        : 0U;
+    const unsigned effective_minimum =
+        std::max(minimum_faces, relative_minimum);
     std::vector<Eigen::Vector3i> kept;
     kept.reserve(faces.size());
     for (std::size_t i = 0; i < faces.size(); ++i)
-        if (sizes[static_cast<std::size_t>(component[i])] >= minimum_faces)
+        if (sizes[static_cast<std::size_t>(component[i])] >= effective_minimum)
             kept.push_back(faces[i]);
     faces = std::move(kept);
 }
@@ -639,7 +650,11 @@ void clean_mesh(
     if (options.mesh_method == MeshMethod::delaunay_cut)
         remove_scale_spurious_geometry(
             mesh, options.mesh_spurious_factor, roi_boundary);
-    remove_small_components(mesh.faces, options.mesh_min_component_faces);
+    remove_small_components(
+        mesh.faces, options.mesh_min_component_faces,
+        options.mesh_method == MeshMethod::tsdf
+            ? options.mesh_tsdf_min_component_fraction
+            : 0.F);
     orient_components(mesh.faces);
     const unsigned spikes = options.mesh_method == MeshMethod::delaunay_cut &&
             options.mesh_remove_spikes

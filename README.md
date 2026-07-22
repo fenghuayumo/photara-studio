@@ -170,10 +170,14 @@ MVS 中表现为轮廓双层、底座重叠或缺失。程序会在输出旁生�
 
 CPU PatchMatch 会一次缓存所有图像金字塔，并默认同时处理 8 个参考视图；每个视图内部再按
 8 行 tile 做 red/black 并行传播。可用 `--patchmatch-concurrent-views` 和
-`--patchmatch-tile-rows` 调整。`--mesh-method auto` 在 preview 使用快速 projective mesh，
-在 default/high 使用 CGAL 全局 Delaunay visibility graph-cut；未构建 CGAL 时明确告警并回退
-projective。全局图的输入上限由 `--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。
-两种 mesh backend 都会经过统一 Clean。
+`--patchmatch-tile-rows` 调整。`--mesh-method auto` 在 GGGS 路径使用 median-depth TSDF，
+MVS-only preview 使用快速 projective mesh，default/high 使用 CGAL 全局 Delaunay visibility
+graph-cut。全局图的输入上限由 `--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。
+三个 mesh backend 都会经过统一 Clean；构建了 `asdiff::mesh` 时，GGGS mesh 随后默认执行
+Instant Meshes field-aligned remesh 和 CGAL repair/decimate。`--mesh-target-faces` 默认目标为
+1,000,000 面；Instant 的 quad 目标自动换算为约一半，重拓扑前后会清理微小连通碎片。
+`--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 asdiff 后处理。GGGS mesh 模式
+默认在第 7,000 步开启权重 0.05 的 median-depth/rendered-normal 几何一致性优化。
 
 - `scene.mvs`：OpenMVS Interface（MVSI），可用 OpenMVS Viewer 打开验证相机与稀疏点
 - `scene.ply`：稀疏 XYZ；写出 PLY 时会额外生成同名 `scene.mvs`

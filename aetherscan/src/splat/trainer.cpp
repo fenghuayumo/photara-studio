@@ -1060,11 +1060,16 @@ GaussianModel Trainer::train(
                 : (iteration - 1) / options_.sh_degree_interval);
         raster_options.kernel_size = options_.kernel_size;
         raster_options.scale_modifier = options_.scale_modifier;
+        const bool depth_normal_active = options_.use_depth_normal_loss &&
+            options_.depth_normal_weight > 0.F &&
+            iteration >= options_.depth_normal_from_iter;
         raster_options.require_depth = options_.use_mvs_depth ||
-                                       options_.use_mvs_normals;
+                                       options_.use_mvs_normals ||
+                                       depth_normal_active;
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
         detail::LossGradients loss = detail::compute_training_loss(
-            rendered, target, options_, report_progress);
+            rendered, target, options_, report_progress,
+            depth_normal_active);
         ModelGradients gradients = rasterizer.backward(
             model, rendered, loss.color, loss.alpha, loss.depth, loss.normal);
         if (densification_enabled)

@@ -79,6 +79,12 @@ struct TrainingOptions {
     float ssim_weight{0.2F};
     float depth_weight{0.05F};
     float normal_weight{0.01F};
+    // GGGS meshing loss from the Python reference: cosine consistency between
+    // the rasterized Gaussian normal and the normal differentiated from the
+    // rendered median-depth map.
+    bool use_depth_normal_loss{false};
+    float depth_normal_weight{0.05F};
+    unsigned depth_normal_from_iter{7'000};
     // Match pygsplat's mask-training controls. In masked mode RGB is supervised
     // only in the foreground and background alpha leakage is penalized. In
     // transparent mode the same foreground RGB loss is combined with full-image

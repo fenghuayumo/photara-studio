@@ -167,6 +167,99 @@ __global__ void loss_kernel(
     }
 }
 
+__device__ float3 subtract3(const float3 a, const float3 b) {
+    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+__device__ float3 cross3(const float3 a, const float3 b) {
+    return make_float3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x);
+}
+
+__device__ float dot3(const float3 a, const float3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+__device__ float3 scale3(const float3 value, const float scale) {
+    return make_float3(value.x * scale, value.y * scale, value.z * scale);
+}
+
+__global__ void depth_normal_consistency_kernel(
+    const float* depth, const float* normal, float* grad_depth,
+    float* grad_normal, float* terms, const std::uint32_t width,
+    const std::uint32_t height, const float fx, const float fy,
+    const float cx, const float cy, const float weight) {
+    const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    if (pixel >= pixels) return;
+    const std::uint32_t x = static_cast<std::uint32_t>(pixel % width);
+    const std::uint32_t y = static_cast<std::uint32_t>(pixel / width);
+    if (x == 0 || y == 0 || x + 1 >= width || y + 1 >= height)
+        return;
+
+    const std::size_t top = pixel - width;
+    const std::size_t bottom = pixel + width;
+    const std::size_t left = pixel - 1;
+    const std::size_t right = pixel + 1;
+    if (!(depth[pixel] > 0.F && depth[top] > 0.F && depth[bottom] > 0.F &&
+          depth[left] > 0.F && depth[right] > 0.F))
+        return;
+
+    const auto point = [&](const std::uint32_t px, const std::uint32_t py,
+                           const float d) {
+        return make_float3(
+            (static_cast<float>(px) - cx) / fx * d,
+            (static_cast<float>(py) - cy) / fy * d, d);
+    };
+    const float3 point_top = point(x, y - 1, depth[top]);
+    const float3 point_bottom = point(x, y + 1, depth[bottom]);
+    const float3 point_left = point(x - 1, y, depth[left]);
+    const float3 point_right = point(x + 1, y, depth[right]);
+    const float3 dy = subtract3(point_bottom, point_top);
+    const float3 dx = subtract3(point_right, point_left);
+    const float3 cross = cross3(dy, dx);
+    const float length_squared = dot3(cross, cross);
+    if (!(length_squared > 1e-20F) || !isfinite(length_squared)) return;
+    const float inverse_length = rsqrtf(length_squared);
+    const float3 depth_normal = scale3(cross, inverse_length);
+    const float3 raster_normal = make_float3(
+        normal[pixel], normal[pixels + pixel],
+        normal[2 * pixels + pixel]);
+    const float normalization = weight / static_cast<float>(pixels);
+    const float loss = normalization *
+        (1.F - dot3(raster_normal, depth_normal));
+    if (terms) atomicAdd(terms + 2, loss);
+
+    atomicAdd(grad_normal + pixel, -normalization * depth_normal.x);
+    atomicAdd(
+        grad_normal + pixels + pixel,
+        -normalization * depth_normal.y);
+    atomicAdd(
+        grad_normal + 2 * pixels + pixel,
+        -normalization * depth_normal.z);
+
+    // Backpropagate through normalize(cross(dy, dx)), matching PyTorch's
+    // autograd path in gggs_depth_to_normal.
+    const float3 grad_unit = scale3(raster_normal, -normalization);
+    const float projection = dot3(depth_normal, grad_unit);
+    const float3 grad_cross = scale3(
+        subtract3(grad_unit, scale3(depth_normal, projection)),
+        inverse_length);
+    const float3 grad_dy = cross3(dx, grad_cross);
+    const float3 grad_dx = cross3(grad_cross, dy);
+    const auto ray = [&](const std::uint32_t px, const std::uint32_t py) {
+        return make_float3(
+            (static_cast<float>(px) - cx) / fx,
+            (static_cast<float>(py) - cy) / fy, 1.F);
+    };
+    atomicAdd(grad_depth + bottom, dot3(grad_dy, ray(x, y + 1)));
+    atomicAdd(grad_depth + top, -dot3(grad_dy, ray(x, y - 1)));
+    atomicAdd(grad_depth + right, dot3(grad_dx, ray(x + 1, y)));
+    atomicAdd(grad_depth + left, -dot3(grad_dx, ray(x - 1, y)));
+}
+
 __global__ void adam_kernel(
     float* parameter, const float* gradient, float* first, float* second,
     const std::size_t count, const float learning_rate,
@@ -427,7 +520,8 @@ void chain_parameter_gradients(
 
 LossGradients compute_training_loss(
     const RenderResult& rendered, const TrainingView& target,
-    const TrainingOptions& options, const bool collect_scalar_terms) {
+    const TrainingOptions& options, const bool collect_scalar_terms,
+    const bool depth_normal_active) {
     const std::size_t pixels = static_cast<std::size_t>(target.camera.width) *
                                target.camera.height;
     LossGradients result{
@@ -464,6 +558,18 @@ LossGradients compute_training_loss(
             ssim_weight, options.photometric_weight, result.color,
             collect_scalar_terms ? terms.ptr<float>() : nullptr,
             target.camera.width, target.camera.height);
+    if (depth_normal_active && options.depth_normal_weight > 0.F) {
+        depth_normal_consistency_kernel<<<
+            (pixels + k_threads - 1) / k_threads, k_threads>>>(
+            rendered.median_depth.ptr<float>(), rendered.normal.ptr<float>(),
+            result.depth.ptr<float>(), result.normal.ptr<float>(),
+            collect_scalar_terms ? terms.ptr<float>() : nullptr,
+            target.camera.width, target.camera.height, target.camera.fx,
+            target.camera.fy, target.camera.cx, target.camera.cy,
+            options.depth_normal_weight);
+        check_cuda(
+            cudaGetLastError(), "compute GGGS depth-normal consistency");
+    }
     if (collect_scalar_terms) {
         std::array<float, 4> host{};
         check_cuda(cudaMemcpy(
