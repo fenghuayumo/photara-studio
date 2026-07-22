@@ -268,7 +268,7 @@ SceneGeometry training_scene_geometry(
     SceneGeometry geometry{
         std::max((maximum - minimum).norm(), 1e-6F),
         0.5F * (minimum + maximum)};
-    if (dense_input || scene.views.empty()) return geometry;
+    if (scene.views.empty()) return geometry;
 
     // Match pygsplat's COLMAP convention: optimization scale is measured from
     // camera centers, not the untrimmed sparse-point AABB. A handful of bad
@@ -282,9 +282,11 @@ SceneGeometry training_scene_geometry(
         camera_center += position;
         ++finite_cameras;
     }
-    if (finite_cameras == 0)
+    if (finite_cameras == 0) {
+        if (dense_input) return geometry;
         throw std::invalid_argument(
             "Sparse GGGS training requires at least one finite camera center");
+    }
     camera_center /= static_cast<float>(finite_cameras);
     float camera_radius = 0.F;
     for (const auto& view : scene.views) {
@@ -293,9 +295,11 @@ SceneGeometry training_scene_geometry(
             camera_radius = std::max(
                 camera_radius, (position - camera_center).norm());
     }
-    if (!(camera_radius > 1e-6F) || !std::isfinite(camera_radius))
+    if (!(camera_radius > 1e-6F) || !std::isfinite(camera_radius)) {
+        if (dense_input) return geometry;
         throw std::invalid_argument(
             "Sparse GGGS training requires non-degenerate camera coverage");
+    }
     return {1.1F * camera_radius, camera_center};
 }
 

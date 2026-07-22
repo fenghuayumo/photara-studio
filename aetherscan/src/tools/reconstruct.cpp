@@ -1220,7 +1220,11 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     options.ssim_weight = cli.gggs_ssim_weight;
     options.minimum_scale_fraction = cli.gggs_min_scale_fraction;
     options.maximum_scale_fraction = cli.gggs_max_scale_fraction;
-    options.constrain_scale_range = dense_input || cli.gggs_constrain_scales;
+    // pygsplat leaves Gaussian scales unconstrained for dense point-cloud
+    // initialization. Retain the safety clamp only when explicitly requested;
+    // forcing it for every dense input clips tangential splats and removes
+    // legitimate surface coverage in sparsely sampled detail regions.
+    options.constrain_scale_range = cli.gggs_constrain_scales;
     options.max_scale_ratio = cli.gggs_max_scale_ratio;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
@@ -1228,9 +1232,10 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         cli.gggs_depth_normal_weight > 0.F;
     options.depth_normal_weight = cli.gggs_depth_normal_weight;
     options.depth_normal_from_iter = cli.gggs_geometry_from_iter;
-    // The Python GGGS meshing preset starts geometry at 7k and keeps the
-    // structural parameters trainable. The photometric-only dense warm-up
-    // freeze would otherwise make this loss a no-op.
+    // Keep structural parameters trainable while the geometry loss is active.
+    // A 3k start matches the Python run only when its multi-view PatchMatch
+    // losses are also enabled; depth-normal consistency alone was measurably
+    // over-smoothing on the dense initializer, so the C++ default remains 7k.
     if (options.use_depth_normal_loss && dense_input)
         options.dense_structure_freeze_iter = 0;
     const char* effective_strategy = !options.enable_densification

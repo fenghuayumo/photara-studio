@@ -165,16 +165,16 @@ GggsMeshResult extract_gggs_mesh(
     mvs::DensifyOptions fusion_options = mesh_options.fusion;
     fusion_options.build_mesh = true;
     const float scene_extent = camera_scene_extent(scene);
-    const float maximum_depth = mesh_options.max_depth > 0.F
+    const float allowed_maximum_depth = mesh_options.max_depth > 0.F
         ? mesh_options.max_depth
         : 2.F * scene_extent;
     if (fusion_options.mesh_method == mvs::MeshMethod::tsdf) {
         // gs2mesh.py resolves the same automatic values before constructing
         // Open3D's ScalableTSDFVolume.
         if (!(fusion_options.mesh_tsdf_voxel_size > 0.F) &&
-            maximum_depth > 0.F)
+            allowed_maximum_depth > 0.F)
             fusion_options.mesh_tsdf_voxel_size =
-                maximum_depth / 2048.F *
+                allowed_maximum_depth / 2048.F *
                 std::max(fusion_options.mesh_tsdf_voxel_scale, 1e-6F);
         fusion_options.mesh_tsdf_truncation_voxels = 4.F;
         fusion_options.mesh_tsdf_min_component_fraction = 1.F;
@@ -245,7 +245,7 @@ GggsMeshResult extract_gggs_mesh(
         depth_map.resize(geometry_view.width, geometry_view.height);
         geometry_view.foreground_mask.assign(pixels, 0);
         float minimum_depth = std::numeric_limits<float>::infinity();
-        float maximum_depth = 0.F;
+        float observed_maximum_depth = 0.F;
         for (std::uint32_t y = 0; y < geometry_view.height; ++y) {
             for (std::uint32_t x = 0; x < geometry_view.width; ++x) {
                 const std::size_t pixel =
@@ -257,14 +257,30 @@ GggsMeshResult extract_gggs_mesh(
                     (!target.has_mask &&
                      alpha[pixel] < mesh_options.alpha_threshold) ||
                     !std::isfinite(d) || d <= 0.F ||
-                    (maximum_depth > 0.F && d > maximum_depth))
+                    (allowed_maximum_depth > 0.F &&
+                     d > allowed_maximum_depth))
                     continue;
                 mvs::Vec3f n{
                     normal[pixel], normal[pixels + pixel],
                     normal[2 * pixels + pixel]};
-                if (!n.allFinite() || n.squaredNorm() < 0.25F) continue;
-                n.normalize();
-                if (mesh_options.min_depth_normal_cosine >= -1.F && x > 0 &&
+                const bool valid_normal = n.allFinite() &&
+                    n.squaredNorm() >= 0.25F;
+                const bool filter_by_normal =
+                    mesh_options.min_depth_normal_cosine >= -1.F;
+                const bool fusion_requires_normal =
+                    fusion_options.mesh_method != mvs::MeshMethod::tsdf;
+                // Open3D/gs2mesh integrates valid depth even when the GGGS
+                // rendered normal is undefined. TSDF does not consume normals,
+                // so rejecting those pixels creates holes and loses surface
+                // detail for no geometric benefit.
+                if (!valid_normal &&
+                    (filter_by_normal || fusion_requires_normal))
+                    continue;
+                if (valid_normal)
+                    n.normalize();
+                else
+                    n = -mvs::Vec3f::UnitZ();
+                if (filter_by_normal && x > 0 &&
                     x + 1 < geometry_view.width && y > 0 &&
                     y + 1 < geometry_view.height) {
                     const auto point_at = [&](const std::uint32_t px,
@@ -318,14 +334,14 @@ GggsMeshResult extract_gggs_mesh(
                     fusion_options.ncc_keep_threshold);
                 geometry_view.foreground_mask[pixel] = 1;
                 minimum_depth = std::min(minimum_depth, d);
-                maximum_depth = std::max(maximum_depth, d);
+                observed_maximum_depth = std::max(observed_maximum_depth, d);
                 ++valid_depth_pixels;
             }
         }
         depth_map.depth_min = std::isfinite(minimum_depth)
             ? minimum_depth
             : 0.F;
-        depth_map.depth_max = maximum_depth;
+        depth_map.depth_max = observed_maximum_depth;
     }
     render_stage.finish();
 
@@ -334,7 +350,7 @@ GggsMeshResult extract_gggs_mesh(
         " valid_pixels=", valid_depth_pixels,
         " alpha_threshold=", mesh_options.alpha_threshold,
         " scene_extent=", scene_extent,
-        " max_depth=", maximum_depth,
+        " max_depth=", allowed_maximum_depth,
         " tsdf_voxel=", fusion_options.mesh_tsdf_voxel_size,
         " depth_normal_compared=", compared_depth_normal_pixels,
         " depth_normal_rejected=", rejected_depth_normal_pixels,
