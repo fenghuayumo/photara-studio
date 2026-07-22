@@ -982,6 +982,12 @@ bool repair_and_decimate_mesh(
     aetherscan::mvs::Mesh& mesh, const std::uint64_t target_faces,
     const bool use_instant_remesh) {
     if (target_faces == 0 || mesh.faces.empty()) return false;
+    if (mesh.faces.size() <= target_faces) {
+        aetherscan::core::Logger::instance().info(
+            "mesh target postprocess skipped: input_faces=", mesh.faces.size(),
+            " target_faces=", target_faces);
+        return false;
+    }
     if (mesh.vertices.size() >
         static_cast<std::size_t>(
             (std::numeric_limits<std::uint32_t>::max)()))
@@ -1550,7 +1556,7 @@ int main(int argc, char** argv) {
                             cli.mesh_remesh);
                     } catch (const std::exception& error) {
                         aetherscan::core::Logger::instance().warning(
-                            "asdiff mesh postprocess failed; retaining TSDF "
+                            "asdiff mesh postprocess failed; retaining cleaned "
                             "mesh: ", error.what());
                     }
                 }
@@ -1558,7 +1564,7 @@ int main(int argc, char** argv) {
                 if (cli.gggs && cli.mesh_target_faces > 0)
                     aetherscan::core::Logger::instance().warning(
                         "asdiff mesh postprocess unavailable (CGAL mesh tools "
-                        "were not built); retaining cleaned TSDF mesh");
+                        "were not built); retaining cleaned mesh");
 #endif
                 const std::string mesh_tag = cli.gggs
                     ? "_gggs_mesh"

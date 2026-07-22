@@ -714,6 +714,94 @@ void test_gggs_depth_normal_consistency() {
         "GGGS median-depth gradient differs from Python autograd");
 }
 
+void test_gggs_depth_normal_parameter_gradients() {
+    using namespace aetherscan::splat;
+    constexpr std::size_t side = 32;
+    constexpr std::size_t pixels = side * side;
+    const auto make_model = [](const float z_offset) {
+        GaussianModel model;
+        model.means = tinytensor::Tensor::from_vector(
+            std::vector<float>{
+                -0.07F, -0.02F, 2.00F + z_offset,
+                 0.08F,  0.03F, 2.08F},
+            {2, 3}, tinytensor::Device::CUDA);
+        model.log_scales = tinytensor::Tensor::from_vector(
+            std::vector<float>{
+                std::log(0.20F), std::log(0.16F), std::log(0.035F),
+                std::log(0.18F), std::log(0.15F), std::log(0.030F)},
+            {2, 3}, tinytensor::Device::CUDA);
+        model.quaternions = tinytensor::Tensor::from_vector(
+            std::vector<float>{
+                0.98480775F, 0.F, 0.17364818F, 0.F,
+                0.97629601F, -0.08583165F, -0.17298739F, 0.01513444F},
+            {2, 4}, tinytensor::Device::CUDA);
+        model.opacity_logits = tinytensor::Tensor::from_vector(
+            std::vector<float>{1.5F, 1.2F}, {2, 1},
+            tinytensor::Device::CUDA);
+        model.sh = tinytensor::Tensor::from_vector(
+            std::vector<float>{0.4F, 0.3F, 0.2F, 0.2F, 0.3F, 0.4F},
+            {2, 1, 3}, tinytensor::Device::CUDA);
+        model.sh_degree = 0;
+        return model;
+    };
+
+    Camera camera;
+    camera.world_to_camera[0] = 1.F;
+    camera.world_to_camera[5] = 1.F;
+    camera.world_to_camera[10] = 1.F;
+    camera.world_to_camera[15] = 1.F;
+    camera.fx = camera.fy = 45.F;
+    camera.cx = camera.cy = 15.5F;
+    camera.width = camera.height = side;
+
+    TrainingView target;
+    target.camera = camera;
+    target.rgb = tinytensor::Tensor::zeros(
+        {3, side, side}, tinytensor::Device::CUDA);
+    target.depth = tinytensor::Tensor::zeros(
+        {side, side}, tinytensor::Device::CUDA);
+    target.normal = tinytensor::Tensor::zeros(
+        {3, side, side}, tinytensor::Device::CUDA);
+    target.mask = tinytensor::Tensor::from_vector(
+        std::vector<float>(pixels, 1.F), {side, side},
+        tinytensor::Device::CUDA);
+
+    TrainingOptions options;
+    options.photometric_weight = 0.F;
+    options.ssim_weight = 0.F;
+    options.use_depth_normal_loss = true;
+    options.depth_normal_weight = 0.05F;
+    RasterizeOptions raster_options;
+    raster_options.require_depth = true;
+
+    GaussianModel model = make_model(0.F);
+    Rasterizer rasterizer;
+    const RenderResult rendered = rasterizer.forward(
+        model, camera, raster_options);
+    const auto loss = detail::compute_training_loss(
+        rendered, target, options, true, true);
+    const ModelGradients gradients = rasterizer.backward(
+        model, rendered, loss.color, loss.alpha, loss.depth, loss.normal);
+    const float analytic = gradients.means.to_vector()[2];
+
+    const auto evaluate = [&](const float offset) {
+        const auto candidate = make_model(offset);
+        const auto candidate_rendered = Rasterizer().forward(
+            candidate, camera, raster_options);
+        return detail::compute_training_loss(
+            candidate_rendered, target, options, true, true).normal_value;
+    };
+    constexpr float epsilon = 2e-4F;
+    const float numeric =
+        (evaluate(epsilon) - evaluate(-epsilon)) / (2.F * epsilon);
+    const float scale = std::max({std::abs(analytic), std::abs(numeric), 1e-5F});
+    require(
+        std::isfinite(analytic) && std::isfinite(numeric) &&
+            std::abs(analytic - numeric) / scale < 0.08F,
+        "GGGS depth-normal loss does not backpropagate through median depth "
+        "and raster normals into Gaussian means");
+}
+
 void test_densification_strategies_and_dense_bypass() {
     using namespace aetherscan;
     const auto root = std::filesystem::temp_directory_path() /
@@ -817,6 +905,7 @@ int main() {
         test_mask_loss_modes();
         test_ssim_loss_and_scale_constraint();
         test_gggs_depth_normal_consistency();
+        test_gggs_depth_normal_parameter_gradients();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";
         return 0;

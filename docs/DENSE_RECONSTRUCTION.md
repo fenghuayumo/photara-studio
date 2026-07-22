@@ -215,17 +215,17 @@ TSDF，在 MVS-only 的 `default/high` 选择全局 Delaunay，在 `preview` 选
 --mesh-method auto|tsdf|projective|delaunay
 --mesh-max-points 2000000       # 0 表示不设上限
 --mesh-target-faces 1000000     # asdiff/CGAL repair + decimate；0 关闭
---mesh-remesh true              # 先执行 Instant Meshes field-aligned remesh
+--mesh-remesh true              # 超过目标面数时先执行 Instant Meshes remesh
 --mesh-free-space-support true  # OpenMVS weak-surface beta/gamma 强化
 --mesh-free-space-quantile 0.95 # 融合权重到 OpenMVS 能量尺度的校准分位数
 ```
 
 后续几何处理顺序固定为：`Delaunay cut → Clean/manifold → photometric mesh refinement
 → 可选交付级简化/重拓扑 → UV/贴图`。photometric refinement 前不默认简化，否则会先丢失
-其需要优化的小尺度自由度。工程在找到 CGAL 时同时构建并链接 `asdiff::mesh`，GGGS TSDF +
-Clean 后默认先调用 Instant Meshes field-aligned remesh，再调用保边界的
-`repair_and_decimate`；未找到 CGAL 时保留 Clean 后的 TSDF 并记录明确告警。可用
-`--mesh-remesh=false` 做不重拓扑的质量 A/B。
+其需要优化的小尺度自由度。工程在找到 CGAL 时同时构建并链接 `asdiff::mesh`。GGGS mesh
+超过目标面数时先调用 Instant Meshes field-aligned remesh，再调用保边界的
+`repair_and_decimate`；若已经低于目标面数则保留 Clean 结果，不再做目标面数后处理。未找到
+CGAL 时保留 Clean 后的 TSDF 并记录明确告警。可用 `--mesh-remesh=false` 做不重拓扑的质量 A/B。
 
 ---
 
