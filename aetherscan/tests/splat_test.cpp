@@ -139,6 +139,22 @@ void test_gggs_3d_filter() {
         require(std::abs(opacity_gradients[row] - 0.5F * opacities[row]) < 1e-6F,
                 "GGGS filtered-opacity logit gradient is incorrect");
     }
+
+    detail::bake_3d_filter(model);
+    require(
+        !model.filter_3d.is_valid(),
+        "GGGS 3D-filter bake did not clear the separate floor");
+    const auto baked = detail::activate_parameters(model);
+    const auto baked_scales = baked.scales.to_vector();
+    const auto baked_opacities = baked.opacities.to_vector();
+    for (std::size_t index = 0; index < scales.size(); ++index)
+        require(
+            std::abs(baked_scales[index] - scales[index]) < 1e-6F,
+            "GGGS 3D-filter bake changed the rendered scale");
+    for (std::size_t index = 0; index < opacities.size(); ++index)
+        require(
+            std::abs(baked_opacities[index] - opacities[index]) < 1e-6F,
+            "GGGS 3D-filter bake changed the rendered opacity");
 }
 
 void test_gggs_multi_view_geometry_and_ncc() {

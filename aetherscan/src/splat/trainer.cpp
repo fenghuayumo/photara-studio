@@ -648,6 +648,15 @@ RefinementCounts refine_gaussians(
         model.size() == 0)
         return {};
 
+    // Brush refines canonical parameters: the current Mip-Splatting floor is
+    // baked into scale/opacity before prune, replacement sampling and split.
+    // Keeping the floor separate here changes both the low-opacity set and the
+    // covariance inherited by children, which is especially visible as
+    // floaters in wide-baseline scenes.
+    if (options.densification_strategy ==
+        DensificationStrategy::adc_plus)
+        detail::bake_3d_filter(model);
+
     const std::size_t old_count = model.size();
     const auto gradients = download<float>(stats.gradient);
     const auto counts = download<float>(stats.count);
@@ -786,6 +795,20 @@ RefinementCounts refine_gaussians(
         ? options.densification_cap - model.size()
         : 0;
     if (capacity == 0) {
+        if (adc) {
+            const float remaining_progress = 1.F -
+                static_cast<float>(iteration) /
+                    std::max(1.F, static_cast<float>(options.iterations));
+            detail::apply_adc_decay(
+                model,
+                options.opacity_decay *
+                    std::max(remaining_progress, 0.F),
+                options.densification_strategy ==
+                        DensificationStrategy::adc_plus
+                    ? 0.F
+                    : options.scale_decay *
+                          std::max(remaining_progress, 0.F));
+        }
         stats = detail::make_densification_stats(model.size());
         return {0, pruned};
     }
@@ -1579,14 +1602,33 @@ GaussianModel Trainer::train(
         // The Mip-Splatting radius depends on Gaussian positions and count.
         // Refresh immediately after topology changes and periodically while
         // the means continue to move, matching pygsplat's GGGS schedule.
-        if (options_.use_3d_filter &&
-            (latest_refinement.grown != 0 || latest_refinement.pruned != 0 ||
-             (options_.filter_3d_update_interval != 0 &&
-              iteration % options_.filter_3d_update_interval == 0 &&
-              iteration + options_.filter_3d_update_interval <
-                  options_.iterations)))
-            model.filter_3d = detail::compute_3d_filter(
-                model.means, filter_cameras);
+        if (options_.use_3d_filter) {
+            const StrategyPreset preset = strategy_preset(options_);
+            const bool adc_plus_refine =
+                options_.densification_strategy ==
+                    DensificationStrategy::adc_plus &&
+                iteration > preset.start && iteration < preset.stop &&
+                preset.every != 0 && iteration % preset.every == 0;
+            // Brush refreshes the floor after each ADC+ refine until 90% of
+            // training. At 90% the old floor is baked one final time and the
+            // tail optimizes fixed canonical parameters.
+            const bool adc_plus_refresh =
+                adc_plus_refine &&
+                static_cast<float>(iteration) <
+                    0.9F * static_cast<float>(options_.iterations);
+            const bool other_refresh =
+                options_.densification_strategy !=
+                    DensificationStrategy::adc_plus &&
+                (latest_refinement.grown != 0 ||
+                 latest_refinement.pruned != 0 ||
+                 (options_.filter_3d_update_interval != 0 &&
+                  iteration % options_.filter_3d_update_interval == 0 &&
+                  iteration + options_.filter_3d_update_interval <
+                      options_.iterations));
+            if (adc_plus_refresh || other_refresh)
+                model.filter_3d = detail::compute_3d_filter(
+                    model.means, filter_cameras);
+        }
 
         bool continue_training = true;
         if (report_progress) {
@@ -1615,7 +1657,7 @@ GaussianModel Trainer::train(
                     opacity_gradients.size(), 1));
             continue_training = progress({
                 iteration, options_.iterations, model.size(),
-                view_indices[view_index], latest_refinement.grown,
+                view_index, latest_refinement.grown,
                 latest_refinement.pruned, loss.total, loss.rgb,
                 loss.alpha_value, loss.depth_value, loss.normal_value,
                 static_cast<float>(opacity_gradient_sum * inverse_gaussians),

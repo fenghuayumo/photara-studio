@@ -46,6 +46,11 @@ struct MultiViewLoss {
 
 ActivatedParameters activate_parameters(const GaussianModel& model);
 
+// Fold the Mip-Splatting 3D-filter floor into the canonical scale/opacity
+// parameters and clear model.filter_3d. Brush does this before every ADC+
+// refine so pruning and splitting operate on the rendered parameters.
+void bake_3d_filter(GaussianModel& model);
+
 tinytensor::Tensor compute_3d_filter(
     const tinytensor::Tensor& means,
     const std::vector<Camera>& cameras);

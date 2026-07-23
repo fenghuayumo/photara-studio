@@ -57,6 +57,29 @@ __global__ void activate_kernel(
         sigmoid(opacity_logits[index]) * determinant_ratio;
 }
 
+__global__ void bake_3d_filter_kernel(
+    float* log_scales, float* opacity_logits, const float* filter_3d,
+    const std::size_t count) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float filter_squared =
+        filter_3d[index] * filter_3d[index];
+    float determinant_ratio = 1.F;
+    for (int axis = 0; axis < 3; ++axis) {
+        const std::size_t offset = 3 * index + axis;
+        const float raw_scale = expf(log_scales[offset]);
+        const float filtered_scale = sqrtf(
+            raw_scale * raw_scale + filter_squared);
+        determinant_ratio *= raw_scale / filtered_scale;
+        log_scales[offset] = logf(fmaxf(filtered_scale, 1e-20F));
+    }
+    const float filtered_opacity = fminf(fmaxf(
+        sigmoid(opacity_logits[index]) * determinant_ratio,
+        1e-12F), 1.F - 1e-12F);
+    opacity_logits[index] =
+        logf(filtered_opacity / (1.F - filtered_opacity));
+}
+
 __global__ void chain_gradient_kernel(
     const float* log_scales, const float* raw_quaternions,
     const float* opacity_logits, const float* filter_3d,
@@ -927,6 +950,27 @@ ActivatedParameters activate_parameters(const GaussianModel& model) {
         result.quaternions.ptr<float>(), result.opacities.ptr<float>(), count);
     check_cuda(cudaGetLastError(), "activate GGGS parameters");
     return result;
+}
+
+void bake_3d_filter(GaussianModel& model) {
+    if (!model.filter_3d.is_valid()) return;
+    const std::size_t count = model.size();
+    if (model.filter_3d.device() != tinytensor::Device::CUDA ||
+        model.filter_3d.dtype() != tinytensor::DataType::Float32 ||
+        model.filter_3d.shape().rank() != 2 ||
+        model.filter_3d.shape()[0] != count ||
+        model.filter_3d.shape()[1] != 1)
+        throw std::invalid_argument(
+            "GGGS 3D filter must be CUDA float32 shaped [N,1]");
+    if (count != 0) {
+        bake_3d_filter_kernel<<<
+            (count + k_threads - 1) / k_threads, k_threads>>>(
+            model.log_scales.ptr<float>(),
+            model.opacity_logits.ptr<float>(),
+            model.filter_3d.ptr<float>(), count);
+        check_cuda(cudaGetLastError(), "bake GGGS 3D filter");
+    }
+    model.filter_3d = {};
 }
 
 tinytensor::Tensor compute_3d_filter(
