@@ -50,9 +50,6 @@ struct TrainingOptions {
     float adc_plus_growth_gradient_threshold{0.0025F};
     float adc_plus_growth_select_fraction{0.25F};
     float adc_plus_split_at_screen_size{0.5F};
-    // Keep the legacy host implementation available for deterministic
-    // Brush-parity investigations. The CUDA path avoids full tensor downloads.
-    bool adc_plus_gpu_refine{true};
     // Dense MVS points already cover the surface. Recycle only a small part of
     // the budget per refinement and grow more conservatively than sparse ADC.
     float dense_recycle_fraction{0.01F};

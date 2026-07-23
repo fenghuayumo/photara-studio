@@ -104,7 +104,6 @@ struct ReconstructCli {
     bool gggs_constrain_scales{false};
     std::string gggs_strategy{"default"};
     bool gggs_densification{true};
-    bool gggs_gpu_adc_plus_refine{true};
     unsigned gggs_structure_freeze_iter{0};
     std::uint64_t gggs_densification_cap{10'000'000};
     bool mesh{false};
@@ -250,7 +249,6 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
               << "  --gggs-strategy default|adc_plus|adc_igs|dense_adaptive\n"
               << "  --gggs-densification=BOOL  enable split/prune/reset (default true)\n"
-              << "  --gggs-gpu-adc-plus-refine BOOL  keep ADC+ prune/grow on CUDA (default true)\n"
               << "  --gggs-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
@@ -420,10 +418,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("default"))
         ("gggs-densification", "Enable GGGS split/prune/opacity-reset",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("gggs-gpu-adc-plus-refine",
-         "Run ADC+ prune, sampling, and tensor rearrangement on CUDA",
-         cxxopts::value<bool>()->default_value("true")
-             ->implicit_value("true"))
         ("gggs-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
         ("gggs-densification-cap", "Dynamic Gaussian hard cap",
@@ -601,8 +595,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_constrain_scales = result["gggs-constrain-scales"].as<bool>();
     cli.gggs_strategy = result["gggs-strategy"].as<std::string>();
     cli.gggs_densification = result["gggs-densification"].as<bool>();
-    cli.gggs_gpu_adc_plus_refine =
-        result["gggs-gpu-adc-plus-refine"].as<bool>();
     cli.gggs_structure_freeze_iter =
         result["gggs-structure-freeze-iter"].as<unsigned>();
     cli.gggs_densification_cap =
@@ -1319,7 +1311,6 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
             "--gggs-strategy dense_adaptive requires dense MVS input");
     options.enable_densification =
         cli.gggs_densification && (!dense_input || dense_adaptive);
-    options.adc_plus_gpu_refine = cli.gggs_gpu_adc_plus_refine;
     options.structure_freeze_iter = cli.gggs_structure_freeze_iter;
     if (dense_adaptive) {
         options.max_gaussians = options.max_gaussians == 0
@@ -1395,7 +1386,6 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " max_initial_gaussians=", options.max_gaussians,
         " densification_strategy=", effective_strategy,
         " densification_enabled=", options.enable_densification,
-        " adc_plus_gpu_refine=", options.adc_plus_gpu_refine,
         " structure_freeze_iter=", options.structure_freeze_iter,
         " densification_cap=", options.densification_cap,
         " dense_recycle_fraction=", options.dense_recycle_fraction,

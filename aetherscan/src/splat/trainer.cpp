@@ -826,15 +826,14 @@ RefinementCounts refine_gaussians(
     const StrategyPreset preset = strategy_preset(options);
     const bool dense_adaptive = options.densification_strategy ==
                                 DensificationStrategy::dense_adaptive;
+    const bool adc_plus = options.densification_strategy ==
+                          DensificationStrategy::adc_plus;
     const bool adc = options.densification_strategy ==
-                         DensificationStrategy::adc_plus ||
-                     options.densification_strategy ==
-                         DensificationStrategy::adc_igs;
+                     DensificationStrategy::adc_igs;
     const bool managed = adc || dense_adaptive;
     if (iteration <= preset.start || iteration >= preset.stop ||
         preset.every == 0 || iteration % preset.every != 0 ||
         (managed &&
-         options.densification_strategy != DensificationStrategy::adc_plus &&
          static_cast<float>(iteration) /
                     std::max(1.F, static_cast<float>(options.iterations)) >
                 0.95F) ||
@@ -846,13 +845,9 @@ RefinementCounts refine_gaussians(
     // Keeping the floor separate here changes both the low-opacity set and the
     // covariance inherited by children, which is especially visible as
     // floaters in wide-baseline scenes.
-    if (options.densification_strategy ==
-        DensificationStrategy::adc_plus)
+    if (adc_plus)
         detail::bake_3d_filter(model);
-
-    if (options.densification_strategy ==
-            DensificationStrategy::adc_plus &&
-        options.adc_plus_gpu_refine)
+    if (adc_plus)
         return refine_adc_plus_gpu(
             model, stats, iteration, scene_extent, scene_center,
             options, states);
@@ -980,11 +975,7 @@ RefinementCounts refine_gaussians(
                 max_scale, std::exp(log_scales[3 * index + axis]));
         candidates.push_back({
             index, static_cast<std::size_t>(remap[index]), score, max_scale,
-            screen[index] >
-                (options.densification_strategy ==
-                         DensificationStrategy::adc_plus
-                     ? options.adc_plus_split_at_screen_size
-                     : options.densify_screen_threshold)});
+            screen[index] > options.densify_screen_threshold});
         const float priority = priorities[index] /
                                std::max(counts[index], 1.F);
         if (priority > 0.F) positive_priorities.push_back(priority);
@@ -1003,11 +994,8 @@ RefinementCounts refine_gaussians(
                 model,
                 options.opacity_decay *
                     std::max(remaining_progress, 0.F),
-                options.densification_strategy ==
-                        DensificationStrategy::adc_plus
-                    ? 0.F
-                    : options.scale_decay *
-                          std::max(remaining_progress, 0.F));
+                options.scale_decay *
+                    std::max(remaining_progress, 0.F));
         }
         stats = detail::make_densification_stats(model.size());
         return {0, pruned};
@@ -1030,56 +1018,6 @@ RefinementCounts refine_gaussians(
             else
                 split_parents.push_back(
                     static_cast<int>(candidate.new_index));
-        }
-    } else if (options.densification_strategy ==
-               DensificationStrategy::adc_plus) {
-        std::vector<std::pair<std::size_t, float>> replacement_weights;
-        std::vector<std::pair<std::size_t, float>> growth_weights;
-        std::unordered_set<std::size_t> selected_parents;
-        for (const Candidate& candidate : candidates) {
-            const float opacity = 1.F /
-                (1.F + std::exp(-opacities[candidate.old_index]));
-            replacement_weights.emplace_back(
-                candidate.new_index, opacity);
-            if (iteration < options.grow_stop_iter &&
-                candidate.score >
-                    options.adc_plus_growth_gradient_threshold)
-                growth_weights.emplace_back(
-                    candidate.new_index, candidate.score);
-        }
-
-        auto selected = weighted_unique_sample(
-            replacement_weights, std::min(pruned, capacity), false, random);
-        selected_parents.insert(selected.begin(), selected.end());
-
-        for (const Candidate& candidate : candidates) {
-            if (selected_parents.size() >= capacity) break;
-            if (candidate.oversized)
-                selected_parents.insert(candidate.new_index);
-        }
-
-        const std::size_t threshold_growth =
-            static_cast<std::size_t>(std::llround(
-                growth_weights.size() *
-                options.adc_plus_growth_select_fraction));
-        // brush counts replacement splits against the requested high-gradient
-        // growth budget, even when the sampled sets overlap.
-        const std::size_t requested_growth =
-            threshold_growth > pruned ? threshold_growth - pruned : 0;
-        const std::size_t remaining =
-            capacity > selected_parents.size()
-                ? capacity - selected_parents.size()
-                : 0;
-        selected = weighted_unique_sample(
-            growth_weights, std::min(remaining, requested_growth),
-            false, random);
-        selected_parents.insert(selected.begin(), selected.end());
-
-        split_parents.reserve(
-            std::min(capacity, selected_parents.size()));
-        for (const std::size_t parent : selected_parents) {
-            if (split_parents.size() >= capacity) break;
-            split_parents.push_back(static_cast<int>(parent));
         }
     } else {
         float priority_median = 1.F;
@@ -1173,8 +1111,6 @@ RefinementCounts refine_gaussians(
         ? 3
         : dense_adaptive
             ? 4
-            : options.densification_strategy == DensificationStrategy::adc_plus
-            ? 2
             : 1;
     grow_training_model(
         model, split_parents, split_mode, options, random, states,
@@ -1186,11 +1122,8 @@ RefinementCounts refine_gaussians(
         detail::apply_adc_decay(
             model,
             options.opacity_decay * std::max(remaining_progress, 0.F),
-            options.densification_strategy ==
-                    DensificationStrategy::adc_plus
-                ? 0.F
-                : options.scale_decay *
-                      std::max(remaining_progress, 0.F));
+            options.scale_decay *
+                std::max(remaining_progress, 0.F));
     }
     stats = detail::make_densification_stats(model.size());
     return {duplicate_parents.size() + split_parents.size(), pruned};
