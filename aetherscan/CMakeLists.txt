@@ -360,6 +360,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
 
         add_library(aetherscan_splat
             src/splat/colmap.cpp
+            src/splat/dataset.cpp
             src/splat/mesh.cpp
             src/splat/trainer.cpp)
         add_library(AetherScan::Splat ALIAS aetherscan_splat)

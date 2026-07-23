@@ -4,7 +4,7 @@
 #include "mvs/export.hpp"
 #include "core/logging.hpp"
 #if defined(AETHERSCAN_HAS_GGGS)
-#include "splat/colmap.hpp"
+#include "splat/dataset.hpp"
 #include "splat/trainer.hpp"
 #endif
 #if defined(AETHERSCAN_HAS_TEXTURE)
@@ -75,12 +75,15 @@ struct ReconstructCli {
     bool lightglue_cpu{false};
     bool dense{false};
     bool gggs{false};
+    std::filesystem::path splat_dataset;
+    std::string splat_format{"auto"};
     std::filesystem::path colmap_model;
     std::filesystem::path dense_ply;
     unsigned gggs_iterations{10'000};
     std::uint64_t gggs_max_gaussians{500'000};
     unsigned gggs_max_resolution{1'920};
     std::uint64_t gggs_view_cache_mb{6'144};
+    unsigned gggs_eval_split_every{0};
     bool gggs_use_mask{true};
     std::string gggs_alpha_mode{"transparent"};
     float gggs_match_alpha_weight{0.25F};
@@ -217,10 +220,13 @@ void print_help(const cxxopts::Options& options) {
               << "Dense (optional Stage A Fast MVS after SfM):\n"
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
               << "  --gggs       train CUDA GGGS -> *_gggs.ply\n"
-              << "  --colmap PATH  load COLMAP sparse model, bypass SfM/MVS, enable GGGS\n"
-              << "  --dense-ply PATH  replace COLMAP sparse points with a dense PLY initializer\n"
-              << "  --gggs-iterations N  GGGS steps (dense 10000, COLMAP sparse 5000)\n"
+              << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS camera data\n"
+              << "  --splat-format auto|colmap|realitycapture|openmvs\n"
+              << "  --colmap PATH  compatibility alias for --splat-format colmap\n"
+              << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
+              << "  --gggs-iterations N  GGGS optimizer steps (default 10000)\n"
               << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
+              << "  --gggs-eval-split-every N  hold out every Nth view for PSNR\n"
               << "  --gggs-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
               << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
               << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
@@ -340,9 +346,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("gggs", "Train CUDA GGGS (MVS dense input disables GS densification)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("colmap", "COLMAP root/sparse/0 model; bypass internal SfM and MVS",
+        ("splat-dataset",
+         "External camera dataset: COLMAP root, RealityCapture CSV/dir, or OpenMVS .mvs",
          cxxopts::value<std::string>()->default_value(""))
-        ("dense-ply", "Dense PLY initializer used with --colmap",
+        ("splat-format",
+         "External camera format: auto, colmap, realitycapture, or openmvs",
+         cxxopts::value<std::string>()->default_value("auto"))
+        ("colmap", "Compatibility alias for --splat-dataset PATH --splat-format colmap",
+         cxxopts::value<std::string>()->default_value(""))
+        ("dense-ply", "Dense PLY initializer for external or internal-SfM cameras",
          cxxopts::value<std::string>()->default_value(""))
         ("gggs-iterations", "GGGS optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
@@ -352,6 +364,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("1920"))
         ("gggs-view-cache-mb", "Decoded GGGS host-view LRU budget (0 = no cache)",
          cxxopts::value<std::uint64_t>()->default_value("6144"))
+        ("gggs-eval-split-every",
+         "Hold out every Nth view for PSNR evaluation (0 = train all)",
+         cxxopts::value<unsigned>()->default_value("0"))
         ("gggs-use-mask", "Enable pygsplat-compatible foreground-mask training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("gggs-alpha-mode", "Mask alpha mode: masked or transparent",
@@ -504,22 +519,35 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.lightglue_cpu = result["lightglue-cpu"].as<bool>();
     cli.dense = result["dense"].as<bool>();
     cli.gggs = result["gggs"].as<bool>();
+    const std::string splat_dataset_text =
+        result["splat-dataset"].as<std::string>();
+    if (!splat_dataset_text.empty())
+        cli.splat_dataset = utf8_to_path(splat_dataset_text);
+    cli.splat_format = result["splat-format"].as<std::string>();
     const std::string colmap_text = result["colmap"].as<std::string>();
     if (!colmap_text.empty()) cli.colmap_model = utf8_to_path(colmap_text);
+    if (!cli.colmap_model.empty()) {
+        if (!cli.splat_dataset.empty() &&
+            cli.splat_dataset != cli.colmap_model)
+            throw std::invalid_argument(
+                "--colmap and --splat-dataset cannot name different inputs");
+        if (cli.splat_format != "auto" && cli.splat_format != "colmap")
+            throw std::invalid_argument(
+                "--colmap conflicts with non-COLMAP --splat-format");
+        cli.splat_dataset = cli.colmap_model;
+        cli.splat_format = "colmap";
+    }
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
-    // The native sparse path peaks around 5k; longer runs currently over-prune
-    // and reduce fixed-view PSNR. Explicit CLI values still permit long runs.
-    if (!cli.colmap_model.empty() && cli.dense_ply.empty() &&
-        result.count("gggs-iterations") == 0)
-        cli.gggs_iterations = 5'000;
     cli.gggs_max_gaussians =
         result["gggs-max-gaussians"].as<std::uint64_t>();
     cli.gggs_max_resolution =
         result["gggs-max-resolution"].as<unsigned>();
     cli.gggs_view_cache_mb =
         result["gggs-view-cache-mb"].as<std::uint64_t>();
+    cli.gggs_eval_split_every =
+        result["gggs-eval-split-every"].as<unsigned>();
     cli.gggs_use_mask = result["gggs-use-mask"].as<bool>();
     cli.gggs_alpha_mode = result["gggs-alpha-mode"].as<std::string>();
     cli.gggs_match_alpha_weight =
@@ -616,22 +644,20 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.texture) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
     if (cli.mesh) cli.dense = true;
-    if (!cli.colmap_model.empty()) cli.gggs = true;
-    if (cli.gggs && cli.colmap_model.empty()) cli.dense = true;
-    if (!cli.dense_ply.empty() && cli.colmap_model.empty())
-        throw std::invalid_argument("--dense-ply requires --colmap camera data");
-    if (!cli.colmap_model.empty() && cli.mesh && cli.dense_ply.empty())
+    const bool external_splat_dataset = !cli.splat_dataset.empty();
+    if (external_splat_dataset || !cli.dense_ply.empty()) cli.gggs = true;
+    if (cli.gggs && !external_splat_dataset) cli.dense = true;
+    if (external_splat_dataset && cli.texture)
         throw std::invalid_argument(
-            "--colmap sparse GGGS cannot be combined with --mesh/--texture; "
-            "run MVS explicitly when a mesh is required");
-    if (!cli.colmap_model.empty() && cli.texture)
-        throw std::invalid_argument(
-            "--texture is not yet available in the direct COLMAP GGGS path");
+            "--texture is not yet available in the direct external GGGS path");
 #if !defined(AETHERSCAN_HAS_GGGS)
-    if (cli.gggs) {
+    if (cli.gggs || external_splat_dataset) {
         throw std::invalid_argument(
             "--gggs requires CUDA and AETHERSCAN_ENABLE_GGGS=ON");
     }
+#else
+    static_cast<void>(
+        aetherscan::splat::parse_dataset_format(cli.splat_format));
 #endif
     if (cli.gggs_iterations == 0)
         throw std::invalid_argument("--gggs-iterations must be positive");
@@ -1217,6 +1243,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     options.initialize_scale_from_knn = true;
     options.use_source_resolution = true;
     options.max_image_dimension = cli.gggs_max_resolution;
+    options.evaluation_split_every = cli.gggs_eval_split_every;
     constexpr std::uint64_t bytes_per_megabyte = 1024ULL * 1024ULL;
     options.training_view_cache_bytes = static_cast<std::size_t>(
         std::min<std::uint64_t>(
@@ -1275,6 +1302,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         options.sh0_lr = 2e-3F;
         options.sh_rest_lr = 2e-4F;
         options.sh_degree_interval = 0;
+        options.background_noise_strength = 0.1F;
     } else if (
         !dense_input &&
         options.densification_strategy !=
@@ -1323,7 +1351,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         : cli.gggs_strategy.c_str();
     aetherscan::core::Logger::instance().info(
         "gggs training: iterations=", options.iterations,
-        " input=", dense_input ? "dense_mvs" : "sparse_colmap",
+        " input=", dense_input ? "dense_points" : "sparse_points",
         " input_points=", scene.dense_cloud.points.size(),
         " max_initial_gaussians=", options.max_gaussians,
         " densification_strategy=", effective_strategy,
@@ -1336,11 +1364,13 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " mask_dir=", options.mask_dir,
         " alpha_mode=", cli.gggs_alpha_mode,
         " match_alpha_weight=", options.match_alpha_weight,
+        " background_noise=", options.background_noise_strength,
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
         " source_resolution=", options.use_source_resolution,
         " max_image_dimension=", options.max_image_dimension,
         " host_view_cache_mb=",
         options.training_view_cache_bytes / (1024 * 1024),
+        " eval_split_every=", options.evaluation_split_every,
         " knn_scale=", options.initialize_scale_from_knn,
         " dense_structure_freeze_iter=",
         options.dense_structure_freeze_iter,
@@ -1361,8 +1391,15 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     const std::filesystem::path out_dir = cli.output.parent_path().empty()
         ? std::filesystem::current_path()
         : cli.output.parent_path();
-    std::vector<std::size_t> evaluation_views{
-        0, scene.views.size() / 2, scene.views.size() - 1};
+    std::vector<std::size_t> evaluation_views;
+    if (options.evaluation_split_every != 0) {
+        for (std::size_t index = 0; index < scene.views.size(); ++index)
+            if (index % options.evaluation_split_every == 0)
+                evaluation_views.push_back(index);
+    } else {
+        evaluation_views = {
+            0, scene.views.size() / 2, scene.views.size() - 1};
+    }
     std::sort(evaluation_views.begin(), evaluation_views.end());
     evaluation_views.erase(
         std::unique(evaluation_views.begin(), evaluation_views.end()),
@@ -1370,6 +1407,8 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     const auto evaluate =
         [&](const unsigned iteration,
             const aetherscan::splat::GaussianModel& model) {
+            double psnr_sum = 0.0;
+            double masked_psnr_sum = 0.0;
             for (const std::size_t view_index : evaluation_views) {
                 const auto render_path = out_dir /
                     (cli.output.stem().string() + "_gggs_iter_" +
@@ -1386,7 +1425,15 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                     " alpha_bce=", metrics.alpha_bce,
                     " alpha_coverage=", metrics.alpha_coverage,
                     " render=", render_path);
+                psnr_sum += metrics.psnr;
+                masked_psnr_sum += metrics.masked_psnr;
             }
+            aetherscan::core::Logger::instance().info(
+                "gggs_eval_iteration=", iteration,
+                " views=", evaluation_views.size(),
+                " average_psnr=", psnr_sum / evaluation_views.size(),
+                " average_masked_psnr=",
+                masked_psnr_sum / evaluation_views.size());
         };
     const auto started = std::chrono::steady_clock::now();
     const aetherscan::splat::GaussianModel gaussians =
@@ -1420,6 +1467,8 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     const auto ply = out_dir /
         (cli.output.stem().string() + "_gggs.ply");
     aetherscan::splat::save_gaussians_ply(gaussians, ply);
+    double final_psnr_sum = 0.0;
+    double final_masked_psnr_sum = 0.0;
     for (const std::size_t view_index : evaluation_views) {
         const auto render_path = out_dir /
             (cli.output.stem().string() + "_gggs_view_" +
@@ -1434,7 +1483,14 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
             " mae=", metrics.mae,
             " alpha_bce=", metrics.alpha_bce,
             " alpha_coverage=", metrics.alpha_coverage);
+        final_psnr_sum += metrics.psnr;
+        final_masked_psnr_sum += metrics.masked_psnr;
     }
+    aetherscan::core::Logger::instance().info(
+        "gggs_final_evaluation_views=", evaluation_views.size(),
+        " average_psnr=", final_psnr_sum / evaluation_views.size(),
+        " average_masked_psnr=",
+        final_masked_psnr_sum / evaluation_views.size());
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
     aetherscan::core::Logger::instance().info(
@@ -1501,20 +1557,34 @@ int main(int argc, char** argv) {
             " output=", cli.output, " log=", log_path);
 
 #if defined(AETHERSCAN_HAS_GGGS)
-        if (!cli.colmap_model.empty()) {
-            auto loaded = aetherscan::splat::load_colmap_scene(
-                cli.colmap_model, cli.images_dir);
-            if (!cli.dense_ply.empty())
-                loaded.scene.dense_cloud =
-                    aetherscan::mvs::load_dense_ply(cli.dense_ply);
+        if (!cli.splat_dataset.empty()) {
+            aetherscan::splat::DatasetLoadRequest request;
+            request.source = cli.splat_dataset;
+            request.image_directory = cli.images_dir;
+            request.initial_point_cloud = cli.dense_ply;
+            request.format =
+                aetherscan::splat::parse_dataset_format(cli.splat_format);
+            auto loaded =
+                aetherscan::splat::load_splat_dataset(request);
+            for (const std::string& warning : loaded.warnings)
+                aetherscan::core::Logger::instance().warning(
+                    "splat dataset: ", warning);
             aetherscan::core::Logger::instance().info(
-                "colmap_model=", loaded.model_directory,
-                " format=", loaded.binary ? "binary" : "text",
+                "splat_dataset=", loaded.resolved_source,
+                " format=",
+                aetherscan::splat::dataset_format_name(loaded.format),
                 " cameras=", loaded.scene.views.size(),
-                cli.dense_ply.empty() ? " sparse_points=" : " dense_points=",
+                loaded.initial_points_dense
+                    ? " dense_points="
+                    : " initial_points=",
                 loaded.scene.dense_cloud.points.size(),
-                cli.dense_ply.empty() ? std::string{} :
-                    " dense_ply=" + cli.dense_ply.string());
+                loaded.generated_initial_points
+                    ? " generated_initial_points=true"
+                    : std::string{},
+                loaded.initial_point_cloud.empty()
+                    ? std::string{}
+                    : " initial_ply=" +
+                          loaded.initial_point_cloud.string());
             aetherscan::mvs::DensifyOptions mesh_options;
             aetherscan::mvs::apply_quality_preset(
                 mesh_options, cli.dense_quality);
@@ -1530,7 +1600,7 @@ int main(int argc, char** argv) {
                 cli.mesh_tsdf_smooth_lambda;
             mesh_options.mesh_tsdf_smooth_mu = cli.mesh_tsdf_smooth_mu;
             auto mesh = run_gggs_training(
-                loaded.scene, cli, !cli.dense_ply.empty(),
+                loaded.scene, cli, loaded.initial_points_dense,
                 cli.mesh ? &mesh_options : nullptr);
             if (mesh) {
 #if defined(AETHERSCAN_HAS_ASDIFF_MESH)
@@ -1731,8 +1801,21 @@ int main(int argc, char** argv) {
                     "mvs masks=", densify_opts.mask_dir);
 
             const auto dense_started = std::chrono::steady_clock::now();
-            aetherscan::mvs::MvsScene mvs_scene =
-                aetherscan::mvs::densify_from_sfm(scene, densify_opts);
+            aetherscan::mvs::MvsScene mvs_scene;
+            if (!cli.dense_ply.empty()) {
+                // No external camera metadata: keep the built-in SfM poses,
+                // but use the caller's dense initialization directly.
+                mvs_scene =
+                    aetherscan::mvs::build_mvs_scene(scene, densify_opts);
+                mvs_scene.dense_cloud =
+                    aetherscan::mvs::load_dense_ply(cli.dense_ply);
+                aetherscan::core::Logger::instance().info(
+                    "splat cameras=internal_sfm dense_ply=", cli.dense_ply,
+                    " points=", mvs_scene.dense_cloud.points.size());
+            } else {
+                mvs_scene =
+                    aetherscan::mvs::densify_from_sfm(scene, densify_opts);
+            }
             const double dense_elapsed = std::chrono::duration<double>(
                                              std::chrono::steady_clock::now() -
                                              dense_started)

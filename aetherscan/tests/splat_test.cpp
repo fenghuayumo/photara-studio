@@ -1,7 +1,9 @@
 #include "splat/trainer.hpp"
 #include "splat/colmap.hpp"
+#include "splat/dataset.hpp"
 #include "../src/splat/cuda_ops.hpp"
 #include "io/image.hpp"
+#include "sfm/export_mvs.hpp"
 
 #include <cuda_runtime_api.h>
 
@@ -705,6 +707,114 @@ void test_colmap_text_loading() {
     std::filesystem::remove_all(root);
 }
 
+void test_reality_capture_dataset_loading() {
+    using namespace aetherscan;
+    const auto root = std::filesystem::temp_directory_path() /
+                      "aetherscan_reality_capture_splat_test";
+    const auto images = root / "images";
+    std::filesystem::create_directories(images);
+    for (const char* name : {"left.png", "right.png"})
+        io::save_rgb_png(
+            io::RgbImage{8, 6, std::vector<std::uint8_t>(8 * 6 * 3, 127)},
+            images / name);
+    const auto csv = root / "cameras.csv";
+    {
+        std::ofstream stream(csv);
+        stream << "#name,x,y,alt,heading,pitch,roll,f,px,py,k1,k2,t1,t2\n";
+        stream << "left.png,1,2,3,0,0,0,18,0,0,0.01,-0.02,0.001,-0.002\n";
+        stream << "right.png,2,2,3,0,0,0,18,0,0,0,0,0,0\n";
+    }
+    splat::DatasetLoadRequest request;
+    request.source = root;
+    request.image_directory = images;
+    request.random_initial_point_count = 16;
+    const auto loaded = splat::load_splat_dataset(request);
+    require(
+        loaded.format == splat::DatasetFormat::reality_capture &&
+            loaded.scene.views.size() == 2 &&
+            loaded.generated_initial_points &&
+            loaded.scene.dense_cloud.points.size() == 16,
+        "RealityCapture dataset was not detected or initialized");
+    const auto& view = loaded.scene.views.front();
+    require(
+        std::abs(view.fx - 4.F) < 1e-6F &&
+            std::abs(view.cx - 4.F) < 1e-6F &&
+            std::abs(view.k1 - 0.01F) < 1e-6F &&
+            (view.pose.C - Eigen::Vector3d(1, 2, 3)).norm() < 1e-9,
+        "RealityCapture intrinsics or pose conversion is incorrect");
+    const Eigen::Vector3d forward_world =
+        view.pose.R.transpose() * Eigen::Vector3d::UnitZ();
+    require(
+        (forward_world - Eigen::Vector3d(0, 0, -1)).norm() < 1e-9,
+        "RealityCapture OpenGL-to-pinhole basis conversion is incorrect");
+    std::filesystem::remove_all(root);
+}
+
+void test_openmvs_dataset_loading() {
+    using namespace aetherscan;
+    const auto root = std::filesystem::temp_directory_path() /
+                      "aetherscan_openmvs_splat_test";
+    std::filesystem::create_directories(root);
+    const auto first_path = root / "first.png";
+    const auto second_path = root / "second.png";
+    io::save_rgb_png(
+        io::RgbImage{8, 6, std::vector<std::uint8_t>(8 * 6 * 3, 64)},
+        first_path);
+    io::save_rgb_png(
+        io::RgbImage{8, 6, std::vector<std::uint8_t>(8 * 6 * 3, 192)},
+        second_path);
+
+    sfm::Scene source;
+    sfm::PinholeCamera camera;
+    camera.id = 0;
+    camera.width = 8;
+    camera.height = 6;
+    camera.fx = 7;
+    camera.fy = 7.5;
+    camera.cx = 4;
+    camera.cy = 3;
+    source.cameras.push_back(camera);
+    for (std::uint32_t index = 0; index < 2; ++index) {
+        sfm::Image image;
+        image.id = index;
+        image.camera_id = 0;
+        image.path = index == 0 ? first_path : second_path;
+        image.registered = true;
+        image.pose.C = Eigen::Vector3d(index, 0, 0);
+        image.features.keypoints.push_back({4.F, 3.F});
+        source.images.push_back(std::move(image));
+    }
+    sfm::Track track;
+    track.position = Eigen::Vector3d(0.5, 0, 4);
+    track.observations = {{0, 0}, {1, 0}};
+    track.num_inliers = 2;
+    source.tracks.push_back(track);
+    const auto mvs_path = root / "scene.mvs";
+    sfm::ExportMvsOptions export_options;
+    export_options.image_path_base = root;
+    export_options.sample_colors = false;
+    sfm::export_openmvs_interface(source, mvs_path, export_options);
+
+    splat::DatasetLoadRequest request;
+    request.source = mvs_path;
+    request.image_directory = root;
+    const auto loaded = splat::load_splat_dataset(request);
+    require(
+        loaded.format == splat::DatasetFormat::openmvs &&
+            loaded.scene.views.size() == 2 &&
+            loaded.scene.dense_cloud.points.size() == 1 &&
+            !loaded.generated_initial_points,
+        "OpenMVS interface dataset was not loaded");
+    require(
+        std::abs(loaded.scene.views[0].fx - 7.F) < 1e-6F &&
+            (loaded.scene.views[1].pose.C -
+             Eigen::Vector3d(1, 0, 0)).norm() < 1e-9 &&
+            (loaded.scene.dense_cloud.points[0].position -
+             mvs::Vec3f(0.5F, 0.F, 4.F)).norm() < 1e-6F,
+        "OpenMVS intrinsics, pose, or initial point conversion is incorrect");
+    std::filesystem::remove_all(root);
+}
+
 void test_mask_loss_modes() {
     using namespace aetherscan::splat;
     RenderResult rendered;
@@ -1146,9 +1256,15 @@ void test_densification_strategies_and_dense_bypass() {
     options.input_is_dense = true;
     options.densification_strategy = splat::DensificationStrategy::adc_igs;
     options.evaluation_iterations = {2};
+    options.evaluation_split_every = 2;
     std::size_t evaluations = 0;
+    std::vector<std::size_t> trained_views;
     const auto dense_model = splat::Trainer(options).train(
-        scene, {},
+        scene,
+        [&](const splat::TrainingProgress& progress) {
+            trained_views.push_back(progress.view_index);
+            return true;
+        },
         [&](const unsigned iteration, const splat::GaussianModel&) {
             require(iteration == 2, "GGGS evaluation callback used wrong iteration");
             ++evaluations;
@@ -1157,8 +1273,15 @@ void test_densification_strategies_and_dense_bypass() {
         dense_model.size() == scene.dense_cloud.points.size(),
         "dense point-cloud initialization incorrectly enabled densification");
     require(evaluations == 1, "GGGS evaluation callback was not invoked");
+    require(
+        !trained_views.empty() &&
+            std::all_of(
+                trained_views.begin(), trained_views.end(),
+                [](const std::size_t index) { return index == 1; }),
+        "GGGS evaluation split leaked a held-out view into training");
 
     options.evaluation_iterations.clear();
+    options.evaluation_split_every = 0;
     options.densification_strategy =
         splat::DensificationStrategy::dense_adaptive;
     options.dense_growth_fraction = 1.F;
@@ -1190,6 +1313,8 @@ int main() {
         test_mask_loading();
         test_source_resolution_and_knn_initialization();
         test_colmap_text_loading();
+        test_reality_capture_dataset_loading();
+        test_openmvs_dataset_loading();
         test_mask_loss_modes();
         test_ssim_loss_and_scale_constraint();
         test_gggs_depth_normal_consistency();

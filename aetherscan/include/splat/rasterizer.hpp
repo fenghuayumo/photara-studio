@@ -6,6 +6,7 @@ namespace aetherscan::splat {
 
 struct RasterizeOptions {
     unsigned active_sh_degree{0};
+    std::array<float, 3> background{0.F, 0.F, 0.F};
     float kernel_size{0.F};
     float scale_modifier{1.F};
     bool require_depth{true};

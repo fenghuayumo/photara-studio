@@ -59,6 +59,9 @@ struct TrainingOptions {
     // ADC-IGS scale decay. brush ADC+ only decays opacity.
     float scale_decay{0.002F};
     float mean_noise_weight{50.F};
+    // Uniform noise around a black background, clamped to [0,1].
+    // Kept disabled for dense GGGS; ADC+ CLI parity enables brush's 0.1.
+    float background_noise_strength{0.F};
     float initial_opacity{0.1F};
     float initial_scale{1.F};
     // Match pygsplat: initialize isotropic scales from the RMS distance to the
@@ -144,6 +147,9 @@ struct TrainingOptions {
     unsigned max_image_dimension{1'920};
     std::size_t training_view_cache_bytes{
         std::size_t{6} * 1024 * 1024 * 1024};
+    // Hold out every Nth source view from optimization (0 trains on all).
+    // The caller may render these views through the evaluation callback.
+    unsigned evaluation_split_every{0};
     // Iterations at which the caller may render fixed-view parity snapshots.
     std::vector<unsigned> evaluation_iterations;
 };

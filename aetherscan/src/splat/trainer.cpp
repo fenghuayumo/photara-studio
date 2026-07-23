@@ -216,9 +216,10 @@ Camera training_camera(
 
 std::vector<std::vector<std::size_t>> compute_multi_view_neighbours(
     const std::vector<Camera>& cameras,
+    const std::vector<std::size_t>& active_indices,
     const TrainingOptions& options) {
     std::vector<std::vector<std::size_t>> result(cameras.size());
-    for (std::size_t reference = 0; reference < cameras.size(); ++reference) {
+    for (const std::size_t reference : active_indices) {
         std::vector<std::tuple<float, float, std::size_t>> candidates;
         const auto& camera = cameras[reference];
         const Eigen::Vector3f center(
@@ -227,7 +228,7 @@ std::vector<std::vector<std::size_t>> compute_multi_view_neighbours(
             camera.world_to_camera[2], camera.world_to_camera[6],
             camera.world_to_camera[10]);
         forward.normalize();
-        for (std::size_t index = 0; index < cameras.size(); ++index) {
+        for (const std::size_t index : active_indices) {
             if (index == reference) continue;
             const auto& other = cameras[index];
             const Eigen::Vector3f other_center(
@@ -639,7 +640,9 @@ RefinementCounts refine_gaussians(
     const bool managed = adc || dense_adaptive;
     if (iteration <= preset.start || iteration >= preset.stop ||
         preset.every == 0 || iteration % preset.every != 0 ||
-        (managed && static_cast<float>(iteration) /
+        (managed &&
+         options.densification_strategy != DensificationStrategy::adc_plus &&
+         static_cast<float>(iteration) /
                     std::max(1.F, static_cast<float>(options.iterations)) >
                 0.95F) ||
         model.size() == 0)
@@ -1309,8 +1312,15 @@ GaussianModel Trainer::train(
     if (scene.views.empty())
         throw std::invalid_argument("GGGS training requires at least one MVS view");
     GaussianModel model = initialize_from_dense_cloud(scene, options_);
-    std::vector<std::size_t> view_indices(scene.views.size());
-    std::iota(view_indices.begin(), view_indices.end(), std::size_t{0});
+    std::vector<std::size_t> view_indices;
+    view_indices.reserve(scene.views.size());
+    for (std::size_t index = 0; index < scene.views.size(); ++index)
+        if (options_.evaluation_split_every == 0 ||
+            index % options_.evaluation_split_every != 0)
+            view_indices.push_back(index);
+    if (view_indices.empty())
+        throw std::invalid_argument(
+            "GGGS evaluation split left no training views");
     TrainingViewCache view_cache(scene.views, options_);
     if (options_.use_mask) {
         for (const std::size_t index : view_indices)
@@ -1320,15 +1330,19 @@ GaussianModel Trainer::train(
                     "file or source alpha channel for every selected view");
     }
 
-    std::vector<Camera> filter_cameras;
-    filter_cameras.reserve(scene.views.size());
+    std::vector<Camera> all_cameras;
+    all_cameras.reserve(scene.views.size());
     for (const mvs::MvsView& view : scene.views)
-        filter_cameras.push_back(training_camera(view, options_));
+        all_cameras.push_back(training_camera(view, options_));
+    std::vector<Camera> filter_cameras;
+    filter_cameras.reserve(view_indices.size());
+    for (const std::size_t index : view_indices)
+        filter_cameras.push_back(all_cameras[index]);
     if (options_.use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras);
     const auto multi_view_neighbours = compute_multi_view_neighbours(
-        filter_cameras, options_);
+        all_cameras, view_indices, options_);
 
     detail::AdamState means_state = detail::make_adam_state(model.means);
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
@@ -1349,9 +1363,7 @@ GaussianModel Trainer::train(
     RefinementCounts latest_refinement;
     Rasterizer rasterizer;
     std::mt19937 random(options_.seed);
-    std::vector<std::size_t> shuffled_views(scene.views.size());
-    std::iota(
-        shuffled_views.begin(), shuffled_views.end(), std::size_t{0});
+    std::vector<std::size_t> shuffled_views = view_indices;
     std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
     std::size_t shuffled_view_cursor = 0;
     const SceneGeometry scene_geometry =
@@ -1410,6 +1422,13 @@ GaussianModel Trainer::train(
             options_.sh_degree_interval == 0
                 ? options_.sh_degree
                 : (iteration - 1) / options_.sh_degree_interval);
+        if (options_.background_noise_strength > 0.F) {
+            std::uniform_real_distribution<float> background_noise(
+                -options_.background_noise_strength,
+                options_.background_noise_strength);
+            for (float& channel : raster_options.background)
+                channel = std::clamp(background_noise(random), 0.F, 1.F);
+        }
         raster_options.kernel_size = options_.kernel_size;
         raster_options.scale_modifier = options_.scale_modifier;
         const bool depth_normal_active = options_.use_depth_normal_loss &&

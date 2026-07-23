@@ -109,7 +109,10 @@ RenderResult Rasterizer::forward(
     context->options.active_sh_degree = std::min(
         requested_options.active_sh_degree, model.sh_degree);
     context->activated = detail::activate_parameters(model);
-    context->background = tinytensor::Tensor::zeros(
+    context->background = tinytensor::Tensor::from_vector(
+        std::vector<float>(
+            context->options.background.begin(),
+            context->options.background.end()),
         {3}, tinytensor::Device::CUDA);
     context->view_matrix = tinytensor::Tensor::from_vector(
         std::vector<float>(camera.world_to_camera.begin(), camera.world_to_camera.end()),

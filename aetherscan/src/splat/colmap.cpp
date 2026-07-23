@@ -314,8 +314,8 @@ ColmapLoadResult load_colmap_scene(
     const auto points = binary
         ? read_points_binary(model_directory / "points3D.bin")
         : read_points_text(model_directory / "points3D.txt");
-    if (cameras.empty() || images.empty() || points.empty())
-        throw std::runtime_error("COLMAP reconstruction has no cameras, images, or points");
+    if (cameras.empty() || images.empty())
+        throw std::runtime_error("COLMAP reconstruction has no cameras or images");
 
     std::sort(images.begin(), images.end(), [](const auto& left, const auto& right) {
         return left.name.generic_u8string() < right.name.generic_u8string();
@@ -370,8 +370,6 @@ ColmapLoadResult load_colmap_scene(
         result.scene.sparse_points.push_back(std::move(sparse));
         result.scene.dense_cloud.points.push_back(std::move(point));
     }
-    if (result.scene.dense_cloud.points.empty())
-        throw std::runtime_error("COLMAP reconstruction has no finite sparse points");
     return result;
 }
 
