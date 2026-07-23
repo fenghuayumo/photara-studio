@@ -3,6 +3,7 @@
 #include "splat/options.hpp"
 #include "splat/types.hpp"
 
+#include <array>
 #include <limits>
 
 namespace aetherscan::splat::detail {
@@ -37,6 +38,12 @@ struct DensificationStats {
     tinytensor::Tensor priority;
 };
 
+struct AdcPlusPruneResult {
+    tinytensor::Tensor keep_indices;
+    tinytensor::Tensor opacities;
+    std::size_t pruned{};
+};
+
 struct MultiViewLoss {
     float geometry{};
     float ncc{};
@@ -50,6 +57,15 @@ ActivatedParameters activate_parameters(const GaussianModel& model);
 // parameters and clear model.filter_3d. Brush does this before every ADC+
 // refine so pruning and splitting operate on the rendered parameters.
 void bake_3d_filter(GaussianModel& model);
+
+// Build ADC+ opacity/non-finite/bounds pruning and compacted keep indices on
+// CUDA. Only scalar counts cross back to the host.
+AdcPlusPruneResult adc_plus_prune(
+    const GaussianModel& model,
+    float minimum_opacity,
+    float maximum_bounds,
+    const std::array<float, 3>& scene_center,
+    std::size_t maximum_count);
 
 tinytensor::Tensor compute_3d_filter(
     const tinytensor::Tensor& means,

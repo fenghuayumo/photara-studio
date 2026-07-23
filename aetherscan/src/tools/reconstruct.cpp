@@ -82,6 +82,9 @@ struct ReconstructCli {
     unsigned gggs_iterations{10'000};
     std::uint64_t gggs_max_gaussians{500'000};
     unsigned gggs_max_resolution{1'920};
+    bool gggs_progressive_resolution{true};
+    unsigned gggs_progressive_interval{3'000};
+    float gggs_progressive_initial_scale{0.25F};
     std::uint64_t gggs_view_cache_mb{6'144};
     unsigned gggs_eval_split_every{0};
     bool gggs_use_mask{true};
@@ -101,6 +104,7 @@ struct ReconstructCli {
     bool gggs_constrain_scales{false};
     std::string gggs_strategy{"default"};
     bool gggs_densification{true};
+    bool gggs_gpu_adc_plus_refine{true};
     unsigned gggs_structure_freeze_iter{0};
     std::uint64_t gggs_densification_cap{10'000'000};
     bool mesh{false};
@@ -226,6 +230,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --gggs-iterations N  GGGS optimizer steps (default 10000)\n"
               << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
+              << "  --gggs-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
+              << "  --gggs-progressive-interval N  iterations per resolution level (default 3000)\n"
               << "  --gggs-eval-split-every N  hold out every Nth view for PSNR\n"
               << "  --gggs-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
               << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
@@ -244,6 +250,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
               << "  --gggs-strategy default|adc_plus|adc_igs|dense_adaptive\n"
               << "  --gggs-densification=BOOL  enable split/prune/reset (default true)\n"
+              << "  --gggs-gpu-adc-plus-refine BOOL  keep ADC+ prune/grow on CUDA (default true)\n"
               << "  --gggs-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
@@ -362,6 +369,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("500000"))
         ("gggs-max-resolution", "Maximum GGGS training image dimension (0 = source)",
          cxxopts::value<unsigned>()->default_value("1920"))
+        ("gggs-progressive-resolution",
+         "Enable 1/4 -> 1/2 -> full coarse-to-fine GGGS training",
+         cxxopts::value<bool>()->default_value("true")
+             ->implicit_value("true"))
+        ("gggs-progressive-interval",
+         "Iterations per GGGS resolution level",
+         cxxopts::value<unsigned>()->default_value("3000"))
+        ("gggs-progressive-initial-scale",
+         "Initial GGGS linear image scale",
+         cxxopts::value<float>()->default_value("0.25"))
         ("gggs-view-cache-mb", "Decoded GGGS host-view LRU budget (0 = no cache)",
          cxxopts::value<std::uint64_t>()->default_value("6144"))
         ("gggs-eval-split-every",
@@ -403,6 +420,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("default"))
         ("gggs-densification", "Enable GGGS split/prune/opacity-reset",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("gggs-gpu-adc-plus-refine",
+         "Run ADC+ prune, sampling, and tensor rearrangement on CUDA",
+         cxxopts::value<bool>()->default_value("true")
+             ->implicit_value("true"))
         ("gggs-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
         ("gggs-densification-cap", "Dynamic Gaussian hard cap",
@@ -544,6 +565,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["gggs-max-gaussians"].as<std::uint64_t>();
     cli.gggs_max_resolution =
         result["gggs-max-resolution"].as<unsigned>();
+    cli.gggs_progressive_resolution =
+        result["gggs-progressive-resolution"].as<bool>();
+    cli.gggs_progressive_interval =
+        result["gggs-progressive-interval"].as<unsigned>();
+    cli.gggs_progressive_initial_scale =
+        result["gggs-progressive-initial-scale"].as<float>();
     cli.gggs_view_cache_mb =
         result["gggs-view-cache-mb"].as<std::uint64_t>();
     cli.gggs_eval_split_every =
@@ -574,6 +601,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_constrain_scales = result["gggs-constrain-scales"].as<bool>();
     cli.gggs_strategy = result["gggs-strategy"].as<std::string>();
     cli.gggs_densification = result["gggs-densification"].as<bool>();
+    cli.gggs_gpu_adc_plus_refine =
+        result["gggs-gpu-adc-plus-refine"].as<bool>();
     cli.gggs_structure_freeze_iter =
         result["gggs-structure-freeze-iter"].as<unsigned>();
     cli.gggs_densification_cap =
@@ -1243,6 +1272,11 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     options.initialize_scale_from_knn = true;
     options.use_source_resolution = true;
     options.max_image_dimension = cli.gggs_max_resolution;
+    options.progressive_resolution = cli.gggs_progressive_resolution;
+    options.progressive_resolution_interval =
+        cli.gggs_progressive_interval;
+    options.progressive_initial_scale =
+        std::clamp(cli.gggs_progressive_initial_scale, 1e-3F, 1.F);
     options.evaluation_split_every = cli.gggs_eval_split_every;
     constexpr std::uint64_t bytes_per_megabyte = 1024ULL * 1024ULL;
     options.training_view_cache_bytes = static_cast<std::size_t>(
@@ -1254,7 +1288,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                 : cli.gggs_view_cache_mb * bytes_per_megabyte,
             (std::numeric_limits<std::size_t>::max)()));
     for (const unsigned milestone : {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
-        if (milestone <= options.iterations)
+        if (milestone < options.iterations)
             options.evaluation_iterations.push_back(milestone);
     options.densification_cap = static_cast<std::size_t>(
         std::min<std::uint64_t>(
@@ -1285,6 +1319,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
             "--gggs-strategy dense_adaptive requires dense MVS input");
     options.enable_densification =
         cli.gggs_densification && (!dense_input || dense_adaptive);
+    options.adc_plus_gpu_refine = cli.gggs_gpu_adc_plus_refine;
     options.structure_freeze_iter = cli.gggs_structure_freeze_iter;
     if (dense_adaptive) {
         options.max_gaussians = options.max_gaussians == 0
@@ -1360,6 +1395,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " max_initial_gaussians=", options.max_gaussians,
         " densification_strategy=", effective_strategy,
         " densification_enabled=", options.enable_densification,
+        " adc_plus_gpu_refine=", options.adc_plus_gpu_refine,
         " structure_freeze_iter=", options.structure_freeze_iter,
         " densification_cap=", options.densification_cap,
         " dense_recycle_fraction=", options.dense_recycle_fraction,
@@ -1372,6 +1408,11 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
         " source_resolution=", options.use_source_resolution,
         " max_image_dimension=", options.max_image_dimension,
+        " progressive_resolution=", options.progressive_resolution,
+        " progressive_interval=",
+        options.progressive_resolution_interval,
+        " progressive_initial_scale=",
+        options.progressive_initial_scale,
         " host_view_cache_mb=",
         options.training_view_cache_bytes / (1024 * 1024),
         " eval_split_every=", options.evaluation_split_every,
@@ -1464,6 +1505,9 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                     " opacity_grad_positive=",
                     progress.opacity_gradient_positive_fraction,
                     " opacity_mean=", progress.opacity_mean,
+                    " resolution_scale=", progress.resolution_scale,
+                    " image=", progress.image_width, 'x',
+                    progress.image_height,
                     " step_ms=", progress.milliseconds);
                 return true;
             },

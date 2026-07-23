@@ -50,6 +50,9 @@ struct TrainingOptions {
     float adc_plus_growth_gradient_threshold{0.0025F};
     float adc_plus_growth_select_fraction{0.25F};
     float adc_plus_split_at_screen_size{0.5F};
+    // Keep the legacy host implementation available for deterministic
+    // Brush-parity investigations. The CUDA path avoids full tensor downloads.
+    bool adc_plus_gpu_refine{true};
     // Dense MVS points already cover the surface. Recycle only a small part of
     // the budget per refinement and grow more conservatively than sparse ADC.
     float dense_recycle_fraction{0.01F};
@@ -147,6 +150,14 @@ struct TrainingOptions {
     // and decoded float training views are retained in a bounded host LRU.
     // Only the current reference/neighbour views are uploaded to CUDA.
     unsigned max_image_dimension{1'920};
+    // Coarse-to-fine image schedule. The active linear resolution starts at
+    // 1/4, doubles every 3k iterations, and caps at max_image_dimension.
+    // Advancing a level clears the previous decoded RGB/mask cache.
+    // Library callers opt in explicitly; the reconstruction CLI enables this
+    // by default while parity/unit-test configurations remain fixed-size.
+    bool progressive_resolution{false};
+    unsigned progressive_resolution_interval{3'000};
+    float progressive_initial_scale{0.25F};
     std::size_t training_view_cache_bytes{
         std::size_t{6} * 1024 * 1024 * 1024};
     // Hold out every Nth source view from optimization (0 trains on all).

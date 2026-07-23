@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <future>
 #include <list>
 #include <limits>
 #include <numeric>
@@ -179,7 +180,8 @@ Camera make_camera_impl(const mvs::MvsView& view) {
 }
 
 Camera training_camera(
-    const mvs::MvsView& view, const TrainingOptions& options) {
+    const mvs::MvsView& view, const TrainingOptions& options,
+    const float resolution_scale = 1.F) {
     Camera camera = make_camera_impl(view);
     if (options.use_source_resolution && view.src_width != 0 &&
         view.src_height != 0) {
@@ -211,7 +213,37 @@ Camera training_camera(
         camera.cx = (camera.cx + 0.5F) * scale_x - 0.5F;
         camera.cy = (camera.cy + 0.5F) * scale_y - 0.5F;
     }
+    const float level_scale = std::clamp(resolution_scale, 1e-3F, 1.F);
+    if (level_scale < 1.F) {
+        const std::uint32_t old_width = camera.width;
+        const std::uint32_t old_height = camera.height;
+        camera.width = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(std::lround(
+                   old_width * level_scale)));
+        camera.height = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(std::lround(
+                   old_height * level_scale)));
+        const float scale_x = static_cast<float>(camera.width) / old_width;
+        const float scale_y = static_cast<float>(camera.height) / old_height;
+        camera.fx *= scale_x;
+        camera.fy *= scale_y;
+        camera.cx = (camera.cx + 0.5F) * scale_x - 0.5F;
+        camera.cy = (camera.cy + 0.5F) * scale_y - 0.5F;
+    }
     return camera;
+}
+
+float progressive_resolution_scale(
+    const unsigned iteration, const TrainingOptions& options) {
+    if (!options.progressive_resolution ||
+        options.progressive_resolution_interval == 0)
+        return 1.F;
+    const unsigned level =
+        (std::max(iteration, 1U) - 1U) /
+        options.progressive_resolution_interval;
+    return std::min(
+        1.F, std::clamp(options.progressive_initial_scale, 1e-3F, 1.F) *
+                 std::pow(2.F, static_cast<float>(level)));
 }
 
 std::vector<std::vector<std::size_t>> compute_multi_view_neighbours(
@@ -477,6 +509,19 @@ GaussianModel select_model_rows(
     return selected;
 }
 
+GaussianModel clone_model(const GaussianModel& model) {
+    GaussianModel cloned;
+    cloned.means = model.means.clone();
+    cloned.log_scales = model.log_scales.clone();
+    cloned.quaternions = model.quaternions.clone();
+    cloned.opacity_logits = model.opacity_logits.clone();
+    cloned.sh = model.sh.clone();
+    if (model.filter_3d.is_valid())
+        cloned.filter_3d = model.filter_3d.clone();
+    cloned.sh_degree = model.sh_degree;
+    return cloned;
+}
+
 void append_model(GaussianModel& model, const GaussianModel& added) {
     if (added.size() == 0) return;
     model.means = tinytensor::Tensor::cat({model.means, added.means}, 0);
@@ -530,6 +575,48 @@ void select_training_rows(
     const auto indices = index_tensor(keep);
     model = select_model_rows(model, indices);
     for (detail::AdamState* state : states) select_adam_rows(*state, indices);
+}
+
+void select_training_rows_gpu(
+    GaussianModel& model, const tinytensor::Tensor& indices,
+    const AdamStates& states) {
+    model = select_model_rows(model, indices);
+    for (detail::AdamState* state : states)
+        select_adam_rows(*state, indices);
+}
+
+void zero_adam_rows_gpu(
+    const tinytensor::Tensor& indices, const AdamStates& states) {
+    if (indices.numel() == 0) return;
+    for (detail::AdamState* state : states) {
+        std::vector<std::size_t> dimensions = state->first.shape().dims();
+        dimensions[0] = indices.numel();
+        const auto zeros = tinytensor::Tensor::zeros(
+            tinytensor::TensorShape(dimensions),
+            tinytensor::Device::CUDA);
+        state->first.index_copy_(0, indices, zeros);
+        state->second.index_copy_(0, indices, zeros);
+    }
+}
+
+void grow_adc_plus_gpu(
+    GaussianModel& model, const tinytensor::Tensor& parents,
+    const TrainingOptions& options, const AdamStates& states,
+    const tinytensor::Tensor& screen_sizes) {
+    const std::size_t count = parents.numel();
+    if (count == 0) return;
+    GaussianModel children = select_model_rows(model, parents);
+    auto samples = tinytensor::Tensor::zeros(
+        {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    auto selected_screen = screen_sizes.index_select(0, parents);
+    detail::split_gaussians(
+        model, children, parents, samples, selected_screen, 2,
+        options.prune_opacity,
+        options.adc_plus_split_at_screen_size);
+    zero_adam_rows_gpu(parents, states);
+    append_model(model, children);
+    for (detail::AdamState* state : states)
+        append_zero_adam(*state, count);
 }
 
 void grow_training_model(
@@ -625,6 +712,112 @@ std::vector<std::size_t> weighted_unique_sample(
     return {selected.begin(), selected.end()};
 }
 
+RefinementCounts refine_adc_plus_gpu(
+    GaussianModel& model, detail::DensificationStats& stats,
+    const unsigned iteration, const float scene_extent,
+    const mvs::Vec3f& scene_center, const TrainingOptions& options,
+    const AdamStates& states) {
+    const std::size_t old_count = model.size();
+    auto pruning = detail::adc_plus_prune(
+        model, options.prune_opacity, 100.F * scene_extent,
+        {scene_center.x(), scene_center.y(), scene_center.z()},
+        options.densification_cap);
+    const std::size_t retained = pruning.keep_indices.numel();
+    auto retained_gradient =
+        stats.gradient.index_select(0, pruning.keep_indices);
+    auto retained_count =
+        stats.count.index_select(0, pruning.keep_indices);
+    auto retained_screen =
+        stats.max_screen_radius.index_select(0, pruning.keep_indices);
+    auto retained_opacity =
+        pruning.opacities.index_select(0, pruning.keep_indices);
+    select_training_rows_gpu(model, pruning.keep_indices, states);
+
+    const std::size_t capacity =
+        options.densification_cap > retained
+            ? options.densification_cap - retained
+            : 0;
+    auto selected = tinytensor::Tensor::zeros_bool(
+        {retained}, tinytensor::Device::CUDA);
+    std::size_t selected_count = 0;
+    if (capacity != 0 && retained != 0) {
+        const auto visible = retained_count.gt(0.F);
+        auto visible_indices = visible.nonzero().squeeze(1).to(
+            tinytensor::DataType::Int32);
+        const std::size_t replacement_count = std::min(
+            {pruning.pruned, capacity, visible_indices.numel()});
+        if (replacement_count != 0) {
+            auto weights = retained_opacity.index_select(
+                0, visible_indices);
+            auto sampled_slots = tinytensor::Tensor::multinomial(
+                weights, static_cast<int>(replacement_count), false);
+            auto sampled = visible_indices.index_select(
+                0, sampled_slots).to(tinytensor::DataType::Int32);
+            selected.index_fill_(0, sampled, 1.F);
+            selected_count = replacement_count;
+        }
+
+        auto oversized = visible.logical_and(
+            retained_screen.gt(
+                options.adc_plus_split_at_screen_size));
+        oversized = oversized.logical_and(!selected);
+        auto oversized_indices = oversized.nonzero().squeeze(1).to(
+            tinytensor::DataType::Int32);
+        const std::size_t oversized_count = std::min(
+            oversized_indices.numel(), capacity - selected_count);
+        if (oversized_count != 0) {
+            if (oversized_count != oversized_indices.numel())
+                oversized_indices = oversized_indices.slice(
+                    0, 0, oversized_count);
+            selected.index_fill_(0, oversized_indices, 1.F);
+            selected_count += oversized_count;
+        }
+
+        if (iteration < options.grow_stop_iter &&
+            selected_count < capacity) {
+            auto growth_mask = visible.logical_and(
+                retained_gradient.gt(
+                    options.adc_plus_growth_gradient_threshold));
+            auto growth_indices = growth_mask.nonzero().squeeze(1).to(
+                tinytensor::DataType::Int32);
+            const std::size_t threshold_growth =
+                static_cast<std::size_t>(std::llround(
+                    growth_indices.numel() *
+                    options.adc_plus_growth_select_fraction));
+            const std::size_t requested =
+                threshold_growth > pruning.pruned
+                    ? threshold_growth - pruning.pruned
+                    : 0;
+            const std::size_t growth_count = std::min(
+                {requested, capacity - selected_count,
+                 growth_indices.numel()});
+            if (growth_count != 0) {
+                auto weights = retained_gradient.index_select(
+                    0, growth_indices);
+                auto sampled_slots = tinytensor::Tensor::multinomial(
+                    weights, static_cast<int>(growth_count), false);
+                auto sampled = growth_indices.index_select(
+                    0, sampled_slots).to(tinytensor::DataType::Int32);
+                selected.index_fill_(0, sampled, 1.F);
+            }
+        }
+    }
+
+    auto split_parents = selected.nonzero().squeeze(1).to(
+        tinytensor::DataType::Int32);
+    grow_adc_plus_gpu(
+        model, split_parents, options, states, retained_screen);
+    const float remaining_progress = 1.F -
+        static_cast<float>(iteration) /
+            std::max(1.F, static_cast<float>(options.iterations));
+    detail::apply_adc_decay(
+        model,
+        options.opacity_decay * std::max(remaining_progress, 0.F),
+        0.F);
+    stats = detail::make_densification_stats(model.size());
+    return {split_parents.numel(), pruning.pruned};
+}
+
 RefinementCounts refine_gaussians(
     GaussianModel& model, detail::DensificationStats& stats,
     const unsigned iteration, const float scene_extent,
@@ -656,6 +849,13 @@ RefinementCounts refine_gaussians(
     if (options.densification_strategy ==
         DensificationStrategy::adc_plus)
         detail::bake_3d_filter(model);
+
+    if (options.densification_strategy ==
+            DensificationStrategy::adc_plus &&
+        options.adc_plus_gpu_refine)
+        return refine_adc_plus_gpu(
+            model, stats, iteration, scene_extent, scene_center,
+            options, states);
 
     const std::size_t old_count = model.size();
     const auto gradients = download<float>(stats.gradient);
@@ -1174,11 +1374,12 @@ struct HostTrainingView {
 };
 
 HostTrainingView load_host_training_view(
-    const mvs::MvsView& view, const TrainingOptions& options) {
+    const mvs::MvsView& view, const TrainingOptions& options,
+    const float resolution_scale = 1.F) {
     if (view.width == 0 || view.height == 0)
         throw std::invalid_argument("Cannot build a GGGS training view with empty dimensions");
     const io::RgbImage source = io::load_rgb(view.path);
-    Camera camera = training_camera(view, options);
+    Camera camera = training_camera(view, options, resolution_scale);
     const std::size_t pixels =
         static_cast<std::size_t>(camera.width) * camera.height;
     io::GrayImage source_mask;
@@ -1266,9 +1467,10 @@ class TrainingViewCache {
 public:
     TrainingViewCache(
         const std::vector<mvs::MvsView>& source,
-        const TrainingOptions& options)
+        const TrainingOptions& options, const float resolution_scale = 1.F)
         : source_(source), options_(options),
-          capacity_bytes_(options.training_view_cache_bytes) {}
+          capacity_bytes_(options.training_view_cache_bytes),
+          resolution_scale_(resolution_scale) {}
 
     TrainingView get(const std::size_t index) {
         return upload_training_view(host_view(index));
@@ -1276,6 +1478,15 @@ public:
 
     bool has_mask(const std::size_t index) {
         return host_view(index).has_mask;
+    }
+
+    void set_resolution_scale(const float scale) {
+        const float clamped = std::clamp(scale, 1e-3F, 1.F);
+        if (std::abs(clamped - resolution_scale_) < 1e-6F) return;
+        entries_.clear();
+        lookup_.clear();
+        cached_bytes_ = 0;
+        resolution_scale_ = clamped;
     }
 
 private:
@@ -1296,7 +1507,8 @@ private:
         }
 
         HostTrainingView loaded =
-            load_host_training_view(source_[index], options_);
+            load_host_training_view(
+                source_[index], options_, resolution_scale_);
         const std::size_t loaded_bytes = loaded.bytes();
         while (!entries_.empty() &&
                (capacity_bytes_ == 0 ||
@@ -1318,13 +1530,15 @@ private:
     const TrainingOptions& options_;
     std::size_t capacity_bytes_{};
     std::size_t cached_bytes_{};
+    float resolution_scale_{1.F};
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;
 };
 
 TrainingView make_training_view(
     const mvs::MvsView& view, const TrainingOptions& options) {
-    return upload_training_view(load_host_training_view(view, options));
+    return upload_training_view(
+        load_host_training_view(view, options, 1.F));
 }
 
 Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {}
@@ -1344,7 +1558,10 @@ GaussianModel Trainer::train(
     if (view_indices.empty())
         throw std::invalid_argument(
             "GGGS evaluation split left no training views");
-    TrainingViewCache view_cache(scene.views, options_);
+    float active_resolution_scale =
+        progressive_resolution_scale(1, options_);
+    TrainingViewCache view_cache(
+        scene.views, options_, active_resolution_scale);
     if (options_.use_mask) {
         for (const std::size_t index : view_indices)
             if (!view_cache.has_mask(index))
@@ -1356,16 +1573,40 @@ GaussianModel Trainer::train(
     std::vector<Camera> all_cameras;
     all_cameras.reserve(scene.views.size());
     for (const mvs::MvsView& view : scene.views)
-        all_cameras.push_back(training_camera(view, options_));
+        all_cameras.push_back(training_camera(
+            view, options_, active_resolution_scale));
     std::vector<Camera> filter_cameras;
     filter_cameras.reserve(view_indices.size());
     for (const std::size_t index : view_indices)
         filter_cameras.push_back(all_cameras[index]);
+    std::vector<Camera> full_resolution_filter_cameras;
+    full_resolution_filter_cameras.reserve(view_indices.size());
+    for (const std::size_t index : view_indices)
+        full_resolution_filter_cameras.push_back(
+            training_camera(scene.views[index], options_, 1.F));
     if (options_.use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras);
     const auto multi_view_neighbours = compute_multi_view_neighbours(
         all_cameras, view_indices, options_);
+    std::future<void> evaluation_future;
+    const auto finish_evaluation = [&] {
+        if (evaluation_future.valid()) evaluation_future.get();
+    };
+    const auto launch_evaluation =
+        [&](const unsigned iteration, const GaussianModel& current) {
+            finish_evaluation();
+            GaussianModel snapshot = clone_model(current);
+            if (options_.use_3d_filter)
+                snapshot.filter_3d = detail::compute_3d_filter(
+                    snapshot.means, full_resolution_filter_cameras);
+            evaluation_future = std::async(
+                std::launch::async,
+                [evaluate, iteration,
+                 snapshot = std::move(snapshot)]() mutable {
+                    evaluate(iteration, snapshot);
+                });
+        };
 
     detail::AdamState means_state = detail::make_adam_state(model.means);
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
@@ -1428,6 +1669,24 @@ GaussianModel Trainer::train(
 
     for (unsigned iteration = 1; iteration <= options_.iterations; ++iteration) {
         const auto started = std::chrono::steady_clock::now();
+        const float requested_resolution_scale =
+            progressive_resolution_scale(iteration, options_);
+        if (std::abs(
+                requested_resolution_scale -
+                active_resolution_scale) > 1e-6F) {
+            active_resolution_scale = requested_resolution_scale;
+            view_cache.set_resolution_scale(active_resolution_scale);
+            all_cameras.clear();
+            for (const mvs::MvsView& view : scene.views)
+                all_cameras.push_back(training_camera(
+                    view, options_, active_resolution_scale));
+            filter_cameras.clear();
+            for (const std::size_t index : view_indices)
+                filter_cameras.push_back(all_cameras[index]);
+            if (options_.use_3d_filter)
+                model.filter_3d = detail::compute_3d_filter(
+                    model.means, filter_cameras);
+        }
         const bool report_progress = progress &&
             (iteration == 1 || iteration == options_.iterations ||
              (options_.log_interval != 0 &&
@@ -1666,7 +1925,8 @@ GaussianModel Trainer::train(
                 static_cast<float>(opacity_sum * inverse_gaussians),
                 milliseconds, multi_view_loss.geometry, multi_view_loss.ncc,
                 multi_view_loss.geometry_pixels,
-                multi_view_loss.ncc_pixels});
+                multi_view_loss.ncc_pixels, active_resolution_scale,
+                target.camera.width, target.camera.height});
         }
         if (!continue_training) break;
         if (evaluate &&
@@ -1674,8 +1934,9 @@ GaussianModel Trainer::train(
                 options_.evaluation_iterations.begin(),
                 options_.evaluation_iterations.end(),
                 iteration) != options_.evaluation_iterations.end())
-            evaluate(iteration, model);
+            launch_evaluation(iteration, model);
     }
+    finish_evaluation();
     const cudaError_t error = cudaDeviceSynchronize();
     if (error != cudaSuccess)
         throw std::runtime_error(
@@ -1683,7 +1944,7 @@ GaussianModel Trainer::train(
             cudaGetErrorString(error));
     if (options_.use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
-            model.means, filter_cameras);
+            model.means, full_resolution_filter_cameras);
     return model;
 }
 

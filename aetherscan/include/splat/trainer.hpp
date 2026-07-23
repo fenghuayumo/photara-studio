@@ -31,6 +31,9 @@ struct TrainingProgress {
     float multi_view_ncc_loss{};
     std::size_t multi_view_geometry_pixels{};
     std::size_t multi_view_ncc_pixels{};
+    float resolution_scale{1.F};
+    std::uint32_t image_width{};
+    std::uint32_t image_height{};
 };
 
 struct RenderMetrics {

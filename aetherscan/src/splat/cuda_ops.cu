@@ -80,6 +80,39 @@ __global__ void bake_3d_filter_kernel(
         logf(filtered_opacity / (1.F - filtered_opacity));
 }
 
+__global__ void adc_plus_prune_kernel(
+    const float* means, const float* log_scales,
+    const float* quaternions, const float* opacity_logits,
+    const float* sh, const std::size_t sh_stride,
+    unsigned char* keep, unsigned char* hard_prune, float* opacities,
+    const std::size_t count, const float minimum_opacity,
+    const float maximum_bounds, const float center_x,
+    const float center_y, const float center_z) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float opacity = sigmoid(opacity_logits[index]);
+    opacities[index] = opacity;
+    bool bad = !isfinite(opacity_logits[index]);
+    float maximum_scale = 0.F;
+    for (int axis = 0; axis < 3; ++axis) {
+        const float mean = means[3 * index + axis];
+        const float log_scale = log_scales[3 * index + axis];
+        bad = bad || !isfinite(mean) || !isfinite(log_scale);
+        maximum_scale = fmaxf(maximum_scale, expf(log_scale));
+    }
+    for (int component = 0; component < 4; ++component)
+        bad = bad || !isfinite(quaternions[4 * index + component]);
+    for (std::size_t component = 0; component < sh_stride; ++component)
+        bad = bad || !isfinite(sh[index * sh_stride + component]);
+    const bool outside =
+        fabsf(means[3 * index] - center_x) > maximum_bounds ||
+        fabsf(means[3 * index + 1] - center_y) > maximum_bounds ||
+        fabsf(means[3 * index + 2] - center_z) > maximum_bounds;
+    const bool hard = bad || outside || maximum_scale > maximum_bounds;
+    hard_prune[index] = hard ? 1U : 0U;
+    keep[index] = !hard && opacity >= minimum_opacity ? 1U : 0U;
+}
+
 __global__ void chain_gradient_kernel(
     const float* log_scales, const float* raw_quaternions,
     const float* opacity_logits, const float* filter_3d,
@@ -971,6 +1004,87 @@ void bake_3d_filter(GaussianModel& model) {
         check_cuda(cudaGetLastError(), "bake GGGS 3D filter");
     }
     model.filter_3d = {};
+}
+
+AdcPlusPruneResult adc_plus_prune(
+    const GaussianModel& model, const float minimum_opacity,
+    const float maximum_bounds,
+    const std::array<float, 3>& scene_center,
+    const std::size_t maximum_count) {
+    const std::size_t count = model.size();
+    auto keep = tinytensor::Tensor::zeros_bool(
+        {count}, tinytensor::Device::CUDA);
+    auto hard = tinytensor::Tensor::zeros_bool(
+        {count}, tinytensor::Device::CUDA);
+    auto opacities = tinytensor::Tensor::empty(
+        {count}, tinytensor::Device::CUDA);
+    if (count != 0) {
+        adc_plus_prune_kernel<<<
+            (count + k_threads - 1) / k_threads, k_threads>>>(
+            model.means.ptr<float>(), model.log_scales.ptr<float>(),
+            model.quaternions.ptr<float>(),
+            model.opacity_logits.ptr<float>(), model.sh.ptr<float>(),
+            model.sh.numel() / count, keep.ptr<unsigned char>(),
+            hard.ptr<unsigned char>(), opacities.ptr<float>(), count,
+            minimum_opacity, maximum_bounds, scene_center[0],
+            scene_center[1], scene_center[2]);
+        check_cuda(cudaGetLastError(), "select ADC+ prune mask");
+    }
+
+    std::size_t retained = keep.count_nonzero();
+    if ((retained == 0 && count != 0) ||
+        retained > maximum_count) {
+        std::vector<float> host_opacity(count);
+        std::vector<unsigned char> host_keep(count);
+        std::vector<unsigned char> host_hard(count);
+        check_cuda(cudaMemcpy(
+            host_opacity.data(), opacities.data_ptr(),
+            count * sizeof(float), cudaMemcpyDeviceToHost),
+            "download ADC+ fallback opacities");
+        check_cuda(cudaMemcpy(
+            host_keep.data(), keep.data_ptr(),
+            count * sizeof(unsigned char), cudaMemcpyDeviceToHost),
+            "download ADC+ fallback keep mask");
+        check_cuda(cudaMemcpy(
+            host_hard.data(), hard.data_ptr(),
+            count * sizeof(unsigned char), cudaMemcpyDeviceToHost),
+            "download ADC+ fallback hard-prune mask");
+        if (retained == 0) {
+            std::size_t best = count;
+            float best_opacity = -1.F;
+            for (std::size_t index = 0; index < count; ++index) {
+                if (!host_hard[index] &&
+                    host_opacity[index] > best_opacity) {
+                    best = index;
+                    best_opacity = host_opacity[index];
+                }
+            }
+            if (best != count) {
+                host_keep[best] = 1U;
+                retained = 1;
+            }
+        }
+        if (retained > maximum_count) {
+            std::vector<std::pair<float, std::size_t>> rows;
+            rows.reserve(retained);
+            for (std::size_t index = 0; index < count; ++index)
+                if (host_keep[index])
+                    rows.emplace_back(host_opacity[index], index);
+            std::sort(rows.begin(), rows.end());
+            for (std::size_t index = 0;
+                 index < retained - maximum_count; ++index)
+                host_keep[rows[index].second] = 0U;
+            retained = maximum_count;
+        }
+        check_cuda(cudaMemcpy(
+            keep.data_ptr(), host_keep.data(),
+            count * sizeof(unsigned char), cudaMemcpyHostToDevice),
+            "upload ADC+ fallback keep mask");
+    }
+    auto keep_indices = keep.nonzero().squeeze(1).to(
+        tinytensor::DataType::Int32);
+    return {std::move(keep_indices), std::move(opacities),
+            count - retained};
 }
 
 tinytensor::Tensor compute_3d_filter(
