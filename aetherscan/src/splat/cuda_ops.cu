@@ -494,8 +494,9 @@ __global__ void loss_kernel(
             terms + 0,
             photo_weight * l1_weight * valid * rgb_loss * inverse_pixels / 3.F);
 
-    const bool has_depth = target_depth[pixel] > 0.F && depth[pixel] > 0.F;
-    if (has_depth && valid > 0.F && depth_weight > 0.F) {
+    const bool has_depth = depth_weight > 0.F &&
+        target_depth[pixel] > 0.F && depth[pixel] > 0.F;
+    if (has_depth && valid > 0.F) {
         const float scale = fmaxf(target_depth[pixel], 1e-4F);
         const float difference = (depth[pixel] - target_depth[pixel]) / scale;
         const float robust = sqrtf(
@@ -506,11 +507,17 @@ __global__ void loss_kernel(
             atomicAdd(terms + 1, depth_weight * robust * inverse_pixels);
     }
 
-    const float tx = target_normal[pixel];
-    const float ty = target_normal[pixels + pixel];
-    const float tz = target_normal[2 * pixels + pixel];
-    const float target_length2 = tx * tx + ty * ty + tz * tz;
-    if (target_length2 > 0.25F && valid > 0.F && normal_weight > 0.F) {
+    float tx = 0.F;
+    float ty = 0.F;
+    float tz = 0.F;
+    float target_length2 = 0.F;
+    if (normal_weight > 0.F) {
+        tx = target_normal[pixel];
+        ty = target_normal[pixels + pixel];
+        tz = target_normal[2 * pixels + pixel];
+        target_length2 = tx * tx + ty * ty + tz * tz;
+    }
+    if (target_length2 > 0.25F && valid > 0.F) {
         const float inverse_target_length = rsqrtf(target_length2);
         const float nx = normal[pixel];
         const float ny = normal[pixels + pixel];

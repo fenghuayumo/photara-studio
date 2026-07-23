@@ -79,6 +79,8 @@ struct ReconstructCli {
     std::filesystem::path dense_ply;
     unsigned gggs_iterations{10'000};
     std::uint64_t gggs_max_gaussians{500'000};
+    unsigned gggs_max_resolution{1'920};
+    std::uint64_t gggs_view_cache_mb{6'144};
     bool gggs_use_mask{true};
     std::string gggs_alpha_mode{"transparent"};
     float gggs_match_alpha_weight{0.25F};
@@ -346,6 +348,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("10000"))
         ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
          cxxopts::value<std::uint64_t>()->default_value("500000"))
+        ("gggs-max-resolution", "Maximum GGGS training image dimension (0 = source)",
+         cxxopts::value<unsigned>()->default_value("1920"))
+        ("gggs-view-cache-mb", "Decoded GGGS host-view LRU budget (0 = no cache)",
+         cxxopts::value<std::uint64_t>()->default_value("6144"))
         ("gggs-use-mask", "Enable pygsplat-compatible foreground-mask training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("gggs-alpha-mode", "Mask alpha mode: masked or transparent",
@@ -510,6 +516,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.gggs_iterations = 5'000;
     cli.gggs_max_gaussians =
         result["gggs-max-gaussians"].as<std::uint64_t>();
+    cli.gggs_max_resolution =
+        result["gggs-max-resolution"].as<unsigned>();
+    cli.gggs_view_cache_mb =
+        result["gggs-view-cache-mb"].as<std::uint64_t>();
     cli.gggs_use_mask = result["gggs-use-mask"].as<bool>();
     cli.gggs_alpha_mode = result["gggs-alpha-mode"].as<std::string>();
     cli.gggs_match_alpha_weight =
@@ -1206,6 +1216,16 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;
     options.use_source_resolution = true;
+    options.max_image_dimension = cli.gggs_max_resolution;
+    constexpr std::uint64_t bytes_per_megabyte = 1024ULL * 1024ULL;
+    options.training_view_cache_bytes = static_cast<std::size_t>(
+        std::min<std::uint64_t>(
+            cli.gggs_view_cache_mb >
+                    (std::numeric_limits<std::uint64_t>::max)() /
+                        bytes_per_megabyte
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : cli.gggs_view_cache_mb * bytes_per_megabyte,
+            (std::numeric_limits<std::size_t>::max)()));
     for (const unsigned milestone : {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
         if (milestone <= options.iterations)
             options.evaluation_iterations.push_back(milestone);
@@ -1245,9 +1265,22 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
             : (std::min)(options.max_gaussians, options.densification_cap);
     }
     if (!dense_input &&
+        options.densification_strategy ==
+            aetherscan::splat::DensificationStrategy::adc_plus) {
+        // brush-train optimizer defaults. The trainer also switches ADC+ to
+        // brush's 2-NN/identity/0.5-opacity sparse initialization.
+        options.means_lr = 2e-5F;
+        options.opacities_lr = 0.012F;
+        options.quaternions_lr = 2e-3F;
+        options.sh0_lr = 2e-3F;
+        options.sh_rest_lr = 2e-4F;
+        options.sh_degree_interval = 0;
+    } else if (
+        !dense_input &&
         options.densification_strategy !=
-            aetherscan::splat::DensificationStrategy::default_strategy)
+            aetherscan::splat::DensificationStrategy::default_strategy) {
         options.opacities_lr = 0.025F;
+    }
     options.use_mask = cli.gggs_use_mask;
     options.mask_dir = cli.masks_dir;
     options.alpha_mode = cli.gggs_alpha_mode == "masked"
@@ -1305,6 +1338,9 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " match_alpha_weight=", options.match_alpha_weight,
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
         " source_resolution=", options.use_source_resolution,
+        " max_image_dimension=", options.max_image_dimension,
+        " host_view_cache_mb=",
+        options.training_view_cache_bytes / (1024 * 1024),
         " knn_scale=", options.initialize_scale_from_knn,
         " dense_structure_freeze_iter=",
         options.dense_structure_freeze_iter,

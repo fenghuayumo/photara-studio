@@ -11,11 +11,13 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <list>
 #include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace aetherscan::splat {
@@ -42,6 +44,21 @@ public:
         search(root_, points_[query], best);
         std::sort(best.begin(), best.end());
         return std::sqrt(std::max((best[1] + best[2] + best[3]) / 3.F, 0.F));
+    }
+
+    [[nodiscard]] float two_neighbor_half_average(
+        const std::size_t query) const {
+        if (points_.size() < 3) return 0.F;
+        std::array<float, 4> best{
+            std::numeric_limits<float>::infinity(),
+            std::numeric_limits<float>::infinity(),
+            std::numeric_limits<float>::infinity(),
+            std::numeric_limits<float>::infinity()};
+        search(root_, points_[query], best);
+        std::sort(best.begin(), best.end());
+        return 0.25F * (
+            std::sqrt(std::max(best[1], 0.F)) +
+            std::sqrt(std::max(best[2], 0.F)));
     }
 
 private:
@@ -103,6 +120,35 @@ private:
     int root_{-1};
 };
 
+float percentile_median_size(
+    const std::vector<mvs::Vec3f>& points, const float percentile) {
+    if (points.empty()) return 1.F;
+    std::array<std::vector<float>, 3> axes;
+    for (auto& axis : axes) axis.reserve(points.size());
+    for (const auto& point : points) {
+        if (!point.allFinite()) continue;
+        for (int axis = 0; axis < 3; ++axis)
+            axes[axis].push_back(point(axis));
+    }
+    std::array<float, 3> sizes{};
+    const float p = std::clamp(percentile, 0.F, 1.F);
+    for (int axis = 0; axis < 3; ++axis) {
+        auto& values = axes[axis];
+        if (values.empty()) return 1.F;
+        std::sort(values.begin(), values.end());
+        const std::size_t count = values.size();
+        const std::size_t low = std::min(
+            count - 1,
+            static_cast<std::size_t>((1.F - p) * 0.5F * count));
+        const std::size_t high = std::min(
+            count - 1,
+            static_cast<std::size_t>((1.F + p) * 0.5F * count));
+        sizes[axis] = values[high] - values[low];
+    }
+    std::sort(sizes.begin(), sizes.end());
+    return std::max(sizes[1], 0.01F);
+}
+
 Camera make_camera_impl(const mvs::MvsView& view) {
     Camera camera;
     // Force evaluation: translation() returns a temporary, so retaining the
@@ -132,22 +178,58 @@ Camera make_camera_impl(const mvs::MvsView& view) {
     return camera;
 }
 
+Camera training_camera(
+    const mvs::MvsView& view, const TrainingOptions& options) {
+    Camera camera = make_camera_impl(view);
+    if (options.use_source_resolution && view.src_width != 0 &&
+        view.src_height != 0) {
+        camera.fx = view.src_fx;
+        camera.fy = view.src_fy;
+        camera.cx = view.src_cx;
+        camera.cy = view.src_cy;
+        camera.width = view.src_width;
+        camera.height = view.src_height;
+    }
+    const std::uint32_t largest =
+        std::max(camera.width, camera.height);
+    if (options.max_image_dimension != 0 &&
+        largest > options.max_image_dimension) {
+        const float scale = static_cast<float>(
+            options.max_image_dimension) / static_cast<float>(largest);
+        const std::uint32_t old_width = camera.width;
+        const std::uint32_t old_height = camera.height;
+        camera.width = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(std::lround(
+                   old_width * scale)));
+        camera.height = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(std::lround(
+                   old_height * scale)));
+        const float scale_x = static_cast<float>(camera.width) / old_width;
+        const float scale_y = static_cast<float>(camera.height) / old_height;
+        camera.fx *= scale_x;
+        camera.fy *= scale_y;
+        camera.cx = (camera.cx + 0.5F) * scale_x - 0.5F;
+        camera.cy = (camera.cy + 0.5F) * scale_y - 0.5F;
+    }
+    return camera;
+}
+
 std::vector<std::vector<std::size_t>> compute_multi_view_neighbours(
-    const std::vector<TrainingView>& views,
+    const std::vector<Camera>& cameras,
     const TrainingOptions& options) {
-    std::vector<std::vector<std::size_t>> result(views.size());
-    for (std::size_t reference = 0; reference < views.size(); ++reference) {
+    std::vector<std::vector<std::size_t>> result(cameras.size());
+    for (std::size_t reference = 0; reference < cameras.size(); ++reference) {
         std::vector<std::tuple<float, float, std::size_t>> candidates;
-        const auto& camera = views[reference].camera;
+        const auto& camera = cameras[reference];
         const Eigen::Vector3f center(
             camera.position[0], camera.position[1], camera.position[2]);
         Eigen::Vector3f forward(
             camera.world_to_camera[2], camera.world_to_camera[6],
             camera.world_to_camera[10]);
         forward.normalize();
-        for (std::size_t index = 0; index < views.size(); ++index) {
+        for (std::size_t index = 0; index < cameras.size(); ++index) {
             if (index == reference) continue;
-            const auto& other = views[index].camera;
+            const auto& other = cameras[index];
             const Eigen::Vector3f other_center(
                 other.position[0], other.position[1], other.position[2]);
             const float distance = (center - other_center).norm();
@@ -906,6 +988,8 @@ GaussianModel initialize_from_dense_cloud(
         : std::min(source_count, options.max_gaussians);
     const std::size_t bases = static_cast<std::size_t>(options.sh_degree + 1U) *
                               (options.sh_degree + 1U);
+    const bool brush_adc_plus = options.densification_strategy ==
+                                DensificationStrategy::adc_plus;
     std::vector<float> means(count * 3);
     std::vector<float> scales(count * 3);
     std::vector<float> quaternions(count * 4);
@@ -949,18 +1033,28 @@ GaussianModel initialize_from_dense_cloud(
                   options.maximum_scale_fraction,
                   options.minimum_scale_fraction)
         : std::numeric_limits<float>::infinity();
-    const float opacity = std::clamp(options.initial_opacity, 1e-6F, 1.F - 1e-6F);
+    const float opacity = std::clamp(
+        brush_adc_plus ? 0.5F : options.initial_opacity,
+        1e-6F, 1.F - 1e-6F);
     const float opacity_logit = std::log(opacity / (1.F - opacity));
     std::vector<float> knn_scales(count, 0.F);
-    if (options.initialize_scale_from_knn && count >= 4) {
+    if (options.initialize_scale_from_knn &&
+        count >= (brush_adc_plus ? 3U : 4U)) {
         const KdTree tree(selected_positions);
+        const float brush_maximum_scale = 0.1F *
+            percentile_median_size(selected_positions, 0.75F);
 #if defined(AETHERSCAN_HAS_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
         for (std::int64_t index = 0;
              index < static_cast<std::int64_t>(count); ++index)
             knn_scales[static_cast<std::size_t>(index)] =
-                tree.three_neighbor_rms(static_cast<std::size_t>(index));
+                brush_adc_plus
+                ? std::clamp(
+                      tree.two_neighbor_half_average(
+                          static_cast<std::size_t>(index)),
+                      1e-3F, brush_maximum_scale)
+                : tree.three_neighbor_rms(static_cast<std::size_t>(index));
     }
     std::mt19937 quaternion_random(options.seed);
     std::uniform_real_distribution<float> quaternion_uniform(0.F, 1.F);
@@ -993,13 +1087,13 @@ GaussianModel initialize_from_dense_cloud(
         for (int axis = 0; axis < 3; ++axis)
             scales[3 * index + axis] = std::log(scale);
 
-        if (!options.input_is_dense) {
+        if (!options.input_is_dense && !brush_adc_plus) {
             // Exact pygsplat sparse-SfM initialization: raw U[0,1) quaternion
             // parameters. The raster path normalizes them before use.
             for (int component = 0; component < 4; ++component)
                 quaternions[4 * index + component] = quaternion_uniform(
                     quaternion_random);
-        } else {
+        } else if (options.input_is_dense) {
             mvs::Vec3f normal = point.normal;
             if (!normal.allFinite() || normal.squaredNorm() < 1e-12F)
                 normal = mvs::Vec3f::UnitZ();
@@ -1011,6 +1105,11 @@ GaussianModel initialize_from_dense_cloud(
             quaternions[4 * index + 1] = rotation.x();
             quaternions[4 * index + 2] = rotation.y();
             quaternions[4 * index + 3] = rotation.z();
+        } else {
+            quaternions[4 * index + 0] = 1.F;
+            quaternions[4 * index + 1] = 0.F;
+            quaternions[4 * index + 2] = 0.F;
+            quaternions[4 * index + 3] = 0.F;
         }
         opacities[index] = opacity_logit;
         for (int channel = 0; channel < 3; ++channel)
@@ -1033,21 +1132,27 @@ GaussianModel initialize_from_dense_cloud(
     return model;
 }
 
-TrainingView make_training_view(
+struct HostTrainingView {
+    Camera camera;
+    std::vector<float> rgb;
+    std::vector<float> depth;
+    std::vector<float> normal;
+    std::vector<float> mask;
+    bool has_mask{false};
+
+    [[nodiscard]] std::size_t bytes() const noexcept {
+        return sizeof(*this) + sizeof(float) *
+            (rgb.capacity() + depth.capacity() + normal.capacity() +
+             mask.capacity());
+    }
+};
+
+HostTrainingView load_host_training_view(
     const mvs::MvsView& view, const TrainingOptions& options) {
     if (view.width == 0 || view.height == 0)
         throw std::invalid_argument("Cannot build a GGGS training view with empty dimensions");
     const io::RgbImage source = io::load_rgb(view.path);
-    Camera camera = camera_from_mvs_view(view);
-    if (options.use_source_resolution && view.src_width != 0 &&
-        view.src_height != 0) {
-        camera.fx = view.src_fx;
-        camera.fy = view.src_fy;
-        camera.cx = view.src_cx;
-        camera.cy = view.src_cy;
-        camera.width = view.src_width;
-        camera.height = view.src_height;
-    }
+    Camera camera = training_camera(view, options);
     const std::size_t pixels =
         static_cast<std::size_t>(camera.width) * camera.height;
     io::GrayImage source_mask;
@@ -1078,13 +1183,16 @@ TrainingView make_training_view(
         }
     }
 
-    std::vector<float> depth(pixels, 0.F);
-    std::vector<float> normals(3 * pixels, 0.F);
-    if (camera.width == view.width && camera.height == view.height &&
+    std::vector<float> depth;
+    std::vector<float> normals;
+    if (options.use_mvs_depth &&
+        camera.width == view.width && camera.height == view.height &&
         view.depth_map.depth.size() == pixels)
         depth = view.depth_map.depth;
-    if (camera.width == view.width && camera.height == view.height &&
+    if (options.use_mvs_normals &&
+        camera.width == view.width && camera.height == view.height &&
         view.depth_map.normal.size() == pixels) {
+        normals.resize(3 * pixels);
         for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
             for (int axis = 0; axis < 3; ++axis)
                 normals[static_cast<std::size_t>(axis) * pixels + pixel] =
@@ -1100,18 +1208,97 @@ TrainingView make_training_view(
             mask[pixel] = view.foreground_mask[pixel] != 0 ? 1.F : 0.F;
     }
 
+    return {
+        camera, std::move(rgb), std::move(depth), std::move(normals),
+        std::move(mask), has_mask};
+}
+
+TrainingView upload_training_view(const HostTrainingView& host) {
     TrainingView result;
-    result.camera = camera;
+    result.camera = host.camera;
     result.rgb = tinytensor::Tensor::from_vector(
-        rgb, {3, camera.height, camera.width}, tinytensor::Device::CUDA);
-    result.depth = tinytensor::Tensor::from_vector(
-        depth, {camera.height, camera.width}, tinytensor::Device::CUDA);
-    result.normal = tinytensor::Tensor::from_vector(
-        normals, {3, camera.height, camera.width}, tinytensor::Device::CUDA);
+        host.rgb, {3, host.camera.height, host.camera.width},
+        tinytensor::Device::CUDA);
+    result.depth = host.depth.empty()
+        ? tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA)
+        : tinytensor::Tensor::from_vector(
+              host.depth, {host.camera.height, host.camera.width},
+              tinytensor::Device::CUDA);
+    result.normal = host.normal.empty()
+        ? tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA)
+        : tinytensor::Tensor::from_vector(
+              host.normal, {3, host.camera.height, host.camera.width},
+              tinytensor::Device::CUDA);
     result.mask = tinytensor::Tensor::from_vector(
-        mask, {camera.height, camera.width}, tinytensor::Device::CUDA);
-    result.has_mask = has_mask;
+        host.mask, {host.camera.height, host.camera.width},
+        tinytensor::Device::CUDA);
+    result.has_mask = host.has_mask;
     return result;
+}
+
+class TrainingViewCache {
+public:
+    TrainingViewCache(
+        const std::vector<mvs::MvsView>& source,
+        const TrainingOptions& options)
+        : source_(source), options_(options),
+          capacity_bytes_(options.training_view_cache_bytes) {}
+
+    TrainingView get(const std::size_t index) {
+        return upload_training_view(host_view(index));
+    }
+
+    bool has_mask(const std::size_t index) {
+        return host_view(index).has_mask;
+    }
+
+private:
+    struct Entry {
+        std::size_t index{};
+        std::size_t bytes{};
+        HostTrainingView view;
+    };
+    using Entries = std::list<Entry>;
+
+    const HostTrainingView& host_view(const std::size_t index) {
+        if (index >= source_.size())
+            throw std::out_of_range("GGGS training view index is out of range");
+        const auto found = lookup_.find(index);
+        if (found != lookup_.end()) {
+            entries_.splice(entries_.begin(), entries_, found->second);
+            return entries_.front().view;
+        }
+
+        HostTrainingView loaded =
+            load_host_training_view(source_[index], options_);
+        const std::size_t loaded_bytes = loaded.bytes();
+        while (!entries_.empty() &&
+               (capacity_bytes_ == 0 ||
+                cached_bytes_ + loaded_bytes > capacity_bytes_)) {
+            const auto& evicted = entries_.back();
+            cached_bytes_ -= evicted.bytes;
+            lookup_.erase(evicted.index);
+            entries_.pop_back();
+        }
+        // Keep one decoded view even when caching is disabled or a single
+        // image exceeds the budget. It remains valid until the next miss.
+        entries_.push_front({index, loaded_bytes, std::move(loaded)});
+        lookup_[index] = entries_.begin();
+        cached_bytes_ += loaded_bytes;
+        return entries_.front().view;
+    }
+
+    const std::vector<mvs::MvsView>& source_;
+    const TrainingOptions& options_;
+    std::size_t capacity_bytes_{};
+    std::size_t cached_bytes_{};
+    Entries entries_;
+    std::unordered_map<std::size_t, Entries::iterator> lookup_;
+};
+
+TrainingView make_training_view(
+    const mvs::MvsView& view, const TrainingOptions& options) {
+    return upload_training_view(load_host_training_view(view, options));
 }
 
 Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {}
@@ -1122,28 +1309,26 @@ GaussianModel Trainer::train(
     if (scene.views.empty())
         throw std::invalid_argument("GGGS training requires at least one MVS view");
     GaussianModel model = initialize_from_dense_cloud(scene, options_);
-    std::vector<TrainingView> views;
     std::vector<std::size_t> view_indices(scene.views.size());
     std::iota(view_indices.begin(), view_indices.end(), std::size_t{0});
-    views.reserve(view_indices.size());
-    for (const std::size_t index : view_indices)
-        views.push_back(make_training_view(scene.views[index], options_));
-    if (options_.use_mask &&
-        std::any_of(views.begin(), views.end(),
-                    [](const TrainingView& view) { return !view.has_mask; }))
-        throw std::invalid_argument(
-            "GGGS subject-only training requires a matching mask file or "
-            "source alpha channel for every selected view");
+    TrainingViewCache view_cache(scene.views, options_);
+    if (options_.use_mask) {
+        for (const std::size_t index : view_indices)
+            if (!view_cache.has_mask(index))
+                throw std::invalid_argument(
+                    "GGGS subject-only training requires a matching mask "
+                    "file or source alpha channel for every selected view");
+    }
 
     std::vector<Camera> filter_cameras;
-    filter_cameras.reserve(views.size());
-    for (const TrainingView& view : views)
-        filter_cameras.push_back(view.camera);
+    filter_cameras.reserve(scene.views.size());
+    for (const mvs::MvsView& view : scene.views)
+        filter_cameras.push_back(training_camera(view, options_));
     if (options_.use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras);
     const auto multi_view_neighbours = compute_multi_view_neighbours(
-        views, options_);
+        filter_cameras, options_);
 
     detail::AdamState means_state = detail::make_adam_state(model.means);
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
@@ -1164,7 +1349,7 @@ GaussianModel Trainer::train(
     RefinementCounts latest_refinement;
     Rasterizer rasterizer;
     std::mt19937 random(options_.seed);
-    std::vector<std::size_t> shuffled_views(views.size());
+    std::vector<std::size_t> shuffled_views(scene.views.size());
     std::iota(
         shuffled_views.begin(), shuffled_views.end(), std::size_t{0});
     std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
@@ -1173,6 +1358,16 @@ GaussianModel Trainer::train(
         training_scene_geometry(scene, options_.input_is_dense);
     const float scene_extent = scene_geometry.scale;
     const mvs::Vec3f scene_center = scene_geometry.center;
+    float means_learning_rate_scale = scene_extent;
+    if (options_.densification_strategy ==
+        DensificationStrategy::adc_plus) {
+        std::vector<mvs::Vec3f> positions;
+        positions.reserve(scene.dense_cloud.points.size());
+        for (const auto& point : scene.dense_cloud.points)
+            positions.push_back(point.position);
+        means_learning_rate_scale =
+            percentile_median_size(positions, 0.8F);
+    }
     const float minimum_log_scale = options_.constrain_scale_range
         ? std::log(
               scene_extent *
@@ -1208,7 +1403,7 @@ GaussianModel Trainer::train(
         }
         const std::size_t view_index =
             shuffled_views[shuffled_view_cursor++];
-        const auto& target = views[view_index];
+        const TrainingView target = view_cache.get(view_index);
         RasterizeOptions raster_options;
         raster_options.active_sh_degree = std::min(
             options_.sh_degree,
@@ -1242,15 +1437,17 @@ GaussianModel Trainer::train(
                 0, candidates.size() - 1);
             const std::size_t neighbour_index =
                 candidates[select_neighbour(random)];
+            const TrainingView neighbour =
+                view_cache.get(neighbour_index);
             const auto world_points = detail::unproject_depth_to_world(
                 rendered.median_depth, target.camera);
             const DepthSampleResult sampled = rasterizer.sample_depth(
-                model, world_points, views[neighbour_index].camera,
+                model, world_points, neighbour.camera,
                 raster_options);
             tinytensor::Tensor grad_sampled_points;
             multi_view_loss = detail::add_multi_view_loss(
                 sampled.camera_points, sampled.inside, rendered, target,
-                views[neighbour_index], options_, loss,
+                neighbour, options_, loss,
                 grad_sampled_points, report_progress);
             multi_view_sample_gradients = rasterizer.sample_depth_backward(
                 model, sampled, grad_sampled_points);
@@ -1292,7 +1489,8 @@ GaussianModel Trainer::train(
             static_cast<float>(iteration - 1) /
                 std::max(1U, means_decay_steps),
             1.F);
-        const float means_lr = options_.means_lr * scene_extent *
+        const float means_lr = options_.means_lr *
+                               means_learning_rate_scale *
                                std::pow(0.01F, progress_fraction);
         const bool global_structure_active =
             options_.structure_freeze_iter == 0 ||

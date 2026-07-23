@@ -137,6 +137,13 @@ struct TrainingOptions {
     // Train against source-resolution undistorted images rather than the MVS
     // working resolution.
     bool use_source_resolution{false};
+    // brush-style dataset controls. Images are resized so their largest
+    // dimension does not exceed this value (0 keeps the source resolution),
+    // and decoded float training views are retained in a bounded host LRU.
+    // Only the current reference/neighbour views are uploaded to CUDA.
+    unsigned max_image_dimension{1'920};
+    std::size_t training_view_cache_bytes{
+        std::size_t{6} * 1024 * 1024 * 1024};
     // Iterations at which the caller may render fixed-view parity snapshots.
     std::vector<unsigned> evaluation_iterations;
 };

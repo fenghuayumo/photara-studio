@@ -527,6 +527,14 @@ void test_source_resolution_and_knn_initialization() {
             std::to_string(rgb[6]) +
             " expected=" + std::to_string(expected_red));
 
+    options.max_image_dimension = 2;
+    const auto resized = splat::make_training_view(view, options);
+    require(
+        resized.camera.width == 2 && resized.camera.height == 2 &&
+            std::abs(resized.camera.fx - 2.F) < 1e-6F &&
+            resized.rgb.numel() == 12,
+        "GGGS max image dimension did not resize the camera and target");
+
     mvs::MvsScene scene;
     for (const mvs::Vec3f& position : {
              mvs::Vec3f(0.F, 0.F, 0.F),
@@ -553,6 +561,24 @@ void test_source_resolution_and_knn_initialization() {
             std::abs(std::exp(scales[6]) - expected_offset_scale) < 1e-5F &&
             std::abs(std::exp(scales[9]) - expected_offset_scale) < 1e-5F,
         "GGGS KNN initialization does not match three-neighbour RMS scale");
+    options.densification_strategy =
+        splat::DensificationStrategy::adc_plus;
+    const auto brush_model =
+        splat::initialize_from_dense_cloud(scene, options);
+    const auto brush_scales = brush_model.log_scales.to_vector();
+    const auto brush_rotations = brush_model.quaternions.to_vector();
+    require(
+        std::all_of(
+            brush_scales.begin(), brush_scales.end(),
+            [](const float log_scale) {
+                return std::abs(std::exp(log_scale) - 0.1F) < 1e-5F;
+            }) &&
+            brush_rotations[0] == 1.F && brush_rotations[1] == 0.F &&
+            brush_rotations[2] == 0.F && brush_rotations[3] == 0.F &&
+            std::abs(brush_model.opacity_logits.to_vector()[0]) < 1e-6F,
+        "ADC+ sparse initialization does not match brush");
+    options.densification_strategy =
+        splat::DensificationStrategy::default_strategy;
     options.constrain_scale_range = true;
     options.minimum_scale_fraction = 1e-4F;
     options.maximum_scale_fraction = 0.1F;
