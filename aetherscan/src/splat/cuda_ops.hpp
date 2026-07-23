@@ -116,6 +116,14 @@ void adam_step(
     float clamp_min = -std::numeric_limits<float>::infinity(),
     float clamp_max = std::numeric_limits<float>::infinity());
 
+// Update only the leading active_row_stride values of each logical row.
+// This avoids reading and writing inactive higher-order SH coefficients.
+void adam_step_active_prefix(
+    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
+    AdamState& state, float learning_rate, unsigned step,
+    const TrainingOptions& options, std::size_t full_row_stride,
+    std::size_t active_row_stride, float secondary_learning_rate);
+
 void constrain_scale_ratio(
     tinytensor::Tensor& log_scales, float maximum_ratio);
 

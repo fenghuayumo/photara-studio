@@ -34,6 +34,7 @@ struct TrainingProgress {
     float resolution_scale{1.F};
     std::uint32_t image_width{};
     std::uint32_t image_height{};
+    unsigned active_sh_degree{};
 };
 
 struct RenderMetrics {

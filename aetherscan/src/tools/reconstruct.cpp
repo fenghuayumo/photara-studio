@@ -1327,7 +1327,6 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         options.quaternions_lr = 2e-3F;
         options.sh0_lr = 2e-3F;
         options.sh_rest_lr = 2e-4F;
-        options.sh_degree_interval = 0;
         options.background_noise_strength = 0.1F;
     } else if (
         !dense_input &&
@@ -1498,6 +1497,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                     " resolution_scale=", progress.resolution_scale,
                     " image=", progress.image_width, 'x',
                     progress.image_height,
+                    " sh_degree=", progress.active_sh_degree,
                     " step_ms=", progress.milliseconds);
                 return true;
             },

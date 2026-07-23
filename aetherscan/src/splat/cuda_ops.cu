@@ -756,6 +756,42 @@ __global__ void adam_kernel(
     parameter[index] = fminf(fmaxf(updated, clamp_min), clamp_max);
 }
 
+__global__ void adam_active_prefix_kernel(
+    float* parameter, const float* gradient, float* first, float* second,
+    const std::size_t active_count, const std::size_t full_row_stride,
+    const std::size_t active_row_stride, const float learning_rate,
+    const float secondary_learning_rate, const float beta1, const float beta2,
+    const float correction1, const float correction2, const float epsilon) {
+    const std::size_t active_index =
+        blockIdx.x * blockDim.x + threadIdx.x;
+    if (active_index >= active_count) return;
+    const std::size_t column = active_index % active_row_stride;
+    const std::size_t index =
+        active_index / active_row_stride * full_row_stride + column;
+    const float previous = parameter[index];
+    const float grad = gradient[index];
+    if (!isfinite(previous) || !isfinite(grad)) {
+        first[index] = 0.F;
+        second[index] = 0.F;
+        parameter[index] = isfinite(previous) ? previous : 0.F;
+        return;
+    }
+    const float m = beta1 * first[index] + (1.F - beta1) * grad;
+    const float v = beta2 * second[index] + (1.F - beta2) * grad * grad;
+    if (!isfinite(m) || !isfinite(v)) {
+        first[index] = 0.F;
+        second[index] = 0.F;
+        return;
+    }
+    first[index] = m;
+    second[index] = v;
+    const float lr =
+        column >= 3 ? secondary_learning_rate : learning_rate;
+    const float candidate = previous - lr * (m / correction1) /
+        (sqrtf(v / correction2) + epsilon);
+    parameter[index] = isfinite(candidate) ? candidate : previous;
+}
+
 __global__ void constrain_scale_ratio_kernel(
     float* log_scales, const std::size_t count, const float maximum_log_ratio) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1388,6 +1424,34 @@ void adam_step(
         secondary_learning_rate, group_stride, options.beta1, options.beta2,
         correction1, correction2, options.adam_epsilon, clamp_min, clamp_max);
     check_cuda(cudaGetLastError(), "GGGS Adam update");
+}
+
+void adam_step_active_prefix(
+    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
+    AdamState& state, const float learning_rate, const unsigned step,
+    const TrainingOptions& options, const std::size_t full_row_stride,
+    const std::size_t active_row_stride,
+    const float secondary_learning_rate) {
+    const std::size_t count = parameter.numel();
+    if (count == 0) return;
+    if (full_row_stride == 0 || active_row_stride < 3 ||
+        active_row_stride > full_row_stride ||
+        count % full_row_stride != 0)
+        throw std::invalid_argument("invalid active-prefix Adam row strides");
+    const std::size_t active_count =
+        count / full_row_stride * active_row_stride;
+    const float correction1 =
+        1.F - std::pow(options.beta1, static_cast<float>(step));
+    const float correction2 =
+        1.F - std::pow(options.beta2, static_cast<float>(step));
+    adam_active_prefix_kernel<<<
+        (active_count + k_threads - 1) / k_threads, k_threads>>>(
+        parameter.ptr<float>(), gradient.ptr<float>(), state.first.ptr<float>(),
+        state.second.ptr<float>(), active_count, full_row_stride,
+        active_row_stride, learning_rate, secondary_learning_rate,
+        options.beta1, options.beta2, correction1, correction2,
+        options.adam_epsilon);
+    check_cuda(cudaGetLastError(), "GGGS active-prefix Adam update");
 }
 
 void constrain_scale_ratio(

@@ -1632,11 +1632,12 @@ GaussianModel Trainer::train(
             shuffled_views[shuffled_view_cursor++];
         const TrainingView target = view_cache.get(view_index);
         RasterizeOptions raster_options;
-        raster_options.active_sh_degree = std::min(
+        const unsigned active_sh_degree = std::min(
             options_.sh_degree,
             options_.sh_degree_interval == 0
                 ? options_.sh_degree
-                : (iteration - 1) / options_.sh_degree_interval);
+                : iteration / options_.sh_degree_interval);
+        raster_options.active_sh_degree = active_sh_degree;
         if (options_.background_noise_strength > 0.F) {
             std::uniform_real_distribution<float> background_noise(
                 -options_.background_noise_strength,
@@ -1752,9 +1753,19 @@ GaussianModel Trainer::train(
                 options_.opacities_lr, iteration, options_, 0, 0.F,
                 -12.F, 12.F);
         }
-        detail::adam_step(
-            model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
-            options_, model.sh.shape()[1] * 3, options_.sh_rest_lr);
+        const std::size_t full_sh_stride = model.sh.shape()[1] * 3;
+        const std::size_t active_sh_stride =
+            static_cast<std::size_t>(active_sh_degree + 1) *
+            (active_sh_degree + 1) * 3;
+        if (active_sh_stride < full_sh_stride)
+            detail::adam_step_active_prefix(
+                model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
+                options_, full_sh_stride, active_sh_stride,
+                options_.sh_rest_lr);
+        else
+            detail::adam_step(
+                model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
+                options_, full_sh_stride, options_.sh_rest_lr);
 
         if (densification_enabled &&
             (options_.densification_strategy ==
@@ -1859,7 +1870,8 @@ GaussianModel Trainer::train(
                 milliseconds, multi_view_loss.geometry, multi_view_loss.ncc,
                 multi_view_loss.geometry_pixels,
                 multi_view_loss.ncc_pixels, active_resolution_scale,
-                target.camera.width, target.camera.height});
+                target.camera.width, target.camera.height,
+                active_sh_degree});
         }
         if (!continue_training) break;
         if (evaluate &&

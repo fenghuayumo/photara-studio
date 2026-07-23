@@ -459,6 +459,41 @@ void test_fused_adam_parity() {
         "CUDA Adam differs from FasterGS FusedAdam on its first step");
 }
 
+void test_active_sh_prefix_adam() {
+    using namespace aetherscan::splat;
+    std::vector<float> initial(24);
+    std::iota(initial.begin(), initial.end(), 1.F);
+    auto parameter = tinytensor::Tensor::from_vector(
+        initial, {2, 4, 3}, tinytensor::Device::CUDA);
+    const auto gradient = tinytensor::Tensor::from_vector(
+        std::vector<float>(24, 0.25F), {2, 4, 3},
+        tinytensor::Device::CUDA);
+    auto state = detail::make_adam_state(parameter);
+    TrainingOptions options;
+    options.adam_epsilon = 1e-15F;
+    detail::adam_step_active_prefix(
+        parameter, gradient, state, 1e-3F, 1, options, 12, 3, 1e-4F);
+
+    const auto values = parameter.to_vector();
+    const auto first = state.first.to_vector();
+    const auto second = state.second.to_vector();
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        const bool active = index < 3 || (index >= 12 && index < 15);
+        if (active) {
+            require(
+                std::abs(values[index] - (initial[index] - 1e-3F)) < 1e-6F &&
+                    std::abs(first[index] - 0.025F) < 1e-7F &&
+                    std::abs(second[index] - 0.0000625F) < 1e-8F,
+                "active-prefix Adam did not update an active SH coefficient");
+        } else {
+            require(
+                values[index] == initial[index] && first[index] == 0.F &&
+                    second[index] == 0.F,
+                "active-prefix Adam touched an inactive SH coefficient");
+        }
+    }
+}
+
 void test_mask_loading() {
     using namespace aetherscan;
     const auto root = std::filesystem::temp_directory_path() /
@@ -1326,6 +1361,7 @@ int main() {
         test_alpha_parameter_gradients();
         test_adam_rejects_non_finite_gradients();
         test_fused_adam_parity();
+        test_active_sh_prefix_adam();
         test_mask_loading();
         test_source_resolution_and_knn_initialization();
         test_colmap_text_loading();
