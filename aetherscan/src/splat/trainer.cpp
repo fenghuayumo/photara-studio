@@ -354,13 +354,19 @@ StrategyPreset strategy_preset(const TrainingOptions& options) {
                          DensificationStrategy::adc_igs;
     const unsigned preset_stop = dense_adaptive
         ? 5'000U
+        : options.densification_strategy == DensificationStrategy::adc_plus
+            ? options.iterations
         : options.densification_strategy == DensificationStrategy::adc_igs
             ? 25'000U
             : 15'000U;
     return {
         options.refine_start_iter != 0
             ? options.refine_start_iter
-            : dense_adaptive ? 750U : adc ? 600U : 500U,
+            : dense_adaptive ? 750U
+                             : options.densification_strategy ==
+                                       DensificationStrategy::adc_plus
+                                 ? 0U
+                                 : adc ? 600U : 500U,
         std::min(
             options.refine_stop_iter != 0
                 ? options.refine_stop_iter
@@ -446,19 +452,31 @@ void select_training_rows(
 void grow_training_model(
     GaussianModel& model, const std::vector<int>& parents,
     const int split_mode, const TrainingOptions& options,
-    std::mt19937& random, const AdamStates& states) {
+    std::mt19937& random, const AdamStates& states,
+    const std::vector<float>& screen_sizes) {
     if (parents.empty()) return;
     const auto indices = index_tensor(parents);
     GaussianModel children = select_model_rows(model, indices);
     if (split_mode != 0) {
-        std::normal_distribution<float> normal(0.F, 1.F);
         std::vector<float> samples(3 * parents.size());
-        for (float& value : samples) value = normal(random);
+        if (split_mode != 2) {
+            std::normal_distribution<float> normal(0.F, 1.F);
+            for (float& value : samples) value = normal(random);
+        }
+        std::vector<float> selected_screen_sizes(parents.size(), 0.F);
+        for (std::size_t index = 0; index < parents.size(); ++index)
+            if (static_cast<std::size_t>(parents[index]) < screen_sizes.size())
+                selected_screen_sizes[index] =
+                    screen_sizes[static_cast<std::size_t>(parents[index])];
         auto random_tensor = tinytensor::Tensor::from_vector(
             samples, {parents.size(), 3}, tinytensor::Device::CUDA);
+        auto screen_tensor = tinytensor::Tensor::from_vector(
+            selected_screen_sizes, {parents.size()},
+            tinytensor::Device::CUDA);
         detail::split_gaussians(
-            model, children, indices, random_tensor, split_mode,
-            options.prune_opacity);
+            model, children, indices, random_tensor, screen_tensor, split_mode,
+            options.prune_opacity,
+            split_mode == 2 ? options.adc_plus_split_at_screen_size : 0.F);
         // Splitting mutates the retained parent as well as creating a child.
         // Both are new primitives and must start with clean optimizer moments,
         // matching pygsplat's replacement-based split.
@@ -474,13 +492,18 @@ std::vector<std::size_t> weighted_unique_sample(
     const std::size_t requested, const bool gumbel,
     std::mt19937& random) {
     if (requested == 0 || candidates.empty()) return {};
-    const std::size_t count = std::min(requested, candidates.size());
+    std::vector<std::pair<std::size_t, float>> valid;
+    valid.reserve(candidates.size());
+    for (const auto& candidate : candidates)
+        if (std::isfinite(candidate.second) && candidate.second > 0.F)
+            valid.push_back(candidate);
+    if (valid.empty()) return {};
+    const std::size_t count = std::min(requested, valid.size());
     if (gumbel) {
         std::uniform_real_distribution<float> uniform(1e-7F, 1.F - 1e-7F);
         std::vector<std::pair<float, std::size_t>> scores;
-        scores.reserve(candidates.size());
-        for (const auto& [index, weight] : candidates) {
-            if (weight <= 0.F) continue;
+        scores.reserve(valid.size());
+        for (const auto& [index, weight] : valid) {
             const float u = uniform(random);
             scores.emplace_back(
                 std::log(weight) - std::log(-std::log(u)), index);
@@ -496,19 +519,19 @@ std::vector<std::size_t> weighted_unique_sample(
         return result;
     }
     std::vector<double> weights;
-    weights.reserve(candidates.size());
-    for (const auto& candidate : candidates)
-        weights.push_back(std::max(candidate.second, 0.F));
+    weights.reserve(valid.size());
+    for (const auto& candidate : valid)
+        weights.push_back(candidate.second);
     std::discrete_distribution<std::size_t> distribution(
         weights.begin(), weights.end());
     std::unordered_set<std::size_t> selected;
-    const std::size_t attempts_limit = candidates.size() * 8 + requested * 4;
+    const std::size_t attempts_limit = valid.size() * 8 + requested * 4;
     for (std::size_t attempt = 0;
          attempt < attempts_limit && selected.size() < count; ++attempt)
-        selected.insert(candidates[distribution(random)].first);
+        selected.insert(valid[distribution(random)].first);
     if (selected.size() < count) {
         std::vector<std::pair<float, std::size_t>> sorted;
-        for (const auto& [index, weight] : candidates)
+        for (const auto& [index, weight] : valid)
             if (!selected.contains(index)) sorted.emplace_back(weight, index);
         std::sort(sorted.begin(), sorted.end(), std::greater<>());
         for (const auto& entry : sorted) {
@@ -548,6 +571,8 @@ RefinementCounts refine_gaussians(
     const auto opacities = download<float>(model.opacity_logits);
     const auto log_scales = download<float>(model.log_scales);
     const auto means = download<float>(model.means);
+    const auto quaternions = download<float>(model.quaternions);
+    const auto sh = download<float>(model.sh);
     std::vector<bool> prune(old_count, false);
     std::vector<bool> hard_prune(old_count, false);
     std::vector<float> opacity_values(old_count);
@@ -560,20 +585,29 @@ RefinementCounts refine_gaussians(
             best_opacity = opacity;
             best = index;
         }
-        float min_scale = std::numeric_limits<float>::infinity();
         float max_scale = 0.F;
         for (int axis = 0; axis < 3; ++axis) {
             const float scale = std::exp(log_scales[3 * index + axis]);
-            min_scale = std::min(min_scale, scale);
             max_scale = std::max(max_scale, scale);
         }
         bool remove = opacity < options.prune_opacity;
         if (managed) {
-            const bool invalid = min_scale < 1e-10F ||
-                                 max_scale > 100.F * scene_extent;
+            bool non_finite = !std::isfinite(opacities[index]);
+            for (int axis = 0; axis < 3; ++axis)
+                non_finite = non_finite ||
+                    !std::isfinite(means[3 * index + axis]) ||
+                    !std::isfinite(log_scales[3 * index + axis]);
+            for (int component = 0; component < 4; ++component)
+                non_finite = non_finite ||
+                    !std::isfinite(quaternions[4 * index + component]);
+            const std::size_t sh_stride = model.sh.numel() / old_count;
+            for (std::size_t component = 0; component < sh_stride; ++component)
+                non_finite = non_finite ||
+                    !std::isfinite(sh[index * sh_stride + component]);
             const mvs::Vec3f position(
                 means[3 * index], means[3 * index + 1], means[3 * index + 2]);
-            hard_prune[index] = invalid ||
+            hard_prune[index] = non_finite ||
+                max_scale > 100.F * scene_extent ||
                 (position - scene_center).cwiseAbs().maxCoeff() >
                     100.F * scene_extent;
             remove = remove || hard_prune[index];
@@ -604,7 +638,9 @@ RefinementCounts refine_gaussians(
              index < std::min(opacity_budget, low_opacity.size()); ++index)
             prune[low_opacity[index].second] = true;
     }
-    prune[best] = false;
+    // Keep training alive for pathological all-low-opacity inputs, but never
+    // rescue a non-finite/out-of-bounds row.
+    if (!hard_prune[best]) prune[best] = false;
     std::size_t retained = static_cast<std::size_t>(
         std::count(prune.begin(), prune.end(), false));
     if (retained > options.densification_cap) {
@@ -650,7 +686,11 @@ RefinementCounts refine_gaussians(
                 max_scale, std::exp(log_scales[3 * index + axis]));
         candidates.push_back({
             index, static_cast<std::size_t>(remap[index]), score, max_scale,
-            screen[index] > options.densify_screen_threshold});
+            screen[index] >
+                (options.densification_strategy ==
+                         DensificationStrategy::adc_plus
+                     ? options.adc_plus_split_at_screen_size
+                     : options.densify_screen_threshold)});
         const float priority = priorities[index] /
                                std::max(counts[index], 1.F);
         if (priority > 0.F) positive_priorities.push_back(priority);
@@ -682,6 +722,56 @@ RefinementCounts refine_gaussians(
             else
                 split_parents.push_back(
                     static_cast<int>(candidate.new_index));
+        }
+    } else if (options.densification_strategy ==
+               DensificationStrategy::adc_plus) {
+        std::vector<std::pair<std::size_t, float>> replacement_weights;
+        std::vector<std::pair<std::size_t, float>> growth_weights;
+        std::unordered_set<std::size_t> selected_parents;
+        for (const Candidate& candidate : candidates) {
+            const float opacity = 1.F /
+                (1.F + std::exp(-opacities[candidate.old_index]));
+            replacement_weights.emplace_back(
+                candidate.new_index, opacity);
+            if (iteration < options.grow_stop_iter &&
+                candidate.score >
+                    options.adc_plus_growth_gradient_threshold)
+                growth_weights.emplace_back(
+                    candidate.new_index, candidate.score);
+        }
+
+        auto selected = weighted_unique_sample(
+            replacement_weights, std::min(pruned, capacity), false, random);
+        selected_parents.insert(selected.begin(), selected.end());
+
+        for (const Candidate& candidate : candidates) {
+            if (selected_parents.size() >= capacity) break;
+            if (candidate.oversized)
+                selected_parents.insert(candidate.new_index);
+        }
+
+        const std::size_t threshold_growth =
+            static_cast<std::size_t>(std::llround(
+                growth_weights.size() *
+                options.adc_plus_growth_select_fraction));
+        // brush counts replacement splits against the requested high-gradient
+        // growth budget, even when the sampled sets overlap.
+        const std::size_t requested_growth =
+            threshold_growth > pruned ? threshold_growth - pruned : 0;
+        const std::size_t remaining =
+            capacity > selected_parents.size()
+                ? capacity - selected_parents.size()
+                : 0;
+        selected = weighted_unique_sample(
+            growth_weights, std::min(remaining, requested_growth),
+            false, random);
+        selected_parents.insert(selected.begin(), selected.end());
+
+        split_parents.reserve(
+            std::min(capacity, selected_parents.size()));
+        for (const std::size_t parent : selected_parents) {
+            if (split_parents.size() >= capacity) break;
+            split_parents.push_back(static_cast<int>(parent));
         }
     } else {
         float priority_median = 1.F;
@@ -760,8 +850,14 @@ RefinementCounts refine_gaussians(
         }
     }
 
+    std::vector<float> retained_screen;
+    retained_screen.reserve(keep.size());
+    for (const int old_index : keep)
+        retained_screen.push_back(
+            screen[static_cast<std::size_t>(old_index)]);
     grow_training_model(
-        model, duplicate_parents, 0, options, random, states);
+        model, duplicate_parents, 0, options, random, states,
+        retained_screen);
     // Parent row indices still refer to the original retained prefix after
     // duplicates are appended, so they remain valid here.
     const int split_mode = options.densification_strategy ==
@@ -773,7 +869,8 @@ RefinementCounts refine_gaussians(
             ? 2
             : 1;
     grow_training_model(
-        model, split_parents, split_mode, options, random, states);
+        model, split_parents, split_mode, options, random, states,
+        retained_screen);
     if (adc) {
         const float remaining_progress = 1.F -
             static_cast<float>(iteration) /
@@ -781,7 +878,11 @@ RefinementCounts refine_gaussians(
         detail::apply_adc_decay(
             model,
             options.opacity_decay * std::max(remaining_progress, 0.F),
-            options.scale_decay * std::max(remaining_progress, 0.F));
+            options.densification_strategy ==
+                    DensificationStrategy::adc_plus
+                ? 0.F
+                : options.scale_decay *
+                      std::max(remaining_progress, 0.F));
     }
     stats = detail::make_densification_stats(model.size());
     return {duplicate_parents.size() + split_parents.size(), pruned};

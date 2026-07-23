@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <numbers>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -972,6 +973,79 @@ void test_gggs_depth_normal_parameter_gradients() {
         "and raster normals into Gaussian means");
 }
 
+void test_adc_plus_split_matches_brush() {
+    using namespace aetherscan::splat;
+    GaussianModel parents;
+    parents.means = tinytensor::Tensor::zeros(
+        {1, 3}, tinytensor::Device::CUDA);
+    parents.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{std::log(2.F), 0.F, std::log(0.5F)},
+        {1, 3}, tinytensor::Device::CUDA);
+    parents.quaternions = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F},
+        {1, 4}, tinytensor::Device::CUDA);
+    parents.opacity_logits = tinytensor::Tensor::zeros(
+        {1, 1}, tinytensor::Device::CUDA);
+    parents.sh = tinytensor::Tensor::zeros(
+        {1, 1, 3}, tinytensor::Device::CUDA);
+    parents.sh_degree = 0;
+    GaussianModel children;
+    children.means = tinytensor::Tensor::zeros(
+        {1, 3}, tinytensor::Device::CUDA);
+    children.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{std::log(2.F), 0.F, std::log(0.5F)},
+        {1, 3}, tinytensor::Device::CUDA);
+    children.quaternions = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F},
+        {1, 4}, tinytensor::Device::CUDA);
+    children.opacity_logits = tinytensor::Tensor::zeros(
+        {1, 1}, tinytensor::Device::CUDA);
+    children.sh = tinytensor::Tensor::zeros(
+        {1, 1, 3}, tinytensor::Device::CUDA);
+    children.sh_degree = 0;
+    const auto indices = tinytensor::Tensor::from_vector(
+        std::vector<int>{0}, {1}, tinytensor::Device::CUDA);
+    const auto unused_random = tinytensor::Tensor::zeros(
+        {1, 3}, tinytensor::Device::CUDA);
+    const auto screen_sizes = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F}, {1}, tinytensor::Device::CUDA);
+
+    detail::split_gaussians(
+        parents, children, indices, unused_random, screen_sizes, 2,
+        1.F / 255.F, 0.5F);
+
+    const auto parent_means = parents.means.to_vector();
+    const auto child_means = children.means.to_vector();
+    const auto parent_scales = parents.log_scales.to_vector();
+    const auto child_scales = children.log_scales.to_vector();
+    const float k[3]{0.5F, 0.875F, 0.96875F};
+    const float scale[3]{2.F, 1.F, 0.5F};
+    for (int axis = 0; axis < 3; ++axis) {
+        const float offset =
+            std::sqrt(1.F - k[axis] * k[axis]) * scale[axis];
+        require(
+            std::abs(parent_means[axis] + offset) < 1e-5F &&
+                std::abs(child_means[axis] - offset) < 1e-5F,
+            "ADC+ split does not match brush's centroid-preserving offset");
+        const float expected_log_scale =
+            std::log(scale[axis] * k[axis]);
+        require(
+            std::abs(parent_scales[axis] - expected_log_scale) < 1e-5F &&
+                std::abs(child_scales[axis] - expected_log_scale) < 1e-5F,
+            "ADC+ split does not match brush's covariance-aware shrink");
+    }
+    const float expected_opacity =
+        1.F - std::pow(0.5F, std::numbers::sqrt2_v<float> / 2.F);
+    const float expected_logit =
+        std::log(expected_opacity / (1.F - expected_opacity));
+    require(
+        std::abs(parents.opacity_logits.to_vector()[0] - expected_logit) <
+                1e-5F &&
+            std::abs(children.opacity_logits.to_vector()[0] -
+                     expected_logit) < 1e-5F,
+        "ADC+ split opacity does not match brush's transmittance power");
+}
+
 void test_densification_strategies_and_dense_bypass() {
     using namespace aetherscan;
     const auto root = std::filesystem::temp_directory_path() /
@@ -1027,6 +1101,22 @@ void test_densification_strategies_and_dense_bypass() {
         require(model.size() <= options.densification_cap,
                 "densification exceeded its hard Gaussian cap");
     }
+    // brush ADC+ refines from iteration 200 with no warm-up delay.
+    auto brush_schedule = options;
+    brush_schedule.iterations = 220;
+    brush_schedule.densification_strategy =
+        splat::DensificationStrategy::adc_plus;
+    brush_schedule.refine_start_iter = 0;
+    brush_schedule.refine_stop_iter = 0;
+    brush_schedule.refine_every = 0;
+    brush_schedule.adc_plus_growth_gradient_threshold = -1.F;
+    brush_schedule.adc_plus_growth_select_fraction = 1.F;
+    const auto brush_schedule_model =
+        splat::Trainer(brush_schedule).train(scene);
+    require(
+        brush_schedule_model.size() > scene.dense_cloud.points.size(),
+        "ADC+ did not use brush's first refinement at iteration 200");
+
     options.input_is_dense = true;
     options.densification_strategy = splat::DensificationStrategy::adc_igs;
     options.evaluation_iterations = {2};
@@ -1078,6 +1168,7 @@ int main() {
         test_ssim_loss_and_scale_constraint();
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
+        test_adc_plus_split_matches_brush();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";
         return 0;

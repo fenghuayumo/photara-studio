@@ -32,7 +32,7 @@ struct TrainingOptions {
     bool enable_densification{true};
     DensificationStrategy densification_strategy{
         DensificationStrategy::default_strategy};
-    std::size_t densification_cap{4'000'000};
+    std::size_t densification_cap{10'000'000};
     unsigned refine_start_iter{0};  // 0 selects the strategy preset
     unsigned refine_stop_iter{0};   // 0 selects the strategy preset
     unsigned grow_stop_iter{15'000};
@@ -44,12 +44,19 @@ struct TrainingOptions {
     float densify_select_fraction{0.4F};
     float densify_scale_threshold{0.01F};
     float densify_screen_threshold{0.25F};
+    // brush-train ADC+ defaults. These are separate from the classic 3DGS
+    // controls above so selecting ADC+ does not silently change the default
+    // strategy's pygsplat-compatible thresholds.
+    float adc_plus_growth_gradient_threshold{0.0025F};
+    float adc_plus_growth_select_fraction{0.25F};
+    float adc_plus_split_at_screen_size{0.5F};
     // Dense MVS points already cover the surface. Recycle only a small part of
     // the budget per refinement and grow more conservatively than sparse ADC.
     float dense_recycle_fraction{0.01F};
     float dense_growth_fraction{0.005F};
     float prune_opacity{1.F / 255.F};
     float opacity_decay{0.004F};
+    // ADC-IGS scale decay. brush ADC+ only decays opacity.
     float scale_decay{0.002F};
     float mean_noise_weight{50.F};
     float initial_opacity{0.1F};

@@ -97,7 +97,7 @@ struct ReconstructCli {
     std::string gggs_strategy{"default"};
     bool gggs_densification{true};
     unsigned gggs_structure_freeze_iter{0};
-    std::uint64_t gggs_densification_cap{4'000'000};
+    std::uint64_t gggs_densification_cap{10'000'000};
     bool mesh{false};
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
@@ -237,7 +237,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-strategy default|adc_plus|adc_igs|dense_adaptive\n"
               << "  --gggs-densification=BOOL  enable split/prune/reset (default true)\n"
               << "  --gggs-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
-              << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 4M)\n"
+              << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mesh-method auto|tsdf|projective|delaunay\n"
               << "               auto uses TSDF for GGGS, otherwise the quality preset\n"
@@ -385,7 +385,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("gggs-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
         ("gggs-densification-cap", "Dynamic Gaussian hard cap",
-         cxxopts::value<std::uint64_t>()->default_value("4000000"))
+         cxxopts::value<std::uint64_t>()->default_value("10000000"))
         ("mesh", "Build MVS mesh after densify (implies --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mesh-method",

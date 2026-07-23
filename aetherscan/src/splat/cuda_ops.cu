@@ -751,8 +751,9 @@ __global__ void split_gaussians_kernel(
     float* parent_opacity_logits, const float* parent_quaternions,
     float* child_means, float* child_log_scales,
     float* child_opacity_logits, const int* parent_indices,
-    const float* random_samples, const std::size_t split_count,
-    const int mode, const float minimum_opacity) {
+    const float* random_samples, const float* screen_sizes,
+    const std::size_t split_count, const int mode,
+    const float minimum_opacity, const float split_at_screen_size) {
     const std::size_t child = blockIdx.x * blockDim.x + threadIdx.x;
     if (child >= split_count) return;
     const std::size_t parent = static_cast<std::size_t>(parent_indices[child]);
@@ -784,12 +785,40 @@ __global__ void split_gaussians_kernel(
                           random_samples[3 * child];
             log_scale_delta[axis] = axis == largest ? logf(0.5F) : 0.F;
         }
+    } else if (mode == 2) {
+        // Match brush-train's ADC+ covariance-aware split. The offset is
+        // deterministic and anti-correlated, preserving the centroid. Axes
+        // shrink in proportion to their covariance contribution; oversized
+        // splats shrink harder so their largest on-screen extent reaches the
+        // configured cap.
+        float maximum_scale_squared = 0.F;
+        float scale_squared[3]{};
+        for (int axis = 0; axis < 3; ++axis) {
+            const float scale = expf(parent_log_scales[3 * parent + axis]);
+            scale_squared[axis] = scale * scale;
+            maximum_scale_squared =
+                fmaxf(maximum_scale_squared, scale_squared[axis]);
+        }
+        const float standard_k = rsqrtf(2.F);
+        const float screen = screen_sizes != nullptr
+            ? fmaxf(screen_sizes[child], 1e-6F)
+            : 1e-6F;
+        const float maximum_k = split_at_screen_size > 0.F
+            ? fminf(standard_k, split_at_screen_size / screen)
+            : standard_k;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float ratio = scale_squared[axis] /
+                fmaxf(maximum_scale_squared, 1e-30F);
+            const float k = 1.F - ratio * (1.F - maximum_k);
+            const float scale = sqrtf(scale_squared[axis]);
+            local[axis] = sqrtf(fmaxf(1.F - k * k, 0.F)) * scale;
+            log_scale_delta[axis] = logf(fmaxf(k, 1e-12F));
+        }
     } else {
-        const float scale_factor = mode == 2 ? rsqrtf(2.F) : 1.F / 1.6F;
-        const float sample_factor = mode == 2 ? rsqrtf(2.F) : 1.F;
+        const float scale_factor = 1.F / 1.6F;
         for (int axis = 0; axis < 3; ++axis) {
             local[axis] = expf(parent_log_scales[3 * parent + axis]) *
-                          random_samples[3 * child + axis] * sample_factor;
+                          random_samples[3 * child + axis];
             log_scale_delta[axis] = logf(scale_factor);
         }
     }
@@ -807,8 +836,9 @@ __global__ void split_gaussians_kernel(
     }
     const float opacity = sigmoid(parent_opacity_logits[parent]);
     const float opacity_floor = mode == 1 ? 1e-8F : minimum_opacity;
+    const float opacity_power = mode == 2 ? rsqrtf(2.F) : 0.5F;
     const float revised = fminf(fmaxf(
-        1.F - sqrtf(fmaxf(1.F - opacity, 0.F)),
+        1.F - powf(fmaxf(1.F - opacity, 0.F), opacity_power),
         opacity_floor), 1.F - opacity_floor);
     const float revised_logit = logf(revised / (1.F - revised));
     parent_opacity_logits[parent] = revised_logit;
@@ -1238,8 +1268,10 @@ void split_gaussians(
     GaussianModel& children,
     const tinytensor::Tensor& parent_indices,
     const tinytensor::Tensor& random_samples,
+    const tinytensor::Tensor& screen_sizes,
     const int mode,
-    const float minimum_opacity) {
+    const float minimum_opacity,
+    const float split_at_screen_size) {
     const std::size_t count = parent_indices.numel();
     if (count == 0) return;
     split_gaussians_kernel<<<
@@ -1248,8 +1280,10 @@ void split_gaussians(
         parents.opacity_logits.ptr<float>(), parents.quaternions.ptr<float>(),
         children.means.ptr<float>(), children.log_scales.ptr<float>(),
         children.opacity_logits.ptr<float>(), parent_indices.ptr<int>(),
-        random_samples.ptr<float>(), count, mode,
-        std::clamp(minimum_opacity, 1e-8F, 0.49F));
+        random_samples.ptr<float>(),
+        screen_sizes.is_valid() ? screen_sizes.ptr<float>() : nullptr,
+        count, mode, std::clamp(minimum_opacity, 1e-8F, 0.49F),
+        std::max(split_at_screen_size, 0.F));
     check_cuda(cudaGetLastError(), "split GGGS Gaussians");
 }
 

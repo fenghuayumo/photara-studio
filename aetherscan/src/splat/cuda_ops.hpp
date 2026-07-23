@@ -116,8 +116,10 @@ void split_gaussians(
     GaussianModel& children,
     const tinytensor::Tensor& parent_indices,
     const tinytensor::Tensor& random_samples,
+    const tinytensor::Tensor& screen_sizes,
     int mode,
-    float minimum_opacity);
+    float minimum_opacity,
+    float split_at_screen_size);
 
 void apply_adc_decay(
     GaussianModel& model, float opacity_decay, float scale_decay);
