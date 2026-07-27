@@ -1,7 +1,9 @@
 #include "splat/trainer.hpp"
 
 #include "cuda_ops.hpp"
+#include "densification.hpp"
 #include "io/image.hpp"
+#include "training_data_loader.hpp"
 
 #include <cuda_runtime.h>
 
@@ -12,17 +14,16 @@
 #include <cmath>
 #include <fstream>
 #include <future>
-#include <list>
 #include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
-#include <tuple>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace aetherscan::splat {
 namespace {
+
+namespace data = training_data;
+namespace refine = densification;
 
 constexpr float k_sh0 = 0.28209479177387814F;
 
@@ -183,191 +184,6 @@ float percentile_median_size(
     return std::max(sizes[1], 0.01F);
 }
 
-Camera make_camera_impl(const mvs::MvsView& view) {
-    Camera camera;
-    // Force evaluation: translation() returns a temporary, so retaining the
-    // lazy Eigen cast expression with `auto` would leave a dangling operand.
-    const Eigen::Vector3f translation =
-        view.pose.translation().cast<float>();
-    const Eigen::Matrix3f rotation = view.pose.R.cast<float>();
-    // Transpose a conventional row-major W2C into the contiguous layout used
-    // by the reference CUDA kernels (the same conversion as torch .t()).
-    for (int row = 0; row < 4; ++row) {
-        for (int column = 0; column < 4; ++column) {
-            float value = 0.F;
-            if (row < 3 && column < 3) value = rotation(row, column);
-            else if (row < 3 && column == 3) value = translation(row);
-            else if (row == 3 && column == 3) value = 1.F;
-            camera.world_to_camera[static_cast<std::size_t>(column) * 4 + row] = value;
-        }
-    }
-    const Eigen::Vector3f position = view.pose.C.cast<float>();
-    camera.position = {position.x(), position.y(), position.z()};
-    camera.fx = view.fx;
-    camera.fy = view.fy;
-    camera.cx = view.cx;
-    camera.cy = view.cy;
-    camera.width = view.width;
-    camera.height = view.height;
-    return camera;
-}
-
-Camera training_camera(
-    const mvs::MvsView& view, const TrainingOptions& options,
-    const float resolution_scale = 1.F) {
-    Camera camera = make_camera_impl(view);
-    if (options.use_source_resolution && view.src_width != 0 &&
-        view.src_height != 0) {
-        camera.fx = view.src_fx;
-        camera.fy = view.src_fy;
-        camera.cx = view.src_cx;
-        camera.cy = view.src_cy;
-        camera.width = view.src_width;
-        camera.height = view.src_height;
-    }
-    const std::uint32_t largest =
-        std::max(camera.width, camera.height);
-    if (options.max_image_dimension != 0 &&
-        largest > options.max_image_dimension) {
-        const float scale = static_cast<float>(
-            options.max_image_dimension) / static_cast<float>(largest);
-        const std::uint32_t old_width = camera.width;
-        const std::uint32_t old_height = camera.height;
-        camera.width = std::max<std::uint32_t>(
-            1, static_cast<std::uint32_t>(std::lround(
-                   old_width * scale)));
-        camera.height = std::max<std::uint32_t>(
-            1, static_cast<std::uint32_t>(std::lround(
-                   old_height * scale)));
-        const float scale_x = static_cast<float>(camera.width) / old_width;
-        const float scale_y = static_cast<float>(camera.height) / old_height;
-        camera.fx *= scale_x;
-        camera.fy *= scale_y;
-        camera.cx = (camera.cx + 0.5F) * scale_x - 0.5F;
-        camera.cy = (camera.cy + 0.5F) * scale_y - 0.5F;
-    }
-    const float level_scale = std::clamp(resolution_scale, 1e-3F, 1.F);
-    if (level_scale < 1.F) {
-        const std::uint32_t old_width = camera.width;
-        const std::uint32_t old_height = camera.height;
-        camera.width = std::max<std::uint32_t>(
-            1, static_cast<std::uint32_t>(std::lround(
-                   old_width * level_scale)));
-        camera.height = std::max<std::uint32_t>(
-            1, static_cast<std::uint32_t>(std::lround(
-                   old_height * level_scale)));
-        const float scale_x = static_cast<float>(camera.width) / old_width;
-        const float scale_y = static_cast<float>(camera.height) / old_height;
-        camera.fx *= scale_x;
-        camera.fy *= scale_y;
-        camera.cx = (camera.cx + 0.5F) * scale_x - 0.5F;
-        camera.cy = (camera.cy + 0.5F) * scale_y - 0.5F;
-    }
-    return camera;
-}
-
-float progressive_resolution_scale(
-    const unsigned iteration, const TrainingOptions& options) {
-    if (!options.progressive_resolution ||
-        options.progressive_resolution_interval == 0)
-        return 1.F;
-    const unsigned level =
-        (std::max(iteration, 1U) - 1U) /
-        options.progressive_resolution_interval;
-    return std::min(
-        1.F, std::clamp(options.progressive_initial_scale, 1e-3F, 1.F) *
-                 std::pow(2.F, static_cast<float>(level)));
-}
-
-std::vector<std::vector<std::size_t>> compute_multi_view_neighbours(
-    const std::vector<Camera>& cameras,
-    const std::vector<std::size_t>& active_indices,
-    const TrainingOptions& options) {
-    std::vector<std::vector<std::size_t>> result(cameras.size());
-    for (const std::size_t reference : active_indices) {
-        std::vector<std::tuple<float, float, std::size_t>> candidates;
-        const auto& camera = cameras[reference];
-        const Eigen::Vector3f center(
-            camera.position[0], camera.position[1], camera.position[2]);
-        Eigen::Vector3f forward(
-            camera.world_to_camera[2], camera.world_to_camera[6],
-            camera.world_to_camera[10]);
-        forward.normalize();
-        for (const std::size_t index : active_indices) {
-            if (index == reference) continue;
-            const auto& other = cameras[index];
-            const Eigen::Vector3f other_center(
-                other.position[0], other.position[1], other.position[2]);
-            const float distance = (center - other_center).norm();
-            Eigen::Vector3f other_forward(
-                other.world_to_camera[2], other.world_to_camera[6],
-                other.world_to_camera[10]);
-            other_forward.normalize();
-            const float angle = std::acos(std::clamp(
-                forward.dot(other_forward), -1.F, 1.F)) *
-                57.29577951308232F;
-            if (angle < options.multi_view_max_angle &&
-                distance > options.multi_view_min_distance &&
-                distance < options.multi_view_max_distance)
-                candidates.emplace_back(distance, angle, index);
-        }
-        std::sort(candidates.begin(), candidates.end());
-        const std::size_t count = std::min<std::size_t>(
-            options.multi_view_num, candidates.size());
-        result[reference].reserve(count);
-        for (std::size_t slot = 0; slot < count; ++slot)
-            result[reference].push_back(std::get<2>(candidates[slot]));
-    }
-    return result;
-}
-
-float sample_rgb(
-    const io::RgbImage& image, const float x, const float y, const int channel) {
-    if (x < 0.F || y < 0.F || x > static_cast<float>(image.width - 1) ||
-        y > static_cast<float>(image.height - 1))
-        return 0.F;
-    const int x0 = static_cast<int>(x);
-    const int y0 = static_cast<int>(y);
-    const int x1 = std::min(x0 + 1, static_cast<int>(image.width) - 1);
-    const int y1 = std::min(y0 + 1, static_cast<int>(image.height) - 1);
-    const float tx = x - static_cast<float>(x0);
-    const float ty = y - static_cast<float>(y0);
-    const auto at = [&](const int px, const int py) {
-        return static_cast<float>(image.pixels[
-            (static_cast<std::size_t>(py) * image.width + px) * 3 + channel]);
-    };
-    return ((at(x0, y0) * (1.F - tx) + at(x1, y0) * tx) * (1.F - ty) +
-            (at(x0, y1) * (1.F - tx) + at(x1, y1) * tx) * ty) /
-           255.F;
-}
-
-std::pair<float, float> source_coordinate(
-    const mvs::MvsView& view, const std::uint32_t x, const std::uint32_t y,
-    const Camera& output_camera, const io::RgbImage& source) {
-    const bool distorted = view.k1 != 0.F || view.k2 != 0.F ||
-                           view.p1 != 0.F || view.p2 != 0.F;
-    if (!distorted) {
-        const float scale_x =
-            static_cast<float>(output_camera.width) / source.width;
-        const float scale_y =
-            static_cast<float>(output_camera.height) / source.height;
-        return {(static_cast<float>(x) + 0.5F) / scale_x - 0.5F,
-                (static_cast<float>(y) + 0.5F) / scale_y - 0.5F};
-    }
-    const double xn =
-        (static_cast<double>(x) - output_camera.cx) / output_camera.fx;
-    const double yn =
-        (static_cast<double>(y) - output_camera.cy) / output_camera.fy;
-    const double radius2 = xn * xn + yn * yn;
-    const double radial = 1.0 + view.k1 * radius2 +
-                          view.k2 * radius2 * radius2;
-    const double xd = xn * radial + 2.0 * view.p1 * xn * yn +
-                      view.p2 * (radius2 + 2.0 * xn * xn);
-    const double yd = yn * radial + view.p1 * (radius2 + 2.0 * yn * yn) +
-                      2.0 * view.p2 * xn * yn;
-    return {static_cast<float>(view.src_fx * xd + view.src_cx),
-            static_cast<float>(view.src_fy * yd + view.src_cy)};
-}
 
 template <typename T>
 std::vector<T> download(const tinytensor::Tensor& tensor) {
@@ -388,785 +204,9 @@ void write_float(std::ofstream& stream, const float value) {
     stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
-std::filesystem::path find_mask_path(
-    const std::filesystem::path& directory,
-    const std::filesystem::path& image_path) {
-    if (directory.empty() || !std::filesystem::is_directory(directory))
-        return {};
-    const auto exact = directory / image_path.filename();
-    if (std::filesystem::is_regular_file(exact)) return exact;
-    static constexpr std::array<const char*, 6> extensions{
-        ".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"};
-    for (const char* extension : extensions) {
-        const auto candidate = directory / (image_path.stem().string() + extension);
-        if (std::filesystem::is_regular_file(candidate)) return candidate;
-    }
-    return {};
-}
 
-std::filesystem::path resolve_mask_path(
-    const mvs::MvsView& view, const TrainingOptions& options) {
-    if (!options.mask_dir.empty())
-        return find_mask_path(options.mask_dir, view.path);
-    const auto nested = find_mask_path(view.path.parent_path() / "masks", view.path);
-    if (!nested.empty()) return nested;
-    return find_mask_path(
-        view.path.parent_path().parent_path() / "masks", view.path);
-}
-
-float sample_mask_coverage(
-    const io::GrayImage& mask, const io::RgbImage& source,
-    const float source_x, const float source_y) {
-    const float x = (source_x + 0.5F) * mask.width / source.width - 0.5F;
-    const float y = (source_y + 0.5F) * mask.height / source.height - 0.5F;
-    const int px = static_cast<int>(std::round(x));
-    const int py = static_cast<int>(std::round(y));
-    if (px < 0 || py < 0 || px >= static_cast<int>(mask.width) ||
-        py >= static_cast<int>(mask.height))
-        return 0.F;
-    return mask.pixels[
-               static_cast<std::size_t>(py) * mask.width +
-               static_cast<std::size_t>(px)] > 127
-        ? 1.F
-        : 0.F;
-}
-
-struct RefinementCounts {
-    std::size_t grown{};
-    std::size_t pruned{};
-};
-
-struct StrategyPreset {
-    unsigned start{};
-    unsigned stop{};
-    unsigned every{};
-};
-
-struct SceneGeometry {
-    float scale{1.F};
-    mvs::Vec3f center{mvs::Vec3f::Zero()};
-};
-
-SceneGeometry training_scene_geometry(
-    const mvs::MvsScene& scene, const bool dense_input) {
-    mvs::Vec3f minimum = scene.dense_cloud.points.front().position;
-    mvs::Vec3f maximum = minimum;
-    for (const auto& point : scene.dense_cloud.points) {
-        minimum = minimum.cwiseMin(point.position);
-        maximum = maximum.cwiseMax(point.position);
-    }
-    SceneGeometry geometry{
-        std::max((maximum - minimum).norm(), 1e-6F),
-        0.5F * (minimum + maximum)};
-    if (scene.views.empty()) return geometry;
-
-    // Match pygsplat's COLMAP convention: optimization scale is measured from
-    // camera centers, not the untrimmed sparse-point AABB. A handful of bad
-    // triangulations can make that AABB tens of times too large, which in turn
-    // inflates both the means LR and the minimum Gaussian scale.
-    mvs::Vec3f camera_center = mvs::Vec3f::Zero();
-    std::size_t finite_cameras = 0;
-    for (const auto& view : scene.views) {
-        const mvs::Vec3f position = view.pose.C.cast<float>();
-        if (!position.allFinite()) continue;
-        camera_center += position;
-        ++finite_cameras;
-    }
-    if (finite_cameras == 0) {
-        if (dense_input) return geometry;
-        throw std::invalid_argument(
-            "Sparse GGGS training requires at least one finite camera center");
-    }
-    camera_center /= static_cast<float>(finite_cameras);
-    float camera_radius = 0.F;
-    for (const auto& view : scene.views) {
-        const mvs::Vec3f position = view.pose.C.cast<float>();
-        if (position.allFinite())
-            camera_radius = std::max(
-                camera_radius, (position - camera_center).norm());
-    }
-    if (!(camera_radius > 1e-6F) || !std::isfinite(camera_radius)) {
-        if (dense_input) return geometry;
-        throw std::invalid_argument(
-            "Sparse GGGS training requires non-degenerate camera coverage");
-    }
-    return {1.1F * camera_radius, camera_center};
-}
-
-StrategyPreset strategy_preset(const TrainingOptions& options) {
-    const bool dense_adaptive = options.densification_strategy ==
-                                DensificationStrategy::dense_adaptive;
-    const bool adc = options.densification_strategy ==
-                         DensificationStrategy::adc_plus ||
-                     options.densification_strategy ==
-                         DensificationStrategy::adc_igs;
-    const unsigned preset_stop = dense_adaptive
-        ? 5'000U
-        : options.densification_strategy == DensificationStrategy::adc_plus
-            ? options.iterations
-        : options.densification_strategy == DensificationStrategy::adc_igs
-            ? 25'000U
-            : 15'000U;
-    return {
-        options.refine_start_iter != 0
-            ? options.refine_start_iter
-            : dense_adaptive ? 750U
-                             : options.densification_strategy ==
-                                       DensificationStrategy::adc_plus
-                                 ? 0U
-                                 : adc ? 600U : 500U,
-        std::min(
-            options.refine_stop_iter != 0
-                ? options.refine_stop_iter
-                : preset_stop,
-            options.iterations),
-        options.refine_every != 0
-            ? options.refine_every
-            : dense_adaptive ? 500U : adc ? 200U : 100U};
-}
-
-tinytensor::Tensor index_tensor(const std::vector<int>& indices) {
-    return tinytensor::Tensor::from_vector(
-        indices, {indices.size()}, tinytensor::Device::CUDA);
-}
-
-GaussianModel select_model_rows(
-    const GaussianModel& model, const tinytensor::Tensor& indices) {
-    GaussianModel selected;
-    selected.means = model.means.index_select(0, indices);
-    selected.log_scales = model.log_scales.index_select(0, indices);
-    selected.quaternions = model.quaternions.index_select(0, indices);
-    selected.opacity_logits = model.opacity_logits.index_select(0, indices);
-    selected.sh = model.sh.index_select(0, indices);
-    selected.sh_degree = model.sh_degree;
-    return selected;
-}
-
-GaussianModel clone_model(const GaussianModel& model) {
-    GaussianModel cloned;
-    cloned.means = model.means.clone();
-    cloned.log_scales = model.log_scales.clone();
-    cloned.quaternions = model.quaternions.clone();
-    cloned.opacity_logits = model.opacity_logits.clone();
-    cloned.sh = model.sh.clone();
-    if (model.filter_3d.is_valid())
-        cloned.filter_3d = model.filter_3d.clone();
-    cloned.sh_degree = model.sh_degree;
-    return cloned;
-}
-
-void append_model(GaussianModel& model, const GaussianModel& added) {
-    if (added.size() == 0) return;
-    model.means = tinytensor::Tensor::cat({model.means, added.means}, 0);
-    model.log_scales = tinytensor::Tensor::cat(
-        {model.log_scales, added.log_scales}, 0);
-    model.quaternions = tinytensor::Tensor::cat(
-        {model.quaternions, added.quaternions}, 0);
-    model.opacity_logits = tinytensor::Tensor::cat(
-        {model.opacity_logits, added.opacity_logits}, 0);
-    model.sh = tinytensor::Tensor::cat({model.sh, added.sh}, 0);
-}
-
-void select_adam_rows(
-    detail::AdamState& state, const tinytensor::Tensor& indices) {
-    state.first = state.first.index_select(0, indices);
-    state.second = state.second.index_select(0, indices);
-}
-
-void append_zero_adam(detail::AdamState& state, const std::size_t count) {
-    if (count == 0) return;
-    std::vector<std::size_t> dimensions = state.first.shape().dims();
-    dimensions[0] = count;
-    const auto shape = tinytensor::TensorShape(dimensions);
-    state.first = tinytensor::Tensor::cat(
-        {state.first, tinytensor::Tensor::zeros(
-                          shape, tinytensor::Device::CUDA)}, 0);
-    state.second = tinytensor::Tensor::cat(
-        {state.second, tinytensor::Tensor::zeros(
-                           shape, tinytensor::Device::CUDA)}, 0);
-}
-
-using AdamStates = std::array<detail::AdamState*, 5>;
-
-void zero_adam_rows(
-    const std::vector<int>& rows, const AdamStates& states) {
-    if (rows.empty()) return;
-    const auto indices = index_tensor(rows);
-    for (detail::AdamState* state : states) {
-        std::vector<std::size_t> dimensions = state->first.shape().dims();
-        dimensions[0] = rows.size();
-        const auto zeros = tinytensor::Tensor::zeros(
-            tinytensor::TensorShape(dimensions), tinytensor::Device::CUDA);
-        state->first.index_copy_(0, indices, zeros);
-        state->second.index_copy_(0, indices, zeros);
-    }
-}
-
-void select_training_rows(
-    GaussianModel& model, const std::vector<int>& keep,
-    const AdamStates& states) {
-    const auto indices = index_tensor(keep);
-    model = select_model_rows(model, indices);
-    for (detail::AdamState* state : states) select_adam_rows(*state, indices);
-}
-
-void select_training_rows_gpu(
-    GaussianModel& model, const tinytensor::Tensor& indices,
-    const AdamStates& states) {
-    model = select_model_rows(model, indices);
-    for (detail::AdamState* state : states)
-        select_adam_rows(*state, indices);
-}
-
-void zero_adam_rows_gpu(
-    const tinytensor::Tensor& indices, const AdamStates& states) {
-    if (indices.numel() == 0) return;
-    for (detail::AdamState* state : states) {
-        std::vector<std::size_t> dimensions = state->first.shape().dims();
-        dimensions[0] = indices.numel();
-        const auto zeros = tinytensor::Tensor::zeros(
-            tinytensor::TensorShape(dimensions),
-            tinytensor::Device::CUDA);
-        state->first.index_copy_(0, indices, zeros);
-        state->second.index_copy_(0, indices, zeros);
-    }
-}
-
-void grow_adc_plus_gpu(
-    GaussianModel& model, const tinytensor::Tensor& parents,
-    const TrainingOptions& options, const AdamStates& states,
-    const tinytensor::Tensor& screen_sizes) {
-    const std::size_t count = parents.numel();
-    if (count == 0) return;
-    GaussianModel children = select_model_rows(model, parents);
-    auto samples = tinytensor::Tensor::zeros(
-        {count, std::size_t{3}}, tinytensor::Device::CUDA);
-    auto selected_screen = screen_sizes.index_select(0, parents);
-    detail::split_gaussians(
-        model, children, parents, samples, selected_screen, 2,
-        options.prune_opacity,
-        options.densify_screen_threshold);
-    zero_adam_rows_gpu(parents, states);
-    append_model(model, children);
-    for (detail::AdamState* state : states)
-        append_zero_adam(*state, count);
-}
-
-void grow_training_model(
-    GaussianModel& model, const std::vector<int>& parents,
-    const int split_mode, const TrainingOptions& options,
-    std::mt19937& random, const AdamStates& states,
-    const std::vector<float>& screen_sizes) {
-    if (parents.empty()) return;
-    const auto indices = index_tensor(parents);
-    GaussianModel children = select_model_rows(model, indices);
-    if (split_mode != 0) {
-        std::vector<float> samples(3 * parents.size());
-        if (split_mode != 2) {
-            std::normal_distribution<float> normal(0.F, 1.F);
-            for (float& value : samples) value = normal(random);
-        }
-        std::vector<float> selected_screen_sizes(parents.size(), 0.F);
-        for (std::size_t index = 0; index < parents.size(); ++index)
-            if (static_cast<std::size_t>(parents[index]) < screen_sizes.size())
-                selected_screen_sizes[index] =
-                    screen_sizes[static_cast<std::size_t>(parents[index])];
-        auto random_tensor = tinytensor::Tensor::from_vector(
-            samples, {parents.size(), 3}, tinytensor::Device::CUDA);
-        auto screen_tensor = tinytensor::Tensor::from_vector(
-            selected_screen_sizes, {parents.size()},
-            tinytensor::Device::CUDA);
-        detail::split_gaussians(
-            model, children, indices, random_tensor, screen_tensor, split_mode,
-            options.prune_opacity,
-            split_mode == 2 ? options.densify_screen_threshold : 0.F);
-        // Splitting mutates the retained parent as well as creating a child.
-        // Both are new primitives and must start with clean optimizer moments,
-        // matching pygsplat's replacement-based split.
-        zero_adam_rows(parents, states);
-    }
-    append_model(model, children);
-    for (detail::AdamState* state : states)
-        append_zero_adam(*state, parents.size());
-}
-
-std::vector<std::size_t> weighted_unique_sample(
-    const std::vector<std::pair<std::size_t, float>>& candidates,
-    const std::size_t requested, const bool gumbel,
-    std::mt19937& random) {
-    if (requested == 0 || candidates.empty()) return {};
-    std::vector<std::pair<std::size_t, float>> valid;
-    valid.reserve(candidates.size());
-    for (const auto& candidate : candidates)
-        if (std::isfinite(candidate.second) && candidate.second > 0.F)
-            valid.push_back(candidate);
-    if (valid.empty()) return {};
-    const std::size_t count = std::min(requested, valid.size());
-    if (gumbel) {
-        std::uniform_real_distribution<float> uniform(1e-7F, 1.F - 1e-7F);
-        std::vector<std::pair<float, std::size_t>> scores;
-        scores.reserve(valid.size());
-        for (const auto& [index, weight] : valid) {
-            const float u = uniform(random);
-            scores.emplace_back(
-                std::log(weight) - std::log(-std::log(u)), index);
-        }
-        const std::size_t selected = std::min(count, scores.size());
-        std::partial_sort(
-            scores.begin(), scores.begin() + selected, scores.end(),
-            std::greater<>());
-        std::vector<std::size_t> result;
-        result.reserve(selected);
-        for (std::size_t i = 0; i < selected; ++i)
-            result.push_back(scores[i].second);
-        return result;
-    }
-    std::vector<double> weights;
-    weights.reserve(valid.size());
-    for (const auto& candidate : valid)
-        weights.push_back(candidate.second);
-    std::discrete_distribution<std::size_t> distribution(
-        weights.begin(), weights.end());
-    std::unordered_set<std::size_t> selected;
-    const std::size_t attempts_limit = valid.size() * 8 + requested * 4;
-    for (std::size_t attempt = 0;
-         attempt < attempts_limit && selected.size() < count; ++attempt)
-        selected.insert(valid[distribution(random)].first);
-    if (selected.size() < count) {
-        std::vector<std::pair<float, std::size_t>> sorted;
-        for (const auto& [index, weight] : valid)
-            if (!selected.contains(index)) sorted.emplace_back(weight, index);
-        std::sort(sorted.begin(), sorted.end(), std::greater<>());
-        for (const auto& entry : sorted) {
-            if (selected.size() >= count) break;
-            selected.insert(entry.second);
-        }
-    }
-    return {selected.begin(), selected.end()};
-}
-
-RefinementCounts refine_adc_plus_gpu(
-    GaussianModel& model, detail::DensificationStats& stats,
-    const unsigned iteration, const float scene_extent,
-    const mvs::Vec3f& scene_center, const TrainingOptions& options,
-    const AdamStates& states) {
-    const std::size_t old_count = model.size();
-    auto pruning = detail::adc_plus_prune(
-        model, options.prune_opacity, 100.F * scene_extent,
-        {scene_center.x(), scene_center.y(), scene_center.z()},
-        options.densification_cap);
-    const std::size_t retained = pruning.keep_indices.numel();
-    auto retained_gradient =
-        stats.gradient.index_select(0, pruning.keep_indices);
-    auto retained_count =
-        stats.count.index_select(0, pruning.keep_indices);
-    auto retained_screen =
-        stats.max_screen_radius.index_select(0, pruning.keep_indices);
-    auto retained_opacity =
-        pruning.opacities.index_select(0, pruning.keep_indices);
-    select_training_rows_gpu(model, pruning.keep_indices, states);
-
-    const std::size_t capacity =
-        options.densification_cap > retained
-            ? options.densification_cap - retained
-            : 0;
-    auto selected = tinytensor::Tensor::zeros_bool(
-        {retained}, tinytensor::Device::CUDA);
-    std::size_t selected_count = 0;
-    if (capacity != 0 && retained != 0) {
-        const auto visible = retained_count.gt(0.F);
-        auto visible_indices = visible.nonzero().squeeze(1).to(
-            tinytensor::DataType::Int32);
-        const std::size_t replacement_count = std::min(
-            {pruning.pruned, capacity, visible_indices.numel()});
-        if (replacement_count != 0) {
-            auto weights = retained_opacity.index_select(
-                0, visible_indices);
-            auto sampled_slots = tinytensor::Tensor::multinomial(
-                weights, static_cast<int>(replacement_count), false);
-            auto sampled = visible_indices.index_select(
-                0, sampled_slots).to(tinytensor::DataType::Int32);
-            selected.index_fill_(0, sampled, 1.F);
-            selected_count = replacement_count;
-        }
-
-        auto oversized = visible.logical_and(
-            retained_screen.gt(
-                options.densify_screen_threshold));
-        oversized = oversized.logical_and(!selected);
-        auto oversized_indices = oversized.nonzero().squeeze(1).to(
-            tinytensor::DataType::Int32);
-        const std::size_t oversized_count = std::min(
-            oversized_indices.numel(), capacity - selected_count);
-        if (oversized_count != 0) {
-            if (oversized_count != oversized_indices.numel())
-                oversized_indices = oversized_indices.slice(
-                    0, 0, oversized_count);
-            selected.index_fill_(0, oversized_indices, 1.F);
-            selected_count += oversized_count;
-        }
-
-        if (iteration < options.grow_stop_iter &&
-            selected_count < capacity) {
-            auto growth_mask = visible.logical_and(
-                retained_gradient.gt(
-                    options.densify_gradient_threshold));
-            auto growth_indices = growth_mask.nonzero().squeeze(1).to(
-                tinytensor::DataType::Int32);
-            const std::size_t threshold_growth =
-                static_cast<std::size_t>(std::llround(
-                    growth_indices.numel() *
-                    options.densify_select_fraction));
-            const std::size_t requested =
-                threshold_growth > pruning.pruned
-                    ? threshold_growth - pruning.pruned
-                    : 0;
-            const std::size_t growth_count = std::min(
-                {requested, capacity - selected_count,
-                 growth_indices.numel()});
-            if (growth_count != 0) {
-                auto weights = retained_gradient.index_select(
-                    0, growth_indices);
-                auto sampled_slots = tinytensor::Tensor::multinomial(
-                    weights, static_cast<int>(growth_count), false);
-                auto sampled = growth_indices.index_select(
-                    0, sampled_slots).to(tinytensor::DataType::Int32);
-                selected.index_fill_(0, sampled, 1.F);
-            }
-        }
-    }
-
-    auto split_parents = selected.nonzero().squeeze(1).to(
-        tinytensor::DataType::Int32);
-    grow_adc_plus_gpu(
-        model, split_parents, options, states, retained_screen);
-    const float remaining_progress = 1.F -
-        static_cast<float>(iteration) /
-            std::max(1.F, static_cast<float>(options.iterations));
-    detail::apply_adc_decay(
-        model,
-        options.opacity_decay * std::max(remaining_progress, 0.F),
-        0.F);
-    stats = detail::make_densification_stats(model.size());
-    return {split_parents.numel(), pruning.pruned};
-}
-
-RefinementCounts refine_gaussians(
-    GaussianModel& model, detail::DensificationStats& stats,
-    const unsigned iteration, const float scene_extent,
-    const mvs::Vec3f& scene_center, const TrainingOptions& options,
-    std::mt19937& random, const AdamStates& states) {
-    const StrategyPreset preset = strategy_preset(options);
-    const bool dense_adaptive = options.densification_strategy ==
-                                DensificationStrategy::dense_adaptive;
-    const bool adc_plus = options.densification_strategy ==
-                          DensificationStrategy::adc_plus;
-    const bool adc = options.densification_strategy ==
-                     DensificationStrategy::adc_igs;
-    const bool managed = adc || dense_adaptive;
-    if (iteration <= preset.start || iteration >= preset.stop ||
-        preset.every == 0 || iteration % preset.every != 0 ||
-        (managed &&
-         static_cast<float>(iteration) /
-                    std::max(1.F, static_cast<float>(options.iterations)) >
-                0.95F) ||
-        model.size() == 0)
-        return {};
-
-    // Brush refines canonical parameters: the current Mip-Splatting floor is
-    // baked into scale/opacity before prune, replacement sampling and split.
-    // Keeping the floor separate here changes both the low-opacity set and the
-    // covariance inherited by children, which is especially visible as
-    // floaters in wide-baseline scenes.
-    if (adc_plus)
-        detail::bake_3d_filter(model);
-    if (adc_plus)
-        return refine_adc_plus_gpu(
-            model, stats, iteration, scene_extent, scene_center,
-            options, states);
-
-    const std::size_t old_count = model.size();
-    const auto gradients = download<float>(stats.gradient);
-    const auto counts = download<float>(stats.count);
-    const auto screen = download<float>(stats.max_screen_radius);
-    const auto priorities = download<float>(stats.priority);
-    const auto opacities = download<float>(model.opacity_logits);
-    const auto log_scales = download<float>(model.log_scales);
-    const auto means = download<float>(model.means);
-    const auto quaternions = download<float>(model.quaternions);
-    const auto sh = download<float>(model.sh);
-    std::vector<bool> prune(old_count, false);
-    std::vector<bool> hard_prune(old_count, false);
-    std::vector<float> opacity_values(old_count);
-    std::size_t best = 0;
-    float best_opacity = -1.F;
-    for (std::size_t index = 0; index < old_count; ++index) {
-        const float opacity = 1.F / (1.F + std::exp(-opacities[index]));
-        opacity_values[index] = opacity;
-        if (opacity > best_opacity) {
-            best_opacity = opacity;
-            best = index;
-        }
-        float max_scale = 0.F;
-        for (int axis = 0; axis < 3; ++axis) {
-            const float scale = std::exp(log_scales[3 * index + axis]);
-            max_scale = std::max(max_scale, scale);
-        }
-        bool remove = opacity < options.prune_opacity;
-        if (managed) {
-            bool non_finite = !std::isfinite(opacities[index]);
-            for (int axis = 0; axis < 3; ++axis)
-                non_finite = non_finite ||
-                    !std::isfinite(means[3 * index + axis]) ||
-                    !std::isfinite(log_scales[3 * index + axis]);
-            for (int component = 0; component < 4; ++component)
-                non_finite = non_finite ||
-                    !std::isfinite(quaternions[4 * index + component]);
-            const std::size_t sh_stride = model.sh.numel() / old_count;
-            for (std::size_t component = 0; component < sh_stride; ++component)
-                non_finite = non_finite ||
-                    !std::isfinite(sh[index * sh_stride + component]);
-            const mvs::Vec3f position(
-                means[3 * index], means[3 * index + 1], means[3 * index + 2]);
-            hard_prune[index] = non_finite ||
-                max_scale > 100.F * scene_extent ||
-                (position - scene_center).cwiseAbs().maxCoeff() >
-                    100.F * scene_extent;
-            remove = remove || hard_prune[index];
-        } else if (iteration > options.opacity_reset_every) {
-            remove = remove || max_scale > 0.1F * scene_extent;
-        }
-        prune[index] = remove;
-    }
-    if (dense_adaptive) {
-        std::vector<std::pair<float, std::size_t>> low_opacity;
-        std::size_t hard_count = 0;
-        for (std::size_t index = 0; index < old_count; ++index) {
-            if (hard_prune[index]) {
-                ++hard_count;
-            } else if (prune[index]) {
-                low_opacity.emplace_back(opacity_values[index], index);
-                prune[index] = false;
-            }
-        }
-        std::sort(low_opacity.begin(), low_opacity.end());
-        const std::size_t recycle_limit = static_cast<std::size_t>(std::ceil(
-            old_count * std::clamp(
-                options.dense_recycle_fraction, 0.F, 1.F)));
-        const std::size_t opacity_budget = recycle_limit > hard_count
-            ? recycle_limit - hard_count
-            : 0;
-        for (std::size_t index = 0;
-             index < std::min(opacity_budget, low_opacity.size()); ++index)
-            prune[low_opacity[index].second] = true;
-    }
-    // Keep training alive for pathological all-low-opacity inputs, but never
-    // rescue a non-finite/out-of-bounds row.
-    if (!hard_prune[best]) prune[best] = false;
-    std::size_t retained = static_cast<std::size_t>(
-        std::count(prune.begin(), prune.end(), false));
-    if (retained > options.densification_cap) {
-        std::vector<std::pair<float, std::size_t>> by_opacity;
-        by_opacity.reserve(retained);
-        for (std::size_t index = 0; index < old_count; ++index)
-            if (!prune[index] && index != best)
-                by_opacity.emplace_back(opacity_values[index], index);
-        std::sort(by_opacity.begin(), by_opacity.end());
-        const std::size_t remove_count = retained - options.densification_cap;
-        for (std::size_t index = 0; index < remove_count; ++index)
-            prune[by_opacity[index].second] = true;
-    }
-
-    std::vector<int> keep;
-    keep.reserve(old_count);
-    std::vector<int> remap(old_count, -1);
-    for (std::size_t index = 0; index < old_count; ++index) {
-        if (!prune[index]) {
-            remap[index] = static_cast<int>(keep.size());
-            keep.push_back(static_cast<int>(index));
-        }
-    }
-    const std::size_t pruned = old_count - keep.size();
-
-    struct Candidate {
-        std::size_t old_index{};
-        std::size_t new_index{};
-        float score{};
-        float max_scale{};
-        bool oversized{};
-    };
-    std::vector<Candidate> candidates;
-    std::vector<float> positive_priorities;
-    for (std::size_t index = 0; index < old_count; ++index) {
-        if (remap[index] < 0 || counts[index] <= 0.F) continue;
-        const float score = managed
-            ? gradients[index]
-            : gradients[index] / std::max(counts[index], 1.F);
-        float max_scale = 0.F;
-        for (int axis = 0; axis < 3; ++axis)
-            max_scale = std::max(
-                max_scale, std::exp(log_scales[3 * index + axis]));
-        candidates.push_back({
-            index, static_cast<std::size_t>(remap[index]), score, max_scale,
-            screen[index] > options.densify_screen_threshold});
-        const float priority = priorities[index] /
-                               std::max(counts[index], 1.F);
-        if (priority > 0.F) positive_priorities.push_back(priority);
-    }
-    select_training_rows(model, keep, states);
-
-    const std::size_t capacity = options.densification_cap > model.size()
-        ? options.densification_cap - model.size()
-        : 0;
-    if (capacity == 0) {
-        if (adc) {
-            const float remaining_progress = 1.F -
-                static_cast<float>(iteration) /
-                    std::max(1.F, static_cast<float>(options.iterations));
-            detail::apply_adc_decay(
-                model,
-                options.opacity_decay *
-                    std::max(remaining_progress, 0.F),
-                options.scale_decay *
-                    std::max(remaining_progress, 0.F));
-        }
-        stats = detail::make_densification_stats(model.size());
-        return {0, pruned};
-    }
-
-    std::vector<int> duplicate_parents;
-    std::vector<int> split_parents;
-    if (!managed) {
-        std::sort(candidates.begin(), candidates.end(),
-                  [](const Candidate& a, const Candidate& b) {
-                      return a.score > b.score;
-                  });
-        for (const Candidate& candidate : candidates) {
-            if (duplicate_parents.size() + split_parents.size() >= capacity) break;
-            if (candidate.score <= options.densify_gradient_threshold) break;
-            if (candidate.max_scale <=
-                options.densify_scale_threshold * scene_extent)
-                duplicate_parents.push_back(
-                    static_cast<int>(candidate.new_index));
-            else
-                split_parents.push_back(
-                    static_cast<int>(candidate.new_index));
-        }
-    } else {
-        float priority_median = 1.F;
-        if (!positive_priorities.empty()) {
-            const auto middle = positive_priorities.begin() +
-                                positive_priorities.size() / 2;
-            std::nth_element(
-                positive_priorities.begin(), middle,
-                positive_priorities.end());
-            priority_median = std::max(*middle, 1e-9F);
-        }
-        std::vector<std::pair<std::size_t, float>> replacement_weights;
-        std::vector<std::pair<std::size_t, float>> growth_weights;
-        std::unordered_set<std::size_t> forced;
-        const bool allow_growth = dense_adaptive ||
-            options.densification_strategy != DensificationStrategy::adc_igs ||
-            iteration < options.grow_stop_iter;
-        for (const Candidate& candidate : candidates) {
-            const float opacity = 1.F /
-                (1.F + std::exp(-opacities[candidate.old_index]));
-            float edge_factor = 1.F;
-            if (options.densification_strategy ==
-                DensificationStrategy::adc_igs) {
-                const float priority = priorities[candidate.old_index] /
-                    std::max(counts[candidate.old_index], 1.F);
-                if (priority > 0.F)
-                    edge_factor += 0.25F * std::min(
-                        priority / priority_median, 10.F);
-            }
-            const float screen_factor = candidate.oversized ? 2.F : 1.F;
-            replacement_weights.emplace_back(
-                candidate.new_index,
-                dense_adaptive
-                    ? std::max(candidate.score, 1e-12F) * screen_factor
-                    : opacity * edge_factor);
-            if (allow_growth &&
-                candidate.score > options.densify_gradient_threshold)
-                growth_weights.emplace_back(
-                    candidate.new_index,
-                    candidate.score * edge_factor * screen_factor);
-            if (!dense_adaptive && allow_growth && candidate.oversized)
-                forced.insert(candidate.new_index);
-        }
-        const bool gumbel = options.densification_strategy ==
-                            DensificationStrategy::adc_igs;
-        auto selected = weighted_unique_sample(
-            replacement_weights, std::min(pruned, capacity), gumbel, random);
-        forced.insert(selected.begin(), selected.end());
-        std::size_t desired_growth = static_cast<std::size_t>(std::llround(
-            growth_weights.size() * options.densify_select_fraction));
-        if (dense_adaptive) {
-            desired_growth = std::min(
-                desired_growth,
-                static_cast<std::size_t>(std::ceil(
-                    model.size() * std::clamp(
-                        options.dense_growth_fraction, 0.F, 1.F))));
-            growth_weights.erase(
-                std::remove_if(
-                    growth_weights.begin(), growth_weights.end(),
-                    [&](const auto& candidate) {
-                        return forced.contains(candidate.first);
-                    }),
-                growth_weights.end());
-        }
-        const std::size_t remaining = capacity > forced.size()
-            ? capacity - forced.size()
-            : 0;
-        selected = weighted_unique_sample(
-            growth_weights,
-            std::min(remaining, desired_growth), gumbel, random);
-        forced.insert(selected.begin(), selected.end());
-        split_parents.reserve(std::min(capacity, forced.size()));
-        for (const std::size_t parent : forced) {
-            if (split_parents.size() >= capacity) break;
-            split_parents.push_back(static_cast<int>(parent));
-        }
-    }
-
-    std::vector<float> retained_screen;
-    retained_screen.reserve(keep.size());
-    for (const int old_index : keep)
-        retained_screen.push_back(
-            screen[static_cast<std::size_t>(old_index)]);
-    grow_training_model(
-        model, duplicate_parents, 0, options, random, states,
-        retained_screen);
-    // Parent row indices still refer to the original retained prefix after
-    // duplicates are appended, so they remain valid here.
-    const int split_mode = options.densification_strategy ==
-            DensificationStrategy::adc_igs
-        ? 3
-        : dense_adaptive
-            ? 4
-            : 1;
-    grow_training_model(
-        model, split_parents, split_mode, options, random, states,
-        retained_screen);
-    if (adc) {
-        const float remaining_progress = 1.F -
-            static_cast<float>(iteration) /
-                std::max(1.F, static_cast<float>(options.iterations));
-        detail::apply_adc_decay(
-            model,
-            options.opacity_decay * std::max(remaining_progress, 0.F),
-            options.scale_decay *
-                std::max(remaining_progress, 0.F));
-    }
-    stats = detail::make_densification_stats(model.size());
-    return {duplicate_parents.size() + split_parents.size(), pruned};
-}
 
 }  // namespace
-
-Camera camera_from_mvs_view(const mvs::MvsView& view) {
-    return make_camera_impl(view);
-}
 
 GaussianModel initialize_from_dense_cloud(
     const mvs::MvsScene& scene, const TrainingOptions& options) {
@@ -1209,7 +249,7 @@ GaussianModel initialize_from_dense_cloud(
             (maximum - minimum).norm(), 1e-6F);
     } else {
         initialization_extent =
-            training_scene_geometry(scene, false).scale;
+            refine::training_scene_geometry(scene, false).scale;
     }
     const float fallback_scale = std::max(
         initialization_extent /
@@ -1324,188 +364,6 @@ GaussianModel initialize_from_dense_cloud(
     return model;
 }
 
-struct HostTrainingView {
-    Camera camera;
-    std::vector<float> rgb;
-    std::vector<float> depth;
-    std::vector<float> normal;
-    std::vector<float> mask;
-    bool has_mask{false};
-
-    [[nodiscard]] std::size_t bytes() const noexcept {
-        return sizeof(*this) + sizeof(float) *
-            (rgb.capacity() + depth.capacity() + normal.capacity() +
-             mask.capacity());
-    }
-};
-
-HostTrainingView load_host_training_view(
-    const mvs::MvsView& view, const TrainingOptions& options,
-    const float resolution_scale = 1.F) {
-    if (view.width == 0 || view.height == 0)
-        throw std::invalid_argument("Cannot build a GGGS training view with empty dimensions");
-    const io::RgbImage source = io::load_rgb(view.path);
-    Camera camera = training_camera(view, options, resolution_scale);
-    const std::size_t pixels =
-        static_cast<std::size_t>(camera.width) * camera.height;
-    io::GrayImage source_mask;
-    bool has_source_mask = false;
-    if (options.use_mask) {
-        const auto mask_path = resolve_mask_path(view, options);
-        if (!mask_path.empty()) {
-            source_mask = io::load_gray(mask_path);
-            has_source_mask = true;
-        } else {
-            source_mask = io::load_alpha(view.path);
-            has_source_mask = !source_mask.pixels.empty();
-        }
-    }
-    std::vector<float> rgb(3 * pixels);
-    std::vector<float> mask(pixels, 1.F);
-    for (std::uint32_t y = 0; y < camera.height; ++y) {
-        for (std::uint32_t x = 0; x < camera.width; ++x) {
-            const auto [sx, sy] =
-                source_coordinate(view, x, y, camera, source);
-            const std::size_t pixel =
-                static_cast<std::size_t>(y) * camera.width + x;
-            for (int channel = 0; channel < 3; ++channel)
-                rgb[static_cast<std::size_t>(channel) * pixels + pixel] =
-                    sample_rgb(source, sx, sy, channel);
-            if (has_source_mask)
-                mask[pixel] = sample_mask_coverage(source_mask, source, sx, sy);
-        }
-    }
-
-    std::vector<float> depth;
-    std::vector<float> normals;
-    if (options.use_mvs_depth &&
-        camera.width == view.width && camera.height == view.height &&
-        view.depth_map.depth.size() == pixels)
-        depth = view.depth_map.depth;
-    if (options.use_mvs_normals &&
-        camera.width == view.width && camera.height == view.height &&
-        view.depth_map.normal.size() == pixels) {
-        normals.resize(3 * pixels);
-        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-            for (int axis = 0; axis < 3; ++axis)
-                normals[static_cast<std::size_t>(axis) * pixels + pixel] =
-                    view.depth_map.normal[pixel](axis);
-        }
-    }
-    bool has_mask = has_source_mask;
-    if (options.use_mask && !has_source_mask &&
-        camera.width == view.width && camera.height == view.height &&
-        view.foreground_mask.size() == pixels) {
-        has_mask = true;
-        for (std::size_t pixel = 0; pixel < pixels; ++pixel)
-            mask[pixel] = view.foreground_mask[pixel] != 0 ? 1.F : 0.F;
-    }
-
-    return {
-        camera, std::move(rgb), std::move(depth), std::move(normals),
-        std::move(mask), has_mask};
-}
-
-TrainingView upload_training_view(const HostTrainingView& host) {
-    TrainingView result;
-    result.camera = host.camera;
-    result.rgb = tinytensor::Tensor::from_vector(
-        host.rgb, {3, host.camera.height, host.camera.width},
-        tinytensor::Device::CUDA);
-    result.depth = host.depth.empty()
-        ? tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA)
-        : tinytensor::Tensor::from_vector(
-              host.depth, {host.camera.height, host.camera.width},
-              tinytensor::Device::CUDA);
-    result.normal = host.normal.empty()
-        ? tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA)
-        : tinytensor::Tensor::from_vector(
-              host.normal, {3, host.camera.height, host.camera.width},
-              tinytensor::Device::CUDA);
-    result.mask = tinytensor::Tensor::from_vector(
-        host.mask, {host.camera.height, host.camera.width},
-        tinytensor::Device::CUDA);
-    result.has_mask = host.has_mask;
-    return result;
-}
-
-class TrainingViewCache {
-public:
-    TrainingViewCache(
-        const std::vector<mvs::MvsView>& source,
-        const TrainingOptions& options, const float resolution_scale = 1.F)
-        : source_(source), options_(options),
-          capacity_bytes_(options.training_view_cache_bytes),
-          resolution_scale_(resolution_scale) {}
-
-    TrainingView get(const std::size_t index) {
-        return upload_training_view(host_view(index));
-    }
-
-    bool has_mask(const std::size_t index) {
-        return host_view(index).has_mask;
-    }
-
-    void set_resolution_scale(const float scale) {
-        const float clamped = std::clamp(scale, 1e-3F, 1.F);
-        if (std::abs(clamped - resolution_scale_) < 1e-6F) return;
-        entries_.clear();
-        lookup_.clear();
-        cached_bytes_ = 0;
-        resolution_scale_ = clamped;
-    }
-
-private:
-    struct Entry {
-        std::size_t index{};
-        std::size_t bytes{};
-        HostTrainingView view;
-    };
-    using Entries = std::list<Entry>;
-
-    const HostTrainingView& host_view(const std::size_t index) {
-        if (index >= source_.size())
-            throw std::out_of_range("GGGS training view index is out of range");
-        const auto found = lookup_.find(index);
-        if (found != lookup_.end()) {
-            entries_.splice(entries_.begin(), entries_, found->second);
-            return entries_.front().view;
-        }
-
-        HostTrainingView loaded =
-            load_host_training_view(
-                source_[index], options_, resolution_scale_);
-        const std::size_t loaded_bytes = loaded.bytes();
-        while (!entries_.empty() &&
-               (capacity_bytes_ == 0 ||
-                cached_bytes_ + loaded_bytes > capacity_bytes_)) {
-            const auto& evicted = entries_.back();
-            cached_bytes_ -= evicted.bytes;
-            lookup_.erase(evicted.index);
-            entries_.pop_back();
-        }
-        // Keep one decoded view even when caching is disabled or a single
-        // image exceeds the budget. It remains valid until the next miss.
-        entries_.push_front({index, loaded_bytes, std::move(loaded)});
-        lookup_[index] = entries_.begin();
-        cached_bytes_ += loaded_bytes;
-        return entries_.front().view;
-    }
-
-    const std::vector<mvs::MvsView>& source_;
-    const TrainingOptions& options_;
-    std::size_t capacity_bytes_{};
-    std::size_t cached_bytes_{};
-    float resolution_scale_{1.F};
-    Entries entries_;
-    std::unordered_map<std::size_t, Entries::iterator> lookup_;
-};
-
-TrainingView make_training_view(
-    const mvs::MvsView& view, const TrainingOptions& options) {
-    return upload_training_view(
-        load_host_training_view(view, options, 1.F));
-}
 
 Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {}
 
@@ -1515,6 +373,9 @@ GaussianModel Trainer::train(
     if (scene.views.empty())
         throw std::invalid_argument("GGGS training requires at least one MVS view");
     GaussianModel model = initialize_from_dense_cloud(scene, options_);
+    const bool use_3d_filter =
+        options_.use_depth_normal_loss &&
+        options_.depth_normal_weight > 0.F;
     std::vector<std::size_t> view_indices;
     view_indices.reserve(scene.views.size());
     for (std::size_t index = 0; index < scene.views.size(); ++index)
@@ -1525,8 +386,8 @@ GaussianModel Trainer::train(
         throw std::invalid_argument(
             "GGGS evaluation split left no training views");
     float active_resolution_scale =
-        progressive_resolution_scale(1, options_);
-    TrainingViewCache view_cache(
+        data::progressive_resolution_scale(1, options_);
+    data::TrainingDataLoader view_cache(
         scene.views, options_, active_resolution_scale);
     if (options_.use_mask) {
         for (const std::size_t index : view_indices)
@@ -1539,17 +400,19 @@ GaussianModel Trainer::train(
     std::vector<Camera> all_cameras;
     all_cameras.reserve(scene.views.size());
     for (const mvs::MvsView& view : scene.views)
-        all_cameras.push_back(training_camera(
+        all_cameras.push_back(data::training_camera(
             view, options_, active_resolution_scale));
     std::vector<Camera> filter_cameras;
-    filter_cameras.reserve(view_indices.size());
-    for (const std::size_t index : view_indices)
-        filter_cameras.push_back(all_cameras[index]);
     std::vector<Camera> full_resolution_filter_cameras;
-    full_resolution_filter_cameras.reserve(view_indices.size());
-    for (const std::size_t index : view_indices)
-        full_resolution_filter_cameras.push_back(
-            training_camera(scene.views[index], options_, 1.F));
+    if (use_3d_filter) {
+        filter_cameras.reserve(view_indices.size());
+        full_resolution_filter_cameras.reserve(view_indices.size());
+        for (const std::size_t index : view_indices) {
+            filter_cameras.push_back(all_cameras[index]);
+            full_resolution_filter_cameras.push_back(
+                data::training_camera(scene.views[index], options_, 1.F));
+        }
+    }
     const float filter_3d_factor =
         options_.densification_strategy ==
                 DensificationStrategy::adc_plus
@@ -1562,13 +425,17 @@ GaussianModel Trainer::train(
     // first minimum-scale floor only after the first refinement. Attaching it
     // here makes iteration 200 bake the floor one extra time, permanently
     // suppressing opacity before Brush has ever filtered the model.
-    if (options_.use_3d_filter &&
+    if (use_3d_filter &&
         options_.densification_strategy !=
             DensificationStrategy::adc_plus)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras, filter_3d_factor, brush_filter);
-    const auto multi_view_neighbours = compute_multi_view_neighbours(
-        all_cameras, view_indices, options_);
+    const bool use_multi_view = options_.multi_view_geo_weight > 0.F ||
+                                options_.multi_view_ncc_weight > 0.F;
+    const auto multi_view_neighbours = use_multi_view
+        ? data::compute_multi_view_neighbours(
+              all_cameras, view_indices, options_)
+        : std::vector<std::vector<std::size_t>>(scene.views.size());
     std::future<void> evaluation_future;
     const auto finish_evaluation = [&] {
         if (evaluation_future.valid()) evaluation_future.get();
@@ -1576,8 +443,8 @@ GaussianModel Trainer::train(
     const auto launch_evaluation =
         [&](const unsigned iteration, const GaussianModel& current) {
             finish_evaluation();
-            GaussianModel snapshot = clone_model(current);
-            if (options_.use_3d_filter)
+            GaussianModel snapshot = refine::clone_model(current);
+            if (use_3d_filter)
                 snapshot.filter_3d = detail::compute_3d_filter(
                     snapshot.means, full_resolution_filter_cameras,
                     filter_3d_factor, brush_filter);
@@ -1594,25 +461,20 @@ GaussianModel Trainer::train(
     detail::AdamState rotations_state = detail::make_adam_state(model.quaternions);
     detail::AdamState opacity_state = detail::make_adam_state(model.opacity_logits);
     detail::AdamState sh_state = detail::make_adam_state(model.sh);
-    const AdamStates adam_states{
+    const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
         &sh_state};
-    const bool dense_adaptive = options_.densification_strategy ==
-                                DensificationStrategy::dense_adaptive;
-    const bool densification_enabled = options_.enable_densification &&
-        ((!options_.input_is_dense && !dense_adaptive) ||
-         (options_.input_is_dense && dense_adaptive)) &&
-        strategy_preset(options_).stop > 0;
+    const bool densification_enabled = refine::is_enabled(options_);
     detail::DensificationStats densification_stats =
         detail::make_densification_stats(model.size());
-    RefinementCounts latest_refinement;
+    refine::RefinementCounts latest_refinement;
     Rasterizer rasterizer;
     std::mt19937 random(options_.seed);
     std::vector<std::size_t> shuffled_views = view_indices;
     std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
     std::size_t shuffled_view_cursor = 0;
-    const SceneGeometry scene_geometry =
-        training_scene_geometry(scene, options_.input_is_dense);
+    const refine::SceneGeometry scene_geometry =
+        refine::training_scene_geometry(scene, options_.input_is_dense);
     const float scene_extent = scene_geometry.scale;
     const mvs::Vec3f scene_center = scene_geometry.center;
     float means_learning_rate_scale = scene_extent;
@@ -1651,7 +513,7 @@ GaussianModel Trainer::train(
     for (unsigned iteration = 1; iteration <= options_.iterations; ++iteration) {
         const auto started = std::chrono::steady_clock::now();
         const float requested_resolution_scale =
-            progressive_resolution_scale(iteration, options_);
+            data::progressive_resolution_scale(iteration, options_);
         if (std::abs(
                 requested_resolution_scale -
                 active_resolution_scale) > 1e-6F) {
@@ -1659,15 +521,16 @@ GaussianModel Trainer::train(
             view_cache.set_resolution_scale(active_resolution_scale);
             all_cameras.clear();
             for (const mvs::MvsView& view : scene.views)
-                all_cameras.push_back(training_camera(
+                all_cameras.push_back(data::training_camera(
                     view, options_, active_resolution_scale));
-            filter_cameras.clear();
-            for (const std::size_t index : view_indices)
-                filter_cameras.push_back(all_cameras[index]);
-            if (options_.use_3d_filter)
+            if (use_3d_filter) {
+                filter_cameras.clear();
+                for (const std::size_t index : view_indices)
+                    filter_cameras.push_back(all_cameras[index]);
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras, filter_3d_factor,
                     brush_filter);
+            }
         }
         const bool report_progress = progress &&
             (iteration == 1 || iteration == options_.iterations ||
@@ -1833,7 +696,7 @@ GaussianModel Trainer::train(
             const unsigned noise_stop = options_.densification_strategy ==
                     DensificationStrategy::adc_igs
                 ? options_.grow_stop_iter
-                : strategy_preset(options_).stop;
+                : refine::strategy_schedule(options_).stop;
             if (iteration < noise_stop)
                 detail::inject_adc_noise(
                     model, rendered.visibility,
@@ -1843,12 +706,12 @@ GaussianModel Trainer::train(
 
         latest_refinement = {};
         if (densification_enabled) {
-            latest_refinement = refine_gaussians(
+            latest_refinement = refine::refine_gaussians(
                 model, densification_stats, iteration, scene_extent,
                 scene_center, options_, random, adam_states);
             if (options_.densification_strategy ==
                     DensificationStrategy::default_strategy &&
-                iteration < strategy_preset(options_).stop &&
+                iteration < refine::strategy_schedule(options_).stop &&
                 options_.opacity_reset_every != 0 && iteration > 0 &&
                 iteration % options_.opacity_reset_every == 0) {
                 detail::reset_opacity(
@@ -1858,10 +721,8 @@ GaussianModel Trainer::train(
             }
             detail::constrain_scale_ratio(
                 model.log_scales, options_.max_scale_ratio);
-            const StrategyPreset preset = strategy_preset(options_);
             const bool refined =
-                iteration > preset.start && iteration < preset.stop &&
-                preset.every != 0 && iteration % preset.every == 0;
+                refine::is_refinement_iteration(iteration, options_);
             if (refined &&
                 options_.densification_strategy ==
                     DensificationStrategy::adc_plus)
@@ -1872,13 +733,11 @@ GaussianModel Trainer::train(
         // The Mip-Splatting radius depends on Gaussian positions and count.
         // Refresh immediately after topology changes and periodically while
         // the means continue to move, matching pygsplat's GGGS schedule.
-        if (options_.use_3d_filter) {
-            const StrategyPreset preset = strategy_preset(options_);
+        if (use_3d_filter) {
             const bool adc_plus_refine =
                 options_.densification_strategy ==
                     DensificationStrategy::adc_plus &&
-                iteration > preset.start && iteration < preset.stop &&
-                preset.every != 0 && iteration % preset.every == 0;
+                refine::is_refinement_iteration(iteration, options_);
             // Brush refreshes the floor after each ADC+ refine until 90% of
             // training. At 90% the old floor is baked one final time and the
             // tail optimizes fixed canonical parameters.
@@ -1955,7 +814,7 @@ GaussianModel Trainer::train(
         throw std::runtime_error(
             std::string("GGGS training synchronization failed: ") +
             cudaGetErrorString(error));
-    if (options_.use_3d_filter)
+    if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, full_resolution_filter_cameras,
             filter_3d_factor, brush_filter);

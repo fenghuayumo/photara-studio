@@ -361,7 +361,14 @@ if(AETHERSCAN_ENABLE_FEATURES)
         add_library(aetherscan_splat
             src/splat/colmap.cpp
             src/splat/dataset.cpp
+            src/splat/dataset_colmap.cpp
+            src/splat/dataset_openmvs.cpp
+            src/splat/dataset_reality_capture.cpp
+            src/splat/densification.cpp
+            src/splat/densification_adc_plus.cpp
+            src/splat/densification_strategies.cpp
             src/splat/mesh.cpp
+            src/splat/training_data_loader.cpp
             src/splat/trainer.cpp)
         add_library(AetherScan::Splat ALIAS aetherscan_splat)
         target_include_directories(aetherscan_splat

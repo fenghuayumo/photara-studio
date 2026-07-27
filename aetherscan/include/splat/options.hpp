@@ -89,11 +89,11 @@ struct TrainingOptions {
     bool use_depth_normal_loss{false};
     float depth_normal_weight{0.05F};
     unsigned depth_normal_from_iter{7'000};
-    // Reference GGGS/Mip-Splatting low-pass filter. It expands sub-pixel
-    // Gaussians and compensates opacity so the integrated density is stable.
-    // Appearance-only 3DGS defaults off. The reconstruction CLI enables this
-    // automatically for the GGGS geometry -> TSDF mesh path.
-    bool use_3d_filter{false};
+    // Depth-normal geometry training implicitly enables the reference
+    // GGGS/Mip-Splatting low-pass filter. It is deliberately not an
+    // independent switch: appearance-only 3DGS must keep canonical Gaussian
+    // scale/opacity untouched, while the 3DGS -> mesh path needs stable
+    // sub-pixel coverage.
     unsigned filter_3d_update_interval{100};
     // GGGS multi-view PatchMatch supervision. Geometry uses a differentiable
     // depth round trip through a nearby camera; NCC uses the reference

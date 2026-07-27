@@ -66,9 +66,11 @@ build/aetherscan/Release/aetherscan.exe `
   --gggs-iterations 10000
 ```
 
-mesh 质量路径可用 `--gggs-3d-filter`、`--gggs-mv-geo-weight`、
-`--gggs-mv-ncc-weight`、`--gggs-mv-neighbors`、`--gggs-mv-pixel-noise` 和
-`--gggs-geometry-from-iter` 调整；将两个 multi-view weight 设为 0 可做关闭 A/B。
+mesh 质量路径会随 depth-normal loss 自动启用 Mip-Splatting 3D filter；filter 不再是
+appearance-only 3DGS 的独立开关。可用 `--gggs-depth-normal-weight`、
+`--gggs-mv-geo-weight`、`--gggs-mv-ncc-weight`、`--gggs-mv-neighbors`、
+`--gggs-mv-pixel-noise` 和 `--gggs-geometry-from-iter` 调整；将两个 multi-view
+weight 设为 0 可做关闭 A/B。
 
 `--gggs` 隐含 `--dense`。输出包括 `scene_dense.ply` 和 `scene_gggs.ply`。当前 Gaussian
 PLY 保存训练参数（opacity 和 scale 仍是 logit/log-domain），可用于检查训练结果和后续

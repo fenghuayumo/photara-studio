@@ -92,7 +92,6 @@ struct ReconstructCli {
     float gggs_match_alpha_weight{0.25F};
     float gggs_ssim_weight{0.2F};
     float gggs_depth_normal_weight{0.05F};
-    bool gggs_3d_filter{false};
     float gggs_multi_view_geo_weight{0.02F};
     float gggs_multi_view_ncc_weight{0.6F};
     unsigned gggs_multi_view_num{8};
@@ -238,7 +237,6 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
               << "  --gggs-ssim-weight W  structural loss blend (default 0.2)\n"
               << "  --gggs-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
-              << "  --gggs-3d-filter BOOL  Mip-Splatting 3D filter (default false; --mesh enables)\n"
               << "  --gggs-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
               << "  --gggs-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
               << "  --gggs-mv-neighbors N  nearest camera candidates (default 8)\n"
@@ -395,9 +393,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("gggs-depth-normal-weight",
          "GGGS median-depth/raster-normal consistency weight",
          cxxopts::value<float>()->default_value("0.05"))
-        ("gggs-3d-filter", "Enable GGGS/Mip-Splatting 3D filter",
-         cxxopts::value<bool>()->default_value("false")
-             ->implicit_value("true"))
         ("gggs-mv-geo-weight", "Multi-view depth round-trip loss weight",
          cxxopts::value<float>()->default_value("0.02"))
         ("gggs-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
@@ -579,7 +574,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_ssim_weight = result["gggs-ssim-weight"].as<float>();
     cli.gggs_depth_normal_weight =
         result["gggs-depth-normal-weight"].as<float>();
-    cli.gggs_3d_filter = result["gggs-3d-filter"].as<bool>();
     cli.gggs_multi_view_geo_weight =
         result["gggs-mv-geo-weight"].as<float>();
     cli.gggs_multi_view_ncc_weight =
@@ -1380,15 +1374,6 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     options.use_depth_normal_loss = cli.mesh &&
         cli.gggs_depth_normal_weight > 0.F;
     options.depth_normal_weight = cli.gggs_depth_normal_weight;
-    // Ordinary appearance-only 3DGS keeps the canonical parameters untouched
-    // unless the filter is explicitly requested. Geometry-optimized GGGS that
-    // feeds TSDF meshing enables it automatically for stable sub-pixel
-    // coverage and surface extraction.
-    options.use_3d_filter =
-        cli.gggs_3d_filter || cli.mesh ||
-        (!dense_input &&
-         options.densification_strategy ==
-             aetherscan::splat::DensificationStrategy::adc_plus);
     options.multi_view_geo_weight = cli.mesh
         ? cli.gggs_multi_view_geo_weight
         : 0.F;
@@ -1440,7 +1425,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         options.dense_structure_freeze_iter,
         " depth_normal_loss=", options.use_depth_normal_loss,
         " depth_normal_weight=", options.depth_normal_weight,
-        " filter_3d=", options.use_3d_filter,
+        " filter_3d=", options.use_depth_normal_loss,
         " multi_view_geo_weight=", options.multi_view_geo_weight,
         " multi_view_ncc_weight=", options.multi_view_ncc_weight,
         " multi_view_neighbours=", options.multi_view_num,

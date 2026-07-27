@@ -1333,6 +1333,9 @@ void test_densification_strategies_and_dense_bypass() {
         options.densification_strategy = strategy;
         const auto model = splat::Trainer(options).train(scene);
         require(
+            !model.filter_3d.is_valid(),
+            "appearance-only sparse 3DGS unexpectedly enabled filter_3d");
+        require(
             model.size() > scene.dense_cloud.points.size(),
             strategy == splat::DensificationStrategy::adc_plus
                 ? "sparse-input ADC+ did not grow Gaussians"
@@ -1377,6 +1380,9 @@ void test_densification_strategies_and_dense_bypass() {
     require(
         dense_model.size() == scene.dense_cloud.points.size(),
         "dense point-cloud initialization incorrectly enabled densification");
+    require(
+        !dense_model.filter_3d.is_valid(),
+        "appearance-only dense 3DGS unexpectedly enabled filter_3d");
     require(evaluations == 1, "GGGS evaluation callback was not invoked");
     require(
         !trained_views.empty() &&
@@ -1387,6 +1393,13 @@ void test_densification_strategies_and_dense_bypass() {
 
     options.evaluation_iterations.clear();
     options.evaluation_split_every = 0;
+    options.use_depth_normal_loss = true;
+    options.depth_normal_from_iter = 1;
+    const auto geometry_dense_model = splat::Trainer(options).train(scene);
+    require(
+        geometry_dense_model.filter_3d.is_valid(),
+        "depth-normal mesh training did not enable filter_3d");
+    options.use_depth_normal_loss = false;
     options.densification_strategy =
         splat::DensificationStrategy::dense_adaptive;
     options.dense_growth_fraction = 1.F;
