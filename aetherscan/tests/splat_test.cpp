@@ -253,7 +253,7 @@ void test_forward_backward() {
     using namespace aetherscan::splat;
     GaussianModel model;
     model.means = tinytensor::Tensor::from_vector(
-        std::vector<float>{0.F, 0.F, 2.F}, {1, 3},
+        std::vector<float>{0.5F, 0.F, 2.F}, {1, 3},
         tinytensor::Device::CUDA);
     model.log_scales = tinytensor::Tensor::from_vector(
         std::vector<float>{std::log(0.15F), std::log(0.15F),
@@ -276,9 +276,11 @@ void test_forward_backward() {
     camera.world_to_camera[15] = 1.F;
     camera.fx = 40.F;
     camera.fy = 40.F;
-    camera.cx = 15.5F;
+    // Deliberately use an off-centre Gaussian on a non-square tile grid.
+    // This catches x/y-transposed AccuTile keys that square-image tests hide.
+    camera.cx = 23.5F;
     camera.cy = 15.5F;
-    camera.width = 32;
+    camera.width = 48;
     camera.height = 32;
 
     Rasterizer rasterizer;

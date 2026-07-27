@@ -1494,6 +1494,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                     progress.total_iterations,
                     " view=", progress.view_index,
                     " gaussians=", progress.gaussian_count,
+                    " tile_instances=", progress.rendered_instances,
                     " grown=", progress.grown_count,
                     " pruned=", progress.pruned_count,
                     " loss=", progress.loss,

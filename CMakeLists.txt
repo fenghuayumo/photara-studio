@@ -10,6 +10,8 @@ option(AETHERSCAN_BUILD_TESTS "Build correctness tests" ON)
 option(AETHERSCAN_ENABLE_CUDA "Build CUDA acceleration" ON)
 option(AETHERSCAN_ENABLE_GGGS
     "Build CUDA GGGS training (TinyTensor + reference rasterizer)" ON)
+option(AETHERSCAN_ENABLE_ACCUTILE
+    "Use opacity-aware SnugBox/AccuTile Gaussian-to-tile enumeration" ON)
 option(AETHERSCAN_ENABLE_NATIVE_ARCH "Optimize CPU code for the build host" ON)
 option(AETHERSCAN_ENABLE_FEATURES "Build image feature extraction and matching" ON)
 option(AETHERSCAN_ENABLE_SIFTGPU "Enable the optional non-commercial SiftGPU adapter" ON)

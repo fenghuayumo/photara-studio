@@ -15,6 +15,7 @@ struct TrainingProgress {
     unsigned iteration{};
     unsigned total_iterations{};
     std::size_t gaussian_count{};
+    std::size_t rendered_instances{};
     std::size_t view_index{};
     std::size_t grown_count{};
     std::size_t pruned_count{};

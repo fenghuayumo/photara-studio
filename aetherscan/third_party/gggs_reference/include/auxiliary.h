@@ -48,6 +48,149 @@ __forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& r
         min(grid.y, max((int)0, (int)((p.y + max_radius + BLOCK_Y - 1) / BLOCK_Y)))};
 }
 
+// Opacity-aware SnugBox + AccuTile enumeration from Speedy-Splat. The pixel
+// kernels discard alpha below 1/255, so tiles outside the corresponding
+// truncated ellipse cannot affect either the forward or backward result.
+__forceinline__ __device__ uint32_t enumerateAccuTilesAxis(
+    const float2 mean,
+    const float4 conic_opacity,
+    const float threshold,
+    const dim3 grid,
+    const bool iterate_x,
+    const uint32_t gaussian_id,
+    uint32_t output_offset,
+    const float depth,
+    uint64_t* keys,
+    uint32_t* values) {
+    const float a = iterate_x ? conic_opacity.x : conic_opacity.z;
+    const float b = conic_opacity.y;
+    const float c = iterate_x ? conic_opacity.z : conic_opacity.x;
+    const float center_u = iterate_x ? mean.x : mean.y;
+    const float center_v = iterate_x ? mean.y : mean.x;
+    const float block_u = iterate_x ? static_cast<float>(BLOCK_X) : static_cast<float>(BLOCK_Y);
+    const float block_v = iterate_x ? static_cast<float>(BLOCK_Y) : static_cast<float>(BLOCK_X);
+    const int grid_u = iterate_x ? static_cast<int>(grid.x) : static_cast<int>(grid.y);
+    const int grid_v = iterate_x ? static_cast<int>(grid.y) : static_cast<int>(grid.x);
+    const float determinant = a * c - b * b;
+
+    const float extent_u = sqrtf(threshold * c / determinant);
+    const float extent_v = sqrtf(threshold * a / determinant);
+    const float bbox_u_min = center_u - extent_u;
+    const float bbox_u_max = center_u + extent_u;
+    const float bbox_v_min = center_v - extent_v;
+    const float bbox_v_max = center_v + extent_v;
+
+    const int tile_u_min =
+        max(0, min(grid_u, static_cast<int>(floorf(bbox_u_min / block_u))));
+    const int tile_u_max =
+        max(0, min(grid_u, static_cast<int>(floorf(bbox_u_max / block_u)) + 1));
+    if (tile_u_min >= tile_u_max)
+        return 0;
+
+    // u coordinates at which the lower and upper v extrema occur.
+    const float arg_v_min = center_u + b * extent_v / a;
+    const float arg_v_max = center_u - b * extent_v / a;
+    uint32_t count = 0;
+
+    for (int tile_u = tile_u_min; tile_u < tile_u_max; ++tile_u) {
+        const float u0 = fmaxf(bbox_u_min, tile_u * block_u);
+        const float u1 = fminf(bbox_u_max, (tile_u + 1) * block_u);
+        const float du0 = u0 - center_u;
+        const float du1 = u1 - center_u;
+        const float root0 =
+            sqrtf(fmaxf(0.F, c * threshold - determinant * du0 * du0));
+        const float root1 =
+            sqrtf(fmaxf(0.F, c * threshold - determinant * du1 * du1));
+        const float lower0 = center_v + (-b * du0 - root0) / c;
+        const float lower1 = center_v + (-b * du1 - root1) / c;
+        const float upper0 = center_v + (-b * du0 + root0) / c;
+        const float upper1 = center_v + (-b * du1 + root1) / c;
+
+        const float slice_v_min =
+            arg_v_min >= u0 && arg_v_min <= u1 ? bbox_v_min : fminf(lower0, lower1);
+        const float slice_v_max =
+            arg_v_max >= u0 && arg_v_max <= u1 ? bbox_v_max : fmaxf(upper0, upper1);
+        const int tile_v_min =
+            max(0, min(grid_v, static_cast<int>(floorf(slice_v_min / block_v))));
+        const int tile_v_max =
+            max(0, min(grid_v, static_cast<int>(floorf(slice_v_max / block_v)) + 1));
+
+        for (int tile_v = tile_v_min; tile_v < tile_v_max; ++tile_v) {
+            if (keys) {
+                const int tile_x = iterate_x ? tile_u : tile_v;
+                const int tile_y = iterate_x ? tile_v : tile_u;
+                uint64_t key = static_cast<uint64_t>(tile_y) * grid.x + tile_x;
+                key = (key << 32) | *reinterpret_cast<const uint32_t*>(&depth);
+                keys[output_offset] = key;
+                values[output_offset] = gaussian_id;
+                ++output_offset;
+            }
+            ++count;
+        }
+    }
+    return count;
+}
+
+__forceinline__ __device__ uint32_t enumerateGaussianTiles(
+    const float2 mean,
+    const float4 conic_opacity,
+    const dim3 grid,
+    const uint32_t gaussian_id,
+    uint32_t output_offset,
+    const float depth,
+    uint64_t* keys,
+    uint32_t* values) {
+#if AETHERSCAN_GGGS_ACCUTILE
+    constexpr float alpha_threshold = 1.F / 255.F;
+    if (!(conic_opacity.x > 0.F && conic_opacity.z > 0.F) ||
+        !(conic_opacity.w >= alpha_threshold))
+        return 0;
+
+    const float determinant =
+        conic_opacity.x * conic_opacity.z - conic_opacity.y * conic_opacity.y;
+    const float threshold = 2.F * logf(conic_opacity.w * 255.F);
+    if (!(determinant > 0.F) || !(threshold >= 0.F))
+        return 0;
+
+    const float extent_x = sqrtf(threshold * conic_opacity.z / determinant);
+    const float extent_y = sqrtf(threshold * conic_opacity.x / determinant);
+    const int span_x = static_cast<int>(ceilf((2.F * extent_x) / BLOCK_X));
+    const int span_y = static_cast<int>(ceilf((2.F * extent_y) / BLOCK_Y));
+    return enumerateAccuTilesAxis(
+        mean, conic_opacity, threshold, grid, span_x <= span_y,
+        gaussian_id, output_offset, depth, keys, values);
+#else
+    const float determinant =
+        conic_opacity.x * conic_opacity.z - conic_opacity.y * conic_opacity.y;
+    if (!(determinant > 0.F))
+        return 0;
+    const float covariance_x = conic_opacity.z / determinant;
+    const float covariance_y = conic_opacity.x / determinant;
+    const float covariance_xy = -conic_opacity.y / determinant;
+    const float mid = 0.5F * (covariance_x + covariance_y);
+    const float lambda = mid + sqrtf(fmaxf(
+        0.1F, mid * mid -
+        (covariance_x * covariance_y - covariance_xy * covariance_xy)));
+    const int radius = static_cast<int>(ceilf(3.F * sqrtf(lambda)));
+    uint2 rect_min, rect_max;
+    getRect(mean, radius, rect_min, rect_max, grid);
+    uint32_t count = 0;
+    for (int y = rect_min.y; y < rect_max.y; ++y) {
+        for (int x = rect_min.x; x < rect_max.x; ++x) {
+            if (keys) {
+                uint64_t key = static_cast<uint64_t>(y) * grid.x + x;
+                key = (key << 32) | *reinterpret_cast<const uint32_t*>(&depth);
+                keys[output_offset] = key;
+                values[output_offset] = gaussian_id;
+                ++output_offset;
+            }
+            ++count;
+        }
+    }
+    return count;
+#endif
+}
+
 __forceinline__ __device__ float3 transformPoint4x3(const float3& p, const float* matrix) {
     float3 transformed = {
         matrix[0] * p.x + matrix[4] * p.y + matrix[8] * p.z + matrix[12],

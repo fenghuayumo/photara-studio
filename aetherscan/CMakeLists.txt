@@ -327,6 +327,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
             CUDA::cudart
             glm::glm)
         target_compile_features(aetherscan_gggs_reference PUBLIC cxx_std_20)
+        target_compile_definitions(aetherscan_gggs_reference PRIVATE
+            AETHERSCAN_GGGS_ACCUTILE=$<BOOL:${AETHERSCAN_ENABLE_ACCUTILE}>)
         target_compile_options(aetherscan_gggs_reference PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
         set_target_properties(aetherscan_gggs_reference PROPERTIES

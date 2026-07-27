@@ -787,6 +787,7 @@ GaussianModel Trainer::train(
                     opacity_gradients.size(), 1));
             continue_training = progress({
                 iteration, options_.iterations, model.size(),
+                static_cast<std::size_t>(rendered.rendered_instances),
                 view_index, latest_refinement.grown,
                 latest_refinement.pruned, loss.total, loss.rgb,
                 loss.alpha_value, loss.depth_value, loss.normal_value,

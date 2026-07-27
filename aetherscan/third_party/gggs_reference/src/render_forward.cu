@@ -350,9 +350,11 @@ __global__ void preprocessCUDA(
 
     float2 point_image = {p_view.x / p_view.z * focal_x + center_x,
                           p_view.y / p_view.z * focal_y + center_y};
-    uint2 rect_min, rect_max;
-    getRect(point_image, my_radius, rect_min, rect_max, grid);
-    if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
+    const float4 local_conic_opacity = {
+        conic.x, conic.y, conic.z, opacities[idx] * ceof};
+    const uint32_t tile_count = enumerateGaussianTiles(
+        point_image, local_conic_opacity, grid, idx, 0, 0.F, nullptr, nullptr);
+    if (tile_count == 0)
         return;
 
     if (colors_precomp == nullptr) {
@@ -365,8 +367,8 @@ __global__ void preprocessCUDA(
     depths[idx]          = norm3df(p_view.x, p_view.y, p_view.z);
     radii[idx]           = my_radius;
     points_xy_image[idx] = point_image;
-    conic_opacity[idx] = {conic.x, conic.y, conic.z, opacities[idx] * ceof};
-    tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
+    conic_opacity[idx] = local_conic_opacity;
+    tiles_touched[idx] = tile_count;
 }
 
 // Main rasterization method. Collaboratively works on one tile per
