@@ -160,7 +160,8 @@ __global__ void chain_gradient_kernel(
 __global__ void compute_3d_filter_distance_kernel(
     const float* means, const float* cameras, const std::size_t count,
     const std::size_t camera_count, float* distances,
-    unsigned* maximum_distance_bits) {
+    unsigned* maximum_distance_bits,
+    const bool all_camera_euclidean) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     const float x = means[3 * index];
@@ -176,13 +177,23 @@ __global__ void compute_3d_filter_distance_kernel(
                                camera[9] * z + camera[13];
         const float camera_z = camera[2] * x + camera[6] * y +
                                camera[10] * z + camera[14];
-        if (!(camera_z > 0.2F)) continue;
-        const float boundary_x = camera[18] / camera[16] * 0.575F;
-        const float boundary_y = camera[19] / camera[17] * 0.575F;
-        if (fabsf(camera_x / camera_z) > boundary_x ||
-            fabsf(camera_y / camera_z) > boundary_y)
-            continue;
-        minimum_distance = fminf(minimum_distance, camera_z);
+        if (all_camera_euclidean) {
+            // Brush's 3D filter is based on Euclidean distance to every
+            // training camera. This keeps the floor continuous just outside
+            // a view.
+            minimum_distance = fminf(
+                minimum_distance,
+                sqrtf(camera_x * camera_x + camera_y * camera_y +
+                      camera_z * camera_z));
+        } else {
+            if (!(camera_z > 0.2F)) continue;
+            const float boundary_x = camera[18] / camera[16] * 0.575F;
+            const float boundary_y = camera[19] / camera[17] * 0.575F;
+            if (fabsf(camera_x / camera_z) > boundary_x ||
+                fabsf(camera_y / camera_z) > boundary_y)
+                continue;
+            minimum_distance = fminf(minimum_distance, camera_z);
+        }
     }
     distances[index] = minimum_distance;
     if (minimum_distance < FLT_MAX)
@@ -191,14 +202,15 @@ __global__ void compute_3d_filter_distance_kernel(
 
 __global__ void finalize_3d_filter_kernel(
     float* distances, const std::size_t count, const float maximum_distance,
-    const float inverse_maximum_focal) {
+    const float inverse_maximum_focal,
+    const float minimum_scale_factor_sqrt) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     const float distance = distances[index] < FLT_MAX
         ? distances[index]
         : maximum_distance;
     distances[index] = distance * inverse_maximum_focal *
-                       0.4472135954999579F;
+                       minimum_scale_factor_sqrt;
 }
 
 __device__ float sample_plane_bilinear(
@@ -756,6 +768,46 @@ __global__ void adam_kernel(
     parameter[index] = fminf(fmaxf(updated, clamp_min), clamp_max);
 }
 
+__global__ void adam_reduced_second_kernel(
+    float* parameter, const float* gradient, float* first, float* second,
+    const std::size_t count, const std::size_t row_stride,
+    const float learning_rate, const float secondary_learning_rate,
+    const float beta1, const float beta2, const float correction1,
+    const float correction2, const float epsilon) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const std::size_t row_begin = index / row_stride * row_stride;
+    float grad_square_mean = 0.F;
+    for (std::size_t column = 0; column < row_stride; ++column) {
+        const float value = gradient[row_begin + column];
+        if (isfinite(value)) grad_square_mean += value * value;
+    }
+    grad_square_mean /= static_cast<float>(row_stride);
+    const float previous = parameter[index];
+    const float grad = gradient[index];
+    if (!isfinite(previous) || !isfinite(grad)) {
+        first[index] = 0.F;
+        second[index] = 0.F;
+        parameter[index] = isfinite(previous) ? previous : 0.F;
+        return;
+    }
+    const float m = beta1 * first[index] + (1.F - beta1) * grad;
+    const float v =
+        beta2 * second[index] + (1.F - beta2) * grad_square_mean;
+    if (!isfinite(m) || !isfinite(v)) {
+        first[index] = 0.F;
+        second[index] = 0.F;
+        return;
+    }
+    first[index] = m;
+    second[index] = v;
+    const float lr = index % row_stride >= 3
+        ? secondary_learning_rate : learning_rate;
+    const float candidate = previous - lr * (m / correction1) /
+        (sqrtf(v / correction2) + epsilon);
+    parameter[index] = isfinite(candidate) ? candidate : previous;
+}
+
 __global__ void adam_active_prefix_kernel(
     float* parameter, const float* gradient, float* first, float* second,
     const std::size_t active_count, const std::size_t full_row_stride,
@@ -1126,7 +1178,9 @@ AdcPlusPruneResult adc_plus_prune(
 }
 
 tinytensor::Tensor compute_3d_filter(
-    const tinytensor::Tensor& means, const std::vector<Camera>& cameras) {
+    const tinytensor::Tensor& means, const std::vector<Camera>& cameras,
+    const float minimum_scale_factor,
+    const bool all_camera_euclidean) {
     if (!means.is_valid() || means.device() != tinytensor::Device::CUDA ||
         means.dtype() != tinytensor::DataType::Float32 ||
         means.shape().rank() != 2 || means.shape()[1] != 3)
@@ -1163,9 +1217,10 @@ tinytensor::Tensor compute_3d_filter(
         tinytensor::DataType::Int32);
     compute_3d_filter_distance_kernel<<<
         (count + k_threads - 1) / k_threads, k_threads>>>(
-        means.ptr<float>(), camera_tensor.ptr<float>(), count,
-        cameras.size(), result.ptr<float>(),
-        reinterpret_cast<unsigned*>(maximum_bits.data_ptr()));
+            means.ptr<float>(), camera_tensor.ptr<float>(), count,
+            cameras.size(), result.ptr<float>(),
+            reinterpret_cast<unsigned*>(maximum_bits.data_ptr()),
+            all_camera_euclidean);
     check_cuda(cudaGetLastError(), "compute GGGS 3D filter distances");
     unsigned maximum_distance_bits{};
     check_cuda(cudaMemcpy(
@@ -1178,8 +1233,9 @@ tinytensor::Tensor compute_3d_filter(
         maximum_distance = 1.F;
     finalize_3d_filter_kernel<<<
         (count + k_threads - 1) / k_threads, k_threads>>>(
-        result.ptr<float>(), count, maximum_distance,
-        1.F / maximum_focal);
+            result.ptr<float>(), count, maximum_distance,
+            1.F / maximum_focal,
+            std::sqrt(std::max(minimum_scale_factor, 0.F)));
     check_cuda(cudaGetLastError(), "finalize GGGS 3D filter");
     return result;
 }
@@ -1426,6 +1482,28 @@ void adam_step(
         secondary_learning_rate, group_stride, options.beta1, options.beta2,
         correction1, correction2, options.adam_epsilon, clamp_min, clamp_max);
     check_cuda(cudaGetLastError(), "GGGS Adam update");
+}
+
+void adam_step_reduced_second(
+    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
+    AdamState& state, const float learning_rate, const unsigned step,
+    const TrainingOptions& options, const std::size_t row_stride,
+    const float secondary_learning_rate) {
+    const std::size_t count = parameter.numel();
+    if (count == 0) return;
+    if (row_stride < 3 || count % row_stride != 0)
+        throw std::invalid_argument("invalid reduced-second Adam row stride");
+    const float correction1 =
+        1.F - std::pow(options.beta1, static_cast<float>(step));
+    const float correction2 =
+        1.F - std::pow(options.beta2, static_cast<float>(step));
+    adam_reduced_second_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        parameter.ptr<float>(), gradient.ptr<float>(), state.first.ptr<float>(),
+        state.second.ptr<float>(), count, row_stride, learning_rate,
+        secondary_learning_rate, options.beta1, options.beta2, correction1,
+        correction2, options.adam_epsilon);
+    check_cuda(cudaGetLastError(), "GGGS reduced-second Adam update");
 }
 
 void adam_step_active_prefix(

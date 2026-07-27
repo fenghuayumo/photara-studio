@@ -1332,6 +1332,21 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         options.quaternions_lr = 2e-3F;
         options.sh0_lr = 2e-3F;
         options.sh_rest_lr = 2e-4F;
+        // brush-train's AdamScaled default.  Using the pygsplat/FusedAdam
+        // epsilon (1e-15) amplifies near-zero scale/rotation gradients by up
+        // to ten orders of magnitude and creates large extrapolation sheets.
+        // The imported CUDA rasterizer emits image-mean gradients at a
+        // smaller numeric scale than Brush's WGPU autodiff rasterizer.  This
+        // epsilon preserves Brush's effective epsilon-to-gradient ratio.
+        options.adam_epsilon = 1e-8F;
+        // brush trains every configured SH band from the first step and keeps
+        // a fixed image scale.  Letting geometry first fit quarter-resolution
+        // images with only DC color gives ADC+ a strong incentive to create
+        // large view-dependent sheets; later stages can recover training-view
+        // PSNR without removing that erroneous geometry, so it appears as
+        // floaters in extrapolated views.
+        options.sh_degree_interval = 0;
+        options.progressive_resolution = false;
         options.background_noise_strength = 0.1F;
     } else if (
         !dense_input &&
@@ -1358,7 +1373,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                 options.densification_strategy ==
                     aetherscan::splat::DensificationStrategy::adc_plus &&
                 !cli.gggs_max_scale_ratio_overridden
-            ? 100.F
+            ? 0.F
             : cli.gggs_max_scale_ratio;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
@@ -1369,7 +1384,11 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     // unless the filter is explicitly requested. Geometry-optimized GGGS that
     // feeds TSDF meshing enables it automatically for stable sub-pixel
     // coverage and surface extraction.
-    options.use_3d_filter = cli.gggs_3d_filter || cli.mesh;
+    options.use_3d_filter =
+        cli.gggs_3d_filter || cli.mesh ||
+        (!dense_input &&
+         options.densification_strategy ==
+             aetherscan::splat::DensificationStrategy::adc_plus);
     options.multi_view_geo_weight = cli.mesh
         ? cli.gggs_multi_view_geo_weight
         : 0.F;

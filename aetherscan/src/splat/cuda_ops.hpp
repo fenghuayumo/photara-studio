@@ -69,7 +69,9 @@ AdcPlusPruneResult adc_plus_prune(
 
 tinytensor::Tensor compute_3d_filter(
     const tinytensor::Tensor& means,
-    const std::vector<Camera>& cameras);
+    const std::vector<Camera>& cameras,
+    float minimum_scale_factor = 0.2F,
+    bool all_camera_euclidean = false);
 
 MultiViewLoss add_multi_view_loss(
     const tinytensor::Tensor& sampled_neighbour_points,
@@ -115,6 +117,14 @@ void adam_step(
     float secondary_learning_rate = 0.F,
     float clamp_min = -std::numeric_limits<float>::infinity(),
     float clamp_max = std::numeric_limits<float>::infinity());
+
+// brush AdamScaled shares the second moment across every trailing SH
+// coefficient of a Gaussian while retaining a per-coefficient first moment.
+void adam_step_reduced_second(
+    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
+    AdamState& state, float learning_rate, unsigned step,
+    const TrainingOptions& options, std::size_t row_stride,
+    float secondary_learning_rate);
 
 // Update only the leading active_row_stride values of each logical row.
 // This avoids reading and writing inactive higher-order SH coefficients.

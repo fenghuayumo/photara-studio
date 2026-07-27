@@ -38,18 +38,12 @@ struct TrainingOptions {
     unsigned grow_stop_iter{15'000};
     unsigned refine_every{0};       // 0 selects the strategy preset
     unsigned opacity_reset_every{3'000};
-    // pygsplat DefaultStrategy threshold. With the backward accumulation
-    // buffer correctly cleared, the native refine statistic has parity scale.
-    float densify_gradient_threshold{0.003F};
-    float densify_select_fraction{0.4F};
+    // Shared split/growth controls. Strategies may differ in how they build
+    // the candidate set, but should not expose duplicate threshold knobs.
+    float densify_gradient_threshold{0.0025F};
+    float densify_select_fraction{0.25F};
     float densify_scale_threshold{0.01F};
-    float densify_screen_threshold{0.25F};
-    // brush-train ADC+ defaults. These are separate from the classic 3DGS
-    // controls above so selecting ADC+ does not silently change the default
-    // strategy's pygsplat-compatible thresholds.
-    float adc_plus_growth_gradient_threshold{0.0025F};
-    float adc_plus_growth_select_fraction{0.25F};
-    float adc_plus_split_at_screen_size{0.5F};
+    float densify_screen_threshold{0.5F};
     // Dense MVS points already cover the surface. Recycle only a small part of
     // the budget per refinement and grow more conservatively than sparse ADC.
     float dense_recycle_fraction{0.01F};

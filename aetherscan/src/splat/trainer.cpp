@@ -150,6 +150,39 @@ float percentile_median_size(
     return std::max(sizes[1], 0.01F);
 }
 
+float percentile_median_size(
+    const std::vector<float>& xyz, const float percentile) {
+    if (xyz.size() < 3) return 1.F;
+    std::array<std::vector<float>, 3> axes;
+    const std::size_t count = xyz.size() / 3;
+    for (auto& axis : axes) axis.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        if (!std::isfinite(xyz[3 * index]) ||
+            !std::isfinite(xyz[3 * index + 1]) ||
+            !std::isfinite(xyz[3 * index + 2]))
+            continue;
+        for (int axis = 0; axis < 3; ++axis)
+            axes[axis].push_back(xyz[3 * index + axis]);
+    }
+    std::array<float, 3> sizes{};
+    const float p = std::clamp(percentile, 0.F, 1.F);
+    for (int axis = 0; axis < 3; ++axis) {
+        auto& values = axes[axis];
+        if (values.empty()) return 1.F;
+        std::sort(values.begin(), values.end());
+        const std::size_t n = values.size();
+        const std::size_t low = std::min(
+            n - 1,
+            static_cast<std::size_t>((1.F - p) * 0.5F * n));
+        const std::size_t high = std::min(
+            n - 1,
+            static_cast<std::size_t>((1.F + p) * 0.5F * n));
+        sizes[axis] = values[high] - values[low];
+    }
+    std::sort(sizes.begin(), sizes.end());
+    return std::max(sizes[1], 0.01F);
+}
+
 Camera make_camera_impl(const mvs::MvsView& view) {
     Camera camera;
     // Force evaluation: translation() returns a temporary, so retaining the
@@ -612,7 +645,7 @@ void grow_adc_plus_gpu(
     detail::split_gaussians(
         model, children, parents, samples, selected_screen, 2,
         options.prune_opacity,
-        options.adc_plus_split_at_screen_size);
+        options.densify_screen_threshold);
     zero_adam_rows_gpu(parents, states);
     append_model(model, children);
     for (detail::AdamState* state : states)
@@ -646,7 +679,7 @@ void grow_training_model(
         detail::split_gaussians(
             model, children, indices, random_tensor, screen_tensor, split_mode,
             options.prune_opacity,
-            split_mode == 2 ? options.adc_plus_split_at_screen_size : 0.F);
+            split_mode == 2 ? options.densify_screen_threshold : 0.F);
         // Splitting mutates the retained parent as well as creating a child.
         // Both are new primitives and must start with clean optimizer moments,
         // matching pygsplat's replacement-based split.
@@ -759,7 +792,7 @@ RefinementCounts refine_adc_plus_gpu(
 
         auto oversized = visible.logical_and(
             retained_screen.gt(
-                options.adc_plus_split_at_screen_size));
+                options.densify_screen_threshold));
         oversized = oversized.logical_and(!selected);
         auto oversized_indices = oversized.nonzero().squeeze(1).to(
             tinytensor::DataType::Int32);
@@ -777,13 +810,13 @@ RefinementCounts refine_adc_plus_gpu(
             selected_count < capacity) {
             auto growth_mask = visible.logical_and(
                 retained_gradient.gt(
-                    options.adc_plus_growth_gradient_threshold));
+                    options.densify_gradient_threshold));
             auto growth_indices = growth_mask.nonzero().squeeze(1).to(
                 tinytensor::DataType::Int32);
             const std::size_t threshold_growth =
                 static_cast<std::size_t>(std::llround(
                     growth_indices.numel() *
-                    options.adc_plus_growth_select_fraction));
+                    options.densify_select_fraction));
             const std::size_t requested =
                 threshold_growth > pruning.pruned
                     ? threshold_growth - pruning.pruned
@@ -1517,9 +1550,23 @@ GaussianModel Trainer::train(
     for (const std::size_t index : view_indices)
         full_resolution_filter_cameras.push_back(
             training_camera(scene.views[index], options_, 1.F));
-    if (options_.use_3d_filter)
+    const float filter_3d_factor =
+        options_.densification_strategy ==
+                DensificationStrategy::adc_plus
+            ? 0.1F
+            : 0.2F;
+    const bool brush_filter =
+        options_.densification_strategy ==
+        DensificationStrategy::adc_plus;
+    // Brush starts sparse training with canonical KNN scales and attaches the
+    // first minimum-scale floor only after the first refinement. Attaching it
+    // here makes iteration 200 bake the floor one extra time, permanently
+    // suppressing opacity before Brush has ever filtered the model.
+    if (options_.use_3d_filter &&
+        options_.densification_strategy !=
+            DensificationStrategy::adc_plus)
         model.filter_3d = detail::compute_3d_filter(
-            model.means, filter_cameras);
+            model.means, filter_cameras, filter_3d_factor, brush_filter);
     const auto multi_view_neighbours = compute_multi_view_neighbours(
         all_cameras, view_indices, options_);
     std::future<void> evaluation_future;
@@ -1532,7 +1579,8 @@ GaussianModel Trainer::train(
             GaussianModel snapshot = clone_model(current);
             if (options_.use_3d_filter)
                 snapshot.filter_3d = detail::compute_3d_filter(
-                    snapshot.means, full_resolution_filter_cameras);
+                    snapshot.means, full_resolution_filter_cameras,
+                    filter_3d_factor, brush_filter);
             evaluation_future = std::async(
                 std::launch::async,
                 [evaluate, iteration,
@@ -1618,7 +1666,8 @@ GaussianModel Trainer::train(
                 filter_cameras.push_back(all_cameras[index]);
             if (options_.use_3d_filter)
                 model.filter_3d = detail::compute_3d_filter(
-                    model.means, filter_cameras);
+                    model.means, filter_cameras, filter_3d_factor,
+                    brush_filter);
         }
         const bool report_progress = progress &&
             (iteration == 1 || iteration == options_.iterations ||
@@ -1766,6 +1815,11 @@ GaussianModel Trainer::train(
                 model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
                 options_, full_sh_stride, active_sh_stride,
                 options_.sh_rest_lr);
+        else if (options_.densification_strategy ==
+                 DensificationStrategy::adc_plus)
+            detail::adam_step_reduced_second(
+                model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
+                options_, full_sh_stride, options_.sh_rest_lr);
         else
             detail::adam_step(
                 model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
@@ -1804,6 +1858,15 @@ GaussianModel Trainer::train(
             }
             detail::constrain_scale_ratio(
                 model.log_scales, options_.max_scale_ratio);
+            const StrategyPreset preset = strategy_preset(options_);
+            const bool refined =
+                iteration > preset.start && iteration < preset.stop &&
+                preset.every != 0 && iteration % preset.every == 0;
+            if (refined &&
+                options_.densification_strategy ==
+                    DensificationStrategy::adc_plus)
+                means_learning_rate_scale = percentile_median_size(
+                    download<float>(model.means), 0.8F);
         }
 
         // The Mip-Splatting radius depends on Gaussian positions and count.
@@ -1834,7 +1897,8 @@ GaussianModel Trainer::train(
                       options_.iterations));
             if (adc_plus_refresh || other_refresh)
                 model.filter_3d = detail::compute_3d_filter(
-                    model.means, filter_cameras);
+                    model.means, filter_cameras, filter_3d_factor,
+                    brush_filter);
         }
 
         bool continue_training = true;
@@ -1893,7 +1957,8 @@ GaussianModel Trainer::train(
             cudaGetErrorString(error));
     if (options_.use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
-            model.means, full_resolution_filter_cameras);
+            model.means, full_resolution_filter_cameras,
+            filter_3d_factor, brush_filter);
     return model;
 }
 

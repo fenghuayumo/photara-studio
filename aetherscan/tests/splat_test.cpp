@@ -1334,7 +1334,11 @@ void test_densification_strategies_and_dense_bypass() {
         const auto model = splat::Trainer(options).train(scene);
         require(
             model.size() > scene.dense_cloud.points.size(),
-            "sparse-input densification strategy did not grow Gaussians");
+            strategy == splat::DensificationStrategy::adc_plus
+                ? "sparse-input ADC+ did not grow Gaussians"
+                : strategy == splat::DensificationStrategy::adc_igs
+                    ? "sparse-input ADC-IGS did not grow Gaussians"
+                    : "sparse-input default strategy did not grow Gaussians");
         require(model.size() <= options.densification_cap,
                 "densification exceeded its hard Gaussian cap");
     }
@@ -1346,8 +1350,8 @@ void test_densification_strategies_and_dense_bypass() {
     brush_schedule.refine_start_iter = 0;
     brush_schedule.refine_stop_iter = 0;
     brush_schedule.refine_every = 0;
-    brush_schedule.adc_plus_growth_gradient_threshold = -1.F;
-    brush_schedule.adc_plus_growth_select_fraction = 1.F;
+    brush_schedule.densify_gradient_threshold = -1.F;
+    brush_schedule.densify_select_fraction = 1.F;
     const auto brush_schedule_model =
         splat::Trainer(brush_schedule).train(scene);
     require(
