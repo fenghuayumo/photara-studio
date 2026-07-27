@@ -74,6 +74,7 @@ void render(
     float* out_normal,
     float* out_mdepth,
     float* normal_length,
+    float* visibility,
     bool require_depth);
 } // namespace FORWARD
 

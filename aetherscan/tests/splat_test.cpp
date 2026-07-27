@@ -288,6 +288,9 @@ void test_forward_backward() {
     require(
         *std::max_element(alpha.begin(), alpha.end()) > 0.F,
         "Rasterized alpha is empty");
+    require(
+        rendered.visibility.to_vector() == std::vector<float>{1.F},
+        "Contributing Gaussian was not marked visible");
 
     const std::size_t pixels =
         static_cast<std::size_t>(camera.width) * camera.height;
@@ -325,6 +328,53 @@ void test_forward_backward() {
                     return std::abs(first - second) < 1e-6F;
                 }),
         "GGGS backward retained stale geometry gradients between calls");
+}
+
+void test_contribution_visibility_rejects_occluded_gaussians() {
+    using namespace aetherscan::splat;
+    constexpr std::size_t count = 4;
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(
+        std::vector<float>{
+            0.F, 0.F, 1.F,
+            0.F, 0.F, 1.1F,
+            0.F, 0.F, 1.2F,
+            0.F, 0.F, 2.F},
+        {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>(count * 3, std::log(10.F)),
+        {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    std::vector<float> rotations(count * 4, 0.F);
+    for (std::size_t index = 0; index < count; ++index)
+        rotations[4 * index] = 1.F;
+    model.quaternions = tinytensor::Tensor::from_vector(
+        rotations, {count, std::size_t{4}}, tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        std::vector<float>(count, 12.F), {count, std::size_t{1}},
+        tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::zeros(
+        {count, std::size_t{1}, std::size_t{3}},
+        tinytensor::Device::CUDA);
+    model.sh_degree = 0;
+
+    Camera camera;
+    camera.world_to_camera[0] = 1.F;
+    camera.world_to_camera[5] = 1.F;
+    camera.world_to_camera[10] = 1.F;
+    camera.world_to_camera[15] = 1.F;
+    camera.fx = camera.fy = 40.F;
+    camera.cx = camera.cy = 15.5F;
+    camera.width = camera.height = 32;
+
+    const RenderResult rendered = Rasterizer().forward(model, camera);
+    const auto radii = rendered.radii.to_vector();
+    const auto visibility = rendered.visibility.to_vector();
+    require(
+        radii.back() > 0,
+        "Occlusion test Gaussian did not project into the camera");
+    require(
+        visibility.front() == 1.F && visibility.back() == 0.F,
+        "Projected-but-occluded Gaussian was incorrectly marked visible");
 }
 
 void test_alpha_parameter_gradients() {
@@ -1358,6 +1408,7 @@ int main() {
         test_gggs_3d_filter();
         test_gggs_multi_view_geometry_and_ncc();
         test_forward_backward();
+        test_contribution_visibility_rejects_occluded_gaussians();
         test_alpha_parameter_gradients();
         test_adam_rejects_non_finite_gradients();
         test_fused_adam_parity();

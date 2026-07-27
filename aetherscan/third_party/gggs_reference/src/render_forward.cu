@@ -394,7 +394,8 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         float* __restrict__ out_alpha,
         float* __restrict__ out_normal,
         float* __restrict__ out_mdepth,
-        float* __restrict__ normal_length) {
+        float* __restrict__ normal_length,
+        float* __restrict__ visibility) {
     auto block                 = cg::this_thread_block();
     uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
     uint32_t block_id          = block.group_index().y * horizontal_blocks + block.group_index().x;
@@ -418,6 +419,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
     // Allocate storage for batches of collectively fetched data.
     __shared__ float2 collected_xy[BLOCK_SIZE];
+    __shared__ uint32_t collected_id[BLOCK_SIZE];
     __shared__ float collected_feature[BLOCK_SIZE * CHANNELS];
     __shared__ float4 collected_conic_opacity[BLOCK_SIZE];
     [[maybe_unused]] __shared__ float4 collected_ray_planes[BLOCK_SIZE];
@@ -447,6 +449,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         int progress = i * BLOCK_SIZE + block.thread_rank();
         if (range.x + progress < range.y) {
             int coll_id                                  = point_list[range.x + progress];
+            collected_id[block.thread_rank()]            = coll_id;
             collected_xy[block.thread_rank()]            = points_xy_image[coll_id];
             collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
             for (int ch = 0; ch < CHANNELS; ch++)
@@ -487,6 +490,10 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             }
 
             const float aT = alpha * T;
+            // Match brush's visibility semantics: projected-but-occluded
+            // Gaussians are not considered observed by ADC+. Benign repeated
+            // writes of the same value avoid a costly per-pixel atomic.
+            visibility[collected_id[j]] = 1.F;
             // Eq. (3) from 3D Gaussian splatting paper.
             for (int ch = 0; ch < CHANNELS; ch++)
                 C[ch] += collected_feature[j + BLOCK_SIZE * ch] * aT;
@@ -678,13 +685,14 @@ void FORWARD::render(
     float* out_normal,
     float* out_mdepth,
     float* normal_length,
+    float* visibility,
     bool require_depth) {
 #define RENDER_CUDA_CALL(template_depth)                                                \
     renderCUDA<NUM_CHANNELS, template_depth, SPLIT, SPLIT_ITERATIONS><<<grid, block>>>( \
         ranges, point_list, W, H, means2D, conic_opacity, colors,                       \
         ray_planes, normals, focal_x, focal_y, center_x, center_y,                     \
         n_contrib, max_contributor, bg_color, out_color, out_alpha,                     \
-        out_normal, out_mdepth, normal_length)
+        out_normal, out_mdepth, normal_length, visibility)
 
     if (require_depth)
         RENDER_CUDA_CALL(true);

@@ -1707,11 +1707,15 @@ GaussianModel Trainer::train(
                 multi_view_sample_gradients, gradients);
         if (densification_enabled)
             detail::accumulate_densification_stats(
-                gradients.refine_weight, rendered.radii,
+                gradients.refine_weight, rendered.visibility, rendered.radii,
                 densification_stats, target.camera.width,
                 target.camera.height,
                 options_.densification_strategy !=
-                    DensificationStrategy::default_strategy);
+                    DensificationStrategy::default_strategy,
+                options_.densification_strategy ==
+                        DensificationStrategy::adc_plus ||
+                    options_.densification_strategy ==
+                        DensificationStrategy::adc_igs);
 
         // Dense MVS already provides accurate surface positions. Decaying the
         // position LR across the full 10k run keeps large geometric updates
@@ -1778,7 +1782,7 @@ GaussianModel Trainer::train(
                 : strategy_preset(options_).stop;
             if (iteration < noise_stop)
                 detail::inject_adc_noise(
-                    model, rendered.radii,
+                    model, rendered.visibility,
                     means_lr * options_.mean_noise_weight,
                     scene_extent, options_.seed + iteration);
         }

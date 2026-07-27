@@ -131,11 +131,13 @@ DensificationStats make_densification_stats(std::size_t count);
 
 void accumulate_densification_stats(
     const tinytensor::Tensor& refine_weight,
+    const tinytensor::Tensor& visibility,
     const tinytensor::Tensor& radii,
     DensificationStats& stats,
     std::uint32_t width,
     std::uint32_t height,
-    bool use_maximum);
+    bool use_maximum,
+    bool require_contribution_visibility);
 
 // Mutate selected parents and their already-cloned children in place.
 // mode: 1=default split, 2=ADC+ split, 3=ADC-IGS split,
@@ -155,7 +157,7 @@ void apply_adc_decay(
 
 void inject_adc_noise(
     GaussianModel& model,
-    const tinytensor::Tensor& radii,
+    const tinytensor::Tensor& visibility,
     float standard_deviation,
     float maximum_noise,
     unsigned seed);

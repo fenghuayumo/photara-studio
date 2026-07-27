@@ -56,6 +56,7 @@ public:
         float* out_mdepth,
         float* out_alpha,
         float* out_normal,
+        float* visibility,
         int* radii         = nullptr,
         bool require_depth = true,
         bool debug         = false);

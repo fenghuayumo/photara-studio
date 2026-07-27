@@ -808,12 +808,14 @@ __global__ void constrain_scale_ratio_kernel(
 }
 
 __global__ void accumulate_densification_kernel(
-    const float* refine_weight, const int* radii, float* gradient,
-    float* count, float* max_screen_radius, float* priority,
+    const float* refine_weight, const float* visibility, const int* radii,
+    float* gradient, float* count, float* max_screen_radius, float* priority,
     const std::size_t gaussian_count, const float inverse_resolution,
-    const bool use_maximum) {
+    const bool use_maximum, const bool require_contribution_visibility) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= gaussian_count || radii[index] <= 0) return;
+    if (index >= gaussian_count || radii[index] <= 0 ||
+        (require_contribution_visibility && visibility[index] <= 0.F))
+        return;
     const float weight = isfinite(refine_weight[index])
         ? fmaxf(refine_weight[index], 0.F)
         : 0.F;
@@ -978,11 +980,11 @@ __device__ float normal_sample(
 }
 
 __global__ void inject_adc_noise_kernel(
-    float* means, const float* opacity_logits, const int* radii,
+    float* means, const float* opacity_logits, const float* visibility,
     const std::size_t count, const float standard_deviation,
     const float maximum_noise, const unsigned seed) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= count || radii[index] <= 0) return;
+    if (index >= count || visibility[index] <= 0.F) return;
     const float inverse_opacity = 1.F - sigmoid(opacity_logits[index]);
     const float weight = powf(inverse_opacity, 150.F);
     for (std::uint32_t axis = 0; axis < 3; ++axis) {
@@ -1474,21 +1476,24 @@ DensificationStats make_densification_stats(const std::size_t count) {
 
 void accumulate_densification_stats(
     const tinytensor::Tensor& refine_weight,
+    const tinytensor::Tensor& visibility,
     const tinytensor::Tensor& radii,
     DensificationStats& stats,
     const std::uint32_t width,
     const std::uint32_t height,
-    const bool use_maximum) {
+    const bool use_maximum,
+    const bool require_contribution_visibility) {
     const std::size_t count = refine_weight.numel();
     if (count == 0) return;
     const float inverse_resolution = 1.F /
         static_cast<float>(std::max<std::uint32_t>(1, std::min(width, height)));
     accumulate_densification_kernel<<<
         (count + k_threads - 1) / k_threads, k_threads>>>(
-        refine_weight.ptr<float>(), radii.ptr<int>(),
+        refine_weight.ptr<float>(), visibility.ptr<float>(), radii.ptr<int>(),
         stats.gradient.ptr<float>(), stats.count.ptr<float>(),
         stats.max_screen_radius.ptr<float>(), stats.priority.ptr<float>(),
-        count, inverse_resolution, use_maximum);
+        count, inverse_resolution, use_maximum,
+        require_contribution_visibility);
     check_cuda(cudaGetLastError(), "accumulate GGGS densification stats");
 }
 
@@ -1530,7 +1535,7 @@ void apply_adc_decay(
 
 void inject_adc_noise(
     GaussianModel& model,
-    const tinytensor::Tensor& radii,
+    const tinytensor::Tensor& visibility,
     const float standard_deviation,
     const float maximum_noise,
     const unsigned seed) {
@@ -1538,7 +1543,7 @@ void inject_adc_noise(
     inject_adc_noise_kernel<<<
         (model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.means.ptr<float>(), model.opacity_logits.ptr<float>(),
-        radii.ptr<int>(), model.size(), standard_deviation,
+        visibility.ptr<float>(), model.size(), standard_deviation,
         std::max(maximum_noise, 0.F), seed);
     check_cuda(cudaGetLastError(), "inject ADC exploration noise");
 }

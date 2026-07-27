@@ -101,6 +101,7 @@ struct ReconstructCli {
     float gggs_min_scale_fraction{1e-4F};
     float gggs_max_scale_fraction{0.002F};
     float gggs_max_scale_ratio{0.F};
+    bool gggs_max_scale_ratio_overridden{false};
     bool gggs_constrain_scales{false};
     std::string gggs_strategy{"default"};
     bool gggs_densification{true};
@@ -245,7 +246,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-geometry-from-iter N  start geometry loss (default 3000)\n"
               << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --gggs-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
-              << "  --gggs-max-scale-ratio R  hard anisotropy clamp (0 disables; default 0)\n"
+              << "  --gggs-max-scale-ratio R  hard anisotropy clamp "
+                 "(0 disables; ADC+ visual default 100)\n"
               << "  --gggs-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
               << "  --gggs-strategy default|adc_plus|adc_igs|dense_adaptive\n"
               << "  --gggs-densification=BOOL  enable split/prune/reset (default true)\n"
@@ -410,7 +412,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.0001"))
         ("gggs-max-scale-fraction", "Maximum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.002"))
-        ("gggs-max-scale-ratio", "Maximum Gaussian axis ratio (0 disables)",
+        ("gggs-max-scale-ratio",
+         "Maximum Gaussian axis ratio (0 disables; ADC+ defaults to 100)",
          cxxopts::value<float>()->default_value("0"))
         ("gggs-constrain-scales", "Clamp sparse KNN scales to configured fractions",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -592,6 +595,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["gggs-max-scale-fraction"].as<float>();
     cli.gggs_max_scale_ratio =
         result["gggs-max-scale-ratio"].as<float>();
+    cli.gggs_max_scale_ratio_overridden =
+        result.count("gggs-max-scale-ratio") != 0;
     cli.gggs_constrain_scales = result["gggs-constrain-scales"].as<bool>();
     cli.gggs_strategy = result["gggs-strategy"].as<std::string>();
     cli.gggs_densification = result["gggs-densification"].as<bool>();
@@ -1348,7 +1353,13 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     // forcing it for every dense input clips tangential splats and removes
     // legitimate surface coverage in sparsely sampled detail regions.
     options.constrain_scale_range = cli.gggs_constrain_scales;
-    options.max_scale_ratio = cli.gggs_max_scale_ratio;
+    options.max_scale_ratio =
+        !dense_input &&
+                options.densification_strategy ==
+                    aetherscan::splat::DensificationStrategy::adc_plus &&
+                !cli.gggs_max_scale_ratio_overridden
+            ? 100.F
+            : cli.gggs_max_scale_ratio;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
     options.use_depth_normal_loss = cli.mesh &&

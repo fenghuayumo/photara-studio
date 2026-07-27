@@ -132,6 +132,8 @@ RenderResult Rasterizer::forward(
         {3, camera.height, camera.width}, tinytensor::Device::CUDA);
     result.radii = tinytensor::Tensor::zeros(
         {model.size()}, tinytensor::Device::CUDA, tinytensor::DataType::Int32);
+    result.visibility = tinytensor::Tensor::zeros(
+        {model.size()}, tinytensor::Device::CUDA);
 
     if (model.size() != 0 && pixels != 0) {
         const unsigned total_bases = static_cast<unsigned>(model.sh.shape()[1]);
@@ -160,7 +162,8 @@ RenderResult Rasterizer::forward(
             camera.cx, camera.cy, context->options.kernel_size, false,
             result.color.ptr<float>(), result.median_depth.ptr<float>(),
             result.alpha.ptr<float>(), result.normal.ptr<float>(),
-            result.radii.ptr<int>(), context->options.require_depth,
+            result.visibility.ptr<float>(), result.radii.ptr<int>(),
+            context->options.require_depth,
             context->options.debug);
         (void)active_bases; // The reference API derives active bases from SHD.
     }

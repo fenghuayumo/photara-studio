@@ -147,11 +147,15 @@ quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN sca
 | `--gggs-strategy` | 统计与增长 | 默认调度 |
 |---|---|---|
 | `default` | 平均屏幕梯度；小 Gaussian clone，大 Gaussian split；opacity reset | 500–15k，每 100 步 |
-| `adc_plus` | 最大 refine weight、可见度和屏幕半径；预算回收、ADC split/decay/noise | 600–15k，每 200 步 |
+| `adc_plus` | 最大 refine weight、实际 alpha 贡献可见度和屏幕半径；预算回收、ADC split/decay/noise | 全程每 200 步；15k 后停止额外增长，只回收低 opacity 点 |
 | `adc_igs` | ADC+ pruning + Gumbel Top-K + 投影优先级 + 最大轴二分 | 增长至 15k，裁剪至 25k，每 200 步 |
 | `dense_adaptive` | 每轮最多回收 1% 低贡献点（异常/越界点另行删除）、额外增长 0.5%，按最大 refine weight 和投影半径做表面切平面二分；不使用 ADC noise/decay | 1k–5k，每 500 步；1k 后冻结结构 Adam，仅继续 SH |
 
 所有策略均受 `--gggs-densification-cap` 硬上限约束，新增/裁剪数量写入训练日志。
+ADC+ 的“可见”要求 Gaussian 通过 alpha/transmittance 测试并实际参与至少一个像素合成；
+仅投影进相机视锥但被前景遮挡的 Gaussian 不再累计支持度、参与回收采样或注入探索噪声。
+稀疏 ADC+ 默认还将轴比限制为 `100`，抑制只对训练相机正面成立、在范围外视角变成漂浮片的
+极薄 Gaussian；可用 `--gggs-max-scale-ratio 0` 显式关闭，或传入其他上限。
 
 稠密点云建议配置：
 

@@ -71,6 +71,10 @@ struct RenderResult {
     tinytensor::Tensor median_depth;  // [H,W]
     tinytensor::Tensor normal;        // [3,H,W]
     tinytensor::Tensor radii;         // [N], int32
+    // [N], 1 only when the Gaussian survives alpha/transmittance tests and
+    // contributes to at least one pixel. This is stricter than radii > 0,
+    // which only means that the Gaussian projected into the camera frustum.
+    tinytensor::Tensor visibility;
     RasterContext context;
     int rendered_instances{};
 };
