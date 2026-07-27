@@ -25,6 +25,23 @@ __device__ float sigmoid(const float value) {
     return 1.F / (1.F + expf(-value));
 }
 
+__global__ void unpack_training_pixels_kernel(
+    const unsigned* rgba, float* rgb, float* mask,
+    const std::size_t pixels) {
+    const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels) return;
+    const unsigned value = rgba[pixel];
+    constexpr float inverse_255 = 1.F / 255.F;
+    rgb[pixel] = static_cast<float>(value & 0xffU) * inverse_255;
+    rgb[pixels + pixel] =
+        static_cast<float>((value >> 8U) & 0xffU) * inverse_255;
+    rgb[2 * pixels + pixel] =
+        static_cast<float>((value >> 16U) & 0xffU) * inverse_255;
+    if (mask)
+        mask[pixel] =
+            static_cast<float>((value >> 24U) & 0xffU) * inverse_255;
+}
+
 __global__ void activate_kernel(
     const float* log_scales, const float* raw_quaternions,
     const float* opacity_logits, const float* filter_3d,
@@ -1057,6 +1074,36 @@ __global__ void reset_opacity_kernel(
 }
 
 }  // namespace
+
+DecodedTrainingPixels upload_packed_training_pixels(
+    const std::vector<int>& rgba, const std::uint32_t width,
+    const std::uint32_t height, const bool decode_mask) {
+    const std::size_t pixels =
+        static_cast<std::size_t>(width) * height;
+    if (rgba.size() != pixels)
+        throw std::invalid_argument(
+            "GGGS packed training image size does not match camera");
+    const auto packed = tinytensor::Tensor::from_vector(
+        rgba, {height, width}, tinytensor::Device::CUDA);
+    DecodedTrainingPixels result{
+        tinytensor::Tensor::empty(
+            {std::size_t{3}, height, width},
+            tinytensor::Device::CUDA),
+        decode_mask
+            ? tinytensor::Tensor::empty(
+                  {height, width}, tinytensor::Device::CUDA)
+            : tinytensor::Tensor::zeros(
+                  {std::size_t{1}}, tinytensor::Device::CUDA)};
+    if (pixels == 0) return result;
+    unpack_training_pixels_kernel<<<
+        (pixels + k_threads - 1) / k_threads, k_threads>>>(
+        reinterpret_cast<const unsigned*>(packed.ptr<int>()),
+        result.rgb.ptr<float>(),
+        decode_mask ? result.mask.ptr<float>() : nullptr,
+        pixels);
+    check_cuda(cudaGetLastError(), "unpack GGGS training pixels");
+    return result;
+}
 
 ActivatedParameters activate_parameters(const GaussianModel& model) {
     const std::size_t count = model.size();

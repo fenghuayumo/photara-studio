@@ -1,13 +1,17 @@
 #include "training_data_loader.hpp"
 
 #include "io/image.hpp"
+#include "cuda_ops.hpp"
 #include "splat/trainer.hpp"
 
 #include <Eigen/Geometry>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <future>
 #include <list>
+#include <limits>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -253,18 +257,35 @@ float sample_mask_coverage(
 
 struct HostTrainingView {
     Camera camera;
-    std::vector<float> rgb;
+    // One little-endian RGBA8 word per pixel. Alpha stores the optional
+    // binary training mask; opaque 255 is used when no mask is present.
+    std::vector<int> rgba;
     std::vector<float> depth;
     std::vector<float> normal;
-    std::vector<float> mask;
     bool has_mask{false};
 
     [[nodiscard]] std::size_t bytes() const noexcept {
-        return sizeof(*this) + sizeof(float) *
-            (rgb.capacity() + depth.capacity() + normal.capacity() +
-             mask.capacity());
+        return sizeof(*this) + sizeof(int) * rgba.capacity() +
+            sizeof(float) * (depth.capacity() + normal.capacity());
     }
 };
+
+std::uint8_t quantize_channel(const float value) {
+    return static_cast<std::uint8_t>(std::lround(
+        std::clamp(value, 0.F, 1.F) * 255.F));
+}
+
+int pack_rgba(
+    const std::uint8_t red, const std::uint8_t green,
+    const std::uint8_t blue, const std::uint8_t alpha) {
+    const std::uint32_t packed =
+        static_cast<std::uint32_t>(red) |
+        (static_cast<std::uint32_t>(green) << 8U) |
+        (static_cast<std::uint32_t>(blue) << 16U) |
+        (static_cast<std::uint32_t>(alpha) << 24U);
+    static_assert(sizeof(int) == sizeof(packed));
+    return std::bit_cast<int>(packed);
+}
 
 HostTrainingView load_host_training_view(
     const mvs::MvsView& view, const TrainingOptions& options,
@@ -289,21 +310,51 @@ HostTrainingView load_host_training_view(
             has_source_mask = !source_mask.pixels.empty();
         }
     }
-    std::vector<float> rgb(3 * pixels);
-    std::vector<float> mask(pixels, 1.F);
-    for (std::uint32_t y = 0; y < camera.height; ++y) {
-        for (std::uint32_t x = 0; x < camera.width; ++x) {
-            const auto [sx, sy] =
-                source_coordinate(view, x, y, camera, source);
-            const std::size_t pixel =
-                static_cast<std::size_t>(y) * camera.width + x;
-            for (int channel = 0; channel < 3; ++channel)
-                rgb[static_cast<std::size_t>(channel) * pixels + pixel] =
-                    sample_rgb(source, sx, sy, channel);
-            if (has_source_mask)
-                mask[pixel] =
-                    sample_mask_coverage(source_mask, source, sx, sy);
+    std::vector<int> rgba(pixels);
+    const bool direct_source =
+        view.k1 == 0.F && view.k2 == 0.F &&
+        view.p1 == 0.F && view.p2 == 0.F &&
+        camera.width == source.width && camera.height == source.height;
+    for (std::int64_t linear = 0;
+         linear < static_cast<std::int64_t>(pixels); ++linear) {
+        const auto pixel = static_cast<std::size_t>(linear);
+        const auto x = static_cast<std::uint32_t>(
+            pixel % camera.width);
+        const auto y = static_cast<std::uint32_t>(
+            pixel / camera.width);
+        std::uint8_t red{};
+        std::uint8_t green{};
+        std::uint8_t blue{};
+        std::uint8_t alpha{255};
+        if (direct_source) {
+            red = source.pixels[3 * pixel];
+            green = source.pixels[3 * pixel + 1];
+            blue = source.pixels[3 * pixel + 2];
+            if (has_source_mask) {
+                const float coverage =
+                    source_mask.width == source.width &&
+                            source_mask.height == source.height
+                        ? (source_mask.pixels[pixel] > 127 ? 1.F : 0.F)
+                        : sample_mask_coverage(
+                              source_mask, source,
+                              static_cast<float>(x),
+                              static_cast<float>(y));
+                alpha = coverage > 0.5F ? 255 : 0;
+            }
+            rgba[pixel] = pack_rgba(red, green, blue, alpha);
+            continue;
         }
+        const auto [sx, sy] =
+            source_coordinate(view, x, y, camera, source);
+        red = quantize_channel(sample_rgb(source, sx, sy, 0));
+        green = quantize_channel(sample_rgb(source, sx, sy, 1));
+        blue = quantize_channel(sample_rgb(source, sx, sy, 2));
+        if (has_source_mask)
+            alpha = sample_mask_coverage(
+                        source_mask, source, sx, sy) > 0.5F
+                ? 255
+                : 0;
+        rgba[pixel] = pack_rgba(red, green, blue, alpha);
     }
 
     std::vector<float> depth;
@@ -327,22 +378,26 @@ HostTrainingView load_host_training_view(
         camera.width == view.width && camera.height == view.height &&
         view.foreground_mask.size() == pixels) {
         has_mask = true;
-        for (std::size_t pixel = 0; pixel < pixels; ++pixel)
-            mask[pixel] =
-                view.foreground_mask[pixel] != 0 ? 1.F : 0.F;
+        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+            const std::uint32_t color =
+                static_cast<std::uint32_t>(rgba[pixel]) & 0x00ffffffU;
+            const std::uint32_t alpha =
+                view.foreground_mask[pixel] != 0 ? 0xff000000U : 0U;
+            rgba[pixel] = std::bit_cast<int>(color | alpha);
+        }
     }
 
     return {
-        camera, std::move(rgb), std::move(depth), std::move(normals),
-        std::move(mask), has_mask};
+        camera, std::move(rgba), std::move(depth), std::move(normals),
+        has_mask};
 }
 
 TrainingView upload_training_view(const HostTrainingView& host) {
     TrainingView result;
     result.camera = host.camera;
-    result.rgb = tinytensor::Tensor::from_vector(
-        host.rgb, {3, host.camera.height, host.camera.width},
-        tinytensor::Device::CUDA);
+    auto decoded = detail::upload_packed_training_pixels(
+        host.rgba, host.camera.width, host.camera.height, host.has_mask);
+    result.rgb = std::move(decoded.rgb);
     result.depth = host.depth.empty()
         ? tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA)
         : tinytensor::Tensor::from_vector(
@@ -353,9 +408,7 @@ TrainingView upload_training_view(const HostTrainingView& host) {
         : tinytensor::Tensor::from_vector(
               host.normal, {3, host.camera.height, host.camera.width},
               tinytensor::Device::CUDA);
-    result.mask = tinytensor::Tensor::from_vector(
-        host.mask, {host.camera.height, host.camera.width},
-        tinytensor::Device::CUDA);
+    result.mask = std::move(decoded.mask);
     result.has_mask = host.has_mask;
     return result;
 }
@@ -376,6 +429,23 @@ struct TrainingDataLoader::Impl {
         return upload_training_view(host_view(index));
     }
 
+    void prefetch(const std::size_t index) {
+        if (index >= source_.size())
+            throw std::out_of_range(
+                "GGGS training prefetch index is out of range");
+        if (lookup_.contains(index) || prefetches_.contains(index))
+            return;
+        const float scale = resolution_scale_;
+        prefetches_.emplace(
+            index,
+            std::async(
+                std::launch::async,
+                [this, index, scale] {
+                    return load_host_training_view(
+                        source_[index], options_, scale);
+                }));
+    }
+
     bool has_mask(const std::size_t index) {
         return host_view(index).has_mask;
     }
@@ -386,6 +456,9 @@ struct TrainingDataLoader::Impl {
         entries_.clear();
         lookup_.clear();
         cached_bytes_ = 0;
+        // std::future from std::launch::async joins on destruction. Clear all
+        // old-scale work before publishing the new scale.
+        prefetches_.clear();
         resolution_scale_ = clamped;
     }
 
@@ -407,8 +480,15 @@ private:
             return entries_.front().view;
         }
 
-        HostTrainingView loaded = load_host_training_view(
-            source_[index], options_, resolution_scale_);
+        HostTrainingView loaded;
+        const auto prefetched = prefetches_.find(index);
+        if (prefetched != prefetches_.end()) {
+            loaded = prefetched->second.get();
+            prefetches_.erase(prefetched);
+        } else {
+            loaded = load_host_training_view(
+                source_[index], options_, resolution_scale_);
+        }
         const std::size_t loaded_bytes = loaded.bytes();
         while (!entries_.empty() &&
                (capacity_bytes_ == 0 ||
@@ -433,6 +513,7 @@ private:
     float resolution_scale_{1.F};
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;
+    std::unordered_map<std::size_t, std::future<HostTrainingView>> prefetches_;
 };
 
 
@@ -453,6 +534,10 @@ TrainingView TrainingDataLoader::get(const std::size_t index) {
 
 bool TrainingDataLoader::has_mask(const std::size_t index) {
     return impl_->has_mask(index);
+}
+
+void TrainingDataLoader::prefetch(const std::size_t index) {
+    impl_->prefetch(index);
 }
 
 void TrainingDataLoader::set_resolution_scale(const float scale) {

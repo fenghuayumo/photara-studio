@@ -377,7 +377,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("gggs-progressive-initial-scale",
          "Initial GGGS linear image scale",
          cxxopts::value<float>()->default_value("0.25"))
-        ("gggs-view-cache-mb", "Decoded GGGS host-view LRU budget (0 = no cache)",
+        ("gggs-view-cache-mb", "Packed RGBA8 GGGS host-view LRU budget (0 = no cache)",
          cxxopts::value<std::uint64_t>()->default_value("6144"))
         ("gggs-eval-split-every",
          "Hold out every Nth view for PSNR evaluation (0 = train all)",
@@ -1419,6 +1419,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         options.progressive_initial_scale,
         " host_view_cache_mb=",
         options.training_view_cache_bytes / (1024 * 1024),
+        " prefetch_views=", options.training_prefetch_views,
         " eval_split_every=", options.evaluation_split_every,
         " knn_scale=", options.initialize_scale_from_knn,
         " dense_structure_freeze_iter=",

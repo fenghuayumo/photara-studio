@@ -151,6 +151,9 @@ struct TrainingOptions {
     float progressive_initial_scale{0.25F};
     std::size_t training_view_cache_bytes{
         std::size_t{6} * 1024 * 1024 * 1024};
+    // Decode upcoming shuffled views concurrently while CUDA processes the
+    // current iteration. Zero disables prefetching.
+    std::size_t training_prefetch_views{4};
     // Hold out every Nth source view from optimization (0 trains on all).
     // The caller may render these views through the evaluation callback.
     unsigned evaluation_split_every{0};

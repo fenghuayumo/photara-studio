@@ -626,9 +626,12 @@ void test_source_resolution_and_knn_initialization() {
     const float expected_red =
         (red(x0, y0) * (1.F - tx) + red(x1, y0) * tx) * (1.F - ty) +
         (red(x0, y1) * (1.F - tx) + red(x1, y1) * tx) * ty;
-    if (std::abs(rgb[6] - expected_red) >= 1e-6F)
+    // Training targets are cached as packed RGBA8, matching Brush's
+    // GPU-ready representation. Brown resampling therefore has one final
+    // 8-bit quantization step after bilinear interpolation.
+    if (std::abs(rgb[6] - expected_red) > 0.5F / 255.F + 1e-6F)
         throw std::runtime_error(
-            "GGGS source-resolution Brown mapping differs: actual=" +
+            "GGGS packed source-resolution Brown mapping differs: actual=" +
             std::to_string(rgb[6]) +
             " expected=" + std::to_string(expected_red));
 

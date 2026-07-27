@@ -4,7 +4,9 @@
 #include "splat/types.hpp"
 
 #include <array>
+#include <cstdint>
 #include <limits>
+#include <vector>
 
 namespace aetherscan::splat::detail {
 
@@ -24,6 +26,11 @@ struct LossGradients {
     float alpha_value{};
     float depth_value{};
     float normal_value{};
+};
+
+struct DecodedTrainingPixels {
+    tinytensor::Tensor rgb;
+    tinytensor::Tensor mask;
 };
 
 struct AdamState {
@@ -52,6 +59,15 @@ struct MultiViewLoss {
 };
 
 ActivatedParameters activate_parameters(const GaussianModel& model);
+
+// Upload one packed RGBA8 word per pixel and expand it on CUDA. Packing the
+// host cache cuts its footprint and per-step PCIe traffic by 3-4x compared
+// with cached planar float RGB plus a separate float mask.
+DecodedTrainingPixels upload_packed_training_pixels(
+    const std::vector<int>& rgba,
+    std::uint32_t width,
+    std::uint32_t height,
+    bool decode_mask);
 
 // Fold the Mip-Splatting 3D-filter floor into the canonical scale/opacity
 // parameters and clear model.filter_3d. Brush does this before every ADC+

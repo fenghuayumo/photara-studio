@@ -10,10 +10,9 @@
 
 namespace aetherscan::splat::training_data {
 
-// Owns the CPU-side decoded-view cache and performs the narrow host-to-device
-// upload needed by an iteration. Keeping this separate from Trainer makes the
-// data pipeline independently replaceable (for example by a threaded
-// prefetcher) without coupling image I/O to optimization.
+// Owns the CPU-side packed RGBA8 view cache and performs the narrow
+// host-to-device upload needed by an iteration. Keeping this separate from
+// Trainer avoids coupling image I/O and prefetch scheduling to optimization.
 class TrainingDataLoader {
 public:
     TrainingDataLoader(
@@ -29,6 +28,7 @@ public:
 
     [[nodiscard]] TrainingView get(std::size_t index);
     [[nodiscard]] bool has_mask(std::size_t index);
+    void prefetch(std::size_t index);
     void set_resolution_scale(float scale);
 
 private:

@@ -540,6 +540,12 @@ GaussianModel Trainer::train(
             std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
             shuffled_view_cursor = 0;
         }
+        const std::size_t prefetch_end = std::min(
+            shuffled_views.size(),
+            shuffled_view_cursor + options_.training_prefetch_views + 1);
+        for (std::size_t cursor = shuffled_view_cursor;
+             cursor < prefetch_end; ++cursor)
+            view_cache.prefetch(shuffled_views[cursor]);
         const std::size_t view_index =
             shuffled_views[shuffled_view_cursor++];
         const TrainingView target = view_cache.get(view_index);
@@ -836,7 +842,9 @@ RenderMetrics render_evaluation_png(
     const std::vector<float> color = download<float>(rendered.color);
     const std::vector<float> alpha = download<float>(rendered.alpha);
     const std::vector<float> target_rgb = download<float>(target.rgb);
-    const std::vector<float> mask = download<float>(target.mask);
+    const std::vector<float> mask =
+        target.has_mask ? download<float>(target.mask)
+                        : std::vector<float>{};
     const std::size_t pixels =
         static_cast<std::size_t>(target.camera.width) * target.camera.height;
 
@@ -853,7 +861,8 @@ RenderMetrics render_evaluation_png(
         if (alpha[pixel] > 0.01F) ++covered;
         const double predicted_alpha = std::clamp(
             static_cast<double>(alpha[pixel]), 1e-7, 1.0 - 1e-7);
-        const double target_alpha = mask[pixel] > 0.F ? 1.0 : 0.0;
+        const bool foreground = !target.has_mask || mask[pixel] > 0.F;
+        const double target_alpha = foreground ? 1.0 : 0.0;
         alpha_bce -= target_alpha * std::log(predicted_alpha) +
             (1.0 - target_alpha) * std::log(1.0 - predicted_alpha);
         for (int channel = 0; channel < 3; ++channel) {
@@ -862,7 +871,7 @@ RenderMetrics render_evaluation_png(
             const float prediction = std::clamp(color[planar], 0.F, 1.F);
             image.pixels[3 * pixel + channel] = static_cast<std::uint8_t>(
                 std::lround(prediction * 255.F));
-            if (mask[pixel] > 0.F) {
+            if (foreground) {
                 const double difference =
                     static_cast<double>(prediction - target_rgb[planar]);
                 absolute_error += std::abs(difference);
