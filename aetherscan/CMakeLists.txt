@@ -67,6 +67,15 @@ if(AETHERSCAN_ENABLE_FEATURES)
     find_package(freeimage CONFIG REQUIRED)
     find_package(Eigen3 CONFIG REQUIRED)
     find_package(PoseLib CONFIG REQUIRED)
+    # Some Ceres/glog vcpkg exports retain gflags::gflags in their link
+    # interface without declaring the dependency themselves.
+    set(GFLAGS_USE_TARGET_NAMESPACE TRUE)
+    find_package(gflags CONFIG REQUIRED)
+    if(MSVC AND gflags_DIR)
+        get_filename_component(_gflags_share_dir "${gflags_DIR}" DIRECTORY)
+        get_filename_component(_gflags_prefix "${_gflags_share_dir}" DIRECTORY)
+        link_directories("${_gflags_prefix}/lib")
+    endif()
     find_package(Ceres CONFIG REQUIRED)
     find_package(hnswlib CONFIG REQUIRED)
     find_package(Boost REQUIRED)
@@ -326,7 +335,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
     else()
         message(WARNING
             "CGAL not found: default/high global MVS meshing is unavailable; "
-            "preview projective and GGGS TSDF meshing remain supported")
+            "GGGS TSDF meshing remains supported, but automatic-ROI coarse "
+            "meshing requires a CGAL-enabled build")
     endif()
 
     if(AETHERSCAN_ENABLE_GGGS AND AETHERSCAN_ENABLE_CUDA)
@@ -425,7 +435,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         add_library(aetherscan_texture
             src/texture/bake.cpp
             src/texture/delight.cpp
-            src/texture/export.cpp)
+            src/texture/export.cpp
+            src/texture/mask.cpp)
         add_library(AetherScan::Texture ALIAS aetherscan_texture)
         target_include_directories(aetherscan_texture PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

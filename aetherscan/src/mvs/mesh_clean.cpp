@@ -555,8 +555,14 @@ void smooth_mesh(Mesh& mesh, const DensifyOptions& options) {
         }
     }
     const float lambda = std::clamp(options.mesh_smooth_lambda, 0.F, 0.5F);
+    if (!(lambda > 0.F)) return;
+    // A negative second pass cancels the volume loss of ordinary umbrella
+    // smoothing. The small positive pass-band keeps broad object shape while
+    // attenuating the high-frequency MVS/triangulation noise that otherwise
+    // appears as a ragged projected silhouette.
+    const float mu = -lambda / (1.F - 0.1F * lambda);
     std::vector<Vec3f> next(mesh.vertices.size());
-    for (unsigned iteration = 0; iteration < options.mesh_smooth_iters; ++iteration) {
+    const auto pass = [&](const float factor) {
         next = mesh.vertices;
         for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
             if (boundary[i] || adjacent[i].empty()) continue;
@@ -564,9 +570,14 @@ void smooth_mesh(Mesh& mesh, const DensifyOptions& options) {
             for (const int neighbor : adjacent[i])
                 mean += mesh.vertices[static_cast<std::size_t>(neighbor)];
             mean /= static_cast<float>(adjacent[i].size());
-            next[i] = mesh.vertices[i] * (1.F - lambda) + mean * lambda;
+            next[i] = mesh.vertices[i] + factor * (mean - mesh.vertices[i]);
         }
         mesh.vertices.swap(next);
+    };
+    for (unsigned iteration = 0; iteration < options.mesh_smooth_iters;
+         ++iteration) {
+        pass(lambda);
+        pass(mu);
     }
 }
 
@@ -770,9 +781,7 @@ void clean_mesh(
     }
     mesh.faces = std::move(accepted);
     orient_components(mesh.faces);
-    // The aggressive OpenMVS-style pass targets the closed global cut. A
-    // projective preview is intentionally an open sheet, where iterative
-    // spike removal could peel the surface inward from image boundaries.
+    // The aggressive OpenMVS-style pass targets the closed global cut.
     if (options.mesh_method == MeshMethod::delaunay_cut)
         remove_scale_spurious_geometry(
             mesh, options.mesh_spurious_factor, roi_boundary);
@@ -802,7 +811,8 @@ void clean_mesh(
     core::Logger::instance().info(
         "mvs mesh clean: faces=", input_faces, " -> ", mesh.faces.size(),
         " vertices=", mesh.vertices.size(), " spikes_removed=", spikes,
-        " bow_ties_split=", bow_ties, " holes_closed=", holes);
+        " bow_ties_split=", bow_ties, " holes_closed=", holes,
+        " taubin_iters=", options.mesh_smooth_iters);
     stage.finish();
 }
 

@@ -259,17 +259,22 @@ depth-normal 硬过滤，避免在薄结构和法线快速变化处直接删除 
 
 ## Stage B — Mask、Texture、Delight（共用后处理）
 
-本阶段 **不假设** 一定经过 GGGS。输入是 `active_mesh`（MVS 或 GGGS）。
+本阶段 **不假设** 一定经过 GGGS。GGGS 训练前输入固定为 `mvs_mesh`；
+GGGS 结束后的贴图/Delight 可以改用最终 `gggs_mesh`。
 
 ### B1. Mask（光栅化）
 
-对每个注册视图，用 `active_mesh` Z-buffer 光栅化得到前景 mask（可羽化）。
+完整 MVS 结束后，对每个注册视图用 `asdiff_render` 将 `mvs_mesh`
+光栅化为前景 mask。Mask 按 GGGS 使用的原始理想针孔相机分辨率生成，而不是 MVS
+PatchMatch 的 640 px 工作分辨率。当前 `asdiff_render` 光栅输出为单采样，因此默认按
+每轴 2 倍分辨率渲染，再做 2×2 面积下采样，得到 0..255 的抗锯齿软覆盖。
 
 用途：
 
 - Delight 前景约束与 alpha 保留；
 - ProjectTextures 置信度加权；
-- GGGS 训练时的可选 mask 光度（若开启 GGGS）。
+- GGGS 训练的 RGB 前景与 alpha BCE 监督；
+- GGGS 完成后若选择其为 `active_mesh`，可重新渲染最终 mask 供贴图使用。
 
 若用户只要点云/裸 mesh、不开 texture/delight/gggs，可跳过 mask。
 
@@ -461,29 +466,34 @@ aetherscan --images ... --output out/scene.mvs --dense --mesh --texture --deligh
 
 ---
 
-## ROI / Mask 闭环（已实现，2026-07-19）
+## ROI 与前景 Mask（单向流水线，2026-07-28）
 
-ROI 与 mask 是两层独立约束：ROI 是世界坐标中的 3D OBB，决定哪些几何允许进入
-深度、融合和网格；mask 是每个工作分辨率视图的 2D 前景，决定哪些像素可以参与匹配。
-两者同时存在时取交集，而不是互相替代。
+ROI 与 mask 是两层独立约束。显式输入的外部 mask 可以约束 MVS；手动/自动 ROI 是
+世界坐标中的 3D OBB。没有外部 mask 时，GGGS 默认直接使用 MVS 每视图深度与自动主体
+OBB 的交集生成软 Mask，不依赖 MVS mesh，也不依赖 AI 分割模型。生成的 Mask 只属于
+后处理训练数据，绝不反馈成第二遍 PatchMatch 的硬约束。
 
-自动模式采用两阶段 MVS：
+默认 GGGS 流程只执行一遍 MVS，并跳过容易产生破洞和锯齿轮廓的 MVS Delaunay Mesh：
 
 ```text
-低迭代 PatchMatch → 粗融合点云
-  → RANSAC 桌面/地面 → 删除平面及背面点
-  → 相机视线交汇点引导的 26 邻域体素主体分量
-  → PCA OBB（带 margin）
-  → ROI-aware 粗 CGAL Delaunay mesh + Clean
-  → z-buffer 回投影、膨胀并与输入 mask 求交
-  → 最终 PatchMatch → filter → fusion → CGAL Delaunay → Clean
+SfM
+  → PatchMatch → filter → fusion
+  → MVS DenseCloud
+  → 自动地面/支撑面检测 → 主体 3D OBB
+  → 每视图全分辨率 depth 反投影 ∩ OBB → close / tiny-hole fill / dilate / 1 px feather
+  → per-view source-resolution soft masks
+  → DenseCloud 初始化 3DGS + masks 训练 GGGS
+  → GGGS median depth / normal / alpha
+  → TSDF → final mesh
 ```
 
-完整约束位置：
+约束位置：
 
-- PatchMatch：reference patch、source patch 和候选世界点都必须位于有效区域；
-- depth filter：reference/source 像素先过 mask，重投影世界点再过 OBB；
-- fusion：reference/source 样本、稳健融合后的最终点均检查 mask/OBB；
+- 外部输入 mask：可以约束 PatchMatch、depth filter 和 fusion；
+- depth-ROI mask：MVS 融合后生成，只供 GGGS 使用，不约束 MVS；
+- mesh-rendered mask：保留为显式诊断/fallback，只供 GGGS、Delight 与贴图使用；
+- 手动 ROI：可约束 PatchMatch/fusion/mesh；
+- 自动 ROI：在一次完整 MVS 融合后执行，不触发第二遍 MVS；
 - global Delaunay：ROI 外点不插入，中心在 OBB 外的 cell 强制为 source/free-space；
 - Clean：删除跨出 OBB 的三角形；只保护 ROI 裁剪产生的开边界不执行 hole cap，主体内部
   的小边界环仍会补洞，避免因启用 ROI 而保留大量内部孔洞。
@@ -491,22 +501,40 @@ ROI 与 mask 是两层独立约束：ROI 是世界坐标中的 3D OBB，决定�
 CLI：
 
 ```powershell
-# 自动桌面/地面、主体分量、OBB、粗网格 mask，再进行最终重建
-aetherscan --images images --output scene.mvs --dense --mesh --roi auto
+# 默认 GGGS 前景路径：无外部 mask、无 MVS mesh、无 AI model
+aetherscan --images images --output scene.ply --dense --gggs --mesh
+
+# 只生成并导出 depth-ROI Mask，先做人眼质量门禁，不训练 GGGS
+aetherscan --images images --output scene.ply --masks - `
+  --foreground-mask-source depth --foreground-mask-only
 
 # 手动 OBB；文件为 15 个空白分隔浮点数
 # center xyz，axes 的 3x3 row-major，half_extent xyz
 aetherscan --images images --output scene.mvs --dense --mesh --roi roi.txt
 
-# 自动 OBB 每个半轴增加 10%，回投影轮廓在工作图上膨胀 7 px
-aetherscan ... --roi auto --roi-margin 0.10 --roi-mask-dilate 7
+# 显式退回 MVS mesh → asdiff_render Mask（诊断用途）
+aetherscan ... --foreground-mask-source mesh
+
+# 完全关闭前景 Mask
+aetherscan ... --foreground-mask-source none --masks -
+
+# 自动 OBB 默认每个半轴增加 15%；可显式增加到 20%
+aetherscan ... --roi auto --roi-margin 0.20
 ```
 
 手动 OBB 的轴矩阵读入后会以 SVD 投影到最近的正交旋转矩阵；半轴必须全部大于零。
 只在地面检测失败时会退化为「视线目标 + 主体分量」OBB；若连可靠主体 OBB 也无法得到，
-才保留无 ROI 的粗重建并给出 warning，不会输出一个错误裁剪的空模型。
+才保留无 ROI 的完整重建并给出 warning，不会输出一个错误裁剪的空模型。
 有效 ROI 会同时写到 `<output_stem>_roi.txt`，可直接作为下一次 `--roi` 的输入，便于
 自动检测后人工微调并复现最终重建。
+
+无外部 Mask 的 GGGS 路径默认把 MVS `resolution_level` 提升到 0，因此导出的
+`<output_stem>_depth_roi_masks/` 和训练 Mask 都是原图分辨率，不再把半分辨率轮廓双线性放大。
+若明确优先速度，可传 `--dense-resolution-level 1` 回到半分辨率。自动 OBB 默认使用 15%
+余量，只沿检测到的支撑面方向单侧扩到 25%，以补全底座但不吞入桌布。
+`--roi-mask-close`、`--roi-mask-dilate` 和 `--roi-mask-feather` 控制小缺口修复、保守外扩与软边；
+depth Mask 默认只做 1 px feather，真实的大孔洞会保留。孤立小前景分量在 feather 前移除，
+避免稀疏深度噪点污染背景。
 
 ---
 

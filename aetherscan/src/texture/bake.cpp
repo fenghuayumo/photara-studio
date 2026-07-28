@@ -5,6 +5,7 @@
 #include "parallel/thread_pool.hpp"
 #include "texture/delight.hpp"
 #include "texture/export.hpp"
+#include "texture/projection.hpp"
 
 #include "asdiff_render/asdiff_render.hpp"
 
@@ -34,32 +35,21 @@ namespace {
     return {view.src_fx * xd + view.src_cx, view.src_fy * yd + view.src_cy};
 }
 
-[[nodiscard]] std::array<float, 16> world_to_clip_row_major(
-    const mvs::MvsView& view, const float near_z, const float far_z) {
-    const Eigen::Matrix3f R = view.pose.R.cast<float>();
-    const Eigen::Vector3f t = view.pose.translation().cast<float>();
-    const float w = static_cast<float>(view.width);
-    const float h = static_cast<float>(view.height);
-    const float x_offset = 2.F * view.cx / w - 1.F;
-    const float y_offset = 2.F * view.cy / h - 1.F;
-    const float depth_scale = (far_z + near_z) / (far_z - near_z);
-    const float depth_offset = -2.F * far_z * near_z / (far_z - near_z);
-
-    std::array<float, 16> m{};
-    // Row-major 4x4 matching asdiff_render / COLMAP helper.
-    for (int c = 0; c < 3; ++c) {
-        m[0 * 4 + c] =
-            (2.F * view.fx / w) * R(0, c) + x_offset * R(2, c);
-        m[1 * 4 + c] =
-            (2.F * view.fy / h) * R(1, c) + y_offset * R(2, c);
-        m[2 * 4 + c] = depth_scale * R(2, c);
-        m[3 * 4 + c] = R(2, c);
+[[nodiscard]] std::filesystem::path find_texture_mask(
+    const std::filesystem::path& directory,
+    const std::filesystem::path& image_path) {
+    if (directory.empty() || !std::filesystem::is_directory(directory))
+        return {};
+    const std::filesystem::path exact = directory / image_path.filename();
+    if (std::filesystem::is_regular_file(exact)) return exact;
+    static constexpr std::array<const char*, 6> extensions{
+        ".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"};
+    for (const char* extension : extensions) {
+        const std::filesystem::path candidate =
+            directory / (image_path.stem().string() + extension);
+        if (std::filesystem::is_regular_file(candidate)) return candidate;
     }
-    m[0 * 4 + 3] = (2.F * view.fx / w) * t.x() + x_offset * t.z();
-    m[1 * 4 + 3] = (2.F * view.fy / h) * t.y() + y_offset * t.z();
-    m[2 * 4 + 3] = depth_scale * t.z() + depth_offset;
-    m[3 * 4 + 3] = t.z();
-    return m;
+    return {};
 }
 
 [[nodiscard]] std::pair<float, float> depth_range_for_view(
@@ -94,12 +84,13 @@ std::vector<TextureViewImage> load_texture_views(
         scene.views.size(), threads, [&](const std::size_t i) {
             const mvs::MvsView& view = scene.views[i];
             const io::RgbImage source = io::load_rgb(view.path);
+            const bool has_effective_mask =
+                has_effective_foreground_mask(view);
             io::GrayImage source_mask;
-            if (!options.mask_dir.empty()) {
-                const auto mask_path =
-                    options.mask_dir / view.path.filename();
-                if (std::filesystem::exists(mask_path))
-                    source_mask = io::load_gray(mask_path);
+            if (!has_effective_mask) {
+                const std::filesystem::path mask_path =
+                    find_texture_mask(options.mask_dir, view.path);
+                if (!mask_path.empty()) source_mask = io::load_gray(mask_path);
             }
             const bool has_distortion =
                 view.k1 != 0.F || view.k2 != 0.F || view.p1 != 0.F ||
@@ -137,7 +128,7 @@ std::vector<TextureViewImage> load_texture_views(
             out.height = view.height;
             out.rgb.resize(
                 static_cast<std::size_t>(view.width) * view.height * 3U);
-            if (!source_mask.pixels.empty())
+            if (has_effective_mask || !source_mask.pixels.empty())
                 out.mask.resize(
                     static_cast<std::size_t>(view.width) * view.height);
 
@@ -174,27 +165,35 @@ std::vector<TextureViewImage> load_texture_views(
                                 sample_channel(sx, sy, c) / 255.F);
                     }
                     if (!out.mask.empty()) {
-                        const float mx =
-                            sx * static_cast<float>(source_mask.width) /
-                            static_cast<float>(source.width);
-                        const float my =
-                            sy * static_cast<float>(source_mask.height) /
-                            static_cast<float>(source.height);
-                        const int mask_x = std::clamp(
-                            static_cast<int>(std::lround(mx)), 0,
-                            static_cast<int>(source_mask.width) - 1);
-                        const int mask_y = std::clamp(
-                            static_cast<int>(std::lround(my)), 0,
-                            static_cast<int>(source_mask.height) - 1);
-                        out.mask[static_cast<std::size_t>(y) * view.width +
-                                 x] =
-                            source_mask.pixels
-                                        [static_cast<std::size_t>(mask_y) *
-                                             source_mask.width +
-                                         static_cast<std::size_t>(mask_x)] >=
-                                    128
+                        const std::size_t output_index =
+                            static_cast<std::size_t>(y) * view.width + x;
+                        if (has_effective_mask) {
+                            out.mask[output_index] =
+                                effective_foreground_coverage(
+                                    view, output_index);
+                        } else {
+                            const float scale_x =
+                                static_cast<float>(source_mask.width) /
+                                static_cast<float>(source.width);
+                            const float scale_y =
+                                static_cast<float>(source_mask.height) /
+                                static_cast<float>(source.height);
+                            const float mx = (sx + 0.5F) * scale_x - 0.5F;
+                            const float my = (sy + 0.5F) * scale_y - 0.5F;
+                            const int mask_x = std::clamp(
+                                static_cast<int>(std::lround(mx)), 0,
+                                static_cast<int>(source_mask.width) - 1);
+                            const int mask_y = std::clamp(
+                                static_cast<int>(std::lround(my)), 0,
+                                static_cast<int>(source_mask.height) - 1);
+                            out.mask[output_index] =
+                                source_mask.pixels[
+                                    static_cast<std::size_t>(mask_y) *
+                                        source_mask.width +
+                                    static_cast<std::size_t>(mask_x)] >= 128
                                 ? 1.F
                                 : 0.F;
+                        }
                     }
                 }
             }

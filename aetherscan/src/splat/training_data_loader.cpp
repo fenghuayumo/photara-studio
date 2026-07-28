@@ -243,21 +243,36 @@ float sample_mask_coverage(
     const float source_x, const float source_y) {
     const float x = (source_x + 0.5F) * mask.width / source.width - 0.5F;
     const float y = (source_y + 0.5F) * mask.height / source.height - 0.5F;
-    const int px = static_cast<int>(std::round(x));
-    const int py = static_cast<int>(std::round(y));
-    if (px < 0 || py < 0 || px >= static_cast<int>(mask.width) ||
-        py >= static_cast<int>(mask.height))
+    if (x < -0.5F || y < -0.5F ||
+        x > static_cast<float>(mask.width) - 0.5F ||
+        y > static_cast<float>(mask.height) - 0.5F)
         return 0.F;
-    return mask.pixels[
-               static_cast<std::size_t>(py) * mask.width +
-               static_cast<std::size_t>(px)] > 127
-        ? 1.F
-        : 0.F;
+    const int x0 = std::clamp(
+        static_cast<int>(std::floor(x)), 0,
+        static_cast<int>(mask.width) - 1);
+    const int y0 = std::clamp(
+        static_cast<int>(std::floor(y)), 0,
+        static_cast<int>(mask.height) - 1);
+    const int x1 = std::min(x0 + 1, static_cast<int>(mask.width) - 1);
+    const int y1 = std::min(y0 + 1, static_cast<int>(mask.height) - 1);
+    const float tx = std::clamp(x - static_cast<float>(x0), 0.F, 1.F);
+    const float ty = std::clamp(y - static_cast<float>(y0), 0.F, 1.F);
+    const auto at = [&](const int px, const int py) {
+        return static_cast<float>(
+                   mask.pixels[
+                       static_cast<std::size_t>(py) * mask.width + px]) /
+            255.F;
+    };
+    return std::clamp(
+        (at(x0, y0) * (1.F - tx) + at(x1, y0) * tx) * (1.F - ty) +
+            (at(x0, y1) * (1.F - tx) + at(x1, y1) * tx) * ty,
+        0.F, 1.F);
 }
 
 float sample_projected_foreground_coverage(
     const mvs::MvsView& view, const Camera& output_camera,
-    const std::uint32_t x, const std::uint32_t y) {
+    const std::uint32_t x, const std::uint32_t y,
+    const float mask_denominator) {
     const std::size_t working_pixels =
         static_cast<std::size_t>(view.width) * view.height;
     if (view.foreground_mask.size() != working_pixels ||
@@ -283,11 +298,11 @@ float sample_projected_foreground_coverage(
             px >= static_cast<int>(view.width) ||
             py >= static_cast<int>(view.height))
             return 0.F;
-        return view.foreground_mask[
-                   static_cast<std::size_t>(py) * view.width +
-                   static_cast<std::size_t>(px)] != 0
-            ? 1.F
-            : 0.F;
+        return static_cast<float>(
+                   view.foreground_mask[
+                       static_cast<std::size_t>(py) * view.width +
+                       static_cast<std::size_t>(px)]) /
+            mask_denominator;
     };
     return std::clamp(
         (sample(x0, y0) * (1.F - tx) + sample(x0 + 1, y0) * tx) *
@@ -356,6 +371,15 @@ HostTrainingView load_host_training_view(
     const bool has_projected_mask =
         view.foreground_mask.size() ==
         static_cast<std::size_t>(view.width) * view.height;
+    // Older/internal MVS paths used binary 0/1 masks while projected ROI
+    // masks use 8-bit 0..255 coverage. Accept both representations so a
+    // binary mask cannot silently become 255 times too transparent.
+    const float projected_mask_denominator =
+        has_projected_mask &&
+            *std::max_element(
+                view.foreground_mask.begin(), view.foreground_mask.end()) <= 1
+        ? 1.F
+        : 255.F;
     std::vector<int> rgba(pixels);
     const bool direct_source =
         view.k1 == 0.F && view.k2 == 0.F &&
@@ -380,18 +404,21 @@ HostTrainingView load_host_training_view(
                 const float coverage =
                     source_mask.width == source.width &&
                             source_mask.height == source.height
-                        ? (source_mask.pixels[pixel] > 127 ? 1.F : 0.F)
+                        ? static_cast<float>(
+                              source_mask.pixels[pixel]) /
+                              255.F
                         : sample_mask_coverage(
                               source_mask, source,
                               static_cast<float>(x),
                               static_cast<float>(y));
-                alpha = coverage > 0.5F ? 255 : 0;
+                alpha = quantize_channel(coverage);
             }
             if (has_projected_mask)
                 alpha = std::min(
                     alpha, quantize_channel(
                         sample_projected_foreground_coverage(
-                            view, camera, x, y)));
+                            view, camera, x, y,
+                            projected_mask_denominator)));
             rgba[pixel] = pack_rgba(red, green, blue, alpha);
             continue;
         }
@@ -401,15 +428,14 @@ HostTrainingView load_host_training_view(
         green = quantize_channel(sample_rgb(source, sx, sy, 1));
         blue = quantize_channel(sample_rgb(source, sx, sy, 2));
         if (has_source_mask)
-            alpha = sample_mask_coverage(
-                        source_mask, source, sx, sy) > 0.5F
-                ? 255
-                : 0;
+            alpha = quantize_channel(
+                sample_mask_coverage(source_mask, source, sx, sy));
         if (has_projected_mask)
             alpha = std::min(
                 alpha, quantize_channel(
                     sample_projected_foreground_coverage(
-                        view, camera, x, y)));
+                        view, camera, x, y,
+                        projected_mask_denominator)));
         rgba[pixel] = pack_rgba(red, green, blue, alpha);
     }
 

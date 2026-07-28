@@ -1166,8 +1166,26 @@ void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
 #endif
 
     const auto images = detail::load_view_images(scene, options);
-    for (std::size_t i = 0; i < scene.views.size(); ++i)
-        scene.views[i].foreground_mask = images[i].mask;
+    for (std::size_t i = 0; i < scene.views.size(); ++i) {
+        auto& persistent_mask = scene.views[i].foreground_mask;
+        const bool has_projected_coverage =
+            persistent_mask.size() ==
+            static_cast<std::size_t>(scene.views[i].width) *
+                scene.views[i].height;
+        // Keep a projected grayscale mask across the final PatchMatch pass.
+        // load_view_images intentionally thresholds it for the hot path, but
+        // replacing the persistent copy would discard the anti-aliased edge
+        // consumed later by GGGS. The first pass still imports an external
+        // binary mask when no projected coverage exists yet.
+        if (has_projected_coverage) continue;
+        persistent_mask = images[i].mask;
+        // ViewImage masks are intentionally binary for the PatchMatch hot
+        // path. MvsView masks are also consumed as 8-bit coverage by GGGS,
+        // so keep their persistent representation in the documented 0..255
+        // range instead of leaking binary 0/1 values downstream.
+        for (std::uint8_t& value : persistent_mask)
+            value = value == 0 ? 0 : 255;
+    }
     const unsigned threads = parallel::resolve_thread_count(scene.thread_count);
     const unsigned levels = options.sub_resolution_levels + 1;
     const ImagePyramids pyramids =

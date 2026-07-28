@@ -590,6 +590,27 @@ void test_mask_loading() {
     require(
         training.mask.to_vector() == std::vector<float>({1.F, 0.F, 0.F, 0.F}),
         "GGGS did not intersect the input and coarse-mesh masks");
+    view.foreground_mask = {1, 1, 1, 0};
+    const splat::TrainingView binary_training =
+        splat::make_training_view(view, options);
+    require(
+        binary_training.mask.to_vector() ==
+            std::vector<float>({1.F, 0.F, 0.F, 0.F}),
+        "GGGS interpreted a binary MVS mask as 8-bit fractional coverage");
+    io::RgbImage soft_mask{2, 2, {
+        128, 128, 128, 0, 0, 0,
+        0, 0, 0, 255, 255, 255}};
+    io::save_rgb_png(soft_mask, masks / "frame.png");
+    view.foreground_mask.clear();
+    const splat::TrainingView soft_training =
+        splat::make_training_view(view, options);
+    const auto soft_values = soft_training.mask.to_vector();
+    require(
+        soft_values.size() == 4 &&
+            std::abs(soft_values[0] - 128.F / 255.F) < 1e-6F &&
+            soft_values[1] == 0.F && soft_values[2] == 0.F &&
+            soft_values[3] == 1.F,
+        "GGGS discarded grayscale coverage from an asdiff mesh mask");
     std::filesystem::remove_all(root);
 }
 

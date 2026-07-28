@@ -1,6 +1,8 @@
 #include "sfm/global_rotation.hpp"
 
-#include <Eigen/SparseCholesky>
+#include "core/logging.hpp"
+
+#include <Eigen/IterativeLinearSolvers>
 
 #include <algorithm>
 #include <cmath>
@@ -70,6 +72,15 @@ std::vector<Edge> collect_edges(
     for (Index pair_index = 0; pair_index < scene.pairs.size(); ++pair_index) {
         const ImagePair& pair = scene.pairs[pair_index];
         if (!pair.active || !pair.relative_pose.has_value()) continue;
+        if (pair.id1 >= scene.images.size() ||
+            pair.id2 >= scene.images.size() ||
+            pair.id1 == pair.id2) {
+            core::Logger::instance().warning(
+                "global rotation: ignoring invalid pair index=", pair_index,
+                " endpoints=", pair.id1, ',', pair.id2,
+                " images=", scene.images.size());
+            continue;
+        }
         // HasValidWeight() is checked before openMVS chooses either weight.
         if (pair.composite_weight() <= 0.F) continue;
         const double weight = use_pair_weights
@@ -173,8 +184,15 @@ Eigen::VectorXd shrinkage(const Eigen::VectorXd& value, double kappa) {
 class LadSolver {
 public:
     explicit LadSolver(const Eigen::SparseMatrix<double>& matrix)
-        : matrix_(matrix) {
-        solver_.compute(matrix_.transpose() * matrix_);
+        : matrix_(matrix),
+          normal_matrix_(matrix_.transpose() * matrix_) {
+        normal_matrix_.makeCompressed();
+        solver_.setMaxIterations(std::max(
+            100,
+            static_cast<int>(std::min<Eigen::Index>(
+                2000, normal_matrix_.cols() * 4))));
+        solver_.setTolerance(1e-10);
+        solver_.compute(normal_matrix_);
     }
 
     bool valid() const { return solver_.info() == Eigen::Success; }
@@ -191,7 +209,9 @@ public:
 
         // openMVS intentionally uses ten inner ADMM iterations here.
         for (int iteration = 0; iteration < 10; ++iteration) {
-            solution = solver_.solve(matrix_.transpose() * (rhs + z - u));
+            const Eigen::VectorXd normal_rhs =
+                matrix_.transpose() * (rhs + z - u);
+            solution = solver_.solve(normal_rhs);
             if (solver_.info() != Eigen::Success) return false;
             ax.noalias() = matrix_ * solution;
             relaxed_ax = ax;  // rho = alpha = 1
@@ -213,7 +233,12 @@ public:
 
 private:
     const Eigen::SparseMatrix<double>& matrix_;
-    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> solver_;
+    Eigen::SparseMatrix<double> normal_matrix_;
+    Eigen::ConjugateGradient<
+        Eigen::SparseMatrix<double>,
+        Eigen::Lower | Eigen::Upper,
+        Eigen::DiagonalPreconditioner<double>>
+        solver_;
 };
 
 void compute_residuals(
@@ -251,6 +276,10 @@ GlobalRotationSummary estimate_global_rotations(
     GlobalRotationSummary summary;
     const std::vector<Edge> edges = collect_edges(
         scene, options.use_pair_weights, options.reject_planar_pairs);
+    core::Logger::instance().debug(
+        "global rotation: collected edges=", edges.size(),
+        " pairs=", scene.pairs.size(),
+        " images=", scene.images.size());
     if (edges.empty() || scene.images.empty()) return summary;
 
     std::vector<Mat3> rotations;
@@ -259,6 +288,8 @@ GlobalRotationSummary estimate_global_rotations(
     if (!initialize_from_mst(
             scene.images.size(), edges, rotations, valid, fixed))
         return summary;
+    core::Logger::instance().debug(
+        "global rotation: initialized MST fixed=", fixed);
 
     std::vector<Index> free_images;
     std::vector<Index> image_to_free(scene.images.size(), k_invalid);
@@ -293,17 +324,26 @@ GlobalRotationSummary estimate_global_rotations(
     Eigen::SparseMatrix<double> tangent_matrix(
         valid_edge_count * 3, free_images.size() * 3);
     tangent_matrix.setFromTriplets(triplets.begin(), triplets.end());
+    core::Logger::instance().debug(
+        "global rotation: tangent rows=", tangent_matrix.rows(),
+        " cols=", tangent_matrix.cols(),
+        " nonzeros=", tangent_matrix.nonZeros());
     const Eigen::ArrayXd base_weights =
         Eigen::Map<const Eigen::ArrayXd>(row_weights.data(), row_weights.size());
     Eigen::VectorXd residuals(tangent_matrix.rows());
     Eigen::VectorXd step(tangent_matrix.cols());
     compute_residuals(edges, rotations, valid, residuals);
+    core::Logger::instance().debug(
+        "global rotation: initial residual_norm=", residuals.norm());
 
     if (options.max_l1_iterations > 0) {
         const Eigen::SparseMatrix<double> weighted_matrix =
             base_weights.matrix().asDiagonal() * tangent_matrix;
         LadSolver lad(weighted_matrix);
         if (!lad.valid()) return summary;
+        core::Logger::instance().debug(
+            "global rotation: LAD initialized iterations=",
+            options.max_l1_iterations);
         double current_norm = 0.0;
         for (unsigned iteration = 0; iteration < options.max_l1_iterations;
              ++iteration) {
@@ -320,11 +360,21 @@ GlobalRotationSummary estimate_global_rotations(
                 std::abs(previous_norm - current_norm) < 1e-10)
                 break;
         }
+        core::Logger::instance().debug(
+            "global rotation: LAD finished residual_norm=", residuals.norm());
     }
 
     if (options.max_irls_iterations > 0) {
-        Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
-        solver.analyzePattern(tangent_matrix.transpose() * tangent_matrix);
+        Eigen::ConjugateGradient<
+            Eigen::SparseMatrix<double>,
+            Eigen::Lower | Eigen::Upper,
+            Eigen::DiagonalPreconditioner<double>>
+            solver;
+        solver.setMaxIterations(std::max(
+            100,
+            static_cast<int>(std::min<Eigen::Index>(
+                2000, tangent_matrix.cols() * 4))));
+        solver.setTolerance(1e-10);
         const double sigma = options.irls_sigma_deg * k_pi / 180.0;
         Eigen::ArrayXd robust_weights(tangent_matrix.rows());
         for (unsigned iteration = 0; iteration < options.max_irls_iterations;
@@ -348,7 +398,10 @@ GlobalRotationSummary estimate_global_rotations(
             const Eigen::SparseMatrix<double> at_weight =
                 tangent_matrix.transpose() *
                 robust_weights.matrix().asDiagonal();
-            solver.factorize(at_weight * tangent_matrix);
+            Eigen::SparseMatrix<double> normal_matrix =
+                at_weight * tangent_matrix;
+            normal_matrix.makeCompressed();
+            solver.compute(normal_matrix);
             if (solver.info() != Eigen::Success) return summary;
             step = solver.solve(at_weight * residuals);
             if (solver.info() != Eigen::Success || !step.allFinite())
@@ -358,6 +411,8 @@ GlobalRotationSummary estimate_global_rotations(
             ++summary.iterations;
             if (average_step < options.step_convergence_threshold) break;
         }
+        core::Logger::instance().debug(
+            "global rotation: IRLS finished residual_norm=", residuals.norm());
     }
 
     for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {

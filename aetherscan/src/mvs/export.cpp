@@ -316,6 +316,175 @@ DenseCloud load_dense_ply(const std::filesystem::path& path) {
     return cloud;
 }
 
+Mesh load_mesh_ply(const std::filesystem::path& path) {
+    // Reuse the point loader for its validated vertex conversion, then make a
+    // second streaming pass for the face element. Mesh PLYs are small enough
+    // compared with the dense cloud that this keeps the parser straightforward
+    // without adding a second set of subtly different vertex conversions.
+    DenseCloud cloud = load_dense_ply(path);
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("Failed to open mesh PLY: " + path.string());
+
+    std::string line;
+    if (!std::getline(in, line))
+        throw std::runtime_error("Invalid mesh PLY header: " + path.string());
+    bool ascii = false;
+    bool binary_little = false;
+    bool in_vertex = false;
+    bool in_face = false;
+    bool saw_end_header = false;
+    std::size_t vertex_count = 0;
+    std::size_t face_count = 0;
+    std::vector<PlyProperty> vertex_properties;
+    std::vector<PlyProperty> face_properties;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::istringstream tokens(line);
+        std::string keyword;
+        tokens >> keyword;
+        if (keyword == "format") {
+            std::string format;
+            tokens >> format;
+            ascii = format == "ascii";
+            binary_little = format == "binary_little_endian";
+            if (!ascii && !binary_little)
+                throw std::runtime_error(
+                    "Mesh PLY must be ASCII or binary little endian");
+        } else if (keyword == "element") {
+            std::string name;
+            std::size_t count = 0;
+            tokens >> name >> count;
+            in_vertex = name == "vertex";
+            in_face = name == "face";
+            if (in_vertex) vertex_count = count;
+            if (in_face) face_count = count;
+        } else if (keyword == "property" && (in_vertex || in_face)) {
+            std::string type;
+            tokens >> type;
+            PlyProperty property;
+            if (type == "list") {
+                std::string count_type;
+                std::string value_type;
+                tokens >> count_type >> value_type >> property.name;
+                property.list = true;
+                property.count_type = parse_ply_scalar(count_type);
+                property.value_type = parse_ply_scalar(value_type);
+            } else {
+                tokens >> property.name;
+                property.value_type = parse_ply_scalar(type);
+            }
+            (in_vertex ? vertex_properties : face_properties)
+                .push_back(std::move(property));
+        } else if (keyword == "end_header") {
+            saw_end_header = true;
+            break;
+        }
+    }
+    if (!saw_end_header || (!ascii && !binary_little) ||
+        vertex_count != cloud.points.size() || face_count == 0 ||
+        face_properties.empty())
+        throw std::runtime_error(
+            "PLY has no readable mesh face element: " + path.string());
+
+    std::vector<char> payload;
+    std::size_t offset = 0;
+    if (binary_little) {
+        const auto start = in.tellg();
+        in.seekg(0, std::ios::end);
+        const auto end = in.tellg();
+        if (start < 0 || end < start)
+            throw std::runtime_error("Unable to size binary mesh PLY payload");
+        payload.resize(static_cast<std::size_t>(end - start));
+        in.seekg(start);
+        if (!payload.empty())
+            in.read(payload.data(), static_cast<std::streamsize>(payload.size()));
+        if (!in) throw std::runtime_error("Failed to read binary mesh PLY payload");
+    }
+    const auto read_scalar = [&](const PlyScalar type) {
+        double value = 0.0;
+        if (ascii) {
+            if (!(in >> value))
+                throw std::runtime_error("Unexpected end of ASCII mesh PLY");
+        } else {
+            value = read_ply_binary_scalar(payload, offset, type);
+        }
+        return value;
+    };
+    const auto read_property = [&](const PlyProperty& property) {
+        std::vector<double> values;
+        if (!property.list) {
+            values.push_back(read_scalar(property.value_type));
+            return values;
+        }
+        const double count_value = read_scalar(property.count_type);
+        if (!std::isfinite(count_value) || count_value < 0.0 ||
+            count_value > 100'000'000.0)
+            throw std::runtime_error("Invalid mesh PLY list length");
+        const auto count = static_cast<std::size_t>(count_value);
+        values.reserve(count);
+        for (std::size_t item = 0; item < count; ++item)
+            values.push_back(read_scalar(property.value_type));
+        return values;
+    };
+
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex)
+        for (const PlyProperty& property : vertex_properties)
+            static_cast<void>(read_property(property));
+
+    Mesh mesh;
+    mesh.vertices.reserve(vertex_count);
+    const auto has_vertex_property = [&](const char* name) {
+        return std::any_of(
+            vertex_properties.begin(), vertex_properties.end(),
+            [name](const PlyProperty& property) {
+                return !property.list && property.name == name;
+            });
+    };
+    const bool has_normals =
+        has_vertex_property("nx") && has_vertex_property("ny") &&
+        has_vertex_property("nz");
+    const bool has_colors =
+        has_vertex_property("red") && has_vertex_property("green") &&
+        has_vertex_property("blue");
+    if (has_normals) mesh.normals.reserve(vertex_count);
+    if (has_colors) mesh.colors.reserve(vertex_count);
+    for (DensePoint& point : cloud.points) {
+        mesh.vertices.push_back(point.position);
+        if (has_normals) mesh.normals.push_back(point.normal);
+        if (has_colors) mesh.colors.push_back(point.color);
+    }
+
+    mesh.faces.reserve(face_count);
+    for (std::size_t face = 0; face < face_count; ++face) {
+        std::vector<Index> polygon;
+        for (const PlyProperty& property : face_properties) {
+            std::vector<double> values = read_property(property);
+            if (!property.list ||
+                (property.name != "vertex_indices" &&
+                 property.name != "vertex_index"))
+                continue;
+            polygon.reserve(values.size());
+            for (const double value : values) {
+                if (!std::isfinite(value) || value < 0.0 ||
+                    value >= static_cast<double>(vertex_count) ||
+                    value > static_cast<double>(
+                        (std::numeric_limits<Index>::max)()))
+                    throw std::runtime_error("Mesh PLY face index is out of range");
+                polygon.push_back(static_cast<Index>(value));
+            }
+        }
+        if (polygon.size() < 3) continue;
+        for (std::size_t corner = 1; corner + 1 < polygon.size(); ++corner)
+            mesh.faces.emplace_back(
+                static_cast<int>(polygon[0]),
+                static_cast<int>(polygon[corner]),
+                static_cast<int>(polygon[corner + 1]));
+    }
+    if (mesh.faces.empty())
+        throw std::runtime_error("Mesh PLY contains no valid triangles");
+    return mesh;
+}
+
 void save_roi(
     const OrientedBoundingBox& roi, const std::filesystem::path& path) {
     if (!roi.valid) throw std::invalid_argument("Cannot save an invalid ROI");

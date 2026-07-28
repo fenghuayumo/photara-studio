@@ -386,17 +386,54 @@ void rasterize_triangle(
     const int min_y = std::max(0, static_cast<int>(std::floor(std::min({ay, by, cy}))));
     const int max_y = std::min(static_cast<int>(view.height) - 1,
         static_cast<int>(std::ceil(std::max({ay, by, cy}))));
+    constexpr std::array<std::array<float, 2>, 4> samples{{
+        {{0.25F, 0.25F}}, {{0.75F, 0.25F}},
+        {{0.25F, 0.75F}}, {{0.75F, 0.75F}}}};
     for (int y = min_y; y <= max_y; ++y) for (int x = min_x; x <= max_x; ++x) {
-        const float px = static_cast<float>(x) + 0.5F;
-        const float py = static_cast<float>(y) + 0.5F;
-        const float wa = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area;
-        const float wb = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area;
-        const float wc = 1.F - wa - wb;
-        if (wa < -1e-4F || wb < -1e-4F || wc < -1e-4F) continue;
-        const float z = wa * pa.z() + wb * pb.z() + wc * pc.z();
+        float z = std::numeric_limits<float>::max();
+        for (const auto& sample : samples) {
+            const float px = static_cast<float>(x) + sample[0];
+            const float py = static_cast<float>(y) + sample[1];
+            const float wa =
+                ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area;
+            const float wb =
+                ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area;
+            const float wc = 1.F - wa - wb;
+            if (wa < -1e-4F || wb < -1e-4F || wc < -1e-4F) continue;
+            z = std::min(z, wa * pa.z() + wb * pb.z() + wc * pc.z());
+        }
+        if (!std::isfinite(z) ||
+            z == std::numeric_limits<float>::max())
+            continue;
         const std::size_t index = static_cast<std::size_t>(y) * view.width + x;
         if (z < zbuffer[index]) { zbuffer[index] = z; mask[index] = 255; }
     }
+}
+
+float projection_edge_limit(
+    const Mesh& mesh, const float maximum_edge_factor) {
+    if (mesh.faces.empty() || !(maximum_edge_factor > 0.F)) return 0.F;
+    std::vector<float> lengths;
+    lengths.reserve(3 * mesh.faces.size());
+    for (const Eigen::Vector3i& face : mesh.faces) {
+        if (face.minCoeff() < 0 ||
+            face.maxCoeff() >= static_cast<int>(mesh.vertices.size()))
+            continue;
+        for (int slot = 0; slot < 3; ++slot) {
+            const float length =
+                (mesh.vertices[static_cast<std::size_t>(face[slot])] -
+                 mesh.vertices[
+                     static_cast<std::size_t>(face[(slot + 1) % 3])])
+                    .norm();
+            if (std::isfinite(length) && length > 0.F)
+                lengths.push_back(length);
+        }
+    }
+    if (lengths.empty()) return 0.F;
+    const auto middle = lengths.begin() +
+        static_cast<std::ptrdiff_t>(lengths.size() / 2);
+    std::nth_element(lengths.begin(), middle, lengths.end());
+    return *middle * std::max(maximum_edge_factor, 1.F);
 }
 
 void dilate(
@@ -476,13 +513,59 @@ void close_broken_silhouette(
     erode(mask, width, height, radius);
 }
 
+void feather_mask(
+    std::vector<std::uint8_t>& mask, const std::uint32_t width,
+    const std::uint32_t height, const unsigned radius) {
+    if (radius == 0 || mask.empty()) return;
+    const int r = static_cast<int>(radius);
+    const std::uint64_t diameter = 2ULL * radius + 1ULL;
+    std::vector<std::uint32_t> horizontal(mask.size(), 0);
+    std::vector<std::uint8_t> output(mask.size(), 0);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        std::uint32_t sum = 0;
+        for (int x = -r; x < static_cast<int>(width) + r; ++x) {
+            const int add = x + r;
+            const int remove = x - r - 1;
+            if (add >= 0 && add < static_cast<int>(width))
+                sum += mask[static_cast<std::size_t>(y) * width + add];
+            if (remove >= 0 && remove < static_cast<int>(width))
+                sum -= mask[static_cast<std::size_t>(y) * width + remove];
+            if (x >= 0 && x < static_cast<int>(width))
+                horizontal[static_cast<std::size_t>(y) * width + x] = sum;
+        }
+    }
+    for (std::uint32_t x = 0; x < width; ++x) {
+        std::uint64_t sum = 0;
+        for (int y = -r; y < static_cast<int>(height) + r; ++y) {
+            const int add = y + r;
+            const int remove = y - r - 1;
+            if (add >= 0 && add < static_cast<int>(height))
+                sum += horizontal[static_cast<std::size_t>(add) * width + x];
+            if (remove >= 0 && remove < static_cast<int>(height))
+                sum -= horizontal[
+                    static_cast<std::size_t>(remove) * width + x];
+            if (y >= 0 && y < static_cast<int>(height)) {
+                const std::uint64_t rounded =
+                    sum + diameter * diameter / 2ULL;
+                output[static_cast<std::size_t>(y) * width + x] =
+                    static_cast<std::uint8_t>(
+                        std::min<std::uint64_t>(
+                            255ULL, rounded / (diameter * diameter)));
+            }
+        }
+    }
+    mask.swap(output);
+}
+
 std::size_t fill_enclosed_holes(
     std::vector<std::uint8_t>& mask, const std::uint32_t width,
-    const std::uint32_t height) {
+    const std::uint32_t height, const std::size_t maximum_hole_pixels) {
     if (width == 0 || height == 0 || mask.empty()) return 0;
 
     // Mark all background reachable from the image border. Any zero pixel
-    // left afterwards is an enclosed hole in the projected silhouette.
+    // left afterwards is an enclosed hole in the projected silhouette. Only
+    // fill small components: large holes are usually real gaps between limbs,
+    // handles, or supports and must remain background.
     // Reuse value 1 as the temporary exterior marker so this needs only a
     // compact traversal queue in addition to the mask itself.
     std::vector<std::uint32_t> queue;
@@ -515,15 +598,85 @@ std::size_t fill_enclosed_holes(
     }
 
     std::size_t filled = 0;
-    for (auto& pixel : mask) {
-        if (pixel == 0) {
-            pixel = 255;
-            ++filled;
-        } else if (pixel == 1) {
-            pixel = 0;
+    std::vector<std::uint32_t> component;
+    for (std::uint32_t seed = 0; seed < mask.size(); ++seed) {
+        if (mask[seed] != 0) continue;
+        component.clear();
+        queue.clear();
+        mask[seed] = 2;
+        queue.push_back(seed);
+        for (std::size_t cursor = 0; cursor < queue.size(); ++cursor) {
+            const std::uint32_t index = queue[cursor];
+            component.push_back(index);
+            const std::uint32_t x = index % width;
+            const std::uint32_t y = index / width;
+            const auto enqueue_hole = [&](const std::uint32_t neighbor) {
+                if (mask[neighbor] == 0) {
+                    mask[neighbor] = 2;
+                    queue.push_back(neighbor);
+                }
+            };
+            if (x > 0) enqueue_hole(index - 1);
+            if (x + 1 < width) enqueue_hole(index + 1);
+            if (y > 0) enqueue_hole(index - width);
+            if (y + 1 < height) enqueue_hole(index + width);
         }
+        const bool should_fill =
+            maximum_hole_pixels != 0 &&
+            component.size() <= maximum_hole_pixels;
+        for (const std::uint32_t index : component)
+            mask[index] = should_fill ? 255 : 0;
+        if (should_fill) filled += component.size();
     }
+    for (auto& pixel : mask)
+        if (pixel == 1) pixel = 0;
     return filled;
+}
+
+std::size_t remove_small_foreground_islands(
+    std::vector<std::uint8_t>& mask, const std::uint32_t width,
+    const std::uint32_t height, const std::size_t maximum_pixels) {
+    if (mask.empty() || maximum_pixels == 0) return 0;
+    std::vector<std::uint8_t> visited(mask.size(), 0);
+    std::vector<std::uint32_t> component;
+    component.reserve(maximum_pixels + 1);
+    std::vector<std::uint32_t> queue;
+    queue.reserve(maximum_pixels + 1);
+    std::size_t removed = 0;
+    for (std::uint32_t seed = 0; seed < mask.size(); ++seed) {
+        if (visited[seed] || mask[seed] == 0) continue;
+        visited[seed] = 1;
+        queue.clear();
+        component.clear();
+        queue.push_back(seed);
+        for (std::size_t cursor = 0; cursor < queue.size(); ++cursor) {
+            const std::uint32_t pixel = queue[cursor];
+            component.push_back(pixel);
+            const int x = static_cast<int>(pixel % width);
+            const int y = static_cast<int>(pixel / width);
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    const int nx = x + dx;
+                    const int ny = y + dy;
+                    if (nx < 0 || ny < 0 ||
+                        nx >= static_cast<int>(width) ||
+                        ny >= static_cast<int>(height))
+                        continue;
+                    const auto next = static_cast<std::uint32_t>(
+                        static_cast<std::uint32_t>(ny) * width +
+                        static_cast<std::uint32_t>(nx));
+                    if (visited[next] || mask[next] == 0) continue;
+                    visited[next] = 1;
+                    queue.push_back(next);
+                }
+            }
+        }
+        if (component.size() > maximum_pixels) continue;
+        for (const std::uint32_t pixel : component) mask[pixel] = 0;
+        removed += component.size();
+    }
+    return removed;
 }
 
 }  // namespace
@@ -572,6 +725,22 @@ bool estimate_automatic_roi(MvsScene& scene, const DensifyOptions& options) {
         scene.dense_cloud.points, selected, options.roi_margin_fraction,
         has_plane ? &plane_n : nullptr);
     if (!roi.valid) return false;
+    if (has_plane &&
+        options.auto_roi_ground_margin_fraction >= 0.F &&
+        options.auto_roi_ground_margin_fraction >
+            options.roi_margin_fraction) {
+        // axes.col(2) is the ground normal and points from the support plane
+        // toward the subject. Extend only the negative side so the complete
+        // base is retained without widening the horizontal ROI into a table.
+        const float denominator =
+            1.F + std::max(0.F, options.roi_margin_fraction);
+        const float unpadded_half = roi.half_extent.z() / denominator;
+        const float extra = unpadded_half *
+            (options.auto_roi_ground_margin_fraction -
+             options.roi_margin_fraction);
+        roi.center -= roi.axes.col(2) * (0.5F * extra);
+        roi.half_extent.z() += 0.5F * extra;
+    }
 
     const std::size_t subject_count = static_cast<std::size_t>(std::count_if(
         scene.dense_cloud.points.begin(), scene.dense_cloud.points.end(),
@@ -600,6 +769,89 @@ bool estimate_automatic_roi(MvsScene& scene, const DensifyOptions& options) {
     return true;
 }
 
+void build_depth_roi_foreground_masks(
+    MvsScene& scene, const DensifyOptions& options) {
+    core::StageScope stage("mvs.depth_roi_masks");
+    if (!scene.roi.valid)
+        throw std::invalid_argument(
+            "Depth ROI masks require a valid reconstruction ROI");
+    const unsigned threads =
+        parallel::resolve_thread_count(scene.thread_count);
+    const unsigned close_radius = options.auto_roi_mask_close_px != 0
+        ? std::min(options.auto_roi_mask_close_px, 4U)
+        : 2U;
+    const unsigned dilate_radius =
+        std::min(options.auto_roi_mask_dilate_px, 2U);
+    const std::size_t maximum_hole_pixels =
+        static_cast<std::size_t>(2U * close_radius + 1U) *
+        static_cast<std::size_t>(2U * close_radius + 1U);
+    std::vector<std::uint64_t> foreground(scene.views.size(), 0);
+    std::vector<std::uint64_t> filled(scene.views.size(), 0);
+    std::vector<std::uint64_t> removed_islands(scene.views.size(), 0);
+    parallel::parallel_for(
+        scene.views.size(), threads, [&](const std::size_t view_index) {
+        MvsView& view = scene.views[view_index];
+        const std::size_t pixels =
+            static_cast<std::size_t>(view.width) * view.height;
+        if (view.depth_map.depth.size() != pixels)
+            throw std::runtime_error(
+                "Depth ROI mask view has no matching depth map");
+        std::vector<std::uint8_t> mask(pixels, 0);
+        for (std::uint32_t y = 0; y < view.height; ++y) {
+            for (std::uint32_t x = 0; x < view.width; ++x) {
+                const std::size_t pixel =
+                    static_cast<std::size_t>(y) * view.width + x;
+                const float depth = view.depth_map.depth[pixel];
+                if (!(depth > 0.F) || !std::isfinite(depth)) continue;
+                const Vec3f camera = view.unproject(
+                    static_cast<float>(x), static_cast<float>(y), depth);
+                const Vec3f world = view.pose
+                    .transform_camera_to_world(camera.cast<double>())
+                    .cast<float>();
+                if (scene.roi.contains(world)) mask[pixel] = 255;
+            }
+        }
+        close_broken_silhouette(
+            mask, view.width, view.height, close_radius);
+        filled[view_index] = fill_enclosed_holes(
+            mask, view.width, view.height, maximum_hole_pixels);
+        dilate(mask, view.width, view.height, dilate_radius);
+        removed_islands[view_index] = remove_small_foreground_islands(
+            mask, view.width, view.height,
+            std::max<std::size_t>(32, pixels / 1000));
+        feather_mask(
+            mask, view.width, view.height,
+            options.auto_roi_mask_feather_px);
+        foreground[view_index] = static_cast<std::uint64_t>(std::count_if(
+            mask.begin(), mask.end(),
+            [](const std::uint8_t value) { return value >= 128; }));
+        view.foreground_mask = std::move(mask);
+    });
+    const std::uint64_t total_pixels = std::accumulate(
+        scene.views.begin(), scene.views.end(), std::uint64_t{0},
+        [](const std::uint64_t sum, const MvsView& view) {
+            return sum + static_cast<std::uint64_t>(view.width) * view.height;
+        });
+    const std::uint64_t total_foreground = std::accumulate(
+        foreground.begin(), foreground.end(), std::uint64_t{0});
+    core::Logger::instance().info(
+        "depth ROI foreground masks: views=", scene.views.size(),
+        " foreground_fraction=",
+        total_pixels == 0
+            ? 0.0
+            : static_cast<double>(total_foreground) /
+                  static_cast<double>(total_pixels),
+        " close_radius=", close_radius,
+        " dilate_radius=", dilate_radius,
+        " filled_hole_pixels=",
+        std::accumulate(filled.begin(), filled.end(), std::uint64_t{0}),
+        " removed_island_pixels=",
+        std::accumulate(
+            removed_islands.begin(), removed_islands.end(),
+            std::uint64_t{0}));
+    stage.finish();
+}
+
 void build_projected_foreground_masks(
     MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.project_roi_masks");
@@ -619,6 +871,40 @@ void build_projected_foreground_masks(
         for (const auto& face : f) box.faces.emplace_back(face[0], face[1], face[2]);
     }
     const Mesh* source = scene.mesh.faces.empty() ? &box : &scene.mesh;
+    std::vector<Eigen::Vector3i> projection_faces;
+    float projection_maximum_edge = 0.F;
+    std::size_t rejected_long_faces = 0;
+    if (source != &box) {
+        projection_maximum_edge =
+            projection_edge_limit(*source, options.mesh_max_edge_voxels);
+        projection_faces.reserve(source->faces.size());
+        for (const Eigen::Vector3i& face : source->faces) {
+            if (face.minCoeff() < 0 ||
+                face.maxCoeff() >= static_cast<int>(source->vertices.size()))
+                continue;
+            float longest = 0.F;
+            for (int slot = 0; slot < 3; ++slot)
+                longest = std::max(
+                    longest,
+                    (source->vertices[
+                         static_cast<std::size_t>(face[slot])] -
+                     source->vertices[static_cast<std::size_t>(
+                         face[(slot + 1) % 3])])
+                        .norm());
+            if (projection_maximum_edge > 0.F &&
+                longest > projection_maximum_edge) {
+                ++rejected_long_faces;
+                continue;
+            }
+            projection_faces.push_back(face);
+        }
+        if (projection_faces.empty()) {
+            projection_faces = source->faces;
+            rejected_long_faces = 0;
+        }
+    }
+    const auto& faces =
+        source == &box ? box.faces : projection_faces;
     const unsigned threads =
         parallel::resolve_thread_count(scene.thread_count);
     std::uint32_t minimum_view_dimension =
@@ -630,12 +916,15 @@ void build_projected_foreground_masks(
         minimum_view_dimension = 0;
     const unsigned adaptive_close_radius = std::clamp(
         std::max(
-            3U * options.auto_roi_mask_dilate_px,
-            minimum_view_dimension / 40U),
+            options.auto_roi_mask_dilate_px,
+            minimum_view_dimension / 160U),
         1U, 32U);
     const unsigned close_radius = options.auto_roi_mask_close_px != 0
         ? options.auto_roi_mask_close_px
         : adaptive_close_radius;
+    const std::size_t maximum_hole_pixels =
+        static_cast<std::size_t>(2U * close_radius + 1U) *
+        static_cast<std::size_t>(2U * close_radius + 1U);
     std::vector<std::size_t> filled_hole_pixels(scene.views.size(), 0);
     parallel::parallel_for(
         scene.views.size(), threads, [&](const std::size_t view_index) {
@@ -644,7 +933,7 @@ void build_projected_foreground_masks(
         const bool has_input_mask = view.foreground_mask.size() == size;
         std::vector<std::uint8_t> projected(size, 0);
         std::vector<float> zbuffer(size, std::numeric_limits<float>::max());
-        for (const auto& face : source->faces) {
+        for (const auto& face : faces) {
             const int a = face.x(), b = face.y(), c = face.z();
             if (a < 0 || b < 0 || c < 0 ||
                 static_cast<std::size_t>(std::max({a,b,c})) >= source->vertices.size()) continue;
@@ -655,7 +944,9 @@ void build_projected_foreground_masks(
             close_broken_silhouette(
                 projected, view.width, view.height, close_radius);
             filled_hole_pixels[view_index] =
-                fill_enclosed_holes(projected, view.width, view.height);
+                fill_enclosed_holes(
+                    projected, view.width, view.height,
+                    maximum_hole_pixels);
         }
         dilate(projected, view.width, view.height, options.auto_roi_mask_dilate_px);
         if (has_input_mask) {
@@ -683,6 +974,10 @@ void build_projected_foreground_masks(
             }
             for (std::size_t i = 0; i < size; ++i)
                 projected[i] = (projected[i] && view.foreground_mask[i]) ? 255 : 0;
+        } else if (source != &box) {
+            feather_mask(
+                projected, view.width, view.height,
+                options.auto_roi_mask_feather_px);
         }
         view.foreground_mask.swap(projected);
     });
@@ -698,7 +993,14 @@ void build_projected_foreground_masks(
     core::Logger::instance().info(
         "projected foreground masks: views=", scene.views.size(),
         " coarse_mesh=", source != &box ? 1 : 0,
+        " raster_faces=", faces.size(),
+        " rejected_long_faces=", rejected_long_faces,
+        " projection_edge_limit=", projection_maximum_edge,
         " close_radius=", source != &box ? close_radius : 0,
+        " maximum_hole_pixels=",
+        source != &box ? maximum_hole_pixels : 0,
+        " feather_radius=",
+        source != &box ? options.auto_roi_mask_feather_px : 0,
         " hole_filled_views=", views_with_holes,
         " filled_hole_pixels=", total_filled,
         " maximum_view_hole_pixels=", maximum_filled);

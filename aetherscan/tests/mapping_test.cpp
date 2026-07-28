@@ -140,6 +140,65 @@ void test_global_rotation_weighting() {
     expect(bad_edge_error > 0.14, "rotation outlier retains expected residual");
 }
 
+void test_global_rotation_dense_graph_iterative_solve() {
+    constexpr Index k_views = 76;
+    Scene scene;
+    scene.images.resize(k_views);
+    std::vector<Mat3> rotations(k_views);
+    for (Index image_id = 0; image_id < k_views; ++image_id) {
+        scene.images[image_id].id = image_id;
+        rotations[image_id] =
+            axis_rotation(Vec3::UnitY(), 360.0 * image_id / k_views) *
+            axis_rotation(Vec3::UnitX(), 2.0 * std::sin(0.3 * image_id));
+    }
+
+    for (Index first = 0; first < k_views; ++first) {
+        for (Index offset = 1; offset <= 8; ++offset) {
+            const Index second = first + offset;
+            if (second >= k_views) break;
+            Mat3 relative =
+                rotations[second] * rotations[first].transpose();
+            if ((first * 11 + second) % 53 == 0)
+                relative =
+                    axis_rotation(Vec3::UnitZ(), 18.0) * relative;
+            ImagePair pair(first, second);
+            pair.relative_pose = Pose3D{relative, Vec3::Zero()};
+            pair.weight_spatial =
+                0.5F + 0.5F * static_cast<float>((first + second) % 7) / 6.F;
+            pair.matches.resize(200 + (first * 17 + second) % 800);
+            scene.pairs.push_back(std::move(pair));
+        }
+    }
+
+    // A corrupt checkpoint must be rejected before it reaches graph storage.
+    ImagePair invalid(0, k_views + 5);
+    invalid.relative_pose = Pose3D{Mat3::Identity(), Vec3::Zero()};
+    invalid.weight_spatial = 1.F;
+    invalid.matches.resize(500);
+    scene.pairs.push_back(std::move(invalid));
+
+    GlobalRotationOptions options;
+    options.max_relative_rotation_error_deg = 0.0;
+    const GlobalRotationSummary summary =
+        estimate_global_rotations(scene, options);
+    expect(summary.success, "dense global rotation graph solves iteratively");
+    expect(summary.estimated_images == k_views,
+           "dense global rotation graph estimates every image");
+    expect(summary.used_pairs > 500,
+           "dense global rotation graph retains broad connectivity");
+
+    double mean_error = 0.0;
+    for (Index image_id = 1; image_id < k_views; ++image_id) {
+        mean_error += rotation_error(
+            scene.images[image_id].pose.R *
+                scene.images[image_id - 1].pose.R.transpose(),
+            rotations[image_id] * rotations[image_id - 1].transpose());
+    }
+    mean_error /= static_cast<double>(k_views - 1);
+    expect(mean_error < 0.03,
+           "dense global rotation graph remains accurate with outliers");
+}
+
 void test_global_positioning_points_only() {
     constexpr int k_views = 4;
     constexpr int k_points = 30;
@@ -751,6 +810,7 @@ void test_dirty_track_updates_are_isolated() {
 int main() {
     test_pair_cycle_weighting();
     test_global_rotation_weighting();
+    test_global_rotation_dense_graph_iterative_solve();
     test_global_positioning_points_only();
     test_large_point_only_positioning_does_not_require_pairs();
     test_global_positioning_irls_downweights_bad_direction();

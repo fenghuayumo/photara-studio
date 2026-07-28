@@ -10,6 +10,7 @@
 #endif
 #if defined(AETHERSCAN_HAS_TEXTURE)
 #include "texture/bake.hpp"
+#include "texture/mask.hpp"
 #include "texture/options.hpp"
 #endif
 #if defined(AETHERSCAN_HAS_ASDIFF_MESH)
@@ -108,6 +109,8 @@ struct ReconstructCli {
     unsigned gggs_structure_freeze_iter{0};
     std::uint64_t gggs_densification_cap{10'000'000};
     bool mesh{false};
+    bool mvs_mesh_only{false};
+    std::filesystem::path mask_mesh;
     bool mesh_obj{false};
     std::string mesh_method{"auto"};
     std::uint64_t mesh_max_points{2'000'000};
@@ -127,10 +130,15 @@ struct ReconstructCli {
     unsigned dense_resolution_level{1};
     bool dense_resolution_overridden{false};
     std::filesystem::path masks_dir;
-    std::string roi{"auto"};
-    float roi_margin{0.08F};
+    std::string foreground_mask_source{"depth"};
+    bool foreground_mask_only{false};
+    std::string roi{"none"};
+    float roi_margin{0.15F};
+    bool roi_margin_overridden{false};
     unsigned roi_mask_dilate{5};
     unsigned roi_mask_close{0};
+    unsigned roi_mask_feather{2};
+    bool roi_mask_feather_overridden{false};
     bool coarse_preview_only{false};
     bool texture{false};
     bool delight{false};
@@ -255,6 +263,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
+              << "  --mask-mesh PATH  load an existing PLY mesh and render masks/previews\n"
               << "  --mesh-method auto|tsdf|delaunay\n"
               << "               auto uses TSDF for GGGS, otherwise the quality preset\n"
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
@@ -425,6 +434,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("10000000"))
         ("mesh", "Build MVS mesh after densify (implies --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("mvs-mesh-only",
+         "External-dataset quality gate: mesh --dense-ply directly and "
+         "render source-resolution masks without GGGS",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("mask-mesh",
+         "Existing PLY mesh for --mvs-mesh-only; bypasses Delaunay and renders "
+         "asdiff masks plus normal-shaded previews",
+         cxxopts::value<std::string>()->default_value(""))
         ("mesh-method",
          "Mesh backend: auto, tsdf, or delaunay",
          cxxopts::value<std::string>()->default_value("auto"))
@@ -472,17 +489,26 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("masks",
          "Foreground mask directory (auto, - to disable, or explicit path)",
          cxxopts::value<std::string>()->default_value("auto"))
+        ("foreground-mask-source",
+         "Generated GGGS mask source when --masks is absent: depth, mesh, or none",
+         cxxopts::value<std::string>()->default_value("depth"))
+        ("foreground-mask-only",
+         "Stop after MVS depth/ROI foreground masks; do not train GGGS",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("roi", "Reconstruction ROI: none, auto, or 15-float OBB file",
-         cxxopts::value<std::string>()->default_value("auto"))
+         cxxopts::value<std::string>()->default_value("none"))
         ("roi-margin", "Automatic OBB fractional extent padding",
-         cxxopts::value<float>()->default_value("0.08"))
+         cxxopts::value<float>()->default_value("0.15"))
         ("roi-mask-dilate", "Coarse-mesh mask dilation in working pixels",
          cxxopts::value<unsigned>()->default_value("5"))
         ("roi-mask-close",
          "Coarse-mesh mask closing radius (0 = adaptive)",
          cxxopts::value<unsigned>()->default_value("0"))
+        ("roi-mask-feather",
+         "Coarse-mesh mask soft-edge radius in working pixels",
+         cxxopts::value<unsigned>()->default_value("2"))
         ("coarse-preview-only",
-         "Export automatic-ROI coarse mesh/masks and skip final MVS",
+         "Deprecated compatibility flag; single-pass MVS is always used",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("texture",
          "UV unwrap + projective texture bake on MVS mesh (implies --mesh)",
@@ -608,6 +634,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_densification_cap =
         result["gggs-densification-cap"].as<std::uint64_t>();
     cli.mesh = result["mesh"].as<bool>();
+    cli.mvs_mesh_only = result["mvs-mesh-only"].as<bool>();
+    const std::string mask_mesh_text = result["mask-mesh"].as<std::string>();
+    if (!mask_mesh_text.empty())
+        cli.mask_mesh = utf8_to_path(mask_mesh_text);
     cli.mesh_obj = result["mesh-obj"].as<bool>();
     cli.texture = result["texture"].as<bool>();
     cli.delight = result["delight"].as<bool>();
@@ -659,24 +689,50 @@ ReconstructCli parse_cli(int argc, char** argv) {
         const std::filesystem::path candidate =
             cli.images_dir.parent_path() / "masks";
         if (std::filesystem::is_directory(candidate)) cli.masks_dir = candidate;
-    } else if (masks_text == "-") {
-        cli.gggs_use_mask = false;
     } else if (!masks_text.empty() && masks_text != "-") {
         cli.masks_dir = utf8_to_path(masks_text);
     }
+    cli.foreground_mask_source =
+        result["foreground-mask-source"].as<std::string>();
+    cli.foreground_mask_only =
+        result["foreground-mask-only"].as<bool>();
+    if (cli.foreground_mask_source != "depth" &&
+        cli.foreground_mask_source != "mesh" &&
+        cli.foreground_mask_source != "none")
+        throw std::invalid_argument(
+            "--foreground-mask-source must be depth, mesh, or none");
+    if (cli.foreground_mask_source == "none" &&
+        cli.masks_dir.empty())
+        cli.gggs_use_mask = false;
     cli.roi = result["roi"].as<std::string>();
     cli.roi_margin = result["roi-margin"].as<float>();
+    cli.roi_margin_overridden = result.count("roi-margin") != 0;
     cli.roi_mask_dilate = result["roi-mask-dilate"].as<unsigned>();
     cli.roi_mask_close = result["roi-mask-close"].as<unsigned>();
+    cli.roi_mask_feather = result["roi-mask-feather"].as<unsigned>();
+    cli.roi_mask_feather_overridden =
+        result.count("roi-mask-feather") != 0;
     cli.coarse_preview_only = result["coarse-preview-only"].as<bool>();
     if (cli.roi_margin < 0.F || cli.roi_margin > 1.F)
         throw std::invalid_argument("--roi-margin must be in [0,1]");
     if (cli.delight) cli.texture = true;
     if (cli.texture) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
+    if (!cli.mask_mesh.empty()) cli.mvs_mesh_only = true;
+    if (cli.mvs_mesh_only) cli.mesh = true;
+    if (cli.foreground_mask_only) cli.dense = true;
     if (cli.mesh) cli.dense = true;
     const bool external_splat_dataset = !cli.splat_dataset.empty();
-    if (external_splat_dataset || !cli.dense_ply.empty()) cli.gggs = true;
+    if (cli.mvs_mesh_only) {
+        if (!external_splat_dataset ||
+            (cli.dense_ply.empty() && cli.mask_mesh.empty()))
+            throw std::invalid_argument(
+                "--mvs-mesh-only requires --splat-dataset and either "
+                "--dense-ply or --mask-mesh");
+        cli.gggs = false;
+    } else if (external_splat_dataset || !cli.dense_ply.empty()) {
+        cli.gggs = true;
+    }
     if (cli.gggs && !external_splat_dataset) cli.dense = true;
     if (external_splat_dataset && cli.texture)
         throw std::invalid_argument(
@@ -1299,7 +1355,8 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     const aetherscan::mvs::MvsScene& scene,
     const ReconstructCli& cli,
     const bool dense_input,
-    const aetherscan::mvs::DensifyOptions* mesh_options = nullptr) {
+    const aetherscan::mvs::DensifyOptions* mesh_options = nullptr,
+    const std::filesystem::path& generated_mask_dir = {}) {
     aetherscan::splat::TrainingOptions options;
     options.iterations = cli.gggs_iterations;
     options.max_gaussians = static_cast<std::size_t>(
@@ -1405,12 +1462,43 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     const bool all_views_have_projected_masks =
         !scene.views.empty() &&
         projected_mask_views == scene.views.size();
+    if (projected_mask_views != 0) {
+        std::uint64_t projected_mask_pixels = 0;
+        std::uint64_t projected_mask_nonzero = 0;
+        std::uint64_t projected_mask_foreground = 0;
+        std::uint64_t projected_mask_sum = 0;
+        for (const auto& view : scene.views) {
+            if (view.foreground_mask.size() !=
+                static_cast<std::size_t>(view.width) * view.height)
+                continue;
+            projected_mask_pixels += view.foreground_mask.size();
+            for (const std::uint8_t value : view.foreground_mask) {
+                projected_mask_nonzero += value != 0;
+                projected_mask_foreground += value > 127;
+                projected_mask_sum += value;
+            }
+        }
+        const double inverse_pixels = projected_mask_pixels == 0
+            ? 0.0
+            : 1.0 / static_cast<double>(projected_mask_pixels);
+        aetherscan::core::Logger::instance().info(
+            "gggs projected mask audit: pixels=", projected_mask_pixels,
+            " nonzero_fraction=",
+            projected_mask_nonzero * inverse_pixels,
+            " foreground_fraction=",
+            projected_mask_foreground * inverse_pixels,
+            " mean_coverage=",
+            projected_mask_sum * inverse_pixels / 255.0);
+    }
     // A coarse MVS mesh/ROI mask is an internal geometric constraint, not an
     // optional user mask. Keep using it even when `--masks -` disables
     // external mask discovery.
     options.use_mask =
-        cli.gggs_use_mask || all_views_have_projected_masks;
-    options.mask_dir = cli.masks_dir;
+        cli.gggs_use_mask || all_views_have_projected_masks ||
+        !generated_mask_dir.empty();
+    options.mask_dir = generated_mask_dir.empty()
+        ? cli.masks_dir
+        : generated_mask_dir;
     options.alpha_mode = cli.gggs_alpha_mode == "masked"
         ? aetherscan::splat::AlphaMode::masked
         : aetherscan::splat::AlphaMode::transparent;
@@ -1713,6 +1801,7 @@ int main(int argc, char** argv) {
             mesh_options.roi_margin_fraction = cli.roi_margin;
             mesh_options.auto_roi_mask_dilate_px = cli.roi_mask_dilate;
             mesh_options.auto_roi_mask_close_px = cli.roi_mask_close;
+            mesh_options.auto_roi_mask_feather_px = cli.roi_mask_feather;
             mesh_options.mesh_method = aetherscan::mvs::MeshMethod::tsdf;
             mesh_options.mesh_tsdf_voxel_scale =
                 cli.mesh_tsdf_voxel_scale > 0.F
@@ -1727,6 +1816,69 @@ int main(int argc, char** argv) {
                 !mesh_options.roi_path.empty())
                 prepare_loaded_point_cloud_roi(
                     loaded.scene, mesh_options);
+            if (cli.mvs_mesh_only) {
+                if (!cli.mask_mesh.empty()) {
+                    loaded.scene.mesh =
+                        aetherscan::mvs::load_mesh_ply(cli.mask_mesh);
+                    if (loaded.scene.roi.valid) {
+                        const std::size_t input_vertices =
+                            loaded.scene.mesh.vertices.size();
+                        const std::size_t input_faces =
+                            loaded.scene.mesh.faces.size();
+                        aetherscan::mvs::DensifyOptions crop_options;
+                        crop_options.mesh_clean = false;
+                        aetherscan::mvs::detail::clean_mesh(
+                            loaded.scene.mesh, crop_options,
+                            &loaded.scene.roi);
+                        aetherscan::core::Logger::instance().info(
+                            "external mask mesh cropped to ROI: vertices=",
+                            input_vertices, " -> ",
+                            loaded.scene.mesh.vertices.size(), " faces=",
+                            input_faces, " -> ",
+                            loaded.scene.mesh.faces.size());
+                    }
+                } else {
+                    mesh_options.mesh_method =
+                        aetherscan::mvs::MeshMethod::delaunay_cut;
+                    mesh_options.build_mesh = true;
+                    mesh_options.mesh_max_points = cli.mesh_max_points;
+                    if (cli.mesh_dist_insert_px >= 0.F)
+                        mesh_options.mesh_dist_insert_px =
+                            cli.mesh_dist_insert_px;
+                    mesh_options.mesh_use_free_space_support =
+                        cli.mesh_free_space_support;
+                    mesh_options.mesh_k_free_space_calibration_quantile =
+                        std::clamp(
+                            cli.mesh_free_space_quantile, 0.F, 0.999F);
+                    aetherscan::mvs::reconstruct_mesh(
+                        loaded.scene, mesh_options);
+                }
+                aetherscan::mvs::save_mesh_ply(
+                    loaded.scene.mesh, cli.output);
+#if defined(AETHERSCAN_HAS_TEXTURE)
+                const auto mask_directory =
+                    cli.output.parent_path() /
+                    (cli.output.stem().string() + "_masks");
+                aetherscan::texture::MeshMaskOptions mask_options;
+                mask_options.preview_directory =
+                    cli.output.parent_path() /
+                    (cli.output.stem().string() + "_mesh_previews");
+                const auto mask_summary =
+                    aetherscan::texture::render_mesh_foreground_masks(
+                        loaded.scene, mask_directory, mask_options);
+                aetherscan::core::Logger::instance().info(
+                    "mvs_mesh_quality_gate=", cli.output,
+                    cli.mask_mesh.empty()
+                        ? std::string{}
+                        : " source_mesh=" + cli.mask_mesh.string(),
+                    " vertices=", loaded.scene.mesh.vertices.size(),
+                    " faces=", loaded.scene.mesh.faces.size(),
+                    " mask_views=", mask_summary.image_count,
+                    " preview_views=", mask_summary.preview_count,
+                    " mask_directory=", mask_directory);
+#endif
+                return 0;
+            }
             auto mesh = run_gggs_training(
                 loaded.scene, cli, loaded.initial_points_dense,
                 cli.mesh ? &mesh_options : nullptr);
@@ -1838,12 +1990,31 @@ int main(int argc, char** argv) {
             if (cli.dense_resolution_overridden)
                 densify_opts.resolution_level = cli.dense_resolution_level;
             densify_opts.mask_dir = cli.masks_dir;
-            densify_opts.auto_roi = cli.roi == "auto";
+            const bool generated_depth_masks =
+                (cli.gggs || cli.foreground_mask_only) &&
+                cli.gggs_use_mask &&
+                cli.masks_dir.empty() &&
+                cli.foreground_mask_source == "depth";
+            if (generated_depth_masks &&
+                !cli.dense_resolution_overridden)
+                densify_opts.resolution_level = 0;
+            densify_opts.auto_roi =
+                cli.roi == "auto" || generated_depth_masks;
+            densify_opts.build_depth_roi_masks = generated_depth_masks;
             if (cli.roi != "none" && cli.roi != "auto" && cli.roi != "-")
                 densify_opts.roi_path = utf8_to_path(cli.roi);
             densify_opts.roi_margin_fraction = cli.roi_margin;
+            densify_opts.auto_roi_ground_margin_fraction =
+                generated_depth_masks
+                ? (cli.roi_margin_overridden ? cli.roi_margin : 0.25F)
+                : cli.roi_margin;
             densify_opts.auto_roi_mask_dilate_px = cli.roi_mask_dilate;
             densify_opts.auto_roi_mask_close_px = cli.roi_mask_close;
+            densify_opts.auto_roi_mask_feather_px =
+                generated_depth_masks &&
+                    !cli.roi_mask_feather_overridden
+                ? 1U
+                : cli.roi_mask_feather;
             densify_opts.coarse_preview_only = cli.coarse_preview_only;
             {
                 const std::filesystem::path diagnostic_dir =
@@ -1877,14 +2048,18 @@ int main(int argc, char** argv) {
             densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
             densify_opts.patchmatch_concurrent_views =
                 cli.patchmatch_concurrent_views;
-            // With GGGS enabled, the active mesh is extracted from the trained
-            // Gaussian median-depth/normal maps after optimization. Avoid
-            // spending time on an MVS mesh that would immediately be replaced.
-            densify_opts.build_mesh = cli.mesh && !cli.gggs;
-            if (!cli.mesh) {
+            // The default GGGS mask path comes from ROI-filtered MVS depth,
+            // so a Delaunay surface is no longer a prerequisite. Build the
+            // MVS mesh only when explicitly needed by a non-GGGS product,
+            // texture baking, or the legacy mesh-mask diagnostic path.
+            densify_opts.build_mesh =
+                cli.texture || (!cli.gggs && cli.mesh) ||
+                (cli.gggs && cli.gggs_use_mask &&
+                 cli.masks_dir.empty() &&
+                 cli.foreground_mask_source == "mesh");
+            if (!densify_opts.build_mesh) {
                 densify_opts.mesh_method = aetherscan::mvs::MeshMethod::none;
-            } else if (cli.mesh_method == "tsdf" ||
-                       (cli.mesh_method == "auto" && cli.gggs)) {
+            } else if (cli.mesh_method == "tsdf") {
                 densify_opts.mesh_method =
                     aetherscan::mvs::MeshMethod::tsdf;
             } else {
@@ -1921,6 +2096,13 @@ int main(int argc, char** argv) {
                           ? "tsdf"
                           : "none",
                 " mask_border_px=", densify_opts.mask_border_px,
+                " foreground_mask_source=",
+                densify_opts.build_depth_roi_masks
+                    ? "depth"
+                    : densify_opts.build_mesh &&
+                              cli.foreground_mask_source == "mesh"
+                          ? "mesh"
+                          : "external_or_none",
                 " roi=", densify_opts.auto_roi
                     ? "auto"
                     : densify_opts.roi_path.empty() ? "none" : "manual",
@@ -1976,10 +2158,87 @@ int main(int argc, char** argv) {
                 " points=", mvs_scene.dense_cloud.points.size(),
                 " densify_s=", dense_elapsed);
 
+            std::filesystem::path effective_mask_dir = cli.masks_dir;
+            if (!mvs_scene.mesh.faces.empty()) {
+                const auto mvs_mesh_path =
+                    out_dir /
+                    (cli.output.stem().string() + "_mvs_mesh.ply");
+                aetherscan::mvs::save_mesh_ply(
+                    mvs_scene.mesh, mvs_mesh_path);
+                aetherscan::core::Logger::instance().info(
+                    "mvs_mesh_ply=", mvs_mesh_path,
+                    " vertices=", mvs_scene.mesh.vertices.size(),
+                    " faces=", mvs_scene.mesh.faces.size());
+            }
+
+#if defined(AETHERSCAN_HAS_TEXTURE)
+            if ((cli.gggs || cli.foreground_mask_only) &&
+                cli.gggs_use_mask &&
+                effective_mask_dir.empty()) {
+                const bool depth_masks_ready = std::all_of(
+                    mvs_scene.views.begin(), mvs_scene.views.end(),
+                    [](const aetherscan::mvs::MvsView& view) {
+                        return view.foreground_mask.size() ==
+                            static_cast<std::size_t>(view.width) *
+                                view.height;
+                    });
+                if (depth_masks_ready) {
+                    const auto preview_directory =
+                        out_dir /
+                        (cli.output.stem().string() +
+                         "_depth_roi_masks");
+                    const auto mask_summary =
+                        aetherscan::texture::export_view_foreground_masks(
+                            mvs_scene, preview_directory);
+                    aetherscan::core::Logger::instance().info(
+                        "gggs_mask_source=mvs_depth_roi",
+                        " views=", mask_summary.image_count,
+                        " pixels=", mask_summary.pixel_count,
+                        " preview_directory=", preview_directory);
+                } else {
+                    if (mvs_scene.mesh.faces.empty())
+                        throw std::runtime_error(
+                            "GGGS foreground masks require MVS depth ROI, "
+                            "an MVS mesh, or --masks");
+                    effective_mask_dir =
+                        out_dir /
+                        (cli.output.stem().string() +
+                         "_mvs_mesh_masks");
+                    aetherscan::texture::MeshMaskOptions mask_options;
+                    mask_options.supersample = 2;
+                    const auto mask_summary =
+                        aetherscan::texture::render_mesh_foreground_masks(
+                            mvs_scene, effective_mask_dir, mask_options);
+                    aetherscan::core::Logger::instance().info(
+                        "gggs_mask_source=mvs_mesh_asdiff",
+                        " views=", mask_summary.image_count,
+                        " pixels=", mask_summary.pixel_count,
+                        " soft_edge_pixels=",
+                        mask_summary.soft_edge_pixels);
+                }
+            }
+#else
+            if (cli.gggs && cli.gggs_use_mask &&
+                effective_mask_dir.empty())
+                throw std::runtime_error(
+                    "GGGS mesh-mask training requires asdiff_render; "
+                    "enable AETHERSCAN_ENABLE_TEXTURE");
+#endif
+
+            if (cli.foreground_mask_only) {
+                aetherscan::core::Logger::instance().info(
+                    "foreground mask quality gate complete; GGGS skipped");
+                return 0;
+            }
+
 #if defined(AETHERSCAN_HAS_GGGS)
             if (cli.gggs) {
+                auto gggs_mesh_options = densify_opts;
+                gggs_mesh_options.mesh_method =
+                    aetherscan::mvs::MeshMethod::tsdf;
                 auto gggs_mesh = run_gggs_training(
-                    mvs_scene, cli, true, &densify_opts);
+                    mvs_scene, cli, true, &gggs_mesh_options,
+                    effective_mask_dir);
                 if (gggs_mesh) mvs_scene.mesh = std::move(*gggs_mesh);
             }
 #endif
@@ -2027,7 +2286,7 @@ int main(int argc, char** argv) {
                     tex_opts.uv_parallel_partitions =
                         cli.uv_parallel_partitions;
                     tex_opts.delight = cli.delight;
-                    tex_opts.mask_dir = densify_opts.mask_dir;
+                    tex_opts.mask_dir = effective_mask_dir;
                     if (cli.dense_quality ==
                         aetherscan::mvs::DensifyQuality::high) {
                         tex_opts.blend_mode =

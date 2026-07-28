@@ -33,13 +33,27 @@ struct DensifyOptions {
     // tabletop/ground removal followed by subject component extraction.
     std::filesystem::path roi_path;
     bool auto_roi{false};
+    // Build GGGS foreground constraints directly from ROI-filtered MVS depth
+    // maps. This avoids making a low-quality MVS mesh part of the mask path.
+    bool build_depth_roi_masks{false};
     // Fractional padding applied independently to automatic OBB extents.
-    float roi_margin_fraction{0.08F};
+    // Keep automatic ROI conservative: it is a reconstruction safety bound,
+    // not a semantic foreground cut. A 15% guard band avoids slicing valid
+    // support geometry when the fitted subject component ends near a surface.
+    float roi_margin_fraction{0.15F};
+    // Optional one-sided padding toward the detected support plane. Negative
+    // uses roi_margin_fraction. Depth-mask generation can preserve a complete
+    // pedestal without widening the horizontal OBB into the tabletop.
+    float auto_roi_ground_margin_fraction{-1.F};
     // Coarse mesh silhouette expansion at working resolution.
     unsigned auto_roi_mask_dilate_px{5};
     // Morphological closing radius for broken coarse-mesh silhouettes.
-    // Zero selects an image-scale adaptive radius.
+    // Zero selects a conservative image-scale adaptive radius. Only enclosed
+    // holes no larger than the corresponding structuring element are filled,
+    // preserving real gaps between subject parts.
     unsigned auto_roi_mask_close_px{0};
+    // Soft transition around the foreground silhouette in working pixels.
+    unsigned auto_roi_mask_feather_px{2};
     // Optional diagnostic export of the CGAL coarse mesh used to generate
     // automatic foreground masks.
     std::filesystem::path coarse_mesh_output_path;
@@ -116,7 +130,8 @@ struct DensifyOptions {
     bool mesh_clean{true};
     // Close boundary loops with at most this many edges (0 = disabled).
     unsigned mesh_close_hole_edges{16};
-    // Optional boundary-preserving umbrella smoothing after cleanup.
+    // Optional boundary-preserving, shrink-resistant Taubin smoothing after
+    // global Delaunay cleanup.
     unsigned mesh_smooth_iters{0};
     float mesh_smooth_lambda{0.15F};
     // Skip inserting a fused point if an existing Delaunay vertex projects
@@ -146,8 +161,6 @@ struct DensifyOptions {
     // Set to zero to use the literal OpenMVS absolute scale.
     float mesh_k_free_space_calibration_quantile{0.95F};
     float mesh_k_inf{1.0e6F};
-    // Projective meshing samples every Nth depth pixel.
-    unsigned mesh_pixel_step{2};
     // TSDF voxel size in world units (0 = infer from median pixel footprint).
     // GGGS overrides the automatic value with max_depth / 2048 to match
     // pygsplat's gs2mesh.py.
@@ -217,7 +230,6 @@ inline void apply_quality_preset(
         options.min_views_filter = 1;
         options.grazing_weight_floor = 0.20F;
         options.speckle_size = 24;
-        options.mesh_pixel_step = 3;
         options.mesh_min_component_faces = 24;
         options.mesh_close_hole_edges = 8;
         break;
@@ -235,7 +247,6 @@ inline void apply_quality_preset(
         options.min_views_fuse = 3;
         options.min_views_filter = 1;
         options.speckle_size = 40;
-        options.mesh_pixel_step = 2;
         options.mesh_min_component_faces = 32;
         options.mesh_close_hole_edges = 16;
         options.mesh_dist_insert_px = 0.75F;
@@ -261,7 +272,6 @@ inline void apply_quality_preset(
         // Full-resolution depth is retained for fusion; sampling every other
         // pixel keeps the default high-quality mesh at a product-manageable
         // size. API callers can still set this to 1 for an ultra-dense mesh.
-        options.mesh_pixel_step = 2;
         options.mesh_weld_pixel_fraction = 0.55F;
         options.mesh_depth_diff_threshold = 0.018F;
         options.mesh_min_component_faces = 64;

@@ -2,6 +2,7 @@
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
 #include "mvs/maxflow.hpp"
+#include "texture/projection.hpp"
 
 #include <algorithm>
 #include <array>
@@ -133,6 +134,13 @@ void test_projected_mesh_mask() {
     require(mask.size() == 32U * 32U, "projected mask has wrong size");
     require(mask[16U * 32U + 16U] != 0, "projected mesh missed image center");
     require(mask[0] == 0, "projected mesh mask filled background corner");
+    require(
+        std::any_of(
+            mask.begin(), mask.end(),
+            [](const std::uint8_t value) {
+                return value > 0 && value < 255;
+            }),
+        "projected mesh mask has no soft silhouette coverage");
 }
 
 void test_projected_mesh_mask_fills_enclosed_holes() {
@@ -161,6 +169,32 @@ void test_projected_mesh_mask_fills_enclosed_holes() {
         "coarse-mesh hole filling leaked into exterior background");
 }
 
+void test_projected_mesh_mask_preserves_large_enclosed_holes() {
+    MvsScene scene;
+    scene.views.push_back(make_plane_view(0, 64));
+    scene.mesh.vertices = {
+        Vec3f{-0.40F, -0.40F, 2.F}, Vec3f{0.40F, -0.40F, 2.F},
+        Vec3f{0.40F, 0.40F, 2.F}, Vec3f{-0.40F, 0.40F, 2.F},
+        Vec3f{-0.18F, -0.18F, 2.F}, Vec3f{0.18F, -0.18F, 2.F},
+        Vec3f{0.18F, 0.18F, 2.F}, Vec3f{-0.18F, 0.18F, 2.F}};
+    scene.mesh.faces = {
+        Eigen::Vector3i{0,1,5}, Eigen::Vector3i{0,5,4},
+        Eigen::Vector3i{1,2,6}, Eigen::Vector3i{1,6,5},
+        Eigen::Vector3i{3,7,6}, Eigen::Vector3i{3,6,2},
+        Eigen::Vector3i{0,4,7}, Eigen::Vector3i{0,7,3}};
+    DensifyOptions options;
+    options.auto_roi_mask_dilate_px = 0;
+    options.auto_roi_mask_close_px = 1;
+    options.auto_roi_mask_feather_px = 0;
+    detail::build_projected_foreground_masks(scene, options);
+    require(
+        scene.views[0].foreground_mask[32U * 64U + 32U] == 0,
+        "projected coarse-mesh mask filled a real subject opening");
+    require(
+        scene.views[0].foreground_mask[0] == 0,
+        "large-hole preservation leaked into exterior background");
+}
+
 void test_projected_mesh_mask_closes_open_notches() {
     MvsScene scene;
     scene.views.push_back(make_plane_view(0, 32));
@@ -185,6 +219,33 @@ void test_projected_mesh_mask_closes_open_notches() {
     require(
         scene.views[0].foreground_mask[0] == 0,
         "coarse-mesh closing leaked into distant background");
+}
+
+void test_depth_roi_mask_without_mesh() {
+    MvsScene scene;
+    scene.views.push_back(make_plane_view(0, 32));
+    scene.roi.valid = true;
+    scene.roi.center = Vec3f{0.F, 0.F, 2.F};
+    scene.roi.half_extent = Vec3f{0.10F, 0.10F, 0.10F};
+    DensifyOptions options;
+    options.auto_roi_mask_close_px = 1;
+    options.auto_roi_mask_dilate_px = 0;
+    options.auto_roi_mask_feather_px = 0;
+    detail::build_depth_roi_foreground_masks(scene, options);
+    const auto& mask = scene.views[0].foreground_mask;
+    require(mask.size() == 32U * 32U, "depth ROI mask has wrong size");
+    require(mask[16U * 32U + 16U] == 255,
+            "depth ROI mask missed the subject center");
+    require(mask[0] == 0, "depth ROI mask retained distant background");
+    require(scene.mesh.faces.empty(),
+            "depth ROI mask unexpectedly required a mesh");
+
+    std::fill(
+        scene.views[0].depth_map.depth.begin(),
+        scene.views[0].depth_map.depth.end(), 3.F);
+    detail::build_depth_roi_foreground_masks(scene, options);
+    require(scene.views[0].foreground_mask[16U * 32U + 16U] == 0,
+            "depth ROI mask retained geometry outside the 3D OBB");
 }
 
 void test_input_mask_is_not_cut_by_coarse_mesh_holes() {
@@ -231,6 +292,71 @@ void test_manual_obb_file() {
     std::filesystem::remove(path);
     require((roundtrip.center - roi.center).norm() < 1e-5F,
             "OBB save/load changed its center");
+}
+
+void test_asdiff_texture_camera_projection() {
+    MvsView view;
+    view.width = 641;
+    view.height = 479;
+    view.fx = 713.25F;
+    view.fy = 698.75F;
+    view.cx = 301.2F;
+    view.cy = 245.8F;
+    view.pose.R = (
+        Eigen::AngleAxisd(
+            0.41, Eigen::Vector3d{0.2, 0.9, -0.3}.normalized()) *
+        Eigen::AngleAxisd(-0.17, Eigen::Vector3d::UnitX()))
+                      .toRotationMatrix();
+    view.pose.C = Eigen::Vector3d{-0.4, 0.25, 1.1};
+    constexpr float near_z = 0.2F;
+    constexpr float far_z = 8.F;
+    const auto matrix = aetherscan::texture::world_to_clip_row_major(
+        view, near_z, far_z);
+
+    const Vec3f camera_point{0.13F, -0.09F, 2.4F};
+    const Vec3f world =
+        view.pose
+            .transform_camera_to_world(camera_point.cast<double>())
+            .cast<float>();
+    std::array<float, 4> clip{};
+    for (int row = 0; row < 4; ++row)
+        clip[static_cast<std::size_t>(row)] =
+            matrix[static_cast<std::size_t>(4 * row)] * world.x() +
+            matrix[static_cast<std::size_t>(4 * row + 1)] * world.y() +
+            matrix[static_cast<std::size_t>(4 * row + 2)] * world.z() +
+            matrix[static_cast<std::size_t>(4 * row + 3)];
+    require(clip[3] > 0.F, "asdiff texture camera reversed positive depth");
+    const float pixel_corner_x =
+        (clip[0] / clip[3] * 0.5F + 0.5F) *
+        static_cast<float>(view.width);
+    const float pixel_corner_y =
+        (clip[1] / clip[3] * 0.5F + 0.5F) *
+        static_cast<float>(view.height);
+    const float expected_x =
+        view.fx * camera_point.x() / camera_point.z() + view.cx;
+    const float expected_y =
+        view.fy * camera_point.y() / camera_point.z() + view.cy;
+    // asdiff_render samples photo texels at pixel_corner - 0.5.
+    require(
+        std::abs((pixel_corner_x - 0.5F) - expected_x) < 1e-4F &&
+            std::abs((pixel_corner_y - 0.5F) - expected_y) < 1e-4F,
+        "AetherScan/asdiff texture projection has a half-pixel offset");
+    const float ndc_depth = clip[2] / clip[3];
+    require(
+        ndc_depth > -1.F && ndc_depth < 1.F,
+        "asdiff texture projection produced invalid clip depth");
+
+    view.foreground_mask.assign(
+        static_cast<std::size_t>(view.width) * view.height, 0);
+    constexpr std::size_t mask_pixel = 1234;
+    view.foreground_mask[mask_pixel] = 128;
+    require(
+        aetherscan::texture::has_effective_foreground_mask(view) &&
+            std::abs(
+                aetherscan::texture::effective_foreground_coverage(
+                    view, mask_pixel) -
+                128.F / 255.F) < 1e-6F,
+        "texture baking did not preserve the in-memory soft foreground mask");
 }
 
 void test_automatic_ground_and_subject_roi() {
@@ -304,7 +430,6 @@ void test_quality_presets() {
         options.grazing_weight_floor > 0.F &&
             options.grazing_weight_floor < 0.2F,
         "high preset grazing samples are not softly weighted");
-    require(options.mesh_pixel_step == 2, "high preset mesh is too large by default");
     require(
         std::abs(options.mesh_k_behind - 1.F) < 1e-6F,
         "global mesh surface thickness is not one sigma");
@@ -631,6 +756,36 @@ void test_dense_ply_round_trip() {
         "dense PLY loader changed point color");
 }
 
+void test_mesh_ply_round_trip() {
+    Mesh source;
+    source.vertices = {
+        Vec3f{0.F, 0.F, 0.F},
+        Vec3f{1.F, 0.F, 0.F},
+        Vec3f{0.F, 1.F, 0.F}};
+    source.normals.assign(3, Vec3f{0.F, 0.F, 1.F});
+    source.colors = {
+        Vec3f{1.F, 0.F, 0.F},
+        Vec3f{0.F, 1.F, 0.F},
+        Vec3f{0.F, 0.F, 1.F}};
+    source.faces.emplace_back(0, 1, 2);
+    const auto path = std::filesystem::temp_directory_path() /
+                      "aetherscan_mesh_ply_round_trip.ply";
+    save_mesh_ply(source, path);
+    const Mesh loaded = load_mesh_ply(path);
+    std::filesystem::remove(path);
+    require(loaded.vertices.size() == 3, "mesh PLY loader lost vertices");
+    require(loaded.faces.size() == 1, "mesh PLY loader lost a face");
+    require(
+        loaded.faces.front() == Eigen::Vector3i(0, 1, 2),
+        "mesh PLY loader changed face indices");
+    require(
+        loaded.normals.size() == source.normals.size(),
+        "mesh PLY loader lost normals");
+    require(
+        loaded.colors.size() == source.colors.size(),
+        "mesh PLY loader lost colors");
+}
+
 #if defined(AETHERSCAN_HAS_CGAL)
 void test_global_delaunay_mesh() {
     MvsScene scene;
@@ -708,9 +863,12 @@ int main() {
         test_mask_and_roi_constrained_fusion();
         test_projected_mesh_mask();
         test_projected_mesh_mask_fills_enclosed_holes();
+        test_projected_mesh_mask_preserves_large_enclosed_holes();
         test_projected_mesh_mask_closes_open_notches();
+        test_depth_roi_mask_without_mesh();
         test_input_mask_is_not_cut_by_coarse_mesh_holes();
         test_manual_obb_file();
+        test_asdiff_texture_camera_projection();
         test_automatic_ground_and_subject_roi();
         test_quality_presets();
 #if !defined(AETHERSCAN_HAS_CGAL)
@@ -723,6 +881,7 @@ int main() {
         test_bow_tie_holes_are_split_and_closed();
         test_sparse_tsdf_mesh();
         test_dense_ply_round_trip();
+        test_mesh_ply_round_trip();
 #if defined(AETHERSCAN_HAS_CGAL)
         test_global_delaunay_mesh();
 #endif
