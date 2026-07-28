@@ -121,6 +121,8 @@ struct ReconstructCli {
     float mesh_free_space_quantile{0.95F};
     unsigned patchmatch_tile_rows{8};
     unsigned patchmatch_concurrent_views{8};
+    std::string patchmatch_backend{"auto"};
+    int patchmatch_cuda_device{-1};
     aetherscan::mvs::DensifyQuality dense_quality{
         aetherscan::mvs::DensifyQuality::default_quality};
     unsigned dense_resolution_level{1};
@@ -458,6 +460,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("patchmatch-concurrent-views",
          "Reference views concurrently sharing the PatchMatch CPU budget",
          cxxopts::value<unsigned>()->default_value("8"))
+        ("patchmatch-backend",
+         "PatchMatch backend: auto (default), cpu, or cuda",
+         cxxopts::value<std::string>()->default_value("auto"))
+        ("patchmatch-cuda-device",
+         "CUDA device ordinal for PatchMatch (-1 = current/default)",
+         cxxopts::value<int>()->default_value("-1"))
         ("mesh-obj", "Additionally export mesh as ASCII OBJ",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("dense-quality",
@@ -630,6 +638,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["patchmatch-tile-rows"].as<unsigned>();
     cli.patchmatch_concurrent_views =
         result["patchmatch-concurrent-views"].as<unsigned>();
+    cli.patchmatch_backend =
+        result["patchmatch-backend"].as<std::string>();
+    cli.patchmatch_cuda_device =
+        result["patchmatch-cuda-device"].as<int>();
     const std::string dense_quality = result["dense-quality"].as<std::string>();
     if (dense_quality == "preview") {
         cli.dense_quality = aetherscan::mvs::DensifyQuality::preview;
@@ -742,6 +754,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.patchmatch_concurrent_views == 0)
         throw std::invalid_argument(
             "--patchmatch-concurrent-views must be positive");
+    if (cli.patchmatch_backend != "auto" &&
+        cli.patchmatch_backend != "cpu" &&
+        cli.patchmatch_backend != "cuda")
+        throw std::invalid_argument(
+            "--patchmatch-backend must be auto, cpu, or cuda");
     if (cli.mesh_dist_insert_px < -1.F || cli.mesh_dist_insert_px > 16.F)
         throw std::invalid_argument(
             "--mesh-dist-insert-px must be -1 or in [0,16]");
@@ -1793,6 +1810,14 @@ int main(int argc, char** argv) {
             densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
             densify_opts.patchmatch_concurrent_views =
                 cli.patchmatch_concurrent_views;
+            densify_opts.patchmatch_backend =
+                cli.patchmatch_backend == "cuda"
+                    ? aetherscan::mvs::PatchMatchBackend::cuda
+                    : cli.patchmatch_backend == "cpu"
+                          ? aetherscan::mvs::PatchMatchBackend::cpu
+                          : aetherscan::mvs::PatchMatchBackend::automatic;
+            densify_opts.patchmatch_cuda_device =
+                cli.patchmatch_cuda_device;
             // With GGGS enabled, the active mesh is extracted from the trained
             // Gaussian median-depth/normal maps after optimization. Avoid
             // spending time on an MVS mesh that would immediately be replaced.
@@ -1832,6 +1857,9 @@ int main(int argc, char** argv) {
                 " tile_rows=", densify_opts.patchmatch_tile_rows,
                 " concurrent_views=",
                 densify_opts.patchmatch_concurrent_views,
+                " patchmatch_backend=", cli.patchmatch_backend,
+                " patchmatch_cuda_device=",
+                densify_opts.patchmatch_cuda_device,
                 " tsdf_voxel_scale=",
                 densify_opts.mesh_tsdf_voxel_scale,
                 " mesh_method=",

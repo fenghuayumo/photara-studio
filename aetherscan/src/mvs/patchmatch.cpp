@@ -1,6 +1,8 @@
 #include "mvs/densify.hpp"
 #include "mvs/internal.hpp"
 
+#include "patchmatch_cuda.hpp"
+
 #include "core/logging.hpp"
 #include "parallel/thread_pool.hpp"
 
@@ -12,6 +14,8 @@
 #include <future>
 #include <limits>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace aetherscan::mvs {
@@ -80,6 +84,12 @@ struct SourceContext {
 };
 
 using ImagePyramids = std::vector<std::vector<ScaledView>>;
+
+struct PatchMatchRuntime {
+    bool use_cuda{false};
+    bool require_cuda{false};
+    int cuda_device{-1};
+};
 
 struct PatchRef {
     float texels[k_texels]{};
@@ -453,7 +463,7 @@ void upsample_depth(const DepthMap& coarse, DepthMap& fine) {
     }
 }
 
-void run_patchmatch_level(
+void run_patchmatch_level_cpu(
     ScaledView& ref, const sfm::Pose3D& ref_pose,
     const std::vector<const ScaledView*>& neighbors,
     const std::vector<sfm::Pose3D>& neighbor_poses,
@@ -624,6 +634,147 @@ void run_patchmatch_level(
     }
 }
 
+#if defined(AETHERSCAN_MVS_HAS_CUDA)
+void run_patchmatch_level_cuda(
+    ScaledView& ref, const sfm::Pose3D& ref_pose,
+    const std::vector<const ScaledView*>& neighbors,
+    const std::vector<sfm::Pose3D>& neighbor_poses,
+    const std::vector<const DepthMap*>& neighbor_depths,
+    const float d_min, const float d_max, const DensifyOptions& options,
+    const unsigned random_seed, const bool use_geo,
+    const bool initialize_invalid, const OrientedBoundingBox* roi,
+    const int cuda_device) {
+    const std::size_t pixel_count =
+        static_cast<std::size_t>(ref.width) * ref.height;
+    DepthMap& dm = ref.depth;
+    std::vector<float> packed_normals(pixel_count * 3U);
+    for (std::size_t i = 0; i < pixel_count; ++i) {
+        packed_normals[i * 3U + 0U] = dm.normal[i].x();
+        packed_normals[i * 3U + 1U] = dm.normal[i].y();
+        packed_normals[i * 3U + 2U] = dm.normal[i].z();
+    }
+
+    const auto make_image = [](
+                                const ScaledView& view,
+                                const DepthMap* depth) {
+        const auto& mask = view.mask_pixels();
+        return cuda_patchmatch::HostImage{
+            view.width,
+            view.height,
+            view.fx,
+            view.fy,
+            view.cx,
+            view.cy,
+            view.gray_pixels().data(),
+            mask.empty() ? nullptr : mask.data(),
+            depth != nullptr && !depth->depth.empty()
+                ? depth->depth.data()
+                : nullptr};
+    };
+
+    const std::size_t source_count = std::min<std::size_t>(
+        neighbors.size(), cuda_patchmatch::k_max_sources);
+    std::vector<cuda_patchmatch::HostSource> sources(source_count);
+    for (std::size_t i = 0; i < source_count; ++i) {
+        sources[i].image = make_image(
+            *neighbors[i],
+            i < neighbor_depths.size() ? neighbor_depths[i] : nullptr);
+        const Mat3f rotation =
+            (neighbor_poses[i].R * ref_pose.R.transpose()).cast<float>();
+        const Vec3f translation =
+            (neighbor_poses[i].R *
+             (ref_pose.C - neighbor_poses[i].C))
+                .cast<float>();
+        for (int row = 0; row < 3; ++row) {
+            sources[i].translation[row] = translation(row);
+            for (int column = 0; column < 3; ++column)
+                sources[i].rotation[row * 3 + column] =
+                    rotation(row, column);
+        }
+    }
+
+    cuda_patchmatch::Request request;
+    request.device = cuda_device;
+    request.reference = make_image(ref, nullptr);
+    request.depth = dm.depth.data();
+    request.normal_xyz = packed_normals.data();
+    request.confidence = dm.confidence.data();
+    request.sources = sources.data();
+    request.source_count = static_cast<unsigned>(sources.size());
+    request.depth_min = d_min;
+    request.depth_max = d_max;
+    request.estimation_iters = options.estimation_iters;
+    request.random_iters = options.random_iters;
+    request.min_patch_views = options.min_patch_views;
+    request.geometric_weight = options.geometric_weight;
+    request.random_seed = random_seed;
+    request.use_geometric = use_geo;
+    request.initialize_invalid = initialize_invalid;
+
+    request.use_roi = roi != nullptr && roi->valid;
+    const Mat3f reference_to_world = ref_pose.R.transpose().cast<float>();
+    const Vec3f reference_center = ref_pose.C.cast<float>();
+    for (int row = 0; row < 3; ++row) {
+        request.reference_center[row] = reference_center(row);
+        for (int column = 0; column < 3; ++column)
+            request.reference_to_world[row * 3 + column] =
+                reference_to_world(row, column);
+    }
+    if (request.use_roi) {
+        for (int row = 0; row < 3; ++row) {
+            request.roi_center[row] = roi->center(row);
+            request.roi_half_extent[row] = roi->half_extent(row);
+            for (int column = 0; column < 3; ++column)
+                request.roi_axes[row * 3 + column] =
+                    roi->axes(row, column);
+        }
+    }
+
+    std::string error;
+    if (!cuda_patchmatch::run(request, error))
+        throw std::runtime_error(
+            "CUDA PatchMatch failed: " + error);
+    for (std::size_t i = 0; i < pixel_count; ++i) {
+        dm.normal[i] = Vec3f{
+            packed_normals[i * 3U + 0U],
+            packed_normals[i * 3U + 1U],
+            packed_normals[i * 3U + 2U]};
+    }
+}
+#endif
+
+void run_patchmatch_level(
+    ScaledView& ref, const sfm::Pose3D& ref_pose,
+    const std::vector<const ScaledView*>& neighbors,
+    const std::vector<sfm::Pose3D>& neighbor_poses,
+    const std::vector<const DepthMap*>& neighbor_depths,
+    const float d_min, const float d_max, const DensifyOptions& options,
+    const unsigned random_seed, const unsigned threads, const bool use_geo,
+    const bool initialize_invalid, const OrientedBoundingBox* roi,
+    PatchMatchRuntime& runtime) {
+    (void)runtime;
+#if defined(AETHERSCAN_MVS_HAS_CUDA)
+    if (runtime.use_cuda) {
+        try {
+            run_patchmatch_level_cuda(
+                ref, ref_pose, neighbors, neighbor_poses, neighbor_depths,
+                d_min, d_max, options, random_seed, use_geo,
+                initialize_invalid, roi, runtime.cuda_device);
+            return;
+        } catch (const std::exception& error) {
+            if (runtime.require_cuda) throw;
+            core::Logger::instance().warning(
+                error.what(), "; falling back to CPU PatchMatch");
+            runtime.use_cuda = false;
+        }
+    }
+#endif
+    run_patchmatch_level_cpu(
+        ref, ref_pose, neighbors, neighbor_poses, neighbor_depths,
+        d_min, d_max, options, random_seed, threads, use_geo,
+        initialize_invalid, roi);
+}
+
 void init_from_sparse(
     ScaledView& view, const MvsView& full, const MvsScene& scene, const float d_min,
     const float d_max) {
@@ -666,7 +817,7 @@ void init_from_sparse(
 void estimate_one_view_photometric(
     MvsScene& scene, const ImagePyramids& pyramids, const Index view_id,
     const DensifyOptions& options, const unsigned threads,
-    const unsigned random_seed) {
+    const unsigned random_seed, PatchMatchRuntime& runtime) {
     MvsView& view = scene.views[view_id];
     if (view.neighbors.empty()) return;
 
@@ -726,7 +877,7 @@ void estimate_one_view_photometric(
         run_patchmatch_level(
             scaled, view.pose, neighbors, neighbor_poses, neighbor_depths, d_min,
             d_max, options, random_seed ^ level * 0x9E3779B9u, threads, false,
-            true, scene.roi.valid ? &scene.roi : nullptr);
+            true, scene.roi.valid ? &scene.roi : nullptr, runtime);
         current = std::move(scaled);
     }
 
@@ -745,7 +896,7 @@ void refine_one_view_geometric(
     MvsScene& scene, const ImagePyramids& pyramids,
     const std::vector<DepthMap>& depth_snapshot, const Index view_id,
     const DensifyOptions& options, const unsigned threads,
-    const unsigned random_seed) {
+    const unsigned random_seed, PatchMatchRuntime& runtime) {
     MvsView& view = scene.views[view_id];
     if (view.neighbors.empty() || view.depth_map.depth.empty()) return;
 
@@ -766,7 +917,7 @@ void refine_one_view_geometric(
     run_patchmatch_level(
         ref, view.pose, neighbors, neighbor_poses, neighbor_depths,
         view.depth_map.depth_min, view.depth_map.depth_max, options, random_seed,
-        threads, true, false, scene.roi.valid ? &scene.roi : nullptr);
+        threads, true, false, scene.roi.valid ? &scene.roi : nullptr, runtime);
 
     view.depth_map = std::move(ref.depth);
     for (std::size_t i = 0; i < view.depth_map.depth.size(); ++i) {
@@ -1005,6 +1156,42 @@ DepthFilterStats filter_one_depth_map(
 
 void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.estimate_depth");
+    PatchMatchRuntime runtime;
+    runtime.require_cuda =
+        options.patchmatch_backend == PatchMatchBackend::cuda;
+    runtime.cuda_device = options.patchmatch_cuda_device;
+    if (options.patchmatch_backend != PatchMatchBackend::cpu) {
+#if defined(AETHERSCAN_MVS_HAS_CUDA)
+        std::string device_name;
+        std::string error;
+        runtime.use_cuda = cuda_patchmatch::available(
+            runtime.cuda_device, device_name, error);
+        if (runtime.use_cuda) {
+            core::Logger::instance().info(
+                "mvs PatchMatch backend=cuda device=", device_name,
+                " ordinal=", runtime.cuda_device);
+        } else if (runtime.require_cuda) {
+            throw std::runtime_error(
+                "CUDA PatchMatch was requested but is unavailable: " +
+                error);
+        } else {
+            core::Logger::instance().warning(
+                "CUDA PatchMatch unavailable: ", error,
+                "; using CPU PatchMatch");
+        }
+#else
+        if (runtime.require_cuda)
+            throw std::runtime_error(
+                "CUDA PatchMatch was requested, but this build has no CUDA "
+                "MVS backend");
+        core::Logger::instance().info(
+            "mvs PatchMatch backend=cpu (CUDA MVS backend not built)");
+#endif
+    } else {
+        core::Logger::instance().info(
+            "mvs PatchMatch backend=cpu");
+    }
+
     const auto images = detail::load_view_images(scene, options);
     for (std::size_t i = 0; i < scene.views.size(); ++i)
         scene.views[i].foreground_mask = images[i].mask;
@@ -1015,16 +1202,36 @@ void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
 
     {
         core::ProgressReporter progress("mvs.estimate_depth", scene.views.size());
-        run_view_tile_batches(
-            scene.views.size(), threads, options.patchmatch_concurrent_views,
-            [&](const std::size_t i, const unsigned view_threads) {
-                estimate_one_view_photometric(
-                    scene, pyramids, static_cast<Index>(i), options,
-                    view_threads,
-                    static_cast<unsigned>(0xA37E5CA) ^
-                        static_cast<unsigned>(i) * 0x9E3779B9u);
-                progress.advance();
-            });
+        const auto estimate = [&](const std::size_t i,
+                                  const unsigned view_threads) {
+            estimate_one_view_photometric(
+                scene, pyramids, static_cast<Index>(i), options,
+                view_threads,
+                static_cast<unsigned>(0xA37E5CA) ^
+                    static_cast<unsigned>(i) * 0x9E3779B9u,
+                runtime);
+            progress.advance();
+        };
+        if (runtime.use_cuda) {
+            // One reference view supplies enough pixels to saturate the GPU.
+            // Serial view dispatch also bounds VRAM and upload pressure.
+            std::size_t i = 0;
+            while (i < scene.views.size() && runtime.use_cuda)
+                estimate(i++, 1U);
+            if (i < scene.views.size()) {
+                run_view_tile_batches(
+                    scene.views.size() - i, threads,
+                    options.patchmatch_concurrent_views,
+                    [&](const std::size_t offset,
+                        const unsigned view_threads) {
+                        estimate(i + offset, view_threads);
+                    });
+            }
+        } else {
+            run_view_tile_batches(
+                scene.views.size(), threads,
+                options.patchmatch_concurrent_views, estimate);
+        }
     }
 
     if (options.geometric_consistency && options.geometric_iters > 0) {
@@ -1037,18 +1244,35 @@ void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 depth_snapshot[i] = scene.views[i].depth_map;
             core::ProgressReporter progress(
                 "mvs.geometric_consistency", scene.views.size());
-            run_view_tile_batches(
-                scene.views.size(), threads,
-                options.patchmatch_concurrent_views,
-                [&](const std::size_t i, const unsigned view_threads) {
-                    refine_one_view_geometric(
-                        scene, pyramids, depth_snapshot,
-                        static_cast<Index>(i), options, view_threads,
-                        static_cast<unsigned>(
-                            0xC0FFEE + round * 0x10001U) ^
-                            static_cast<unsigned>(i) * 0x9E3779B9u);
-                    progress.advance();
-                });
+            const auto refine = [&](const std::size_t i,
+                                    const unsigned view_threads) {
+                refine_one_view_geometric(
+                    scene, pyramids, depth_snapshot,
+                    static_cast<Index>(i), options, view_threads,
+                    static_cast<unsigned>(
+                        0xC0FFEE + round * 0x10001U) ^
+                        static_cast<unsigned>(i) * 0x9E3779B9u,
+                    runtime);
+                progress.advance();
+            };
+            if (runtime.use_cuda) {
+                std::size_t i = 0;
+                while (i < scene.views.size() && runtime.use_cuda)
+                    refine(i++, 1U);
+                if (i < scene.views.size()) {
+                    run_view_tile_batches(
+                        scene.views.size() - i, threads,
+                        options.patchmatch_concurrent_views,
+                        [&](const std::size_t offset,
+                            const unsigned view_threads) {
+                            refine(i + offset, view_threads);
+                        });
+                }
+            } else {
+                run_view_tile_batches(
+                    scene.views.size(), threads,
+                    options.patchmatch_concurrent_views, refine);
+            }
         }
         geo_stage.finish();
     }

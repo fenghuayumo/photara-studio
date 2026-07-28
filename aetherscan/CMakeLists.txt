@@ -290,6 +290,26 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/mvs/mesh_tsdf.cpp
         src/mvs/export.cpp
         src/mvs/densify.cpp)
+    if(AETHERSCAN_ENABLE_CUDA)
+        # Keep CUDA compilation isolated from image-codec targets whose
+        # imported MSVC-only options (for example /EHsc) are invalid for nvcc.
+        add_library(aetherscan_mvs_cuda STATIC
+            src/mvs/patchmatch_cuda.cu)
+        target_compile_features(aetherscan_mvs_cuda PUBLIC cxx_std_20)
+        target_link_libraries(aetherscan_mvs_cuda PUBLIC CUDA::cudart)
+        if(MSVC)
+            target_compile_options(aetherscan_mvs_cuda PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/W4,-EHsc>)
+        endif()
+        set_target_properties(aetherscan_mvs_cuda PROPERTIES
+            CUDA_ARCHITECTURES native
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+            POSITION_INDEPENDENT_CODE ON)
+        target_link_libraries(aetherscan_mvs PRIVATE aetherscan_mvs_cuda)
+        target_compile_definitions(aetherscan_mvs PUBLIC
+            AETHERSCAN_MVS_HAS_CUDA=1)
+    endif()
     add_library(AetherScan::MVS ALIAS aetherscan_mvs)
     target_include_directories(aetherscan_mvs PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

@@ -13,7 +13,8 @@ MvsScene build_mvs_scene(const sfm::Scene& sfm_scene, const DensifyOptions& opti
 // Score and attach neighbor lists on every view (covisibility + baseline angle).
 void select_neighbors(MvsScene& scene, const DensifyOptions& options);
 
-// Estimate a depth/normal/confidence map for every reference view (CPU PatchMatch).
+// Estimate a depth/normal/confidence map for every reference view. Automatic
+// backend selection prefers CUDA and falls back to CPU when unavailable.
 void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options);
 
 // Fuse depth maps into a multi-view consistent DenseCloud.

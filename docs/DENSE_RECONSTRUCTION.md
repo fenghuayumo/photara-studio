@@ -24,8 +24,8 @@
   若未来扩展，须另开插件接口，默认实现仍为 GGGS。
 
 与 SfM 文档一致：紧凑索引与 SoA、公开 API 与执行布局分离；默认构建不依赖
-OpenCV；图像 IO 继续使用 FreeImage。MVS 深度估计以 **CPU 吃满** 为第一版目标；
-GGGS 优化以 **CUDA** 为主。
+OpenCV；图像 IO 继续使用 FreeImage。MVS 深度估计默认使用 **CUDA PatchMatch**，
+无可用 CUDA 设备或 CPU-only 构建时自动回退到多核 CPU；GGGS 优化以 **CUDA** 为主。
 
 ---
 
@@ -122,7 +122,8 @@ aetherscan/
 
 CMake 建议：
 
-- `aetherscan_mvs`：始终可构建（CPU densify/mesh）；
+- `aetherscan_mvs`：始终可构建（CPU densify/mesh）；CUDA 构建额外链接隔离的
+  `aetherscan_mvs_cuda` PatchMatch kernel 库；
 - `aetherscan_texture`：依赖 mvs 的 mesh/相机类型；Delight 可选 ONNX；
 - `aetherscan_gggs`：`AETHERSCAN_ENABLE_GGGS`（CUDA），默认 OFF 或独立选项，
   不阻碍「仅 MVS+贴图」产品路径。
@@ -161,7 +162,8 @@ dense-* / mesh-mvs-* / masks-* / gggs-* / mesh-gggs-* / texture-*
 
 ### 目标
 
-快速、高覆盖的稠密结构与 **可交付的初步 mesh**。CPU 混合视图/tile 并行 + NCC；
+快速、高覆盖的稠密结构与 **可交付的初步 mesh**。CUDA red/black PatchMatch + NCC
+为默认路径，CPU 混合视图/tile 并行作为兼容后端；
 质量旋钮偏「快而全」，几何精修留给可选 GGGS。
 
 ### 步骤
@@ -180,17 +182,34 @@ dense-* / mesh-mvs-* / masks-* / gggs-* / mesh-gggs-* / texture-*
 
 此时若用户关闭 texture/gggs，流水线即可结束。
 
-### 当前实现状态（2026-07-19）
+### 当前实现状态（2026-07-28）
 
-PatchMatch 已实现以下 CPU 路径：
+PatchMatch 已实现 CUDA 与 CPU 双后端：
 
 - 所有视图、所有 coarse-to-fine 层的灰度图和 mask 在进入 PatchMatch 时一次构建并缓存；
   reference/source 只持有只读引用，不再为每个参考视图重复缩放邻图；
+- CUDA kernel 覆盖随机/稀疏初始化、25 texel 双线性 ZNCC、斜面传播、随机深度/法线精修、
+  多源最优视图聚合、ROI 限制和基于邻图深度快照的几何一致性；相机变换和深度/法线结果
+  直接桥接现有 `DepthMap`，后续 filter/fusion 不需要分叉；
+- CUDA 按最多 64 行拆分 kernel launch，单参考视图串行调度以控制 VRAM 和 Windows TDR
+  风险；`auto` 默认优先 CUDA，初始化或运行失败会记录原因并切回 CPU，显式 `cuda`
+  则失败即报错；
 - 深度传播采用 red/black 两阶段，阶段内以 `patchmatch_tile_rows` 行为一个 tile，避免
   相邻像素同时读写造成的数据竞争；随机种子由 view/level/iteration/tile 唯一确定；
 - 默认同时调度 8 个参考视图，并在其 row tiles 之间分配总 CPU 预算。最后不足 8 个视图时，
   每个剩余视图自动获得更多线程，兼顾内存带宽吞吐和尾部利用率；
 - 几何一致性每轮读取不可变的全局深度快照，因此多视图/tile 写入不会与邻图读取竞争。
+
+后端选择参数：
+
+```text
+--patchmatch-backend auto|cpu|cuda   # 默认 auto
+--patchmatch-cuda-device -1          # -1 使用当前/默认 CUDA 设备
+```
+
+Gingy 预览质量实测（RTX 5090 D v2，164/171 注册相机）：CUDA 将
+`mvs.estimate_depth` 从 401.68 秒降到 31.47 秒（12.8×），完整 densify 从
+424.03 秒降到 54.67 秒（7.8×）；全量 PLY 的 8,665,149 个点坐标/法线均为有限值。
 
 全局表面重建已实现为可选 CGAL 后端：
 
