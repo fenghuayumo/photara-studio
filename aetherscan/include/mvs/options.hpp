@@ -23,12 +23,6 @@ enum class DensifyQuality : std::uint8_t {
     high = 2,
 };
 
-enum class PatchMatchBackend : std::uint8_t {
-    automatic = 0,
-    cpu = 1,
-    cuda = 2,
-};
-
 struct DensifyOptions {
     // Optional per-image foreground masks. Files must have the same basename
     // as source images; white is reconstructed and black is ignored.
@@ -193,11 +187,6 @@ struct DensifyOptions {
     // Reference views concurrently sharing the CPU budget. Each view still
     // runs row tiles; the final partial batch receives more threads per view.
     unsigned patchmatch_concurrent_views{8};
-    // Automatic selects CUDA when a compatible device/build is available and
-    // otherwise keeps the CPU implementation as a transparent fallback.
-    PatchMatchBackend patchmatch_backend{PatchMatchBackend::automatic};
-    // CUDA device ordinal. Negative selects the current/default CUDA device.
-    int patchmatch_cuda_device{-1};
     unsigned thread_count{0};
 };
 

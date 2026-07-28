@@ -87,8 +87,6 @@ using ImagePyramids = std::vector<std::vector<ScaledView>>;
 
 struct PatchMatchRuntime {
     bool use_cuda{false};
-    bool require_cuda{false};
-    int cuda_device{-1};
 };
 
 struct PatchRef {
@@ -642,8 +640,7 @@ void run_patchmatch_level_cuda(
     const std::vector<const DepthMap*>& neighbor_depths,
     const float d_min, const float d_max, const DensifyOptions& options,
     const unsigned random_seed, const bool use_geo,
-    const bool initialize_invalid, const OrientedBoundingBox* roi,
-    const int cuda_device) {
+    const bool initialize_invalid, const OrientedBoundingBox* roi) {
     const std::size_t pixel_count =
         static_cast<std::size_t>(ref.width) * ref.height;
     DepthMap& dm = ref.depth;
@@ -694,7 +691,7 @@ void run_patchmatch_level_cuda(
     }
 
     cuda_patchmatch::Request request;
-    request.device = cuda_device;
+    request.device = -1;
     request.reference = make_image(ref, nullptr);
     request.depth = dm.depth.data();
     request.normal_xyz = packed_normals.data();
@@ -755,18 +752,11 @@ void run_patchmatch_level(
     (void)runtime;
 #if defined(AETHERSCAN_MVS_HAS_CUDA)
     if (runtime.use_cuda) {
-        try {
-            run_patchmatch_level_cuda(
-                ref, ref_pose, neighbors, neighbor_poses, neighbor_depths,
-                d_min, d_max, options, random_seed, use_geo,
-                initialize_invalid, roi, runtime.cuda_device);
-            return;
-        } catch (const std::exception& error) {
-            if (runtime.require_cuda) throw;
-            core::Logger::instance().warning(
-                error.what(), "; falling back to CPU PatchMatch");
-            runtime.use_cuda = false;
-        }
+        run_patchmatch_level_cuda(
+            ref, ref_pose, neighbors, neighbor_poses, neighbor_depths,
+            d_min, d_max, options, random_seed, use_geo,
+            initialize_invalid, roi);
+        return;
     }
 #endif
     run_patchmatch_level_cpu(
@@ -1157,40 +1147,23 @@ DepthFilterStats filter_one_depth_map(
 void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.estimate_depth");
     PatchMatchRuntime runtime;
-    runtime.require_cuda =
-        options.patchmatch_backend == PatchMatchBackend::cuda;
-    runtime.cuda_device = options.patchmatch_cuda_device;
-    if (options.patchmatch_backend != PatchMatchBackend::cpu) {
 #if defined(AETHERSCAN_MVS_HAS_CUDA)
-        std::string device_name;
-        std::string error;
-        runtime.use_cuda = cuda_patchmatch::available(
-            runtime.cuda_device, device_name, error);
-        if (runtime.use_cuda) {
-            core::Logger::instance().info(
-                "mvs PatchMatch backend=cuda device=", device_name,
-                " ordinal=", runtime.cuda_device);
-        } else if (runtime.require_cuda) {
-            throw std::runtime_error(
-                "CUDA PatchMatch was requested but is unavailable: " +
-                error);
-        } else {
-            core::Logger::instance().warning(
-                "CUDA PatchMatch unavailable: ", error,
-                "; using CPU PatchMatch");
-        }
-#else
-        if (runtime.require_cuda)
-            throw std::runtime_error(
-                "CUDA PatchMatch was requested, but this build has no CUDA "
-                "MVS backend");
+    std::string device_name;
+    std::string error;
+    runtime.use_cuda =
+        cuda_patchmatch::available(-1, device_name, error);
+    if (runtime.use_cuda) {
         core::Logger::instance().info(
-            "mvs PatchMatch backend=cpu (CUDA MVS backend not built)");
-#endif
+            "mvs PatchMatch backend=cuda device=", device_name);
     } else {
-        core::Logger::instance().info(
-            "mvs PatchMatch backend=cpu");
+        core::Logger::instance().warning(
+            "CUDA GPU not detected: ", error,
+            "; using CPU PatchMatch");
     }
+#else
+    core::Logger::instance().info(
+        "mvs PatchMatch backend=cpu (CUDA MVS backend not built)");
+#endif
 
     const auto images = detail::load_view_images(scene, options);
     for (std::size_t i = 0; i < scene.views.size(); ++i)
@@ -1215,18 +1188,8 @@ void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
         if (runtime.use_cuda) {
             // One reference view supplies enough pixels to saturate the GPU.
             // Serial view dispatch also bounds VRAM and upload pressure.
-            std::size_t i = 0;
-            while (i < scene.views.size() && runtime.use_cuda)
-                estimate(i++, 1U);
-            if (i < scene.views.size()) {
-                run_view_tile_batches(
-                    scene.views.size() - i, threads,
-                    options.patchmatch_concurrent_views,
-                    [&](const std::size_t offset,
-                        const unsigned view_threads) {
-                        estimate(i + offset, view_threads);
-                    });
-            }
+            for (std::size_t i = 0; i < scene.views.size(); ++i)
+                estimate(i, 1U);
         } else {
             run_view_tile_batches(
                 scene.views.size(), threads,
@@ -1256,18 +1219,8 @@ void estimate_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 progress.advance();
             };
             if (runtime.use_cuda) {
-                std::size_t i = 0;
-                while (i < scene.views.size() && runtime.use_cuda)
-                    refine(i++, 1U);
-                if (i < scene.views.size()) {
-                    run_view_tile_batches(
-                        scene.views.size() - i, threads,
-                        options.patchmatch_concurrent_views,
-                        [&](const std::size_t offset,
-                            const unsigned view_threads) {
-                            refine(i + offset, view_threads);
-                        });
-                }
+                for (std::size_t i = 0; i < scene.views.size(); ++i)
+                    refine(i, 1U);
             } else {
                 run_view_tile_batches(
                     scene.views.size(), threads,

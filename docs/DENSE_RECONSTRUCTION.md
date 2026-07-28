@@ -25,7 +25,9 @@
 
 与 SfM 文档一致：紧凑索引与 SoA、公开 API 与执行布局分离；默认构建不依赖
 OpenCV；图像 IO 继续使用 FreeImage。MVS 深度估计默认使用 **CUDA PatchMatch**，
-无可用 CUDA 设备或 CPU-only 构建时自动回退到多核 CPU；GGGS 优化以 **CUDA** 为主。
+默认启动时检测 CUDA：检测到兼容 GPU 就必须使用 GPU，只有未检测到 GPU 或 CPU-only
+构建才使用多核 CPU；已经选定 GPU 后若 kernel 运行失败则直接报错，不静默进入慢速路径。
+GGGS 优化以 **CUDA** 为主。
 
 ---
 
@@ -192,20 +194,15 @@ PatchMatch 已实现 CUDA 与 CPU 双后端：
   多源最优视图聚合、ROI 限制和基于邻图深度快照的几何一致性；相机变换和深度/法线结果
   直接桥接现有 `DepthMap`，后续 filter/fusion 不需要分叉；
 - CUDA 按最多 64 行拆分 kernel launch，单参考视图串行调度以控制 VRAM 和 Windows TDR
-  风险；`auto` 默认优先 CUDA，初始化或运行失败会记录原因并切回 CPU，显式 `cuda`
-  则失败即报错；
+  风险；启动时未检测到 CUDA GPU 才选择 CPU，已经进入 CUDA 路径后运行失败则直接报错；
 - 深度传播采用 red/black 两阶段，阶段内以 `patchmatch_tile_rows` 行为一个 tile，避免
   相邻像素同时读写造成的数据竞争；随机种子由 view/level/iteration/tile 唯一确定；
 - 默认同时调度 8 个参考视图，并在其 row tiles 之间分配总 CPU 预算。最后不足 8 个视图时，
   每个剩余视图自动获得更多线程，兼顾内存带宽吞吐和尾部利用率；
 - 几何一致性每轮读取不可变的全局深度快照，因此多视图/tile 写入不会与邻图读取竞争。
 
-后端选择参数：
-
-```text
---patchmatch-backend auto|cpu|cuda   # 默认 auto
---patchmatch-cuda-device -1          # -1 使用当前/默认 CUDA 设备
-```
+PatchMatch 后端不暴露 CLI 选择参数：运行时自动检测默认 CUDA 设备，有 GPU 使用 GPU，
+未检测到 GPU 或 CPU-only 构建才使用 CPU，避免给普通重建流程增加硬件调度参数。
 
 Gingy 预览质量实测（RTX 5090 D v2，164/171 注册相机）：CUDA 将
 `mvs.estimate_depth` 从 401.68 秒降到 31.47 秒（12.8×），完整 densify 从
