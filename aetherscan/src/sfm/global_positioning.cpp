@@ -411,11 +411,13 @@ std::vector<Index> select_tracks_for_positioning(
     std::stable_sort(
         ranked.begin(), ranked.end(),
         [](const RankedTrack& left, const RankedTrack& right) {
-            // Parallax carries more positional information than track length.
-            if (left.max_parallax != right.max_parallax)
-                return left.max_parallax > right.max_parallax;
             if (left.registered_views != right.registered_views)
                 return left.registered_views > right.registered_views;
+            // Prefer well-supported multi-view tracks. Use parallax only as a
+            // tie-breaker: before positions are known, an accidentally merged
+            // track can otherwise look maximally informative.
+            if (left.max_parallax != right.max_parallax)
+                return left.max_parallax > right.max_parallax;
             return left.track_id < right.track_id;
         });
 

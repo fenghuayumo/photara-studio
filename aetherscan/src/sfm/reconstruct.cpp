@@ -7,8 +7,10 @@
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <queue>
 
 namespace aetherscan::sfm {
 namespace {
@@ -87,6 +89,7 @@ std::uint64_t reconstruction_key(
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
     key.append_string("reconstruction");
+    key.append_string("position-graph-v2");
     key.append_string(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
@@ -157,6 +160,96 @@ std::uint64_t reconstruction_key(
         config.global_positioning.constraint));
     key.append(config.global_positioning.constraint_reweight_scale);
     return key.value();
+}
+
+unsigned quarantine_position_outliers(Scene& scene) {
+    struct PositionEdge {
+        Index first{};
+        Index second{};
+        double length{};
+    };
+    std::vector<PositionEdge> edges;
+    std::vector<double> lengths;
+    edges.reserve(scene.pairs.size());
+    lengths.reserve(scene.pairs.size());
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || pair.id1 >= scene.images.size() ||
+            pair.id2 >= scene.images.size())
+            continue;
+        const Image& first = scene.images[pair.id1];
+        const Image& second = scene.images[pair.id2];
+        if (!first.registered || !second.registered) continue;
+        const double length = (first.pose.C - second.pose.C).norm();
+        if (!(length > 1e-8) || !std::isfinite(length)) continue;
+        edges.push_back({pair.id1, pair.id2, length});
+        lengths.push_back(length);
+    }
+    if (lengths.size() < 3) return 0;
+
+    const auto middle = lengths.begin() + lengths.size() / 2;
+    std::nth_element(lengths.begin(), middle, lengths.end());
+    const double median_length = *middle;
+    if (!(median_length > 1e-8) || !std::isfinite(median_length)) return 0;
+
+    // A bearing-only solve may satisfy every reprojection constraint while a
+    // weakly constrained camera group drifts to a different scale. Remove
+    // those scale-breaking links, then keep the largest position-rigid
+    // component for BA and let robust resection recover the excluded views.
+    const double maximum_length = 8.0 * median_length;
+    std::vector<std::vector<Index>> adjacency(scene.images.size());
+    for (const PositionEdge& edge : edges) {
+        if (edge.length > maximum_length) continue;
+        adjacency[edge.first].push_back(edge.second);
+        adjacency[edge.second].push_back(edge.first);
+    }
+
+    std::vector<std::uint8_t> visited(scene.images.size(), 0);
+    std::vector<Index> largest;
+    for (Index seed = 0; seed < scene.images.size(); ++seed) {
+        if (visited[seed] || !scene.images[seed].registered) continue;
+        std::vector<Index> component;
+        std::queue<Index> pending;
+        pending.push(seed);
+        visited[seed] = 1;
+        while (!pending.empty()) {
+            const Index image_id = pending.front();
+            pending.pop();
+            component.push_back(image_id);
+            for (const Index neighbor : adjacency[image_id]) {
+                if (visited[neighbor]) continue;
+                visited[neighbor] = 1;
+                pending.push(neighbor);
+            }
+        }
+        if (component.size() > largest.size())
+            largest = std::move(component);
+    }
+
+    const unsigned registered = scene.registered_count();
+    if (largest.size() < 3 || largest.size() * 2 < registered) return 0;
+    std::vector<std::uint8_t> keep(scene.images.size(), 0);
+    for (const Index image_id : largest) keep[image_id] = 1;
+    unsigned quarantined = 0;
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        Image& image = scene.images[image_id];
+        if (!image.registered || keep[image_id]) continue;
+        image.registered = false;
+        ++quarantined;
+    }
+    if (quarantined == 0) return 0;
+
+    // Point positions estimated together with a drifting component are not a
+    // safe BA seed. Re-triangulate all structure from the retained cameras.
+    for (Track& track : scene.tracks) {
+        track.position = Vec3::Zero();
+        track.num_inliers = 0;
+    }
+    core::Logger::instance().warning(
+        "global position graph: quarantined=", quarantined,
+        " retained=", largest.size(),
+        " median_edge=", median_length,
+        " maximum_edge=", maximum_length);
+    return quarantined;
 }
 
 void populate_reprojection_stats(
@@ -276,12 +369,18 @@ ReconstructionSummary run_global_mapping(
         return summary;
     }
 
+    const unsigned quarantined_positions =
+        quarantine_position_outliers(scene);
+
     // Densify structure for BA: camera-only needs a full triangulation; a capped
     // only_points solve only marks a subset, so triangulate the remaining tracks.
-    if (position_summary.positioned_tracks == 0) {
+    if (position_summary.positioned_tracks == 0 ||
+        quarantined_positions > 0) {
         triangulate_tracks(scene, false, 6.F, 1.F);
         core::Logger::instance().info(
-            "global: triangulated after camera-only positioning");
+            quarantined_positions > 0
+                ? "global: triangulated after position-graph quarantine"
+                : "global: triangulated after camera-only positioning");
     } else {
         triangulate_tracks(scene, true, 6.F, 1.F);
         core::Logger::instance().info(
