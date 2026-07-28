@@ -407,6 +407,8 @@ __global__ void multi_view_raw_kernel(
     const float* reference_depth, const float* reference_normal,
     const float* reference_rgb, const float* sampled_neighbour_points,
     const bool* sampled_inside, const float* neighbour_rgb, const float* transform,
+    const float* reference_mask, const float* neighbour_mask,
+    const bool reference_has_mask, const bool neighbour_has_mask,
     const Camera reference, const Camera neighbour,
     const float pixel_noise_threshold, const bool robust_ncc,
     const float ncc_lambda_reference, const float ncc_sharpness,
@@ -418,8 +420,33 @@ __global__ void multi_view_raw_kernel(
     const int x = static_cast<int>(pixel % reference.width);
     const int y = static_cast<int>(pixel / reference.width);
     const float depth = reference_depth[pixel];
-    if (!sampled_inside[pixel] || !(depth > 0.F))
+    if (!sampled_inside[pixel] || !(depth > 0.F) ||
+        (reference_has_mask && reference_mask[pixel] <= 0.5F))
         return;
+    if (neighbour_has_mask) {
+        const float qx =
+            (static_cast<float>(x) - reference.cx) / reference.fx * depth;
+        const float qy =
+            (static_cast<float>(y) - reference.cy) / reference.fy * depth;
+        const float nx = transform[0] * qx + transform[1] * qy +
+                         transform[2] * depth + transform[9];
+        const float ny = transform[3] * qx + transform[4] * qy +
+                         transform[5] * depth + transform[10];
+        const float nz = transform[6] * qx + transform[7] * qy +
+                         transform[8] * depth + transform[11];
+        if (!(nz > 0.2F)) return;
+        const int neighbour_x = static_cast<int>(lrintf(
+            neighbour.fx * nx / nz + neighbour.cx));
+        const int neighbour_y = static_cast<int>(lrintf(
+            neighbour.fy * ny / nz + neighbour.cy));
+        if (neighbour_x < 0 || neighbour_y < 0 ||
+            neighbour_x >= static_cast<int>(neighbour.width) ||
+            neighbour_y >= static_cast<int>(neighbour.height) ||
+            neighbour_mask[
+                static_cast<std::size_t>(neighbour_y) * neighbour.width +
+                static_cast<std::size_t>(neighbour_x)] <= 0.5F)
+            return;
+    }
     const float sx = sampled_neighbour_points[3 * pixel];
     const float sy = sampled_neighbour_points[3 * pixel + 1];
     const float sz = sampled_neighbour_points[3 * pixel + 2];
@@ -1343,7 +1370,11 @@ MultiViewLoss add_multi_view_loss(
         reference_render.normal.ptr<float>(), reference.rgb.ptr<float>(),
         sampled_neighbour_points.ptr<float>(), sampled_inside.ptr<bool>(),
         neighbour.rgb.ptr<float>(),
-        transform_tensor.ptr<float>(), reference.camera, neighbour.camera,
+        transform_tensor.ptr<float>(),
+        reference.has_mask ? reference.mask.ptr<float>() : nullptr,
+        neighbour.has_mask ? neighbour.mask.ptr<float>() : nullptr,
+        reference.has_mask, neighbour.has_mask,
+        reference.camera, neighbour.camera,
         options.multi_view_pixel_noise_threshold,
         options.multi_view_robust_ncc,
         options.multi_view_ncc_lambda_reference,

@@ -1,6 +1,7 @@
 #include "mvs/densify.hpp"
 
 #include "core/logging.hpp"
+#include "mvs/export.hpp"
 #include "mvs/internal.hpp"
 
 #include <algorithm>
@@ -11,11 +12,15 @@ namespace aetherscan::mvs {
 void densify(MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.densify");
 #if !defined(AETHERSCAN_HAS_CGAL)
+    if (options.auto_roi && !scene.roi.valid)
+        throw std::runtime_error(
+            "Automatic ROI coarse meshing requires the CGAL global Delaunay "
+            "backend. Configure a CGAL-enabled build.");
     if (options.build_mesh &&
         options.mesh_method == MeshMethod::delaunay_cut)
         throw std::runtime_error(
             "Global Delaunay meshing requires a CGAL-enabled build. "
-            "Install CGAL or explicitly select TSDF/projective meshing.");
+            "Install CGAL or use GGGS TSDF meshing.");
 #endif
     if (!options.roi_path.empty()) {
         if (!detail::load_manual_roi(options.roi_path, scene.roi))
@@ -33,15 +38,34 @@ void densify(MvsScene& scene, const DensifyOptions& options) {
         coarse.geometric_consistency = false;
         coarse.random_iters = std::min(4U, options.random_iters);
         coarse.min_views_fuse = std::min(2U, options.min_views_fuse);
-        coarse.mesh_method = MeshMethod::depth_projective;
-        coarse.mesh_pixel_step = std::max(3U, options.mesh_pixel_step);
-        coarse.mesh_close_hole_edges = 0;
+        // Foreground masks require a globally coherent surface. Reuse the
+        // production CGAL Delaunay/free-space graph-cut backend and cap only
+        // its candidate count for this coarse pass.
+        coarse.mesh_method = MeshMethod::delaunay_cut;
+        constexpr std::uint64_t maximum_coarse_mesh_points = 500'000;
+        coarse.mesh_max_points = options.mesh_max_points == 0
+            ? maximum_coarse_mesh_points
+            : std::min(
+                  options.mesh_max_points, maximum_coarse_mesh_points);
 
         estimate_depth_maps(scene, coarse);
         fuse_depth_maps(scene, coarse);
         if (detail::estimate_automatic_roi(scene, options)) {
             reconstruct_mesh(scene, coarse);
+            if (!options.coarse_mesh_output_path.empty()) {
+                save_mesh_ply(scene.mesh, options.coarse_mesh_output_path);
+                core::Logger::instance().info(
+                    "coarse_mesh_ply=", options.coarse_mesh_output_path,
+                    " vertices=", scene.mesh.vertices.size(),
+                    " faces=", scene.mesh.faces.size());
+            }
             detail::build_projected_foreground_masks(scene, options);
+            if (options.coarse_preview_only) {
+                core::Logger::instance().info(
+                    "coarse preview complete; skipping final MVS pass");
+                stage.finish();
+                return;
+            }
             for (auto& view : scene.views) view.depth_map = {};
             scene.dense_cloud.points.clear();
             scene.mesh = {};

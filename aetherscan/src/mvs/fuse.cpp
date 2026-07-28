@@ -234,11 +234,21 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
     using Grid = std::unordered_map<GridKey, Accumulator, GridHash>;
     const unsigned worker_count = std::max(
         1U, std::min<unsigned>(threads, static_cast<unsigned>(rows.size())));
-    std::vector<Grid> worker_grids(worker_count);
+    // Keep every worker's writes private, but partition them by the final key
+    // hash.  The former single Grid per worker made pixel fusion parallel and
+    // then serialized tens of millions of entries into one global map.  With
+    // the same partitioning on every worker, each shard can be reduced
+    // independently without locks.
+    const unsigned shard_count = worker_count;
+    std::vector<std::vector<Grid>> worker_grids(worker_count);
+    for (auto& shards : worker_grids) shards.resize(shard_count);
     const std::size_t reserve_per_worker =
         rows.empty() ? 0 : std::min<std::size_t>(
             1'000'000, rows.size() * 256 / worker_count);
-    for (auto& grid : worker_grids) grid.reserve(reserve_per_worker);
+    const std::size_t reserve_per_shard =
+        (reserve_per_worker + shard_count - 1) / shard_count;
+    for (auto& shards : worker_grids)
+        for (auto& grid : shards) grid.reserve(reserve_per_shard);
 
     parallel::parallel_for(
         rows.size(), worker_count,
@@ -246,7 +256,7 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
             const auto [ref_id, y] = rows[row_index];
             const MvsView& ref = scene.views[ref_id];
             const DepthMap& rdm = ref.depth_map;
-            Grid& grid = worker_grids[worker_id];
+            auto& grids = worker_grids[worker_id];
 
             for (std::uint32_t x = 0; x < ref.width; ++x) {
                 const std::size_t index =
@@ -461,6 +471,8 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                     static_cast<std::int64_t>(std::floor(position.y() / voxel)),
                     static_cast<std::int64_t>(std::floor(position.z() / voxel)),
                     normal_bin(normal)};
+                Grid& grid =
+                    grids[GridHash{}(key) % static_cast<std::size_t>(shard_count)];
                 Accumulator& accumulator = grid[key];
                 accumulator.position += position * weight;
                 accumulator.normal += normal * weight;
@@ -483,38 +495,66 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
         });
 
     std::size_t grid_entries = 0;
-    for (const auto& grid : worker_grids) grid_entries += grid.size();
-    Grid fused;
-    fused.reserve(grid_entries);
-    for (const auto& grid : worker_grids)
-        for (const auto& [key, value] : grid)
-            merge_accumulator(fused[key], value);
+    for (const auto& shards : worker_grids)
+        for (const auto& grid : shards) grid_entries += grid.size();
 
-    scene.dense_cloud.points.reserve(fused.size());
-    for (auto& [key, accumulator] : fused) {
-        (void)key;
-        if (accumulator.weight <= 0.F || accumulator.view_count < options.min_views_fuse ||
-            accumulator.normal.squaredNorm() < 1e-10F)
-            continue;
-        DensePoint point;
-        point.position = accumulator.position / accumulator.weight;
-        point.normal = accumulator.normal.normalized();
-        point.color = accumulator.color_weight > 0.F
-                          ? accumulator.color / accumulator.color_weight
-                          : Vec3f{0.5F, 0.5F, 0.5F};
-        point.weight = accumulator.weight;
-        point.views.assign(
-            accumulator.views.begin(),
-            accumulator.views.begin() + accumulator.view_count);
-        point.view_weights.assign(
-            accumulator.view_weights.begin(),
-            accumulator.view_weights.begin() + accumulator.view_count);
-        scene.dense_cloud.points.push_back(std::move(point));
-    }
+    std::vector<Grid> fused_shards(shard_count);
+    parallel::parallel_for(
+        shard_count, worker_count, [&](const std::size_t shard) {
+            std::size_t shard_entries = 0;
+            for (const auto& grids : worker_grids)
+                shard_entries += grids[shard].size();
+            Grid& fused = fused_shards[shard];
+            fused.reserve(shard_entries);
+            for (const auto& grids : worker_grids)
+                for (const auto& [key, value] : grids[shard])
+                    merge_accumulator(fused[key], value);
+        });
+
+    std::vector<std::vector<DensePoint>> shard_points(shard_count);
+    parallel::parallel_for(
+        shard_count, worker_count, [&](const std::size_t shard) {
+            Grid& fused = fused_shards[shard];
+            auto& points = shard_points[shard];
+            points.reserve(fused.size());
+            for (auto& [key, accumulator] : fused) {
+                (void)key;
+                if (accumulator.weight <= 0.F ||
+                    accumulator.view_count < options.min_views_fuse ||
+                    accumulator.normal.squaredNorm() < 1e-10F)
+                    continue;
+                DensePoint point;
+                point.position = accumulator.position / accumulator.weight;
+                point.normal = accumulator.normal.normalized();
+                point.color = accumulator.color_weight > 0.F
+                                  ? accumulator.color /
+                                        accumulator.color_weight
+                                  : Vec3f{0.5F, 0.5F, 0.5F};
+                point.weight = accumulator.weight;
+                point.views.assign(
+                    accumulator.views.begin(),
+                    accumulator.views.begin() + accumulator.view_count);
+                point.view_weights.assign(
+                    accumulator.view_weights.begin(),
+                    accumulator.view_weights.begin() +
+                        accumulator.view_count);
+                points.push_back(std::move(point));
+            }
+        });
+
+    std::size_t point_count = 0;
+    for (const auto& points : shard_points) point_count += points.size();
+    scene.dense_cloud.points.reserve(point_count);
+    for (auto& points : shard_points)
+        std::move(
+            points.begin(), points.end(),
+            std::back_inserter(scene.dense_cloud.points));
 
     core::Logger::instance().info(
         "mvs fuse: points=", scene.dense_cloud.points.size(),
-        " voxel=", voxel, " workers=", worker_count);
+        " voxel=", voxel, " workers=", worker_count,
+        " reduce_shards=", shard_count,
+        " worker_grid_entries=", grid_entries);
     stage.finish();
 }
 

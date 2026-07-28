@@ -92,6 +92,9 @@ void save_geometry_diagnostics(
     io::RgbImage depth_image{width, height, std::vector<std::uint8_t>(3 * pixels)};
     io::RgbImage normal_image{width, height, std::vector<std::uint8_t>(3 * pixels)};
     io::RgbImage alpha_image{width, height, std::vector<std::uint8_t>(3 * pixels)};
+    io::RgbImage mask_image{width, height, std::vector<std::uint8_t>(3 * pixels)};
+    io::RgbImage alpha_error_image{
+        width, height, std::vector<std::uint8_t>(3 * pixels)};
     for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
         const bool valid = mask[pixel] > 0.5F &&
             alpha[pixel] >= alpha_threshold && depth[pixel] > 0.F &&
@@ -119,14 +122,31 @@ void save_geometry_diagnostics(
         }
         const auto alpha_byte = static_cast<std::uint8_t>(std::lround(
             std::clamp(alpha[pixel], 0.F, 1.F) * 255.F));
+        const auto mask_byte = static_cast<std::uint8_t>(std::lround(
+            std::clamp(mask[pixel], 0.F, 1.F) * 255.F));
         for (int channel = 0; channel < 3; ++channel)
             alpha_image.pixels[3 * pixel + channel] = alpha_byte;
+        for (int channel = 0; channel < 3; ++channel)
+            mask_image.pixels[3 * pixel + channel] = mask_byte;
+        // Red marks foreground requested by the mask but missing from the
+        // rendered alpha. Cyan marks opacity leaking outside the mask.
+        const float missing = std::clamp(mask[pixel] - alpha[pixel], 0.F, 1.F);
+        const float leaking = std::clamp(alpha[pixel] - mask[pixel], 0.F, 1.F);
+        alpha_error_image.pixels[3 * pixel] =
+            static_cast<std::uint8_t>(std::lround(missing * 255.F));
+        alpha_error_image.pixels[3 * pixel + 1] =
+            static_cast<std::uint8_t>(std::lround(leaking * 255.F));
+        alpha_error_image.pixels[3 * pixel + 2] =
+            static_cast<std::uint8_t>(std::lround(leaking * 255.F));
     }
     std::filesystem::create_directories(directory);
     const std::string suffix = "_view_" + std::to_string(view_index) + ".png";
     io::save_rgb_png(depth_image, directory / ("gggs_depth" + suffix));
     io::save_rgb_png(normal_image, directory / ("gggs_normal" + suffix));
     io::save_rgb_png(alpha_image, directory / ("gggs_alpha" + suffix));
+    io::save_rgb_png(mask_image, directory / ("gggs_mask" + suffix));
+    io::save_rgb_png(
+        alpha_error_image, directory / ("gggs_alpha_error" + suffix));
     core::Logger::instance().info(
         "gggs geometry diagnostics: view=", view_index,
         " depth_p02=", near_depth, " depth_p98=", far_depth,
@@ -206,6 +226,7 @@ GggsMeshResult extract_gggs_mesh(
     Rasterizer rasterizer;
 
     std::size_t valid_depth_pixels = 0;
+    std::size_t rejected_roi_pixels = 0;
     std::size_t compared_depth_normal_pixels = 0;
     std::size_t rejected_depth_normal_pixels = 0;
     for (std::size_t view_index = 0;
@@ -224,13 +245,24 @@ GggsMeshResult extract_gggs_mesh(
         const std::vector<float> depth = rendered.median_depth.to_vector();
         const std::vector<float> normal = rendered.normal.to_vector();
         const std::vector<float> alpha = rendered.alpha.to_vector();
-        const std::vector<float> mask = target.mask.to_vector();
         const std::size_t pixels = static_cast<std::size_t>(
             geometry_view.width) * geometry_view.height;
+        // The packed training loader represents a disabled/absent mask with a
+        // one-element sentinel tensor. Mesh extraction, however, indexes one
+        // value per rendered pixel. Treat an absent mask as an all-foreground
+        // image, which also matches the alpha fallback below.
+        const std::vector<float> mask = target.has_mask
+            ? target.mask.to_vector()
+            : std::vector<float>(pixels, 1.F);
         if (depth.size() != pixels || alpha.size() != pixels ||
             mask.size() != pixels || normal.size() != 3 * pixels)
             throw std::runtime_error(
-                "GGGS mesh render returned an unexpected tensor shape");
+                "GGGS mesh render returned an unexpected tensor shape: "
+                "depth=" + std::to_string(depth.size()) +
+                " alpha=" + std::to_string(alpha.size()) +
+                " mask=" + std::to_string(mask.size()) +
+                " normal=" + std::to_string(normal.size()) +
+                " expected_pixels=" + std::to_string(pixels));
 
         if (!mesh_options.diagnostics_dir.empty() &&
             (view_index == 0 || view_index == geometry_scene.views.size() / 2 ||
@@ -260,6 +292,22 @@ GggsMeshResult extract_gggs_mesh(
                     (allowed_maximum_depth > 0.F &&
                      d > allowed_maximum_depth))
                     continue;
+                if (geometry_scene.roi.valid) {
+                    const mvs::Vec3f camera_point =
+                        geometry_view.unproject(
+                            static_cast<float>(x),
+                            static_cast<float>(y), d);
+                    const mvs::Vec3f world_point =
+                        geometry_view.pose
+                            .transform_camera_to_world(
+                                camera_point.cast<double>())
+                            .cast<float>();
+                    if (!world_point.allFinite() ||
+                        !geometry_scene.roi.contains(world_point)) {
+                        ++rejected_roi_pixels;
+                        continue;
+                    }
+                }
                 mvs::Vec3f n{
                     normal[pixel], normal[pixels + pixel],
                     normal[2 * pixels + pixel]};
@@ -352,6 +400,8 @@ GggsMeshResult extract_gggs_mesh(
         " scene_extent=", scene_extent,
         " max_depth=", allowed_maximum_depth,
         " tsdf_voxel=", fusion_options.mesh_tsdf_voxel_size,
+        " roi_enabled=", geometry_scene.roi.valid,
+        " roi_rejected_pixels=", rejected_roi_pixels,
         " depth_normal_compared=", compared_depth_normal_pixels,
         " depth_normal_rejected=", rejected_depth_normal_pixels,
         " min_depth_normal_cosine=", mesh_options.min_depth_normal_cosine);

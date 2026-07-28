@@ -247,6 +247,21 @@ void test_gggs_multi_view_geometry_and_ncc() {
     require_finite(gradients.depth, "Non-finite multi-view depth gradient");
     require_finite(gradients.normal, "Non-finite multi-view normal gradient");
     require_finite(grad_sampled, "Non-finite multi-view sampled-point gradient");
+
+    reference.has_mask = true;
+    neighbour.has_mask = true;
+    reference.mask = tinytensor::Tensor::zeros(
+        {height, width}, tinytensor::Device::CUDA);
+    neighbour.mask = tinytensor::Tensor::ones(
+        {height, width}, tinytensor::Device::CUDA);
+    tinytensor::Tensor masked_grad_sampled;
+    const auto masked_loss = detail::add_multi_view_loss(
+        sampled, inside, reference_render, reference, neighbour,
+        options, gradients, masked_grad_sampled, true);
+    require(
+        masked_loss.geometry_pixels == 0 &&
+            masked_loss.ncc_pixels == 0,
+        "GGGS multi-view loss ignored the coarse foreground mask");
 }
 
 void test_forward_backward() {
@@ -565,6 +580,7 @@ void test_mask_loading() {
     view.height = view.src_height = 2;
     view.fx = view.fy = view.src_fx = view.src_fy = 1.F;
     view.cx = view.cy = view.src_cx = view.src_cy = 0.5F;
+    view.foreground_mask = {255, 255, 255, 0};
     splat::TrainingOptions options;
     options.use_mask = true;
     options.mask_dir = masks;
@@ -572,8 +588,8 @@ void test_mask_loading() {
         splat::make_training_view(view, options);
     require(training.has_mask, "GGGS did not load the matching mask file");
     require(
-        training.mask.to_vector() == std::vector<float>({1.F, 0.F, 0.F, 1.F}),
-        "GGGS mask threshold or pixel mapping differs from pygsplat");
+        training.mask.to_vector() == std::vector<float>({1.F, 0.F, 0.F, 0.F}),
+        "GGGS did not intersect the input and coarse-mesh masks");
     std::filesystem::remove_all(root);
 }
 
@@ -599,6 +615,7 @@ void test_source_resolution_and_knn_initialization() {
     view.src_fx = view.src_fy = 4.F;
     view.src_cx = view.src_cy = 1.5F;
     view.k1 = 0.1F;
+    view.foreground_mask = {255, 0, 0, 255};
     splat::TrainingOptions options;
     options.use_source_resolution = true;
     const auto training = splat::make_training_view(view, options);
@@ -606,6 +623,17 @@ void test_source_resolution_and_knn_initialization() {
         training.camera.width == 4 && training.camera.height == 4 &&
             std::abs(training.camera.fx - 4.F) < 1e-6F,
         "GGGS training did not restore source-resolution intrinsics");
+    const auto projected_mask = training.mask.to_vector();
+    require(
+        training.has_mask && projected_mask.size() == 16 &&
+            projected_mask[0] > 0.5F && projected_mask[15] > 0.5F &&
+            projected_mask[3] < 0.1F && projected_mask[12] < 0.1F &&
+            std::any_of(
+                projected_mask.begin(), projected_mask.end(),
+                [](const float coverage) {
+                    return coverage > 0.F && coverage < 1.F;
+                }),
+        "GGGS did not softly reproject the coarse MVS mask to source resolution");
     const auto rgb = training.rgb.to_vector();
     const float xn = (2.F - view.src_cx) / view.src_fx;
     const float yn = (1.F - view.src_cy) / view.src_fy;

@@ -8,8 +8,6 @@ namespace aetherscan::mvs {
 enum class MeshMethod : std::uint8_t {
     // Delaunay tetrahedralization + visibility-weighted s-t graph cut.
     delaunay_cut = 0,
-    // Projective depth-map triangulation (fast preview fallback).
-    depth_projective = 1,
     // Open3D-compatible sparse block TSDF fusion followed by Marching Cubes.
     // This is the preferred backend for GGGS median-depth geometry.
     tsdf = 2,
@@ -39,6 +37,14 @@ struct DensifyOptions {
     float roi_margin_fraction{0.08F};
     // Coarse mesh silhouette expansion at working resolution.
     unsigned auto_roi_mask_dilate_px{5};
+    // Morphological closing radius for broken coarse-mesh silhouettes.
+    // Zero selects an image-scale adaptive radius.
+    unsigned auto_roi_mask_close_px{0};
+    // Optional diagnostic export of the CGAL coarse mesh used to generate
+    // automatic foreground masks.
+    std::filesystem::path coarse_mesh_output_path;
+    // Stop after automatic ROI, coarse mesh, and projected-mask generation.
+    bool coarse_preview_only{false};
     // RANSAC distance and component voxel size as scene-diagonal fractions.
     float auto_roi_plane_threshold_fraction{0.003F};
     float auto_roi_component_voxel_fraction{0.006F};
@@ -101,8 +107,8 @@ struct DensifyOptions {
     bool geometric_consistency{true};
     // Build mesh after fusion.
     bool build_mesh{true};
-    // Projective is the fast preview path; delaunay_cut selects the optional
-    // CGAL global visibility graph-cut backend.
+    // MVS uses the CGAL global visibility graph-cut backend. GGGS median-depth
+    // geometry uses TSDF.
     MeshMethod mesh_method{MeshMethod::delaunay_cut};
     // Run topology cleanup after either meshing backend: remove duplicate,
     // degenerate and non-manifold faces, orient connected components, remove
@@ -197,7 +203,7 @@ inline void apply_quality_preset(
     options = DensifyOptions{};
     switch (quality) {
     case DensifyQuality::preview:
-        options.mesh_method = MeshMethod::depth_projective;
+        options.mesh_method = MeshMethod::delaunay_cut;
         options.resolution_level = 2;
         options.mask_border_px = 0;
         options.sub_resolution_levels = 1;

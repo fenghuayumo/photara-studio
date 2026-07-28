@@ -1,6 +1,7 @@
 #include "mvs/internal.hpp"
 
 #include "core/logging.hpp"
+#include "parallel/thread_pool.hpp"
 
 #include <Eigen/Eigenvalues>
 #include <Eigen/SVD>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <queue>
 #include <random>
 #include <unordered_map>
@@ -30,6 +32,8 @@ struct CellHash {
         return h;
     }
 };
+
+constexpr std::size_t k_maximum_component_samples = 500'000;
 
 [[nodiscard]] std::pair<Vec3f, Vec3f> bounds(
     const std::vector<DensePoint>& points) {
@@ -177,10 +181,19 @@ struct CellHash {
 [[nodiscard]] std::vector<std::size_t> subject_component(
     const MvsScene& scene, const Vec3f& target, const float voxel,
     const bool has_plane, const Vec3f& plane_n, const float plane_d,
-    const float plane_threshold) {
+    const float plane_threshold, std::size_t& occupied_cells,
+    std::size_t& minimum_cell_support) {
     const auto& points = scene.dense_cloud.points;
-    std::unordered_map<Cell, std::vector<std::size_t>, CellHash> cells;
-    cells.reserve(points.size() / 2 + 1);
+    struct CellAccumulator {
+        std::size_t points{};
+        Vec3f sum{Vec3f::Zero()};
+        std::size_t representative{};
+        float representative_distance{
+            std::numeric_limits<float>::infinity()};
+    };
+    std::unordered_map<Cell, CellAccumulator, CellHash> cells;
+    cells.reserve(
+        std::min(points.size(), k_maximum_component_samples) / 2 + 1);
     for (std::size_t i = 0; i < points.size(); ++i) {
         const Vec3f& p = points[i].position;
         if (has_plane && plane_n.dot(p) - plane_d <= 1.5F * plane_threshold) continue;
@@ -188,15 +201,61 @@ struct CellHash {
             static_cast<int>(std::floor(p.x() / voxel)),
             static_cast<int>(std::floor(p.y() / voxel)),
             static_cast<int>(std::floor(p.z() / voxel))};
-        cells[key].push_back(i);
+        auto& cell = cells[key];
+        ++cell.points;
+        cell.sum += p;
+        const Vec3f center{
+            (static_cast<float>(key.x) + 0.5F) * voxel,
+            (static_cast<float>(key.y) + 0.5F) * voxel,
+            (static_cast<float>(key.z) + 0.5F) * voxel};
+        const float distance = (p - center).squaredNorm();
+        if (distance < cell.representative_distance) {
+            cell.representative_distance = distance;
+            cell.representative = i;
+        }
     }
+    if (cells.empty()) return {};
+
+    // Fusion output order varies with parallel reduction. A fixed-stride
+    // point sample consequently changed the component graph between otherwise
+    // identical runs and sometimes connected the subject to its support.
+    // Accumulate every point into an order-independent occupancy grid instead.
+    //
+    // On large dense clouds, real surface voxels contain tens to thousands of
+    // samples while accidental MVS bridges are far below the median. Removing
+    // cells below one quarter of the median breaks those unstable bridges before
+    // component selection. Small/synthetic clouds keep every occupied cell.
+    minimum_cell_support = 1;
+    if (points.size() > k_maximum_component_samples) {
+        std::vector<std::size_t> counts;
+        counts.reserve(cells.size());
+        for (const auto& entry : cells)
+            counts.push_back(entry.second.points);
+        const auto middle = counts.begin() +
+            static_cast<std::ptrdiff_t>(counts.size() / 2);
+        std::nth_element(counts.begin(), middle, counts.end());
+        const std::size_t total_samples = std::accumulate(
+            counts.begin(), counts.end(), std::size_t{0});
+        const std::size_t mean_support =
+            total_samples / std::max<std::size_t>(counts.size(), 1);
+        minimum_cell_support = std::max({
+            std::size_t{2}, *middle / 4, mean_support / 16});
+        for (auto it = cells.begin(); it != cells.end();) {
+            if (it->second.points < minimum_cell_support)
+                it = cells.erase(it);
+            else
+                ++it;
+        }
+    }
+    occupied_cells = cells.size();
     if (cells.empty()) return {};
 
     std::unordered_map<Cell, unsigned, CellHash> labels;
     labels.reserve(cells.size());
     struct Component { std::vector<Cell> cells; std::size_t points{}; Vec3f sum{Vec3f::Zero()}; };
     std::vector<Component> components;
-    for (const auto& [seed, indices] : cells) {
+    for (const auto& entry : cells) {
+        const Cell& seed = entry.first;
         if (labels.contains(seed)) continue;
         const unsigned label = static_cast<unsigned>(components.size());
         components.emplace_back();
@@ -208,10 +267,9 @@ struct CellHash {
             queue.pop();
             auto& component = components.back();
             component.cells.push_back(cell);
-            for (const std::size_t index : cells.at(cell)) {
-                ++component.points;
-                component.sum += points[index].position;
-            }
+            const auto& accumulator = cells.at(cell);
+            component.points += accumulator.points;
+            component.sum += accumulator.sum;
             for (int dz = -1; dz <= 1; ++dz)
                 for (int dy = -1; dy <= 1; ++dy)
                     for (int dx = -1; dx <= 1; ++dx) {
@@ -242,11 +300,9 @@ struct CellHash {
         if (score > best_score) { best_score = score; best = i; }
     }
     std::vector<std::size_t> selected;
-    selected.reserve(components[best].points);
-    for (const Cell& cell : components[best].cells) {
-        const auto& indices = cells.at(cell);
-        selected.insert(selected.end(), indices.begin(), indices.end());
-    }
+    selected.reserve(components[best].cells.size());
+    for (const Cell& cell : components[best].cells)
+        selected.push_back(cells.at(cell).representative);
     return selected;
 }
 
@@ -371,6 +427,105 @@ void dilate(
     mask.swap(output);
 }
 
+void erode(
+    std::vector<std::uint8_t>& mask, const std::uint32_t width,
+    const std::uint32_t height, const unsigned radius) {
+    if (radius == 0 || mask.empty()) return;
+    std::vector<std::uint8_t> horizontal(mask.size(), 0), output(mask.size(), 0);
+    const int diameter = 2 * static_cast<int>(radius) + 1;
+    for (std::uint32_t y = 0; y < height; ++y) {
+        int active = 0;
+        for (int x = -static_cast<int>(radius);
+             x < static_cast<int>(width + radius); ++x) {
+            const int add = x + static_cast<int>(radius);
+            const int remove = x - static_cast<int>(radius) - 1;
+            if (add >= 0 && add < static_cast<int>(width) &&
+                mask[static_cast<std::size_t>(y) * width + add])
+                ++active;
+            if (remove >= 0 && remove < static_cast<int>(width) &&
+                mask[static_cast<std::size_t>(y) * width + remove])
+                --active;
+            if (x >= 0 && x < static_cast<int>(width) && active == diameter)
+                horizontal[static_cast<std::size_t>(y) * width + x] = 255;
+        }
+    }
+    for (std::uint32_t x = 0; x < width; ++x) {
+        int active = 0;
+        for (int y = -static_cast<int>(radius);
+             y < static_cast<int>(height + radius); ++y) {
+            const int add = y + static_cast<int>(radius);
+            const int remove = y - static_cast<int>(radius) - 1;
+            if (add >= 0 && add < static_cast<int>(height) &&
+                horizontal[static_cast<std::size_t>(add) * width + x])
+                ++active;
+            if (remove >= 0 && remove < static_cast<int>(height) &&
+                horizontal[static_cast<std::size_t>(remove) * width + x])
+                --active;
+            if (y >= 0 && y < static_cast<int>(height) && active == diameter)
+                output[static_cast<std::size_t>(y) * width + x] = 255;
+        }
+    }
+    mask.swap(output);
+}
+
+void close_broken_silhouette(
+    std::vector<std::uint8_t>& mask, const std::uint32_t width,
+    const std::uint32_t height, const unsigned radius) {
+    if (radius == 0) return;
+    dilate(mask, width, height, radius);
+    erode(mask, width, height, radius);
+}
+
+std::size_t fill_enclosed_holes(
+    std::vector<std::uint8_t>& mask, const std::uint32_t width,
+    const std::uint32_t height) {
+    if (width == 0 || height == 0 || mask.empty()) return 0;
+
+    // Mark all background reachable from the image border. Any zero pixel
+    // left afterwards is an enclosed hole in the projected silhouette.
+    // Reuse value 1 as the temporary exterior marker so this needs only a
+    // compact traversal queue in addition to the mask itself.
+    std::vector<std::uint32_t> queue;
+    queue.reserve(
+        2U * static_cast<std::size_t>(width + height));
+    const auto enqueue = [&](const std::uint32_t x, const std::uint32_t y) {
+        const std::size_t index = static_cast<std::size_t>(y) * width + x;
+        if (mask[index] == 0) {
+            mask[index] = 1;
+            queue.push_back(static_cast<std::uint32_t>(index));
+        }
+    };
+    for (std::uint32_t x = 0; x < width; ++x) {
+        enqueue(x, 0);
+        if (height > 1) enqueue(x, height - 1);
+    }
+    for (std::uint32_t y = 1; y + 1 < height; ++y) {
+        enqueue(0, y);
+        if (width > 1) enqueue(width - 1, y);
+    }
+
+    for (std::size_t cursor = 0; cursor < queue.size(); ++cursor) {
+        const std::uint32_t index = queue[cursor];
+        const std::uint32_t x = index % width;
+        const std::uint32_t y = index / width;
+        if (x > 0) enqueue(x - 1, y);
+        if (x + 1 < width) enqueue(x + 1, y);
+        if (y > 0) enqueue(x, y - 1);
+        if (y + 1 < height) enqueue(x, y + 1);
+    }
+
+    std::size_t filled = 0;
+    for (auto& pixel : mask) {
+        if (pixel == 0) {
+            pixel = 255;
+            ++filled;
+        } else if (pixel == 1) {
+            pixel = 0;
+        }
+    }
+    return filled;
+}
+
 }  // namespace
 
 bool load_manual_roi(
@@ -395,6 +550,7 @@ bool load_manual_roi(
 bool estimate_automatic_roi(MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.auto_roi");
     if (scene.dense_cloud.points.size() < 100) return false;
+    const std::size_t source_points = scene.dense_cloud.points.size();
     const auto [lo, hi] = bounds(scene.dense_cloud.points);
     const float diagonal = (hi - lo).norm();
     if (!(diagonal > 1e-8F)) return false;
@@ -407,19 +563,26 @@ bool estimate_automatic_roi(MvsScene& scene, const DensifyOptions& options) {
     const float voxel = std::max(
         diagonal * options.auto_roi_component_voxel_fraction,
         plane_threshold * 1.5F);
+    std::size_t occupied_component_cells = 0;
+    std::size_t minimum_cell_support = 1;
     const auto selected = subject_component(
         scene, viewing_target(scene), voxel, has_plane, plane_n, plane_d,
-        plane_threshold);
+        plane_threshold, occupied_component_cells, minimum_cell_support);
     OrientedBoundingBox roi = fit_obb(
         scene.dense_cloud.points, selected, options.roi_margin_fraction,
         has_plane ? &plane_n : nullptr);
     if (!roi.valid) return false;
 
+    const std::size_t subject_count = static_cast<std::size_t>(std::count_if(
+        scene.dense_cloud.points.begin(), scene.dense_cloud.points.end(),
+        [&](const DensePoint& point) {
+            return roi.contains(point.position);
+        }));
     std::vector<DensePoint> subject;
-    subject.reserve(selected.size());
-    for (const auto index : selected)
-        if (roi.contains(scene.dense_cloud.points[index].position))
-            subject.push_back(scene.dense_cloud.points[index]);
+    subject.reserve(subject_count);
+    for (auto& point : scene.dense_cloud.points)
+        if (roi.contains(point.position))
+            subject.push_back(std::move(point));
     scene.dense_cloud.points.swap(subject);
     scene.roi = roi;
     scene.roi_automatic = true;
@@ -428,6 +591,10 @@ bool estimate_automatic_roi(MvsScene& scene, const DensifyOptions& options) {
     scene.ground_offset = plane_d;
     core::Logger::instance().info(
         "auto ROI: ground=", has_plane ? "yes" : "no",
+        " source_points=", source_points,
+        " component_cells=", selected.size(),
+        " occupied_cells=", occupied_component_cells,
+        " minimum_cell_support=", minimum_cell_support,
         " subject_points=", scene.dense_cloud.points.size(),
         " half_extent=", roi.half_extent.transpose());
     return true;
@@ -452,7 +619,27 @@ void build_projected_foreground_masks(
         for (const auto& face : f) box.faces.emplace_back(face[0], face[1], face[2]);
     }
     const Mesh* source = scene.mesh.faces.empty() ? &box : &scene.mesh;
-    for (auto& view : scene.views) {
+    const unsigned threads =
+        parallel::resolve_thread_count(scene.thread_count);
+    std::uint32_t minimum_view_dimension =
+        std::numeric_limits<std::uint32_t>::max();
+    for (const auto& view : scene.views)
+        minimum_view_dimension = std::min(
+            minimum_view_dimension, std::min(view.width, view.height));
+    if (minimum_view_dimension == std::numeric_limits<std::uint32_t>::max())
+        minimum_view_dimension = 0;
+    const unsigned adaptive_close_radius = std::clamp(
+        std::max(
+            3U * options.auto_roi_mask_dilate_px,
+            minimum_view_dimension / 40U),
+        1U, 32U);
+    const unsigned close_radius = options.auto_roi_mask_close_px != 0
+        ? options.auto_roi_mask_close_px
+        : adaptive_close_radius;
+    std::vector<std::size_t> filled_hole_pixels(scene.views.size(), 0);
+    parallel::parallel_for(
+        scene.views.size(), threads, [&](const std::size_t view_index) {
+        auto& view = scene.views[view_index];
         const std::size_t size = static_cast<std::size_t>(view.width) * view.height;
         const bool has_input_mask = view.foreground_mask.size() == size;
         std::vector<std::uint8_t> projected(size, 0);
@@ -464,10 +651,16 @@ void build_projected_foreground_masks(
             rasterize_triangle(view, source->vertices[a], source->vertices[b],
                                source->vertices[c], zbuffer, projected);
         }
+        if (source != &box) {
+            close_broken_silhouette(
+                projected, view.width, view.height, close_radius);
+            filled_hole_pixels[view_index] =
+                fill_enclosed_holes(projected, view.width, view.height);
+        }
         dilate(projected, view.width, view.height, options.auto_roi_mask_dilate_px);
         if (has_input_mask) {
-            // A coarse projective mesh is intentionally incomplete. Using its
-            // silhouette as a hard intersection makes every coarse hole
+            // A coarse geometric proxy is intentionally conservative. Using
+            // its silhouette as a hard intersection makes every coarse hole
             // irreversible in the final PatchMatch pass. An existing input
             // mask is already the stronger 2D foreground cue, so constrain it
             // only by the projected OBB envelope. Keep the coarse silhouette
@@ -492,7 +685,23 @@ void build_projected_foreground_masks(
                 projected[i] = (projected[i] && view.foreground_mask[i]) ? 255 : 0;
         }
         view.foreground_mask.swap(projected);
-    }
+    });
+    const std::size_t views_with_holes = static_cast<std::size_t>(std::count_if(
+        filled_hole_pixels.begin(), filled_hole_pixels.end(),
+        [](const std::size_t pixels) { return pixels != 0; }));
+    const std::size_t total_filled = std::accumulate(
+        filled_hole_pixels.begin(), filled_hole_pixels.end(), std::size_t{0});
+    const std::size_t maximum_filled = filled_hole_pixels.empty()
+        ? 0
+        : *std::max_element(
+              filled_hole_pixels.begin(), filled_hole_pixels.end());
+    core::Logger::instance().info(
+        "projected foreground masks: views=", scene.views.size(),
+        " coarse_mesh=", source != &box ? 1 : 0,
+        " close_radius=", source != &box ? close_radius : 0,
+        " hole_filled_views=", views_with_holes,
+        " filled_hole_pixels=", total_filled,
+        " maximum_view_hole_pixels=", maximum_filled);
 }
 
 }  // namespace aetherscan::mvs::detail

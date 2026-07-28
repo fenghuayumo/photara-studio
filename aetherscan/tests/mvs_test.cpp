@@ -135,6 +135,58 @@ void test_projected_mesh_mask() {
     require(mask[0] == 0, "projected mesh mask filled background corner");
 }
 
+void test_projected_mesh_mask_fills_enclosed_holes() {
+    MvsScene scene;
+    scene.views.push_back(make_plane_view(0, 32));
+    scene.mesh.vertices = {
+        Vec3f{-0.20F, -0.20F, 2.F}, Vec3f{0.20F, -0.20F, 2.F},
+        Vec3f{0.20F, 0.20F, 2.F}, Vec3f{-0.20F, 0.20F, 2.F},
+        Vec3f{-0.06F, -0.06F, 2.F}, Vec3f{0.06F, -0.06F, 2.F},
+        Vec3f{0.06F, 0.06F, 2.F}, Vec3f{-0.06F, 0.06F, 2.F}};
+    // Four strips form a projected frame with a deliberate central hole.
+    scene.mesh.faces = {
+        Eigen::Vector3i{0,1,5}, Eigen::Vector3i{0,5,4},
+        Eigen::Vector3i{1,2,6}, Eigen::Vector3i{1,6,5},
+        Eigen::Vector3i{3,7,6}, Eigen::Vector3i{3,6,2},
+        Eigen::Vector3i{0,4,7}, Eigen::Vector3i{0,7,3}};
+    DensifyOptions options;
+    options.auto_roi_mask_dilate_px = 0;
+    detail::build_projected_foreground_masks(scene, options);
+    const auto& mask = scene.views[0].foreground_mask;
+    require(
+        mask[16U * 32U + 16U] != 0,
+        "projected coarse-mesh mask retained an enclosed hole");
+    require(
+        mask[0] == 0,
+        "coarse-mesh hole filling leaked into exterior background");
+}
+
+void test_projected_mesh_mask_closes_open_notches() {
+    MvsScene scene;
+    scene.views.push_back(make_plane_view(0, 32));
+    scene.mesh.vertices = {
+        Vec3f{-0.20F, -0.20F, 2.F}, Vec3f{0.20F, -0.20F, 2.F},
+        Vec3f{0.20F, 0.20F, 2.F}, Vec3f{-0.20F, 0.20F, 2.F},
+        Vec3f{-0.06F, -0.06F, 2.F}, Vec3f{0.06F, -0.06F, 2.F},
+        Vec3f{0.06F, 0.06F, 2.F}, Vec3f{-0.06F, 0.06F, 2.F}};
+    // Deliberately omit the top strip, connecting the central void to the
+    // exterior. Hole filling alone cannot repair this boundary notch.
+    scene.mesh.faces = {
+        Eigen::Vector3i{1,2,6}, Eigen::Vector3i{1,6,5},
+        Eigen::Vector3i{3,7,6}, Eigen::Vector3i{3,6,2},
+        Eigen::Vector3i{0,4,7}, Eigen::Vector3i{0,7,3}};
+    DensifyOptions options;
+    options.auto_roi_mask_dilate_px = 0;
+    options.auto_roi_mask_close_px = 4;
+    detail::build_projected_foreground_masks(scene, options);
+    require(
+        scene.views[0].foreground_mask[16U * 32U + 16U] != 0,
+        "coarse-mesh mask retained a boundary-connected notch");
+    require(
+        scene.views[0].foreground_mask[0] == 0,
+        "coarse-mesh closing leaked into distant background");
+}
+
 void test_input_mask_is_not_cut_by_coarse_mesh_holes() {
     MvsScene scene;
     scene.views.push_back(make_plane_view(0, 32));
@@ -214,44 +266,27 @@ void test_automatic_ground_and_subject_roi() {
                 p.views = {0,1,2};
                 scene.dense_cloud.points.push_back(p);
             }
+    MvsScene reversed = scene;
+    std::reverse(
+        reversed.dense_cloud.points.begin(),
+        reversed.dense_cloud.points.end());
     DensifyOptions options;
     options.auto_roi_component_voxel_fraction = 0.04F;
     options.roi_margin_fraction = 0.05F;
     require(detail::estimate_automatic_roi(scene, options), "automatic ROI failed");
+    require(
+        detail::estimate_automatic_roi(reversed, options),
+        "reversed automatic ROI failed");
+    require(
+        (scene.roi.center - reversed.roi.center).norm() < 1e-4F &&
+            (scene.roi.half_extent - reversed.roi.half_extent).norm() < 1e-4F,
+        "automatic ROI depends on parallel fusion point ordering");
     require(scene.has_ground_plane, "automatic ROI missed dominant ground plane");
     require(scene.roi.contains(target), "automatic ROI missed subject target");
     require(!scene.roi.contains(Vec3f{0.9F, 0.F, 0.9F}),
             "automatic ROI retained distant ground");
     for (const auto& point : scene.dense_cloud.points)
         require(point.position.y() > 0.05F, "subject component retained ground");
-}
-
-void test_projective_mesh() {
-    MvsScene scene = make_plane_scene();
-    DensifyOptions options;
-    options.speckle_size = 1;
-    options.min_views_fuse = 2;
-    fuse_depth_maps(scene, options);
-    options.mesh_method = MeshMethod::depth_projective;
-    options.mesh_pixel_step = 1;
-    options.mesh_min_component_faces = 1;
-    reconstruct_mesh(scene, options);
-
-    require(!scene.mesh.vertices.empty(), "plane meshing produced no vertices");
-    require(scene.mesh.faces.size() == 450, "unexpected plane face count");
-    require(
-        scene.mesh.normals.size() == scene.mesh.vertices.size(),
-        "mesh normals are incomplete");
-    std::set<std::array<int, 3>> unique;
-    for (const Eigen::Vector3i& face : scene.mesh.faces) {
-        std::array<int, 3> key{face[0], face[1], face[2]};
-        std::sort(key.begin(), key.end());
-        require(key[0] >= 0, "negative mesh index");
-        require(
-            key[2] < static_cast<int>(scene.mesh.vertices.size()),
-            "mesh index out of range");
-        require(unique.insert(key).second, "duplicate projective face");
-    }
 }
 
 void test_quality_presets() {
@@ -285,8 +320,8 @@ void test_quality_presets() {
     apply_quality_preset(options, DensifyQuality::preview);
     require(options.resolution_level == 2, "preview preset resolution mismatch");
     require(
-        options.mesh_method == MeshMethod::depth_projective,
-        "preview preset does not select projective meshing");
+        options.mesh_method == MeshMethod::delaunay_cut,
+        "preview preset does not select CGAL global meshing");
     require(
         std::abs(options.depth_diff_threshold - 0.01F) < 1e-6F,
         "preset application leaked high-quality thresholds");
@@ -514,7 +549,7 @@ void test_bow_tie_holes_are_split_and_closed() {
         Eigen::Vector3i{2,3,0}, Eigen::Vector3i{0,6,4},
         Eigen::Vector3i{4,6,5}, Eigen::Vector3i{5,6,0}};
     DensifyOptions options;
-    options.mesh_method = MeshMethod::depth_projective;
+    options.mesh_method = MeshMethod::delaunay_cut;
     options.mesh_min_component_faces = 1;
     options.mesh_close_hole_edges = 8;
     options.mesh_spurious_factor = 0.F;
@@ -672,10 +707,11 @@ int main() {
         test_parallel_fusion();
         test_mask_and_roi_constrained_fusion();
         test_projected_mesh_mask();
+        test_projected_mesh_mask_fills_enclosed_holes();
+        test_projected_mesh_mask_closes_open_notches();
         test_input_mask_is_not_cut_by_coarse_mesh_holes();
         test_manual_obb_file();
         test_automatic_ground_and_subject_roi();
-        test_projective_mesh();
         test_quality_presets();
 #if !defined(AETHERSCAN_HAS_CGAL)
         test_missing_cgal_fails_before_densify();

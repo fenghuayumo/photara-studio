@@ -171,8 +171,8 @@ MVS 中表现为轮廓双层、底座重叠或缺失。程序会在输出旁生�
 CPU PatchMatch 会一次缓存所有图像金字塔，并默认同时处理 8 个参考视图；每个视图内部再按
 8 行 tile 做 red/black 并行传播。可用 `--patchmatch-concurrent-views` 和
 `--patchmatch-tile-rows` 调整。`--mesh-method auto` 在 GGGS 路径使用 median-depth TSDF；
-MVS-only preview 使用快速 projective mesh，default/high 使用 CGAL 全局 Delaunay visibility
-graph-cut。全局图的输入上限由
+MVS-only 的 preview/default/high 均使用 CGAL 全局 Delaunay visibility
+graph-cut，不再提供 projective mesh。全局图的输入上限由
 `--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。三个 mesh backend 都会经过统一
 Clean；构建了 `asdiff::mesh` 且 GGGS mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
 Meshes field-aligned remesh 和 CGAL repair/decimate。已经低于目标面数的网格结果会直接保留，

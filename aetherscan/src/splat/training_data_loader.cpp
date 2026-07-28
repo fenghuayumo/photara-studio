@@ -255,6 +255,49 @@ float sample_mask_coverage(
         : 0.F;
 }
 
+float sample_projected_foreground_coverage(
+    const mvs::MvsView& view, const Camera& output_camera,
+    const std::uint32_t x, const std::uint32_t y) {
+    const std::size_t working_pixels =
+        static_cast<std::size_t>(view.width) * view.height;
+    if (view.foreground_mask.size() != working_pixels ||
+        view.width == 0 || view.height == 0)
+        return 1.F;
+
+    // The coarse mesh mask lives in the undistorted MVS working camera.
+    // Reproject the ideal pinhole ray instead of scaling pixels directly so
+    // source-resolution and progressive-resolution GGGS targets use exactly
+    // the same foreground envelope.
+    const float xn =
+        (static_cast<float>(x) - output_camera.cx) / output_camera.fx;
+    const float yn =
+        (static_cast<float>(y) - output_camera.cy) / output_camera.fy;
+    const float u = view.fx * xn + view.cx;
+    const float v = view.fy * yn + view.cy;
+    const int x0 = static_cast<int>(std::floor(u));
+    const int y0 = static_cast<int>(std::floor(v));
+    const float tx = u - static_cast<float>(x0);
+    const float ty = v - static_cast<float>(y0);
+    const auto sample = [&](const int px, const int py) {
+        if (px < 0 || py < 0 ||
+            px >= static_cast<int>(view.width) ||
+            py >= static_cast<int>(view.height))
+            return 0.F;
+        return view.foreground_mask[
+                   static_cast<std::size_t>(py) * view.width +
+                   static_cast<std::size_t>(px)] != 0
+            ? 1.F
+            : 0.F;
+    };
+    return std::clamp(
+        (sample(x0, y0) * (1.F - tx) + sample(x0 + 1, y0) * tx) *
+                (1.F - ty) +
+            (sample(x0, y0 + 1) * (1.F - tx) +
+             sample(x0 + 1, y0 + 1) * tx) *
+                ty,
+        0.F, 1.F);
+}
+
 struct HostTrainingView {
     Camera camera;
     // One little-endian RGBA8 word per pixel. Alpha stores the optional
@@ -310,6 +353,9 @@ HostTrainingView load_host_training_view(
             has_source_mask = !source_mask.pixels.empty();
         }
     }
+    const bool has_projected_mask =
+        view.foreground_mask.size() ==
+        static_cast<std::size_t>(view.width) * view.height;
     std::vector<int> rgba(pixels);
     const bool direct_source =
         view.k1 == 0.F && view.k2 == 0.F &&
@@ -341,6 +387,11 @@ HostTrainingView load_host_training_view(
                               static_cast<float>(y));
                 alpha = coverage > 0.5F ? 255 : 0;
             }
+            if (has_projected_mask)
+                alpha = std::min(
+                    alpha, quantize_channel(
+                        sample_projected_foreground_coverage(
+                            view, camera, x, y)));
             rgba[pixel] = pack_rgba(red, green, blue, alpha);
             continue;
         }
@@ -354,6 +405,11 @@ HostTrainingView load_host_training_view(
                         source_mask, source, sx, sy) > 0.5F
                 ? 255
                 : 0;
+        if (has_projected_mask)
+            alpha = std::min(
+                alpha, quantize_channel(
+                    sample_projected_foreground_coverage(
+                        view, camera, x, y)));
         rgba[pixel] = pack_rgba(red, green, blue, alpha);
     }
 
@@ -373,19 +429,7 @@ HostTrainingView load_host_training_view(
                     view.depth_map.normal[pixel](axis);
         }
     }
-    bool has_mask = has_source_mask;
-    if (options.use_mask && !has_source_mask &&
-        camera.width == view.width && camera.height == view.height &&
-        view.foreground_mask.size() == pixels) {
-        has_mask = true;
-        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-            const std::uint32_t color =
-                static_cast<std::uint32_t>(rgba[pixel]) & 0x00ffffffU;
-            const std::uint32_t alpha =
-                view.foreground_mask[pixel] != 0 ? 0xff000000U : 0U;
-            rgba[pixel] = std::bit_cast<int>(color | alpha);
-        }
-    }
+    const bool has_mask = has_source_mask || has_projected_mask;
 
     return {
         camera, std::move(rgba), std::move(depth), std::move(normals),

@@ -173,8 +173,8 @@ dense-* / mesh-mvs-* / masks-* / gggs-* / mesh-gggs-* / texture-*
 1. **邻域选择**：共视稀疏点、基线角、尺度、重叠；
 2. **PatchMatch 深度**：斜面 (depth+normal)、粗到细、几何一致性可选；
 3. **融合**：多视图一致性 → `DenseCloud`（xyz、rgb、normal、view 列表）；
-4. **MVS mesh**：Delaunay + 可见性图割（主推，对齐 OpenMVS 质量族）或深度图
-   projective triangulation（更快预览）；随后统一 Clean。
+4. **MVS mesh**：统一使用 CGAL Delaunay + 可见性图割（对齐 OpenMVS
+   质量族），随后执行 Clean。
 
 ### 输出
 
@@ -224,16 +224,15 @@ Gingy 预览质量实测（RTX 5090 D v2，164/171 注册相机）：CUDA 将
    封闭小边界环，可选 boundary-preserving smoothing，最后压缩顶点并重算法线。
 
 构建时使用标准 `find_package(CGAL QUIET)`。CLI 的 `--mesh-method auto` 在 GGGS 路径选择
-TSDF，在 MVS-only 的 `default/high` 选择全局 Delaunay，在 `preview` 选择 projective。
-可用 `--mesh-method tsdf|projective|delaunay` 强制选择；显式请求不可用的 Delaunay 时直接报错，
-不静默交付低质量 projective 结果。
+TSDF，在所有 MVS-only 质量预设中选择全局 Delaunay。
+可用 `--mesh-method tsdf|delaunay` 强制选择；显式请求不可用的 Delaunay 时直接报错。
 
 关键调优参数：
 
 ```text
 --patchmatch-tile-rows 8
 --patchmatch-concurrent-views 8
---mesh-method auto|tsdf|projective|delaunay
+--mesh-method auto|tsdf|delaunay
 --mesh-max-points 2000000       # 0 表示不设上限
 --mesh-target-faces 0           # 默认保留原生 MC；正数开启 asdiff/CGAL 减面
 --mesh-remesh true              # 超过目标面数时先执行 Instant Meshes remesh
@@ -410,7 +409,7 @@ run_rebuild(scene, cfg):
 
 ## 实施顺序
 
-1. **MVS P0（已完成）**：缓存金字塔、tile PatchMatch、depth + fuse、projective/global
+1. **MVS P0（已完成）**：缓存金字塔、tile PatchMatch、depth + fuse、CGAL global
    Delaunay mesh、Clean、PLY/OBJ；
 2. **Mask + Texture P0（已完成骨架）**：`aetherscan_texture` 通过外部
    `asdiff_render`（默认同级 `../asdiffrender`，`asdiff::render`）做 UVAtlas
@@ -475,9 +474,9 @@ ROI 与 mask 是两层独立约束：ROI 是世界坐标中的 3D OBB，决定�
   → RANSAC 桌面/地面 → 删除平面及背面点
   → 相机视线交汇点引导的 26 邻域体素主体分量
   → PCA OBB（带 margin）
-  → ROI-aware 粗 projective mesh + Clean
+  → ROI-aware 粗 CGAL Delaunay mesh + Clean
   → z-buffer 回投影、膨胀并与输入 mask 求交
-  → 最终 PatchMatch → filter → fusion → Delaunay/projective → Clean
+  → 最终 PatchMatch → filter → fusion → CGAL Delaunay → Clean
 ```
 
 完整约束位置：
@@ -550,8 +549,7 @@ COLMAP 分支的 texture 编排。实现、构建方法、性能边界和许可�
 ## 可扩展全局表面重建与 Clean（2026-07-20）
 
 默认/高质量档的最终 mesh 现在必须使用 CGAL 全局 Delaunay visibility cut；CGAL
-不可用或全局切割失败时会明确报错，不再静默退回容易产生局部碎片的 projective
-mesh。projective 仅保留为 preview 的显式快速路径。
+不可用或全局切割失败时会明确报错，不再静默退回局部碎片网格。
 
 全局后端的关键实现如下：
 
