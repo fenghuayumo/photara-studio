@@ -56,6 +56,14 @@ struct FrontEndOptions {
     // When true, sequential window is augmented with BoW pairs (requires
     // descriptors; temporary SiftGPU extract may be used for retrieval only).
     bool augment_sequential_with_retrieval{false};
+    // After the primary GPU pass, expand only weak verified views against the
+    // remaining images with an independently configurable ratio test. This
+    // preserves the fast path for well-connected views while recovering
+    // difficult viewpoints without paying for an unconditional all-pairs run.
+    bool progressive_pair_expansion{true};
+    unsigned progressive_min_verified_degree{4};
+    float progressive_rescue_match_ratio{0.85F};
+    std::size_t progressive_max_images{500};
     bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};
     CheckpointOptions checkpoint{};

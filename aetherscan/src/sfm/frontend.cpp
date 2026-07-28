@@ -21,6 +21,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace aetherscan::sfm {
@@ -190,6 +191,11 @@ FrontEndStageKeys make_stage_keys(
     geometry.append(options.focal_pixels);
     geometry.append(options.trust_focal_pixels);
     append_relative_options(geometry, options.relative);
+    geometry.append(options.progressive_pair_expansion);
+    geometry.append(options.progressive_min_verified_degree);
+    geometry.append(options.progressive_rescue_match_ratio);
+    geometry.append(options.progressive_max_images);
+    geometry.append_string("progressive_pair_expansion_v2");
 
     FingerprintBuilder tracks;
     tracks.append_string("tracks");
@@ -1415,6 +1421,7 @@ FrontEndResult run_frontend(
                 if (pair.matches.empty()) continue;
                 scene.pairs.push_back(std::move(pair));
             }
+
             geometry_verified_in_pipeline = true;
         } else {
             const unsigned match_threads = threads;
@@ -1479,9 +1486,6 @@ FrontEndResult run_frontend(
     } else {
         core::Logger::instance().info("checkpoint hit: matches");
     }
-    // Descriptors are no longer needed after matching; keep keypoints only.
-    release_descriptors(scene);
-
     if (!geometry_verified_in_pipeline) {
         std::vector<ImagePair> pairs(candidates.size());
         core::ProgressReporter geometry_progress(
@@ -1503,6 +1507,86 @@ FrontEndResult run_frontend(
             scene.pairs.push_back(std::move(pair));
         }
     }
+
+    const bool can_expand_progressively =
+        runtime_options.progressive_pair_expansion &&
+        runtime_options.matcher == "gpu_mutual_ratio" &&
+        scene.images.size() <= runtime_options.progressive_max_images &&
+        runtime_options.neighbor_window + 1 < scene.images.size();
+    if (can_expand_progressively) {
+        std::vector<unsigned> verified_degree(scene.images.size(), 0U);
+        for (const ImagePair& pair : scene.pairs) {
+            if (!pair.active) continue;
+            ++verified_degree[pair.id1];
+            ++verified_degree[pair.id2];
+        }
+        std::vector<std::uint8_t> weak(scene.images.size(), 0);
+        unsigned weak_images = 0;
+        for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+            if (verified_degree[image_id] >=
+                runtime_options.progressive_min_verified_degree)
+                continue;
+            weak[image_id] = 1;
+            ++weak_images;
+        }
+
+        std::unordered_set<std::uint64_t> primary_pairs;
+        primary_pairs.reserve(candidates.size() * 2);
+        const auto candidate_key = [](const Index first, const Index second) {
+            const Index low = std::min(first, second);
+            const Index high = std::max(first, second);
+            return (static_cast<std::uint64_t>(low) << 32U) | high;
+        };
+        for (const PairCandidate& candidate : candidates)
+            primary_pairs.insert(
+                candidate_key(candidate.id1, candidate.id2));
+
+        std::vector<PairCandidate> rescue_candidates;
+        for (Index first = 0; first < scene.images.size(); ++first) {
+            for (Index second = first + 1; second < scene.images.size();
+                 ++second) {
+                if (!weak[first] && !weak[second]) continue;
+                if (primary_pairs.count(candidate_key(first, second)))
+                    continue;
+                rescue_candidates.push_back({first, second});
+            }
+        }
+        if (!rescue_candidates.empty()) {
+            optimize_pairs_order(rescue_candidates, scene);
+            FrontEndOptions rescue_options = runtime_options;
+            rescue_options.match_ratio = std::max(
+                runtime_options.match_ratio,
+                runtime_options.progressive_rescue_match_ratio);
+            auto rescue_matcher = make_frontend_matcher(rescue_options);
+            std::vector<RawPairMatches> rescue_raw_pairs;
+            std::vector<PairDiagnostics> rescue_diagnostics;
+            std::vector<ImagePair> rescue_pair_slots;
+            core::ProgressReporter rescue_progress(
+                "expand weak image pairs", rescue_candidates.size());
+            match_and_verify_siftgpu_coordinator(
+                scene, rescue_candidates, *rescue_matcher, rescue_options,
+                threads, rescue_raw_pairs, rescue_diagnostics,
+                rescue_pair_slots, rescue_progress);
+            rescue_progress.finish();
+
+            unsigned rescued_pairs = 0;
+            for (ImagePair& pair : rescue_pair_slots) {
+                if (pair.matches.empty()) continue;
+                scene.pairs.push_back(std::move(pair));
+                ++rescued_pairs;
+            }
+            core::Logger::instance().info(
+                "progressive pair expansion: weak_images=", weak_images,
+                " attempted=", rescue_candidates.size(),
+                " accepted=", rescued_pairs,
+                " ratio=", rescue_options.match_ratio,
+                " pairs_total=", scene.pairs.size());
+        }
+    }
+    // Descriptors are no longer needed after matching and weak-view rescue;
+    // keep keypoints only for track construction and mapping.
+    release_descriptors(scene);
+
     verify_image_snapshot(
         image_paths, image_fingerprint, ImageSnapshotCheck::content);
     checkpoints.save_scene(

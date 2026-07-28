@@ -7,10 +7,13 @@
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 
+#include <Eigen/QR>
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <queue>
+#include <unordered_map>
 
 namespace aetherscan::sfm {
 namespace {
@@ -65,6 +68,8 @@ void append_resection(
     key.append(options.min_inlier_ratio);
     key.append(options.inlier_grid_size);
     key.append(options.min_inlier_grid_cells);
+    key.append(options.coverage_bypass_min_inliers);
+    key.append(options.coverage_bypass_inlier_ratio);
     key.append(options.consistency_bypass_inlier_ratio);
     key.append(options.min_consistency_pair_weight);
     key.append(options.min_rotation_consistency_neighbors);
@@ -75,6 +80,7 @@ void append_resection(
     key.append(options.min_angle_deg);
     key.append(options.mult_depth_near);
     key.append(options.mult_depth_far);
+    key.append(options.use_pair_match_correspondences);
     key.append(options.ransac.max_reproj_error_px);
     key.append(options.ransac.confidence);
     key.append(options.ransac.max_iterations);
@@ -89,7 +95,7 @@ std::uint64_t reconstruction_key(
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
     key.append_string("reconstruction");
-    key.append_string("position-graph-v2");
+    key.append_string("deferred-component-reseed-v9");
     key.append_string(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
@@ -162,7 +168,8 @@ std::uint64_t reconstruction_key(
     return key.value();
 }
 
-unsigned quarantine_position_outliers(Scene& scene) {
+unsigned repair_position_outliers(
+    Scene& scene, std::vector<Index>& reseeded_images) {
     struct PositionEdge {
         Index first{};
         Index second{};
@@ -229,14 +236,130 @@ unsigned quarantine_position_outliers(Scene& scene) {
     if (largest.size() < 3 || largest.size() * 2 < registered) return 0;
     std::vector<std::uint8_t> keep(scene.images.size(), 0);
     for (const Index image_id : largest) keep[image_id] = 1;
+    std::vector<std::uint8_t> reachable = keep;
+    std::queue<Index> recovery_queue;
+    for (const Index image_id : largest)
+        recovery_queue.push(image_id);
+    while (!recovery_queue.empty()) {
+        const Index image_id = recovery_queue.front();
+        recovery_queue.pop();
+        for (const ImagePair& pair : scene.pairs) {
+            if (!pair.active || !pair.relative_pose.has_value()) continue;
+            Index neighbor = k_invalid;
+            if (pair.id1 == image_id)
+                neighbor = pair.id2;
+            else if (pair.id2 == image_id)
+                neighbor = pair.id1;
+            if (neighbor >= scene.images.size() || reachable[neighbor] ||
+                !scene.images[neighbor].registered)
+                continue;
+            reachable[neighbor] = 1;
+            recovery_queue.push(neighbor);
+        }
+    }
+
+    std::vector<Index> recoverable;
     unsigned quarantined = 0;
     for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
         Image& image = scene.images[image_id];
         if (!image.registered || keep[image_id]) continue;
-        image.registered = false;
-        ++quarantined;
+        if (reachable[image_id])
+            recoverable.push_back(image_id);
+        else {
+            image.registered = false;
+            ++quarantined;
+        }
     }
-    if (quarantined == 0) return 0;
+    unsigned reseeded = 0;
+    if (!recoverable.empty()) {
+        std::unordered_map<Index, Eigen::Index> columns;
+        columns.reserve(recoverable.size());
+        for (Eigen::Index column = 0;
+             column < static_cast<Eigen::Index>(recoverable.size());
+             ++column)
+            columns.emplace(recoverable[static_cast<std::size_t>(column)],
+                            column);
+
+        struct DirectionConstraint {
+            Index first{};
+            Index second{};
+            Vec3 offset{Vec3::Zero()};
+            double weight{1.0};
+        };
+        std::vector<DirectionConstraint> constraints;
+        constraints.reserve(scene.pairs.size());
+        for (const ImagePair& pair : scene.pairs) {
+            if (!pair.active || !pair.relative_pose.has_value() ||
+                pair.id1 >= scene.images.size() ||
+                pair.id2 >= scene.images.size() ||
+                !scene.images[pair.id1].registered ||
+                !scene.images[pair.id2].registered)
+                continue;
+            if (!columns.count(pair.id1) && !columns.count(pair.id2))
+                continue;
+            Vec3 direction =
+                scene.images[pair.id1].pose.R.transpose() *
+                pair.relative_pose->C;
+            const double norm = direction.norm();
+            if (!(norm > 1e-8) || !direction.allFinite()) continue;
+            direction /= norm;
+            constraints.push_back({
+                pair.id1, pair.id2, median_length * direction,
+                std::sqrt(std::max(
+                    0.1, static_cast<double>(pair.composite_weight())))});
+        }
+
+        if (constraints.size() >= recoverable.size()) {
+            Eigen::MatrixXd coefficients = Eigen::MatrixXd::Zero(
+                static_cast<Eigen::Index>(constraints.size()),
+                static_cast<Eigen::Index>(recoverable.size()));
+            Eigen::MatrixXd right_hand_side = Eigen::MatrixXd::Zero(
+                static_cast<Eigen::Index>(constraints.size()), 3);
+            for (Eigen::Index row = 0;
+                 row < static_cast<Eigen::Index>(constraints.size()); ++row) {
+                const DirectionConstraint& constraint =
+                    constraints[static_cast<std::size_t>(row)];
+                Vec3 target = constraint.offset;
+                if (const auto found = columns.find(constraint.second);
+                    found != columns.end())
+                    coefficients(row, found->second) += constraint.weight;
+                else
+                    target -= scene.images[constraint.second].pose.C;
+                if (const auto found = columns.find(constraint.first);
+                    found != columns.end())
+                    coefficients(row, found->second) -= constraint.weight;
+                else
+                    target += scene.images[constraint.first].pose.C;
+                right_hand_side.row(row) =
+                    (constraint.weight * target).transpose();
+            }
+            const Eigen::MatrixXd solution =
+                coefficients.colPivHouseholderQr().solve(right_hand_side);
+            for (Eigen::Index column = 0;
+                 column < solution.rows(); ++column) {
+                const Index image_id =
+                    recoverable[static_cast<std::size_t>(column)];
+                const Vec3 center = solution.row(column).transpose();
+                if (!center.allFinite()) {
+                    scene.images[image_id].registered = false;
+                    ++quarantined;
+                    continue;
+                }
+                scene.images[image_id].pose.C = center;
+                // Keep the repaired pose aside while the rigid component is
+                // refined. It is restored against that stable map below.
+                scene.images[image_id].registered = false;
+                reseeded_images.push_back(image_id);
+                ++reseeded;
+            }
+        } else {
+            for (const Index image_id : recoverable) {
+                scene.images[image_id].registered = false;
+                ++quarantined;
+            }
+        }
+    }
+    if (quarantined == 0 && reseeded == 0) return 0;
 
     // Point positions estimated together with a drifting component are not a
     // safe BA seed. Re-triangulate all structure from the retained cameras.
@@ -245,11 +368,12 @@ unsigned quarantine_position_outliers(Scene& scene) {
         track.num_inliers = 0;
     }
     core::Logger::instance().warning(
-        "global position graph: quarantined=", quarantined,
+        "global position graph: reseeded=", reseeded,
+        " quarantined=", quarantined,
         " retained=", largest.size(),
         " median_edge=", median_length,
         " maximum_edge=", maximum_length);
-    return quarantined;
+    return quarantined + reseeded;
 }
 
 void populate_reprojection_stats(
@@ -369,17 +493,18 @@ ReconstructionSummary run_global_mapping(
         return summary;
     }
 
-    const unsigned quarantined_positions =
-        quarantine_position_outliers(scene);
+    std::vector<Index> reseeded_images;
+    const unsigned repaired_positions =
+        repair_position_outliers(scene, reseeded_images);
 
     // Densify structure for BA: camera-only needs a full triangulation; a capped
     // only_points solve only marks a subset, so triangulate the remaining tracks.
     if (position_summary.positioned_tracks == 0 ||
-        quarantined_positions > 0) {
+        repaired_positions > 0) {
         triangulate_tracks(scene, false, 6.F, 1.F);
         core::Logger::instance().info(
-            quarantined_positions > 0
-                ? "global: triangulated after position-graph quarantine"
+            repaired_positions > 0
+                ? "global: triangulated after position-graph repair"
                 : "global: triangulated after camera-only positioning");
     } else {
         triangulate_tracks(scene, true, 6.F, 1.F);
@@ -450,6 +575,46 @@ ReconstructionSummary run_global_mapping(
         fallback_resection.min_angle_deg,
         fallback_resection.mult_depth_near,
         fallback_resection.mult_depth_far);
+
+    if (!reseeded_images.empty()) {
+        std::vector<std::uint8_t> is_reseeded(scene.images.size(), 0);
+        for (const Index image_id : reseeded_images) {
+            scene.images[image_id].registered = true;
+            is_reseeded[image_id] = 1;
+        }
+        triangulate_tracks(
+            scene, false, fallback_resection.max_reproj_error,
+            fallback_resection.min_angle_deg);
+        filter_tracks(
+            scene, fallback_resection.max_reproj_error,
+            fallback_resection.min_angle_deg,
+            fallback_resection.mult_depth_near,
+            fallback_resection.mult_depth_far);
+
+        BundleOptions recovery_bundle;
+        recovery_bundle.optimizer = fallback_resection.full_ba;
+        recovery_bundle.optimizer.maximum_iterations = 40;
+        recovery_bundle.optimizer.optimize_focal = false;
+        recovery_bundle.optimizer.optimize_aspect_ratio = false;
+        recovery_bundle.optimizer.optimize_distortion = false;
+        recovery_bundle.optimize_all_registered = false;
+        recovery_bundle.free_image_ids = reseeded_images;
+        for (Index image_id = 0; image_id < scene.images.size(); ++image_id)
+            if (scene.images[image_id].registered &&
+                !is_reseeded[image_id])
+                recovery_bundle.fixed_image_ids.push_back(image_id);
+        if (!run_bundle_adjustment(scene, recovery_bundle).success)
+            core::Logger::instance().warning(
+                "global: anchored component bundle adjustment failed");
+        triangulate_tracks(
+            scene, false, fallback_resection.max_reproj_error,
+            fallback_resection.min_angle_deg);
+        filter_tracks(
+            scene, fine_reproj_error,
+            fallback_resection.min_angle_deg,
+            fallback_resection.mult_depth_near,
+            fallback_resection.mult_depth_far);
+    }
 
     // Match openMVS final behavior: retry images excluded from the largest
     // rotation component through robust incremental resection.

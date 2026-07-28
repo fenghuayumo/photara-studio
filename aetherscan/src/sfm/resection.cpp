@@ -22,6 +22,7 @@ namespace {
 struct PoseProposal {
     Index image_id{k_invalid};
     AbsolutePoseResult pose{};
+    std::vector<ImageTrackRef> correspondences;
     unsigned num_points{0};
     double inlier_ratio{0.0};
     unsigned inlier_grid_cells{0};
@@ -30,6 +31,122 @@ struct PoseProposal {
     unsigned translation_neighbors{0};
     double median_translation_error_deg{0.0};
 };
+
+struct PoseCandidate {
+    Index image_id{k_invalid};
+    std::vector<ImageTrackRef> correspondences;
+};
+
+using RegisteredFeatureTracks =
+    std::vector<std::unordered_map<Index, Index>>;
+
+RegisteredFeatureTracks build_registered_feature_tracks(
+    const Scene& scene) {
+    RegisteredFeatureTracks index(scene.images.size());
+    for (Index track_id = 0; track_id < scene.tracks.size(); ++track_id) {
+        const Track& track = scene.tracks[track_id];
+        if (!track.is_triangulated()) continue;
+        const std::size_t count = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            const Observation& observation = track.observations[i];
+            if (observation.image_id >= scene.images.size() ||
+                !scene.images[observation.image_id].registered)
+                continue;
+            index[observation.image_id].try_emplace(
+                observation.feature_id, track_id);
+        }
+    }
+    return index;
+}
+
+std::vector<ImageTrackRef> collect_pose_correspondences(
+    const Scene& scene, const RegisteredFeatureTracks& registered_tracks,
+    const Index image_id, const ResectionConfig& config) {
+    std::unordered_map<std::uint64_t, unsigned> votes;
+    if (image_id < scene.image_tracks.size()) {
+        votes.reserve(scene.image_tracks[image_id].size() * 2);
+        for (const ImageTrackRef& reference : scene.image_tracks[image_id]) {
+            if (reference.track_id >= scene.tracks.size() ||
+                !scene.tracks[reference.track_id].is_triangulated())
+                continue;
+            const std::uint64_t key =
+                (static_cast<std::uint64_t>(reference.feature_id) << 32U) |
+                reference.track_id;
+            votes[key] += 1U << 20U;
+        }
+    }
+
+    if (config.use_pair_match_correspondences) {
+        for (const ImagePair& pair : scene.pairs) {
+            if (!pair.active || pair.matches.empty()) continue;
+            Index other_id = k_invalid;
+            bool target_is_first = false;
+            if (pair.id1 == image_id) {
+                other_id = pair.id2;
+                target_is_first = true;
+            } else if (pair.id2 == image_id) {
+                other_id = pair.id1;
+            } else {
+                continue;
+            }
+            if (other_id >= scene.images.size() ||
+                !scene.images[other_id].registered ||
+                other_id >= registered_tracks.size())
+                continue;
+            const auto& other_tracks = registered_tracks[other_id];
+            for (const FeatureMatch& match : pair.matches) {
+                const Index target_feature =
+                    target_is_first ? match.query : match.train;
+                const Index other_feature =
+                    target_is_first ? match.train : match.query;
+                const auto position = other_tracks.find(other_feature);
+                if (position == other_tracks.end()) continue;
+                const std::uint64_t key =
+                    (static_cast<std::uint64_t>(target_feature) << 32U) |
+                    position->second;
+                ++votes[key];
+            }
+        }
+    }
+
+    struct RankedReference {
+        ImageTrackRef reference;
+        unsigned votes{};
+    };
+    std::vector<RankedReference> ranked;
+    ranked.reserve(votes.size());
+    for (const auto& [key, count] : votes) {
+        ranked.push_back({
+            {static_cast<Index>(key & 0xffffffffULL),
+             static_cast<Index>(key >> 32U)},
+            count});
+    }
+    std::sort(
+        ranked.begin(), ranked.end(),
+        [](const RankedReference& left, const RankedReference& right) {
+            if (left.votes != right.votes)
+                return left.votes > right.votes;
+            if (left.reference.feature_id != right.reference.feature_id)
+                return left.reference.feature_id <
+                       right.reference.feature_id;
+            return left.reference.track_id < right.reference.track_id;
+        });
+
+    std::unordered_set<Index> used_features;
+    std::unordered_set<Index> used_tracks;
+    used_features.reserve(ranked.size());
+    used_tracks.reserve(ranked.size());
+    std::vector<ImageTrackRef> result;
+    result.reserve(ranked.size());
+    for (const RankedReference& entry : ranked) {
+        if (!used_features.insert(entry.reference.feature_id).second ||
+            !used_tracks.insert(entry.reference.track_id).second)
+            continue;
+        result.push_back(entry.reference);
+    }
+    return result;
+}
 
 double rotation_error_deg(const Mat3& first, const Mat3& second) {
     const Mat3 delta = first * second.transpose();
@@ -117,57 +234,47 @@ std::pair<unsigned, double> pose_translation_consistency(
     return {static_cast<unsigned>(errors.size()), errors[middle]};
 }
 
-std::vector<Index> select_next_images(
+std::vector<PoseCandidate> select_next_images(
     const Scene& scene,
+    const RegisteredFeatureTracks& registered_tracks,
     const std::unordered_map<Index, unsigned>& unregistered,
     const ResectionConfig& config) {
-    std::vector<Index> candidates;
+    std::vector<PoseCandidate> candidates;
     candidates.reserve(unregistered.size());
     for (const auto& [image_id, score] : unregistered) {
         (void)score;
-        candidates.push_back(image_id);
+        candidates.push_back({image_id, {}});
     }
     if (candidates.empty()) return {};
 
-    std::vector<unsigned> scores(candidates.size(), 0);
     const unsigned threads = parallel::resolve_thread_count(scene.thread_count);
     parallel::parallel_for(
         candidates.size(), threads, [&](const std::size_t index) {
-            const Index image_id = candidates[index];
-            if (image_id >= scene.image_tracks.size()) return;
-            unsigned score = 0;
-            for (const ImageTrackRef& reference : scene.image_tracks[image_id]) {
-                if (reference.track_id < scene.tracks.size() &&
-                    scene.tracks[reference.track_id].is_triangulated())
-                    ++score;
-            }
-            scores[index] = score;
+            candidates[index].correspondences =
+                collect_pose_correspondences(
+                    scene, registered_tracks,
+                    candidates[index].image_id, config);
         });
 
-    std::vector<Index> next;
+    std::vector<PoseCandidate> next;
     next.reserve(candidates.size());
-    for (std::size_t index = 0; index < candidates.size(); ++index) {
-        if (scores[index] >= config.min_correspondences)
-            next.push_back(candidates[index]);
-    }
+    for (PoseCandidate& candidate : candidates)
+        if (candidate.correspondences.size() >= config.min_correspondences)
+            next.push_back(std::move(candidate));
     if (next.empty()) return next;
 
-    std::unordered_map<Index, unsigned> score_by_id;
-    score_by_id.reserve(candidates.size());
-    for (std::size_t index = 0; index < candidates.size(); ++index)
-        score_by_id.emplace(candidates[index], scores[index]);
-
-    std::sort(next.begin(), next.end(), [&](Index a, Index b) {
-        return score_by_id[a] > score_by_id[b];
+    std::sort(next.begin(), next.end(), [](const auto& a, const auto& b) {
+        return a.correspondences.size() > b.correspondences.size();
     });
-    const unsigned best = score_by_id[next.front()];
+    const unsigned best =
+        static_cast<unsigned>(next.front().correspondences.size());
     const unsigned threshold = static_cast<unsigned>(
         config.ratio_correspondences * static_cast<float>(best));
     next.erase(
         std::remove_if(
             next.begin(), next.end(),
-            [&](Index id) {
-                return score_by_id[id] <
+            [&](const PoseCandidate& candidate) {
+                return candidate.correspondences.size() <
                        std::max(threshold, config.min_correspondences);
             }),
         next.end());
@@ -175,23 +282,26 @@ std::vector<Index> select_next_images(
 }
 
 PoseProposal estimate_image_pose(
-    const Scene& scene, const Index image_id, const ResectionConfig& config) {
+    const Scene& scene, const PoseCandidate& candidate,
+    const ResectionConfig& config) {
     PoseProposal proposal;
-    proposal.image_id = image_id;
+    proposal.image_id = candidate.image_id;
+    proposal.correspondences.reserve(candidate.correspondences.size());
     std::vector<Vec3> bearings;
     std::vector<Vec3> points;
     std::vector<Vec2> pixels;
+    const Index image_id = candidate.image_id;
     if (image_id >= scene.images.size()) return proposal;
     const Image& image = scene.images[image_id];
     const PinholeCamera& camera = scene.camera_of(image);
 
-    if (image_id >= scene.image_tracks.size()) return proposal;
-    for (const ImageTrackRef& reference : scene.image_tracks[image_id]) {
+    for (const ImageTrackRef& reference : candidate.correspondences) {
         if (reference.track_id >= scene.tracks.size()) continue;
         const Track& track = scene.tracks[reference.track_id];
         if (!track.is_triangulated()) continue;
         if (reference.feature_id >= image.features.keypoints.size()) continue;
         const auto& kp = image.features.keypoints[reference.feature_id];
+        proposal.correspondences.push_back(reference);
         bearings.push_back(camera.unproject_normalized({kp.x, kp.y}));
         points.push_back(track.position);
         pixels.emplace_back(kp.x, kp.y);
@@ -247,7 +357,14 @@ PoseProposal estimate_image_pose(
     const bool ratio_ok =
         config.min_inlier_ratio <= 0.F ||
         proposal.inlier_ratio >= config.min_inlier_ratio;
+    const bool bypass_coverage =
+        config.coverage_bypass_inlier_ratio > 0.F &&
+        proposal.pose.num_inliers >=
+            config.coverage_bypass_min_inliers &&
+        proposal.inlier_ratio >=
+            config.coverage_bypass_inlier_ratio;
     const bool coverage_ok =
+        bypass_coverage ||
         config.min_inlier_grid_cells == 0 ||
         proposal.inlier_grid_cells >= config.min_inlier_grid_cells;
     const bool bypass_consistency =
@@ -269,6 +386,49 @@ PoseProposal estimate_image_pose(
     if (!ratio_ok || !coverage_ok || !rotation_ok || !translation_ok)
         proposal.pose.success = false;
     return proposal;
+}
+
+void attach_inlier_observations(
+    Scene& scene, const PoseProposal& proposal) {
+    const std::size_t count = std::min(
+        proposal.correspondences.size(),
+        proposal.pose.inlier_mask.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!proposal.pose.inlier_mask[i]) continue;
+        const ImageTrackRef& reference = proposal.correspondences[i];
+        if (reference.track_id >= scene.tracks.size()) continue;
+        Track& track = scene.tracks[reference.track_id];
+        const auto existing = std::find_if(
+            track.observations.begin(), track.observations.end(),
+            [&](const Observation& observation) {
+                return observation.image_id == proposal.image_id;
+            });
+        const bool observation_existed =
+            existing != track.observations.end();
+        const std::size_t inlier_count = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        if (observation_existed) {
+            const std::size_t existing_index = static_cast<std::size_t>(
+                std::distance(track.observations.begin(), existing));
+            if (existing_index < inlier_count) continue;
+            const Observation promoted = *existing;
+            track.observations.erase(existing);
+            track.observations.insert(
+                track.observations.begin() +
+                    static_cast<std::ptrdiff_t>(inlier_count),
+                promoted);
+        } else {
+            track.observations.insert(
+                track.observations.begin() +
+                    static_cast<std::ptrdiff_t>(inlier_count),
+                {proposal.image_id, reference.feature_id});
+        }
+        track.num_inliers = static_cast<std::uint8_t>(
+            std::min<std::size_t>(inlier_count + 1U, 255U));
+        if (!observation_existed &&
+            proposal.image_id < scene.image_tracks.size())
+            scene.image_tracks[proposal.image_id].push_back(reference);
+    }
 }
 
 std::vector<Index> build_local_window(
@@ -472,23 +632,28 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
     std::vector<Index> dirty_images;
 
     while (!unregistered.empty()) {
-        std::vector<Index> next_ids = select_next_images(scene, unregistered, config);
-        if (next_ids.empty()) break;
+        const RegisteredFeatureTracks registered_tracks =
+            build_registered_feature_tracks(scene);
+        std::vector<PoseCandidate> next_candidates =
+            select_next_images(
+                scene, registered_tracks, unregistered, config);
+        if (next_candidates.empty()) break;
 
         const unsigned start_count = registered_count;
         bool stop_candidate_band = false;
         for (std::size_t wave_begin = 0;
-             wave_begin < next_ids.size() && !stop_candidate_band;
+             wave_begin < next_candidates.size() && !stop_candidate_band;
              wave_begin += wave_limit) {
             const std::size_t wave_end = std::min(
                 wave_begin + static_cast<std::size_t>(wave_limit),
-                next_ids.size());
+                next_candidates.size());
             const std::size_t wave_count = wave_end - wave_begin;
             std::vector<PoseProposal> proposals(wave_count);
             parallel::parallel_for(
                 wave_count, threads, [&](const std::size_t index) {
                     proposals[index] = estimate_image_pose(
-                        scene, next_ids[wave_begin + index], config);
+                        scene, next_candidates[wave_begin + index],
+                        config);
                 });
 
             for (std::size_t n = 0; n < proposals.size();) {
@@ -519,6 +684,7 @@ unsigned register_images(Scene& scene, const ResectionConfig& config) {
 
                 scene.images[proposal.image_id].pose = proposal.pose.pose;
                 scene.images[proposal.image_id].registered = true;
+                attach_inlier_observations(scene, proposal);
                 ++scene.registration_generation;
                 if (scene.registration_generation == 0) {
                     // Generation zero means "unchecked". A wrap is extremely

@@ -10,8 +10,8 @@
 namespace aetherscan::sfm {
 
 struct ResectionConfig {
-    unsigned min_correspondences{15};
-    unsigned min_inliers{12};
+    unsigned min_correspondences{8};
+    unsigned min_inliers{8};
     unsigned max_local_window{25};
     unsigned local_ba_every{10};
     // Parallel PnP wave size against a fixed triangulation snapshot.
@@ -36,7 +36,11 @@ struct ResectionConfig {
     float avg_inliers_ratio_force_ba{0.6F};
     float min_inlier_ratio{0.35F};
     unsigned inlier_grid_size{4};
-    unsigned min_inlier_grid_cells{4};
+    unsigned min_inlier_grid_cells{2};
+    // A compact object can legitimately occupy only a few grid cells in a
+    // distant view. Permit that layout only with overwhelming PnP support.
+    unsigned coverage_bypass_min_inliers{12};
+    float coverage_bypass_inlier_ratio{0.85F};
     // Strong, spatially distributed 2D-3D support is more reliable than the
     // translation direction of low-parallax two-view edges.
     float consistency_bypass_inlier_ratio{0.5F};
@@ -49,6 +53,10 @@ struct ResectionConfig {
     float min_angle_deg{1.F};
     float mult_depth_near{0.05F};
     float mult_depth_far{20.F};
+    // Recover weak views directly from verified pair matches to registered
+    // landmark observations, even when a conservative global track rebuild
+    // did not merge the weak edge into the landmark.
+    bool use_pair_match_correspondences{true};
     AbsolutePoseOptions ransac{};
     ba::OptimizerOptions local_ba{};
     ba::OptimizerOptions full_ba{};
@@ -61,7 +69,7 @@ struct ResectionConfig {
         ransac.confidence = 0.999;
         ransac.max_iterations = 10000;
         ransac.min_iterations = 100;
-        ransac.min_inliers = 12;
+        ransac.min_inliers = 8;
         local_ba.maximum_iterations = 20;
         local_ba.huber_delta = 2.0;
         // Match openMVS local BA: keep intrinsics fixed while resecting.
