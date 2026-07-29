@@ -179,6 +179,9 @@ struct DensifyOptions {
     unsigned mesh_tsdf_pixel_step{2};  // retained for checkpoint compatibility
     // Ignore field samples whose accumulated integration weight is lower.
     float mesh_tsdf_min_weight{0.25F};
+    // Optional output directory for source-aligned multi-view depth
+    // consistency and TSDF observation-weight heatmaps.
+    std::filesystem::path mesh_tsdf_diagnostics_dir;
     // TSDF can contain tiny closed bubbles where depth maps disagree. Remove
     // components smaller than this fraction of the largest component.
     float mesh_tsdf_min_component_fraction{0.0005F};

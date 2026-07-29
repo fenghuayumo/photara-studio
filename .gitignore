@@ -20,4 +20,5 @@
 *.cubin
 *.ptx
 *.log
-
+__pycache__/
+*.py[cod]

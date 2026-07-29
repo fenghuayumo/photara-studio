@@ -1,0 +1,774 @@
+#include "mvs/densify.hpp"
+#include "mvs/export.hpp"
+#include "sfm/export_mvs.hpp"
+#include "sfm/frontend.hpp"
+#include "sfm/reconstruct.hpp"
+#include "splat/dataset.hpp"
+#include "splat/trainer.hpp"
+
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/filesystem.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace nb = nanobind;
+
+namespace {
+
+namespace mvs = aetherscan::mvs;
+namespace sfm = aetherscan::sfm;
+namespace splat = aetherscan::splat;
+
+struct SfmSceneHandle {
+    sfm::Scene scene;
+    sfm::ReconstructionSummary summary;
+};
+
+struct MvsSceneHandle {
+    mvs::MvsScene scene;
+    splat::DatasetFormat dataset_format{splat::DatasetFormat::auto_detect};
+    std::vector<std::string> warnings;
+};
+
+struct GaussianModelHandle {
+    splat::GaussianModel model;
+};
+
+struct MeshResultHandle {
+    mvs::DenseCloud surface_cloud;
+    mvs::Mesh mesh;
+    std::size_t valid_depth_pixels{};
+};
+
+[[nodiscard]] bool supported_image_extension(
+    std::filesystem::path extension) {
+    std::string value = extension.string();
+    std::transform(
+        value.begin(), value.end(), value.begin(),
+        [](const unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+    return value == ".jpg" || value == ".jpeg" || value == ".png" ||
+           value == ".tif" || value == ".tiff" || value == ".bmp";
+}
+
+[[nodiscard]] std::vector<std::filesystem::path> discover_images(
+    const std::filesystem::path& directory) {
+    if (!std::filesystem::is_directory(directory))
+        throw std::invalid_argument(
+            "Image directory does not exist: " + directory.string());
+    std::vector<std::filesystem::path> paths;
+    for (const auto& entry : std::filesystem::directory_iterator(directory))
+        if (entry.is_regular_file() &&
+            supported_image_extension(entry.path().extension()))
+            paths.push_back(entry.path());
+    std::sort(paths.begin(), paths.end());
+    if (paths.empty())
+        throw std::invalid_argument(
+            "Image directory contains no supported images: " +
+            directory.string());
+    return paths;
+}
+
+[[nodiscard]] std::shared_ptr<SfmSceneHandle> run_sfm(
+    const std::vector<std::filesystem::path>& image_paths,
+    const sfm::ReconstructionConfig& options) {
+    auto result = std::make_shared<SfmSceneHandle>();
+    result->summary = sfm::reconstruct(
+        result->scene, image_paths, options);
+    return result;
+}
+
+[[nodiscard]] std::shared_ptr<SfmSceneHandle> run_sfm_directory(
+    const std::filesystem::path& image_directory,
+    const sfm::ReconstructionConfig& options) {
+    return run_sfm(discover_images(image_directory), options);
+}
+
+[[nodiscard]] std::shared_ptr<SfmSceneHandle> run_sfm_frontend(
+    const std::vector<std::filesystem::path>& image_paths,
+    const sfm::FrontEndOptions& options) {
+    sfm::FrontEndResult frontend = sfm::run_frontend(image_paths, options);
+    auto result = std::make_shared<SfmSceneHandle>();
+    result->scene = std::move(frontend.scene);
+    return result;
+}
+
+sfm::ReconstructionSummary run_sfm_mapping(
+    SfmSceneHandle& handle, const sfm::ReconstructionMode mode) {
+    switch (mode) {
+        case sfm::ReconstructionMode::incremental:
+            handle.summary = sfm::run_incremental_mapping(handle.scene);
+            break;
+        case sfm::ReconstructionMode::hierarchical:
+            handle.summary = sfm::run_hierarchical_mapping(handle.scene);
+            break;
+        case sfm::ReconstructionMode::global:
+            handle.summary = sfm::run_global_mapping(handle.scene);
+            break;
+    }
+    return handle.summary;
+}
+
+[[nodiscard]] std::shared_ptr<MvsSceneHandle> build_mvs_scene(
+    const SfmSceneHandle& sfm_scene, const mvs::DensifyOptions& options) {
+    auto result = std::make_shared<MvsSceneHandle>();
+    result->scene = mvs::build_mvs_scene(sfm_scene.scene, options);
+    return result;
+}
+
+[[nodiscard]] std::shared_ptr<MvsSceneHandle> run_mvs(
+    const SfmSceneHandle& sfm_scene, const mvs::DensifyOptions& options) {
+    auto result = std::make_shared<MvsSceneHandle>();
+    result->scene = mvs::densify_from_sfm(sfm_scene.scene, options);
+    return result;
+}
+
+[[nodiscard]] std::shared_ptr<MvsSceneHandle> load_dataset(
+    const splat::DatasetLoadRequest& request) {
+    splat::DatasetLoadResult loaded = splat::load_splat_dataset(request);
+    auto result = std::make_shared<MvsSceneHandle>();
+    result->scene = std::move(loaded.scene);
+    result->dataset_format = loaded.format;
+    result->warnings = std::move(loaded.warnings);
+    return result;
+}
+
+[[nodiscard]] std::shared_ptr<GaussianModelHandle> train_3dgs(
+    const MvsSceneHandle& scene, const splat::TrainingOptions& options) {
+    auto result = std::make_shared<GaussianModelHandle>();
+    result->model = splat::Trainer(options).train(scene.scene);
+    return result;
+}
+
+[[nodiscard]] std::shared_ptr<GaussianModelHandle> load_3dgs(
+    const std::filesystem::path& path) {
+    auto result = std::make_shared<GaussianModelHandle>();
+    result->model = splat::load_gaussians_ply(path);
+    return result;
+}
+
+[[nodiscard]] std::shared_ptr<MeshResultHandle> extract_tsdf(
+    const GaussianModelHandle& model, const MvsSceneHandle& scene,
+    const splat::TrainingOptions& training_options,
+    splat::GggsMeshOptions mesh_options) {
+    mesh_options.fusion.mesh_method = mvs::MeshMethod::tsdf;
+    mesh_options.fusion.build_mesh = true;
+    splat::GggsMeshResult extracted = splat::extract_gggs_mesh(
+        model.model, scene.scene, training_options, mesh_options);
+    auto result = std::make_shared<MeshResultHandle>();
+    result->surface_cloud = std::move(extracted.surface_cloud);
+    result->mesh = std::move(extracted.mesh);
+    result->valid_depth_pixels = extracted.valid_depth_pixels;
+    return result;
+}
+
+}  // namespace
+
+NB_MODULE(aetherscan_native, module) {
+    module.doc() =
+        "Nanobind experiment API for AetherScan SfM, MVS, 3DGS and TSDF";
+
+    nb::enum_<sfm::ReconstructionMode>(module, "ReconstructionMode")
+        .value("INCREMENTAL", sfm::ReconstructionMode::incremental)
+        .value("HIERARCHICAL", sfm::ReconstructionMode::hierarchical)
+        .value("GLOBAL", sfm::ReconstructionMode::global);
+
+    nb::enum_<mvs::MeshMethod>(module, "MeshMethod")
+        .value("DELAUNAY", mvs::MeshMethod::delaunay_cut)
+        .value("TSDF", mvs::MeshMethod::tsdf)
+        .value("NONE", mvs::MeshMethod::none);
+
+    nb::enum_<mvs::DensifyQuality>(module, "DensifyQuality")
+        .value("PREVIEW", mvs::DensifyQuality::preview)
+        .value("DEFAULT", mvs::DensifyQuality::default_quality)
+        .value("HIGH", mvs::DensifyQuality::high);
+
+    nb::enum_<splat::DatasetFormat>(module, "DatasetFormat")
+        .value("AUTO", splat::DatasetFormat::auto_detect)
+        .value("COLMAP", splat::DatasetFormat::colmap)
+        .value("REALITY_CAPTURE", splat::DatasetFormat::reality_capture)
+        .value("OPENMVS", splat::DatasetFormat::openmvs);
+
+    nb::enum_<splat::AlphaMode>(module, "AlphaMode")
+        .value("MASKED", splat::AlphaMode::masked)
+        .value("TRANSPARENT", splat::AlphaMode::transparent);
+
+    nb::enum_<splat::DensificationStrategy>(
+        module, "DensificationStrategy")
+        .value("DEFAULT", splat::DensificationStrategy::default_strategy)
+        .value("ADC_PLUS", splat::DensificationStrategy::adc_plus)
+        .value("ADC_IGS", splat::DensificationStrategy::adc_igs)
+        .value(
+            "DENSE_ADAPTIVE",
+            splat::DensificationStrategy::dense_adaptive);
+
+    nb::class_<sfm::FrontEndOptions>(module, "FrontEndOptions")
+        .def(nb::init<>())
+        .def_rw("focal_pixels", &sfm::FrontEndOptions::focal_pixels)
+        .def_rw(
+            "trust_focal_pixels",
+            &sfm::FrontEndOptions::trust_focal_pixels)
+        .def_rw(
+            "neighbor_window", &sfm::FrontEndOptions::neighbor_window)
+        .def_rw("thread_count", &sfm::FrontEndOptions::thread_count)
+        .def_rw("extractor", &sfm::FrontEndOptions::extractor)
+        .def_rw("matcher", &sfm::FrontEndOptions::matcher)
+        .def_rw("pipeline", &sfm::FrontEndOptions::pipeline)
+        .def_rw("match_ratio", &sfm::FrontEndOptions::match_ratio)
+        .def_rw("mutual_check", &sfm::FrontEndOptions::mutual_check)
+        .def_rw("max_features", &sfm::FrontEndOptions::max_features)
+        .def_rw(
+            "sift_contrast_threshold",
+            &sfm::FrontEndOptions::sift_contrast_threshold)
+        .def_rw(
+            "extractor_model_path",
+            &sfm::FrontEndOptions::extractor_model_path)
+        .def_rw(
+            "extractor_input_width",
+            &sfm::FrontEndOptions::extractor_input_width)
+        .def_rw(
+            "extractor_input_height",
+            &sfm::FrontEndOptions::extractor_input_height)
+        .def_rw(
+            "extractor_min_score",
+            &sfm::FrontEndOptions::extractor_min_score)
+        .def_rw(
+            "extractor_use_cuda",
+            &sfm::FrontEndOptions::extractor_use_cuda)
+        .def_rw(
+            "lightglue_model_path",
+            &sfm::FrontEndOptions::lightglue_model_path)
+        .def_rw(
+            "lightglue_extractor",
+            &sfm::FrontEndOptions::lightglue_extractor)
+        .def_rw(
+            "lightglue_input_width",
+            &sfm::FrontEndOptions::lightglue_input_width)
+        .def_rw(
+            "lightglue_input_height",
+            &sfm::FrontEndOptions::lightglue_input_height)
+        .def_rw(
+            "lightglue_min_score",
+            &sfm::FrontEndOptions::lightglue_min_score)
+        .def_rw(
+            "lightglue_use_cuda",
+            &sfm::FrontEndOptions::lightglue_use_cuda)
+        .def_rw(
+            "progressive_pair_expansion",
+            &sfm::FrontEndOptions::progressive_pair_expansion)
+        .def_rw(
+            "progressive_min_verified_degree",
+            &sfm::FrontEndOptions::progressive_min_verified_degree)
+        .def_rw(
+            "progressive_rescue_match_ratio",
+            &sfm::FrontEndOptions::progressive_rescue_match_ratio);
+
+    nb::class_<sfm::ReconstructionConfig>(module, "SfmOptions")
+        .def(nb::init<>())
+        .def_rw("mode", &sfm::ReconstructionConfig::mode)
+        .def_rw("frontend", &sfm::ReconstructionConfig::frontend)
+        .def_rw(
+            "incremental_hierarchical_rescue",
+            &sfm::ReconstructionConfig::incremental_hierarchical_rescue)
+        .def_rw(
+            "incremental_hierarchical_rescue_min_missing",
+            &sfm::ReconstructionConfig::
+                incremental_hierarchical_rescue_min_missing)
+        .def_rw(
+            "incremental_hierarchical_rescue_min_missing_ratio",
+            &sfm::ReconstructionConfig::
+                incremental_hierarchical_rescue_min_missing_ratio);
+
+    nb::class_<sfm::ReconstructionSummary>(module, "SfmSummary")
+        .def_ro("valid", &sfm::ReconstructionSummary::valid)
+        .def_ro(
+            "registered_views",
+            &sfm::ReconstructionSummary::registered_views)
+        .def_ro("landmarks", &sfm::ReconstructionSummary::landmarks)
+        .def_ro(
+            "failed_views", &sfm::ReconstructionSummary::failed_views)
+        .def_ro(
+            "reprojection_observations",
+            &sfm::ReconstructionSummary::reprojection_observations)
+        .def_ro(
+            "mean_reprojection_error_pixels",
+            &sfm::ReconstructionSummary::mean_reprojection_error_pixels)
+        .def_ro(
+            "rms_reprojection_error_pixels",
+            &sfm::ReconstructionSummary::rms_reprojection_error_pixels);
+
+    nb::class_<mvs::DensifyOptions>(module, "MvsOptions")
+        .def(nb::init<>())
+        .def_rw("mask_dir", &mvs::DensifyOptions::mask_dir)
+        .def_rw("mask_border_px", &mvs::DensifyOptions::mask_border_px)
+        .def_rw("roi_path", &mvs::DensifyOptions::roi_path)
+        .def_rw("auto_roi", &mvs::DensifyOptions::auto_roi)
+        .def_rw(
+            "roi_margin_fraction",
+            &mvs::DensifyOptions::roi_margin_fraction)
+        .def_rw(
+            "resolution_level", &mvs::DensifyOptions::resolution_level)
+        .def_rw("min_resolution", &mvs::DensifyOptions::min_resolution)
+        .def_rw(
+            "sub_resolution_levels",
+            &mvs::DensifyOptions::sub_resolution_levels)
+        .def_rw(
+            "estimation_iters", &mvs::DensifyOptions::estimation_iters)
+        .def_rw(
+            "geometric_iters", &mvs::DensifyOptions::geometric_iters)
+        .def_rw(
+            "geometric_weight", &mvs::DensifyOptions::geometric_weight)
+        .def_rw("random_iters", &mvs::DensifyOptions::random_iters)
+        .def_rw("max_neighbors", &mvs::DensifyOptions::max_neighbors)
+        .def_rw(
+            "min_patch_views", &mvs::DensifyOptions::min_patch_views)
+        .def_rw(
+            "optim_angle_deg", &mvs::DensifyOptions::optim_angle_deg)
+        .def_rw(
+            "ncc_keep_threshold",
+            &mvs::DensifyOptions::ncc_keep_threshold)
+        .def_rw(
+            "min_shared_points", &mvs::DensifyOptions::min_shared_points)
+        .def_rw(
+            "min_views_fuse", &mvs::DensifyOptions::min_views_fuse)
+        .def_rw("speckle_size", &mvs::DensifyOptions::speckle_size)
+        .def_rw(
+            "depth_diff_threshold",
+            &mvs::DensifyOptions::depth_diff_threshold)
+        .def_rw(
+            "reprojection_error_px",
+            &mvs::DensifyOptions::reprojection_error_px)
+        .def_rw(
+            "normal_diff_threshold_deg",
+            &mvs::DensifyOptions::normal_diff_threshold_deg)
+        .def_rw(
+            "filter_depth_maps",
+            &mvs::DensifyOptions::filter_depth_maps)
+        .def_rw(
+            "min_views_filter", &mvs::DensifyOptions::min_views_filter)
+        .def_rw(
+            "adjust_filtered_depth",
+            &mvs::DensifyOptions::adjust_filtered_depth)
+        .def_rw(
+            "geometric_consistency",
+            &mvs::DensifyOptions::geometric_consistency)
+        .def_rw("build_mesh", &mvs::DensifyOptions::build_mesh)
+        .def_rw("mesh_method", &mvs::DensifyOptions::mesh_method)
+        .def_rw("mesh_clean", &mvs::DensifyOptions::mesh_clean)
+        .def_rw(
+            "mesh_close_hole_edges",
+            &mvs::DensifyOptions::mesh_close_hole_edges)
+        .def_rw(
+            "mesh_max_points", &mvs::DensifyOptions::mesh_max_points)
+        .def_rw(
+            "mesh_tsdf_voxel_size",
+            &mvs::DensifyOptions::mesh_tsdf_voxel_size)
+        .def_rw(
+            "mesh_tsdf_bounds_padding",
+            &mvs::DensifyOptions::mesh_tsdf_bounds_padding)
+        .def_rw(
+            "mesh_tsdf_voxel_scale",
+            &mvs::DensifyOptions::mesh_tsdf_voxel_scale)
+        .def_rw(
+            "mesh_tsdf_truncation_voxels",
+            &mvs::DensifyOptions::mesh_tsdf_truncation_voxels)
+        .def_rw(
+            "mesh_tsdf_min_weight",
+            &mvs::DensifyOptions::mesh_tsdf_min_weight)
+        .def_rw(
+            "mesh_tsdf_diagnostics_dir",
+            &mvs::DensifyOptions::mesh_tsdf_diagnostics_dir)
+        .def_rw(
+            "mesh_tsdf_min_component_fraction",
+            &mvs::DensifyOptions::mesh_tsdf_min_component_fraction)
+        .def_rw(
+            "mesh_tsdf_smooth_iters",
+            &mvs::DensifyOptions::mesh_tsdf_smooth_iters)
+        .def_rw(
+            "mesh_tsdf_smooth_lambda",
+            &mvs::DensifyOptions::mesh_tsdf_smooth_lambda)
+        .def_rw(
+            "mesh_tsdf_smooth_mu",
+            &mvs::DensifyOptions::mesh_tsdf_smooth_mu)
+        .def_rw("thread_count", &mvs::DensifyOptions::thread_count);
+
+    nb::class_<splat::TrainingOptions>(module, "TrainingOptions")
+        .def(nb::init<>())
+        .def_rw("iterations", &splat::TrainingOptions::iterations)
+        .def_rw("sh_degree", &splat::TrainingOptions::sh_degree)
+        .def_rw(
+            "sh_degree_interval",
+            &splat::TrainingOptions::sh_degree_interval)
+        .def_rw("seed", &splat::TrainingOptions::seed)
+        .def_rw("log_interval", &splat::TrainingOptions::log_interval)
+        .def_rw("max_gaussians", &splat::TrainingOptions::max_gaussians)
+        .def_rw("input_is_dense", &splat::TrainingOptions::input_is_dense)
+        .def_rw(
+            "enable_densification",
+            &splat::TrainingOptions::enable_densification)
+        .def_rw(
+            "densification_strategy",
+            &splat::TrainingOptions::densification_strategy)
+        .def_rw(
+            "densification_cap",
+            &splat::TrainingOptions::densification_cap)
+        .def_rw(
+            "refine_start_iter",
+            &splat::TrainingOptions::refine_start_iter)
+        .def_rw(
+            "refine_stop_iter",
+            &splat::TrainingOptions::refine_stop_iter)
+        .def_rw(
+            "grow_stop_iter", &splat::TrainingOptions::grow_stop_iter)
+        .def_rw("refine_every", &splat::TrainingOptions::refine_every)
+        .def_rw(
+            "opacity_reset_every",
+            &splat::TrainingOptions::opacity_reset_every)
+        .def_rw(
+            "densify_gradient_threshold",
+            &splat::TrainingOptions::densify_gradient_threshold)
+        .def_rw(
+            "densify_select_fraction",
+            &splat::TrainingOptions::densify_select_fraction)
+        .def_rw(
+            "densify_scale_threshold",
+            &splat::TrainingOptions::densify_scale_threshold)
+        .def_rw(
+            "densify_screen_threshold",
+            &splat::TrainingOptions::densify_screen_threshold)
+        .def_rw("prune_opacity", &splat::TrainingOptions::prune_opacity)
+        .def_rw("opacity_decay", &splat::TrainingOptions::opacity_decay)
+        .def_rw("scale_decay", &splat::TrainingOptions::scale_decay)
+        .def_rw(
+            "background_noise_strength",
+            &splat::TrainingOptions::background_noise_strength)
+        .def_rw(
+            "initialize_scale_from_knn",
+            &splat::TrainingOptions::initialize_scale_from_knn)
+        .def_rw("means_lr", &splat::TrainingOptions::means_lr)
+        .def_rw("scales_lr", &splat::TrainingOptions::scales_lr)
+        .def_rw("opacities_lr", &splat::TrainingOptions::opacities_lr)
+        .def_rw("quaternions_lr", &splat::TrainingOptions::quaternions_lr)
+        .def_rw("sh0_lr", &splat::TrainingOptions::sh0_lr)
+        .def_rw("sh_rest_lr", &splat::TrainingOptions::sh_rest_lr)
+        .def_rw(
+            "photometric_weight",
+            &splat::TrainingOptions::photometric_weight)
+        .def_rw("ssim_weight", &splat::TrainingOptions::ssim_weight)
+        .def_rw(
+            "use_depth_normal_loss",
+            &splat::TrainingOptions::use_depth_normal_loss)
+        .def_rw(
+            "depth_normal_weight",
+            &splat::TrainingOptions::depth_normal_weight)
+        .def_rw(
+            "depth_normal_from_iter",
+            &splat::TrainingOptions::depth_normal_from_iter)
+        .def_rw(
+            "multi_view_geo_weight",
+            &splat::TrainingOptions::multi_view_geo_weight)
+        .def_rw(
+            "multi_view_ncc_weight",
+            &splat::TrainingOptions::multi_view_ncc_weight)
+        .def_rw(
+            "multi_view_num", &splat::TrainingOptions::multi_view_num)
+        .def_rw(
+            "multi_view_pixel_noise_threshold",
+            &splat::TrainingOptions::multi_view_pixel_noise_threshold)
+        .def_rw("use_mask", &splat::TrainingOptions::use_mask)
+        .def_rw("alpha_mode", &splat::TrainingOptions::alpha_mode)
+        .def_rw(
+            "match_alpha_weight",
+            &splat::TrainingOptions::match_alpha_weight)
+        .def_rw("mask_dir", &splat::TrainingOptions::mask_dir)
+        .def_rw(
+            "minimum_scale_fraction",
+            &splat::TrainingOptions::minimum_scale_fraction)
+        .def_rw(
+            "maximum_scale_fraction",
+            &splat::TrainingOptions::maximum_scale_fraction)
+        .def_rw(
+            "max_scale_ratio", &splat::TrainingOptions::max_scale_ratio)
+        .def_rw(
+            "constrain_scale_range",
+            &splat::TrainingOptions::constrain_scale_range)
+        .def_rw(
+            "use_source_resolution",
+            &splat::TrainingOptions::use_source_resolution)
+        .def_rw(
+            "max_image_dimension",
+            &splat::TrainingOptions::max_image_dimension)
+        .def_rw(
+            "progressive_resolution",
+            &splat::TrainingOptions::progressive_resolution)
+        .def_rw(
+            "progressive_resolution_interval",
+            &splat::TrainingOptions::progressive_resolution_interval)
+        .def_rw(
+            "progressive_initial_scale",
+            &splat::TrainingOptions::progressive_initial_scale)
+        .def_rw(
+            "training_view_cache_bytes",
+            &splat::TrainingOptions::training_view_cache_bytes)
+        .def_rw(
+            "training_prefetch_views",
+            &splat::TrainingOptions::training_prefetch_views)
+        .def_rw(
+            "evaluation_split_every",
+            &splat::TrainingOptions::evaluation_split_every);
+
+    nb::class_<splat::DatasetLoadRequest>(module, "DatasetRequest")
+        .def(nb::init<>())
+        .def_rw("source", &splat::DatasetLoadRequest::source)
+        .def_rw(
+            "image_directory",
+            &splat::DatasetLoadRequest::image_directory)
+        .def_rw(
+            "initial_point_cloud",
+            &splat::DatasetLoadRequest::initial_point_cloud)
+        .def_rw("format", &splat::DatasetLoadRequest::format)
+        .def_rw(
+            "random_initial_point_count",
+            &splat::DatasetLoadRequest::random_initial_point_count)
+        .def_rw("seed", &splat::DatasetLoadRequest::seed);
+
+    nb::class_<splat::GggsMeshOptions>(module, "TsdfOptions")
+        .def(nb::init<>())
+        .def_rw(
+            "alpha_threshold",
+            &splat::GggsMeshOptions::alpha_threshold)
+        .def_rw("max_depth", &splat::GggsMeshOptions::max_depth)
+        .def_rw(
+            "diagnostics_dir",
+            &splat::GggsMeshOptions::diagnostics_dir)
+        .def_rw(
+            "min_depth_normal_cosine",
+            &splat::GggsMeshOptions::min_depth_normal_cosine)
+        .def_rw("fusion", &splat::GggsMeshOptions::fusion);
+
+    nb::class_<SfmSceneHandle>(module, "SfmScene")
+        .def_prop_ro(
+            "summary",
+            [](const SfmSceneHandle& self) { return self.summary; })
+        .def_prop_ro(
+            "camera_count",
+            [](const SfmSceneHandle& self) {
+                return self.scene.cameras.size();
+            })
+        .def_prop_ro(
+            "image_count",
+            [](const SfmSceneHandle& self) {
+                return self.scene.images.size();
+            })
+        .def_prop_ro(
+            "registered_count",
+            [](const SfmSceneHandle& self) {
+                return self.scene.registered_count();
+            })
+        .def_prop_ro(
+            "track_count",
+            [](const SfmSceneHandle& self) {
+                return self.scene.tracks.size();
+            })
+        .def(
+            "save_openmvs",
+            [](const SfmSceneHandle& self,
+               const std::filesystem::path& path) {
+                sfm::export_openmvs_interface(self.scene, path);
+            },
+            nb::arg("path"),
+            nb::call_guard<nb::gil_scoped_release>());
+
+    nb::class_<MvsSceneHandle>(module, "MvsScene")
+        .def_prop_ro(
+            "view_count",
+            [](const MvsSceneHandle& self) {
+                return self.scene.views.size();
+            })
+        .def_prop_ro(
+            "dense_point_count",
+            [](const MvsSceneHandle& self) {
+                return self.scene.dense_cloud.points.size();
+            })
+        .def_prop_ro(
+            "mesh_vertex_count",
+            [](const MvsSceneHandle& self) {
+                return self.scene.mesh.vertices.size();
+            })
+        .def_prop_ro(
+            "mesh_face_count",
+            [](const MvsSceneHandle& self) {
+                return self.scene.mesh.faces.size();
+            })
+        .def_ro("warnings", &MvsSceneHandle::warnings)
+        .def(
+            "load_dense_cloud",
+            [](MvsSceneHandle& self, const std::filesystem::path& path) {
+                self.scene.dense_cloud = mvs::load_dense_ply(path);
+            },
+            nb::arg("path"),
+            nb::call_guard<nb::gil_scoped_release>())
+        .def(
+            "save_dense_cloud",
+            [](const MvsSceneHandle& self,
+               const std::filesystem::path& path) {
+                mvs::save_dense_ply(self.scene.dense_cloud, path);
+            },
+            nb::arg("path"),
+            nb::call_guard<nb::gil_scoped_release>())
+        .def(
+            "save_mesh",
+            [](const MvsSceneHandle& self,
+               const std::filesystem::path& path) {
+                mvs::save_mesh_ply(self.scene.mesh, path);
+            },
+            nb::arg("path"),
+            nb::call_guard<nb::gil_scoped_release>());
+
+    nb::class_<GaussianModelHandle>(module, "GaussianModel")
+        .def_prop_ro(
+            "size",
+            [](const GaussianModelHandle& self) {
+                return self.model.size();
+            })
+        .def_prop_ro(
+            "sh_degree",
+            [](const GaussianModelHandle& self) {
+                return self.model.sh_degree;
+            })
+        .def(
+            "save",
+            [](const GaussianModelHandle& self,
+               const std::filesystem::path& path) {
+                splat::save_gaussians_ply(self.model, path);
+            },
+            nb::arg("path"),
+            nb::call_guard<nb::gil_scoped_release>());
+
+    nb::class_<MeshResultHandle>(module, "MeshResult")
+        .def_prop_ro(
+            "vertex_count",
+            [](const MeshResultHandle& self) {
+                return self.mesh.vertices.size();
+            })
+        .def_prop_ro(
+            "face_count",
+            [](const MeshResultHandle& self) {
+                return self.mesh.faces.size();
+            })
+        .def_prop_ro(
+            "surface_point_count",
+            [](const MeshResultHandle& self) {
+                return self.surface_cloud.points.size();
+            })
+        .def_ro(
+            "valid_depth_pixels",
+            &MeshResultHandle::valid_depth_pixels)
+        .def(
+            "save",
+            [](const MeshResultHandle& self,
+               const std::filesystem::path& path) {
+                mvs::save_mesh_ply(self.mesh, path);
+            },
+            nb::arg("path"),
+            nb::call_guard<nb::gil_scoped_release>())
+        .def(
+            "save_surface_cloud",
+            [](const MeshResultHandle& self,
+               const std::filesystem::path& path) {
+                mvs::save_dense_ply(self.surface_cloud, path);
+            },
+            nb::arg("path"),
+            nb::call_guard<nb::gil_scoped_release>());
+
+    module.def(
+        "discover_images", &discover_images, nb::arg("directory"),
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "run_sfm", &run_sfm, nb::arg("image_paths"),
+        nb::arg("options") = sfm::ReconstructionConfig{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "run_sfm_directory", &run_sfm_directory,
+        nb::arg("image_directory"),
+        nb::arg("options") = sfm::ReconstructionConfig{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "run_sfm_frontend", &run_sfm_frontend, nb::arg("image_paths"),
+        nb::arg("options") = sfm::FrontEndOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "run_sfm_mapping", &run_sfm_mapping, nb::arg("scene"),
+        nb::arg("mode") = sfm::ReconstructionMode::global,
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "build_mvs_scene", &build_mvs_scene, nb::arg("sfm_scene"),
+        nb::arg("options") = mvs::DensifyOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "run_mvs", &run_mvs, nb::arg("sfm_scene"),
+        nb::arg("options") = mvs::DensifyOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "mvs_select_neighbors",
+        [](MvsSceneHandle& scene, const mvs::DensifyOptions& options) {
+            mvs::select_neighbors(scene.scene, options);
+        },
+        nb::arg("scene"), nb::arg("options") = mvs::DensifyOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "mvs_estimate_depth_maps",
+        [](MvsSceneHandle& scene, const mvs::DensifyOptions& options) {
+            mvs::estimate_depth_maps(scene.scene, options);
+        },
+        nb::arg("scene"), nb::arg("options") = mvs::DensifyOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "mvs_fuse_depth_maps",
+        [](MvsSceneHandle& scene, const mvs::DensifyOptions& options) {
+            mvs::fuse_depth_maps(scene.scene, options);
+        },
+        nb::arg("scene"), nb::arg("options") = mvs::DensifyOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "mvs_reconstruct_mesh",
+        [](MvsSceneHandle& scene, const mvs::DensifyOptions& options) {
+            mvs::reconstruct_mesh(scene.scene, options);
+        },
+        nb::arg("scene"), nb::arg("options") = mvs::DensifyOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "load_dataset", &load_dataset, nb::arg("request"),
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "train_3dgs", &train_3dgs, nb::arg("scene"),
+        nb::arg("options") = splat::TrainingOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "load_3dgs", &load_3dgs, nb::arg("path"),
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "extract_tsdf", &extract_tsdf, nb::arg("model"),
+        nb::arg("scene"),
+        nb::arg("training_options") = splat::TrainingOptions{},
+        nb::arg("tsdf_options") = splat::GggsMeshOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "apply_mvs_quality_preset",
+        [](mvs::DensifyOptions& options, const mvs::DensifyQuality quality) {
+            mvs::apply_quality_preset(options, quality);
+        },
+        nb::arg("options"), nb::arg("quality"));
+}

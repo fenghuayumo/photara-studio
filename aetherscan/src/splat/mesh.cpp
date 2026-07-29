@@ -188,6 +188,8 @@ GggsMeshResult extract_gggs_mesh(
         ? mesh_options.max_depth
         : 2.F * scene_extent;
     if (fusion_options.mesh_method == mvs::MeshMethod::tsdf) {
+        fusion_options.mesh_tsdf_diagnostics_dir =
+            mesh_options.diagnostics_dir;
         if (scene.roi.valid && !scene.roi_automatic) {
             // A manual ROI is an explicit user override. Automatic ROI is
             // deliberately not reused here because it is a semantic subject

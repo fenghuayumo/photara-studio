@@ -7,6 +7,8 @@ project(AetherScan
 
 option(AETHERSCAN_BUILD_BENCHMARKS "Build performance benchmarks" ON)
 option(AETHERSCAN_BUILD_TESTS "Build correctness tests" ON)
+option(AETHERSCAN_BUILD_PYTHON
+    "Build the nanobind Python experiment module" OFF)
 option(AETHERSCAN_ENABLE_CUDA "Build CUDA acceleration" ON)
 option(AETHERSCAN_ENABLE_GGGS
     "Build CUDA GGGS training (TinyTensor + reference rasterizer)" ON)

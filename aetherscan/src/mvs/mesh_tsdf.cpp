@@ -1,6 +1,7 @@
 #include "mvs/internal.hpp"
 
 #include "core/logging.hpp"
+#include "io/image.hpp"
 #include "marching_cubes_const.hpp"
 
 #include <algorithm>
@@ -298,6 +299,191 @@ struct TouchedBlock {
         voxel_index(x, y, z))];
 }
 
+[[nodiscard]] std::array<std::uint8_t, 3> support_color(
+    const float value, const float brightness = 1.F) noexcept {
+    const float t = std::clamp(value, 0.F, 1.F);
+    const float scale = std::clamp(brightness, 0.F, 1.F);
+    const float red = t <= 0.5F ? 1.F : 2.F * (1.F - t);
+    const float green = t <= 0.5F ? 2.F * t : 1.F;
+    return {
+        static_cast<std::uint8_t>(std::lround(255.F * scale * red)),
+        static_cast<std::uint8_t>(std::lround(255.F * scale * green)),
+        0U};
+}
+
+[[nodiscard]] std::vector<std::size_t> diagnostic_view_indices(
+    const std::size_t view_count) {
+    if (view_count == 0) return {};
+    std::vector<std::size_t> indices{0, view_count / 2, view_count - 1};
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    return indices;
+}
+
+void save_tsdf_diagnostics(
+    const MvsScene& scene, const Volume& volume, const float voxel_size,
+    const float relative_depth_threshold,
+    const std::filesystem::path& directory) {
+    if (directory.empty() || scene.views.empty()) return;
+    std::filesystem::create_directories(directory);
+    const float consistency_threshold =
+        std::max(relative_depth_threshold, 1e-4F);
+    const float full_weight =
+        static_cast<float>(std::clamp<std::size_t>(
+            scene.views.size(), std::size_t{2}, std::size_t{8}));
+
+    for (const std::size_t view_index :
+         diagnostic_view_indices(scene.views.size())) {
+        const MvsView& reference = scene.views[view_index];
+        const DepthMap& reference_map = reference.depth_map;
+        if (reference_map.depth.size() != reference_map.size() ||
+            reference_map.width == 0 || reference_map.height == 0)
+            continue;
+
+        const std::size_t pixels = reference_map.size();
+        io::RgbImage consistency_image{
+            reference_map.width, reference_map.height,
+            std::vector<std::uint8_t>(3 * pixels, 0U)};
+        io::RgbImage weight_image{
+            reference_map.width, reference_map.height,
+            std::vector<std::uint8_t>(3 * pixels, 0U)};
+        std::uint64_t valid_reference_pixels = 0;
+        std::uint64_t compared_depths = 0;
+        std::uint64_t consistent_depths = 0;
+        std::uint64_t pixels_without_comparison = 0;
+        std::uint64_t zero_weight_pixels = 0;
+        double minimum_weight_sum = 0.0;
+
+        for (std::uint32_t y = 0; y < reference_map.height; ++y) {
+            for (std::uint32_t x = 0; x < reference_map.width; ++x) {
+                const std::size_t pixel = reference_map.index(x, y);
+                const float depth = reference_map.depth[pixel];
+                if (!(depth > 0.F) || !std::isfinite(depth)) continue;
+                ++valid_reference_pixels;
+                const Vec3f camera_point = reference.unproject(
+                    static_cast<float>(x), static_cast<float>(y), depth);
+                const Vec3f world = reference.pose
+                    .transform_camera_to_world(camera_point.cast<double>())
+                    .cast<float>();
+                if (!world.allFinite()) continue;
+
+                unsigned compared = 0;
+                unsigned consistent = 0;
+                for (const NeighborScore& score : reference.neighbors) {
+                    const std::size_t neighbor_index =
+                        static_cast<std::size_t>(score.view_id);
+                    if (neighbor_index >= scene.views.size() ||
+                        neighbor_index == view_index)
+                        continue;
+                    const MvsView& neighbor = scene.views[neighbor_index];
+                    const DepthMap& neighbor_map = neighbor.depth_map;
+                    if (neighbor_map.depth.size() != neighbor_map.size())
+                        continue;
+                    const Vec3f projected = neighbor.pose
+                        .transform_world_to_camera(world.cast<double>())
+                        .cast<float>();
+                    if (!(projected.z() > 0.F) || !projected.allFinite())
+                        continue;
+                    const float inverse_z = 1.F / projected.z();
+                    const float uf = neighbor.fx * projected.x() * inverse_z +
+                        neighbor.cx + 0.5F;
+                    const float vf = neighbor.fy * projected.y() * inverse_z +
+                        neighbor.cy + 0.5F;
+                    if (!(uf >= 0.F && vf >= 0.F) ||
+                        uf >= static_cast<float>(neighbor_map.width) ||
+                        vf >= static_cast<float>(neighbor_map.height))
+                        continue;
+                    const int u = static_cast<int>(uf);
+                    const int v = static_cast<int>(vf);
+                    const float neighbor_depth =
+                        neighbor_map.depth[neighbor_map.index(u, v)];
+                    if (!(neighbor_depth > 0.F) ||
+                        !std::isfinite(neighbor_depth))
+                        continue;
+                    const float tolerance = consistency_threshold *
+                        std::max(neighbor_depth, projected.z());
+                    const float delta = neighbor_depth - projected.z();
+                    // A closer neighbor surface occludes this reference point;
+                    // it is not evidence that the reference depth is wrong.
+                    if (delta < -tolerance) continue;
+                    ++compared;
+                    if (std::abs(delta) <= tolerance) ++consistent;
+                }
+
+                const std::size_t color_offset = 3 * pixel;
+                if (compared == 0) {
+                    consistency_image.pixels[color_offset + 2] = 128U;
+                    ++pixels_without_comparison;
+                } else {
+                    const float ratio =
+                        static_cast<float>(consistent) /
+                        static_cast<float>(compared);
+                    const float brightness = std::min(
+                        1.F, static_cast<float>(compared) / 4.F);
+                    const auto color = support_color(ratio, brightness);
+                    for (std::size_t channel = 0; channel < 3; ++channel)
+                        consistency_image.pixels[color_offset + channel] =
+                            color[channel];
+                    compared_depths += compared;
+                    consistent_depths += consistent;
+                }
+
+                const Vec3f lattice =
+                    world / voxel_size - Vec3f::Constant(0.5F);
+                const GridKey cell{
+                    static_cast<std::int64_t>(std::floor(lattice.x())),
+                    static_cast<std::int64_t>(std::floor(lattice.y())),
+                    static_cast<std::int64_t>(std::floor(lattice.z()))};
+                float minimum_weight =
+                    std::numeric_limits<float>::infinity();
+                for (int corner = 0; corner < 8; ++corner) {
+                    const GridKey key{
+                        cell.x + shift[corner].x(),
+                        cell.y + shift[corner].y(),
+                        cell.z + shift[corner].z()};
+                    const TsdfVoxel* voxel = find_voxel(volume, key);
+                    minimum_weight = std::min(
+                        minimum_weight, voxel == nullptr ? 0.F : voxel->weight);
+                }
+                if (!std::isfinite(minimum_weight)) minimum_weight = 0.F;
+                minimum_weight_sum += minimum_weight;
+                if (!(minimum_weight > 0.F)) ++zero_weight_pixels;
+                const auto weight_color =
+                    support_color(minimum_weight / full_weight);
+                for (std::size_t channel = 0; channel < 3; ++channel)
+                    weight_image.pixels[color_offset + channel] =
+                        weight_color[channel];
+            }
+        }
+
+        const std::string suffix =
+            "_view_" + std::to_string(view_index) + ".png";
+        io::save_rgb_png(
+            consistency_image,
+            directory / ("tsdf_depth_consistency" + suffix));
+        io::save_rgb_png(
+            weight_image, directory / ("tsdf_weight" + suffix));
+        core::Logger::instance().info(
+            "TSDF diagnostics: view=", view_index,
+            " valid_reference_pixels=", valid_reference_pixels,
+            " compared_depths=", compared_depths,
+            " consistent_depths=", consistent_depths,
+            " consistency_ratio=",
+            compared_depths > 0
+                ? static_cast<double>(consistent_depths) /
+                    static_cast<double>(compared_depths)
+                : 0.0,
+            " pixels_without_comparison=", pixels_without_comparison,
+            " zero_min_corner_weight_pixels=", zero_weight_pixels,
+            " average_min_corner_weight=",
+            valid_reference_pixels > 0
+                ? minimum_weight_sum /
+                    static_cast<double>(valid_reference_pixels)
+                : 0.0,
+            " directory=", directory);
+    }
+}
+
 }  // namespace
 
 bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
@@ -347,6 +533,9 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
         stage.finish();
         return false;
     }
+    save_tsdf_diagnostics(
+        scene, volume, voxel_size, options.depth_diff_threshold,
+        options.mesh_tsdf_diagnostics_dir);
 
     Mesh mesh;
     std::unordered_map<EdgeKey, int, EdgeHash> edge_vertices;

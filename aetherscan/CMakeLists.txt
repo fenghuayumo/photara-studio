@@ -476,10 +476,62 @@ if(AETHERSCAN_ENABLE_FEATURES)
                 target_compile_options(aetherscan_texture PRIVATE -march=native)
             endif()
         endif()
+        endif()
     endif()
-endif()
 
-if(AETHERSCAN_BUILD_BENCHMARKS)
+    if(AETHERSCAN_BUILD_PYTHON)
+        if(NOT TARGET aetherscan_splat)
+            message(FATAL_ERROR
+                "AETHERSCAN_BUILD_PYTHON requires CUDA GGGS support")
+        endif()
+        find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+        execute_process(
+            COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+            RESULT_VARIABLE _aetherscan_nanobind_result
+            OUTPUT_VARIABLE nanobind_ROOT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(_aetherscan_nanobind_result EQUAL 0)
+            find_package(nanobind CONFIG QUIET)
+        endif()
+        if(NOT nanobind_FOUND)
+            include(FetchContent)
+            FetchContent_Declare(
+                nanobind
+                GIT_REPOSITORY https://github.com/wjakob/nanobind.git
+                GIT_TAG v2.13.0
+                GIT_SHALLOW TRUE)
+            FetchContent_MakeAvailable(nanobind)
+        endif()
+
+        nanobind_add_module(
+            aetherscan_python
+            NB_STATIC
+            src/python/bindings.cpp)
+        set_target_properties(aetherscan_python PROPERTIES
+            OUTPUT_NAME aetherscan_native)
+        target_link_libraries(aetherscan_python PRIVATE
+            AetherScan::SfM
+            AetherScan::MVS
+            AetherScan::Splat)
+        target_compile_features(aetherscan_python PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(aetherscan_python PRIVATE
+                /W4 /permissive- /EHsc)
+        else()
+            target_compile_options(aetherscan_python PRIVATE
+                -Wall -Wextra -Wpedantic)
+        endif()
+        if(AETHERSCAN_BUILD_TESTS)
+            add_test(
+                NAME aetherscan.python.import
+                COMMAND "${Python_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/python_smoke.py"
+                    "$<TARGET_FILE_DIR:aetherscan_python>")
+        endif()
+    endif()
+
+    if(AETHERSCAN_BUILD_BENCHMARKS)
     add_executable(aetherscan_ba_benchmark src/tools/ba_benchmark.cpp)
     target_link_libraries(aetherscan_ba_benchmark PRIVATE AetherScan::BA)
     if(TARGET aetherscan_features)
