@@ -427,7 +427,10 @@ GaussianModel Trainer::train(
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
     detail::AdamState rotations_state = detail::make_adam_state(model.quaternions);
     detail::AdamState opacity_state = detail::make_adam_state(model.opacity_logits);
-    detail::AdamState sh_state = detail::make_adam_state(model.sh);
+    detail::AdamState sh_state =
+        options_.densification_strategy == DensificationStrategy::adc_plus
+            ? detail::make_reduced_second_adam_state(model.sh)
+            : detail::make_adam_state(model.sh);
     const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
         &sh_state};

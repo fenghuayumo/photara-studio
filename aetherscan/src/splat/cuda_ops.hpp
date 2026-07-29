@@ -126,6 +126,11 @@ LossGradients compute_training_loss(
 
 AdamState make_adam_state(const tinytensor::Tensor& parameter);
 
+// Keep a full first moment but only one second-moment scalar per row. This is
+// the storage layout used by Brush's AdamScaled for SH coefficients.
+AdamState make_reduced_second_adam_state(
+    const tinytensor::Tensor& parameter);
+
 void adam_step(
     tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
     AdamState& state, float learning_rate, unsigned step,

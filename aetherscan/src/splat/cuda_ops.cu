@@ -14,6 +14,7 @@ namespace aetherscan::splat::detail {
 namespace {
 
 constexpr unsigned k_threads = 256;
+constexpr unsigned k_reduced_adam_threads = 64;
 
 void check_cuda(const cudaError_t error, const char* operation) {
     if (error != cudaSuccess)
@@ -814,42 +815,79 @@ __global__ void adam_kernel(
 
 __global__ void adam_reduced_second_kernel(
     float* parameter, const float* gradient, float* first, float* second,
-    const std::size_t count, const std::size_t row_stride,
+    const std::size_t row_count, const std::size_t full_row_stride,
+    const std::size_t active_row_stride,
     const float learning_rate, const float secondary_learning_rate,
     const float beta1, const float beta2, const float correction1,
     const float correction2, const float epsilon) {
-    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= count) return;
-    const std::size_t row_begin = index / row_stride * row_stride;
-    float grad_square_mean = 0.F;
-    for (std::size_t column = 0; column < row_stride; ++column) {
+    const std::size_t row = blockIdx.x;
+    if (row >= row_count) return;
+    const unsigned lane = threadIdx.x;
+    const std::size_t row_begin = row * full_row_stride;
+
+    __shared__ float warp_square_sums[k_reduced_adam_threads / 32];
+    __shared__ float denominator;
+    __shared__ bool row_valid;
+
+    float local_square_sum = 0.F;
+    for (std::size_t column = lane; column < active_row_stride;
+         column += blockDim.x) {
         const float value = gradient[row_begin + column];
-        if (isfinite(value)) grad_square_mean += value * value;
+        if (isfinite(value)) local_square_sum += value * value;
     }
-    grad_square_mean /= static_cast<float>(row_stride);
-    const float previous = parameter[index];
-    const float grad = gradient[index];
-    if (!isfinite(previous) || !isfinite(grad)) {
-        first[index] = 0.F;
-        second[index] = 0.F;
-        parameter[index] = isfinite(previous) ? previous : 0.F;
-        return;
+    for (unsigned offset = 16; offset > 0; offset >>= 1)
+        local_square_sum += __shfl_down_sync(
+            0xffffffffU, local_square_sum, offset);
+    if ((lane & 31U) == 0)
+        warp_square_sums[lane >> 5U] = local_square_sum;
+    __syncthreads();
+
+    if (lane == 0) {
+        const float square_sum =
+            warp_square_sums[0] + warp_square_sums[1];
+        const float grad_square_mean =
+            square_sum / static_cast<float>(active_row_stride);
+        const float v =
+            beta2 * second[row] + (1.F - beta2) * grad_square_mean;
+        row_valid = isfinite(v);
+        if (row_valid) {
+            second[row] = v;
+            denominator = sqrtf(v / correction2) + epsilon;
+            row_valid = isfinite(denominator) && denominator > 0.F;
+        }
+        if (!row_valid) {
+            second[row] = 0.F;
+            denominator = 1.F;
+        }
     }
-    const float m = beta1 * first[index] + (1.F - beta1) * grad;
-    const float v =
-        beta2 * second[index] + (1.F - beta2) * grad_square_mean;
-    if (!isfinite(m) || !isfinite(v)) {
-        first[index] = 0.F;
-        second[index] = 0.F;
-        return;
+    __syncthreads();
+
+    for (std::size_t column = lane; column < active_row_stride;
+         column += blockDim.x) {
+        const std::size_t index = row_begin + column;
+        const float previous = parameter[index];
+        const float grad = gradient[index];
+        if (!row_valid) {
+            first[index] = 0.F;
+            continue;
+        }
+        if (!isfinite(previous) || !isfinite(grad)) {
+            first[index] = 0.F;
+            parameter[index] = isfinite(previous) ? previous : 0.F;
+            continue;
+        }
+        const float m = beta1 * first[index] + (1.F - beta1) * grad;
+        if (!isfinite(m)) {
+            first[index] = 0.F;
+            continue;
+        }
+        first[index] = m;
+        const float lr = column >= 3
+            ? secondary_learning_rate : learning_rate;
+        const float candidate =
+            previous - lr * (m / correction1) / denominator;
+        parameter[index] = isfinite(candidate) ? candidate : previous;
     }
-    first[index] = m;
-    second[index] = v;
-    const float lr = index % row_stride >= 3
-        ? secondary_learning_rate : learning_rate;
-    const float candidate = previous - lr * (m / correction1) /
-        (sqrtf(v / correction2) + epsilon);
-    parameter[index] = isfinite(candidate) ? candidate : previous;
 }
 
 __global__ void adam_active_prefix_kernel(
@@ -1544,6 +1582,18 @@ AdamState make_adam_state(const tinytensor::Tensor& parameter) {
             tinytensor::Tensor::zeros_like(parameter)};
 }
 
+AdamState make_reduced_second_adam_state(
+    const tinytensor::Tensor& parameter) {
+    const auto dimensions = parameter.shape().dims();
+    if (dimensions.empty())
+        throw std::invalid_argument(
+            "reduced-second Adam requires at least one parameter dimension");
+    return {
+        tinytensor::Tensor::zeros_like(parameter),
+        tinytensor::Tensor::zeros(
+            {dimensions.front()}, parameter.device())};
+}
+
 void adam_step(
     tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
     AdamState& state, const float learning_rate, const unsigned step,
@@ -1571,16 +1621,20 @@ void adam_step_reduced_second(
     if (count == 0) return;
     if (row_stride < 3 || count % row_stride != 0)
         throw std::invalid_argument("invalid reduced-second Adam row stride");
+    const std::size_t row_count = count / row_stride;
+    if (state.first.numel() != count || state.second.numel() != row_count)
+        throw std::invalid_argument(
+            "reduced-second Adam state has an incompatible shape");
     const float correction1 =
         1.F - std::pow(options.beta1, static_cast<float>(step));
     const float correction2 =
         1.F - std::pow(options.beta2, static_cast<float>(step));
     adam_reduced_second_kernel<<<
-        (count + k_threads - 1) / k_threads, k_threads>>>(
+        row_count, k_reduced_adam_threads>>>(
         parameter.ptr<float>(), gradient.ptr<float>(), state.first.ptr<float>(),
-        state.second.ptr<float>(), count, row_stride, learning_rate,
-        secondary_learning_rate, options.beta1, options.beta2, correction1,
-        correction2, options.adam_epsilon);
+        state.second.ptr<float>(), row_count, row_stride, row_stride,
+        learning_rate, secondary_learning_rate, options.beta1, options.beta2,
+        correction1, correction2, options.adam_epsilon);
     check_cuda(cudaGetLastError(), "GGGS reduced-second Adam update");
 }
 
@@ -1598,10 +1652,31 @@ void adam_step_active_prefix(
         throw std::invalid_argument("invalid active-prefix Adam row strides");
     const std::size_t active_count =
         count / full_row_stride * active_row_stride;
+    const std::size_t row_count = count / full_row_stride;
     const float correction1 =
         1.F - std::pow(options.beta1, static_cast<float>(step));
     const float correction2 =
         1.F - std::pow(options.beta2, static_cast<float>(step));
+    if (state.second.numel() == row_count) {
+        if (state.first.numel() != count)
+            throw std::invalid_argument(
+                "active-prefix reduced-second Adam state has an "
+                "incompatible shape");
+        adam_reduced_second_kernel<<<
+            row_count, k_reduced_adam_threads>>>(
+            parameter.ptr<float>(), gradient.ptr<float>(),
+            state.first.ptr<float>(), state.second.ptr<float>(), row_count,
+            full_row_stride, active_row_stride, learning_rate,
+            secondary_learning_rate, options.beta1, options.beta2,
+            correction1, correction2, options.adam_epsilon);
+        check_cuda(
+            cudaGetLastError(),
+            "GGGS active-prefix reduced-second Adam update");
+        return;
+    }
+    if (state.first.numel() != count || state.second.numel() != count)
+        throw std::invalid_argument(
+            "active-prefix Adam state has an incompatible shape");
     adam_active_prefix_kernel<<<
         (active_count + k_threads - 1) / k_threads, k_threads>>>(
         parameter.ptr<float>(), gradient.ptr<float>(), state.first.ptr<float>(),

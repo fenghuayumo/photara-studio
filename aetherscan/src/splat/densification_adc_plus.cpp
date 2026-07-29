@@ -39,15 +39,17 @@ void select_adam_rows(
 
 void append_zero_adam(detail::AdamState& state, const std::size_t count) {
     if (count == 0) return;
-    std::vector<std::size_t> dimensions = state.first.shape().dims();
-    dimensions[0] = count;
-    const auto shape = tinytensor::TensorShape(dimensions);
-    state.first = tinytensor::Tensor::cat(
-        {state.first, tinytensor::Tensor::zeros(
-                          shape, tinytensor::Device::CUDA)}, 0);
-    state.second = tinytensor::Tensor::cat(
-        {state.second, tinytensor::Tensor::zeros(
-                           shape, tinytensor::Device::CUDA)}, 0);
+    const auto append_zeros = [count](tinytensor::Tensor& tensor) {
+        std::vector<std::size_t> dimensions = tensor.shape().dims();
+        dimensions[0] = count;
+        tensor = tinytensor::Tensor::cat(
+            {tensor, tinytensor::Tensor::zeros(
+                         tinytensor::TensorShape(dimensions),
+                         tinytensor::Device::CUDA)},
+            0);
+    };
+    append_zeros(state.first);
+    append_zeros(state.second);
 }
 
 void select_training_rows_gpu(
@@ -62,13 +64,16 @@ void zero_adam_rows_gpu(
     const tinytensor::Tensor& indices, const AdamStates& states) {
     if (indices.numel() == 0) return;
     for (detail::AdamState* state : states) {
-        std::vector<std::size_t> dimensions = state->first.shape().dims();
-        dimensions[0] = indices.numel();
-        const auto zeros = tinytensor::Tensor::zeros(
-            tinytensor::TensorShape(dimensions),
-            tinytensor::Device::CUDA);
-        state->first.index_copy_(0, indices, zeros);
-        state->second.index_copy_(0, indices, zeros);
+        const auto zero_rows = [&indices](tinytensor::Tensor& tensor) {
+            std::vector<std::size_t> dimensions = tensor.shape().dims();
+            dimensions[0] = indices.numel();
+            const auto zeros = tinytensor::Tensor::zeros(
+                tinytensor::TensorShape(dimensions),
+                tinytensor::Device::CUDA);
+            tensor.index_copy_(0, indices, zeros);
+        };
+        zero_rows(state->first);
+        zero_rows(state->second);
     }
 }
 

@@ -527,6 +527,83 @@ void test_fused_adam_parity() {
         "CUDA Adam differs from FasterGS FusedAdam on its first step");
 }
 
+void test_reduced_second_sh_adam() {
+    using namespace aetherscan::splat;
+    auto parameter = tinytensor::Tensor::zeros(
+        {2, 2, 3}, tinytensor::Device::CUDA);
+    const std::vector<float> gradient_values{
+        1.F, 2.F, 3.F, 4.F, 5.F, 6.F,
+        2.F, 2.F, 2.F, 2.F, 2.F, 2.F};
+    const auto gradient = tinytensor::Tensor::from_vector(
+        gradient_values, {2, 2, 3}, tinytensor::Device::CUDA);
+    auto state = detail::make_reduced_second_adam_state(parameter);
+    require(
+        state.first.numel() == parameter.numel() &&
+            state.second.numel() == 2,
+        "reduced-second Adam did not compact its second moment per row");
+
+    TrainingOptions options;
+    options.adam_epsilon = 1e-15F;
+    constexpr float primary_lr = 1e-3F;
+    constexpr float secondary_lr = 1e-4F;
+    detail::adam_step_reduced_second(
+        parameter, gradient, state, primary_lr, 1, options, 6,
+        secondary_lr);
+
+    const auto values = parameter.to_vector();
+    const auto first = state.first.to_vector();
+    const auto second = state.second.to_vector();
+    const std::array<float, 2> square_means{91.F / 6.F, 4.F};
+    for (std::size_t row = 0; row < 2; ++row) {
+        require(
+            std::abs(
+                second[row] -
+                (1.F - options.beta2) * square_means[row]) < 1e-7F,
+            "reduced-second Adam stored the wrong row moment");
+        for (std::size_t column = 0; column < 6; ++column) {
+            const std::size_t index = row * 6 + column;
+            const float lr = column < 3 ? primary_lr : secondary_lr;
+            const float expected =
+                -lr * gradient_values[index] /
+                std::sqrt(square_means[row]);
+            require(
+                std::abs(values[index] - expected) < 1e-6F &&
+                    std::abs(
+                        first[index] -
+                        (1.F - options.beta1) *
+                            gradient_values[index]) < 1e-6F,
+                "reduced-second Adam differs from row-reduced AdamScaled");
+        }
+    }
+
+    auto prefix_parameter = tinytensor::Tensor::zeros(
+        {2, 4, 3}, tinytensor::Device::CUDA);
+    const auto prefix_gradient = tinytensor::Tensor::from_vector(
+        std::vector<float>(24, 0.25F), {2, 4, 3},
+        tinytensor::Device::CUDA);
+    auto prefix_state =
+        detail::make_reduced_second_adam_state(prefix_parameter);
+    detail::adam_step_active_prefix(
+        prefix_parameter, prefix_gradient, prefix_state, primary_lr, 1,
+        options, 12, 3, secondary_lr);
+    const auto prefix_values = prefix_parameter.to_vector();
+    const auto prefix_first = prefix_state.first.to_vector();
+    const auto prefix_second = prefix_state.second.to_vector();
+    require(
+        prefix_second.size() == 2,
+        "active-prefix Adam expanded the compact second moment");
+    for (std::size_t index = 0; index < prefix_values.size(); ++index) {
+        const bool active = index < 3 || (index >= 12 && index < 15);
+        require(
+            active
+                ? std::abs(prefix_values[index] + primary_lr) < 1e-6F &&
+                      std::abs(prefix_first[index] - 0.025F) < 1e-6F
+                : prefix_values[index] == 0.F &&
+                      prefix_first[index] == 0.F,
+            "active-prefix reduced-second Adam touched the wrong SH band");
+    }
+}
+
 void test_active_sh_prefix_adam() {
     using namespace aetherscan::splat;
     std::vector<float> initial(24);
@@ -1527,6 +1604,7 @@ int main() {
         test_alpha_parameter_gradients();
         test_adam_rejects_non_finite_gradients();
         test_fused_adam_parity();
+        test_reduced_second_sh_adam();
         test_active_sh_prefix_adam();
         test_mask_loading();
         test_source_resolution_and_knn_initialization();
