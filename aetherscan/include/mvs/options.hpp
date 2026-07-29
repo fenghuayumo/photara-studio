@@ -165,6 +165,10 @@ struct DensifyOptions {
     // GGGS overrides the automatic value with max_depth / 2048 to match
     // pygsplat's gs2mesh.py.
     float mesh_tsdf_voxel_size{0.F};
+    // Padding multiplier for point-cloud-derived TSDF bounds. Foreground
+    // clouds can miss weakly textured outer surfaces, so keep this
+    // conservative while making it explicitly tunable.
+    float mesh_tsdf_bounds_padding{2.F};
     // Multiplier applied only to the inferred voxel size. Values above one
     // extract a coarser, locally regular mesh directly from the TSDF instead
     // of relying on a topology-damaging post-decimation pass.

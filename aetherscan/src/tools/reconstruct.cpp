@@ -81,6 +81,7 @@ struct ReconstructCli {
     std::string splat_format{"auto"};
     std::filesystem::path colmap_model;
     std::filesystem::path dense_ply;
+    std::filesystem::path gggs_model;
     unsigned gggs_iterations{10'000};
     std::uint64_t gggs_max_gaussians{500'000};
     unsigned gggs_max_resolution{1'920};
@@ -117,6 +118,7 @@ struct ReconstructCli {
     std::uint64_t mesh_target_faces{0};
     bool mesh_remesh{true};
     float mesh_tsdf_voxel_scale{-1.F};
+    float mesh_tsdf_bounds_padding{2.F};
     unsigned mesh_tsdf_smooth_iters{2};
     float mesh_tsdf_smooth_lambda{0.5F};
     float mesh_tsdf_smooth_mu{-0.53F};
@@ -238,6 +240,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-format auto|colmap|realitycapture|openmvs\n"
               << "  --colmap PATH  compatibility alias for --splat-format colmap\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
+              << "  --gggs-model PATH  load a trained GGGS PLY and skip optimization\n"
               << "  --gggs-iterations N  GGGS optimizer steps (default 10000)\n"
               << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --gggs-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
@@ -272,6 +275,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-target-faces N  asdiff/CGAL repair + decimate target (0 disables)\n"
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
+              << "  --mesh-tsdf-bounds-padding F  point-cloud bounds multiplier (default 2)\n"
               << "  --mesh-tsdf-smooth-iters N  boundary-locked Taubin passes (default 2)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
@@ -373,6 +377,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("dense-ply", "Dense PLY initializer for external or internal-SfM cameras",
          cxxopts::value<std::string>()->default_value(""))
+        ("gggs-model", "Trained GGGS PLY to load instead of optimizing",
+         cxxopts::value<std::string>()->default_value(""))
         ("gggs-iterations", "GGGS optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
         ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
@@ -456,6 +462,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh-tsdf-voxel-scale",
          "Automatic TSDF voxel multiplier (-1 = gs2mesh default 1x)",
          cxxopts::value<float>()->default_value("-1"))
+        ("mesh-tsdf-bounds-padding",
+         "Point-cloud TSDF bounds multiplier",
+         cxxopts::value<float>()->default_value("2"))
         ("mesh-tsdf-smooth-iters",
          "Boundary-locked TSDF Taubin smoothing iterations (0 disables)",
          cxxopts::value<unsigned>()->default_value("2"))
@@ -587,6 +596,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
+    const std::string gggs_model_text =
+        result["gggs-model"].as<std::string>();
+    if (!gggs_model_text.empty())
+        cli.gggs_model = utf8_to_path(gggs_model_text);
     cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
     cli.gggs_max_gaussians =
         result["gggs-max-gaussians"].as<std::uint64_t>();
@@ -653,6 +666,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.mesh_remesh = result["mesh-remesh"].as<bool>();
     cli.mesh_tsdf_voxel_scale =
         result["mesh-tsdf-voxel-scale"].as<float>();
+    cli.mesh_tsdf_bounds_padding =
+        result["mesh-tsdf-bounds-padding"].as<float>();
     cli.mesh_tsdf_smooth_iters =
         result["mesh-tsdf-smooth-iters"].as<unsigned>();
     cli.mesh_tsdf_smooth_lambda =
@@ -819,6 +834,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          !std::isfinite(cli.mesh_tsdf_voxel_scale)))
         throw std::invalid_argument(
             "--mesh-tsdf-voxel-scale must be -1 or positive");
+    if (!(cli.mesh_tsdf_bounds_padding >= 1.F) ||
+        !std::isfinite(cli.mesh_tsdf_bounds_padding))
+        throw std::invalid_argument(
+            "--mesh-tsdf-bounds-padding must be finite and >= 1");
     if (!std::isfinite(cli.mesh_tsdf_smooth_lambda) ||
         cli.mesh_tsdf_smooth_lambda < 0.F ||
         cli.mesh_tsdf_smooth_lambda > 1.F)
@@ -1490,12 +1509,11 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
             " mean_coverage=",
             projected_mask_sum * inverse_pixels / 255.0);
     }
-    // A coarse MVS mesh/ROI mask is an internal geometric constraint, not an
-    // optional user mask. Keep using it even when `--masks -` disables
-    // external mask discovery.
-    options.use_mask =
-        cli.gggs_use_mask || all_views_have_projected_masks ||
-        !generated_mask_dir.empty();
+    // Respect an explicit no-mask training request. Automatically generated
+    // masks are training inputs only and never constrain TSDF independently.
+    options.use_mask = cli.gggs_use_mask &&
+        (all_views_have_projected_masks || !generated_mask_dir.empty() ||
+         !cli.masks_dir.empty());
     options.mask_dir = generated_mask_dir.empty()
         ? cli.masks_dir
         : generated_mask_dir;
@@ -1637,8 +1655,12 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                 masked_psnr_sum / evaluation_views.size());
         };
     const auto started = std::chrono::steady_clock::now();
-    const aetherscan::splat::GaussianModel gaussians =
-        aetherscan::splat::Trainer(options).train(
+    aetherscan::splat::GaussianModel gaussians;
+    if (!cli.gggs_model.empty()) {
+        gaussians =
+            aetherscan::splat::load_gaussians_ply(cli.gggs_model);
+    } else {
+        gaussians = aetherscan::splat::Trainer(options).train(
             scene,
             [](const aetherscan::splat::TrainingProgress& progress) {
                 aetherscan::core::Logger::instance().info(
@@ -1670,9 +1692,12 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                 return true;
             },
             evaluate);
-    const auto ply = out_dir /
-        (cli.output.stem().string() + "_gggs.ply");
-    aetherscan::splat::save_gaussians_ply(gaussians, ply);
+    }
+    const auto ply = cli.gggs_model.empty()
+        ? out_dir / (cli.output.stem().string() + "_gggs.ply")
+        : cli.gggs_model;
+    if (cli.gggs_model.empty())
+        aetherscan::splat::save_gaussians_ply(gaussians, ply);
     double final_psnr_sum = 0.0;
     double final_masked_psnr_sum = 0.0;
     for (const std::size_t view_index : evaluation_views) {
@@ -1702,7 +1727,8 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     aetherscan::core::Logger::instance().info(
         "gggs_ply=", ply,
         " gaussians=", gaussians.size(),
-        " training_s=", elapsed);
+        cli.gggs_model.empty() ? " training_s=" : " model_load_s=",
+        elapsed);
     if (!cli.mesh) return std::nullopt;
     if (mesh_options == nullptr)
         throw std::invalid_argument(
@@ -1807,15 +1833,17 @@ int main(int argc, char** argv) {
                 cli.mesh_tsdf_voxel_scale > 0.F
                 ? cli.mesh_tsdf_voxel_scale
                 : 1.F;
+            mesh_options.mesh_tsdf_bounds_padding =
+                cli.mesh_tsdf_bounds_padding;
             mesh_options.mesh_tsdf_smooth_iters =
                 cli.mesh_tsdf_smooth_iters;
             mesh_options.mesh_tsdf_smooth_lambda =
                 cli.mesh_tsdf_smooth_lambda;
             mesh_options.mesh_tsdf_smooth_mu = cli.mesh_tsdf_smooth_mu;
             if (mesh_options.auto_roi ||
-                !mesh_options.roi_path.empty())
-                prepare_loaded_point_cloud_roi(
-                    loaded.scene, mesh_options);
+                !mesh_options.roi_path.empty()) {
+                prepare_loaded_point_cloud_roi(loaded.scene, mesh_options);
+            }
             if (cli.mvs_mesh_only) {
                 if (!cli.mask_mesh.empty()) {
                     loaded.scene.mesh =
@@ -2033,6 +2061,8 @@ int main(int argc, char** argv) {
                 cli.mesh_tsdf_voxel_scale > 0.F
                 ? cli.mesh_tsdf_voxel_scale
                 : 1.F;
+            densify_opts.mesh_tsdf_bounds_padding =
+                cli.mesh_tsdf_bounds_padding;
             densify_opts.mesh_tsdf_smooth_iters =
                 cli.mesh_tsdf_smooth_iters;
             densify_opts.mesh_tsdf_smooth_lambda =

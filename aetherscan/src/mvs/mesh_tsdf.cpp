@@ -302,6 +302,8 @@ struct TouchedBlock {
 
 bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.mesh.tsdf");
+    const OrientedBoundingBox& bounds =
+        scene.tsdf_bounds.valid ? scene.tsdf_bounds : scene.roi;
     const float inferred_voxel = estimate_voxel_size(scene);
     const float voxel_size = options.mesh_tsdf_voxel_size > 0.F
         ? options.mesh_tsdf_voxel_size
@@ -323,11 +325,11 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
     std::size_t maximum_view_blocks = 0;
     for (const MvsView& view : scene.views) {
         const std::vector<TouchedBlock> blocks = allocate_view_blocks(
-            view, scene.roi, block_length, truncation, volume,
+            view, bounds, block_length, truncation, volume,
             valid_depth_samples);
         maximum_view_blocks = std::max(maximum_view_blocks, blocks.size());
         integrated_voxels += integrate_view(
-            view, scene.roi, voxel_size, truncation, blocks);
+            view, bounds, voxel_size, truncation, blocks);
     }
 
     core::Logger::instance().info(
@@ -336,6 +338,7 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
         " voxel_scale=", options.mesh_tsdf_voxel_scale,
         " truncation=", truncation,
         " depth_sampling_stride=", k_depth_sampling_stride,
+        " bounds_enabled=", bounds.valid,
         " depth_samples=", valid_depth_samples,
         " volume_blocks=", volume.size(),
         " max_view_blocks=", maximum_view_blocks,

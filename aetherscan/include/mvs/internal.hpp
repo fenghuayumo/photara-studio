@@ -21,6 +21,9 @@ std::vector<ViewImage> load_view_images(
 bool load_manual_roi(
     const std::filesystem::path& path, OrientedBoundingBox& roi);
 bool estimate_automatic_roi(MvsScene& scene, const DensifyOptions& options);
+bool estimate_tsdf_bounds(
+    const DenseCloud& cloud, OrientedBoundingBox& result,
+    unsigned thread_count = 0, float padding_scale = 1.1F);
 void build_depth_roi_foreground_masks(
     MvsScene& scene, const DensifyOptions& options);
 void build_projected_foreground_masks(

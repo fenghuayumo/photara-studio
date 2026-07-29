@@ -26,8 +26,13 @@ void reconstruct_mesh(MvsScene& scene, const DensifyOptions& options) {
     } else {
         throw std::runtime_error("Unsupported MVS mesh method");
     }
-    detail::clean_mesh(
-        scene.mesh, options, scene.roi.valid ? &scene.roi : nullptr);
+    const OrientedBoundingBox* cleanup_bounds = nullptr;
+    if (options.mesh_method == MeshMethod::tsdf &&
+        scene.tsdf_bounds.valid)
+        cleanup_bounds = &scene.tsdf_bounds;
+    else if (scene.roi.valid)
+        cleanup_bounds = &scene.roi;
+    detail::clean_mesh(scene.mesh, options, cleanup_bounds);
     stage.finish();
 }
 

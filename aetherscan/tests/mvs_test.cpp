@@ -248,6 +248,44 @@ void test_depth_roi_mask_without_mesh() {
             "depth ROI mask retained geometry outside the 3D OBB");
 }
 
+void test_tsdf_bounds_remove_only_radius_outliers() {
+    DenseCloud cloud;
+    for (int z = 0; z < 4; ++z) {
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                DensePoint point;
+                point.position = Vec3f{
+                    0.1F * static_cast<float>(x),
+                    0.1F * static_cast<float>(y),
+                    0.1F * static_cast<float>(z)};
+                cloud.points.push_back(std::move(point));
+            }
+        }
+    }
+    DensePoint supported_extension;
+    supported_extension.position = Vec3f{0.6F, 0.15F, 0.15F};
+    for (int i = 0; i < 12; ++i) {
+        DensePoint point = supported_extension;
+        point.position.x() += 0.002F * static_cast<float>(i);
+        cloud.points.push_back(std::move(point));
+    }
+    DensePoint isolated;
+    isolated.position = Vec3f{100.F, 100.F, 100.F};
+    cloud.points.push_back(std::move(isolated));
+
+    OrientedBoundingBox bounds;
+    require(
+        detail::estimate_tsdf_bounds(cloud, bounds, 2),
+        "TSDF bounds estimation failed");
+    require(bounds.valid, "TSDF bounds were not marked valid");
+    require(
+        bounds.contains(Vec3f{0.61F, 0.15F, 0.15F}),
+        "TSDF bounds clipped a supported non-planar extension");
+    require(
+        !bounds.contains(Vec3f{100.F, 100.F, 100.F}),
+        "TSDF bounds retained an isolated background outlier");
+}
+
 void test_input_mask_is_not_cut_by_coarse_mesh_holes() {
     MvsScene scene;
     scene.views.push_back(make_plane_view(0, 32));
@@ -866,6 +904,7 @@ int main() {
         test_projected_mesh_mask_preserves_large_enclosed_holes();
         test_projected_mesh_mask_closes_open_notches();
         test_depth_roi_mask_without_mesh();
+        test_tsdf_bounds_remove_only_radius_outliers();
         test_input_mask_is_not_cut_by_coarse_mesh_holes();
         test_manual_obb_file();
         test_asdiff_texture_camera_projection();

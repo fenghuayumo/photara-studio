@@ -162,6 +162,10 @@ struct MvsScene {
     DenseCloud dense_cloud;
     Mesh mesh;
     OrientedBoundingBox roi;
+    // A broad point-cloud-derived safety bound used only by TSDF allocation
+    // and integration. Unlike roi, this does not describe a semantic subject
+    // and must not be projected into image-space foreground masks.
+    OrientedBoundingBox tsdf_bounds;
     bool roi_automatic{false};
     bool has_ground_plane{false};
     Vec3f ground_normal{Vec3f::Zero()};

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <queue>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -166,6 +167,29 @@ void remove_small_components_with_connectivity(
         : 0U;
     const unsigned effective_minimum =
         std::max(minimum_faces, relative_minimum);
+    const std::size_t kept_components = static_cast<std::size_t>(
+        std::count_if(
+            sizes.begin(), sizes.end(),
+            [&](const unsigned size) {
+                return size >= effective_minimum;
+            }));
+    std::vector<unsigned> largest_components = sizes;
+    std::sort(
+        largest_components.begin(), largest_components.end(),
+        std::greater<>{});
+    if (largest_components.size() > 8U)
+        largest_components.resize(8U);
+    std::ostringstream component_summary;
+    for (std::size_t index = 0;
+         index < largest_components.size(); ++index) {
+        if (index != 0) component_summary << ',';
+        component_summary << largest_components[index];
+    }
+    core::Logger::instance().info(
+        "mesh component filter: components=", sizes.size(),
+        " kept=", kept_components,
+        " minimum_faces=", effective_minimum,
+        " largest_components=", component_summary.str());
     std::vector<Eigen::Vector3i> kept;
     kept.reserve(faces.size());
     for (std::size_t i = 0; i < faces.size(); ++i)

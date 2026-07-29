@@ -98,6 +98,7 @@ private:
 
 void save_gaussians_ply(
     const GaussianModel& model, const std::filesystem::path& path);
+GaussianModel load_gaussians_ply(const std::filesystem::path& path);
 
 RenderMetrics render_evaluation_png(
     const GaussianModel& model, const mvs::MvsView& view,

@@ -3,6 +3,7 @@
 #include "core/logging.hpp"
 #include "io/image.hpp"
 #include "mvs/densify.hpp"
+#include "mvs/internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -176,10 +177,8 @@ GggsMeshResult extract_gggs_mesh(
         geometry_scene.views.push_back(make_geometry_view(view));
     geometry_scene.sparse_points = scene.sparse_points;
     geometry_scene.roi = scene.roi;
+    geometry_scene.tsdf_bounds = scene.tsdf_bounds;
     geometry_scene.roi_automatic = scene.roi_automatic;
-    geometry_scene.has_ground_plane = scene.has_ground_plane;
-    geometry_scene.ground_normal = scene.ground_normal;
-    geometry_scene.ground_offset = scene.ground_offset;
     geometry_scene.thread_count = scene.thread_count;
 
     mvs::DensifyOptions fusion_options = mesh_options.fusion;
@@ -189,6 +188,17 @@ GggsMeshResult extract_gggs_mesh(
         ? mesh_options.max_depth
         : 2.F * scene_extent;
     if (fusion_options.mesh_method == mvs::MeshMethod::tsdf) {
+        if (scene.roi.valid && !scene.roi_automatic) {
+            // A manual ROI is an explicit user override. Automatic ROI is
+            // deliberately not reused here because it is a semantic subject
+            // crop, unlike gs2mesh's broad reconstruction bounds.
+            geometry_scene.tsdf_bounds = scene.roi;
+        } else if (!geometry_scene.tsdf_bounds.valid) {
+            mvs::detail::estimate_tsdf_bounds(
+                scene.dense_cloud, geometry_scene.tsdf_bounds,
+                scene.thread_count,
+                fusion_options.mesh_tsdf_bounds_padding);
+        }
         // gs2mesh.py resolves the same automatic values before constructing
         // Open3D's ScalableTSDFVolume.
         if (!(fusion_options.mesh_tsdf_voxel_size > 0.F) &&
@@ -197,6 +207,9 @@ GggsMeshResult extract_gggs_mesh(
                 allowed_maximum_depth / 2048.F *
                 std::max(fusion_options.mesh_tsdf_voxel_scale, 1e-6F);
         fusion_options.mesh_tsdf_truncation_voxels = 4.F;
+        // Match gs2mesh.py's default num_clusters=1. With sufficiently broad
+        // bounds the subject and its support cloth form the largest component,
+        // while detached background sheets remain removable.
         fusion_options.mesh_tsdf_min_component_fraction = 1.F;
         fusion_options.mesh_close_hole_edges = 0;
     }
@@ -226,7 +239,7 @@ GggsMeshResult extract_gggs_mesh(
     Rasterizer rasterizer;
 
     std::size_t valid_depth_pixels = 0;
-    std::size_t rejected_roi_pixels = 0;
+    std::size_t rejected_bounds_pixels = 0;
     std::size_t compared_depth_normal_pixels = 0;
     std::size_t rejected_depth_normal_pixels = 0;
     for (std::size_t view_index = 0;
@@ -292,7 +305,12 @@ GggsMeshResult extract_gggs_mesh(
                     (allowed_maximum_depth > 0.F &&
                      d > allowed_maximum_depth))
                     continue;
-                if (geometry_scene.roi.valid) {
+                // The broad TSDF bound is applied again inside the sparse
+                // volume allocator/integrator. Filtering here keeps the
+                // diagnostic count accurate without imposing any silhouette
+                // or primitive-shape assumption.
+                if (fusion_options.mesh_method == mvs::MeshMethod::tsdf &&
+                    geometry_scene.tsdf_bounds.valid) {
                     const mvs::Vec3f camera_point =
                         geometry_view.unproject(
                             static_cast<float>(x),
@@ -303,8 +321,8 @@ GggsMeshResult extract_gggs_mesh(
                                 camera_point.cast<double>())
                             .cast<float>();
                     if (!world_point.allFinite() ||
-                        !geometry_scene.roi.contains(world_point)) {
-                        ++rejected_roi_pixels;
+                        !geometry_scene.tsdf_bounds.contains(world_point)) {
+                        ++rejected_bounds_pixels;
                         continue;
                     }
                 }
@@ -400,8 +418,8 @@ GggsMeshResult extract_gggs_mesh(
         " scene_extent=", scene_extent,
         " max_depth=", allowed_maximum_depth,
         " tsdf_voxel=", fusion_options.mesh_tsdf_voxel_size,
-        " roi_enabled=", geometry_scene.roi.valid,
-        " roi_rejected_pixels=", rejected_roi_pixels,
+        " bounds_enabled=", geometry_scene.tsdf_bounds.valid,
+        " bounds_rejected_pixels=", rejected_bounds_pixels,
         " depth_normal_compared=", compared_depth_normal_pixels,
         " depth_normal_rejected=", rejected_depth_normal_pixels,
         " min_depth_normal_cosine=", mesh_options.min_depth_normal_cosine);

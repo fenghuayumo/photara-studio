@@ -1,6 +1,7 @@
 #include "splat/trainer.hpp"
 
 #include "cuda_ops.hpp"
+#include "core/logging.hpp"
 #include "densification.hpp"
 #include "io/image.hpp"
 #include "training_data_loader.hpp"
@@ -17,7 +18,9 @@
 #include <limits>
 #include <numeric>
 #include <random>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace aetherscan::splat {
 namespace {
@@ -966,6 +969,164 @@ void save_gaussians_ply(
         if (has_filter) write_float(output, filter_3d[gaussian]);
     }
     if (!output) throw std::runtime_error("Failed while writing Gaussian PLY: " + path.string());
+}
+
+GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        throw std::runtime_error(
+            "Failed to open Gaussian PLY: " + path.string());
+
+    std::string line;
+    if (!std::getline(input, line) || line != "ply")
+        throw std::runtime_error("Invalid Gaussian PLY header: " + path.string());
+    std::size_t count = 0;
+    bool binary_little_endian = false;
+    bool reading_vertices = false;
+    std::vector<std::string> properties;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line == "end_header") break;
+        std::istringstream tokens(line);
+        std::string keyword;
+        tokens >> keyword;
+        if (keyword == "format") {
+            std::string format;
+            tokens >> format;
+            binary_little_endian = format == "binary_little_endian";
+        } else if (keyword == "element") {
+            std::string element;
+            std::size_t element_count = 0;
+            tokens >> element >> element_count;
+            reading_vertices = element == "vertex";
+            if (reading_vertices) count = element_count;
+        } else if (keyword == "property" && reading_vertices) {
+            std::string type;
+            std::string name;
+            tokens >> type >> name;
+            if (type != "float" && type != "float32")
+                throw std::runtime_error(
+                    "Gaussian PLY requires float vertex properties: " +
+                    path.string());
+            properties.push_back(std::move(name));
+        }
+    }
+    if (!binary_little_endian || count == 0 || properties.empty())
+        throw std::runtime_error(
+            "Gaussian PLY must contain binary little-endian vertices: " +
+            path.string());
+
+    std::unordered_map<std::string, std::size_t> property_index;
+    property_index.reserve(properties.size());
+    for (std::size_t index = 0; index < properties.size(); ++index)
+        property_index.emplace(properties[index], index);
+    const auto required = [&](const std::string& name) {
+        const auto found = property_index.find(name);
+        if (found == property_index.end())
+            throw std::runtime_error(
+                "Gaussian PLY is missing property " + name + ": " +
+                path.string());
+        return found->second;
+    };
+    const std::array<std::size_t, 3> position_index{
+        required("x"), required("y"), required("z")};
+    const std::array<std::size_t, 3> dc_index{
+        required("f_dc_0"), required("f_dc_1"), required("f_dc_2")};
+    const std::size_t opacity_index = required("opacity");
+    const std::array<std::size_t, 3> scale_index{
+        required("scale_0"), required("scale_1"), required("scale_2")};
+    const std::array<std::size_t, 4> rotation_index{
+        required("rot_0"), required("rot_1"), required("rot_2"),
+        required("rot_3")};
+
+    std::size_t rest_count = 0;
+    while (property_index.contains("f_rest_" + std::to_string(rest_count)))
+        ++rest_count;
+    if (rest_count % 3U != 0)
+        throw std::runtime_error(
+            "Gaussian PLY has an invalid SH property count: " + path.string());
+    const std::size_t bases = 1U + rest_count / 3U;
+    const unsigned degree = static_cast<unsigned>(
+        std::lround(std::sqrt(static_cast<double>(bases)))) - 1U;
+    if (static_cast<std::size_t>(degree + 1U) * (degree + 1U) != bases ||
+        degree > 3U)
+        throw std::runtime_error(
+            "Gaussian PLY has unsupported SH degree: " + path.string());
+    std::vector<std::size_t> rest_index(rest_count);
+    for (std::size_t rest = 0; rest < rest_count; ++rest)
+        rest_index[rest] = required("f_rest_" + std::to_string(rest));
+
+    std::vector<float> means(count * 3U);
+    std::vector<float> scales(count * 3U);
+    std::vector<float> rotations(count * 4U);
+    std::vector<float> opacities(count);
+    std::vector<float> sh(count * bases * 3U, 0.F);
+    const auto filter_property = property_index.find("filter_3D");
+    std::vector<float> filter;
+    if (filter_property != property_index.end()) filter.resize(count);
+    std::vector<float> row(properties.size());
+    for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
+        input.read(
+            reinterpret_cast<char*>(row.data()),
+            static_cast<std::streamsize>(row.size() * sizeof(float)));
+        if (!input)
+            throw std::runtime_error(
+                "Gaussian PLY ended inside vertex data: " + path.string());
+        for (int axis = 0; axis < 3; ++axis) {
+            means[3U * gaussian + static_cast<std::size_t>(axis)] =
+                row[position_index[static_cast<std::size_t>(axis)]];
+            scales[3U * gaussian + static_cast<std::size_t>(axis)] =
+                row[scale_index[static_cast<std::size_t>(axis)]];
+        }
+        for (int component = 0; component < 4; ++component)
+            rotations[4U * gaussian + static_cast<std::size_t>(component)] =
+                row[rotation_index[static_cast<std::size_t>(component)]];
+        opacities[gaussian] = row[opacity_index];
+        for (int channel = 0; channel < 3; ++channel) {
+            sh[(gaussian * bases) * 3U +
+               static_cast<std::size_t>(channel)] =
+                row[dc_index[static_cast<std::size_t>(channel)]];
+            for (std::size_t basis = 1; basis < bases; ++basis) {
+                const std::size_t rest =
+                    static_cast<std::size_t>(channel) * (bases - 1U) +
+                    basis - 1U;
+                sh[(gaussian * bases + basis) * 3U +
+                   static_cast<std::size_t>(channel)] =
+                    row[rest_index[rest]];
+            }
+        }
+        if (!filter.empty()) filter[gaussian] = row[filter_property->second];
+    }
+    const auto finite = [](const std::vector<float>& values) {
+        return std::all_of(
+            values.begin(), values.end(),
+            [](const float value) { return std::isfinite(value); });
+    };
+    if (!finite(means) || !finite(scales) || !finite(rotations) ||
+        !finite(opacities) || !finite(sh) ||
+        (!filter.empty() && !finite(filter)))
+        throw std::runtime_error(
+            "Gaussian PLY contains non-finite parameters: " + path.string());
+
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(
+        means, {count, 3U}, tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        scales, {count, 3U}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        rotations, {count, 4U}, tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        opacities, {count, 1U}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::from_vector(
+        sh, {count, bases, 3U}, tinytensor::Device::CUDA);
+    if (!filter.empty())
+        model.filter_3d = tinytensor::Tensor::from_vector(
+            filter, {count, 1U}, tinytensor::Device::CUDA);
+    model.sh_degree = degree;
+    core::Logger::instance().info(
+        "loaded GGGS PLY=", path, " gaussians=", count,
+        " sh_degree=", degree, " filter_3d=", !filter.empty());
+    return model;
 }
 
 }  // namespace aetherscan::splat
