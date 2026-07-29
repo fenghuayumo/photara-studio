@@ -119,6 +119,8 @@ struct ReconstructCli {
     bool mesh_remesh{true};
     float mesh_tsdf_voxel_scale{-1.F};
     float mesh_tsdf_bounds_padding{2.F};
+    unsigned mesh_tsdf_support_closing_axes{2};
+    std::filesystem::path mesh_tsdf_frame_export_dir;
     unsigned mesh_tsdf_smooth_iters{2};
     float mesh_tsdf_smooth_lambda{0.5F};
     float mesh_tsdf_smooth_mu{-0.53F};
@@ -276,6 +278,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
               << "  --mesh-tsdf-bounds-padding F  point-cloud bounds multiplier (default 2)\n"
+              << "  --mesh-tsdf-support-closing-axes N  0 disables; 2 = conservative default\n"
+              << "  --mesh-tsdf-frame-export-dir DIR  export exact TSDF input frames for A/B\n"
               << "  --mesh-tsdf-smooth-iters N  boundary-locked Taubin passes (default 2)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
@@ -465,6 +469,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh-tsdf-bounds-padding",
          "Point-cloud TSDF bounds multiplier",
          cxxopts::value<float>()->default_value("2"))
+        ("mesh-tsdf-support-closing-axes",
+         "Required bilateral support axes before filling a zero-weight voxel",
+         cxxopts::value<unsigned>()->default_value("2"))
+        ("mesh-tsdf-frame-export-dir",
+         "Export exact uint16-mm TSDF depth frames and camera manifest",
+         cxxopts::value<std::string>()->default_value(""))
         ("mesh-tsdf-smooth-iters",
          "Boundary-locked TSDF Taubin smoothing iterations (0 disables)",
          cxxopts::value<unsigned>()->default_value("2"))
@@ -668,6 +678,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["mesh-tsdf-voxel-scale"].as<float>();
     cli.mesh_tsdf_bounds_padding =
         result["mesh-tsdf-bounds-padding"].as<float>();
+    cli.mesh_tsdf_support_closing_axes =
+        result["mesh-tsdf-support-closing-axes"].as<unsigned>();
+    const std::string mesh_tsdf_frame_export_dir =
+        result["mesh-tsdf-frame-export-dir"].as<std::string>();
+    if (!mesh_tsdf_frame_export_dir.empty())
+        cli.mesh_tsdf_frame_export_dir =
+            utf8_to_path(mesh_tsdf_frame_export_dir);
     cli.mesh_tsdf_smooth_iters =
         result["mesh-tsdf-smooth-iters"].as<unsigned>();
     cli.mesh_tsdf_smooth_lambda =
@@ -838,6 +855,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         !std::isfinite(cli.mesh_tsdf_bounds_padding))
         throw std::invalid_argument(
             "--mesh-tsdf-bounds-padding must be finite and >= 1");
+    if (cli.mesh_tsdf_support_closing_axes > 3)
+        throw std::invalid_argument(
+            "--mesh-tsdf-support-closing-axes must be in [0,3]");
     if (!std::isfinite(cli.mesh_tsdf_smooth_lambda) ||
         cli.mesh_tsdf_smooth_lambda < 0.F ||
         cli.mesh_tsdf_smooth_lambda > 1.F)
@@ -1445,17 +1465,16 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         // brush-train optimizer defaults. The trainer also switches ADC+ to
         // brush's 2-NN/identity/0.5-opacity sparse initialization.
         options.means_lr = 2e-5F;
+        options.scales_lr = 5e-3F;
         options.opacities_lr = 0.012F;
         options.quaternions_lr = 2e-3F;
         options.sh0_lr = 2e-3F;
         options.sh_rest_lr = 2e-4F;
-        // brush-train's AdamScaled default.  Using the pygsplat/FusedAdam
-        // epsilon (1e-15) amplifies near-zero scale/rotation gradients by up
-        // to ten orders of magnitude and creates large extrapolation sheets.
-        // The imported CUDA rasterizer emits image-mean gradients at a
-        // smaller numeric scale than Brush's WGPU autodiff rasterizer.  This
-        // epsilon preserves Brush's effective epsilon-to-gradient ratio.
-        options.adam_epsilon = 1e-8F;
+        options.beta1 = 0.9F;
+        options.beta2 = 0.999F;
+        // Brush explicitly constructs AdamScaled with epsilon=1e-15; the
+        // means scheduler decays by 100x to 2e-7 over the configured run.
+        options.adam_epsilon = 1e-15F;
         // brush trains every configured SH band from the first step and keeps
         // a fixed image scale.  Letting geometry first fit quarter-resolution
         // images with only DC color gives ADC+ a strong incentive to create
@@ -1835,6 +1854,10 @@ int main(int argc, char** argv) {
                 : 1.F;
             mesh_options.mesh_tsdf_bounds_padding =
                 cli.mesh_tsdf_bounds_padding;
+            mesh_options.mesh_tsdf_support_closing_axes =
+                cli.mesh_tsdf_support_closing_axes;
+            mesh_options.mesh_tsdf_frame_export_dir =
+                cli.mesh_tsdf_frame_export_dir;
             mesh_options.mesh_tsdf_smooth_iters =
                 cli.mesh_tsdf_smooth_iters;
             mesh_options.mesh_tsdf_smooth_lambda =
@@ -2063,6 +2086,10 @@ int main(int argc, char** argv) {
                 : 1.F;
             densify_opts.mesh_tsdf_bounds_padding =
                 cli.mesh_tsdf_bounds_padding;
+            densify_opts.mesh_tsdf_support_closing_axes =
+                cli.mesh_tsdf_support_closing_axes;
+            densify_opts.mesh_tsdf_frame_export_dir =
+                cli.mesh_tsdf_frame_export_dir;
             densify_opts.mesh_tsdf_smooth_iters =
                 cli.mesh_tsdf_smooth_iters;
             densify_opts.mesh_tsdf_smooth_lambda =

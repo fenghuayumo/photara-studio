@@ -388,6 +388,12 @@ NB_MODULE(aetherscan_native, module) {
             "mesh_tsdf_min_weight",
             &mvs::DensifyOptions::mesh_tsdf_min_weight)
         .def_rw(
+            "mesh_tsdf_support_closing_axes",
+            &mvs::DensifyOptions::mesh_tsdf_support_closing_axes)
+        .def_rw(
+            "mesh_tsdf_frame_export_dir",
+            &mvs::DensifyOptions::mesh_tsdf_frame_export_dir)
+        .def_rw(
             "mesh_tsdf_diagnostics_dir",
             &mvs::DensifyOptions::mesh_tsdf_diagnostics_dir)
         .def_rw(

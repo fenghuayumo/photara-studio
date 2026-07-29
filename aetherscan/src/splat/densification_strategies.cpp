@@ -241,7 +241,6 @@ RefinementCounts refine_gaussians(
     const unsigned iteration, const float scene_extent,
     const mvs::Vec3f& scene_center, const TrainingOptions& options,
     std::mt19937& random, const AdamStates& states) {
-    const StrategySchedule preset = strategy_schedule(options);
     const bool dense_adaptive = options.densification_strategy ==
                                 DensificationStrategy::dense_adaptive;
     const bool adc_plus = options.densification_strategy ==
@@ -249,22 +248,9 @@ RefinementCounts refine_gaussians(
     const bool adc = options.densification_strategy ==
                      DensificationStrategy::adc_igs;
     const bool managed = adc || dense_adaptive;
-    if (iteration <= preset.start || iteration >= preset.stop ||
-        preset.every == 0 || iteration % preset.every != 0 ||
-        (managed &&
-         static_cast<float>(iteration) /
-                    std::max(1.F, static_cast<float>(options.iterations)) >
-                0.95F) ||
-        model.size() == 0)
+    if (!is_refinement_iteration(iteration, options) || model.size() == 0)
         return {};
 
-    // Brush refines canonical parameters: the current Mip-Splatting floor is
-    // baked into scale/opacity before prune, replacement sampling and split.
-    // Keeping the floor separate here changes both the low-opacity set and the
-    // covariance inherited by children, which is especially visible as
-    // floaters in wide-baseline scenes.
-    if (adc_plus)
-        detail::bake_3d_filter(model);
     if (adc_plus)
         return internal::refine_adc_plus_gpu(
             model, stats, iteration, scene_extent, scene_center,

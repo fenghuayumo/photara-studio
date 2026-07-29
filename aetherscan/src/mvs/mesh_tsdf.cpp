@@ -8,6 +8,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -299,6 +301,221 @@ struct TouchedBlock {
         voxel_index(x, y, z))];
 }
 
+struct SupportClosingStats {
+    std::uint64_t zero_weight_voxels{};
+    std::uint64_t bilateral_candidates{};
+    std::uint64_t filled_voxels{};
+};
+
+struct PendingSupportVoxel {
+    TsdfVoxel* voxel{};
+    float value{};
+};
+
+void export_tsdf_frames(
+    const MvsScene& scene, const float voxel_size,
+    const float truncation, const std::filesystem::path& directory) {
+    if (directory.empty()) return;
+    std::filesystem::create_directories(directory);
+    std::ofstream manifest(directory / "frames.csv");
+    if (!manifest)
+        throw std::runtime_error(
+            "failed to create TSDF frame manifest: " +
+            (directory / "frames.csv").string());
+    manifest << std::setprecision(17)
+             << "file,width,height,fx,fy,cx,cy,"
+                "r00,r01,r02,r10,r11,r12,r20,r21,r22,t0,t1,t2\n";
+
+    std::uint64_t valid_pixels = 0;
+    std::uint64_t clipped_pixels = 0;
+    std::uint64_t bytes_written = 0;
+    for (std::size_t view_index = 0;
+         view_index < scene.views.size(); ++view_index) {
+        const MvsView& view = scene.views[view_index];
+        const DepthMap& map = view.depth_map;
+        if (map.depth.size() != map.size())
+            throw std::runtime_error(
+                "TSDF frame export received an incomplete depth map");
+
+        std::vector<std::uint16_t> depth_mm(map.size(), 0);
+        for (std::size_t pixel = 0; pixel < map.size(); ++pixel) {
+            const float depth = map.depth[pixel];
+            if (!(depth > 0.F) || !std::isfinite(depth)) continue;
+            const double millimetres =
+                std::floor(static_cast<double>(depth) * 1000.0);
+            if (!(millimetres >= 1.0) ||
+                millimetres >
+                    static_cast<double>(
+                        std::numeric_limits<std::uint16_t>::max())) {
+                ++clipped_pixels;
+                continue;
+            }
+            depth_mm[pixel] =
+                static_cast<std::uint16_t>(millimetres);
+            ++valid_pixels;
+        }
+
+        std::ostringstream filename;
+        filename << "depth_" << std::setfill('0') << std::setw(4)
+                 << view_index << ".u16";
+        const std::filesystem::path output = directory / filename.str();
+        std::ofstream depth_file(output, std::ios::binary);
+        if (!depth_file)
+            throw std::runtime_error(
+                "failed to create TSDF depth frame: " + output.string());
+        const std::streamsize byte_count = static_cast<std::streamsize>(
+            depth_mm.size() * sizeof(std::uint16_t));
+        depth_file.write(
+            reinterpret_cast<const char*>(depth_mm.data()), byte_count);
+        if (!depth_file)
+            throw std::runtime_error(
+                "failed to write TSDF depth frame: " + output.string());
+        bytes_written += static_cast<std::uint64_t>(byte_count);
+
+        const auto& R = view.pose.R;
+        const auto t = view.pose.translation();
+        manifest << filename.str() << ',' << map.width << ','
+                 << map.height << ',' << view.fx << ',' << view.fy
+                 << ',' << view.cx << ',' << view.cy;
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                manifest << ',' << R(row, column);
+        manifest << ',' << t.x() << ',' << t.y() << ',' << t.z()
+                 << '\n';
+    }
+    if (!manifest)
+        throw std::runtime_error(
+            "failed to write TSDF frame manifest: " +
+            (directory / "frames.csv").string());
+
+    std::ofstream metadata(directory / "metadata.txt");
+    if (!metadata)
+        throw std::runtime_error(
+            "failed to create TSDF frame metadata");
+    metadata << std::setprecision(17)
+             << "voxel_size=" << voxel_size << '\n'
+             << "sdf_trunc=" << truncation << '\n'
+             << "depth_scale=1000\n"
+             << "depth_trunc=65.535\n"
+             << "frame_count=" << scene.views.size() << '\n';
+    core::Logger::instance().info(
+        "mvs mesh TSDF frame export: frames=", scene.views.size(),
+        " valid_pixels=", valid_pixels,
+        " clipped_pixels=", clipped_pixels,
+        " bytes=", bytes_written, " directory=", directory);
+}
+
+[[nodiscard]] SupportClosingStats close_internal_tsdf_support(
+    Volume& volume, const OrientedBoundingBox& bounds,
+    const float voxel_size, const float minimum_weight,
+    const unsigned required_axes) {
+    SupportClosingStats stats;
+    if (required_axes == 0 || required_axes > 3) return stats;
+
+    constexpr std::array<GridKey, 3> axis_offsets{{
+        {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    std::vector<TouchedBlock> blocks;
+    blocks.reserve(volume.size());
+    for (auto& [key, block] : volume)
+        blocks.push_back({key, block.get()});
+    std::vector<std::vector<PendingSupportVoxel>> block_pending(
+        blocks.size());
+    std::vector<std::uint64_t> block_zero_counts(blocks.size(), 0);
+    std::vector<std::uint64_t> block_candidate_counts(blocks.size(), 0);
+    const float valid_weight = std::max(
+        minimum_weight, std::numeric_limits<float>::epsilon());
+
+    // Scan first and apply later: newly synthesized support must never seed
+    // another fill in this pass.
+#if defined(AETHERSCAN_HAS_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::int64_t block_index = 0;
+         block_index < static_cast<std::int64_t>(blocks.size());
+         ++block_index) {
+        const TouchedBlock& touched =
+            blocks[static_cast<std::size_t>(block_index)];
+        std::vector<PendingSupportVoxel>& pending =
+            block_pending[static_cast<std::size_t>(block_index)];
+        std::uint64_t& zero_count =
+            block_zero_counts[static_cast<std::size_t>(block_index)];
+        std::uint64_t& candidate_count =
+            block_candidate_counts[static_cast<std::size_t>(block_index)];
+        for (int x = 0; x < k_block_resolution; ++x) {
+            for (int y = 0; y < k_block_resolution; ++y) {
+                for (int z = 0; z < k_block_resolution; ++z) {
+                    TsdfVoxel& center =
+                        touched.block->voxels[static_cast<std::size_t>(
+                            voxel_index(x, y, z))];
+                    if (center.weight != 0.F) continue;
+                    ++zero_count;
+
+                    const GridKey key =
+                        global_key(touched.key, x, y, z);
+                    if (bounds.valid &&
+                        !bounds.contains(position_of(key, voxel_size)))
+                        continue;
+
+                    unsigned bilateral_axes = 0;
+                    double value_sum = 0.0;
+                    double axis_weight_sum = 0.0;
+                    for (const GridKey& offset : axis_offsets) {
+                        const GridKey negative{
+                            key.x - offset.x, key.y - offset.y,
+                            key.z - offset.z};
+                        const GridKey positive{
+                            key.x + offset.x, key.y + offset.y,
+                            key.z + offset.z};
+                        const TsdfVoxel* a = find_voxel(volume, negative);
+                        const TsdfVoxel* b = find_voxel(volume, positive);
+                        if (a == nullptr || b == nullptr ||
+                            a->weight < valid_weight ||
+                            b->weight < valid_weight)
+                            continue;
+
+                        ++bilateral_axes;
+                        // Use the weaker side as the axis confidence so a
+                        // heavily observed side cannot drag the fill across a
+                        // weakly supported surface.
+                        const double axis_weight =
+                            std::min(a->weight, b->weight);
+                        const double pair_value =
+                            (static_cast<double>(a->value) * a->weight +
+                             static_cast<double>(b->value) * b->weight) /
+                            (static_cast<double>(a->weight) + b->weight);
+                        value_sum += axis_weight * pair_value;
+                        axis_weight_sum += axis_weight;
+                    }
+                    if (bilateral_axes < required_axes ||
+                        !(axis_weight_sum > 0.0))
+                        continue;
+
+                    ++candidate_count;
+                    const float value = static_cast<float>(
+                        value_sum / axis_weight_sum);
+                    if (!std::isfinite(value)) continue;
+                    pending.push_back({
+                        &center, std::clamp(value, -1.F, 1.F)});
+                }
+            }
+        }
+    }
+
+    for (std::size_t block_index = 0;
+         block_index < blocks.size(); ++block_index) {
+        stats.zero_weight_voxels += block_zero_counts[block_index];
+        stats.bilateral_candidates +=
+            block_candidate_counts[block_index];
+        for (const PendingSupportVoxel& fill :
+             block_pending[block_index]) {
+            fill.voxel->value = fill.value;
+            fill.voxel->weight = 1.F;
+            ++stats.filled_voxels;
+        }
+    }
+    return stats;
+}
+
 [[nodiscard]] std::array<std::uint8_t, 3> support_color(
     const float value, const float brightness = 1.F) noexcept {
     const float t = std::clamp(value, 0.F, 1.F);
@@ -533,6 +750,19 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
         stage.finish();
         return false;
     }
+    export_tsdf_frames(
+        scene, voxel_size, truncation,
+        options.mesh_tsdf_frame_export_dir);
+    const SupportClosingStats closing = close_internal_tsdf_support(
+        volume, bounds, voxel_size, options.mesh_tsdf_min_weight,
+        options.mesh_tsdf_support_closing_axes);
+    core::Logger::instance().info(
+        "mvs mesh TSDF support closing: required_axes=",
+        options.mesh_tsdf_support_closing_axes,
+        " zero_weight_voxels=", closing.zero_weight_voxels,
+        " bilateral_candidates=", closing.bilateral_candidates,
+        " filled_voxels=", closing.filled_voxels,
+        " synthetic_weight=1 single_pass=true");
     save_tsdf_diagnostics(
         scene, volume, voxel_size, options.depth_diff_threshold,
         options.mesh_tsdf_diagnostics_dir);

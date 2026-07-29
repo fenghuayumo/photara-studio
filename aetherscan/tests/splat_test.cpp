@@ -2,6 +2,7 @@
 #include "splat/colmap.hpp"
 #include "splat/dataset.hpp"
 #include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/densification.hpp"
 #include "io/image.hpp"
 #include "sfm/export_mvs.hpp"
 
@@ -967,6 +968,11 @@ void test_openmvs_dataset_loading() {
             (loaded.scene.dense_cloud.points[0].position -
              mvs::Vec3f(0.5F, 0.F, 4.F)).norm() < 1e-6F,
         "OpenMVS intrinsics, pose, or initial point conversion is incorrect");
+    require(
+        loaded.scene.sparse_points.size() == 1 &&
+            loaded.scene.sparse_points[0].view_ids ==
+                std::vector<mvs::Index>{0, 1},
+        "OpenMVS vertex observations were not read in archive order");
     std::filesystem::remove_all(root);
 }
 
@@ -1339,6 +1345,32 @@ void test_adc_plus_split_matches_brush() {
 
 void test_densification_strategies_and_dense_bypass() {
     using namespace aetherscan;
+    require(
+        splat::TrainingOptions{}.adam_epsilon == 1e-15F,
+        "ADC+ Adam epsilon no longer matches Brush");
+
+    std::vector<float> brush_points;
+    for (const float value : {
+             -100.F, 0.F, 1.F, 2.F, 3.F, 4.F,
+             5.F, 6.F, 7.F, 8.F, 100.F})
+        brush_points.insert(
+            brush_points.end(), {value, 2.F * value, 3.F * value});
+    const auto brush_bounds =
+        splat::densification::brush_scene_geometry(brush_points);
+    require(
+        (brush_bounds.center - mvs::Vec3f(4.F, 8.F, 12.F)).norm() <
+                1e-6F &&
+            std::abs(brush_bounds.scale - 16.F) < 1e-6F &&
+            std::abs(brush_bounds.maximum_extent - 12.F) < 1e-6F,
+        "ADC+ percentile bounds no longer match Brush");
+    const auto fallback_bounds =
+        splat::densification::brush_scene_geometry({});
+    require(
+        fallback_bounds.center.isZero() &&
+            fallback_bounds.scale == 2.F &&
+            fallback_bounds.maximum_extent == 1.F,
+        "ADC+ bounds fallback no longer matches Brush");
+
     const auto root = std::filesystem::temp_directory_path() /
                       "aetherscan_densification_test";
     std::filesystem::create_directories(root);
@@ -1409,6 +1441,18 @@ void test_densification_strategies_and_dense_bypass() {
     brush_schedule.refine_every = 0;
     brush_schedule.densify_gradient_threshold = -1.F;
     brush_schedule.densify_select_fraction = 1.F;
+    auto full_brush_schedule = brush_schedule;
+    full_brush_schedule.iterations = 30'000;
+    require(
+        splat::densification::is_refinement_iteration(
+            28'400, full_brush_schedule),
+        "ADC+ stopped before Brush's final 30k refinement");
+    require(
+        !splat::densification::is_refinement_iteration(
+            28'600, full_brush_schedule) &&
+            !splat::densification::is_refinement_iteration(
+                29'800, full_brush_schedule),
+        "ADC+ refined after Brush's 95% cutoff");
     const auto brush_schedule_model =
         splat::Trainer(brush_schedule).train(scene);
     require(

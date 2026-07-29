@@ -18,7 +18,8 @@ SceneGeometry training_scene_geometry(
     }
     SceneGeometry geometry{
         std::max((maximum - minimum).norm(), 1e-6F),
-        0.5F * (minimum + maximum)};
+        0.5F * (minimum + maximum),
+        0.5F * (maximum - minimum).maxCoeff()};
     if (scene.views.empty()) return geometry;
 
     // Match pygsplat's COLMAP convention: optimization scale is measured from
@@ -51,7 +52,50 @@ SceneGeometry training_scene_geometry(
         throw std::invalid_argument(
             "Sparse GGGS training requires non-degenerate camera coverage");
     }
-    return {1.1F * camera_radius, camera_center};
+    return {1.1F * camera_radius, camera_center, 1.1F * camera_radius};
+}
+
+SceneGeometry brush_scene_geometry(
+    const std::vector<float>& xyz, const float percentile) {
+    std::array<std::vector<float>, 3> axes;
+    const std::size_t count = xyz.size() / 3;
+    for (auto& values : axes) values.reserve(count);
+    for (std::size_t index = 0; index < count; ++index)
+        for (std::size_t axis = 0; axis < axes.size(); ++axis) {
+            const float value = xyz[3 * index + axis];
+            if (std::isfinite(value)) axes[axis].push_back(value);
+        }
+
+    if (std::any_of(
+            axes.begin(), axes.end(),
+            [](const auto& values) { return values.empty(); }))
+        return {2.F, mvs::Vec3f::Zero(), 1.F};
+
+    const float p = std::clamp(percentile, 0.F, 1.F);
+    mvs::Vec3f minimum;
+    mvs::Vec3f maximum;
+    for (std::size_t axis = 0; axis < axes.size(); ++axis) {
+        auto& values = axes[axis];
+        std::sort(values.begin(), values.end());
+        const std::size_t size = values.size();
+        const std::size_t low = static_cast<std::size_t>(
+            (1.F - p) * 0.5F * static_cast<float>(size));
+        const std::size_t high = std::min(
+            size - 1,
+            static_cast<std::size_t>(
+                (1.F + p) * 0.5F * static_cast<float>(size)));
+        minimum(static_cast<Eigen::Index>(axis)) = values[low];
+        maximum(static_cast<Eigen::Index>(axis)) = values[high];
+    }
+
+    const mvs::Vec3f half_extent = 0.5F * (maximum - minimum);
+    std::array<float, 3> extents{
+        half_extent.x(), half_extent.y(), half_extent.z()};
+    std::sort(extents.begin(), extents.end());
+    return {
+        2.F * extents[1],
+        0.5F * (minimum + maximum),
+        extents[2]};
 }
 
 StrategySchedule strategy_schedule(const TrainingOptions& options) {
@@ -112,8 +156,20 @@ bool is_enabled(const TrainingOptions& options) {
 bool is_refinement_iteration(
     const unsigned iteration, const TrainingOptions& options) {
     const StrategySchedule schedule = strategy_schedule(options);
-    return iteration > schedule.start && iteration < schedule.stop &&
-        schedule.every != 0 && iteration % schedule.every == 0;
+    if (iteration <= schedule.start || iteration >= schedule.stop ||
+        schedule.every == 0 || iteration % schedule.every != 0)
+        return false;
+    const bool brush_managed =
+        options.densification_strategy ==
+            DensificationStrategy::adc_plus ||
+        options.densification_strategy ==
+            DensificationStrategy::adc_igs ||
+        options.densification_strategy ==
+            DensificationStrategy::dense_adaptive;
+    return !brush_managed ||
+        static_cast<float>(iteration) /
+                std::max(1.F, static_cast<float>(options.iterations)) <=
+            0.95F;
 }
 
 }  // namespace aetherscan::splat::densification

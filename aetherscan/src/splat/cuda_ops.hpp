@@ -70,8 +70,8 @@ DecodedTrainingPixels upload_packed_training_pixels(
     bool decode_mask);
 
 // Fold the Mip-Splatting 3D-filter floor into the canonical scale/opacity
-// parameters and clear model.filter_3d. Brush does this before every ADC+
-// refine so pruning and splitting operate on the rendered parameters.
+// parameters and clear model.filter_3d. This is available for explicit model
+// conversion; ADC+ training keeps the filter separate from canonical values.
 void bake_3d_filter(GaussianModel& model);
 
 // Build ADC+ opacity/non-finite/bounds pruning and compacted keep indices on

@@ -95,7 +95,9 @@ SfM (已有) ──► RebuildScene
 GGGS 几何提取走与 `pygsplat/gs2mesh.py` 对齐的稀疏体素块 TSDF：默认
 `max_depth=2*scene_extent`、`voxel=max_depth/2048`、`sdf_trunc=4*voxel`，逐相机投影融合后用
 标准 Marching Cubes 提取，再仅保留最大连通分量。默认不再执行通用 remesher/decimator；
-`--mesh-tsdf-voxel-scale` 可显式调整质量/速度，`--mesh-target-faces` 可按需开启交付级减面。
+Clean 会对不超过 16 条边的小孔执行边界耳切三角化，不插入中心点，避免扇形补洞在桌布等
+近似平面上产生方块状桥接伪影。`--mesh-tsdf-voxel-scale` 可显式调整质量/速度，
+`--mesh-target-faces` 可按需开启交付级减面。
 
 CLI 示意（设计级，非最终参数名）：
 
@@ -535,6 +537,274 @@ aetherscan ... --roi auto --roi-margin 0.20
 `--roi-mask-close`、`--roi-mask-dilate` 和 `--roi-mask-feather` 控制小缺口修复、保守外扩与软边；
 depth Mask 默认只做 1 px feather，真实的大孔洞会保留。孤立小前景分量在 feather 前移除，
 避免稀疏深度噪点污染背景。
+
+---
+
+## `ori_img` 稀疏 ADC+ / TSDF 验证（2026-07-29）
+
+在 `D:\ScanVideo\ori_img\images` 的 76 张图上，global SfM 注册 `76/76`，生成
+`121,532` 个稀疏点和 `460,202` 条观测，平均重投影误差 `0.4158 px`、RMS `0.5584 px`，
+SfM 阶段耗时 `22.58 s`（进程墙钟约 `24.01 s`）。用导出的 OpenMVS Interface 作为稀疏
+初始化执行 30,000 步
+`adc_plus`，最终得到 `591,600` 个 Gaussian；三个固定视角 PSNR 为
+`32.03 / 33.77 / 32.59 dB`，平均 `32.80 dB`，训练耗时 `680.31 s`。
+
+TSDF 使用 `voxel=0.00105929`、`truncation=0.00423714`，融合 `28,222,121` 个有效深度像素，
+Marching Cubes 原始输出 `1,927,187` 顶点 / `3,658,990` 面。保留最大分量并做 16 边以内的
+耳切补洞后为 `1,380,018` 顶点 / `2,724,671` 面，共关闭 `4,901` 个小边界环。
+桌布诊断视角的黑洞像素由 `26,274` 降到 `25,995`，且没有中心扇形版本的大块平面伪影；
+把阈值放宽到 64 只再减少 8 个黑像素，却把渲染器拒绝的桥接面从 18 增到 543，因此产品
+默认采用更保守的 16。
+
+本次同时修复了 OpenMVS 顶点观测反序列化的求值顺序问题。修复前所有 `image_id` 被误读为
+0，邻居为 `0/76`；修复后为 `76/76`，三个 TSDF 诊断视角分别比较约 `4.83M` 个邻居深度，
+一致率为 `99.927% / 99.954% / 99.942%`。
+
+性能上，ADC+ 是 GPU-bound：RTX 5090 训练期间利用率约 `95–97%`，CPU 平均约占一个核心；
+SfM、MVS、TSDF 才是 32 线程 CPU 调度的重点。TSDF 本次完成约 `4.82 亿` 次体素更新，
+融合阶段 `1.63 s`，整个 mesh extraction `12.95 s`。不应为了显示 100% CPU 占用而让
+CPU 与 CUDA 训练争用内存带宽。
+
+### TSDF support closing A/B（2026-07-29）
+
+Marching Cubes 前增加了保守的一体素 support closing：
+
+- 只检查已经分配的 TSDF block 中 `weight == 0` 的体素；
+- 只有至少两个坐标轴的正、负方向邻居都达到有效权重时才填充；
+- 用双侧邻居插值得到 TSDF，合成权重固定为 `1`；
+- 候选先收集、后统一写回，因此是单轮非级联操作，不会由新填体素继续向轮廓外生长；
+- `--mesh-tsdf-support-closing-axes 2` 为默认保守模式，`0` 可关闭做 A/B。
+
+在同一份 `591,600` Gaussian ADCPlus 模型、相同 76 个相机和相同深度图上，关闭与开启
+closing 的真实数据 A/B 结果如下：
+
+| 指标 | axes=0 | axes=2 |
+|---|---:|---:|
+| 填充的零权重体素 | 0 | 12,088 |
+| MC supported cells | 24,104,486 | 24,137,604 |
+| MC faces | 3,658,990 | 3,675,540 |
+| 最终主体 mesh vertices | 1,380,018 | 1,383,245 |
+| 最终主体 mesh faces | 2,724,671 | 2,730,842 |
+| 后处理关闭的小边界环 | 4,901 | 4,880 |
+
+`statue_alex01250.png` 箭头视角的二值轮廓只新增 52 像素、移除 19 像素；桌布左侧、
+中央腿部和右侧尾根三个箭头 ROI 分别只新增 `0 / 1 / 0` 像素。因此 support closing
+能够修复真实存在的零散一体素 support 孔，但不是这三个明显缺陷的主因。它们在
+closing 前后基本不变，更可能来自 GGGS 深度场中的缺失/错误零交叉（包括 ADCPlus
+覆盖不足或多视图深度不一致），而不是 MC 单纯因为某一个角点零权重拒绝 cell。
+
+closing 的 block 扫描使用 OpenMP 并行；本数据集耗时从约 `1.46 s` 降到 `0.12 s`
+（约 `11.8x`），并行版与串行版最终 PLY 的 SHA-256 完全一致。
+
+### AetherScan PLY → pygsplat TSDF 隔离测试（2026-07-29）
+
+为了区分 AetherScan 训练输出和 C++ TSDF 后端，另做了完整的交叉实现测试，而不是只把
+AetherScan 已渲染的深度交给 Open3D：
+
+1. 用 pygsplat 自带的 `load_splats()` 直接读取
+   `scene_adcplus_gggs.ply`，得到 `591,600` 个 Gaussian、SH degree 3 和
+   `591,600 × 1` 的 `filter_3D`；
+2. 从 AetherScan 实际参与 TSDF 的 frame manifest 生成 pygsplat Nerfstudio 相机，
+   禁止 world normalization；76 个外参经 OpenGL/OpenCV 往返后的最大误差为
+   `1.0e-7`，pygsplat 的 mesh scene scale 为 `1.084708184`，与 AetherScan 一致；
+3. 由 pygsplat GGGS rasterizer 重新生成 median depth，再使用 pygsplat 自己的
+   Open3D TSDF、最大连通分量后处理和默认参数
+   `max_depth=2.1694, voxel=0.001059, truncation=0.004237`。
+
+pygsplat 输出为 `1,380,685` vertices / `2,718,237` faces，三个箭头处的缺陷仍然
+存在，并且外观与 “AetherScan depth → Open3D TSDF” 基本相同：同视角二值 mesh mask
+只有 `856 / 1,000,000` 像素不同。第 0 帧的 TSDF 输入深度也验证了 PLY 兼容性：
+AetherScan 与 pygsplat 的有效像素只相差 16 个；共同有效的 437,206 像素中有
+433,501 个量化到完全相同的毫米深度，平均绝对差仅 `0.0132 mm`。
+
+这个结果可以排除“仅由 AetherScan 的 C++ TSDF / Marching Cubes 实现造成”以及
+“pygsplat 错读 AetherScan PLY”这两个假设。更准确的当前结论是：问题会随 AetherScan
+PLY 渲染出的多视图深度场传递到 pygsplat；可能涉及覆盖不足、opacity/scale/filter、
+densification/prune 或多视图几何一致性，现阶段不能只归因于“剪掉了过多 Gaussian”。
+第 0 帧桌布 ROI 的输入深度本身近似实心，但融合 mesh 相对该输入少 2,170 个前景像素，
+说明明显孔洞更像是多视图深度支持不稳定在 TSDF 融合阶段的表现，而不是单帧 alpha
+阈值产生的洞。严格区分具体训练项仍需用同相机、同 TSDF 参数的 pygsplat 自训 PLY
+作为第二个受控输入。
+
+### 历史 pygsplat dense-init 参考（非稀疏 ADCPlus 主对照，2026-07-29）
+
+此前曾把无明显主体破洞的 pygsplat 模型
+`D:\ScanVideo\ori_img\gsplat_dense_init\point_cloud.ply` 作为主对照。该模型使用原 COLMAP
+坐标，而 AetherScan 使用内部 SfM 坐标；76 个同名相机的 Sim(3) 拟合尺度为
+`0.2601507255`，相机中心误差 mean/P95/max 为
+`0.00438 / 0.00675 / 0.00865`，朝向误差 mean/P95/max 为
+`0.110° / 0.177° / 0.317°`。Aether 的相机和内参被变换到 pygsplat 原生坐标，
+TSDF 参数也按尺度等价换算为
+`max_depth=8.33907, voxel=0.00407181, truncation=0.0162873`。
+
+相同 76 个物理视角、相同 TSDF 分辨率下，pygsplat 自训 PLY 输出
+`894,765` vertices / `1,775,758` faces；Aether PLY 输出
+`1,380,685` vertices / `2,718,237` faces。自训模型的主体 mesh 更连续，但它没有
+重建桌布/背景，因此“桌布无破洞”不能作为同一表面的质量结论；主体 body/tail ROI
+可以比较。
+
+把两份 PLY 都换算到 Aether 世界尺度，并限制到 pygsplat 主体的共同 0.5–99.5%
+bbox（额外 2 cm padding）后：
+
+| 指标 | AetherScan | pygsplat 自训 |
+|---|---:|---:|
+| bbox 内 Gaussian 数 | 187,966 | 1,244,034 |
+| 几何平均 scale P10/P50/P90 | 0.857/1.297/2.399 mm | 0.464/0.712/1.218 mm |
+| filter_3D P50 | 0.228 mm | 0.319 mm |
+| filter 后 opacity P10/P50/P90 | 0.032/0.115/0.562 | 0.009/0.207/0.753 |
+| axis ratio P50/P90/P99 | 7.49/23.50/66.93 | 4.67/12.39/30.28 |
+
+因此 pygsplat 并不是依靠更小的 `filter_3D`：它的 filter 相对最小轴反而更强，但
+主体内 Gaussian 数约为 Aether 的 `6.62x`，scale 中位数约小 `1.82x`，有效 opacity
+中位数更高，且极端各向异性明显更少。
+
+跨视角深度一致性使用每帧 4 像素 stride、8 个最近相机，残差统一换算到 Aether
+物理尺度。以一个 TSDF voxel（1.059 mm）为阈值：
+
+| 指标 | AetherScan | pygsplat 自训 |
+|---|---:|---:|
+| 全局一致像素率 | 83.83% | 89.02% |
+| 绝对深度残差 P50 | 0.444 mm | 0.184 mm |
+| 绝对深度残差 P90 | 1.768 mm | 1.212 mm |
+| view 0 body ROI 一致率 | 90.11% | 92.38% |
+| view 0 tail ROI 一致率 | 90.58% | 92.75% |
+
+阈值放宽到 2/4 voxel 时两者分别为 `92.03/93.75%` 和
+`92.48/93.79%`；差距主要集中在亚体素到一体素范围，恰好会影响细表面 TSDF
+零交叉的连续性。
+
+训练结构轨迹也不同。pygsplat 从 `scene_dense.ply` 的 `1,249,605` 个点初始化，
+`DefaultStrategy.refine_stop_iter=0` 使 grow/split/prune 每步都立即返回，
+`speedysplat_pruning=false`，最终仍为 `1,249,605`，所以该模型的 grow/prune
+轨迹严格为零。Aether ADCPlus 从 `121,532` 开始，30k 步累计 grow `842,453`、
+prune `372,385`，最终 `591,600`；15k–25k 区间 grow `125,957`、prune
+`125,099`，已经进入几乎一进一出的密度平台。
+
+这个实验只能说明稠密初始化、无结构更新的模型可以给出更连续的主体深度，不能回答
+“相同稀疏 COLMAP 起点下，AetherScan 与 pygsplat ADCPlus 谁导致孔洞”。它不再作为
+本问题的主对照，只保留为 dense-init 上界参考。
+
+### COLMAP 稀疏起点 → pygsplat ADCPlus 严格对照（2026-07-29）
+
+已按真正需要的路径重新训练，不加载上述 dense-init PLY：
+
+1. 输入为 `D:\ScanVideo\ori_img\sparse\0` 的 COLMAP 文本模型和同目录 76 张
+   `1000×1000` 图像，pygsplat 解析到 `83,993` 个稀疏点；
+2. 使用 pygsplat 原生 `adcplus` 预设训练 30k 步，`refine_every=200`、
+   `refine_start=600`、`refine_stop=15000`、`grow_select_fraction=0.4`、
+   `opac_decay=scale_decay=0.002`、上限 4M，并从第 7k 步启用 GGGS
+   depth-normal 和多视图 geo/NCC；
+3. 最终 PLY 为
+   `runs/ori_img_adcplus_20260729/pygsplat_sparse_adcplus/point_cloud.ply`，
+   含 `664,437` 个 Gaussian、SH degree 3 和 `filter_3D`；
+4. 将 AetherScan 实际使用的 76 个相机按已拟合 Sim(3) 表达到 COLMAP 世界，
+   两个模型使用相同物理深度上限和 Open3D TSDF 参数。COLMAP 坐标下等效参数为
+   `max_depth=8.3390748`、`voxel=0.004071814`、
+   `truncation=0.016287256`；深度量化尺度也按 Sim(3) 换算，保证与 Aether
+   世界的 1 mm 量化相同。
+
+同一物理尺度下的 Gaussian 参数如下：
+
+| 指标 | AetherScan ADCPlus | pygsplat 稀疏 ADCPlus |
+|---|---:|---:|
+| 最终 Gaussian 数 | 591,600 | 664,437 |
+| opacity P10/P50/P90 | 0.033/0.141/0.658 | 0.058/0.670/0.998 |
+| filter 后 opacity P10/P50/P90 | 0.029/0.128/0.619 | 0.038/0.294/0.792 |
+| opacity < 0.1 | 38.31% | 16.21% |
+| 几何平均 scale P10/P50/P90 | 1.001/6.173/31.623 mm | 0.582/3.062/29.013 mm |
+| filter_3D P10/P50/P90 | 0.200/0.395/1.566 mm | 0.263/1.003/3.306 mm |
+| 原始 axis ratio P50/P90/P99 | 5.98/25.84/117.24 | 12.86/52.22/181.75 |
+| filter 后 axis ratio P50/P90/P99 | 5.66/21.19/87.37 | 7.89/24.16/67.11 |
+
+pygsplat 并不是靠更小的 `filter_3D` 或更低的各向异性消除孔洞；它的关键区别是
+Gaussian 数更多、典型 scale 更小，而且剩余 Gaussian 的有效 opacity 明显更高。
+
+真实 densify/prune 日志也已逐事件解析：
+
+| 轨迹指标 | AetherScan ADCPlus | pygsplat 稀疏 ADCPlus |
+|---|---:|---:|
+| 初始点数 | 121,532 | 83,993 |
+| 累计 grow/refine | 842,453 | 773,042 |
+| 累计 prune | 372,385 | 192,598 |
+| prune /（初始 + 累计 grow） | 38.63% | 22.47% |
+| 最终点数 | 591,600 | 664,437 |
+| 15k–25k grow | 125,957 | 36,247 |
+| 15k–25k prune | 125,099 | 36,280 |
+
+两者都会进入密度平台，但 AetherScan 后半段的结构周转明显更强；因此“训练中删得
+更多”现在有数据支持，但仍不能把它单独定为根因，因为两边的初始 SfM 点、相机和
+几何 loss 起始步也不同。
+
+跨视角深度以 4 像素 stride、每帧 8 个最近相机统计，统一换算到 Aether 物理尺度：
+
+| 指标 | AetherScan ADCPlus | pygsplat 稀疏 ADCPlus |
+|---|---:|---:|
+| 有效深度像素（76 帧） | 28,222,121 | 27,921,997 |
+| 1 voxel 内全局一致率 | 83.83% | 85.00% |
+| 2 voxel 内全局一致率 | 92.03% | 92.91% |
+| 4 voxel 内全局一致率 | 93.75% | 94.39% |
+| 绝对深度残差 P50/P90 | 0.444/1.768 mm | 0.435/1.566 mm |
+| view 0 桌面 ROI，1 voxel | 78.99% | 81.72% |
+| view 0 body ROI，1 voxel | 90.11% | 90.58% |
+| view 0 tail ROI，1 voxel | 90.58% | 90.60% |
+
+同一 Open3D TSDF 后端下，AetherScan 深度得到
+`1,380,069` vertices / `2,717,369` faces，pygsplat 稀疏 ADCPlus 得到
+`1,352,458` vertices / `2,668,803` faces。两者均无 non-manifold edge，但开放
+边界统计有明显差异：
+
+| mesh 边界指标 | AetherScan ADCPlus | pygsplat 稀疏 ADCPlus |
+|---|---:|---:|
+| boundary edges | 52,151 | 44,669 |
+| boundary components | 4,402 | 4,131 |
+| 至少 64 条边的边界环 | 80 | 44 |
+| 至少 128 条边的边界环 | 38 | 21 |
+| 周长至少 32 mm 的边界环 | 130 | 91 |
+
+相同正面相机下，pygsplat 稀疏 ADCPlus mesh 在原图三个箭头位置没有复现 AetherScan
+结果中的大块贯穿孔；较大的开放边界环也减少约 45%。结合“AetherScan PLY 交给
+pygsplat/Open3D 仍复现缺陷”的上一组隔离实验，当前可以把主问题定位到
+**TSDF 之前的 3DGS/SfM 输入侧**：TSDF 会把多视图深度支持的局部差异放大为边界环，
+但不是 AetherScan C++ Marching Cubes 独自产生孔洞。下一步应固定 AetherScan 的
+相机、稀疏点和 geometry loss，仅降低后半程 prune/turnover 或设置主体最低有效
+opacity/density，做单变量训练 A/B；在该 A/B 完成前，不能把根因进一步简化成
+“只因为 prune 过多”。
+
+### ADCPlus 3D filter 生命周期修正（2026-07-29）
+
+后半程 prune 阈值 A/B 没有缓解可见孔洞，实验参数
+`adc_plus_post_growth_prune_factor` 已从产品代码、CLI 和文档中删除。继续逐项对照
+pygsplat 后发现了更直接的实现偏差：
+
+- pygsplat 始终把 `filter_3D` 作为渲染时的独立 Mip-Splatting floor；致密化后只重算
+  filter，不修改 canonical scale/opacity；
+- AetherScan 原实现会在每次 ADCPlus refine 前把当前 filter 烘焙进 scale/opacity，
+  refine 后再生成一个新 filter，造成 opacity 被多轮永久衰减；
+- 原实现还在 90% 训练进度停止刷新 filter，但 ADCPlus 的 prune-only refine 实际持续
+  到 95%，导致 90%–95% 区间的 filter 生命周期不完整。
+
+修正后从训练开始即计算 filter，refine 前不再 bake；0%–95% 每次 topology update 后
+重算，95% 后按 100 步周期刷新。使用相同 COLMAP 相机/稀疏点、相同 30k ADCPlus、
+相同 geometry loss、相同 TSDF 参数的单变量 A/B：
+
+| 指标 | 原 filter bake | 独立 filter |
+|---|---:|---:|
+| 最终 Gaussian 数 | 545,384 | 584,694 |
+| canonical opacity mean | 0.254 | 0.482 |
+| canonical opacity P10/P50 | 0.036 / 0.151 | 0.071 / 0.432 |
+| filter 后 opacity P10/P50 | 0.031 / 0.137 | 0.061 / 0.289 |
+| 3-view 平均 PSNR | 33.274 dB | 34.878 dB |
+| 76 帧有效深度像素 | 28,615,968 | 28,659,209 |
+| 全局 1-voxel 深度一致率 | 86.24% | 87.33% |
+| view 0 桌布 ROI 1-voxel 一致率 | 81.90% | 85.39% |
+| Open3D mesh boundary edges | 46,354 | 39,445 |
+| boundary components | 3,862 | 3,610 |
+| 至少 128 条边的边界环 | 36 | 19 |
+| 周长至少 32 mm 的边界环 | 124 | 80 |
+
+这次修正没有禁止 prune；低 opacity Gaussian 仍正常清理，因此与 prune=0 后留下大量
+近透明死点的实验不同。正面预览中仍有细碎开放边界，但大边界环和桌布跨视角深度误差
+均明显下降，说明反复 filter bake 是孔洞的重要来源之一，而不是全部来源。
 
 ---
 

@@ -11,6 +11,7 @@
 #include <limits>
 #include <queue>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace aetherscan::texture {
@@ -226,6 +227,27 @@ MeshMaskSummary render_mesh_foreground_masks(
         throw std::invalid_argument(
             "MVS mesh contains no valid triangles for mask rendering");
 
+    std::vector<float> vertex_normal_attributes;
+    if (!options.preview_directory.empty() &&
+        scene.mesh.normals.size() == scene.mesh.vertices.size()) {
+        vertex_normal_attributes.resize(scene.mesh.normals.size() * 3U);
+        bool normals_valid = true;
+        for (std::size_t index = 0; index < scene.mesh.normals.size(); ++index) {
+            Eigen::Vector3f normal = scene.mesh.normals[index];
+            const float norm = normal.norm();
+            if (!std::isfinite(norm) || norm <= 1e-12F) {
+                normals_valid = false;
+                break;
+            }
+            normal /= norm;
+            for (int channel = 0; channel < 3; ++channel)
+                vertex_normal_attributes[3U * index +
+                                         static_cast<std::size_t>(channel)] =
+                    normal(channel);
+        }
+        if (!normals_valid) vertex_normal_attributes.clear();
+    }
+
     std::filesystem::create_directories(output_directory);
     if (!options.preview_directory.empty())
         std::filesystem::create_directories(options.preview_directory);
@@ -268,6 +290,12 @@ MeshMaskSummary render_mesh_foreground_masks(
         raster_options.output_barycentric_derivatives = false;
         const asdiff_render::RasterizeOutput rendered =
             rasterizer.forward(clip_positions, indices, raster_options);
+        std::vector<float> interpolated_normals;
+        if (!vertex_normal_attributes.empty()) {
+            auto interpolated = rasterizer.interpolate_forward(
+                vertex_normal_attributes, 3U, indices, rendered);
+            interpolated_normals = std::move(interpolated.values);
+        }
         const std::size_t expected =
             static_cast<std::size_t>(render_view.width) *
             render_view.height * 4U;
@@ -308,8 +336,23 @@ MeshMaskSummary render_mesh_foreground_masks(
                         const auto triangle = static_cast<std::size_t>(
                             std::llround(triangle_value) - 1LL);
                         if (triangle >= rendered_face_normals.size()) continue;
-                        Eigen::Vector3f normal =
-                            world_to_camera * rendered_face_normals[triangle];
+                        Eigen::Vector3f normal;
+                        if (interpolated_normals.size() ==
+                            static_cast<std::size_t>(render_view.width) *
+                                render_view.height * 3U) {
+                            normal = Eigen::Vector3f{
+                                interpolated_normals[3U * high_pixel],
+                                interpolated_normals[3U * high_pixel + 1U],
+                                interpolated_normals[3U * high_pixel + 2U]};
+                            const float norm = normal.norm();
+                            if (std::isfinite(norm) && norm > 1e-12F)
+                                normal /= norm;
+                            else
+                                normal = rendered_face_normals[triangle];
+                        } else {
+                            normal = rendered_face_normals[triangle];
+                        }
+                        normal = world_to_camera * normal;
                         if (normal.z() > 0.F) normal = -normal;
                         const float light =
                             0.25F + 0.75F * std::abs(normal.z());

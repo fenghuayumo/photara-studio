@@ -437,7 +437,8 @@ unsigned split_bow_tie_vertices(
 
 unsigned close_small_holes(
     Mesh& mesh, const unsigned maximum_edges,
-    const std::vector<std::uint8_t>& protected_vertices = {}) {
+    const std::vector<std::uint8_t>& protected_vertices = {},
+    const bool center_fan = true) {
     if (maximum_edges < 3 || mesh.faces.empty()) return 0;
     const Connectivity connectivity = build_connectivity(mesh.faces);
     std::vector<std::array<int, 2>> boundary_neighbors(
@@ -500,30 +501,118 @@ unsigned close_small_holes(
             }))
             continue;
 
-        Vec3f center = Vec3f::Zero();
-        Vec3f color = Vec3f::Zero();
-        for (const int vertex : loop) {
-            center += mesh.vertices[static_cast<std::size_t>(vertex)];
-            if (mesh.colors.size() == mesh.vertices.size())
-                color += mesh.colors[static_cast<std::size_t>(vertex)];
-        }
-        center /= static_cast<float>(loop.size());
-        color /= static_cast<float>(loop.size());
-        const int center_id = static_cast<int>(mesh.vertices.size());
-        mesh.vertices.push_back(center);
-        if (!mesh.colors.empty()) mesh.colors.push_back(color);
-
         // Existing boundary faces use seed_edge.a->seed_edge.b when
         // seed_forward is true. New triangles must traverse shared edges in
         // the opposite direction.
-        const bool traversal_matches_existing = seed_forward;
-        for (std::size_t i = 0; i < loop.size(); ++i) {
-            const int a = loop[i];
-            const int b = loop[(i + 1) % loop.size()];
-            if (traversal_matches_existing)
-                mesh.faces.emplace_back(b, a, center_id);
-            else
-                mesh.faces.emplace_back(a, b, center_id);
+        if (center_fan) {
+            Vec3f center = Vec3f::Zero();
+            Vec3f color = Vec3f::Zero();
+            for (const int vertex : loop) {
+                center += mesh.vertices[static_cast<std::size_t>(vertex)];
+                if (mesh.colors.size() == mesh.vertices.size())
+                    color += mesh.colors[static_cast<std::size_t>(vertex)];
+            }
+            center /= static_cast<float>(loop.size());
+            color /= static_cast<float>(loop.size());
+            const int center_id = static_cast<int>(mesh.vertices.size());
+            mesh.vertices.push_back(center);
+            if (!mesh.colors.empty()) mesh.colors.push_back(color);
+            for (std::size_t i = 0; i < loop.size(); ++i) {
+                const int a = loop[i];
+                const int b = loop[(i + 1) % loop.size()];
+                if (seed_forward)
+                    mesh.faces.emplace_back(b, a, center_id);
+                else
+                    mesh.faces.emplace_back(a, b, center_id);
+            }
+        } else {
+            std::vector<int> polygon = loop;
+            if (seed_forward) std::reverse(polygon.begin(), polygon.end());
+
+            Vec3f center = Vec3f::Zero();
+            for (const int vertex : polygon)
+                center += mesh.vertices[static_cast<std::size_t>(vertex)];
+            center /= static_cast<float>(polygon.size());
+            Vec3f polygon_normal = Vec3f::Zero();
+            for (std::size_t i = 0; i < polygon.size(); ++i) {
+                const Vec3f a =
+                    mesh.vertices[static_cast<std::size_t>(polygon[i])] -
+                    center;
+                const Vec3f b = mesh.vertices[static_cast<std::size_t>(
+                                    polygon[(i + 1) % polygon.size()])] -
+                    center;
+                polygon_normal += a.cross(b);
+            }
+            Eigen::Index drop_axis = 0;
+            polygon_normal.cwiseAbs().maxCoeff(&drop_axis);
+            const auto project = [&](const int vertex) {
+                const Vec3f& point =
+                    mesh.vertices[static_cast<std::size_t>(vertex)];
+                if (drop_axis == 0) return Eigen::Vector2f(point.y(), point.z());
+                if (drop_axis == 1) return Eigen::Vector2f(point.x(), point.z());
+                return Eigen::Vector2f(point.x(), point.y());
+            };
+            const auto cross2 = [](const Eigen::Vector2f& a,
+                                   const Eigen::Vector2f& b,
+                                   const Eigen::Vector2f& c) {
+                return (b.x() - a.x()) * (c.y() - a.y()) -
+                    (b.y() - a.y()) * (c.x() - a.x());
+            };
+
+            float signed_area = 0.F;
+            for (std::size_t i = 0; i < polygon.size(); ++i) {
+                const Eigen::Vector2f a = project(polygon[i]);
+                const Eigen::Vector2f b =
+                    project(polygon[(i + 1) % polygon.size()]);
+                signed_area += a.x() * b.y() - a.y() * b.x();
+            }
+            const float orientation = signed_area >= 0.F ? 1.F : -1.F;
+            std::vector<int> remaining = polygon;
+            std::vector<Eigen::Vector3i> triangles;
+            triangles.reserve(polygon.size() - 2);
+            bool triangulated = std::abs(signed_area) > 1e-12F;
+            while (triangulated && remaining.size() > 3) {
+                bool clipped = false;
+                for (std::size_t i = 0; i < remaining.size(); ++i) {
+                    const int ear_previous =
+                        remaining[(i + remaining.size() - 1) %
+                                  remaining.size()];
+                    const int ear_current = remaining[i];
+                    const int next = remaining[(i + 1) % remaining.size()];
+                    const Eigen::Vector2f a = project(ear_previous);
+                    const Eigen::Vector2f b = project(ear_current);
+                    const Eigen::Vector2f c = project(next);
+                    if (orientation * cross2(a, b, c) <= 1e-12F) continue;
+                    bool contains_vertex = false;
+                    for (const int candidate : remaining) {
+                        if (candidate == ear_previous ||
+                            candidate == ear_current ||
+                            candidate == next)
+                            continue;
+                        const Eigen::Vector2f p = project(candidate);
+                        if (orientation * cross2(a, b, p) >= -1e-12F &&
+                            orientation * cross2(b, c, p) >= -1e-12F &&
+                            orientation * cross2(c, a, p) >= -1e-12F) {
+                            contains_vertex = true;
+                            break;
+                        }
+                    }
+                    if (contains_vertex) continue;
+                    triangles.emplace_back(ear_previous, ear_current, next);
+                    remaining.erase(
+                        remaining.begin() + static_cast<std::ptrdiff_t>(i));
+                    clipped = true;
+                    break;
+                }
+                if (!clipped) triangulated = false;
+            }
+            if (triangulated && remaining.size() == 3)
+                triangles.emplace_back(
+                    remaining[0], remaining[1], remaining[2]);
+            if (!triangulated || triangles.size() + 2 != polygon.size())
+                continue;
+            mesh.faces.insert(
+                mesh.faces.end(), triangles.begin(), triangles.end());
         }
         ++closed;
     }
@@ -749,10 +838,13 @@ void clean_mesh(
         remove_small_components_with_connectivity(
             mesh.faces, options.mesh_min_component_faces,
             options.mesh_tsdf_min_component_fraction, connectivity);
+        const unsigned holes = close_small_holes(
+            mesh, options.mesh_close_hole_edges, roi_boundary, false);
         compact_and_compute_normals(mesh);
         core::Logger::instance().info(
             "mvs mesh TSDF postprocess: faces=", input_faces, " -> ",
             mesh.faces.size(), " vertices=", mesh.vertices.size(),
+            " holes_closed=", holes,
             " taubin_iters=", options.mesh_tsdf_smooth_iters,
             " mean_displacement=", smoothing.mean_displacement,
             " max_displacement=", smoothing.maximum_displacement);

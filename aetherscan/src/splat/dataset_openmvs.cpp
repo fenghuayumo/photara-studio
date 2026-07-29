@@ -233,10 +233,15 @@ public:
                 read_array<float, 3>(reader, "vertex position");
             const std::uint64_t view_count = reader.count("vertex views");
             vertex.views.reserve(static_cast<std::size_t>(view_count));
-            for (std::uint64_t index = 0; index < view_count; ++index)
-                vertex.views.emplace_back(
-                    reader.pod<std::uint32_t>("vertex image"),
-                    reader.pod<float>("vertex confidence"));
+            for (std::uint64_t index = 0; index < view_count; ++index) {
+                // Function-argument evaluation order is not guaranteed. Read
+                // archive fields explicitly in their serialized order.
+                const std::uint32_t image =
+                    reader.pod<std::uint32_t>("vertex image");
+                const float confidence =
+                    reader.pod<float>("vertex confidence");
+                vertex.views.emplace_back(image, confidence);
+            }
         }
         std::vector<std::array<float, 3>> normals;
         const std::uint64_t normal_count = reader.count("vertex normals");

@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <random>
+#include <vector>
 
 namespace aetherscan::splat::densification {
 
@@ -25,12 +26,19 @@ struct StrategySchedule {
 struct SceneGeometry {
     float scale{1.F};
     mvs::Vec3f center{mvs::Vec3f::Zero()};
+    float maximum_extent{1.F};
 };
 
 using AdamStates = std::array<detail::AdamState*, 5>;
 
 [[nodiscard]] SceneGeometry training_scene_geometry(
     const mvs::MvsScene& scene, bool dense_input);
+
+// Brush derives its optimizer/refinement bounds from the middle 80% of the
+// current Gaussian means. scale is BoundingBox::median_size(), while
+// maximum_extent is the largest half-extent used by its out-of-bounds prune.
+[[nodiscard]] SceneGeometry brush_scene_geometry(
+    const std::vector<float>& xyz, float percentile = 0.8F);
 
 [[nodiscard]] StrategySchedule strategy_schedule(
     const TrainingOptions& options);

@@ -213,7 +213,11 @@ GggsMeshResult extract_gggs_mesh(
         // bounds the subject and its support cloth form the largest component,
         // while detached background sheets remain removable.
         fusion_options.mesh_tsdf_min_component_fraction = 1.F;
-        fusion_options.mesh_close_hole_edges = 0;
+        // Ear-clipped TSDF caps follow the existing boundary instead of adding
+        // a center-fan vertex, so small pinholes can be repaired
+        // without the flat bridge artifacts produced by fan capping.
+        fusion_options.mesh_close_hole_edges = std::max(
+            fusion_options.mesh_close_hole_edges, 16U);
     }
     fusion_options.ncc_keep_threshold = std::max(
         1.F - mesh_options.alpha_threshold, 1e-3F);

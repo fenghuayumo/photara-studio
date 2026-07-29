@@ -179,6 +179,14 @@ struct DensifyOptions {
     unsigned mesh_tsdf_pixel_step{2};  // retained for checkpoint compatibility
     // Ignore field samples whose accumulated integration weight is lower.
     float mesh_tsdf_min_weight{0.25F};
+    // Before Marching Cubes, fill a zero-weight voxel only when this many
+    // coordinate axes have valid samples on both sides. Two closes isolated
+    // one-voxel support gaps without growing open silhouettes; zero disables.
+    unsigned mesh_tsdf_support_closing_axes{2};
+    // Optional lossless export of the exact uint16-millimetre depth frames,
+    // intrinsics, and world-to-camera poses consumed by TSDF. Intended for
+    // backend A/B diagnostics; empty disables the roughly 2 bytes/pixel dump.
+    std::filesystem::path mesh_tsdf_frame_export_dir;
     // Optional output directory for source-aligned multi-view depth
     // consistency and TSDF observation-weight heatmaps.
     std::filesystem::path mesh_tsdf_diagnostics_dir;

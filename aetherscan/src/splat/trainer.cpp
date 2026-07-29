@@ -154,40 +154,6 @@ float percentile_median_size(
     return std::max(sizes[1], 0.01F);
 }
 
-float percentile_median_size(
-    const std::vector<float>& xyz, const float percentile) {
-    if (xyz.size() < 3) return 1.F;
-    std::array<std::vector<float>, 3> axes;
-    const std::size_t count = xyz.size() / 3;
-    for (auto& axis : axes) axis.reserve(count);
-    for (std::size_t index = 0; index < count; ++index) {
-        if (!std::isfinite(xyz[3 * index]) ||
-            !std::isfinite(xyz[3 * index + 1]) ||
-            !std::isfinite(xyz[3 * index + 2]))
-            continue;
-        for (int axis = 0; axis < 3; ++axis)
-            axes[axis].push_back(xyz[3 * index + axis]);
-    }
-    std::array<float, 3> sizes{};
-    const float p = std::clamp(percentile, 0.F, 1.F);
-    for (int axis = 0; axis < 3; ++axis) {
-        auto& values = axes[axis];
-        if (values.empty()) return 1.F;
-        std::sort(values.begin(), values.end());
-        const std::size_t n = values.size();
-        const std::size_t low = std::min(
-            n - 1,
-            static_cast<std::size_t>((1.F - p) * 0.5F * n));
-        const std::size_t high = std::min(
-            n - 1,
-            static_cast<std::size_t>((1.F + p) * 0.5F * n));
-        sizes[axis] = values[high] - values[low];
-    }
-    std::sort(sizes.begin(), sizes.end());
-    return std::max(sizes[1], 0.01F);
-}
-
-
 template <typename T>
 std::vector<T> download(const tinytensor::Tensor& tensor) {
     std::vector<T> values(tensor.numel());
@@ -424,13 +390,11 @@ GaussianModel Trainer::train(
     const bool brush_filter =
         options_.densification_strategy ==
         DensificationStrategy::adc_plus;
-    // Brush starts sparse training with canonical KNN scales and attaches the
-    // first minimum-scale floor only after the first refinement. Attaching it
-    // here makes iteration 200 bake the floor one extra time, permanently
-    // suppressing opacity before Brush has ever filtered the model.
-    if (use_3d_filter &&
-        options_.densification_strategy !=
-            DensificationStrategy::adc_plus)
+    // Keep the Mip-Splatting floor separate from the canonical parameters.
+    // pygsplat applies this filter only while rasterizing and recomputes it
+    // after topology changes; repeatedly baking it into scale/opacity causes
+    // a cumulative opacity loss.
+    if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras, filter_3d_factor, brush_filter);
     const bool use_multi_view = options_.multi_view_geo_weight > 0.F ||
@@ -481,14 +445,12 @@ GaussianModel Trainer::train(
     const float scene_extent = scene_geometry.scale;
     const mvs::Vec3f scene_center = scene_geometry.center;
     float means_learning_rate_scale = scene_extent;
+    refine::SceneGeometry refinement_geometry = scene_geometry;
     if (options_.densification_strategy ==
         DensificationStrategy::adc_plus) {
-        std::vector<mvs::Vec3f> positions;
-        positions.reserve(scene.dense_cloud.points.size());
-        for (const auto& point : scene.dense_cloud.points)
-            positions.push_back(point.position);
-        means_learning_rate_scale =
-            percentile_median_size(positions, 0.8F);
+        refinement_geometry = refine::brush_scene_geometry(
+            download<float>(model.means));
+        means_learning_rate_scale = refinement_geometry.scale;
     }
     const float minimum_log_scale = options_.constrain_scale_range
         ? std::log(
@@ -710,14 +672,23 @@ GaussianModel Trainer::train(
                 detail::inject_adc_noise(
                     model, rendered.visibility,
                     means_lr * options_.mean_noise_weight,
-                    scene_extent, options_.seed + iteration);
+                    options_.densification_strategy ==
+                            DensificationStrategy::adc_plus
+                        ? refinement_geometry.scale
+                        : scene_extent,
+                    options_.seed + iteration);
         }
 
         latest_refinement = {};
         if (densification_enabled) {
+            const bool adc_plus =
+                options_.densification_strategy ==
+                DensificationStrategy::adc_plus;
             latest_refinement = refine::refine_gaussians(
-                model, densification_stats, iteration, scene_extent,
-                scene_center, options_, random, adam_states);
+                model, densification_stats, iteration,
+                adc_plus ? refinement_geometry.maximum_extent : scene_extent,
+                adc_plus ? refinement_geometry.center : scene_center,
+                options_, random, adam_states);
             if (options_.densification_strategy ==
                     DensificationStrategy::default_strategy &&
                 iteration < refine::strategy_schedule(options_).stop &&
@@ -732,11 +703,11 @@ GaussianModel Trainer::train(
                 model.log_scales, options_.max_scale_ratio);
             const bool refined =
                 refine::is_refinement_iteration(iteration, options_);
-            if (refined &&
-                options_.densification_strategy ==
-                    DensificationStrategy::adc_plus)
-                means_learning_rate_scale = percentile_median_size(
-                    download<float>(model.means), 0.8F);
+            if (refined && adc_plus) {
+                refinement_geometry = refine::brush_scene_geometry(
+                    download<float>(model.means));
+                means_learning_rate_scale = refinement_geometry.scale;
+            }
         }
 
         // The Mip-Splatting radius depends on Gaussian positions and count.
@@ -747,13 +718,21 @@ GaussianModel Trainer::train(
                 options_.densification_strategy ==
                     DensificationStrategy::adc_plus &&
                 refine::is_refinement_iteration(iteration, options_);
-            // Brush refreshes the floor after each ADC+ refine until 90% of
-            // training. At 90% the old floor is baked one final time and the
-            // tail optimizes fixed canonical parameters.
+            const float training_progress =
+                static_cast<float>(iteration) /
+                std::max(1.F, static_cast<float>(options_.iterations));
+            // Match pygsplat: recompute after every ADC+ topology update
+            // through 95%, then periodically while the fixed-topology tail
+            // continues moving Gaussian means.
             const bool adc_plus_refresh =
-                adc_plus_refine &&
-                static_cast<float>(iteration) <
-                    0.9F * static_cast<float>(options_.iterations);
+                options_.densification_strategy ==
+                    DensificationStrategy::adc_plus &&
+                (adc_plus_refine ||
+                 (training_progress > 0.95F &&
+                  options_.filter_3d_update_interval != 0 &&
+                  iteration % options_.filter_3d_update_interval == 0 &&
+                  iteration + options_.filter_3d_update_interval <
+                      options_.iterations));
             const bool other_refresh =
                 options_.densification_strategy !=
                     DensificationStrategy::adc_plus &&

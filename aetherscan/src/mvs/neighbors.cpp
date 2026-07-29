@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -31,21 +32,33 @@ void select_neighbors(MvsScene& scene, const DensifyOptions& options) {
         float scale_sum{0.F};
     };
     std::vector<std::unordered_map<Index, Acc>> accum(scene.views.size());
+    std::size_t sparse_observations = 0;
+    std::size_t invalid_observations = 0;
+    std::size_t behind_camera_observations = 0;
 
     for (const auto& point : scene.sparse_points) {
         for (std::size_t a = 0; a < point.view_ids.size(); ++a) {
             const Index id_a = point.view_ids[a];
+            ++sparse_observations;
+            if (id_a >= scene.views.size()) {
+                ++invalid_observations;
+                continue;
+            }
             const MvsView& va = scene.views[id_a];
             const Vec3f xa =
                 va.pose.transform_world_to_camera(point.position.cast<double>())
                     .cast<float>();
-            if (xa.z() <= 1e-6F) continue;
+            if (xa.z() <= 1e-6F) {
+                ++behind_camera_observations;
+                continue;
+            }
             const float footprint_a =
                 xa.z() / std::max(va.fx, 1.F);  // approx meters/pixel
 
             for (std::size_t b = 0; b < point.view_ids.size(); ++b) {
                 if (a == b) continue;
                 const Index id_b = point.view_ids[b];
+                if (id_b >= scene.views.size()) continue;
                 const MvsView& vb = scene.views[id_b];
                 const Vec3f xb =
                     vb.pose.transform_world_to_camera(point.position.cast<double>())
@@ -106,11 +119,50 @@ void select_neighbors(MvsScene& scene, const DensifyOptions& options) {
     }
 
     std::size_t with_neighbors = 0;
+    std::size_t candidate_pairs = 0;
+    std::size_t rejected_shared = 0;
+    std::size_t rejected_angle = 0;
+    std::size_t rejected_scale = 0;
+    float minimum_angle = std::numeric_limits<float>::max();
+    float maximum_angle = 0.F;
+    for (const auto& candidates : accum) {
+        candidate_pairs += candidates.size();
+        for (const auto& [other, acc] : candidates) {
+            static_cast<void>(other);
+            if (acc.shared < options.min_shared_points) {
+                ++rejected_shared;
+                continue;
+            }
+            const float mean_angle =
+                acc.angle_sum / static_cast<float>(acc.shared);
+            const float mean_scale =
+                acc.scale_sum / static_cast<float>(acc.shared);
+            minimum_angle = std::min(minimum_angle, mean_angle);
+            maximum_angle = std::max(maximum_angle, mean_angle);
+            if (mean_angle < 3.F || mean_angle > 65.F) {
+                ++rejected_angle;
+                continue;
+            }
+            if (mean_scale < 0.2F || mean_scale > 3.2F)
+                ++rejected_scale;
+        }
+    }
     for (const auto& view : scene.views)
         if (!view.neighbors.empty()) ++with_neighbors;
+    if (minimum_angle == std::numeric_limits<float>::max())
+        minimum_angle = 0.F;
     core::Logger::instance().info(
         "mvs neighbors: views_with_neighbors=", with_neighbors, '/',
-        scene.views.size());
+        scene.views.size(), " sparse_points=", scene.sparse_points.size(),
+        " observations=", sparse_observations,
+        " invalid_observations=", invalid_observations,
+        " behind_camera_observations=", behind_camera_observations,
+        " candidate_pairs=", candidate_pairs,
+        " rejected_shared=", rejected_shared,
+        " rejected_angle=", rejected_angle,
+        " rejected_scale=", rejected_scale,
+        " candidate_angle_range_deg=[", minimum_angle, ',',
+        maximum_angle, ']');
     stage.finish();
 }
 

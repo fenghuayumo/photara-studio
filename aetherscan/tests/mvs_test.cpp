@@ -770,6 +770,99 @@ void test_sparse_tsdf_mesh() {
         "sparse TSDF zero crossing does not match the input depth");
 }
 
+std::size_t boundary_edge_count(const Mesh& mesh) {
+    std::map<std::pair<int, int>, unsigned> edge_counts;
+    for (const Eigen::Vector3i& face : mesh.faces) {
+        for (int edge = 0; edge < 3; ++edge) {
+            int a = face[edge];
+            int b = face[(edge + 1) % 3];
+            if (a > b) std::swap(a, b);
+            ++edge_counts[{a, b}];
+        }
+    }
+    return static_cast<std::size_t>(std::count_if(
+        edge_counts.begin(), edge_counts.end(),
+        [](const auto& item) { return item.second == 1; }));
+}
+
+void test_tsdf_support_closing_repairs_internal_one_voxel_gap() {
+    const auto make_scene = [](const bool internal_gap) {
+        MvsScene scene;
+        MvsView view;
+        view.id = 0;
+        view.pose = aetherscan::sfm::Pose3D::identity();
+        view.width = view.height = 64;
+        view.fx = view.fy = 64.F;
+        view.cx = view.cy = 31.5F;
+        view.depth_map.view_id = 0;
+        view.depth_map.resize(view.width, view.height);
+        std::fill(
+            view.depth_map.depth.begin(), view.depth_map.depth.end(), 1.F);
+        std::fill(
+            view.depth_map.normal.begin(), view.depth_map.normal.end(),
+            Vec3f{0.F, 0.F, -1.F});
+        std::fill(
+            view.depth_map.confidence.begin(),
+            view.depth_map.confidence.end(), 0.F);
+        if (internal_gap) {
+            // A single missing depth ray creates an internal zero-weight
+            // support column while surrounding surface samples remain valid.
+            view.depth_map.depth[
+                view.depth_map.index(32, 32)] = 0.F;
+        }
+        scene.views.push_back(std::move(view));
+        return scene;
+    };
+
+    DensifyOptions options;
+    options.mesh_method = MeshMethod::tsdf;
+    options.mesh_tsdf_voxel_size = 0.0125F;
+    options.mesh_tsdf_truncation_voxels = 3.F;
+    options.mesh_tsdf_min_weight = 0.01F;
+    options.mesh_tsdf_min_component_fraction = 0.F;
+    options.mesh_min_component_faces = 1;
+    options.mesh_close_hole_edges = 0;
+    options.mesh_tsdf_support_closing_axes = 0;
+
+    MvsScene open_scene = make_scene(true);
+    require(
+        detail::reconstruct_mesh_tsdf(open_scene, options),
+        "TSDF without support closing rejected the test plane");
+    const std::size_t open_boundary_edges =
+        boundary_edge_count(open_scene.mesh);
+
+    options.mesh_tsdf_support_closing_axes = 2;
+    MvsScene closed_scene = make_scene(true);
+    require(
+        detail::reconstruct_mesh_tsdf(closed_scene, options),
+        "TSDF support closing rejected the test plane");
+    const std::size_t closed_boundary_edges =
+        boundary_edge_count(closed_scene.mesh);
+    require(
+        closed_scene.mesh.faces.size() > open_scene.mesh.faces.size(),
+        "TSDF support closing did not restore missing surface faces");
+    require(
+        closed_boundary_edges < open_boundary_edges,
+        "TSDF support closing did not reduce the internal gap boundary");
+
+    options.mesh_tsdf_support_closing_axes = 0;
+    MvsScene open_silhouette = make_scene(false);
+    require(
+        detail::reconstruct_mesh_tsdf(open_silhouette, options),
+        "TSDF without support closing rejected the intact plane");
+    options.mesh_tsdf_support_closing_axes = 2;
+    MvsScene closed_silhouette = make_scene(false);
+    require(
+        detail::reconstruct_mesh_tsdf(closed_silhouette, options),
+        "TSDF support closing rejected the intact plane");
+    require(
+        closed_silhouette.mesh.faces.size() ==
+            open_silhouette.mesh.faces.size() &&
+        closed_silhouette.mesh.vertices.size() ==
+            open_silhouette.mesh.vertices.size(),
+        "TSDF support closing grew an open silhouette");
+}
+
 void test_dense_ply_round_trip() {
     DenseCloud source;
     DensePoint point;
@@ -792,6 +885,30 @@ void test_dense_ply_round_trip() {
     require(
         (loaded.points[0].color - point.color).cwiseAbs().maxCoeff() < 0.005F,
         "dense PLY loader changed point color");
+}
+
+void test_tsdf_holes_use_boundary_triangulation() {
+    Mesh mesh;
+    mesh.vertices = {
+        Vec3f{0.F, 0.F, 0.F}, Vec3f{1.F, 0.F, 0.F},
+        Vec3f{0.F, 1.F, 0.F}, Vec3f{0.F, 0.F, 1.F}};
+    // Tetrahedron with one triangular face missing.
+    mesh.faces = {
+        Eigen::Vector3i{0, 1, 3}, Eigen::Vector3i{1, 2, 3},
+        Eigen::Vector3i{2, 0, 3}};
+    DensifyOptions options;
+    options.mesh_method = MeshMethod::tsdf;
+    options.mesh_min_component_faces = 1;
+    options.mesh_tsdf_min_component_fraction = 0.F;
+    options.mesh_close_hole_edges = 8;
+    options.mesh_tsdf_smooth_iters = 0;
+    detail::clean_mesh(mesh, options);
+    require(
+        mesh.faces.size() == 4,
+        "TSDF boundary triangulation did not close a triangular hole");
+    require(
+        mesh.vertices.size() == 4,
+        "TSDF boundary triangulation introduced a center-fan vertex");
 }
 
 void test_mesh_ply_round_trip() {
@@ -918,7 +1035,9 @@ int main() {
         test_mesh_clean();
         test_roi_aware_mesh_clean();
         test_bow_tie_holes_are_split_and_closed();
+        test_tsdf_holes_use_boundary_triangulation();
         test_sparse_tsdf_mesh();
+        test_tsdf_support_closing_repairs_internal_one_voxel_gap();
         test_dense_ply_round_trip();
         test_mesh_ply_round_trip();
 #if defined(AETHERSCAN_HAS_CGAL)
