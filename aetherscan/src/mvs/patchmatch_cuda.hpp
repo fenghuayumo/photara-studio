@@ -46,15 +46,6 @@ struct Request {
     unsigned random_seed{};
     bool use_geometric{};
     bool initialize_invalid{};
-
-    bool use_roi{};
-    // Reference-camera to world rotation (row-major) and camera center.
-    float reference_to_world[9]{};
-    float reference_center[3]{};
-    // ROI axes are column vectors in world space (row-major matrix storage).
-    float roi_center[3]{};
-    float roi_axes[9]{};
-    float roi_half_extent[3]{};
 };
 
 // Returns false only when CUDA/device support is unavailable. Runtime failures

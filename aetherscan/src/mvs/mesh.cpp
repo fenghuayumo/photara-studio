@@ -28,10 +28,8 @@ void reconstruct_mesh(MvsScene& scene, const DensifyOptions& options) {
     }
     const OrientedBoundingBox* cleanup_bounds = nullptr;
     if (options.mesh_method == MeshMethod::tsdf &&
-        scene.tsdf_bounds.valid)
-        cleanup_bounds = &scene.tsdf_bounds;
-    else if (scene.roi.valid)
-        cleanup_bounds = &scene.roi;
+        scene.subject_bounds.valid)
+        cleanup_bounds = &scene.subject_bounds;
     detail::clean_mesh(scene.mesh, options, cleanup_bounds);
     stage.finish();
 }

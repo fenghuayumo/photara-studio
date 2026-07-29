@@ -2,354 +2,236 @@
 
 ## 目标边界
 
-在已完成的 SfM 之上，构建 RealityScan 类产品的后半段：稠密点云、网格、纹理
-网格（albedo）。几何质量采用 **双路径**：
+在已完成的 SfM 之上，默认产品主链路直接使用相机位姿与稀疏点云初始化 ADCPlus，
+由 GGGS 优化多视图几何，再从 Gaussian 渲染的深度、法线和 alpha 进行 TSDF 网格重建：
 
-1. **Fast MVS 路径（默认可交付）**：快速稠密点云 + 初步 mesh；用户可选立刻做
-   UV / Project Texture / Delight，效果满足即可结束。
-2. **GGGS 精修路径（可选）**：以 MVS 稠密点云初始化 3DGS，用
-   **Geometry-Grounded Gaussian Splatting (GGGS)** 优化几何并抽取最终 mesh，
-   再做 UV / Project / Delight。
+```text
+SfM → sparse points → ADCPlus / GGGS → TSDF → Clean → Texture / Delight
+```
 
-3DGS/GGGS **不是强制阶段**。产品应支持「只跑 MVS+贴图」与「MVS → GGGS → 贴图」
-两种完整交付，由用户/配置显式选择。
+默认路径明确跳过以下阶段：
+
+- PatchMatch 稠密深度估计；
+- MVS 稠密点云融合；
+- Delaunay/Poisson MVS mesh；
+- 从 MVS mesh 或 MVS depth 派生前景 Mask。
+
+原因是 MVS mesh 会在辐条、细线、薄片、遮挡边界等结构上提前丢失几何，而后续 Mask 无法恢复
+这些细节。GGGS 应直接利用原图光度、轮廓与多视图几何监督完成致密化。
+
+MVS 实现保留为可选诊断、算法对照和兼容导出后端，不是 GGGS、TSDF 或贴图的前置依赖，
+也不参与默认物体重建。
 
 参考：
 
-- OpenMVS：`libs/MVS` 的 densify / mesh 流水线思想（不复制对象模型）；
-- AIHoloImager：`TextureReconstruction`（Flatten → ShadowMap → Project → Resolve → Dilate）
-  与图像域 Delighter；
-- GGGS：锁定论文 *Geometry-Grounded Gaussian Splatting*（将 Gaussian 作为随机实体、
-  直接渲染高质量深度并抽取形状）；
-  若未来扩展，须另开插件接口，默认实现仍为 GGGS。
+- GGGS：*Geometry-Grounded Gaussian Splatting*；
+- pygsplat/GS-2M：Gaussian 深度渲染与 TSDF 提取约定；
+- Open3D：稀疏体素块 TSDF 的公开接口与数值回归参考；
+- OpenMVS：仅作为可选 densify/mesh 对照，不复制对象模型；
+- AIHoloImager：TextureReconstruction 与图像域 Delight。
 
-与 SfM 文档一致：紧凑索引与 SoA、公开 API 与执行布局分离；默认构建不依赖
-OpenCV；图像 IO 继续使用 FreeImage。MVS 深度估计默认使用 **CUDA PatchMatch**，
-默认启动时检测 CUDA：检测到兼容 GPU 就必须使用 GPU，只有未检测到 GPU 或 CPU-only
-构建才使用多核 CPU；已经选定 GPU 后若 kernel 运行失败则直接报错，不静默进入慢速路径。
-GGGS 优化以 **CUDA** 为主。
+与 SfM 文档一致：紧凑索引与 SoA、公开 API 与执行布局分离；默认构建不依赖 OpenCV；
+图像 IO 使用 FreeImage。ADCPlus/GGGS 以 CUDA 为主，TSDF/Clean 使用多核 CPU。
 
 ---
 
 ## 总览流水线
 
 ```text
-SfM (已有) ──► RebuildScene
-                 │
-                 ▼
-        ┌── Stage A: Fast MVS ──────────────────────────┐
-        │  PatchMatch depth → Fuse dense cloud            │
-        │  Coarse / MVS mesh（Delaunay+cut 或 Poisson）   │
-        └──────────────────────┬─────────────────────────┘
-                               │
-                 ┌─────────────┴─────────────┐
-                 │ 用户选择几何终点            │
-                 ▼                           ▼
-        Path MVS-only                 Path GGGS (可选)
-        (mesh = MVS mesh)             Stage C: 3DGS init
-                 │                      + GGGS optimize
-                 │                      + extract final mesh
-                 │                           │
-                 └─────────────┬─────────────┘
-                               ▼
-                 active_mesh = 选定几何
-                               │
-        ┌──────────────────────┴──────────────────────────┐
-        │  Stage B/D 共用（均可选，由配置开关）              │
-        │  Rasterize active_mesh → per-view masks           │
-        │  [optional] Image Delight (mask 护边)             │
-        │  [optional] UV + ProjectTextures + Dilate         │
-        │  Export: cloud / mesh / textured albedo mesh      │
-        └─────────────────────────────────────────────────┘
+Images
+  → SfM
+  → registered cameras + sparse landmarks
+  → sparse-point filtering / subject bounds
+  → ADCPlus warmup and adaptive densification
+  → GGGS photometric + multi-view geometry optimization
+  → median depth / normal / alpha per registered view
+  → sparse-block TSDF
+  → Marching Cubes → topology audit → Clean
+  → optional UV / Texture / Delight
 ```
 
-要点：
+物体模式和场景模式共用几何主链路：
 
-- **Mask / Texture / Delight 挂在「当前活跃 mesh」上**，不绑定「必须先 GGGS」。
-- MVS-only 路径下，活跃 mesh 即 MVS mesh；开 GGGS 后，活跃 mesh 切换为
-  GGGS 抽取结果（可保留 MVS mesh 作对比/fallback）。
-- Delight 与 Texture 各自独立开关；可「只要 mesh」「只要带光贴图」「要 albedo」。
+- **物体模式**：限制主体空间范围；存在外部软 Mask 时直接使用。没有外部 Mask 时，由内部
+  Gaussian 主体自举产生前景约束。该自动路径属于产品 P0，失败时必须提示用户确认主体范围，
+  不得静默把全图当成物体。
+- **场景模式**：不做前背景分离，以空间 bounds、相机可见性和 opacity 约束控制重建范围。
 
----
-
-## 用户可见能力矩阵
-
-| 开关 | 含义 | 依赖 |
-|------|------|------|
-| `enable_mvs` | 稠密深度 + 融合点云 + MVS mesh | SfM |
-| `enable_texture` | UV 展开 + ProjectTextures + Dilate | 活跃 mesh |
-| `enable_delight` | 图像域去光照，再投影得 albedo | `enable_texture`（建议）；可单独预计算 delighted 图 |
-| `enable_gggs` | MVS 点云初始化 → GGGS → 最终 mesh | `enable_mvs`；纹理若开启则对 **GGGS mesh** 执行 |
-
-典型组合：
-
-| 场景 | 配置 |
-|------|------|
-| 只要稠密点云 | `mvs` |
-| 快速看网格 | `mvs`（导出 mesh） |
-| MVS 已够用，出贴图 | `mvs + texture` |
-| MVS 出 albedo | `mvs + texture + delight` |
-| 几何再精修后贴图 | `mvs + gggs + texture` |
-| 全质量 | `mvs + gggs + texture + delight` |
-
-GGGS 几何提取走与 `pygsplat/gs2mesh.py` 对齐的稀疏体素块 TSDF：默认
-`max_depth=2*scene_extent`、`voxel=max_depth/2048`、`sdf_trunc=4*voxel`，逐相机投影融合后用
-标准 Marching Cubes 提取，再仅保留最大连通分量。默认不再执行通用 remesher/decimator；
-Clean 会对不超过 16 条边的小孔执行边界耳切三角化，不插入中心点，避免扇形补洞在桌布等
-近似平面上产生方块状桥接伪影。`--mesh-tsdf-voxel-scale` 可显式调整质量/速度，
-`--mesh-target-faces` 可按需开启交付级减面。
-
-CLI 示意（设计级，非最终参数名）：
+产品入口不暴露 `external|bootstrap|none` 之类的 Mask 来源枚举，只保留：
 
 ```text
-aetherscan reconstruct <images> --output out/
-  --dense
-  --mesh
-  [--texture] [--delight]
-  [--gggs]                  # 可选；开启后 texture 默认作用于 GGGS mesh
-  [--texture-on mvs|gggs]   # 显式指定贴图几何源；默认随是否 --gggs
+--capture-mode object|scene
+--masks <directory>          # 可选
 ```
 
----
+内部规则固定为：
 
-## 模块划分
+```text
+object + masks   → 使用外部软 Mask
+object - masks   → Gaussian 主体自举
+scene            → 不使用前景 Mask
+```
+
+### 用户可见能力矩阵
+
+| 能力 | 含义 | 依赖 |
+|---|---|---|
+| `capture_mode=object` | 单物体重建，启用主体 bounds 与前景约束 | SfM |
+| `capture_mode=scene` | 场景重建，不做前背景分离 | SfM |
+| `enable_gggs` | 稀疏点初始化 ADCPlus/GGGS | SfM；默认开启 |
+| `enable_mesh` | GGGS depth/normal/alpha → TSDF → Clean | GGGS |
+| `enable_texture` | UV 展开 + ProjectTextures + Dilate | 最终 mesh |
+| `enable_delight` | 图像域去光照并生成 albedo | Texture，建议开启 |
+CLI 示意：
+
+```powershell
+aetherscan --images images --output object.ply --capture-mode object
+aetherscan --images images --output object.ply --capture-mode object --masks masks
+aetherscan --images images --output scene.ply --capture-mode scene
+```
+
+显式指定 `--capture-mode` 会作为产品级完整重建预设，自动开启 GGGS 与 TSDF Mesh；
+省略该参数仍保留低层 SfM-only 开发流程。不再需要也不再接受 ROI 参数。
+`object` 模式从 SfM 稀疏点自动计算 `SubjectBounds`；`scene` 模式禁用该范围约束。
+
+### 模块划分
 
 ```text
 aetherscan/
-  sfm/           # 已有
-  mvs/           # Fast densify + MVS mesh
-  mask/          # mesh 光栅化 → per-view mask
-  gaussians/     # init from dense cloud + GGGS（可选库/目标）
-  texture/       # delight, uv, flatten, project, resolve, dilate
-  rebuild/       # 编排 RebuildScene、配置、checkpoint
+  sfm/           # 相机位姿、稀疏点、观测
+  splat/         # sparse init、ADCPlus、GGGS、Gaussian 渲染
+  subject/       # SubjectBounds、主体 Gaussian 选择、软 Mask 自举
+  tsdf/          # 独立 sparse-block TSDF、MC、查询/导出
+  mesh/          # topology audit、Clean、简化
+  texture/       # delight、UV、project、resolve、dilate
+  rebuild/       # 编排、配置、checkpoint
+  mvs/           # 可选诊断/兼容后端
 ```
 
-CMake 建议：
+建议将 TSDF 拆为独立 `AetherScan::TSDF` 目标，只依赖 Eigen/OpenMP；MVS、GGGS 通过 adapter
+提供深度帧，不让 TSDF 公开 API 依赖 `MvsScene`。
 
-- `aetherscan_mvs`：始终可构建（CPU densify/mesh）；CUDA 构建额外链接隔离的
-  `aetherscan_mvs_cuda` PatchMatch kernel 库；
-- `aetherscan_texture`：依赖 mvs 的 mesh/相机类型；Delight 可选 ONNX；
-- `aetherscan_gggs`：`AETHERSCAN_ENABLE_GGGS`（CUDA），默认 OFF 或独立选项，
-  不阻碍「仅 MVS+贴图」产品路径。
-
----
-
-## 数据模型：`RebuildScene`
-
-与 `sfm::Scene` 分离，由 `build_rebuild_scene(sfm::Scene)` 或 MVSI 导入填充。
+### 数据模型：`RebuildScene`
 
 ```text
 RebuildScene
-  cameras[] / views[]          # 位姿、K、路径；建议支持 per-camera / undistort
-  dense_cloud                  # Stage A
-  mvs_mesh                     # Stage A；可带可选 UV/albedo（若在 MVS 路径贴过图）
-  view_masks[]                 # 由「贴图/Delight 当时选用的 mesh」光栅化
-  gaussians                    # 仅 enable_gggs
-  gggs_mesh                    # 仅 enable_gggs
-  active_mesh_id               # mvs | gggs
-  albedo_atlas + uvs           # 仅 enable_texture
-  delighted_images[]           # 可选缓存；enable_delight
+  cameras[] / views[]
+  sparse_landmarks + observations
+  subject_bounds
+  input_masks[]
+  bootstrap_masks[]
+  gaussians
+  rendered_depth/normal/alpha[]
+  final_mesh
+  albedo_atlas + uvs
+  delighted_images[]
 ```
 
-Checkpoint 按阶段落盘（对齐 SfM `AETHCKPT` 思路）：
+Checkpoint 按阶段落盘：
 
 ```text
-dense-* / mesh-mvs-* / masks-* / gggs-* / mesh-gggs-* / texture-*
+sfm-* / subject-* / gggs-warmup-* / masks-* / gggs-* / tsdf-* / mesh-* / texture-*
 ```
 
-支持从任意阶段续跑，例如：已有 `mesh-mvs` 时只开 `--texture --delight`；
-或已有 dense cloud 时只开 `--gggs`。
+支持从任意阶段续跑。MVS 产物使用独立的 `diagnostics-mvs-*` 命名，不进入默认依赖图。
 
 ---
 
-## Stage A — Fast MVS
+## Stage A — 稀疏初始化与主体约束
 
-### 目标
+### 输入门禁
 
-快速、高覆盖的稠密结构与 **可交付的初步 mesh**。CUDA red/black PatchMatch + NCC
-为默认路径，CPU 混合视图/tile 并行作为兼容后端；
-质量旋钮偏「快而全」，几何精修留给可选 GGGS。
+GGGS 只消费 SfM 注册相机、原图、稀疏点及其观测。进入训练前必须检查：
 
-### 步骤
+- 注册相机比例、重投影 RMS 和轨迹连续性；
+- 稀疏点的有限值、观测数和视角分布；
+- 删除低观测、超大重投影误差和孤立离群点；
+- object 模式下估计主体 OBB，但 OBB 只表示 3D bounds，不直接投影成前景 Mask。
 
-1. **邻域选择**：共视稀疏点、基线角、尺度、重叠；
-2. **PatchMatch 深度**：斜面 (depth+normal)、粗到细、几何一致性可选；
-3. **融合**：多视图一致性 → `DenseCloud`（xyz、rgb、normal、view 列表）；
-4. **MVS mesh**：统一使用 CGAL Delaunay + 可见性图割（对齐 OpenMVS
-   质量族），随后执行 Clean。
+稀疏点通过位置、颜色和局部 KNN 尺度初始化 Gaussian。必须显式标记
+`initial_points_dense=false`，保证 ADCPlus densification 真正启用；若策略与输入类型不兼容，
+立即报错，禁止静默切换策略。
 
-### 输出
+### 物体主体自举
 
-- 稠密点云 PLY；
-- MVS mesh（OBJ/PLY）；
-- `.dmap` 缓存（可选保留）。
-
-此时若用户关闭 texture/gggs，流水线即可结束。
-
-### 当前实现状态（2026-07-28）
-
-PatchMatch 已实现 CUDA 与 CPU 双后端：
-
-- 所有视图、所有 coarse-to-fine 层的灰度图和 mask 在进入 PatchMatch 时一次构建并缓存；
-  reference/source 只持有只读引用，不再为每个参考视图重复缩放邻图；
-- CUDA kernel 覆盖随机/稀疏初始化、25 texel 双线性 ZNCC、斜面传播、随机深度/法线精修、
-  多源最优视图聚合、ROI 限制和基于邻图深度快照的几何一致性；相机变换和深度/法线结果
-  直接桥接现有 `DepthMap`，后续 filter/fusion 不需要分叉；
-- CUDA 按最多 64 行拆分 kernel launch，单参考视图串行调度以控制 VRAM 和 Windows TDR
-  风险；启动时未检测到 CUDA GPU 才选择 CPU，已经进入 CUDA 路径后运行失败则直接报错；
-- 深度传播采用 red/black 两阶段，阶段内以 `patchmatch_tile_rows` 行为一个 tile，避免
-  相邻像素同时读写造成的数据竞争；随机种子由 view/level/iteration/tile 唯一确定；
-- 默认同时调度 8 个参考视图，并在其 row tiles 之间分配总 CPU 预算。最后不足 8 个视图时，
-  每个剩余视图自动获得更多线程，兼顾内存带宽吞吐和尾部利用率；
-- 几何一致性每轮读取不可变的全局深度快照，因此多视图/tile 写入不会与邻图读取竞争。
-
-PatchMatch 后端不暴露 CLI 选择参数：运行时自动检测默认 CUDA 设备，有 GPU 使用 GPU，
-未检测到 GPU 或 CPU-only 构建才使用 CPU，避免给普通重建流程增加硬件调度参数。
-
-Gingy 预览质量实测（RTX 5090 D v2，164/171 注册相机）：CUDA 将
-`mvs.estimate_depth` 从 401.68 秒降到 31.47 秒（12.8×），完整 densify 从
-424.03 秒降到 54.67 秒（7.8×）；全量 PLY 的 8,665,149 个点坐标/法线均为有限值。
-
-全局表面重建已实现为可选 CGAL 后端：
-
-1. 以融合点的中位 pixel footprint 建立尺度无关的体素采样，并用
-   `mesh_max_points` 提供显式内存上限；
-2. 构建 3D Delaunay，有限和无限 cell 都进入图；无限 cell 与相机所在 cell 连接 source；
-3. 对 camera→sample 与 sample 后方的线段累计有向 facet visibility weight，质量项使用
-   facet plane / circumsphere angle（与 OpenMVS 同类能量）；
-4. 按 OpenMVS `DELAUNAY_WEAKSURF` 计算 cell 的 incoming free-space support；沿表面前后
-   `3σ/4σ` 区间得到 beta/gamma，并对通过相对差、绝对差和 outlier 检测的 endpoint cell
-   强化 sink t-edge。融合权重先用确定性射线样本归一化到 OpenMVS 的绝对能量尺度；
-5. 用无递归 FIFO push-relabel 求 s-t cut，避免百万 cell 图上的递归栈风险；
-6. 提取 inside/outside 分界面，并拒绝相对中位 Delaunay 边过长的跨空洞三角形；
-7. backend-independent Clean 删除非法、重复、退化和非流形面，统一连通分量朝向，删除小岛，
-   封闭小边界环，可选 boundary-preserving smoothing，最后压缩顶点并重算法线。
-
-构建时使用标准 `find_package(CGAL QUIET)`。CLI 的 `--mesh-method auto` 在 GGGS 路径选择
-TSDF，在所有 MVS-only 质量预设中选择全局 Delaunay。
-可用 `--mesh-method tsdf|delaunay` 强制选择；显式请求不可用的 Delaunay 时直接报错。
-
-关键调优参数：
+object 模式且未提供外部 Mask 时，内部执行两阶段训练：
 
 ```text
---patchmatch-tile-rows 8
---patchmatch-concurrent-views 8
---mesh-method auto|tsdf|delaunay
---mesh-max-points 2000000       # 0 表示不设上限
---mesh-target-faces 0           # 默认保留原生 MC；正数开启 asdiff/CGAL 减面
---mesh-remesh true              # 超过目标面数时先执行 Instant Meshes remesh
---mesh-tsdf-voxel-scale -1      # -1: gs2mesh 原生 1x；正数显式覆盖
---mesh-tsdf-smooth-iters 2      # 边界锁定 Taubin 无收缩平滑；0 保留原始 MC
---uv-parallel-partitions 8      # UVAtlas 空间分区并发；1 为串行
---mesh-free-space-support true  # OpenMVS weak-surface beta/gamma 强化
---mesh-free-space-quantile 0.95 # 融合权重到 OpenMVS 能量尺度的校准分位数
+sparse subject seeds
+  → short ADCPlus warmup
+  → 以稀疏主体点为锚选择 Gaussian 3D 连通分量
+  → 投影 full-resolution alpha/depth
+  → 多视图一致性与边缘保留
+  → source-resolution soft masks
+  → 正式 GGGS
 ```
 
-后续几何处理顺序固定为：`Delaunay cut → Clean/manifold → photometric mesh refinement
-→ 可选交付级简化/重拓扑 → UV/贴图`。photometric refinement 前不默认简化，否则会先丢失
-其需要优化的小尺度自由度。工程在找到 CGAL 时同时构建并链接 `asdiff::mesh`。GGGS mesh
-超过目标面数时先调用 Instant Meshes field-aligned remesh，再调用保边界的
-`repair_and_decimate`；若已经低于目标面数则保留 Clean 结果，不再做目标面数后处理。未找到
-CGAL 时保留 Clean 后的 TSDF 并记录明确告警。可用 `--mesh-remesh=false` 做不重拓扑的质量 A/B。
+自举 Mask 必须保留软 alpha、细线和孔隙，不做会删除辐条的固定半径腐蚀。若主体选择置信度
+不足，输出预览并要求用户提供外部 Mask 或重新拍摄；不回退到 MVS mesh/depth Mask。
 
-稠密 MVS 输入默认以全部融合点初始化 GGGS（`--gggs-max-gaussians 0`），而不是随机截断到
-50 万点。这样薄结构和遮挡区域在训练开始时仍有 Gaussian 覆盖；显存受限时再显式设置上限。
-几何导出遵循 pygsplat/GS-2M 的 alpha 0.5 + 有效深度筛选，不额外启用原先 cosine 0.5 的
-depth-normal 硬过滤，避免在薄结构和法线快速变化处直接删除 TSDF 输入像素。
+### ADCPlus / GGGS
 
----
+1. 以稀疏 SfM 点初始化 SH、opacity、scale 和 rotation；
+2. ADCPlus 动态 grow/split/clone/prune；
+3. `filter_3D` 仅作为渲染时 Mip-Splatting floor，不烘焙进 canonical scale/opacity；
+4. warmup 后加入 GGGS depth-normal、多视图几何往返与 plane-warp NCC；
+5. object 模式使用软 Mask 监督 RGB/alpha，scene 模式使用完整图像；
+6. 导出 Gaussian PLY、训练诊断与逐视图 median depth/normal/alpha。
 
-## Stage B — Mask、Texture、Delight（共用后处理）
-
-本阶段 **不假设** 一定经过 GGGS。GGGS 训练前输入固定为 `mvs_mesh`；
-GGGS 结束后的贴图/Delight 可以改用最终 `gggs_mesh`。
-
-### B1. Mask（光栅化）
-
-完整 MVS 结束后，对每个注册视图用 `asdiff_render` 将 `mvs_mesh`
-光栅化为前景 mask。Mask 按 GGGS 使用的原始理想针孔相机分辨率生成，而不是 MVS
-PatchMatch 的 640 px 工作分辨率。当前 `asdiff_render` 光栅输出为单采样，因此默认按
-每轴 2 倍分辨率渲染，再做 2×2 面积下采样，得到 0..255 的抗锯齿软覆盖。
-
-用途：
-
-- Delight 前景约束与 alpha 保留；
-- ProjectTextures 置信度加权；
-- GGGS 训练的 RGB 前景与 alpha BCE 监督；
-- GGGS 完成后若选择其为 `active_mesh`，可重新渲染最终 mask 供贴图使用。
-
-若用户只要点云/裸 mesh、不开 texture/delight/gggs，可跳过 mask。
-
-### B2. Image Delight（可选）
-
-**时机：图像域、投影之前**（对齐 AIHoloImager）。
-
-- 默认实现：Intrinsic 四段网络，**ONNX Runtime 进程内推理**（无 PyTorch 依赖）；
-- 模型文件：`stage_0.onnx` … `stage_3.onnx`（由上游 `.pt` 离线导出一次即可）；
-- 回退：多视图统计 delight（无模型时，尚未实现）；
-- 前景约束：复用 `--masks`。
-
-关闭时 Project 使用原图 → 带光照贴图；开启 → 更接近 albedo。
-
-### B3. UV + ProjectTextures（可选）
-
-对齐 AIHoloImager `TextureReconstruction`：
-
-1. **UvUnwrap**：Microsoft UVAtlas（P0 默认；chart 打包、stretch、gutter 更稳，
-   与 Open3D/`pygsplat` 的 `compute_uvatlas` 同系）；xatlas 作无 UVAtlas 时的回退
-   （跨平台/轻依赖）；
-2. **Flatten**：UV 空间栅格化 → 世界坐标图 + 法向图；
-3. **Per-view**：mesh 深度/ShadowMap → Project（遮挡 + `cos` 置信度）；
-4. **融合**：P0 默认 top-1（max confidence）；high 档 top-K；
-5. **Resolve + Dilate**：置信度阈值 + gutter 外扩（UVAtlas `gutter` 与 atlas 外扩配合）。
-
-前置：mesh 须流形（或 unwrap 前自动 FixNonManifold）；失败则明确报错，不静默出坏 UV。
-推荐参数起点（对齐 `pygsplat`）：`gutter=1`、`max_stretch=0.33`、按 atlas 分辨率
-并行 partition。
-
-### B4. 导出
-
-- 无 texture：mesh ± 点云；
-- 有 texture：OBJ+MTL / glTF + albedo；
-- 有 delight：标注为 albedo；无 delight：标注为 projective/lit texture。
+三轴比例约束、最大 Gaussian 数和 densification 周期必须由质量档控制。几何训练当前基线显式
+使用 10:1 三轴比例上限；CLI、帮助文字与策略默认值必须保持一致。
 
 ---
 
-## Stage C — GGGS（可选几何精修）
+## Stage B — TSDF 与 Mesh
 
-**仅当 `enable_gggs=true`。**
+TSDF 只融合 GGGS 输出的 median depth、normal 和 alpha，不依赖 MVS 数据结构。默认参数与
+pygsplat/GS-2M 对齐：
 
-### 算法锁定
+```text
+max_depth = 2 * scene_extent
+voxel     = max_depth / 2048
+sdf_trunc = 4 * voxel
+```
 
-后端固定为 **Geometry-Grounded Gaussian Splatting (GGGS)**：
+逐相机融合后使用标准 Marching Cubes，再依次执行：
 
-- 将 Gaussian 原语按随机实体（stochastic solids）处理；
-- 直接渲染高质量深度 / 几何场并抽取表面；
-- 不与 SuGaR / 2DGS 等混为默认实现。
+```text
+raw MC
+  → topology audit
+  → component filtering
+  → conservative small-hole handling
+  → orientation repair
+  → optional smoothing / remesh / decimation
+  → topology audit
+```
 
-### 流程
+细线结构是质量门禁：
 
-1. **初始化**：MVS `DenseCloud` → Gaussian  
-   （mean=xyz，尺度∝局部间距，短轴沿法向，颜色=点色；体素/曲率下采样控 N）；
-2. **优化**：先以 RGB+mask 收敛外观，默认第 7,000 步启用权重 0.05 的 GGGS median-depth /
-   rendered-normal self-consistency，并保持 mean/scale/quaternion/opacity 可训练；可选与 MVS
-   depth 一致性；
-3. **抽 mesh**：以原图分辨率渲染 GGGS median depth / normal / alpha，复用 COLMAP 相机与 mask，
-   以 Open3D-compatible sparse block TSDF + Marching Cubes 抽取隐式表面，再保留最大连通分量
-   → `gggs_mesh`；默认不重拓扑/减面，该路径不依赖 `multi_view_robust_ncc`；
-4. **切换**：`active_mesh_id = gggs`；若仍 `enable_texture`，对 **gggs_mesh**
-   重跑 Stage B（mask 建议重算）。
+- voxel size 应小于目标最细结构直径的约 1/2；
+- 使用原分辨率 depth/alpha，避免低分辨率轮廓上采样；
+- 支持 2–4 voxel truncation 档位；
+- alpha/normal 阈值不得在轮廓和薄片处做硬删除；
+- Clean 不得仅按全局尺度删除细长小分量；
+- 对小于可恢复 voxel 尺度的结构，允许同时交付 Gaussian/Surfel，而不虚假承诺封闭 mesh。
 
-### 失败与回退
+`support closing` 只允许作为可关闭的保守修复，不用于填补上游深度缺失。输出必须检查
+non-manifold edge/vertex、orientability、boundary components 和 watertight 状态。
 
-- GGGS 失败或用户中止：保留 MVS mesh/点云；若已请求 texture，可回退到
-  `texture-on=mvs` 并告警；
-- 不允许在未产生合法 `gggs_mesh` 时静默宣称「GGGS 质量」。
+---
 
-### 资源
+## Stage C — Texture 与 Delight（可选）
 
-- CUDA 强依赖；无 GPU 构建时应编译期/运行期禁用 `enable_gggs`；
-- 与 Fast MVS 的 CPU 路径解耦，避免拖慢默认「MVS+贴图」交付。
+Texture 和 Delight 只作用于 TSDF/Clean 后的最终 mesh：
+
+1. 从最终 mesh 光栅化每视图可见性和投影置信度；
+2. 可选图像域 Delight；
+3. UVAtlas 展开；
+4. Flatten → ShadowMap → Project → Resolve → Dilate；
+5. 导出 PLY/OBJ/glTF 与 albedo。
+
+前景约束复用 object 模式的外部或自举软 Mask。用于贴图的最终 mesh mask 只负责可见性，
+不反馈到 GGGS 训练，也不作为主体分割来源。
 
 ---
 
@@ -357,509 +239,291 @@ PatchMatch 的 640 px 工作分辨率。当前 `asdiff_render` 光栅输出为�
 
 ```text
 run_rebuild(scene, cfg):
-  require SfM registered
+  require and validate SfM cameras + sparse landmarks
+  bounds = estimate_subject_bounds(scene.sparse_landmarks)
 
-  if cfg.enable_mvs:
-      dense + mvs_mesh
-      active = mvs
+  if cfg.capture_mode == object:
+      if cfg.input_masks:
+          masks = load_soft_masks()
+      else:
+          warmup = train_sparse_adcplus(scene, bounds, short_schedule)
+          masks = bootstrap_subject_masks(warmup, sparse_landmark_seeds)
+          require mask confidence gate
+  else:
+      masks = none
 
-  if cfg.enable_gggs:
-      require dense_cloud
-      init + optimize GGGS + extract gggs_mesh
-      active = gggs
-
-  need_mask = cfg.enable_texture or cfg.enable_delight or cfg.enable_gggs
-  if need_mask and active mesh:
-      rasterize masks from active mesh
-      # 若先 GGGS 再 texture：mask 用 gggs_mesh
-      # 若 MVS-only texture：mask 用 mvs_mesh
-
-  if cfg.enable_delight:
-      delight images (with masks)
+  gaussians = train_sparse_adcplus_gggs(scene, bounds, masks)
+  frames = render_median_depth_normal_alpha(gaussians)
+  raw_mesh = tsdf.integrate_and_extract(frames)
+  final_mesh = audit_clean_and_reaudit(raw_mesh)
 
   if cfg.enable_texture:
-      uv + project + dilate on active mesh
-      export textured mesh
+      texture(final_mesh, scene.images, masks)
+  if cfg.enable_delight:
+      delight_and_reproject(final_mesh, scene.images, masks)
 
-  always export artifacts requested (cloud / meshes / masks / atlas)
+  if cfg.enable_mvs_diagnostics:
+      run_mvs_out_of_band(scene)   # 不向主链路提供输入
 ```
 
 顺序约束：
 
-- `enable_gggs` ⇒ 需要先有 MVS dense（或从 checkpoint 加载）；
-- `enable_delight` 强烈建议配合 mask；无 mesh 时不可 delight（或仅全图无 mask，不推荐）；
-- `enable_texture` 需要活跃 mesh；与是否 GGGS 无关。
+- GGGS 依赖 SfM，不依赖 dense cloud 或 MVS mesh；
+- object 模式必须通过主体 bounds 与前景置信度门禁；
+- scene 模式允许无 Mask；
+- TSDF 只接受 GGGS 渲染帧；
+- Texture/Delight 只接受通过拓扑门禁的最终 mesh；
+- MVS 诊断失败不得影响默认产品结果。
 
 ---
 
 ## 与现有 SfM / OpenMVS 的衔接
 
-- 进程内：`sfm::Scene` → `RebuildScene`（保留 per-image 内参与畸变策略：
-  深度/投影前 undistort 缓存为 P0 推荐）；
-- 文件：继续支持 MVSI v7，便于与外部 OpenMVS densify 做 A/B；
-- 已知导出缺口（单相机、无畸变、confidence=0）在自研路径中通过进程内手递规避；
-  MVSI 导出可后续加固，但不阻塞本架构。
+- 进程内默认路径：`sfm::Scene → RebuildScene → sparse ADCPlus/GGGS`；
+- SfM 相机、稀疏点颜色和 observation track 必须完整传给 GGGS 初始化；
+- MVSI/`.mvs` 可以继续作为相机与稀疏点交换容器，但读取该容器不代表执行 MVS；
+- OpenMVS densify/mesh 仅用于离线 A/B、回归和兼容导出；
+- 默认路径不得因为 `--gggs` 隐式触发 PatchMatch/fusion，也不得因输入被误标为 dense 而
+  静默关闭 ADCPlus。
 
 ---
 
 ## 性能原则
 
-1. **端到端墙钟时间** 为判据；分阶段记录 densify / mesh / gggs / delight / project；
-2. Fast MVS：图像金字塔只构建一次；默认 8 个参考视图并行、每视图内部 row tile 并行；
-   red/black phase 与几何快照保证并行确定性，并在最后一批动态重分配 CPU；
-3. Texture：按 atlas 行块 / chart 并行；图像 LRU；
-4. GGGS：GPU 时间单独计量；初始化与抽 mesh 后处理可 CPU；
-5. 预设档：`preview` / `default` / `high`（分辨率、PM 迭代、是否 GGGS、
-   atlas 尺寸、是否 Delight）。
+1. 以端到端墙钟时间和最终质量为判据，不以所有阶段 CPU 100% 为目标；
+2. SfM 前端、track、BA 和输入预处理充分使用多核 CPU；
+3. ADCPlus/GGGS 是 GPU-bound；CPU 并行负责图像解码、Mask/SubjectBounds、预取、评估和异步导出；
+4. TSDF block integration、Marching Cubes、Clean 和 topology audit 使用多核 CPU；
+5. GGGS 与 CPU 后处理之间通过 checkpoint/队列解耦，避免 CUDA 等待串行文件 IO；
+6. 质量档 `preview/default/high` 控制训练步数、Gaussian 上限、TSDF voxel/truncation、
+   texture 分辨率和 Delight，不再控制 PatchMatch。
 
 ---
 
 ## 实施顺序
 
-1. **MVS P0（已完成）**：缓存金字塔、tile PatchMatch、depth + fuse、CGAL global
-   Delaunay mesh、Clean、PLY/OBJ；
-2. **Mask + Texture P0（已完成骨架）**：`aetherscan_texture` 通过外部
-   `asdiff_render`（默认同级 `../asdiffrender`，`asdiff::render`）做 UVAtlas
-   unwrap + Vulkan Flatten/ShadowMap/Project；CLI `--texture` /
-   `--atlas-resolution`；导出 `*_textured.obj` + MTL + albedo PNG。前景 mask
-   目录复用 `--masks`；
-3. **Delight P1（已完成骨架）**：Intrinsic 四段网络以 **C++ ONNX Runtime**
-   进程内推理（与 LightGlue 共用 ORT，无 Python/PyTorch）；CLI `--delight`。
-   模型为 `stage_0..3.onnx`（见 `AETHERSCAN_INTRINSIC_MODELS_DIR`）。权重源自
-   [compphoto/Intrinsic](https://github.com/compphoto/Intrinsic)
-   （**学术/非商用许可**，`docs/LICENSE-Intrinsic.md`）；
-4. **编排 P0**：配置矩阵、checkpoint、CLI（MVS-only 完整交付）——部分完成
-   （CLI 开关已接入；checkpoint 续跑未做）；
-5. **GGGS P1**：dense→init→optimize→extract；`--gggs` 后再跑 texture；
-6. **产品化**：档位、回退、与 OpenMVS densify 质量对比报告。
+1. **直接稀疏入口 P0（已完成）**：`sfm::Scene` 直接构造 GGGS 数据集，跳过 densify；
+2. **策略语义 P0（已完成）**：明确 sparse 初始化状态，ADCPlus 保持动态致密化；
+3. **物体主体 P0**：支持外部软 Mask，并实现 warmup → Gaussian 主体选择 → soft-mask 自举；
+4. **TSDF P0**：拆出独立 `AetherScan::TSDF` API，增加 Open3D 同帧回归与拓扑门禁；
+5. **细结构 P0**：增加细线质量档，联合控制 alpha、voxel、truncation 与 Clean；
+6. **编排/checkpoint P1**：支持从 SfM、warmup、正式 GGGS、TSDF 和 Texture 任意阶段续跑；
+7. **Texture/Delight P1**：只消费最终 TSDF/Clean mesh；
+8. **MVS diagnostics P2**：保留现有 CUDA PatchMatch、fusion 和 Delaunay 作为独立对照工具。
 
-验收优先级：先保证 **「MVS + 可选 texture/delight」** 闭环可交付，再接入 GGGS。
+当前内部 SfM 分支已经直接执行
+`SfM sparse → ADCPlus/GGGS → TSDF`，日志以 `gggs_input=sfm_sparse` 和
+`patchmatch=false` 标识。旧自动 ROI、手动 ROI、depth-ROI Mask 入口已经删除。
+无外部 Mask 的 Gaussian 主体自举仍未完成，不能标记为已交付。
 
 ### Texture / Delight 构建与用法
 
 ```powershell
-# 贴图：Vulkan SDK 1.2+（含 dxc）+ UVAtlas
-# Delight：再开 ONNX（与 LightGlue 相同开关），并准备 stage_*.onnx
-cmake -S . -B build-cgal `
-  -DAETHERSCAN_ENABLE_TEXTURE=ON `
-  -DAETHERSCAN_ENABLE_ONNX=ON `
-  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake -S . -B build-cgal -DAETHERSCAN_ENABLE_TEXTURE=ON -DAETHERSCAN_ENABLE_ONNX=ON
 cmake --build build-cgal --config Release --parallel
 
-aetherscan --images ... --output out/scene.mvs --dense --mesh --texture
-aetherscan --images ... --output out/scene.mvs --dense --mesh --texture --delight
+aetherscan --images images --output object.ply --capture-mode object --texture
+aetherscan --images images --output object.ply --capture-mode object --texture --delight
 ```
 
-- asdiff_render：默认使用同级本地仓库 `../asdiffrender`（单一源码，不 vendoring）。
-  可用 `-DAETHERSCAN_ASDIFF_RENDER_ROOT=` 覆盖；有远端后可改为
-  `third_party/asdiffrender` submodule。
-- Delight：C++ ONNX only；将 `stage_*.onnx` 放到
-  `AETHERSCAN_INTRINSIC_MODELS_DIR`。
-- 关闭贴图：`-DAETHERSCAN_ENABLE_TEXTURE=OFF`。
+- asdiff_render 默认使用同级本地仓库 `../asdiffrender`；
+- Delight 使用 C++ ONNX Runtime；模型放在 `AETHERSCAN_INTRINSIC_MODELS_DIR`；
+- Intrinsic 权重为学术/非商用许可，产品发布前必须完成许可证审查；
+- 未通过 mesh 拓扑门禁时不进入 UV/Texture。
 
 ---
 
 ## 明确非目标（本阶段）
 
-- 默认路径绑定 OpenMVS 式「源图矩形 atlas + LBP 视图选择」（可作实验模式，非默认）；
-- 将 GGGS 并列作为官方几何后端；
+- 把 MVS densify/mesh 重新放回默认主链路；
+- 从 MVS mesh 或 MVS depth 生成默认主体 Mask；
+- 向普通用户暴露 Mask 来源枚举；
+- 用固定腐蚀/闭运算牺牲细线结构换取表面看似封闭；
 - 无 CUDA 时强行启用 GGGS；
-- 在粗 MVS mesh 未 Clean/流形时静默 UV（应失败或自动修复并打日志）。
+- 在非流形 mesh 上静默执行 UV 和贴图。
 
 ---
 
-## ROI 与前景 Mask（单向流水线，2026-07-28）
+## SubjectBounds 与前景约束
 
-ROI 与 mask 是两层独立约束。显式输入的外部 mask 可以约束 MVS；手动/自动 ROI 是
-世界坐标中的 3D OBB。没有外部 mask 时，GGGS 默认直接使用 MVS 每视图深度与自动主体
-OBB 的交集生成软 Mask，不依赖 MVS mesh，也不依赖 AI 分割模型。生成的 Mask 只属于
-后处理训练数据，绝不反馈成第二遍 PatchMatch 的硬约束。
+SubjectBounds 与 Mask 是两类不同约束：
 
-默认 GGGS 流程只执行一遍 MVS，并跳过容易产生破洞和锯齿轮廓的 MVS Delaunay Mesh：
+- **SubjectBounds**：世界坐标中的保守 3D AABB，只限制 GGGS 几何提取与 TSDF 空间范围；
+- **Mask**：原图分辨率的 2D soft alpha，只约束 object 模式中的 RGB/alpha 学习；
+- SubjectBounds 不删除 SfM 点或 Gaussian，也不投影成训练 Mask。
 
-```text
-SfM
-  → PatchMatch → filter → fusion
-  → MVS DenseCloud
-  → 自动地面/支撑面检测 → 主体 3D OBB
-  → 每视图全分辨率 depth 反投影 ∩ OBB → close / tiny-hole fill / dilate / 1 px feather
-  → per-view source-resolution soft masks
-  → DenseCloud 初始化 3DGS + masks 训练 GGGS
-  → GGGS median depth / normal / alpha
-  → TSDF → final mesh
-```
+### SubjectBounds
 
-约束位置：
+当前实现直接对 SfM 稀疏点执行与 `pygsplat/gs2mesh.py` 同类的保守范围估计：
 
-- 外部输入 mask：可以约束 PatchMatch、depth filter 和 fusion；
-- depth-ROI mask：MVS 融合后生成，只供 GGGS 使用，不约束 MVS；
-- mesh-rendered mask：保留为显式诊断/fallback，只供 GGGS、Delight 与贴图使用；
-- 手动 ROI：可约束 PatchMatch/fusion/mesh；
-- 自动 ROI：在一次完整 MVS 融合后执行，不触发第二遍 MVS；
-- global Delaunay：ROI 外点不插入，中心在 OBB 外的 cell 强制为 source/free-space；
-- Clean：删除跨出 OBB 的三角形；只保护 ROI 裁剪产生的开边界不执行 hole cap，主体内部
-  的小边界环仍会补洞，避免因启用 ROI 而保留大量内部孔洞。
+1. 只接收有限坐标且至少被两个视图观测的稀疏点；
+2. 以 `max(0.1, 0.05 × 原始对角线)` 为半径，删除邻居数不足 10 的孤立离群点；
+3. 对保留点计算轴对齐包围盒；
+4. 每个半轴乘以 1.15 的保守 padding，并设置最小退化轴厚度；
+5. 输出 `<output_stem>_subject_bounds.txt` 供复现。
 
-CLI：
+该范围只负责限制后续分配和提取，不做语义分割，不裁剪稀疏点、MVS 点云或 Gaussian。
+旧 dense-cloud 自动 ROI、手动 ROI 文件、投影 ROI Mask 及其 CLI/Python API 均已删除。
+`scene` 模式将 `SubjectBounds` 置空，TSDF 按实际可见深度分配稀疏块。
+
+### 前景约束
+
+产品只暴露 object/scene 模式与可选 `--masks`：
 
 ```powershell
-# 默认 GGGS 前景路径：无外部 mask、无 MVS mesh、无 AI model
-aetherscan --images images --output scene.ply --dense --gggs --mesh
-
-# 只生成并导出 depth-ROI Mask，先做人眼质量门禁，不训练 GGGS
-aetherscan --images images --output scene.ply --masks - `
-  --foreground-mask-source depth --foreground-mask-only
-
-# 手动 OBB；文件为 15 个空白分隔浮点数
-# center xyz，axes 的 3x3 row-major，half_extent xyz
-aetherscan --images images --output scene.mvs --dense --mesh --roi roi.txt
-
-# 显式退回 MVS mesh → asdiff_render Mask（诊断用途）
-aetherscan ... --foreground-mask-source mesh
-
-# 完全关闭前景 Mask
-aetherscan ... --foreground-mask-source none --masks -
-
-# 自动 OBB 默认每个半轴增加 15%；可显式增加到 20%
-aetherscan ... --roi auto --roi-margin 0.20
+aetherscan --images images --capture-mode object
+aetherscan --images images --capture-mode object --masks masks
+aetherscan --images images --capture-mode scene
 ```
 
-手动 OBB 的轴矩阵读入后会以 SVD 投影到最近的正交旋转矩阵；半轴必须全部大于零。
-只在地面检测失败时会退化为「视线目标 + 主体分量」OBB；若连可靠主体 OBB 也无法得到，
-才保留无 ROI 的完整重建并给出 warning，不会输出一个错误裁剪的空模型。
-有效 ROI 会同时写到 `<output_stem>_roi.txt`，可直接作为下一次 `--roi` 的输入，便于
-自动检测后人工微调并复现最终重建。
+- object + 外部 Mask：按原分辨率读取 soft alpha；
+- object + 无外部 Mask：内部执行 Gaussian 主体自举；
+- scene：不做前背景分离；
+- 不再提供 `depth|mesh|none` 这类用户可见来源参数；
+- MVS depth 和 MVS mesh 不作为默认或 fallback Mask 来源。
 
-无外部 Mask 的 GGGS 路径默认把 MVS `resolution_level` 提升到 0，因此导出的
-`<output_stem>_depth_roi_masks/` 和训练 Mask 都是原图分辨率，不再把半分辨率轮廓双线性放大。
-若明确优先速度，可传 `--dense-resolution-level 1` 回到半分辨率。自动 OBB 默认使用 15%
-余量，只沿检测到的支撑面方向单侧扩到 25%，以补全底座但不吞入桌布。
-`--roi-mask-close`、`--roi-mask-dilate` 和 `--roi-mask-feather` 控制小缺口修复、保守外扩与软边；
-depth Mask 默认只做 1 px feather，真实的大孔洞会保留。孤立小前景分量在 feather 前移除，
-避免稀疏深度噪点污染背景。
+### 细线与孔隙保护
+
+自行车辐条、电线、栏杆和薄片必须按软覆盖处理：
+
+- Mask 生成和训练均使用原图分辨率；
+- 不使用固定半径 erosion 删除细线；
+- close/tiny-hole fill 只能处理有明确尺度上限的孤立噪点；
+- 轮廓 feather 应小于等于约 1 px，并保留内部真实孔隙；
+- Gaussian 主体选择使用 3D 连通性与多视图支持，不能只取每帧最大 2D 连通分量；
+- 自举 Mask 的 alpha、边界稳定性和跨视图一致性必须输出诊断。
+
+最终 mesh 光栅化 Mask 只用于 Texture/Delight 的可见性和护边，不反馈给 GGGS，也不改变主体
+分割结果。
 
 ---
 
-## `ori_img` 稀疏 ADC+ / TSDF 验证（2026-07-29）
+## 验证基线与已确认结论
 
-在 `D:\ScanVideo\ori_img\images` 的 76 张图上，global SfM 注册 `76/76`，生成
-`121,532` 个稀疏点和 `460,202` 条观测，平均重投影误差 `0.4158 px`、RMS `0.5584 px`，
-SfM 阶段耗时 `22.58 s`（进程墙钟约 `24.01 s`）。用导出的 OpenMVS Interface 作为稀疏
-初始化执行 30,000 步
-`adc_plus`，最终得到 `591,600` 个 Gaussian；三个固定视角 PSNR 为
-`32.03 / 33.77 / 32.59 dB`，平均 `32.80 dB`，训练耗时 `680.31 s`。
+本节只记录可复现基线、已确认结论和质量门禁。更新时覆盖旧数据，不追加每日实验流水账。
 
-TSDF 使用 `voxel=0.00105929`、`truncation=0.00423714`，融合 `28,222,121` 个有效深度像素，
-Marching Cubes 原始输出 `1,927,187` 顶点 / `3,658,990` 面。保留最大分量并做 16 边以内的
-耳切补洞后为 `1,380,018` 顶点 / `2,724,671` 面，共关闭 `4,901` 个小边界环。
-桌布诊断视角的黑洞像素由 `26,274` 降到 `25,995`，且没有中心扇形版本的大块平面伪影；
-把阈值放宽到 64 只再减少 8 个黑像素，却把渲染器拒绝的桥接面从 18 增到 543，因此产品
-默认采用更保守的 16。
+### `ori_img` 已验证部分
 
-本次同时修复了 OpenMVS 顶点观测反序列化的求值顺序问题。修复前所有 `image_id` 被误读为
-0，邻居为 `0/76`；修复后为 `76/76`，三个 TSDF 诊断视角分别比较约 `4.83M` 个邻居深度，
-一致率为 `99.927% / 99.954% / 99.942%`。
+测试集为 `D:\ScanVideo\ori_img\images` 的 76 张 `1000×1000` 图像。当前证据如下：
 
-性能上，ADC+ 是 GPU-bound：RTX 5090 训练期间利用率约 `95–97%`，CPU 平均约占一个核心；
-SfM、MVS、TSDF 才是 32 线程 CPU 调度的重点。TSDF 本次完成约 `4.82 亿` 次体素更新，
-融合阶段 `1.63 s`，整个 mesh extraction `12.95 s`。不应为了显示 100% CPU 占用而让
-CPU 与 CUDA 训练争用内存带宽。
+| 阶段 | 实测结果 | 结论 |
+|---|---:|---|
+| global SfM | 76/76 注册，123,958 稀疏点 | 通过 |
+| SubjectBounds | 半径过滤保留 123,901/123,958；padding 后覆盖 123,939/123,958 | 通过；仅 19 个孤立点在范围外 |
+| sparse ADCPlus smoke | 123,958 初始 Gaussian，`densification_enabled=1`，`patchmatch=false` | 通过 |
+| 稀疏 ADCPlus | 10k 步，123,557 → 402,291 Gaussians | 通过 |
+| masked GGGS | masked PSNR 28.87 dB | 通过 |
+| TSDF + Clean | 10.93 s，1,055,356 顶点 / 2,061,718 面 | 数值通过，拓扑未通过 |
 
-### TSDF support closing A/B（2026-07-29）
+当前 smoke test 已证明内部 SfM 可以完全跳过 MVS，直接进入 ADCPlus。10k 质量基线中的
+Mask 来自已删除的实验性 depth-ROI 路径，只保留其数值作为历史对照，不能作为当前产品流程
+的能力证明。“无 MVS、无外部 Mask 的 object 自动主体自举”仍未完成。
 
-Marching Cubes 前增加了保守的一体素 support closing：
+无 Mask 的对照会学习墙面、桌布等背景；稀疏点 OBB 投影 Mask 覆盖率曾达到 99.99%，也不能
+作为物体轮廓。迁移后的下一条正式回归必须满足：
 
-- 只检查已经分配的 TSDF block 中 `weight == 0` 的体素；
-- 只有至少两个坐标轴的正、负方向邻居都达到有效权重时才填充；
-- 用双侧邻居插值得到 TSDF，合成权重固定为 `1`；
-- 候选先收集、后统一写回，因此是单轮非级联操作，不会由新填体素继续向轮廓外生长；
-- `--mesh-tsdf-support-closing-axes 2` 为默认保守模式，`0` 可关闭做 A/B。
+1. 命令和日志中不出现 PatchMatch、fusion 或 dense-cloud 初始化；
+2. ADCPlus 日志明确 `initial_points_dense=false`、`densification_enabled=true`；
+3. 先用外部软 Mask 验证完全无 MVS 的端到端结果；
+4. 再用同一相机、稀疏点和训练参数验证 Gaussian 主体自举；
+5. 对细线测试集单独统计轮廓召回、深度覆盖和最终 mesh 连通性。
 
-在同一份 `591,600` Gaussian ADCPlus 模型、相同 76 个相机和相同深度图上，关闭与开启
-closing 的真实数据 A/B 结果如下：
+### ADCPlus 已确认约束
 
-| 指标 | axes=0 | axes=2 |
+- 稀疏 SfM 点是默认初始化；dense PLY 仅为兼容输入；
+- 策略不兼容必须报错，不得把 `adc_plus` 静默变成无 densification；
+- `filter_3D` 是独立 Mip-Splatting floor，不烘焙进 canonical scale/opacity；
+- 三轴比例默认值必须与 CLI/帮助一致，当前几何基线显式使用 10:1；
+- 不把 prune 数单独视为孔洞根因，同时审计 opacity、scale、多视图深度一致性和边界环。
+
+### TSDF 对齐结论与质量门禁
+
+相同 76 帧 uint16 毫米深度、相机、voxel、truncation 和 stride 与 Open3D
+`ScalableTSDFVolume` 对照：
+
+| 实现 | 原始顶点 | 原始三角形 |
 |---|---:|---:|
-| 填充的零权重体素 | 0 | 12,088 |
-| MC supported cells | 24,104,486 | 24,137,604 |
-| MC faces | 3,658,990 | 3,675,540 |
-| 最终主体 mesh vertices | 1,380,018 | 1,383,245 |
-| 最终主体 mesh faces | 2,724,671 | 2,730,842 |
-| 后处理关闭的小边界环 | 4,901 | 4,880 |
+| AetherScan，support closing 关闭 | 1,123,104 | 2,113,376 |
+| Open3D | 1,127,370 | 2,122,973 |
+| 相对差异 | -0.38% | -0.45% |
 
-`statue_alex01250.png` 箭头视角的二值轮廓只新增 52 像素、移除 19 像素；桌布左侧、
-中央腿部和右侧尾根三个箭头 ROI 分别只新增 `0 / 1 / 0` 像素。因此 support closing
-能够修复真实存在的零散一体素 support 孔，但不是这三个明显缺陷的主因。它们在
-closing 前后基本不变，更可能来自 GGGS 深度场中的缺失/错误零交叉（包括 ADCPlus
-覆盖不足或多视图深度不一致），而不是 MC 单纯因为某一个角点零权重拒绝 cell。
+该结果验证了相机约定、深度尺度、TSDF 截断、稀疏体素块寻址和 Marching Cubes 主流程。
+但当前 Clean 后真实网格仍有 37 条真正非流形边、约 5.4 万条边界或异常边及约 90 个非流形
+顶点，并且不可定向、非 watertight。关闭 support closing 后仍存在相同非流形边。
 
-closing 的 block 扫描使用 OpenMP 并行；本数据集耗时从约 `1.46 s` 降到 `0.12 s`
-（约 `11.8x`），并行版与串行版最终 PLY 的 SHA-256 完全一致。
+发布前必须增加：
 
-### AetherScan PLY → pygsplat TSDF 隔离测试（2026-07-29）
+1. raw MC 和每个后处理步骤的独立拓扑审计；
+2. non-manifold、orientability、boundary component 自动门禁；
+3. 修复后重新统一绕向；
+4. Open3D 同帧数值回归；
+5. 细线/薄片/负坐标/边界截断的合成测试。
 
-为了区分 AetherScan 训练输出和 C++ TSDF 后端，另做了完整的交叉实现测试，而不是只把
-AetherScan 已渲染的深度交给 Open3D：
+门禁通过前，TSDF 输出适合预览和后续修复，不能承诺 CAD、打印或物理碰撞所需的封闭流形。
 
-1. 用 pygsplat 自带的 `load_splats()` 直接读取
-   `scene_adcplus_gggs.ply`，得到 `591,600` 个 Gaussian、SH degree 3 和
-   `591,600 × 1` 的 `filter_3D`；
-2. 从 AetherScan 实际参与 TSDF 的 frame manifest 生成 pygsplat Nerfstudio 相机，
-   禁止 world normalization；76 个外参经 OpenGL/OpenCV 往返后的最大误差为
-   `1.0e-7`，pygsplat 的 mesh scene scale 为 `1.084708184`，与 AetherScan 一致；
-3. 由 pygsplat GGGS rasterizer 重新生成 median depth，再使用 pygsplat 自己的
-   Open3D TSDF、最大连通分量后处理和默认参数
-   `max_depth=2.1694, voxel=0.001059, truncation=0.004237`。
+### 性能结论
 
-pygsplat 输出为 `1,380,685` vertices / `2,718,237` faces，三个箭头处的缺陷仍然
-存在，并且外观与 “AetherScan depth → Open3D TSDF” 基本相同：同视角二值 mesh mask
-只有 `856 / 1,000,000` 像素不同。第 0 帧的 TSDF 输入深度也验证了 PLY 兼容性：
-AetherScan 与 pygsplat 的有效像素只相差 16 个；共同有效的 437,206 像素中有
-433,501 个量化到完全相同的毫米深度，平均绝对差仅 `0.0132 mm`。
+ADCPlus/GGGS 是 GPU-bound；不要为了 CPU 100% 与 CUDA 争用内存带宽。CPU 优化重点变为
+SfM、图像/Mask 预处理、TSDF integration、Marching Cubes、Clean 和 topology audit。
+TSDF integration 与 support closing 已使用 OpenMP；后续优先并行化 MC block 遍历，采用连续
+block allocator、扁平哈希表和两阶段计数/写出。
 
-这个结果可以排除“仅由 AetherScan 的 C++ TSDF / Marching Cubes 实现造成”以及
-“pygsplat 错读 AetherScan PLY”这两个假设。更准确的当前结论是：问题会随 AetherScan
-PLY 渲染出的多视图深度场传递到 pygsplat；可能涉及覆盖不足、opacity/scale/filter、
-densification/prune 或多视图几何一致性，现阶段不能只归因于“剪掉了过多 Gaussian”。
-第 0 帧桌布 ROI 的输入深度本身近似实心，但融合 mesh 相对该输入少 2,170 个前景像素，
-说明明显孔洞更像是多视图深度支持不稳定在 TSDF 融合阶段的表现，而不是单帧 alpha
-阈值产生的洞。严格区分具体训练项仍需用同相机、同 TSDF 参数的 pygsplat 自训 PLY
-作为第二个受控输入。
+---
 
-### 历史 pygsplat dense-init 参考（非稀疏 ADCPlus 主对照，2026-07-29）
+## 当前实现状态与迁移缺口
 
-此前曾把无明显主体破洞的 pygsplat 模型
-`D:\ScanVideo\ori_img\gsplat_dense_init\point_cloud.ply` 作为主对照。该模型使用原 COLMAP
-坐标，而 AetherScan 使用内部 SfM 坐标；76 个同名相机的 Sim(3) 拟合尺度为
-`0.2601507255`，相机中心误差 mean/P95/max 为
-`0.00438 / 0.00675 / 0.00865`，朝向误差 mean/P95/max 为
-`0.110° / 0.177° / 0.317°`。Aether 的相机和内参被变换到 pygsplat 原生坐标，
-TSDF 参数也按尺度等价换算为
-`max_depth=8.33907, voxel=0.00407181, truncation=0.0162873`。
+已经具备：
 
-相同 76 个物理视角、相同 TSDF 分辨率下，pygsplat 自训 PLY 输出
-`894,765` vertices / `1,775,758` faces；Aether PLY 输出
-`1,380,685` vertices / `2,718,237` faces。自训模型的主体 mesh 更连续，但它没有
-重建桌布/背景，因此“桌布无破洞”不能作为同一表面的质量结论；主体 body/tail ROI
-可以比较。
+- SfM 相机、COLMAP/OpenMVS Interface 稀疏点加载；
+- 内部 `sfm::Scene` 直接构造 GGGS dataset，日志明确 `patchmatch=false`；
+- `capture_mode=object|scene` 与 SfM 稀疏点自动 `SubjectBounds`；
+- sparse ADCPlus 初始化保持 densification 开启；
+- GGGS CUDA rasterizer forward/backward、SSIM、Adam；
+- sparse `default/adc_plus/adc_igs` 动态 grow/split/clone/prune；
+- Mip-Splatting 3D filter、GGGS 多视图几何与 NCC；
+- median depth/normal/alpha → TSDF → Clean；
+- 外部 `--masks` 与透明/前景训练模式；
+- Texture/Delight 骨架。
 
-把两份 PLY 都换算到 Aether 世界尺度，并限制到 pygsplat 主体的共同 0.5–99.5%
-bbox（额外 2 cm padding）后：
+仍需完成：
 
-| 指标 | AetherScan | pygsplat 自训 |
-|---|---:|---:|
-| bbox 内 Gaussian 数 | 187,966 | 1,244,034 |
-| 几何平均 scale P10/P50/P90 | 0.857/1.297/2.399 mm | 0.464/0.712/1.218 mm |
-| filter_3D P50 | 0.228 mm | 0.319 mm |
-| filter 后 opacity P10/P50/P90 | 0.032/0.115/0.562 | 0.009/0.207/0.753 |
-| axis ratio P50/P90/P99 | 7.49/23.50/66.93 | 4.67/12.39/30.28 |
+- object 模式 Gaussian 主体自举与置信度门禁；
+- 独立 `AetherScan::TSDF` 公共 API；
+- raw MC/后处理分阶段拓扑门禁；
+- direct SfM 分支的 Texture/checkpoint 编排；
+- out-of-core view cache 和 ADC-IGS edge/error ownership。
 
-因此 pygsplat 并不是依靠更小的 `filter_3D`：它的 filter 相对最小轴反而更强，但
-主体内 Gaussian 数约为 Aether 的 `6.62x`，scale 中位数约小 `1.82x`，有效 opacity
-中位数更高，且极端各向异性明显更少。
+实现、构建和许可证细节见 [GGGS_CPP.md](GGGS_CPP.md)。
 
-跨视角深度一致性使用每帧 4 像素 stride、8 个最近相机，残差统一换算到 Aether
-物理尺度。以一个 TSDF voxel（1.059 mm）为阈值：
+---
 
-| 指标 | AetherScan | pygsplat 自训 |
-|---|---:|---:|
-| 全局一致像素率 | 83.83% | 89.02% |
-| 绝对深度残差 P50 | 0.444 mm | 0.184 mm |
-| 绝对深度残差 P90 | 1.768 mm | 1.212 mm |
-| view 0 body ROI 一致率 | 90.11% | 92.38% |
-| view 0 tail ROI 一致率 | 90.58% | 92.75% |
+## 可选 MVS 诊断后端
 
-阈值放宽到 2/4 voxel 时两者分别为 `92.03/93.75%` 和
-`92.48/93.79%`；差距主要集中在亚体素到一体素范围，恰好会影响细表面 TSDF
-零交叉的连续性。
+现有 CUDA/CPU PatchMatch、depth filter/fusion、CGAL Delaunay 和 MVS Clean 代码保留，但职责为：
 
-训练结构轨迹也不同。pygsplat 从 `scene_dense.ply` 的 `1,249,605` 个点初始化，
-`DefaultStrategy.refine_stop_iter=0` 使 grow/split/prune 每步都立即返回，
-`speedysplat_pruning=false`，最终仍为 `1,249,605`，所以该模型的 grow/prune
-轨迹严格为零。Aether ADCPlus 从 `121,532` 开始，30k 步累计 grow `842,453`、
-prune `372,385`，最终 `591,600`；15k–25k 区间 grow `125,957`、prune
-`125,099`，已经进入几乎一进一出的密度平台。
+- 与 OpenMVS 做质量和性能 A/B；
+- 输出兼容 dense cloud/MVS mesh；
+- 诊断 GGGS 深度覆盖；
+- 独立开发和回归测试。
 
-这个实验只能说明稠密初始化、无结构更新的模型可以给出更连续的主体深度，不能回答
-“相同稀疏 COLMAP 起点下，AetherScan 与 pygsplat ADCPlus 谁导致孔洞”。它不再作为
-本问题的主对照，只保留为 dense-init 上界参考。
-
-### COLMAP 稀疏起点 → pygsplat ADCPlus 严格对照（2026-07-29）
-
-已按真正需要的路径重新训练，不加载上述 dense-init PLY：
-
-1. 输入为 `D:\ScanVideo\ori_img\sparse\0` 的 COLMAP 文本模型和同目录 76 张
-   `1000×1000` 图像，pygsplat 解析到 `83,993` 个稀疏点；
-2. 使用 pygsplat 原生 `adcplus` 预设训练 30k 步，`refine_every=200`、
-   `refine_start=600`、`refine_stop=15000`、`grow_select_fraction=0.4`、
-   `opac_decay=scale_decay=0.002`、上限 4M，并从第 7k 步启用 GGGS
-   depth-normal 和多视图 geo/NCC；
-3. 最终 PLY 为
-   `runs/ori_img_adcplus_20260729/pygsplat_sparse_adcplus/point_cloud.ply`，
-   含 `664,437` 个 Gaussian、SH degree 3 和 `filter_3D`；
-4. 将 AetherScan 实际使用的 76 个相机按已拟合 Sim(3) 表达到 COLMAP 世界，
-   两个模型使用相同物理深度上限和 Open3D TSDF 参数。COLMAP 坐标下等效参数为
-   `max_depth=8.3390748`、`voxel=0.004071814`、
-   `truncation=0.016287256`；深度量化尺度也按 Sim(3) 换算，保证与 Aether
-   世界的 1 mm 量化相同。
-
-同一物理尺度下的 Gaussian 参数如下：
-
-| 指标 | AetherScan ADCPlus | pygsplat 稀疏 ADCPlus |
-|---|---:|---:|
-| 最终 Gaussian 数 | 591,600 | 664,437 |
-| opacity P10/P50/P90 | 0.033/0.141/0.658 | 0.058/0.670/0.998 |
-| filter 后 opacity P10/P50/P90 | 0.029/0.128/0.619 | 0.038/0.294/0.792 |
-| opacity < 0.1 | 38.31% | 16.21% |
-| 几何平均 scale P10/P50/P90 | 1.001/6.173/31.623 mm | 0.582/3.062/29.013 mm |
-| filter_3D P10/P50/P90 | 0.200/0.395/1.566 mm | 0.263/1.003/3.306 mm |
-| 原始 axis ratio P50/P90/P99 | 5.98/25.84/117.24 | 12.86/52.22/181.75 |
-| filter 后 axis ratio P50/P90/P99 | 5.66/21.19/87.37 | 7.89/24.16/67.11 |
-
-pygsplat 并不是靠更小的 `filter_3D` 或更低的各向异性消除孔洞；它的关键区别是
-Gaussian 数更多、典型 scale 更小，而且剩余 Gaussian 的有效 opacity 明显更高。
-
-真实 densify/prune 日志也已逐事件解析：
-
-| 轨迹指标 | AetherScan ADCPlus | pygsplat 稀疏 ADCPlus |
-|---|---:|---:|
-| 初始点数 | 121,532 | 83,993 |
-| 累计 grow/refine | 842,453 | 773,042 |
-| 累计 prune | 372,385 | 192,598 |
-| prune /（初始 + 累计 grow） | 38.63% | 22.47% |
-| 最终点数 | 591,600 | 664,437 |
-| 15k–25k grow | 125,957 | 36,247 |
-| 15k–25k prune | 125,099 | 36,280 |
-
-两者都会进入密度平台，但 AetherScan 后半段的结构周转明显更强；因此“训练中删得
-更多”现在有数据支持，但仍不能把它单独定为根因，因为两边的初始 SfM 点、相机和
-几何 loss 起始步也不同。
-
-跨视角深度以 4 像素 stride、每帧 8 个最近相机统计，统一换算到 Aether 物理尺度：
-
-| 指标 | AetherScan ADCPlus | pygsplat 稀疏 ADCPlus |
-|---|---:|---:|
-| 有效深度像素（76 帧） | 28,222,121 | 27,921,997 |
-| 1 voxel 内全局一致率 | 83.83% | 85.00% |
-| 2 voxel 内全局一致率 | 92.03% | 92.91% |
-| 4 voxel 内全局一致率 | 93.75% | 94.39% |
-| 绝对深度残差 P50/P90 | 0.444/1.768 mm | 0.435/1.566 mm |
-| view 0 桌面 ROI，1 voxel | 78.99% | 81.72% |
-| view 0 body ROI，1 voxel | 90.11% | 90.58% |
-| view 0 tail ROI，1 voxel | 90.58% | 90.60% |
-
-同一 Open3D TSDF 后端下，AetherScan 深度得到
-`1,380,069` vertices / `2,717,369` faces，pygsplat 稀疏 ADCPlus 得到
-`1,352,458` vertices / `2,668,803` faces。两者均无 non-manifold edge，但开放
-边界统计有明显差异：
-
-| mesh 边界指标 | AetherScan ADCPlus | pygsplat 稀疏 ADCPlus |
-|---|---:|---:|
-| boundary edges | 52,151 | 44,669 |
-| boundary components | 4,402 | 4,131 |
-| 至少 64 条边的边界环 | 80 | 44 |
-| 至少 128 条边的边界环 | 38 | 21 |
-| 周长至少 32 mm 的边界环 | 130 | 91 |
-
-相同正面相机下，pygsplat 稀疏 ADCPlus mesh 在原图三个箭头位置没有复现 AetherScan
-结果中的大块贯穿孔；较大的开放边界环也减少约 45%。结合“AetherScan PLY 交给
-pygsplat/Open3D 仍复现缺陷”的上一组隔离实验，当前可以把主问题定位到
-**TSDF 之前的 3DGS/SfM 输入侧**：TSDF 会把多视图深度支持的局部差异放大为边界环，
-但不是 AetherScan C++ Marching Cubes 独自产生孔洞。下一步应固定 AetherScan 的
-相机、稀疏点和 geometry loss，仅降低后半程 prune/turnover 或设置主体最低有效
-opacity/density，做单变量训练 A/B；在该 A/B 完成前，不能把根因进一步简化成
-“只因为 prune 过多”。
-
-### ADCPlus 3D filter 生命周期修正（2026-07-29）
-
-后半程 prune 阈值 A/B 没有缓解可见孔洞，实验参数
-`adc_plus_post_growth_prune_factor` 已从产品代码、CLI 和文档中删除。继续逐项对照
-pygsplat 后发现了更直接的实现偏差：
-
-- pygsplat 始终把 `filter_3D` 作为渲染时的独立 Mip-Splatting floor；致密化后只重算
-  filter，不修改 canonical scale/opacity；
-- AetherScan 原实现会在每次 ADCPlus refine 前把当前 filter 烘焙进 scale/opacity，
-  refine 后再生成一个新 filter，造成 opacity 被多轮永久衰减；
-- 原实现还在 90% 训练进度停止刷新 filter，但 ADCPlus 的 prune-only refine 实际持续
-  到 95%，导致 90%–95% 区间的 filter 生命周期不完整。
-
-修正后从训练开始即计算 filter，refine 前不再 bake；0%–95% 每次 topology update 后
-重算，95% 后按 100 步周期刷新。使用相同 COLMAP 相机/稀疏点、相同 30k ADCPlus、
-相同 geometry loss、相同 TSDF 参数的单变量 A/B：
-
-| 指标 | 原 filter bake | 独立 filter |
-|---|---:|---:|
-| 最终 Gaussian 数 | 545,384 | 584,694 |
-| canonical opacity mean | 0.254 | 0.482 |
-| canonical opacity P10/P50 | 0.036 / 0.151 | 0.071 / 0.432 |
-| filter 后 opacity P10/P50 | 0.031 / 0.137 | 0.061 / 0.289 |
-| 3-view 平均 PSNR | 33.274 dB | 34.878 dB |
-| 76 帧有效深度像素 | 28,615,968 | 28,659,209 |
-| 全局 1-voxel 深度一致率 | 86.24% | 87.33% |
-| view 0 桌布 ROI 1-voxel 一致率 | 81.90% | 85.39% |
-| Open3D mesh boundary edges | 46,354 | 39,445 |
-| boundary components | 3,862 | 3,610 |
-| 至少 128 条边的边界环 | 36 | 19 |
-| 周长至少 32 mm 的边界环 | 124 | 80 |
-
-这次修正没有禁止 prune；低 opacity Gaussian 仍正常清理，因此与 prune=0 后留下大量
-近透明死点的实验不同。正面预览中仍有细碎开放边界，但大边界环和桌布跨视角深度误差
-均明显下降，说明反复 filter bake 是孔洞的重要来源之一，而不是全部来源。
+这些产物不得自动成为 GGGS 初始化、主体 Mask 或 TSDF 输入。诊断后端应使用单独命令或配置，
+避免普通产品路径误触发昂贵的 densify。
 
 ---
 
 ## 小结
 
-AetherScan 稠密段以 **Fast MVS 为可交付主干**（点云 + mesh，并可按需 texture /
-delight）；**GGGS（Geometry-Grounded Gaussian Splatting）为可选几何精修**。
-Mask / UV / Project / Delight 共用一套后处理，作用于用户选定的活跃 mesh。
-这样既满足「MVS 已经够用就停」的产品需求，又保留「需要更高几何质量时再开 GGGS」
-的升级路径。
+AetherScan 默认几何路线确定为：
 
-### GGGS C++ 后端落地状态（2026-07-21）
+```text
+SfM cameras + sparse points
+  → sparse ADCPlus / GGGS
+  → median depth / normal / alpha
+  → TSDF
+  → topology audit + Clean
+  → optional Texture / Delight
+```
 
-已新增 `splat` 模块并完成 GGGS 原生 CUDA rasterizer 的 forward/backward、TinyTensor
-参数激活与显式梯度、完整 11×11 fused SSIM CUDA forward/backward、融合 Adam、MVS
-dense-cloud 初始化、COLMAP 文本/二进制相机/稀疏点加载和 Gaussian PLY 导出。CLI 使用
-`--gggs --gggs-iterations N` 在 dense fusion 后训练，也可用 `--colmap PATH` 跳过内部 SfM/MVS。
-已有稠密点云可用 `--colmap PATH --dense-ply scene_dense.ply --gggs`，直接复用 COLMAP
-相机与原图、以 PLY 的位置/RGB/法线初始化 GGGS；PLY 中的 `view_indices/view_weights` 会一并读取。
-`--gggs-use-mask` 已支持与 pygsplat 一致的 `transparent`（前景 RGB + alpha BCE）和
-`masked`（前景 RGB + 背景 alpha 泄漏惩罚）模式，复用 `--masks` 或源图 alpha channel。
-
-长训练收敛修复已加入 scene-scaled mean LR、`1e-15` Adam epsilon、绝对 scale 边界和默认
-10:1 三轴比例约束。`D:\ScanVideo\ori_img` 上相同的 500k Gaussian / 4000 步 mask A/B 中，
-三个诊断视角相对旧实现提升 `1.45 / 2.39 / 2.67 dB`，极端轴比例 p99.9 从约 170k 降到 10。
-
-稀疏 COLMAP 初始化已支持 `default`、`adc_plus`、`adc_igs` 三种动态 split/clone/prune、
-opacity 管理和数量硬上限；MVS/外部 PLY 稠密点云初始化默认关闭致密化，也可显式选择
-`dense_adaptive`。GGGS median-depth/normal/alpha → TSDF → Clean 的 mesh extraction 与
-`active_mesh` 切换已经接通；外部稠密 PLY 可通过 `--colmap ... --dense-ply ...` 绕过 SfM/MVS。
-mesh 训练现在还默认启用 Mip-Splatting 3D filter，并从第 3,000 步加入 GGGS `sampleDepth`
-多视图几何往返与 7×7 plane-warp NCC；对应权重可用 `--gggs-mv-geo-weight` 和
-`--gggs-mv-ncc-weight` 做 A/B，训练日志会输出两项原始 loss 和有效像素数。
-当前仍未完成的是 ADC-IGS 逐像素 edge/error ownership、out-of-core view cache，以及 direct
-COLMAP 分支的 texture 编排。实现、构建方法、性能边界和许可证风险见
-[GGGS_CPP.md](GGGS_CPP.md)。
-
----
-
-## 可扩展全局表面重建与 Clean（2026-07-20）
-
-默认/高质量档的最终 mesh 现在必须使用 CGAL 全局 Delaunay visibility cut；CGAL
-不可用或全局切割失败时会明确报错，不再静默退回局部碎片网格。
-
-全局后端的关键实现如下：
-
-- 先按「所有观测视图中的投影距离 + 相对深度差」过滤 Delaunay 插入点，并合并观测；
-- 相机 cell 只定位一次，visibility ray 按 Delaunay segment traversal 计算；每个工作线程
-  使用稀疏局部累加器，达到阈值后批量合并，避免逐 ray 原子写热点；
-- s-t cut 使用 Boost Boykov-Kolmogorov。没有采用 OpenMVS 默认的 IBFS 源码，因为其
-  上游许可证限定研究用途，不适合产品分发；
-- 非 CGAL 构建在 densify 开始前即拒绝 default/high 全局 meshing，避免完成昂贵深度估计
-  后才发现后端不可用。
-
-Clean 与 OpenMVS 的处理尺度对齐：使用 P95 边长识别异常长三角形、使用 P55 边长与
-分量 AABB 对角线剔除尺度异常小的碎片、迭代删除 spike、拆分 bow-tie 顶点、统一绕向并
-补小孔。ROI 不再禁用全部补洞：只有由 OBB 裁切面产生的边界顶点被保护，主体内部的小孔
-仍会关闭。`mesh_spurious_factor=0` 和 `mesh_remove_spikes=false` 可用于关闭相应 API 级步骤。
+MVS 不再是默认阶段，也不负责生成前景 Mask。物体模式使用可选外部软 Mask 或内部 Gaussian
+主体自举；场景模式不做前背景分离。当前稀疏 ADCPlus 和 TSDF 核心已经实测可行，下一阶段的
+实现重点是直接 SfM 编排、无 MVS 主体自举、细结构保护和 TSDF 拓扑门禁。

@@ -371,7 +371,7 @@ HostTrainingView load_host_training_view(
     const bool has_projected_mask =
         view.foreground_mask.size() ==
         static_cast<std::size_t>(view.width) * view.height;
-    // Older/internal MVS paths used binary 0/1 masks while projected ROI
+    // Older/internal MVS paths used binary 0/1 masks while projected bounds
     // masks use 8-bit 0..255 coverage. Accept both representations so a
     // binary mask cannot silently become 255 times too transparent.
     const float projected_mask_denominator =

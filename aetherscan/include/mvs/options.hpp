@@ -29,40 +29,6 @@ struct DensifyOptions {
     // guard band prevents uncertain segmentation/sampling at silhouettes from
     // turning into long grazing-angle depth sheets.
     unsigned mask_border_px{1};
-    // Optional manual OBB text file (center/axes/half_extent), or automatic
-    // tabletop/ground removal followed by subject component extraction.
-    std::filesystem::path roi_path;
-    bool auto_roi{false};
-    // Build GGGS foreground constraints directly from ROI-filtered MVS depth
-    // maps. This avoids making a low-quality MVS mesh part of the mask path.
-    bool build_depth_roi_masks{false};
-    // Fractional padding applied independently to automatic OBB extents.
-    // Keep automatic ROI conservative: it is a reconstruction safety bound,
-    // not a semantic foreground cut. A 15% guard band avoids slicing valid
-    // support geometry when the fitted subject component ends near a surface.
-    float roi_margin_fraction{0.15F};
-    // Optional one-sided padding toward the detected support plane. Negative
-    // uses roi_margin_fraction. Depth-mask generation can preserve a complete
-    // pedestal without widening the horizontal OBB into the tabletop.
-    float auto_roi_ground_margin_fraction{-1.F};
-    // Coarse mesh silhouette expansion at working resolution.
-    unsigned auto_roi_mask_dilate_px{5};
-    // Morphological closing radius for broken coarse-mesh silhouettes.
-    // Zero selects a conservative image-scale adaptive radius. Only enclosed
-    // holes no larger than the corresponding structuring element are filled,
-    // preserving real gaps between subject parts.
-    unsigned auto_roi_mask_close_px{0};
-    // Soft transition around the foreground silhouette in working pixels.
-    unsigned auto_roi_mask_feather_px{2};
-    // Optional diagnostic export of the CGAL coarse mesh used to generate
-    // automatic foreground masks.
-    std::filesystem::path coarse_mesh_output_path;
-    // Stop after automatic ROI, coarse mesh, and projected-mask generation.
-    bool coarse_preview_only{false};
-    // RANSAC distance and component voxel size as scene-diagonal fractions.
-    float auto_roi_plane_threshold_fraction{0.003F};
-    float auto_roi_component_voxel_fraction{0.006F};
-    unsigned auto_roi_ransac_iters{512};
     // Image downscale steps before densify (0 = full res, 1 ~= half, ...).
     unsigned resolution_level{1};
     // Minimum working image dimension after downscale.

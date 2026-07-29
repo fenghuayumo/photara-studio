@@ -2,6 +2,7 @@
 
 #include "dataset_internal.hpp"
 #include "mvs/export.hpp"
+#include "mvs/internal.hpp"
 
 #include <Eigen/Geometry>
 
@@ -15,7 +16,7 @@
 namespace aetherscan::splat {
 namespace {
 
-void use_sparse_points_as_initial_cloud(mvs::MvsScene& scene) {
+void use_sparse_points_as_initial_cloud_impl(mvs::MvsScene& scene) {
     if (!scene.dense_cloud.points.empty()) return;
     scene.dense_cloud.points.reserve(scene.sparse_points.size());
     for (const mvs::SparsePoint& sparse : scene.sparse_points) {
@@ -100,7 +101,7 @@ void finalize_initial_cloud(
         result.initial_point_cloud = request.initial_point_cloud;
         result.initial_points_dense = true;
     } else {
-        use_sparse_points_as_initial_cloud(result.scene);
+        use_sparse_points_as_initial_cloud_impl(result.scene);
     }
     if (result.scene.dense_cloud.points.empty()) {
         generate_camera_frustum_points(
@@ -112,9 +113,20 @@ void finalize_initial_cloud(
             std::to_string(request.random_initial_point_count) +
             " deterministic camera-frustum initialization points");
     }
+    if (!result.scene.subject_bounds.valid)
+        mvs::detail::estimate_subject_bounds(
+            result.scene.sparse_points, result.scene.subject_bounds, 0, 1.15F);
 }
 
 }  // namespace
+
+void initialize_scene_from_sparse_points(mvs::MvsScene& scene) {
+    use_sparse_points_as_initial_cloud_impl(scene);
+    if (!scene.subject_bounds.valid)
+        mvs::detail::estimate_subject_bounds(
+            scene.sparse_points, scene.subject_bounds,
+            scene.thread_count, 1.15F);
+}
 
 DatasetFormat parse_dataset_format(const std::string_view value) {
     const std::string normalized =

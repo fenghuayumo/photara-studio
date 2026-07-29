@@ -51,12 +51,6 @@ struct DeviceRequest {
     unsigned random_seed{};
     bool use_geometric{};
     bool initialize_invalid{};
-    bool use_roi{};
-    float reference_to_world[9]{};
-    float reference_center[3]{};
-    float roi_center[3]{};
-    float roi_axes[9]{};
-    float roi_half_extent[3]{};
 };
 
 bool check(
@@ -394,32 +388,10 @@ __device__ float geometric_score(
     return fminf(4.F, sqrtf(distance * (distance + 2.F)));
 }
 
-__device__ bool inside_roi(
-    const DeviceRequest& request, const float3 reference_point) {
-    if (!request.use_roi) return true;
-    const float3 world = add(
-        matrix_vector(request.reference_to_world, reference_point),
-        make_vec(
-            request.reference_center[0],
-            request.reference_center[1],
-            request.reference_center[2]));
-    const float3 relative = sub(
-        world,
-        make_vec(
-            request.roi_center[0], request.roi_center[1],
-            request.roi_center[2]));
-    const float3 local =
-        matrix_transpose_vector(request.roi_axes, relative);
-    return fabsf(local.x) <= request.roi_half_extent[0] &&
-           fabsf(local.y) <= request.roi_half_extent[1] &&
-           fabsf(local.z) <= request.roi_half_extent[2];
-}
-
 __device__ float score_candidate(
     const DeviceRequest& request, const Patch& patch,
     const int x, const int y, const float depth, const float3 normal) {
-    if (!(depth >= request.depth_min && depth <= request.depth_max) ||
-        !inside_roi(request, mul(patch.center_ray, depth)))
+    if (!(depth >= request.depth_min && depth <= request.depth_max))
         return k_robust;
     float scores[k_max_sources];
     unsigned count = 0;
@@ -758,25 +730,6 @@ bool run(const Request& request, std::string& error) {
     device_request.random_seed = request.random_seed;
     device_request.use_geometric = request.use_geometric;
     device_request.initialize_invalid = request.initialize_invalid;
-    device_request.use_roi = request.use_roi;
-    std::copy(
-        std::begin(request.reference_to_world),
-        std::end(request.reference_to_world),
-        std::begin(device_request.reference_to_world));
-    std::copy(
-        std::begin(request.reference_center),
-        std::end(request.reference_center),
-        std::begin(device_request.reference_center));
-    std::copy(
-        std::begin(request.roi_center), std::end(request.roi_center),
-        std::begin(device_request.roi_center));
-    std::copy(
-        std::begin(request.roi_axes), std::end(request.roi_axes),
-        std::begin(device_request.roi_axes));
-    std::copy(
-        std::begin(request.roi_half_extent),
-        std::end(request.roi_half_extent),
-        std::begin(device_request.roi_half_extent));
 
     const dim3 block(16, 8);
     const unsigned rows = request.reference.height;

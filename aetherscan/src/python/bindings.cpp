@@ -313,11 +313,6 @@ NB_MODULE(aetherscan_native, module) {
         .def(nb::init<>())
         .def_rw("mask_dir", &mvs::DensifyOptions::mask_dir)
         .def_rw("mask_border_px", &mvs::DensifyOptions::mask_border_px)
-        .def_rw("roi_path", &mvs::DensifyOptions::roi_path)
-        .def_rw("auto_roi", &mvs::DensifyOptions::auto_roi)
-        .def_rw(
-            "roi_margin_fraction",
-            &mvs::DensifyOptions::roi_margin_fraction)
         .def_rw(
             "resolution_level", &mvs::DensifyOptions::resolution_level)
         .def_rw("min_resolution", &mvs::DensifyOptions::min_resolution)

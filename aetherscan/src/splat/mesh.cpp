@@ -176,9 +176,7 @@ GggsMeshResult extract_gggs_mesh(
     for (const auto& view : scene.views)
         geometry_scene.views.push_back(make_geometry_view(view));
     geometry_scene.sparse_points = scene.sparse_points;
-    geometry_scene.roi = scene.roi;
-    geometry_scene.tsdf_bounds = scene.tsdf_bounds;
-    geometry_scene.roi_automatic = scene.roi_automatic;
+    geometry_scene.subject_bounds = scene.subject_bounds;
     geometry_scene.thread_count = scene.thread_count;
 
     mvs::DensifyOptions fusion_options = mesh_options.fusion;
@@ -190,14 +188,9 @@ GggsMeshResult extract_gggs_mesh(
     if (fusion_options.mesh_method == mvs::MeshMethod::tsdf) {
         fusion_options.mesh_tsdf_diagnostics_dir =
             mesh_options.diagnostics_dir;
-        if (scene.roi.valid && !scene.roi_automatic) {
-            // A manual ROI is an explicit user override. Automatic ROI is
-            // deliberately not reused here because it is a semantic subject
-            // crop, unlike gs2mesh's broad reconstruction bounds.
-            geometry_scene.tsdf_bounds = scene.roi;
-        } else if (!geometry_scene.tsdf_bounds.valid) {
-            mvs::detail::estimate_tsdf_bounds(
-                scene.dense_cloud, geometry_scene.tsdf_bounds,
+        if (!geometry_scene.subject_bounds.valid) {
+            mvs::detail::estimate_subject_bounds(
+                scene.sparse_points, geometry_scene.subject_bounds,
                 scene.thread_count,
                 fusion_options.mesh_tsdf_bounds_padding);
         }
@@ -316,7 +309,7 @@ GggsMeshResult extract_gggs_mesh(
                 // diagnostic count accurate without imposing any silhouette
                 // or primitive-shape assumption.
                 if (fusion_options.mesh_method == mvs::MeshMethod::tsdf &&
-                    geometry_scene.tsdf_bounds.valid) {
+                    geometry_scene.subject_bounds.valid) {
                     const mvs::Vec3f camera_point =
                         geometry_view.unproject(
                             static_cast<float>(x),
@@ -327,7 +320,7 @@ GggsMeshResult extract_gggs_mesh(
                                 camera_point.cast<double>())
                             .cast<float>();
                     if (!world_point.allFinite() ||
-                        !geometry_scene.tsdf_bounds.contains(world_point)) {
+                        !geometry_scene.subject_bounds.contains(world_point)) {
                         ++rejected_bounds_pixels;
                         continue;
                     }
@@ -424,7 +417,7 @@ GggsMeshResult extract_gggs_mesh(
         " scene_extent=", scene_extent,
         " max_depth=", allowed_maximum_depth,
         " tsdf_voxel=", fusion_options.mesh_tsdf_voxel_size,
-        " bounds_enabled=", geometry_scene.tsdf_bounds.valid,
+        " subject_bounds_enabled=", geometry_scene.subject_bounds.valid,
         " bounds_rejected_pixels=", rejected_bounds_pixels,
         " depth_normal_compared=", compared_depth_normal_pixels,
         " depth_normal_rejected=", rejected_depth_normal_pixels,

@@ -273,9 +273,14 @@ MvsScene build_mvs_scene(
             scene.sparse_points.push_back(std::move(point));
     }
 
+    detail::estimate_subject_bounds(
+        scene.sparse_points, scene.subject_bounds,
+        scene.thread_count, 1.15F);
+
     core::Logger::instance().info(
         "mvs scene: views=", scene.views.size(),
-        " sparse_points=", scene.sparse_points.size());
+        " sparse_points=", scene.sparse_points.size(),
+        " subject_bounds=", scene.subject_bounds.valid ? "valid" : "unavailable");
     stage.finish();
     return scene;
 }

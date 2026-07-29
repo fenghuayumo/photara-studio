@@ -45,8 +45,7 @@ std::vector<GlobalVertex> collect_global_vertices(
     std::vector<GlobalVertex> vertices;
     vertices.reserve(scene.dense_cloud.points.size());
     for (const DensePoint& point : scene.dense_cloud.points) {
-        if (!point.position.allFinite() || point.views.empty() ||
-            (scene.roi.valid && !scene.roi.contains(point.position)))
+        if (!point.position.allFinite() || point.views.empty())
             continue;
         GlobalVertex vertex;
         vertex.position = point.position;
@@ -389,9 +388,7 @@ bool extract_surface(
     // The unbounded Delaunay cells represent known outside/free space.
     for (auto cell = triangulation.all_cells_begin();
          cell != triangulation.all_cells_end(); ++cell)
-        if (triangulation.is_infinite(cell) ||
-            (scene.roi.valid &&
-             !scene.roi.contains(cell_center(triangulation, cell))))
+        if (triangulation.is_infinite(cell))
             cell->info().source = options.mesh_k_inf;
 
     // Camera locations are shared by many rays. Locate them once, both to
@@ -858,11 +855,6 @@ bool extract_surface(
         const CellHandle first = facet->first;
         const int opposite = facet->second;
         const CellHandle second = first->neighbor(opposite);
-        if (scene.roi.valid &&
-            (!scene.roi.contains(cell_center(triangulation, first)) ||
-             (!triangulation.is_infinite(second) &&
-              !scene.roi.contains(cell_center(triangulation, second)))))
-            continue;
         const bool first_source = graph.is_source_side(
             static_cast<std::size_t>(first->info().node));
         const bool second_source = graph.is_source_side(
@@ -887,7 +879,7 @@ bool extract_surface(
             std::max({edge01.norm(), edge12.norm(), edge20.norm()});
         longest_surface_edge = std::max(longest_surface_edge, longest_edge);
         // The graph cut labels tetrahedra, so its complete source/sink
-        // interface is topologically closed (apart from an intentional ROI
+        // interface is topologically closed (apart from an intentional bounds
         // cut). Dropping individual long facets here punctures that interface
         // and creates exactly the boundary loops Clean is later asked to
         // repair. Preserve the interface and leave scale-aware rejection to

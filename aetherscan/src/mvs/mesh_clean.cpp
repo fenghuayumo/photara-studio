@@ -235,7 +235,7 @@ float percentile_edge_length(
 
 void remove_scale_spurious_geometry(
     Mesh& mesh, const float factor,
-    const std::vector<std::uint8_t>& roi_boundary) {
+    const std::vector<std::uint8_t>& bounds_boundary) {
     if (!(factor > 0.F) || mesh.faces.empty()) return;
     const float edge95 = percentile_edge_length(mesh, mesh.faces, 95);
     if (edge95 > 0.F) {
@@ -244,11 +244,11 @@ void remove_scale_spurious_geometry(
             for (int slot = 0; slot < 3; ++slot) {
                 const int a = face[slot];
                 const int b = face[(slot + 1) % 3];
-                // Never turn an intentional ROI cut into a larger opening.
-                if ((!roi_boundary.empty() &&
-                     roi_boundary[static_cast<std::size_t>(a)]) ||
-                    (!roi_boundary.empty() &&
-                     roi_boundary[static_cast<std::size_t>(b)]))
+                // Never turn an intentional SubjectBounds cut into a larger opening.
+                if ((!bounds_boundary.empty() &&
+                     bounds_boundary[static_cast<std::size_t>(a)]) ||
+                    (!bounds_boundary.empty() &&
+                     bounds_boundary[static_cast<std::size_t>(b)]))
                     continue;
                 if ((mesh.vertices[static_cast<std::size_t>(a)] -
                      mesh.vertices[static_cast<std::size_t>(b)]).norm() >
@@ -291,8 +291,8 @@ void remove_scale_spurious_geometry(
                     mesh.vertices[static_cast<std::size_t>(vertex)];
                 box.minimum = box.minimum.cwiseMin(point);
                 box.maximum = box.maximum.cwiseMax(point);
-                if (!roi_boundary.empty() &&
-                    roi_boundary[static_cast<std::size_t>(vertex)])
+                if (!bounds_boundary.empty() &&
+                    bounds_boundary[static_cast<std::size_t>(vertex)])
                     box.touches_roi = true;
             }
             for (const int adjacent :
@@ -776,10 +776,10 @@ SmoothingStats smooth_tsdf_mesh_taubin(
 
 void clean_mesh(
     Mesh& mesh, const DensifyOptions& options,
-    const OrientedBoundingBox* roi) {
-    std::vector<std::uint8_t> roi_boundary(mesh.vertices.size(), 0);
-    if (roi != nullptr && roi->valid) {
-        // Remember vertices on faces cut by the ROI. Boundary loops touching
+    const OrientedBoundingBox* subject_bounds) {
+    std::vector<std::uint8_t> bounds_boundary(mesh.vertices.size(), 0);
+    if (subject_bounds != nullptr && subject_bounds->valid) {
+        // Remember vertices on faces cut by SubjectBounds. Boundary loops touching
         // these vertices are intentional crop contours; other small loops are
         // reconstruction holes and remain eligible for filling.
         for (const Eigen::Vector3i& face : mesh.faces) {
@@ -789,22 +789,22 @@ void clean_mesh(
             std::array<bool, 3> inside{};
             unsigned inside_count = 0;
             for (int slot = 0; slot < 3; ++slot) {
-                inside[static_cast<std::size_t>(slot)] = roi->contains(
+                inside[static_cast<std::size_t>(slot)] = subject_bounds->contains(
                     mesh.vertices[static_cast<std::size_t>(face[slot])]);
                 inside_count += inside[static_cast<std::size_t>(slot)] ? 1U : 0U;
             }
             if (inside_count == 0 || inside_count == 3) continue;
             for (int slot = 0; slot < 3; ++slot)
                 if (inside[static_cast<std::size_t>(slot)])
-                    roi_boundary[static_cast<std::size_t>(face[slot])] = 1;
+                    bounds_boundary[static_cast<std::size_t>(face[slot])] = 1;
         }
         std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
             if (face.minCoeff() < 0 ||
                 face.maxCoeff() >= static_cast<int>(mesh.vertices.size()))
                 return true;
-            return !roi->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
-                   !roi->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
-                   !roi->contains(mesh.vertices[static_cast<std::size_t>(face[2])]);
+            return !subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
+                   !subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
+                   !subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[2])]);
         });
     }
     if (!options.mesh_clean || mesh.faces.empty()) {
@@ -839,7 +839,7 @@ void clean_mesh(
             mesh.faces, options.mesh_min_component_faces,
             options.mesh_tsdf_min_component_fraction, connectivity);
         const unsigned holes = close_small_holes(
-            mesh, options.mesh_close_hole_edges, roi_boundary, false);
+            mesh, options.mesh_close_hole_edges, bounds_boundary, false);
         compact_and_compute_normals(mesh);
         core::Logger::instance().info(
             "mvs mesh TSDF postprocess: faces=", input_faces, " -> ",
@@ -865,10 +865,10 @@ void clean_mesh(
             face.maxCoeff() >= static_cast<int>(mesh.vertices.size()) ||
             face[0] == face[1] || face[1] == face[2] || face[2] == face[0])
             continue;
-        if (roi != nullptr && roi->valid &&
-            (!roi->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
-             !roi->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
-             !roi->contains(mesh.vertices[static_cast<std::size_t>(face[2])])))
+        if (subject_bounds != nullptr && subject_bounds->valid &&
+            (!subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
+             !subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
+             !subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[2])])))
             continue;
         const Vec3f cross =
             (mesh.vertices[static_cast<std::size_t>(face[1])] -
@@ -900,7 +900,7 @@ void clean_mesh(
     // The aggressive OpenMVS-style pass targets the closed global cut.
     if (options.mesh_method == MeshMethod::delaunay_cut)
         remove_scale_spurious_geometry(
-            mesh, options.mesh_spurious_factor, roi_boundary);
+            mesh, options.mesh_spurious_factor, bounds_boundary);
     remove_small_components(
         mesh.faces, options.mesh_min_component_faces,
         options.mesh_method == MeshMethod::tsdf
@@ -909,17 +909,17 @@ void clean_mesh(
     orient_components(mesh.faces);
     const unsigned spikes = options.mesh_method == MeshMethod::delaunay_cut &&
             options.mesh_remove_spikes
-        ? remove_spikes(mesh, roi_boundary)
+        ? remove_spikes(mesh, bounds_boundary)
         : 0U;
-    const unsigned bow_ties = split_bow_tie_vertices(mesh, roi_boundary);
+    const unsigned bow_ties = split_bow_tie_vertices(mesh, bounds_boundary);
     const unsigned holes = close_small_holes(
-        mesh, options.mesh_close_hole_edges, roi_boundary);
+        mesh, options.mesh_close_hole_edges, bounds_boundary);
     smooth_mesh(mesh, options);
-    if (roi != nullptr && roi->valid) {
+    if (subject_bounds != nullptr && subject_bounds->valid) {
         std::erase_if(mesh.faces, [&](const Eigen::Vector3i& face) {
-            return !roi->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
-                   !roi->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
-                   !roi->contains(mesh.vertices[static_cast<std::size_t>(face[2])]);
+            return !subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[0])]) ||
+                   !subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[1])]) ||
+                   !subject_bounds->contains(mesh.vertices[static_cast<std::size_t>(face[2])]);
         });
     }
     compact_and_compute_normals(mesh);

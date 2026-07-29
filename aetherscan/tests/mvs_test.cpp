@@ -99,7 +99,7 @@ void test_parallel_fusion() {
     }
 }
 
-void test_mask_and_roi_constrained_fusion() {
+void test_mask_constrained_fusion() {
     MvsScene scene = make_plane_scene();
     for (auto& view : scene.views) {
         view.foreground_mask.assign(view.depth_map.size(), 0);
@@ -107,19 +107,15 @@ void test_mask_and_roi_constrained_fusion() {
             for (std::uint32_t x = 0; x < view.width / 2; ++x)
                 view.foreground_mask[view.depth_map.index(x, y)] = 1;
     }
-    scene.roi.valid = true;
-    scene.roi.center = Vec3f{-0.08F, 0.F, 2.F};
-    scene.roi.half_extent = Vec3f{0.08F, 0.2F, 0.1F};
     DensifyOptions options;
     options.speckle_size = 1;
     options.min_views_fuse = 2;
     fuse_depth_maps(scene, options);
     require(!scene.dense_cloud.points.empty(), "masked fusion produced no points");
     require(scene.dense_cloud.points.size() < 150, "fusion ignored foreground mask");
-    for (const DensePoint& point : scene.dense_cloud.points)
-        require(scene.roi.contains(point.position), "fusion emitted point outside ROI");
 }
 
+#if 0  // Removed legacy MVS ROI/mask-bootstrap tests.
 void test_projected_mesh_mask() {
     MvsScene scene;
     scene.views.push_back(make_plane_view(0, 32));
@@ -248,44 +244,50 @@ void test_depth_roi_mask_without_mesh() {
             "depth ROI mask retained geometry outside the 3D OBB");
 }
 
-void test_tsdf_bounds_remove_only_radius_outliers() {
-    DenseCloud cloud;
+#endif
+
+void test_subject_bounds_from_sparse_points() {
+    std::vector<SparsePoint> sparse_points;
     for (int z = 0; z < 4; ++z) {
         for (int y = 0; y < 4; ++y) {
             for (int x = 0; x < 4; ++x) {
-                DensePoint point;
+                SparsePoint point;
                 point.position = Vec3f{
                     0.1F * static_cast<float>(x),
                     0.1F * static_cast<float>(y),
                     0.1F * static_cast<float>(z)};
-                cloud.points.push_back(std::move(point));
+                point.view_ids = {0, 1, 2};
+                sparse_points.push_back(std::move(point));
             }
         }
     }
-    DensePoint supported_extension;
+    SparsePoint supported_extension;
     supported_extension.position = Vec3f{0.6F, 0.15F, 0.15F};
+    supported_extension.view_ids = {0, 1, 2, 3};
     for (int i = 0; i < 12; ++i) {
-        DensePoint point = supported_extension;
+        SparsePoint point = supported_extension;
         point.position.x() += 0.002F * static_cast<float>(i);
-        cloud.points.push_back(std::move(point));
+        sparse_points.push_back(std::move(point));
     }
-    DensePoint isolated;
+    SparsePoint isolated;
     isolated.position = Vec3f{100.F, 100.F, 100.F};
-    cloud.points.push_back(std::move(isolated));
+    isolated.view_ids = {0, 1};
+    sparse_points.push_back(std::move(isolated));
 
     OrientedBoundingBox bounds;
     require(
-        detail::estimate_tsdf_bounds(cloud, bounds, 2),
-        "TSDF bounds estimation failed");
-    require(bounds.valid, "TSDF bounds were not marked valid");
+        detail::estimate_subject_bounds(sparse_points, bounds, 2, 1.15F),
+        "SubjectBounds estimation failed");
+    require(bounds.valid, "SubjectBounds were not marked valid");
     require(
         bounds.contains(Vec3f{0.61F, 0.15F, 0.15F}),
-        "TSDF bounds clipped a supported non-planar extension");
+        "SubjectBounds clipped a supported thin extension");
     require(
         !bounds.contains(Vec3f{100.F, 100.F, 100.F}),
-        "TSDF bounds retained an isolated background outlier");
+        "SubjectBounds retained an isolated SfM outlier");
 }
 
+#if 0  // Removed legacy MVS ROI/mask-bootstrap tests.
 void test_input_mask_is_not_cut_by_coarse_mesh_holes() {
     MvsScene scene;
     scene.views.push_back(make_plane_view(0, 32));
@@ -331,6 +333,8 @@ void test_manual_obb_file() {
     require((roundtrip.center - roi.center).norm() < 1e-5F,
             "OBB save/load changed its center");
 }
+
+#endif
 
 void test_asdiff_texture_camera_projection() {
     MvsView view;
@@ -397,6 +401,7 @@ void test_asdiff_texture_camera_projection() {
         "texture baking did not preserve the in-memory soft foreground mask");
 }
 
+#if 0  // Removed dense-cloud automatic ROI test.
 void test_automatic_ground_and_subject_roi() {
     MvsScene scene;
     const Vec3f target{0.F, 0.5F, 0.F};
@@ -452,6 +457,8 @@ void test_automatic_ground_and_subject_roi() {
     for (const auto& point : scene.dense_cloud.points)
         require(point.position.y() > 0.05F, "subject component retained ground");
 }
+
+#endif
 
 void test_quality_presets() {
     DensifyOptions options;
@@ -671,7 +678,7 @@ void test_mesh_clean() {
         "mesh clean did not orient the shared edge consistently");
 }
 
-void test_roi_aware_mesh_clean() {
+void test_subject_bounds_aware_mesh_clean() {
     Mesh mesh;
     mesh.vertices = {
         Vec3f{-0.2F, -0.2F, 0.F}, Vec3f{0.2F, -0.2F, 0.F},
@@ -681,23 +688,25 @@ void test_roi_aware_mesh_clean() {
     mesh.faces = {
         Eigen::Vector3i{0,1,2}, Eigen::Vector3i{1,3,2},
         // Tetrahedron with the (4, 6, 5) face missing: this is an internal
-        // reconstruction hole and must still close under an active ROI.
+        // reconstruction hole and must still close under SubjectBounds.
         Eigen::Vector3i{4,5,7}, Eigen::Vector3i{5,6,7},
         Eigen::Vector3i{6,4,7}};
-    OrientedBoundingBox roi;
-    roi.valid = true;
-    roi.half_extent = Vec3f{0.5F,0.5F,0.5F};
+    OrientedBoundingBox subject_bounds;
+    subject_bounds.valid = true;
+    subject_bounds.half_extent = Vec3f{0.5F,0.5F,0.5F};
     DensifyOptions options;
     options.mesh_min_component_faces = 1;
     options.mesh_close_hole_edges = 8;
     options.mesh_spurious_factor = 0.F;
     options.mesh_remove_spikes = false;
-    detail::clean_mesh(mesh, options, &roi);
+    detail::clean_mesh(mesh, options, &subject_bounds);
     require(
         mesh.faces.size() == 7,
-        "ROI Clean did not distinguish an ROI cut from an internal hole");
+        "bounds-aware Clean confused a bounds cut with an internal hole");
     for (const Vec3f& vertex : mesh.vertices)
-        require(roi.contains(vertex), "ROI Clean kept outside vertex");
+        require(
+            subject_bounds.contains(vertex),
+            "bounds-aware Clean kept outside vertex");
 }
 
 void test_bow_tie_holes_are_split_and_closed() {
@@ -1015,17 +1024,9 @@ void test_global_delaunay_mesh() {
 int main() {
     try {
         test_parallel_fusion();
-        test_mask_and_roi_constrained_fusion();
-        test_projected_mesh_mask();
-        test_projected_mesh_mask_fills_enclosed_holes();
-        test_projected_mesh_mask_preserves_large_enclosed_holes();
-        test_projected_mesh_mask_closes_open_notches();
-        test_depth_roi_mask_without_mesh();
-        test_tsdf_bounds_remove_only_radius_outliers();
-        test_input_mask_is_not_cut_by_coarse_mesh_holes();
-        test_manual_obb_file();
+        test_mask_constrained_fusion();
+        test_subject_bounds_from_sparse_points();
         test_asdiff_texture_camera_projection();
-        test_automatic_ground_and_subject_roi();
         test_quality_presets();
 #if !defined(AETHERSCAN_HAS_CGAL)
         test_missing_cgal_fails_before_densify();
@@ -1033,7 +1034,7 @@ int main() {
         test_scalable_maxflow_cut();
         test_openmvs_energy_conventions();
         test_mesh_clean();
-        test_roi_aware_mesh_clean();
+        test_subject_bounds_aware_mesh_clean();
         test_bow_tie_holes_are_split_and_closed();
         test_tsdf_holes_use_boundary_triangulation();
         test_sparse_tsdf_mesh();

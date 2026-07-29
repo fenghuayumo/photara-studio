@@ -281,7 +281,6 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                     static_cast<float>(x), static_cast<float>(y), rdm.depth[index]);
                 const Vec3f world0 =
                     ref.pose.transform_camera_to_world(cam0.cast<double>()).cast<float>();
-                if (scene.roi.valid && !scene.roi.contains(world0)) continue;
                 const Vec3f world_n0 =
                     (ref.pose.R.transpose().cast<float>() * normal0).normalized();
                 const Vec3f viewing_ray0 =
@@ -463,7 +462,6 @@ void fuse_depth_maps(MvsScene& scene, const DensifyOptions& options) {
                 if (inlier_count < options.min_views_fuse) continue;
                 position /= std::max(weight, 1e-6F);
                 if (!position.allFinite() || normal.squaredNorm() < 1e-10F) continue;
-                if (scene.roi.valid && !scene.roi.contains(position)) continue;
                 normal.normalize();
 
                 const GridKey key{

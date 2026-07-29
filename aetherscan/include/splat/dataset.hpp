@@ -79,4 +79,8 @@ private:
 [[nodiscard]] DatasetLoadResult load_splat_dataset(
     const DatasetLoadRequest& request);
 
+// Populate the trainer's initial cloud directly from SfM sparse landmarks.
+// This is the default product path and never marks the input as dense.
+void initialize_scene_from_sparse_points(mvs::MvsScene& scene);
+
 }  // namespace aetherscan::splat

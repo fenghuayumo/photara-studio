@@ -168,7 +168,7 @@ struct TouchedBlock {
 }
 
 [[nodiscard]] std::vector<TouchedBlock> allocate_view_blocks(
-    const MvsView& view, const OrientedBoundingBox& roi,
+    const MvsView& view, const OrientedBoundingBox& subject_bounds,
     const float block_length, const float truncation, Volume& volume,
     std::size_t& valid_depth_samples) {
     std::unordered_set<GridKey, GridHash> touched;
@@ -188,7 +188,8 @@ struct TouchedBlock {
                 .transform_camera_to_world(camera_point.cast<double>())
                 .cast<float>();
             if (!world_point.allFinite() ||
-                (roi.valid && !roi.contains(world_point, truncation)))
+                (subject_bounds.valid &&
+                 !subject_bounds.contains(world_point, truncation)))
                 continue;
 
             const GridKey minimum = floor_key(
@@ -210,7 +211,7 @@ struct TouchedBlock {
 }
 
 [[nodiscard]] std::uint64_t integrate_view(
-    const MvsView& view, const OrientedBoundingBox& roi,
+    const MvsView& view, const OrientedBoundingBox& subject_bounds,
     const float voxel_size, const float truncation,
     const std::vector<TouchedBlock>& blocks) {
     const DepthMap& map = view.depth_map;
@@ -230,7 +231,9 @@ struct TouchedBlock {
                 for (int z = 0; z < k_block_resolution; ++z) {
                     const GridKey key = global_key(touched.key, x, y, z);
                     const Vec3f world = position_of(key, voxel_size);
-                    if (roi.valid && !roi.contains(world)) continue;
+                    if (subject_bounds.valid &&
+                        !subject_bounds.contains(world))
+                        continue;
                     const Vec3f camera = view.pose
                         .transform_world_to_camera(world.cast<double>())
                         .cast<float>();
@@ -705,8 +708,7 @@ void save_tsdf_diagnostics(
 
 bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.mesh.tsdf");
-    const OrientedBoundingBox& bounds =
-        scene.tsdf_bounds.valid ? scene.tsdf_bounds : scene.roi;
+    const OrientedBoundingBox& bounds = scene.subject_bounds;
     const float inferred_voxel = estimate_voxel_size(scene);
     const float voxel_size = options.mesh_tsdf_voxel_size > 0.F
         ? options.mesh_tsdf_voxel_size

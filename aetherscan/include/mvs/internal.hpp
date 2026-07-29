@@ -18,16 +18,10 @@ struct ViewImage {
 std::vector<ViewImage> load_view_images(
     const MvsScene& scene, const DensifyOptions& options);
 
-bool load_manual_roi(
-    const std::filesystem::path& path, OrientedBoundingBox& roi);
-bool estimate_automatic_roi(MvsScene& scene, const DensifyOptions& options);
-bool estimate_tsdf_bounds(
-    const DenseCloud& cloud, OrientedBoundingBox& result,
+bool estimate_subject_bounds(
+    const std::vector<SparsePoint>& sparse_points,
+    OrientedBoundingBox& result,
     unsigned thread_count = 0, float padding_scale = 1.1F);
-void build_depth_roi_foreground_masks(
-    MvsScene& scene, const DensifyOptions& options);
-void build_projected_foreground_masks(
-    MvsScene& scene, const DensifyOptions& options);
 
 // Scalable global Delaunay/visibility graph-cut backend. Returns false when
 // CGAL support is not built or a valid global surface cannot be extracted.
@@ -41,7 +35,7 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options);
 // Backend-independent topology cleanup and normal recomputation.
 void clean_mesh(
     Mesh& mesh, const DensifyOptions& options,
-    const OrientedBoundingBox* roi = nullptr);
+    const OrientedBoundingBox* subject_bounds = nullptr);
 
 // CGAL orients a tetrahedron facet according to the index of its opposite
 // vertex. Keeping that orientation is important for the signed

@@ -485,18 +485,22 @@ Mesh load_mesh_ply(const std::filesystem::path& path) {
     return mesh;
 }
 
-void save_roi(
-    const OrientedBoundingBox& roi, const std::filesystem::path& path) {
-    if (!roi.valid) throw std::invalid_argument("Cannot save an invalid ROI");
+void save_subject_bounds(
+    const OrientedBoundingBox& bounds, const std::filesystem::path& path) {
+    if (!bounds.valid)
+        throw std::invalid_argument("Cannot save invalid SubjectBounds");
     std::ofstream out(path);
-    if (!out) throw std::runtime_error("Failed to create ROI: " + path.string());
+    if (!out)
+        throw std::runtime_error(
+            "Failed to create SubjectBounds: " + path.string());
     out.precision(9);
-    out << roi.center.x() << ' ' << roi.center.y() << ' ' << roi.center.z();
+    out << bounds.center.x() << ' ' << bounds.center.y() << ' '
+        << bounds.center.z();
     for (int row = 0; row < 3; ++row)
         for (int column = 0; column < 3; ++column)
-            out << ' ' << roi.axes(row, column);
-    out << ' ' << roi.half_extent.x() << ' ' << roi.half_extent.y() << ' '
-        << roi.half_extent.z() << '\n';
+            out << ' ' << bounds.axes(row, column);
+    out << ' ' << bounds.half_extent.x() << ' '
+        << bounds.half_extent.y() << ' ' << bounds.half_extent.z() << '\n';
 }
 
 void save_dense_ply(const DenseCloud& cloud, const std::filesystem::path& path) {

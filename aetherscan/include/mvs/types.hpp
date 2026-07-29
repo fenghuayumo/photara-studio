@@ -161,15 +161,10 @@ struct MvsScene {
     std::vector<SparsePoint> sparse_points;
     DenseCloud dense_cloud;
     Mesh mesh;
-    OrientedBoundingBox roi;
-    // A broad point-cloud-derived safety bound used only by TSDF allocation
-    // and integration. Unlike roi, this does not describe a semantic subject
-    // and must not be projected into image-space foreground masks.
-    OrientedBoundingBox tsdf_bounds;
-    bool roi_automatic{false};
-    bool has_ground_plane{false};
-    Vec3f ground_normal{Vec3f::Zero()};
-    float ground_offset{0.F};  // ground_normal.dot(X) = ground_offset
+    // Conservative product reconstruction volume estimated from SfM sparse
+    // points. It limits GGGS extraction and TSDF allocation, but never deletes
+    // input points and is never projected into a 2D foreground mask.
+    OrientedBoundingBox subject_bounds;
     unsigned thread_count{0};
 };
 

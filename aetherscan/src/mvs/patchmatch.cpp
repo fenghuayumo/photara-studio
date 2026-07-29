@@ -370,15 +370,7 @@ void run_view_tile_batches(
     const sfm::Pose3D& ref_pose, const std::vector<SourceContext>& sources,
     const float depth,
     const Vec3f& normal, const float robust, const bool use_geo,
-    const float geo_weight, const unsigned min_patch_views,
-    const OrientedBoundingBox* roi) {
-    if (roi != nullptr && roi->valid) {
-        const Vec3f camera = ref.unproject(
-            static_cast<float>(x), static_cast<float>(y), depth);
-        const Vec3f world = ref_pose.transform_camera_to_world(
-            camera.cast<double>()).cast<float>();
-        if (!roi->contains(world)) return robust;
-    }
+    const float geo_weight, const unsigned min_patch_views) {
     if (sources.empty()) return robust;
     // This function is on the hottest PatchMatch path. A fixed buffer avoids
     // one heap allocation for every pixel/hypothesis evaluation.
@@ -468,7 +460,7 @@ void run_patchmatch_level_cpu(
     const std::vector<const DepthMap*>& neighbor_depths,
     const float d_min, const float d_max, const DensifyOptions& options,
     const unsigned random_seed, const unsigned threads, const bool use_geo,
-    const bool initialize_invalid, const OrientedBoundingBox* roi) {
+    const bool initialize_invalid) {
     DepthMap& dm = ref.depth;
     std::vector<SourceContext> sources;
     sources.reserve(neighbors.size());
@@ -525,7 +517,7 @@ void run_patchmatch_level_cpu(
                         patch, static_cast<int>(x), static_cast<int>(y), ref,
                         ref_pose, sources, dm.depth[idx], dm.normal[idx], robust,
                         use_geo, options.geometric_weight,
-                        options.min_patch_views, roi);
+                        options.min_patch_views);
                 }
             }
         });
@@ -590,7 +582,7 @@ void run_patchmatch_level_cpu(
                                     patch, x, y, ref, ref_pose, sources,
                                     candidate_depth, normal, robust, use_geo,
                                     options.geometric_weight,
-                                    options.min_patch_views, roi);
+                                    options.min_patch_views);
                                 if (confidence < best_conf) {
                                     best_conf = confidence;
                                     best_depth = candidate_depth;
@@ -613,7 +605,7 @@ void run_patchmatch_level_cpu(
                                     patch, x, y, ref, ref_pose, sources,
                                     candidate_depth, candidate_normal, robust,
                                     use_geo, options.geometric_weight,
-                                    options.min_patch_views, roi);
+                                    options.min_patch_views);
                                 if (confidence < best_conf) {
                                     best_conf = confidence;
                                     best_depth = candidate_depth;
@@ -640,7 +632,7 @@ void run_patchmatch_level_cuda(
     const std::vector<const DepthMap*>& neighbor_depths,
     const float d_min, const float d_max, const DensifyOptions& options,
     const unsigned random_seed, const bool use_geo,
-    const bool initialize_invalid, const OrientedBoundingBox* roi) {
+    const bool initialize_invalid) {
     const std::size_t pixel_count =
         static_cast<std::size_t>(ref.width) * ref.height;
     DepthMap& dm = ref.depth;
@@ -708,25 +700,6 @@ void run_patchmatch_level_cuda(
     request.use_geometric = use_geo;
     request.initialize_invalid = initialize_invalid;
 
-    request.use_roi = roi != nullptr && roi->valid;
-    const Mat3f reference_to_world = ref_pose.R.transpose().cast<float>();
-    const Vec3f reference_center = ref_pose.C.cast<float>();
-    for (int row = 0; row < 3; ++row) {
-        request.reference_center[row] = reference_center(row);
-        for (int column = 0; column < 3; ++column)
-            request.reference_to_world[row * 3 + column] =
-                reference_to_world(row, column);
-    }
-    if (request.use_roi) {
-        for (int row = 0; row < 3; ++row) {
-            request.roi_center[row] = roi->center(row);
-            request.roi_half_extent[row] = roi->half_extent(row);
-            for (int column = 0; column < 3; ++column)
-                request.roi_axes[row * 3 + column] =
-                    roi->axes(row, column);
-        }
-    }
-
     std::string error;
     if (!cuda_patchmatch::run(request, error))
         throw std::runtime_error(
@@ -747,22 +720,21 @@ void run_patchmatch_level(
     const std::vector<const DepthMap*>& neighbor_depths,
     const float d_min, const float d_max, const DensifyOptions& options,
     const unsigned random_seed, const unsigned threads, const bool use_geo,
-    const bool initialize_invalid, const OrientedBoundingBox* roi,
-    PatchMatchRuntime& runtime) {
+    const bool initialize_invalid, PatchMatchRuntime& runtime) {
     (void)runtime;
 #if defined(AETHERSCAN_MVS_HAS_CUDA)
     if (runtime.use_cuda) {
         run_patchmatch_level_cuda(
             ref, ref_pose, neighbors, neighbor_poses, neighbor_depths,
             d_min, d_max, options, random_seed, use_geo,
-            initialize_invalid, roi);
+            initialize_invalid);
         return;
     }
 #endif
     run_patchmatch_level_cpu(
         ref, ref_pose, neighbors, neighbor_poses, neighbor_depths,
         d_min, d_max, options, random_seed, threads, use_geo,
-        initialize_invalid, roi);
+        initialize_invalid);
 }
 
 void init_from_sparse(
@@ -775,7 +747,6 @@ void init_from_sparse(
     const float sx = static_cast<float>(view.width) / static_cast<float>(full.width);
     const float sy = static_cast<float>(view.height) / static_cast<float>(full.height);
     for (const auto& point : scene.sparse_points) {
-        if (scene.roi.valid && !scene.roi.contains(point.position)) continue;
         bool observes = false;
         for (const Index id : point.view_ids) {
             if (id == full.id) {
@@ -867,7 +838,7 @@ void estimate_one_view_photometric(
         run_patchmatch_level(
             scaled, view.pose, neighbors, neighbor_poses, neighbor_depths, d_min,
             d_max, options, random_seed ^ level * 0x9E3779B9u, threads, false,
-            true, scene.roi.valid ? &scene.roi : nullptr, runtime);
+            true, runtime);
         current = std::move(scaled);
     }
 
@@ -907,7 +878,7 @@ void refine_one_view_geometric(
     run_patchmatch_level(
         ref, view.pose, neighbors, neighbor_poses, neighbor_depths,
         view.depth_map.depth_min, view.depth_map.depth_max, options, random_seed,
-        threads, true, false, scene.roi.valid ? &scene.roi : nullptr, runtime);
+        threads, true, false, runtime);
 
     view.depth_map = std::move(ref.depth);
     for (std::size_t i = 0; i < view.depth_map.depth.size(); ++i) {
@@ -959,12 +930,6 @@ DepthFilterStats filter_one_depth_map(
                 static_cast<float>(x), static_cast<float>(y), depth0);
             const Vec3f world0 =
                 ref.pose.transform_camera_to_world(camera0.cast<double>()).cast<float>();
-            if (scene.roi.valid && !scene.roi.contains(world0)) {
-                output.depth[index] = 0.F;
-                output.normal[index] = Vec3f::Zero();
-                output.confidence[index] = 2.F;
-                continue;
-            }
             const Vec3f world_normal0 =
                 (ref.pose.R.transpose().cast<float>() * normal0).normalized();
             const Vec3f viewing_ray0 =

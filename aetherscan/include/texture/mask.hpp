@@ -48,7 +48,7 @@ struct MeshMaskSummary {
     const MeshMaskOptions& options = {});
 
 // Export working-camera foreground coverage at the source ideal-pinhole
-// resolution. Intended for inspecting depth/ROI masks; GGGS consumes the
+// resolution. Intended for inspecting in-memory masks; GGGS consumes the
 // in-memory working masks directly.
 [[nodiscard]] MeshMaskSummary export_view_foreground_masks(
     const mvs::MvsScene& scene,
