@@ -544,15 +544,10 @@ __global__ void computeCov2DCUDA(
         }
     }
 
-    const float opacity      = opacities[idx];
-    const float dL_dcoef     = dL_dconic.w * opacity;
-    const float dL_dsqrtcoef = dL_dcoef * 0.5f / (coef + 1e-6f);
-    const float dL_ddet0     = dL_dsqrtcoef / det_1;
-    const float dL_ddet1     = -dL_ddet0 * coef;
-    // TODO gradient is zero if det_0 or det_1 < 0
-    const float dcoef_da = dL_ddet0 * cov2D[1][1] + dL_ddet1 * (cov2D[1][1] + kernel_size);
-    const float dcoef_db = (-2.f * cov2D[0][1]) * (dL_ddet0 + dL_ddet1);
-    const float dcoef_dc = dL_ddet0 * cov2D[0][0] + dL_ddet1 * (cov2D[0][0] + kernel_size);
+    // Detach the Mip opacity compensation from covariance gradients. Its full
+    // analytical derivative is numerically unstable for tiny/elongated
+    // projected Gaussians and can drive degenerate scale growth. The
+    // compensated forward opacity and opacity-logit gradient remain intact.
     // Use helper variables for 2D covariance entries. More compact.
     float a = cov2D[0][0] + kernel_size;
     float b = cov2D[0][1];
@@ -570,10 +565,6 @@ __global__ void computeCov2DCUDA(
         dL_da = denom2inv * (-c * c * dL_dconic.x + 2 * b * c * dL_dconic.y + (denom - a * c) * dL_dconic.z);
         dL_dc = denom2inv * (-a * a * dL_dconic.z + 2 * a * b * dL_dconic.y + (denom - a * c) * dL_dconic.x);
         dL_db = denom2inv * 2 * (b * c * dL_dconic.x - (denom + 2 * b * b) * dL_dconic.y + a * b * dL_dconic.z);
-
-        dL_da += dcoef_da;
-        dL_dc += dcoef_dc;
-        dL_db += dcoef_db;
 
         // update dL_dopacity
         dL_dopacity[idx] = dL_dconic.w * coef;

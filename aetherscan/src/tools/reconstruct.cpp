@@ -85,6 +85,7 @@ struct ReconstructCli {
     unsigned gggs_iterations{10'000};
     std::uint64_t gggs_max_gaussians{500'000};
     unsigned gggs_max_resolution{1'920};
+    float gggs_kernel_size{0.F};
     bool gggs_progressive_resolution{true};
     unsigned gggs_progressive_interval{3'000};
     float gggs_progressive_initial_scale{0.25F};
@@ -245,6 +246,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-model PATH  load a trained GGGS PLY and skip optimization\n"
               << "  --gggs-iterations N  GGGS optimizer steps (default 10000)\n"
               << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
+              << "  --gggs-kernel-size V  screen covariance low-pass variance; "
+                 "0 disables, 0.1 matches Brush Mip\n"
               << "  --gggs-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
               << "  --gggs-progressive-interval N  iterations per resolution level (default 3000)\n"
               << "  --gggs-eval-split-every N  hold out every Nth view for PSNR\n"
@@ -389,6 +392,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("500000"))
         ("gggs-max-resolution", "Maximum GGGS training image dimension (0 = source)",
          cxxopts::value<unsigned>()->default_value("1920"))
+        ("gggs-kernel-size",
+         "Screen covariance low-pass variance (0 disables; Brush Mip uses 0.1)",
+         cxxopts::value<float>()->default_value("0"))
         ("gggs-progressive-resolution",
          "Enable 1/4 -> 1/2 -> full coarse-to-fine GGGS training",
          cxxopts::value<bool>()->default_value("true")
@@ -615,6 +621,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["gggs-max-gaussians"].as<std::uint64_t>();
     cli.gggs_max_resolution =
         result["gggs-max-resolution"].as<unsigned>();
+    cli.gggs_kernel_size = result["gggs-kernel-size"].as<float>();
     cli.gggs_progressive_resolution =
         result["gggs-progressive-resolution"].as<bool>();
     cli.gggs_progressive_interval =
@@ -780,6 +787,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
 #endif
     if (cli.gggs_iterations == 0)
         throw std::invalid_argument("--gggs-iterations must be positive");
+    if (!std::isfinite(cli.gggs_kernel_size) ||
+        cli.gggs_kernel_size < 0.F)
+        throw std::invalid_argument(
+            "--gggs-kernel-size must be finite and non-negative");
     if (cli.gggs_alpha_mode != "masked" &&
         cli.gggs_alpha_mode != "transparent")
         throw std::invalid_argument(
@@ -1406,6 +1417,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     options.initialize_scale_from_knn = true;
     options.use_source_resolution = true;
     options.max_image_dimension = cli.gggs_max_resolution;
+    options.kernel_size = cli.gggs_kernel_size;
     options.progressive_resolution = cli.gggs_progressive_resolution;
     options.progressive_resolution_interval =
         cli.gggs_progressive_interval;
@@ -1600,6 +1612,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
         " source_resolution=", options.use_source_resolution,
         " max_image_dimension=", options.max_image_dimension,
+        " screen_space_kernel=", options.kernel_size,
         " progressive_resolution=", options.progressive_resolution,
         " progressive_interval=",
         options.progressive_resolution_interval,

@@ -435,8 +435,11 @@ void test_alpha_parameter_gradients() {
     const std::size_t sample_pixel =
         static_cast<std::size_t>(camera.cy) * camera.width +
         static_cast<std::size_t>(camera.cx) + 2;
-    const auto sampled_alpha = [&](GaussianModel model) {
-        const auto values = Rasterizer().forward(model, camera).alpha.to_vector();
+    const auto sampled_alpha = [&](
+                                   GaussianModel model,
+                                   const RasterizeOptions& options) {
+        const auto values =
+            Rasterizer().forward(model, camera, options).alpha.to_vector();
         return values[sample_pixel];
     };
 
@@ -444,9 +447,37 @@ void test_alpha_parameter_gradients() {
     // Match training initialization and stay away from the rasterizer's
     // per-splat alpha=0.99 clamp, whose derivative is intentionally clipped.
     constexpr float base_opacity_logit = -2.19722458F;
-    GaussianModel model = make_model(base_log_scale, base_opacity_logit);
-    Rasterizer rasterizer;
-    const RenderResult rendered = rasterizer.forward(model, camera);
+    {
+        Camera centered_camera = camera;
+        centered_camera.cx = 16.F;
+        centered_camera.cy = 16.F;
+        RasterizeOptions classic_options;
+        RasterizeOptions mip_options;
+        mip_options.kernel_size = 0.1F;
+        const GaussianModel centered_model =
+            make_model(base_log_scale, base_opacity_logit);
+        const RenderResult classic =
+            Rasterizer().forward(centered_model, centered_camera, classic_options);
+        const RenderResult mip =
+            Rasterizer().forward(centered_model, centered_camera, mip_options);
+        const std::size_t center_pixel =
+            16U * centered_camera.width + 16U;
+        const auto classic_alpha_image = classic.alpha.to_vector();
+        const auto mip_alpha_image = mip.alpha.to_vector();
+        const float classic_alpha = classic_alpha_image[center_pixel];
+        const float mip_alpha = mip_alpha_image[center_pixel];
+        // Projected std-dev is fx/z*scale = 3px on both axes, so the
+        // determinant compensation is sqrt(9*9 / (9.1*9.1)) = 9/9.1.
+        const float expected_mip_alpha = 0.1F * 9.F / 9.1F;
+        require(
+            std::abs(classic_alpha - 0.1F) < 1e-5F &&
+                std::abs(mip_alpha - expected_mip_alpha) < 1e-5F,
+            "GGGS screen-space opacity compensation is incorrect");
+        const std::size_t tail_pixel = center_pixel + 6U;
+        require(
+            mip_alpha_image[tail_pixel] > classic_alpha_image[tail_pixel],
+            "GGGS screen-space covariance low-pass did not expand the support");
+    }
     const auto zero_color = tinytensor::Tensor::zeros(
         {3, camera.height, camera.width}, tinytensor::Device::CUDA);
     std::vector<float> alpha_chain(pixels, 0.F);
@@ -458,28 +489,68 @@ void test_alpha_parameter_gradients() {
         {camera.height, camera.width}, tinytensor::Device::CUDA);
     const auto zero_normal = tinytensor::Tensor::zeros(
         {3, camera.height, camera.width}, tinytensor::Device::CUDA);
-    const ModelGradients gradients = rasterizer.backward(
-        model, rendered, zero_color, grad_alpha, zero_scalar, zero_normal);
-    const float analytic_opacity = gradients.opacity_logits.to_vector()[0];
-    const float analytic_scale = gradients.log_scales.to_vector()[0];
-
     constexpr float epsilon = 1e-3F;
-    const float numeric_opacity =
-        (sampled_alpha(make_model(base_log_scale, base_opacity_logit + epsilon)) -
-         sampled_alpha(make_model(base_log_scale, base_opacity_logit - epsilon))) /
-        (2.F * epsilon);
-    const float numeric_scale =
-        (sampled_alpha(make_model(base_log_scale + epsilon, base_opacity_logit)) -
-         sampled_alpha(make_model(base_log_scale - epsilon, base_opacity_logit))) /
-        (2.F * epsilon);
-    require(
-        analytic_opacity > 0.F && numeric_opacity > 0.F &&
-            std::isfinite(analytic_opacity) && std::isfinite(numeric_opacity),
-        "GGGS alpha-to-opacity-logit gradient is not a descent direction");
-    require(
-        analytic_scale > 0.F && numeric_scale > 0.F &&
-            std::isfinite(analytic_scale) && std::isfinite(numeric_scale),
-        "GGGS alpha-to-log-scale gradient is not a descent direction");
+    for (const float kernel_size : {0.F, 0.1F}) {
+        RasterizeOptions options;
+        options.kernel_size = kernel_size;
+        GaussianModel model = make_model(base_log_scale, base_opacity_logit);
+        Rasterizer rasterizer;
+        const RenderResult rendered =
+            rasterizer.forward(model, camera, options);
+        const ModelGradients gradients = rasterizer.backward(
+            model, rendered, zero_color, grad_alpha, zero_scalar, zero_normal);
+        const float analytic_opacity =
+            gradients.opacity_logits.to_vector()[0];
+        const float analytic_scale = gradients.log_scales.to_vector()[0];
+
+        const float numeric_opacity =
+            (sampled_alpha(
+                 make_model(
+                     base_log_scale, base_opacity_logit + epsilon),
+                 options) -
+             sampled_alpha(
+                 make_model(
+                     base_log_scale, base_opacity_logit - epsilon),
+                 options)) /
+            (2.F * epsilon);
+        const float numeric_scale =
+            (sampled_alpha(
+                 make_model(
+                     base_log_scale + epsilon, base_opacity_logit),
+                 options) -
+             sampled_alpha(
+                 make_model(
+                     base_log_scale - epsilon, base_opacity_logit),
+                 options)) /
+            (2.F * epsilon);
+        require(
+            analytic_opacity > 0.F && numeric_opacity > 0.F &&
+                std::isfinite(analytic_opacity) &&
+                std::isfinite(numeric_opacity),
+            "GGGS alpha-to-opacity-logit gradient is not a descent direction");
+        require(
+            analytic_scale > 0.F && numeric_scale > 0.F &&
+                std::isfinite(analytic_scale) &&
+                std::isfinite(numeric_scale),
+            "GGGS alpha-to-log-scale gradient is not a descent direction");
+        const auto relative_error = [](const float analytic,
+                                       const float numeric) {
+            return std::abs(analytic - numeric) /
+                std::max(std::abs(numeric), 1e-6F);
+        };
+        require(
+            relative_error(analytic_opacity, numeric_opacity) < 2e-2F,
+            "GGGS opacity-compensation opacity gradient differs from finite "
+            "differences");
+        // Brush/Faster-GS intentionally detach Mip opacity compensation from
+        // the covariance gradient. The unfiltered path still provides a
+        // strict end-to-end finite-difference check for scale derivatives.
+        if (kernel_size == 0.F)
+            require(
+                relative_error(analytic_scale, numeric_scale) < 2e-2F,
+                "GGGS covariance scale gradient differs from finite "
+                "differences");
+    }
 }
 
 void test_adam_rejects_non_finite_gradients() {
