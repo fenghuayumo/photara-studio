@@ -84,6 +84,8 @@ struct ReconstructCli {
     std::filesystem::path dense_ply;
     std::filesystem::path gggs_model;
     unsigned gggs_iterations{10'000};
+    bool gggs_profile_cuda{false};
+    unsigned gggs_profile_interval{100};
     std::uint64_t gggs_max_gaussians{500'000};
     unsigned gggs_max_resolution{1'920};
     float gggs_kernel_size{0.F};
@@ -236,6 +238,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --gggs-model PATH  load a trained GGGS PLY and skip optimization\n"
               << "  --gggs-iterations N  GGGS optimizer steps (default 10000)\n"
+              << "  --gggs-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
+              << "  --gggs-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
               << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --gggs-kernel-size V  screen covariance low-pass variance; "
                  "0 disables, 0.1 matches Brush Mip\n"
@@ -381,6 +385,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("gggs-iterations", "GGGS optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
+        ("gggs-profile-cuda",
+         "Record windowed CUDA-event timings for GGGS training stages",
+         cxxopts::value<bool>()->default_value("false")
+             ->implicit_value("true"))
+        ("gggs-profile-interval",
+         "CUDA profiling aggregation window (1..1000 iterations)",
+         cxxopts::value<unsigned>()->default_value("100"))
         ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
          cxxopts::value<std::uint64_t>()->default_value("500000"))
         ("gggs-max-resolution", "Maximum GGGS training image dimension (0 = source)",
@@ -593,6 +604,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!gggs_model_text.empty())
         cli.gggs_model = utf8_to_path(gggs_model_text);
     cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
+    cli.gggs_profile_cuda = result["gggs-profile-cuda"].as<bool>();
+    cli.gggs_profile_interval =
+        result["gggs-profile-interval"].as<unsigned>();
+    if (cli.gggs_profile_interval == 0 ||
+        cli.gggs_profile_interval > 1'000)
+        throw std::invalid_argument(
+            "--gggs-profile-interval must be in [1, 1000]");
     cli.gggs_max_gaussians =
         result["gggs-max-gaussians"].as<std::uint64_t>();
     cli.gggs_max_resolution =
@@ -1477,6 +1495,8 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         : aetherscan::splat::AlphaMode::transparent;
     options.match_alpha_weight = cli.gggs_match_alpha_weight;
     options.ssim_weight = cli.gggs_ssim_weight;
+    options.profile_cuda = cli.gggs_profile_cuda;
+    options.cuda_profile_interval = cli.gggs_profile_interval;
     options.minimum_scale_fraction = cli.gggs_min_scale_fraction;
     options.maximum_scale_fraction = cli.gggs_max_scale_fraction;
     // pygsplat leaves Gaussian scales unconstrained for dense point-cloud
@@ -1533,6 +1553,8 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " alpha_mode=", cli.gggs_alpha_mode,
         " match_alpha_weight=", options.match_alpha_weight,
         " background_noise=", options.background_noise_strength,
+        " cuda_profile=", options.profile_cuda,
+        " cuda_profile_interval=", options.cuda_profile_interval,
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
         " source_resolution=", options.use_source_resolution,
         " max_image_dimension=", options.max_image_dimension,

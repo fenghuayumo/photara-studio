@@ -1641,10 +1641,15 @@ void test_densification_strategies_and_dense_bypass() {
     options.evaluation_split_every = 0;
     options.use_depth_normal_loss = true;
     options.depth_normal_from_iter = 1;
+    options.multi_view_geo_weight = 0.02F;
+    options.profile_cuda = true;
+    options.cuda_profile_interval = 2;
     const auto geometry_dense_model = splat::Trainer(options).train(scene);
     require(
         geometry_dense_model.filter_3d.is_valid(),
         "depth-normal mesh training did not enable filter_3d");
+    options.profile_cuda = false;
+    options.multi_view_geo_weight = 0.F;
     options.use_depth_normal_loss = false;
     options.densification_strategy =
         splat::DensificationStrategy::dense_adaptive;

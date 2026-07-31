@@ -414,6 +414,10 @@ NB_MODULE(aetherscan_native, module) {
             &splat::TrainingOptions::sh_degree_interval)
         .def_rw("seed", &splat::TrainingOptions::seed)
         .def_rw("log_interval", &splat::TrainingOptions::log_interval)
+        .def_rw("profile_cuda", &splat::TrainingOptions::profile_cuda)
+        .def_rw(
+            "cuda_profile_interval",
+            &splat::TrainingOptions::cuda_profile_interval)
         .def_rw("max_gaussians", &splat::TrainingOptions::max_gaussians)
         .def_rw("input_is_dense", &splat::TrainingOptions::input_is_dense)
         .def_rw(

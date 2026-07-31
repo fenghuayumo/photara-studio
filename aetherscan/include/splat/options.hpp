@@ -25,6 +25,12 @@ struct TrainingOptions {
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
     unsigned log_interval{100};
+    // Optional windowed CUDA-event timings for the GGGS training loop.
+    // Disabled by default so production training does not create or record
+    // profiling events. The interval is capped by the trainer to avoid an
+    // accidentally unbounded CUDA event pool.
+    bool profile_cuda{false};
+    unsigned cuda_profile_interval{100};
     std::size_t max_gaussians{500'000};
     // Sparse COLMAP initialization enables dynamic Gaussian management. Dense
     // MVS initialization only enables it for the explicit dense_adaptive mode.

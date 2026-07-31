@@ -468,6 +468,22 @@ SfM、图像/Mask 预处理、TSDF integration、Marching Cubes、Clean 和 topo
 TSDF integration 与 support closing 已使用 OpenMP；后续优先并行化 MC block 遍历，采用连续
 block allocator、扁平哈希表和两阶段计数/写出。
 
+GGGS 子阶段性能分析使用可选 CUDA event profiler：
+
+```bash
+aetherscan ... --gggs \
+  --gggs-profile-cuda \
+  --gggs-profile-interval 100
+```
+
+profiler 默认关闭；启用后在同一训练 stream 上按窗口记录并输出
+`raster_forward`、`training_loss`、`multi_view`、`raster_backward`、
+`densification_stats`、`optimizer`、`adc_noise`、`refinement` 和 `filter_3d`
+的每步摊销毫秒与占比，同时记录 Gaussian 数、tile instance、几何监督步数和拓扑更新次数。
+窗口上限为 1000 步，避免意外创建无界 CUDA event 池。首个窗口包含 CUDA kernel、内存池和
+图像缓存预热，只用于识别冷启动；稳定性能应比较后续多个窗口。该 profiler 不统计训练后的
+最终全视图评估、PLY 导出或 TSDF 阶段。
+
 ---
 
 ## 当前实现状态与迁移缺口

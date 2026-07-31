@@ -11,6 +11,7 @@
 #include <Eigen/Geometry>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -29,6 +30,223 @@ namespace data = training_data;
 namespace refine = densification;
 
 constexpr float k_sh0 = 0.28209479177387814F;
+
+enum class CudaTrainingStage : std::size_t {
+    raster_forward,
+    training_loss,
+    multi_view,
+    raster_backward,
+    densification_stats,
+    optimizer,
+    adc_noise,
+    refinement,
+    filter_3d,
+    count
+};
+
+constexpr std::size_t k_cuda_training_stage_count =
+    static_cast<std::size_t>(CudaTrainingStage::count);
+
+void check_profile_cuda(const cudaError_t error, const char* operation) {
+    if (error == cudaSuccess) return;
+    throw std::runtime_error(
+        std::string{"GGGS CUDA profiler "} + operation + " failed: " +
+        cudaGetErrorString(error));
+}
+
+struct CudaProfileSample {
+    std::array<cudaEvent_t, k_cuda_training_stage_count + 1> boundaries{};
+};
+
+class CudaTrainingProfiler {
+public:
+    explicit CudaTrainingProfiler(const TrainingOptions& options)
+        : enabled_(options.profile_cuda),
+          interval_(std::clamp(options.cuda_profile_interval, 1U, 1'000U)) {
+        if (!enabled_) return;
+        samples_.resize(interval_);
+        try {
+            for (CudaProfileSample& sample : samples_)
+                for (cudaEvent_t& event : sample.boundaries)
+                    check_profile_cuda(
+                        cudaEventCreateWithFlags(&event, cudaEventDefault),
+                        "event creation");
+        } catch (...) {
+            destroy_events();
+            throw;
+        }
+        core::Logger::instance().info(
+            "gggs_cuda_profile enabled=1 interval=", interval_,
+            " stages=raster_forward,training_loss,multi_view,"
+            "raster_backward,densification_stats,optimizer,adc_noise,"
+            "refinement,filter_3d");
+    }
+
+    ~CudaTrainingProfiler() { destroy_events(); }
+
+    CudaTrainingProfiler(const CudaTrainingProfiler&) = delete;
+    CudaTrainingProfiler& operator=(const CudaTrainingProfiler&) = delete;
+
+    [[nodiscard]] bool enabled() const noexcept { return enabled_; }
+
+    void begin_iteration(
+        const unsigned iteration, const std::size_t gaussian_count) {
+        if (!enabled_) return;
+        if (sample_cursor_ >= samples_.size())
+            throw std::logic_error("GGGS CUDA profiler sample window overflow");
+        if (sample_cursor_ == 0) {
+            first_iteration_ = iteration;
+            first_gaussians_ = gaussian_count;
+        }
+        active_stage_ = 0;
+        check_profile_cuda(
+            cudaEventRecord(
+                samples_[sample_cursor_].boundaries.front(), nullptr),
+            "start record");
+    }
+
+    void mark(const CudaTrainingStage stage) {
+        if (!enabled_) return;
+        const std::size_t index = static_cast<std::size_t>(stage);
+        if (index != active_stage_)
+            throw std::logic_error(
+                "GGGS CUDA profiler stage order is inconsistent");
+        check_profile_cuda(
+            cudaEventRecord(
+                samples_[sample_cursor_].boundaries[index + 1], nullptr),
+            "stage record");
+        ++active_stage_;
+    }
+
+    void end_iteration(
+        const unsigned iteration, const std::size_t gaussian_count,
+        const std::size_t rendered_instances, const bool depth_normal_active,
+        const bool multi_view_active, const bool refined,
+        const bool filter_refreshed) {
+        if (!enabled_) return;
+        if (active_stage_ != k_cuda_training_stage_count)
+            throw std::logic_error(
+                "GGGS CUDA profiler iteration ended before every stage");
+        last_iteration_ = iteration;
+        last_gaussians_ = gaussian_count;
+        rendered_instances_sum_ += rendered_instances;
+        depth_normal_steps_ += depth_normal_active;
+        multi_view_steps_ += multi_view_active;
+        refinement_steps_ += refined;
+        filter_refresh_steps_ += filter_refreshed;
+        ++sample_cursor_;
+        if (sample_cursor_ == samples_.size()) report_and_reset();
+    }
+
+    void flush() {
+        if (enabled_ && sample_cursor_ != 0) report_and_reset();
+    }
+
+private:
+    void report_and_reset() {
+        check_profile_cuda(
+            cudaEventSynchronize(
+                samples_[sample_cursor_ - 1].boundaries.back()),
+            "window synchronization");
+        std::array<double, k_cuda_training_stage_count> totals{};
+        for (std::size_t sample_index = 0;
+             sample_index < sample_cursor_; ++sample_index) {
+            const CudaProfileSample& sample = samples_[sample_index];
+            for (std::size_t stage = 0;
+                 stage < k_cuda_training_stage_count; ++stage) {
+                float elapsed_ms = 0.F;
+                check_profile_cuda(
+                    cudaEventElapsedTime(
+                        &elapsed_ms, sample.boundaries[stage],
+                        sample.boundaries[stage + 1]),
+                    "elapsed-time query");
+                totals[stage] += elapsed_ms;
+            }
+        }
+        const double inverse_samples =
+            1.0 / static_cast<double>(sample_cursor_);
+        std::array<double, k_cuda_training_stage_count> averages{};
+        double cuda_timeline_average_ms = 0.0;
+        for (std::size_t stage = 0;
+             stage < k_cuda_training_stage_count; ++stage) {
+            averages[stage] = totals[stage] * inverse_samples;
+            cuda_timeline_average_ms += averages[stage];
+        }
+        const auto value = [&](const CudaTrainingStage stage) {
+            return averages[static_cast<std::size_t>(stage)];
+        };
+        const auto percent = [&](const CudaTrainingStage stage) {
+            return cuda_timeline_average_ms > 0.0
+                ? value(stage) * 100.0 / cuda_timeline_average_ms
+                : 0.0;
+        };
+        core::Logger::instance().info(
+            "gggs_cuda_profile iterations=", first_iteration_, '-',
+            last_iteration_, " samples=", sample_cursor_,
+            " gaussians=[", first_gaussians_, ',', last_gaussians_, ']',
+            " avg_tile_instances=",
+            rendered_instances_sum_ * inverse_samples,
+            " depth_normal_steps=", depth_normal_steps_,
+            " multi_view_steps=", multi_view_steps_,
+            " refinement_steps=", refinement_steps_,
+            " filter_refresh_steps=", filter_refresh_steps_,
+            " cuda_timeline_avg_ms=", cuda_timeline_average_ms,
+            " raster_forward_ms=",
+            value(CudaTrainingStage::raster_forward),
+            " raster_forward_pct=",
+            percent(CudaTrainingStage::raster_forward),
+            " training_loss_ms=", value(CudaTrainingStage::training_loss),
+            " training_loss_pct=",
+            percent(CudaTrainingStage::training_loss),
+            " multi_view_ms=", value(CudaTrainingStage::multi_view),
+            " multi_view_pct=", percent(CudaTrainingStage::multi_view),
+            " raster_backward_ms=",
+            value(CudaTrainingStage::raster_backward),
+            " raster_backward_pct=",
+            percent(CudaTrainingStage::raster_backward),
+            " densification_stats_ms=",
+            value(CudaTrainingStage::densification_stats),
+            " densification_stats_pct=",
+            percent(CudaTrainingStage::densification_stats),
+            " optimizer_ms=", value(CudaTrainingStage::optimizer),
+            " optimizer_pct=", percent(CudaTrainingStage::optimizer),
+            " adc_noise_ms=", value(CudaTrainingStage::adc_noise),
+            " adc_noise_pct=", percent(CudaTrainingStage::adc_noise),
+            " refinement_ms=", value(CudaTrainingStage::refinement),
+            " refinement_pct=", percent(CudaTrainingStage::refinement),
+            " filter_3d_ms=", value(CudaTrainingStage::filter_3d),
+            " filter_3d_pct=", percent(CudaTrainingStage::filter_3d));
+        sample_cursor_ = 0;
+        rendered_instances_sum_ = 0;
+        depth_normal_steps_ = 0;
+        multi_view_steps_ = 0;
+        refinement_steps_ = 0;
+        filter_refresh_steps_ = 0;
+    }
+
+    void destroy_events() noexcept {
+        for (CudaProfileSample& sample : samples_)
+            for (cudaEvent_t& event : sample.boundaries) {
+                if (event != nullptr) cudaEventDestroy(event);
+                event = nullptr;
+            }
+    }
+
+    bool enabled_{false};
+    unsigned interval_{};
+    std::vector<CudaProfileSample> samples_;
+    std::size_t sample_cursor_{};
+    std::size_t active_stage_{};
+    unsigned first_iteration_{};
+    unsigned last_iteration_{};
+    std::size_t first_gaussians_{};
+    std::size_t last_gaussians_{};
+    std::uint64_t rendered_instances_sum_{};
+    std::uint64_t depth_normal_steps_{};
+    std::uint64_t multi_view_steps_{};
+    std::uint64_t refinement_steps_{};
+    std::uint64_t filter_refresh_steps_{};
+};
 
 class KdTree {
 public:
@@ -439,6 +657,7 @@ GaussianModel Trainer::train(
         detail::make_densification_stats(model.size());
     refine::RefinementCounts latest_refinement;
     Rasterizer rasterizer;
+    CudaTrainingProfiler cuda_profiler(options_);
     std::mt19937 random(options_.seed);
     std::vector<std::size_t> shuffled_views = view_indices;
     std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
@@ -545,10 +764,13 @@ GaussianModel Trainer::train(
                                        options_.use_mvs_normals ||
                                        depth_normal_active ||
                                        multi_view_active;
+        cuda_profiler.begin_iteration(iteration, model.size());
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
+        cuda_profiler.mark(CudaTrainingStage::raster_forward);
         detail::LossGradients loss = detail::compute_training_loss(
             rendered, target, options_, report_progress,
             depth_normal_active);
+        cuda_profiler.mark(CudaTrainingStage::training_loss);
         detail::MultiViewLoss multi_view_loss;
         DepthSampleGradients multi_view_sample_gradients;
         bool has_multi_view_sample_gradients = false;
@@ -586,11 +808,13 @@ GaussianModel Trainer::train(
                                      multi_view_loss.ncc;
             }
         }
+        cuda_profiler.mark(CudaTrainingStage::multi_view);
         ModelGradients gradients = rasterizer.backward(
             model, rendered, loss.color, loss.alpha, loss.depth, loss.normal);
         if (has_multi_view_sample_gradients)
             detail::add_sample_depth_model_gradients(
                 multi_view_sample_gradients, gradients);
+        cuda_profiler.mark(CudaTrainingStage::raster_backward);
         if (densification_enabled)
             detail::accumulate_densification_stats(
                 gradients.refine_weight, rendered.visibility, rendered.radii,
@@ -602,6 +826,7 @@ GaussianModel Trainer::train(
                         DensificationStrategy::adc_plus ||
                     options_.densification_strategy ==
                         DensificationStrategy::adc_igs);
+        cuda_profiler.mark(CudaTrainingStage::densification_stats);
 
         // Dense MVS already provides accurate surface positions. Decaying the
         // position LR across the full 10k run keeps large geometric updates
@@ -661,6 +886,7 @@ GaussianModel Trainer::train(
             detail::adam_step(
                 model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
                 options_, full_sh_stride, options_.sh_rest_lr);
+        cuda_profiler.mark(CudaTrainingStage::optimizer);
 
         if (densification_enabled &&
             (options_.densification_strategy ==
@@ -681,8 +907,10 @@ GaussianModel Trainer::train(
                         : scene_extent,
                     options_.seed + iteration);
         }
+        cuda_profiler.mark(CudaTrainingStage::adc_noise);
 
         latest_refinement = {};
+        bool refinement_happened = false;
         if (densification_enabled) {
             const bool adc_plus =
                 options_.densification_strategy ==
@@ -704,18 +932,20 @@ GaussianModel Trainer::train(
             }
             detail::constrain_scale_ratio(
                 model.log_scales, options_.max_scale_ratio);
-            const bool refined =
+            refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
-            if (refined && adc_plus) {
+            if (refinement_happened && adc_plus) {
                 refinement_geometry = refine::brush_scene_geometry(
                     download<float>(model.means));
                 means_learning_rate_scale = refinement_geometry.scale;
             }
         }
+        cuda_profiler.mark(CudaTrainingStage::refinement);
 
         // The Mip-Splatting radius depends on Gaussian positions and count.
         // Refresh immediately after topology changes and periodically while
         // the means continue to move, matching pygsplat's GGGS schedule.
+        bool filter_refreshed = false;
         if (use_3d_filter) {
             const bool adc_plus_refine =
                 options_.densification_strategy ==
@@ -745,11 +975,18 @@ GaussianModel Trainer::train(
                   iteration % options_.filter_3d_update_interval == 0 &&
                   iteration + options_.filter_3d_update_interval <
                       options_.iterations));
-            if (adc_plus_refresh || other_refresh)
+            filter_refreshed = adc_plus_refresh || other_refresh;
+            if (filter_refreshed)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras, filter_3d_factor,
                     brush_filter);
         }
+        cuda_profiler.mark(CudaTrainingStage::filter_3d);
+        cuda_profiler.end_iteration(
+            iteration, model.size(),
+            static_cast<std::size_t>(rendered.rendered_instances),
+            depth_normal_active, multi_view_active, refinement_happened,
+            filter_refreshed);
 
         bool continue_training = true;
         if (report_progress) {
@@ -800,6 +1037,7 @@ GaussianModel Trainer::train(
                 iteration) != options_.evaluation_iterations.end())
             launch_evaluation(iteration, model);
     }
+    cuda_profiler.flush();
     finish_evaluation();
     const cudaError_t error = cudaDeviceSynchronize();
     if (error != cudaSuccess)
