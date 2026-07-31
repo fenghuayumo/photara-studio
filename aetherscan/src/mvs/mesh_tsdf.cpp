@@ -3,15 +3,19 @@
 #include "core/logging.hpp"
 #include "io/image.hpp"
 #include "marching_cubes_const.hpp"
+#include "parallel/thread_pool.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -25,6 +29,18 @@ constexpr int k_block_resolution = 16;
 constexpr int k_block_voxel_count =
     k_block_resolution * k_block_resolution * k_block_resolution;
 constexpr unsigned k_depth_sampling_stride = 4;
+constexpr std::size_t k_positive_block_count = 8;
+constexpr std::size_t k_cell_mask_words =
+    (k_block_voxel_count + 63) / 64;
+constexpr std::size_t k_edges_per_block =
+    static_cast<std::size_t>(k_block_voxel_count) * 3;
+constexpr std::size_t k_edge_mask_words =
+    (k_edges_per_block + 63) / 64;
+constexpr std::size_t k_invalid_block =
+    std::numeric_limits<std::size_t>::max();
+static_assert(
+    k_edges_per_block <=
+    static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()));
 
 struct GridKey {
     std::int64_t x{};
@@ -53,22 +69,6 @@ struct GridHash {
         const auto y = mix(static_cast<std::uint64_t>(key.y));
         const auto z = mix(static_cast<std::uint64_t>(key.z));
         return static_cast<std::size_t>(x ^ (y << 1U) ^ (z << 7U));
-    }
-};
-
-struct EdgeKey {
-    GridKey a;
-    GridKey b;
-
-    [[nodiscard]] bool operator==(const EdgeKey&) const noexcept = default;
-};
-
-struct EdgeHash {
-    [[nodiscard]] std::size_t operator()(const EdgeKey& edge) const noexcept {
-        const GridHash hash;
-        const std::size_t a = hash(edge.a);
-        const std::size_t b = hash(edge.b);
-        return a ^ (b + 0x9e3779b97f4a7c15ULL + (a << 6U) + (a >> 2U));
     }
 };
 
@@ -127,11 +127,6 @@ struct TouchedBlock {
         (static_cast<float>(key.x) + 0.5F) * voxel_size,
         (static_cast<float>(key.y) + 0.5F) * voxel_size,
         (static_cast<float>(key.z) + 0.5F) * voxel_size};
-}
-
-[[nodiscard]] EdgeKey edge_key(GridKey a, GridKey b) noexcept {
-    if (key_less(b, a)) std::swap(a, b);
-    return {a, b};
 }
 
 [[nodiscard]] float estimate_voxel_size(const MvsScene& scene) {
@@ -704,6 +699,418 @@ void save_tsdf_diagnostics(
     }
 }
 
+struct MarchingBlock {
+    GridKey key;
+    const VolumeBlock* volume_block{};
+    std::array<std::size_t, k_positive_block_count> positive_neighbors{};
+    std::uint32_t supported_cells{};
+    std::uint32_t active_cells{};
+    std::uint32_t face_count{};
+    std::size_t vertex_offset{};
+    std::size_t face_offset{};
+};
+
+struct MarchingCubesStats {
+    std::uint64_t scanned_cells{};
+    std::uint64_t supported_cells{};
+    std::uint64_t active_cells{};
+    std::size_t scratch_bytes{};
+    unsigned thread_count{};
+};
+
+struct LocalEdgeMasks {
+    std::array<
+        std::uint64_t,
+        k_positive_block_count * k_edge_mask_words> words{};
+};
+
+struct OwnedEdge {
+    std::size_t block{k_invalid_block};
+    std::size_t local_edge{};
+};
+
+// A cell owned by a block only reaches that block or one of its seven
+// positive neighbors. Encoding the three positive-boundary bits turns all
+// corner/edge reads into direct array access instead of sparse-volume hashes.
+[[nodiscard]] std::size_t positive_neighbor_slot(
+    const int x, const int y, const int z) noexcept {
+    return (x >= k_block_resolution ? 4U : 0U) |
+        (y >= k_block_resolution ? 2U : 0U) |
+        (z >= k_block_resolution ? 1U : 0U);
+}
+
+[[nodiscard]] const TsdfVoxel* marching_voxel(
+    const std::vector<MarchingBlock>& blocks, const MarchingBlock& block,
+    const int x, const int y, const int z) noexcept {
+    const std::size_t owner = block.positive_neighbors[
+        positive_neighbor_slot(x, y, z)];
+    if (owner == k_invalid_block) return nullptr;
+    return &blocks[owner].volume_block->voxels[static_cast<std::size_t>(
+        voxel_index(
+            x % k_block_resolution,
+            y % k_block_resolution,
+            z % k_block_resolution))];
+}
+
+[[nodiscard]] OwnedEdge marching_owned_edge(
+    const MarchingBlock& block, const int x, const int y, const int z,
+    const int edge) noexcept {
+    // edge_shift always selects the lower grid coordinate on the edge axis.
+    // The block containing that coordinate is therefore the unique global
+    // owner, including edges shared by cells in adjacent sparse blocks.
+    const int edge_x = x + edge_shift[edge].x();
+    const int edge_y = y + edge_shift[edge].y();
+    const int edge_z = z + edge_shift[edge].z();
+    const std::size_t owner = block.positive_neighbors[
+        positive_neighbor_slot(edge_x, edge_y, edge_z)];
+    return {
+        owner,
+        static_cast<std::size_t>(
+            voxel_index(
+                edge_x % k_block_resolution,
+                edge_y % k_block_resolution,
+                edge_z % k_block_resolution)) *
+                3U +
+            static_cast<std::size_t>(edge_shift[edge].w())};
+}
+
+[[nodiscard]] std::vector<MarchingBlock> build_marching_blocks(
+    const Volume& volume) {
+    std::vector<MarchingBlock> blocks;
+    blocks.reserve(volume.size());
+    for (const auto& [key, block] : volume) {
+        MarchingBlock marching_block;
+        marching_block.key = key;
+        marching_block.volume_block = block.get();
+        marching_block.positive_neighbors.fill(k_invalid_block);
+        blocks.push_back(marching_block);
+    }
+    std::sort(
+        blocks.begin(), blocks.end(),
+        [](const MarchingBlock& a, const MarchingBlock& b) {
+            return key_less(a.key, b.key);
+        });
+
+    // Sorted blocks give stable output ranges. This temporary hash is only
+    // used once to resolve the eight direct positive-neighbor indices.
+    std::unordered_map<GridKey, std::size_t, GridHash> block_indices;
+    block_indices.reserve(blocks.size());
+    for (std::size_t index = 0; index < blocks.size(); ++index)
+        block_indices.emplace(blocks[index].key, index);
+    for (MarchingBlock& block : blocks) {
+        for (int dx = 0; dx <= 1; ++dx) {
+            for (int dy = 0; dy <= 1; ++dy) {
+                for (int dz = 0; dz <= 1; ++dz) {
+                    const GridKey neighbor{
+                        block.key.x + dx,
+                        block.key.y + dy,
+                        block.key.z + dz};
+                    const auto found = block_indices.find(neighbor);
+                    if (found != block_indices.end()) {
+                        block.positive_neighbors[
+                            positive_neighbor_slot(
+                                dx * k_block_resolution,
+                                dy * k_block_resolution,
+                                dz * k_block_resolution)] = found->second;
+                    }
+                }
+            }
+        }
+    }
+    return blocks;
+}
+
+[[nodiscard]] std::uint32_t cube_face_count(const int cube_index) noexcept {
+    std::uint32_t count = 0;
+    for (int triangle = 0;
+         tri_table[cube_index][triangle] != -1;
+         triangle += 3)
+        ++count;
+    return count;
+}
+
+[[nodiscard]] int marching_cube_index(
+    const std::vector<MarchingBlock>& blocks, const MarchingBlock& block,
+    const int x, const int y, const int z,
+    const float minimum_weight) noexcept {
+    int cube_index = 0;
+    for (int corner = 0; corner < 8; ++corner) {
+        const TsdfVoxel* voxel = marching_voxel(
+            blocks, block,
+            x + shift[corner].x(),
+            y + shift[corner].y(),
+            z + shift[corner].z());
+        if (voxel == nullptr || voxel->weight < minimum_weight) return -1;
+        if (voxel->value < 0.F) cube_index |= 1 << corner;
+    }
+    return cube_index;
+}
+
+[[nodiscard]] std::size_t edge_vertex_index(
+    const std::vector<MarchingBlock>& blocks,
+    const std::vector<std::uint64_t>& edge_masks,
+    const std::vector<std::uint16_t>& edge_prefix,
+    const MarchingBlock& block, const int x, const int y, const int z,
+    const int edge) {
+    const OwnedEdge owned = marching_owned_edge(
+        block, x, y, z, edge);
+    if (owned.block == k_invalid_block)
+        throw std::runtime_error("Marching Cubes edge owner is missing");
+    const std::size_t word = owned.local_edge / 64U;
+    const unsigned bit = static_cast<unsigned>(owned.local_edge % 64U);
+    const std::uint64_t mask =
+        edge_masks[owned.block * k_edge_mask_words + word];
+    if ((mask & (std::uint64_t{1} << bit)) == 0)
+        throw std::runtime_error(
+            "Marching Cubes referenced an unallocated edge");
+    const std::uint64_t before =
+        bit == 0U ? 0U : mask & ((std::uint64_t{1} << bit) - 1U);
+    const std::size_t rank =
+        edge_prefix[
+            owned.block * (k_edge_mask_words + 1U) + word] +
+        static_cast<std::size_t>(std::popcount(before));
+    return blocks[owned.block].vertex_offset + rank;
+}
+
+[[nodiscard]] MarchingCubesStats extract_marching_cubes(
+    const Volume& volume, const float voxel_size,
+    const float minimum_weight, const unsigned requested_thread_count,
+    Mesh& mesh) {
+    core::StageScope stage("mvs.mesh.tsdf.marching_cubes");
+    std::vector<MarchingBlock> blocks = build_marching_blocks(volume);
+    const unsigned thread_count = std::max(
+        1U, parallel::resolve_thread_count(requested_thread_count));
+
+    std::vector<std::uint64_t> active_cell_masks(
+        blocks.size() * k_cell_mask_words);
+    std::vector<std::uint64_t> edge_masks(
+        blocks.size() * k_edge_mask_words);
+    std::vector<LocalEdgeMasks> worker_edge_masks(thread_count);
+
+    // Pass 1: classify cells and count faces. Edge ownership is accumulated
+    // into per-worker masks and merged one word at a time, avoiding a
+    // contended global edge hash and per-edge atomics.
+    parallel::parallel_for(
+        blocks.size(), thread_count,
+        [&](const std::size_t block_index, const unsigned worker_id) {
+            MarchingBlock& block = blocks[block_index];
+            LocalEdgeMasks& local = worker_edge_masks[worker_id];
+            local.words.fill(0);
+            std::uint32_t supported_cells = 0;
+            std::uint32_t active_cells = 0;
+            std::uint32_t face_count = 0;
+            for (int x = 0; x < k_block_resolution; ++x) {
+                for (int y = 0; y < k_block_resolution; ++y) {
+                    for (int z = 0; z < k_block_resolution; ++z) {
+                        const int cube_index = marching_cube_index(
+                            blocks, block, x, y, z, minimum_weight);
+                        if (cube_index < 0) continue;
+                        ++supported_cells;
+                        if (cube_index == 0 || cube_index == 255) continue;
+                        ++active_cells;
+                        const std::size_t cell = static_cast<std::size_t>(
+                            voxel_index(x, y, z));
+                        active_cell_masks[
+                            block_index * k_cell_mask_words + cell / 64U] |=
+                            std::uint64_t{1} << (cell % 64U);
+                        face_count += cube_face_count(cube_index);
+
+                        const int used_edges = edge_table[cube_index];
+                        for (int edge = 0; edge < 12; ++edge) {
+                            if ((used_edges & (1 << edge)) == 0) continue;
+                            const OwnedEdge owned = marching_owned_edge(
+                                block, x, y, z, edge);
+                            if (owned.block == k_invalid_block)
+                                throw std::runtime_error(
+                                    "Marching Cubes active cell has no edge "
+                                    "owner");
+                            const std::size_t owner_slot =
+                                positive_neighbor_slot(
+                                    x + edge_shift[edge].x(),
+                                    y + edge_shift[edge].y(),
+                                    z + edge_shift[edge].z());
+                            local.words[
+                                owner_slot * k_edge_mask_words +
+                                owned.local_edge / 64U] |=
+                                std::uint64_t{1} <<
+                                (owned.local_edge % 64U);
+                        }
+                    }
+                }
+            }
+            block.supported_cells = supported_cells;
+            block.active_cells = active_cells;
+            block.face_count = face_count;
+
+            for (std::size_t slot = 0;
+                 slot < k_positive_block_count; ++slot) {
+                const std::size_t owner = block.positive_neighbors[slot];
+                if (owner == k_invalid_block) continue;
+                for (std::size_t word = 0;
+                     word < k_edge_mask_words; ++word) {
+                    const std::uint64_t bits =
+                        local.words[slot * k_edge_mask_words + word];
+                    if (bits == 0) continue;
+                    std::atomic_ref<std::uint64_t>(
+                        edge_masks[owner * k_edge_mask_words + word])
+                        .fetch_or(bits, std::memory_order_relaxed);
+                }
+            }
+        });
+
+    std::vector<std::uint16_t> edge_prefix(
+        blocks.size() * (k_edge_mask_words + 1U));
+    std::size_t total_vertices = 0;
+    std::size_t total_faces = 0;
+    MarchingCubesStats stats;
+    stats.thread_count = static_cast<unsigned>(std::min<std::size_t>(
+        thread_count, std::max<std::size_t>(1U, blocks.size())));
+    stats.scanned_cells =
+        static_cast<std::uint64_t>(blocks.size()) *
+        static_cast<std::uint64_t>(k_block_voxel_count);
+    for (std::size_t block_index = 0;
+         block_index < blocks.size(); ++block_index) {
+        MarchingBlock& block = blocks[block_index];
+        block.vertex_offset = total_vertices;
+        block.face_offset = total_faces;
+        std::uint16_t prefix = 0;
+        for (std::size_t word = 0; word < k_edge_mask_words; ++word) {
+            edge_prefix[
+                block_index * (k_edge_mask_words + 1U) + word] = prefix;
+            prefix = static_cast<std::uint16_t>(
+                prefix +
+                std::popcount(
+                    edge_masks[block_index * k_edge_mask_words + word]));
+        }
+        edge_prefix[
+            block_index * (k_edge_mask_words + 1U) +
+            k_edge_mask_words] = prefix;
+        total_vertices += prefix;
+        total_faces += block.face_count;
+        stats.supported_cells += block.supported_cells;
+        stats.active_cells += block.active_cells;
+    }
+    if (total_vertices >
+        static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error(
+            "Marching Cubes vertex count exceeds 32-bit mesh indices");
+
+    mesh = {};
+    mesh.vertices.resize(total_vertices);
+    mesh.faces.resize(total_faces);
+
+    // Pass 2: each block writes its prefix-assigned slices. Faces only revisit
+    // active cells; vertex indices come from the canonical owner bit rank.
+    parallel::parallel_for(
+        blocks.size(), thread_count,
+        [&](const std::size_t block_index) {
+            const MarchingBlock& block = blocks[block_index];
+            const std::size_t prefix_base =
+                block_index * (k_edge_mask_words + 1U);
+            for (std::size_t word = 0; word < k_edge_mask_words; ++word) {
+                std::uint64_t bits =
+                    edge_masks[block_index * k_edge_mask_words + word];
+                std::size_t output =
+                    block.vertex_offset + edge_prefix[prefix_base + word];
+                while (bits != 0) {
+                    const unsigned bit =
+                        static_cast<unsigned>(std::countr_zero(bits));
+                    const std::size_t local_edge = word * 64U + bit;
+                    const std::size_t local_voxel = local_edge / 3U;
+                    const int axis = static_cast<int>(local_edge % 3U);
+                    const int x = static_cast<int>(
+                        local_voxel /
+                        (k_block_resolution * k_block_resolution));
+                    const int y = static_cast<int>(
+                        (local_voxel / k_block_resolution) %
+                        k_block_resolution);
+                    const int z = static_cast<int>(
+                        local_voxel % k_block_resolution);
+                    const TsdfVoxel& a =
+                        block.volume_block->voxels[local_voxel];
+                    const TsdfVoxel* b = marching_voxel(
+                        blocks, block,
+                        x + (axis == 0 ? 1 : 0),
+                        y + (axis == 1 ? 1 : 0),
+                        z + (axis == 2 ? 1 : 0));
+                    if (b == nullptr)
+                        throw std::runtime_error(
+                            "Marching Cubes edge endpoint is missing");
+                    const float aa = std::abs(a.value);
+                    const float ab = std::abs(b->value);
+                    const float t =
+                        aa + ab > 1e-12F ? aa / (aa + ab) : 0.5F;
+                    const GridKey start = global_key(block.key, x, y, z);
+                    GridKey end = start;
+                    if (axis == 0) ++end.x;
+                    else if (axis == 1) ++end.y;
+                    else ++end.z;
+                    mesh.vertices[output++] =
+                        position_of(start, voxel_size) * (1.F - t) +
+                        position_of(end, voxel_size) * t;
+                    bits &= bits - 1U;
+                }
+            }
+
+            std::size_t face_output = block.face_offset;
+            for (std::size_t word = 0; word < k_cell_mask_words; ++word) {
+                std::uint64_t bits =
+                    active_cell_masks[
+                        block_index * k_cell_mask_words + word];
+                while (bits != 0) {
+                    const unsigned bit =
+                        static_cast<unsigned>(std::countr_zero(bits));
+                    const std::size_t cell = word * 64U + bit;
+                    const int x = static_cast<int>(
+                        cell /
+                        (k_block_resolution * k_block_resolution));
+                    const int y = static_cast<int>(
+                        (cell / k_block_resolution) %
+                        k_block_resolution);
+                    const int z = static_cast<int>(
+                        cell % k_block_resolution);
+                    const int cube_index = marching_cube_index(
+                        blocks, block, x, y, z, minimum_weight);
+                    if (cube_index <= 0 || cube_index >= 255)
+                        throw std::runtime_error(
+                            "Marching Cubes active-cell mask is inconsistent");
+                    for (int triangle = 0;
+                         tri_table[cube_index][triangle] != -1;
+                         triangle += 3) {
+                        const std::size_t a = edge_vertex_index(
+                            blocks, edge_masks, edge_prefix, block,
+                            x, y, z,
+                            tri_table[cube_index][triangle]);
+                        const std::size_t b = edge_vertex_index(
+                            blocks, edge_masks, edge_prefix, block,
+                            x, y, z,
+                            tri_table[cube_index][triangle + 2]);
+                        const std::size_t c = edge_vertex_index(
+                            blocks, edge_masks, edge_prefix, block,
+                            x, y, z,
+                            tri_table[cube_index][triangle + 1]);
+                        mesh.faces[face_output++] = Eigen::Vector3i{
+                            static_cast<int>(a),
+                            static_cast<int>(b),
+                            static_cast<int>(c)};
+                    }
+                    bits &= bits - 1U;
+                }
+            }
+            if (face_output != block.face_offset + block.face_count)
+                throw std::runtime_error(
+                    "Marching Cubes face prefix is inconsistent");
+        });
+
+    stats.scratch_bytes =
+        active_cell_masks.size() * sizeof(active_cell_masks.front()) +
+        edge_masks.size() * sizeof(edge_masks.front()) +
+        edge_prefix.size() * sizeof(edge_prefix.front()) +
+        worker_edge_masks.size() * sizeof(worker_edge_masks.front());
+    stage.finish();
+    return stats;
+}
+
 }  // namespace
 
 bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
@@ -770,95 +1177,20 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
         options.mesh_tsdf_diagnostics_dir);
 
     Mesh mesh;
-    std::unordered_map<EdgeKey, int, EdgeHash> edge_vertices;
-    edge_vertices.reserve(volume.size() * 256);
-    std::uint64_t scanned_cells = 0;
-    std::uint64_t supported_cells = 0;
-
-    const auto vertex_on_edge = [&] (
-        const GridKey& a, const GridKey& b, const float va,
-        const float vb) {
-        const EdgeKey edge = edge_key(a, b);
-        const auto existing = edge_vertices.find(edge);
-        if (existing != edge_vertices.end()) return existing->second;
-        const float aa = std::abs(va);
-        const float ab = std::abs(vb);
-        const float t = aa + ab > 1e-12F ? aa / (aa + ab) : 0.5F;
-        const Vec3f position =
-            position_of(a, voxel_size) * (1.F - t) +
-            position_of(b, voxel_size) * t;
-        const int index = static_cast<int>(mesh.vertices.size());
-        mesh.vertices.push_back(position);
-        edge_vertices.emplace(edge, index);
-        return index;
-    };
-
-    for (const auto& [block_key, block] : volume) {
-        (void)block;
-        for (int x = 0; x < k_block_resolution; ++x) {
-            for (int y = 0; y < k_block_resolution; ++y) {
-                for (int z = 0; z < k_block_resolution; ++z) {
-                    ++scanned_cells;
-                    const GridKey cell = global_key(block_key, x, y, z);
-                    std::array<GridKey, 8> keys{};
-                    std::array<float, 8> values{};
-                    int cube_index = 0;
-                    bool supported = true;
-                    for (int corner = 0; corner < 8; ++corner) {
-                        keys[static_cast<std::size_t>(corner)] = {
-                            cell.x + shift[corner].x(),
-                            cell.y + shift[corner].y(),
-                            cell.z + shift[corner].z()};
-                        const TsdfVoxel* voxel = find_voxel(
-                            volume, keys[static_cast<std::size_t>(corner)]);
-                        if (voxel == nullptr ||
-                            voxel->weight < options.mesh_tsdf_min_weight) {
-                            supported = false;
-                            break;
-                        }
-                        values[static_cast<std::size_t>(corner)] =
-                            voxel->value;
-                        if (voxel->value < 0.F) cube_index |= 1 << corner;
-                    }
-                    if (!supported) continue;
-                    ++supported_cells;
-                    if (cube_index == 0 || cube_index == 255) continue;
-
-                    std::array<int, 12> edge_to_index{};
-                    for (int edge = 0; edge < 12; ++edge) {
-                        if ((edge_table[cube_index] & (1 << edge)) == 0)
-                            continue;
-                        const int a = edge_to_vert[edge][0];
-                        const int b = edge_to_vert[edge][1];
-                        edge_to_index[static_cast<std::size_t>(edge)] =
-                            vertex_on_edge(
-                                keys[static_cast<std::size_t>(a)],
-                                keys[static_cast<std::size_t>(b)],
-                                values[static_cast<std::size_t>(a)],
-                                values[static_cast<std::size_t>(b)]);
-                    }
-                    for (int triangle = 0;
-                         tri_table[cube_index][triangle] != -1;
-                         triangle += 3) {
-                        // Open3D reverses the last two indices relative to the
-                        // classic lookup table to preserve its outward winding.
-                        mesh.faces.emplace_back(
-                            edge_to_index[static_cast<std::size_t>(
-                                tri_table[cube_index][triangle])],
-                            edge_to_index[static_cast<std::size_t>(
-                                tri_table[cube_index][triangle + 2])],
-                            edge_to_index[static_cast<std::size_t>(
-                                tri_table[cube_index][triangle + 1])]);
-                    }
-                }
-            }
-        }
-    }
+    const MarchingCubesStats marching = extract_marching_cubes(
+        volume, voxel_size, options.mesh_tsdf_min_weight,
+        options.thread_count, mesh);
 
     core::Logger::instance().info(
-        "mvs mesh TSDF Marching Cubes: scanned_cells=", scanned_cells,
-        " supported_cells=", supported_cells,
-        " vertices=", mesh.vertices.size(), " faces=", mesh.faces.size());
+        "mvs mesh TSDF Marching Cubes: scanned_cells=",
+        marching.scanned_cells,
+        " supported_cells=", marching.supported_cells,
+        " active_cells=", marching.active_cells,
+        " vertices=", mesh.vertices.size(), " faces=", mesh.faces.size(),
+        " threads=", marching.thread_count,
+        " scratch_mib=",
+        static_cast<double>(marching.scratch_bytes) / (1024.0 * 1024.0),
+        " deterministic_grid_edges=true");
     if (mesh.faces.empty()) {
         stage.finish();
         return false;

@@ -764,9 +764,37 @@ void test_sparse_tsdf_mesh() {
     options.mesh_tsdf_min_component_fraction = 0.F;
     options.mesh_min_component_faces = 1;
     options.mesh_close_hole_edges = 0;
+    MvsScene parallel_scene = scene;
+    options.thread_count = 1;
     require(
         detail::reconstruct_mesh_tsdf(scene, options),
         "sparse TSDF rejected a valid depth plane");
+    options.thread_count = 4;
+    require(
+        detail::reconstruct_mesh_tsdf(parallel_scene, options),
+        "parallel sparse TSDF rejected a valid depth plane");
+    require(
+        scene.mesh.vertices.size() == parallel_scene.mesh.vertices.size() &&
+            scene.mesh.faces.size() == parallel_scene.mesh.faces.size(),
+        "parallel Marching Cubes changed mesh sizes");
+    for (std::size_t index = 0; index < scene.mesh.vertices.size(); ++index) {
+        const Vec3f& single = scene.mesh.vertices[index];
+        const Vec3f& parallel = parallel_scene.mesh.vertices[index];
+        require(
+            single.x() == parallel.x() &&
+                single.y() == parallel.y() &&
+                single.z() == parallel.z(),
+            "parallel Marching Cubes changed vertex order or position");
+    }
+    for (std::size_t index = 0; index < scene.mesh.faces.size(); ++index) {
+        const Eigen::Vector3i& single = scene.mesh.faces[index];
+        const Eigen::Vector3i& parallel = parallel_scene.mesh.faces[index];
+        require(
+            single.x() == parallel.x() &&
+                single.y() == parallel.y() &&
+                single.z() == parallel.z(),
+            "parallel Marching Cubes changed face order or indices");
+    }
     detail::clean_mesh(scene.mesh, options);
     require(!scene.mesh.faces.empty(), "sparse TSDF plane mesh is empty");
     const auto [minimum, maximum] = std::minmax_element(
