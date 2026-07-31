@@ -271,6 +271,157 @@ MVS depth/normal 常驻 GPU。
 中小场景速度优先时合理；大场景需要改成 pinned-host 预取、有限 VRAM cache 和多 CUDA stream，
 否则显存会随视图数量线性增长。
 
+### `Rasterizer::sample_depth` Nsight Compute 分析（2026-07-31）
+
+在 RTX 5090 D v2、Nsight Compute 2025.1 上，使用 `ori_img` 和 `antman_nomask`
+两组无 mask 数据对 `sampleDepthCUDA<2,8,5>` forward 与 `sampleDepthCUDA<2>`
+backward 做了稳定窗口采集。训练配置为 ADC+、30,000 步、最大训练边长 1,000、
+关闭 progressive resolution，几何项从第 3,000 步开启，每步从最多 8 个候选邻视角中
+随机选择一个邻视角。`--gggs-mv-neighbors 8` 只是候选池大小，并不会在一次迭代中执行
+8 次 `sample_depth`；实际选择逻辑见
+[`trainer.cpp`](../aetherscan/src/splat/trainer.cpp#L813)。
+
+训练 profiler 的稳定窗口是第 15,001–30,000 步的 CUDA event 平均值：
+
+| 数据集 | CUDA/iter | multi-view | sample forward | MV loss | sample backward | unproject | gradient merge |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `ori_img` | 21.8625 ms | 12.7234 ms（58.20%） | 6.0128 ms | 3.2678 ms | 3.0834 ms | 0.3129 ms | 0.0465 ms |
+| `antman_nomask` | 18.9966 ms | 10.7962 ms（56.83%） | 5.5498 ms | 2.2374 ms | 2.7406 ms | 0.2273 ms | 0.0411 ms |
+
+对应日志为：
+
+- `artifacts/ori_img_multiview_profile_30k_20260731/stdout.log`
+- `artifacts/antman_multiview_profile_30k_20260731/stdout.log`
+
+Nsight Compute 使用 kernel replay、19 passes 和默认 cold-cache 行为，在约第 15,000 步
+捕获单次 forward/backward。这里的 kernel 时间用于判断微架构瓶颈，不能直接替代上表跨视角、
+跨迭代的 CUDA event 平均值。报告保存在：
+
+- `artifacts/nsight_sampledepth_20260731/ori_img/sample_depth_stable.ncu-rep`
+- `artifacts/nsight_sampledepth_20260731/antman/sample_depth_stable.ncu-rep`
+
+#### 全分辨率采样量与 tile batch 利用率
+
+multi-view 在每个有效迭代中先把当前视图的整张 median-depth 图反投影到世界坐标，
+再送入邻视角 `sample_depth`，见
+[`trainer.cpp`](../aetherscan/src/splat/trainer.cpp#L821)。
+GGGS reference 使用 16×16、256-thread CTA 和 `SAMPLE_BATCH_SIZE=2`，因此每个
+duplicated-tile CTA 最多容纳 512 个点，配置见
+[`config.h`](../aetherscan/third_party/gggs_reference/include/config.h#L22)。
+
+由 forward SASS 中两组最终输出 store 的实际执行线程数可恢复进入 kernel 的点数：
+
+| 数据集 | 图像/输入点 | 邻视角内采样点 | in-frustum | duplicated CTA | 分配槽位 | 槽位利用率 | 第 1 槽线程利用率 | 第 2 槽线程利用率 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `ori_img` | 1,000,000 | 801,883 | 80.2% | 2,929 | 1,499,648 | 53.5% | 79.3% | 27.7% |
+| `antman_nomask` | 648,000 | 518,048 | 79.9% | 2,211 | 1,132,032 | 45.8% | 78.9% | 12.7% |
+
+约 20% 的全分辨率点在投影到邻视角后被剔除，但它们仍参加了整图 unproject。剩余点按 tile
+以 512 点为单位向上取整后，又产生 46.5%–54.2% 的空槽。第二个 per-thread sample
+尤其稀疏：`ori_img` 中只有第一个 sample 数量的 34.9%，`antman_nomask` 中只有 16.0%；
+但所有线程仍为双 sample 状态承担相同的寄存器分配。
+
+tile/point binning 需要对完整 point list 做 scan、sort、range identification 和 batch
+rounding，见
+[`rasterizer_impl.cu`](../aetherscan/third_party/gggs_reference/src/rasterizer_impl.cu#L1378)
+及
+[`rasterizer_impl.cu`](../aetherscan/third_party/gggs_reference/src/rasterizer_impl.cu#L1423)。
+因此减少整图输入量和减少 tile 尾块浪费是两个不同的优化层级。
+
+#### Forward：寄存器受限的重复 tile traversal
+
+| 指标 | `ori_img` | `antman_nomask` |
+|---|---:|---:|
+| 单 kernel replay 时间 | 6.477 ms | 6.754 ms |
+| registers/thread | 99 | 99 |
+| 实测 occupancy | 31.63% | 31.49% |
+| SM throughput | 42.64% | 36.01% |
+| L1 / L2 throughput | 12.27% / 5.07% | 13.13% / 4.25% |
+| DRAM throughput | 0.31% | 0.30% |
+| global sector 相对 ideal 冗余 | 55.6% | 55.9% |
+| eligible warps/scheduler | 0.92 | 0.85 |
+| branch target uniform | 89.40% | 91.58% |
+
+forward 的主要问题不是 DRAM 带宽。99 registers/thread 使寄存器成为 occupancy 限制项：
+每个 SM 只能驻留两个 256-thread CTA，理论 occupancy 上限约 33.3%。寄存器压力来自
+per-sample `done/Depth/T/point_xy/last_contributor` 等状态，以及
+`T_p[SAMPLE_BATCH_SIZE][SPLIT+1]`；当前配置实际为 `T_p[2][9]`，见
+[`sample_forward.cu`](../aetherscan/third_party/gggs_reference/src/sample_forward.cu#L574)
+和
+[`sample_forward.cu`](../aetherscan/third_party/gggs_reference/src/sample_forward.cu#L694)。
+
+每个 CTA 先遍历一次 Gaussian tile range 以确定初始深度和 `last_contributor`，然后执行
+1 次完整 8-way split 和 4 次后续 refinement，总计 5 次 refinement traversal，见
+[`sample_forward.cu`](../aetherscan/third_party/gggs_reference/src/sample_forward.cu#L700)
+和
+[`sample_forward.cu`](../aetherscan/third_party/gggs_reference/src/sample_forward.cu#L789)。
+因此 forward 更准确的描述是“低 occupancy 下重复遍历同一 Gaussian range 的计算/控制流
+瓶颈”，而不是显存带宽瓶颈。
+
+`antman_nomask` 虽然输入像素少 35.2%，forward 却没有更快：它的 slot 利用率更差，
+每 CTA 的平均 SASS 指令量又比 `ori_img` 高约 12.7%，说明 tile 内 Gaussian 数量和
+`max_contributor` 分布比纯像素数量更能决定耗时，同时存在 CTA 间工作量不均衡。
+
+#### Backward：local-memory/cache latency 与同步
+
+| 指标 | `ori_img` | `antman_nomask` |
+|---|---:|---:|
+| 单 kernel replay 时间 | 3.201 ms | 3.105 ms |
+| registers/thread | 39 | 39 |
+| 实测 occupancy | 81.09% | 77.79% |
+| SM throughput | 48.33% | 57.03% |
+| L1 / L2 throughput | 80.95% / 60.16% | 84.28% / 50.07% |
+| DRAM throughput | 1.87% | 1.87% |
+| L2 theoretical local sectors | 292.42 M | 241.25 M |
+| long-scoreboard stall / issue | 6.22 | 3.53 |
+| barrier stall / issue | 4.24 | 4.60 |
+| MIO throttle / issue | 2.75 | 3.32 |
+| branch target uniform | 83.75% | 85.63% |
+
+backward 的 occupancy 已经较高，但动态索引的 per-sample 局部数组产生了很大的 local-memory
+流量。L2 hit rate 为 98%–99%、DRAM 仅使用 1.87%，说明数据大多命中 cache；真正限制
+吞吐的是 local load/store 的 cache 管线和依赖延迟，而不是外部显存带宽。这与高
+long-scoreboard、MIO throttle 和仅约 1.3–1.5 eligible warps/scheduler 一致。
+
+backward 还会对 Gaussian contributor range 完整遍历两次，见
+[`sample_backward.cu`](../aetherscan/third_party/gggs_reference/src/sample_backward.cu#L170)
+和
+[`sample_backward.cu`](../aetherscan/third_party/gggs_reference/src/sample_backward.cu#L232)；
+第二次遍历对每个 Gaussian 聚合梯度，先做 warp reduction，再由每个 warp 的 lane 0
+执行 10 次 `atomicAdd`，见
+[`sample_backward.cu`](../aetherscan/third_party/gggs_reference/src/sample_backward.cu#L328)。
+atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后会更加突出。
+
+#### 优化顺序与预期收益
+
+1. **补齐可观测性，不改变算法。** 在 profiler 中记录 `PN`、`num_evaluation`、
+   `num_duplicated_tiles`，并增加每 tile point count、Gaussian range、`max_contributor`
+   的分位数/直方图。Release CUDA 构建加入 `-lineinfo`；当前报告只有 SASS correlation，
+   尚不能把 local-memory 热点自动映射回 CUDA-C 行。
+2. **实现 `<1>/<2>` tail specialization。** 满载 tile batch 继续用
+   `sampleDepthCUDA<2,...>`，尾块按 point count 分流到 `<1>` specialization，避免空的
+   第二 sample 长期占用 forward 寄存器。不能直接全局改成 `SAMPLE_BATCH_SIZE=1`，
+   否则 dense tile 会增加 CTA 数量并重复加载 Gaussian shared-memory tile。
+3. **缩短 forward 寄存器生命周期。** 对初始深度 pass 和 split refinement 做 kernel
+   拆分或状态重排，第一阶段以不改变数值语义为约束，将目标设为不超过 64
+   registers/thread；理论 residency 可由 2 CTA/SM 提高到约 4 CTA/SM。需要同时测量
+   中间结果写回和额外 launch 的成本，不能只看 occupancy。
+4. **标量化 backward per-sample 数组。** 对 `G[2]`、`p_ids[2]`、点梯度和 contributor
+   状态做显式展开，并 A/B 测试 48/64/80 registers 的编译变体，以 local sectors、
+   long-scoreboard 和 kernel time 而非单独的 occupancy 作为选择标准。
+5. **随后处理 atomic 与 tile 负载均衡。** 评估 block-level Gaussian 梯度聚合、
+   按预计 `max_contributor` 排序 CTA，或 persistent CTA work queue；这些工作应排在
+   backward local-memory 和 forward 寄存器问题之后。
+6. **算法级采样调度单独做质量 A/B。** half-resolution multi-view、每 2/4 步执行一次，
+   或仅对多视角一致的保守 focus 区域采样，可能比单 kernel 优化取得更大收益，但会改变
+   几何监督分布，必须同时比较 mesh 完整性、边界和跨视角一致性。
+
+稳定窗口中 sample forward+backward 占总 CUDA 时间的 41.6%（`ori_img`）和 43.6%
+（`antman_nomask`）。若这两个阶段整体加速 2 倍，在其他阶段不变的假设下，Amdahl 估算
+每次训练迭代的 CUDA 时间可分别下降约 20.8% 和 21.8%。若 GGGS 仍占完整 pipeline 的
+约 90%，且 wall time 与 CUDA 时间近似同比变化，整条 pipeline 的潜在收益约为 18%–20%；
+该数字是优化上限估算，仍需用完整 30,000 步稳定窗口复测。
+
 ## 当前几何交付与后续工作
 
 当前版本已打通 GGGS mesh extraction：训练后按原图分辨率渲染每个相机的 median depth、normal

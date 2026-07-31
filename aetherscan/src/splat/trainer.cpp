@@ -34,8 +34,12 @@ constexpr float k_sh0 = 0.28209479177387814F;
 enum class CudaTrainingStage : std::size_t {
     raster_forward,
     training_loss,
-    multi_view,
+    multi_view_unproject,
+    multi_view_sample_forward,
+    multi_view_loss,
+    multi_view_sample_backward,
     raster_backward,
+    multi_view_gradient_merge,
     densification_stats,
     optimizer,
     adc_noise,
@@ -77,9 +81,11 @@ public:
         }
         core::Logger::instance().info(
             "gggs_cuda_profile enabled=1 interval=", interval_,
-            " stages=raster_forward,training_loss,multi_view,"
-            "raster_backward,densification_stats,optimizer,adc_noise,"
-            "refinement,filter_3d");
+            " stages=raster_forward,training_loss,multi_view_unproject,"
+            "multi_view_sample_forward,multi_view_loss,"
+            "multi_view_sample_backward,raster_backward,"
+            "multi_view_gradient_merge,densification_stats,optimizer,"
+            "adc_noise,refinement,filter_3d");
     }
 
     ~CudaTrainingProfiler() { destroy_events(); }
@@ -180,6 +186,16 @@ private:
                 ? value(stage) * 100.0 / cuda_timeline_average_ms
                 : 0.0;
         };
+        const double multi_view_average_ms =
+            value(CudaTrainingStage::multi_view_unproject) +
+            value(CudaTrainingStage::multi_view_sample_forward) +
+            value(CudaTrainingStage::multi_view_loss) +
+            value(CudaTrainingStage::multi_view_sample_backward) +
+            value(CudaTrainingStage::multi_view_gradient_merge);
+        const double multi_view_percent =
+            cuda_timeline_average_ms > 0.0
+            ? multi_view_average_ms * 100.0 / cuda_timeline_average_ms
+            : 0.0;
         core::Logger::instance().info(
             "gggs_cuda_profile iterations=", first_iteration_, '-',
             last_iteration_, " samples=", sample_cursor_,
@@ -198,12 +214,32 @@ private:
             " training_loss_ms=", value(CudaTrainingStage::training_loss),
             " training_loss_pct=",
             percent(CudaTrainingStage::training_loss),
-            " multi_view_ms=", value(CudaTrainingStage::multi_view),
-            " multi_view_pct=", percent(CudaTrainingStage::multi_view),
+            " multi_view_ms=", multi_view_average_ms,
+            " multi_view_pct=", multi_view_percent,
+            " multi_view_unproject_ms=",
+            value(CudaTrainingStage::multi_view_unproject),
+            " multi_view_unproject_pct=",
+            percent(CudaTrainingStage::multi_view_unproject),
+            " multi_view_sample_forward_ms=",
+            value(CudaTrainingStage::multi_view_sample_forward),
+            " multi_view_sample_forward_pct=",
+            percent(CudaTrainingStage::multi_view_sample_forward),
+            " multi_view_loss_ms=",
+            value(CudaTrainingStage::multi_view_loss),
+            " multi_view_loss_pct=",
+            percent(CudaTrainingStage::multi_view_loss),
+            " multi_view_sample_backward_ms=",
+            value(CudaTrainingStage::multi_view_sample_backward),
+            " multi_view_sample_backward_pct=",
+            percent(CudaTrainingStage::multi_view_sample_backward),
             " raster_backward_ms=",
             value(CudaTrainingStage::raster_backward),
             " raster_backward_pct=",
             percent(CudaTrainingStage::raster_backward),
+            " multi_view_gradient_merge_ms=",
+            value(CudaTrainingStage::multi_view_gradient_merge),
+            " multi_view_gradient_merge_pct=",
+            percent(CudaTrainingStage::multi_view_gradient_merge),
             " densification_stats_ms=",
             value(CudaTrainingStage::densification_stats),
             " densification_stats_pct=",
@@ -784,18 +820,24 @@ GaussianModel Trainer::train(
                 view_cache.get(neighbour_index);
             const auto world_points = detail::unproject_depth_to_world(
                 rendered.median_depth, target.camera);
+            cuda_profiler.mark(CudaTrainingStage::multi_view_unproject);
             const DepthSampleResult sampled = rasterizer.sample_depth(
                 model, world_points, neighbour.camera,
                 raster_options);
+            cuda_profiler.mark(
+                CudaTrainingStage::multi_view_sample_forward);
             tinytensor::Tensor grad_sampled_points;
             multi_view_loss = detail::add_multi_view_loss(
                 sampled.camera_points, sampled.inside, rendered, target,
                 neighbour, options_, loss,
                 grad_sampled_points, report_progress);
+            cuda_profiler.mark(CudaTrainingStage::multi_view_loss);
             multi_view_sample_gradients = rasterizer.sample_depth_backward(
                 model, sampled, grad_sampled_points);
             detail::add_sample_depth_point_gradients(
                 target.camera, multi_view_sample_gradients.points, loss);
+            cuda_profiler.mark(
+                CudaTrainingStage::multi_view_sample_backward);
             has_multi_view_sample_gradients = true;
             if (report_progress) {
                 loss.total += options_.multi_view_geo_weight *
@@ -807,14 +849,21 @@ GaussianModel Trainer::train(
                 loss.normal_value += options_.multi_view_ncc_weight *
                                      multi_view_loss.ncc;
             }
+        } else {
+            cuda_profiler.mark(CudaTrainingStage::multi_view_unproject);
+            cuda_profiler.mark(
+                CudaTrainingStage::multi_view_sample_forward);
+            cuda_profiler.mark(CudaTrainingStage::multi_view_loss);
+            cuda_profiler.mark(
+                CudaTrainingStage::multi_view_sample_backward);
         }
-        cuda_profiler.mark(CudaTrainingStage::multi_view);
         ModelGradients gradients = rasterizer.backward(
             model, rendered, loss.color, loss.alpha, loss.depth, loss.normal);
+        cuda_profiler.mark(CudaTrainingStage::raster_backward);
         if (has_multi_view_sample_gradients)
             detail::add_sample_depth_model_gradients(
                 multi_view_sample_gradients, gradients);
-        cuda_profiler.mark(CudaTrainingStage::raster_backward);
+        cuda_profiler.mark(CudaTrainingStage::multi_view_gradient_merge);
         if (densification_enabled)
             detail::accumulate_densification_stats(
                 gradients.refine_weight, rendered.visibility, rendered.radii,

@@ -477,9 +477,12 @@ aetherscan ... --gggs \
 ```
 
 profiler 默认关闭；启用后在同一训练 stream 上按窗口记录并输出
-`raster_forward`、`training_loss`、`multi_view`、`raster_backward`、
-`densification_stats`、`optimizer`、`adc_noise`、`refinement` 和 `filter_3d`
-的每步摊销毫秒与占比，同时记录 Gaussian 数、tile instance、几何监督步数和拓扑更新次数。
+`raster_forward`、`training_loss`、`raster_backward`、`densification_stats`、
+`optimizer`、`adc_noise`、`refinement` 和 `filter_3d` 的每步摊销毫秒与占比。
+`multi_view` 除保留总耗时外，还细分为 `unproject`、`sample_forward`、
+`loss`、`sample_backward` 和 `gradient_merge`，从而区分全图反投影、邻视角
+深度采样、几何/NCC loss、采样反传与主 raster backward 后的梯度合并。同时记录
+Gaussian 数、tile instance、几何监督步数和拓扑更新次数。
 窗口上限为 1000 步，避免意外创建无界 CUDA event 池。首个窗口包含 CUDA kernel、内存池和
 图像缓存预热，只用于识别冷启动；稳定性能应比较后续多个窗口。该 profiler 不统计训练后的
 最终全视图评估、PLY 导出或 TSDF 阶段。
