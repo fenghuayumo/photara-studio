@@ -653,6 +653,13 @@ GaussianModel Trainer::train(
             model.means, filter_cameras, filter_3d_factor, brush_filter);
     const bool use_multi_view = options_.multi_view_geo_weight > 0.F ||
                                 options_.multi_view_ncc_weight > 0.F;
+    const unsigned multi_view_tail_interval =
+        std::max(1U, options_.multi_view_tail_interval);
+    TrainingOptions tail_multi_view_options = options_;
+    tail_multi_view_options.multi_view_geo_weight *=
+        static_cast<float>(multi_view_tail_interval);
+    tail_multi_view_options.multi_view_ncc_weight *=
+        static_cast<float>(multi_view_tail_interval);
     const auto multi_view_neighbours = use_multi_view
         ? data::compute_multi_view_neighbours(
               all_cameras, view_indices, options_)
@@ -791,11 +798,28 @@ GaussianModel Trainer::train(
         const bool depth_normal_active = options_.use_depth_normal_loss &&
             options_.depth_normal_weight > 0.F &&
             iteration >= options_.depth_normal_from_iter;
-        const bool multi_view_active =
+        const bool multi_view_eligible =
             (options_.multi_view_geo_weight > 0.F ||
              options_.multi_view_ncc_weight > 0.F) &&
             iteration >= options_.depth_normal_from_iter &&
             !multi_view_neighbours[view_index].empty();
+        const bool multi_view_tail =
+            iteration > options_.grow_stop_iter;
+        const bool multi_view_scheduled =
+            !multi_view_tail || multi_view_tail_interval == 1 ||
+            (iteration - options_.grow_stop_iter) %
+                    multi_view_tail_interval ==
+                0;
+        const bool multi_view_active =
+            multi_view_eligible && multi_view_scheduled;
+        std::size_t multi_view_neighbour_index = 0;
+        if (multi_view_eligible) {
+            const auto& candidates = multi_view_neighbours[view_index];
+            std::uniform_int_distribution<std::size_t> select_neighbour(
+                0, candidates.size() - 1);
+            multi_view_neighbour_index =
+                candidates[select_neighbour(random)];
+        }
         raster_options.require_depth = options_.use_mvs_depth ||
                                        options_.use_mvs_normals ||
                                        depth_normal_active ||
@@ -811,13 +835,10 @@ GaussianModel Trainer::train(
         DepthSampleGradients multi_view_sample_gradients;
         bool has_multi_view_sample_gradients = false;
         if (multi_view_active) {
-            const auto& candidates = multi_view_neighbours[view_index];
-            std::uniform_int_distribution<std::size_t> select_neighbour(
-                0, candidates.size() - 1);
-            const std::size_t neighbour_index =
-                candidates[select_neighbour(random)];
             const TrainingView neighbour =
-                view_cache.get(neighbour_index);
+                view_cache.get(multi_view_neighbour_index);
+            const TrainingOptions& multi_view_options =
+                multi_view_tail ? tail_multi_view_options : options_;
             const auto world_points = detail::unproject_depth_to_world(
                 rendered.median_depth, target.camera);
             cuda_profiler.mark(CudaTrainingStage::multi_view_unproject);
@@ -829,7 +850,7 @@ GaussianModel Trainer::train(
             tinytensor::Tensor grad_sampled_points;
             multi_view_loss = detail::add_multi_view_loss(
                 sampled.camera_points, sampled.inside, rendered, target,
-                neighbour, options_, loss,
+                neighbour, multi_view_options, loss,
                 grad_sampled_points, report_progress);
             cuda_profiler.mark(CudaTrainingStage::multi_view_loss);
             multi_view_sample_gradients = rasterizer.sample_depth_backward(
@@ -840,13 +861,13 @@ GaussianModel Trainer::train(
                 CudaTrainingStage::multi_view_sample_backward);
             has_multi_view_sample_gradients = true;
             if (report_progress) {
-                loss.total += options_.multi_view_geo_weight *
+                loss.total += multi_view_options.multi_view_geo_weight *
                                   multi_view_loss.geometry +
-                              options_.multi_view_ncc_weight *
+                              multi_view_options.multi_view_ncc_weight *
                                   multi_view_loss.ncc;
-                loss.depth_value += options_.multi_view_geo_weight *
+                loss.depth_value += multi_view_options.multi_view_geo_weight *
                                     multi_view_loss.geometry;
-                loss.normal_value += options_.multi_view_ncc_weight *
+                loss.normal_value += multi_view_options.multi_view_ncc_weight *
                                      multi_view_loss.ncc;
             }
         } else {

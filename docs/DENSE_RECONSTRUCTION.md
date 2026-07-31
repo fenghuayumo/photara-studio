@@ -408,12 +408,13 @@ aetherscan --images images --capture-mode scene
 
 | 阶段 | 实测结果 | 结论 |
 |---|---:|---|
-| global SfM | 76/76 注册，123,958 稀疏点 | 通过 |
-| SubjectBounds | 半径过滤保留 123,901/123,958；padding 后覆盖 123,939/123,958 | 通过；仅 19 个孤立点在范围外 |
-| sparse ADCPlus smoke | 123,958 初始 Gaussian，`densification_enabled=1`，`patchmatch=false` | 通过 |
+| global SfM | 23.927 s，76/76 注册，125,818 稀疏点 | 通过 |
+| SubjectBounds | 半径过滤保留 125,777/125,818 | 通过；41 个孤立点被过滤 |
+| sparse ADCPlus smoke | 125,818 初始 Gaussian，`densification_enabled=1`，`patchmatch=false` | 通过 |
 | 稀疏 ADCPlus | 10k 步，123,557 → 402,291 Gaussians | 通过 |
+| ADCPlus 30k + MV tail interval=2 | 478.244 s，125,818 → 627,470 Gaussians，PSNR 21.0766 dB | `ori_img` 通过；仅作为显式 fast mode |
 | masked GGGS | masked PSNR 28.87 dB | 通过 |
-| TSDF + Clean | 10.93 s，1,055,356 顶点 / 2,061,718 面 | 数值通过，拓扑未通过 |
+| TSDF + Clean（30k 无 Mask） | 20.392 s，1,347,617 顶点 / 2,668,110 面 | 数值通过，拓扑仍需门禁 |
 
 当前 smoke test 已证明内部 SfM 可以完全跳过 MVS，直接进入 ADCPlus。10k 质量基线中的
 Mask 来自已删除的实验性 depth-ROI 路径，只保留其数值作为历史对照，不能作为当前产品流程
@@ -486,6 +487,24 @@ Gaussian 数、tile instance、几何监督步数和拓扑更新次数。
 窗口上限为 1000 步，避免意外创建无界 CUDA event 池。首个窗口包含 CUDA kernel、内存池和
 图像缓存预热，只用于识别冷启动；稳定性能应比较后续多个窗口。该 profiler 不统计训练后的
 最终全视图评估、PLY 导出或 TSDF 阶段。
+
+ADCPlus 默认保持每步执行多视图；tail 调度是显式 fast mode：
+
+```bash
+# 默认值 1；只有允许质量折衷时才显式设置 2
+aetherscan ... --gggs-mv-tail-interval 2
+```
+
+第 15,001–30,000 步每两步执行一次昂贵的 `sample_depth + NCC + backward`，活跃步权重乘 2，
+保持多视图目标的期望不变。`ori_img` 完整 30k A/B 中，稳定 CUDA 时间由 21.2029
+降到 14.8752 ms/iter（-29.84%），GGGS wall time 由 575.389 降到 478.244 s
+（-16.88%），三视角 PSNR 由 20.9876 提高到 21.0766 dB；Clean 网格面数变化 -1.31%。
+但 `antman_nomask` 同一 OpenMVS 场景 A/B 中，interval=2 虽将训练由 442.813 降至
+380.596 s（-14.05%），PSNR 却由 37.8694 降到 36.7273 dB，Clean 主体网格面数由
+14,736,038 降到 10,612,585（-27.98%）。ADCPlus 在 15k 后仍持续 prune、replacement、
+noise 和 refine，因此按 `grow_stop_iter` 立即降频并不安全。默认值保持 interval=1；
+在引入几何稳定性触发或完整质量门禁前，interval=2 只能用于预览/快速模式。该优化只降低
+GPU 几何监督频率，不以提高 CPU 占用率为目标。
 
 ---
 

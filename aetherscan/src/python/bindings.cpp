@@ -490,6 +490,9 @@ NB_MODULE(aetherscan_native, module) {
         .def_rw(
             "multi_view_num", &splat::TrainingOptions::multi_view_num)
         .def_rw(
+            "multi_view_tail_interval",
+            &splat::TrainingOptions::multi_view_tail_interval)
+        .def_rw(
             "multi_view_pixel_noise_threshold",
             &splat::TrainingOptions::multi_view_pixel_noise_threshold)
         .def_rw("use_mask", &splat::TrainingOptions::use_mask)

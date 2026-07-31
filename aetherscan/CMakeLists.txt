@@ -360,7 +360,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         target_compile_definitions(aetherscan_gggs_reference PRIVATE
             AETHERSCAN_GGGS_ACCUTILE=$<BOOL:${AETHERSCAN_ENABLE_ACCUTILE}>)
         target_compile_options(aetherscan_gggs_reference PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math -lineinfo>)
         set_target_properties(aetherscan_gggs_reference PROPERTIES
             CUDA_ARCHITECTURES native
             CUDA_SEPARABLE_COMPILATION OFF

@@ -1,6 +1,6 @@
 # GGGS C++ / TinyTensor 后端
 
-## 当前实现状态（2026-07-22）
+## 当前实现状态
 
 AetherScan 已有一条可编译、可前反向传播、可由 CLI 启动的 GGGS 训练路径：
 
@@ -107,34 +107,6 @@ Gaussian 数量；此模式禁用 split、prune 和 opacity reset，只验证 RG
 `--gggs-structure-freeze-iter 5000`。到达该步后 means、scale、quaternion、opacity
 保持不变，但 SH/颜色继续使用 CUDA Adam 更新。
 
-### `ori_img` 收敛回归（2026-07-22）
-
-在 `D:\ScanVideo\ori_img` 的 76 张图、83,993 个 COLMAP 初始点上，默认策略训练
-5,000 步后得到 81,543 个 Gaussian。RGB+mask loss 从 1.62741 降到 0.00939；三个
-固定视角的 masked PSNR 为 30.00 / 35.65 / 35.38 dB，前景像素 PSNR 为
-24.84 / 30.54 / 30.24 dB。对应 Python GGGS 回归为 82,538 个 Gaussian、PSNR
-34.787 dB。
-
-本回归的关键修复是每次 GGGS backward 前清零 geometry-gradient scratch。参考
-FasterGS wrapper 使用 `resizeFunctional<true>`；若 C++ 使用未初始化的 pooled memory，
-`atomicAdd` 会累积旧的 conic/opacity 梯度，使 opacity 中位数错误升到约 0.96，loss
-无法下降。回归测试会连续执行两次相同 backward 并比较 opacity gradient，防止复发。
-
-同一修复也已在完整稠密路径上回归：preview MVS 融合 2,200,863 个点，均匀选择
-500,000 个 Gaussian，关闭动态致密化，并在前 1,000 步优化结构参数、后续仅优化逐级开放的
-SH。10,000 步训练耗时 47.13 秒，随机训练视图上的总 loss 从 0.06081 降到 0.00433；三个
-固定视角在 1,000 / 5,000 / 10,000 步的 masked PSNR 分别为：
-
-| 步数 | view 0 | view 38 | view 75 |
-|---:|---:|---:|---:|
-| 1,000 | 29.11 dB | 35.64 dB | 33.51 dB |
-| 5,000 | 29.80 dB | 36.68 dB | 34.87 dB |
-| 10,000 | 30.01 dB | 36.86 dB | 35.43 dB |
-
-10,000 步的严格前景像素 PSNR 为 24.82 / 31.71 / 30.25 dB。渲染未出现几何破洞、针刺或
-opacity 塌缩；因此稠密输入的默认 10,000 步、500,000 Gaussian 固定拓扑配置可以作为当前
-质量基线，暂不需要启用 `dense_adaptive`。
-
 稀疏 COLMAP 路径默认与 pygsplat 一致：使用原始三近邻 RMS scale 和随机 raw
 quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN scale 很大的离群点，
 正常训练由后续 prune 移除；固定拓扑稳健性实验可显式加
@@ -197,64 +169,11 @@ SH 颜色参数始终继续训练，`dense_adaptive` 的受限回收和切平面
 mask 内诊断视角 PSNR 为 22.87 / 22.32 / 24.55 dB，导出 PLY 的 31,000,000 个 float 标量
 全部 finite。300 步仅用于验证 mask 数据链路和梯度，不能替代正式 10,000 步训练。
 
-## 实拍端到端验证（2026-07-21）
-
-`D:\ScanVideo\ori_img\images` 的 76 张 1000×1000 图片已完成实际验证：76/76 相机注册，
-SfM reprojection RMS 为 0.591 px；default MVS 用 32 workers 在约 104 秒内融合出 2,097,765
-个点。针对“训练越久反而越糊”的问题，在同一个 preview MVS、500,000 Gaussian、4000 步、
-76/76 mask 配置上做了修复前后 A/B：
-
-| 版本 | 训练时间 | view 0 PSNR | view 38 PSNR | view 75 PSNR |
-|---|---:|---:|---:|---:|
-| 修复前 | 33.39 s | 20.82 dB | 20.03 dB | 20.89 dB |
-| 收敛修复后 | 34.40 s | 22.27 dB | 22.42 dB | 23.55 dB |
-
-修复包括：Adam epsilon 对齐到 `1e-15`，mean 学习率按 scene scale 缩放并指数衰减，加入
-L1+SSIM 光度损失，限制绝对 scale 范围与单 Gaussian 三轴最大比例。修复前 PLY 的轴比例
-p90/p99.9 分别达到 `171.9 / 170011`，产生明显针刺；修复后降为 `1.77 / 10.0`，且最小
-scale 从 `8.89e-8` 提升到 `8.89e-5`。两个版本 31,000,000 个 float 标量均为 finite，SSIM
-在当时的近似实现中只增加约 3% 训练时间；当前完整 11×11 fused CUDA 实现需要单独做正式
-性能基准，不能沿用该旧数据。
-
-训练日志会输出当前随机采样的 `view`，因此单步 loss 不应被误读为同一张图上的单调曲线。
-当前渲染已明显稳定，但仍有 floaters；修复后约 23.6% Gaussian 的 opacity 低于 `1/255`，
-该 A/B 使用的是动态管理加入前的固定 Gaussian 版本，不能视为最终商业画质。
-
-`dense_adaptive` 已在相同 76 视角数据上完成 preview MVS + 5,000 步真实验证：以 500,000
-Gaussian 启动、硬上限 600,000，8 次受限 refine 后得到 520,150 Gaussian，GGGS 训练耗时
-23.79 秒。第 1,000→5,000 步三个固定视角的前景内 PSNR 从 22.36 / 22.47 / 25.25 dB
-变为 22.68 / 23.07 / 25.16 dB，alpha coverage 最终保持 0.323 / 0.333 / 0.325，没有出现
-结构/opacity 塌缩。当前 C++ 诊断采用更严格的“仅前景像素平均”口径；按 pygsplat 将 mask
-外像素置零后再对整图平均的口径，同一最终误差约为 27.6 / 27.8 / 30.0 dB。
-
-新增 COLMAP/ADC-IGS 路径已在同一数据集实测：文本模型加载 76 个相机和 83,993 个稀疏点，
-以 10,000 个 Gaussian 启动、硬上限 15,000，1000 步训练在第 800 步新增 3,987、裁剪 21，
-最终为 13,966 个 Gaussian；三个诊断视角 PSNR 为 14.38 / 11.93 / 14.26 dB。该短跑用于
-验证数据链路、动态 Tensor/Adam 状态和硬上限，并不代表 30k 步最终画质。
-
 CUDA 前反向冒烟测试：
 
 ```powershell
 ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-failure
 ```
-
-### 3D filter + multi-view 回归（2026-07-22）
-
-`D:\ScanVideo\ori_img` 的 1,249,605 点稠密初始化、76 视角、10,000 步完整训练耗时
-283.6 秒；第 3,000 步后启用 `sampleDepth` 几何、NCC 和 depth-normal，单步约 60–70 ms，
-每步约 11–31 万有效 multi-view 像素。最终 TSDF mesh 为 890,029 顶点 / 1,766,231 面；
-pygsplat pseudo-reference 为 887,781 / 1,762,164。
-
-按两侧各 750,000 个均匀表面样本做精确点到三角面距离，voxel=`0.00408112`：
-
-| 版本 | symmetric Chamfer-L1 | F@0.25 voxel | F@0.5 voxel | F@1 voxel | F@2 voxel |
-|---|---:|---:|---:|---:|---:|
-| depth/TSDF 修复基线 | 0.002866 | 0.2934 | 0.5280 | 0.8040 | 0.9517 |
-| + 3D filter + multi-view | **0.000566** | **0.8722** | **0.9730** | **0.9936** | **0.9983** |
-
-这里 pygsplat mesh 只是无真值条件下的实现对齐参照，不等价于真实几何精度。新 mesh 到输入
-稠密点的距离 p50/p90/p99 为 `0.001889 / 0.006033 / 0.015141`，也与 pygsplat 的
-`0.001873 / 0.005981 / 0.015087` 基本一致。
 
 ## 性能设计
 
@@ -398,10 +317,10 @@ atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后
    `num_duplicated_tiles`，并增加每 tile point count、Gaussian range、`max_contributor`
    的分位数/直方图。Release CUDA 构建加入 `-lineinfo`；当前报告只有 SASS correlation，
    尚不能把 local-memory 热点自动映射回 CUDA-C 行。
-2. **实现 `<1>/<2>` tail specialization。** 满载 tile batch 继续用
-   `sampleDepthCUDA<2,...>`，尾块按 point count 分流到 `<1>` specialization，避免空的
-   第二 sample 长期占用 forward 寄存器。不能直接全局改成 `SAMPLE_BATCH_SIZE=1`，
-   否则 dense tile 会增加 CTA 数量并重复加载 Gaussian shared-memory tile。
+2. **不要继续投入 `<1>/<2>` tail specialization。** 已分别实测“额外 tail grid”
+   和“compact worklist”两种实现。前者为稀疏尾块增加空 CTA launch，后者增加 prefix scan、
+   worklist 构建和 device-to-host 同步；在约 33 万 Gaussian 的真实场景中 forward 均由约
+   4.2 ms 退化到约 4.9–5.0 ms。两种实现都已撤回，只保留 255/257 点边界的前后向数值测试。
 3. **缩短 forward 寄存器生命周期。** 对初始深度 pass 和 split refinement 做 kernel
    拆分或状态重排，第一阶段以不改变数值语义为约束，将目标设为不超过 64
    registers/thread；理论 residency 可由 2 CTA/SM 提高到约 4 CTA/SM。需要同时测量
@@ -412,15 +331,62 @@ atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后
 5. **随后处理 atomic 与 tile 负载均衡。** 评估 block-level Gaussian 梯度聚合、
    按预计 `max_contributor` 排序 CTA，或 persistent CTA work queue；这些工作应排在
    backward local-memory 和 forward 寄存器问题之后。
-6. **算法级采样调度单独做质量 A/B。** half-resolution multi-view、每 2/4 步执行一次，
-   或仅对多视角一致的保守 focus 区域采样，可能比单 kernel 优化取得更大收益，但会改变
-   几何监督分布，必须同时比较 mesh 完整性、边界和跨视角一致性。
+6. **算法级采样调度只保留显式 fast mode。** ADC 停止增长后每 2 步执行一次、活跃步
+   权重乘 2 虽能保持目标函数期望，但 `antman_nomask` 已证明它可能破坏几何覆盖。
+   默认仍每步执行；后续应研究几何稳定性触发、half-resolution 或保守 focus 区域。
 
 稳定窗口中 sample forward+backward 占总 CUDA 时间的 41.6%（`ori_img`）和 43.6%
 （`antman_nomask`）。若这两个阶段整体加速 2 倍，在其他阶段不变的假设下，Amdahl 估算
 每次训练迭代的 CUDA 时间可分别下降约 20.8% 和 21.8%。若 GGGS 仍占完整 pipeline 的
 约 90%，且 wall time 与 CUDA 时间近似同比变化，整条 pipeline 的潜在收益约为 18%–20%；
-该数字是优化上限估算，仍需用完整 30,000 步稳定窗口复测。
+该数字是单 kernel 优化上限估算；下面的完整 30,000 步 A/B 已验证更高层的调度收益。
+
+#### ADC tail 多视图随机调度 A/B（2026-07-31）
+
+新增 `--gggs-mv-tail-interval N`。默认值为 1，即每步执行；`N=2` 是显式性能模式。
+调度只在 `iteration > grow_stop_iter` 后生效，ADCPlus 默认即第 15,001–30,000 步。
+被跳过的迭代仍消费邻视角选择 RNG，避免改变后续随机流；活跃迭代把 geometry/NCC 权重
+乘以 `N`，因此是无偏的随机目标估计。它不会改变 depth-normal 的执行频率。
+
+使用同一份 76 视角 / 125,818 稀疏点 SfM 缓存，在 RTX 5090 D v2 上按 ADCPlus、
+30,000 步、`1000×1000`、geometry from 3,000、scale ratio 10 做完整 A/B：
+
+| 指标 | interval=1 | interval=2 | 变化 |
+|---|---:|---:|---:|
+| GGGS wall time | 575.389 s | 478.244 s | **-16.88%** |
+| 15,001–30,000 CUDA/iter | 21.2029 ms | 14.8752 ms | **-29.84%** |
+| 15,001–30,000 multi-view/iter | 12.3839 ms | 6.1603 ms | -50.25% |
+| sample forward / loss / backward | 5.7850 / 3.2788 / 2.9687 ms | 2.8582 / 1.6546 / 1.4688 ms | 约 -50% |
+| 三视角平均 PSNR | 20.9876 dB | 21.0766 dB | +0.0890 dB |
+| 最终 Gaussian | 653,367 | 627,470 | -3.96% |
+| TSDF Clean 顶点 / 面 | 1,365,794 / 2,703,392 | 1,347,617 / 2,668,110 | -1.33% / -1.31% |
+
+interval=2 在 `ori_img` 上没有观察到 PSNR 或主体网格完整性回退，训练少用 97.145 秒。
+完整日志分别为
+`artifacts/ori_img_mv_tail_interval1_30k_20260731/stdout.log` 和
+`artifacts/ori_img_mv_tail_interval2_30k_20260731/stdout.log`。
+ADC 的 GPU 原子与 refine 会造成跨进程非逐元素确定性，因此 Gaussian/mesh 数量只按区间
+判断。
+
+随后使用同一份 64 相机 / 26,127 稀疏点 OpenMVS 工程，对 `antman_nomask` 做严格同加载
+路径 A/B：
+
+| 指标 | interval=1 | interval=2 | 变化 |
+|---|---:|---:|---:|
+| GGGS wall time | 442.813 s | 380.596 s | **-14.05%** |
+| 15,001–30,000 CUDA/iter | 17.2424 ms | 12.8187 ms | **-25.66%** |
+| 15,001–30,000 multi-view/iter | 9.8435 ms | 5.1150 ms | -48.04% |
+| 三视角平均 PSNR | 37.8694 dB | 36.7273 dB | **-1.1421 dB** |
+| 最终 Gaussian | 554,006 | 562,094 | +1.46% |
+| TSDF Clean 顶点 / 面 | 7,470,759 / 14,736,038 | 5,355,665 / 10,612,585 | **-28.31% / -27.98%** |
+
+虽然调度仍有稳定性能收益，但 `antman_nomask` 的 PSNR 和最大连通网格覆盖明显回退。
+原因是 ADCPlus 的 `grow_stop_iter=15,000` 只停止新增 Gaussian，prune、replacement、
+ADC noise 和每 200 步 refine 默认持续到训练结束；因此“停止增长”并不等价于拓扑与几何
+已经收敛。在未实现基于几何稳定性或 refine-stop 的自适应触发前，interval=1 保持为默认值，
+interval=2 只能作为允许质量折衷的显式 fast mode。对应日志为
+`artifacts/antman_mv_tail_interval1_current_30k_20260731/stdout.log` 和
+`artifacts/antman_mv_tail_interval2_30k_20260731/stdout.log`。
 
 ## 当前几何交付与后续工作
 

@@ -107,6 +107,10 @@ struct TrainingOptions {
     float multi_view_geo_weight{0.F};
     float multi_view_ncc_weight{0.F};
     unsigned multi_view_num{8};
+    // Subsample the expensive multi-view objective after ADC growth stops.
+    // Active-step weights are multiplied by this interval so the stochastic
+    // objective remains unchanged in expectation.
+    unsigned multi_view_tail_interval{1};
     float multi_view_max_angle{30.F};
     float multi_view_min_distance{0.01F};
     float multi_view_max_distance{1.5F};

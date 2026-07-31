@@ -102,6 +102,7 @@ struct ReconstructCli {
     float gggs_multi_view_geo_weight{0.02F};
     float gggs_multi_view_ncc_weight{0.6F};
     unsigned gggs_multi_view_num{8};
+    unsigned gggs_multi_view_tail_interval{1};
     float gggs_multi_view_pixel_noise{1.F};
     unsigned gggs_geometry_from_iter{3'000};
     float gggs_min_scale_fraction{1e-4F};
@@ -254,6 +255,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
               << "  --gggs-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
               << "  --gggs-mv-neighbors N  nearest camera candidates (default 8)\n"
+              << "  --gggs-mv-tail-interval N  multi-view interval after ADC growth stops (default 1)\n"
               << "  --gggs-mv-pixel-noise P  geometry reprojection gate (default 1px)\n"
               << "  --gggs-geometry-from-iter N  start geometry loss (default 3000)\n"
               << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
@@ -431,6 +433,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.6"))
         ("gggs-mv-neighbors", "Number of nearest multi-view candidates",
          cxxopts::value<unsigned>()->default_value("8"))
+        ("gggs-mv-tail-interval",
+         "Multi-view sampling interval after ADC growth stops",
+         cxxopts::value<unsigned>()->default_value("1"))
         ("gggs-mv-pixel-noise", "Multi-view reprojection threshold in pixels",
          cxxopts::value<float>()->default_value("1"))
         ("gggs-geometry-from-iter", "Iteration to start GGGS geometry loss",
@@ -638,6 +643,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_multi_view_ncc_weight =
         result["gggs-mv-ncc-weight"].as<float>();
     cli.gggs_multi_view_num = result["gggs-mv-neighbors"].as<unsigned>();
+    cli.gggs_multi_view_tail_interval =
+        result["gggs-mv-tail-interval"].as<unsigned>();
     cli.gggs_multi_view_pixel_noise =
         result["gggs-mv-pixel-noise"].as<float>();
     cli.gggs_geometry_from_iter =
@@ -788,6 +795,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "GGGS multi-view loss weights must be non-negative");
     if (cli.gggs_multi_view_num == 0)
         throw std::invalid_argument("--gggs-mv-neighbors must be positive");
+    if (cli.gggs_multi_view_tail_interval == 0)
+        throw std::invalid_argument(
+            "--gggs-mv-tail-interval must be positive");
     if (!(cli.gggs_multi_view_pixel_noise > 0.F))
         throw std::invalid_argument("--gggs-mv-pixel-noise must be positive");
     if (cli.gggs_min_scale_fraction <= 0.F ||
@@ -1523,6 +1533,8 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         ? cli.gggs_multi_view_ncc_weight
         : 0.F;
     options.multi_view_num = cli.gggs_multi_view_num;
+    options.multi_view_tail_interval =
+        cli.gggs_multi_view_tail_interval;
     options.multi_view_pixel_noise_threshold =
         cli.gggs_multi_view_pixel_noise;
     options.depth_normal_from_iter = cli.gggs_geometry_from_iter;
@@ -1577,6 +1589,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " multi_view_geo_weight=", options.multi_view_geo_weight,
         " multi_view_ncc_weight=", options.multi_view_ncc_weight,
         " multi_view_neighbours=", options.multi_view_num,
+        " multi_view_tail_interval=", options.multi_view_tail_interval,
         " multi_view_pixel_noise=",
         options.multi_view_pixel_noise_threshold,
         " geometry_from_iter=", options.depth_normal_from_iter,

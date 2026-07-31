@@ -348,6 +348,95 @@ void test_forward_backward() {
         "GGGS backward retained stale geometry gradients between calls");
 }
 
+void test_sample_depth_batch_boundary() {
+    using namespace aetherscan::splat;
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 0.F, 2.F}, {1, 3},
+        tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{
+            std::log(0.25F), std::log(0.25F), std::log(0.08F)},
+        {1, 3}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F}, {1, 4},
+        tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        std::vector<float>{5.F}, {1, 1}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::zeros(
+        {1, 1, 3}, tinytensor::Device::CUDA);
+    model.sh_degree = 0;
+
+    Camera camera;
+    camera.world_to_camera[0] = 1.F;
+    camera.world_to_camera[5] = 1.F;
+    camera.world_to_camera[10] = 1.F;
+    camera.world_to_camera[15] = 1.F;
+    camera.fx = camera.fy = 40.F;
+    camera.cx = camera.cy = 15.5F;
+    camera.width = camera.height = 32;
+
+    struct SampleRun {
+        std::vector<float> camera_points;
+        std::vector<bool> inside;
+        std::vector<float> point_gradients;
+    };
+    Rasterizer rasterizer;
+    const auto run = [&](const std::size_t count) {
+        std::vector<float> points(3 * count, 0.F);
+        for (std::size_t index = 0; index < count; ++index)
+            points[3 * index + 2] = 2.F;
+        const auto world_points = tinytensor::Tensor::from_vector(
+            points, {count, std::size_t{3}}, tinytensor::Device::CUDA);
+        const DepthSampleResult sampled =
+            rasterizer.sample_depth(model, world_points, camera);
+        std::vector<float> output_gradient(3 * count, 0.F);
+        for (std::size_t index = 0; index < count; ++index)
+            output_gradient[3 * index + 2] =
+                1.F / static_cast<float>(count);
+        const auto gradients = rasterizer.sample_depth_backward(
+            model, sampled,
+            tinytensor::Tensor::from_vector(
+                output_gradient, {count, std::size_t{3}},
+                tinytensor::Device::CUDA));
+        require_finite(
+            gradients.points,
+            "Non-finite sample-depth point gradient at tail boundary");
+        return SampleRun{
+            sampled.camera_points.to_vector(),
+            sampled.inside.to_vector_bool(),
+            gradients.points.to_vector()};
+    };
+
+    // Exercise both sides of the per-tile 256-thread sample-slot boundary.
+    const SampleRun one_sample_tail = run(255);
+    const SampleRun two_sample_tail = run(257);
+    require(
+        std::all_of(
+            one_sample_tail.inside.begin(), one_sample_tail.inside.end(),
+            [](const bool value) { return value; }) &&
+        std::all_of(
+            two_sample_tail.inside.begin(), two_sample_tail.inside.end(),
+            [](const bool value) { return value; }),
+        "GGGS sample-depth tail test did not intersect the Gaussian surface");
+    for (std::size_t index = 0; index < 255 * 3; ++index) {
+        require(
+            std::abs(
+                one_sample_tail.camera_points[index] -
+                two_sample_tail.camera_points[index]) < 1e-6F,
+            "GGGS sample-depth batch-boundary forward results differ");
+    }
+    // The loss above is averaged over the number of points, so remove that
+    // known scale before comparing the two batch-boundary cases.
+    for (std::size_t index = 0; index < 255 * 3; ++index) {
+        require(
+            std::abs(
+                255.F * one_sample_tail.point_gradients[index] -
+                257.F * two_sample_tail.point_gradients[index]) < 2e-5F,
+            "GGGS sample-depth batch-boundary point gradients differ");
+    }
+}
+
 void test_contribution_visibility_rejects_occluded_gaussians() {
     using namespace aetherscan::splat;
     constexpr std::size_t count = 4;
@@ -1676,6 +1765,7 @@ int main() {
         test_gggs_3d_filter();
         test_gggs_multi_view_geometry_and_ncc();
         test_forward_backward();
+        test_sample_depth_batch_boundary();
         test_contribution_visibility_rejects_occluded_gaussians();
         test_alpha_parameter_gradients();
         test_adam_rejects_non_finite_gradients();
