@@ -30,6 +30,7 @@ struct LossGradients {
 
 struct DecodedTrainingPixels {
     tinytensor::Tensor rgb;
+    tinytensor::Tensor gray;
     tinytensor::Tensor mask;
 };
 
@@ -67,7 +68,8 @@ DecodedTrainingPixels upload_packed_training_pixels(
     const std::vector<int>& rgba,
     std::uint32_t width,
     std::uint32_t height,
-    bool decode_mask);
+    bool decode_mask,
+    bool decode_gray);
 
 // Fold the Mip-Splatting 3D-filter floor into the canonical scale/opacity
 // parameters and clear model.filter_3d. This is available for explicit model

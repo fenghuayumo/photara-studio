@@ -183,6 +183,14 @@ void test_gggs_multi_view_geometry_and_ncc() {
     neighbour.camera = make_camera(0.1F);
     std::vector<float> reference_rgb(3 * pixels);
     std::vector<float> neighbour_rgb(3 * pixels);
+    std::vector<float> reference_gray(pixels, 0.F);
+    std::vector<float> neighbour_gray(pixels, 0.F);
+    constexpr std::array<float, 3> gray_weights{
+        0.299F, 0.587F, 0.114F};
+    constexpr std::array<float, 3> channel_scales{
+        0.8F, 1.F, 0.6F};
+    constexpr std::array<float, 3> channel_offsets{
+        0.05F, 0.F, 0.15F};
     for (std::uint32_t y = 0; y < height; ++y) {
         for (std::uint32_t x = 0; x < width; ++x) {
             const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
@@ -195,10 +203,22 @@ void test_gggs_multi_view_geometry_and_ncc() {
                 0.5F + 0.22F * std::sin(0.37F * world_x_pixel) +
                 0.18F * std::cos(0.29F * y);
             for (int channel = 0; channel < 3; ++channel) {
-                reference_rgb[static_cast<std::size_t>(channel) * pixels + pixel] =
-                    ref_value;
-                neighbour_rgb[static_cast<std::size_t>(channel) * pixels + pixel] =
-                    neighbour_value;
+                const float reference_channel =
+                    channel_offsets[channel] +
+                    channel_scales[channel] * ref_value;
+                const float neighbour_channel =
+                    channel_offsets[channel] +
+                    channel_scales[channel] * neighbour_value;
+                reference_rgb[
+                    static_cast<std::size_t>(channel) * pixels + pixel] =
+                    reference_channel;
+                neighbour_rgb[
+                    static_cast<std::size_t>(channel) * pixels + pixel] =
+                    neighbour_channel;
+                reference_gray[pixel] +=
+                    gray_weights[channel] * reference_channel;
+                neighbour_gray[pixel] +=
+                    gray_weights[channel] * neighbour_channel;
             }
         }
     }
@@ -206,6 +226,12 @@ void test_gggs_multi_view_geometry_and_ncc() {
         reference_rgb, {3, height, width}, tinytensor::Device::CUDA);
     neighbour.rgb = tinytensor::Tensor::from_vector(
         neighbour_rgb, {3, height, width}, tinytensor::Device::CUDA);
+    reference.gray = tinytensor::Tensor::from_vector(
+        reference_gray,
+        {height, width}, tinytensor::Device::CUDA);
+    neighbour.gray = tinytensor::Tensor::from_vector(
+        neighbour_gray,
+        {height, width}, tinytensor::Device::CUDA);
     RenderResult reference_render;
     reference_render.median_depth = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 2.F), {height, width},

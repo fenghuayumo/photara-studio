@@ -462,12 +462,15 @@ HostTrainingView load_host_training_view(
         has_mask};
 }
 
-TrainingView upload_training_view(const HostTrainingView& host) {
+TrainingView upload_training_view(
+    const HostTrainingView& host, const bool decode_gray) {
     TrainingView result;
     result.camera = host.camera;
     auto decoded = detail::upload_packed_training_pixels(
-        host.rgba, host.camera.width, host.camera.height, host.has_mask);
+        host.rgba, host.camera.width, host.camera.height, host.has_mask,
+        decode_gray);
     result.rgb = std::move(decoded.rgb);
+    result.gray = std::move(decoded.gray);
     result.depth = host.depth.empty()
         ? tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA)
         : tinytensor::Tensor::from_vector(
@@ -496,7 +499,8 @@ struct TrainingDataLoader::Impl {
           resolution_scale_(resolution_scale) {}
 
     TrainingView get(const std::size_t index) {
-        return upload_training_view(host_view(index));
+        return upload_training_view(
+            host_view(index), options_.multi_view_ncc_weight > 0.F);
     }
 
     void prefetch(const std::size_t index) {
@@ -623,7 +627,8 @@ Camera camera_from_mvs_view(const mvs::MvsView& view) {
 TrainingView make_training_view(
     const mvs::MvsView& view, const TrainingOptions& options) {
     return upload_training_view(
-        load_host_training_view(view, options, 1.F));
+        load_host_training_view(view, options, 1.F),
+        options.multi_view_ncc_weight > 0.F);
 }
 
 }  // namespace aetherscan::splat

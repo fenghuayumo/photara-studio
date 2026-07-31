@@ -42,6 +42,7 @@ struct GaussianModel {
 struct TrainingView {
     Camera camera;
     tinytensor::Tensor rgb;     // [3,H,W], linear float RGB
+    tinytensor::Tensor gray;    // [H,W], optional NCC luminance
     tinytensor::Tensor depth;   // [H,W], zero when unavailable
     tinytensor::Tensor normal;  // [3,H,W], camera space
     tinytensor::Tensor mask;    // [H,W], 0 or 1

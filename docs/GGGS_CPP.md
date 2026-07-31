@@ -388,6 +388,46 @@ interval=2 只能作为允许质量折衷的显式 fast mode。对应日志为
 `artifacts/antman_mv_tail_interval1_current_30k_20260731/stdout.log` 和
 `artifacts/antman_mv_tail_interval2_30k_20260731/stdout.log`。
 
+#### Plane-warp NCC 底层 kernel A/B（2026-07-31）
+
+默认训练继续保持 `--gggs-mv-tail-interval 1`，没有改变 multi-view 的迭代频率、权重、
+7×7 patch、homography、NCC 目标或解析梯度。优化只作用于图像解码和
+`multi_view_raw_kernel`：
+
+1. 邻视图的双线性值与 `du/dv` 从同一组 2×2 角点计算，避免同一位置重复采样；
+2. 仅在启用 NCC 时，RGBA8 上传 kernel 同步生成单通道 BT.601 灰度平面，plane warp
+   不再为每个 patch sample 重读三个 RGB 平面；
+3. `32×8` CTA 协作加载带 2 像素 halo 的 `36×12` 参考灰度 tile，并把固定的半像素采样
+   预展开成 `69×21` shared-memory tile。相邻输出像素重叠的参考 patch 不再重复访问
+   global memory 或重复做双线性插值；邻视图的非规则 warp 仍逐像素精确计算。
+
+在同一份 `antman_nomask` COLMAP 输入（64 相机 / 14,586 稀疏点）、RTX 5090 D v2、
+ADCPlus 5,000 步、`1000 px`、geometry from 3,000、无 Mask、interval=1 上，用优化前后
+独立保留的 Release 二进制做同参数 A/B：
+
+| 指标 | 基线 | Plane-warp NCC 优化 | 变化 |
+|---|---:|---:|---:|
+| GGGS wall time | 30.4701 s | 29.5425 s | **-3.04%** |
+| 3,001–5,000 CUDA/iter | 11.0843 ms | 10.7495 ms | **-3.02%** |
+| 3,001–5,000 multi-view/iter | 6.6993 ms | 6.4688 ms | **-3.44%** |
+| 3,001–5,000 NCC loss kernel | 2.1737 ms | 2.0694 ms | **-4.80%** |
+| 三视角平均 PSNR | 30.5035 dB | 30.7663 dB | +0.2628 dB |
+| 最终 Gaussian | 173,061 | 174,107 | +0.60% |
+
+ADCPlus 的 atomic/refine 路径不是跨进程逐元素确定的，且底层优化改变了浮点加法顺序；
+因此 PSNR 与 Gaussian 数只作为没有观察到质量回退的门禁，不把单次正向变化解释为质量提升。
+严格性能结论优先采用同输入 A/B 的 CUDA event 分段结果。日志位于
+`artifacts/antman_ncc_ab_20260731/baseline_mv/stdout.log` 和
+`artifacts/antman_ncc_ab_20260731/optimized_samples_mv/stdout.log`。
+
+最终候选又以同一 COLMAP 输入完成 30,000 步 + TSDF/Clean 检查：GGGS 训练 422.839 秒，
+521,820 个 Gaussian，三视角平均 PSNR 39.2708 dB；第 15,001–30,000 步每窗口平均
+CUDA 16.2756 ms、multi-view 9.2433 ms、NCC loss 2.3062 ms，15,000 个迭代中有
+14,298 个有效 multi-view step。TSDF 三个诊断视图的跨视角深度一致率为
+98.51%–99.79%，Clean 后网格为 9,982,336 顶点 / 19,776,598 面。该运行从 14,586 点
+COLMAP 模型直接加载，不能与上文旧的 26,127 点 OpenMVS 30k 基线做严格速度归因。
+完整日志为 `artifacts/antman_ncc_final_interval1_30k_20260731/stdout.log`。
+
 ## 当前几何交付与后续工作
 
 当前版本已打通 GGGS mesh extraction：训练后按原图分辨率渲染每个相机的 median depth、normal

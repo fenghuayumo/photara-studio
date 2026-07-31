@@ -15,6 +15,24 @@ namespace {
 
 constexpr unsigned k_threads = 256;
 constexpr unsigned k_reduced_adam_threads = 64;
+// A 32x8 image-space CTA shares the integer reference tile and all fixed
+// half-pixel samples needed by the 7x7 NCC patches of its 256 output pixels.
+constexpr unsigned k_multi_view_block_x = 32;
+constexpr unsigned k_multi_view_block_y = 8;
+constexpr int k_ncc_reference_padding = 2;
+constexpr int k_ncc_reference_tile_width =
+    static_cast<int>(k_multi_view_block_x) +
+    2 * k_ncc_reference_padding;
+constexpr int k_ncc_reference_tile_height =
+    static_cast<int>(k_multi_view_block_y) +
+    2 * k_ncc_reference_padding;
+constexpr int k_ncc_radius = 3;
+constexpr int k_ncc_reference_sample_width =
+    2 * static_cast<int>(k_multi_view_block_x) +
+    2 * k_ncc_radius - 1;
+constexpr int k_ncc_reference_sample_height =
+    2 * static_cast<int>(k_multi_view_block_y) +
+    2 * k_ncc_radius - 1;
 
 void check_cuda(const cudaError_t error, const char* operation) {
     if (error != cudaSuccess)
@@ -27,17 +45,23 @@ __device__ float sigmoid(const float value) {
 }
 
 __global__ void unpack_training_pixels_kernel(
-    const unsigned* rgba, float* rgb, float* mask,
+    const unsigned* rgba, float* rgb, float* gray, float* mask,
     const std::size_t pixels) {
     const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
     if (pixel >= pixels) return;
     const unsigned value = rgba[pixel];
     constexpr float inverse_255 = 1.F / 255.F;
-    rgb[pixel] = static_cast<float>(value & 0xffU) * inverse_255;
-    rgb[pixels + pixel] =
+    const float red =
+        static_cast<float>(value & 0xffU) * inverse_255;
+    const float green =
         static_cast<float>((value >> 8U) & 0xffU) * inverse_255;
-    rgb[2 * pixels + pixel] =
+    const float blue =
         static_cast<float>((value >> 16U) & 0xffU) * inverse_255;
+    rgb[pixel] = red;
+    rgb[pixels + pixel] = green;
+    rgb[2 * pixels + pixel] = blue;
+    if (gray)
+        gray[pixel] = 0.299F * red + 0.587F * green + 0.114F * blue;
     if (mask)
         mask[pixel] =
             static_cast<float>((value >> 24U) & 0xffU) * inverse_255;
@@ -246,23 +270,47 @@ __device__ float sample_plane_bilinear(
             image[y1 * width + x1] * tx) * ty;
 }
 
-__device__ float sample_gray_bilinear(
-    const float* rgb, const int width, const int height,
+struct GrayBilinearGradient {
+    float value;
+    float du;
+    float dv;
+};
+
+__device__ __forceinline__ GrayBilinearGradient
+sample_gray_bilinear_gradient(
+    const float* gray, const int width, const int height,
     const float u, const float v) {
-    const std::size_t pixels = static_cast<std::size_t>(width) * height;
-    return 0.299F * sample_plane_bilinear(rgb, width, height, u, v) +
-           0.587F * sample_plane_bilinear(rgb + pixels, width, height, u, v) +
-           0.114F * sample_plane_bilinear(rgb + 2 * pixels, width, height, u, v);
+    const float floor_u = floorf(u);
+    const float floor_v = floorf(v);
+    const int x0 = max(
+        0, min(width - 1, static_cast<int>(floor_u)));
+    const int y0 = max(
+        0, min(height - 1, static_cast<int>(floor_v)));
+    const int x1 = min(x0 + 1, width - 1);
+    const int y1 = min(y0 + 1, height - 1);
+    const float tx = u - floor_u;
+    const float ty = v - floor_v;
+    const float c00 = gray[y0 * width + x0];
+    const float c01 = gray[y0 * width + x1];
+    const float c10 = gray[y1 * width + x0];
+    const float c11 = gray[y1 * width + x1];
+    return {
+        (c00 * (1.F - tx) + c01 * tx) * (1.F - ty) +
+            (c10 * (1.F - tx) + c11 * tx) * ty,
+        (c01 - c00) * (1.F - ty) + (c11 - c10) * ty,
+        (c10 - c00) * (1.F - tx) + (c11 - c01) * tx};
 }
 
 __device__ bool plane_warp_ncc(
     const float depth, float nx, float ny, float nz,
     const int center_x, const int center_y,
     const float* transform, const Camera reference,
-    const Camera neighbour, const float* reference_rgb,
-    const float* neighbour_rgb, float& ncc, float& grad_depth,
+    const Camera neighbour, const float* reference_gray,
+    const int reference_gray_width,
+    const int reference_sample_x, const int reference_sample_y,
+    const float* neighbour_gray, float& ncc, float& grad_depth,
     float& grad_nx, float& grad_ny, float& grad_nz) {
-    constexpr int radius = 3;
+    constexpr int radius = k_ncc_radius;
     constexpr float radius_scaled = 1.5F;
     constexpr int samples = 49;
     constexpr float inverse_samples = 1.F / samples;
@@ -312,32 +360,16 @@ __device__ bool plane_warp_ncc(
                   vn - radius_scaled > 0.F &&
                   vn + radius_scaled < neighbour.height - 1))
                 return false;
-            const float cr = sample_gray_bilinear(
-                reference_rgb, static_cast<int>(reference.width),
-                static_cast<int>(reference.height), ur, vr);
-            const int x0 = static_cast<int>(floorf(un));
-            const int y0 = static_cast<int>(floorf(vn));
-            const float tx = un - x0;
-            const float ty = vn - y0;
-            const float cn = sample_gray_bilinear(
-                neighbour_rgb, static_cast<int>(neighbour.width),
-                static_cast<int>(neighbour.height), un, vn);
-            const float c00 = sample_gray_bilinear(
-                neighbour_rgb, static_cast<int>(neighbour.width),
-                static_cast<int>(neighbour.height), x0, y0);
-            const float c01 = sample_gray_bilinear(
-                neighbour_rgb, static_cast<int>(neighbour.width),
-                static_cast<int>(neighbour.height), x0 + 1, y0);
-            const float c10 = sample_gray_bilinear(
-                neighbour_rgb, static_cast<int>(neighbour.width),
-                static_cast<int>(neighbour.height), x0, y0 + 1);
-            const float c11 = sample_gray_bilinear(
-                neighbour_rgb, static_cast<int>(neighbour.width),
-                static_cast<int>(neighbour.height), x0 + 1, y0 + 1);
-            const float dc_du = (c01 - c00) * (1.F - ty) +
-                                (c11 - c10) * ty;
-            const float dc_dv = (c10 - c00) * (1.F - tx) +
-                                (c11 - c01) * tx;
+            const float cr = reference_gray[
+                (reference_sample_y + dv_i) * reference_gray_width +
+                reference_sample_x + du_i];
+            const GrayBilinearGradient neighbour_sample =
+                sample_gray_bilinear_gradient(
+                    neighbour_gray, static_cast<int>(neighbour.width),
+                    static_cast<int>(neighbour.height), un, vn);
+            const float cn = neighbour_sample.value;
+            const float dc_du = neighbour_sample.du;
+            const float dc_dv = neighbour_sample.dv;
             const float dc_dhx = dc_du * neighbour.fx / hz;
             const float dc_dhy = dc_dv * neighbour.fy / hz;
             const float dc_dhz =
@@ -406,20 +438,101 @@ __device__ bool plane_warp_ncc(
 
 __global__ void multi_view_raw_kernel(
     const float* reference_depth, const float* reference_normal,
-    const float* reference_rgb, const float* sampled_neighbour_points,
-    const bool* sampled_inside, const float* neighbour_rgb, const float* transform,
+    const float* reference_gray, const float* sampled_neighbour_points,
+    const bool* sampled_inside, const float* neighbour_gray,
+    const float* transform,
     const float* reference_mask, const float* neighbour_mask,
     const bool reference_has_mask, const bool neighbour_has_mask,
     const Camera reference, const Camera neighbour,
     const float pixel_noise_threshold, const bool robust_ncc,
+    const bool enable_ncc,
     const float ncc_lambda_reference, const float ncc_sharpness,
     const float ncc_min_weight, float* geo_grad_sampled,
     float* ncc_grad_depth, float* ncc_grad_normal, float* terms,
     const std::size_t pixels) {
-    const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float reference_tile[
+        k_ncc_reference_tile_width * k_ncc_reference_tile_height];
+    __shared__ float reference_samples[
+        k_ncc_reference_sample_width *
+        k_ncc_reference_sample_height];
+    const int block_origin_x =
+        static_cast<int>(blockIdx.x * k_multi_view_block_x);
+    const int block_origin_y =
+        static_cast<int>(blockIdx.y * k_multi_view_block_y);
+    const unsigned thread_linear =
+        threadIdx.y * k_multi_view_block_x + threadIdx.x;
+    constexpr unsigned tile_pixels =
+        k_ncc_reference_tile_width * k_ncc_reference_tile_height;
+    constexpr unsigned block_threads =
+        k_multi_view_block_x * k_multi_view_block_y;
+    if (enable_ncc) {
+        for (unsigned tile_pixel = thread_linear;
+             tile_pixel < tile_pixels;
+             tile_pixel += block_threads) {
+            const int tile_x =
+                static_cast<int>(tile_pixel % k_ncc_reference_tile_width);
+            const int tile_y =
+                static_cast<int>(tile_pixel / k_ncc_reference_tile_width);
+            const int source_x = max(
+                0, min(
+                    static_cast<int>(reference.width) - 1,
+                    block_origin_x + tile_x -
+                        k_ncc_reference_padding));
+            const int source_y = max(
+                0, min(
+                    static_cast<int>(reference.height) - 1,
+                    block_origin_y + tile_y -
+                        k_ncc_reference_padding));
+            reference_tile[tile_pixel] =
+                reference_gray[
+                    static_cast<std::size_t>(source_y) *
+                        reference.width +
+                    static_cast<std::size_t>(source_x)];
+        }
+        __syncthreads();
+        constexpr unsigned sample_pixels =
+            k_ncc_reference_sample_width *
+            k_ncc_reference_sample_height;
+        for (unsigned sample_pixel = thread_linear;
+             sample_pixel < sample_pixels;
+             sample_pixel += block_threads) {
+            const int sample_x = static_cast<int>(
+                sample_pixel % k_ncc_reference_sample_width);
+            const int sample_y = static_cast<int>(
+                sample_pixel / k_ncc_reference_sample_width);
+            const int x0 = (sample_x + 1) / 2;
+            const int y0 = (sample_y + 1) / 2;
+            const int x1 = x0 + 1;
+            const int y1 = y0 + 1;
+            const float tx = (sample_x & 1) == 0 ? 0.5F : 0.F;
+            const float ty = (sample_y & 1) == 0 ? 0.5F : 0.F;
+            const float c00 =
+                reference_tile[
+                    y0 * k_ncc_reference_tile_width + x0];
+            const float c01 =
+                reference_tile[
+                    y0 * k_ncc_reference_tile_width + x1];
+            const float c10 =
+                reference_tile[
+                    y1 * k_ncc_reference_tile_width + x0];
+            const float c11 =
+                reference_tile[
+                    y1 * k_ncc_reference_tile_width + x1];
+            reference_samples[sample_pixel] =
+                (c00 * (1.F - tx) + c01 * tx) * (1.F - ty) +
+                (c10 * (1.F - tx) + c11 * tx) * ty;
+        }
+        __syncthreads();
+    }
+    const int x = block_origin_x + static_cast<int>(threadIdx.x);
+    const int y = block_origin_y + static_cast<int>(threadIdx.y);
+    if (x >= static_cast<int>(reference.width) ||
+        y >= static_cast<int>(reference.height))
+        return;
+    const std::size_t pixel =
+        static_cast<std::size_t>(y) * reference.width +
+        static_cast<std::size_t>(x);
     if (pixel >= pixels) return;
-    const int x = static_cast<int>(pixel % reference.width);
-    const int y = static_cast<int>(pixel / reference.width);
     const float depth = reference_depth[pixel];
     if (!sampled_inside[pixel] || !(depth > 0.F) ||
         (reference_has_mask && reference_mask[pixel] <= 0.5F))
@@ -484,13 +597,17 @@ __global__ void multi_view_raw_kernel(
     atomicAdd(terms, weight * noise);
     atomicAdd(terms + 1, 1.F);
 
+    if (!enable_ncc) return;
     const float nx = reference_normal[pixel];
     const float ny = reference_normal[pixels + pixel];
     const float nz = reference_normal[2 * pixels + pixel];
     float ncc{}, gd{}, gnx{}, gny{}, gnz{};
     if (!plane_warp_ncc(
             depth, nx, ny, nz, x, y, transform, reference, neighbour,
-            reference_rgb, neighbour_rgb, ncc, gd, gnx, gny, gnz))
+            reference_samples, k_ncc_reference_sample_width,
+            2 * static_cast<int>(threadIdx.x) + k_ncc_radius,
+            2 * static_cast<int>(threadIdx.y) + k_ncc_radius,
+            neighbour_gray, ncc, gd, gnx, gny, gnz))
         return;
     const float error = fminf(fmaxf(1.F - ncc, 0.F), 2.F);
     if (!robust_ncc && error >= 0.9F) return;
@@ -1142,7 +1259,8 @@ __global__ void reset_opacity_kernel(
 
 DecodedTrainingPixels upload_packed_training_pixels(
     const std::vector<int>& rgba, const std::uint32_t width,
-    const std::uint32_t height, const bool decode_mask) {
+    const std::uint32_t height, const bool decode_mask,
+    const bool decode_gray) {
     const std::size_t pixels =
         static_cast<std::size_t>(width) * height;
     if (rgba.size() != pixels)
@@ -1154,6 +1272,11 @@ DecodedTrainingPixels upload_packed_training_pixels(
         tinytensor::Tensor::empty(
             {std::size_t{3}, height, width},
             tinytensor::Device::CUDA),
+        decode_gray
+            ? tinytensor::Tensor::empty(
+                  {height, width}, tinytensor::Device::CUDA)
+            : tinytensor::Tensor::zeros(
+                  {std::size_t{1}}, tinytensor::Device::CUDA),
         decode_mask
             ? tinytensor::Tensor::empty(
                   {height, width}, tinytensor::Device::CUDA)
@@ -1164,6 +1287,7 @@ DecodedTrainingPixels upload_packed_training_pixels(
         (pixels + k_threads - 1) / k_threads, k_threads>>>(
         reinterpret_cast<const unsigned*>(packed.ptr<int>()),
         result.rgb.ptr<float>(),
+        decode_gray ? result.gray.ptr<float>() : nullptr,
         decode_mask ? result.mask.ptr<float>() : nullptr,
         pixels);
     check_cuda(cudaGetLastError(), "unpack GGGS training pixels");
@@ -1402,12 +1526,20 @@ MultiViewLoss add_multi_view_loss(
     auto ncc_normal = tinytensor::Tensor::zeros_like(reference_render.normal);
     auto terms = tinytensor::Tensor::zeros(
         {std::size_t{4}}, tinytensor::Device::CUDA);
-    multi_view_raw_kernel<<<
-        (pixels + k_threads - 1) / k_threads, k_threads>>>(
+    const bool enable_ncc = options.multi_view_ncc_weight > 0.F;
+    const dim3 multi_view_block{
+        k_multi_view_block_x, k_multi_view_block_y};
+    const dim3 multi_view_grid{
+        (reference.camera.width + k_multi_view_block_x - 1) /
+            k_multi_view_block_x,
+        (reference.camera.height + k_multi_view_block_y - 1) /
+            k_multi_view_block_y};
+    multi_view_raw_kernel<<<multi_view_grid, multi_view_block>>>(
         reference_render.median_depth.ptr<float>(),
-        reference_render.normal.ptr<float>(), reference.rgb.ptr<float>(),
+        reference_render.normal.ptr<float>(),
+        enable_ncc ? reference.gray.ptr<float>() : nullptr,
         sampled_neighbour_points.ptr<float>(), sampled_inside.ptr<bool>(),
-        neighbour.rgb.ptr<float>(),
+        enable_ncc ? neighbour.gray.ptr<float>() : nullptr,
         transform_tensor.ptr<float>(),
         reference.has_mask ? reference.mask.ptr<float>() : nullptr,
         neighbour.has_mask ? neighbour.mask.ptr<float>() : nullptr,
@@ -1415,6 +1547,7 @@ MultiViewLoss add_multi_view_loss(
         reference.camera, neighbour.camera,
         options.multi_view_pixel_noise_threshold,
         options.multi_view_robust_ncc,
+        enable_ncc,
         options.multi_view_ncc_lambda_reference,
         options.multi_view_ncc_sharpness,
         std::clamp(options.multi_view_ncc_min_weight, 0.F, 1.F),
