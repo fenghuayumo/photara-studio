@@ -254,15 +254,16 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             const float2 xy    = collected_xy[j];
             const float4 con_o = collected_conic_opacity[j];
             float G[SAMPLES_PRE_ROUND];
-            int p_ids[SAMPLES_PRE_ROUND];
+            bool valid_sample[SAMPLES_PRE_ROUND];
             int valid_num = 0;
+#pragma unroll
             for (int p = 0; p < point_num_round; p++) {
                 const float2 d   = {xy.x - point_xy[p].x, xy.y - point_xy[p].y};
                 float power      = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
                 G[p]             = expf(power);
                 float alpha      = con_o.w * G[p];
                 bool valid       = !(done[p] || (power > 0.0f) || (alpha < 1.0f / 255.0f));
-                p_ids[valid_num] = p;
+                valid_sample[p]  = valid;
                 valid_num += static_cast<int>(valid);
             }
             if (!warp.any(valid_num))
@@ -274,8 +275,10 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             float2 dL_dmean2D_local     = {0};
             float4 dL_dconic2D_local    = {0};
             float dL_drsigma_local      = 0.f;
-            for (int k = 0; k < valid_num; k++) {
-                int p          = p_ids[k];
+#pragma unroll
+            for (int p = 0; p < point_num_round; p++) {
+                if (!valid_sample[p])
+                    continue;
                 const float2 d = {xy.x - point_xy[p].x, xy.y - point_xy[p].y};
                 float alpha    = fminf(0.99f, con_o.w * G[p]);
 
