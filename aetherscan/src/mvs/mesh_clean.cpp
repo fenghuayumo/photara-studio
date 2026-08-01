@@ -161,9 +161,16 @@ void remove_small_components_with_connectivity(
     }
     const unsigned largest =
         sizes.empty() ? 0U : *std::max_element(sizes.begin(), sizes.end());
-    const unsigned relative_minimum = minimum_largest_fraction > 0.F
+    // A fraction of exactly one means "keep the largest component".  Do not
+    // round-trip the integer face count through float here: above 2^24 a
+    // value such as 17,107,151 can round up to 17,107,152 and remove every
+    // component, including the largest one.
+    const unsigned relative_minimum = minimum_largest_fraction >= 1.F
+        ? largest
+        : minimum_largest_fraction > 0.F
         ? static_cast<unsigned>(std::ceil(
-              static_cast<float>(largest) * minimum_largest_fraction))
+              static_cast<double>(largest) *
+              static_cast<double>(minimum_largest_fraction)))
         : 0U;
     const unsigned effective_minimum =
         std::max(minimum_faces, relative_minimum);
