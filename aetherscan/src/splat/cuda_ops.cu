@@ -15,6 +15,7 @@ namespace {
 
 constexpr unsigned k_threads = 256;
 constexpr unsigned k_reduced_adam_threads = 64;
+constexpr unsigned k_geometry_summary_terms = 6;
 // A 32x8 image-space CTA shares the integer reference tile and all fixed
 // half-pixel samples needed by the 7x7 NCC patches of its 256 output pixels.
 constexpr unsigned k_multi_view_block_x = 32;
@@ -42,6 +43,45 @@ void check_cuda(const cudaError_t error, const char* operation) {
 
 __device__ float sigmoid(const float value) {
     return 1.F / (1.F + expf(-value));
+}
+
+__global__ void geometry_distribution_summary_kernel(
+    const float* log_scales, const float* opacity_logits,
+    float* terms, const std::size_t count) {
+    __shared__ float partial[k_geometry_summary_terms][k_threads];
+    float local[k_geometry_summary_terms]{};
+    for (std::size_t index =
+             blockIdx.x * blockDim.x + threadIdx.x;
+         index < count;
+         index += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+        const float opacity = sigmoid(opacity_logits[index]);
+        const float sx = log_scales[3 * index];
+        const float sy = log_scales[3 * index + 1];
+        const float sz = log_scales[3 * index + 2];
+        const float log_scale = (sx + sy + sz) / 3.F;
+        const float anisotropy =
+            fmaxf(sx, fmaxf(sy, sz)) - fminf(sx, fminf(sy, sz));
+        local[0] += opacity;
+        local[1] += opacity * opacity;
+        local[2] += log_scale;
+        local[3] += log_scale * log_scale;
+        local[4] += anisotropy;
+        local[5] += anisotropy * anisotropy;
+    }
+    for (unsigned term = 0; term < k_geometry_summary_terms; ++term)
+        partial[term][threadIdx.x] = local[term];
+    __syncthreads();
+    for (unsigned stride = k_threads / 2; stride != 0; stride >>= 1U) {
+        if (threadIdx.x < stride)
+            for (unsigned term = 0;
+                 term < k_geometry_summary_terms; ++term)
+                partial[term][threadIdx.x] +=
+                    partial[term][threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        for (unsigned term = 0; term < k_geometry_summary_terms; ++term)
+            atomicAdd(terms + term, partial[term][0]);
 }
 
 __global__ void unpack_training_pixels_kernel(
@@ -445,7 +485,7 @@ __global__ void multi_view_raw_kernel(
     const bool reference_has_mask, const bool neighbour_has_mask,
     const Camera reference, const Camera neighbour,
     const float pixel_noise_threshold, const bool robust_ncc,
-    const bool enable_ncc,
+    const bool enable_ncc, const bool count_geometry_candidates,
     const float ncc_lambda_reference, const float ncc_sharpness,
     const float ncc_min_weight, float* geo_grad_sampled,
     float* ncc_grad_depth, float* ncc_grad_normal, float* terms,
@@ -572,6 +612,17 @@ __global__ void multi_view_raw_kernel(
     const float ry = transform[1] * dx + transform[4] * dy + transform[7] * dz;
     const float rz = transform[2] * dx + transform[5] * dy + transform[8] * dz;
     if (!(rz > 0.2F)) return;
+    if (count_geometry_candidates) {
+        // All lanes that remain active here are valid round-trip candidates.
+        // Count once per warp instead of serializing hundreds of thousands of
+        // per-pixel atomics into the five-scalar loss buffer.
+        const unsigned active_lanes = __activemask();
+        const unsigned leader = static_cast<unsigned>(__ffs(active_lanes) - 1);
+        if (threadIdx.x == leader)
+            atomicAdd(
+                terms + 4,
+                static_cast<float>(__popc(active_lanes)));
+    }
     const float projected_x = reference.fx * rx / rz + reference.cx;
     const float projected_y = reference.fy * ry / rz + reference.cy;
     const float du = projected_x - static_cast<float>(x);
@@ -623,6 +674,14 @@ __global__ void multi_view_raw_kernel(
     ncc_grad_normal[2 * pixels + pixel] = factor * gnz;
     atomicAdd(terms + 2, weight * confidence * error);
     atomicAdd(terms + 3, 1.F);
+}
+
+__global__ void accumulate_multi_view_stability_kernel(
+    const float* terms, float* accumulator) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    accumulator[0] += terms[1];
+    accumulator[1] += terms[4];
+    accumulator[2] += 1.F;
 }
 
 __global__ void add_multi_view_gradients_kernel(
@@ -1485,7 +1544,8 @@ MultiViewLoss add_multi_view_loss(
     const TrainingOptions& options,
     LossGradients& gradients,
     tinytensor::Tensor& grad_sampled_points,
-    const bool collect_scalar_terms) {
+    const bool collect_scalar_terms,
+    tinytensor::Tensor* stability_accumulator) {
     const std::size_t pixels =
         static_cast<std::size_t>(reference.camera.width) *
         reference.camera.height;
@@ -1525,8 +1585,10 @@ MultiViewLoss add_multi_view_loss(
         reference_render.median_depth);
     auto ncc_normal = tinytensor::Tensor::zeros_like(reference_render.normal);
     auto terms = tinytensor::Tensor::zeros(
-        {std::size_t{4}}, tinytensor::Device::CUDA);
+        {std::size_t{5}}, tinytensor::Device::CUDA);
     const bool enable_ncc = options.multi_view_ncc_weight > 0.F;
+    const bool count_geometry_candidates =
+        collect_scalar_terms || stability_accumulator != nullptr;
     const dim3 multi_view_block{
         k_multi_view_block_x, k_multi_view_block_y};
     const dim3 multi_view_grid{
@@ -1547,13 +1609,27 @@ MultiViewLoss add_multi_view_loss(
         reference.camera, neighbour.camera,
         options.multi_view_pixel_noise_threshold,
         options.multi_view_robust_ncc,
-        enable_ncc,
+        enable_ncc, count_geometry_candidates,
         options.multi_view_ncc_lambda_reference,
         options.multi_view_ncc_sharpness,
         std::clamp(options.multi_view_ncc_min_weight, 0.F, 1.F),
         grad_sampled_points.ptr<float>(), ncc_depth.ptr<float>(),
         ncc_normal.ptr<float>(), terms.ptr<float>(), pixels);
     check_cuda(cudaGetLastError(), "compute GGGS multi-view loss");
+    if (stability_accumulator != nullptr) {
+        if (stability_accumulator->device() !=
+                tinytensor::Device::CUDA ||
+            stability_accumulator->dtype() !=
+                tinytensor::DataType::Float32 ||
+            stability_accumulator->numel() != 3)
+            throw std::invalid_argument(
+                "GGGS stability accumulator must be CUDA float32[3]");
+        accumulate_multi_view_stability_kernel<<<1, 1>>>(
+            terms.ptr<float>(), stability_accumulator->ptr<float>());
+        check_cuda(
+            cudaGetLastError(),
+            "accumulate GGGS multi-view stability terms");
+    }
     add_multi_view_gradients_kernel<<<
         (pixels + k_threads - 1) / k_threads, k_threads>>>(
         gradients.depth.ptr<float>(), gradients.normal.ptr<float>(),
@@ -1565,12 +1641,50 @@ MultiViewLoss add_multi_view_loss(
     const std::vector<float> values = terms.to_vector();
     MultiViewLoss result;
     result.geometry_pixels = static_cast<std::size_t>(values[1]);
+    result.geometry_candidates = static_cast<std::size_t>(values[4]);
     result.ncc_pixels = static_cast<std::size_t>(values[3]);
     result.geometry = result.geometry_pixels != 0
         ? values[0] / values[1]
         : 0.F;
     result.ncc = result.ncc_pixels != 0 ? values[2] / values[3] : 0.F;
     return result;
+}
+
+GeometryDistributionSummary summarize_geometry_distribution(
+    const GaussianModel& model) {
+    GeometryDistributionSummary summary;
+    const std::size_t count = model.size();
+    if (count == 0) return summary;
+    auto terms = tinytensor::Tensor::zeros(
+        {static_cast<std::size_t>(k_geometry_summary_terms)},
+        tinytensor::Device::CUDA);
+    const std::size_t required_blocks =
+        (count + k_threads - 1) / k_threads;
+    const unsigned blocks = static_cast<unsigned>(
+        std::min<std::size_t>(required_blocks, 1024));
+    geometry_distribution_summary_kernel<<<blocks, k_threads>>>(
+        model.log_scales.ptr<float>(),
+        model.opacity_logits.ptr<float>(), terms.ptr<float>(), count);
+    check_cuda(
+        cudaGetLastError(), "summarize GGGS geometry distribution");
+    const std::vector<float> values = terms.to_vector();
+    const float inverse_count = 1.F / static_cast<float>(count);
+    const auto moments = [&](const unsigned offset) {
+        const float mean = values[offset] * inverse_count;
+        const float second = values[offset + 1] * inverse_count;
+        return std::array<float, 2>{
+            mean, std::sqrt(std::max(second - mean * mean, 0.F))};
+    };
+    const auto opacity = moments(0);
+    const auto scale = moments(2);
+    const auto anisotropy = moments(4);
+    summary.opacity_mean = opacity[0];
+    summary.opacity_stddev = opacity[1];
+    summary.log_scale_mean = scale[0];
+    summary.log_scale_stddev = scale[1];
+    summary.log_anisotropy_mean = anisotropy[0];
+    summary.log_anisotropy_stddev = anisotropy[1];
+    return summary;
 }
 
 tinytensor::Tensor unproject_depth_to_world(

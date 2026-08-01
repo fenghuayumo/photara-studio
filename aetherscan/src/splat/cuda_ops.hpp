@@ -56,7 +56,17 @@ struct MultiViewLoss {
     float geometry{};
     float ncc{};
     std::size_t geometry_pixels{};
+    std::size_t geometry_candidates{};
     std::size_t ncc_pixels{};
+};
+
+struct GeometryDistributionSummary {
+    float opacity_mean{};
+    float opacity_stddev{};
+    float log_scale_mean{};
+    float log_scale_stddev{};
+    float log_anisotropy_mean{};
+    float log_anisotropy_stddev{};
 };
 
 ActivatedParameters activate_parameters(const GaussianModel& model);
@@ -100,7 +110,11 @@ MultiViewLoss add_multi_view_loss(
     const TrainingOptions& options,
     LossGradients& gradients,
     tinytensor::Tensor& grad_sampled_points,
-    bool collect_scalar_terms);
+    bool collect_scalar_terms,
+    tinytensor::Tensor* stability_accumulator = nullptr);
+
+GeometryDistributionSummary summarize_geometry_distribution(
+    const GaussianModel& model);
 
 tinytensor::Tensor unproject_depth_to_world(
     const tinytensor::Tensor& depth, const Camera& camera);

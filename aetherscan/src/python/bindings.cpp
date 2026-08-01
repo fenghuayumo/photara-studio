@@ -493,6 +493,30 @@ NB_MODULE(aetherscan_native, module) {
             "multi_view_tail_interval",
             &splat::TrainingOptions::multi_view_tail_interval)
         .def_rw(
+            "multi_view_adaptive_frequency",
+            &splat::TrainingOptions::multi_view_adaptive_frequency)
+        .def_rw(
+            "multi_view_adaptive_max_interval",
+            &splat::TrainingOptions::multi_view_adaptive_max_interval)
+        .def_rw(
+            "multi_view_adaptive_stable_refinements",
+            &splat::TrainingOptions::multi_view_adaptive_stable_refinements)
+        .def_rw(
+            "multi_view_adaptive_count_threshold",
+            &splat::TrainingOptions::multi_view_adaptive_count_threshold)
+        .def_rw(
+            "multi_view_adaptive_churn_threshold",
+            &splat::TrainingOptions::multi_view_adaptive_churn_threshold)
+        .def_rw(
+            "multi_view_adaptive_depth_threshold",
+            &splat::TrainingOptions::multi_view_adaptive_depth_threshold)
+        .def_rw(
+            "multi_view_adaptive_min_depth_consistency",
+            &splat::TrainingOptions::multi_view_adaptive_min_depth_consistency)
+        .def_rw(
+            "multi_view_adaptive_distribution_threshold",
+            &splat::TrainingOptions::multi_view_adaptive_distribution_threshold)
+        .def_rw(
             "multi_view_pixel_noise_threshold",
             &splat::TrainingOptions::multi_view_pixel_noise_threshold)
         .def_rw("use_mask", &splat::TrainingOptions::use_mask)

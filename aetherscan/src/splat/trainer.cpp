@@ -4,6 +4,7 @@
 #include "core/logging.hpp"
 #include "densification.hpp"
 #include "io/image.hpp"
+#include "multi_view_scheduler.hpp"
 #include "training_data_loader.hpp"
 
 #include <cuda_runtime.h>
@@ -655,11 +656,20 @@ GaussianModel Trainer::train(
                                 options_.multi_view_ncc_weight > 0.F;
     const unsigned multi_view_tail_interval =
         std::max(1U, options_.multi_view_tail_interval);
+    const bool adaptive_multi_view =
+        use_multi_view && options_.multi_view_adaptive_frequency &&
+        options_.multi_view_adaptive_max_interval > 1;
+    detail::MultiViewStabilityScheduler multi_view_scheduler(options_);
     TrainingOptions tail_multi_view_options = options_;
     tail_multi_view_options.multi_view_geo_weight *=
         static_cast<float>(multi_view_tail_interval);
     tail_multi_view_options.multi_view_ncc_weight *=
         static_cast<float>(multi_view_tail_interval);
+    TrainingOptions adaptive_multi_view_options = options_;
+    auto multi_view_stability_accumulator = adaptive_multi_view
+        ? tinytensor::Tensor::zeros(
+              {std::size_t{3}}, tinytensor::Device::CUDA)
+        : tinytensor::Tensor{};
     const auto multi_view_neighbours = use_multi_view
         ? data::compute_multi_view_neighbours(
               all_cameras, view_indices, options_)
@@ -803,13 +813,17 @@ GaussianModel Trainer::train(
              options_.multi_view_ncc_weight > 0.F) &&
             iteration >= options_.depth_normal_from_iter &&
             !multi_view_neighbours[view_index].empty();
-        const bool multi_view_tail =
+        const bool multi_view_tail = !adaptive_multi_view &&
             iteration > options_.grow_stop_iter;
+        const unsigned active_multi_view_interval = adaptive_multi_view
+            ? multi_view_scheduler.interval()
+            : multi_view_tail ? multi_view_tail_interval : 1U;
         const bool multi_view_scheduled =
-            !multi_view_tail || multi_view_tail_interval == 1 ||
-            (iteration - options_.grow_stop_iter) %
-                    multi_view_tail_interval ==
-                0;
+            active_multi_view_interval == 1U ||
+            (adaptive_multi_view
+                ? iteration % active_multi_view_interval == 0
+                : (iteration - options_.grow_stop_iter) %
+                        active_multi_view_interval == 0);
         const bool multi_view_active =
             multi_view_eligible && multi_view_scheduled;
         std::size_t multi_view_neighbour_index = 0;
@@ -838,7 +852,9 @@ GaussianModel Trainer::train(
             const TrainingView neighbour =
                 view_cache.get(multi_view_neighbour_index);
             const TrainingOptions& multi_view_options =
-                multi_view_tail ? tail_multi_view_options : options_;
+                adaptive_multi_view
+                ? adaptive_multi_view_options
+                : multi_view_tail ? tail_multi_view_options : options_;
             const auto world_points = detail::unproject_depth_to_world(
                 rendered.median_depth, target.camera);
             cuda_profiler.mark(CudaTrainingStage::multi_view_unproject);
@@ -851,7 +867,10 @@ GaussianModel Trainer::train(
             multi_view_loss = detail::add_multi_view_loss(
                 sampled.camera_points, sampled.inside, rendered, target,
                 neighbour, multi_view_options, loss,
-                grad_sampled_points, report_progress);
+                grad_sampled_points, report_progress,
+                adaptive_multi_view
+                    ? &multi_view_stability_accumulator
+                    : nullptr);
             cuda_profiler.mark(CudaTrainingStage::multi_view_loss);
             multi_view_sample_gradients = rasterizer.sample_depth_backward(
                 model, sampled, grad_sampled_points);
@@ -1010,6 +1029,65 @@ GaussianModel Trainer::train(
                 means_learning_rate_scale = refinement_geometry.scale;
             }
         }
+        if (adaptive_multi_view && refinement_happened) {
+            const std::vector<float> window =
+                multi_view_stability_accumulator.to_vector();
+            multi_view_stability_accumulator.zero_();
+            const float consistent_pixels = window[0];
+            const float candidate_pixels = window[1];
+            const float active_steps = window[2];
+            if (candidate_pixels > 0.F && active_steps > 0.F) {
+                const float depth_consistency =
+                    consistent_pixels / candidate_pixels;
+                const detail::GeometryDistributionSummary distribution =
+                    detail::summarize_geometry_distribution(model);
+                const detail::GeometryStabilityDecision decision =
+                    multi_view_scheduler.update({
+                        model.size(), latest_refinement.grown,
+                        latest_refinement.pruned, depth_consistency,
+                        distribution});
+                adaptive_multi_view_options = options_;
+                adaptive_multi_view_options.multi_view_geo_weight *=
+                    static_cast<float>(decision.interval);
+                adaptive_multi_view_options.multi_view_ncc_weight *=
+                    static_cast<float>(decision.interval);
+                core::Logger::instance().info(
+                    "gggs_mv_stability iteration=", iteration,
+                    " reference_ready=", decision.reference_ready,
+                    " stable=", decision.stable,
+                    " stable_refinements=", decision.stable_refinements,
+                    " interval=", decision.interval,
+                    " reduced=", decision.reduced,
+                    " recovered=", decision.recovered,
+                    " gaussian_count=", model.size(),
+                    " count_delta=", decision.count_delta,
+                    " churn=", decision.churn,
+                    " depth_consistency=", depth_consistency,
+                    " depth_delta=", decision.depth_delta,
+                    " opacity_mean=", distribution.opacity_mean,
+                    " opacity_std=", distribution.opacity_stddev,
+                    " log_scale_mean=", distribution.log_scale_mean,
+                    " log_scale_std=", distribution.log_scale_stddev,
+                    " log_anisotropy_mean=",
+                    distribution.log_anisotropy_mean,
+                    " distribution_delta=",
+                    decision.distribution_delta,
+                    " window_steps=", active_steps,
+                    " consistent_pixels=", consistent_pixels,
+                    " candidate_pixels=", candidate_pixels);
+            } else {
+                const detail::GeometryStabilityDecision decision =
+                    multi_view_scheduler.invalidate();
+                adaptive_multi_view_options = options_;
+                core::Logger::instance().info(
+                    "gggs_mv_stability iteration=", iteration,
+                    " reference_ready=false stable=false interval=",
+                    decision.interval,
+                    " recovered=", decision.recovered,
+                    " reason=no_depth_candidates window_steps=",
+                    active_steps);
+            }
+        }
         cuda_profiler.mark(CudaTrainingStage::refinement);
 
         // The Mip-Splatting radius depends on Gaussian positions and count.
@@ -1097,7 +1175,13 @@ GaussianModel Trainer::train(
                 multi_view_loss.geometry_pixels,
                 multi_view_loss.ncc_pixels, active_resolution_scale,
                 target.camera.width, target.camera.height,
-                active_sh_degree});
+                active_sh_degree, active_multi_view_interval,
+                multi_view_loss.geometry_candidates != 0
+                    ? static_cast<float>(
+                          multi_view_loss.geometry_pixels) /
+                          static_cast<float>(
+                              multi_view_loss.geometry_candidates)
+                    : 0.F});
         }
         if (!continue_training) break;
         if (evaluate &&

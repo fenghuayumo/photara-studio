@@ -3,6 +3,7 @@
 #include "splat/dataset.hpp"
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/densification.hpp"
+#include "../src/splat/multi_view_scheduler.hpp"
 #include "io/image.hpp"
 #include "sfm/export_mvs.hpp"
 
@@ -263,12 +264,27 @@ void test_gggs_multi_view_geometry_and_ncc() {
         sampled_points, {pixels, std::size_t{3}}, tinytensor::Device::CUDA);
     const auto inside = tinytensor::Tensor::ones_bool(
         {pixels}, tinytensor::Device::CUDA);
+    auto stability_accumulator = tinytensor::Tensor::zeros(
+        {std::size_t{3}}, tinytensor::Device::CUDA);
     tinytensor::Tensor grad_sampled;
     const auto loss = detail::add_multi_view_loss(
         sampled, inside, reference_render, reference, neighbour,
-        options, gradients, grad_sampled, true);
+        options, gradients, grad_sampled, true,
+        &stability_accumulator);
     require(loss.geometry_pixels > 0 && loss.ncc_pixels > 0,
             "GGGS multi-view consistency rejected a valid planar pair");
+    require(
+        loss.geometry_candidates >= loss.geometry_pixels &&
+            loss.geometry_candidates > 0,
+        "GGGS multi-view consistency candidate count is invalid");
+    const std::vector<float> stability =
+        stability_accumulator.to_vector();
+    require(
+        static_cast<std::size_t>(stability[0]) == loss.geometry_pixels &&
+            static_cast<std::size_t>(stability[1]) ==
+                loss.geometry_candidates &&
+            stability[2] == 1.F,
+        "GGGS multi-view stability window did not accumulate loss terms");
     require(loss.geometry < 1e-3F && loss.ncc < 2e-3F,
             "GGGS multi-view geometry/NCC does not preserve a consistent plane");
     require_finite(gradients.depth, "Non-finite multi-view depth gradient");
@@ -287,8 +303,99 @@ void test_gggs_multi_view_geometry_and_ncc() {
         options, gradients, masked_grad_sampled, true);
     require(
         masked_loss.geometry_pixels == 0 &&
+            masked_loss.geometry_candidates == 0 &&
             masked_loss.ncc_pixels == 0,
         "GGGS multi-view loss ignored the coarse foreground mask");
+}
+
+void test_geometry_stability_scheduler() {
+    using namespace aetherscan::splat;
+    GaussianModel model;
+    model.means = tinytensor::Tensor::zeros(
+        {std::size_t{2}, std::size_t{3}}, tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{
+            std::log(0.1F), std::log(0.2F), std::log(0.4F),
+            std::log(0.2F), std::log(0.2F), std::log(0.2F)},
+        {std::size_t{2}, std::size_t{3}}, tinytensor::Device::CUDA);
+    const auto logit = [](const float value) {
+        return std::log(value / (1.F - value));
+    };
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        std::vector<float>{logit(0.2F), logit(0.8F)},
+        {std::size_t{2}, std::size_t{1}}, tinytensor::Device::CUDA);
+    const detail::GeometryDistributionSummary distribution =
+        detail::summarize_geometry_distribution(model);
+    require(
+        std::abs(distribution.opacity_mean - 0.5F) < 1e-5F &&
+            std::abs(distribution.opacity_stddev - 0.3F) < 1e-5F,
+        "GGGS opacity distribution summary is incorrect");
+    require(
+        std::abs(distribution.log_scale_mean - std::log(0.2F)) <
+                1e-5F &&
+            distribution.log_scale_stddev < 1e-5F &&
+            std::abs(
+                distribution.log_anisotropy_mean - std::log(2.F)) <
+                1e-5F &&
+            std::abs(
+                distribution.log_anisotropy_stddev - std::log(2.F)) <
+                1e-5F,
+        "GGGS scale distribution summary is incorrect");
+
+    TrainingOptions options;
+    options.multi_view_adaptive_max_interval = 4;
+    options.multi_view_adaptive_stable_refinements = 2;
+    options.multi_view_adaptive_count_threshold = 0.01F;
+    options.multi_view_adaptive_churn_threshold = 0.01F;
+    options.multi_view_adaptive_depth_threshold = 0.03F;
+    options.multi_view_adaptive_min_depth_consistency = 0.5F;
+    options.multi_view_adaptive_distribution_threshold = 0.03F;
+    detail::MultiViewStabilityScheduler scheduler(options);
+    detail::GeometryStabilitySample sample{
+        1000, 0, 0, 0.8F, distribution};
+    require(
+        !scheduler.update(sample).reference_ready &&
+            scheduler.interval() == 1,
+        "GGGS stability scheduler reduced before a reference window");
+    sample.gaussian_count = 1002;
+    sample.depth_consistency = 0.805F;
+    require(
+        !scheduler.update(sample).reduced && scheduler.interval() == 1,
+        "GGGS stability scheduler reduced too early");
+    sample.gaussian_count = 1004;
+    sample.depth_consistency = 0.81F;
+    require(
+        scheduler.update(sample).reduced && scheduler.interval() == 2,
+        "GGGS stability scheduler did not reduce after stable windows");
+    sample.gaussian_count = 1006;
+    sample.depth_consistency = 0.815F;
+    scheduler.update(sample);
+    sample.gaussian_count = 1008;
+    sample.depth_consistency = 0.82F;
+    require(
+        scheduler.update(sample).reduced && scheduler.interval() == 4,
+        "GGGS stability scheduler did not reduce gradually");
+    sample.depth_consistency = 0.35F;
+    const detail::GeometryStabilityDecision recovery =
+        scheduler.update(sample);
+    require(
+        recovery.recovered && scheduler.interval() == 1,
+        "GGGS stability scheduler did not recover on geometry drift");
+    scheduler.update(sample);
+    sample.depth_consistency = 0.8F;
+    scheduler.update(sample);
+    sample.depth_consistency = 0.805F;
+    scheduler.update(sample);
+    sample.depth_consistency = 0.81F;
+    require(
+        scheduler.update(sample).reduced && scheduler.interval() == 2,
+        "GGGS stability scheduler did not resume after recovery");
+    const detail::GeometryStabilityDecision invalidated =
+        scheduler.invalidate();
+    require(
+        invalidated.recovered && scheduler.interval() == 1 &&
+            !scheduler.update(sample).reference_ready,
+        "GGGS stability scheduler did not reset after missing geometry");
 }
 
 void test_forward_backward() {
@@ -1790,6 +1897,7 @@ int main() {
         test_mvs_camera_conversion();
         test_gggs_3d_filter();
         test_gggs_multi_view_geometry_and_ncc();
+        test_geometry_stability_scheduler();
         test_forward_backward();
         test_sample_depth_batch_boundary();
         test_contribution_visibility_rejects_occluded_gaussians();

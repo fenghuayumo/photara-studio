@@ -103,6 +103,14 @@ struct ReconstructCli {
     float gggs_multi_view_ncc_weight{0.6F};
     unsigned gggs_multi_view_num{8};
     unsigned gggs_multi_view_tail_interval{1};
+    bool gggs_multi_view_adaptive{false};
+    unsigned gggs_multi_view_adaptive_max_interval{2};
+    unsigned gggs_multi_view_stable_refinements{5};
+    float gggs_multi_view_stable_count_threshold{0.005F};
+    float gggs_multi_view_stable_churn_threshold{0.01F};
+    float gggs_multi_view_stable_depth_threshold{0.02F};
+    float gggs_multi_view_min_depth_consistency{0.5F};
+    float gggs_multi_view_stable_distribution_threshold{0.025F};
     float gggs_multi_view_pixel_noise{1.F};
     unsigned gggs_geometry_from_iter{3'000};
     float gggs_min_scale_fraction{1e-4F};
@@ -256,6 +264,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
               << "  --gggs-mv-neighbors N  nearest camera candidates (default 8)\n"
               << "  --gggs-mv-tail-interval N  multi-view interval after ADC growth stops (default 1)\n"
+              << "  --gggs-mv-adaptive BOOL  lower multi-view frequency only after geometry stabilizes\n"
+              << "  --gggs-mv-adaptive-max-interval N  adaptive interval ceiling (default 2)\n"
+              << "  --gggs-mv-stable-refinements N  stable refine windows before each reduction (default 5)\n"
               << "  --gggs-mv-pixel-noise P  geometry reprojection gate (default 1px)\n"
               << "  --gggs-geometry-from-iter N  start geometry loss (default 3000)\n"
               << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
@@ -436,6 +447,31 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("gggs-mv-tail-interval",
          "Multi-view sampling interval after ADC growth stops",
          cxxopts::value<unsigned>()->default_value("1"))
+        ("gggs-mv-adaptive",
+         "Adapt multi-view frequency from geometry stability",
+         cxxopts::value<bool>()->default_value("false")
+             ->implicit_value("true"))
+        ("gggs-mv-adaptive-max-interval",
+         "Maximum geometry-stable multi-view interval",
+         cxxopts::value<unsigned>()->default_value("2"))
+        ("gggs-mv-stable-refinements",
+         "Stable refinement windows required before reducing frequency",
+         cxxopts::value<unsigned>()->default_value("5"))
+        ("gggs-mv-stable-count-threshold",
+         "Maximum relative Gaussian-count drift per stable window",
+         cxxopts::value<float>()->default_value("0.005"))
+        ("gggs-mv-stable-churn-threshold",
+         "Maximum grow+prune fraction per stable window",
+         cxxopts::value<float>()->default_value("0.01"))
+        ("gggs-mv-stable-depth-threshold",
+         "Maximum depth-consistency-rate drift per stable window",
+         cxxopts::value<float>()->default_value("0.02"))
+        ("gggs-mv-min-depth-consistency",
+         "Minimum depth round-trip consistency for stable geometry",
+         cxxopts::value<float>()->default_value("0.5"))
+        ("gggs-mv-stable-distribution-threshold",
+         "Maximum opacity/scale distribution drift per stable window",
+         cxxopts::value<float>()->default_value("0.025"))
         ("gggs-mv-pixel-noise", "Multi-view reprojection threshold in pixels",
          cxxopts::value<float>()->default_value("1"))
         ("gggs-geometry-from-iter", "Iteration to start GGGS geometry loss",
@@ -645,6 +681,22 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_multi_view_num = result["gggs-mv-neighbors"].as<unsigned>();
     cli.gggs_multi_view_tail_interval =
         result["gggs-mv-tail-interval"].as<unsigned>();
+    cli.gggs_multi_view_adaptive =
+        result["gggs-mv-adaptive"].as<bool>();
+    cli.gggs_multi_view_adaptive_max_interval =
+        result["gggs-mv-adaptive-max-interval"].as<unsigned>();
+    cli.gggs_multi_view_stable_refinements =
+        result["gggs-mv-stable-refinements"].as<unsigned>();
+    cli.gggs_multi_view_stable_count_threshold =
+        result["gggs-mv-stable-count-threshold"].as<float>();
+    cli.gggs_multi_view_stable_churn_threshold =
+        result["gggs-mv-stable-churn-threshold"].as<float>();
+    cli.gggs_multi_view_stable_depth_threshold =
+        result["gggs-mv-stable-depth-threshold"].as<float>();
+    cli.gggs_multi_view_min_depth_consistency =
+        result["gggs-mv-min-depth-consistency"].as<float>();
+    cli.gggs_multi_view_stable_distribution_threshold =
+        result["gggs-mv-stable-distribution-threshold"].as<float>();
     cli.gggs_multi_view_pixel_noise =
         result["gggs-mv-pixel-noise"].as<float>();
     cli.gggs_geometry_from_iter =
@@ -798,6 +850,28 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.gggs_multi_view_tail_interval == 0)
         throw std::invalid_argument(
             "--gggs-mv-tail-interval must be positive");
+    if (cli.gggs_multi_view_adaptive_max_interval == 0 ||
+        cli.gggs_multi_view_adaptive_max_interval > 16)
+        throw std::invalid_argument(
+            "--gggs-mv-adaptive-max-interval must be in [1,16]");
+    if (cli.gggs_multi_view_stable_refinements == 0)
+        throw std::invalid_argument(
+            "--gggs-mv-stable-refinements must be positive");
+    const auto valid_unit_threshold = [](const float value) {
+        return std::isfinite(value) && value >= 0.F && value <= 1.F;
+    };
+    if (!valid_unit_threshold(
+            cli.gggs_multi_view_stable_count_threshold) ||
+        !valid_unit_threshold(
+            cli.gggs_multi_view_stable_churn_threshold) ||
+        !valid_unit_threshold(
+            cli.gggs_multi_view_stable_depth_threshold) ||
+        !valid_unit_threshold(
+            cli.gggs_multi_view_min_depth_consistency) ||
+        !valid_unit_threshold(
+            cli.gggs_multi_view_stable_distribution_threshold))
+        throw std::invalid_argument(
+            "GGGS adaptive multi-view thresholds must be finite in [0,1]");
     if (!(cli.gggs_multi_view_pixel_noise > 0.F))
         throw std::invalid_argument("--gggs-mv-pixel-noise must be positive");
     if (cli.gggs_min_scale_fraction <= 0.F ||
@@ -1535,6 +1609,22 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     options.multi_view_num = cli.gggs_multi_view_num;
     options.multi_view_tail_interval =
         cli.gggs_multi_view_tail_interval;
+    options.multi_view_adaptive_frequency =
+        cli.gggs_multi_view_adaptive;
+    options.multi_view_adaptive_max_interval =
+        cli.gggs_multi_view_adaptive_max_interval;
+    options.multi_view_adaptive_stable_refinements =
+        cli.gggs_multi_view_stable_refinements;
+    options.multi_view_adaptive_count_threshold =
+        cli.gggs_multi_view_stable_count_threshold;
+    options.multi_view_adaptive_churn_threshold =
+        cli.gggs_multi_view_stable_churn_threshold;
+    options.multi_view_adaptive_depth_threshold =
+        cli.gggs_multi_view_stable_depth_threshold;
+    options.multi_view_adaptive_min_depth_consistency =
+        cli.gggs_multi_view_min_depth_consistency;
+    options.multi_view_adaptive_distribution_threshold =
+        cli.gggs_multi_view_stable_distribution_threshold;
     options.multi_view_pixel_noise_threshold =
         cli.gggs_multi_view_pixel_noise;
     options.depth_normal_from_iter = cli.gggs_geometry_from_iter;
@@ -1590,6 +1680,20 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " multi_view_ncc_weight=", options.multi_view_ncc_weight,
         " multi_view_neighbours=", options.multi_view_num,
         " multi_view_tail_interval=", options.multi_view_tail_interval,
+        " multi_view_adaptive=",
+        options.multi_view_adaptive_frequency,
+        " multi_view_adaptive_max_interval=",
+        options.multi_view_adaptive_max_interval,
+        " multi_view_stable_refinements=",
+        options.multi_view_adaptive_stable_refinements,
+        " multi_view_stability_thresholds=[count:",
+        options.multi_view_adaptive_count_threshold,
+        ",churn:", options.multi_view_adaptive_churn_threshold,
+        ",depth:", options.multi_view_adaptive_depth_threshold,
+        ",min_depth:",
+        options.multi_view_adaptive_min_depth_consistency,
+        ",distribution:",
+        options.multi_view_adaptive_distribution_threshold, ']',
         " multi_view_pixel_noise=",
         options.multi_view_pixel_noise_threshold,
         " geometry_from_iter=", options.depth_normal_from_iter,
@@ -1671,6 +1775,9 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                     " mv_ncc=", progress.multi_view_ncc_loss,
                     " mv_geo_pixels=", progress.multi_view_geometry_pixels,
                     " mv_ncc_pixels=", progress.multi_view_ncc_pixels,
+                    " mv_interval=", progress.multi_view_interval,
+                    " mv_depth_consistency=",
+                    progress.multi_view_depth_consistency,
                     " opacity_grad_mean=", progress.opacity_gradient_mean,
                     " opacity_grad_positive=",
                     progress.opacity_gradient_positive_fraction,

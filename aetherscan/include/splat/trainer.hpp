@@ -36,6 +36,8 @@ struct TrainingProgress {
     std::uint32_t image_width{};
     std::uint32_t image_height{};
     unsigned active_sh_degree{};
+    unsigned multi_view_interval{1};
+    float multi_view_depth_consistency{};
 };
 
 struct RenderMetrics {

@@ -111,6 +111,19 @@ struct TrainingOptions {
     // Active-step weights are multiplied by this interval so the stochastic
     // objective remains unchanged in expectation.
     unsigned multi_view_tail_interval{1};
+    // Optional quality-first replacement for the fixed grow-stop gate.  The
+    // trainer observes topology churn, depth round-trip consistency, and the
+    // opacity/scale distribution at refinement boundaries.  It only raises
+    // the interval after several stable windows and immediately restores
+    // every-step supervision when any metric drifts.
+    bool multi_view_adaptive_frequency{false};
+    unsigned multi_view_adaptive_max_interval{2};
+    unsigned multi_view_adaptive_stable_refinements{5};
+    float multi_view_adaptive_count_threshold{0.005F};
+    float multi_view_adaptive_churn_threshold{0.01F};
+    float multi_view_adaptive_depth_threshold{0.02F};
+    float multi_view_adaptive_min_depth_consistency{0.5F};
+    float multi_view_adaptive_distribution_threshold{0.025F};
     float multi_view_max_angle{30.F};
     float multi_view_min_distance{0.01F};
     float multi_view_max_distance{1.5F};
