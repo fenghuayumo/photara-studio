@@ -647,36 +647,14 @@ void test_pam_smoke() {
     options.occupancy_iso_value = 0.05F;
     options.vacancy_threshold = 1.F;
     options.occupancy_chunk_size = 512;
-    const auto bounding_volume = std::filesystem::temp_directory_path() /
-        "aetherscan_pam_bounding_volume.json";
-    {
-        std::ofstream stream(bounding_volume);
-        stream << R"({
-  "class_name": "GaussianWrappingBoundingVolume",
-  "version": 1,
-  "vertices": [
-    [-0.75, -0.75, -0.75], [0.75, -0.75, -0.75],
-    [-0.75, 0.75, -0.75], [0.75, 0.75, -0.75],
-    [-0.75, -0.75, 0.75], [0.75, -0.75, 0.75],
-    [-0.75, 0.75, 0.75], [0.75, 0.75, 0.75]
-  ],
-  "hull_simplices": null
-})";
-    }
-    options.bounding_volume_file = bounding_volume;
     const auto result = splat::extract_pam_mesh(
         model, scene, seed, splat::TrainingOptions{}, options);
-    std::filesystem::remove(bounding_volume);
     require(
         result.candidate_cloud.points.size() == options.max_points &&
             result.tetrahedron_count > 0 &&
             result.occupied_tetrahedron_count > 0 &&
             !result.mesh.vertices.empty() && !result.mesh.faces.empty(),
         "PAM smoke extraction did not produce a boundary mesh");
-    for (const mvs::DensePoint& point : result.candidate_cloud.points)
-        require(
-            point.position.cwiseAbs().maxCoeff() <= 0.751F,
-            "PAM convex bounding volume did not filter candidates");
     std::vector<std::pair<int, int>> edges;
     edges.reserve(result.mesh.faces.size() * 3);
     for (const Eigen::Vector3i& face : result.mesh.faces) {

@@ -624,9 +624,6 @@ NB_MODULE(aetherscan_native, module) {
         .def_rw(
             "min_depth_normal_cosine",
             &splat::GggsMeshOptions::min_depth_normal_cosine)
-        .def_rw(
-            "focus_radius_fraction",
-            &splat::GggsMeshOptions::focus_radius_fraction)
         .def_rw("fusion", &splat::GggsMeshOptions::fusion);
 
     nb::class_<splat::PamMeshOptions>(module, "PamOptions")
@@ -641,12 +638,6 @@ NB_MODULE(aetherscan_native, module) {
         .def_rw(
             "gaussian_seed_fraction",
             &splat::PamMeshOptions::gaussian_seed_fraction)
-        .def_rw(
-            "focus_radius_fraction",
-            &splat::PamMeshOptions::focus_radius_fraction)
-        .def_rw(
-            "bounding_volume_file",
-            &splat::PamMeshOptions::bounding_volume_file)
         .def_rw(
             "oversampling_factor",
             &splat::PamMeshOptions::oversampling_factor)

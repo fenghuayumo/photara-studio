@@ -70,15 +70,11 @@ occupancy 采样分类并提取 occupied/free 边界。Mask 前景视角参与�
 `--pam-points-per-tetrahedron` 控制第二级。`--pam-occupancy-iso-value 0.3` 对应
 GaussianWrapping `ours` rasterizer 的 `iso_surface_value=0.2`，适合自行车辐条等半透明细结构；
 默认 0.5 更保守。`--pam-gaussian-seed-fraction` 可选地把部分候选直接从 Gaussian 生成，
-默认 0 表示忠实使用 pivot mesh。无 mask 的 360° 场景还可通过
-`--pam-focus-radius-fraction` 启用相机光轴交点附近的球形 ROI。若 GaussianWrapping 数据附带
-Blender 导出的 `GaussianWrappingBoundingVolume` JSON，优先用 `--pam-bounding-volume PATH`
-加载其顶点凸包；该凸包会同时裁剪 Gaussian pivot、direct Gaussian seed、pivot-mesh 面采样
-和投影后的最终候选，使采样预算真正集中在物体及细线，而不是只在末端删除背景。它与球形 ROI
-和场景 SubjectBounds 取交集。中间候选保存为
+默认 0 表示忠实使用 pivot mesh。PAM 始终处理完整场景，不使用相机 focus、自动 ROI、场景
+SubjectBounds 或外部凸包裁剪 pivot、候选点和最终 mesh。中间候选保存为
 `*_pam_candidates.ply`。Python 模块对应提供 `PamOptions` 与 `extract_pam`。
 
-bicycle 回归可直接使用 GaussianWrapping 自带的边界体：
+bicycle 回归可直接使用 `images_2`：
 
 ```powershell
 build/aetherscan/Release/aetherscan.exe `
@@ -87,8 +83,7 @@ build/aetherscan/Release/aetherscan.exe `
   --output artifacts\bicycle\scene.mvs --gggs `
   --gggs-strategy adc_plus --gggs-iterations 30000 `
   --gggs-max-resolution 0 --gggs-progressive-resolution=false `
-  --mesh --mesh-method pam --pam-occupancy-iso-value 0.3 `
-  --pam-bounding-volume D:\ProgramCode\Python\GaussianWrapping\assets\bounding_volumes_examples\bicycle_bounding_volume.json
+  --mesh --mesh-method pam --pam-occupancy-iso-value 0.3
 ```
 
 这里直接读取 `images_2`，`--gggs-max-resolution 0` 表示保持这些文件的 2473×1643 像素，

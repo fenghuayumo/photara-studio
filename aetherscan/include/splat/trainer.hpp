@@ -65,10 +65,6 @@ struct GggsMeshOptions {
     // matching pygsplat/GS-2M whose abs-dot 100-degree test rejects no sample.
     // Set 0.5 explicitly to request the former strict 60-degree filter.
     float min_depth_normal_cosine{-2.F};
-    // Optional camera-focus ROI applied before TSDF allocation. The radius is
-    // this fraction of the median camera distance to the least-squares focus
-    // point. Zero keeps the scene's original subject bounds.
-    float focus_radius_fraction{0.F};
     mvs::DensifyOptions fusion;
 };
 
@@ -93,14 +89,6 @@ struct PamMeshOptions {
     // sampling, this gives sub-pixel wires and other small disconnected
     // structures a chance to enter the Delaunay complex.
     float gaussian_seed_fraction{0.F};
-    // Optional automatic object ROI.  The center is the least-squares
-    // intersection of registered camera optical axes and the radius is this
-    // fraction of their median distance to that center.  Zero disables it.
-    float focus_radius_fraction{0.F};
-    // Optional GaussianWrappingBoundingVolume JSON exported by the Blender
-    // add-on. Its vertex convex hull is applied consistently to Gaussian
-    // pivots, seed-mesh sampling, refined candidates, and final meshing.
-    std::filesystem::path bounding_volume_file;
     unsigned oversampling_factor{2};
     unsigned max_resample_rounds{4};
     unsigned refinement_steps{10};

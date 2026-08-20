@@ -197,10 +197,9 @@ normal field。PAM 不经过 TSDF：先从 Gaussian center 与 learned-normal pi
 `tetra_triangulation` + Marching Tetrahedra，再将自适应采样点投影到多视图 Gaussian
 occupancy 等值面，并通过第二次 CGAL Delaunay 四面体分类提取表面。可用
 `--pam-pivot-max-points`、`--pam-max-points`、`--pam-occupancy-iso-value`、
-`--pam-refinement-steps` 和 `--pam-neighbors` 控制质量与耗时。可用
-`--pam-bounding-volume` 读取 GaussianWrapping Blender 导出的凸包 JSON，并在 pivot、面采样、
-细节种子和最终候选四个阶段统一裁剪背景；这对 bicycle 辐条等细结构尤其重要。该后端要求
-构建时找到 CGAL。
+`--pam-refinement-steps` 和 `--pam-neighbors` 控制质量与耗时。PAM 对完整场景重建，不使用
+相机 focus、自动 ROI、场景 SubjectBounds 或外部凸包裁剪 mesh；细结构保留由 ADCPlus、
+learned normal field、occupancy 和自适应采样负责。该后端要求构建时找到 CGAL。
 
 - `scene.mvs`：OpenMVS Interface（MVSI），可用 OpenMVS Viewer 打开验证相机与稀疏点
 - `scene.ply`：稀疏 XYZ；写出 PLY 时会额外生成同名 `scene.mvs`

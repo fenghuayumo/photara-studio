@@ -4,18 +4,13 @@
 #include "cuda_ops.hpp"
 
 #include <Eigen/Geometry>
-#include <Eigen/Cholesky>
-
 #include <algorithm>
-#include <cstdlib>
 #include <cmath>
 #include <cstdint>
-#include <fstream>
 #include <limits>
 #include <numeric>
 #include <queue>
 #include <random>
-#include <string>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -306,199 +301,9 @@ bool in_camera_frustum(
            y < static_cast<float>(view.height);
 }
 
-std::pair<mvs::Vec3f, float> estimate_camera_focus(
-    const mvs::MvsScene& scene) {
-    Eigen::Matrix3d system = Eigen::Matrix3d::Zero();
-    Eigen::Vector3d right_hand_side = Eigen::Vector3d::Zero();
-    for (const mvs::MvsView& view : scene.views) {
-        Eigen::Vector3d direction = view.pose.R.row(2).transpose();
-        if (!(direction.squaredNorm() > 1e-12)) continue;
-        direction.normalize();
-        const Eigen::Matrix3d projector =
-            Eigen::Matrix3d::Identity() - direction * direction.transpose();
-        system += projector;
-        right_hand_side += projector * view.pose.C;
-    }
-    const Eigen::Vector3d center = system.ldlt().solve(right_hand_side);
-    if (!center.allFinite()) return {mvs::Vec3f::Zero(), 0.F};
-    std::vector<float> distances;
-    distances.reserve(scene.views.size());
-    for (const mvs::MvsView& view : scene.views) {
-        const float distance =
-            static_cast<float>((view.pose.C - center).norm());
-        if (std::isfinite(distance)) distances.push_back(distance);
-    }
-    if (distances.empty()) return {center.cast<float>(), 0.F};
-    const auto middle = distances.begin() +
-        static_cast<std::ptrdiff_t>(distances.size() / 2);
-    std::nth_element(distances.begin(), middle, distances.end());
-    return {center.cast<float>(), *middle};
-}
-
-class PamBoundingVolume {
-public:
-    explicit PamBoundingVolume(const std::filesystem::path& file) {
-        if (file.empty()) return;
-        std::ifstream stream(file, std::ios::binary);
-        if (!stream)
-            throw std::runtime_error(
-                "Unable to open PAM bounding volume: " + file.string());
-        const std::string json{
-            std::istreambuf_iterator<char>(stream),
-            std::istreambuf_iterator<char>()};
-        if (json.find("GaussianWrappingBoundingVolume") ==
-            std::string::npos)
-            throw std::runtime_error(
-                "PAM bounding volume is not a GaussianWrapping export: " +
-                file.string());
-        const std::size_t vertices_key = json.find("\"vertices\"");
-        const std::size_t array_begin = vertices_key == std::string::npos
-            ? std::string::npos
-            : json.find('[', vertices_key);
-        if (array_begin == std::string::npos)
-            throw std::runtime_error(
-                "PAM bounding volume has no vertices array: " +
-                file.string());
-        std::size_t array_end = std::string::npos;
-        unsigned depth = 0;
-        for (std::size_t cursor = array_begin; cursor < json.size(); ++cursor) {
-            if (json[cursor] == '[')
-                ++depth;
-            else if (json[cursor] == ']' && --depth == 0) {
-                array_end = cursor;
-                break;
-            }
-        }
-        if (array_end == std::string::npos)
-            throw std::runtime_error(
-                "PAM bounding volume has an unterminated vertices array: " +
-                file.string());
-
-        std::vector<float> coordinates;
-        const char* cursor = json.data() + array_begin + 1;
-        const char* const end = json.data() + array_end;
-        while (cursor < end) {
-            if ((*cursor >= '0' && *cursor <= '9') || *cursor == '-' ||
-                *cursor == '+' || *cursor == '.') {
-                char* parsed_end = nullptr;
-                const double value = std::strtod(cursor, &parsed_end);
-                if (parsed_end != cursor && parsed_end <= end) {
-                    if (!std::isfinite(value))
-                        throw std::runtime_error(
-                            "PAM bounding volume contains a non-finite vertex");
-                    coordinates.push_back(static_cast<float>(value));
-                    cursor = parsed_end;
-                    continue;
-                }
-            }
-            ++cursor;
-        }
-        if (coordinates.size() < 12 || coordinates.size() % 3 != 0)
-            throw std::runtime_error(
-                "PAM bounding volume requires at least four 3D vertices");
-        const std::size_t vertex_count = coordinates.size() / 3;
-        if (vertex_count > 256)
-            throw std::runtime_error(
-                "PAM bounding volume has more than 256 vertices; export a "
-                "simplified convex volume");
-        std::vector<mvs::Vec3f> vertices(vertex_count);
-        mvs::Vec3f centroid = mvs::Vec3f::Zero();
-        mvs::Vec3f minimum = mvs::Vec3f::Constant(
-            std::numeric_limits<float>::infinity());
-        mvs::Vec3f maximum = mvs::Vec3f::Constant(
-            -std::numeric_limits<float>::infinity());
-        for (std::size_t index = 0; index < vertex_count; ++index) {
-            vertices[index] = mvs::Vec3f{
-                coordinates[3 * index], coordinates[3 * index + 1],
-                coordinates[3 * index + 2]};
-            centroid += vertices[index];
-            minimum = minimum.cwiseMin(vertices[index]);
-            maximum = maximum.cwiseMax(vertices[index]);
-        }
-        centroid /= static_cast<float>(vertex_count);
-        tolerance_ = 1e-5F * std::max(1.F, (maximum - minimum).norm());
-
-        // GaussianWrapping exports the convex-volume vertices, but the face
-        // list is optional. Recover its supporting half-spaces from every
-        // non-collinear vertex triple. Bounding volumes are deliberately
-        // small (normally eight vertices), so this exhaustive construction is
-        // simpler and more tolerant of null hull_simplices than a JSON/mesh
-        // dependency.
-        for (std::size_t i = 0; i < vertex_count; ++i)
-            for (std::size_t j = i + 1; j < vertex_count; ++j)
-                for (std::size_t k = j + 1; k < vertex_count; ++k) {
-                    mvs::Vec3f normal =
-                        (vertices[j] - vertices[i]).cross(
-                            vertices[k] - vertices[i]);
-                    const float length = normal.norm();
-                    if (!(length > tolerance_ * tolerance_)) continue;
-                    normal /= length;
-                    float offset = -normal.dot(vertices[i]);
-                    float minimum_side =
-                        std::numeric_limits<float>::infinity();
-                    float maximum_side =
-                        -std::numeric_limits<float>::infinity();
-                    for (const mvs::Vec3f& vertex : vertices) {
-                        const float side = normal.dot(vertex) + offset;
-                        minimum_side = std::min(minimum_side, side);
-                        maximum_side = std::max(maximum_side, side);
-                    }
-                    if (minimum_side < -tolerance_ &&
-                        maximum_side > tolerance_)
-                        continue;
-                    if (normal.dot(centroid) + offset > 0.F) {
-                        normal = -normal;
-                        offset = -offset;
-                    }
-                    bool duplicate = false;
-                    for (const Plane& plane : planes_)
-                        if (plane.normal.dot(normal) > 1.F - 1e-5F &&
-                            std::abs(plane.offset - offset) <= tolerance_) {
-                            duplicate = true;
-                            break;
-                        }
-                    if (!duplicate) planes_.push_back({normal, offset});
-                }
-        if (planes_.size() < 4)
-            throw std::runtime_error(
-                "PAM bounding volume vertices do not form a 3D convex hull");
-        core::Logger::instance().info(
-            "gggs PAM convex bounding volume: file=", file.string(),
-            " vertices=", vertex_count, " planes=", planes_.size());
-    }
-
-    [[nodiscard]] bool active() const noexcept { return !planes_.empty(); }
-
-    [[nodiscard]] bool contains(const mvs::Vec3f& point) const noexcept {
-        for (const Plane& plane : planes_)
-            if (plane.normal.dot(point) + plane.offset > tolerance_)
-                return false;
-        return true;
-    }
-
-private:
-    struct Plane {
-        mvs::Vec3f normal;
-        float offset{};
-    };
-    std::vector<Plane> planes_;
-    float tolerance_{1e-5F};
-};
-
-[[nodiscard]] bool inside_pam_roi(
-    const mvs::Vec3f& point, const mvs::Vec3f& focus_center,
-    const float focus_radius, const PamBoundingVolume& bounding_volume) {
-    return (focus_radius <= 0.F ||
-            (point - focus_center).squaredNorm() <=
-                focus_radius * focus_radius) &&
-           (!bounding_volume.active() || bounding_volume.contains(point));
-}
-
 std::vector<mvs::Vec3f> sample_seed_mesh(
     const mvs::Mesh& mesh, const mvs::MvsScene& scene,
-    const std::size_t count, std::mt19937& random,
-    const mvs::Vec3f& focus_center, const float focus_radius,
-    const PamBoundingVolume& bounding_volume) {
+    const std::size_t count, std::mt19937& random) {
     std::vector<double> weights(mesh.faces.size(), 0.0);
     for (std::size_t face_index = 0; face_index < mesh.faces.size();
          ++face_index) {
@@ -508,9 +313,6 @@ std::vector<mvs::Vec3f> sample_seed_mesh(
         const mvs::Vec3f c = mesh.vertices[static_cast<std::size_t>(face.z())];
         const float area = 0.5F * (b - a).cross(c - a).norm();
         const mvs::Vec3f center = (a + b + c) / 3.F;
-        if (!inside_pam_roi(
-                center, focus_center, focus_radius, bounding_volume))
-            continue;
         float minimum_distance2 = std::numeric_limits<float>::infinity();
         for (const mvs::MvsView& view : scene.views)
             if (in_camera_frustum(center, view))
@@ -548,8 +350,7 @@ std::vector<mvs::Vec3f> sample_seed_mesh(
 
 std::vector<std::size_t> sample_gaussian_indices(
     const HostGaussianField& field, const std::size_t requested,
-    std::mt19937& random, const mvs::Vec3f& focus_center,
-    const float focus_radius, const PamBoundingVolume& bounding_volume) {
+    std::mt19937& random) {
     struct WeightedIndex {
         double key{};
         std::size_t index{};
@@ -559,10 +360,6 @@ std::vector<std::size_t> sample_gaussian_indices(
     std::uniform_real_distribution<double> uniform(
         std::numeric_limits<double>::min(), 1.0);
     for (std::size_t index = 0; index < field.means.size(); ++index) {
-        if (!inside_pam_roi(
-                field.means[index], focus_center, focus_radius,
-                bounding_volume))
-            continue;
         const float normal2 = field.normals[index].squaredNorm();
         const float opacity = field.opacities[index];
         const float minimum_scale = field.scales[index].minCoeff();
@@ -613,10 +410,9 @@ std::vector<std::size_t> sample_gaussian_indices(
 
 std::vector<mvs::Vec3f> sample_gaussian_detail_seeds(
     const HostGaussianField& field, const std::size_t requested,
-    std::mt19937& random, const mvs::Vec3f& focus_center,
-    const float focus_radius, const PamBoundingVolume& bounding_volume) {
+    std::mt19937& random) {
     const std::vector<std::size_t> selected = sample_gaussian_indices(
-        field, requested, random, focus_center, focus_radius, bounding_volume);
+        field, requested, random);
     std::vector<mvs::Vec3f> seeds;
     seeds.reserve(selected.size());
     for (const std::size_t index : selected) {
@@ -626,11 +422,7 @@ std::vector<mvs::Vec3f> sample_gaussian_detail_seeds(
         // Start on the learned outward side of the Gaussian.  Half a standard
         // deviation is close enough for the occupancy/vector-field projection
         // but avoids the zero gradient exactly at the Gaussian mean.
-        const mvs::Vec3f seed =
-            field.means[index] + 0.5F * sigma * normal;
-        if (inside_pam_roi(
-                seed, focus_center, focus_radius, bounding_volume))
-            seeds.push_back(seed);
+        seeds.push_back(field.means[index] + 0.5F * sigma * normal);
     }
     return seeds;
 }
@@ -670,14 +462,11 @@ struct PivotEdgeHash {
 mvs::Mesh build_gaussian_pivot_seed_mesh(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const TrainingOptions& training_options, const HostGaussianField& field,
-    const PamMeshOptions& options, std::mt19937& random,
-    const mvs::Vec3f& focus_center, const float focus_radius,
-    const PamBoundingVolume& bounding_volume) {
+    const PamMeshOptions& options, std::mt19937& random) {
     const std::size_t gaussian_budget = std::max<std::size_t>(
         options.pivot_max_points / 2, 2);
     const std::vector<std::size_t> selected = sample_gaussian_indices(
-        field, gaussian_budget, random, focus_center, focus_radius,
-        bounding_volume);
+        field, gaussian_budget, random);
     std::vector<mvs::Vec3f> pivots;
     std::vector<float> pivot_scales;
     pivots.reserve(2 * selected.size());
@@ -688,9 +477,6 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
         if (!(sigma > 0.F)) continue;
         const mvs::Vec3f offset = field.means[index] +
             options.pivot_std_factor * sigma * normal;
-        if (!inside_pam_roi(
-                offset, focus_center, focus_radius, bounding_volume))
-            continue;
         const float edge_scale = 3.F * field.scales[index].maxCoeff();
         pivots.push_back(offset);
         pivot_scales.push_back(edge_scale);
@@ -847,8 +633,6 @@ PamMeshResult extract_pam_mesh(
         !std::isfinite(options.gaussian_seed_fraction) ||
         options.gaussian_seed_fraction < 0.F ||
         options.gaussian_seed_fraction > 1.F ||
-        !std::isfinite(options.focus_radius_fraction) ||
-        options.focus_radius_fraction < 0.F ||
         !(options.occupancy_iso_value > 0.F &&
           options.occupancy_iso_value < 1.F) ||
         options.vacancy_threshold < 0.F)
@@ -857,22 +641,11 @@ PamMeshResult extract_pam_mesh(
     core::StageScope stage("gggs.pam");
     HostGaussianField field(model);
     std::mt19937 random(options.seed);
-    const auto [focus_center, median_camera_radius] =
-        estimate_camera_focus(scene);
-    const float focus_radius =
-        options.focus_radius_fraction * median_camera_radius;
-    const PamBoundingVolume bounding_volume(options.bounding_volume_file);
-    if (focus_radius > 0.F)
-        core::Logger::instance().info(
-            "gggs PAM focus ROI: center=", focus_center.transpose(),
-            " radius=", focus_radius,
-            " median_camera_radius=", median_camera_radius);
     mvs::Mesh generated_seed_mesh;
     const mvs::Mesh* active_seed_mesh = &seed_mesh;
     if (seed_mesh.vertices.empty()) {
         generated_seed_mesh = build_gaussian_pivot_seed_mesh(
-            model, scene, training_options, field, options, random,
-            focus_center, focus_radius, bounding_volume);
+            model, scene, training_options, field, options, random);
         active_seed_mesh = &generated_seed_mesh;
     }
     std::vector<mvs::Vec3f> candidates;
@@ -910,12 +683,7 @@ PamMeshResult extract_pam_mesh(
                  ++index)
                 if (std::abs(
                         occupancy[index] - options.occupancy_iso_value) <=
-                        options.vacancy_threshold &&
-                    (!scene.subject_bounds.valid ||
-                     scene.subject_bounds.contains(sampled[index])) &&
-                    inside_pam_roi(
-                        sampled[index], focus_center, focus_radius,
-                        bounding_volume))
+                        options.vacancy_threshold)
                     candidates.push_back(sampled[index]);
         };
 
@@ -926,8 +694,7 @@ PamMeshResult extract_pam_mesh(
                 static_cast<double>(options.max_points) *
                 options.gaussian_seed_fraction)));
     refine_and_append(sample_gaussian_detail_seeds(
-        field, gaussian_seed_count, random, focus_center, focus_radius,
-        bounding_volume));
+        field, gaussian_seed_count, random));
     const std::size_t gaussian_candidates = candidates.size();
     const unsigned rounds = std::max(options.max_resample_rounds, 1U);
     for (unsigned round = 0;
@@ -936,8 +703,7 @@ PamMeshResult extract_pam_mesh(
         const std::size_t sample_count = missing *
             std::max(options.oversampling_factor, 1U);
         refine_and_append(sample_seed_mesh(
-            *active_seed_mesh, scene, sample_count, random,
-            focus_center, focus_radius, bounding_volume));
+            *active_seed_mesh, scene, sample_count, random));
     }
     core::Logger::instance().info(
         "gggs PAM seeds: gaussian_requested=", gaussian_seed_count,

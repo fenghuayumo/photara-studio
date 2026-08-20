@@ -149,8 +149,6 @@ struct ReconstructCli {
     std::uint64_t pam_pivot_max_points{1'000'000};
     float pam_pivot_std_factor{3.F};
     float pam_gaussian_seed_fraction{0.F};
-    float pam_focus_radius_fraction{0.F};
-    std::filesystem::path pam_bounding_volume;
     unsigned pam_refinement_steps{10};
     unsigned pam_neighbors{32};
     unsigned pam_points_per_tetrahedron{10};
@@ -307,8 +305,6 @@ void print_help(const cxxopts::Options& options) {
               << "  --pam-pivot-max-points N  GaussianWrapping pivot vertices before tetra_triangulation\n"
               << "  --pam-pivot-std-factor F  learned-normal pivot displacement in sigma (default 3)\n"
               << "  --pam-gaussian-seed-fraction F  optional direct Gaussian candidate fraction (default 0)\n"
-              << "  --pam-focus-radius-fraction F  camera-focus ROI radius / median camera radius (0 disables)\n"
-              << "  --pam-bounding-volume PATH  GaussianWrapping convex bounding-volume JSON\n"
               << "  --pam-refinement-steps N  PAM occupancy/vector-field steps (default 10)\n"
               << "  --pam-neighbors N  Gaussian neighbors in the PAM field (default 32)\n"
               << "  --pam-occupancy-iso-value V  occupied threshold (0.3 matches GW iso shift 0.2)\n"
@@ -558,12 +554,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("pam-gaussian-seed-fraction",
          "Fraction of PAM candidates seeded from learned Gaussians",
          cxxopts::value<float>()->default_value("0"))
-        ("pam-focus-radius-fraction",
-         "Automatic camera-focus ROI radius fraction (0 disables)",
-         cxxopts::value<float>()->default_value("0"))
-        ("pam-bounding-volume",
-         "GaussianWrapping convex bounding-volume JSON",
-         cxxopts::value<std::string>()->default_value(""))
         ("pam-refinement-steps", "PAM occupancy/vector-field refinement steps",
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-neighbors", "Nearest Gaussians used by the PAM vector field",
@@ -819,10 +809,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["pam-pivot-std-factor"].as<float>();
     cli.pam_gaussian_seed_fraction =
         result["pam-gaussian-seed-fraction"].as<float>();
-    cli.pam_focus_radius_fraction =
-        result["pam-focus-radius-fraction"].as<float>();
-    cli.pam_bounding_volume = utf8_to_path(
-        result["pam-bounding-volume"].as<std::string>());
     cli.pam_refinement_steps =
         result["pam-refinement-steps"].as<unsigned>();
     cli.pam_neighbors = result["pam-neighbors"].as<unsigned>();
@@ -1039,18 +1025,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
         !std::isfinite(cli.pam_occupancy_iso_value) ||
         !(cli.pam_occupancy_iso_value > 0.F &&
           cli.pam_occupancy_iso_value < 1.F) ||
-        !std::isfinite(cli.pam_focus_radius_fraction) ||
-        cli.pam_focus_radius_fraction < 0.F ||
         !std::isfinite(cli.pam_vacancy_threshold) ||
         cli.pam_vacancy_threshold < 0.F ||
         !std::isfinite(cli.pam_mask_background_threshold) ||
         cli.pam_mask_background_threshold < 0.F ||
         cli.pam_mask_background_threshold > 1.F)
         throw std::invalid_argument("Invalid PAM extraction options");
-    if (!cli.pam_bounding_volume.empty() &&
-        !std::filesystem::is_regular_file(cli.pam_bounding_volume))
-        throw std::invalid_argument(
-            "--pam-bounding-volume must name an existing JSON file");
     if (cli.patchmatch_tile_rows == 0)
         throw std::invalid_argument("--patchmatch-tile-rows must be positive");
     if (cli.patchmatch_concurrent_views == 0)
@@ -1995,9 +1975,6 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         pam_options.pivot_std_factor = cli.pam_pivot_std_factor;
         pam_options.gaussian_seed_fraction =
             cli.pam_gaussian_seed_fraction;
-        pam_options.focus_radius_fraction =
-            cli.pam_focus_radius_fraction;
-        pam_options.bounding_volume_file = cli.pam_bounding_volume;
         pam_options.refinement_steps = cli.pam_refinement_steps;
         pam_options.vector_field_neighbors = cli.pam_neighbors;
         pam_options.points_per_tetrahedron =
@@ -2045,8 +2022,6 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     extraction_options.fusion = *mesh_options;
     extraction_options.fusion.build_mesh = true;
     extraction_options.diagnostics_dir = out_dir;
-    extraction_options.focus_radius_fraction =
-        cli.pam_focus_radius_fraction;
     const auto mesh_started = std::chrono::steady_clock::now();
     auto extraction = aetherscan::splat::extract_gggs_mesh(
         gaussians, scene, options, extraction_options);
