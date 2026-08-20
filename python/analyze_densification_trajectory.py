@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ITERATION = re.compile(
-    r"gggs iteration=(\d+)/(\d+).*?gaussians=(\d+)"
+    r"splat iteration=(\d+)/(\d+).*?gaussians=(\d+)"
     r".*?grown=(\d+) pruned=(\d+)"
 )
 PYGSPLAT_INITIAL = re.compile(r"Model initialized\. Number of GS:\s*(\d+)")

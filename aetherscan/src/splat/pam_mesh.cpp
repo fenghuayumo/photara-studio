@@ -487,7 +487,7 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
         throw std::runtime_error(
             "Gaussian pivot generation produced fewer than four vertices");
     core::Logger::instance().info(
-        "gggs pivot tetra_triangulation: selected_gaussians=", selected.size(),
+        "splat pivot tetra_triangulation: selected_gaussians=", selected.size(),
         " pivots=", pivots.size(),
         " std_factor=", options.pivot_std_factor);
 
@@ -588,7 +588,7 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
             "Gaussian pivot marching tetrahedra produced no surface");
     compute_vertex_normals(mesh);
     core::Logger::instance().info(
-        "gggs pivot mesh: tetrahedra=",
+        "splat pivot mesh: tetrahedra=",
         triangulation.number_of_finite_cells(),
         " vertices=", mesh.vertices.size(),
         " faces=", mesh.faces.size(),
@@ -638,7 +638,7 @@ PamMeshResult extract_pam_mesh(
         options.vacancy_threshold < 0.F)
         throw std::invalid_argument("Invalid PAM extraction options");
 
-    core::StageScope stage("gggs.pam");
+    core::StageScope stage("splat.pam");
     HostGaussianField field(model);
     std::mt19937 random(options.seed);
     mvs::Mesh generated_seed_mesh;
@@ -706,7 +706,7 @@ PamMeshResult extract_pam_mesh(
             *active_seed_mesh, scene, sample_count, random));
     }
     core::Logger::instance().info(
-        "gggs PAM seeds: gaussian_requested=", gaussian_seed_count,
+        "splat PAM seeds: gaussian_requested=", gaussian_seed_count,
         " gaussian_accepted=", gaussian_candidates,
         " mesh_accepted=", candidates.size() - gaussian_candidates);
     if (candidates.size() < 4)
@@ -886,7 +886,7 @@ PamMeshResult extract_pam_mesh(
         result.candidate_cloud.points.push_back(std::move(dense));
     }
     core::Logger::instance().info(
-        "gggs PAM: candidates=", candidates.size(),
+        "splat PAM: candidates=", candidates.size(),
         " tetrahedra=", result.tetrahedron_count,
         " occupied_tetrahedra=", result.occupied_tetrahedron_count,
         " vertices=", result.mesh.vertices.size(),

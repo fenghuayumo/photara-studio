@@ -141,34 +141,34 @@ void save_geometry_diagnostics(
     }
     std::filesystem::create_directories(directory);
     const std::string suffix = "_view_" + std::to_string(view_index) + ".png";
-    io::save_rgb_png(depth_image, directory / ("gggs_depth" + suffix));
-    io::save_rgb_png(normal_image, directory / ("gggs_normal" + suffix));
-    io::save_rgb_png(alpha_image, directory / ("gggs_alpha" + suffix));
-    io::save_rgb_png(mask_image, directory / ("gggs_mask" + suffix));
+    io::save_rgb_png(depth_image, directory / ("splat_depth" + suffix));
+    io::save_rgb_png(normal_image, directory / ("splat_normal" + suffix));
+    io::save_rgb_png(alpha_image, directory / ("splat_alpha" + suffix));
+    io::save_rgb_png(mask_image, directory / ("splat_mask" + suffix));
     io::save_rgb_png(
-        alpha_error_image, directory / ("gggs_alpha_error" + suffix));
+        alpha_error_image, directory / ("splat_alpha_error" + suffix));
     core::Logger::instance().info(
-        "gggs geometry diagnostics: view=", view_index,
+        "splat geometry diagnostics: view=", view_index,
         " depth_p02=", near_depth, " depth_p98=", far_depth,
         " directory=", directory);
 }
 
 }  // namespace
 
-GggsMeshResult extract_gggs_mesh(
+SplatMeshResult extract_splat_mesh(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const TrainingOptions& training_options,
-    const GggsMeshOptions& mesh_options) {
+    const SplatMeshOptions& mesh_options) {
     if (model.size() == 0)
-        throw std::invalid_argument("GGGS mesh extraction requires Gaussians");
+        throw std::invalid_argument("Splat mesh extraction requires Gaussians");
     if (scene.views.size() < 2)
         throw std::invalid_argument(
-            "GGGS mesh extraction requires at least two registered views");
+            "Splat mesh extraction requires at least two registered views");
     if (!(mesh_options.alpha_threshold > 0.F &&
           mesh_options.alpha_threshold < 1.F))
         throw std::invalid_argument(
-            "GGGS mesh alpha threshold must be in (0, 1)");
-    core::StageScope render_stage("gggs.mesh_render_geometry");
+            "Splat mesh alpha threshold must be in (0, 1)");
+    core::StageScope render_stage("splat.mesh_render_geometry");
     mvs::MvsScene geometry_scene;
     geometry_scene.views.reserve(scene.views.size());
     for (const auto& view : scene.views)
@@ -263,7 +263,7 @@ GggsMeshResult extract_gggs_mesh(
         if (depth.size() != pixels || alpha.size() != pixels ||
             mask.size() != pixels || normal.size() != 3 * pixels)
             throw std::runtime_error(
-                "GGGS mesh render returned an unexpected tensor shape: "
+                "Splat mesh render returned an unexpected tensor shape: "
                 "depth=" + std::to_string(depth.size()) +
                 " alpha=" + std::to_string(alpha.size()) +
                 " mask=" + std::to_string(mask.size()) +
@@ -384,7 +384,7 @@ GggsMeshResult extract_gggs_mesh(
     render_stage.finish();
 
     core::Logger::instance().info(
-        "gggs mesh depth: views=", geometry_scene.views.size(),
+        "splat mesh depth: views=", geometry_scene.views.size(),
         " valid_pixels=", valid_depth_pixels,
         " alpha_threshold=", mesh_options.alpha_threshold,
         " scene_extent=", scene_extent,
@@ -402,15 +402,15 @@ GggsMeshResult extract_gggs_mesh(
         mvs::fuse_depth_maps(geometry_scene, fusion_options);
         if (geometry_scene.dense_cloud.points.empty())
             throw std::runtime_error(
-                "GGGS mesh depth fusion produced no surface points");
+                "Splat mesh depth fusion produced no surface points");
     }
     mvs::reconstruct_mesh(geometry_scene, fusion_options);
     if (geometry_scene.mesh.vertices.empty() ||
         geometry_scene.mesh.faces.empty())
         throw std::runtime_error(
-            "GGGS mesh extraction produced no triangle surface");
+            "Splat mesh extraction produced no triangle surface");
 
-    GggsMeshResult result;
+    SplatMeshResult result;
     result.surface_cloud = std::move(geometry_scene.dense_cloud);
     result.mesh = std::move(geometry_scene.mesh);
     result.valid_depth_pixels = valid_depth_pixels;

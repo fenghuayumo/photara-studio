@@ -4,7 +4,7 @@
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
 #include "core/logging.hpp"
-#if defined(AETHERSCAN_HAS_GGGS)
+#if defined(AETHERSCAN_HAS_SPLAT)
 #include "splat/dataset.hpp"
 #include "splat/trainer.hpp"
 #endif
@@ -76,56 +76,56 @@ struct ReconstructCli {
     unsigned hybrid_lightglue_max_features{2048U};
     bool lightglue_cpu{false};
     bool dense{false};
-    bool gggs{false};
+    bool splat{false};
     std::string capture_mode{"object"};
     std::filesystem::path splat_dataset;
     std::string splat_format{"auto"};
     std::filesystem::path colmap_model;
     std::filesystem::path dense_ply;
-    std::filesystem::path gggs_model;
-    unsigned gggs_iterations{10'000};
-    bool gggs_profile_cuda{false};
-    unsigned gggs_profile_interval{100};
-    std::uint64_t gggs_max_gaussians{500'000};
-    unsigned gggs_max_resolution{1'920};
-    float gggs_kernel_size{0.F};
-    bool gggs_progressive_resolution{true};
-    unsigned gggs_progressive_interval{3'000};
-    float gggs_progressive_initial_scale{0.25F};
-    std::uint64_t gggs_view_cache_mb{6'144};
-    unsigned gggs_eval_split_every{0};
-    bool gggs_use_mask{true};
-    std::string gggs_alpha_mode{"transparent"};
-    float gggs_match_alpha_weight{0.25F};
-    float gggs_ssim_weight{0.2F};
-    float gggs_depth_normal_weight{0.05F};
-    bool gggs_normal_field{true};
-    float gggs_normal_field_weight{0.05F};
-    float gggs_normal_field_depth_ratio{0.6F};
-    unsigned gggs_normal_field_from_iter{8'001};
-    float gggs_multi_view_geo_weight{0.02F};
-    float gggs_multi_view_ncc_weight{0.6F};
-    unsigned gggs_multi_view_num{8};
-    unsigned gggs_multi_view_tail_interval{1};
-    bool gggs_multi_view_adaptive{false};
-    unsigned gggs_multi_view_adaptive_max_interval{2};
-    unsigned gggs_multi_view_stable_refinements{5};
-    float gggs_multi_view_stable_count_threshold{0.005F};
-    float gggs_multi_view_stable_churn_threshold{0.01F};
-    float gggs_multi_view_stable_depth_threshold{0.02F};
-    float gggs_multi_view_min_depth_consistency{0.5F};
-    float gggs_multi_view_stable_distribution_threshold{0.025F};
-    float gggs_multi_view_pixel_noise{1.F};
-    unsigned gggs_geometry_from_iter{3'000};
-    float gggs_min_scale_fraction{1e-4F};
-    float gggs_max_scale_fraction{0.002F};
-    float gggs_max_scale_ratio{0.F};
-    bool gggs_max_scale_ratio_overridden{false};
-    bool gggs_constrain_scales{false};
-    std::string gggs_strategy{"default"};
-    bool gggs_densification{true};
-    unsigned gggs_structure_freeze_iter{0};
-    std::uint64_t gggs_densification_cap{10'000'000};
+    std::filesystem::path splat_model;
+    unsigned splat_iterations{10'000};
+    bool splat_profile_cuda{false};
+    unsigned splat_profile_interval{100};
+    std::uint64_t splat_max_gaussians{500'000};
+    unsigned splat_max_resolution{1'920};
+    float splat_kernel_size{0.F};
+    bool splat_progressive_resolution{true};
+    unsigned splat_progressive_interval{3'000};
+    float splat_progressive_initial_scale{0.25F};
+    std::uint64_t splat_view_cache_mb{6'144};
+    unsigned splat_eval_split_every{0};
+    bool splat_use_mask{true};
+    std::string splat_alpha_mode{"transparent"};
+    float splat_match_alpha_weight{0.25F};
+    float splat_ssim_weight{0.2F};
+    float splat_depth_normal_weight{0.05F};
+    bool splat_normal_field{true};
+    float splat_normal_field_weight{0.05F};
+    float splat_normal_field_depth_ratio{0.6F};
+    unsigned splat_normal_field_from_iter{8'001};
+    float splat_multi_view_geo_weight{0.02F};
+    float splat_multi_view_ncc_weight{0.6F};
+    unsigned splat_multi_view_num{8};
+    unsigned splat_multi_view_tail_interval{1};
+    bool splat_multi_view_adaptive{false};
+    unsigned splat_multi_view_adaptive_max_interval{2};
+    unsigned splat_multi_view_stable_refinements{5};
+    float splat_multi_view_stable_count_threshold{0.005F};
+    float splat_multi_view_stable_churn_threshold{0.01F};
+    float splat_multi_view_stable_depth_threshold{0.02F};
+    float splat_multi_view_min_depth_consistency{0.5F};
+    float splat_multi_view_stable_distribution_threshold{0.025F};
+    float splat_multi_view_pixel_noise{1.F};
+    unsigned splat_geometry_from_iter{3'000};
+    float splat_min_scale_fraction{1e-4F};
+    float splat_max_scale_fraction{0.002F};
+    float splat_max_scale_ratio{0.F};
+    bool splat_max_scale_ratio_overridden{false};
+    bool splat_constrain_scales{false};
+    std::string splat_strategy{"default"};
+    bool splat_densification{true};
+    unsigned splat_structure_freeze_iter{0};
+    std::uint64_t splat_densification_cap{10'000'000};
     bool mesh{false};
     bool mvs_mesh_only{false};
     std::filesystem::path mask_mesh;
@@ -255,52 +255,52 @@ void print_help(const cxxopts::Options& options) {
               << "  global       rotation averaging + global positioning + BA\n"
               << "Dense (optional Stage A Fast MVS after SfM):\n"
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
-              << "  --gggs       train CUDA GGGS -> *_gggs.ply\n"
+              << "  --splat       train CUDA Gaussian splats -> *_splat.ply\n"
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS camera data\n"
               << "  --splat-format auto|colmap|realitycapture|openmvs\n"
               << "  --colmap PATH  compatibility alias for --splat-format colmap\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
-              << "  --gggs-model PATH  load a trained GGGS PLY and skip optimization\n"
-              << "  --gggs-iterations N  GGGS optimizer steps (default 10000)\n"
-              << "  --gggs-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
-              << "  --gggs-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
-              << "  --gggs-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
-              << "  --gggs-kernel-size V  screen covariance low-pass variance; "
+              << "  --splat-model PATH  load a trained splat PLY and skip optimization\n"
+              << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
+              << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
+              << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
+              << "  --splat-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
+              << "  --splat-kernel-size V  screen covariance low-pass variance; "
                  "0 disables, 0.1 matches Brush Mip\n"
-              << "  --gggs-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
-              << "  --gggs-progressive-interval N  iterations per resolution level (default 3000)\n"
-              << "  --gggs-eval-split-every N  hold out every Nth view for PSNR\n"
-              << "  --gggs-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
-              << "  --gggs-alpha-mode masked|transparent (default transparent)\n"
-              << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
-              << "  --gggs-ssim-weight W  structural loss blend (default 0.2)\n"
-              << "  --gggs-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
-              << "  --gggs-normal-field BOOL  learn GaussianWrapping normal features (default true)\n"
-              << "  --gggs-normal-field-weight W  normal-field consistency weight (default 0.05)\n"
-              << "  --gggs-normal-field-depth-ratio R  median-depth alignment ratio (default 0.6)\n"
-              << "  --gggs-normal-field-from-iter N  start normal-field loss (default 8001)\n"
-              << "  --gggs-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
-              << "  --gggs-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
-              << "  --gggs-mv-neighbors N  nearest camera candidates (default 8)\n"
-              << "  --gggs-mv-tail-interval N  multi-view interval after ADC growth stops (default 1)\n"
-              << "  --gggs-mv-adaptive BOOL  lower multi-view frequency only after geometry stabilizes\n"
-              << "  --gggs-mv-adaptive-max-interval N  adaptive interval ceiling (default 2)\n"
-              << "  --gggs-mv-stable-refinements N  stable refine windows before each reduction (default 5)\n"
-              << "  --gggs-mv-pixel-noise P  geometry reprojection gate (default 1px)\n"
-              << "  --gggs-geometry-from-iter N  start geometry loss (default 3000)\n"
-              << "  --gggs-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
-              << "  --gggs-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
-              << "  --gggs-max-scale-ratio R  hard anisotropy clamp "
+              << "  --splat-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
+              << "  --splat-progressive-interval N  iterations per resolution level (default 3000)\n"
+              << "  --splat-eval-split-every N  hold out every Nth view for PSNR\n"
+              << "  --splat-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
+              << "  --splat-alpha-mode masked|transparent (default transparent)\n"
+              << "  --splat-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
+              << "  --splat-ssim-weight W  structural loss blend (default 0.2)\n"
+              << "  --splat-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
+              << "  --splat-normal-field BOOL  learn GaussianWrapping normal features (default true)\n"
+              << "  --splat-normal-field-weight W  normal-field consistency weight (default 0.05)\n"
+              << "  --splat-normal-field-depth-ratio R  median-depth alignment ratio (default 0.6)\n"
+              << "  --splat-normal-field-from-iter N  start normal-field loss (default 8001)\n"
+              << "  --splat-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
+              << "  --splat-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
+              << "  --splat-mv-neighbors N  nearest camera candidates (default 8)\n"
+              << "  --splat-mv-tail-interval N  multi-view interval after ADC growth stops (default 1)\n"
+              << "  --splat-mv-adaptive BOOL  lower multi-view frequency only after geometry stabilizes\n"
+              << "  --splat-mv-adaptive-max-interval N  adaptive interval ceiling (default 2)\n"
+              << "  --splat-mv-stable-refinements N  stable refine windows before each reduction (default 5)\n"
+              << "  --splat-mv-pixel-noise P  geometry reprojection gate (default 1px)\n"
+              << "  --splat-geometry-from-iter N  start geometry loss (default 3000)\n"
+              << "  --splat-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
+              << "  --splat-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
+              << "  --splat-max-scale-ratio R  hard anisotropy clamp "
                  "(0 disables; ADC+ visual default 100)\n"
-              << "  --gggs-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
-              << "  --gggs-strategy default|adc_plus|adc_igs|dense_adaptive\n"
-              << "  --gggs-densification=BOOL  enable split/prune/reset (default true)\n"
-              << "  --gggs-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
-              << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
+              << "  --splat-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
+              << "  --splat-strategy default|adc_plus|adc_igs|dense_adaptive\n"
+              << "  --splat-densification=BOOL  enable split/prune/reset (default true)\n"
+              << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
+              << "  --splat-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mask-mesh PATH  load an existing PLY mesh and render masks/previews\n"
               << "  --mesh-method auto|tsdf|delaunay|pam\n"
-              << "               auto uses TSDF for GGGS, otherwise the quality preset\n"
+              << "               auto uses TSDF for splats, otherwise the quality preset\n"
               << "  --pam-max-points N  PAM refined surface candidates (default 1000000)\n"
               << "  --pam-pivot-max-points N  GaussianWrapping pivot vertices before tetra_triangulation\n"
               << "  --pam-pivot-std-factor F  learned-normal pivot displacement in sigma (default 3)\n"
@@ -406,7 +406,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false"))
         ("dense", "Run Fast MVS densify after SfM",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("gggs", "Train CUDA GGGS directly from SfM sparse points",
+        ("splat", "Train CUDA Gaussian splats directly from SfM sparse points",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("capture-mode",
          "Capture type: object uses SfM SubjectBounds; scene is unbounded",
@@ -421,120 +421,120 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("dense-ply", "Dense PLY initializer for external or internal-SfM cameras",
          cxxopts::value<std::string>()->default_value(""))
-        ("gggs-model", "Trained GGGS PLY to load instead of optimizing",
+        ("splat-model", "Trained splat PLY to load instead of optimizing",
          cxxopts::value<std::string>()->default_value(""))
-        ("gggs-iterations", "GGGS optimizer iterations",
+        ("splat-iterations", "Splat optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
-        ("gggs-profile-cuda",
-         "Record windowed CUDA-event timings for GGGS training stages",
+        ("splat-profile-cuda",
+         "Record windowed CUDA-event timings for splat training stages",
          cxxopts::value<bool>()->default_value("false")
              ->implicit_value("true"))
-        ("gggs-profile-interval",
+        ("splat-profile-interval",
          "CUDA profiling aggregation window (1..1000 iterations)",
          cxxopts::value<unsigned>()->default_value("100"))
-        ("gggs-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
+        ("splat-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
          cxxopts::value<std::uint64_t>()->default_value("500000"))
-        ("gggs-max-resolution", "Maximum GGGS training image dimension (0 = source)",
+        ("splat-max-resolution", "Maximum splat training image dimension (0 = source)",
          cxxopts::value<unsigned>()->default_value("1920"))
-        ("gggs-kernel-size",
+        ("splat-kernel-size",
          "Screen covariance low-pass variance (0 disables; Brush Mip uses 0.1)",
          cxxopts::value<float>()->default_value("0"))
-        ("gggs-progressive-resolution",
-         "Enable 1/4 -> 1/2 -> full coarse-to-fine GGGS training",
+        ("splat-progressive-resolution",
+         "Enable 1/4 -> 1/2 -> full coarse-to-fine splat training",
          cxxopts::value<bool>()->default_value("true")
              ->implicit_value("true"))
-        ("gggs-progressive-interval",
-         "Iterations per GGGS resolution level",
+        ("splat-progressive-interval",
+         "Iterations per splat resolution level",
          cxxopts::value<unsigned>()->default_value("3000"))
-        ("gggs-progressive-initial-scale",
-         "Initial GGGS linear image scale",
+        ("splat-progressive-initial-scale",
+         "Initial splat linear image scale",
          cxxopts::value<float>()->default_value("0.25"))
-        ("gggs-view-cache-mb", "Packed RGBA8 GGGS host-view LRU budget (0 = no cache)",
+        ("splat-view-cache-mb", "Packed RGBA8 splat host-view LRU budget (0 = no cache)",
          cxxopts::value<std::uint64_t>()->default_value("6144"))
-        ("gggs-eval-split-every",
+        ("splat-eval-split-every",
          "Hold out every Nth view for PSNR evaluation (0 = train all)",
          cxxopts::value<unsigned>()->default_value("0"))
-        ("gggs-use-mask", "Enable pygsplat-compatible foreground-mask training",
+        ("splat-use-mask", "Enable pygsplat-compatible foreground-mask training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("gggs-alpha-mode", "Mask alpha mode: masked or transparent",
+        ("splat-alpha-mode", "Mask alpha mode: masked or transparent",
          cxxopts::value<std::string>()->default_value("transparent"))
-        ("gggs-match-alpha-weight", "Alpha BCE weight in transparent mode",
+        ("splat-match-alpha-weight", "Alpha BCE weight in transparent mode",
          cxxopts::value<float>()->default_value("0.25"))
-        ("gggs-ssim-weight", "SSIM blend in the photometric loss",
+        ("splat-ssim-weight", "SSIM blend in the photometric loss",
          cxxopts::value<float>()->default_value("0.2"))
-        ("gggs-depth-normal-weight",
-         "GGGS median-depth/raster-normal consistency weight",
+        ("splat-depth-normal-weight",
+         "Splat median-depth/raster-normal consistency weight",
          cxxopts::value<float>()->default_value("0.05"))
-        ("gggs-normal-field",
+        ("splat-normal-field",
          "Learn GaussianWrapping four-channel normal-field features",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("gggs-normal-field-weight", "Normal-field consistency loss weight",
+        ("splat-normal-field-weight", "Normal-field consistency loss weight",
          cxxopts::value<float>()->default_value("0.05"))
-        ("gggs-normal-field-depth-ratio",
+        ("splat-normal-field-depth-ratio",
          "Median-depth fraction of normal-field alignment",
          cxxopts::value<float>()->default_value("0.6"))
-        ("gggs-normal-field-from-iter", "Iteration to start normal-field loss",
+        ("splat-normal-field-from-iter", "Iteration to start normal-field loss",
          cxxopts::value<unsigned>()->default_value("8001"))
-        ("gggs-mv-geo-weight", "Multi-view depth round-trip loss weight",
+        ("splat-mv-geo-weight", "Multi-view depth round-trip loss weight",
          cxxopts::value<float>()->default_value("0.02"))
-        ("gggs-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
+        ("splat-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
          cxxopts::value<float>()->default_value("0.6"))
-        ("gggs-mv-neighbors", "Number of nearest multi-view candidates",
+        ("splat-mv-neighbors", "Number of nearest multi-view candidates",
          cxxopts::value<unsigned>()->default_value("8"))
-        ("gggs-mv-tail-interval",
+        ("splat-mv-tail-interval",
          "Multi-view sampling interval after ADC growth stops",
          cxxopts::value<unsigned>()->default_value("1"))
-        ("gggs-mv-adaptive",
+        ("splat-mv-adaptive",
          "Adapt multi-view frequency from geometry stability",
          cxxopts::value<bool>()->default_value("false")
              ->implicit_value("true"))
-        ("gggs-mv-adaptive-max-interval",
+        ("splat-mv-adaptive-max-interval",
          "Maximum geometry-stable multi-view interval",
          cxxopts::value<unsigned>()->default_value("2"))
-        ("gggs-mv-stable-refinements",
+        ("splat-mv-stable-refinements",
          "Stable refinement windows required before reducing frequency",
          cxxopts::value<unsigned>()->default_value("5"))
-        ("gggs-mv-stable-count-threshold",
+        ("splat-mv-stable-count-threshold",
          "Maximum relative Gaussian-count drift per stable window",
          cxxopts::value<float>()->default_value("0.005"))
-        ("gggs-mv-stable-churn-threshold",
+        ("splat-mv-stable-churn-threshold",
          "Maximum grow+prune fraction per stable window",
          cxxopts::value<float>()->default_value("0.01"))
-        ("gggs-mv-stable-depth-threshold",
+        ("splat-mv-stable-depth-threshold",
          "Maximum depth-consistency-rate drift per stable window",
          cxxopts::value<float>()->default_value("0.02"))
-        ("gggs-mv-min-depth-consistency",
+        ("splat-mv-min-depth-consistency",
          "Minimum depth round-trip consistency for stable geometry",
          cxxopts::value<float>()->default_value("0.5"))
-        ("gggs-mv-stable-distribution-threshold",
+        ("splat-mv-stable-distribution-threshold",
          "Maximum opacity/scale distribution drift per stable window",
          cxxopts::value<float>()->default_value("0.025"))
-        ("gggs-mv-pixel-noise", "Multi-view reprojection threshold in pixels",
+        ("splat-mv-pixel-noise", "Multi-view reprojection threshold in pixels",
          cxxopts::value<float>()->default_value("1"))
-        ("gggs-geometry-from-iter", "Iteration to start GGGS geometry loss",
+        ("splat-geometry-from-iter", "Iteration to start splat geometry loss",
          cxxopts::value<unsigned>()->default_value("3000"))
-        ("gggs-min-scale-fraction", "Minimum Gaussian scale / scene extent",
+        ("splat-min-scale-fraction", "Minimum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.0001"))
-        ("gggs-max-scale-fraction", "Maximum Gaussian scale / scene extent",
+        ("splat-max-scale-fraction", "Maximum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.002"))
-        ("gggs-max-scale-ratio",
+        ("splat-max-scale-ratio",
          "Maximum Gaussian axis ratio (0 disables; ADC+ defaults to 100)",
          cxxopts::value<float>()->default_value("0"))
-        ("gggs-constrain-scales", "Clamp sparse KNN scales to configured fractions",
+        ("splat-constrain-scales", "Clamp sparse KNN scales to configured fractions",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("gggs-strategy", "Densification: default, adc_plus, adc_igs, dense_adaptive",
+        ("splat-strategy", "Densification: default, adc_plus, adc_igs, dense_adaptive",
          cxxopts::value<std::string>()->default_value("default"))
-        ("gggs-densification", "Enable GGGS split/prune/opacity-reset",
+        ("splat-densification", "Enable splat split/prune/opacity-reset",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("gggs-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
+        ("splat-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
-        ("gggs-densification-cap", "Dynamic Gaussian hard cap",
+        ("splat-densification-cap", "Dynamic Gaussian hard cap",
          cxxopts::value<std::uint64_t>()->default_value("10000000"))
-        ("mesh", "Build TSDF mesh from GGGS (or MVS mesh with --dense)",
+        ("mesh", "Build TSDF mesh from splats (or MVS mesh with --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mvs-mesh-only",
          "External-dataset quality gate: mesh --dense-ply directly and "
-         "render source-resolution masks without GGGS",
+         "render source-resolution masks without splat training",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mask-mesh",
          "Existing PLY mesh for --mvs-mesh-only; bypasses Delaunay and renders "
@@ -680,7 +680,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["hybrid-lightglue-max-features"].as<unsigned>();
     cli.lightglue_cpu = result["lightglue-cpu"].as<bool>();
     cli.dense = result["dense"].as<bool>();
-    cli.gggs = result["gggs"].as<bool>();
+    cli.splat = result["splat"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")
         throw std::invalid_argument(
@@ -705,89 +705,89 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
-    const std::string gggs_model_text =
-        result["gggs-model"].as<std::string>();
-    if (!gggs_model_text.empty())
-        cli.gggs_model = utf8_to_path(gggs_model_text);
-    cli.gggs_iterations = result["gggs-iterations"].as<unsigned>();
-    cli.gggs_profile_cuda = result["gggs-profile-cuda"].as<bool>();
-    cli.gggs_profile_interval =
-        result["gggs-profile-interval"].as<unsigned>();
-    if (cli.gggs_profile_interval == 0 ||
-        cli.gggs_profile_interval > 1'000)
+    const std::string splat_model_text =
+        result["splat-model"].as<std::string>();
+    if (!splat_model_text.empty())
+        cli.splat_model = utf8_to_path(splat_model_text);
+    cli.splat_iterations = result["splat-iterations"].as<unsigned>();
+    cli.splat_profile_cuda = result["splat-profile-cuda"].as<bool>();
+    cli.splat_profile_interval =
+        result["splat-profile-interval"].as<unsigned>();
+    if (cli.splat_profile_interval == 0 ||
+        cli.splat_profile_interval > 1'000)
         throw std::invalid_argument(
-            "--gggs-profile-interval must be in [1, 1000]");
-    cli.gggs_max_gaussians =
-        result["gggs-max-gaussians"].as<std::uint64_t>();
-    cli.gggs_max_resolution =
-        result["gggs-max-resolution"].as<unsigned>();
-    cli.gggs_kernel_size = result["gggs-kernel-size"].as<float>();
-    cli.gggs_progressive_resolution =
-        result["gggs-progressive-resolution"].as<bool>();
-    cli.gggs_progressive_interval =
-        result["gggs-progressive-interval"].as<unsigned>();
-    cli.gggs_progressive_initial_scale =
-        result["gggs-progressive-initial-scale"].as<float>();
-    cli.gggs_view_cache_mb =
-        result["gggs-view-cache-mb"].as<std::uint64_t>();
-    cli.gggs_eval_split_every =
-        result["gggs-eval-split-every"].as<unsigned>();
-    cli.gggs_use_mask = result["gggs-use-mask"].as<bool>();
-    cli.gggs_alpha_mode = result["gggs-alpha-mode"].as<std::string>();
-    cli.gggs_match_alpha_weight =
-        result["gggs-match-alpha-weight"].as<float>();
-    cli.gggs_ssim_weight = result["gggs-ssim-weight"].as<float>();
-    cli.gggs_depth_normal_weight =
-        result["gggs-depth-normal-weight"].as<float>();
-    cli.gggs_normal_field = result["gggs-normal-field"].as<bool>();
-    cli.gggs_normal_field_weight =
-        result["gggs-normal-field-weight"].as<float>();
-    cli.gggs_normal_field_depth_ratio =
-        result["gggs-normal-field-depth-ratio"].as<float>();
-    cli.gggs_normal_field_from_iter =
-        result["gggs-normal-field-from-iter"].as<unsigned>();
-    cli.gggs_multi_view_geo_weight =
-        result["gggs-mv-geo-weight"].as<float>();
-    cli.gggs_multi_view_ncc_weight =
-        result["gggs-mv-ncc-weight"].as<float>();
-    cli.gggs_multi_view_num = result["gggs-mv-neighbors"].as<unsigned>();
-    cli.gggs_multi_view_tail_interval =
-        result["gggs-mv-tail-interval"].as<unsigned>();
-    cli.gggs_multi_view_adaptive =
-        result["gggs-mv-adaptive"].as<bool>();
-    cli.gggs_multi_view_adaptive_max_interval =
-        result["gggs-mv-adaptive-max-interval"].as<unsigned>();
-    cli.gggs_multi_view_stable_refinements =
-        result["gggs-mv-stable-refinements"].as<unsigned>();
-    cli.gggs_multi_view_stable_count_threshold =
-        result["gggs-mv-stable-count-threshold"].as<float>();
-    cli.gggs_multi_view_stable_churn_threshold =
-        result["gggs-mv-stable-churn-threshold"].as<float>();
-    cli.gggs_multi_view_stable_depth_threshold =
-        result["gggs-mv-stable-depth-threshold"].as<float>();
-    cli.gggs_multi_view_min_depth_consistency =
-        result["gggs-mv-min-depth-consistency"].as<float>();
-    cli.gggs_multi_view_stable_distribution_threshold =
-        result["gggs-mv-stable-distribution-threshold"].as<float>();
-    cli.gggs_multi_view_pixel_noise =
-        result["gggs-mv-pixel-noise"].as<float>();
-    cli.gggs_geometry_from_iter =
-        result["gggs-geometry-from-iter"].as<unsigned>();
-    cli.gggs_min_scale_fraction =
-        result["gggs-min-scale-fraction"].as<float>();
-    cli.gggs_max_scale_fraction =
-        result["gggs-max-scale-fraction"].as<float>();
-    cli.gggs_max_scale_ratio =
-        result["gggs-max-scale-ratio"].as<float>();
-    cli.gggs_max_scale_ratio_overridden =
-        result.count("gggs-max-scale-ratio") != 0;
-    cli.gggs_constrain_scales = result["gggs-constrain-scales"].as<bool>();
-    cli.gggs_strategy = result["gggs-strategy"].as<std::string>();
-    cli.gggs_densification = result["gggs-densification"].as<bool>();
-    cli.gggs_structure_freeze_iter =
-        result["gggs-structure-freeze-iter"].as<unsigned>();
-    cli.gggs_densification_cap =
-        result["gggs-densification-cap"].as<std::uint64_t>();
+            "--splat-profile-interval must be in [1, 1000]");
+    cli.splat_max_gaussians =
+        result["splat-max-gaussians"].as<std::uint64_t>();
+    cli.splat_max_resolution =
+        result["splat-max-resolution"].as<unsigned>();
+    cli.splat_kernel_size = result["splat-kernel-size"].as<float>();
+    cli.splat_progressive_resolution =
+        result["splat-progressive-resolution"].as<bool>();
+    cli.splat_progressive_interval =
+        result["splat-progressive-interval"].as<unsigned>();
+    cli.splat_progressive_initial_scale =
+        result["splat-progressive-initial-scale"].as<float>();
+    cli.splat_view_cache_mb =
+        result["splat-view-cache-mb"].as<std::uint64_t>();
+    cli.splat_eval_split_every =
+        result["splat-eval-split-every"].as<unsigned>();
+    cli.splat_use_mask = result["splat-use-mask"].as<bool>();
+    cli.splat_alpha_mode = result["splat-alpha-mode"].as<std::string>();
+    cli.splat_match_alpha_weight =
+        result["splat-match-alpha-weight"].as<float>();
+    cli.splat_ssim_weight = result["splat-ssim-weight"].as<float>();
+    cli.splat_depth_normal_weight =
+        result["splat-depth-normal-weight"].as<float>();
+    cli.splat_normal_field = result["splat-normal-field"].as<bool>();
+    cli.splat_normal_field_weight =
+        result["splat-normal-field-weight"].as<float>();
+    cli.splat_normal_field_depth_ratio =
+        result["splat-normal-field-depth-ratio"].as<float>();
+    cli.splat_normal_field_from_iter =
+        result["splat-normal-field-from-iter"].as<unsigned>();
+    cli.splat_multi_view_geo_weight =
+        result["splat-mv-geo-weight"].as<float>();
+    cli.splat_multi_view_ncc_weight =
+        result["splat-mv-ncc-weight"].as<float>();
+    cli.splat_multi_view_num = result["splat-mv-neighbors"].as<unsigned>();
+    cli.splat_multi_view_tail_interval =
+        result["splat-mv-tail-interval"].as<unsigned>();
+    cli.splat_multi_view_adaptive =
+        result["splat-mv-adaptive"].as<bool>();
+    cli.splat_multi_view_adaptive_max_interval =
+        result["splat-mv-adaptive-max-interval"].as<unsigned>();
+    cli.splat_multi_view_stable_refinements =
+        result["splat-mv-stable-refinements"].as<unsigned>();
+    cli.splat_multi_view_stable_count_threshold =
+        result["splat-mv-stable-count-threshold"].as<float>();
+    cli.splat_multi_view_stable_churn_threshold =
+        result["splat-mv-stable-churn-threshold"].as<float>();
+    cli.splat_multi_view_stable_depth_threshold =
+        result["splat-mv-stable-depth-threshold"].as<float>();
+    cli.splat_multi_view_min_depth_consistency =
+        result["splat-mv-min-depth-consistency"].as<float>();
+    cli.splat_multi_view_stable_distribution_threshold =
+        result["splat-mv-stable-distribution-threshold"].as<float>();
+    cli.splat_multi_view_pixel_noise =
+        result["splat-mv-pixel-noise"].as<float>();
+    cli.splat_geometry_from_iter =
+        result["splat-geometry-from-iter"].as<unsigned>();
+    cli.splat_min_scale_fraction =
+        result["splat-min-scale-fraction"].as<float>();
+    cli.splat_max_scale_fraction =
+        result["splat-max-scale-fraction"].as<float>();
+    cli.splat_max_scale_ratio =
+        result["splat-max-scale-ratio"].as<float>();
+    cli.splat_max_scale_ratio_overridden =
+        result.count("splat-max-scale-ratio") != 0;
+    cli.splat_constrain_scales = result["splat-constrain-scales"].as<bool>();
+    cli.splat_strategy = result["splat-strategy"].as<std::string>();
+    cli.splat_densification = result["splat-densification"].as<bool>();
+    cli.splat_structure_freeze_iter =
+        result["splat-structure-freeze-iter"].as<unsigned>();
+    cli.splat_densification_cap =
+        result["splat-densification-cap"].as<std::uint64_t>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mvs_mesh_only = result["mvs-mesh-only"].as<bool>();
     const std::string mask_mesh_text = result["mask-mesh"].as<std::string>();
@@ -879,18 +879,18 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.delight) cli.texture = true;
     if (cli.texture) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
-    if (!cli.gggs_model.empty()) cli.gggs = true;
+    if (!cli.splat_model.empty()) cli.splat = true;
     // An explicitly selected capture mode is the product-level full rebuild
     // preset. Omitting it keeps the low-level SfM-only developer workflow.
     if (result.count("capture-mode") != 0) {
-        cli.gggs = true;
+        cli.splat = true;
         cli.mesh = true;
     }
     if (!cli.mask_mesh.empty()) cli.mvs_mesh_only = true;
     if (cli.mvs_mesh_only) cli.mesh = true;
-    // GGGS extracts its mesh from learned median depth through TSDF and does
-    // not require PatchMatch or an MVS dense cloud.
-    if (cli.mesh && !cli.gggs) cli.dense = true;
+    // The GGGS-derived path extracts its mesh from learned median depth
+    // through TSDF and does not require PatchMatch or an MVS dense cloud.
+    if (cli.mesh && !cli.splat) cli.dense = true;
     const bool external_splat_dataset = !cli.splat_dataset.empty();
     if (cli.mvs_mesh_only) {
         if (!external_splat_dataset ||
@@ -898,101 +898,101 @@ ReconstructCli parse_cli(int argc, char** argv) {
             throw std::invalid_argument(
                 "--mvs-mesh-only requires --splat-dataset and either "
                 "--dense-ply or --mask-mesh");
-        cli.gggs = false;
+        cli.splat = false;
     } else if (external_splat_dataset || !cli.dense_ply.empty()) {
-        cli.gggs = true;
+        cli.splat = true;
     }
     // Internal SfM now follows the same sparse initialization path as direct
     // COLMAP/OpenMVS datasets. --dense remains an explicit MVS diagnostic.
     if (external_splat_dataset && cli.texture)
         throw std::invalid_argument(
-            "--texture is not yet available in the direct external GGGS path");
-#if !defined(AETHERSCAN_HAS_GGGS)
-    if (cli.gggs || external_splat_dataset) {
+            "--texture is not yet available in the direct external splat path");
+#if !defined(AETHERSCAN_HAS_SPLAT)
+    if (cli.splat || external_splat_dataset) {
         throw std::invalid_argument(
-            "--gggs requires CUDA and AETHERSCAN_ENABLE_GGGS=ON");
+            "--splat requires CUDA and AETHERSCAN_ENABLE_SPLAT=ON");
     }
 #else
     static_cast<void>(
         aetherscan::splat::parse_dataset_format(cli.splat_format));
 #endif
-    if (cli.gggs_iterations == 0)
-        throw std::invalid_argument("--gggs-iterations must be positive");
-    if (!std::isfinite(cli.gggs_kernel_size) ||
-        cli.gggs_kernel_size < 0.F)
+    if (cli.splat_iterations == 0)
+        throw std::invalid_argument("--splat-iterations must be positive");
+    if (!std::isfinite(cli.splat_kernel_size) ||
+        cli.splat_kernel_size < 0.F)
         throw std::invalid_argument(
-            "--gggs-kernel-size must be finite and non-negative");
-    if (cli.gggs_alpha_mode != "masked" &&
-        cli.gggs_alpha_mode != "transparent")
+            "--splat-kernel-size must be finite and non-negative");
+    if (cli.splat_alpha_mode != "masked" &&
+        cli.splat_alpha_mode != "transparent")
         throw std::invalid_argument(
-            "--gggs-alpha-mode must be masked or transparent");
-    if (cli.gggs_match_alpha_weight < 0.F)
+            "--splat-alpha-mode must be masked or transparent");
+    if (cli.splat_match_alpha_weight < 0.F)
         throw std::invalid_argument(
-            "--gggs-match-alpha-weight must be non-negative");
-    if (cli.gggs_ssim_weight < 0.F || cli.gggs_ssim_weight > 1.F)
-        throw std::invalid_argument("--gggs-ssim-weight must be in [0,1]");
-    if (cli.gggs_depth_normal_weight < 0.F)
+            "--splat-match-alpha-weight must be non-negative");
+    if (cli.splat_ssim_weight < 0.F || cli.splat_ssim_weight > 1.F)
+        throw std::invalid_argument("--splat-ssim-weight must be in [0,1]");
+    if (cli.splat_depth_normal_weight < 0.F)
         throw std::invalid_argument(
-            "--gggs-depth-normal-weight must be non-negative");
-    if (!std::isfinite(cli.gggs_normal_field_weight) ||
-        cli.gggs_normal_field_weight < 0.F)
+            "--splat-depth-normal-weight must be non-negative");
+    if (!std::isfinite(cli.splat_normal_field_weight) ||
+        cli.splat_normal_field_weight < 0.F)
         throw std::invalid_argument(
-            "--gggs-normal-field-weight must be finite and non-negative");
-    if (!std::isfinite(cli.gggs_normal_field_depth_ratio) ||
-        cli.gggs_normal_field_depth_ratio < 0.F ||
-        cli.gggs_normal_field_depth_ratio > 1.F)
+            "--splat-normal-field-weight must be finite and non-negative");
+    if (!std::isfinite(cli.splat_normal_field_depth_ratio) ||
+        cli.splat_normal_field_depth_ratio < 0.F ||
+        cli.splat_normal_field_depth_ratio > 1.F)
         throw std::invalid_argument(
-            "--gggs-normal-field-depth-ratio must be in [0,1]");
-    if (cli.gggs_multi_view_geo_weight < 0.F ||
-        cli.gggs_multi_view_ncc_weight < 0.F)
+            "--splat-normal-field-depth-ratio must be in [0,1]");
+    if (cli.splat_multi_view_geo_weight < 0.F ||
+        cli.splat_multi_view_ncc_weight < 0.F)
         throw std::invalid_argument(
-            "GGGS multi-view loss weights must be non-negative");
-    if (cli.gggs_multi_view_num == 0)
-        throw std::invalid_argument("--gggs-mv-neighbors must be positive");
-    if (cli.gggs_multi_view_tail_interval == 0)
+            "Splat multi-view loss weights must be non-negative");
+    if (cli.splat_multi_view_num == 0)
+        throw std::invalid_argument("--splat-mv-neighbors must be positive");
+    if (cli.splat_multi_view_tail_interval == 0)
         throw std::invalid_argument(
-            "--gggs-mv-tail-interval must be positive");
-    if (cli.gggs_multi_view_adaptive_max_interval == 0 ||
-        cli.gggs_multi_view_adaptive_max_interval > 16)
+            "--splat-mv-tail-interval must be positive");
+    if (cli.splat_multi_view_adaptive_max_interval == 0 ||
+        cli.splat_multi_view_adaptive_max_interval > 16)
         throw std::invalid_argument(
-            "--gggs-mv-adaptive-max-interval must be in [1,16]");
-    if (cli.gggs_multi_view_stable_refinements == 0)
+            "--splat-mv-adaptive-max-interval must be in [1,16]");
+    if (cli.splat_multi_view_stable_refinements == 0)
         throw std::invalid_argument(
-            "--gggs-mv-stable-refinements must be positive");
+            "--splat-mv-stable-refinements must be positive");
     const auto valid_unit_threshold = [](const float value) {
         return std::isfinite(value) && value >= 0.F && value <= 1.F;
     };
     if (!valid_unit_threshold(
-            cli.gggs_multi_view_stable_count_threshold) ||
+            cli.splat_multi_view_stable_count_threshold) ||
         !valid_unit_threshold(
-            cli.gggs_multi_view_stable_churn_threshold) ||
+            cli.splat_multi_view_stable_churn_threshold) ||
         !valid_unit_threshold(
-            cli.gggs_multi_view_stable_depth_threshold) ||
+            cli.splat_multi_view_stable_depth_threshold) ||
         !valid_unit_threshold(
-            cli.gggs_multi_view_min_depth_consistency) ||
+            cli.splat_multi_view_min_depth_consistency) ||
         !valid_unit_threshold(
-            cli.gggs_multi_view_stable_distribution_threshold))
+            cli.splat_multi_view_stable_distribution_threshold))
         throw std::invalid_argument(
-            "GGGS adaptive multi-view thresholds must be finite in [0,1]");
-    if (!(cli.gggs_multi_view_pixel_noise > 0.F))
-        throw std::invalid_argument("--gggs-mv-pixel-noise must be positive");
-    if (cli.gggs_min_scale_fraction <= 0.F ||
-        cli.gggs_max_scale_fraction < cli.gggs_min_scale_fraction)
+            "Splat adaptive multi-view thresholds must be finite in [0,1]");
+    if (!(cli.splat_multi_view_pixel_noise > 0.F))
+        throw std::invalid_argument("--splat-mv-pixel-noise must be positive");
+    if (cli.splat_min_scale_fraction <= 0.F ||
+        cli.splat_max_scale_fraction < cli.splat_min_scale_fraction)
         throw std::invalid_argument(
-            "GGGS scale fractions must satisfy 0 < min <= max");
-    if (cli.gggs_max_scale_ratio != 0.F && cli.gggs_max_scale_ratio < 1.F)
+            "Splat scale fractions must satisfy 0 < min <= max");
+    if (cli.splat_max_scale_ratio != 0.F && cli.splat_max_scale_ratio < 1.F)
         throw std::invalid_argument(
-            "--gggs-max-scale-ratio must be 0 or >= 1");
-    if (cli.gggs_strategy != "default" &&
-        cli.gggs_strategy != "adc_plus" &&
-        cli.gggs_strategy != "adc_igs" &&
-        cli.gggs_strategy != "dense_adaptive")
+            "--splat-max-scale-ratio must be 0 or >= 1");
+    if (cli.splat_strategy != "default" &&
+        cli.splat_strategy != "adc_plus" &&
+        cli.splat_strategy != "adc_igs" &&
+        cli.splat_strategy != "dense_adaptive")
         throw std::invalid_argument(
-            "--gggs-strategy must be default, adc_plus, adc_igs, or "
+            "--splat-strategy must be default, adc_plus, adc_igs, or "
             "dense_adaptive");
-    if (cli.gggs_densification_cap == 0)
+    if (cli.splat_densification_cap == 0)
         throw std::invalid_argument(
-            "--gggs-densification-cap must be positive");
+            "--splat-densification-cap must be positive");
 #if !defined(AETHERSCAN_HAS_TEXTURE)
     if (cli.texture || cli.delight) {
         throw std::invalid_argument(
@@ -1011,9 +1011,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument(
             "--mesh-method must be auto, tsdf, delaunay, or pam");
     }
-    if (cli.mesh_method == "pam" && !cli.gggs)
+    if (cli.mesh_method == "pam" && !cli.splat)
         throw std::invalid_argument(
-            "--mesh-method pam requires GGGS training or --gggs-model");
+            "--mesh-method pam requires splat training or --splat-model");
     if (cli.pam_max_points < 4 || cli.pam_pivot_max_points < 4 ||
         cli.pam_neighbors == 0 ||
         cli.pam_points_per_tetrahedron == 0 ||
@@ -1551,57 +1551,57 @@ bool repair_and_decimate_mesh(
 }
 #endif
 
-#if defined(AETHERSCAN_HAS_GGGS)
-std::optional<aetherscan::mvs::Mesh> run_gggs_training(
+#if defined(AETHERSCAN_HAS_SPLAT)
+std::optional<aetherscan::mvs::Mesh> run_splat_training(
     const aetherscan::mvs::MvsScene& scene,
     const ReconstructCli& cli,
     const bool dense_input,
     const aetherscan::mvs::DensifyOptions* mesh_options = nullptr,
     const std::filesystem::path& generated_mask_dir = {}) {
     aetherscan::splat::TrainingOptions options;
-    options.iterations = cli.gggs_iterations;
+    options.iterations = cli.splat_iterations;
     options.max_gaussians = static_cast<std::size_t>(
         std::min<std::uint64_t>(
-            cli.gggs_max_gaussians,
+            cli.splat_max_gaussians,
             (std::numeric_limits<std::size_t>::max)()));
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;
     options.use_source_resolution = true;
-    options.max_image_dimension = cli.gggs_max_resolution;
-    options.kernel_size = cli.gggs_kernel_size;
-    options.progressive_resolution = cli.gggs_progressive_resolution;
+    options.max_image_dimension = cli.splat_max_resolution;
+    options.kernel_size = cli.splat_kernel_size;
+    options.progressive_resolution = cli.splat_progressive_resolution;
     options.progressive_resolution_interval =
-        cli.gggs_progressive_interval;
+        cli.splat_progressive_interval;
     options.progressive_initial_scale =
-        std::clamp(cli.gggs_progressive_initial_scale, 1e-3F, 1.F);
-    options.evaluation_split_every = cli.gggs_eval_split_every;
+        std::clamp(cli.splat_progressive_initial_scale, 1e-3F, 1.F);
+    options.evaluation_split_every = cli.splat_eval_split_every;
     constexpr std::uint64_t bytes_per_megabyte = 1024ULL * 1024ULL;
     options.training_view_cache_bytes = static_cast<std::size_t>(
         std::min<std::uint64_t>(
-            cli.gggs_view_cache_mb >
+            cli.splat_view_cache_mb >
                     (std::numeric_limits<std::uint64_t>::max)() /
                         bytes_per_megabyte
                 ? (std::numeric_limits<std::uint64_t>::max)()
-                : cli.gggs_view_cache_mb * bytes_per_megabyte,
+                : cli.splat_view_cache_mb * bytes_per_megabyte,
             (std::numeric_limits<std::size_t>::max)()));
     for (const unsigned milestone : {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
         if (milestone < options.iterations)
             options.evaluation_iterations.push_back(milestone);
     options.densification_cap = static_cast<std::size_t>(
         std::min<std::uint64_t>(
-            cli.gggs_densification_cap,
+            cli.splat_densification_cap,
             (std::numeric_limits<std::size_t>::max)()));
     if (!dense_input)
         options.max_gaussians = options.max_gaussians == 0
             ? options.densification_cap
             : (std::min)(options.max_gaussians, options.densification_cap);
-    if (cli.gggs_strategy == "adc_plus")
+    if (cli.splat_strategy == "adc_plus")
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::adc_plus;
-    else if (cli.gggs_strategy == "adc_igs")
+    else if (cli.splat_strategy == "adc_igs")
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::adc_igs;
-    else if (cli.gggs_strategy == "dense_adaptive")
+    else if (cli.splat_strategy == "dense_adaptive")
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::dense_adaptive;
     else
@@ -1613,10 +1613,10 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     if (!dense_input && options.densification_strategy ==
             aetherscan::splat::DensificationStrategy::dense_adaptive)
         throw std::invalid_argument(
-            "--gggs-strategy dense_adaptive requires dense MVS input");
+            "--splat-strategy dense_adaptive requires dense MVS input");
     options.enable_densification =
-        cli.gggs_densification && (!dense_input || dense_adaptive);
-    options.structure_freeze_iter = cli.gggs_structure_freeze_iter;
+        cli.splat_densification && (!dense_input || dense_adaptive);
+    options.structure_freeze_iter = cli.splat_structure_freeze_iter;
     if (dense_adaptive) {
         options.max_gaussians = options.max_gaussians == 0
             ? options.densification_cap
@@ -1683,7 +1683,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
             ? 0.0
             : 1.0 / static_cast<double>(projected_mask_pixels);
         aetherscan::core::Logger::instance().info(
-            "gggs projected mask audit: pixels=", projected_mask_pixels,
+            "splat projected mask audit: pixels=", projected_mask_pixels,
             " nonzero_fraction=",
             projected_mask_nonzero * inverse_pixels,
             " foreground_fraction=",
@@ -1693,71 +1693,71 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     }
     // Respect an explicit no-mask training request. Automatically generated
     // masks are training inputs only and never constrain TSDF independently.
-    options.use_mask = cli.gggs_use_mask &&
+    options.use_mask = cli.splat_use_mask &&
         (all_views_have_projected_masks || !generated_mask_dir.empty() ||
          !cli.masks_dir.empty());
     options.mask_dir = generated_mask_dir.empty()
         ? cli.masks_dir
         : generated_mask_dir;
-    options.alpha_mode = cli.gggs_alpha_mode == "masked"
+    options.alpha_mode = cli.splat_alpha_mode == "masked"
         ? aetherscan::splat::AlphaMode::masked
         : aetherscan::splat::AlphaMode::transparent;
-    options.match_alpha_weight = cli.gggs_match_alpha_weight;
-    options.ssim_weight = cli.gggs_ssim_weight;
-    options.use_normal_field = cli.gggs_normal_field;
-    options.normal_field_weight = cli.gggs_normal_field_weight;
+    options.match_alpha_weight = cli.splat_match_alpha_weight;
+    options.ssim_weight = cli.splat_ssim_weight;
+    options.use_normal_field = cli.splat_normal_field;
+    options.normal_field_weight = cli.splat_normal_field_weight;
     options.normal_field_depth_ratio =
-        cli.gggs_normal_field_depth_ratio;
-    options.normal_field_from_iter = cli.gggs_normal_field_from_iter;
-    options.profile_cuda = cli.gggs_profile_cuda;
-    options.cuda_profile_interval = cli.gggs_profile_interval;
-    options.minimum_scale_fraction = cli.gggs_min_scale_fraction;
-    options.maximum_scale_fraction = cli.gggs_max_scale_fraction;
+        cli.splat_normal_field_depth_ratio;
+    options.normal_field_from_iter = cli.splat_normal_field_from_iter;
+    options.profile_cuda = cli.splat_profile_cuda;
+    options.cuda_profile_interval = cli.splat_profile_interval;
+    options.minimum_scale_fraction = cli.splat_min_scale_fraction;
+    options.maximum_scale_fraction = cli.splat_max_scale_fraction;
     // pygsplat leaves Gaussian scales unconstrained for dense point-cloud
     // initialization. Retain the safety clamp only when explicitly requested;
     // forcing it for every dense input clips tangential splats and removes
     // legitimate surface coverage in sparsely sampled detail regions.
-    options.constrain_scale_range = cli.gggs_constrain_scales;
+    options.constrain_scale_range = cli.splat_constrain_scales;
     options.max_scale_ratio =
         !dense_input &&
                 options.densification_strategy ==
                     aetherscan::splat::DensificationStrategy::adc_plus &&
-                !cli.gggs_max_scale_ratio_overridden
+                !cli.splat_max_scale_ratio_overridden
             ? 0.F
-            : cli.gggs_max_scale_ratio;
+            : cli.splat_max_scale_ratio;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
     options.use_depth_normal_loss = cli.mesh &&
-        cli.gggs_depth_normal_weight > 0.F;
-    options.depth_normal_weight = cli.gggs_depth_normal_weight;
+        cli.splat_depth_normal_weight > 0.F;
+    options.depth_normal_weight = cli.splat_depth_normal_weight;
     options.multi_view_geo_weight = cli.mesh
-        ? cli.gggs_multi_view_geo_weight
+        ? cli.splat_multi_view_geo_weight
         : 0.F;
     options.multi_view_ncc_weight = cli.mesh
-        ? cli.gggs_multi_view_ncc_weight
+        ? cli.splat_multi_view_ncc_weight
         : 0.F;
-    options.multi_view_num = cli.gggs_multi_view_num;
+    options.multi_view_num = cli.splat_multi_view_num;
     options.multi_view_tail_interval =
-        cli.gggs_multi_view_tail_interval;
+        cli.splat_multi_view_tail_interval;
     options.multi_view_adaptive_frequency =
-        cli.gggs_multi_view_adaptive;
+        cli.splat_multi_view_adaptive;
     options.multi_view_adaptive_max_interval =
-        cli.gggs_multi_view_adaptive_max_interval;
+        cli.splat_multi_view_adaptive_max_interval;
     options.multi_view_adaptive_stable_refinements =
-        cli.gggs_multi_view_stable_refinements;
+        cli.splat_multi_view_stable_refinements;
     options.multi_view_adaptive_count_threshold =
-        cli.gggs_multi_view_stable_count_threshold;
+        cli.splat_multi_view_stable_count_threshold;
     options.multi_view_adaptive_churn_threshold =
-        cli.gggs_multi_view_stable_churn_threshold;
+        cli.splat_multi_view_stable_churn_threshold;
     options.multi_view_adaptive_depth_threshold =
-        cli.gggs_multi_view_stable_depth_threshold;
+        cli.splat_multi_view_stable_depth_threshold;
     options.multi_view_adaptive_min_depth_consistency =
-        cli.gggs_multi_view_min_depth_consistency;
+        cli.splat_multi_view_min_depth_consistency;
     options.multi_view_adaptive_distribution_threshold =
-        cli.gggs_multi_view_stable_distribution_threshold;
+        cli.splat_multi_view_stable_distribution_threshold;
     options.multi_view_pixel_noise_threshold =
-        cli.gggs_multi_view_pixel_noise;
-    options.depth_normal_from_iter = cli.gggs_geometry_from_iter;
+        cli.splat_multi_view_pixel_noise;
+    options.depth_normal_from_iter = cli.splat_geometry_from_iter;
     // Keep structural parameters trainable while GGGS geometry supervision is
     // active. The 3k schedule now matches pygsplat's complete loss stack.
     if ((options.use_depth_normal_loss ||
@@ -1766,9 +1766,9 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         options.dense_structure_freeze_iter = 0;
     const char* effective_strategy = !options.enable_densification
         ? "disabled"
-        : cli.gggs_strategy.c_str();
+        : cli.splat_strategy.c_str();
     aetherscan::core::Logger::instance().info(
-        "gggs training: iterations=", options.iterations,
+        "splat training: iterations=", options.iterations,
         " input=", dense_input ? "dense_points" : "sparse_points",
         " input_points=", scene.dense_cloud.points.size(),
         " max_initial_gaussians=", options.max_gaussians,
@@ -1782,7 +1782,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         " projected_mask_views=", projected_mask_views, '/',
         scene.views.size(),
         " mask_dir=", options.mask_dir,
-        " alpha_mode=", cli.gggs_alpha_mode,
+        " alpha_mode=", cli.splat_alpha_mode,
         " match_alpha_weight=", options.match_alpha_weight,
         " background_noise=", options.background_noise_strength,
         " cuda_profile=", options.profile_cuda,
@@ -1859,13 +1859,13 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
             double masked_psnr_sum = 0.0;
             for (const std::size_t view_index : evaluation_views) {
                 const auto render_path = out_dir /
-                    (cli.output.stem().string() + "_gggs_iter_" +
+                    (cli.output.stem().string() + "_splat_iter_" +
                      std::to_string(iteration) + "_view_" +
                      std::to_string(view_index) + ".png");
                 const auto metrics = aetherscan::splat::render_evaluation_png(
                     model, scene.views[view_index], render_path, options);
                 aetherscan::core::Logger::instance().info(
-                    "gggs_eval_iteration=", iteration,
+                    "splat_eval_iteration=", iteration,
                     " view=", view_index,
                     " foreground_psnr=", metrics.psnr,
                     " masked_psnr=", metrics.masked_psnr,
@@ -1877,7 +1877,7 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
                 masked_psnr_sum += metrics.masked_psnr;
             }
             aetherscan::core::Logger::instance().info(
-                "gggs_eval_iteration=", iteration,
+                "splat_eval_iteration=", iteration,
                 " views=", evaluation_views.size(),
                 " average_psnr=", psnr_sum / evaluation_views.size(),
                 " average_masked_psnr=",
@@ -1885,15 +1885,15 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         };
     const auto started = std::chrono::steady_clock::now();
     aetherscan::splat::GaussianModel gaussians;
-    if (!cli.gggs_model.empty()) {
+    if (!cli.splat_model.empty()) {
         gaussians =
-            aetherscan::splat::load_gaussians_ply(cli.gggs_model);
+            aetherscan::splat::load_gaussians_ply(cli.splat_model);
     } else {
         gaussians = aetherscan::splat::Trainer(options).train(
             scene,
             [](const aetherscan::splat::TrainingProgress& progress) {
                 aetherscan::core::Logger::instance().info(
-                    "gggs iteration=", progress.iteration, '/',
+                    "splat iteration=", progress.iteration, '/',
                     progress.total_iterations,
                     " view=", progress.view_index,
                     " gaussians=", progress.gaussian_count,
@@ -1925,21 +1925,21 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
             },
             evaluate);
     }
-    const auto ply = cli.gggs_model.empty()
-        ? out_dir / (cli.output.stem().string() + "_gggs.ply")
-        : cli.gggs_model;
-    if (cli.gggs_model.empty())
+    const auto ply = cli.splat_model.empty()
+        ? out_dir / (cli.output.stem().string() + "_splat.ply")
+        : cli.splat_model;
+    if (cli.splat_model.empty())
         aetherscan::splat::save_gaussians_ply(gaussians, ply);
     double final_psnr_sum = 0.0;
     double final_masked_psnr_sum = 0.0;
     for (const std::size_t view_index : evaluation_views) {
         const auto render_path = out_dir /
-            (cli.output.stem().string() + "_gggs_view_" +
+            (cli.output.stem().string() + "_splat_view_" +
              std::to_string(view_index) + ".png");
         const auto metrics = aetherscan::splat::render_evaluation_png(
             gaussians, scene.views[view_index], render_path, options);
         aetherscan::core::Logger::instance().info(
-            "gggs_render=", render_path,
+            "splat_render=", render_path,
             " view=", view_index,
             " foreground_psnr=", metrics.psnr,
             " masked_psnr=", metrics.masked_psnr,
@@ -1950,16 +1950,16 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         final_masked_psnr_sum += metrics.masked_psnr;
     }
     aetherscan::core::Logger::instance().info(
-        "gggs_final_evaluation_views=", evaluation_views.size(),
+        "splat_final_evaluation_views=", evaluation_views.size(),
         " average_psnr=", final_psnr_sum / evaluation_views.size(),
         " average_masked_psnr=",
         final_masked_psnr_sum / evaluation_views.size());
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
     aetherscan::core::Logger::instance().info(
-        "gggs_ply=", ply,
+        "splat_ply=", ply,
         " gaussians=", gaussians.size(),
-        cli.gggs_model.empty() ? " training_s=" : " model_load_s=",
+        cli.splat_model.empty() ? " training_s=" : " model_load_s=",
         elapsed);
     if (!cli.mesh) return std::nullopt;
     if (cli.mesh_method == "pam") {
@@ -2016,24 +2016,24 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     }
     if (mesh_options == nullptr)
         throw std::invalid_argument(
-            "GGGS mesh extraction requires configured MVS mesh options");
+            "Splat mesh extraction requires configured MVS mesh options");
 
-    aetherscan::splat::GggsMeshOptions extraction_options;
+    aetherscan::splat::SplatMeshOptions extraction_options;
     extraction_options.fusion = *mesh_options;
     extraction_options.fusion.build_mesh = true;
     extraction_options.diagnostics_dir = out_dir;
     const auto mesh_started = std::chrono::steady_clock::now();
-    auto extraction = aetherscan::splat::extract_gggs_mesh(
+    auto extraction = aetherscan::splat::extract_splat_mesh(
         gaussians, scene, options, extraction_options);
     const auto surface_ply = out_dir /
-        (cli.output.stem().string() + "_gggs_surface.ply");
+        (cli.output.stem().string() + "_splat_surface.ply");
     if (!extraction.surface_cloud.points.empty())
         aetherscan::mvs::save_dense_ply(
             extraction.surface_cloud, surface_ply);
     const double mesh_elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - mesh_started).count();
     aetherscan::core::Logger::instance().info(
-        "gggs_surface_ply=",
+        "splat_surface_ply=",
         extraction.surface_cloud.points.empty()
             ? std::filesystem::path{"disabled_for_tsdf"}
             : surface_ply,
@@ -2072,7 +2072,7 @@ int main(int argc, char** argv) {
             "AetherScan started: mode=", cli.mode, " images_dir=", cli.images_dir,
             " output=", cli.output, " log=", log_path);
 
-#if defined(AETHERSCAN_HAS_GGGS)
+#if defined(AETHERSCAN_HAS_SPLAT)
         if (!cli.splat_dataset.empty()) {
             aetherscan::splat::DatasetLoadRequest request;
             request.source = cli.splat_dataset;
@@ -2171,7 +2171,7 @@ int main(int argc, char** argv) {
 #endif
                 return 0;
             }
-            auto mesh = run_gggs_training(
+            auto mesh = run_splat_training(
                 loaded.scene, cli, loaded.initial_points_dense,
                 cli.mesh ? &mesh_options : nullptr);
             if (mesh) {
@@ -2181,7 +2181,7 @@ int main(int argc, char** argv) {
                         *mesh, cli.mesh_target_faces, cli.mesh_remesh);
 #endif
                 const auto mesh_path = cli.output.parent_path() /
-                    (cli.output.stem().string() + "_gggs_mesh.ply");
+                    (cli.output.stem().string() + "_splat_mesh.ply");
                 aetherscan::mvs::save_mesh_ply(*mesh, mesh_path);
                 if (cli.mesh_obj)
                     aetherscan::mvs::save_mesh_obj(
@@ -2275,8 +2275,8 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("Output must end with .mvs or .ply");
         }
 
-#if defined(AETHERSCAN_HAS_GGGS)
-        if (cli.gggs && !cli.dense) {
+#if defined(AETHERSCAN_HAS_SPLAT)
+        if (cli.splat && !cli.dense) {
             aetherscan::mvs::DensifyOptions mesh_options;
             aetherscan::mvs::apply_quality_preset(
                 mesh_options, cli.dense_quality);
@@ -2301,14 +2301,14 @@ int main(int argc, char** argv) {
             mesh_options.mesh_tsdf_smooth_mu = cli.mesh_tsdf_smooth_mu;
             mesh_options.thread_count = scene.thread_count;
 
-            auto gggs_scene =
+            auto splat_scene =
                 aetherscan::mvs::build_mvs_scene(scene, mesh_options);
             aetherscan::splat::initialize_scene_from_sparse_points(
-                gggs_scene);
+                splat_scene);
             if (cli.capture_mode == "scene")
-                gggs_scene.subject_bounds = {};
+                splat_scene.subject_bounds = {};
             if (cli.capture_mode == "object" &&
-                !gggs_scene.subject_bounds.valid)
+                !splat_scene.subject_bounds.valid)
                 throw std::runtime_error(
                     "Could not estimate SubjectBounds from SfM sparse points");
 
@@ -2317,17 +2317,17 @@ int main(int argc, char** argv) {
                 ? std::filesystem::current_path()
                 : cli.output.parent_path();
             std::filesystem::path bounds_path;
-            if (gggs_scene.subject_bounds.valid) {
+            if (splat_scene.subject_bounds.valid) {
                 bounds_path =
                     out_dir /
                     (cli.output.stem().string() + "_subject_bounds.txt");
                 aetherscan::mvs::save_subject_bounds(
-                    gggs_scene.subject_bounds, bounds_path);
+                    splat_scene.subject_bounds, bounds_path);
             }
             aetherscan::core::Logger::instance().info(
-                "gggs_input=sfm_sparse",
+                "splat_input=sfm_sparse",
                 " initial_points=",
-                gggs_scene.dense_cloud.points.size(),
+                splat_scene.dense_cloud.points.size(),
                 " capture_mode=", cli.capture_mode,
                 " subject_bounds=",
                 bounds_path.empty()
@@ -2335,8 +2335,8 @@ int main(int argc, char** argv) {
                     : bounds_path.string(),
                 " patchmatch=false");
 
-            auto mesh = run_gggs_training(
-                gggs_scene, cli, false,
+            auto mesh = run_splat_training(
+                splat_scene, cli, false,
                 cli.mesh ? &mesh_options : nullptr,
                 cli.masks_dir);
             if (mesh) {
@@ -2345,20 +2345,20 @@ int main(int argc, char** argv) {
                     repair_and_decimate_mesh(
                         *mesh, cli.mesh_target_faces, cli.mesh_remesh);
 #endif
-                gggs_scene.mesh = std::move(*mesh);
+                splat_scene.mesh = std::move(*mesh);
                 const auto mesh_path =
                     out_dir /
-                    (cli.output.stem().string() + "_gggs_mesh.ply");
+                    (cli.output.stem().string() + "_splat_mesh.ply");
                 aetherscan::mvs::save_mesh_ply(
-                    gggs_scene.mesh, mesh_path);
+                    splat_scene.mesh, mesh_path);
                 if (cli.mesh_obj)
                     aetherscan::mvs::save_mesh_obj(
-                        gggs_scene.mesh,
+                        splat_scene.mesh,
                         mesh_path.parent_path() /
                             (mesh_path.stem().string() + ".obj"));
                 aetherscan::core::Logger::instance().info(
                     "mesh_ply=", mesh_path,
-                    " faces=", gggs_scene.mesh.faces.size());
+                    " faces=", splat_scene.mesh.faces.size());
 
 #if defined(AETHERSCAN_HAS_TEXTURE)
                 if (cli.texture) {
@@ -2372,7 +2372,7 @@ int main(int argc, char** argv) {
                         out_dir /
                         (cli.output.stem().string() + "_textured");
                     aetherscan::texture::bake_and_export(
-                        gggs_scene, textured_stem, tex_opts);
+                        splat_scene, textured_stem, tex_opts);
                 }
 #endif
             }
@@ -2418,10 +2418,10 @@ int main(int argc, char** argv) {
             densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
             densify_opts.patchmatch_concurrent_views =
                 cli.patchmatch_concurrent_views;
-            // MVS is now an explicit diagnostic path. Product GGGS training
+            // MVS is now an explicit diagnostic path. Product splat training
             // starts directly from SfM sparse points and never depends on an
             // MVS-derived spatial crop or foreground mask.
-            densify_opts.build_mesh = cli.texture || (!cli.gggs && cli.mesh);
+            densify_opts.build_mesh = cli.texture || (!cli.splat && cli.mesh);
             if (!densify_opts.build_mesh) {
                 densify_opts.mesh_method = aetherscan::mvs::MeshMethod::none;
             } else if (cli.mesh_method == "tsdf") {
@@ -2518,21 +2518,21 @@ int main(int argc, char** argv) {
                     " faces=", mvs_scene.mesh.faces.size());
             }
 
-#if defined(AETHERSCAN_HAS_GGGS)
-            if (cli.gggs) {
-                auto gggs_mesh_options = densify_opts;
-                gggs_mesh_options.mesh_method =
+#if defined(AETHERSCAN_HAS_SPLAT)
+            if (cli.splat) {
+                auto splat_mesh_options = densify_opts;
+                splat_mesh_options.mesh_method =
                     aetherscan::mvs::MeshMethod::tsdf;
-                auto gggs_mesh = run_gggs_training(
-                    mvs_scene, cli, true, &gggs_mesh_options,
+                auto splat_mesh = run_splat_training(
+                    mvs_scene, cli, true, &splat_mesh_options,
                     effective_mask_dir);
-                if (gggs_mesh) mvs_scene.mesh = std::move(*gggs_mesh);
+                if (splat_mesh) mvs_scene.mesh = std::move(*splat_mesh);
             }
 #endif
 
             if (cli.mesh && !mvs_scene.mesh.faces.empty()) {
 #if defined(AETHERSCAN_HAS_ASDIFF_MESH)
-                if (cli.gggs && cli.mesh_target_faces > 0) {
+                if (cli.splat && cli.mesh_target_faces > 0) {
                     try {
                         repair_and_decimate_mesh(
                             mvs_scene.mesh, cli.mesh_target_faces,
@@ -2544,13 +2544,13 @@ int main(int argc, char** argv) {
                     }
                 }
 #else
-                if (cli.gggs && cli.mesh_target_faces > 0)
+                if (cli.splat && cli.mesh_target_faces > 0)
                     aetherscan::core::Logger::instance().warning(
                         "asdiff mesh postprocess unavailable (CGAL mesh tools "
                         "were not built); retaining cleaned mesh");
 #endif
-                const std::string mesh_tag = cli.gggs
-                    ? "_gggs_mesh"
+                const std::string mesh_tag = cli.splat
+                    ? "_splat_mesh"
                     : "_mesh";
                 const auto mesh_ply =
                     out_dir / (cli.output.stem().string() + mesh_tag + ".ply");
@@ -2563,7 +2563,7 @@ int main(int argc, char** argv) {
                     "mesh_ply=", mesh_ply,
                     cli.mesh_obj ? " mesh_obj=" : "",
                     cli.mesh_obj ? mesh_obj.string() : std::string{},
-                    " active_mesh=", cli.gggs ? "gggs" : "mvs",
+                    " active_mesh=", cli.splat ? "splat" : "mvs",
                     " faces=", mvs_scene.mesh.faces.size());
 
 #if defined(AETHERSCAN_HAS_TEXTURE)

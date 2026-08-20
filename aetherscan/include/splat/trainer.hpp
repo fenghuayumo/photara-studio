@@ -52,7 +52,7 @@ struct RenderMetrics {
     float alpha_coverage{};
 };
 
-struct GggsMeshOptions {
+struct SplatMeshOptions {
     // GS-2M/pygsplat fallback threshold when the dataset has no input mask.
     // With a mask, the mask alone defines valid extraction pixels.
     float alpha_threshold{0.5F};
@@ -68,7 +68,7 @@ struct GggsMeshOptions {
     mvs::DensifyOptions fusion;
 };
 
-struct GggsMeshResult {
+struct SplatMeshResult {
     mvs::DenseCloud surface_cloud;
     mvs::Mesh mesh;
     std::size_t valid_depth_pixels{};
@@ -144,13 +144,13 @@ RenderMetrics render_evaluation_png(
     const std::filesystem::path& path,
     const TrainingOptions& options = {});
 
-// Render GGGS median-depth/normal maps, fuse them across the registered
-// cameras, then run the selected MVS surface backend and topology cleanup.
-// This path is independent of PatchMatch photometric NCC.
-GggsMeshResult extract_gggs_mesh(
+// Render learned median-depth/normal maps, fuse them across the registered
+// cameras, then run the selected surface backend and topology cleanup. The
+// geometry losses follow GGGS ideas, but this is AetherScan's splat API.
+SplatMeshResult extract_splat_mesh(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const TrainingOptions& training_options = {},
-    const GggsMeshOptions& mesh_options = {});
+    const SplatMeshOptions& mesh_options = {});
 
 // GaussianWrapping Primal Adaptive Meshing (PAM). An empty seed_mesh first
 // builds the native learned-normal Gaussian pivot mesh using Delaunay

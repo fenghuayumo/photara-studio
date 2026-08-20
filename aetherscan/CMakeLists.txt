@@ -17,7 +17,7 @@ if(AETHERSCAN_ENABLE_CUDA)
     else()
         message(WARNING "CUDA compiler not found; building CPU-only AetherScan")
         set(AETHERSCAN_ENABLE_CUDA OFF)
-        set(AETHERSCAN_ENABLE_GGGS OFF)
+        set(AETHERSCAN_ENABLE_SPLAT OFF)
     endif()
 endif()
 
@@ -335,11 +335,11 @@ if(AETHERSCAN_ENABLE_FEATURES)
     else()
         message(WARNING
             "CGAL not found: default/high global MVS meshing is unavailable; "
-            "GGGS TSDF meshing remains supported, but automatic-ROI coarse "
-            "meshing requires a CGAL-enabled build")
+            "splat TSDF meshing remains supported, but PAM and global "
+            "Delaunay meshing require a CGAL-enabled build")
     endif()
 
-    if(AETHERSCAN_ENABLE_GGGS AND AETHERSCAN_ENABLE_CUDA)
+    if(AETHERSCAN_ENABLE_SPLAT AND AETHERSCAN_ENABLE_CUDA)
         find_package(glm CONFIG REQUIRED)
         add_subdirectory(
             third_party/tinytensor
@@ -382,7 +382,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
             tinytensor::tinytensor
             aetherscan_gggs_reference
             CUDA::cudart)
-        target_compile_definitions(aetherscan_splat_cuda PUBLIC AETHERSCAN_HAS_GGGS=1)
+        target_compile_definitions(aetherscan_splat_cuda PUBLIC AETHERSCAN_HAS_SPLAT=1)
         target_compile_options(aetherscan_splat_cuda PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
         set_target_properties(aetherscan_splat_cuda PROPERTIES
@@ -414,7 +414,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         target_link_libraries(aetherscan_splat PUBLIC
             AetherScan::MVS
             aetherscan_splat_cuda)
-        target_compile_definitions(aetherscan_splat PUBLIC AETHERSCAN_HAS_GGGS=1)
+        target_compile_definitions(aetherscan_splat PUBLIC AETHERSCAN_HAS_SPLAT=1)
     endif()
     if(OpenMP_CXX_FOUND)
         target_link_libraries(aetherscan_mvs PUBLIC OpenMP::OpenMP_CXX)
@@ -483,7 +483,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
     if(AETHERSCAN_BUILD_PYTHON)
         if(NOT TARGET aetherscan_splat)
             message(FATAL_ERROR
-                "AETHERSCAN_BUILD_PYTHON requires CUDA GGGS support")
+                "AETHERSCAN_BUILD_PYTHON requires CUDA splat support")
         endif()
         find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
         execute_process(
@@ -576,7 +576,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         target_link_libraries(aetherscan PRIVATE AetherScan::MVS cxxopts::cxxopts)
         if(TARGET aetherscan_splat)
             target_link_libraries(aetherscan PRIVATE AetherScan::Splat)
-            target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_GGGS=1)
+            target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_SPLAT=1)
         endif()
         if(TARGET aetherscan_texture)
             target_link_libraries(aetherscan PRIVATE AetherScan::Texture)

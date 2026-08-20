@@ -1,4 +1,4 @@
-"""Run GGGS depth rendering and TSDF meshing without rebuilding C++."""
+"""Run splat depth rendering and TSDF meshing without rebuilding C++."""
 
 from __future__ import annotations
 

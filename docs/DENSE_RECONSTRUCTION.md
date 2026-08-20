@@ -3,10 +3,10 @@
 ## 目标边界
 
 在已完成的 SfM 之上，默认产品主链路直接使用相机位姿与稀疏点云初始化 ADCPlus，
-由 GGGS 优化多视图几何，再从 Gaussian 渲染的深度、法线和 alpha 进行 TSDF 网格重建：
+由 Splat 优化多视图几何，再从 Gaussian 渲染的深度、法线和 alpha 进行 TSDF 网格重建：
 
 ```text
-SfM → sparse points → ADCPlus / GGGS → TSDF → Clean → Texture / Delight
+SfM → sparse points → ADCPlus / Splat → TSDF → Clean → Texture / Delight
 ```
 
 默认路径明确跳过以下阶段：
@@ -17,21 +17,22 @@ SfM → sparse points → ADCPlus / GGGS → TSDF → Clean → Texture / Deligh
 - 从 MVS mesh 或 MVS depth 派生前景 Mask。
 
 原因是 MVS mesh 会在辐条、细线、薄片、遮挡边界等结构上提前丢失几何，而后续 Mask 无法恢复
-这些细节。GGGS 应直接利用原图光度、轮廓与多视图几何监督完成致密化。
+这些细节。Splat 应直接利用原图光度、轮廓与多视图几何监督完成致密化。
 
-MVS 实现保留为可选诊断、算法对照和兼容导出后端，不是 GGGS、TSDF 或贴图的前置依赖，
+MVS 实现保留为可选诊断、算法对照和兼容导出后端，不是 Splat、TSDF 或贴图的前置依赖，
 也不参与默认物体重建。
 
 参考：
 
-- GGGS：*Geometry-Grounded Gaussian Splatting*；
+- AetherScan Splat：当前产品实现；其几何监督参考 *Geometry-Grounded Gaussian
+  Splatting (GGGS)*，并融合 ADCPlus、GaussianWrapping normal field 与独立 mesh 后端；
 - pygsplat/GS-2M：Gaussian 深度渲染与 TSDF 提取约定；
 - Open3D：稀疏体素块 TSDF 的公开接口与数值回归参考；
 - OpenMVS：仅作为可选 densify/mesh 对照，不复制对象模型；
 - AIHoloImager：TextureReconstruction 与图像域 Delight。
 
 与 SfM 文档一致：紧凑索引与 SoA、公开 API 与执行布局分离；默认构建不依赖 OpenCV；
-图像 IO 使用 FreeImage。ADCPlus/GGGS 以 CUDA 为主，TSDF/Clean 使用多核 CPU。
+图像 IO 使用 FreeImage。ADCPlus/Splat 以 CUDA 为主，TSDF/Clean 使用多核 CPU。
 
 ---
 
@@ -43,7 +44,7 @@ Images
   → registered cameras + sparse landmarks
   → sparse-point filtering / subject bounds
   → ADCPlus warmup and adaptive densification
-  → GGGS photometric + multi-view geometry optimization
+  → Splat photometric + multi-view geometry optimization
   → median depth / normal / alpha per registered view
   → sparse-block TSDF
   → Marching Cubes → topology audit → Clean
@@ -78,8 +79,8 @@ scene            → 不使用前景 Mask
 |---|---|---|
 | `capture_mode=object` | 单物体重建，启用主体 bounds 与前景约束 | SfM |
 | `capture_mode=scene` | 场景重建，不做前背景分离 | SfM |
-| `enable_gggs` | 稀疏点初始化 ADCPlus/GGGS | SfM；默认开启 |
-| `enable_mesh` | GGGS depth/normal/alpha → TSDF → Clean | GGGS |
+| `enable_splat` | 稀疏点初始化 ADCPlus/Splat | SfM；默认开启 |
+| `enable_mesh` | Splat depth/normal/alpha → TSDF → Clean | Splat |
 | `enable_texture` | UV 展开 + ProjectTextures + Dilate | 最终 mesh |
 | `enable_delight` | 图像域去光照并生成 albedo | Texture，建议开启 |
 CLI 示意：
@@ -90,7 +91,7 @@ aetherscan --images images --output object.ply --capture-mode object --masks mas
 aetherscan --images images --output scene.ply --capture-mode scene
 ```
 
-显式指定 `--capture-mode` 会作为产品级完整重建预设，自动开启 GGGS 与 TSDF Mesh；
+显式指定 `--capture-mode` 会作为产品级完整重建预设，自动开启 Splat 与 TSDF Mesh；
 省略该参数仍保留低层 SfM-only 开发流程。不再需要也不再接受 ROI 参数。
 `object` 模式从 SfM 稀疏点自动计算 `SubjectBounds`；`scene` 模式禁用该范围约束。
 
@@ -99,7 +100,7 @@ aetherscan --images images --output scene.ply --capture-mode scene
 ```text
 aetherscan/
   sfm/           # 相机位姿、稀疏点、观测
-  splat/         # sparse init、ADCPlus、GGGS、Gaussian 渲染
+  splat/         # sparse init、ADCPlus、Splat、Gaussian 渲染
   subject/       # SubjectBounds、主体 Gaussian 选择、软 Mask 自举
   tsdf/          # 独立 sparse-block TSDF、MC、查询/导出
   mesh/          # topology audit、Clean、简化
@@ -108,7 +109,7 @@ aetherscan/
   mvs/           # 可选诊断/兼容后端
 ```
 
-建议将 TSDF 拆为独立 `AetherScan::TSDF` 目标，只依赖 Eigen/OpenMP；MVS、GGGS 通过 adapter
+建议将 TSDF 拆为独立 `AetherScan::TSDF` 目标，只依赖 Eigen/OpenMP；MVS、Splat 通过 adapter
 提供深度帧，不让 TSDF 公开 API 依赖 `MvsScene`。
 
 ### 数据模型：`RebuildScene`
@@ -130,7 +131,7 @@ RebuildScene
 Checkpoint 按阶段落盘：
 
 ```text
-sfm-* / subject-* / gggs-warmup-* / masks-* / gggs-* / tsdf-* / mesh-* / texture-*
+sfm-* / subject-* / splat-warmup-* / masks-* / splat-* / tsdf-* / mesh-* / texture-*
 ```
 
 支持从任意阶段续跑。MVS 产物使用独立的 `diagnostics-mvs-*` 命名，不进入默认依赖图。
@@ -141,7 +142,7 @@ sfm-* / subject-* / gggs-warmup-* / masks-* / gggs-* / tsdf-* / mesh-* / texture
 
 ### 输入门禁
 
-GGGS 只消费 SfM 注册相机、原图、稀疏点及其观测。进入训练前必须检查：
+Splat 只消费 SfM 注册相机、原图、稀疏点及其观测。进入训练前必须检查：
 
 - 注册相机比例、重投影 RMS 和轨迹连续性；
 - 稀疏点的有限值、观测数和视角分布；
@@ -163,18 +164,18 @@ sparse subject seeds
   → 投影 full-resolution alpha/depth
   → 多视图一致性与边缘保留
   → source-resolution soft masks
-  → 正式 GGGS
+  → 正式 Splat
 ```
 
 自举 Mask 必须保留软 alpha、细线和孔隙，不做会删除辐条的固定半径腐蚀。若主体选择置信度
 不足，输出预览并要求用户提供外部 Mask 或重新拍摄；不回退到 MVS mesh/depth Mask。
 
-### ADCPlus / GGGS
+### ADCPlus / Splat
 
 1. 以稀疏 SfM 点初始化 SH、opacity、scale 和 rotation；
 2. ADCPlus 动态 grow/split/clone/prune；
 3. `filter_3D` 仅作为渲染时 Mip-Splatting floor，不烘焙进 canonical scale/opacity；
-4. warmup 后加入 GGGS depth-normal、多视图几何往返与 plane-warp NCC；
+4. warmup 后加入 Splat depth-normal、多视图几何往返与 plane-warp NCC；
 5. object 模式使用软 Mask 监督 RGB/alpha，scene 模式使用完整图像；
 6. 导出 Gaussian PLY、训练诊断与逐视图 median depth/normal/alpha。
 
@@ -185,7 +186,7 @@ sparse subject seeds
 
 ## Stage B — TSDF 与 Mesh
 
-TSDF 只融合 GGGS 输出的 median depth、normal 和 alpha，不依赖 MVS 数据结构。默认参数与
+TSDF 只融合 Splat 输出的 median depth、normal 和 alpha，不依赖 MVS 数据结构。默认参数与
 pygsplat/GS-2M 对齐：
 
 ```text
@@ -231,7 +232,7 @@ Texture 和 Delight 只作用于 TSDF/Clean 后的最终 mesh：
 5. 导出 PLY/OBJ/glTF 与 albedo。
 
 前景约束复用 object 模式的外部或自举软 Mask。用于贴图的最终 mesh mask 只负责可见性，
-不反馈到 GGGS 训练，也不作为主体分割来源。
+不反馈到 Splat 训练，也不作为主体分割来源。
 
 ---
 
@@ -252,7 +253,7 @@ run_rebuild(scene, cfg):
   else:
       masks = none
 
-  gaussians = train_sparse_adcplus_gggs(scene, bounds, masks)
+  gaussians = train_sparse_adcplus_splat(scene, bounds, masks)
   frames = render_median_depth_normal_alpha(gaussians)
   raw_mesh = tsdf.integrate_and_extract(frames)
   final_mesh = audit_clean_and_reaudit(raw_mesh)
@@ -268,10 +269,10 @@ run_rebuild(scene, cfg):
 
 顺序约束：
 
-- GGGS 依赖 SfM，不依赖 dense cloud 或 MVS mesh；
+- Splat 依赖 SfM，不依赖 dense cloud 或 MVS mesh；
 - object 模式必须通过主体 bounds 与前景置信度门禁；
 - scene 模式允许无 Mask；
-- TSDF 只接受 GGGS 渲染帧；
+- TSDF 只接受 Splat 渲染帧；
 - Texture/Delight 只接受通过拓扑门禁的最终 mesh；
 - MVS 诊断失败不得影响默认产品结果。
 
@@ -279,11 +280,11 @@ run_rebuild(scene, cfg):
 
 ## 与现有 SfM / OpenMVS 的衔接
 
-- 进程内默认路径：`sfm::Scene → RebuildScene → sparse ADCPlus/GGGS`；
-- SfM 相机、稀疏点颜色和 observation track 必须完整传给 GGGS 初始化；
+- 进程内默认路径：`sfm::Scene → RebuildScene → sparse ADCPlus/Splat`；
+- SfM 相机、稀疏点颜色和 observation track 必须完整传给 Splat 初始化；
 - MVSI/`.mvs` 可以继续作为相机与稀疏点交换容器，但读取该容器不代表执行 MVS；
 - OpenMVS densify/mesh 仅用于离线 A/B、回归和兼容导出；
-- 默认路径不得因为 `--gggs` 隐式触发 PatchMatch/fusion，也不得因输入被误标为 dense 而
+- 默认路径不得因为 `--splat` 隐式触发 PatchMatch/fusion，也不得因输入被误标为 dense 而
   静默关闭 ADCPlus。
 
 ---
@@ -292,9 +293,9 @@ run_rebuild(scene, cfg):
 
 1. 以端到端墙钟时间和最终质量为判据，不以所有阶段 CPU 100% 为目标；
 2. SfM 前端、track、BA 和输入预处理充分使用多核 CPU；
-3. ADCPlus/GGGS 是 GPU-bound；CPU 并行负责图像解码、Mask/SubjectBounds、预取、评估和异步导出；
+3. ADCPlus/Splat 是 GPU-bound；CPU 并行负责图像解码、Mask/SubjectBounds、预取、评估和异步导出；
 4. TSDF block integration、Marching Cubes、Clean 和 topology audit 使用多核 CPU；
-5. GGGS 与 CPU 后处理之间通过 checkpoint/队列解耦，避免 CUDA 等待串行文件 IO；
+5. Splat 与 CPU 后处理之间通过 checkpoint/队列解耦，避免 CUDA 等待串行文件 IO；
 6. 质量档 `preview/default/high` 控制训练步数、Gaussian 上限、TSDF voxel/truncation、
    texture 分辨率和 Delight，不再控制 PatchMatch。
 
@@ -302,17 +303,17 @@ run_rebuild(scene, cfg):
 
 ## 实施顺序
 
-1. **直接稀疏入口 P0（已完成）**：`sfm::Scene` 直接构造 GGGS 数据集，跳过 densify；
+1. **直接稀疏入口 P0（已完成）**：`sfm::Scene` 直接构造 Splat 数据集，跳过 densify；
 2. **策略语义 P0（已完成）**：明确 sparse 初始化状态，ADCPlus 保持动态致密化；
 3. **物体主体 P0**：支持外部软 Mask，并实现 warmup → Gaussian 主体选择 → soft-mask 自举；
 4. **TSDF P0**：拆出独立 `AetherScan::TSDF` API，增加 Open3D 同帧回归与拓扑门禁；
 5. **细结构 P0**：增加细线质量档，联合控制 alpha、voxel、truncation 与 Clean；
-6. **编排/checkpoint P1**：支持从 SfM、warmup、正式 GGGS、TSDF 和 Texture 任意阶段续跑；
+6. **编排/checkpoint P1**：支持从 SfM、warmup、正式 Splat、TSDF 和 Texture 任意阶段续跑；
 7. **Texture/Delight P1**：只消费最终 TSDF/Clean mesh；
 8. **MVS diagnostics P2**：保留现有 CUDA PatchMatch、fusion 和 Delaunay 作为独立对照工具。
 
 当前内部 SfM 分支已经直接执行
-`SfM sparse → ADCPlus/GGGS → TSDF`，日志以 `gggs_input=sfm_sparse` 和
+`SfM sparse → ADCPlus/Splat → TSDF`，日志以 `splat_input=sfm_sparse` 和
 `patchmatch=false` 标识。旧自动 ROI、手动 ROI、depth-ROI Mask 入口已经删除。
 无外部 Mask 的 Gaussian 主体自举仍未完成，不能标记为已交付。
 
@@ -339,7 +340,7 @@ aetherscan --images images --output object.ply --capture-mode object --texture -
 - 从 MVS mesh 或 MVS depth 生成默认主体 Mask；
 - 向普通用户暴露 Mask 来源枚举；
 - 用固定腐蚀/闭运算牺牲细线结构换取表面看似封闭；
-- 无 CUDA 时强行启用 GGGS；
+- 无 CUDA 时强行启用 Splat；
 - 在非流形 mesh 上静默执行 UV 和贴图。
 
 ---
@@ -348,7 +349,7 @@ aetherscan --images images --output object.ply --capture-mode object --texture -
 
 SubjectBounds 与 Mask 是两类不同约束：
 
-- **SubjectBounds**：世界坐标中的保守 3D AABB，只限制 GGGS 几何提取与 TSDF 空间范围；
+- **SubjectBounds**：世界坐标中的保守 3D AABB，只限制 Splat 几何提取与 TSDF 空间范围；
 - **Mask**：原图分辨率的 2D soft alpha，只约束 object 模式中的 RGB/alpha 学习；
 - SubjectBounds 不删除 SfM 点或 Gaussian，也不投影成训练 Mask。
 
@@ -393,7 +394,7 @@ aetherscan --images images --capture-mode scene
 - Gaussian 主体选择使用 3D 连通性与多视图支持，不能只取每帧最大 2D 连通分量；
 - 自举 Mask 的 alpha、边界稳定性和跨视图一致性必须输出诊断。
 
-最终 mesh 光栅化 Mask 只用于 Texture/Delight 的可见性和护边，不反馈给 GGGS，也不改变主体
+最终 mesh 光栅化 Mask 只用于 Texture/Delight 的可见性和护边，不反馈给 Splat，也不改变主体
 分割结果。
 
 ---
@@ -413,7 +414,7 @@ aetherscan --images images --capture-mode scene
 | sparse ADCPlus smoke | 125,818 初始 Gaussian，`densification_enabled=1`，`patchmatch=false` | 通过 |
 | 稀疏 ADCPlus | 10k 步，123,557 → 402,291 Gaussians | 通过 |
 | ADCPlus 30k + MV tail interval=2 | 478.244 s，125,818 → 627,470 Gaussians，PSNR 21.0766 dB | `ori_img` 通过；仅作为显式 fast mode |
-| masked GGGS | masked PSNR 28.87 dB | 通过 |
+| masked Splat | masked PSNR 28.87 dB | 通过 |
 | TSDF + Clean（30k 无 Mask） | 20.392 s，1,347,617 顶点 / 2,668,110 面 | 数值通过，拓扑仍需门禁 |
 
 当前 smoke test 已证明内部 SfM 可以完全跳过 MVS，直接进入 ADCPlus。10k 质量基线中的
@@ -464,17 +465,17 @@ Mask 来自已删除的实验性 depth-ROI 路径，只保留其数值作为历�
 
 ### 性能结论
 
-ADCPlus/GGGS 是 GPU-bound；不要为了 CPU 100% 与 CUDA 争用内存带宽。CPU 优化重点变为
+ADCPlus/Splat 是 GPU-bound；不要为了 CPU 100% 与 CUDA 争用内存带宽。CPU 优化重点变为
 SfM、图像/Mask 预处理、TSDF integration、Marching Cubes、Clean 和 topology audit。
 TSDF integration 与 support closing 已使用 OpenMP；后续优先并行化 MC block 遍历，采用连续
 block allocator、扁平哈希表和两阶段计数/写出。
 
-GGGS 子阶段性能分析使用可选 CUDA event profiler：
+Splat 子阶段性能分析使用可选 CUDA event profiler：
 
 ```bash
-aetherscan ... --gggs \
-  --gggs-profile-cuda \
-  --gggs-profile-interval 100
+aetherscan ... --splat \
+  --splat-profile-cuda \
+  --splat-profile-interval 100
 ```
 
 profiler 默认关闭；启用后在同一训练 stream 上按窗口记录并输出
@@ -492,12 +493,12 @@ ADCPlus 默认保持每步执行多视图；tail 调度是显式 fast mode：
 
 ```bash
 # 默认值 1；只有允许质量折衷时才显式设置 2
-aetherscan ... --gggs-mv-tail-interval 2
+aetherscan ... --splat-mv-tail-interval 2
 ```
 
 第 15,001–30,000 步每两步执行一次昂贵的 `sample_depth + NCC + backward`，活跃步权重乘 2，
 保持多视图目标的期望不变。`ori_img` 完整 30k A/B 中，稳定 CUDA 时间由 21.2029
-降到 14.8752 ms/iter（-29.84%），GGGS wall time 由 575.389 降到 478.244 s
+降到 14.8752 ms/iter（-29.84%），Splat wall time 由 575.389 降到 478.244 s
 （-16.88%），三视角 PSNR 由 20.9876 提高到 21.0766 dB；Clean 网格面数变化 -1.31%。
 但 `antman_nomask` 同一 OpenMVS 场景 A/B 中，interval=2 虽将训练由 442.813 降至
 380.596 s（-14.05%），PSNR 却由 37.8694 降到 36.7273 dB，Clean 主体网格面数由
@@ -513,7 +514,7 @@ NCC loss kernel 从 2.1737 降到 2.0694 ms（-4.80%），稳定 CUDA/iter 从 1
 降到 10.7495 ms（-3.02%），训练从 30.4701 降到 29.5425 秒（-3.04%）；三视角 PSNR
 为 30.5035 → 30.7663 dB。最终 30k + TSDF 门禁得到 39.2708 dB 和
 9,982,336 顶点 / 19,776,598 面，未观察到因减少监督频率导致的质量回退，因为频率没有变化。
-详细条件和浮点非确定性说明见 `GGGS_CPP.md`。
+详细条件和浮点非确定性说明见 `SPLAT_CPP.md`。
 
 ---
 
@@ -522,12 +523,12 @@ NCC loss kernel 从 2.1737 降到 2.0694 ms（-4.80%），稳定 CUDA/iter 从 1
 已经具备：
 
 - SfM 相机、COLMAP/OpenMVS Interface 稀疏点加载；
-- 内部 `sfm::Scene` 直接构造 GGGS dataset，日志明确 `patchmatch=false`；
+- 内部 `sfm::Scene` 直接构造 Splat dataset，日志明确 `patchmatch=false`；
 - `capture_mode=object|scene` 与 SfM 稀疏点自动 `SubjectBounds`；
 - sparse ADCPlus 初始化保持 densification 开启；
-- GGGS CUDA rasterizer forward/backward、SSIM、Adam；
+- Splat CUDA rasterizer forward/backward、SSIM、Adam；
 - sparse `default/adc_plus/adc_igs` 动态 grow/split/clone/prune；
-- Mip-Splatting 3D filter、GGGS 多视图几何与 NCC；
+- Mip-Splatting 3D filter、Splat 多视图几何与 NCC；
 - median depth/normal/alpha → TSDF → Clean；
 - 外部 `--masks` 与透明/前景训练模式；
 - Texture/Delight 骨架。
@@ -540,7 +541,7 @@ NCC loss kernel 从 2.1737 降到 2.0694 ms（-4.80%），稳定 CUDA/iter 从 1
 - direct SfM 分支的 Texture/checkpoint 编排；
 - out-of-core view cache 和 ADC-IGS edge/error ownership。
 
-实现、构建和许可证细节见 [GGGS_CPP.md](GGGS_CPP.md)。
+实现、构建和许可证细节见 [SPLAT_CPP.md](SPLAT_CPP.md)。
 
 ---
 
@@ -550,10 +551,10 @@ NCC loss kernel 从 2.1737 降到 2.0694 ms（-4.80%），稳定 CUDA/iter 从 1
 
 - 与 OpenMVS 做质量和性能 A/B；
 - 输出兼容 dense cloud/MVS mesh；
-- 诊断 GGGS 深度覆盖；
+- 诊断 Splat 深度覆盖；
 - 独立开发和回归测试。
 
-这些产物不得自动成为 GGGS 初始化、主体 Mask 或 TSDF 输入。诊断后端应使用单独命令或配置，
+这些产物不得自动成为 Splat 初始化、主体 Mask 或 TSDF 输入。诊断后端应使用单独命令或配置，
 避免普通产品路径误触发昂贵的 densify。
 
 ---
@@ -564,7 +565,7 @@ AetherScan 默认几何路线确定为：
 
 ```text
 SfM cameras + sparse points
-  → sparse ADCPlus / GGGS
+  → sparse ADCPlus / Splat
   → median depth / normal / alpha
   → TSDF
   → topology audit + Clean

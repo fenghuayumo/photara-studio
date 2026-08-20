@@ -37,5 +37,5 @@ mesh = aes.extract_tsdf(gaussians, mvs, training, tsdf)
 mesh.save("mesh.ply")
 ```
 
-`examples/tsdf_experiment.py` loads an existing COLMAP model and trained GGGS
+`examples/tsdf_experiment.py` loads an existing COLMAP model and trained splat
 PLY, so TSDF parameters can be tested without rerunning SfM or 3DGS training.

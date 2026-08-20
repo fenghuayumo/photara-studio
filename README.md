@@ -170,29 +170,31 @@ MVS 中表现为轮廓双层、底座重叠或缺失。程序会在输出旁生�
 
 CPU PatchMatch 会一次缓存所有图像金字塔，并默认同时处理 8 个参考视图；每个视图内部再按
 8 行 tile 做 red/black 并行传播。可用 `--patchmatch-concurrent-views` 和
-`--patchmatch-tile-rows` 调整。`--mesh-method auto` 在 GGGS 路径使用 median-depth TSDF；
+`--patchmatch-tile-rows` 调整。`--mesh-method auto` 在 splat 路径使用 median-depth TSDF；
 MVS-only 的 preview/default/high 均使用 CGAL 全局 Delaunay visibility
 graph-cut，不再提供 projective mesh。全局图的输入上限由
 `--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。三个 mesh backend 都会经过统一
-Clean；构建了 `asdiff::mesh` 且 GGGS mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
+Clean；构建了 `asdiff::mesh` 且 splat mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
 Meshes field-aligned remesh 和 CGAL repair/decimate。已经低于目标面数的网格结果会直接保留，
 避免无意义的重采样和修复引入新边界。目标面数默认为 1,000,000；Instant 的 quad 目标自动
 换算为约一半，重拓扑前后会清理微小连通碎片。
 
-GGGS + TSDF 默认把自动估计体素放大到 `2.3x`，直接提取约百万面的局部规则网格后再做 UV
+Splat + TSDF 默认把自动估计体素放大到 `2.3x`，直接提取约百万面的局部规则网格后再做 UV
 展开和投影纹理，避免高密 TSDF 经通用减面产生跨孔长三角。可用
 `--mesh-tsdf-voxel-scale` 显式调整；`--mesh-target-faces 0` 保留原始 TSDF 分辨率用于诊断。
 UVAtlas 默认用 `--uv-parallel-partitions 8` 做空间分区并发展开，最后统一打包到单张 atlas；
 设为 `1` 可回到串行展开。
-`--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 asdiff 后处理。GGGS mesh 模式
+`--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 asdiff 后处理。Splat mesh 模式
 默认在第 7,000 步开启权重 0.05 的 median-depth/rendered-normal 几何一致性优化。
 
-稠密 MVS 输入默认使用全部融合点初始化 GGGS（`--gggs-max-gaussians 0`），避免随机截断到
+稠密 MVS 输入默认使用全部融合点初始化 splat（`--splat-max-gaussians 0`），避免随机截断到
 50 万点后在薄结构和遮挡区域形成永久覆盖缺口；显存受限时可显式设置较小上限。
-GGGS mesh 导出只使用 alpha 0.5 与有效深度掩码，不再默认执行额外的 60° depth-normal 硬过滤；
+Splat mesh 导出只使用 alpha 0.5 与有效深度掩码，不再默认执行额外的 60° depth-normal 硬过滤；
 这与 pygsplat/GS-2M 的默认 TSDF 输入一致，避免在高曲率和薄结构区域人为打洞。
 
-GaussianWrapping 几何路径可用 `--mesh-method pam`：GGGS 默认从第 8,001 步学习四通道
+当前 splat 训练借鉴 GGGS 的几何监督，但已融合 ADCPlus、GaussianWrapping normal field 与
+独立 mesh 后端，命令行统一使用 `--splat` / `--splat-*`。GaussianWrapping 几何路径可用
+`--mesh-method pam`：训练默认从第 8,001 步学习四通道
 normal field。PAM 不经过 TSDF：先从 Gaussian center 与 learned-normal pivot 运行
 `tetra_triangulation` + Marching Tetrahedra，再将自适应采样点投影到多视图 Gaussian
 occupancy 等值面，并通过第二次 CGAL Delaunay 四面体分类提取表面。可用

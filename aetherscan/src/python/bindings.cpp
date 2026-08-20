@@ -164,10 +164,10 @@ sfm::ReconstructionSummary run_sfm_mapping(
 [[nodiscard]] std::shared_ptr<MeshResultHandle> extract_tsdf(
     const GaussianModelHandle& model, const MvsSceneHandle& scene,
     const splat::TrainingOptions& training_options,
-    splat::GggsMeshOptions mesh_options) {
+    splat::SplatMeshOptions mesh_options) {
     mesh_options.fusion.mesh_method = mvs::MeshMethod::tsdf;
     mesh_options.fusion.build_mesh = true;
-    splat::GggsMeshResult extracted = splat::extract_gggs_mesh(
+    splat::SplatMeshResult extracted = splat::extract_splat_mesh(
         model.model, scene.scene, training_options, mesh_options);
     auto result = std::make_shared<MeshResultHandle>();
     result->surface_cloud = std::move(extracted.surface_cloud);
@@ -612,19 +612,19 @@ NB_MODULE(aetherscan_native, module) {
             &splat::DatasetLoadRequest::random_initial_point_count)
         .def_rw("seed", &splat::DatasetLoadRequest::seed);
 
-    nb::class_<splat::GggsMeshOptions>(module, "TsdfOptions")
+    nb::class_<splat::SplatMeshOptions>(module, "TsdfOptions")
         .def(nb::init<>())
         .def_rw(
             "alpha_threshold",
-            &splat::GggsMeshOptions::alpha_threshold)
-        .def_rw("max_depth", &splat::GggsMeshOptions::max_depth)
+            &splat::SplatMeshOptions::alpha_threshold)
+        .def_rw("max_depth", &splat::SplatMeshOptions::max_depth)
         .def_rw(
             "diagnostics_dir",
-            &splat::GggsMeshOptions::diagnostics_dir)
+            &splat::SplatMeshOptions::diagnostics_dir)
         .def_rw(
             "min_depth_normal_cosine",
-            &splat::GggsMeshOptions::min_depth_normal_cosine)
-        .def_rw("fusion", &splat::GggsMeshOptions::fusion);
+            &splat::SplatMeshOptions::min_depth_normal_cosine)
+        .def_rw("fusion", &splat::SplatMeshOptions::fusion);
 
     nb::class_<splat::PamMeshOptions>(module, "PamOptions")
         .def(nb::init<>())
@@ -884,7 +884,7 @@ NB_MODULE(aetherscan_native, module) {
         "extract_tsdf", &extract_tsdf, nb::arg("model"),
         nb::arg("scene"),
         nb::arg("training_options") = splat::TrainingOptions{},
-        nb::arg("tsdf_options") = splat::GggsMeshOptions{},
+        nb::arg("tsdf_options") = splat::SplatMeshOptions{},
         nb::call_guard<nb::gil_scoped_release>());
     module.def(
         "extract_pam", &extract_pam, nb::arg("model"),

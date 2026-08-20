@@ -1,15 +1,17 @@
-# GGGS C++ / TinyTensor 后端
+# AetherScan Splat C++ / TinyTensor 后端
 
 ## 当前实现状态
 
-AetherScan 已有一条可编译、可前反向传播、可由 CLI 启动的 GGGS 训练路径：
+AetherScan 已有一条可编译、可前反向传播、可由 CLI 启动的 Gaussian splat 训练路径。
+当前实现参考了 GGGS 的几何监督与 CUDA rasterizer，但已组合 ADCPlus、GaussianWrapping
+normal field、PAM/TSDF 等独立能力，因此公开接口统一称为 `splat`，不再以 GGGS 命名：
 
 ```text
 images → SfM → CPU/OpenMP PatchMatch MVS → fused dense cloud ─┐
 images + COLMAP sparse model ──────────────────────────────────┤
                                                               ↓
-  Gaussian 初始化 → GGGS CUDA forward/backward
-  → fused 11×11 L1+SSIM → TinyTensor Adam → *_gggs.ply
+  Gaussian 初始化 → Splat CUDA forward/backward
+  → fused 11×11 L1+SSIM → TinyTensor Adam → *_splat.ply
 ```
 
 这条路径不依赖 LibTorch、PyBind 或 Python 运行时。MVS 继续负责充分利用 CPU；Gaussian
@@ -24,14 +26,14 @@ images + COLMAP sparse model ─────────────────
   forward/backward；
 - `aetherscan/src/splat/colmap.cpp`：COLMAP 文本/二进制相机、位姿、稀疏点和 track 加载；
 - `aetherscan/src/splat/trainer.cpp`：点云初始化、动态 Gaussian 管理、训练和 PLY 导出；
-- `aetherscan/third_party/gggs_reference/`：从 Python 参考工程移入的原始 CUDA
+- `aetherscan/third_party/gggs_reference/`：从 Python GGGS 参考工程移入的原始 CUDA
   rasterizer core，不包含 Torch/PyBind wrapper；
 - `aetherscan/third_party/tinytensor/`：tensor 存储、CUDA 内存和基础运算。
 
 模型使用可训练的世界坐标均值、log-scale、四元数、opacity logit 和最高三阶 SH。
 稠密点云法线用于初始化 Gaussian 朝向，像素足迹用于初始化尺度，点色用于初始化 SH0。
 训练损失包含与 `pygsplat/simple_trainer.py` 对齐的 `0.8 * L1 + 0.2 * SSIM` 光度项和可选
-mask/alpha loss。mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 GGGS depth-normal、
+mask/alpha loss。mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 splat depth-normal、
 权重 `0.02` 的多视图几何往返和权重 `0.6` 的平面单应 NCC。多视图几何通过 GGGS 原生
 `sampleDepth` 前后向在相邻视图查询表面点，梯度同时回传参考深度、查询点以及邻视图
 Gaussian；NCC 使用半像素 7×7 patch、鲁棒 diffuse confidence 和深度/法线解析梯度。
@@ -53,9 +55,9 @@ mask 会在计算 L1/SSIM 前同时作用于预测图和目标图。13×13 确�
 法线方向，第四维经 `tanh` 学习朝向符号。默认在第 8,001 步按当前 Gaussian 最短轴重置
 方向和符号，再按 alignment 权重 `0.05` 与默认 depth ratio `0.6` 对齐由 median depth
 微分得到的法线；特征拥有独立 Adam
-状态，并随 clone、split、prune 一起维护。可用 `--gggs-normal-field=false` 关闭，或用
-`--gggs-normal-field-weight`、`--gggs-normal-field-depth-ratio`、
-`--gggs-normal-field-from-iter` 调整。
+状态，并随 clone、split、prune 一起维护。可用 `--splat-normal-field=false` 关闭，或用
+`--splat-normal-field-weight`、`--splat-normal-field-depth-ratio`、
+`--splat-normal-field-from-iter` 调整。
 
 构建时找到 CGAL 后，`--mesh --mesh-method pam` 走 GaussianWrapping 原生的两级
 `tetra_triangulation`，不依赖 TSDF。第一级为每个入选 Gaussian 生成“中心 + learned-normal
@@ -80,13 +82,13 @@ bicycle 回归可直接使用 `images_2`：
 build/aetherscan/Release/aetherscan.exe `
   --images D:\Models\360_extra_scenes_1\bicycle\images_2 `
   --splat-dataset D:\Models\360_extra_scenes_1\bicycle\sparse\0 `
-  --output artifacts\bicycle\scene.mvs --gggs `
-  --gggs-strategy adc_plus --gggs-iterations 30000 `
-  --gggs-max-resolution 0 --gggs-progressive-resolution=false `
+  --output artifacts\bicycle\scene.mvs --splat `
+  --splat-strategy adc_plus --splat-iterations 30000 `
+  --splat-max-resolution 0 --splat-progressive-resolution=false `
   --mesh --mesh-method pam --pam-occupancy-iso-value 0.3
 ```
 
-这里直接读取 `images_2`，`--gggs-max-resolution 0` 表示保持这些文件的 2473×1643 像素，
+这里直接读取 `images_2`，`--splat-max-resolution 0` 表示保持这些文件的 2473×1643 像素，
 不会先读原图再动态缩放。COLMAP 相机内参会按所选图像文件的实际宽高和像素中心规则同步标定。
 
 ## 构建与运行
@@ -94,7 +96,7 @@ build/aetherscan/Release/aetherscan.exe `
 需要 CUDA Toolkit 和 glm：
 
 ```powershell
-cmake -S . -B build -DAETHERSCAN_ENABLE_CUDA=ON -DAETHERSCAN_ENABLE_GGGS=ON
+cmake -S . -B build -DAETHERSCAN_ENABLE_CUDA=ON -DAETHERSCAN_ENABLE_SPLAT=ON
 cmake --build build --config Release --target aetherscan -- /m
 ```
 
@@ -104,27 +106,27 @@ cmake --build build --config Release --target aetherscan -- /m
 build/aetherscan/Release/aetherscan.exe `
   --images data/images `
   --output output/scene.mvs `
-  --gggs `
-  --gggs-iterations 10000
+  --splat `
+  --splat-iterations 10000
 ```
 
 mesh 质量路径会随 depth-normal loss 自动启用 Mip-Splatting 3D filter；filter 不再是
-appearance-only 3DGS 的独立开关。可用 `--gggs-depth-normal-weight`、
-`--gggs-mv-geo-weight`、`--gggs-mv-ncc-weight`、`--gggs-mv-neighbors`、
-`--gggs-mv-pixel-noise` 和 `--gggs-geometry-from-iter` 调整；将两个 multi-view
+appearance-only 3DGS 的独立开关。可用 `--splat-depth-normal-weight`、
+`--splat-mv-geo-weight`、`--splat-mv-ncc-weight`、`--splat-mv-neighbors`、
+`--splat-mv-pixel-noise` 和 `--splat-geometry-from-iter` 调整；将两个 multi-view
 weight 设为 0 可做关闭 A/B。
 
-`--gggs` 隐含 `--dense`。输出包括 `scene_dense.ply` 和 `scene_gggs.ply`。当前 Gaussian
+`--splat` 隐含 `--dense`。输出包括 `scene_dense.ply` 和 `scene_splat.ply`。当前 Gaussian
 PLY 保存训练参数（opacity 和 scale 仍是 logit/log-domain），可用于检查训练结果和后续
 viewer/mesh-extraction 接入。
 
 稠密 MVS 输入默认从 fused cloud 均匀选取最多 500,000 个初始 Gaussian，可用
-`--gggs-max-gaussians N` 修改，`0` 表示使用全部 dense points。稠密点云已经具有高采样密度，
-因此默认关闭动态致密化；显式选择 `--gggs-strategy dense_adaptive` 时，训练器会小批量回收
+`--splat-max-gaussians N` 修改，`0` 表示使用全部 dense points。稠密点云已经具有高采样密度，
+因此默认关闭动态致密化；显式选择 `--splat-strategy dense_adaptive` 时，训练器会小批量回收
 低 opacity 点，并把预算重新分配到高屏幕梯度/大投影贡献区域。稀疏 COLMAP 输入则启用原有
 动态 Gaussian 管理。训练结束还会保存
 第一个、中间和最后相机的
-`*_gggs_view_*.png`，并在日志记录 PSNR、MAE 和 alpha coverage。
+`*_splat_view_*.png`，并在日志记录 PSNR、MAE 和 alpha coverage。
 
 可直接跳过内部 SfM/MVS，加载 COLMAP 相机位姿和稀疏点云。稀疏输入默认 30,000 步
 （致密化约至 15k），稠密 MVS 仍默认 10,000 步：
@@ -133,26 +135,26 @@ viewer/mesh-extraction 接入。
 aetherscan --images D:\ScanVideo\ori_img\images `
   --colmap D:\ScanVideo\ori_img `
   --output out\scene.mvs `
-  --gggs-strategy default `
-  --gggs-max-gaussians 500000 `
-  --gggs-densification-cap 4000000
+  --splat-strategy default `
+  --splat-max-gaussians 500000 `
+  --splat-densification-cap 4000000
 ```
 
-调试基础优化收敛时，可用 `--gggs-densification=false` 固定 COLMAP 初始化的
+调试基础优化收敛时，可用 `--splat-densification=false` 固定 COLMAP 初始化的
 Gaussian 数量；此模式禁用 split、prune 和 opacity reset，只验证 RGB、mask loss、
 光栅化反向与 CUDA Adam 的参数优化。因为没有 prune，固定拓扑模式也会在整个训练中
-保留 `--gggs-max-scale-fraction` 上限；启用致密化后不逐步硬夹 scale，而与 pygsplat
+保留 `--splat-max-scale-fraction` 上限；启用致密化后不逐步硬夹 scale，而与 pygsplat
 一样由 refine 阶段按 `0.1 * scene_scale` 清理过大的 Gaussian。不能先夹到同一个
 阈值再比较，否则 `exp(log(scale))` 的浮点误差会误删边界 Gaussian。
 
 若要验证“结构先优化、随后只收敛外观”，可加
-`--gggs-structure-freeze-iter 5000`。到达该步后 means、scale、quaternion、opacity
+`--splat-structure-freeze-iter 5000`。到达该步后 means、scale、quaternion、opacity
 保持不变，但 SH/颜色继续使用 CUDA Adam 更新。
 
 稀疏 COLMAP 路径默认与 pygsplat 一致：使用原始三近邻 RMS scale 和随机 raw
 quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN scale 很大的离群点，
 正常训练由后续 prune 移除；固定拓扑稳健性实验可显式加
-`--gggs-constrain-scales=true`。`--gggs-max-scale-ratio` 默认 0，不额外限制轴比。
+`--splat-constrain-scales=true`。`--splat-max-scale-ratio` 默认 0，不额外限制轴比。
 
 加载器自动解析根目录、`sparse/`、`sparse/0/` 或直接 model 目录中的 `.bin` / `.txt`。
 当前精确支持 `SIMPLE_PINHOLE`、`PINHOLE`、`SIMPLE_RADIAL`、`RADIAL`、`OPENCV`；无法由
@@ -160,39 +162,39 @@ quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN sca
 
 当前支持四种策略，前三种用于稀疏输入，`dense_adaptive` 专用于 MVS 稠密输入：
 
-| `--gggs-strategy` | 统计与增长 | 默认调度 |
+| `--splat-strategy` | 统计与增长 | 默认调度 |
 |---|---|---|
 | `default` | 平均屏幕梯度；小 Gaussian clone，大 Gaussian split；opacity reset | 500–15k，每 100 步 |
 | `adc_plus` | 最大 refine weight、实际 alpha 贡献可见度和屏幕半径；预算回收、ADC split/decay/noise | 全程每 200 步；15k 后停止额外增长，只回收低 opacity 点 |
 | `adc_igs` | ADC+ pruning + Gumbel Top-K + 投影优先级 + 最大轴二分 | 增长至 15k，裁剪至 25k，每 200 步 |
 | `dense_adaptive` | 每轮最多回收 1% 低贡献点（异常/越界点另行删除）、额外增长 0.5%，按最大 refine weight 和投影半径做表面切平面二分；不使用 ADC noise/decay | 1k–5k，每 500 步；1k 后冻结结构 Adam，仅继续 SH |
 
-所有策略均受 `--gggs-densification-cap` 硬上限约束，新增/裁剪数量写入训练日志。
+所有策略均受 `--splat-densification-cap` 硬上限约束，新增/裁剪数量写入训练日志。
 ADC+ 的“可见”要求 Gaussian 通过 alpha/transmittance 测试并实际参与至少一个像素合成；
 仅投影进相机视锥但被前景遮挡的 Gaussian 不再累计支持度、参与回收采样或注入探索噪声。
 稀疏 ADC+ 默认还将轴比限制为 `100`，抑制只对训练相机正面成立、在范围外视角变成漂浮片的
-极薄 Gaussian；可用 `--gggs-max-scale-ratio 0` 显式关闭，或传入其他上限。
+极薄 Gaussian；可用 `--splat-max-scale-ratio 0` 显式关闭，或传入其他上限。
 
 稠密点云建议配置：
 
 ```powershell
 aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
-  --dense --gggs --gggs-strategy dense_adaptive `
-  --gggs-max-gaussians 500000 --gggs-densification-cap 600000
+  --dense --splat --splat-strategy dense_adaptive `
+  --splat-max-gaussians 500000 --splat-densification-cap 600000
 ```
 
-GGGS 默认启用 Mask 训练，只重建主体并抑制背景；可用 `--gggs-use-mask=false` 显式关闭。
+Splat 默认启用 Mask 训练，只重建主体并抑制背景；可用 `--splat-use-mask=false` 显式关闭。
 Mask 复用 `--masks` 指定的目录（默认寻找 `images/` 的同级 `masks/`），并支持 Python
 数据集相同的 stem 匹配、`.png/.jpg/.jpeg` 大小写扩展名，以及双线性软覆盖重采样，
 找不到独立 mask 时回退到源图 alpha channel：
 
 ```powershell
 aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
-  --dense --gggs --gggs-use-mask `
-  --gggs-alpha-mode transparent --gggs-match-alpha-weight 0.25 `
-  --gggs-ssim-weight 0.2 `
-  --gggs-min-scale-fraction 0.0001 --gggs-max-scale-fraction 0.002 `
-  --gggs-max-scale-ratio 10
+  --dense --splat --splat-use-mask `
+  --splat-alpha-mode transparent --splat-match-alpha-weight 0.25 `
+  --splat-ssim-weight 0.2 `
+  --splat-min-scale-fraction 0.0001 --splat-max-scale-fraction 0.002 `
+  --splat-max-scale-ratio 10
 ```
 
 - `transparent`（默认）：前景 RGB loss + `0.25 * BCE(render_alpha, mask)`；
@@ -201,7 +203,7 @@ aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
 主体模式要求每个训练视图都有匹配 mask 或源图 alpha channel；任何视图缺失都会立即报错，
 避免背景意外进入模型。日志会单独输出 `rgb/alpha/depth/normal` 四项 loss。
 默认将最大 Gaussian 尺度限制为场景范围的 `0.002`，防止 splat 扩张到背景并形成不透明
-雾层；可通过 `--gggs-max-scale-fraction` 显式调整。
+雾层；可通过 `--splat-max-scale-fraction` 显式调整。
 纯光度稠密输入可在前 1,000 步 warm-up 后冻结 mean/scale/quaternion/opacity Adam；启用
 depth-normal 几何目标时会自动取消该冻结，使第 7,000 步后的几何梯度能够继续更新结构参数。
 SH 颜色参数始终继续训练，`dense_adaptive` 的受限回收和切平面二分也仍可执行。
@@ -238,7 +240,7 @@ MVS depth/normal 常驻 GPU。
 两组无 mask 数据对 `sampleDepthCUDA<2,8,5>` forward 与 `sampleDepthCUDA<2>`
 backward 做了稳定窗口采集。训练配置为 ADC+、30,000 步、最大训练边长 1,000、
 关闭 progressive resolution，几何项从第 3,000 步开启，每步从最多 8 个候选邻视角中
-随机选择一个邻视角。`--gggs-mv-neighbors 8` 只是候选池大小，并不会在一次迭代中执行
+随机选择一个邻视角。`--splat-mv-neighbors 8` 只是候选池大小，并不会在一次迭代中执行
 8 次 `sample_depth`；实际选择逻辑见
 [`trainer.cpp`](../aetherscan/src/splat/trainer.cpp#L813)。
 
@@ -379,13 +381,13 @@ atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后
 
 稳定窗口中 sample forward+backward 占总 CUDA 时间的 41.6%（`ori_img`）和 43.6%
 （`antman_nomask`）。若这两个阶段整体加速 2 倍，在其他阶段不变的假设下，Amdahl 估算
-每次训练迭代的 CUDA 时间可分别下降约 20.8% 和 21.8%。若 GGGS 仍占完整 pipeline 的
+每次训练迭代的 CUDA 时间可分别下降约 20.8% 和 21.8%。若 splat 训练仍占完整 pipeline 的
 约 90%，且 wall time 与 CUDA 时间近似同比变化，整条 pipeline 的潜在收益约为 18%–20%；
 该数字是单 kernel 优化上限估算；下面的完整 30,000 步 A/B 已验证更高层的调度收益。
 
 #### ADC tail 多视图随机调度 A/B（2026-07-31）
 
-新增 `--gggs-mv-tail-interval N`。默认值为 1，即每步执行；`N=2` 是显式性能模式。
+新增 `--splat-mv-tail-interval N`。默认值为 1，即每步执行；`N=2` 是显式性能模式。
 调度只在 `iteration > grow_stop_iter` 后生效，ADCPlus 默认即第 15,001–30,000 步。
 被跳过的迭代仍消费邻视角选择 RNG，避免改变后续随机流；活跃迭代把 geometry/NCC 权重
 乘以 `N`，因此是无偏的随机目标估计。它不会改变 depth-normal 的执行频率。
@@ -395,7 +397,7 @@ atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后
 
 | 指标 | interval=1 | interval=2 | 变化 |
 |---|---:|---:|---:|
-| GGGS wall time | 575.389 s | 478.244 s | **-16.88%** |
+| Splat wall time | 575.389 s | 478.244 s | **-16.88%** |
 | 15,001–30,000 CUDA/iter | 21.2029 ms | 14.8752 ms | **-29.84%** |
 | 15,001–30,000 multi-view/iter | 12.3839 ms | 6.1603 ms | -50.25% |
 | sample forward / loss / backward | 5.7850 / 3.2788 / 2.9687 ms | 2.8582 / 1.6546 / 1.4688 ms | 约 -50% |
@@ -415,7 +417,7 @@ ADC 的 GPU 原子与 refine 会造成跨进程非逐元素确定性，因此 Ga
 
 | 指标 | interval=1 | interval=2 | 变化 |
 |---|---:|---:|---:|
-| GGGS wall time | 442.813 s | 380.596 s | **-14.05%** |
+| Splat wall time | 442.813 s | 380.596 s | **-14.05%** |
 | 15,001–30,000 CUDA/iter | 17.2424 ms | 12.8187 ms | **-25.66%** |
 | 15,001–30,000 multi-view/iter | 9.8435 ms | 5.1150 ms | -48.04% |
 | 三视角平均 PSNR | 37.8694 dB | 36.7273 dB | **-1.1421 dB** |
@@ -432,7 +434,7 @@ interval=2 只能作为允许质量折衷的显式 fast mode。对应日志为
 
 #### Plane-warp NCC 底层 kernel A/B（2026-07-31）
 
-默认训练继续保持 `--gggs-mv-tail-interval 1`，没有改变 multi-view 的迭代频率、权重、
+默认训练继续保持 `--splat-mv-tail-interval 1`，没有改变 multi-view 的迭代频率、权重、
 7×7 patch、homography、NCC 目标或解析梯度。优化只作用于图像解码和
 `multi_view_raw_kernel`：
 
@@ -449,7 +451,7 @@ ADCPlus 5,000 步、`1000 px`、geometry from 3,000、无 Mask、interval=1 上�
 
 | 指标 | 基线 | Plane-warp NCC 优化 | 变化 |
 |---|---:|---:|---:|
-| GGGS wall time | 30.4701 s | 29.5425 s | **-3.04%** |
+| Splat wall time | 30.4701 s | 29.5425 s | **-3.04%** |
 | 3,001–5,000 CUDA/iter | 11.0843 ms | 10.7495 ms | **-3.02%** |
 | 3,001–5,000 multi-view/iter | 6.6993 ms | 6.4688 ms | **-3.44%** |
 | 3,001–5,000 NCC loss kernel | 2.1737 ms | 2.0694 ms | **-4.80%** |
@@ -462,7 +464,7 @@ ADCPlus 的 atomic/refine 路径不是跨进程逐元素确定的，且底层优
 `artifacts/antman_ncc_ab_20260731/baseline_mv/stdout.log` 和
 `artifacts/antman_ncc_ab_20260731/optimized_samples_mv/stdout.log`。
 
-最终候选又以同一 COLMAP 输入完成 30,000 步 + TSDF/Clean 检查：GGGS 训练 422.839 秒，
+最终候选又以同一 COLMAP 输入完成 30,000 步 + TSDF/Clean 检查：splat 训练 422.839 秒，
 521,820 个 Gaussian，三视角平均 PSNR 39.2708 dB；第 15,001–30,000 步每窗口平均
 CUDA 16.2756 ms、multi-view 9.2433 ms、NCC loss 2.3062 ms，15,000 个迭代中有
 14,298 个有效 multi-view step。TSDF 三个诊断视图的跨视角深度一致率为
@@ -472,11 +474,11 @@ COLMAP 模型直接加载，不能与上文旧的 26,127 点 OpenMVS 30k 基线�
 
 ## 当前几何交付与后续工作
 
-当前版本已打通 GGGS mesh extraction：训练后按原图分辨率渲染每个相机的 median depth、normal
+当前版本已打通 splat mesh extraction：训练后按原图分辨率渲染每个相机的 median depth、normal
 和 alpha；存在输入 mask 时以 mask 为准，否则回退到 alpha 0.5，与 `gs2mesh.py` 一致。随后按
 `max_depth=2*scene_extent`、`voxel=max_depth/2048`、`sdf_trunc=4*voxel` 做 Open3D-compatible
-稀疏体素块投影融合，并用标准 Marching Cubes 抽取、保留最大连通分量。`--gggs --mesh` 会把
-`active_mesh` 切换为 `*_gggs_mesh.ply`，不再使用 projective MVS patch mesh。
+稀疏体素块投影融合，并用标准 Marching Cubes 抽取、保留最大连通分量。`--splat --mesh` 会把
+`active_mesh` 切换为 `*_splat_mesh.ply`，不再使用 projective MVS patch mesh。
 
 若构建时找到 CGAL，可通过非零 `--mesh-target-faces` 显式调用 asdiff_render 的 Instant Meshes
 field-aligned remesh，再调用 `asdiff::mesh::repair_and_decimate`；默认保留原生 Marching Cubes 网格；

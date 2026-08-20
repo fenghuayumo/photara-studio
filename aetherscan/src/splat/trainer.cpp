@@ -55,7 +55,7 @@ constexpr std::size_t k_cuda_training_stage_count =
 void check_profile_cuda(const cudaError_t error, const char* operation) {
     if (error == cudaSuccess) return;
     throw std::runtime_error(
-        std::string{"GGGS CUDA profiler "} + operation + " failed: " +
+        std::string{"Splat CUDA profiler "} + operation + " failed: " +
         cudaGetErrorString(error));
 }
 
@@ -81,7 +81,7 @@ public:
             throw;
         }
         core::Logger::instance().info(
-            "gggs_cuda_profile enabled=1 interval=", interval_,
+            "splat_cuda_profile enabled=1 interval=", interval_,
             " stages=raster_forward,training_loss,multi_view_unproject,"
             "multi_view_sample_forward,multi_view_loss,"
             "multi_view_sample_backward,raster_backward,"
@@ -100,7 +100,7 @@ public:
         const unsigned iteration, const std::size_t gaussian_count) {
         if (!enabled_) return;
         if (sample_cursor_ >= samples_.size())
-            throw std::logic_error("GGGS CUDA profiler sample window overflow");
+            throw std::logic_error("Splat CUDA profiler sample window overflow");
         if (sample_cursor_ == 0) {
             first_iteration_ = iteration;
             first_gaussians_ = gaussian_count;
@@ -117,7 +117,7 @@ public:
         const std::size_t index = static_cast<std::size_t>(stage);
         if (index != active_stage_)
             throw std::logic_error(
-                "GGGS CUDA profiler stage order is inconsistent");
+                "Splat CUDA profiler stage order is inconsistent");
         check_profile_cuda(
             cudaEventRecord(
                 samples_[sample_cursor_].boundaries[index + 1], nullptr),
@@ -133,7 +133,7 @@ public:
         if (!enabled_) return;
         if (active_stage_ != k_cuda_training_stage_count)
             throw std::logic_error(
-                "GGGS CUDA profiler iteration ended before every stage");
+                "Splat CUDA profiler iteration ended before every stage");
         last_iteration_ = iteration;
         last_gaussians_ = gaussian_count;
         rendered_instances_sum_ += rendered_instances;
@@ -198,7 +198,7 @@ private:
             ? multi_view_average_ms * 100.0 / cuda_timeline_average_ms
             : 0.0;
         core::Logger::instance().info(
-            "gggs_cuda_profile iterations=", first_iteration_, '-',
+            "splat_cuda_profile iterations=", first_iteration_, '-',
             last_iteration_, " samples=", sample_cursor_,
             " gaussians=[", first_gaussians_, ',', last_gaussians_, ']',
             " avg_tile_instances=",
@@ -465,9 +465,9 @@ tinytensor::Tensor normal_features_from_smallest_axis(
 GaussianModel initialize_from_dense_cloud(
     const mvs::MvsScene& scene, const TrainingOptions& options) {
     if (scene.dense_cloud.points.empty())
-        throw std::invalid_argument("GGGS initialization requires a non-empty dense cloud");
+        throw std::invalid_argument("Splat initialization requires a non-empty dense cloud");
     if (options.sh_degree > 3)
-        throw std::invalid_argument("The current GGGS CUDA backend supports SH degree <= 3");
+        throw std::invalid_argument("The current splat CUDA backend supports SH degree <= 3");
     const std::size_t source_count = scene.dense_cloud.points.size();
     const std::size_t count = options.max_gaussians == 0
         ? source_count
@@ -639,7 +639,7 @@ GaussianModel Trainer::train(
     const mvs::MvsScene& scene, ProgressCallback progress,
     EvaluationCallback evaluate) const {
     if (scene.views.empty())
-        throw std::invalid_argument("GGGS training requires at least one MVS view");
+        throw std::invalid_argument("Splat training requires at least one MVS view");
     GaussianModel model = initialize_from_dense_cloud(scene, options_);
     const bool use_3d_filter =
         options_.use_depth_normal_loss &&
@@ -652,7 +652,7 @@ GaussianModel Trainer::train(
             view_indices.push_back(index);
     if (view_indices.empty())
         throw std::invalid_argument(
-            "GGGS evaluation split left no training views");
+            "Splat evaluation split left no training views");
     float active_resolution_scale =
         data::progressive_resolution_scale(1, options_);
     data::TrainingDataLoader view_cache(
@@ -661,7 +661,7 @@ GaussianModel Trainer::train(
         for (const std::size_t index : view_indices)
             if (!view_cache.has_mask(index))
                 throw std::invalid_argument(
-                    "GGGS subject-only training requires a matching mask "
+                    "Splat subject-only training requires a matching mask "
                     "file or source alpha channel for every selected view");
     }
 
@@ -1146,7 +1146,7 @@ GaussianModel Trainer::train(
                 adaptive_multi_view_options.multi_view_ncc_weight *=
                     static_cast<float>(decision.interval);
                 core::Logger::instance().info(
-                    "gggs_mv_stability iteration=", iteration,
+                    "splat_mv_stability iteration=", iteration,
                     " reference_ready=", decision.reference_ready,
                     " stable=", decision.stable,
                     " stable_refinements=", decision.stable_refinements,
@@ -1174,7 +1174,7 @@ GaussianModel Trainer::train(
                     multi_view_scheduler.invalidate();
                 adaptive_multi_view_options = options_;
                 core::Logger::instance().info(
-                    "gggs_mv_stability iteration=", iteration,
+                    "splat_mv_stability iteration=", iteration,
                     " reference_ready=false stable=false interval=",
                     decision.interval,
                     " recovered=", decision.recovered,
@@ -1235,7 +1235,7 @@ GaussianModel Trainer::train(
             const cudaError_t report_error = cudaDeviceSynchronize();
             if (report_error != cudaSuccess)
                 throw std::runtime_error(
-                    std::string("GGGS training step failed: ") +
+                    std::string("Splat training step failed: ") +
                     cudaGetErrorString(report_error));
             const double milliseconds = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count();
@@ -1290,7 +1290,7 @@ GaussianModel Trainer::train(
     const cudaError_t error = cudaDeviceSynchronize();
     if (error != cudaSuccess)
         throw std::runtime_error(
-            std::string("GGGS training synchronization failed: ") +
+            std::string("Splat training synchronization failed: ") +
             cudaGetErrorString(error));
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
@@ -1402,7 +1402,7 @@ void save_gaussians_ply(
             const auto index = static_cast<std::size_t>(
                 std::distance(values.begin(), invalid));
             throw std::runtime_error(
-                std::string("Refusing to write non-finite GGGS parameter ") +
+                std::string("Refusing to write non-finite splat parameter ") +
                 name + " at scalar index " + std::to_string(index));
         }
     };
@@ -1417,7 +1417,7 @@ void save_gaussians_ply(
     std::ofstream output(path, std::ios::binary);
     if (!output) throw std::runtime_error("Failed to create Gaussian PLY: " + path.string());
     output << "ply\nformat binary_little_endian 1.0\n"
-           << "comment AetherScan GGGS (3DGS-compatible SH layout)\n"
+           << "comment AetherScan splat (GGGS-derived geometry; 3DGS-compatible SH layout)\n"
            << "element vertex " << count << '\n'
            << "property float x\nproperty float y\nproperty float z\n"
            << "property float nx\nproperty float ny\nproperty float nz\n"
@@ -1666,7 +1666,7 @@ GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
             filter, {count, 1U}, tinytensor::Device::CUDA);
     model.sh_degree = degree;
     core::Logger::instance().info(
-        "loaded GGGS PLY=", path, " gaussians=", count,
+        "loaded splat PLY=", path, " gaussians=", count,
         " sh_degree=", degree, " filter_3d=", !filter.empty(),
         " learned_normal_field=", has_normal_features);
     return model;
