@@ -137,6 +137,8 @@ GaussianModel clone_model(const GaussianModel& model) {
     cloned.quaternions = model.quaternions.clone();
     cloned.opacity_logits = model.opacity_logits.clone();
     cloned.sh = model.sh.clone();
+    if (model.normal_features.is_valid())
+        cloned.normal_features = model.normal_features.clone();
     if (model.filter_3d.is_valid())
         cloned.filter_3d = model.filter_3d.clone();
     cloned.sh_degree = model.sh_degree;

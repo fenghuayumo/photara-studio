@@ -400,6 +400,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
             src/splat/densification_adc_plus.cpp
             src/splat/densification_strategies.cpp
             src/splat/mesh.cpp
+            src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp
             src/splat/trainer.cpp)
         add_library(AetherScan::Splat ALIAS aetherscan_splat)

@@ -11,6 +11,9 @@ struct RasterizeOptions {
     float scale_modifier{1.F};
     bool require_depth{true};
     bool debug{false};
+    // Optional [N,3] world-space feature colors. When present, SH evaluation
+    // is bypassed and backward returns ModelGradients::colors_precomp.
+    tinytensor::Tensor colors_precomp;
 };
 
 class Rasterizer {
@@ -34,6 +37,11 @@ public:
     DepthSampleGradients sample_depth_backward(
         const GaussianModel& model, const DepthSampleResult& sampled,
         const tinytensor::Tensor& grad_camera_points) const;
+
+    OccupancyResult evaluate_occupancy(
+        const GaussianModel& model, const tinytensor::Tensor& world_points,
+        const Camera& camera,
+        const RasterizeOptions& options = {}) const;
 };
 
 }  // namespace aetherscan::splat

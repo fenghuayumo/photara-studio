@@ -1,5 +1,7 @@
 #include "splat/colmap.hpp"
 
+#include "io/image.hpp"
+
 #include <Eigen/Geometry>
 
 #include <algorithm>
@@ -296,6 +298,32 @@ void set_intrinsics(const ColmapCamera& camera, mvs::MvsView& view) {
     view.src_cy = view.cy;
 }
 
+void match_selected_image_resolution(
+    const io::ImageSize& selected, mvs::MvsView& view) {
+    if (selected.width == view.src_width &&
+        selected.height == view.src_height)
+        return;
+    const float scale_x =
+        static_cast<float>(selected.width) / view.src_width;
+    const float scale_y =
+        static_cast<float>(selected.height) / view.src_height;
+    const auto scale_principal = [](const float value, const float scale) {
+        return (value + 0.5F) * scale - 0.5F;
+    };
+    view.fx *= scale_x;
+    view.fy *= scale_y;
+    view.cx = scale_principal(view.cx, scale_x);
+    view.cy = scale_principal(view.cy, scale_y);
+    view.width = selected.width;
+    view.height = selected.height;
+    view.src_fx *= scale_x;
+    view.src_fy *= scale_y;
+    view.src_cx = scale_principal(view.src_cx, scale_x);
+    view.src_cy = scale_principal(view.src_cy, scale_y);
+    view.src_width = selected.width;
+    view.src_height = selected.height;
+}
+
 }  // namespace
 
 ColmapLoadResult load_colmap_scene(
@@ -337,6 +365,7 @@ ColmapLoadResult load_colmap_scene(
         if (!std::filesystem::is_regular_file(view.path))
             throw std::runtime_error("COLMAP image does not exist: " + view.path.string());
         set_intrinsics(camera->second, view);
+        match_selected_image_resolution(io::load_image_size(view.path), view);
         view.pose.set_from_rt(image.rotation.toRotationMatrix(), image.translation);
         image_to_view.emplace(image.id, view.id);
         result.scene.views.push_back(std::move(view));

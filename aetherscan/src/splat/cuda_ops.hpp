@@ -71,6 +71,14 @@ struct GeometryDistributionSummary {
 
 ActivatedParameters activate_parameters(const GaussianModel& model);
 
+// Convert GaussianWrapping's [direction.xyz, orientation_logit] features to
+// normalize(direction) * tanh(logit), and chain gradients back to features.
+tinytensor::Tensor normal_features_to_normals(
+    const tinytensor::Tensor& normal_features);
+tinytensor::Tensor normal_features_backward(
+    const tinytensor::Tensor& normal_features,
+    const tinytensor::Tensor& grad_normals);
+
 // Upload one packed RGBA8 word per pixel and expand it on CUDA. Packing the
 // host cache cuts its footprint and per-step PCIe traffic by 3-4x compared
 // with cached planar float RGB plus a separate float mask.
@@ -139,6 +147,14 @@ LossGradients compute_training_loss(
     const RenderResult& rendered, const TrainingView& target,
     const TrainingOptions& options, bool collect_scalar_terms,
     bool depth_normal_active = false);
+
+LossGradients compute_normal_field_loss(
+    const RenderResult& rendered, const Camera& camera, float weight,
+    bool collect_scalar_terms = false);
+
+void add_model_gradients(
+    const ModelGradients& source, ModelGradients& destination,
+    bool include_refine_weight = false);
 
 AdamState make_adam_state(const tinytensor::Tensor& parameter);
 

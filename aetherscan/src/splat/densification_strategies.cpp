@@ -42,6 +42,9 @@ GaussianModel select_model_rows(
     selected.quaternions = model.quaternions.index_select(0, indices);
     selected.opacity_logits = model.opacity_logits.index_select(0, indices);
     selected.sh = model.sh.index_select(0, indices);
+    if (model.normal_features.is_valid())
+        selected.normal_features =
+            model.normal_features.index_select(0, indices);
     selected.sh_degree = model.sh_degree;
     return selected;
 }
@@ -56,6 +59,9 @@ void append_model(GaussianModel& model, const GaussianModel& added) {
     model.opacity_logits = tinytensor::Tensor::cat(
         {model.opacity_logits, added.opacity_logits}, 0);
     model.sh = tinytensor::Tensor::cat({model.sh, added.sh}, 0);
+    if (model.normal_features.is_valid())
+        model.normal_features = tinytensor::Tensor::cat(
+            {model.normal_features, added.normal_features}, 0);
 }
 
 void select_adam_rows(

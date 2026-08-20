@@ -24,11 +24,10 @@ namespace aetherscan::mvs::detail {
 namespace {
 
 // Match Open3D ScalableTSDFVolume, which is the backend used by pygsplat's
-// gs2mesh.py: 16^3 sparse volume units allocated around stride-4 depth points.
+// gs2mesh.py: 16^3 sparse volume units allocated around sampled depth points.
 constexpr int k_block_resolution = 16;
 constexpr int k_block_voxel_count =
     k_block_resolution * k_block_resolution * k_block_resolution;
-constexpr unsigned k_depth_sampling_stride = 4;
 constexpr std::size_t k_positive_block_count = 8;
 constexpr std::size_t k_cell_mask_words =
     (k_block_voxel_count + 63) / 64;
@@ -164,7 +163,8 @@ struct TouchedBlock {
 
 [[nodiscard]] std::vector<TouchedBlock> allocate_view_blocks(
     const MvsView& view, const OrientedBoundingBox& subject_bounds,
-    const float block_length, const float truncation, Volume& volume,
+    const float block_length, const float truncation,
+    const unsigned depth_sampling_stride, Volume& volume,
     std::size_t& valid_depth_samples) {
     std::unordered_set<GridKey, GridHash> touched;
     const DepthMap& map = view.depth_map;
@@ -172,8 +172,8 @@ struct TouchedBlock {
 
     const float inverse_block_length = 1.F / block_length;
     const Vec3f truncation_vector = Vec3f::Constant(truncation);
-    for (unsigned y = 0; y < map.height; y += k_depth_sampling_stride) {
-        for (unsigned x = 0; x < map.width; x += k_depth_sampling_stride) {
+    for (unsigned y = 0; y < map.height; y += depth_sampling_stride) {
+        for (unsigned x = 0; x < map.width; x += depth_sampling_stride) {
             const float depth = map.depth[map.index(x, y)];
             if (!(depth > 0.F) || !std::isfinite(depth)) continue;
             ++valid_depth_samples;
@@ -1135,9 +1135,11 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
     std::size_t valid_depth_samples = 0;
     std::uint64_t integrated_voxels = 0;
     std::size_t maximum_view_blocks = 0;
+    const unsigned depth_sampling_stride =
+        std::max(options.mesh_tsdf_pixel_step, 1U);
     for (const MvsView& view : scene.views) {
         const std::vector<TouchedBlock> blocks = allocate_view_blocks(
-            view, bounds, block_length, truncation, volume,
+            view, bounds, block_length, truncation, depth_sampling_stride, volume,
             valid_depth_samples);
         maximum_view_blocks = std::max(maximum_view_blocks, blocks.size());
         integrated_voxels += integrate_view(
@@ -1149,7 +1151,7 @@ bool reconstruct_mesh_tsdf(MvsScene& scene, const DensifyOptions& options) {
         voxel_size, " inferred_voxel=", inferred_voxel,
         " voxel_scale=", options.mesh_tsdf_voxel_scale,
         " truncation=", truncation,
-        " depth_sampling_stride=", k_depth_sampling_stride,
+        " depth_sampling_stride=", depth_sampling_stride,
         " bounds_enabled=", bounds.valid,
         " depth_samples=", valid_depth_samples,
         " volume_blocks=", volume.size(),

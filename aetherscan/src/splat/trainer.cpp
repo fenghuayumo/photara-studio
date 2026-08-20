@@ -428,6 +428,36 @@ void write_float(std::ofstream& stream, const float value) {
     stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
+tinytensor::Tensor normal_features_from_smallest_axis(
+    const GaussianModel& model) {
+    const detail::ActivatedParameters activated =
+        detail::activate_parameters(model);
+    const auto scales = activated.scales.to_vector();
+    const auto quaternions = activated.quaternions.to_vector();
+    std::vector<float> features(model.size() * 4, 0.F);
+    for (std::size_t index = 0; index < model.size(); ++index) {
+        int minimum_axis = 0;
+        if (scales[3 * index + 1] < scales[3 * index])
+            minimum_axis = 1;
+        if (scales[3 * index + 2] <
+            scales[3 * index + static_cast<std::size_t>(minimum_axis)])
+            minimum_axis = 2;
+        const Eigen::Quaternionf rotation(
+            quaternions[4 * index], quaternions[4 * index + 1],
+            quaternions[4 * index + 2], quaternions[4 * index + 3]);
+        const mvs::Vec3f direction =
+            rotation.toRotationMatrix().col(minimum_axis);
+        for (int axis = 0; axis < 3; ++axis)
+            features[4 * index + static_cast<std::size_t>(axis)] =
+                direction(axis);
+        // GaussianWrapping resets the learnable orientation sign to zero.
+        features[4 * index + 3] = 0.F;
+    }
+    return tinytensor::Tensor::from_vector(
+        features, {model.size(), std::size_t{4}},
+        tinytensor::Device::CUDA);
+}
+
 
 
 }  // namespace
@@ -451,6 +481,7 @@ GaussianModel initialize_from_dense_cloud(
     std::vector<float> quaternions(count * 4);
     std::vector<float> opacities(count);
     std::vector<float> sh(count * bases * 3, 0.F);
+    std::vector<float> normal_features(count * 4, 0.F);
 
     const auto source_index = [source_count, count](const std::size_t index) {
         return count == source_count
@@ -568,6 +599,17 @@ GaussianModel initialize_from_dense_cloud(
             quaternions[4 * index + 3] = 0.F;
         }
         opacities[index] = opacity_logit;
+        mvs::Vec3f field_normal = point.normal;
+        if (!field_normal.allFinite() ||
+            field_normal.squaredNorm() < 1e-12F)
+            field_normal = mvs::Vec3f::UnitZ();
+        else
+            field_normal.normalize();
+        for (int axis = 0; axis < 3; ++axis)
+            normal_features[4 * index + axis] = field_normal(axis);
+        // GaussianWrapping resets orientation signs to zero when normal-field
+        // regularization starts, so tanh(w) initially contributes no bias.
+        normal_features[4 * index + 3] = 0.F;
         for (int channel = 0; channel < 3; ++channel)
             sh[(index * bases) * 3 + channel] =
                 (std::clamp(point.color(channel), 0.F, 1.F) - 0.5F) / k_sh0;
@@ -584,6 +626,8 @@ GaussianModel initialize_from_dense_cloud(
         opacities, {count, 1}, tinytensor::Device::CUDA);
     model.sh = tinytensor::Tensor::from_vector(
         sh, {count, bases, 3}, tinytensor::Device::CUDA);
+    model.normal_features = tinytensor::Tensor::from_vector(
+        normal_features, {count, 4}, tinytensor::Device::CUDA);
     model.sh_degree = options.sh_degree;
     return model;
 }
@@ -702,9 +746,11 @@ GaussianModel Trainer::train(
         options_.densification_strategy == DensificationStrategy::adc_plus
             ? detail::make_reduced_second_adam_state(model.sh)
             : detail::make_adam_state(model.sh);
+    detail::AdamState normal_features_state =
+        detail::make_adam_state(model.normal_features);
     const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
-        &sh_state};
+        &sh_state, &normal_features_state};
     const bool densification_enabled = refine::is_enabled(options_);
     detail::DensificationStats densification_stats =
         detail::make_densification_stats(model.size());
@@ -808,6 +854,9 @@ GaussianModel Trainer::train(
         const bool depth_normal_active = options_.use_depth_normal_loss &&
             options_.depth_normal_weight > 0.F &&
             iteration >= options_.depth_normal_from_iter;
+        const bool normal_field_active = options_.use_normal_field &&
+            options_.normal_field_weight > 0.F &&
+            iteration >= options_.normal_field_from_iter;
         const bool multi_view_eligible =
             (options_.multi_view_geo_weight > 0.F ||
              options_.multi_view_ncc_weight > 0.F) &&
@@ -837,6 +886,7 @@ GaussianModel Trainer::train(
         raster_options.require_depth = options_.use_mvs_depth ||
                                        options_.use_mvs_normals ||
                                        depth_normal_active ||
+                                       normal_field_active ||
                                        multi_view_active;
         cuda_profiler.begin_iteration(iteration, model.size());
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
@@ -844,6 +894,41 @@ GaussianModel Trainer::train(
         detail::LossGradients loss = detail::compute_training_loss(
             rendered, target, options_, report_progress,
             depth_normal_active);
+        RenderResult normal_field_render;
+        detail::LossGradients normal_field_loss;
+        ModelGradients normal_field_gradients;
+        if (options_.use_normal_field &&
+            iteration == std::max(options_.normal_field_from_iter, 1U)) {
+            model.normal_features =
+                normal_features_from_smallest_axis(model);
+            normal_features_state =
+                detail::make_adam_state(model.normal_features);
+        }
+        if (normal_field_active) {
+            RasterizeOptions normal_options = raster_options;
+            normal_options.colors_precomp =
+                detail::normal_features_to_normals(model.normal_features);
+            normal_options.require_depth = true;
+            normal_field_render = rasterizer.forward(
+                model, target.camera, normal_options);
+            normal_field_loss = detail::compute_normal_field_loss(
+                normal_field_render, target.camera,
+                options_.normal_field_weight *
+                    options_.normal_field_depth_ratio,
+                report_progress);
+            normal_field_gradients = rasterizer.backward(
+                model, normal_field_render, normal_field_loss.color,
+                normal_field_loss.alpha, normal_field_loss.depth,
+                normal_field_loss.normal);
+            normal_field_gradients.normal_features =
+                detail::normal_features_backward(
+                    model.normal_features,
+                    normal_field_gradients.colors_precomp);
+            if (report_progress) {
+                loss.total += normal_field_loss.total;
+                loss.normal_value += normal_field_loss.normal_value;
+            }
+        }
         cuda_profiler.mark(CudaTrainingStage::training_loss);
         detail::MultiViewLoss multi_view_loss;
         DepthSampleGradients multi_view_sample_gradients;
@@ -899,6 +984,9 @@ GaussianModel Trainer::train(
         }
         ModelGradients gradients = rasterizer.backward(
             model, rendered, loss.color, loss.alpha, loss.depth, loss.normal);
+        if (normal_field_active)
+            detail::add_model_gradients(
+                normal_field_gradients, gradients, false);
         cuda_profiler.mark(CudaTrainingStage::raster_backward);
         if (has_multi_view_sample_gradients)
             detail::add_sample_depth_model_gradients(
@@ -975,6 +1063,12 @@ GaussianModel Trainer::train(
             detail::adam_step(
                 model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
                 options_, full_sh_stride, options_.sh_rest_lr);
+        if (normal_field_active)
+            detail::adam_step(
+                model.normal_features,
+                normal_field_gradients.normal_features,
+                normal_features_state, options_.normal_features_lr,
+                iteration, options_);
         cuda_profiler.mark(CudaTrainingStage::optimizer);
 
         if (densification_enabled &&
@@ -1287,6 +1381,13 @@ void save_gaussians_ply(
     const auto rotations = download<float>(model.quaternions);
     const auto opacities = download<float>(model.opacity_logits);
     const auto sh = download<float>(model.sh);
+    const bool has_normal_features = model.normal_features.is_valid() &&
+        model.normal_features.shape().rank() == 2 &&
+        model.normal_features.shape()[0] == count &&
+        model.normal_features.shape()[1] == 4;
+    const auto normal_features = has_normal_features
+        ? download<float>(model.normal_features)
+        : std::vector<float>{};
     const bool has_filter = model.filter_3d.is_valid() &&
         model.filter_3d.numel() == count;
     const auto filter_3d = has_filter
@@ -1310,6 +1411,8 @@ void save_gaussians_ply(
     require_finite(rotations, "quaternions");
     require_finite(opacities, "opacity_logits");
     require_finite(sh, "SH");
+    if (has_normal_features)
+        require_finite(normal_features, "normal_features");
     if (has_filter) require_finite(filter_3d, "filter_3D");
     std::ofstream output(path, std::ios::binary);
     if (!output) throw std::runtime_error("Failed to create Gaussian PLY: " + path.string());
@@ -1325,6 +1428,12 @@ void save_gaussians_ply(
            << "property float scale_0\nproperty float scale_1\nproperty float scale_2\n"
            << "property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n"
            << (has_filter ? "property float filter_3D\n" : "")
+           << (has_normal_features
+                   ? "property float gaussian_features_0\n"
+                     "property float gaussian_features_1\n"
+                     "property float gaussian_features_2\n"
+                     "property float gaussian_features_3\n"
+                   : "")
            << "end_header\n";
     for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
         for (int axis = 0; axis < 3; ++axis) write_float(output, means[3 * gaussian + axis]);
@@ -1341,6 +1450,11 @@ void save_gaussians_ply(
         for (int component = 0; component < 4; ++component)
             write_float(output, rotations[4 * gaussian + component]);
         if (has_filter) write_float(output, filter_3d[gaussian]);
+        if (has_normal_features)
+            for (int component = 0; component < 4; ++component)
+                write_float(
+                    output,
+                    normal_features[4 * gaussian + component]);
     }
     if (!output) throw std::runtime_error("Failed while writing Gaussian PLY: " + path.string());
 }
@@ -1435,9 +1549,21 @@ GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
     std::vector<float> rotations(count * 4U);
     std::vector<float> opacities(count);
     std::vector<float> sh(count * bases * 3U, 0.F);
+    std::vector<float> normal_features(count * 4U, 0.F);
     const auto filter_property = property_index.find("filter_3D");
     std::vector<float> filter;
     if (filter_property != property_index.end()) filter.resize(count);
+    std::array<std::size_t, 4> normal_feature_index{};
+    bool has_normal_features = true;
+    for (std::size_t component = 0; component < 4; ++component) {
+        const auto found = property_index.find(
+            "gaussian_features_" + std::to_string(component));
+        if (found == property_index.end()) {
+            has_normal_features = false;
+            break;
+        }
+        normal_feature_index[component] = found->second;
+    }
     std::vector<float> row(properties.size());
     for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
         input.read(
@@ -1470,6 +1596,46 @@ GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
             }
         }
         if (!filter.empty()) filter[gaussian] = row[filter_property->second];
+        if (has_normal_features)
+            for (std::size_t component = 0; component < 4; ++component)
+                normal_features[4U * gaussian + component] =
+                    row[normal_feature_index[component]];
+    }
+    if (!has_normal_features) {
+        // Legacy 3DGS PLY: seed the field from the thinnest covariance axis.
+        // Its orientation is necessarily ambiguous without learned features;
+        // w=1 keeps the field usable for PAM while further training can flip it.
+        for (std::size_t gaussian = 0; gaussian < count; ++gaussian) {
+            const auto scale = scales.begin() +
+                static_cast<std::ptrdiff_t>(3U * gaussian);
+            const int axis = static_cast<int>(std::distance(
+                scale, std::min_element(scale, scale + 3)));
+            float w = rotations[4U * gaussian];
+            float x = rotations[4U * gaussian + 1U];
+            float y = rotations[4U * gaussian + 2U];
+            float z = rotations[4U * gaussian + 3U];
+            const float inverse_norm = 1.F / std::max(
+                std::sqrt(w * w + x * x + y * y + z * z), 1e-12F);
+            w *= inverse_norm;
+            x *= inverse_norm;
+            y *= inverse_norm;
+            z *= inverse_norm;
+            const std::array<std::array<float, 3>, 3> columns{{
+                {{1.F - 2.F * (y * y + z * z),
+                  2.F * (x * y + w * z),
+                  2.F * (x * z - w * y)}},
+                {{2.F * (x * y - w * z),
+                  1.F - 2.F * (x * x + z * z),
+                  2.F * (y * z + w * x)}},
+                {{2.F * (x * z + w * y),
+                  2.F * (y * z - w * x),
+                  1.F - 2.F * (x * x + y * y)}}}};
+            for (int component = 0; component < 3; ++component)
+                normal_features[4U * gaussian + component] =
+                    columns[static_cast<std::size_t>(axis)]
+                           [static_cast<std::size_t>(component)];
+            normal_features[4U * gaussian + 3U] = 1.F;
+        }
     }
     const auto finite = [](const std::vector<float>& values) {
         return std::all_of(
@@ -1477,7 +1643,7 @@ GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
             [](const float value) { return std::isfinite(value); });
     };
     if (!finite(means) || !finite(scales) || !finite(rotations) ||
-        !finite(opacities) || !finite(sh) ||
+        !finite(opacities) || !finite(sh) || !finite(normal_features) ||
         (!filter.empty() && !finite(filter)))
         throw std::runtime_error(
             "Gaussian PLY contains non-finite parameters: " + path.string());
@@ -1493,13 +1659,16 @@ GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
         opacities, {count, 1U}, tinytensor::Device::CUDA);
     model.sh = tinytensor::Tensor::from_vector(
         sh, {count, bases, 3U}, tinytensor::Device::CUDA);
+    model.normal_features = tinytensor::Tensor::from_vector(
+        normal_features, {count, 4U}, tinytensor::Device::CUDA);
     if (!filter.empty())
         model.filter_3d = tinytensor::Tensor::from_vector(
             filter, {count, 1U}, tinytensor::Device::CUDA);
     model.sh_degree = degree;
     core::Logger::instance().info(
         "loaded GGGS PLY=", path, " gaussians=", count,
-        " sh_degree=", degree, " filter_3d=", !filter.empty());
+        " sh_degree=", degree, " filter_3d=", !filter.empty(),
+        " learned_normal_field=", has_normal_features);
     return model;
 }
 

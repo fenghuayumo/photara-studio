@@ -20,6 +20,7 @@ struct RasterContextImpl {
     tinytensor::Tensor binning_buffer;
     tinytensor::Tensor image_buffer;
     tinytensor::Tensor tile_buffer;
+    tinytensor::Tensor colors_precomp;
     RasterizeOptions options;
     Camera camera;
     int rendered_instances{};
@@ -86,6 +87,9 @@ RenderResult Rasterizer::forward(
     require_cuda_float_contiguous(model.sh, "model.sh");
     if (model.filter_3d.is_valid())
         require_cuda_float_contiguous(model.filter_3d, "model.filter_3d");
+    if (requested_options.colors_precomp.is_valid())
+        require_cuda_float_contiguous(
+            requested_options.colors_precomp, "colors_precomp");
     if (camera.width == 0 || camera.height == 0)
         throw std::invalid_argument("GGGS camera dimensions must be positive");
     if (model.means.shape().rank() != 2 || model.means.shape()[1] != 3 ||
@@ -101,11 +105,18 @@ RenderResult Rasterizer::forward(
           model.filter_3d.shape()[0] != model.size() ||
           model.filter_3d.shape()[1] != 1)))
         throw std::invalid_argument("Invalid GGGS model tensor shapes");
+    if (requested_options.colors_precomp.is_valid() &&
+        (requested_options.colors_precomp.shape().rank() != 2 ||
+         requested_options.colors_precomp.shape()[0] != model.size() ||
+         requested_options.colors_precomp.shape()[1] != 3))
+        throw std::invalid_argument(
+            "GGGS precomputed colors must have shape [N,3]");
 
     RenderResult result;
     auto context = std::make_shared<RasterContextImpl>();
     context->camera = camera;
     context->options = requested_options;
+    context->colors_precomp = requested_options.colors_precomp;
     context->options.active_sh_degree = std::min(
         requested_options.active_sh_degree, model.sh_degree);
     context->activated = detail::activate_parameters(model);
@@ -151,11 +162,15 @@ RenderResult Rasterizer::forward(
             static_cast<int>(total_bases), 0, 0,
             context->background.ptr<float>(),
             static_cast<int>(camera.width), static_cast<int>(camera.height),
-            model.means.ptr<float>(), nullptr,
+            model.means.ptr<float>(),
+            context->colors_precomp.is_valid()
+                ? context->colors_precomp.ptr<float>()
+                : nullptr,
             context->activated.opacities.ptr<float>(),
             context->activated.scales.ptr<float>(),
             context->activated.quaternions.ptr<float>(), nullptr,
-            model.sh.ptr<float>(), nullptr, nullptr, nullptr,
+            context->colors_precomp.is_valid() ? nullptr : model.sh.ptr<float>(),
+            nullptr, nullptr, nullptr,
             context->options.scale_modifier,
             context->view_matrix.ptr<float>(),
             context->camera_position.ptr<float>(), camera.fx, camera.fy,
@@ -207,10 +222,14 @@ ModelGradients Rasterizer::backward(
             context.rendered_instances, context.background.ptr<float>(),
             static_cast<int>(context.camera.width),
             static_cast<int>(context.camera.height), model.means.ptr<float>(),
-            nullptr, context.activated.opacities.ptr<float>(),
+            context.colors_precomp.is_valid()
+                ? context.colors_precomp.ptr<float>()
+                : nullptr,
+            context.activated.opacities.ptr<float>(),
             context.activated.scales.ptr<float>(),
             context.activated.quaternions.ptr<float>(), nullptr,
-            model.sh.ptr<float>(), nullptr, nullptr, nullptr,
+            context.colors_precomp.is_valid() ? nullptr : model.sh.ptr<float>(),
+            nullptr, nullptr, nullptr,
             context.options.scale_modifier, context.view_matrix.ptr<float>(),
             context.camera_position.ptr<float>(), context.camera.fx,
             context.camera.fy, context.camera.cx, context.camera.cy,
@@ -238,6 +257,8 @@ ModelGradients Rasterizer::backward(
         model, context.activated, grad_scales, grad_quaternions,
         grad_opacities, gradients);
     gradients.refine_weight = std::move(refine_weight);
+    if (context.colors_precomp.is_valid())
+        gradients.colors_precomp = std::move(grad_colors);
     return gradients;
 }
 
@@ -343,6 +364,61 @@ DepthSampleGradients Rasterizer::sample_depth_backward(
     detail::chain_parameter_gradients(
         model, context.activated, grad_scales, grad_quaternions,
         grad_opacities, result.model);
+    return result;
+}
+
+OccupancyResult Rasterizer::evaluate_occupancy(
+    const GaussianModel& model, const tinytensor::Tensor& world_points,
+    const Camera& camera, const RasterizeOptions& requested_options) const {
+    require_cuda_float_contiguous(world_points, "world_points");
+    if (world_points.shape().rank() != 2 || world_points.shape()[1] != 3)
+        throw std::invalid_argument(
+            "GGGS occupancy points must have shape [P,3]");
+    if (model.size() == 0 || world_points.shape()[0] == 0)
+        throw std::invalid_argument(
+            "GGGS occupancy evaluation requires Gaussians and points");
+    if (camera.width == 0 || camera.height == 0)
+        throw std::invalid_argument(
+            "GGGS occupancy camera dimensions must be positive");
+
+    const detail::ActivatedParameters activated =
+        detail::activate_parameters(model);
+    auto view_matrix = tinytensor::Tensor::from_vector(
+        std::vector<float>(
+            camera.world_to_camera.begin(), camera.world_to_camera.end()),
+        {4, 4}, tinytensor::Device::CUDA);
+    auto camera_position = tinytensor::Tensor::from_vector(
+        std::vector<float>(camera.position.begin(), camera.position.end()),
+        {3}, tinytensor::Device::CUDA);
+    tinytensor::Tensor geometry_buffer;
+    tinytensor::Tensor binning_buffer;
+    tinytensor::Tensor point_buffer;
+    tinytensor::Tensor point_binning_buffer;
+    tinytensor::Tensor tile_buffer;
+    tinytensor::Tensor duplicated_tile_buffer;
+    const std::size_t point_count = world_points.shape()[0];
+    auto transmittance = tinytensor::Tensor::zeros(
+        {point_count}, tinytensor::Device::CUDA);
+    OccupancyResult result;
+    result.inside = tinytensor::Tensor::zeros(
+        {point_count}, tinytensor::Device::CUDA,
+        tinytensor::DataType::Bool);
+    CudaRasterizer::Rasterizer::evaluateTransmittance(
+        resize_buffer(geometry_buffer), resize_buffer(binning_buffer),
+        resize_buffer(point_buffer), resize_buffer(point_binning_buffer),
+        resize_buffer(tile_buffer), resize_buffer(duplicated_tile_buffer),
+        static_cast<int>(point_count), static_cast<int>(model.size()),
+        static_cast<int>(camera.width), static_cast<int>(camera.height),
+        world_points.ptr<float>(), model.means.ptr<float>(),
+        activated.opacities.ptr<float>(), activated.scales.ptr<float>(),
+        requested_options.scale_modifier,
+        activated.quaternions.ptr<float>(), nullptr,
+        view_matrix.ptr<float>(), camera_position.ptr<float>(), camera.fx,
+        camera.fy, camera.cx, camera.cy, requested_options.kernel_size,
+        false, transmittance.ptr<float>(), result.inside.ptr<bool>(),
+        requested_options.debug);
+    result.occupancy =
+        tinytensor::Tensor::ones_like(transmittance) - transmittance;
     return result;
 }
 

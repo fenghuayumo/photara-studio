@@ -65,6 +65,10 @@ struct GggsMeshOptions {
     // matching pygsplat/GS-2M whose abs-dot 100-degree test rejects no sample.
     // Set 0.5 explicitly to request the former strict 60-degree filter.
     float min_depth_normal_cosine{-2.F};
+    // Optional camera-focus ROI applied before TSDF allocation. The radius is
+    // this fraction of the median camera distance to the least-squares focus
+    // point. Zero keeps the scene's original subject bounds.
+    float focus_radius_fraction{0.F};
     mvs::DensifyOptions fusion;
 };
 
@@ -72,6 +76,51 @@ struct GggsMeshResult {
     mvs::DenseCloud surface_cloud;
     mvs::Mesh mesh;
     std::size_t valid_depth_pixels{};
+};
+
+struct PamMeshOptions {
+    // Candidate points are sampled from a coarse seed mesh with probability
+    // proportional to face area / nearest-visible-camera-distance^2.
+    std::size_t max_points{1'000'000};
+    // Maximum number of Gaussian pivot vertices used by the initial
+    // tetra_triangulation stage. Two-pivot extraction uses a Gaussian center
+    // and one learned-normal offset per selected Gaussian.
+    std::size_t pivot_max_points{1'000'000};
+    // GaussianWrapping's default learned-normal pivot displacement.
+    float pivot_std_factor{3.F};
+    // Reserve part of the candidate budget for opacity/anisotropy-weighted
+    // Gaussian means offset along their learned normal.  Unlike surface-area
+    // sampling, this gives sub-pixel wires and other small disconnected
+    // structures a chance to enter the Delaunay complex.
+    float gaussian_seed_fraction{0.F};
+    // Optional automatic object ROI.  The center is the least-squares
+    // intersection of registered camera optical axes and the radius is this
+    // fraction of their median distance to that center.  Zero disables it.
+    float focus_radius_fraction{0.F};
+    // Optional GaussianWrappingBoundingVolume JSON exported by the Blender
+    // add-on. Its vertex convex hull is applied consistently to Gaussian
+    // pivots, seed-mesh sampling, refined candidates, and final meshing.
+    std::filesystem::path bounding_volume_file;
+    unsigned oversampling_factor{2};
+    unsigned max_resample_rounds{4};
+    unsigned refinement_steps{10};
+    unsigned vector_field_neighbors{32};
+    unsigned points_per_tetrahedron{10};
+    float occupancy_iso_value{0.5F};
+    float vacancy_threshold{0.1F};
+    float minimum_gradient_norm_squared{0.5F};
+    float refinement_step{0.5F};
+    float mask_background_threshold{0.01F};
+    std::size_t occupancy_chunk_size{250'000};
+    unsigned seed{0};
+};
+
+struct PamMeshResult {
+    mvs::Mesh seed_mesh;
+    mvs::Mesh mesh;
+    mvs::DenseCloud candidate_cloud;
+    std::size_t tetrahedron_count{};
+    std::size_t occupied_tetrahedron_count{};
 };
 
 using ProgressCallback = std::function<bool(const TrainingProgress&)>;
@@ -114,5 +163,16 @@ GggsMeshResult extract_gggs_mesh(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const TrainingOptions& training_options = {},
     const GggsMeshOptions& mesh_options = {});
+
+// GaussianWrapping Primal Adaptive Meshing (PAM). An empty seed_mesh first
+// builds the native learned-normal Gaussian pivot mesh using Delaunay
+// tetra_triangulation and marching tetrahedra. PAM then samples that coarse
+// mesh, projects candidates onto the occupancy isosurface, tetrahedralizes
+// again, and returns the occupied/free-space boundary.
+PamMeshResult extract_pam_mesh(
+    const GaussianModel& model, const mvs::MvsScene& scene,
+    const mvs::Mesh& seed_mesh,
+    const TrainingOptions& training_options = {},
+    const PamMeshOptions& pam_options = {});
 
 }  // namespace aetherscan::splat

@@ -139,10 +139,12 @@ struct DensifyOptions {
     // extract a coarser, locally regular mesh directly from the TSDF instead
     // of relying on a topology-damaging post-decimation pass.
     float mesh_tsdf_voxel_scale{1.F};
-    // Truncation half-width in voxels. Sparse-block allocation samples depth
-    // every four pixels, matching Open3D ScalableTSDFVolume.
+    // Truncation half-width in voxels.
     float mesh_tsdf_truncation_voxels{4.F};
-    unsigned mesh_tsdf_pixel_step{2};  // retained for checkpoint compatibility
+    // Pixel stride used only while allocating sparse TSDF blocks. Integration
+    // still projects every voxel into the full-resolution depth map. Open3D's
+    // default is four; use one for sub-pixel wires and other thin structures.
+    unsigned mesh_tsdf_pixel_step{4};
     // Ignore field samples whose accumulated integration weight is lower.
     float mesh_tsdf_min_weight{0.25F};
     // Before Marching Cubes, fill a zero-weight voxel only when this many

@@ -47,6 +47,53 @@ Gaussian separable CUDA forward/backward 和 `padding="valid"` 边界语义，�
 mask 会在计算 L1/SSIM 前同时作用于预测图和目标图。13×13 确定性输入的 loss、中心梯度、
 梯度和与绝对梯度和均有严格数值回归，误差阈值为 `2e-5`。
 
+### GaussianWrapping normal field 与 PAM
+
+训练器可学习 GaussianWrapping 的四通道 `gaussian_features_0..3`：前三维经归一化得到
+法线方向，第四维经 `tanh` 学习朝向符号。默认在第 8,001 步按当前 Gaussian 最短轴重置
+方向和符号，再按 alignment 权重 `0.05` 与默认 depth ratio `0.6` 对齐由 median depth
+微分得到的法线；特征拥有独立 Adam
+状态，并随 clone、split、prune 一起维护。可用 `--gggs-normal-field=false` 关闭，或用
+`--gggs-normal-field-weight`、`--gggs-normal-field-depth-ratio`、
+`--gggs-normal-field-from-iter` 调整。
+
+构建时找到 CGAL 后，`--mesh --mesh-method pam` 走 GaussianWrapping 原生的两级
+`tetra_triangulation`，不依赖 TSDF。第一级为每个入选 Gaussian 生成“中心 + learned-normal
+方向 3σ 偏移”的两个 pivot，计算多视图 occupancy 后做 Delaunay 与 Marching Tetrahedra，
+得到 `*_pam_pivot_mesh.ply`。第二级按 `face_area / visible_camera_distance²` 从 pivot mesh
+采样，用 32 邻域 normal field 将候选投影到 occupancy 等值面，再次 Delaunay，对四面体内部
+occupancy 采样分类并提取 occupied/free 边界。Mask 前景视角参与最小 occupancy 融合，明确
+背景投空，视锥外视角弃权。
+
+`--pam-pivot-max-points` 控制第一级 pivot 顶点上限，`--pam-pivot-std-factor` 控制法线偏移；
+`--pam-max-points`、`--pam-refinement-steps`、`--pam-neighbors` 和
+`--pam-points-per-tetrahedron` 控制第二级。`--pam-occupancy-iso-value 0.3` 对应
+GaussianWrapping `ours` rasterizer 的 `iso_surface_value=0.2`，适合自行车辐条等半透明细结构；
+默认 0.5 更保守。`--pam-gaussian-seed-fraction` 可选地把部分候选直接从 Gaussian 生成，
+默认 0 表示忠实使用 pivot mesh。无 mask 的 360° 场景还可通过
+`--pam-focus-radius-fraction` 启用相机光轴交点附近的球形 ROI。若 GaussianWrapping 数据附带
+Blender 导出的 `GaussianWrappingBoundingVolume` JSON，优先用 `--pam-bounding-volume PATH`
+加载其顶点凸包；该凸包会同时裁剪 Gaussian pivot、direct Gaussian seed、pivot-mesh 面采样
+和投影后的最终候选，使采样预算真正集中在物体及细线，而不是只在末端删除背景。它与球形 ROI
+和场景 SubjectBounds 取交集。中间候选保存为
+`*_pam_candidates.ply`。Python 模块对应提供 `PamOptions` 与 `extract_pam`。
+
+bicycle 回归可直接使用 GaussianWrapping 自带的边界体：
+
+```powershell
+build/aetherscan/Release/aetherscan.exe `
+  --images D:\Models\360_extra_scenes_1\bicycle\images_2 `
+  --splat-dataset D:\Models\360_extra_scenes_1\bicycle\sparse\0 `
+  --output artifacts\bicycle\scene.mvs --gggs `
+  --gggs-strategy adc_plus --gggs-iterations 30000 `
+  --gggs-max-resolution 0 --gggs-progressive-resolution=false `
+  --mesh --mesh-method pam --pam-occupancy-iso-value 0.3 `
+  --pam-bounding-volume D:\ProgramCode\Python\GaussianWrapping\assets\bounding_volumes_examples\bicycle_bounding_volume.json
+```
+
+这里直接读取 `images_2`，`--gggs-max-resolution 0` 表示保持这些文件的 2473×1643 像素，
+不会先读原图再动态缩放。COLMAP 相机内参会按所选图像文件的实际宽高和像素中心规则同步标定。
+
 ## 构建与运行
 
 需要 CUDA Toolkit 和 glm：

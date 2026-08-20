@@ -5,6 +5,8 @@
 #include "mvs/densify.hpp"
 #include "mvs/internal.hpp"
 
+#include <Eigen/Cholesky>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -33,6 +35,35 @@ namespace {
     }
     // pygsplat follows the original 3DGS normalization convention.
     return std::isfinite(radius) ? 1.1F * radius : 0.F;
+}
+
+[[nodiscard]] std::pair<mvs::Vec3f, float> estimate_camera_focus(
+    const mvs::MvsScene& scene) {
+    Eigen::Matrix3d system = Eigen::Matrix3d::Zero();
+    Eigen::Vector3d right_hand_side = Eigen::Vector3d::Zero();
+    for (const mvs::MvsView& view : scene.views) {
+        Eigen::Vector3d direction = view.pose.R.row(2).transpose();
+        if (!(direction.squaredNorm() > 1e-12)) continue;
+        direction.normalize();
+        const Eigen::Matrix3d projector =
+            Eigen::Matrix3d::Identity() - direction * direction.transpose();
+        system += projector;
+        right_hand_side += projector * view.pose.C;
+    }
+    const Eigen::Vector3d center = system.ldlt().solve(right_hand_side);
+    if (!center.allFinite()) return {mvs::Vec3f::Zero(), 0.F};
+    std::vector<float> distances;
+    distances.reserve(scene.views.size());
+    for (const mvs::MvsView& view : scene.views) {
+        const float distance = static_cast<float>(
+            (view.pose.C - center).norm());
+        if (std::isfinite(distance)) distances.push_back(distance);
+    }
+    if (distances.empty()) return {center.cast<float>(), 0.F};
+    const auto middle = distances.begin() +
+        static_cast<std::ptrdiff_t>(distances.size() / 2);
+    std::nth_element(distances.begin(), middle, distances.end());
+    return {center.cast<float>(), *middle};
 }
 
 mvs::MvsView make_geometry_view(const mvs::MvsView& source) {
@@ -169,6 +200,10 @@ GggsMeshResult extract_gggs_mesh(
           mesh_options.alpha_threshold < 1.F))
         throw std::invalid_argument(
             "GGGS mesh alpha threshold must be in (0, 1)");
+    if (!std::isfinite(mesh_options.focus_radius_fraction) ||
+        mesh_options.focus_radius_fraction < 0.F)
+        throw std::invalid_argument(
+            "GGGS mesh focus radius fraction must be finite and non-negative");
 
     core::StageScope render_stage("gggs.mesh_render_geometry");
     mvs::MvsScene geometry_scene;
@@ -178,6 +213,25 @@ GggsMeshResult extract_gggs_mesh(
     geometry_scene.sparse_points = scene.sparse_points;
     geometry_scene.subject_bounds = scene.subject_bounds;
     geometry_scene.thread_count = scene.thread_count;
+
+    if (mesh_options.focus_radius_fraction > 0.F) {
+        const auto [focus_center, median_camera_radius] =
+            estimate_camera_focus(scene);
+        const float focus_radius =
+            mesh_options.focus_radius_fraction * median_camera_radius;
+        if (!(focus_radius > 0.F) || !std::isfinite(focus_radius))
+            throw std::runtime_error(
+                "GGGS mesh camera-focus ROI could not be estimated");
+        geometry_scene.subject_bounds.valid = true;
+        geometry_scene.subject_bounds.center = focus_center;
+        geometry_scene.subject_bounds.axes = mvs::Mat3f::Identity();
+        geometry_scene.subject_bounds.half_extent =
+            mvs::Vec3f::Constant(focus_radius);
+        core::Logger::instance().info(
+            "gggs mesh focus ROI: center=", focus_center.transpose(),
+            " radius=", focus_radius,
+            " median_camera_radius=", median_camera_radius);
+    }
 
     mvs::DensifyOptions fusion_options = mesh_options.fusion;
     fusion_options.build_mesh = true;

@@ -481,6 +481,224 @@ void test_forward_backward() {
         "GGGS backward retained stale geometry gradients between calls");
 }
 
+void test_normal_field_parameterization_and_occupancy() {
+    using namespace aetherscan::splat;
+    const float sign_logit = std::atanh(0.5F);
+    const auto features = tinytensor::Tensor::from_vector(
+        std::vector<float>{2.F, 0.F, 0.F, sign_logit}, {1, 4},
+        tinytensor::Device::CUDA);
+    const auto normals =
+        detail::normal_features_to_normals(features).to_vector();
+    require(
+        normals.size() == 3 && std::abs(normals[0] - 0.5F) < 1e-6F &&
+            std::abs(normals[1]) < 1e-6F &&
+            std::abs(normals[2]) < 1e-6F,
+        "GaussianWrapping normal feature conversion changed");
+    const auto feature_gradients = detail::normal_features_backward(
+        features,
+        tinytensor::Tensor::from_vector(
+            std::vector<float>{1.F, 2.F, 3.F}, {1, 3},
+            tinytensor::Device::CUDA)).to_vector();
+    require(
+        feature_gradients.size() == 4 &&
+            std::abs(feature_gradients[0]) < 1e-6F &&
+            std::abs(feature_gradients[1] - 0.5F) < 1e-6F &&
+            std::abs(feature_gradients[2] - 0.75F) < 1e-6F &&
+            std::abs(feature_gradients[3] - 0.75F) < 1e-6F,
+        "GaussianWrapping normal feature chain rule changed");
+
+    Camera loss_camera;
+    loss_camera.world_to_camera[0] = 1.F;
+    loss_camera.world_to_camera[5] = 1.F;
+    loss_camera.world_to_camera[10] = 1.F;
+    loss_camera.world_to_camera[15] = 1.F;
+    loss_camera.fx = loss_camera.fy = 20.F;
+    loss_camera.cx = loss_camera.cy = 2.F;
+    loss_camera.width = loss_camera.height = 5;
+    RenderResult normal_render;
+    normal_render.median_depth = tinytensor::Tensor::from_vector(
+        std::vector<float>(25, 2.F), {5, 5},
+        tinytensor::Device::CUDA);
+    std::vector<float> oriented(75, 0.F);
+    std::fill(oriented.begin() + 50, oriented.end(), 1.F);
+    normal_render.color = tinytensor::Tensor::from_vector(
+        oriented, {3, 5, 5}, tinytensor::Device::CUDA);
+    normal_render.alpha = tinytensor::Tensor::zeros(
+        {5, 5}, tinytensor::Device::CUDA);
+    normal_render.normal = tinytensor::Tensor::zeros(
+        {3, 5, 5}, tinytensor::Device::CUDA);
+    const detail::LossGradients normal_loss =
+        detail::compute_normal_field_loss(
+            normal_render, loss_camera, 0.05F, true);
+    require(
+        normal_loss.total > 0.F && std::isfinite(normal_loss.total),
+        "GaussianWrapping normal-field alignment loss was not evaluated");
+    require_finite(
+        normal_loss.color,
+        "Normal-field alignment produced non-finite normal gradients");
+    require_finite(
+        normal_loss.depth,
+        "Normal-field alignment produced non-finite depth gradients");
+
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 0.F, 2.F}, {1, 3},
+        tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{std::log(0.25F), std::log(0.25F),
+                           std::log(0.08F)},
+        {1, 3}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F}, {1, 4},
+        tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        std::vector<float>{5.F}, {1, 1}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::zeros(
+        {1, 1, 3}, tinytensor::Device::CUDA);
+    model.normal_features = features;
+    model.sh_degree = 0;
+    Camera camera;
+    camera.world_to_camera[0] = 1.F;
+    camera.world_to_camera[5] = 1.F;
+    camera.world_to_camera[10] = 1.F;
+    camera.world_to_camera[15] = 1.F;
+    camera.fx = camera.fy = 40.F;
+    camera.cx = camera.cy = 15.5F;
+    camera.width = camera.height = 32;
+    const auto query = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 0.F, 2.F}, {1, 3},
+        tinytensor::Device::CUDA);
+    const OccupancyResult occupancy =
+        Rasterizer().evaluate_occupancy(model, query, camera);
+    require(
+        occupancy.inside.to_vector_bool() == std::vector<bool>{true} &&
+            occupancy.occupancy.to_vector()[0] > 0.5F,
+        "PAM integrated occupancy did not classify a Gaussian center");
+
+    const auto ply = std::filesystem::temp_directory_path() /
+        "aetherscan_normal_field_roundtrip.ply";
+    save_gaussians_ply(model, ply);
+    const GaussianModel loaded = load_gaussians_ply(ply);
+    std::filesystem::remove(ply);
+    const auto loaded_features = loaded.normal_features.to_vector();
+    const auto original_features = features.to_vector();
+    require(
+        loaded_features == original_features,
+        "GaussianWrapping gaussian_features PLY round trip changed values");
+}
+
+void test_pam_smoke() {
+#if defined(AETHERSCAN_HAS_CGAL)
+    namespace mvs = aetherscan::mvs;
+    namespace splat = aetherscan::splat;
+    const std::vector<mvs::Vec3f> shell{
+        {1.F, 0.F, 0.F}, {-1.F, 0.F, 0.F},
+        {0.F, 1.F, 0.F}, {0.F, -1.F, 0.F},
+        {0.F, 0.F, 1.F}, {0.F, 0.F, -1.F}};
+    std::vector<float> means;
+    std::vector<float> features;
+    for (const mvs::Vec3f& point : shell) {
+        means.insert(means.end(), point.data(), point.data() + 3);
+        features.insert(features.end(), point.data(), point.data() + 3);
+        features.push_back(3.F);
+    }
+    splat::GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(
+        means, {shell.size(), std::size_t{3}}, tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>(shell.size() * 3, std::log(0.65F)),
+        {shell.size(), std::size_t{3}}, tinytensor::Device::CUDA);
+    std::vector<float> quaternions(shell.size() * 4, 0.F);
+    for (std::size_t index = 0; index < shell.size(); ++index)
+        quaternions[4 * index] = 1.F;
+    model.quaternions = tinytensor::Tensor::from_vector(
+        quaternions, {shell.size(), std::size_t{4}},
+        tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        std::vector<float>(shell.size(), 8.F),
+        {shell.size(), std::size_t{1}}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::zeros(
+        {shell.size(), std::size_t{1}, std::size_t{3}},
+        tinytensor::Device::CUDA);
+    model.normal_features = tinytensor::Tensor::from_vector(
+        features, {shell.size(), std::size_t{4}},
+        tinytensor::Device::CUDA);
+
+    mvs::MvsScene scene;
+    mvs::MvsView view;
+    view.pose.R = Eigen::Matrix3d::Identity();
+    view.pose.C = Eigen::Vector3d(0.0, 0.0, -4.0);
+    view.fx = view.fy = 50.F;
+    view.cx = view.cy = 31.5F;
+    view.width = view.height = 64;
+    scene.views.push_back(view);
+    mvs::Mesh seed;
+    seed.vertices = shell;
+    seed.faces = {
+        {0, 2, 4}, {2, 1, 4}, {1, 3, 4}, {3, 0, 4},
+        {2, 0, 5}, {1, 2, 5}, {3, 1, 5}, {0, 3, 5}};
+    splat::PamMeshOptions options;
+    options.max_points = 64;
+    options.oversampling_factor = 8;
+    options.max_resample_rounds = 4;
+    options.refinement_steps = 0;
+    options.vector_field_neighbors = shell.size();
+    options.points_per_tetrahedron = 1;
+    options.occupancy_iso_value = 0.05F;
+    options.vacancy_threshold = 1.F;
+    options.occupancy_chunk_size = 512;
+    const auto bounding_volume = std::filesystem::temp_directory_path() /
+        "aetherscan_pam_bounding_volume.json";
+    {
+        std::ofstream stream(bounding_volume);
+        stream << R"({
+  "class_name": "GaussianWrappingBoundingVolume",
+  "version": 1,
+  "vertices": [
+    [-0.75, -0.75, -0.75], [0.75, -0.75, -0.75],
+    [-0.75, 0.75, -0.75], [0.75, 0.75, -0.75],
+    [-0.75, -0.75, 0.75], [0.75, -0.75, 0.75],
+    [-0.75, 0.75, 0.75], [0.75, 0.75, 0.75]
+  ],
+  "hull_simplices": null
+})";
+    }
+    options.bounding_volume_file = bounding_volume;
+    const auto result = splat::extract_pam_mesh(
+        model, scene, seed, splat::TrainingOptions{}, options);
+    std::filesystem::remove(bounding_volume);
+    require(
+        result.candidate_cloud.points.size() == options.max_points &&
+            result.tetrahedron_count > 0 &&
+            result.occupied_tetrahedron_count > 0 &&
+            !result.mesh.vertices.empty() && !result.mesh.faces.empty(),
+        "PAM smoke extraction did not produce a boundary mesh");
+    for (const mvs::DensePoint& point : result.candidate_cloud.points)
+        require(
+            point.position.cwiseAbs().maxCoeff() <= 0.751F,
+            "PAM convex bounding volume did not filter candidates");
+    std::vector<std::pair<int, int>> edges;
+    edges.reserve(result.mesh.faces.size() * 3);
+    for (const Eigen::Vector3i& face : result.mesh.faces) {
+        for (int corner = 0; corner < 3; ++corner) {
+            int a = face[corner];
+            int b = face[(corner + 1) % 3];
+            if (a > b) std::swap(a, b);
+            edges.emplace_back(a, b);
+        }
+    }
+    std::sort(edges.begin(), edges.end());
+    for (std::size_t begin = 0; begin < edges.size();) {
+        std::size_t end = begin + 1;
+        while (end < edges.size() && edges[end] == edges[begin]) ++end;
+        require(
+            end - begin <= 2,
+            "PAM topology orientation retained a non-manifold edge");
+        begin = end;
+    }
+#endif
+}
+
 void test_sample_depth_batch_boundary() {
     using namespace aetherscan::splat;
     GaussianModel model;
@@ -1190,6 +1408,22 @@ void test_colmap_text_loading() {
             (point.position - mvs::Vec3f(0.1F, 0.2F, 4.F)).norm() < 1e-6F,
         "COLMAP track mapping or sparse position is wrong");
 
+    const auto images_2 = root / "images_2";
+    std::filesystem::create_directories(images_2);
+    io::save_rgb_png(
+        io::RgbImage{2, 2, std::vector<std::uint8_t>(12, 127)},
+        images_2 / "frame.png");
+    const auto half_loaded = splat::load_colmap_scene(root, images_2);
+    const auto& half_view = half_loaded.scene.views.front();
+    require(
+        half_view.width == 2 && half_view.height == 2 &&
+            half_view.src_width == 2 && half_view.src_height == 2 &&
+            std::abs(half_view.fx - 50.F) < 1e-5F &&
+            std::abs(half_view.fy - 101.F * (2.F / 3.F)) < 1e-5F &&
+            std::abs(half_view.cx - 0.75F) < 1e-5F &&
+            std::abs(half_view.cy - (5.F / 6.F)) < 1e-5F,
+        "COLMAP intrinsics did not follow the selected image resolution");
+
     {
         std::ofstream stream(model / "cameras.bin", std::ios::binary);
         write_binary<std::uint64_t>(stream, 1);
@@ -1863,6 +2097,8 @@ void test_densification_strategies_and_dense_bypass() {
     options.evaluation_split_every = 0;
     options.use_depth_normal_loss = true;
     options.depth_normal_from_iter = 1;
+    options.use_normal_field = true;
+    options.normal_field_from_iter = 1;
     options.multi_view_geo_weight = 0.02F;
     options.profile_cuda = true;
     options.cuda_profile_interval = 2;
@@ -1870,9 +2106,18 @@ void test_densification_strategies_and_dense_bypass() {
     require(
         geometry_dense_model.filter_3d.is_valid(),
         "depth-normal mesh training did not enable filter_3d");
+    require_finite(
+        geometry_dense_model.normal_features,
+        "normal-field training produced non-finite features");
+    require(
+        geometry_dense_model.normal_features.shape() ==
+            tinytensor::TensorShape{
+                geometry_dense_model.size(), std::size_t{4}},
+        "normal-field training changed the feature row layout");
     options.profile_cuda = false;
     options.multi_view_geo_weight = 0.F;
     options.use_depth_normal_loss = false;
+    options.use_normal_field = false;
     options.densification_strategy =
         splat::DensificationStrategy::dense_adaptive;
     options.dense_growth_fraction = 1.F;
@@ -1899,6 +2144,8 @@ int main() {
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();
         test_forward_backward();
+        test_normal_field_parameterization_and_occupancy();
+        test_pam_smoke();
         test_sample_depth_batch_boundary();
         test_contribution_visibility_rejects_occluded_gaussians();
         test_alpha_parameter_gradients();

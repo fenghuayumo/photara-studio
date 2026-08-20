@@ -7,6 +7,14 @@
 
 namespace aetherscan::io {
 
+struct ImageSize {
+    std::uint32_t width{};
+    std::uint32_t height{};
+};
+
+// Reads image dimensions without converting or copying its pixel buffer.
+ImageSize load_image_size(const std::filesystem::path& path);
+
 struct GrayImage {
     std::uint32_t width{};
     std::uint32_t height{};

@@ -95,6 +95,14 @@ struct TrainingOptions {
     bool use_depth_normal_loss{false};
     float depth_normal_weight{0.05F};
     unsigned depth_normal_from_iter{7'000};
+    // GaussianWrapping normal field. Four features per Gaussian encode
+    // normalize(xyz) * tanh(w), and are aligned to normals differentiated
+    // from the rendered median-depth map.
+    bool use_normal_field{false};
+    float normal_field_weight{0.05F};
+    float normal_field_depth_ratio{0.6F};
+    unsigned normal_field_from_iter{8'001};
+    float normal_features_lr{0.025F};
     // Depth-normal geometry training implicitly enables the reference
     // GGGS/Mip-Splatting low-pass filter. It is deliberately not an
     // independent switch: appearance-only 3DGS must keep canonical Gaussian

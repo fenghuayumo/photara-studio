@@ -65,6 +65,21 @@ void copy_top_left(
 
 }  // namespace
 
+ImageSize load_image_size(const std::filesystem::path& path) {
+    std::lock_guard lock(freeimage_mutex());
+    ensure_freeimage();
+    const auto format = detect_format(path);
+    FIBITMAP* loaded = FreeImage_Load(format, path.string().c_str(), 0);
+    if (!loaded)
+        throw std::runtime_error("Failed to load image: " + path.string());
+    const ImageSize size{
+        FreeImage_GetWidth(loaded), FreeImage_GetHeight(loaded)};
+    FreeImage_Unload(loaded);
+    if (size.width == 0 || size.height == 0)
+        throw std::runtime_error("Empty image: " + path.string());
+    return size;
+}
+
 GrayImage load_gray(const std::filesystem::path& path) {
     std::lock_guard lock(freeimage_mutex());
     ensure_freeimage();

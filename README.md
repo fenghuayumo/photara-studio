@@ -192,6 +192,16 @@ UVAtlas 默认用 `--uv-parallel-partitions 8` 做空间分区并发展开，最
 GGGS mesh 导出只使用 alpha 0.5 与有效深度掩码，不再默认执行额外的 60° depth-normal 硬过滤；
 这与 pygsplat/GS-2M 的默认 TSDF 输入一致，避免在高曲率和薄结构区域人为打洞。
 
+GaussianWrapping 几何路径可用 `--mesh-method pam`：GGGS 默认从第 8,001 步学习四通道
+normal field。PAM 不经过 TSDF：先从 Gaussian center 与 learned-normal pivot 运行
+`tetra_triangulation` + Marching Tetrahedra，再将自适应采样点投影到多视图 Gaussian
+occupancy 等值面，并通过第二次 CGAL Delaunay 四面体分类提取表面。可用
+`--pam-pivot-max-points`、`--pam-max-points`、`--pam-occupancy-iso-value`、
+`--pam-refinement-steps` 和 `--pam-neighbors` 控制质量与耗时。可用
+`--pam-bounding-volume` 读取 GaussianWrapping Blender 导出的凸包 JSON，并在 pivot、面采样、
+细节种子和最终候选四个阶段统一裁剪背景；这对 bicycle 辐条等细结构尤其重要。该后端要求
+构建时找到 CGAL。
+
 - `scene.mvs`：OpenMVS Interface（MVSI），可用 OpenMVS Viewer 打开验证相机与稀疏点
 - `scene.ply`：稀疏 XYZ；写出 PLY 时会额外生成同名 `scene.mvs`
 - `scene_dense.ply`：多轮几何一致性和深度过滤后的稠密点云

@@ -29,6 +29,10 @@ struct GaussianModel {
     tinytensor::Tensor quaternions;     // [N,4], scalar-first
     tinytensor::Tensor opacity_logits;  // [N,1]
     tinytensor::Tensor sh;              // [N,K,3]
+    // GaussianWrapping normal-field features. xyz is a learnable direction;
+    // w is an orientation logit. The surface normal used by training/PAM is
+    // normalize(xyz) * tanh(w). Kept optional for legacy 3DGS PLY files.
+    tinytensor::Tensor normal_features; // [N,4], optional
     // Mip-Splatting screen-space footprint converted to a world-space radius.
     // This is derived state (no gradient) and is recomputed as means change.
     tinytensor::Tensor filter_3d;        // [N,1], optional
@@ -55,6 +59,10 @@ struct ModelGradients {
     tinytensor::Tensor quaternions;
     tinytensor::Tensor opacity_logits;
     tinytensor::Tensor sh;
+    tinytensor::Tensor normal_features;
+    // Gradient of RasterizeOptions::colors_precomp. This is populated only
+    // for an explicit precomputed-color render (normal-field training).
+    tinytensor::Tensor colors_precomp;
     // Per-Gaussian image-plane refine weight emitted by the GGGS backward
     // kernel. This drives default/ADC+/ADC-IGS densification.
     tinytensor::Tensor refine_weight;
@@ -91,6 +99,13 @@ struct DepthSampleResult {
 struct DepthSampleGradients {
     ModelGradients model;
     tinytensor::Tensor points;         // [P,3], world space
+};
+
+struct OccupancyResult {
+    // GaussianWrapping calls this alpha_integrated: 1 - transmittance at each
+    // world-space query point along the selected camera ray.
+    tinytensor::Tensor occupancy;  // [P]
+    tinytensor::Tensor inside;     // [P], bool camera-frustum membership
 };
 
 }  // namespace aetherscan::splat

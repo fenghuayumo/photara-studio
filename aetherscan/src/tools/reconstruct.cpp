@@ -99,6 +99,10 @@ struct ReconstructCli {
     float gggs_match_alpha_weight{0.25F};
     float gggs_ssim_weight{0.2F};
     float gggs_depth_normal_weight{0.05F};
+    bool gggs_normal_field{true};
+    float gggs_normal_field_weight{0.05F};
+    float gggs_normal_field_depth_ratio{0.6F};
+    unsigned gggs_normal_field_from_iter{8'001};
     float gggs_multi_view_geo_weight{0.02F};
     float gggs_multi_view_ncc_weight{0.6F};
     unsigned gggs_multi_view_num{8};
@@ -132,6 +136,7 @@ struct ReconstructCli {
     bool mesh_remesh{true};
     float mesh_tsdf_voxel_scale{-1.F};
     float mesh_tsdf_bounds_padding{2.F};
+    unsigned mesh_tsdf_pixel_step{4};
     unsigned mesh_tsdf_support_closing_axes{2};
     std::filesystem::path mesh_tsdf_frame_export_dir;
     unsigned mesh_tsdf_smooth_iters{2};
@@ -140,6 +145,18 @@ struct ReconstructCli {
     float mesh_dist_insert_px{-1.F};
     bool mesh_free_space_support{true};
     float mesh_free_space_quantile{0.95F};
+    std::uint64_t pam_max_points{1'000'000};
+    std::uint64_t pam_pivot_max_points{1'000'000};
+    float pam_pivot_std_factor{3.F};
+    float pam_gaussian_seed_fraction{0.F};
+    float pam_focus_radius_fraction{0.F};
+    std::filesystem::path pam_bounding_volume;
+    unsigned pam_refinement_steps{10};
+    unsigned pam_neighbors{32};
+    unsigned pam_points_per_tetrahedron{10};
+    float pam_occupancy_iso_value{0.5F};
+    float pam_vacancy_threshold{0.1F};
+    float pam_mask_background_threshold{0.01F};
     unsigned patchmatch_tile_rows{8};
     unsigned patchmatch_concurrent_views{8};
     aetherscan::mvs::DensifyQuality dense_quality{
@@ -260,6 +277,10 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
               << "  --gggs-ssim-weight W  structural loss blend (default 0.2)\n"
               << "  --gggs-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
+              << "  --gggs-normal-field BOOL  learn GaussianWrapping normal features (default true)\n"
+              << "  --gggs-normal-field-weight W  normal-field consistency weight (default 0.05)\n"
+              << "  --gggs-normal-field-depth-ratio R  median-depth alignment ratio (default 0.6)\n"
+              << "  --gggs-normal-field-from-iter N  start normal-field loss (default 8001)\n"
               << "  --gggs-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
               << "  --gggs-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
               << "  --gggs-mv-neighbors N  nearest camera candidates (default 8)\n"
@@ -280,8 +301,17 @@ void print_help(const cxxopts::Options& options) {
               << "  --gggs-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mask-mesh PATH  load an existing PLY mesh and render masks/previews\n"
-              << "  --mesh-method auto|tsdf|delaunay\n"
+              << "  --mesh-method auto|tsdf|delaunay|pam\n"
               << "               auto uses TSDF for GGGS, otherwise the quality preset\n"
+              << "  --pam-max-points N  PAM refined surface candidates (default 1000000)\n"
+              << "  --pam-pivot-max-points N  GaussianWrapping pivot vertices before tetra_triangulation\n"
+              << "  --pam-pivot-std-factor F  learned-normal pivot displacement in sigma (default 3)\n"
+              << "  --pam-gaussian-seed-fraction F  optional direct Gaussian candidate fraction (default 0)\n"
+              << "  --pam-focus-radius-fraction F  camera-focus ROI radius / median camera radius (0 disables)\n"
+              << "  --pam-bounding-volume PATH  GaussianWrapping convex bounding-volume JSON\n"
+              << "  --pam-refinement-steps N  PAM occupancy/vector-field steps (default 10)\n"
+              << "  --pam-neighbors N  Gaussian neighbors in the PAM field (default 32)\n"
+              << "  --pam-occupancy-iso-value V  occupied threshold (0.3 matches GW iso shift 0.2)\n"
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
               << "  --mesh-free-space-support BOOL  weak-surface beta/gamma cut\n"
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
@@ -289,6 +319,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
               << "  --mesh-tsdf-bounds-padding F  point-cloud bounds multiplier (default 2)\n"
+              << "  --mesh-tsdf-pixel-step N  sparse allocation stride (1 preserves thin wires; default 4)\n"
               << "  --mesh-tsdf-support-closing-axes N  0 disables; 2 = conservative default\n"
               << "  --mesh-tsdf-frame-export-dir DIR  export exact TSDF input frames for A/B\n"
               << "  --mesh-tsdf-smooth-iters N  boundary-locked Taubin passes (default 2)\n"
@@ -438,6 +469,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("gggs-depth-normal-weight",
          "GGGS median-depth/raster-normal consistency weight",
          cxxopts::value<float>()->default_value("0.05"))
+        ("gggs-normal-field",
+         "Learn GaussianWrapping four-channel normal-field features",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("gggs-normal-field-weight", "Normal-field consistency loss weight",
+         cxxopts::value<float>()->default_value("0.05"))
+        ("gggs-normal-field-depth-ratio",
+         "Median-depth fraction of normal-field alignment",
+         cxxopts::value<float>()->default_value("0.6"))
+        ("gggs-normal-field-from-iter", "Iteration to start normal-field loss",
+         cxxopts::value<unsigned>()->default_value("8001"))
         ("gggs-mv-geo-weight", "Multi-view depth round-trip loss weight",
          cxxopts::value<float>()->default_value("0.02"))
         ("gggs-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
@@ -504,8 +545,39 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "asdiff masks plus normal-shaded previews",
          cxxopts::value<std::string>()->default_value(""))
         ("mesh-method",
-         "Mesh backend: auto, tsdf, or delaunay",
+         "Mesh backend: auto, tsdf, delaunay, or pam",
          cxxopts::value<std::string>()->default_value("auto"))
+        ("pam-max-points", "Maximum PAM refined surface candidates",
+         cxxopts::value<std::uint64_t>()->default_value("1000000"))
+        ("pam-pivot-max-points",
+         "Maximum Gaussian pivot vertices for initial tetra triangulation",
+         cxxopts::value<std::uint64_t>()->default_value("1000000"))
+        ("pam-pivot-std-factor",
+         "Learned-normal Gaussian pivot displacement in sigma",
+         cxxopts::value<float>()->default_value("3"))
+        ("pam-gaussian-seed-fraction",
+         "Fraction of PAM candidates seeded from learned Gaussians",
+         cxxopts::value<float>()->default_value("0"))
+        ("pam-focus-radius-fraction",
+         "Automatic camera-focus ROI radius fraction (0 disables)",
+         cxxopts::value<float>()->default_value("0"))
+        ("pam-bounding-volume",
+         "GaussianWrapping convex bounding-volume JSON",
+         cxxopts::value<std::string>()->default_value(""))
+        ("pam-refinement-steps", "PAM occupancy/vector-field refinement steps",
+         cxxopts::value<unsigned>()->default_value("10"))
+        ("pam-neighbors", "Nearest Gaussians used by the PAM vector field",
+         cxxopts::value<unsigned>()->default_value("32"))
+        ("pam-points-per-tetrahedron", "PAM occupancy samples per tetrahedron",
+         cxxopts::value<unsigned>()->default_value("10"))
+        ("pam-occupancy-iso-value",
+         "PAM integrated occupancy isosurface threshold",
+         cxxopts::value<float>()->default_value("0.5"))
+        ("pam-vacancy-threshold", "PAM candidate distance from occupancy 0.5",
+         cxxopts::value<float>()->default_value("0.1"))
+        ("pam-mask-background-threshold",
+         "Mask alpha below this value votes empty in PAM",
+         cxxopts::value<float>()->default_value("0.01"))
         ("mesh-max-points",
          "Maximum samples inserted into global Delaunay (0 = unlimited)",
          cxxopts::value<std::uint64_t>()->default_value("2000000"))
@@ -520,6 +592,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh-tsdf-bounds-padding",
          "Point-cloud TSDF bounds multiplier",
          cxxopts::value<float>()->default_value("2"))
+        ("mesh-tsdf-pixel-step",
+         "Sparse TSDF block allocation pixel stride",
+         cxxopts::value<unsigned>()->default_value("4"))
         ("mesh-tsdf-support-closing-axes",
          "Required bilateral support axes before filling a zero-weight voxel",
          cxxopts::value<unsigned>()->default_value("2"))
@@ -674,6 +749,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.gggs_ssim_weight = result["gggs-ssim-weight"].as<float>();
     cli.gggs_depth_normal_weight =
         result["gggs-depth-normal-weight"].as<float>();
+    cli.gggs_normal_field = result["gggs-normal-field"].as<bool>();
+    cli.gggs_normal_field_weight =
+        result["gggs-normal-field-weight"].as<float>();
+    cli.gggs_normal_field_depth_ratio =
+        result["gggs-normal-field-depth-ratio"].as<float>();
+    cli.gggs_normal_field_from_iter =
+        result["gggs-normal-field-from-iter"].as<unsigned>();
     cli.gggs_multi_view_geo_weight =
         result["gggs-mv-geo-weight"].as<float>();
     cli.gggs_multi_view_ncc_weight =
@@ -730,6 +812,28 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.uv_parallel_partitions =
         result["uv-parallel-partitions"].as<std::uint32_t>();
     cli.mesh_method = result["mesh-method"].as<std::string>();
+    cli.pam_max_points = result["pam-max-points"].as<std::uint64_t>();
+    cli.pam_pivot_max_points =
+        result["pam-pivot-max-points"].as<std::uint64_t>();
+    cli.pam_pivot_std_factor =
+        result["pam-pivot-std-factor"].as<float>();
+    cli.pam_gaussian_seed_fraction =
+        result["pam-gaussian-seed-fraction"].as<float>();
+    cli.pam_focus_radius_fraction =
+        result["pam-focus-radius-fraction"].as<float>();
+    cli.pam_bounding_volume = utf8_to_path(
+        result["pam-bounding-volume"].as<std::string>());
+    cli.pam_refinement_steps =
+        result["pam-refinement-steps"].as<unsigned>();
+    cli.pam_neighbors = result["pam-neighbors"].as<unsigned>();
+    cli.pam_points_per_tetrahedron =
+        result["pam-points-per-tetrahedron"].as<unsigned>();
+    cli.pam_occupancy_iso_value =
+        result["pam-occupancy-iso-value"].as<float>();
+    cli.pam_vacancy_threshold =
+        result["pam-vacancy-threshold"].as<float>();
+    cli.pam_mask_background_threshold =
+        result["pam-mask-background-threshold"].as<float>();
     cli.mesh_max_points = result["mesh-max-points"].as<std::uint64_t>();
     cli.mesh_target_faces =
         result["mesh-target-faces"].as<std::uint64_t>();
@@ -738,6 +842,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["mesh-tsdf-voxel-scale"].as<float>();
     cli.mesh_tsdf_bounds_padding =
         result["mesh-tsdf-bounds-padding"].as<float>();
+    cli.mesh_tsdf_pixel_step =
+        result["mesh-tsdf-pixel-step"].as<unsigned>();
     cli.mesh_tsdf_support_closing_axes =
         result["mesh-tsdf-support-closing-axes"].as<unsigned>();
     const std::string mesh_tsdf_frame_export_dir =
@@ -787,6 +893,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.delight) cli.texture = true;
     if (cli.texture) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
+    if (!cli.gggs_model.empty()) cli.gggs = true;
     // An explicitly selected capture mode is the product-level full rebuild
     // preset. Omitting it keeps the low-level SfM-only developer workflow.
     if (result.count("capture-mode") != 0) {
@@ -841,6 +948,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.gggs_depth_normal_weight < 0.F)
         throw std::invalid_argument(
             "--gggs-depth-normal-weight must be non-negative");
+    if (!std::isfinite(cli.gggs_normal_field_weight) ||
+        cli.gggs_normal_field_weight < 0.F)
+        throw std::invalid_argument(
+            "--gggs-normal-field-weight must be finite and non-negative");
+    if (!std::isfinite(cli.gggs_normal_field_depth_ratio) ||
+        cli.gggs_normal_field_depth_ratio < 0.F ||
+        cli.gggs_normal_field_depth_ratio > 1.F)
+        throw std::invalid_argument(
+            "--gggs-normal-field-depth-ratio must be in [0,1]");
     if (cli.gggs_multi_view_geo_weight < 0.F ||
         cli.gggs_multi_view_ncc_weight < 0.F)
         throw std::invalid_argument(
@@ -905,10 +1021,36 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument(
             "--uv-parallel-partitions must be positive");
     if (cli.mesh_method != "auto" && cli.mesh_method != "tsdf" &&
-        cli.mesh_method != "delaunay") {
+        cli.mesh_method != "delaunay" && cli.mesh_method != "pam") {
         throw std::invalid_argument(
-            "--mesh-method must be auto, tsdf, or delaunay");
+            "--mesh-method must be auto, tsdf, delaunay, or pam");
     }
+    if (cli.mesh_method == "pam" && !cli.gggs)
+        throw std::invalid_argument(
+            "--mesh-method pam requires GGGS training or --gggs-model");
+    if (cli.pam_max_points < 4 || cli.pam_pivot_max_points < 4 ||
+        cli.pam_neighbors == 0 ||
+        cli.pam_points_per_tetrahedron == 0 ||
+        !std::isfinite(cli.pam_pivot_std_factor) ||
+        !(cli.pam_pivot_std_factor > 0.F) ||
+        !std::isfinite(cli.pam_gaussian_seed_fraction) ||
+        cli.pam_gaussian_seed_fraction < 0.F ||
+        cli.pam_gaussian_seed_fraction > 1.F ||
+        !std::isfinite(cli.pam_occupancy_iso_value) ||
+        !(cli.pam_occupancy_iso_value > 0.F &&
+          cli.pam_occupancy_iso_value < 1.F) ||
+        !std::isfinite(cli.pam_focus_radius_fraction) ||
+        cli.pam_focus_radius_fraction < 0.F ||
+        !std::isfinite(cli.pam_vacancy_threshold) ||
+        cli.pam_vacancy_threshold < 0.F ||
+        !std::isfinite(cli.pam_mask_background_threshold) ||
+        cli.pam_mask_background_threshold < 0.F ||
+        cli.pam_mask_background_threshold > 1.F)
+        throw std::invalid_argument("Invalid PAM extraction options");
+    if (!cli.pam_bounding_volume.empty() &&
+        !std::filesystem::is_regular_file(cli.pam_bounding_volume))
+        throw std::invalid_argument(
+            "--pam-bounding-volume must name an existing JSON file");
     if (cli.patchmatch_tile_rows == 0)
         throw std::invalid_argument("--patchmatch-tile-rows must be positive");
     if (cli.patchmatch_concurrent_views == 0)
@@ -929,6 +1071,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         !std::isfinite(cli.mesh_tsdf_bounds_padding))
         throw std::invalid_argument(
             "--mesh-tsdf-bounds-padding must be finite and >= 1");
+    if (cli.mesh_tsdf_pixel_step == 0 || cli.mesh_tsdf_pixel_step > 16)
+        throw std::invalid_argument(
+            "--mesh-tsdf-pixel-step must be in [1,16]");
     if (cli.mesh_tsdf_support_closing_axes > 3)
         throw std::invalid_argument(
             "--mesh-tsdf-support-closing-axes must be in [0,3]");
@@ -1579,6 +1724,11 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         : aetherscan::splat::AlphaMode::transparent;
     options.match_alpha_weight = cli.gggs_match_alpha_weight;
     options.ssim_weight = cli.gggs_ssim_weight;
+    options.use_normal_field = cli.gggs_normal_field;
+    options.normal_field_weight = cli.gggs_normal_field_weight;
+    options.normal_field_depth_ratio =
+        cli.gggs_normal_field_depth_ratio;
+    options.normal_field_from_iter = cli.gggs_normal_field_from_iter;
     options.profile_cuda = cli.gggs_profile_cuda;
     options.cuda_profile_interval = cli.gggs_profile_interval;
     options.minimum_scale_fraction = cli.gggs_min_scale_fraction;
@@ -1675,6 +1825,10 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         options.dense_structure_freeze_iter,
         " depth_normal_loss=", options.use_depth_normal_loss,
         " depth_normal_weight=", options.depth_normal_weight,
+        " normal_field=", options.use_normal_field,
+        " normal_field_weight=", options.normal_field_weight,
+        " normal_field_depth_ratio=", options.normal_field_depth_ratio,
+        " normal_field_from_iter=", options.normal_field_from_iter,
         " filter_3d=", options.use_depth_normal_loss,
         " multi_view_geo_weight=", options.multi_view_geo_weight,
         " multi_view_ncc_weight=", options.multi_view_ncc_weight,
@@ -1828,6 +1982,61 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
         cli.gggs_model.empty() ? " training_s=" : " model_load_s=",
         elapsed);
     if (!cli.mesh) return std::nullopt;
+    if (cli.mesh_method == "pam") {
+        aetherscan::splat::PamMeshOptions pam_options;
+        pam_options.max_points = static_cast<std::size_t>(
+            std::min<std::uint64_t>(
+                cli.pam_max_points,
+                (std::numeric_limits<std::size_t>::max)()));
+        pam_options.pivot_max_points = static_cast<std::size_t>(
+            std::min<std::uint64_t>(
+                cli.pam_pivot_max_points,
+                (std::numeric_limits<std::size_t>::max)()));
+        pam_options.pivot_std_factor = cli.pam_pivot_std_factor;
+        pam_options.gaussian_seed_fraction =
+            cli.pam_gaussian_seed_fraction;
+        pam_options.focus_radius_fraction =
+            cli.pam_focus_radius_fraction;
+        pam_options.bounding_volume_file = cli.pam_bounding_volume;
+        pam_options.refinement_steps = cli.pam_refinement_steps;
+        pam_options.vector_field_neighbors = cli.pam_neighbors;
+        pam_options.points_per_tetrahedron =
+            cli.pam_points_per_tetrahedron;
+        pam_options.occupancy_iso_value =
+            cli.pam_occupancy_iso_value;
+        pam_options.vacancy_threshold = cli.pam_vacancy_threshold;
+        pam_options.mask_background_threshold =
+            cli.pam_mask_background_threshold;
+        const auto pam_started = std::chrono::steady_clock::now();
+        // An empty seed requests GaussianWrapping's native path:
+        // learned-normal pivots -> tetra_triangulation -> marching tetrahedra
+        // -> PAM resampling and a second occupancy-classified Delaunay.
+        auto pam = aetherscan::splat::extract_pam_mesh(
+            gaussians, scene, aetherscan::mvs::Mesh{}, options,
+            pam_options);
+        const auto seed_ply = out_dir /
+            (cli.output.stem().string() + "_pam_pivot_mesh.ply");
+        const auto candidates_ply = out_dir /
+            (cli.output.stem().string() + "_pam_candidates.ply");
+        if (!pam.seed_mesh.faces.empty())
+            aetherscan::mvs::save_mesh_ply(pam.seed_mesh, seed_ply);
+        aetherscan::mvs::save_dense_ply(
+            pam.candidate_cloud, candidates_ply);
+        aetherscan::core::Logger::instance().info(
+            "pam_pivot_mesh_ply=", seed_ply,
+            " pivot_vertices=", pam.seed_mesh.vertices.size(),
+            " pivot_faces=", pam.seed_mesh.faces.size(),
+            " pam_candidates_ply=", candidates_ply,
+            " candidates=", pam.candidate_cloud.points.size(),
+            " tetrahedra=", pam.tetrahedron_count,
+            " occupied_tetrahedra=", pam.occupied_tetrahedron_count,
+            " mesh_vertices=", pam.mesh.vertices.size(),
+            " mesh_faces=", pam.mesh.faces.size(),
+            " pam_s=",
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - pam_started).count());
+        return std::move(pam.mesh);
+    }
     if (mesh_options == nullptr)
         throw std::invalid_argument(
             "GGGS mesh extraction requires configured MVS mesh options");
@@ -1836,6 +2045,8 @@ std::optional<aetherscan::mvs::Mesh> run_gggs_training(
     extraction_options.fusion = *mesh_options;
     extraction_options.fusion.build_mesh = true;
     extraction_options.diagnostics_dir = out_dir;
+    extraction_options.focus_radius_fraction =
+        cli.pam_focus_radius_fraction;
     const auto mesh_started = std::chrono::steady_clock::now();
     auto extraction = aetherscan::splat::extract_gggs_mesh(
         gaussians, scene, options, extraction_options);
@@ -1928,6 +2139,8 @@ int main(int argc, char** argv) {
                 : 1.F;
             mesh_options.mesh_tsdf_bounds_padding =
                 cli.mesh_tsdf_bounds_padding;
+            mesh_options.mesh_tsdf_pixel_step =
+                cli.mesh_tsdf_pixel_step;
             mesh_options.mesh_tsdf_support_closing_axes =
                 cli.mesh_tsdf_support_closing_axes;
             mesh_options.mesh_tsdf_frame_export_dir =
@@ -2100,6 +2313,8 @@ int main(int argc, char** argv) {
                 : 1.F;
             mesh_options.mesh_tsdf_bounds_padding =
                 cli.mesh_tsdf_bounds_padding;
+            mesh_options.mesh_tsdf_pixel_step =
+                cli.mesh_tsdf_pixel_step;
             mesh_options.mesh_tsdf_support_closing_axes =
                 cli.mesh_tsdf_support_closing_axes;
             mesh_options.mesh_tsdf_frame_export_dir =
@@ -2207,6 +2422,8 @@ int main(int argc, char** argv) {
                 : 1.F;
             densify_opts.mesh_tsdf_bounds_padding =
                 cli.mesh_tsdf_bounds_padding;
+            densify_opts.mesh_tsdf_pixel_step =
+                cli.mesh_tsdf_pixel_step;
             densify_opts.mesh_tsdf_support_closing_axes =
                 cli.mesh_tsdf_support_closing_axes;
             densify_opts.mesh_tsdf_frame_export_dir =

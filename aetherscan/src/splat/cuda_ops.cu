@@ -948,6 +948,144 @@ __global__ void depth_normal_consistency_kernel(
     atomicAdd(grad_depth + left, -dot3(grad_dx, ray(x - 1, y)));
 }
 
+__global__ void normal_field_consistency_kernel(
+    const float* depth, const float* oriented_normal, float* grad_depth,
+    float* grad_oriented_normal, float* terms, const Camera camera,
+    const float weight) {
+    const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::size_t pixels =
+        static_cast<std::size_t>(camera.width) * camera.height;
+    if (pixel >= pixels) return;
+    const std::uint32_t x = static_cast<std::uint32_t>(pixel % camera.width);
+    const std::uint32_t y = static_cast<std::uint32_t>(pixel / camera.width);
+    if (x == 0 || y == 0 || x + 1 >= camera.width ||
+        y + 1 >= camera.height)
+        return;
+
+    const std::size_t top = pixel - camera.width;
+    const std::size_t bottom = pixel + camera.width;
+    const std::size_t left = pixel - 1;
+    const std::size_t right = pixel + 1;
+    if (!(depth[pixel] > 0.F && depth[top] > 0.F && depth[bottom] > 0.F &&
+          depth[left] > 0.F && depth[right] > 0.F))
+        return;
+    const auto point = [&](const std::uint32_t px, const std::uint32_t py,
+                           const float d) {
+        return make_float3(
+            (static_cast<float>(px) - camera.cx) / camera.fx * d,
+            (static_cast<float>(py) - camera.cy) / camera.fy * d, d);
+    };
+    const float3 dy = subtract3(
+        point(x, y + 1, depth[bottom]), point(x, y - 1, depth[top]));
+    const float3 dx = subtract3(
+        point(x + 1, y, depth[right]), point(x - 1, y, depth[left]));
+    const float3 cross = cross3(dy, dx);
+    const float length_squared = dot3(cross, cross);
+    if (!(length_squared > 1e-20F) || !isfinite(length_squared)) return;
+    const float inverse_length = rsqrtf(length_squared);
+    const float3 depth_normal = scale3(cross, inverse_length);
+
+    const float3 normal_world = make_float3(
+        oriented_normal[pixel], oriented_normal[pixels + pixel],
+        oriented_normal[2 * pixels + pixel]);
+    // Camera.world_to_camera is column-major. Apply the conventional R to
+    // compare the learned world-space field against the camera-space depth
+    // normal, exactly matching GaussianWrapping's world conversion.
+    const float3 normal_camera = make_float3(
+        camera.world_to_camera[0] * normal_world.x +
+            camera.world_to_camera[4] * normal_world.y +
+            camera.world_to_camera[8] * normal_world.z,
+        camera.world_to_camera[1] * normal_world.x +
+            camera.world_to_camera[5] * normal_world.y +
+            camera.world_to_camera[9] * normal_world.z,
+        camera.world_to_camera[2] * normal_world.x +
+            camera.world_to_camera[6] * normal_world.y +
+            camera.world_to_camera[10] * normal_world.z);
+    const float normalization = weight / static_cast<float>(pixels);
+    if (terms)
+        atomicAdd(
+            terms + 2,
+            normalization * (1.F - dot3(normal_camera, depth_normal)));
+
+    const float3 grad_camera = scale3(depth_normal, -normalization);
+    const float3 grad_world = make_float3(
+        camera.world_to_camera[0] * grad_camera.x +
+            camera.world_to_camera[1] * grad_camera.y +
+            camera.world_to_camera[2] * grad_camera.z,
+        camera.world_to_camera[4] * grad_camera.x +
+            camera.world_to_camera[5] * grad_camera.y +
+            camera.world_to_camera[6] * grad_camera.z,
+        camera.world_to_camera[8] * grad_camera.x +
+            camera.world_to_camera[9] * grad_camera.y +
+            camera.world_to_camera[10] * grad_camera.z);
+    atomicAdd(grad_oriented_normal + pixel, grad_world.x);
+    atomicAdd(grad_oriented_normal + pixels + pixel, grad_world.y);
+    atomicAdd(grad_oriented_normal + 2 * pixels + pixel, grad_world.z);
+
+    const float3 grad_unit = scale3(normal_camera, -normalization);
+    const float projection = dot3(depth_normal, grad_unit);
+    const float3 grad_cross = scale3(
+        subtract3(grad_unit, scale3(depth_normal, projection)),
+        inverse_length);
+    const float3 grad_dy = cross3(dx, grad_cross);
+    const float3 grad_dx = cross3(grad_cross, dy);
+    const auto ray = [&](const std::uint32_t px, const std::uint32_t py) {
+        return make_float3(
+            (static_cast<float>(px) - camera.cx) / camera.fx,
+            (static_cast<float>(py) - camera.cy) / camera.fy, 1.F);
+    };
+    atomicAdd(
+        grad_depth + bottom, dot3(grad_dy, ray(x, y + 1)));
+    atomicAdd(grad_depth + top, -dot3(grad_dy, ray(x, y - 1)));
+    atomicAdd(grad_depth + right, dot3(grad_dx, ray(x + 1, y)));
+    atomicAdd(grad_depth + left, -dot3(grad_dx, ray(x - 1, y)));
+}
+
+__global__ void normal_features_forward_kernel(
+    const float* features, float* normals, const std::size_t count) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float x = features[4 * index];
+    const float y = features[4 * index + 1];
+    const float z = features[4 * index + 2];
+    const float length = sqrtf(x * x + y * y + z * z);
+    if (!(length > 1e-12F) || !isfinite(length)) return;
+    const float sign = tanhf(features[4 * index + 3]);
+    normals[3 * index] = sign * x / length;
+    normals[3 * index + 1] = sign * y / length;
+    normals[3 * index + 2] = sign * z / length;
+}
+
+__global__ void normal_features_backward_kernel(
+    const float* features, const float* grad_normals, float* grad_features,
+    const std::size_t count) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float x = features[4 * index];
+    const float y = features[4 * index + 1];
+    const float z = features[4 * index + 2];
+    const float length = sqrtf(x * x + y * y + z * z);
+    if (!(length > 1e-12F) || !isfinite(length)) return;
+    const float inverse_length = 1.F / length;
+    const float nx = x * inverse_length;
+    const float ny = y * inverse_length;
+    const float nz = z * inverse_length;
+    const float gx = grad_normals[3 * index];
+    const float gy = grad_normals[3 * index + 1];
+    const float gz = grad_normals[3 * index + 2];
+    const float tangent_projection = gx * nx + gy * ny + gz * nz;
+    const float sign = tanhf(features[4 * index + 3]);
+    const float direction_scale = sign * inverse_length;
+    grad_features[4 * index] =
+        direction_scale * (gx - nx * tangent_projection);
+    grad_features[4 * index + 1] =
+        direction_scale * (gy - ny * tangent_projection);
+    grad_features[4 * index + 2] =
+        direction_scale * (gz - nz * tangent_projection);
+    grad_features[4 * index + 3] =
+        (1.F - sign * sign) * tangent_projection;
+}
+
 __global__ void adam_kernel(
     float* parameter, const float* gradient, float* first, float* second,
     const std::size_t count, const float learning_rate,
@@ -1370,6 +1508,46 @@ ActivatedParameters activate_parameters(const GaussianModel& model) {
     return result;
 }
 
+tinytensor::Tensor normal_features_to_normals(
+    const tinytensor::Tensor& normal_features) {
+    if (!normal_features.is_valid() ||
+        normal_features.device() != tinytensor::Device::CUDA ||
+        normal_features.dtype() != tinytensor::DataType::Float32 ||
+        !normal_features.is_contiguous() ||
+        normal_features.shape().rank() != 2 ||
+        normal_features.shape()[1] != 4)
+        throw std::invalid_argument(
+            "GGGS normal features must be contiguous CUDA float32 [N,4]");
+    const std::size_t count = normal_features.shape()[0];
+    auto normals = tinytensor::Tensor::zeros(
+        {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    if (count != 0)
+        normal_features_forward_kernel<<<
+            (count + k_threads - 1) / k_threads, k_threads>>>(
+            normal_features.ptr<float>(), normals.ptr<float>(), count);
+    check_cuda(cudaGetLastError(), "convert GGGS normal features");
+    return normals;
+}
+
+tinytensor::Tensor normal_features_backward(
+    const tinytensor::Tensor& normal_features,
+    const tinytensor::Tensor& grad_normals) {
+    if (!grad_normals.is_valid() || grad_normals.shape().rank() != 2 ||
+        grad_normals.shape()[0] != normal_features.shape()[0] ||
+        grad_normals.shape()[1] != 3)
+        throw std::invalid_argument(
+            "GGGS normal gradient must have shape [N,3]");
+    const std::size_t count = normal_features.shape()[0];
+    auto result = tinytensor::Tensor::zeros_like(normal_features);
+    if (count != 0)
+        normal_features_backward_kernel<<<
+            (count + k_threads - 1) / k_threads, k_threads>>>(
+            normal_features.ptr<float>(), grad_normals.ptr<float>(),
+            result.ptr<float>(), count);
+    check_cuda(cudaGetLastError(), "chain GGGS normal-feature gradients");
+    return result;
+}
+
 void bake_3d_filter(GaussianModel& model) {
     if (!model.filter_3d.is_valid()) return;
     const std::size_t count = model.size();
@@ -1735,6 +1913,32 @@ void add_sample_depth_model_gradients(
     check_cuda(cudaGetLastError(), "accumulate GGGS sample-depth gradients");
 }
 
+void add_model_gradients(
+    const ModelGradients& source, ModelGradients& destination,
+    const bool include_refine_weight) {
+    const auto add = [](const tinytensor::Tensor& source_tensor,
+                        tinytensor::Tensor& destination_tensor) {
+        if (!source_tensor.is_valid()) return;
+        if (!destination_tensor.is_valid() ||
+            destination_tensor.shape() != source_tensor.shape())
+            throw std::invalid_argument(
+                "Cannot merge incompatible GGGS model gradients");
+        const std::size_t count = destination_tensor.numel();
+        add_tensor_in_place_kernel<<<
+            (count + k_threads - 1) / k_threads, k_threads>>>(
+            destination_tensor.ptr<float>(), source_tensor.ptr<float>(),
+            count);
+    };
+    add(source.means, destination.means);
+    add(source.log_scales, destination.log_scales);
+    add(source.quaternions, destination.quaternions);
+    add(source.opacity_logits, destination.opacity_logits);
+    add(source.sh, destination.sh);
+    if (include_refine_weight)
+        add(source.refine_weight, destination.refine_weight);
+    check_cuda(cudaGetLastError(), "merge GGGS model gradients");
+}
+
 void chain_parameter_gradients(
     const GaussianModel& model, const ActivatedParameters& activated,
     const tinytensor::Tensor& grad_scales,
@@ -1820,6 +2024,41 @@ LossGradients compute_training_loss(
         result.depth_value = host[1];
         result.normal_value = host[2];
         result.total = host[0] + host[1] + host[2] + host[3];
+    }
+    return result;
+}
+
+LossGradients compute_normal_field_loss(
+    const RenderResult& rendered, const Camera& camera, const float weight,
+    const bool collect_scalar_terms) {
+    LossGradients result{
+        tinytensor::Tensor::zeros_like(rendered.color),
+        tinytensor::Tensor::zeros_like(rendered.alpha),
+        tinytensor::Tensor::zeros_like(rendered.median_depth),
+        tinytensor::Tensor::zeros_like(rendered.normal)};
+    const std::size_t pixels =
+        static_cast<std::size_t>(camera.width) * camera.height;
+    tinytensor::Tensor terms;
+    if (collect_scalar_terms)
+        terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
+    if (pixels != 0 && weight > 0.F) {
+        normal_field_consistency_kernel<<<
+            (pixels + k_threads - 1) / k_threads, k_threads>>>(
+            rendered.median_depth.ptr<float>(), rendered.color.ptr<float>(),
+            result.depth.ptr<float>(), result.color.ptr<float>(),
+            collect_scalar_terms ? terms.ptr<float>() : nullptr, camera,
+            weight);
+        check_cuda(cudaGetLastError(), "compute GGGS normal-field loss");
+    }
+    if (collect_scalar_terms) {
+        std::array<float, 4> host{};
+        check_cuda(
+            cudaMemcpy(
+                host.data(), terms.ptr<float>(), sizeof(host),
+                cudaMemcpyDeviceToHost),
+            "download GGGS normal-field loss");
+        result.normal_value = host[2];
+        result.total = host[2];
     }
     return result;
 }

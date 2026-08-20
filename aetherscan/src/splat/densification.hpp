@@ -29,7 +29,7 @@ struct SceneGeometry {
     float maximum_extent{1.F};
 };
 
-using AdamStates = std::array<detail::AdamState*, 5>;
+using AdamStates = std::array<detail::AdamState*, 6>;
 
 [[nodiscard]] SceneGeometry training_scene_geometry(
     const mvs::MvsScene& scene, bool dense_input);

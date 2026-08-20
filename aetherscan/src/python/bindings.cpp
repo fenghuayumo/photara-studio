@@ -49,6 +49,8 @@ struct MeshResultHandle {
     mvs::DenseCloud surface_cloud;
     mvs::Mesh mesh;
     std::size_t valid_depth_pixels{};
+    std::size_t tetrahedron_count{};
+    std::size_t occupied_tetrahedron_count{};
 };
 
 [[nodiscard]] bool supported_image_extension(
@@ -171,6 +173,22 @@ sfm::ReconstructionSummary run_sfm_mapping(
     result->surface_cloud = std::move(extracted.surface_cloud);
     result->mesh = std::move(extracted.mesh);
     result->valid_depth_pixels = extracted.valid_depth_pixels;
+    return result;
+}
+
+[[nodiscard]] std::shared_ptr<MeshResultHandle> extract_pam(
+    const GaussianModelHandle& model, const MvsSceneHandle& scene,
+    const MeshResultHandle& seed,
+    const splat::TrainingOptions& training_options,
+    const splat::PamMeshOptions& pam_options) {
+    splat::PamMeshResult extracted = splat::extract_pam_mesh(
+        model.model, scene.scene, seed.mesh, training_options, pam_options);
+    auto result = std::make_shared<MeshResultHandle>();
+    result->surface_cloud = std::move(extracted.candidate_cloud);
+    result->mesh = std::move(extracted.mesh);
+    result->tetrahedron_count = extracted.tetrahedron_count;
+    result->occupied_tetrahedron_count =
+        extracted.occupied_tetrahedron_count;
     return result;
 }
 
@@ -380,6 +398,9 @@ NB_MODULE(aetherscan_native, module) {
             "mesh_tsdf_truncation_voxels",
             &mvs::DensifyOptions::mesh_tsdf_truncation_voxels)
         .def_rw(
+            "mesh_tsdf_pixel_step",
+            &mvs::DensifyOptions::mesh_tsdf_pixel_step)
+        .def_rw(
             "mesh_tsdf_min_weight",
             &mvs::DensifyOptions::mesh_tsdf_min_weight)
         .def_rw(
@@ -559,7 +580,22 @@ NB_MODULE(aetherscan_native, module) {
             &splat::TrainingOptions::training_prefetch_views)
         .def_rw(
             "evaluation_split_every",
-            &splat::TrainingOptions::evaluation_split_every);
+            &splat::TrainingOptions::evaluation_split_every)
+        .def_rw(
+            "use_normal_field",
+            &splat::TrainingOptions::use_normal_field)
+        .def_rw(
+            "normal_field_weight",
+            &splat::TrainingOptions::normal_field_weight)
+        .def_rw(
+            "normal_field_depth_ratio",
+            &splat::TrainingOptions::normal_field_depth_ratio)
+        .def_rw(
+            "normal_field_from_iter",
+            &splat::TrainingOptions::normal_field_from_iter)
+        .def_rw(
+            "normal_features_lr",
+            &splat::TrainingOptions::normal_features_lr);
 
     nb::class_<splat::DatasetLoadRequest>(module, "DatasetRequest")
         .def(nb::init<>())
@@ -588,7 +624,63 @@ NB_MODULE(aetherscan_native, module) {
         .def_rw(
             "min_depth_normal_cosine",
             &splat::GggsMeshOptions::min_depth_normal_cosine)
+        .def_rw(
+            "focus_radius_fraction",
+            &splat::GggsMeshOptions::focus_radius_fraction)
         .def_rw("fusion", &splat::GggsMeshOptions::fusion);
+
+    nb::class_<splat::PamMeshOptions>(module, "PamOptions")
+        .def(nb::init<>())
+        .def_rw("max_points", &splat::PamMeshOptions::max_points)
+        .def_rw(
+            "pivot_max_points",
+            &splat::PamMeshOptions::pivot_max_points)
+        .def_rw(
+            "pivot_std_factor",
+            &splat::PamMeshOptions::pivot_std_factor)
+        .def_rw(
+            "gaussian_seed_fraction",
+            &splat::PamMeshOptions::gaussian_seed_fraction)
+        .def_rw(
+            "focus_radius_fraction",
+            &splat::PamMeshOptions::focus_radius_fraction)
+        .def_rw(
+            "bounding_volume_file",
+            &splat::PamMeshOptions::bounding_volume_file)
+        .def_rw(
+            "oversampling_factor",
+            &splat::PamMeshOptions::oversampling_factor)
+        .def_rw(
+            "max_resample_rounds",
+            &splat::PamMeshOptions::max_resample_rounds)
+        .def_rw(
+            "refinement_steps",
+            &splat::PamMeshOptions::refinement_steps)
+        .def_rw(
+            "vector_field_neighbors",
+            &splat::PamMeshOptions::vector_field_neighbors)
+        .def_rw(
+            "points_per_tetrahedron",
+            &splat::PamMeshOptions::points_per_tetrahedron)
+        .def_rw(
+            "occupancy_iso_value",
+            &splat::PamMeshOptions::occupancy_iso_value)
+        .def_rw(
+            "vacancy_threshold",
+            &splat::PamMeshOptions::vacancy_threshold)
+        .def_rw(
+            "minimum_gradient_norm_squared",
+            &splat::PamMeshOptions::minimum_gradient_norm_squared)
+        .def_rw(
+            "refinement_step",
+            &splat::PamMeshOptions::refinement_step)
+        .def_rw(
+            "mask_background_threshold",
+            &splat::PamMeshOptions::mask_background_threshold)
+        .def_rw(
+            "occupancy_chunk_size",
+            &splat::PamMeshOptions::occupancy_chunk_size)
+        .def_rw("seed", &splat::PamMeshOptions::seed);
 
     nb::class_<SfmSceneHandle>(module, "SfmScene")
         .def_prop_ro(
@@ -708,6 +800,12 @@ NB_MODULE(aetherscan_native, module) {
         .def_ro(
             "valid_depth_pixels",
             &MeshResultHandle::valid_depth_pixels)
+        .def_ro(
+            "tetrahedron_count",
+            &MeshResultHandle::tetrahedron_count)
+        .def_ro(
+            "occupied_tetrahedron_count",
+            &MeshResultHandle::occupied_tetrahedron_count)
         .def(
             "save",
             [](const MeshResultHandle& self,
@@ -796,6 +894,12 @@ NB_MODULE(aetherscan_native, module) {
         nb::arg("scene"),
         nb::arg("training_options") = splat::TrainingOptions{},
         nb::arg("tsdf_options") = splat::GggsMeshOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "extract_pam", &extract_pam, nb::arg("model"),
+        nb::arg("scene"), nb::arg("seed_mesh"),
+        nb::arg("training_options") = splat::TrainingOptions{},
+        nb::arg("pam_options") = splat::PamMeshOptions{},
         nb::call_guard<nb::gil_scoped_release>());
     module.def(
         "apply_mvs_quality_preset",
