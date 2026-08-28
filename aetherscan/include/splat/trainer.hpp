@@ -163,6 +163,15 @@ inline constexpr std::uint32_t k_gaussian_chunk_version = 1;
 std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model);
 GaussianModel decode_gaussians(std::span<const std::uint8_t> bytes);
 
+// Blocks until the process is killed. Renders whenever the orbit-camera
+// sidecar revision changes, and submits the CUDA color tensor to the
+// editor preview callback.
+void run_orbit_preview(
+    const GaussianModel& model,
+    const std::filesystem::path& camera_file,
+    DevicePreviewCallback device_preview,
+    float kernel_size = 0.F);
+
 RenderMetrics render_evaluation_png(
     const GaussianModel& model, const mvs::MvsView& view,
     const std::filesystem::path& path,

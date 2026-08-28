@@ -25,6 +25,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 
 namespace aetherscan::splat {
@@ -1909,6 +1910,39 @@ GaussianModel decode_gaussians(const std::span<const std::uint8_t> bytes) {
             filter, {count, 1U}, tinytensor::Device::CUDA);
     model.sh_degree = sh_degree;
     return model;
+}
+
+void run_orbit_preview(
+    const GaussianModel& model,
+    const std::filesystem::path& camera_file,
+    DevicePreviewCallback device_preview,
+    const float kernel_size) {
+    if (model.size() == 0)
+        throw std::runtime_error("Orbit preview requires a trained Gaussian model");
+    if (!device_preview)
+        throw std::runtime_error("Orbit preview requires a live display callback");
+    if (camera_file.empty())
+        throw std::runtime_error("Orbit preview requires a camera sidecar");
+
+    Rasterizer rasterizer;
+    RasterizeOptions options;
+    options.active_sh_degree = model.sh_degree;
+    options.kernel_size = kernel_size;
+    options.require_depth = false;
+
+    std::uint64_t last_revision = ~0ULL;
+    while (true) {
+        Camera next;
+        std::uint64_t revision = 0;
+        if (load_preview_camera_file(camera_file, next, revision) &&
+            revision != last_revision) {
+            const RenderResult rendered =
+                rasterizer.forward(model, next, options);
+            device_preview(0, 0, next, rendered.color);
+            last_revision = revision;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
 }
 
 }  // namespace aetherscan::splat

@@ -85,6 +85,7 @@ struct ReconstructCli {
     bool lightglue_cpu{false};
     bool dense{false};
     bool splat{false};
+    bool splat_view{false};
     std::string capture_mode{"object"};
     std::filesystem::path splat_dataset;
     std::string splat_format{"auto"};
@@ -276,6 +277,7 @@ void print_help(const cxxopts::Options& options) {
               << "Dense (optional Stage A Fast MVS after SfM):\n"
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
               << "  --splat       train CUDA Gaussian splats -> *_splat.ply\n"
+              << "  --splat-view  orbit-preview a trained splat from the camera sidecar\n"
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS camera data\n"
               << "  --splat-format auto|colmap|realitycapture|openmvs\n"
               << "  --colmap PATH  compatibility alias for --splat-format colmap\n"
@@ -441,6 +443,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("dense", "Run Fast MVS densify after SfM",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat", "Train CUDA Gaussian splats directly from SfM sparse points",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-view",
+         "Orbit-preview a trained splat from --splat-preview-camera-file",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("capture-mode",
          "Capture type: object uses SfM SubjectBounds; scene is unbounded",
@@ -752,6 +757,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.lightglue_cpu = result["lightglue-cpu"].as<bool>();
     cli.dense = result["dense"].as<bool>();
     cli.splat = result["splat"].as<bool>();
+    cli.splat_view = result["splat-view"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")
         throw std::invalid_argument(
@@ -1011,7 +1017,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument(
             "--texture is not yet available in the direct external splat path");
 #if !defined(AETHERSCAN_HAS_SPLAT)
-    if (cli.splat || external_splat_dataset) {
+    if (cli.splat || cli.splat_view || external_splat_dataset) {
         throw std::invalid_argument(
             "--splat requires CUDA and AETHERSCAN_ENABLE_SPLAT=ON");
     }
@@ -1019,8 +1025,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     static_cast<void>(
         aetherscan::splat::parse_dataset_format(cli.splat_format));
 #endif
-    if (cli.splat_iterations == 0)
+    if (!cli.splat_view && cli.splat_iterations == 0)
         throw std::invalid_argument("--splat-iterations must be positive");
+    if (cli.splat_view && cli.splat_preview_camera_file.empty())
+        throw std::invalid_argument(
+            "--splat-view requires --splat-preview-camera-file");
     if (!std::isfinite(cli.splat_kernel_size) ||
         cli.splat_kernel_size < 0.F)
         throw std::invalid_argument(
@@ -1260,6 +1269,67 @@ std::string lower_extension(const std::filesystem::path& path) {
         [](const unsigned char value) { return static_cast<char>(std::tolower(value)); });
     return extension;
 }
+
+#if defined(AETHERSCAN_HAS_SPLAT)
+void run_splat_view(
+    const ReconstructCli& cli, aetherscan::project::Archive& archive) {
+    const bool has_vulkan_preview =
+        cli.splat_preview_vk_memory_handle != 0 &&
+        cli.splat_preview_vk_semaphore_handle != 0 &&
+        cli.splat_preview_vk_allocation_size != 0 &&
+        cli.splat_preview_vk_width != 0 &&
+        cli.splat_preview_vk_height != 0;
+    if (!has_vulkan_preview)
+        throw std::invalid_argument(
+            "--splat-view requires Vulkan preview handles");
+
+    aetherscan::splat::GaussianModel model;
+    std::filesystem::path model_path = cli.splat_model;
+    std::error_code exists_error;
+    if (model_path.empty()) {
+        const std::filesystem::path parent = cli.output.parent_path().empty()
+            ? std::filesystem::current_path()
+            : cli.output.parent_path();
+        model_path = parent / (cli.output.stem().string() + "_splat.ply");
+    }
+    if (std::filesystem::exists(model_path, exists_error)) {
+        model = aetherscan::splat::load_gaussians_ply(model_path);
+        aetherscan::core::Logger::instance().info(
+            "splat_view_model=", model_path, " gaussians=", model.size());
+    } else if (archive.has(aetherscan::project::ChunkType::gaussians)) {
+        model = aetherscan::splat::decode_gaussians(
+            archive.chunk(aetherscan::project::ChunkType::gaussians));
+        aetherscan::core::Logger::instance().info(
+            "splat_view_model=ascan gaussians=", model.size());
+    } else {
+        throw std::runtime_error(
+            "No trained splat model found for --splat-view");
+    }
+    if (model.size() == 0)
+        throw std::runtime_error("--splat-view loaded an empty Gaussian model");
+
+    auto vulkan_preview = std::make_unique<aetherscan::splat::CudaVulkanPreview>(
+        aetherscan::splat::CudaVulkanPreviewOptions{
+            cli.splat_preview_vk_memory_handle,
+            cli.splat_preview_vk_semaphore_handle,
+            cli.splat_preview_vk_allocation_size,
+            cli.splat_preview_vk_width,
+            cli.splat_preview_vk_height,
+            cli.splat_preview_vk_device_luid,
+            cli.splat_preview_vk_device_node_mask});
+    aetherscan::core::Logger::instance().info(
+        "splat_view_transport=cuda_vulkan_external_memory extent=",
+        cli.splat_preview_vk_width, 'x', cli.splat_preview_vk_height);
+    aetherscan::splat::run_orbit_preview(
+        model, cli.splat_preview_camera_file,
+        [&vulkan_preview](
+            unsigned, std::size_t, const aetherscan::splat::Camera& camera,
+            const tinytensor::Tensor& color) {
+            vulkan_preview->submit(color, camera.width, camera.height);
+        },
+        cli.splat_kernel_size);
+}
+#endif
 
 aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     aetherscan::project::Settings settings;
@@ -2361,6 +2431,13 @@ int main(int argc, char** argv) {
                 archive.has(aetherscan::project::ChunkType::gaussians),
                 " mesh=", archive.has(aetherscan::project::ChunkType::mesh));
         }
+
+#if defined(AETHERSCAN_HAS_SPLAT)
+        if (cli.splat_view) {
+            run_splat_view(cli, archive);
+            return 0;
+        }
+#endif
 
 #if defined(AETHERSCAN_HAS_SPLAT)
         if (!cli.splat_dataset.empty()) {

@@ -62,6 +62,7 @@ struct App {
     ProjectLayout layout;
 
     ProcessJob job;
+    ProcessJob viewer;
     JobKind active_job{JobKind::none};
     RunMonitor monitor;
     LogStream log;
@@ -114,6 +115,15 @@ struct App {
     bool show_status_bar{true};
     bool reset_dock_layout{};
 };
+
+void stop_splat_view(App& app) {
+    if (app.viewer.running()) app.viewer.stop();
+}
+
+bool live_preview_active(const App& app) {
+    return (app.job.running() && app.active_job == JobKind::train) ||
+           app.viewer.running();
+}
 
 constexpr float k_toolbar_height = 52.F;
 constexpr float k_status_height = 34.F;
@@ -436,6 +446,7 @@ void clear_loaded_result(App& app) {
 
 void new_project(App& app) {
     if (app.job.running() || app.loading_scene) return;
+    stop_splat_view(app);
     clear_loaded_result(app);
     app.settings = {};
     app.layout = {};
@@ -456,6 +467,7 @@ void select_image_folder(App& app) {
             L"Select the capture image folder", app.settings.images_dir))
         return;
 
+    stop_splat_view(app);
     clear_loaded_result(app);
     if (app.project_folder_automatic) {
         app.settings.project_dir.fill('\0');
@@ -525,8 +537,7 @@ void fit_preview_raster(
 
 void sync_live_preview_camera(
     App& app, const bool force, std::uint32_t width, std::uint32_t height) {
-    const bool live =
-        app.job.running() && app.active_job == JobKind::train;
+    const bool live = live_preview_active(app);
     if (!force && !live) return;
     if (app.layout.preview_camera_file.empty()) return;
     width = std::max<std::uint32_t>(1, width);
@@ -562,6 +573,7 @@ void select_project_folder(App& app) {
             L"Open AetherScan Project", app.settings.project_dir, false))
         return;
 
+    stop_splat_view(app);
     clear_loaded_result(app);
     app.project_folder_automatic = false;
     refresh_artifacts(app);
@@ -626,11 +638,13 @@ bool has_reconstruction_result(const App& app) {
 void delete_reconstruction_results(App& app) {
     if (app.job.running() || app.loading_scene || app.layout.root.empty()) return;
 
+    stop_splat_view(app);
     clear_loaded_result(app);
-    const std::array<std::filesystem::path, 9> generated_files = {
+    const std::array<std::filesystem::path, 10> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.mesh_ply,
-        app.layout.align_log, app.layout.train_log, app.layout.export_log};
+        app.layout.align_log, app.layout.train_log, app.layout.export_log,
+        app.layout.view_log};
 
     std::uintmax_t removed = 0;
     std::string failure;
@@ -701,9 +715,7 @@ void poll_scene_load(App& app) {
         return;
     }
     app.scene = std::move(loaded.scene);
-    const bool live_train =
-        app.job.running() && app.active_job == JobKind::train;
-    if (!live_train) app.camera.frame(app.scene);
+    if (!live_preview_active(app)) app.camera.frame(app.scene);
     if (app.tab != ViewportTab::training) app.tab = ViewportTab::sparse;
     set_message(
         app,
@@ -715,6 +727,7 @@ void poll_scene_load(App& app) {
 
 void start_align(App& app) {
     if (app.job.running()) return;
+    stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -782,6 +795,7 @@ const char* stop_job_label(const JobKind kind) {
 
 void start_export_sfm(App& app) {
     if (app.job.running()) return;
+    stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -831,8 +845,43 @@ void start_export_sfm(App& app) {
     }
 }
 
+void start_splat_view(App& app) {
+    if (app.job.running() || app.viewer.running() || !app.has_model) return;
+    if (app.settings.images_dir[0] == '\0' ||
+        app.settings.project_dir[0] == '\0')
+        return;
+    refresh_artifacts(app);
+    if (!app.has_model) return;
+    std::error_code error;
+    std::filesystem::create_directories(app.layout.root, error);
+    sync_live_preview_camera(
+        app, true, app.preview_raster_width, app.preview_raster_height);
+
+    app.preview.create(k_preview_extent, k_preview_extent);
+    PreviewHandles handles;
+    handles.memory =
+        reinterpret_cast<std::uintptr_t>(app.preview.memory_handle);
+    handles.semaphore =
+        reinterpret_cast<std::uintptr_t>(app.preview.semaphore_handle);
+    handles.allocation_size = app.preview.allocation_size;
+    handles.width = app.preview.width;
+    handles.height = app.preview.height;
+    handles.device_luid = gpu::device_luid();
+    handles.device_node_mask = gpu::device_node_mask();
+    try {
+        app.viewer.start(
+            build_view_command(
+                AETHERSCAN_CLI_PATH, app.settings, app.layout, handles),
+            app.layout.view_log);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+    app.preview.close_export_handles();
+}
+
 void start_train(App& app, const bool smoke) {
     if (app.job.running()) return;
+    stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -967,6 +1016,7 @@ void on_job_finished(App& app) {
             : "Training finished",
         app.settings.build_mesh && !app.has_mesh ? theme::warning
                                                  : theme::success);
+    if (!app.smoke_mode && app.has_model) start_splat_view(app);
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,40 +1485,46 @@ void draw_scene_panel(App& app) {
     theme::section_header("SCENE");
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {7.F, 7.F});
     ImGui::SetCursorPosX(10.F);
-    const std::string capture_label = app.layout.project_file.empty()
+    const std::string project_label = app.layout.project_file.empty()
         ? (app.layout.root.filename().empty()
-               ? std::string("Capture")
+               ? std::string("Untitled Project")
                : app.layout.root.filename().string())
         : app.layout.project_file.filename().string();
+    const bool has_cloud = app.has_sparse || app.scene.has_points();
+    const bool has_gaussians = app.has_model;
+    const bool has_mesh = app.has_mesh;
     if (ImGui::TreeNodeEx(
-            capture_label.c_str(),
+            project_label.c_str(),
             ImGuiTreeNodeFlags_DefaultOpen |
                 ImGuiTreeNodeFlags_SpanAvailWidth)) {
-        const auto leaf = [](const char* label, const bool present,
-                             const bool selected) {
+        const auto object_row = [](const char* label, const bool selected) {
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf |
                                        ImGuiTreeNodeFlags_NoTreePushOnOpen |
                                        ImGuiTreeNodeFlags_SpanAvailWidth;
             if (selected) flags |= ImGuiTreeNodeFlags_Selected;
-            if (!present) ImGui::PushStyleColor(ImGuiCol_Text, theme::text_faint);
             ImGui::TreeNodeEx(label, flags);
-            if (!present) ImGui::PopStyleColor();
+            return ImGui::IsItemClicked();
         };
-        leaf("Input Images", app.settings.images_dir[0] != '\0', false);
-        leaf("Camera Poses", !app.scene.views.empty(), false);
-        leaf(
-            "Sparse Point Cloud", app.has_sparse || app.scene.has_points(),
-            app.tab == ViewportTab::sparse);
-        if (ImGui::IsItemClicked() && app.has_sparse) {
-            app.tab = ViewportTab::sparse;
-            ensure_sparse_loaded(app);
+        if (!has_cloud && !has_gaussians && !has_mesh) {
+            ImGui::SetCursorPosX(22.F);
+            ImGui::PushTextWrapPos(wrap);
+            theme::caption("Align photos to add a sparse cloud.");
+            ImGui::PopTextWrapPos();
+        } else {
+            if (has_cloud &&
+                object_row(
+                    "Sparse Cloud", app.tab == ViewportTab::sparse)) {
+                app.tab = ViewportTab::sparse;
+                if (app.has_sparse) ensure_sparse_loaded(app);
+            }
+            if (has_gaussians &&
+                object_row(
+                    "Gaussians", app.tab == ViewportTab::training)) {
+                app.tab = ViewportTab::training;
+                if (!app.job.running()) start_splat_view(app);
+            }
+            if (has_mesh) object_row("Mesh", false);
         }
-        leaf("SfM Export", app.has_asfm || app.has_mvs, false);
-        leaf(
-            "Gaussian Model", app.has_model,
-            app.tab == ViewportTab::training);
-        if (ImGui::IsItemClicked()) app.tab = ViewportTab::training;
-        leaf("Reconstructed Mesh", app.has_mesh, false);
         ImGui::TreePop();
     }
     ImGui::PopStyleVar();
@@ -1684,6 +1740,8 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const bool hovered = ImGui::IsItemHovered();
 
     const bool training = app.job.running() && app.active_job == JobKind::train;
+    const bool viewing = app.viewer.running();
+    const bool live = training || viewing;
     const bool has_frame = app.preview.display.descriptor &&
                            gpu::consumed_timeline_value() > 0;
     const unsigned view_count = preview_camera_count(app);
@@ -1695,17 +1753,21 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
             camera_label, sizeof(camera_label), "camera %u / %u",
             app.preview_view + 1, view_count);
 
-    const char* controls = training
+    const char* controls = live
         ? "LMB orbit  |  MMB pan  |  RMB + WASD fly  |  arrows snap capture"
-        : "Resume Train 3DGS to move this camera";
+        : (app.has_model
+               ? "Open Live Training to orbit this splat"
+               : "Train 3DGS to move this camera");
 
     if (!has_frame) {
         draw_empty_viewport(
             draw, min, max,
-            training ? "Waiting for the first rendered iteration..."
-                     : "No live training preview",
-            training ? "Orbit the view; the first frame uses this camera"
-                     : "Run Train 3DGS to stream the optimiser output");
+            live ? "Waiting for the first rendered view..."
+                 : "No live splat preview",
+            live ? "Orbit the view; the first frame uses this camera"
+                 : (app.has_model
+                        ? "Open Live Training to render the trained splat"
+                        : "Run Train 3DGS to stream the optimiser output"));
     } else {
         draw->AddImage(
             reinterpret_cast<ImTextureID>(app.preview.display.descriptor),
@@ -1727,10 +1789,13 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
 
     draw_viewport_overlay(
         draw, min,
-        has_frame ? (training ? "LIVE TRAINING PREVIEW" : "LAST TRAINING FRAME")
-                  : (training ? "TRAINING" : "IDLE"),
-        has_frame ? (training ? theme::success : theme::inactive)
-                  : (training ? theme::warning : theme::inactive));
+        has_frame
+            ? (training ? "LIVE TRAINING PREVIEW"
+                        : (viewing ? "LIVE SPLAT VIEW" : "LAST TRAINING FRAME"))
+            : (live ? (training ? "TRAINING" : "VIEWING") : "IDLE"),
+        has_frame
+            ? (live ? theme::success : theme::inactive)
+            : (live ? theme::warning : theme::inactive));
 
     const TrainingStats& stats = app.monitor.training();
     if (has_frame && stats.valid) {
@@ -1793,13 +1858,15 @@ void draw_viewport_panel(App& app) {
         app.tab = ViewportTab::sparse;
     ImGui::SameLine(0.F, 4.F);
     if (theme::toolbar_button(
-            "Live Training", {0, 26.F}, true, app.tab == ViewportTab::training))
+            "Live Training", {0, 26.F}, true, app.tab == ViewportTab::training)) {
         app.tab = ViewportTab::training;
+        if (app.has_model && !app.job.running()) start_splat_view(app);
+    }
     ImGui::PopStyleVar();
 
     const char* state = app.job.running()
         ? running_job_caption(app.active_job)
-        : "READY";
+        : (app.viewer.running() ? "VIEWING" : "READY");
     const float state_width = ImGui::CalcTextSize(state).x;
     ImGui::SetCursorPos({
         content_start.x + std::max(8.F, header_width - state_width - 14.F),
@@ -2400,11 +2467,21 @@ int main(const int argc, char** argv) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         app.job.poll();
+        app.viewer.poll();
         app.preview.poll();
         app.log.poll(app.fresh_lines);
         for (const std::string& line : app.fresh_lines)
             app.monitor.consume(line);
         if (app.job.consume_completion()) on_job_finished(app);
+        if (app.viewer.consume_completion()) {
+            const int view_code = app.viewer.exit_code();
+            if (view_code != 0 && view_code != 2)
+                set_message(
+                    app,
+                    "Splat viewer exited with code " +
+                        std::to_string(view_code),
+                    theme::warning);
+        }
         poll_scene_load(app);
 
         if (app.smoke_mode) {
@@ -2486,6 +2563,7 @@ int main(const int argc, char** argv) {
             gpu::present(draw_data, theme::surface_0);
     }
 
+    if (app.viewer.running()) app.viewer.stop();
     if (app.job.running()) app.job.stop();
     vkDeviceWaitIdle(gpu::device());
     app.preview.reset();

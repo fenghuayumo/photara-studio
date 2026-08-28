@@ -667,6 +667,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.align_log = layout.root / (stem + "_align.log");
     layout.train_log = layout.root / (stem + "_train.log");
     layout.export_log = layout.root / (stem + "_export.log");
+    layout.view_log = layout.root / (stem + "_view.log");
     layout.preview_view_file = layout.root / (stem + "_preview_view");
     layout.preview_camera_file = layout.root / (stem + "_preview_camera");
     return layout;
@@ -734,6 +735,32 @@ std::string build_train_command(
                 << settings.geometry_from_iter;
     }
 
+    if (preview.memory && preview.semaphore) {
+        command << " --splat-preview-vk-memory-handle " << preview.memory
+                << " --splat-preview-vk-semaphore-handle " << preview.semaphore
+                << " --splat-preview-vk-allocation-size "
+                << preview.allocation_size << " --splat-preview-vk-width "
+                << preview.width << " --splat-preview-vk-height "
+                << preview.height << " --splat-preview-vk-device-luid "
+                << preview.device_luid
+                << " --splat-preview-vk-device-node-mask "
+                << preview.device_node_mask;
+    }
+    return command.str();
+}
+
+std::string build_view_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout, const PreviewHandles& preview) {
+    std::ostringstream command;
+    command << quote(cli_path) << " --images "
+            << quote(settings.images_dir.data()) << " --output "
+            << quote(layout.model_output) << " --splat-view"
+            << " --splat-preview-camera-file "
+            << quote(layout.preview_camera_file);
+    std::error_code exists_error;
+    if (std::filesystem::exists(layout.splat_ply, exists_error))
+        command << " --splat-model " << quote(layout.splat_ply);
     if (preview.memory && preview.semaphore) {
         command << " --splat-preview-vk-memory-handle " << preview.memory
                 << " --splat-preview-vk-semaphore-handle " << preview.semaphore

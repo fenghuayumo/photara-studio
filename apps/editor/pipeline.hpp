@@ -250,6 +250,7 @@ struct ProjectLayout {
     std::filesystem::path align_log;
     std::filesystem::path train_log;
     std::filesystem::path export_log;
+    std::filesystem::path view_log;
     std::filesystem::path preview_view_file;
     std::filesystem::path preview_camera_file;
 };
@@ -271,6 +272,10 @@ std::string build_align_command(
     const ProjectLayout& layout);
 
 std::string build_train_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout, const PreviewHandles& preview);
+
+std::string build_view_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout, const PreviewHandles& preview);
 
