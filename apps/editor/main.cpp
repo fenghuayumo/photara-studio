@@ -1,35 +1,31 @@
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <windows.h>
-#endif
+#include "pipeline.hpp"
+#include "sparse_view.hpp"
+#include "theme.hpp"
+#include "vulkan_backend.hpp"
 
-#include "io/image.hpp"
-
-#include "imgui.h"
 #include "imgui_impl_glfw.h"
-#include "imgui_impl_vulkan.h"
 
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#if defined(_WIN32)
+#include <shellapi.h>
+#include <shlobj.h>
+#endif
+
 #include <algorithm>
 #include <array>
-#include <atomic>
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <future>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #ifndef AETHERSCAN_CLI_PATH
@@ -37,1391 +33,1323 @@
 #endif
 
 namespace {
-VkInstance instance{};
-VkPhysicalDevice physical_device{};
-VkDevice device{};
-std::uint32_t queue_family = UINT32_MAX;
-VkQueue queue{};
-VkDescriptorPool descriptor_pool{};
-ImGui_ImplVulkanH_Window window_data{};
-bool rebuild_swapchain{};
-constexpr std::uint32_t min_images = 2;
-VkImage external_preview_image{};
-VkImage display_preview_image{};
-VkSemaphore external_preview_timeline{};
-std::uint32_t external_preview_width{};
-std::uint32_t external_preview_height{};
-std::uint64_t external_ready_value{};
-std::uint64_t external_consumed_value{};
-std::uint64_t physical_device_luid{};
-std::uint32_t physical_device_node_mask{};
 
-void vk_check(VkResult result) {
-    if (result < 0) {
-        std::fprintf(stderr, "Vulkan error: %d\n", result);
-        std::abort();
-    }
+using namespace editor;
+
+constexpr std::uint32_t k_preview_extent = 1920;
+
+enum class ViewportTab { sparse, training };
+
+enum class StepState { pending, active, done, skipped, failed };
+
+struct App {
+    ProjectSettings settings;
+    ProjectLayout layout;
+
+    ProcessJob job;
+    JobKind active_job{JobKind::none};
+    RunMonitor monitor;
+    LogStream log;
+    std::vector<std::string> fresh_lines;
+
+    gpu::ExternalPreview preview;
+
+    SparseScene scene;
+    OrbitCamera camera;
+    ViewOptions view_options;
+    SceneRenderer renderer;
+    std::future<SceneLoad> pending_load;
+    bool loading_scene{};
+    std::string scene_source;
+
+    bool has_sparse{};
+    bool has_model{};
+    bool has_mesh{};
+    ViewportTab tab{ViewportTab::sparse};
+
+    std::string message;
+    ImVec4 message_colour{theme::text_muted};
+
+    // Manual CUDA/Vulkan interop verification harness.
+    bool smoke_mode{};
+    bool smoke_started{};
+    bool smoke_success{};
+};
+
+void set_message(App& app, std::string text, const ImVec4& colour) {
+    app.message = std::move(text);
+    app.message_colour = colour;
 }
 
-bool has_extension(
-    const ImVector<VkExtensionProperties>& properties, const char* name) {
-    for (const auto& property : properties)
-        if (std::strcmp(property.extensionName, name) == 0) return true;
+bool directory_has_images(const std::filesystem::path& directory) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(directory, error)) return false;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(directory, error)) {
+        if (!entry.is_regular_file(error)) continue;
+        std::string extension = entry.path().extension().string();
+        std::transform(
+            extension.begin(), extension.end(), extension.begin(),
+            [](const unsigned char value) {
+                return static_cast<char>(std::tolower(value));
+            });
+        if (extension == ".jpg" || extension == ".jpeg" ||
+            extension == ".png" || extension == ".tif" ||
+            extension == ".tiff" || extension == ".bmp")
+            return true;
+    }
     return false;
 }
 
-void setup_vulkan(ImVector<const char*> extensions) {
-    std::uint32_t count{};
-    vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
-    ImVector<VkExtensionProperties> properties;
-    properties.resize(count);
-    vk_check(vkEnumerateInstanceExtensionProperties(
-        nullptr, &count, properties.Data));
-    if (has_extension(
-            properties,
-            VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME))
-        extensions.push_back(
-            VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-
-    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = "AetherScan Editor";
-    app.apiVersion = VK_API_VERSION_1_2;
-    VkInstanceCreateInfo create{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    create.pApplicationInfo = &app;
-    create.enabledExtensionCount = extensions.Size;
-    create.ppEnabledExtensionNames = extensions.Data;
-    vk_check(vkCreateInstance(&create, nullptr, &instance));
-
-    physical_device = ImGui_ImplVulkanH_SelectPhysicalDevice(instance);
-    queue_family = ImGui_ImplVulkanH_SelectQueueFamilyIndex(physical_device);
-    VkPhysicalDeviceIDProperties id{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
-    VkPhysicalDeviceProperties2 device_properties{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-    device_properties.pNext = &id;
-    vkGetPhysicalDeviceProperties2(physical_device, &device_properties);
-    if (id.deviceLUIDValid) {
-        static_assert(sizeof(physical_device_luid) == VK_LUID_SIZE);
-        std::memcpy(
-            &physical_device_luid, id.deviceLUID,
-            sizeof(physical_device_luid));
-        physical_device_node_mask = id.deviceNodeMask;
-    }
-    const float priority = 1.F;
-    VkDeviceQueueCreateInfo queue_info{
-        VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-    queue_info.queueFamilyIndex = queue_family;
-    queue_info.queueCount = 1;
-    queue_info.pQueuePriorities = &priority;
-    const char* required_device_extensions[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
-        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME};
-    VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-    device_info.queueCreateInfoCount = 1;
-    device_info.pQueueCreateInfos = &queue_info;
-    VkPhysicalDeviceTimelineSemaphoreFeatures timeline{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
-    timeline.timelineSemaphore = VK_TRUE;
-    device_info.pNext = &timeline;
-    device_info.enabledExtensionCount = static_cast<std::uint32_t>(
-        std::size(required_device_extensions));
-    device_info.ppEnabledExtensionNames = required_device_extensions;
-    vk_check(vkCreateDevice(physical_device, &device_info, nullptr, &device));
-    vkGetDeviceQueue(device, queue_family, 0, &queue);
-
-    std::array<VkDescriptorPoolSize, 2> sizes{{
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, 128},
-    }};
-    VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pool.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool.maxSets = 1024;
-    pool.poolSizeCount = static_cast<std::uint32_t>(sizes.size());
-    pool.pPoolSizes = sizes.data();
-    vk_check(vkCreateDescriptorPool(device, &pool, nullptr, &descriptor_pool));
-}
-
-void setup_window(VkSurfaceKHR surface, int width, int height) {
-    window_data.Surface = surface;
-    VkBool32 supported{};
-    vkGetPhysicalDeviceSurfaceSupportKHR(
-        physical_device, queue_family, surface, &supported);
-    if (!supported) throw std::runtime_error("Vulkan queue has no WSI support");
-    const VkFormat formats[] = {
-        VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
-    window_data.SurfaceFormat = ImGui_ImplVulkanH_SelectSurfaceFormat(
-        physical_device, surface, formats, 2,
-        VK_COLORSPACE_SRGB_NONLINEAR_KHR);
-    const VkPresentModeKHR present = VK_PRESENT_MODE_FIFO_KHR;
-    window_data.PresentMode = ImGui_ImplVulkanH_SelectPresentMode(
-        physical_device, surface, &present, 1);
-    ImGui_ImplVulkanH_CreateOrResizeWindow(
-        instance, physical_device, device, &window_data, queue_family,
-        nullptr, width, height, min_images);
-}
-
-void render_frame(ImDrawData* draw) {
-    auto& wd = window_data;
-    VkSemaphore acquired =
-        wd.FrameSemaphores[wd.SemaphoreIndex].ImageAcquiredSemaphore;
-    VkSemaphore complete =
-        wd.FrameSemaphores[wd.SemaphoreIndex].RenderCompleteSemaphore;
-    VkResult result = vkAcquireNextImageKHR(
-        device, wd.Swapchain, UINT64_MAX, acquired, {}, &wd.FrameIndex);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
-        rebuild_swapchain = true;
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) return;
-    if (result != VK_SUBOPTIMAL_KHR) vk_check(result);
-    auto& frame = wd.Frames[wd.FrameIndex];
-    vk_check(vkWaitForFences(device, 1, &frame.Fence, VK_TRUE, UINT64_MAX));
-    vk_check(vkResetFences(device, 1, &frame.Fence));
-    vk_check(vkResetCommandPool(device, frame.CommandPool, 0));
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vk_check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
-    const bool copy_external_preview =
-        external_preview_image && display_preview_image &&
-        external_preview_timeline &&
-        external_ready_value > external_consumed_value;
-    if (copy_external_preview) {
-        std::array<VkImageMemoryBarrier, 2> acquire{};
-        acquire[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        acquire[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-        acquire[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        acquire[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        acquire[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        acquire[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-        acquire[0].dstQueueFamilyIndex = queue_family;
-        acquire[0].image = external_preview_image;
-        acquire[0].subresourceRange = {
-            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        acquire[1] = acquire[0];
-        acquire[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        acquire[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        acquire[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        acquire[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        acquire[1].srcQueueFamilyIndex = queue_family;
-        acquire[1].image = display_preview_image;
-        vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
-            static_cast<std::uint32_t>(acquire.size()), acquire.data());
-        VkImageCopy copy{};
-        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.extent = {
-            external_preview_width, external_preview_height, 1};
-        vkCmdCopyImage(
-            frame.CommandBuffer, external_preview_image,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, display_preview_image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-        std::array<VkImageMemoryBarrier, 2> release{};
-        release[0] = acquire[0];
-        release[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        release[0].dstAccessMask = 0;
-        release[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        release[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        release[0].srcQueueFamilyIndex = queue_family;
-        release[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-        release[1] = acquire[1];
-        release[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        release[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        release[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        release[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-            nullptr, static_cast<std::uint32_t>(release.size()),
-            release.data());
-    }
-    VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    pass.renderPass = wd.RenderPass;
-    pass.framebuffer = frame.Framebuffer;
-    pass.renderArea.extent = {static_cast<std::uint32_t>(wd.Width),
-                              static_cast<std::uint32_t>(wd.Height)};
-    pass.clearValueCount = 1;
-    pass.pClearValues = &wd.ClearValue;
-    vkCmdBeginRenderPass(
-        frame.CommandBuffer, &pass, VK_SUBPASS_CONTENTS_INLINE);
-    ImGui_ImplVulkan_RenderDrawData(draw, frame.CommandBuffer);
-    vkCmdEndRenderPass(frame.CommandBuffer);
-    vk_check(vkEndCommandBuffer(frame.CommandBuffer));
-    const VkPipelineStageFlags wait =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    const std::array<VkSemaphore, 2> waits{{
-        acquired, external_preview_timeline}};
-    const std::array<VkPipelineStageFlags, 2> wait_stages{{
-        wait, VK_PIPELINE_STAGE_TRANSFER_BIT}};
-    const std::array<VkSemaphore, 2> signals{{
-        complete, external_preview_timeline}};
-    const std::array<std::uint64_t, 2> wait_values{{
-        0, external_ready_value}};
-    const std::array<std::uint64_t, 2> signal_values{{
-        0, external_ready_value + 1}};
-    VkTimelineSemaphoreSubmitInfo timeline{
-        VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
-    if (copy_external_preview) {
-        timeline.waitSemaphoreValueCount = 2;
-        timeline.pWaitSemaphoreValues = wait_values.data();
-        timeline.signalSemaphoreValueCount = 2;
-        timeline.pSignalSemaphoreValues = signal_values.data();
-        submit.pNext = &timeline;
-    }
-    submit.waitSemaphoreCount = copy_external_preview ? 2U : 1U;
-    submit.pWaitSemaphores = waits.data();
-    submit.pWaitDstStageMask = wait_stages.data();
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &frame.CommandBuffer;
-    submit.signalSemaphoreCount = copy_external_preview ? 2U : 1U;
-    submit.pSignalSemaphores = signals.data();
-    vk_check(vkQueueSubmit(queue, 1, &submit, frame.Fence));
-    if (copy_external_preview)
-        external_consumed_value = external_ready_value;
-
-    VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-    info.waitSemaphoreCount = 1;
-    info.pWaitSemaphores = &complete;
-    info.swapchainCount = 1;
-    info.pSwapchains = &wd.Swapchain;
-    info.pImageIndices = &wd.FrameIndex;
-    result = vkQueuePresentKHR(queue, &info);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
-        rebuild_swapchain = true;
-    else
-        vk_check(result);
-    wd.SemaphoreIndex = (wd.SemaphoreIndex + 1) % wd.SemaphoreCount;
-}
-
-std::uint32_t memory_type(std::uint32_t bits, VkMemoryPropertyFlags flags) {
-    VkPhysicalDeviceMemoryProperties properties{};
-    vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
-    for (std::uint32_t i = 0; i < properties.memoryTypeCount; ++i)
-        if ((bits & (1U << i)) &&
-            (properties.memoryTypes[i].propertyFlags & flags) == flags)
-            return i;
-    throw std::runtime_error("No Vulkan memory type");
-}
-
-struct PreviewTexture {
-    VkImage image{};
-    VkDeviceMemory memory{};
-    VkImageView view{};
-    VkSampler sampler{};
-    VkDescriptorSet descriptor{};
-    std::uint32_t width{};
-    std::uint32_t height{};
-
-    void reset() {
-        if (!device) return;
-        vkDeviceWaitIdle(device);
-        if (descriptor) ImGui_ImplVulkan_RemoveTexture(descriptor);
-        if (sampler) vkDestroySampler(device, sampler, nullptr);
-        if (view) vkDestroyImageView(device, view, nullptr);
-        if (image) vkDestroyImage(device, image, nullptr);
-        if (memory) vkFreeMemory(device, memory, nullptr);
-        *this = {};
-    }
-
-    void upload(const aetherscan::io::RgbImage& source) {
-        reset();
-        width = source.width;
-        height = source.height;
-        const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4;
-        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(bytes));
-        for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
-            rgba[4 * i] = source.pixels[3 * i];
-            rgba[4 * i + 1] = source.pixels[3 * i + 1];
-            rgba[4 * i + 2] = source.pixels[3 * i + 2];
-            rgba[4 * i + 3] = 255;
-        }
-        VkBuffer staging{};
-        VkDeviceMemory staging_memory{};
-        VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        buffer.size = bytes;
-        buffer.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        vk_check(vkCreateBuffer(device, &buffer, nullptr, &staging));
-        VkMemoryRequirements requirements{};
-        vkGetBufferMemoryRequirements(device, staging, &requirements);
-        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = memory_type(
-            requirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        vk_check(vkAllocateMemory(device, &allocation, nullptr, &staging_memory));
-        vk_check(vkBindBufferMemory(device, staging, staging_memory, 0));
-        void* mapped{};
-        vk_check(vkMapMemory(device, staging_memory, 0, bytes, 0, &mapped));
-        std::memcpy(mapped, rgba.data(), static_cast<std::size_t>(bytes));
-        vkUnmapMemory(device, staging_memory);
-
-        VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        image_info.imageType = VK_IMAGE_TYPE_2D;
-        image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-        image_info.extent = {width, height, 1};
-        image_info.mipLevels = 1;
-        image_info.arrayLayers = 1;
-        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                           VK_IMAGE_USAGE_SAMPLED_BIT;
-        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        vk_check(vkCreateImage(device, &image_info, nullptr, &image));
-        vkGetImageMemoryRequirements(device, image, &requirements);
-        allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = memory_type(
-            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        vk_check(vkAllocateMemory(device, &allocation, nullptr, &memory));
-        vk_check(vkBindImageMemory(device, image, memory, 0));
-
-        auto& frame = window_data.Frames[window_data.FrameIndex];
-        vk_check(vkResetCommandPool(device, frame.CommandPool, 0));
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vk_check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
-        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = image;
-        barrier.subresourceRange = {
-            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-            &barrier);
-        VkBufferImageCopy copy{};
-        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.imageExtent = {width, height, 1};
-        vkCmdCopyBufferToImage(
-            frame.CommandBuffer, staging, image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
-            1, &barrier);
-        vk_check(vkEndCommandBuffer(frame.CommandBuffer));
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &frame.CommandBuffer;
-        vk_check(vkQueueSubmit(queue, 1, &submit, {}));
-        vk_check(vkQueueWaitIdle(queue));
-        vkDestroyBuffer(device, staging, nullptr);
-        vkFreeMemory(device, staging_memory, nullptr);
-
-        VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        view_info.image = image;
-        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vk_check(vkCreateImageView(device, &view_info, nullptr, &view));
-        VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-        sampler_info.magFilter = VK_FILTER_LINEAR;
-        sampler_info.minFilter = VK_FILTER_LINEAR;
-        sampler_info.addressModeU = sampler_info.addressModeV =
-            sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampler_info.maxLod = 1.F;
-        vk_check(vkCreateSampler(device, &sampler_info, nullptr, &sampler));
-        descriptor = ImGui_ImplVulkan_AddTexture(
-            sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-};
-
-struct ExternalPreview {
-    PreviewTexture display;
-    VkImage image{};
-    VkDeviceMemory memory{};
-    VkSemaphore timeline{};
-    HANDLE memory_handle{};
-    HANDLE semaphore_handle{};
-    VkDeviceSize allocation_size{};
-    std::uint32_t width{};
-    std::uint32_t height{};
-
-    void create(const std::uint32_t image_width,
-                const std::uint32_t image_height) {
-        reset();
-        width = image_width;
-        height = image_height;
-        aetherscan::io::RgbImage black;
-        black.width = width;
-        black.height = height;
-        black.pixels.assign(
-            static_cast<std::size_t>(width) * height * 3, 10);
-        display.upload(black);
-        display_preview_image = display.image;
-
-        VkExternalMemoryImageCreateInfo external_image{
-            VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
-        external_image.handleTypes =
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-        VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        image_info.pNext = &external_image;
-        image_info.imageType = VK_IMAGE_TYPE_2D;
-        image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-        image_info.extent = {width, height, 1};
-        image_info.mipLevels = 1;
-        image_info.arrayLayers = 1;
-        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                           VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                           VK_IMAGE_USAGE_SAMPLED_BIT;
-        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        vk_check(vkCreateImage(device, &image_info, nullptr, &image));
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(device, image, &requirements);
-        allocation_size = requirements.size;
-
-        SECURITY_ATTRIBUTES security{
-            sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-        VkExportMemoryWin32HandleInfoKHR win32_export{
-            VK_STRUCTURE_TYPE_EXPORT_MEMORY_WIN32_HANDLE_INFO_KHR};
-        win32_export.pAttributes = &security;
-        win32_export.dwAccess = GENERIC_ALL;
-        VkExportMemoryAllocateInfo export_info{
-            VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
-        export_info.pNext = &win32_export;
-        export_info.handleTypes =
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-        VkMemoryDedicatedAllocateInfo dedicated{
-            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
-        dedicated.pNext = &export_info;
-        dedicated.image = image;
-        VkMemoryAllocateInfo allocation{
-            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.pNext = &dedicated;
-        allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = memory_type(
-            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        vk_check(vkAllocateMemory(device, &allocation, nullptr, &memory));
-        vk_check(vkBindImageMemory(device, image, memory, 0));
-
-        VkExportSemaphoreWin32HandleInfoKHR semaphore_win32{
-            VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR};
-        semaphore_win32.pAttributes = &security;
-        semaphore_win32.dwAccess = GENERIC_ALL;
-        VkExportSemaphoreCreateInfo semaphore_export{
-            VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
-        semaphore_export.pNext = &semaphore_win32;
-        semaphore_export.handleTypes =
-            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-        VkSemaphoreTypeCreateInfo timeline_type{
-            VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
-        timeline_type.pNext = &semaphore_export;
-        timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-        timeline_type.initialValue = 0;
-        VkSemaphoreCreateInfo semaphore_info{
-            VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-        semaphore_info.pNext = &timeline_type;
-        vk_check(vkCreateSemaphore(
-            device, &semaphore_info, nullptr, &timeline));
-
-        renew_export_handles();
-
-        auto& frame = window_data.Frames[window_data.FrameIndex];
-        vk_check(vkResetCommandPool(device, frame.CommandPool, 0));
-        VkCommandBufferBeginInfo begin{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vk_check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
-        VkImageMemoryBarrier release{
-            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        release.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        release.srcQueueFamilyIndex = queue_family;
-        release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-        release.image = image;
-        release.subresourceRange = {
-            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr,
-            1, &release);
-        vk_check(vkEndCommandBuffer(frame.CommandBuffer));
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &frame.CommandBuffer;
-        vk_check(vkQueueSubmit(queue, 1, &submit, {}));
-        vk_check(vkQueueWaitIdle(queue));
-
-        external_preview_image = image;
-        external_preview_timeline = timeline;
-        external_preview_width = width;
-        external_preview_height = height;
-        external_ready_value = 0;
-        external_consumed_value = 0;
-    }
-
-    void renew_export_handles() {
-        close_export_handles();
-        const auto get_memory = reinterpret_cast<
-            PFN_vkGetMemoryWin32HandleKHR>(vkGetDeviceProcAddr(
-                device, "vkGetMemoryWin32HandleKHR"));
-        const auto get_semaphore = reinterpret_cast<
-            PFN_vkGetSemaphoreWin32HandleKHR>(vkGetDeviceProcAddr(
-                device, "vkGetSemaphoreWin32HandleKHR"));
-        if (!get_memory || !get_semaphore)
-            throw std::runtime_error("Vulkan Win32 export functions missing");
-        VkMemoryGetWin32HandleInfoKHR memory_info{
-            VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
-        memory_info.memory = memory;
-        memory_info.handleType =
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-        vk_check(get_memory(device, &memory_info, &memory_handle));
-        VkSemaphoreGetWin32HandleInfoKHR timeline_info{
-            VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR};
-        timeline_info.semaphore = timeline;
-        timeline_info.handleType =
-            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-        vk_check(get_semaphore(
-            device, &timeline_info, &semaphore_handle));
-    }
-
-    void poll() {
-        if (!timeline) return;
-        std::uint64_t value{};
-        if (vkGetSemaphoreCounterValue(device, timeline, &value) == VK_SUCCESS &&
-            (value & 1U) != 0 && value > external_consumed_value)
-            external_ready_value = value;
-    }
-
-    // Keep training non-blocking while the swapchain is minimized. CUDA's
-    // next preview waits for the even release value, so consume/copy without
-    // presenting when no WSI frame can be acquired.
-    void consume_without_present() {
-        if (external_ready_value <= external_consumed_value) return;
-        vk_check(vkQueueWaitIdle(queue));
-        auto& frame = window_data.Frames[window_data.FrameIndex];
-        vk_check(vkResetCommandPool(device, frame.CommandPool, 0));
-        VkCommandBufferBeginInfo begin{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vk_check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
-        std::array<VkImageMemoryBarrier, 2> acquire{};
-        acquire[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        acquire[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-        acquire[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        acquire[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        acquire[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        acquire[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-        acquire[0].dstQueueFamilyIndex = queue_family;
-        acquire[0].image = image;
-        acquire[0].subresourceRange = {
-            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        acquire[1] = acquire[0];
-        acquire[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        acquire[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        acquire[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        acquire[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        acquire[1].srcQueueFamilyIndex = queue_family;
-        acquire[1].image = display.image;
-        vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
-            static_cast<std::uint32_t>(acquire.size()), acquire.data());
-        VkImageCopy copy{};
-        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.extent = {width, height, 1};
-        vkCmdCopyImage(
-            frame.CommandBuffer, image,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, display.image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-        std::array<VkImageMemoryBarrier, 2> release{};
-        release[0] = acquire[0];
-        release[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        release[0].dstAccessMask = 0;
-        release[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        release[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        release[0].srcQueueFamilyIndex = queue_family;
-        release[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-        release[1] = acquire[1];
-        release[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        release[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        release[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        release[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-            nullptr, static_cast<std::uint32_t>(release.size()),
-            release.data());
-        vk_check(vkEndCommandBuffer(frame.CommandBuffer));
-        const VkPipelineStageFlags wait_stage =
-            VK_PIPELINE_STAGE_TRANSFER_BIT;
-        const std::uint64_t signal_value = external_ready_value + 1;
-        VkTimelineSemaphoreSubmitInfo timeline_info{
-            VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
-        timeline_info.waitSemaphoreValueCount = 1;
-        timeline_info.pWaitSemaphoreValues = &external_ready_value;
-        timeline_info.signalSemaphoreValueCount = 1;
-        timeline_info.pSignalSemaphoreValues = &signal_value;
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submit.pNext = &timeline_info;
-        submit.waitSemaphoreCount = 1;
-        submit.pWaitSemaphores = &timeline;
-        submit.pWaitDstStageMask = &wait_stage;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &frame.CommandBuffer;
-        submit.signalSemaphoreCount = 1;
-        submit.pSignalSemaphores = &timeline;
-        vk_check(vkQueueSubmit(queue, 1, &submit, {}));
-        vk_check(vkQueueWaitIdle(queue));
-        external_consumed_value = external_ready_value;
-    }
-
-    void close_export_handles() {
-        if (memory_handle) CloseHandle(std::exchange(memory_handle, nullptr));
-        if (semaphore_handle)
-            CloseHandle(std::exchange(semaphore_handle, nullptr));
-    }
-
-    void reset() {
-        if (!device) return;
-        vkDeviceWaitIdle(device);
-        external_preview_image = {};
-        display_preview_image = {};
-        external_preview_timeline = {};
-        external_ready_value = external_consumed_value = 0;
-        close_export_handles();
-        if (timeline) vkDestroySemaphore(device, timeline, nullptr);
-        if (image) vkDestroyImage(device, image, nullptr);
-        if (memory) vkFreeMemory(device, memory, nullptr);
-        timeline = {};
-        image = {};
-        memory = {};
-        allocation_size = 0;
-        width = height = 0;
-        display.reset();
-    }
-};
-
-std::string quote(const std::filesystem::path& path) {
-    return '"' + path.string() + '"';
-}
-
-struct Job {
-    std::atomic_bool running{};
-    std::atomic_int exit_code{-1};
-    std::filesystem::path log;
 #if defined(_WIN32)
-    HANDLE process{};
-#endif
-
-    void start(const std::string& command, const std::filesystem::path& log_path) {
-        if (running.exchange(true)) return;
-        exit_code = -1;
-        log = log_path;
-#if defined(_WIN32)
-        SECURITY_ATTRIBUTES security{
-            sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-        HANDLE log_handle = CreateFileW(
-            log.c_str(), GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, &security, CREATE_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (log_handle == INVALID_HANDLE_VALUE) {
-            running = false;
-            throw std::runtime_error("Cannot create reconstruction log");
+// Native folder picker. Failure simply leaves the text field untouched.
+bool pick_folder(const wchar_t* title, std::array<char, 1024>& destination) {
+    bool picked = false;
+    const HRESULT initialised =
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(
+            CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&dialog)))) {
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST);
+        dialog->SetTitle(title);
+        if (SUCCEEDED(dialog->Show(nullptr))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item))) {
+                PWSTR wide = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wide))) {
+                    const int bytes = WideCharToMultiByte(
+                        CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+                    if (bytes > 0 &&
+                        static_cast<std::size_t>(bytes) <= destination.size()) {
+                        WideCharToMultiByte(
+                            CP_UTF8, 0, wide, -1, destination.data(), bytes,
+                            nullptr, nullptr);
+                        picked = true;
+                    }
+                    CoTaskMemFree(wide);
+                }
+                item->Release();
+            }
         }
-        const int count = MultiByteToWideChar(
-            CP_UTF8, 0, command.c_str(), -1, nullptr, 0);
-        std::vector<wchar_t> mutable_command(
-            static_cast<std::size_t>(count));
-        MultiByteToWideChar(
-            CP_UTF8, 0, command.c_str(), -1, mutable_command.data(), count);
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        startup.dwFlags = STARTF_USESTDHANDLES;
-        startup.hStdOutput = log_handle;
-        startup.hStdError = log_handle;
-        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-        PROCESS_INFORMATION info{};
-        const BOOL created = CreateProcessW(
-            nullptr, mutable_command.data(), nullptr, nullptr, TRUE,
-            CREATE_NO_WINDOW, nullptr, nullptr, &startup, &info);
-        CloseHandle(log_handle);
-        if (!created) {
-            running = false;
-            throw std::runtime_error(
-                "CreateProcess failed: " + std::to_string(GetLastError()));
-        }
-        process = info.hProcess;
-        CloseHandle(info.hThread);
-#else
-        running = false;
-        throw std::runtime_error(
-            "External-memory editor launch is currently Win32-only");
-#endif
+        dialog->Release();
     }
+    if (SUCCEEDED(initialised)) CoUninitialize();
+    return picked;
+}
 
-    void poll() {
-#if defined(_WIN32)
-        if (!running || !process) return;
-        DWORD code = STILL_ACTIVE;
-        if (GetExitCodeProcess(process, &code) && code != STILL_ACTIVE) {
-            exit_code = static_cast<int>(code);
-            running = false;
-            CloseHandle(std::exchange(process, nullptr));
-        }
-#endif
-    }
-
-    void stop() {
-#if defined(_WIN32)
-        if (process) {
-            TerminateProcess(process, 2);
-            WaitForSingleObject(process, INFINITE);
-            CloseHandle(std::exchange(process, nullptr));
-        }
-#endif
-        running = false;
-    }
-};
-
-std::filesystem::path newest_preview(const std::filesystem::path& directory) {
-    std::filesystem::path newest;
-    std::filesystem::file_time_type time{};
+void reveal_in_explorer(const std::filesystem::path& path) {
     std::error_code error;
-    if (!std::filesystem::exists(directory, error)) return {};
-    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".png") continue;
-        const auto candidate = entry.last_write_time(error);
-        if (newest.empty() || candidate > time) {
-            newest = entry.path();
-            time = candidate;
+    if (!std::filesystem::exists(path, error)) return;
+    ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+#else
+bool pick_folder(const wchar_t*, std::array<char, 1024>&) { return false; }
+void reveal_in_explorer(const std::filesystem::path&) {}
+#endif
+
+// ---------------------------------------------------------------------------
+// Project actions
+
+void refresh_artifacts(App& app) {
+    app.layout = resolve_layout(app.settings);
+    std::error_code error;
+    app.has_sparse = std::filesystem::exists(app.layout.sparse_ply, error);
+    app.has_model = std::filesystem::exists(app.layout.splat_ply, error);
+    app.has_mesh = std::filesystem::exists(app.layout.mesh_ply, error);
+}
+
+void request_scene_load(
+    App& app, const std::filesystem::path& cloud,
+    const std::filesystem::path& poses, std::string label) {
+    if (app.loading_scene) return;
+    app.loading_scene = true;
+    app.scene_source = std::move(label);
+    app.pending_load = std::async(
+        std::launch::async,
+        [cloud, poses] { return load_sparse_scene(cloud, poses); });
+}
+
+void poll_scene_load(App& app) {
+    if (!app.loading_scene || !app.pending_load.valid()) return;
+    if (app.pending_load.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::ready)
+        return;
+    SceneLoad loaded = app.pending_load.get();
+    app.loading_scene = false;
+    if (!loaded.ok) {
+        set_message(app, "Point cloud: " + loaded.error, theme::danger);
+        return;
+    }
+    app.scene = std::move(loaded.scene);
+    app.camera.frame(app.scene);
+    app.tab = ViewportTab::sparse;
+    set_message(
+        app,
+        app.scene_source + ": " + format_count(app.scene.points.size()) +
+            " points, " + std::to_string(app.scene.registered_views) + " / " +
+            std::to_string(app.scene.total_views) + " views registered",
+        theme::success);
+}
+
+void start_align(App& app) {
+    if (app.job.running()) return;
+    refresh_artifacts(app);
+    std::error_code error;
+    std::filesystem::create_directories(app.layout.root, error);
+    if (error) {
+        set_message(app, "Cannot create project directory", theme::danger);
+        return;
+    }
+    if (!directory_has_images(app.settings.images_dir.data())) {
+        set_message(
+            app, "No images found in the selected source folder", theme::danger);
+        return;
+    }
+    try {
+        app.monitor.begin(JobKind::align);
+        app.log.open(app.layout.align_log);
+        app.job.start(
+            build_align_command(
+                AETHERSCAN_CLI_PATH, app.settings, app.layout),
+            app.layout.align_log);
+        app.active_job = JobKind::align;
+        set_message(app, "Aligning cameras...", theme::accent);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+}
+
+void start_train(App& app, const bool smoke) {
+    if (app.job.running()) return;
+    refresh_artifacts(app);
+    std::error_code error;
+    std::filesystem::create_directories(app.layout.root, error);
+
+    // The trainer inherits the shared allocation, so the exported handles are
+    // recreated per run: the timeline counter has to restart from zero.
+    app.preview.create(k_preview_extent, k_preview_extent);
+    PreviewHandles handles;
+    handles.memory =
+        reinterpret_cast<std::uintptr_t>(app.preview.memory_handle);
+    handles.semaphore =
+        reinterpret_cast<std::uintptr_t>(app.preview.semaphore_handle);
+    handles.allocation_size = app.preview.allocation_size;
+    handles.width = app.preview.width;
+    handles.height = app.preview.height;
+    handles.device_luid = gpu::device_luid();
+    handles.device_node_mask = gpu::device_node_mask();
+
+    std::string command;
+    if (smoke) {
+        // Fixed COLMAP dataset used only by --interop-smoke.
+        std::ostringstream smoke_command;
+        smoke_command
+            << '"' << AETHERSCAN_CLI_PATH << "\" --images \""
+            << app.settings.images_dir.data() << "\" --output \""
+            << app.layout.model_output.string()
+            << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
+            << " --splat-format colmap --splat-use-mask false"
+            << " --splat --splat-strategy adc_plus --splat-iterations "
+            << app.settings.iterations << " --splat-preview-interval "
+            << app.settings.preview_interval
+            << " --splat-preview-vk-memory-handle " << handles.memory
+            << " --splat-preview-vk-semaphore-handle " << handles.semaphore
+            << " --splat-preview-vk-allocation-size " << handles.allocation_size
+            << " --splat-preview-vk-width " << handles.width
+            << " --splat-preview-vk-height " << handles.height
+            << " --splat-preview-vk-device-luid " << handles.device_luid
+            << " --splat-preview-vk-device-node-mask "
+            << handles.device_node_mask;
+        command = smoke_command.str();
+    } else {
+        command = build_train_command(
+            AETHERSCAN_CLI_PATH, app.settings, app.layout, handles);
+    }
+
+    try {
+        app.monitor.begin(JobKind::train);
+        app.log.open(app.layout.train_log);
+        app.job.start(command, app.layout.train_log);
+        app.active_job = JobKind::train;
+        app.tab = ViewportTab::training;
+        set_message(
+            app,
+            app.settings.build_mesh
+                ? "Training with depth/normal geometry supervision..."
+                : "Training Gaussians...",
+            theme::accent);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+    // The child has inherited the handles; the parent copies are no longer
+    // needed and must not leak across runs.
+    app.preview.close_export_handles();
+}
+
+void on_job_finished(App& app) {
+    const int code = app.job.exit_code();
+    app.monitor.mark_finished(code);
+    const JobKind kind = app.active_job;
+    app.active_job = JobKind::none;
+    refresh_artifacts(app);
+
+    if (code != 0) {
+        std::string reason = app.monitor.last_error();
+        if (reason.empty())
+            reason = code == 2 ? "Stopped by user"
+                               : "Exited with code " + std::to_string(code);
+        set_message(
+            app,
+            std::string(kind == JobKind::align ? "Alignment" : "Training") +
+                " failed: " + reason,
+            code == 2 ? theme::warning : theme::danger);
+        return;
+    }
+
+    if (kind == JobKind::align) {
+        if (app.has_sparse) {
+            request_scene_load(
+                app, app.layout.sparse_ply, app.layout.sparse_poses,
+                "Sparse cloud");
+        } else {
+            set_message(
+                app, "Alignment finished but no sparse cloud was written",
+                theme::warning);
         }
+        return;
     }
-    return newest;
+    set_message(
+        app,
+        app.settings.build_mesh
+            ? (app.has_mesh ? "Training and mesh extraction finished"
+                            : "Training finished, mesh extraction produced no "
+                              "surface")
+            : "Training finished",
+        app.settings.build_mesh && !app.has_mesh ? theme::warning
+                                                 : theme::success);
 }
 
-std::string tail(const std::filesystem::path& path, std::size_t max_bytes) {
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if (!input) return "Waiting for reconstruction output...";
-    const auto end = input.tellg();
-    const auto begin = std::max<std::streamoff>(
-        0, static_cast<std::streamoff>(end) -
-               static_cast<std::streamoff>(max_bytes));
-    input.seekg(begin);
-    return {std::istreambuf_iterator<char>(input), {}};
-}
+// ---------------------------------------------------------------------------
+// UI fragments
 
-void apply_editor_style() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowPadding = {0, 0};
-    style.FramePadding = {9, 6};
-    style.CellPadding = {8, 5};
-    style.ItemSpacing = {8, 7};
-    style.ItemInnerSpacing = {6, 5};
-    style.ScrollbarSize = 11.F;
-    style.GrabMinSize = 8.F;
-    style.WindowBorderSize = 0.F;
-    style.ChildBorderSize = 1.F;
-    style.PopupBorderSize = 1.F;
-    style.FrameBorderSize = 1.F;
-    style.WindowRounding = 0.F;
-    style.ChildRounding = 0.F;
-    style.FrameRounding = 3.F;
-    style.PopupRounding = 4.F;
-    style.ScrollbarRounding = 8.F;
-    style.GrabRounding = 3.F;
-    style.TabRounding = 3.F;
-    auto& c = style.Colors;
-    c[ImGuiCol_Text] = ImVec4(0.88F, 0.88F, 0.89F, 1.F);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.43F, 0.43F, 0.47F, 1.F);
-    c[ImGuiCol_WindowBg] = ImVec4(0.055F, 0.055F, 0.06F, 1.F);
-    c[ImGuiCol_ChildBg] = ImVec4(0.075F, 0.075F, 0.08F, 1.F);
-    c[ImGuiCol_PopupBg] = ImVec4(0.12F, 0.12F, 0.13F, 0.98F);
-    c[ImGuiCol_Border] = ImVec4(0.20F, 0.20F, 0.22F, 1.F);
-    c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_FrameBg] = ImVec4(0.105F, 0.105F, 0.115F, 1.F);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.16F, 0.16F, 0.18F, 1.F);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.19F, 0.19F, 0.21F, 1.F);
-    c[ImGuiCol_TitleBg] = ImVec4(0.10F, 0.10F, 0.11F, 1.F);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.12F, 0.12F, 0.13F, 1.F);
-    c[ImGuiCol_MenuBarBg] = ImVec4(0.13F, 0.13F, 0.14F, 1.F);
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0.07F, 0.07F, 0.075F, 1.F);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.25F, 0.25F, 0.27F, 1.F);
-    c[ImGuiCol_CheckMark] = ImVec4(0.31F, 0.76F, 0.97F, 1.F);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.18F, 0.55F, 0.84F, 1.F);
-    c[ImGuiCol_Button] = ImVec4(0.13F, 0.13F, 0.145F, 1.F);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.20F, 0.20F, 0.22F, 1.F);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.035F, 0.28F, 0.44F, 1.F);
-    c[ImGuiCol_Header] = ImVec4(0.035F, 0.28F, 0.44F, 1.F);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.12F, 0.30F, 0.43F, 1.F);
-    c[ImGuiCol_HeaderActive] = ImVec4(0.05F, 0.37F, 0.58F, 1.F);
-    c[ImGuiCol_Separator] = ImVec4(0.20F, 0.20F, 0.22F, 1.F);
-    c[ImGuiCol_SeparatorHovered] = ImVec4(0.0F, 0.47F, 0.83F, 1.F);
-    c[ImGuiCol_ResizeGrip] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_ResizeGripHovered] = ImVec4(0.0F, 0.47F, 0.83F, 0.7F);
-    c[ImGuiCol_Tab] = ImVec4(0.11F, 0.11F, 0.12F, 1.F);
-    c[ImGuiCol_TabHovered] = ImVec4(0.17F, 0.17F, 0.19F, 1.F);
-    c[ImGuiCol_TabSelected] = ImVec4(0.15F, 0.15F, 0.165F, 1.F);
-    c[ImGuiCol_TabDimmed] = ImVec4(0.08F, 0.08F, 0.09F, 1.F);
-}
+// Brand strip plus a breadcrumb of the four workflow stages, so the current
+// position in the pipeline is readable without scanning the side panels.
+void draw_title_bar(const App& app) {
+    const bool training =
+        app.job.running() && app.active_job == JobKind::train;
+    const bool aligning =
+        app.job.running() && app.active_job == JobKind::align;
+    const int current = training && app.monitor.stage() == Stage::meshing ? 3
+        : training                                                        ? 2
+        : aligning                                                        ? 1
+        : app.has_model                                                   ? 2
+        : app.has_sparse                                                  ? 1
+                                                                          : 0;
 
-void panel_title(const char* title, const char* suffix = nullptr) {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15F, 0.15F, 0.165F, 1.F));
-    ImGui::BeginChild(
-        (std::string("##title_") + title).c_str(), {0, 34.F}, false,
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    ImGui::SetCursorPos({12.F, 9.F});
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66F, 0.67F, 0.71F, 1.F));
-    ImGui::TextUnformatted(title);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.078F, 0.080F, 0.090F, 1.F));
+    ImGui::BeginChild("##titlebar", {0, 30.F}, false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetCursorPos({14.F, 6.F});
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::accent);
+    ImGui::TextUnformatted("AETHER");
     ImGui::PopStyleColor();
-    if (suffix) {
-        const float width = ImGui::CalcTextSize(suffix).x;
-        ImGui::SameLine(ImGui::GetWindowWidth() - width - 12.F);
-        ImGui::TextDisabled("%s", suffix);
+    ImGui::SameLine(0.F, 1.F);
+    ImGui::TextUnformatted("SCAN");
+
+    const std::array<const char*, 4> steps{
+        {"Images", "Alignment", "Gaussians", "Mesh"}};
+    ImGui::SameLine(0.F, 26.F);
+    for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
+        if (i > 0) {
+            ImGui::SameLine(0.F, 8.F);
+            theme::caption("\xE2\x80\xBA");  // single right angle quote
+            ImGui::SameLine(0.F, 8.F);
+        }
+        const bool reached = i <= current;
+        ImGui::PushStyleColor(
+            ImGuiCol_Text, i == current ? theme::accent
+                                        : (reached ? theme::text_muted
+                                                   : theme::text_faint));
+        ImGui::TextUnformatted(steps[static_cast<std::size_t>(i)]);
+        ImGui::PopStyleColor();
     }
+
+    const std::string project = app.layout.root.filename().empty()
+        ? std::string("Untitled Project")
+        : app.layout.root.filename().string();
+    const float width = ImGui::CalcTextSize(project.c_str()).x;
+    ImGui::SameLine(std::max(0.F, ImGui::GetWindowWidth() - width - 16.F));
+    theme::caption(project.c_str());
     ImGui::EndChild();
     ImGui::PopStyleColor();
 }
 
-void status_dot(bool active) {
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::GetWindowDrawList()->AddCircleFilled(
-        {p.x + 5.F, p.y + 8.F}, 4.F,
-        ImGui::ColorConvertFloat4ToU32(
-            active ? ImVec4(0.28F, 0.80F, 0.47F, 1.F)
-                   : ImVec4(0.38F, 0.39F, 0.42F, 1.F)));
-    ImGui::Dummy({14.F, 16.F});
+// Returns the action requested from the toolbar, if any.
+enum class Action { none, align, train, stop, reveal, frame_scene };
+
+Action draw_toolbar(App& app) {
+    Action action = Action::none;
+    const bool busy = app.job.running();
+    const bool images_ready = app.settings.images_dir[0] != '\0';
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.106F, 0.110F, 0.122F, 1.F));
+    ImGui::BeginChild("##toolbar", {0, 52.F}, false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetCursorPos({12.F, 10.F});
+
+    if (theme::toolbar_button("Image Folder", {114.F, 32.F}, !busy)) {
+        if (pick_folder(L"Select the capture image folder", app.settings.images_dir))
+            refresh_artifacts(app);
+    }
+    ImGui::SameLine();
+
+    // Step 1: multi-view alignment.
+    const bool aligning = busy && app.active_job == JobKind::align;
+    if (aligning) {
+        theme::toolbar_button("Aligning...", {124.F, 32.F}, false, true);
+    } else if (theme::primary_button(
+                   app.has_sparse ? "Re-align Photos" : "Align Photos",
+                   {124.F, 32.F}, !busy && images_ready)) {
+        action = Action::align;
+    }
+    ImGui::SameLine();
+
+    // Step 2: Gaussian optimisation, gated on a reviewed alignment.
+    const bool training = busy && app.active_job == JobKind::train;
+    if (training) {
+        theme::toolbar_button("Training...", {124.F, 32.F}, false, true);
+    } else {
+        const bool ready = !busy && images_ready;
+        if (app.has_sparse) {
+            if (theme::primary_button("Train 3DGS", {124.F, 32.F}, ready))
+                action = Action::train;
+        } else if (theme::toolbar_button("Train 3DGS", {124.F, 32.F}, ready)) {
+            action = Action::train;
+        }
+        if (!app.has_sparse && ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "No alignment yet. Training will run Structure from Motion "
+                "first, then optimise Gaussians.");
+    }
+    ImGui::SameLine();
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::Checkbox("Build Mesh", &app.settings.build_mesh);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Extract a surface after training.\n"
+            "Enables depth-normal consistency and multi-view geometry/NCC\n"
+            "supervision during optimisation, which the mesh needs.");
+    ImGui::SameLine(0.F, 14.F);
+
+    if (theme::toolbar_button(
+            "Open Output", {104.F, 32.F}, app.layout.root.has_filename()))
+        action = Action::reveal;
+    if (busy) {
+        ImGui::SameLine();
+        if (theme::danger_button("Stop", {74.F, 32.F})) action = Action::stop;
+    }
+
+    const char* transport = "CUDA / Vulkan  ·  external memory";
+    const float transport_width = ImGui::CalcTextSize(transport).x;
+    ImGui::SameLine(ImGui::GetWindowWidth() - transport_width - 16.F);
+    ImGui::SetCursorPosY(18.F);
+    theme::caption(transport);
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    return action;
 }
 
-std::pair<int, int> parse_iteration(const std::string& log) {
-    const std::string marker = "splat iteration=";
-    const std::size_t found = log.rfind(marker);
-    if (found == std::string::npos) return {0, 0};
-    const char* begin = log.c_str() + found + marker.size();
-    char* end{};
-    const long current = std::strtol(begin, &end, 10);
-    if (!end || *end != '/') return {0, 0};
-    const long total = std::strtol(end + 1, nullptr, 10);
-    return {static_cast<int>(current), static_cast<int>(total)};
+void draw_step(
+    const char* index, const char* label, const StepState state,
+    const char* note) {
+    ImVec4 colour = theme::inactive;
+    switch (state) {
+        case StepState::done: colour = theme::success; break;
+        case StepState::active: {
+            const float pulse =
+                0.55F + 0.45F * std::abs(std::sin(
+                                    static_cast<float>(ImGui::GetTime()) * 2.4F));
+            colour = theme::fade(theme::accent, pulse);
+            break;
+        }
+        case StepState::failed: colour = theme::danger; break;
+        case StepState::skipped: colour = theme::fade(theme::inactive, 0.4F); break;
+        case StepState::pending: break;
+    }
+
+    ImGui::SetCursorPosX(14.F);
+    theme::status_dot(colour);
+    ImGui::SameLine(0.F, 8.F);
+    theme::caption(index);
+    ImGui::SameLine(0.F, 8.F);
+    if (state == StepState::done || state == StepState::active) {
+        ImGui::TextUnformatted(label);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::text_muted);
+        ImGui::TextUnformatted(label);
+        ImGui::PopStyleColor();
+    }
+    if (note) {
+        ImGui::SetCursorPosX(44.F);
+        theme::caption(note);
+    }
 }
+
+void draw_left_panel(App& app, const float width) {
+    theme::begin_panel("LeftPanel", {width, 0}, nullptr, nullptr, {0, 0});
+
+    theme::section_header("SCENE");
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {7.F, 7.F});
+    ImGui::SetCursorPosX(10.F);
+    if (ImGui::TreeNodeEx(
+            app.layout.root.filename().empty()
+                ? "Capture"
+                : app.layout.root.filename().string().c_str(),
+            ImGuiTreeNodeFlags_DefaultOpen |
+                ImGuiTreeNodeFlags_SpanAvailWidth)) {
+        const auto leaf = [](const char* label, const bool present,
+                             const bool selected) {
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf |
+                                       ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                       ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (selected) flags |= ImGuiTreeNodeFlags_Selected;
+            if (!present) ImGui::PushStyleColor(ImGuiCol_Text, theme::text_faint);
+            ImGui::TreeNodeEx(label, flags);
+            if (!present) ImGui::PopStyleColor();
+        };
+        leaf("Input Images", app.settings.images_dir[0] != '\0', false);
+        leaf("Camera Poses", !app.scene.views.empty(), false);
+        leaf(
+            "Sparse Point Cloud", app.scene.has_points(),
+            app.tab == ViewportTab::sparse && app.scene.has_points());
+        leaf(
+            "Gaussian Model", app.has_model,
+            app.tab == ViewportTab::training);
+        leaf("Reconstructed Mesh", app.has_mesh, false);
+        ImGui::TreePop();
+    }
+    ImGui::PopStyleVar();
+    ImGui::Dummy({0, 6.F});
+
+    theme::section_header("PIPELINE");
+    const bool busy = app.job.running();
+    const Stage stage = app.monitor.stage();
+    const bool aligning = busy && app.active_job == JobKind::align;
+    const bool training = busy && app.active_job == JobKind::train;
+
+    draw_step(
+        "01", "Select images",
+        app.settings.images_dir[0] != '\0' ? StepState::done : StepState::pending,
+        nullptr);
+    draw_step(
+        "02", "Align cameras",
+        aligning ? StepState::active
+                 : (app.has_sparse ? StepState::done : StepState::pending),
+        aligning ? stage_name(stage) : nullptr);
+    draw_step(
+        "03", "Review sparse cloud",
+        app.scene.has_points() ? StepState::done
+                               : (app.has_sparse ? StepState::active
+                                                 : StepState::pending),
+        app.scene.has_points()
+            ? nullptr
+            : (app.has_sparse ? "Ready to load" : nullptr));
+    draw_step(
+        "04", "Optimise Gaussians",
+        training && stage != Stage::meshing
+            ? StepState::active
+            : (app.has_model ? StepState::done : StepState::pending),
+        app.settings.build_mesh ? "Geometry constraints on" : nullptr);
+    draw_step(
+        "05", "Extract mesh",
+        !app.settings.build_mesh
+            ? StepState::skipped
+            : (training && stage == Stage::meshing
+                   ? StepState::active
+                   : (app.has_mesh ? StepState::done : StepState::pending)),
+        app.settings.build_mesh ? nullptr : "Disabled");
+
+    ImGui::Dummy({0, 8.F});
+    theme::section_header("SOURCE");
+    ImGui::Indent(14.F);
+    theme::caption("IMAGES");
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(width - 20.F);
+    ImGui::TextUnformatted(
+        app.settings.images_dir[0] != '\0' ? app.settings.images_dir.data()
+                                          : "(not selected)");
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy({0, 6.F});
+    theme::caption("PROJECT");
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(width - 20.F);
+    ImGui::TextUnformatted(
+        app.settings.project_dir[0] != '\0' ? app.settings.project_dir.data()
+                                           : "(not selected)");
+    ImGui::PopTextWrapPos();
+    ImGui::Unindent(14.F);
+
+    theme::end_panel();
+}
+
+void draw_empty_viewport(
+    ImDrawList* draw, const ImVec2 min, const ImVec2 max, const char* headline,
+    const char* hint) {
+    // A restrained perspective construction grid so the empty stage still
+    // reads as a 3D workspace.
+    const float horizon = min.y + (max.y - min.y) * 0.46F;
+    const ImVec2 vanishing{(min.x + max.x) * 0.5F, horizon};
+    draw->PushClipRect(min, max, true);
+    draw->AddLine({min.x, horizon}, {max.x, horizon}, IM_COL32(30, 34, 42, 255));
+    constexpr int rays = 16;
+    for (int i = -rays; i <= rays; ++i) {
+        const float x =
+            vanishing.x + i * (max.x - min.x) / static_cast<float>(rays);
+        draw->AddLine(
+            vanishing, {x, max.y},
+            i == 0 ? IM_COL32(52, 62, 74, 200) : IM_COL32(30, 34, 42, 170));
+    }
+    for (int i = 0; i < 16; ++i) {
+        const float t = static_cast<float>(i) / 15.F;
+        const float y = horizon + t * t * (max.y - horizon);
+        draw->AddLine({min.x, y}, {max.x, y}, IM_COL32(30, 34, 42, 170));
+    }
+    draw->PopClipRect();
+
+    const float headline_width = ImGui::CalcTextSize(headline).x;
+    const float hint_width = ImGui::CalcTextSize(hint).x;
+    const float centre_x = (min.x + max.x) * 0.5F;
+    draw->AddText(
+        {centre_x - headline_width * 0.5F, horizon - 44.F},
+        theme::u32(theme::text_muted), headline);
+    draw->AddText(
+        {centre_x - hint_width * 0.5F, horizon - 22.F},
+        theme::u32(theme::text_faint), hint);
+}
+
+void draw_viewport_overlay(
+    ImDrawList* draw, const ImVec2 min, const char* label, const ImVec4& dot) {
+    const float text_width = ImGui::CalcTextSize(label).x;
+    const ImVec2 origin{min.x + 14.F, min.y + 14.F};
+    const ImVec2 max{origin.x + text_width + 42.F, origin.y + 30.F};
+    draw->AddRectFilled(origin, max, IM_COL32(16, 18, 23, 214), 5.F);
+    draw->AddRect(origin, max, theme::u32(theme::border, 0.7F), 5.F);
+    draw->AddCircleFilled(
+        {origin.x + 16.F, origin.y + 15.F}, 4.F, theme::u32(dot));
+    draw->AddText(
+        {origin.x + 28.F, origin.y + 15.F - ImGui::GetTextLineHeight() * 0.5F},
+        theme::u32(theme::text_bright), label);
+}
+
+void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg));
+
+    if (!app.scene.has_points()) {
+        const char* headline = app.loading_scene
+            ? "Loading sparse reconstruction..."
+            : (app.has_sparse ? "Sparse cloud ready to load"
+                              : "No alignment yet");
+        const char* hint = app.has_sparse
+            ? "Use Load Sparse Cloud in the inspector"
+            : "Pick an image folder, then run Align Photos";
+        draw_empty_viewport(draw, min, max, headline, hint);
+        return;
+    }
+
+    const bool hovered = ImGui::IsWindowHovered();
+    update_orbit_camera(app.camera, hovered);
+    const SceneDrawStats stats = app.renderer.draw(
+        draw, min, max, app.scene, app.camera, app.view_options, hovered);
+
+    draw_viewport_overlay(
+        draw, min,
+        app.scene_source.empty() ? "SPARSE POINT CLOUD" : app.scene_source.c_str(),
+        theme::accent);
+
+    // Bottom-left readout: what is on screen and how to navigate.
+    char readout[192];
+    std::snprintf(
+        readout, sizeof(readout), "%s pts drawn  ·  %zu cameras  ·  %s pts total",
+        format_count(stats.drawn_points).c_str(), stats.drawn_views,
+        format_count(app.scene.points.size()).c_str());
+    draw->AddText(
+        {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
+    draw->AddText(
+        {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
+        "LMB orbit  ·  RMB pan  ·  wheel zoom");
+
+    if (stats.hovered_view >= 0 &&
+        static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size()) {
+        const ViewPose& pose = app.scene.views[stats.hovered_view];
+        ImGui::SetTooltip(
+            "%s\n%u x %u  ·  f %.1f px\n%zu observations  ·  p95 %.2f px",
+            pose.name.c_str(), pose.width, pose.height, pose.fx,
+            pose.observations, pose.reprojection_p95);
+    }
+}
+
+void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg));
+
+    const bool training = app.job.running() && app.active_job == JobKind::train;
+    const bool has_frame = app.preview.display.descriptor &&
+                           gpu::consumed_timeline_value() > 0;
+    if (!has_frame) {
+        draw_empty_viewport(
+            draw, min, max,
+            training ? "Waiting for the first rendered iteration..."
+                     : "No live training preview",
+            training ? "Frames arrive over Vulkan external memory"
+                     : "Run Train 3DGS to stream the optimiser output");
+        draw_viewport_overlay(
+            draw, min, training ? "TRAINING" : "IDLE",
+            training ? theme::warning : theme::inactive);
+        return;
+    }
+
+    const ImVec2 available{max.x - min.x, max.y - min.y};
+    const float scale = std::min(
+        available.x / static_cast<float>(app.preview.width),
+        available.y / static_cast<float>(app.preview.height));
+    const ImVec2 size{
+        app.preview.width * scale, app.preview.height * scale};
+    const ImVec2 origin{
+        min.x + (available.x - size.x) * 0.5F,
+        min.y + (available.y - size.y) * 0.5F};
+    draw->AddImage(
+        reinterpret_cast<ImTextureID>(app.preview.display.descriptor), origin,
+        {origin.x + size.x, origin.y + size.y});
+
+    draw_viewport_overlay(
+        draw, min, training ? "LIVE TRAINING PREVIEW" : "LAST TRAINING FRAME",
+        training ? theme::success : theme::inactive);
+
+    const TrainingStats& stats = app.monitor.training();
+    if (stats.valid) {
+        char readout[192];
+        std::snprintf(
+            readout, sizeof(readout),
+            "iter %u / %u  ·  %s gaussians  ·  loss %.4f  ·  %.1f ms/step",
+            stats.iteration, stats.total_iterations,
+            format_count(stats.gaussians).c_str(), stats.loss,
+            stats.step_milliseconds);
+        draw->AddText(
+            {min.x + 16.F, max.y - 26.F}, theme::u32(theme::text_muted),
+            readout);
+    }
+}
+
+void draw_centre_column(App& app, const float width, const float console_height) {
+    ImGui::BeginChild("CentreStack", {width, 0}, false, ImGuiWindowFlags_NoScrollbar);
+    const float viewport_height =
+        ImGui::GetContentRegionAvail().y - console_height - 4.F;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::BeginChild(
+        "Viewport", {0, viewport_height}, true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar();
+
+    // Header with the viewport tabs on the left and state on the right.
+    const ImVec2 header_origin = ImGui::GetCursorScreenPos();
+    const float header_width = ImGui::GetContentRegionAvail().x;
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        header_origin, {header_origin.x + header_width, header_origin.y + 36.F},
+        theme::u32(theme::surface_3));
+    ImGui::GetWindowDrawList()->AddLine(
+        {header_origin.x, header_origin.y + 35.F},
+        {header_origin.x + header_width, header_origin.y + 35.F},
+        theme::u32(theme::border));
+
+    ImGui::SetCursorPos({8.F, 5.F});
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.F, 4.F));
+    if (theme::toolbar_button(
+            "Sparse Cloud", {0, 26.F}, true, app.tab == ViewportTab::sparse))
+        app.tab = ViewportTab::sparse;
+    ImGui::SameLine(0.F, 4.F);
+    if (theme::toolbar_button(
+            "Live Training", {0, 26.F}, true, app.tab == ViewportTab::training))
+        app.tab = ViewportTab::training;
+    ImGui::PopStyleVar();
+
+    const char* state = app.job.running()
+        ? (app.active_job == JobKind::align ? "ALIGNING" : "TRAINING")
+        : "READY";
+    const float state_width = ImGui::CalcTextSize(state).x;
+    ImGui::SameLine(std::max(0.F, ImGui::GetWindowWidth() - state_width - 14.F));
+    ImGui::SetCursorPosY(10.F);
+    theme::caption(state);
+    ImGui::SetCursorPos({0, 36.F});
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    ImGui::BeginChild(
+        "##view", {0, 0}, false,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    const ImVec2 view_min = ImGui::GetCursorScreenPos();
+    const ImVec2 region = ImGui::GetContentRegionAvail();
+    const ImVec2 view_max{view_min.x + region.x, view_min.y + region.y};
+    if (app.tab == ViewportTab::sparse)
+        draw_sparse_tab(app, view_min, view_max);
+    else
+        draw_training_tab(app, view_min, view_max);
+    ImGui::EndChild();
+    ImGui::EndChild();
+
+    // Console.
+    const char* trailing = app.job.running() ? "FOLLOWING OUTPUT" : nullptr;
+    theme::begin_panel("Console", {0, 0}, "CONSOLE", trailing, {0, 0});
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.031F, 0.033F, 0.039F, 1.F));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.F, 8.F));
+    ImGui::BeginChild("Log", {0, 0}, false, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::PopStyleVar();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66F, 0.68F, 0.72F, 1.F));
+    if (app.log.console().empty())
+        ImGui::TextUnformatted("Reconstruction output appears here.");
+    else
+        ImGui::TextUnformatted(app.log.console().c_str());
+    ImGui::PopStyleColor();
+    if (app.job.running()) ImGui::SetScrollHereY(1.F);
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    theme::end_panel();
+
+    ImGui::EndChild();
+}
+
+Action draw_inspector(App& app, const float width) {
+    Action action = Action::none;
+    const bool busy = app.job.running();
+    theme::begin_panel("Inspector", {width, 0}, "INSPECTOR");
+
+    if (ImGui::CollapsingHeader("Project", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        theme::caption("Image source");
+        ImGui::SetNextItemWidth(-30.F);
+        ImGui::InputText(
+            "##images", app.settings.images_dir.data(),
+            app.settings.images_dir.size());
+        ImGui::SameLine(0.F, 4.F);
+        if (ImGui::Button("...##pick_images", {24.F, 0})) {
+            if (pick_folder(L"Select the capture image folder",
+                            app.settings.images_dir))
+                refresh_artifacts(app);
+        }
+        theme::caption("Project directory");
+        ImGui::SetNextItemWidth(-30.F);
+        if (ImGui::InputText(
+                "##project", app.settings.project_dir.data(),
+                app.settings.project_dir.size()))
+            refresh_artifacts(app);
+        ImGui::SameLine(0.F, 4.F);
+        if (ImGui::Button("...##pick_project", {24.F, 0})) {
+            if (pick_folder(L"Select the project output folder",
+                            app.settings.project_dir))
+                refresh_artifacts(app);
+        }
+        ImGui::Spacing();
+    }
+
+    if (ImGui::CollapsingHeader(
+            "Camera Alignment", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        ImGui::BeginDisabled(busy);
+        theme::caption("Solver");
+        ImGui::SetNextItemWidth(-1.F);
+        const char* modes[] = {"Global", "Incremental", "Hierarchical"};
+        ImGui::Combo("##sfm_mode", &app.settings.sfm_mode, modes, 3);
+        theme::caption("Max features per image");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputInt("##max_features", &app.settings.max_features, 1000, 5000);
+        ImGui::Checkbox("Reuse cached alignment", &app.settings.reuse_cache);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Shares a checkpoint directory between runs so training reuses\n"
+                "the alignment you just reviewed instead of re-solving it.");
+        ImGui::EndDisabled();
+
+        if (!app.scene.views.empty()) {
+            ImGui::Spacing();
+            theme::metric_coloured(
+                "Registered views",
+                (std::to_string(app.scene.registered_views) + " / " +
+                 std::to_string(app.scene.total_views))
+                    .c_str(),
+                app.scene.registered_views == app.scene.total_views
+                    ? theme::success
+                    : theme::warning);
+            char buffer[64];
+            std::snprintf(
+                buffer, sizeof(buffer), "%.3f px", app.scene.mean_reprojection);
+            theme::metric("Mean reprojection", buffer);
+            theme::metric(
+                "Sparse points",
+                format_count(app.scene.points.size()).c_str());
+        }
+        ImGui::Spacing();
+    }
+
+    if (ImGui::CollapsingHeader(
+            "Gaussian Splatting", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        ImGui::BeginDisabled(busy);
+        theme::caption("Capture type");
+        ImGui::SetNextItemWidth(-1.F);
+        const char* capture[] = {"Object", "Scene"};
+        int capture_index = app.settings.scene_mode ? 1 : 0;
+        if (ImGui::Combo("##capture", &capture_index, capture, 2))
+            app.settings.scene_mode = capture_index == 1;
+        theme::caption("Densification strategy");
+        ImGui::SetNextItemWidth(-1.F);
+        const char* strategies[] = {
+            "Default", "ADC Plus", "ADC IGS", "Dense adaptive"};
+        ImGui::Combo("##strategy", &app.settings.strategy, strategies, 4);
+        theme::caption("Iterations");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputInt("##iterations", &app.settings.iterations, 1000, 5000);
+        theme::caption("Max training resolution");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputInt(
+            "##resolution", &app.settings.max_resolution, 128, 512);
+        theme::caption("Live preview cadence");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputInt("##cadence", &app.settings.preview_interval, 10, 50);
+        ImGui::Checkbox(
+            "Coarse-to-fine resolution", &app.settings.progressive_resolution);
+        ImGui::Checkbox("Foreground mask training", &app.settings.use_mask);
+        ImGui::Checkbox("Learn normal field", &app.settings.normal_field);
+        ImGui::EndDisabled();
+        ImGui::Spacing();
+    }
+
+    if (ImGui::CollapsingHeader(
+            "Mesh & Geometry", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        ImGui::BeginDisabled(busy);
+        ImGui::Checkbox(
+            "Build mesh after training", &app.settings.build_mesh);
+        ImGui::Spacing();
+        if (app.settings.build_mesh) {
+            ImGui::PushTextWrapPos(0.F);
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::accent);
+            ImGui::TextUnformatted(
+                "Training will add depth-normal consistency and multi-view "
+                "geometry/NCC supervision so the learned depth is metric "
+                "enough to fuse.");
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+            theme::caption("Surface backend");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* methods[] = {"Auto", "TSDF", "Delaunay", "PAM"};
+            ImGui::Combo("##mesh_method", &app.settings.mesh_method, methods, 4);
+            theme::caption("Depth-normal weight");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::DragFloat(
+                "##depth_normal", &app.settings.depth_normal_weight, 0.005F,
+                0.F, 1.F, "%.3f");
+            theme::caption("Multi-view geometry weight");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::DragFloat(
+                "##mv_geo", &app.settings.multi_view_geo_weight, 0.005F, 0.F,
+                1.F, "%.3f");
+            theme::caption("Multi-view NCC weight");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::DragFloat(
+                "##mv_ncc", &app.settings.multi_view_ncc_weight, 0.01F, 0.F,
+                2.F, "%.2f");
+            theme::caption("Geometry loss start iteration");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt(
+                "##geo_from", &app.settings.geometry_from_iter, 500, 2000);
+        } else {
+            ImGui::PushTextWrapPos(0.F);
+            theme::caption(
+                "Appearance-only training. Geometry losses stay off and no "
+                "surface is extracted.");
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::EndDisabled();
+        ImGui::Spacing();
+    }
+
+    if (app.tab == ViewportTab::sparse &&
+        ImGui::CollapsingHeader("Sparse View", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        if (theme::toolbar_button(
+                "Load Sparse Cloud", {-1.F, 28.F},
+                app.has_sparse && !app.loading_scene))
+            request_scene_load(
+                app, app.layout.sparse_ply, app.layout.sparse_poses,
+                "Sparse cloud");
+        if (theme::toolbar_button(
+                "Load Trained Model", {-1.F, 28.F},
+                app.has_model && !app.loading_scene))
+            request_scene_load(
+                app, app.layout.splat_ply, app.layout.sparse_poses,
+                "Gaussian centres");
+        ImGui::Spacing();
+        if (theme::toolbar_button(
+                "Frame Scene", {-1.F, 28.F}, app.scene.has_points()))
+            action = Action::frame_scene;
+        ImGui::Spacing();
+        theme::caption("Point size");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::SliderFloat(
+            "##point_size", &app.view_options.point_size, 1.F, 6.F, "%.1f px");
+        theme::caption("Rendered point budget");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::SliderInt(
+            "##budget", &app.view_options.point_budget, 20'000, 600'000,
+            "%d");
+        theme::caption("Camera marker size");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::SliderFloat(
+            "##view_scale", &app.view_options.view_scale, 0.02F, 0.4F, "%.2f");
+        ImGui::Spacing();
+        ImGui::Checkbox("Colour by depth", &app.view_options.colour_by_depth);
+        ImGui::Checkbox("Show cameras", &app.view_options.show_views);
+        ImGui::Checkbox("Show trajectory", &app.view_options.show_trajectory);
+        ImGui::Checkbox("Show ground grid", &app.view_options.show_grid);
+        ImGui::Spacing();
+    }
+
+    const TrainingStats& stats = app.monitor.training();
+    if (stats.valid &&
+        ImGui::CollapsingHeader(
+            "Training Telemetry", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        char buffer[64];
+        std::snprintf(
+            buffer, sizeof(buffer), "%u / %u", stats.iteration,
+            stats.total_iterations);
+        theme::metric("Iteration", buffer);
+        const float ratio = stats.total_iterations > 0
+            ? static_cast<float>(stats.iteration) /
+                  static_cast<float>(stats.total_iterations)
+            : 0.F;
+        theme::progress_track({-1.F, 6.F}, ratio, theme::accent);
+        ImGui::Spacing();
+        theme::metric("Gaussians", format_count(stats.gaussians).c_str());
+        std::snprintf(buffer, sizeof(buffer), "%.4f", stats.loss);
+        theme::metric("Total loss", buffer);
+        std::snprintf(buffer, sizeof(buffer), "%.4f", stats.rgb_loss);
+        theme::metric("RGB", buffer);
+        if (app.settings.build_mesh) {
+            std::snprintf(buffer, sizeof(buffer), "%.4f", stats.depth_loss);
+            theme::metric("Depth", buffer);
+            std::snprintf(buffer, sizeof(buffer), "%.4f", stats.normal_loss);
+            theme::metric("Normal", buffer);
+            std::snprintf(
+                buffer, sizeof(buffer), "%.4f",
+                stats.multi_view_geometry_loss);
+            theme::metric("Multi-view geo", buffer);
+            std::snprintf(
+                buffer, sizeof(buffer), "%.4f", stats.multi_view_ncc_loss);
+            theme::metric("Multi-view NCC", buffer);
+        }
+        std::snprintf(buffer, sizeof(buffer), "%.1f ms", stats.step_milliseconds);
+        theme::metric("Step time", buffer);
+        std::snprintf(
+            buffer, sizeof(buffer), "%.2fx", stats.resolution_scale);
+        theme::metric("Resolution scale", buffer);
+        std::snprintf(
+            buffer, sizeof(buffer), "%llu",
+            static_cast<unsigned long long>(gpu::consumed_timeline_value()));
+        theme::metric("Preview timeline", buffer);
+        ImGui::Spacing();
+    }
+
+    // Context-appropriate primary action pinned to the bottom of the panel.
+    ImGui::Dummy({0, 10.F});
+    if (busy) {
+        if (theme::danger_button(
+                app.active_job == JobKind::align ? "Stop Alignment"
+                                                 : "Stop Training",
+                {-1.F, 40.F}))
+            action = Action::stop;
+    } else if (!app.has_sparse) {
+        if (theme::primary_button(
+                "Align Photos", {-1.F, 40.F},
+                app.settings.images_dir[0] != '\0'))
+            action = Action::align;
+    } else {
+        if (theme::primary_button(
+                app.settings.build_mesh ? "Train 3DGS + Mesh" : "Train 3DGS",
+                {-1.F, 40.F}, app.settings.images_dir[0] != '\0'))
+            action = Action::train;
+    }
+
+    theme::end_panel();
+    return action;
+}
+
+void draw_status_bar(const App& app, const float height) {
+    const bool busy = app.job.running();
+    const ImVec4 background = busy
+        ? ImVec4(0.027F, 0.208F, 0.325F, 1.F)
+        : ImVec4(0.086F, 0.090F, 0.102F, 1.F);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, background);
+    ImGui::BeginChild("##status", {0, height}, false, ImGuiWindowFlags_NoScrollbar);
+
+    const float centre_y = (height - ImGui::GetTextLineHeight()) * 0.5F;
+    ImGui::SetCursorPos({12.F, centre_y});
+    ImVec4 dot = theme::inactive;
+    if (busy) dot = theme::accent;
+    else if (app.monitor.stage() == Stage::failed) dot = theme::danger;
+    else if (app.monitor.stage() == Stage::complete) dot = theme::success;
+    theme::status_dot(dot, 7.F);
+
+    ImGui::SameLine(0.F, 8.F);
+    ImGui::SetCursorPosY(centre_y);
+    if (busy) {
+        const std::string headline = app.monitor.headline();
+        ImGui::TextUnformatted(headline.c_str());
+    } else if (!app.message.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, app.message_colour);
+        ImGui::TextUnformatted(app.message.c_str());
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::TextUnformatted("Ready");
+    }
+
+    // Progress bar plus percentage and ETA, right-aligned before the build tag.
+    const char* tag = "AetherScan 0.2";
+    const float tag_width = ImGui::CalcTextSize(tag).x;
+    if (busy) {
+        const float fraction = app.monitor.fraction();
+        const double eta = app.monitor.eta_seconds();
+        char trailing[96];
+        if (fraction >= 0.F && eta >= 0.0)
+            std::snprintf(
+                trailing, sizeof(trailing), "%3.0f%%   ETA %s", fraction * 100.F,
+                format_duration(eta).c_str());
+        else if (fraction >= 0.F)
+            std::snprintf(trailing, sizeof(trailing), "%3.0f%%", fraction * 100.F);
+        else
+            std::snprintf(trailing, sizeof(trailing), "working");
+
+        const float trailing_width = ImGui::CalcTextSize(trailing).x;
+        constexpr float bar_width = 220.F;
+        const float bar_x = std::max(
+            240.F, ImGui::GetWindowWidth() - tag_width - 28.F -
+                       trailing_width - 12.F - bar_width);
+        ImGui::SameLine(bar_x);
+        ImGui::SetCursorPosY((height - 7.F) * 0.5F);
+        theme::progress_track(
+            {bar_width, 7.F}, fraction,
+            fraction < 0.F ? theme::accent : ImVec4(0.55F, 0.84F, 1.F, 1.F));
+        ImGui::SameLine(0.F, 12.F);
+        ImGui::SetCursorPosY(centre_y);
+        ImGui::TextUnformatted(trailing);
+    }
+
+    ImGui::SameLine(std::max(0.F, ImGui::GetWindowWidth() - tag_width - 14.F));
+    ImGui::SetCursorPosY(centre_y);
+    ImGui::PushStyleColor(
+        ImGuiCol_Text, busy ? theme::text_bright : theme::text_faint);
+    ImGui::TextUnformatted(tag);
+    ImGui::PopStyleColor();
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
 }  // namespace
 
 int main(const int argc, char** argv) {
-    const bool interop_smoke =
-        argc > 1 && std::string_view(argv[1]) == "--interop-smoke";
-    glfwSetErrorCallback([](int code, const char* text) {
+    App app;
+    app.smoke_mode = argc > 1 && std::string_view(argv[1]) == "--interop-smoke";
+
+    std::snprintf(
+        app.settings.images_dir.data(), app.settings.images_dir.size(),
+        "D:\\ScanVideo\\ori_img\\images");
+    std::snprintf(
+        app.settings.project_dir.data(), app.settings.project_dir.size(),
+        "D:\\ScanVideo\\ori_img\\aetherscan_gui");
+    if (app.smoke_mode) {
+        std::snprintf(
+            app.settings.project_dir.data(), app.settings.project_dir.size(),
+            "D:\\ProgramCode\\C++\\3dgs\\AetherScan\\artifacts\\cuda_vulkan_smoke");
+        app.settings.iterations = 100;
+    }
+
+    glfwSetErrorCallback([](const int code, const char* text) {
         std::fprintf(stderr, "GLFW %d: %s\n", code, text);
     });
     if (!glfwInit() || !glfwVulkanSupported()) return 1;
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(
-        1500, 900, "AetherScan Reconstruction Editor", nullptr, nullptr);
+        1600, 940, "AetherScan Reconstruction Editor", nullptr, nullptr);
+
     ImVector<const char*> extensions;
     std::uint32_t extension_count{};
-    const char** required =
-        glfwGetRequiredInstanceExtensions(&extension_count);
+    const char** required = glfwGetRequiredInstanceExtensions(&extension_count);
     for (std::uint32_t i = 0; i < extension_count; ++i)
         extensions.push_back(required[i]);
-    setup_vulkan(extensions);
+    gpu::create_context(extensions);
     VkSurfaceKHR surface{};
-    vk_check(glfwCreateWindowSurface(instance, window, nullptr, &surface));
-    int width{}, height{};
+    gpu::check(
+        glfwCreateWindowSurface(gpu::instance(), window, nullptr, &surface));
+    int width{};
+    int height{};
     glfwGetFramebufferSize(window, &width, &height);
-    setup_window(surface, width, height);
+    gpu::create_window(surface, width, height);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGui::GetIO().IniFilename = nullptr;
     ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    const char* preferred_font = "C:\\Windows\\Fonts\\msyh.ttc";
-    if (!std::filesystem::exists(preferred_font))
-        preferred_font = "C:\\Windows\\Fonts\\segoeui.ttf";
-    io.Fonts->AddFontFromFileTTF(
-        preferred_font, 15.F, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-    apply_editor_style();
+    const theme::Fonts fonts = theme::load_fonts(io);
+    io.FontDefault = fonts.regular;
+    theme::apply_style();
+
     ImGui_ImplGlfw_InitForVulkan(window, true);
     ImGui_ImplVulkan_InitInfo init{};
-    init.Instance = instance;
-    init.PhysicalDevice = physical_device;
-    init.Device = device;
-    init.QueueFamily = queue_family;
-    init.Queue = queue;
-    init.DescriptorPool = descriptor_pool;
-    init.RenderPass = window_data.RenderPass;
-    init.MinImageCount = min_images;
-    init.ImageCount = window_data.ImageCount;
+    init.Instance = gpu::instance();
+    init.PhysicalDevice = gpu::physical_device();
+    init.Device = gpu::device();
+    init.QueueFamily = gpu::queue_family();
+    init.Queue = gpu::queue();
+    init.DescriptorPool = gpu::descriptor_pool();
+    init.RenderPass = gpu::window().RenderPass;
+    init.MinImageCount = gpu::k_min_images;
+    init.ImageCount = gpu::window().ImageCount;
     init.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-    init.CheckVkResultFn = vk_check;
+    init.CheckVkResultFn = gpu::check;
     ImGui_ImplVulkan_Init(&init);
 
-    std::array<char, 1024> images{"D:\\ScanVideo\\ori_img\\images"};
-    std::array<char, 1024> output{"D:\\ScanVideo\\ori_img\\aetherscan_gui\\object.ply"};
-    if (interop_smoke)
-        std::snprintf(
-            output.data(), output.size(),
-            "D:\\ProgramCode\\C++\\3dgs\\AetherScan\\artifacts\\cuda_vulkan_smoke\\scene.ply");
-    int iterations = interop_smoke ? 100 : 30'000;
-    int preview_interval = 50;
-    bool scene_mode = false;
-    Job job;
-    ExternalPreview preview;
-    preview.create(1920, 1920);
-    bool smoke_started = false;
-    bool smoke_success = false;
+    refresh_artifacts(app);
+    app.preview.create(k_preview_extent, k_preview_extent);
+    if (app.has_sparse)
+        request_scene_load(
+            app, app.layout.sparse_ply, app.layout.sparse_poses,
+            "Sparse cloud");
+
     const auto smoke_begin = std::chrono::steady_clock::now();
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
-        job.poll();
-        preview.poll();
-        if (interop_smoke && smoke_started && !job.running &&
-            external_consumed_value >= 3) {
-            smoke_success = job.exit_code == 0;
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
-        } else if (interop_smoke &&
-                   std::chrono::steady_clock::now() - smoke_begin >
-                       std::chrono::seconds(60)) {
-            job.stop();
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        app.job.poll();
+        app.preview.poll();
+        app.log.poll(app.fresh_lines);
+        for (const std::string& line : app.fresh_lines)
+            app.monitor.consume(line);
+        if (app.job.consume_completion()) on_job_finished(app);
+        poll_scene_load(app);
+
+        if (app.smoke_mode) {
+            if (!app.smoke_started && !app.job.running()) {
+                app.smoke_started = true;
+                start_train(app, true);
+                glfwIconifyWindow(window);
+            } else if (
+                app.smoke_started && !app.job.running() &&
+                gpu::consumed_timeline_value() >= 3) {
+                app.smoke_success = app.job.exit_code() == 0;
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            } else if (
+                std::chrono::steady_clock::now() - smoke_begin >
+                std::chrono::seconds(60)) {
+                app.job.stop();
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
         }
+
         glfwGetFramebufferSize(window, &width, &height);
         if (width > 0 && height > 0 &&
-            (rebuild_swapchain || window_data.Width != width ||
-             window_data.Height != height)) {
-            ImGui_ImplVulkan_SetMinImageCount(min_images);
-            ImGui_ImplVulkanH_CreateOrResizeWindow(
-                instance, physical_device, device, &window_data, queue_family,
-                nullptr, width, height, min_images);
-            window_data.FrameIndex = 0;
-            rebuild_swapchain = false;
-        }
+            (gpu::swapchain_needs_rebuild() || gpu::window().Width != width ||
+             gpu::window().Height != height))
+            gpu::resize_window(width, height);
         if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
-            preview.consume_without_present();
+            app.preview.consume_without_present();
             ImGui_ImplGlfw_Sleep(10);
             continue;
         }
+
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
         ImGui::SetNextWindowPos({0, 0});
-        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin(
             "AetherScan", nullptr,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
-                ImGuiWindowFlags_NoScrollWithMouse);
+                ImGuiWindowFlags_NoScrollWithMouse |
+                ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        iterations = std::max(iterations, 1);
-        preview_interval = std::max(preview_interval, 1);
-        const std::filesystem::path output_path(output.data());
-        const auto job_dir = output_path.parent_path();
-        const auto log_path = job_dir / "editor_reconstruction.log";
-        const std::string log = tail(log_path, 32 * 1024);
-        const auto [current_iteration, total_iterations] = parse_iteration(log);
-        const float progress = total_iterations > 0
-            ? std::clamp(
-                  static_cast<float>(current_iteration) / total_iterations,
-                  0.F, 1.F)
-            : 0.F;
-        bool start_requested = interop_smoke && !smoke_started;
+        app.settings.iterations = std::max(app.settings.iterations, 1);
+        app.settings.preview_interval =
+            std::max(app.settings.preview_interval, 1);
+        app.settings.max_features = std::max(app.settings.max_features, 512);
+        app.settings.geometry_from_iter =
+            std::max(app.settings.geometry_from_iter, 0);
 
-        // Menubar: deliberately restrained, matching the reference editor.
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.095F, 0.095F, 0.105F, 1.F));
-        ImGui::BeginChild("##menubar", {0, 31.F}, false,
-                          ImGuiWindowFlags_NoScrollbar);
-        ImGui::SetCursorPos({12.F, 6.F});
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.31F, 0.76F, 0.97F, 1.F));
-        ImGui::TextUnformatted("AETHER");
-        ImGui::PopStyleColor();
-        ImGui::SameLine(67.F);
-        ImGui::TextUnformatted("SCAN");
-        ImGui::SameLine(116.F);
-        ImGui::TextDisabled("File");
-        ImGui::SameLine(); ImGui::TextDisabled("Edit");
-        ImGui::SameLine(); ImGui::TextDisabled("View");
-        ImGui::SameLine(); ImGui::TextDisabled("Reconstruction");
-        ImGui::SameLine(); ImGui::TextDisabled("Help");
-        const std::string project_name = output_path.stem().empty()
-            ? "Untitled Project" : output_path.stem().string();
-        const float project_width = ImGui::CalcTextSize(project_name.c_str()).x;
-        ImGui::SameLine(ImGui::GetWindowWidth() - project_width - 15.F);
-        ImGui::TextDisabled("%s", project_name.c_str());
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
+        draw_title_bar(app);
+        Action action = draw_toolbar(app);
 
-        // Main toolbar.
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.145F, 0.145F, 0.155F, 1.F));
-        ImGui::BeginChild("##toolbar", {0, 47.F}, false,
-                          ImGuiWindowFlags_NoScrollbar);
-        ImGui::SetCursorPos({10.F, 8.F});
-        ImGui::Button("+  Add Images", {112.F, 31.F});
-        ImGui::SameLine();
-        ImGui::Button("Align Photos", {112.F, 31.F});
-        ImGui::SameLine();
-        ImGui::PushStyleColor(
-            ImGuiCol_Button,
-            job.running ? ImVec4(0.20F, 0.20F, 0.22F, 1.F)
-                        : ImVec4(0.02F, 0.38F, 0.62F, 1.F));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                              ImVec4(0.03F, 0.47F, 0.75F, 1.F));
-        if (ImGui::Button(
-                job.running ? "Training..." : "Train 3DGS",
-                {112.F, 31.F}) && !job.running && !interop_smoke)
-            start_requested = true;
-        ImGui::PopStyleColor(2);
-        ImGui::SameLine();
-        ImGui::Button("Build Mesh", {104.F, 31.F});
-        ImGui::SameLine();
-        ImGui::Button("Export", {82.F, 31.F});
-        if (job.running) {
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.96F, 0.38F, 0.35F, 1.F));
-            if (ImGui::Button("Stop", {70.F, 31.F})) job.stop();
-            ImGui::PopStyleColor();
-        }
-        const char* gpu_text = "CUDA / Vulkan  |  External Memory";
-        const float gpu_width = ImGui::CalcTextSize(gpu_text).x;
-        ImGui::SameLine(ImGui::GetWindowWidth() - gpu_width - 16.F);
-        ImGui::SetCursorPosY(15.F);
-        ImGui::TextDisabled("%s", gpu_text);
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
+        constexpr float status_height = 34.F;
+        constexpr float left_width = 272.F;
+        constexpr float right_width = 336.F;
+        constexpr float console_height = 178.F;
+        const float workspace_height =
+            ImGui::GetContentRegionAvail().y - status_height;
 
-        const float status_height = 25.F;
-        const float content_height = ImGui::GetContentRegionAvail().y - status_height;
-        const float left_width = 255.F;
-        const float right_width = 310.F;
-        const float console_height = 190.F;
-
-        ImGui::BeginChild("##workspace", {0, content_height}, false,
-                          ImGuiWindowFlags_NoScrollbar);
-
-        // Left: scene hierarchy and assets.
-        ImGui::BeginChild("ScenePanel", {left_width, 0}, true);
-        panel_title("SCENE");
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {7.F, 8.F});
-        ImGui::SetCursorPosX(11.F);
-        if (ImGui::TreeNodeEx(
-                "Capture 01", ImGuiTreeNodeFlags_DefaultOpen |
-                                  ImGuiTreeNodeFlags_SpanAvailWidth)) {
-            ImGui::TreeNodeEx(
-                "Input Images", ImGuiTreeNodeFlags_Leaf |
-                                    ImGuiTreeNodeFlags_NoTreePushOnOpen |
-                                    ImGuiTreeNodeFlags_SpanAvailWidth);
-            ImGui::TreeNodeEx(
-                "Camera Poses", ImGuiTreeNodeFlags_Leaf |
-                                    ImGuiTreeNodeFlags_NoTreePushOnOpen |
-                                    ImGuiTreeNodeFlags_SpanAvailWidth);
-            ImGui::TreeNodeEx(
-                "Sparse Point Cloud", ImGuiTreeNodeFlags_Leaf |
-                                         ImGuiTreeNodeFlags_NoTreePushOnOpen |
-                                         ImGuiTreeNodeFlags_SpanAvailWidth);
-            ImGui::TreeNodeEx(
-                "Gaussian Model", ImGuiTreeNodeFlags_Leaf |
-                                      ImGuiTreeNodeFlags_NoTreePushOnOpen |
-                                      ImGuiTreeNodeFlags_SpanAvailWidth |
-                                      ImGuiTreeNodeFlags_Selected);
-            ImGui::TreeNodeEx(
-                "Reconstructed Mesh", ImGuiTreeNodeFlags_Leaf |
-                                         ImGuiTreeNodeFlags_NoTreePushOnOpen |
-                                         ImGuiTreeNodeFlags_SpanAvailWidth);
-            ImGui::TreePop();
-        }
-        ImGui::PopStyleVar();
-        ImGui::Dummy({0, 6.F});
-        panel_title("PIPELINE");
-        const std::array<std::pair<const char*, const char*>, 4> stages{{
-            {"01", "Align cameras"}, {"02", "Sparse reconstruction"},
-            {"03", "ADCPlus training"}, {"04", "Mesh extraction"}}};
-        for (std::size_t i = 0; i < stages.size(); ++i) {
-            const bool active = job.running &&
-                ((i < 2 && log.find("sfm") != std::string::npos) ||
-                 (i == 2 && log.find("splat training") != std::string::npos) ||
-                 (i == 3 && log.find("mesh") != std::string::npos));
-            ImGui::SetCursorPosX(13.F);
-            status_dot(active);
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s", stages[i].first);
-            ImGui::SameLine();
-            ImGui::TextUnformatted(stages[i].second);
-        }
-        ImGui::Dummy({0, 8.F});
-        panel_title("ASSETS");
-        ImGui::SetCursorPosX(13.F);
-        ImGui::TextDisabled("IMAGES");
-        ImGui::Spacing();
-        ImGui::SetCursorPosX(13.F);
-        ImGui::TextWrapped("%s", images.data());
+        ImGui::BeginChild(
+            "##workspace", {0, workspace_height}, false,
+            ImGuiWindowFlags_NoScrollbar);
+        draw_left_panel(app, left_width);
+        ImGui::SameLine(0.F, 4.F);
+        const float centre_width =
+            ImGui::GetContentRegionAvail().x - right_width - 4.F;
+        draw_centre_column(app, centre_width, console_height);
+        ImGui::SameLine(0.F, 4.F);
+        const Action inspector_action = draw_inspector(app, right_width);
+        if (action == Action::none) action = inspector_action;
         ImGui::EndChild();
 
-        ImGui::SameLine(0, 3.F);
+        draw_status_bar(app, status_height);
 
-        // Centre: viewport plus console.
-        const float center_width = ImGui::GetContentRegionAvail().x - right_width - 3.F;
-        ImGui::BeginChild("CenterStack", {center_width, 0}, false,
-                          ImGuiWindowFlags_NoScrollbar);
-        const float viewport_height = ImGui::GetContentRegionAvail().y - console_height - 3.F;
-        ImGui::BeginChild("Viewport", {0, viewport_height}, true,
-                          ImGuiWindowFlags_NoScrollbar);
-        panel_title("SCENE VIEW", job.running ? "LIVE" : "READY");
-        const ImVec2 view_origin = ImGui::GetCursorScreenPos();
-        const ImVec2 available = ImGui::GetContentRegionAvail();
-        ImGui::GetWindowDrawList()->AddRectFilled(
-            view_origin, {view_origin.x + available.x, view_origin.y + available.y},
-            IM_COL32(8, 9, 12, 255));
-        const bool has_rendered_preview =
-            preview.display.descriptor && (job.running || current_iteration > 0);
-        if (!has_rendered_preview) {
-            ImDrawList* draw = ImGui::GetWindowDrawList();
-            const ImVec2 view_max{view_origin.x + available.x,
-                                  view_origin.y + available.y};
-            const float horizon_y = view_origin.y + available.y * 0.43F;
-            const ImVec2 vanishing{view_origin.x + available.x * 0.5F,
-                                   horizon_y};
-            draw->PushClipRect(view_origin, view_max, true);
-
-            // Subtle perspective construction grid for the empty scene.
-            draw->AddLine({view_origin.x, horizon_y},
-                          {view_max.x, horizon_y},
-                          IM_COL32(32, 36, 43, 255));
-            constexpr int ray_count = 18;
-            for (int i = -ray_count; i <= ray_count; ++i) {
-                const float x = vanishing.x +
-                                i * available.x / static_cast<float>(ray_count);
-                const ImU32 colour = i == 0 ? IM_COL32(58, 67, 78, 210)
-                                            : IM_COL32(34, 38, 45, 190);
-                draw->AddLine(vanishing, {x, view_max.y}, colour);
-            }
-            for (int i = 0; i < 18; ++i) {
-                const float t = static_cast<float>(i) / 17.F;
-                const float eased = t * t;
-                const float y = horizon_y + eased * (view_max.y - horizon_y);
-                draw->AddLine({view_origin.x, y}, {view_max.x, y},
-                              IM_COL32(34, 38, 45, 190));
-            }
-
-            // World origin and compact orientation gizmo.
-            draw->AddLine({vanishing.x, view_max.y}, vanishing,
-                          IM_COL32(55, 126, 184, 230), 1.5F);
-            draw->AddCircleFilled(vanishing, 3.F,
-                                  IM_COL32(78, 170, 227, 255));
-            const ImVec2 gizmo{view_max.x - 54.F, view_origin.y + 50.F};
-            draw->AddCircleFilled(gizmo, 23.F, IM_COL32(18, 20, 25, 220));
-            draw->AddCircle(gizmo, 23.F, IM_COL32(55, 59, 68, 255));
-            draw->AddLine(gizmo, {gizmo.x + 16.F, gizmo.y},
-                          IM_COL32(226, 82, 82, 255), 2.F);
-            draw->AddLine(gizmo, {gizmo.x, gizmo.y - 16.F},
-                          IM_COL32(86, 202, 121, 255), 2.F);
-            draw->AddLine(gizmo, {gizmo.x - 10.F, gizmo.y + 11.F},
-                          IM_COL32(79, 154, 235, 255), 2.F);
-            draw->AddText({gizmo.x + 18.F, gizmo.y - 7.F},
-                          IM_COL32(226, 82, 82, 255), "X");
-            draw->AddText({gizmo.x - 4.F, gizmo.y - 31.F},
-                          IM_COL32(86, 202, 121, 255), "Y");
-            draw->PopClipRect();
-        } else {
-            const float scale = std::min(
-                available.x / preview.width, available.y / preview.height);
-            const ImVec2 size{preview.width * scale, preview.height * scale};
-            ImGui::SetCursorPosX(
-                ImGui::GetCursorPosX() + (available.x - size.x) * 0.5F);
-            ImGui::SetCursorPosY(
-                ImGui::GetCursorPosY() + (available.y - size.y) * 0.5F);
-            ImGui::Image(
-                reinterpret_cast<ImTextureID>(preview.display.descriptor), size);
+        switch (action) {
+            case Action::align:
+                if (!app.smoke_mode) start_align(app);
+                break;
+            case Action::train:
+                if (!app.smoke_mode) start_train(app, false);
+                break;
+            case Action::stop:
+                app.job.stop();
+                set_message(app, "Stopping...", theme::warning);
+                break;
+            case Action::reveal: reveal_in_explorer(app.layout.root); break;
+            case Action::frame_scene: app.camera.frame(app.scene); break;
+            case Action::none: break;
         }
-        const ImVec2 overlay_min{view_origin.x + 14.F, view_origin.y + 14.F};
-        const ImVec2 overlay_max{view_origin.x + 225.F, view_origin.y + 47.F};
-        ImGui::GetWindowDrawList()->AddRectFilled(
-            overlay_min, overlay_max, IM_COL32(20, 20, 23, 220), 4.F);
-        ImGui::GetWindowDrawList()->AddCircleFilled(
-            {overlay_min.x + 16.F, overlay_min.y + 16.F}, 4.F,
-            job.running ? IM_COL32(69, 204, 120, 255)
-                        : IM_COL32(96, 98, 104, 255));
-        ImGui::GetWindowDrawList()->AddText(
-            {overlay_min.x + 29.F, overlay_min.y + 8.F},
-            IM_COL32(205, 207, 212, 255),
-            job.running ? "LIVE TRAINING PREVIEW" : "WAITING FOR RECONSTRUCTION");
-        ImGui::EndChild();
 
-        ImGui::BeginChild("ConsolePanel", {0, 0}, true);
-        panel_title("CONSOLE", job.running ? "FOLLOWING OUTPUT" : nullptr);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.045F, 0.045F, 0.05F, 1.F));
-        ImGui::BeginChild("Log", {0, 0}, false,
-                          ImGuiWindowFlags_HorizontalScrollbar);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.68F, 0.70F, 0.73F, 1.F));
-        ImGui::TextUnformatted(log.c_str());
-        ImGui::PopStyleColor();
-        if (job.running) ImGui::SetScrollHereY(1.F);
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::EndChild();
-        ImGui::EndChild();
-
-        ImGui::SameLine(0, 3.F);
-
-        // Right: inspector/settings.
-        ImGui::BeginChild("Inspector", {right_width, 0}, true);
-        panel_title("INSPECTOR");
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.16F, 0.16F, 0.175F, 1.F));
-        if (ImGui::CollapsingHeader(
-                "Project", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Spacing();
-            ImGui::TextDisabled("Image source");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputText("##images", images.data(), images.size());
-            ImGui::TextDisabled("Output model");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputText("##output", output.data(), output.size());
-            ImGui::Spacing();
-        }
-        if (ImGui::CollapsingHeader(
-                "Reconstruction", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Spacing();
-            ImGui::TextDisabled("Capture mode");
-            ImGui::SetNextItemWidth(-1.F);
-            const char* modes[] = {"Object", "Scene"};
-            int mode = scene_mode ? 1 : 0;
-            if (ImGui::Combo("##mode", &mode, modes, 2)) scene_mode = mode == 1;
-            ImGui::TextDisabled("ADCPlus iterations");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputInt("##iterations", &iterations, 1000, 5000);
-            ImGui::TextDisabled("Live preview cadence");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputInt("##cadence", &preview_interval, 10, 50);
-            ImGui::Spacing();
-        }
-        if (ImGui::CollapsingHeader(
-                "Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Spacing();
-            ImGui::TextDisabled("Training backend");
-            ImGui::SameLine(ImGui::GetWindowWidth() - 76.F);
-            ImGui::TextColored(
-                ImVec4(0.31F, 0.76F, 0.97F, 1.F), "CUDA");
-            ImGui::TextDisabled("Preview transport");
-            ImGui::TextWrapped("Vulkan external memory / timeline semaphore");
-            ImGui::TextDisabled("Shared texture");
-            ImGui::SameLine(ImGui::GetWindowWidth() - 104.F);
-            ImGui::Text("%u x %u", preview.width, preview.height);
-            ImGui::Spacing();
-        }
-        if (job.running || current_iteration > 0) {
-            if (ImGui::CollapsingHeader(
-                    "Training status", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::Spacing();
-                ImGui::Text("Iteration  %d / %d", current_iteration,
-                            total_iterations);
-                ImGui::PushStyleColor(
-                    ImGuiCol_PlotHistogram,
-                    ImVec4(0.0F, 0.47F, 0.83F, 1.F));
-                ImGui::ProgressBar(progress, {-1.F, 7.F}, "");
-                ImGui::PopStyleColor();
-                ImGui::TextDisabled(
-                    "Timeline value  %llu",
-                    static_cast<unsigned long long>(external_consumed_value));
-            }
-        }
-        ImGui::Dummy({0, 12.F});
-        if (!job.running) {
-            ImGui::PushStyleColor(ImGuiCol_Button,
-                                  ImVec4(0.02F, 0.38F, 0.62F, 1.F));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                                  ImVec4(0.03F, 0.48F, 0.76F, 1.F));
-            if (!interop_smoke && ImGui::Button(
-                    "Start Reconstruction", {-1.F, 39.F}))
-                start_requested = true;
-            ImGui::PopStyleColor(2);
-        } else if (ImGui::Button("Stop Reconstruction", {-1.F, 39.F})) {
-            job.stop();
-        }
-        ImGui::PopStyleColor();
-        ImGui::EndChild();
-        ImGui::EndChild();
-
-        // Status bar.
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.035F, 0.28F, 0.44F, 1.F));
-        ImGui::BeginChild("##status", {0, status_height}, false,
-                          ImGuiWindowFlags_NoScrollbar);
-        ImGui::SetCursorPos({10.F, 5.F});
-        ImGui::Text("%s", job.running ? "Reconstruction running" : "Ready");
-        ImGui::SameLine();
-        ImGui::TextDisabled("  |  ");
-        ImGui::SameLine();
-        ImGui::Text("%s", scene_mode ? "Scene capture" : "Object capture");
-        const char* status_right = "AetherScan 0.2  |  GPU accelerated";
-        ImGui::SameLine(ImGui::GetWindowWidth() -
-                        ImGui::CalcTextSize(status_right).x - 12.F);
-        ImGui::TextUnformatted(status_right);
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-
-        if (!job.running && start_requested) {
-            smoke_started = true;
-            std::filesystem::create_directories(job_dir);
-            if (!preview.memory_handle || !preview.semaphore_handle)
-                preview.create(1920, 1920);
-            std::ostringstream command;
-            command << quote(AETHERSCAN_CLI_PATH) << " --images "
-                    << quote(images.data()) << " --output "
-                    << quote(output_path);
-            if (interop_smoke)
-                command
-                    << " --splat-dataset "
-                    << quote("D:\\ScanVideo\\ori_img")
-                    << " --splat-format colmap --splat-use-mask false";
-            else
-                command << " --capture-mode "
-                        << (scene_mode ? "scene" : "object");
-            command << " --splat --splat-strategy adc_plus"
-                    << " --splat-iterations " << iterations
-                    << " --splat-preview-interval " << preview_interval
-                    << " --splat-preview-vk-memory-handle "
-                    << reinterpret_cast<std::uintptr_t>(
-                           preview.memory_handle)
-                    << " --splat-preview-vk-semaphore-handle "
-                    << reinterpret_cast<std::uintptr_t>(
-                           preview.semaphore_handle)
-                    << " --splat-preview-vk-allocation-size "
-                    << preview.allocation_size
-                    << " --splat-preview-vk-width " << preview.width
-                    << " --splat-preview-vk-height " << preview.height;
-            command << " --splat-preview-vk-device-luid "
-                    << physical_device_luid
-                    << " --splat-preview-vk-device-node-mask "
-                    << physical_device_node_mask;
-            job.start(command.str(), log_path);
-            preview.close_export_handles();
-            if (interop_smoke) glfwIconifyWindow(window);
-        }
         ImGui::End();
-
         ImGui::Render();
-        if (ImGui::GetDrawData()->DisplaySize.x > 0 &&
-            ImGui::GetDrawData()->DisplaySize.y > 0) {
-            window_data.ClearValue.color = {{0.025F, 0.03F, 0.04F, 1.F}};
-            render_frame(ImGui::GetDrawData());
-        }
+        ImDrawData* draw_data = ImGui::GetDrawData();
+        if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
+            gpu::present(draw_data, theme::surface_0);
     }
 
-    if (job.running) job.stop();
-    vkDeviceWaitIdle(device);
-    preview.reset();
+    if (app.job.running()) app.job.stop();
+    vkDeviceWaitIdle(gpu::device());
+    app.preview.reset();
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
-    ImGui_ImplVulkanH_DestroyWindow(
-        instance, device, &window_data, nullptr);
-    vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
-    vkDestroyDevice(device, nullptr);
-    vkDestroyInstance(instance, nullptr);
+    gpu::destroy_context();
     glfwDestroyWindow(window);
     glfwTerminate();
-    return interop_smoke && !smoke_success ? 4 : 0;
+    return app.smoke_mode && !app.smoke_success ? 4 : 0;
 }

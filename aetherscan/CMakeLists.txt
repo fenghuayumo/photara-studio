@@ -630,10 +630,22 @@ if(AETHERSCAN_ENABLE_FEATURES)
                 Vulkan::Vulkan glfw)
             target_compile_features(aetherscan_imgui PUBLIC cxx_std_20)
 
+            set(AETHERSCAN_EDITOR_DIR
+                "${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor")
             add_executable(aetherscan_editor
-                ${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor/main.cpp)
+                ${AETHERSCAN_EDITOR_DIR}/main.cpp
+                ${AETHERSCAN_EDITOR_DIR}/pipeline.cpp
+                ${AETHERSCAN_EDITOR_DIR}/sparse_view.cpp
+                ${AETHERSCAN_EDITOR_DIR}/theme.cpp
+                ${AETHERSCAN_EDITOR_DIR}/vulkan_backend.cpp)
+            target_include_directories(aetherscan_editor PRIVATE
+                ${AETHERSCAN_EDITOR_DIR})
             target_link_libraries(aetherscan_editor PRIVATE
                 aetherscan_imgui AetherScan::Features Vulkan::Vulkan glfw)
+            if(WIN32)
+                # Native folder picker (IFileOpenDialog) and Explorer reveal.
+                target_link_libraries(aetherscan_editor PRIVATE ole32 shell32)
+            endif()
             target_compile_features(aetherscan_editor PRIVATE cxx_std_20)
             target_compile_definitions(aetherscan_editor PRIVATE
                 AETHERSCAN_CLI_PATH="$<TARGET_FILE:aetherscan>")
