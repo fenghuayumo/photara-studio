@@ -90,6 +90,9 @@ struct ReconstructCli {
     std::filesystem::path splat_model;
     unsigned splat_iterations{10'000};
     unsigned splat_preview_interval{0};
+    unsigned splat_preview_view{0};
+    std::filesystem::path splat_preview_view_file;
+    std::filesystem::path splat_preview_camera_file;
     std::filesystem::path splat_preview_dir;
     std::uint64_t splat_preview_vk_memory_handle{};
     std::uint64_t splat_preview_vk_semaphore_handle{};
@@ -113,7 +116,7 @@ struct ReconstructCli {
     float splat_match_alpha_weight{0.25F};
     float splat_ssim_weight{0.2F};
     float splat_depth_normal_weight{0.05F};
-    bool splat_normal_field{true};
+    bool splat_normal_field{false};
     float splat_normal_field_weight{0.05F};
     float splat_normal_field_depth_ratio{0.6F};
     unsigned splat_normal_field_from_iter{8'001};
@@ -276,7 +279,10 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-model PATH  load a trained splat PLY and skip optimization\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
-              << "  --splat-preview-interval N  emit the current training render every N steps (0 disables)\n"
+              << "  --splat-preview-interval N  emit a live preview every N steps (0 disables)\n"
+              << "  --splat-preview-view N  camera index for live preview (default 0, first frame)\n"
+              << "  --splat-preview-view-file PATH  optional file the editor updates to switch cameras\n"
+              << "  --splat-preview-camera-file PATH  optional orbit-camera sidecar (overrides view index)\n"
               << "  --splat-preview-dir PATH  editor preview PNG directory\n"
               << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
@@ -291,7 +297,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
               << "  --splat-ssim-weight W  structural loss blend (default 0.2)\n"
               << "  --splat-depth-normal-weight W  median-depth/normal consistency (default 0.05)\n"
-              << "  --splat-normal-field BOOL  learn GaussianWrapping normal features (default true)\n"
+              << "  --splat-normal-field BOOL  learn GaussianWrapping normal features (default false)\n"
               << "  --splat-normal-field-weight W  normal-field consistency weight (default 0.05)\n"
               << "  --splat-normal-field-depth-ratio R  median-depth alignment ratio (default 0.6)\n"
               << "  --splat-normal-field-from-iter N  start normal-field loss (default 8001)\n"
@@ -447,8 +453,17 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-iterations", "Splat optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
         ("splat-preview-interval",
-         "Emit the already-rendered training view every N iterations",
+         "Emit a live preview from a fixed camera every N iterations",
          cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-preview-view",
+         "Camera index for live preview (0 is the first captured frame)",
+         cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-preview-view-file",
+         "Sidecar file whose integer contents select the live preview camera",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-preview-camera-file",
+         "Sidecar file with an orbit-camera W2C pose for the live preview",
+         cxxopts::value<std::string>()->default_value(""))
         ("splat-preview-dir", "Directory for live training preview PNGs",
          cxxopts::value<std::string>()->default_value(""))
         ("splat-preview-vk-memory-handle",
@@ -510,7 +525,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.05"))
         ("splat-normal-field",
          "Learn GaussianWrapping four-channel normal-field features",
-         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-normal-field-weight", "Normal-field consistency loss weight",
          cxxopts::value<float>()->default_value("0.05"))
         ("splat-normal-field-depth-ratio",
@@ -761,6 +776,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_iterations = result["splat-iterations"].as<unsigned>();
     cli.splat_preview_interval =
         result["splat-preview-interval"].as<unsigned>();
+    cli.splat_preview_view = result["splat-preview-view"].as<unsigned>();
+    const std::string splat_preview_view_file_text =
+        result["splat-preview-view-file"].as<std::string>();
+    if (!splat_preview_view_file_text.empty())
+        cli.splat_preview_view_file = utf8_to_path(splat_preview_view_file_text);
+    const std::string splat_preview_camera_file_text =
+        result["splat-preview-camera-file"].as<std::string>();
+    if (!splat_preview_camera_file_text.empty())
+        cli.splat_preview_camera_file =
+            utf8_to_path(splat_preview_camera_file_text);
     const std::string splat_preview_dir_text =
         result["splat-preview-dir"].as<std::string>();
     if (!splat_preview_dir_text.empty())
@@ -1697,6 +1722,9 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     aetherscan::splat::TrainingOptions options;
     options.iterations = cli.splat_iterations;
     options.preview_interval = cli.splat_preview_interval;
+    options.preview_view_index = cli.splat_preview_view;
+    options.preview_view_file = cli.splat_preview_view_file;
+    options.preview_camera_file = cli.splat_preview_camera_file;
     options.max_gaussians = static_cast<std::size_t>(
         std::min<std::uint64_t>(
             cli.splat_max_gaussians,

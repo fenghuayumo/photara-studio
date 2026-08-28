@@ -619,6 +619,8 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.align_log = layout.root / "editor_align.log";
     layout.train_log = layout.root / "editor_train.log";
     layout.export_log = layout.root / "editor_export.log";
+    layout.preview_view_file = layout.root / "editor_preview_view";
+    layout.preview_camera_file = layout.root / "editor_preview_camera";
     return layout;
 }
 
@@ -661,6 +663,11 @@ std::string build_train_command(
             << " --splat-strategy " << strategy_flag(settings.strategy)
             << " --splat-iterations " << settings.iterations
             << " --splat-preview-interval " << settings.preview_interval
+            << " --splat-preview-view 0"
+            << " --splat-preview-view-file "
+            << quote(layout.preview_view_file)
+            << " --splat-preview-camera-file "
+            << quote(layout.preview_camera_file)
             << " --splat-max-resolution " << settings.max_resolution
             << " --splat-progressive-resolution="
             << (settings.progressive_resolution ? "true" : "false")
@@ -708,6 +715,13 @@ std::string build_export_sfm_command(
     if (std::filesystem::exists(layout.cache, exists_error))
         command << " --cache-dir " << quote(layout.cache);
     return command.str();
+}
+
+void write_preview_view_index(const ProjectLayout& layout, const unsigned index) {
+    if (layout.preview_view_file.empty()) return;
+    std::ofstream output(layout.preview_view_file, std::ios::trunc);
+    if (!output) return;
+    output << index << '\n';
 }
 
 std::string format_duration(const double seconds) {

@@ -190,10 +190,14 @@ struct TrainingOptions {
     unsigned evaluation_split_every{0};
     // Iterations at which the caller may render fixed-view parity snapshots.
     std::vector<unsigned> evaluation_iterations;
-    // Emit the already-rasterized training view through PreviewCallback at
-    // this cadence. Zero disables previews. This avoids cloning the complete
-    // Gaussian model or launching an additional render just for the editor.
     unsigned preview_interval{0};
+    // Live preview camera. 0 is the first captured frame. An optional sidecar
+    // file lets the editor change this while training without restarting.
+    unsigned preview_view_index{0};
+    std::filesystem::path preview_view_file;
+    // Optional orbit-camera sidecar written by the editor (W2C + intrinsics).
+    // When present and readable it overrides preview_view_index.
+    std::filesystem::path preview_camera_file;
 };
 
 }  // namespace aetherscan::splat

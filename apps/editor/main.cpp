@@ -27,6 +27,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -78,6 +79,13 @@ struct App {
     bool has_model{};
     bool has_mesh{};
     ViewportTab tab{ViewportTab::sparse};
+    unsigned preview_view{};
+    std::uint64_t preview_camera_revision{};
+    bool preview_follow_view{true};
+    OrbitCamera last_preview_orbit{};
+    bool has_last_preview_orbit{};
+    std::uint32_t preview_raster_width{k_preview_extent};
+    std::uint32_t preview_raster_height{k_preview_extent};
 
     std::string message;
     ImVec4 message_colour{theme::text_muted};
@@ -268,6 +276,80 @@ void request_scene_load(
         [cloud, poses] { return load_sparse_scene(cloud, poses); });
 }
 
+void ensure_sparse_loaded(App& app) {
+    if (!app.has_sparse || app.scene.has_points() || app.loading_scene) return;
+    request_scene_load(
+        app, app.layout.sparse_ply, app.layout.sparse_poses, "Sparse cloud");
+}
+
+const ViewPose* first_registered_view(const SparseScene& scene) {
+    for (const ViewPose& pose : scene.views) {
+        if (pose.registered) return &pose;
+    }
+    return scene.views.empty() ? nullptr : &scene.views.front();
+}
+
+bool orbit_pose_changed(const OrbitCamera& a, const OrbitCamera& b) {
+    const auto differs = [](const float left, const float right) {
+        return std::abs(left - right) > 1e-5F;
+    };
+    return differs(a.yaw, b.yaw) || differs(a.pitch, b.pitch) ||
+           differs(a.distance, b.distance) || differs(a.fov_degrees, b.fov_degrees) ||
+           differs(a.target.x, b.target.x) || differs(a.target.y, b.target.y) ||
+           differs(a.target.z, b.target.z);
+}
+
+void fit_preview_raster(
+    const float viewport_w, const float viewport_h, std::uint32_t& width,
+    std::uint32_t& height) {
+    const float view_w = std::max(1.F, viewport_w);
+    const float view_h = std::max(1.F, viewport_h);
+    if (view_w >= view_h) {
+        width = k_preview_extent;
+        height = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(std::lround(
+                   static_cast<double>(k_preview_extent) * view_h / view_w)));
+    } else {
+        height = k_preview_extent;
+        width = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(std::lround(
+                   static_cast<double>(k_preview_extent) * view_w / view_h)));
+    }
+}
+
+void sync_live_preview_camera(
+    App& app, const bool force, std::uint32_t width, std::uint32_t height) {
+    const bool live =
+        app.job.running() && app.active_job == JobKind::train;
+    if (!force && !live) return;
+    if (app.layout.preview_camera_file.empty()) return;
+    width = std::max<std::uint32_t>(1, width);
+    height = std::max<std::uint32_t>(1, height);
+    if (!force && app.has_last_preview_orbit &&
+        !orbit_pose_changed(app.camera, app.last_preview_orbit) &&
+        width == app.preview_raster_width && height == app.preview_raster_height)
+        return;
+    ++app.preview_camera_revision;
+    app.preview_raster_width = width;
+    app.preview_raster_height = height;
+    const SplatPreviewCamera preview =
+        make_preview_camera(app.camera, width, height);
+    write_preview_camera_file(
+        app.layout.preview_camera_file, preview, app.preview_camera_revision);
+    app.last_preview_orbit = app.camera;
+    app.has_last_preview_orbit = true;
+}
+
+void snap_preview_to_index(App& app, const unsigned index) {
+    app.preview_view = index;
+    app.preview_follow_view = true;
+    write_preview_view_index(app.layout, app.preview_view);
+    if (index < app.scene.views.size())
+        snap_orbit_to_view(app.camera, app.scene.views[index]);
+    sync_live_preview_camera(
+        app, true, app.preview_raster_width, app.preview_raster_height);
+}
+
 void select_project_folder(App& app) {
     if (app.job.running() || app.loading_scene) return;
     if (!pick_folder(
@@ -356,8 +438,10 @@ void poll_scene_load(App& app) {
         return;
     }
     app.scene = std::move(loaded.scene);
-    app.camera.frame(app.scene);
-    app.tab = ViewportTab::sparse;
+    const bool live_train =
+        app.job.running() && app.active_job == JobKind::train;
+    if (!live_train) app.camera.frame(app.scene);
+    if (app.tab != ViewportTab::training) app.tab = ViewportTab::sparse;
     set_message(
         app,
         app.scene_source + ": " + format_count(app.scene.points.size()) +
@@ -476,6 +560,15 @@ void start_train(App& app, const bool smoke) {
     refresh_artifacts(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
+    app.preview_view = 0;
+    app.preview_follow_view = true;
+    load_view_poses(app.layout.sparse_poses, app.scene);
+    if (const ViewPose* pose = first_registered_view(app.scene))
+        snap_orbit_to_view(app.camera, *pose);
+    write_preview_view_index(app.layout, app.preview_view);
+    sync_live_preview_camera(
+        app, true, app.preview_raster_width, app.preview_raster_height);
+    ensure_sparse_loaded(app);
 
     // The trainer inherits the shared allocation, so the exported handles are
     // recreated per run: the timeline counter has to restart from zero.
@@ -504,6 +597,10 @@ void start_train(App& app, const bool smoke) {
             << " --splat --splat-strategy adc_plus --splat-iterations "
             << app.settings.iterations << " --splat-preview-interval "
             << app.settings.preview_interval
+            << " --splat-preview-view 0 --splat-preview-view-file \""
+            << app.layout.preview_view_file.string() << '"'
+            << " --splat-preview-camera-file \""
+            << app.layout.preview_camera_file.string() << '"'
             << " --splat-preview-vk-memory-handle " << handles.memory
             << " --splat-preview-vk-semaphore-handle " << handles.semaphore
             << " --splat-preview-vk-allocation-size " << handles.allocation_size
@@ -1046,12 +1143,17 @@ void draw_scene_panel(App& app) {
         leaf("Input Images", app.settings.images_dir[0] != '\0', false);
         leaf("Camera Poses", !app.scene.views.empty(), false);
         leaf(
-            "Sparse Point Cloud", app.scene.has_points(),
-            app.tab == ViewportTab::sparse && app.scene.has_points());
+            "Sparse Point Cloud", app.has_sparse || app.scene.has_points(),
+            app.tab == ViewportTab::sparse);
+        if (ImGui::IsItemClicked() && app.has_sparse) {
+            app.tab = ViewportTab::sparse;
+            ensure_sparse_loaded(app);
+        }
         leaf("OpenMVS Export", app.has_mvs, false);
         leaf(
             "Gaussian Model", app.has_model,
             app.tab == ViewportTab::training);
+        if (ImGui::IsItemClicked()) app.tab = ViewportTab::training;
         leaf("Reconstructed Mesh", app.has_mesh, false);
         ImGui::TreePop();
     }
@@ -1080,7 +1182,9 @@ void draw_scene_panel(App& app) {
                                                  : StepState::pending),
         app.scene.has_points()
             ? nullptr
-            : (app.has_sparse ? "Ready to load" : nullptr));
+            : (app.has_sparse
+                   ? (app.loading_scene ? "Loading" : "On disk")
+                   : nullptr));
     draw_step(
         "04", "Optimise Gaussians",
         training && stage != Stage::meshing
@@ -1152,6 +1256,7 @@ void draw_viewport_overlay(
 }
 
 void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
+    ensure_sparse_loaded(app);
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilledMultiColor(
         min, max, IM_COL32(9, 11, 16, 255), IM_COL32(9, 11, 16, 255),
@@ -1203,7 +1308,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
             {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
     } else if (!app.loading_scene) {
         const char* hint = app.has_sparse
-            ? "Load Sparse Cloud in the inspector"
+            ? "Reading sparse.ply..."
             : "Pick an image folder, then Align Photos";
         draw->AddText(
             {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_faint), hint);
@@ -1222,56 +1327,117 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     }
 }
 
+unsigned preview_camera_count(const App& app) {
+    if (!app.scene.views.empty())
+        return static_cast<unsigned>(app.scene.views.size());
+    return std::max(1U, app.preview_view + 1U);
+}
+
+void step_preview_view(App& app, const int delta) {
+    unsigned next = app.preview_view;
+    if (!app.scene.views.empty()) {
+        const int count = static_cast<int>(app.scene.views.size());
+        int wrapped = (static_cast<int>(app.preview_view) + delta) % count;
+        if (wrapped < 0) wrapped += count;
+        next = static_cast<unsigned>(wrapped);
+    } else {
+        next = static_cast<unsigned>(
+            std::max(0, static_cast<int>(app.preview_view) + delta));
+    }
+    if (next == app.preview_view && app.preview_follow_view) return;
+    snap_preview_to_index(app, next);
+}
+
+void handle_preview_view_input(App& app, const bool hovered) {
+    if (!hovered || ImGui::GetIO().WantTextInput) return;
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) return;
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
+        step_preview_view(app, -1);
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
+        step_preview_view(app, 1);
+}
+
 void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg));
 
+    ImGui::SetCursorScreenPos(min);
+    ImGui::InvisibleButton(
+        "##training_view",
+        {std::max(1.F, max.x - min.x), std::max(1.F, max.y - min.y)},
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
+            ImGuiButtonFlags_MouseButtonMiddle);
+    const bool hovered = ImGui::IsItemHovered();
+
     const bool training = app.job.running() && app.active_job == JobKind::train;
     const bool has_frame = app.preview.display.descriptor &&
                            gpu::consumed_timeline_value() > 0;
+    const unsigned view_count = preview_camera_count(app);
+    char camera_label[64];
+    if (!app.preview_follow_view || app.scene.views.empty())
+        std::snprintf(camera_label, sizeof(camera_label), "orbit camera");
+    else
+        std::snprintf(
+            camera_label, sizeof(camera_label), "camera %u / %u",
+            app.preview_view + 1, view_count);
+
+    const char* controls = training
+        ? "LMB orbit  |  MMB pan  |  RMB + WASD fly  |  arrows snap capture"
+        : "Resume Train 3DGS to move this camera";
+
     if (!has_frame) {
         draw_empty_viewport(
             draw, min, max,
             training ? "Waiting for the first rendered iteration..."
                      : "No live training preview",
-            training ? "Frames arrive over Vulkan external memory"
+            training ? "Orbit the view; the first frame uses this camera"
                      : "Run Train 3DGS to stream the optimiser output");
-        draw_viewport_overlay(
-            draw, min, training ? "TRAINING" : "IDLE",
-            training ? theme::warning : theme::inactive);
-        return;
+    } else {
+        draw->AddImage(
+            reinterpret_cast<ImTextureID>(app.preview.display.descriptor),
+            min, max);
     }
 
-    const ImVec2 available{max.x - min.x, max.y - min.y};
-    const float scale = std::min(
-        available.x / static_cast<float>(app.preview.width),
-        available.y / static_cast<float>(app.preview.height));
-    const ImVec2 size{
-        app.preview.width * scale, app.preview.height * scale};
-    const ImVec2 origin{
-        min.x + (available.x - size.x) * 0.5F,
-        min.y + (available.y - size.y) * 0.5F};
-    draw->AddImage(
-        reinterpret_cast<ImTextureID>(app.preview.display.descriptor), origin,
-        {origin.x + size.x, origin.y + size.y});
+    const bool gizmo_captures =
+        draw_viewport_gizmo(app.gizmo, app.camera, min, max);
+    update_orbit_camera(
+        app.camera, hovered && !gizmo_captures, app.scene.radius);
+    if (app.camera.interacting ||
+        (hovered && !gizmo_captures && ImGui::GetIO().MouseWheel != 0.F))
+        app.preview_follow_view = false;
+    handle_preview_view_input(app, hovered && !gizmo_captures);
+    std::uint32_t raster_w = app.preview_raster_width;
+    std::uint32_t raster_h = app.preview_raster_height;
+    fit_preview_raster(max.x - min.x, max.y - min.y, raster_w, raster_h);
+    sync_live_preview_camera(app, false, raster_w, raster_h);
 
     draw_viewport_overlay(
-        draw, min, training ? "LIVE TRAINING PREVIEW" : "LAST TRAINING FRAME",
-        training ? theme::success : theme::inactive);
+        draw, min,
+        has_frame ? (training ? "LIVE TRAINING PREVIEW" : "LAST TRAINING FRAME")
+                  : (training ? "TRAINING" : "IDLE"),
+        has_frame ? (training ? theme::success : theme::inactive)
+                  : (training ? theme::warning : theme::inactive));
 
     const TrainingStats& stats = app.monitor.training();
-    if (stats.valid) {
+    if (has_frame && stats.valid) {
         char readout[192];
         std::snprintf(
             readout, sizeof(readout),
-            "iter %u / %u  |  %s gaussians  |  loss %.4f  |  %.1f ms/step",
+            "iter %u / %u  |  %s gaussians  |  loss %.4f  |  %.1f ms/step  |  %s",
             stats.iteration, stats.total_iterations,
             format_count(stats.gaussians).c_str(), stats.loss,
-            stats.step_milliseconds);
+            stats.step_milliseconds, camera_label);
         draw->AddText(
-            {min.x + 16.F, max.y - 26.F}, theme::u32(theme::text_muted),
+            {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted),
             readout);
+    } else if (has_frame) {
+        draw->AddText(
+            {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted),
+            camera_label);
     }
+    draw->AddText(
+        {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
+        controls);
 }
 
 void draw_viewport_panel(App& app) {
@@ -1486,7 +1652,11 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox(
             "Coarse-to-fine resolution", &app.settings.progressive_resolution);
         ImGui::Checkbox("Foreground mask training", &app.settings.use_mask);
-        ImGui::Checkbox("Learn normal field", &app.settings.normal_field);
+        ImGui::Checkbox("Normal field", &app.settings.normal_field);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "GaussianWrapping's learned normal field.\n"
+                "Off (default) trains the GGGS path.");
         ImGui::EndDisabled();
         ImGui::Spacing();
     }

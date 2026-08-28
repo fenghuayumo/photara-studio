@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 
@@ -668,6 +669,13 @@ SceneLoad load_sparse_scene(
     return result;
 }
 
+bool load_view_poses(
+    const std::filesystem::path& poses_csv, SparseScene& scene) {
+    if (!scene.views.empty()) return true;
+    const std::string error = load_poses(poses_csv, scene);
+    return error.empty() && !scene.views.empty();
+}
+
 void OrbitCamera::frame(const SparseScene& scene) {
     yaw = 0.785398F;
     pitch = 0.61548F;
@@ -961,6 +969,87 @@ SceneDrawStats SceneRenderer::draw(
 
     draw->PopClipRect();
     return stats;
+}
+
+SplatPreviewCamera make_preview_camera(
+    const OrbitCamera& camera, const std::uint32_t width,
+    const std::uint32_t height) {
+    const float pitch = std::clamp(camera.pitch, -1.53F, 1.53F);
+    const Vec3 offset{
+        std::cos(pitch) * std::sin(camera.yaw), -std::sin(pitch),
+        std::cos(pitch) * std::cos(camera.yaw)};
+    const Vec3 eye = camera.target + offset * camera.distance;
+    const Vec3 forward = normalize(camera.target - eye);
+    const Vec3 right = normalize(cross(forward, k_world_up));
+    const Vec3 up = cross(right, forward);
+    // OpenCV / COLMAP: X right, Y down, Z forward.
+    const Vec3 x = right;
+    const Vec3 y{-up.x, -up.y, -up.z};
+    const Vec3 z = forward;
+    const float r00 = x.x, r01 = x.y, r02 = x.z;
+    const float r10 = y.x, r11 = y.y, r12 = y.z;
+    const float r20 = z.x, r21 = z.y, r22 = z.z;
+    const float tx = -(r00 * eye.x + r01 * eye.y + r02 * eye.z);
+    const float ty = -(r10 * eye.x + r11 * eye.y + r12 * eye.z);
+    const float tz = -(r20 * eye.x + r21 * eye.y + r22 * eye.z);
+
+    SplatPreviewCamera preview;
+    preview.world_to_camera = {
+        r00, r10, r20, 0.F,
+        r01, r11, r21, 0.F,
+        r02, r12, r22, 0.F,
+        tx, ty, tz, 1.F};
+    preview.position = {eye.x, eye.y, eye.z};
+    const float half_fov = camera.fov_degrees * 0.5F * 3.14159265F / 180.F;
+    const float image_height =
+        static_cast<float>(std::max<std::uint32_t>(1, height));
+    preview.fy = image_height * 0.5F / std::max(1e-4F, std::tan(half_fov));
+    preview.fx = preview.fy;
+    preview.cx = static_cast<float>(std::max<std::uint32_t>(1, width)) * 0.5F;
+    preview.cy = image_height * 0.5F;
+    preview.width = std::max<std::uint32_t>(1, width);
+    preview.height = std::max<std::uint32_t>(1, height);
+    return preview;
+}
+
+void snap_orbit_to_view(OrbitCamera& camera, const ViewPose& pose) {
+    const auto& rotation = pose.rotation;
+    Vec3 look{rotation[6], rotation[7], rotation[8]};
+    const float look_length = std::sqrt(dot(look, look));
+    if (look_length < 1e-8F) return;
+    look = look * (1.F / look_length);
+    camera.target = pose.centre + look * camera.distance;
+    const Vec3 offset = pose.centre - camera.target;
+    const float horizontal =
+        std::sqrt(offset.x * offset.x + offset.z * offset.z);
+    camera.pitch = std::clamp(
+        std::atan2(-offset.y, std::max(horizontal, 1e-8F)), -1.53F, 1.53F);
+    camera.yaw = std::atan2(offset.x, offset.z);
+    if (pose.fy > 1e-3F && pose.height > 0) {
+        const float half = static_cast<float>(pose.height) * 0.5F / pose.fy;
+        camera.fov_degrees = std::clamp(
+            2.F * std::atan(half) * 180.F / 3.14159265F, 10.F, 120.F);
+    }
+}
+
+bool write_preview_camera_file(
+    const std::filesystem::path& path, const SplatPreviewCamera& camera,
+    const std::uint64_t revision) {
+    if (path.empty()) return false;
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) return false;
+    output << std::setprecision(9);
+    output << revision << '\n';
+    for (std::size_t i = 0; i < camera.world_to_camera.size(); ++i) {
+        if (i) output << ' ';
+        output << camera.world_to_camera[i];
+    }
+    output << '\n'
+           << camera.position[0] << ' ' << camera.position[1] << ' '
+           << camera.position[2] << '\n'
+           << camera.fx << ' ' << camera.fy << ' ' << camera.cx << ' '
+           << camera.cy << ' ' << camera.width << ' ' << camera.height << '\n';
+    return static_cast<bool>(output);
 }
 
 }  // namespace editor

@@ -73,6 +73,34 @@ struct OrbitCamera {
     void frame(const SparseScene& scene);
 };
 
+// Rasterizer-facing camera matching splat::Camera (OpenCV +Z, Y-down, W2C
+// stored column-major).
+struct SplatPreviewCamera {
+    std::array<float, 16> world_to_camera{};
+    std::array<float, 3> position{};
+    float fx{1.F};
+    float fy{1.F};
+    float cx{};
+    float cy{};
+    std::uint32_t width{};
+    std::uint32_t height{};
+};
+
+SplatPreviewCamera make_preview_camera(
+    const OrbitCamera& camera, std::uint32_t width, std::uint32_t height);
+
+// Places the orbit eye at the capture pose looking along camera +Z.
+void snap_orbit_to_view(OrbitCamera& camera, const ViewPose& pose);
+
+bool write_preview_camera_file(
+    const std::filesystem::path& path, const SplatPreviewCamera& camera,
+    std::uint64_t revision);
+
+// Loads registered cameras from the SfM diagnostics CSV without touching
+// points. Returns false when the file is missing or has no rows.
+bool load_view_poses(
+    const std::filesystem::path& poses_csv, SparseScene& scene);
+
 // Applies orbit/pan/fly mouse navigation plus WASD/QE movement while the
 // viewport owns input. Holding RMB switches mouse motion to fly-look; Shift
 // accelerates keyboard movement.

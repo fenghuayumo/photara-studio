@@ -224,7 +224,8 @@ struct ProjectSettings {
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;
     int geometry_from_iter = 3'000;
-    bool normal_field = true;
+    // GaussianWrapping normal-field training. Off is the default GGGS path.
+    bool normal_field = false;
 };
 
 // Everything the editor reads or writes lives under the project directory.
@@ -240,6 +241,8 @@ struct ProjectLayout {
     std::filesystem::path align_log;
     std::filesystem::path train_log;
     std::filesystem::path export_log;
+    std::filesystem::path preview_view_file;
+    std::filesystem::path preview_camera_file;
 };
 
 ProjectLayout resolve_layout(const ProjectSettings& settings);
@@ -265,6 +268,8 @@ std::string build_train_command(
 std::string build_export_sfm_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout);
+
+void write_preview_view_index(const ProjectLayout& layout, unsigned index);
 
 std::string format_duration(double seconds);
 std::string format_count(std::uint64_t value);

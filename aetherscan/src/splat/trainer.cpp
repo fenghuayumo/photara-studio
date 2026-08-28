@@ -15,6 +15,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <future>
 #include <limits>
@@ -31,6 +32,44 @@ namespace data = training_data;
 namespace refine = densification;
 
 constexpr float k_sh0 = 0.28209479177387814F;
+
+std::size_t requested_preview_view(
+    const TrainingOptions& options, const std::size_t view_count) {
+    unsigned requested = options.preview_view_index;
+    if (!options.preview_view_file.empty()) {
+        std::ifstream input(options.preview_view_file);
+        unsigned from_file{};
+        if (input >> from_file) requested = from_file;
+    }
+    if (view_count == 0) return 0;
+    return std::min<std::size_t>(requested, view_count - 1);
+}
+
+bool load_preview_camera_file(
+    const std::filesystem::path& path, Camera& camera,
+    std::uint64_t& revision) {
+    if (path.empty()) return false;
+    std::ifstream input(path);
+    if (!input) return false;
+    std::uint64_t parsed_revision{};
+    input >> parsed_revision;
+    for (float& value : camera.world_to_camera) input >> value;
+    input >> camera.position[0] >> camera.position[1] >> camera.position[2];
+    double fx{}, fy{}, cx{}, cy{};
+    unsigned width{}, height{};
+    input >> fx >> fy >> cx >> cy >> width >> height;
+    if (!input || width == 0 || height == 0 || !(fx > 0.0) || !(fy > 0.0))
+        return false;
+    constexpr unsigned k_max_preview_extent = 4096;
+    camera.fx = static_cast<float>(fx);
+    camera.fy = static_cast<float>(fy);
+    camera.cx = static_cast<float>(cx);
+    camera.cy = static_cast<float>(cy);
+    camera.width = std::min(width, k_max_preview_extent);
+    camera.height = std::min(height, k_max_preview_extent);
+    revision = parsed_revision;
+    return true;
+}
 
 enum class CudaTrainingStage : std::size_t {
     raster_forward,
@@ -762,6 +801,9 @@ GaussianModel Trainer::train(
     std::vector<std::size_t> shuffled_views = view_indices;
     std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
     std::size_t shuffled_view_cursor = 0;
+    std::size_t last_preview_view = std::numeric_limits<std::size_t>::max();
+    std::uint64_t last_preview_camera_revision =
+        std::numeric_limits<std::uint64_t>::max();
     const refine::SceneGeometry scene_geometry =
         refine::training_scene_geometry(scene, options_.input_is_dense);
     const float scene_extent = scene_geometry.scale;
@@ -892,33 +934,62 @@ GaussianModel Trainer::train(
         cuda_profiler.begin_iteration(iteration, model.size());
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
         cuda_profiler.mark(CudaTrainingStage::raster_forward);
-        const bool emit_preview = options_.preview_interval != 0 &&
-            (iteration % options_.preview_interval == 0 ||
-             iteration == options_.iterations);
-        if (device_preview && emit_preview) {
-            device_preview(
-                iteration, view_index, target.camera, rendered.color);
-        } else if (preview && emit_preview) {
-            const std::vector<float> planar = download<float>(rendered.color);
-            const std::size_t pixels =
-                static_cast<std::size_t>(target.camera.width) *
-                target.camera.height;
-            TrainingPreview frame;
-            frame.iteration = iteration;
-            frame.view_index = view_index;
-            frame.width = target.camera.width;
-            frame.height = target.camera.height;
-            frame.rgb.resize(3 * pixels);
-            for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-                for (std::size_t channel = 0; channel < 3; ++channel) {
-                    const float value = std::clamp(
-                        planar[channel * pixels + pixel], 0.F, 1.F);
-                    frame.rgb[3 * pixel + channel] =
-                        static_cast<std::uint8_t>(
-                            std::lround(value * 255.F));
+        if ((preview || device_preview) && options_.preview_interval != 0) {
+            Camera preview_camera;
+            std::uint64_t camera_revision = 0;
+            const bool custom_camera = load_preview_camera_file(
+                options_.preview_camera_file, preview_camera, camera_revision);
+            const std::size_t preview_index =
+                requested_preview_view(options_, scene.views.size());
+            const bool due =
+                iteration % options_.preview_interval == 0 ||
+                iteration == options_.iterations ||
+                (custom_camera
+                     ? camera_revision != last_preview_camera_revision
+                     : preview_index != last_preview_view);
+            if (due) {
+                if (!custom_camera) {
+                    view_cache.prefetch(preview_index);
+                    preview_camera = view_cache.get(preview_index).camera;
+                }
+                RasterizeOptions preview_options;
+                preview_options.active_sh_degree =
+                    raster_options.active_sh_degree;
+                preview_options.kernel_size = raster_options.kernel_size;
+                preview_options.scale_modifier = raster_options.scale_modifier;
+                preview_options.require_depth = false;
+                const RenderResult preview_rendered = rasterizer.forward(
+                    model, preview_camera, preview_options);
+                last_preview_view = preview_index;
+                last_preview_camera_revision = camera_revision;
+                if (device_preview) {
+                    device_preview(
+                        iteration, preview_index, preview_camera,
+                        preview_rendered.color);
+                } else {
+                    const std::vector<float> planar =
+                        download<float>(preview_rendered.color);
+                    const std::size_t pixels =
+                        static_cast<std::size_t>(preview_camera.width) *
+                        preview_camera.height;
+                    TrainingPreview frame;
+                    frame.iteration = iteration;
+                    frame.view_index = preview_index;
+                    frame.width = preview_camera.width;
+                    frame.height = preview_camera.height;
+                    frame.rgb.resize(3 * pixels);
+                    for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+                        for (std::size_t channel = 0; channel < 3; ++channel) {
+                            const float value = std::clamp(
+                                planar[channel * pixels + pixel], 0.F, 1.F);
+                            frame.rgb[3 * pixel + channel] =
+                                static_cast<std::uint8_t>(
+                                    std::lround(value * 255.F));
+                        }
+                    }
+                    preview(std::move(frame));
                 }
             }
-            preview(std::move(frame));
         }
         detail::LossGradients loss = detail::compute_training_loss(
             rendered, target, options_, report_progress,

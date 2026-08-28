@@ -30,33 +30,31 @@ __global__ void planar_rgb_to_surface(
     const std::uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
     const std::uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= destination_width || y >= destination_height) return;
-    const float scale = fminf(
-        static_cast<float>(destination_width) / source_width,
-        static_cast<float>(destination_height) / source_height);
-    const float draw_width = source_width * scale;
-    const float draw_height = source_height * scale;
-    const float offset_x = (destination_width - draw_width) * 0.5F;
-    const float offset_y = (destination_height - draw_height) * 0.5F;
-    uchar4 value = make_uchar4(12, 14, 18, 255);
-    if (x >= offset_x && y >= offset_y &&
-        x < offset_x + draw_width && y < offset_y + draw_height) {
-        const std::uint32_t sx = min(
-            static_cast<std::uint32_t>((x - offset_x) / scale),
-            source_width - 1);
-        const std::uint32_t sy = min(
-            static_cast<std::uint32_t>((y - offset_y) / scale),
-            source_height - 1);
-        const std::size_t pixels =
-            static_cast<std::size_t>(source_width) * source_height;
-        const std::size_t index =
-            static_cast<std::size_t>(sy) * source_width + sx;
-        const auto channel = [&](const std::size_t c) {
-            return static_cast<unsigned char>(lrintf(
-                fminf(fmaxf(source[c * pixels + index], 0.F), 1.F) *
-                255.F));
-        };
-        value = make_uchar4(channel(0), channel(1), channel(2), 255);
-    }
+    if (source_width == 0 || source_height == 0) return;
+    // Stretch the CUDA render to fill the shared Vulkan image. The editor
+    // then maps that image onto the whole viewport, so letterboxing here
+    // would show up as empty bars in the UI.
+    const std::uint32_t sx = min(
+        static_cast<std::uint32_t>(
+            (static_cast<float>(x) + 0.5F) *
+            static_cast<float>(source_width) /
+            static_cast<float>(destination_width)),
+        source_width - 1);
+    const std::uint32_t sy = min(
+        static_cast<std::uint32_t>(
+            (static_cast<float>(y) + 0.5F) *
+            static_cast<float>(source_height) /
+            static_cast<float>(destination_height)),
+        source_height - 1);
+    const std::size_t pixels =
+        static_cast<std::size_t>(source_width) * source_height;
+    const std::size_t index =
+        static_cast<std::size_t>(sy) * source_width + sx;
+    const auto channel = [&](const std::size_t c) {
+        return static_cast<unsigned char>(lrintf(
+            fminf(fmaxf(source[c * pixels + index], 0.F), 1.F) * 255.F));
+    };
+    const uchar4 value = make_uchar4(channel(0), channel(1), channel(2), 255);
     surf2Dwrite(value, destination, x * sizeof(uchar4), y);
 }
 }  // namespace
