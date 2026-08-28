@@ -177,6 +177,29 @@ void refresh_artifacts(App& app) {
     app.has_mesh = std::filesystem::exists(app.layout.mesh_ply, error);
 }
 
+void assign_default_project_folder(App& app) {
+    if (app.settings.images_dir[0] == '\0' ||
+        app.settings.project_dir[0] != '\0')
+        return;
+
+    const std::filesystem::path images(app.settings.images_dir.data());
+    const std::filesystem::path parent = images.parent_path();
+    const std::filesystem::path project =
+        (parent.empty() ? images : parent) / "aetherscan_gui";
+    const std::string text = project.string();
+    std::snprintf(
+        app.settings.project_dir.data(), app.settings.project_dir.size(), "%s",
+        text.c_str());
+}
+
+void select_image_folder(App& app) {
+    if (!pick_folder(
+            L"Select the capture image folder", app.settings.images_dir))
+        return;
+    assign_default_project_folder(app);
+    refresh_artifacts(app);
+}
+
 void request_scene_load(
     App& app, const std::filesystem::path& cloud,
     const std::filesystem::path& poses, std::string label) {
@@ -232,6 +255,7 @@ void poll_scene_load(App& app) {
 
 void start_align(App& app) {
     if (app.job.running()) return;
+    assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Select a project output folder first", theme::warning);
         return;
@@ -264,6 +288,7 @@ void start_align(App& app) {
 
 void start_train(App& app, const bool smoke) {
     if (app.job.running()) return;
+    assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Select a project output folder first", theme::warning);
         return;
@@ -436,13 +461,10 @@ enum class Action { none, align, train, stop, reveal };
 Action draw_menu_bar(App& app) {
     Action action = Action::none;
     const bool busy = app.job.running();
-    const bool project_ready = app.settings.project_dir[0] != '\0';
     const ImGuiIO& io = ImGui::GetIO();
     if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O) &&
         !busy) {
-        if (pick_folder(
-                L"Select the capture image folder", app.settings.images_dir))
-            refresh_artifacts(app);
+        select_image_folder(app);
     }
     if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape) && busy)
         action = Action::stop;
@@ -450,10 +472,7 @@ Action draw_menu_bar(App& app) {
     if (!ImGui::BeginMenuBar()) return action;
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("Select Image Folder...", "Ctrl+O", false, !busy)) {
-            if (pick_folder(
-                    L"Select the capture image folder",
-                    app.settings.images_dir))
-                refresh_artifacts(app);
+            select_image_folder(app);
         }
         if (ImGui::MenuItem("Set Project Folder...", nullptr, false, !busy)) {
             select_project_folder(app);
@@ -477,13 +496,11 @@ Action draw_menu_bar(App& app) {
     if (ImGui::BeginMenu("Reconstruction")) {
         if (ImGui::MenuItem(
                 app.has_sparse ? "Re-align Photos" : "Align Photos", nullptr,
-                false, !busy && project_ready &&
-                           app.settings.images_dir[0] != '\0'))
+                false, !busy && app.settings.images_dir[0] != '\0'))
             action = Action::align;
         if (ImGui::MenuItem(
                 "Train 3DGS", nullptr, false,
-                !busy && project_ready &&
-                    app.settings.images_dir[0] != '\0'))
+                !busy && app.settings.images_dir[0] != '\0'))
             action = Action::train;
         ImGui::Separator();
         if (ImGui::MenuItem("Stop Active Job", "Esc", false, busy))
@@ -518,7 +535,6 @@ Action draw_toolbar(App& app) {
     Action action = Action::none;
     const bool busy = app.job.running();
     const bool images_ready = app.settings.images_dir[0] != '\0';
-    const bool project_ready = app.settings.project_dir[0] != '\0';
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.106F, 0.110F, 0.122F, 1.F));
     ImGui::BeginChild("##toolbar", {0, 52.F}, false, ImGuiWindowFlags_NoScrollbar);
@@ -528,8 +544,7 @@ Action draw_toolbar(App& app) {
             "##image_folder", icons::Icon::folder, "Image Folder",
             {124.F, 32.F}, icons::ButtonStyle::normal, !busy, false,
             "Select capture image folder")) {
-        if (pick_folder(L"Select the capture image folder", app.settings.images_dir))
-            refresh_artifacts(app);
+        select_image_folder(app);
     }
     ImGui::SameLine();
 
@@ -543,7 +558,7 @@ Action draw_toolbar(App& app) {
                    "##align", icons::Icon::align,
                    app.has_sparse ? "Re-align Photos" : "Align Photos",
                    {132.F, 32.F}, icons::ButtonStyle::primary,
-                   !busy && images_ready && project_ready)) {
+                   !busy && images_ready)) {
         action = Action::align;
     }
     ImGui::SameLine();
@@ -555,7 +570,7 @@ Action draw_toolbar(App& app) {
             "##training", icons::Icon::train, "Training...", {126.F, 32.F},
             icons::ButtonStyle::primary, false, true);
     } else {
-        const bool ready = !busy && images_ready && project_ready;
+        const bool ready = !busy && images_ready;
         if (app.has_sparse) {
             if (icons::labeled_button(
                     "##train", icons::Icon::train, "Train 3DGS",
@@ -986,14 +1001,15 @@ Action draw_inspector(App& app, const float width) {
         ImGui::Spacing();
         theme::caption("Image source");
         ImGui::SetNextItemWidth(-30.F);
-        ImGui::InputText(
-            "##images", app.settings.images_dir.data(),
-            app.settings.images_dir.size());
+        if (ImGui::InputText(
+                "##images", app.settings.images_dir.data(),
+                app.settings.images_dir.size())) {
+            assign_default_project_folder(app);
+            refresh_artifacts(app);
+        }
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button("...##pick_images", {24.F, 0})) {
-            if (pick_folder(L"Select the capture image folder",
-                            app.settings.images_dir))
-                refresh_artifacts(app);
+            select_image_folder(app);
         }
         theme::caption("Project directory");
         ImGui::SetNextItemWidth(-30.F);
@@ -1229,14 +1245,12 @@ Action draw_inspector(App& app, const float width) {
     } else if (!app.has_sparse) {
         if (theme::primary_button(
                 "Align Photos", {-1.F, 40.F},
-                app.settings.images_dir[0] != '\0' &&
-                    app.settings.project_dir[0] != '\0'))
+                app.settings.images_dir[0] != '\0'))
             action = Action::align;
     } else {
         if (theme::primary_button(
                 app.settings.build_mesh ? "Train 3DGS + Mesh" : "Train 3DGS",
-                {-1.F, 40.F}, app.settings.images_dir[0] != '\0' &&
-                                      app.settings.project_dir[0] != '\0'))
+                {-1.F, 40.F}, app.settings.images_dir[0] != '\0'))
             action = Action::train;
     }
 
