@@ -57,6 +57,8 @@ struct ReconstructCli {
     double focal_pixels{};
     std::string mode{"global"};
     std::filesystem::path output;
+    bool export_mvs_requested{false};
+    std::filesystem::path export_mvs_path;
     std::size_t neighbor_window{3};
     float match_ratio{0.85F};
     bool mutual_check{true};
@@ -343,8 +345,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
               << "Output formats:\n"
-              << "  .mvs  OpenMVS Interface (open in Viewer)\n"
-              << "  .ply  sparse XYZ point cloud\n"
+              << "  .mvs  OpenMVS Interface (explicit SfM export)\n"
+              << "  .ply  sparse XYZRGB point cloud (does not write .mvs)\n"
+              << "  --export-mvs [path]  also write OpenMVS Interface after SfM\n"
               << "  with --dense: also writes dense.ply next to --output\n"
               << "  with --texture: also writes *_textured.obj/.mtl/_albedo.png\n"
               << "Log level: set AETHERSCAN_LOG_LEVEL=error|warning|info|debug|trace|off\n";
@@ -365,6 +368,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Reconstruction mode: global (default), incremental, or hierarchical",
          cxxopts::value<std::string>()->default_value("global"))
         ("o,output", "Output path (.mvs or .ply)", cxxopts::value<std::string>())
+        ("export-mvs",
+         "Write OpenMVS Interface after SfM. Optional path; default is "
+         "<output-stem>.mvs. .ply output does not write .mvs unless this is set.",
+         cxxopts::value<std::string>()->implicit_value(""))
         ("window", "Sequential neighbor window",
          cxxopts::value<std::size_t>()->default_value("3"))
         ("match-ratio", "Lowe ratio test threshold",
@@ -688,6 +695,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.focal_pixels = result["focal"].as<double>();
     cli.mode = result["mode"].as<std::string>();
     cli.output = utf8_to_path(result["output"].as<std::string>());
+    if (result.count("export-mvs") != 0) {
+        cli.export_mvs_requested = true;
+        const auto export_mvs_text = result["export-mvs"].as<std::string>();
+        if (!export_mvs_text.empty())
+            cli.export_mvs_path = utf8_to_path(export_mvs_text);
+    }
     cli.neighbor_window = result["window"].as<std::size_t>();
     cli.match_ratio = result["match-ratio"].as<float>();
     cli.mutual_check = result["mutual-check"].as<bool>();
@@ -1224,11 +1237,76 @@ void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& 
     std::ofstream output(path);
     if (!output) throw std::runtime_error("Failed to create PLY: " + path.string());
     output << "ply\nformat ascii 1.0\nelement vertex " << count
-           << "\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
+           << "\nproperty float x\nproperty float y\nproperty float z\n"
+           << "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+           << "end_header\n";
+
+    // Sample each landmark from its inlier observations so the editor can
+    // show the reconstruction in the photos' own colours instead of a ramp.
+    std::unordered_map<aetherscan::sfm::Index, std::unique_ptr<aetherscan::io::RgbImage>>
+        rgb_cache;
+    const auto cached_rgb =
+        [&](const aetherscan::sfm::Index image_id) -> const aetherscan::io::RgbImage* {
+        const auto existing = rgb_cache.find(image_id);
+        if (existing != rgb_cache.end()) return existing->second.get();
+        try {
+            auto image = std::make_unique<aetherscan::io::RgbImage>(
+                aetherscan::io::load_rgb(scene.images[image_id].path));
+            const aetherscan::io::RgbImage* pointer = image.get();
+            rgb_cache.emplace(image_id, std::move(image));
+            return pointer;
+        } catch (...) {
+            rgb_cache.emplace(image_id, nullptr);
+            return nullptr;
+        }
+    };
+
     for (const auto& track : scene.tracks) {
         if (!track.is_triangulated()) continue;
+        double sum_r = 0.0;
+        double sum_g = 0.0;
+        double sum_b = 0.0;
+        std::size_t samples = 0;
+        const std::size_t inliers = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < inliers; ++i) {
+            const auto& observation = track.observations[i];
+            if (observation.image_id >= scene.images.size()) continue;
+            const auto& image = scene.images[observation.image_id];
+            if (!image.registered ||
+                observation.feature_id >= image.features.keypoints.size())
+                continue;
+            const auto* rgb = cached_rgb(observation.image_id);
+            if (!rgb || rgb->width == 0 || rgb->height == 0) continue;
+            const auto& keypoint = image.features.keypoints[observation.feature_id];
+            const int xi = static_cast<int>(std::lround(keypoint.x));
+            const int yi = static_cast<int>(std::lround(keypoint.y));
+            if (xi < 0 || yi < 0 ||
+                xi >= static_cast<int>(rgb->width) ||
+                yi >= static_cast<int>(rgb->height))
+                continue;
+            const std::size_t offset =
+                (static_cast<std::size_t>(yi) * rgb->width +
+                 static_cast<std::size_t>(xi)) *
+                3;
+            if (offset + 2 >= rgb->pixels.size()) continue;
+            sum_r += rgb->pixels[offset + 0];
+            sum_g += rgb->pixels[offset + 1];
+            sum_b += rgb->pixels[offset + 2];
+            ++samples;
+        }
+        const int red = samples > 0
+            ? static_cast<int>(std::lround(sum_r / static_cast<double>(samples)))
+            : 200;
+        const int green = samples > 0
+            ? static_cast<int>(std::lround(sum_g / static_cast<double>(samples)))
+            : 200;
+        const int blue = samples > 0
+            ? static_cast<int>(std::lround(sum_b / static_cast<double>(samples)))
+            : 200;
         output << track.position.x() << ' ' << track.position.y() << ' '
-               << track.position.z() << '\n';
+               << track.position.z() << ' ' << red << ' ' << green << ' '
+               << blue << '\n';
     }
 }
 
@@ -2386,16 +2464,28 @@ int main(int argc, char** argv) {
         aetherscan::core::Logger::instance().info(
             "sfm_diagnostics=", diagnostics_path);
 
-        if (lower_extension(cli.output) == ".mvs") {
+        const auto output_ext = lower_extension(cli.output);
+        if (output_ext == ".mvs") {
             aetherscan::sfm::export_openmvs_interface(scene, cli.output);
-        } else if (lower_extension(cli.output) == ".ply") {
+        } else if (output_ext == ".ply") {
             save_ply(scene, cli.output);
-            auto mvs_path = cli.output.parent_path() / cli.output.stem();
-            mvs_path += ".mvs";
-            aetherscan::sfm::export_openmvs_interface(scene, mvs_path);
-            aetherscan::core::Logger::instance().info("mvs=", mvs_path);
         } else {
             throw std::invalid_argument("Output must end with .mvs or .ply");
+        }
+
+        if (cli.export_mvs_requested) {
+            std::filesystem::path mvs_path = cli.export_mvs_path;
+            if (mvs_path.empty()) {
+                mvs_path = cli.output.parent_path() / cli.output.stem();
+                mvs_path += ".mvs";
+            }
+            if (lower_extension(mvs_path) != ".mvs")
+                throw std::invalid_argument(
+                    "--export-mvs path must end with .mvs");
+            if (mvs_path != cli.output) {
+                aetherscan::sfm::export_openmvs_interface(scene, mvs_path);
+                aetherscan::core::Logger::instance().info("mvs=", mvs_path);
+            }
         }
 
 #if defined(AETHERSCAN_HAS_SPLAT)

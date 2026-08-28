@@ -635,6 +635,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
             set(AETHERSCAN_EDITOR_DIR
                 "${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor")
             add_executable(aetherscan_editor
+                ${AETHERSCAN_EDITOR_DIR}/console_view.cpp
                 ${AETHERSCAN_EDITOR_DIR}/icons.cpp
                 ${AETHERSCAN_EDITOR_DIR}/main.cpp
                 ${AETHERSCAN_EDITOR_DIR}/pipeline.cpp
@@ -651,6 +652,9 @@ if(AETHERSCAN_ENABLE_FEATURES)
                 target_link_libraries(aetherscan_editor PRIVATE ole32 shell32)
             endif()
             target_compile_features(aetherscan_editor PRIVATE cxx_std_20)
+            if(MSVC)
+                target_compile_options(aetherscan_editor PRIVATE /utf-8)
+            endif()
             target_compile_definitions(aetherscan_editor PRIVATE
                 AETHERSCAN_CLI_PATH="$<TARGET_FILE:aetherscan>")
             add_dependencies(aetherscan_editor aetherscan)

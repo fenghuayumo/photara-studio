@@ -24,16 +24,21 @@ inline constexpr ImVec4 surface_2{0.106F, 0.110F, 0.122F, 1.F};  // inputs
 inline constexpr ImVec4 surface_3{0.145F, 0.149F, 0.165F, 1.F};  // raised
 inline constexpr ImVec4 border{0.180F, 0.186F, 0.204F, 1.F};
 inline constexpr ImVec4 viewport_bg{0.027F, 0.031F, 0.043F, 1.F};
+inline constexpr ImVec4 console_bg{0.022F, 0.024F, 0.029F, 1.F};
 
 struct Fonts {
     ImFont* regular{};
     // Latin-only 12px face used for panel headers and small chrome. Chinese
     // glyphs are baked only into the regular face to keep the atlas small.
     ImFont* small{};
+    ImFont* mono{};
 };
 
 Fonts load_fonts(ImGuiIO& io);
 void apply_style();
+
+ImFont* small_font();
+ImFont* mono_font();
 
 ImU32 u32(const ImVec4& colour, float alpha_scale = 1.F);
 ImVec4 fade(const ImVec4& colour, float alpha);

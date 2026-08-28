@@ -20,7 +20,9 @@ namespace editor {
 // The workflow the editor exposes: align cameras first, review the sparse
 // result, then optimise Gaussians (optionally with the geometry supervision
 // that mesh extraction needs).
-enum class JobKind { none, align, train };
+enum class JobKind { none, align, train, export_sfm };
+
+const char* job_name(JobKind kind);
 
 enum class Stage {
     idle,
@@ -79,24 +81,57 @@ struct ArtifactFlags {
     bool texture{};
 };
 
+// Parsed child log line. `time` is the HH:MM:SS.mmm fragment when the logger
+// prefix is present; otherwise the whole line lives in `message`.
+enum class ConsoleSeverity : std::uint8_t {
+    debug,
+    info,
+    warning,
+    error,
+    other
+};
+
+struct ConsoleLine {
+    ConsoleSeverity severity{ConsoleSeverity::other};
+    std::string time;
+    std::string message;
+};
+
+struct ConsoleCounts {
+    int total{};
+    int info{};
+    int warning{};
+    int error{};
+};
+
 // Incremental reader over the redirected child stdout/stderr. Keeps a bounded
-// console buffer and hands complete lines to the parser.
+// line buffer and hands complete lines to the parser.
 class LogStream {
 public:
     void open(const std::filesystem::path& path);
     void close();
     void clear();
+    // Drop displayed lines without rewinding the file so a live job continues.
+    void clear_display();
     void poll(std::vector<std::string>& fresh_lines);
 
-    [[nodiscard]] const std::string& console() const { return console_; }
+    [[nodiscard]] const std::vector<ConsoleLine>& lines() const { return lines_; }
+    [[nodiscard]] const ConsoleCounts& counts() const { return counts_; }
+    [[nodiscard]] std::uint64_t generation() const { return generation_; }
 
 private:
-    static constexpr std::size_t k_console_budget = 192 * 1024;
+    static constexpr std::size_t k_max_lines = 6'000;
+
+    void push_line(std::string line);
+    void trim_if_needed();
+    void recount();
 
     std::filesystem::path path_;
     std::uintmax_t offset_{};
     std::string partial_;
-    std::string console_;
+    std::vector<ConsoleLine> lines_;
+    ConsoleCounts counts_;
+    std::uint64_t generation_{};
 };
 
 // Parses the CLI log into a stage, the active sub-task and an overall fraction.
@@ -197,12 +232,14 @@ struct ProjectLayout {
     std::filesystem::path root;
     std::filesystem::path cache;
     std::filesystem::path sparse_ply;
+    std::filesystem::path sparse_mvs;
     std::filesystem::path sparse_poses;
     std::filesystem::path model_output;
     std::filesystem::path splat_ply;
     std::filesystem::path mesh_ply;
     std::filesystem::path align_log;
     std::filesystem::path train_log;
+    std::filesystem::path export_log;
 };
 
 ProjectLayout resolve_layout(const ProjectSettings& settings);
@@ -224,6 +261,10 @@ std::string build_align_command(
 std::string build_train_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout, const PreviewHandles& preview);
+
+std::string build_export_sfm_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout);
 
 std::string format_duration(double seconds);
 std::string format_count(std::uint64_t value);

@@ -87,7 +87,8 @@ void camera_view_matrix(
 struct ViewOptions {
     float point_size = 1.7F;
     int point_budget = 160'000;
-    bool colour_by_depth = true;
+    // Depth ramp is an overlay. Vertex RGB from the PLY is the default.
+    bool colour_by_depth = false;
     bool show_views = true;
     bool show_trajectory = true;
     bool show_grid = true;

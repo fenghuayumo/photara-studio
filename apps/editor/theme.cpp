@@ -20,9 +20,41 @@ const char* pick_ui_font() {
     return nullptr;
 }
 
+const char* pick_mono_font() {
+    static const char* const candidates[] = {
+        "C:\\Windows\\Fonts\\CascadiaMono.ttf",
+        "C:\\Windows\\Fonts\\cascadiamono.ttf",
+        "C:\\Windows\\Fonts\\consola.ttf",
+        "C:\\Windows\\Fonts\\lucon.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    };
+    for (const char* candidate : candidates)
+        if (std::filesystem::exists(candidate)) return candidate;
+    return nullptr;
+}
+
 constexpr float header_height = 32.F;
 
 ImFont* g_small_font{};
+ImFont* g_mono_font{};
+
+ImFont* load_ui_font(ImGuiIO& io, const char* path, const float size) {
+    ImFontConfig config;
+    // msyh.ttc is a collection; FontNo 0 is the regular face.
+    config.FontNo = 0;
+    config.PixelSnapH = true;
+    return io.Fonts->AddFontFromFileTTF(
+        path, size, &config, io.Fonts->GetGlyphRangesChineseFull());
+}
+
+ImFont* load_mono_font(ImGuiIO& io, const char* path, const float size) {
+    ImFontConfig config;
+    config.PixelSnapH = true;
+    config.OversampleH = 2;
+    return io.Fonts->AddFontFromFileTTF(
+        path, size, &config, io.Fonts->GetGlyphRangesDefault());
+}
 
 }  // namespace
 
@@ -39,17 +71,28 @@ ImVec4 fade(const ImVec4& colour, const float alpha) {
 Fonts load_fonts(ImGuiIO& io) {
     Fonts fonts;
     const char* path = pick_ui_font();
-    if (!path) {
+    fonts.regular = path ? load_ui_font(io, path, 15.F) : nullptr;
+    if (!fonts.regular) {
         fonts.regular = io.Fonts->AddFontDefault();
         fonts.small = fonts.regular;
     } else {
-        fonts.regular = io.Fonts->AddFontFromFileTTF(
-            path, 15.F, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-        fonts.small = io.Fonts->AddFontFromFileTTF(path, 12.F);
+        fonts.small = load_ui_font(io, path, 12.F);
         if (!fonts.small) fonts.small = fonts.regular;
     }
     g_small_font = fonts.small;
+    if (const char* mono = pick_mono_font())
+        fonts.mono = load_mono_font(io, mono, 13.F);
+    if (!fonts.mono) fonts.mono = fonts.small;
+    g_mono_font = fonts.mono;
     return fonts;
+}
+
+ImFont* small_font() {
+    return g_small_font ? g_small_font : ImGui::GetFont();
+}
+
+ImFont* mono_font() {
+    return g_mono_font ? g_mono_font : ImGui::GetFont();
 }
 
 void apply_style() {

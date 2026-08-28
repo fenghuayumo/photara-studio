@@ -654,7 +654,6 @@ SceneDrawStats SceneRenderer::draw(
 
         const float span = std::max(1e-6F, far_depth - near_depth);
         const float half = std::max(0.5F, options.point_size * 0.5F);
-        const ImU32 flat = theme::u32(ImVec4(0.62F, 0.78F, 0.90F, 1.F), 0.95F);
         constexpr std::size_t chunk = 4'096;
         for (std::size_t begin = 0; begin < scratch_.size(); begin += chunk) {
             const std::size_t end =
@@ -665,9 +664,7 @@ SceneDrawStats SceneRenderer::draw(
                 const Projected& point = scratch_[i];
                 const ImU32 colour = source_colours
                     ? colour_scratch_[i]
-                    : (options.colour_by_depth
-                           ? depth_ramp(1.F - (point.depth - near_depth) / span)
-                           : flat);
+                    : depth_ramp(1.F - (point.depth - near_depth) / span);
                 draw->PrimRect(
                     {point.x - half, point.y - half},
                     {point.x + half, point.y + half}, colour);

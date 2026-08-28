@@ -1,4 +1,5 @@
-#include "pipeline.hpp"
+﻿#include "pipeline.hpp"
+#include "console_view.hpp"
 #include "icons.hpp"
 #include "sparse_view.hpp"
 #include "theme.hpp"
@@ -58,6 +59,7 @@ struct App {
     JobKind active_job{JobKind::none};
     RunMonitor monitor;
     LogStream log;
+    ConsoleView console;
     std::vector<std::string> fresh_lines;
 
     gpu::ExternalPreview preview;
@@ -72,6 +74,7 @@ struct App {
     std::string scene_source;
 
     bool has_sparse{};
+    bool has_mvs{};
     bool has_model{};
     bool has_mesh{};
     ViewportTab tab{ViewportTab::sparse};
@@ -196,6 +199,7 @@ void refresh_artifacts(App& app) {
     if (app.settings.project_dir[0] == '\0') {
         app.layout = {};
         app.has_sparse = false;
+        app.has_mvs = false;
         app.has_model = false;
         app.has_mesh = false;
         return;
@@ -203,6 +207,7 @@ void refresh_artifacts(App& app) {
     app.layout = resolve_layout(app.settings);
     std::error_code error;
     app.has_sparse = std::filesystem::exists(app.layout.sparse_ply, error);
+    app.has_mvs = std::filesystem::exists(app.layout.sparse_mvs, error);
     app.has_model = std::filesystem::exists(app.layout.splat_ply, error);
     app.has_mesh = std::filesystem::exists(app.layout.mesh_ply, error);
 }
@@ -230,6 +235,7 @@ void clear_loaded_result(App& app) {
     app.tab = ViewportTab::sparse;
     app.monitor.reset();
     app.log.clear();
+    app.console = {};
     app.fresh_lines.clear();
 }
 
@@ -284,7 +290,8 @@ void select_project_folder(App& app) {
 }
 
 bool has_reconstruction_result(const App& app) {
-    if (app.scene.has_points() || app.has_sparse || app.has_model || app.has_mesh)
+    if (app.scene.has_points() || app.has_sparse || app.has_mvs ||
+        app.has_model || app.has_mesh)
         return true;
     if (app.layout.cache.empty()) return false;
     std::error_code error;
@@ -295,10 +302,10 @@ void delete_reconstruction_results(App& app) {
     if (app.job.running() || app.loading_scene || app.layout.root.empty()) return;
 
     clear_loaded_result(app);
-    const std::array<std::filesystem::path, 7> generated_files = {
-        app.layout.sparse_ply, app.layout.sparse_poses,
+    const std::array<std::filesystem::path, 9> generated_files = {
+        app.layout.sparse_ply, app.layout.sparse_mvs, app.layout.sparse_poses,
         app.layout.model_output, app.layout.splat_ply, app.layout.mesh_ply,
-        app.layout.align_log, app.layout.train_log};
+        app.layout.align_log, app.layout.train_log, app.layout.export_log};
 
     std::uintmax_t removed = 0;
     std::string failure;
@@ -373,6 +380,10 @@ void start_align(App& app) {
         set_message(app, "Cannot create project directory", theme::danger);
         return;
     }
+    {
+        std::error_code stale;
+        std::filesystem::remove(app.layout.sparse_mvs, stale);
+    }
     if (!directory_has_images(app.settings.images_dir.data())) {
         set_message(
             app, "No images found in the selected source folder", theme::danger);
@@ -387,6 +398,69 @@ void start_align(App& app) {
             app.layout.align_log);
         app.active_job = JobKind::align;
         set_message(app, "Aligning cameras...", theme::accent);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+}
+
+bool alignment_cache_present(const App& app) {
+    if (app.layout.cache.empty()) return false;
+    std::error_code error;
+    return std::filesystem::exists(app.layout.cache, error);
+}
+
+bool can_export_sfm(const App& app) {
+    return app.settings.images_dir[0] != '\0' &&
+           app.settings.project_dir[0] != '\0' &&
+           (app.has_sparse || alignment_cache_present(app));
+}
+
+const char* running_job_caption(const JobKind kind) {
+    switch (kind) {
+        case JobKind::align: return "ALIGNING";
+        case JobKind::export_sfm: return "EXPORTING";
+        case JobKind::train: return "TRAINING";
+        case JobKind::none: return "READY";
+    }
+    return "READY";
+}
+
+const char* stop_job_label(const JobKind kind) {
+    switch (kind) {
+        case JobKind::align: return "Stop Alignment";
+        case JobKind::export_sfm: return "Stop Export";
+        default: return "Stop Training";
+    }
+}
+
+void start_export_sfm(App& app) {
+    if (app.job.running()) return;
+    assign_default_project_folder(app);
+    if (app.settings.project_dir[0] == '\0') {
+        set_message(app, "Select a project output folder first", theme::warning);
+        return;
+    }
+    refresh_artifacts(app);
+    if (!can_export_sfm(app)) {
+        set_message(
+            app, "Align photos before exporting SfM alignment", theme::warning);
+        return;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(app.layout.root, error);
+    if (error) {
+        set_message(app, "Cannot create project directory", theme::danger);
+        return;
+    }
+    try {
+        app.monitor.begin(JobKind::export_sfm);
+        app.log.open(app.layout.export_log);
+        app.job.start(
+            build_export_sfm_command(
+                AETHERSCAN_CLI_PATH, app.settings, app.layout),
+            app.layout.export_log);
+        app.active_job = JobKind::export_sfm;
+        set_message(app, "Exporting SfM alignment...", theme::accent);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
     }
@@ -478,8 +552,7 @@ void on_job_finished(App& app) {
                                : "Exited with code " + std::to_string(code);
         set_message(
             app,
-            std::string(kind == JobKind::align ? "Alignment" : "Training") +
-                " failed: " + reason,
+            std::string(job_name(kind)) + " failed: " + reason,
             code == 2 ? theme::warning : theme::danger);
         return;
     }
@@ -496,6 +569,14 @@ void on_job_finished(App& app) {
         }
         return;
     }
+    if (kind == JobKind::export_sfm) {
+        set_message(
+            app,
+            app.has_mvs ? "Exported SfM alignment to sparse.mvs"
+                        : "Export finished but sparse.mvs was not written",
+            app.has_mvs ? theme::success : theme::warning);
+        return;
+    }
     set_message(
         app,
         app.settings.build_mesh
@@ -510,7 +591,7 @@ void on_job_finished(App& app) {
 // ---------------------------------------------------------------------------
 // UI fragments
 
-enum class Action { none, align, train, stop, reveal };
+enum class Action { none, align, train, export_sfm, stop, reveal };
 
 int workflow_step(const App& app) {
     const bool training =
@@ -539,12 +620,14 @@ void apply_default_dock_layout(const ImGuiID dockspace_id, const ImVec2 size) {
     ImGui::DockBuilderSplitNode(
         dock_main, ImGuiDir_Right, 0.24F, &dock_right, &dock_main);
     ImGui::DockBuilderSplitNode(
-        dock_main, ImGuiDir_Down, 0.22F, &dock_bottom, &dock_main);
+        dock_main, ImGuiDir_Down, 0.26F, &dock_bottom, &dock_main);
 
     ImGui::DockBuilderDockWindow("Scene", dock_left);
     ImGui::DockBuilderDockWindow("Viewport", dock_main);
     ImGui::DockBuilderDockWindow("Console", dock_bottom);
     ImGui::DockBuilderDockWindow("Inspector", dock_right);
+    if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(dock_main))
+        node->LocalFlags |= ImGuiDockNodeFlags_AutoHideTabBar;
     ImGui::DockBuilderFinish(dockspace_id);
 }
 
@@ -625,6 +708,10 @@ Action draw_menu_bar(App& app) {
                 "Sparse cloud");
         }
         if (ImGui::MenuItem(
+                "Export SfM Alignment...", nullptr, false,
+                !busy && can_export_sfm(app)))
+            action = Action::export_sfm;
+        if (ImGui::MenuItem(
                 "Open Output Folder", nullptr, false,
                 app.layout.root.has_filename()))
             action = Action::reveal;
@@ -641,6 +728,10 @@ Action draw_menu_bar(App& app) {
                 "Train 3DGS", nullptr, false,
                 !busy && app.settings.images_dir[0] != '\0'))
             action = Action::train;
+        if (ImGui::MenuItem(
+                "Export SfM Alignment...", nullptr, false,
+                !busy && can_export_sfm(app)))
+            action = Action::export_sfm;
         ImGui::Separator();
         if (ImGui::MenuItem(
                 "Clear Reconstruction Results...", nullptr, false,
@@ -873,7 +964,7 @@ Action draw_toolbar(App& app) {
             action = Action::stop;
     }
 
-    const char* transport = "CUDA / Vulkan  ·  external memory";
+    const char* transport = "CUDA / Vulkan  |  external memory";
     const float transport_width = ImGui::CalcTextSize(transport).x;
     ImGui::SameLine(
         std::max(0.F, ImGui::GetWindowWidth() - transport_width - 16.F));
@@ -957,6 +1048,7 @@ void draw_scene_panel(App& app) {
         leaf(
             "Sparse Point Cloud", app.scene.has_points(),
             app.tab == ViewportTab::sparse && app.scene.has_points());
+        leaf("OpenMVS Export", app.has_mvs, false);
         leaf(
             "Gaussian Model", app.has_model,
             app.tab == ViewportTab::training);
@@ -1115,7 +1207,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     char readout[192];
     std::snprintf(
         readout, sizeof(readout),
-        "%s pts drawn  ·  %zu / %zu cameras shown  ·  %s pts total",
+        "%s pts drawn  |  %zu / %zu cameras shown  |  %s pts total",
         format_count(stats.drawn_points).c_str(), stats.drawn_views,
         app.scene.registered_views,
         format_count(app.scene.points.size()).c_str());
@@ -1123,13 +1215,13 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
-        "LMB orbit  ·  MMB pan  ·  RMB + WASD/QE fly  ·  wheel dolly  ·  F frame");
+        "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  wheel dolly  |  F frame");
 
     if (!gizmo_captures && stats.hovered_view >= 0 &&
         static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size()) {
         const ViewPose& pose = app.scene.views[stats.hovered_view];
         ImGui::SetTooltip(
-            "%s\n%u x %u  ·  f %.1f px\n%zu observations  ·  p95 %.2f px",
+            "%s\n%u x %u  |  f %.1f px\n%zu observations  |  p95 %.2f px",
             pose.name.c_str(), pose.width, pose.height, pose.fx,
             pose.observations, pose.reprojection_p95);
     }
@@ -1177,7 +1269,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         char readout[192];
         std::snprintf(
             readout, sizeof(readout),
-            "iter %u / %u  ·  %s gaussians  ·  loss %.4f  ·  %.1f ms/step",
+            "iter %u / %u  |  %s gaussians  |  loss %.4f  |  %.1f ms/step",
             stats.iteration, stats.total_iterations,
             format_count(stats.gaussians).c_str(), stats.loss,
             stats.step_milliseconds);
@@ -1200,18 +1292,26 @@ void draw_viewport_panel(App& app) {
         return;
     }
 
-    // Header with the viewport tabs on the left and state on the right.
+    // SetCursorPos is window-relative and includes the dock tab bar. The
+    // Sparse Cloud / Live Training buttons used to sit at (8, 5) under the
+    // "Viewport" tab. Layout from the content origin Begin() already set.
+    if (ImGuiDockNode* node = ImGui::GetWindowDockNode())
+        node->LocalFlags |= ImGuiDockNodeFlags_AutoHideTabBar;
+
+    constexpr float k_header_height = 36.F;
+    const ImVec2 content_start = ImGui::GetCursorPos();
     const ImVec2 header_origin = ImGui::GetCursorScreenPos();
     const float header_width = ImGui::GetContentRegionAvail().x;
     ImGui::GetWindowDrawList()->AddRectFilled(
-        header_origin, {header_origin.x + header_width, header_origin.y + 36.F},
+        header_origin,
+        {header_origin.x + header_width, header_origin.y + k_header_height},
         theme::u32(theme::surface_3));
     ImGui::GetWindowDrawList()->AddLine(
-        {header_origin.x, header_origin.y + 35.F},
-        {header_origin.x + header_width, header_origin.y + 35.F},
+        {header_origin.x, header_origin.y + k_header_height - 1.F},
+        {header_origin.x + header_width, header_origin.y + k_header_height - 1.F},
         theme::u32(theme::border));
 
-    ImGui::SetCursorPos({8.F, 5.F});
+    ImGui::SetCursorPos({content_start.x + 8.F, content_start.y + 5.F});
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.F, 4.F));
     if (theme::toolbar_button(
             "Sparse Cloud", {0, 26.F}, true, app.tab == ViewportTab::sparse))
@@ -1223,13 +1323,14 @@ void draw_viewport_panel(App& app) {
     ImGui::PopStyleVar();
 
     const char* state = app.job.running()
-        ? (app.active_job == JobKind::align ? "ALIGNING" : "TRAINING")
+        ? running_job_caption(app.active_job)
         : "READY";
     const float state_width = ImGui::CalcTextSize(state).x;
-    ImGui::SameLine(std::max(0.F, ImGui::GetWindowWidth() - state_width - 14.F));
-    ImGui::SetCursorPosY(10.F);
+    ImGui::SetCursorPos({
+        content_start.x + std::max(8.F, header_width - state_width - 14.F),
+        content_start.y + 10.F});
     theme::caption(state);
-    ImGui::SetCursorPos({0, 36.F});
+    ImGui::SetCursorPos({content_start.x, content_start.y + k_header_height});
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
@@ -1251,26 +1352,9 @@ void draw_viewport_panel(App& app) {
 
 void draw_console_panel(App& app) {
     if (!app.show_console) return;
-    ImGuiWindowFlags flags = 0;
-    if (app.job.running()) flags |= ImGuiWindowFlags_UnsavedDocument;
-    if (!ImGui::Begin("Console", &app.show_console, flags)) {
-        ImGui::End();
-        return;
-    }
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.031F, 0.033F, 0.039F, 1.F));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.F, 8.F));
-    ImGui::BeginChild("Log", {0, 0}, false, ImGuiWindowFlags_HorizontalScrollbar);
-    ImGui::PopStyleVar();
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66F, 0.68F, 0.72F, 1.F));
-    if (app.log.console().empty())
-        ImGui::TextUnformatted("Reconstruction output appears here.");
-    else
-        ImGui::TextUnformatted(app.log.console().c_str());
-    ImGui::PopStyleColor();
-    if (app.job.running()) ImGui::SetScrollHereY(1.F);
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-    ImGui::End();
+    editor::draw_console(
+        app.show_console, app.console, app.log, app.job.running(),
+        app.active_job, app.monitor.stage());
 }
 
 Action draw_inspector(App& app) {
@@ -1337,9 +1421,26 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox("Reuse cached alignment", &app.settings.reuse_cache);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Shares a checkpoint directory between runs so training reuses\n"
-                "the alignment you just reviewed instead of re-solving it.");
+                "Reuse the Structure-from-Motion cache so Train 3DGS can\n"
+                "reload cameras and sparse points into memory instead of\n"
+                "solving poses again. Uncheck to rebuild from the images.\n"
+                "OpenMVS files are not written unless you export.");
         ImGui::EndDisabled();
+
+        if (theme::toolbar_button(
+                "Export SfM Alignment", {-1.F, 28.F},
+                !busy && can_export_sfm(app)))
+            action = Action::export_sfm;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Write cameras and sparse points to sparse.mvs.\n"
+                "Align Photos and Train 3DGS keep the reconstruction in\n"
+                "memory (via the alignment cache) and do not write this file.");
+        if (app.has_mvs) {
+            ImGui::Spacing();
+            theme::metric_coloured(
+                "OpenMVS file", "sparse.mvs", theme::success);
+        }
 
         if (!app.scene.views.empty()) {
             ImGui::Spacing();
@@ -1481,6 +1582,9 @@ Action draw_inspector(App& app) {
             "##fly_speed", &app.camera.move_speed, 0.1F, 10.F, "%.1fx");
         ImGui::Spacing();
         ImGui::Checkbox("Colour by depth", &app.view_options.colour_by_depth);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Replace sampled point colours with a near-to-far ramp.");
         ImGui::Checkbox("Show cameras", &app.view_options.show_views);
         ImGui::Checkbox("Show trajectory", &app.view_options.show_trajectory);
         ImGui::Checkbox("Show ground grid", &app.view_options.show_grid);
@@ -1537,9 +1641,7 @@ Action draw_inspector(App& app) {
     ImGui::Dummy({0, 10.F});
     if (busy) {
         if (theme::danger_button(
-                app.active_job == JobKind::align ? "Stop Alignment"
-                                                 : "Stop Training",
-                {-1.F, 40.F}))
+                stop_job_label(app.active_job), {-1.F, 40.F}))
             action = Action::stop;
     } else if (!app.has_sparse) {
         if (theme::primary_button(
@@ -1611,8 +1713,8 @@ void draw_status_bar(const App& app) {
     icons::Icon state_icon = icons::Icon::cube;
     if (busy) {
         state_colour = theme::accent;
-        state_icon = app.active_job == JobKind::align ? icons::Icon::align
-                                                      : icons::Icon::train;
+        state_icon = app.active_job == JobKind::train ? icons::Icon::train
+                                                      : icons::Icon::align;
     } else if (app.monitor.stage() == Stage::failed) {
         state_colour = theme::danger;
         state_icon = icons::Icon::stop;
@@ -1855,6 +1957,9 @@ int main(const int argc, char** argv) {
                 break;
             case Action::train:
                 if (!app.smoke_mode) start_train(app, false);
+                break;
+            case Action::export_sfm:
+                if (!app.smoke_mode) start_export_sfm(app);
                 break;
             case Action::stop:
                 app.job.stop();

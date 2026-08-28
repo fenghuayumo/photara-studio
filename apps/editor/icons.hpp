@@ -22,6 +22,10 @@ enum class Icon {
     stop,
     points,
     gpu,
+    copy,
+    trash,
+    search,
+    follow,
 };
 
 enum class ButtonStyle { normal, primary, danger };

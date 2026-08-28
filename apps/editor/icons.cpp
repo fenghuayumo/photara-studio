@@ -307,6 +307,53 @@ void draw(
             }
             break;
         }
+        case Icon::copy: {
+            draw_list->AddRect(
+                point(min, max, 0.28F, 0.18F), point(min, max, 0.78F, 0.66F),
+                colour, 2.F, 0, thickness);
+            draw_list->AddRect(
+                point(min, max, 0.18F, 0.34F), point(min, max, 0.68F, 0.82F),
+                colour, 2.F, 0, thickness);
+            break;
+        }
+        case Icon::trash: {
+            draw_list->AddLine(
+                point(min, max, 0.22F, 0.30F), point(min, max, 0.78F, 0.30F),
+                colour, thickness);
+            draw_list->AddLine(
+                point(min, max, 0.38F, 0.22F), point(min, max, 0.62F, 0.22F),
+                colour, thickness);
+            const ImVec2 bin[] = {
+                point(min, max, 0.30F, 0.30F),
+                point(min, max, 0.34F, 0.80F),
+                point(min, max, 0.66F, 0.80F),
+                point(min, max, 0.70F, 0.30F)};
+            draw_list->AddPolyline(bin, 4, colour, 0, thickness);
+            line(draw_list, min, max, 0.42F, 0.40F, 0.42F, 0.70F, colour,
+                 thickness * 0.8F);
+            line(draw_list, min, max, 0.58F, 0.40F, 0.58F, 0.70F, colour,
+                 thickness * 0.8F);
+            break;
+        }
+        case Icon::search: {
+            draw_list->AddCircle(
+                point(min, max, 0.42F, 0.42F), extent * 0.22F, colour, 16,
+                thickness);
+            line(draw_list, min, max, 0.58F, 0.58F, 0.78F, 0.78F, colour,
+                 thickness);
+            break;
+        }
+        case Icon::follow: {
+            line(draw_list, min, max, 0.50F, 0.18F, 0.50F, 0.62F, colour,
+                 thickness);
+            arrow_head(
+                draw_list, point(min, max, 0.50F, 0.62F),
+                point(min, max, 0.34F, 0.46F),
+                point(min, max, 0.66F, 0.46F), colour, thickness);
+            line(draw_list, min, max, 0.22F, 0.78F, 0.78F, 0.78F, colour,
+                 thickness);
+            break;
+        }
     }
 }
 

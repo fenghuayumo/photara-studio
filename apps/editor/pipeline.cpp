@@ -1,9 +1,11 @@
 #include "pipeline.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -132,6 +134,16 @@ const char* sfm_mode_flag(const int index) {
 
 }  // namespace
 
+const char* job_name(const JobKind kind) {
+    switch (kind) {
+        case JobKind::align: return "Alignment";
+        case JobKind::train: return "Training";
+        case JobKind::export_sfm: return "SfM export";
+        case JobKind::none: return "Job";
+    }
+    return "Job";
+}
+
 const char* stage_name(const Stage stage) {
     switch (stage) {
         case Stage::idle: return "Idle";
@@ -153,11 +165,62 @@ const char* stage_name(const Stage stage) {
 // ---------------------------------------------------------------------------
 // LogStream
 
+namespace {
+
+bool is_digit(const char value) {
+    return value >= '0' && value <= '9';
+}
+
+ConsoleSeverity severity_from_tag(const std::string_view tag) {
+    if (tag == "error") return ConsoleSeverity::error;
+    if (tag == "warning" || tag == "warn") return ConsoleSeverity::warning;
+    if (tag == "debug" || tag == "trace") return ConsoleSeverity::debug;
+    if (tag == "info") return ConsoleSeverity::info;
+    return ConsoleSeverity::other;
+}
+
+void count_severity(ConsoleCounts& counts, const ConsoleSeverity severity, const int delta) {
+    counts.total += delta;
+    switch (severity) {
+        case ConsoleSeverity::warning: counts.warning += delta; break;
+        case ConsoleSeverity::error: counts.error += delta; break;
+        default: counts.info += delta; break;
+    }
+}
+
+ConsoleLine parse_console_line(std::string raw) {
+    ConsoleLine line;
+    // Logger prefix: "YYYY-MM-DD HH:MM:SS.mmm [level] message"
+    constexpr std::size_t k_timestamp = 23;
+    if (raw.size() > k_timestamp + 3 && is_digit(raw[0]) && raw[4] == '-' &&
+        raw[10] == ' ' && raw[13] == ':' && raw[16] == ':' && raw[19] == '.') {
+        line.time.assign(raw, 11, 12);
+        const std::size_t open = raw.find('[', k_timestamp);
+        const std::size_t close =
+            open == std::string::npos ? std::string::npos : raw.find(']', open);
+        if (open != std::string::npos && close != std::string::npos) {
+            line.severity = severity_from_tag(std::string_view(
+                raw.data() + open + 1, close - open - 1));
+            std::size_t message = close + 1;
+            while (message < raw.size() && raw[message] == ' ') ++message;
+            line.message = raw.substr(message);
+            return line;
+        }
+    }
+    line.severity = ConsoleSeverity::other;
+    line.message = std::move(raw);
+    return line;
+}
+
+}  // namespace
+
 void LogStream::open(const std::filesystem::path& path) {
     path_ = path;
     offset_ = 0;
     partial_.clear();
-    console_.clear();
+    lines_.clear();
+    counts_ = {};
+    ++generation_;
 }
 
 void LogStream::close() {
@@ -168,7 +231,34 @@ void LogStream::close() {
 
 void LogStream::clear() {
     close();
-    console_.clear();
+    clear_display();
+}
+
+void LogStream::clear_display() {
+    lines_.clear();
+    counts_ = {};
+    ++generation_;
+}
+
+void LogStream::push_line(std::string line) {
+    ConsoleLine parsed = parse_console_line(std::move(line));
+    count_severity(counts_, parsed.severity, 1);
+    lines_.push_back(std::move(parsed));
+    ++generation_;
+}
+
+void LogStream::recount() {
+    counts_ = {};
+    for (const ConsoleLine& line : lines_)
+        count_severity(counts_, line.severity, 1);
+}
+
+void LogStream::trim_if_needed() {
+    if (lines_.size() <= k_max_lines) return;
+    const std::size_t drop = lines_.size() - (k_max_lines * 3) / 4;
+    lines_.erase(lines_.begin(), lines_.begin() + static_cast<std::ptrdiff_t>(drop));
+    recount();
+    ++generation_;
 }
 
 void LogStream::poll(std::vector<std::string>& fresh_lines) {
@@ -181,7 +271,9 @@ void LogStream::poll(std::vector<std::string>& fresh_lines) {
     if (size < offset_) {
         offset_ = 0;
         partial_.clear();
-        console_.clear();
+        lines_.clear();
+        counts_ = {};
+        ++generation_;
     }
     if (size == offset_) return;
 
@@ -196,14 +288,6 @@ void LogStream::poll(std::vector<std::string>& fresh_lines) {
     offset_ += chunk.size();
     if (chunk.empty()) return;
 
-    console_ += chunk;
-    if (console_.size() > k_console_budget) {
-        const std::size_t excess = console_.size() - k_console_budget;
-        const std::size_t line_break = console_.find('\n', excess);
-        console_.erase(
-            0, line_break == std::string::npos ? excess : line_break + 1);
-    }
-
     partial_ += chunk;
     std::size_t begin = 0;
     while (true) {
@@ -211,10 +295,14 @@ void LogStream::poll(std::vector<std::string>& fresh_lines) {
         if (newline == std::string::npos) break;
         std::string line = partial_.substr(begin, newline - begin);
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (!line.empty()) fresh_lines.push_back(std::move(line));
+        if (!line.empty()) {
+            fresh_lines.push_back(line);
+            push_line(std::move(line));
+        }
         begin = newline + 1;
     }
     partial_.erase(0, begin);
+    trim_if_needed();
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +324,7 @@ void RunMonitor::reset() {
 void RunMonitor::begin(const JobKind kind) {
     reset();
     kind_ = kind;
-    stage_ = kind == JobKind::align ? Stage::features : Stage::training;
+    stage_ = kind == JobKind::train ? Stage::training : Stage::features;
     band_begin_ = 0.F;
     band_end_ = 0.F;
 }
@@ -312,7 +400,7 @@ void RunMonitor::consume(const std::string& line) {
                      name.find("mapping") != std::string::npos)
                 enter_stage(
                     Stage::mapping,
-                    kind_ == JobKind::align ? 0.77F : 0.09F);
+                    kind_ == JobKind::train ? 0.09F : 0.77F);
             else if (
                 name == "splat.mesh_render_geometry" || name == "splat.pam" ||
                 name.rfind("mvs.mesh", 0) == 0 || name == "mvs.fuse")
@@ -326,13 +414,13 @@ void RunMonitor::consume(const std::string& line) {
     if (line.find("frontend: images=") != std::string::npos ||
         line.find("frontend diagnostics:") != std::string::npos) {
         enter_stage(
-            Stage::mapping, kind_ == JobKind::align ? 0.77F : 0.09F);
+            Stage::mapping, kind_ == JobKind::train ? 0.09F : 0.77F);
         task_ = {};
         return;
     }
 
     if (line.find("sfm_diagnostics=") != std::string::npos &&
-        kind_ == JobKind::align) {
+        kind_ != JobKind::train) {
         enter_stage(Stage::exporting, 0.97F);
         task_ = {};
         return;
@@ -351,10 +439,11 @@ void RunMonitor::consume(const std::string& line) {
     if (metrics_at == std::string::npos) return;
     const std::string label = line.substr(label_begin, metrics_at - label_begin);
 
-    const Band* bands = kind_ == JobKind::align ? k_align_bands : k_train_bands;
-    const std::size_t band_count = kind_ == JobKind::align
-        ? std::size(k_align_bands)
-        : std::size(k_train_bands);
+    const Band* bands =
+        kind_ == JobKind::train ? k_train_bands : k_align_bands;
+    const std::size_t band_count = kind_ == JobKind::train
+        ? std::size(k_train_bands)
+        : std::size(k_align_bands);
     const Band* match = nullptr;
     for (std::size_t i = 0; i < band_count; ++i)
         if (starts_with(label, bands[i].prefix)) {
@@ -426,7 +515,7 @@ std::string RunMonitor::headline() const {
         text += " / ";
         text += std::to_string(training_.total_iterations);
     } else if (task_.active && !task_.label.empty()) {
-        text += "  ·  ";
+        text += "  |  ";
         text += task_.label;
     }
     return text;
@@ -522,12 +611,14 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.root = std::filesystem::path(settings.project_dir.data());
     layout.cache = layout.root / "cache";
     layout.sparse_ply = layout.root / "sparse.ply";
+    layout.sparse_mvs = layout.root / "sparse.mvs";
     layout.sparse_poses = layout.root / "sparse_sfm_diagnostics.csv";
     layout.model_output = layout.root / "model.ply";
     layout.splat_ply = layout.root / "model_splat.ply";
     layout.mesh_ply = layout.root / "model_splat_mesh.ply";
     layout.align_log = layout.root / "editor_align.log";
     layout.train_log = layout.root / "editor_train.log";
+    layout.export_log = layout.root / "editor_export.log";
     return layout;
 }
 
@@ -535,8 +626,10 @@ std::string build_align_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout) {
     std::ostringstream command;
-    // Deliberately no --capture-mode / --splat / --mesh: those switch the CLI
-    // into a full rebuild. This invocation stops after the sparse export.
+    // Deliberately no --capture-mode / --splat / --mesh / --export-mvs: those
+    // switch the CLI into a full rebuild or write an OpenMVS sidecar. Align
+    // keeps the SfM scene in the reconstruction cache and only writes the
+    // sparse PLY the viewport needs.
     command << quote(cli_path) << " --images "
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.sparse_ply) << " --mode "
@@ -553,11 +646,13 @@ std::string build_train_command(
     std::ostringstream command;
     command << quote(cli_path) << " --images "
             << quote(settings.images_dir.data()) << " --output "
-            << quote(layout.model_output) << " --mode "
-            << sfm_mode_flag(settings.sfm_mode) << " --max-features "
-            << settings.max_features;
-    // The shared cache turns the SfM prefix into a checkpoint hit, so the
-    // alignment the user just reviewed is reused verbatim.
+            << quote(layout.model_output);
+
+    // Training is a new process, so the SfM `Scene` from Align is restored
+    // from the reconstruction cache into memory, then `build_mvs_scene` runs
+    // in-process. OpenMVS files are never the hand-off.
+    command << " --mode " << sfm_mode_flag(settings.sfm_mode)
+            << " --max-features " << settings.max_features;
     if (settings.reuse_cache)
         command << " --cache-dir " << quote(layout.cache);
 
@@ -597,6 +692,21 @@ std::string build_train_command(
                 << " --splat-preview-vk-device-node-mask "
                 << preview.device_node_mask;
     }
+    return command.str();
+}
+
+std::string build_export_sfm_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout) {
+    std::ostringstream command;
+    command << quote(cli_path) << " --images "
+            << quote(settings.images_dir.data()) << " --output "
+            << quote(layout.sparse_mvs) << " --mode "
+            << sfm_mode_flag(settings.sfm_mode) << " --max-features "
+            << settings.max_features;
+    std::error_code exists_error;
+    if (std::filesystem::exists(layout.cache, exists_error))
+        command << " --cache-dir " << quote(layout.cache);
     return command.str();
 }
 
