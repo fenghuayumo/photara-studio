@@ -637,7 +637,8 @@ Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {}
 
 GaussianModel Trainer::train(
     const mvs::MvsScene& scene, ProgressCallback progress,
-    EvaluationCallback evaluate) const {
+    EvaluationCallback evaluate, PreviewCallback preview,
+    DevicePreviewCallback device_preview) const {
     if (scene.views.empty())
         throw std::invalid_argument("Splat training requires at least one MVS view");
     GaussianModel model = initialize_from_dense_cloud(scene, options_);
@@ -891,6 +892,34 @@ GaussianModel Trainer::train(
         cuda_profiler.begin_iteration(iteration, model.size());
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
         cuda_profiler.mark(CudaTrainingStage::raster_forward);
+        const bool emit_preview = options_.preview_interval != 0 &&
+            (iteration % options_.preview_interval == 0 ||
+             iteration == options_.iterations);
+        if (device_preview && emit_preview) {
+            device_preview(
+                iteration, view_index, target.camera, rendered.color);
+        } else if (preview && emit_preview) {
+            const std::vector<float> planar = download<float>(rendered.color);
+            const std::size_t pixels =
+                static_cast<std::size_t>(target.camera.width) *
+                target.camera.height;
+            TrainingPreview frame;
+            frame.iteration = iteration;
+            frame.view_index = view_index;
+            frame.width = target.camera.width;
+            frame.height = target.camera.height;
+            frame.rgb.resize(3 * pixels);
+            for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    const float value = std::clamp(
+                        planar[channel * pixels + pixel], 0.F, 1.F);
+                    frame.rgb[3 * pixel + channel] =
+                        static_cast<std::uint8_t>(
+                            std::lround(value * 255.F));
+                }
+            }
+            preview(std::move(frame));
+        }
         detail::LossGradients loss = detail::compute_training_loss(
             rendered, target, options_, report_progress,
             depth_normal_active);

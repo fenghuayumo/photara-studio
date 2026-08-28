@@ -299,6 +299,35 @@ run_rebuild(scene, cfg):
 6. 质量档 `preview/default/high` 控制训练步数、Gaussian 上限、TSDF voxel/truncation、
    texture 分辨率和 Delight，不再控制 PatchMatch。
 
+### Vulkan 编辑器与训练预览
+
+`aetherscan_editor` 使用 GLFW + Dear ImGui + Vulkan。编辑器创建可导出的 Vulkan image 与
+timeline semaphore，以可继承 Win32 HANDLE 启动独立 `aetherscan` 重建进程。训练进程按 Vulkan
+physical-device LUID 选择同一块 CUDA GPU，导入 image/semaphore，并把该步已有的 planar-float
+raster color 直接写入 Vulkan image；不克隆 GaussianModel、不额外渲染、不经过 CPU/PNG：
+
+```powershell
+cmake -S . -B build -DAETHERSCAN_BUILD_EDITOR=ON
+cmake --build build --config Release --target aetherscan_editor --parallel
+build\aetherscan\Release\aetherscan_editor.exe
+
+# 同一预览接口也可脱离 GUI 使用
+aetherscan --images images --output object.ply --splat `
+  --splat-strategy adc_plus --splat-preview-interval 50 `
+  --splat-preview-dir live_previews
+```
+
+同步协议为单 image、双向 timeline：CUDA 等待 `2*(N-1)`、写入并 signal `2*N-1`；Vulkan
+等待奇数值，将 shared image 在 GPU 内复制到常驻显示纹理，release queue-family ownership，
+再 signal `2*N`。常驻纹理允许 UI 持续显示上一帧，CUDA 只会在下一预览点等待 Vulkan 完成一次
+GPU copy。CLI 未收到 external handles 时仍保留 RGB8/PNG 回退，便于无互操作环境诊断。
+窗口最小化时编辑器继续在无 present 的 command buffer 中消费/释放共享帧，避免 CUDA 在下一
+预览点因 WSI 暂停而阻塞。
+
+Windows/NVIDIA 回归使用两帧验证完整往返：iteration 50 signal timeline 1，Vulkan copy/release
+signal 2，iteration 100 wait 2 后 signal 3。第二帧无死锁且训练完成；`step_ms` 不再包含
+GPU→CPU readback 与 PNG 编码。
+
 ---
 
 ## 实施顺序

@@ -52,6 +52,16 @@ struct RenderMetrics {
     float alpha_coverage{};
 };
 
+struct TrainingPreview {
+    unsigned iteration{};
+    std::size_t view_index{};
+    std::uint32_t width{};
+    std::uint32_t height{};
+    // Top-left-origin, interleaved 8-bit RGB. Ownership is transferred to the
+    // callback so an editor can enqueue the frame without retaining tensors.
+    std::vector<std::uint8_t> rgb;
+};
+
 struct SplatMeshOptions {
     // GS-2M/pygsplat fallback threshold when the dataset has no input mask.
     // With a mask, the mask alone defines valid extraction pixels.
@@ -114,6 +124,13 @@ struct PamMeshResult {
 using ProgressCallback = std::function<bool(const TrainingProgress&)>;
 using EvaluationCallback =
     std::function<void(unsigned iteration, const GaussianModel& model)>;
+using PreviewCallback = std::function<void(TrainingPreview)>;
+// Called while the raster color tensor is still resident on CUDA. The tensor
+// is planar float RGB [3,H,W] and is valid only for the duration of the call.
+// This is the zero-copy hook used by CUDA/Vulkan external-memory interop.
+using DevicePreviewCallback = std::function<void(
+    unsigned iteration, std::size_t view_index, const Camera& camera,
+    const tinytensor::Tensor& color)>;
 
 Camera camera_from_mvs_view(const mvs::MvsView& view);
 
@@ -129,7 +146,8 @@ public:
 
     GaussianModel train(
         const mvs::MvsScene& scene, ProgressCallback progress = {},
-        EvaluationCallback evaluate = {}) const;
+        EvaluationCallback evaluate = {}, PreviewCallback preview = {},
+        DevicePreviewCallback device_preview = {}) const;
 
 private:
     TrainingOptions options_;

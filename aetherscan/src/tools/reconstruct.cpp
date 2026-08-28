@@ -4,8 +4,10 @@
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
 #include "core/logging.hpp"
+#include "io/image.hpp"
 #if defined(AETHERSCAN_HAS_SPLAT)
 #include "splat/dataset.hpp"
+#include "splat/cuda_vulkan_preview.hpp"
 #include "splat/trainer.hpp"
 #endif
 #if defined(AETHERSCAN_HAS_TEXTURE)
@@ -32,6 +34,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -84,6 +87,15 @@ struct ReconstructCli {
     std::filesystem::path dense_ply;
     std::filesystem::path splat_model;
     unsigned splat_iterations{10'000};
+    unsigned splat_preview_interval{0};
+    std::filesystem::path splat_preview_dir;
+    std::uint64_t splat_preview_vk_memory_handle{};
+    std::uint64_t splat_preview_vk_semaphore_handle{};
+    std::uint64_t splat_preview_vk_allocation_size{};
+    unsigned splat_preview_vk_width{};
+    unsigned splat_preview_vk_height{};
+    std::uint64_t splat_preview_vk_device_luid{};
+    unsigned splat_preview_vk_device_node_mask{};
     bool splat_profile_cuda{false};
     unsigned splat_profile_interval{100};
     std::uint64_t splat_max_gaussians{500'000};
@@ -262,6 +274,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-model PATH  load a trained splat PLY and skip optimization\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
+              << "  --splat-preview-interval N  emit the current training render every N steps (0 disables)\n"
+              << "  --splat-preview-dir PATH  editor preview PNG directory\n"
               << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
               << "  --splat-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
@@ -425,6 +439,28 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-iterations", "Splat optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
+        ("splat-preview-interval",
+         "Emit the already-rendered training view every N iterations",
+         cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-preview-dir", "Directory for live training preview PNGs",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-preview-vk-memory-handle",
+         "Inherited Win32 Vulkan external-memory handle",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("splat-preview-vk-semaphore-handle",
+         "Inherited Win32 Vulkan timeline-semaphore handle",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("splat-preview-vk-allocation-size",
+         "Vulkan external image allocation size",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("splat-preview-vk-width", "Vulkan external image width",
+         cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-preview-vk-height", "Vulkan external image height",
+         cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-preview-vk-device-luid", "Vulkan physical-device Win32 LUID",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("splat-preview-vk-device-node-mask", "Vulkan device-node mask",
+         cxxopts::value<unsigned>()->default_value("0"))
         ("splat-profile-cuda",
          "Record windowed CUDA-event timings for splat training stages",
          cxxopts::value<bool>()->default_value("false")
@@ -710,6 +746,26 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!splat_model_text.empty())
         cli.splat_model = utf8_to_path(splat_model_text);
     cli.splat_iterations = result["splat-iterations"].as<unsigned>();
+    cli.splat_preview_interval =
+        result["splat-preview-interval"].as<unsigned>();
+    const std::string splat_preview_dir_text =
+        result["splat-preview-dir"].as<std::string>();
+    if (!splat_preview_dir_text.empty())
+        cli.splat_preview_dir = utf8_to_path(splat_preview_dir_text);
+    cli.splat_preview_vk_memory_handle =
+        result["splat-preview-vk-memory-handle"].as<std::uint64_t>();
+    cli.splat_preview_vk_semaphore_handle =
+        result["splat-preview-vk-semaphore-handle"].as<std::uint64_t>();
+    cli.splat_preview_vk_allocation_size =
+        result["splat-preview-vk-allocation-size"].as<std::uint64_t>();
+    cli.splat_preview_vk_width =
+        result["splat-preview-vk-width"].as<unsigned>();
+    cli.splat_preview_vk_height =
+        result["splat-preview-vk-height"].as<unsigned>();
+    cli.splat_preview_vk_device_luid =
+        result["splat-preview-vk-device-luid"].as<std::uint64_t>();
+    cli.splat_preview_vk_device_node_mask =
+        result["splat-preview-vk-device-node-mask"].as<unsigned>();
     cli.splat_profile_cuda = result["splat-profile-cuda"].as<bool>();
     cli.splat_profile_interval =
         result["splat-profile-interval"].as<unsigned>();
@@ -1560,6 +1616,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     const std::filesystem::path& generated_mask_dir = {}) {
     aetherscan::splat::TrainingOptions options;
     options.iterations = cli.splat_iterations;
+    options.preview_interval = cli.splat_preview_interval;
     options.max_gaussians = static_cast<std::size_t>(
         std::min<std::uint64_t>(
             cli.splat_max_gaussians,
@@ -1884,6 +1941,70 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                 masked_psnr_sum / evaluation_views.size());
         };
     const auto started = std::chrono::steady_clock::now();
+    aetherscan::splat::PreviewCallback preview;
+    aetherscan::splat::DevicePreviewCallback device_preview;
+    std::unique_ptr<aetherscan::splat::CudaVulkanPreview> vulkan_preview;
+    const bool has_vulkan_preview =
+        cli.splat_preview_vk_memory_handle != 0 &&
+        cli.splat_preview_vk_semaphore_handle != 0 &&
+        cli.splat_preview_vk_allocation_size != 0 &&
+        cli.splat_preview_vk_width != 0 &&
+        cli.splat_preview_vk_height != 0;
+    if (options.preview_interval != 0 && has_vulkan_preview) {
+        vulkan_preview =
+            std::make_unique<aetherscan::splat::CudaVulkanPreview>(
+                aetherscan::splat::CudaVulkanPreviewOptions{
+                    cli.splat_preview_vk_memory_handle,
+                    cli.splat_preview_vk_semaphore_handle,
+                    cli.splat_preview_vk_allocation_size,
+                    cli.splat_preview_vk_width,
+                    cli.splat_preview_vk_height,
+                    cli.splat_preview_vk_device_luid,
+                    cli.splat_preview_vk_device_node_mask});
+        device_preview = [&vulkan_preview](
+                             const unsigned iteration,
+                             const std::size_t view_index,
+                             const aetherscan::splat::Camera& camera,
+                             const tinytensor::Tensor& color) {
+            vulkan_preview->submit(color, camera.width, camera.height);
+            aetherscan::core::Logger::instance().info(
+                "splat_preview_iteration=", iteration,
+                " view=", view_index,
+                " transport=cuda_vulkan_external_memory",
+                " timeline_value=", 2 * vulkan_preview->frame_count() - 1);
+        };
+        aetherscan::core::Logger::instance().info(
+            "splat_preview_transport=cuda_vulkan_external_memory extent=",
+            cli.splat_preview_vk_width, 'x',
+            cli.splat_preview_vk_height);
+    } else if (options.preview_interval != 0) {
+        const std::filesystem::path preview_dir =
+            cli.splat_preview_dir.empty()
+                ? out_dir / "splat_previews"
+                : cli.splat_preview_dir;
+        std::filesystem::create_directories(preview_dir);
+        preview = [preview_dir, previous = std::filesystem::path{}](
+                      aetherscan::splat::TrainingPreview frame) mutable {
+            aetherscan::io::RgbImage image;
+            image.width = frame.width;
+            image.height = frame.height;
+            image.pixels = std::move(frame.rgb);
+            std::ostringstream filename;
+            filename << "preview_iter_" << std::setw(8)
+                     << std::setfill('0') << frame.iteration << "_view_"
+                     << frame.view_index << ".png";
+            const auto path = preview_dir / filename.str();
+            aetherscan::io::save_rgb_png(image, path);
+            if (!previous.empty()) {
+                std::error_code remove_error;
+                std::filesystem::remove(previous, remove_error);
+            }
+            previous = path;
+            aetherscan::core::Logger::instance().info(
+                "splat_preview_iteration=", frame.iteration,
+                " view=", frame.view_index, " image=", path);
+        };
+    }
     aetherscan::splat::GaussianModel gaussians;
     if (!cli.splat_model.empty()) {
         gaussians =
@@ -1923,7 +2044,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                     " step_ms=", progress.milliseconds);
                 return true;
             },
-            evaluate);
+            evaluate, preview, device_preview);
     }
     const auto ply = cli.splat_model.empty()
         ? out_dir / (cli.output.stem().string() + "_splat.ply")

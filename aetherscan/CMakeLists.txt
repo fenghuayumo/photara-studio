@@ -370,6 +370,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         add_library(aetherscan_splat_cuda STATIC
             src/splat/rasterizer.cu
             src/splat/cuda_ops.cu
+            src/splat/cuda_vulkan_preview.cu
             src/splat/fused_ssim.cu)
         target_include_directories(aetherscan_splat_cuda
             PUBLIC
@@ -593,6 +594,57 @@ if(AETHERSCAN_ENABLE_FEATURES)
                     $<TARGET_RUNTIME_DLLS:aetherscan>
                     $<TARGET_FILE_DIR:aetherscan>
                 COMMAND_EXPAND_LISTS)
+        endif()
+
+        if(AETHERSCAN_BUILD_EDITOR)
+            find_package(Vulkan 1.2 REQUIRED)
+            find_package(glfw3 CONFIG REQUIRED)
+            include(FetchContent)
+            get_filename_component(
+                _aetherscan_vcpkg_root "${glfw3_DIR}/../../../.." ABSOLUTE)
+            file(GLOB _aetherscan_imgui_local
+                "${_aetherscan_vcpkg_root}/buildtrees/imgui/src/v1.91.9-*.clean")
+            if(_aetherscan_imgui_local)
+                list(GET _aetherscan_imgui_local 0 _aetherscan_imgui_source)
+                FetchContent_Declare(aetherscan_imgui
+                    SOURCE_DIR "${_aetherscan_imgui_source}")
+            else()
+                FetchContent_Declare(
+                    aetherscan_imgui
+                    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+                    GIT_TAG 365f6444ab40ee87c73c947b475b3a267b3cb77c
+                    GIT_SHALLOW FALSE)
+            endif()
+            FetchContent_MakeAvailable(aetherscan_imgui)
+            add_library(aetherscan_imgui STATIC
+                ${aetherscan_imgui_SOURCE_DIR}/imgui.cpp
+                ${aetherscan_imgui_SOURCE_DIR}/imgui_draw.cpp
+                ${aetherscan_imgui_SOURCE_DIR}/imgui_tables.cpp
+                ${aetherscan_imgui_SOURCE_DIR}/imgui_widgets.cpp
+                ${aetherscan_imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+                ${aetherscan_imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
+            target_include_directories(aetherscan_imgui PUBLIC
+                ${aetherscan_imgui_SOURCE_DIR}
+                ${aetherscan_imgui_SOURCE_DIR}/backends)
+            target_link_libraries(aetherscan_imgui PUBLIC
+                Vulkan::Vulkan glfw)
+            target_compile_features(aetherscan_imgui PUBLIC cxx_std_20)
+
+            add_executable(aetherscan_editor
+                ${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor/main.cpp)
+            target_link_libraries(aetherscan_editor PRIVATE
+                aetherscan_imgui AetherScan::Features Vulkan::Vulkan glfw)
+            target_compile_features(aetherscan_editor PRIVATE cxx_std_20)
+            target_compile_definitions(aetherscan_editor PRIVATE
+                AETHERSCAN_CLI_PATH="$<TARGET_FILE:aetherscan>")
+            add_dependencies(aetherscan_editor aetherscan)
+            if(WIN32)
+                add_custom_command(TARGET aetherscan_editor POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:aetherscan_editor>
+                        $<TARGET_FILE_DIR:aetherscan_editor>
+                    COMMAND_EXPAND_LISTS)
+            endif()
         endif()
     endif()
 endif()
