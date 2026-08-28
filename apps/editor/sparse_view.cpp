@@ -16,6 +16,7 @@ namespace {
 // SfM reconstructions use a Y-down world, so world "up" is -Y.
 constexpr Vec3 k_world_up{0.F, -1.F, 0.F};
 constexpr float k_near_plane = 1e-4F;
+constexpr float k_far_plane = 1e5F;
 // Cap so a multi-million-point dense or splat PLY cannot exhaust host memory.
 constexpr std::size_t k_max_loaded_points = 4'000'000;
 
@@ -48,6 +49,8 @@ struct ViewFrame {
     Vec3 up;
     Vec3 forward;
     float focal{};
+    float half_x{};
+    float half_y{};
     ImVec2 centre;
 };
 
@@ -63,8 +66,11 @@ ViewFrame build_frame(
     frame.right = normalize(cross(frame.forward, k_world_up));
     frame.up = cross(frame.right, frame.forward);
     const float height = std::max(1.F, max.y - min.y);
+    const float width = std::max(1.F, max.x - min.x);
     const float half_fov = camera.fov_degrees * 0.5F * 3.14159265F / 180.F;
     frame.focal = height * 0.5F / std::max(1e-4F, std::tan(half_fov));
+    frame.half_x = width * 0.5F;
+    frame.half_y = height * 0.5F;
     frame.centre = {(min.x + max.x) * 0.5F, (min.y + max.y) * 0.5F};
     return frame;
 }
@@ -81,36 +87,185 @@ bool project(
     return true;
 }
 
-// Draws a world-space segment, dropping the part behind the near plane.
+// Keeps the parameter interval [t0, t1] of P(t)=P0+t(P1-P0) inside t*den >= num.
+bool keep_halfspace(const float num, const float den, float& t0, float& t1) {
+    constexpr float eps = 1e-12F;
+    if (std::abs(den) < eps) return num <= 0.F;
+    const float t = num / den;
+    if (den > 0.F) {
+        if (t > t1) return false;
+        t0 = std::max(t0, t);
+    } else {
+        if (t < t0) return false;
+        t1 = std::min(t1, t);
+    }
+    return t0 <= t1;
+}
+
+// Clips the segment to the view frustum so grazing lines near the camera
+// cannot explode to huge screen coordinates and streak across the viewport.
 void draw_segment(
     ImDrawList* draw, const ViewFrame& frame, const Vec3 a, const Vec3 b,
     const ImU32 colour, const float thickness = 1.F) {
-    ImVec2 screen_a;
-    ImVec2 screen_b;
-    float depth_a{};
-    float depth_b{};
-    const bool visible_a = project(frame, a, screen_a, depth_a);
-    const bool visible_b = project(frame, b, screen_b, depth_b);
-    if (!visible_a && !visible_b) return;
-    if (visible_a && visible_b) {
-        draw->AddLine(screen_a, screen_b, colour, thickness);
-        return;
+    const Vec3 rel_a = a - frame.eye;
+    const Vec3 rel_b = b - frame.eye;
+    const float ax = dot(rel_a, frame.right);
+    const float ay = dot(rel_a, frame.up);
+    const float az = dot(rel_a, frame.forward);
+    const float bx = dot(rel_b, frame.right);
+    const float by = dot(rel_b, frame.up);
+    const float bz = dot(rel_b, frame.forward);
+    const float dx = bx - ax;
+    const float dy = by - ay;
+    const float dz = bz - az;
+    float t0 = 0.F;
+    float t1 = 1.F;
+    if (!keep_halfspace(k_near_plane - az, dz, t0, t1)) return;
+    if (!keep_halfspace(az - k_far_plane, -dz, t0, t1)) return;
+    const float pad = 1.15F;
+    const float tx = frame.half_x * pad / std::max(1e-4F, frame.focal);
+    const float ty = frame.half_y * pad / std::max(1e-4F, frame.focal);
+    if (!keep_halfspace(ax - tx * az, tx * dz - dx, t0, t1)) return;
+    if (!keep_halfspace(-(ax + tx * az), dx + tx * dz, t0, t1)) return;
+    if (!keep_halfspace(ay - ty * az, ty * dz - dy, t0, t1)) return;
+    if (!keep_halfspace(-(ay + ty * az), dy + ty * dz, t0, t1)) return;
+
+    const float cx0 = ax + dx * t0;
+    const float cy0 = ay + dy * t0;
+    const float cz0 = az + dz * t0;
+    const float cx1 = ax + dx * t1;
+    const float cy1 = ay + dy * t1;
+    const float cz1 = az + dz * t1;
+    if (cz0 <= k_near_plane || cz1 <= k_near_plane) return;
+    const ImVec2 screen_a{
+        frame.centre.x + cx0 * frame.focal / cz0,
+        frame.centre.y - cy0 * frame.focal / cz0};
+    const ImVec2 screen_b{
+        frame.centre.x + cx1 * frame.focal / cz1,
+        frame.centre.y - cy1 * frame.focal / cz1};
+    draw->AddLine(screen_a, screen_b, colour, thickness);
+}
+
+float snap_grid_cell(const float desired) {
+    const float value = std::max(desired, 1e-8F);
+    const float exponent = std::floor(std::log10(value));
+    const float base = std::pow(10.F, exponent);
+    const float mantissa = value / base;
+    if (mantissa < 1.5F) return base;
+    if (mantissa < 3.5F) return 2.F * base;
+    if (mantissa < 7.5F) return 5.F * base;
+    return 10.F * base;
+}
+
+bool is_multiple(const float value, const float step) {
+    if (step <= 1e-20F) return false;
+    const float scaled = value / step;
+    return std::abs(scaled - std::round(scaled)) < 1e-4F;
+}
+
+float grid_horizon_extent(
+    const ViewFrame& frame, const OrbitCamera& camera, const float plane_y,
+    const float focus_x, const float focus_z) {
+    float extent = camera.distance * 4.F;
+    const float xs[3] = {-frame.half_x, 0.F, frame.half_x};
+    const float ys[3] = {-frame.half_y, 0.F, frame.half_y};
+    for (const float sx : xs) {
+        for (const float sy : ys) {
+            const Vec3 dir = normalize(
+                frame.forward * frame.focal + frame.right * sx + frame.up * sy);
+            if (std::abs(dir.y) < 1e-6F) continue;
+            const float t = (plane_y - frame.eye.y) / dir.y;
+            if (t <= k_near_plane) continue;
+            const Vec3 hit = frame.eye + dir * t;
+            const float dx = hit.x - focus_x;
+            const float dz = hit.z - focus_z;
+            extent = std::max(extent, std::sqrt(dx * dx + dz * dz));
+        }
     }
-    // Clip against the near plane so the segment does not wrap around.
-    const Vec3 inside = visible_a ? a : b;
-    const Vec3 outside = visible_a ? b : a;
-    const float inside_depth = visible_a ? depth_a : depth_b;
-    const float outside_depth = visible_a ? depth_b : depth_a;
-    const float span = inside_depth - outside_depth;
-    if (std::abs(span) < 1e-9F) return;
-    const float t = (inside_depth - k_near_plane * 1.01F) / span;
-    const Vec3 clipped = inside + (outside - inside) * std::clamp(t, 0.F, 1.F);
-    ImVec2 screen_clipped;
-    float clipped_depth{};
-    if (!project(frame, clipped, screen_clipped, clipped_depth)) return;
-    draw->AddLine(
-        visible_a ? screen_a : screen_clipped,
-        visible_a ? screen_clipped : screen_b, colour, thickness);
+    return extent * 1.25F;
+}
+
+// World-locked XZ ground grid. Dense cells around the look-at, major lines
+// continuing to the horizon so the upper view is ground, not an empty void.
+void draw_ground_grid(
+    ImDrawList* draw, const ViewFrame& frame, const OrbitCamera& camera,
+    const float plane_y) {
+    const float world_per_pixel =
+        camera.distance / std::max(1.F, frame.focal);
+    const float minor = snap_grid_cell(world_per_pixel * 40.F);
+    const float major = minor * 10.F;
+    const float focus_x = camera.target.x;
+    const float focus_z = camera.target.z;
+    const float horizon = grid_horizon_extent(
+        frame, camera, plane_y, focus_x, focus_z);
+    constexpr int k_minor_cells = 36;
+    const float inner = minor * static_cast<float>(k_minor_cells);
+    const float extent =
+        std::min(std::max(horizon, inner), major * 40.F);
+    const float origin_x = std::floor(focus_x / minor) * minor;
+    const float origin_z = std::floor(focus_z / minor) * minor;
+
+    auto radial_fade = [&](const float x, const float z) {
+        const float nx = (x - focus_x) / extent;
+        const float nz = (z - focus_z) / extent;
+        return std::clamp(1.F - nx * nx - nz * nz, 0.F, 1.F);
+    };
+
+    auto draw_faded_line = [&](
+        const Vec3 start, const Vec3 end, const ImVec4& rgb, const float alpha,
+        const float thickness, const int segments) {
+        for (int s = 0; s < segments; ++s) {
+            const float u0 = static_cast<float>(s) / segments;
+            const float u1 = static_cast<float>(s + 1) / segments;
+            const Vec3 p0 = start + (end - start) * u0;
+            const Vec3 p1 = start + (end - start) * u1;
+            const float fade =
+                radial_fade((p0.x + p1.x) * 0.5F, (p0.z + p1.z) * 0.5F);
+            if (fade * alpha < 0.02F) continue;
+            draw_segment(
+                draw, frame, p0, p1, theme::u32(rgb, alpha * fade), thickness);
+        }
+    };
+
+    const ImVec4 minor_rgb{0.30F, 0.33F, 0.38F, 1.F};
+    const ImVec4 major_rgb{0.42F, 0.45F, 0.52F, 1.F};
+    const ImVec4 axis_x{0.89F, 0.32F, 0.32F, 1.F};
+    const ImVec4 axis_z{0.31F, 0.60F, 0.92F, 1.F};
+
+    auto draw_axis_family = [&](const bool along_z) {
+        const int count = std::min(
+            240, static_cast<int>(std::ceil(extent / minor)));
+        const float snapped = along_z ? origin_x : origin_z;
+        for (int i = -count; i <= count; ++i) {
+            const float coord = snapped + static_cast<float>(i) * minor;
+            const float delta = along_z ? coord - focus_x : coord - focus_z;
+            if (std::abs(delta) > extent) continue;
+            const float span = std::sqrt(
+                std::max(0.F, extent * extent - delta * delta));
+            const bool origin = std::abs(coord) <= minor * 0.25F;
+            const bool major_line = origin || is_multiple(coord, major);
+            const bool inner_minor = std::abs(delta) <= inner + minor;
+            if (!major_line && !inner_minor) continue;
+            const ImVec4 rgb = origin ? (along_z ? axis_z : axis_x)
+                                      : (major_line ? major_rgb : minor_rgb);
+            const float alpha = origin ? 0.72F : (major_line ? 0.40F : 0.18F);
+            const int segments = major_line ? 8 : 4;
+            if (along_z) {
+                draw_faded_line(
+                    {coord, plane_y, focus_z - span},
+                    {coord, plane_y, focus_z + span}, rgb, alpha,
+                    origin ? 1.6F : 1.F, segments);
+            } else {
+                draw_faded_line(
+                    {focus_x - span, plane_y, coord},
+                    {focus_x + span, plane_y, coord}, rgb, alpha,
+                    origin ? 1.6F : 1.F, segments);
+            }
+        }
+    };
+
+    draw_axis_family(true);
+    draw_axis_family(false);
 }
 
 ImU32 depth_ramp(const float t) {
@@ -514,11 +669,16 @@ SceneLoad load_sparse_scene(
 }
 
 void OrbitCamera::frame(const SparseScene& scene) {
+    yaw = 0.785398F;
+    pitch = 0.61548F;
+    if (!scene.has_points()) {
+        target = {};
+        distance = 6.F;
+        return;
+    }
     target = scene.centroid;
     const float half_fov = fov_degrees * 0.5F * 3.14159265F / 180.F;
     distance = scene.radius / std::max(0.05F, std::tan(half_fov)) * 1.35F;
-    yaw = 0.7F;
-    pitch = 0.35F;
 }
 
 void update_orbit_camera(
@@ -602,26 +762,12 @@ SceneDrawStats SceneRenderer::draw(
     draw->PushClipRect(min, max, true);
 
     if (options.show_grid) {
-        // Ground plane one radius below the cloud, in the Y-down world. A
-        // straight 3D line stays straight under projection, so each grid line
-        // is a single near-plane-clipped segment.
-        const float extent = scene.radius * 3.F;
-        const float y = scene.centroid.y + scene.radius * 1.05F;
-        constexpr int lines = 14;
-        for (int i = -lines; i <= lines; ++i) {
-            const float t = static_cast<float>(i) / lines * extent;
-            const float fade =
-                1.F - std::abs(static_cast<float>(i)) / (lines + 2.F);
-            const ImU32 colour = theme::u32(
-                i == 0 ? theme::accent : ImVec4(0.35F, 0.38F, 0.44F, 1.F),
-                (i == 0 ? 0.32F : 0.15F) * fade);
-            draw_segment(
-                draw, frame, {scene.centroid.x + t, y, scene.centroid.z - extent},
-                {scene.centroid.x + t, y, scene.centroid.z + extent}, colour);
-            draw_segment(
-                draw, frame, {scene.centroid.x - extent, y, scene.centroid.z + t},
-                {scene.centroid.x + extent, y, scene.centroid.z + t}, colour);
-        }
+        // Empty stage sits on world Y=0. A loaded cloud gets a floor just
+        // below it so the grid does not cut through the reconstruction.
+        const float plane_y = scene.has_points()
+            ? scene.centroid.y + scene.radius * 1.05F
+            : 0.F;
+        draw_ground_grid(draw, frame, camera, plane_y);
     }
 
     // Points: project once into the scratch buffer so the depth ramp can be
@@ -803,12 +949,13 @@ SceneDrawStats SceneRenderer::draw(
         }
     }
 
-    // World origin axes, drawn last so they stay readable.
-    const float axis = scene.radius * 0.25F;
+    // World origin axes, drawn last so they stay readable. Green follows the
+    // gizmo convention: -Y is up in this Y-down reconstruction world.
+    const float axis = std::max(scene.radius * 0.25F, camera.distance * 0.08F);
     draw_segment(
         draw, frame, {0, 0, 0}, {axis, 0, 0}, IM_COL32(226, 82, 82, 200), 1.6F);
     draw_segment(
-        draw, frame, {0, 0, 0}, {0, axis, 0}, IM_COL32(86, 202, 121, 200), 1.6F);
+        draw, frame, {0, 0, 0}, {0, -axis, 0}, IM_COL32(86, 202, 121, 200), 1.6F);
     draw_segment(
         draw, frame, {0, 0, 0}, {0, 0, axis}, IM_COL32(79, 154, 235, 200), 1.6F);
 

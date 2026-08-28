@@ -60,9 +60,9 @@ SceneLoad load_sparse_scene(
     std::filesystem::path cloud_ply, std::filesystem::path poses_csv);
 
 struct OrbitCamera {
-    float yaw{0.7F};
-    float pitch{0.35F};
-    float distance{4.F};
+    float yaw{0.785398F};
+    float pitch{0.61548F};
+    float distance{6.F};
     Vec3 target;
     float fov_degrees{50.F};
     float move_speed{1.F};

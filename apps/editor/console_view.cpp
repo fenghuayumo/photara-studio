@@ -16,10 +16,13 @@
 namespace editor {
 namespace {
 
-constexpr float k_header_height = 36.F;
-constexpr float k_gutter = 3.F;
-constexpr float k_time_width = 98.F;
-constexpr float k_level_width = 46.F;
+constexpr float k_toolbar_height = 42.F;
+constexpr float k_filter_height = 40.F;
+constexpr float k_header_height = k_toolbar_height + k_filter_height;
+constexpr float k_gutter = 4.F;
+constexpr float k_time_width = 108.F;
+constexpr float k_level_width = 52.F;
+constexpr float k_row_pad = 16.F;
 
 bool contains_ci(const std::string_view hay, const std::string_view needle) {
     if (needle.empty()) return true;
@@ -146,41 +149,31 @@ bool filter_chip(
     std::snprintf(count_text, sizeof(count_text), "%d", count);
     const ImVec2 label_size = ImGui::CalcTextSize(label);
     const ImVec2 count_size = ImGui::CalcTextSize(count_text);
-    const ImVec2 size{label_size.x + count_size.x + 22.F, 24.F};
+    const ImVec2 size{label_size.x + count_size.x + 28.F, 28.F};
     const bool pressed = ImGui::InvisibleButton(id, size);
     const bool hovered = ImGui::IsItemHovered();
     const ImVec2 min = ImGui::GetItemRectMin();
     const ImVec2 max = ImGui::GetItemRectMax();
     ImDrawList* draw = ImGui::GetWindowDrawList();
 
-    const ImVec4 fill = active ? theme::fade(colour, 0.20F)
-                               : (hovered ? theme::surface_3 : theme::surface_2);
-    draw->AddRectFilled(min, max, theme::u32(fill), 4.F);
+    const ImVec4 fill = active ? theme::fade(colour, 0.18F)
+                               : (hovered ? theme::surface_3 : theme::surface_1);
+    draw->AddRectFilled(min, max, theme::u32(fill), 6.F);
     if (active)
-        draw->AddRect(min, max, theme::u32(colour, 0.55F), 4.F);
+        draw->AddRect(min, max, theme::u32(colour, 0.50F), 6.F);
     else if (hovered)
-        draw->AddRect(min, max, theme::u32(theme::border), 4.F);
+        draw->AddRect(min, max, theme::u32(theme::border, 0.8F), 6.F);
 
     const float text_y = min.y + (size.y - font->FontSize) * 0.5F;
     draw->AddText(
-        font, font->FontSize, {min.x + 8.F, text_y},
+        font, font->FontSize, {min.x + 11.F, text_y},
         theme::u32(active ? colour : theme::text_muted), label);
     draw->AddText(
-        font, font->FontSize, {min.x + 8.F + label_size.x + 6.F, text_y},
+        font, font->FontSize, {min.x + 11.F + label_size.x + 8.F, text_y},
         theme::u32(active || count > 0 ? colour : theme::text_faint),
         count_text);
     ImGui::PopFont();
     return pressed;
-}
-
-void draw_header_separator(const float height) {
-    const ImVec2 min = ImGui::GetItemRectMin();
-    const ImVec2 max = ImGui::GetItemRectMax();
-    const float x = max.x + 6.F;
-    ImGui::GetWindowDrawList()->AddLine(
-        {x, min.y + 4.F}, {x, min.y + height - 4.F},
-        theme::u32(theme::border, 0.85F));
-    ImGui::Dummy({12.F, height});
 }
 
 void draw_status_badge(const bool running, const Stage stage) {
@@ -202,8 +195,8 @@ void draw_status_badge(const bool running, const Stage stage) {
     }
 
     theme::status_dot(colour, 8.F);
-    ImGui::SameLine(0.F, 7.F);
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.F);
+    ImGui::SameLine(0.F, 10.F);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.F);
     ImGui::PushFont(theme::small_font());
     ImGui::PushStyleColor(
         ImGuiCol_Text, running ? theme::accent
@@ -239,33 +232,18 @@ void draw_unseen_badge(const int count) {
 void draw_empty_state(
     ImDrawList* draw, const ImVec2 min, const ImVec2 max, const char* title,
     const char* hint) {
-    const ImVec2 centre{
-        (min.x + max.x) * 0.5F, (min.y + max.y) * 0.46F};
-    const ImVec2 glyph_min{centre.x - 26.F, centre.y - 40.F};
-    const ImVec2 glyph_max{centre.x + 26.F, centre.y - 6.F};
-    draw->AddRectFilled(
-        glyph_min, glyph_max, theme::u32(theme::surface_2), 5.F);
-    draw->AddRect(glyph_min, glyph_max, theme::u32(theme::border), 5.F);
-    draw->AddLine(
-        {glyph_min.x, glyph_min.y + 10.F}, {glyph_max.x, glyph_min.y + 10.F},
-        theme::u32(theme::border));
-    draw->AddRectFilled(
-        {glyph_min.x, glyph_min.y + 4.F}, {glyph_min.x + 2.F, glyph_max.y - 4.F},
-        theme::u32(theme::accent, 0.85F));
-    draw->AddText(
-        {glyph_min.x + 10.F, glyph_min.y + 14.F}, theme::u32(theme::accent),
-        ">_");
-
     ImFont* font = ImGui::GetFont();
     const float title_w =
         font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.F, title).x;
     const float hint_w =
         font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.F, hint).x;
+    const float centre_x = (min.x + max.x) * 0.5F;
+    const float centre_y = (min.y + max.y) * 0.5F;
     draw->AddText(
-        {centre.x - title_w * 0.5F, glyph_max.y + 14.F},
+        {centre_x - title_w * 0.5F, centre_y - 12.F},
         theme::u32(theme::text_muted), title);
     draw->AddText(
-        {centre.x - hint_w * 0.5F, glyph_max.y + 34.F},
+        {centre_x - hint_w * 0.5F, centre_y + 8.F},
         theme::u32(theme::text_faint), hint);
 }
 
@@ -329,7 +307,7 @@ void draw_log_row(
     ImFont* mono = theme::mono_font();
     ImFont* small = theme::small_font();
     const float text_y = min.y + (row_height - mono->FontSize) * 0.5F;
-    float x = min.x + 10.F;
+    float x = min.x + k_row_pad;
 
     if (!line.time.empty()) {
         draw->AddText(
@@ -341,22 +319,22 @@ void draw_log_row(
     const char* tag = level_tag(line.severity);
     const ImVec2 tag_size =
         small->CalcTextSizeA(small->FontSize, FLT_MAX, 0.F, tag);
-    const ImVec2 badge_min{x, min.y + (row_height - tag_size.y - 6.F) * 0.5F};
+    const ImVec2 badge_min{x, min.y + (row_height - tag_size.y - 8.F) * 0.5F};
     const ImVec2 badge_max{
-        badge_min.x + tag_size.x + 10.F, badge_min.y + tag_size.y + 6.F};
-    draw->AddRectFilled(badge_min, badge_max, theme::u32(level, 0.16F), 3.F);
+        badge_min.x + tag_size.x + 12.F, badge_min.y + tag_size.y + 8.F};
+    draw->AddRectFilled(badge_min, badge_max, theme::u32(level, 0.16F), 4.F);
     draw->AddText(
         small, small->FontSize,
-        {badge_min.x + 5.F, badge_min.y + 3.F}, theme::u32(level), tag);
-    x += k_level_width + 8.F;
+        {badge_min.x + 6.F, badge_min.y + 4.F}, theme::u32(level), tag);
+    x += k_level_width + 12.F;
 
     draw_message(
         draw, mono, mono->FontSize, {x, text_y}, theme::u32(message_colour(line.severity)),
-        line.message, query, max.x - 8.F, max.y);
+        line.message, query, max.x - k_row_pad, max.y);
 
     const float message_width = mono->CalcTextSizeA(
         mono->FontSize, FLT_MAX, 0.F, line.message.c_str()).x;
-    if (hovered && message_width > max.x - x - 8.F)
+    if (hovered && message_width > max.x - x - k_row_pad)
         ImGui::SetTooltip("%s", line.message.c_str());
 
     ImGui::PopID();
@@ -394,18 +372,32 @@ void draw_console(
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(
         header_origin,
-        {header_origin.x + header_width, header_origin.y + k_header_height},
+        {header_origin.x + header_width, header_origin.y + k_toolbar_height},
         theme::u32(theme::surface_3));
+    draw->AddRectFilled(
+        {header_origin.x, header_origin.y + k_toolbar_height},
+        {header_origin.x + header_width, header_origin.y + k_header_height},
+        theme::u32(theme::surface_2));
+    draw->AddLine(
+        {header_origin.x, header_origin.y + k_toolbar_height},
+        {header_origin.x + header_width, header_origin.y + k_toolbar_height},
+        theme::u32(theme::border, 0.85F));
     draw->AddLine(
         {header_origin.x, header_origin.y + k_header_height - 1.F},
         {header_origin.x + header_width, header_origin.y + k_header_height - 1.F},
         theme::u32(theme::border));
 
-    ImGui::SetCursorPos({content_start.x + 10.F, content_start.y + 6.F});
+    constexpr float k_btn = 30.F;
+    constexpr float k_btn_gap = 8.F;
+    constexpr float k_side_pad = 14.F;
+    const float toolbar_y =
+        content_start.y + (k_toolbar_height - k_btn) * 0.5F;
+
+    ImGui::SetCursorPos({content_start.x + k_side_pad, toolbar_y + 4.F});
     draw_status_badge(running, stage);
     if (running) {
-        ImGui::SameLine(0.F, 8.F);
-        ImGui::SetCursorPosY(content_start.y + 10.F);
+        ImGui::SameLine(0.F, 12.F);
+        ImGui::SetCursorPosY(toolbar_y + 7.F);
         ImGui::PushFont(theme::small_font());
         ImGui::PushStyleColor(ImGuiCol_Text, theme::text_faint);
         ImGui::TextUnformatted(job_name(job));
@@ -413,23 +405,60 @@ void draw_console(
         ImGui::PopFont();
     }
 
-    ImGui::SameLine(0.F, 4.F);
-    draw_header_separator(24.F);
-    ImGui::SameLine(0.F, 0.F);
-    ImGui::SetCursorPosY(content_start.y + 6.F);
+    const float actions_width = k_btn * 3.F + k_btn_gap * 2.F;
+    ImGui::SetCursorPos({
+        content_start.x + header_width - k_side_pad - actions_width, toolbar_y});
+    const int unseen = view.at_bottom
+        ? 0
+        : std::max(
+              0, static_cast<int>(lines.size()) -
+                     static_cast<int>(view.seen_count));
+    if (icons::ghost_button(
+            "##follow", icons::Icon::follow, {k_btn, k_btn},
+            view.follow && view.at_bottom, true,
+            view.follow ? "Follow output" : "Jump to latest")) {
+        view.follow = true;
+        view.jump_to_end = true;
+    }
+    draw_unseen_badge(unseen);
+    ImGui::SameLine(0.F, k_btn_gap);
+    if (icons::ghost_button(
+            "##copy", icons::Icon::copy, {k_btn, k_btn}, false,
+            !view.visible.empty(), "Copy visible lines")) {
+        std::string text;
+        for (const int index : view.visible) {
+            text += format_line(lines[static_cast<std::size_t>(index)]);
+            text += '\n';
+        }
+        copy_text(text);
+    }
+    ImGui::SameLine(0.F, k_btn_gap);
+    if (icons::ghost_button(
+            "##clear", icons::Icon::trash, {k_btn, k_btn}, false,
+            counts.total > 0, "Clear console")) {
+        log.clear_display();
+        view.selected = -1;
+        view.seen_count = 0;
+        view.visible.clear();
+        view.cached_generation = log.generation();
+    }
+
+    const float filter_y =
+        content_start.y + k_toolbar_height + (k_filter_height - 28.F) * 0.5F;
+    ImGui::SetCursorPos({content_start.x + k_side_pad, filter_y});
     if (filter_chip(
             "##all", "All", counts.total, view.filter == ConsoleFilter::all,
             theme::accent))
         view.filter = ConsoleFilter::all;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show every log line");
-    ImGui::SameLine(0.F, 4.F);
+    ImGui::SameLine(0.F, 8.F);
     if (filter_chip(
             "##info", "Info", counts.info, view.filter == ConsoleFilter::info,
             ImVec4(0.55F, 0.72F, 0.86F, 1.F)))
         view.filter = view.filter == ConsoleFilter::info ? ConsoleFilter::all
                                                          : ConsoleFilter::info;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Info and debug output");
-    ImGui::SameLine(0.F, 4.F);
+    ImGui::SameLine(0.F, 8.F);
     if (filter_chip(
             "##warn", "Warn", counts.warning,
             view.filter == ConsoleFilter::warning, theme::warning))
@@ -437,7 +466,7 @@ void draw_console(
             ? ConsoleFilter::all
             : ConsoleFilter::warning;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Warnings only");
-    ImGui::SameLine(0.F, 4.F);
+    ImGui::SameLine(0.F, 8.F);
     if (filter_chip(
             "##err", "Error", counts.error, view.filter == ConsoleFilter::error,
             theme::danger))
@@ -445,18 +474,16 @@ void draw_console(
                                                           : ConsoleFilter::error;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Errors only");
 
-    constexpr float k_btn = 26.F;
-    constexpr float k_actions = k_btn * 3.F + 8.F;
-    const float search_right = header_width - 10.F - k_actions;
     const float chips_end =
         ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+    const float search_right = header_width - k_side_pad;
     const float search_width =
-        std::clamp(search_right - chips_end - 16.F, 0.F, 240.F);
-
-    if (search_width >= 88.F) {
-        ImGui::SetCursorPos({search_right - search_width, content_start.y + 5.F});
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(26.F, 4.F));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.F);
+        std::clamp(search_right - chips_end - 20.F, 0.F, 280.F);
+    if (search_width >= 120.F) {
+        ImGui::SetCursorPos({
+            content_start.x + search_right - search_width, filter_y});
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(30.F, 6.F));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.F);
         ImGui::PushFont(theme::small_font());
         ImGui::PushItemWidth(search_width);
         if (view.request_search_focus) {
@@ -473,46 +500,12 @@ void draw_console(
         const ImVec2 field_max = ImGui::GetItemRectMax();
         icons::draw(
             draw, icons::Icon::search,
-            {field_min.x + 7.F, field_min.y + 5.F},
-            {field_min.x + 21.F, field_max.y - 5.F},
-            theme::u32(theme::text_faint));
+            {field_min.x + 9.F, field_min.y + 6.F},
+            {field_min.x + 23.F, field_max.y - 6.F},
+            theme::u32(theme::text_faint), 1.8F);
         if (view.search[0] != '\0' && ImGui::IsItemFocused() &&
             ImGui::IsKeyPressed(ImGuiKey_Escape))
             view.search[0] = '\0';
-    }
-
-    ImGui::SetCursorPos({search_right + 8.F, content_start.y + 5.F});
-    const int unseen = view.at_bottom
-        ? 0
-        : std::max(0, static_cast<int>(lines.size()) - static_cast<int>(view.seen_count));
-    if (icons::button(
-            "##follow", icons::Icon::follow, {k_btn, k_btn},
-            view.follow && view.at_bottom, true,
-            view.follow ? "Follow output" : "Jump to latest")) {
-        view.follow = true;
-        view.jump_to_end = true;
-    }
-    draw_unseen_badge(unseen);
-    ImGui::SameLine(0.F, 4.F);
-    if (icons::button(
-            "##copy", icons::Icon::copy, {k_btn, k_btn}, false,
-            !view.visible.empty(), "Copy visible lines")) {
-        std::string text;
-        for (const int index : view.visible) {
-            text += format_line(lines[static_cast<std::size_t>(index)]);
-            text += '\n';
-        }
-        copy_text(text);
-    }
-    ImGui::SameLine(0.F, 4.F);
-    if (icons::button(
-            "##clear", icons::Icon::trash, {k_btn, k_btn}, false, counts.total > 0,
-            "Clear console")) {
-        log.clear_display();
-        view.selected = -1;
-        view.seen_count = 0;
-        view.visible.clear();
-        view.cached_generation = log.generation();
     }
 
     ImGui::SetCursorPos({content_start.x, content_start.y + k_header_height});
@@ -525,7 +518,7 @@ void draw_console(
     const ImVec2 log_min = ImGui::GetCursorScreenPos();
     const ImVec2 log_region = ImGui::GetContentRegionAvail();
     const ImVec2 log_max{log_min.x + log_region.x, log_min.y + log_region.y};
-    const float row_height = std::floor(theme::mono_font()->FontSize + 11.F);
+    const float row_height = std::floor(theme::mono_font()->FontSize + 17.F);
     const std::string_view query = view.search.data();
 
     if (lines.empty()) {

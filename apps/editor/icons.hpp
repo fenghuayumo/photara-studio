@@ -43,6 +43,11 @@ bool labeled_button(
     ButtonStyle style = ButtonStyle::normal, bool enabled = true,
     bool active = false, const char* tooltip = nullptr);
 
+// Quiet toolbar control: no fill until hover, extra padding around the glyph.
+bool ghost_button(
+    const char* id, Icon icon, ImVec2 size, bool active = false,
+    bool enabled = true, const char* tooltip = nullptr);
+
 // Small non-interactive icon that participates in the current ImGui layout.
 void inline_icon(Icon icon, ImU32 colour, float size = 15.F);
 

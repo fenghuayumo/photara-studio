@@ -620,7 +620,7 @@ void apply_default_dock_layout(const ImGuiID dockspace_id, const ImVec2 size) {
     ImGui::DockBuilderSplitNode(
         dock_main, ImGuiDir_Right, 0.24F, &dock_right, &dock_main);
     ImGui::DockBuilderSplitNode(
-        dock_main, ImGuiDir_Down, 0.26F, &dock_bottom, &dock_main);
+        dock_main, ImGuiDir_Down, 0.28F, &dock_bottom, &dock_main);
 
     ImGui::DockBuilderDockWindow("Scene", dock_left);
     ImGui::DockBuilderDockWindow("Viewport", dock_main);
@@ -1123,36 +1123,18 @@ void draw_scene_panel(App& app) {
 void draw_empty_viewport(
     ImDrawList* draw, const ImVec2 min, const ImVec2 max, const char* headline,
     const char* hint) {
-    // A restrained perspective construction grid so the empty stage still
-    // reads as a 3D workspace.
-    const float horizon = min.y + (max.y - min.y) * 0.46F;
-    const ImVec2 vanishing{(min.x + max.x) * 0.5F, horizon};
     draw->PushClipRect(min, max, true);
-    draw->AddLine({min.x, horizon}, {max.x, horizon}, IM_COL32(30, 34, 42, 255));
-    constexpr int rays = 16;
-    for (int i = -rays; i <= rays; ++i) {
-        const float x =
-            vanishing.x + i * (max.x - min.x) / static_cast<float>(rays);
-        draw->AddLine(
-            vanishing, {x, max.y},
-            i == 0 ? IM_COL32(52, 62, 74, 200) : IM_COL32(30, 34, 42, 170));
-    }
-    for (int i = 0; i < 16; ++i) {
-        const float t = static_cast<float>(i) / 15.F;
-        const float y = horizon + t * t * (max.y - horizon);
-        draw->AddLine({min.x, y}, {max.x, y}, IM_COL32(30, 34, 42, 170));
-    }
-    draw->PopClipRect();
-
     const float headline_width = ImGui::CalcTextSize(headline).x;
     const float hint_width = ImGui::CalcTextSize(hint).x;
     const float centre_x = (min.x + max.x) * 0.5F;
+    const float y = min.y + (max.y - min.y) * 0.18F;
     draw->AddText(
-        {centre_x - headline_width * 0.5F, horizon - 44.F},
+        {centre_x - headline_width * 0.5F, y},
         theme::u32(theme::text_muted), headline);
     draw->AddText(
-        {centre_x - hint_width * 0.5F, horizon - 22.F},
+        {centre_x - hint_width * 0.5F, y + 20.F},
         theme::u32(theme::text_faint), hint);
+    draw->PopClipRect();
 }
 
 void draw_viewport_overlay(
@@ -1171,21 +1153,18 @@ void draw_viewport_overlay(
 
 void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg));
+    draw->AddRectFilledMultiColor(
+        min, max, IM_COL32(9, 11, 16, 255), IM_COL32(9, 11, 16, 255),
+        IM_COL32(18, 22, 32, 255), IM_COL32(18, 22, 32, 255));
 
-    if (!app.scene.has_points()) {
-        const char* headline = app.loading_scene
-            ? "Loading sparse reconstruction..."
-            : (app.has_sparse ? "Sparse cloud ready to load"
-                              : "No alignment yet");
-        const char* hint = app.has_sparse
-            ? "Use Load Sparse Cloud in the inspector"
-            : "Pick an image folder, then run Align Photos";
-        draw_empty_viewport(draw, min, max, headline, hint);
-        return;
-    }
+    ImGui::SetCursorScreenPos(min);
+    ImGui::InvisibleButton(
+        "##sparse_view",
+        {std::max(1.F, max.x - min.x), std::max(1.F, max.y - min.y)},
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
+            ImGuiButtonFlags_MouseButtonMiddle);
+    const bool hovered = ImGui::IsItemHovered();
 
-    const bool hovered = ImGui::IsWindowHovered();
     const SceneDrawStats stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, app.view_options, hovered);
 
@@ -1198,21 +1177,37 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     update_orbit_camera(
         app.camera, hovered && !gizmo_captures, app.scene.radius);
 
-    draw_viewport_overlay(
-        draw, min,
-        app.scene_source.empty() ? "SPARSE POINT CLOUD" : app.scene_source.c_str(),
-        theme::accent);
+    const char* overlay = "NO ALIGNMENT";
+    ImVec4 overlay_dot = theme::inactive;
+    if (app.loading_scene) {
+        overlay = "LOADING";
+        overlay_dot = theme::warning;
+    } else if (app.scene.has_points()) {
+        overlay = app.scene_source.empty() ? "SPARSE POINT CLOUD"
+                                           : app.scene_source.c_str();
+        overlay_dot = theme::accent;
+    } else if (app.has_sparse) {
+        overlay = "CLOUD READY";
+    }
+    draw_viewport_overlay(draw, min, overlay, overlay_dot);
 
-    // Bottom-left readout: what is on screen and how to navigate.
-    char readout[192];
-    std::snprintf(
-        readout, sizeof(readout),
-        "%s pts drawn  |  %zu / %zu cameras shown  |  %s pts total",
-        format_count(stats.drawn_points).c_str(), stats.drawn_views,
-        app.scene.registered_views,
-        format_count(app.scene.points.size()).c_str());
-    draw->AddText(
-        {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
+    if (app.scene.has_points()) {
+        char readout[192];
+        std::snprintf(
+            readout, sizeof(readout),
+            "%s pts drawn  |  %zu / %zu cameras shown  |  %s pts total",
+            format_count(stats.drawn_points).c_str(), stats.drawn_views,
+            app.scene.registered_views,
+            format_count(app.scene.points.size()).c_str());
+        draw->AddText(
+            {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
+    } else if (!app.loading_scene) {
+        const char* hint = app.has_sparse
+            ? "Load Sparse Cloud in the inspector"
+            : "Pick an image folder, then Align Photos";
+        draw->AddText(
+            {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_faint), hint);
+    }
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
         "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  wheel dolly  |  F frame");

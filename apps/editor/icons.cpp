@@ -308,50 +308,66 @@ void draw(
             break;
         }
         case Icon::copy: {
+            const float rounding = std::max(1.5F, extent * 0.11F);
+            const float stroke = std::max(thickness, extent * 0.09F);
             draw_list->AddRect(
-                point(min, max, 0.28F, 0.18F), point(min, max, 0.78F, 0.66F),
-                colour, 2.F, 0, thickness);
+                point(min, max, 0.36F, 0.16F), point(min, max, 0.84F, 0.64F),
+                colour, rounding, 0, stroke);
             draw_list->AddRect(
-                point(min, max, 0.18F, 0.34F), point(min, max, 0.68F, 0.82F),
-                colour, 2.F, 0, thickness);
+                point(min, max, 0.16F, 0.36F), point(min, max, 0.64F, 0.84F),
+                colour, rounding, 0, stroke);
             break;
         }
         case Icon::trash: {
+            const float stroke = std::max(thickness, extent * 0.09F);
+            const float rounding = std::max(1.4F, extent * 0.10F);
             draw_list->AddLine(
-                point(min, max, 0.22F, 0.30F), point(min, max, 0.78F, 0.30F),
-                colour, thickness);
+                point(min, max, 0.40F, 0.16F), point(min, max, 0.60F, 0.16F),
+                colour, stroke);
             draw_list->AddLine(
-                point(min, max, 0.38F, 0.22F), point(min, max, 0.62F, 0.22F),
-                colour, thickness);
-            const ImVec2 bin[] = {
-                point(min, max, 0.30F, 0.30F),
-                point(min, max, 0.34F, 0.80F),
-                point(min, max, 0.66F, 0.80F),
-                point(min, max, 0.70F, 0.30F)};
-            draw_list->AddPolyline(bin, 4, colour, 0, thickness);
-            line(draw_list, min, max, 0.42F, 0.40F, 0.42F, 0.70F, colour,
-                 thickness * 0.8F);
-            line(draw_list, min, max, 0.58F, 0.40F, 0.58F, 0.70F, colour,
-                 thickness * 0.8F);
+                point(min, max, 0.40F, 0.16F), point(min, max, 0.40F, 0.28F),
+                colour, stroke);
+            draw_list->AddLine(
+                point(min, max, 0.60F, 0.16F), point(min, max, 0.60F, 0.28F),
+                colour, stroke);
+            draw_list->AddLine(
+                point(min, max, 0.18F, 0.28F), point(min, max, 0.82F, 0.28F),
+                colour, stroke);
+            draw_list->AddRect(
+                point(min, max, 0.28F, 0.34F), point(min, max, 0.72F, 0.84F),
+                colour, rounding, ImDrawFlags_RoundCornersBottom, stroke);
+            line(draw_list, min, max, 0.42F, 0.46F, 0.42F, 0.72F, colour,
+                 stroke * 0.85F);
+            line(draw_list, min, max, 0.58F, 0.46F, 0.58F, 0.72F, colour,
+                 stroke * 0.85F);
             break;
         }
         case Icon::search: {
-            draw_list->AddCircle(
-                point(min, max, 0.42F, 0.42F), extent * 0.22F, colour, 16,
-                thickness);
-            line(draw_list, min, max, 0.58F, 0.58F, 0.78F, 0.78F, colour,
-                 thickness);
+            const float stroke = std::max(thickness, extent * 0.09F);
+            const ImVec2 lens = point(min, max, 0.40F, 0.40F);
+            const float radius = extent * 0.23F;
+            draw_list->AddCircle(lens, radius, colour, 24, stroke);
+            const float diag = 0.70710678F;
+            draw_list->AddLine(
+                {lens.x + radius * diag, lens.y + radius * diag},
+                {lens.x + radius * diag + extent * 0.28F,
+                 lens.y + radius * diag + extent * 0.28F},
+                colour, stroke);
             break;
         }
         case Icon::follow: {
-            line(draw_list, min, max, 0.50F, 0.18F, 0.50F, 0.62F, colour,
-                 thickness);
-            arrow_head(
-                draw_list, point(min, max, 0.50F, 0.62F),
-                point(min, max, 0.34F, 0.46F),
-                point(min, max, 0.66F, 0.46F), colour, thickness);
-            line(draw_list, min, max, 0.22F, 0.78F, 0.78F, 0.78F, colour,
-                 thickness);
+            const float stroke = std::max(thickness, extent * 0.09F);
+            draw_list->PathLineTo(point(min, max, 0.28F, 0.22F));
+            draw_list->PathLineTo(point(min, max, 0.50F, 0.40F));
+            draw_list->PathLineTo(point(min, max, 0.72F, 0.22F));
+            draw_list->PathStroke(colour, 0, stroke);
+            draw_list->PathLineTo(point(min, max, 0.28F, 0.44F));
+            draw_list->PathLineTo(point(min, max, 0.50F, 0.62F));
+            draw_list->PathLineTo(point(min, max, 0.72F, 0.44F));
+            draw_list->PathStroke(colour, 0, stroke);
+            draw_list->AddLine(
+                point(min, max, 0.24F, 0.80F), point(min, max, 0.76F, 0.80F),
+                colour, stroke);
             break;
         }
     }
@@ -392,6 +408,43 @@ bool labeled_button(
         {icon_min.x + icon_size + 8.F, min.y + (size.y - text_size.y) * 0.5F},
         theme::u32(colours.icon), label);
     finish_button(active, tooltip, colours.icon);
+    return pressed;
+}
+
+bool ghost_button(
+    const char* id, const Icon icon, const ImVec2 size, const bool active,
+    const bool enabled, const char* tooltip) {
+    const ImVec4 transparent{0.F, 0.F, 0.F, 0.F};
+    ButtonColours colours;
+    if (!enabled) {
+        colours = {transparent, transparent, transparent, theme::text_faint};
+    } else if (active) {
+        colours = {
+            theme::fade(theme::accent, 0.16F),
+            theme::fade(theme::accent, 0.24F),
+            theme::fade(theme::accent, 0.24F), theme::accent};
+    } else {
+        colours = {
+            transparent, theme::surface_3, theme::surface_2, theme::text_muted};
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.F);
+    const bool pressed = begin_icon_button(id, size, colours, enabled);
+    ImGui::PopStyleVar(2);
+
+    const bool hovered = ImGui::IsItemHovered();
+    ImVec4 icon_colour = colours.icon;
+    if (enabled && hovered && !active)
+        icon_colour = icon == Icon::trash ? theme::danger : theme::text_bright;
+
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    const float pad = std::max(7.F, std::min(size.x, size.y) * 0.26F);
+    draw(
+        ImGui::GetWindowDrawList(), icon, {min.x + pad, min.y + pad},
+        {max.x - pad, max.y - pad}, theme::u32(icon_colour), 1.8F);
+    finish_button(active, tooltip, icon_colour);
     return pressed;
 }
 

@@ -83,6 +83,7 @@ bool draw_axes_gizmo(
     }
 
     ImGui::SetCursorScreenPos(widget_min);
+    ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton("##orientation_axes", {k_gizmo_size, k_gizmo_size});
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* draw = ImGui::GetWindowDrawList();
