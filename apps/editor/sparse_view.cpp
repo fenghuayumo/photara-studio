@@ -2,6 +2,8 @@
 
 #include "theme.hpp"
 
+#include "io/image.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -10,6 +12,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <utility>
 
 namespace editor {
 namespace {
@@ -626,6 +629,109 @@ std::string load_poses(
     return {};
 }
 
+bool sample_photo_rgb(
+    const aetherscan::io::RgbImage& image, const float x, const float y,
+    double& r, double& g, double& b) {
+    if (image.width == 0 || image.height == 0 || image.pixels.size() < 3)
+        return false;
+    const int xi = static_cast<int>(std::lround(static_cast<double>(x)));
+    const int yi = static_cast<int>(std::lround(static_cast<double>(y)));
+    if (xi < 0 || yi < 0 || xi >= static_cast<int>(image.width) ||
+        yi >= static_cast<int>(image.height))
+        return false;
+    const std::size_t offset =
+        (static_cast<std::size_t>(yi) * image.width +
+         static_cast<std::size_t>(xi)) *
+        3;
+    if (offset + 2 >= image.pixels.size()) return false;
+    r = image.pixels[offset];
+    g = image.pixels[offset + 1];
+    b = image.pixels[offset + 2];
+    return true;
+}
+
+void colour_points_from_photos(
+    const aetherscan::sfm::Scene& scene, SparseScene& loaded,
+    const std::vector<std::size_t>& track_ids) {
+    if (loaded.points.empty() || track_ids.size() != loaded.points.size())
+        return;
+
+    std::vector<std::vector<std::pair<std::size_t, aetherscan::sfm::Index>>>
+        observations_by_image(scene.images.size());
+    for (std::size_t point = 0; point < track_ids.size(); ++point) {
+        const auto& track = scene.tracks[track_ids[point]];
+        const std::size_t inliers = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < inliers; ++i) {
+            const auto& observation = track.observations[i];
+            if (observation.image_id >= scene.images.size()) continue;
+            observations_by_image[observation.image_id].emplace_back(
+                point, observation.feature_id);
+        }
+    }
+
+    std::vector<double> sum_r(loaded.points.size());
+    std::vector<double> sum_g(loaded.points.size());
+    std::vector<double> sum_b(loaded.points.size());
+    std::vector<std::uint32_t> samples(loaded.points.size());
+
+    for (std::size_t image_id = 0; image_id < scene.images.size(); ++image_id) {
+        if (observations_by_image[image_id].empty()) continue;
+        const auto& image = scene.images[image_id];
+        if (image.path.empty()) continue;
+        aetherscan::io::RgbImage rgb;
+        try {
+            rgb = aetherscan::io::load_rgb(image.path);
+        } catch (...) {
+            continue;
+        }
+        const float scale_x =
+            image.features.image_width > 0
+                ? static_cast<float>(rgb.width) /
+                      static_cast<float>(image.features.image_width)
+                : 1.F;
+        const float scale_y =
+            image.features.image_height > 0
+                ? static_cast<float>(rgb.height) /
+                      static_cast<float>(image.features.image_height)
+                : 1.F;
+        for (const auto& [point, feature_id] :
+             observations_by_image[image_id]) {
+            if (feature_id >= image.features.keypoints.size()) continue;
+            const auto& keypoint = image.features.keypoints[feature_id];
+            double r = 0.0;
+            double g = 0.0;
+            double b = 0.0;
+            if (!sample_photo_rgb(
+                    rgb, keypoint.x * scale_x, keypoint.y * scale_y, r, g, b))
+                continue;
+            sum_r[point] += r;
+            sum_g[point] += g;
+            sum_b[point] += b;
+            ++samples[point];
+        }
+    }
+
+    loaded.colours.clear();
+    loaded.colours.reserve(loaded.points.size());
+    bool any = false;
+    for (std::size_t i = 0; i < loaded.points.size(); ++i) {
+        if (samples[i] == 0) {
+            loaded.colours.push_back(IM_COL32(180, 180, 180, 255));
+            continue;
+        }
+        any = true;
+        const auto channel = [count = samples[i]](const double sum) {
+            return static_cast<int>(
+                std::clamp(std::lround(sum / count), 0L, 255L));
+        };
+        loaded.colours.push_back(
+            IM_COL32(
+                channel(sum_r[i]), channel(sum_g[i]), channel(sum_b[i]), 255));
+    }
+    if (!any) loaded.colours.clear();
+}
+
 }  // namespace
 
 void SparseScene::clear() { *this = {}; }
@@ -637,12 +743,16 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
     for (const auto& track : scene.tracks)
         if (track.is_triangulated()) ++point_count;
     loaded.scene.points.reserve(point_count);
-    for (const auto& track : scene.tracks) {
+    std::vector<std::size_t> track_ids;
+    track_ids.reserve(point_count);
+    for (std::size_t index = 0; index < scene.tracks.size(); ++index) {
+        const auto& track = scene.tracks[index];
         if (!track.is_triangulated()) continue;
         loaded.scene.points.push_back({
             static_cast<float>(track.position.x()),
             static_cast<float>(track.position.y()),
             static_cast<float>(track.position.z())});
+        track_ids.push_back(index);
     }
     loaded.scene.views.reserve(scene.images.size());
     for (const auto& image : scene.images) {
@@ -671,6 +781,7 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
         loaded.scene.views.push_back(std::move(pose));
     }
     loaded.scene.total_views = scene.images.size();
+    colour_points_from_photos(scene, loaded.scene, track_ids);
     loaded.scene.compute_bounds();
     return loaded;
 }

@@ -36,7 +36,7 @@ struct ViewPose {
 
 struct SparseScene {
     std::vector<Vec3> points;
-    // Empty when the source PLY carried no colour channel.
+    // Empty when the PLY has no RGB and photo sampling found no colours.
     std::vector<std::uint32_t> colours;
     std::vector<ViewPose> views;
     Vec3 centroid;
