@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -153,6 +154,8 @@ public:
     // Overall progress of the running job. Negative means indeterminate.
     [[nodiscard]] float fraction() const;
     [[nodiscard]] double eta_seconds() const;
+    // Wall time since begin(); frozen after mark_finished(). Negative if no job.
+    [[nodiscard]] double elapsed_seconds() const;
     [[nodiscard]] std::string headline() const;
 
 private:
@@ -169,6 +172,10 @@ private:
     float floor_{};
     float band_begin_{};
     float band_end_{};
+    bool has_clock_{};
+    bool clock_running_{};
+    std::chrono::steady_clock::time_point started_{};
+    std::chrono::steady_clock::time_point stopped_{};
 };
 
 // Child process with stdout and stderr redirected to a log file. Handles are
@@ -202,7 +209,7 @@ private:
 
 struct ProjectSettings {
     std::array<char, 1024> images_dir{};
-    std::array<char, 1024> project_dir{};
+    std::array<char, 1024> project_dir{};  // .ascan path, or legacy folder
 
     int sfm_mode = 0;  // global, incremental, hierarchical
     bool reuse_cache = true;
@@ -231,8 +238,10 @@ struct ProjectSettings {
 // Everything the editor reads or writes lives under the project directory.
 struct ProjectLayout {
     std::filesystem::path root;
+    std::filesystem::path project_file;
     std::filesystem::path cache;
     std::filesystem::path sparse_ply;
+    std::filesystem::path sparse_asfm;
     std::filesystem::path sparse_mvs;
     std::filesystem::path sparse_poses;
     std::filesystem::path model_output;

@@ -201,7 +201,10 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/hierarchical.cpp
         src/sfm/frontend.cpp
         src/sfm/reconstruct.cpp
-        src/sfm/export_mvs.cpp)
+        src/sfm/export_mvs.cpp
+        src/sfm/asfm.cpp
+        src/project/archive.cpp
+        src/project/document.cpp)
 
     # Derive cache invalidation from the implementation itself. This removes
     # the need to manually bump ad-hoc "vN"/dated ABI strings whenever an SfM,
@@ -646,7 +649,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
             target_include_directories(aetherscan_editor PRIVATE
                 ${AETHERSCAN_EDITOR_DIR})
             target_link_libraries(aetherscan_editor PRIVATE
-                aetherscan_imgui AetherScan::Features Vulkan::Vulkan glfw)
+                aetherscan_imgui AetherScan::SfM Vulkan::Vulkan glfw)
             if(WIN32)
                 # Native folder picker (IFileOpenDialog) and Explorer reveal.
                 target_link_libraries(aetherscan_editor PRIVATE ole32 shell32)
@@ -713,6 +716,9 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
         add_executable(aetherscan_export_mvs_test tests/export_mvs_test.cpp)
         target_link_libraries(aetherscan_export_mvs_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.export_mvs COMMAND aetherscan_export_mvs_test)
+        add_executable(aetherscan_project_io_test tests/project_io_test.cpp)
+        target_link_libraries(aetherscan_project_io_test PRIVATE AetherScan::SfM)
+        add_test(NAME aetherscan.project.io COMMAND aetherscan_project_io_test)
         add_executable(aetherscan_mvs_test tests/mvs_test.cpp)
         target_link_libraries(aetherscan_mvs_test PRIVATE AetherScan::MVS)
         add_test(NAME aetherscan.mvs.pipeline COMMAND aetherscan_mvs_test)

@@ -6,6 +6,11 @@
 #include "viewport_gizmo.hpp"
 #include "vulkan_backend.hpp"
 
+#include "project/archive.hpp"
+#include "project/document.hpp"
+#include "sfm/asfm.hpp"
+#include "sfm/export_mvs.hpp"
+
 #include "imgui_impl_glfw.h"
 #include "imgui_internal.h"
 
@@ -75,9 +80,12 @@ struct App {
     std::string scene_source;
 
     bool has_sparse{};
+    bool has_asfm{};
     bool has_mvs{};
     bool has_model{};
     bool has_mesh{};
+    std::uint32_t project_writer_version{};
+    std::uint32_t project_min_reader_version{};
     ViewportTab tab{ViewportTab::sparse};
     unsigned preview_view{};
     std::uint64_t preview_camera_revision{};
@@ -186,6 +194,59 @@ bool pick_folder(const wchar_t* title, std::array<char, 1024>& destination) {
     return picked;
 }
 
+bool copy_wide_path(const wchar_t* wide, std::array<char, 1024>& destination) {
+    const int bytes = WideCharToMultiByte(
+        CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0 || static_cast<std::size_t>(bytes) > destination.size())
+        return false;
+    WideCharToMultiByte(
+        CP_UTF8, 0, wide, -1, destination.data(), bytes, nullptr, nullptr);
+    return true;
+}
+
+bool pick_project_file(
+    const wchar_t* title, std::array<char, 1024>& destination, const bool save) {
+    bool picked = false;
+    const HRESULT initialised =
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IFileDialog* dialog = nullptr;
+    const HRESULT created = save
+        ? CoCreateInstance(
+              CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+              IID_PPV_ARGS(&dialog))
+        : CoCreateInstance(
+              CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+              IID_PPV_ARGS(&dialog));
+    if (SUCCEEDED(created) && dialog) {
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        if (save)
+            dialog->SetOptions(options | FOS_OVERWRITEPROMPT);
+        else
+            dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
+        dialog->SetTitle(title);
+        COMDLG_FILTERSPEC filters[] = {
+            {L"AetherScan Project (*.ascan)", L"*.ascan"},
+            {L"All files (*.*)", L"*.*"}};
+        dialog->SetFileTypes(2, filters);
+        dialog->SetDefaultExtension(L"ascan");
+        if (SUCCEEDED(dialog->Show(nullptr))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item))) {
+                PWSTR wide = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wide))) {
+                    picked = copy_wide_path(wide, destination);
+                    CoTaskMemFree(wide);
+                }
+                item->Release();
+            }
+        }
+        dialog->Release();
+    }
+    if (SUCCEEDED(initialised)) CoUninitialize();
+    return picked;
+}
+
 void reveal_in_explorer(const std::filesystem::path& path) {
     std::error_code error;
     if (!std::filesystem::exists(path, error)) return;
@@ -193,6 +254,9 @@ void reveal_in_explorer(const std::filesystem::path& path) {
 }
 #else
 bool pick_folder(const wchar_t*, std::array<char, 1024>&) { return false; }
+bool pick_project_file(const wchar_t*, std::array<char, 1024>&, bool) {
+    return false;
+}
 void reveal_in_explorer(const std::filesystem::path&) {}
 #endif
 
@@ -207,17 +271,39 @@ void refresh_artifacts(App& app) {
     if (app.settings.project_dir[0] == '\0') {
         app.layout = {};
         app.has_sparse = false;
+        app.has_asfm = false;
         app.has_mvs = false;
         app.has_model = false;
         app.has_mesh = false;
+        app.project_writer_version = 0;
+        app.project_min_reader_version = 0;
         return;
     }
     app.layout = resolve_layout(app.settings);
     std::error_code error;
-    app.has_sparse = std::filesystem::exists(app.layout.sparse_ply, error);
+    app.has_asfm = std::filesystem::exists(app.layout.sparse_asfm, error);
     app.has_mvs = std::filesystem::exists(app.layout.sparse_mvs, error);
+    app.has_sparse = std::filesystem::exists(app.layout.sparse_ply, error);
     app.has_model = std::filesystem::exists(app.layout.splat_ply, error);
     app.has_mesh = std::filesystem::exists(app.layout.mesh_ply, error);
+    app.project_writer_version = 0;
+    app.project_min_reader_version = 0;
+    if (app.layout.project_file.empty()) return;
+    try {
+        if (!std::filesystem::exists(app.layout.project_file, error)) return;
+        const auto archive =
+            aetherscan::project::Archive::open(app.layout.project_file);
+        app.project_writer_version = archive.writer_version();
+        app.project_min_reader_version = archive.min_reader_version();
+        app.has_sparse =
+            archive.has(aetherscan::project::ChunkType::sfm) || app.has_sparse;
+        app.has_model =
+            archive.has(aetherscan::project::ChunkType::gaussians) ||
+            app.has_model;
+        app.has_mesh =
+            archive.has(aetherscan::project::ChunkType::mesh) || app.has_mesh;
+    } catch (...) {
+    }
 }
 
 void assign_default_project_folder(App& app) {
@@ -228,12 +314,113 @@ void assign_default_project_folder(App& app) {
     const std::filesystem::path images(app.settings.images_dir.data());
     const std::filesystem::path parent = images.parent_path();
     const std::filesystem::path project =
-        (parent.empty() ? images : parent) / "aetherscan_gui";
+        (parent.empty() ? images : parent) / (images.filename().string() + ".ascan");
     const std::string text = project.string();
     std::snprintf(
         app.settings.project_dir.data(), app.settings.project_dir.size(), "%s",
         text.c_str());
     app.project_folder_automatic = true;
+}
+
+void store_path_field(
+    std::array<char, 1024>& field, const std::filesystem::path& path) {
+    const std::string text = path.string();
+    std::snprintf(field.data(), field.size(), "%s", text.c_str());
+}
+
+aetherscan::project::Settings collect_project_settings(const App& app) {
+    aetherscan::project::Settings settings;
+    settings.name = app.layout.project_file.empty()
+        ? std::string("Untitled")
+        : app.layout.project_file.stem().string();
+    settings.image_directory = app.settings.images_dir.data();
+    settings.sfm_mode = app.settings.sfm_mode;
+    settings.reuse_cache = app.settings.reuse_cache;
+    settings.max_features = static_cast<unsigned>(
+        std::max(0, app.settings.max_features));
+    settings.scene_mode = app.settings.scene_mode;
+    settings.iterations = app.settings.iterations;
+    settings.preview_interval = app.settings.preview_interval;
+    settings.strategy = app.settings.strategy;
+    settings.max_resolution = app.settings.max_resolution;
+    settings.progressive_resolution = app.settings.progressive_resolution;
+    settings.use_mask = app.settings.use_mask;
+    settings.build_mesh = app.settings.build_mesh;
+    settings.mesh_method = app.settings.mesh_method;
+    settings.depth_normal_weight = app.settings.depth_normal_weight;
+    settings.multi_view_geo_weight = app.settings.multi_view_geo_weight;
+    settings.multi_view_ncc_weight = app.settings.multi_view_ncc_weight;
+    settings.geometry_from_iter = app.settings.geometry_from_iter;
+    settings.normal_field = app.settings.normal_field;
+    return settings;
+}
+
+void apply_project_settings(
+    App& app, const aetherscan::project::Settings& settings) {
+    if (!settings.image_directory.empty())
+        store_path_field(app.settings.images_dir, settings.image_directory);
+    app.settings.sfm_mode = settings.sfm_mode;
+    app.settings.reuse_cache = settings.reuse_cache;
+    app.settings.max_features = static_cast<int>(settings.max_features);
+    app.settings.scene_mode = settings.scene_mode;
+    app.settings.iterations = settings.iterations;
+    app.settings.preview_interval = settings.preview_interval;
+    app.settings.strategy = settings.strategy;
+    app.settings.max_resolution = settings.max_resolution;
+    app.settings.progressive_resolution = settings.progressive_resolution;
+    app.settings.use_mask = settings.use_mask;
+    app.settings.build_mesh = settings.build_mesh;
+    app.settings.mesh_method = settings.mesh_method;
+    app.settings.depth_normal_weight = settings.depth_normal_weight;
+    app.settings.multi_view_geo_weight = settings.multi_view_geo_weight;
+    app.settings.multi_view_ncc_weight = settings.multi_view_ncc_weight;
+    app.settings.geometry_from_iter = settings.geometry_from_iter;
+    app.settings.normal_field = settings.normal_field;
+}
+
+void request_ascan_scene_load(App& app) {
+    if (app.loading_scene || app.layout.project_file.empty()) return;
+    app.loading_scene = true;
+    app.scene_source = "Project SfM";
+    const auto path = app.layout.project_file;
+    app.pending_load = std::async(std::launch::async, [path] {
+        SceneLoad loaded;
+        try {
+            const auto archive = aetherscan::project::Archive::open(path);
+            const auto scene = aetherscan::project::read_sfm(archive);
+            if (!scene) {
+                loaded.error = "Project has no SfM stage yet";
+                return loaded;
+            }
+            loaded = sparse_scene_from_sfm(*scene);
+        } catch (const std::exception& error) {
+            loaded.error = error.what();
+        }
+        return loaded;
+    });
+}
+
+bool save_project_to_path(App& app, const std::filesystem::path& path) {
+    try {
+        std::error_code error;
+        aetherscan::project::Archive archive =
+            aetherscan::project::Archive::create();
+        const auto current = app.layout.project_file;
+        if (!current.empty() && std::filesystem::exists(current, error))
+            archive = aetherscan::project::Archive::open(current);
+        else if (std::filesystem::exists(path, error))
+            archive = aetherscan::project::Archive::open(path);
+        aetherscan::project::write_settings(
+            archive, collect_project_settings(app), path);
+        archive.save(path);
+        store_path_field(app.settings.project_dir, path);
+        app.project_folder_automatic = false;
+        refresh_artifacts(app);
+        return true;
+    } catch (const std::exception& error) {
+        set_message(app, error.what(), theme::danger);
+        return false;
+    }
 }
 
 void clear_loaded_result(App& app) {
@@ -245,6 +432,22 @@ void clear_loaded_result(App& app) {
     app.log.clear();
     app.console = {};
     app.fresh_lines.clear();
+}
+
+void new_project(App& app) {
+    if (app.job.running() || app.loading_scene) return;
+    clear_loaded_result(app);
+    app.settings = {};
+    app.layout = {};
+    app.has_sparse = false;
+    app.has_asfm = false;
+    app.has_mvs = false;
+    app.has_model = false;
+    app.has_mesh = false;
+    app.project_writer_version = 0;
+    app.project_min_reader_version = 0;
+    app.project_folder_automatic = false;
+    set_message(app, "New project", theme::text_muted);
 }
 
 void select_image_folder(App& app) {
@@ -278,8 +481,11 @@ void request_scene_load(
 
 void ensure_sparse_loaded(App& app) {
     if (!app.has_sparse || app.scene.has_points() || app.loading_scene) return;
-    request_scene_load(
-        app, app.layout.sparse_ply, app.layout.sparse_poses, "Sparse cloud");
+    if (!app.layout.project_file.empty())
+        request_ascan_scene_load(app);
+    else
+        request_scene_load(
+            app, app.layout.sparse_ply, app.layout.sparse_poses, "Sparse cloud");
 }
 
 const ViewPose* first_registered_view(const SparseScene& scene) {
@@ -352,28 +558,65 @@ void snap_preview_to_index(App& app, const unsigned index) {
 
 void select_project_folder(App& app) {
     if (app.job.running() || app.loading_scene) return;
-    if (!pick_folder(
-            L"Select the AetherScan project folder",
-            app.settings.project_dir))
+    if (!pick_project_file(
+            L"Open AetherScan Project", app.settings.project_dir, false))
         return;
 
-    // Switching projects is an explicit scene transition. Clear the previous
-    // reconstruction immediately, then load the selected project's sparse
-    // result when one is available.
     clear_loaded_result(app);
     app.project_folder_automatic = false;
     refresh_artifacts(app);
+    try {
+        const auto archive =
+            aetherscan::project::Archive::open(app.layout.project_file);
+        apply_project_settings(app, aetherscan::project::read_settings(archive));
+        refresh_artifacts(app);
+    } catch (const std::exception& error) {
+        set_message(app, error.what(), theme::danger);
+        return;
+    }
     if (app.has_sparse)
-        request_scene_load(
-            app, app.layout.sparse_ply, app.layout.sparse_poses,
-            "Sparse cloud");
+        request_ascan_scene_load(app);
     else
-        set_message(app, "Project selected; no sparse cloud yet", theme::text_muted);
+        set_message(app, "Project opened; no SfM stage yet", theme::text_muted);
+}
+
+void save_project_as(App& app) {
+    if (app.job.running()) return;
+    if (!pick_project_file(
+            L"Save AetherScan Project", app.settings.project_dir, true))
+        return;
+    {
+        std::filesystem::path path(app.settings.project_dir.data());
+        std::string extension = path.extension().string();
+        std::transform(
+            extension.begin(), extension.end(), extension.begin(),
+            [](const unsigned char value) {
+                return static_cast<char>(std::tolower(value));
+            });
+        if (extension != ".ascan") path.replace_extension(".ascan");
+        store_path_field(app.settings.project_dir, path);
+    }
+    app.project_folder_automatic = false;
+    refresh_artifacts(app);
+    if (save_project_to_path(app, app.layout.project_file))
+        set_message(app, "Project saved", theme::success);
+}
+
+void save_project(App& app) {
+    if (app.job.running()) return;
+    assign_default_project_folder(app);
+    refresh_artifacts(app);
+    if (app.layout.project_file.empty()) {
+        save_project_as(app);
+        return;
+    }
+    if (save_project_to_path(app, app.layout.project_file))
+        set_message(app, "Project saved", theme::success);
 }
 
 bool has_reconstruction_result(const App& app) {
-    if (app.scene.has_points() || app.has_sparse || app.has_mvs ||
-        app.has_model || app.has_mesh)
+    if (app.scene.has_points() || app.has_sparse || app.has_asfm ||
+        app.has_mvs || app.has_model || app.has_mesh)
         return true;
     if (app.layout.cache.empty()) return false;
     std::error_code error;
@@ -385,8 +628,8 @@ void delete_reconstruction_results(App& app) {
 
     clear_loaded_result(app);
     const std::array<std::filesystem::path, 9> generated_files = {
-        app.layout.sparse_ply, app.layout.sparse_mvs, app.layout.sparse_poses,
-        app.layout.model_output, app.layout.splat_ply, app.layout.mesh_ply,
+        app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
+        app.layout.sparse_poses, app.layout.splat_ply, app.layout.mesh_ply,
         app.layout.align_log, app.layout.train_log, app.layout.export_log};
 
     std::uintmax_t removed = 0;
@@ -398,14 +641,34 @@ void delete_reconstruction_results(App& app) {
         if (error && failure.empty()) failure = error.message();
     }
 
-    // resolve_layout() always makes this exact root/cache child. Re-check the
+    if (!app.layout.project_file.empty()) {
+        try {
+            if (std::filesystem::exists(app.layout.project_file)) {
+                auto archive =
+                    aetherscan::project::Archive::open(app.layout.project_file);
+                archive.erase_chunk(aetherscan::project::ChunkType::sfm);
+                archive.erase_chunk(aetherscan::project::ChunkType::gaussians);
+                archive.erase_chunk(aetherscan::project::ChunkType::mesh);
+                archive.erase_chunk(aetherscan::project::ChunkType::texture);
+                aetherscan::project::write_settings(
+                    archive, collect_project_settings(app),
+                    app.layout.project_file);
+                archive.save(app.layout.project_file);
+            }
+        } catch (const std::exception& error) {
+            if (failure.empty()) failure = error.what();
+        }
+    }
+
+    // resolve_layout() keeps cache as a child of the project directory.
     // relationship before a recursive removal so a malformed path can never
     // broaden the deletion target.
     const std::filesystem::path root = app.layout.root.lexically_normal();
     const std::filesystem::path cache = app.layout.cache.lexically_normal();
     const bool safe_cache = !root.empty() && !cache.empty() && cache != root &&
                             cache.parent_path() == root &&
-                            cache.filename() == "cache";
+                            (cache.filename() == "cache" ||
+                             cache.extension() == ".cache");
     if (safe_cache) {
         std::error_code error;
         removed += std::filesystem::remove_all(cache, error);
@@ -454,7 +717,7 @@ void start_align(App& app) {
     if (app.job.running()) return;
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Select a project output folder first", theme::warning);
+        set_message(app, "Save or choose a project file first", theme::warning);
         return;
     }
     refresh_artifacts(app);
@@ -521,7 +784,7 @@ void start_export_sfm(App& app) {
     if (app.job.running()) return;
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Select a project output folder first", theme::warning);
+        set_message(app, "Save or choose a project file first", theme::warning);
         return;
     }
     refresh_artifacts(app);
@@ -537,6 +800,24 @@ void start_export_sfm(App& app) {
         return;
     }
     try {
+        if (!app.layout.project_file.empty()) {
+            std::error_code exists_error;
+            if (std::filesystem::exists(app.layout.project_file, exists_error)) {
+                const auto archive =
+                    aetherscan::project::Archive::open(app.layout.project_file);
+                const auto scene = aetherscan::project::read_sfm(archive);
+                if (scene) {
+                    aetherscan::sfm::save_asfm(*scene, app.layout.sparse_asfm);
+                    aetherscan::sfm::export_openmvs_interface(
+                        *scene, app.layout.sparse_mvs);
+                    refresh_artifacts(app);
+                    set_message(
+                        app, "Exported SfM to .asfm and OpenMVS .mvs",
+                        theme::success);
+                    return;
+                }
+            }
+        }
         app.monitor.begin(JobKind::export_sfm);
         app.log.open(app.layout.export_log);
         app.job.start(
@@ -554,7 +835,7 @@ void start_train(App& app, const bool smoke) {
     if (app.job.running()) return;
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
-        set_message(app, "Select a project output folder first", theme::warning);
+        set_message(app, "Save or choose a project file first", theme::warning);
         return;
     }
     refresh_artifacts(app);
@@ -656,22 +937,25 @@ void on_job_finished(App& app) {
 
     if (kind == JobKind::align) {
         if (app.has_sparse) {
-            request_scene_load(
-                app, app.layout.sparse_ply, app.layout.sparse_poses,
-                "Sparse cloud");
+            request_ascan_scene_load(app);
         } else {
             set_message(
-                app, "Alignment finished but no sparse cloud was written",
+                app, "Alignment finished but no SfM stage was written",
                 theme::warning);
         }
         return;
     }
     if (kind == JobKind::export_sfm) {
+        std::error_code error;
+        const bool has_asfm =
+            std::filesystem::exists(app.layout.sparse_asfm, error);
         set_message(
             app,
-            app.has_mvs ? "Exported SfM alignment to sparse.mvs"
-                        : "Export finished but sparse.mvs was not written",
-            app.has_mvs ? theme::success : theme::warning);
+            has_asfm ? "Exported SfM alignment to .asfm"
+                     : (app.has_mvs
+                            ? "Exported SfM alignment to sparse.mvs"
+                            : "Export finished but no SfM file was written"),
+            has_asfm || app.has_mvs ? theme::success : theme::warning);
         return;
     }
     set_message(
@@ -781,28 +1065,53 @@ Action draw_menu_bar(App& app) {
     Action action = Action::none;
     const bool busy = app.job.running();
     const ImGuiIO& io = ImGui::GetIO();
-    if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O) &&
-        !busy) {
+    if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift &&
+        ImGui::IsKeyPressed(ImGuiKey_N) && !busy) {
+        new_project(app);
+    }
+    if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift &&
+        ImGui::IsKeyPressed(ImGuiKey_O) && !busy) {
         select_image_folder(app);
+    }
+    if (!io.WantTextInput && io.KeyCtrl && io.KeyShift &&
+        ImGui::IsKeyPressed(ImGuiKey_O) && !busy) {
+        select_project_folder(app);
+    }
+    if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S) &&
+        !busy) {
+        if (io.KeyShift) save_project_as(app);
+        else save_project(app);
     }
     if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape) && busy)
         action = Action::stop;
 
     if (!ImGui::BeginMainMenuBar()) return action;
     if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("New Project", "Ctrl+N", false, !busy)) {
+            new_project(app);
+        }
         if (ImGui::MenuItem("Select Image Folder...", "Ctrl+O", false, !busy)) {
             select_image_folder(app);
         }
-        if (ImGui::MenuItem("Set Project Folder...", nullptr, false, !busy)) {
+        if (ImGui::MenuItem("Open Project...", "Ctrl+Shift+O", false, !busy)) {
             select_project_folder(app);
+        }
+        if (ImGui::MenuItem("Save Project", "Ctrl+S", false, !busy)) {
+            save_project(app);
+        }
+        if (ImGui::MenuItem("Save Project As...", "Ctrl+Shift+S", false, !busy)) {
+            save_project_as(app);
         }
         ImGui::Separator();
         if (ImGui::MenuItem(
                 "Load Sparse Cloud", nullptr, false,
                 app.has_sparse && !app.loading_scene)) {
-            request_scene_load(
-                app, app.layout.sparse_ply, app.layout.sparse_poses,
-                "Sparse cloud");
+            if (!app.layout.project_file.empty())
+                request_ascan_scene_load(app);
+            else
+                request_scene_load(
+                    app, app.layout.sparse_ply, app.layout.sparse_poses,
+                    "Sparse cloud");
         }
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
@@ -888,9 +1197,11 @@ Action draw_menu_bar(App& app) {
         ImGui::PopStyleColor();
     }
 
-    const std::string project = app.layout.root.filename().empty()
-        ? std::string("Untitled Project")
-        : app.layout.root.filename().string();
+    const std::string project = app.layout.project_file.empty()
+        ? (app.layout.root.filename().empty()
+               ? std::string("Untitled Project")
+               : app.layout.root.filename().string())
+        : app.layout.project_file.filename().string();
     const float project_width = ImGui::CalcTextSize(project.c_str()).x;
     const float project_x =
         std::max(0.F, ImGui::GetWindowWidth() - project_width - 16.F);
@@ -1124,10 +1435,13 @@ void draw_scene_panel(App& app) {
     theme::section_header("SCENE");
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {7.F, 7.F});
     ImGui::SetCursorPosX(10.F);
+    const std::string capture_label = app.layout.project_file.empty()
+        ? (app.layout.root.filename().empty()
+               ? std::string("Capture")
+               : app.layout.root.filename().string())
+        : app.layout.project_file.filename().string();
     if (ImGui::TreeNodeEx(
-            app.layout.root.filename().empty()
-                ? "Capture"
-                : app.layout.root.filename().string().c_str(),
+            capture_label.c_str(),
             ImGuiTreeNodeFlags_DefaultOpen |
                 ImGuiTreeNodeFlags_SpanAvailWidth)) {
         const auto leaf = [](const char* label, const bool present,
@@ -1149,7 +1463,7 @@ void draw_scene_panel(App& app) {
             app.tab = ViewportTab::sparse;
             ensure_sparse_loaded(app);
         }
-        leaf("OpenMVS Export", app.has_mvs, false);
+        leaf("SfM Export", app.has_asfm || app.has_mvs, false);
         leaf(
             "Gaussian Model", app.has_model,
             app.tab == ViewportTab::training);
@@ -1546,7 +1860,7 @@ Action draw_inspector(App& app) {
         if (ImGui::Button("...##pick_images", {24.F, 0})) {
             select_image_folder(app);
         }
-        theme::caption("Project directory");
+        theme::caption("Project file");
         ImGui::SetNextItemWidth(-30.F);
         if (ImGui::InputText(
                 "##project", app.settings.project_dir.data(),
@@ -1558,6 +1872,12 @@ Action draw_inspector(App& app) {
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button("...##pick_project", {24.F, 0})) {
             select_project_folder(app);
+        }
+        if (app.project_writer_version != 0) {
+            ImGui::Spacing();
+            const std::string format =
+                "ascan v" + std::to_string(app.project_writer_version);
+            theme::metric("Project format", format.c_str());
         }
         ImGui::Spacing();
         if (theme::danger_button(
@@ -1583,9 +1903,8 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Reuse the Structure-from-Motion cache so Train 3DGS can\n"
-                "reload cameras and sparse points into memory instead of\n"
-                "solving poses again. Uncheck to rebuild from the images.\n"
-                "OpenMVS files are not written unless you export.");
+                "reload cameras from the .ascan project instead of solving\n"
+                "poses again. Uncheck to rebuild from the images.");
         ImGui::EndDisabled();
 
         if (theme::toolbar_button(
@@ -1594,13 +1913,21 @@ Action draw_inspector(App& app) {
             action = Action::export_sfm;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Write cameras and sparse points to sparse.mvs.\n"
-                "Align Photos and Train 3DGS keep the reconstruction in\n"
-                "memory (via the alignment cache) and do not write this file.");
+                "Write the SfM stage to a standalone .asfm file and an\n"
+                "OpenMVS .mvs sidecar. The project file already stores SfM.");
+        if (app.has_asfm) {
+            ImGui::Spacing();
+            const std::string asfm_name =
+                app.layout.sparse_asfm.filename().string();
+            theme::metric_coloured(
+                "SfM scene", asfm_name.c_str(), theme::success);
+        }
         if (app.has_mvs) {
             ImGui::Spacing();
+            const std::string mvs_name =
+                app.layout.sparse_mvs.filename().string();
             theme::metric_coloured(
-                "OpenMVS file", "sparse.mvs", theme::success);
+                "OpenMVS file", mvs_name.c_str(), theme::success);
         }
 
         if (!app.scene.views.empty()) {
@@ -1717,10 +2044,14 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
         if (theme::toolbar_button(
                 "Load Sparse Cloud", {-1.F, 28.F},
-                app.has_sparse && !app.loading_scene))
-            request_scene_load(
-                app, app.layout.sparse_ply, app.layout.sparse_poses,
-                "Sparse cloud");
+                app.has_sparse && !app.loading_scene)) {
+            if (!app.layout.project_file.empty())
+                request_ascan_scene_load(app);
+            else
+                request_scene_load(
+                    app, app.layout.sparse_ply, app.layout.sparse_poses,
+                    "Sparse cloud");
+        }
         if (theme::toolbar_button(
                 "Load Trained Model", {-1.F, 28.F},
                 app.has_model && !app.loading_scene))
@@ -1923,6 +2254,18 @@ void draw_status_bar(const App& app) {
     draw_status_segment(
         right, centre_y, icons::Icon::gpu, backend,
         busy ? theme::text_bright : theme::text_muted);
+
+    const double elapsed = app.monitor.elapsed_seconds();
+    if (elapsed >= 0.0) {
+        const std::string elapsed_text =
+            "Elapsed " + format_duration(elapsed);
+        const float elapsed_width = status_segment_width(elapsed_text.c_str());
+        right -= elapsed_width + 22.F;
+        draw_status_separator(right + elapsed_width + 11.F, height);
+        draw_status_segment(
+            right, centre_y, icons::Icon::clock, elapsed_text.c_str(),
+            busy ? theme::text_bright : theme::text_muted);
+    }
 
     if (busy) {
         const float fraction = app.monitor.fraction();

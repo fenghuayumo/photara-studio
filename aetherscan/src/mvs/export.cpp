@@ -1,5 +1,7 @@
 #include "mvs/export.hpp"
 
+#include "io/format_version.hpp"
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -616,6 +618,94 @@ bool load_depth_map(DepthMap& depth, const std::filesystem::path& path) {
         reinterpret_cast<char*>(depth.normal.data()),
         static_cast<std::streamsize>(depth.normal.size() * sizeof(Vec3f)));
     return static_cast<bool>(in);
+}
+
+std::vector<std::uint8_t> encode_mesh(const Mesh& mesh) {
+    const bool has_normals = mesh.normals.size() == mesh.vertices.size();
+    const bool has_colors = mesh.colors.size() == mesh.vertices.size();
+    std::uint32_t flags = 0;
+    if (has_normals) flags |= 1U;
+    if (has_colors) flags |= 2U;
+    const std::size_t vertex_bytes =
+        mesh.vertices.size() * sizeof(float) * 3 +
+        (has_normals ? mesh.normals.size() * sizeof(float) * 3 : 0) +
+        (has_colors ? mesh.colors.size() * sizeof(float) * 3 : 0);
+    const std::size_t face_bytes = mesh.faces.size() * sizeof(std::int32_t) * 3;
+    std::vector<std::uint8_t> bytes(
+        4 + 8 + 8 + 4 + vertex_bytes + face_bytes);
+    std::uint8_t* cursor = bytes.data();
+    const auto append = [&](const void* data, const std::size_t size) {
+        std::memcpy(cursor, data, size);
+        cursor += size;
+    };
+    const std::uint32_t version = k_mesh_chunk_version;
+    const std::uint64_t vertex_count = mesh.vertices.size();
+    const std::uint64_t face_count = mesh.faces.size();
+    append(&version, sizeof(version));
+    append(&vertex_count, sizeof(vertex_count));
+    append(&face_count, sizeof(face_count));
+    append(&flags, sizeof(flags));
+    for (const auto& vertex : mesh.vertices)
+        append(vertex.data(), sizeof(float) * 3);
+    if (has_normals)
+        for (const auto& normal : mesh.normals)
+            append(normal.data(), sizeof(float) * 3);
+    if (has_colors)
+        for (const auto& color : mesh.colors)
+            append(color.data(), sizeof(float) * 3);
+    for (const auto& face : mesh.faces) {
+        const std::int32_t indices[3] = {face.x(), face.y(), face.z()};
+        append(indices, sizeof(indices));
+    }
+    return bytes;
+}
+
+Mesh decode_mesh(const std::span<const std::uint8_t> bytes) {
+    if (bytes.size() < 4 + 8 + 8 + 4)
+        throw std::runtime_error("Mesh chunk is too small");
+    const std::uint8_t* cursor = bytes.data();
+    const std::uint8_t* end = bytes.data() + bytes.size();
+    const auto take = [&](const std::size_t size) {
+        if (cursor + size > end)
+            throw std::runtime_error("Truncated mesh chunk");
+        const std::uint8_t* data = cursor;
+        cursor += size;
+        return data;
+    };
+    std::uint32_t version = 0;
+    std::memcpy(&version, take(sizeof(version)), sizeof(version));
+    if (version == 0 || version > k_mesh_chunk_version)
+        throw std::runtime_error(io::unsupported_payload_version(
+            "Mesh chunk", version, k_mesh_chunk_version));
+    std::uint64_t vertex_count = 0;
+    std::uint64_t face_count = 0;
+    std::uint32_t flags = 0;
+    std::memcpy(&vertex_count, take(sizeof(vertex_count)), sizeof(vertex_count));
+    std::memcpy(&face_count, take(sizeof(face_count)), sizeof(face_count));
+    std::memcpy(&flags, take(sizeof(flags)), sizeof(flags));
+    if (vertex_count > 100'000'000ULL || face_count > 200'000'000ULL)
+        throw std::runtime_error("Mesh chunk counts are unreasonable");
+    Mesh mesh;
+    mesh.vertices.resize(static_cast<std::size_t>(vertex_count));
+    for (auto& vertex : mesh.vertices)
+        std::memcpy(vertex.data(), take(sizeof(float) * 3), sizeof(float) * 3);
+    if ((flags & 1U) != 0) {
+        mesh.normals.resize(mesh.vertices.size());
+        for (auto& normal : mesh.normals)
+            std::memcpy(normal.data(), take(sizeof(float) * 3), sizeof(float) * 3);
+    }
+    if ((flags & 2U) != 0) {
+        mesh.colors.resize(mesh.vertices.size());
+        for (auto& color : mesh.colors)
+            std::memcpy(color.data(), take(sizeof(float) * 3), sizeof(float) * 3);
+    }
+    mesh.faces.resize(static_cast<std::size_t>(face_count));
+    for (auto& face : mesh.faces) {
+        std::int32_t indices[3]{};
+        std::memcpy(indices, take(sizeof(indices)), sizeof(indices));
+        face = Eigen::Vector3i(indices[0], indices[1], indices[2]);
+    }
+    return mesh;
 }
 
 }  // namespace aetherscan::mvs

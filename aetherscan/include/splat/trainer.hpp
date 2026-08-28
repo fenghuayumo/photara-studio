@@ -5,8 +5,10 @@
 #include "splat/options.hpp"
 #include "splat/rasterizer.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <span>
 #include <vector>
 
 namespace aetherscan::splat {
@@ -156,6 +158,10 @@ private:
 void save_gaussians_ply(
     const GaussianModel& model, const std::filesystem::path& path);
 GaussianModel load_gaussians_ply(const std::filesystem::path& path);
+
+inline constexpr std::uint32_t k_gaussian_chunk_version = 1;
+std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model);
+GaussianModel decode_gaussians(std::span<const std::uint8_t> bytes);
 
 RenderMetrics render_evaluation_png(
     const GaussianModel& model, const mvs::MvsView& view,

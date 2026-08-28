@@ -2,6 +2,8 @@
 
 #include "imgui.h"
 
+#include "sfm/scene.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -58,6 +60,7 @@ struct SceneLoad {
 // unreadable CSV still yields a usable point cloud.
 SceneLoad load_sparse_scene(
     std::filesystem::path cloud_ply, std::filesystem::path poses_csv);
+SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene);
 
 struct OrbitCamera {
     float yaw{0.785398F};

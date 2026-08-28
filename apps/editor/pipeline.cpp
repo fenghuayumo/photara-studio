@@ -1,6 +1,8 @@
 #include "pipeline.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -104,6 +106,16 @@ bool ratio_after(
 
 std::string quote(const std::filesystem::path& path) {
     return '"' + path.string() + '"';
+}
+
+std::string lower_extension(const std::filesystem::path& path) {
+    std::string extension = path.extension().string();
+    std::transform(
+        extension.begin(), extension.end(), extension.begin(),
+        [](const unsigned char value) {
+            return static_cast<char>(std::tolower(value));
+        });
+    return extension;
 }
 
 const char* strategy_flag(const int index) {
@@ -319,6 +331,10 @@ void RunMonitor::reset() {
     floor_ = 0.F;
     band_begin_ = 0.F;
     band_end_ = 0.F;
+    has_clock_ = false;
+    clock_running_ = false;
+    started_ = {};
+    stopped_ = {};
 }
 
 void RunMonitor::begin(const JobKind kind) {
@@ -327,6 +343,10 @@ void RunMonitor::begin(const JobKind kind) {
     stage_ = kind == JobKind::train ? Stage::training : Stage::features;
     band_begin_ = 0.F;
     band_end_ = 0.F;
+    started_ = std::chrono::steady_clock::now();
+    stopped_ = started_;
+    has_clock_ = true;
+    clock_running_ = true;
 }
 
 void RunMonitor::enter_stage(const Stage stage, const float floor) {
@@ -475,6 +495,17 @@ void RunMonitor::mark_finished(const int exit_code) {
     task_.active = false;
     stage_ = exit_code == 0 ? Stage::complete : Stage::failed;
     if (exit_code == 0) floor_ = 1.F;
+    if (clock_running_) {
+        stopped_ = std::chrono::steady_clock::now();
+        clock_running_ = false;
+    }
+}
+
+double RunMonitor::elapsed_seconds() const {
+    if (!has_clock_) return -1.0;
+    const auto end = clock_running_ ? std::chrono::steady_clock::now()
+                                    : stopped_;
+    return std::chrono::duration<double>(end - started_).count();
 }
 
 float RunMonitor::fraction() const {
@@ -608,19 +639,36 @@ bool ProcessJob::consume_completion() {
 
 ProjectLayout resolve_layout(const ProjectSettings& settings) {
     ProjectLayout layout;
-    layout.root = std::filesystem::path(settings.project_dir.data());
-    layout.cache = layout.root / "cache";
-    layout.sparse_ply = layout.root / "sparse.ply";
-    layout.sparse_mvs = layout.root / "sparse.mvs";
-    layout.sparse_poses = layout.root / "sparse_sfm_diagnostics.csv";
-    layout.model_output = layout.root / "model.ply";
-    layout.splat_ply = layout.root / "model_splat.ply";
-    layout.mesh_ply = layout.root / "model_splat_mesh.ply";
-    layout.align_log = layout.root / "editor_align.log";
-    layout.train_log = layout.root / "editor_train.log";
-    layout.export_log = layout.root / "editor_export.log";
-    layout.preview_view_file = layout.root / "editor_preview_view";
-    layout.preview_camera_file = layout.root / "editor_preview_camera";
+    const std::filesystem::path stored(settings.project_dir.data());
+    if (lower_extension(stored) == ".ascan") {
+        layout.project_file = stored;
+        layout.root = stored.parent_path();
+    } else {
+        layout.root = stored;
+        layout.project_file = stored.empty()
+            ? std::filesystem::path{}
+            : stored / "project.ascan";
+    }
+    if (layout.root.empty() && !layout.project_file.empty())
+        layout.root = std::filesystem::current_path();
+    const std::string stem = layout.project_file.empty()
+        ? std::string("project")
+        : layout.project_file.stem().string();
+    layout.cache = layout.root / (stem + ".cache");
+    layout.sparse_ply = layout.root / (stem + "_sparse.ply");
+    layout.sparse_asfm = layout.root / (stem + ".asfm");
+    layout.sparse_mvs = layout.root / (stem + ".mvs");
+    layout.sparse_poses = layout.root / (stem + "_sfm_diagnostics.csv");
+    layout.model_output = layout.project_file.empty()
+        ? layout.root / (stem + ".ply")
+        : layout.project_file;
+    layout.splat_ply = layout.root / (stem + "_splat.ply");
+    layout.mesh_ply = layout.root / (stem + "_splat_mesh.ply");
+    layout.align_log = layout.root / (stem + "_align.log");
+    layout.train_log = layout.root / (stem + "_train.log");
+    layout.export_log = layout.root / (stem + "_export.log");
+    layout.preview_view_file = layout.root / (stem + "_preview_view");
+    layout.preview_camera_file = layout.root / (stem + "_preview_camera");
     return layout;
 }
 
@@ -628,13 +676,12 @@ std::string build_align_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout) {
     std::ostringstream command;
-    // Deliberately no --capture-mode / --splat / --mesh / --export-mvs: those
-    // switch the CLI into a full rebuild or write an OpenMVS sidecar. Align
-    // keeps the SfM scene in the reconstruction cache and only writes the
-    // sparse PLY the viewport needs.
+    // Align writes the SfM stage into the .ascan project. Sidecar PLY/CSV are
+    // not the hand-off; Train reloads cameras from the project file.
     command << quote(cli_path) << " --images "
             << quote(settings.images_dir.data()) << " --output "
-            << quote(layout.sparse_ply) << " --mode "
+            << quote(layout.project_file.empty() ? layout.sparse_ply
+                                                 : layout.project_file) << " --mode "
             << sfm_mode_flag(settings.sfm_mode) << " --max-features "
             << settings.max_features;
     if (settings.reuse_cache)
@@ -650,9 +697,8 @@ std::string build_train_command(
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.model_output);
 
-    // Training is a new process, so the SfM `Scene` from Align is restored
-    // from the reconstruction cache into memory, then `build_mvs_scene` runs
-    // in-process. OpenMVS files are never the hand-off.
+    // Training reloads SfM from the .ascan project when Align has already
+    // written that stage. OpenMVS files are never the hand-off.
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
             << " --max-features " << settings.max_features;
     if (settings.reuse_cache)
@@ -708,7 +754,7 @@ std::string build_export_sfm_command(
     std::ostringstream command;
     command << quote(cli_path) << " --images "
             << quote(settings.images_dir.data()) << " --output "
-            << quote(layout.sparse_mvs) << " --mode "
+            << quote(layout.sparse_asfm) << " --mode "
             << sfm_mode_flag(settings.sfm_mode) << " --max-features "
             << settings.max_features;
     std::error_code exists_error;

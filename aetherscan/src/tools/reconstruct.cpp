@@ -1,5 +1,8 @@
 #include "sfm/reconstruct.hpp"
+#include "sfm/asfm.hpp"
 #include "sfm/export_mvs.hpp"
+#include "project/archive.hpp"
+#include "project/document.hpp"
 #include "mvs/densify.hpp"
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
@@ -351,8 +354,10 @@ void print_help(const cxxopts::Options& options) {
               << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
               << "Output formats:\n"
-              << "  .mvs  OpenMVS Interface (explicit SfM export)\n"
-              << "  .ply  sparse XYZRGB point cloud (does not write .mvs)\n"
+              << "  .ascan  AetherScan project (settings + completed stages)\n"
+              << "  .asfm   native SfM scene (cameras, keypoints, tracks)\n"
+              << "  .ply    sparse XYZRGB point cloud\n"
+              << "  .mvs    OpenMVS Interface (interop export)\n"
               << "  --export-mvs [path]  also write OpenMVS Interface after SfM\n"
               << "  with --dense: also writes dense.ply next to --output\n"
               << "  with --texture: also writes *_textured.obj/.mtl/_albedo.png\n"
@@ -373,7 +378,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("m,mode",
          "Reconstruction mode: global (default), incremental, or hierarchical",
          cxxopts::value<std::string>()->default_value("global"))
-        ("o,output", "Output path (.mvs or .ply)", cxxopts::value<std::string>())
+        ("o,output",
+         "Output path (.ascan, .asfm, .ply, or .mvs)",
+         cxxopts::value<std::string>())
         ("export-mvs",
          "Write OpenMVS Interface after SfM. Optional path; default is "
          "<output-stem>.mvs. .ply output does not write .mvs unless this is set.",
@@ -1254,6 +1261,35 @@ std::string lower_extension(const std::filesystem::path& path) {
     return extension;
 }
 
+aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
+    aetherscan::project::Settings settings;
+    settings.name = cli.output.stem().string();
+    settings.image_directory = cli.images_dir;
+    if (cli.mode == "incremental") settings.sfm_mode = 1;
+    else if (cli.mode == "hierarchical") settings.sfm_mode = 2;
+    settings.max_features = cli.max_features;
+    settings.scene_mode = cli.capture_mode == "scene";
+    settings.iterations = static_cast<int>(cli.splat_iterations);
+    settings.preview_interval = static_cast<int>(cli.splat_preview_interval);
+    if (cli.splat_strategy == "adc_plus") settings.strategy = 1;
+    else if (cli.splat_strategy == "adc_igs") settings.strategy = 2;
+    else if (cli.splat_strategy == "dense_adaptive") settings.strategy = 3;
+    else settings.strategy = 0;
+    settings.max_resolution = static_cast<int>(cli.splat_max_resolution);
+    settings.progressive_resolution = cli.splat_progressive_resolution;
+    settings.use_mask = cli.splat_use_mask;
+    settings.build_mesh = cli.mesh;
+    if (cli.mesh_method == "tsdf") settings.mesh_method = 1;
+    else if (cli.mesh_method == "pam") settings.mesh_method = 2;
+    else settings.mesh_method = 0;
+    settings.depth_normal_weight = cli.splat_depth_normal_weight;
+    settings.multi_view_geo_weight = cli.splat_multi_view_geo_weight;
+    settings.multi_view_ncc_weight = cli.splat_multi_view_ncc_weight;
+    settings.geometry_from_iter = static_cast<int>(cli.splat_geometry_from_iter);
+    settings.normal_field = cli.splat_normal_field;
+    return settings;
+}
+
 void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& path) {
     std::size_t count = 0;
     for (const auto& track : scene.tracks) {
@@ -1718,7 +1754,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     const ReconstructCli& cli,
     const bool dense_input,
     const aetherscan::mvs::DensifyOptions* mesh_options = nullptr,
-    const std::filesystem::path& generated_mask_dir = {}) {
+    const std::filesystem::path& generated_mask_dir = {},
+    aetherscan::project::Archive* project_archive = nullptr) {
     aetherscan::splat::TrainingOptions options;
     options.iterations = cli.splat_iterations;
     options.preview_interval = cli.splat_preview_interval;
@@ -2190,6 +2227,14 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " gaussians=", gaussians.size(),
         cli.splat_model.empty() ? " training_s=" : " model_load_s=",
         elapsed);
+    if (project_archive) {
+        project_archive->set_chunk(
+            aetherscan::project::ChunkType::gaussians,
+            aetherscan::splat::encode_gaussians(gaussians));
+        project_archive->save(cli.output);
+        aetherscan::core::Logger::instance().info(
+            "ascan_gaussians=", cli.output, " count=", gaussians.size());
+    }
     if (!cli.mesh) return std::nullopt;
     if (cli.mesh_method == "pam") {
         aetherscan::splat::PamMeshOptions pam_options;
@@ -2301,6 +2346,22 @@ int main(int argc, char** argv) {
             "AetherScan started: mode=", cli.mode, " images_dir=", cli.images_dir,
             " output=", cli.output, " log=", log_path);
 
+        const auto output_ext = lower_extension(cli.output);
+        const bool project_output = output_ext == ".ascan";
+        aetherscan::project::Archive archive =
+            aetherscan::project::Archive::create();
+        std::error_code project_error;
+        if (project_output &&
+            std::filesystem::exists(cli.output, project_error)) {
+            archive = aetherscan::project::Archive::open(cli.output);
+            aetherscan::core::Logger::instance().info(
+                "ascan_open=", cli.output,
+                " sfm=", archive.has(aetherscan::project::ChunkType::sfm),
+                " gaussians=",
+                archive.has(aetherscan::project::ChunkType::gaussians),
+                " mesh=", archive.has(aetherscan::project::ChunkType::mesh));
+        }
+
 #if defined(AETHERSCAN_HAS_SPLAT)
         if (!cli.splat_dataset.empty()) {
             aetherscan::splat::DatasetLoadRequest request;
@@ -2402,7 +2463,8 @@ int main(int argc, char** argv) {
             }
             auto mesh = run_splat_training(
                 loaded.scene, cli, loaded.initial_points_dense,
-                cli.mesh ? &mesh_options : nullptr);
+                cli.mesh ? &mesh_options : nullptr, {},
+                project_output ? &archive : nullptr);
             if (mesh) {
 #if defined(AETHERSCAN_HAS_ASDIFF_MESH)
                 if (cli.mesh_target_faces > 0)
@@ -2418,11 +2480,38 @@ int main(int argc, char** argv) {
                             (mesh_path.stem().string() + ".obj"));
                 aetherscan::core::Logger::instance().info(
                     "mesh_ply=", mesh_path, " faces=", mesh->faces.size());
+                if (project_output) {
+                    archive.set_chunk(
+                        aetherscan::project::ChunkType::mesh,
+                        aetherscan::mvs::encode_mesh(*mesh));
+                    archive.save(cli.output);
+                    aetherscan::core::Logger::instance().info(
+                        "ascan_mesh=", cli.output,
+                        " faces=", mesh->faces.size());
+                }
             }
             return 0;
         }
 #endif
 
+        aetherscan::sfm::Scene scene;
+        bool loaded_project_sfm = false;
+        if (project_output && cli.splat &&
+            archive.has(aetherscan::project::ChunkType::sfm)) {
+            auto loaded = aetherscan::project::read_sfm(archive);
+            if (loaded && loaded->registered_count() >= 2) {
+                scene = std::move(*loaded);
+                loaded_project_sfm = true;
+                aetherscan::core::Logger::instance().info(
+                    "ascan_sfm_loaded images=", scene.images.size(),
+                    " registered=", scene.registered_count(),
+                    " tracks=", scene.tracks.size());
+            }
+        }
+
+        aetherscan::sfm::ReconstructionSummary summary{};
+        double elapsed = 0.0;
+        if (!loaded_project_sfm) {
         std::vector<std::filesystem::path> files;
         for (const auto& entry :
              std::filesystem::directory_iterator(cli.images_dir)) {
@@ -2475,9 +2564,8 @@ int main(int argc, char** argv) {
         config.frontend.checkpoint.directory = cli.cache_dir;
 
         const auto started = std::chrono::steady_clock::now();
-        aetherscan::sfm::Scene scene;
-        const auto summary = aetherscan::sfm::reconstruct(scene, files, config);
-        const double elapsed =
+        summary = aetherscan::sfm::reconstruct(scene, files, config);
+        elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
                 .count();
 
@@ -2491,14 +2579,39 @@ int main(int argc, char** argv) {
         const auto diagnostics_path = write_sfm_diagnostics(scene, cli.output);
         aetherscan::core::Logger::instance().info(
             "sfm_diagnostics=", diagnostics_path);
+        } else {
+            summary.valid = true;
+            summary.registered_views =
+                static_cast<unsigned>(scene.registered_count());
+            unsigned landmarks = 0;
+            for (const auto& track : scene.tracks)
+                if (track.is_triangulated()) ++landmarks;
+            summary.landmarks = landmarks;
+            summary.failed_views = static_cast<unsigned>(
+                scene.images.size() - scene.registered_count());
+        }
 
-        const auto output_ext = lower_extension(cli.output);
         if (output_ext == ".mvs") {
             aetherscan::sfm::export_openmvs_interface(scene, cli.output);
         } else if (output_ext == ".ply") {
             save_ply(scene, cli.output);
+        } else if (output_ext == ".asfm") {
+            aetherscan::sfm::save_asfm(scene, cli.output);
+            aetherscan::core::Logger::instance().info("asfm=", cli.output);
+        } else if (output_ext == ".ascan") {
+            const auto settings = settings_from_cli(cli);
+            if (!loaded_project_sfm)
+                aetherscan::project::replace_sfm_stage(
+                    archive, scene, settings, cli.output);
+            else
+                aetherscan::project::write_settings(
+                    archive, settings, cli.output);
+            archive.save(cli.output);
+            aetherscan::core::Logger::instance().info(
+                "ascan=", cli.output, " sfm_images=", scene.images.size());
         } else {
-            throw std::invalid_argument("Output must end with .mvs or .ply");
+            throw std::invalid_argument(
+                "Output must end with .ascan, .asfm, .ply, or .mvs");
         }
 
         if (cli.export_mvs_requested) {
@@ -2579,7 +2692,8 @@ int main(int argc, char** argv) {
             auto mesh = run_splat_training(
                 splat_scene, cli, false,
                 cli.mesh ? &mesh_options : nullptr,
-                cli.masks_dir);
+                cli.masks_dir,
+                project_output ? &archive : nullptr);
             if (mesh) {
 #if defined(AETHERSCAN_HAS_ASDIFF_MESH)
                 if (cli.mesh_target_faces > 0)
@@ -2600,6 +2714,15 @@ int main(int argc, char** argv) {
                 aetherscan::core::Logger::instance().info(
                     "mesh_ply=", mesh_path,
                     " faces=", splat_scene.mesh.faces.size());
+                if (project_output) {
+                    archive.set_chunk(
+                        aetherscan::project::ChunkType::mesh,
+                        aetherscan::mvs::encode_mesh(splat_scene.mesh));
+                    archive.save(cli.output);
+                    aetherscan::core::Logger::instance().info(
+                        "ascan_mesh=", cli.output,
+                        " faces=", splat_scene.mesh.faces.size());
+                }
 
 #if defined(AETHERSCAN_HAS_TEXTURE)
                 if (cli.texture) {
@@ -2766,7 +2889,8 @@ int main(int argc, char** argv) {
                     aetherscan::mvs::MeshMethod::tsdf;
                 auto splat_mesh = run_splat_training(
                     mvs_scene, cli, true, &splat_mesh_options,
-                    effective_mask_dir);
+                    effective_mask_dir,
+                    project_output ? &archive : nullptr);
                 if (splat_mesh) mvs_scene.mesh = std::move(*splat_mesh);
             }
 #endif

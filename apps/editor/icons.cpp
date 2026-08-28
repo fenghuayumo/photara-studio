@@ -370,6 +370,15 @@ void draw(
                 colour, stroke);
             break;
         }
+        case Icon::clock: {
+            draw_list->AddCircle(
+                centre, extent * 0.36F, colour, 0, thickness);
+            line(draw_list, min, max, 0.50F, 0.50F, 0.50F, 0.28F, colour,
+                 thickness);
+            line(draw_list, min, max, 0.50F, 0.50F, 0.72F, 0.50F, colour,
+                 thickness);
+            break;
+        }
     }
 }
 

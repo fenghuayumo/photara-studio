@@ -1,0 +1,38 @@
+#pragma once
+
+#include "sfm/scene.hpp"
+
+#include <cstdint>
+#include <filesystem>
+#include <span>
+#include <vector>
+
+namespace aetherscan::sfm {
+
+inline constexpr std::uint32_t k_asfm_version = 1;
+inline constexpr std::uint32_t k_asfm_min_reader = 1;
+
+struct AsfmOptions {
+    // If set, image paths are stored relative to this directory when they do
+    // not escape it. Load resolves remaining relative paths against this base.
+    std::filesystem::path path_base;
+};
+
+// Native SfM scene file (.asfm). Product subset: cameras, images, poses,
+// keypoints, triangulated tracks. No descriptors, pairs, or resection state.
+void save_asfm(
+    const Scene& scene,
+    const std::filesystem::path& path,
+    const AsfmOptions& options = {});
+Scene load_asfm(
+    const std::filesystem::path& path,
+    const AsfmOptions& options = {});
+
+std::vector<std::uint8_t> encode_asfm(
+    const Scene& scene,
+    const AsfmOptions& options = {});
+Scene decode_asfm(
+    std::span<const std::uint8_t> bytes,
+    const AsfmOptions& options = {});
+
+}  // namespace aetherscan::sfm

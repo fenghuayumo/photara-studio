@@ -26,6 +26,7 @@ enum class Icon {
     trash,
     search,
     follow,
+    clock,
 };
 
 enum class ButtonStyle { normal, primary, danger };

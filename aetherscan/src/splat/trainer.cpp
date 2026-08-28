@@ -3,6 +3,7 @@
 #include "cuda_ops.hpp"
 #include "core/logging.hpp"
 #include "densification.hpp"
+#include "io/format_version.hpp"
 #include "io/image.hpp"
 #include "multi_view_scheduler.hpp"
 #include "training_data_loader.hpp"
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <future>
 #include <limits>
@@ -1769,6 +1771,143 @@ GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
         "loaded splat PLY=", path, " gaussians=", count,
         " sh_degree=", degree, " filter_3d=", !filter.empty(),
         " learned_normal_field=", has_normal_features);
+    return model;
+}
+
+std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model) {
+    const std::size_t count = model.size();
+    if (count == 0) {
+        const std::uint32_t version = k_gaussian_chunk_version;
+        const std::uint64_t stored_count = 0;
+        const std::uint32_t sh_degree = model.sh_degree;
+        const std::uint32_t flags = 0;
+        std::vector<std::uint8_t> bytes(4 + 8 + 4 + 4);
+        std::memcpy(bytes.data(), &version, 4);
+        std::memcpy(bytes.data() + 4, &stored_count, 8);
+        std::memcpy(bytes.data() + 12, &sh_degree, 4);
+        std::memcpy(bytes.data() + 16, &flags, 4);
+        return bytes;
+    }
+    const std::size_t bases = count == 0 ? 1 : model.sh.shape()[1];
+    const auto means = download<float>(model.means);
+    const auto log_scales = download<float>(model.log_scales);
+    const auto rotations = download<float>(model.quaternions);
+    const auto opacities = download<float>(model.opacity_logits);
+    const auto sh = count == 0 ? std::vector<float>{} : download<float>(model.sh);
+    const bool has_normal_features = model.normal_features.is_valid() &&
+        model.normal_features.shape().rank() == 2 &&
+        model.normal_features.shape()[0] == count &&
+        model.normal_features.shape()[1] == 4;
+    const auto normal_features = has_normal_features
+        ? download<float>(model.normal_features)
+        : std::vector<float>{};
+    const bool has_filter = model.filter_3d.is_valid() &&
+        model.filter_3d.numel() == count;
+    const auto filter_3d = has_filter
+        ? download<float>(model.filter_3d)
+        : std::vector<float>{};
+    std::uint32_t flags = 0;
+    if (has_filter) flags |= 1U;
+    if (has_normal_features) flags |= 2U;
+    const std::uint32_t version = k_gaussian_chunk_version;
+    const std::uint64_t stored_count = count;
+    const std::uint32_t sh_degree = model.sh_degree;
+    std::vector<std::uint8_t> bytes(
+        sizeof(version) + sizeof(stored_count) + sizeof(sh_degree) +
+        sizeof(flags) +
+        (means.size() + log_scales.size() + rotations.size() + opacities.size() +
+         sh.size() + normal_features.size() + filter_3d.size()) *
+            sizeof(float));
+    std::uint8_t* cursor = bytes.data();
+    const auto append = [&](const void* data, const std::size_t size) {
+        if (size == 0) return;
+        std::memcpy(cursor, data, size);
+        cursor += size;
+    };
+    append(&version, sizeof(version));
+    append(&stored_count, sizeof(stored_count));
+    append(&sh_degree, sizeof(sh_degree));
+    append(&flags, sizeof(flags));
+    append(means.data(), means.size() * sizeof(float));
+    append(log_scales.data(), log_scales.size() * sizeof(float));
+    append(rotations.data(), rotations.size() * sizeof(float));
+    append(opacities.data(), opacities.size() * sizeof(float));
+    append(sh.data(), sh.size() * sizeof(float));
+    append(normal_features.data(), normal_features.size() * sizeof(float));
+    append(filter_3d.data(), filter_3d.size() * sizeof(float));
+    return bytes;
+}
+
+GaussianModel decode_gaussians(const std::span<const std::uint8_t> bytes) {
+    if (bytes.size() < 4 + 8 + 4 + 4)
+        throw std::runtime_error("Gaussian chunk is too small");
+    const std::uint8_t* cursor = bytes.data();
+    const std::uint8_t* end = bytes.data() + bytes.size();
+    const auto take = [&](const std::size_t size) {
+        if (cursor + size > end)
+            throw std::runtime_error("Truncated Gaussian chunk");
+        const std::uint8_t* data = cursor;
+        cursor += size;
+        return data;
+    };
+    std::uint32_t version = 0;
+    std::uint64_t count64 = 0;
+    std::uint32_t sh_degree = 0;
+    std::uint32_t flags = 0;
+    std::memcpy(&version, take(sizeof(version)), sizeof(version));
+    std::memcpy(&count64, take(sizeof(count64)), sizeof(count64));
+    std::memcpy(&sh_degree, take(sizeof(sh_degree)), sizeof(sh_degree));
+    std::memcpy(&flags, take(sizeof(flags)), sizeof(flags));
+    if (version == 0 || version > k_gaussian_chunk_version)
+        throw std::runtime_error(io::unsupported_payload_version(
+            "Gaussian chunk", version, k_gaussian_chunk_version));
+    if (count64 > 50'000'000ULL || sh_degree > 3)
+        throw std::runtime_error("Gaussian chunk header is invalid");
+    const std::size_t count = static_cast<std::size_t>(count64);
+    const std::size_t bases =
+        static_cast<std::size_t>(sh_degree + 1U) * (sh_degree + 1U);
+    const bool has_filter = (flags & 1U) != 0;
+    const bool has_normal_features = (flags & 2U) != 0;
+    std::vector<float> means(count * 3U);
+    std::vector<float> scales(count * 3U);
+    std::vector<float> rotations(count * 4U);
+    std::vector<float> opacities(count);
+    std::vector<float> sh(count * bases * 3U);
+    std::vector<float> normal_features(has_normal_features ? count * 4U : 0);
+    std::vector<float> filter(has_filter ? count : 0);
+    const auto take_floats = [&](std::vector<float>& values) {
+        if (values.empty()) return;
+        std::memcpy(
+            values.data(), take(values.size() * sizeof(float)),
+            values.size() * sizeof(float));
+    };
+    take_floats(means);
+    take_floats(scales);
+    take_floats(rotations);
+    take_floats(opacities);
+    take_floats(sh);
+    take_floats(normal_features);
+    take_floats(filter);
+
+    GaussianModel model;
+    if (count == 0) return model;
+    model.means = tinytensor::Tensor::from_vector(
+        means, {count, 3U}, tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        scales, {count, 3U}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        rotations, {count, 4U}, tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        opacities, {count, 1U}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::from_vector(
+        sh, {count, bases, 3U}, tinytensor::Device::CUDA);
+    if (has_normal_features)
+        model.normal_features = tinytensor::Tensor::from_vector(
+            normal_features, {count, 4U}, tinytensor::Device::CUDA);
+    if (has_filter)
+        model.filter_3d = tinytensor::Tensor::from_vector(
+            filter, {count, 1U}, tinytensor::Device::CUDA);
+    model.sh_degree = sh_degree;
     return model;
 }
 

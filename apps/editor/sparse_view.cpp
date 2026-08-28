@@ -630,6 +630,51 @@ std::string load_poses(
 
 void SparseScene::clear() { *this = {}; }
 
+SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
+    SceneLoad loaded;
+    loaded.ok = true;
+    std::size_t point_count = 0;
+    for (const auto& track : scene.tracks)
+        if (track.is_triangulated()) ++point_count;
+    loaded.scene.points.reserve(point_count);
+    for (const auto& track : scene.tracks) {
+        if (!track.is_triangulated()) continue;
+        loaded.scene.points.push_back({
+            static_cast<float>(track.position.x()),
+            static_cast<float>(track.position.y()),
+            static_cast<float>(track.position.z())});
+    }
+    loaded.scene.views.reserve(scene.images.size());
+    for (const auto& image : scene.images) {
+        ViewPose pose;
+        pose.name = image.path.filename().string();
+        pose.centre = {
+            static_cast<float>(image.pose.C.x()),
+            static_cast<float>(image.pose.C.y()),
+            static_cast<float>(image.pose.C.z())};
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                pose.rotation[static_cast<std::size_t>(row * 3 + column)] =
+                    static_cast<float>(image.pose.R(row, column));
+        if (image.camera_id < scene.cameras.size()) {
+            const auto& camera = scene.cameras[image.camera_id];
+            pose.fx = static_cast<float>(camera.fx);
+            pose.fy = static_cast<float>(camera.fy);
+            pose.width = camera.width;
+            pose.height = camera.height;
+        }
+        pose.observations = image.id < scene.image_tracks.size()
+            ? scene.image_tracks[image.id].size()
+            : 0;
+        pose.registered = image.registered;
+        if (pose.registered) ++loaded.scene.registered_views;
+        loaded.scene.views.push_back(std::move(pose));
+    }
+    loaded.scene.total_views = scene.images.size();
+    loaded.scene.compute_bounds();
+    return loaded;
+}
+
 void SparseScene::compute_bounds() {
     if (points.empty()) {
         centroid = {};
