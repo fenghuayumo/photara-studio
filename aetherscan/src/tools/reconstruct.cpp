@@ -938,9 +938,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!cli.splat_model.empty()) cli.splat = true;
     // An explicitly selected capture mode is the product-level full rebuild
     // preset. Omitting it keeps the low-level SfM-only developer workflow.
+    // An explicit --mesh still wins, so a caller can request appearance-only
+    // splat training in either capture mode.
     if (result.count("capture-mode") != 0) {
         cli.splat = true;
-        cli.mesh = true;
+        if (result.count("mesh") == 0) cli.mesh = true;
     }
     if (!cli.mask_mesh.empty()) cli.mvs_mesh_only = true;
     if (cli.mvs_mesh_only) cli.mesh = true;
