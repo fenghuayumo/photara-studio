@@ -602,8 +602,10 @@ if(AETHERSCAN_ENABLE_FEATURES)
             include(FetchContent)
             get_filename_component(
                 _aetherscan_vcpkg_root "${glfw3_DIR}/../../../.." ABSOLUTE)
+            # DockSpace / DockBuilder live on the docking branch. Prefer a local
+            # vcpkg docking tree when present so configure stays offline.
             file(GLOB _aetherscan_imgui_local
-                "${_aetherscan_vcpkg_root}/buildtrees/imgui/src/v1.91.9-*.clean")
+                "${_aetherscan_vcpkg_root}/buildtrees/imgui/src/*docking*.clean")
             if(_aetherscan_imgui_local)
                 list(GET _aetherscan_imgui_local 0 _aetherscan_imgui_source)
                 FetchContent_Declare(aetherscan_imgui
@@ -612,8 +614,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
                 FetchContent_Declare(
                     aetherscan_imgui
                     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-                    GIT_TAG 365f6444ab40ee87c73c947b475b3a267b3cb77c
-                    GIT_SHALLOW FALSE)
+                    GIT_TAG v1.91.9-docking
+                    GIT_SHALLOW TRUE)
             endif()
             FetchContent_MakeAvailable(aetherscan_imgui)
             add_library(aetherscan_imgui STATIC

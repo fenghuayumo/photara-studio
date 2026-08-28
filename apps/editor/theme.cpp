@@ -54,7 +54,7 @@ Fonts load_fonts(ImGuiIO& io) {
 
 void apply_style() {
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowPadding = {0, 0};
+    style.WindowPadding = {10.F, 8.F};
     style.FramePadding = {9, 6};
     style.CellPadding = {8, 5};
     style.ItemSpacing = {8, 7};
@@ -62,7 +62,8 @@ void apply_style() {
     style.IndentSpacing = 18.F;
     style.ScrollbarSize = 11.F;
     style.GrabMinSize = 9.F;
-    style.WindowBorderSize = 0.F;
+    style.WindowBorderSize = 1.F;
+    style.DockingSeparatorSize = 3.F;
     style.ChildBorderSize = 1.F;
     style.PopupBorderSize = 1.F;
     style.FrameBorderSize = 1.F;
@@ -114,6 +115,8 @@ void apply_style() {
     c[ImGuiCol_TabSelectedOverline] = accent;
     c[ImGuiCol_TabDimmed] = ImVec4(0.071F, 0.073F, 0.082F, 1.F);
     c[ImGuiCol_TabDimmedSelected] = ImVec4(0.125F, 0.129F, 0.145F, 1.F);
+    c[ImGuiCol_DockingPreview] = fade(accent, 0.45F);
+    c[ImGuiCol_DockingEmptyBg] = surface_0;
     c[ImGuiCol_PlotHistogram] = accent;
     c[ImGuiCol_TextSelectedBg] = fade(accent, 0.35F);
 }

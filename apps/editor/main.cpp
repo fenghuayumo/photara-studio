@@ -6,6 +6,11 @@
 #include "vulkan_backend.hpp"
 
 #include "imgui_impl_glfw.h"
+#include "imgui_internal.h"
+
+#ifndef IMGUI_HAS_DOCK
+#error "The editor requires Dear ImGui built from the docking branch."
+#endif
 
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
@@ -22,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <future>
@@ -79,7 +85,31 @@ struct App {
     bool smoke_success{};
     bool close_requested{};
     bool show_controls{};
+    bool show_clear_results{};
+    bool project_folder_automatic{};
+
+    bool show_scene{true};
+    bool show_viewport{true};
+    bool show_console{true};
+    bool show_inspector{true};
+    bool show_status_bar{true};
+    bool reset_dock_layout{};
 };
+
+constexpr float k_toolbar_height = 52.F;
+constexpr float k_status_height = 34.F;
+
+// ImGui stores IniFilename as a raw pointer, so this has to outlive the
+// context. Smoke tests keep ini disabled so they cannot clobber a saved layout.
+std::string g_editor_ini;
+
+std::filesystem::path resolve_editor_ini() {
+#if defined(_WIN32)
+    if (const char* appdata = std::getenv("APPDATA"))
+        return std::filesystem::path(appdata) / "AetherScan" / "editor.ini";
+#endif
+    return std::filesystem::current_path() / "aetherscan_editor.ini";
+}
 
 void set_message(App& app, std::string text, const ImVec4& colour) {
     app.message = std::move(text);
@@ -190,14 +220,35 @@ void assign_default_project_folder(App& app) {
     std::snprintf(
         app.settings.project_dir.data(), app.settings.project_dir.size(), "%s",
         text.c_str());
+    app.project_folder_automatic = true;
+}
+
+void clear_loaded_result(App& app) {
+    app.scene.clear();
+    app.scene_source.clear();
+    app.camera = {};
+    app.tab = ViewportTab::sparse;
+    app.monitor.reset();
+    app.log.clear();
+    app.fresh_lines.clear();
 }
 
 void select_image_folder(App& app) {
+    if (app.job.running() || app.loading_scene) return;
     if (!pick_folder(
             L"Select the capture image folder", app.settings.images_dir))
         return;
+
+    clear_loaded_result(app);
+    if (app.project_folder_automatic) {
+        app.settings.project_dir.fill('\0');
+        app.project_folder_automatic = false;
+    }
     assign_default_project_folder(app);
     refresh_artifacts(app);
+    set_message(
+        app, "Image dataset selected; previous viewport result cleared",
+        theme::text_muted);
 }
 
 void request_scene_load(
@@ -212,6 +263,7 @@ void request_scene_load(
 }
 
 void select_project_folder(App& app) {
+    if (app.job.running() || app.loading_scene) return;
     if (!pick_folder(
             L"Select the AetherScan project folder",
             app.settings.project_dir))
@@ -220,8 +272,8 @@ void select_project_folder(App& app) {
     // Switching projects is an explicit scene transition. Clear the previous
     // reconstruction immediately, then load the selected project's sparse
     // result when one is available.
-    app.scene.clear();
-    app.scene_source.clear();
+    clear_loaded_result(app);
+    app.project_folder_automatic = false;
     refresh_artifacts(app);
     if (app.has_sparse)
         request_scene_load(
@@ -229,6 +281,60 @@ void select_project_folder(App& app) {
             "Sparse cloud");
     else
         set_message(app, "Project selected; no sparse cloud yet", theme::text_muted);
+}
+
+bool has_reconstruction_result(const App& app) {
+    if (app.scene.has_points() || app.has_sparse || app.has_model || app.has_mesh)
+        return true;
+    if (app.layout.cache.empty()) return false;
+    std::error_code error;
+    return std::filesystem::exists(app.layout.cache, error);
+}
+
+void delete_reconstruction_results(App& app) {
+    if (app.job.running() || app.loading_scene || app.layout.root.empty()) return;
+
+    clear_loaded_result(app);
+    const std::array<std::filesystem::path, 7> generated_files = {
+        app.layout.sparse_ply, app.layout.sparse_poses,
+        app.layout.model_output, app.layout.splat_ply, app.layout.mesh_ply,
+        app.layout.align_log, app.layout.train_log};
+
+    std::uintmax_t removed = 0;
+    std::string failure;
+    for (const std::filesystem::path& path : generated_files) {
+        if (path.empty()) continue;
+        std::error_code error;
+        if (std::filesystem::remove(path, error)) ++removed;
+        if (error && failure.empty()) failure = error.message();
+    }
+
+    // resolve_layout() always makes this exact root/cache child. Re-check the
+    // relationship before a recursive removal so a malformed path can never
+    // broaden the deletion target.
+    const std::filesystem::path root = app.layout.root.lexically_normal();
+    const std::filesystem::path cache = app.layout.cache.lexically_normal();
+    const bool safe_cache = !root.empty() && !cache.empty() && cache != root &&
+                            cache.parent_path() == root &&
+                            cache.filename() == "cache";
+    if (safe_cache) {
+        std::error_code error;
+        removed += std::filesystem::remove_all(cache, error);
+        if (error && failure.empty()) failure = error.message();
+    }
+
+    refresh_artifacts(app);
+    if (failure.empty()) {
+        set_message(
+            app,
+            "Reconstruction results cleared (" + std::to_string(removed) +
+                " generated entries removed)",
+            theme::success);
+    } else {
+        set_message(
+            app, "Some reconstruction results could not be removed: " + failure,
+            theme::danger);
+    }
 }
 
 void poll_scene_load(App& app) {
@@ -404,59 +510,92 @@ void on_job_finished(App& app) {
 // ---------------------------------------------------------------------------
 // UI fragments
 
-// Brand strip plus a breadcrumb of the four workflow stages, so the current
-// position in the pipeline is readable without scanning the side panels.
-void draw_title_bar(const App& app) {
+enum class Action { none, align, train, stop, reveal };
+
+int workflow_step(const App& app) {
     const bool training =
         app.job.running() && app.active_job == JobKind::train;
     const bool aligning =
         app.job.running() && app.active_job == JobKind::align;
-    const int current = training && app.monitor.stage() == Stage::meshing ? 3
-        : training                                                        ? 2
-        : aligning                                                        ? 1
-        : app.has_model                                                   ? 2
-        : app.has_sparse                                                  ? 1
-                                                                          : 0;
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.078F, 0.080F, 0.090F, 1.F));
-    ImGui::BeginChild("##titlebar", {0, 30.F}, false, ImGuiWindowFlags_NoScrollbar);
-    ImGui::SetCursorPos({14.F, 6.F});
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::accent);
-    ImGui::TextUnformatted("AETHER");
-    ImGui::PopStyleColor();
-    ImGui::SameLine(0.F, 1.F);
-    ImGui::TextUnformatted("SCAN");
-
-    const std::array<const char*, 4> steps{
-        {"Images", "Alignment", "Gaussians", "Mesh"}};
-    ImGui::SameLine(0.F, 26.F);
-    for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
-        if (i > 0) {
-            ImGui::SameLine(0.F, 8.F);
-            theme::caption("\xE2\x80\xBA");  // single right angle quote
-            ImGui::SameLine(0.F, 8.F);
-        }
-        const bool reached = i <= current;
-        ImGui::PushStyleColor(
-            ImGuiCol_Text, i == current ? theme::accent
-                                        : (reached ? theme::text_muted
-                                                   : theme::text_faint));
-        ImGui::TextUnformatted(steps[static_cast<std::size_t>(i)]);
-        ImGui::PopStyleColor();
-    }
-
-    const std::string project = app.layout.root.filename().empty()
-        ? std::string("Untitled Project")
-        : app.layout.root.filename().string();
-    const float width = ImGui::CalcTextSize(project.c_str()).x;
-    ImGui::SameLine(std::max(0.F, ImGui::GetWindowWidth() - width - 16.F));
-    theme::caption(project.c_str());
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
+    if (training && app.monitor.stage() == Stage::meshing) return 3;
+    if (training) return 2;
+    if (aligning) return 1;
+    if (app.has_model) return 2;
+    if (app.has_sparse) return 1;
+    return 0;
 }
 
-// Returns the action requested from the toolbar, if any.
-enum class Action { none, align, train, stop, reveal };
+void apply_default_dock_layout(const ImGuiID dockspace_id, const ImVec2 size) {
+    ImGui::DockBuilderRemoveNode(dockspace_id);
+    ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspace_id, size);
+
+    ImGuiID dock_main = dockspace_id;
+    ImGuiID dock_left = 0;
+    ImGuiID dock_right = 0;
+    ImGuiID dock_bottom = 0;
+    ImGui::DockBuilderSplitNode(
+        dock_main, ImGuiDir_Left, 0.18F, &dock_left, &dock_main);
+    ImGui::DockBuilderSplitNode(
+        dock_main, ImGuiDir_Right, 0.24F, &dock_right, &dock_main);
+    ImGui::DockBuilderSplitNode(
+        dock_main, ImGuiDir_Down, 0.22F, &dock_bottom, &dock_main);
+
+    ImGui::DockBuilderDockWindow("Scene", dock_left);
+    ImGui::DockBuilderDockWindow("Viewport", dock_main);
+    ImGui::DockBuilderDockWindow("Console", dock_bottom);
+    ImGui::DockBuilderDockWindow("Inspector", dock_right);
+    ImGui::DockBuilderFinish(dockspace_id);
+}
+
+// Host window covering the work area under the toolbar and above the status
+// bar. The default split matches the previous fixed layout so first launch
+// still reads as Scene | Viewport+Console | Inspector.
+void build_dock_space(App& app) {
+    if (!(ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_DockingEnable)) return;
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float status_h = app.show_status_bar ? k_status_height : 0.F;
+    const ImVec2 pos{
+        viewport->WorkPos.x, viewport->WorkPos.y + k_toolbar_height};
+    const ImVec2 size{
+        viewport->WorkSize.x,
+        std::max(1.F, viewport->WorkSize.y - k_toolbar_height - status_h)};
+
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGui::SetNextWindowViewport(viewport->ID);
+
+    constexpr ImGuiWindowFlags host_flags =
+        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground |
+        ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.F, 0.F));
+    ImGui::Begin("##EditorDockSpaceHost", nullptr, host_flags);
+    ImGui::PopStyleVar(3);
+
+    // Bump the id when the default window set changes so old ini layouts
+    // migrate instead of restoring a missing split.
+    const ImGuiID dockspace_id = ImGui::GetID("EditorDockSpace_v1");
+    if (app.reset_dock_layout ||
+        ImGui::DockBuilderGetNode(dockspace_id) == nullptr) {
+        app.show_scene = true;
+        app.show_viewport = true;
+        app.show_console = true;
+        app.show_inspector = true;
+        apply_default_dock_layout(dockspace_id, ImGui::GetContentRegionAvail());
+        app.reset_dock_layout = false;
+    }
+
+    ImGui::DockSpace(
+        dockspace_id, ImVec2(0.F, 0.F), ImGuiDockNodeFlags_PassthruCentralNode);
+    ImGui::End();
+}
 
 Action draw_menu_bar(App& app) {
     Action action = Action::none;
@@ -469,7 +608,7 @@ Action draw_menu_bar(App& app) {
     if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape) && busy)
         action = Action::stop;
 
-    if (!ImGui::BeginMenuBar()) return action;
+    if (!ImGui::BeginMainMenuBar()) return action;
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("Select Image Folder...", "Ctrl+O", false, !busy)) {
             select_image_folder(app);
@@ -503,15 +642,76 @@ Action draw_menu_bar(App& app) {
                 !busy && app.settings.images_dir[0] != '\0'))
             action = Action::train;
         ImGui::Separator();
+        if (ImGui::MenuItem(
+                "Clear Reconstruction Results...", nullptr, false,
+                !busy && !app.loading_scene &&
+                    has_reconstruction_result(app)))
+            app.show_clear_results = true;
+        ImGui::Separator();
         if (ImGui::MenuItem("Stop Active Job", "Esc", false, busy))
             action = Action::stop;
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("View")) {
+        ImGui::MenuItem("Scene", nullptr, &app.show_scene);
+        ImGui::MenuItem("Viewport", nullptr, &app.show_viewport);
+        ImGui::MenuItem("Inspector", nullptr, &app.show_inspector);
+        ImGui::MenuItem("Console", nullptr, &app.show_console);
+        ImGui::MenuItem("Status Bar", nullptr, &app.show_status_bar);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset Layout")) {
+            app.show_scene = true;
+            app.show_viewport = true;
+            app.show_console = true;
+            app.show_inspector = true;
+            app.show_status_bar = true;
+            app.reset_dock_layout = true;
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Help")) {
         if (ImGui::MenuItem("Viewport Controls")) app.show_controls = true;
         ImGui::EndMenu();
     }
-    ImGui::EndMenuBar();
+
+    ImGui::SameLine(0.F, 28.F);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::accent);
+    ImGui::TextUnformatted("AETHER");
+    ImGui::PopStyleColor();
+    ImGui::SameLine(0.F, 1.F);
+    ImGui::TextUnformatted("SCAN");
+
+    const int current = workflow_step(app);
+    const std::array<const char*, 4> steps{
+        {"Images", "Alignment", "Gaussians", "Mesh"}};
+    ImGui::SameLine(0.F, 22.F);
+    for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
+        if (i > 0) {
+            ImGui::SameLine(0.F, 8.F);
+            theme::caption("\xE2\x80\xBA");
+            ImGui::SameLine(0.F, 8.F);
+        }
+        const bool reached = i <= current;
+        ImGui::PushStyleColor(
+            ImGuiCol_Text, i == current ? theme::accent
+                                        : (reached ? theme::text_muted
+                                                   : theme::text_faint));
+        ImGui::TextUnformatted(steps[static_cast<std::size_t>(i)]);
+        ImGui::PopStyleColor();
+    }
+
+    const std::string project = app.layout.root.filename().empty()
+        ? std::string("Untitled Project")
+        : app.layout.root.filename().string();
+    const float project_width = ImGui::CalcTextSize(project.c_str()).x;
+    const float project_x =
+        std::max(0.F, ImGui::GetWindowWidth() - project_width - 16.F);
+    if (project_x > ImGui::GetCursorPosX() + 24.F) {
+        ImGui::SameLine(project_x);
+        theme::caption(project.c_str());
+    }
+
+    ImGui::EndMainMenuBar();
     return action;
 }
 
@@ -531,14 +731,77 @@ void draw_controls_window(App& app) {
     ImGui::End();
 }
 
+void draw_clear_results_modal(App& app) {
+    constexpr const char* popup = "Clear Reconstruction Results";
+    if (app.show_clear_results) {
+        ImGui::OpenPopup(popup);
+        app.show_clear_results = false;
+    }
+
+    ImGui::SetNextWindowSize({470.F, 0.F}, ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(
+            popup, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::TextUnformatted("Clear the current reconstruction?");
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 440.F);
+    ImGui::TextColored(
+        theme::warning,
+        "Clear View Only removes the old result from the editor but keeps all "
+        "project files.");
+    ImGui::TextColored(
+        theme::danger,
+        "Delete Generated Results permanently removes sparse clouds, trained "
+        "models, meshes, logs, and the reconstruction cache from the current "
+        "project. Source images are never deleted.");
+    ImGui::PopTextWrapPos();
+    if (!app.layout.root.empty()) {
+        ImGui::Spacing();
+        theme::caption("Current project");
+        ImGui::TextWrapped("%s", app.layout.root.string().c_str());
+    }
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (theme::toolbar_button("Clear View Only", {126.F, 30.F})) {
+        clear_loaded_result(app);
+        set_message(app, "Loaded reconstruction cleared from view", theme::success);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (theme::danger_button("Delete Generated Results", {190.F, 30.F})) {
+        delete_reconstruction_results(app);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", {92.F, 30.F})) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 Action draw_toolbar(App& app) {
     Action action = Action::none;
     const bool busy = app.job.running();
     const bool images_ready = app.settings.images_dir[0] != '\0';
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.106F, 0.110F, 0.122F, 1.F));
-    ImGui::BeginChild("##toolbar", {0, 52.F}, false, ImGuiWindowFlags_NoScrollbar);
-    ImGui::SetCursorPos({12.F, 10.F});
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize({viewport->WorkSize.x, k_toolbar_height});
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.F, 10.F));
+    ImGui::PushStyleColor(
+        ImGuiCol_WindowBg, ImVec4(0.106F, 0.110F, 0.122F, 1.F));
+    constexpr ImGuiWindowFlags toolbar_flags =
+        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoScrollbar;
+    ImGui::Begin("##toolbar", nullptr, toolbar_flags);
+    ImGui::PopStyleVar(3);
 
     if (icons::labeled_button(
             "##image_folder", icons::Icon::folder, "Image Folder",
@@ -612,11 +875,12 @@ Action draw_toolbar(App& app) {
 
     const char* transport = "CUDA / Vulkan  ·  external memory";
     const float transport_width = ImGui::CalcTextSize(transport).x;
-    ImGui::SameLine(ImGui::GetWindowWidth() - transport_width - 16.F);
+    ImGui::SameLine(
+        std::max(0.F, ImGui::GetWindowWidth() - transport_width - 16.F));
     ImGui::SetCursorPosY(18.F);
     theme::caption(transport);
 
-    ImGui::EndChild();
+    ImGui::End();
     ImGui::PopStyleColor();
     return action;
 }
@@ -657,8 +921,17 @@ void draw_step(
     }
 }
 
-void draw_left_panel(App& app, const float width) {
-    theme::begin_panel("LeftPanel", {width, 0}, nullptr, nullptr, {0, 0});
+void draw_scene_panel(App& app) {
+    if (!app.show_scene) return;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.F, 0.F));
+    const bool open = ImGui::Begin("Scene", &app.show_scene);
+    ImGui::PopStyleVar();
+    if (!open) {
+        ImGui::End();
+        return;
+    }
+
+    const float wrap = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 20.F;
 
     theme::section_header("SCENE");
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {7.F, 7.F});
@@ -736,7 +1009,7 @@ void draw_left_panel(App& app, const float width) {
     ImGui::Indent(14.F);
     theme::caption("IMAGES");
     ImGui::Spacing();
-    ImGui::PushTextWrapPos(width - 20.F);
+    ImGui::PushTextWrapPos(wrap);
     ImGui::TextUnformatted(
         app.settings.images_dir[0] != '\0' ? app.settings.images_dir.data()
                                           : "(not selected)");
@@ -744,15 +1017,16 @@ void draw_left_panel(App& app, const float width) {
     ImGui::Dummy({0, 6.F});
     theme::caption("PROJECT");
     ImGui::Spacing();
-    ImGui::PushTextWrapPos(width - 20.F);
+    ImGui::PushTextWrapPos(wrap);
     ImGui::TextUnformatted(
         app.settings.project_dir[0] != '\0' ? app.settings.project_dir.data()
                                            : "(not selected)");
     ImGui::PopTextWrapPos();
     ImGui::Unindent(14.F);
 
-    theme::end_panel();
+    ImGui::End();
 }
+
 
 void draw_empty_viewport(
     ImDrawList* draw, const ImVec2 min, const ImVec2 max, const char* headline,
@@ -913,15 +1187,18 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     }
 }
 
-void draw_centre_column(App& app, const float width, const float console_height) {
-    ImGui::BeginChild("CentreStack", {width, 0}, false, ImGuiWindowFlags_NoScrollbar);
-    const float viewport_height =
-        ImGui::GetContentRegionAvail().y - console_height - 4.F;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::BeginChild(
-        "Viewport", {0, viewport_height}, true, ImGuiWindowFlags_NoScrollbar);
+void draw_viewport_panel(App& app) {
+    if (!app.show_viewport) return;
+    constexpr ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoScrollWithMouse;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.F, 0.F));
+    const bool open = ImGui::Begin("Viewport", &app.show_viewport, flags);
     ImGui::PopStyleVar();
+    if (!open) {
+        ImGui::End();
+        return;
+    }
 
     // Header with the viewport tabs on the left and state on the right.
     const ImVec2 header_origin = ImGui::GetCursorScreenPos();
@@ -969,11 +1246,17 @@ void draw_centre_column(App& app, const float width, const float console_height)
     else
         draw_training_tab(app, view_min, view_max);
     ImGui::EndChild();
-    ImGui::EndChild();
+    ImGui::End();
+}
 
-    // Console.
-    const char* trailing = app.job.running() ? "FOLLOWING OUTPUT" : nullptr;
-    theme::begin_panel("Console", {0, 0}, "CONSOLE", trailing, {0, 0});
+void draw_console_panel(App& app) {
+    if (!app.show_console) return;
+    ImGuiWindowFlags flags = 0;
+    if (app.job.running()) flags |= ImGuiWindowFlags_UnsavedDocument;
+    if (!ImGui::Begin("Console", &app.show_console, flags)) {
+        ImGui::End();
+        return;
+    }
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.031F, 0.033F, 0.039F, 1.F));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.F, 8.F));
     ImGui::BeginChild("Log", {0, 0}, false, ImGuiWindowFlags_HorizontalScrollbar);
@@ -987,15 +1270,17 @@ void draw_centre_column(App& app, const float width, const float console_height)
     if (app.job.running()) ImGui::SetScrollHereY(1.F);
     ImGui::EndChild();
     ImGui::PopStyleColor();
-    theme::end_panel();
-
-    ImGui::EndChild();
+    ImGui::End();
 }
 
-Action draw_inspector(App& app, const float width) {
+Action draw_inspector(App& app) {
     Action action = Action::none;
+    if (!app.show_inspector) return action;
+    if (!ImGui::Begin("Inspector", &app.show_inspector)) {
+        ImGui::End();
+        return action;
+    }
     const bool busy = app.job.running();
-    theme::begin_panel("Inspector", {width, 0}, "INSPECTOR");
 
     if (ImGui::CollapsingHeader("Project", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
@@ -1004,6 +1289,11 @@ Action draw_inspector(App& app, const float width) {
         if (ImGui::InputText(
                 "##images", app.settings.images_dir.data(),
                 app.settings.images_dir.size())) {
+            clear_loaded_result(app);
+            if (app.project_folder_automatic) {
+                app.settings.project_dir.fill('\0');
+                app.project_folder_automatic = false;
+            }
             assign_default_project_folder(app);
             refresh_artifacts(app);
         }
@@ -1015,12 +1305,21 @@ Action draw_inspector(App& app, const float width) {
         ImGui::SetNextItemWidth(-30.F);
         if (ImGui::InputText(
                 "##project", app.settings.project_dir.data(),
-                app.settings.project_dir.size()))
+                app.settings.project_dir.size())) {
+            clear_loaded_result(app);
+            app.project_folder_automatic = false;
             refresh_artifacts(app);
+        }
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button("...##pick_project", {24.F, 0})) {
             select_project_folder(app);
         }
+        ImGui::Spacing();
+        if (theme::danger_button(
+                "Clear Reconstruction Results...", {-1.F, 28.F},
+                !busy && !app.loading_scene &&
+                    has_reconstruction_result(app)))
+            app.show_clear_results = true;
         ImGui::Spacing();
     }
 
@@ -1254,7 +1553,7 @@ Action draw_inspector(App& app, const float width) {
             action = Action::train;
     }
 
-    theme::end_panel();
+    ImGui::End();
     return action;
 }
 
@@ -1281,14 +1580,31 @@ void draw_status_separator(const float x, const float height) {
         theme::u32(theme::border, 0.8F));
 }
 
-void draw_status_bar(const App& app, const float height) {
+void draw_status_bar(const App& app) {
+    if (!app.show_status_bar) return;
+
     const bool busy = app.job.running();
     const ImVec4 background = busy
         ? ImVec4(0.027F, 0.208F, 0.325F, 1.F)
         : ImVec4(0.086F, 0.090F, 0.102F, 1.F);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, background);
-    ImGui::BeginChild("##status", {0, height}, false, ImGuiWindowFlags_NoScrollbar);
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(
+        viewport->WorkPos.x,
+        viewport->WorkPos.y + viewport->WorkSize.y - k_status_height));
+    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, k_status_height));
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.F, 0.F));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, background);
+    constexpr ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::Begin("##StatusBar", nullptr, flags);
+    ImGui::PopStyleVar(3);
 
+    const float height = k_status_height;
     const float centre_y = (height - ImGui::GetTextLineHeight()) * 0.5F;
     ImGui::SetCursorPos({12.F, centre_y});
     ImVec4 state_colour = theme::inactive;
@@ -1333,7 +1649,7 @@ void draw_status_bar(const App& app, const float height) {
     ImGui::TextUnformatted(tag);
     ImGui::PopStyleColor();
 
-    const char* backend = "CUDA · Vulkan";
+    const char* backend = "CUDA / Vulkan";
     const float backend_width = status_segment_width(backend);
     right -= backend_width + 22.F;
     draw_status_separator(right + backend_width + 11.F, height);
@@ -1390,7 +1706,7 @@ void draw_status_bar(const App& app, const float height) {
         }
     }
 
-    ImGui::EndChild();
+    ImGui::End();
     ImGui::PopStyleColor();
 }
 
@@ -1437,6 +1753,16 @@ int main(const int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigDockingWithShift = false;
+    if (!app.smoke_mode) {
+        const std::filesystem::path ini = resolve_editor_ini();
+        std::error_code error;
+        std::filesystem::create_directories(ini.parent_path(), error);
+        g_editor_ini = ini.string();
+        io.IniFilename = g_editor_ini.c_str();
+        if (!std::filesystem::exists(ini, error)) app.reset_dock_layout = true;
+    }
     const theme::Fonts fonts = theme::load_fonts(io);
     io.FontDefault = fonts.regular;
     theme::apply_style();
@@ -1504,16 +1830,6 @@ int main(const int argc, char** argv) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::SetNextWindowPos({0, 0});
-        ImGui::SetNextWindowSize(io.DisplaySize);
-        ImGui::Begin(
-            "AetherScan", nullptr,
-            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
-                ImGuiWindowFlags_NoScrollWithMouse |
-                ImGuiWindowFlags_NoBringToFrontOnFocus |
-                ImGuiWindowFlags_MenuBar);
-
         app.settings.iterations = std::max(app.settings.iterations, 1);
         app.settings.preview_interval =
             std::max(app.settings.preview_interval, 1);
@@ -1522,31 +1838,16 @@ int main(const int argc, char** argv) {
             std::max(app.settings.geometry_from_iter, 0);
 
         Action action = draw_menu_bar(app);
-        draw_title_bar(app);
         const Action toolbar_action = draw_toolbar(app);
         if (action == Action::none) action = toolbar_action;
 
-        constexpr float status_height = 34.F;
-        constexpr float left_width = 272.F;
-        constexpr float right_width = 336.F;
-        constexpr float console_height = 178.F;
-        const float workspace_height =
-            ImGui::GetContentRegionAvail().y - status_height;
-
-        ImGui::BeginChild(
-            "##workspace", {0, workspace_height}, false,
-            ImGuiWindowFlags_NoScrollbar);
-        draw_left_panel(app, left_width);
-        ImGui::SameLine(0.F, 4.F);
-        const float centre_width =
-            ImGui::GetContentRegionAvail().x - right_width - 4.F;
-        draw_centre_column(app, centre_width, console_height);
-        ImGui::SameLine(0.F, 4.F);
-        const Action inspector_action = draw_inspector(app, right_width);
+        build_dock_space(app);
+        draw_scene_panel(app);
+        draw_viewport_panel(app);
+        draw_console_panel(app);
+        const Action inspector_action = draw_inspector(app);
         if (action == Action::none) action = inspector_action;
-        ImGui::EndChild();
-
-        draw_status_bar(app, status_height);
+        draw_status_bar(app);
 
         switch (action) {
             case Action::align:
@@ -1563,8 +1864,8 @@ int main(const int argc, char** argv) {
             case Action::none: break;
         }
 
-        ImGui::End();
         draw_controls_window(app);
+        draw_clear_results_modal(app);
         if (app.close_requested) glfwSetWindowShouldClose(window, GLFW_TRUE);
         ImGui::Render();
         ImDrawData* draw_data = ImGui::GetDrawData();

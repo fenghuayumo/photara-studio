@@ -85,6 +85,7 @@ class LogStream {
 public:
     void open(const std::filesystem::path& path);
     void close();
+    void clear();
     void poll(std::vector<std::string>& fresh_lines);
 
     [[nodiscard]] const std::string& console() const { return console_; }

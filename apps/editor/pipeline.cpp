@@ -166,6 +166,11 @@ void LogStream::close() {
     partial_.clear();
 }
 
+void LogStream::clear() {
+    close();
+    console_.clear();
+}
+
 void LogStream::poll(std::vector<std::string>& fresh_lines) {
     fresh_lines.clear();
     if (path_.empty()) return;
