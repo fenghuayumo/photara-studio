@@ -1,6 +1,8 @@
 #include "pipeline.hpp"
+#include "icons.hpp"
 #include "sparse_view.hpp"
 #include "theme.hpp"
+#include "viewport_gizmo.hpp"
 #include "vulkan_backend.hpp"
 
 #include "imgui_impl_glfw.h"
@@ -57,6 +59,7 @@ struct App {
     SparseScene scene;
     OrbitCamera camera;
     ViewOptions view_options;
+    ViewportGizmoState gizmo;
     SceneRenderer renderer;
     std::future<SceneLoad> pending_load;
     bool loading_scene{};
@@ -74,6 +77,8 @@ struct App {
     bool smoke_mode{};
     bool smoke_started{};
     bool smoke_success{};
+    bool close_requested{};
+    bool show_controls{};
 };
 
 void set_message(App& app, std::string text, const ImVec4& colour) {
@@ -154,6 +159,17 @@ void reveal_in_explorer(const std::filesystem::path&) {}
 // Project actions
 
 void refresh_artifacts(App& app) {
+    // A normal editor session starts without a project. Do not resolve an
+    // empty path relative to the process working directory, otherwise a
+    // stray sparse.ply next to the executable could be treated as the active
+    // reconstruction.
+    if (app.settings.project_dir[0] == '\0') {
+        app.layout = {};
+        app.has_sparse = false;
+        app.has_model = false;
+        app.has_mesh = false;
+        return;
+    }
     app.layout = resolve_layout(app.settings);
     std::error_code error;
     app.has_sparse = std::filesystem::exists(app.layout.sparse_ply, error);
@@ -170,6 +186,26 @@ void request_scene_load(
     app.pending_load = std::async(
         std::launch::async,
         [cloud, poses] { return load_sparse_scene(cloud, poses); });
+}
+
+void select_project_folder(App& app) {
+    if (!pick_folder(
+            L"Select the AetherScan project folder",
+            app.settings.project_dir))
+        return;
+
+    // Switching projects is an explicit scene transition. Clear the previous
+    // reconstruction immediately, then load the selected project's sparse
+    // result when one is available.
+    app.scene.clear();
+    app.scene_source.clear();
+    refresh_artifacts(app);
+    if (app.has_sparse)
+        request_scene_load(
+            app, app.layout.sparse_ply, app.layout.sparse_poses,
+            "Sparse cloud");
+    else
+        set_message(app, "Project selected; no sparse cloud yet", theme::text_muted);
 }
 
 void poll_scene_load(App& app) {
@@ -196,6 +232,10 @@ void poll_scene_load(App& app) {
 
 void start_align(App& app) {
     if (app.job.running()) return;
+    if (app.settings.project_dir[0] == '\0') {
+        set_message(app, "Select a project output folder first", theme::warning);
+        return;
+    }
     refresh_artifacts(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
@@ -224,6 +264,10 @@ void start_align(App& app) {
 
 void start_train(App& app, const bool smoke) {
     if (app.job.running()) return;
+    if (app.settings.project_dir[0] == '\0') {
+        set_message(app, "Select a project output folder first", theme::warning);
+        return;
+    }
     refresh_artifacts(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
@@ -387,18 +431,103 @@ void draw_title_bar(const App& app) {
 }
 
 // Returns the action requested from the toolbar, if any.
-enum class Action { none, align, train, stop, reveal, frame_scene };
+enum class Action { none, align, train, stop, reveal };
+
+Action draw_menu_bar(App& app) {
+    Action action = Action::none;
+    const bool busy = app.job.running();
+    const bool project_ready = app.settings.project_dir[0] != '\0';
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O) &&
+        !busy) {
+        if (pick_folder(
+                L"Select the capture image folder", app.settings.images_dir))
+            refresh_artifacts(app);
+    }
+    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape) && busy)
+        action = Action::stop;
+
+    if (!ImGui::BeginMenuBar()) return action;
+    if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("Select Image Folder...", "Ctrl+O", false, !busy)) {
+            if (pick_folder(
+                    L"Select the capture image folder",
+                    app.settings.images_dir))
+                refresh_artifacts(app);
+        }
+        if (ImGui::MenuItem("Set Project Folder...", nullptr, false, !busy)) {
+            select_project_folder(app);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem(
+                "Load Sparse Cloud", nullptr, false,
+                app.has_sparse && !app.loading_scene)) {
+            request_scene_load(
+                app, app.layout.sparse_ply, app.layout.sparse_poses,
+                "Sparse cloud");
+        }
+        if (ImGui::MenuItem(
+                "Open Output Folder", nullptr, false,
+                app.layout.root.has_filename()))
+            action = Action::reveal;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Exit", "Alt+F4")) app.close_requested = true;
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Reconstruction")) {
+        if (ImGui::MenuItem(
+                app.has_sparse ? "Re-align Photos" : "Align Photos", nullptr,
+                false, !busy && project_ready &&
+                           app.settings.images_dir[0] != '\0'))
+            action = Action::align;
+        if (ImGui::MenuItem(
+                "Train 3DGS", nullptr, false,
+                !busy && project_ready &&
+                    app.settings.images_dir[0] != '\0'))
+            action = Action::train;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Stop Active Job", "Esc", false, busy))
+            action = Action::stop;
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Help")) {
+        if (ImGui::MenuItem("Viewport Controls")) app.show_controls = true;
+        ImGui::EndMenu();
+    }
+    ImGui::EndMenuBar();
+    return action;
+}
+
+void draw_controls_window(App& app) {
+    if (!app.show_controls) return;
+    ImGui::SetNextWindowSize({420.F, 0.F}, ImGuiCond_Appearing);
+    if (ImGui::Begin("Viewport Controls", &app.show_controls,
+                     ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Camera");
+        ImGui::Separator();
+        ImGui::BulletText("LMB drag: orbit");
+        ImGui::BulletText("MMB or Shift+LMB drag: pan");
+        ImGui::BulletText("RMB drag: fly look");
+        ImGui::BulletText("RMB + WASD/QE: fly; Shift accelerates");
+        ImGui::BulletText("Mouse wheel: dolly; F: frame reconstruction");
+    }
+    ImGui::End();
+}
 
 Action draw_toolbar(App& app) {
     Action action = Action::none;
     const bool busy = app.job.running();
     const bool images_ready = app.settings.images_dir[0] != '\0';
+    const bool project_ready = app.settings.project_dir[0] != '\0';
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.106F, 0.110F, 0.122F, 1.F));
     ImGui::BeginChild("##toolbar", {0, 52.F}, false, ImGuiWindowFlags_NoScrollbar);
     ImGui::SetCursorPos({12.F, 10.F});
 
-    if (theme::toolbar_button("Image Folder", {114.F, 32.F}, !busy)) {
+    if (icons::labeled_button(
+            "##image_folder", icons::Icon::folder, "Image Folder",
+            {124.F, 32.F}, icons::ButtonStyle::normal, !busy, false,
+            "Select capture image folder")) {
         if (pick_folder(L"Select the capture image folder", app.settings.images_dir))
             refresh_artifacts(app);
     }
@@ -407,10 +536,14 @@ Action draw_toolbar(App& app) {
     // Step 1: multi-view alignment.
     const bool aligning = busy && app.active_job == JobKind::align;
     if (aligning) {
-        theme::toolbar_button("Aligning...", {124.F, 32.F}, false, true);
-    } else if (theme::primary_button(
+        icons::labeled_button(
+            "##aligning", icons::Icon::align, "Aligning...", {132.F, 32.F},
+            icons::ButtonStyle::primary, false, true);
+    } else if (icons::labeled_button(
+                   "##align", icons::Icon::align,
                    app.has_sparse ? "Re-align Photos" : "Align Photos",
-                   {124.F, 32.F}, !busy && images_ready)) {
+                   {132.F, 32.F}, icons::ButtonStyle::primary,
+                   !busy && images_ready && project_ready)) {
         action = Action::align;
     }
     ImGui::SameLine();
@@ -418,13 +551,19 @@ Action draw_toolbar(App& app) {
     // Step 2: Gaussian optimisation, gated on a reviewed alignment.
     const bool training = busy && app.active_job == JobKind::train;
     if (training) {
-        theme::toolbar_button("Training...", {124.F, 32.F}, false, true);
+        icons::labeled_button(
+            "##training", icons::Icon::train, "Training...", {126.F, 32.F},
+            icons::ButtonStyle::primary, false, true);
     } else {
-        const bool ready = !busy && images_ready;
+        const bool ready = !busy && images_ready && project_ready;
         if (app.has_sparse) {
-            if (theme::primary_button("Train 3DGS", {124.F, 32.F}, ready))
+            if (icons::labeled_button(
+                    "##train", icons::Icon::train, "Train 3DGS",
+                    {126.F, 32.F}, icons::ButtonStyle::primary, ready))
                 action = Action::train;
-        } else if (theme::toolbar_button("Train 3DGS", {124.F, 32.F}, ready)) {
+        } else if (icons::labeled_button(
+                       "##train", icons::Icon::train, "Train 3DGS",
+                       {126.F, 32.F}, icons::ButtonStyle::normal, ready)) {
             action = Action::train;
         }
         if (!app.has_sparse && ImGui::IsItemHovered())
@@ -443,12 +582,17 @@ Action draw_toolbar(App& app) {
             "supervision during optimisation, which the mesh needs.");
     ImGui::SameLine(0.F, 14.F);
 
-    if (theme::toolbar_button(
-            "Open Output", {104.F, 32.F}, app.layout.root.has_filename()))
+    if (icons::labeled_button(
+            "##open_output", icons::Icon::output, "Open Output",
+            {116.F, 32.F}, icons::ButtonStyle::normal,
+            app.layout.root.has_filename()))
         action = Action::reveal;
     if (busy) {
         ImGui::SameLine();
-        if (theme::danger_button("Stop", {74.F, 32.F})) action = Action::stop;
+        if (icons::labeled_button(
+                "##stop", icons::Icon::stop, "Stop", {76.F, 32.F},
+                icons::ButtonStyle::danger))
+            action = Action::stop;
     }
 
     const char* transport = "CUDA / Vulkan  ·  external memory";
@@ -661,9 +805,17 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     }
 
     const bool hovered = ImGui::IsWindowHovered();
-    update_orbit_camera(app.camera, hovered);
     const SceneDrawStats stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, app.view_options, hovered);
+
+    const bool gizmo_captures =
+        draw_viewport_gizmo(app.gizmo, app.camera, min, max);
+    const bool frame_key = hovered && !gizmo_captures &&
+                           !ImGui::GetIO().WantTextInput &&
+                           ImGui::IsKeyPressed(ImGuiKey_F);
+    if (frame_key) app.camera.frame(app.scene);
+    update_orbit_camera(
+        app.camera, hovered && !gizmo_captures, app.scene.radius);
 
     draw_viewport_overlay(
         draw, min,
@@ -673,16 +825,18 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     // Bottom-left readout: what is on screen and how to navigate.
     char readout[192];
     std::snprintf(
-        readout, sizeof(readout), "%s pts drawn  ·  %zu cameras  ·  %s pts total",
+        readout, sizeof(readout),
+        "%s pts drawn  ·  %zu / %zu cameras shown  ·  %s pts total",
         format_count(stats.drawn_points).c_str(), stats.drawn_views,
+        app.scene.registered_views,
         format_count(app.scene.points.size()).c_str());
     draw->AddText(
         {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
-        "LMB orbit  ·  RMB pan  ·  wheel zoom");
+        "LMB orbit  ·  MMB pan  ·  RMB + WASD/QE fly  ·  wheel dolly  ·  F frame");
 
-    if (stats.hovered_view >= 0 &&
+    if (!gizmo_captures && stats.hovered_view >= 0 &&
         static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size()) {
         const ViewPose& pose = app.scene.views[stats.hovered_view];
         ImGui::SetTooltip(
@@ -849,9 +1003,7 @@ Action draw_inspector(App& app, const float width) {
             refresh_artifacts(app);
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button("...##pick_project", {24.F, 0})) {
-            if (pick_folder(L"Select the project output folder",
-                            app.settings.project_dir))
-                refresh_artifacts(app);
+            select_project_folder(app);
         }
         ImGui::Spacing();
     }
@@ -995,10 +1147,6 @@ Action draw_inspector(App& app, const float width) {
                 app, app.layout.splat_ply, app.layout.sparse_poses,
                 "Gaussian centres");
         ImGui::Spacing();
-        if (theme::toolbar_button(
-                "Frame Scene", {-1.F, 28.F}, app.scene.has_points()))
-            action = Action::frame_scene;
-        ImGui::Spacing();
         theme::caption("Point size");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::SliderFloat(
@@ -1012,6 +1160,10 @@ Action draw_inspector(App& app, const float width) {
         ImGui::SetNextItemWidth(-1.F);
         ImGui::SliderFloat(
             "##view_scale", &app.view_options.view_scale, 0.02F, 0.4F, "%.2f");
+        theme::caption("Fly speed");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::SliderFloat(
+            "##fly_speed", &app.camera.move_speed, 0.1F, 10.F, "%.1fx");
         ImGui::Spacing();
         ImGui::Checkbox("Colour by depth", &app.view_options.colour_by_depth);
         ImGui::Checkbox("Show cameras", &app.view_options.show_views);
@@ -1077,17 +1229,42 @@ Action draw_inspector(App& app, const float width) {
     } else if (!app.has_sparse) {
         if (theme::primary_button(
                 "Align Photos", {-1.F, 40.F},
-                app.settings.images_dir[0] != '\0'))
+                app.settings.images_dir[0] != '\0' &&
+                    app.settings.project_dir[0] != '\0'))
             action = Action::align;
     } else {
         if (theme::primary_button(
                 app.settings.build_mesh ? "Train 3DGS + Mesh" : "Train 3DGS",
-                {-1.F, 40.F}, app.settings.images_dir[0] != '\0'))
+                {-1.F, 40.F}, app.settings.images_dir[0] != '\0' &&
+                                      app.settings.project_dir[0] != '\0'))
             action = Action::train;
     }
 
     theme::end_panel();
     return action;
+}
+
+float status_segment_width(const char* text) {
+    return 15.F + 6.F + ImGui::CalcTextSize(text).x;
+}
+
+void draw_status_segment(
+    const float x, const float y, const icons::Icon icon, const char* text,
+    const ImVec4 colour = theme::text_muted) {
+    ImGui::SetCursorPos({x, y});
+    icons::inline_icon(icon, theme::u32(colour), 15.F);
+    ImGui::SameLine(0.F, 6.F);
+    ImGui::SetCursorPosY(y);
+    ImGui::PushStyleColor(ImGuiCol_Text, colour);
+    ImGui::TextUnformatted(text);
+    ImGui::PopStyleColor();
+}
+
+void draw_status_separator(const float x, const float height) {
+    ImGui::GetWindowDrawList()->AddLine(
+        {ImGui::GetWindowPos().x + x, ImGui::GetWindowPos().y + 8.F},
+        {ImGui::GetWindowPos().x + x, ImGui::GetWindowPos().y + height - 8.F},
+        theme::u32(theme::border, 0.8F));
 }
 
 void draw_status_bar(const App& app, const float height) {
@@ -1100,11 +1277,23 @@ void draw_status_bar(const App& app, const float height) {
 
     const float centre_y = (height - ImGui::GetTextLineHeight()) * 0.5F;
     ImGui::SetCursorPos({12.F, centre_y});
-    ImVec4 dot = theme::inactive;
-    if (busy) dot = theme::accent;
-    else if (app.monitor.stage() == Stage::failed) dot = theme::danger;
-    else if (app.monitor.stage() == Stage::complete) dot = theme::success;
-    theme::status_dot(dot, 7.F);
+    ImVec4 state_colour = theme::inactive;
+    icons::Icon state_icon = icons::Icon::cube;
+    if (busy) {
+        state_colour = theme::accent;
+        state_icon = app.active_job == JobKind::align ? icons::Icon::align
+                                                      : icons::Icon::train;
+    } else if (app.monitor.stage() == Stage::failed) {
+        state_colour = theme::danger;
+        state_icon = icons::Icon::stop;
+    } else if (app.monitor.stage() == Stage::complete) {
+        state_colour = theme::success;
+        state_icon = app.scene.has_points() ? icons::Icon::points
+                                            : icons::Icon::cube;
+    } else if (app.scene.has_points()) {
+        state_icon = icons::Icon::points;
+    }
+    icons::inline_icon(state_icon, theme::u32(state_colour), 16.F);
 
     ImGui::SameLine(0.F, 8.F);
     ImGui::SetCursorPosY(centre_y);
@@ -1119,9 +1308,25 @@ void draw_status_bar(const App& app, const float height) {
         ImGui::TextUnformatted("Ready");
     }
 
-    // Progress bar plus percentage and ETA, right-aligned before the build tag.
+    // Persistent right-hand telemetry: backend and build tag always remain
+    // visible; idle mode also shows viewport, point and active-tool state.
     const char* tag = "AetherScan 0.2";
     const float tag_width = ImGui::CalcTextSize(tag).x;
+    float right = ImGui::GetWindowWidth() - tag_width - 14.F;
+    ImGui::SetCursorPos({right, centre_y});
+    ImGui::PushStyleColor(
+        ImGuiCol_Text, busy ? theme::text_bright : theme::text_faint);
+    ImGui::TextUnformatted(tag);
+    ImGui::PopStyleColor();
+
+    const char* backend = "CUDA · Vulkan";
+    const float backend_width = status_segment_width(backend);
+    right -= backend_width + 22.F;
+    draw_status_separator(right + backend_width + 11.F, height);
+    draw_status_segment(
+        right, centre_y, icons::Icon::gpu, backend,
+        busy ? theme::text_bright : theme::text_muted);
+
     if (busy) {
         const float fraction = app.monitor.fraction();
         const double eta = app.monitor.eta_seconds();
@@ -1138,8 +1343,7 @@ void draw_status_bar(const App& app, const float height) {
         const float trailing_width = ImGui::CalcTextSize(trailing).x;
         constexpr float bar_width = 220.F;
         const float bar_x = std::max(
-            240.F, ImGui::GetWindowWidth() - tag_width - 28.F -
-                       trailing_width - 12.F - bar_width);
+            240.F, right - trailing_width - 14.F - bar_width);
         ImGui::SameLine(bar_x);
         ImGui::SetCursorPosY((height - 7.F) * 0.5F);
         theme::progress_track(
@@ -1148,14 +1352,29 @@ void draw_status_bar(const App& app, const float height) {
         ImGui::SameLine(0.F, 12.F);
         ImGui::SetCursorPosY(centre_y);
         ImGui::TextUnformatted(trailing);
-    }
+    } else {
+        if (app.scene.has_points()) {
+            const std::string points =
+                format_count(app.scene.points.size()) + " pts";
+            const float points_width = status_segment_width(points.c_str());
+            right -= points_width + 22.F;
+            draw_status_separator(right + points_width + 11.F, height);
+            draw_status_segment(
+                right, centre_y, icons::Icon::points, points.c_str());
+        }
 
-    ImGui::SameLine(std::max(0.F, ImGui::GetWindowWidth() - tag_width - 14.F));
-    ImGui::SetCursorPosY(centre_y);
-    ImGui::PushStyleColor(
-        ImGuiCol_Text, busy ? theme::text_bright : theme::text_faint);
-    ImGui::TextUnformatted(tag);
-    ImGui::PopStyleColor();
+        const char* view = app.tab == ViewportTab::sparse ? "Sparse" : "Training";
+        const float view_width = status_segment_width(view);
+        right -= view_width + 22.F;
+        if (right > 520.F) {
+            draw_status_separator(right + view_width + 11.F, height);
+            draw_status_segment(
+                right, centre_y,
+                app.tab == ViewportTab::sparse ? icons::Icon::cube
+                                               : icons::Icon::train,
+                view);
+        }
+    }
 
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -1167,13 +1386,10 @@ int main(const int argc, char** argv) {
     App app;
     app.smoke_mode = argc > 1 && std::string_view(argv[1]) == "--interop-smoke";
 
-    std::snprintf(
-        app.settings.images_dir.data(), app.settings.images_dir.size(),
-        "D:\\ScanVideo\\ori_img\\images");
-    std::snprintf(
-        app.settings.project_dir.data(), app.settings.project_dir.size(),
-        "D:\\ScanVideo\\ori_img\\aetherscan_gui");
     if (app.smoke_mode) {
+        std::snprintf(
+            app.settings.images_dir.data(), app.settings.images_dir.size(),
+            "D:\\ScanVideo\\ori_img\\images");
         std::snprintf(
             app.settings.project_dir.data(), app.settings.project_dir.size(),
             "D:\\ProgramCode\\C++\\3dgs\\AetherScan\\artifacts\\cuda_vulkan_smoke");
@@ -1228,10 +1444,6 @@ int main(const int argc, char** argv) {
 
     refresh_artifacts(app);
     app.preview.create(k_preview_extent, k_preview_extent);
-    if (app.has_sparse)
-        request_scene_load(
-            app, app.layout.sparse_ply, app.layout.sparse_poses,
-            "Sparse cloud");
 
     const auto smoke_begin = std::chrono::steady_clock::now();
 
@@ -1285,7 +1497,8 @@ int main(const int argc, char** argv) {
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
                 ImGuiWindowFlags_NoScrollWithMouse |
-                ImGuiWindowFlags_NoBringToFrontOnFocus);
+                ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_MenuBar);
 
         app.settings.iterations = std::max(app.settings.iterations, 1);
         app.settings.preview_interval =
@@ -1294,8 +1507,10 @@ int main(const int argc, char** argv) {
         app.settings.geometry_from_iter =
             std::max(app.settings.geometry_from_iter, 0);
 
+        Action action = draw_menu_bar(app);
         draw_title_bar(app);
-        Action action = draw_toolbar(app);
+        const Action toolbar_action = draw_toolbar(app);
+        if (action == Action::none) action = toolbar_action;
 
         constexpr float status_height = 34.F;
         constexpr float left_width = 272.F;
@@ -1331,11 +1546,12 @@ int main(const int argc, char** argv) {
                 set_message(app, "Stopping...", theme::warning);
                 break;
             case Action::reveal: reveal_in_explorer(app.layout.root); break;
-            case Action::frame_scene: app.camera.frame(app.scene); break;
             case Action::none: break;
         }
 
         ImGui::End();
+        draw_controls_window(app);
+        if (app.close_requested) glfwSetWindowShouldClose(window, GLFW_TRUE);
         ImGui::Render();
         ImDrawData* draw_data = ImGui::GetDrawData();
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)

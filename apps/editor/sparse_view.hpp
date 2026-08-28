@@ -65,6 +65,7 @@ struct OrbitCamera {
     float distance{4.F};
     Vec3 target;
     float fov_degrees{50.F};
+    float move_speed{1.F};
     // Latched on press inside the viewport so a drag that wanders over the
     // side panels keeps rotating, and a drag started on a panel does not.
     bool interacting{};
@@ -72,8 +73,16 @@ struct OrbitCamera {
     void frame(const SparseScene& scene);
 };
 
-// Applies mouse orbit, pan and zoom while the viewport is hovered.
-void update_orbit_camera(OrbitCamera& camera, bool hovered);
+// Applies orbit/pan/fly mouse navigation plus WASD/QE movement while the
+// viewport owns input. Holding RMB switches mouse motion to fly-look; Shift
+// accelerates keyboard movement.
+void update_orbit_camera(
+    OrbitCamera& camera, bool accepts_input, float scene_radius);
+
+// Column-major view matrix used to project the top-right XYZ navigation axes.
+void camera_view_matrix(
+    const OrbitCamera& camera, ImVec2 min, ImVec2 max,
+    std::array<float, 16>& view);
 
 struct ViewOptions {
     float point_size = 1.7F;
@@ -82,7 +91,7 @@ struct ViewOptions {
     bool show_views = true;
     bool show_trajectory = true;
     bool show_grid = true;
-    float view_scale = 0.09F;
+    float view_scale = 0.045F;
 };
 
 struct SceneDrawStats {

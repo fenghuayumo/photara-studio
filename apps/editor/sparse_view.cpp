@@ -521,45 +521,76 @@ void OrbitCamera::frame(const SparseScene& scene) {
     pitch = 0.35F;
 }
 
-void update_orbit_camera(OrbitCamera& camera, const bool hovered) {
+void update_orbit_camera(
+    OrbitCamera& camera, const bool accepts_input, const float scene_radius) {
     const ImGuiIO& io = ImGui::GetIO();
-    if (hovered && io.MouseWheel != 0.F)
+    if (accepts_input && io.MouseWheel != 0.F)
         camera.distance = std::clamp(
             camera.distance * std::exp(-io.MouseWheel * 0.16F), 1e-3F, 1e7F);
 
     const bool any_down = ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
                           ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
                           ImGui::IsMouseDown(ImGuiMouseButton_Middle);
-    if (!any_down) {
-        camera.interacting = false;
-        return;
-    }
-    if (hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+    if (!any_down) camera.interacting = false;
+    if (accepts_input && (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
                     ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
                     ImGui::IsMouseClicked(ImGuiMouseButton_Middle)))
         camera.interacting = true;
-    if (!camera.interacting) return;
 
-    const bool orbiting = ImGui::IsMouseDown(ImGuiMouseButton_Left);
-    const ImVec2 delta = io.MouseDelta;
-    if (delta.x == 0.F && delta.y == 0.F) return;
+    const float pitch = std::clamp(camera.pitch, -1.53F, 1.53F);
+    const Vec3 offset{
+        std::cos(pitch) * std::sin(camera.yaw), -std::sin(pitch),
+        std::cos(pitch) * std::cos(camera.yaw)};
+    const Vec3 forward = normalize(offset * -1.F);
+    const Vec3 right = normalize(cross(forward, k_world_up));
+    const Vec3 up = cross(right, forward);
 
-    if (orbiting) {
-        camera.yaw -= delta.x * 0.008F;
-        camera.pitch = std::clamp(
-            camera.pitch + delta.y * 0.008F, -1.53F, 1.53F);
-    } else {
-        const float pitch = std::clamp(camera.pitch, -1.53F, 1.53F);
-        const Vec3 offset{
-            std::cos(pitch) * std::sin(camera.yaw), -std::sin(pitch),
-            std::cos(pitch) * std::cos(camera.yaw)};
-        const Vec3 forward = normalize(offset * -1.F);
-        const Vec3 right = normalize(cross(forward, k_world_up));
-        const Vec3 up = cross(right, forward);
-        const float scale = camera.distance * 0.0018F;
-        camera.target =
-            camera.target + right * (-delta.x * scale) + up * (delta.y * scale);
+    if (camera.interacting) {
+        const bool orbiting = ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                              !io.KeyShift;
+        const bool looking = ImGui::IsMouseDown(ImGuiMouseButton_Right);
+        const ImVec2 delta = io.MouseDelta;
+        if (orbiting || looking) {
+            camera.yaw -= delta.x * 0.008F;
+            camera.pitch = std::clamp(
+                camera.pitch + delta.y * 0.008F, -1.53F, 1.53F);
+        } else {
+            const float scale = camera.distance * 0.0018F;
+            camera.target = camera.target + right * (-delta.x * scale) +
+                            up * (delta.y * scale);
+        }
     }
+
+    // Fly keys deliberately require RMB. This keeps W/E/R available for
+    // transform-gizmo shortcuts during ordinary viewport use.
+    if (!accepts_input || !ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
+        io.WantTextInput)
+        return;
+    const float boost = io.KeyShift ? 4.F : 1.F;
+    const float base = std::max(scene_radius, camera.distance * 0.2F);
+    const float step = base * camera.move_speed * boost * io.DeltaTime;
+    Vec3 movement;
+    if (ImGui::IsKeyDown(ImGuiKey_W)) movement = movement + forward;
+    if (ImGui::IsKeyDown(ImGuiKey_S)) movement = movement - forward;
+    if (ImGui::IsKeyDown(ImGuiKey_D)) movement = movement + right;
+    if (ImGui::IsKeyDown(ImGuiKey_A)) movement = movement - right;
+    if (ImGui::IsKeyDown(ImGuiKey_E)) movement = movement + up;
+    if (ImGui::IsKeyDown(ImGuiKey_Q)) movement = movement - up;
+    if (dot(movement, movement) > 1e-8F)
+        camera.target = camera.target + normalize(movement) * step;
+}
+
+void camera_view_matrix(
+    const OrbitCamera& camera, const ImVec2 min, const ImVec2 max,
+    std::array<float, 16>& view) {
+    const ViewFrame frame = build_frame(camera, min, max);
+    view = {
+        frame.right.x, frame.up.x, -frame.forward.x, 0.F,
+        frame.right.y, frame.up.y, -frame.forward.y, 0.F,
+        frame.right.z, frame.up.z, -frame.forward.z, 0.F,
+        -dot(frame.right, frame.eye), -dot(frame.up, frame.eye),
+        dot(frame.forward, frame.eye), 1.F};
+
 }
 
 SceneDrawStats SceneRenderer::draw(
@@ -646,13 +677,13 @@ SceneDrawStats SceneRenderer::draw(
     }
 
     if (options.show_trajectory && scene.views.size() > 1) {
-        const ImU32 colour = theme::u32(theme::accent, 0.35F);
+        const ImU32 colour = theme::u32(theme::accent, 0.18F);
         const ViewPose* previous = nullptr;
         for (const ViewPose& pose : scene.views) {
             if (!pose.registered) continue;
             if (previous)
                 draw_segment(
-                    draw, frame, previous->centre, pose.centre, colour, 1.4F);
+                    draw, frame, previous->centre, pose.centre, colour, 1.F);
             previous = &pose;
         }
     }
@@ -660,12 +691,50 @@ SceneDrawStats SceneRenderer::draw(
     if (options.show_views) {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         float best_distance = 18.F;
-        // A frustum length proportional to the scene keeps markers legible at
-        // any zoom level.
-        const float length = std::max(1e-4F, scene.radius * options.view_scale);
+        constexpr std::size_t max_markers = 32;
+        const std::size_t registered = std::max<std::size_t>(
+            1, std::count_if(
+                   scene.views.begin(), scene.views.end(),
+                   [](const ViewPose& pose) { return pose.registered; }));
+        const std::size_t marker_stride = std::max<std::size_t>(
+            1, (registered + max_markers - 1) / max_markers);
+
+        // Pick the hovered marker before drawing so exactly one camera gets
+        // the bright treatment. Only uniformly sampled cameras participate;
+        // dense capture rings otherwise turn into an unreadable wire cage.
+        std::size_t ordinal = 0;
         for (std::size_t index = 0; index < scene.views.size(); ++index) {
             const ViewPose& pose = scene.views[index];
             if (!pose.registered) continue;
+            const bool sampled = ordinal % marker_stride == 0 ||
+                                 ordinal + 1 == registered;
+            ++ordinal;
+            if (!sampled) continue;
+            ImVec2 apex_screen;
+            float apex_depth{};
+            if (!hovered ||
+                !project(frame, pose.centre, apex_screen, apex_depth))
+                continue;
+            const float dx = apex_screen.x - mouse.x;
+            const float dy = apex_screen.y - mouse.y;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            if (distance < best_distance) {
+                best_distance = distance;
+                stats.hovered_view = static_cast<int>(index);
+            }
+        }
+
+        // A compact frustum plus a faint image plane reads as a camera without
+        // overwhelming the sparse cloud.
+        const float length = std::max(1e-4F, scene.radius * options.view_scale);
+        ordinal = 0;
+        for (std::size_t index = 0; index < scene.views.size(); ++index) {
+            const ViewPose& pose = scene.views[index];
+            if (!pose.registered) continue;
+            const bool sampled = ordinal % marker_stride == 0 ||
+                                 ordinal + 1 == registered;
+            ++ordinal;
+            if (!sampled) continue;
             const auto& r = pose.rotation;
             // Camera-to-world is the transpose of the stored world-to-camera.
             const auto to_world = [&](const float x, const float y,
@@ -692,38 +761,47 @@ SceneDrawStats SceneRenderer::draw(
             float apex_depth{};
             const bool apex_visible =
                 project(frame, apex, apex_screen, apex_depth);
-            bool is_hovered = false;
-            if (hovered && apex_visible) {
-                const float dx = apex_screen.x - mouse.x;
-                const float dy = apex_screen.y - mouse.y;
-                const float distance = std::sqrt(dx * dx + dy * dy);
-                if (distance < best_distance) {
-                    best_distance = distance;
-                    stats.hovered_view = static_cast<int>(index);
-                    is_hovered = true;
-                }
+            const bool is_hovered =
+                stats.hovered_view == static_cast<int>(index);
+
+            ImVec2 corner_screen[4];
+            bool plane_visible = true;
+            for (int i = 0; i < 4; ++i) {
+                float corner_depth{};
+                plane_visible &= project(
+                    frame, corners[i], corner_screen[i], corner_depth);
             }
 
             const ImU32 body = theme::u32(
                 is_hovered ? theme::warning : theme::accent,
-                is_hovered ? 0.95F : 0.55F);
+                is_hovered ? 0.98F : 0.24F);
+            if (plane_visible) {
+                draw->AddConvexPolyFilled(
+                    corner_screen, 4,
+                    theme::u32(
+                        is_hovered ? theme::warning : theme::accent,
+                        is_hovered ? 0.10F : 0.025F));
+            }
+            const float line_width = is_hovered ? 1.6F : 0.75F;
             for (const Vec3& corner : corners)
-                draw_segment(draw, frame, apex, corner, body, 1.F);
+                draw_segment(draw, frame, apex, corner, body, line_width);
             for (int i = 0; i < 4; ++i)
                 draw_segment(
-                    draw, frame, corners[i], corners[(i + 1) % 4], body, 1.F);
-            // Up marker on the image plane's top edge.
-            draw_segment(
-                draw, frame, corners[0], to_world(0.F, -half_y * 1.9F, length),
-                body, 1.F);
-            draw_segment(
-                draw, frame, corners[1], to_world(0.F, -half_y * 1.9F, length),
-                body, 1.F);
+                    draw, frame, corners[i], corners[(i + 1) % 4], body,
+                    line_width);
+            // Only the hovered camera needs an up marker; repeating it for
+            // every frame is the main source of the former fence-like look.
+            if (is_hovered) {
+                const Vec3 up = to_world(0.F, -half_y * 1.75F, length);
+                draw_segment(draw, frame, corners[0], up, body, line_width);
+                draw_segment(draw, frame, corners[1], up, body, line_width);
+            }
             if (apex_visible)
                 draw->AddCircleFilled(
-                    apex_screen, is_hovered ? 3.5F : 2.F,
+                    apex_screen, is_hovered ? 3.5F : 1.5F,
                     theme::u32(
-                        is_hovered ? theme::warning : theme::accent, 0.9F));
+                        is_hovered ? theme::warning : theme::accent,
+                        is_hovered ? 0.95F : 0.38F));
             ++stats.drawn_views;
         }
     }
