@@ -153,6 +153,7 @@ struct MvsView {
 
 struct SparsePoint {
     Vec3f position{Vec3f::Zero()};
+    Vec3f color{Vec3f::Constant(0.5F)};  // sRGB in [0, 1]
     std::vector<Index> view_ids;  // MvsView indices that observe this point
 };
 

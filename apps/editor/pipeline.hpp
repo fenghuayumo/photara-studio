@@ -253,6 +253,7 @@ struct ProjectLayout {
     std::filesystem::path view_log;
     std::filesystem::path preview_view_file;
     std::filesystem::path preview_camera_file;
+    std::filesystem::path working_sfm;
 };
 
 ProjectLayout resolve_layout(const ProjectSettings& settings);

@@ -24,6 +24,7 @@ struct TrainingOptions {
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
+    // Console training stats every N steps. Zero logs only the first and last.
     unsigned log_interval{100};
     // Optional windowed CUDA-event timings for the GGGS training loop.
     // Disabled by default so production training does not create or record

@@ -385,6 +385,10 @@ ColmapLoadResult load_colmap_scene(
         sparse.view_ids.erase(
             std::unique(sparse.view_ids.begin(), sparse.view_ids.end()),
             sparse.view_ids.end());
+        sparse.color = mvs::Vec3f(
+            source.color[0] / 255.F,
+            source.color[1] / 255.F,
+            source.color[2] / 255.F);
 
         mvs::DensePoint point;
         point.position = sparse.position;

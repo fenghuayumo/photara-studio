@@ -7,9 +7,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace aetherscan::mvs {
 namespace {
@@ -39,6 +41,105 @@ namespace {
     const double yd =
         yn * radial + view.p1 * (r2 + 2.0 * yn * yn) + 2.0 * view.p2 * xn * yn;
     return {view.src_fx * xd + view.src_cx, view.src_fy * yd + view.src_cy};
+}
+
+bool sample_rgb(
+    const io::RgbImage& image, const float x, const float y,
+    double& r, double& g, double& b) {
+    if (image.width == 0 || image.height == 0 || image.pixels.size() < 3)
+        return false;
+    const int xi = static_cast<int>(std::lround(static_cast<double>(x)));
+    const int yi = static_cast<int>(std::lround(static_cast<double>(y)));
+    if (xi < 0 || yi < 0 || xi >= static_cast<int>(image.width) ||
+        yi >= static_cast<int>(image.height))
+        return false;
+    const std::size_t offset =
+        (static_cast<std::size_t>(yi) * image.width +
+         static_cast<std::size_t>(xi)) *
+        3;
+    if (offset + 2 >= image.pixels.size()) return false;
+    r = image.pixels[offset];
+    g = image.pixels[offset + 1];
+    b = image.pixels[offset + 2];
+    return true;
+}
+
+void colour_sparse_points_from_photos(
+    const sfm::Scene& sfm_scene,
+    const std::vector<std::size_t>& track_ids,
+    std::vector<SparsePoint>& points) {
+    if (points.empty() || track_ids.size() != points.size()) return;
+
+    std::vector<std::vector<std::pair<std::size_t, sfm::Index>>>
+        observations_by_image(sfm_scene.images.size());
+    for (std::size_t point = 0; point < track_ids.size(); ++point) {
+        const auto& track = sfm_scene.tracks[track_ids[point]];
+        const std::size_t inliers = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < inliers; ++i) {
+            const auto& observation = track.observations[i];
+            if (observation.image_id >= sfm_scene.images.size()) continue;
+            observations_by_image[observation.image_id].emplace_back(
+                point, observation.feature_id);
+        }
+    }
+
+    std::vector<double> sum_r(points.size());
+    std::vector<double> sum_g(points.size());
+    std::vector<double> sum_b(points.size());
+    std::vector<std::uint32_t> samples(points.size());
+
+    for (std::size_t image_id = 0; image_id < sfm_scene.images.size();
+         ++image_id) {
+        if (observations_by_image[image_id].empty()) continue;
+        const auto& image = sfm_scene.images[image_id];
+        if (image.path.empty()) continue;
+        io::RgbImage rgb;
+        try {
+            rgb = io::load_rgb(image.path);
+        } catch (...) {
+            continue;
+        }
+        const float scale_x =
+            image.features.image_width > 0
+                ? static_cast<float>(rgb.width) /
+                      static_cast<float>(image.features.image_width)
+                : 1.F;
+        const float scale_y =
+            image.features.image_height > 0
+                ? static_cast<float>(rgb.height) /
+                      static_cast<float>(image.features.image_height)
+                : 1.F;
+        for (const auto& [point, feature_id] :
+             observations_by_image[image_id]) {
+            if (feature_id >= image.features.keypoints.size()) continue;
+            const auto& keypoint = image.features.keypoints[feature_id];
+            double r = 0.0;
+            double g = 0.0;
+            double b = 0.0;
+            if (!sample_rgb(
+                    rgb, keypoint.x * scale_x, keypoint.y * scale_y, r, g, b))
+                continue;
+            sum_r[point] += r;
+            sum_g[point] += g;
+            sum_b[point] += b;
+            ++samples[point];
+        }
+    }
+
+    std::size_t colored = 0;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (samples[i] == 0) continue;
+        ++colored;
+        const auto channel = [count = samples[i]](const double sum) {
+            return static_cast<float>(sum / (255.0 * count));
+        };
+        points[i].color = Vec3f(
+            channel(sum_r[i]), channel(sum_g[i]), channel(sum_b[i]));
+        points[i].color = points[i].color.cwiseMax(0.F).cwiseMin(1.F);
+    }
+    core::Logger::instance().info(
+        "mvs sparse colors: sampled=", colored, "/", points.size());
 }
 
 void erode_mask(
@@ -257,7 +358,11 @@ MvsScene build_mvs_scene(
         view.src_height = camera.height;
     }
 
-    for (const auto& track : sfm_scene.tracks) {
+    std::vector<std::size_t> source_tracks;
+    source_tracks.reserve(sfm_scene.tracks.size());
+    for (std::size_t track_index = 0; track_index < sfm_scene.tracks.size();
+         ++track_index) {
+        const auto& track = sfm_scene.tracks[track_index];
         if (!track.is_triangulated()) continue;
         SparsePoint point;
         point.position = track.position.cast<float>();
@@ -269,9 +374,13 @@ MvsScene build_mvs_scene(
             if (mvs_id == k_invalid) continue;
             point.view_ids.push_back(mvs_id);
         }
-        if (point.view_ids.size() >= 2)
+        if (point.view_ids.size() >= 2) {
+            source_tracks.push_back(track_index);
             scene.sparse_points.push_back(std::move(point));
+        }
     }
+    colour_sparse_points_from_photos(
+        sfm_scene, source_tracks, scene.sparse_points);
 
     detail::estimate_subject_bounds(
         scene.sparse_points, scene.subject_bounds,

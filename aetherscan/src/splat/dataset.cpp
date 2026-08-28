@@ -24,7 +24,11 @@ void use_sparse_points_as_initial_cloud_impl(mvs::MvsScene& scene) {
         mvs::DensePoint point;
         point.position = sparse.position;
         point.normal = mvs::Vec3f::UnitZ();
-        point.color = mvs::Vec3f::Constant(0.5F);
+        point.color = sparse.color;
+        if (!point.color.allFinite())
+            point.color = mvs::Vec3f::Constant(0.5F);
+        else
+            point.color = point.color.cwiseMax(0.F).cwiseMin(1.F);
         point.weight = static_cast<float>(sparse.view_ids.size());
         point.views = sparse.view_ids;
         scene.dense_cloud.points.push_back(std::move(point));

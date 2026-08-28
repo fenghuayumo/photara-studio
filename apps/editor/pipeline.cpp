@@ -108,6 +108,13 @@ std::string quote(const std::filesystem::path& path) {
     return '"' + path.string() + '"';
 }
 
+void append_gui_flags(
+    std::ostringstream& command, const ProjectLayout& layout) {
+    command << " --gui";
+    if (!layout.working_sfm.empty())
+        command << " --working-sfm " << quote(layout.working_sfm);
+}
+
 std::string lower_extension(const std::filesystem::path& path) {
     std::string extension = path.extension().string();
     std::transform(
@@ -668,8 +675,9 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.train_log = layout.root / (stem + "_train.log");
     layout.export_log = layout.root / (stem + "_export.log");
     layout.view_log = layout.root / (stem + "_view.log");
-    layout.preview_view_file = layout.root / (stem + "_preview_view");
-    layout.preview_camera_file = layout.root / (stem + "_preview_camera");
+    layout.working_sfm = layout.cache / "sfm.bin";
+    layout.preview_view_file = layout.cache / "preview_view";
+    layout.preview_camera_file = layout.cache / "preview_camera";
     return layout;
 }
 
@@ -677,8 +685,8 @@ std::string build_align_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout) {
     std::ostringstream command;
-    // Align writes the SfM stage into the .ascan project. Sidecar PLY/CSV are
-    // not the hand-off; Train reloads cameras from the project file.
+    // Align keeps SfM in the cache working copy. .ascan is only written
+    // when the user saves the project.
     command << quote(cli_path) << " --images "
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.project_file.empty() ? layout.sparse_ply
@@ -687,6 +695,7 @@ std::string build_align_command(
             << settings.max_features;
     if (settings.reuse_cache)
         command << " --cache-dir " << quote(layout.cache);
+    append_gui_flags(command, layout);
     return command.str();
 }
 
@@ -698,8 +707,8 @@ std::string build_train_command(
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.model_output);
 
-    // Training reloads SfM from the .ascan project when Align has already
-    // written that stage. OpenMVS files are never the hand-off.
+    // Training reloads SfM from the cache working copy (or an existing
+    // .ascan if the user saved one). OpenMVS files are never the hand-off.
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
             << " --max-features " << settings.max_features;
     if (settings.reuse_cache)
@@ -721,6 +730,7 @@ std::string build_train_command(
             << " --splat-use-mask=" << (settings.use_mask ? "true" : "false")
             << " --splat-normal-field="
             << (settings.normal_field ? "true" : "false");
+    append_gui_flags(command, layout);
 
     // Mesh extraction is what turns on depth/normal and multi-view geometry
     // supervision inside the trainer, so both travel together.
@@ -758,6 +768,7 @@ std::string build_view_command(
             << quote(layout.model_output) << " --splat-view"
             << " --splat-preview-camera-file "
             << quote(layout.preview_camera_file);
+    append_gui_flags(command, layout);
     std::error_code exists_error;
     if (std::filesystem::exists(layout.splat_ply, exists_error))
         command << " --splat-model " << quote(layout.splat_ply);
@@ -787,6 +798,7 @@ std::string build_export_sfm_command(
     std::error_code exists_error;
     if (std::filesystem::exists(layout.cache, exists_error))
         command << " --cache-dir " << quote(layout.cache);
+    append_gui_flags(command, layout);
     return command.str();
 }
 

@@ -60,6 +60,10 @@ struct ReconstructCli {
     double focal_pixels{};
     std::string mode{"global"};
     std::filesystem::path output;
+    // Editor/interactive runs skip sidecars, eval PNG dumps, and the extra
+    // timestamped log file. The caller already captures stdout.
+    bool gui{false};
+    std::filesystem::path working_sfm;
     bool export_mvs_requested{false};
     std::filesystem::path export_mvs_path;
     std::size_t neighbor_window{3};
@@ -93,6 +97,7 @@ struct ReconstructCli {
     std::filesystem::path dense_ply;
     std::filesystem::path splat_model;
     unsigned splat_iterations{10'000};
+    unsigned splat_log_interval{100};
     unsigned splat_preview_interval{0};
     unsigned splat_preview_view{0};
     std::filesystem::path splat_preview_view_file;
@@ -284,6 +289,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-model PATH  load a trained splat PLY and skip optimization\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
+              << "  --splat-log-interval N  training-stat log every N steps (default 100, 0 = first/last)\n"
               << "  --splat-preview-interval N  emit a live preview every N steps (0 disables)\n"
               << "  --splat-preview-view N  camera index for live preview (default 0, first frame)\n"
               << "  --splat-preview-view-file PATH  optional file the editor updates to switch cameras\n"
@@ -361,6 +367,8 @@ void print_help(const cxxopts::Options& options) {
               << "  .ply    sparse XYZRGB point cloud\n"
               << "  .mvs    OpenMVS Interface (interop export)\n"
               << "  --export-mvs [path]  also write OpenMVS Interface after SfM\n"
+              << "  --gui  editor/interactive: no ascan/asfm/eval PNG/extra log\n"
+              << "  --working-sfm PATH  compact SfM working copy for --gui\n"
               << "  with --dense: also writes dense.ply next to --output\n"
               << "  with --texture: also writes *_textured.obj/.mtl/_albedo.png\n"
               << "Log level: set AETHERSCAN_LOG_LEVEL=error|warning|info|debug|trace|off\n";
@@ -383,6 +391,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("o,output",
          "Output path (.ascan, .asfm, .ply, or .mvs)",
          cxxopts::value<std::string>())
+        ("gui",
+         "Editor run: skip ascan/asfm sidecars, eval dumps, and extra log file",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("working-sfm",
+         "Compact SfM working copy used by --gui (read on --splat, write after SfM)",
+         cxxopts::value<std::string>()->default_value(""))
         ("export-mvs",
          "Write OpenMVS Interface after SfM. Optional path; default is "
          "<output-stem>.mvs. .ply output does not write .mvs unless this is set.",
@@ -464,6 +478,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-iterations", "Splat optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
+        ("splat-log-interval",
+         "Log splat training stats every N iterations (0 = first and last only)",
+         cxxopts::value<unsigned>()->default_value("100"))
         ("splat-preview-interval",
          "Emit a live preview from a fixed camera every N iterations",
          cxxopts::value<unsigned>()->default_value("0"))
@@ -722,6 +739,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.focal_pixels = result["focal"].as<double>();
     cli.mode = result["mode"].as<std::string>();
     cli.output = utf8_to_path(result["output"].as<std::string>());
+    cli.gui = result["gui"].as<bool>();
+    const std::string working_sfm_text =
+        result["working-sfm"].as<std::string>();
+    if (!working_sfm_text.empty())
+        cli.working_sfm = utf8_to_path(working_sfm_text);
     if (result.count("export-mvs") != 0) {
         cli.export_mvs_requested = true;
         const auto export_mvs_text = result["export-mvs"].as<std::string>();
@@ -787,6 +809,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!splat_model_text.empty())
         cli.splat_model = utf8_to_path(splat_model_text);
     cli.splat_iterations = result["splat-iterations"].as<unsigned>();
+    cli.splat_log_interval = result["splat-log-interval"].as<unsigned>();
     cli.splat_preview_interval =
         result["splat-preview-interval"].as<unsigned>();
     cli.splat_preview_view = result["splat-preview-view"].as<unsigned>();
@@ -1360,6 +1383,39 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     return settings;
 }
 
+void save_working_sfm(
+    const ReconstructCli& cli, const aetherscan::sfm::Scene& scene) {
+    if (cli.working_sfm.empty() || scene.registered_count() < 2) return;
+    std::error_code error;
+    std::filesystem::create_directories(cli.working_sfm.parent_path(), error);
+    aetherscan::sfm::AsfmOptions options;
+    options.path_base = cli.images_dir;
+    aetherscan::sfm::save_asfm(scene, cli.working_sfm, options);
+    aetherscan::core::Logger::instance().info(
+        "working_sfm=", cli.working_sfm,
+        " images=", scene.images.size(),
+        " registered=", scene.registered_count());
+}
+
+bool load_working_sfm(
+    const ReconstructCli& cli, aetherscan::sfm::Scene& scene) {
+    std::error_code error;
+    if (cli.working_sfm.empty() ||
+        !std::filesystem::exists(cli.working_sfm, error))
+        return false;
+    aetherscan::sfm::AsfmOptions options;
+    options.path_base = cli.images_dir;
+    auto loaded = aetherscan::sfm::load_asfm(cli.working_sfm, options);
+    if (loaded.registered_count() < 2) return false;
+    scene = std::move(loaded);
+    aetherscan::core::Logger::instance().info(
+        "working_sfm_loaded=", cli.working_sfm,
+        " images=", scene.images.size(),
+        " registered=", scene.registered_count(),
+        " tracks=", scene.tracks.size());
+    return true;
+}
+
 void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& path) {
     std::size_t count = 0;
     for (const auto& track : scene.tracks) {
@@ -1828,6 +1884,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     aetherscan::project::Archive* project_archive = nullptr) {
     aetherscan::splat::TrainingOptions options;
     options.iterations = cli.splat_iterations;
+    options.log_interval = cli.splat_log_interval;
     options.preview_interval = cli.splat_preview_interval;
     options.preview_view_index = cli.splat_preview_view;
     options.preview_view_file = cli.splat_preview_view_file;
@@ -1846,7 +1903,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         cli.splat_progressive_interval;
     options.progressive_initial_scale =
         std::clamp(cli.splat_progressive_initial_scale, 1e-3F, 1.F);
-    options.evaluation_split_every = cli.splat_eval_split_every;
+    options.evaluation_split_every =
+        cli.gui ? 0U : cli.splat_eval_split_every;
     constexpr std::uint64_t bytes_per_megabyte = 1024ULL * 1024ULL;
     options.training_view_cache_bytes = static_cast<std::size_t>(
         std::min<std::uint64_t>(
@@ -1856,9 +1914,12 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                 ? (std::numeric_limits<std::uint64_t>::max)()
                 : cli.splat_view_cache_mb * bytes_per_megabyte,
             (std::numeric_limits<std::size_t>::max)()));
-    for (const unsigned milestone : {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
-        if (milestone < options.iterations)
-            options.evaluation_iterations.push_back(milestone);
+    if (!cli.gui) {
+        for (const unsigned milestone :
+             {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
+            if (milestone < options.iterations)
+                options.evaluation_iterations.push_back(milestone);
+    }
     options.densification_cap = static_cast<std::size_t>(
         std::min<std::uint64_t>(
             cli.splat_densification_cap,
@@ -2041,6 +2102,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         : cli.splat_strategy.c_str();
     aetherscan::core::Logger::instance().info(
         "splat training: iterations=", options.iterations,
+        " log_interval=", options.log_interval,
         " input=", dense_input ? "dense_points" : "sparse_points",
         " input_points=", scene.dense_cloud.points.size(),
         " max_initial_gaussians=", options.max_gaussians,
@@ -2112,49 +2174,54 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         ? std::filesystem::current_path()
         : cli.output.parent_path();
     std::vector<std::size_t> evaluation_views;
-    if (options.evaluation_split_every != 0) {
-        for (std::size_t index = 0; index < scene.views.size(); ++index)
-            if (index % options.evaluation_split_every == 0)
-                evaluation_views.push_back(index);
-    } else {
-        evaluation_views = {
-            0, scene.views.size() / 2, scene.views.size() - 1};
-    }
-    std::sort(evaluation_views.begin(), evaluation_views.end());
-    evaluation_views.erase(
-        std::unique(evaluation_views.begin(), evaluation_views.end()),
-        evaluation_views.end());
-    const auto evaluate =
-        [&](const unsigned iteration,
-            const aetherscan::splat::GaussianModel& model) {
-            double psnr_sum = 0.0;
-            double masked_psnr_sum = 0.0;
-            for (const std::size_t view_index : evaluation_views) {
-                const auto render_path = out_dir /
-                    (cli.output.stem().string() + "_splat_iter_" +
-                     std::to_string(iteration) + "_view_" +
-                     std::to_string(view_index) + ".png");
-                const auto metrics = aetherscan::splat::render_evaluation_png(
-                    model, scene.views[view_index], render_path, options);
+    aetherscan::splat::EvaluationCallback evaluate;
+    if (!cli.gui) {
+        if (options.evaluation_split_every != 0) {
+            for (std::size_t index = 0; index < scene.views.size(); ++index)
+                if (index % options.evaluation_split_every == 0)
+                    evaluation_views.push_back(index);
+        } else if (!scene.views.empty()) {
+            evaluation_views = {
+                0, scene.views.size() / 2, scene.views.size() - 1};
+        }
+        std::sort(evaluation_views.begin(), evaluation_views.end());
+        evaluation_views.erase(
+            std::unique(evaluation_views.begin(), evaluation_views.end()),
+            evaluation_views.end());
+        evaluate =
+            [&](const unsigned iteration,
+                const aetherscan::splat::GaussianModel& model) {
+                double psnr_sum = 0.0;
+                double masked_psnr_sum = 0.0;
+                for (const std::size_t view_index : evaluation_views) {
+                    const auto render_path = out_dir /
+                        (cli.output.stem().string() + "_splat_iter_" +
+                         std::to_string(iteration) + "_view_" +
+                         std::to_string(view_index) + ".png");
+                    const auto metrics =
+                        aetherscan::splat::render_evaluation_png(
+                            model, scene.views[view_index], render_path,
+                            options);
+                    aetherscan::core::Logger::instance().info(
+                        "splat_eval_iteration=", iteration,
+                        " view=", view_index,
+                        " foreground_psnr=", metrics.psnr,
+                        " masked_psnr=", metrics.masked_psnr,
+                        " mae=", metrics.mae,
+                        " alpha_bce=", metrics.alpha_bce,
+                        " alpha_coverage=", metrics.alpha_coverage,
+                        " render=", render_path);
+                    psnr_sum += metrics.psnr;
+                    masked_psnr_sum += metrics.masked_psnr;
+                }
                 aetherscan::core::Logger::instance().info(
                     "splat_eval_iteration=", iteration,
-                    " view=", view_index,
-                    " foreground_psnr=", metrics.psnr,
-                    " masked_psnr=", metrics.masked_psnr,
-                    " mae=", metrics.mae,
-                    " alpha_bce=", metrics.alpha_bce,
-                    " alpha_coverage=", metrics.alpha_coverage,
-                    " render=", render_path);
-                psnr_sum += metrics.psnr;
-                masked_psnr_sum += metrics.masked_psnr;
-            }
-            aetherscan::core::Logger::instance().info(
-                "splat_eval_iteration=", iteration,
-                " views=", evaluation_views.size(),
-                " average_psnr=", psnr_sum / evaluation_views.size(),
-                " average_masked_psnr=",
-                masked_psnr_sum / evaluation_views.size());
-        };
+                    " views=", evaluation_views.size(),
+                    " average_psnr=", psnr_sum / evaluation_views.size(),
+                    " average_masked_psnr=",
+                    masked_psnr_sum / evaluation_views.size());
+            };
+    }
     const auto started = std::chrono::steady_clock::now();
     aetherscan::splat::PreviewCallback preview;
     aetherscan::splat::DevicePreviewCallback device_preview;
@@ -2182,7 +2249,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                              const aetherscan::splat::Camera& camera,
                              const tinytensor::Tensor& color) {
             vulkan_preview->submit(color, camera.width, camera.height);
-            aetherscan::core::Logger::instance().info(
+            aetherscan::core::Logger::instance().debug(
                 "splat_preview_iteration=", iteration,
                 " view=", view_index,
                 " transport=cuda_vulkan_external_memory",
@@ -2192,7 +2259,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             "splat_preview_transport=cuda_vulkan_external_memory extent=",
             cli.splat_preview_vk_width, 'x',
             cli.splat_preview_vk_height);
-    } else if (options.preview_interval != 0) {
+    } else if (options.preview_interval != 0 && !cli.gui) {
         const std::filesystem::path preview_dir =
             cli.splat_preview_dir.empty()
                 ? out_dir / "splat_previews"
@@ -2215,7 +2282,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                 std::filesystem::remove(previous, remove_error);
             }
             previous = path;
-            aetherscan::core::Logger::instance().info(
+            aetherscan::core::Logger::instance().debug(
                 "splat_preview_iteration=", frame.iteration,
                 " view=", frame.view_index, " image=", path);
         };
@@ -2266,6 +2333,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         : cli.splat_model;
     if (cli.splat_model.empty())
         aetherscan::splat::save_gaussians_ply(gaussians, ply);
+    if (!cli.gui && !evaluation_views.empty()) {
     double final_psnr_sum = 0.0;
     double final_masked_psnr_sum = 0.0;
     for (const std::size_t view_index : evaluation_views) {
@@ -2290,6 +2358,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " average_psnr=", final_psnr_sum / evaluation_views.size(),
         " average_masked_psnr=",
         final_masked_psnr_sum / evaluation_views.size());
+    }
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
     aetherscan::core::Logger::instance().info(
@@ -2339,10 +2408,12 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             (cli.output.stem().string() + "_pam_pivot_mesh.ply");
         const auto candidates_ply = out_dir /
             (cli.output.stem().string() + "_pam_candidates.ply");
-        if (!pam.seed_mesh.faces.empty())
-            aetherscan::mvs::save_mesh_ply(pam.seed_mesh, seed_ply);
-        aetherscan::mvs::save_dense_ply(
-            pam.candidate_cloud, candidates_ply);
+        if (!cli.gui) {
+            if (!pam.seed_mesh.faces.empty())
+                aetherscan::mvs::save_mesh_ply(pam.seed_mesh, seed_ply);
+            aetherscan::mvs::save_dense_ply(
+                pam.candidate_cloud, candidates_ply);
+        }
         aetherscan::core::Logger::instance().info(
             "pam_pivot_mesh_ply=", seed_ply,
             " pivot_vertices=", pam.seed_mesh.vertices.size(),
@@ -2365,13 +2436,13 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     aetherscan::splat::SplatMeshOptions extraction_options;
     extraction_options.fusion = *mesh_options;
     extraction_options.fusion.build_mesh = true;
-    extraction_options.diagnostics_dir = out_dir;
+    if (!cli.gui) extraction_options.diagnostics_dir = out_dir;
     const auto mesh_started = std::chrono::steady_clock::now();
     auto extraction = aetherscan::splat::extract_splat_mesh(
         gaussians, scene, options, extraction_options);
     const auto surface_ply = out_dir /
         (cli.output.stem().string() + "_splat_surface.ply");
-    if (!extraction.surface_cloud.points.empty())
+    if (!cli.gui && !extraction.surface_cloud.points.empty())
         aetherscan::mvs::save_dense_ply(
             extraction.surface_cloud, surface_ply);
     const double mesh_elapsed = std::chrono::duration<double>(
@@ -2410,14 +2481,17 @@ int main(int argc, char** argv) {
         if (log_directory.empty()) log_directory = std::filesystem::current_path();
         const std::filesystem::path log_path =
             aetherscan::core::Logger::instance().configure(
-                log_directory, "aetherscan", console_level,
-                aetherscan::core::LogLevel::trace);
+                cli.gui ? std::filesystem::path{} : log_directory,
+                "aetherscan", console_level,
+                cli.gui ? aetherscan::core::LogLevel::off
+                        : aetherscan::core::LogLevel::trace);
         aetherscan::core::Logger::instance().info(
             "AetherScan started: mode=", cli.mode, " images_dir=", cli.images_dir,
             " output=", cli.output, " log=", log_path);
 
         const auto output_ext = lower_extension(cli.output);
         const bool project_output = output_ext == ".ascan";
+        const bool write_project = project_output && !cli.gui;
         aetherscan::project::Archive archive =
             aetherscan::project::Archive::create();
         std::error_code project_error;
@@ -2541,7 +2615,7 @@ int main(int argc, char** argv) {
             auto mesh = run_splat_training(
                 loaded.scene, cli, loaded.initial_points_dense,
                 cli.mesh ? &mesh_options : nullptr, {},
-                project_output ? &archive : nullptr);
+                write_project ? &archive : nullptr);
             if (mesh) {
 #if defined(AETHERSCAN_HAS_ASDIFF_MESH)
                 if (cli.mesh_target_faces > 0)
@@ -2557,7 +2631,7 @@ int main(int argc, char** argv) {
                             (mesh_path.stem().string() + ".obj"));
                 aetherscan::core::Logger::instance().info(
                     "mesh_ply=", mesh_path, " faces=", mesh->faces.size());
-                if (project_output) {
+                if (write_project) {
                     archive.set_chunk(
                         aetherscan::project::ChunkType::mesh,
                         aetherscan::mvs::encode_mesh(*mesh));
@@ -2585,6 +2659,9 @@ int main(int argc, char** argv) {
                     " tracks=", scene.tracks.size());
             }
         }
+        if (cli.splat && !loaded_project_sfm &&
+            load_working_sfm(cli, scene))
+            loaded_project_sfm = true;
 
         aetherscan::sfm::ReconstructionSummary summary{};
         double elapsed = 0.0;
@@ -2653,9 +2730,12 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        const auto diagnostics_path = write_sfm_diagnostics(scene, cli.output);
-        aetherscan::core::Logger::instance().info(
-            "sfm_diagnostics=", diagnostics_path);
+        if (!cli.gui) {
+            const auto diagnostics_path =
+                write_sfm_diagnostics(scene, cli.output);
+            aetherscan::core::Logger::instance().info(
+                "sfm_diagnostics=", diagnostics_path);
+        }
         } else {
             summary.valid = true;
             summary.registered_views =
@@ -2668,6 +2748,8 @@ int main(int argc, char** argv) {
                 scene.images.size() - scene.registered_count());
         }
 
+        save_working_sfm(cli, scene);
+
         if (output_ext == ".mvs") {
             aetherscan::sfm::export_openmvs_interface(scene, cli.output);
         } else if (output_ext == ".ply") {
@@ -2676,16 +2758,18 @@ int main(int argc, char** argv) {
             aetherscan::sfm::save_asfm(scene, cli.output);
             aetherscan::core::Logger::instance().info("asfm=", cli.output);
         } else if (output_ext == ".ascan") {
-            const auto settings = settings_from_cli(cli);
-            if (!loaded_project_sfm)
-                aetherscan::project::replace_sfm_stage(
-                    archive, scene, settings, cli.output);
-            else
-                aetherscan::project::write_settings(
-                    archive, settings, cli.output);
-            archive.save(cli.output);
-            aetherscan::core::Logger::instance().info(
-                "ascan=", cli.output, " sfm_images=", scene.images.size());
+            if (write_project) {
+                const auto settings = settings_from_cli(cli);
+                if (!loaded_project_sfm)
+                    aetherscan::project::replace_sfm_stage(
+                        archive, scene, settings, cli.output);
+                else
+                    aetherscan::project::write_settings(
+                        archive, settings, cli.output);
+                archive.save(cli.output);
+                aetherscan::core::Logger::instance().info(
+                    "ascan=", cli.output, " sfm_images=", scene.images.size());
+            }
         } else {
             throw std::invalid_argument(
                 "Output must end with .ascan, .asfm, .ply, or .mvs");
@@ -2748,7 +2832,7 @@ int main(int argc, char** argv) {
                 ? std::filesystem::current_path()
                 : cli.output.parent_path();
             std::filesystem::path bounds_path;
-            if (splat_scene.subject_bounds.valid) {
+            if (!cli.gui && splat_scene.subject_bounds.valid) {
                 bounds_path =
                     out_dir /
                     (cli.output.stem().string() + "_subject_bounds.txt");
@@ -2770,7 +2854,7 @@ int main(int argc, char** argv) {
                 splat_scene, cli, false,
                 cli.mesh ? &mesh_options : nullptr,
                 cli.masks_dir,
-                project_output ? &archive : nullptr);
+                write_project ? &archive : nullptr);
             if (mesh) {
 #if defined(AETHERSCAN_HAS_ASDIFF_MESH)
                 if (cli.mesh_target_faces > 0)
@@ -2791,7 +2875,7 @@ int main(int argc, char** argv) {
                 aetherscan::core::Logger::instance().info(
                     "mesh_ply=", mesh_path,
                     " faces=", splat_scene.mesh.faces.size());
-                if (project_output) {
+                if (write_project) {
                     archive.set_chunk(
                         aetherscan::project::ChunkType::mesh,
                         aetherscan::mvs::encode_mesh(splat_scene.mesh));
@@ -2967,7 +3051,7 @@ int main(int argc, char** argv) {
                 auto splat_mesh = run_splat_training(
                     mvs_scene, cli, true, &splat_mesh_options,
                     effective_mask_dir,
-                    project_output ? &archive : nullptr);
+                    write_project ? &archive : nullptr);
                 if (splat_mesh) mvs_scene.mesh = std::move(*splat_mesh);
             }
 #endif

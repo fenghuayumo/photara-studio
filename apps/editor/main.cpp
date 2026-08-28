@@ -293,7 +293,9 @@ void refresh_artifacts(App& app) {
     std::error_code error;
     app.has_asfm = std::filesystem::exists(app.layout.sparse_asfm, error);
     app.has_mvs = std::filesystem::exists(app.layout.sparse_mvs, error);
-    app.has_sparse = std::filesystem::exists(app.layout.sparse_ply, error);
+    app.has_sparse =
+        std::filesystem::exists(app.layout.sparse_ply, error) ||
+        std::filesystem::exists(app.layout.working_sfm, error);
     app.has_model = std::filesystem::exists(app.layout.splat_ply, error);
     app.has_mesh = std::filesystem::exists(app.layout.mesh_ply, error);
     app.project_writer_version = 0;
@@ -336,6 +338,14 @@ void store_path_field(
     std::array<char, 1024>& field, const std::filesystem::path& path) {
     const std::string text = path.string();
     std::snprintf(field.data(), field.size(), "%s", text.c_str());
+}
+
+aetherscan::sfm::Scene load_working_sfm(
+    const std::filesystem::path& path,
+    const std::filesystem::path& images_dir) {
+    aetherscan::sfm::AsfmOptions options;
+    options.path_base = images_dir;
+    return aetherscan::sfm::load_asfm(path, options);
 }
 
 aetherscan::project::Settings collect_project_settings(const App& app) {
@@ -389,25 +399,38 @@ void apply_project_settings(
 }
 
 void request_ascan_scene_load(App& app) {
-    if (app.loading_scene || app.layout.project_file.empty()) return;
+    if (app.loading_scene) return;
+    const auto ascan = app.layout.project_file;
+    const auto working = app.layout.working_sfm;
+    const std::filesystem::path images(app.settings.images_dir.data());
+    if (ascan.empty() && working.empty()) return;
     app.loading_scene = true;
     app.scene_source = "Project SfM";
-    const auto path = app.layout.project_file;
-    app.pending_load = std::async(std::launch::async, [path] {
-        SceneLoad loaded;
-        try {
-            const auto archive = aetherscan::project::Archive::open(path);
-            const auto scene = aetherscan::project::read_sfm(archive);
-            if (!scene) {
+    app.pending_load = std::async(
+        std::launch::async, [ascan, working, images] {
+            SceneLoad loaded;
+            std::error_code error;
+            try {
+                // Live Align writes the cache working copy, not .ascan.
+                // Relative photo paths in that file are stored against the
+                // image folder and must be resolved with the same base.
+                if (!working.empty() &&
+                    std::filesystem::exists(working, error)) {
+                    return sparse_scene_from_sfm(
+                        load_working_sfm(working, images));
+                }
+                if (!ascan.empty() && std::filesystem::exists(ascan, error)) {
+                    const auto archive =
+                        aetherscan::project::Archive::open(ascan);
+                    const auto scene = aetherscan::project::read_sfm(archive);
+                    if (scene) return sparse_scene_from_sfm(*scene);
+                }
                 loaded.error = "Project has no SfM stage yet";
-                return loaded;
+            } catch (const std::exception& failure) {
+                loaded.error = failure.what();
             }
-            loaded = sparse_scene_from_sfm(*scene);
-        } catch (const std::exception& error) {
-            loaded.error = error.what();
-        }
-        return loaded;
-    });
+            return loaded;
+        });
 }
 
 bool save_project_to_path(App& app, const std::filesystem::path& path) {
@@ -422,6 +445,13 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             archive = aetherscan::project::Archive::open(path);
         aetherscan::project::write_settings(
             archive, collect_project_settings(app), path);
+        std::error_code working_error;
+        if (!app.layout.working_sfm.empty() &&
+            std::filesystem::exists(app.layout.working_sfm, working_error)) {
+            const auto scene = load_working_sfm(
+                app.layout.working_sfm, app.settings.images_dir.data());
+            aetherscan::project::write_sfm(archive, scene, path);
+        }
         archive.save(path);
         store_path_field(app.settings.project_dir, path);
         app.project_folder_automatic = false;
@@ -493,7 +523,7 @@ void request_scene_load(
 
 void ensure_sparse_loaded(App& app) {
     if (!app.has_sparse || app.scene.has_points() || app.loading_scene) return;
-    if (!app.layout.project_file.empty())
+    if (!app.layout.project_file.empty() || !app.layout.working_sfm.empty())
         request_ascan_scene_load(app);
     else
         request_scene_load(
@@ -741,6 +771,10 @@ void start_align(App& app) {
         return;
     }
     {
+        std::error_code cache_error;
+        std::filesystem::create_directories(app.layout.cache, cache_error);
+    }
+    {
         std::error_code stale;
         std::filesystem::remove(app.layout.sparse_mvs, stale);
     }
@@ -766,7 +800,8 @@ void start_align(App& app) {
 bool alignment_cache_present(const App& app) {
     if (app.layout.cache.empty()) return false;
     std::error_code error;
-    return std::filesystem::exists(app.layout.cache, error);
+    return std::filesystem::exists(app.layout.working_sfm, error) ||
+           std::filesystem::exists(app.layout.cache, error);
 }
 
 bool can_export_sfm(const App& app) {
@@ -814,6 +849,21 @@ void start_export_sfm(App& app) {
         return;
     }
     try {
+        if (!app.layout.working_sfm.empty()) {
+            std::error_code exists_error;
+            if (std::filesystem::exists(app.layout.working_sfm, exists_error)) {
+                const auto scene = load_working_sfm(
+                    app.layout.working_sfm, app.settings.images_dir.data());
+                aetherscan::sfm::save_asfm(scene, app.layout.sparse_asfm);
+                aetherscan::sfm::export_openmvs_interface(
+                    scene, app.layout.sparse_mvs);
+                refresh_artifacts(app);
+                set_message(
+                    app, "Exported SfM to .asfm and OpenMVS .mvs",
+                    theme::success);
+                return;
+            }
+        }
         if (!app.layout.project_file.empty()) {
             std::error_code exists_error;
             if (std::filesystem::exists(app.layout.project_file, exists_error)) {
@@ -854,6 +904,10 @@ void start_splat_view(App& app) {
     if (!app.has_model) return;
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
+    {
+        std::error_code cache_error;
+        std::filesystem::create_directories(app.layout.cache, cache_error);
+    }
     sync_live_preview_camera(
         app, true, app.preview_raster_width, app.preview_raster_height);
 
@@ -890,6 +944,10 @@ void start_train(App& app, const bool smoke) {
     refresh_artifacts(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
+    {
+        std::error_code cache_error;
+        std::filesystem::create_directories(app.layout.cache, cache_error);
+    }
     app.preview_view = 0;
     app.preview_follow_view = true;
     load_view_poses(app.layout.sparse_poses, app.scene);
@@ -1970,8 +2028,9 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Reuse the Structure-from-Motion cache so Train 3DGS can\n"
-                "reload cameras from the .ascan project instead of solving\n"
-                "poses again. Uncheck to rebuild from the images.");
+                "reload cameras without solving poses again. Uncheck to\n"
+                "rebuild from the images. Align/Train do not write .ascan\n"
+                "or .asfm unless you Save Project or Export SfM.");
         ImGui::EndDisabled();
 
         if (theme::toolbar_button(
@@ -1981,7 +2040,7 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Write the SfM stage to a standalone .asfm file and an\n"
-                "OpenMVS .mvs sidecar. The project file already stores SfM.");
+                "OpenMVS .mvs sidecar. Align/Train no longer write these.");
         if (app.has_asfm) {
             ImGui::Spacing();
             const std::string asfm_name =

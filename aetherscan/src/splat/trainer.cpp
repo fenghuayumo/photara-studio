@@ -36,6 +36,11 @@ namespace refine = densification;
 
 constexpr float k_sh0 = 0.28209479177387814F;
 
+// Logging iterations also run densify / live preview / a full GPU sync, so a
+// single step's wall time is a poor ETA rate. Smooth the mean ms/iter over
+// each log interval instead.
+constexpr double k_step_time_ema = 0.85;
+
 std::size_t requested_preview_view(
     const TrainingOptions& options, const std::size_t view_count) {
     unsigned requested = options.preview_view_index;
@@ -842,8 +847,11 @@ GaussianModel Trainer::train(
                   fixed_maximum_scale_fraction * scene_extent, 1e-6F))
             : std::numeric_limits<float>::infinity();
 
+    auto interval_started = std::chrono::steady_clock::now();
+    unsigned last_progress_iteration = 0;
+    double ema_step_ms = 0.0;
+
     for (unsigned iteration = 1; iteration <= options_.iterations; ++iteration) {
-        const auto started = std::chrono::steady_clock::now();
         const float requested_resolution_scale =
             data::progressive_resolution_scale(iteration, options_);
         if (std::abs(
@@ -1340,8 +1348,6 @@ GaussianModel Trainer::train(
                 throw std::runtime_error(
                     std::string("Splat training step failed: ") +
                     cudaGetErrorString(report_error));
-            const double milliseconds = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - started).count();
             const auto opacity_gradients = download<float>(
                 gradients.opacity_logits);
             const auto opacity_logits = download<float>(model.opacity_logits);
@@ -1358,6 +1364,21 @@ GaussianModel Trainer::train(
             const double inverse_gaussians = 1.0 /
                 static_cast<double>(std::max<std::size_t>(
                     opacity_gradients.size(), 1));
+            const auto now = std::chrono::steady_clock::now();
+            const double interval_ms =
+                std::chrono::duration<double, std::milli>(
+                    now - interval_started).count();
+            const unsigned steps = iteration - last_progress_iteration;
+            double milliseconds = 0.0;
+            if (last_progress_iteration > 0 && steps > 0) {
+                const double mean_ms =
+                    interval_ms / static_cast<double>(steps);
+                ema_step_ms = ema_step_ms <= 0.0
+                    ? mean_ms
+                    : k_step_time_ema * ema_step_ms +
+                          (1.0 - k_step_time_ema) * mean_ms;
+                milliseconds = ema_step_ms;
+            }
             continue_training = progress({
                 iteration, options_.iterations, model.size(),
                 static_cast<std::size_t>(rendered.rendered_instances),
@@ -1379,6 +1400,8 @@ GaussianModel Trainer::train(
                           static_cast<float>(
                               multi_view_loss.geometry_candidates)
                     : 0.F});
+            interval_started = now;
+            last_progress_iteration = iteration;
         }
         if (!continue_training) break;
         if (evaluate &&

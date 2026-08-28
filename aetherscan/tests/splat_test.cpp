@@ -1488,6 +1488,21 @@ void test_reality_capture_dataset_loading() {
     std::filesystem::remove_all(root);
 }
 
+void test_sparse_init_keeps_photo_colors() {
+    using namespace aetherscan;
+    mvs::MvsScene scene;
+    mvs::SparsePoint sparse;
+    sparse.position = mvs::Vec3f(0.F, 0.F, 1.F);
+    sparse.color = mvs::Vec3f(0.8F, 0.1F, 0.25F);
+    sparse.view_ids = {0, 1};
+    scene.sparse_points.push_back(sparse);
+    splat::initialize_scene_from_sparse_points(scene);
+    require(
+        scene.dense_cloud.points.size() == 1 &&
+            (scene.dense_cloud.points[0].color - sparse.color).norm() < 1e-6F,
+        "SfM sparse colours were not copied into the Gaussian seed cloud");
+}
+
 void test_openmvs_dataset_loading() {
     using namespace aetherscan;
     const auto root = std::filesystem::temp_directory_path() /
@@ -2136,6 +2151,7 @@ int main() {
         test_colmap_text_loading();
         test_reality_capture_dataset_loading();
         test_openmvs_dataset_loading();
+        test_sparse_init_keeps_photo_colors();
         test_mask_loss_modes();
         test_ssim_loss_and_scale_constraint();
         test_gggs_depth_normal_consistency();

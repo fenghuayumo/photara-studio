@@ -2,6 +2,8 @@
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
 #include "mvs/maxflow.hpp"
+#include "io/image.hpp"
+#include "sfm/scene.hpp"
 #include "texture/projection.hpp"
 
 #include <algorithm>
@@ -70,6 +72,69 @@ MvsScene make_plane_scene() {
     sparse.view_ids = {0, 1};
     scene.sparse_points.push_back(std::move(sparse));
     return scene;
+}
+
+void test_build_mvs_scene_samples_sparse_colors() {
+    using aetherscan::io::RgbImage;
+    using aetherscan::io::save_rgb_png;
+    using aetherscan::sfm::Image;
+    using aetherscan::sfm::PinholeCamera;
+    using aetherscan::sfm::Scene;
+    using aetherscan::sfm::Track;
+
+    const auto root = std::filesystem::temp_directory_path() /
+                      "aetherscan_mvs_sparse_color_test";
+    std::filesystem::create_directories(root);
+    const auto red_path = root / "red.png";
+    const auto green_path = root / "green.png";
+    RgbImage red{2, 2, std::vector<std::uint8_t>(2 * 2 * 3, 0)};
+    for (std::size_t i = 0; i < red.pixels.size(); i += 3) red.pixels[i] = 255;
+    RgbImage green{2, 2, std::vector<std::uint8_t>(2 * 2 * 3, 0)};
+    for (std::size_t i = 1; i < green.pixels.size(); i += 3)
+        green.pixels[i] = 255;
+    save_rgb_png(red, red_path);
+    save_rgb_png(green, green_path);
+
+    Scene source;
+    PinholeCamera camera;
+    camera.id = 0;
+    camera.width = 2;
+    camera.height = 2;
+    camera.fx = 1;
+    camera.fy = 1;
+    camera.cx = 0.5;
+    camera.cy = 0.5;
+    source.cameras.push_back(camera);
+    for (std::uint32_t index = 0; index < 2; ++index) {
+        Image image;
+        image.id = index;
+        image.camera_id = 0;
+        image.path = index == 0 ? red_path : green_path;
+        image.registered = true;
+        image.pose.C = Eigen::Vector3d(index, 0, 0);
+        image.features.image_width = 2;
+        image.features.image_height = 2;
+        image.features.keypoints.push_back({0.F, 0.F});
+        source.images.push_back(std::move(image));
+    }
+    Track track;
+    track.position = Eigen::Vector3d(0.5, 0, 1);
+    track.observations = {{0, 0}, {1, 0}};
+    track.num_inliers = 2;
+    source.tracks.push_back(std::move(track));
+
+    DensifyOptions options;
+    const MvsScene scene = build_mvs_scene(source, options);
+    require(
+        scene.sparse_points.size() == 1,
+        "SfM track was not converted into a sparse MVS point");
+    const Vec3f color = scene.sparse_points[0].color;
+    require(
+        std::abs(color.x() - 0.5F) < 1e-3F &&
+            std::abs(color.y() - 0.5F) < 1e-3F &&
+            std::abs(color.z()) < 1e-3F,
+        "SfM sparse point did not average photo colours");
+    std::filesystem::remove_all(root);
 }
 
 void test_parallel_fusion() {
@@ -1052,6 +1117,7 @@ void test_global_delaunay_mesh() {
 int main() {
     try {
         test_parallel_fusion();
+        test_build_mvs_scene_samples_sparse_colors();
         test_mask_constrained_fusion();
         test_subject_bounds_from_sparse_points();
         test_asdiff_texture_camera_projection();

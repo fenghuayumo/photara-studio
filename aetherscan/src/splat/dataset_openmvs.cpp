@@ -377,6 +377,7 @@ public:
             point.weight = total_confidence > 0.F
                 ? total_confidence
                 : static_cast<float>(point.views.size());
+            sparse.color = point.color;
             result.scene.sparse_points.push_back(std::move(sparse));
             result.scene.dense_cloud.points.push_back(std::move(point));
         }
