@@ -78,6 +78,9 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.multi_view_ncc_weight);
     writer.value(static_cast<std::int32_t>(settings.geometry_from_iter));
     writer.value(static_cast<std::uint8_t>(settings.normal_field));
+    writer.string(store_path(settings.dataset_source, base));
+    writer.string(settings.dataset_format);
+    writer.string(store_path(settings.dataset_initial_cloud, base));
     return writer.take();
 }
 
@@ -110,7 +113,14 @@ Settings decode_settings(
     settings.multi_view_ncc_weight = reader.value<float>();
     settings.geometry_from_iter = reader.value<std::int32_t>();
     settings.normal_field = reader.value<std::uint8_t>() != 0;
-    // Newer additive fields live after this prefix and are ignored here.
+    // Optional additive fields were appended after the original settings
+    // prefix. Old .ascan files have no bytes remaining here.
+    if (reader.remaining() > 0)
+        settings.dataset_source = load_path(reader.string(), base);
+    if (reader.remaining() > 0)
+        settings.dataset_format = reader.string();
+    if (reader.remaining() > 0)
+        settings.dataset_initial_cloud = load_path(reader.string(), base);
     return settings;
 }
 

@@ -120,6 +120,10 @@ void stop_splat_view(App& app) {
     if (app.viewer.running()) app.viewer.stop();
 }
 
+bool has_external_dataset(const App& app) {
+    return app.settings.dataset_source[0] != '\0';
+}
+
 bool live_preview_active(const App& app) {
     return (app.job.running() && app.active_job == JobKind::train) ||
            app.viewer.running();
@@ -214,8 +218,11 @@ bool copy_wide_path(const wchar_t* wide, std::array<char, 1024>& destination) {
     return true;
 }
 
-bool pick_project_file(
-    const wchar_t* title, std::array<char, 1024>& destination, const bool save) {
+enum class FilePickKind { project, dataset, point_cloud };
+
+bool pick_file(
+    const wchar_t* title, std::array<char, 1024>& destination,
+    const bool save, const FilePickKind kind) {
     bool picked = false;
     const HRESULT initialised =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -235,11 +242,21 @@ bool pick_project_file(
         else
             dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
         dialog->SetTitle(title);
-        COMDLG_FILTERSPEC filters[] = {
+        COMDLG_FILTERSPEC project_filters[] = {
             {L"AetherScan Project (*.ascan)", L"*.ascan"},
             {L"All files (*.*)", L"*.*"}};
+        COMDLG_FILTERSPEC dataset_filters[] = {
+            {L"Camera datasets (*.csv;*.mvs)", L"*.csv;*.mvs"},
+            {L"All files (*.*)", L"*.*"}};
+        COMDLG_FILTERSPEC point_cloud_filters[] = {
+            {L"Point cloud (*.ply)", L"*.ply"},
+            {L"All files (*.*)", L"*.*"}};
+        const COMDLG_FILTERSPEC* filters = project_filters;
+        if (kind == FilePickKind::dataset) filters = dataset_filters;
+        if (kind == FilePickKind::point_cloud) filters = point_cloud_filters;
         dialog->SetFileTypes(2, filters);
-        dialog->SetDefaultExtension(L"ascan");
+        if (kind == FilePickKind::project && save)
+            dialog->SetDefaultExtension(L"ascan");
         if (SUCCEEDED(dialog->Show(nullptr))) {
             IShellItem* item = nullptr;
             if (SUCCEEDED(dialog->GetResult(&item))) {
@@ -257,6 +274,21 @@ bool pick_project_file(
     return picked;
 }
 
+bool pick_project_file(
+    const wchar_t* title, std::array<char, 1024>& destination, const bool save) {
+    return pick_file(title, destination, save, FilePickKind::project);
+}
+
+bool pick_dataset_file(
+    const wchar_t* title, std::array<char, 1024>& destination) {
+    return pick_file(title, destination, false, FilePickKind::dataset);
+}
+
+bool pick_point_cloud_file(
+    const wchar_t* title, std::array<char, 1024>& destination) {
+    return pick_file(title, destination, false, FilePickKind::point_cloud);
+}
+
 void reveal_in_explorer(const std::filesystem::path& path) {
     std::error_code error;
     if (!std::filesystem::exists(path, error)) return;
@@ -265,6 +297,12 @@ void reveal_in_explorer(const std::filesystem::path& path) {
 #else
 bool pick_folder(const wchar_t*, std::array<char, 1024>&) { return false; }
 bool pick_project_file(const wchar_t*, std::array<char, 1024>&, bool) {
+    return false;
+}
+bool pick_dataset_file(const wchar_t*, std::array<char, 1024>&) {
+    return false;
+}
+bool pick_point_cloud_file(const wchar_t*, std::array<char, 1024>&) {
     return false;
 }
 void reveal_in_explorer(const std::filesystem::path&) {}
@@ -354,6 +392,13 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
         ? std::string("Untitled")
         : app.layout.project_file.stem().string();
     settings.image_directory = app.settings.images_dir.data();
+    settings.dataset_source = app.settings.dataset_source.data();
+    settings.dataset_format = app.settings.dataset_format == 1
+        ? "colmap"
+        : app.settings.dataset_format == 2
+            ? "realitycapture"
+            : app.settings.dataset_format == 3 ? "openmvs" : "auto";
+    settings.dataset_initial_cloud = app.settings.dataset_initial_cloud.data();
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
     settings.max_features = static_cast<unsigned>(
@@ -379,6 +424,17 @@ void apply_project_settings(
     App& app, const aetherscan::project::Settings& settings) {
     if (!settings.image_directory.empty())
         store_path_field(app.settings.images_dir, settings.image_directory);
+    store_path_field(app.settings.dataset_source, settings.dataset_source);
+    if (settings.dataset_format == "colmap")
+        app.settings.dataset_format = 1;
+    else if (settings.dataset_format == "realitycapture")
+        app.settings.dataset_format = 2;
+    else if (settings.dataset_format == "openmvs")
+        app.settings.dataset_format = 3;
+    else
+        app.settings.dataset_format = 0;
+    store_path_field(
+        app.settings.dataset_initial_cloud, settings.dataset_initial_cloud);
     app.settings.sfm_mode = settings.sfm_mode;
     app.settings.reuse_cache = settings.reuse_cache;
     app.settings.max_features = static_cast<int>(settings.max_features);
@@ -758,6 +814,13 @@ void poll_scene_load(App& app) {
 void start_align(App& app) {
     if (app.job.running()) return;
     stop_splat_view(app);
+    if (has_external_dataset(app)) {
+        set_message(
+            app,
+            "External dataset selected; use Train 3DGS instead of Align Photos",
+            theme::warning);
+        return;
+    }
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -805,7 +868,8 @@ bool alignment_cache_present(const App& app) {
 }
 
 bool can_export_sfm(const App& app) {
-    return app.settings.images_dir[0] != '\0' &&
+    return !has_external_dataset(app) &&
+           app.settings.images_dir[0] != '\0' &&
            app.settings.project_dir[0] != '\0' &&
            (app.has_sparse || alignment_cache_present(app));
 }
@@ -950,7 +1014,13 @@ void start_train(App& app, const bool smoke) {
     }
     app.preview_view = 0;
     app.preview_follow_view = true;
-    load_view_poses(app.layout.sparse_poses, app.scene);
+    if (has_external_dataset(app)) {
+        // The external dataset is consumed by the child CLI. Do not leave a
+        // stale internal SfM scene visible while that job is running.
+        app.scene.clear();
+    } else {
+        load_view_poses(app.layout.sparse_poses, app.scene);
+    }
     if (const ViewPose* pose = first_registered_view(app.scene))
         snap_orbit_to_view(app.camera, *pose);
     write_preview_view_index(app.layout, app.preview_view);
@@ -981,7 +1051,7 @@ void start_train(App& app, const bool smoke) {
             << app.settings.images_dir.data() << "\" --output \""
             << app.layout.model_output.string()
             << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
-            << " --splat-format colmap --splat-use-mask false"
+            << " --dataset-format colmap --splat-use-mask false"
             << " --splat --splat-strategy adc_plus --splat-iterations "
             << app.settings.iterations << " --splat-preview-interval "
             << app.settings.preview_interval
@@ -1091,7 +1161,7 @@ int workflow_step(const App& app) {
     if (training) return 2;
     if (aligning) return 1;
     if (app.has_model) return 2;
-    if (app.has_sparse) return 1;
+    if (app.has_sparse || has_external_dataset(app)) return 1;
     return 0;
 }
 
@@ -1236,7 +1306,9 @@ Action draw_menu_bar(App& app) {
     if (ImGui::BeginMenu("Reconstruction")) {
         if (ImGui::MenuItem(
                 app.has_sparse ? "Re-align Photos" : "Align Photos", nullptr,
-                false, !busy && app.settings.images_dir[0] != '\0'))
+                false,
+                !busy && app.settings.images_dir[0] != '\0' &&
+                    !has_external_dataset(app)))
             action = Action::align;
         if (ImGui::MenuItem(
                 "Train 3DGS", nullptr, false,
@@ -1391,6 +1463,7 @@ Action draw_toolbar(App& app) {
     Action action = Action::none;
     const bool busy = app.job.running();
     const bool images_ready = app.settings.images_dir[0] != '\0';
+    const bool external_dataset = has_external_dataset(app);
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -1428,7 +1501,7 @@ Action draw_toolbar(App& app) {
                    "##align", icons::Icon::align,
                    app.has_sparse ? "Re-align Photos" : "Align Photos",
                    {132.F, 32.F}, icons::ButtonStyle::primary,
-                   !busy && images_ready)) {
+                   !busy && images_ready && !external_dataset)) {
         action = Action::align;
     }
     ImGui::SameLine();
@@ -1451,10 +1524,15 @@ Action draw_toolbar(App& app) {
                        {126.F, 32.F}, icons::ButtonStyle::normal, ready)) {
             action = Action::train;
         }
-        if (!app.has_sparse && ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "No alignment yet. Training will run Structure from Motion "
-                "first, then optimise Gaussians.");
+        if (ImGui::IsItemHovered()) {
+            if (external_dataset)
+                ImGui::SetTooltip(
+                    "Train directly from the selected external camera dataset.");
+            else if (!app.has_sparse)
+                ImGui::SetTooltip(
+                    "No alignment yet. Training will run Structure from Motion "
+                    "first, then optimise Gaussians.");
+        }
     }
     ImGui::SameLine();
 
@@ -1539,6 +1617,7 @@ void draw_scene_panel(App& app) {
     }
 
     const float wrap = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 20.F;
+    const bool external_dataset = has_external_dataset(app);
 
     theme::section_header("SCENE");
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {7.F, 7.F});
@@ -1566,7 +1645,10 @@ void draw_scene_panel(App& app) {
         if (!has_cloud && !has_gaussians && !has_mesh) {
             ImGui::SetCursorPosX(22.F);
             ImGui::PushTextWrapPos(wrap);
-            theme::caption("Align photos to add a sparse cloud.");
+            theme::caption(
+                external_dataset
+                    ? "External camera dataset selected. Train 3DGS to use it."
+                    : "Align photos to add a sparse cloud.");
             ImGui::PopTextWrapPos();
         } else {
             if (has_cloud &&
@@ -1601,18 +1683,26 @@ void draw_scene_panel(App& app) {
     draw_step(
         "02", "Align cameras",
         aligning ? StepState::active
-                 : (app.has_sparse ? StepState::done : StepState::pending),
-        aligning ? stage_name(stage) : nullptr);
+                 : (app.has_sparse || external_dataset
+                        ? StepState::done
+                        : StepState::pending),
+        aligning
+            ? stage_name(stage)
+            : (external_dataset ? "External dataset" : nullptr));
     draw_step(
         "03", "Review sparse cloud",
         app.scene.has_points() ? StepState::done
-                               : (app.has_sparse ? StepState::active
-                                                 : StepState::pending),
+                               : (external_dataset ? StepState::skipped
+                                                   : (app.has_sparse
+                                                          ? StepState::active
+                                                          : StepState::pending)),
         app.scene.has_points()
             ? nullptr
-            : (app.has_sparse
-                   ? (app.loading_scene ? "Loading" : "On disk")
-                   : nullptr));
+            : (external_dataset
+                   ? "Provided by external dataset"
+                   : (app.has_sparse
+                          ? (app.loading_scene ? "Loading" : "On disk")
+                          : nullptr)));
     draw_step(
         "04", "Optimise Gaussians",
         training && stage != Stage::meshing
@@ -1646,6 +1736,14 @@ void draw_scene_panel(App& app) {
         app.settings.project_dir[0] != '\0' ? app.settings.project_dir.data()
                                            : "(not selected)");
     ImGui::PopTextWrapPos();
+    if (external_dataset) {
+        ImGui::Dummy({0, 6.F});
+        theme::caption("EXTERNAL DATASET");
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(wrap);
+        ImGui::TextUnformatted(app.settings.dataset_source.data());
+        ImGui::PopTextWrapPos();
+    }
     ImGui::Unindent(14.F);
 
     ImGui::End();
@@ -2010,6 +2108,68 @@ Action draw_inspector(App& app) {
                 !busy && !app.loading_scene &&
                     has_reconstruction_result(app)))
             app.show_clear_results = true;
+
+        ImGui::BeginDisabled(busy);
+        theme::caption("External SfM dataset (optional)");
+        ImGui::SetNextItemWidth(-138.F);
+        if (ImGui::InputText(
+                "##dataset_source", app.settings.dataset_source.data(),
+                app.settings.dataset_source.size())) {
+            clear_loaded_result(app);
+            refresh_artifacts(app);
+        }
+        ImGui::SameLine(0.F, 4.F);
+        if (ImGui::Button("Folder##pick_dataset_folder", {58.F, 0.F}) &&
+            pick_folder(
+                L"Select external SfM dataset folder",
+                app.settings.dataset_source)) {
+            clear_loaded_result(app);
+            refresh_artifacts(app);
+        }
+        ImGui::SameLine(0.F, 4.F);
+        if (ImGui::Button("File##pick_dataset_file", {46.F, 0.F}) &&
+            pick_dataset_file(
+                L"Select external camera dataset file",
+                app.settings.dataset_source)) {
+            clear_loaded_result(app);
+            refresh_artifacts(app);
+        }
+        if (has_external_dataset(app)) {
+            theme::caption(
+                "Train 3DGS will use the imported cameras and skip internal SfM.");
+            theme::caption("Dataset format");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* formats[] = {
+                "Auto detect", "COLMAP", "RealityCapture", "OpenMVS"};
+            ImGui::Combo(
+                "##dataset_format", &app.settings.dataset_format, formats, 4);
+
+            theme::caption("Initial point cloud (optional)");
+            ImGui::SetNextItemWidth(-82.F);
+            if (ImGui::InputText(
+                    "##dataset_initial_cloud",
+                    app.settings.dataset_initial_cloud.data(),
+                    app.settings.dataset_initial_cloud.size()))
+                clear_loaded_result(app);
+            ImGui::SameLine(0.F, 4.F);
+            if (ImGui::Button("File##pick_initial_cloud", {46.F, 0.F}) &&
+                pick_point_cloud_file(
+                    L"Select initial point cloud",
+                    app.settings.dataset_initial_cloud))
+                clear_loaded_result(app);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Optional dense PLY initializer. COLMAP/OpenMVS sparse points "
+                    "are used automatically when available.");
+            if (ImGui::Button("Clear external dataset", {-1.F, 26.F})) {
+                app.settings.dataset_source.fill('\0');
+                app.settings.dataset_initial_cloud.fill('\0');
+                app.settings.dataset_format = 0;
+                clear_loaded_result(app);
+                refresh_artifacts(app);
+            }
+        }
+        ImGui::EndDisabled();
         ImGui::Spacing();
     }
 
@@ -2265,6 +2425,13 @@ Action draw_inspector(App& app) {
         if (theme::danger_button(
                 stop_job_label(app.active_job), {-1.F, 40.F}))
             action = Action::stop;
+    } else if (has_external_dataset(app)) {
+        if (theme::primary_button(
+                app.settings.build_mesh ? "Train External 3DGS + Mesh"
+                                        : "Train External 3DGS",
+                {-1.F, 40.F},
+                app.settings.images_dir[0] != '\0'))
+            action = Action::train;
     } else if (!app.has_sparse) {
         if (theme::primary_button(
                 "Align Photos", {-1.F, 40.F},
@@ -2580,6 +2747,8 @@ int main(const int argc, char** argv) {
         app.settings.preview_interval =
             std::max(app.settings.preview_interval, 1);
         app.settings.max_features = std::max(app.settings.max_features, 512);
+        app.settings.dataset_format = std::clamp(
+            app.settings.dataset_format, 0, 3);
         app.settings.geometry_from_iter =
             std::max(app.settings.geometry_from_iter, 0);
 

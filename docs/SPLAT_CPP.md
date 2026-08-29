@@ -17,6 +17,10 @@ images + COLMAP sparse model ─────────────────
 这条路径不依赖 LibTorch、PyBind 或 Python 运行时。MVS 继续负责充分利用 CPU；Gaussian
 投影、排序、混合、反向传播、损失与参数更新在 CUDA 上执行。
 
+外部相机对齐数据通过 `--splat-dataset` 配合 `--dataset-format` 传入；格式可选
+`auto`、`colmap`、`realitycapture` 和 `openmvs`。`--splat-format` 仅作为旧脚本的
+兼容别名，不再作为推荐参数名。
+
 ## 目录与职责
 
 - `aetherscan/include/splat/`：公开的模型、相机、训练配置和训练器 API；

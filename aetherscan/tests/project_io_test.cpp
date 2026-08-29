@@ -106,6 +106,9 @@ int main() {
     Settings settings;
     settings.name = "demo";
     settings.image_directory = dir / "images";
+    settings.dataset_source = dir / "colmap";
+    settings.dataset_format = "colmap";
+    settings.dataset_initial_cloud = dir / "seed.ply";
     settings.sfm_mode = 2;
     settings.max_features = 4096;
     settings.build_mesh = true;
@@ -121,6 +124,15 @@ int main() {
     expect(loaded.has(ChunkType::gaussians), "ascan gaussians chunk");
     const Settings round_trip = read_settings(loaded);
     expect(round_trip.name == "demo", "settings name");
+    expect(
+        round_trip.dataset_source == settings.dataset_source,
+        "external dataset source");
+    expect(
+        round_trip.dataset_format == "colmap",
+        "external dataset format");
+    expect(
+        round_trip.dataset_initial_cloud == settings.dataset_initial_cloud,
+        "external dataset initializer");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");

@@ -92,7 +92,7 @@ struct ReconstructCli {
     bool splat_view{false};
     std::string capture_mode{"object"};
     std::filesystem::path splat_dataset;
-    std::string splat_format{"auto"};
+    std::string dataset_format{"auto"};
     std::filesystem::path colmap_model;
     std::filesystem::path dense_ply;
     std::filesystem::path splat_model;
@@ -284,8 +284,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat       train CUDA Gaussian splats -> *_splat.ply\n"
               << "  --splat-view  orbit-preview a trained splat from the camera sidecar\n"
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS camera data\n"
-              << "  --splat-format auto|colmap|realitycapture|openmvs\n"
-              << "  --colmap PATH  compatibility alias for --splat-format colmap\n"
+              << "  --dataset-format auto|colmap|realitycapture|openmvs\n"
+              << "  --splat-format VALUE  deprecated alias for --dataset-format\n"
+              << "  --colmap PATH  compatibility alias for --dataset-format colmap\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-model PATH  load a trained splat PLY and skip optimization\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
@@ -467,10 +468,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-dataset",
          "External camera dataset: COLMAP root, RealityCapture CSV/dir, or OpenMVS .mvs",
          cxxopts::value<std::string>()->default_value(""))
-        ("splat-format",
-         "External camera format: auto, colmap, realitycapture, or openmvs",
+        ("dataset-format",
+         "External dataset format: auto, colmap, realitycapture, or openmvs",
          cxxopts::value<std::string>()->default_value("auto"))
-        ("colmap", "Compatibility alias for --splat-dataset PATH --splat-format colmap",
+        ("splat-format",
+         "Deprecated alias for --dataset-format",
+         cxxopts::value<std::string>()->default_value(""))
+        ("colmap", "Compatibility alias for --splat-dataset PATH --dataset-format colmap",
          cxxopts::value<std::string>()->default_value(""))
         ("dense-ply", "Dense PLY initializer for external or internal-SfM cameras",
          cxxopts::value<std::string>()->default_value(""))
@@ -788,7 +792,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-dataset"].as<std::string>();
     if (!splat_dataset_text.empty())
         cli.splat_dataset = utf8_to_path(splat_dataset_text);
-    cli.splat_format = result["splat-format"].as<std::string>();
+    cli.dataset_format = result["dataset-format"].as<std::string>();
+    const std::string legacy_dataset_format =
+        result["splat-format"].as<std::string>();
+    if (!legacy_dataset_format.empty()) {
+        if (cli.dataset_format != "auto" &&
+            cli.dataset_format != legacy_dataset_format)
+            throw std::invalid_argument(
+                "--dataset-format and deprecated --splat-format disagree");
+        cli.dataset_format = legacy_dataset_format;
+    }
     const std::string colmap_text = result["colmap"].as<std::string>();
     if (!colmap_text.empty()) cli.colmap_model = utf8_to_path(colmap_text);
     if (!cli.colmap_model.empty()) {
@@ -796,11 +809,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
             cli.splat_dataset != cli.colmap_model)
             throw std::invalid_argument(
                 "--colmap and --splat-dataset cannot name different inputs");
-        if (cli.splat_format != "auto" && cli.splat_format != "colmap")
+        if (cli.dataset_format != "auto" && cli.dataset_format != "colmap")
             throw std::invalid_argument(
-                "--colmap conflicts with non-COLMAP --splat-format");
+                "--colmap conflicts with non-COLMAP --dataset-format");
         cli.splat_dataset = cli.colmap_model;
-        cli.splat_format = "colmap";
+        cli.dataset_format = "colmap";
     }
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
@@ -1046,7 +1059,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
 #else
     static_cast<void>(
-        aetherscan::splat::parse_dataset_format(cli.splat_format));
+        aetherscan::splat::parse_dataset_format(cli.dataset_format));
 #endif
     if (!cli.splat_view && cli.splat_iterations == 0)
         throw std::invalid_argument("--splat-iterations must be positive");
@@ -1358,6 +1371,9 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     aetherscan::project::Settings settings;
     settings.name = cli.output.stem().string();
     settings.image_directory = cli.images_dir;
+    settings.dataset_source = cli.splat_dataset;
+    settings.dataset_format = cli.dataset_format;
+    settings.dataset_initial_cloud = cli.dense_ply;
     if (cli.mode == "incremental") settings.sfm_mode = 1;
     else if (cli.mode == "hierarchical") settings.sfm_mode = 2;
     settings.max_features = cli.max_features;
@@ -2515,12 +2531,15 @@ int main(int argc, char** argv) {
 
 #if defined(AETHERSCAN_HAS_SPLAT)
         if (!cli.splat_dataset.empty()) {
+            if (write_project)
+                aetherscan::project::write_settings(
+                    archive, settings_from_cli(cli), cli.output);
             aetherscan::splat::DatasetLoadRequest request;
             request.source = cli.splat_dataset;
             request.image_directory = cli.images_dir;
             request.initial_point_cloud = cli.dense_ply;
             request.format =
-                aetherscan::splat::parse_dataset_format(cli.splat_format);
+                aetherscan::splat::parse_dataset_format(cli.dataset_format);
             auto loaded =
                 aetherscan::splat::load_splat_dataset(request);
             for (const std::string& warning : loaded.warnings)

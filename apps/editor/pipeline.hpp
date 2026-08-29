@@ -211,6 +211,12 @@ struct ProjectSettings {
     std::array<char, 1024> images_dir{};
     std::array<char, 1024> project_dir{};  // .ascan path, or legacy folder
 
+    // Optional external SfM/camera dataset. When set, Train 3DGS bypasses
+    // AetherScan's own image alignment and uses this dataset directly.
+    std::array<char, 1024> dataset_source{};
+    int dataset_format = 0;  // auto, COLMAP, RealityCapture, OpenMVS
+    std::array<char, 1024> dataset_initial_cloud{};
+
     int sfm_mode = 0;  // global, incremental, hierarchical
     bool reuse_cache = true;
     int max_features = 27'000;

@@ -151,6 +151,15 @@ const char* sfm_mode_flag(const int index) {
     }
 }
 
+const char* dataset_format_flag(const int index) {
+    switch (index) {
+        case 1: return "colmap";
+        case 2: return "realitycapture";
+        case 3: return "openmvs";
+        default: return "auto";
+    }
+}
+
 }  // namespace
 
 const char* job_name(const JobKind kind) {
@@ -708,11 +717,22 @@ std::string build_train_command(
             << quote(layout.model_output);
 
     // Training reloads SfM from the cache working copy (or an existing
-    // .ascan if the user saved one). OpenMVS files are never the hand-off.
+    // .ascan if the user saved one), unless an external dataset is selected.
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
             << " --max-features " << settings.max_features;
     if (settings.reuse_cache)
         command << " --cache-dir " << quote(layout.cache);
+
+    if (settings.dataset_source[0] != '\0') {
+        command << " --splat-dataset "
+                << quote(std::filesystem::path(settings.dataset_source.data()))
+                << " --dataset-format "
+                << dataset_format_flag(settings.dataset_format);
+        if (settings.dataset_initial_cloud[0] != '\0')
+            command << " --dense-ply "
+                    << quote(std::filesystem::path(
+                           settings.dataset_initial_cloud.data()));
+    }
 
     command << " --splat --capture-mode "
             << (settings.scene_mode ? "scene" : "object")

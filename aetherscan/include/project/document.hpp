@@ -18,6 +18,11 @@ inline constexpr std::uint32_t k_settings_min_reader = 1;
 struct Settings {
     std::string name;
     std::filesystem::path image_directory;
+    // Optional external camera/dataset input used by direct splat training.
+    // These fields are additive so older .ascan settings remain readable.
+    std::filesystem::path dataset_source;
+    std::string dataset_format{"auto"};
+    std::filesystem::path dataset_initial_cloud;
     int sfm_mode = 0;  // 0 global, 1 incremental, 2 hierarchical
     bool reuse_cache = true;
     unsigned max_features = 27'000;
