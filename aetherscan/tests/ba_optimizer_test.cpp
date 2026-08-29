@@ -157,31 +157,6 @@ int main() {
         std::cerr << '\n';
         return 3;
     }
-    Problem fixed_translation_problem = make_problem();
-    const std::vector<Pose> fixed_translation_poses =
-        fixed_translation_problem.poses;
-    OptimizerOptions fixed_translation_options = options;
-    fixed_translation_options.optimize_translations = false;
-    const double fixed_translation_initial =
-        evaluate_cost(fixed_translation_problem);
-    const OptimizerSummary fixed_translation_summary =
-        optimize_cpu(fixed_translation_problem, fixed_translation_options);
-    bool translations_unchanged = true;
-    for (std::size_t pose = 0;
-         pose < fixed_translation_problem.poses.size(); ++pose) {
-        const Pose& before = fixed_translation_poses[pose];
-        const Pose& after = fixed_translation_problem.poses[pose];
-        translations_unchanged = translations_unchanged &&
-            before.cx == after.cx && before.cy == after.cy &&
-            before.cz == after.cz;
-    }
-    if (!fixed_translation_summary.usable() ||
-        !(fixed_translation_summary.final_cost < fixed_translation_initial) ||
-        !translations_unchanged) {
-        std::cerr <<
-            "fixed-translation BA modified centers or failed to improve cost\n";
-        return 13;
-    }
     Problem boundary_problem = make_problem();
     boundary_problem.pose_constant.resize(boundary_problem.poses.size(), 0);
     boundary_problem.pose_constant[2] = 1;

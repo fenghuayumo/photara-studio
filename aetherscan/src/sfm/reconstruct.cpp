@@ -7,171 +7,16 @@
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 
-#include <Eigen/Eigenvalues>
 #include <Eigen/QR>
 
 #include <algorithm>
 #include <cmath>
 #include <iostream>
-#include <numbers>
 #include <queue>
 #include <unordered_map>
 
 namespace aetherscan::sfm {
 namespace {
-
-double median_value(std::vector<double> values) {
-    if (values.empty()) return 0.0;
-    const auto middle = values.begin() + values.size() / 2;
-    std::nth_element(values.begin(), middle, values.end());
-    return *middle;
-}
-
-double percentile_value(std::vector<double> values, const double fraction) {
-    if (values.empty()) return 0.0;
-    std::sort(values.begin(), values.end());
-    const std::size_t index = static_cast<std::size_t>(std::clamp(
-        fraction * static_cast<double>(values.size() - 1),
-        0.0, static_cast<double>(values.size() - 1)));
-    return values[index];
-}
-
-unsigned stabilize_orbit_rotations(
-    Scene& scene,
-    const GlobalPositioningOptions& options) {
-    if (!(options.sequence_local_motion_weight > 0.0) ||
-        scene.images.size() < 3)
-        return 0;
-
-    unsigned verified_neighbors = 0;
-    for (Index image_id = 0; image_id + 1 < scene.images.size(); ++image_id) {
-        const ImagePair* pair = scene.find_pair(image_id, image_id + 1);
-        if (pair && pair->active && pair->relative_pose.has_value())
-            ++verified_neighbors;
-    }
-    const double neighbor_ratio = static_cast<double>(verified_neighbors) /
-        static_cast<double>(scene.images.size() - 1);
-    if (neighbor_ratio < options.sequence_min_neighbor_ratio)
-        return 0;
-
-    std::vector<Image*> images;
-    images.reserve(scene.images.size());
-    Vec3 mean = Vec3::Zero();
-    for (Image& image : scene.images) {
-        if (!image.registered) continue;
-        images.push_back(&image);
-        mean += image.pose.C;
-    }
-    if (images.size() < 8) return 0;
-    mean /= static_cast<double>(images.size());
-
-    Mat3 covariance = Mat3::Zero();
-    for (const Image* image : images) {
-        const Vec3 centered = image->pose.C - mean;
-        covariance += centered * centered.transpose();
-    }
-    const Eigen::SelfAdjointEigenSolver<Mat3> eigensolver(covariance);
-    if (eigensolver.info() != Eigen::Success) return 0;
-    const Vec3 plane_normal = eigensolver.eigenvectors().col(0).normalized();
-    const Vec3 axis1 = eigensolver.eigenvectors().col(2).normalized();
-    const Vec3 axis2 = plane_normal.cross(axis1).normalized();
-
-    Eigen::MatrixXd circle_system(images.size(), 3);
-    Eigen::VectorXd circle_rhs(images.size());
-    std::vector<double> angles;
-    angles.reserve(images.size());
-    for (std::size_t index = 0; index < images.size(); ++index) {
-        const Vec3 centered = images[index]->pose.C - mean;
-        const double x = centered.dot(axis1);
-        const double y = centered.dot(axis2);
-        circle_system.row(index) << 2.0 * x, 2.0 * y, 1.0;
-        circle_rhs[index] = x * x + y * y;
-    }
-    const Eigen::Vector3d circle =
-        circle_system.colPivHouseholderQr().solve(circle_rhs);
-    if (!circle.allFinite()) return 0;
-    const Vec3 orbit_center = mean + circle[0] * axis1 + circle[1] * axis2;
-
-    std::vector<double> radii;
-    std::vector<double> plane_distances;
-    radii.reserve(images.size());
-    plane_distances.reserve(images.size());
-    for (const Image* image : images) {
-        const Vec3 radial = image->pose.C - orbit_center;
-        radii.push_back(radial.norm());
-        plane_distances.push_back(std::abs((image->pose.C - mean).dot(
-            plane_normal)));
-        angles.push_back(std::atan2(radial.dot(axis2), radial.dot(axis1)));
-    }
-    const double radius = median_value(radii);
-    if (!(radius > 1e-8) || !std::isfinite(radius)) return 0;
-    std::vector<double> radius_errors;
-    radius_errors.reserve(radii.size());
-    for (const double value : radii)
-        radius_errors.push_back(std::abs(value - radius));
-    if (percentile_value(plane_distances, 0.95) > 0.05 * radius ||
-        percentile_value(radius_errors, 0.95) > 0.25 * radius)
-        return 0;
-
-    std::sort(angles.begin(), angles.end());
-    double maximum_gap = 0.0;
-    for (std::size_t index = 1; index < angles.size(); ++index)
-        maximum_gap = std::max(maximum_gap, angles[index] - angles[index - 1]);
-    maximum_gap = std::max(
-        maximum_gap,
-        2.0 * std::numbers::pi - angles.back() + angles.front());
-    const double angular_coverage = 2.0 * std::numbers::pi - maximum_gap;
-    if (angular_coverage < std::numbers::pi) return 0;
-
-    double direction_score = 0.0;
-    for (std::size_t index = 0; index + 1 < images.size(); ++index) {
-        const Vec3 tangent = plane_normal.cross(
-            images[index]->pose.C - orbit_center).normalized();
-        direction_score += tangent.dot(
-            images[index + 1]->pose.C - images[index]->pose.C);
-    }
-    const double tangent_sign = direction_score >= 0.0 ? 1.0 : -1.0;
-
-    double best_height_fraction = 0.0;
-    double best_score = std::numeric_limits<double>::infinity();
-    for (int step = -20; step <= 20; ++step) {
-        const double fraction = 0.01 * static_cast<double>(step);
-        const Vec3 focus = orbit_center + fraction * radius * plane_normal;
-        std::vector<double> errors;
-        errors.reserve(images.size());
-        for (const Image* image : images) {
-            const Vec3 direction = (focus - image->pose.C).normalized();
-            const Vec3 optical_axis = image->pose.R.row(2).transpose();
-            errors.push_back(std::acos(std::clamp(
-                direction.dot(optical_axis), -1.0, 1.0)));
-        }
-        const double score = median_value(std::move(errors));
-        if (score < best_score) {
-            best_score = score;
-            best_height_fraction = fraction;
-        }
-    }
-
-    const Vec3 focus = orbit_center +
-        best_height_fraction * radius * plane_normal;
-    for (Image* image : images) {
-        const Vec3 x_axis = tangent_sign * plane_normal.cross(
-            image->pose.C - orbit_center).normalized();
-        Vec3 z_axis = focus - image->pose.C;
-        z_axis -= x_axis * x_axis.dot(z_axis);
-        if (z_axis.norm() <= 1e-10) return 0;
-        z_axis.normalize();
-        const Vec3 y_axis = z_axis.cross(x_axis).normalized();
-        image->pose.R.row(0) = x_axis.transpose();
-        image->pose.R.row(1) = y_axis.transpose();
-        image->pose.R.row(2) = z_axis.transpose();
-    }
-    core::Logger::instance().info(
-        "global: stabilized circular orbit rotations=", images.size(),
-        " coverage_deg=", angular_coverage * 180.0 / std::numbers::pi,
-        " focus_height_ratio=", best_height_fraction);
-    return static_cast<unsigned>(images.size());
-}
 
 #if !defined(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID)
 #define AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID "unconfigured"
@@ -192,7 +37,6 @@ void append_optimizer(
     key.append(options.fix_first_pose);
     key.append(options.fix_first_point);
     key.append(options.optimize_rotations);
-    key.append(options.optimize_translations);
     key.append(options.optimize_points);
     key.append(options.optimize_focal);
     key.append(options.optimize_aspect_ratio);
@@ -251,7 +95,7 @@ std::uint64_t reconstruction_key(
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
     key.append_string("reconstruction");
-    key.append_string("deferred-component-reseed-v20");
+    key.append_string("deferred-component-reseed-v9");
     key.append_string(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
@@ -282,10 +126,7 @@ std::uint64_t reconstruction_key(
         config.hierarchical.alignment.merge_proximity_relative_threshold);
     key.append(config.hierarchical.alignment.ransac_iterations);
     key.append(config.hierarchical.alignment.random_seed);
-    key.append(config.hierarchical.alignment.require_all_subscenes);
     key.append(config.hierarchical.final_bundle_adjustment);
-    key.append(
-        config.hierarchical.global_fallback_on_alignment_failure);
     key.append(config.incremental_hierarchical_rescue);
     key.append(config.incremental_hierarchical_rescue_min_missing);
     key.append(config.incremental_hierarchical_rescue_min_missing_ratio);
@@ -295,7 +136,6 @@ std::uint64_t reconstruction_key(
     key.append(config.global_rotation.irls_sigma_deg);
     key.append(config.global_rotation.max_relative_rotation_error_deg);
     key.append(config.global_rotation.use_pair_weights);
-    key.append(config.global_rotation.mst_neighbor_span);
     key.append(config.global_rotation.reject_planar_pairs);
     key.append(
         static_cast<std::uint32_t>(config.global_rotation.weight_type));
@@ -325,10 +165,6 @@ std::uint64_t reconstruction_key(
     key.append(static_cast<std::uint32_t>(
         config.global_positioning.constraint));
     key.append(config.global_positioning.constraint_reweight_scale);
-    key.append(config.global_positioning.sequence_min_neighbor_ratio);
-    key.append(config.global_positioning.sequence_smoothness_weight);
-    key.append(config.global_positioning.sequence_baseline_weight);
-    key.append(config.global_positioning.sequence_local_motion_weight);
     return key.value();
 }
 
@@ -685,7 +521,6 @@ ReconstructionSummary run_global_mapping(
     bundle.optimizer.maximum_iterations = 12;
     bundle.optimizer.huber_delta = 2.0;
     bundle.optimizer.optimize_rotations = false;
-    bundle.optimizer.optimize_translations = false;
     bundle.optimizer.optimize_focal = false;
     bundle.optimizer.optimize_distortion = false;
     if (!run_bundle_adjustment(scene, bundle).success) {
@@ -700,13 +535,9 @@ ReconstructionSummary run_global_mapping(
         fallback_resection.mult_depth_near,
         fallback_resection.mult_depth_far);
 
-    // Stage 2: refine rotations/focal while preserving globally positioned
-    // centers. Ordered captures are then projected back onto their coherent
-    // local-motion direction so repetitive surfaces cannot attract a short
-    // camera segment into a duplicate reconstruction.
+    // Stage 2: free rotations + focal with prior/bounds; keep distortion fixed.
     bundle.optimizer.maximum_iterations = 25;
     bundle.optimizer.optimize_rotations = true;
-    bundle.optimizer.optimize_translations = false;
     bundle.optimizer.optimize_focal = true;
     bundle.optimizer.optimize_aspect_ratio = true;
     bundle.optimizer.optimize_distortion = false;
@@ -714,7 +545,6 @@ ReconstructionSummary run_global_mapping(
         core::Logger::instance().error("global: full bundle adjustment failed");
         return summary;
     }
-    stabilize_orbit_rotations(scene, positioning);
     triangulate_tracks(
         scene,
         true,
@@ -730,7 +560,6 @@ ReconstructionSummary run_global_mapping(
     // Stage 3: short polish with distortion once geometry is stable.
     bundle.optimizer.maximum_iterations = 8;
     bundle.optimizer.optimize_rotations = true;
-    bundle.optimizer.optimize_translations = false;
     bundle.optimizer.optimize_focal = true;
     bundle.optimizer.optimize_aspect_ratio = true;
     bundle.optimizer.optimize_distortion = true;
@@ -843,8 +672,6 @@ ReconstructionSummary reconstruct(
         HierarchicalConfig hierarchical = config.hierarchical;
         hierarchical.star = config.star;
         hierarchical.resection = config.resection;
-        hierarchical.fallback_global_rotation = config.global_rotation;
-        hierarchical.fallback_global_positioning = config.global_positioning;
         summary = run_hierarchical_mapping(scene_out, hierarchical);
     } else if (config.mode == ReconstructionMode::global) {
         summary = run_global_mapping(
@@ -940,9 +767,6 @@ ReconstructionSummary reconstruct(
             HierarchicalConfig hierarchical = config.hierarchical;
             hierarchical.star = config.star;
             hierarchical.resection = config.resection;
-            hierarchical.fallback_global_rotation = config.global_rotation;
-            hierarchical.fallback_global_positioning =
-                config.global_positioning;
             // Subscene checkpoints are not valid replacements for the parent
             // incremental scene. Save only the merged result below.
             hierarchical.resection.checkpoint_callback = {};

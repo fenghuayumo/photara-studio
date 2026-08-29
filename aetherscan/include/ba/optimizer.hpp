@@ -29,7 +29,6 @@ struct OptimizerOptions {
     bool fix_first_pose{true};
     bool fix_first_point{true};
     bool optimize_rotations{true};
-    bool optimize_translations{true};
     bool optimize_points{true};
     // Optimized independently for every intrinsic group referenced by poses.
     bool optimize_focal{false};            // optimize focal scale

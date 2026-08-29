@@ -16,8 +16,8 @@ struct GlobalPositioningOptions {
     unsigned min_views_per_track{4};
     // Coverage-aware selection scales with scene size while retaining a hard
     // ceiling for predictable solve time.
-    unsigned min_tracks_for_positioning{6000};
-    unsigned tracks_per_registered_image{60};
+    unsigned min_tracks_for_positioning{2500};
+    unsigned tracks_per_registered_image{20};
     unsigned max_tracks_for_positioning{20000};
     unsigned coverage_grid_size{4};
     unsigned max_irls_iterations{8};
@@ -44,16 +44,6 @@ struct GlobalPositioningOptions {
     GlobalPositioningConstraint constraint{
         GlobalPositioningConstraint::only_points};
     double constraint_reweight_scale{1.0};
-    // When most neighboring image IDs have verified geometry, treat the
-    // input as an ordered capture.  These sign-independent priors prevent a
-    // bearing-only solve from assigning unrelated scales to local chunks.
-    double sequence_min_neighbor_ratio{0.5};
-    double sequence_smoothness_weight{0.0};
-    double sequence_baseline_weight{10.0};
-    // Consecutive motion expressed in the first camera's coordinates should
-    // remain nearly constant for an ordered orbit/scan.  Unlike world-space
-    // second differences, this follows curved camera paths naturally.
-    double sequence_local_motion_weight{1.0};
 };
 
 struct GlobalPositioningSummary {
