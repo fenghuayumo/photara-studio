@@ -109,6 +109,8 @@ int main() {
     settings.dataset_source = dir / "colmap";
     settings.dataset_format = "colmap";
     settings.dataset_initial_cloud = dir / "seed.ply";
+    settings.splat_output_format = "spz";
+    settings.splat_model_source = dir / "imported.sog";
     settings.sfm_mode = 2;
     settings.max_features = 4096;
     settings.build_mesh = true;
@@ -133,6 +135,12 @@ int main() {
     expect(
         round_trip.dataset_initial_cloud == settings.dataset_initial_cloud,
         "external dataset initializer");
+    expect(
+        round_trip.splat_output_format == settings.splat_output_format,
+        "splat output format");
+    expect(
+        round_trip.splat_model_source == settings.splat_model_source,
+        "splat model source");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");

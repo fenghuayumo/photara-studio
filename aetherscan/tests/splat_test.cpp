@@ -1,6 +1,7 @@
 #include "splat/trainer.hpp"
 #include "splat/colmap.hpp"
 #include "splat/dataset.hpp"
+#include "splat/formats.hpp"
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/multi_view_scheduler.hpp"
@@ -585,6 +586,77 @@ void test_normal_field_parameterization_and_occupancy() {
     require(
         loaded_features == original_features,
         "GaussianWrapping gaussian_features PLY round trip changed values");
+}
+
+void test_sog_spz_roundtrip() {
+    using namespace aetherscan::splat;
+    constexpr std::size_t count = 3;
+    constexpr unsigned degree = 1;
+    const std::vector<float> means{
+        0.F, 0.F, 2.F, 1.25F, -0.5F, 3.5F, -1.75F, 0.75F, 1.2F};
+    const std::vector<float> scales{
+        -1.4F, -1.1F, -1.8F, -0.3F, -0.9F, -1.2F, -2.1F, -1.7F, -0.6F};
+    const std::vector<float> rotations{
+        1.F, 0.F, 0.F, 0.F, 0.9238795F, 0.F, 0.3826834F, 0.F,
+        0.8660254F, 0.2886751F, -0.2886751F, 0.2886751F};
+    const std::vector<float> opacities{-2.F, 0.5F, 3.F};
+    const std::vector<float> sh{
+        0.2F, -0.1F, 0.35F, 0.04F, -0.08F, 0.12F, -0.2F, 0.16F, -0.1F,
+        -0.3F, 0.25F, 0.1F, 0.45F, 0.05F, -0.25F, -0.12F, -0.2F, 0.28F,
+        0.1F, 0.4F, 0.2F, -0.18F, 0.09F, -0.14F, 0.02F, -0.3F, 0.22F,
+        -0.05F, 0.18F, 0.31F, 0.12F, -0.16F, 0.07F, -0.22F, 0.14F,
+        0.19F};
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(
+        means, {count, 3U}, tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        scales, {count, 3U}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        rotations, {count, 4U}, tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        opacities, {count, 1U}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::from_vector(
+        sh, {count, 4U, 3U}, tinytensor::Device::CUDA);
+    model.sh_degree = degree;
+
+    const auto verify = [&](const std::filesystem::path& path,
+                            const GaussianFormat format, const float tolerance,
+                            const char* label) {
+        save_gaussians(model, path, format);
+        const GaussianModel loaded = load_gaussians(path);
+        require(loaded.size() == count, label);
+        require(loaded.sh_degree == degree, label);
+        const auto loaded_means = loaded.means.to_vector();
+        const auto loaded_sh = loaded.sh.to_vector();
+        require(loaded_means.size() == means.size(), label);
+        require(loaded_sh.size() == sh.size(), label);
+        for (std::size_t index = 0; index < means.size(); ++index)
+            if (std::abs(loaded_means[index] - means[index]) >= tolerance)
+                throw std::runtime_error(
+                    std::string(label) + " (means index " +
+                    std::to_string(index) + ", error=" +
+                    std::to_string(std::abs(loaded_means[index] - means[index])) +
+                    ", actual=" + std::to_string(loaded_means[index]) +
+                    ")");
+        for (std::size_t index = 0; index < sh.size(); ++index)
+            if (std::abs(loaded_sh[index] - sh[index]) >= tolerance)
+                throw std::runtime_error(
+                    std::string(label) + " (SH index " +
+                    std::to_string(index) + ", error=" +
+                    std::to_string(std::abs(loaded_sh[index] - sh[index])) +
+                    ")");
+        std::error_code error;
+        std::filesystem::remove(path, error);
+    };
+
+    verify(
+        std::filesystem::temp_directory_path() /
+            "aetherscan_splat_roundtrip.sog",
+        GaussianFormat::sog, 0.03F, "SOG Gaussian round trip changed values");
+    verify(
+        std::filesystem::temp_directory_path() /
+            "aetherscan_splat_roundtrip.spz",
+        GaussianFormat::spz, 0.04F, "SPZ Gaussian round trip changed values");
 }
 
 void test_pam_smoke() {
@@ -2138,6 +2210,7 @@ int main() {
         test_geometry_stability_scheduler();
         test_forward_backward();
         test_normal_field_parameterization_and_occupancy();
+        test_sog_spz_roundtrip();
         test_pam_smoke();
         test_sample_depth_batch_boundary();
         test_contribution_visibility_rejects_occluded_gaussians();

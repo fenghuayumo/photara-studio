@@ -4,6 +4,7 @@
 #include "sfm/frontend.hpp"
 #include "sfm/reconstruct.hpp"
 #include "splat/dataset.hpp"
+#include "splat/formats.hpp"
 #include "splat/trainer.hpp"
 
 #include <nanobind/nanobind.h>
@@ -157,7 +158,7 @@ sfm::ReconstructionSummary run_sfm_mapping(
 [[nodiscard]] std::shared_ptr<GaussianModelHandle> load_3dgs(
     const std::filesystem::path& path) {
     auto result = std::make_shared<GaussianModelHandle>();
-    result->model = splat::load_gaussians_ply(path);
+    result->model = splat::load_gaussians(path);
     return result;
 }
 
@@ -767,7 +768,7 @@ NB_MODULE(aetherscan_native, module) {
             "save",
             [](const GaussianModelHandle& self,
                const std::filesystem::path& path) {
-                splat::save_gaussians_ply(self.model, path);
+                splat::save_gaussians(self.model, path);
             },
             nb::arg("path"),
             nb::call_guard<nb::gil_scoped_release>());

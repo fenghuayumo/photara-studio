@@ -344,6 +344,9 @@ if(AETHERSCAN_ENABLE_FEATURES)
 
     if(AETHERSCAN_ENABLE_SPLAT AND AETHERSCAN_ENABLE_CUDA)
         find_package(glm CONFIG REQUIRED)
+        find_package(WebP CONFIG REQUIRED)
+        find_package(ZLIB REQUIRED)
+        find_package(zstd CONFIG REQUIRED)
         add_subdirectory(
             third_party/tinytensor
             ${CMAKE_CURRENT_BINARY_DIR}/third_party/tinytensor)
@@ -403,6 +406,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
             src/splat/densification.cpp
             src/splat/densification_adc_plus.cpp
             src/splat/densification_strategies.cpp
+            src/splat/formats.cpp
             src/splat/mesh.cpp
             src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp
@@ -417,7 +421,10 @@ if(AETHERSCAN_ENABLE_FEATURES)
         target_compile_features(aetherscan_splat PUBLIC cxx_std_20)
         target_link_libraries(aetherscan_splat PUBLIC
             AetherScan::MVS
-            aetherscan_splat_cuda)
+            aetherscan_splat_cuda
+            WebP::webp
+            ZLIB::ZLIB
+            zstd::libzstd)
         target_compile_definitions(aetherscan_splat PUBLIC AETHERSCAN_HAS_SPLAT=1)
     endif()
     if(OpenMP_CXX_FOUND)
@@ -649,7 +656,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
             target_include_directories(aetherscan_editor PRIVATE
                 ${AETHERSCAN_EDITOR_DIR})
             target_link_libraries(aetherscan_editor PRIVATE
-                aetherscan_imgui AetherScan::SfM Vulkan::Vulkan glfw)
+                aetherscan_imgui AetherScan::SfM AetherScan::Splat
+                Vulkan::Vulkan glfw)
             if(WIN32)
                 # Native folder picker (IFileOpenDialog) and Explorer reveal.
                 target_link_libraries(aetherscan_editor PRIVATE ole32 shell32)

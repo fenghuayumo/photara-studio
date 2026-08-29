@@ -10,6 +10,7 @@
 #include "project/document.hpp"
 #include "sfm/asfm.hpp"
 #include "sfm/export_mvs.hpp"
+#include "splat/trainer.hpp"
 
 #include "imgui_impl_glfw.h"
 #include "imgui_internal.h"
@@ -124,6 +125,19 @@ bool has_external_dataset(const App& app) {
     return app.settings.dataset_source[0] != '\0';
 }
 
+std::filesystem::path existing_splat_model(const App& app) {
+    const std::filesystem::path imported(app.settings.splat_model_source.data());
+    std::error_code error;
+    if (!imported.empty() && std::filesystem::exists(imported, error))
+        return imported;
+    const std::array<std::filesystem::path, 4> candidates = {
+        app.layout.splat_model, app.layout.splat_ply, app.layout.splat_sog,
+        app.layout.splat_spz};
+    for (const auto& candidate : candidates)
+        if (std::filesystem::exists(candidate, error)) return candidate;
+    return {};
+}
+
 bool live_preview_active(const App& app) {
     return (app.job.running() && app.active_job == JobKind::train) ||
            app.viewer.running();
@@ -218,7 +232,7 @@ bool copy_wide_path(const wchar_t* wide, std::array<char, 1024>& destination) {
     return true;
 }
 
-enum class FilePickKind { project, dataset, point_cloud };
+enum class FilePickKind { project, dataset, point_cloud, splat_model };
 
 bool pick_file(
     const wchar_t* title, std::array<char, 1024>& destination,
@@ -251,9 +265,13 @@ bool pick_file(
         COMDLG_FILTERSPEC point_cloud_filters[] = {
             {L"Point cloud (*.ply)", L"*.ply"},
             {L"All files (*.*)", L"*.*"}};
+        COMDLG_FILTERSPEC splat_model_filters[] = {
+            {L"Gaussian splat (*.ply;*.sog;*.spz)", L"*.ply;*.sog;*.spz"},
+            {L"All files (*.*)", L"*.*"}};
         const COMDLG_FILTERSPEC* filters = project_filters;
         if (kind == FilePickKind::dataset) filters = dataset_filters;
         if (kind == FilePickKind::point_cloud) filters = point_cloud_filters;
+        if (kind == FilePickKind::splat_model) filters = splat_model_filters;
         dialog->SetFileTypes(2, filters);
         if (kind == FilePickKind::project && save)
             dialog->SetDefaultExtension(L"ascan");
@@ -288,6 +306,10 @@ bool pick_point_cloud_file(
     const wchar_t* title, std::array<char, 1024>& destination) {
     return pick_file(title, destination, false, FilePickKind::point_cloud);
 }
+bool pick_splat_model_file(
+    const wchar_t* title, std::array<char, 1024>& destination) {
+    return pick_file(title, destination, false, FilePickKind::splat_model);
+}
 
 void reveal_in_explorer(const std::filesystem::path& path) {
     std::error_code error;
@@ -303,6 +325,9 @@ bool pick_dataset_file(const wchar_t*, std::array<char, 1024>&) {
     return false;
 }
 bool pick_point_cloud_file(const wchar_t*, std::array<char, 1024>&) {
+    return false;
+}
+bool pick_splat_model_file(const wchar_t*, std::array<char, 1024>&) {
     return false;
 }
 void reveal_in_explorer(const std::filesystem::path&) {}
@@ -334,7 +359,7 @@ void refresh_artifacts(App& app) {
     app.has_sparse =
         std::filesystem::exists(app.layout.sparse_ply, error) ||
         std::filesystem::exists(app.layout.working_sfm, error);
-    app.has_model = std::filesystem::exists(app.layout.splat_ply, error);
+    app.has_model = !existing_splat_model(app).empty();
     app.has_mesh = std::filesystem::exists(app.layout.mesh_ply, error);
     app.project_writer_version = 0;
     app.project_min_reader_version = 0;
@@ -399,6 +424,12 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
             ? "realitycapture"
             : app.settings.dataset_format == 3 ? "openmvs" : "auto";
     settings.dataset_initial_cloud = app.settings.dataset_initial_cloud.data();
+    settings.splat_model_source = app.settings.splat_model_source.data();
+    settings.splat_output_format = app.settings.splat_format == 1
+        ? "ply"
+        : app.settings.splat_format == 2
+            ? "sog"
+            : app.settings.splat_format == 3 ? "spz" : "auto";
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
     settings.max_features = static_cast<unsigned>(
@@ -435,6 +466,15 @@ void apply_project_settings(
         app.settings.dataset_format = 0;
     store_path_field(
         app.settings.dataset_initial_cloud, settings.dataset_initial_cloud);
+    store_path_field(app.settings.splat_model_source, settings.splat_model_source);
+    if (settings.splat_output_format == "ply")
+        app.settings.splat_format = 1;
+    else if (settings.splat_output_format == "sog")
+        app.settings.splat_format = 2;
+    else if (settings.splat_output_format == "spz")
+        app.settings.splat_format = 3;
+    else
+        app.settings.splat_format = 0;
     app.settings.sfm_mode = settings.sfm_mode;
     app.settings.reuse_cache = settings.reuse_cache;
     app.settings.max_features = static_cast<int>(settings.max_features);
@@ -575,6 +615,41 @@ void request_scene_load(
     app.pending_load = std::async(
         std::launch::async,
         [cloud, poses] { return load_sparse_scene(cloud, poses); });
+}
+
+void request_gaussian_scene_load(App& app) {
+    if (app.loading_scene) return;
+    const auto model_path = existing_splat_model(app);
+    const auto ascan = app.layout.project_file;
+    const auto poses = app.layout.sparse_poses;
+    if (model_path.empty() && ascan.empty()) return;
+    app.loading_scene = true;
+    app.scene_source = "Gaussian centres";
+    app.pending_load = std::async(
+        std::launch::async, [model_path, ascan, poses] {
+            try {
+                if (!model_path.empty())
+                    return load_gaussian_scene(model_path, poses);
+                std::error_code error;
+                if (std::filesystem::exists(ascan, error)) {
+                    const auto archive =
+                        aetherscan::project::Archive::open(ascan);
+                    if (archive.has(aetherscan::project::ChunkType::gaussians))
+                        return gaussian_scene_from_model(
+                            aetherscan::splat::decode_gaussians(
+                                archive.chunk(
+                                    aetherscan::project::ChunkType::gaussians)),
+                            poses);
+                }
+                SceneLoad loaded;
+                loaded.error = "Project has no trained Gaussian model yet";
+                return loaded;
+            } catch (const std::exception& failure) {
+                SceneLoad loaded;
+                loaded.error = failure.what();
+                return loaded;
+            }
+        });
 }
 
 void ensure_sparse_loaded(App& app) {
@@ -726,9 +801,10 @@ void delete_reconstruction_results(App& app) {
 
     stop_splat_view(app);
     clear_loaded_result(app);
-    const std::array<std::filesystem::path, 10> generated_files = {
+    const std::array<std::filesystem::path, 12> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
-        app.layout.sparse_poses, app.layout.splat_ply, app.layout.mesh_ply,
+        app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
+        app.layout.splat_spz, app.layout.mesh_ply,
         app.layout.align_log, app.layout.train_log, app.layout.export_log,
         app.layout.view_log};
 
@@ -2170,6 +2246,28 @@ Action draw_inspector(App& app) {
             }
         }
         ImGui::EndDisabled();
+        ImGui::BeginDisabled(busy);
+        theme::caption("Trained splat model (optional)");
+        ImGui::SetNextItemWidth(-138.F);
+        if (ImGui::InputText(
+                "##splat_model_source", app.settings.splat_model_source.data(),
+                app.settings.splat_model_source.size())) {
+            clear_loaded_result(app);
+            refresh_artifacts(app);
+        }
+        ImGui::SameLine(0.F, 4.F);
+        if (ImGui::Button("File##pick_splat_model", {46.F, 0.F}) &&
+            pick_splat_model_file(
+                L"Select trained Gaussian splat model",
+                app.settings.splat_model_source)) {
+            clear_loaded_result(app);
+            refresh_artifacts(app);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Load an existing PLY, SOG, or SPZ model for preview. "
+                "When set, it takes precedence over generated sidecars.");
+        ImGui::EndDisabled();
         ImGui::Spacing();
     }
 
@@ -2271,6 +2369,17 @@ Action draw_inspector(App& app) {
                 "GaussianWrapping's learned normal field.\n"
                 "Off (default) trains the GGGS path.");
         ImGui::EndDisabled();
+        theme::caption("Splat output format");
+        ImGui::SetNextItemWidth(-1.F);
+        const char* splat_formats[] = {"Auto (PLY)", "PLY", "SOG", "SPZ"};
+        ImGui::BeginDisabled(busy);
+        ImGui::Combo(
+            "##splat_format", &app.settings.splat_format, splat_formats, 4);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Format of the trained sidecar: PLY, PlayCanvas SOG, or "
+                "Niantic SPZ. Auto currently writes PLY.");
         ImGui::Spacing();
     }
 
@@ -2341,9 +2450,7 @@ Action draw_inspector(App& app) {
         if (theme::toolbar_button(
                 "Load Trained Model", {-1.F, 28.F},
                 app.has_model && !app.loading_scene))
-            request_scene_load(
-                app, app.layout.splat_ply, app.layout.sparse_poses,
-                "Gaussian centres");
+            request_gaussian_scene_load(app);
         ImGui::Spacing();
         theme::caption("Point size");
         ImGui::SetNextItemWidth(-1.F);

@@ -160,6 +160,15 @@ const char* dataset_format_flag(const int index) {
     }
 }
 
+const char* splat_format_flag(const int index) {
+    switch (index) {
+        case 1: return "ply";
+        case 2: return "sog";
+        case 3: return "spz";
+        default: return "auto";
+    }
+}
+
 }  // namespace
 
 const char* job_name(const JobKind kind) {
@@ -390,7 +399,8 @@ void RunMonitor::consume(const std::string& line) {
         line.find(" mvs=") != std::string::npos)
         artifacts_.mvs = true;
     if (line.find("dense_ply=") != std::string::npos) artifacts_.dense = true;
-    if (line.find("splat_ply=") != std::string::npos) {
+    if (line.find("splat_model=") != std::string::npos ||
+        line.find("splat_ply=") != std::string::npos) {
         artifacts_.splat = true;
         enter_stage(Stage::meshing, k_meshing_band_begin);
     }
@@ -679,6 +689,11 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
         ? layout.root / (stem + ".ply")
         : layout.project_file;
     layout.splat_ply = layout.root / (stem + "_splat.ply");
+    layout.splat_sog = layout.root / (stem + "_splat.sog");
+    layout.splat_spz = layout.root / (stem + "_splat.spz");
+    layout.splat_model = settings.splat_format == 2
+        ? layout.splat_sog
+        : settings.splat_format == 3 ? layout.splat_spz : layout.splat_ply;
     layout.mesh_ply = layout.root / (stem + "_splat_mesh.ply");
     layout.align_log = layout.root / (stem + "_align.log");
     layout.train_log = layout.root / (stem + "_train.log");
@@ -749,7 +764,9 @@ std::string build_train_command(
             << (settings.progressive_resolution ? "true" : "false")
             << " --splat-use-mask=" << (settings.use_mask ? "true" : "false")
             << " --splat-normal-field="
-            << (settings.normal_field ? "true" : "false");
+            << (settings.normal_field ? "true" : "false")
+            << " --splat-output-format "
+            << splat_format_flag(settings.splat_format);
     append_gui_flags(command, layout);
 
     // Mesh extraction is what turns on depth/normal and multi-view geometry
@@ -790,8 +807,20 @@ std::string build_view_command(
             << quote(layout.preview_camera_file);
     append_gui_flags(command, layout);
     std::error_code exists_error;
-    if (std::filesystem::exists(layout.splat_ply, exists_error))
-        command << " --splat-model " << quote(layout.splat_ply);
+    const std::filesystem::path imported_model(settings.splat_model_source.data());
+    if (!imported_model.empty() &&
+        std::filesystem::exists(imported_model, exists_error)) {
+        command << " --splat-model " << quote(imported_model);
+    } else {
+        const std::array<std::filesystem::path, 4> candidates = {
+            layout.splat_model, layout.splat_ply, layout.splat_sog,
+            layout.splat_spz};
+        for (const auto& candidate : candidates) {
+            if (!std::filesystem::exists(candidate, exists_error)) continue;
+            command << " --splat-model " << quote(candidate);
+            break;
+        }
+    }
     if (preview.memory && preview.semaphore) {
         command << " --splat-preview-vk-memory-handle " << preview.memory
                 << " --splat-preview-vk-semaphore-handle " << preview.semaphore

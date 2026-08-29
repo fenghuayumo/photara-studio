@@ -3,6 +3,7 @@
 #include "imgui.h"
 
 #include "sfm/scene.hpp"
+#include "splat/types.hpp"
 
 #include <array>
 #include <cstddef>
@@ -60,6 +61,11 @@ struct SceneLoad {
 // unreadable CSV still yields a usable point cloud.
 SceneLoad load_sparse_scene(
     std::filesystem::path cloud_ply, std::filesystem::path poses_csv);
+SceneLoad load_gaussian_scene(
+    std::filesystem::path model, std::filesystem::path poses_csv);
+SceneLoad gaussian_scene_from_model(
+    const aetherscan::splat::GaussianModel& model,
+    std::filesystem::path poses_csv);
 SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene);
 
 struct OrbitCamera {

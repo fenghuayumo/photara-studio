@@ -3,6 +3,7 @@
 #include "theme.hpp"
 
 #include "io/image.hpp"
+#include "splat/formats.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -823,6 +824,60 @@ SceneLoad load_sparse_scene(
     result.scene.compute_bounds();
     result.ok = true;
     return result;
+}
+
+SceneLoad gaussian_scene_from_model(
+    const aetherscan::splat::GaussianModel& model,
+    std::filesystem::path poses_csv) {
+    SceneLoad result;
+    try {
+        if (model.size() == 0) {
+            result.error = "Gaussian model contains no points";
+            return result;
+        }
+        const auto means = model.means.to_vector();
+        const auto sh = model.sh.to_vector();
+        const std::size_t count = model.size();
+        const std::size_t stride = std::max<std::size_t>(
+            1, (count + k_max_loaded_points - 1U) / k_max_loaded_points);
+        const std::size_t visible_count = (count + stride - 1U) / stride;
+        result.scene.points.reserve(visible_count);
+        result.scene.colours.reserve(visible_count);
+        const std::size_t bases = model.sh.shape()[1];
+        constexpr float sh_dc = 0.28209479177387814F;
+        for (std::size_t index = 0; index < count; index += stride) {
+            const std::size_t mean_offset = index * 3U;
+            result.scene.points.push_back({
+                means[mean_offset], means[mean_offset + 1U],
+                means[mean_offset + 2U]});
+            const std::size_t sh_offset = index * bases * 3U;
+            const auto channel = [&](const std::size_t component) {
+                return static_cast<int>(std::lround(std::clamp(
+                    0.5F + sh_dc * sh[sh_offset + component], 0.F, 1.F) *
+                    255.F));
+            };
+            result.scene.colours.push_back(IM_COL32(
+                channel(0), channel(1), channel(2), 255));
+        }
+        load_poses(poses_csv, result.scene);
+        result.scene.compute_bounds();
+        result.ok = true;
+    } catch (const std::exception& failure) {
+        result.error = failure.what();
+    }
+    return result;
+}
+
+SceneLoad load_gaussian_scene(
+    std::filesystem::path model_path, std::filesystem::path poses_csv) {
+    try {
+        const auto model = aetherscan::splat::load_gaussians(model_path);
+        return gaussian_scene_from_model(model, std::move(poses_csv));
+    } catch (const std::exception& failure) {
+        SceneLoad result;
+        result.error = failure.what();
+        return result;
+    }
 }
 
 bool load_view_poses(

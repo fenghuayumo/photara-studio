@@ -81,6 +81,8 @@ std::vector<std::uint8_t> encode_settings(
     writer.string(store_path(settings.dataset_source, base));
     writer.string(settings.dataset_format);
     writer.string(store_path(settings.dataset_initial_cloud, base));
+    writer.string(settings.splat_output_format);
+    writer.string(store_path(settings.splat_model_source, base));
     return writer.take();
 }
 
@@ -121,6 +123,10 @@ Settings decode_settings(
         settings.dataset_format = reader.string();
     if (reader.remaining() > 0)
         settings.dataset_initial_cloud = load_path(reader.string(), base);
+    if (reader.remaining() > 0)
+        settings.splat_output_format = reader.string();
+    if (reader.remaining() > 0)
+        settings.splat_model_source = load_path(reader.string(), base);
     return settings;
 }
 

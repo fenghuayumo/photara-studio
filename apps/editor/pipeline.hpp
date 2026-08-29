@@ -216,6 +216,10 @@ struct ProjectSettings {
     std::array<char, 1024> dataset_source{};
     int dataset_format = 0;  // auto, COLMAP, RealityCapture, OpenMVS
     std::array<char, 1024> dataset_initial_cloud{};
+    // Optional existing trained Gaussian file to preview/import. Empty uses
+    // the generated sidecar selected by splat_format.
+    std::array<char, 1024> splat_model_source{};
+    int splat_format = 0;  // auto/PLY, PLY, SOG, SPZ
 
     int sfm_mode = 0;  // global, incremental, hierarchical
     bool reuse_cache = true;
@@ -252,6 +256,9 @@ struct ProjectLayout {
     std::filesystem::path sparse_poses;
     std::filesystem::path model_output;
     std::filesystem::path splat_ply;
+    std::filesystem::path splat_sog;
+    std::filesystem::path splat_spz;
+    std::filesystem::path splat_model;
     std::filesystem::path mesh_ply;
     std::filesystem::path align_log;
     std::filesystem::path train_log;

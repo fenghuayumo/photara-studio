@@ -23,6 +23,10 @@ struct Settings {
     std::filesystem::path dataset_source;
     std::string dataset_format{"auto"};
     std::filesystem::path dataset_initial_cloud;
+    // Final trained Gaussian representation: ply, sog, or spz.
+    std::string splat_output_format{"ply"};
+    // Optional external trained Gaussian file used by the editor preview.
+    std::filesystem::path splat_model_source;
     int sfm_mode = 0;  // 0 global, 1 incremental, 2 hierarchical
     bool reuse_cache = true;
     unsigned max_features = 27'000;
