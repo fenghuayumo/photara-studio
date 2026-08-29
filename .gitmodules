@@ -1,0 +1,3 @@
+[submodule "third_party/aether_drender"]
+	path = third_party/aether_drender
+	url = https://github.com/fenghuayumo/aether_drender.git

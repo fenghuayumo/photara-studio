@@ -436,7 +436,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         endif()
     endif()
 
-    if(AETHERSCAN_HAS_TEXTURE AND TARGET asdiff::render)
+    if(AETHERSCAN_HAS_TEXTURE AND TARGET aether::render)
         add_library(aetherscan_texture
             src/texture/bake.cpp
             src/texture/delight.cpp
@@ -449,7 +449,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         target_compile_features(aetherscan_texture PUBLIC cxx_std_20)
         target_link_libraries(aetherscan_texture PUBLIC
             AetherScan::MVS
-            asdiff::render)
+            aether::render)
         target_compile_definitions(aetherscan_texture PUBLIC AETHERSCAN_HAS_TEXTURE=1)
         file(TO_CMAKE_PATH "${AETHERSCAN_INTRINSIC_MODELS_DIR}"
             AETHERSCAN_INTRINSIC_MODELS_DIR)
@@ -586,10 +586,10 @@ if(AETHERSCAN_ENABLE_FEATURES)
             target_link_libraries(aetherscan PRIVATE AetherScan::Texture)
             target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_TEXTURE=1)
         endif()
-        if(TARGET asdiff::mesh)
-            target_link_libraries(aetherscan PRIVATE asdiff::mesh)
+        if(TARGET aether::mesh)
+            target_link_libraries(aetherscan PRIVATE aether::mesh)
             target_compile_definitions(
-                aetherscan PRIVATE AETHERSCAN_HAS_ASDIFF_MESH=1)
+                aetherscan PRIVATE AETHERSCAN_HAS_AETHER_MESH=1)
         endif()
         if(WIN32)
             add_custom_command(TARGET aetherscan POST_BUILD

@@ -31,28 +31,26 @@ set(AETHERSCAN_ONNXRUNTIME_ROOT "" CACHE PATH
 # OpenCV is intentionally not a dependency. Image IO uses FreeImage; SIFT uses
 # vendored VLFeat; multi-view geometry uses Eigen.
 
-# Texture baking (asdiff_render / UVAtlas / Vulkan) + optional Intrinsic delight.
-# Prefer a single local checkout (sibling ../asdiffrender). Do not vendor a
-# second copy — when asdiffrender has a remote, switch to a git submodule and
-# point AETHERSCAN_ASDIFF_RENDER_ROOT at third_party/asdiffrender.
+# Texture baking (aether_drender / UVAtlas / Vulkan) + optional Intrinsic delight.
+# Default source is the git submodule at third_party/aether_drender.
 option(AETHERSCAN_ENABLE_TEXTURE
-    "Enable mesh UV unwrap + projective texture baking (asdiff_render)" ON)
-option(AETHERSCAN_ENABLE_ASDIFF_MESH
-    "Use optional CGAL asdiff_render mesh repair/decimation" ON)
+    "Enable mesh UV unwrap + projective texture baking (aether_drender)" ON)
+option(AETHERSCAN_ENABLE_AETHER_MESH
+    "Use optional CGAL aether_drender mesh repair/decimation" ON)
 option(AETHERSCAN_ENABLE_INSTANT_REMESH
     "Use Instant Meshes field-aligned remeshing before CGAL decimation" ON)
-set(AETHERSCAN_ASDIFF_RENDER_ROOT "" CACHE PATH
-    "Path to asdiff_render sources (empty = auto-detect sibling / submodule)")
+set(AETHERSCAN_AETHER_DRENDER_ROOT "" CACHE PATH
+    "Path to aether_drender sources (empty = auto-detect submodule / sibling)")
 
-function(aetherscan_resolve_asdiff_render_root out_var)
-    if(AETHERSCAN_ASDIFF_RENDER_ROOT AND
-       EXISTS "${AETHERSCAN_ASDIFF_RENDER_ROOT}/CMakeLists.txt")
-        set(${out_var} "${AETHERSCAN_ASDIFF_RENDER_ROOT}" PARENT_SCOPE)
+function(aetherscan_resolve_aether_drender_root out_var)
+    if(AETHERSCAN_AETHER_DRENDER_ROOT AND
+       EXISTS "${AETHERSCAN_AETHER_DRENDER_ROOT}/CMakeLists.txt")
+        set(${out_var} "${AETHERSCAN_AETHER_DRENDER_ROOT}" PARENT_SCOPE)
         return()
     endif()
     set(_candidates
-        "${CMAKE_CURRENT_SOURCE_DIR}/../asdiffrender"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/asdiffrender")
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/aether_drender"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../aether_drender")
     foreach(_cand IN LISTS _candidates)
         get_filename_component(_cand_abs "${_cand}" ABSOLUTE)
         if(EXISTS "${_cand_abs}/CMakeLists.txt")
@@ -73,39 +71,40 @@ aetherscan_setup_onnxruntime()
 
 set(AETHERSCAN_HAS_TEXTURE OFF)
 if(AETHERSCAN_ENABLE_TEXTURE)
-    aetherscan_resolve_asdiff_render_root(_aetherscan_asdiff_root)
-    if(NOT _aetherscan_asdiff_root)
+    aetherscan_resolve_aether_drender_root(_aetherscan_drender_root)
+    if(NOT _aetherscan_drender_root)
         message(WARNING
-            "AETHERSCAN_ENABLE_TEXTURE=ON but asdiff_render not found. "
-            "Place a checkout at ../asdiffrender (recommended while local-only), "
-            "or set -DAETHERSCAN_ASDIFF_RENDER_ROOT=. Disabling texture module.")
+            "AETHERSCAN_ENABLE_TEXTURE=ON but aether_drender not found. "
+            "Initialize the git submodule at third_party/aether_drender "
+            "(git submodule update --init --recursive), "
+            "or set -DAETHERSCAN_AETHER_DRENDER_ROOT=. Disabling texture module.")
         set(AETHERSCAN_ENABLE_TEXTURE OFF)
     else()
-        set(AETHERSCAN_ASDIFF_RENDER_ROOT "${_aetherscan_asdiff_root}"
-            CACHE PATH "Path to asdiff_render sources" FORCE)
-        message(STATUS "asdiff_render: ${AETHERSCAN_ASDIFF_RENDER_ROOT}")
+        set(AETHERSCAN_AETHER_DRENDER_ROOT "${_aetherscan_drender_root}"
+            CACHE PATH "Path to aether_drender sources" FORCE)
+        message(STATUS "aether_drender: ${AETHERSCAN_AETHER_DRENDER_ROOT}")
         find_package(Vulkan 1.2 QUIET)
         if(NOT Vulkan_FOUND)
             message(WARNING
                 "Vulkan SDK 1.2+ not found; disabling AETHERSCAN_ENABLE_TEXTURE")
             set(AETHERSCAN_ENABLE_TEXTURE OFF)
         else()
-            set(ASDIFF_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
-            set(ASDIFF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+            set(AETHER_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+            set(AETHER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
             find_package(CGAL CONFIG QUIET)
-            if(AETHERSCAN_ENABLE_ASDIFF_MESH AND CGAL_FOUND)
-                set(ASDIFF_BUILD_MESH_TOOLS ON CACHE BOOL "" FORCE)
-                set(ASDIFF_ENABLE_INSTANT_MESHES
+            if(AETHERSCAN_ENABLE_AETHER_MESH AND CGAL_FOUND)
+                set(AETHER_BUILD_MESH_TOOLS ON CACHE BOOL "" FORCE)
+                set(AETHER_ENABLE_INSTANT_MESHES
                     ${AETHERSCAN_ENABLE_INSTANT_REMESH} CACHE BOOL "" FORCE)
                 message(STATUS
-                    "Enabling asdiff::mesh repair/decimation; Instant Meshes="
+                    "Enabling aether::mesh repair/decimation; Instant Meshes="
                     "${AETHERSCAN_ENABLE_INSTANT_REMESH}")
             else()
-                set(ASDIFF_BUILD_MESH_TOOLS OFF CACHE BOOL "" FORCE)
+                set(AETHER_BUILD_MESH_TOOLS OFF CACHE BOOL "" FORCE)
             endif()
             add_subdirectory(
-                "${AETHERSCAN_ASDIFF_RENDER_ROOT}"
-                "${CMAKE_BINARY_DIR}/_deps/asdiff_render")
+                "${AETHERSCAN_AETHER_DRENDER_ROOT}"
+                "${CMAKE_BINARY_DIR}/_deps/aether_drender")
             set(AETHERSCAN_HAS_TEXTURE ON)
             include(FetchIntrinsicModels)
             aetherscan_setup_intrinsic_models()

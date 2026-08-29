@@ -21,7 +21,7 @@ struct TextureOptions {
     float uv_gutter{1.F};
     float uv_max_stretch{1.F / 3.F};
     // UVAtlas charting is otherwise largely serial on large meshes. The
-    // asdiff wrapper partitions faces spatially, unwraps groups concurrently,
+    // aether_drender wrapper partitions faces spatially, unwraps groups concurrently,
     // then packs the combined charts into one atlas.
     std::uint32_t uv_parallel_partitions{8};
 

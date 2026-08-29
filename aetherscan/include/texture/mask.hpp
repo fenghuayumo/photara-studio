@@ -8,7 +8,7 @@
 namespace aetherscan::texture {
 
 struct MeshMaskOptions {
-    // Render each axis at this multiple, then area-downsample. asdiff_render's
+    // Render each axis at this multiple, then area-downsample. aether_drender's
     // current raster output is single-sample; 2x produces stable soft edges
     // without teaching the MVS working resolution to the training mask.
     std::uint32_t supersample{2};
@@ -22,7 +22,7 @@ struct MeshMaskOptions {
     std::uint32_t maximum_hole_pixels{64};
     std::uint32_t vulkan_device_index{0};
     // When non-empty, write a flat normal-shaded render from the exact same
-    // asdiff raster pass as each mask. This makes camera/mesh alignment
+    // aether_drender raster pass as each mask. This makes camera/mesh alignment
     // inspectable without introducing a second renderer.
     std::filesystem::path preview_directory;
 };

@@ -1177,7 +1177,7 @@ void test_mask_loading() {
             std::abs(soft_values[0] - 128.F / 255.F) < 1e-6F &&
             soft_values[1] == 0.F && soft_values[2] == 0.F &&
             soft_values[3] == 1.F,
-        "GGGS discarded grayscale coverage from an asdiff mesh mask");
+        "GGGS discarded grayscale coverage from an aether_drender mesh mask");
     std::filesystem::remove_all(root);
 }
 

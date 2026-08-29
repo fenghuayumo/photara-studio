@@ -18,8 +18,8 @@
 #include "texture/mask.hpp"
 #include "texture/options.hpp"
 #endif
-#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
-#include "asdiff_mesh/mesh_ops.hpp"
+#if defined(AETHERSCAN_HAS_AETHER_MESH)
+#include "aether_mesh/mesh_ops.hpp"
 #endif
 
 #include <cxxopts.hpp>
@@ -344,7 +344,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
               << "  --mesh-free-space-support BOOL  weak-surface beta/gamma cut\n"
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
-              << "  --mesh-target-faces N  asdiff/CGAL repair + decimate target (0 disables)\n"
+              << "  --mesh-target-faces N  aether/CGAL repair + decimate target (0 disables)\n"
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
               << "  --mesh-tsdf-bounds-padding F  point-cloud bounds multiplier (default 2)\n"
@@ -625,7 +625,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mask-mesh",
          "Existing PLY mesh for --mvs-mesh-only; bypasses Delaunay and renders "
-         "asdiff masks plus normal-shaded previews",
+         "aether_drender masks plus normal-shaded previews",
          cxxopts::value<std::string>()->default_value(""))
         ("mesh-method",
          "Mesh backend: auto, tsdf, delaunay, or pam",
@@ -659,7 +659,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Maximum samples inserted into global Delaunay (0 = unlimited)",
          cxxopts::value<std::uint64_t>()->default_value("2000000"))
         ("mesh-target-faces",
-         "Optional asdiff/CGAL repair and decimation target (0 disables)",
+         "Optional aether/CGAL repair and decimation target (0 disables)",
          cxxopts::value<std::uint64_t>()->default_value("0"))
         ("mesh-remesh", "Run Instant Meshes before CGAL repair",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -1132,7 +1132,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.texture || cli.delight) {
         throw std::invalid_argument(
             "--texture/--delight require a build with AETHERSCAN_ENABLE_TEXTURE "
-            "(Vulkan SDK + asdiff_render)");
+            "(Vulkan SDK + aether_drender)");
     }
 #endif
     if (cli.atlas_resolution < 64) {
@@ -1678,7 +1678,7 @@ std::filesystem::path write_sfm_diagnostics(
     return csv_path;
 }
 
-#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
+#if defined(AETHERSCAN_HAS_AETHER_MESH)
 void retain_largest_edge_component(
     std::vector<float>& positions, std::vector<std::uint32_t>& indices) {
     const std::size_t face_count = indices.size() / 3;
@@ -1776,9 +1776,9 @@ bool repair_and_decimate_mesh(
         static_cast<std::size_t>(
             (std::numeric_limits<std::uint32_t>::max)()))
         throw std::runtime_error(
-            "asdiff mesh preprocessing requires 32-bit vertex indices");
+            "aether mesh preprocessing requires 32-bit vertex indices");
 
-    aetherscan::core::StageScope stage("mesh.asdiff_repair_decimate");
+    aetherscan::core::StageScope stage("mesh.aether_repair_decimate");
     std::vector<float> positions;
     positions.reserve(mesh.vertices.size() * 3);
     for (const auto& vertex : mesh.vertices) {
@@ -1797,9 +1797,9 @@ bool repair_and_decimate_mesh(
         indices.push_back(static_cast<std::uint32_t>(face[2]));
     }
 
-    if (use_instant_remesh && asdiff_mesh::has_instant_meshes_backend()) {
+    if (use_instant_remesh && aether_mesh::has_instant_meshes_backend()) {
         aetherscan::core::StageScope remesh_stage("mesh.instant_remesh");
-        asdiff_mesh::RemeshOptions remesh_options;
+        aether_mesh::RemeshOptions remesh_options;
         // PoSy=4 produces approximately one quad per requested face; the
         // binding triangulates each regular quad for the downstream pipeline.
         const std::uint64_t instant_faces =
@@ -1809,7 +1809,7 @@ bool repair_and_decimate_mesh(
             static_cast<std::uint64_t>((std::numeric_limits<int>::max)())));
         remesh_options.deterministic = true;
         try {
-            auto remeshed = asdiff_mesh::remesh_field_aligned(
+            auto remeshed = aether_mesh::remesh_field_aligned(
                 positions, indices, remesh_options);
             aetherscan::core::Logger::instance().info(
                 "instant mesh: vertices=", positions.size() / 3, " -> ",
@@ -1829,9 +1829,9 @@ bool repair_and_decimate_mesh(
             "Instant Meshes backend unavailable; continuing with CGAL repair");
     }
 
-    auto result = asdiff_mesh::repair_and_decimate(
+    auto result = aether_mesh::repair_and_decimate(
         positions, indices,
-        asdiff_mesh::DecimateOptions{
+        aether_mesh::DecimateOptions{
             static_cast<std::size_t>(target_faces), false});
     retain_largest_edge_component(result.positions, result.indices);
     aetherscan::mvs::Mesh processed;
@@ -1865,7 +1865,7 @@ bool repair_and_decimate_mesh(
         if (normal.squaredNorm() > 1e-12F) normal.normalize();
 
     aetherscan::core::Logger::instance().info(
-        "asdiff mesh: vertices=", mesh.vertices.size(), " -> ",
+        "aether mesh: vertices=", mesh.vertices.size(), " -> ",
         processed.vertices.size(), " faces=", mesh.faces.size(), " -> ",
         processed.faces.size(), " target_faces=", target_faces);
     mesh = std::move(processed);
@@ -2617,7 +2617,7 @@ int main(int argc, char** argv) {
                 cli.mesh ? &mesh_options : nullptr, {},
                 write_project ? &archive : nullptr);
             if (mesh) {
-#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
+#if defined(AETHERSCAN_HAS_AETHER_MESH)
                 if (cli.mesh_target_faces > 0)
                     repair_and_decimate_mesh(
                         *mesh, cli.mesh_target_faces, cli.mesh_remesh);
@@ -2856,7 +2856,7 @@ int main(int argc, char** argv) {
                 cli.masks_dir,
                 write_project ? &archive : nullptr);
             if (mesh) {
-#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
+#if defined(AETHERSCAN_HAS_AETHER_MESH)
                 if (cli.mesh_target_faces > 0)
                     repair_and_decimate_mesh(
                         *mesh, cli.mesh_target_faces, cli.mesh_remesh);
@@ -3057,7 +3057,7 @@ int main(int argc, char** argv) {
 #endif
 
             if (cli.mesh && !mvs_scene.mesh.faces.empty()) {
-#if defined(AETHERSCAN_HAS_ASDIFF_MESH)
+#if defined(AETHERSCAN_HAS_AETHER_MESH)
                 if (cli.splat && cli.mesh_target_faces > 0) {
                     try {
                         repair_and_decimate_mesh(
@@ -3065,14 +3065,14 @@ int main(int argc, char** argv) {
                             cli.mesh_remesh);
                     } catch (const std::exception& error) {
                         aetherscan::core::Logger::instance().warning(
-                            "asdiff mesh postprocess failed; retaining cleaned "
+                            "aether mesh postprocess failed; retaining cleaned "
                             "mesh: ", error.what());
                     }
                 }
 #else
                 if (cli.splat && cli.mesh_target_faces > 0)
                     aetherscan::core::Logger::instance().warning(
-                        "asdiff mesh postprocess unavailable (CGAL mesh tools "
+                        "aether mesh postprocess unavailable (CGAL mesh tools "
                         "were not built); retaining cleaned mesh");
 #endif
                 const std::string mesh_tag = cli.splat

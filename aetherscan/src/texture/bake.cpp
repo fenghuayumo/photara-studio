@@ -7,7 +7,7 @@
 #include "texture/export.hpp"
 #include "texture/projection.hpp"
 
-#include "asdiff_render/asdiff_render.hpp"
+#include "aether_drender/aether_drender.hpp"
 
 #include <algorithm>
 #include <array>
@@ -244,9 +244,9 @@ TexturedMesh bake_mesh_texture(
         throw std::runtime_error("Cannot bake texture: mesh is empty");
     if (scene.views.size() < 2)
         throw std::runtime_error("Cannot bake texture: need at least 2 views");
-    if (!asdiff_render::has_uv_atlas_backend())
+    if (!aether_drender::has_uv_atlas_backend())
         throw std::runtime_error(
-            "UVAtlas backend unavailable; rebuild with ASDIFF_ENABLE_UVATLAS");
+            "UVAtlas backend unavailable; rebuild with AETHER_ENABLE_UVATLAS");
 
     auto views = load_texture_views(scene, options);
     if (options.delight) {
@@ -267,7 +267,7 @@ TexturedMesh bake_mesh_texture(
     }
 
     core::StageScope unwrap_stage("texture.uv_unwrap");
-    asdiff_render::UvAtlasOptions uv_opts;
+    aether_drender::UvAtlasOptions uv_opts;
     uv_opts.width = options.atlas_resolution;
     uv_opts.height = options.atlas_resolution;
     uv_opts.gutter = options.uv_gutter;
@@ -279,8 +279,8 @@ TexturedMesh bake_mesh_texture(
         " atlas=", uv_opts.width, "x", uv_opts.height,
         " gutter=", uv_opts.gutter,
         " max_stretch=", uv_opts.max_stretch);
-    const asdiff_render::UvAtlasOutput unwrapped =
-        asdiff_render::unwrap_uv(positions, indices, uv_opts);
+    const aether_drender::UvAtlasOutput unwrapped =
+        aether_drender::unwrap_uv(positions, indices, uv_opts);
     core::Logger::instance().info(
         "texture UV result: partitions=", unwrapped.partition_count,
         " charts=", unwrapped.chart_count,
@@ -302,12 +302,12 @@ TexturedMesh bake_mesh_texture(
             unwrapped.positions, unwrapped.indices, normals);
     }
 
-    std::vector<asdiff_render::ProjectionView> projections;
+    std::vector<aether_drender::ProjectionView> projections;
     projections.reserve(scene.views.size());
     for (std::size_t i = 0; i < scene.views.size(); ++i) {
         const mvs::MvsView& view = scene.views[i];
         const auto [near_z, far_z] = depth_range_for_view(view, scene.mesh);
-        asdiff_render::ProjectionView proj;
+        aether_drender::ProjectionView proj;
         proj.width = views[i].width;
         proj.height = views[i].height;
         proj.channel_count = 3;
@@ -320,23 +320,23 @@ TexturedMesh bake_mesh_texture(
     }
 
     core::StageScope bake_stage("texture.project");
-    asdiff_render::Context context({options.vulkan_device_index, false});
-    asdiff_render::TextureBaker baker(context);
-    asdiff_render::TextureBakeOptions bake_opts;
+    aether_drender::Context context({options.vulkan_device_index, false});
+    aether_drender::TextureBaker baker(context);
+    aether_drender::TextureBakeOptions bake_opts;
     bake_opts.width = options.atlas_resolution;
     bake_opts.height = options.atlas_resolution;
     bake_opts.blend_mode =
         options.blend_mode == BlendMode::best_view
-            ? asdiff_render::ProjectionBlendMode::best_view
-            : asdiff_render::ProjectionBlendMode::weighted_average;
+            ? aether_drender::ProjectionBlendMode::best_view
+            : aether_drender::ProjectionBlendMode::weighted_average;
     bake_opts.visibility_mode =
         options.visibility_mode == VisibilityMode::shadow_map
-            ? asdiff_render::VisibilityMode::shadow_map
-            : asdiff_render::VisibilityMode::hybrid_ray_query;
+            ? aether_drender::VisibilityMode::shadow_map
+            : aether_drender::VisibilityMode::hybrid_ray_query;
     bake_opts.pcf_radius = options.pcf_radius;
     bake_opts.allow_visibility_fallback = options.allow_visibility_fallback;
 
-    const asdiff_render::TextureBakeOutput baked = baker.bake(
+    const aether_drender::TextureBakeOutput baked = baker.bake(
         unwrapped.positions, normals, unwrapped.uv, unwrapped.indices,
         projections, bake_opts);
     bake_stage.finish();

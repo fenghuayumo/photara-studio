@@ -356,7 +356,7 @@ aetherscan --images images --output object.ply --capture-mode object --texture
 aetherscan --images images --output object.ply --capture-mode object --texture --delight
 ```
 
-- asdiff_render 默认使用同级本地仓库 `../asdiffrender`；
+- aether_drender 默认使用 git submodule `third_party/aether_drender`；
 - Delight 使用 C++ ONNX Runtime；模型放在 `AETHERSCAN_INTRINSIC_MODELS_DIR`；
 - Intrinsic 权重为学术/非商用许可，产品发布前必须完成许可证审查；
 - 未通过 mesh 拓扑门禁时不进入 UV/Texture。

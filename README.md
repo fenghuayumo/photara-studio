@@ -28,6 +28,8 @@
 ```text
 AetherScan/
 ├── CMakeLists.txt                 总工程入口
+├── third_party/
+│   └── aether_drender/            纹理烘焙 / 网格预处理（git submodule）
 ├── aetherscan/
 │   ├── CMakeLists.txt             核心库子项目
 │   ├── include/                   稳定的公开 C++ API（ba/features/sfm/...）
@@ -50,6 +52,12 @@ AetherScan/
 **不再默认链接 OpenCV。**
 
 ## 构建
+
+克隆后先初始化 submodule（贴图模块依赖 `third_party/aether_drender`）：
+
+```powershell
+git submodule update --init --recursive
+```
 
 ```powershell
 cmake -S . -B build `
@@ -92,7 +100,8 @@ cmake -S . -B build `
 | `AETHERSCAN_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
 | `AETHERSCAN_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
 | `AETHERSCAN_ENABLE_TEXTURE` | ON | UVAtlas + Vulkan 贴图烘焙 |
-| `AETHERSCAN_ASDIFF_RENDER_ROOT` | 自动 | asdiff_render 路径（默认 `../asdiffrender`） |
+| `AETHERSCAN_ENABLE_AETHER_MESH` | ON | CGAL aether_drender 网格修复/减面 |
+| `AETHERSCAN_AETHER_DRENDER_ROOT` | 自动 | aether_drender 路径（默认 `third_party/aether_drender`） |
 | `AETHERSCAN_INTRINSIC_MODELS_DIR` | `${BUILD}/Models/Intrinsic` | Delight 的 `stage_*.onnx` 目录 |
 
 特征后端可自由组合（提取 × 匹配），例如：
@@ -174,7 +183,7 @@ CPU PatchMatch 会一次缓存所有图像金字塔，并默认同时处理 8 �
 MVS-only 的 preview/default/high 均使用 CGAL 全局 Delaunay visibility
 graph-cut，不再提供 projective mesh。全局图的输入上限由
 `--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。三个 mesh backend 都会经过统一
-Clean；构建了 `asdiff::mesh` 且 splat mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
+Clean；构建了 `aether::mesh` 且 splat mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
 Meshes field-aligned remesh 和 CGAL repair/decimate。已经低于目标面数的网格结果会直接保留，
 避免无意义的重采样和修复引入新边界。目标面数默认为 1,000,000；Instant 的 quad 目标自动
 换算为约一半，重拓扑前后会清理微小连通碎片。
@@ -184,7 +193,7 @@ Splat + TSDF 默认把自动估计体素放大到 `2.3x`，直接提取约百万
 `--mesh-tsdf-voxel-scale` 显式调整；`--mesh-target-faces 0` 保留原始 TSDF 分辨率用于诊断。
 UVAtlas 默认用 `--uv-parallel-partitions 8` 做空间分区并发展开，最后统一打包到单张 atlas；
 设为 `1` 可回到串行展开。
-`--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 asdiff 后处理。Splat mesh 模式
+`--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 aether mesh 后处理。Splat mesh 模式
 默认在第 7,000 步开启权重 0.05 的 median-depth/rendered-normal 几何一致性优化。
 
 稠密 MVS 输入默认使用全部融合点初始化 splat（`--splat-max-gaussians 0`），避免随机截断到
@@ -208,10 +217,10 @@ learned normal field、occupancy 和自适应采样负责。该后端要求构�
 - `scene_dense.ply`：多轮几何一致性和深度过滤后的稠密点云
 - `scene_mesh.ply`：启用 `--mesh` 时生成的网格
 - `scene_textured.obj` / `.mtl` / `_albedo.png`：启用 `--texture` 时由
-  `asdiff_render` UVAtlas + Vulkan 投影烘焙（可选 `--delight` 去光照）
+  `aether_drender` UVAtlas + Vulkan 投影烘焙（可选 `--delight` 去光照）
 
 贴图模块默认开启（`AETHERSCAN_ENABLE_TEXTURE=ON`），依赖 Vulkan SDK（含 `dxc`）与
-同级本地仓库 `../asdiffrender`（不拷贝进本仓库，避免双份维护；日后有远端可改 submodule）。
+git submodule `third_party/aether_drender`（https://github.com/fenghuayumo/aether_drender）。
 
 `--delight` 纯 C++ **ONNX Runtime** 推理（与 LightGlue 相同开关
 `-DAETHERSCAN_ENABLE_ONNX=ON`），无 Python/PyTorch。将 `stage_0..3.onnx` 放到
