@@ -16,9 +16,15 @@ struct GlobalRotationOptions {
     double irls_sigma_deg{5.0};
     double max_relative_rotation_error_deg{12.0};
     bool use_pair_weights{true};
-    // Homography-dominant pairs carry ambiguous rotation on weak-parallax
-    // scenes and should not seed the global rotation backbone.
-    bool reject_planar_pairs{true};
+    // Prefer verified neighbors when building the initialization tree.  Long
+    // retrieval edges still participate in averaging and loop closure, but a
+    // repetitive high-inlier match cannot define an entire branch up front.
+    // Zero restores a purely weight-ordered maximum spanning tree.
+    unsigned mst_neighbor_span{3};
+    // Homography-dominant pairs can be the only stable evidence in a
+    // weak-parallax sequence.  Keep them by default and let cycle weighting
+    // plus robust rotation averaging suppress inconsistent edges.
+    bool reject_planar_pairs{false};
     WeightType weight_type{WeightType::geman_mcclure};
 };
 

@@ -112,6 +112,7 @@ std::vector<Edge> collect_edges(
 bool initialize_from_mst(
     std::size_t image_count,
     const std::vector<Edge>& edges,
+    const unsigned neighbor_span,
     std::vector<Mat3>& rotations,
     std::vector<char>& valid,
     Index& fixed) {
@@ -131,6 +132,13 @@ bool initialize_from_mst(
     std::vector<Index> order(edges.size());
     std::iota(order.begin(), order.end(), Index{0});
     std::stable_sort(order.begin(), order.end(), [&](Index lhs, Index rhs) {
+        if (neighbor_span > 0) {
+            const bool lhs_neighbor =
+                edges[lhs].b - edges[lhs].a <= neighbor_span;
+            const bool rhs_neighbor =
+                edges[rhs].b - edges[rhs].a <= neighbor_span;
+            if (lhs_neighbor != rhs_neighbor) return lhs_neighbor;
+        }
         return edges[lhs].weight > edges[rhs].weight;
     });
 
@@ -286,7 +294,8 @@ GlobalRotationSummary estimate_global_rotations(
     std::vector<char> valid;
     Index fixed = k_invalid;
     if (!initialize_from_mst(
-            scene.images.size(), edges, rotations, valid, fixed))
+            scene.images.size(), edges, options.mst_neighbor_span,
+            rotations, valid, fixed))
         return summary;
     core::Logger::instance().debug(
         "global rotation: initialized MST fixed=", fixed);

@@ -1157,6 +1157,12 @@ bool align_and_merge_hierarchical(
     core::Logger::instance().info(
         "hierarchical align: connected_subscenes=", included_count, '/',
         subscenes.size());
+    if (config.require_all_subscenes && included_count != subscenes.size()) {
+        core::Logger::instance().warning(
+            "hierarchical align: refusing partial merge; connected_subscenes=",
+            included_count, '/', subscenes.size());
+        return false;
+    }
     std::vector<Similarity3> transforms;
     if (!estimate_global_transforms(
             subscenes.size(), pairs, included, transforms)) {
@@ -1323,7 +1329,29 @@ ReconstructionSummary run_hierarchical_mapping(
         if (succeeded[i]) reconstructed.push_back(std::move(subscenes[i]));
     }
     if (reconstructed.empty()) return {};
+    if (config.global_fallback_on_alignment_failure &&
+        reconstructed.size() != subscenes.size()) {
+        core::Logger::instance().warning(
+            "hierarchical reconstruction incomplete: reconstructed_subscenes=",
+            reconstructed.size(), '/', subscenes.size(),
+            "; retrying untouched parent with global SfM");
+        return run_global_mapping(
+            scene,
+            config.fallback_global_rotation,
+            config.fallback_global_positioning,
+            config.resection);
+    }
     if (!align_and_merge_hierarchical(scene, reconstructed, config.alignment)) {
+        if (config.global_fallback_on_alignment_failure) {
+            core::Logger::instance().warning(
+                "hierarchical alignment failed; retrying untouched parent "
+                "with global SfM");
+            return run_global_mapping(
+                scene,
+                config.fallback_global_rotation,
+                config.fallback_global_positioning,
+                config.resection);
+        }
         std::size_t best = reconstructed.size();
         unsigned best_registered = 0;
         for (std::size_t i = 0; i < reconstructed.size(); ++i) {

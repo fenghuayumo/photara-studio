@@ -124,6 +124,116 @@ struct BaselineLengthCostAnalytic : ceres::SizedCostFunction<1, 3, 3> {
     double baseline;
 };
 
+struct SharedBaselineCostAnalytic : ceres::SizedCostFunction<1, 3, 3, 1> {
+    explicit SharedBaselineCostAnalytic(const double weight)
+        : sqrt_weight(std::sqrt(std::max(0.0, weight))) {}
+
+    bool Evaluate(
+        double const* const* parameters,
+        double* residuals,
+        double** jacobians) const override {
+        const Eigen::Map<const Vec3> first(parameters[0]);
+        const Eigen::Map<const Vec3> second(parameters[1]);
+        const double baseline = parameters[2][0];
+        const Vec3 difference = second - first;
+        const double length = difference.norm();
+        if (!(length > 1e-10) || !std::isfinite(length)) return false;
+        residuals[0] = sqrt_weight * (length - baseline);
+        if (jacobians) {
+            const Eigen::RowVector3d direction =
+                sqrt_weight * difference.transpose() / length;
+            if (jacobians[0]) {
+                Eigen::Map<Eigen::RowVector3d> first_jacobian(jacobians[0]);
+                first_jacobian = -direction;
+            }
+            if (jacobians[1]) {
+                Eigen::Map<Eigen::RowVector3d> second_jacobian(jacobians[1]);
+                second_jacobian = direction;
+            }
+            if (jacobians[2]) jacobians[2][0] = -sqrt_weight;
+        }
+        return true;
+    }
+
+    double sqrt_weight{1.0};
+};
+
+struct SequenceSmoothnessCostAnalytic
+    : ceres::SizedCostFunction<3, 3, 3, 3> {
+    explicit SequenceSmoothnessCostAnalytic(const double weight)
+        : sqrt_weight(std::sqrt(std::max(0.0, weight))) {}
+
+    bool Evaluate(
+        double const* const* parameters,
+        double* residuals,
+        double** jacobians) const override {
+        const Eigen::Map<const Vec3> previous(parameters[0]);
+        const Eigen::Map<const Vec3> current(parameters[1]);
+        const Eigen::Map<const Vec3> next(parameters[2]);
+        Eigen::Map<Vec3> residual_map(residuals);
+        residual_map = sqrt_weight * (previous - 2.0 * current + next);
+        if (jacobians) {
+            if (jacobians[0]) {
+                Eigen::Map<Matrix3dRowMajor> jacobian(jacobians[0]);
+                jacobian.setIdentity();
+                jacobian *= sqrt_weight;
+            }
+            if (jacobians[1]) {
+                Eigen::Map<Matrix3dRowMajor> jacobian(jacobians[1]);
+                jacobian.setIdentity();
+                jacobian *= -2.0 * sqrt_weight;
+            }
+            if (jacobians[2]) {
+                Eigen::Map<Matrix3dRowMajor> jacobian(jacobians[2]);
+                jacobian.setIdentity();
+                jacobian *= sqrt_weight;
+            }
+        }
+        return true;
+    }
+
+    double sqrt_weight{1.0};
+};
+
+struct SequenceLocalMotionCostAnalytic
+    : ceres::SizedCostFunction<3, 3, 3, 3> {
+    SequenceLocalMotionCostAnalytic(
+        const Mat3& world_to_camera, const double weight)
+        : world_to_camera(world_to_camera),
+          sqrt_weight(std::sqrt(std::max(0.0, weight))) {}
+
+    bool Evaluate(
+        double const* const* parameters,
+        double* residuals,
+        double** jacobians) const override {
+        const Eigen::Map<const Vec3> first(parameters[0]);
+        const Eigen::Map<const Vec3> second(parameters[1]);
+        const Eigen::Map<const Vec3> shared_step(parameters[2]);
+        Eigen::Map<Vec3> residual_map(residuals);
+        residual_map = sqrt_weight *
+            (world_to_camera * (second - first) - shared_step);
+        if (jacobians) {
+            if (jacobians[0]) {
+                Eigen::Map<Matrix3dRowMajor> jacobian(jacobians[0]);
+                jacobian = -sqrt_weight * world_to_camera;
+            }
+            if (jacobians[1]) {
+                Eigen::Map<Matrix3dRowMajor> jacobian(jacobians[1]);
+                jacobian = sqrt_weight * world_to_camera;
+            }
+            if (jacobians[2]) {
+                Eigen::Map<Matrix3dRowMajor> jacobian(jacobians[2]);
+                jacobian.setIdentity();
+                jacobian *= -sqrt_weight;
+            }
+        }
+        return true;
+    }
+
+    Mat3 world_to_camera{Mat3::Identity()};
+    double sqrt_weight{1.0};
+};
+
 class AdaptiveHuberLoss final : public ceres::LossFunction {
 public:
     AdaptiveHuberLoss(double threshold, double base_weight)
@@ -198,6 +308,7 @@ struct BuiltPositioningProblem {
     std::vector<std::unique_ptr<AdaptiveHuberLoss>> losses;
     std::vector<PositioningResidual> residuals;
     std::vector<double> scales;
+    std::vector<double> sequence_step;
     unsigned valid_images{0};
     unsigned valid_pairs{0};
     unsigned valid_tracks{0};
@@ -206,7 +317,29 @@ struct BuiltPositioningProblem {
     bool has_point_blocks{false};
     std::size_t scale_anchor{std::numeric_limits<std::size_t>::max()};
     double scale_anchor_score{-1.0};
+    unsigned sequence_baselines{0};
+    unsigned sequence_smoothness_terms{0};
+    unsigned sequence_local_motion_terms{0};
 };
+
+bool is_ordered_capture(
+    const Scene& scene, const GlobalPositioningOptions& options) {
+    // Short unordered multi-view problems can contain every adjacent edge by
+    // chance. Require a meaningful sequence length before enabling temporal
+    // capture priors.
+    if (scene.images.size() < 8 ||
+        options.sequence_min_neighbor_ratio <= 0.0)
+        return false;
+    unsigned verified_neighbors = 0;
+    for (Index image_id = 0; image_id + 1 < scene.images.size(); ++image_id) {
+        const ImagePair* pair = scene.find_pair(image_id, image_id + 1);
+        if (pair && pair->active && pair->relative_pose.has_value())
+            ++verified_neighbors;
+    }
+    const double ratio = static_cast<double>(verified_neighbors) /
+        static_cast<double>(scene.images.size() - 1);
+    return ratio >= options.sequence_min_neighbor_ratio;
+}
 
 struct WorldRay {
     Vec3 origin{Vec3::Zero()};
@@ -584,7 +717,7 @@ BuiltPositioningProblem build_positioning_problem(
         }
     }
 
-    built.scales.reserve(scene.pairs.size() + point_to_camera_capacity);
+    built.scales.reserve(scene.pairs.size() + point_to_camera_capacity + 1);
     built.losses.reserve(scene.pairs.size() + point_to_camera_capacity);
     built.residuals.reserve(scene.pairs.size() + point_to_camera_capacity);
 
@@ -708,6 +841,85 @@ BuiltPositioningProblem build_positioning_problem(
                 ++built.valid_tracks;
                 built.has_point_blocks = true;
             }
+        }
+    }
+
+    if (options.optimize_positions && is_ordered_capture(scene, options) &&
+        (options.sequence_baseline_weight > 0.0 ||
+         options.sequence_smoothness_weight > 0.0 ||
+         options.sequence_local_motion_weight > 0.0)) {
+        built.scales.push_back(1.0);
+        double& shared_baseline = built.scales.back();
+        built.problem.AddParameterBlock(&shared_baseline, 1);
+        // SfM scale is arbitrary.  Fixing this gauge to one prevents the
+        // sign-independent baseline prior from collapsing every center into
+        // the same point while inverse depths compensate.
+        built.problem.SetParameterBlockConstant(&shared_baseline);
+        // The shared baseline already fixes the similarity scale gauge.  Make
+        // it the scale anchor too, otherwise an unrelated inverse-depth scale
+        // is fixed as a second (and potentially conflicting) gauge constraint.
+        built.scale_anchor = built.scales.size() - 1;
+        built.scale_anchor_score = std::numeric_limits<double>::infinity();
+
+        if (options.sequence_local_motion_weight > 0.0) {
+            Vec3 initial_step = Vec3::Zero();
+            unsigned initial_step_count = 0;
+            for (Index image_id = 0;
+                 image_id + 1 < scene.images.size(); ++image_id) {
+                const Image& first = scene.images[image_id];
+                const Image& second = scene.images[image_id + 1];
+                if (!first.registered || !second.registered) continue;
+                const Vec3 delta = second.pose.C - first.pose.C;
+                const double length = delta.norm();
+                if (!(length > 1e-10) || !std::isfinite(length)) continue;
+                initial_step += first.pose.R * delta / length;
+                ++initial_step_count;
+            }
+            if (initial_step_count == 0 || initial_step.norm() < 1e-8)
+                initial_step = Vec3::UnitX();
+            else
+                initial_step.normalize();
+            built.sequence_step.assign(
+                initial_step.data(), initial_step.data() + 3);
+            built.problem.AddParameterBlock(built.sequence_step.data(), 3);
+        }
+        for (Index image_id = 0;
+             image_id + 1 < scene.images.size(); ++image_id) {
+            Image& first = scene.images[image_id];
+            Image& second = scene.images[image_id + 1];
+            if (!first.registered || !second.registered) continue;
+            if (options.sequence_baseline_weight > 0.0) {
+                built.problem.AddResidualBlock(
+                    new SharedBaselineCostAnalytic(
+                        options.sequence_baseline_weight),
+                    nullptr,
+                    first.pose.C.data(), second.pose.C.data(),
+                    &shared_baseline);
+                ++built.sequence_baselines;
+            }
+            if (options.sequence_local_motion_weight > 0.0 &&
+                !built.sequence_step.empty()) {
+                built.problem.AddResidualBlock(
+                    new SequenceLocalMotionCostAnalytic(
+                        first.pose.R,
+                        options.sequence_local_motion_weight),
+                    nullptr,
+                    first.pose.C.data(), second.pose.C.data(),
+                    built.sequence_step.data());
+                ++built.sequence_local_motion_terms;
+            }
+            if (image_id + 2 >= scene.images.size() ||
+                options.sequence_smoothness_weight <= 0.0)
+                continue;
+            Image& third = scene.images[image_id + 2];
+            if (!third.registered) continue;
+            built.problem.AddResidualBlock(
+                new SequenceSmoothnessCostAnalytic(
+                    options.sequence_smoothness_weight),
+                nullptr,
+                first.pose.C.data(), second.pose.C.data(),
+                third.pose.C.data());
+            ++built.sequence_smoothness_terms;
         }
     }
 
@@ -1221,6 +1433,9 @@ bool attempt_positioning(
         " pairs=", built.valid_pairs,
         " tracks=", built.valid_tracks, '/', built.candidate_tracks,
         " observations=", built.observations,
+        " sequence_baselines=", built.sequence_baselines,
+        " sequence_smoothness=", built.sequence_smoothness_terms,
+        " sequence_local_motion=", built.sequence_local_motion_terms,
         " fix_cameras=", attempt.fix_cameras ? 1 : 0);
 
     ceres::Solver::Options solver_options;
@@ -1239,6 +1454,9 @@ bool attempt_positioning(
         options);
 
     auto* ordering = new ceres::ParameterBlockOrdering;
+    if (!built.sequence_step.empty() &&
+        built.problem.HasParameterBlock(built.sequence_step.data()))
+        ordering->AddElementToGroup(built.sequence_step.data(), 0);
     for (double& scale : built.scales)
         if (built.problem.HasParameterBlock(&scale))
             ordering->AddElementToGroup(&scale, 0);

@@ -402,6 +402,7 @@ void assemble_system(
     const bool fix_first_point,
     const bool optimize_points,
     const bool optimize_rotations,
+    const bool optimize_translations,
     const std::size_t intrinsic_dof,
     AssemblyWorkspace& workspace,
     System& system) {
@@ -583,6 +584,16 @@ void assemble_system(
                 destination_rhs[axis] = 0.0;
             }
         }
+        if (!optimize_translations) {
+            for (std::size_t axis = 3; axis < pose_size; ++axis) {
+                for (std::size_t column = 0; column < pose_size; ++column) {
+                    destination_hessian[axis * pose_size + column] = 0.0;
+                    destination_hessian[column * pose_size + axis] = 0.0;
+                }
+                destination_hessian[axis * pose_size + axis] = 1.0;
+                destination_rhs[axis] = 0.0;
+            }
+        }
     }
     if (intrinsic_dof > 0) {
         const std::size_t group_stride =
@@ -653,6 +664,24 @@ void assemble_system(
                     system.pose_intrinsic_cross.data() +
                     observation * pose_size * intrinsic_dof;
                 std::fill(pose_intr, pose_intr + 3 * intrinsic_dof, 0.0);
+            }
+        }
+    }
+    if (!optimize_translations) {
+        for (std::size_t observation = 0;
+             observation < problem.observations.size(); ++observation) {
+            double* cross =
+                system.cross.data() + observation * cross_block_size;
+            std::fill(
+                cross + 3 * point_size,
+                cross + pose_size * point_size, 0.0);
+            if (intrinsic_dof > 0) {
+                double* pose_intr =
+                    system.pose_intrinsic_cross.data() +
+                    observation * pose_size * intrinsic_dof;
+                std::fill(
+                    pose_intr + 3 * intrinsic_dof,
+                    pose_intr + pose_size * intrinsic_dof, 0.0);
             }
         }
     }
@@ -1542,7 +1571,8 @@ void apply_focal_prior(
 
 void apply_step(Problem& problem, const std::vector<double>& camera_step,
                 const std::vector<double>& point_step, const bool fix_first,
-                const bool optimize_rotations) {
+                const bool optimize_rotations,
+                const bool optimize_translations) {
     for (std::size_t camera = 0; camera < problem.poses.size(); ++camera) {
         if (problem.is_pose_constant(camera, fix_first)) continue;
         Pose& pose = problem.poses[camera];
@@ -1577,7 +1607,9 @@ void apply_step(Problem& problem, const std::vector<double>& camera_step,
             pose.qy = qy * inverse_norm;
             pose.qz = qz * inverse_norm;
         }
-        pose.cx += step[3]; pose.cy += step[4]; pose.cz += step[5];
+        if (optimize_translations) {
+            pose.cx += step[3]; pose.cy += step[4]; pose.cz += step[5];
+        }
     }
     for (std::size_t point = 0; point < problem.points.size(); ++point) {
         problem.points[point].x += point_step[point * point_size];
@@ -1705,7 +1737,8 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         assemble_system(
             problem, linearization, adjacency, damping,
             options.fix_first_point, options.optimize_points,
-            options.optimize_rotations, block_dof, assembly_workspace,
+            options.optimize_rotations, options.optimize_translations,
+            block_dof, assembly_workspace,
             system);
         apply_focal_prior(system, problem, options);
         const bool use_dense_intrinsic_schur =
@@ -1855,7 +1888,7 @@ OptimizerSummary optimize_cpu(Problem& problem, const OptimizerOptions& options)
         const auto old_intrinsics = problem.intrinsics;
         apply_step(
             problem, camera_step, point_step, options.fix_first_pose,
-            options.optimize_rotations);
+            options.optimize_rotations, options.optimize_translations);
         if (block_dof > 0)
             apply_intrinsic_step(problem, intrinsic_step, options);
         const EvaluationStats candidate_evaluation =
