@@ -1238,6 +1238,24 @@ ReconstructionSummary run_hierarchical_mapping(
     if (subscenes.size() == 1) {
         core::Logger::instance().info(
             "hierarchical single-cluster fast path: views=", scene.images.size());
+
+        // A single cluster has no Sim(3) merge to solve.  Prefer the global
+        // rotation/positioning path here because it uses every verified pair
+        // jointly; the old star/resection path is retained as a fallback for
+        // sparse or degenerate graphs where global positioning cannot solve.
+        Scene global_scene = scene;
+        const ReconstructionSummary global = run_global_mapping(
+            global_scene, {}, {}, config.resection);
+        if (global.valid &&
+            global.registered_views >= scene.images.size()) {
+            scene = std::move(global_scene);
+            core::Logger::instance().info(
+                "hierarchical single-cluster: accepted global mapping");
+            return global;
+        }
+        core::Logger::instance().warning(
+            "hierarchical single-cluster: global mapping unavailable; "
+            "falling back to star/resection");
         build_tracks(scene, config.cluster.min_pair_weight);
         if (!star_initialize(scene, config.star)) return summarize(scene);
         register_images(scene, config.resection);

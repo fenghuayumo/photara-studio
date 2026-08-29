@@ -95,7 +95,9 @@ std::uint64_t reconstruction_key(
     const ReconstructionConfig& config) {
     FingerprintBuilder key;
     key.append_string("reconstruction");
-    key.append_string("deferred-component-reseed-v9");
+    // Bump when the single-cluster hierarchy path changes from star-only to
+    // global-first mapping; old hierarchy checkpoints must not bypass it.
+    key.append_string("deferred-component-reseed-v10");
     key.append_string(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)

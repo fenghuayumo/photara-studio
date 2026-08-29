@@ -118,6 +118,9 @@ void test_global_rotation_weighting() {
         0.5F);
 
     GlobalRotationOptions options;
+    // This test exercises the optional composite-weight path explicitly;
+    // production defaults use robust inlier-count weighting.
+    options.use_pair_weights = true;
     options.max_l1_iterations = 0;
     options.max_irls_iterations = 1;
     options.irls_sigma_deg = 1e6;
