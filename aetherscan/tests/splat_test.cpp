@@ -588,7 +588,7 @@ void test_normal_field_parameterization_and_occupancy() {
         "GaussianWrapping gaussian_features PLY round trip changed values");
 }
 
-void test_sog_spz_roundtrip() {
+void test_gaussian_format_roundtrip() {
     using namespace aetherscan::splat;
     constexpr std::size_t count = 3;
     constexpr unsigned degree = 1;
@@ -627,6 +627,9 @@ void test_sog_spz_roundtrip() {
         require(loaded.size() == count, label);
         require(loaded.sh_degree == degree, label);
         const auto loaded_means = loaded.means.to_vector();
+        const auto loaded_scales = loaded.log_scales.to_vector();
+        const auto loaded_rotations = loaded.quaternions.to_vector();
+        const auto loaded_opacities = loaded.opacity_logits.to_vector();
         const auto loaded_sh = loaded.sh.to_vector();
         require(loaded_means.size() == means.size(), label);
         require(loaded_sh.size() == sh.size(), label);
@@ -645,6 +648,27 @@ void test_sog_spz_roundtrip() {
                     std::to_string(index) + ", error=" +
                     std::to_string(std::abs(loaded_sh[index] - sh[index])) +
                     ")");
+        for (std::size_t index = 0; index < scales.size(); ++index)
+            require(
+                std::abs(loaded_scales[index] - scales[index]) < tolerance,
+                label);
+        for (std::size_t index = 0; index < opacities.size(); ++index)
+            require(
+                std::abs(loaded_opacities[index] - opacities[index]) < tolerance,
+                label);
+        for (std::size_t index = 0; index < count; ++index) {
+            float distance = 0.F;
+            float antipodal_distance = 0.F;
+            for (std::size_t component = 0; component < 4U; ++component) {
+                const float actual = loaded_rotations[index * 4U + component];
+                const float expected = rotations[index * 4U + component];
+                distance += (actual - expected) * (actual - expected);
+                antipodal_distance += (actual + expected) * (actual + expected);
+            }
+            require(
+                std::sqrt(std::min(distance, antipodal_distance)) < tolerance,
+                label);
+        }
         std::error_code error;
         std::filesystem::remove(path, error);
     };
@@ -657,6 +681,10 @@ void test_sog_spz_roundtrip() {
         std::filesystem::temp_directory_path() /
             "aetherscan_splat_roundtrip.spz",
         GaussianFormat::spz, 0.04F, "SPZ Gaussian round trip changed values");
+    verify(
+        std::filesystem::temp_directory_path() /
+            "aetherscan_splat_roundtrip.glb",
+        GaussianFormat::glb, 1e-5F, "GLB Gaussian round trip changed values");
 }
 
 void test_pam_smoke() {
@@ -2210,7 +2238,7 @@ int main() {
         test_geometry_stability_scheduler();
         test_forward_backward();
         test_normal_field_parameterization_and_occupancy();
-        test_sog_spz_roundtrip();
+        test_gaussian_format_roundtrip();
         test_pam_smoke();
         test_sample_depth_batch_boundary();
         test_contribution_visibility_rejects_occluded_gaussians();

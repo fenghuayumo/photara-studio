@@ -130,9 +130,9 @@ std::filesystem::path existing_splat_model(const App& app) {
     std::error_code error;
     if (!imported.empty() && std::filesystem::exists(imported, error))
         return imported;
-    const std::array<std::filesystem::path, 4> candidates = {
+    const std::array<std::filesystem::path, 5> candidates = {
         app.layout.splat_model, app.layout.splat_ply, app.layout.splat_sog,
-        app.layout.splat_spz};
+        app.layout.splat_spz, app.layout.splat_glb};
     for (const auto& candidate : candidates)
         if (std::filesystem::exists(candidate, error)) return candidate;
     return {};
@@ -266,7 +266,7 @@ bool pick_file(
             {L"Point cloud (*.ply)", L"*.ply"},
             {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC splat_model_filters[] = {
-            {L"Gaussian splat (*.ply;*.sog;*.spz)", L"*.ply;*.sog;*.spz"},
+            {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb)", L"*.ply;*.sog;*.spz;*.glb"},
             {L"All files (*.*)", L"*.*"}};
         const COMDLG_FILTERSPEC* filters = project_filters;
         if (kind == FilePickKind::dataset) filters = dataset_filters;
@@ -429,7 +429,8 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
         ? "ply"
         : app.settings.splat_format == 2
             ? "sog"
-            : app.settings.splat_format == 3 ? "spz" : "auto";
+            : app.settings.splat_format == 3 ? "spz"
+            : app.settings.splat_format == 4 ? "glb" : "auto";
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
     settings.max_features = static_cast<unsigned>(
@@ -473,6 +474,8 @@ void apply_project_settings(
         app.settings.splat_format = 2;
     else if (settings.splat_output_format == "spz")
         app.settings.splat_format = 3;
+    else if (settings.splat_output_format == "glb")
+        app.settings.splat_format = 4;
     else
         app.settings.splat_format = 0;
     app.settings.sfm_mode = settings.sfm_mode;
@@ -801,10 +804,10 @@ void delete_reconstruction_results(App& app) {
 
     stop_splat_view(app);
     clear_loaded_result(app);
-    const std::array<std::filesystem::path, 12> generated_files = {
+    const std::array<std::filesystem::path, 13> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
-        app.layout.splat_spz, app.layout.mesh_ply,
+        app.layout.splat_spz, app.layout.splat_glb, app.layout.mesh_ply,
         app.layout.align_log, app.layout.train_log, app.layout.export_log,
         app.layout.view_log};
 
@@ -2265,7 +2268,7 @@ Action draw_inspector(App& app) {
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Load an existing PLY, SOG, or SPZ model for preview. "
+                "Load an existing PLY, SOG, SPZ, or GLB model for preview. "
                 "When set, it takes precedence over generated sidecars.");
         ImGui::EndDisabled();
         ImGui::Spacing();
@@ -2371,15 +2374,16 @@ Action draw_inspector(App& app) {
         ImGui::EndDisabled();
         theme::caption("Splat output format");
         ImGui::SetNextItemWidth(-1.F);
-        const char* splat_formats[] = {"Auto (PLY)", "PLY", "SOG", "SPZ"};
+        const char* splat_formats[] = {
+            "Auto (PLY)", "PLY", "SOG", "SPZ", "GLB"};
         ImGui::BeginDisabled(busy);
         ImGui::Combo(
-            "##splat_format", &app.settings.splat_format, splat_formats, 4);
+            "##splat_format", &app.settings.splat_format, splat_formats, 5);
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Format of the trained sidecar: PLY, PlayCanvas SOG, or "
-                "Niantic SPZ. Auto currently writes PLY.");
+                "Format of the trained sidecar: PLY, PlayCanvas SOG, Niantic "
+                "SPZ, or Khronos KHR_gaussian_splatting GLB. Auto writes PLY.");
         ImGui::Spacing();
     }
 

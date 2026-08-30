@@ -1,5 +1,6 @@
 #include "splat/formats.hpp"
 
+#include "formats_glb.hpp"
 #include "splat/trainer.hpp"
 
 #include <webp/decode.h>
@@ -1392,9 +1393,10 @@ GaussianFormat parse_gaussian_format(const std::string_view value) {
     if (normalized == "ply") return GaussianFormat::ply;
     if (normalized == "sog") return GaussianFormat::sog;
     if (normalized == "spz") return GaussianFormat::spz;
+    if (normalized == "glb") return GaussianFormat::glb;
     throw std::invalid_argument(
         "Unknown splat output format '" + std::string(value) +
-        "' (expected auto, ply, sog, or spz)");
+        "' (expected auto, ply, sog, spz, or glb)");
 }
 
 const char* gaussian_format_name(const GaussianFormat format) noexcept {
@@ -1403,6 +1405,7 @@ const char* gaussian_format_name(const GaussianFormat format) noexcept {
         case GaussianFormat::ply: return "ply";
         case GaussianFormat::sog: return "sog";
         case GaussianFormat::spz: return "spz";
+        case GaussianFormat::glb: return "glb";
     }
     return "auto";
 }
@@ -1413,6 +1416,7 @@ const char* gaussian_format_extension(const GaussianFormat format) noexcept {
         case GaussianFormat::ply: return "ply";
         case GaussianFormat::sog: return "sog";
         case GaussianFormat::spz: return "spz";
+        case GaussianFormat::glb: return "glb";
     }
     return "";
 }
@@ -1424,6 +1428,7 @@ void save_gaussians(
         const auto extension = lower(path.extension().string());
         format = extension == ".sog" ? GaussianFormat::sog
             : extension == ".spz" ? GaussianFormat::spz
+            : extension == ".glb" ? GaussianFormat::glb
             : GaussianFormat::ply;
     }
     switch (format) {
@@ -1435,6 +1440,9 @@ void save_gaussians(
             return;
         case GaussianFormat::spz:
             write_file(path, save_spz_v4(model));
+            return;
+        case GaussianFormat::glb:
+            write_file(path, detail::save_glb(model));
             return;
         case GaussianFormat::auto_detect:
             break;
@@ -1450,6 +1458,8 @@ GaussianModel load_gaussians(
             format = GaussianFormat::sog;
         else if (lower(path.extension().string()) == ".spz")
             format = GaussianFormat::spz;
+        else if (lower(path.extension().string()) == ".glb")
+            format = GaussianFormat::glb;
         else
             format = GaussianFormat::ply;
     }
@@ -1457,6 +1467,13 @@ GaussianModel load_gaussians(
         case GaussianFormat::ply: return load_gaussians_ply(path);
         case GaussianFormat::sog: return load_sog(path);
         case GaussianFormat::spz: return load_spz(path);
+        case GaussianFormat::glb: {
+            auto decoded = detail::load_glb(path);
+            return make_model(
+                decoded.count, decoded.degree, decoded.means,
+                decoded.log_scales, decoded.rotations,
+                decoded.opacity_logits, decoded.sh);
+        }
         case GaussianFormat::auto_detect: break;
     }
     throw std::runtime_error("Invalid Gaussian input format");

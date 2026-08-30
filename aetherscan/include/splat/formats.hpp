@@ -14,6 +14,7 @@ enum class GaussianFormat {
     ply,
     sog,
     spz,
+    glb,
 };
 
 GaussianFormat parse_gaussian_format(std::string_view value);

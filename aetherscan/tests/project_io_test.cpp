@@ -109,8 +109,8 @@ int main() {
     settings.dataset_source = dir / "colmap";
     settings.dataset_format = "colmap";
     settings.dataset_initial_cloud = dir / "seed.ply";
-    settings.splat_output_format = "spz";
-    settings.splat_model_source = dir / "imported.sog";
+    settings.splat_output_format = "glb";
+    settings.splat_model_source = dir / "imported.glb";
     settings.sfm_mode = 2;
     settings.max_features = 4096;
     settings.build_mesh = true;

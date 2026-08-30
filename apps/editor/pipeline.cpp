@@ -165,6 +165,7 @@ const char* splat_format_flag(const int index) {
         case 1: return "ply";
         case 2: return "sog";
         case 3: return "spz";
+        case 4: return "glb";
         default: return "auto";
     }
 }
@@ -691,9 +692,11 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.splat_ply = layout.root / (stem + "_splat.ply");
     layout.splat_sog = layout.root / (stem + "_splat.sog");
     layout.splat_spz = layout.root / (stem + "_splat.spz");
+    layout.splat_glb = layout.root / (stem + "_splat.glb");
     layout.splat_model = settings.splat_format == 2
         ? layout.splat_sog
-        : settings.splat_format == 3 ? layout.splat_spz : layout.splat_ply;
+        : settings.splat_format == 3 ? layout.splat_spz
+        : settings.splat_format == 4 ? layout.splat_glb : layout.splat_ply;
     layout.mesh_ply = layout.root / (stem + "_splat_mesh.ply");
     layout.align_log = layout.root / (stem + "_align.log");
     layout.train_log = layout.root / (stem + "_train.log");
@@ -812,9 +815,9 @@ std::string build_view_command(
         std::filesystem::exists(imported_model, exists_error)) {
         command << " --splat-model " << quote(imported_model);
     } else {
-        const std::array<std::filesystem::path, 4> candidates = {
+        const std::array<std::filesystem::path, 5> candidates = {
             layout.splat_model, layout.splat_ply, layout.splat_sog,
-            layout.splat_spz};
+            layout.splat_spz, layout.splat_glb};
         for (const auto& candidate : candidates) {
             if (!std::filesystem::exists(candidate, exists_error)) continue;
             command << " --splat-model " << quote(candidate);

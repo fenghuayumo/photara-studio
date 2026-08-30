@@ -290,8 +290,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-format VALUE  deprecated alias for --dataset-format\n"
               << "  --colmap PATH  compatibility alias for --dataset-format colmap\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
-              << "  --splat-output-format auto|ply|sog|spz  final Gaussian format (default auto)\n"
-              << "  --splat-model PATH  load a trained splat PLY/SOG/SPZ and skip optimization\n"
+              << "  --splat-output-format auto|ply|sog|spz|glb  final Gaussian format (default auto)\n"
+              << "  --splat-model PATH  load a trained splat PLY/SOG/SPZ/GLB and skip optimization\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
               << "  --splat-log-interval N  training-stat log every N steps (default 100, 0 = first/last)\n"
               << "  --splat-preview-interval N  emit a live preview every N steps (0 disables)\n"
@@ -475,7 +475,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "External dataset format: auto, colmap, realitycapture, or openmvs",
          cxxopts::value<std::string>()->default_value("auto"))
         ("splat-output-format",
-         "Final Gaussian format: auto, ply, sog, or spz",
+         "Final Gaussian format: auto, ply, sog, spz, or glb",
          cxxopts::value<std::string>()->default_value("auto"))
         ("splat-format",
          "Deprecated alias for --dataset-format",
@@ -484,7 +484,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("dense-ply", "Dense PLY initializer for external or internal-SfM cameras",
          cxxopts::value<std::string>()->default_value(""))
-        ("splat-model", "Trained splat PLY/SOG/SPZ to load instead of optimizing",
+        ("splat-model", "Trained splat PLY/SOG/SPZ/GLB to load instead of optimizing",
          cxxopts::value<std::string>()->default_value(""))
         ("splat-iterations", "Splat optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
@@ -1346,6 +1346,7 @@ void run_splat_view(
                           aetherscan::splat::gaussian_format_extension(requested)));
         candidates.push_back(parent / (stem + ".sog"));
         candidates.push_back(parent / (stem + ".spz"));
+        candidates.push_back(parent / (stem + ".glb"));
         candidates.push_back(parent / (stem + ".ply"));
     }
     for (const auto& candidate : candidates) {
@@ -1356,14 +1357,14 @@ void run_splat_view(
             "splat_view_model=", model_path, " gaussians=", model.size());
         break;
     }
-    if (model_path.empty() && archive.has(aetherscan::project::ChunkType::gaussians)) {
+    if (model_path.empty()) {
+        if (!archive.has(aetherscan::project::ChunkType::gaussians))
+            throw std::runtime_error(
+                "No trained splat model found for --splat-view");
         model = aetherscan::splat::decode_gaussians(
             archive.chunk(aetherscan::project::ChunkType::gaussians));
         aetherscan::core::Logger::instance().info(
             "splat_view_model=ascan gaussians=", model.size());
-    } else {
-        throw std::runtime_error(
-            "No trained splat model found for --splat-view");
     }
     if (model.size() == 0)
         throw std::runtime_error("--splat-view loaded an empty Gaussian model");
@@ -1931,6 +1932,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                 ? aetherscan::splat::GaussianFormat::sog
                 : lower_extension(cli.output) == ".spz"
                     ? aetherscan::splat::GaussianFormat::spz
+                : lower_extension(cli.output) == ".glb"
+                    ? aetherscan::splat::GaussianFormat::glb
                     : aetherscan::splat::GaussianFormat::ply)
         : requested_output_format;
     aetherscan::splat::TrainingOptions options;
