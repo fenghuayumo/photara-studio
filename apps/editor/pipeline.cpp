@@ -702,10 +702,16 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.train_log = layout.root / (stem + "_train.log");
     layout.export_log = layout.root / (stem + "_export.log");
     layout.view_log = layout.root / (stem + "_view.log");
-    layout.working_sfm = layout.cache / "sfm.bin";
-    layout.preview_view_file = layout.cache / "preview_view";
-    layout.preview_camera_file = layout.cache / "preview_camera";
-    layout.preview_vis_file = layout.cache / "preview_vis";
+    std::filesystem::path runtime_dir = layout.cache;
+    if (!settings.reuse_cache) {
+        std::error_code temp_error;
+        const auto temp = std::filesystem::temp_directory_path(temp_error);
+        if (!temp_error) runtime_dir = temp / "AetherScan" / stem;
+    }
+    layout.working_sfm = runtime_dir / "sfm.bin";
+    layout.preview_view_file = runtime_dir / "preview_view";
+    layout.preview_camera_file = runtime_dir / "preview_camera";
+    layout.preview_vis_file = runtime_dir / "preview_vis";
     return layout;
 }
 
@@ -713,8 +719,8 @@ std::string build_align_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout) {
     std::ostringstream command;
-    // Align keeps SfM in the cache working copy. .ascan is only written
-    // when the user saves the project.
+    // Align keeps SfM in a working copy (project .cache when reuse is on,
+    // otherwise a temp folder). .ascan is only written on Save Project.
     command << quote(cli_path) << " --images "
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.project_file.empty() ? layout.sparse_ply
@@ -735,8 +741,8 @@ std::string build_train_command(
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.model_output);
 
-    // Training reloads SfM from the cache working copy (or an existing
-    // .ascan if the user saved one), unless an external dataset is selected.
+    // Training reloads SfM from the working copy (or a saved .ascan),
+    // unless an external dataset is selected.
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
             << " --max-features " << settings.max_features;
     if (settings.reuse_cache)
@@ -853,7 +859,8 @@ std::string build_export_sfm_command(
             << sfm_mode_flag(settings.sfm_mode) << " --max-features "
             << settings.max_features;
     std::error_code exists_error;
-    if (std::filesystem::exists(layout.cache, exists_error))
+    if (settings.reuse_cache &&
+        std::filesystem::exists(layout.cache, exists_error))
         command << " --cache-dir " << quote(layout.cache);
     append_gui_flags(command, layout);
     return command.str();
@@ -861,6 +868,9 @@ std::string build_export_sfm_command(
 
 void write_preview_view_index(const ProjectLayout& layout, const unsigned index) {
     if (layout.preview_view_file.empty()) return;
+    std::error_code error;
+    std::filesystem::create_directories(
+        layout.preview_view_file.parent_path(), error);
     std::ofstream output(layout.preview_view_file, std::ios::trunc);
     if (!output) return;
     output << index << '\n';

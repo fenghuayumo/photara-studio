@@ -222,7 +222,7 @@ struct ProjectSettings {
     int splat_format = 0;  // auto/PLY, PLY, SOG, SPZ, GLB
 
     int sfm_mode = 0;  // global, incremental, hierarchical
-    bool reuse_cache = true;
+    bool reuse_cache = false;
     int max_features = 27'000;
 
     bool scene_mode = false;

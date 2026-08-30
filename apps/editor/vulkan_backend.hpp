@@ -13,6 +13,10 @@
 #include "imgui_impl_vulkan.h"
 
 #include <cstdint>
+#include <filesystem>
+#include <future>
+#include <memory>
+#include <vector>
 
 namespace editor::gpu {
 
@@ -59,6 +63,38 @@ struct PreviewTexture {
 
     void reset();
     void upload(const aetherscan::io::RgbImage& source);
+};
+
+// Lazy GPU thumbnails for sparse-viewport camera frustums. `clear()` must run
+// while the ImGui Vulkan backend is still alive.
+struct CameraPhotoCache {
+    CameraPhotoCache() = default;
+    CameraPhotoCache(const CameraPhotoCache&) = delete;
+    CameraPhotoCache& operator=(const CameraPhotoCache&) = delete;
+
+    void clear();
+    void resize(std::size_t view_count);
+    void request(std::size_t index, const std::filesystem::path& path);
+    void poll();
+    [[nodiscard]] ImTextureID id(std::size_t index) const;
+    [[nodiscard]] const ImTextureID* ids() const {
+        return ids_.empty() ? nullptr : ids_.data();
+    }
+    [[nodiscard]] std::size_t size() const { return ids_.size(); }
+
+private:
+    struct Slot {
+        PreviewTexture texture;
+        std::future<aetherscan::io::RgbImage> pending;
+        std::filesystem::path path;
+        bool loading{};
+        bool failed{};
+    };
+
+    [[nodiscard]] std::size_t inflight() const;
+
+    std::vector<std::unique_ptr<Slot>> slots_;
+    std::vector<ImTextureID> ids_;
 };
 
 // The CUDA-written image is exported as a Win32 handle and copied into a

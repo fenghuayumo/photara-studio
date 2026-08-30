@@ -72,6 +72,7 @@ struct App {
     std::vector<std::string> fresh_lines;
 
     gpu::ExternalPreview preview;
+    gpu::CameraPhotoCache photos;
 
     SparseScene scene;
     OrbitCamera camera;
@@ -568,6 +569,7 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
 }
 
 void clear_loaded_result(App& app) {
+    app.photos.clear();
     app.scene.clear();
     app.scene_source.clear();
     app.camera = {};
@@ -1000,6 +1002,23 @@ void delete_reconstruction_results(App& app) {
     }
 }
 
+void poll_camera_photos(App& app) {
+    if (app.scene.views.empty()) {
+        if (app.photos.size() != 0) app.photos.clear();
+        return;
+    }
+    attach_view_image_paths(
+        app.scene, std::filesystem::path(app.settings.images_dir.data()));
+    app.photos.resize(app.scene.views.size());
+    if (app.view_options.show_views && app.view_options.show_camera_photos) {
+        std::vector<std::size_t> markers;
+        sampled_view_indices(app.scene, markers);
+        for (const std::size_t index : markers)
+            app.photos.request(index, app.scene.views[index].image_path);
+    }
+    app.photos.poll();
+}
+
 void poll_scene_load(App& app) {
     if (!app.loading_scene || !app.pending_load.valid()) return;
     if (app.pending_load.wait_for(std::chrono::seconds(0)) !=
@@ -1011,7 +1030,10 @@ void poll_scene_load(App& app) {
         set_message(app, "Point cloud: " + loaded.error, theme::danger);
         return;
     }
+    app.photos.clear();
     app.scene = std::move(loaded.scene);
+    attach_view_image_paths(
+        app.scene, std::filesystem::path(app.settings.images_dir.data()));
     if (!live_preview_active(app)) app.camera.frame(app.scene);
     if (app.view_mode != VisualizationMode::splat &&
         app.view_mode != VisualizationMode::rings)
@@ -1046,9 +1068,10 @@ void start_align(App& app) {
         set_message(app, "Cannot create project directory", theme::danger);
         return;
     }
-    {
+    if (!app.layout.working_sfm.empty()) {
         std::error_code cache_error;
-        std::filesystem::create_directories(app.layout.cache, cache_error);
+        std::filesystem::create_directories(
+            app.layout.working_sfm.parent_path(), cache_error);
     }
     {
         std::error_code stale;
@@ -1181,9 +1204,10 @@ void start_splat_view(App& app) {
     if (!app.has_model) return;
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
-    {
-        std::error_code cache_error;
-        std::filesystem::create_directories(app.layout.cache, cache_error);
+    if (!app.layout.preview_camera_file.empty()) {
+        std::error_code preview_error;
+        std::filesystem::create_directories(
+            app.layout.preview_camera_file.parent_path(), preview_error);
     }
     sync_live_preview_camera(
         app, true, app.preview_raster_width, app.preview_raster_height);
@@ -1221,18 +1245,22 @@ void start_train(App& app, const bool smoke) {
     refresh_artifacts(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
-    {
-        std::error_code cache_error;
-        std::filesystem::create_directories(app.layout.cache, cache_error);
+    if (!app.layout.preview_view_file.empty()) {
+        std::error_code preview_error;
+        std::filesystem::create_directories(
+            app.layout.preview_view_file.parent_path(), preview_error);
     }
     app.preview_view = 0;
     app.preview_follow_view = true;
     if (has_external_dataset(app)) {
         // The external dataset is consumed by the child CLI. Do not leave a
         // stale internal SfM scene visible while that job is running.
+        app.photos.clear();
         app.scene.clear();
     } else {
         load_view_poses(app.layout.sparse_poses, app.scene);
+        attach_view_image_paths(
+            app.scene, std::filesystem::path(app.settings.images_dir.data()));
     }
     if (const ViewPose* pose = first_registered_view(app.scene))
         snap_orbit_to_view(app.camera, *pose);
@@ -2028,7 +2056,8 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
 
     const SceneDrawStats stats = app.renderer.draw(
-        draw, min, max, app.scene, app.camera, app.view_options, hovered);
+        draw, min, max, app.scene, app.camera, app.view_options, hovered,
+        app.photos.ids(), app.photos.size());
 
     const bool gizmo_captures =
         draw_viewport_gizmo(app.gizmo, app.camera, min, max);
@@ -2443,10 +2472,10 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox("Reuse cached alignment", &app.settings.reuse_cache);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Reuse the Structure-from-Motion cache so Train 3DGS can\n"
-                "reload cameras without solving poses again. Uncheck to\n"
-                "rebuild from the images. Align/Train do not write .ascan\n"
-                "or .asfm unless you Save Project or Export SfM.");
+                "Write a project .cache folder so later Align/Train can\n"
+                "reuse extracted features. Off by default: skip that folder.\n"
+                "Align/Train do not write .ascan or .asfm unless you Save\n"
+                "Project or Export SfM.");
         ImGui::EndDisabled();
 
         if (theme::toolbar_button(
@@ -2652,6 +2681,12 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip(
                 "Replace sampled point colours with a near-to-far ramp.");
         ImGui::Checkbox("Show cameras", &app.view_options.show_views);
+        ImGui::BeginDisabled(!app.view_options.show_views);
+        ImGui::Checkbox("Show camera photos", &app.view_options.show_camera_photos);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(
+                "Map each capture onto the far plane of its view frustum.");
+        ImGui::EndDisabled();
         ImGui::Checkbox("Show trajectory", &app.view_options.show_trajectory);
         ImGui::Checkbox("Show ground grid", &app.view_options.show_grid);
         ImGui::Spacing();
@@ -2997,6 +3032,7 @@ int main(const int argc, char** argv) {
                     theme::warning);
         }
         poll_scene_load(app);
+        poll_camera_photos(app);
 
         if (app.smoke_mode) {
             if (!app.smoke_started && !app.job.running()) {
@@ -3082,6 +3118,7 @@ int main(const int argc, char** argv) {
     if (app.viewer.running()) app.viewer.stop();
     if (app.job.running()) app.job.stop();
     vkDeviceWaitIdle(gpu::device());
+    app.photos.clear();
     app.preview.reset();
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();

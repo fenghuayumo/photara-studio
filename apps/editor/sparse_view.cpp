@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <system_error>
 #include <utility>
 
 namespace editor {
@@ -149,6 +150,39 @@ void draw_segment(
         frame.centre.x + cx1 * frame.focal / cz1,
         frame.centre.y - cy1 * frame.focal / cz1};
     draw->AddLine(screen_a, screen_b, colour, thickness);
+}
+
+void image_plane_corners(
+    const ViewPose& pose, const float length, Vec3 corners[4]) {
+    const auto& r = pose.rotation;
+    const auto to_world = [&](const float x, const float y, const float z) {
+        return Vec3{
+            pose.centre.x + r[0] * x + r[3] * y + r[6] * z,
+            pose.centre.y + r[1] * x + r[4] * y + r[7] * z,
+            pose.centre.z + r[2] * x + r[5] * y + r[8] * z};
+    };
+    const float half_x = pose.fx > 1e-3F && pose.width > 0
+        ? length * (pose.width * 0.5F) / pose.fx
+        : length * 0.5F;
+    const float half_y = pose.fy > 1e-3F && pose.height > 0
+        ? length * (pose.height * 0.5F) / pose.fy
+        : length * 0.35F;
+    corners[0] = to_world(-half_x, -half_y, length);
+    corners[1] = to_world(half_x, -half_y, length);
+    corners[2] = to_world(half_x, half_y, length);
+    corners[3] = to_world(-half_x, half_y, length);
+}
+
+bool point_in_convex_quad(const ImVec2 point, const ImVec2 quad[4]) {
+    auto side = [](const ImVec2 a, const ImVec2 b, const ImVec2 p) {
+        return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+    };
+    const float s0 = side(quad[0], quad[1], point);
+    const float s1 = side(quad[1], quad[2], point);
+    const float s2 = side(quad[2], quad[3], point);
+    const float s3 = side(quad[3], quad[0], point);
+    return (s0 >= 0.F && s1 >= 0.F && s2 >= 0.F && s3 >= 0.F) ||
+           (s0 <= 0.F && s1 <= 0.F && s2 <= 0.F && s3 <= 0.F);
 }
 
 float snap_grid_cell(const float desired) {
@@ -896,6 +930,7 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
         pose.observations = image.id < scene.image_tracks.size()
             ? scene.image_tracks[image.id].size()
             : 0;
+        pose.image_path = image.path;
         pose.registered = image.registered;
         if (pose.registered) ++loaded.scene.registered_views;
         loaded.scene.views.push_back(std::move(pose));
@@ -1029,6 +1064,49 @@ bool load_view_poses(
     return error.empty() && !scene.views.empty();
 }
 
+void attach_view_image_paths(
+    SparseScene& scene, const std::filesystem::path& images_dir) {
+    std::error_code error;
+    for (ViewPose& pose : scene.views) {
+        if (!pose.image_path.empty()) {
+            if (std::filesystem::is_regular_file(pose.image_path, error))
+                continue;
+            if (pose.image_path.is_relative() && !images_dir.empty()) {
+                const auto joined = images_dir / pose.image_path;
+                if (std::filesystem::is_regular_file(joined, error)) {
+                    pose.image_path = joined;
+                    continue;
+                }
+            }
+        }
+        if (images_dir.empty() || pose.name.empty()) continue;
+        const auto candidate = images_dir / pose.name;
+        if (std::filesystem::is_regular_file(candidate, error))
+            pose.image_path = candidate;
+    }
+}
+
+void sampled_view_indices(
+    const SparseScene& scene, std::vector<std::size_t>& indices,
+    const std::size_t max_markers) {
+    indices.clear();
+    const std::size_t registered = std::max<std::size_t>(
+        1, std::count_if(
+               scene.views.begin(), scene.views.end(),
+               [](const ViewPose& pose) { return pose.registered; }));
+    const std::size_t stride = std::max<std::size_t>(
+        1, (registered + std::max<std::size_t>(1, max_markers) - 1) /
+               std::max<std::size_t>(1, max_markers));
+    std::size_t ordinal = 0;
+    for (std::size_t index = 0; index < scene.views.size(); ++index) {
+        if (!scene.views[index].registered) continue;
+        const bool sampled =
+            ordinal % stride == 0 || ordinal + 1 == registered;
+        ++ordinal;
+        if (sampled) indices.push_back(index);
+    }
+}
+
 void OrbitCamera::frame(const SparseScene& scene) {
     yaw = 0.785398F;
     pitch = 0.61548F;
@@ -1117,7 +1195,8 @@ void camera_view_matrix(
 SceneDrawStats SceneRenderer::draw(
     ImDrawList* draw, const ImVec2 min, const ImVec2 max,
     const SparseScene& scene, const OrbitCamera& camera,
-    const ViewOptions& options, const bool hovered) {
+    const ViewOptions& options, const bool hovered,
+    const ImTextureID* view_photos, const std::size_t view_photo_count) {
     SceneDrawStats stats;
     const ViewFrame frame = build_frame(camera, min, max);
     draw->PushClipRect(min, max, true);
@@ -1198,71 +1277,49 @@ SceneDrawStats SceneRenderer::draw(
     if (options.show_views) {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         float best_distance = 18.F;
-        constexpr std::size_t max_markers = 32;
-        const std::size_t registered = std::max<std::size_t>(
-            1, std::count_if(
-                   scene.views.begin(), scene.views.end(),
-                   [](const ViewPose& pose) { return pose.registered; }));
-        const std::size_t marker_stride = std::max<std::size_t>(
-            1, (registered + max_markers - 1) / max_markers);
+        std::vector<std::size_t> markers;
+        sampled_view_indices(scene, markers);
+
+        // A compact frustum plus the capture photo on the far plane. Dense
+        // rings only draw a uniform subset so the cloud stays readable.
+        const float length = std::max(1e-4F, scene.radius * options.view_scale);
 
         // Pick the hovered marker before drawing so exactly one camera gets
-        // the bright treatment. Only uniformly sampled cameras participate;
-        // dense capture rings otherwise turn into an unreadable wire cage.
-        std::size_t ordinal = 0;
-        for (std::size_t index = 0; index < scene.views.size(); ++index) {
+        // the bright treatment. The far-plane quad is also hittable so a
+        // textured image can be selected without aiming at the tiny apex.
+        for (const std::size_t index : markers) {
+            if (!hovered) break;
             const ViewPose& pose = scene.views[index];
-            if (!pose.registered) continue;
-            const bool sampled = ordinal % marker_stride == 0 ||
-                                 ordinal + 1 == registered;
-            ++ordinal;
-            if (!sampled) continue;
             ImVec2 apex_screen;
             float apex_depth{};
-            if (!hovered ||
-                !project(frame, pose.centre, apex_screen, apex_depth))
-                continue;
-            const float dx = apex_screen.x - mouse.x;
-            const float dy = apex_screen.y - mouse.y;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            if (distance < best_distance) {
-                best_distance = distance;
+            float score = 1e9F;
+            if (project(frame, pose.centre, apex_screen, apex_depth)) {
+                const float dx = apex_screen.x - mouse.x;
+                const float dy = apex_screen.y - mouse.y;
+                score = std::sqrt(dx * dx + dy * dy);
+            }
+            Vec3 corners[4];
+            image_plane_corners(pose, length, corners);
+            ImVec2 corner_screen[4];
+            bool plane_visible = true;
+            for (int i = 0; i < 4; ++i) {
+                float corner_depth{};
+                plane_visible &= project(
+                    frame, corners[i], corner_screen[i], corner_depth);
+            }
+            if (plane_visible && point_in_convex_quad(mouse, corner_screen))
+                score = std::min(score, 4.F);
+            if (score < best_distance) {
+                best_distance = score;
                 stats.hovered_view = static_cast<int>(index);
             }
         }
 
-        // A compact frustum plus a faint image plane reads as a camera without
-        // overwhelming the sparse cloud.
-        const float length = std::max(1e-4F, scene.radius * options.view_scale);
-        ordinal = 0;
-        for (std::size_t index = 0; index < scene.views.size(); ++index) {
+        for (const std::size_t index : markers) {
             const ViewPose& pose = scene.views[index];
-            if (!pose.registered) continue;
-            const bool sampled = ordinal % marker_stride == 0 ||
-                                 ordinal + 1 == registered;
-            ++ordinal;
-            if (!sampled) continue;
-            const auto& r = pose.rotation;
-            // Camera-to-world is the transpose of the stored world-to-camera.
-            const auto to_world = [&](const float x, const float y,
-                                      const float z) {
-                return Vec3{
-                    pose.centre.x + r[0] * x + r[3] * y + r[6] * z,
-                    pose.centre.y + r[1] * x + r[4] * y + r[7] * z,
-                    pose.centre.z + r[2] * x + r[5] * y + r[8] * z};
-            };
-            const float half_x = pose.fx > 1e-3F && pose.width > 0
-                ? length * (pose.width * 0.5F) / pose.fx
-                : length * 0.5F;
-            const float half_y = pose.fy > 1e-3F && pose.height > 0
-                ? length * (pose.height * 0.5F) / pose.fy
-                : length * 0.35F;
+            Vec3 corners[4];
+            image_plane_corners(pose, length, corners);
             const Vec3 apex = pose.centre;
-            const Vec3 corners[4] = {
-                to_world(-half_x, -half_y, length),
-                to_world(half_x, -half_y, length),
-                to_world(half_x, half_y, length),
-                to_world(-half_x, half_y, length)};
 
             ImVec2 apex_screen;
             float apex_depth{};
@@ -1283,11 +1340,38 @@ SceneDrawStats SceneRenderer::draw(
                 is_hovered ? theme::warning : theme::accent,
                 is_hovered ? 0.98F : 0.24F);
             if (plane_visible) {
-                draw->AddConvexPolyFilled(
-                    corner_screen, 4,
-                    theme::u32(
-                        is_hovered ? theme::warning : theme::accent,
-                        is_hovered ? 0.10F : 0.025F));
+                ImTextureID photo{};
+                if (options.show_camera_photos && view_photos != nullptr &&
+                    index < view_photo_count)
+                    photo = view_photos[index];
+                if (photo) {
+                    // Flip U when the plane is seen from behind so the photo
+                    // stays readable from either side of the capture ring.
+                    const float area =
+                        (corner_screen[1].x - corner_screen[0].x) *
+                            (corner_screen[3].y - corner_screen[0].y) -
+                        (corner_screen[1].y - corner_screen[0].y) *
+                            (corner_screen[3].x - corner_screen[0].x);
+                    const ImU32 tint =
+                        IM_COL32(255, 255, 255, is_hovered ? 255 : 230);
+                    if (area >= 0.F) {
+                        draw->AddImageQuad(
+                            photo, corner_screen[0], corner_screen[1],
+                            corner_screen[2], corner_screen[3], {0.F, 0.F},
+                            {1.F, 0.F}, {1.F, 1.F}, {0.F, 1.F}, tint);
+                    } else {
+                        draw->AddImageQuad(
+                            photo, corner_screen[0], corner_screen[1],
+                            corner_screen[2], corner_screen[3], {1.F, 0.F},
+                            {0.F, 0.F}, {0.F, 1.F}, {1.F, 1.F}, tint);
+                    }
+                } else {
+                    draw->AddConvexPolyFilled(
+                        corner_screen, 4,
+                        theme::u32(
+                            is_hovered ? theme::warning : theme::accent,
+                            is_hovered ? 0.10F : 0.025F));
+                }
             }
             const float line_width = is_hovered ? 1.6F : 0.75F;
             for (const Vec3& corner : corners)
@@ -1299,7 +1383,12 @@ SceneDrawStats SceneRenderer::draw(
             // Only the hovered camera needs an up marker; repeating it for
             // every frame is the main source of the former fence-like look.
             if (is_hovered) {
-                const Vec3 up = to_world(0.F, -half_y * 1.75F, length);
+                const Vec3 top_mid = (corners[0] + corners[1]) * 0.5F;
+                const Vec3 plane_mid =
+                    (corners[0] + corners[1] + corners[2] + corners[3]) *
+                    0.25F;
+                const Vec3 up =
+                    plane_mid + (top_mid - plane_mid) * 1.75F;
                 draw_segment(draw, frame, corners[0], up, body, line_width);
                 draw_segment(draw, frame, corners[1], up, body, line_width);
             }

@@ -1,6 +1,9 @@
 #include "vulkan_backend.hpp"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -667,6 +670,114 @@ void ExternalPreview::reset() {
     allocation_size = 0;
     width = height = 0;
     display.reset();
+}
+
+namespace {
+
+constexpr std::uint32_t k_thumb_long_edge = 320;
+constexpr std::size_t k_max_inflight = 2;
+
+aetherscan::io::RgbImage load_camera_thumbnail(
+    const std::filesystem::path& path) {
+    aetherscan::io::RgbImage rgb = aetherscan::io::load_rgb(path);
+    const std::uint32_t long_edge = std::max(rgb.width, rgb.height);
+    if (long_edge <= k_thumb_long_edge || long_edge == 0) return rgb;
+    const float scale =
+        static_cast<float>(k_thumb_long_edge) / static_cast<float>(long_edge);
+    const std::uint32_t width = std::max(
+        1U, static_cast<std::uint32_t>(std::lround(
+                static_cast<float>(rgb.width) * scale)));
+    const std::uint32_t height = std::max(
+        1U, static_cast<std::uint32_t>(std::lround(
+                static_cast<float>(rgb.height) * scale)));
+    aetherscan::io::RgbImage thumb;
+    thumb.width = width;
+    thumb.height = height;
+    thumb.pixels.resize(static_cast<std::size_t>(width) * height * 3);
+    aetherscan::io::resize_bilinear(
+        rgb.pixels.data(), rgb.width, rgb.height, 3, thumb.pixels.data(),
+        width, height);
+    return thumb;
+}
+
+}  // namespace
+
+void CameraPhotoCache::clear() {
+    for (auto& slot : slots_) {
+        if (!slot) continue;
+        if (slot->pending.valid()) slot->pending.wait();
+        slot->texture.reset();
+    }
+    slots_.clear();
+    ids_.clear();
+}
+
+void CameraPhotoCache::resize(const std::size_t view_count) {
+    if (view_count == slots_.size()) return;
+    if (view_count < slots_.size()) {
+        for (std::size_t i = view_count; i < slots_.size(); ++i) {
+            if (!slots_[i]) continue;
+            if (slots_[i]->pending.valid()) slots_[i]->pending.wait();
+            slots_[i]->texture.reset();
+        }
+    }
+    slots_.resize(view_count);
+    ids_.resize(view_count);
+}
+
+std::size_t CameraPhotoCache::inflight() const {
+    std::size_t count = 0;
+    for (const auto& slot : slots_)
+        if (slot && slot->loading) ++count;
+    return count;
+}
+
+void CameraPhotoCache::request(
+    const std::size_t index, const std::filesystem::path& path) {
+    if (index >= slots_.size() || path.empty()) return;
+    if (!slots_[index]) slots_[index] = std::make_unique<Slot>();
+    Slot& slot = *slots_[index];
+    if (slot.path != path) {
+        if (slot.pending.valid()) slot.pending.wait();
+        slot.texture.reset();
+        ids_[index] = {};
+        slot.pending = {};
+        slot.loading = false;
+        slot.failed = false;
+        slot.path = path;
+    }
+    if (slot.failed || slot.loading || ids_[index]) return;
+    if (inflight() >= k_max_inflight) return;
+    slot.loading = true;
+    slot.pending = std::async(std::launch::async, [path] {
+        return load_camera_thumbnail(path);
+    });
+}
+
+void CameraPhotoCache::poll() {
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        Slot* slot = slots_[i].get();
+        if (!slot || !slot->loading || !slot->pending.valid()) continue;
+        if (slot->pending.wait_for(std::chrono::seconds(0)) !=
+            std::future_status::ready)
+            continue;
+        try {
+            const aetherscan::io::RgbImage image = slot->pending.get();
+            if (image.width == 0 || image.height == 0 || image.pixels.empty())
+                throw std::runtime_error("empty camera thumbnail");
+            slot->texture.upload(image);
+            ids_[i] = reinterpret_cast<ImTextureID>(slot->texture.descriptor);
+        } catch (...) {
+            slot->failed = true;
+            ids_[i] = {};
+        }
+        slot->loading = false;
+        return;
+    }
+}
+
+ImTextureID CameraPhotoCache::id(const std::size_t index) const {
+    return index < ids_.size() ? ids_[index] : ImTextureID{};
 }
 
 }  // namespace editor::gpu

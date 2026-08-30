@@ -28,7 +28,7 @@ struct Settings {
     // Optional external trained Gaussian file used by the editor preview.
     std::filesystem::path splat_model_source;
     int sfm_mode = 0;  // 0 global, 1 incremental, 2 hierarchical
-    bool reuse_cache = true;
+    bool reuse_cache = false;
     unsigned max_features = 27'000;
     bool scene_mode = false;
     int iterations = 30'000;

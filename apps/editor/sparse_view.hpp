@@ -24,6 +24,7 @@ struct Vec3 {
 // world-to-camera matrix in row-major order, matching sfm::Pose3D::R.
 struct ViewPose {
     std::string name;
+    std::filesystem::path image_path;
     Vec3 centre;
     std::array<float, 9> rotation{{1, 0, 0, 0, 1, 0, 0, 0, 1}};
     float fx{1.F};
@@ -122,6 +123,17 @@ bool write_preview_camera_file(
 bool load_view_poses(
     const std::filesystem::path& poses_csv, SparseScene& scene);
 
+// Fills missing ViewPose::image_path entries from `images_dir / name`.
+void attach_view_image_paths(
+    SparseScene& scene, const std::filesystem::path& images_dir);
+
+constexpr std::size_t k_max_camera_markers = 32;
+
+// Uniform subset of registered cameras drawn as frustum markers.
+void sampled_view_indices(
+    const SparseScene& scene, std::vector<std::size_t>& indices,
+    std::size_t max_markers = k_max_camera_markers);
+
 // Applies orbit/pan/fly mouse navigation plus WASD/QE movement while the
 // viewport owns input. Holding RMB switches mouse motion to fly-look; Shift
 // accelerates keyboard movement.
@@ -142,6 +154,7 @@ struct ViewOptions {
     // Depth ramp is an overlay. Vertex RGB from the PLY is the default.
     bool colour_by_depth = false;
     bool show_views = true;
+    bool show_camera_photos = true;
     bool show_trajectory = true;
     bool show_grid = true;
     bool draw_rings = false;
@@ -160,7 +173,8 @@ public:
     SceneDrawStats draw(
         ImDrawList* draw, ImVec2 min, ImVec2 max, const SparseScene& scene,
         const OrbitCamera& camera, const ViewOptions& options,
-        bool hovered);
+        bool hovered, const ImTextureID* view_photos = nullptr,
+        std::size_t view_photo_count = 0);
 
 private:
     struct Projected {
