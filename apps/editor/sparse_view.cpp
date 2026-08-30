@@ -295,6 +295,125 @@ ImU32 depth_ramp(const float t) {
     return ImGui::ColorConvertFloat4ToU32(colour);
 }
 
+struct ProjectedRing {
+    ImVec2 centre;
+    ImVec2 radius;
+    float rotation{};
+};
+
+bool project_gaussian_ring(
+    const ViewFrame& frame, const Vec3 mean, const GaussianPrimitive& gaussian,
+    const float ring_scale, ProjectedRing& ring) {
+    const Vec3 relative = mean - frame.eye;
+    const float cam_x = dot(relative, frame.right);
+    const float cam_y = dot(relative, frame.up);
+    const float cam_z = dot(relative, frame.forward);
+    if (cam_z <= k_near_plane) return false;
+
+    float qw = gaussian.rotation[0];
+    float qx = gaussian.rotation[1];
+    float qy = gaussian.rotation[2];
+    float qz = gaussian.rotation[3];
+    const float qn = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+    if (qn < 1e-8F) return false;
+    qw /= qn;
+    qx /= qn;
+    qy /= qn;
+    qz /= qn;
+    const float xx = qx * qx;
+    const float yy = qy * qy;
+    const float zz = qz * qz;
+    const float xy = qx * qy;
+    const float xz = qx * qz;
+    const float yz = qy * qz;
+    const float wx = qw * qx;
+    const float wy = qw * qy;
+    const float wz = qw * qz;
+    const Vec3 axis_x{
+        (1.F - 2.F * (yy + zz)) * gaussian.scale.x,
+        (2.F * (xy + wz)) * gaussian.scale.x,
+        (2.F * (xz - wy)) * gaussian.scale.x};
+    const Vec3 axis_y{
+        (2.F * (xy - wz)) * gaussian.scale.y,
+        (1.F - 2.F * (xx + zz)) * gaussian.scale.y,
+        (2.F * (yz + wx)) * gaussian.scale.y};
+    const Vec3 axis_z{
+        (2.F * (xz + wy)) * gaussian.scale.z,
+        (2.F * (yz - wx)) * gaussian.scale.z,
+        (1.F - 2.F * (xx + yy)) * gaussian.scale.z};
+    const Vec3 cam_ax{
+        dot(axis_x, frame.right), dot(axis_x, frame.up),
+        dot(axis_x, frame.forward)};
+    const Vec3 cam_ay{
+        dot(axis_y, frame.right), dot(axis_y, frame.up),
+        dot(axis_y, frame.forward)};
+    const Vec3 cam_az{
+        dot(axis_z, frame.right), dot(axis_z, frame.up),
+        dot(axis_z, frame.forward)};
+
+    const float inv_z = 1.F / cam_z;
+    const float inv_z2 = inv_z * inv_z;
+    const float jx_x = frame.focal * inv_z;
+    const float jx_z = -frame.focal * cam_x * inv_z2;
+    const float jy_y = -frame.focal * inv_z;
+    const float jy_z = frame.focal * cam_y * inv_z2;
+    const auto project_axis = [&](const Vec3& axis) {
+        return ImVec2{
+            jx_x * axis.x + jx_z * axis.z, jy_y * axis.y + jy_z * axis.z};
+    };
+    const ImVec2 p0 = project_axis(cam_ax);
+    const ImVec2 p1 = project_axis(cam_ay);
+    const ImVec2 p2 = project_axis(cam_az);
+    const float a = p0.x * p0.x + p1.x * p1.x + p2.x * p2.x;
+    const float b = p0.x * p0.y + p1.x * p1.y + p2.x * p2.y;
+    const float c = p0.y * p0.y + p1.y * p1.y + p2.y * p2.y;
+    const float mid = 0.5F * (a + c);
+    const float ext = 0.5F * std::sqrt(std::max(0.F, (a - c) * (a - c) + 4.F * b * b));
+    const float lambda0 = std::max(0.F, mid + ext);
+    const float lambda1 = std::max(0.F, mid - ext);
+    ring.centre = {
+        frame.centre.x + cam_x * frame.focal * inv_z,
+        frame.centre.y - cam_y * frame.focal * inv_z};
+    ring.radius = {
+        std::min(80.F, ring_scale * std::sqrt(lambda0)),
+        std::min(80.F, ring_scale * std::sqrt(lambda1))};
+    ring.rotation = 0.5F * std::atan2(2.F * b, a - c);
+    return ring.radius.x >= 0.75F || ring.radius.y >= 0.75F;
+}
+
+std::size_t draw_gaussian_rings(
+    ImDrawList* draw, const ViewFrame& frame, const SparseScene& scene,
+    const ViewOptions& options, const ImVec2 min, const ImVec2 max) {
+    const std::size_t count = scene.points.size();
+    const std::size_t budget = static_cast<std::size_t>(
+        std::max(1, options.ring_budget));
+    const std::size_t stride =
+        std::max<std::size_t>(1, count / budget + 1);
+    const bool source_colours =
+        !options.colour_by_depth && !scene.colours.empty();
+    std::size_t drawn = 0;
+    for (std::size_t i = 0; i < count; i += stride) {
+        ProjectedRing ring;
+        if (!project_gaussian_ring(
+                frame, scene.points[i], scene.gaussians[i], options.ring_scale,
+                ring))
+            continue;
+        if (ring.centre.x + ring.radius.x < min.x ||
+            ring.centre.x - ring.radius.x > max.x ||
+            ring.centre.y + ring.radius.y < min.y ||
+            ring.centre.y - ring.radius.y > max.y)
+            continue;
+        const ImU32 colour = source_colours
+            ? (scene.colours[i] & 0x00FFFFFF) | IM_COL32(0, 0, 0, 200)
+            : theme::u32(theme::accent, 0.72F);
+        const int segments = ring.radius.x > 18.F ? 18 : 12;
+        draw->AddEllipse(
+            ring.centre, ring.radius, colour, ring.rotation, segments, 1.15F);
+        ++drawn;
+    }
+    return drawn;
+}
+
 // ---------------------------------------------------------------------------
 // PLY parsing
 
@@ -837,12 +956,19 @@ SceneLoad gaussian_scene_from_model(
         }
         const auto means = model.means.to_vector();
         const auto sh = model.sh.to_vector();
+        const auto log_scales = model.log_scales.is_valid()
+            ? model.log_scales.to_vector()
+            : std::vector<float>{};
+        const auto rotations = model.quaternions.is_valid()
+            ? model.quaternions.to_vector()
+            : std::vector<float>{};
         const std::size_t count = model.size();
         const std::size_t stride = std::max<std::size_t>(
             1, (count + k_max_loaded_points - 1U) / k_max_loaded_points);
         const std::size_t visible_count = (count + stride - 1U) / stride;
         result.scene.points.reserve(visible_count);
         result.scene.colours.reserve(visible_count);
+        result.scene.gaussians.reserve(visible_count);
         const std::size_t bases = model.sh.shape()[1];
         constexpr float sh_dc = 0.28209479177387814F;
         for (std::size_t index = 0; index < count; index += stride) {
@@ -858,7 +984,23 @@ SceneLoad gaussian_scene_from_model(
             };
             result.scene.colours.push_back(IM_COL32(
                 channel(0), channel(1), channel(2), 255));
+            const std::size_t scale_offset = index * 3U;
+            const std::size_t quat_offset = index * 4U;
+            if (scale_offset + 2U < log_scales.size() &&
+                quat_offset + 3U < rotations.size()) {
+                GaussianPrimitive primitive;
+                primitive.scale = {
+                    std::exp(log_scales[scale_offset]),
+                    std::exp(log_scales[scale_offset + 1U]),
+                    std::exp(log_scales[scale_offset + 2U])};
+                primitive.rotation = {
+                    rotations[quat_offset], rotations[quat_offset + 1U],
+                    rotations[quat_offset + 2U], rotations[quat_offset + 3U]};
+                result.scene.gaussians.push_back(primitive);
+            }
         }
+        if (result.scene.gaussians.size() != result.scene.points.size())
+            result.scene.gaussians.clear();
         load_poses(poses_csv, result.scene);
         result.scene.compute_bounds();
         result.ok = true;
@@ -989,10 +1131,13 @@ SceneDrawStats SceneRenderer::draw(
         draw_ground_grid(draw, frame, camera, plane_y);
     }
 
-    // Points: project once into the scratch buffer so the depth ramp can be
-    // normalised against the visible range, then emit quads in chunks.
+    // Rings replace the centre dots when a trained Gaussian model is loaded.
+    // Sparse SfM clouds have no covariance, so they always stay as points.
     const std::size_t count = scene.points.size();
-    if (count > 0) {
+    if (options.draw_rings && scene.has_gaussians()) {
+        stats.drawn_points =
+            draw_gaussian_rings(draw, frame, scene, options, min, max);
+    } else if (count > 0) {
         const std::size_t stride = std::max<std::size_t>(
             1, count / std::max(1, options.point_budget) + 1);
         scratch_.clear();
@@ -1245,7 +1390,8 @@ void snap_orbit_to_view(OrbitCamera& camera, const ViewPose& pose) {
 
 bool write_preview_camera_file(
     const std::filesystem::path& path, const SplatPreviewCamera& camera,
-    const std::uint64_t revision) {
+    const std::uint64_t revision, const char* vis_mode,
+    const float point_size_px, const float ring_scale) {
     if (path.empty()) return false;
     std::ofstream output(path, std::ios::trunc);
     if (!output) return false;
@@ -1260,6 +1406,8 @@ bool write_preview_camera_file(
            << camera.position[2] << '\n'
            << camera.fx << ' ' << camera.fy << ' ' << camera.cx << ' '
            << camera.cy << ' ' << camera.width << ' ' << camera.height << '\n';
+    if (vis_mode != nullptr && vis_mode[0] != '\0')
+        output << vis_mode << ' ' << point_size_px << ' ' << ring_scale << '\n';
     return static_cast<bool>(output);
 }
 

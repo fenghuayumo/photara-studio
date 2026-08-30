@@ -21,6 +21,8 @@ enum class Icon {
     output,
     stop,
     points,
+    splat,
+    rings,
     gpu,
     copy,
     trash,

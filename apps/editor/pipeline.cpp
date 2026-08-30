@@ -705,6 +705,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.working_sfm = layout.cache / "sfm.bin";
     layout.preview_view_file = layout.cache / "preview_view";
     layout.preview_camera_file = layout.cache / "preview_camera";
+    layout.preview_vis_file = layout.cache / "preview_vis";
     return layout;
 }
 
@@ -762,6 +763,8 @@ std::string build_train_command(
             << quote(layout.preview_view_file)
             << " --splat-preview-camera-file "
             << quote(layout.preview_camera_file)
+            << " --splat-preview-vis-file "
+            << quote(layout.preview_vis_file)
             << " --splat-max-resolution " << settings.max_resolution
             << " --splat-progressive-resolution="
             << (settings.progressive_resolution ? "true" : "false")
@@ -807,7 +810,9 @@ std::string build_view_command(
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.model_output) << " --splat-view"
             << " --splat-preview-camera-file "
-            << quote(layout.preview_camera_file);
+            << quote(layout.preview_camera_file)
+            << " --splat-preview-vis-file "
+            << quote(layout.preview_vis_file);
     append_gui_flags(command, layout);
     std::error_code exists_error;
     const std::filesystem::path imported_model(settings.splat_model_source.data());

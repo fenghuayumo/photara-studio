@@ -170,7 +170,8 @@ void run_orbit_preview(
     const GaussianModel& model,
     const std::filesystem::path& camera_file,
     DevicePreviewCallback device_preview,
-    float kernel_size = 0.F);
+    float kernel_size = 0.F,
+    const std::filesystem::path& vis_file = {});
 
 RenderMetrics render_evaluation_png(
     const GaussianModel& model, const mvs::MvsView& view,

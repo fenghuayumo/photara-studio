@@ -287,6 +287,23 @@ void draw(
             draw_list->AddCircleFilled(
                 point(min, max, 0.72F, 0.66F), extent * 0.09F, colour);
             break;
+        case Icon::splat:
+            draw_list->AddCircleFilled(
+                point(min, max, 0.50F, 0.52F), extent * 0.22F, colour);
+            draw_list->AddCircleFilled(
+                point(min, max, 0.36F, 0.40F), extent * 0.13F, colour);
+            break;
+        case Icon::rings: {
+            draw_list->AddEllipse(
+                point(min, max, 0.50F, 0.50F),
+                {extent * 0.30F, extent * 0.18F}, colour, -0.40F, 18,
+                thickness);
+            draw_list->AddEllipse(
+                point(min, max, 0.50F, 0.50F),
+                {extent * 0.16F, extent * 0.10F}, colour, -0.40F, 14,
+                thickness);
+            break;
+        }
         case Icon::gpu: {
             draw_list->AddRect(
                 point(min, max, 0.25F, 0.25F), point(min, max, 0.75F, 0.75F),

@@ -35,10 +35,18 @@ struct ViewPose {
     bool registered{};
 };
 
+struct GaussianPrimitive {
+    Vec3 scale;
+    // Scalar-first quaternion matching splat::GaussianModel::quaternions.
+    std::array<float, 4> rotation{{1.F, 0.F, 0.F, 0.F}};
+};
+
 struct SparseScene {
     std::vector<Vec3> points;
     // Empty when the PLY has no RGB and photo sampling found no colours.
     std::vector<std::uint32_t> colours;
+    // Populated only when the cloud came from a trained Gaussian model.
+    std::vector<GaussianPrimitive> gaussians;
     std::vector<ViewPose> views;
     Vec3 centroid;
     float radius{1.F};
@@ -47,6 +55,9 @@ struct SparseScene {
     float mean_reprojection{};
 
     [[nodiscard]] bool has_points() const { return !points.empty(); }
+    [[nodiscard]] bool has_gaussians() const {
+        return !gaussians.empty() && gaussians.size() == points.size();
+    }
     void compute_bounds();
     void clear();
 };
@@ -103,7 +114,8 @@ void snap_orbit_to_view(OrbitCamera& camera, const ViewPose& pose);
 
 bool write_preview_camera_file(
     const std::filesystem::path& path, const SplatPreviewCamera& camera,
-    std::uint64_t revision);
+    std::uint64_t revision, const char* vis_mode = nullptr,
+    float point_size_px = 2.5F, float ring_scale = 2.5F);
 
 // Loads registered cameras from the SfM diagnostics CSV without touching
 // points. Returns false when the file is missing or has no rows.
@@ -124,11 +136,15 @@ void camera_view_matrix(
 struct ViewOptions {
     float point_size = 1.7F;
     int point_budget = 160'000;
+    int ring_budget = 8'000;
+    // SuperSplat-style contour: multiples of the projected 2D Gaussian sigma.
+    float ring_scale = 2.5F;
     // Depth ramp is an overlay. Vertex RGB from the PLY is the default.
     bool colour_by_depth = false;
     bool show_views = true;
     bool show_trajectory = true;
     bool show_grid = true;
+    bool draw_rings = false;
     float view_scale = 0.045F;
 };
 

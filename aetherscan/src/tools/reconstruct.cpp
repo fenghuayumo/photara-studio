@@ -104,6 +104,7 @@ struct ReconstructCli {
     unsigned splat_preview_view{0};
     std::filesystem::path splat_preview_view_file;
     std::filesystem::path splat_preview_camera_file;
+    std::filesystem::path splat_preview_vis_file;
     std::filesystem::path splat_preview_dir;
     std::uint64_t splat_preview_vk_memory_handle{};
     std::uint64_t splat_preview_vk_semaphore_handle{};
@@ -298,6 +299,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-preview-view N  camera index for live preview (default 0, first frame)\n"
               << "  --splat-preview-view-file PATH  optional file the editor updates to switch cameras\n"
               << "  --splat-preview-camera-file PATH  optional orbit-camera sidecar (overrides view index)\n"
+              << "  --splat-preview-vis-file PATH  optional splat/points/rings visualization sidecar\n"
               << "  --splat-preview-dir PATH  editor preview PNG directory\n"
               << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
@@ -502,6 +504,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-preview-camera-file",
          "Sidecar file with an orbit-camera W2C pose for the live preview",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-preview-vis-file",
+         "Sidecar file selecting live preview shading: splat, points, or rings",
          cxxopts::value<std::string>()->default_value(""))
         ("splat-preview-dir", "Directory for live training preview PNGs",
          cxxopts::value<std::string>()->default_value(""))
@@ -843,6 +848,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!splat_preview_camera_file_text.empty())
         cli.splat_preview_camera_file =
             utf8_to_path(splat_preview_camera_file_text);
+    const std::string splat_preview_vis_file_text =
+        result["splat-preview-vis-file"].as<std::string>();
+    if (!splat_preview_vis_file_text.empty())
+        cli.splat_preview_vis_file = utf8_to_path(splat_preview_vis_file_text);
     const std::string splat_preview_dir_text =
         result["splat-preview-dir"].as<std::string>();
     if (!splat_preview_dir_text.empty())
@@ -1388,7 +1397,7 @@ void run_splat_view(
             const tinytensor::Tensor& color) {
             vulkan_preview->submit(color, camera.width, camera.height);
         },
-        cli.splat_kernel_size);
+        cli.splat_kernel_size, cli.splat_preview_vis_file);
 }
 #endif
 
@@ -1943,6 +1952,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.preview_view_index = cli.splat_preview_view;
     options.preview_view_file = cli.splat_preview_view_file;
     options.preview_camera_file = cli.splat_preview_camera_file;
+    options.preview_vis_file = cli.splat_preview_vis_file;
     options.max_gaussians = static_cast<std::size_t>(
         std::min<std::uint64_t>(
             cli.splat_max_gaussians,

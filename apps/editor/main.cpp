@@ -11,6 +11,7 @@
 #include "sfm/asfm.hpp"
 #include "sfm/export_mvs.hpp"
 #include "splat/trainer.hpp"
+#include "splat/visualize.hpp"
 
 #include "imgui_impl_glfw.h"
 #include "imgui_internal.h"
@@ -54,7 +55,7 @@ using namespace editor;
 
 constexpr std::uint32_t k_preview_extent = 1920;
 
-enum class ViewportTab { sparse, training };
+enum class VisualizationMode { points, splat, rings };
 
 enum class StepState { pending, active, done, skipped, failed };
 
@@ -88,7 +89,7 @@ struct App {
     bool has_mesh{};
     std::uint32_t project_writer_version{};
     std::uint32_t project_min_reader_version{};
-    ViewportTab tab{ViewportTab::sparse};
+    VisualizationMode view_mode{VisualizationMode::points};
     unsigned preview_view{};
     std::uint64_t preview_camera_revision{};
     bool preview_follow_view{true};
@@ -120,6 +121,10 @@ struct App {
 void stop_splat_view(App& app) {
     if (app.viewer.running()) app.viewer.stop();
 }
+
+void start_splat_view(App& app);
+void sync_live_preview_camera(
+    App& app, bool force, std::uint32_t width, std::uint32_t height);
 
 bool has_external_dataset(const App& app) {
     return app.settings.dataset_source[0] != '\0';
@@ -566,7 +571,7 @@ void clear_loaded_result(App& app) {
     app.scene.clear();
     app.scene_source.clear();
     app.camera = {};
-    app.tab = ViewportTab::sparse;
+    app.view_mode = VisualizationMode::points;
     app.monitor.reset();
     app.log.clear();
     app.console = {};
@@ -664,6 +669,129 @@ void ensure_sparse_loaded(App& app) {
             app, app.layout.sparse_ply, app.layout.sparse_poses, "Sparse cloud");
 }
 
+void ensure_gaussian_scene(App& app) {
+    if (app.scene.has_gaussians() || app.loading_scene || !app.has_model) return;
+    request_gaussian_scene_load(app);
+}
+
+aetherscan::splat::VisualizeOptions editor_visualize_options(const App& app) {
+    aetherscan::splat::VisualizeOptions options;
+    options.mode = app.view_mode == VisualizationMode::points
+        ? aetherscan::splat::VisualizationMode::points
+        : app.view_mode == VisualizationMode::rings
+            ? aetherscan::splat::VisualizationMode::rings
+            : aetherscan::splat::VisualizationMode::splat;
+    options.point_size_px = app.view_options.point_size;
+    options.ring_scale = app.view_options.ring_scale;
+    return options;
+}
+
+void write_preview_vis(App& app) {
+    if (app.layout.preview_vis_file.empty()) return;
+    aetherscan::splat::write_visualization_sidecar(
+        app.layout.preview_vis_file, editor_visualize_options(app),
+        app.preview_camera_revision);
+}
+
+void publish_preview_vis(App& app) {
+    ++app.preview_camera_revision;
+    write_preview_vis(app);
+}
+
+void set_visualization_mode(App& app, const VisualizationMode mode) {
+    app.view_mode = mode;
+    const bool training =
+        app.job.running() && app.active_job == JobKind::train;
+    if (app.has_model && !training)
+        start_splat_view(app);
+    else if (mode == VisualizationMode::points && !live_preview_active(app) &&
+             !app.scene.has_points())
+        ensure_sparse_loaded(app);
+    write_preview_vis(app);
+    sync_live_preview_camera(
+        app, true, app.preview_raster_width, app.preview_raster_height);
+}
+
+constexpr float k_view_rail_pad = 10.F;
+constexpr float k_view_rail_top = 52.F;
+constexpr float k_view_rail_width = 44.F;
+constexpr float k_view_rail_height = 120.F;
+
+ImRect view_mode_rail_rect(const ImVec2 view_min) {
+    const ImVec2 origin{
+        view_min.x + k_view_rail_pad, view_min.y + k_view_rail_top};
+    return {
+        origin.x, origin.y, origin.x + k_view_rail_width,
+        origin.y + k_view_rail_height};
+}
+
+bool view_mode_rail_contains(const ImVec2 view_min, const ImVec2 mouse) {
+    return view_mode_rail_rect(view_min).Contains(mouse);
+}
+
+bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
+    const ImRect rail = view_mode_rail_rect(view_min);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(
+        rail.Min, rail.Max, IM_COL32(16, 18, 23, 214), 8.F);
+    draw->AddRect(
+        rail.Min, rail.Max, theme::u32(theme::border, 0.7F), 8.F);
+
+    constexpr float k_btn = 32.F;
+    constexpr float k_inner = 6.F;
+    constexpr float k_gap = 4.F;
+    const ImVec2 button_size{k_btn, k_btn};
+    bool hovered = false;
+
+    const bool training =
+        app.job.running() && app.active_job == JobKind::train;
+    const bool splat_ok = app.has_model || training;
+    const bool rings_ok = app.has_model || training;
+
+    struct RailItem {
+        const char* id;
+        icons::Icon icon;
+        VisualizationMode mode;
+        bool enabled;
+        const char* tooltip;
+    };
+    const RailItem items[] = {
+        {"##viz_points", icons::Icon::points, VisualizationMode::points, true,
+         "Point Cloud"},
+        {"##viz_splat", icons::Icon::splat, VisualizationMode::splat, splat_ok,
+         splat_ok ? "Splat" : "Train 3DGS to view the splat"},
+        {"##viz_rings", icons::Icon::rings, VisualizationMode::rings, rings_ok,
+         rings_ok ? "Rings"
+                  : "Available while training or after a Gaussian model exists"},
+    };
+
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0.F, k_gap});
+    for (int i = 0; i < 3; ++i) {
+        const ImVec2 button_min{
+            rail.Min.x + k_inner,
+            rail.Min.y + k_inner + static_cast<float>(i) * (k_btn + k_gap)};
+        ImGui::SetCursorScreenPos(button_min);
+        ImGui::SetNextItemAllowOverlap();
+        const bool pressed = icons::ghost_button(
+            items[i].id, items[i].icon, button_size,
+            app.view_mode == items[i].mode, items[i].enabled,
+            items[i].tooltip);
+        const bool hit =
+            items[i].enabled && clicked &&
+            ImRect{button_min, {button_min.x + k_btn, button_min.y + k_btn}}
+                .Contains(mouse);
+        if (pressed || hit)
+            set_visualization_mode(app, items[i].mode);
+        hovered = hovered || ImGui::IsItemHovered() ||
+                  ImRect{button_min, {button_min.x + k_btn, button_min.y + k_btn}}
+                      .Contains(mouse);
+    }
+    ImGui::PopStyleVar();
+    return hovered;
+}
+
 const ViewPose* first_registered_view(const SparseScene& scene) {
     for (const ViewPose& pose : scene.views) {
         if (pose.registered) return &pose;
@@ -715,8 +843,12 @@ void sync_live_preview_camera(
     app.preview_raster_height = height;
     const SplatPreviewCamera preview =
         make_preview_camera(app.camera, width, height);
+    const auto vis = editor_visualize_options(app);
     write_preview_camera_file(
-        app.layout.preview_camera_file, preview, app.preview_camera_revision);
+        app.layout.preview_camera_file, preview, app.preview_camera_revision,
+        aetherscan::splat::visualization_mode_name(vis.mode),
+        vis.point_size_px, vis.ring_scale);
+    write_preview_vis(app);
     app.last_preview_orbit = app.camera;
     app.has_last_preview_orbit = true;
 }
@@ -881,7 +1013,9 @@ void poll_scene_load(App& app) {
     }
     app.scene = std::move(loaded.scene);
     if (!live_preview_active(app)) app.camera.frame(app.scene);
-    if (app.tab != ViewportTab::training) app.tab = ViewportTab::sparse;
+    if (app.view_mode != VisualizationMode::splat &&
+        app.view_mode != VisualizationMode::rings)
+        app.view_mode = VisualizationMode::points;
     set_message(
         app,
         app.scene_source + ": " + format_count(app.scene.points.size()) +
@@ -1103,6 +1237,7 @@ void start_train(App& app, const bool smoke) {
     if (const ViewPose* pose = first_registered_view(app.scene))
         snap_orbit_to_view(app.camera, *pose);
     write_preview_view_index(app.layout, app.preview_view);
+    app.view_mode = VisualizationMode::splat;
     sync_live_preview_camera(
         app, true, app.preview_raster_width, app.preview_raster_height);
     ensure_sparse_loaded(app);
@@ -1138,6 +1273,8 @@ void start_train(App& app, const bool smoke) {
             << app.layout.preview_view_file.string() << '"'
             << " --splat-preview-camera-file \""
             << app.layout.preview_camera_file.string() << '"'
+            << " --splat-preview-vis-file \""
+            << app.layout.preview_vis_file.string() << '"'
             << " --splat-preview-vk-memory-handle " << handles.memory
             << " --splat-preview-vk-semaphore-handle " << handles.semaphore
             << " --splat-preview-vk-allocation-size " << handles.allocation_size
@@ -1157,7 +1294,6 @@ void start_train(App& app, const bool smoke) {
         app.log.open(app.layout.train_log);
         app.job.start(command, app.layout.train_log);
         app.active_job = JobKind::train;
-        app.tab = ViewportTab::training;
         set_message(
             app,
             app.settings.build_mesh
@@ -1363,6 +1499,7 @@ Action draw_menu_bar(App& app) {
         if (ImGui::MenuItem(
                 "Load Sparse Cloud", nullptr, false,
                 app.has_sparse && !app.loading_scene)) {
+            app.view_mode = VisualizationMode::points;
             if (!app.layout.project_file.empty())
                 request_ascan_scene_load(app);
             else
@@ -1732,15 +1869,23 @@ void draw_scene_panel(App& app) {
         } else {
             if (has_cloud &&
                 object_row(
-                    "Sparse Cloud", app.tab == ViewportTab::sparse)) {
-                app.tab = ViewportTab::sparse;
+                    "Sparse Cloud",
+                    app.view_mode == VisualizationMode::points &&
+                        !live_preview_active(app))) {
+                app.view_mode = VisualizationMode::points;
                 if (app.has_sparse) ensure_sparse_loaded(app);
+                write_preview_vis(app);
+                sync_live_preview_camera(
+                    app, true, app.preview_raster_width,
+                    app.preview_raster_height);
             }
             if (has_gaussians &&
                 object_row(
-                    "Gaussians", app.tab == ViewportTab::training)) {
-                app.tab = ViewportTab::training;
-                if (!app.job.running()) start_splat_view(app);
+                    "Gaussians",
+                    app.view_mode == VisualizationMode::splat ||
+                        app.view_mode == VisualizationMode::rings ||
+                        live_preview_active(app))) {
+                set_visualization_mode(app, VisualizationMode::splat);
             }
             if (has_mesh) object_row("Mesh", false);
         }
@@ -1861,19 +2006,26 @@ void draw_viewport_overlay(
 }
 
 void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
-    ensure_sparse_loaded(app);
+    if (app.view_mode == VisualizationMode::rings)
+        ensure_gaussian_scene(app);
+    else
+        ensure_sparse_loaded(app);
+    app.view_options.draw_rings = app.view_mode == VisualizationMode::rings;
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilledMultiColor(
         min, max, IM_COL32(9, 11, 16, 255), IM_COL32(9, 11, 16, 255),
         IM_COL32(18, 22, 32, 255), IM_COL32(18, 22, 32, 255));
 
     ImGui::SetCursorScreenPos(min);
+    ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton(
         "##sparse_view",
         {std::max(1.F, max.x - min.x), std::max(1.F, max.y - min.y)},
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
             ImGuiButtonFlags_MouseButtonMiddle);
-    const bool hovered = ImGui::IsItemHovered();
+    const bool hovered =
+        ImGui::IsItemHovered() &&
+        !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
 
     const SceneDrawStats stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, app.view_options, hovered);
@@ -1892,6 +2044,9 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     if (app.loading_scene) {
         overlay = "LOADING";
         overlay_dot = theme::warning;
+    } else if (app.view_mode == VisualizationMode::rings) {
+        overlay = app.scene.has_gaussians() ? "GAUSSIAN RINGS" : "NO GAUSSIANS";
+        overlay_dot = app.scene.has_gaussians() ? theme::accent : theme::inactive;
     } else if (app.scene.has_points()) {
         overlay = app.scene_source.empty() ? "SPARSE POINT CLOUD"
                                            : app.scene_source.c_str();
@@ -1905,7 +2060,10 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         char readout[192];
         std::snprintf(
             readout, sizeof(readout),
-            "%s pts drawn  |  %zu / %zu cameras shown  |  %s pts total",
+            app.view_mode == VisualizationMode::rings &&
+                    app.scene.has_gaussians()
+                ? "%s rings drawn  |  %zu / %zu cameras shown  |  %s gaussians"
+                : "%s pts drawn  |  %zu / %zu cameras shown  |  %s pts total",
             format_count(stats.drawn_points).c_str(), stats.drawn_views,
             app.scene.registered_views,
             format_count(app.scene.points.size()).c_str());
@@ -1967,12 +2125,15 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg));
 
     ImGui::SetCursorScreenPos(min);
+    ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton(
         "##training_view",
         {std::max(1.F, max.x - min.x), std::max(1.F, max.y - min.y)},
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
             ImGuiButtonFlags_MouseButtonMiddle);
-    const bool hovered = ImGui::IsItemHovered();
+    const bool hovered =
+        ImGui::IsItemHovered() &&
+        !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
 
     const bool training = app.job.running() && app.active_job == JobKind::train;
     const bool viewing = app.viewer.running();
@@ -1991,17 +2152,17 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const char* controls = live
         ? "LMB orbit  |  MMB pan  |  RMB + WASD fly  |  arrows snap capture"
         : (app.has_model
-               ? "Open Live Training to orbit this splat"
+               ? "Select a visualization mode to start the live preview"
                : "Train 3DGS to move this camera");
 
     if (!has_frame) {
         draw_empty_viewport(
             draw, min, max,
             live ? "Waiting for the first rendered view..."
-                 : "No live splat preview",
+                 : "No live preview",
             live ? "Orbit the view; the first frame uses this camera"
                  : (app.has_model
-                        ? "Open Live Training to render the trained splat"
+                        ? "Select Points, Splat, or Rings to render the model"
                         : "Run Train 3DGS to stream the optimiser output"));
     } else {
         draw->AddImage(
@@ -2022,12 +2183,21 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     fit_preview_raster(max.x - min.x, max.y - min.y, raster_w, raster_h);
     sync_live_preview_camera(app, false, raster_w, raster_h);
 
+    const char* overlay_label = "IDLE";
+    if (has_frame) {
+        if (app.view_mode == VisualizationMode::points)
+            overlay_label = "GAUSSIAN CENTRES";
+        else if (app.view_mode == VisualizationMode::rings)
+            overlay_label = "GAUSSIAN RINGS";
+        else if (training)
+            overlay_label = "LIVE TRAINING PREVIEW";
+        else
+            overlay_label = viewing ? "LIVE SPLAT VIEW" : "LAST TRAINING FRAME";
+    } else if (live) {
+        overlay_label = training ? "TRAINING" : "VIEWING";
+    }
     draw_viewport_overlay(
-        draw, min,
-        has_frame
-            ? (training ? "LIVE TRAINING PREVIEW"
-                        : (viewing ? "LIVE SPLAT VIEW" : "LAST TRAINING FRAME"))
-            : (live ? (training ? "TRAINING" : "VIEWING") : "IDLE"),
+        draw, min, overlay_label,
         has_frame
             ? (live ? theme::success : theme::inactive)
             : (live ? theme::warning : theme::inactive));
@@ -2067,9 +2237,6 @@ void draw_viewport_panel(App& app) {
         return;
     }
 
-    // SetCursorPos is window-relative and includes the dock tab bar. The
-    // Sparse Cloud / Live Training buttons used to sit at (8, 5) under the
-    // "Viewport" tab. Layout from the content origin Begin() already set.
     if (ImGuiDockNode* node = ImGui::GetWindowDockNode())
         node->LocalFlags |= ImGuiDockNodeFlags_AutoHideTabBar;
 
@@ -2085,19 +2252,6 @@ void draw_viewport_panel(App& app) {
         {header_origin.x, header_origin.y + k_header_height - 1.F},
         {header_origin.x + header_width, header_origin.y + k_header_height - 1.F},
         theme::u32(theme::border));
-
-    ImGui::SetCursorPos({content_start.x + 8.F, content_start.y + 5.F});
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.F, 4.F));
-    if (theme::toolbar_button(
-            "Sparse Cloud", {0, 26.F}, true, app.tab == ViewportTab::sparse))
-        app.tab = ViewportTab::sparse;
-    ImGui::SameLine(0.F, 4.F);
-    if (theme::toolbar_button(
-            "Live Training", {0, 26.F}, true, app.tab == ViewportTab::training)) {
-        app.tab = ViewportTab::training;
-        if (app.has_model && !app.job.running()) start_splat_view(app);
-    }
-    ImGui::PopStyleVar();
 
     const char* state = app.job.running()
         ? running_job_caption(app.active_job)
@@ -2119,10 +2273,11 @@ void draw_viewport_panel(App& app) {
     const ImVec2 view_min = ImGui::GetCursorScreenPos();
     const ImVec2 region = ImGui::GetContentRegionAvail();
     const ImVec2 view_max{view_min.x + region.x, view_min.y + region.y};
-    if (app.tab == ViewportTab::sparse)
-        draw_sparse_tab(app, view_min, view_max);
-    else
+    if (live_preview_active(app))
         draw_training_tab(app, view_min, view_max);
+    else
+        draw_sparse_tab(app, view_min, view_max);
+    draw_view_mode_rail(app, view_min);
     ImGui::EndChild();
     ImGui::End();
 }
@@ -2438,12 +2593,13 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
     }
 
-    if (app.tab == ViewportTab::sparse &&
-        ImGui::CollapsingHeader("Sparse View", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (app.view_mode != VisualizationMode::splat &&
+        ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
         if (theme::toolbar_button(
                 "Load Sparse Cloud", {-1.F, 28.F},
                 app.has_sparse && !app.loading_scene)) {
+            app.view_mode = VisualizationMode::points;
             if (!app.layout.project_file.empty())
                 request_ascan_scene_load(app);
             else
@@ -2458,13 +2614,30 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
         theme::caption("Point size");
         ImGui::SetNextItemWidth(-1.F);
-        ImGui::SliderFloat(
-            "##point_size", &app.view_options.point_size, 1.F, 6.F, "%.1f px");
+        if (ImGui::SliderFloat(
+                "##point_size", &app.view_options.point_size, 1.F, 6.F,
+                "%.1f px") &&
+            live_preview_active(app))
+            publish_preview_vis(app);
         theme::caption("Rendered point budget");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::SliderInt(
             "##budget", &app.view_options.point_budget, 20'000, 600'000,
             "%d");
+        if (app.view_mode == VisualizationMode::rings) {
+            theme::caption("Ring budget");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::SliderInt(
+                "##ring_budget", &app.view_options.ring_budget, 1'000, 40'000,
+                "%d");
+            theme::caption("Ring scale");
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::SliderFloat(
+                    "##ring_scale", &app.view_options.ring_scale, 1.F, 4.F,
+                    "%.1f σ") &&
+                live_preview_active(app))
+                publish_preview_vis(app);
+        }
         theme::caption("Camera marker size");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::SliderFloat(
@@ -2707,16 +2880,20 @@ void draw_status_bar(const App& app) {
                 right, centre_y, icons::Icon::points, points.c_str());
         }
 
-        const char* view = app.tab == ViewportTab::sparse ? "Sparse" : "Training";
+        const char* view = "Points";
+        icons::Icon view_icon = icons::Icon::points;
+        if (app.view_mode == VisualizationMode::splat) {
+            view = "Splat";
+            view_icon = icons::Icon::splat;
+        } else if (app.view_mode == VisualizationMode::rings) {
+            view = "Rings";
+            view_icon = icons::Icon::rings;
+        }
         const float view_width = status_segment_width(view);
         right -= view_width + 22.F;
         if (right > 520.F) {
             draw_status_separator(right + view_width + 11.F, height);
-            draw_status_segment(
-                right, centre_y,
-                app.tab == ViewportTab::sparse ? icons::Icon::cube
-                                               : icons::Icon::train,
-                view);
+            draw_status_segment(right, centre_y, view_icon, view);
         }
     }
 

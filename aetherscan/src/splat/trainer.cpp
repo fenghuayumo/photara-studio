@@ -1,4 +1,5 @@
 #include "splat/trainer.hpp"
+#include "splat/visualize.hpp"
 
 #include "cuda_ops.hpp"
 #include "core/logging.hpp"
@@ -55,7 +56,7 @@ std::size_t requested_preview_view(
 
 bool load_preview_camera_file(
     const std::filesystem::path& path, Camera& camera,
-    std::uint64_t& revision) {
+    std::uint64_t& revision, VisualizeOptions* vis = nullptr) {
     if (path.empty()) return false;
     std::ifstream input(path);
     if (!input) return false;
@@ -76,7 +77,31 @@ bool load_preview_camera_file(
     camera.width = std::min(width, k_max_preview_extent);
     camera.height = std::min(height, k_max_preview_extent);
     revision = parsed_revision;
+    if (vis != nullptr) {
+        std::string mode_text;
+        float point_size = vis->point_size_px;
+        float ring_scale = vis->ring_scale;
+        if (input >> mode_text >> point_size >> ring_scale) {
+            VisualizationMode mode = vis->mode;
+            if (parse_visualization_mode(mode_text, mode)) {
+                vis->mode = mode;
+                vis->point_size_px = std::max(0.5F, point_size);
+                vis->ring_scale = std::clamp(ring_scale, 0.5F, 8.F);
+            }
+        }
+    }
     return true;
+}
+
+tinytensor::Tensor render_preview_color(
+    const GaussianModel& model, const Camera& camera,
+    const TrainingOptions& options, const unsigned active_sh_degree,
+    VisualizeOptions vis, std::uint64_t& vis_revision) {
+    vis.active_sh_degree = active_sh_degree;
+    vis.kernel_size = options.kernel_size;
+    vis.scale_modifier = options.scale_modifier;
+    load_visualization_sidecar(options.preview_vis_file, vis, vis_revision);
+    return visualize(model, camera, vis);
 }
 
 enum class CudaTrainingStage : std::size_t {
@@ -812,6 +837,8 @@ GaussianModel Trainer::train(
     std::size_t last_preview_view = std::numeric_limits<std::size_t>::max();
     std::uint64_t last_preview_camera_revision =
         std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t last_preview_vis_revision =
+        std::numeric_limits<std::uint64_t>::max();
     const refine::SceneGeometry scene_geometry =
         refine::training_scene_geometry(scene, options_.input_is_dense);
     const float scene_extent = scene_geometry.scale;
@@ -948,13 +975,20 @@ GaussianModel Trainer::train(
         if ((preview || device_preview) && options_.preview_interval != 0) {
             Camera preview_camera;
             std::uint64_t camera_revision = 0;
+            VisualizeOptions camera_vis;
             const bool custom_camera = load_preview_camera_file(
-                options_.preview_camera_file, preview_camera, camera_revision);
+                options_.preview_camera_file, preview_camera, camera_revision,
+                &camera_vis);
             const std::size_t preview_index =
                 requested_preview_view(options_, scene.views.size());
+            std::uint64_t vis_revision = last_preview_vis_revision;
+            VisualizeOptions vis_peek = camera_vis;
+            load_visualization_sidecar(
+                options_.preview_vis_file, vis_peek, vis_revision);
             const bool due =
                 iteration % options_.preview_interval == 0 ||
                 iteration == options_.iterations ||
+                vis_revision != last_preview_vis_revision ||
                 (custom_camera
                      ? camera_revision != last_preview_camera_revision
                      : preview_index != last_preview_view);
@@ -963,23 +997,19 @@ GaussianModel Trainer::train(
                     view_cache.prefetch(preview_index);
                     preview_camera = view_cache.get(preview_index).camera;
                 }
-                RasterizeOptions preview_options;
-                preview_options.active_sh_degree =
-                    raster_options.active_sh_degree;
-                preview_options.kernel_size = raster_options.kernel_size;
-                preview_options.scale_modifier = raster_options.scale_modifier;
-                preview_options.require_depth = false;
-                const RenderResult preview_rendered = rasterizer.forward(
-                    model, preview_camera, preview_options);
+                const tinytensor::Tensor preview_color = render_preview_color(
+                    model, preview_camera, options_,
+                    raster_options.active_sh_degree, camera_vis, vis_revision);
                 last_preview_view = preview_index;
                 last_preview_camera_revision = camera_revision;
+                last_preview_vis_revision = vis_revision;
                 if (device_preview) {
                     device_preview(
                         iteration, preview_index, preview_camera,
-                        preview_rendered.color);
+                        preview_color);
                 } else {
                     const std::vector<float> planar =
-                        download<float>(preview_rendered.color);
+                        download<float>(preview_color);
                     const std::size_t pixels =
                         static_cast<std::size_t>(preview_camera.width) *
                         preview_camera.height;
@@ -1939,7 +1969,8 @@ void run_orbit_preview(
     const GaussianModel& model,
     const std::filesystem::path& camera_file,
     DevicePreviewCallback device_preview,
-    const float kernel_size) {
+    const float kernel_size,
+    const std::filesystem::path& vis_file) {
     if (model.size() == 0)
         throw std::runtime_error("Orbit preview requires a trained Gaussian model");
     if (!device_preview)
@@ -1947,22 +1978,21 @@ void run_orbit_preview(
     if (camera_file.empty())
         throw std::runtime_error("Orbit preview requires a camera sidecar");
 
-    Rasterizer rasterizer;
-    RasterizeOptions options;
-    options.active_sh_degree = model.sh_degree;
-    options.kernel_size = kernel_size;
-    options.require_depth = false;
-
     std::uint64_t last_revision = ~0ULL;
+    std::uint64_t last_vis_revision = ~0ULL;
     while (true) {
         Camera next;
         std::uint64_t revision = 0;
-        if (load_preview_camera_file(camera_file, next, revision) &&
-            revision != last_revision) {
-            const RenderResult rendered =
-                rasterizer.forward(model, next, options);
-            device_preview(0, 0, next, rendered.color);
+        VisualizeOptions vis;
+        vis.active_sh_degree = model.sh_degree;
+        vis.kernel_size = kernel_size;
+        std::uint64_t vis_revision = last_vis_revision;
+        load_visualization_sidecar(vis_file, vis, vis_revision);
+        if (load_preview_camera_file(camera_file, next, revision, &vis) &&
+            (revision != last_revision || vis_revision != last_vis_revision)) {
+            device_preview(0, 0, next, visualize(model, next, vis));
             last_revision = revision;
+            last_vis_revision = vis_revision;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }

@@ -199,6 +199,8 @@ struct TrainingOptions {
     // Optional orbit-camera sidecar written by the editor (W2C + intrinsics).
     // When present and readable it overrides preview_view_index.
     std::filesystem::path preview_camera_file;
+    // Editor visualization mode sidecar: splat / points / rings.
+    std::filesystem::path preview_vis_file;
 };
 
 }  // namespace aetherscan::splat

@@ -377,7 +377,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
             src/splat/rasterizer.cu
             src/splat/cuda_ops.cu
             src/splat/cuda_vulkan_preview.cu
-            src/splat/fused_ssim.cu)
+            src/splat/fused_ssim.cu
+            src/splat/visualize.cu)
         target_include_directories(aetherscan_splat_cuda
             PUBLIC
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
