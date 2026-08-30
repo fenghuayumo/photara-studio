@@ -44,6 +44,11 @@ struct GlobalPositioningOptions {
     GlobalPositioningConstraint constraint{
         GlobalPositioningConstraint::only_points};
     double constraint_reweight_scale{1.0};
+    // Detect complete, ordered turntable/orbit captures from solved geometry
+    // and regularize their centers before the final bundle polish. The
+    // detector is intentionally strict, so ordinary unordered or linear
+    // captures keep the unconstrained global solution.
+    bool regularize_complete_orbits{true};
 };
 
 struct GlobalPositioningSummary {

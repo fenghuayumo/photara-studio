@@ -7,16 +7,281 @@
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
 
+#include <Eigen/Eigenvalues>
 #include <Eigen/QR>
 
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <numbers>
+#include <numeric>
 #include <queue>
 #include <unordered_map>
 
 namespace aetherscan::sfm {
 namespace {
+
+double median_value(std::vector<double> values) {
+    if (values.empty()) return 0.0;
+    const auto middle = values.begin() +
+        static_cast<std::ptrdiff_t>(values.size() / 2);
+    std::nth_element(values.begin(), middle, values.end());
+    return *middle;
+}
+
+double percentile_value(
+    std::vector<double> values, const double fraction) {
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    const std::size_t index = static_cast<std::size_t>(std::clamp(
+        fraction * static_cast<double>(values.size() - 1),
+        0.0, static_cast<double>(values.size() - 1)));
+    return values[index];
+}
+
+bool regularize_complete_orbit(
+    Scene& scene, const GlobalPositioningOptions& options,
+    bool& preserve_orbit_centers) {
+    preserve_orbit_centers = false;
+    if (!options.regularize_complete_orbits || scene.images.size() < 16 ||
+        scene.registered_count() != scene.images.size())
+        return false;
+
+    unsigned verified_neighbors = 0;
+    for (Index image_id = 0; image_id + 1 < scene.images.size(); ++image_id) {
+        const ImagePair* pair = scene.find_pair(image_id, image_id + 1);
+        // This is sequence evidence only. Rotation averaging may already have
+        // deactivated a locally inconsistent edge, but the verified relative
+        // pose still proves that the consecutive images overlap.
+        if (pair && pair->relative_pose.has_value())
+            ++verified_neighbors;
+    }
+    const double neighbor_ratio = static_cast<double>(verified_neighbors) /
+        static_cast<double>(scene.images.size() - 1);
+    Vec3 mean = Vec3::Zero();
+    for (const Image& image : scene.images) mean += image.pose.C;
+    mean /= static_cast<double>(scene.images.size());
+    Mat3 covariance = Mat3::Zero();
+    for (const Image& image : scene.images) {
+        const Vec3 centered = image.pose.C - mean;
+        covariance += centered * centered.transpose();
+    }
+    const Eigen::SelfAdjointEigenSolver<Mat3> eigensolver(covariance);
+    if (eigensolver.info() != Eigen::Success) return false;
+    Vec3 plane_normal = eigensolver.eigenvectors().col(0).normalized();
+    const Vec3 axis1 = eigensolver.eigenvectors().col(2).normalized();
+    double normal_score = 0.0;
+    for (const Image& image : scene.images)
+        normal_score += image.pose.R.row(1).dot(plane_normal);
+    if (normal_score < 0.0) plane_normal = -plane_normal;
+    const Vec3 axis2 = plane_normal.cross(axis1).normalized();
+
+    Eigen::MatrixXd circle_system(scene.images.size(), 3);
+    Eigen::VectorXd circle_rhs(scene.images.size());
+    for (std::size_t index = 0; index < scene.images.size(); ++index) {
+        const Vec3 centered = scene.images[index].pose.C - mean;
+        const double x = centered.dot(axis1);
+        const double y = centered.dot(axis2);
+        circle_system.row(index) << 2.0 * x, 2.0 * y, 1.0;
+        circle_rhs[static_cast<Eigen::Index>(index)] = x * x + y * y;
+    }
+    const Eigen::Vector3d circle =
+        circle_system.colPivHouseholderQr().solve(circle_rhs);
+    if (!circle.allFinite()) return false;
+    const Vec3 orbit_center =
+        mean + circle[0] * axis1 + circle[1] * axis2;
+
+    std::vector<double> radii;
+    std::vector<double> plane_distances;
+    std::vector<double> angles;
+    radii.reserve(scene.images.size());
+    plane_distances.reserve(scene.images.size());
+    angles.reserve(scene.images.size());
+    for (const Image& image : scene.images) {
+        const Vec3 radial = image.pose.C - orbit_center;
+        const double x = radial.dot(axis1);
+        const double y = radial.dot(axis2);
+        radii.push_back(std::hypot(x, y));
+        plane_distances.push_back(std::abs((image.pose.C - mean).dot(
+            plane_normal)));
+        double angle = std::atan2(y, x);
+        if (!angles.empty()) {
+            while (angle - angles.back() > std::numbers::pi)
+                angle -= 2.0 * std::numbers::pi;
+            while (angle - angles.back() < -std::numbers::pi)
+                angle += 2.0 * std::numbers::pi;
+        }
+        angles.push_back(angle);
+    }
+    const double radius = median_value(radii);
+    if (!(radius > 1e-8) || !std::isfinite(radius)) return false;
+    std::vector<double> radius_errors;
+    radius_errors.reserve(radii.size());
+    for (const double value : radii)
+        radius_errors.push_back(std::abs(value - radius));
+
+    const double mean_index =
+        0.5 * static_cast<double>(scene.images.size() - 1);
+    const double mean_angle =
+        std::accumulate(angles.begin(), angles.end(), 0.0) /
+        static_cast<double>(angles.size());
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (std::size_t index = 0; index < angles.size(); ++index) {
+        const double centered_index =
+            static_cast<double>(index) - mean_index;
+        numerator += centered_index * (angles[index] - mean_angle);
+        denominator += centered_index * centered_index;
+    }
+    if (!(denominator > 0.0)) return false;
+    const double angular_step = numerator / denominator;
+    const double angular_intercept = mean_angle - angular_step * mean_index;
+    const double angular_coverage = std::abs(angular_step) *
+        static_cast<double>(scene.images.size() - 1);
+    std::vector<double> angular_residuals;
+    angular_residuals.reserve(angles.size());
+    unsigned consistent_steps = 0;
+    for (std::size_t index = 0; index < angles.size(); ++index) {
+        angular_residuals.push_back(std::abs(
+            angles[index] -
+            (angular_intercept + angular_step * static_cast<double>(index))));
+        if (index > 0 &&
+            (angles[index] - angles[index - 1]) * angular_step > 0.0)
+            ++consistent_steps;
+    }
+    const double direction_ratio = static_cast<double>(consistent_steps) /
+        static_cast<double>(scene.images.size() - 1);
+
+    std::vector<double> roll_errors;
+    roll_errors.reserve(scene.images.size());
+    for (const Image& image : scene.images) {
+        roll_errors.push_back(std::acos(std::clamp(
+            image.pose.R.row(1).dot(plane_normal), -1.0, 1.0)));
+    }
+    const double planarity_ratio =
+        percentile_value(plane_distances, 0.95) / radius;
+    const double radius_error_ratio =
+        percentile_value(radius_errors, 0.95) / radius;
+    const double angular_residual_p95 =
+        percentile_value(angular_residuals, 0.95);
+    const double roll_error_p95 = percentile_value(roll_errors, 0.95);
+    std::vector<double> center_steps;
+    center_steps.reserve(scene.images.size() - 1);
+    for (std::size_t index = 1; index < scene.images.size(); ++index)
+        center_steps.push_back((
+            scene.images[index].pose.C -
+            scene.images[index - 1].pose.C).norm());
+    const double median_center_step = median_value(center_steps);
+    const double center_step_p95_ratio = median_center_step > 1e-10
+        ? percentile_value(center_steps, 0.95) / median_center_step
+        : std::numeric_limits<double>::infinity();
+    const double center_step_max_ratio = median_center_step > 1e-10
+        ? *std::max_element(center_steps.begin(), center_steps.end()) /
+            median_center_step
+        : std::numeric_limits<double>::infinity();
+    const bool trajectory_needs_repair =
+        radius_error_ratio > 0.08 || center_step_p95_ratio > 2.0 ||
+        center_step_max_ratio > 1.5 ||
+        angular_residual_p95 > 10.0 * std::numbers::pi / 180.0;
+    core::Logger::instance().debug(
+        "global orbit probe: views=", scene.images.size(),
+        " neighbor_ratio=", neighbor_ratio,
+        " planarity_ratio=", planarity_ratio,
+        " radius_error_ratio=", radius_error_ratio,
+        " fitted_coverage_deg=", angular_coverage * 180.0 /
+            std::numbers::pi,
+        " direction_ratio=", direction_ratio,
+        " angular_residual_p95_deg=", angular_residual_p95 * 180.0 /
+            std::numbers::pi,
+        " roll_error_p95_deg=", roll_error_p95 * 180.0 /
+            std::numbers::pi,
+        " center_step_p95_ratio=", center_step_p95_ratio,
+        " center_step_max_ratio=", center_step_max_ratio,
+        " needs_repair=", trajectory_needs_repair ? 1 : 0);
+    if (neighbor_ratio < 0.50 ||
+        planarity_ratio > 0.03 || radius_error_ratio > 0.30 ||
+        angular_coverage < 300.0 * std::numbers::pi / 180.0 ||
+        angular_coverage > 420.0 * std::numbers::pi / 180.0 ||
+        std::abs(angular_step) < 0.2 * std::numbers::pi / 180.0 ||
+        std::abs(angular_step) > 20.0 * std::numbers::pi / 180.0 ||
+        direction_ratio < 0.70 ||
+        angular_residual_p95 > 35.0 * std::numbers::pi / 180.0 ||
+        roll_error_p95 > 15.0 * std::numbers::pi / 180.0)
+        return false;
+
+    // A clean orbit needs no projection, but its centers should remain fixed
+    // during the short distortion polish. Otherwise a small set of repetitive
+    // observations can pull one otherwise well-conditioned camera off-track.
+    preserve_orbit_centers = true;
+    if (!trajectory_needs_repair) {
+        core::Logger::instance().info(
+            "global: preserving well-conditioned circular orbit centers views=",
+            scene.images.size(),
+            " center_step_p95_ratio=", center_step_p95_ratio,
+            " center_step_max_ratio=", center_step_max_ratio);
+        return false;
+    }
+
+    std::vector<Vec3> regularized_centers(scene.images.size());
+    for (std::size_t index = 0; index < scene.images.size(); ++index) {
+        const double angle = angular_intercept +
+            angular_step * static_cast<double>(index);
+        regularized_centers[index] = orbit_center + radius *
+            (std::cos(angle) * axis1 + std::sin(angle) * axis2);
+    }
+
+    double best_height_fraction = 0.0;
+    double best_focus_score = std::numeric_limits<double>::infinity();
+    for (int step = -20; step <= 20; ++step) {
+        const double fraction = 0.01 * static_cast<double>(step);
+        const Vec3 focus =
+            orbit_center + fraction * radius * plane_normal;
+        std::vector<double> errors;
+        errors.reserve(scene.images.size());
+        for (std::size_t index = 0; index < scene.images.size(); ++index) {
+            const Vec3 direction =
+                (focus - regularized_centers[index]).normalized();
+            const Vec3 optical_axis =
+                scene.images[index].pose.R.row(2).transpose();
+            errors.push_back(std::acos(std::clamp(
+                direction.dot(optical_axis), -1.0, 1.0)));
+        }
+        const double score = median_value(std::move(errors));
+        if (score < best_focus_score) {
+            best_focus_score = score;
+            best_height_fraction = fraction;
+        }
+    }
+    if (best_focus_score > 15.0 * std::numbers::pi / 180.0) {
+        preserve_orbit_centers = false;
+        return false;
+    }
+
+    const Vec3 focus = orbit_center +
+        best_height_fraction * radius * plane_normal;
+    const double tangent_sign = angular_step >= 0.0 ? 1.0 : -1.0;
+    for (std::size_t index = 0; index < scene.images.size(); ++index) {
+        Image& image = scene.images[index];
+        image.pose.C = regularized_centers[index];
+        Vec3 x_axis = tangent_sign * plane_normal.cross(
+            image.pose.C - orbit_center).normalized();
+        Vec3 z_axis = focus - image.pose.C;
+        z_axis -= x_axis * x_axis.dot(z_axis);
+        if (z_axis.norm() <= 1e-10) return false;
+        z_axis.normalize();
+        const Vec3 y_axis = z_axis.cross(x_axis).normalized();
+        image.pose.R.row(0) = x_axis.transpose();
+        image.pose.R.row(1) = y_axis.transpose();
+        image.pose.R.row(2) = z_axis.transpose();
+    }
+    core::Logger::instance().info(
+        "global: regularized complete circular orbit views=",
+        scene.images.size(),
+        " angular_step_deg=", angular_step * 180.0 / std::numbers::pi,
+        " coverage_deg=", angular_coverage * 180.0 / std::numbers::pi,
+        " focus_height_ratio=", best_height_fraction);
+    return true;
+}
 
 #if !defined(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID)
 #define AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID "unconfigured"
@@ -37,6 +302,7 @@ void append_optimizer(
     key.append(options.fix_first_pose);
     key.append(options.fix_first_point);
     key.append(options.optimize_rotations);
+    key.append(options.optimize_translations);
     key.append(options.optimize_points);
     key.append(options.optimize_focal);
     key.append(options.optimize_aspect_ratio);
@@ -97,7 +363,7 @@ std::uint64_t reconstruction_key(
     key.append_string("reconstruction");
     // Bump when the single-cluster hierarchy path changes from star-only to
     // global-first mapping; old hierarchy checkpoints must not bypass it.
-    key.append_string("deferred-component-reseed-v10");
+    key.append_string("deferred-component-reseed-v19");
     key.append_string(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
@@ -167,6 +433,7 @@ std::uint64_t reconstruction_key(
     key.append(static_cast<std::uint32_t>(
         config.global_positioning.constraint));
     key.append(config.global_positioning.constraint_reweight_scale);
+    key.append(config.global_positioning.regularize_complete_orbits);
     return key.value();
 }
 
@@ -547,9 +814,19 @@ ReconstructionSummary run_global_mapping(
         core::Logger::instance().error("global: full bundle adjustment failed");
         return summary;
     }
+    bool preserve_orbit_centers = false;
+    // A temporarily disconnected camera is recovered below. Delay the orbit
+    // probe until that camera has an anchored pose; otherwise the strict
+    // complete-sequence check would silently skip hierarchical single-cluster
+    // reconstructions.
+    bool orbit_regularized = false;
+    if (reseeded_images.empty()) {
+        orbit_regularized = regularize_complete_orbit(
+            scene, positioning, preserve_orbit_centers);
+    }
     triangulate_tracks(
         scene,
-        true,
+        !orbit_regularized,
         fallback_resection.max_reproj_error,
         fallback_resection.min_angle_deg);
     filter_tracks(
@@ -562,6 +839,7 @@ ReconstructionSummary run_global_mapping(
     // Stage 3: short polish with distortion once geometry is stable.
     bundle.optimizer.maximum_iterations = 8;
     bundle.optimizer.optimize_rotations = true;
+    bundle.optimizer.optimize_translations = !preserve_orbit_centers;
     bundle.optimizer.optimize_focal = true;
     bundle.optimizer.optimize_aspect_ratio = true;
     bundle.optimizer.optimize_distortion = true;
@@ -616,6 +894,37 @@ ReconstructionSummary run_global_mapping(
             fallback_resection.min_angle_deg,
             fallback_resection.mult_depth_near,
             fallback_resection.mult_depth_far);
+
+        bool recovered_orbit_centers = false;
+        const bool recovered_orbit_regularized = regularize_complete_orbit(
+            scene, positioning, recovered_orbit_centers);
+        if (recovered_orbit_regularized) {
+            triangulate_tracks(
+                scene, false, fallback_resection.max_reproj_error,
+                fallback_resection.min_angle_deg);
+            filter_tracks(
+                scene, fallback_resection.max_reproj_error,
+                fallback_resection.min_angle_deg,
+                fallback_resection.mult_depth_near,
+                fallback_resection.mult_depth_far);
+
+            BundleOptions orbit_bundle;
+            orbit_bundle.optimizer = bundle.optimizer;
+            orbit_bundle.optimizer.maximum_iterations = 8;
+            orbit_bundle.optimizer.optimize_rotations = true;
+            orbit_bundle.optimizer.optimize_translations = false;
+            orbit_bundle.optimizer.optimize_focal = true;
+            orbit_bundle.optimizer.optimize_aspect_ratio = true;
+            orbit_bundle.optimizer.optimize_distortion = true;
+            if (!run_bundle_adjustment(scene, orbit_bundle).success)
+                core::Logger::instance().warning(
+                    "global: recovered-orbit bundle polish failed");
+            filter_tracks(
+                scene, fine_reproj_error,
+                fallback_resection.min_angle_deg,
+                fallback_resection.mult_depth_near,
+                fallback_resection.mult_depth_far);
+        }
     }
 
     // Match openMVS final behavior: retry images excluded from the largest
