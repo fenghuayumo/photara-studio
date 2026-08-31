@@ -578,7 +578,8 @@ void test_local_ba_boundary_selection() {
         track.position = truth + Vec3(0.01, -0.01, 0.02);
         add_observation(track, 0, truth);
         add_observation(track, 1, truth);
-        track.num_inliers = 2;
+        add_observation(track, 2, truth);
+        track.num_inliers = 3;
         scene.tracks.push_back(std::move(track));
     }
     Track boundary_only;
@@ -593,6 +594,7 @@ void test_local_ba_boundary_selection() {
     local_points_before.reserve(20);
     for (std::size_t point_id = 0; point_id < 20; ++point_id)
         local_points_before.push_back(scene.tracks[point_id].position);
+    Scene global_scene = scene;
 
     BundleOptions options;
     options.free_image_ids = {0};
@@ -600,8 +602,13 @@ void test_local_ba_boundary_selection() {
     options.optimize_all_registered = false;
     options.optimize_points = false;
     options.optimizer.maximum_iterations = 3;
+    // Fixed boundary cameras are intentionally unsupported by the CUDA BA
+    // backend and must retain the exact CPU local-BA semantics.
+    options.cuda_min_observations = 0;
     const BundleSummary summary = run_bundle_adjustment(scene, options);
     expect(summary.success, "fixed-point local BA succeeds");
+    expect(summary.backend == BundleBackend::cpu,
+           "fixed-boundary local BA stays on CPU");
     expect(summary.num_points == 20, "local BA excludes boundary-only tracks");
     bool local_points_unchanged = true;
     for (std::size_t point_id = 0; point_id < local_points_before.size(); ++point_id)
@@ -611,6 +618,25 @@ void test_local_ba_boundary_selection() {
     expect(
         (scene.tracks.back().position - unchanged).norm() == 0.0,
         "local BA does not modify boundary-only landmarks");
+
+    BundleOptions global_options;
+    global_options.optimizer.maximum_iterations = 5;
+    global_options.prefer_cuda = true;
+    global_options.cuda_min_observations = 0;
+    const BundleSummary global_summary =
+        run_bundle_adjustment(global_scene, global_options);
+    expect(global_summary.success, "automatic BA backend succeeds");
+#if defined(AETHERSCAN_HAS_CUDA)
+    const BundleBackend expected_backend =
+        aetherscan::ba::CudaOptimizer::is_available()
+        ? BundleBackend::cuda
+        : BundleBackend::cpu;
+    expect(global_summary.backend == expected_backend,
+           "compatible global BA selects the available backend");
+#else
+    expect(global_summary.backend == BundleBackend::cpu,
+           "CPU-only build selects the CPU BA backend");
+#endif
 }
 
 void test_robust_triangulation_and_track_split() {

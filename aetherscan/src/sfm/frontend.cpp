@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -194,8 +195,13 @@ FrontEndStageKeys make_stage_keys(
     geometry.append(options.progressive_pair_expansion);
     geometry.append(options.progressive_min_verified_degree);
     geometry.append(options.progressive_rescue_match_ratio);
+    geometry.append(options.progressive_rescue_min_inliers);
     geometry.append(options.progressive_max_images);
-    geometry.append_string("progressive_pair_expansion_v2");
+    geometry.append(options.progressive_rescue_neighbor_window);
+    geometry.append(options.progressive_rescue_retrieval_top_k);
+    geometry.append(options.progressive_rescue_max_pairs_per_image);
+    geometry.append(options.progressive_rescue_max_features);
+    geometry.append_string("progressive_pair_expansion_v3");
 
     FingerprintBuilder tracks;
     tracks.append_string("tracks");
@@ -434,6 +440,75 @@ features::FeatureSet select_top_features_grid_3x3(
     }
     trimmed.mark_descriptors_modified();
     return trimmed;
+}
+
+struct KeypointIdentity {
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint32_t scale{};
+    std::uint32_t orientation{};
+
+    bool operator==(const KeypointIdentity&) const = default;
+};
+
+struct KeypointIdentityHash {
+    std::size_t operator()(const KeypointIdentity& key) const noexcept {
+        std::size_t hash = key.x;
+        hash ^= static_cast<std::size_t>(key.y) + 0x9e3779b9U +
+                (hash << 6U) + (hash >> 2U);
+        hash ^= static_cast<std::size_t>(key.scale) + 0x9e3779b9U +
+                (hash << 6U) + (hash >> 2U);
+        hash ^= static_cast<std::size_t>(key.orientation) + 0x9e3779b9U +
+                (hash << 6U) + (hash >> 2U);
+        return hash;
+    }
+};
+
+KeypointIdentity keypoint_identity(const features::Keypoint& keypoint) {
+    return {
+        std::bit_cast<std::uint32_t>(keypoint.x),
+        std::bit_cast<std::uint32_t>(keypoint.y),
+        std::bit_cast<std::uint32_t>(keypoint.scale),
+        std::bit_cast<std::uint32_t>(keypoint.orientation)};
+}
+
+std::size_t append_new_features_preserving_indices(
+    features::FeatureSet& base, features::FeatureSet additional,
+    const std::size_t maximum_total) {
+    if (base.descriptor_dimension != additional.descriptor_dimension ||
+        base.image_width != additional.image_width ||
+        base.image_height != additional.image_height)
+        throw std::runtime_error("Incompatible weak-view feature augmentation");
+    base.compress_descriptors_u8();
+    additional.compress_descriptors_u8();
+
+    std::unordered_set<KeypointIdentity, KeypointIdentityHash> existing;
+    existing.reserve(base.keypoints.size() * 2);
+    for (const auto& keypoint : base.keypoints)
+        existing.insert(keypoint_identity(keypoint));
+
+    const std::size_t dimension = base.descriptor_dimension;
+    const std::size_t original_size = base.keypoints.size();
+    const std::size_t reserve_total = maximum_total > 0
+        ? std::min(
+              original_size + additional.keypoints.size(), maximum_total)
+        : original_size + additional.keypoints.size();
+    base.keypoints.reserve(reserve_total);
+    base.descriptors_u8.reserve(
+        reserve_total * dimension);
+    for (std::size_t index = 0; index < additional.keypoints.size(); ++index) {
+        if (maximum_total > 0 && base.keypoints.size() >= maximum_total) break;
+        if (!existing.insert(
+                keypoint_identity(additional.keypoints[index])).second)
+            continue;
+        base.keypoints.push_back(additional.keypoints[index]);
+        const auto* descriptor =
+            additional.descriptors_u8.data() + index * dimension;
+        base.descriptors_u8.insert(
+            base.descriptors_u8.end(), descriptor, descriptor + dimension);
+    }
+    base.mark_descriptors_modified();
+    return base.keypoints.size() - original_size;
 }
 
 // openMVS OptimizePairsOrder: group by id1 for GPU descriptor cache reuse,
@@ -1511,7 +1586,6 @@ FrontEndResult run_frontend(
     const bool can_expand_progressively =
         runtime_options.progressive_pair_expansion &&
         runtime_options.matcher == "gpu_mutual_ratio" &&
-        scene.images.size() <= runtime_options.progressive_max_images &&
         runtime_options.neighbor_window + 1 < scene.images.size();
     if (can_expand_progressively) {
         std::vector<unsigned> verified_degree(scene.images.size(), 0U);
@@ -1530,6 +1604,43 @@ FrontEndResult run_frontend(
             ++weak_images;
         }
 
+        if (weak_images > 0 && runtime_options.extractor == "siftgpu" &&
+            runtime_options.progressive_rescue_max_features >
+                runtime_options.max_features) {
+            features::SiftGpuOptions extraction_options;
+            extraction_options.peak_threshold = static_cast<float>(
+                runtime_options.sift_contrast_threshold);
+            extraction_options.maximum_features =
+                runtime_options.progressive_rescue_max_features;
+            features::SiftGpuExtractor rescue_extractor(extraction_options);
+            if (!rescue_extractor.is_available())
+                throw std::runtime_error(
+                    "Weak-view SiftGPU augmentation is unavailable");
+            std::size_t appended_features = 0;
+            core::ProgressReporter augmentation_progress(
+                "augment weak image features", weak_images);
+            for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+                if (!weak[image_id]) continue;
+                const io::GrayImage gray = io::load_gray(image_paths[image_id]);
+                features::FeatureSet additional =
+                    rescue_extractor.extract_gray(
+                        gray.pixels, gray.width, gray.height);
+                additional = select_top_features_grid_3x3(
+                    std::move(additional),
+                    runtime_options.progressive_rescue_max_features);
+                appended_features += append_new_features_preserving_indices(
+                    scene.images[image_id].features, std::move(additional),
+                    runtime_options.progressive_rescue_max_features);
+                augmentation_progress.advance();
+            }
+            augmentation_progress.finish();
+            core::Logger::instance().info(
+                "weak-view feature augmentation: images=", weak_images,
+                " target=",
+                runtime_options.progressive_rescue_max_features,
+                " appended=", appended_features);
+        }
+
         std::unordered_set<std::uint64_t> primary_pairs;
         primary_pairs.reserve(candidates.size() * 2);
         const auto candidate_key = [](const Index first, const Index second) {
@@ -1542,21 +1653,88 @@ FrontEndResult run_frontend(
                 candidate_key(candidate.id1, candidate.id2));
 
         std::vector<PairCandidate> rescue_candidates;
-        for (Index first = 0; first < scene.images.size(); ++first) {
-            for (Index second = first + 1; second < scene.images.size();
-                 ++second) {
-                if (!weak[first] && !weak[second]) continue;
-                if (primary_pairs.count(candidate_key(first, second)))
-                    continue;
-                rescue_candidates.push_back({first, second});
+        std::unordered_set<std::uint64_t> rescue_pair_keys;
+        const bool exhaustive_rescue =
+            scene.images.size() <= runtime_options.progressive_max_images;
+        rescue_pair_keys.reserve(
+            weak_images *
+            std::max<std::size_t>(
+                1, runtime_options.progressive_rescue_max_pairs_per_image));
+        std::vector<std::size_t> rescue_degree(scene.images.size(), 0);
+        const auto add_rescue_candidate = [&](Index first, Index second) {
+            if (first == second) return false;
+            if (first > second) std::swap(first, second);
+            const std::uint64_t key = candidate_key(first, second);
+            if (primary_pairs.count(key) || rescue_pair_keys.count(key))
+                return false;
+            const std::size_t budget =
+                runtime_options.progressive_rescue_max_pairs_per_image;
+            if (!exhaustive_rescue && budget > 0 &&
+                ((weak[first] && rescue_degree[first] >= budget) ||
+                 (weak[second] && rescue_degree[second] >= budget)))
+                return false;
+            rescue_pair_keys.insert(key);
+            rescue_candidates.push_back({first, second});
+            if (weak[first]) ++rescue_degree[first];
+            if (weak[second]) ++rescue_degree[second];
+            return true;
+        };
+
+        if (exhaustive_rescue) {
+            for (Index first = 0; first < scene.images.size(); ++first) {
+                for (Index second = first + 1; second < scene.images.size();
+                     ++second) {
+                    if (!weak[first] && !weak[second]) continue;
+                    add_rescue_candidate(first, second);
+                }
+            }
+        } else {
+            // Prefer temporal continuity first. This bridges short runs of
+            // low-texture/video frames without an O(weak_views * images) pass.
+            const std::size_t radius =
+                runtime_options.progressive_rescue_neighbor_window;
+            for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+                if (!weak[image_id]) continue;
+                const Index begin = static_cast<Index>(
+                    image_id > radius ? image_id - radius : 0);
+                const Index end = static_cast<Index>(std::min<std::size_t>(
+                    scene.images.size() - 1,
+                    static_cast<std::size_t>(image_id) + radius));
+                for (Index other = begin; other <= end; ++other)
+                    add_rescue_candidate(image_id, other);
+            }
+
+            if (runtime_options.progressive_rescue_retrieval_top_k > 0 &&
+                scene.images.size() >= runtime_options.retrieval_min_images) {
+                RetrievalOptions rescue_retrieval = runtime_options.retrieval;
+                rescue_retrieval.top_k =
+                    runtime_options.progressive_rescue_retrieval_top_k;
+                auto retrieved =
+                    retrieve_image_pairs(scene.images, rescue_retrieval);
+                std::sort(
+                    retrieved.begin(), retrieved.end(),
+                    [](const RetrievedPair& left, const RetrievedPair& right) {
+                        return left.score > right.score;
+                    });
+                for (const RetrievedPair& pair : retrieved) {
+                    if (!weak[pair.first] && !weak[pair.second]) continue;
+                    add_rescue_candidate(pair.first, pair.second);
+                }
             }
         }
         if (!rescue_candidates.empty()) {
             optimize_pairs_order(rescue_candidates, scene);
             FrontEndOptions rescue_options = runtime_options;
+            rescue_options.max_features = std::max(
+                runtime_options.max_features,
+                runtime_options.progressive_rescue_max_features);
             rescue_options.match_ratio = std::max(
                 runtime_options.match_ratio,
                 runtime_options.progressive_rescue_match_ratio);
+            rescue_options.relative.min_inliers = std::max(
+                8U, std::min(
+                        runtime_options.relative.min_inliers,
+                        runtime_options.progressive_rescue_min_inliers));
             auto rescue_matcher = make_frontend_matcher(rescue_options);
             std::vector<RawPairMatches> rescue_raw_pairs;
             std::vector<PairDiagnostics> rescue_diagnostics;
@@ -1577,9 +1755,11 @@ FrontEndResult run_frontend(
             }
             core::Logger::instance().info(
                 "progressive pair expansion: weak_images=", weak_images,
+                " strategy=", exhaustive_rescue ? "exhaustive" : "bounded",
                 " attempted=", rescue_candidates.size(),
                 " accepted=", rescued_pairs,
                 " ratio=", rescue_options.match_ratio,
+                " min_inliers=", rescue_options.relative.min_inliers,
                 " pairs_total=", scene.pairs.size());
         }
     }

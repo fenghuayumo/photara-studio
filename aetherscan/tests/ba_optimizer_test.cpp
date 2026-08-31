@@ -396,6 +396,33 @@ int main() {
             std::cerr << "GPU fixed-point BA modified landmarks or failed to improve cost\n";
             return 8;
         }
+        Problem gpu_translation_only_problem = make_problem();
+        const std::vector<Pose> gpu_translation_only_poses =
+            gpu_translation_only_problem.poses;
+        OptimizerOptions gpu_translation_only_options = options;
+        gpu_translation_only_options.optimize_rotations = false;
+        const double gpu_translation_only_initial = evaluate_cost(
+            gpu_translation_only_problem,
+            gpu_translation_only_options.huber_delta,
+            gpu_translation_only_options.minimum_depth);
+        const OptimizerSummary gpu_translation_only_summary = optimize_cuda(
+            gpu_translation_only_problem, gpu_translation_only_options);
+        bool gpu_rotations_unchanged = true;
+        for (std::size_t pose = 0;
+             pose < gpu_translation_only_problem.poses.size(); ++pose) {
+            const Pose& before = gpu_translation_only_poses[pose];
+            const Pose& after = gpu_translation_only_problem.poses[pose];
+            gpu_rotations_unchanged = gpu_rotations_unchanged &&
+                before.qw == after.qw && before.qx == after.qx &&
+                before.qy == after.qy && before.qz == after.qz;
+        }
+        if (!gpu_translation_only_summary.usable() ||
+            !(gpu_translation_only_summary.final_cost <
+              gpu_translation_only_initial) ||
+            !gpu_rotations_unchanged) {
+            std::cerr << "GPU translation-only BA modified rotations or failed to improve cost\n";
+            return 12;
+        }
     }
 #endif
     return 0;

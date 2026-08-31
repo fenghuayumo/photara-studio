@@ -63,7 +63,16 @@ struct FrontEndOptions {
     bool progressive_pair_expansion{true};
     unsigned progressive_min_verified_degree{4};
     float progressive_rescue_match_ratio{0.85F};
+    unsigned progressive_rescue_min_inliers{20};
+    // Small scenes can afford exhaustive weak-view expansion. Larger scenes
+    // use a bounded union of wider sequential and deeper retrieval proposals.
     std::size_t progressive_max_images{500};
+    std::size_t progressive_rescue_neighbor_window{16};
+    std::size_t progressive_rescue_retrieval_top_k{64};
+    std::size_t progressive_rescue_max_pairs_per_image{96};
+    // Re-detect only weak views at this larger budget. Existing descriptors
+    // remain first so cached primary-match feature indices stay valid.
+    unsigned progressive_rescue_max_features{27000};
     bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};
     CheckpointOptions checkpoint{};

@@ -222,12 +222,17 @@ std::vector<RetrievedPair> retrieve_image_pairs(
         return it - words.begin();
     };
 
+    // Reuse one dense score buffer per worker. Constructing and zero-filling an
+    // image_count-sized vector for every query made retrieval O(N^2) even when
+    // the inverted index touched only a small candidate set.
+    std::vector<std::vector<double>> accumulators(
+        threads, std::vector<double>(images.size(), 0.0));
     std::vector<std::unordered_map<PairKey, float>> selected_shards(threads);
     parallel::parallel_for(
         images.size(), threads,
         [&](const std::size_t image_id, const unsigned tid) {
             if (!(norms[image_id] > 0.0)) return;
-            std::vector<double> accumulator(images.size(), 0.0);
+            std::vector<double>& accumulator = accumulators[tid];
             std::vector<Index> touched;
             touched.reserve(64);
             for (const WeightedWord& entry : image_words[image_id]) {
@@ -254,6 +259,7 @@ std::vector<RetrievedPair> retrieve_image_pairs(
                     if (score > 0.F) candidates.push_back({candidate, score});
                 }
             }
+            for (const Index candidate : touched) accumulator[candidate] = 0.0;
             const std::size_t keep = std::min(options.top_k, candidates.size());
             if (keep == 0) return;
             std::partial_sort(

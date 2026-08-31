@@ -5,6 +5,11 @@
 
 namespace aetherscan::sfm {
 
+enum class BundleBackend {
+    cpu,
+    cuda,
+};
+
 struct BundleOptions {
     ba::OptimizerOptions optimizer{};
     bool optimize_points{true};
@@ -22,6 +27,15 @@ struct BundleOptions {
     bool gate_intrinsics_by_observability{true};
     unsigned min_views_for_intrinsics{3};
     float min_median_parallax_deg{1.0F};
+    // Use the CUDA Schur/PCG backend when the problem is large enough and the
+    // requested parameterization is supported. Unsupported configurations
+    // (shared-intrinsic refinement, partial pose locks, or local fixed views)
+    // stay on the CPU without changing reconstruction semantics.
+    // Opt in after profiling the target GPU. The CUDA linearizer is fast, but
+    // the current end-to-end Schur/PCG path can still lose to the tuned CPU
+    // backend on ordinary SfM track distributions.
+    bool prefer_cuda{false};
+    std::size_t cuda_min_observations{50'000};
 };
 
 struct BundleSummary {
@@ -30,6 +44,7 @@ struct BundleSummary {
     unsigned num_cameras{0};
     unsigned num_points{0};
     unsigned num_observations{0};
+    BundleBackend backend{BundleBackend::cpu};
 };
 
 // Builds a BA problem from triangulated inlier tracks and runs aetherscan::ba.

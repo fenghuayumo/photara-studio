@@ -259,7 +259,9 @@ __global__ void reduced_point_rhs_kernel(
 __global__ void schur_rhs_kernel(
     const std::size_t* offsets, const std::size_t* observations, const Index* points,
     const double* camera_rhs, const double* reduced_points, const double* cross,
-    const std::size_t camera_count, const bool fix_first, double* output) {
+    const std::size_t camera_count, const bool fix_first,
+    const bool optimize_rotations, const bool optimize_translations,
+    double* output) {
     for (std::size_t camera = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          camera < camera_count; camera += static_cast<std::size_t>(blockDim.x) * gridDim.x) {
         double result[6];
@@ -272,7 +274,10 @@ __global__ void schur_rhs_kernel(
             for (int row=0; row<6; ++row)
                 result[row]-=w[row*3]*p[0]+w[row*3+1]*p[1]+w[row*3+2]*p[2];
         }
-        for (int row=0; row<6; ++row) output[camera*6+row]=result[row];
+        for (int row=0; row<6; ++row) {
+            const bool active = row < 3 ? optimize_rotations : optimize_translations;
+            output[camera*6+row]=active ? result[row] : 0.0;
+        }
     }
 }
 
@@ -298,7 +303,8 @@ __global__ void camera_product_kernel(
     const std::size_t* offsets, const std::size_t* observations, const Index* points,
     const double* hessian, const double* cross, const double* input,
     const double* point_temporary, const std::size_t camera_count,
-    const bool fix_first, double* output) {
+    const bool fix_first, const bool optimize_rotations,
+    const bool optimize_translations, double* output) {
     for (std::size_t camera=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
          camera<camera_count; camera+=static_cast<std::size_t>(blockDim.x)*gridDim.x) {
         if (fix_first && camera==0) {
@@ -314,13 +320,17 @@ __global__ void camera_product_kernel(
             for (int row=0; row<6; ++row)
                 result[row]-=w[row*3]*p[0]+w[row*3+1]*p[1]+w[row*3+2]*p[2];
         }
-        for (int row=0; row<6; ++row) output[camera*6+row]=result[row];
+        for (int row=0; row<6; ++row) {
+            const bool active = row < 3 ? optimize_rotations : optimize_translations;
+            output[camera*6+row]=active ? result[row] : input[camera*6+row];
+        }
     }
 }
 
 __global__ void precondition_kernel(
     const double* hessian, const double* residual, const std::size_t camera_count,
-    const bool fix_first, double* output) {
+    const bool fix_first, const bool optimize_rotations,
+    const bool optimize_translations, double* output) {
     for (std::size_t camera=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
          camera<camera_count; camera+=static_cast<std::size_t>(blockDim.x)*gridDim.x) {
         double* solution=output+camera*6;
@@ -333,14 +343,22 @@ __global__ void precondition_kernel(
                 lower[row*6+column]=sqrt(value); }
             else lower[row*6+column]=value/lower[column*6+column];
         }
-        if (!valid) { for (int i=0;i<6;++i) solution[i]=residual[camera*6+i]/fmax(matrix[i*6+i],1e-12); continue; }
-        double temporary[6]{};
-        for (int row=0;row<6;++row) { double value=residual[camera*6+row];
-            for (int k=0;k<row;++k) value-=lower[row*6+k]*temporary[k];
-            temporary[row]=value/lower[row*6+row]; }
-        for (int row=5;row>=0;--row) { double value=temporary[row];
-            for (int k=row+1;k<6;++k) value-=lower[k*6+row]*solution[k];
-            solution[row]=value/lower[row*6+row]; }
+        if (!valid) {
+            for (int i=0;i<6;++i)
+                solution[i]=residual[camera*6+i]/fmax(matrix[i*6+i],1e-12);
+        } else {
+            double temporary[6]{};
+            for (int row=0;row<6;++row) { double value=residual[camera*6+row];
+                for (int k=0;k<row;++k) value-=lower[row*6+k]*temporary[k];
+                temporary[row]=value/lower[row*6+row]; }
+            for (int row=5;row>=0;--row) { double value=temporary[row];
+                for (int k=row+1;k<6;++k) value-=lower[k*6+row]*solution[k];
+                solution[row]=value/lower[row*6+row]; }
+        }
+        for (int row=0;row<6;++row) {
+            const bool active = row < 3 ? optimize_rotations : optimize_translations;
+            if (!active) solution[row]=0.0;
+        }
     }
 }
 
@@ -470,22 +488,29 @@ __global__ void recover_points_kernel(
     }
 }
 
-__global__ void update_poses_kernel(Pose* poses, const double* step, const std::size_t count, const bool fix_first) {
+__global__ void update_poses_kernel(
+    Pose* poses, const double* step, const std::size_t count,
+    const bool fix_first, const bool optimize_rotations,
+    const bool optimize_translations) {
     for (std::size_t i=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
          i<count; i+=static_cast<std::size_t>(blockDim.x)*gridDim.x) {
         if (fix_first && i==0) continue;
         Pose& p=poses[i]; const double* s=step+i*6;
-        const double angle=sqrt(s[0]*s[0]+s[1]*s[1]+s[2]*s[2]);
-        double dw=1.0, dx=0.5*s[0], dy=0.5*s[1], dz=0.5*s[2];
-        if (angle>1e-12) { dw=cos(0.5*angle); const double k=sin(0.5*angle)/angle;
-            dx=k*s[0]; dy=k*s[1]; dz=k*s[2]; }
-        const double qw=dw*p.qw-dx*p.qx-dy*p.qy-dz*p.qz;
-        const double qx=dw*p.qx+dx*p.qw+dy*p.qz-dz*p.qy;
-        const double qy=dw*p.qy-dx*p.qz+dy*p.qw+dz*p.qx;
-        const double qz=dw*p.qz+dx*p.qy-dy*p.qx+dz*p.qw;
-        const double inv=rsqrt(qw*qw+qx*qx+qy*qy+qz*qz);
-        p.qw=qw*inv; p.qx=qx*inv; p.qy=qy*inv; p.qz=qz*inv;
-        p.cx+=s[3]; p.cy+=s[4]; p.cz+=s[5];
+        if (optimize_rotations) {
+            const double angle=sqrt(s[0]*s[0]+s[1]*s[1]+s[2]*s[2]);
+            double dw=1.0, dx=0.5*s[0], dy=0.5*s[1], dz=0.5*s[2];
+            if (angle>1e-12) { dw=cos(0.5*angle); const double k=sin(0.5*angle)/angle;
+                dx=k*s[0]; dy=k*s[1]; dz=k*s[2]; }
+            const double qw=dw*p.qw-dx*p.qx-dy*p.qy-dz*p.qz;
+            const double qx=dw*p.qx+dx*p.qw+dy*p.qz-dz*p.qy;
+            const double qy=dw*p.qy-dx*p.qz+dy*p.qw+dz*p.qx;
+            const double qz=dw*p.qz+dx*p.qy-dy*p.qx+dz*p.qw;
+            const double inv=rsqrt(qw*qw+qx*qx+qy*qy+qz*qz);
+            p.qw=qw*inv; p.qx=qx*inv; p.qy=qy*inv; p.qz=qz*inv;
+        }
+        if (optimize_translations) {
+            p.cx+=s[3]; p.cy+=s[4]; p.cz+=s[5];
+        }
     }
 }
 
@@ -570,10 +595,18 @@ public:
             options.fix_first_pose,point_temporary.data());
         camera_product_kernel<<<blocks(camera_count),threads>>>(camera_offsets.data(),camera_observations.data(),
             point_ids.data(),camera_h.data(),cross.data(),direction.data(),point_temporary.data(),
-            camera_count,options.fix_first_pose,product.data());
+            camera_count,options.fix_first_pose,options.optimize_rotations,
+            options.optimize_translations,product.data());
         check(cudaGetLastError(),"Schur multiply");
     }
     bool launch_persistent_pcg() {
+        // The persistent kernel deliberately runs a fixed iteration count. Do
+        // not use it for the normal tolerance-driven solve: well-conditioned
+        // SfM systems often converge early, and running the full budget can be
+        // slower than the synchronized PCG path despite lower launch overhead.
+        if (options.pcg_tolerance > 0.0 ||
+            !options.optimize_rotations || !options.optimize_translations)
+            return false;
         int device=0; check(cudaGetDevice(&device),"cudaGetDevice"); cudaDeviceProp properties{};
         check(cudaGetDeviceProperties(&properties,device),"cudaGetDeviceProperties");
         if (!properties.cooperativeLaunch) return false;
@@ -661,14 +694,17 @@ OptimizerSummary CudaOptimizer::optimize() {
             d.options.fix_first_point,d.options.optimize_points);
         reduced_point_rhs_kernel<<<blocks(d.point_count),threads>>>(d.point_inverse.data(),d.point_b.data(),d.point_count,d.reduced_point.data());
         schur_rhs_kernel<<<blocks(d.camera_count),threads>>>(d.camera_offsets.data(),d.camera_observations.data(),d.point_ids.data(),
-            d.camera_b.data(),d.reduced_point.data(),d.cross.data(),d.camera_count,d.options.fix_first_pose,d.rhs.data());
+            d.camera_b.data(),d.reduced_point.data(),d.cross.data(),d.camera_count,
+            d.options.fix_first_pose,d.options.optimize_rotations,
+            d.options.optimize_translations,d.rhs.data());
         check(cudaGetLastError(),"system assembly");
         std::size_t pcg=0;
         if (d.launch_persistent_pcg()) {
             pcg=d.options.maximum_pcg_iterations;
         } else {
           d.solution.zero(); check(cudaMemcpy(d.residual.data(),d.rhs.data(),camera_values*sizeof(double),cudaMemcpyDeviceToDevice),"PCG init");
-          precondition_kernel<<<blocks(d.camera_count),threads>>>(d.camera_h.data(),d.residual.data(),d.camera_count,d.options.fix_first_pose,d.z.data());
+          precondition_kernel<<<blocks(d.camera_count),threads>>>(d.camera_h.data(),d.residual.data(),d.camera_count,
+              d.options.fix_first_pose,d.options.optimize_rotations,d.options.optimize_translations,d.z.data());
           check(cudaMemcpy(d.direction.data(),d.z.data(),camera_values*sizeof(double),cudaMemcpyDeviceToDevice),"PCG direction");
           d.dot_to(d.residual,d.z,camera_values,0); d.dot_to(d.rhs,d.rhs,camera_values,1);
           double rhs_norm{}; check(cudaMemcpy(&rhs_norm,d.pcg_scalars.data()+1,sizeof(double),cudaMemcpyDeviceToHost),"PCG rhs norm");
@@ -681,7 +717,8 @@ OptimizerSummary CudaOptimizer::optimize() {
                 check(cudaMemcpy(&residual_norm,d.pcg_scalars.data()+2,sizeof(double),cudaMemcpyDeviceToHost),"PCG residual norm");
                 if (!std::isfinite(residual_norm) || residual_norm<=target) { ++pcg; break; }
             }
-            precondition_kernel<<<blocks(d.camera_count),threads>>>(d.camera_h.data(),d.residual.data(),d.camera_count,d.options.fix_first_pose,d.z.data());
+            precondition_kernel<<<blocks(d.camera_count),threads>>>(d.camera_h.data(),d.residual.data(),d.camera_count,
+                d.options.fix_first_pose,d.options.optimize_rotations,d.options.optimize_translations,d.z.data());
             d.dot_to(d.residual,d.z,camera_values,3); beta_kernel<<<1,1>>>(d.pcg_scalars.data());
             direction_kernel<<<blocks(camera_values),threads>>>(d.direction.data(),d.z.data(),camera_values,d.pcg_scalars.data()+4);
           }
@@ -691,7 +728,8 @@ OptimizerSummary CudaOptimizer::optimize() {
         const double norm=std::sqrt(d.dot(d.solution,d.solution,camera_values)+d.dot(d.point_step,d.point_step,d.point_count*3));
         check(cudaMemcpy(d.pose_backup.data(),d.poses.data(),d.camera_count*sizeof(Pose),cudaMemcpyDeviceToDevice),"pose backup");
         check(cudaMemcpy(d.point_backup.data(),d.points.data(),d.point_count*sizeof(Point3),cudaMemcpyDeviceToDevice),"point backup");
-        update_poses_kernel<<<blocks(d.camera_count),threads>>>(d.poses.data(),d.solution.data(),d.camera_count,d.options.fix_first_pose);
+        update_poses_kernel<<<blocks(d.camera_count),threads>>>(d.poses.data(),d.solution.data(),d.camera_count,
+            d.options.fix_first_pose,d.options.optimize_rotations,d.options.optimize_translations);
         update_points_kernel<<<blocks(d.point_count),threads>>>(d.points.data(),d.point_step.data(),d.point_count);
         linearize_kernel<<<blocks(d.observation_count),threads>>>(
             d.poses.data(),d.intrinsics.data(),d.points.data(),

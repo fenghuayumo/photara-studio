@@ -292,7 +292,22 @@ NB_MODULE(aetherscan_native, module) {
             &sfm::FrontEndOptions::progressive_min_verified_degree)
         .def_rw(
             "progressive_rescue_match_ratio",
-            &sfm::FrontEndOptions::progressive_rescue_match_ratio);
+            &sfm::FrontEndOptions::progressive_rescue_match_ratio)
+        .def_rw(
+            "progressive_rescue_min_inliers",
+            &sfm::FrontEndOptions::progressive_rescue_min_inliers)
+        .def_rw(
+            "progressive_rescue_neighbor_window",
+            &sfm::FrontEndOptions::progressive_rescue_neighbor_window)
+        .def_rw(
+            "progressive_rescue_retrieval_top_k",
+            &sfm::FrontEndOptions::progressive_rescue_retrieval_top_k)
+        .def_rw(
+            "progressive_rescue_max_pairs_per_image",
+            &sfm::FrontEndOptions::progressive_rescue_max_pairs_per_image)
+        .def_rw(
+            "progressive_rescue_max_features",
+            &sfm::FrontEndOptions::progressive_rescue_max_features);
 
     nb::class_<sfm::ReconstructionConfig>(module, "SfmOptions")
         .def(nb::init<>())

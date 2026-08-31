@@ -189,7 +189,45 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         }
     }
 
-    summary.optimizer = ba::optimize_cpu(problem, opt);
+    bool use_cuda = false;
+#if defined(AETHERSCAN_HAS_CUDA)
+    const bool has_partial_pose_locks = std::any_of(
+        problem.pose_constant.begin(), problem.pose_constant.end(),
+        [](const std::uint8_t value) { return value != 0; });
+    const bool optimizes_intrinsics =
+        opt.optimize_focal || opt.optimize_principal_point ||
+        opt.optimize_distortion;
+    const bool supported_parameterization =
+        (opt.optimize_rotations || opt.optimize_translations) &&
+        !has_partial_pose_locks && !optimizes_intrinsics;
+    use_cuda = options.prefer_cuda && supported_parameterization &&
+        problem.observations.size() >= options.cuda_min_observations &&
+        ba::CudaOptimizer::is_available();
+    if (use_cuda) {
+        try {
+            core::Logger::instance().info(
+                "bundle backend=cuda device=", ba::CudaOptimizer::device_name(),
+                " observations=", problem.observations.size());
+            summary.optimizer = ba::optimize_cuda(problem, opt);
+            summary.backend = BundleBackend::cuda;
+            if (!summary.optimizer.usable()) {
+                core::Logger::instance().warning(
+                    "CUDA bundle adjustment produced an unusable step; "
+                    "continuing with CPU from the last accepted state");
+                use_cuda = false;
+            }
+        } catch (const std::exception& error) {
+            core::Logger::instance().warning(
+                "CUDA bundle adjustment unavailable at runtime; falling back "
+                "to CPU: ", error.what());
+            use_cuda = false;
+        }
+    }
+#endif
+    if (!use_cuda) {
+        summary.optimizer = ba::optimize_cpu(problem, opt);
+        summary.backend = BundleBackend::cpu;
+    }
     summary.success = summary.optimizer.usable();
     summary.num_cameras = static_cast<unsigned>(problem.poses.size());
     summary.num_points = static_cast<unsigned>(problem.points.size());
@@ -197,7 +235,9 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     core::Logger::instance().info(
         "bundle adjustment: cameras=", summary.num_cameras,
         " points=", summary.num_points,
-        " observations=", summary.num_observations, ' ',
+        " observations=", summary.num_observations,
+        " backend=", summary.backend == BundleBackend::cuda ? "cuda" : "cpu",
+        ' ',
         summary.optimizer.brief_report());
     if (!summary.success) return summary;
 
