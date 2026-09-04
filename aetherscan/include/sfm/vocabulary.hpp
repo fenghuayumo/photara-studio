@@ -34,8 +34,14 @@ public:
         std::span<const features::FeatureSet> images,
         const VocabularyConfig& config,
         features::DescriptorMetric metric = features::DescriptorMetric::l2_root);
+    void train(
+        std::span<const features::FeatureSet* const> images,
+        const VocabularyConfig& config,
+        features::DescriptorMetric metric = features::DescriptorMetric::l2_root);
 
     [[nodiscard]] std::uint32_t quantize(std::span<const float> descriptor) const;
+    [[nodiscard]] std::uint32_t quantize(
+        std::span<const std::uint8_t> descriptor) const;
 
     void save(const std::filesystem::path& path) const;
     void load(const std::filesystem::path& path);

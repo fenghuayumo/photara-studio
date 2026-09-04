@@ -52,9 +52,9 @@ VocabularyTree load_or_train_vocabulary(
         return vocabulary;
     }
 
-    std::vector<features::FeatureSet> feature_sets;
+    std::vector<const features::FeatureSet*> feature_sets;
     feature_sets.reserve(images.size());
-    for (const Image& image : images) feature_sets.push_back(image.features);
+    for (const Image& image : images) feature_sets.push_back(&image.features);
     features::DescriptorMetric metric = features::DescriptorMetric::l2_root;
     for (const Image& image : images) {
         if (!image.features.descriptors.empty()) {
@@ -93,20 +93,25 @@ std::vector<RetrievedPair> retrieve_image_pairs(
             if (features.descriptor_dimension != dimension ||
                 features.keypoints.empty())
                 return;
-            auto& mutable_features =
-                const_cast<features::FeatureSet&>(features);
-            const auto float_rows = mutable_features.descriptor_rows_float();
-            if (float_rows.empty()) return;
             const auto samples = sample_descriptors_spatially(
                 features, options.max_descriptors_per_image, options.sample_grid);
             Histogram& histogram = histograms[image_id];
             histogram.reserve(samples.size());
             for (const features::FeatureIndex index : samples) {
-                const float* row =
-                    float_rows.data() +
-                    static_cast<std::size_t>(index) * dimension;
-                const Word word = vocabulary.quantize(
-                    std::span<const float>(row, dimension));
+                Word word{};
+                if (features.storage ==
+                    features::DescriptorStorage::float32) {
+                    const float* row = features.descriptors.data() +
+                        static_cast<std::size_t>(index) * dimension;
+                    word = vocabulary.quantize(
+                        std::span<const float>(row, dimension));
+                } else {
+                    const std::uint8_t* row =
+                        features.descriptors_u8.data() +
+                        static_cast<std::size_t>(index) * dimension;
+                    word = vocabulary.quantize(
+                        std::span<const std::uint8_t>(row, dimension));
+                }
                 auto& count = histogram[word];
                 if (count != std::numeric_limits<std::uint16_t>::max()) ++count;
             }

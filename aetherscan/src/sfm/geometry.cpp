@@ -291,16 +291,16 @@ double shared_focal_essential_score(
     const Mat3 E = K.transpose() * F * K;
     const Eigen::JacobiSVD<Mat3> svd(E);
     const auto singular = svd.singularValues();
-    const double scale =
-        std::max(singular[0] * singular[0] + singular[1] * singular[1], 1e-30);
+    const double scale = std::max(
+        singular[0] * singular[0] + singular[1] * singular[1], 1e-30);
     const double equal =
         (singular[0] - singular[1]) * (singular[0] - singular[1]) / scale;
-    const double rank =
-        singular[2] * singular[2] / std::max(singular[1] * singular[1], 1e-30);
+    const double rank = singular[2] * singular[2] /
+        std::max(singular[1] * singular[1], 1e-30);
     return equal + rank;
 }
 
-std::optional<double> estimate_shared_focal_from_fundamental(
+std::optional<double> estimate_pair_focal_for_diagnostics(
     const Mat3& F, const PinholeCamera& camera) {
     const double image_scale =
         static_cast<double>(std::max(camera.width, camera.height));
@@ -309,30 +309,29 @@ std::optional<double> estimate_shared_focal_from_fundamental(
     constexpr int samples = 80;
     int best_index = 0;
     double best_score = std::numeric_limits<double>::infinity();
-    for (int i = 0; i < samples; ++i) {
+    for (int index = 0; index < samples; ++index) {
         const double alpha =
-            static_cast<double>(i) / static_cast<double>(samples - 1);
-        const double log_focal = log_min + alpha * (log_max - log_min);
+            static_cast<double>(index) / static_cast<double>(samples - 1);
+        const double candidate = log_min + alpha * (log_max - log_min);
         const double score = shared_focal_essential_score(
-            F, camera.cx, camera.cy, std::exp(log_focal));
+            F, camera.cx, camera.cy, std::exp(candidate));
         if (score < best_score) {
             best_score = score;
-            best_index = i;
+            best_index = index;
         }
     }
     if (best_index <= 1 || best_index >= samples - 2)
         return std::nullopt;
-    const double step = (log_max - log_min) / static_cast<double>(samples - 1);
+    const double step = (log_max - log_min) / (samples - 1);
     double left = std::max(log_min, log_min + (best_index - 1) * step);
     double right = std::min(log_max, log_min + (best_index + 1) * step);
     for (int iteration = 0; iteration < 32; ++iteration) {
         const double first = (2.0 * left + right) / 3.0;
         const double second = (left + 2.0 * right) / 3.0;
-        const double first_score = shared_focal_essential_score(
-            F, camera.cx, camera.cy, std::exp(first));
-        const double second_score = shared_focal_essential_score(
-            F, camera.cx, camera.cy, std::exp(second));
-        if (first_score <= second_score)
+        if (shared_focal_essential_score(
+                F, camera.cx, camera.cy, std::exp(first)) <=
+            shared_focal_essential_score(
+                F, camera.cx, camera.cy, std::exp(second)))
             right = second;
         else
             left = first;
@@ -376,6 +375,11 @@ bool estimate_with_poselib(
     PinholeCamera filter_camera1 = camera1;
     PinholeCamera filter_camera2 = camera2;
     bool have_pose = false;
+    // With unknown intrinsics the pose recovered from F uses only the current
+    // focal prior.  Keep the F-RANSAC support until the graph has calibrated
+    // that focal; otherwise the provisional cheirality/reprojection pass can
+    // irreversibly discard correct matches before the calibrated rerun.
+    std::vector<char> deferred_filter_inliers;
 
     const bool shared_camera =
         camera1.width == camera2.width && camera1.height == camera2.height &&
@@ -396,17 +400,18 @@ bool estimate_with_poselib(
         camera1.trust_intrinsics && camera2.trust_intrinsics;
 
     if (use_shared_focal) {
+        // Estimate F first, then let the frontend's Fetzer view-graph solve
+        // calibrate the shared focal from all pairs together.  Decompose with
+        // the current prior for this provisional pass; relative poses are
+        // recomputed after the global focal update (as in openMVS).
+        ransac.real_focal_check = true;
         const poselib::RansacStats stats =
             poselib::estimate_fundamental(
                 pinhole_pts1, pinhole_pts2, ransac, bundle, &F, &inliers);
         if (stats.num_inliers < options.min_inliers) return false;
-        const std::optional<double> focal =
-            estimate_shared_focal_from_fundamental(F, camera1);
-        if (!focal.has_value()) return false;
-        const double f = *focal;
-        result.estimated_focal = f;
-        filter_camera1.fx = filter_camera1.fy = f;
-        filter_camera2.fx = filter_camera2.fy = f;
+        deferred_filter_inliers = inliers;
+        result.estimated_focal =
+            estimate_pair_focal_for_diagnostics(F, camera1);
         E = normalize_essential(
             filter_camera2.K().transpose() * F * filter_camera1.K());
         std::vector<Vec3> b1(pixels1.size()), b2(pixels2.size());
@@ -468,15 +473,33 @@ bool estimate_with_poselib(
 
     if (!have_pose) return false;
 
-    result.num_ransac_inliers =
-        static_cast<unsigned>(std::count(inliers.begin(), inliers.end(), char{1}));
+    const std::vector<char>& ransac_support =
+        deferred_filter_inliers.empty() ? inliers : deferred_filter_inliers;
+    result.num_ransac_inliers = static_cast<unsigned>(std::count(
+        ransac_support.begin(), ransac_support.end(), char{1}));
     float mean_angle = 0.F;
     std::vector<Vec2> inlier_pixels;
-    const unsigned filtered = filter_matches(
-        pixels1, pixels2, filter_camera1, filter_camera2, pose, options, inliers, mean_angle,
-        &inlier_pixels);
-    result.num_inliers = filtered;
-    if (filtered < options.min_inliers) return false;
+    if (deferred_filter_inliers.empty()) {
+        const unsigned filtered = filter_matches(
+            pixels1, pixels2, filter_camera1, filter_camera2, pose, options,
+            inliers, mean_angle, &inlier_pixels);
+        result.num_inliers = filtered;
+        if (filtered < options.min_inliers) return false;
+    } else {
+        // Compute provisional angle diagnostics from the current focal, but do
+        // not use them to shrink the correspondence set.  The frontend reruns
+        // relative pose estimation and strict filtering after graph focal
+        // calibration, matching openMVS' preservation of all pair matches.
+        std::vector<char> diagnostic_mask = deferred_filter_inliers;
+        filter_matches(
+            pixels1, pixels2, filter_camera1, filter_camera2, pose, options,
+            diagnostic_mask, mean_angle, nullptr);
+        inliers = std::move(deferred_filter_inliers);
+        result.num_inliers = result.num_ransac_inliers;
+        inlier_pixels.reserve(result.num_inliers);
+        for (std::size_t index = 0; index < inliers.size(); ++index)
+            if (inliers[index]) inlier_pixels.push_back(pixels1[index]);
+    }
 
     result.success = true;
     result.pose = pose;

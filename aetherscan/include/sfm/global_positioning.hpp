@@ -12,7 +12,8 @@ enum class GlobalPositioningConstraint {
 };
 
 struct GlobalPositioningOptions {
-    // Prefer longer tracks; 4–5 cuts short noisy constraints on real scenes.
+    // Prefer longer tracks; 4–5 cuts short noisy constraints on real scenes
+    // and avoids unconstrained short tracks in the selected subset.
     unsigned min_views_per_track{4};
     // Coverage-aware selection scales with scene size while retaining a hard
     // ceiling for predictable solve time.

@@ -111,7 +111,8 @@ struct FeatureSet {
 
     // Expand uint8 storage into float descriptors when needed for ANN/matching.
     std::span<const float> descriptor_rows_float();
-    // Quantize float RootSIFT-like values to 8-bit and drop float storage.
+    // Quantize RootSIFT values with the standard 512 scale (saturating to
+    // 8-bit) and drop float storage.
     void compress_descriptors_u8();
     void release_descriptors() noexcept;
 };

@@ -54,6 +54,7 @@ int main() {
         pair.weight_triplet = 0.4F;
         pair.weight_cycle = 0.2F;
         pair.estimated_focal = 880.0;
+        pair.zero_baseline = true;
         scene.pairs.push_back(pair);
         sfm::Track track;
         track.position = sfm::Vec3(4.0, 5.0, 6.0);
@@ -76,12 +77,26 @@ int main() {
             restored.pairs[0].weight_connectivity != 0.6F ||
             restored.pairs[0].weight_triplet != 0.4F ||
             restored.pairs[0].weight_cycle != 0.2F ||
+            !restored.pairs[0].zero_baseline ||
             restored.resection_progress.since_full_ba != 3 ||
             restored.resection_progress.last_registered !=
                 scene.resection_progress.last_registered) {
             std::cerr << "feature checkpoint round trip failed\n";
             std::filesystem::remove_all(directory);
             return 1;
+        }
+        scene.images[0].features.compress_descriptors_u8();
+        store.save_scene(
+            sfm::CheckpointStage::features, scene_key + 2, scene);
+        if (!store.load_scene(
+                sfm::CheckpointStage::features, scene_key + 2, restored) ||
+            restored.images[0].features.storage !=
+                features::DescriptorStorage::uint8 ||
+            restored.images[0].features.descriptors_u8.size() != 2 ||
+            !restored.images[0].features.descriptors.empty()) {
+            std::cerr << "compressed feature checkpoint round trip failed\n";
+            std::filesystem::remove_all(directory);
+            return 9;
         }
         store.save_scene(sfm::CheckpointStage::tracks, scene_key, scene);
         if (!store.load_scene(

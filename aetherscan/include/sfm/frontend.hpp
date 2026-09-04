@@ -26,7 +26,7 @@ struct FrontEndOptions {
     // "hybrid_lightglue" | ...
     // Legacy alias: "siftgpu" normalizes to "gpu_mutual_ratio".
     std::string matcher{"gpu_mutual_ratio"};
-    float match_ratio{0.85F};
+    float match_ratio{0.8F};
     bool mutual_check{true};
     // Empty / "none" => compose extractor×matcher.
     // "lightglue_end2end" => fused PairFeaturePipeline (ignores extractor/matcher).

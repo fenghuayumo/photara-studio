@@ -10,7 +10,11 @@
 namespace aetherscan::sfm {
 
 struct RetrievalOptions {
-    std::size_t top_k{20};
+    // Match openMVS' large-scene retrieval budget.  Twenty neighbors leaves
+    // multi-room/loop datasets fragmented even when every retained pair is
+    // geometrically sound; fifty remains linear per image while providing
+    // enough cross-cluster links for robust global/hierarchical alignment.
+    std::size_t top_k{50};
     std::size_t max_descriptors_per_image{2000};
     unsigned sample_grid{3};
     float stop_word_ratio{0.5F};

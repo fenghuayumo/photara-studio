@@ -504,10 +504,15 @@ std::vector<ScenePair> estimate_scene_pairs(
     };
     std::map<std::pair<std::size_t, std::size_t>, std::vector<Link>> grouped;
     for (const ImagePair& pair : parent.pairs) {
-        if (!pair.active || pair.id1 >= global_owner.size() ||
+        // Cross-cluster matches are measurements for the robust Sim(3) merge,
+        // not edges of the rotation/translation averaging graph.  `active` and
+        // `composite_weight` encode decisions made for that graph; applying
+        // them here can erase the only measurements joining two independently
+        // reconstructed clusters.  Keep the OpenMVS criterion here: enough
+        // geometrically filtered matches, followed by Sim(3) RANSAC below.
+        if (pair.id1 >= global_owner.size() ||
             pair.id2 >= global_owner.size() ||
-            pair.num_inliers() < config.min_common_tracks ||
-            pair.composite_weight() < config.min_pair_weight) {
+            pair.num_inliers() < config.min_common_tracks) {
             continue;
         }
         const int owner1 = global_owner[pair.id1];
@@ -1246,11 +1251,23 @@ ReconstructionSummary run_hierarchical_mapping(
         Scene global_scene = scene;
         const ReconstructionSummary global = run_global_mapping(
             global_scene, {}, {}, config.resection);
-        if (global.valid &&
-            global.registered_views >= scene.images.size()) {
+        const double global_coverage =
+            static_cast<double>(global.registered_views) /
+            static_cast<double>(std::max<std::size_t>(1, scene.images.size()));
+        // A global solve can leave a handful of weak/repetitive views
+        // unregistered while still producing the only geometrically coherent
+        // map.  Do not discard 99% coverage merely because resection could not
+        // recover the last few images; that fallback reintroduces drift.
+        const bool accept_global =
+            global.valid &&
+            (global.registered_views >= scene.images.size() ||
+             (scene.images.size() >= 20 && global_coverage >= 0.90));
+        if (accept_global) {
             scene = std::move(global_scene);
             core::Logger::instance().info(
-                "hierarchical single-cluster: accepted global mapping");
+                "hierarchical single-cluster: accepted global mapping",
+                " registered=", global.registered_views, '/',
+                scene.images.size(), " coverage=", global_coverage);
             return global;
         }
         core::Logger::instance().warning(

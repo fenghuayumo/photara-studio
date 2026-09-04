@@ -160,6 +160,9 @@ int main() {
                 first_split[i].local_to_global == second_split[i].local_to_global,
                 "cluster membership is deterministic");
     }
+    expect(
+        split_hierarchical_scene(split_scene).size() == 1,
+        "ordinary capture sizes stay in one global map");
 
     Scene scene = make_scene();
     HierarchicalConfig config;

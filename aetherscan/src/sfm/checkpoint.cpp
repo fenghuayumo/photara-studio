@@ -35,7 +35,7 @@ namespace aetherscan::sfm {
 namespace {
 
 constexpr std::array<char, 8> magic{'A', 'E', 'T', 'H', 'C', 'K', 'P', 'T'};
-constexpr std::uint32_t schema_version = 6;
+constexpr std::uint32_t schema_version = 7;
 constexpr std::uint64_t fnv_offset = 14695981039346656037ULL;
 constexpr std::uint64_t fnv_prime = 1099511628211ULL;
 
@@ -367,9 +367,16 @@ void write_feature_set(
         writer.value(keypoint.orientation);
         writer.value(keypoint.response);
     }
-    writer.value(static_cast<std::uint8_t>(include_descriptors));
-    if (include_descriptors)
-        write_vector(writer, features.descriptors);
+    const bool has_descriptors = include_descriptors &&
+        (!features.descriptors.empty() || !features.descriptors_u8.empty());
+    writer.value(static_cast<std::uint8_t>(has_descriptors));
+    if (has_descriptors) {
+        writer.value(static_cast<std::uint8_t>(features.storage));
+        if (features.storage == features::DescriptorStorage::float32)
+            write_vector(writer, features.descriptors);
+        else
+            write_vector(writer, features.descriptors_u8);
+    }
 }
 
 features::FeatureSet read_feature_set(Reader& reader) {
@@ -391,7 +398,15 @@ features::FeatureSet read_feature_set(Reader& reader) {
     }
     const bool has_descriptors = reader.value<std::uint8_t>() != 0;
     if (has_descriptors) {
-        read_vector(reader, features.descriptors);
+        features.storage = static_cast<features::DescriptorStorage>(
+            reader.value<std::uint8_t>());
+        if (features.storage == features::DescriptorStorage::float32)
+            read_vector(reader, features.descriptors);
+        else if (features.storage == features::DescriptorStorage::uint8)
+            read_vector(reader, features.descriptors_u8);
+        else
+            throw std::runtime_error(
+                "Checkpoint descriptor storage is invalid");
         features.validate();
     } else if (features.descriptor_dimension == 0 &&
                !features.keypoints.empty()) {
@@ -463,6 +478,7 @@ void write_scene(
         writer.value(pair.mean_ray_angle);
         writer.value(pair.homography_ratio);
         writer.value(static_cast<std::uint8_t>(pair.degenerate_planar));
+        writer.value(static_cast<std::uint8_t>(pair.zero_baseline));
         writer.value(static_cast<std::uint8_t>(pair.active));
     }
     writer.value_size(scene.tracks.size());
@@ -587,6 +603,7 @@ Scene read_scene(Reader& reader) {
         pair.mean_ray_angle = reader.value<float>();
         pair.homography_ratio = reader.value<float>();
         pair.degenerate_planar = reader.value<std::uint8_t>() != 0;
+        pair.zero_baseline = reader.value<std::uint8_t>() != 0;
         pair.active = reader.value<std::uint8_t>() != 0;
     }
     scene.tracks.resize(reader.size(32, 1'000'000'000));

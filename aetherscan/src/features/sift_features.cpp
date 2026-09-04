@@ -370,8 +370,11 @@ void FeatureSet::compress_descriptors_u8() {
     descriptors_u8.resize(descriptors.size());
     for (std::size_t i = 0; i < descriptors.size(); ++i) {
         const float value = std::clamp(descriptors[i], 0.F, 1.F);
-        descriptors_u8[i] =
-            static_cast<std::uint8_t>(std::lround(value * 255.F));
+        // SiftMatchGPU's byte-descriptor overload expects descriptors scaled
+        // to a norm of 512 (the de-facto SIFT/RootSIFT byte convention used
+        // by COLMAP and openMVS), with values above 255 saturated.
+        descriptors_u8[i] = static_cast<std::uint8_t>(std::min(
+            255L, std::lround(value * 512.F)));
     }
     descriptors.clear();
     descriptors.shrink_to_fit();

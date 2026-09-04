@@ -232,10 +232,8 @@ MatchSet SiftGpuMatcher::match(
     if (std::this_thread::get_id() != impl_->owner_thread)
         throw std::runtime_error(
             "SiftGPU matcher must run on its CUDA context owner thread");
-    auto& mutable_query = const_cast<FeatureSet&>(query);
-    auto& mutable_train = const_cast<FeatureSet&>(train);
-    mutable_query.validate();
-    mutable_train.validate();
+    query.validate();
+    train.validate();
     if (query.descriptor_dimension != 128 ||
         train.descriptor_dimension != 128)
         throw std::invalid_argument(
@@ -245,23 +243,37 @@ MatchSet SiftGpuMatcher::match(
         train.keypoints.size() > impl_->options.maximum_features)
         throw std::invalid_argument(
             "SiftGPU matcher feature count exceeds configured maximum");
-    const auto query_rows = mutable_query.descriptor_rows_float();
-    const auto train_rows = mutable_train.descriptor_rows_float();
-    if (query_rows.empty() || train_rows.empty()) return {};
-
 #if defined(AETHERSCAN_HAS_SIFTGPU)
     std::lock_guard lock(impl_->mutex);
     if (impl_->slot0_identity != query.descriptor_identity ||
         impl_->slot0_generation != query.descriptor_generation) {
-        impl_->gpu->SetDescriptors(
-            0, static_cast<int>(query.keypoints.size()), query_rows.data());
+        if (query.storage == DescriptorStorage::uint8) {
+            if (query.descriptors_u8.empty()) return {};
+            impl_->gpu->SetDescriptors(
+                0, static_cast<int>(query.keypoints.size()),
+                query.descriptors_u8.data());
+        } else {
+            if (query.descriptors.empty()) return {};
+            impl_->gpu->SetDescriptors(
+                0, static_cast<int>(query.keypoints.size()),
+                query.descriptors.data());
+        }
         impl_->slot0_identity = query.descriptor_identity;
         impl_->slot0_generation = query.descriptor_generation;
     }
     if (impl_->slot1_identity != train.descriptor_identity ||
         impl_->slot1_generation != train.descriptor_generation) {
-        impl_->gpu->SetDescriptors(
-            1, static_cast<int>(train.keypoints.size()), train_rows.data());
+        if (train.storage == DescriptorStorage::uint8) {
+            if (train.descriptors_u8.empty()) return {};
+            impl_->gpu->SetDescriptors(
+                1, static_cast<int>(train.keypoints.size()),
+                train.descriptors_u8.data());
+        } else {
+            if (train.descriptors.empty()) return {};
+            impl_->gpu->SetDescriptors(
+                1, static_cast<int>(train.keypoints.size()),
+                train.descriptors.data());
+        }
         impl_->slot1_identity = train.descriptor_identity;
         impl_->slot1_generation = train.descriptor_generation;
     }

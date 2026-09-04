@@ -40,6 +40,7 @@
 #include <cstring>
 #include <filesystem>
 #include <future>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -58,6 +59,8 @@ constexpr std::uint32_t k_preview_extent = 1920;
 enum class VisualizationMode { points, splat, rings };
 
 enum class StepState { pending, active, done, skipped, failed };
+
+enum class ClearResultsAction { none, clear_view, delete_generated };
 
 struct App {
     ProjectSettings settings;
@@ -110,6 +113,10 @@ struct App {
     bool show_controls{};
     bool show_clear_results{};
     bool project_folder_automatic{};
+    // A user-cleared viewport must stay empty until an explicit load or a new
+    // reconstruction completes. Otherwise draw_sparse_tab() reloads it on the
+    // very next frame merely because an artifact still exists on disk.
+    bool suppress_scene_auto_load{};
 
     bool show_scene{true};
     bool show_viewport{true};
@@ -117,6 +124,13 @@ struct App {
     bool show_inspector{true};
     bool show_status_bar{true};
     bool reset_dock_layout{};
+
+    // OS file drops arrive on the GLFW callback and are consumed against the
+    // last viewport rectangle on the following frame.
+    std::vector<std::string> dropped_paths;
+    ImVec2 viewport_min{};
+    ImVec2 viewport_max{};
+    bool viewport_bounds_valid{};
 };
 
 void stop_splat_view(App& app) {
@@ -169,24 +183,118 @@ void set_message(App& app, std::string text, const ImVec4& colour) {
     app.message_colour = colour;
 }
 
+std::string lower_path_extension(const std::filesystem::path& path) {
+    std::string extension = path.extension().string();
+    std::transform(
+        extension.begin(), extension.end(), extension.begin(),
+        [](const unsigned char value) {
+            return static_cast<char>(std::tolower(value));
+        });
+    return extension;
+}
+
+bool is_supported_image_extension(std::string extension) {
+    std::transform(
+        extension.begin(), extension.end(), extension.begin(),
+        [](const unsigned char value) {
+            return static_cast<char>(std::tolower(value));
+        });
+    return extension == ".jpg" || extension == ".jpeg" ||
+           extension == ".png" || extension == ".tif" ||
+           extension == ".tiff" || extension == ".bmp";
+}
+
 bool directory_has_images(const std::filesystem::path& directory) {
     std::error_code error;
     if (!std::filesystem::is_directory(directory, error)) return false;
     for (const auto& entry :
          std::filesystem::directory_iterator(directory, error)) {
         if (!entry.is_regular_file(error)) continue;
-        std::string extension = entry.path().extension().string();
-        std::transform(
-            extension.begin(), extension.end(), extension.begin(),
-            [](const unsigned char value) {
-                return static_cast<char>(std::tolower(value));
-            });
-        if (extension == ".jpg" || extension == ".jpeg" ||
-            extension == ".png" || extension == ".tif" ||
-            extension == ".tiff" || extension == ".bmp")
+        if (is_supported_image_extension(entry.path().extension().string()))
             return true;
     }
     return false;
+}
+
+std::filesystem::path path_from_drop(const std::string& text) {
+#if defined(_WIN32)
+    return std::filesystem::path(std::u8string(text.begin(), text.end()));
+#else
+    return std::filesystem::path(text);
+#endif
+}
+
+std::filesystem::path normalized_directory(const std::filesystem::path& path) {
+    std::error_code error;
+    auto canonical = std::filesystem::weakly_canonical(path, error);
+    if (error) canonical = path.lexically_normal();
+    return canonical;
+}
+
+bool same_directory(
+    const std::filesystem::path& left, const std::filesystem::path& right) {
+    std::error_code error;
+    if (std::filesystem::equivalent(left, right, error)) return true;
+    return normalized_directory(left) == normalized_directory(right);
+}
+
+bool is_supported_image_file(const std::filesystem::path& path) {
+    std::error_code error;
+    return std::filesystem::is_regular_file(path, error) &&
+           is_supported_image_extension(path.extension().string());
+}
+
+std::optional<std::filesystem::path> resolve_dropped_image_directory(
+    const std::vector<std::string>& dropped, std::string& error) {
+    std::vector<std::filesystem::path> folders;
+    std::vector<std::filesystem::path> image_folders;
+    std::vector<std::filesystem::path> images;
+    folders.reserve(dropped.size());
+    images.reserve(dropped.size());
+    for (const std::string& text : dropped) {
+        if (text.empty()) continue;
+        const std::filesystem::path path = path_from_drop(text);
+        std::error_code status;
+        if (std::filesystem::is_directory(path, status)) {
+            const auto folder = normalized_directory(path);
+            folders.push_back(folder);
+            if (directory_has_images(folder)) image_folders.push_back(folder);
+        } else if (is_supported_image_file(path)) {
+            images.push_back(path);
+        }
+    }
+
+    if (image_folders.size() > 1) {
+        error = "Drop a single image folder";
+        return std::nullopt;
+    }
+    if (image_folders.size() == 1) {
+        const auto& folder = image_folders.front();
+        for (const auto& image : images) {
+            if (!same_directory(image.parent_path(), folder)) {
+                error = "Dropped items must belong to one image folder";
+                return std::nullopt;
+            }
+        }
+        return folder;
+    }
+    if (!folders.empty() && images.empty()) {
+        error = "Dropped folder contains no supported images";
+        return std::nullopt;
+    }
+    if (images.empty()) {
+        error = "Drop an image folder, photos, .asfm, or .ascan project";
+        return std::nullopt;
+    }
+
+    const auto parent = normalized_directory(images.front().parent_path());
+    for (const auto& image : images) {
+        if (!same_directory(image.parent_path(), parent)) {
+            error = "Dropped photos must come from the same folder";
+            return std::nullopt;
+        }
+    }
+    return parent;
 }
 
 #if defined(_WIN32)
@@ -409,6 +517,18 @@ void store_path_field(
     std::snprintf(field.data(), field.size(), "%s", text.c_str());
 }
 
+void store_utf8_path_field(
+    std::array<char, 1024>& field, const std::filesystem::path& path) {
+#if defined(_WIN32)
+    const std::u8string utf8 = path.u8string();
+    if (utf8.size() + 1 > field.size()) return;
+    std::memcpy(field.data(), utf8.data(), utf8.size());
+    field[utf8.size()] = '\0';
+#else
+    store_path_field(field, path);
+#endif
+}
+
 aetherscan::sfm::Scene load_working_sfm(
     const std::filesystem::path& path,
     const std::filesystem::path& images_dir) {
@@ -503,16 +623,37 @@ void apply_project_settings(
     app.settings.normal_field = settings.normal_field;
 }
 
+void request_asfm_scene_load(
+    App& app, const std::filesystem::path& asfm, std::string label) {
+    if (app.loading_scene || asfm.empty()) return;
+    app.suppress_scene_auto_load = false;
+    const std::filesystem::path images(app.settings.images_dir.data());
+    app.loading_scene = true;
+    app.scene_source = std::move(label);
+    app.pending_load = std::async(
+        std::launch::async, [asfm, images] {
+            SceneLoad loaded;
+            try {
+                return sparse_scene_from_sfm(load_working_sfm(asfm, images));
+            } catch (const std::exception& failure) {
+                loaded.error = failure.what();
+                return loaded;
+            }
+        });
+}
+
 void request_ascan_scene_load(App& app) {
     if (app.loading_scene) return;
     const auto ascan = app.layout.project_file;
     const auto working = app.layout.working_sfm;
+    const auto asfm = app.layout.sparse_asfm;
     const std::filesystem::path images(app.settings.images_dir.data());
-    if (ascan.empty() && working.empty()) return;
+    if (ascan.empty() && working.empty() && asfm.empty()) return;
+    app.suppress_scene_auto_load = false;
     app.loading_scene = true;
     app.scene_source = "Project SfM";
     app.pending_load = std::async(
-        std::launch::async, [ascan, working, images] {
+        std::launch::async, [ascan, working, asfm, images] {
             SceneLoad loaded;
             std::error_code error;
             try {
@@ -530,6 +671,8 @@ void request_ascan_scene_load(App& app) {
                     const auto scene = aetherscan::project::read_sfm(archive);
                     if (scene) return sparse_scene_from_sfm(*scene);
                 }
+                if (!asfm.empty() && std::filesystem::exists(asfm, error))
+                    return sparse_scene_from_sfm(load_working_sfm(asfm, images));
                 loaded.error = "Project has no SfM stage yet";
             } catch (const std::exception& failure) {
                 loaded.error = failure.what();
@@ -597,18 +740,14 @@ void new_project(App& app) {
     set_message(app, "New project", theme::text_muted);
 }
 
-void select_image_folder(App& app) {
-    if (app.job.running() || app.loading_scene) return;
-    if (!pick_folder(
-            L"Select the capture image folder", app.settings.images_dir))
-        return;
-
+void apply_image_directory_selection(App& app) {
     stop_splat_view(app);
     clear_loaded_result(app);
-    if (app.project_folder_automatic) {
-        app.settings.project_dir.fill('\0');
-        app.project_folder_automatic = false;
-    }
+    // An image-folder selection starts a different reconstruction. Retaining
+    // an explicitly opened project here makes refresh_artifacts() immediately
+    // reload that project's old SfM result into the new dataset.
+    app.settings.project_dir.fill('\0');
+    app.project_folder_automatic = false;
     assign_default_project_folder(app);
     refresh_artifacts(app);
     set_message(
@@ -616,10 +755,104 @@ void select_image_folder(App& app) {
         theme::text_muted);
 }
 
+void select_image_folder(App& app) {
+    if (app.job.running() || app.loading_scene) return;
+    if (!pick_folder(
+            L"Select the capture image folder", app.settings.images_dir))
+        return;
+    apply_image_directory_selection(app);
+}
+
+void open_project_from_path(App& app, const std::filesystem::path& path);
+void open_asfm_from_path(App& app, const std::filesystem::path& asfm);
+
+void apply_dropped_image_source(
+    App& app, const std::vector<std::string>& dropped) {
+    if (app.job.running() || app.loading_scene) {
+        set_message(
+            app, "Cannot change images while a job is running", theme::warning);
+        return;
+    }
+    std::string error;
+    const auto directory = resolve_dropped_image_directory(dropped, error);
+    if (!directory) {
+        set_message(app, error, theme::danger);
+        return;
+    }
+    store_utf8_path_field(app.settings.images_dir, *directory);
+    apply_image_directory_selection(app);
+}
+
+void apply_dropped_paths(App& app, const std::vector<std::string>& dropped) {
+    std::vector<std::filesystem::path> projects;
+    std::vector<std::filesystem::path> asfms;
+    std::vector<std::string> remainder;
+    projects.reserve(dropped.size());
+    asfms.reserve(dropped.size());
+    remainder.reserve(dropped.size());
+    for (const std::string& text : dropped) {
+        if (text.empty()) continue;
+        const std::filesystem::path path = path_from_drop(text);
+        const std::string extension = lower_path_extension(path);
+        if (extension == ".ascan")
+            projects.push_back(path);
+        else if (extension == ".asfm")
+            asfms.push_back(path);
+        else
+            remainder.push_back(text);
+    }
+
+    if (projects.size() > 1) {
+        set_message(app, "Drop a single .ascan project file", theme::danger);
+        return;
+    }
+    if (projects.size() == 1) {
+        open_project_from_path(app, projects.front());
+        return;
+    }
+    if (asfms.size() > 1) {
+        set_message(app, "Drop a single .asfm file", theme::danger);
+        return;
+    }
+    if (asfms.size() == 1) {
+        if (!remainder.empty()) {
+            std::string error;
+            if (const auto directory =
+                    resolve_dropped_image_directory(remainder, error))
+                store_utf8_path_field(app.settings.images_dir, *directory);
+        }
+        open_asfm_from_path(app, asfms.front());
+        return;
+    }
+    apply_dropped_image_source(app, remainder.empty() ? dropped : remainder);
+}
+
+bool mouse_over_viewport(const App& app) {
+    if (!app.viewport_bounds_valid) return false;
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    return mouse.x >= app.viewport_min.x && mouse.y >= app.viewport_min.y &&
+           mouse.x < app.viewport_max.x && mouse.y < app.viewport_max.y;
+}
+
+void consume_dropped_paths(App& app) {
+    if (app.dropped_paths.empty()) return;
+    std::vector<std::string> dropped;
+    dropped.swap(app.dropped_paths);
+    if (!mouse_over_viewport(app)) {
+        set_message(
+            app,
+            "Drop photos, an .asfm scene, or an .ascan project on the viewport",
+            theme::warning);
+        return;
+    }
+    apply_dropped_paths(app, dropped);
+}
+
 void request_scene_load(
     App& app, const std::filesystem::path& cloud,
     const std::filesystem::path& poses, std::string label) {
     if (app.loading_scene) return;
+    app.suppress_scene_auto_load = false;
     app.loading_scene = true;
     app.scene_source = std::move(label);
     app.pending_load = std::async(
@@ -633,6 +866,7 @@ void request_gaussian_scene_load(App& app) {
     const auto ascan = app.layout.project_file;
     const auto poses = app.layout.sparse_poses;
     if (model_path.empty() && ascan.empty()) return;
+    app.suppress_scene_auto_load = false;
     app.loading_scene = true;
     app.scene_source = "Gaussian centres";
     app.pending_load = std::async(
@@ -663,7 +897,9 @@ void request_gaussian_scene_load(App& app) {
 }
 
 void ensure_sparse_loaded(App& app) {
-    if (!app.has_sparse || app.scene.has_points() || app.loading_scene) return;
+    if (app.suppress_scene_auto_load || !app.has_sparse ||
+        app.scene.has_points() || app.loading_scene)
+        return;
     if (!app.layout.project_file.empty() || !app.layout.working_sfm.empty())
         request_ascan_scene_load(app);
     else
@@ -702,6 +938,9 @@ void publish_preview_vis(App& app) {
 
 void set_visualization_mode(App& app, const VisualizationMode mode) {
     app.view_mode = mode;
+    // Changing the rail mode is an explicit request to show scene data again.
+    if (mode == VisualizationMode::points)
+        app.suppress_scene_auto_load = false;
     const bool training =
         app.job.running() && app.active_job == JobKind::train;
     if (app.has_model && !training)
@@ -865,12 +1104,7 @@ void snap_preview_to_index(App& app, const unsigned index) {
         app, true, app.preview_raster_width, app.preview_raster_height);
 }
 
-void select_project_folder(App& app) {
-    if (app.job.running() || app.loading_scene) return;
-    if (!pick_project_file(
-            L"Open AetherScan Project", app.settings.project_dir, false))
-        return;
-
+void apply_opened_project(App& app) {
     stop_splat_view(app);
     clear_loaded_result(app);
     app.project_folder_automatic = false;
@@ -886,8 +1120,94 @@ void select_project_folder(App& app) {
     }
     if (app.has_sparse)
         request_ascan_scene_load(app);
+    else if (app.has_asfm)
+        request_asfm_scene_load(
+            app, app.layout.sparse_asfm, app.layout.sparse_asfm.filename().string());
     else
         set_message(app, "Project opened; no SfM stage yet", theme::text_muted);
+}
+
+void select_project_folder(App& app) {
+    if (app.job.running() || app.loading_scene) return;
+    if (!pick_project_file(
+            L"Open AetherScan Project", app.settings.project_dir, false))
+        return;
+    apply_opened_project(app);
+}
+
+void open_project_from_path(App& app, const std::filesystem::path& path) {
+    if (app.job.running() || app.loading_scene) {
+        set_message(
+            app, "Cannot open a project while a job is running", theme::warning);
+        return;
+    }
+    store_utf8_path_field(app.settings.project_dir, path);
+    apply_opened_project(app);
+}
+
+std::filesystem::path inferred_images_dir_near(
+    const std::filesystem::path& asfm) {
+    const auto parent = asfm.parent_path();
+    if (directory_has_images(parent)) return parent;
+    const auto images = parent / "images";
+    if (directory_has_images(images)) return images;
+    return {};
+}
+
+void infer_images_dir_from_scene(App& app) {
+    if (app.settings.images_dir[0] != '\0') return;
+    std::optional<std::filesystem::path> parent;
+    for (const ViewPose& view : app.scene.views) {
+        if (view.image_path.empty() || view.image_path.is_relative()) continue;
+        const auto directory = view.image_path.parent_path();
+        if (directory.empty()) continue;
+        if (!parent)
+            parent = directory;
+        else if (!same_directory(*parent, directory))
+            return;
+    }
+    if (parent && directory_has_images(*parent))
+        store_utf8_path_field(app.settings.images_dir, *parent);
+}
+
+void open_asfm_from_path(App& app, const std::filesystem::path& asfm) {
+    if (app.job.running() || app.loading_scene) {
+        set_message(
+            app, "Cannot open SfM while a job is running", theme::warning);
+        return;
+    }
+    stop_splat_view(app);
+    clear_loaded_result(app);
+
+    const auto sibling = asfm.parent_path() / (asfm.stem().string() + ".ascan");
+    std::error_code error;
+    if (std::filesystem::exists(sibling, error)) {
+        store_utf8_path_field(app.settings.project_dir, sibling);
+        app.project_folder_automatic = false;
+        try {
+            refresh_artifacts(app);
+            const auto archive =
+                aetherscan::project::Archive::open(app.layout.project_file);
+            apply_project_settings(
+                app, aetherscan::project::read_settings(archive));
+        } catch (...) {
+        }
+    } else {
+        store_utf8_path_field(
+            app.settings.project_dir,
+            asfm.parent_path() / (asfm.stem().string() + ".ascan"));
+        app.project_folder_automatic = true;
+    }
+
+    if (app.settings.images_dir[0] == '\0') {
+        const auto inferred = inferred_images_dir_near(asfm);
+        if (!inferred.empty())
+            store_utf8_path_field(app.settings.images_dir, inferred);
+    }
+    if (app.settings.project_dir[0] != '\0') refresh_artifacts(app);
+    app.has_sparse = true;
+    app.has_asfm = true;
+    request_asfm_scene_load(app, asfm, asfm.filename().string());
 }
 
 void save_project_as(App& app) {
@@ -938,6 +1258,7 @@ void delete_reconstruction_results(App& app) {
 
     stop_splat_view(app);
     clear_loaded_result(app);
+    app.suppress_scene_auto_load = true;
     const std::array<std::filesystem::path, 13> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
@@ -988,6 +1309,25 @@ void delete_reconstruction_results(App& app) {
         if (error && failure.empty()) failure = error.message();
     }
 
+    // With reuse_cache disabled, resolve_layout() places the live sfm.bin and
+    // preview sidecars under %TEMP%/AetherScan/<project-hash>, not in
+    // layout.cache. Delete that exact namespaced directory as well; leaving it
+    // behind makes refresh_artifacts() resurrect the supposedly deleted scene.
+    const std::filesystem::path runtime =
+        app.layout.working_sfm.parent_path().lexically_normal();
+    std::error_code temp_error;
+    const std::filesystem::path temp_root =
+        (std::filesystem::temp_directory_path(temp_error) / "AetherScan")
+            .lexically_normal();
+    const bool safe_runtime =
+        !temp_error && !runtime.empty() && runtime != temp_root &&
+        runtime.parent_path() == temp_root;
+    if (safe_runtime) {
+        std::error_code error;
+        removed += std::filesystem::remove_all(runtime, error);
+        if (error && failure.empty()) failure = error.message();
+    }
+
     refresh_artifacts(app);
     if (failure.empty()) {
         set_message(
@@ -1032,6 +1372,7 @@ void poll_scene_load(App& app) {
     }
     app.photos.clear();
     app.scene = std::move(loaded.scene);
+    infer_images_dir_from_scene(app);
     attach_view_image_paths(
         app.scene, std::filesystem::path(app.settings.images_dir.data()));
     if (!live_preview_active(app)) app.camera.frame(app.scene);
@@ -1654,7 +1995,8 @@ void draw_controls_window(App& app) {
     ImGui::End();
 }
 
-void draw_clear_results_modal(App& app) {
+ClearResultsAction draw_clear_results_modal(App& app) {
+    ClearResultsAction action = ClearResultsAction::none;
     constexpr const char* popup = "Clear Reconstruction Results";
     if (app.show_clear_results) {
         ImGui::OpenPopup(popup);
@@ -1664,7 +2006,7 @@ void draw_clear_results_modal(App& app) {
     ImGui::SetNextWindowSize({470.F, 0.F}, ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(
             popup, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-        return;
+        return action;
 
     ImGui::TextUnformatted("Clear the current reconstruction?");
     ImGui::Spacing();
@@ -1689,18 +2031,18 @@ void draw_clear_results_modal(App& app) {
     ImGui::Spacing();
 
     if (theme::toolbar_button("Clear View Only", {126.F, 30.F})) {
-        clear_loaded_result(app);
-        set_message(app, "Loaded reconstruction cleared from view", theme::success);
+        action = ClearResultsAction::clear_view;
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (theme::danger_button("Delete Generated Results", {190.F, 30.F})) {
-        delete_reconstruction_results(app);
+        action = ClearResultsAction::delete_generated;
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", {92.F, 30.F})) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
+    return action;
 }
 
 Action draw_toolbar(App& app) {
@@ -1730,7 +2072,7 @@ Action draw_toolbar(App& app) {
     if (icons::labeled_button(
             "##image_folder", icons::Icon::folder, "Image Folder",
             {124.F, 32.F}, icons::ButtonStyle::normal, !busy, false,
-            "Select capture image folder")) {
+            "Select capture image folder, or drop photos / .asfm / .ascan on the viewport")) {
         select_image_folder(app);
     }
     ImGui::SameLine();
@@ -1901,6 +2243,7 @@ void draw_scene_panel(App& app) {
                     app.view_mode == VisualizationMode::points &&
                         !live_preview_active(app))) {
                 app.view_mode = VisualizationMode::points;
+                app.suppress_scene_auto_load = false;
                 if (app.has_sparse) ensure_sparse_loaded(app);
                 write_preview_vis(app);
                 sync_live_preview_camera(
@@ -2055,6 +2398,16 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         ImGui::IsItemHovered() &&
         !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
 
+    if (!app.loading_scene && !app.scene.has_points() && !app.has_sparse) {
+        draw_empty_viewport(
+            draw, min, max,
+            app.settings.images_dir[0] != '\0' ? "Ready to align cameras"
+                                               : "Drop photos or a reconstruction",
+            app.settings.images_dir[0] != '\0'
+                ? "Run Align Photos, or drop a different folder, .asfm, or .ascan"
+                : "Drop an image folder, photos, .asfm, or .ascan onto this view");
+    }
+
     const SceneDrawStats stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, app.view_options, hovered,
         app.photos.ids(), app.photos.size());
@@ -2068,7 +2421,8 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     update_orbit_camera(
         app.camera, hovered && !gizmo_captures, app.scene.radius);
 
-    const char* overlay = "NO ALIGNMENT";
+    const char* overlay = app.settings.images_dir[0] != '\0' ? "NO ALIGNMENT"
+                                                            : "NO IMAGES";
     ImVec4 overlay_dot = theme::inactive;
     if (app.loading_scene) {
         overlay = "LOADING";
@@ -2101,7 +2455,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     } else if (!app.loading_scene) {
         const char* hint = app.has_sparse
             ? "Reading sparse.ply..."
-            : "Pick an image folder, then Align Photos";
+            : "Drop a photo folder, .asfm, or .ascan here";
         draw->AddText(
             {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_faint), hint);
     }
@@ -2254,7 +2608,10 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
 }
 
 void draw_viewport_panel(App& app) {
-    if (!app.show_viewport) return;
+    if (!app.show_viewport) {
+        app.viewport_bounds_valid = false;
+        return;
+    }
     constexpr ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoScrollWithMouse;
@@ -2262,12 +2619,20 @@ void draw_viewport_panel(App& app) {
     const bool open = ImGui::Begin("Viewport", &app.show_viewport, flags);
     ImGui::PopStyleVar();
     if (!open) {
+        app.viewport_bounds_valid = false;
         ImGui::End();
         return;
     }
 
     if (ImGuiDockNode* node = ImGui::GetWindowDockNode())
         node->LocalFlags |= ImGuiDockNodeFlags_AutoHideTabBar;
+
+    app.viewport_min = ImGui::GetWindowPos();
+    const ImVec2 viewport_size = ImGui::GetWindowSize();
+    app.viewport_max = {
+        app.viewport_min.x + viewport_size.x,
+        app.viewport_min.y + viewport_size.y};
+    app.viewport_bounds_valid = true;
 
     constexpr float k_header_height = 36.F;
     const ImVec2 content_start = ImGui::GetCursorPos();
@@ -2959,6 +3324,18 @@ int main(const int argc, char** argv) {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(
         1600, 940, "AetherScan Reconstruction Editor", nullptr, nullptr);
+    glfwSetWindowUserPointer(window, &app);
+    glfwSetDropCallback(
+        window, [](GLFWwindow* handle, const int count, const char** paths) {
+            auto* state = static_cast<App*>(glfwGetWindowUserPointer(handle));
+            if (state == nullptr || count <= 0 || paths == nullptr) return;
+            state->dropped_paths.clear();
+            state->dropped_paths.reserve(static_cast<std::size_t>(count));
+            for (int i = 0; i < count; ++i) {
+                if (paths[i] != nullptr && paths[i][0] != '\0')
+                    state->dropped_paths.emplace_back(paths[i]);
+            }
+        });
 
     ImVector<const char*> extensions;
     std::uint32_t extension_count{};
@@ -3066,6 +3443,7 @@ int main(const int argc, char** argv) {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        consume_dropped_paths(app);
 
         app.settings.iterations = std::max(app.settings.iterations, 1);
         app.settings.preview_interval =
@@ -3107,12 +3485,29 @@ int main(const int argc, char** argv) {
         }
 
         draw_controls_window(app);
-        draw_clear_results_modal(app);
+        const ClearResultsAction clear_results_action =
+            draw_clear_results_modal(app);
         if (app.close_requested) glfwSetWindowShouldClose(window, GLFW_TRUE);
         ImGui::Render();
         ImDrawData* draw_data = ImGui::GetDrawData();
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
             gpu::present(draw_data, theme::surface_0);
+
+        // The viewport draw list can reference camera-photo descriptors until
+        // present() has submitted this frame. Clear only afterwards so the
+        // confirmation click cannot invalidate resources used by that frame.
+        if (clear_results_action == ClearResultsAction::clear_view) {
+            clear_loaded_result(app);
+            // draw_sparse_tab() normally restores an available sparse result on
+            // every frame. Keep a user-requested clear stable until they
+            // explicitly load/select the cloud again.
+            app.suppress_scene_auto_load = true;
+            set_message(
+                app, "Loaded reconstruction cleared from view", theme::success);
+        } else if (
+            clear_results_action == ClearResultsAction::delete_generated) {
+            delete_reconstruction_results(app);
+        }
     }
 
     if (app.viewer.running()) app.viewer.stop();

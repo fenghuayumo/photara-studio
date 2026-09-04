@@ -108,6 +108,9 @@ int main() {
     expect(
         std::abs(*self_calibrated.estimated_focal - cam.fx) < 0.25 * cam.fx,
         "shared-focal estimate should be close to truth");
+    expect(
+        self_calibrated.num_inliers == self_calibrated.num_ransac_inliers,
+        "unknown-focal pass must preserve F inliers for calibrated rerun");
 
     std::vector<Vec2> distorted_pixels1, distorted_pixels2;
     for (int i = 0; i < 120; ++i) {

@@ -40,6 +40,9 @@ struct ImagePair {
     float mean_ray_angle{0.F};  // radians
     float homography_ratio{0.F};  // H_inliers / E_inliers
     bool degenerate_planar{false};
+    // Byte-identical source images. Their relative pose is an observed
+    // identity constraint, not an unconstrained two-view geometry estimate.
+    bool zero_baseline{false};
     bool active{true};
 
     ImagePair() = default;

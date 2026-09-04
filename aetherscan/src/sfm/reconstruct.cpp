@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numbers>
 #include <numeric>
 #include <queue>
@@ -363,7 +364,7 @@ std::uint64_t reconstruction_key(
     key.append_string("reconstruction");
     // Bump when the single-cluster hierarchy path changes from star-only to
     // global-first mapping; old hierarchy checkpoints must not bypass it.
-    key.append_string("deferred-component-reseed-v19");
+    key.append_string("scaled-weights-20k-v34");
     key.append_string(AETHERSCAN_RECONSTRUCTION_CACHE_BUILD_ID);
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
@@ -643,6 +644,115 @@ unsigned repair_position_outliers(
         " median_edge=", median_length,
         " maximum_edge=", maximum_length);
     return quarantined + reseeded;
+}
+
+unsigned enforce_zero_baseline_pose_groups(Scene& scene) {
+    if (scene.images.empty() || scene.pairs.empty()) return 0;
+
+    std::vector<Index> parent(scene.images.size());
+    std::iota(parent.begin(), parent.end(), Index{0});
+    const auto find = [&](const auto self, const Index node) -> Index {
+        if (parent[node] == node) return node;
+        return parent[node] = self(self, parent[node]);
+    };
+    const auto unite = [&](Index first, Index second) {
+        first = find(find, first);
+        second = find(find, second);
+        if (first == second) return;
+        if (first < second) parent[second] = first;
+        else parent[first] = second;
+    };
+
+    bool has_zero_baseline = false;
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.zero_baseline || pair.id1 >= parent.size() ||
+            pair.id2 >= parent.size() || pair.id1 == pair.id2)
+            continue;
+        unite(pair.id1, pair.id2);
+        has_zero_baseline = true;
+    }
+    if (!has_zero_baseline) return 0;
+
+    std::unordered_map<Index, std::vector<Index>> groups;
+    for (Index image_id = 0; image_id < parent.size(); ++image_id) {
+        const Index root = find(find, image_id);
+        groups[root].push_back(image_id);
+    }
+
+    std::vector<double> reprojection_rms(scene.images.size(),
+                                         std::numeric_limits<double>::max());
+    std::vector<unsigned> reprojection_count(scene.images.size(), 0);
+    std::vector<double> squared_errors(scene.images.size(), 0.0);
+    for (const Track& track : scene.tracks) {
+        if (!track.is_triangulated() || !track.position.allFinite()) continue;
+        const std::size_t inlier_count = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < inlier_count; ++i) {
+            const Observation& observation = track.observations[i];
+            if (observation.image_id >= scene.images.size()) continue;
+            const Image& image = scene.images[observation.image_id];
+            if (!image.registered || image.camera_id >= scene.cameras.size() ||
+                observation.feature_id >= image.features.keypoints.size())
+                continue;
+            const Vec3 camera_point =
+                image.pose.transform_world_to_camera(track.position);
+            if (!camera_point.allFinite() || camera_point.z() <= 0.0) continue;
+            const Vec2 projected =
+                scene.cameras[image.camera_id].project(camera_point);
+            const auto& keypoint =
+                image.features.keypoints[observation.feature_id];
+            const double error =
+                (projected - Vec2(keypoint.x, keypoint.y)).norm();
+            if (!std::isfinite(error)) continue;
+            squared_errors[observation.image_id] += error * error;
+            ++reprojection_count[observation.image_id];
+        }
+    }
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        if (reprojection_count[image_id] >= 10) {
+            reprojection_rms[image_id] =
+                std::sqrt(squared_errors[image_id] /
+                          static_cast<double>(reprojection_count[image_id]));
+        }
+    }
+
+    unsigned updated = 0;
+    unsigned group_count = 0;
+    for (auto& [root, image_ids] : groups) {
+        Index representative = k_invalid;
+        double best_score = std::numeric_limits<double>::infinity();
+        for (const Index image_id : image_ids) {
+            const Image& image = scene.images[image_id];
+            if (!image.registered || !image.pose.R.allFinite() ||
+                !image.pose.C.allFinite())
+                continue;
+            // Prefer the copy with the strongest low-error support. Views with
+            // too few observations only win when no supported copy exists.
+            const double score = reprojection_rms[image_id];
+            if (score < best_score ||
+                (score == best_score && image_id < representative)) {
+                representative = image_id;
+                best_score = score;
+            }
+        }
+        if (representative == k_invalid) continue;
+        ++group_count;
+        const Pose3D fused = scene.images[representative].pose;
+        for (const Index image_id : image_ids) {
+            Image& image = scene.images[image_id];
+            if (image.registered &&
+                image.pose.R.isApprox(fused.R) &&
+                image.pose.C.isApprox(fused.C))
+                continue;
+            image.registered = true;
+            image.pose = fused;
+            ++updated;
+        }
+    }
+    core::Logger::instance().info(
+        "zero-baseline pose groups: groups=", group_count,
+        " cloned_views=", updated);
+    return updated;
 }
 
 void populate_reprojection_stats(
@@ -931,6 +1041,21 @@ ReconstructionSummary run_global_mapping(
     // rotation component through robust incremental resection.
     if (scene.registered_count() < scene.images.size())
         register_images(scene, fallback_resection);
+
+    if (enforce_zero_baseline_pose_groups(scene) > 0) {
+        // The poses are now exact observations. Re-triangulate affected/all
+        // tracks without another free-camera BA, which could split the copies
+        // again despite their identical pixels.
+        triangulate_tracks(
+            scene, false, fallback_resection.max_reproj_error,
+            fallback_resection.min_angle_deg);
+        filter_tracks(
+            scene,
+            std::min(fallback_resection.max_reproj_error, 2.F),
+            fallback_resection.min_angle_deg,
+            fallback_resection.mult_depth_near,
+            fallback_resection.mult_depth_far);
+    }
 
     summary.registered_views = scene.registered_count();
     summary.failed_views =

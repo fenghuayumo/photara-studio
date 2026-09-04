@@ -279,6 +279,17 @@ void VocabularyTree::train(
     const std::span<const features::FeatureSet> images,
     const VocabularyConfig& config,
     const features::DescriptorMetric metric) {
+    std::vector<const features::FeatureSet*> image_refs;
+    image_refs.reserve(images.size());
+    for (const features::FeatureSet& image : images)
+        image_refs.push_back(&image);
+    train(image_refs, config, metric);
+}
+
+void VocabularyTree::train(
+    const std::span<const features::FeatureSet* const> images,
+    const VocabularyConfig& config,
+    const features::DescriptorMetric metric) {
     if (config.branching < 2 || config.depth == 0)
         throw std::invalid_argument("Invalid vocabulary configuration");
     config_ = config;
@@ -287,7 +298,9 @@ void VocabularyTree::train(
     centroids_.clear();
     word_count_ = 0;
     dimension_ = 0;
-    for (const features::FeatureSet& features : images) {
+    for (const features::FeatureSet* image : images) {
+        if (image == nullptr) continue;
+        const features::FeatureSet& features = *image;
         if (features.descriptor_dimension > 0) {
             dimension_ = features.descriptor_dimension;
             break;
@@ -299,22 +312,39 @@ void VocabularyTree::train(
     training.reserve(
         std::min(config.max_training_descriptors, images.size() * config.max_descriptors_per_image) *
         dimension_);
-    for (const features::FeatureSet& features : images) {
+    for (const features::FeatureSet* image : images) {
+        if (image == nullptr) continue;
+        const features::FeatureSet& features = *image;
         if (features.descriptor_dimension != dimension_ ||
-            features.descriptors.empty() || features.keypoints.empty())
+            (features.descriptors.empty() &&
+             features.descriptors_u8.empty()) ||
+            features.keypoints.empty())
             continue;
         const auto samples = sample_descriptors_spatially(
             features, config.max_descriptors_per_image, config.sample_grid);
-        auto& mutable_features = const_cast<features::FeatureSet&>(features);
-        const auto float_rows = mutable_features.descriptor_rows_float();
-        if (float_rows.empty()) continue;
+        std::vector<float> converted(dimension_);
         for (const features::FeatureIndex index : samples) {
             if (training.size() / dimension_ >= config.max_training_descriptors)
                 break;
-            const float* row =
-                float_rows.data() +
-                static_cast<std::size_t>(index) * dimension_;
-            training.insert(training.end(), row, row + dimension_);
+            if (features.storage ==
+                aetherscan::features::DescriptorStorage::float32) {
+                const float* row = features.descriptors.data() +
+                    static_cast<std::size_t>(index) * dimension_;
+                training.insert(training.end(), row, row + dimension_);
+            } else {
+                const std::uint8_t* row = features.descriptors_u8.data() +
+                    static_cast<std::size_t>(index) * dimension_;
+                double squared_norm = 0.0;
+                for (std::size_t column = 0; column < dimension_; ++column)
+                    squared_norm += static_cast<double>(row[column]) *
+                                    static_cast<double>(row[column]);
+                const float inverse_norm = static_cast<float>(
+                    1.0 / std::sqrt(std::max(squared_norm, 1e-24)));
+                for (std::size_t column = 0; column < dimension_; ++column)
+                    converted[column] = row[column] * inverse_norm;
+                training.insert(
+                    training.end(), converted.begin(), converted.end());
+            }
         }
         if (training.size() / dimension_ >= config.max_training_descriptors)
             break;
@@ -352,6 +382,42 @@ std::uint32_t VocabularyTree::quantize(const std::span<const float> descriptor) 
                 descriptor.data(),
                 centroids_.data() + child_index * dimension_,
                 dimension_);
+            if (distance < best) {
+                best = distance;
+                best_child = child_index;
+            }
+        }
+        node = best_child;
+    }
+    return static_cast<std::uint32_t>(nodes_[node].word_id);
+}
+
+std::uint32_t VocabularyTree::quantize(
+    const std::span<const std::uint8_t> descriptor) const {
+    if (nodes_.empty() || descriptor.size() != dimension_)
+        throw std::invalid_argument("Vocabulary quantize input mismatch");
+    double squared_norm = 0.0;
+    for (const std::uint8_t value : descriptor)
+        squared_norm += static_cast<double>(value) * value;
+    const float inverse_norm = static_cast<float>(
+        1.0 / std::sqrt(std::max(squared_norm, 1e-24)));
+    std::size_t node = 0;
+    while (nodes_[node].word_id < 0) {
+        const Node& current = nodes_[node];
+        if (current.child_count == 0)
+            throw std::runtime_error("Corrupt vocabulary node");
+        float best = std::numeric_limits<float>::infinity();
+        std::size_t best_child = current.first_child;
+        for (std::uint16_t child = 0; child < current.child_count; ++child) {
+            const std::size_t child_index = current.first_child + child;
+            const float* centroid =
+                centroids_.data() + child_index * dimension_;
+            float distance = 0.F;
+            for (std::size_t column = 0; column < dimension_; ++column) {
+                const float delta =
+                    descriptor[column] * inverse_norm - centroid[column];
+                distance += delta * delta;
+            }
             if (distance < best) {
                 best = distance;
                 best_child = child_index;

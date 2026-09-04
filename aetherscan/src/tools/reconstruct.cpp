@@ -68,7 +68,7 @@ struct ReconstructCli {
     bool export_mvs_requested{false};
     std::filesystem::path export_mvs_path;
     std::size_t neighbor_window{3};
-    float match_ratio{0.85F};
+    float match_ratio{0.8F};
     bool mutual_check{true};
     double sift_contrast{0.005};
     std::filesystem::path cache_dir;
@@ -410,7 +410,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("window", "Sequential neighbor window",
          cxxopts::value<std::size_t>()->default_value("3"))
         ("match-ratio", "Lowe ratio test threshold",
-         cxxopts::value<float>()->default_value("0.85"))
+         cxxopts::value<float>()->default_value("0.8"))
         ("mutual-check", "Mutual match consistency check",
          cxxopts::value<bool>()->default_value("true"))
         ("sift-contrast", "SIFT contrast threshold",

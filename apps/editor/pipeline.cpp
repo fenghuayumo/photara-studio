@@ -60,6 +60,36 @@ constexpr float k_training_band_begin = 0.12F;
 constexpr float k_training_band_end = 0.88F;
 constexpr float k_meshing_band_begin = 0.88F;
 
+std::string runtime_cache_key(const std::filesystem::path& project_file) {
+    std::error_code error;
+    std::filesystem::path identity =
+        std::filesystem::weakly_canonical(project_file, error);
+    if (error) {
+        error.clear();
+        identity = std::filesystem::absolute(project_file, error);
+    }
+    if (error) identity = project_file;
+
+    std::u8string bytes = identity.lexically_normal().generic_u8string();
+#if defined(_WIN32)
+    // Windows paths are case-insensitive. Keep differently-cased spellings of
+    // the same project in the same runtime cache namespace.
+    for (char8_t& value : bytes) {
+        if (value >= u8'A' && value <= u8'Z')
+            value = static_cast<char8_t>(value - u8'A' + u8'a');
+    }
+#endif
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const char8_t value : bytes) {
+        hash ^= static_cast<std::uint8_t>(value);
+        hash *= 1099511628211ULL;
+    }
+
+    std::ostringstream key;
+    key << project_file.stem().string() << '-' << std::hex << hash;
+    return key.str();
+}
+
 bool starts_with(std::string_view text, std::string_view prefix) {
     return text.size() >= prefix.size() &&
            text.compare(0, prefix.size(), prefix) == 0;
@@ -706,7 +736,9 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     if (!settings.reuse_cache) {
         std::error_code temp_error;
         const auto temp = std::filesystem::temp_directory_path(temp_error);
-        if (!temp_error) runtime_dir = temp / "AetherScan" / stem;
+        if (!temp_error)
+            runtime_dir =
+                temp / "AetherScan" / runtime_cache_key(layout.project_file);
     }
     layout.working_sfm = runtime_dir / "sfm.bin";
     layout.preview_view_file = runtime_dir / "preview_view";

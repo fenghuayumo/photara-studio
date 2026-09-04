@@ -68,15 +68,25 @@ int main() {
         std::cerr << "u8 compress failed\n";
         return 4;
     }
+    features::FeatureSet quantization_probe;
+    quantization_probe.descriptor_dimension = 4;
+    quantization_probe.keypoints.resize(1);
+    quantization_probe.descriptors = {0.F, 0.25F, 0.5F, 1.F};
+    quantization_probe.compress_descriptors_u8();
+    if (quantization_probe.descriptors_u8 !=
+        std::vector<std::uint8_t>{0, 128, 255, 255}) {
+        std::cerr << "RootSIFT byte scale is not SiftGPU-compatible\n";
+        return 5;
+    }
     const auto rows = features.descriptor_rows_float();
     if (rows.size() != 9 * 4) {
         std::cerr << "u8 expand failed\n";
-        return 5;
+        return 6;
     }
     features.release_descriptors();
     if (!features.descriptors.empty() || !features.descriptors_u8.empty()) {
         std::cerr << "release failed\n";
-        return 6;
+        return 7;
     }
     std::cout << "vocabulary/memory tests passed words=" << vocabulary.word_count()
               << '\n';

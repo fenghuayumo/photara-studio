@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -19,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <numbers>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -35,6 +37,7 @@ namespace {
 struct PairCandidate {
     Index id1{};
     Index id2{};
+    bool zero_baseline{false};
 };
 
 struct PairDiagnostics {
@@ -130,6 +133,7 @@ FrontEndStageKeys make_stage_keys(
     const ImageSetFingerprint& images) {
     FingerprintBuilder features;
     features.append_string("features");
+    features.append_string("rootsift-u8-scale512-v1");
     append_cache_build_identity(features);
     features.append(images.value);
     features.append_string(options.extractor);
@@ -152,6 +156,7 @@ FrontEndStageKeys make_stage_keys(
 
     FingerprintBuilder matches;
     matches.append_string("matches");
+    matches.append_string("zero-baseline-identity-v1");
     append_cache_build_identity(matches);
     matches.append(features.value());
     matches.append(options.neighbor_window);
@@ -187,6 +192,8 @@ FrontEndStageKeys make_stage_keys(
 
     FingerprintBuilder geometry;
     geometry.append_string("geometry");
+    geometry.append_string("defer-unknown-focal-filter-v1");
+    geometry.append_string("zero-baseline-inactive-v2");
     append_cache_build_identity(geometry);
     geometry.append(matches.value());
     geometry.append(options.focal_pixels);
@@ -257,31 +264,142 @@ void initialize_cameras(
     }
 }
 
-double weighted_median(
-    std::vector<std::pair<double, double>> samples) {
-    if (samples.empty()) return 0.0;
-    std::sort(
-        samples.begin(), samples.end(),
-        [](const auto& left, const auto& right) {
-            return left.first < right.first;
-        });
-    double total = 0.0;
-    for (const auto& sample : samples) total += sample.second;
-    if (!(total > 0.0)) return samples[samples.size() / 2].first;
-    double accumulated = 0.0;
-    for (const auto& sample : samples) {
-        accumulated += sample.second;
-        if (accumulated >= 0.5 * total) return sample.first;
-    }
-    return samples.back().first;
+struct FetzerSameCameraCost {
+    Eigen::Vector4d d01{Eigen::Vector4d::Zero()};
+    Eigen::Vector4d d12{Eigen::Vector4d::Zero()};
+};
+
+Eigen::Vector4d fetzer_cross_terms(
+    const Vec3& ai, const Vec3& bi, const Vec3& aj, const Vec3& bj,
+    const int u, const int v) {
+    return {
+        ai(u) * aj(v) - ai(v) * aj(u),
+        ai(u) * bj(v) - ai(v) * bj(u),
+        bi(u) * aj(v) - bi(v) * aj(u),
+        bi(u) * bj(v) - bi(v) * bj(u)};
 }
 
-void calibrate_view_graph_focals(Scene& scene) {
-    std::vector<std::vector<std::pair<double, double>>> grouped(
+std::optional<FetzerSameCameraCost> make_fetzer_same_camera_cost(
+    const Mat3& fundamental, const PinholeCamera& camera) {
+    Mat3 principal = Mat3::Identity();
+    principal(0, 2) = camera.cx;
+    principal(1, 2) = camera.cy;
+    const Mat3 G = principal.transpose() * fundamental * principal;
+    const Eigen::JacobiSVD<Mat3> svd(
+        G, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    if (svd.info() != Eigen::Success) return std::nullopt;
+    const Vec3 singular = svd.singularValues();
+    if (!singular.allFinite() || singular(1) <= 1e-15)
+        return std::nullopt;
+    const Vec3 v0 = svd.matrixV().col(0);
+    const Vec3 v1 = svd.matrixV().col(1);
+    const Vec3 u0 = svd.matrixU().col(0);
+    const Vec3 u1 = svd.matrixU().col(1);
+    const Vec3 ai(
+        singular(0) * singular(0) *
+            (v0(0) * v0(0) + v0(1) * v0(1)),
+        singular(0) * singular(1) *
+            (v0(0) * v1(0) + v0(1) * v1(1)),
+        singular(1) * singular(1) *
+            (v1(0) * v1(0) + v1(1) * v1(1)));
+    const Vec3 aj(
+        u1(0) * u1(0) + u1(1) * u1(1),
+        -(u0(0) * u1(0) + u0(1) * u1(1)),
+        u0(0) * u0(0) + u0(1) * u0(1));
+    const Vec3 bi(
+        singular(0) * singular(0) * v0(2) * v0(2),
+        singular(0) * singular(1) * v0(2) * v1(2),
+        singular(1) * singular(1) * v1(2) * v1(2));
+    const Vec3 bj(
+        u1(2) * u1(2), -u0(2) * u1(2), u0(2) * u0(2));
+    FetzerSameCameraCost cost;
+    cost.d01 = fetzer_cross_terms(ai, bi, aj, bj, 1, 0);
+    cost.d12 = fetzer_cross_terms(ai, bi, aj, bj, 2, 1);
+    if (!cost.d01.allFinite() || !cost.d12.allFinite())
+        return std::nullopt;
+    return cost;
+}
+
+double fetzer_residual_squared(
+    const FetzerSameCameraCost& cost, const double focal) {
+    const double f2 = focal * focal;
+    const double denominator0 = f2 * cost.d01(0) + cost.d01(1);
+    const double denominator1 = f2 * cost.d12(0) + cost.d12(2);
+    if (std::abs(denominator0) <= 1e-18 ||
+        std::abs(denominator1) <= 1e-18)
+        return std::numeric_limits<double>::infinity();
+    const double k0 =
+        (f2 * cost.d01(2) + cost.d01(3)) / denominator0;
+    const double k1 =
+        (f2 * cost.d12(1) + cost.d12(3)) / denominator1;
+    const double residual0 = (f2 + k0) / f2;
+    const double residual1 = (f2 + k1) / f2;
+    return residual0 * residual0 + residual1 * residual1;
+}
+
+double robust_fetzer_objective(
+    const std::vector<FetzerSameCameraCost>& costs, const double log_focal) {
+    constexpr double loss_scale = 0.1;
+    constexpr double loss_scale_squared = loss_scale * loss_scale;
+    const double focal = std::exp(log_focal);
+    double objective = 0.0;
+    for (const FetzerSameCameraCost& cost : costs) {
+        const double residual = fetzer_residual_squared(cost, focal);
+        objective += std::isfinite(residual)
+            ? loss_scale_squared * std::atan(residual / loss_scale_squared)
+            : 0.5 * std::numbers::pi * loss_scale_squared;
+    }
+    return objective;
+}
+
+double solve_fetzer_focal(
+    const std::vector<FetzerSameCameraCost>& costs,
+    const PinholeCamera& camera) {
+    const double image_scale =
+        static_cast<double>(std::max(camera.width, camera.height));
+    const double log_min = std::log(std::max(0.25 * image_scale, 1.0));
+    const double log_max = std::log(std::max(4.0 * image_scale, 2.0));
+    constexpr int samples = 160;
+    int best = 0;
+    double best_cost = std::numeric_limits<double>::infinity();
+    for (int index = 0; index < samples; ++index) {
+        const double alpha =
+            static_cast<double>(index) / static_cast<double>(samples - 1);
+        const double candidate = log_min + alpha * (log_max - log_min);
+        const double objective = robust_fetzer_objective(costs, candidate);
+        if (objective < best_cost) {
+            best_cost = objective;
+            best = index;
+        }
+    }
+    // An optimum on the physical search boundary is the characteristic
+    // weak-parallax/self-calibration degeneracy, not a measured focal. Keep
+    // the camera prior in that case and let multi-view BA refine it later.
+    if (best <= 1 || best >= samples - 2)
+        return std::numeric_limits<double>::quiet_NaN();
+    const double step = (log_max - log_min) / (samples - 1);
+    double left = std::max(log_min, log_min + (best - 1) * step);
+    double right = std::min(log_max, log_min + (best + 1) * step);
+    for (int iteration = 0; iteration < 48; ++iteration) {
+        const double first = (2.0 * left + right) / 3.0;
+        const double second = (left + 2.0 * right) / 3.0;
+        if (robust_fetzer_objective(costs, first) <=
+            robust_fetzer_objective(costs, second))
+            right = second;
+        else
+            left = first;
+    }
+    return std::exp(0.5 * (left + right));
+}
+
+bool calibrate_view_graph_focals(Scene& scene) {
+    bool updated = false;
+    std::vector<std::vector<FetzerSameCameraCost>> grouped(
         scene.cameras.size());
     for (const ImagePair& pair : scene.pairs) {
-        if (!pair.active || pair.degenerate_planar ||
-            !pair.estimated_focal.has_value() ||
+        if (!pair.active || pair.degenerate_planar || !pair.F.has_value() ||
+            pair.num_inliers() < 15 ||
+            pair.composite_weight() < 3.F ||
             pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size())
             continue;
         const Index first_group = scene.images[pair.id1].camera_id;
@@ -290,47 +408,34 @@ void calibrate_view_graph_focals(Scene& scene) {
             continue;
         const PinholeCamera& camera = scene.cameras[first_group];
         if (camera.trust_intrinsics) continue;
-        const double focal = *pair.estimated_focal;
-        const double image_scale =
-            static_cast<double>(std::max(camera.width, camera.height));
-        if (!std::isfinite(focal) || focal < 0.25 * image_scale ||
-            focal > 4.0 * image_scale)
-            continue;
-        const double weight =
-            std::max(static_cast<double>(pair.composite_weight()), 1e-3);
-        grouped[first_group].push_back({std::log(focal), weight});
+        if (const auto cost =
+                make_fetzer_same_camera_cost(*pair.F, camera))
+            grouped[first_group].push_back(*cost);
     }
 
     for (std::size_t group = 0; group < grouped.size(); ++group) {
-        auto& samples = grouped[group];
-        if (samples.size() < 8) continue;
-        const double center = weighted_median(samples);
-        std::vector<std::pair<double, double>> deviations;
-        deviations.reserve(samples.size());
-        for (const auto& sample : samples)
-            deviations.push_back(
-                {std::abs(sample.first - center), sample.second});
-        const double mad = weighted_median(std::move(deviations));
-        const double cutoff =
-            std::max(3.0 * 1.4826 * mad, std::log(1.15));
-        std::vector<std::pair<double, double>> inliers;
-        inliers.reserve(samples.size());
-        for (const auto& sample : samples)
-            if (std::abs(sample.first - center) <= cutoff)
-                inliers.push_back(sample);
-        if (inliers.size() < 8) continue;
-        const double focal = std::exp(weighted_median(inliers));
+        const auto& costs = grouped[group];
+        // openMVS requires a meaningful view-graph consensus rather than
+        // trusting a handful of independently degenerate pairs.
+        if (costs.size() < 16) continue;
         PinholeCamera& camera = scene.cameras[group];
         const double initial = camera.focal();
+        const double focal = solve_fetzer_focal(costs, camera);
+        const double ratio = focal / std::max(initial, 1.0);
+        // Same broad degeneracy check as openMVS ViewGraphCalibrator. The
+        // tighter absolute bounds are the physical search interval above.
+        if (!std::isfinite(focal) || ratio < 0.1 || ratio > 10.0)
+            continue;
         camera.fx = focal;
         camera.fy = focal;
         camera.focal_prior = focal;
+        updated = true;
         core::Logger::instance().info(
             "view-graph focal: camera=", group,
             " initial=", initial, " consensus=", focal,
-            " samples=", samples.size(), " inliers=", inliers.size(),
-            " log_mad=", mad);
+            " ratio=", ratio, " residual_pairs=", costs.size());
     }
+    return updated;
 }
 
 void release_descriptors(Scene& scene) {
@@ -637,6 +742,36 @@ GeometryVerifyResult verify_pair_geometry(
     const Image& img2 = scene.images[candidate.id2];
     result.diagnostics.attempted_geometry = true;
 
+    if (candidate.zero_baseline) {
+        ImagePair pair(candidate.id1, candidate.id2);
+        pair.relative_pose = Pose3D::identity();
+        pair.matches.reserve(raw.size());
+        for (const features::FeatureMatch& match : raw) {
+            if (match.query >= img1.features.keypoints.size() ||
+                match.train >= img2.features.keypoints.size())
+                continue;
+            pair.matches.push_back({match.query, match.train});
+        }
+        if (pair.matches.size() < relative.min_inliers) return result;
+        pair.weight_spatial = 0.5F;
+        pair.weight_geometry = 0.5F;
+        pair.mean_ray_angle = 0.F;
+        pair.homography_ratio = 1.F;
+        pair.degenerate_planar = true;
+        pair.zero_baseline = true;
+        // Keep the edge as an observed grouping constraint, but exclude its
+        // identical pixels from track construction and relative-pose averaging.
+        // A free BA can otherwise split copies even after an identity init.
+        pair.active = false;
+        result.diagnostics.ransac_inliers =
+            static_cast<unsigned>(pair.matches.size());
+        result.diagnostics.filtered_inliers =
+            static_cast<unsigned>(pair.matches.size());
+        result.diagnostics.accepted = true;
+        result.pair = std::move(pair);
+        return result;
+    }
+
     std::vector<Vec2> p1, p2;
     p1.reserve(raw.size());
     p2.reserve(raw.size());
@@ -675,6 +810,106 @@ GeometryVerifyResult verify_pair_geometry(
     result.diagnostics.accepted = true;
     result.pair = std::move(pair);
     return result;
+}
+
+unsigned recompute_relative_poses_with_calibrated_focals(
+    Scene& scene, const RelativePoseOptions& relative) {
+    std::atomic<unsigned> updated{0};
+    std::atomic<unsigned> rejected{0};
+    RelativePoseOptions calibrated = relative;
+    calibrated.force_fundamental = false;
+    calibrated.force_shared_focal = false;
+
+    parallel::parallel_for(
+        scene.pairs.size(), scene.thread_count,
+        [&](const std::size_t pair_index) {
+            ImagePair& pair = scene.pairs[pair_index];
+            if (pair.zero_baseline || !pair.active ||
+                pair.id1 >= scene.images.size() ||
+                pair.id2 >= scene.images.size() || pair.matches.empty())
+                return;
+            const Image& first = scene.images[pair.id1];
+            const Image& second = scene.images[pair.id2];
+            PinholeCamera camera1 = scene.camera_of(first);
+            PinholeCamera camera2 = scene.camera_of(second);
+            camera1.trust_intrinsics = true;
+            camera2.trust_intrinsics = true;
+
+            std::vector<Vec2> pixels1;
+            std::vector<Vec2> pixels2;
+            pixels1.reserve(pair.matches.size());
+            pixels2.reserve(pair.matches.size());
+            for (const FeatureMatch& match : pair.matches) {
+                if (match.query >= first.features.keypoints.size() ||
+                    match.train >= second.features.keypoints.size())
+                    continue;
+                const auto& point1 = first.features.keypoints[match.query];
+                const auto& point2 = second.features.keypoints[match.train];
+                pixels1.emplace_back(point1.x, point1.y);
+                pixels2.emplace_back(point2.x, point2.y);
+            }
+            if (pixels1.size() < calibrated.min_inliers) {
+                pair.active = false;
+                ++rejected;
+                return;
+            }
+
+            const RelativePoseResult geometry = estimate_relative_pose(
+                pixels1, pixels2, camera1, camera2, calibrated);
+            if (!geometry.success ||
+                geometry.inlier_mask.size() != pair.matches.size()) {
+                pair.active = false;
+                pair.relative_pose.reset();
+                ++rejected;
+                return;
+            }
+
+            std::vector<FeatureMatch> inlier_matches;
+            inlier_matches.reserve(geometry.num_inliers);
+            for (std::size_t index = 0; index < pair.matches.size(); ++index)
+                if (geometry.inlier_mask[index])
+                    inlier_matches.push_back(pair.matches[index]);
+            if (inlier_matches.size() < calibrated.min_inliers) {
+                pair.active = false;
+                pair.relative_pose.reset();
+                ++rejected;
+                return;
+            }
+
+            pair.matches = std::move(inlier_matches);
+            pair.relative_pose = geometry.pose;
+            pair.E = geometry.E;
+            pair.F = geometry.F;
+            pair.estimated_focal.reset();
+            pair.H = geometry.H;
+            pair.mean_ray_angle = geometry.mean_ray_angle;
+            pair.weight_spatial = geometry.weight_spatial;
+            pair.homography_ratio = geometry.homography_ratio;
+            pair.degenerate_planar = geometry.degenerate_planar;
+            pair.weight_geometry = geometry.degenerate_planar
+                ? calibrated.degenerate_weight_scale
+                : 1.F;
+            ++updated;
+        });
+
+    core::Logger::instance().info(
+        "frontend calibrated relative poses: updated=", updated.load(),
+        " rejected=", rejected.load(), " total=", scene.pairs.size());
+    return updated.load();
+}
+
+void finalize_view_graph(
+    Scene& scene, const FrontEndOptions& options) {
+    compute_pair_weights(scene, options.pair_weighting);
+    if (calibrate_view_graph_focals(scene)) {
+        recompute_relative_poses_with_calibrated_focals(
+            scene, options.relative);
+        // Relative-pose filtering changes inlier counts, spatial support and
+        // rotation cycles. This mirrors openMVS ComputeRelativePoses(), which
+        // refreshes pair weights after view-graph calibration.
+        compute_pair_weights(scene, options.pair_weighting);
+    }
+    build_tracks(scene, options.min_pair_weight);
 }
 
 // GPU/ORT matching stays on the owner thread while geometric verification is
@@ -800,6 +1035,29 @@ std::vector<PairCandidate> build_pair_candidates(
     if (pairs.empty())
         return build_pair_list(scene.images.size(), options.neighbor_window);
     return pairs;
+}
+
+std::size_t mark_content_duplicate_pairs(
+    std::vector<PairCandidate>& pairs,
+    const ImageSetFingerprint& image_fingerprint) {
+    std::size_t marked = 0;
+    for (PairCandidate& pair : pairs) {
+        if (pair.id1 >= image_fingerprint.files.size() ||
+            pair.id2 >= image_fingerprint.files.size())
+            continue;
+        const ImageFileFingerprint& first = image_fingerprint.files[pair.id1];
+        const ImageFileFingerprint& second = image_fingerprint.files[pair.id2];
+        // Exact file equality is itself a measurement: the two views came from
+        // the same capture. Estimate an identity pose instead of letting F/E
+        // RANSAC invent a baseline for identical pixels.
+        pair.zero_baseline = first.size == second.size &&
+                             first.digest == second.digest;
+        if (pair.zero_baseline) ++marked;
+    }
+    if (marked > 0)
+        core::Logger::instance().info(
+            "frontend marked zero-baseline duplicate pairs: ", marked);
+    return marked;
 }
 
 features::FeatureIndex merge_lightglue_keypoint(
@@ -1119,9 +1377,7 @@ FrontEndResult run_frontend(
             CheckpointStage::geometry, stage_keys.geometry, scene)) {
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
         const auto started = std::chrono::steady_clock::now();
-        compute_pair_weights(scene, options.pair_weighting);
-        calibrate_view_graph_focals(scene);
-        build_tracks(scene, options.min_pair_weight);
+        finalize_view_graph(scene, options);
         result.timing.tracks_seconds =
             std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - started)
@@ -1198,6 +1454,7 @@ FrontEndResult run_frontend(
             candidates = build_pair_list(
                 scene.images.size(), runtime_options.neighbor_window);
         }
+        mark_content_duplicate_pairs(candidates, image_fingerprint);
         std::vector<RawPairMatches> raw_pairs;
         std::vector<PairDiagnostics> diagnostics(candidates.size());
         bool match_cache_hit =
@@ -1274,9 +1531,7 @@ FrontEndResult run_frontend(
                 .count();
 
         const auto tracks_started = std::chrono::steady_clock::now();
-        compute_pair_weights(scene, options.pair_weighting);
-        calibrate_view_graph_focals(scene);
-        build_tracks(scene, options.min_pair_weight);
+        finalize_view_graph(scene, options);
         checkpoints.save_scene(
             CheckpointStage::tracks, stage_keys.tracks, scene);
         result.timing.tracks_seconds =
@@ -1345,6 +1600,11 @@ FrontEndResult run_frontend(
 
         initialize_cameras(
             scene, options.focal_pixels, options.trust_focal_pixels);
+        // Keep the scene in compact form from this point onward. Retrieval and
+        // SiftGPU matching consume uint8 descriptors without permanently
+        // expanding the full dataset back to float32.
+        if (runtime_options.compress_descriptors_u8)
+            compress_descriptors(scene);
         verify_image_snapshot(image_paths, image_fingerprint);
         checkpoints.save_scene(
             CheckpointStage::features, stage_keys.features, scene);
@@ -1360,6 +1620,7 @@ FrontEndResult run_frontend(
 
     const auto match_started = std::chrono::steady_clock::now();
     auto candidates = build_pair_candidates(scene, runtime_options);
+    mark_content_duplicate_pairs(candidates, image_fingerprint);
     // Group by id1 before GPU matching so slot-0 descriptors stay warm.
     if (matcher->requires_owner_thread())
         optimize_pairs_order(candidates, scene);
@@ -1413,7 +1674,7 @@ FrontEndResult run_frontend(
                 std::vector<std::size_t> rescue_indices;
                 std::vector<unsigned> primary_degree(scene.images.size(), 0U);
                 for (const ImagePair& pair : pair_slots) {
-                    if (pair.matches.empty()) continue;
+                    if (!pair.active || pair.matches.empty()) continue;
                     ++primary_degree[pair.id1];
                     ++primary_degree[pair.id2];
                 }
@@ -1440,7 +1701,8 @@ FrontEndResult run_frontend(
 
                 std::size_t primary_accepted = 0;
                 for (const ImagePair& pair : pair_slots)
-                    primary_accepted += pair.matches.empty() ? 0U : 1U;
+                    primary_accepted +=
+                        pair.active && !pair.matches.empty() ? 1U : 0U;
                 if (!rescue_candidates.empty()) {
                     auto rescue_matcher =
                         make_descriptor_lightglue_matcher(runtime_options);
@@ -1776,9 +2038,7 @@ FrontEndResult run_frontend(
             .count();
 
     const auto tracks_started = std::chrono::steady_clock::now();
-    compute_pair_weights(scene, options.pair_weighting);
-    calibrate_view_graph_focals(scene);
-    build_tracks(scene, options.min_pair_weight);
+    finalize_view_graph(scene, options);
     checkpoints.save_scene(
         CheckpointStage::tracks, stage_keys.tracks, scene);
     result.timing.tracks_seconds =

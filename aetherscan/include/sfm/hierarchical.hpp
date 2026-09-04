@@ -13,7 +13,11 @@ namespace aetherscan::sfm {
 struct ReconstructionSummary;
 
 struct ClusterConfig {
-    unsigned max_views_per_cluster{200};
+    // Splitting a low-parallax loop into independent monocular maps destroys
+    // the closure constraints before Sim(3) alignment.  Keep captures of this
+    // size in one global map; clustering remains the safety valve for truly
+    // large or disconnected input sets.
+    unsigned max_views_per_cluster{2048};
     unsigned min_views_per_cluster{10};
     unsigned max_over_capacity{20};
     unsigned min_common_tracks{25};

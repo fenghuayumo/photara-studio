@@ -328,8 +328,30 @@ GlobalRotationSummary estimate_global_rotations(
         "global rotation: tangent rows=", tangent_matrix.rows(),
         " cols=", tangent_matrix.cols(),
         " nonzeros=", tangent_matrix.nonZeros());
-    const Eigen::ArrayXd base_weights =
+    Eigen::ArrayXd base_weights =
         Eigen::Map<const Eigen::ArrayXd>(row_weights.data(), row_weights.size());
+    // OpenMVS relies on a direct sparse factorization for the LAD pass.  The
+    // iterative fallback below is much more sensitive to the raw magnitude of
+    // composite weights, so normalize by the median while preserving every
+    // relative weight.
+    {
+        std::vector<double> finite_weights;
+        finite_weights.reserve(row_weights.size());
+        for (const double weight : row_weights) {
+            if (weight > 0.0 && std::isfinite(weight))
+                finite_weights.push_back(weight);
+        }
+        if (!finite_weights.empty()) {
+            std::nth_element(
+                finite_weights.begin(),
+                finite_weights.begin() + finite_weights.size() / 2,
+                finite_weights.end());
+            const double weight_scale =
+                finite_weights[finite_weights.size() / 2];
+            if (std::isfinite(weight_scale) && weight_scale > 0.0)
+                base_weights /= weight_scale;
+        }
+    }
     Eigen::VectorXd residuals(tangent_matrix.rows());
     Eigen::VectorXd step(tangent_matrix.cols());
     compute_residuals(edges, rotations, valid, residuals);
@@ -340,28 +362,36 @@ GlobalRotationSummary estimate_global_rotations(
         const Eigen::SparseMatrix<double> weighted_matrix =
             base_weights.matrix().asDiagonal() * tangent_matrix;
         LadSolver lad(weighted_matrix);
-        if (!lad.valid()) return summary;
-        core::Logger::instance().debug(
-            "global rotation: LAD initialized iterations=",
-            options.max_l1_iterations);
-        double current_norm = 0.0;
-        for (unsigned iteration = 0; iteration < options.max_l1_iterations;
-             ++iteration) {
-            step.setZero();
-            if (!lad.solve(base_weights.matrix().asDiagonal() * residuals, step) ||
-                !step.allFinite())
-                return summary;
-            const double previous_norm = current_norm;
-            current_norm = step.norm();
-            const double average_step = apply_step(step, free_images, rotations);
-            compute_residuals(edges, rotations, valid, residuals);
-            ++summary.iterations;
-            if (average_step < options.step_convergence_threshold ||
-                std::abs(previous_norm - current_norm) < 1e-10)
-                break;
+        if (!lad.valid()) {
+            core::Logger::instance().warning(
+                "global rotation: LAD factorization failed; continuing with IRLS");
+        } else {
+            core::Logger::instance().debug(
+                "global rotation: LAD initialized iterations=",
+                options.max_l1_iterations);
+            double current_norm = 0.0;
+            for (unsigned iteration = 0; iteration < options.max_l1_iterations;
+                 ++iteration) {
+                step.setZero();
+                if (!lad.solve(
+                        base_weights.matrix().asDiagonal() * residuals,
+                        step) ||
+                    !step.allFinite())
+                    break;
+                const double previous_norm = current_norm;
+                current_norm = step.norm();
+                const double average_step =
+                    apply_step(step, free_images, rotations);
+                compute_residuals(edges, rotations, valid, residuals);
+                ++summary.iterations;
+                if (average_step < options.step_convergence_threshold ||
+                    std::abs(previous_norm - current_norm) < 1e-10)
+                    break;
+            }
+            core::Logger::instance().debug(
+                "global rotation: LAD finished residual_norm=",
+                residuals.norm());
         }
-        core::Logger::instance().debug(
-            "global rotation: LAD finished residual_norm=", residuals.norm());
     }
 
     if (options.max_irls_iterations > 0) {
