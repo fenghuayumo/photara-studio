@@ -1358,7 +1358,8 @@ bool attempt_positioning(
 
 std::vector<PositioningAttempt> fallback_attempts(
     const GlobalPositioningOptions& options,
-    const bool allow_camera_fallback) {
+    const bool allow_camera_fallback,
+    const bool use_camera_warm_start) {
     std::vector<PositioningAttempt> attempts;
     const auto push = [&](
         GlobalPositioningConstraint constraint,
@@ -1371,6 +1372,15 @@ std::vector<PositioningAttempt> fallback_attempts(
             {constraint, solver, warm_start_positions, fix_cameras,
              ray_initialize_points, label});
     };
+
+    if (use_camera_warm_start && allow_camera_fallback &&
+        options.constraint != GlobalPositioningConstraint::only_cameras) {
+        push(
+            GlobalPositioningConstraint::only_cameras,
+            LinearSolverStrategy::sparse_normal_cholesky,
+            false, false, false,
+            "warm_start/only_cameras");
+    }
 
     push(
         options.constraint,
@@ -1390,7 +1400,7 @@ std::vector<PositioningAttempt> fallback_attempts(
             "primary/sparse_normal_cholesky");
         // Relative translations remain a last-resort initializer, never a
         // scene-size-driven primary path.
-        if (allow_camera_fallback) {
+        if (allow_camera_fallback && !use_camera_warm_start) {
             push(
                 GlobalPositioningConstraint::only_cameras,
                 LinearSolverStrategy::sparse_normal_cholesky,
@@ -1449,8 +1459,11 @@ GlobalPositioningSummary solve_global_positions(
     std::vector<Vec3> warm_centers;
     bool have_warm_centers = false;
 
-    for (const PositioningAttempt& attempt :
-         fallback_attempts(options, !selected_tracks.empty())) {
+    const bool use_camera_warm_start =
+        options.camera_warm_start_first &&
+        scene.registered_count() >= options.camera_warm_start_min_images;
+    for (const PositioningAttempt& attempt : fallback_attempts(
+             options, !selected_tracks.empty(), use_camera_warm_start)) {
         if (attempt.warm_start_positions) {
             if (!have_warm_centers) continue;
             restore_points_only();

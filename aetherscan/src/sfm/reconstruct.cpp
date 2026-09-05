@@ -399,6 +399,8 @@ std::uint64_t reconstruction_key(
     key.append(config.incremental_hierarchical_rescue);
     key.append(config.incremental_hierarchical_rescue_min_missing);
     key.append(config.incremental_hierarchical_rescue_min_missing_ratio);
+    key.append(config.minimum_final_observations_per_image);
+    key.append(config.maximum_final_reprojection_error_pixels);
     key.append(config.global_rotation.max_l1_iterations);
     key.append(config.global_rotation.max_irls_iterations);
     key.append(config.global_rotation.step_convergence_threshold);
@@ -431,6 +433,8 @@ std::uint64_t reconstruction_key(
     key.append(config.global_positioning.optimize_points);
     key.append(config.global_positioning.optimize_scales);
     key.append(config.global_positioning.ray_initialize_points);
+    key.append(config.global_positioning.camera_warm_start_first);
+    key.append(config.global_positioning.camera_warm_start_min_images);
     key.append(static_cast<std::uint32_t>(
         config.global_positioning.constraint));
     key.append(config.global_positioning.constraint_reweight_scale);
@@ -812,6 +816,77 @@ ReconstructionSummary summarize_scene(const Scene& scene) {
 
 }  // namespace
 
+unsigned prune_unsupported_registrations(
+    Scene& scene, const unsigned minimum_observations,
+    const double maximum_reprojection_error_pixels) {
+    if (minimum_observations == 0) return 0;
+    const double threshold =
+        std::max(maximum_reprojection_error_pixels, 0.0);
+    std::vector<unsigned> support(scene.images.size(), 0);
+    for (const Track& track : scene.tracks) {
+        if (!track.is_triangulated() || !track.position.allFinite()) continue;
+        const std::size_t inlier_count = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t index = 0; index < inlier_count; ++index) {
+            const Observation& observation = track.observations[index];
+            if (observation.image_id >= scene.images.size()) continue;
+            const Image& image = scene.images[observation.image_id];
+            if (!image.registered || image.camera_id >= scene.cameras.size() ||
+                observation.feature_id >= image.features.keypoints.size())
+                continue;
+            const Vec3 camera_point =
+                image.pose.transform_world_to_camera(track.position);
+            if (!camera_point.allFinite() || camera_point.z() <= 0.0) continue;
+            const Vec2 projected =
+                scene.cameras[image.camera_id].project(camera_point);
+            const auto& feature = image.features.keypoints[observation.feature_id];
+            const double error =
+                (projected - Vec2(feature.x, feature.y)).norm();
+            if (std::isfinite(error) && error <= threshold)
+                ++support[observation.image_id];
+        }
+    }
+
+    std::vector<std::uint8_t> removed(scene.images.size(), 0);
+    unsigned invalidated = 0;
+    for (std::size_t image_id = 0; image_id < scene.images.size(); ++image_id) {
+        Image& image = scene.images[image_id];
+        if (!image.registered || support[image_id] >= minimum_observations)
+            continue;
+        removed[image_id] = 1;
+        image.registered = false;
+        image.pose = Pose3D::identity();
+        ++invalidated;
+        core::Logger::instance().warning(
+            "final registration audit: invalidated image=", image.path.filename(),
+            " support=", support[image_id],
+            " required=", minimum_observations);
+    }
+    if (invalidated == 0) return 0;
+
+    for (Track& track : scene.tracks) {
+        const std::size_t old_inliers = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        unsigned retained_inliers = 0;
+        for (std::size_t index = 0; index < old_inliers; ++index)
+            if (track.observations[index].image_id < removed.size() &&
+                !removed[track.observations[index].image_id])
+                ++retained_inliers;
+        std::erase_if(track.observations, [&](const Observation& observation) {
+            return observation.image_id < removed.size() &&
+                   removed[observation.image_id];
+        });
+        track.num_inliers = static_cast<std::uint8_t>(
+            std::min<std::size_t>(retained_inliers, 255));
+        if (track.num_inliers < 2) track.num_inliers = 0;
+    }
+    rebuild_track_index(scene);
+    core::Logger::instance().warning(
+        "final registration audit: invalidated=", invalidated,
+        " remaining=", scene.registered_count());
+    return invalidated;
+}
+
 ReconstructionSummary run_incremental_mapping(
     Scene& scene,
     const StarInitConfig& star,
@@ -1100,8 +1175,12 @@ ReconstructionSummary reconstruct(
         scene_out.thread_count =
             parallel::resolve_thread_count(config.frontend.thread_count);
         core::Logger::instance().info("checkpoint hit: reconstruction");
-        if (config.mode != ReconstructionMode::incremental)
+        if (config.mode != ReconstructionMode::incremental) {
+            prune_unsupported_registrations(
+                scene_out, config.minimum_final_observations_per_image,
+                config.maximum_final_reprojection_error_pixels);
             return summarize_scene(scene_out);
+        }
     }
     ReconstructionSummary summary;
     if (config.mode == ReconstructionMode::hierarchical) {
@@ -1238,10 +1317,13 @@ ReconstructionSummary reconstruct(
             }
         }
     }
+    prune_unsupported_registrations(
+        scene_out, config.minimum_final_observations_per_image,
+        config.maximum_final_reprojection_error_pixels);
+    summary = summarize_scene(scene_out);
     if (summary.valid)
         checkpoints.save_scene(
             CheckpointStage::reconstruction, mapping_key, scene_out);
-    populate_reprojection_stats(scene_out, summary);
     return summary;
 }
 

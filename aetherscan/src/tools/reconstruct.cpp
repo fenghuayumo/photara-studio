@@ -60,6 +60,7 @@ struct ReconstructCli {
     std::filesystem::path images_dir;
     double focal_pixels{};
     std::string mode{"global"};
+    bool trust_focal{false};
     std::filesystem::path output;
     // Editor/interactive runs skip sidecars, eval PNG dumps, and the extra
     // timestamped log file. The caller already captures stdout.
@@ -394,6 +395,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("m,mode",
          "Reconstruction mode: global (default), incremental, or hierarchical",
          cxxopts::value<std::string>()->default_value("global"))
+        ("trust-focal", "Lock externally calibrated --focal and zero distortion",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("o,output",
          "Output path (.ascan, .asfm, .ply, or .mvs)",
          cxxopts::value<std::string>())
@@ -753,6 +756,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.images_dir = utf8_to_path(result["images"].as<std::string>());
     cli.focal_pixels = result["focal"].as<double>();
     cli.mode = result["mode"].as<std::string>();
+    cli.trust_focal = result["trust-focal"].as<bool>();
+    if (!std::isfinite(cli.focal_pixels) || cli.focal_pixels < 0.0 ||
+        (cli.trust_focal && cli.focal_pixels <= 0.0))
+        throw std::invalid_argument(
+            "--focal must be finite and nonnegative; --trust-focal requires --focal > 0");
+    if (cli.mode != "global" && cli.mode != "incremental" &&
+        cli.mode != "hierarchical")
+        throw std::invalid_argument(
+            "--mode must be global, incremental, or hierarchical");
     cli.output = utf8_to_path(result["output"].as<std::string>());
     cli.gui = result["gui"].as<bool>();
     const std::string working_sfm_text =
@@ -2759,6 +2771,7 @@ int main(int argc, char** argv) {
         else
             config.mode = aetherscan::sfm::ReconstructionMode::incremental;
         config.frontend.focal_pixels = cli.focal_pixels;
+        config.frontend.trust_focal_pixels = cli.trust_focal;
         config.frontend.neighbor_window = cli.neighbor_window;
         config.frontend.sift_contrast_threshold = cli.sift_contrast;
         config.frontend.match_ratio = cli.match_ratio;

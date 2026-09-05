@@ -42,6 +42,11 @@ struct GlobalPositioningOptions {
     // After camera-only warm-start, initialize points by multi-ray midpoints
     // instead of uniform random noise (much better conditioned).
     bool ray_initialize_points{true};
+    // Initialize camera centers from robust relative-translation constraints
+    // before point-bearing refinement. This avoids random point-only local
+    // minima on large weakly connected scenes.
+    bool camera_warm_start_first{true};
+    unsigned camera_warm_start_min_images{512};
     GlobalPositioningConstraint constraint{
         GlobalPositioningConstraint::only_points};
     double constraint_reweight_scale{1.0};

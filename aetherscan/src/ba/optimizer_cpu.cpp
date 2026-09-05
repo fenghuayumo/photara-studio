@@ -797,7 +797,7 @@ void explicit_schur_multiply(
     const std::size_t camera_count = pattern.row_offsets.size() - 1;
     output.assign(input.size(), 0.0);
 #if defined(AETHERSCAN_HAS_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if(pattern.columns.size() >= 32768)
 #endif
     for (std::int64_t camera_signed = 0;
          camera_signed < static_cast<std::int64_t>(camera_count); ++camera_signed) {
@@ -827,7 +827,7 @@ void precondition_explicit(
     const std::size_t camera_count = pattern.row_offsets.size() - 1;
     output.assign(residual.size(), 0.0);
 #if defined(AETHERSCAN_HAS_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if(camera_count >= 512)
 #endif
     for (std::int64_t camera_signed = 0;
          camera_signed < static_cast<std::int64_t>(camera_count); ++camera_signed) {
@@ -845,8 +845,10 @@ void precondition_explicit(
 
 double dot(const std::vector<double>& first, const std::vector<double>& second) {
     double value = 0.0;
+    // PCG executes several reductions per iteration. For small camera
+    // systems, repeatedly waking the full OpenMP team dominates the solve.
 #if defined(AETHERSCAN_HAS_OPENMP)
-#pragma omp parallel for reduction(+:value) schedule(static)
+#pragma omp parallel for reduction(+:value) schedule(static) if(first.size() >= 8192)
 #endif
     for (std::int64_t i = 0; i < static_cast<std::int64_t>(first.size()); ++i) {
         value += first[static_cast<std::size_t>(i)] * second[static_cast<std::size_t>(i)];
@@ -860,7 +862,7 @@ void precondition(
     const std::size_t camera_count = system.camera_rhs.size() / pose_size;
     output.assign(residual.size(), 0.0);
 #if defined(AETHERSCAN_HAS_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if(camera_count >= 512)
 #endif
     for (std::int64_t camera_signed = 0;
          camera_signed < static_cast<std::int64_t>(camera_count); ++camera_signed) {
@@ -911,7 +913,7 @@ std::size_t solve_pcg(
         if (!(denominator > 1e-30) || !std::isfinite(denominator)) break;
         const double alpha = rz / denominator;
 #if defined(AETHERSCAN_HAS_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if(solution.size() >= 8192)
 #endif
         for (std::int64_t i = 0; i < static_cast<std::int64_t>(solution.size()); ++i) {
             const auto index = static_cast<std::size_t>(i);
@@ -932,7 +934,7 @@ std::size_t solve_pcg(
         if (std::abs(rz) <= 1e-30) break;
         const double beta = next_rz / rz;
 #if defined(AETHERSCAN_HAS_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if(direction.size() >= 8192)
 #endif
         for (std::int64_t i = 0; i < static_cast<std::int64_t>(direction.size()); ++i) {
             const auto index = static_cast<std::size_t>(i);

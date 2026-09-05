@@ -154,6 +154,11 @@ LightGlue，并用更严格的几何阈值接纳救援边。
 `--mode hierarchical`。必填参数为 `--images`、`--output`。`--focal` 可选：省略或
 `0` 时用 `1.2 * max(宽,高)` 作初始值，再由 view-graph 共识与 BA 精化；已知标定可显式传入。其余选项见 `aetherscan --help`。
 
+`--focal` 默认只是初值；若输入是已标定的零畸变图像，可同时传入
+`--trust-focal --focal <像素焦距>` 锁定内参。自动自标定退化时，全部图片注册和低重投影
+误差仍可能对应错误轨迹。当前真实数据结果、已知问题和可重复执行的质量门槛见
+[SfM 真实数据验收](docs/SFM_ACCEPTANCE_20260905.md)。
+
 稠密重建使用整条流水线质量预设，而不只是调整图像分辨率：
 
 ```powershell

@@ -212,6 +212,7 @@ FrontEndStageKeys make_stage_keys(
 
     FingerprintBuilder tracks;
     tracks.append_string("tracks");
+    tracks.append_string("always-finalize-relative-poses-v1");
     append_cache_build_identity(tracks);
     tracks.append(geometry.value());
     tracks.append(options.min_pair_weight);
@@ -392,10 +393,41 @@ double solve_fetzer_focal(
     return std::exp(0.5 * (left + right));
 }
 
+std::optional<double> robust_pair_focal_fallback(
+    const std::vector<double>& candidates, const PinholeCamera& camera) {
+    const double image_scale =
+        static_cast<double>(std::max(camera.width, camera.height));
+    const double minimum = std::max(0.25 * image_scale, 1.0);
+    const double maximum = std::max(4.0 * image_scale, 2.0);
+    std::vector<double> log_focals;
+    log_focals.reserve(candidates.size());
+    for (const double focal : candidates) {
+        if (std::isfinite(focal) && focal >= minimum && focal <= maximum)
+            log_focals.push_back(std::log(focal));
+    }
+    if (log_focals.size() < 16) return std::nullopt;
+    std::sort(log_focals.begin(), log_focals.end());
+
+    // Pairwise self-calibration is systematically low-biased on ordered
+    // low-parallax orbits. A high robust quantile avoids that collapsed mode,
+    // while remaining far below the generic 1.2*image-size initialization.
+    const std::size_t index = static_cast<std::size_t>(
+        0.75 * static_cast<double>(log_focals.size() - 1));
+    const double estimate = log_focals[index];
+    const double log_support_radius = std::log(1.5);
+    const std::size_t support = static_cast<std::size_t>(std::count_if(
+        log_focals.begin(), log_focals.end(), [&](const double value) {
+            return std::abs(value - estimate) <= log_support_radius;
+        }));
+    if (support * 4 < log_focals.size()) return std::nullopt;
+    return std::exp(estimate);
+}
+
 bool calibrate_view_graph_focals(Scene& scene) {
     bool updated = false;
     std::vector<std::vector<FetzerSameCameraCost>> grouped(
         scene.cameras.size());
+    std::vector<std::vector<double>> pair_focals(scene.cameras.size());
     for (const ImagePair& pair : scene.pairs) {
         if (!pair.active || pair.degenerate_planar || !pair.F.has_value() ||
             pair.num_inliers() < 15 ||
@@ -411,21 +443,44 @@ bool calibrate_view_graph_focals(Scene& scene) {
         if (const auto cost =
                 make_fetzer_same_camera_cost(*pair.F, camera))
             grouped[first_group].push_back(*cost);
+        if (pair.estimated_focal.has_value())
+            pair_focals[first_group].push_back(*pair.estimated_focal);
     }
 
     for (std::size_t group = 0; group < grouped.size(); ++group) {
         const auto& costs = grouped[group];
         // openMVS requires a meaningful view-graph consensus rather than
         // trusting a handful of independently degenerate pairs.
-        if (costs.size() < 16) continue;
+        if (costs.size() < 16) {
+            if (!scene.cameras[group].trust_intrinsics)
+                core::Logger::instance().warning(
+                    "view-graph focal unresolved: camera=", group,
+                    " reason=insufficient_pairs pairs=", costs.size(),
+                    " using_initial_focal=", scene.cameras[group].focal());
+            continue;
+        }
         PinholeCamera& camera = scene.cameras[group];
         const double initial = camera.focal();
-        const double focal = solve_fetzer_focal(costs, camera);
+        double focal = solve_fetzer_focal(costs, camera);
+        bool used_pair_fallback = false;
+        if (!std::isfinite(focal)) {
+            const auto fallback = robust_pair_focal_fallback(
+                pair_focals[group], camera);
+            if (fallback.has_value()) {
+                focal = *fallback;
+                used_pair_fallback = true;
+            }
+        }
         const double ratio = focal / std::max(initial, 1.0);
         // Same broad degeneracy check as openMVS ViewGraphCalibrator. The
         // tighter absolute bounds are the physical search interval above.
-        if (!std::isfinite(focal) || ratio < 0.1 || ratio > 10.0)
+        if (!std::isfinite(focal) || ratio < 0.1 || ratio > 10.0) {
+            core::Logger::instance().warning(
+                "view-graph focal unresolved: camera=", group,
+                " reason=degenerate_consensus pairs=", costs.size(),
+                " using_initial_focal=", initial);
             continue;
+        }
         camera.fx = focal;
         camera.fy = focal;
         camera.focal_prior = focal;
@@ -433,7 +488,9 @@ bool calibrate_view_graph_focals(Scene& scene) {
         core::Logger::instance().info(
             "view-graph focal: camera=", group,
             " initial=", initial, " consensus=", focal,
-            " ratio=", ratio, " residual_pairs=", costs.size());
+            " ratio=", ratio, " residual_pairs=", costs.size(),
+            " pair_candidates=", pair_focals[group].size(),
+            " fallback=", used_pair_fallback ? "pair_q75" : "fetzer");
     }
     return updated;
 }
@@ -664,7 +721,7 @@ Image make_image_from_features(
 void extract_features_siftgpu_coordinator(
     Scene& scene, const std::vector<std::filesystem::path>& image_paths,
     features::FeatureExtractor& extractor, const unsigned max_features,
-    core::ProgressReporter& progress) {
+    core::ProgressReporter& progress, const bool compress_u8 = false) {
     const std::size_t count = image_paths.size();
     scene.images.resize(count);
     auto& pool = parallel::global_thread_pool();
@@ -698,10 +755,15 @@ void extract_features_siftgpu_coordinator(
                  features = std::move(features)]() mutable {
                     features = select_top_features_grid_3x3(
                         std::move(features), max_features);
+                    if (compress_u8) features.compress_descriptors_u8();
                     scene.images[index] = make_image_from_features(
                         static_cast<Index>(index), path, std::move(features));
                     progress.advance();
                 });
+
+            // Bound the float32 descriptors retained by queued work, even
+            // when extraction outruns CPU grid selection / quantization.
+            if ((index + 1) % 8 == 0) post_tasks.wait();
 
             if (index + 1 < count) current_load = std::move(next_load);
         }
@@ -715,10 +777,12 @@ void extract_features_siftgpu_coordinator(
                 pool,
                 [&, index, path = image_paths[index],
                  features = std::move(features)]() mutable {
+                    if (compress_u8) features.compress_descriptors_u8();
                     scene.images[index] = make_image_from_features(
                         static_cast<Index>(index), path, std::move(features));
                     progress.advance();
                 });
+            if ((index + 1) % 8 == 0) post_tasks.wait();
         }
     }
 
@@ -901,7 +965,15 @@ unsigned recompute_relative_poses_with_calibrated_focals(
 void finalize_view_graph(
     Scene& scene, const FrontEndOptions& options) {
     compute_pair_weights(scene, options.pair_weighting);
-    if (calibrate_view_graph_focals(scene)) {
+    const bool focal_updated = calibrate_view_graph_focals(scene);
+    const bool has_untrusted_intrinsics = std::any_of(
+        scene.cameras.begin(), scene.cameras.end(),
+        [](const PinholeCamera& camera) { return !camera.trust_intrinsics; });
+    if (focal_updated || has_untrusted_intrinsics) {
+        // Unknown-focal F-RANSAC deliberately defers cheirality and strict
+        // reprojection filtering. Complete that pass even when calibration
+        // keeps the initial focal; otherwise unchecked F support reaches
+        // track building and mapping precisely in the degenerate case.
         recompute_relative_poses_with_calibrated_focals(
             scene, options.relative);
         // Relative-pose filtering changes inlier counts, spatial support and
@@ -1447,7 +1519,7 @@ FrontEndResult run_frontend(
                 "extract features (lightglue retrieval)", image_paths.size());
             extract_features_siftgpu_coordinator(
                 retrieval_scene, image_paths, extractor, options.max_features,
-                retrieval_extract);
+                retrieval_extract, true);
             retrieval_extract.finish();
             candidates = build_pair_candidates(retrieval_scene, runtime_options);
         } else {
@@ -1573,7 +1645,8 @@ FrontEndResult run_frontend(
         scene.cameras.reserve(image_paths.size());
         if (extractor->info().thread_affine) {
             extract_features_siftgpu_coordinator(
-                scene, image_paths, *extractor, options.max_features, progress);
+                scene, image_paths, *extractor, options.max_features, progress,
+                runtime_options.compress_descriptors_u8);
         } else {
             const unsigned extraction_threads = threads;
             std::vector<std::unique_ptr<features::FeatureExtractor>> workers(
@@ -1591,6 +1664,8 @@ FrontEndResult run_frontend(
                         local->extract_file(image_paths[i]);
                     features = select_top_features_grid_3x3(
                         std::move(features), options.max_features);
+                    if (runtime_options.compress_descriptors_u8)
+                        features.compress_descriptors_u8();
                     scene.images[i] = make_image_from_features(
                         static_cast<Index>(i), image_paths[i],
                         std::move(features));

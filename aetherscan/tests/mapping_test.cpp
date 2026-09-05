@@ -639,6 +639,60 @@ void test_local_ba_boundary_selection() {
 #endif
 }
 
+void test_final_registration_audit_prunes_unsupported_pose() {
+    Scene scene;
+    scene.cameras.push_back(cam());
+    scene.images.resize(3);
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        Image& image = scene.images[image_id];
+        image.id = image_id;
+        image.camera_id = 0;
+        image.registered = true;
+        image.path = std::filesystem::path(
+            "audit_" + std::to_string(image_id) + ".png");
+        image.features.keypoints.resize(3);
+    }
+    for (Index point_id = 0; point_id < 3; ++point_id) {
+        Track track;
+        track.position = Vec3(0.05 * point_id, 0.02 * point_id, 4.0);
+        for (Index image_id = 0; image_id < 2; ++image_id) {
+            const Vec2 pixel = scene.cameras[0].project(track.position);
+            scene.images[image_id].features.keypoints[point_id].x =
+                static_cast<float>(pixel.x());
+            scene.images[image_id].features.keypoints[point_id].y =
+                static_cast<float>(pixel.y());
+            track.observations.push_back({image_id, point_id});
+        }
+        if (point_id == 0) {
+            const Vec2 pixel = scene.cameras[0].project(track.position);
+            scene.images[2].features.keypoints[point_id].x =
+                static_cast<float>(pixel.x());
+            scene.images[2].features.keypoints[point_id].y =
+                static_cast<float>(pixel.y());
+            track.observations.push_back({2, point_id});
+        }
+        track.num_inliers = static_cast<std::uint8_t>(
+            track.observations.size());
+        scene.tracks.push_back(std::move(track));
+    }
+    rebuild_track_index(scene);
+    expect(
+        prune_unsupported_registrations(scene, 2, 1.0) == 1,
+        "final registration audit invalidates weak pose");
+    expect(
+        scene.images[0].registered && scene.images[1].registered &&
+            !scene.images[2].registered,
+        "final registration audit keeps supported poses");
+    expect(
+        std::none_of(
+            scene.tracks.front().observations.begin(),
+            scene.tracks.front().observations.end(),
+            [](const Observation& observation) {
+                return observation.image_id == 2;
+            }),
+        "final registration audit removes weak observations");
+}
+
 void test_robust_triangulation_and_track_split() {
     Scene scene;
     scene.cameras.assign(6, cam());
@@ -842,6 +896,7 @@ int main() {
     test_global_rotation_dense_graph_iterative_solve();
     test_global_positioning_points_only();
     test_large_point_only_positioning_does_not_require_pairs();
+    test_final_registration_audit_prunes_unsupported_pose();
     test_global_positioning_irls_downweights_bad_direction();
     test_global_positioning_preserves_fixed_initial_positions();
     test_global_positioning_rejects_empty_point_constraints();
