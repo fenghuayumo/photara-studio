@@ -52,6 +52,22 @@ class AcceptanceTests(unittest.TestCase):
             np.testing.assert_allclose(poses['view 1.png'][0],[-3,-3,-4])
             np.testing.assert_allclose(poses['view 1.png'][1],np.eye(3))
 
+    def test_registered_but_scale_unobservable_view_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fields = ['name','registered','alignment_reliable','center_x','center_y','center_z',
+                      'qw','qx','qy','qz','observations','reprojection_rms_px','reprojection_p95_px']
+            xyz = np.random.default_rng(9).normal(size=(8,3))
+            with (root/'images.txt').open('w') as reference, (root/'diagnostics.csv').open('w', newline='') as f:
+                writer = csv.writer(f); writer.writerow(fields)
+                for i, p in enumerate(xyz):
+                    reference.write(f'{i+1} 1 0 0 0 {-p[0]} {-p[1]} {-p[2]} 1 image{i}.png\n\n')
+                    writer.writerow([f'image{i}.png',1,int(i!=7),*p,1,0,0,0,100,.1,.2])
+            result = evaluate(root/'diagnostics.csv', root)
+            self.assertFalse(result['passed'])
+            self.assertFalse(result['gates']['alignment_observability'])
+            self.assertEqual(result['alignment_unreliable'], ['image7.png'])
+
     def test_evaluator_removes_similarity_but_not_camera_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

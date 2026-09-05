@@ -97,18 +97,24 @@ def evaluate(diagnostics, reference):
         delta = estimated @ align.T @ ref[name][1].T
         angles.append(np.degrees(np.arccos(np.clip((np.trace(delta)-1)/2, -1, 1))))
     obs = np.array([int(r['observations']) for r in registered])
+    reliable = [r for r in registered
+                if int(r.get('alignment_reliable', '1'))]
     rms = np.array([float(r['reprojection_rms_px']) for r in registered])
     weighted_rms = float(np.sqrt(np.sum(obs*rms*rms)/obs.sum()))
     result = dict(images=len(rows), registered=len(registered), reference_images=len(ref),
                   matched_reference=len(matched), registration_fraction=len(registered)/len(rows),
                   reference_match_fraction=len(matched)/len(registered),
                   reference_registration_fraction=len(matched)/len(eligible_reference),
+                  alignment_reliable=len(reliable),
+                  alignment_reliable_fraction=len(reliable)/len(registered),
                   observations=int(obs.sum()), observations_per_camera=stats(obs),
                   reprojection_rms_px=weighted_rms,
                   camera_reprojection_p95_px=stats([float(r['reprojection_p95_px']) for r in registered]),
                   center_error_percent_reference_radius=stats(100*distances/radius),
                   rotation_error_deg=stats(angles), similarity_scale=float(scale),
                   unregistered=[r['name'] for r in rows if not int(r['registered'])],
+                  alignment_unreliable=[r['name'] for r in registered
+                                        if not int(r.get('alignment_reliable', '1'))],
                   weak_cameras=[dict(name=r['name'], observations=int(r['observations']))
                                 for r in registered if int(r['observations']) < 30],
                   worst_cameras=[dict(name=names[i], center_error_percent_radius=float(100*distances[i]/radius),
@@ -117,6 +123,7 @@ def evaluate(diagnostics, reference):
     # Explicit provisional engineering gates, not a claim of universal product quality.
     result['gates'] = dict(registration=result['registration_fraction'] >= .98,
                            reference_coverage=result['reference_registration_fraction'] >= .98,
+                           alignment_observability=len(reliable) == len(registered),
                            reprojection=weighted_rms <= 1.0,
                            center_p95=result['center_error_percent_reference_radius']['p95'] <= 5.0,
                            rotation_p95=result['rotation_error_deg']['p95'] <= 3.0,

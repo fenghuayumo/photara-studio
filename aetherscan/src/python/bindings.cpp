@@ -330,6 +330,12 @@ NB_MODULE(aetherscan_native, module) {
         .def_ro(
             "registered_views",
             &sfm::ReconstructionSummary::registered_views)
+        .def_ro(
+            "alignment_reliable_views",
+            &sfm::ReconstructionSummary::alignment_reliable_views)
+        .def_ro(
+            "alignment_unreliable_views",
+            &sfm::ReconstructionSummary::alignment_unreliable_views)
         .def_ro("landmarks", &sfm::ReconstructionSummary::landmarks)
         .def_ro(
             "failed_views", &sfm::ReconstructionSummary::failed_views)

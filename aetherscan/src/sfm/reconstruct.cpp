@@ -18,6 +18,7 @@
 #include <numeric>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace aetherscan::sfm {
 namespace {
@@ -511,22 +512,24 @@ unsigned repair_position_outliers(
     std::vector<std::uint8_t> keep(scene.images.size(), 0);
     for (const Index image_id : largest) keep[image_id] = 1;
     std::vector<std::uint8_t> reachable = keep;
+    std::vector<std::vector<Index>> recovery_adjacency(scene.images.size());
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || !pair.relative_pose.has_value() ||
+            pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size() ||
+            !scene.images[pair.id1].registered ||
+            !scene.images[pair.id2].registered)
+            continue;
+        recovery_adjacency[pair.id1].push_back(pair.id2);
+        recovery_adjacency[pair.id2].push_back(pair.id1);
+    }
     std::queue<Index> recovery_queue;
     for (const Index image_id : largest)
         recovery_queue.push(image_id);
     while (!recovery_queue.empty()) {
         const Index image_id = recovery_queue.front();
         recovery_queue.pop();
-        for (const ImagePair& pair : scene.pairs) {
-            if (!pair.active || !pair.relative_pose.has_value()) continue;
-            Index neighbor = k_invalid;
-            if (pair.id1 == image_id)
-                neighbor = pair.id2;
-            else if (pair.id2 == image_id)
-                neighbor = pair.id1;
-            if (neighbor >= scene.images.size() || reachable[neighbor] ||
-                !scene.images[neighbor].registered)
-                continue;
+        for (const Index neighbor : recovery_adjacency[image_id]) {
+            if (reachable[neighbor]) continue;
             reachable[neighbor] = 1;
             recovery_queue.push(neighbor);
         }
@@ -806,6 +809,10 @@ ReconstructionSummary summarize_scene(const Scene& scene) {
     summary.registered_views = scene.registered_count();
     summary.failed_views =
         static_cast<unsigned>(scene.images.size()) - summary.registered_views;
+    const AlignmentObservability observability =
+        analyze_alignment_observability(scene);
+    summary.alignment_reliable_views = observability.reliable_views;
+    summary.alignment_unreliable_views = observability.unreliable_views;
     for (const Track& track : scene.tracks)
         if (track.is_triangulated()) ++summary.landmarks;
     summary.valid =
@@ -815,6 +822,225 @@ ReconstructionSummary summarize_scene(const Scene& scene) {
 }
 
 }  // namespace
+
+AlignmentObservability analyze_alignment_observability(const Scene& scene) {
+    AlignmentObservability result;
+    result.reliable.assign(scene.images.size(), 0);
+    if (scene.images.empty()) return result;
+
+    struct Edge { Index first{}; Index second{}; };
+    struct Adjacent { Index neighbor{}; std::size_t edge{}; };
+    std::vector<Edge> edges;
+    std::vector<std::vector<Adjacent>> adjacency(scene.images.size());
+    std::unordered_set<std::uint64_t> edge_keys;
+    edge_keys.reserve(scene.pairs.size() * 2);
+    const auto add_edge = [&](Index first, Index second) {
+        if (first == second || first >= scene.images.size() ||
+            second >= scene.images.size() ||
+            !scene.images[first].registered ||
+            !scene.images[second].registered)
+            return;
+        if (first > second) std::swap(first, second);
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(first) << 32U) | second;
+        if (!edge_keys.insert(key).second) return;
+        const std::size_t edge_id = edges.size();
+        edges.push_back({first, second});
+        adjacency[first].push_back({second, edge_id});
+        adjacency[second].push_back({first, edge_id});
+    };
+    for (const ImagePair& pair : scene.pairs) {
+        if (pair.active && !pair.zero_baseline &&
+            pair.relative_pose.has_value())
+            add_edge(pair.id1, pair.id2);
+    }
+    const Index invalid = k_invalid;
+    std::vector<Index> discovery(scene.images.size(), invalid);
+    std::vector<Index> low(scene.images.size(), invalid);
+    std::vector<Index> parent(scene.images.size(), invalid);
+    std::vector<std::size_t> parent_edge(
+        scene.images.size(), std::numeric_limits<std::size_t>::max());
+    std::vector<std::uint8_t> bridge(edges.size(), 0);
+    Index timestamp = 0;
+    struct Frame { Index node{}; std::size_t next{}; };
+    for (Index root = 0; root < scene.images.size(); ++root) {
+        if (!scene.images[root].registered || discovery[root] != invalid)
+            continue;
+        discovery[root] = low[root] = timestamp++;
+        std::vector<Frame> stack{{root, 0}};
+        while (!stack.empty()) {
+            Frame& frame = stack.back();
+            if (frame.next < adjacency[frame.node].size()) {
+                const Adjacent adjacent = adjacency[frame.node][frame.next++];
+                if (adjacent.edge == parent_edge[frame.node]) continue;
+                if (discovery[adjacent.neighbor] == invalid) {
+                    parent[adjacent.neighbor] = frame.node;
+                    parent_edge[adjacent.neighbor] = adjacent.edge;
+                    discovery[adjacent.neighbor] =
+                        low[adjacent.neighbor] = timestamp++;
+                    stack.push_back({adjacent.neighbor, 0});
+                } else {
+                    low[frame.node] = std::min(
+                        low[frame.node], discovery[adjacent.neighbor]);
+                }
+                continue;
+            }
+            const Index node = frame.node;
+            stack.pop_back();
+            if (parent[node] == invalid) continue;
+            const Index ancestor = parent[node];
+            low[ancestor] = std::min(low[ancestor], low[node]);
+            if (low[node] > discovery[ancestor]) {
+                bridge[parent_edge[node]] = 1;
+            }
+        }
+    }
+
+    std::vector<std::uint8_t> visited(scene.images.size(), 0);
+    std::vector<Index> camera_block(scene.images.size(), invalid);
+    std::vector<std::vector<Index>> blocks;
+    for (Index root = 0; root < scene.images.size(); ++root) {
+        if (!scene.images[root].registered || visited[root]) continue;
+        const Index block_id = static_cast<Index>(blocks.size());
+        blocks.emplace_back();
+        std::queue<Index> pending;
+        pending.push(root);
+        visited[root] = 1;
+        while (!pending.empty()) {
+            const Index node = pending.front();
+            pending.pop();
+            camera_block[node] = block_id;
+            blocks.back().push_back(node);
+            for (const Adjacent adjacent : adjacency[node]) {
+                if (bridge[adjacent.edge] || visited[adjacent.neighbor]) continue;
+                visited[adjacent.neighbor] = 1;
+                pending.push(adjacent.neighbor);
+            }
+        }
+    }
+
+    struct PointScatter {
+        unsigned count{};
+        Vec3 mean{Vec3::Zero()};
+        Eigen::Matrix3d scatter{Eigen::Matrix3d::Zero()};
+
+        void add(const Vec3& point) {
+            ++count;
+            const Vec3 delta = point - mean;
+            mean += delta / static_cast<double>(count);
+            scatter += delta * (point - mean).transpose();
+        }
+
+        [[nodiscard]] bool constrains_similarity() const {
+            if (count < 3 || !scatter.allFinite()) return false;
+            const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(scatter);
+            if (solver.info() != Eigen::Success) return false;
+            const auto eigenvalues = solver.eigenvalues();
+            const double scale = eigenvalues.cwiseAbs().maxCoeff();
+            if (!(scale > 0.0)) return false;
+            return eigenvalues[1] >
+                   64.0 * std::numeric_limits<double>::epsilon() * scale;
+        }
+    };
+    std::unordered_map<std::uint64_t, PointScatter> shared_points;
+    std::vector<Index> track_blocks;
+    std::vector<std::pair<Index, Index>> block_observations;
+    for (const Track& track : scene.tracks) {
+        if (!track.is_triangulated() || !track.position.allFinite()) continue;
+        track_blocks.clear();
+        block_observations.clear();
+        const std::size_t count = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            const Index image_id = track.observations[i].image_id;
+            if (image_id < camera_block.size() &&
+                camera_block[image_id] != invalid)
+                block_observations.emplace_back(camera_block[image_id], image_id);
+        }
+        std::sort(block_observations.begin(), block_observations.end());
+        block_observations.erase(
+            std::unique(block_observations.begin(), block_observations.end()),
+            block_observations.end());
+        for (std::size_t begin = 0; begin < block_observations.size();) {
+            std::size_t end = begin + 1;
+            while (end < block_observations.size() &&
+                   block_observations[end].first == block_observations[begin].first)
+                ++end;
+            const Vec3 first_ray = track.position -
+                scene.images[block_observations[begin].second].pose.C;
+            bool independent_depth = false;
+            for (std::size_t observation = begin + 1; observation < end; ++observation) {
+                const Vec3 ray = track.position -
+                    scene.images[block_observations[observation].second].pose.C;
+                const double scale = first_ray.squaredNorm() * ray.squaredNorm();
+                if (std::isfinite(scale) && scale > 0.0 &&
+                    first_ray.cross(ray).squaredNorm() >
+                        64.0 * std::numeric_limits<double>::epsilon() * scale) {
+                    independent_depth = true;
+                    break;
+                }
+            }
+            if (independent_depth)
+                track_blocks.push_back(block_observations[begin].first);
+            begin = end;
+        }
+        for (std::size_t i = 0; i < track_blocks.size(); ++i) {
+            for (std::size_t j = i + 1; j < track_blocks.size(); ++j) {
+                const std::uint64_t key =
+                    (static_cast<std::uint64_t>(track_blocks[i]) << 32U) |
+                    track_blocks[j];
+                shared_points[key].add(track.position);
+            }
+        }
+    }
+
+    std::vector<Index> block_parent(blocks.size());
+    std::iota(block_parent.begin(), block_parent.end(), Index{0});
+    const auto find_block = [&](const auto self, const Index node) -> Index {
+        if (block_parent[node] == node) return node;
+        return block_parent[node] = self(self, block_parent[node]);
+    };
+    unsigned similarity_constraints = 0;
+    for (const auto& [key, points] : shared_points) {
+        if (!points.constrains_similarity()) continue;
+        const Index first = static_cast<Index>(key >> 32U);
+        const Index second = static_cast<Index>(key & 0xffffffffU);
+        const Index first_root = find_block(find_block, first);
+        const Index second_root = find_block(find_block, second);
+        if (first_root != second_root) block_parent[second_root] = first_root;
+        ++similarity_constraints;
+    }
+
+    std::unordered_map<Index, unsigned> group_sizes;
+    Index largest_group = invalid;
+    unsigned largest_size = 0;
+    for (Index block_id = 0; block_id < blocks.size(); ++block_id) {
+        const Index group = find_block(find_block, block_id);
+        const unsigned size =
+            (group_sizes[group] += static_cast<unsigned>(blocks[block_id].size()));
+        if (size > largest_size) {
+            largest_size = size;
+            largest_group = group;
+        }
+    }
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        if (camera_block[image_id] != invalid &&
+            find_block(find_block, camera_block[image_id]) == largest_group)
+            result.reliable[image_id] = 1;
+    }
+    for (std::size_t edge_id = 0; edge_id < edges.size(); ++edge_id) {
+        if (!bridge[edge_id]) continue;
+        const Edge& edge = edges[edge_id];
+        if (find_block(find_block, camera_block[edge.first]) !=
+            find_block(find_block, camera_block[edge.second]))
+            ++result.bridge_edges;
+    }
+    result.constraint_edges =
+        static_cast<unsigned>(edges.size()) + similarity_constraints;
+    result.reliable_views = largest_size;
+    result.unreliable_views = scene.registered_count() - result.reliable_views;
+    return result;
+}
 
 unsigned prune_unsupported_registrations(
     Scene& scene, const unsigned minimum_observations,
@@ -1135,6 +1361,10 @@ ReconstructionSummary run_global_mapping(
     summary.registered_views = scene.registered_count();
     summary.failed_views =
         static_cast<unsigned>(scene.images.size()) - summary.registered_views;
+    const AlignmentObservability observability =
+        analyze_alignment_observability(scene);
+    summary.alignment_reliable_views = observability.reliable_views;
+    summary.alignment_unreliable_views = observability.unreliable_views;
     for (const Track& track : scene.tracks) {
         if (track.is_triangulated()) ++summary.landmarks;
     }

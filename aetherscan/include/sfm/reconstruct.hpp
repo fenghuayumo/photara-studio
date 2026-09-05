@@ -42,10 +42,22 @@ struct ReconstructionSummary {
     unsigned registered_views{0};
     unsigned landmarks{0};
     unsigned failed_views{0};
+    unsigned alignment_reliable_views{0};
+    unsigned alignment_unreliable_views{0};
     std::uint64_t reprojection_observations{0};
     double mean_reprojection_error_pixels{0.0};
     double rms_reprojection_error_pixels{0.0};
 };
+
+struct AlignmentObservability {
+    std::vector<std::uint8_t> reliable;
+    unsigned reliable_views{0};
+    unsigned unreliable_views{0};
+    unsigned constraint_edges{0};
+    unsigned bridge_edges{0};
+};
+
+AlignmentObservability analyze_alignment_observability(const Scene& scene);
 
 // Remove registration flags from cameras that no longer have enough valid
 // landmark support after final filtering/BA. Returns the number invalidated.

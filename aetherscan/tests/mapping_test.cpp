@@ -693,6 +693,66 @@ void test_final_registration_audit_prunes_unsupported_pose() {
         "final registration audit removes weak observations");
 }
 
+void test_alignment_observability_reports_bridge_branch() {
+    Scene scene;
+    scene.images.resize(7);
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        scene.images[image_id].id = image_id;
+        scene.images[image_id].registered = true;
+    }
+    const auto add_pair = [&](const Index first, const Index second) {
+        ImagePair pair(first, second);
+        pair.relative_pose = Pose3D::identity();
+        scene.pairs.push_back(std::move(pair));
+    };
+    add_pair(0, 1); add_pair(1, 2); add_pair(2, 3);
+    add_pair(3, 0); add_pair(0, 2);
+    add_pair(3, 4);
+    add_pair(4, 5); add_pair(5, 6); add_pair(6, 4);
+    const AlignmentObservability audit =
+        analyze_alignment_observability(scene);
+    expect(audit.bridge_edges == 1,
+           "alignment observability finds scale bridge");
+    expect(audit.reliable_views == 4 && audit.unreliable_views == 3,
+           "alignment observability retains largest rigid block");
+
+    Track cross_track;
+    cross_track.position = Vec3(0.0, 0.0, 4.0);
+    cross_track.observations = {{2, 0}, {4, 0}, {5, 0}};
+    cross_track.num_inliers = 3;
+    scene.tracks.push_back(std::move(cross_track));
+    const AlignmentObservability one_point =
+        analyze_alignment_observability(scene);
+    expect(one_point.bridge_edges == 1 && one_point.reliable_views == 4,
+           "one shared point does not constrain branch scale");
+
+    Track cross_track_2;
+    cross_track_2.position = Vec3(1.0, 0.0, 4.0);
+    cross_track_2.observations = {{1, 0}, {5, 0}};
+    cross_track_2.num_inliers = 2;
+    scene.tracks.push_back(std::move(cross_track_2));
+    Track cross_track_3;
+    cross_track_3.position = Vec3(0.0, 1.0, 4.0);
+    cross_track_3.observations = {{0, 0}, {6, 0}};
+    cross_track_3.num_inliers = 2;
+    scene.tracks.push_back(std::move(cross_track_3));
+    expect(analyze_alignment_observability(scene).unreliable_views == 3,
+           "jointly triangulated points cannot certify independent block depth");
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id)
+        scene.images[image_id].pose.C = Vec3(static_cast<double>(image_id), 0.0, 0.0);
+    for (Track& track : scene.tracks) {
+        track.observations = {{1, 0}, {2, 0}, {4, 0}, {5, 0}};
+        track.num_inliers = 4;
+    }
+    const AlignmentObservability anchored =
+        analyze_alignment_observability(scene);
+    expect(anchored.bridge_edges == 0 && anchored.reliable_views == 7,
+           "three non-collinear shared points make branch scale observable");
+    scene.tracks.back().position = Vec3(2.0, 0.0, 4.0);
+    expect(analyze_alignment_observability(scene).unreliable_views == 3,
+           "collinear shared landmarks cannot certify a similarity");
+}
+
 void test_robust_triangulation_and_track_split() {
     Scene scene;
     scene.cameras.assign(6, cam());
@@ -897,6 +957,7 @@ int main() {
     test_global_positioning_points_only();
     test_large_point_only_positioning_does_not_require_pairs();
     test_final_registration_audit_prunes_unsupported_pose();
+    test_alignment_observability_reports_bridge_branch();
     test_global_positioning_irls_downweights_bad_direction();
     test_global_positioning_preserves_fixed_initial_positions();
     test_global_positioning_rejects_empty_point_constraints();

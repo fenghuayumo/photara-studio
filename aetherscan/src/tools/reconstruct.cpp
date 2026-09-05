@@ -1604,6 +1604,8 @@ std::filesystem::path write_sfm_diagnostics(
     };
     std::vector<ImageStats> stats(scene.images.size());
     std::vector<GraphStats> graph_stats(scene.images.size());
+    const auto alignment_observability =
+        aetherscan::sfm::analyze_alignment_observability(scene);
     std::array<std::vector<double>, 5> radial_errors;
     std::array<double, 5> radial_signed_sum{};
 
@@ -1679,7 +1681,7 @@ std::filesystem::path write_sfm_diagnostics(
               "k1,k2,p1,p2,center_x,center_y,center_z,qw,qx,qy,qz,"
               "observations,reprojection_mean_px,reprojection_rms_px,"
               "reprojection_p95_px,reprojection_max_px,previous_center_step,"
-              "previous_rotation_deg,active_pairs,cycle_supported_pairs,"
+              "previous_rotation_deg,alignment_reliable,active_pairs,cycle_supported_pairs,"
               "cycle_inconsistent_pairs,degenerate_pairs,pair_weight_sum,"
               "pair_weight_max,weighted_mean_ray_angle_deg\n";
 
@@ -1742,7 +1744,10 @@ std::filesystem::path write_sfm_diagnostics(
                << quaternion.x() << ',' << quaternion.y() << ','
                << quaternion.z() << ',' << count << ',' << mean << ',' << rms
                << ',' << p95 << ',' << maximum << ',' << center_step << ','
-               << rotation_step << ',' << graph.active_pairs << ','
+               << rotation_step << ','
+               << static_cast<unsigned>(
+                      alignment_observability.reliable[image_index]) << ','
+               << graph.active_pairs << ','
                << graph.cycle_supported_pairs << ','
                << graph.cycle_inconsistent_pairs << ','
                << graph.degenerate_pairs << ',' << graph.composite_weight_sum
@@ -1818,6 +1823,12 @@ std::filesystem::path write_sfm_diagnostics(
         " step_p95=", percentile(trajectory_steps, 0.95),
         " rotation_median_deg=", percentile(rotation_steps, 0.5),
         " rotation_p95_deg=", percentile(rotation_steps, 0.95));
+    aetherscan::core::Logger::instance().info(
+        "sfm audit alignment observability: reliable=",
+        alignment_observability.reliable_views,
+        " unreliable=", alignment_observability.unreliable_views,
+        " constraint_edges=", alignment_observability.constraint_edges,
+        " bridges=", alignment_observability.bridge_edges);
     for (std::size_t bin = 0; bin < radial_errors.size(); ++bin) {
         const std::size_t count = radial_errors[bin].size();
         aetherscan::core::Logger::instance().info(
