@@ -1587,14 +1587,45 @@ std::filesystem::path write_sfm_diagnostics(
     const std::filesystem::path& reconstruction_path) {
     using aetherscan::sfm::Vec2;
     using aetherscan::sfm::Vec3;
+    using aetherscan::sfm::Mat3;
 
     struct ImageStats {
         std::vector<double> errors;
         double squared_sum{0.0};
     };
+    struct GraphStats {
+        unsigned active_pairs{0};
+        unsigned cycle_supported_pairs{0};
+        unsigned cycle_inconsistent_pairs{0};
+        unsigned degenerate_pairs{0};
+        double composite_weight_sum{0.0};
+        double maximum_composite_weight{0.0};
+        double weighted_ray_angle_sum{0.0};
+    };
     std::vector<ImageStats> stats(scene.images.size());
+    std::vector<GraphStats> graph_stats(scene.images.size());
     std::array<std::vector<double>, 5> radial_errors;
     std::array<double, 5> radial_signed_sum{};
+
+    for (const auto& pair : scene.pairs) {
+        if (!pair.active || !pair.relative_pose.has_value() ||
+            pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size())
+            continue;
+        const double weight = (std::max)(
+            0.0, static_cast<double>(pair.composite_weight()));
+        for (const auto image_id : {pair.id1, pair.id2}) {
+            auto& graph = graph_stats[image_id];
+            ++graph.active_pairs;
+            if (pair.weight_triplet > 0.F) ++graph.cycle_supported_pairs;
+            if (pair.weight_cycle < 0.999F) ++graph.cycle_inconsistent_pairs;
+            if (pair.degenerate_planar) ++graph.degenerate_pairs;
+            graph.composite_weight_sum += weight;
+            graph.maximum_composite_weight =
+                (std::max)(graph.maximum_composite_weight, weight);
+            graph.weighted_ray_angle_sum +=
+                weight * static_cast<double>(pair.mean_ray_angle);
+        }
+    }
 
     for (const auto& track : scene.tracks) {
         if (!track.is_triangulated() || !track.position.allFinite()) continue;
@@ -1648,7 +1679,9 @@ std::filesystem::path write_sfm_diagnostics(
               "k1,k2,p1,p2,center_x,center_y,center_z,qw,qx,qy,qz,"
               "observations,reprojection_mean_px,reprojection_rms_px,"
               "reprojection_p95_px,reprojection_max_px,previous_center_step,"
-              "previous_rotation_deg\n";
+              "previous_rotation_deg,active_pairs,cycle_supported_pairs,"
+              "cycle_inconsistent_pairs,degenerate_pairs,pair_weight_sum,"
+              "pair_weight_max,weighted_mean_ray_angle_deg\n";
 
     std::vector<std::tuple<double, std::size_t, double, double>> worst_images;
     std::vector<double> trajectory_steps;
@@ -1686,6 +1719,11 @@ std::filesystem::path write_sfm_diagnostics(
             rotation_steps.push_back(rotation_step);
         }
         const auto quaternion = image.pose.quaternion();
+        const auto& graph = graph_stats[image_index];
+        const double mean_ray_angle_deg = graph.composite_weight_sum > 0.0
+            ? graph.weighted_ray_angle_sum / graph.composite_weight_sum *
+                  radians_to_degrees
+            : 0.0;
         output << image_index << ','
                << csv_escape(image.path.filename().string()) << ','
                << (image.registered ? 1 : 0) << ',' << image.camera_id << ','
@@ -1704,7 +1742,65 @@ std::filesystem::path write_sfm_diagnostics(
                << quaternion.x() << ',' << quaternion.y() << ','
                << quaternion.z() << ',' << count << ',' << mean << ',' << rms
                << ',' << p95 << ',' << maximum << ',' << center_step << ','
-               << rotation_step << '\n';
+               << rotation_step << ',' << graph.active_pairs << ','
+               << graph.cycle_supported_pairs << ','
+               << graph.cycle_inconsistent_pairs << ','
+               << graph.degenerate_pairs << ',' << graph.composite_weight_sum
+               << ',' << graph.maximum_composite_weight << ','
+               << mean_ray_angle_deg << '\n';
+    }
+
+    const auto pair_csv_path = reconstruction_path.parent_path() /
+        (reconstruction_path.stem().string() + "_sfm_pairs.csv");
+    std::ofstream pair_output(pair_csv_path);
+    if (!pair_output)
+        throw std::runtime_error(
+            "Failed to create SfM pair diagnostics: " +
+            pair_csv_path.string());
+    pair_output << std::setprecision(12)
+        << "image_id1,name1,image_id2,name2,active,inliers,"
+           "composite_weight,spatial_weight,geometry_weight,"
+           "connectivity_weight,triplet_weight,cycle_weight,"
+           "mean_ray_angle_deg,degenerate_planar,zero_baseline,"
+           "center_distance,direction_error_deg,rotation_error_deg\n";
+    for (const auto& pair : scene.pairs) {
+        if (pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size())
+            continue;
+        const auto& first = scene.images[pair.id1];
+        const auto& second = scene.images[pair.id2];
+        double center_distance = std::numeric_limits<double>::quiet_NaN();
+        double direction_error = std::numeric_limits<double>::quiet_NaN();
+        double rotation_error = std::numeric_limits<double>::quiet_NaN();
+        if (first.registered && second.registered &&
+            pair.relative_pose.has_value()) {
+            const Vec3 actual = second.pose.C - first.pose.C;
+            const Vec3 expected = -(
+                second.pose.R.transpose() *
+                pair.relative_pose->translation());
+            center_distance = actual.norm();
+            if (center_distance > 1e-12 && expected.norm() > 1e-12) {
+                direction_error = std::acos(std::clamp(
+                    actual.normalized().dot(expected.normalized()), -1.0, 1.0)) *
+                    radians_to_degrees;
+            }
+            const Mat3 rotation_delta =
+                (second.pose.R * first.pose.R.transpose()) *
+                pair.relative_pose->R.transpose();
+            rotation_error = std::acos(std::clamp(
+                0.5 * (rotation_delta.trace() - 1.0), -1.0, 1.0)) *
+                radians_to_degrees;
+        }
+        pair_output << pair.id1 << ','
+            << csv_escape(first.path.filename().string()) << ','
+            << pair.id2 << ',' << csv_escape(second.path.filename().string())
+            << ',' << (pair.active ? 1 : 0) << ',' << pair.num_inliers() << ','
+            << pair.composite_weight() << ',' << pair.weight_spatial << ','
+            << pair.weight_geometry << ',' << pair.weight_connectivity << ','
+            << pair.weight_triplet << ',' << pair.weight_cycle << ','
+            << static_cast<double>(pair.mean_ray_angle) * radians_to_degrees
+            << ',' << (pair.degenerate_planar ? 1 : 0) << ','
+            << (pair.zero_baseline ? 1 : 0) << ',' << center_distance << ','
+            << direction_error << ',' << rotation_error << '\n';
     }
 
     std::sort(worst_images.begin(), worst_images.end(), std::greater<>());
