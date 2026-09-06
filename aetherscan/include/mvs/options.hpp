@@ -107,6 +107,10 @@ struct DensifyOptions {
     std::uint64_t mesh_max_points{2'000'000};
     // Graph-cut / visibility weights (Jancosek-Pajdla style).
     float mesh_k_sigma{2.F};
+    // Scale the visibility uncertainty by the median length of edges incident
+    // to each sample. This follows OpenMVS's density-adaptive reconstruction
+    // model while clamping pathological neighborhoods to the global scale.
+    bool mesh_adaptive_sigma{true};
     float mesh_k_qual{1.F};
     // Visibility ray continuation behind a sample, in sigma units. One sigma
     // is the base surface-thickness model used by the graph-cut energy.
@@ -168,10 +172,13 @@ struct DensifyOptions {
     unsigned mesh_tsdf_smooth_iters{2};
     float mesh_tsdf_smooth_lambda{0.5F};
     float mesh_tsdf_smooth_mu{-0.53F};
-    // Weld radius and maximum triangle edge in units of the scene's median
-    // pixel footprint. These are scale invariant unlike bbox fractions.
+    // Weld radius in units of the scene's median pixel footprint.
     float mesh_weld_pixel_fraction{0.65F};
-    float mesh_max_edge_voxels{5.F};
+    // Drop graph-cut facets whose longest edge exceeds this multiple of the
+    // median longest edge over all cut facets. Delaunay vertices are observed
+    // samples, so these outliers are unsupported webbing across occluded gaps.
+    // The relative statistic is scene-scale invariant; zero disables.
+    float mesh_max_edge_scale{4.F};
     // Reject a triangle spanning a larger relative depth discontinuity.
     float mesh_depth_diff_threshold{0.025F};
     // Drop tiny disconnected triangle islands after welding.

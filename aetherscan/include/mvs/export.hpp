@@ -16,6 +16,8 @@ DenseCloud load_dense_ply(const std::filesystem::path& path);
 // three vertices are triangulated as a fan. Position is required; per-vertex
 // normals and RGB are imported when all corresponding properties are present.
 Mesh load_mesh_ply(const std::filesystem::path& path);
+// Includes weight and per-point view_indices/view_weights for graph-cut replay.
+// Replay must use the same ordered cameras and world coordinate system.
 void save_dense_ply(const DenseCloud& cloud, const std::filesystem::path& path);
 void save_mesh_ply(const Mesh& mesh, const std::filesystem::path& path);
 void save_mesh_obj(const Mesh& mesh, const std::filesystem::path& path);

@@ -14,6 +14,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace aetherscan::texture {
@@ -236,6 +237,78 @@ void compute_vertex_normals(
     }
 }
 
+struct SeamEdgeUse {
+    std::uint64_t key{};
+    std::uint32_t chart{};
+    mvs::Vec2f low_uv{mvs::Vec2f::Zero()};
+    mvs::Vec2f high_uv{mvs::Vec2f::Zero()};
+};
+
+// UVAtlas duplicates vertices along chart boundaries. Match the two copies of
+// each original manifold edge and sample corresponding UVs for the native
+// aether_drender seam-polish pass.
+std::vector<float> build_dense_seam_pairs(
+    const aether_drender::UvAtlasOutput& mesh,
+    const std::uint32_t samples_per_edge) {
+    if (samples_per_edge == 0 || mesh.indices.size() % 3U != 0 ||
+        mesh.uv.size() % 2U != 0 ||
+        mesh.vertex_remap.size() != mesh.uv.size() / 2U ||
+        mesh.face_chart_ids.size() != mesh.indices.size() / 3U)
+        return {};
+
+    std::vector<SeamEdgeUse> uses;
+    uses.reserve(mesh.indices.size());
+    for (std::size_t face = 0; face < mesh.indices.size() / 3U; ++face) {
+        for (int edge = 0; edge < 3; ++edge) {
+            const std::uint32_t a =
+                mesh.indices[face * 3U + static_cast<std::size_t>(edge)];
+            const std::uint32_t b = mesh.indices[
+                face * 3U + static_cast<std::size_t>((edge + 1) % 3)];
+            if (a >= mesh.vertex_remap.size() || b >= mesh.vertex_remap.size())
+                continue;
+            const std::uint32_t original_a = mesh.vertex_remap[a];
+            const std::uint32_t original_b = mesh.vertex_remap[b];
+            if (original_a == original_b) continue;
+            const bool swap = original_a > original_b;
+            const std::uint32_t low = std::min(original_a, original_b);
+            const std::uint32_t high = std::max(original_a, original_b);
+            const auto uv = [&](const std::uint32_t vertex) {
+                return mvs::Vec2f{
+                    mesh.uv[static_cast<std::size_t>(vertex) * 2U],
+                    mesh.uv[static_cast<std::size_t>(vertex) * 2U + 1U]};
+            };
+            uses.push_back({
+                (static_cast<std::uint64_t>(low) << 32U) | high,
+                mesh.face_chart_ids[face], swap ? uv(b) : uv(a),
+                swap ? uv(a) : uv(b)});
+        }
+    }
+    std::sort(uses.begin(), uses.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.key, a.chart) < std::tie(b.key, b.chart);
+    });
+
+    std::vector<float> pairs;
+    for (std::size_t begin = 0; begin < uses.size();) {
+        std::size_t end = begin + 1;
+        while (end < uses.size() && uses[end].key == uses[begin].key) ++end;
+        if (end - begin == 2U && uses[begin].chart != uses[begin + 1U].chart) {
+            for (std::uint32_t sample = 0; sample < samples_per_edge; ++sample) {
+                const float t =
+                    (static_cast<float>(sample) + 0.5F) /
+                    static_cast<float>(samples_per_edge);
+                const mvs::Vec2f first =
+                    uses[begin].low_uv * (1.F - t) + uses[begin].high_uv * t;
+                const mvs::Vec2f second = uses[begin + 1U].low_uv * (1.F - t) +
+                    uses[begin + 1U].high_uv * t;
+                pairs.insert(
+                    pairs.end(), {first.x(), first.y(), second.x(), second.y()});
+            }
+        }
+        begin = end;
+    }
+    return pairs;
+}
+
 }  // namespace
 
 TexturedMesh bake_mesh_texture(
@@ -341,6 +414,56 @@ TexturedMesh bake_mesh_texture(
         projections, bake_opts);
     bake_stage.finish();
 
+    std::vector<float> final_rgb(
+        static_cast<std::size_t>(baked.width) * baked.height * 3U);
+    const std::uint32_t baked_channels =
+        baked.color.size() /
+                (static_cast<std::size_t>(baked.width) * baked.height) >=
+            4U
+        ? 4U
+        : 3U;
+    for (std::size_t pixel = 0;
+         pixel < static_cast<std::size_t>(baked.width) * baked.height; ++pixel)
+        for (std::size_t channel = 0; channel < 3U; ++channel)
+            final_rgb[pixel * 3U + channel] =
+                baked.color[pixel * baked_channels + channel];
+
+    aether_drender::TextureRefineOutput refined;
+    std::vector<float> seam_pairs;
+    if (options.optimize) {
+        if (options.optimize_steps == 0 || options.optimize_batch_size == 0)
+            throw std::invalid_argument(
+                "Texture optimization steps and batch size must be positive");
+        seam_pairs = build_dense_seam_pairs(
+            unwrapped, options.seam_samples_per_edge);
+        core::StageScope refine_stage("texture.optimize");
+        aether_drender::TextureRefineOptions refine_opts;
+        refine_opts.width = baked.width;
+        refine_opts.height = baked.height;
+        refine_opts.steps = options.optimize_steps;
+        refine_opts.batch_size = options.optimize_batch_size;
+        refine_opts.learning_rate = options.optimize_learning_rate;
+        refine_opts.minimum_learning_rate = options.optimize_min_learning_rate;
+        refine_opts.seam_polish_steps = options.seam_polish_steps;
+        refine_opts.seam_learning_rate = options.seam_learning_rate;
+        aether_drender::TextureRefiner refiner(context);
+        refined = refiner.refine(
+            final_rgb, unwrapped.positions, unwrapped.uv, unwrapped.indices,
+            projections, seam_pairs, refine_opts);
+        final_rgb = refined.color;
+        refine_stage.finish();
+        core::Logger::instance().info(
+            "texture optimize: steps=", refined.loss_history.size(),
+            " seam_pairs=", seam_pairs.size() / 4U,
+            " seam_steps=", refined.seam_loss_history.size(),
+            " precompute_s=", refined.precompute_seconds,
+            " optimize_s=", refined.optimization_seconds,
+            refined.loss_history.empty() ? "" : " loss_first=",
+            refined.loss_history.empty() ? 0.F : refined.loss_history.front(),
+            refined.loss_history.empty() ? "" : " loss_last=",
+            refined.loss_history.empty() ? 0.F : refined.loss_history.back());
+    }
+
     TexturedMesh result;
     result.positions.resize(unwrapped.positions.size() / 3U);
     result.normals.resize(normals.size() / 3U);
@@ -364,27 +487,12 @@ TexturedMesh bake_mesh_texture(
     result.atlas_valid = baked.valid_mask;
     result.used_ray_query = baked.used_ray_query;
     result.delighted = options.delight;
-
-    // Baker returns RGBA; keep RGB only.
-    result.atlas_rgb.resize(
-        static_cast<std::size_t>(baked.width) * baked.height * 3U);
-    const std::uint32_t channels =
-        baked.color.size() /
-                (static_cast<std::size_t>(baked.width) * baked.height) >=
-            4U
-            ? 4U
-            : 3U;
-    for (std::uint32_t y = 0; y < baked.height; ++y) {
-        for (std::uint32_t x = 0; x < baked.width; ++x) {
-            const std::size_t src =
-                (static_cast<std::size_t>(y) * baked.width + x) * channels;
-            const std::size_t dst =
-                (static_cast<std::size_t>(y) * baked.width + x) * 3U;
-            result.atlas_rgb[dst] = baked.color[src];
-            result.atlas_rgb[dst + 1] = baked.color[src + 1];
-            result.atlas_rgb[dst + 2] = baked.color[src + 2];
-        }
-    }
+    result.optimized = options.optimize;
+    result.atlas_rgb = std::move(final_rgb);
+    result.optimization_loss = std::move(refined.loss_history);
+    result.seam_loss = std::move(refined.seam_loss_history);
+    result.optimization_precompute_seconds = refined.precompute_seconds;
+    result.optimization_seconds = refined.optimization_seconds;
 
     std::size_t valid = 0;
     for (const auto v : result.atlas_valid)
@@ -398,7 +506,8 @@ TexturedMesh bake_mesh_texture(
             : static_cast<double>(valid) /
                   static_cast<double>(result.atlas_valid.size()),
         " ray_query=", result.used_ray_query,
-        " delight=", result.delighted);
+        " delight=", result.delighted,
+        " optimized=", result.optimized);
     return result;
 }
 

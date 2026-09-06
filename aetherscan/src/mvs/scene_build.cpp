@@ -304,6 +304,26 @@ std::vector<ViewImage> load_view_images(
 
 }  // namespace detail
 
+void prepare_imported_scene(MvsScene& scene, const DensifyOptions& options) {
+    if (options.resolution_level >= 31)
+        throw std::invalid_argument("MVS resolution level must be below 31");
+    for (const auto& view : scene.views)
+        if (!view.width || !view.height || !view.src_width || !view.src_height)
+            throw std::invalid_argument("Imported MVS camera has empty image dimensions");
+    for (auto& view : scene.views) {
+        const auto [w, h] = working_size(view.src_width, view.src_height,
+            options.resolution_level, options.min_resolution);
+        const float sx = static_cast<float>(w) / view.width;
+        const float sy = static_cast<float>(h) / view.height;
+        view.fx *= sx; view.fy *= sy;
+        view.cx *= sx; view.cy *= sy;
+        view.width = w; view.height = h;
+        view.depth_map = {};
+        view.foreground_mask.clear();
+        view.neighbors.clear();
+    }
+}
+
 MvsScene build_mvs_scene(
     const sfm::Scene& sfm_scene, const DensifyOptions& options) {
     core::StageScope stage("mvs.build_scene");

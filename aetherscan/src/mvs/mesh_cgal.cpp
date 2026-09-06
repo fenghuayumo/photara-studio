@@ -13,6 +13,7 @@
 #include <limits>
 #include <mutex>
 #include <random>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,6 +40,41 @@ struct GlobalVertex {
     std::vector<Index> views;
     std::vector<float> view_weights;
 };
+
+// Keep all CGAL predicates and graph-cut distances in a canonical local
+// coordinate frame. Dense reconstructions frequently use georeferenced or
+// otherwise offset world coordinates; subtracting the cloud centre and
+// normalizing its span avoids losing the small Delaunay edges in float-valued
+// energy calculations. The transform is a positive uniform similarity, so it
+// cannot change the Delaunay topology.
+struct WorkingTransform {
+    Vec3f origin{Vec3f::Zero()};
+    float scale{1.F};
+
+    [[nodiscard]] Vec3f to_working(const Vec3f& point) const {
+        return (point - origin) * scale;
+    }
+    [[nodiscard]] Vec3f to_world(const Vec3f& point) const {
+        return point / scale + origin;
+    }
+};
+
+WorkingTransform make_working_transform(
+    const std::vector<GlobalVertex>& vertices) {
+    Vec3f minimum = Vec3f::Constant(std::numeric_limits<float>::max());
+    Vec3f maximum = Vec3f::Constant(std::numeric_limits<float>::lowest());
+    for (const GlobalVertex& vertex : vertices) {
+        minimum = minimum.cwiseMin(vertex.position);
+        maximum = maximum.cwiseMax(vertex.position);
+    }
+    WorkingTransform transform;
+    if (vertices.empty()) return transform;
+    transform.origin = minimum + (maximum - minimum) * 0.5F;
+    const float span = (maximum - minimum).maxCoeff();
+    if (std::isfinite(span) && span > 1e-20F)
+        transform.scale = 2.F / span;
+    return transform;
+}
 
 std::vector<GlobalVertex> collect_global_vertices(
     const MvsScene& scene, const DensifyOptions& options) {
@@ -177,7 +213,8 @@ void merge_observations(GlobalVertex& target, const GlobalVertex& source) {
 
 void build_projection_filtered_delaunay(
     std::vector<GlobalVertex> candidates, const MvsScene& scene,
-    const DensifyOptions& options, Delaunay& triangulation,
+    const DensifyOptions& options, const WorkingTransform& transform,
+    Delaunay& triangulation,
     std::vector<GlobalVertex>& vertices) {
     vertices.clear();
     vertices.reserve(candidates.size());
@@ -185,7 +222,7 @@ void build_projection_filtered_delaunay(
     points.reserve(candidates.size());
     std::vector<std::ptrdiff_t> order(candidates.size());
     for (std::size_t index = 0; index < candidates.size(); ++index) {
-        points.push_back(to_point(candidates[index].position));
+        points.push_back(to_point(transform.to_working(candidates[index].position)));
         order[index] = static_cast<std::ptrdiff_t>(index);
     }
     using SearchTraits =
@@ -233,6 +270,45 @@ void build_projection_filtered_delaunay(
     core::Logger::instance().info(
         "mvs global mesh projection_filtered_vertices=", vertices.size(),
         " dist_insert_px=", options.mesh_dist_insert_px);
+}
+
+// OpenMVS numbers cells in the spatial insertion order before allocating the
+// max-flow graph. CGAL's cell-container order is fragmented by insertion and
+// produces avoidable cache misses during every visibility walk and cut pass.
+int assign_spatial_cell_nodes(Delaunay& triangulation) {
+    std::size_t cell_count = 0;
+    for (auto cell = triangulation.all_cells_begin();
+         cell != triangulation.all_cells_end(); ++cell)
+        ++cell_count;
+    if (cell_count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::overflow_error("Delaunay graph exceeds the supported node count");
+
+    const std::size_t vertex_slots =
+        static_cast<std::size_t>(triangulation.number_of_vertices()) + 1U;
+    std::vector<std::size_t> keys;
+    keys.reserve(cell_count);
+    std::vector<std::size_t> offsets(vertex_slots + 1U, 0U);
+    for (auto cell = triangulation.all_cells_begin();
+         cell != triangulation.all_cells_end(); ++cell) {
+        std::size_t key = 0;
+        for (int vertex = 0; vertex < 4; ++vertex) {
+            if (triangulation.is_infinite(cell->vertex(vertex))) continue;
+            const std::size_t insertion = cell->vertex(vertex)->info().index;
+            if (insertion != std::numeric_limits<std::size_t>::max())
+                key = std::max(key, std::min(insertion + 1U, vertex_slots));
+        }
+        keys.push_back(key);
+        ++offsets[key + 1U];
+    }
+    for (std::size_t i = 1; i < offsets.size(); ++i)
+        offsets[i] += offsets[i - 1U];
+    std::size_t cell_index = 0;
+    for (auto cell = triangulation.all_cells_begin();
+         cell != triangulation.all_cells_end(); ++cell) {
+        cell->info() = {};
+        cell->info().node = static_cast<int>(offsets[keys[cell_index++]]++);
+    }
+    return static_cast<int>(cell_count);
 }
 
 Vec3f cell_center(const Delaunay& triangulation, const CellHandle& cell) {
@@ -324,6 +400,52 @@ float estimate_sigma(const Delaunay& triangulation, const float multiplier) {
         std::sqrt(std::max(lengths[middle], 1e-16F)) * multiplier, 1e-6F);
 }
 
+std::vector<float> estimate_vertex_sigmas(
+    const Delaunay& triangulation, const std::size_t vertex_count,
+    const float global_sigma, const float multiplier) {
+    std::vector<std::size_t> offsets(vertex_count + 1U, 0U);
+    for (auto edge = triangulation.finite_edges_begin();
+         edge != triangulation.finite_edges_end(); ++edge) {
+        const CellHandle cell = edge->first;
+        const std::size_t a = cell->vertex(edge->second)->info().index;
+        const std::size_t b = cell->vertex(edge->third)->info().index;
+        if (a < vertex_count) ++offsets[a + 1U];
+        if (b < vertex_count) ++offsets[b + 1U];
+    }
+    for (std::size_t i = 1; i < offsets.size(); ++i)
+        offsets[i] += offsets[i - 1U];
+    std::vector<std::size_t> cursor = offsets;
+    std::vector<float> lengths(offsets.back());
+    for (auto edge = triangulation.finite_edges_begin();
+         edge != triangulation.finite_edges_end(); ++edge) {
+        const CellHandle cell = edge->first;
+        const auto first = cell->vertex(edge->second);
+        const auto second = cell->vertex(edge->third);
+        const std::size_t a = first->info().index;
+        const std::size_t b = second->info().index;
+        const float length = (to_vec(first->point()) - to_vec(second->point())).norm();
+        if (a < vertex_count) lengths[cursor[a]++] = length;
+        if (b < vertex_count) lengths[cursor[b]++] = length;
+    }
+
+    const float minimum = global_sigma * 0.25F;
+    const float maximum = global_sigma * 4.F;
+    std::vector<float> sigma(vertex_count, global_sigma);
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const std::size_t begin = offsets[vertex];
+        const std::size_t end = offsets[vertex + 1U];
+        if (begin == end) continue;
+        const std::size_t middle = begin + (end - begin) / 2U;
+        std::nth_element(
+            lengths.begin() + static_cast<std::ptrdiff_t>(begin),
+            lengths.begin() + static_cast<std::ptrdiff_t>(middle),
+            lengths.begin() + static_cast<std::ptrdiff_t>(end));
+        sigma[vertex] = std::clamp(
+            lengths[middle] * multiplier, minimum, maximum);
+    }
+    return sigma;
+}
+
 struct CellAccum {
     float sink{0.F};
     std::array<float, 4> facet{};
@@ -366,13 +488,9 @@ constexpr std::size_t k_local_weight_flush_size = 65'536;
 
 bool extract_surface(
     Delaunay& triangulation, const std::vector<GlobalVertex>& vertices,
-    const MvsScene& scene, const DensifyOptions& options, Mesh& mesh) {
-    int node_count = 0;
-    for (auto cell = triangulation.all_cells_begin();
-         cell != triangulation.all_cells_end(); ++cell) {
-        cell->info() = {};
-        cell->info().node = node_count++;
-    }
+    const MvsScene& scene, const DensifyOptions& options,
+    const WorkingTransform& transform, Mesh& mesh) {
+    const int node_count = assign_spatial_cell_nodes(triangulation);
     if (node_count == 0) return false;
     std::vector<Vec3f> cell_centers(static_cast<std::size_t>(node_count));
     for (auto cell = triangulation.all_cells_begin();
@@ -381,7 +499,10 @@ bool extract_surface(
             cell_center(triangulation, cell);
 
     const float sigma = estimate_sigma(triangulation, options.mesh_k_sigma);
-    const float inverse_two_sigma_squared = 0.5F / (sigma * sigma);
+    const std::vector<float> vertex_sigmas = options.mesh_adaptive_sigma
+        ? estimate_vertex_sigmas(
+              triangulation, vertices.size(), sigma, options.mesh_k_sigma)
+        : std::vector<float>{};
     core::Logger::instance().info(
         "mvs global mesh cells=", node_count, " sigma=", sigma);
 
@@ -397,7 +518,8 @@ bool extract_surface(
         scene.views.size(), Point(0.0, 0.0, 0.0));
     std::vector<CellHandle> camera_cells(scene.views.size());
     for (std::size_t id = 0; id < scene.views.size(); ++id) {
-        camera_points[id] = to_point(scene.views[id].pose.C.cast<float>());
+        camera_points[id] = to_point(
+            transform.to_working(scene.views[id].pose.C.cast<float>()));
         camera_cells[id] = triangulation.locate(camera_points[id]);
         if (camera_cells[id] != CellHandle())
             camera_cells[id]->info().source = std::max(
@@ -448,6 +570,11 @@ bool extract_surface(
             if (vertex_index >= vertices.size()) return;
             const GlobalVertex& sample = vertices[vertex_index];
             const Vec3f point = sample.position;
+            const float sample_sigma = vertex_sigmas.empty()
+                ? sigma
+                : vertex_sigmas[vertex_index];
+            const float sample_inverse_two_sigma_squared =
+                0.5F / (sample_sigma * sample_sigma);
             VisibilityAccum& local = worker_accums[worker_id];
             for (std::size_t view_index = 0;
                  view_index < sample.views.size(); ++view_index) {
@@ -456,7 +583,8 @@ bool extract_surface(
                 const float alpha = view_index < sample.view_weights.size()
                     ? sample.view_weights[view_index]
                     : 1e-3F;
-                const Vec3f camera = scene.views[id].pose.C.cast<float>();
+                const Vec3f camera = transform.to_working(
+                    scene.views[id].pose.C.cast<float>());
                 const Vec3f ray = point - camera;
                 const float ray_length = ray.norm();
                 if (!(ray_length > 1e-6F)) continue;
@@ -481,14 +609,14 @@ bool extract_surface(
                                 alpha *
                                     (1.F - std::exp(
                                                -distance * distance *
-                                               inverse_two_sigma_squared)));
+                                               sample_inverse_two_sigma_squared)));
                         }
                     }
                     previous = cell;
                 }
 
                 const Vec3f behind =
-                    point + direction * sigma *
+                    point + direction * sample_sigma *
                                 std::max(options.mesh_k_behind, 1.F);
                 const Point behind_point = to_point(behind);
                 const CellHandle sink_cell =
@@ -516,7 +644,7 @@ bool extract_surface(
                                 alpha *
                                     (1.F - std::exp(
                                                -distance * distance *
-                                               inverse_two_sigma_squared)));
+                                               sample_inverse_two_sigma_squared)));
                         }
                     }
                     previous = cell;
@@ -545,17 +673,19 @@ bool extract_surface(
 
     if (options.mesh_use_free_space_support) {
         core::StageScope weak_stage("mvs.mesh_weak_surface");
-        const float front_distance =
-            sigma * std::max(options.mesh_k_free_space_front, 0.F);
-        const float back_distance =
-            sigma * std::max(options.mesh_k_free_space_back, 0.F);
-        const float near_distance = std::max(sigma * 1e-4F, 1e-8F);
-
         const auto measure_weak_surface =
             [&](const VertexHandle& vertex, const Vec3f& point,
-                const Index id, float& beta, float& gamma,
+                const Index id, const float sample_sigma,
+                float& beta, float& gamma,
                 CellHandle& endpoint_cell) {
-                const Vec3f camera = scene.views[id].pose.C.cast<float>();
+                const float front_distance = sample_sigma *
+                    std::max(options.mesh_k_free_space_front, 0.F);
+                const float back_distance = sample_sigma *
+                    std::max(options.mesh_k_free_space_back, 0.F);
+                const float near_distance =
+                    std::max(sample_sigma * 1e-4F, 1e-8F);
+                const Vec3f camera = transform.to_working(
+                    scene.views[id].pose.C.cast<float>());
                 const Vec3f ray = point - camera;
                 const float ray_length = ray.norm();
                 if (!(ray_length > 1e-6F) || !(front_distance > 0.F) ||
@@ -662,8 +792,12 @@ bool extract_surface(
                         float beta = 0.F;
                         float gamma = 0.F;
                         CellHandle endpoint_cell;
+                        const float sample_sigma = vertex_sigmas.empty()
+                            ? sigma
+                            : vertex_sigmas[vertex_index];
                         if (measure_weak_surface(
-                                vertex, sample.position, id, beta, gamma,
+                                vertex, sample.position, id, sample_sigma,
+                                beta, gamma,
                                 endpoint_cell))
                             worker_samples[worker_id].push_back({beta, gamma});
                     }
@@ -711,6 +845,9 @@ bool extract_surface(
                 if (vertex_index >= vertices.size()) return;
                 const GlobalVertex& sample = vertices[vertex_index];
                 const Vec3f point = sample.position;
+                const float sample_sigma = vertex_sigmas.empty()
+                    ? sigma
+                    : vertex_sigmas[vertex_index];
                 WeakSurfaceStats& stats = worker_stats[worker_id];
 
                 for (const Index id : sample.views) {
@@ -720,7 +857,8 @@ bool extract_surface(
                     float gamma = 0.F;
                     CellHandle endpoint_cell;
                     if (!measure_weak_surface(
-                            vertex, point, id, beta, gamma, endpoint_cell))
+                            vertex, point, id, sample_sigma, beta, gamma,
+                            endpoint_cell))
                         continue;
                     ++stats.measured;
 
@@ -836,7 +974,7 @@ bool extract_surface(
         auto [it, inserted] =
             vertex_map.emplace(index, static_cast<int>(vertex_map.size()));
         if (inserted) {
-            mesh.vertices.push_back(to_vec(handle->point()));
+            mesh.vertices.push_back(transform.to_world(to_vec(handle->point())));
             mesh.colors.push_back(
                 index < vertices.size() ? vertices[index].color
                                         : Vec3f{0.7F, 0.7F, 0.7F});
@@ -844,12 +982,50 @@ bool extract_surface(
         return it->second;
     };
 
-    std::size_t long_facets_preserved = 0;
+    const auto facet_longest_edge_squared =
+        [&](const CellHandle& cell, const int opposite) {
+            std::array<Vec3f, 3> triangle{};
+            int cursor = 0;
+            for (int vertex = 0; vertex < 4; ++vertex)
+                if (vertex != opposite)
+                    triangle[static_cast<std::size_t>(cursor++)] =
+                        to_vec(cell->vertex(vertex)->point());
+            return std::max({
+                (triangle[0] - triangle[1]).squaredNorm(),
+                (triangle[1] - triangle[2]).squaredNorm(),
+                (triangle[2] - triangle[0]).squaredNorm()});
+        };
+    float gate_edge_squared = std::numeric_limits<float>::max();
+    float median_cut_edge = 0.F;
+    if (options.mesh_max_edge_scale > 0.F) {
+        std::vector<float> cut_edges;
+        cut_edges.reserve(vertices.size() * 2U);
+        for (auto facet = triangulation.finite_facets_begin();
+             facet != triangulation.finite_facets_end(); ++facet) {
+            const CellHandle first = facet->first;
+            const int opposite = facet->second;
+            const CellHandle second = first->neighbor(opposite);
+            if (graph.is_source_side(
+                    static_cast<std::size_t>(first->info().node)) ==
+                graph.is_source_side(
+                    static_cast<std::size_t>(second->info().node)))
+                continue;
+            cut_edges.push_back(facet_longest_edge_squared(first, opposite));
+        }
+        if (!cut_edges.empty()) {
+            const std::size_t middle = cut_edges.size() / 2U;
+            std::nth_element(
+                cut_edges.begin(),
+                cut_edges.begin() + static_cast<std::ptrdiff_t>(middle),
+                cut_edges.end());
+            median_cut_edge = std::sqrt(cut_edges[middle]);
+            gate_edge_squared = cut_edges[middle] *
+                options.mesh_max_edge_scale * options.mesh_max_edge_scale;
+        }
+    }
+
+    std::size_t unsupported_facets_removed = 0;
     float longest_surface_edge = 0.F;
-    const float median_edge = sigma /
-                              std::max(options.mesh_k_sigma, 1e-6F);
-    const float maximum_edge = median_edge *
-                               std::max(options.mesh_max_edge_voxels, 1.F);
     for (auto facet = triangulation.finite_facets_begin();
          facet != triangulation.finite_facets_end(); ++facet) {
         const CellHandle first = facet->first;
@@ -860,50 +1036,29 @@ bool extract_surface(
         const bool second_source = graph.is_source_side(
             static_cast<std::size_t>(second->info().node));
         if (first_source == second_source) continue;
+        const float longest_edge_squared =
+            facet_longest_edge_squared(first, opposite);
+        longest_surface_edge = std::max(
+            longest_surface_edge, std::sqrt(longest_edge_squared));
+        if (longest_edge_squared > gate_edge_squared) {
+            ++unsupported_facets_removed;
+            continue;
+        }
         std::array<int, 3> ids{};
-        int cursor = 0;
-        for (int i = 0; i < 4; ++i)
-            if (i != opposite) ids[static_cast<std::size_t>(cursor++)] =
-                map_vertex(first->vertex(i));
+        const auto oriented = oriented_tetrahedron_facet_vertices(opposite);
+        for (std::size_t i = 0; i < 3; ++i)
+            ids[i] = map_vertex(first->vertex(oriented[i]));
         Eigen::Vector3i face{ids[0], ids[1], ids[2]};
-        const Vec3f edge01 =
-            mesh.vertices[static_cast<std::size_t>(face[1])] -
-            mesh.vertices[static_cast<std::size_t>(face[0])];
-        const Vec3f edge12 =
-            mesh.vertices[static_cast<std::size_t>(face[2])] -
-            mesh.vertices[static_cast<std::size_t>(face[1])];
-        const Vec3f edge20 =
-            mesh.vertices[static_cast<std::size_t>(face[0])] -
-            mesh.vertices[static_cast<std::size_t>(face[2])];
-        const float longest_edge =
-            std::max({edge01.norm(), edge12.norm(), edge20.norm()});
-        longest_surface_edge = std::max(longest_surface_edge, longest_edge);
-        // The graph cut labels tetrahedra, so its complete source/sink
-        // interface is topologically closed (apart from an intentional bounds
-        // cut). Dropping individual long facets here punctures that interface
-        // and creates exactly the boundary loops Clean is later asked to
-        // repair. Preserve the interface and leave scale-aware rejection to
-        // the component-level cleanup pass, which cannot create local holes.
-        if (longest_edge > maximum_edge) ++long_facets_preserved;
-        const Vec3f normal =
-            (mesh.vertices[static_cast<std::size_t>(face[1])] -
-             mesh.vertices[static_cast<std::size_t>(face[0])])
-                .cross(mesh.vertices[static_cast<std::size_t>(face[2])] -
-                       mesh.vertices[static_cast<std::size_t>(face[0])]);
-        const Vec3f first_center = cell_center(triangulation, first);
-        const Vec3f second_center = triangulation.is_infinite(second)
-            ? first_center + normal
-            : cell_center(triangulation, second);
-        const Vec3f outside_to_inside = first_source
-            ? second_center - first_center
-            : first_center - second_center;
-        if (normal.dot(outside_to_inside) > 0.F) std::swap(face[1], face[2]);
+        // CGAL facet parity gives the orientation even at the convex hull,
+        // where an infinite cell has no geometric centroid.
+        if (!first_source) std::swap(face[0], face[2]);
         mesh.faces.push_back(face);
     }
     core::Logger::instance().info(
         "mvs global mesh surface_faces=", mesh.faces.size(),
-        " long_facets_preserved=", long_facets_preserved,
-        " edge_limit=", maximum_edge,
+        " unsupported_facets_removed=", unsupported_facets_removed,
+        " median_cut_edge=", median_cut_edge,
+        " edge_limit=", median_cut_edge * options.mesh_max_edge_scale,
         " longest_edge=", longest_surface_edge);
     return !mesh.faces.empty();
 }
@@ -924,10 +1079,12 @@ bool reconstruct_mesh_global_cgal(
     std::vector<GlobalVertex> candidates =
         collect_global_vertices(scene, options);
     if (candidates.size() < 4) return false;
+    const WorkingTransform transform = make_working_transform(candidates);
     Delaunay triangulation;
     std::vector<GlobalVertex> vertices;
     build_projection_filtered_delaunay(
-        std::move(candidates), scene, options, triangulation, vertices);
+        std::move(candidates), scene, options, transform, triangulation,
+        vertices);
     core::Logger::instance().info(
         "mvs global mesh delaunay vertices=", triangulation.number_of_vertices(),
         " finite_cells=", triangulation.number_of_finite_cells());
@@ -935,8 +1092,17 @@ bool reconstruct_mesh_global_cgal(
         triangulation.number_of_finite_cells() == 0)
         return false;
 
+    // From this boundary onward all ray lengths and uncertainty estimates use
+    // the same canonical frame as the tetrahedralization.
+    for (GlobalVertex& vertex : vertices)
+        vertex.position = transform.to_working(vertex.position);
+    core::Logger::instance().info(
+        "mvs global mesh canonical_origin=", transform.origin.transpose(),
+        " canonical_scale=", transform.scale);
+
     const bool success =
-        extract_surface(triangulation, vertices, scene, options, scene.mesh);
+        extract_surface(
+            triangulation, vertices, scene, options, transform, scene.mesh);
     stage.finish();
     return success;
 #endif

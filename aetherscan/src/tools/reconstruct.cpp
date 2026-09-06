@@ -174,6 +174,8 @@ struct ReconstructCli {
     float mesh_tsdf_smooth_mu{-0.53F};
     float mesh_dist_insert_px{-1.F};
     bool mesh_free_space_support{true};
+    bool mesh_adaptive_sigma{true};
+    float mesh_max_edge_scale{4.F};
     float mesh_free_space_quantile{0.95F};
     std::uint64_t pam_max_points{1'000'000};
     std::uint64_t pam_pivot_max_points{1'000'000};
@@ -197,6 +199,10 @@ struct ReconstructCli {
     std::uint32_t atlas_resolution{2048};
     bool atlas_resolution_overridden{false};
     std::uint32_t uv_parallel_partitions{8};
+    bool texture_optimize{true};
+    std::uint32_t texture_optimize_steps{1000};
+    std::uint32_t texture_optimize_batch_size{4};
+    std::uint32_t texture_seam_samples{4};
 };
 
 std::uint64_t peak_working_set_bytes() noexcept {
@@ -350,6 +356,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --pam-occupancy-iso-value V  occupied threshold (0.3 matches GW iso shift 0.2)\n"
               << "  --mesh-dist-insert-px N  global Delaunay projection spacing\n"
               << "  --mesh-free-space-support BOOL  weak-surface beta/gamma cut\n"
+              << "  --mesh-adaptive-sigma BOOL  adapt visibility scale to local point density\n"
+              << "  --mesh-max-edge-scale F  reject gap-spanning cut facets (default 4; 0 disables)\n"
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
               << "  --mesh-target-faces N  aether/CGAL repair + decimate target (0 disables)\n"
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
@@ -361,6 +369,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-tsdf-smooth-iters N  boundary-locked Taubin passes (default 2)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
+              << "  --colmap PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
               << "  --capture-mode object|scene  object uses SfM SubjectBounds\n"
               << "  --masks DIR optional foreground masks (auto: sibling masks/)\n"
               << "Texture (optional Stage B after --mesh; requires Vulkan + UVAtlas):\n"
@@ -368,6 +377,10 @@ void print_help(const cxxopts::Options& options) {
               << "  --delight    Intrinsic image delighter before bake (albedo)\n"
               << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
+              << "  --texture-optimize BOOL  aether_drender photometric + seam optimization (default true)\n"
+              << "  --texture-optimize-steps N  native Vulkan Adam steps (default 1000)\n"
+              << "  --texture-optimize-batch-size N  calibrated views per optimizer step (default 4)\n"
+              << "  --texture-seam-samples N  samples per UV chart seam edge (default 4)\n"
               << "Output formats:\n"
               << "  .ascan  AetherScan project (settings + completed stages)\n"
               << "  .asfm   native SfM scene (cameras, keypoints, tracks)\n"
@@ -709,9 +722,24 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh-free-space-support",
          "OpenMVS weak-surface beta/gamma sink reinforcement",
          cxxopts::value<bool>()->default_value("true"))
+        ("mesh-adaptive-sigma",
+         "OpenMVS local-density adaptive graph-cut uncertainty",
+         cxxopts::value<bool>()->default_value("true"))
+        ("mesh-max-edge-scale",
+         "Maximum cut-facet edge relative to the cut-facet median",
+         cxxopts::value<float>()->default_value("4"))
         ("mesh-free-space-quantile",
          "Quantile used to calibrate fused support to OpenMVS scale",
          cxxopts::value<float>()->default_value("0.95"))
+        ("texture-optimize",
+         "Refine projected atlas with aether_drender's native optimizer",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("texture-optimize-steps", "Native texture optimization steps",
+         cxxopts::value<std::uint32_t>()->default_value("1000"))
+        ("texture-optimize-batch-size", "Views per texture optimization step",
+         cxxopts::value<std::uint32_t>()->default_value("4"))
+        ("texture-seam-samples", "Samples per UV chart seam edge",
+         cxxopts::value<std::uint32_t>()->default_value("4"))
         ("patchmatch-tile-rows",
          "Rows per CPU PatchMatch scheduling tile",
          cxxopts::value<unsigned>()->default_value("8"))
@@ -973,6 +1001,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result.count("atlas-resolution") != 0;
     cli.uv_parallel_partitions =
         result["uv-parallel-partitions"].as<std::uint32_t>();
+    cli.texture_optimize = result["texture-optimize"].as<bool>();
+    cli.texture_optimize_steps =
+        result["texture-optimize-steps"].as<std::uint32_t>();
+    cli.texture_optimize_batch_size =
+        result["texture-optimize-batch-size"].as<std::uint32_t>();
+    cli.texture_seam_samples =
+        result["texture-seam-samples"].as<std::uint32_t>();
     cli.mesh_method = result["mesh-method"].as<std::string>();
     cli.pam_max_points = result["pam-max-points"].as<std::uint64_t>();
     cli.pam_pivot_max_points =
@@ -1019,6 +1054,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["mesh-dist-insert-px"].as<float>();
     cli.mesh_free_space_support =
         result["mesh-free-space-support"].as<bool>();
+    cli.mesh_adaptive_sigma = result["mesh-adaptive-sigma"].as<bool>();
+    cli.mesh_max_edge_scale = result["mesh-max-edge-scale"].as<float>();
     cli.mesh_free_space_quantile =
         result["mesh-free-space-quantile"].as<float>();
     cli.patchmatch_tile_rows =
@@ -1073,12 +1110,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
                 "--mvs-mesh-only requires --splat-dataset and either "
                 "--dense-ply or --mask-mesh");
         cli.splat = false;
-    } else if (external_splat_dataset || !cli.dense_ply.empty()) {
+    } else if ((external_splat_dataset && !cli.dense) ||
+               (!external_splat_dataset && !cli.dense_ply.empty())) {
         cli.splat = true;
     }
     // Internal SfM now follows the same sparse initialization path as direct
     // COLMAP/OpenMVS datasets. --dense remains an explicit MVS diagnostic.
-    if (external_splat_dataset && cli.texture)
+    if (external_splat_dataset && cli.splat && cli.texture)
         throw std::invalid_argument(
             "--texture is not yet available in the direct external splat path");
 #if !defined(AETHERSCAN_HAS_SPLAT)
@@ -1183,6 +1221,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.uv_parallel_partitions == 0)
         throw std::invalid_argument(
             "--uv-parallel-partitions must be positive");
+    if (cli.texture_optimize &&
+        (cli.texture_optimize_steps == 0 ||
+         cli.texture_optimize_batch_size == 0))
+        throw std::invalid_argument(
+            "--texture-optimize-steps and --texture-optimize-batch-size must "
+            "be positive when optimization is enabled");
     if (cli.mesh_method != "auto" && cli.mesh_method != "tsdf" &&
         cli.mesh_method != "delaunay" && cli.mesh_method != "pam") {
         throw std::invalid_argument(
@@ -1216,6 +1260,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.mesh_dist_insert_px < -1.F || cli.mesh_dist_insert_px > 16.F)
         throw std::invalid_argument(
             "--mesh-dist-insert-px must be -1 or in [0,16]");
+    if (!std::isfinite(cli.mesh_max_edge_scale) ||
+        cli.mesh_max_edge_scale < 0.F)
+        throw std::invalid_argument(
+            "--mesh-max-edge-scale must be finite and >= 0");
     if (cli.mesh_target_faces > 0 && cli.mesh_target_faces < 4)
         throw std::invalid_argument(
             "--mesh-target-faces must be 0 or at least 4");
@@ -2753,6 +2801,61 @@ int main(int argc, char** argv) {
             mesh_options.mesh_tsdf_smooth_lambda =
                 cli.mesh_tsdf_smooth_lambda;
             mesh_options.mesh_tsdf_smooth_mu = cli.mesh_tsdf_smooth_mu;
+            if (!cli.splat && !cli.mvs_mesh_only) {
+                // Explicit --dense/--mesh with calibrated cameras is MVS, not
+                // an implicit Gaussian-training request. Keep the given poses.
+                mesh_options.mesh_method = cli.mesh_method == "tsdf"
+                    ? aetherscan::mvs::MeshMethod::tsdf
+                    : aetherscan::mvs::MeshMethod::delaunay_cut;
+                mesh_options.build_mesh = cli.mesh;
+                mesh_options.mesh_max_points = cli.mesh_max_points;
+                if (cli.dense_resolution_overridden)
+                    mesh_options.resolution_level = cli.dense_resolution_level;
+                if (cli.mesh_dist_insert_px >= 0.F)
+                    mesh_options.mesh_dist_insert_px = cli.mesh_dist_insert_px;
+                mesh_options.mesh_use_free_space_support = cli.mesh_free_space_support;
+                mesh_options.mesh_adaptive_sigma = cli.mesh_adaptive_sigma;
+                mesh_options.mesh_max_edge_scale = cli.mesh_max_edge_scale;
+                mesh_options.mesh_k_free_space_calibration_quantile =
+                    std::clamp(cli.mesh_free_space_quantile, 0.F, 0.999F);
+                mesh_options.patchmatch_tile_rows = cli.patchmatch_tile_rows;
+                mesh_options.patchmatch_concurrent_views = cli.patchmatch_concurrent_views;
+                aetherscan::mvs::prepare_imported_scene(loaded.scene, mesh_options);
+                aetherscan::mvs::densify(loaded.scene, mesh_options);
+                const auto stem = cli.output.parent_path() / cli.output.stem();
+                aetherscan::mvs::save_dense_ply(loaded.scene.dense_cloud,
+                    stem.string() + "_dense.ply");
+                if (cli.mesh) {
+                    if (loaded.scene.mesh.faces.empty())
+                        throw std::runtime_error("Calibrated MVS produced an empty mesh");
+                    aetherscan::mvs::save_mesh_ply(loaded.scene.mesh,
+                        stem.string() + "_mesh.ply");
+                    if (cli.mesh_obj)
+                        aetherscan::mvs::save_mesh_obj(loaded.scene.mesh,
+                            stem.string() + "_mesh.obj");
+                    if (write_project) {
+                        archive.set_chunk(aetherscan::project::ChunkType::mesh,
+                            aetherscan::mvs::encode_mesh(loaded.scene.mesh));
+                        archive.save(cli.output);
+                    }
+                }
+#if defined(AETHERSCAN_HAS_TEXTURE)
+                if (cli.texture) {
+                    aetherscan::texture::TextureOptions tex_opts;
+                    tex_opts.atlas_resolution = cli.atlas_resolution;
+                    tex_opts.uv_parallel_partitions = cli.uv_parallel_partitions;
+                    tex_opts.optimize = cli.texture_optimize;
+                    tex_opts.optimize_steps = cli.texture_optimize_steps;
+                    tex_opts.optimize_batch_size = cli.texture_optimize_batch_size;
+                    tex_opts.seam_samples_per_edge = cli.texture_seam_samples;
+                    tex_opts.delight = cli.delight;
+                    tex_opts.mask_dir = cli.masks_dir;
+                    aetherscan::texture::bake_and_export(loaded.scene,
+                        stem.string() + "_textured", tex_opts);
+                }
+#endif
+                return 0;
+            }
             if (cli.mvs_mesh_only) {
                 if (!cli.mask_mesh.empty()) {
                     loaded.scene.mesh =
@@ -2767,6 +2870,8 @@ int main(int argc, char** argv) {
                             cli.mesh_dist_insert_px;
                     mesh_options.mesh_use_free_space_support =
                         cli.mesh_free_space_support;
+                    mesh_options.mesh_adaptive_sigma = cli.mesh_adaptive_sigma;
+                    mesh_options.mesh_max_edge_scale = cli.mesh_max_edge_scale;
                     mesh_options.mesh_k_free_space_calibration_quantile =
                         std::clamp(
                             cli.mesh_free_space_quantile, 0.F, 0.999F);
@@ -3079,6 +3184,11 @@ int main(int argc, char** argv) {
                     tex_opts.atlas_resolution = cli.atlas_resolution;
                     tex_opts.uv_parallel_partitions =
                         cli.uv_parallel_partitions;
+                    tex_opts.optimize = cli.texture_optimize;
+                    tex_opts.optimize_steps = cli.texture_optimize_steps;
+                    tex_opts.optimize_batch_size =
+                        cli.texture_optimize_batch_size;
+                    tex_opts.seam_samples_per_edge = cli.texture_seam_samples;
                     tex_opts.delight = cli.delight;
                     tex_opts.mask_dir = cli.masks_dir;
                     const auto textured_stem =
@@ -3126,6 +3236,8 @@ int main(int argc, char** argv) {
                     cli.mesh_dist_insert_px;
             densify_opts.mesh_use_free_space_support =
                 cli.mesh_free_space_support;
+            densify_opts.mesh_adaptive_sigma = cli.mesh_adaptive_sigma;
+            densify_opts.mesh_max_edge_scale = cli.mesh_max_edge_scale;
             densify_opts.mesh_k_free_space_calibration_quantile =
                 std::clamp(cli.mesh_free_space_quantile, 0.F, 0.999F);
             densify_opts.patchmatch_tile_rows = cli.patchmatch_tile_rows;
@@ -3286,6 +3398,11 @@ int main(int argc, char** argv) {
                     tex_opts.atlas_resolution = cli.atlas_resolution;
                     tex_opts.uv_parallel_partitions =
                         cli.uv_parallel_partitions;
+                    tex_opts.optimize = cli.texture_optimize;
+                    tex_opts.optimize_steps = cli.texture_optimize_steps;
+                    tex_opts.optimize_batch_size =
+                        cli.texture_optimize_batch_size;
+                    tex_opts.seam_samples_per_edge = cli.texture_seam_samples;
                     tex_opts.delight = cli.delight;
                     tex_opts.mask_dir = effective_mask_dir;
                     if (cli.dense_quality ==
@@ -3316,6 +3433,7 @@ int main(int argc, char** argv) {
                         "textured_obj=", textured_stem.string() + ".obj",
                         " delight=", cli.delight,
                         " atlas=", tex_opts.atlas_resolution,
+                        " optimized=", tex_opts.optimize,
                         " texture_s=", tex_elapsed);
                 }
 #endif

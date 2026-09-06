@@ -27,6 +27,11 @@ struct TexturedMesh {
     std::vector<float> atlas_valid;  // 0/1 coverage mask
     bool used_ray_query{false};
     bool delighted{false};
+    bool optimized{false};
+    std::vector<float> optimization_loss;
+    std::vector<float> seam_loss;
+    double optimization_precompute_seconds{0.0};
+    double optimization_seconds{0.0};
 };
 
 struct TextureViewImage {

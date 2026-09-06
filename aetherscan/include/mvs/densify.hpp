@@ -10,6 +10,10 @@ namespace aetherscan::mvs {
 // Images are loaded, undistorted, and downscaled to the working resolution.
 MvsScene build_mvs_scene(const sfm::Scene& sfm_scene, const DensifyOptions& options);
 
+// Set imported cameras to the MVS working resolution without changing poses or
+// source-image calibration. Call before estimating depths; discards old maps.
+void prepare_imported_scene(MvsScene& scene, const DensifyOptions& options);
+
 // Score and attach neighbor lists on every view (covisibility + baseline angle).
 void select_neighbors(MvsScene& scene, const DensifyOptions& options);
 

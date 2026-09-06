@@ -130,7 +130,7 @@ void assign_dense_scalar(
 
 void write_ply_header(
     std::ostream& out, const std::size_t vertices, const std::size_t faces,
-    const bool has_color, const bool has_normal) {
+    const bool has_color, const bool has_normal, const bool has_visibility = false) {
     out << "ply\nformat binary_little_endian 1.0\n";
     out << "element vertex " << vertices << '\n';
     out << "property float x\nproperty float y\nproperty float z\n";
@@ -138,6 +138,9 @@ void write_ply_header(
         out << "property float nx\nproperty float ny\nproperty float nz\n";
     if (has_color)
         out << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    if (has_visibility)
+        out << "property float weight\nproperty list uint uint view_indices\n"
+               "property list uint float view_weights\n";
     if (faces > 0) {
         out << "element face " << faces << '\n';
         out << "property list uchar int vertex_indices\n";
@@ -510,13 +513,18 @@ void save_dense_ply(const DenseCloud& cloud, const std::filesystem::path& path) 
     if (!out) throw std::runtime_error("Failed to create PLY: " + path.string());
     const bool has_color = !cloud.points.empty();
     const bool has_normal = !cloud.points.empty();
-    write_ply_header(out, cloud.points.size(), 0, has_color, has_normal);
+    write_ply_header(out, cloud.points.size(), 0, has_color, has_normal, true);
     for (const auto& p : cloud.points) {
         for (int k = 0; k < 3; ++k) write_little_endian(out, p.position[k]);
         for (int k = 0; k < 3; ++k) write_little_endian(out, p.normal[k]);
         write_little_endian(out, to_u8(p.color.x()));
         write_little_endian(out, to_u8(p.color.y()));
         write_little_endian(out, to_u8(p.color.z()));
+        write_little_endian(out, p.weight);
+        write_little_endian(out, static_cast<std::uint32_t>(p.views.size()));
+        for (const auto view : p.views) write_little_endian(out, static_cast<std::uint32_t>(view));
+        write_little_endian(out, static_cast<std::uint32_t>(p.view_weights.size()));
+        for (const float weight : p.view_weights) write_little_endian(out, weight);
     }
 }
 

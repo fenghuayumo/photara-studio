@@ -73,10 +73,15 @@ def render_views(
     height: int,
     colmap_model: Path | None = None,
     colmap_indices: list[int] | None = None,
+    textured: bool = False,
 ) -> None:
-    mesh = o3d.io.read_triangle_mesh(str(mesh_path), enable_post_processing=False)
+    mesh = o3d.io.read_triangle_mesh(str(mesh_path), enable_post_processing=textured)
     if mesh.is_empty() or not mesh.has_triangles():
         raise ValueError(f"mesh has no triangles: {mesh_path}")
+    if textured and (not mesh.has_textures() or not mesh.has_triangle_uvs()):
+        raise ValueError(f"mesh has no texture/UVs: {mesh_path}")
+    if not textured:
+        mesh.textures = []
     if not mesh.has_vertex_normals():
         mesh.compute_vertex_normals()
 
@@ -106,7 +111,7 @@ def render_views(
     visualizer.add_geometry(mesh)
     render_option = visualizer.get_render_option()
     render_option.background_color = np.array([0.025, 0.032, 0.045])
-    render_option.light_on = True
+    render_option.light_on = not textured
     render_option.mesh_show_back_face = True
     render_option.mesh_color_option = o3d.visualization.MeshColorOption.Color
     render_option.mesh_shade_option = o3d.visualization.MeshShadeOption.Color
@@ -124,7 +129,8 @@ def render_views(
         )
         base_color = np.array([0.38, 0.72, 0.98])
         colors = np.clip(intensity[:, None] * base_color[None, :], 0.0, 1.0)
-        mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+        if not textured:
+            mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
         visualizer.update_geometry(mesh)
         view = visualizer.get_view_control()
         if camera_parameters is not None:
@@ -165,6 +171,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mesh", type=Path, help="input PLY triangle mesh")
     parser.add_argument("output", type=Path, help="output PNG contact sheet")
+    parser.add_argument("--textured", action="store_true", help="render OBJ atlas without synthetic shading")
     parser.add_argument("--width", type=int, default=720, help="width of each view")
     parser.add_argument("--height", type=int, default=720, help="height of each view")
     parser.add_argument("--colmap-model", type=Path, help="optional COLMAP sparse model")
@@ -183,6 +190,7 @@ def main() -> None:
         args.height,
         args.colmap_model.resolve() if args.colmap_model else None,
         args.colmap_indices,
+        args.textured,
     )
 
 

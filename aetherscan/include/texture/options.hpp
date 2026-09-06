@@ -30,6 +30,18 @@ struct TextureOptions {
     std::uint32_t pcf_radius{1};
     bool allow_visibility_fallback{true};
 
+    // The projective bake is only an initialization. By default, refine the
+    // atlas directly against all calibrated views with aether_drender's native
+    // Vulkan/Adam optimizer, followed by seam-only polish.
+    bool optimize{true};
+    std::uint32_t optimize_steps{1000};
+    std::uint32_t optimize_batch_size{4};
+    float optimize_learning_rate{5e-3F};
+    float optimize_min_learning_rate{2.5e-4F};
+    std::uint32_t seam_samples_per_edge{4};
+    std::uint32_t seam_polish_steps{30};
+    float seam_learning_rate{1e-3F};
+
     // Optional foreground masks (same basename as source images).
     std::filesystem::path mask_dir;
 

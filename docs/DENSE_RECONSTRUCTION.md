@@ -354,9 +354,16 @@ cmake --build build-cgal --config Release --parallel
 
 aetherscan --images images --output object.ply --capture-mode object --texture
 aetherscan --images images --output object.ply --capture-mode object --texture --delight
+
+# 只导出 aether_drender 投影初值，不做光度/接缝优化
+aetherscan --images images --output object.ply --texture --texture-optimize=false
 ```
 
 - aether_drender 默认使用 git submodule `third_party/aether_drender`；
+- UVAtlas 展开后先由 `aether_drender::TextureBaker` 做 Vulkan 可见性投影，再默认由
+  `aether_drender::TextureRefiner` 做多视图光度 Adam 优化与 seam-only polish；
+- `--texture-optimize-steps`、`--texture-optimize-batch-size` 和
+  `--texture-seam-samples` 控制原生优化；整个优化阶段不经过 PyTorch；
 - Delight 使用 C++ ONNX Runtime；模型放在 `AETHERSCAN_INTRINSIC_MODELS_DIR`；
 - Intrinsic 权重为学术/非商用许可，产品发布前必须完成许可证审查；
 - 未通过 mesh 拓扑门禁时不进入 UV/Texture。
@@ -583,6 +590,14 @@ NCC loss kernel 从 2.1737 降到 2.0694 ms（-4.80%），稳定 CUDA/iter 从 1
 - 诊断 Splat 深度覆盖；
 - 独立开发和回归测试。
 
+CGAL Delaunay mesh 核心按 OpenMVS 的全局 visibility graph-cut 原则实现。进入四面体化前，
+点云与相机统一变换到局部规范坐标，避免大世界坐标破坏浮点距离；graph cell 按空间插入顺序
+编号以改善 ray walk/max-flow 局部性；surface uncertainty 默认按每个顶点的局部 Delaunay
+边中位数自适应，并限制在全局尺度的 `[0.25, 4]` 倍范围。可用
+`--mesh-adaptive-sigma=false` 做旧全局 sigma 对照。
+graph-cut 提取后还会删除最长边超过 cut-facet 中位数 4 倍的无支撑 webbing；
+`--mesh-max-edge-scale=0` 可仅用于诊断时关闭该门禁。
+
 这些产物不得自动成为 Splat 初始化、主体 Mask 或 TSDF 输入。诊断后端应使用单独命令或配置，
 避免普通产品路径误触发昂贵的 densify。
 
@@ -604,3 +619,46 @@ SfM cameras + sparse points
 MVS 不再是默认阶段，也不负责生成前景 Mask。物体模式使用可选外部软 Mask 或内部 Gaussian
 主体自举；场景模式不做前背景分离。当前稀疏 ADCPlus 和 TSDF 核心已经实测可行，下一阶段的
 实现重点是直接 SfM 编排、无 MVS 主体自举、细结构保护和 TSDF 拓扑门禁。
+# Calibrated MVS regression (2026-09-06)
+
+When calibrated COLMAP cameras already exist, use the explicit dense path:
+
+```powershell
+build/aetherscan/Release/aetherscan.exe --images D:/ScanVideo/ori_img/images --colmap D:/ScanVideo/ori_img --output artifacts/ori_img_calibrated_high/scene.ply --dense --mesh --dense-quality high --mesh-max-points 1000000 --texture --atlas-resolution 2048 --texture-optimize-steps 100
+```
+
+This preserves the imported poses, uses the MVS quality preset for image resolution,
+and writes `scene_dense.ply`, `scene_mesh.ply`, and `scene_textured.obj/.mtl/_albedo.png`.
+Texture projection and Adam/seam refinement run through `aether_drender`.
+Explicit `--splat` still selects Gaussian training. An external dataset alone also
+keeps the existing Gaussian default; `--dense` or `--mesh` selects calibrated MVS.
+
+Dense PLY checkpoints now retain point weights, camera indices, and per-camera
+weights. Graph-cut replay requires the same camera ordering and world coordinates;
+ordinary third-party XYZ/RGB PLY files are not equivalent visibility checkpoints.
+
+The earlier `ori_img_mvs_rewrite_20260905` results used internally estimated cameras
+and failed visual inspection (fragmentation and connecting sheets). With supplied
+COLMAP cameras, the 640-pixel fixed-camera regression kept 6,419,346 of 6,604,910
+depth samples and fused 1,863,511 points. The weak-support variant produced one
+retained component with 437,899 faces. This is evidence of a major camera-dependent
+quality difference, **not** an isolated measurement of a meshing-algorithm gain or
+a ground-truth accuracy result. Thin details and occluded regions still need visual
+inspection; triangle count and optimizer loss alone are not acceptance criteria.
+
+Full-resolution validation through the production CLI completed successfully:
+
+- 76 calibrated views; 15,310,182 retained depth samples; 4,033,656 fused points.
+- 487,928 mesh vertices and 970,906 faces; one retained component, zero
+  nonmanifold edges, 5,038 boundary edges in 36 boundary components (not watertight).
+- MVS took 145.1 seconds on the local RTX 5090 D v2 system.
+- Native projection took 39.7 seconds; 100 Adam steps plus 30 seam-polish steps
+  took 34.8 seconds including precomputation. Reported training loss changed from
+  0.03338 to 0.02813 (different sampled batches, not a held-out image-quality metric).
+- 2048² atlas, 212 charts. Original-camera previews are saved in
+  `artifacts/ori_img_calibrated_high/mesh_cameras.png` and `texture_cameras.png`.
+  Main structure and carved appearance are much improved; side-view holes, ragged
+  thin edges and some visible texture seams remain. Internal SfM pose estimation
+  is not fixed by this calibrated-input route.
+- Release CLI and MVS tests build successfully. All 14 CTests pass; the MVS suite
+  also checks outward convex-hull facet orientation and visibility PLY round trips.

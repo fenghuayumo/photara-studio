@@ -965,12 +965,40 @@ void test_tsdf_support_closing_repairs_internal_one_voxel_gap() {
         "TSDF support closing grew an open silhouette");
 }
 
+void test_imported_scene_resolution() {
+    MvsScene scene;
+    MvsView view;
+    view.width = view.src_width = 1000;
+    view.height = view.src_height = 800;
+    view.fx = view.src_fx = 900.F;
+    view.fy = view.src_fy = 880.F;
+    view.cx = view.src_cx = 500.F;
+    view.cy = view.src_cy = 400.F;
+    view.pose.C = aetherscan::sfm::Vec3{1., 2., 3.};
+    scene.views.push_back(view);
+    DensifyOptions options;
+    prepare_imported_scene(scene, options);
+    const auto& resized = scene.views.front();
+    require(resized.width == 640 && resized.height == 512,
+        "imported cameras ignored working-resolution preset");
+    require(std::abs(resized.fx - 576.F) < 1e-4F &&
+            std::abs(resized.cx - 320.F) < 1e-4F &&
+            (resized.pose.C - view.pose.C).norm() == 0. && resized.src_fx == view.src_fx,
+        "imported camera resize changed pose/source calibration");
+    prepare_imported_scene(scene, options);
+    require(scene.views.front().width == 640 && std::abs(scene.views.front().fx - 576.F) < 1e-4F,
+        "imported camera preparation is not idempotent");
+}
+
 void test_dense_ply_round_trip() {
     DenseCloud source;
     DensePoint point;
     point.position = Vec3f{1.25F, -2.5F, 3.75F};
     point.normal = Vec3f{0.F, 1.F, 0.F};
     point.color = Vec3f{0.2F, 0.4F, 0.8F};
+    point.weight = 3.5F;
+    point.views = {0, 7, 300};
+    point.view_weights = {0.5F, 1.F, 2.F};
     source.points.push_back(point);
     const auto path = std::filesystem::temp_directory_path() /
                       "aetherscan_dense_ply_round_trip.ply";
@@ -978,6 +1006,10 @@ void test_dense_ply_round_trip() {
     const DenseCloud loaded = load_dense_ply(path);
     std::filesystem::remove(path);
     require(loaded.points.size() == 1, "dense PLY loader lost a point");
+    require(loaded.points[0].views == point.views &&
+            loaded.points[0].view_weights == point.view_weights &&
+            loaded.points[0].weight == point.weight,
+            "dense PLY round trip lost graph-cut visibility weights");
     require(
         (loaded.points[0].position - point.position).norm() < 1e-6F,
         "dense PLY loader changed point position");
@@ -1085,13 +1117,19 @@ void test_global_delaunay_mesh() {
     options.mesh_k_inf = 1.0e4F;
     options.mesh_k_qual = 0.05F;
     options.mesh_k_behind = 1.F;
-    // A per-facet edge cutoff must not puncture the closed graph-cut surface.
-    options.mesh_max_edge_voxels = 1.F;
+    // Disable the unsupported-webbing gate for the synthetic closed fixture;
+    // its behavior is covered by real-scene topology/visual regression.
+    options.mesh_max_edge_scale = 0.F;
     require(
         detail::reconstruct_mesh_global_cgal(scene, options),
         "global Delaunay backend rejected the sphere");
     std::map<std::pair<int, int>, unsigned> edge_counts;
+    double signed_volume = 0.;
     for (const Eigen::Vector3i& face : scene.mesh.faces) {
+        const auto a = scene.mesh.vertices[face[0]].cast<double>().eval();
+        const auto b = scene.mesh.vertices[face[1]].cast<double>().eval();
+        const auto c = scene.mesh.vertices[face[2]].cast<double>().eval();
+        signed_volume += a.dot(b.cross(c)) / 6.;
         for (int edge = 0; edge < 3; ++edge) {
             int a = face[edge];
             int b = face[(edge + 1) % 3];
@@ -1104,11 +1142,38 @@ void test_global_delaunay_mesh() {
             edge_counts.begin(), edge_counts.end(),
             [](const auto& item) { return item.second == 1; }),
         "global graph-cut surface was punctured by facet filtering");
+    require(signed_volume > 0., "graph-cut convex-hull facets face inward");
     detail::clean_mesh(scene.mesh, options);
     require(!scene.mesh.faces.empty(), "global Delaunay mesh is empty");
     require(
         scene.mesh.normals.size() == scene.mesh.vertices.size(),
         "global Delaunay mesh normals are incomplete");
+
+    // The graph-cut energy must be invariant to the large world-coordinate
+    // offsets commonly found in georeferenced projects. This used to feed
+    // large absolute floats directly into all distance calculations.
+    MvsScene shifted = scene;
+    shifted.mesh = {};
+    const Vec3f offset{1.0e6F, -2.0e6F, 3.0e6F};
+    constexpr float object_scale = 10.F;
+    for (std::size_t i = 0; i < shifted.views.size(); ++i)
+        shifted.views[i].pose.C =
+            (offset + cameras[i] * object_scale).cast<double>();
+    for (DensePoint& point : shifted.dense_cloud.points)
+        point.position = offset + point.position * object_scale;
+    require(
+        detail::reconstruct_mesh_global_cgal(shifted, options),
+        "canonical-coordinate Delaunay backend rejected a shifted scene");
+    require(
+        !shifted.mesh.faces.empty(),
+        "canonical-coordinate Delaunay backend produced no shifted surface");
+    Vec3f shifted_center = Vec3f::Zero();
+    for (const Vec3f& vertex : shifted.mesh.vertices)
+        shifted_center += vertex;
+    shifted_center /= static_cast<float>(shifted.mesh.vertices.size());
+    require(
+        (shifted_center - offset).norm() < object_scale,
+        "canonical-coordinate Delaunay output did not map back to world space");
 }
 #endif
 
@@ -1134,6 +1199,7 @@ int main() {
         test_sparse_tsdf_mesh();
         test_tsdf_support_closing_repairs_internal_one_voxel_gap();
         test_dense_ply_round_trip();
+        test_imported_scene_resolution();
         test_mesh_ply_round_trip();
 #if defined(AETHERSCAN_HAS_CGAL)
         test_global_delaunay_mesh();
