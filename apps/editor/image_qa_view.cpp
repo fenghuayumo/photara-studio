@@ -632,12 +632,6 @@ void draw_image_qa(
     ImGui::PopStyleVar();
 
     const ImVec2 nav_size{28.F, 28.F};
-    ImGui::SetCursorScreenPos({max.x - 168.F, min.y + 10.F});
-    if (icons::ghost_button(
-            "##qa_prev", icons::Icon::chevron_left, nav_size, false, count > 1,
-            "Previous image"))
-        select_image_qa_view(state, state.selected - 1, count);
-    ImGui::SameLine(0.F, 4.F);
     char index_label[32];
     if (count > 0)
         std::snprintf(
@@ -645,12 +639,24 @@ void draw_image_qa(
             count);
     else
         std::snprintf(index_label, sizeof(index_label), "—");
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.F);
+    const ImVec2 label_size = ImGui::CalcTextSize(index_label);
+    const float label_w = std::max(label_size.x, 56.F);
+    const float nav_y = min.y + (k_toolbar_h - nav_size.y) * 0.5F;
+    const float next_x = max.x - 12.F - nav_size.x;
+    const float label_x = next_x - 8.F - label_w;
+    const float prev_x = label_x - 8.F - nav_size.x;
+
+    ImGui::SetCursorScreenPos({prev_x, nav_y});
+    if (icons::ghost_button(
+            "##qa_prev", icons::Icon::chevron_left, nav_size, false, count > 1,
+            "Previous image"))
+        select_image_qa_view(state, state.selected - 1, count);
+    ImGui::SetCursorScreenPos(
+        {label_x, nav_y + (nav_size.y - label_size.y) * 0.5F});
     ImGui::PushStyleColor(ImGuiCol_Text, theme::text_muted);
     ImGui::TextUnformatted(index_label);
     ImGui::PopStyleColor();
-    ImGui::SameLine(0.F, 4.F);
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 6.F);
+    ImGui::SetCursorScreenPos({next_x, nav_y});
     if (icons::ghost_button(
             "##qa_next", icons::Icon::chevron_right, nav_size, false, count > 1,
             "Next image"))
@@ -662,7 +668,7 @@ void draw_image_qa(
             small->CalcTextSizeA(small->FontSize, 220.F, 0.F, item.name.c_str()).x;
         draw->AddText(
             small, small->FontSize,
-            {max.x - 180.F - name_w, min.y + 17.F},
+            {prev_x - 12.F - name_w, min.y + (k_toolbar_h - small->FontSize) * 0.5F},
             theme::u32(theme::text_faint), item.name.c_str());
     }
 
