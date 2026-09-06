@@ -61,6 +61,9 @@ struct FrontEndOptions {
     // preserves the fast path for well-connected views while recovering
     // difficult viewpoints without paying for an unconditional all-pairs run.
     bool progressive_pair_expansion{true};
+    // Experimental: extra graph connectivity has not yet demonstrated correct
+    // branch coordinates on Alameda. Keep disabled in the default pipeline.
+    bool structural_pair_expansion{false};
     unsigned progressive_min_verified_degree{4};
     float progressive_rescue_match_ratio{0.85F};
     unsigned progressive_rescue_min_inliers{20};

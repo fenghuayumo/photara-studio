@@ -61,6 +61,7 @@ struct ReconstructCli {
     double focal_pixels{};
     std::string mode{"global"};
     bool trust_focal{false};
+    bool structural_pair_expansion{false};
     std::filesystem::path output;
     // Editor/interactive runs skip sidecars, eval PNG dumps, and the extra
     // timestamped log file. The caller already captures stdout.
@@ -409,6 +410,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Reconstruction mode: global (default), incremental, or hierarchical",
          cxxopts::value<std::string>()->default_value("global"))
         ("trust-focal", "Lock externally calibrated --focal and zero distortion",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("sfm-structural-rescue", "Experimental bridge-branch pair expansion (not validated for production)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("o,output",
          "Output path (.ascan, .asfm, .ply, or .mvs)",
@@ -785,6 +788,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.focal_pixels = result["focal"].as<double>();
     cli.mode = result["mode"].as<std::string>();
     cli.trust_focal = result["trust-focal"].as<bool>();
+    cli.structural_pair_expansion = result["sfm-structural-rescue"].as<bool>();
     if (!std::isfinite(cli.focal_pixels) || cli.focal_pixels < 0.0 ||
         (cli.trust_focal && cli.focal_pixels <= 0.0))
         throw std::invalid_argument(
@@ -2984,6 +2988,7 @@ int main(int argc, char** argv) {
             config.mode = aetherscan::sfm::ReconstructionMode::incremental;
         config.frontend.focal_pixels = cli.focal_pixels;
         config.frontend.trust_focal_pixels = cli.trust_focal;
+        config.frontend.structural_pair_expansion = cli.structural_pair_expansion;
         config.frontend.neighbor_window = cli.neighbor_window;
         config.frontend.sift_contrast_threshold = cli.sift_contrast;
         config.frontend.match_ratio = cli.match_ratio;

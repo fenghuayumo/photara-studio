@@ -199,6 +199,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/global_rotation.cpp
         src/sfm/global_positioning.cpp
         src/sfm/hierarchical.cpp
+        src/sfm/submap_recovery.cpp
         src/sfm/frontend.cpp
         src/sfm/reconstruct.cpp
         src/sfm/export_mvs.cpp
@@ -224,6 +225,9 @@ if(AETHERSCAN_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/io/image_freeimage.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/checkpoint.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/frontend.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/submap_recovery.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/submap_recovery.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/reconstruct.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/geometry.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/pair_weighting.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/retrieval.cpp"
@@ -559,6 +563,15 @@ if(AETHERSCAN_ENABLE_FEATURES)
                 COMMAND_EXPAND_LISTS)
         endif()
         add_executable(aetherscan_pair_verify src/tools/pair_verify.cpp)
+        add_executable(aetherscan_sfm_realign src/tools/sfm_realign.cpp)
+        target_link_libraries(aetherscan_sfm_realign PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_sfm_realign POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_realign>
+                    $<TARGET_FILE_DIR:aetherscan_sfm_realign>
+                COMMAND_EXPAND_LISTS)
+        endif()
         target_link_libraries(aetherscan_pair_verify PRIVATE AetherScan::SfM)
         if(WIN32)
             add_custom_command(TARGET aetherscan_pair_verify POST_BUILD
@@ -723,6 +736,9 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(aetherscan_checkpoint_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.checkpoint COMMAND aetherscan_checkpoint_test)
         add_executable(aetherscan_hierarchical_test tests/hierarchical_test.cpp)
+        add_executable(aetherscan_submap_recovery_test tests/submap_recovery_test.cpp)
+        target_link_libraries(aetherscan_submap_recovery_test PRIVATE AetherScan::SfM)
+        add_test(NAME aetherscan.sfm.submap_recovery COMMAND aetherscan_submap_recovery_test)
         target_link_libraries(aetherscan_hierarchical_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.hierarchical COMMAND aetherscan_hierarchical_test)
         add_executable(aetherscan_export_mvs_test tests/export_mvs_test.cpp)

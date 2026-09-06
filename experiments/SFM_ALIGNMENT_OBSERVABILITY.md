@@ -44,3 +44,12 @@ and collinear shared landmarks. Existing mapping and acceptance tests also run.
 Further geometry work should use independently reconstructed submaps and
 validated registration against the stable map, retaining uncertain poses as
 uncertain when the images do not provide sufficient evidence.
+
+## Independent submap follow-up
+
+The experimental implementation and reproducible results are recorded in
+[SFM_SUBMAP_RECOVERY.md](SFM_SUBMAP_RECOVERY.md). Alameda's 16-view branch now
+reconstructs independently, but its current cross-map observations provide no
+shared landmarks with independently recoverable depth on the stable side.
+Alignment is rejected and the original coordinates remain unchanged. This is
+not a drift correction or an end-to-end speedup result.

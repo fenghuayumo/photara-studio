@@ -7,6 +7,7 @@
 #include "io/image.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/tracks.hpp"
+#include "sfm/submap_recovery.hpp"
 
 #include <algorithm>
 #include <array>
@@ -200,6 +201,7 @@ FrontEndStageKeys make_stage_keys(
     geometry.append(options.trust_focal_pixels);
     append_relative_options(geometry, options.relative);
     geometry.append(options.progressive_pair_expansion);
+    geometry.append(options.structural_pair_expansion);
     geometry.append(options.progressive_min_verified_degree);
     geometry.append(options.progressive_rescue_match_ratio);
     geometry.append(options.progressive_rescue_min_inliers);
@@ -462,6 +464,24 @@ bool calibrate_view_graph_focals(Scene& scene) {
         PinholeCamera& camera = scene.cameras[group];
         const double initial = camera.focal();
         double focal = solve_fetzer_focal(costs, camera);
+        const auto pair_consensus = robust_pair_focal_fallback(pair_focals[group], camera);
+        core::Logger::instance().info(
+            "view-graph focal cross-check: camera=", group,
+            " fetzer=", focal, " pair_q75=", pair_consensus.value_or(0.0));
+        if (std::isfinite(focal) && pair_consensus.has_value() &&
+            std::abs(std::log(focal / *pair_consensus)) > std::log(1.5)) {
+            // An interior minimum is not sufficient evidence of observable
+            // self-calibration. Independent pair estimates can expose a
+            // collapsed graph minimum even when it is away from the bounds.
+            // Do not choose either conflicting estimate as a measurement:
+            // retain the adjustable prior and still run strict pose filtering.
+            core::Logger::instance().warning(
+                "view-graph focal unresolved: camera=", group,
+                " reason=conflicting_estimators fetzer=", focal,
+                " pair_q75=", *pair_consensus,
+                " using_initial_focal=", initial);
+            continue;
+        }
         bool used_pair_fallback = false;
         if (!std::isfinite(focal)) {
             const auto fallback = robust_pair_focal_fallback(
@@ -1932,10 +1952,16 @@ FrontEndResult run_frontend(
             ++verified_degree[pair.id2];
         }
         std::vector<std::uint8_t> weak(scene.images.size(), 0);
+        const auto structural_risk = runtime_options.structural_pair_expansion
+            ? find_structural_pair_risks(scene)
+            : std::vector<std::uint8_t>(scene.images.size(), 0);
+        unsigned structural_weak_images = 0;
         unsigned weak_images = 0;
         for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+            if (structural_risk[image_id]) ++structural_weak_images;
             if (verified_degree[image_id] >=
-                runtime_options.progressive_min_verified_degree)
+                runtime_options.progressive_min_verified_degree &&
+                !structural_risk[image_id])
                 continue;
             weak[image_id] = 1;
             ++weak_images;
@@ -1988,6 +2014,10 @@ FrontEndResult run_frontend(
         for (const PairCandidate& candidate : candidates)
             primary_pairs.insert(
                 candidate_key(candidate.id1, candidate.id2));
+        std::unordered_set<std::uint64_t> verified_pairs;
+        for (const auto& pair : scene.pairs)
+            if (pair.active && !pair.matches.empty())
+                verified_pairs.insert(candidate_key(pair.id1, pair.id2));
 
         std::vector<PairCandidate> rescue_candidates;
         std::unordered_set<std::uint64_t> rescue_pair_keys;
@@ -2002,7 +2032,13 @@ FrontEndResult run_frontend(
             if (first == second) return false;
             if (first > second) std::swap(first, second);
             const std::uint64_t key = candidate_key(first, second);
-            if (primary_pairs.count(key) || rescue_pair_keys.count(key))
+            // A failed primary match is not evidence that two images cannot
+            // connect. Retry structural-risk pairs with the rescue matcher;
+            // never duplicate already verified edges.
+            const bool retry_failed =
+                (structural_risk[first] || structural_risk[second]) &&
+                !verified_pairs.count(key);
+            if ((primary_pairs.count(key) && !retry_failed) || rescue_pair_keys.count(key))
                 return false;
             const std::size_t budget =
                 runtime_options.progressive_rescue_max_pairs_per_image;
@@ -2030,6 +2066,15 @@ FrontEndResult run_frontend(
             // low-texture/video frames without an O(weak_views * images) pass.
             const std::size_t radius =
                 runtime_options.progressive_rescue_neighbor_window;
+            std::vector<PairCandidate> deferred_internal;
+            const auto propose = [&](Index first, Index second) {
+                // Spend the bounded budget on potential main-map anchors
+                // before adding more edges wholly inside a flagged branch.
+                if (structural_risk[first] && structural_risk[second])
+                    deferred_internal.push_back({first, second});
+                else
+                    add_rescue_candidate(first, second);
+            };
             for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
                 if (!weak[image_id]) continue;
                 const Index begin = static_cast<Index>(
@@ -2038,7 +2083,7 @@ FrontEndResult run_frontend(
                     scene.images.size() - 1,
                     static_cast<std::size_t>(image_id) + radius));
                 for (Index other = begin; other <= end; ++other)
-                    add_rescue_candidate(image_id, other);
+                    propose(image_id, other);
             }
 
             if (runtime_options.progressive_rescue_retrieval_top_k > 0 &&
@@ -2055,9 +2100,11 @@ FrontEndResult run_frontend(
                     });
                 for (const RetrievedPair& pair : retrieved) {
                     if (!weak[pair.first] && !weak[pair.second]) continue;
-                    add_rescue_candidate(pair.first, pair.second);
+                    propose(pair.first, pair.second);
                 }
             }
+            for (const auto& pair : deferred_internal)
+                add_rescue_candidate(pair.id1, pair.id2);
         }
         if (!rescue_candidates.empty()) {
             optimize_pairs_order(rescue_candidates, scene);
@@ -2092,6 +2139,7 @@ FrontEndResult run_frontend(
             }
             core::Logger::instance().info(
                 "progressive pair expansion: weak_images=", weak_images,
+                " structural_weak_images=", structural_weak_images,
                 " strategy=", exhaustive_rescue ? "exhaustive" : "bounded",
                 " attempted=", rescue_candidates.size(),
                 " accepted=", rescued_pairs,
