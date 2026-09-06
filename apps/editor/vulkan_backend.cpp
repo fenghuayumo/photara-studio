@@ -394,8 +394,9 @@ void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
     image_info.arrayLayers = 1;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image_info.usage =
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                       VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                       VK_IMAGE_USAGE_SAMPLED_BIT;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     check(vkCreateImage(g_device, &image_info, nullptr, &image));
     vkGetImageMemoryRequirements(g_device, image, &requirements);
@@ -462,6 +463,88 @@ void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
     check(vkCreateSampler(g_device, &sampler_info, nullptr, &sampler));
     descriptor = ImGui_ImplVulkan_AddTexture(
         sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+bool PreviewTexture::download_rgb(aetherscan::io::RgbImage& destination) const {
+    destination = {};
+    if (!g_device || !image || width == 0 || height == 0) return false;
+
+    const VkDeviceSize bytes =
+        static_cast<VkDeviceSize>(width) * height * 4;
+    VkBuffer staging{};
+    VkDeviceMemory staging_memory{};
+    VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    buffer.size = bytes;
+    buffer.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    check(vkCreateBuffer(g_device, &buffer, nullptr, &staging));
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(g_device, staging, &requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = memory_type(
+        requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    check(vkAllocateMemory(g_device, &allocation, nullptr, &staging_memory));
+    check(vkBindBufferMemory(g_device, staging, staging_memory, 0));
+
+    check(vkQueueWaitIdle(g_queue));
+    auto& frame = g_window.Frames[g_window.FrameIndex];
+    check(vkResetCommandPool(g_device, frame.CommandPool, 0));
+    VkCommandBufferBeginInfo begin{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(
+        frame.CommandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+        &barrier);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {width, height, 1};
+    vkCmdCopyImageToBuffer(
+        frame.CommandBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        staging, 1, &copy);
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(
+        frame.CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+        &barrier);
+    check(vkEndCommandBuffer(frame.CommandBuffer));
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &frame.CommandBuffer;
+    check(vkQueueSubmit(g_queue, 1, &submit, {}));
+    check(vkQueueWaitIdle(g_queue));
+
+    void* mapped{};
+    check(vkMapMemory(g_device, staging_memory, 0, bytes, 0, &mapped));
+    const auto* rgba = static_cast<const std::uint8_t*>(mapped);
+    destination.width = width;
+    destination.height = height;
+    destination.pixels.resize(static_cast<std::size_t>(width) * height * 3);
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    for (std::size_t i = 0; i < pixels; ++i) {
+        destination.pixels[3 * i] = rgba[4 * i];
+        destination.pixels[3 * i + 1] = rgba[4 * i + 1];
+        destination.pixels[3 * i + 2] = rgba[4 * i + 2];
+    }
+    vkUnmapMemory(g_device, staging_memory);
+    vkDestroyBuffer(g_device, staging, nullptr);
+    vkFreeMemory(g_device, staging_memory, nullptr);
+    return !destination.pixels.empty();
 }
 
 void ExternalPreview::create(

@@ -63,6 +63,8 @@ struct PreviewTexture {
 
     void reset();
     void upload(const aetherscan::io::RgbImage& source);
+    // Copies the sampled image back to host RGB. Used by the 2D QA compare path.
+    bool download_rgb(aetherscan::io::RgbImage& destination) const;
 };
 
 // Lazy GPU thumbnails for sparse-viewport camera frustums. `clear()` must run

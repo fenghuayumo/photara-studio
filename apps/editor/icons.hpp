@@ -29,6 +29,14 @@ enum class Icon {
     search,
     follow,
     clock,
+    view2d,
+    compare,
+    heatmap,
+    features,
+    chevron_left,
+    chevron_right,
+    frustum,
+    photo,
 };
 
 enum class ButtonStyle { normal, primary, danger };

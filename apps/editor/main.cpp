@@ -1,11 +1,13 @@
 ﻿#include "pipeline.hpp"
 #include "console_view.hpp"
 #include "icons.hpp"
+#include "image_qa_view.hpp"
 #include "sparse_view.hpp"
 #include "theme.hpp"
 #include "viewport_gizmo.hpp"
 #include "vulkan_backend.hpp"
 
+#include "io/image.hpp"
 #include "project/archive.hpp"
 #include "project/document.hpp"
 #include "sfm/asfm.hpp"
@@ -58,6 +60,8 @@ constexpr std::uint32_t k_preview_extent = 1920;
 
 enum class VisualizationMode { points, splat, rings };
 
+enum class ViewportWorkspace { scene_3d, image_2d };
+
 enum class StepState { pending, active, done, skipped, failed };
 
 enum class ClearResultsAction { none, clear_view, delete_generated };
@@ -94,6 +98,11 @@ struct App {
     std::uint32_t project_writer_version{};
     std::uint32_t project_min_reader_version{};
     VisualizationMode view_mode{VisualizationMode::points};
+    ViewportWorkspace workspace{ViewportWorkspace::scene_3d};
+    ImageQaState image_qa;
+    ImageQaSession image_qa_session;
+    unsigned qa_preview_view{~0U};
+    std::chrono::steady_clock::time_point qa_metrics_after{};
     unsigned preview_view{};
     std::uint64_t preview_camera_revision{};
     bool preview_follow_view{true};
@@ -140,6 +149,7 @@ void stop_splat_view(App& app) {
 void start_splat_view(App& app);
 void sync_live_preview_camera(
     App& app, bool force, std::uint32_t width, std::uint32_t height);
+void set_viewport_workspace(App& app, ViewportWorkspace workspace);
 
 bool has_external_dataset(const App& app) {
     return app.settings.dataset_source[0] != '\0';
@@ -713,6 +723,9 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
 
 void clear_loaded_result(App& app) {
     app.photos.clear();
+    app.image_qa_session.clear();
+    app.image_qa = {};
+    app.qa_preview_view = ~0U;
     app.scene.clear();
     app.scene_source.clear();
     app.camera = {};
@@ -957,6 +970,8 @@ constexpr float k_view_rail_pad = 10.F;
 constexpr float k_view_rail_top = 52.F;
 constexpr float k_view_rail_width = 44.F;
 constexpr float k_view_rail_height = 120.F;
+constexpr float k_scene_toggle_gap = 8.F;
+constexpr float k_scene_toggle_height = 84.F;
 
 ImRect view_mode_rail_rect(const ImVec2 view_min) {
     const ImVec2 origin{
@@ -966,8 +981,58 @@ ImRect view_mode_rail_rect(const ImVec2 view_min) {
         origin.y + k_view_rail_height};
 }
 
+ImRect scene_toggle_rail_rect(const ImVec2 view_min) {
+    const ImVec2 origin{
+        view_min.x + k_view_rail_pad,
+        view_min.y + k_view_rail_top + k_view_rail_height + k_scene_toggle_gap};
+    return {
+        origin.x, origin.y, origin.x + k_view_rail_width,
+        origin.y + k_scene_toggle_height};
+}
+
 bool view_mode_rail_contains(const ImVec2 view_min, const ImVec2 mouse) {
-    return view_mode_rail_rect(view_min).Contains(mouse);
+    return view_mode_rail_rect(view_min).Contains(mouse) ||
+           scene_toggle_rail_rect(view_min).Contains(mouse);
+}
+
+void set_camera_overlays(ViewOptions& options, const bool visible) {
+    options.show_views = visible;
+    options.show_camera_photos = visible;
+}
+
+// One click path on top of the full-viewport InvisibleButton. The previous
+// ghost_button + raw hit test both fired, so toggles flipped twice and looked
+// stuck.
+bool rail_icon_button(
+    const char* id, const icons::Icon icon, const ImVec2 min, const ImVec2 size,
+    const bool active, const bool enabled, const char* tooltip) {
+    ImGui::SetCursorScreenPos(min);
+    ImGui::SetNextItemAllowOverlap();
+    if (!enabled) ImGui::BeginDisabled();
+    ImGui::InvisibleButton(id, size);
+    if (!enabled) ImGui::EndDisabled();
+    const bool hovered = ImGui::IsItemHovered();
+    const bool pressed = enabled && hovered && ImGui::IsItemClicked();
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 max{min.x + size.x, min.y + size.y};
+    if (enabled && active) {
+        draw->AddRectFilled(
+            min, max, theme::u32(theme::fade(theme::accent, 0.20F)), 6.F);
+        draw->AddRect(min, max, theme::u32(theme::accent, 0.70F), 6.F);
+    } else if (enabled && hovered) {
+        draw->AddRectFilled(min, max, theme::u32(theme::surface_3), 6.F);
+    }
+    const ImVec4 icon_colour = !enabled
+        ? theme::text_faint
+        : (active ? theme::accent
+                  : (hovered ? theme::text_bright : theme::text_muted));
+    const float pad = std::max(7.F, std::min(size.x, size.y) * 0.22F);
+    icons::draw(
+        draw, icon, {min.x + pad, min.y + pad}, {max.x - pad, max.y - pad},
+        theme::u32(icon_colour), 1.8F);
+    if (hovered && tooltip) ImGui::SetTooltip("%s", tooltip);
+    return pressed;
 }
 
 bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
@@ -1006,31 +1071,106 @@ bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
                   : "Available while training or after a Gaussian model exists"},
     };
 
-    const ImVec2 mouse = ImGui::GetIO().MousePos;
-    const bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0.F, k_gap});
     for (int i = 0; i < 3; ++i) {
         const ImVec2 button_min{
             rail.Min.x + k_inner,
             rail.Min.y + k_inner + static_cast<float>(i) * (k_btn + k_gap)};
-        ImGui::SetCursorScreenPos(button_min);
-        ImGui::SetNextItemAllowOverlap();
-        const bool pressed = icons::ghost_button(
-            items[i].id, items[i].icon, button_size,
-            app.view_mode == items[i].mode, items[i].enabled,
-            items[i].tooltip);
-        const bool hit =
-            items[i].enabled && clicked &&
-            ImRect{button_min, {button_min.x + k_btn, button_min.y + k_btn}}
-                .Contains(mouse);
-        if (pressed || hit)
+        if (rail_icon_button(
+                items[i].id, items[i].icon, button_min, button_size,
+                app.view_mode == items[i].mode, items[i].enabled,
+                items[i].tooltip))
             set_visualization_mode(app, items[i].mode);
-        hovered = hovered || ImGui::IsItemHovered() ||
-                  ImRect{button_min, {button_min.x + k_btn, button_min.y + k_btn}}
-                      .Contains(mouse);
+        hovered = hovered || ImGui::IsItemHovered();
     }
     ImGui::PopStyleVar();
     return hovered;
+}
+
+bool draw_scene_toggle_rail(App& app, const ImVec2 view_min) {
+    const ImRect rail = scene_toggle_rail_rect(view_min);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(rail.Min, rail.Max, IM_COL32(16, 18, 23, 214), 8.F);
+    draw->AddRect(rail.Min, rail.Max, theme::u32(theme::border, 0.7F), 8.F);
+
+    constexpr float k_btn = 32.F;
+    constexpr float k_inner = 6.F;
+    constexpr float k_gap = 4.F;
+    const ImVec2 button_size{k_btn, k_btn};
+    bool hovered = false;
+
+    const ImVec2 cameras_min{rail.Min.x + k_inner, rail.Min.y + k_inner};
+    if (rail_icon_button(
+            "##tog_cameras", icons::Icon::frustum, cameras_min, button_size,
+            app.view_options.show_views, true,
+            app.view_options.show_views
+                ? "Hide camera frustums"
+                : "Show camera frustums"))
+        set_camera_overlays(app.view_options, !app.view_options.show_views);
+    hovered = hovered || ImGui::IsItemHovered();
+
+    const ImVec2 grid_min{
+        rail.Min.x + k_inner, rail.Min.y + k_inner + k_btn + k_gap};
+    if (rail_icon_button(
+            "##tog_grid", icons::Icon::grid, grid_min, button_size,
+            app.view_options.show_grid, true,
+            app.view_options.show_grid ? "Hide ground grid"
+                                      : "Show ground grid"))
+        app.view_options.show_grid = !app.view_options.show_grid;
+    hovered = hovered || ImGui::IsItemHovered();
+    return hovered;
+}
+
+void draw_workspace_toggle(App& app, const ImVec2 origin) {
+    struct Item {
+        const char* id;
+        icons::Icon icon;
+        const char* label;
+        ViewportWorkspace workspace;
+    };
+    const Item items[] = {
+        {"##ws_3d", icons::Icon::cube, "3D", ViewportWorkspace::scene_3d},
+        {"##ws_2d", icons::Icon::view2d, "2D", ViewportWorkspace::image_2d},
+    };
+    ImGui::SetCursorScreenPos({origin.x + 10.F, origin.y + 5.F});
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 cluster_min = ImGui::GetCursorScreenPos();
+    const ImVec2 cluster_max{cluster_min.x + 118.F, cluster_min.y + 26.F};
+    draw->AddRectFilled(
+        cluster_min, cluster_max, theme::u32(theme::surface_2), 7.F);
+    draw->AddRect(
+        cluster_min, cluster_max, theme::u32(theme::border, 0.7F), 7.F);
+    for (int i = 0; i < 2; ++i) {
+        const ImVec2 chip_min{
+            cluster_min.x + 3.F + static_cast<float>(i) * 56.F,
+            cluster_min.y + 2.F};
+        const ImVec2 chip_max{chip_min.x + 54.F, cluster_min.y + 24.F};
+        ImGui::SetCursorScreenPos(chip_min);
+        ImGui::InvisibleButton(items[i].id, {54.F, 22.F});
+        const bool active = app.workspace == items[i].workspace;
+        const bool hovered = ImGui::IsItemHovered();
+        if (active)
+            draw->AddRectFilled(
+                chip_min, chip_max, theme::u32(theme::fade(theme::accent, 0.20F)),
+                5.F);
+        else if (hovered)
+            draw->AddRectFilled(
+                chip_min, chip_max, theme::u32(theme::surface_3), 5.F);
+        const ImVec4 colour = active ? theme::accent : theme::text_muted;
+        icons::draw(
+            draw, items[i].icon, {chip_min.x + 6.F, chip_min.y + 3.F},
+            {chip_min.x + 20.F, chip_min.y + 17.F}, theme::u32(colour), 1.5F);
+        draw->AddText(
+            {chip_min.x + 24.F, chip_min.y + 3.F}, theme::u32(colour),
+            items[i].label);
+        if (ImGui::IsItemClicked())
+            set_viewport_workspace(app, items[i].workspace);
+        if (hovered)
+            ImGui::SetTooltip(
+                items[i].workspace == ViewportWorkspace::scene_3d
+                    ? "3D scene view"
+                    : "2D image QA — features, GT vs 3DGS, error map");
+    }
 }
 
 const ViewPose* first_registered_view(const SparseScene& scene) {
@@ -1102,6 +1242,130 @@ void snap_preview_to_index(App& app, const unsigned index) {
         snap_orbit_to_view(app.camera, app.scene.views[index]);
     sync_live_preview_camera(
         app, true, app.preview_raster_width, app.preview_raster_height);
+}
+
+void sync_qa_preview_camera(App& app) {
+    if (!live_preview_active(app) || app.layout.preview_camera_file.empty())
+        return;
+    if (app.image_qa.selected < 0 ||
+        static_cast<std::size_t>(app.image_qa.selected) >= app.scene.views.size())
+        return;
+    const ViewPose& pose = app.scene.views[static_cast<std::size_t>(app.image_qa.selected)];
+    std::uint32_t width = k_preview_extent;
+    std::uint32_t height = k_preview_extent;
+    if (pose.width > 0 && pose.height > 0) {
+        if (pose.width >= pose.height) {
+            width = k_preview_extent;
+            height = std::max<std::uint32_t>(
+                1, static_cast<std::uint32_t>(std::lround(
+                       static_cast<double>(k_preview_extent) * pose.height /
+                       pose.width)));
+        } else {
+            height = k_preview_extent;
+            width = std::max<std::uint32_t>(
+                1, static_cast<std::uint32_t>(std::lround(
+                       static_cast<double>(k_preview_extent) * pose.width /
+                       pose.height)));
+        }
+    }
+    const unsigned view = static_cast<unsigned>(app.image_qa.selected);
+    if (app.qa_preview_view == view && app.preview_raster_width == width &&
+        app.preview_raster_height == height)
+        return;
+    ++app.preview_camera_revision;
+    app.preview_raster_width = width;
+    app.preview_raster_height = height;
+    app.preview_view = view;
+    app.preview_follow_view = true;
+    app.qa_preview_view = view;
+    const SplatPreviewCamera preview =
+        make_preview_camera_from_view(pose, width, height);
+    write_preview_camera_file(
+        app.layout.preview_camera_file, preview, app.preview_camera_revision,
+        "splat", app.view_options.point_size, app.view_options.ring_scale);
+    write_preview_view_index(app.layout, app.preview_view);
+    aetherscan::splat::VisualizeOptions vis;
+    vis.mode = aetherscan::splat::VisualizationMode::splat;
+    vis.point_size_px = app.view_options.point_size;
+    vis.ring_scale = app.view_options.ring_scale;
+    aetherscan::splat::write_visualization_sidecar(
+        app.layout.preview_vis_file, vis, app.preview_camera_revision);
+    app.qa_metrics_after =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(220);
+}
+
+void capture_qa_render(App& app) {
+    if (app.workspace != ViewportWorkspace::image_2d) return;
+    if (!image_qa_needs_render(app.image_qa.mode)) return;
+    // The wipe itself samples GPU textures. Readback is only for PSNR / error.
+    if (app.image_qa.dragging_wipe) return;
+    if (!app.image_qa.metrics_dirty) return;
+    if (app.image_qa_session.metrics_busy()) return;
+    if (!app.preview.display.descriptor || gpu::consumed_timeline_value() == 0)
+        return;
+    if (!app.image_qa_session.has_gt() ||
+        app.image_qa_session.loaded_view() != app.image_qa.selected)
+        return;
+    if (std::chrono::steady_clock::now() < app.qa_metrics_after) return;
+
+    const std::uint64_t revision = gpu::consumed_timeline_value();
+    if (app.image_qa_session.has_render_pixels() &&
+        app.image_qa_session.render_view() == app.image_qa.selected &&
+        app.image_qa_session.metrics().valid) {
+        app.image_qa.metrics_dirty = false;
+        return;
+    }
+    aetherscan::io::RgbImage render;
+    if (!app.preview.display.download_rgb(render)) return;
+    app.image_qa_session.set_render(
+        std::move(render), app.image_qa.selected, revision);
+    app.image_qa.metrics_dirty = false;
+}
+
+void set_viewport_workspace(App& app, const ViewportWorkspace workspace) {
+    if (app.workspace == workspace) return;
+    app.workspace = workspace;
+    app.qa_preview_view = ~0U;
+    if (workspace == ViewportWorkspace::image_2d) {
+        refresh_image_qa_folder(
+            app.image_qa, std::filesystem::path(app.settings.images_dir.data()));
+        const int count = image_qa_count(app.image_qa, app.scene);
+        app.qa_metrics_after =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        app.image_qa.metrics_dirty = true;
+        if (app.image_qa.selected < 0 && count > 0) {
+            select_image_qa_view(
+                app.image_qa, static_cast<int>(app.preview_view), count);
+        }
+    } else if (live_preview_active(app)) {
+        sync_live_preview_camera(
+            app, true, app.preview_raster_width, app.preview_raster_height);
+    }
+}
+
+void ensure_qa_preview(App& app) {
+    if (app.workspace != ViewportWorkspace::image_2d) return;
+    if (!image_qa_needs_render(app.image_qa.mode)) return;
+    if (app.has_model && !live_preview_active(app) && !app.job.running())
+        start_splat_view(app);
+    sync_qa_preview_camera(app);
+    capture_qa_render(app);
+}
+
+void sync_qa_selection_to_preview(App& app, const int previous) {
+    if (app.image_qa.selected == previous) return;
+    if (app.image_qa.selected < 0 ||
+        static_cast<std::size_t>(app.image_qa.selected) >= app.scene.views.size())
+        return;
+    app.preview_view = static_cast<unsigned>(app.image_qa.selected);
+    app.preview_follow_view = true;
+    write_preview_view_index(app.layout, app.preview_view);
+    snap_orbit_to_view(
+        app.camera, app.scene.views[static_cast<std::size_t>(app.image_qa.selected)]);
+    app.qa_preview_view = ~0U;
+    app.image_qa.metrics_dirty = true;
+    app.qa_metrics_after =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(220);
 }
 
 void apply_opened_project(App& app) {
@@ -1350,7 +1614,20 @@ void poll_camera_photos(App& app) {
     attach_view_image_paths(
         app.scene, std::filesystem::path(app.settings.images_dir.data()));
     app.photos.resize(app.scene.views.size());
-    if (app.view_options.show_views && app.view_options.show_camera_photos) {
+    if (app.workspace == ViewportWorkspace::image_2d) {
+        const int count = static_cast<int>(app.scene.views.size());
+        const int selected = std::clamp(app.image_qa.selected, 0, count - 1);
+        const int begin = std::max(0, selected - 18);
+        const int end = std::min(count, selected + 19);
+        const int strip_begin = std::max(0, app.image_qa.filmstrip_first);
+        const int strip_end = std::min(count, app.image_qa.filmstrip_last + 1);
+        for (int i = begin; i < end; ++i)
+            app.photos.request(
+                static_cast<std::size_t>(i), app.scene.views[static_cast<std::size_t>(i)].image_path);
+        for (int i = strip_begin; i < strip_end; ++i)
+            app.photos.request(
+                static_cast<std::size_t>(i), app.scene.views[static_cast<std::size_t>(i)].image_path);
+    } else if (app.view_options.show_views && app.view_options.show_camera_photos) {
         std::vector<std::size_t> markers;
         sampled_view_indices(app.scene, markers);
         for (const std::size_t index : markers)
@@ -1371,7 +1648,11 @@ void poll_scene_load(App& app) {
         return;
     }
     app.photos.clear();
+    app.image_qa_session.clear();
+    app.qa_preview_view = ~0U;
     app.scene = std::move(loaded.scene);
+    if (app.image_qa.selected >= static_cast<int>(app.scene.views.size()))
+        app.image_qa.selected = app.scene.views.empty() ? -1 : 0;
     infer_images_dir_from_scene(app);
     attach_view_image_paths(
         app.scene, std::filesystem::path(app.settings.images_dir.data()));
@@ -1846,6 +2127,12 @@ Action draw_menu_bar(App& app) {
     }
     if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape) && busy)
         action = Action::stop;
+    if (!io.WantTextInput && !io.KeyCtrl && !io.KeyAlt &&
+        ImGui::IsKeyPressed(ImGuiKey_2))
+        set_viewport_workspace(app, ViewportWorkspace::image_2d);
+    if (!io.WantTextInput && !io.KeyCtrl && !io.KeyAlt &&
+        ImGui::IsKeyPressed(ImGuiKey_3))
+        set_viewport_workspace(app, ViewportWorkspace::scene_3d);
 
     if (!ImGui::BeginMainMenuBar()) return action;
     if (ImGui::BeginMenu("File")) {
@@ -1921,6 +2208,21 @@ Action draw_menu_bar(App& app) {
         ImGui::MenuItem("Console", nullptr, &app.show_console);
         ImGui::MenuItem("Status Bar", nullptr, &app.show_status_bar);
         ImGui::Separator();
+        if (ImGui::MenuItem(
+                "3D Scene", "3",
+                app.workspace == ViewportWorkspace::scene_3d))
+            set_viewport_workspace(app, ViewportWorkspace::scene_3d);
+        if (ImGui::MenuItem(
+                "2D Image QA", "2",
+                app.workspace == ViewportWorkspace::image_2d))
+            set_viewport_workspace(app, ViewportWorkspace::image_2d);
+        ImGui::Separator();
+        if (ImGui::MenuItem(
+                "Show Cameras", nullptr, app.view_options.show_views))
+            set_camera_overlays(
+                app.view_options, !app.view_options.show_views);
+        ImGui::MenuItem("Show Ground Grid", nullptr, &app.view_options.show_grid);
+        ImGui::Separator();
         if (ImGui::MenuItem("Reset Layout")) {
             app.show_scene = true;
             app.show_viewport = true;
@@ -1984,13 +2286,20 @@ void draw_controls_window(App& app) {
     ImGui::SetNextWindowSize({420.F, 0.F}, ImGuiCond_Appearing);
     if (ImGui::Begin("Viewport Controls", &app.show_controls,
                      ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("Camera");
+        ImGui::TextUnformatted("3D camera");
         ImGui::Separator();
         ImGui::BulletText("LMB drag: orbit");
         ImGui::BulletText("MMB or Shift+LMB drag: pan");
         ImGui::BulletText("RMB drag: fly look");
         ImGui::BulletText("RMB + WASD/QE: fly; Shift accelerates");
         ImGui::BulletText("Mouse wheel: dolly; F: frame reconstruction");
+        ImGui::Spacing();
+        ImGui::TextUnformatted("2D image QA");
+        ImGui::Separator();
+        ImGui::BulletText("Wheel: zoom; LMB/MMB drag: pan; double-click or F: fit");
+        ImGui::BulletText("Left / Right: previous and next capture");
+        ImGui::BulletText("Compare: drag the vertical handle to wipe GT vs 3DGS");
+        ImGui::BulletText("2 / 3: switch 2D image QA and 3D scene");
     }
     ImGui::End();
 }
@@ -2553,6 +2862,13 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
             min, max);
     }
 
+    ViewOptions overlay = app.view_options;
+    overlay.show_cloud = false;
+    overlay.draw_rings = false;
+    const SceneDrawStats overlay_stats = app.renderer.draw(
+        draw, min, max, app.scene, app.camera, overlay, hovered,
+        app.photos.ids(), app.photos.size());
+
     const bool gizmo_captures =
         draw_viewport_gizmo(app.gizmo, app.camera, min, max);
     update_orbit_camera(
@@ -2605,6 +2921,16 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
         controls);
+
+    if (!gizmo_captures && overlay_stats.hovered_view >= 0 &&
+        static_cast<std::size_t>(overlay_stats.hovered_view) <
+            app.scene.views.size()) {
+        const ViewPose& pose = app.scene.views[overlay_stats.hovered_view];
+        ImGui::SetTooltip(
+            "%s\n%u x %u  |  f %.1f px\n%zu observations  |  p95 %.2f px",
+            pose.name.c_str(), pose.width, pose.height, pose.fx,
+            pose.observations, pose.reprojection_p95);
+    }
 }
 
 void draw_viewport_panel(App& app) {
@@ -2647,9 +2973,13 @@ void draw_viewport_panel(App& app) {
         {header_origin.x + header_width, header_origin.y + k_header_height - 1.F},
         theme::u32(theme::border));
 
-    const char* state = app.job.running()
-        ? running_job_caption(app.active_job)
-        : (app.viewer.running() ? "VIEWING" : "READY");
+    draw_workspace_toggle(app, header_origin);
+
+    const char* state = app.workspace == ViewportWorkspace::image_2d
+        ? "IMAGE QA"
+        : (app.job.running()
+               ? running_job_caption(app.active_job)
+               : (app.viewer.running() ? "VIEWING" : "READY"));
     const float state_width = ImGui::CalcTextSize(state).x;
     ImGui::SetCursorPos({
         content_start.x + std::max(8.F, header_width - state_width - 14.F),
@@ -2667,11 +2997,33 @@ void draw_viewport_panel(App& app) {
     const ImVec2 view_min = ImGui::GetCursorScreenPos();
     const ImVec2 region = ImGui::GetContentRegionAvail();
     const ImVec2 view_max{view_min.x + region.x, view_min.y + region.y};
-    if (live_preview_active(app))
+    if (app.workspace == ViewportWorkspace::image_2d) {
+        refresh_image_qa_folder(
+            app.image_qa, std::filesystem::path(app.settings.images_dir.data()));
+        const int previous = app.image_qa.selected;
+        ImageQaDrawInput input;
+        input.scene = &app.scene;
+        input.photos = &app.photos;
+        input.render = app.preview.display.descriptor
+            ? reinterpret_cast<ImTextureID>(app.preview.display.descriptor)
+            : ImTextureID{};
+        input.has_render = app.preview.display.descriptor &&
+                           gpu::consumed_timeline_value() > 0;
+        input.render_live = live_preview_active(app);
+        input.has_model = app.has_model;
+        draw_image_qa(
+            app.image_qa, app.image_qa_session, input, view_min, view_max);
+        sync_qa_selection_to_preview(app, previous);
+        ensure_qa_preview(app);
+    } else if (live_preview_active(app)) {
         draw_training_tab(app, view_min, view_max);
-    else
+        draw_view_mode_rail(app, view_min);
+        draw_scene_toggle_rail(app, view_min);
+    } else {
         draw_sparse_tab(app, view_min, view_max);
-    draw_view_mode_rail(app, view_min);
+        draw_view_mode_rail(app, view_min);
+        draw_scene_toggle_rail(app, view_min);
+    }
     ImGui::EndChild();
     ImGui::End();
 }
@@ -2987,6 +3339,66 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
     }
 
+    if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        if (ImGui::Checkbox("Show cameras", &app.view_options.show_views))
+            app.view_options.show_camera_photos = app.view_options.show_views;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Wire frustums and capture photos in the 3D / training view.");
+        ImGui::Checkbox("Show trajectory", &app.view_options.show_trajectory);
+        ImGui::Checkbox("Show ground grid", &app.view_options.show_grid);
+        ImGui::Spacing();
+    }
+
+    if (app.workspace == ViewportWorkspace::image_2d &&
+        ImGui::CollapsingHeader("Image QA", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        const int count = image_qa_count(app.image_qa, app.scene);
+        if (app.image_qa.selected >= 0 && app.image_qa.selected < count &&
+            static_cast<std::size_t>(app.image_qa.selected) <
+                app.scene.views.size()) {
+            const ViewPose& pose =
+                app.scene.views[static_cast<std::size_t>(app.image_qa.selected)];
+            theme::metric("Capture", pose.name.c_str());
+            char res[32];
+            std::snprintf(
+                res, sizeof(res), "%u × %u", pose.width, pose.height);
+            theme::metric("Resolution", res);
+            theme::metric(
+                "Registered", pose.registered ? "yes" : "no");
+            theme::metric(
+                "Observations", std::to_string(pose.observations).c_str());
+            theme::metric(
+                "Features", std::to_string(pose.features.size()).c_str());
+            theme::metric(
+                "Triangulated",
+                std::to_string(pose.triangulated_features).c_str());
+        } else if (count > 0) {
+            theme::metric("Images", std::to_string(count).c_str());
+        } else {
+            theme::caption("Align photos to inspect cameras and features.");
+        }
+        ImGui::Spacing();
+        ImGui::Checkbox("Show triangulated", &app.image_qa.show_triangulated);
+        ImGui::Checkbox("Show untracked keypoints", &app.image_qa.show_untracked);
+        if (app.image_qa_session.metrics().valid) {
+            ImGui::Spacing();
+            theme::section_header("COMPARE");
+            const ImageQaMetrics& metrics = app.image_qa_session.metrics();
+            char buffer[32];
+            std::snprintf(buffer, sizeof(buffer), "%.2f dB", metrics.psnr);
+            theme::metric("PSNR", buffer);
+            std::snprintf(buffer, sizeof(buffer), "%.4f", metrics.ssim);
+            theme::metric("SSIM", buffer);
+            std::snprintf(buffer, sizeof(buffer), "%.4f", metrics.mae);
+            theme::metric("MAE", buffer);
+            std::snprintf(buffer, sizeof(buffer), "%.4f", metrics.rmse);
+            theme::metric("RMSE", buffer);
+        }
+        ImGui::Spacing();
+    }
+
     if (app.view_mode != VisualizationMode::splat &&
         ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
@@ -3045,15 +3457,6 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Replace sampled point colours with a near-to-far ramp.");
-        ImGui::Checkbox("Show cameras", &app.view_options.show_views);
-        ImGui::BeginDisabled(!app.view_options.show_views);
-        ImGui::Checkbox("Show camera photos", &app.view_options.show_camera_photos);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip(
-                "Map each capture onto the far plane of its view frustum.");
-        ImGui::EndDisabled();
-        ImGui::Checkbox("Show trajectory", &app.view_options.show_trajectory);
-        ImGui::Checkbox("Show ground grid", &app.view_options.show_grid);
         ImGui::Spacing();
     }
 
@@ -3282,7 +3685,10 @@ void draw_status_bar(const App& app) {
 
         const char* view = "Points";
         icons::Icon view_icon = icons::Icon::points;
-        if (app.view_mode == VisualizationMode::splat) {
+        if (app.workspace == ViewportWorkspace::image_2d) {
+            view = "2D Image";
+            view_icon = icons::Icon::view2d;
+        } else if (app.view_mode == VisualizationMode::splat) {
             view = "Splat";
             view_icon = icons::Icon::splat;
         } else if (app.view_mode == VisualizationMode::rings) {
@@ -3513,6 +3919,7 @@ int main(const int argc, char** argv) {
     if (app.viewer.running()) app.viewer.stop();
     if (app.job.running()) app.job.stop();
     vkDeviceWaitIdle(gpu::device());
+    app.image_qa_session.clear();
     app.photos.clear();
     app.preview.reset();
     ImGui_ImplVulkan_Shutdown();

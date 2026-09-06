@@ -396,6 +396,104 @@ void draw(
                  thickness);
             break;
         }
+        case Icon::view2d: {
+            draw_list->AddRect(
+                point(min, max, 0.16F, 0.24F), point(min, max, 0.84F, 0.76F),
+                colour, 2.F, 0, thickness);
+            draw_list->AddTriangleFilled(
+                point(min, max, 0.24F, 0.64F), point(min, max, 0.42F, 0.44F),
+                point(min, max, 0.58F, 0.64F), colour);
+            draw_list->AddTriangleFilled(
+                point(min, max, 0.48F, 0.64F), point(min, max, 0.66F, 0.38F),
+                point(min, max, 0.78F, 0.64F), colour);
+            draw_list->AddCircleFilled(
+                point(min, max, 0.30F, 0.36F), extent * 0.055F, colour);
+            break;
+        }
+        case Icon::compare: {
+            draw_list->AddRect(
+                point(min, max, 0.16F, 0.22F), point(min, max, 0.84F, 0.78F),
+                colour, 2.F, 0, thickness);
+            line(draw_list, min, max, 0.50F, 0.22F, 0.50F, 0.78F, colour,
+                 thickness);
+            draw_list->AddCircleFilled(
+                point(min, max, 0.34F, 0.50F), extent * 0.07F, colour);
+            draw_list->AddCircle(
+                point(min, max, 0.66F, 0.50F), extent * 0.07F, colour, 12,
+                thickness);
+            break;
+        }
+        case Icon::heatmap: {
+            draw_list->AddRect(
+                point(min, max, 0.18F, 0.22F), point(min, max, 0.82F, 0.78F),
+                colour, 2.F, 0, thickness);
+            draw_list->AddRectFilled(
+                point(min, max, 0.26F, 0.54F), point(min, max, 0.40F, 0.70F),
+                colour, 1.F);
+            draw_list->AddRectFilled(
+                point(min, max, 0.43F, 0.42F), point(min, max, 0.57F, 0.70F),
+                colour, 1.F);
+            draw_list->AddRectFilled(
+                point(min, max, 0.60F, 0.30F), point(min, max, 0.74F, 0.70F),
+                colour, 1.F);
+            break;
+        }
+        case Icon::features: {
+            draw_list->AddCircle(
+                point(min, max, 0.32F, 0.34F), extent * 0.10F, colour, 12,
+                thickness);
+            draw_list->AddCircleFilled(
+                point(min, max, 0.68F, 0.40F), extent * 0.07F, colour);
+            draw_list->AddCircleFilled(
+                point(min, max, 0.42F, 0.68F), extent * 0.055F, colour);
+            line(draw_list, min, max, 0.62F, 0.66F, 0.78F, 0.66F, colour,
+                 thickness);
+            line(draw_list, min, max, 0.70F, 0.58F, 0.70F, 0.74F, colour,
+                 thickness);
+            break;
+        }
+        case Icon::chevron_left: {
+            line(draw_list, min, max, 0.60F, 0.24F, 0.34F, 0.50F, colour,
+                 thickness);
+            line(draw_list, min, max, 0.34F, 0.50F, 0.60F, 0.76F, colour,
+                 thickness);
+            break;
+        }
+        case Icon::chevron_right: {
+            line(draw_list, min, max, 0.40F, 0.24F, 0.66F, 0.50F, colour,
+                 thickness);
+            line(draw_list, min, max, 0.66F, 0.50F, 0.40F, 0.76F, colour,
+                 thickness);
+            break;
+        }
+        case Icon::frustum: {
+            const ImVec2 apex = point(min, max, 0.50F, 0.20F);
+            const ImVec2 far[] = {
+                point(min, max, 0.22F, 0.78F),
+                point(min, max, 0.78F, 0.78F),
+                point(min, max, 0.70F, 0.58F),
+                point(min, max, 0.30F, 0.58F)};
+            draw_list->AddPolyline(far, 4, colour, ImDrawFlags_Closed, thickness);
+            draw_list->AddLine(apex, far[0], colour, thickness);
+            draw_list->AddLine(apex, far[1], colour, thickness);
+            draw_list->AddLine(apex, far[2], colour, thickness);
+            draw_list->AddLine(apex, far[3], colour, thickness);
+            break;
+        }
+        case Icon::photo: {
+            draw_list->AddRect(
+                point(min, max, 0.16F, 0.24F), point(min, max, 0.84F, 0.76F),
+                colour, 2.F, 0, thickness);
+            draw_list->AddCircle(
+                point(min, max, 0.34F, 0.40F), extent * 0.07F, colour, 12,
+                thickness);
+            const ImVec2 hill[] = {
+                point(min, max, 0.22F, 0.66F),
+                point(min, max, 0.40F, 0.48F),
+                point(min, max, 0.58F, 0.66F)};
+            draw_list->AddPolyline(hill, 3, colour, 0, thickness);
+            break;
+        }
     }
 }
 

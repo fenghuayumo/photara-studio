@@ -908,6 +908,23 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
             static_cast<float>(track.position.z())});
         track_ids.push_back(index);
     }
+    std::vector<std::vector<char>> triangulated(scene.images.size());
+    for (const auto& track : scene.tracks) {
+        if (!track.is_triangulated()) continue;
+        const std::size_t inliers = std::min<std::size_t>(
+            track.num_inliers, track.observations.size());
+        for (std::size_t i = 0; i < inliers; ++i) {
+            const auto& observation = track.observations[i];
+            if (observation.image_id >= scene.images.size()) continue;
+            const auto& image = scene.images[observation.image_id];
+            auto& flags = triangulated[observation.image_id];
+            if (flags.empty())
+                flags.assign(image.features.keypoints.size(), 0);
+            if (observation.feature_id < flags.size())
+                flags[observation.feature_id] = 1;
+        }
+    }
+
     loaded.scene.views.reserve(scene.images.size());
     for (const auto& image : scene.images) {
         ViewPose pose;
@@ -933,6 +950,46 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
         pose.image_path = image.path;
         pose.registered = image.registered;
         if (pose.registered) ++loaded.scene.registered_views;
+
+        const auto& keypoints = image.features.keypoints;
+        const float image_w = image.features.image_width > 0
+            ? static_cast<float>(image.features.image_width)
+            : (pose.width > 0 ? static_cast<float>(pose.width) : 1.F);
+        const float image_h = image.features.image_height > 0
+            ? static_cast<float>(image.features.image_height)
+            : (pose.height > 0 ? static_cast<float>(pose.height) : 1.F);
+        const std::vector<char>* flags =
+            image.id < triangulated.size() ? &triangulated[image.id] : nullptr;
+        constexpr std::size_t k_max_stored_features = 24'000;
+        pose.features.reserve(std::min(keypoints.size(), k_max_stored_features));
+        std::vector<std::size_t> order;
+        if (keypoints.size() > k_max_stored_features) {
+            order.resize(keypoints.size());
+            for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::stable_sort(
+                order.begin(), order.end(),
+                [&](const std::size_t a, const std::size_t b) {
+                    const bool ta = flags && a < flags->size() && (*flags)[a];
+                    const bool tb = flags && b < flags->size() && (*flags)[b];
+                    if (ta != tb) return ta;
+                    return keypoints[a].response > keypoints[b].response;
+                });
+            order.resize(k_max_stored_features);
+        }
+        const std::size_t count = order.empty() ? keypoints.size() : order.size();
+        for (std::size_t n = 0; n < count; ++n) {
+            const std::size_t i = order.empty() ? n : order[n];
+            const auto& keypoint = keypoints[i];
+            ImageFeature feature;
+            feature.u = keypoint.x / image_w;
+            feature.v = keypoint.y / image_h;
+            feature.scale = std::max(0.002F, keypoint.scale / image_w);
+            feature.response = keypoint.response;
+            feature.triangulated =
+                flags && i < flags->size() && (*flags)[i] != 0;
+            if (feature.triangulated) ++pose.triangulated_features;
+            pose.features.push_back(feature);
+        }
         loaded.scene.views.push_back(std::move(pose));
     }
     loaded.scene.total_views = scene.images.size();
@@ -943,8 +1000,26 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
 
 void SparseScene::compute_bounds() {
     if (points.empty()) {
-        centroid = {};
-        radius = 1.F;
+        Vec3 sum;
+        std::size_t used = 0;
+        for (const ViewPose& pose : views) {
+            if (!pose.registered) continue;
+            sum = sum + pose.centre;
+            ++used;
+        }
+        if (used == 0) {
+            centroid = {};
+            radius = 1.F;
+            return;
+        }
+        centroid = sum * (1.F / static_cast<float>(used));
+        float farthest = 0.F;
+        for (const ViewPose& pose : views) {
+            if (!pose.registered) continue;
+            const Vec3 offset = pose.centre - centroid;
+            farthest = std::max(farthest, std::sqrt(dot(offset, offset)));
+        }
+        radius = std::max(1e-3F, farthest * 1.25F);
         return;
     }
     // Median-ish centre via the mean, then a robust radius from the 95th
@@ -1061,7 +1136,11 @@ bool load_view_poses(
     const std::filesystem::path& poses_csv, SparseScene& scene) {
     if (!scene.views.empty()) return true;
     const std::string error = load_poses(poses_csv, scene);
-    return error.empty() && !scene.views.empty();
+    if (error.empty() && !scene.views.empty()) {
+        if (!scene.has_points()) scene.compute_bounds();
+        return true;
+    }
+    return false;
 }
 
 void attach_view_image_paths(
@@ -1213,7 +1292,9 @@ SceneDrawStats SceneRenderer::draw(
     // Rings replace the centre dots when a trained Gaussian model is loaded.
     // Sparse SfM clouds have no covariance, so they always stay as points.
     const std::size_t count = scene.points.size();
-    if (options.draw_rings && scene.has_gaussians()) {
+    if (!options.show_cloud) {
+        // Overlay-only draw (live splat / training): cameras and grid stay.
+    } else if (options.draw_rings && scene.has_gaussians()) {
         stats.drawn_points =
             draw_gaussian_rings(draw, frame, scene, options, min, max);
     } else if (count > 0) {
@@ -1414,6 +1495,41 @@ SceneDrawStats SceneRenderer::draw(
 
     draw->PopClipRect();
     return stats;
+}
+
+SplatPreviewCamera make_preview_camera_from_view(
+    const ViewPose& pose, const std::uint32_t width,
+    const std::uint32_t height) {
+    const auto& r = pose.rotation;
+    const float tx =
+        -(r[0] * pose.centre.x + r[1] * pose.centre.y + r[2] * pose.centre.z);
+    const float ty =
+        -(r[3] * pose.centre.x + r[4] * pose.centre.y + r[5] * pose.centre.z);
+    const float tz =
+        -(r[6] * pose.centre.x + r[7] * pose.centre.y + r[8] * pose.centre.z);
+
+    SplatPreviewCamera preview;
+    preview.world_to_camera = {
+        r[0], r[3], r[6], 0.F,
+        r[1], r[4], r[7], 0.F,
+        r[2], r[5], r[8], 0.F,
+        tx, ty, tz, 1.F};
+    preview.position = {pose.centre.x, pose.centre.y, pose.centre.z};
+    const float src_w = pose.width > 0
+        ? static_cast<float>(pose.width)
+        : static_cast<float>(std::max<std::uint32_t>(1, width));
+    const float src_h = pose.height > 0
+        ? static_cast<float>(pose.height)
+        : static_cast<float>(std::max<std::uint32_t>(1, height));
+    const float dst_w = static_cast<float>(std::max<std::uint32_t>(1, width));
+    const float dst_h = static_cast<float>(std::max<std::uint32_t>(1, height));
+    preview.fx = pose.fx * (dst_w / src_w);
+    preview.fy = pose.fy * (dst_h / src_h);
+    preview.cx = src_w * 0.5F * (dst_w / src_w);
+    preview.cy = src_h * 0.5F * (dst_h / src_h);
+    preview.width = std::max<std::uint32_t>(1, width);
+    preview.height = std::max<std::uint32_t>(1, height);
+    return preview;
 }
 
 SplatPreviewCamera make_preview_camera(

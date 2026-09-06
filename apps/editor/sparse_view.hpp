@@ -20,6 +20,15 @@ struct Vec3 {
     float z{};
 };
 
+// Detected keypoint in normalized image coordinates (origin top-left).
+struct ImageFeature {
+    float u{};
+    float v{};
+    float scale{0.01F};
+    float response{};
+    bool triangulated{};
+};
+
 // One registered view from the SfM diagnostics CSV. `rotation` is the
 // world-to-camera matrix in row-major order, matching sfm::Pose3D::R.
 struct ViewPose {
@@ -33,7 +42,9 @@ struct ViewPose {
     std::uint32_t height{};
     float reprojection_p95{};
     std::size_t observations{};
+    std::size_t triangulated_features{};
     bool registered{};
+    std::vector<ImageFeature> features;
 };
 
 struct GaussianPrimitive {
@@ -110,6 +121,10 @@ struct SplatPreviewCamera {
 SplatPreviewCamera make_preview_camera(
     const OrbitCamera& camera, std::uint32_t width, std::uint32_t height);
 
+// Exact capture pose, with intrinsics scaled to the requested raster.
+SplatPreviewCamera make_preview_camera_from_view(
+    const ViewPose& pose, std::uint32_t width, std::uint32_t height);
+
 // Places the orbit eye at the capture pose looking along camera +Z.
 void snap_orbit_to_view(OrbitCamera& camera, const ViewPose& pose);
 
@@ -153,6 +168,7 @@ struct ViewOptions {
     float ring_scale = 2.5F;
     // Depth ramp is an overlay. Vertex RGB from the PLY is the default.
     bool colour_by_depth = false;
+    bool show_cloud = true;
     bool show_views = true;
     bool show_camera_photos = true;
     bool show_trajectory = true;

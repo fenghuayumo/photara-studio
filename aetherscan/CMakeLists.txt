@@ -664,6 +664,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
             add_executable(aetherscan_editor
                 ${AETHERSCAN_EDITOR_DIR}/console_view.cpp
                 ${AETHERSCAN_EDITOR_DIR}/icons.cpp
+                ${AETHERSCAN_EDITOR_DIR}/image_qa_view.cpp
                 ${AETHERSCAN_EDITOR_DIR}/main.cpp
                 ${AETHERSCAN_EDITOR_DIR}/pipeline.cpp
                 ${AETHERSCAN_EDITOR_DIR}/sparse_view.cpp
