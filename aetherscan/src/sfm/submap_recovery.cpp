@@ -2,6 +2,7 @@
 #include "sfm/reconstruct.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
+#include "core/logging.hpp"
 
 #include <Eigen/Eigenvalues>
 #include <algorithm>
@@ -349,5 +350,149 @@ SubmapRecoveryReport recover_independent_submap(
     report.accepted = true;
     report.reason = "accepted";
     return report;
+}
+std::vector<Index> recover_stable_resections(Scene& scene) {
+    const auto audit = analyze_alignment_observability(scene);
+    if (audit.reliable_views == scene.images.size() || audit.reliable_views < 2) return {};
+    struct Match { Index feature; Index track; Vec3 point; };
+    std::vector<std::vector<Match>> matches(scene.images.size());
+    std::unordered_map<std::uint64_t, std::vector<Observation>> boundary;
+    for (const auto& pair : scene.pairs) {
+        if (!pair.active || !pair.relative_pose || pair.zero_baseline ||
+            pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size()) continue;
+        const bool forward = audit.reliable[pair.id1] && !audit.reliable[pair.id2];
+        const bool reverse = audit.reliable[pair.id2] && !audit.reliable[pair.id1];
+        if (!forward && !reverse) continue;
+        for (const auto& m : pair.matches)
+            boundary[key(forward ? pair.id1 : pair.id2, forward ? m.query : m.train)]
+                .push_back({forward ? pair.id2 : pair.id1, forward ? m.train : m.query});
+    }
+    TriangulationOptions tri;
+    tri.reproj_threshold_px = 2;
+    tri.min_angle_deg = 1;
+    tri.split_tracks = false;
+    for (Index t = 0; t < scene.tracks.size(); ++t) {
+        const auto& source = scene.tracks[t];
+        Track stable;
+        std::map<Index, Index> stable_observations;
+        std::set<std::pair<Index, Index>> targets;
+        for (const auto& obs : source.observations) {
+            if (obs.image_id >= scene.images.size()) continue;
+            if (audit.reliable[obs.image_id]) {
+                stable_observations.emplace(obs.image_id, obs.feature_id);
+                if (const auto it = boundary.find(key(obs.image_id, obs.feature_id)); it != boundary.end())
+                    for (const auto& target : it->second) targets.emplace(target.image_id, target.feature_id);
+            } else targets.emplace(obs.image_id, obs.feature_id);
+        }
+        if (targets.empty() || stable_observations.size() < 2) continue;
+        for (const auto& [image, feature] : stable_observations) stable.observations.push_back({image, feature});
+        if (triangulate_track(stable, scene, tri) < 2) continue;
+        // Replacing a point must not discard valid observations in the frozen
+        // map. A locally successful PnP is insufficient if its anchors damage
+        // the geometry that made the main map reliable.
+        bool preserves_stable_support = true;
+        for (std::size_t o = 0; o < std::min<std::size_t>(source.num_inliers, source.observations.size()); ++o) {
+            const auto& obs = source.observations[o];
+            if (obs.image_id >= scene.images.size() || !audit.reliable[obs.image_id]) continue;
+            const auto& pose = scene.images[obs.image_id].pose;
+            if (supports(scene, obs, source.position, pose, 2) &&
+                !supports(scene, obs, stable.position, pose, 2)) {
+                preserves_stable_support = false;
+                break;
+            }
+        }
+        if (!preserves_stable_support) continue;
+        for (const auto& [image, feature] : targets)
+            if (feature < scene.images[image].features.keypoints.size())
+                matches[image].push_back({feature, t, stable.position});
+    }
+    std::vector<Index> recovered;
+    std::vector<std::vector<Match>> accepted(scene.images.size());
+    for (Index id = 0; id < scene.images.size(); ++id) {
+        if (audit.reliable[id]) continue;
+        const auto& image = scene.images[id];
+        if (image.camera_id >= scene.cameras.size()) continue;
+        const auto& camera = scene.camera_of(image);
+        std::map<Index, std::set<Index>> by_feature, by_track;
+        for (const auto& m : matches[id]) { by_feature[m.feature].insert(m.track); by_track[m.track].insert(m.feature); }
+        std::map<Index, Match> unique;
+        for (const auto& m : matches[id])
+            if (by_feature[m.feature].size() == 1 && by_track[m.track].size() == 1) unique.emplace(m.feature, m);
+        core::Logger::instance().info("stable resection: image=", image.path.filename(), " correspondences=", unique.size());
+        const auto reject = [&](const char* reason) {
+            core::Logger::instance().info("stable resection rejected: image=", image.path.filename(), " reason=", reason);
+        };
+        if (unique.size() < 40) { reject("insufficient_independent_depths"); continue; }
+        std::vector<Vec3> bearings, points;
+        std::vector<Match> validation;
+        std::size_t n = 0;
+        for (const auto& [feature, m] : unique) {
+            if (n++ % 5 == 0) { validation.push_back(m); continue; }
+            const auto& p = image.features.keypoints[feature];
+            bearings.push_back(camera.unproject(Vec2(p.x, p.y)));
+            points.push_back(m.point);
+        }
+        if (!noncollinear(points)) { reject("ill_conditioned_fit_points"); continue; }
+        AbsolutePoseOptions options;
+        options.min_inliers = 30;
+        options.max_reproj_error_px = 2;
+        options.max_iterations = 10000;
+        const auto pose = estimate_absolute_pose(bearings, points, camera, options);
+        if (!pose.success || pose.num_inliers < 0.8 * points.size()) { reject("pose_consensus_failed"); continue; }
+        unsigned heldout = 0;
+        std::set<std::pair<int, int>> cells;
+        std::vector<Vec3> heldout_points;
+        for (const auto& m : validation) {
+            if (!supports(scene, {id, m.feature}, m.point, pose.pose, 2)) continue;
+            ++heldout;
+            heldout_points.push_back(m.point);
+            const auto& p = image.features.keypoints[m.feature];
+            cells.emplace(static_cast<int>(std::clamp(4*p.x/std::max(1u,camera.width), 0.F, 3.F)),
+                          static_cast<int>(std::clamp(4*p.y/std::max(1u,camera.height), 0.F, 3.F)));
+        }
+        if (heldout < 8 || heldout < 0.8 * validation.size()) { reject("heldout_consensus_failed"); continue; }
+        if (cells.size() < 3 || !noncollinear(heldout_points)) { reject("ill_conditioned_validation"); continue; }
+        for (const auto& [feature, m] : unique)
+            if (supports(scene, {id, feature}, m.point, pose.pose, 2)) accepted[id].push_back(m);
+        scene.images[id].pose = pose.pose;
+        scene.images[id].registered = true;
+        recovered.push_back(id);
+        core::Logger::instance().info("stable resection accepted: image=", image.path.filename(),
+            " fit=", pose.num_inliers, " heldout=", heldout, '/', validation.size());
+    }
+    if (recovered.empty()) return recovered;
+    std::vector<bool> moved(scene.images.size(), false);
+    for (Index id : recovered) moved[id] = true;
+    // Reattach only verified 2D-3D observations. Unsupported old target tracks
+    // must not keep stale geometry after replacing a camera pose.
+    for (auto& track : scene.tracks) {
+        std::vector<Observation> observations;
+        std::uint8_t count = 0;
+        for (std::size_t o = 0; o < track.observations.size(); ++o) {
+            const auto& obs = track.observations[o];
+            if (obs.image_id < moved.size() && moved[obs.image_id]) continue;
+            observations.push_back(obs);
+            if (o < track.num_inliers) ++count;
+        }
+        track.observations = std::move(observations);
+        track.num_inliers = count >= 2 ? count : 0;
+    }
+    std::set<Index> changed;
+    for (Index id : recovered) for (const auto& m : accepted[id]) {
+        auto& track = scene.tracks[m.track];
+        track.position = m.point;
+        track.observations.push_back({id, m.feature});
+        changed.insert(m.track);
+    }
+    for (Index t : changed) {
+        auto& track = scene.tracks[t];
+        const auto end = std::stable_partition(track.observations.begin(), track.observations.end(), [&](const Observation& obs) {
+            return obs.image_id < scene.images.size() && scene.images[obs.image_id].registered &&
+                supports(scene, obs, track.position, scene.images[obs.image_id].pose, 2);
+        });
+        track.num_inliers = static_cast<std::uint8_t>(std::min<std::size_t>(255, end - track.observations.begin()));
+    }
+    rebuild_track_index(scene);
+    return recovered;
 }
 }  // namespace aetherscan::sfm

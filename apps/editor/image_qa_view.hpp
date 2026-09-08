@@ -114,6 +114,7 @@ struct ImageQaDrawInput {
     bool has_render{};
     bool render_live{};
     bool has_model{};
+    bool external_alignment{};
 };
 
 void draw_image_qa(

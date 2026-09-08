@@ -854,7 +854,15 @@ void draw_image_qa(
             draw->AddText(
                 {canvas_min.x + 16.F, canvas_max.y - 40.F},
                 theme::u32(theme::warning),
-                "No keypoints in this reconstruction — re-align to inspect features");
+                input.external_alignment
+                    ? "No triangulated keypoints in this imported alignment"
+                    : "No keypoints in this reconstruction — re-align to inspect features");
+    } else if (state.mode == ImageQaMode::features && !item.pose &&
+               input.external_alignment) {
+        draw->AddText(
+            {canvas_min.x + 16.F, canvas_max.y - 22.F},
+            theme::u32(theme::warning),
+            "Loading imported cameras for the feature overlay…");
     }
 
     if (image_qa_needs_render(state.mode) && session.metrics_busy() &&

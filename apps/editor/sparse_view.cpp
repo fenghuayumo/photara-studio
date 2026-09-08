@@ -3,7 +3,10 @@
 #include "theme.hpp"
 
 #include "io/image.hpp"
+#include "splat/dataset.hpp"
 #include "splat/formats.hpp"
+
+#include <Eigen/Core>
 
 #include <algorithm>
 #include <cmath>
@@ -890,7 +893,7 @@ void colour_points_from_photos(
 
 void SparseScene::clear() { *this = {}; }
 
-SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
+SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour_from_photos) {
     SceneLoad loaded;
     loaded.ok = true;
     std::size_t point_count = 0;
@@ -941,6 +944,8 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
             const auto& camera = scene.cameras[image.camera_id];
             pose.fx = static_cast<float>(camera.fx);
             pose.fy = static_cast<float>(camera.fy);
+            pose.cx = static_cast<float>(camera.cx);
+            pose.cy = static_cast<float>(camera.cy);
             pose.width = camera.width;
             pose.height = camera.height;
         }
@@ -993,8 +998,161 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene) {
         loaded.scene.views.push_back(std::move(pose));
     }
     loaded.scene.total_views = scene.images.size();
-    colour_points_from_photos(scene, loaded.scene, track_ids);
+    if (colour_from_photos) colour_points_from_photos(scene, loaded.scene, track_ids);
     loaded.scene.compute_bounds();
+    return loaded;
+}
+
+SceneLoad sparse_scene_from_dataset(
+    const std::filesystem::path& source, const std::string& dataset_format,
+    const std::filesystem::path& initial_point_cloud,
+    const std::filesystem::path& image_directory) {
+    SceneLoad loaded;
+    try {
+        aetherscan::splat::DatasetLoadRequest request;
+        request.source = source;
+        request.image_directory = image_directory;
+        request.initial_point_cloud = initial_point_cloud;
+        request.format =
+            aetherscan::splat::parse_dataset_format(dataset_format);
+        const aetherscan::splat::DatasetLoadResult dataset =
+            aetherscan::splat::load_splat_dataset(request);
+        const aetherscan::mvs::MvsScene& scene = dataset.scene;
+
+        loaded.scene.views.reserve(scene.views.size());
+        for (const auto& view : scene.views) {
+            ViewPose pose;
+            pose.name = view.path.filename().string();
+            pose.image_path = view.path;
+            pose.centre = {
+                static_cast<float>(view.pose.C.x()),
+                static_cast<float>(view.pose.C.y()),
+                static_cast<float>(view.pose.C.z())};
+            for (int row = 0; row < 3; ++row)
+                for (int column = 0; column < 3; ++column)
+                    pose.rotation[static_cast<std::size_t>(row * 3 + column)] =
+                        static_cast<float>(view.pose.R(row, column));
+            pose.fx = view.fx;
+            pose.fy = view.fy;
+            pose.cx = view.cx;
+            pose.cy = view.cy;
+            pose.width = view.width;
+            pose.height = view.height;
+            pose.registered = true;
+            ++loaded.scene.registered_views;
+            ++loaded.scene.total_views;
+            loaded.scene.views.push_back(std::move(pose));
+        }
+
+        const auto append_scene_point = [&](const Eigen::Vector3f& position,
+                                            const Eigen::Vector3f& color) {
+            loaded.scene.points.push_back(
+                {position.x(), position.y(), position.z()});
+            const auto channel = [](const float value) {
+                return static_cast<int>(
+                    std::lround(std::clamp(value, 0.F, 1.F) * 255.F));
+            };
+            loaded.scene.colours.push_back(IM_COL32(
+                channel(color.x()), channel(color.y()), channel(color.z()),
+                255));
+        };
+        loaded.scene.points.reserve(scene.sparse_points.size());
+        loaded.scene.colours.reserve(scene.sparse_points.size());
+        for (const auto& point : scene.sparse_points)
+            append_scene_point(point.position, point.color);
+        // RealityCapture (and camera-only COLMAP) may have no sparse tracks.
+        // Fall back to the trainer's initial cloud so the 2D overlay still
+        // has landmarks to project.
+        if (loaded.scene.points.empty()) {
+            constexpr std::size_t k_max_cloud_points = 40'000;
+            const std::size_t stride = std::max<std::size_t>(
+                1, (scene.dense_cloud.points.size() + k_max_cloud_points - 1) /
+                       k_max_cloud_points);
+            loaded.scene.points.reserve(std::min(
+                scene.dense_cloud.points.size(), k_max_cloud_points));
+            loaded.scene.colours.reserve(loaded.scene.points.capacity());
+            for (std::size_t i = 0; i < scene.dense_cloud.points.size();
+                 i += stride)
+                append_scene_point(
+                    scene.dense_cloud.points[i].position,
+                    scene.dense_cloud.points[i].color);
+        }
+
+        // Imported alignments carry no per-image keypoint table. Projecting
+        // the landmarks each view observes gives the same visual overlay and
+        // marks every plotted feature as triangulated.
+        std::vector<std::vector<std::size_t>> observations(scene.views.size());
+        for (std::size_t index = 0; index < scene.sparse_points.size();
+             ++index)
+            for (const auto view_id : scene.sparse_points[index].view_ids)
+                if (view_id < observations.size())
+                    observations[view_id].push_back(index);
+        constexpr std::size_t k_max_dataset_features = 24'000;
+        const auto project_point = [](ViewPose& pose,
+                                      const aetherscan::mvs::MvsView& view,
+                                      const Eigen::Vector3f& position) {
+            if (view.width == 0 || view.height == 0) return;
+            if (pose.features.size() >= k_max_dataset_features) return;
+            const Eigen::Matrix3f rotation = view.pose.R.cast<float>();
+            const Eigen::Vector3f centre = view.pose.C.cast<float>();
+            const Eigen::Vector3f camera_point =
+                rotation * (position - centre);
+            if (!(camera_point.z() > 1e-3F)) return;
+            const float inverse_z = 1.F / camera_point.z();
+            const float pixel_x =
+                view.fx * camera_point.x() * inverse_z + view.cx;
+            const float pixel_y =
+                view.fy * camera_point.y() * inverse_z + view.cy;
+            if (pixel_x < 0.F || pixel_y < 0.F ||
+                pixel_x >= static_cast<float>(view.width) ||
+                pixel_y >= static_cast<float>(view.height))
+                return;
+            ImageFeature feature;
+            feature.u = pixel_x / static_cast<float>(view.width);
+            feature.v = pixel_y / static_cast<float>(view.height);
+            feature.scale = 0.006F;
+            feature.triangulated = true;
+            pose.features.push_back(feature);
+            ++pose.triangulated_features;
+        };
+        for (std::size_t index = 0;
+             index < scene.views.size() && index < loaded.scene.views.size();
+             ++index) {
+            const auto& view = scene.views[index];
+            ViewPose& pose = loaded.scene.views[index];
+            pose.observations = observations[index].size();
+            pose.features.reserve(std::min(
+                std::max(observations[index].size(), loaded.scene.points.size()),
+                k_max_dataset_features));
+            if (!observations[index].empty()) {
+                const std::size_t stride = std::max<std::size_t>(
+                    1,
+                    (observations[index].size() + k_max_dataset_features - 1) /
+                        k_max_dataset_features);
+                for (std::size_t i = 0; i < observations[index].size();
+                     i += stride)
+                    project_point(
+                        pose, view,
+                        scene.sparse_points[observations[index][i]].position);
+            } else {
+                const std::size_t stride = std::max<std::size_t>(
+                    1, (loaded.scene.points.size() + k_max_dataset_features - 1) /
+                           k_max_dataset_features);
+                for (std::size_t i = 0; i < loaded.scene.points.size();
+                     i += stride)
+                    project_point(
+                        pose, view,
+                        {loaded.scene.points[i].x, loaded.scene.points[i].y,
+                         loaded.scene.points[i].z});
+            }
+        }
+
+        loaded.scene.compute_bounds();
+        loaded.ok = true;
+    } catch (const std::exception& failure) {
+        loaded = {};
+        loaded.error = failure.what();
+    }
     return loaded;
 }
 
@@ -1525,8 +1683,10 @@ SplatPreviewCamera make_preview_camera_from_view(
     const float dst_h = static_cast<float>(std::max<std::uint32_t>(1, height));
     preview.fx = pose.fx * (dst_w / src_w);
     preview.fy = pose.fy * (dst_h / src_h);
-    preview.cx = src_w * 0.5F * (dst_w / src_w);
-    preview.cy = src_h * 0.5F * (dst_h / src_h);
+    preview.cx = pose.cx >= 0.F ? pose.cx * (dst_w / src_w)
+                                : src_w * 0.5F * (dst_w / src_w);
+    preview.cy = pose.cy >= 0.F ? pose.cy * (dst_h / src_h)
+                                : src_h * 0.5F * (dst_h / src_h);
     preview.width = std::max<std::uint32_t>(1, width);
     preview.height = std::max<std::uint32_t>(1, height);
     return preview;

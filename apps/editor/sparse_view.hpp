@@ -38,6 +38,10 @@ struct ViewPose {
     std::array<float, 9> rotation{{1, 0, 0, 0, 1, 0, 0, 0, 1}};
     float fx{1.F};
     float fy{1.F};
+    // Principal point in pixels. Negative means unknown; consumers fall back
+    // to the image centre.
+    float cx{-1.F};
+    float cy{-1.F};
     std::uint32_t width{};
     std::uint32_t height{};
     float reprojection_p95{};
@@ -89,7 +93,17 @@ SceneLoad load_gaussian_scene(
 SceneLoad gaussian_scene_from_model(
     const aetherscan::splat::GaussianModel& model,
     std::filesystem::path poses_csv);
-SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene);
+SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour_from_photos = true);
+
+// Loads an external camera alignment dataset (COLMAP / RealityCapture /
+// OpenMVS) into editor view poses. The same reader order is used by the
+// trainer, so view indices line up with the training dataset. Triangulated
+// landmarks are projected into each view so the 2D QA feature overlay works
+// for imported alignments, which carry no per-image keypoints.
+SceneLoad sparse_scene_from_dataset(
+    const std::filesystem::path& source, const std::string& dataset_format,
+    const std::filesystem::path& initial_point_cloud = {},
+    const std::filesystem::path& image_directory = {});
 
 struct OrbitCamera {
     float yaw{0.785398F};

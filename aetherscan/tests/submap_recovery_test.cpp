@@ -1,6 +1,11 @@
 #include "sfm/submap_recovery.hpp"
 #include "sfm/tracks.hpp"
+#include "sfm/reconstruct.hpp"
+#include "sfm/preview.hpp"
+#include "sfm/asfm.hpp"
+#include "core/logging.hpp"
 #include <iostream>
+#include <chrono>
 #include <random>
 #include <stdexcept>
 
@@ -25,7 +30,7 @@ Scene fixture(bool shared = true) {
         scene.images.push_back(image);
     }
     std::mt19937 rng(81);
-    std::uniform_real_distribution<double> xy(-0.8, 0.8), z(4.0, 6.0);
+    std::uniform_real_distribution<double> xy(-1.5, 1.5), z(4.0, 6.0);
     for (Index p = 0; p < 160; ++p) {
         Vec3 point(xy(rng), xy(rng), z(rng));
         Track track;
@@ -61,9 +66,53 @@ Scene fixture(bool shared = true) {
 
 int main() {
     try {
+        aetherscan::core::Logger::instance().configure({});
         const std::vector<Index> ids{4, 5, 6, 7};
         const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
         Scene scene = fixture();
+        const auto preview = make_alignment_preview(scene, 17);
+        expect(preview.tracks.size() <= 17 && !preview.tracks.empty(), "preview must bound sampled points");
+        expect(preview.images.size() == scene.images.size() && preview.pairs.empty(), "preview keeps camera IDs without graph");
+        const auto decoded_preview = decode_asfm(encode_asfm(preview));
+        expect(decoded_preview.tracks.size() == preview.tracks.size(), "preview observation remapping must round-trip");
+        const auto preview_path = std::filesystem::temp_directory_path() /
+            ("aetherscan-preview-test-" + std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()) + ".asfm");
+        save_alignment_preview(scene, preview_path);
+        expect(load_asfm(preview_path).registered_count() == 8, "published preview must load");
+        auto next_preview = scene;
+        next_preview.images[7].registered = false;
+        save_alignment_preview(next_preview, preview_path);
+        expect(load_asfm(preview_path).registered_count() == 7,
+            "preview publication must replace an existing snapshot");
+        std::filesystem::remove(preview_path);
+        Scene resected = fixture();
+        // Remove local edges: singletons can be anchored by stable 2D-3D
+        // evidence even though they cannot independently triangulate depth.
+        resected.pairs.erase(std::remove_if(resected.pairs.begin(), resected.pairs.end(),
+            [](const ImagePair& p) { return p.id1 >= 4; }), resected.pairs.end());
+        const auto recovered = recover_stable_resections(resected);
+        expect(recovered.size() == 4, "stable resection must recover isolated drifting poses");
+        for (Index i = 4; i < 8; ++i)
+            expect((resected.images[i].pose.C - Vec3(0.25*i,0.12*(i%2),0)).norm() < 0.01,
+                "resection must not reuse drifting depths");
+        expect(analyze_alignment_observability(resected).unreliable_views == 0,
+            "independent stable-depth support must certify corrected singletons");
+        Scene no_anchor = fixture(false);
+        expect(recover_stable_resections(no_anchor).empty(), "resection must reject missing stable depths");
+        Scene heldout_mismatch = fixture();
+        for (Index i = 4; i < 8; ++i) {
+            const auto original_features = heldout_mismatch.images[i].features.keypoints;
+            for (Index p = 0; p < 160; p += 5)
+                heldout_mismatch.images[i].features.keypoints[p] = original_features[(p + 75) % 160];
+        }
+        const auto rejected_poses = heldout_mismatch.images;
+        expect(recover_stable_resections(heldout_mismatch).empty(),
+            "resection must reject inconsistent held-out correspondences despite a perfect fit subset");
+        for (Index i = 0; i < 8; ++i)
+            expect(heldout_mismatch.images[i].pose.C == rejected_poses[i].pose.C &&
+                   heldout_mismatch.images[i].pose.R == rejected_poses[i].pose.R,
+                "rejected resection must preserve all poses");
         // Neither global registration nor inherited shared landmarks may hide
         // a dense four-camera branch attached through one verified bridge.
         auto risk = find_structural_pair_risks(scene);

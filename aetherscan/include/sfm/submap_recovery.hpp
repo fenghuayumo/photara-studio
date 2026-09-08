@@ -10,6 +10,9 @@ namespace aetherscan::sfm {
 // Marks cameras outside the largest bridge-free verified-pair block so dense
 // internal connectivity cannot hide a branch attached through a single bridge.
 std::vector<std::uint8_t> find_structural_pair_risks(const Scene& scene);
+// Resection can constrain a singleton without independently triangulated local
+// depth. Fit against stable-only depths, then validate withheld correspondences.
+std::vector<Index> recover_stable_resections(Scene& scene);
 
 struct SubmapRecoveryOptions {
     unsigned minimum_shared_points{30};

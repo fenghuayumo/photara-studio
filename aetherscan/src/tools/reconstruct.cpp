@@ -1,5 +1,6 @@
 #include "sfm/reconstruct.hpp"
 #include "sfm/asfm.hpp"
+#include "sfm/preview.hpp"
 #include "sfm/export_mvs.hpp"
 #include "project/archive.hpp"
 #include "project/document.hpp"
@@ -2985,6 +2986,27 @@ int main(int argc, char** argv) {
         if (files.size() < 2) throw std::runtime_error("Need at least two images");
 
         aetherscan::sfm::ReconstructionConfig config;
+        std::chrono::steady_clock::time_point last_alignment_preview{};
+        bool has_alignment_preview = false;
+        if (!cli.working_sfm.empty()) {
+            config.resection.checkpoint_callback = [&](const aetherscan::sfm::Scene& partial) {
+                const auto now = std::chrono::steady_clock::now();
+                if (partial.registered_count() < 2 ||
+                    (has_alignment_preview &&
+                     now - last_alignment_preview < std::chrono::seconds(3))) return;
+                last_alignment_preview = now;
+                has_alignment_preview = true;
+                auto path = cli.working_sfm;
+                path += ".preview.asfm";
+                try {
+                    aetherscan::sfm::save_alignment_preview(partial, path);
+                    aetherscan::core::Logger::instance().info(
+                        "sfm_preview=", path, " registered=", partial.registered_count());
+                } catch (const std::exception& error) {
+                    aetherscan::core::Logger::instance().warning("SfM preview skipped: ", error.what());
+                }
+            };
+        }
         if (cli.mode == "global")
             config.mode = aetherscan::sfm::ReconstructionMode::global;
         else if (cli.mode == "hierarchical")

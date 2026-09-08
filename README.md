@@ -206,6 +206,13 @@ UVAtlas 默认用 `--uv-parallel-partitions 8` 做空间分区并发展开，最
 Splat mesh 导出只使用 alpha 0.5 与有效深度掩码，不再默认执行额外的 60° depth-normal 硬过滤；
 这与 pygsplat/GS-2M 的默认 TSDF 输入一致，避免在高曲率和薄结构区域人为打洞。
 
+ADCPlus 在 brush 版本上做了证据化增强：每次 refinement 会额外剪枝“观测窗口内贡献步数
+不足且 opacity 低于软阈值”的低可见 floater 行；growth 采样权重按投影 footprint
+（屏幕占比）归一，抵近镜头 splat 在屏幕空间梯度上的系统性超权。二者只复用光栅化阶段
+已经在统计的 count / refine_weight / screen 半径，不引入额外监督或新参数；每次
+refinement 输出 `adc_plus_refine` 诊断日志（剪枝原因、replacement/oversized/growth
+数量与容量）。共享致密化参数可通过 `apply_strategy_defaults` 按策略取不同默认值
+（ADC+ 全程增长，ADC-IGS 预留后 40% 为巩固期）。
 当前 splat 训练借鉴 GGGS 的几何监督，但已融合 ADCPlus、GaussianWrapping normal field 与
 独立 mesh 后端，命令行统一使用 `--splat` / `--splat-*`。GaussianWrapping 几何路径可用
 `--mesh-method pam`：训练默认从第 8,001 步学习四通道

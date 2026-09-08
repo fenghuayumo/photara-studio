@@ -87,8 +87,17 @@ struct App {
     ViewportGizmoState gizmo;
     SceneRenderer renderer;
     std::future<SceneLoad> pending_load;
+    std::future<SceneLoad> alignment_preview_load;
+    std::filesystem::file_time_type alignment_preview_stamp{};
+    std::chrono::steady_clock::time_point alignment_preview_poll{};
+    bool alignment_preview_seen{};
+    unsigned alignment_preview_generation{};
+    unsigned alignment_preview_load_generation{};
     bool loading_scene{};
     std::string scene_source;
+    // Signature of the external dataset alignment already loaded (or whose
+    // load failed) so the viewport does not retry an unchanged bad path.
+    std::string dataset_scene_key;
 
     bool has_sparse{};
     bool has_asfm{};
@@ -103,6 +112,11 @@ struct App {
     ImageQaSession image_qa_session;
     unsigned qa_preview_view{~0U};
     std::chrono::steady_clock::time_point qa_metrics_after{};
+    // Timeline value already consumed when the QA capture camera was written.
+    // Compare frames are only trusted once a newer preview arrives, so an
+    // orbit-camera frame can never be wiped against a training photo.
+    std::uint64_t qa_camera_timeline{};
+    bool qa_camera_valid{};
     unsigned preview_view{};
     std::uint64_t preview_camera_revision{};
     bool preview_follow_view{true};
@@ -652,6 +666,63 @@ void request_asfm_scene_load(
         });
 }
 
+std::string external_dataset_signature(const App& app) {
+    std::string key(app.settings.dataset_source.data());
+    key += '|';
+    key += std::to_string(app.settings.dataset_format);
+    key += '|';
+    key += app.settings.dataset_initial_cloud.data();
+    key += '|';
+    key += app.settings.images_dir.data();
+    return key;
+}
+
+std::string external_dataset_format(const App& app) {
+    switch (app.settings.dataset_format) {
+        case 1: return "colmap";
+        case 2: return "realitycapture";
+        case 3: return "openmvs";
+        default: return "auto";
+    }
+}
+
+// Loads the imported camera alignment into the editor scene. Without those
+// view poses the 2D QA workspace has no capture cameras to snap its compare
+// render or feature overlay to, and the trainer keeps previewing from the
+// orbit camera instead of the photo being inspected.
+void request_dataset_scene_load(App& app) {
+    if (app.loading_scene || !has_external_dataset(app)) return;
+    const std::filesystem::path source(app.settings.dataset_source.data());
+    const std::string format = external_dataset_format(app);
+    const std::filesystem::path initial_cloud(
+        app.settings.dataset_initial_cloud.data());
+    const std::filesystem::path images(app.settings.images_dir.data());
+    app.dataset_scene_key = external_dataset_signature(app);
+    app.suppress_scene_auto_load = false;
+    app.loading_scene = true;
+    app.scene_source = "External dataset";
+    app.pending_load = std::async(
+        std::launch::async, [source, format, initial_cloud, images] {
+            return sparse_scene_from_dataset(
+                source, format, initial_cloud, images);
+        });
+}
+
+void ensure_dataset_scene_loaded(App& app) {
+    if (app.suppress_scene_auto_load || !has_external_dataset(app) ||
+        app.loading_scene)
+        return;
+    // A Gaussian-centre scene merges the imported views when no internal
+    // poses CSV exists, so it also counts as showing the dataset cameras.
+    const bool imported_views_visible =
+        !app.scene.views.empty() &&
+        (app.scene_source == "External dataset" ||
+         app.scene_source == "Gaussian centres");
+    if (imported_views_visible) return;
+    if (external_dataset_signature(app) == app.dataset_scene_key) return;
+    request_dataset_scene_load(app);
+}
+
 void request_ascan_scene_load(App& app) {
     if (app.loading_scene) return;
     const auto ascan = app.layout.project_file;
@@ -879,24 +950,54 @@ void request_gaussian_scene_load(App& app) {
     const auto ascan = app.layout.project_file;
     const auto poses = app.layout.sparse_poses;
     if (model_path.empty() && ascan.empty()) return;
+    const bool dataset = has_external_dataset(app);
+    const std::filesystem::path dataset_source(app.settings.dataset_source.data());
+    const std::string dataset_format = external_dataset_format(app);
+    const std::filesystem::path dataset_initial_cloud(
+        app.settings.dataset_initial_cloud.data());
+    const std::filesystem::path dataset_images(app.settings.images_dir.data());
     app.suppress_scene_auto_load = false;
     app.loading_scene = true;
     app.scene_source = "Gaussian centres";
     app.pending_load = std::async(
-        std::launch::async, [model_path, ascan, poses] {
+        std::launch::async,
+        [model_path, ascan, poses, dataset, dataset_source, dataset_format,
+         dataset_initial_cloud, dataset_images] {
+            const auto merge_dataset_views = [&](SceneLoad& loaded) {
+                // External-dataset training uses the imported cameras, not
+                // an internal poses CSV. Always replace so compare / feature
+                // QA snap to the same views the trainer used.
+                if (!dataset || !loaded.ok) return;
+                SceneLoad imported = sparse_scene_from_dataset(
+                    dataset_source, dataset_format, dataset_initial_cloud,
+                    dataset_images);
+                if (!imported.ok) return;
+                loaded.scene.views = std::move(imported.scene.views);
+                loaded.scene.registered_views =
+                    imported.scene.registered_views;
+                loaded.scene.total_views = imported.scene.total_views;
+            };
             try {
                 if (!model_path.empty())
-                    return load_gaussian_scene(model_path, poses);
+                {
+                    SceneLoad loaded = load_gaussian_scene(model_path, poses);
+                    merge_dataset_views(loaded);
+                    return loaded;
+                }
                 std::error_code error;
                 if (std::filesystem::exists(ascan, error)) {
                     const auto archive =
                         aetherscan::project::Archive::open(ascan);
                     if (archive.has(aetherscan::project::ChunkType::gaussians))
-                        return gaussian_scene_from_model(
+                    {
+                        SceneLoad loaded = gaussian_scene_from_model(
                             aetherscan::splat::decode_gaussians(
                                 archive.chunk(
                                     aetherscan::project::ChunkType::gaussians)),
                             poses);
+                        merge_dataset_views(loaded);
+                        return loaded;
+                    }
                 }
                 SceneLoad loaded;
                 loaded.error = "Project has no trained Gaussian model yet";
@@ -1210,6 +1311,9 @@ void fit_preview_raster(
 
 void sync_live_preview_camera(
     App& app, const bool force, std::uint32_t width, std::uint32_t height) {
+    // 2D QA owns the sidecar while that workspace is open. Writing the orbit
+    // camera here would wipe the capture pose the compare view is waiting on.
+    if (app.workspace == ViewportWorkspace::image_2d) return;
     const bool live = live_preview_active(app);
     if (!force && !live) return;
     if (app.layout.preview_camera_file.empty()) return;
@@ -1229,6 +1333,9 @@ void sync_live_preview_camera(
         app.layout.preview_camera_file, preview, app.preview_camera_revision,
         aetherscan::splat::visualization_mode_name(vis.mode),
         vis.point_size_px, vis.ring_scale);
+    // The shared camera sidecar now describes the orbit camera, not the QA
+    // capture pose; drop the QA freshness marker until it is rewritten.
+    app.qa_camera_valid = false;
     write_preview_vis(app);
     app.last_preview_orbit = app.camera;
     app.has_last_preview_orbit = true;
@@ -1244,9 +1351,16 @@ void snap_preview_to_index(App& app, const unsigned index) {
         app, true, app.preview_raster_width, app.preview_raster_height);
 }
 
+[[nodiscard]] bool qa_capture_frame_ready(const App& app) {
+    if (!app.qa_camera_valid || app.image_qa.selected < 0) return false;
+    if (app.qa_preview_view != static_cast<unsigned>(app.image_qa.selected))
+        return false;
+    const std::uint64_t consumed = gpu::consumed_timeline_value();
+    return consumed > 0 && consumed > app.qa_camera_timeline;
+}
+
 void sync_qa_preview_camera(App& app) {
-    if (!live_preview_active(app) || app.layout.preview_camera_file.empty())
-        return;
+    if (app.layout.preview_camera_file.empty()) return;
     if (app.image_qa.selected < 0 ||
         static_cast<std::size_t>(app.image_qa.selected) >= app.scene.views.size())
         return;
@@ -1269,20 +1383,29 @@ void sync_qa_preview_camera(App& app) {
         }
     }
     const unsigned view = static_cast<unsigned>(app.image_qa.selected);
-    if (app.qa_preview_view == view && app.preview_raster_width == width &&
+    if (app.qa_camera_valid && app.qa_preview_view == view &&
+        app.preview_raster_width == width &&
         app.preview_raster_height == height)
         return;
+    std::error_code error;
+    std::filesystem::create_directories(
+        app.layout.preview_camera_file.parent_path(), error);
     ++app.preview_camera_revision;
     app.preview_raster_width = width;
     app.preview_raster_height = height;
     app.preview_view = view;
     app.preview_follow_view = true;
-    app.qa_preview_view = view;
     const SplatPreviewCamera preview =
         make_preview_camera_from_view(pose, width, height);
-    write_preview_camera_file(
-        app.layout.preview_camera_file, preview, app.preview_camera_revision,
-        "splat", app.view_options.point_size, app.view_options.ring_scale);
+    if (!write_preview_camera_file(
+            app.layout.preview_camera_file, preview, app.preview_camera_revision,
+            "splat", app.view_options.point_size, app.view_options.ring_scale)) {
+        app.qa_camera_valid = false;
+        return;
+    }
+    app.qa_preview_view = view;
+    app.qa_camera_timeline = gpu::consumed_timeline_value();
+    app.qa_camera_valid = true;
     write_preview_view_index(app.layout, app.preview_view);
     aetherscan::splat::VisualizeOptions vis;
     vis.mode = aetherscan::splat::VisualizationMode::splat;
@@ -1301,7 +1424,7 @@ void capture_qa_render(App& app) {
     if (app.image_qa.dragging_wipe) return;
     if (!app.image_qa.metrics_dirty) return;
     if (app.image_qa_session.metrics_busy()) return;
-    if (!app.preview.display.descriptor || gpu::consumed_timeline_value() == 0)
+    if (!app.preview.display.descriptor || !qa_capture_frame_ready(app))
         return;
     if (!app.image_qa_session.has_gt() ||
         app.image_qa_session.loaded_view() != app.image_qa.selected)
@@ -1326,6 +1449,7 @@ void set_viewport_workspace(App& app, const ViewportWorkspace workspace) {
     if (app.workspace == workspace) return;
     app.workspace = workspace;
     app.qa_preview_view = ~0U;
+    app.qa_camera_valid = false;
     if (workspace == ViewportWorkspace::image_2d) {
         refresh_image_qa_folder(
             app.image_qa, std::filesystem::path(app.settings.images_dir.data()));
@@ -1345,8 +1469,11 @@ void set_viewport_workspace(App& app, const ViewportWorkspace workspace) {
 
 void ensure_qa_preview(App& app) {
     if (app.workspace != ViewportWorkspace::image_2d) return;
-    if (!image_qa_needs_render(app.image_qa.mode)) return;
-    if (app.has_model && !live_preview_active(app) && !app.job.running())
+    // Publish the capture pose before starting the viewer so the first
+    // streamed frame is already the photo being inspected, not the orbit eye.
+    sync_qa_preview_camera(app);
+    if (image_qa_needs_render(app.image_qa.mode) && app.has_model &&
+        !live_preview_active(app) && !app.job.running())
         start_splat_view(app);
     sync_qa_preview_camera(app);
     capture_qa_render(app);
@@ -1363,6 +1490,7 @@ void sync_qa_selection_to_preview(App& app, const int previous) {
     snap_orbit_to_view(
         app.camera, app.scene.views[static_cast<std::size_t>(app.image_qa.selected)]);
     app.qa_preview_view = ~0U;
+    app.qa_camera_valid = false;
     app.image_qa.metrics_dirty = true;
     app.qa_metrics_after =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(220);
@@ -1382,7 +1510,11 @@ void apply_opened_project(App& app) {
         set_message(app, error.what(), theme::danger);
         return;
     }
-    if (app.has_sparse)
+    if (has_external_dataset(app))
+        // The imported alignment drives training for this project; internal
+        // SfM artifacts, if any, describe a different capture setup.
+        request_dataset_scene_load(app);
+    else if (app.has_sparse)
         request_ascan_scene_load(app);
     else if (app.has_asfm)
         request_asfm_scene_load(
@@ -1650,7 +1782,15 @@ void poll_scene_load(App& app) {
     app.photos.clear();
     app.image_qa_session.clear();
     app.qa_preview_view = ~0U;
+    app.qa_camera_valid = false;
     app.scene = std::move(loaded.scene);
+    app.alignment_preview_seen = false;
+    // When an internal SfM or Gaussian scene replaces the imported cameras,
+    // allow the next ensure pass to restore the dataset view poses, which are
+    // the ones training actually uses.
+    if (app.scene_source != "External dataset" &&
+        app.scene_source != "Gaussian centres")
+        app.dataset_scene_key.clear();
     if (app.image_qa.selected >= static_cast<int>(app.scene.views.size()))
         app.image_qa.selected = app.scene.views.empty() ? -1 : 0;
     infer_images_dir_from_scene(app);
@@ -1666,6 +1806,48 @@ void poll_scene_load(App& app) {
             " points, " + std::to_string(app.scene.registered_views) + " / " +
             std::to_string(app.scene.total_views) + " views registered",
         theme::success);
+}
+
+void poll_alignment_preview(App& app) {
+    const bool aligning = app.job.running() && app.active_job == JobKind::align;
+    if (app.alignment_preview_load.valid()) {
+        if (app.alignment_preview_load.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        auto loaded = app.alignment_preview_load.get();
+        if (aligning && !app.loading_scene && loaded.ok &&
+            app.alignment_preview_load_generation == app.alignment_preview_generation) {
+            const bool first = !app.alignment_preview_seen;
+            app.scene = std::move(loaded.scene);
+            app.alignment_preview_seen = true;
+            if (first) {
+                app.photos.clear();
+                app.camera.frame(app.scene);
+                app.view_mode = VisualizationMode::points;
+            }
+            app.image_qa.metrics_dirty = true;
+            set_message(app, "Aligning: " + std::to_string(app.scene.registered_views) +
+                " cameras (partial result)", theme::accent);
+        }
+    }
+    if (!aligning || app.loading_scene || app.layout.working_sfm.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < app.alignment_preview_poll) return;
+    app.alignment_preview_poll = now + std::chrono::milliseconds(500);
+    auto path = app.layout.working_sfm;
+    path += ".preview.asfm";
+    std::error_code error;
+    const auto stamp = std::filesystem::last_write_time(path, error);
+    if (error || stamp == app.alignment_preview_stamp) return;
+    app.alignment_preview_stamp = stamp;
+    app.alignment_preview_load_generation = app.alignment_preview_generation;
+    const std::filesystem::path images(app.settings.images_dir.data());
+    app.alignment_preview_load = std::async(std::launch::async, [path, images] {
+        try { return sparse_scene_from_sfm(load_working_sfm(path, images), false); }
+        catch (const std::exception& error) {
+            SceneLoad result;
+            result.error = error.what();
+            return result;
+        }
+    });
 }
 
 void start_align(App& app) {
@@ -1706,6 +1888,18 @@ void start_align(App& app) {
     }
     try {
         app.monitor.begin(JobKind::align);
+        auto preview_path = app.layout.working_sfm;
+        preview_path += ".preview.asfm";
+        std::error_code preview_error;
+        std::filesystem::remove(preview_path, preview_error);
+        app.alignment_preview_stamp = {};
+        if (preview_error) {
+            app.alignment_preview_stamp = std::filesystem::last_write_time(preview_path, preview_error);
+            if (preview_error) app.alignment_preview_stamp = {};
+        }
+        app.alignment_preview_seen = false;
+        ++app.alignment_preview_generation;
+        app.alignment_preview_poll = {};
         app.log.open(app.layout.align_log);
         app.job.start(
             build_align_command(
@@ -1879,6 +2073,9 @@ void start_train(App& app, const bool smoke) {
         // stale internal SfM scene visible while that job is running.
         app.photos.clear();
         app.scene.clear();
+        // QA compare and feature inspection need the exact imported capture
+        // cameras, so populate the editor scene from the same dataset.
+        request_dataset_scene_load(app);
     } else {
         load_view_poses(app.layout.sparse_poses, app.scene);
         attach_view_image_paths(
@@ -2688,6 +2885,11 @@ void draw_viewport_overlay(
 void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     if (app.view_mode == VisualizationMode::rings)
         ensure_gaussian_scene(app);
+    // Only fill an empty viewport here. Replacing an explicitly loaded cloud
+    // would fight the user; the QA workspace enforces dataset cameras itself.
+    else if (has_external_dataset(app) && app.scene.views.empty() &&
+             !app.scene.has_points())
+        ensure_dataset_scene_loaded(app);
     else
         ensure_sparse_loaded(app);
     app.view_options.draw_rings = app.view_mode == VisualizationMode::rings;
@@ -2710,9 +2912,12 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     if (!app.loading_scene && !app.scene.has_points() && !app.has_sparse) {
         draw_empty_viewport(
             draw, min, max,
+            app.job.running() && app.active_job == JobKind::align ? "Aligning photos..." :
             app.settings.images_dir[0] != '\0' ? "Ready to align cameras"
                                                : "Drop photos or a reconstruction",
-            app.settings.images_dir[0] != '\0'
+            app.job.running() && app.active_job == JobKind::align
+                ? "Cameras and points appear as soon as geometry is available"
+                : app.settings.images_dir[0] != '\0'
                 ? "Run Align Photos, or drop a different folder, .asfm, or .ascan"
                 : "Drop an image folder, photos, .asfm, or .ascan onto this view");
     }
@@ -2733,8 +2938,14 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const char* overlay = app.settings.images_dir[0] != '\0' ? "NO ALIGNMENT"
                                                             : "NO IMAGES";
     ImVec4 overlay_dot = theme::inactive;
-    if (app.loading_scene) {
+    if (app.job.running() && app.active_job == JobKind::align) {
+        overlay = app.alignment_preview_seen ? "ALIGNING / PARTIAL RESULT" : "ALIGNING";
+        overlay_dot = theme::accent;
+    } else if (app.loading_scene) {
         overlay = "LOADING";
+        overlay_dot = theme::warning;
+    } else if (app.alignment_preview_seen) {
+        overlay = "PARTIAL ALIGNMENT / NOT FINAL";
         overlay_dot = theme::warning;
     } else if (app.view_mode == VisualizationMode::rings) {
         overlay = app.scene.has_gaussians() ? "GAUSSIAN RINGS" : "NO GAUSSIANS";
@@ -3008,12 +3219,14 @@ void draw_viewport_panel(App& app) {
             ? reinterpret_cast<ImTextureID>(app.preview.display.descriptor)
             : ImTextureID{};
         input.has_render = app.preview.display.descriptor &&
-                           gpu::consumed_timeline_value() > 0;
+                           qa_capture_frame_ready(app);
         input.render_live = live_preview_active(app);
         input.has_model = app.has_model;
+        input.external_alignment = has_external_dataset(app);
         draw_image_qa(
             app.image_qa, app.image_qa_session, input, view_min, view_max);
         sync_qa_selection_to_preview(app, previous);
+        ensure_dataset_scene_loaded(app);
         ensure_qa_preview(app);
     } else if (live_preview_active(app)) {
         draw_training_tab(app, view_min, view_max);
@@ -3815,6 +4028,7 @@ int main(const int argc, char** argv) {
                     theme::warning);
         }
         poll_scene_load(app);
+        poll_alignment_preview(app);
         poll_camera_photos(app);
 
         if (app.smoke_mode) {

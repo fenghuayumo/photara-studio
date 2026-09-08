@@ -129,5 +129,8 @@ struct ExternalPreview {
 };
 
 std::uint64_t consumed_timeline_value();
+// Timeline value of a trainer frame that is signalled but not yet consumed.
+// Zero when nothing is pending.
+std::uint64_t ready_timeline_value();
 
 }  // namespace editor::gpu

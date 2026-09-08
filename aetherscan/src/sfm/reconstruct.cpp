@@ -6,6 +6,7 @@
 #include "sfm/pair_weighting.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
+#include "sfm/submap_recovery.hpp"
 
 #include <Eigen/Eigenvalues>
 #include <Eigen/QR>
@@ -1038,6 +1039,51 @@ AlignmentObservability analyze_alignment_observability(const Scene& scene) {
     result.constraint_edges =
         static_cast<unsigned>(edges.size()) + similarity_constraints;
     result.reliable_views = largest_size;
+    // A resected singleton need not have independent local depth. Certify it
+    // only from depths recomputed exclusively in the frozen reliable map,
+    // never from a jointly triangulated parent point or newly certified view.
+    const auto stable_mask = result.reliable;
+    std::vector<PointScatter> resection_support(scene.images.size());
+    std::vector<std::unordered_set<Index>> supported_features(scene.images.size());
+    std::vector<std::unordered_set<unsigned>> supported_cells(scene.images.size());
+    TriangulationOptions tri;
+    tri.reproj_threshold_px = 2.F;
+    tri.min_angle_deg = 1.F;
+    tri.split_tracks = false;
+    if (largest_size < scene.registered_count()) for (const auto& source : scene.tracks) {
+        Track anchor;
+        std::vector<Observation> targets;
+        std::unordered_set<Index> stable_images;
+        for (std::size_t o = 0; o < std::min<std::size_t>(source.num_inliers, source.observations.size()); ++o) {
+            const auto& obs = source.observations[o];
+            if (obs.image_id >= scene.images.size() || !scene.images[obs.image_id].registered) continue;
+            if (stable_mask[obs.image_id]) {
+                if (stable_images.insert(obs.image_id).second) anchor.observations.push_back(obs);
+            } else targets.push_back(obs);
+        }
+        if (targets.empty() || anchor.observations.size() < 2 || triangulate_track(anchor, scene, tri) < 2) continue;
+        for (const auto& obs : targets) {
+            const auto& image = scene.images[obs.image_id];
+            if (image.camera_id >= scene.cameras.size() || obs.feature_id >= image.features.keypoints.size()) continue;
+            const auto& camera = scene.camera_of(image);
+            const auto& measured = image.features.keypoints[obs.feature_id];
+            Vec2 pixel;
+            if (!camera.project_checked(image.pose.transform_world_to_camera(anchor.position), pixel) ||
+                (pixel - Vec2(measured.x, measured.y)).norm() > 2.0 ||
+                !supported_features[obs.image_id].insert(obs.feature_id).second) continue;
+            resection_support[obs.image_id].add(anchor.position);
+            const auto x = static_cast<unsigned>(std::clamp(4.F * measured.x / std::max(1u, camera.width), 0.F, 3.F));
+            const auto y = static_cast<unsigned>(std::clamp(4.F * measured.y / std::max(1u, camera.height), 0.F, 3.F));
+            supported_cells[obs.image_id].insert(y * 4 + x);
+        }
+    }
+    for (Index id = 0; id < scene.images.size(); ++id) {
+        if (!result.reliable[id] && resection_support[id].count >= 40 &&
+            supported_cells[id].size() >= 3 && resection_support[id].constrains_similarity()) {
+            result.reliable[id] = 1;
+            ++result.reliable_views;
+        }
+    }
     result.unreliable_views = scene.registered_count() - result.reliable_views;
     return result;
 }
@@ -1195,6 +1241,9 @@ ReconstructionSummary run_global_mapping(
 
     filter_tracks(scene, 6.F, 1.F, 0.F, 0.F);
 
+    if (fallback_resection.checkpoint_callback)
+        fallback_resection.checkpoint_callback(scene);
+
     // Stage 1: structure/translation only. Opening focal this early lets a
     // weak global layout absorb into intrinsics (cloth3: 900 -> ~810).
     BundleOptions bundle;
@@ -1226,6 +1275,8 @@ ReconstructionSummary run_global_mapping(
         return summary;
     }
     bool preserve_orbit_centers = false;
+    if (fallback_resection.checkpoint_callback)
+        fallback_resection.checkpoint_callback(scene);
     // A temporarily disconnected camera is recovered below. Delay the orbit
     // probe until that camera has an anchored pose; otherwise the strict
     // complete-sequence check would silently skip hierarchical single-cluster
@@ -1409,6 +1460,12 @@ ReconstructionSummary reconstruct(
             prune_unsupported_registrations(
                 scene_out, config.minimum_final_observations_per_image,
                 config.maximum_final_reprojection_error_pixels);
+            if (!recover_stable_resections(scene_out).empty())
+                prune_unsupported_registrations(
+                    scene_out, config.minimum_final_observations_per_image,
+                    config.maximum_final_reprojection_error_pixels);
+            if (config.resection.checkpoint_callback)
+                config.resection.checkpoint_callback(scene_out);
             return summarize_scene(scene_out);
         }
     }
@@ -1550,7 +1607,13 @@ ReconstructionSummary reconstruct(
     prune_unsupported_registrations(
         scene_out, config.minimum_final_observations_per_image,
         config.maximum_final_reprojection_error_pixels);
+    if (!recover_stable_resections(scene_out).empty())
+        prune_unsupported_registrations(
+            scene_out, config.minimum_final_observations_per_image,
+            config.maximum_final_reprojection_error_pixels);
     summary = summarize_scene(scene_out);
+    if (config.resection.checkpoint_callback)
+        config.resection.checkpoint_callback(scene_out);
     if (summary.valid)
         checkpoints.save_scene(
             CheckpointStage::reconstruction, mapping_key, scene_out);

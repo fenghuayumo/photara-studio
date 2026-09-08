@@ -123,6 +123,7 @@ std::uint32_t device_node_mask() { return g_device_node_mask; }
 bool swapchain_needs_rebuild() { return g_rebuild_swapchain; }
 void clear_swapchain_rebuild() { g_rebuild_swapchain = false; }
 std::uint64_t consumed_timeline_value() { return g_consumed_value; }
+std::uint64_t ready_timeline_value() { return g_ready_value; }
 
 void create_context(ImVector<const char*> extensions) {
     std::uint32_t count{};
