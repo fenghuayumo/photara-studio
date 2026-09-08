@@ -188,7 +188,7 @@ float sample_rgb(
 std::pair<float, float> source_coordinate(
     const mvs::MvsView& view, const std::uint32_t x, const std::uint32_t y,
     const Camera& output_camera, const io::RgbImage& source) {
-    const bool distorted = view.k1 != 0.F || view.k2 != 0.F ||
+    const bool distorted = view.source_model == CameraModel::opencv_fisheye || view.k1 != 0.F || view.k2 != 0.F ||
                            view.p1 != 0.F || view.p2 != 0.F;
     if (!distorted) {
         const float scale_x =
@@ -202,15 +202,10 @@ std::pair<float, float> source_coordinate(
         (static_cast<double>(x) - output_camera.cx) / output_camera.fx;
     const double yn =
         (static_cast<double>(y) - output_camera.cy) / output_camera.fy;
-    const double radius2 = xn * xn + yn * yn;
-    const double radial = 1.0 + view.k1 * radius2 +
-                          view.k2 * radius2 * radius2;
-    const double xd = xn * radial + 2.0 * view.p1 * xn * yn +
-                      view.p2 * (radius2 + 2.0 * xn * xn);
-    const double yd = yn * radial + view.p1 * (radius2 + 2.0 * yn * yn) +
-                      2.0 * view.p2 * xn * yn;
-    return {static_cast<float>(view.src_fx * xd + view.src_cx),
-            static_cast<float>(view.src_fy * yd + view.src_cy)};
+    const auto pixel = project_camera_plane(view.source_model, xn, yn,
+        view.k1, view.k2, view.p1, view.p2);
+    return {static_cast<float>(view.src_fx * pixel.x + view.src_cx),
+            static_cast<float>(view.src_fy * pixel.y + view.src_cy)};
 }
 std::filesystem::path find_mask_path(
     const std::filesystem::path& directory,

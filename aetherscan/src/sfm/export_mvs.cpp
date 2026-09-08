@@ -119,6 +119,10 @@ void export_openmvs_interface(
     const std::filesystem::path& path,
     const ExportMvsOptions& options) {
     core::StageScope stage("sfm.export_openmvs");
+    for (const auto& image : scene.images)
+        if (image.registered && scene.camera_of(image).model == CameraModel::opencv_fisheye)
+            throw std::runtime_error(
+                "OpenMVS interface requires rectified pinhole images; use .asfm for fisheye alignment");
     std::vector<std::uint32_t> registered;
     registered.reserve(scene.images.size());
     for (std::uint32_t i = 0; i < scene.images.size(); ++i) {

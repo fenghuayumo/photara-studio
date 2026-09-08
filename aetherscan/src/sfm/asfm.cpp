@@ -85,6 +85,7 @@ void write_payload(
             record.value(camera.p2);
             record.value(camera.focal_prior);
             record.value(static_cast<std::uint8_t>(camera.trust_intrinsics));
+            record.value(static_cast<std::uint32_t>(camera.model));
         });
     }
 
@@ -147,6 +148,12 @@ Scene read_payload(BufferReader& reader, const AsfmOptions& options) {
             camera.p2 = record.value<double>();
             camera.focal_prior = record.value<double>();
             camera.trust_intrinsics = record.value<std::uint8_t>() != 0;
+            if (record.remaining() >= sizeof(std::uint32_t)) {
+                const auto model = record.value<std::uint32_t>();
+                if (model > static_cast<std::uint32_t>(CameraModel::opencv_fisheye))
+                    throw std::runtime_error("Unsupported SfM camera model");
+                camera.model = static_cast<CameraModel>(model);
+            }
         });
     }
 
@@ -221,7 +228,9 @@ std::vector<std::uint8_t> encode_asfm(
     BufferWriter file;
     file.bytes(k_magic.data(), k_magic.size());
     file.value(k_asfm_version);
-    file.value(k_asfm_min_reader);
+    const bool fisheye = std::any_of(scene.cameras.begin(), scene.cameras.end(),
+        [](const PinholeCamera& camera) { return camera.model == CameraModel::opencv_fisheye; });
+    file.value(fisheye ? k_asfm_version : k_asfm_min_reader);
     file.value(payload.size());
     file.value(payload.checksum());
     file.bytes(payload.buffer().data(), payload.buffer().size());

@@ -60,6 +60,7 @@ namespace {
 struct ReconstructCli {
     std::filesystem::path images_dir;
     double focal_pixels{};
+    aetherscan::CameraModel camera_model{aetherscan::CameraModel::automatic};
     std::string mode{"global"};
     bool trust_focal{false};
     bool structural_pair_expansion{false};
@@ -404,12 +405,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("h,help", "Print usage")
         ("i,images", "Image directory", cxxopts::value<std::string>())
         ("f,focal",
-         "Initial focal length in pixels (0 = 1.2 * max(width,height); "
+         "Initial focal in pixels (0 = max dimension * 1.2, fisheye * 0.5; "
          "refined by view-graph consensus + BA unless trusted)",
          cxxopts::value<double>()->default_value("0"))
         ("m,mode",
          "Reconstruction mode: global (default), incremental, or hierarchical",
          cxxopts::value<std::string>()->default_value("global"))
+        ("camera-model", "Camera model: auto | pinhole | opencv_fisheye (alias fisheye)",
+         cxxopts::value<std::string>()->default_value("auto"))
         ("trust-focal", "Lock externally calibrated --focal and zero distortion",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("sfm-structural-rescue", "Experimental bridge-branch pair expansion (not validated for production)",
@@ -786,6 +789,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
 
     ReconstructCli cli;
     cli.images_dir = utf8_to_path(result["images"].as<std::string>());
+    const auto camera_model = result["camera-model"].as<std::string>();
+    if (camera_model == "fisheye" || camera_model == "opencv_fisheye")
+        cli.camera_model = aetherscan::CameraModel::opencv_fisheye;
+    else if (camera_model == "auto")
+        cli.camera_model = aetherscan::CameraModel::automatic;
+    else if (camera_model == "pinhole")
+        cli.camera_model = aetherscan::CameraModel::pinhole;
+    else
+        throw std::invalid_argument("--camera-model must be auto, pinhole or opencv_fisheye");
     cli.focal_pixels = result["focal"].as<double>();
     cli.mode = result["mode"].as<std::string>();
     cli.trust_focal = result["trust-focal"].as<bool>();
@@ -1474,6 +1486,7 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.dataset_format = cli.dataset_format;
     settings.dataset_initial_cloud = cli.dense_ply;
     settings.splat_output_format = cli.splat_output_format;
+    settings.camera_model = static_cast<int>(cli.camera_model);
     if (cli.mode == "incremental") settings.sfm_mode = 1;
     else if (cli.mode == "hierarchical") settings.sfm_mode = 2;
     settings.max_features = cli.max_features;
@@ -1736,7 +1749,7 @@ std::filesystem::path write_sfm_diagnostics(
               "reprojection_p95_px,reprojection_max_px,previous_center_step,"
               "previous_rotation_deg,alignment_reliable,active_pairs,cycle_supported_pairs,"
               "cycle_inconsistent_pairs,degenerate_pairs,pair_weight_sum,"
-              "pair_weight_max,weighted_mean_ray_angle_deg\n";
+              "pair_weight_max,weighted_mean_ray_angle_deg,camera_model\n";
 
     std::vector<std::tuple<double, std::size_t, double, double>> worst_images;
     std::vector<double> trajectory_steps;
@@ -1805,7 +1818,9 @@ std::filesystem::path write_sfm_diagnostics(
                << graph.cycle_inconsistent_pairs << ','
                << graph.degenerate_pairs << ',' << graph.composite_weight_sum
                << ',' << graph.maximum_composite_weight << ','
-               << mean_ray_angle_deg << '\n';
+               << mean_ray_angle_deg << ','
+               << (camera && camera->model == aetherscan::CameraModel::opencv_fisheye
+                       ? "opencv_fisheye" : "pinhole") << '\n';
     }
 
     const auto pair_csv_path = reconstruction_path.parent_path() /
@@ -3013,6 +3028,7 @@ int main(int argc, char** argv) {
             config.mode = aetherscan::sfm::ReconstructionMode::hierarchical;
         else
             config.mode = aetherscan::sfm::ReconstructionMode::incremental;
+        config.frontend.camera_model = cli.camera_model;
         config.frontend.focal_pixels = cli.focal_pixels;
         config.frontend.trust_focal_pixels = cli.trust_focal;
         config.frontend.structural_pair_expansion = cli.structural_pair_expansion;

@@ -9,7 +9,7 @@
 
 namespace aetherscan::sfm {
 
-inline constexpr std::uint32_t k_asfm_version = 1;
+inline constexpr std::uint32_t k_asfm_version = 2;
 inline constexpr std::uint32_t k_asfm_min_reader = 1;
 
 struct AsfmOptions {

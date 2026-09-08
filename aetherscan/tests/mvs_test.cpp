@@ -134,6 +134,10 @@ void test_build_mvs_scene_samples_sparse_colors() {
             std::abs(color.y() - 0.5F) < 1e-3F &&
             std::abs(color.z()) < 1e-3F,
         "SfM sparse point did not average photo colours");
+    source.cameras[0].model = aetherscan::CameraModel::opencv_fisheye;
+    const auto fisheye_scene = build_mvs_scene(source, options);
+    require(fisheye_scene.views[0].source_model == aetherscan::CameraModel::opencv_fisheye,
+            "MVS must preserve the source fisheye projection for rectification");
     std::filesystem::remove_all(root);
 }
 

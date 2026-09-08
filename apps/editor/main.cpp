@@ -581,6 +581,7 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
             ? "sog"
             : app.settings.splat_format == 3 ? "spz"
             : app.settings.splat_format == 4 ? "glb" : "auto";
+    settings.camera_model = app.settings.camera_model;
     settings.sfm_mode = app.settings.sfm_mode;
     settings.reuse_cache = app.settings.reuse_cache;
     settings.max_features = static_cast<unsigned>(
@@ -628,6 +629,7 @@ void apply_project_settings(
         app.settings.splat_format = 4;
     else
         app.settings.splat_format = 0;
+    app.settings.camera_model = settings.camera_model;
     app.settings.sfm_mode = settings.sfm_mode;
     app.settings.reuse_cache = settings.reuse_cache;
     app.settings.max_features = static_cast<int>(settings.max_features);
@@ -3396,6 +3398,22 @@ Action draw_inspector(App& app) {
         ImGui::SetNextItemWidth(-1.F);
         const char* modes[] = {"Global", "Incremental", "Hierarchical"};
         ImGui::Combo("##sfm_mode", &app.settings.sfm_mode, modes, 3);
+        theme::caption("Camera model");
+        ImGui::SetNextItemWidth(-1.F);
+        const char* camera_models[] = {"Auto", "Pinhole", "OpenCV Fisheye"};
+        int camera_choice = app.settings.camera_model == 2 ? 0 : app.settings.camera_model + 1;
+        if (ImGui::Combo("##camera_model", &camera_choice, camera_models, 3))
+            app.settings.camera_model = camera_choice == 0 ? 2 : camera_choice - 1;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Auto compares matched image geometry and EXIF lens hints.\n"
+                              "Ambiguous results use Pinhole. You can override the model.");
+        std::string result_model;
+        for (const auto& view : app.scene.views) {
+            if (!view.registered) continue;
+            if (result_model.empty()) result_model = view.camera_model;
+            else if (result_model != view.camera_model) { result_model = "Mixed"; break; }
+        }
+        theme::metric("Result camera", result_model.empty() ? "Pending alignment" : result_model.c_str());
         theme::caption("Max features per image");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputInt("##max_features", &app.settings.max_features, 1000, 5000);

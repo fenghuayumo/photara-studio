@@ -1,4 +1,5 @@
 #include "sfm/geometry.hpp"
+#include "sfm/camera_selection.hpp"
 #include "sfm/triangulation.hpp"
 #include "sfm/tracks.hpp"
 
@@ -52,6 +53,85 @@ int main() {
         (distorted.unproject_normalized(distorted_pixel) -
          distorted_ray.normalized()).norm() < 1e-7,
         "distorted project/unproject should be consistent");
+
+    PinholeCamera fisheye = make_camera(400.0);
+    fisheye.model = aetherscan::CameraModel::opencv_fisheye;
+    fisheye.k1 = 0.025; fisheye.k2 = -0.002;
+    fisheye.p1 = 0.0002; fisheye.p2 = -0.00001;
+    for (double angle : {0.0, 1e-9, 0.4, 0.9, 1.4, 1.55}) {
+        const Vec3 ray(std::sin(angle)*0.8, std::sin(angle)*0.6, std::cos(angle));
+        expect((fisheye.unproject_normalized(fisheye.project(ray))-ray).norm() < 1e-8,
+               "fisheye optical axis and wide-angle round trip");
+        const double t2 = angle*angle;
+        const double radius = angle*(1+t2*(0.025+t2*(-0.002+t2*(0.0002-t2*0.00001))));
+        expect((fisheye.project(ray)-Vec2(640+400*radius*0.8,360+400*radius*0.6)).norm()<1e-8,
+               "fisheye projection matches angular polynomial");
+    }
+    std::vector<Vec2> fish1, fish2;
+    std::vector<Vec3> fish_points;
+    Pose3D fish_pose;
+    fish_pose.R = Eigen::AngleAxisd(0.07, Vec3::UnitY()).toRotationMatrix();
+    fish_pose.C = Vec3(0.5, 0.03, 0.0);
+    std::mt19937 fish_rng(82);
+    std::uniform_real_distribution<double> fish_xy(-3.0,3.0), fish_z(2.0,5.0);
+    for (int i=0; i<200; ++i) {
+        Vec3 point(fish_xy(fish_rng),fish_xy(fish_rng),fish_z(fish_rng));
+        fish_points.push_back(point);
+        fish1.push_back(fisheye.project(point));
+        fish2.push_back(fisheye.project(fish_pose.transform_world_to_camera(point)));
+    }
+    // An unlocked focal still uses the fisheye E solver, never pinhole self-calibration.
+    fisheye.trust_intrinsics = false;
+    const auto fish_relative = aetherscan::sfm::estimate_relative_pose(fish1,fish2,fisheye,fisheye);
+    expect(fish_relative.success && fish_relative.num_inliers >= 190,
+           "fisheye two-view estimation");
+    if (fish_relative.success) {
+        expect((fish_relative.pose.R-fish_pose.R).norm()<1e-4, "fisheye relative rotation");
+        expect(fish_relative.pose.C.normalized().dot(fish_pose.C.normalized())>0.9999,
+               "fisheye translation direction");
+    }
+    std::vector<Vec3> fish_bearings;
+    for (const auto& pixel : fish2) fish_bearings.push_back(fisheye.unproject_normalized(pixel));
+    const auto fish_absolute = aetherscan::sfm::estimate_absolute_pose(fish_bearings,fish_points,fisheye);
+    expect(fish_absolute.success, "fisheye absolute pose estimation");
+
+    // Automatic model selection uses identical raw correspondences for each hypothesis.
+    for (const auto model : {aetherscan::CameraModel::pinhole,
+                             aetherscan::CameraModel::opencv_fisheye}) {
+        auto truth = make_camera(640);
+        truth.model = model;
+        std::vector<aetherscan::sfm::CameraModelProbe> probes;
+        for (int pair=0; pair<3; ++pair) {
+            aetherscan::sfm::CameraModelProbe probe;
+            Pose3D other;
+            other.C = Vec3(0.4+0.15*pair,0.05*pair,0.1);
+            other.R = Eigen::AngleAxisd(0.04*pair,Vec3::UnitY()).toRotationMatrix();
+            std::mt19937 random(50+pair);
+            std::uniform_real_distribution<double> xy(-2.8,2.8), depth(2,5);
+            for (int i=0; i<500; ++i) {
+                const Vec3 point(xy(random),xy(random),depth(random));
+                const Vec2 a=truth.project(point), b=truth.project(other.transform_world_to_camera(point));
+                if (a.x()<0 || a.x()>=1280 || b.x()<0 || b.x()>=1280 ||
+                    a.y()<0 || a.y()>=720 || b.y()<0 || b.y()>=720) continue;
+                probe.first.push_back(a); probe.second.push_back(b);
+            }
+            probes.push_back(std::move(probe));
+        }
+        const auto selection = aetherscan::sfm::select_camera_model(truth,probes);
+        std::cout << "auto model=" << static_cast<int>(model) << " selected=" << static_cast<int>(selection.model)
+                  << " pinhole=" << selection.pinhole_score << " fish=" << selection.fisheye_score << '\n';
+        expect(selection.model == model, "automatic camera model from synthetic geometry");
+        if (model == aetherscan::CameraModel::opencv_fisheye)
+            expect(selection.confident, "wide-angle fisheye evidence is decisive");
+        else {
+            const auto calibrated = aetherscan::sfm::select_camera_model(truth,probes,640);
+            expect(calibrated.model == model && calibrated.confident,
+                   "known focal distinguishes pinhole from fisheye");
+        }
+    }
+    const auto ambiguous = aetherscan::sfm::select_camera_model(make_camera(),{});
+    expect(ambiguous.model == aetherscan::CameraModel::pinhole && !ambiguous.confident,
+           "insufficient model evidence falls back to pinhole");
 
     // Synthetic two-view relative pose
     const PinholeCamera cam = make_camera();

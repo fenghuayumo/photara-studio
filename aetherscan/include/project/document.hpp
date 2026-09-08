@@ -27,6 +27,7 @@ struct Settings {
     std::string splat_output_format{"ply"};
     // Optional external trained Gaussian file used by the editor preview.
     std::filesystem::path splat_model_source;
+    int camera_model = 0;  // 0 pinhole, 1 OpenCV fisheye, 2 automatic
     int sfm_mode = 0;  // 0 global, 1 incremental, 2 hierarchical
     bool reuse_cache = false;
     unsigned max_features = 27'000;

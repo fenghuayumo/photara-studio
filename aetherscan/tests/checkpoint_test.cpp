@@ -27,6 +27,7 @@ int main() {
         scene.cameras.push_back(
             {0, 1280, 720, 900.0, 900.0, 640.0, 360.0});
         scene.cameras[0].focal_prior = 875.0;
+        scene.cameras[0].model = CameraModel::opencv_fisheye;
         sfm::Image image;
         image.id = 0;
         image.camera_id = 0;
@@ -72,6 +73,7 @@ int main() {
             restored.images[0].path != scene.images[0].path ||
             restored.images[0].features.descriptors.size() != 2 ||
             restored.cameras[0].focal_prior != 875.0 ||
+            restored.cameras[0].model != CameraModel::opencv_fisheye ||
             restored.pairs.size() != 1 ||
             restored.pairs[0].estimated_focal != pair.estimated_focal ||
             restored.pairs[0].weight_connectivity != 0.6F ||

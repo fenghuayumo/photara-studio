@@ -27,13 +27,9 @@ namespace {
 
 [[nodiscard]] sfm::Vec2 project_distorted(
     const mvs::MvsView& view, const double xn, const double yn) {
-    const double r2 = xn * xn + yn * yn;
-    const double radial = 1.0 + view.k1 * r2 + view.k2 * r2 * r2;
-    const double xd =
-        xn * radial + 2.0 * view.p1 * xn * yn + view.p2 * (r2 + 2.0 * xn * xn);
-    const double yd =
-        yn * radial + view.p1 * (r2 + 2.0 * yn * yn) + 2.0 * view.p2 * xn * yn;
-    return {view.src_fx * xd + view.src_cx, view.src_fy * yd + view.src_cy};
+    const auto pixel = project_camera_plane(view.source_model, xn, yn,
+        view.k1, view.k2, view.p1, view.p2);
+    return {view.src_fx * pixel.x + view.src_cx, view.src_fy * pixel.y + view.src_cy};
 }
 
 [[nodiscard]] std::filesystem::path find_texture_mask(
@@ -94,7 +90,7 @@ std::vector<TextureViewImage> load_texture_views(
                 if (!mask_path.empty()) source_mask = io::load_gray(mask_path);
             }
             const bool has_distortion =
-                view.k1 != 0.F || view.k2 != 0.F || view.p1 != 0.F ||
+                view.source_model == CameraModel::opencv_fisheye || view.k1 != 0.F || view.k2 != 0.F || view.p1 != 0.F ||
                 view.p2 != 0.F;
 
             auto sample_channel =

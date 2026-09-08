@@ -1,4 +1,5 @@
 #include "ba/optimizer.hpp"
+#include "../src/ba/reprojection_detail.cuh"
 
 #include <cmath>
 #include <iostream>
@@ -108,6 +109,78 @@ Problem make_grouped_intrinsics_problem() {
 }  // namespace
 
 int main() {
+    // Central differences independently check the full BA chain, including
+    // four angular distortion coefficients and the optical-axis limit.
+    for (const Point3 point : {Point3{0,0,3}, Point3{2.8,-1.7,1.0}}) {
+        Pose pose;
+        PinholeIntrinsics intr{430,410,320,240,0.02,-0.003,0.0002,-0.00001};
+        intr.model = aetherscan::CameraModel::opencv_fisheye;
+        LinearizerOptions opt;
+        opt.huber_delta = 0; opt.optimize_focal = true;
+        opt.optimize_aspect_ratio = true; opt.optimize_principal_point = true;
+        opt.optimize_distortion = true;
+        LinearizedObservation value;
+        detail::linearize_observation(pose,intr,point,320,240,1,opt,value);
+        if (!value.valid) return 20;
+        for (int column=0; column<11; ++column) {
+            auto plus=intr, minus=intr; auto pp=point, pm=point;
+            double* ip[] = {&plus.fx,&plus.fy,&plus.cx,&plus.cy,&plus.k1,&plus.k2,&plus.p1,&plus.p2};
+            double* im[] = {&minus.fx,&minus.fy,&minus.cx,&minus.cy,&minus.k1,&minus.k2,&minus.p1,&minus.p2};
+            double* xp[] = {&pp.x,&pp.y,&pp.z};
+            double* xm[] = {&pm.x,&pm.y,&pm.z};
+            const double h=1e-6;
+            if (column<8) { *ip[column]+=h; *im[column]-=h; }
+            else { *xp[column-8]+=h; *xm[column-8]-=h; }
+            LinearizedObservation vp,vm;
+            detail::linearize_observation(pose,plus,pp,320,240,1,opt,vp);
+            detail::linearize_observation(pose,minus,pm,320,240,1,opt,vm);
+            for (int row=0; row<2; ++row) {
+                const double numeric=(vp.residual[row]-vm.residual[row])/(2*h);
+                const double analytic=column<8 ? value.intrinsic_jacobian[row*8+column]
+                    : value.point_jacobian[row*3+column-8];
+                if (std::abs(numeric-analytic)>1e-4*(1+std::abs(numeric))) {
+                    std::cerr << "fisheye Jacobian mismatch " << column << '\n'; return 21;
+                }
+            }
+        }
+    }
+
+    Problem fish = make_problem();
+    fish.intrinsics[0].model = aetherscan::CameraModel::opencv_fisheye;
+    for (std::size_t i=0; i<fish.observations.size(); ++i) {
+        const double x=(fish.observations.x[i]-640)/800;
+        const double y=(fish.observations.y[i]-360)/800;
+        const double r=std::hypot(x,y);
+        const double scale=r>0 ? std::atan(r)/r : 1;
+        fish.observations.x[i]=640+800*x*scale;
+        fish.observations.y[i]=360+800*y*scale;
+    }
+    const auto fish_original = fish;
+    OptimizerOptions fish_options;
+    fish_options.maximum_iterations=25;
+    fish_options.huber_delta=100;
+    const double fish_initial=evaluate_cost(fish,100);
+    const auto fish_summary=optimize_cpu(fish,fish_options);
+    if (!fish_summary.usable() || fish_summary.final_cost>fish_initial*1e-3) {
+        std::cerr << "fisheye CPU BA failed to converge\n"; return 22;
+    }
+#if defined(AETHERSCAN_HAS_CUDA)
+    if (CudaLinearizer::is_available()) {
+        LinearizationOutput cpu, gpu;
+        linearize_cpu(fish_original,cpu);
+        CudaLinearizer device;
+        device.upload(fish_original); device.evaluate(); device.download(gpu);
+        for (std::size_t i=0; i<cpu.observations.size(); ++i)
+            for (int axis=0; axis<2; ++axis)
+                if (std::abs(cpu.observations[i].residual[axis]-gpu.observations[i].residual[axis])>1e-8)
+                    return 23;
+        auto fish_gpu=fish_original;
+        const auto gpu_summary=optimize_cuda(fish_gpu,fish_options);
+        if (!gpu_summary.usable() || gpu_summary.final_cost>fish_initial*1e-3) {
+            std::cerr << "fisheye CUDA BA failed to converge\n"; return 24;
+        }
+    }
+#endif
     Problem problem = make_problem();
     Problem gpu_problem = problem;
     const double initial = evaluate_cost(problem);

@@ -1664,12 +1664,9 @@ double evaluate_cost(const Problem& problem, const double huber_delta, const dou
             cost += problem.observations.weight[observation] * 1e12;
             continue;
         }
-        const double x = px / pz, y = py / pz, radius2 = x * x + y * y;
-        const double radial = 1.0 + intrinsics.k1 * radius2 + intrinsics.k2 * radius2 * radius2;
-        const double distorted_x = x * radial + 2.0 * intrinsics.p1 * x * y +
-                                   intrinsics.p2 * (radius2 + 2.0 * x * x);
-        const double distorted_y = y * radial + intrinsics.p1 * (radius2 + 2.0 * y * y) +
-                                   2.0 * intrinsics.p2 * x * y;
+        const auto projection = project_camera_plane(intrinsics.model, px/pz, py/pz,
+            intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2);
+        const double distorted_x = projection.x, distorted_y = projection.y;
         const double rx = intrinsics.fx * distorted_x + intrinsics.cx - problem.observations.x[observation];
         const double ry = intrinsics.fy * distorted_y + intrinsics.cy - problem.observations.y[observation];
         const double norm = std::sqrt(rx * rx + ry * ry);

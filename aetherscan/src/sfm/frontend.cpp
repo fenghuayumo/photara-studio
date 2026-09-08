@@ -7,6 +7,8 @@
 #include "io/image.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/tracks.hpp"
+#include "sfm/camera_selection.hpp"
+#include <cctype>
 #include "sfm/submap_recovery.hpp"
 
 #include <algorithm>
@@ -198,6 +200,8 @@ FrontEndStageKeys make_stage_keys(
     append_cache_build_identity(geometry);
     geometry.append(matches.value());
     geometry.append(options.focal_pixels);
+    geometry.append(static_cast<std::uint32_t>(options.camera_model));
+    geometry.append_string("automatic-camera-selection-v1");
     geometry.append(options.trust_focal_pixels);
     append_relative_options(geometry, options.relative);
     geometry.append(options.progressive_pair_expansion);
@@ -230,18 +234,23 @@ FrontEndStageKeys make_stage_keys(
 }
 
 void initialize_cameras(
-    Scene& scene, const double focal_pixels, const bool trust_focal_pixels) {
+    Scene& scene, const double focal_pixels, const bool trust_focal_pixels,
+    const CameraModel requested_model) {
+    const CameraModel model = requested_model == CameraModel::automatic
+        ? CameraModel::pinhole : requested_model;
     scene.cameras.clear();
     scene.cameras.reserve(scene.images.size());
     for (Index i = 0; i < scene.images.size(); ++i) {
         const auto& features = scene.images[i].features;
         PinholeCamera camera;
+        camera.model = model;
         camera.width = features.image_width;
         camera.height = features.image_height;
         const double focal =
             focal_pixels > 0
                 ? focal_pixels
-                : 1.2 * std::max(camera.width, camera.height);
+                : (model == CameraModel::opencv_fisheye ? 0.5 : 1.2) *
+                  std::max(camera.width, camera.height);
         camera.fx = focal;
         camera.fy = focal;
         camera.focal_prior = focal;
@@ -264,6 +273,57 @@ void initialize_cameras(
             scene.images[i].camera_id =
                 static_cast<Index>(existing - scene.cameras.begin());
         }
+    }
+}
+
+void select_scene_camera_models(
+    Scene& scene, const std::vector<RawPairMatches>& raw_pairs,
+    const std::vector<PairCandidate>& candidates, const FrontEndOptions& options) {
+    for (auto& camera : scene.cameras) {
+        std::vector<std::size_t> eligible;
+        for (std::size_t i=0; i<raw_pairs.size(); ++i) {
+            const auto& pair = raw_pairs[i];
+            if (i >= candidates.size() || candidates[i].zero_baseline || pair.matches.size()<40 ||
+                pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size()) continue;
+            if (scene.images[pair.id1].camera_id == camera.id &&
+                scene.images[pair.id2].camera_id == camera.id) eligible.push_back(i);
+        }
+        std::vector<CameraModelProbe> probes;
+        const std::size_t count = std::min<std::size_t>(8, eligible.size());
+        for (std::size_t i=0; i<count; ++i) {
+            const auto& pair = raw_pairs[eligible[i*eligible.size()/count]];
+            CameraModelProbe probe;
+            const auto& first = scene.images[pair.id1].features.keypoints;
+            const auto& second = scene.images[pair.id2].features.keypoints;
+            const std::size_t samples = std::min<std::size_t>(400,pair.matches.size());
+            for (std::size_t j=0; j<samples; ++j) {
+                const auto& match = pair.matches[j*pair.matches.size()/samples];
+                if (match.query>=first.size() || match.train>=second.size()) continue;
+                probe.first.emplace_back(first[match.query].x,first[match.query].y);
+                probe.second.emplace_back(second[match.train].x,second[match.train].y);
+            }
+            probes.push_back(std::move(probe));
+        }
+        bool lens_hint = false;
+        unsigned inspected = 0;
+        for (const auto& image : scene.images) {
+            if (image.camera_id != camera.id) continue;
+            auto lens = io::load_lens_description(image.path);
+            std::transform(lens.begin(),lens.end(),lens.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            lens_hint = lens_hint || lens.find("fisheye") != std::string::npos ||
+                lens.find("fish-eye") != std::string::npos;
+            if (++inspected == 3) break;
+        }
+        core::Logger::instance().info("auto camera: evaluating group=",camera.id," pairs=",probes.size());
+        const auto selected = select_camera_model(camera,probes,options.focal_pixels,lens_hint);
+        camera.model = selected.model;
+        camera.fx = camera.fy = camera.focal_prior = selected.focal_pixels;
+        core::Logger::instance().info("auto camera: group=",camera.id,
+            " selected=",camera.model == CameraModel::opencv_fisheye ? "opencv_fisheye" : "pinhole",
+            " focal=",camera.focal()," pinhole_score=",selected.pinhole_score,
+            " fisheye_score=",selected.fisheye_score," informative_pairs=",selected.informative_pairs,
+            " confident=",selected.confident," reason=",selected.reason);
     }
 }
 
@@ -441,7 +501,7 @@ bool calibrate_view_graph_focals(Scene& scene) {
         if (first_group != second_group || first_group >= scene.cameras.size())
             continue;
         const PinholeCamera& camera = scene.cameras[first_group];
-        if (camera.trust_intrinsics) continue;
+        if (camera.trust_intrinsics || camera.model == CameraModel::opencv_fisheye) continue;
         if (const auto cost =
                 make_fetzer_same_camera_cost(*pair.F, camera))
             grouped[first_group].push_back(*cost);
@@ -450,6 +510,7 @@ bool calibrate_view_graph_focals(Scene& scene) {
     }
 
     for (std::size_t group = 0; group < grouped.size(); ++group) {
+        if (scene.cameras[group].model == CameraModel::opencv_fisheye) continue;
         const auto& costs = grouped[group];
         // openMVS requires a meaningful view-graph consensus rather than
         // trusting a handful of independently degenerate pairs.
@@ -1413,7 +1474,7 @@ void match_and_verify_lightglue(
     // Cameras must exist before geometry verify (uses scene.cameras[camera_id]).
     // Image sizes are only known after phase-1 LightGlue merges.
     initialize_cameras(
-        scene, options.focal_pixels, options.trust_focal_pixels);
+        scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
 
     // Phase 2: sequential geometry verify. Parallel submit previously crashed
     // (0xC0000005) under LightGlue; keep this path simple and robust.
@@ -1583,7 +1644,7 @@ FrontEndResult run_frontend(
                 scene.pairs.push_back(std::move(pair));
             }
             initialize_cameras(
-                scene, options.focal_pixels, options.trust_focal_pixels);
+                scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
             verify_image_snapshot(image_paths, image_fingerprint);
             checkpoints.save_scene(
                 CheckpointStage::features, stage_keys.features, scene);
@@ -1591,7 +1652,7 @@ FrontEndResult run_frontend(
         } else {
             core::Logger::instance().info("checkpoint hit: matches");
             initialize_cameras(
-                scene, options.focal_pixels, options.trust_focal_pixels);
+                scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
             std::vector<ImagePair> pairs(candidates.size());
             core::ProgressReporter geometry_progress(
                 "verify pair geometry", candidates.size());
@@ -1611,6 +1672,19 @@ FrontEndResult run_frontend(
                 if (pair.matches.empty()) continue;
                 scene.pairs.push_back(std::move(pair));
             }
+        }
+
+        if (options.camera_model == CameraModel::automatic) {
+            select_scene_camera_models(scene, raw_pairs, candidates, options);
+            std::vector<ImagePair> pairs(candidates.size());
+            parallel::parallel_for(candidates.size(), threads, [&](const std::size_t i) {
+                auto verified = verify_pair_geometry(scene,candidates[i],raw_pairs[i].matches,options.relative);
+                diagnostics[i] = verified.diagnostics;
+                if (verified.pair) pairs[i] = std::move(*verified.pair);
+            });
+            scene.pairs.clear();
+            for (auto& pair : pairs)
+                if (!pair.matches.empty()) scene.pairs.push_back(std::move(pair));
         }
 
         verify_image_snapshot(
@@ -1694,7 +1768,7 @@ FrontEndResult run_frontend(
         }
 
         initialize_cameras(
-            scene, options.focal_pixels, options.trust_focal_pixels);
+            scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
         // Keep the scene in compact form from this point onward. Retrieval and
         // SiftGPU matching consume uint8 descriptors without permanently
         // expanding the full dataset back to float32.
@@ -1706,7 +1780,7 @@ FrontEndResult run_frontend(
     } else {
         scene.thread_count = parallel::resolve_thread_count(options.thread_count);
         initialize_cameras(
-            scene, options.focal_pixels, options.trust_focal_pixels);
+            scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
         core::Logger::instance().info("checkpoint hit: features");
     }
     result.timing.extract_seconds =
@@ -1917,6 +1991,11 @@ FrontEndResult run_frontend(
         checkpoints.save_matches(stage_keys.matches, raw_pairs);
     } else {
         core::Logger::instance().info("checkpoint hit: matches");
+    }
+    if (options.camera_model == CameraModel::automatic) {
+        select_scene_camera_models(scene, raw_pairs, candidates, options);
+        scene.pairs.clear();
+        geometry_verified_in_pipeline = false;
     }
     if (!geometry_verified_in_pipeline) {
         std::vector<ImagePair> pairs(candidates.size());

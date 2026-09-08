@@ -91,7 +91,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         if (inserted) {
             problem.intrinsics.push_back({
                 camera.fx, camera.fy, camera.cx, camera.cy,
-                camera.k1, camera.k2, camera.p1, camera.p2});
+                camera.k1, camera.k2, camera.p1, camera.p2, camera.model});
             group_to_scene_camera.push_back(image.camera_id);
         }
         problem.pose_intrinsic[i] = group_it->second;

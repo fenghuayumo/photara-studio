@@ -35,7 +35,7 @@ namespace aetherscan::sfm {
 namespace {
 
 constexpr std::array<char, 8> magic{'A', 'E', 'T', 'H', 'C', 'K', 'P', 'T'};
-constexpr std::uint32_t schema_version = 7;
+constexpr std::uint32_t schema_version = 8;
 constexpr std::uint64_t fnv_offset = 14695981039346656037ULL;
 constexpr std::uint64_t fnv_prime = 1099511628211ULL;
 
@@ -437,6 +437,7 @@ void write_scene(
         writer.value(camera.k2);
         writer.value(camera.p1);
         writer.value(camera.p2);
+        writer.value(static_cast<std::uint32_t>(camera.model));
         writer.value(camera.focal_prior);
         writer.value(static_cast<std::uint8_t>(camera.trust_intrinsics));
     }
@@ -566,6 +567,10 @@ Scene read_scene(Reader& reader) {
         camera.k2 = reader.value<double>();
         camera.p1 = reader.value<double>();
         camera.p2 = reader.value<double>();
+        const auto model = reader.value<std::uint32_t>();
+        if (model > static_cast<std::uint32_t>(CameraModel::opencv_fisheye))
+            throw std::runtime_error("Unsupported checkpoint camera model");
+        camera.model = static_cast<CameraModel>(model);
         camera.focal_prior = reader.value<double>();
         camera.trust_intrinsics = reader.value<std::uint8_t>() != 0;
     }

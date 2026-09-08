@@ -221,6 +221,7 @@ struct ProjectSettings {
     std::array<char, 1024> splat_model_source{};
     int splat_format = 0;  // auto/PLY, PLY, SOG, SPZ, GLB
 
+    int camera_model = 2;  // pinhole, OpenCV fisheye, automatic
     int sfm_mode = 0;  // global, incremental, hierarchical
     bool reuse_cache = false;
     int max_features = 27'000;

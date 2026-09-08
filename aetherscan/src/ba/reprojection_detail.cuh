@@ -65,14 +65,10 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
     const double inv_z = 1.0 / pz;
     const double xn = px * inv_z;
     const double yn = py * inv_z;
-    const double r2 = xn * xn + yn * yn;
-    const double radial = 1.0 + intrinsics.k1 * r2 + intrinsics.k2 * r2 * r2;
-    const double x_distorted =
-        xn * radial + 2.0 * intrinsics.p1 * xn * yn +
-        intrinsics.p2 * (r2 + 2.0 * xn * xn);
-    const double y_distorted =
-        yn * radial + intrinsics.p1 * (r2 + 2.0 * yn * yn) +
-        2.0 * intrinsics.p2 * xn * yn;
+    const auto projection = project_camera_plane(intrinsics.model, xn, yn,
+        intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2);
+    const double x_distorted = projection.x;
+    const double y_distorted = projection.y;
 
     const double projected_x = intrinsics.fx * x_distorted + intrinsics.cx;
     const double projected_y = intrinsics.fy * y_distorted + intrinsics.cy;
@@ -82,17 +78,8 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
         return;
     }
 
-    const double radial_slope = intrinsics.k1 + 2.0 * intrinsics.k2 * r2;
-    const double dradial_dx = 2.0 * xn * radial_slope;
-    const double dradial_dy = 2.0 * yn * radial_slope;
-    const double dxd_dx = radial + xn * dradial_dx +
-                          2.0 * intrinsics.p1 * yn + 6.0 * intrinsics.p2 * xn;
-    const double dxd_dy = xn * dradial_dy +
-                          2.0 * intrinsics.p1 * xn + 2.0 * intrinsics.p2 * yn;
-    const double dyd_dx = yn * dradial_dx +
-                          2.0 * intrinsics.p1 * xn + 2.0 * intrinsics.p2 * yn;
-    const double dyd_dy = radial + yn * dradial_dy +
-                          6.0 * intrinsics.p1 * yn + 2.0 * intrinsics.p2 * xn;
+    const double dxd_dx = projection.xx, dxd_dy = projection.xy;
+    const double dyd_dx = projection.yx, dyd_dy = projection.yy;
 
     const double j00 = intrinsics.fx * dxd_dx * inv_z;
     const double j01 = intrinsics.fx * dxd_dy * inv_z;
@@ -175,24 +162,12 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
         ++intrinsic_column;
     }
     if (options.optimize_distortion) {
-        const double fx = intrinsics.fx;
-        const double fy = intrinsics.fy;
-        result.intrinsic_jacobian[intrinsic_column] = scale * fx * xn * r2;
-        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
-            scale * fy * yn * r2;
-        ++intrinsic_column;
-        result.intrinsic_jacobian[intrinsic_column] = scale * fx * xn * r2 * r2;
-        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
-            scale * fy * yn * r2 * r2;
-        ++intrinsic_column;
-        result.intrinsic_jacobian[intrinsic_column] = scale * fx * (2.0 * xn * yn);
-        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
-            scale * fy * (r2 + 2.0 * yn * yn);
-        ++intrinsic_column;
-        result.intrinsic_jacobian[intrinsic_column] = scale * fx * (r2 + 2.0 * xn * xn);
-        result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
-            scale * fy * (2.0 * xn * yn);
-        ++intrinsic_column;
+        for (int i = 0; i < 4; ++i, ++intrinsic_column) {
+            result.intrinsic_jacobian[intrinsic_column] =
+                scale * intrinsics.fx * projection.dx[i];
+            result.intrinsic_jacobian[k_max_intrinsic_params + intrinsic_column] =
+                scale * intrinsics.fy * projection.dy[i];
+        }
     }
     (void)intrinsic_column;
     result.valid = true;

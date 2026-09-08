@@ -65,6 +65,28 @@ void copy_top_left(
 
 }  // namespace
 
+std::string load_lens_description(const std::filesystem::path& path) {
+    std::lock_guard lock(freeimage_mutex());
+    ensure_freeimage();
+    try {
+        const auto format = detect_format(path);
+        FIBITMAP* bitmap = FreeImage_Load(format, path.string().c_str(), FIF_LOAD_NOPIXELS);
+        if (!bitmap) return {};
+        std::string description;
+        for (const auto metadata : {FIMD_EXIF_EXIF, FIMD_EXIF_MAIN}) {
+            for (const char* key : {"LensModel", "LensMake"}) {
+                FITAG* tag = nullptr;
+                if (FreeImage_GetMetadata(metadata, bitmap, key, &tag) && tag) {
+                    const char* value = FreeImage_TagToString(metadata, tag);
+                    if (value) { description += value; description += ' '; }
+                }
+            }
+        }
+        FreeImage_Unload(bitmap);
+        return description;
+    } catch (const std::exception&) { return {}; }
+}
+
 ImageSize load_image_size(const std::filesystem::path& path) {
     std::lock_guard lock(freeimage_mutex());
     ensure_freeimage();

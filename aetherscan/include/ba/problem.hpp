@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/camera_projection.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -29,6 +31,7 @@ struct PinholeIntrinsics {
     double k2{0.0};
     double p1{0.0};
     double p2{0.0};
+    CameraModel model{CameraModel::pinhole};
 };
 
 struct Point3 {

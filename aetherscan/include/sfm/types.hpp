@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/camera_projection.hpp"
+
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
@@ -66,6 +68,7 @@ struct Pose3D {
     [[nodiscard]] Quat quaternion() const { return Quat(R).normalized(); }
 };
 
+// Historical type name retained for source compatibility; model selects projection.
 struct PinholeCamera {
     Index id{k_invalid};
     std::uint32_t width{};
@@ -81,6 +84,8 @@ struct PinholeCamera {
     // Stable focal anchor for BA priors/bounds. Zero means initialize from fx/fy.
     double focal_prior{};
     bool trust_intrinsics{true};
+    CameraModel model{CameraModel::pinhole};
+    // For opencv_fisheye, p1/p2 store angular k3/k4 (not tangential terms).
 
     [[nodiscard]] Mat3 K() const {
         Mat3 matrix = Mat3::Identity();
@@ -93,10 +98,35 @@ struct PinholeCamera {
 
     [[nodiscard]] double focal() const { return 0.5 * (fx + fy); }
 
-    // Pixel -> normalized plane (z=1). Iteratively undo Brown distortion when present.
+    // Pixel -> normalized forward plane (z=1), with model-specific inverse distortion.
     [[nodiscard]] Vec3 unproject(const Vec2& pixel) const {
         double x = (pixel.x() - cx) / fx;
         double y = (pixel.y() - cy) / fy;
+        if (model == CameraModel::opencv_fisheye) {
+            const double radius = std::hypot(x, y);
+            if (radius < 1e-12) return {x, y, 1.0};
+            // Safeguarded inverse on the forward hemisphere; invalid pixels
+            // outside a monotonic calibration return NaN for existing filters.
+            double lo = 0.0, hi = 1.5707963267948966 - 1e-8;
+            auto distorted_angle = [&](double theta) {
+                const double t2 = theta * theta;
+                return theta * (1 + t2*(k1+t2*(k2+t2*(p1+t2*p2))));
+            };
+            if (radius >= distorted_angle(hi))
+                return Vec3::Constant(std::numeric_limits<double>::quiet_NaN());
+            double theta = radius < hi ? radius : 0.5*hi;
+            for (int i = 0; i < 50; ++i) {
+                const double error = distorted_angle(theta)-radius;
+                if (std::abs(error) < 1e-13) break;
+                if (error < 0) lo = theta; else hi = theta;
+                const double t2 = theta*theta;
+                const double derivative = 1+t2*(3*k1+t2*(5*k2+t2*(7*p1+t2*9*p2)));
+                const double next = theta-error/derivative;
+                theta = derivative > 0 && next > lo && next < hi ? next : 0.5*(lo+hi);
+            }
+            const double scale = std::tan(theta)/radius;
+            return {x*scale, y*scale, 1.0};
+        }
         if (k1 != 0.0 || k2 != 0.0 || p1 != 0.0 || p2 != 0.0) {
             const double xd = x;
             const double yd = y;
@@ -123,13 +153,8 @@ struct PinholeCamera {
         const double inv_z = 1.0 / camera_point.z();
         const double x = camera_point.x() * inv_z;
         const double y = camera_point.y() * inv_z;
-        const double r2 = x * x + y * y;
-        const double radial = 1.0 + k1 * r2 + k2 * r2 * r2;
-        const double distorted_x =
-            x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
-        const double distorted_y =
-            y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
-        return {fx * distorted_x + cx, fy * distorted_y + cy};
+        const auto projected = project_camera_plane(model, x, y, k1, k2, p1, p2);
+        return {fx * projected.x + cx, fy * projected.y + cy};
     }
 
     [[nodiscard]] bool project_checked(const Vec3& camera_point, Vec2& pixel) const {

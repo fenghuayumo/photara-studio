@@ -236,14 +236,15 @@ unsigned filter_matches(
 
 #if defined(AETHERSCAN_HAS_POSELIB)
 bool has_distortion(const PinholeCamera& camera) {
-    return camera.k1 != 0.0 || camera.k2 != 0.0 ||
+    return camera.model == CameraModel::opencv_fisheye ||
+           camera.k1 != 0.0 || camera.k2 != 0.0 ||
            camera.p1 != 0.0 || camera.p2 != 0.0;
 }
 
 poselib::Camera to_poselib_camera(const PinholeCamera& camera) {
     if (has_distortion(camera)) {
         return poselib::Camera(
-            "OPENCV",
+            camera.model == CameraModel::opencv_fisheye ? "OPENCV_FISHEYE" : "OPENCV",
             {camera.fx, camera.fy, camera.cx, camera.cy,
              camera.k1, camera.k2, camera.p1, camera.p2},
             static_cast<int>(camera.width),
@@ -392,12 +393,14 @@ bool estimate_with_poselib(
         std::abs(camera1.p1 - camera2.p1) < 1e-12 &&
         std::abs(camera1.p2 - camera2.p2) < 1e-12;
 
-    const bool use_shared_focal =
+    const bool fisheye = camera1.model == CameraModel::opencv_fisheye ||
+                         camera2.model == CameraModel::opencv_fisheye;
+    const bool use_shared_focal = !fisheye && (
         options.force_shared_focal ||
-        (!camera1.trust_intrinsics && !camera2.trust_intrinsics && shared_camera);
+        (!camera1.trust_intrinsics && !camera2.trust_intrinsics && shared_camera));
     const bool use_calibrated =
         !options.force_fundamental && !use_shared_focal &&
-        camera1.trust_intrinsics && camera2.trust_intrinsics;
+        ((camera1.trust_intrinsics && camera2.trust_intrinsics) || fisheye);
 
     if (use_shared_focal) {
         // Estimate F first, then let the frontend's Fetzer view-graph solve
@@ -793,13 +796,17 @@ AbsolutePoseResult estimate_absolute_pose(
     for (std::size_t i = 0; i < bearings.size(); ++i) {
         const Vec3 bearing = bearings[i].normalized();
         if (bearing.z() <= 1e-8) return result;
-        pixels.emplace_back(
-            camera.fx * bearing.x() / bearing.z() + camera.cx,
-            camera.fy * bearing.y() / bearing.z() + camera.cy);
+        if (camera.model == CameraModel::opencv_fisheye)
+            pixels.emplace_back(camera.project(bearing));
+        else
+            pixels.emplace_back(
+                camera.fx * bearing.x() / bearing.z() + camera.cx,
+                camera.fy * bearing.y() / bearing.z() + camera.cy);
         points.emplace_back(points_world[i]);
     }
 
-    const poselib::Camera pose_camera(
+    const poselib::Camera pose_camera = camera.model == CameraModel::opencv_fisheye
+        ? to_poselib_camera(camera) : poselib::Camera(
         "PINHOLE",
         {camera.fx, camera.fy, camera.cx, camera.cy},
         static_cast<int>(camera.width),

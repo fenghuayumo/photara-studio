@@ -112,6 +112,7 @@ struct MvsView {
     std::uint32_t width{};
     std::uint32_t height{};
     // Original camera (source image) for undistortion.
+    CameraModel source_model{CameraModel::pinhole};
     float src_fx{1.F};
     float src_fy{1.F};
     float src_cx{0.F};

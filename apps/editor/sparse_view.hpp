@@ -33,6 +33,7 @@ struct ImageFeature {
 // world-to-camera matrix in row-major order, matching sfm::Pose3D::R.
 struct ViewPose {
     std::string name;
+    std::string camera_model{"Unknown"};
     std::filesystem::path image_path;
     Vec3 centre;
     std::array<float, 9> rotation{{1, 0, 0, 0, 1, 0, 0, 0, 1}};

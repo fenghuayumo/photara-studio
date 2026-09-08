@@ -103,6 +103,17 @@ int main() {
     expect(restored.tracks[0].num_inliers == 2, "asfm inliers");
     expect(restored.pairs.empty(), "asfm omits pairs");
 
+    Scene fish_source = source;
+    fish_source.cameras[0].model = aetherscan::CameraModel::opencv_fisheye;
+    fish_source.cameras[0].p1 = 0.0003;
+    fish_source.cameras[0].p2 = -0.00002;
+    const auto fish_restored = decode_asfm(encode_asfm(fish_source));
+    expect(fish_restored.cameras[0].model == aetherscan::CameraModel::opencv_fisheye,
+           "asfm fish model round trip");
+    expect(fish_restored.cameras[0].p2 == -0.00002, "asfm fish k4 round trip");
+    expect(restored.cameras[0].model == aetherscan::CameraModel::pinhole,
+           "asfm pinhole default");
+
     Settings settings;
     settings.name = "demo";
     settings.image_directory = dir / "images";
@@ -111,6 +122,7 @@ int main() {
     settings.dataset_initial_cloud = dir / "seed.ply";
     settings.splat_output_format = "glb";
     settings.splat_model_source = dir / "imported.glb";
+    settings.camera_model = 2;
     settings.sfm_mode = 2;
     settings.max_features = 4096;
     settings.build_mesh = true;
@@ -141,6 +153,7 @@ int main() {
     expect(
         round_trip.splat_model_source == settings.splat_model_source,
         "splat model source");
+    expect(round_trip.camera_model == 2, "settings camera model");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");

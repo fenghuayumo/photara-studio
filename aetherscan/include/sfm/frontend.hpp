@@ -13,7 +13,8 @@
 namespace aetherscan::sfm {
 
 struct FrontEndOptions {
-    double focal_pixels{0.0};  // 0 => 1.2 * max(w,h)
+    CameraModel camera_model{CameraModel::pinhole};
+    double focal_pixels{0.0};  // 0 => 1.2 * max(w,h), fisheye: 0.5 * max(w,h)
     // A supplied focal is normally an initialization, not a calibration.
     // Set true only for externally calibrated/locked intrinsics.
     bool trust_focal_pixels{false};

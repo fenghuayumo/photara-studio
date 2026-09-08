@@ -745,6 +745,9 @@ std::string load_poses(
     std::string line;
     if (!std::getline(input, line)) return "Empty camera pose table";
 
+    const auto columns = split_csv_row(line);
+    const auto model_column = std::find(columns.begin(), columns.end(), "camera_model");
+    const std::size_t model_index = static_cast<std::size_t>(model_column-columns.begin());
     double reprojection_sum = 0.0;
     std::size_t reprojection_count = 0;
     while (std::getline(input, line)) {
@@ -753,6 +756,8 @@ std::string load_poses(
         if (fields.size() < 28) continue;
         ViewPose pose;
         pose.name = fields[1];
+        if (model_index < fields.size())
+            pose.camera_model = fields[model_index] == "opencv_fisheye" ? "OpenCV Fisheye" : "Pinhole";
         pose.registered = field_as_double(fields, 2) != 0.0;
         pose.width = static_cast<std::uint32_t>(field_as_double(fields, 4));
         pose.height = static_cast<std::uint32_t>(field_as_double(fields, 5));
@@ -942,6 +947,8 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour
                     static_cast<float>(image.pose.R(row, column));
         if (image.camera_id < scene.cameras.size()) {
             const auto& camera = scene.cameras[image.camera_id];
+            pose.camera_model = camera.model == aetherscan::CameraModel::opencv_fisheye
+                ? "OpenCV Fisheye" : "Pinhole";
             pose.fx = static_cast<float>(camera.fx);
             pose.fy = static_cast<float>(camera.fy);
             pose.cx = static_cast<float>(camera.cx);

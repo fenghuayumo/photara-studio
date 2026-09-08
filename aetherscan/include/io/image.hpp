@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <vector>
+#include <string>
 
 namespace aetherscan::io {
 
@@ -14,6 +15,8 @@ struct ImageSize {
 
 // Reads image dimensions without converting or copying its pixel buffer.
 ImageSize load_image_size(const std::filesystem::path& path);
+// Optional EXIF lens description; empty when absent or unreadable.
+std::string load_lens_description(const std::filesystem::path& path);
 
 struct GrayImage {
     std::uint32_t width{};

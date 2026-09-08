@@ -66,6 +66,11 @@ int main() {
             magic[0] == 'M' && magic[1] == 'V' && magic[2] == 'S' && magic[3] == 'I',
             "MVSI magic");
     }
+    scene.cameras[0].model = aetherscan::CameraModel::opencv_fisheye;
+    bool refused_fisheye = false;
+    try { export_openmvs_interface(scene, path, options); }
+    catch (const std::runtime_error&) { refused_fisheye = true; }
+    expect(refused_fisheye, "unrectified fisheye cannot be mislabeled as pinhole MVS");
     std::error_code ec;
     std::filesystem::remove(path, ec);
     if (failures == 0) {
