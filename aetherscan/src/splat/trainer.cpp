@@ -1221,6 +1221,13 @@ GaussianModel Trainer::train(
         }
         cuda_profiler.mark(CudaTrainingStage::adc_noise);
 
+        // Reduce opacity stats before densify remaps rows. Gradients still
+        // match the pre-refinement model; a later download would not.
+        detail::OpacityProgressStats opacity_stats{};
+        if (report_progress)
+            opacity_stats = detail::summarize_opacity_progress(
+                model.opacity_logits, gradients.opacity_logits);
+
         latest_refinement = {};
         bool refinement_happened = false;
         if (densification_enabled) {
@@ -1357,27 +1364,6 @@ GaussianModel Trainer::train(
 
         bool continue_training = true;
         if (report_progress) {
-            const cudaError_t report_error = cudaDeviceSynchronize();
-            if (report_error != cudaSuccess)
-                throw std::runtime_error(
-                    std::string("Splat training step failed: ") +
-                    cudaGetErrorString(report_error));
-            const auto opacity_gradients = download<float>(
-                gradients.opacity_logits);
-            const auto opacity_logits = download<float>(model.opacity_logits);
-            double opacity_gradient_sum = 0.0;
-            double opacity_sum = 0.0;
-            std::size_t positive_opacity_gradients = 0;
-            for (std::size_t index = 0;
-                 index < opacity_gradients.size(); ++index) {
-                opacity_gradient_sum += opacity_gradients[index];
-                positive_opacity_gradients += opacity_gradients[index] > 0.F;
-                opacity_sum += 1.0 /
-                    (1.0 + std::exp(-static_cast<double>(opacity_logits[index])));
-            }
-            const double inverse_gaussians = 1.0 /
-                static_cast<double>(std::max<std::size_t>(
-                    opacity_gradients.size(), 1));
             const auto now = std::chrono::steady_clock::now();
             const double interval_ms =
                 std::chrono::duration<double, std::milli>(
@@ -1399,10 +1385,9 @@ GaussianModel Trainer::train(
                 view_index, latest_refinement.grown,
                 latest_refinement.pruned, loss.total, loss.rgb,
                 loss.alpha_value, loss.depth_value, loss.normal_value,
-                static_cast<float>(opacity_gradient_sum * inverse_gaussians),
-                static_cast<float>(positive_opacity_gradients *
-                                   inverse_gaussians),
-                static_cast<float>(opacity_sum * inverse_gaussians),
+                opacity_stats.gradient_mean,
+                opacity_stats.positive_gradient_fraction,
+                opacity_stats.opacity_mean,
                 milliseconds, multi_view_loss.geometry, multi_view_loss.ncc,
                 multi_view_loss.geometry_pixels,
                 multi_view_loss.ncc_pixels, active_resolution_scale,

@@ -238,9 +238,15 @@ RefinementCounts refine_gaussians(
     const auto priorities = download<float>(stats.priority);
     const auto opacities = download<float>(model.opacity_logits);
     const auto log_scales = download<float>(model.log_scales);
-    const auto means = download<float>(model.means);
-    const auto quaternions = download<float>(model.quaternions);
-    const auto sh = download<float>(model.sh);
+    // Default prune/split only reads opacity, scale, and densify stats.
+    // Means / quaternion / SH stay on the device unless dense_adaptive needs
+    // them for the non-finite and bounds sweep.
+    const std::vector<float> means = managed
+        ? download<float>(model.means) : std::vector<float>{};
+    const std::vector<float> quaternions = managed
+        ? download<float>(model.quaternions) : std::vector<float>{};
+    const std::vector<float> sh = managed
+        ? download<float>(model.sh) : std::vector<float>{};
     std::vector<bool> prune(old_count, false);
     std::vector<bool> hard_prune(old_count, false);
     std::vector<float> opacity_values(old_count);

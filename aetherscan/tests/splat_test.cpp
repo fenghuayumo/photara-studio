@@ -1967,6 +1967,236 @@ void test_gggs_depth_normal_parameter_gradients() {
         "and raster normals into Gaussian means");
 }
 
+void require_close(
+    const std::vector<float>& actual, const std::vector<float>& expected,
+    const float tolerance, const char* message) {
+    require(actual.size() == expected.size(), message);
+    for (std::size_t index = 0; index < actual.size(); ++index)
+        require(std::abs(actual[index] - expected[index]) <= tolerance, message);
+}
+
+struct RefineHarness {
+    aetherscan::splat::GaussianModel model;
+    aetherscan::splat::detail::AdamState means;
+    aetherscan::splat::detail::AdamState scales;
+    aetherscan::splat::detail::AdamState rotations;
+    aetherscan::splat::detail::AdamState opacity;
+    aetherscan::splat::detail::AdamState sh;
+    aetherscan::splat::detail::AdamState normals;
+    aetherscan::splat::densification::AdamStates states() {
+        return {&means, &scales, &rotations, &opacity, &sh, &normals};
+    }
+};
+
+RefineHarness make_refine_harness(aetherscan::splat::GaussianModel model) {
+    RefineHarness harness;
+    harness.model = std::move(model);
+    harness.means = aetherscan::splat::detail::make_adam_state(
+        harness.model.means);
+    harness.scales = aetherscan::splat::detail::make_adam_state(
+        harness.model.log_scales);
+    harness.rotations = aetherscan::splat::detail::make_adam_state(
+        harness.model.quaternions);
+    harness.opacity = aetherscan::splat::detail::make_adam_state(
+        harness.model.opacity_logits);
+    harness.sh = aetherscan::splat::detail::make_reduced_second_adam_state(
+        harness.model.sh);
+    harness.normals = aetherscan::splat::detail::make_adam_state(
+        harness.model.normal_features.is_valid()
+            ? harness.model.normal_features
+            : tinytensor::Tensor::zeros(
+                  {harness.model.size(), std::size_t{4}},
+                  tinytensor::Device::CUDA));
+    return harness;
+}
+
+aetherscan::splat::GaussianModel make_default_refine_model(
+    const std::vector<float>& sh_values) {
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    aetherscan::splat::GaussianModel model;
+    model.means = Tensor::from_vector(
+        std::vector<float>{0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0},
+        {4, 3}, gpu);
+    model.log_scales = Tensor::from_vector(
+        std::vector<float>{
+            std::log(0.001F), std::log(0.001F), std::log(0.001F),
+            std::log(0.001F), std::log(0.001F), std::log(0.001F),
+            std::log(0.05F), std::log(0.05F), std::log(0.05F),
+            std::log(0.001F), std::log(0.001F), std::log(0.001F)},
+        {4, 3}, gpu);
+    model.quaternions = Tensor::from_vector(
+        std::vector<float>{
+            1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0},
+        {4, 4}, gpu);
+    model.opacity_logits = Tensor::from_vector(
+        std::vector<float>{-3.F, 0.F, 0.F, 0.F}, {4, 1}, gpu);
+    model.sh = Tensor::from_vector(sh_values, {4, 1, 3}, gpu);
+    model.sh_degree = 0;
+    return model;
+}
+
+aetherscan::splat::detail::DensificationStats make_default_refine_stats() {
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    auto stats = aetherscan::splat::detail::make_densification_stats(4);
+    stats.gradient = Tensor::from_vector(
+        std::vector<float>{1.F, 10.F, 10.F, 0.1F}, {4}, gpu);
+    stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.priority = Tensor::full({4}, 10.F, gpu);
+    stats.max_screen_radius = Tensor::zeros({4}, gpu);
+    return stats;
+}
+
+aetherscan::splat::TrainingOptions make_default_refine_options() {
+    aetherscan::splat::TrainingOptions options;
+    options.densification_strategy =
+        aetherscan::splat::DensificationStrategy::default_strategy;
+    options.refine_start_iter = 1;
+    options.refine_stop_iter = 200;
+    options.refine_every = 100;
+    options.prune_opacity = 0.1F;
+    options.densify_gradient_threshold = 0.1F;
+    options.densify_scale_threshold = 0.01F;
+    options.densification_cap = 100;
+    return options;
+}
+
+void test_opacity_progress_summary_matches_host() {
+    using namespace aetherscan::splat;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    const auto empty = detail::summarize_opacity_progress(
+        tinytensor::Tensor{}, tinytensor::Tensor{});
+    require(
+        empty.gradient_mean == 0.F &&
+            empty.positive_gradient_fraction == 0.F &&
+            empty.opacity_mean == 0.F,
+        "empty opacity progress summary is not zero");
+
+    const std::vector<float> logits{0.F, 2.F, -2.F};
+    const std::vector<float> gradients{-1.F, 2.F, 0.5F};
+    const auto stats = detail::summarize_opacity_progress(
+        tinytensor::Tensor::from_vector(logits, {3, 1}, gpu),
+        tinytensor::Tensor::from_vector(gradients, {3, 1}, gpu));
+    double gradient_sum = 0.0;
+    double opacity_sum = 0.0;
+    std::size_t positive = 0;
+    for (std::size_t index = 0; index < logits.size(); ++index) {
+        gradient_sum += gradients[index];
+        positive += gradients[index] > 0.F;
+        opacity_sum += 1.0 / (1.0 + std::exp(-static_cast<double>(logits[index])));
+    }
+    const double inverse = 1.0 / static_cast<double>(logits.size());
+    require(
+        std::abs(stats.gradient_mean -
+                 static_cast<float>(gradient_sum * inverse)) < 1e-6F,
+        "opacity gradient mean does not match host reduction");
+    require(
+        std::abs(stats.positive_gradient_fraction -
+                 static_cast<float>(positive * inverse)) < 1e-6F,
+        "positive opacity-gradient fraction does not match host reduction");
+    require(
+        std::abs(stats.opacity_mean -
+                 static_cast<float>(opacity_sum * inverse)) < 1e-6F,
+        "opacity mean does not match host sigmoid reduction");
+
+    std::vector<float> many_logits(4096, 0.F);
+    std::vector<float> many_gradients(4096);
+    for (std::size_t index = 0; index < many_gradients.size(); ++index)
+        many_gradients[index] = (index % 2U) == 0U ? 1.F : -1.F;
+    const auto many = detail::summarize_opacity_progress(
+        tinytensor::Tensor::from_vector(many_logits, {4096}, gpu),
+        tinytensor::Tensor::from_vector(many_gradients, {4096}, gpu));
+    require(
+        std::abs(many.gradient_mean) < 1e-5F &&
+            std::abs(many.positive_gradient_fraction - 0.5F) < 1e-5F &&
+            std::abs(many.opacity_mean - 0.5F) < 1e-5F,
+        "large opacity progress summary drifted from the host pattern");
+
+    bool threw = false;
+    try {
+        detail::summarize_opacity_progress(
+            tinytensor::Tensor::zeros({4, 1}, gpu),
+            tinytensor::Tensor::zeros({3, 1}, gpu));
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "mismatched opacity progress tensors were accepted");
+}
+
+void test_default_refine_ignores_unused_host_downloads() {
+    using namespace aetherscan::splat;
+    auto options = make_default_refine_options();
+    const std::vector<float> finite_sh(12, 0.25F);
+    const std::vector<float> nan_sh(
+        12, std::numeric_limits<float>::quiet_NaN());
+
+    auto finite = make_refine_harness(make_default_refine_model(finite_sh));
+    auto poisoned = make_refine_harness(make_default_refine_model(nan_sh));
+    auto finite_stats = make_default_refine_stats();
+    auto poisoned_stats = make_default_refine_stats();
+    std::mt19937 finite_random(42);
+    std::mt19937 poisoned_random(42);
+    const auto finite_result = densification::refine_gaussians(
+        finite.model, finite_stats, 100, 1.F, aetherscan::mvs::Vec3f::Zero(),
+        options, finite_random, finite.states());
+    const auto poisoned_result = densification::refine_gaussians(
+        poisoned.model, poisoned_stats, 100, 1.F,
+        aetherscan::mvs::Vec3f::Zero(), options, poisoned_random,
+        poisoned.states());
+
+    require(
+        finite_result.pruned == 1 && finite_result.grown == 2 &&
+            finite.model.size() == 5,
+        "default refine did not prune the low-opacity row and clone/split");
+    require(
+        poisoned_result.pruned == finite_result.pruned &&
+            poisoned_result.grown == finite_result.grown &&
+            poisoned.model.size() == finite.model.size(),
+        "default refine used SH values that should stay on the device");
+    require_close(
+        poisoned.model.means.to_vector(), finite.model.means.to_vector(),
+        1e-5F, "default refine changed means when SH was NaN on device");
+    require_close(
+        poisoned.model.log_scales.to_vector(),
+        finite.model.log_scales.to_vector(), 1e-5F,
+        "default refine changed scales when SH was NaN on device");
+    require_close(
+        poisoned.model.opacity_logits.to_vector(),
+        finite.model.opacity_logits.to_vector(), 1e-5F,
+        "default refine changed opacity when SH was NaN on device");
+}
+
+void test_dense_adaptive_still_prunes_nonfinite_geometry() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    GaussianModel model = make_default_refine_model(std::vector<float>(12, 0.F));
+    auto sh = model.sh.to_vector();
+    sh[9] = std::numeric_limits<float>::quiet_NaN();
+    sh[10] = std::numeric_limits<float>::quiet_NaN();
+    sh[11] = std::numeric_limits<float>::quiet_NaN();
+    model.sh = Tensor::from_vector(sh, {4, 1, 3}, gpu);
+    model.opacity_logits = Tensor::zeros({4, 1}, gpu);
+    auto harness = make_refine_harness(std::move(model));
+    auto stats = make_default_refine_stats();
+    TrainingOptions options = make_default_refine_options();
+    options.densification_strategy = DensificationStrategy::dense_adaptive;
+    options.dense_recycle_fraction = 0.F;
+    options.dense_growth_fraction = 0.F;
+    options.densify_gradient_threshold = 100.F;
+    options.densification_cap = 3;
+    std::mt19937 random(42);
+    const auto result = densification::refine_gaussians(
+        harness.model, stats, 100, 1.F, aetherscan::mvs::Vec3f::Zero(),
+        options, random, harness.states());
+    require(
+        result.pruned == 1 && result.grown == 0 && harness.model.size() == 3,
+        "dense_adaptive no longer hard-prunes non-finite SH rows");
+    require_finite(
+        harness.model.sh, "dense_adaptive kept a non-finite SH row");
+}
+
 void test_igs_growth_budget() {
     using namespace aetherscan::splat;
     using tinytensor::Tensor;
@@ -2177,7 +2407,20 @@ void test_densification_strategies_and_dense_bypass() {
              splat::DensificationStrategy::adc_plus,
              splat::DensificationStrategy::adc_igs}) {
         options.densification_strategy = strategy;
-        const auto model = splat::Trainer(options).train(scene);
+        unsigned progress_steps = 0;
+        const auto model = splat::Trainer(options).train(
+            scene, [&](const splat::TrainingProgress& progress) {
+                ++progress_steps;
+                require(
+                    std::isfinite(progress.opacity_mean) &&
+                        std::isfinite(progress.opacity_gradient_mean),
+                    "progress callback received non-finite opacity stats "
+                    "across a densify step");
+                return true;
+            });
+        require(
+            progress_steps == options.iterations,
+            "progress callback skipped a densify logging iteration");
         require(
             !model.filter_3d.is_valid(),
             "appearance-only sparse 3DGS unexpectedly enabled filter_3d");
@@ -2330,6 +2573,9 @@ int main() {
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
         test_adc_plus_split_matches_brush();
+        test_opacity_progress_summary_matches_host();
+        test_default_refine_ignores_unused_host_downloads();
+        test_dense_adaptive_still_prunes_nonfinite_geometry();
         test_igs_growth_budget();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";

@@ -69,6 +69,14 @@ struct GeometryDistributionSummary {
     float log_anisotropy_stddev{};
 };
 
+// Logging-only opacity stats. The three scalars are reduced on CUDA so a
+// progress callback does not download every Gaussian.
+struct OpacityProgressStats {
+    float gradient_mean{};
+    float positive_gradient_fraction{};
+    float opacity_mean{};
+};
+
 ActivatedParameters activate_parameters(const GaussianModel& model);
 
 // Convert GaussianWrapping's [direction.xyz, orientation_logit] features to
@@ -123,6 +131,10 @@ MultiViewLoss add_multi_view_loss(
 
 GeometryDistributionSummary summarize_geometry_distribution(
     const GaussianModel& model);
+
+OpacityProgressStats summarize_opacity_progress(
+    const tinytensor::Tensor& opacity_logits,
+    const tinytensor::Tensor& opacity_gradients);
 
 tinytensor::Tensor unproject_depth_to_world(
     const tinytensor::Tensor& depth, const Camera& camera);

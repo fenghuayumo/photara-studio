@@ -16,6 +16,7 @@ namespace {
 constexpr unsigned k_threads = 256;
 constexpr unsigned k_reduced_adam_threads = 64;
 constexpr unsigned k_geometry_summary_terms = 6;
+constexpr unsigned k_opacity_progress_terms = 3;
 // A 32x8 image-space CTA shares the integer reference tile and all fixed
 // half-pixel samples needed by the 7x7 NCC patches of its 256 output pixels.
 constexpr unsigned k_multi_view_block_x = 32;
@@ -81,6 +82,36 @@ __global__ void geometry_distribution_summary_kernel(
     }
     if (threadIdx.x == 0)
         for (unsigned term = 0; term < k_geometry_summary_terms; ++term)
+            atomicAdd(terms + term, partial[term][0]);
+}
+
+__global__ void opacity_progress_summary_kernel(
+    const float* opacity_logits, const float* opacity_gradients,
+    float* terms, const std::size_t count) {
+    __shared__ float partial[k_opacity_progress_terms][k_threads];
+    float local[k_opacity_progress_terms]{};
+    for (std::size_t index =
+             blockIdx.x * blockDim.x + threadIdx.x;
+         index < count;
+         index += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+        const float gradient = opacity_gradients[index];
+        local[0] += gradient;
+        local[1] += gradient > 0.F ? 1.F : 0.F;
+        local[2] += sigmoid(opacity_logits[index]);
+    }
+    for (unsigned term = 0; term < k_opacity_progress_terms; ++term)
+        partial[term][threadIdx.x] = local[term];
+    __syncthreads();
+    for (unsigned stride = k_threads / 2; stride != 0; stride >>= 1U) {
+        if (threadIdx.x < stride)
+            for (unsigned term = 0;
+                 term < k_opacity_progress_terms; ++term)
+                partial[term][threadIdx.x] +=
+                    partial[term][threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        for (unsigned term = 0; term < k_opacity_progress_terms; ++term)
             atomicAdd(terms + term, partial[term][0]);
 }
 
@@ -1892,6 +1923,43 @@ GeometryDistributionSummary summarize_geometry_distribution(
     summary.log_anisotropy_mean = anisotropy[0];
     summary.log_anisotropy_stddev = anisotropy[1];
     return summary;
+}
+
+OpacityProgressStats summarize_opacity_progress(
+    const tinytensor::Tensor& opacity_logits,
+    const tinytensor::Tensor& opacity_gradients) {
+    OpacityProgressStats stats;
+    if (!opacity_logits.is_valid() || !opacity_gradients.is_valid())
+        return stats;
+    const std::size_t count = opacity_logits.numel();
+    if (count == 0) return stats;
+    if (opacity_logits.device() != tinytensor::Device::CUDA ||
+        opacity_gradients.device() != tinytensor::Device::CUDA ||
+        opacity_logits.dtype() != tinytensor::DataType::Float32 ||
+        opacity_gradients.dtype() != tinytensor::DataType::Float32)
+        throw std::invalid_argument(
+            "opacity progress summary requires CUDA float32 tensors");
+    if (opacity_gradients.numel() != count)
+        throw std::invalid_argument(
+            "opacity progress summary requires matching logit and "
+            "gradient counts");
+    auto terms = tinytensor::Tensor::zeros(
+        {static_cast<std::size_t>(k_opacity_progress_terms)},
+        tinytensor::Device::CUDA);
+    const std::size_t required_blocks =
+        (count + k_threads - 1) / k_threads;
+    const unsigned blocks = static_cast<unsigned>(
+        std::min<std::size_t>(required_blocks, 1024));
+    opacity_progress_summary_kernel<<<blocks, k_threads>>>(
+        opacity_logits.ptr<float>(), opacity_gradients.ptr<float>(),
+        terms.ptr<float>(), count);
+    check_cuda(cudaGetLastError(), "summarize opacity progress");
+    const std::vector<float> values = terms.to_vector();
+    const float inverse_count = 1.F / static_cast<float>(count);
+    stats.gradient_mean = values[0] * inverse_count;
+    stats.positive_gradient_fraction = values[1] * inverse_count;
+    stats.opacity_mean = values[2] * inverse_count;
+    return stats;
 }
 
 tinytensor::Tensor unproject_depth_to_world(
