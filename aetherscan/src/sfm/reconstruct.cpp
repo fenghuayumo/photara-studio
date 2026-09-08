@@ -1,4 +1,5 @@
 #include "sfm/reconstruct.hpp"
+#include "sfm/appearance.hpp"
 
 #include "core/logging.hpp"
 #include "parallel/thread_pool.hpp"
@@ -1466,7 +1467,9 @@ ReconstructionSummary reconstruct(
                     config.maximum_final_reprojection_error_pixels);
             if (config.resection.checkpoint_callback)
                 config.resection.checkpoint_callback(scene_out);
-            return summarize_scene(scene_out);
+            const ReconstructionSummary summary = summarize_scene(scene_out);
+            if (summary.valid) colour_triangulated_tracks(scene_out);
+            return summary;
         }
     }
     ReconstructionSummary summary;
@@ -1617,6 +1620,7 @@ ReconstructionSummary reconstruct(
     if (summary.valid)
         checkpoints.save_scene(
             CheckpointStage::reconstruction, mapping_key, scene_out);
+    if (summary.valid) colour_triangulated_tracks(scene_out);
     return summary;
 }
 

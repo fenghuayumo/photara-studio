@@ -169,6 +169,15 @@ bool has_external_dataset(const App& app) {
     return app.settings.dataset_source[0] != '\0';
 }
 
+bool alignment_ready(const App& app) {
+    return has_external_dataset(app) || app.has_sparse || app.scene.has_points();
+}
+
+bool waiting_for_train_preview(const App& app) {
+    return app.job.running() && app.active_job == JobKind::train &&
+           gpu::consumed_timeline_value() == 0;
+}
+
 std::filesystem::path existing_splat_model(const App& app) {
     const std::filesystem::path imported(app.settings.splat_model_source.data());
     std::error_code error;
@@ -708,6 +717,36 @@ void request_dataset_scene_load(App& app) {
             return sparse_scene_from_dataset(
                 source, format, initial_cloud, images);
         });
+}
+
+std::filesystem::path inferred_images_dir_near(const std::filesystem::path& asfm);
+void clear_loaded_result(App& app);
+
+void apply_external_dataset_selection(App& app) {
+    clear_loaded_result(app);
+    refresh_artifacts(app);
+    if (!has_external_dataset(app)) return;
+    const std::filesystem::path source(app.settings.dataset_source.data());
+    if (app.settings.images_dir[0] == '\0') {
+        auto inferred = inferred_images_dir_near(source);
+        if (inferred.empty()) {
+            std::error_code error;
+            if (std::filesystem::is_directory(source, error)) {
+                if (directory_has_images(source)) inferred = source;
+                else if (directory_has_images(source / "images"))
+                    inferred = source / "images";
+            }
+        }
+        if (!inferred.empty())
+            store_utf8_path_field(app.settings.images_dir, inferred);
+    }
+    assign_default_project_folder(app);
+    request_dataset_scene_load(app);
+    set_message(
+        app,
+        "External cameras loaded. Align Photos is skipped; Train 3DGS or "
+        "Dense MVS can run next.",
+        theme::accent);
 }
 
 void ensure_dataset_scene_loaded(App& app) {
@@ -1646,6 +1685,10 @@ bool has_reconstruction_result(const App& app) {
     if (app.scene.has_points() || app.has_sparse || app.has_asfm ||
         app.has_mvs || app.has_model || app.has_mesh)
         return true;
+    std::error_code dense_error;
+    if (!app.layout.dense_ply.empty() &&
+        std::filesystem::exists(app.layout.dense_ply, dense_error))
+        return true;
     if (app.layout.cache.empty()) return false;
     std::error_code error;
     return std::filesystem::exists(app.layout.cache, error);
@@ -1657,12 +1700,12 @@ void delete_reconstruction_results(App& app) {
     stop_splat_view(app);
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
-    const std::array<std::filesystem::path, 13> generated_files = {
+    const std::array<std::filesystem::path, 15> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
         app.layout.splat_spz, app.layout.splat_glb, app.layout.mesh_ply,
-        app.layout.align_log, app.layout.train_log, app.layout.export_log,
-        app.layout.view_log};
+        app.layout.dense_ply, app.layout.align_log, app.layout.train_log,
+        app.layout.dense_log, app.layout.export_log, app.layout.view_log};
 
     std::uintmax_t removed = 0;
     std::string failure;
@@ -1933,6 +1976,7 @@ const char* running_job_caption(const JobKind kind) {
         case JobKind::align: return "ALIGNING";
         case JobKind::export_sfm: return "EXPORTING";
         case JobKind::train: return "TRAINING";
+        case JobKind::dense: return "DENSE MVS";
         case JobKind::none: return "READY";
     }
     return "READY";
@@ -1942,6 +1986,7 @@ const char* stop_job_label(const JobKind kind) {
     switch (kind) {
         case JobKind::align: return "Stop Alignment";
         case JobKind::export_sfm: return "Stop Export";
+        case JobKind::dense: return "Stop Dense MVS";
         default: return "Stop Training";
     }
 }
@@ -2071,13 +2116,11 @@ void start_train(App& app, const bool smoke) {
     app.preview_view = 0;
     app.preview_follow_view = true;
     if (has_external_dataset(app)) {
-        // The external dataset is consumed by the child CLI. Do not leave a
-        // stale internal SfM scene visible while that job is running.
-        app.photos.clear();
-        app.scene.clear();
-        // QA compare and feature inspection need the exact imported capture
-        // cameras, so populate the editor scene from the same dataset.
-        request_dataset_scene_load(app);
+        // Keep the already-reviewed imported cameras and cloud on screen.
+        // The child CLI reloads the same dataset; wiping the viewport made
+        // Train look like a reset.
+        if (!app.scene.has_points() && app.scene.views.empty())
+            request_dataset_scene_load(app);
     } else {
         load_view_poses(app.layout.sparse_poses, app.scene);
         attach_view_image_paths(
@@ -2145,9 +2188,11 @@ void start_train(App& app, const bool smoke) {
         app.active_job = JobKind::train;
         set_message(
             app,
-            app.settings.build_mesh
-                ? "Training with depth/normal geometry supervision..."
-                : "Training Gaussians...",
+            has_external_dataset(app)
+                ? "Training from imported cameras..."
+                : (app.settings.build_mesh
+                       ? "Training with depth/normal geometry supervision..."
+                       : "Training from aligned cameras..."),
             theme::accent);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
@@ -2155,6 +2200,52 @@ void start_train(App& app, const bool smoke) {
     // The child has inherited the handles; the parent copies are no longer
     // needed and must not leak across runs.
     app.preview.close_export_handles();
+}
+
+void start_dense(App& app) {
+    if (app.job.running()) return;
+    stop_splat_view(app);
+    assign_default_project_folder(app);
+    if (app.settings.project_dir[0] == '\0') {
+        set_message(app, "Save or choose a project file first", theme::warning);
+        return;
+    }
+    if (!alignment_ready(app) && !alignment_cache_present(app)) {
+        set_message(
+            app,
+            "Align photos or load an external camera dataset before Dense MVS",
+            theme::warning);
+        return;
+    }
+    refresh_artifacts(app);
+    std::error_code error;
+    std::filesystem::create_directories(app.layout.root, error);
+    if (error) {
+        set_message(app, "Cannot create project directory", theme::danger);
+        return;
+    }
+    if (has_external_dataset(app)) {
+        if (!app.scene.has_points() && app.scene.views.empty())
+            request_dataset_scene_load(app);
+    }
+    app.view_mode = VisualizationMode::points;
+    try {
+        app.monitor.begin(JobKind::dense);
+        app.log.open(app.layout.dense_log);
+        app.job.start(
+            build_dense_command(
+                AETHERSCAN_CLI_PATH, app.settings, app.layout),
+            app.layout.dense_log);
+        app.active_job = JobKind::dense;
+        set_message(
+            app,
+            has_external_dataset(app)
+                ? "Dense MVS from imported cameras..."
+                : "Dense MVS from aligned cameras...",
+            theme::accent);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
 }
 
 void on_job_finished(App& app) {
@@ -2186,6 +2277,19 @@ void on_job_finished(App& app) {
         }
         return;
     }
+    if (kind == JobKind::dense) {
+        std::error_code error;
+        const bool has_dense =
+            std::filesystem::exists(app.layout.dense_ply, error);
+        set_message(
+            app,
+            has_dense ? "Dense MVS finished"
+                      : "Dense MVS finished but no dense.ply was written",
+            has_dense ? theme::success : theme::warning);
+        if (app.has_sparse || has_external_dataset(app))
+            ensure_sparse_loaded(app);
+        return;
+    }
     if (kind == JobKind::export_sfm) {
         std::error_code error;
         const bool has_asfm =
@@ -2214,7 +2318,7 @@ void on_job_finished(App& app) {
 // ---------------------------------------------------------------------------
 // UI fragments
 
-enum class Action { none, align, train, export_sfm, stop, reveal };
+enum class Action { none, align, train, dense, export_sfm, stop, reveal };
 
 int workflow_step(const App& app) {
     const bool training =
@@ -2222,6 +2326,7 @@ int workflow_step(const App& app) {
     const bool aligning =
         app.job.running() && app.active_job == JobKind::align;
     if (training && app.monitor.stage() == Stage::meshing) return 3;
+    if (app.job.running() && app.active_job == JobKind::dense) return 3;
     if (training) return 2;
     if (aligning) return 1;
     if (app.has_model) return 2;
@@ -2383,8 +2488,13 @@ Action draw_menu_bar(App& app) {
             action = Action::align;
         if (ImGui::MenuItem(
                 "Train 3DGS", nullptr, false,
-                !busy && app.settings.images_dir[0] != '\0'))
+                !busy && (app.settings.images_dir[0] != '\0' ||
+                          has_external_dataset(app))))
             action = Action::train;
+        if (ImGui::MenuItem(
+                "Dense MVS", nullptr, false,
+                !busy && alignment_ready(app)))
+            action = Action::dense;
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
                 !busy && can_export_sfm(app)))
@@ -2621,11 +2731,14 @@ Action draw_toolbar(App& app) {
         if (ImGui::IsItemHovered()) {
             if (external_dataset)
                 ImGui::SetTooltip(
-                    "Train directly from the selected external camera dataset.");
+                    "Train directly from the imported cameras. SfM is skipped.");
             else if (!app.has_sparse)
                 ImGui::SetTooltip(
                     "No alignment yet. Training will run Structure from Motion "
                     "first, then optimise Gaussians.");
+            else
+                ImGui::SetTooltip(
+                    "Start 3DGS from the current aligned cameras and sparse cloud.");
         }
     }
     ImGui::SameLine();
@@ -2781,7 +2894,9 @@ void draw_scene_panel(App& app) {
 
     draw_step(
         "01", "Select images",
-        app.settings.images_dir[0] != '\0' ? StepState::done : StepState::pending,
+        app.settings.images_dir[0] != '\0' || external_dataset
+            ? StepState::done
+            : StepState::pending,
         nullptr);
     draw_step(
         "02", "Align cameras",
@@ -2791,21 +2906,20 @@ void draw_scene_panel(App& app) {
                         : StepState::pending),
         aligning
             ? stage_name(stage)
-            : (external_dataset ? "External dataset" : nullptr));
+            : (external_dataset ? "Imported cameras (SfM skipped)" : nullptr));
     draw_step(
         "03", "Review sparse cloud",
-        app.scene.has_points() ? StepState::done
-                               : (external_dataset ? StepState::skipped
-                                                   : (app.has_sparse
-                                                          ? StepState::active
-                                                          : StepState::pending)),
+        app.scene.has_points()
+            ? StepState::done
+            : ((external_dataset || app.has_sparse)
+                   ? StepState::active
+                   : StepState::pending),
         app.scene.has_points()
             ? nullptr
-            : (external_dataset
-                   ? "Provided by external dataset"
-                   : (app.has_sparse
-                          ? (app.loading_scene ? "Loading" : "On disk")
-                          : nullptr)));
+            : (app.loading_scene
+                   ? "Loading"
+                   : (external_dataset ? "Imported cameras"
+                                       : (app.has_sparse ? "On disk" : nullptr))));
     draw_step(
         "04", "Optimise Gaussians",
         training && stage != Stage::meshing
@@ -2814,12 +2928,16 @@ void draw_scene_panel(App& app) {
         app.settings.build_mesh ? "Geometry constraints on" : nullptr);
     draw_step(
         "05", "Extract mesh",
-        !app.settings.build_mesh
+        !app.settings.build_mesh &&
+                !(busy && app.active_job == JobKind::dense)
             ? StepState::skipped
-            : (training && stage == Stage::meshing
+            : ((training && stage == Stage::meshing) ||
+                       (busy && app.active_job == JobKind::dense)
                    ? StepState::active
                    : (app.has_mesh ? StepState::done : StepState::pending)),
-        app.settings.build_mesh ? nullptr : "Disabled");
+        busy && app.active_job == JobKind::dense
+            ? stage_name(stage)
+            : (app.settings.build_mesh ? nullptr : "Disabled"));
 
     ImGui::Dummy({0, 8.F});
     theme::section_header("SOURCE");
@@ -2942,6 +3060,12 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     ImVec4 overlay_dot = theme::inactive;
     if (app.job.running() && app.active_job == JobKind::align) {
         overlay = app.alignment_preview_seen ? "ALIGNING / PARTIAL RESULT" : "ALIGNING";
+        overlay_dot = theme::accent;
+    } else if (waiting_for_train_preview(app)) {
+        overlay = "PREPARING 3DGS";
+        overlay_dot = theme::warning;
+    } else if (app.job.running() && app.active_job == JobKind::dense) {
+        overlay = "DENSE MVS";
         overlay_dot = theme::accent;
     } else if (app.loading_scene) {
         overlay = "LOADING";
@@ -3230,7 +3354,7 @@ void draw_viewport_panel(App& app) {
         sync_qa_selection_to_preview(app, previous);
         ensure_dataset_scene_loaded(app);
         ensure_qa_preview(app);
-    } else if (live_preview_active(app)) {
+    } else if (live_preview_active(app) && !waiting_for_train_preview(app)) {
         draw_training_tab(app, view_min, view_max);
         draw_view_mode_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
@@ -3310,28 +3434,27 @@ Action draw_inspector(App& app) {
         if (ImGui::InputText(
                 "##dataset_source", app.settings.dataset_source.data(),
                 app.settings.dataset_source.size())) {
-            clear_loaded_result(app);
-            refresh_artifacts(app);
         }
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            apply_external_dataset_selection(app);
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button("Folder##pick_dataset_folder", {58.F, 0.F}) &&
             pick_folder(
                 L"Select external SfM dataset folder",
                 app.settings.dataset_source)) {
-            clear_loaded_result(app);
-            refresh_artifacts(app);
+            apply_external_dataset_selection(app);
         }
         ImGui::SameLine(0.F, 4.F);
         if (ImGui::Button("File##pick_dataset_file", {46.F, 0.F}) &&
             pick_dataset_file(
                 L"Select external camera dataset file",
                 app.settings.dataset_source)) {
-            clear_loaded_result(app);
-            refresh_artifacts(app);
+            apply_external_dataset_selection(app);
         }
         if (has_external_dataset(app)) {
             theme::caption(
-                "Train 3DGS will use the imported cameras and skip internal SfM.");
+                "Imported cameras replace Align Photos. Review the cloud, then "
+                "run Train 3DGS or Dense MVS.");
             theme::caption("Dataset format");
             ImGui::SetNextItemWidth(-1.F);
             const char* formats[] = {
@@ -3362,6 +3485,7 @@ Action draw_inspector(App& app) {
                 app.settings.dataset_format = 0;
                 clear_loaded_result(app);
                 refresh_artifacts(app);
+                if (app.has_sparse) request_ascan_scene_load(app);
             }
         }
         ImGui::EndDisabled();
@@ -3747,9 +3871,11 @@ Action draw_inspector(App& app) {
         if (theme::primary_button(
                 app.settings.build_mesh ? "Train External 3DGS + Mesh"
                                         : "Train External 3DGS",
-                {-1.F, 40.F},
-                app.settings.images_dir[0] != '\0'))
+                {-1.F, 40.F}, true))
             action = Action::train;
+        ImGui::Dummy({0, 6.F});
+        if (theme::toolbar_button("Dense MVS", {-1.F, 32.F}))
+            action = Action::dense;
     } else if (!app.has_sparse) {
         if (theme::primary_button(
                 "Align Photos", {-1.F, 40.F},
@@ -3760,6 +3886,9 @@ Action draw_inspector(App& app) {
                 app.settings.build_mesh ? "Train 3DGS + Mesh" : "Train 3DGS",
                 {-1.F, 40.F}, app.settings.images_dir[0] != '\0'))
             action = Action::train;
+        ImGui::Dummy({0, 6.F});
+        if (theme::toolbar_button("Dense MVS", {-1.F, 32.F}))
+            action = Action::dense;
     }
 
     ImGui::End();
@@ -4110,6 +4239,9 @@ int main(const int argc, char** argv) {
                 break;
             case Action::train:
                 if (!app.smoke_mode) start_train(app, false);
+                break;
+            case Action::dense:
+                if (!app.smoke_mode) start_dense(app);
                 break;
             case Action::export_sfm:
                 if (!app.smoke_mode) start_export_sfm(app);

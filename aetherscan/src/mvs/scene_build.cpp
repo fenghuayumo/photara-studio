@@ -70,6 +70,7 @@ void colour_sparse_points_from_photos(
         observations_by_image(sfm_scene.images.size());
     for (std::size_t point = 0; point < track_ids.size(); ++point) {
         const auto& track = sfm_scene.tracks[track_ids[point]];
+        if (track.has_color) continue;
         const std::size_t inliers = std::min<std::size_t>(
             track.num_inliers, track.observations.size());
         for (std::size_t i = 0; i < inliers; ++i) {
@@ -396,8 +397,25 @@ MvsScene build_mvs_scene(
             scene.sparse_points.push_back(std::move(point));
         }
     }
-    colour_sparse_points_from_photos(
-        sfm_scene, source_tracks, scene.sparse_points);
+    std::size_t colored_from_tracks = 0;
+    for (std::size_t i = 0; i < source_tracks.size(); ++i) {
+        const auto& track = sfm_scene.tracks[source_tracks[i]];
+        if (!track.has_color) continue;
+        scene.sparse_points[i].color = Vec3f(
+            static_cast<float>(track.color_r) / 255.F,
+            static_cast<float>(track.color_g) / 255.F,
+            static_cast<float>(track.color_b) / 255.F);
+        ++colored_from_tracks;
+    }
+    if (colored_from_tracks == scene.sparse_points.size() &&
+        !scene.sparse_points.empty()) {
+        core::Logger::instance().info(
+            "mvs sparse colors: from_tracks=", colored_from_tracks,
+            "/", scene.sparse_points.size(), " photos=0");
+    } else {
+        colour_sparse_points_from_photos(
+            sfm_scene, source_tracks, scene.sparse_points);
+    }
 
     detail::estimate_subject_bounds(
         scene.sparse_points, scene.subject_bounds,

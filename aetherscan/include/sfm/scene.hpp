@@ -81,6 +81,12 @@ struct Track {
     Vec3 position{Vec3::Zero()};
     std::vector<Observation> observations;
     std::uint8_t num_inliers{0};
+    // Mean sRGB sampled at inlier keypoints. Align writes this so Train/MVS
+    // can initialise Gaussians without decoding the photo set again.
+    std::uint8_t color_r{128};
+    std::uint8_t color_g{128};
+    std::uint8_t color_b{128};
+    bool has_color{false};
     // Runtime-only scheduling metadata. Checkpoints deliberately omit this:
     // after resume tracks are conservatively checked once, without invalidating
     // the existing checkpoint schema and large frontend caches.

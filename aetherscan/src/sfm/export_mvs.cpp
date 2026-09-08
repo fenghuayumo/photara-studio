@@ -213,7 +213,7 @@ void export_openmvs_interface(
             const auto found = image_to_export.find(obs.image_id);
             if (found == image_to_export.end()) continue;
             vertex.views.emplace_back(found->second, 0.0f);
-            if (!options.sample_colors) continue;
+            if (track.has_color || !options.sample_colors) continue;
             const Image& image = scene.images[obs.image_id];
             if (obs.feature_id >= image.features.keypoints.size()) continue;
             const auto* rgb = cached_rgb(rgb_cache, scene, obs.image_id);
@@ -229,7 +229,12 @@ void export_openmvs_interface(
         if (vertex.views.size() < 2) continue;
         std::sort(vertex.views.begin(), vertex.views.end(),
             [](const auto& a, const auto& b) { return a.first < b.first; });
-        if (color_samples > 0) {
+        if (track.has_color) {
+            vertex.r = track.color_r;
+            vertex.g = track.color_g;
+            vertex.b = track.color_b;
+            wrote_any_color = true;
+        } else if (color_samples > 0) {
             vertex.r = static_cast<std::uint8_t>(std::lround(sum_r / color_samples));
             vertex.g = static_cast<std::uint8_t>(std::lround(sum_g / color_samples));
             vertex.b = static_cast<std::uint8_t>(std::lround(sum_b / color_samples));

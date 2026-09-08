@@ -126,6 +126,10 @@ void write_payload(
                 record.value(observation.feature_id);
             }
             record.value(static_cast<std::uint32_t>(track.num_inliers));
+            record.value(static_cast<std::uint8_t>(track.has_color ? 1 : 0));
+            record.value(track.color_r);
+            record.value(track.color_g);
+            record.value(track.color_b);
         });
     }
 }
@@ -204,6 +208,12 @@ Scene read_payload(BufferReader& reader, const AsfmOptions& options) {
                 throw std::runtime_error("ASFM track inlier count is invalid");
             track.num_inliers = static_cast<std::uint8_t>(
                 (std::min)(inliers, 255U));
+            if (record.remaining() >= 4) {
+                track.has_color = record.value<std::uint8_t>() != 0;
+                track.color_r = record.value<std::uint8_t>();
+                track.color_g = record.value<std::uint8_t>();
+                track.color_b = record.value<std::uint8_t>();
+            }
         });
         for (const Observation& observation : track.observations) {
             if (observation.image_id >= scene.images.size() ||
@@ -230,7 +240,7 @@ std::vector<std::uint8_t> encode_asfm(
     file.value(k_asfm_version);
     const bool fisheye = std::any_of(scene.cameras.begin(), scene.cameras.end(),
         [](const PinholeCamera& camera) { return camera.model == CameraModel::opencv_fisheye; });
-    file.value(fisheye ? k_asfm_version : k_asfm_min_reader);
+    file.value(fisheye ? k_asfm_fisheye_min_reader : k_asfm_min_reader);
     file.value(payload.size());
     file.value(payload.checksum());
     file.bytes(payload.buffer().data(), payload.buffer().size());

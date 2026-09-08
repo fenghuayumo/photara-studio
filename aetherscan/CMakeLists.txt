@@ -205,6 +205,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/reconstruct.cpp
         src/sfm/export_mvs.cpp
         src/sfm/asfm.cpp
+        src/sfm/appearance.cpp
         src/sfm/preview.cpp
         src/project/archive.cpp
         src/project/document.cpp)

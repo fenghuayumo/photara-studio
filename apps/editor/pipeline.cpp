@@ -39,8 +39,16 @@ constexpr Band k_align_bands[] = {
     {"register images", Stage::mapping, 0.77F, 0.96F},
 };
 
-// On the training run SfM is normally a checkpoint hit, so it only owns a thin
-// slice at the front.
+constexpr Band k_dense_bands[] = {
+    {"mvs.load_images", Stage::dense, 0.05F, 0.18F},
+    {"mvs.estimate_depth", Stage::dense, 0.18F, 0.62F},
+    {"mvs.geometric_consistency", Stage::dense, 0.62F, 0.78F},
+    {"mvs.filter_depth", Stage::dense, 0.78F, 0.86F},
+    {"mvs.fuse", Stage::dense, 0.86F, 0.94F},
+    {"mvs.mesh", Stage::meshing, 0.94F, 0.99F},
+};
+
+// On the training run SfM is skipped when a working alignment exists.
 constexpr Band k_train_bands[] = {
     {"extract features", Stage::features, 0.01F, 0.04F},
     {"match image pairs", Stage::matching, 0.04F, 0.07F},
@@ -206,6 +214,7 @@ const char* job_name(const JobKind kind) {
     switch (kind) {
         case JobKind::align: return "Alignment";
         case JobKind::train: return "Training";
+        case JobKind::dense: return "Dense MVS";
         case JobKind::export_sfm: return "SfM export";
         case JobKind::none: return "Job";
     }
@@ -220,6 +229,7 @@ const char* stage_name(const Stage stage) {
         case Stage::tracks: return "Building tracks";
         case Stage::mapping: return "Solving camera poses";
         case Stage::exporting: return "Writing sparse scene";
+        case Stage::preparing: return "Preparing aligned scene";
         case Stage::dense: return "Dense MVS";
         case Stage::training: return "Training Gaussians";
         case Stage::meshing: return "Extracting mesh";
@@ -396,7 +406,9 @@ void RunMonitor::reset() {
 void RunMonitor::begin(const JobKind kind) {
     reset();
     kind_ = kind;
-    stage_ = kind == JobKind::train ? Stage::training : Stage::features;
+    if (kind == JobKind::train) stage_ = Stage::preparing;
+    else if (kind == JobKind::dense) stage_ = Stage::dense;
+    else stage_ = Stage::features;
     band_begin_ = 0.F;
     band_end_ = 0.F;
     started_ = std::chrono::steady_clock::now();
@@ -422,6 +434,30 @@ void RunMonitor::consume(const std::string& line) {
     if (line.find("checkpoint hit: reconstruction") != std::string::npos ||
         line.find("checkpoint hit: tracks") != std::string::npos)
         resumed_ = true;
+
+    if (line.find("pipeline_handoff=") != std::string::npos) {
+        if (line.find("pipeline_handoff=reconstruct") != std::string::npos) {
+            if (kind_ == JobKind::train || kind_ == JobKind::dense)
+                enter_stage(Stage::features, 0.02F);
+        } else if (kind_ == JobKind::train) {
+            enter_stage(Stage::preparing, 0.04F);
+        } else if (kind_ == JobKind::dense) {
+            enter_stage(Stage::dense, 0.04F);
+        }
+        task_ = {};
+        return;
+    }
+    if (line.find("working_sfm_loaded=") != std::string::npos ||
+        line.find("ascan_sfm_loaded") != std::string::npos ||
+        line.find("splat_dataset=") != std::string::npos) {
+        if (kind_ == JobKind::train) enter_stage(Stage::preparing, 0.05F);
+        else if (kind_ == JobKind::dense) enter_stage(Stage::dense, 0.05F);
+    }
+    if (line.find("splat_input=") != std::string::npos ||
+        line.find("mvs sparse colors:") != std::string::npos ||
+        line.find("mvs scene:") != std::string::npos) {
+        if (kind_ == JobKind::train) enter_stage(Stage::preparing, 0.09F);
+    }
 
     // Artifact keys. Only presence matters; paths come from the layout.
     if (line.find("sfm_diagnostics=") != std::string::npos)
@@ -516,11 +552,15 @@ void RunMonitor::consume(const std::string& line) {
     if (metrics_at == std::string::npos) return;
     const std::string label = line.substr(label_begin, metrics_at - label_begin);
 
-    const Band* bands =
-        kind_ == JobKind::train ? k_train_bands : k_align_bands;
-    const std::size_t band_count = kind_ == JobKind::train
-        ? std::size(k_train_bands)
-        : std::size(k_align_bands);
+    const Band* bands = k_align_bands;
+    std::size_t band_count = std::size(k_align_bands);
+    if (kind_ == JobKind::train) {
+        bands = k_train_bands;
+        band_count = std::size(k_train_bands);
+    } else if (kind_ == JobKind::dense) {
+        bands = k_dense_bands;
+        band_count = std::size(k_dense_bands);
+    }
     const Band* match = nullptr;
     for (std::size_t i = 0; i < band_count; ++i)
         if (starts_with(label, bands[i].prefix)) {
@@ -728,8 +768,10 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
         : settings.splat_format == 3 ? layout.splat_spz
         : settings.splat_format == 4 ? layout.splat_glb : layout.splat_ply;
     layout.mesh_ply = layout.root / (stem + "_splat_mesh.ply");
+    layout.dense_ply = layout.root / (stem + "_dense.ply");
     layout.align_log = layout.root / (stem + "_align.log");
     layout.train_log = layout.root / (stem + "_train.log");
+    layout.dense_log = layout.root / (stem + "_dense.log");
     layout.export_log = layout.root / (stem + "_export.log");
     layout.view_log = layout.root / (stem + "_view.log");
     std::filesystem::path runtime_dir = layout.cache;
@@ -882,6 +924,38 @@ std::string build_view_command(
                 << " --splat-preview-vk-device-node-mask "
                 << preview.device_node_mask;
     }
+    return command.str();
+}
+
+std::string build_dense_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout) {
+    std::ostringstream command;
+    command << quote(cli_path) << " --images "
+            << quote(settings.images_dir.data()) << " --output "
+            << quote(layout.project_file.empty() ? layout.sparse_ply
+                                                 : layout.project_file);
+    if (settings.dataset_source[0] != '\0') {
+        command << " --splat-dataset "
+                << quote(std::filesystem::path(settings.dataset_source.data()))
+                << " --dataset-format "
+                << dataset_format_flag(settings.dataset_format);
+        if (settings.dataset_initial_cloud[0] != '\0')
+            command << " --dense-ply "
+                    << quote(std::filesystem::path(
+                           settings.dataset_initial_cloud.data()));
+    } else {
+        command << " --mode " << sfm_mode_flag(settings.sfm_mode)
+                << " --camera-model " << (settings.camera_model == 2 ? "auto" :
+                    settings.camera_model == 1 ? "opencv_fisheye" : "pinhole")
+                << " --max-features " << settings.max_features;
+        if (settings.reuse_cache)
+            command << " --cache-dir " << quote(layout.cache);
+    }
+    command << " --dense --mesh=" << (settings.build_mesh ? "true" : "false");
+    if (settings.build_mesh)
+        command << " --mesh-method " << mesh_method_flag(settings.mesh_method);
+    append_gui_flags(command, layout);
     return command.str();
 }
 

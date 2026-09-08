@@ -9,8 +9,11 @@
 
 namespace aetherscan::sfm {
 
-inline constexpr std::uint32_t k_asfm_version = 2;
+inline constexpr std::uint32_t k_asfm_version = 3;
 inline constexpr std::uint32_t k_asfm_min_reader = 1;
+// Fisheye cameras were introduced in writer v2. Colour is additive in v3, so
+// older readers that already understand fisheye can still open new files.
+inline constexpr std::uint32_t k_asfm_fisheye_min_reader = 2;
 
 struct AsfmOptions {
     // If set, image paths are stored relative to this directory when they do

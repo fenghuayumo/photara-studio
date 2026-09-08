@@ -1,4 +1,5 @@
 #include "sfm/reconstruct.hpp"
+#include "sfm/appearance.hpp"
 #include "sfm/asfm.hpp"
 #include "sfm/preview.hpp"
 #include "sfm/export_mvs.hpp"
@@ -1545,6 +1546,14 @@ bool load_working_sfm(
     return true;
 }
 
+void ensure_scene_appearance(
+    const ReconstructCli& cli, aetherscan::sfm::Scene& scene) {
+    if (aetherscan::sfm::triangulated_tracks_have_color(scene)) return;
+    const std::size_t colored =
+        aetherscan::sfm::colour_triangulated_tracks(scene);
+    if (colored > 0) save_working_sfm(cli, scene);
+}
+
 void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& path) {
     std::size_t count = 0;
     for (const auto& track : scene.tracks) {
@@ -1579,6 +1588,14 @@ void save_ply(const aetherscan::sfm::Scene& scene, const std::filesystem::path& 
 
     for (const auto& track : scene.tracks) {
         if (!track.is_triangulated()) continue;
+        if (track.has_color) {
+            output << track.position.x() << ' ' << track.position.y() << ' '
+                   << track.position.z() << ' '
+                   << static_cast<int>(track.color_r) << ' '
+                   << static_cast<int>(track.color_g) << ' '
+                   << static_cast<int>(track.color_b) << '\n';
+            continue;
+        }
         double sum_r = 0.0;
         double sum_g = 0.0;
         double sum_b = 0.0;
@@ -2789,6 +2806,8 @@ int main(int argc, char** argv) {
             if (cli.capture_mode == "scene")
                 loaded.scene.subject_bounds = {};
             aetherscan::core::Logger::instance().info(
+                "pipeline_handoff=external_dataset");
+            aetherscan::core::Logger::instance().info(
                 "splat_dataset=", loaded.resolved_source,
                 " format=",
                 aetherscan::splat::dataset_format_name(loaded.format),
@@ -2964,25 +2983,34 @@ int main(int argc, char** argv) {
 
         aetherscan::sfm::Scene scene;
         bool loaded_project_sfm = false;
-        if (project_output && cli.splat &&
+        const bool needs_cameras = cli.splat || cli.dense;
+        if (project_output && needs_cameras &&
             archive.has(aetherscan::project::ChunkType::sfm)) {
             auto loaded = aetherscan::project::read_sfm(archive);
             if (loaded && loaded->registered_count() >= 2) {
                 scene = std::move(*loaded);
                 loaded_project_sfm = true;
                 aetherscan::core::Logger::instance().info(
+                    "pipeline_handoff=ascan_sfm");
+                aetherscan::core::Logger::instance().info(
                     "ascan_sfm_loaded images=", scene.images.size(),
                     " registered=", scene.registered_count(),
                     " tracks=", scene.tracks.size());
             }
         }
-        if (cli.splat && !loaded_project_sfm &&
-            load_working_sfm(cli, scene))
+        if (needs_cameras && !loaded_project_sfm &&
+            load_working_sfm(cli, scene)) {
             loaded_project_sfm = true;
+            aetherscan::core::Logger::instance().info(
+                "pipeline_handoff=working_sfm");
+        }
+        if (loaded_project_sfm) ensure_scene_appearance(cli, scene);
 
         aetherscan::sfm::ReconstructionSummary summary{};
         double elapsed = 0.0;
         if (!loaded_project_sfm) {
+        aetherscan::core::Logger::instance().info(
+            "pipeline_handoff=reconstruct");
         std::vector<std::filesystem::path> files;
         for (const auto& entry :
              std::filesystem::directory_iterator(cli.images_dir)) {

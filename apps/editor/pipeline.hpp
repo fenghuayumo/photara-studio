@@ -18,10 +18,10 @@
 
 namespace editor {
 
-// The workflow the editor exposes: align cameras first, review the sparse
-// result, then optimise Gaussians (optionally with the geometry supervision
-// that mesh extraction needs).
-enum class JobKind { none, align, train, export_sfm };
+// Alignment is the shared product of internal SfM or an imported camera
+// dataset. Downstream jobs (Train 3DGS, dense MVS) consume that product and
+// must not rebuild it.
+enum class JobKind { none, align, train, dense, export_sfm };
 
 const char* job_name(JobKind kind);
 
@@ -32,6 +32,7 @@ enum class Stage {
     tracks,
     mapping,
     exporting,
+    preparing,
     dense,
     training,
     meshing,
@@ -262,8 +263,10 @@ struct ProjectLayout {
     std::filesystem::path splat_glb;
     std::filesystem::path splat_model;
     std::filesystem::path mesh_ply;
+    std::filesystem::path dense_ply;
     std::filesystem::path align_log;
     std::filesystem::path train_log;
+    std::filesystem::path dense_log;
     std::filesystem::path export_log;
     std::filesystem::path view_log;
     std::filesystem::path preview_view_file;
@@ -297,6 +300,10 @@ std::string build_view_command(
     const ProjectLayout& layout, const PreviewHandles& preview);
 
 std::string build_export_sfm_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout);
+
+std::string build_dense_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout);
 

@@ -1005,7 +1005,22 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour
         loaded.scene.views.push_back(std::move(pose));
     }
     loaded.scene.total_views = scene.images.size();
-    if (colour_from_photos) colour_points_from_photos(scene, loaded.scene, track_ids);
+    bool used_track_colours = !track_ids.empty();
+    if (!track_ids.empty()) {
+        loaded.scene.colours.resize(track_ids.size());
+        for (std::size_t i = 0; i < track_ids.size(); ++i) {
+            const auto& track = scene.tracks[track_ids[i]];
+            if (!track.has_color) {
+                used_track_colours = false;
+                break;
+            }
+            loaded.scene.colours[i] = IM_COL32(
+                track.color_r, track.color_g, track.color_b, 255);
+        }
+        if (!used_track_colours) loaded.scene.colours.clear();
+    }
+    if (!used_track_colours && colour_from_photos)
+        colour_points_from_photos(scene, loaded.scene, track_ids);
     loaded.scene.compute_bounds();
     return loaded;
 }

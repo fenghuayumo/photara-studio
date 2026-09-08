@@ -101,7 +101,19 @@ int main() {
     expect(restored.images[0].features.descriptors.empty(), "asfm omits descriptors");
     expect(restored.tracks.size() == 1, "asfm track count");
     expect(restored.tracks[0].num_inliers == 2, "asfm inliers");
+    expect(!restored.tracks[0].has_color, "asfm colour absent by default");
     expect(restored.pairs.empty(), "asfm omits pairs");
+
+    Scene colored = source;
+    colored.tracks[0].has_color = true;
+    colored.tracks[0].color_r = 12;
+    colored.tracks[0].color_g = 34;
+    colored.tracks[0].color_b = 56;
+    const Scene colored_restored = decode_asfm(encode_asfm(colored));
+    expect(colored_restored.tracks[0].has_color, "asfm colour round trip flag");
+    expect(colored_restored.tracks[0].color_r == 12, "asfm colour r");
+    expect(colored_restored.tracks[0].color_g == 34, "asfm colour g");
+    expect(colored_restored.tracks[0].color_b == 56, "asfm colour b");
 
     Scene fish_source = source;
     fish_source.cameras[0].model = aetherscan::CameraModel::opencv_fisheye;
