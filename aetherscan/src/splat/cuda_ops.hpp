@@ -203,8 +203,8 @@ void accumulate_densification_stats(
     bool require_contribution_visibility);
 
 // Mutate selected parents and their already-cloned children in place.
-// mode: 1=default split, 2=ADC+ split, 3=ADC-IGS split,
-//       4=dense-MVS tangent-plane split.
+// mode: 1=default, 2=ADC+, 3=legacy stochastic IGS,
+//       4=dense-MVS tangent plane, 5=IGS moment-preserving major-axis split.
 void split_gaussians(
     GaussianModel& parents,
     GaussianModel& children,
@@ -217,6 +217,10 @@ void split_gaussians(
 
 void apply_adc_decay(
     GaussianModel& model, float opacity_decay, float scale_decay);
+
+tinytensor::Tensor adc_plus_footprint_weights(
+    const tinytensor::Tensor& gradients,
+    const tinytensor::Tensor& screens);
 
 void inject_adc_noise(
     GaussianModel& model,

@@ -1334,6 +1334,21 @@ __global__ void split_gaussians_kernel(
                           random_samples[3 * child];
             log_scale_delta[axis] = axis == largest ? logf(0.5F) : 0.F;
         }
+    } else if (mode == 5) {
+        // Equal-weight mixture: C_child + d*d^T == C_parent. Restrict d
+        // to one eigenvector so no off-diagonal covariance is introduced.
+        int largest = 0;
+        for (int axis = 1; axis < 3; ++axis)
+            if (parent_log_scales[3 * parent + axis] >
+                parent_log_scales[3 * parent + largest]) largest = axis;
+        const float screen = screen_sizes != nullptr
+            ? fmaxf(screen_sizes[child], 1e-6F) : 1e-6F;
+        const float k = split_at_screen_size > 0.F
+            ? fminf(rsqrtf(2.F), split_at_screen_size / screen)
+            : rsqrtf(2.F);
+        local[largest] = expf(parent_log_scales[3 * parent + largest]) *
+            sqrtf(fmaxf(1.F - k * k, 0.F));
+        log_scale_delta[largest] = logf(fmaxf(k, 1e-12F));
     } else if (mode == 2) {
         // Match brush-train's ADC+ covariance-aware split. The offset is
         // deterministic and anti-correlated, preserving the centroid. Axes
@@ -1385,7 +1400,7 @@ __global__ void split_gaussians_kernel(
     }
     const float opacity = sigmoid(parent_opacity_logits[parent]);
     const float opacity_floor = mode == 1 ? 1e-8F : minimum_opacity;
-    const float opacity_power = mode == 2 ? rsqrtf(2.F) : 0.5F;
+    const float opacity_power = (mode == 2 || mode == 5) ? rsqrtf(2.F) : 0.5F;
     const float revised = fminf(fmaxf(
         1.F - powf(fmaxf(1.F - opacity, 0.F), opacity_power),
         opacity_floor), 1.F - opacity_floor);
@@ -1405,6 +1420,20 @@ __global__ void adc_decay_kernel(
     opacity_logits[index] = logf(opacity / (1.F - opacity));
     for (int axis = 0; axis < 3; ++axis)
         log_scales[3 * index + axis] += log_scale_decay;
+}
+
+__global__ void adc_plus_footprint_weights_kernel(
+    const float* gradients, const float* screens,
+    float* weights, const std::size_t count) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const float gradient = fmaxf(gradients[index], 0.F);
+    // Growth sampling divides the accumulated gradient signal by the
+    // projected footprint (screen fraction), countering the systematic
+    // near-camera overweighting of screen-space densification scores. The
+    // small floor only disables the correction for near-invisible rows.
+    const float footprint = fmaxf(screens[index], 0.05F);
+    weights[index] = gradient / footprint;
 }
 
 __device__ std::uint32_t hash_u32(std::uint32_t value) {
@@ -2248,6 +2277,23 @@ void apply_adc_decay(
         model.log_scales.ptr<float>(), model.opacity_logits.ptr<float>(),
         model.size(), std::max(opacity_decay, 0.F), std::log(scale_factor));
     check_cuda(cudaGetLastError(), "decay ADC Gaussian parameters");
+}
+
+tinytensor::Tensor adc_plus_footprint_weights(
+    const tinytensor::Tensor& gradients,
+    const tinytensor::Tensor& screens) {
+    const std::size_t count = gradients.numel();
+    auto weights = tinytensor::Tensor::empty(
+        {count == 0 ? std::size_t{1} : count}, tinytensor::Device::CUDA);
+    if (count == 0) return weights;
+    const bool screens_valid = screens.is_valid() && screens.numel() == count;
+    if (!screens_valid) return gradients.clone();
+    adc_plus_footprint_weights_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        gradients.ptr<float>(), screens.ptr<float>(),
+        weights.ptr<float>(), count);
+    check_cuda(cudaGetLastError(), "build ADC+ footprint weights");
+    return weights;
 }
 
 void inject_adc_noise(

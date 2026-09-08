@@ -1,6 +1,7 @@
 #include "densification.hpp"
 
-#include "densification_internal.hpp"
+#include "densification_adc_plus.hpp"
+#include "densification_igs.hpp"
 
 #include <cuda_runtime.h>
 
@@ -112,51 +113,6 @@ void select_training_rows(
     for (detail::AdamState* state : states) select_adam_rows(*state, indices);
 }
 
-void select_training_rows_gpu(
-    GaussianModel& model, const tinytensor::Tensor& indices,
-    const AdamStates& states) {
-    model = select_model_rows(model, indices);
-    for (detail::AdamState* state : states)
-        select_adam_rows(*state, indices);
-}
-
-void zero_adam_rows_gpu(
-    const tinytensor::Tensor& indices, const AdamStates& states) {
-    if (indices.numel() == 0) return;
-    for (detail::AdamState* state : states) {
-        const auto zero_rows = [&indices](tinytensor::Tensor& tensor) {
-            std::vector<std::size_t> dimensions = tensor.shape().dims();
-            dimensions[0] = indices.numel();
-            const auto zeros = tinytensor::Tensor::zeros(
-                tinytensor::TensorShape(dimensions),
-                tinytensor::Device::CUDA);
-            tensor.index_copy_(0, indices, zeros);
-        };
-        zero_rows(state->first);
-        zero_rows(state->second);
-    }
-}
-
-void grow_adc_plus_gpu(
-    GaussianModel& model, const tinytensor::Tensor& parents,
-    const TrainingOptions& options, const AdamStates& states,
-    const tinytensor::Tensor& screen_sizes) {
-    const std::size_t count = parents.numel();
-    if (count == 0) return;
-    GaussianModel children = select_model_rows(model, parents);
-    auto samples = tinytensor::Tensor::zeros(
-        {count, std::size_t{3}}, tinytensor::Device::CUDA);
-    auto selected_screen = screen_sizes.index_select(0, parents);
-    detail::split_gaussians(
-        model, children, parents, samples, selected_screen, 2,
-        options.prune_opacity,
-        options.densify_screen_threshold);
-    zero_adam_rows_gpu(parents, states);
-    append_model(model, children);
-    for (detail::AdamState* state : states)
-        append_zero_adam(*state, count);
-}
-
 void grow_training_model(
     GaussianModel& model, const std::vector<int>& parents,
     const int split_mode, const TrainingOptions& options,
@@ -263,12 +219,15 @@ RefinementCounts refine_gaussians(
                           DensificationStrategy::adc_plus;
     const bool adc = options.densification_strategy ==
                      DensificationStrategy::adc_igs;
-    const bool managed = adc || dense_adaptive;
+    const bool managed = dense_adaptive;
     if (!is_refinement_iteration(iteration, options) || model.size() == 0)
         return {};
 
+    if (adc)
+        return IgsStrategy{}.refine(
+            model, stats, iteration, scene_extent, scene_center, options, states);
     if (adc_plus)
-        return internal::refine_adc_plus_gpu(
+        return AdcPlusStrategy{}.refine(
             model, stats, iteration, scene_extent, scene_center,
             options, states);
 
@@ -406,17 +365,6 @@ RefinementCounts refine_gaussians(
         ? options.densification_cap - model.size()
         : 0;
     if (capacity == 0) {
-        if (adc) {
-            const float remaining_progress = 1.F -
-                static_cast<float>(iteration) /
-                    std::max(1.F, static_cast<float>(options.iterations));
-            detail::apply_adc_decay(
-                model,
-                options.opacity_decay *
-                    std::max(remaining_progress, 0.F),
-                options.scale_decay *
-                    std::max(remaining_progress, 0.F));
-        }
         stats = detail::make_densification_stats(model.size());
         return {0, pruned};
     }
@@ -452,21 +400,11 @@ RefinementCounts refine_gaussians(
         std::vector<std::pair<std::size_t, float>> replacement_weights;
         std::vector<std::pair<std::size_t, float>> growth_weights;
         std::unordered_set<std::size_t> forced;
-        const bool allow_growth = dense_adaptive ||
-            options.densification_strategy != DensificationStrategy::adc_igs ||
-            iteration < options.grow_stop_iter;
+        const bool allow_growth = true;
         for (const Candidate& candidate : candidates) {
             const float opacity = 1.F /
                 (1.F + std::exp(-opacities[candidate.old_index]));
             float edge_factor = 1.F;
-            if (options.densification_strategy ==
-                DensificationStrategy::adc_igs) {
-                const float priority = priorities[candidate.old_index] /
-                    std::max(counts[candidate.old_index], 1.F);
-                if (priority > 0.F)
-                    edge_factor += 0.25F * std::min(
-                        priority / priority_median, 10.F);
-            }
             const float screen_factor = candidate.oversized ? 2.F : 1.F;
             replacement_weights.emplace_back(
                 candidate.new_index,
@@ -481,8 +419,7 @@ RefinementCounts refine_gaussians(
             if (!dense_adaptive && allow_growth && candidate.oversized)
                 forced.insert(candidate.new_index);
         }
-        const bool gumbel = options.densification_strategy ==
-                            DensificationStrategy::adc_igs;
+        const bool gumbel = false;
         auto selected = weighted_unique_sample(
             replacement_weights, std::min(pruned, capacity), gumbel, random);
         forced.insert(selected.begin(), selected.end());
@@ -526,25 +463,10 @@ RefinementCounts refine_gaussians(
         retained_screen);
     // Parent row indices still refer to the original retained prefix after
     // duplicates are appended, so they remain valid here.
-    const int split_mode = options.densification_strategy ==
-            DensificationStrategy::adc_igs
-        ? 3
-        : dense_adaptive
-            ? 4
-            : 1;
+    const int split_mode = dense_adaptive ? 4 : 1;
     grow_training_model(
         model, split_parents, split_mode, options, random, states,
         retained_screen);
-    if (adc) {
-        const float remaining_progress = 1.F -
-            static_cast<float>(iteration) /
-                std::max(1.F, static_cast<float>(options.iterations));
-        detail::apply_adc_decay(
-            model,
-            options.opacity_decay * std::max(remaining_progress, 0.F),
-            options.scale_decay *
-                std::max(remaining_progress, 0.F));
-    }
     stats = detail::make_densification_stats(model.size());
     return {duplicate_parents.size() + split_parents.size(), pruned};
 }

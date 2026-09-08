@@ -19,6 +19,11 @@ enum class DensificationStrategy {
     dense_adaptive,
 };
 
+[[nodiscard]] constexpr bool is_adc_strategy(DensificationStrategy strategy) {
+    return strategy == DensificationStrategy::adc_plus ||
+           strategy == DensificationStrategy::adc_igs;
+}
+
 struct TrainingOptions {
     unsigned iterations{10'000};
     unsigned sh_degree{3};
@@ -57,7 +62,7 @@ struct TrainingOptions {
     float dense_growth_fraction{0.005F};
     float prune_opacity{1.F / 255.F};
     float opacity_decay{0.004F};
-    // ADC-IGS scale decay. brush ADC+ only decays opacity.
+    // Legacy scale-decay setting. ADC+ and IGS only decay opacity.
     float scale_decay{0.002F};
     float mean_noise_weight{50.F};
     // Uniform noise around a black background, clamped to [0,1].
@@ -202,5 +207,11 @@ struct TrainingOptions {
     // Editor visualization mode sidecar: splat / points / rings.
     std::filesystem::path preview_vis_file;
 };
+
+// Strategy-specific defaults for shared densification knobs. The CLI applies
+// this after selecting the strategy and before mapping user overrides, so the
+// same option name can carry a different default value per densification
+// strategy without duplicating parameters.
+void apply_strategy_defaults(TrainingOptions& options);
 
 }  // namespace aetherscan::splat

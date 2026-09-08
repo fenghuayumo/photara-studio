@@ -409,6 +409,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
             src/splat/dataset_openmvs.cpp
             src/splat/dataset_reality_capture.cpp
             src/splat/densification.cpp
+            src/splat/densification_igs.cpp
             src/splat/densification_adc_plus.cpp
             src/splat/densification_strategies.cpp
             src/splat/formats.cpp

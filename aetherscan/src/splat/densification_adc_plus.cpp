@@ -1,4 +1,6 @@
-#include "densification_internal.hpp"
+#include "densification_adc_plus.hpp"
+
+#include "core/logging.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -86,7 +88,7 @@ void zero_adam_rows_gpu(
 void grow_adc_plus_gpu(
     GaussianModel& model, const tinytensor::Tensor& parents,
     const TrainingOptions& options, const AdamStates& states,
-    const tinytensor::Tensor& screen_sizes) {
+    const tinytensor::Tensor& screen_sizes, const int split_mode) {
     const std::size_t count = parents.numel();
     if (count == 0) return;
     GaussianModel children = select_model_rows(model, parents);
@@ -94,7 +96,7 @@ void grow_adc_plus_gpu(
         {count, std::size_t{3}}, tinytensor::Device::CUDA);
     auto selected_screen = screen_sizes.index_select(0, parents);
     detail::split_gaussians(
-        model, children, parents, samples, selected_screen, 2,
+        model, children, parents, samples, selected_screen, split_mode,
         options.prune_opacity,
         options.densify_screen_threshold);
     zero_adam_rows_gpu(parents, states);
@@ -105,26 +107,60 @@ void grow_adc_plus_gpu(
 
 }  // namespace
 
-RefinementCounts internal::refine_adc_plus_gpu(
+tinytensor::Tensor AdcPlusStrategy::growth_candidates(
+    const tinytensor::Tensor& eligible, const tinytensor::Tensor&) const {
+    return eligible.nonzero().squeeze(1).to(tinytensor::DataType::Int32);
+}
+
+RefinementCounts AdcPlusStrategy::refine(
     GaussianModel& model, detail::DensificationStats& stats,
     const unsigned iteration, const float scene_extent,
     const mvs::Vec3f& scene_center, const TrainingOptions& options,
-    const AdamStates& states) {
+    const AdamStates& states) const {
     const std::size_t old_count = model.size();
     auto pruning = detail::adc_plus_prune(
         model, options.prune_opacity, 100.F * scene_extent,
         {scene_center.x(), scene_center.y(), scene_center.z()},
         options.densification_cap);
-    const std::size_t retained = pruning.keep_indices.numel();
+    // Evidence prune: a row that was actually contributing in fewer than two
+    // steps of the observation window while carrying soft-floor opacity is a
+    // floater in waiting. The opacity floor reuses prune_opacity (12x) so no
+    // new strategy parameter is introduced.
+    constexpr float k_evidence_visible_steps = 2.F;
+    constexpr float k_low_visibility_opacity_factor = 12.F;
+    const float low_visibility_opacity = std::max(
+        k_low_visibility_opacity_factor * options.prune_opacity, 1e-4F);
+    auto keep_indices = pruning.keep_indices;
+    std::size_t evidence_pruned = 0;
+    if (keep_indices.numel() != 0) {
+        const auto kept_counts =
+            stats.count.index_select(0, keep_indices);
+        const auto kept_opacities =
+            pruning.opacities.index_select(0, keep_indices);
+        const auto supported = kept_counts.ge(k_evidence_visible_steps)
+            .logical_or(kept_opacities.ge(low_visibility_opacity));
+        const auto supported_positions =
+            supported.nonzero().squeeze(1).to(
+                tinytensor::DataType::Int32);
+        if (supported_positions.numel() != 0) {
+            evidence_pruned =
+                keep_indices.numel() - supported_positions.numel();
+            keep_indices =
+                keep_indices.index_select(0, supported_positions);
+        }
+    }
+    const std::size_t retained = keep_indices.numel();
     auto retained_gradient =
-        stats.gradient.index_select(0, pruning.keep_indices);
+        stats.gradient.index_select(0, keep_indices);
     auto retained_count =
-        stats.count.index_select(0, pruning.keep_indices);
+        stats.count.index_select(0, keep_indices);
     auto retained_screen =
-        stats.max_screen_radius.index_select(0, pruning.keep_indices);
+        stats.max_screen_radius.index_select(0, keep_indices);
     auto retained_opacity =
-        pruning.opacities.index_select(0, pruning.keep_indices);
-    select_training_rows_gpu(model, pruning.keep_indices, states);
+        pruning.opacities.index_select(0, keep_indices);
+    select_training_rows_gpu(model, keep_indices, states);
+    const std::size_t pruned = old_count - retained;
+
 
     const std::size_t capacity =
         options.densification_cap > retained
@@ -133,6 +169,9 @@ RefinementCounts internal::refine_adc_plus_gpu(
     auto selected = tinytensor::Tensor::zeros_bool(
         {retained}, tinytensor::Device::CUDA);
     std::size_t selected_count = 0;
+    std::size_t replacement_selected = 0;
+    std::size_t oversized_selected_count = 0;
+    std::size_t growth_selected_count = 0;
     if (capacity != 0 && retained != 0) {
         const auto visible = retained_count.gt(0.F);
         auto visible_indices = visible.nonzero().squeeze(1).to(
@@ -140,14 +179,14 @@ RefinementCounts internal::refine_adc_plus_gpu(
         const std::size_t replacement_count = std::min(
             {pruning.pruned, capacity, visible_indices.numel()});
         if (replacement_count != 0) {
-            auto weights = retained_opacity.index_select(
-                0, visible_indices);
+            auto weights = retained_opacity.index_select(0, visible_indices);
             auto sampled_slots = tinytensor::Tensor::multinomial(
                 weights, static_cast<int>(replacement_count), false);
             auto sampled = visible_indices.index_select(
                 0, sampled_slots).to(tinytensor::DataType::Int32);
             selected.index_fill_(0, sampled, 1.F);
             selected_count = replacement_count;
+            replacement_selected = replacement_count;
         }
 
         auto oversized = visible.logical_and(
@@ -164,6 +203,7 @@ RefinementCounts internal::refine_adc_plus_gpu(
                     0, 0, oversized_count);
             selected.index_fill_(0, oversized_indices, 1.F);
             selected_count += oversized_count;
+            oversized_selected_count = oversized_count;
         }
 
         if (iteration < options.grow_stop_iter &&
@@ -171,11 +211,11 @@ RefinementCounts internal::refine_adc_plus_gpu(
             auto growth_mask = visible.logical_and(
                 retained_gradient.gt(
                     options.densify_gradient_threshold));
-            auto growth_indices = growth_mask.nonzero().squeeze(1).to(
-                tinytensor::DataType::Int32);
+            const auto eligible_count = growth_mask.nonzero().numel();
+            auto growth_indices = growth_candidates(growth_mask, selected);
             const std::size_t threshold_growth =
                 static_cast<std::size_t>(std::llround(
-                    growth_indices.numel() *
+                    eligible_count *
                     options.densify_select_fraction));
             const std::size_t requested =
                 threshold_growth > pruning.pruned
@@ -185,13 +225,15 @@ RefinementCounts internal::refine_adc_plus_gpu(
                 {requested, capacity - selected_count,
                  growth_indices.numel()});
             if (growth_count != 0) {
-                auto weights = retained_gradient.index_select(
-                    0, growth_indices);
+                auto weights = detail::adc_plus_footprint_weights(
+                    retained_gradient.index_select(0, growth_indices),
+                    retained_screen.index_select(0, growth_indices));
                 auto sampled_slots = tinytensor::Tensor::multinomial(
                     weights, static_cast<int>(growth_count), false);
                 auto sampled = growth_indices.index_select(
                     0, sampled_slots).to(tinytensor::DataType::Int32);
                 selected.index_fill_(0, sampled, 1.F);
+                growth_selected_count = growth_count;
             }
         }
     }
@@ -199,7 +241,7 @@ RefinementCounts internal::refine_adc_plus_gpu(
     auto split_parents = selected.nonzero().squeeze(1).to(
         tinytensor::DataType::Int32);
     grow_adc_plus_gpu(
-        model, split_parents, options, states, retained_screen);
+        model, split_parents, options, states, retained_screen, split_mode());
     const float remaining_progress = 1.F -
         static_cast<float>(iteration) /
             std::max(1.F, static_cast<float>(options.iterations));
@@ -208,7 +250,17 @@ RefinementCounts internal::refine_adc_plus_gpu(
         options.opacity_decay * std::max(remaining_progress, 0.F),
         0.F);
     stats = detail::make_densification_stats(model.size());
-    return {split_parents.numel(), pruning.pruned};
+    aetherscan::core::Logger::instance().info(
+        name(), "_refine iteration=", iteration,
+        " gaussians=", model.size(),
+        " pruned_total=", pruned,
+        " pruned_low_visibility=", evidence_pruned,
+        " replacement_selected=", replacement_selected,
+        " oversized_selected=", oversized_selected_count,
+        " growth_selected=", growth_selected_count,
+        " capacity=", capacity,
+        " growing=", iteration < options.grow_stop_iter);
+    return {split_parents.numel(), pruned};
 }
 
 }  // namespace aetherscan::splat::densification

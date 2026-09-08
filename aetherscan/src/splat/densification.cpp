@@ -101,25 +101,13 @@ SceneGeometry brush_scene_geometry(
 StrategySchedule strategy_schedule(const TrainingOptions& options) {
     const bool dense_adaptive = options.densification_strategy ==
                                 DensificationStrategy::dense_adaptive;
-    const bool adc = options.densification_strategy ==
-                         DensificationStrategy::adc_plus ||
-                     options.densification_strategy ==
-                         DensificationStrategy::adc_igs;
-    const unsigned preset_stop = dense_adaptive
-        ? 5'000U
-        : options.densification_strategy == DensificationStrategy::adc_plus
-            ? options.iterations
-        : options.densification_strategy == DensificationStrategy::adc_igs
-            ? 25'000U
-            : 15'000U;
+    const bool adc = is_adc_strategy(options.densification_strategy);
+    const unsigned preset_stop = dense_adaptive ? 5'000U
+        : adc ? options.iterations : 15'000U;
     return {
         options.refine_start_iter != 0
             ? options.refine_start_iter
-            : dense_adaptive ? 750U
-                             : options.densification_strategy ==
-                                       DensificationStrategy::adc_plus
-                                 ? 0U
-                                 : adc ? 600U : 500U,
+            : dense_adaptive ? 750U : adc ? 0U : 500U,
         std::min(
             options.refine_stop_iter != 0
                 ? options.refine_stop_iter
@@ -175,3 +163,26 @@ bool is_refinement_iteration(
 }
 
 }  // namespace aetherscan::splat::densification
+
+namespace aetherscan::splat {
+
+void apply_strategy_defaults(TrainingOptions& options) {
+    switch (options.densification_strategy) {
+    case DensificationStrategy::adc_plus:
+        // Brush ADC+ grows through the whole refinement window: floater
+        // control comes from evidence-conditional decay/pruning rather than
+        // a growth cutoff, so never stop net growth before the 95% gate.
+        options.grow_stop_iter =
+            std::max(options.grow_stop_iter, options.iterations);
+        break;
+    case DensificationStrategy::adc_igs:
+        // Match ADC+ growth budget; the strategy changes candidate allocation.
+        options.grow_stop_iter = std::max(options.grow_stop_iter, options.iterations);
+        break;
+    case DensificationStrategy::default_strategy:
+    case DensificationStrategy::dense_adaptive:
+        break;
+    }
+}
+
+}  // namespace aetherscan::splat

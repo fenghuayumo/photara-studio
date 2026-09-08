@@ -2175,6 +2175,10 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     else
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::default_strategy;
+    // Shared densification knobs may default to different values per
+    // strategy; user-provided CLI overrides are applied afterwards and keep
+    // winning.
+    aetherscan::splat::apply_strategy_defaults(options);
     const bool dense_adaptive = dense_input &&
         options.densification_strategy ==
             aetherscan::splat::DensificationStrategy::dense_adaptive;
@@ -2191,8 +2195,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             : (std::min)(options.max_gaussians, options.densification_cap);
     }
     if (!dense_input &&
-        options.densification_strategy ==
-            aetherscan::splat::DensificationStrategy::adc_plus) {
+        aetherscan::splat::is_adc_strategy(options.densification_strategy)) {
         // brush-train optimizer defaults. The trainer also switches ADC+ to
         // brush's 2-NN/identity/0.5-opacity sparse initialization.
         options.means_lr = 2e-5F;
@@ -2288,8 +2291,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.constrain_scale_range = cli.splat_constrain_scales;
     options.max_scale_ratio =
         !dense_input &&
-                options.densification_strategy ==
-                    aetherscan::splat::DensificationStrategy::adc_plus &&
+                aetherscan::splat::is_adc_strategy(options.densification_strategy) &&
                 !cli.splat_max_scale_ratio_overridden
             ? 0.F
             : cli.splat_max_scale_ratio;
@@ -2344,6 +2346,9 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " densification_strategy=", effective_strategy,
         " densification_enabled=", options.enable_densification,
         " structure_freeze_iter=", options.structure_freeze_iter,
+        " grow_stop_iter=", options.grow_stop_iter,
+        " opacity_decay=", options.opacity_decay,
+        " scale_decay=", options.scale_decay,
         " densification_cap=", options.densification_cap,
         " dense_recycle_fraction=", options.dense_recycle_fraction,
         " dense_growth_fraction=", options.dense_growth_fraction,

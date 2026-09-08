@@ -1967,6 +1967,49 @@ void test_gggs_depth_normal_parameter_gradients() {
         "and raster normals into Gaussian means");
 }
 
+void test_igs_growth_budget() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    GaussianModel model;
+    model.means = Tensor::zeros({4, 3}, gpu);
+    model.log_scales = Tensor::full({4, 3}, -3.F, gpu);
+    model.quaternions = Tensor::from_vector(
+        std::vector<float>{1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0}, {4,4}, gpu);
+    model.opacity_logits = Tensor::zeros({4,1}, gpu);
+    model.sh = Tensor::zeros({4,1,3}, gpu);
+    model.normal_features = Tensor::zeros({4,3}, gpu);
+    auto means = detail::make_adam_state(model.means);
+    auto scales = detail::make_adam_state(model.log_scales);
+    auto rotations = detail::make_adam_state(model.quaternions);
+    auto opacity = detail::make_adam_state(model.opacity_logits);
+    auto sh = detail::make_reduced_second_adam_state(model.sh);
+    auto normals = detail::make_adam_state(model.normal_features);
+    densification::AdamStates states{&means, &scales, &rotations, &opacity, &sh, &normals};
+    auto stats = detail::make_densification_stats(4);
+    stats.gradient = Tensor::full({4}, 1.F, gpu);
+    stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.priority = Tensor::full({4}, 10.F, gpu);
+    stats.max_screen_radius = Tensor::from_vector(
+        std::vector<float>{0.5F,0.01F,0.01F,0.01F}, {4}, gpu);
+    TrainingOptions options;
+    options.densification_strategy = DensificationStrategy::adc_igs;
+    options.densification_cap = 7;
+    options.densify_select_fraction = 0.5F;
+    options.densify_screen_threshold = 0.1F;
+    options.densify_gradient_threshold = 0.01F;
+    std::mt19937 random(42);
+    const auto result = densification::refine_gaussians(
+        model, stats, 200, 1.F, aetherscan::mvs::Vec3f::Zero(), options, random, states);
+    require(result.grown == 3 && model.size() == 7,
+            "IGS lost growth budget to an already selected oversized parent");
+    for (const auto* state : states)
+        require(state->first.shape()[0] == 7 && state->second.shape()[0] == 7,
+                "IGS topology and Adam rows diverged");
+    require_finite(model.means, "IGS produced non-finite means");
+    require_finite(model.log_scales, "IGS produced non-finite scales");
+}
+
 void test_adc_plus_split_matches_brush() {
     using namespace aetherscan::splat;
     GaussianModel parents;
@@ -2003,6 +2046,26 @@ void test_adc_plus_split_matches_brush() {
         {1, 3}, tinytensor::Device::CUDA);
     const auto screen_sizes = tinytensor::Tensor::from_vector(
         std::vector<float>{1.F}, {1}, tinytensor::Device::CUDA);
+
+    auto igs_parents = densification::clone_model(parents);
+    auto igs_children = densification::clone_model(children);
+    detail::split_gaussians(
+        igs_parents, igs_children, indices, unused_random, screen_sizes, 5,
+        1.F / 255.F, 0.5F);
+    const auto igs_parent_mean = igs_parents.means.to_vector();
+    const auto igs_child_mean = igs_children.means.to_vector();
+    const auto igs_scale = igs_parents.log_scales.to_vector();
+    const float original_variance[3]{4.F, 1.F, 0.25F};
+    for (int row = 0; row < 3; ++row) {
+        require(std::abs(igs_parent_mean[row] + igs_child_mean[row]) < 1e-5F,
+                "IGS split changed the mixture centroid");
+        for (int col = 0; col < 3; ++col) {
+            const float covariance = (row == col ? std::exp(2.F * igs_scale[row]) : 0.F)
+                + igs_child_mean[row] * igs_child_mean[col];
+            require(std::abs(covariance - (row == col ? original_variance[row] : 0.F)) < 1e-5F,
+                    "IGS split changed the mixture covariance");
+        }
+    }
 
     detail::split_gaussians(
         parents, children, indices, unused_random, screen_sizes, 2,
@@ -2150,6 +2213,15 @@ void test_densification_strategies_and_dense_bypass() {
             !splat::densification::is_refinement_iteration(
                 29'800, full_brush_schedule),
         "ADC+ refined after Brush's 95% cutoff");
+    auto igs_schedule = full_brush_schedule;
+    igs_schedule.densification_strategy = splat::DensificationStrategy::adc_igs;
+    splat::apply_strategy_defaults(igs_schedule);
+    require(igs_schedule.grow_stop_iter >= igs_schedule.iterations,
+            "IGS unexpectedly truncates ADC+ growth budget");
+    for (unsigned step : {200U, 600U, 24000U, 28400U, 28600U})
+        require(splat::densification::is_refinement_iteration(step, igs_schedule) ==
+                    splat::densification::is_refinement_iteration(step, full_brush_schedule),
+                "IGS and ADC+ refinement schedules differ");
     const auto brush_schedule_model =
         splat::Trainer(brush_schedule).train(scene);
     require(
@@ -2258,6 +2330,7 @@ int main() {
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
         test_adc_plus_split_matches_brush();
+        test_igs_growth_budget();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";
         return 0;
