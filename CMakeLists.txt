@@ -13,6 +13,8 @@ option(AETHERSCAN_BUILD_PYTHON
 option(AETHERSCAN_ENABLE_CUDA "Build CUDA acceleration" ON)
 option(AETHERSCAN_ENABLE_SPLAT
     "Build CUDA Gaussian splat training (TinyTensor + GGGS-derived reference rasterizer)" ON)
+option(AETHERSCAN_ENABLE_VULKAN_COMPUTE
+    "Build the TinyTensor Vulkan compute backend (HLSL/DXC, independent VkDevice)" ON)
 option(AETHERSCAN_ENABLE_ACCUTILE
     "Use opacity-aware SnugBox/AccuTile Gaussian-to-tile enumeration" ON)
 option(AETHERSCAN_ENABLE_NATIVE_ARCH "Optimize CPU code for the build host" ON)

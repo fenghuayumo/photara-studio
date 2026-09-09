@@ -33,7 +33,15 @@
 
 #include "core/export.hpp"
 
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "vulkan/ops.hpp"
+#endif
+
 namespace tinytensor {
+
+    namespace vulkan {
+        class TensorStorage;
+    }
 
     class TensorError;
     class TensorIndexer;
@@ -327,6 +335,8 @@ namespace tinytensor {
         mutable size_t id_ = 0;
         static std::atomic<size_t> next_id_;
         static inline bool profiling_enabled_ = false;
+
+        friend class vulkan::TensorStorage;
 
         void materialize_if_deferred();
         void materialize_if_deferred() const {
@@ -984,6 +994,9 @@ namespace tinytensor {
             if (!is_valid()) {
                 return nullptr;
             }
+            if (device_ == Device::Vulkan) {
+                throw std::runtime_error("ptr() is not available on Device::Vulkan tensors");
+            }
             assert_view_not_stale();
             char* data_ptr = static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
             return static_cast<T*>(static_cast<void*>(data_ptr));
@@ -995,6 +1008,9 @@ namespace tinytensor {
             if (!is_valid()) {
                 return nullptr;
             }
+            if (device_ == Device::Vulkan) {
+                throw std::runtime_error("ptr() is not available on Device::Vulkan tensors");
+            }
             assert_view_not_stale();
             const char* data_ptr = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
             return static_cast<const T*>(static_cast<const void*>(data_ptr));
@@ -1005,6 +1021,9 @@ namespace tinytensor {
             if (!is_valid()) {
                 return nullptr;
             }
+            if (device_ == Device::Vulkan) {
+                throw std::runtime_error("data_ptr() is not available on Device::Vulkan tensors");
+            }
             assert_view_not_stale();
             return static_cast<char*>(data_) + storage_offset_ * dtype_size(dtype_);
         }
@@ -1012,6 +1031,9 @@ namespace tinytensor {
             materialize_if_deferred();
             if (!is_valid()) {
                 return nullptr;
+            }
+            if (device_ == Device::Vulkan) {
+                throw std::runtime_error("data_ptr() is not available on Device::Vulkan tensors");
             }
             assert_view_not_stale();
             return static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
@@ -1151,6 +1173,7 @@ namespace tinytensor {
 
         Tensor cpu() const { return to(Device::CPU); }
         Tensor cuda() const { return to(Device::CUDA); }
+        Tensor vulkan() const { return to(Device::Vulkan); }
 
         // ============= SHAPE OPERATIONS =============
         Tensor reshape(std::span<const int> sizes) const {
@@ -1329,7 +1352,7 @@ namespace tinytensor {
         LFS_DEFINE_UNARY_OP_BOOL(isnan, isnan_op)
         LFS_DEFINE_UNARY_OP_BOOL(isinf, isinf_op)
         LFS_DEFINE_UNARY_OP_BOOL(isfinite, isfinite_op)
-        LFS_DEFINE_UNARY_OP_BOOL(logical_not, logical_not_op)
+        Tensor logical_not() const;
 
 #undef LFS_DEFINE_UNARY_OP
 #undef LFS_DEFINE_UNARY_OP_FUSABLE
@@ -1436,32 +1459,33 @@ namespace tinytensor {
         // Comparison operations (return Bool tensors)
 
         // Functor-based overloads for Tensor (zero enum overhead)
-        Tensor eq(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::equal_op{});
-        }
-
-        Tensor ne(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::not_equal_op{});
-        }
-
-        Tensor lt(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::less_op{});
-        }
-
-        Tensor le(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::less_equal_op{});
-        }
-
-        Tensor gt(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::greater_op{});
-        }
-
-        Tensor ge(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::greater_equal_op{});
-        }
+        Tensor eq(const Tensor& other) const;
+        Tensor ne(const Tensor& other) const;
+        Tensor lt(const Tensor& other) const;
+        Tensor le(const Tensor& other) const;
+        Tensor gt(const Tensor& other) const;
+        Tensor ge(const Tensor& other) const;
 
         // Macro for scalar comparison operations (return Bool dtype)
-#define LFS_DEFINE_SCALAR_CMP_OP(name, op_type)                                                      \
+#ifdef TINYTENSOR_HAS_VULKAN
+#define LFS_DEFINE_SCALAR_CMP_OP(name, op_type, vulkan_op)                                           \
+    template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>                      \
+    Tensor name(const T& other) const {                                                              \
+        if (!is_valid() || numel() == 0) {                                                           \
+            if (!is_valid())                                                                         \
+                return Tensor();                                                                     \
+            return Tensor::empty(shape_, device_, DataType::Bool);                                   \
+        }                                                                                            \
+        if (device_ == Device::Vulkan) {                                                             \
+            return vulkan::elementwise_scalar(                                                       \
+                *this, static_cast<float>(other), vulkan::ElementwiseOp::vulkan_op);                 \
+        }                                                                                            \
+        return UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::op_type, float>>(                     \
+            TensorLeaf(*this), ops::scalar_right_op<ops::op_type, float>(static_cast<float>(other)), \
+            shape_, device_, DataType::Bool);                                                        \
+    }
+#else
+#define LFS_DEFINE_SCALAR_CMP_OP(name, op_type, vulkan_op)                                           \
     template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>                      \
     Tensor name(const T& other) const {                                                              \
         if (!is_valid() || numel() == 0) {                                                           \
@@ -1473,28 +1497,20 @@ namespace tinytensor {
             TensorLeaf(*this), ops::scalar_right_op<ops::op_type, float>(static_cast<float>(other)), \
             shape_, device_, DataType::Bool);                                                        \
     }
+#endif
 
-        LFS_DEFINE_SCALAR_CMP_OP(eq, equal_op)
-        LFS_DEFINE_SCALAR_CMP_OP(ne, not_equal_op)
-        LFS_DEFINE_SCALAR_CMP_OP(lt, less_op)
-        LFS_DEFINE_SCALAR_CMP_OP(le, less_equal_op)
-        LFS_DEFINE_SCALAR_CMP_OP(gt, greater_op)
-        LFS_DEFINE_SCALAR_CMP_OP(ge, greater_equal_op)
+        LFS_DEFINE_SCALAR_CMP_OP(eq, equal_op, Eq)
+        LFS_DEFINE_SCALAR_CMP_OP(ne, not_equal_op, Ne)
+        LFS_DEFINE_SCALAR_CMP_OP(lt, less_op, Lt)
+        LFS_DEFINE_SCALAR_CMP_OP(le, less_equal_op, Le)
+        LFS_DEFINE_SCALAR_CMP_OP(gt, greater_op, Gt)
+        LFS_DEFINE_SCALAR_CMP_OP(ge, greater_equal_op, Ge)
 
 #undef LFS_DEFINE_SCALAR_CMP_OP
 
-        // Logical operations (Tensor only, Bool -> Bool)
-        Tensor logical_and(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::logical_and_op{});
-        }
-
-        Tensor logical_or(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::logical_or_op{});
-        }
-
-        Tensor logical_xor(const Tensor& other) const {
-            return comparison_op_with_promotion(other, ops::logical_xor_op{});
-        }
+        Tensor logical_and(const Tensor& other) const;
+        Tensor logical_or(const Tensor& other) const;
+        Tensor logical_xor(const Tensor& other) const;
 
         // ============= REDUCE OPERATIONS =============
         Tensor sum(std::span<const int> axes = {}, bool keepdim = false) const {

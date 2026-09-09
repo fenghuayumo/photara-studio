@@ -21,6 +21,7 @@ enum class DataType : uint8_t {
 enum class Device : uint8_t {
     CPU = 0,
     CUDA = 1,
+    Vulkan = 2,
 };
 
 // ============================================================================
@@ -57,10 +58,23 @@ inline constexpr bool is_bool_like(DataType dtype) {
 
 inline constexpr const char* device_name(Device device) {
     switch (device) {
-        case Device::CPU:  return "cpu";
-        case Device::CUDA: return "cuda";
+        case Device::CPU:    return "cpu";
+        case Device::CUDA:   return "cuda";
+        case Device::Vulkan: return "vulkan";
         default: return "unknown";
     }
+}
+
+inline constexpr bool is_cuda_device(Device device) {
+    return device == Device::CUDA;
+}
+
+inline constexpr bool is_vulkan_device(Device device) {
+    return device == Device::Vulkan;
+}
+
+inline constexpr bool is_gpu_device(Device device) {
+    return device == Device::CUDA || device == Device::Vulkan;
 }
 
 } // namespace tinytensor

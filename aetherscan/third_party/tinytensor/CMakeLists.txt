@@ -95,3 +95,97 @@ endif()
 
 # Alias for linking
 add_library(tinytensor::tinytensor ALIAS tinytensor)
+
+# ============================================================================
+# Optional Vulkan compute backend (HLSL -> SPIR-V via DXC)
+# ============================================================================
+option(TINYTENSOR_ENABLE_VULKAN "Build the TinyTensor Vulkan compute backend" OFF)
+if(TINYTENSOR_ENABLE_VULKAN)
+    find_package(Vulkan 1.2 QUIET)
+    find_program(TINYTENSOR_DXC_EXECUTABLE
+        NAMES dxc
+        HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+    if(NOT Vulkan_FOUND OR NOT TINYTENSOR_DXC_EXECUTABLE)
+        message(WARNING
+            "TINYTENSOR_ENABLE_VULKAN=ON but Vulkan SDK 1.2+ or dxc was not found; "
+            "disabling the Vulkan backend")
+        set(TINYTENSOR_ENABLE_VULKAN OFF)
+    endif()
+endif()
+
+if(TINYTENSOR_ENABLE_VULKAN)
+    set(TINYTENSOR_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/shaders")
+    set(TINYTENSOR_SHADER_SOURCES
+        elementwise.hlsl
+        strided_copy.hlsl
+        index_select.hlsl
+        index_fill.hlsl
+        mask_flags.hlsl
+        scan_block.hlsl
+        scan_add.hlsl
+        compact.hlsl
+        multinomial.hlsl)
+    set(TINYTENSOR_SHADER_BINARIES)
+    set(TINYTENSOR_SHADER_EMBEDDED_HEADERS)
+    foreach(shader IN LISTS TINYTENSOR_SHADER_SOURCES)
+        set(shader_binary "${CMAKE_CURRENT_BINARY_DIR}/vulkan/shaders/${shader}.spv")
+        set(shader_embedded "${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated/${shader}.embedded.hpp")
+        string(MAKE_C_IDENTIFIER "${shader}_spv" shader_variable)
+        add_custom_command(
+            OUTPUT "${shader_binary}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${CMAKE_CURRENT_BINARY_DIR}/vulkan/shaders"
+            COMMAND "${TINYTENSOR_DXC_EXECUTABLE}"
+                    -spirv -T cs_6_0 -E main -O3
+                    -fspv-target-env=vulkan1.2
+                    -fvk-use-dx-layout
+                    -I "${TINYTENSOR_SHADER_DIR}"
+                    "${TINYTENSOR_SHADER_DIR}/${shader}"
+                    -Fo "${shader_binary}"
+            DEPENDS
+                "${TINYTENSOR_SHADER_DIR}/${shader}"
+                "${TINYTENSOR_SHADER_DIR}/common.hlsli"
+            VERBATIM)
+        add_custom_command(
+            OUTPUT "${shader_embedded}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated"
+            COMMAND "${CMAKE_COMMAND}"
+                    -DINPUT_FILE=${shader_binary}
+                    -DOUTPUT_FILE=${shader_embedded}
+                    -DVARIABLE_NAME=${shader_variable}
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/cmake/embed_spir_v.cmake"
+            DEPENDS
+                "${shader_binary}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/cmake/embed_spir_v.cmake"
+            VERBATIM)
+        list(APPEND TINYTENSOR_SHADER_BINARIES "${shader_binary}")
+        list(APPEND TINYTENSOR_SHADER_EMBEDDED_HEADERS "${shader_embedded}")
+    endforeach()
+
+    add_custom_target(tinytensor_shaders
+        DEPENDS ${TINYTENSOR_SHADER_BINARIES} ${TINYTENSOR_SHADER_EMBEDDED_HEADERS})
+
+    add_library(tinytensor_vulkan OBJECT
+        vulkan/runtime/runtime.cpp
+        vulkan/ops.cpp)
+    add_dependencies(tinytensor_vulkan tinytensor_shaders)
+    target_include_directories(tinytensor_vulkan
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+        PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated)
+    target_compile_features(tinytensor_vulkan PUBLIC cxx_std_20)
+    target_compile_definitions(tinytensor_vulkan PUBLIC TINYTENSOR_HAS_VULKAN=1)
+    target_link_libraries(tinytensor_vulkan PUBLIC Vulkan::Vulkan)
+    set_target_properties(tinytensor_vulkan PROPERTIES FOLDER "external")
+    if(MSVC)
+        target_compile_options(tinytensor_vulkan PRIVATE /EHsc /utf-8)
+    endif()
+
+    target_sources(tinytensor PRIVATE $<TARGET_OBJECTS:tinytensor_vulkan>)
+    target_link_libraries(tinytensor PUBLIC Vulkan::Vulkan)
+    target_compile_definitions(tinytensor PUBLIC TINYTENSOR_HAS_VULKAN=1)
+    target_compile_definitions(tinytensor_cpp PUBLIC TINYTENSOR_HAS_VULKAN=1)
+    target_compile_definitions(tinytensor_cuda PUBLIC TINYTENSOR_HAS_VULKAN=1)
+    message(STATUS "TinyTensor Vulkan backend: ON (dxc=${TINYTENSOR_DXC_EXECUTABLE})")
+    set(TINYTENSOR_HAS_VULKAN_BACKEND ON PARENT_SCOPE)
+endif()

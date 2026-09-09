@@ -92,6 +92,15 @@ namespace tinytensor {
 
         switch (op) {
         case LoadOp::Empty: {
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (args.device == Device::Vulkan) {
+                result = vulkan::TensorStorage::empty(args.shape, args.dtype);
+                break;
+            }
+#endif
+            if (args.device == Device::Vulkan) {
+                throw std::runtime_error("TinyTensor was built without Vulkan support");
+            }
             result.shape_ = args.shape;
             result.strides_ = args.shape.strides();
             result.storage_offset_ = 0;
@@ -192,6 +201,13 @@ namespace tinytensor {
             result = load(LoadOp::Empty, args);
             if (!result.is_valid() || result.numel() == 0)
                 return result;
+
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (result.device_ == Device::Vulkan) {
+                vulkan::fill(result, value);
+                break;
+            }
+#endif
 
             if (result.device_ == Device::CUDA) {
                 if (result.dtype_ == DataType::Float32) {
@@ -532,6 +548,10 @@ namespace tinytensor {
                                                n, num_samples, replacement,
                                                RandomGenerator::instance().get_next_cuda_seed(), result.stream());
                 // No sync - tensor operation
+#ifdef TINYTENSOR_HAS_VULKAN
+            } else if (weights->device() == Device::Vulkan) {
+                result = vulkan::multinomial(*weights, static_cast<int>(num_samples), replacement);
+#endif
             } else {
                 auto weights_data = weights->to_vector();
 
@@ -1754,6 +1774,7 @@ namespace tinytensor {
             result.dtype_ = first_dtype;
             result.data_ = tensors[0].data_;
             result.data_owner_ = tensors[0].data_owner_; // Share ownership
+            result.storage_meta_ = tensors[0].storage_meta_;
             result.state_ = std::make_shared<Tensor::TensorState>(*tensors[0].state_);
             result.state_->capacity = tensors[0].capacity();
             result.state_->logical_size = total_size_along_dim;
@@ -1766,6 +1787,11 @@ namespace tinytensor {
                       result.id_, result.data_, result.capacity(), result.logical_size());
 
             // Copy additional tensors into the reserved space
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (first_device == Device::Vulkan) {
+                vulkan::cat_dim0_into(result, tensors, first_size);
+            } else
+#endif
             if (first_device == Device::CUDA) {
                 size_t offset = first_size * row_size * element_size;
                 LOG_DEBUG("  Starting CUDA memcpy for {} additional tensors, initial offset={} bytes",
@@ -1846,6 +1872,11 @@ namespace tinytensor {
         // ============= OPTIMIZED PATH: First dimension =============
         if (resolved_dim == 0) {
             // Concatenating along first dimension - completely contiguous
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (first_device == Device::Vulkan) {
+                vulkan::cat_dim0_into(result, tensors, 0);
+            } else
+#endif
             if (first_device == Device::CUDA) {
                 size_t offset = 0;
                 for (const auto& t : tensors) {

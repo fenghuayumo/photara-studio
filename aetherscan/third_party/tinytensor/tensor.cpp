@@ -648,6 +648,10 @@ namespace tinytensor {
                 LOG_ERROR("CUDA memcpy failed in clone(): {}", cudaGetErrorString(err));
                 return Tensor();
             }
+#ifdef TINYTENSOR_HAS_VULKAN
+        } else if (device_ == Device::Vulkan) {
+            vulkan::copy_same_layout(result, *this);
+#endif
         } else {
             std::memcpy(result.data_ptr(), data_ptr(), num_bytes);
         }
@@ -680,6 +684,11 @@ namespace tinytensor {
             return result;
         }
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::make_contiguous(*this);
+        }
+#endif
         if (device_ == Device::CUDA) {
             const char* src_base = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
             const size_t rank = shape_.rank();
@@ -873,7 +882,7 @@ namespace tinytensor {
     // ============= Device Transfer =============
     Tensor Tensor::to(Device device, cudaStream_t stream) const {
         materialize_if_deferred();
-        const char* op_name = (device == Device::CUDA) ? "to_cuda" : "to_cpu";
+        const char* op_name = device_name(device);
         // OpTraceGuard stub - profiling disabled
         // debug::OpTraceGuard trace(op_name, *this);
 
@@ -982,6 +991,32 @@ namespace tinytensor {
                 return t;
             }
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan || device == Device::Vulkan) {
+            if (!is_contiguous_) {
+                return contiguous().to(device);
+            }
+            auto transferred = empty(shape_, device, dtype_);
+            if (numel() == 0) {
+                return transferred;
+            }
+            if (device_ == Device::CPU && device == Device::Vulkan) {
+                vulkan::upload(transferred, data_ptr(), bytes());
+                return transferred;
+            }
+            if (device_ == Device::Vulkan && device == Device::CPU) {
+                vulkan::download(*this, transferred.data_ptr(), bytes());
+                return transferred;
+            }
+            if (device_ == Device::Vulkan && device == Device::CUDA) {
+                return to(Device::CPU).to(Device::CUDA);
+            }
+            if (device_ == Device::CUDA && device == Device::Vulkan) {
+                return to(Device::CPU).to(Device::Vulkan);
+            }
+        }
+#endif
 
         auto t = empty(shape_, device, dtype_);
         if (numel() == 0) {
@@ -1125,6 +1160,12 @@ namespace tinytensor {
         if (!is_contiguous_) {
             return contiguous().to(dtype);
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::convert(*this, dtype);
+        }
+#endif
 
 // Macro for type conversions using launch_convert_type
 #define CONVERT_DTYPE_CUDA(FROM_TYPE, TO_TYPE, FROM_DTYPE, TO_DTYPE)                                                                         \
@@ -1455,6 +1496,10 @@ namespace tinytensor {
 
         if (device_ == Device::CUDA) {
             CHECK_CUDA(cudaMemset(dest, 0, bytes()));
+#ifdef TINYTENSOR_HAS_VULKAN
+        } else if (device_ == Device::Vulkan) {
+            vulkan::fill(*this, 0.0f);
+#endif
         } else {
             std::memset(dest, 0, bytes());
         }
@@ -1467,6 +1512,19 @@ namespace tinytensor {
         if (!is_valid() || numel() == 0) {
             return *this;
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            if (!is_contiguous()) {
+                Tensor materialized = contiguous();
+                vulkan::fill(materialized, value);
+                copy_from(materialized);
+                return *this;
+            }
+            vulkan::fill(*this, value);
+            return *this;
+        }
+#endif
 
         // CRITICAL FIX: For non-contiguous tensors (from slice/view operations),
         // we must respect strides and fill only the elements in the view
@@ -1661,6 +1719,14 @@ namespace tinytensor {
                 CHECK_CUDA(cudaMemcpy(data_ptr(), other.data_ptr(), bytes(), cudaMemcpyHostToDevice));
             } else if (device_ == Device::CPU && other.device_ == Device::CUDA) {
                 CHECK_CUDA(cudaMemcpy(data_ptr(), other.data_ptr(), bytes(), cudaMemcpyDeviceToHost));
+#ifdef TINYTENSOR_HAS_VULKAN
+            } else if (device_ == Device::Vulkan && other.device_ == Device::Vulkan) {
+                vulkan::copy_same_layout(*this, other);
+            } else if (device_ == Device::Vulkan && other.device_ == Device::CPU) {
+                vulkan::upload(*this, other.data_ptr(), bytes());
+            } else if (device_ == Device::CPU && other.device_ == Device::Vulkan) {
+                vulkan::download(other, data_ptr(), bytes());
+#endif
             } else {
                 std::memcpy(data_ptr(), other.data_ptr(), bytes());
             }
@@ -2245,6 +2311,13 @@ namespace tinytensor {
 
         std::vector<float> result(numel());
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            vulkan::download(*this, result.data(), bytes());
+            return result;
+        }
+#endif
+
         // Use data_ptr() which accounts for storage_offset
         const void* src = data_ptr();
 
@@ -2289,6 +2362,10 @@ namespace tinytensor {
             LOG_DEBUG("Copying from CUDA to CPU, bytes: {}", bytes());
             CHECK_CUDA(cudaMemcpy(result.data(), data_ptr(), bytes(), cudaMemcpyDeviceToHost));
             LOG_DEBUG("CUDA copy complete");
+#ifdef TINYTENSOR_HAS_VULKAN
+        } else if (device_ == Device::Vulkan) {
+            vulkan::download(*this, result.data(), bytes());
+#endif
         } else {
             LOG_DEBUG("Copying from CPU memory, bytes: {}", bytes());
             std::memcpy(result.data(), data_ptr(), bytes());
@@ -2332,6 +2409,10 @@ namespace tinytensor {
 
         if (device_ == Device::CUDA) {
             CHECK_CUDA(cudaMemcpy(result.data(), data_ptr(), bytes(), cudaMemcpyDeviceToHost));
+#ifdef TINYTENSOR_HAS_VULKAN
+        } else if (device_ == Device::Vulkan) {
+            vulkan::download(*this, result.data(), bytes());
+#endif
         } else {
             std::memcpy(result.data(), data_ptr(), bytes());
         }
@@ -2365,6 +2446,14 @@ namespace tinytensor {
             for (size_t i = 0; i < numel(); ++i) {
                 result[i] = temp[i] != 0;
             }
+#ifdef TINYTENSOR_HAS_VULKAN
+        } else if (device_ == Device::Vulkan) {
+            std::vector<unsigned char> temp(numel());
+            vulkan::download(*this, temp.data(), bytes());
+            for (size_t i = 0; i < numel(); ++i) {
+                result[i] = temp[i] != 0;
+            }
+#endif
         } else {
             const unsigned char* data = ptr<unsigned char>();
             for (size_t i = 0; i < numel(); ++i) {
@@ -2397,6 +2486,10 @@ namespace tinytensor {
                     CHECK_CUDA(cudaDeviceSynchronize());
                 }
                 CHECK_CUDA(cudaMemcpy(result.data(), data_ptr(), bytes(), cudaMemcpyDeviceToHost));
+#ifdef TINYTENSOR_HAS_VULKAN
+            } else if (device_ == Device::Vulkan) {
+                vulkan::download(*this, result.data(), bytes());
+#endif
             } else {
                 std::memcpy(result.data(), data_ptr(), bytes());
             }
@@ -2669,6 +2762,18 @@ namespace tinytensor {
             if (device_ == Device::CUDA) {
                 CHECK_CUDA(cudaMalloc(&new_data, new_bytes));
                 LOG_DEBUG("  ✓ CUDA allocation succeeded: {} MB at {}", new_bytes / (1024.0 * 1024.0), new_data);
+#ifdef TINYTENSOR_HAS_VULKAN
+            } else if (device_ == Device::Vulkan) {
+                Tensor grown = vulkan::TensorStorage::empty(shape_, dtype_, new_capacity);
+                if (numel() > 0) {
+                    vulkan::copy_same_layout(grown, *this);
+                }
+                *this = grown;
+                state_->capacity = new_capacity;
+                state_->logical_size = current_rows;
+                LOG_DEBUG("  ✓ Vulkan allocation succeeded: {} MB", new_bytes / (1024.0 * 1024.0));
+                return;
+#endif
             } else {
                 new_data = std::malloc(new_bytes);
                 if (!new_data) {
@@ -2732,8 +2837,15 @@ namespace tinytensor {
           tensor_info_(t ? t->str() : "") {}
 
     Tensor Tensor::zeros_direct(TensorShape shape, size_t capacity, Device device, DataType dtype) {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device == Device::Vulkan) {
+            Tensor t = vulkan::TensorStorage::empty(shape, dtype, capacity);
+            vulkan::fill(t, 0.0f);
+            return t;
+        }
+#endif
         if (device != Device::CUDA) {
-            throw TensorError("zeros_direct only supports CUDA device");
+            throw TensorError("zeros_direct only supports CUDA or Vulkan devices");
         }
 
         // Rank-0 tensor (empty)

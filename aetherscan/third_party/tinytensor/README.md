@@ -10,6 +10,7 @@ TinyTensor provides GPU-accelerated tensor operations with CUDA support, similar
 
 - **Tensor Operations**: Comprehensive tensor manipulation (broadcasting, masking, matrix ops, etc.)
 - **CUDA Acceleration**: GPU kernels for performance-critical operations
+- **Vulkan Compute**: Optional `Device::Vulkan` backend with HLSL compute shaders (DXC → SPIR-V)
 - **Memory Management**: Built-in allocators (slab, arena, pinned memory)
 - **Lazy Execution**: Lazy IR and executor for operation optimization
 - **Advanced Operations**: Random ops, neural network ops, fused pointwise ops

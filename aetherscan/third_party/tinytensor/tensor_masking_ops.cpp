@@ -242,6 +242,12 @@ namespace tinytensor {
             indices_int32 = indices_same_device.to(DataType::Int32);
         }
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            vulkan::index_select_into(*this, indices_same_device, out, dim, static_cast<int>(mode));
+            return;
+        }
+#endif
         if (device_ == Device::CUDA) {
             const int* idx_ptr = is_int64 ? indices_int32.ptr<int>() : indices_same_device.ptr<int>();
 
@@ -747,6 +753,16 @@ namespace tinytensor {
     }
 
     Tensor& Tensor::index_fill_(int dim, const Tensor& idx, float val) {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            dim = resolve_dim(dim);
+            if (dim != 0 || ndim() != 1) {
+                throw std::runtime_error("Vulkan index_fill_ currently supports 1D dim=0");
+            }
+            vulkan::index_fill(*this, idx, val);
+            return *this;
+        }
+#endif
         return scatter_(dim, idx, val, ScatterMode::None);
     }
 
@@ -1382,6 +1398,11 @@ namespace tinytensor {
             return contiguous().count_nonzero();
         }
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::count_nonzero(*this);
+        }
+#endif
         if (device_ == Device::CUDA) {
             // Use CUDA kernel for counting
             size_t count = 0;
@@ -1452,6 +1473,11 @@ namespace tinytensor {
 
         size_t n_dims = ndim();
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::nonzero(*this);
+        }
+#endif
         // Special case for 1D tensors
         if (n_dims == 1) {
             // Allocate MAXIMUM size to prevent buffer overflow from Thrust/CUB mismatch
@@ -1688,6 +1714,10 @@ namespace tinytensor {
         if (t.numel() > 0 && data.data() != nullptr) {
             if (device == Device::CUDA) {
                 cudaMemcpy(t.data_ptr(), data.data(), t.bytes(), cudaMemcpyHostToDevice);
+#ifdef TINYTENSOR_HAS_VULKAN
+            } else if (device == Device::Vulkan) {
+                vulkan::upload(t, data.data(), t.bytes());
+#endif
             } else {
                 std::memcpy(t.data_ptr(), data.data(), t.bytes());
             }
@@ -2081,6 +2111,105 @@ namespace tinytensor {
                   state_->logical_size - n_rows, state_->logical_size, state_->capacity);
 
         return *this;
+    }
+
+    Tensor Tensor::logical_not() const {
+        if (!is_valid() || numel() == 0) {
+            if (!is_valid()) {
+                return Tensor();
+            }
+            return Tensor::empty(shape_, device_, DataType::Bool);
+        }
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_unary(*this, vulkan::ElementwiseOp::Not);
+        }
+#endif
+        Tensor result = UnaryExpr<TensorLeaf, ops::logical_not_op>(
+            TensorLeaf(*this), ops::logical_not_op{}, shape_, device_, DataType::Bool);
+        link_deferred_result_to_inputs(result, {lazy_expr_id()});
+        return result;
+    }
+
+    Tensor Tensor::logical_and(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::And);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::logical_and_op{});
+    }
+
+    Tensor Tensor::logical_or(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::Or);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::logical_or_op{});
+    }
+
+    Tensor Tensor::logical_xor(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::Xor);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::logical_xor_op{});
+    }
+
+    Tensor Tensor::eq(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::Eq);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::equal_op{});
+    }
+
+    Tensor Tensor::ne(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::Ne);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::not_equal_op{});
+    }
+
+    Tensor Tensor::lt(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::Lt);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::less_op{});
+    }
+
+    Tensor Tensor::le(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::Le);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::less_equal_op{});
+    }
+
+    Tensor Tensor::gt(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::Gt);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::greater_op{});
+    }
+
+    Tensor Tensor::ge(const Tensor& other) const {
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::elementwise_binary(*this, other, vulkan::ElementwiseOp::Ge);
+        }
+#endif
+        return comparison_op_with_promotion(other, ops::greater_equal_op{});
     }
 
 #undef CHECK_CUDA
