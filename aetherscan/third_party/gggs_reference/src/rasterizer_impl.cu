@@ -75,7 +75,8 @@ __global__ void duplicateWithKeys(
     uint32_t* gaussian_values_unsorted,
     const float4* conic_opacity,
     const uint32_t* tiles_touched,
-    dim3 grid) {
+    dim3 grid,
+    int wrap_width) {
     auto idx = cg::this_grid().thread_rank();
     if (idx >= P)
         return;
@@ -86,7 +87,7 @@ __global__ void duplicateWithKeys(
         uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
         enumerateGaussianTiles(
             points_xy[idx], conic_opacity[idx], grid, idx, off, depths[idx],
-            gaussian_keys_unsorted, gaussian_values_unsorted);
+            gaussian_keys_unsorted, gaussian_values_unsorted, wrap_width);
     }
 }
 
@@ -299,7 +300,15 @@ int CudaRasterizer::Rasterizer::forward(
     float* visibility,
     int* radii,
     bool require_depth,
-    bool debug) {
+    bool debug,
+    int camera_model,
+    float k1,
+    float k2,
+    float k3,
+    float k4) {
+    const RasterIntrinsics K{
+        focal_x, focal_y, center_x, center_y, camera_model, k1, k2, k3, k4};
+    const int wrap_width = raster_is_equirect(camera_model) ? width : 0;
     dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
     dim3 block(BLOCK_X, BLOCK_Y, 1);
     const int tiles = tile_grid.x * tile_grid.y;
@@ -342,8 +351,7 @@ int CudaRasterizer::Rasterizer::forward(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    kernel_size,
                    radii,
                    geomState.clamped,
@@ -380,7 +388,8 @@ int CudaRasterizer::Rasterizer::forward(
         binningState.point_list_unsorted,
         geomState.conic_opacity,
         geomState.tiles_touched,
-        tile_grid);
+        tile_grid,
+        wrap_width);
     CHECK_CUDA(, debug);
 
     int bit = getHigherMsb(tile_grid.x * tile_grid.y);
@@ -416,7 +425,7 @@ int CudaRasterizer::Rasterizer::forward(
                    feature_ptr,
                    geomState.ray_planes,
                    geomState.normals,
-                   focal_x, focal_y, center_x, center_y,
+                   focal_x, focal_y, center_x, center_y, camera_model,
                    imgState.n_contrib,
                    tileState.max_contributor,
                    background,
@@ -481,7 +490,14 @@ void CudaRasterizer::Rasterizer::backward(
     float* dL_dsg_color,
     float* refine_weight,
     bool require_depth,
-    bool debug) {
+    bool debug,
+    int camera_model,
+    float k1,
+    float k2,
+    float k3,
+    float k4) {
+    const RasterIntrinsics K{
+        focal_x, focal_y, center_x, center_y, camera_model, k1, k2, k3, k4};
     GeometryState geomState   = GeometryState::fromChunk(geom_buffer, P);
     BinningState binningState = BinningState::fromChunk(binning_buffer, R);
     ImageState imgState       = ImageState::fromChunk(img_buffer, width * height);
@@ -525,7 +541,7 @@ void CudaRasterizer::Rasterizer::backward(
                    dL_dpix_mdepth,
                    dL_dalphas,
                    dL_dpixel_normals,
-                   focal_x, focal_y, center_x, center_y,
+                   focal_x, focal_y, center_x, center_y, camera_model,
                    (float3*)dL_dmean2D,
                    geomBwdState.conic_opacity,
                    dL_dcolor,
@@ -552,7 +568,7 @@ void CudaRasterizer::Rasterizer::backward(
                    scale_modifier,
                    viewmatrix,
                    width, height,
-                   focal_x, focal_y, center_x, center_y,
+                   K,
                    kernel_size,
                    (glm::vec3*)campos,
                    radii,
@@ -600,7 +616,15 @@ int CudaRasterizer::Rasterizer::evaluateTransmittance(
     const bool prefiltered,
     float* out_transmittance,
     bool* inside,
-    bool debug) {
+    bool debug,
+    int camera_model,
+    float k1,
+    float k2,
+    float k3,
+    float k4) {
+    const RasterIntrinsics K{
+        focal_x, focal_y, center_x, center_y, camera_model, k1, k2, k3, k4};
+    const int wrap_width = raster_is_equirect(camera_model) ? width : 0;
     size_t chunk_size       = required<GeometryState>(P);
     char* chunkptr          = geometryBuffer(chunk_size);
     GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
@@ -629,8 +653,7 @@ int CudaRasterizer::Rasterizer::evaluateTransmittance(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    kernel_size,
                    geomState.internal_radii,
                    geomState.clamped,
@@ -668,7 +691,8 @@ int CudaRasterizer::Rasterizer::evaluateTransmittance(
         binningState.point_list_unsorted,
         geomState.conic_opacity,
         geomState.tiles_touched,
-        tile_grid)
+        tile_grid,
+        wrap_width)
         CHECK_CUDA(, debug);
 
     int bit = getHigherMsb(tiles);
@@ -704,8 +728,7 @@ int CudaRasterizer::Rasterizer::evaluateTransmittance(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    pointState.points2D,
                    pointState.depths,
                    tile_grid,
@@ -820,7 +843,15 @@ int CudaRasterizer::Rasterizer::evaluateSDF(
     float* out_depth,
     float* out_sdf,
     bool* inside,
-    bool debug) {
+    bool debug,
+    int camera_model,
+    float k1,
+    float k2,
+    float k3,
+    float k4) {
+    const RasterIntrinsics K{
+        focal_x, focal_y, center_x, center_y, camera_model, k1, k2, k3, k4};
+    const int wrap_width = raster_is_equirect(camera_model) ? width : 0;
     size_t chunk_size       = required<GeometryState>(P);
     char* chunkptr          = geometryBuffer(chunk_size);
     GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
@@ -850,8 +881,7 @@ int CudaRasterizer::Rasterizer::evaluateSDF(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    kernel_size,
                    geomState.internal_radii,
                    geomState.clamped,
@@ -889,7 +919,8 @@ int CudaRasterizer::Rasterizer::evaluateSDF(
         binningState.point_list_unsorted,
         geomState.conic_opacity,
         geomState.tiles_touched,
-        tile_grid)
+        tile_grid,
+        wrap_width)
         CHECK_CUDA(, debug);
 
     int bit = getHigherMsb(tiles);
@@ -925,8 +956,7 @@ int CudaRasterizer::Rasterizer::evaluateSDF(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    pointState.points2D,
                    pointState.depths,
                    tile_grid,
@@ -1047,7 +1077,15 @@ int CudaRasterizer::Rasterizer::evaluateColor(
     const bool prefiltered,
     float* out_color,
     bool* inside,
-    bool debug) {
+    bool debug,
+    int camera_model,
+    float k1,
+    float k2,
+    float k3,
+    float k4) {
+    const RasterIntrinsics K{
+        focal_x, focal_y, center_x, center_y, camera_model, k1, k2, k3, k4};
+    const int wrap_width = raster_is_equirect(camera_model) ? width : 0;
     size_t chunk_size       = required<GeometryState>(P);
     char* chunkptr          = geometryBuffer(chunk_size);
     GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
@@ -1076,8 +1114,7 @@ int CudaRasterizer::Rasterizer::evaluateColor(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    kernel_size,
                    geomState.internal_radii,
                    geomState.clamped,
@@ -1114,7 +1151,8 @@ int CudaRasterizer::Rasterizer::evaluateColor(
         binningState.point_list_unsorted,
         geomState.conic_opacity,
         geomState.tiles_touched,
-        tile_grid)
+        tile_grid,
+        wrap_width)
         CHECK_CUDA(, debug);
 
     int bit = getHigherMsb(tiles);
@@ -1150,8 +1188,7 @@ int CudaRasterizer::Rasterizer::evaluateColor(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    pointState.points2D,
                    pointState.depths,
                    tile_grid,
@@ -1262,7 +1299,15 @@ int3 CudaRasterizer::Rasterizer::sampleDepth(
     const bool prefiltered,
     float* output,
     bool* inside,
-    bool debug) {
+    bool debug,
+    int camera_model,
+    float k1,
+    float k2,
+    float k3,
+    float k4) {
+    const RasterIntrinsics K{
+        focal_x, focal_y, center_x, center_y, camera_model, k1, k2, k3, k4};
+    const int wrap_width = raster_is_equirect(camera_model) ? width : 0;
     size_t chunk_size       = required<GeometryState>(P);
     char* chunkptr          = geometryBuffer(chunk_size);
     GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
@@ -1291,8 +1336,7 @@ int3 CudaRasterizer::Rasterizer::sampleDepth(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    kernel_size,
                    geomState.internal_radii,
                    geomState.clamped,
@@ -1329,7 +1373,8 @@ int3 CudaRasterizer::Rasterizer::sampleDepth(
         binningState.point_list_unsorted,
         geomState.conic_opacity,
         geomState.tiles_touched,
-        tile_grid);
+        tile_grid,
+        wrap_width);
     CHECK_CUDA(, debug);
 
     int bit = getHigherMsb(tiles);
@@ -1366,8 +1411,7 @@ int3 CudaRasterizer::Rasterizer::sampleDepth(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y,
-                   center_x, center_y,
+                   K,
                    pointState.points2D,
                    pointState.depths,
                    tile_grid,
@@ -1492,7 +1536,14 @@ void CudaRasterizer::Rasterizer::sampleDepthBackward(
     float* dL_dscale,
     float* dL_drot,
     float* dL_dpoint,
-    bool debug) {
+    bool debug,
+    int camera_model,
+    float k1,
+    float k2,
+    float k3,
+    float k4) {
+    const RasterIntrinsics K{
+        focal_x, focal_y, center_x, center_y, camera_model, k1, k2, k3, k4};
     GeometryState geomState                   = GeometryState::fromChunk(geom_buffer, P);
     BinningState binningState                 = BinningState::fromChunk(binning_buffer, R);
     PointState pointState                     = PointState::fromChunk(point_buffer, PN);
@@ -1552,7 +1603,7 @@ void CudaRasterizer::Rasterizer::sampleDepthBackward(
                    scale_modifier,
                    viewmatrix,
                    width, height,
-                   focal_x, focal_y, center_x, center_y,
+                   K,
                    kernel_size,
                    (glm::vec3*)cam_pos,
                    geomState.internal_radii,
@@ -1579,7 +1630,7 @@ void CudaRasterizer::Rasterizer::sampleDepthBackward(
                    viewmatrix,
                    (glm::vec3*)cam_pos,
                    width, height,
-                   focal_x, focal_y, center_x, center_y,
+                   K,
                    pointState.tiles_touched,
                    (float2*)dL_dpoint2D,
                    (float3*)dL_dpoint),

@@ -1,6 +1,7 @@
 #ifndef CUDA_SAMPLE_BACKWARD_H_INCLUDED
 #define CUDA_SAMPLE_BACKWARD_H_INCLUDED
 
+#include "camera_model.h"
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <cuda.h>
@@ -15,10 +16,7 @@ void preprocess_points(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, int H,
-    const float focal_x,
-    const float focal_y,
-    const float center_x,
-    const float center_y,
+    const RasterIntrinsics K,
     const uint32_t* tiles_touched,
     const float2* dL_dpoints2D,
     float3* dL_dpoints3D);

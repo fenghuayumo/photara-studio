@@ -45,10 +45,7 @@ __global__ void preprocessPointsCUDA(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, int H,
-    const float focal_x,
-    const float focal_y,
-    const float center_x,
-    const float center_y,
+    const RasterIntrinsics K,
     const uint32_t* tiles_touched,
     const float2* dL_dpoints2D,
     float3* dL_dpoints3D) {
@@ -59,17 +56,30 @@ __global__ void preprocessPointsCUDA(
     float3 m = points3D[idx];
 
     float3 p_view = transformPoint4x3(m, viewmatrix);
-    float rz = 1.0f / (p_view.z + 0.0000001f);
-    float sx = p_view.x * rz;
-    float sy = p_view.y * rz;
-
     float3 dL_dpoints;
-    dL_dpoints.x = (focal_x * (viewmatrix[0] - sx * viewmatrix[2]) * dL_dpoints2D[idx].x
-                  + focal_y * (viewmatrix[1] - sy * viewmatrix[2]) * dL_dpoints2D[idx].y) * rz;
-    dL_dpoints.y = (focal_x * (viewmatrix[4] - sx * viewmatrix[6]) * dL_dpoints2D[idx].x
-                  + focal_y * (viewmatrix[5] - sy * viewmatrix[6]) * dL_dpoints2D[idx].y) * rz;
-    dL_dpoints.z = (focal_x * (viewmatrix[8] - sx * viewmatrix[10]) * dL_dpoints2D[idx].x
-                  + focal_y * (viewmatrix[9] - sy * viewmatrix[10]) * dL_dpoints2D[idx].y) * rz;
+    if (raster_is_pinhole(K.model)) {
+        float rz = 1.0f / (p_view.z + 0.0000001f);
+        float sx = p_view.x * rz;
+        float sy = p_view.y * rz;
+        dL_dpoints.x = (K.focal_x * (viewmatrix[0] - sx * viewmatrix[2]) * dL_dpoints2D[idx].x
+                      + K.focal_y * (viewmatrix[1] - sy * viewmatrix[2]) * dL_dpoints2D[idx].y) * rz;
+        dL_dpoints.y = (K.focal_x * (viewmatrix[4] - sx * viewmatrix[6]) * dL_dpoints2D[idx].x
+                      + K.focal_y * (viewmatrix[5] - sy * viewmatrix[6]) * dL_dpoints2D[idx].y) * rz;
+        dL_dpoints.z = (K.focal_x * (viewmatrix[8] - sx * viewmatrix[10]) * dL_dpoints2D[idx].x
+                      + K.focal_y * (viewmatrix[9] - sy * viewmatrix[10]) * dL_dpoints2D[idx].y) * rz;
+    } else {
+        const RasterProjection projected = project_raster_camera(p_view, K, W, H);
+        const glm::vec3 dL_dcam(
+            projected.J[0][0] * dL_dpoints2D[idx].x + projected.J[1][0] * dL_dpoints2D[idx].y,
+            projected.J[0][1] * dL_dpoints2D[idx].x + projected.J[1][1] * dL_dpoints2D[idx].y,
+            projected.J[0][2] * dL_dpoints2D[idx].x + projected.J[1][2] * dL_dpoints2D[idx].y);
+        dL_dpoints.x = viewmatrix[0] * dL_dcam.x + viewmatrix[1] * dL_dcam.y + viewmatrix[2] * dL_dcam.z;
+        dL_dpoints.y = viewmatrix[4] * dL_dcam.x + viewmatrix[5] * dL_dcam.y + viewmatrix[6] * dL_dcam.z;
+        dL_dpoints.z = viewmatrix[8] * dL_dcam.x + viewmatrix[9] * dL_dcam.y + viewmatrix[10] * dL_dcam.z;
+        if (!projected.valid) {
+            dL_dpoints = {0.f, 0.f, 0.f};
+        }
+    }
 
     dL_dpoints3D[idx] = dL_dpoints;
 }
@@ -359,10 +369,7 @@ void BACKWARD::preprocess_points(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, int H,
-    const float focal_x,
-    const float focal_y,
-    const float center_x,
-    const float center_y,
+    const RasterIntrinsics K,
     const uint32_t* tiles_touched,
     const float2* dL_dpoints2D,
     float3* dL_dpoints3D) {
@@ -372,10 +379,7 @@ void BACKWARD::preprocess_points(
         viewmatrix,
         cam_pos,
         W, H,
-        focal_x,
-        focal_y,
-        center_x,
-        center_y,
+        K,
         tiles_touched,
         dL_dpoints2D,
         dL_dpoints3D);

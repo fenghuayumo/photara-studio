@@ -78,7 +78,7 @@ __device__ __forceinline__ glm::vec3 computeColorFromSHSG(int idx, int SHD, int 
 }
 
 // Forward version of 2D covariance matrix computation
-__device__ __forceinline__ bool computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, float kernel_size, const float* cov3D, const float* viewmatrix,
+__device__ __forceinline__ bool computeCov2D(const float3& mean, const RasterIntrinsics& K, const int image_width, const int image_height, float tan_fovx, float tan_fovy, float kernel_size, const float* cov3D, const float* viewmatrix,
                                              float* cov2D, float3* normals, float4* ray_plane, float& coef, const glm::vec3* scale = nullptr, const float4* rotation = nullptr, const float mod = 1.f) {
     // The following models the steps outlined by equations 29
     // and 31 in "EWA Splatting" (Zwicker et al., 2002).
@@ -86,20 +86,33 @@ __device__ __forceinline__ bool computeCov2D(const float3& mean, float focal_x, 
     // Transposes used to account for row-/column-major conventions.
     float3 t       = transformPoint4x3(mean, viewmatrix);
     const float tc = norm3df(t.x, t.y, t.z);
+    const float focal_x = K.focal_x;
+    const float focal_y = K.focal_y;
 
-    const float limx = 1.3f * tan_fovx;
-    const float limy = 1.3f * tan_fovy;
-    float u          = t.x / t.z;
-    float v          = t.y / t.z;
-    t.x              = fminf(limx, fmaxf(-limx, u)) * t.z;
-    t.y              = fminf(limy, fmaxf(-limy, v)) * t.z;
-    u                = t.x / t.z;
-    v                = t.y / t.z;
-
-    glm::mat3 J = glm::mat3(
-        focal_x / t.z, 0.f, -(focal_x * t.x) / (t.z * t.z),
-        0.f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
-        0.f, 0.f, 0.f);
+    float u;
+    float v;
+    glm::mat3 J;
+    if (raster_is_pinhole(K.model)) {
+        const float limx = 1.3f * tan_fovx;
+        const float limy = 1.3f * tan_fovy;
+        u                = t.x / t.z;
+        v                = t.y / t.z;
+        t.x              = fminf(limx, fmaxf(-limx, u)) * t.z;
+        t.y              = fminf(limy, fmaxf(-limy, v)) * t.z;
+        u                = t.x / t.z;
+        v                = t.y / t.z;
+        J = glm::mat3(
+            focal_x / t.z, 0.f, -(focal_x * t.x) / (t.z * t.z),
+            0.f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+            0.f, 0.f, 0.f);
+    } else {
+        const RasterProjection projected = project_raster_camera(t, K, image_width, image_height);
+        if (!projected.valid)
+            return false;
+        J = projected.J;
+        u = t.x / fmaxf(t.z, 1e-6f);
+        v = t.y / fmaxf(t.z, 1e-6f);
+    }
 
     glm::mat3 W = glm::mat3(
         viewmatrix[0], viewmatrix[4], viewmatrix[8],
@@ -297,8 +310,7 @@ __global__ void preprocessCUDA(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, int H,
-    const float focal_x, float focal_y,
-    const float center_x, float center_y,
+    const RasterIntrinsics K,
     const float kernel_size,
     int* radii,
     bool* clamped,
@@ -318,12 +330,17 @@ __global__ void preprocessCUDA(
     radii[idx]         = 0;
     tiles_touched[idx] = 0;
     const float3 p_orig = {orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2]};
-    float3 p_view;
-    if (!in_frustum(p_orig, viewmatrix, prefiltered, p_view))
+    float3 p_view = transformPoint4x3(p_orig, viewmatrix);
+    if (!camera_visible(p_view, K.model)) {
+        if (prefiltered && raster_is_pinhole(K.model)) {
+            printf("Point is filtered although prefiltered is set. This shouldn't happen!");
+            __trap();
+        }
         return;
+    }
 
-    const float tan_fovx = (float)W / (2.0f * focal_x);
-    const float tan_fovy = (float)H / (2.0f * focal_y);
+    const float tan_fovx = (float)W / (2.0f * K.focal_x);
+    const float tan_fovy = (float)H / (2.0f * K.focal_y);
 
     const float* cov3D = nullptr;
     if (cov3D_precomp) {
@@ -332,8 +349,9 @@ __global__ void preprocessCUDA(
 
     float cov2D[3];
     float ceof;
-    computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, kernel_size, cov3D, viewmatrix, cov2D,
-                 normals + idx, ray_planes + idx, ceof, scales + idx, rotations + idx, scale_modifier);
+    if (!computeCov2D(p_orig, K, W, H, tan_fovx, tan_fovy, kernel_size, cov3D, viewmatrix, cov2D,
+                 normals + idx, ray_planes + idx, ceof, scales + idx, rotations + idx, scale_modifier))
+        return;
 
     const float3 cov = {cov2D[0], cov2D[1], cov2D[2]};
 
@@ -348,12 +366,15 @@ __global__ void preprocessCUDA(
     float lambda2   = mid - sqrtf(fmaxf(0.1f, mid * mid - det));
     float my_radius = ceilf(3.f * sqrtf(fmaxf(lambda1, lambda2)));
 
-    float2 point_image = {p_view.x / p_view.z * focal_x + center_x,
-                          p_view.y / p_view.z * focal_y + center_y};
+    const RasterProjection projected = project_raster_camera(p_view, K, W, H);
+    if (!projected.valid)
+        return;
+    float2 point_image = projected.mean;
     const float4 local_conic_opacity = {
         conic.x, conic.y, conic.z, opacities[idx] * ceof};
+    const int wrap_width = raster_is_equirect(K.model) ? W : 0;
     const uint32_t tile_count = enumerateGaussianTiles(
-        point_image, local_conic_opacity, grid, idx, 0, 0.F, nullptr, nullptr);
+        point_image, local_conic_opacity, grid, idx, 0, 0.F, nullptr, nullptr, wrap_width);
     if (tile_count == 0)
         return;
 
@@ -389,6 +410,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         const float focal_y,
         const float center_x,
         const float center_y,
+        const int camera_model,
         uint32_t* __restrict__ n_contrib,
         uint32_t* __restrict__ max_contributors,
         const float* __restrict__ bg_color,
@@ -471,7 +493,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             // Resample using conic matrix (cf. "Surface
             // Splatting" by Zwicker et al., 2001)
             float2 xy    = collected_xy[j];
-            float2 d     = {xy.x - pixf.x, xy.y - pixf.y};
+            float2 d     = {wrap_delta_x(xy.x - pixf.x, W, camera_model), xy.y - pixf.y};
             float4 con_o = collected_conic_opacity[j];
             float power  = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
             if (power > 0.0f) {
@@ -591,7 +613,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
                     contributor++;
                     done         = contributor >= last_contributor;
                     float2 xy    = collected_xy[j];
-                    float2 d     = {xy.x - pixf.x, xy.y - pixf.y};
+                    float2 d     = {wrap_delta_x(xy.x - pixf.x, W, camera_model), xy.y - pixf.y};
                     float4 con_o = collected_conic_opacity[j];
                     float power  = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
                     if (power > 0.0f) {
@@ -679,6 +701,7 @@ void FORWARD::render(
     const float focal_y,
     const float center_x,
     const float center_y,
+    const int camera_model,
     uint32_t* n_contrib,
     uint32_t* max_contributor,
     const float* bg_color,
@@ -692,7 +715,7 @@ void FORWARD::render(
 #define RENDER_CUDA_CALL(template_depth)                                                \
     renderCUDA<NUM_CHANNELS, template_depth, SPLIT, SPLIT_ITERATIONS><<<grid, block>>>( \
         ranges, point_list, W, H, means2D, conic_opacity, colors,                       \
-        ray_planes, normals, focal_x, focal_y, center_x, center_y,                     \
+        ray_planes, normals, focal_x, focal_y, center_x, center_y, camera_model,        \
         n_contrib, max_contributor, bg_color, out_color, out_alpha,                     \
         out_normal, out_mdepth, normal_length, visibility)
 
@@ -720,8 +743,7 @@ void FORWARD::preprocess(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, const int H,
-    const float focal_x, const float focal_y,
-    const float center_x, const float center_y,
+    const RasterIntrinsics K,
     const float kernel_size,
     int* radii,
     bool* clamped,
@@ -750,8 +772,7 @@ void FORWARD::preprocess(
         viewmatrix,
         cam_pos,
         W, H,
-        focal_x, focal_y,
-        center_x, center_y,
+        K,
         kernel_size,
         radii,
         clamped,

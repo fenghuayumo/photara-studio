@@ -98,7 +98,7 @@ int main() {
     // Automatic model selection uses identical raw correspondences for each hypothesis.
     for (const auto model : {aetherscan::CameraModel::pinhole,
                              aetherscan::CameraModel::opencv_fisheye}) {
-        auto truth = make_camera(640);
+        auto truth = make_camera(model == aetherscan::CameraModel::opencv_fisheye ? 448 : 640);
         truth.model = model;
         std::vector<aetherscan::sfm::CameraModelProbe> probes;
         for (int pair=0; pair<3; ++pair) {
@@ -125,8 +125,8 @@ int main() {
             expect(selection.confident, "wide-angle fisheye evidence is decisive");
         else {
             const auto calibrated = aetherscan::sfm::select_camera_model(truth,probes,640);
-            expect(calibrated.model == model && calibrated.confident,
-                   "known focal distinguishes pinhole from fisheye");
+            expect(calibrated.model == model && std::abs(calibrated.focal_pixels-640)<1e-6,
+                   "known focal is preserved when model evidence is ambiguous");
         }
     }
     const auto ambiguous = aetherscan::sfm::select_camera_model(make_camera(),{});

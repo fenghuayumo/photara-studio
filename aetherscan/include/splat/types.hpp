@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/camera_projection.hpp"
 #include "internal/tensor_impl.hpp"
 
 #include <array>
@@ -21,6 +22,12 @@ struct Camera {
     float cy{0.F};
     std::uint32_t width{};
     std::uint32_t height{};
+    CameraModel model{CameraModel::pinhole};
+    // OpenCV fisheye k1..k4. Unused for pinhole and equirectangular.
+    float k1{0.F};
+    float k2{0.F};
+    float k3{0.F};
+    float k4{0.F};
 };
 
 struct GaussianModel {

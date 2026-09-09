@@ -1,3 +1,4 @@
+#include "core/camera_projection.hpp"
 #include "splat/trainer.hpp"
 #include "splat/colmap.hpp"
 #include "splat/dataset.hpp"
@@ -403,6 +404,190 @@ void test_geometry_stability_scheduler() {
         invalidated.recovered && scheduler.interval() == 1 &&
             !scheduler.update(sample).reference_ready,
         "GGGS stability scheduler did not reset after missing geometry");
+}
+
+void test_camera_projection_roundtrip() {
+    using namespace aetherscan;
+    const auto fish = project_fisheye_camera(
+        0.0, 0.0, 1.0, 400.0, 400.0, 640.0, 360.0, 0.0, 0.0, 0.0, 0.0);
+    require(fish.valid && std::abs(fish.u - 640.0) < 1e-9 &&
+                std::abs(fish.v - 360.0) < 1e-9,
+            "fisheye optical axis should land on the principal point");
+    const double x = 0.8, y = 0.6, z = 1.0;
+    const auto off = project_fisheye_camera(
+        x, y, z, 400.0, 400.0, 640.0, 360.0, 0.025, -0.002, 0.0002, -0.00001);
+    require(off.valid, "fisheye off-axis projection failed");
+    const auto plane = project_camera_plane(
+        CameraModel::opencv_fisheye, x / z, y / z,
+        0.025, -0.002, 0.0002, -0.00001);
+    require(std::abs(off.u - (400.0 * plane.x + 640.0)) < 1e-8 &&
+                std::abs(off.v - (400.0 * plane.y + 360.0)) < 1e-8,
+            "fisheye camera projection must match the normalized-plane model");
+    const auto back = unproject_fisheye_camera(
+        off.u, off.v, 400.0, 400.0, 640.0, 360.0,
+        0.025, -0.002, 0.0002, -0.00001);
+    require(back.valid, "fisheye unproject failed");
+    const double scale = z / back.z;
+    require(std::hypot(back.x * scale - x, back.y * scale - y, back.z * scale - z) < 1e-6,
+            "fisheye project/unproject roundtrip");
+
+    const auto front = project_equirectangular_camera(0.0, 0.0, 1.0, 800, 400);
+    require(front.valid && std::abs(front.u - 400.0) < 1e-6 &&
+                std::abs(front.v - 200.0) < 1e-6,
+            "equirect +Z should land at the image center");
+    const auto right = project_equirectangular_camera(1.0, 0.0, 0.0, 800, 400);
+    require(right.valid && std::abs(right.u - 600.0) < 1e-6 &&
+                std::abs(right.v - 200.0) < 1e-6,
+            "equirect +X should land at 0.75 width");
+    const auto behind = project_equirectangular_camera(0.0, 0.0, -1.0, 800, 400);
+    require(behind.valid &&
+                (std::abs(behind.u) < 1e-5 || std::abs(behind.u - 800.0) < 1e-5),
+            "equirect -Z should land on the azimuth seam");
+    const auto ray = unproject_equirectangular_camera(600.0, 200.0, 800, 400);
+    require(ray.valid && std::abs(ray.x - 1.0) < 1e-6 &&
+                std::abs(ray.y) < 1e-6 && std::abs(ray.z) < 1e-6,
+            "equirect unproject of +X");
+}
+
+void test_fisheye_equirect_rasterize() {
+    using namespace aetherscan::splat;
+    auto identity_camera = []() {
+        Camera camera;
+        camera.world_to_camera[0] = 1.F;
+        camera.world_to_camera[5] = 1.F;
+        camera.world_to_camera[10] = 1.F;
+        camera.world_to_camera[15] = 1.F;
+        camera.width = 64;
+        camera.height = 48;
+        return camera;
+    };
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 0.F, 2.F}, {1, 3},
+        tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{std::log(0.08F), std::log(0.08F), std::log(0.08F)},
+        {1, 3}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F}, {1, 4},
+        tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        std::vector<float>{2.F}, {1, 1}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.5F, 0.25F, 0.1F}, {1, 1, 3},
+        tinytensor::Device::CUDA);
+    model.sh_degree = 0;
+    Rasterizer rasterizer;
+
+    Camera fisheye = identity_camera();
+    fisheye.model = aetherscan::CameraModel::opencv_fisheye;
+    fisheye.fx = fisheye.fy = 28.F;
+    fisheye.cx = 31.5F;
+    fisheye.cy = 23.5F;
+    const auto fish_render = rasterizer.forward(model, fisheye);
+    require(fish_render.rendered_instances > 0, "fisheye Gaussian was not rasterized");
+    const auto fish_alpha = fish_render.alpha.to_vector();
+    std::size_t fish_peak = 0;
+    for (std::size_t i = 1; i < fish_alpha.size(); ++i)
+        if (fish_alpha[i] > fish_alpha[fish_peak]) fish_peak = i;
+    require(
+        fish_peak % fisheye.width == 31 && fish_peak / fisheye.width == 23 &&
+            fish_alpha[fish_peak] > 0.F,
+        "fisheye on-axis splat should peak at the principal point");
+    const std::size_t fish_pixels =
+        static_cast<std::size_t>(fisheye.width) * fisheye.height;
+    const auto fish_grad = tinytensor::Tensor::from_vector(
+        std::vector<float>(3 * fish_pixels, 1.F / static_cast<float>(fish_pixels)),
+        {3, fisheye.height, fisheye.width}, tinytensor::Device::CUDA);
+    const auto zero_a = tinytensor::Tensor::zeros(
+        {fisheye.height, fisheye.width}, tinytensor::Device::CUDA);
+    const auto zero_n = tinytensor::Tensor::zeros(
+        {3, fisheye.height, fisheye.width}, tinytensor::Device::CUDA);
+    const auto fish_grad_out = rasterizer.backward(
+        model, fish_render, fish_grad, zero_a, zero_a, zero_n);
+    require_finite(fish_grad_out.means, "fisheye mean gradient");
+
+    Camera equirect = identity_camera();
+    equirect.model = aetherscan::CameraModel::equirectangular;
+    equirect.fx = equirect.fy =
+        static_cast<float>(equirect.width) / (2.F * 3.14159265358979323846F);
+    equirect.cx = 0.5F * static_cast<float>(equirect.width);
+    equirect.cy = 0.5F * static_cast<float>(equirect.height);
+    const auto eq_render = rasterizer.forward(model, equirect);
+    require(eq_render.rendered_instances > 0, "equirect Gaussian was not rasterized");
+    const auto eq_alpha = eq_render.alpha.to_vector();
+    std::size_t eq_peak = 0;
+    for (std::size_t i = 1; i < eq_alpha.size(); ++i)
+        if (eq_alpha[i] > eq_alpha[eq_peak]) eq_peak = i;
+    require(
+        eq_peak % equirect.width == 32 && eq_peak / equirect.width == 24 &&
+            eq_alpha[eq_peak] > 0.F,
+        "equirect +Z splat should peak at the image center");
+
+    model.means = tinytensor::Tensor::from_vector(
+        std::vector<float>{2.F, 0.F, 0.F}, {1, 3},
+        tinytensor::Device::CUDA);
+    const auto right_render = rasterizer.forward(model, equirect);
+    const auto right_alpha = right_render.alpha.to_vector();
+    std::size_t right_peak = 0;
+    for (std::size_t i = 1; i < right_alpha.size(); ++i)
+        if (right_alpha[i] > right_alpha[right_peak]) right_peak = i;
+    require(
+        right_peak % equirect.width == 48 &&
+            right_peak / equirect.width == 24,
+        "equirect +X splat should peak at 0.75 width");
+}
+
+void test_colmap_fisheye_and_equirect_loading() {
+    using namespace aetherscan;
+    const auto root = std::filesystem::temp_directory_path() /
+                      "aetherscan_colmap_fisheye_equirect_test";
+    const auto model = root / "sparse" / "0";
+    const auto images = root / "images";
+    std::filesystem::create_directories(model);
+    std::filesystem::create_directories(images);
+    io::save_rgb_png(
+        io::RgbImage{8, 6, std::vector<std::uint8_t>(144, 127)},
+        images / "frame.png");
+    {
+        std::ofstream stream(model / "cameras.txt");
+        stream << "1 OPENCV_FISHEYE 8 6 200 201 4 3 0.01 -0.002 0.0001 -0.00001\n";
+    }
+    {
+        std::ofstream stream(model / "images.txt");
+        stream << "7 1 0 0 0 0 0 0 1 frame.png\n\n";
+    }
+    {
+        std::ofstream stream(model / "points3D.txt");
+        stream << "42 0.1 0.2 4 10 20 30 0.5 7 0\n";
+    }
+    const auto loaded = splat::load_colmap_scene(root, images);
+    require(
+        loaded.scene.views.front().source_model == CameraModel::opencv_fisheye &&
+            std::abs(loaded.scene.views.front().fx - 200.F) < 1e-5F &&
+            std::abs(loaded.scene.views.front().p2 + 0.00001F) < 1e-6F,
+        "COLMAP OPENCV_FISHEYE was not loaded natively");
+    {
+        std::ofstream stream(model / "cameras.txt");
+        stream << "1 EQUIRECTANGULAR 8 6 8 6\n";
+    }
+    const auto equirect = splat::load_colmap_scene(root, images);
+    require(
+        equirect.scene.views.front().source_model ==
+            CameraModel::equirectangular,
+        "COLMAP EQUIRECTANGULAR was not loaded");
+    {
+        std::ofstream stream(model / "cameras.txt");
+        stream << "1 FOV 8 6 100 101 4 3 0.7\n";
+    }
+    bool refused_fov = false;
+    try {
+        (void)splat::load_colmap_scene(root, images);
+    } catch (const std::runtime_error&) {
+        refused_fov = true;
+    }
+    require(refused_fov, "COLMAP FOV must still be rejected");
+    std::filesystem::remove_all(root);
 }
 
 void test_forward_backward() {
@@ -2703,6 +2888,8 @@ int main() {
             return 0;
         }
         test_mvs_camera_conversion();
+        test_camera_projection_roundtrip();
+        test_fisheye_equirect_rasterize();
         test_gggs_3d_filter();
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();
@@ -2722,6 +2909,7 @@ int main() {
         test_brush_quantile_selection();
         test_source_resolution_and_knn_initialization();
         test_colmap_text_loading();
+        test_colmap_fisheye_and_equirect_loading();
         test_reality_capture_dataset_loading();
         test_openmvs_dataset_loading();
         test_sparse_init_keeps_photo_colors();

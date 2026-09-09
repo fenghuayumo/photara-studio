@@ -347,11 +347,21 @@ __global__ void compute_3d_filter_distance_kernel(
                       camera_z * camera_z));
         } else {
             if (!(camera_z > 0.2F)) continue;
-            const float boundary_x = camera[18] / camera[16] * 0.575F;
-            const float boundary_y = camera[19] / camera[17] * 0.575F;
-            if (fabsf(camera_x / camera_z) > boundary_x ||
-                fabsf(camera_y / camera_z) > boundary_y)
-                continue;
+            const float width = camera[18];
+            const float height = camera[19];
+            const float fx = camera[16];
+            const float fy = camera[17];
+            // Equirectangular dummy focals are width/(2π); skip the pinhole
+            // NDC bounds and keep every front-hemisphere sample for fisheye.
+            const bool wide_angle =
+                fx > 0.F && width / fx > 2.5F;
+            if (!wide_angle) {
+                const float boundary_x = width / fx * 0.575F;
+                const float boundary_y = height / fy * 0.575F;
+                if (fabsf(camera_x / camera_z) > boundary_x ||
+                    fabsf(camera_y / camera_z) > boundary_y)
+                    continue;
+            }
             minimum_distance = fminf(minimum_distance, camera_z);
         }
     }
@@ -1823,6 +1833,10 @@ tinytensor::Tensor compute_3d_filter(
     if (cameras.empty())
         throw std::invalid_argument(
             "GGGS 3D filter requires at least one camera");
+    const bool any_equirect = std::any_of(
+        cameras.begin(), cameras.end(), [](const Camera& camera) {
+            return camera.model == CameraModel::equirectangular;
+        });
     const std::size_t count = means.shape()[0];
     if (count == 0)
         return tinytensor::Tensor::empty(
@@ -1838,7 +1852,12 @@ tinytensor::Tensor compute_3d_filter(
         packed[20 * view + 17] = camera.fy;
         packed[20 * view + 18] = static_cast<float>(camera.width);
         packed[20 * view + 19] = static_cast<float>(camera.height);
-        maximum_focal = std::max(maximum_focal, camera.fx);
+        const float filter_focal =
+            camera.model == CameraModel::equirectangular
+                ? static_cast<float>(camera.width) /
+                      (2.F * 3.14159265358979323846F)
+                : camera.fx;
+        maximum_focal = std::max(maximum_focal, filter_focal);
     }
     maximum_focal = std::max(maximum_focal, 1e-6F);
     const auto camera_tensor = tinytensor::Tensor::from_vector(
@@ -1854,7 +1873,7 @@ tinytensor::Tensor compute_3d_filter(
             means.ptr<float>(), camera_tensor.ptr<float>(), count,
             cameras.size(), result.ptr<float>(),
             reinterpret_cast<unsigned*>(maximum_bits.data_ptr()),
-            all_camera_euclidean);
+            all_camera_euclidean || any_equirect);
     check_cuda(cudaGetLastError(), "compute GGGS 3D filter distances");
     finalize_3d_filter_kernel<<<
         (count + k_threads - 1) / k_threads, k_threads>>>(

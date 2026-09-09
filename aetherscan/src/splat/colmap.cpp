@@ -1,5 +1,6 @@
 #include "splat/colmap.hpp"
 
+#include "core/camera_projection.hpp"
 #include "io/image.hpp"
 
 #include <Eigen/Geometry>
@@ -42,8 +43,23 @@ struct ColmapPoint {
     std::vector<std::uint32_t> image_ids;
 };
 
-constexpr std::array<int, 11> k_camera_parameter_counts{
-    3, 4, 4, 5, 8, 8, 12, 5, 4, 5, 12};
+int camera_parameter_count(const int model) {
+    switch (model) {
+    case 0: return 3;   // SIMPLE_PINHOLE
+    case 1: return 4;   // PINHOLE
+    case 2: return 4;   // SIMPLE_RADIAL
+    case 3: return 5;   // RADIAL
+    case 4: return 8;   // OPENCV
+    case 5: return 8;   // OPENCV_FISHEYE
+    case 6: return 12;  // FULL_OPENCV
+    case 7: return 5;   // FOV
+    case 8: return 4;   // SIMPLE_RADIAL_FISHEYE
+    case 9: return 5;   // RADIAL_FISHEYE
+    case 10: return 12; // THIN_PRISM_FISHEYE
+    case 17: return 2;  // EQUIRECTANGULAR (LichtFeld / COLMAP fork)
+    default: return -1;
+    }
+}
 
 template <typename T>
 T read_binary(std::istream& stream, const char* field) {
@@ -96,11 +112,11 @@ std::unordered_map<std::uint32_t, ColmapCamera> read_cameras_binary(
         camera.model = read_binary<std::int32_t>(stream, "camera model");
         camera.width = read_binary<std::uint64_t>(stream, "camera width");
         camera.height = read_binary<std::uint64_t>(stream, "camera height");
-        if (camera.model < 0 ||
-            camera.model >= static_cast<std::int32_t>(k_camera_parameter_counts.size()))
+        const int parameter_count = camera_parameter_count(camera.model);
+        if (parameter_count < 0)
             throw std::runtime_error("Unsupported COLMAP camera model id " +
                                      std::to_string(camera.model));
-        camera.parameters.resize(k_camera_parameter_counts[camera.model]);
+        camera.parameters.resize(static_cast<std::size_t>(parameter_count));
         for (double& parameter : camera.parameters)
             parameter = read_binary<double>(stream, "camera parameter");
         cameras.emplace(id, std::move(camera));
@@ -180,7 +196,8 @@ int camera_model_id(std::string name) {
         {"SIMPLE_PINHOLE", 0}, {"PINHOLE", 1}, {"SIMPLE_RADIAL", 2},
         {"RADIAL", 3}, {"OPENCV", 4}, {"OPENCV_FISHEYE", 5},
         {"FULL_OPENCV", 6}, {"FOV", 7}, {"SIMPLE_RADIAL_FISHEYE", 8},
-        {"RADIAL_FISHEYE", 9}, {"THIN_PRISM_FISHEYE", 10}};
+        {"RADIAL_FISHEYE", 9}, {"THIN_PRISM_FISHEYE", 10},
+        {"EQUIRECTANGULAR", 17}, {"SPHERICAL", 17}};
     const auto iterator = ids.find(name);
     return iterator == ids.end() ? -1 : iterator->second;
 }
@@ -202,8 +219,9 @@ std::unordered_map<std::uint32_t, ColmapCamera> read_cameras_text(
             throw std::runtime_error("Invalid COLMAP camera row: " + line);
         double value{};
         while (row >> value) camera.parameters.push_back(value);
-        if (camera.parameters.size() !=
-            static_cast<std::size_t>(k_camera_parameter_counts[camera.model]))
+        const int parameter_count = camera_parameter_count(camera.model);
+        if (parameter_count < 0 ||
+            camera.parameters.size() != static_cast<std::size_t>(parameter_count))
             throw std::runtime_error("Wrong COLMAP camera parameter count: " + line);
         cameras.emplace(id, std::move(camera));
     }
@@ -287,10 +305,35 @@ void set_intrinsics(const ColmapCamera& camera, mvs::MvsView& view) {
             view.p1 = static_cast<float>(p[6]);
             view.p2 = static_cast<float>(p[7]);
         }
+    } else if (camera.model == 5 || camera.model == 8 || camera.model == 9) {
+        view.source_model = CameraModel::opencv_fisheye;
+        if (camera.model == 5) {
+            view.fx = static_cast<float>(p[0]);
+            view.fy = static_cast<float>(p[1]);
+            view.cx = static_cast<float>(p[2]);
+            view.cy = static_cast<float>(p[3]);
+            view.k1 = static_cast<float>(p[4]);
+            view.k2 = static_cast<float>(p[5]);
+            view.p1 = static_cast<float>(p[6]);
+            view.p2 = static_cast<float>(p[7]);
+        } else {
+            view.fx = view.fy = static_cast<float>(p[0]);
+            view.cx = static_cast<float>(p[1]);
+            view.cy = static_cast<float>(p[2]);
+            view.k1 = static_cast<float>(p[3]);
+            if (camera.model == 9) view.k2 = static_cast<float>(p[4]);
+        }
+    } else if (camera.model == 17) {
+        view.source_model = CameraModel::equirectangular;
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        view.fx = view.fy = width / (2.F * 3.14159265358979323846F);
+        view.cx = 0.5F * width;
+        view.cy = 0.5F * height;
     } else {
         throw std::runtime_error(
             "COLMAP camera model " + std::to_string(camera.model) +
-            " is not representable by the current pinhole/Brown raster input");
+            " is not supported for splat training");
     }
     view.src_fx = view.fx;
     view.src_fy = view.fy;

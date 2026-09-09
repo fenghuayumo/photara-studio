@@ -1,6 +1,7 @@
 #ifndef CUDA_RASTERIZER_SAMPLE_H_INCLUDED
 #define CUDA_RASTERIZER_SAMPLE_H_INCLUDED
 
+#include "camera_model.h"
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <cuda.h>
@@ -16,8 +17,7 @@ void preprocess_points(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, int H,
-    const float focal_x, float focal_y,
-    const float center_x, float center_y,
+    const RasterIntrinsics K,
     float2* points2D,
     float* ts,
     const dim3 grid,

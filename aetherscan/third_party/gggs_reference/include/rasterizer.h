@@ -12,6 +12,8 @@
 #ifndef CUDA_RASTERIZER_H_INCLUDED
 #define CUDA_RASTERIZER_H_INCLUDED
 
+#include "camera_model.h"
+
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -59,7 +61,12 @@ public:
         float* visibility,
         int* radii         = nullptr,
         bool require_depth = true,
-        bool debug         = false);
+        bool debug         = false,
+        int camera_model   = 0,
+        float k1           = 0.f,
+        float k2           = 0.f,
+        float k3           = 0.f,
+        float k4           = 0.f);
 
     static void backward(
         std::function<char*(size_t)> geometryBuffer,
@@ -109,7 +116,12 @@ public:
         float* dL_dsg_color,
         float* refine_weight,
         bool require_depth = true,
-        bool debug         = false);
+        bool debug         = false,
+        int camera_model   = 0,
+        float k1           = 0.f,
+        float k2           = 0.f,
+        float k3           = 0.f,
+        float k4           = 0.f);
 
     static int evaluateTransmittance(
         std::function<char*(size_t)> geometryBuffer,
@@ -137,7 +149,9 @@ public:
         const bool prefiltered,
         float* out_transmittance,
         bool* inside,
-        bool debug      = false);
+        bool debug      = false,
+        int camera_model = 0,
+        float k1 = 0.f, float k2 = 0.f, float k3 = 0.f, float k4 = 0.f);
 
     static int evaluateSDF(
         std::function<char*(size_t)> geometryBuffer,
@@ -166,7 +180,9 @@ public:
         float* out_depth,
         float* out_sdf,
         bool* inside,
-        bool debug      = false);
+        bool debug      = false,
+        int camera_model = 0,
+        float k1 = 0.f, float k2 = 0.f, float k3 = 0.f, float k4 = 0.f);
 
     static int evaluateColor(
         std::function<char*(size_t)> geometryBuffer,
@@ -201,7 +217,9 @@ public:
         const bool prefiltered,
         float* out_color,
         bool* inside,
-        bool debug = false);
+        bool debug = false,
+        int camera_model = 0,
+        float k1 = 0.f, float k2 = 0.f, float k3 = 0.f, float k4 = 0.f);
 
     static int3 sampleDepth(
         std::function<char*(size_t)> geometryBuffer,
@@ -229,7 +247,9 @@ public:
         const bool prefiltered,
         float* output,
         bool* inside,
-        bool debug = false);
+        bool debug = false,
+        int camera_model = 0,
+        float k1 = 0.f, float k2 = 0.f, float k3 = 0.f, float k4 = 0.f);
 
     static void sampleDepthBackward(
         std::function<char*(size_t)> geometryBuffer,
@@ -267,7 +287,9 @@ public:
         float* dL_dscale,
         float* dL_drot,
         float* dL_dpoint,
-        bool debug);
+        bool debug,
+        int camera_model = 0,
+        float k1 = 0.f, float k2 = 0.f, float k3 = 0.f, float k4 = 0.f);
 };
 }; // namespace CudaRasterizer
 

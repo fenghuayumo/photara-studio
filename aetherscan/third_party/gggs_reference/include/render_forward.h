@@ -12,6 +12,7 @@
 #ifndef CUDA_RASTERIZER_FORWARD_H_INCLUDED
 #define CUDA_RASTERIZER_FORWARD_H_INCLUDED
 
+#include "camera_model.h"
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <cuda.h>
@@ -36,8 +37,7 @@ void preprocess(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, const int H,
-    const float focal_x, const float focal_y,
-    const float center_x, const float center_y,
+    const RasterIntrinsics K,
     const float kernel_size,
     int* radii,
     bool* clamped,
@@ -66,6 +66,7 @@ void render(
     const float focal_y,
     const float center_x,
     const float center_y,
+    const int camera_model,
     uint32_t* n_contrib,
     uint32_t* max_contributor,
     const float* bg_color,

@@ -1,5 +1,6 @@
 #include "training_data_loader.hpp"
 
+#include "core/camera_projection.hpp"
 #include "io/image.hpp"
 #include "cuda_ops.hpp"
 #include "core/logging.hpp"
@@ -23,7 +24,16 @@
 namespace aetherscan::splat {
 namespace {
 
-Camera make_camera_impl(const mvs::MvsView& view) {
+void finalize_equirect_intrinsics(Camera& camera) {
+    camera.fx = camera.fy =
+        static_cast<float>(camera.width) / (2.F * 3.14159265358979323846F);
+    camera.cx = 0.5F * static_cast<float>(camera.width);
+    camera.cy = 0.5F * static_cast<float>(camera.height);
+    camera.k1 = camera.k2 = camera.k3 = camera.k4 = 0.F;
+}
+
+Camera make_camera_impl(
+    const mvs::MvsView& view, const bool native_source) {
     Camera camera;
     // Force evaluation: translation() returns a temporary, so retaining the
     // lazy Eigen cast expression with `auto` would leave a dangling operand.
@@ -43,12 +53,29 @@ Camera make_camera_impl(const mvs::MvsView& view) {
     }
     const Eigen::Vector3f position = view.pose.C.cast<float>();
     camera.position = {position.x(), position.y(), position.z()};
-    camera.fx = view.fx;
-    camera.fy = view.fy;
-    camera.cx = view.cx;
-    camera.cy = view.cy;
-    camera.width = view.width;
-    camera.height = view.height;
+    if (native_source) {
+        camera.model = view.source_model;
+        camera.fx = view.src_fx;
+        camera.fy = view.src_fy;
+        camera.cx = view.src_cx;
+        camera.cy = view.src_cy;
+        camera.width = view.src_width != 0 ? view.src_width : view.width;
+        camera.height = view.src_height != 0 ? view.src_height : view.height;
+        camera.k1 = view.k1;
+        camera.k2 = view.k2;
+        camera.k3 = view.p1;
+        camera.k4 = view.p2;
+        if (camera.model == CameraModel::equirectangular)
+            finalize_equirect_intrinsics(camera);
+    } else {
+        camera.model = CameraModel::pinhole;
+        camera.fx = view.fx;
+        camera.fy = view.fy;
+        camera.cx = view.cx;
+        camera.cy = view.cy;
+        camera.width = view.width;
+        camera.height = view.height;
+    }
     return camera;
 }
 
@@ -56,11 +83,26 @@ Camera make_camera_impl(const mvs::MvsView& view) {
  
 namespace training_data {
 
+bool uses_native_training_camera(
+    const mvs::MvsView& view, const TrainingOptions& options) {
+    if (view.source_model == CameraModel::equirectangular)
+        return true;
+    return uses_native_splat_projection(view.source_model) &&
+           !options.undistort_to_pinhole;
+}
+
 Camera training_camera(
     const mvs::MvsView& view, const TrainingOptions& options,
     const float resolution_scale) {
-    Camera camera = make_camera_impl(view);
-    if (options.use_source_resolution && view.src_width != 0 &&
+    if (options.undistort_to_pinhole &&
+        view.source_model == CameraModel::equirectangular)
+        throw std::invalid_argument(
+            "Equirectangular cameras cannot be undistorted to pinhole; "
+            "train them natively");
+    Camera camera = make_camera_impl(
+        view, uses_native_training_camera(view, options));
+    if (!uses_native_splat_projection(camera.model) &&
+        options.use_source_resolution && view.src_width != 0 &&
         view.src_height != 0) {
         camera.fx = view.src_fx;
         camera.fy = view.src_fy;
@@ -89,6 +131,8 @@ Camera training_camera(
         camera.fy *= scale_y;
         camera.cx = (camera.cx + 0.5F) * scale_x - 0.5F;
         camera.cy = (camera.cy + 0.5F) * scale_y - 0.5F;
+        if (camera.model == CameraModel::equirectangular)
+            finalize_equirect_intrinsics(camera);
     }
     const float level_scale = std::clamp(resolution_scale, 1e-3F, 1.F);
     if (level_scale < 1.F) {
@@ -106,6 +150,8 @@ Camera training_camera(
         camera.fy *= scale_y;
         camera.cx = (camera.cx + 0.5F) * scale_x - 0.5F;
         camera.cy = (camera.cy + 0.5F) * scale_y - 0.5F;
+        if (camera.model == CameraModel::equirectangular)
+            finalize_equirect_intrinsics(camera);
     }
     return camera;
 }
@@ -191,6 +237,14 @@ float sample_rgb(
 std::pair<float, float> source_coordinate(
     const mvs::MvsView& view, const std::uint32_t x, const std::uint32_t y,
     const Camera& output_camera, const io::RgbImage& source) {
+    if (uses_native_splat_projection(output_camera.model)) {
+        const float scale_x =
+            static_cast<float>(output_camera.width) / source.width;
+        const float scale_y =
+            static_cast<float>(output_camera.height) / source.height;
+        return {(static_cast<float>(x) + 0.5F) / scale_x - 0.5F,
+                (static_cast<float>(y) + 0.5F) / scale_y - 0.5F};
+    }
     const bool distorted = view.source_model == CameraModel::opencv_fisheye || view.k1 != 0.F || view.k2 != 0.F ||
                            view.p1 != 0.F || view.p2 != 0.F;
     if (!distorted) {
@@ -274,7 +328,8 @@ float sample_projected_foreground_coverage(
     const std::size_t working_pixels =
         static_cast<std::size_t>(view.width) * view.height;
     if (view.foreground_mask.size() != working_pixels ||
-        view.width == 0 || view.height == 0)
+        view.width == 0 || view.height == 0 ||
+        uses_native_splat_projection(output_camera.model))
         return 1.F;
 
     // The coarse mesh mask lives in the undistorted MVS working camera.
@@ -380,9 +435,10 @@ HostTrainingView load_host_training_view(
         : 255.F;
     std::vector<int> rgba(pixels);
     const bool direct_source =
-        view.k1 == 0.F && view.k2 == 0.F &&
-        view.p1 == 0.F && view.p2 == 0.F &&
-        camera.width == source.width && camera.height == source.height;
+        camera.width == source.width && camera.height == source.height &&
+        (uses_native_splat_projection(camera.model) ||
+         (view.k1 == 0.F && view.k2 == 0.F &&
+          view.p1 == 0.F && view.p2 == 0.F));
     for (std::int64_t linear = 0;
          linear < static_cast<std::int64_t>(pixels); ++linear) {
         const auto pixel = static_cast<std::size_t>(linear);
@@ -722,7 +778,8 @@ CacheStats TrainingDataLoader::stats() const {
 }  // namespace training_data
 
 Camera camera_from_mvs_view(const mvs::MvsView& view) {
-    return make_camera_impl(view);
+    return make_camera_impl(
+        view, uses_native_splat_projection(view.source_model));
 }
 
 TrainingView make_training_view(

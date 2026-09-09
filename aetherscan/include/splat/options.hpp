@@ -173,6 +173,10 @@ struct TrainingOptions {
     // Train against source-resolution undistorted images rather than the MVS
     // working resolution.
     bool use_source_resolution{false};
+    // When true, resample OpenCV fisheye views onto a pinhole working camera.
+    // Native fisheye/equirectangular rasterization is used otherwise. Equirect
+    // cannot be undistorted and always trains natively.
+    bool undistort_to_pinhole{false};
     // brush-style dataset controls. Images are resized so their largest
     // dimension does not exceed this value (0 keeps the source resolution),
     // and packed training views are retained in bounded host/device LRUs.

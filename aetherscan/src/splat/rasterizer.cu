@@ -199,7 +199,9 @@ RenderResult Rasterizer::forward(
             result.alpha.ptr<float>(), result.normal.ptr<float>(),
             result.visibility.ptr<float>(), result.radii.ptr<int>(),
             context->options.require_depth,
-            context->options.debug);
+            context->options.debug,
+            static_cast<int>(camera.model), camera.k1, camera.k2,
+            camera.k3, camera.k4);
         (void)active_bases; // The reference API derives active bases from SHD.
     }
     result.rendered_instances = context->rendered_instances;
@@ -271,7 +273,9 @@ ModelGradients Rasterizer::backward(
             grad_scales.ptr<float>(), grad_quaternions.ptr<float>(),
             grad_covariance.ptr<float>(), gradients.sh.ptr<float>(),
             nullptr, nullptr, nullptr, refine_weight.ptr<float>(),
-            context.options.require_depth, context.options.debug);
+            context.options.require_depth, context.options.debug,
+            static_cast<int>(context.camera.model), context.camera.k1,
+            context.camera.k2, context.camera.k3, context.camera.k4);
     }
     detail::chain_parameter_gradients(
         model, context.activated, grad_scales, grad_quaternions,
@@ -319,7 +323,9 @@ DepthSampleResult Rasterizer::sample_depth(
         camera.fx, camera.fy, camera.cx, camera.cy,
         requested_options.kernel_size, false,
         result.camera_points.ptr<float>(), result.inside.ptr<bool>(),
-        requested_options.debug);
+        requested_options.debug,
+        static_cast<int>(camera.model), camera.k1, camera.k2,
+        camera.k3, camera.k4);
     result.context = std::move(context);
     return result;
 }
@@ -375,7 +381,9 @@ DepthSampleGradients Rasterizer::sample_depth_backward(
         grad_opacities.ptr<float>(), result.model.means.ptr<float>(),
         grad_covariance.ptr<float>(), grad_scales.ptr<float>(),
         grad_quaternions.ptr<float>(), result.points.ptr<float>(),
-        context.options.debug);
+        context.options.debug,
+        static_cast<int>(context.camera.model), context.camera.k1,
+        context.camera.k2, context.camera.k3, context.camera.k4);
     detail::chain_parameter_gradients(
         model, context.activated, grad_scales, grad_quaternions,
         grad_opacities, result.model);
@@ -425,7 +433,9 @@ OccupancyResult Rasterizer::evaluate_occupancy(
         constants.view_matrix(), constants.position(), camera.fx,
         camera.fy, camera.cx, camera.cy, requested_options.kernel_size,
         false, transmittance.ptr<float>(), result.inside.ptr<bool>(),
-        requested_options.debug);
+        requested_options.debug,
+        static_cast<int>(camera.model), camera.k1, camera.k2,
+        camera.k3, camera.k4);
     result.occupancy =
         tinytensor::Tensor::ones_like(transmittance) - transmittance;
     return result;

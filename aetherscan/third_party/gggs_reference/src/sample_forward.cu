@@ -14,8 +14,7 @@ __global__ void preprocessPointsCUDA(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, int H,
-    const float focal_x, float focal_y,
-    const float center_x, float center_y,
+    const RasterIntrinsics K,
     float2* points2D,
     float* ts,
     const dim3 grid,
@@ -28,12 +27,14 @@ __global__ void preprocessPointsCUDA(
     tiles_touched[idx] = 0;
 
     const float3 p_orig = {points3D[3 * idx], points3D[3 * idx + 1], points3D[3 * idx + 2]};
-    float3 p_view;
-    if (!in_frustum(p_orig, viewmatrix, prefiltered, p_view))
+    float3 p_view = transformPoint4x3(p_orig, viewmatrix);
+    if (!camera_visible(p_view, K.model))
         return;
 
-    float2 point_image = {p_view.x / p_view.z * focal_x + center_x,
-                          p_view.y / p_view.z * focal_y + center_y};
+    const RasterProjection projected = project_raster_camera(p_view, K, W, H);
+    if (!projected.valid)
+        return;
+    float2 point_image = projected.mean;
 
     if (point_image.x < 0 || point_image.x > W - 1 || point_image.y < 0 || point_image.y > H - 1)
         return;
@@ -813,8 +814,7 @@ void FORWARD::preprocess_points(
     const float* viewmatrix,
     const glm::vec3* cam_pos,
     const int W, int H,
-    const float focal_x, float focal_y,
-    const float center_x, float center_y,
+    const RasterIntrinsics K,
     float2* points2D,
     float* ts,
     const dim3 grid,
@@ -826,8 +826,7 @@ void FORWARD::preprocess_points(
         viewmatrix,
         cam_pos,
         W, H,
-        focal_x, focal_y,
-        center_x, center_y,
+        K,
         points2D,
         ts,
         grid,

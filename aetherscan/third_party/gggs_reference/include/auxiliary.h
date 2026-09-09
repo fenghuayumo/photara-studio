@@ -12,6 +12,7 @@
 #ifndef CUDA_RASTERIZER_AUXILIARY_H_INCLUDED
 #define CUDA_RASTERIZER_AUXILIARY_H_INCLUDED
 
+#include "camera_model.h"
 #include "config.h"
 #include "stdio.h"
 #include <glm/glm.hpp>
@@ -131,7 +132,7 @@ __forceinline__ __device__ uint32_t enumerateAccuTilesAxis(
     return count;
 }
 
-__forceinline__ __device__ uint32_t enumerateGaussianTiles(
+__forceinline__ __device__ uint32_t enumerateGaussianTilesUnwrapped(
     const float2 mean,
     const float4 conic_opacity,
     const dim3 grid,
@@ -189,6 +190,42 @@ __forceinline__ __device__ uint32_t enumerateGaussianTiles(
     }
     return count;
 #endif
+}
+
+__forceinline__ __device__ uint32_t enumerateGaussianTiles(
+    const float2 mean,
+    const float4 conic_opacity,
+    const dim3 grid,
+    const uint32_t gaussian_id,
+    uint32_t output_offset,
+    const float depth,
+    uint64_t* keys,
+    uint32_t* values,
+    const int wrap_width = 0) {
+    uint32_t count = enumerateGaussianTilesUnwrapped(
+        mean, conic_opacity, grid, gaussian_id, output_offset, depth, keys, values);
+    if (wrap_width <= 0)
+        return count;
+    const float determinant =
+        conic_opacity.x * conic_opacity.z - conic_opacity.y * conic_opacity.y;
+    if (!(determinant > 0.F))
+        return count;
+    const float covariance_x = conic_opacity.z / determinant;
+    const float radius = 3.F * sqrtf(fmaxf(covariance_x, 0.F));
+    const float width = static_cast<float>(wrap_width);
+    if (mean.x - radius < 0.F) {
+        const float2 wrapped = {mean.x + width, mean.y};
+        count += enumerateGaussianTilesUnwrapped(
+            wrapped, conic_opacity, grid, gaussian_id, output_offset + count,
+            depth, keys, values);
+    }
+    if (mean.x + radius > width) {
+        const float2 wrapped = {mean.x - width, mean.y};
+        count += enumerateGaussianTilesUnwrapped(
+            wrapped, conic_opacity, grid, gaussian_id, output_offset + count,
+            depth, keys, values);
+    }
+    return count;
 }
 
 __forceinline__ __device__ float3 transformPoint4x3(const float3& p, const float* matrix) {

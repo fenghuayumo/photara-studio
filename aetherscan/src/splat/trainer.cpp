@@ -2,6 +2,7 @@
 #include "splat/visualize.hpp"
 
 #include "cuda_ops.hpp"
+#include "core/camera_projection.hpp"
 #include "core/logging.hpp"
 #include "densification.hpp"
 #include "io/format_version.hpp"
@@ -770,8 +771,22 @@ GaussianModel Trainer::train(
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras, filter_3d_factor, brush_filter);
-    const bool use_multi_view = options_.multi_view_geo_weight > 0.F ||
-                                options_.multi_view_ncc_weight > 0.F;
+    const bool native_non_pinhole = std::any_of(
+        all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
+            return uses_native_splat_projection(camera.model);
+        });
+    if (native_non_pinhole &&
+        (options_.multi_view_geo_weight > 0.F ||
+         options_.multi_view_ncc_weight > 0.F ||
+         options_.use_depth_normal_loss)) {
+        core::Logger::instance().info(
+            "Disabling pinhole-only depth-normal and multi-view losses for "
+            "fisheye/equirectangular splat cameras");
+    }
+    const bool use_multi_view =
+        !native_non_pinhole &&
+        (options_.multi_view_geo_weight > 0.F ||
+         options_.multi_view_ncc_weight > 0.F);
     const unsigned multi_view_tail_interval =
         std::max(1U, options_.multi_view_tail_interval);
     const bool adaptive_multi_view =
@@ -936,15 +951,14 @@ GaussianModel Trainer::train(
         }
         raster_options.kernel_size = options_.kernel_size;
         raster_options.scale_modifier = options_.scale_modifier;
-        const bool depth_normal_active = options_.use_depth_normal_loss &&
+        const bool depth_normal_active = !native_non_pinhole &&
+            options_.use_depth_normal_loss &&
             options_.depth_normal_weight > 0.F &&
             iteration >= options_.depth_normal_from_iter;
         const bool normal_field_active = options_.use_normal_field &&
             options_.normal_field_weight > 0.F &&
             iteration >= options_.normal_field_from_iter;
-        const bool multi_view_eligible =
-            (options_.multi_view_geo_weight > 0.F ||
-             options_.multi_view_ncc_weight > 0.F) &&
+        const bool multi_view_eligible = use_multi_view &&
             iteration >= options_.depth_normal_from_iter &&
             !multi_view_neighbours[view_index].empty();
         const bool multi_view_tail = !adaptive_multi_view &&

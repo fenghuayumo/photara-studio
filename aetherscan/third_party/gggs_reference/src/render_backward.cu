@@ -255,7 +255,8 @@ __global__ void computeCov2DCUDA(
     const float4* rotations,
     const float* opacities,
     const float mod,
-    const float h_x, float h_y,
+    const RasterIntrinsics K,
+    const int image_width, const int image_height,
     const float tan_fovx, const float tan_fovy,
     const float kernel_size,
     const float* view_matrix,
@@ -277,6 +278,8 @@ __global__ void computeCov2DCUDA(
     float4 dL_dconic           = dL_dconics[idx];
     const glm::vec3 dL_dnormal = dL_dnormals[idx];
 
+    const float h_x = K.focal_x;
+    const float h_y = K.focal_y;
     auto load_ray_plane_grad = [h_x, h_y](const float4* dL_dray_planes, auto idx) {
         float4 dL_dray_plane = dL_dray_planes[idx];
         dL_dray_plane.x /= h_x;
@@ -291,22 +294,33 @@ __global__ void computeCov2DCUDA(
     float rtc    = rnorm3df(t.x, t.y, t.z);
     float3 dL_dt = {t.x * rtc * dL_dtc, t.y * rtc * dL_dtc, t.z * rtc * dL_dtc};
 
-    const float limx = 1.3f * tan_fovx;
-    const float limy = 1.3f * tan_fovy;
-    float u          = t.x / t.z;
-    float v          = t.y / t.z;
-    t.x              = fminf(limx, fmaxf(-limx, u)) * t.z;
-    t.y              = fminf(limy, fmaxf(-limy, v)) * t.z;
-
-    const float x_grad_mul = u < -limx || u > limx ? 0 : 1;
-    const float y_grad_mul = v < -limy || v > limy ? 0 : 1;
-
-    u = t.x / t.z;
-    v = t.y / t.z;
-
-    glm::mat3 J = glm::mat3(h_x / t.z, 0.0f, -(h_x * t.x) / (t.z * t.z),
-                            0.0f, h_y / t.z, -(h_y * t.y) / (t.z * t.z),
-                            0, 0, 0);
+    float u;
+    float v;
+    float x_grad_mul = 1.f;
+    float y_grad_mul = 1.f;
+    glm::mat3 J;
+    if (raster_is_pinhole(K.model)) {
+        const float limx = 1.3f * tan_fovx;
+        const float limy = 1.3f * tan_fovy;
+        u                = t.x / t.z;
+        v                = t.y / t.z;
+        t.x              = fminf(limx, fmaxf(-limx, u)) * t.z;
+        t.y              = fminf(limy, fmaxf(-limy, v)) * t.z;
+        x_grad_mul       = u < -limx || u > limx ? 0 : 1;
+        y_grad_mul       = v < -limy || v > limy ? 0 : 1;
+        u                = t.x / t.z;
+        v                = t.y / t.z;
+        J = glm::mat3(h_x / t.z, 0.0f, -(h_x * t.x) / (t.z * t.z),
+                      0.0f, h_y / t.z, -(h_y * t.y) / (t.z * t.z),
+                      0, 0, 0);
+    } else {
+        const RasterProjection projected = project_raster_camera(t, K, image_width, image_height);
+        if (!projected.valid)
+            return;
+        J = projected.J;
+        u = t.x / fmaxf(t.z, 1e-6f);
+        v = t.y / fmaxf(t.z, 1e-6f);
+    }
 
     glm::mat3 W = glm::mat3(
         view_matrix[0], view_matrix[4], view_matrix[8],
@@ -659,10 +673,8 @@ __global__ void preprocessCUDA(
     const float* sg_color,
     const float scale_modifier,
     const float* view,
-    const float focal_x,
-    const float focal_y,
-    const float center_x,
-    const float center_y,
+    const int W, const int H,
+    const RasterIntrinsics K,
     const glm::vec3* campos,
     const int* radii,
     const bool* clamped,
@@ -683,17 +695,31 @@ __global__ void preprocessCUDA(
     float3 m = means[idx];
 
     float3 p_view = transformPoint4x3(m, view);
-    float rz = 1.0f / (p_view.z + 0.0000001f);
-    float sx = p_view.x * rz;
-    float sy = p_view.y * rz;
-
     glm::vec3 dL_dmean;
-    dL_dmean.x = (focal_x * (view[0] - sx * view[2]) * dL_dmean2D[idx].x
-                + focal_y * (view[1] - sy * view[2]) * dL_dmean2D[idx].y) * rz;
-    dL_dmean.y = (focal_x * (view[4] - sx * view[6]) * dL_dmean2D[idx].x
-                + focal_y * (view[5] - sy * view[6]) * dL_dmean2D[idx].y) * rz;
-    dL_dmean.z = (focal_x * (view[8] - sx * view[10]) * dL_dmean2D[idx].x
-                + focal_y * (view[9] - sy * view[10]) * dL_dmean2D[idx].y) * rz;
+    if (raster_is_pinhole(K.model)) {
+        float rz = 1.0f / (p_view.z + 0.0000001f);
+        float sx = p_view.x * rz;
+        float sy = p_view.y * rz;
+        dL_dmean.x = (K.focal_x * (view[0] - sx * view[2]) * dL_dmean2D[idx].x
+                    + K.focal_y * (view[1] - sy * view[2]) * dL_dmean2D[idx].y) * rz;
+        dL_dmean.y = (K.focal_x * (view[4] - sx * view[6]) * dL_dmean2D[idx].x
+                    + K.focal_y * (view[5] - sy * view[6]) * dL_dmean2D[idx].y) * rz;
+        dL_dmean.z = (K.focal_x * (view[8] - sx * view[10]) * dL_dmean2D[idx].x
+                    + K.focal_y * (view[9] - sy * view[10]) * dL_dmean2D[idx].y) * rz;
+    } else {
+        const RasterProjection projected = project_raster_camera(
+            p_view, K, W, H);
+        const glm::vec3 dL_dcam(
+            projected.J[0][0] * dL_dmean2D[idx].x + projected.J[1][0] * dL_dmean2D[idx].y,
+            projected.J[0][1] * dL_dmean2D[idx].x + projected.J[1][1] * dL_dmean2D[idx].y,
+            projected.J[0][2] * dL_dmean2D[idx].x + projected.J[1][2] * dL_dmean2D[idx].y);
+        dL_dmean.x = view[0] * dL_dcam.x + view[1] * dL_dcam.y + view[2] * dL_dcam.z;
+        dL_dmean.y = view[4] * dL_dcam.x + view[5] * dL_dcam.y + view[6] * dL_dcam.z;
+        dL_dmean.z = view[8] * dL_dcam.x + view[9] * dL_dcam.y + view[10] * dL_dcam.z;
+        if (!projected.valid) {
+            dL_dmean = glm::vec3(0.f);
+        }
+    }
 
     dL_dmeans[idx] += dL_dmean;
 
@@ -732,6 +758,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         const float focal_y,
         const float center_x,
         const float center_y,
+        const int camera_model,
         float3* __restrict__ dL_dmean2D,
         float4* __restrict__ dL_dconic2D,
         float* __restrict__ dL_dcolors,
@@ -852,7 +879,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
                 contributor++;
                 done         = contributor >= last_contributor;
                 float2 xy    = collected_xy[j];
-                float2 d     = {xy.x - pixf.x, xy.y - pixf.y};
+                float2 d     = {wrap_delta_x(xy.x - pixf.x, W, camera_model), xy.y - pixf.y};
                 float4 con_o = collected_conic_opacity[j];
                 float power  = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
                 if (power > 0.0f)
@@ -913,7 +940,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
             // Compute blending values, as before.
             const float2 xy    = collected_xy[j];
-            const float2 d     = {xy.x - pixf.x, xy.y - pixf.y};
+            const float2 d     = {wrap_delta_x(xy.x - pixf.x, W, camera_model), xy.y - pixf.y};
             const float4 con_o = collected_conic_opacity[j];
 
             float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
@@ -1105,10 +1132,7 @@ void BACKWARD::preprocess(
     const float scale_modifier,
     const float* viewmatrix,
     const int W, const int H,
-    const float focal_x,
-    const float focal_y,
-    const float center_x,
-    const float center_y,
+    const RasterIntrinsics K,
     const float kernel_size,
     const glm::vec3* campos,
     const int* radii,
@@ -1127,8 +1151,8 @@ void BACKWARD::preprocess(
     float* dL_dsg_axis,
     float* dL_dsg_sharpness,
     float* dL_dsg_color) {
-    const float tan_fovx = (float)W / (2.0f * focal_x);
-    const float tan_fovy = (float)H / (2.0f * focal_y);
+    const float tan_fovx = (float)W / (2.0f * K.focal_x);
+    const float tan_fovy = (float)H / (2.0f * K.focal_y);
     computeCov2DCUDA<<<(P + 255) / 256, 256>>>(
         P,
         means3D,
@@ -1138,8 +1162,9 @@ void BACKWARD::preprocess(
         rotations,
         opacities,
         scale_modifier,
-        focal_x,
-        focal_y,
+        K,
+        W,
+        H,
         tan_fovx,
         tan_fovy,
         kernel_size,
@@ -1162,10 +1187,9 @@ void BACKWARD::preprocess(
         sg_color,
         scale_modifier,
         viewmatrix,
-        focal_x,
-        focal_y,
-        center_x,
-        center_y,
+        W,
+        H,
+        K,
         campos,
         radii,
         clamped,
@@ -1208,6 +1232,7 @@ void BACKWARD::render(
     const float focal_y,
     const float center_x,
     const float center_y,
+    const int camera_model,
     float3* dL_dmean2D,
     float4* dL_dconic2D,
     float* dL_dcolors,
@@ -1221,7 +1246,7 @@ void BACKWARD::render(
         depths, ray_planes, normals, alphas, normalmap, mdepth,             \
         normal_length, n_contrib, max_contributors, dL_dpixels,             \
         dL_dpixel_mdepth, dL_dalphas, dL_dpixel_normals,                    \
-        focal_x, focal_y, center_x, center_y,                               \
+        focal_x, focal_y, center_x, center_y, camera_model,                 \
         dL_dmean2D, dL_dconic2D, dL_dcolors,                                \
         dL_dray_planes, dL_dnormals, refine_weight)
 

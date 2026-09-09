@@ -161,8 +161,12 @@ quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN sca
 `--splat-constrain-scales=true`。`--splat-max-scale-ratio` 默认 0，不额外限制轴比。
 
 加载器自动解析根目录、`sparse/`、`sparse/0/` 或直接 model 目录中的 `.bin` / `.txt`。
-当前精确支持 `SIMPLE_PINHOLE`、`PINHOLE`、`SIMPLE_RADIAL`、`RADIAL`、`OPENCV`；无法由
-现有 Brown/pinhole 相机准确表达的 fisheye、FOV、FULL_OPENCV 会明确拒绝，不做静默近似。
+当前支持 `SIMPLE_PINHOLE`、`PINHOLE`、`SIMPLE_RADIAL`、`RADIAL`、`OPENCV`，以及原生
+`OPENCV_FISHEYE` / `SIMPLE_RADIAL_FISHEYE` / `RADIAL_FISHEYE` 和 `EQUIRECTANGULAR`
+（别名 `SPHERICAL`）。鱼眼和全景默认在原始图像上训练，不先去畸变成针孔；
+`--splat-undistort` 可以把鱼眼重新采样到针孔工作相机。`FOV`、`FULL_OPENCV`、
+`THIN_PRISM_FISHEYE` 仍会明确拒绝。全景无法去畸变。非针孔相机上会跳过
+depth-normal 与多视图 NCC/几何项，RGB+SSIM 仍照常训练。
 
 当前支持四种策略，前三种用于稀疏输入，`dense_adaptive` 专用于 MVS 稠密输入：
 

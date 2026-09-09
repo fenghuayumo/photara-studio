@@ -122,6 +122,7 @@ struct ReconstructCli {
     unsigned splat_profile_interval{100};
     std::uint64_t splat_max_gaussians{500'000};
     unsigned splat_max_resolution{1'920};
+    bool splat_undistort{false};
     float splat_kernel_size{0.F};
     bool splat_progressive_resolution{true};
     unsigned splat_progressive_interval{3'000};
@@ -564,6 +565,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("500000"))
         ("splat-max-resolution", "Maximum splat training image dimension (0 = source)",
          cxxopts::value<unsigned>()->default_value("1920"))
+        ("splat-undistort",
+         "Resample OpenCV fisheye views onto a pinhole camera before splat training",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-kernel-size",
          "Screen covariance low-pass variance (0 disables; Brush Mip uses 0.1)",
          cxxopts::value<float>()->default_value("0"))
@@ -943,6 +947,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-max-gaussians"].as<std::uint64_t>();
     cli.splat_max_resolution =
         result["splat-max-resolution"].as<unsigned>();
+    cli.splat_undistort = result["splat-undistort"].as<bool>();
     cli.splat_kernel_size = result["splat-kernel-size"].as<float>();
     cli.splat_progressive_resolution =
         result["splat-progressive-resolution"].as<bool>();
@@ -2170,6 +2175,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;
     options.use_source_resolution = true;
+    options.undistort_to_pinhole = cli.splat_undistort;
     options.max_image_dimension = cli.splat_max_resolution;
     options.kernel_size = cli.splat_kernel_size;
     options.progressive_resolution = cli.splat_progressive_resolution;

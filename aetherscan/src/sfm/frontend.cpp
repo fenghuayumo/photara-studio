@@ -201,7 +201,7 @@ FrontEndStageKeys make_stage_keys(
     geometry.append(matches.value());
     geometry.append(options.focal_pixels);
     geometry.append(static_cast<std::uint32_t>(options.camera_model));
-    geometry.append_string("automatic-camera-selection-v1");
+    geometry.append_string("validated-camera-calibration-v2");
     geometry.append(options.trust_focal_pixels);
     append_relative_options(geometry, options.relative);
     geometry.append(options.progressive_pair_expansion);
@@ -316,8 +316,10 @@ void select_scene_camera_models(
             if (++inspected == 3) break;
         }
         core::Logger::instance().info("auto camera: evaluating group=",camera.id," pairs=",probes.size());
-        const auto selected = select_camera_model(camera,probes,options.focal_pixels,lens_hint);
+        const auto selected = select_camera_model(camera,probes,options.focal_pixels,lens_hint,options.camera_model);
         camera.model = selected.model;
+        camera.k1=selected.distortion[0]; camera.k2=selected.distortion[1];
+        camera.p1=selected.distortion[2]; camera.p2=selected.distortion[3];
         camera.fx = camera.fy = camera.focal_prior = selected.focal_pixels;
         core::Logger::instance().info("auto camera: group=",camera.id,
             " selected=",camera.model == CameraModel::opencv_fisheye ? "opencv_fisheye" : "pinhole",
@@ -1674,7 +1676,8 @@ FrontEndResult run_frontend(
             }
         }
 
-        if (options.camera_model == CameraModel::automatic) {
+        if (options.camera_model == CameraModel::automatic ||
+            (options.camera_model == CameraModel::opencv_fisheye && options.focal_pixels <= 0)) {
             select_scene_camera_models(scene, raw_pairs, candidates, options);
             std::vector<ImagePair> pairs(candidates.size());
             parallel::parallel_for(candidates.size(), threads, [&](const std::size_t i) {
@@ -1992,7 +1995,8 @@ FrontEndResult run_frontend(
     } else {
         core::Logger::instance().info("checkpoint hit: matches");
     }
-    if (options.camera_model == CameraModel::automatic) {
+    if (options.camera_model == CameraModel::automatic ||
+            (options.camera_model == CameraModel::opencv_fisheye && options.focal_pixels <= 0)) {
         select_scene_camera_models(scene, raw_pairs, candidates, options);
         scene.pairs.clear();
         geometry_verified_in_pipeline = false;

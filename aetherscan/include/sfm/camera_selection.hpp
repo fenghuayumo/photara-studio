@@ -1,6 +1,7 @@
 #pragma once
 #include "sfm/geometry.hpp"
 #include <string>
+#include <array>
 
 namespace aetherscan::sfm {
 struct CameraModelProbe {
@@ -9,6 +10,7 @@ struct CameraModelProbe {
 struct CameraModelSelection {
     CameraModel model{CameraModel::pinhole};
     double focal_pixels{};
+    std::array<double,4> distortion{};
     double pinhole_score{}, fisheye_score{};
     unsigned informative_pairs{};
     bool confident{};
@@ -18,5 +20,6 @@ struct CameraModelSelection {
 // Probes must share the supplied camera's dimensions. Ambiguity favors pinhole.
 CameraModelSelection select_camera_model(
     const PinholeCamera& camera, const std::vector<CameraModelProbe>& probes,
-    double supplied_focal = 0.0, bool fisheye_lens_hint = false);
+    double supplied_focal = 0.0, bool fisheye_lens_hint = false,
+    CameraModel requested = CameraModel::automatic);
 } // namespace aetherscan::sfm

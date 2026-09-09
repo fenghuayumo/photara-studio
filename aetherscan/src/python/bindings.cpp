@@ -583,6 +583,9 @@ NB_MODULE(aetherscan_native, module) {
             "use_source_resolution",
             &splat::TrainingOptions::use_source_resolution)
         .def_rw(
+            "undistort_to_pinhole",
+            &splat::TrainingOptions::undistort_to_pinhole)
+        .def_rw(
             "max_image_dimension",
             &splat::TrainingOptions::max_image_dimension)
         .def_rw(
