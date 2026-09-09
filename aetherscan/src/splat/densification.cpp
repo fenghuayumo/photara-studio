@@ -76,7 +76,6 @@ SceneGeometry brush_scene_geometry(
     mvs::Vec3f maximum;
     for (std::size_t axis = 0; axis < axes.size(); ++axis) {
         auto& values = axes[axis];
-        std::sort(values.begin(), values.end());
         const std::size_t size = values.size();
         const std::size_t low = static_cast<std::size_t>(
             (1.F - p) * 0.5F * static_cast<float>(size));
@@ -84,8 +83,14 @@ SceneGeometry brush_scene_geometry(
             size - 1,
             static_cast<std::size_t>(
                 (1.F + p) * 0.5F * static_cast<float>(size)));
-        minimum(static_cast<Eigen::Index>(axis)) = values[low];
+        // Only two order statistics are needed. Sorting all N coordinates
+        // on the training thread stalls CUDA at every ADC refinement.
+        std::nth_element(values.begin(), values.begin() + high, values.end());
         maximum(static_cast<Eigen::Index>(axis)) = values[high];
+        if (low < high)
+            std::nth_element(
+                values.begin(), values.begin() + low, values.begin() + high);
+        minimum(static_cast<Eigen::Index>(axis)) = values[low];
     }
 
     const mvs::Vec3f half_extent = 0.5F * (maximum - minimum);
@@ -96,6 +101,18 @@ SceneGeometry brush_scene_geometry(
         2.F * extents[1],
         0.5F * (minimum + maximum),
         extents[2]};
+}
+
+SceneGeometry brush_scene_geometry_cuda(
+    const tinytensor::Tensor& means, const float percentile) {
+    const auto bounds = detail::percentile_bounds(means, percentile);
+    const mvs::Vec3f minimum(bounds[0], bounds[1], bounds[2]);
+    const mvs::Vec3f maximum(bounds[3], bounds[4], bounds[5]);
+    const mvs::Vec3f half_extent = 0.5F * (maximum - minimum);
+    std::array<float, 3> extents{
+        half_extent.x(), half_extent.y(), half_extent.z()};
+    std::sort(extents.begin(), extents.end());
+    return {2.F * extents[1], 0.5F * (minimum + maximum), extents[2]};
 }
 
 StrategySchedule strategy_schedule(const TrainingOptions& options) {

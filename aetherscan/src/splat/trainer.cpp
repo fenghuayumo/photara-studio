@@ -105,7 +105,9 @@ tinytensor::Tensor render_preview_color(
 }
 
 enum class CudaTrainingStage : std::size_t {
+    data_load,
     raster_forward,
+    preview,
     training_loss,
     multi_view_unproject,
     multi_view_sample_forward,
@@ -154,7 +156,7 @@ public:
         }
         core::Logger::instance().info(
             "splat_cuda_profile enabled=1 interval=", interval_,
-            " stages=raster_forward,training_loss,multi_view_unproject,"
+            " stages=data_load,raster_forward,preview,training_loss,multi_view_unproject,"
             "multi_view_sample_forward,multi_view_loss,"
             "multi_view_sample_backward,raster_backward,"
             "multi_view_gradient_merge,densification_stats,optimizer,"
@@ -280,6 +282,8 @@ private:
             " refinement_steps=", refinement_steps_,
             " filter_refresh_steps=", filter_refresh_steps_,
             " cuda_timeline_avg_ms=", cuda_timeline_average_ms,
+            " data_load_ms=", value(CudaTrainingStage::data_load),
+            " preview_ms=", value(CudaTrainingStage::preview),
             " raster_forward_ms=",
             value(CudaTrainingStage::raster_forward),
             " raster_forward_pct=",
@@ -843,8 +847,7 @@ GaussianModel Trainer::train(
     float means_learning_rate_scale = scene_extent;
     refine::SceneGeometry refinement_geometry = scene_geometry;
     if (is_adc_strategy(options_.densification_strategy)) {
-        refinement_geometry = refine::brush_scene_geometry(
-            download<float>(model.means));
+        refinement_geometry = refine::brush_scene_geometry_cuda(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
     }
     const float minimum_log_scale = options_.constrain_scale_range
@@ -873,8 +876,12 @@ GaussianModel Trainer::train(
     auto interval_started = std::chrono::steady_clock::now();
     unsigned last_progress_iteration = 0;
     double ema_step_ms = 0.0;
+    auto next_preview_poll = std::chrono::steady_clock::time_point::min();
+    const bool preview_has_sidecars = !options_.preview_camera_file.empty() ||
+        !options_.preview_view_file.empty() || !options_.preview_vis_file.empty();
 
     for (unsigned iteration = 1; iteration <= options_.iterations; ++iteration) {
+        cuda_profiler.begin_iteration(iteration, model.size());
         const float requested_resolution_scale =
             data::progressive_resolution_scale(iteration, options_);
         if (std::abs(
@@ -912,6 +919,7 @@ GaussianModel Trainer::train(
         const std::size_t view_index =
             shuffled_views[shuffled_view_cursor++];
         const TrainingView target = view_cache.get(view_index);
+        cuda_profiler.mark(CudaTrainingStage::data_load);
         RasterizeOptions raster_options;
         const unsigned active_sh_degree = std::min(
             options_.sh_degree,
@@ -965,10 +973,21 @@ GaussianModel Trainer::train(
                                        depth_normal_active ||
                                        normal_field_active ||
                                        multi_view_active;
-        cuda_profiler.begin_iteration(iteration, model.size());
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
         cuda_profiler.mark(CudaTrainingStage::raster_forward);
-        if ((preview || device_preview) && options_.preview_interval != 0) {
+        const bool preview_enabled = (preview || device_preview) &&
+            options_.preview_interval != 0;
+        const bool preview_scheduled = preview_enabled &&
+            (iteration == 1 || iteration == options_.iterations ||
+             iteration % options_.preview_interval == 0);
+        // Check interactive camera controls at most once per display frame,
+        // rather than opening/parsing three files for every optimizer step.
+        // Explicit iteration cadence and the final preview are still honored.
+        if (preview_enabled && (preview_scheduled ||
+                (preview_has_sidecars &&
+                 std::chrono::steady_clock::now() >= next_preview_poll))) {
+            next_preview_poll = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(16);
             Camera preview_camera;
             std::uint64_t camera_revision = 0;
             VisualizeOptions camera_vis;
@@ -990,8 +1009,7 @@ GaussianModel Trainer::train(
                      : preview_index != last_preview_view);
             if (due) {
                 if (!custom_camera) {
-                    view_cache.prefetch(preview_index);
-                    preview_camera = view_cache.get(preview_index).camera;
+                    preview_camera = all_cameras[preview_index];
                 }
                 const tinytensor::Tensor preview_color = render_preview_color(
                     model, preview_camera, options_,
@@ -1028,6 +1046,7 @@ GaussianModel Trainer::train(
                 }
             }
         }
+        cuda_profiler.mark(CudaTrainingStage::preview);
         detail::LossGradients loss = detail::compute_training_loss(
             rendered, target, options_, report_progress,
             depth_normal_active);
@@ -1253,8 +1272,7 @@ GaussianModel Trainer::train(
             refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
             if (refinement_happened && adc_plus) {
-                refinement_geometry = refine::brush_scene_geometry(
-                    download<float>(model.means));
+                refinement_geometry = refine::brush_scene_geometry_cuda(model.means);
                 means_learning_rate_scale = refinement_geometry.scale;
             }
         }
@@ -1411,6 +1429,15 @@ GaussianModel Trainer::train(
             launch_evaluation(iteration, model);
     }
     cuda_profiler.flush();
+    if (options_.profile_cuda) {
+        const auto cache = view_cache.stats();
+        core::Logger::instance().info(
+            "splat_data_cache requests=", cache.requests,
+            " device_hits=", cache.device_hits,
+            " uploaded_bytes=", cache.uploaded_bytes,
+            " device_resident_bytes=", cache.device_resident_bytes,
+            " device_budget_bytes=", cache.device_budget_bytes);
+    }
     finish_evaluation();
     const cudaError_t error = cudaDeviceSynchronize();
     if (error != cudaSuccess)

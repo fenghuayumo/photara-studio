@@ -127,6 +127,7 @@ struct ReconstructCli {
     unsigned splat_progressive_interval{3'000};
     float splat_progressive_initial_scale{0.25F};
     std::uint64_t splat_view_cache_mb{6'144};
+    std::uint64_t splat_device_cache_mb{512};
     unsigned splat_eval_split_every{0};
     bool splat_use_mask{true};
     std::string splat_alpha_mode{"transparent"};
@@ -314,6 +315,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-preview-dir PATH  editor preview PNG directory\n"
               << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
+              << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
               << "  --splat-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --splat-kernel-size V  screen covariance low-pass variance; "
                  "0 disables, 0.1 matches Brush Mip\n"
@@ -577,6 +579,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0.25"))
         ("splat-view-cache-mb", "Packed RGBA8 splat host-view LRU budget (0 = no cache)",
          cxxopts::value<std::uint64_t>()->default_value("6144"))
+        ("splat-device-cache-mb", "Packed splat CUDA-view LRU budget, capped by free VRAM (0 = disabled)",
+         cxxopts::value<std::uint64_t>()->default_value("512"))
         ("splat-eval-split-every",
          "Hold out every Nth view for PSNR evaluation (0 = train all)",
          cxxopts::value<unsigned>()->default_value("0"))
@@ -948,6 +952,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-progressive-initial-scale"].as<float>();
     cli.splat_view_cache_mb =
         result["splat-view-cache-mb"].as<std::uint64_t>();
+    cli.splat_device_cache_mb =
+        result["splat-device-cache-mb"].as<std::uint64_t>();
     cli.splat_eval_split_every =
         result["splat-eval-split-every"].as<unsigned>();
     cli.splat_use_mask = result["splat-use-mask"].as<bool>();
@@ -2182,6 +2188,11 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                 ? (std::numeric_limits<std::uint64_t>::max)()
                 : cli.splat_view_cache_mb * bytes_per_megabyte,
             (std::numeric_limits<std::size_t>::max)()));
+    options.training_device_cache_bytes = static_cast<std::size_t>(
+        std::min<std::uint64_t>(
+            cli.splat_device_cache_mb,
+            (std::numeric_limits<std::size_t>::max)() / bytes_per_megabyte)
+        * bytes_per_megabyte);
     if (!cli.gui) {
         for (const unsigned milestone :
              {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})

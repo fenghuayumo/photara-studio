@@ -5,6 +5,7 @@
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/multi_view_scheduler.hpp"
+#include "../src/splat/training_data_loader.hpp"
 #include "io/image.hpp"
 #include "sfm/export_mvs.hpp"
 
@@ -86,6 +87,11 @@ void test_gggs_3d_filter() {
             std::abs(filter[1] - 4.F * unit) < 1e-6F &&
             std::abs(filter[2] - 4.F * unit) < 1e-6F,
         "GGGS 3D filter differs from pygsplat visibility/focal formula");
+    const auto invisible = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 0.F, -2.F}, {1, 3}, tinytensor::Device::CUDA);
+    require(std::abs(detail::compute_3d_filter(invisible, {camera}).to_vector()[0] -
+                     unit) < 1e-6F,
+            "GPU filter maximum lost the all-invisible fallback");
 
     GaussianModel model;
     model.means = means;
@@ -446,6 +452,17 @@ void test_forward_backward() {
 
     const std::size_t pixels =
         static_cast<std::size_t>(camera.width) * camera.height;
+    RasterizeOptions colored_background;
+    colored_background.background = {0.1F, 0.3F, 0.7F};
+    const auto colored = rasterizer.forward(model, camera, colored_background);
+    const auto black_rgb = rendered.color.to_vector();
+    const auto colored_rgb = colored.color.to_vector();
+    for (std::size_t channel = 0; channel < 3; ++channel)
+        for (std::size_t pixel = 0; pixel < pixels; ++pixel)
+            require(std::abs(colored_rgb[channel * pixels + pixel] -
+                        black_rgb[channel * pixels + pixel] -
+                        (1.F - alpha[pixel]) * colored_background.background[channel]) < 5e-6F,
+                    "Raster camera constants changed the background blend");
     const auto grad_color = tinytensor::Tensor::from_vector(
         std::vector<float>(3 * pixels, 1.F / static_cast<float>(pixels)),
         {3, camera.height, camera.width}, tinytensor::Device::CUDA);
@@ -1279,6 +1296,133 @@ void test_mask_loading() {
             soft_values[3] == 1.F,
         "GGGS discarded grayscale coverage from an aether_drender mesh mask");
     std::filesystem::remove_all(root);
+}
+
+void test_training_device_cache() {
+    using namespace aetherscan;
+    const auto root = std::filesystem::temp_directory_path() /
+        "aetherscan_training_device_cache_test";
+    std::filesystem::create_directories(root);
+    std::vector<mvs::MvsView> views(2);
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        auto& view = views[i];
+        view.path = root / (std::to_string(i) + ".png");
+        io::save_rgb_png(
+            io::RgbImage{16, 16, std::vector<std::uint8_t>(
+                16 * 16 * 3, static_cast<std::uint8_t>(60 + 90 * i))},
+            view.path);
+        view.width = view.src_width = view.height = view.src_height = 16;
+        view.fx = view.fy = view.src_fx = view.src_fy = 12.F;
+        view.cx = view.cy = view.src_cx = view.src_cy = 7.5F;
+        view.foreground_mask.assign(256, 255);
+        view.foreground_mask[0] = 0;
+        view.depth_map.depth.assign(256, 2.F + static_cast<float>(i));
+        view.depth_map.normal.assign(256, mvs::Vec3f(0.F, 0.F, 1.F));
+    }
+    splat::TrainingOptions options;
+    options.use_mask = options.use_mvs_depth = options.use_mvs_normals = true;
+    options.multi_view_ncc_weight = 0.6F;
+    options.training_prefetch_views = 0;
+    options.training_view_cache_bytes = 0;
+    // Exactly one RGBA8 + depth + normal frame; the next view must evict it.
+    options.training_device_cache_bytes = 256 * (4 + 4 + 12);
+    splat::training_data::TrainingDataLoader cache(views, options);
+    const auto reference = splat::make_training_view(views[0], options);
+    const auto first = cache.get(0);
+    const auto hit = cache.get(0);
+    const auto compare = [](const splat::TrainingView& a,
+                            const splat::TrainingView& b) {
+        require(a.rgb.to_vector() == b.rgb.to_vector() &&
+                a.gray.to_vector() == b.gray.to_vector() &&
+                a.mask.to_vector() == b.mask.to_vector() &&
+                a.depth.to_vector() == b.depth.to_vector() &&
+                a.normal.to_vector() == b.normal.to_vector() &&
+                a.has_mask == b.has_mask,
+                "Training cache changed RGB/mask/gray/depth/normal supervision");
+    };
+    compare(reference, first);
+    compare(reference, hit);
+    require(cache.stats().device_hits == 1 &&
+            cache.stats().uploaded_bytes == options.training_device_cache_bytes,
+            "Training cache hit uploaded the frame again");
+    const auto neighbour = cache.get(1);
+    compare(first, reference);  // Reference tensors must survive LRU eviction.
+    compare(neighbour, splat::make_training_view(views[1], options));
+    compare(cache.get(0), reference);
+    require(cache.stats().device_hits == 1 &&
+            cache.stats().device_resident_bytes <= options.training_device_cache_bytes,
+            "Training device LRU did not enforce its budget");
+    cache.set_resolution_scale(0.5F);
+    require(cache.stats().device_resident_bytes == 0,
+            "Resolution transition retained stale CUDA views");
+    const auto resized = cache.get(0);
+    require(resized.camera.width == 8 && resized.camera.height == 8 &&
+            resized.rgb.numel() == 3 * 8 * 8 &&
+            cache.stats().device_hits == 1,
+            "Resolution transition reused old-size CUDA supervision");
+    for (const std::size_t budget : {std::size_t{0}, std::size_t{1}}) {
+        options.training_device_cache_bytes = budget;
+        splat::training_data::TrainingDataLoader uncached(views, options);
+        compare(uncached.get(0), reference);
+        compare(uncached.get(0), reference);
+        require(uncached.stats().device_hits == 0 &&
+                uncached.stats().device_resident_bytes == 0,
+                "Disabled/undersized CUDA cache retained an oversized view");
+    }
+    std::filesystem::remove_all(root);
+}
+
+void test_brush_quantile_selection() {
+    using namespace aetherscan;
+    for (const std::size_t count : {1U, 2U, 11U, 257U, 100003U}) {
+        std::vector<float> xyz(count * 3);
+        for (std::size_t i = 0; i < xyz.size(); ++i)
+            xyz[i] = i % 37 == 0 ? 0.F
+                : static_cast<float>((i * 73 + 19) % (count * 3)) -
+                    static_cast<float>(count);
+        // Include ties and independently missing coordinates, as the original
+        // full-sort implementation filters non-finite values per axis.
+        if (count > 2) xyz[4] = std::numeric_limits<float>::quiet_NaN();
+        for (const float p : {0.F, 0.5F, 0.8F, 0.95F, 1.F}) {
+            mvs::Vec3f low, high;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                std::vector<float> sorted;
+                for (std::size_t i = 0; i < count; ++i)
+                    if (std::isfinite(xyz[3 * i + axis]))
+                        sorted.push_back(xyz[3 * i + axis]);
+                std::sort(sorted.begin(), sorted.end());
+                low[axis] = sorted[static_cast<std::size_t>(
+                    (1.F - p) * 0.5F * static_cast<float>(sorted.size()))];
+                high[axis] = sorted[std::min(sorted.size() - 1,
+                    static_cast<std::size_t>(
+                        (1.F + p) * 0.5F * static_cast<float>(sorted.size())))];
+            }
+            const auto actual = splat::densification::brush_scene_geometry(xyz, p);
+            const auto device = splat::densification::brush_scene_geometry_cuda(
+                tinytensor::Tensor::from_vector(
+                    xyz, {count, 3}, tinytensor::Device::CUDA), p);
+            require(actual.center == device.center && actual.scale == device.scale &&
+                    actual.maximum_extent == device.maximum_extent,
+                    "GPU ADC quantiles differ from finite CPU order statistics");
+            const mvs::Vec3f half = 0.5F * (high - low);
+            std::array<float, 3> extents{half.x(), half.y(), half.z()};
+            std::sort(extents.begin(), extents.end());
+            require(actual.center == 0.5F * (low + high) &&
+                    actual.scale == 2.F * extents[1] &&
+                    actual.maximum_extent == extents[2],
+                    "ADC quantile selection differs from full-sort reference");
+        }
+    }
+    for (const std::vector<float>& xyz : {
+             std::vector<float>{},
+             std::vector<float>{std::numeric_limits<float>::infinity(), 1.F, 2.F}}) {
+        const auto actual = splat::densification::brush_scene_geometry_cuda(
+            tinytensor::Tensor::from_vector(
+                xyz, {xyz.size() / 3, 3}, tinytensor::Device::CUDA));
+        require(actual.center.isZero() && actual.scale == 2.F &&
+                actual.maximum_extent == 1.F,
+                "GPU ADC quantiles lost the empty/non-finite fallback");
+    }
 }
 
 void test_source_resolution_and_knn_initialization() {
@@ -2475,8 +2619,10 @@ void test_densification_strategies_and_dense_bypass() {
     options.densification_strategy = splat::DensificationStrategy::adc_igs;
     options.evaluation_iterations = {2};
     options.evaluation_split_every = 2;
+    options.preview_interval = 2;
     std::size_t evaluations = 0;
     std::vector<std::size_t> trained_views;
+    std::vector<unsigned> preview_steps;
     const auto dense_model = splat::Trainer(options).train(
         scene,
         [&](const splat::TrainingProgress& progress) {
@@ -2486,6 +2632,12 @@ void test_densification_strategies_and_dense_bypass() {
         [&](const unsigned iteration, const splat::GaussianModel&) {
             require(iteration == 2, "GGGS evaluation callback used wrong iteration");
             ++evaluations;
+        }, {},
+        [&](const unsigned iteration, const std::size_t view,
+            const splat::Camera& camera, const tinytensor::Tensor& color) {
+            require(view == 0 && color.numel() == 3 * camera.width * camera.height,
+                    "Training preview changed camera or image shape");
+            preview_steps.push_back(iteration);
         });
     require(
         dense_model.size() == scene.dense_cloud.points.size(),
@@ -2494,6 +2646,9 @@ void test_densification_strategies_and_dense_bypass() {
         !dense_model.filter_3d.is_valid(),
         "appearance-only dense 3DGS unexpectedly enabled filter_3d");
     require(evaluations == 1, "GGGS evaluation callback was not invoked");
+    require(preview_steps == std::vector<unsigned>{1, 2, 3},
+            "Preview polling dropped the first, scheduled, or final frame");
+    options.preview_interval = 0;
     require(
         !trained_views.empty() &&
             std::all_of(
@@ -2563,6 +2718,8 @@ int main() {
         test_reduced_second_sh_adam();
         test_active_sh_prefix_adam();
         test_mask_loading();
+        test_training_device_cache();
+        test_brush_quantile_selection();
         test_source_resolution_and_knn_initialization();
         test_colmap_text_loading();
         test_reality_capture_dataset_loading();

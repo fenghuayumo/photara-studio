@@ -175,8 +175,8 @@ struct TrainingOptions {
     bool use_source_resolution{false};
     // brush-style dataset controls. Images are resized so their largest
     // dimension does not exceed this value (0 keeps the source resolution),
-    // and decoded float training views are retained in a bounded host LRU.
-    // Only the current reference/neighbour views are uploaded to CUDA.
+    // and packed training views are retained in bounded host/device LRUs.
+    // Only current reference/neighbour views are expanded to float on CUDA.
     unsigned max_image_dimension{1'920};
     // Coarse-to-fine image schedule. The active linear resolution starts at
     // 1/4, doubles every 3k iterations, and caps at max_image_dimension.
@@ -188,6 +188,10 @@ struct TrainingOptions {
     float progressive_initial_scale{0.25F};
     std::size_t training_view_cache_bytes{
         std::size_t{6} * 1024 * 1024 * 1024};
+    // Packed RGBA8 plus optional depth/normal CUDA cache. Zero disables it.
+    // Also capped at 1/8 of free VRAM at loader construction to leave room
+    // for the model, Adam states, and rasterization scratch allocations.
+    std::size_t training_device_cache_bytes{std::size_t{512} * 1024 * 1024};
     // Decode upcoming shuffled views concurrently while CUDA processes the
     // current iteration. Zero disables prefetching.
     std::size_t training_prefetch_views{4};

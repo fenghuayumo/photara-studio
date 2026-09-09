@@ -11,11 +11,16 @@
 
 namespace aetherscan::splat {
 
+struct RasterCameraConstants {
+    tinytensor::Tensor storage;
+    const float* view_matrix() const { return storage.ptr<float>(); }
+    const float* position() const { return storage.ptr<float>() + 16; }
+    const float* background() const { return storage.ptr<float>() + 19; }
+};
+
 struct RasterContextImpl {
     detail::ActivatedParameters activated;
-    tinytensor::Tensor background;
-    tinytensor::Tensor view_matrix;
-    tinytensor::Tensor camera_position;
+    RasterCameraConstants constants;
     tinytensor::Tensor geometry_buffer;
     tinytensor::Tensor binning_buffer;
     tinytensor::Tensor image_buffer;
@@ -29,8 +34,7 @@ struct RasterContextImpl {
 struct DepthSampleContextImpl {
     detail::ActivatedParameters activated;
     tinytensor::Tensor world_points;
-    tinytensor::Tensor view_matrix;
-    tinytensor::Tensor camera_position;
+    RasterCameraConstants constants;
     tinytensor::Tensor geometry_buffer;
     tinytensor::Tensor binning_buffer;
     tinytensor::Tensor point_buffer;
@@ -43,6 +47,31 @@ struct DepthSampleContextImpl {
 };
 
 namespace {
+
+struct HostCameraConstants { float values[22]; };
+
+__global__ void write_camera_constants(
+    const HostCameraConstants constants, float* output) {
+    if (threadIdx.x < 22) output[threadIdx.x] = constants.values[threadIdx.x];
+}
+
+RasterCameraConstants prepare_camera_constants(
+    const Camera& camera, const std::array<float, 3>& background = {}) {
+    HostCameraConstants host;
+    std::copy(camera.world_to_camera.begin(), camera.world_to_camera.end(), host.values);
+    std::copy(camera.position.begin(), camera.position.end(), host.values + 16);
+    std::copy(background.begin(), background.end(), host.values + 19);
+    RasterCameraConstants result{
+        tinytensor::Tensor::empty({22}, tinytensor::Device::CUDA)};
+    // CUDA captures launch arguments before returning. No temporary pinned
+    // tensors or three blocking from_vector uploads on the training stream.
+    write_camera_constants<<<1, 32>>>(host, result.storage.ptr<float>());
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess)
+        throw std::runtime_error(
+            std::string("Prepare raster camera failed: ") + cudaGetErrorString(error));
+    return result;
+}
 
 void require_cuda_float_contiguous(
     const tinytensor::Tensor& tensor, const char* name) {
@@ -120,17 +149,8 @@ RenderResult Rasterizer::forward(
     context->options.active_sh_degree = std::min(
         requested_options.active_sh_degree, model.sh_degree);
     context->activated = detail::activate_parameters(model);
-    context->background = tinytensor::Tensor::from_vector(
-        std::vector<float>(
-            context->options.background.begin(),
-            context->options.background.end()),
-        {3}, tinytensor::Device::CUDA);
-    context->view_matrix = tinytensor::Tensor::from_vector(
-        std::vector<float>(camera.world_to_camera.begin(), camera.world_to_camera.end()),
-        {4, 4}, tinytensor::Device::CUDA);
-    context->camera_position = tinytensor::Tensor::from_vector(
-        std::vector<float>(camera.position.begin(), camera.position.end()),
-        {3}, tinytensor::Device::CUDA);
+    context->constants = prepare_camera_constants(
+        camera, context->options.background);
 
     const std::size_t pixels = static_cast<std::size_t>(camera.width) * camera.height;
     result.color = tinytensor::Tensor::zeros(
@@ -160,7 +180,7 @@ RenderResult Rasterizer::forward(
             static_cast<int>(model.size()),
             static_cast<int>(context->options.active_sh_degree),
             static_cast<int>(total_bases), 0, 0,
-            context->background.ptr<float>(),
+            context->constants.background(),
             static_cast<int>(camera.width), static_cast<int>(camera.height),
             model.means.ptr<float>(),
             context->colors_precomp.is_valid()
@@ -172,8 +192,8 @@ RenderResult Rasterizer::forward(
             context->colors_precomp.is_valid() ? nullptr : model.sh.ptr<float>(),
             nullptr, nullptr, nullptr,
             context->options.scale_modifier,
-            context->view_matrix.ptr<float>(),
-            context->camera_position.ptr<float>(), camera.fx, camera.fy,
+            context->constants.view_matrix(),
+            context->constants.position(), camera.fx, camera.fy,
             camera.cx, camera.cy, context->options.kernel_size, false,
             result.color.ptr<float>(), result.median_depth.ptr<float>(),
             result.alpha.ptr<float>(), result.normal.ptr<float>(),
@@ -219,7 +239,7 @@ ModelGradients Rasterizer::backward(
             resize_zeroed_buffer(scratch), static_cast<int>(count),
             static_cast<int>(context.options.active_sh_degree),
             static_cast<int>(model.sh.shape()[1]), 0, 0,
-            context.rendered_instances, context.background.ptr<float>(),
+            context.rendered_instances, context.constants.background(),
             static_cast<int>(context.camera.width),
             static_cast<int>(context.camera.height), model.means.ptr<float>(),
             context.colors_precomp.is_valid()
@@ -230,8 +250,8 @@ ModelGradients Rasterizer::backward(
             context.activated.quaternions.ptr<float>(), nullptr,
             context.colors_precomp.is_valid() ? nullptr : model.sh.ptr<float>(),
             nullptr, nullptr, nullptr,
-            context.options.scale_modifier, context.view_matrix.ptr<float>(),
-            context.camera_position.ptr<float>(), context.camera.fx,
+            context.options.scale_modifier, context.constants.view_matrix(),
+            context.constants.position(), context.camera.fx,
             context.camera.fy, context.camera.cx, context.camera.cy,
             context.options.kernel_size, rendered.radii.ptr<int>(),
             rendered.alpha.ptr<float>(), rendered.normal.ptr<float>(),
@@ -275,12 +295,7 @@ DepthSampleResult Rasterizer::sample_depth(
     context->options = requested_options;
     context->world_points = world_points;
     context->activated = detail::activate_parameters(model);
-    context->view_matrix = tinytensor::Tensor::from_vector(
-        std::vector<float>(camera.world_to_camera.begin(), camera.world_to_camera.end()),
-        {4, 4}, tinytensor::Device::CUDA);
-    context->camera_position = tinytensor::Tensor::from_vector(
-        std::vector<float>(camera.position.begin(), camera.position.end()),
-        {3}, tinytensor::Device::CUDA);
+    context->constants = prepare_camera_constants(camera);
     const std::size_t point_count = world_points.shape()[0];
     DepthSampleResult result;
     result.camera_points = tinytensor::Tensor::zeros(
@@ -300,7 +315,7 @@ DepthSampleResult Rasterizer::sample_depth(
         context->activated.opacities.ptr<float>(),
         context->activated.scales.ptr<float>(), requested_options.scale_modifier,
         context->activated.quaternions.ptr<float>(), nullptr,
-        context->view_matrix.ptr<float>(), context->camera_position.ptr<float>(),
+        context->constants.view_matrix(), context->constants.position(),
         camera.fx, camera.fy, camera.cx, camera.cy,
         requested_options.kernel_size, false,
         result.camera_points.ptr<float>(), result.inside.ptr<bool>(),
@@ -346,7 +361,7 @@ DepthSampleGradients Rasterizer::sample_depth_backward(
         context.activated.opacities.ptr<float>(),
         context.activated.scales.ptr<float>(), context.options.scale_modifier,
         context.activated.quaternions.ptr<float>(), nullptr,
-        context.view_matrix.ptr<float>(), context.camera_position.ptr<float>(),
+        context.constants.view_matrix(), context.constants.position(),
         context.camera.fx, context.camera.fy, context.camera.cx,
         context.camera.cy, context.options.kernel_size,
         const_cast<char*>(reinterpret_cast<const char*>(context.geometry_buffer.data_ptr())),
@@ -383,13 +398,7 @@ OccupancyResult Rasterizer::evaluate_occupancy(
 
     const detail::ActivatedParameters activated =
         detail::activate_parameters(model);
-    auto view_matrix = tinytensor::Tensor::from_vector(
-        std::vector<float>(
-            camera.world_to_camera.begin(), camera.world_to_camera.end()),
-        {4, 4}, tinytensor::Device::CUDA);
-    auto camera_position = tinytensor::Tensor::from_vector(
-        std::vector<float>(camera.position.begin(), camera.position.end()),
-        {3}, tinytensor::Device::CUDA);
+    const auto constants = prepare_camera_constants(camera);
     tinytensor::Tensor geometry_buffer;
     tinytensor::Tensor binning_buffer;
     tinytensor::Tensor point_buffer;
@@ -413,7 +422,7 @@ OccupancyResult Rasterizer::evaluate_occupancy(
         activated.opacities.ptr<float>(), activated.scales.ptr<float>(),
         requested_options.scale_modifier,
         activated.quaternions.ptr<float>(), nullptr,
-        view_matrix.ptr<float>(), camera_position.ptr<float>(), camera.fx,
+        constants.view_matrix(), constants.position(), camera.fx,
         camera.fy, camera.cx, camera.cy, requested_options.kernel_size,
         false, transmittance.ptr<float>(), result.inside.ptr<bool>(),
         requested_options.debug);

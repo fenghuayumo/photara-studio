@@ -10,8 +10,16 @@
 
 namespace aetherscan::splat::training_data {
 
-// Owns the CPU-side packed RGBA8 view cache and performs the narrow
-// host-to-device upload needed by an iteration. Keeping this separate from
+struct CacheStats {
+    std::size_t requests{};
+    std::size_t device_hits{};
+    std::size_t uploaded_bytes{};
+    std::size_t device_resident_bytes{};
+    std::size_t device_budget_bytes{};
+};
+
+// Owns bounded host and CUDA packed RGBA8 caches. Resident views are expanded
+// on CUDA without uploading the same image again. Keeping this separate from
 // Trainer avoids coupling image I/O and prefetch scheduling to optimization.
 class TrainingDataLoader {
 public:
@@ -30,6 +38,7 @@ public:
     [[nodiscard]] bool has_mask(std::size_t index);
     void prefetch(std::size_t index);
     void set_resolution_scale(float scale);
+    [[nodiscard]] CacheStats stats() const;
 
 private:
     struct Impl;

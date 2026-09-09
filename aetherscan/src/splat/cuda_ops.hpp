@@ -79,6 +79,11 @@ struct OpacityProgressStats {
 
 ActivatedParameters activate_parameters(const GaussianModel& model);
 
+// Exact per-axis finite quantiles, returned as min.xyz/max.xyz. Only six
+// floats cross to the CPU; the full position array stays on CUDA.
+std::array<float, 6> percentile_bounds(
+    const tinytensor::Tensor& means, float percentile);
+
 // Convert GaussianWrapping's [direction.xyz, orientation_logit] features to
 // normalize(direction) * tanh(logit), and chain gradients back to features.
 tinytensor::Tensor normal_features_to_normals(
@@ -96,6 +101,12 @@ DecodedTrainingPixels upload_packed_training_pixels(
     std::uint32_t height,
     bool decode_mask,
     bool decode_gray);
+
+// Expand a resident RGBA8 image without another host upload.
+DecodedTrainingPixels decode_packed_training_pixels(
+    const tinytensor::Tensor& packed,
+    std::uint32_t width, std::uint32_t height,
+    bool decode_mask, bool decode_gray);
 
 // Fold the Mip-Splatting 3D-filter floor into the canonical scale/opacity
 // parameters and clear model.filter_3d. This is available for explicit model

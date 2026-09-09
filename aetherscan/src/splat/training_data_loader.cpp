@@ -2,7 +2,10 @@
 
 #include "io/image.hpp"
 #include "cuda_ops.hpp"
+#include "core/logging.hpp"
 #include "splat/trainer.hpp"
+
+#include <cuda_runtime_api.h>
 
 #include <Eigen/Geometry>
 
@@ -491,18 +494,74 @@ struct TrainingDataLoader::Impl {
         const TrainingOptions& options, const float resolution_scale = 1.F)
         : source_(source), options_(options),
           capacity_bytes_(options.training_view_cache_bytes),
-          resolution_scale_(resolution_scale) {}
+          resolution_scale_(resolution_scale) {
+        if (options.training_device_cache_bytes != 0) {
+            std::size_t free_bytes{}, total_bytes{};
+            const auto error = cudaMemGetInfo(&free_bytes, &total_bytes);
+            if (error != cudaSuccess)
+                throw std::runtime_error(
+                    std::string("Training cache VRAM query failed: ") +
+                    cudaGetErrorString(error));
+            device_capacity_bytes_ = std::min(
+                options.training_device_cache_bytes, free_bytes / 8);
+        }
+        core::Logger::instance().info(
+            "splat_data_cache host_budget_bytes=", capacity_bytes_,
+            " device_budget_bytes=", device_capacity_bytes_);
+    }
 
     TrainingView get(const std::size_t index) {
-        return upload_training_view(
-            host_view(index), options_.multi_view_ncc_weight > 0.F);
+        ++requests_;
+        const auto found = device_lookup_.find(index);
+        if (found != device_lookup_.end()) {
+            ++device_hits_;
+            device_entries_.splice(
+                device_entries_.begin(), device_entries_, found->second);
+            return decode_device_view(device_entries_.front());
+        }
+        const HostTrainingView& host = host_view(index);
+        const std::size_t bytes = sizeof(int) * host.rgba.size() +
+            sizeof(float) * (host.depth.size() + host.normal.size());
+        uploaded_bytes_ += bytes;
+        if (device_capacity_bytes_ == 0 || bytes > device_capacity_bytes_)
+            return upload_training_view(
+                host, options_.multi_view_ncc_weight > 0.F);
+        while (!device_entries_.empty() &&
+               device_cached_bytes_ > device_capacity_bytes_ - bytes) {
+            const auto& evicted = device_entries_.back();
+            device_cached_bytes_ -= evicted.bytes;
+            device_lookup_.erase(evicted.index);
+            device_entries_.pop_back();
+        }
+        DeviceEntry entry;
+        entry.index = index;
+        entry.bytes = bytes;
+        entry.camera = host.camera;
+        entry.has_mask = host.has_mask;
+        entry.rgba = tinytensor::Tensor::from_vector(
+            host.rgba, {host.camera.height, host.camera.width},
+            tinytensor::Device::CUDA);
+        if (!host.depth.empty())
+            entry.depth = tinytensor::Tensor::from_vector(
+                host.depth, {host.camera.height, host.camera.width},
+                tinytensor::Device::CUDA);
+        if (!host.normal.empty())
+            entry.normal = tinytensor::Tensor::from_vector(
+                host.normal, {3, host.camera.height, host.camera.width},
+                tinytensor::Device::CUDA);
+        device_entries_.push_front(std::move(entry));
+        device_lookup_[index] = device_entries_.begin();
+        device_cached_bytes_ += bytes;
+        return decode_device_view(device_entries_.front());
     }
 
     void prefetch(const std::size_t index) {
         if (index >= source_.size())
             throw std::out_of_range(
                 "GGGS training prefetch index is out of range");
-        if (lookup_.contains(index) || prefetches_.contains(index))
+        if (options_.training_prefetch_views == 0 ||
+            device_lookup_.contains(index) || lookup_.contains(index) ||
+            prefetches_.contains(index))
             return;
         const float scale = resolution_scale_;
         prefetches_.emplace(
@@ -516,6 +575,8 @@ struct TrainingDataLoader::Impl {
     }
 
     bool has_mask(const std::size_t index) {
+        const auto found = device_lookup_.find(index);
+        if (found != device_lookup_.end()) return found->second->has_mask;
         return host_view(index).has_mask;
     }
 
@@ -525,13 +586,49 @@ struct TrainingDataLoader::Impl {
         entries_.clear();
         lookup_.clear();
         cached_bytes_ = 0;
+        device_lookup_.clear();
+        device_entries_.clear();
+        device_cached_bytes_ = 0;
         // std::future from std::launch::async joins on destruction. Clear all
         // old-scale work before publishing the new scale.
         prefetches_.clear();
         resolution_scale_ = clamped;
     }
 
+    CacheStats stats() const {
+        return {requests_, device_hits_, uploaded_bytes_,
+                device_cached_bytes_, device_capacity_bytes_};
+    }
+
 private:
+    struct DeviceEntry {
+        std::size_t index{};
+        std::size_t bytes{};
+        Camera camera;
+        tinytensor::Tensor rgba, depth, normal;
+        bool has_mask{};
+    };
+    using DeviceEntries = std::list<DeviceEntry>;
+
+    TrainingView decode_device_view(const DeviceEntry& entry) const {
+        TrainingView result;
+        result.camera = entry.camera;
+        result.has_mask = entry.has_mask;
+        auto decoded = detail::decode_packed_training_pixels(
+            entry.rgba, entry.camera.width, entry.camera.height,
+            entry.has_mask, options_.multi_view_ncc_weight > 0.F);
+        result.rgb = std::move(decoded.rgb);
+        result.gray = std::move(decoded.gray);
+        result.mask = std::move(decoded.mask);
+        // Own the returned supervision tensors independently of the LRU:
+        // callers may retain a reference view while loading a neighbour.
+        result.depth = entry.depth.is_valid() ? entry.depth
+            : tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
+        result.normal = entry.normal.is_valid() ? entry.normal
+            : tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
+        return result;
+    }
+
     struct Entry {
         std::size_t index{};
         std::size_t bytes{};
@@ -579,6 +676,11 @@ private:
     const TrainingOptions& options_;
     std::size_t capacity_bytes_{};
     std::size_t cached_bytes_{};
+    std::size_t device_capacity_bytes_{};
+    std::size_t device_cached_bytes_{};
+    std::size_t requests_{}, device_hits_{}, uploaded_bytes_{};
+    DeviceEntries device_entries_;
+    std::unordered_map<std::size_t, DeviceEntries::iterator> device_lookup_;
     float resolution_scale_{1.F};
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;
@@ -611,6 +713,10 @@ void TrainingDataLoader::prefetch(const std::size_t index) {
 
 void TrainingDataLoader::set_resolution_scale(const float scale) {
     impl_->set_resolution_scale(scale);
+}
+
+CacheStats TrainingDataLoader::stats() const {
+    return impl_->stats();
 }
 
 }  // namespace training_data

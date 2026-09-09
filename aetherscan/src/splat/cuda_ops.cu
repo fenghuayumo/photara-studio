@@ -2,11 +2,14 @@
 #include "fused_ssim.hpp"
 
 #include <cuda_runtime.h>
+#include <math_constants.h>
+#include <cub/device/device_radix_sort.cuh>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cfloat>
+#include <climits>
 #include <cstring>
 #include <stdexcept>
 
@@ -17,6 +20,50 @@ constexpr unsigned k_threads = 256;
 constexpr unsigned k_reduced_adam_threads = 64;
 constexpr unsigned k_geometry_summary_terms = 6;
 constexpr unsigned k_opacity_progress_terms = 3;
+
+__global__ void pack_finite_coordinate_axes(
+    const float* means, float* axes, const std::size_t count) {
+    const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const float value = means[3 * i + axis];
+        axes[axis * count + i] = isfinite(value) ? value : CUDART_INF_F;
+    }
+}
+
+__global__ void read_coordinate_quantiles(
+    const float* sorted, const std::size_t count, const float percentile,
+    float* bounds) {
+    // Non-finite input sorts to the end. Locate each finite prefix without
+    // contended atomic counters or a host count readback before sorting.
+    std::size_t sizes[3];
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        std::size_t lo = 0, hi = count;
+        while (lo < hi) {
+            const std::size_t mid = lo + (hi - lo) / 2;
+            if (isfinite(sorted[axis * count + mid])) lo = mid + 1;
+            else hi = mid;
+        }
+        sizes[axis] = lo;
+    }
+    if (sizes[0] == 0 || sizes[1] == 0 || sizes[2] == 0) {
+        for (int axis = 0; axis < 3; ++axis) {
+            bounds[axis] = -1.F;
+            bounds[axis + 3] = 1.F;
+        }
+        return;
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const std::size_t size = sizes[axis];
+        const std::size_t low = static_cast<std::size_t>(
+            (1.F - percentile) * 0.5F * static_cast<float>(size));
+        const std::size_t high_candidate = static_cast<std::size_t>(
+            (1.F + percentile) * 0.5F * static_cast<float>(size));
+        const std::size_t high = high_candidate < size ? high_candidate : size - 1;
+        bounds[axis] = sorted[axis * count + low];
+        bounds[axis + 3] = sorted[axis * count + high];
+    }
+}
 // A 32x8 image-space CTA shares the integer reference tile and all fixed
 // half-pixel samples needed by the 7x7 NCC patches of its 256 output pixels.
 constexpr unsigned k_multi_view_block_x = 32;
@@ -314,11 +361,15 @@ __global__ void compute_3d_filter_distance_kernel(
 }
 
 __global__ void finalize_3d_filter_kernel(
-    float* distances, const std::size_t count, const float maximum_distance,
+    float* distances, const std::size_t count,
+    const unsigned* maximum_distance_bits,
     const float inverse_maximum_focal,
     const float minimum_scale_factor_sqrt) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
+    float maximum_distance = __uint_as_float(*maximum_distance_bits);
+    if (!(maximum_distance > 0.F) || !isfinite(maximum_distance))
+        maximum_distance = 1.F;
     const float distance = distances[index] < FLT_MAX
         ? distances[index]
         : maximum_distance;
@@ -1525,6 +1576,19 @@ DecodedTrainingPixels upload_packed_training_pixels(
             "GGGS packed training image size does not match camera");
     const auto packed = tinytensor::Tensor::from_vector(
         rgba, {height, width}, tinytensor::Device::CUDA);
+    return decode_packed_training_pixels(
+        packed, width, height, decode_mask, decode_gray);
+}
+
+DecodedTrainingPixels decode_packed_training_pixels(
+    const tinytensor::Tensor& packed, const std::uint32_t width,
+    const std::uint32_t height, const bool decode_mask,
+    const bool decode_gray) {
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    if (!packed.is_valid() || packed.device() != tinytensor::Device::CUDA ||
+        packed.dtype() != tinytensor::DataType::Int32 ||
+        !packed.is_contiguous() || packed.numel() != pixels)
+        throw std::invalid_argument("Invalid CUDA packed training image");
     DecodedTrainingPixels result{
         tinytensor::Tensor::empty(
             {std::size_t{3}, height, width},
@@ -1548,6 +1612,43 @@ DecodedTrainingPixels upload_packed_training_pixels(
         decode_mask ? result.mask.ptr<float>() : nullptr,
         pixels);
     check_cuda(cudaGetLastError(), "unpack GGGS training pixels");
+    return result;
+}
+
+std::array<float, 6> percentile_bounds(
+    const tinytensor::Tensor& means, const float percentile) {
+    if (!means.is_valid() || means.device() != tinytensor::Device::CUDA ||
+        means.dtype() != tinytensor::DataType::Float32 ||
+        !means.is_contiguous() || means.shape().rank() != 2 ||
+        means.shape()[1] != 3 ||
+        means.shape()[0] > static_cast<std::size_t>(INT_MAX))
+        throw std::invalid_argument("Percentile bounds require CUDA float32 [N,3]");
+    const std::size_t count = means.shape()[0];
+    if (count == 0) return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
+    auto axes = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
+    auto sorted = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
+    auto bounds = tinytensor::Tensor::empty({6}, tinytensor::Device::CUDA);
+    std::size_t scratch_bytes{};
+    check_cuda(cub::DeviceRadixSort::SortKeys(
+        nullptr, scratch_bytes, axes.ptr<float>(), sorted.ptr<float>(),
+        static_cast<int>(count)), "size coordinate sort scratch");
+    auto scratch = tinytensor::Tensor::empty(
+        {scratch_bytes}, tinytensor::Device::CUDA, tinytensor::DataType::UInt8);
+    pack_finite_coordinate_axes<<<(count + k_threads - 1) / k_threads, k_threads>>>(
+        means.ptr<float>(), axes.ptr<float>(), count);
+    check_cuda(cudaGetLastError(), "pack coordinate axes");
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        check_cuda(cub::DeviceRadixSort::SortKeys(
+            scratch.data_ptr(), scratch_bytes, axes.ptr<float>() + axis * count,
+            sorted.ptr<float>() + axis * count, static_cast<int>(count)),
+            "sort coordinate quantiles");
+    read_coordinate_quantiles<<<1, 1>>>(
+        sorted.ptr<float>(), count, std::clamp(percentile, 0.F, 1.F),
+        bounds.ptr<float>());
+    check_cuda(cudaGetLastError(), "read coordinate quantiles");
+    std::array<float, 6> result;
+    check_cuda(cudaMemcpy(result.data(), bounds.data_ptr(), sizeof(result),
+        cudaMemcpyDeviceToHost), "download coordinate quantiles");
     return result;
 }
 
@@ -1755,18 +1856,10 @@ tinytensor::Tensor compute_3d_filter(
             reinterpret_cast<unsigned*>(maximum_bits.data_ptr()),
             all_camera_euclidean);
     check_cuda(cudaGetLastError(), "compute GGGS 3D filter distances");
-    unsigned maximum_distance_bits{};
-    check_cuda(cudaMemcpy(
-        &maximum_distance_bits, maximum_bits.data_ptr(), sizeof(unsigned),
-        cudaMemcpyDeviceToHost), "download GGGS 3D filter maximum");
-    float maximum_distance{};
-    std::memcpy(
-        &maximum_distance, &maximum_distance_bits, sizeof(maximum_distance));
-    if (!(maximum_distance > 0.F) || !std::isfinite(maximum_distance))
-        maximum_distance = 1.F;
     finalize_3d_filter_kernel<<<
         (count + k_threads - 1) / k_threads, k_threads>>>(
-            result.ptr<float>(), count, maximum_distance,
+            result.ptr<float>(), count,
+            reinterpret_cast<const unsigned*>(maximum_bits.data_ptr()),
             1.F / maximum_focal,
             std::sqrt(std::max(minimum_scale_factor, 0.F)));
     check_cuda(cudaGetLastError(), "finalize GGGS 3D filter");
