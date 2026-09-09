@@ -46,7 +46,7 @@ void render(
     const float focal_y,
     const float center_x,
     const float center_y,
-    const int camera_model,
+    const RasterIntrinsics pixel_K,
     float3* dL_dmean2D,
     float4* dL_dconic2D,
     float* dL_dcolors,

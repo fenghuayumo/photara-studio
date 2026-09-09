@@ -96,7 +96,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         const uint32_t* __restrict__ point_list,
         int W, int H,
         float focal_x, float focal_y,
-        float center_x, float center_y,
+        float center_x, float center_y, const RasterIntrinsics pixel_K,
         const float2* __restrict__ points2D,
         const float2* __restrict__ gaussians2D,
         const float4* __restrict__ conic_opacity,
@@ -167,6 +167,17 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             float2 dL_dpixnf = {(dL_doutput.x - aux * pixnf.x) * depth,
                                 (dL_doutput.y - aux * pixnf.y) * depth};
             dL_dpoint_xy[p]  = {dL_dpixnf.x / focal_x, dL_dpixnf.y / focal_y};
+            if(raster_is_fisheye(pixel_K.model)) {
+                const float3 ray=pixel_unit_ray(point_xy[p],pixel_K);
+                dL_dDepth[p]=ray.x*dL_doutput.x+ray.y*dL_doutput.y+ray.z*dL_doutput.z;
+                const auto projected=project_fisheye_camera(ray,pixel_K);
+                const glm::vec3 ju=projected.J[0], jv=projected.J[1];
+                const float aa=glm::dot(ju,ju),bb=glm::dot(ju,jv),cc=glm::dot(jv,jv);
+                const float det=aa*cc-bb*bb;
+                const glm::vec3 grad(dL_doutput.x,dL_doutput.y,dL_doutput.z);
+                dL_dpoint_xy[p]={mDepth[p]*glm::dot(grad,(cc*ju-bb*jv)/det),
+                                mDepth[p]*glm::dot(grad,(aa*jv-bb*ju)/det)};
+            }
             point_num_round++;
         }
     }
@@ -313,6 +324,9 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
                 dL_dray_planes_local.x += dL_dt_peak * d.x;
                 dL_dray_planes_local.y += dL_dt_peak * d.y;
 
+                if(raster_is_fisheye(pixel_K.model) && con_o.w*G[p]>=0.99f)
+                    dL_dopa=0.f;
+
                 // Helpful reusable temporary variables
                 const float dL_dG    = con_o.w * dL_dopa;
                 const float gdx      = G[p] * d.x;
@@ -396,7 +410,7 @@ void BACKWARD::sampleDepth(
     const uint32_t* point_list,
     int W, int H,
     float focal_x, float focal_y,
-    float center_x, float center_y,
+    float center_x, float center_y, const RasterIntrinsics pixel_K,
     const float2* points2D,
     const float2* gaussians2D,
     const float4* conic_opacity,
@@ -423,7 +437,7 @@ void BACKWARD::sampleDepth(
         point_list,
         W, H,
         focal_x, focal_y,
-        center_x, center_y,
+        center_x, center_y, pixel_K,
         points2D,
         gaussians2D,
         conic_opacity,

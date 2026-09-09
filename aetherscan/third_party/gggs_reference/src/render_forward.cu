@@ -1,3 +1,4 @@
+#include "fisheye_geometry.h"
 /*
  * Copyright (C) 2023, Inria
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
@@ -122,6 +123,7 @@ __device__ __forceinline__ bool computeCov2D(const float3& mean, const RasterInt
     glm::mat3 T = W * J;
 
     glm::mat3 cov;
+    glm::mat3 native_cov;
     glm::mat3 cov_cam_inv;
 
     bool well_conditioned;
@@ -170,6 +172,7 @@ __device__ __forceinline__ bool computeCov2D(const float3& mean, const RasterInt
         glm::mat3 M = S * R * T;
         // Compute 3D world covariance matrix Sigma
         cov             = glm::transpose(M) * M;
+        native_cov = glm::transpose(S * R) * (S * R);
         glm::mat3 M_inv = S_inv * R * W;
         cov_cam_inv     = glm::transpose(M_inv) * M_inv;
     } else {
@@ -179,6 +182,7 @@ __device__ __forceinline__ bool computeCov2D(const float3& mean, const RasterInt
             cov3D[2], cov3D[4], cov3D[5]);
 
         cov = glm::transpose(T) * glm::transpose(Vrk) * T;
+        native_cov = Vrk;
 
         glm::mat3 Vrk_eigen_vector;
         glm::vec3 Vrk_eigen_value;
@@ -199,6 +203,22 @@ __device__ __forceinline__ bool computeCov2D(const float3& mean, const RasterInt
             Vrk_inv         = glm::outerProduct(eigenvector_min, eigenvector_min);
         }
         cov_cam_inv = glm::transpose(W) * Vrk_inv * W;
+    }
+
+    if (raster_is_fisheye(K.model)) {
+        const float position[3]={t.x,t.y,t.z};
+        const float covariance[6]={native_cov[0][0],native_cov[0][1],native_cov[0][2],
+                                  native_cov[1][1],native_cov[1][2],native_cov[2][2]};
+        const auto native = fisheye_geometry::evaluate(position,covariance,W,K,kernel_size);
+        for(int i=0;i<3;++i) {
+            cov2D[i]=native.cov[i];
+            if(!isfinite(native.cov[i]) || !isfinite(native.normal[i])) return false;
+        }
+        for(int i=0;i<4;++i) if(!isfinite(native.plane[i])) return false;
+        *normals={native.normal[0],native.normal[1],native.normal[2]};
+        *ray_plane={native.plane[0],native.plane[1],native.plane[2],native.plane[3]};
+        coef=native.coefficient;
+        return isfinite(coef) && native.cov[0]*native.cov[2]>native.cov[1]*native.cov[1];
     }
 
     cov2D[0]          = float(cov[0][0] + kernel_size);
@@ -410,7 +430,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         const float focal_y,
         const float center_x,
         const float center_y,
-        const int camera_model,
+        const RasterIntrinsics pixel_K,
         uint32_t* __restrict__ n_contrib,
         uint32_t* __restrict__ max_contributors,
         const float* __restrict__ bg_color,
@@ -429,7 +449,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     uint32_t pix_id            = W * pix.y + pix.x;
     float2 pixf                = {static_cast<float>(pix.x), static_cast<float>(pix.y)};
     const float2 pixnf         = {(pixf.x - center_x) / focal_x, (pixf.y - center_y) / focal_y};
-    const float rln            = rnorm3df(pixnf.x, pixnf.y, 1.f);
+    const float rln            = pixel_ray_z(pixf, pixel_K);
 
     // Check if this thread is associated with a valid pixel or outside.
     bool inside = pix.x < W && pix.y < H;
@@ -493,7 +513,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             // Resample using conic matrix (cf. "Surface
             // Splatting" by Zwicker et al., 2001)
             float2 xy    = collected_xy[j];
-            float2 d     = {wrap_delta_x(xy.x - pixf.x, W, camera_model), xy.y - pixf.y};
+            float2 d     = {wrap_delta_x(xy.x - pixf.x, W, pixel_K.model), xy.y - pixf.y};
             float4 con_o = collected_conic_opacity[j];
             float power  = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
             if (power > 0.0f) {
@@ -613,7 +633,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
                     contributor++;
                     done         = contributor >= last_contributor;
                     float2 xy    = collected_xy[j];
-                    float2 d     = {wrap_delta_x(xy.x - pixf.x, W, camera_model), xy.y - pixf.y};
+                    float2 d     = {wrap_delta_x(xy.x - pixf.x, W, pixel_K.model), xy.y - pixf.y};
                     float4 con_o = collected_conic_opacity[j];
                     float power  = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
                     if (power > 0.0f) {
@@ -701,7 +721,7 @@ void FORWARD::render(
     const float focal_y,
     const float center_x,
     const float center_y,
-    const int camera_model,
+    const RasterIntrinsics pixel_K,
     uint32_t* n_contrib,
     uint32_t* max_contributor,
     const float* bg_color,
@@ -715,7 +735,7 @@ void FORWARD::render(
 #define RENDER_CUDA_CALL(template_depth)                                                \
     renderCUDA<NUM_CHANNELS, template_depth, SPLIT, SPLIT_ITERATIONS><<<grid, block>>>( \
         ranges, point_list, W, H, means2D, conic_opacity, colors,                       \
-        ray_planes, normals, focal_x, focal_y, center_x, center_y, camera_model,        \
+        ray_planes, normals, focal_x, focal_y, center_x, center_y, pixel_K,        \
         n_contrib, max_contributor, bg_color, out_color, out_alpha,                     \
         out_normal, out_mdepth, normal_length, visibility)
 

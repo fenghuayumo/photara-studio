@@ -66,7 +66,7 @@ void render(
     const float focal_y,
     const float center_x,
     const float center_y,
-    const int camera_model,
+    const RasterIntrinsics pixel_K,
     uint32_t* n_contrib,
     uint32_t* max_contributor,
     const float* bg_color,

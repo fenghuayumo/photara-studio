@@ -546,7 +546,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
         const uint32_t* __restrict__ point_list,
         int W, int H,
         float focal_x, float focal_y,
-        float center_x, float center_y,
+        float center_x, float center_y, const RasterIntrinsics pixel_K,
         const float2* __restrict__ points2D,
         const float2* __restrict__ gaussians2D,
         const float4* __restrict__ conic_opacity,
@@ -795,11 +795,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
         float w_max                 = __saturatef((T_p[p][0] - 0.5f) / (T_p[p][0] - T_p[p][SPLIT]));
         float w_min                 = 1.f - w_max;
         float mDepth                = inside_range[p] ? w_max * depth_max[p] + w_min * depth_min[p] : 0.f;
-        float2 pixnf                = {(point_xy[p].x - center_x) / focal_x,
-                                       (point_xy[p].y - center_y) / focal_y};
-        const float rln             = rnorm3df(pixnf.x, pixnf.y, 1.f);
-        float depth                 = mDepth * rln;
-        output[point_idx[p]]        = {pixnf.x * depth, pixnf.y * depth, depth};
+        const float3 ray = pixel_unit_ray(point_xy[p],pixel_K);
+        output[point_idx[p]] = {ray.x*mDepth,ray.y*mDepth,ray.z*mDepth};
         median_depth[point_idx[p]]  = mDepth;
         n_contrib[point_idx[p]]     = last_contributor[p];
         inside_output[point_idx[p]] = inside_range[p];
@@ -963,7 +960,7 @@ void FORWARD::sampleDepth(
     const uint32_t* point_list,
     int W, int H,
     float focal_x, float focal_y,
-    float center_x, float center_y,
+    float center_x, float center_y, const RasterIntrinsics pixel_K,
     const float2* points2D,
     const float2* gaussians2D,
     const float4* conic_opacity,
@@ -985,7 +982,7 @@ void FORWARD::sampleDepth(
         point_list,
         W, H,
         focal_x, focal_y,
-        center_x, center_y,
+        center_x, center_y, pixel_K,
         points2D,
         gaussians2D,
         conic_opacity,

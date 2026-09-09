@@ -321,7 +321,7 @@ __global__ void compute_3d_filter_distance_kernel(
     const float* means, const float* cameras, const std::size_t count,
     const std::size_t camera_count, float* distances,
     unsigned* maximum_distance_bits,
-    const bool all_camera_euclidean) {
+    const bool all_camera_euclidean, const float maximum_focal) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     const float x = means[3 * index];
@@ -329,8 +329,8 @@ __global__ void compute_3d_filter_distance_kernel(
     const float z = means[3 * index + 2];
     float minimum_distance = FLT_MAX;
     for (std::size_t view = 0; view < camera_count; ++view) {
-        // 16 column-major world-to-camera values followed by fx, fy, W, H.
-        const float* camera = cameras + 20 * view;
+        // Matrix, fx/fy, W/H, model, cx/cy and four distortion coefficients.
+        const float* camera = cameras + 27 * view;
         const float camera_x = camera[0] * x + camera[4] * y +
                                camera[8] * z + camera[12];
         const float camera_y = camera[1] * x + camera[5] * y +
@@ -345,23 +345,34 @@ __global__ void compute_3d_filter_distance_kernel(
                 minimum_distance,
                 sqrtf(camera_x * camera_x + camera_y * camera_y +
                       camera_z * camera_z));
+        } else if (static_cast<CameraModel>(static_cast<unsigned>(camera[20])) == CameraModel::opencv_fisheye) {
+            if (!(camera_z > 1e-6F)) continue;
+            const double iz=1.0/static_cast<double>(camera_z);
+            const double u=camera_x*iz,v=camera_y*iz;
+            const auto p=project_camera_plane(CameraModel::opencv_fisheye,u,v,
+                camera[23],camera[24],camera[25],camera[26]);
+            const double px=camera[16]*p.x+camera[21],py=camera[17]*p.y+camera[22];
+            if(px < -0.15*camera[18] || px > 1.15*camera[18] ||
+               py < -0.15*camera[19] || py > 1.15*camera[19]) continue;
+            const double j0=camera[16]*p.xx*iz,j1=camera[16]*p.xy*iz;
+            const double j2=-camera[16]*(p.xx*u+p.xy*v)*iz;
+            const double j3=camera[17]*p.yx*iz,j4=camera[17]*p.yy*iz;
+            const double j5=-camera[17]*(p.yx*u+p.yy*v)*iz;
+            const double a=j0*j0+j1*j1+j2*j2,b=j0*j3+j1*j4+j2*j5;
+            const double c=j3*j3+j4*j4+j5*j5;
+            const double sigma=sqrt(0.5*(a+c+sqrt((a-c)*(a-c)+4*b*b)));
+            if(sigma>0.0 && isfinite(sigma))
+                minimum_distance=fminf(minimum_distance,maximum_focal/static_cast<float>(sigma));
         } else {
             if (!(camera_z > 0.2F)) continue;
             const float width = camera[18];
             const float height = camera[19];
             const float fx = camera[16];
             const float fy = camera[17];
-            // Equirectangular dummy focals are width/(2π); skip the pinhole
-            // NDC bounds and keep every front-hemisphere sample for fisheye.
-            const bool wide_angle =
-                fx > 0.F && width / fx > 2.5F;
-            if (!wide_angle) {
-                const float boundary_x = width / fx * 0.575F;
-                const float boundary_y = height / fy * 0.575F;
-                if (fabsf(camera_x / camera_z) > boundary_x ||
-                    fabsf(camera_y / camera_z) > boundary_y)
-                    continue;
-            }
+            const float boundary_x = width / fx * 0.575F;
+            const float boundary_y = height / fy * 0.575F;
+            if (fabsf(camera_x / camera_z) > boundary_x ||
+                fabsf(camera_y / camera_z) > boundary_y) continue;
             minimum_distance = fminf(minimum_distance, camera_z);
         }
     }
@@ -1841,17 +1852,21 @@ tinytensor::Tensor compute_3d_filter(
     if (count == 0)
         return tinytensor::Tensor::empty(
             {std::size_t{0}, std::size_t{1}}, tinytensor::Device::CUDA);
-    std::vector<float> packed(cameras.size() * 20);
+    std::vector<float> packed(cameras.size() * 27);
     float maximum_focal = 0.F;
     for (std::size_t view = 0; view < cameras.size(); ++view) {
         const Camera& camera = cameras[view];
         std::copy(
             camera.world_to_camera.begin(), camera.world_to_camera.end(),
-            packed.begin() + static_cast<std::ptrdiff_t>(20 * view));
-        packed[20 * view + 16] = camera.fx;
-        packed[20 * view + 17] = camera.fy;
-        packed[20 * view + 18] = static_cast<float>(camera.width);
-        packed[20 * view + 19] = static_cast<float>(camera.height);
+            packed.begin() + static_cast<std::ptrdiff_t>(27 * view));
+        packed[27 * view + 16] = camera.fx;
+        packed[27 * view + 17] = camera.fy;
+        packed[27 * view + 18] = static_cast<float>(camera.width);
+        packed[27 * view + 19] = static_cast<float>(camera.height);
+        packed[27 * view + 20] = static_cast<float>(camera.model);
+        packed[27 * view + 21] = camera.cx; packed[27 * view + 22] = camera.cy;
+        packed[27 * view + 23] = camera.k1; packed[27 * view + 24] = camera.k2;
+        packed[27 * view + 25] = camera.k3; packed[27 * view + 26] = camera.k4;
         const float filter_focal =
             camera.model == CameraModel::equirectangular
                 ? static_cast<float>(camera.width) /
@@ -1861,7 +1876,7 @@ tinytensor::Tensor compute_3d_filter(
     }
     maximum_focal = std::max(maximum_focal, 1e-6F);
     const auto camera_tensor = tinytensor::Tensor::from_vector(
-        packed, {cameras.size(), std::size_t{20}},
+        packed, {cameras.size(), std::size_t{27}},
         tinytensor::Device::CUDA);
     auto result = tinytensor::Tensor::empty(
         {means.shape()[0], std::size_t{1}}, tinytensor::Device::CUDA);
@@ -1873,7 +1888,7 @@ tinytensor::Tensor compute_3d_filter(
             means.ptr<float>(), camera_tensor.ptr<float>(), count,
             cameras.size(), result.ptr<float>(),
             reinterpret_cast<unsigned*>(maximum_bits.data_ptr()),
-            all_camera_euclidean || any_equirect);
+            all_camera_euclidean || any_equirect, maximum_focal);
     check_cuda(cudaGetLastError(), "compute GGGS 3D filter distances");
     finalize_3d_filter_kernel<<<
         (count + k_threads - 1) / k_threads, k_threads>>>(

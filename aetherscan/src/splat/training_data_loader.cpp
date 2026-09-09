@@ -495,11 +495,11 @@ HostTrainingView load_host_training_view(
 
     std::vector<float> depth;
     std::vector<float> normals;
-    if (options.use_mvs_depth &&
+    if (!uses_native_splat_projection(camera.model) && options.use_mvs_depth &&
         camera.width == view.width && camera.height == view.height &&
         view.depth_map.depth.size() == pixels)
         depth = view.depth_map.depth;
-    if (options.use_mvs_normals &&
+    if (!uses_native_splat_projection(camera.model) && options.use_mvs_normals &&
         camera.width == view.width && camera.height == view.height &&
         view.depth_map.normal.size() == pixels) {
         normals.resize(3 * pixels);

@@ -778,9 +778,11 @@ GaussianModel Trainer::train(
     if (native_non_pinhole &&
         (options_.multi_view_geo_weight > 0.F ||
          options_.multi_view_ncc_weight > 0.F ||
-         options_.use_depth_normal_loss)) {
+         options_.use_depth_normal_loss || options_.use_normal_field ||
+         options_.use_mvs_depth || options_.use_mvs_normals)) {
         core::Logger::instance().info(
-            "Disabling pinhole-only depth-normal and multi-view losses for "
+            "Disabling pinhole-only depth-normal, normal-field and multi-view losses; "
+            "native views do not reuse MVS depth/normal maps without reprojection. Cameras: "
             "fisheye/equirectangular splat cameras");
     }
     const bool use_multi_view =
@@ -955,7 +957,7 @@ GaussianModel Trainer::train(
             options_.use_depth_normal_loss &&
             options_.depth_normal_weight > 0.F &&
             iteration >= options_.depth_normal_from_iter;
-        const bool normal_field_active = options_.use_normal_field &&
+        const bool normal_field_active = !native_non_pinhole && options_.use_normal_field &&
             options_.normal_field_weight > 0.F &&
             iteration >= options_.normal_field_from_iter;
         const bool multi_view_eligible = use_multi_view &&

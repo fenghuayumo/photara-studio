@@ -92,7 +92,7 @@ void sampleDepth(
     const uint32_t* point_list,
     int W, int H,
     float focal_x, float focal_y,
-    float center_x, float center_y,
+    float center_x, float center_y, const RasterIntrinsics pixel_K,
     const float2* points2D,
     const float2* gaussians2D,
     const float4* conic_opacity,

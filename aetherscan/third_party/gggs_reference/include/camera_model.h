@@ -82,12 +82,12 @@ RASTER_D inline RasterProjection project_pinhole_camera(
 RASTER_D inline RasterProjection project_fisheye_camera(
     const float3 t, const RasterIntrinsics& K) {
     RasterProjection out{};
-    if (!(t.z > 0.2f))
+    if (!(t.z > 1e-6f))
         return out;
     const float radius = hypotf(t.x, t.y);
     const float theta = atan2f(radius, t.z);
     constexpr float k_half_pi = 1.57079632679f;
-    if (!(theta < k_half_pi - 1e-4f))
+    if (!(theta < k_half_pi))
         return out;
     const float t2 = theta * theta;
     const float poly =
@@ -98,18 +98,24 @@ RASTER_D inline RasterProjection project_fisheye_camera(
     const float dthetad_dtheta =
         1.f + t2 * (3.f * K.k1 +
                     t2 * (5.f * K.k2 + t2 * (7.f * K.k3 + t2 * 9.f * K.k4)));
+    if (!(dthetad_dtheta > 1e-6f)) return out;
     const float R2 = t.x * t.x + t.y * t.y + t.z * t.z;
     float du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz;
-    if (radius < 1e-6f) {
+    if (radius * radius < 1e-6f * t.z * t.z) {
         const float inv_z = 1.f / t.z;
-        const float scale = dthetad_dtheta * inv_z;
-        out.mean = {K.center_x, K.center_y};
-        du_dx = K.focal_x * scale;
-        du_dy = 0.f;
-        du_dz = 0.f;
-        dv_dx = 0.f;
-        dv_dy = K.focal_y * scale;
-        dv_dz = 0.f;
+        const float q = radius * radius * inv_z * inv_z;
+        const float aa = K.k1 - 1.f/3.f;
+        const float bb = K.k2 - K.k1 + 1.f/5.f;
+        const float scale = inv_z * (1.f + aa*q + bb*q*q);
+        const float ds = 2.f*inv_z*inv_z*inv_z*(aa+2.f*bb*q);
+        const float dz = -inv_z*inv_z*(1.f+3.f*aa*q+5.f*bb*q*q);
+        out.mean = {K.center_x+K.focal_x*t.x*scale, K.center_y+K.focal_y*t.y*scale};
+        du_dx = K.focal_x * (scale+t.x*t.x*ds);
+        du_dy = K.focal_x * t.x*t.y*ds;
+        du_dz = K.focal_x * t.x*dz;
+        dv_dx = K.focal_y * t.x*t.y*ds;
+        dv_dy = K.focal_y * (scale+t.y*t.y*ds);
+        dv_dz = K.focal_y * t.y*dz;
     } else {
         const float rho = theta_d / radius;
         out.mean = {
@@ -187,7 +193,31 @@ RASTER_D inline bool camera_visible(
     if (raster_is_equirect(model))
         return isfinite(t.x) && isfinite(t.y) && isfinite(t.z) &&
                sqrtf(t.x * t.x + t.y * t.y + t.z * t.z) > 1e-6f;
-    return t.z > 0.2f;
+    return t.z > (raster_is_fisheye(model) ? 1e-6f : 0.2f);
+}
+
+
+// Fish depth uses camera Z, obtained from the actual inverse-projected ray.
+RASTER_D inline float3 pixel_unit_ray(float2 pixel, const RasterIntrinsics& K) {
+    const float x=(pixel.x-K.center_x)/K.focal_x;
+    const float y=(pixel.y-K.center_y)/K.focal_y;
+    if(!raster_is_fisheye(K.model)) {
+        const float inv=rnorm3df(x,y,1.f); return {x*inv,y*inv,inv};
+    }
+    const float r=hypotf(x,y);
+    float lo=0.f, hi=1.57079632679f;
+    for(int i=0;i<28;++i) {
+        const float t=0.5f*(lo+hi), q=t*t;
+        const float td=t*(1.f+q*(K.k1+q*(K.k2+q*(K.k3+q*K.k4))));
+        if(td<r) lo=t; else hi=t;
+    }
+    const float theta=0.5f*(lo+hi);
+    const float scale=r>1e-8f ? sinf(theta)/r : 1.f;
+    return {x*scale,y*scale,fmaxf(0.f,cosf(theta))};
+}
+
+RASTER_D inline float pixel_ray_z(float2 pixel,const RasterIntrinsics& K) {
+    return pixel_unit_ray(pixel,K).z;
 }
 
 #undef RASTER_HD

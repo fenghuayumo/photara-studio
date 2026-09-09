@@ -13,6 +13,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -536,6 +537,228 @@ void test_fisheye_equirect_rasterize() {
         right_peak % equirect.width == 48 &&
             right_peak / equirect.width == 24,
         "equirect +X splat should peak at 0.75 width");
+}
+
+void test_fisheye_parameter_finite_differences() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    const auto gpu=tinytensor::Device::CUDA;
+    Camera camera;
+    camera.model=aetherscan::CameraModel::opencv_fisheye;
+    camera.width=80; camera.height=64;
+    camera.fx=29.F; camera.fy=31.F; camera.cx=39.2F; camera.cy=31.1F;
+    camera.k1=0.06F; camera.k2=-0.012F; camera.k3=0.003F; camera.k4=-0.0004F;
+    // Non-identity camera rotation exercises covariance/world gradient transforms.
+    const float angle=0.23F, c=std::cos(angle), s=std::sin(angle);
+    camera.world_to_camera={c,0.F,-s,0.F, 0.F,1.F,0.F,0.F, s,0.F,c,0.F, 0.F,0.F,0.F,1.F};
+    const std::size_t pixels=camera.width*camera.height;
+    Rasterizer rasterizer;
+    for(int scene=0;scene<4;++scene) {
+        std::vector<float> parameters={0.9F,0.32F,1.3F, std::log(.16F),std::log(.10F),std::log(.22F),
+                                       0.94F,0.13F,-0.18F,0.21F, 3.F, 0.4F,0.2F,0.3F};
+        if(scene==1) { // Close to the horizon, with camera Z below the old 0.2 cutoff.
+            parameters[0]=1.15F; parameters[1]=.10F;
+            parameters[2]=(.16F+s*parameters[0])/c;
+        }
+        if(scene>=2) { // Exactly on-axis, including the Taylor branch.
+            parameters[0]=-s*1.4F; parameters[1]=0.F; parameters[2]=c*1.4F;
+        }
+        if(scene==3) {parameters[10]=8.F;camera.cx=39.F;camera.cy=31.F;}
+        auto make_model=[&](const std::vector<float>& p) {
+            GaussianModel m;
+            auto upload=[&](int offset,int count,std::initializer_list<std::size_t> shape) {
+                return Tensor::from_vector(std::vector<float>(p.begin()+offset,p.begin()+offset+count),shape,gpu);
+            };
+            m.means=upload(0,3,{1,3}); m.log_scales=upload(3,3,{1,3});
+            m.quaternions=upload(6,4,{1,4}); m.opacity_logits=upload(10,1,{1,1});
+            m.sh=upload(11,3,{1,1,3}); m.sh_degree=0;
+            return m;
+        };
+        for(float kernel : {0.F,0.3F}) {
+            RasterizeOptions options;
+            options.kernel_size=kernel; options.require_depth=true;
+            options.background={.07F,.11F,.03F};
+            auto model=make_model(parameters);
+            auto rendered=rasterizer.forward(model,camera,options);
+            require(rendered.rendered_instances>0,"Fisheye test Gaussian culled");
+            const auto depth=rendered.median_depth.to_vector();
+            const auto alpha=rendered.alpha.to_vector();
+            std::size_t pixel=std::max_element(alpha.begin(),alpha.end())-alpha.begin();
+            require(depth[pixel]>0.F,"Fisheye test needs a valid median depth");
+            // Independent double-precision projection and covariance oracle.
+            Eigen::Matrix3d view_rotation;
+            for(int row=0;row<3;++row) for(int col=0;col<3;++col)
+                view_rotation(row,col)=camera.world_to_camera[4*col+row];
+            const Eigen::Vector3d position=view_rotation*Eigen::Vector3d(parameters[0],parameters[1],parameters[2]);
+            const Eigen::Matrix3d rotation=Eigen::Quaterniond(parameters[6],parameters[7],parameters[8],parameters[9]).normalized().toRotationMatrix();
+            const Eigen::Vector3d variance(std::exp(2*parameters[3]),std::exp(2*parameters[4]),std::exp(2*parameters[5]));
+            const Eigen::Matrix3d covariance=view_rotation*rotation*variance.asDiagonal()*rotation.transpose()*view_rotation.transpose();
+            auto project=[&](Eigen::Vector3d t) {
+                const auto p=aetherscan::project_fisheye_camera(t.x(),t.y(),t.z(),camera.fx,camera.fy,camera.cx,camera.cy,
+                    camera.k1,camera.k2,camera.k3,camera.k4);
+                require(p.valid,"CPU fish projection failed");
+                return Eigen::Vector2d(p.u,p.v);
+            };
+            Eigen::Matrix<double,2,3> jacobian;
+            for(int i=0;i<3;++i) {
+                auto plus=position,minus=position; plus[i]+=1e-5;minus[i]-=1e-5;
+                jacobian.col(i)=(project(plus)-project(minus))/(2e-5);
+            }
+            const Eigen::Matrix2d raw=jacobian*covariance*jacobian.transpose();
+            const Eigen::Matrix2d filtered=raw+kernel*Eigen::Matrix2d::Identity();
+            const Eigen::Vector2d delta=project(position)-Eigen::Vector2d(pixel%camera.width,pixel/camera.width);
+            const double expected_alpha=std::min(.99,1.0/(1.0+std::exp(-parameters[10]))*
+                std::sqrt(raw.determinant()/filtered.determinant())*
+                std::exp(-.5*delta.dot(filtered.inverse()*delta)));
+            require(std::abs(expected_alpha-alpha[pixel])<2e-4,"Fisheye forward covariance differs from CPU oracle");
+            const Eigen::Vector3d expected_normal=-(covariance.inverse()*position).normalized();
+            const auto normals=rendered.normal.to_vector();
+            for(int i=0;i<3;++i)
+                require(std::abs(normals[i*pixels+pixel]-expected_normal[i])<2e-4,"Fisheye forward normal differs from CPU oracle");
+            const Eigen::Vector3d center_ray=position.normalized();
+            const Eigen::Vector3d precision_ray=covariance.inverse()*center_ray;
+            const double precision=center_ray.dot(precision_ray);
+            const Eigen::Matrix<double,3,2> inverse_jacobian=jacobian.transpose()*(jacobian*jacobian.transpose()).inverse();
+            const Eigen::Vector2d slope=inverse_jacobian.transpose()*precision_ray/precision;
+            const double peak=position.norm()+slope.dot(delta);
+            const double g=expected_alpha>=.75 ? .75/expected_alpha : (1-4*std::pow(1-expected_alpha,2))/expected_alpha;
+            const double median=peak+(expected_alpha>=.75 ? -1 : 1)*std::sqrt(-2*std::log(g)/precision);
+            const auto ray=aetherscan::unproject_fisheye_camera(pixel%camera.width,pixel/camera.width,
+                camera.fx,camera.fy,camera.cx,camera.cy,camera.k1,camera.k2,camera.k3,camera.k4);
+            require(ray.valid && std::abs(depth[pixel]-median*ray.z)<3e-4,"Fisheye median depth differs from CPU oracle");
+            // Probe a fixed interior pixel, so visibility/support discontinuities
+            // are not confused with derivatives of the smooth raster expression.
+            for(int channel=0;channel<4;++channel) {
+                std::vector<float> gc(3*pixels,0.F),ga(pixels,0.F),gd(pixels,0.F),gn(3*pixels,0.F);
+                if(channel==0) { gc[pixel]=.7F;gc[pixels+pixel]=-.3F;gc[2*pixels+pixel]=.2F; }
+                if(channel==1) ga[pixel]=1.F;
+                if(channel==2) gd[pixel]=1.F;
+                if(channel==3) {gn[pixel]=.3F;gn[pixels+pixel]=-.7F;gn[2*pixels+pixel]=.2F;}
+                const auto gradients=rasterizer.backward(model,rendered,
+                    Tensor::from_vector(gc,{3,camera.height,camera.width},gpu),
+                    Tensor::from_vector(ga,{camera.height,camera.width},gpu),
+                    Tensor::from_vector(gd,{camera.height,camera.width},gpu),
+                    Tensor::from_vector(gn,{3,camera.height,camera.width},gpu));
+                if(channel==0) {
+                    auto rgb_options=options; rgb_options.require_depth=false;
+                    auto rgb=rasterizer.forward(model,camera,rgb_options);
+                    const auto rgb_grad=rasterizer.backward(model,rgb,
+                        Tensor::from_vector(gc,{3,camera.height,camera.width},gpu),
+                        Tensor::from_vector(ga,{camera.height,camera.width},gpu),
+                        Tensor::from_vector(gd,{camera.height,camera.width},gpu),
+                        Tensor::from_vector(gn,{3,camera.height,camera.width},gpu));
+                    const auto a=gradients.means.to_vector(),b=rgb_grad.means.to_vector();
+                    for(int i=0;i<3;++i) {
+                        if(!std::isfinite(a[i]) || !std::isfinite(b[i]))
+                            std::cerr<<"Geometry/RGB-only mean gradients: "<<a[i]<<", "<<b[i]<<'\n';
+                        require(std::isfinite(a[i]) && std::isfinite(b[i]) && std::abs(a[i]-b[i])<2e-5,
+                            "Geometry outputs changed RGB-only training gradients");
+                    }
+                }
+                std::vector<float> analytic;
+                for(const auto* tensor : {&gradients.means,&gradients.log_scales,&gradients.quaternions,
+                                         &gradients.opacity_logits,&gradients.sh}) {
+                    const auto values=tensor->to_vector();analytic.insert(analytic.end(),values.begin(),values.end());
+                }
+                auto objective=[&](const std::vector<float>& p) {
+                    const auto output=rasterizer.forward(make_model(p),camera,options);
+                    if(channel==0) {auto v=output.color.to_vector();return .7F*v[pixel]-.3F*v[pixels+pixel]+.2F*v[2*pixels+pixel];}
+                    if(channel==1) return output.alpha.to_vector()[pixel];
+                    if(channel==2) return output.median_depth.to_vector()[pixel];
+                    auto v=output.normal.to_vector();return .3F*v[pixel]-.7F*v[pixels+pixel]+.2F*v[2*pixels+pixel];
+                };
+                for(std::size_t i=0;i<parameters.size();++i) {
+                    auto plus=parameters,minus=parameters;
+                    const float h=channel==2 ? 5e-4F : 2e-4F;
+                    plus[i]+=h;minus[i]-=h;
+                    const float numerical=(objective(plus)-objective(minus))/(2*h);
+                    const float tolerance=(channel==2 ? .025F : .004F)+.025F*std::abs(numerical);
+                    if(!std::isfinite(analytic[i]) || std::abs(analytic[i]-numerical)>tolerance) {
+                        std::cerr<<"fish scene="<<scene<<" kernel="<<kernel<<" channel="<<channel
+                                 <<" parameter="<<i<<" analytic="<<analytic[i]<<" numerical="<<numerical<<'\n';
+                        throw std::runtime_error("Fisheye parameter finite difference mismatch");
+                    }
+                }
+            }
+            // Depth sampling returns a point on the inverse-projected ray.
+            // Check derivatives with respect to both the query and the model.
+            const double query_u=static_cast<double>(pixel%camera.width)-.2;
+            const double query_v=static_cast<double>(pixel/camera.width)-.2;
+            const auto query_ray=aetherscan::unproject_fisheye_camera(query_u,query_v,
+                camera.fx,camera.fy,camera.cx,camera.cy,camera.k1,camera.k2,camera.k3,camera.k4);
+            const Eigen::Vector3d query_world=view_rotation.transpose()*
+                (position.norm()*Eigen::Vector3d(query_ray.x,query_ray.y,query_ray.z));
+            std::vector<float> query={static_cast<float>(query_world.x()),static_cast<float>(query_world.y()),static_cast<float>(query_world.z())};
+            auto upload_query=[&](const std::vector<float>& q) {return Tensor::from_vector(q,{1,3},gpu);};
+            const auto sampled=rasterizer.sample_depth(model,upload_query(query),camera,options);
+            const auto point=sampled.camera_points.to_vector();
+            const Eigen::Vector3d query_camera=view_rotation*Eigen::Vector3d(query[0],query[1],query[2]);
+            require(Eigen::Vector3d(point[0],point[1],point[2]).norm()>0.,"Fisheye sample depth returned no intersection");
+            require(Eigen::Vector3d(point[0],point[1],point[2]).normalized().dot(query_camera.normalized())>1.-1e-6,
+                "Fisheye sample depth point is not on the camera ray");
+            const auto sample_grad=rasterizer.sample_depth_backward(model,sampled,
+                Tensor::from_vector(std::vector<float>{.3F,-.2F,.7F},{1,3},gpu));
+            auto sample_objective=[&](const std::vector<float>& p,const std::vector<float>& q) {
+                const auto v=rasterizer.sample_depth(make_model(p),upload_query(q),camera,options).camera_points.to_vector();
+                return .3F*v[0]-.2F*v[1]+.7F*v[2];
+            };
+            const auto query_gradient=sample_grad.points.to_vector();
+            std::vector<float> model_gradient;
+            for(const auto* tensor : {&sample_grad.model.means,&sample_grad.model.log_scales,
+                                     &sample_grad.model.quaternions,&sample_grad.model.opacity_logits}) {
+                const auto v=tensor->to_vector();model_gradient.insert(model_gradient.end(),v.begin(),v.end());
+            }
+            for(int i=0;i<14;++i) {
+                auto pp=parameters,pm=parameters,qp=query,qm=query;
+                constexpr float h=5e-4F;
+                if(i<11) {pp[i]+=h;pm[i]-=h;} else {qp[i-11]+=h;qm[i-11]-=h;}
+                const float numerical=(sample_objective(pp,qp)-sample_objective(pm,qm))/(2*h);
+                const float analytic=i<11 ? model_gradient[i] : query_gradient[i-11];
+                if(!std::isfinite(analytic) || std::abs(numerical-analytic)>.025F+.025F*std::abs(numerical)) {
+                    std::cerr<<"fish sample scene="<<scene<<" kernel="<<kernel<<" parameter="<<i
+                             <<" analytic="<<analytic<<" numerical="<<numerical<<'\n';
+                    throw std::runtime_error("Fisheye sample depth gradient mismatch");
+                }
+            }
+        }
+    }
+}
+
+void test_fisheye_filter_and_supervision() {
+    using namespace aetherscan;
+    using namespace aetherscan::splat;
+    Camera camera;
+    camera.model=CameraModel::opencv_fisheye;
+    camera.world_to_camera={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+    camera.width=128; camera.height=128;
+    camera.fx=camera.fy=30.F;camera.cx=camera.cy=63.5F;
+    const auto means=tinytensor::Tensor::from_vector(
+        std::vector<float>{2.F,0.F,.1F}, {1,3},tinytensor::Device::CUDA);
+    const auto filtered=detail::compute_3d_filter(means,{camera},.2F,false).to_vector();
+    // For an equidistant camera, tangential angular magnification is f*theta/r.
+    // This is larger than the radial magnification f/length at this test point.
+    const float expected=std::sqrt(.2F)*2.F/(30.F*std::atan2(2.F,.1F));
+    require(std::abs(filtered[0]-expected)<1e-5F,"Fisheye filter ignored the local projection scale");
+    mvs::MvsView view;
+    view.path=std::filesystem::temp_directory_path()/
+        ("aetherscan_fisheye_supervision_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".png");
+    io::save_rgb_png(io::RgbImage{16,16,std::vector<std::uint8_t>(16*16*3,128)},view.path);
+    view.width=view.src_width=view.height=view.src_height=16;
+    view.fx=view.fy=view.src_fx=view.src_fy=12.F;
+    view.cx=view.cy=view.src_cx=view.src_cy=7.5F;
+    view.source_model=CameraModel::opencv_fisheye;
+    view.depth_map.depth.assign(256,2.F);
+    view.depth_map.normal.assign(256,mvs::Vec3f(0.F,0.F,1.F));
+    TrainingOptions options;
+    options.use_mvs_depth=options.use_mvs_normals=true;
+    const auto native=make_training_view(view,options);
+    require(native.depth.numel()==1 && native.normal.numel()==1,
+        "Native fisheye reused pinhole MVS geometry based only on matching image dimensions");
+    options.undistort_to_pinhole=true;
+    const auto pinhole=make_training_view(view,options);
+    require(pinhole.depth.numel()==256 && pinhole.normal.numel()==768,
+        "Pinhole working camera lost its matching MVS geometry");
+    std::filesystem::remove(view.path);
 }
 
 void test_colmap_fisheye_and_equirect_loading() {
@@ -2880,13 +3103,22 @@ void test_densification_strategies_and_dense_bypass() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
         int device_count = 0;
         if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
             std::cout << "SKIP: no CUDA device\n";
             return 0;
         }
+        if(argc>1 && std::string(argv[1])=="--fisheye-only") {
+            test_fisheye_parameter_finite_differences();
+            test_fisheye_filter_and_supervision();
+            test_fisheye_equirect_rasterize();
+            std::cout<<"Fisheye tests passed\n";
+            return 0;
+        }
+        test_fisheye_parameter_finite_differences();
+        test_fisheye_filter_and_supervision();
         test_mvs_camera_conversion();
         test_camera_projection_roundtrip();
         test_fisheye_equirect_rasterize();

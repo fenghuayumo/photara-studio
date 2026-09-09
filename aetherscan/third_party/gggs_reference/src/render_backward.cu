@@ -1,3 +1,4 @@
+#include "fisheye_geometry.h"
 /*
  * Copyright (C) 2023, Inria
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
@@ -432,6 +433,32 @@ __global__ void computeCov2DCUDA(
         cov_cam_inv = glm::transpose(W) * Vrk_inv * W;
     }
 
+    if (raster_is_fisheye(K.model)) {
+        using fisheye_geometry::Dual;
+        const Dual position[3]={Dual::variable(t.x,0),Dual::variable(t.y,1),Dual::variable(t.z,2)};
+        const Dual covariance[6]={Dual::variable(Vrk[0][0],3),Dual::variable(Vrk[0][1],4),
+            Dual::variable(Vrk[0][2],5),Dual::variable(Vrk[1][1],6),
+            Dual::variable(Vrk[1][2],7),Dual::variable(Vrk[2][2],8)};
+        const auto native=fisheye_geometry::evaluate(position,covariance,W,K,kernel_size);
+        // The raster kernel stores half of the off-diagonal conic derivative.
+        Dual loss=native.conic[0]*Dual(dL_dconic.x)+native.conic[1]*Dual(2*dL_dconic.y)
+                 +native.conic[2]*Dual(dL_dconic.z)
+                 +native.coefficient*Dual(opacities[idx]*dL_dconic.w);
+        const float4 gp=dL_dray_planes[idx];
+        loss=loss+native.plane[0]*Dual(gp.x)+native.plane[1]*Dual(gp.y)
+                 +native.plane[2]*Dual(gp.z)+native.plane[3]*Dual(gp.w)
+                 +native.normal[0]*Dual(dL_dnormal.x)+native.normal[1]*Dual(dL_dnormal.y)
+                 +native.normal[2]*Dual(dL_dnormal.z);
+        const float3 gm=transformVec4x3Transpose({loss.d[0],loss.d[1],loss.d[2]},view_matrix);
+        dL_dmeans[idx]=glm::vec3(gm.x,gm.y,gm.z);
+        dL_dopacity[idx]=dL_dconic.w*native.coefficient.v;
+        float gc[6];
+        for(int i=0;i<6;++i) gc[i]=loss.d[i+3];
+        if(scales) computeCov3D(idx,scale_local,mod,R,rot,gc,glm::vec3(0.f),min_id,dL_dscales,dL_drots);
+        else for(int i=0;i<6;++i) dL_dcov[6*idx+i]=gc[i];
+        return;
+    }
+
     const float det_0 = fmaxf(1e-6f, cov2D[0][0] * cov2D[1][1] - cov2D[0][1] * cov2D[0][1]);
     const float det_1 = fmaxf(1e-6f, (cov2D[0][0] + kernel_size) * (cov2D[1][1] + kernel_size) - cov2D[0][1] * cov2D[0][1]);
     const float coef  = sqrtf(det_0 / det_1);
@@ -758,7 +785,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         const float focal_y,
         const float center_x,
         const float center_y,
-        const int camera_model,
+        const RasterIntrinsics pixel_K,
         float3* __restrict__ dL_dmean2D,
         float4* __restrict__ dL_dconic2D,
         float* __restrict__ dL_dcolors,
@@ -791,7 +818,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     // product of all (1 - alpha) factors.
     const float w_final = inside ? alphas[pix_id] : 0.f;
     const float T_final = 1.f - w_final;
-    [[maybe_unused]] float mDepth;
+    [[maybe_unused]] float mDepth = 0.f;
 
     float T = T_final;
 
@@ -804,7 +831,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     float dL_dfinalT        = 0.f;
     float dL_dfinalT_render = 0.f;
     [[maybe_unused]] float dL_dpixel_t;
-    [[maybe_unused]] float dL_dpixel_mt;
+    [[maybe_unused]] float dL_dpixel_mt = 0.f;
     [[maybe_unused]] float accum_normal_dot = 0;
     [[maybe_unused]] float dL_dpixel_normal[3];
 
@@ -820,8 +847,8 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         dL_dfinalT_render = dL_dfinalT;
 
         if constexpr (GEOMETRY) {
-            const float inv_w = 1 / w_final;
-            const float rln   = rnorm3df(pixnf.x, pixnf.y, 1.f);
+            const float inv_w = w_final > 0.f ? 1.f / w_final : 0.f;
+            const float rln   = pixel_ray_z(pixf, pixel_K);
             dL_dpixel_mt      = dL_dpixel_mdepths[pix_id] * rln;
 
             float dL_dpixel_normaln[3] = {dL_dpixel_normals[pix_id],
@@ -847,7 +874,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             // dL_dfinalT += glm::dot(dL_dpixel_normaln, normaln) * inv_w;
             dL_dfinalT += dL_dpixel_normal[0] * normaln[0] + dL_dpixel_normal[1] * normaln[1] + dL_dpixel_normal[2] * normaln[2];
 #endif
-            mDepth = mdepth[pix_id] * norm3df(pixnf.x, pixnf.y, 1.f);
+            mDepth = mdepth[pix_id] / fmaxf(pixel_ray_z(pixf, pixel_K), 1e-8f);
         }
     }
 
@@ -879,7 +906,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
                 contributor++;
                 done         = contributor >= last_contributor;
                 float2 xy    = collected_xy[j];
-                float2 d     = {wrap_delta_x(xy.x - pixf.x, W, camera_model), xy.y - pixf.y};
+                float2 d     = {wrap_delta_x(xy.x - pixf.x, W, pixel_K.model), xy.y - pixf.y};
                 float4 con_o = collected_conic_opacity[j];
                 float power  = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
                 if (power > 0.0f)
@@ -940,7 +967,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
             // Compute blending values, as before.
             const float2 xy    = collected_xy[j];
-            const float2 d     = {wrap_delta_x(xy.x - pixf.x, W, camera_model), xy.y - pixf.y};
+            const float2 d     = {wrap_delta_x(xy.x - pixf.x, W, pixel_K.model), xy.y - pixf.y};
             const float4 con_o = collected_conic_opacity[j];
 
             float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
@@ -1032,6 +1059,12 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
                 // Update last alpha (to be used in the next iteration)
                 last_alpha = alpha;
+
+                // The native camera path differentiates the actual alpha clamp.
+                if (raster_is_fisheye(pixel_K.model) && con_o.w * G >= 0.99f) {
+                    dL_dopa = 0.f;
+                    dL_dopa_render = 0.f;
+                }
 
                 // Helpful reusable temporary variables
                 const float dL_dG        = con_o.w * dL_dopa;
@@ -1232,7 +1265,7 @@ void BACKWARD::render(
     const float focal_y,
     const float center_x,
     const float center_y,
-    const int camera_model,
+    const RasterIntrinsics pixel_K,
     float3* dL_dmean2D,
     float4* dL_dconic2D,
     float* dL_dcolors,
@@ -1246,7 +1279,7 @@ void BACKWARD::render(
         depths, ray_planes, normals, alphas, normalmap, mdepth,             \
         normal_length, n_contrib, max_contributors, dL_dpixels,             \
         dL_dpixel_mdepth, dL_dalphas, dL_dpixel_normals,                    \
-        focal_x, focal_y, center_x, center_y, camera_model,                 \
+        focal_x, focal_y, center_x, center_y, pixel_K,                 \
         dL_dmean2D, dL_dconic2D, dL_dcolors,                                \
         dL_dray_planes, dL_dnormals, refine_weight)
 
