@@ -160,6 +160,42 @@ struct OrbitCamera {
     void focus_on(const Vec3& point);
 };
 
+// Viewing / scene-alignment transform for the single reconstruction. Sparse,
+// Gaussians, mesh, and cameras share it so they stay registered. It does not
+// rewrite files on disk. Rotation is XYZ Euler in degrees; scale is uniform
+// (RealityScan-style). Applied as p' = R S (p - pivot) + pivot + translation.
+struct ReconstructionTransform {
+    Vec3 translation{};
+    Vec3 rotation_deg{};
+    float scale{1.F};
+    Vec3 pivot{};
+    bool has_pivot{};
+
+    [[nodiscard]] bool is_identity() const;
+    void reset_pose();
+    void ensure_pivot(const Vec3& centroid);
+};
+
+Vec3 transform_point(const ReconstructionTransform& xf, const Vec3& point);
+Vec3 transform_vector(const ReconstructionTransform& xf, const Vec3& vector);
+Vec3 transform_direction(const ReconstructionTransform& xf, const Vec3& vector);
+Vec3 inverse_transform_point(
+    const ReconstructionTransform& xf, const Vec3& world);
+void reconstruction_model_matrix(
+    const ReconstructionTransform& xf, std::array<float, 16>& matrix);
+// Column-major TRS with origin at the pivot — the matrix ImGuizmo edits.
+void reconstruction_gizmo_matrix(
+    const ReconstructionTransform& xf, std::array<float, 16>& matrix);
+void reconstruction_from_gizmo_matrix(
+    ReconstructionTransform& xf, const std::array<float, 16>& matrix);
+void multiply_mat4(
+    const std::array<float, 16>& a, const std::array<float, 16>& b,
+    std::array<float, 16>& out);
+void reconstruction_set_pivot(
+    ReconstructionTransform& xf, const Vec3& local_pivot);
+bool reconstruction_pose_equal(
+    const ReconstructionTransform& a, const ReconstructionTransform& b);
+
 // Rasterizer-facing camera matching splat::Camera (OpenCV +Z, Y-down, W2C
 // stored column-major).
 struct SplatPreviewCamera {
@@ -216,12 +252,17 @@ void update_orbit_camera(
 bool pick_orbit_focus_point(
     const SparseScene& scene, const OrbitCamera& camera, ImVec2 min,
     ImVec2 max, ImVec2 mouse, Vec3& out_point,
-    const PreviewMesh* mesh = nullptr);
+    const PreviewMesh* mesh = nullptr,
+    const ReconstructionTransform* transform = nullptr);
 
 // Column-major view matrix used to project the top-right XYZ navigation axes.
 void camera_view_matrix(
     const OrbitCamera& camera, ImVec2 min, ImVec2 max,
     std::array<float, 16>& view);
+// OpenGL perspective matching the orbit camera; used by ImGuizmo.
+void camera_projection_matrix(
+    const OrbitCamera& camera, ImVec2 min, ImVec2 max,
+    std::array<float, 16>& projection);
 
 struct ViewOptions {
     float point_size = 1.7F;
@@ -260,7 +301,8 @@ public:
         ImDrawList* draw, ImVec2 min, ImVec2 max, const SparseScene& scene,
         const OrbitCamera& camera, const ViewOptions& options,
         bool hovered, const ImTextureID* view_photos = nullptr,
-        std::size_t view_photo_count = 0, const PreviewMesh* mesh = nullptr);
+        std::size_t view_photo_count = 0, const PreviewMesh* mesh = nullptr,
+        const ReconstructionTransform* transform = nullptr);
 
 private:
     struct Projected {

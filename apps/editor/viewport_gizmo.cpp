@@ -2,6 +2,7 @@
 
 #include "theme.hpp"
 
+#include "ImGuizmo.h"
 #include "imgui.h"
 
 #include <algorithm>
@@ -138,15 +139,103 @@ bool draw_axes_gizmo(
     return hovered;
 }
 
+void apply_imguizmo_style() {
+    ImGuizmo::Style& style = ImGuizmo::GetStyle();
+    style.TranslationLineThickness = 3.F;
+    style.RotationLineThickness = 2.5F;
+    style.ScaleLineThickness = 2.5F;
+    style.CenterCircleSize = 6.F;
+    style.Colors[ImGuizmo::DIRECTION_X] = {0.96F, 0.41F, 0.58F, 1.F};
+    style.Colors[ImGuizmo::DIRECTION_Y] = {0.69F, 0.93F, 0.25F, 1.F};
+    style.Colors[ImGuizmo::DIRECTION_Z] = {0.29F, 0.68F, 0.94F, 1.F};
+    style.Colors[ImGuizmo::PLANE_X] = {0.96F, 0.41F, 0.58F, 0.22F};
+    style.Colors[ImGuizmo::PLANE_Y] = {0.69F, 0.93F, 0.25F, 0.22F};
+    style.Colors[ImGuizmo::PLANE_Z] = {0.29F, 0.68F, 0.94F, 0.22F};
+    style.Colors[ImGuizmo::SELECTION] = {0.29F, 0.71F, 0.96F, 0.90F};
+}
+
+bool draw_object_gizmo(
+    ViewportGizmoState& state, ReconstructionTransform& xf,
+    const OrbitCamera& camera, const ImVec2 min, const ImVec2 max,
+    const float scene_radius) {
+    if (state.tool == TransformTool::orbit) return false;
+
+    ImGuizmo::BeginFrame();
+    apply_imguizmo_style();
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::AllowAxisFlip(false);
+    ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
+    ImGuizmo::SetRect(
+        min.x, min.y, std::max(1.F, max.x - min.x),
+        std::max(1.F, max.y - min.y));
+    ImGuizmo::SetGizmoSizeClipSpace(0.15F);
+
+    std::array<float, 16> view{};
+    std::array<float, 16> projection{};
+    std::array<float, 16> matrix{};
+    camera_view_matrix(camera, min, max, view);
+    camera_projection_matrix(camera, min, max, projection);
+    reconstruction_gizmo_matrix(xf, matrix);
+
+    ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
+    if (state.tool == TransformTool::rotate)
+        operation = ImGuizmo::ROTATE;
+    else if (state.tool == TransformTool::scale)
+        operation = ImGuizmo::SCALEU;
+
+    const ImGuizmo::MODE mode = state.space == GizmoSpace::local
+        ? ImGuizmo::LOCAL
+        : ImGuizmo::WORLD;
+
+    float snap[3] = {};
+    const float* snap_ptr = nullptr;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyCtrl) {
+        if (state.tool == TransformTool::rotate) {
+            snap[0] = snap[1] = snap[2] = 15.F;
+        } else if (state.tool == TransformTool::scale) {
+            snap[0] = snap[1] = snap[2] = 0.1F;
+        } else {
+            const float step = std::max(0.01F, scene_radius * 0.02F);
+            snap[0] = snap[1] = snap[2] = step;
+        }
+        snap_ptr = snap;
+    }
+
+    const bool changed = ImGuizmo::Manipulate(
+        view.data(), projection.data(), operation, mode, matrix.data(),
+        nullptr, snap_ptr);
+    if (changed) reconstruction_from_gizmo_matrix(xf, matrix);
+
+    if (ImGuizmo::IsOver() || ImGuizmo::IsUsing()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (state.tool == TransformTool::translate)
+            ImGui::SetTooltip("Move reconstruction  ·  Ctrl snaps");
+        else if (state.tool == TransformTool::rotate)
+            ImGui::SetTooltip("Rotate reconstruction  ·  Ctrl snaps 15°");
+        else
+            ImGui::SetTooltip("Scale reconstruction uniformly  ·  Ctrl snaps");
+    }
+    return ImGuizmo::IsOver() || ImGuizmo::IsUsing();
+}
+
 }  // namespace
 
 bool draw_viewport_gizmo(
     ViewportGizmoState& state, OrbitCamera& camera, const ImVec2 min,
-    const ImVec2 max) {
+    const ImVec2 max, ReconstructionTransform* transform,
+    const float scene_radius, const bool object_enabled) {
     if (!state.visible) return false;
-    const bool captures = draw_axes_gizmo(camera, min, max);
-    if (captures) {
-        ImGui::SetTooltip("Click an axis to change camera view");
+    bool captures = false;
+    if (object_enabled && transform != nullptr)
+        captures = draw_object_gizmo(
+            state, *transform, camera, min, max, scene_radius);
+    if (!captures) {
+        captures = draw_axes_gizmo(camera, min, max);
+        if (captures)
+            ImGui::SetTooltip("Click an axis to change camera view");
+    } else {
+        draw_axes_gizmo(camera, min, max);
     }
     return captures;
 }

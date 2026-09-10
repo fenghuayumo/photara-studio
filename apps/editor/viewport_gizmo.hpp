@@ -4,14 +4,20 @@
 
 namespace editor {
 
+enum class TransformTool { orbit, translate, rotate, scale };
+enum class GizmoSpace { world, local };
+
 struct ViewportGizmoState {
     bool visible{true};
+    TransformTool tool{TransformTool::orbit};
+    GizmoSpace space{GizmoSpace::world};
 };
 
-// Draws only the top-right camera-orientation widget. It deliberately has no
-// scene transform controls: AetherScan's reconstruction viewport is for
-// inspection, not editing the solved SfM coordinate system.
+// Top-right camera-orientation widget, plus ImGuizmo for the reconstruction
+// transform (Move / Rotate / Scale) when a transform tool is active.
 bool draw_viewport_gizmo(
-    ViewportGizmoState& state, OrbitCamera& camera, ImVec2 min, ImVec2 max);
+    ViewportGizmoState& state, OrbitCamera& camera, ImVec2 min, ImVec2 max,
+    ReconstructionTransform* transform = nullptr, float scene_radius = 1.F,
+    bool object_enabled = false);
 
 }  // namespace editor

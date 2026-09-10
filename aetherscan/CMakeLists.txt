@@ -671,6 +671,34 @@ if(AETHERSCAN_ENABLE_FEATURES)
                 Vulkan::Vulkan glfw)
             target_compile_features(aetherscan_imgui PUBLIC cxx_std_20)
 
+            # SOURCE_SUBDIR skips ImGuizmo's own CMake (sequencer, graph editor).
+            FetchContent_Declare(
+                aetherscan_imguizmo
+                GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
+                GIT_TAG 1.10
+                GIT_SHALLOW TRUE
+                SOURCE_SUBDIR _aetherscan_skip)
+            FetchContent_MakeAvailable(aetherscan_imguizmo)
+            if(EXISTS "${aetherscan_imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp")
+                set(_aetherscan_imguizmo_src
+                    "${aetherscan_imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp")
+                set(_aetherscan_imguizmo_inc
+                    "${aetherscan_imguizmo_SOURCE_DIR}/src")
+            else()
+                set(_aetherscan_imguizmo_src
+                    "${aetherscan_imguizmo_SOURCE_DIR}/ImGuizmo.cpp")
+                set(_aetherscan_imguizmo_inc
+                    "${aetherscan_imguizmo_SOURCE_DIR}")
+            endif()
+            add_library(aetherscan_imguizmo STATIC ${_aetherscan_imguizmo_src})
+            target_include_directories(aetherscan_imguizmo PUBLIC
+                ${_aetherscan_imguizmo_inc})
+            target_link_libraries(aetherscan_imguizmo PUBLIC aetherscan_imgui)
+            target_compile_features(aetherscan_imguizmo PUBLIC cxx_std_20)
+            if(MSVC)
+                target_compile_options(aetherscan_imguizmo PRIVATE /utf-8)
+            endif()
+
             set(AETHERSCAN_EDITOR_DIR
                 "${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor")
             add_executable(aetherscan_editor
@@ -686,8 +714,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
             target_include_directories(aetherscan_editor PRIVATE
                 ${AETHERSCAN_EDITOR_DIR})
             target_link_libraries(aetherscan_editor PRIVATE
-                aetherscan_imgui AetherScan::SfM AetherScan::Splat
-                Vulkan::Vulkan glfw)
+                aetherscan_imgui aetherscan_imguizmo AetherScan::SfM
+                AetherScan::Splat Vulkan::Vulkan glfw)
             if(AETHERSCAN_HAS_TEXTURE AND TARGET AetherScan::Texture)
                 target_link_libraries(aetherscan_editor PRIVATE AetherScan::Texture)
                 target_compile_definitions(aetherscan_editor PRIVATE
