@@ -10,6 +10,7 @@
 #include "mvs/internal.hpp"
 #include "core/logging.hpp"
 #include "io/image.hpp"
+#include "io/video_frames.hpp"
 #if defined(AETHERSCAN_HAS_SPLAT)
 #include "splat/dataset.hpp"
 #include "splat/cuda_vulkan_preview.hpp"
@@ -209,6 +210,16 @@ struct ReconstructCli {
     std::uint32_t texture_optimize_steps{1000};
     std::uint32_t texture_optimize_batch_size{4};
     std::uint32_t texture_seam_samples{4};
+    float video_fps{2.F};
+    int video_sharp_window{3};
+    int video_max_frames{0};
+    int video_quality{95};
+    float video_scale{1.F};
+    int video_rotate{0};
+    std::filesystem::path video_frames_dir;
+    std::filesystem::path video_source;
+    std::filesystem::path ffmpeg{"ffmpeg"};
+    bool video_redo{false};
 };
 
 std::uint64_t peak_working_set_bytes() noexcept {
@@ -396,6 +407,16 @@ void print_help(const cxxopts::Options& options) {
               << "  --export-mvs [path]  also write OpenMVS Interface after SfM\n"
               << "  --gui  editor/interactive: no ascan/asfm/eval PNG/extra log\n"
               << "  --working-sfm PATH  compact SfM working copy for --gui\n"
+              << "Video (when --images is a video file, frames are extracted first):\n"
+              << "  --video-fps F  kept frames per second (default 2)\n"
+              << "  --video-sharp-window N  keep the sharpest of N candidates (default 3; 1 = off)\n"
+              << "  --video-max-frames N  cap extracted stills (0 = no cap)\n"
+              << "  --video-quality Q  JPEG quality 0-100 (default 95; outside writes PNG)\n"
+              << "  --video-scale S  resize extracted frames (default 1)\n"
+              << "  --video-rotate D  clockwise degrees 0/90/180/270\n"
+              << "  --video-frames-dir PATH  stills folder (default <video_stem>/images)\n"
+              << "  --ffmpeg PATH  ffmpeg executable (default ffmpeg on PATH)\n"
+              << "  --video-redo  ignore a previous extract and write frames again\n"
               << "  with --dense: also writes dense.ply next to --output\n"
               << "  with --texture: also writes *_textured.obj/.mtl/_albedo.png\n"
               << "Log level: set AETHERSCAN_LOG_LEVEL=error|warning|info|debug|trace|off\n";
@@ -407,7 +428,26 @@ ReconstructCli parse_cli(int argc, char** argv) {
     options.custom_help("[options]");
     options.add_options()
         ("h,help", "Print usage")
-        ("i,images", "Image directory", cxxopts::value<std::string>())
+        ("i,images", "Image directory or video file", cxxopts::value<std::string>())
+        ("video-fps", "Kept frames per second when --images is a video",
+         cxxopts::value<float>()->default_value("2"))
+        ("video-sharp-window",
+         "Keep the sharpest of N candidate frames (1 disables blur selection)",
+         cxxopts::value<int>()->default_value("3"))
+        ("video-max-frames", "Maximum extracted stills (0 = no cap)",
+         cxxopts::value<int>()->default_value("0"))
+        ("video-quality", "JPEG quality for extracted frames (0-100; else PNG)",
+         cxxopts::value<int>()->default_value("95"))
+        ("video-scale", "Scale factor applied to extracted frames",
+         cxxopts::value<float>()->default_value("1"))
+        ("video-rotate", "Clockwise rotation in degrees (0/90/180/270)",
+         cxxopts::value<int>()->default_value("0"))
+        ("video-frames-dir", "Directory for extracted stills",
+         cxxopts::value<std::string>()->default_value(""))
+        ("ffmpeg", "ffmpeg executable used to decode video",
+         cxxopts::value<std::string>()->default_value("ffmpeg"))
+        ("video-redo", "Re-extract video frames even if a matching set exists",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("f,focal",
          "Initial focal in pixels (0 = max dimension * 1.2, fisheye * 0.5; "
          "refined by view-graph consensus + BA unless trusted)",
@@ -798,6 +838,30 @@ ReconstructCli parse_cli(int argc, char** argv) {
 
     ReconstructCli cli;
     cli.images_dir = utf8_to_path(result["images"].as<std::string>());
+    cli.video_fps = result["video-fps"].as<float>();
+    cli.video_sharp_window = result["video-sharp-window"].as<int>();
+    cli.video_max_frames = result["video-max-frames"].as<int>();
+    cli.video_quality = result["video-quality"].as<int>();
+    cli.video_scale = result["video-scale"].as<float>();
+    cli.video_rotate = result["video-rotate"].as<int>();
+    const std::string video_frames_text =
+        result["video-frames-dir"].as<std::string>();
+    if (!video_frames_text.empty())
+        cli.video_frames_dir = utf8_to_path(video_frames_text);
+    cli.ffmpeg = utf8_to_path(result["ffmpeg"].as<std::string>());
+    if (cli.ffmpeg.empty()) cli.ffmpeg = "ffmpeg";
+    cli.video_redo = result["video-redo"].as<bool>();
+    if (!std::isfinite(cli.video_fps) || cli.video_fps <= 0.0F)
+        throw std::invalid_argument("--video-fps must be positive");
+    if (cli.video_sharp_window < 1)
+        throw std::invalid_argument("--video-sharp-window must be >= 1");
+    if (cli.video_max_frames < 0)
+        throw std::invalid_argument("--video-max-frames must be >= 0");
+    if (!std::isfinite(cli.video_scale) || cli.video_scale <= 0.0F)
+        throw std::invalid_argument("--video-scale must be positive");
+    if (cli.video_rotate % 90 != 0)
+        throw std::invalid_argument(
+            "--video-rotate must be a multiple of 90 degrees");
     const auto camera_model = result["camera-model"].as<std::string>();
     if (camera_model == "fisheye" || camera_model == "opencv_fisheye")
         cli.camera_model = aetherscan::CameraModel::opencv_fisheye;
@@ -1490,14 +1554,74 @@ void run_splat_view(
 }
 #endif
 
+aetherscan::io::VideoExtractOptions video_extract_options(
+    const ReconstructCli& cli) {
+    aetherscan::io::VideoExtractOptions options;
+    options.video = cli.images_dir;
+    options.output_dir = cli.video_frames_dir.empty()
+        ? aetherscan::io::default_video_frames_dir(cli.images_dir)
+        : cli.video_frames_dir;
+    options.ffmpeg = cli.ffmpeg;
+    options.fps = cli.video_fps;
+    options.sharp_window = cli.video_sharp_window;
+    options.max_frames = cli.video_max_frames;
+    options.quality = cli.video_quality;
+    options.scale = cli.video_scale;
+    options.rotate = cli.video_rotate;
+    options.resume = !cli.video_redo;
+    return options;
+}
+
+void adopt_video_frames(
+    ReconstructCli& cli, const std::filesystem::path& frames_dir) {
+    cli.video_source = cli.images_dir;
+    cli.images_dir = frames_dir;
+}
+
+void ensure_video_frames(ReconstructCli& cli, const bool preserve_cameras) {
+    if (!aetherscan::io::is_video_path(cli.images_dir)) return;
+    auto options = video_extract_options(cli);
+    if (preserve_cameras) {
+        if (cli.video_redo) {
+            throw std::runtime_error(
+                "Cannot redo video extraction while reusing an existing "
+                "alignment. Re-run Align Photos.");
+        }
+        if (aetherscan::io::has_matching_video_extract(options)) {
+            adopt_video_frames(cli, options.output_dir);
+            aetherscan::core::Logger::instance().info(
+                "video_frames_dir=", options.output_dir, " reused=true");
+            return;
+        }
+        throw std::runtime_error(
+            "Video extract settings do not match the existing alignment. "
+            "Re-run Align Photos before Train 3DGS or Dense MVS.");
+    }
+    const auto result = aetherscan::io::extract_video_frames(options);
+    adopt_video_frames(cli, result.image_dir);
+    aetherscan::core::Logger::instance().info(
+        "video_frames_dir=", result.image_dir,
+        " frames=", result.frames_written,
+        " reused=", result.reused ? "true" : "false");
+}
+
 aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     aetherscan::project::Settings settings;
     settings.name = cli.output.stem().string();
-    settings.image_directory = cli.images_dir;
+    settings.image_directory =
+        cli.video_source.empty() ? cli.images_dir : cli.video_source;
     settings.dataset_source = cli.splat_dataset;
     settings.dataset_format = cli.dataset_format;
     settings.dataset_initial_cloud = cli.dense_ply;
     settings.splat_output_format = cli.splat_output_format;
+    settings.video_frames_dir =
+        cli.video_source.empty() ? cli.video_frames_dir : cli.images_dir;
+    settings.video_fps = cli.video_fps;
+    settings.video_sharp_window = cli.video_sharp_window;
+    settings.video_max_frames = cli.video_max_frames;
+    settings.video_quality = cli.video_quality;
+    settings.video_scale = cli.video_scale;
+    settings.video_rotate = cli.video_rotate;
     settings.camera_model = static_cast<int>(cli.camera_model);
     if (cli.mode == "incremental") settings.sfm_mode = 1;
     else if (cli.mode == "hierarchical") settings.sfm_mode = 2;
@@ -2761,7 +2885,7 @@ int main(int argc, char** argv) {
 #endif
     try {
         Utf8Argv utf8_argv(argc, argv);
-        const ReconstructCli cli = parse_cli(utf8_argv.argc(), utf8_argv.argv());
+        ReconstructCli cli = parse_cli(utf8_argv.argc(), utf8_argv.argv());
 
         const char* configured_level = std::getenv("AETHERSCAN_LOG_LEVEL");
         const auto console_level = configured_level
@@ -2803,6 +2927,12 @@ int main(int argc, char** argv) {
             return 0;
         }
 #endif
+        const bool preserve_cameras =
+            (cli.splat || cli.dense) &&
+            ((!cli.working_sfm.empty() &&
+              std::filesystem::exists(cli.working_sfm, project_error)) ||
+             archive.has(aetherscan::project::ChunkType::sfm));
+        ensure_video_frames(cli, preserve_cameras);
 
 #if defined(AETHERSCAN_HAS_SPLAT)
         if (!cli.splat_dataset.empty()) {

@@ -1,5 +1,7 @@
 #include "pipeline.hpp"
 
+#include "io/video_frames.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -27,16 +29,18 @@ struct Band {
 };
 
 constexpr Band k_align_bands[] = {
-    {"extract features", Stage::features, 0.03F, 0.34F},
-    {"prepare image pairs", Stage::matching, 0.34F, 0.36F},
-    {"fast match image pairs", Stage::matching, 0.36F, 0.52F},
-    {"lightglue match pairs", Stage::matching, 0.36F, 0.56F},
-    {"rescue difficult pairs", Stage::matching, 0.52F, 0.56F},
-    {"match image pairs", Stage::matching, 0.36F, 0.56F},
-    {"verify pair geometry", Stage::matching, 0.56F, 0.70F},
-    {"build tracks", Stage::tracks, 0.70F, 0.77F},
-    {"sfm.retrieve_image_pairs", Stage::matching, 0.34F, 0.36F},
-    {"register images", Stage::mapping, 0.77F, 0.96F},
+    {"extract video frames", Stage::preparing, 0.00F, 0.08F},
+    {"select sharp frames", Stage::preparing, 0.08F, 0.12F},
+    {"extract features", Stage::features, 0.12F, 0.38F},
+    {"prepare image pairs", Stage::matching, 0.38F, 0.40F},
+    {"fast match image pairs", Stage::matching, 0.40F, 0.54F},
+    {"lightglue match pairs", Stage::matching, 0.40F, 0.58F},
+    {"rescue difficult pairs", Stage::matching, 0.54F, 0.58F},
+    {"match image pairs", Stage::matching, 0.40F, 0.58F},
+    {"verify pair geometry", Stage::matching, 0.58F, 0.72F},
+    {"build tracks", Stage::tracks, 0.72F, 0.78F},
+    {"sfm.retrieve_image_pairs", Stage::matching, 0.38F, 0.40F},
+    {"register images", Stage::mapping, 0.78F, 0.96F},
 };
 
 constexpr Band k_dense_bands[] = {
@@ -50,6 +54,8 @@ constexpr Band k_dense_bands[] = {
 
 // On the training run SfM is skipped when a working alignment exists.
 constexpr Band k_train_bands[] = {
+    {"extract video frames", Stage::preparing, 0.00F, 0.02F},
+    {"select sharp frames", Stage::preparing, 0.00F, 0.02F},
     {"extract features", Stage::features, 0.01F, 0.04F},
     {"match image pairs", Stage::matching, 0.04F, 0.07F},
     {"fast match image pairs", Stage::matching, 0.04F, 0.07F},
@@ -143,7 +149,11 @@ bool ratio_after(
 }
 
 std::string quote(const std::filesystem::path& path) {
-    return '"' + path.string() + '"';
+    return '"' + path_to_utf8(path) + '"';
+}
+
+std::string quote(const char* utf8_path) {
+    return std::string("\"") + (utf8_path == nullptr ? "" : utf8_path) + '"';
 }
 
 void append_gui_flags(
@@ -151,6 +161,21 @@ void append_gui_flags(
     command << " --gui";
     if (!layout.working_sfm.empty())
         command << " --working-sfm " << quote(layout.working_sfm);
+}
+
+void append_video_extract_flags(
+    std::ostringstream& command, const ProjectSettings& settings) {
+    if (!is_video_source(settings)) return;
+    command << " --video-fps " << settings.video_fps
+            << " --video-sharp-window " << settings.video_sharp_window
+            << " --video-max-frames " << settings.video_max_frames
+            << " --video-quality " << settings.video_quality
+            << " --video-scale " << settings.video_scale
+            << " --video-rotate " << settings.video_rotate
+            << " --video-frames-dir "
+            << quote(reconstruction_images_dir(settings));
+    if (settings.ffmpeg_exe[0] != '\0')
+        command << " --ffmpeg " << quote(settings.ffmpeg_exe.data());
 }
 
 std::string lower_extension(const std::filesystem::path& path) {
@@ -229,7 +254,7 @@ const char* stage_name(const Stage stage) {
         case Stage::tracks: return "Building tracks";
         case Stage::mapping: return "Solving camera poses";
         case Stage::exporting: return "Writing sparse scene";
-        case Stage::preparing: return "Preparing aligned scene";
+        case Stage::preparing: return "Preparing input";
         case Stage::dense: return "Dense MVS";
         case Stage::training: return "Training Gaussians";
         case Stage::meshing: return "Extracting mesh";
@@ -541,14 +566,18 @@ void RunMonitor::consume(const std::string& line) {
 
     // ProgressReporter lines. "progress started:" only announces the total.
     const bool finished = line.find("progress finished: ") != std::string::npos;
+    const bool started = line.find("progress started: ") != std::string::npos;
     const std::size_t running = line.find("progress: ");
-    if (!finished && running == std::string::npos) return;
+    if (!finished && !started && running == std::string::npos) return;
 
-    const std::string_view marker =
-        finished ? "progress finished: " : "progress: ";
+    const std::string_view marker = finished
+        ? "progress finished: "
+        : (started ? "progress started: " : "progress: ");
     const std::size_t marker_at = line.find(marker);
     const std::size_t label_begin = marker_at + marker.size();
-    const std::size_t metrics_at = line.find(" completed=", label_begin);
+    std::size_t metrics_at = line.find(" completed=", label_begin);
+    if (metrics_at == std::string::npos && started)
+        metrics_at = line.find(" total=", label_begin);
     if (metrics_at == std::string::npos) return;
     const std::string label = line.substr(label_begin, metrics_at - label_begin);
 
@@ -570,7 +599,12 @@ void RunMonitor::consume(const std::string& line) {
 
     task_.label = label;
     task_.active = !finished;
-    ratio_after(line, " completed=", task_.completed, task_.total);
+    if (started) {
+        task_.completed = 0;
+        number_after(line, " total=", task_.total);
+    } else {
+        ratio_after(line, " completed=", task_.completed, task_.total);
+    }
     number_after(line, " percent=", task_.percent);
     number_after(line, " items/s=", task_.items_per_second);
     std::string eta;
@@ -682,13 +716,28 @@ void ProcessJob::start(
     PROCESS_INFORMATION info{};
     const BOOL created = CreateProcessW(
         nullptr, mutable_command.data(), nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &info);
+        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup,
+        &info);
     CloseHandle(log_handle);
     if (!created) {
         running_ = false;
         throw std::runtime_error(
             "CreateProcess failed: " + std::to_string(GetLastError()));
     }
+    job_ = CreateJobObjectW(nullptr, nullptr);
+    if (job_) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(
+                job_, JobObjectExtendedLimitInformation, &limits,
+                sizeof(limits)) ||
+            !AssignProcessToJobObject(job_, info.hProcess)) {
+            CloseHandle(job_);
+            job_ = nullptr;
+        }
+    }
+    ResumeThread(info.hThread);
     process_ = info.hProcess;
     CloseHandle(info.hThread);
 #else
@@ -708,12 +757,17 @@ void ProcessJob::poll() {
         running_ = false;
         completion_pending_ = true;
         CloseHandle(std::exchange(process_, nullptr));
+        if (job_) CloseHandle(std::exchange(job_, nullptr));
     }
 #endif
 }
 
 void ProcessJob::stop() {
 #if defined(_WIN32)
+    if (job_) {
+        TerminateJobObject(job_, 2);
+        CloseHandle(std::exchange(job_, nullptr));
+    }
     if (process_) {
         TerminateProcess(process_, 2);
         WaitForSingleObject(process_, INFINITE);
@@ -736,7 +790,8 @@ bool ProcessJob::consume_completion() {
 
 ProjectLayout resolve_layout(const ProjectSettings& settings) {
     ProjectLayout layout;
-    const std::filesystem::path stored(settings.project_dir.data());
+    const std::filesystem::path stored =
+        path_from_utf8_field(settings.project_dir.data());
     if (lower_extension(stored) == ".ascan") {
         layout.project_file = stored;
         layout.root = stored.parent_path();
@@ -748,32 +803,37 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     }
     if (layout.root.empty() && !layout.project_file.empty())
         layout.root = std::filesystem::current_path();
-    const std::string stem = layout.project_file.empty()
-        ? std::string("project")
-        : layout.project_file.stem().string();
-    layout.cache = layout.root / (stem + ".cache");
-    layout.sparse_ply = layout.root / (stem + "_sparse.ply");
-    layout.sparse_asfm = layout.root / (stem + ".asfm");
-    layout.sparse_mvs = layout.root / (stem + ".mvs");
-    layout.sparse_poses = layout.root / (stem + "_sfm_diagnostics.csv");
+    const std::filesystem::path stem = layout.project_file.empty()
+        ? std::filesystem::path("project")
+        : layout.project_file.stem();
+    const auto with_suffix = [&](const char* suffix) {
+        std::filesystem::path named = layout.root / stem;
+        named += suffix;
+        return named;
+    };
+    layout.cache = with_suffix(".cache");
+    layout.sparse_ply = with_suffix("_sparse.ply");
+    layout.sparse_asfm = with_suffix(".asfm");
+    layout.sparse_mvs = with_suffix(".mvs");
+    layout.sparse_poses = with_suffix("_sfm_diagnostics.csv");
     layout.model_output = layout.project_file.empty()
-        ? layout.root / (stem + ".ply")
+        ? with_suffix(".ply")
         : layout.project_file;
-    layout.splat_ply = layout.root / (stem + "_splat.ply");
-    layout.splat_sog = layout.root / (stem + "_splat.sog");
-    layout.splat_spz = layout.root / (stem + "_splat.spz");
-    layout.splat_glb = layout.root / (stem + "_splat.glb");
+    layout.splat_ply = with_suffix("_splat.ply");
+    layout.splat_sog = with_suffix("_splat.sog");
+    layout.splat_spz = with_suffix("_splat.spz");
+    layout.splat_glb = with_suffix("_splat.glb");
     layout.splat_model = settings.splat_format == 2
         ? layout.splat_sog
         : settings.splat_format == 3 ? layout.splat_spz
         : settings.splat_format == 4 ? layout.splat_glb : layout.splat_ply;
-    layout.mesh_ply = layout.root / (stem + "_splat_mesh.ply");
-    layout.dense_ply = layout.root / (stem + "_dense.ply");
-    layout.align_log = layout.root / (stem + "_align.log");
-    layout.train_log = layout.root / (stem + "_train.log");
-    layout.dense_log = layout.root / (stem + "_dense.log");
-    layout.export_log = layout.root / (stem + "_export.log");
-    layout.view_log = layout.root / (stem + "_view.log");
+    layout.mesh_ply = with_suffix("_splat_mesh.ply");
+    layout.dense_ply = with_suffix("_dense.ply");
+    layout.align_log = with_suffix("_align.log");
+    layout.train_log = with_suffix("_train.log");
+    layout.dense_log = with_suffix("_dense.log");
+    layout.export_log = with_suffix("_export.log");
+    layout.view_log = with_suffix("_view.log");
     std::filesystem::path runtime_dir = layout.cache;
     if (!settings.reuse_cache) {
         std::error_code temp_error;
@@ -787,6 +847,41 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.preview_camera_file = runtime_dir / "preview_camera";
     layout.preview_vis_file = runtime_dir / "preview_vis";
     return layout;
+}
+
+std::filesystem::path path_from_utf8_field(const char* text) {
+    if (text == nullptr || text[0] == '\0') return {};
+#if defined(_WIN32)
+    const auto* begin = reinterpret_cast<const char8_t*>(text);
+    return std::filesystem::path(
+        std::u8string(begin, begin + std::strlen(text)));
+#else
+    return std::filesystem::path(text);
+#endif
+}
+
+std::string path_to_utf8(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    const std::u8string text = path.u8string();
+    return {
+        reinterpret_cast<const char*>(text.data()), text.size()};
+#else
+    return path.string();
+#endif
+}
+
+bool is_video_source(const ProjectSettings& settings) {
+    return aetherscan::io::is_video_path(
+        path_from_utf8_field(settings.images_dir.data()));
+}
+
+std::filesystem::path reconstruction_images_dir(const ProjectSettings& settings) {
+    const std::filesystem::path source =
+        path_from_utf8_field(settings.images_dir.data());
+    if (!aetherscan::io::is_video_path(source)) return source;
+    if (settings.video_frames_dir[0] != '\0')
+        return path_from_utf8_field(settings.video_frames_dir.data());
+    return aetherscan::io::default_video_frames_dir(source);
 }
 
 std::string build_align_command(
@@ -805,6 +900,7 @@ std::string build_align_command(
             << settings.max_features;
     if (settings.reuse_cache)
         command << " --cache-dir " << quote(layout.cache);
+    append_video_extract_flags(command, settings);
     append_gui_flags(command, layout);
     return command.str();
 }
@@ -828,13 +924,12 @@ std::string build_train_command(
 
     if (settings.dataset_source[0] != '\0') {
         command << " --splat-dataset "
-                << quote(std::filesystem::path(settings.dataset_source.data()))
+                << quote(settings.dataset_source.data())
                 << " --dataset-format "
                 << dataset_format_flag(settings.dataset_format);
         if (settings.dataset_initial_cloud[0] != '\0')
             command << " --dense-ply "
-                    << quote(std::filesystem::path(
-                           settings.dataset_initial_cloud.data()));
+                    << quote(settings.dataset_initial_cloud.data());
     }
 
     command << " --splat --capture-mode "
@@ -857,6 +952,7 @@ std::string build_train_command(
             << (settings.normal_field ? "true" : "false")
             << " --splat-output-format "
             << splat_format_flag(settings.splat_format);
+    append_video_extract_flags(command, settings);
     append_gui_flags(command, layout);
 
     // Mesh extraction is what turns on depth/normal and multi-view geometry
@@ -899,7 +995,8 @@ std::string build_view_command(
             << quote(layout.preview_vis_file);
     append_gui_flags(command, layout);
     std::error_code exists_error;
-    const std::filesystem::path imported_model(settings.splat_model_source.data());
+    const std::filesystem::path imported_model =
+        path_from_utf8_field(settings.splat_model_source.data());
     if (!imported_model.empty() &&
         std::filesystem::exists(imported_model, exists_error)) {
         command << " --splat-model " << quote(imported_model);
@@ -913,6 +1010,7 @@ std::string build_view_command(
             break;
         }
     }
+    append_video_extract_flags(command, settings);
     if (preview.memory && preview.semaphore) {
         command << " --splat-preview-vk-memory-handle " << preview.memory
                 << " --splat-preview-vk-semaphore-handle " << preview.semaphore
@@ -937,13 +1035,12 @@ std::string build_dense_command(
                                                  : layout.project_file);
     if (settings.dataset_source[0] != '\0') {
         command << " --splat-dataset "
-                << quote(std::filesystem::path(settings.dataset_source.data()))
+                << quote(settings.dataset_source.data())
                 << " --dataset-format "
                 << dataset_format_flag(settings.dataset_format);
         if (settings.dataset_initial_cloud[0] != '\0')
             command << " --dense-ply "
-                    << quote(std::filesystem::path(
-                           settings.dataset_initial_cloud.data()));
+                    << quote(settings.dataset_initial_cloud.data());
     } else {
         command << " --mode " << sfm_mode_flag(settings.sfm_mode)
                 << " --camera-model " << (settings.camera_model == 2 ? "auto" :
@@ -955,6 +1052,7 @@ std::string build_dense_command(
     command << " --dense --mesh=" << (settings.build_mesh ? "true" : "false");
     if (settings.build_mesh)
         command << " --mesh-method " << mesh_method_flag(settings.mesh_method);
+    append_video_extract_flags(command, settings);
     append_gui_flags(command, layout);
     return command.str();
 }
@@ -974,6 +1072,7 @@ std::string build_export_sfm_command(
     if (settings.reuse_cache &&
         std::filesystem::exists(layout.cache, exists_error))
         command << " --cache-dir " << quote(layout.cache);
+    append_video_extract_flags(command, settings);
     append_gui_flags(command, layout);
     return command.str();
 }

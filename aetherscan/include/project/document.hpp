@@ -27,6 +27,15 @@ struct Settings {
     std::string splat_output_format{"ply"};
     // Optional external trained Gaussian file used by the editor preview.
     std::filesystem::path splat_model_source;
+    // Optional video capture. image_directory may itself be a video file; these
+    // fields are the extraction knobs Align Photos / --images apply first.
+    std::filesystem::path video_frames_dir;
+    float video_fps = 2.0F;
+    int video_sharp_window = 3;
+    int video_max_frames = 0;
+    int video_quality = 95;
+    float video_scale = 1.0F;
+    int video_rotate = 0;
     int camera_model = 0;  // 0 pinhole, 1 OpenCV fisheye, 2 automatic
     int sfm_mode = 0;  // 0 global, 1 incremental, 2 hierarchical
     bool reuse_cache = false;

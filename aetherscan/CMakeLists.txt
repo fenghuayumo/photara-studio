@@ -119,6 +119,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
 
     add_library(aetherscan_features
         src/io/image_freeimage.cpp
+        src/io/video_frames.cpp
         src/features/extractor.cpp
         src/features/registry.cpp
         src/features/sift_features.cpp
@@ -741,6 +742,16 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
                 COMMAND_EXPAND_LISTS)
         endif()
         add_test(NAME aetherscan.features COMMAND aetherscan_features_test)
+        add_executable(aetherscan_video_frames_test tests/video_frames_test.cpp)
+        target_link_libraries(aetherscan_video_frames_test PRIVATE AetherScan::Features)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_video_frames_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_video_frames_test>
+                    $<TARGET_FILE_DIR:aetherscan_video_frames_test>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        add_test(NAME aetherscan.io.video_frames COMMAND aetherscan_video_frames_test)
         add_executable(aetherscan_two_view_test tests/two_view_test.cpp)
         target_link_libraries(aetherscan_two_view_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.two_view COMMAND aetherscan_two_view_test)

@@ -84,6 +84,13 @@ std::vector<std::uint8_t> encode_settings(
     writer.string(settings.splat_output_format);
     writer.string(store_path(settings.splat_model_source, base));
     writer.value(static_cast<std::int32_t>(settings.camera_model));
+    writer.string(store_path(settings.video_frames_dir, base));
+    writer.value(settings.video_fps);
+    writer.value(static_cast<std::int32_t>(settings.video_sharp_window));
+    writer.value(static_cast<std::int32_t>(settings.video_max_frames));
+    writer.value(static_cast<std::int32_t>(settings.video_quality));
+    writer.value(settings.video_scale);
+    writer.value(static_cast<std::int32_t>(settings.video_rotate));
     return writer.take();
 }
 
@@ -130,6 +137,20 @@ Settings decode_settings(
         settings.splat_model_source = load_path(reader.string(), base);
     if (reader.remaining() >= sizeof(std::int32_t))
         settings.camera_model = reader.value<std::int32_t>();
+    if (reader.remaining() > 0)
+        settings.video_frames_dir = load_path(reader.string(), base);
+    if (reader.remaining() >= sizeof(float))
+        settings.video_fps = reader.value<float>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.video_sharp_window = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.video_max_frames = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.video_quality = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(float))
+        settings.video_scale = reader.value<float>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.video_rotate = reader.value<std::int32_t>();
     return settings;
 }
 

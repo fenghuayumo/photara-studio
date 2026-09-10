@@ -134,6 +134,13 @@ int main() {
     settings.dataset_initial_cloud = dir / "seed.ply";
     settings.splat_output_format = "glb";
     settings.splat_model_source = dir / "imported.glb";
+    settings.video_frames_dir = dir / "clip" / "images";
+    settings.video_fps = 3.5F;
+    settings.video_sharp_window = 5;
+    settings.video_max_frames = 400;
+    settings.video_quality = 90;
+    settings.video_scale = 0.5F;
+    settings.video_rotate = 90;
     settings.camera_model = 2;
     settings.sfm_mode = 2;
     settings.max_features = 4096;
@@ -165,6 +172,15 @@ int main() {
     expect(
         round_trip.splat_model_source == settings.splat_model_source,
         "splat model source");
+    expect(
+        round_trip.video_frames_dir == settings.video_frames_dir,
+        "video frames dir");
+    expect(round_trip.video_fps == 3.5F, "video fps");
+    expect(round_trip.video_sharp_window == 5, "video sharp window");
+    expect(round_trip.video_max_frames == 400, "video max frames");
+    expect(round_trip.video_quality == 90, "video quality");
+    expect(round_trip.video_scale == 0.5F, "video scale");
+    expect(round_trip.video_rotate == 90, "video rotate");
     expect(round_trip.camera_model == 2, "settings camera model");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");

@@ -8,6 +8,7 @@
 #include "vulkan_backend.hpp"
 
 #include "io/image.hpp"
+#include "io/video_frames.hpp"
 #include "project/archive.hpp"
 #include "project/document.hpp"
 #include "sfm/asfm.hpp"
@@ -316,7 +317,7 @@ std::optional<std::filesystem::path> resolve_dropped_image_directory(
         return std::nullopt;
     }
     if (images.empty()) {
-        error = "Drop an image folder, photos, .asfm, or .ascan project";
+        error = "Drop an image folder, photos, a video, .asfm, or .ascan project";
         return std::nullopt;
     }
 
@@ -379,7 +380,7 @@ bool copy_wide_path(const wchar_t* wide, std::array<char, 1024>& destination) {
     return true;
 }
 
-enum class FilePickKind { project, dataset, point_cloud, splat_model };
+enum class FilePickKind { project, dataset, point_cloud, splat_model, video };
 
 bool pick_file(
     const wchar_t* title, std::array<char, 1024>& destination,
@@ -415,10 +416,15 @@ bool pick_file(
         COMDLG_FILTERSPEC splat_model_filters[] = {
             {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb)", L"*.ply;*.sog;*.spz;*.glb"},
             {L"All files (*.*)", L"*.*"}};
+        COMDLG_FILTERSPEC video_filters[] = {
+            {L"Video files (*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv)",
+             L"*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv;*.mts;*.m2ts;*.360"},
+            {L"All files (*.*)", L"*.*"}};
         const COMDLG_FILTERSPEC* filters = project_filters;
         if (kind == FilePickKind::dataset) filters = dataset_filters;
         if (kind == FilePickKind::point_cloud) filters = point_cloud_filters;
         if (kind == FilePickKind::splat_model) filters = splat_model_filters;
+        if (kind == FilePickKind::video) filters = video_filters;
         dialog->SetFileTypes(2, filters);
         if (kind == FilePickKind::project && save)
             dialog->SetDefaultExtension(L"ascan");
@@ -457,6 +463,10 @@ bool pick_splat_model_file(
     const wchar_t* title, std::array<char, 1024>& destination) {
     return pick_file(title, destination, false, FilePickKind::splat_model);
 }
+bool pick_video_file(
+    const wchar_t* title, std::array<char, 1024>& destination) {
+    return pick_file(title, destination, false, FilePickKind::video);
+}
 
 void reveal_in_explorer(const std::filesystem::path& path) {
     std::error_code error;
@@ -475,6 +485,9 @@ bool pick_point_cloud_file(const wchar_t*, std::array<char, 1024>&) {
     return false;
 }
 bool pick_splat_model_file(const wchar_t*, std::array<char, 1024>&) {
+    return false;
+}
+bool pick_video_file(const wchar_t*, std::array<char, 1024>&) {
     return false;
 }
 void reveal_in_explorer(const std::filesystem::path&) {}
@@ -528,38 +541,42 @@ void refresh_artifacts(App& app) {
     }
 }
 
+std::filesystem::path reconstruction_images_path(const App& app) {
+    return reconstruction_images_dir(app.settings);
+}
+
+void store_utf8_path_field(
+    std::array<char, 1024>& field, const std::filesystem::path& path);
+
 void assign_default_project_folder(App& app) {
     if (app.settings.images_dir[0] == '\0' ||
         app.settings.project_dir[0] != '\0')
         return;
 
-    const std::filesystem::path images(app.settings.images_dir.data());
+    const std::filesystem::path images =
+        path_from_utf8_field(app.settings.images_dir.data());
     const std::filesystem::path parent = images.parent_path();
+    std::filesystem::path project_name = is_video_source(app.settings)
+        ? images.stem()
+        : images.filename();
+    project_name += ".ascan";
     const std::filesystem::path project =
-        (parent.empty() ? images : parent) / (images.filename().string() + ".ascan");
-    const std::string text = project.string();
-    std::snprintf(
-        app.settings.project_dir.data(), app.settings.project_dir.size(), "%s",
-        text.c_str());
+        parent.empty() ? project_name : parent / project_name;
+    store_utf8_path_field(app.settings.project_dir, project);
     app.project_folder_automatic = true;
 }
 
 void store_path_field(
     std::array<char, 1024>& field, const std::filesystem::path& path) {
-    const std::string text = path.string();
-    std::snprintf(field.data(), field.size(), "%s", text.c_str());
+    const std::string text = path_to_utf8(path);
+    if (text.size() + 1 > field.size()) return;
+    std::memcpy(field.data(), text.data(), text.size());
+    field[text.size()] = '\0';
 }
 
 void store_utf8_path_field(
     std::array<char, 1024>& field, const std::filesystem::path& path) {
-#if defined(_WIN32)
-    const std::u8string utf8 = path.u8string();
-    if (utf8.size() + 1 > field.size()) return;
-    std::memcpy(field.data(), utf8.data(), utf8.size());
-    field[utf8.size()] = '\0';
-#else
     store_path_field(field, path);
-#endif
 }
 
 aetherscan::sfm::Scene load_working_sfm(
@@ -574,16 +591,28 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
     aetherscan::project::Settings settings;
     settings.name = app.layout.project_file.empty()
         ? std::string("Untitled")
-        : app.layout.project_file.stem().string();
-    settings.image_directory = app.settings.images_dir.data();
-    settings.dataset_source = app.settings.dataset_source.data();
+        : path_to_utf8(app.layout.project_file.stem());
+    settings.image_directory =
+        path_from_utf8_field(app.settings.images_dir.data());
+    settings.dataset_source =
+        path_from_utf8_field(app.settings.dataset_source.data());
     settings.dataset_format = app.settings.dataset_format == 1
         ? "colmap"
         : app.settings.dataset_format == 2
             ? "realitycapture"
             : app.settings.dataset_format == 3 ? "openmvs" : "auto";
-    settings.dataset_initial_cloud = app.settings.dataset_initial_cloud.data();
-    settings.splat_model_source = app.settings.splat_model_source.data();
+    settings.dataset_initial_cloud =
+        path_from_utf8_field(app.settings.dataset_initial_cloud.data());
+    settings.splat_model_source =
+        path_from_utf8_field(app.settings.splat_model_source.data());
+    settings.video_frames_dir =
+        path_from_utf8_field(app.settings.video_frames_dir.data());
+    settings.video_fps = app.settings.video_fps;
+    settings.video_sharp_window = app.settings.video_sharp_window;
+    settings.video_max_frames = app.settings.video_max_frames;
+    settings.video_quality = app.settings.video_quality;
+    settings.video_scale = app.settings.video_scale;
+    settings.video_rotate = app.settings.video_rotate;
     settings.splat_output_format = app.settings.splat_format == 1
         ? "ply"
         : app.settings.splat_format == 2
@@ -628,6 +657,13 @@ void apply_project_settings(
     store_path_field(
         app.settings.dataset_initial_cloud, settings.dataset_initial_cloud);
     store_path_field(app.settings.splat_model_source, settings.splat_model_source);
+    store_path_field(app.settings.video_frames_dir, settings.video_frames_dir);
+    app.settings.video_fps = settings.video_fps;
+    app.settings.video_sharp_window = settings.video_sharp_window;
+    app.settings.video_max_frames = settings.video_max_frames;
+    app.settings.video_quality = settings.video_quality;
+    app.settings.video_scale = settings.video_scale;
+    app.settings.video_rotate = settings.video_rotate;
     if (settings.splat_output_format == "ply")
         app.settings.splat_format = 1;
     else if (settings.splat_output_format == "sog")
@@ -662,7 +698,7 @@ void request_asfm_scene_load(
     App& app, const std::filesystem::path& asfm, std::string label) {
     if (app.loading_scene || asfm.empty()) return;
     app.suppress_scene_auto_load = false;
-    const std::filesystem::path images(app.settings.images_dir.data());
+    const std::filesystem::path images = reconstruction_images_path(app);
     app.loading_scene = true;
     app.scene_source = std::move(label);
     app.pending_load = std::async(
@@ -707,7 +743,7 @@ void request_dataset_scene_load(App& app) {
     const std::string format = external_dataset_format(app);
     const std::filesystem::path initial_cloud(
         app.settings.dataset_initial_cloud.data());
-    const std::filesystem::path images(app.settings.images_dir.data());
+    const std::filesystem::path images = reconstruction_images_path(app);
     app.dataset_scene_key = external_dataset_signature(app);
     app.suppress_scene_auto_load = false;
     app.loading_scene = true;
@@ -769,7 +805,7 @@ void request_ascan_scene_load(App& app) {
     const auto ascan = app.layout.project_file;
     const auto working = app.layout.working_sfm;
     const auto asfm = app.layout.sparse_asfm;
-    const std::filesystem::path images(app.settings.images_dir.data());
+    const std::filesystem::path images = reconstruction_images_path(app);
     if (ascan.empty() && working.empty() && asfm.empty()) return;
     app.suppress_scene_auto_load = false;
     app.loading_scene = true;
@@ -819,7 +855,7 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
         if (!app.layout.working_sfm.empty() &&
             std::filesystem::exists(app.layout.working_sfm, working_error)) {
             const auto scene = load_working_sfm(
-                app.layout.working_sfm, app.settings.images_dir.data());
+                app.layout.working_sfm, reconstruction_images_path(app));
             aetherscan::project::write_sfm(archive, scene, path);
         }
         archive.save(path);
@@ -885,7 +921,29 @@ void select_image_folder(App& app) {
     if (!pick_folder(
             L"Select the capture image folder", app.settings.images_dir))
         return;
+    app.settings.video_frames_dir.fill('\0');
     apply_image_directory_selection(app);
+}
+
+void apply_video_selection(App& app) {
+    stop_splat_view(app);
+    clear_loaded_result(app);
+    app.settings.video_frames_dir.fill('\0');
+    app.settings.project_dir.fill('\0');
+    app.project_folder_automatic = false;
+    assign_default_project_folder(app);
+    refresh_artifacts(app);
+    set_message(
+        app, "Video selected; Align Photos will extract sharp frames, then run SfM",
+        theme::text_muted);
+}
+
+void select_video_file(App& app) {
+    if (app.job.running() || app.loading_scene) return;
+    if (!pick_video_file(
+            L"Select a capture video", app.settings.images_dir))
+        return;
+    apply_video_selection(app);
 }
 
 void open_project_from_path(App& app, const std::filesystem::path& path);
@@ -896,6 +954,30 @@ void apply_dropped_image_source(
     if (app.job.running() || app.loading_scene) {
         set_message(
             app, "Cannot change images while a job is running", theme::warning);
+        return;
+    }
+    std::vector<std::filesystem::path> videos;
+    for (const std::string& text : dropped) {
+        if (text.empty()) continue;
+        const std::filesystem::path path = path_from_drop(text);
+        std::error_code status;
+        if (std::filesystem::is_regular_file(path, status) &&
+            aetherscan::io::is_video_path(path))
+            videos.push_back(path);
+    }
+    if (videos.size() > 1) {
+        set_message(app, "Drop a single video file", theme::danger);
+        return;
+    }
+    if (videos.size() == 1) {
+        if (dropped.size() != 1) {
+            set_message(
+                app, "Drop a single video, or a folder of photos",
+                theme::danger);
+            return;
+        }
+        store_utf8_path_field(app.settings.images_dir, videos.front());
+        apply_video_selection(app);
         return;
     }
     std::string error;
@@ -966,7 +1048,7 @@ void consume_dropped_paths(App& app) {
     if (!mouse_over_viewport(app)) {
         set_message(
             app,
-            "Drop photos, an .asfm scene, or an .ascan project on the viewport",
+            "Drop photos, a video, an .asfm scene, or an .ascan project on the viewport",
             theme::warning);
         return;
     }
@@ -996,7 +1078,7 @@ void request_gaussian_scene_load(App& app) {
     const std::string dataset_format = external_dataset_format(app);
     const std::filesystem::path dataset_initial_cloud(
         app.settings.dataset_initial_cloud.data());
-    const std::filesystem::path dataset_images(app.settings.images_dir.data());
+    const std::filesystem::path dataset_images = reconstruction_images_path(app);
     app.suppress_scene_auto_load = false;
     app.loading_scene = true;
     app.scene_source = "Gaussian centres";
@@ -1493,7 +1575,7 @@ void set_viewport_workspace(App& app, const ViewportWorkspace workspace) {
     app.qa_camera_valid = false;
     if (workspace == ViewportWorkspace::image_2d) {
         refresh_image_qa_folder(
-            app.image_qa, std::filesystem::path(app.settings.images_dir.data()));
+            app.image_qa, reconstruction_images_path(app));
         const int count = image_qa_count(app.image_qa, app.scene);
         app.qa_metrics_after =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
@@ -1653,7 +1735,8 @@ void save_project_as(App& app) {
             L"Save AetherScan Project", app.settings.project_dir, true))
         return;
     {
-        std::filesystem::path path(app.settings.project_dir.data());
+        std::filesystem::path path =
+            path_from_utf8_field(app.settings.project_dir.data());
         std::string extension = path.extension().string();
         std::transform(
             extension.begin(), extension.end(), extension.begin(),
@@ -1788,8 +1871,7 @@ void poll_camera_photos(App& app) {
         if (app.photos.size() != 0) app.photos.clear();
         return;
     }
-    attach_view_image_paths(
-        app.scene, std::filesystem::path(app.settings.images_dir.data()));
+    attach_view_image_paths(app.scene, reconstruction_images_path(app));
     app.photos.resize(app.scene.views.size());
     if (app.workspace == ViewportWorkspace::image_2d) {
         const int count = static_cast<int>(app.scene.views.size());
@@ -1839,8 +1921,7 @@ void poll_scene_load(App& app) {
     if (app.image_qa.selected >= static_cast<int>(app.scene.views.size()))
         app.image_qa.selected = app.scene.views.empty() ? -1 : 0;
     infer_images_dir_from_scene(app);
-    attach_view_image_paths(
-        app.scene, std::filesystem::path(app.settings.images_dir.data()));
+    attach_view_image_paths(app.scene, reconstruction_images_path(app));
     if (!live_preview_active(app)) app.camera.frame(app.scene);
     if (app.view_mode != VisualizationMode::splat &&
         app.view_mode != VisualizationMode::rings)
@@ -1884,7 +1965,7 @@ void poll_alignment_preview(App& app) {
     if (error || stamp == app.alignment_preview_stamp) return;
     app.alignment_preview_stamp = stamp;
     app.alignment_preview_load_generation = app.alignment_preview_generation;
-    const std::filesystem::path images(app.settings.images_dir.data());
+    const std::filesystem::path images = reconstruction_images_path(app);
     app.alignment_preview_load = std::async(std::launch::async, [path, images] {
         try { return sparse_scene_from_sfm(load_working_sfm(path, images), false); }
         catch (const std::exception& error) {
@@ -1926,7 +2007,30 @@ void start_align(App& app) {
         std::error_code stale;
         std::filesystem::remove(app.layout.sparse_mvs, stale);
     }
-    if (!directory_has_images(app.settings.images_dir.data())) {
+    if (is_video_source(app.settings)) {
+        std::error_code video_error;
+        const std::filesystem::path video =
+            path_from_utf8_field(app.settings.images_dir.data());
+        if (!std::filesystem::is_regular_file(video, video_error)) {
+            set_message(app, "Video file not found", theme::danger);
+            return;
+        }
+        const auto frames = reconstruction_images_path(app);
+        const std::filesystem::path ffmpeg_exe =
+            app.settings.ffmpeg_exe[0] != '\0'
+                ? path_from_utf8_field(app.settings.ffmpeg_exe.data())
+                : std::filesystem::path("ffmpeg");
+        if (!directory_has_images(frames) &&
+            !aetherscan::io::ffmpeg_available(ffmpeg_exe)) {
+            set_message(
+                app,
+                "ffmpeg was not found. Install ffmpeg and add it to PATH, or set "
+                "the executable under Video extraction.",
+                theme::danger);
+            return;
+        }
+    } else if (!directory_has_images(
+                   path_from_utf8_field(app.settings.images_dir.data()))) {
         set_message(
             app, "No images found in the selected source folder", theme::danger);
         return;
@@ -2016,7 +2120,7 @@ void start_export_sfm(App& app) {
             std::error_code exists_error;
             if (std::filesystem::exists(app.layout.working_sfm, exists_error)) {
                 const auto scene = load_working_sfm(
-                    app.layout.working_sfm, app.settings.images_dir.data());
+                    app.layout.working_sfm, reconstruction_images_path(app));
                 aetherscan::sfm::save_asfm(scene, app.layout.sparse_asfm);
                 aetherscan::sfm::export_openmvs_interface(
                     scene, app.layout.sparse_mvs);
@@ -2123,8 +2227,7 @@ void start_train(App& app, const bool smoke) {
             request_dataset_scene_load(app);
     } else {
         load_view_poses(app.layout.sparse_poses, app.scene);
-        attach_view_image_paths(
-            app.scene, std::filesystem::path(app.settings.images_dir.data()));
+        attach_view_image_paths(app.scene, reconstruction_images_path(app));
     }
     if (const ViewPose* pose = first_registered_view(app.scene))
         snap_orbit_to_view(app.camera, *pose);
@@ -2446,6 +2549,9 @@ Action draw_menu_bar(App& app) {
         if (ImGui::MenuItem("Select Image Folder...", "Ctrl+O", false, !busy)) {
             select_image_folder(app);
         }
+        if (ImGui::MenuItem("Select Video...", nullptr, false, !busy)) {
+            select_video_file(app);
+        }
         if (ImGui::MenuItem("Open Project...", "Ctrl+Shift+O", false, !busy)) {
             select_project_folder(app);
         }
@@ -2642,7 +2748,8 @@ ClearResultsAction draw_clear_results_modal(App& app) {
     if (!app.layout.root.empty()) {
         ImGui::Spacing();
         theme::caption("Current project");
-        ImGui::TextWrapped("%s", app.layout.root.string().c_str());
+        const std::string root_utf8 = path_to_utf8(app.layout.root);
+        ImGui::TextWrapped("%s", root_utf8.c_str());
     }
     ImGui::Spacing();
     ImGui::Separator();
@@ -2692,6 +2799,13 @@ Action draw_toolbar(App& app) {
             {124.F, 32.F}, icons::ButtonStyle::normal, !busy, false,
             "Select capture image folder, or drop photos / .asfm / .ascan on the viewport")) {
         select_image_folder(app);
+    }
+    ImGui::SameLine();
+    if (icons::labeled_button(
+            "##video_file", icons::Icon::camera, "Video",
+            {88.F, 32.F}, icons::ButtonStyle::normal, !busy, false,
+            "Select a capture video. Align Photos extracts sharp frames, then runs SfM.")) {
+        select_video_file(app);
     }
     ImGui::SameLine();
 
@@ -2942,13 +3056,23 @@ void draw_scene_panel(App& app) {
     ImGui::Dummy({0, 8.F});
     theme::section_header("SOURCE");
     ImGui::Indent(14.F);
-    theme::caption("IMAGES");
+    theme::caption(is_video_source(app.settings) ? "VIDEO" : "IMAGES");
     ImGui::Spacing();
     ImGui::PushTextWrapPos(wrap);
     ImGui::TextUnformatted(
         app.settings.images_dir[0] != '\0' ? app.settings.images_dir.data()
                                           : "(not selected)");
     ImGui::PopTextWrapPos();
+    if (is_video_source(app.settings)) {
+        ImGui::Dummy({0, 4.F});
+        theme::caption("EXTRACTED FRAMES");
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(wrap);
+        const std::string frames_utf8 =
+            path_to_utf8(reconstruction_images_path(app));
+        ImGui::TextUnformatted(frames_utf8.c_str());
+        ImGui::PopTextWrapPos();
+    }
     ImGui::Dummy({0, 6.F});
     theme::caption("PROJECT");
     ImGui::Spacing();
@@ -3034,12 +3158,12 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
             draw, min, max,
             app.job.running() && app.active_job == JobKind::align ? "Aligning photos..." :
             app.settings.images_dir[0] != '\0' ? "Ready to align cameras"
-                                               : "Drop photos or a reconstruction",
+                                               : "Drop photos, a video, or a reconstruction",
             app.job.running() && app.active_job == JobKind::align
                 ? "Cameras and points appear as soon as geometry is available"
                 : app.settings.images_dir[0] != '\0'
-                ? "Run Align Photos, or drop a different folder, .asfm, or .ascan"
-                : "Drop an image folder, photos, .asfm, or .ascan onto this view");
+                ? "Run Align Photos, or drop a different folder, video, .asfm, or .ascan"
+                : "Drop an image folder, photos, a video, .asfm, or .ascan onto this view");
     }
 
     const SceneDrawStats stats = app.renderer.draw(
@@ -3336,7 +3460,7 @@ void draw_viewport_panel(App& app) {
     const ImVec2 view_max{view_min.x + region.x, view_min.y + region.y};
     if (app.workspace == ViewportWorkspace::image_2d) {
         refresh_image_qa_folder(
-            app.image_qa, std::filesystem::path(app.settings.images_dir.data()));
+            app.image_qa, reconstruction_images_path(app));
         const int previous = app.image_qa.selected;
         ImageQaDrawInput input;
         input.scene = &app.scene;
@@ -3386,7 +3510,7 @@ Action draw_inspector(App& app) {
     if (ImGui::CollapsingHeader("Project", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
         theme::caption("Image source");
-        ImGui::SetNextItemWidth(-30.F);
+        ImGui::SetNextItemWidth(-138.F);
         if (ImGui::InputText(
                 "##images", app.settings.images_dir.data(),
                 app.settings.images_dir.size())) {
@@ -3398,9 +3522,78 @@ Action draw_inspector(App& app) {
             assign_default_project_folder(app);
             refresh_artifacts(app);
         }
+        if (ImGui::IsItemDeactivatedAfterEdit() &&
+            is_video_source(app.settings))
+            app.settings.video_frames_dir.fill('\0');
         ImGui::SameLine(0.F, 4.F);
-        if (ImGui::Button("...##pick_images", {24.F, 0})) {
+        if (ImGui::Button("Folder##pick_images", {58.F, 0})) {
             select_image_folder(app);
+        }
+        ImGui::SameLine(0.F, 4.F);
+        if (ImGui::Button("Video##pick_video", {46.F, 0})) {
+            select_video_file(app);
+        }
+        if (is_video_source(app.settings)) {
+            ImGui::Spacing();
+            theme::caption("Video extraction");
+            ImGui::PushTextWrapPos(0.F);
+            theme::caption(
+                "Align Photos extracts the sharpest stills with ffmpeg, then "
+                "runs SfM. Requires ffmpeg on PATH.");
+            ImGui::PopTextWrapPos();
+            theme::caption("Target FPS");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputFloat("##video_fps", &app.settings.video_fps, 0.5F, 1.F, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Kept frames per second of source time.\n"
+                    "2 FPS is a good default for handheld scans.");
+            theme::caption("Sharpness window");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt("##video_sharp_window", &app.settings.video_sharp_window);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Keep the sharpest of N consecutive candidates.\n"
+                    "1 disables blur selection. 3 matches Spirula Studio.");
+            theme::caption("Max frames (0 = no cap)");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt("##video_max_frames", &app.settings.video_max_frames);
+            theme::caption("JPEG quality");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputInt("##video_quality", &app.settings.video_quality);
+            theme::caption("Scale");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputFloat("##video_scale", &app.settings.video_scale, 0.1F, 0.25F, "%.2f");
+            theme::caption("Rotate");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* rotations[] = {"0°", "90°", "180°", "270°"};
+            int rotate_choice = std::clamp(app.settings.video_rotate / 90, 0, 3);
+            if (ImGui::Combo("##video_rotate", &rotate_choice, rotations, 4))
+                app.settings.video_rotate = rotate_choice * 90;
+            theme::caption("Frames folder (optional)");
+            ImGui::SetNextItemWidth(-30.F);
+            ImGui::InputText(
+                "##video_frames_dir", app.settings.video_frames_dir.data(),
+                app.settings.video_frames_dir.size());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Empty uses <video_stem>/images next to the file.");
+            ImGui::SameLine(0.F, 4.F);
+            if (ImGui::Button("...##pick_video_frames", {24.F, 0})) {
+                pick_folder(
+                    L"Select extracted frames folder",
+                    app.settings.video_frames_dir);
+            }
+            const std::string frames_utf8 =
+                path_to_utf8(reconstruction_images_path(app));
+            theme::metric("Will write", frames_utf8.c_str());
+            theme::caption("ffmpeg executable");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputText(
+                "##ffmpeg_exe", app.settings.ffmpeg_exe.data(),
+                app.settings.ffmpeg_exe.size());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Empty uses ffmpeg from PATH.");
         }
         theme::caption("Project file");
         ImGui::SetNextItemWidth(-30.F);
@@ -4220,6 +4413,17 @@ int main(const int argc, char** argv) {
             app.settings.dataset_format, 0, 3);
         app.settings.geometry_from_iter =
             std::max(app.settings.geometry_from_iter, 0);
+        app.settings.video_fps = std::clamp(app.settings.video_fps, 0.05F, 60.F);
+        app.settings.video_sharp_window =
+            std::max(1, app.settings.video_sharp_window);
+        app.settings.video_max_frames =
+            std::max(0, app.settings.video_max_frames);
+        app.settings.video_quality =
+            std::clamp(app.settings.video_quality, -1, 100);
+        app.settings.video_scale =
+            std::clamp(app.settings.video_scale, 0.05F, 4.F);
+        app.settings.video_rotate =
+            std::clamp(app.settings.video_rotate / 90, 0, 3) * 90;
 
         Action action = draw_menu_bar(app);
         const Action toolbar_action = draw_toolbar(app);

@@ -203,6 +203,7 @@ private:
     bool completion_pending_{};
 #if defined(_WIN32)
     HANDLE process_{};
+    HANDLE job_{};
 #endif
 };
 
@@ -226,6 +227,17 @@ struct ProjectSettings {
     int sfm_mode = 0;  // global, incremental, hierarchical
     bool reuse_cache = false;
     int max_features = 27'000;
+
+    // Video capture. images_dir may be a video file; these knobs control the
+    // ffmpeg extract + sharpness selection that runs before SfM.
+    std::array<char, 1024> video_frames_dir{};
+    std::array<char, 260> ffmpeg_exe{};
+    float video_fps = 2.0F;
+    int video_sharp_window = 3;
+    int video_max_frames = 0;
+    int video_quality = 95;
+    float video_scale = 1.0F;
+    int video_rotate = 0;
 
     bool scene_mode = false;
     int iterations = 30'000;
@@ -276,6 +288,16 @@ struct ProjectLayout {
 };
 
 ProjectLayout resolve_layout(const ProjectSettings& settings);
+
+bool is_video_source(const ProjectSettings& settings);
+// Folder of stills SfM/training actually reads. Equals images_dir for a photo
+// folder; the extract destination when images_dir is a video.
+std::filesystem::path reconstruction_images_dir(const ProjectSettings& settings);
+
+// Settings path fields and ImGui buffers are UTF-8. On Windows, constructing
+// filesystem::path from char* uses the ACP, so these keep Chinese paths intact.
+std::filesystem::path path_from_utf8_field(const char* text);
+std::string path_to_utf8(const std::filesystem::path& path);
 
 struct PreviewHandles {
     std::uint64_t memory{};
