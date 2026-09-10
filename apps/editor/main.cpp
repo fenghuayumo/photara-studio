@@ -15,6 +15,9 @@
 #include "sfm/export_mvs.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
+#if defined(AETHERSCAN_HAS_TEXTURE)
+#include "texture/mesh_preview.hpp"
+#endif
 
 #include "imgui_impl_glfw.h"
 #include "imgui_internal.h"
@@ -43,6 +46,7 @@
 #include <cstring>
 #include <filesystem>
 #include <future>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -59,7 +63,7 @@ using namespace editor;
 
 constexpr std::uint32_t k_preview_extent = 1920;
 
-enum class VisualizationMode { points, splat, rings };
+enum class VisualizationMode { points, splat, rings, mesh };
 
 enum class ViewportWorkspace { scene_3d, image_2d };
 
@@ -83,6 +87,23 @@ struct App {
     gpu::CameraPhotoCache photos;
 
     SparseScene scene;
+    PreviewMesh mesh;
+    std::future<MeshLoad> pending_mesh_load;
+    bool frame_mesh_on_load{};
+    bool mesh_load_failed{};
+#if defined(AETHERSCAN_HAS_TEXTURE)
+    std::unique_ptr<aetherscan::texture::MeshPreviewRasterizer>
+        mesh_rasterizer;
+    gpu::PreviewTexture mesh_preview;
+    std::vector<float> mesh_gpu_positions;
+    std::vector<float> mesh_gpu_normals;
+    std::vector<float> mesh_gpu_colours;
+    std::vector<std::uint32_t> mesh_gpu_indices;
+    SplatPreviewCamera mesh_gpu_camera{};
+    bool mesh_gpu_wireframe{};
+    bool mesh_gpu_vertex_colour{};
+    bool mesh_gpu_failed{};
+#endif
     OrbitCamera camera;
     ViewOptions view_options;
     ViewportGizmoState gizmo;
@@ -529,7 +550,8 @@ void refresh_artifacts(App& app) {
     app.has_model = !existing_splat_model(app).empty();
     app.has_mesh =
         std::filesystem::exists(app.layout.mesh_ply, error) ||
-        std::filesystem::exists(app.layout.mvs_mesh_ply, error);
+        std::filesystem::exists(app.layout.mvs_mesh_ply, error) ||
+        std::filesystem::exists(app.layout.mvs_raw_mesh_ply, error);
     app.project_writer_version = 0;
     app.project_min_reader_version = 0;
     if (app.layout.project_file.empty()) return;
@@ -890,9 +912,21 @@ void clear_viewport_scene(App& app) {
     app.qa_preview_view = ~0U;
     app.qa_camera_valid = false;
     app.scene.clear();
+    app.mesh.clear();
+    app.mesh_load_failed = false;
+#if defined(AETHERSCAN_HAS_TEXTURE)
+    app.mesh_gpu_positions.clear();
+    app.mesh_gpu_normals.clear();
+    app.mesh_gpu_colours.clear();
+    app.mesh_gpu_indices.clear();
+    app.mesh_gpu_failed = false;
+    app.mesh_preview.reset();
+#endif
     app.scene_source.clear();
     app.camera = {};
     app.view_mode = VisualizationMode::points;
+    ++app.scene_load_generation;
+    app.loading_scene = false;
 }
 
 void clear_loaded_result(App& app) {
@@ -1175,6 +1209,171 @@ void ensure_gaussian_scene(App& app) {
     request_gaussian_scene_load(app);
 }
 
+std::filesystem::path existing_mesh_path(const App& app) {
+    std::error_code error;
+    const auto exists = [&](const std::filesystem::path& path) {
+        return !path.empty() && std::filesystem::exists(path, error);
+    };
+    const std::array<std::filesystem::path, 3> preferred = {
+        mesh_from_mvs(app.settings) ? app.layout.mvs_mesh_ply
+                                    : app.layout.mesh_ply,
+        app.layout.mesh_ply, app.layout.mvs_mesh_ply};
+    for (const auto& path : preferred)
+        if (exists(path)) return path;
+    if (exists(app.layout.mvs_raw_mesh_ply)) return app.layout.mvs_raw_mesh_ply;
+    return {};
+}
+
+void request_mesh_load(App& app, const bool frame_when_ready) {
+    if (app.loading_scene) return;
+    const auto ply = existing_mesh_path(app);
+    const auto ascan = app.layout.project_file;
+    if (ply.empty() && ascan.empty()) {
+        app.mesh_load_failed = true;
+        set_message(app, "No mesh file found next to the project", theme::warning);
+        return;
+    }
+    app.loading_scene = true;
+    app.mesh_load_failed = false;
+    app.frame_mesh_on_load = frame_when_ready;
+    app.pending_scene_load_generation = app.scene_load_generation;
+    app.pending_mesh_load = std::async(
+        std::launch::async,
+        [ply, ascan] { return load_preview_mesh(ply, ascan); });
+}
+
+void ensure_mesh_loaded(App& app) {
+    if (app.mesh.has() || app.loading_scene || app.mesh_load_failed ||
+        !app.has_mesh)
+        return;
+    request_mesh_load(app, true);
+}
+
+void pack_mesh_gpu_buffers(App& app) {
+#if defined(AETHERSCAN_HAS_TEXTURE)
+    app.mesh_gpu_positions.clear();
+    app.mesh_gpu_normals.clear();
+    app.mesh_gpu_colours.clear();
+    app.mesh_gpu_indices.clear();
+    app.mesh_gpu_camera = {};
+    if (!app.mesh.has()) return;
+    const std::size_t count = app.mesh.vertices.size();
+    app.mesh_gpu_positions.resize(count * 3U);
+    for (std::size_t i = 0; i < count; ++i) {
+        app.mesh_gpu_positions[3U * i] = app.mesh.vertices[i].x;
+        app.mesh_gpu_positions[3U * i + 1U] = app.mesh.vertices[i].y;
+        app.mesh_gpu_positions[3U * i + 2U] = app.mesh.vertices[i].z;
+    }
+    if (app.mesh.normals.size() == count) {
+        app.mesh_gpu_normals.resize(count * 3U);
+        for (std::size_t i = 0; i < count; ++i) {
+            app.mesh_gpu_normals[3U * i] = app.mesh.normals[i].x;
+            app.mesh_gpu_normals[3U * i + 1U] = app.mesh.normals[i].y;
+            app.mesh_gpu_normals[3U * i + 2U] = app.mesh.normals[i].z;
+        }
+    }
+    if (app.mesh.colours.size() == count) {
+        app.mesh_gpu_colours.resize(count * 3U);
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::uint32_t packed = app.mesh.colours[i];
+            app.mesh_gpu_colours[3U * i] =
+                static_cast<float>((packed >> IM_COL32_R_SHIFT) & 255U) / 255.F;
+            app.mesh_gpu_colours[3U * i + 1U] =
+                static_cast<float>((packed >> IM_COL32_G_SHIFT) & 255U) / 255.F;
+            app.mesh_gpu_colours[3U * i + 2U] =
+                static_cast<float>((packed >> IM_COL32_B_SHIFT) & 255U) / 255.F;
+        }
+    }
+    app.mesh_gpu_indices.reserve(app.mesh.faces.size() * 3U);
+    for (const auto& face : app.mesh.faces) {
+        app.mesh_gpu_indices.push_back(face[0]);
+        app.mesh_gpu_indices.push_back(face[1]);
+        app.mesh_gpu_indices.push_back(face[2]);
+    }
+#else
+    (void)app;
+#endif
+}
+
+bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
+#if defined(AETHERSCAN_HAS_TEXTURE)
+    if (!app.mesh.has() || app.mesh_gpu_failed ||
+        app.mesh_gpu_indices.empty())
+        return false;
+    std::uint32_t width = static_cast<std::uint32_t>(
+        std::max(1.F, std::floor(max.x - min.x)));
+    std::uint32_t height = static_cast<std::uint32_t>(
+        std::max(1.F, std::floor(max.y - min.y)));
+    const std::uint32_t cap = app.camera.interacting ? 960U : 1600U;
+    if (width > cap || height > cap) {
+        const float scale = static_cast<float>(cap) /
+                            static_cast<float>(std::max(width, height));
+        width = std::max(1U, static_cast<std::uint32_t>(width * scale));
+        height = std::max(1U, static_cast<std::uint32_t>(height * scale));
+    }
+    const SplatPreviewCamera camera =
+        make_preview_camera(app.camera, width, height);
+    const bool same =
+        app.mesh_preview.descriptor != nullptr &&
+        camera.width == app.mesh_gpu_camera.width &&
+        camera.height == app.mesh_gpu_camera.height &&
+        camera.fx == app.mesh_gpu_camera.fx &&
+        camera.cx == app.mesh_gpu_camera.cx &&
+        camera.cy == app.mesh_gpu_camera.cy &&
+        camera.world_to_camera == app.mesh_gpu_camera.world_to_camera &&
+        app.mesh_gpu_wireframe == app.view_options.mesh_wireframe &&
+        app.mesh_gpu_vertex_colour == app.view_options.mesh_vertex_colour;
+    if (same) return true;
+    try {
+        if (!app.mesh_rasterizer)
+            app.mesh_rasterizer =
+                std::make_unique<aetherscan::texture::MeshPreviewRasterizer>();
+        aetherscan::texture::MeshPreviewCamera gpu_camera;
+        gpu_camera.world_to_camera = camera.world_to_camera;
+        gpu_camera.position = camera.position;
+        gpu_camera.fx = camera.fx;
+        gpu_camera.fy = camera.fy;
+        gpu_camera.cx = camera.cx;
+        gpu_camera.cy = camera.cy;
+        gpu_camera.width = camera.width;
+        gpu_camera.height = camera.height;
+        aetherscan::texture::MeshPreviewOptions options;
+        options.wireframe = app.view_options.mesh_wireframe;
+        options.vertex_colour = app.view_options.mesh_vertex_colour;
+        const aetherscan::io::RgbImage image = app.mesh_rasterizer->render(
+            app.mesh_gpu_positions, app.mesh_gpu_normals,
+            app.mesh_gpu_colours, app.mesh_gpu_indices, gpu_camera, options);
+        app.mesh_preview.upload(image);
+        app.mesh_gpu_camera = camera;
+        app.mesh_gpu_wireframe = options.wireframe;
+        app.mesh_gpu_vertex_colour = options.vertex_colour;
+        return app.mesh_preview.descriptor != nullptr;
+    } catch (const std::exception& failure) {
+        app.mesh_gpu_failed = true;
+        set_message(
+            app, std::string("Mesh GPU rasterizer: ") + failure.what(),
+            theme::warning);
+        return false;
+    }
+#else
+    (void)app;
+    (void)min;
+    (void)max;
+    return false;
+#endif
+}
+
+void show_mesh_view(App& app, const bool frame_when_ready) {
+    app.view_mode = VisualizationMode::mesh;
+    stop_splat_view(app);
+    if (app.mesh.has()) {
+        app.camera.frame(app.mesh.centroid, app.mesh.radius);
+        return;
+    }
+    app.mesh_load_failed = false;
+    request_mesh_load(app, frame_when_ready);
+}
+
 aetherscan::splat::VisualizeOptions editor_visualize_options(const App& app) {
     aetherscan::splat::VisualizeOptions options;
     options.mode = app.view_mode == VisualizationMode::points
@@ -1204,6 +1403,11 @@ void set_visualization_mode(App& app, const VisualizationMode mode) {
     // Changing the rail mode is an explicit request to show scene data again.
     if (mode == VisualizationMode::points)
         app.suppress_scene_auto_load = false;
+    if (mode == VisualizationMode::mesh) {
+        show_mesh_view(app, !app.mesh.has());
+        write_preview_vis(app);
+        return;
+    }
     const bool training =
         app.job.running() && app.active_job == JobKind::train;
     if (app.has_model && !training)
@@ -1219,7 +1423,7 @@ void set_visualization_mode(App& app, const VisualizationMode mode) {
 constexpr float k_view_rail_pad = 10.F;
 constexpr float k_view_rail_top = 52.F;
 constexpr float k_view_rail_width = 44.F;
-constexpr float k_view_rail_height = 120.F;
+constexpr float k_view_rail_height = 156.F;
 constexpr float k_scene_toggle_gap = 8.F;
 constexpr float k_scene_toggle_height = 84.F;
 
@@ -1311,6 +1515,7 @@ bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
         bool enabled;
         const char* tooltip;
     };
+    const bool mesh_ok = app.has_mesh || app.mesh.has();
     const RailItem items[] = {
         {"##viz_points", icons::Icon::points, VisualizationMode::points, true,
          "Point Cloud"},
@@ -1319,10 +1524,13 @@ bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
         {"##viz_rings", icons::Icon::rings, VisualizationMode::rings, rings_ok,
          rings_ok ? "Rings"
                   : "Available while training or after a Gaussian model exists"},
+        {"##viz_mesh", icons::Icon::cube, VisualizationMode::mesh, mesh_ok,
+         mesh_ok ? "Mesh"
+                 : "Build a mesh to inspect the reconstructed surface"},
     };
 
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0.F, k_gap});
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         const ImVec2 button_min{
             rail.Min.x + k_inner,
             rail.Min.y + k_inner + static_cast<float>(i) * (k_btn + k_gap)};
@@ -1516,7 +1724,8 @@ bool handle_viewport_double_click(
     }
     Vec3 point;
     if (!pick_orbit_focus_point(
-            app.scene, app.camera, min, max, ImGui::GetIO().MousePos, point))
+            app.scene, app.camera, min, max, ImGui::GetIO().MousePos, point,
+            app.view_mode == VisualizationMode::mesh ? &app.mesh : nullptr))
         return false;
     app.camera.focus_on(point);
     app.preview_follow_view = false;
@@ -1833,12 +2042,12 @@ void delete_reconstruction_results(App& app) {
     stop_splat_view(app);
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
-    const std::array<std::filesystem::path, 16> generated_files = {
+    const std::array<std::filesystem::path, 17> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
         app.layout.splat_spz, app.layout.splat_glb, app.layout.mesh_ply,
-        app.layout.mvs_mesh_ply, app.layout.dense_ply, app.layout.align_log,
-        app.layout.train_log,
+        app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply,
+        app.layout.dense_ply, app.layout.align_log, app.layout.train_log,
         app.layout.dense_log, app.layout.export_log, app.layout.view_log};
 
     std::uintmax_t removed = 0;
@@ -1946,6 +2155,32 @@ void poll_camera_photos(App& app) {
     app.photos.poll();
 }
 
+void poll_mesh_load(App& app) {
+    if (!app.pending_mesh_load.valid()) return;
+    if (app.pending_mesh_load.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::ready)
+        return;
+    MeshLoad loaded = app.pending_mesh_load.get();
+    app.loading_scene = false;
+    if (app.pending_scene_load_generation != app.scene_load_generation) return;
+    if (!loaded.ok) {
+        app.mesh_load_failed = true;
+        set_message(app, "Mesh: " + loaded.error, theme::danger);
+        return;
+    }
+    app.mesh = std::move(loaded.mesh);
+    app.mesh_load_failed = false;
+    pack_mesh_gpu_buffers(app);
+    app.camera.frame(app.mesh.centroid, app.mesh.radius);
+    app.frame_mesh_on_load = false;
+    app.view_mode = VisualizationMode::mesh;
+    set_message(
+        app,
+        "Mesh: " + format_count(app.mesh.vertices.size()) + " vertices, " +
+            format_count(app.mesh.faces.size()) + " faces",
+        theme::success);
+}
+
 void poll_scene_load(App& app) {
     if (!app.loading_scene || !app.pending_load.valid()) return;
     if (app.pending_load.wait_for(std::chrono::seconds(0)) !=
@@ -1974,9 +2209,11 @@ void poll_scene_load(App& app) {
         app.image_qa.selected = app.scene.views.empty() ? -1 : 0;
     infer_images_dir_from_scene(app);
     attach_view_image_paths(app.scene, reconstruction_images_path(app));
-    if (!live_preview_active(app)) app.camera.frame(app.scene);
+    if (!live_preview_active(app) && app.view_mode != VisualizationMode::mesh)
+        app.camera.frame(app.scene);
     if (app.view_mode != VisualizationMode::splat &&
-        app.view_mode != VisualizationMode::rings)
+        app.view_mode != VisualizationMode::rings &&
+        app.view_mode != VisualizationMode::mesh)
         app.view_mode = VisualizationMode::points;
     set_message(
         app,
@@ -2500,8 +2737,12 @@ void on_job_finished(App& app) {
                           : "Dense MVS finished but no dense.ply was written",
                 has_dense ? theme::success : theme::warning);
         }
-        if (app.has_sparse || has_external_dataset(app))
+        if (app.has_mesh) {
+            app.mesh.clear();
+            show_mesh_view(app, true);
+        } else if (app.has_sparse || has_external_dataset(app)) {
             ensure_sparse_loaded(app);
+        }
         return;
     }
     if (kind == JobKind::export_sfm) {
@@ -2526,7 +2767,12 @@ void on_job_finished(App& app) {
             : "Training finished",
         mesh_from_gaussians(app.settings) && !app.has_mesh ? theme::warning
                                                            : theme::success);
-    if (!app.smoke_mode && app.has_model) start_splat_view(app);
+    if (app.has_mesh) {
+        app.mesh.clear();
+        show_mesh_view(app, true);
+    } else if (!app.smoke_mode && app.has_model) {
+        start_splat_view(app);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3168,7 +3414,11 @@ void draw_scene_panel(App& app) {
                         live_preview_active(app))) {
                 set_visualization_mode(app, VisualizationMode::splat);
             }
-            if (has_mesh) object_row("Mesh", false);
+            if (has_mesh &&
+                object_row(
+                    "Mesh", app.view_mode == VisualizationMode::mesh)) {
+                set_visualization_mode(app, VisualizationMode::mesh);
+            }
         }
         ImGui::TreePop();
     }
@@ -3315,6 +3565,8 @@ void draw_viewport_overlay(
 
 void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const bool aligning = alignment_job_running(app);
+    if (app.view_mode == VisualizationMode::mesh)
+        ensure_mesh_loaded(app);
     if (app.view_mode == VisualizationMode::rings)
         ensure_gaussian_scene(app);
     // Only fill an empty viewport here. Replacing an explicitly loaded cloud
@@ -3322,13 +3574,27 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     else if (has_external_dataset(app) && app.scene.views.empty() &&
              !app.scene.has_points())
         ensure_dataset_scene_loaded(app);
-    else
+    else if (app.view_mode != VisualizationMode::mesh || !app.loading_scene)
         ensure_sparse_loaded(app);
     app.view_options.draw_rings = app.view_mode == VisualizationMode::rings;
+    app.view_options.draw_mesh = app.view_mode == VisualizationMode::mesh;
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilledMultiColor(
         min, max, IM_COL32(9, 11, 16, 255), IM_COL32(9, 11, 16, 255),
         IM_COL32(18, 22, 32, 255), IM_COL32(18, 22, 32, 255));
+    const bool gpu_mesh =
+        app.view_mode == VisualizationMode::mesh &&
+        update_gpu_mesh_preview(app, min, max);
+    if (gpu_mesh) {
+        app.view_options.draw_mesh = false;
+#if defined(AETHERSCAN_HAS_TEXTURE)
+        if (app.mesh_preview.descriptor) {
+            draw->AddImage(
+                reinterpret_cast<ImTextureID>(app.mesh_preview.descriptor),
+                min, max);
+        }
+#endif
+    }
 
     ImGui::SetCursorScreenPos(min);
     ImGui::SetNextItemAllowOverlap();
@@ -3341,7 +3607,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         ImGui::IsItemHovered() &&
         !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
 
-    if (!app.loading_scene && !app.scene.has_points() &&
+    if (!app.loading_scene && !app.scene.has_points() && !app.mesh.has() &&
         (aligning || !app.has_sparse || app.suppress_scene_auto_load)) {
         draw_empty_viewport(
             draw, min, max,
@@ -3356,9 +3622,12 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
                 : "Drop an image folder, photos, a video, .asfm, or .ascan onto this view");
     }
 
+    ViewOptions draw_options = app.view_options;
+    if (app.view_mode == VisualizationMode::mesh) draw_options.show_cloud = false;
     const SceneDrawStats stats = app.renderer.draw(
-        draw, min, max, app.scene, app.camera, app.view_options, hovered,
-        app.photos.ids(), app.photos.size());
+        draw, min, max, app.scene, app.camera, draw_options, hovered,
+        app.photos.ids(), app.photos.size(),
+        app.view_mode == VisualizationMode::mesh ? &app.mesh : nullptr);
 
     const bool gizmo_captures =
         draw_viewport_gizmo(app.gizmo, app.camera, min, max);
@@ -3366,7 +3635,12 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const bool frame_key = viewport_input &&
                            !ImGui::GetIO().WantTextInput &&
                            ImGui::IsKeyPressed(ImGuiKey_F);
-    if (frame_key) app.camera.frame(app.scene);
+    if (frame_key) {
+        if (app.view_mode == VisualizationMode::mesh && app.mesh.has())
+            app.camera.frame(app.mesh.centroid, app.mesh.radius);
+        else
+            app.camera.frame(app.scene);
+    }
     if (!handle_viewport_double_click(app, viewport_input, stats, min, max))
         update_orbit_camera(app.camera, viewport_input, app.scene.radius);
 
@@ -3388,6 +3662,11 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     } else if (app.alignment_preview_seen) {
         overlay = "PARTIAL ALIGNMENT / NOT FINAL";
         overlay_dot = theme::warning;
+    } else if (app.view_mode == VisualizationMode::mesh) {
+        overlay = app.mesh.has()
+            ? (gpu_mesh ? "MESH (GPU)" : "MESH")
+            : "NO MESH";
+        overlay_dot = app.mesh.has() ? theme::accent : theme::inactive;
     } else if (app.view_mode == VisualizationMode::rings) {
         overlay = app.scene.has_gaussians() ? "GAUSSIAN RINGS" : "NO GAUSSIANS";
         overlay_dot = app.scene.has_gaussians() ? theme::accent : theme::inactive;
@@ -3400,7 +3679,32 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     }
     draw_viewport_overlay(draw, min, overlay, overlay_dot);
 
-    if (app.scene.has_points()) {
+    if (app.view_mode == VisualizationMode::mesh && app.mesh.has()) {
+        char readout[192];
+        if (gpu_mesh) {
+            std::snprintf(
+                readout, sizeof(readout),
+                "GPU raster  |  %s vertices  |  %s faces  |  %zu / %zu cameras",
+                format_count(app.mesh.vertices.size()).c_str(),
+                format_count(app.mesh.faces.size()).c_str(), stats.drawn_views,
+                app.scene.registered_views);
+        } else if (stats.drawn_faces == 0) {
+            std::snprintf(
+                readout, sizeof(readout),
+                "Mesh loaded (%s faces) but none are in view — press F to frame",
+                format_count(app.mesh.faces.size()).c_str());
+        } else {
+            std::snprintf(
+                readout, sizeof(readout),
+                "%s faces drawn  |  %s vertices  |  %s faces  |  %zu / %zu cameras",
+                format_count(stats.drawn_faces).c_str(),
+                format_count(app.mesh.vertices.size()).c_str(),
+                format_count(app.mesh.faces.size()).c_str(), stats.drawn_views,
+                app.scene.registered_views);
+        }
+        draw->AddText(
+            {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
+    } else if (app.scene.has_points()) {
         char readout[192];
         std::snprintf(
             readout, sizeof(readout),
@@ -3677,6 +3981,10 @@ void draw_viewport_panel(App& app) {
         sync_qa_selection_to_preview(app, previous);
         ensure_dataset_scene_loaded(app);
         ensure_qa_preview(app);
+    } else if (app.view_mode == VisualizationMode::mesh) {
+        draw_sparse_tab(app, view_min, view_max);
+        draw_view_mode_rail(app, view_min);
+        draw_scene_toggle_rail(app, view_min);
     } else if (live_preview_active(app) && !waiting_for_train_preview(app)) {
         draw_training_tab(app, view_min, view_max);
         draw_view_mode_rail(app, view_min);
@@ -4221,7 +4529,35 @@ Action draw_inspector(App& app) {
                 "Load Trained Model", {-1.F, 28.F},
                 app.has_model && !app.loading_scene))
             request_gaussian_scene_load(app);
+        if (theme::toolbar_button(
+                "Load Mesh", {-1.F, 28.F},
+                app.has_mesh && !app.loading_scene)) {
+            app.mesh.clear();
+            show_mesh_view(app, true);
+        }
+        if (app.view_mode == VisualizationMode::mesh) {
+            ImGui::Spacing();
+            theme::metric(
+                "Vertices", format_count(app.mesh.vertices.size()).c_str());
+            theme::metric(
+                "Faces", format_count(app.mesh.faces.size()).c_str());
+            ImGui::Checkbox("Wireframe", &app.view_options.mesh_wireframe);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Draw triangle edges on top of the shaded surface.");
+            ImGui::Checkbox(
+                "Vertex colour", &app.view_options.mesh_vertex_colour);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Use PLY vertex colours instead of clay shading.");
+            theme::caption("Rendered face budget");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::SliderInt(
+                "##mesh_budget", &app.view_options.mesh_face_budget, 20'000,
+                600'000, "%d");
+        }
         ImGui::Spacing();
+        if (app.view_mode != VisualizationMode::mesh) {
         theme::caption("Point size");
         ImGui::SetNextItemWidth(-1.F);
         if (ImGui::SliderFloat(
@@ -4234,6 +4570,7 @@ Action draw_inspector(App& app) {
         ImGui::SliderInt(
             "##budget", &app.view_options.point_budget, 20'000, 600'000,
             "%d");
+        }
         if (app.view_mode == VisualizationMode::rings) {
             theme::caption("Ring budget");
             ImGui::SetNextItemWidth(-1.F);
@@ -4534,7 +4871,15 @@ void draw_status_bar(const App& app) {
         ImGui::SetCursorPosY(centre_y);
         ImGui::TextUnformatted(trailing);
     } else {
-        if (app.scene.has_points()) {
+        if (app.view_mode == VisualizationMode::mesh && app.mesh.has()) {
+            const std::string faces =
+                format_count(app.mesh.faces.size()) + " faces";
+            const float faces_width = status_segment_width(faces.c_str());
+            right -= faces_width + 22.F;
+            draw_status_separator(right + faces_width + 11.F, height);
+            draw_status_segment(
+                right, centre_y, icons::Icon::cube, faces.c_str());
+        } else if (app.scene.has_points()) {
             const std::string points =
                 format_count(app.scene.points.size()) + " pts";
             const float points_width = status_segment_width(points.c_str());
@@ -4555,6 +4900,9 @@ void draw_status_bar(const App& app) {
         } else if (app.view_mode == VisualizationMode::rings) {
             view = "Rings";
             view_icon = icons::Icon::rings;
+        } else if (app.view_mode == VisualizationMode::mesh) {
+            view = "Mesh";
+            view_icon = icons::Icon::cube;
         }
         const float view_width = status_segment_width(view);
         right -= view_width + 22.F;
@@ -4676,6 +5024,7 @@ int main(const int argc, char** argv) {
                     theme::warning);
         }
         poll_scene_load(app);
+        poll_mesh_load(app);
         poll_alignment_preview(app);
         poll_camera_photos(app);
 
@@ -4831,6 +5180,10 @@ int main(const int argc, char** argv) {
     vkDeviceWaitIdle(gpu::device());
     app.image_qa_session.clear();
     app.photos.clear();
+#if defined(AETHERSCAN_HAS_TEXTURE)
+    app.mesh_preview.reset();
+    app.mesh_rasterizer.reset();
+#endif
     app.preview.reset();
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();

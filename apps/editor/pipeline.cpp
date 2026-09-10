@@ -986,6 +986,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
         : settings.splat_format == 4 ? layout.splat_glb : layout.splat_ply;
     layout.mesh_ply = with_suffix("_splat_mesh.ply");
     layout.mvs_mesh_ply = with_suffix("_mesh.ply");
+    layout.mvs_raw_mesh_ply = with_suffix("_mvs_mesh.ply");
     layout.dense_ply = with_suffix("_dense.ply");
     layout.align_log = with_suffix("_align.log");
     layout.train_log = with_suffix("_train.log");

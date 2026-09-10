@@ -79,8 +79,28 @@ struct SparseScene {
     void clear();
 };
 
+struct PreviewMesh {
+    std::vector<Vec3> vertices;
+    std::vector<Vec3> normals;
+    std::vector<std::uint32_t> colours;
+    std::vector<std::array<std::uint32_t, 3>> faces;
+    Vec3 centroid;
+    float radius{1.F};
+
+    [[nodiscard]] bool has() const { return !faces.empty(); }
+    void compute_normals();
+    void compute_bounds();
+    void clear() { *this = {}; }
+};
+
 struct SceneLoad {
     SparseScene scene;
+    std::string error;
+    bool ok{};
+};
+
+struct MeshLoad {
+    PreviewMesh mesh;
     std::string error;
     bool ok{};
 };
@@ -106,6 +126,10 @@ SceneLoad sparse_scene_from_dataset(
     const std::filesystem::path& initial_point_cloud = {},
     const std::filesystem::path& image_directory = {});
 
+// Prefers `mesh_ply` when it exists; otherwise reads the mesh chunk of `.ascan`.
+MeshLoad load_preview_mesh(
+    std::filesystem::path mesh_ply, std::filesystem::path ascan = {});
+
 struct OrbitCamera {
     float yaw{0.785398F};
     float pitch{0.61548F};
@@ -118,6 +142,7 @@ struct OrbitCamera {
     bool interacting{};
 
     void frame(const SparseScene& scene);
+    void frame(const Vec3& centroid, float radius);
     // SuperSplat-style pivot: keep the current eye, orbit around `point`.
     void focus_on(const Vec3& point);
 };
@@ -177,7 +202,8 @@ void update_orbit_camera(
 // look-at plane so a live splat pixel still has a pivot.
 bool pick_orbit_focus_point(
     const SparseScene& scene, const OrbitCamera& camera, ImVec2 min,
-    ImVec2 max, ImVec2 mouse, Vec3& out_point);
+    ImVec2 max, ImVec2 mouse, Vec3& out_point,
+    const PreviewMesh* mesh = nullptr);
 
 // Column-major view matrix used to project the top-right XYZ navigation axes.
 void camera_view_matrix(
@@ -198,11 +224,16 @@ struct ViewOptions {
     bool show_trajectory = true;
     bool show_grid = true;
     bool draw_rings = false;
+    bool draw_mesh = false;
+    bool mesh_wireframe = false;
+    bool mesh_vertex_colour = false;
+    int mesh_face_budget = 220'000;
     float view_scale = 0.045F;
 };
 
 struct SceneDrawStats {
     std::size_t drawn_points{};
+    std::size_t drawn_faces{};
     std::size_t drawn_views{};
     // Index into SparseScene::views, or -1 when nothing is under the cursor.
     int hovered_view{-1};
@@ -214,7 +245,7 @@ public:
         ImDrawList* draw, ImVec2 min, ImVec2 max, const SparseScene& scene,
         const OrbitCamera& camera, const ViewOptions& options,
         bool hovered, const ImTextureID* view_photos = nullptr,
-        std::size_t view_photo_count = 0);
+        std::size_t view_photo_count = 0, const PreviewMesh* mesh = nullptr);
 
 private:
     struct Projected {
@@ -222,9 +253,17 @@ private:
         float y{};
         float depth{};
     };
+    struct MeshTri {
+        ImVec2 a{};
+        ImVec2 b{};
+        ImVec2 c{};
+        float depth{};
+        ImU32 colour{};
+    };
 
     std::vector<Projected> scratch_;
     std::vector<std::uint32_t> colour_scratch_;
+    std::vector<MeshTri> mesh_scratch_;
 };
 
 }  // namespace editor

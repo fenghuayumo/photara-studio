@@ -285,6 +285,7 @@ struct ProjectLayout {
     std::filesystem::path splat_model;
     std::filesystem::path mesh_ply;
     std::filesystem::path mvs_mesh_ply;
+    std::filesystem::path mvs_raw_mesh_ply;
     std::filesystem::path dense_ply;
     std::filesystem::path align_log;
     std::filesystem::path train_log;

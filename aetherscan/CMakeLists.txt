@@ -465,7 +465,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
             src/texture/bake.cpp
             src/texture/delight.cpp
             src/texture/export.cpp
-            src/texture/mask.cpp)
+            src/texture/mask.cpp
+            src/texture/mesh_preview.cpp)
         add_library(AetherScan::Texture ALIAS aetherscan_texture)
         target_include_directories(aetherscan_texture PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -687,6 +688,11 @@ if(AETHERSCAN_ENABLE_FEATURES)
             target_link_libraries(aetherscan_editor PRIVATE
                 aetherscan_imgui AetherScan::SfM AetherScan::Splat
                 Vulkan::Vulkan glfw)
+            if(AETHERSCAN_HAS_TEXTURE AND TARGET AetherScan::Texture)
+                target_link_libraries(aetherscan_editor PRIVATE AetherScan::Texture)
+                target_compile_definitions(aetherscan_editor PRIVATE
+                    AETHERSCAN_HAS_TEXTURE=1)
+            endif()
             if(WIN32)
                 # Native folder picker (IFileOpenDialog) and Explorer reveal.
                 target_link_libraries(aetherscan_editor PRIVATE ole32 shell32)

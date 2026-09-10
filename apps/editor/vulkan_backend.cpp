@@ -352,9 +352,17 @@ void PreviewTexture::reset() {
 }
 
 void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
-    reset();
-    width = source.width;
-    height = source.height;
+    if (source.width == 0 || source.height == 0) {
+        reset();
+        return;
+    }
+    const bool recreate =
+        image == nullptr || width != source.width || height != source.height;
+    if (recreate) {
+        reset();
+        width = source.width;
+        height = source.height;
+    }
     const VkDeviceSize bytes =
         static_cast<VkDeviceSize>(width) * height * 4;
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(bytes));
@@ -386,6 +394,51 @@ void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
     check(vkMapMemory(g_device, staging_memory, 0, bytes, 0, &mapped));
     std::memcpy(mapped, rgba.data(), static_cast<std::size_t>(bytes));
     vkUnmapMemory(g_device, staging_memory);
+
+    if (!recreate) {
+        auto& frame = g_window.Frames[g_window.FrameIndex];
+        check(vkResetCommandPool(g_device, frame.CommandPool, 0));
+        VkCommandBufferBeginInfo begin{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            frame.CommandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+            &barrier);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {width, height, 1};
+        vkCmdCopyBufferToImage(
+            frame.CommandBuffer, staging, image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(
+            frame.CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+            1, &barrier);
+        check(vkEndCommandBuffer(frame.CommandBuffer));
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &frame.CommandBuffer;
+        check(vkQueueSubmit(g_queue, 1, &submit, {}));
+        check(vkQueueWaitIdle(g_queue));
+        vkDestroyBuffer(g_device, staging, nullptr);
+        vkFreeMemory(g_device, staging_memory, nullptr);
+        return;
+    }
 
     VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     image_info.imageType = VK_IMAGE_TYPE_2D;

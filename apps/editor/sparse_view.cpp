@@ -1,8 +1,11 @@
 #include "sparse_view.hpp"
 
+#include "imgui_internal.h"
 #include "theme.hpp"
 
 #include "io/image.hpp"
+#include "mvs/export.hpp"
+#include "project/archive.hpp"
 #include "splat/dataset.hpp"
 #include "splat/formats.hpp"
 
@@ -10,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -928,6 +932,113 @@ void colour_points_from_photos(
 
 void SparseScene::clear() { *this = {}; }
 
+void PreviewMesh::compute_normals() {
+    normals.assign(vertices.size(), {});
+    for (const auto& face : faces) {
+        if (face[0] >= vertices.size() || face[1] >= vertices.size() ||
+            face[2] >= vertices.size())
+            continue;
+        const Vec3 a = vertices[face[0]];
+        const Vec3 ab = vertices[face[1]] - a;
+        const Vec3 ac = vertices[face[2]] - a;
+        const Vec3 n = cross(ab, ac);
+        normals[face[0]] = normals[face[0]] + n;
+        normals[face[1]] = normals[face[1]] + n;
+        normals[face[2]] = normals[face[2]] + n;
+    }
+    for (Vec3& n : normals) n = normalize(n);
+}
+
+void PreviewMesh::compute_bounds() {
+    if (vertices.empty()) {
+        centroid = {};
+        radius = 1.F;
+        return;
+    }
+    Vec3 sum;
+    for (const Vec3& p : vertices) sum = sum + p;
+    centroid = sum * (1.F / static_cast<float>(vertices.size()));
+    std::vector<float> distances;
+    distances.reserve(vertices.size());
+    for (const Vec3& p : vertices) {
+        const Vec3 offset = p - centroid;
+        distances.push_back(std::sqrt(dot(offset, offset)));
+    }
+    std::nth_element(
+        distances.begin(),
+        distances.begin() + static_cast<std::ptrdiff_t>(distances.size() * 95 / 100),
+        distances.end());
+    const std::size_t p95 = std::min(distances.size() - 1, distances.size() * 95 / 100);
+    radius = std::max(1e-3F, distances[p95] * 1.25F);
+}
+
+PreviewMesh preview_mesh_from_mvs(const aetherscan::mvs::Mesh& source) {
+    PreviewMesh mesh;
+    mesh.vertices.reserve(source.vertices.size());
+    for (const auto& v : source.vertices)
+        mesh.vertices.push_back({v.x(), v.y(), v.z()});
+    if (source.normals.size() == source.vertices.size()) {
+        mesh.normals.reserve(source.normals.size());
+        for (const auto& n : source.normals)
+            mesh.normals.push_back({n.x(), n.y(), n.z()});
+    }
+    if (source.colors.size() == source.vertices.size()) {
+        mesh.colours.reserve(source.colors.size());
+        for (const auto& c : source.colors) {
+            const int r = static_cast<int>(std::lround(
+                std::clamp(c.x(), 0.F, 1.F) * 255.F));
+            const int g = static_cast<int>(std::lround(
+                std::clamp(c.y(), 0.F, 1.F) * 255.F));
+            const int b = static_cast<int>(std::lround(
+                std::clamp(c.z(), 0.F, 1.F) * 255.F));
+            mesh.colours.push_back(IM_COL32(r, g, b, 255));
+        }
+    }
+    mesh.faces.reserve(source.faces.size());
+    for (const auto& f : source.faces) {
+        if (f.x() < 0 || f.y() < 0 || f.z() < 0) continue;
+        const auto i0 = static_cast<std::uint32_t>(f.x());
+        const auto i1 = static_cast<std::uint32_t>(f.y());
+        const auto i2 = static_cast<std::uint32_t>(f.z());
+        if (i0 >= mesh.vertices.size() || i1 >= mesh.vertices.size() ||
+            i2 >= mesh.vertices.size() || i0 == i1 || i1 == i2 || i0 == i2)
+            continue;
+        mesh.faces.push_back({i0, i1, i2});
+    }
+    if (mesh.normals.size() != mesh.vertices.size()) mesh.compute_normals();
+    mesh.compute_bounds();
+    return mesh;
+}
+
+MeshLoad load_preview_mesh(
+    std::filesystem::path mesh_ply, std::filesystem::path ascan) {
+    MeshLoad loaded;
+    try {
+        std::error_code error;
+        if (!mesh_ply.empty() && std::filesystem::exists(mesh_ply, error)) {
+            loaded.mesh = preview_mesh_from_mvs(
+                aetherscan::mvs::load_mesh_ply(mesh_ply));
+        } else if (!ascan.empty() && std::filesystem::exists(ascan, error)) {
+            const auto archive = aetherscan::project::Archive::open(ascan);
+            if (!archive.has(aetherscan::project::ChunkType::mesh)) {
+                loaded.error = "Project has no mesh chunk";
+                return loaded;
+            }
+            loaded.mesh = preview_mesh_from_mvs(
+                aetherscan::mvs::decode_mesh(
+                    archive.chunk(aetherscan::project::ChunkType::mesh)));
+        } else {
+            loaded.error = "No mesh file to load";
+            return loaded;
+        }
+        loaded.ok = loaded.mesh.has();
+        if (!loaded.ok) loaded.error = "Mesh has no faces";
+    } catch (const std::exception& failure) {
+        loaded.error = failure.what();
+    }
+    return loaded;
+}
+
 SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour_from_photos) {
     SceneLoad loaded;
     loaded.ok = true;
@@ -1396,17 +1507,24 @@ void sampled_view_indices(
     }
 }
 
-void OrbitCamera::frame(const SparseScene& scene) {
+void OrbitCamera::frame(const Vec3& centroid, const float radius) {
     yaw = 0.785398F;
     pitch = 0.61548F;
+    target = centroid;
+    const float half_fov = fov_degrees * 0.5F * 3.14159265F / 180.F;
+    const float span = std::max(1e-3F, radius);
+    distance = span / std::max(0.05F, std::tan(half_fov)) * 1.35F;
+}
+
+void OrbitCamera::frame(const SparseScene& scene) {
     if (!scene.has_points()) {
+        yaw = 0.785398F;
+        pitch = 0.61548F;
         target = {};
         distance = 6.F;
         return;
     }
-    target = scene.centroid;
-    const float half_fov = fov_degrees * 0.5F * 3.14159265F / 180.F;
-    distance = scene.radius / std::max(0.05F, std::tan(half_fov)) * 1.35F;
+    frame(scene.centroid, scene.radius);
 }
 
 void OrbitCamera::focus_on(const Vec3& point) {
@@ -1428,10 +1546,11 @@ void OrbitCamera::focus_on(const Vec3& point) {
 
 bool pick_orbit_focus_point(
     const SparseScene& scene, const OrbitCamera& camera, const ImVec2 min,
-    const ImVec2 max, const ImVec2 mouse, Vec3& out_point) {
+    const ImVec2 max, const ImVec2 mouse, Vec3& out_point,
+    const PreviewMesh* mesh) {
     const ViewFrame frame = build_frame(camera, min, max);
-    if (scene.has_points()) {
-        const std::size_t count = scene.points.size();
+    const auto pick_points = [&](const std::vector<Vec3>& points) {
+        const std::size_t count = points.size();
         constexpr std::size_t k_pick_budget = 500'000;
         const std::size_t stride =
             std::max<std::size_t>(1, (count + k_pick_budget - 1) / k_pick_budget);
@@ -1443,7 +1562,7 @@ bool pick_orbit_focus_point(
         for (std::size_t i = 0; i < count; i += stride) {
             ImVec2 screen;
             float depth{};
-            if (!project(frame, scene.points[i], screen, depth)) continue;
+            if (!project(frame, points[i], screen, depth)) continue;
             if (screen.x < min.x || screen.x > max.x || screen.y < min.y ||
                 screen.y > max.y)
                 continue;
@@ -1453,14 +1572,14 @@ bool pick_orbit_focus_point(
             if (!found || depth < best_depth) {
                 found = true;
                 best_depth = depth;
-                best = scene.points[i];
+                best = points[i];
             }
         }
-        if (found) {
-            out_point = best;
-            return true;
-        }
-    }
+        if (found) out_point = best;
+        return found;
+    };
+    if (mesh && mesh->has() && pick_points(mesh->vertices)) return true;
+    if (scene.has_points() && pick_points(scene.points)) return true;
 
     // No reconstructed point under the cursor: pivot on the current look-at
     // plane so a live splat pixel still focuses the orbit without a CPU hit.
@@ -1548,21 +1667,30 @@ void camera_view_matrix(
 
 }
 
+ImU32 shade_u32(const ImU32 base, const float lambert) {
+    const float t = 0.28F + 0.72F * std::clamp(lambert, 0.F, 1.F);
+    const ImVec4 c = ImGui::ColorConvertU32ToFloat4(base);
+    return ImGui::ColorConvertFloat4ToU32(
+        {c.x * t, c.y * t, c.z * t, c.w});
+}
+
 SceneDrawStats SceneRenderer::draw(
     ImDrawList* draw, const ImVec2 min, const ImVec2 max,
     const SparseScene& scene, const OrbitCamera& camera,
     const ViewOptions& options, const bool hovered,
-    const ImTextureID* view_photos, const std::size_t view_photo_count) {
+    const ImTextureID* view_photos, const std::size_t view_photo_count,
+    const PreviewMesh* mesh) {
     SceneDrawStats stats;
     const ViewFrame frame = build_frame(camera, min, max);
     draw->PushClipRect(min, max, true);
+    const bool have_mesh = options.draw_mesh && mesh != nullptr && mesh->has();
 
     if (options.show_grid) {
         // Empty stage sits on world Y=0. A loaded cloud gets a floor just
         // below it so the grid does not cut through the reconstruction.
         const float plane_y = scene.has_points()
             ? scene.centroid.y + scene.radius * 1.05F
-            : 0.F;
+            : (have_mesh ? mesh->centroid.y + mesh->radius * 1.05F : 0.F);
         draw_ground_grid(draw, frame, camera, plane_y);
     }
 
@@ -1618,6 +1746,100 @@ SceneDrawStats SceneRenderer::draw(
             }
         }
         stats.drawn_points = scratch_.size();
+    }
+
+    if (have_mesh) {
+        constexpr ImU32 k_clay = IM_COL32(196, 186, 174, 255);
+        const bool use_vertex_colour =
+            options.mesh_vertex_colour && !options.colour_by_depth &&
+            mesh->colours.size() == mesh->vertices.size();
+        const bool use_normals =
+            mesh->normals.size() == mesh->vertices.size();
+        const std::size_t face_count = mesh->faces.size();
+        const std::size_t stride = 1;
+        (void)options.mesh_face_budget;
+        mesh_scratch_.clear();
+        mesh_scratch_.reserve(face_count / stride + 1);
+        float near_depth = std::numeric_limits<float>::max();
+        float far_depth = 0.F;
+        for (std::size_t i = 0; i < face_count; i += stride) {
+            const auto& face = mesh->faces[i];
+            const Vec3& v0 = mesh->vertices[face[0]];
+            const Vec3& v1 = mesh->vertices[face[1]];
+            const Vec3& v2 = mesh->vertices[face[2]];
+            ImVec2 s0, s1, s2;
+            float d0{}, d1{}, d2{};
+            if (!project(frame, v0, s0, d0) || !project(frame, v1, s1, d1) ||
+                !project(frame, v2, s2, d2))
+                continue;
+            const float min_x = std::min(s0.x, std::min(s1.x, s2.x));
+            const float max_x = std::max(s0.x, std::max(s1.x, s2.x));
+            const float min_y = std::min(s0.y, std::min(s1.y, s2.y));
+            const float max_y = std::max(s0.y, std::max(s1.y, s2.y));
+            if (max_x < min.x || min_x > max.x || max_y < min.y || min_y > max.y)
+                continue;
+            Vec3 n;
+            if (use_normals) {
+                n = mesh->normals[face[0]] + mesh->normals[face[1]] +
+                    mesh->normals[face[2]];
+                n = normalize(n);
+            } else {
+                n = normalize(cross(v1 - v0, v2 - v0));
+            }
+            const Vec3 centre = (v0 + v1 + v2) * (1.F / 3.F);
+            const float lambert = std::abs(dot(n, normalize(frame.eye - centre)));
+            ImU32 base = k_clay;
+            if (use_vertex_colour) {
+                const ImVec4 c0 = ImGui::ColorConvertU32ToFloat4(
+                    mesh->colours[face[0]]);
+                const ImVec4 c1 = ImGui::ColorConvertU32ToFloat4(
+                    mesh->colours[face[1]]);
+                const ImVec4 c2 = ImGui::ColorConvertU32ToFloat4(
+                    mesh->colours[face[2]]);
+                base = ImGui::ColorConvertFloat4ToU32(
+                    {(c0.x + c1.x + c2.x) / 3.F, (c0.y + c1.y + c2.y) / 3.F,
+                     (c0.z + c1.z + c2.z) / 3.F, 1.F});
+            }
+            const float depth = (d0 + d1 + d2) * (1.F / 3.F);
+            near_depth = std::min(near_depth, depth);
+            far_depth = std::max(far_depth, depth);
+            mesh_scratch_.push_back({s0, s1, s2, depth, shade_u32(base, lambert)});
+        }
+        if (options.colour_by_depth && !mesh_scratch_.empty()) {
+            const float span = std::max(1e-6F, far_depth - near_depth);
+            for (MeshTri& tri : mesh_scratch_) {
+                const float t = 1.F - (tri.depth - near_depth) / span;
+                tri.colour = shade_u32(depth_ramp(t), 1.F);
+            }
+        }
+        std::sort(
+            mesh_scratch_.begin(), mesh_scratch_.end(),
+            [](const MeshTri& a, const MeshTri& b) {
+                return a.depth > b.depth;
+            });
+        draw->Flags |= ImDrawListFlags_AllowVtxOffset;
+        constexpr std::size_t chunk = 2'048;
+        const ImVec2 uv = draw->_Data->TexUvWhitePixel;
+        for (std::size_t begin = 0; begin < mesh_scratch_.size();
+             begin += chunk) {
+            const std::size_t end =
+                std::min(mesh_scratch_.size(), begin + chunk);
+            draw->PrimReserve(
+                static_cast<int>((end - begin) * 3),
+                static_cast<int>((end - begin) * 3));
+            for (std::size_t i = begin; i < end; ++i) {
+                const MeshTri& tri = mesh_scratch_[i];
+                draw->PrimVtx(tri.a, uv, tri.colour);
+                draw->PrimVtx(tri.b, uv, tri.colour);
+                draw->PrimVtx(tri.c, uv, tri.colour);
+            }
+        }
+        if (options.mesh_wireframe) {
+            const ImU32 wire = IM_COL32(18, 20, 24, 140);
+            for (const MeshTri& tri : mesh_scratch_)
+                draw->AddTriangle(tri.a, tri.b, tri.c, wire, 1.F);
+        }
+        stats.drawn_faces = mesh_scratch_.size();
     }
 
     if (options.show_trajectory && scene.views.size() > 1) {
