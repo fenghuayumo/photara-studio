@@ -94,6 +94,10 @@ struct App {
     bool alignment_preview_seen{};
     unsigned alignment_preview_generation{};
     unsigned alignment_preview_load_generation{};
+    // Bumped to drop an in-flight scene load (e.g. Re-align must not restore
+    // the previous cloud after the viewport has already been cleared).
+    unsigned scene_load_generation{};
+    unsigned pending_scene_load_generation{};
     bool loading_scene{};
     std::string scene_source;
     // Signature of the external dataset alignment already loaded (or whose
@@ -141,6 +145,9 @@ struct App {
     // reconstruction completes. Otherwise draw_sparse_tab() reloads it on the
     // very next frame merely because an artifact still exists on disk.
     bool suppress_scene_auto_load{};
+    // Re-align draws camera photos into this frame's list. Destroy those
+    // descriptors only after present() has submitted them.
+    bool pending_align_viewport_clear{};
 
     bool show_scene{true};
     bool show_viewport{true};
@@ -699,6 +706,7 @@ void request_asfm_scene_load(
     if (app.loading_scene || asfm.empty()) return;
     app.suppress_scene_auto_load = false;
     const std::filesystem::path images = reconstruction_images_path(app);
+    app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = std::move(label);
     app.pending_load = std::async(
@@ -746,6 +754,7 @@ void request_dataset_scene_load(App& app) {
     const std::filesystem::path images = reconstruction_images_path(app);
     app.dataset_scene_key = external_dataset_signature(app);
     app.suppress_scene_auto_load = false;
+    app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = "External dataset";
     app.pending_load = std::async(
@@ -808,6 +817,7 @@ void request_ascan_scene_load(App& app) {
     const std::filesystem::path images = reconstruction_images_path(app);
     if (ascan.empty() && working.empty() && asfm.empty()) return;
     app.suppress_scene_auto_load = false;
+    app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = "Project SfM";
     app.pending_load = std::async(
@@ -869,19 +879,28 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
     }
 }
 
-void clear_loaded_result(App& app) {
+void clear_viewport_scene(App& app) {
     app.photos.clear();
     app.image_qa_session.clear();
     app.image_qa = {};
     app.qa_preview_view = ~0U;
+    app.qa_camera_valid = false;
     app.scene.clear();
     app.scene_source.clear();
     app.camera = {};
     app.view_mode = VisualizationMode::points;
+}
+
+void clear_loaded_result(App& app) {
+    clear_viewport_scene(app);
     app.monitor.reset();
     app.log.clear();
     app.console = {};
     app.fresh_lines.clear();
+}
+
+bool alignment_job_running(const App& app) {
+    return app.job.running() && app.active_job == JobKind::align;
 }
 
 void new_project(App& app) {
@@ -1060,6 +1079,7 @@ void request_scene_load(
     const std::filesystem::path& poses, std::string label) {
     if (app.loading_scene) return;
     app.suppress_scene_auto_load = false;
+    app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = std::move(label);
     app.pending_load = std::async(
@@ -1080,6 +1100,7 @@ void request_gaussian_scene_load(App& app) {
         app.settings.dataset_initial_cloud.data());
     const std::filesystem::path dataset_images = reconstruction_images_path(app);
     app.suppress_scene_auto_load = false;
+    app.pending_scene_load_generation = app.scene_load_generation;
     app.loading_scene = true;
     app.scene_source = "Gaussian centres";
     app.pending_load = std::async(
@@ -1134,8 +1155,8 @@ void request_gaussian_scene_load(App& app) {
 }
 
 void ensure_sparse_loaded(App& app) {
-    if (app.suppress_scene_auto_load || !app.has_sparse ||
-        app.scene.has_points() || app.loading_scene)
+    if (alignment_job_running(app) || app.suppress_scene_auto_load ||
+        !app.has_sparse || app.scene.has_points() || app.loading_scene)
         return;
     if (!app.layout.project_file.empty() || !app.layout.working_sfm.empty())
         request_ascan_scene_load(app);
@@ -1926,6 +1947,7 @@ void poll_scene_load(App& app) {
         return;
     SceneLoad loaded = app.pending_load.get();
     app.loading_scene = false;
+    if (app.pending_scene_load_generation != app.scene_load_generation) return;
     if (!loaded.ok) {
         set_message(app, "Point cloud: " + loaded.error, theme::danger);
         return;
@@ -1967,6 +1989,8 @@ void poll_alignment_preview(App& app) {
             app.alignment_preview_load_generation == app.alignment_preview_generation) {
             const bool first = !app.alignment_preview_seen;
             app.scene = std::move(loaded.scene);
+            app.scene_source = "Alignment preview";
+            attach_view_image_paths(app.scene, reconstruction_images_path(app));
             app.alignment_preview_seen = true;
             if (first) {
                 app.photos.clear();
@@ -2079,6 +2103,12 @@ void start_align(App& app) {
                 AETHERSCAN_CLI_PATH, app.settings, app.layout),
             app.layout.align_log);
         app.active_job = JobKind::align;
+        // Drop the previous cloud so the next frame only shows this run.
+        // The actual GPU/photo teardown waits until after present(); this
+        // frame's draw list still references those descriptors.
+        ++app.scene_load_generation;
+        app.suppress_scene_auto_load = true;
+        app.pending_align_viewport_clear = true;
         set_message(app, "Aligning cameras...", theme::accent);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
@@ -2410,6 +2440,7 @@ void on_job_finished(App& app) {
     }
 
     if (kind == JobKind::align) {
+        app.suppress_scene_auto_load = false;
         if (app.has_sparse) {
             request_ascan_scene_load(app);
         } else {
@@ -3050,8 +3081,10 @@ void draw_scene_panel(App& app) {
                     app.view_mode == VisualizationMode::points &&
                         !live_preview_active(app))) {
                 app.view_mode = VisualizationMode::points;
-                app.suppress_scene_auto_load = false;
-                if (app.has_sparse) ensure_sparse_loaded(app);
+                if (!alignment_job_running(app)) {
+                    app.suppress_scene_auto_load = false;
+                    if (app.has_sparse) ensure_sparse_loaded(app);
+                }
                 write_preview_vis(app);
                 sync_live_preview_camera(
                     app, true, app.preview_raster_width,
@@ -3102,10 +3135,13 @@ void draw_scene_panel(App& app) {
                    : StepState::pending),
         app.scene.has_points()
             ? nullptr
-            : (app.loading_scene
-                   ? "Loading"
-                   : (external_dataset ? "Imported cameras"
-                                       : (app.has_sparse ? "On disk" : nullptr))));
+            : (aligning
+                   ? "Recomputing"
+                   : (app.loading_scene
+                          ? "Loading"
+                          : (external_dataset ? "Imported cameras"
+                                              : (app.has_sparse ? "On disk"
+                                                                : nullptr)))));
     draw_step(
         "04", "Optimise Gaussians",
         training && stage != Stage::meshing
@@ -3199,6 +3235,7 @@ void draw_viewport_overlay(
 }
 
 void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
+    const bool aligning = alignment_job_running(app);
     if (app.view_mode == VisualizationMode::rings)
         ensure_gaussian_scene(app);
     // Only fill an empty viewport here. Replacing an explicitly loaded cloud
@@ -3225,13 +3262,15 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         ImGui::IsItemHovered() &&
         !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
 
-    if (!app.loading_scene && !app.scene.has_points() && !app.has_sparse) {
+    if (!app.loading_scene && !app.scene.has_points() &&
+        (aligning || !app.has_sparse || app.suppress_scene_auto_load)) {
         draw_empty_viewport(
             draw, min, max,
-            app.job.running() && app.active_job == JobKind::align ? "Aligning photos..." :
-            app.settings.images_dir[0] != '\0' ? "Ready to align cameras"
-                                               : "Drop photos, a video, or a reconstruction",
-            app.job.running() && app.active_job == JobKind::align
+            aligning ? "Aligning photos..."
+                     : app.settings.images_dir[0] != '\0'
+                    ? "Ready to align cameras"
+                    : "Drop photos, a video, or a reconstruction",
+            aligning
                 ? "Cameras and points appear as soon as geometry is available"
                 : app.settings.images_dir[0] != '\0'
                 ? "Run Align Photos, or drop a different folder, video, .asfm, or .ascan"
@@ -3255,7 +3294,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const char* overlay = app.settings.images_dir[0] != '\0' ? "NO ALIGNMENT"
                                                             : "NO IMAGES";
     ImVec4 overlay_dot = theme::inactive;
-    if (app.job.running() && app.active_job == JobKind::align) {
+    if (aligning) {
         overlay = app.alignment_preview_seen ? "ALIGNING / PARTIAL RESULT" : "ALIGNING";
         overlay_dot = theme::accent;
     } else if (waiting_for_train_preview(app)) {
@@ -3277,7 +3316,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         overlay = app.scene_source.empty() ? "SPARSE POINT CLOUD"
                                            : app.scene_source.c_str();
         overlay_dot = theme::accent;
-    } else if (app.has_sparse) {
+    } else if (app.has_sparse && !app.suppress_scene_auto_load) {
         overlay = "CLOUD READY";
     }
     draw_viewport_overlay(draw, min, overlay, overlay_dot);
@@ -3296,7 +3335,11 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         draw->AddText(
             {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
     } else if (!app.loading_scene) {
-        const char* hint = app.has_sparse
+        const char* hint = aligning
+            ? "Waiting for cameras from this alignment"
+            : app.suppress_scene_auto_load
+            ? "Previous result cleared"
+            : app.has_sparse
             ? "Reading sparse.ply..."
             : "Drop a photo folder, .asfm, or .ascan here";
         draw->AddText(
@@ -4595,6 +4638,11 @@ int main(const int argc, char** argv) {
         ImDrawData* draw_data = ImGui::GetDrawData();
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
             gpu::present(draw_data, theme::surface_0);
+
+        if (app.pending_align_viewport_clear) {
+            app.pending_align_viewport_clear = false;
+            clear_viewport_scene(app);
+        }
 
         // The viewport draw list can reference camera-photo descriptors until
         // present() has submitted this frame. Clear only afterwards so the
