@@ -13,6 +13,14 @@ std::vector<std::uint8_t> find_structural_pair_risks(const Scene& scene);
 // Resection can constrain a singleton without independently triangulated local
 // depth. Fit against stable-only depths, then validate withheld correspondences.
 std::vector<Index> recover_stable_resections(Scene& scene);
+// Explicit frozen anchors for offline quality recovery. Untrusted views never
+// contribute depths used to estimate or validate their own replacement poses.
+std::vector<Index> recover_stable_resections(
+    Scene& scene, const std::vector<std::uint8_t>& stable);
+// Screen connections relative to each view's strongest pair, recover weak
+// branches from independently validated anchors, and unregister unsupported
+// poses. Strong-component poses and camera intrinsics stay fixed.
+unsigned recover_weakly_connected_views(Scene& scene);
 
 struct SubmapRecoveryOptions {
     unsigned minimum_shared_points{30};

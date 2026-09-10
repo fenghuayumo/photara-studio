@@ -940,8 +940,7 @@ AlignmentObservability analyze_alignment_observability(const Scene& scene) {
             const auto eigenvalues = solver.eigenvalues();
             const double scale = eigenvalues.cwiseAbs().maxCoeff();
             if (!(scale > 0.0)) return false;
-            return eigenvalues[1] >
-                   64.0 * std::numeric_limits<double>::epsilon() * scale;
+            return eigenvalues[1] > 1e-4 * scale;
         }
     };
     std::unordered_map<std::uint64_t, PointScatter> shared_points;
@@ -976,8 +975,11 @@ AlignmentObservability analyze_alignment_observability(const Scene& scene) {
                     scene.images[block_observations[observation].second].pose.C;
                 const double scale = first_ray.squaredNorm() * ray.squaredNorm();
                 if (std::isfinite(scale) && scale > 0.0 &&
+                    // Match the one-degree depth threshold used by stable
+                    // triangulation. Numerical non-parallelism alone does not
+                    // make a weak branch's scale observable.
                     first_ray.cross(ray).squaredNorm() >
-                        64.0 * std::numeric_limits<double>::epsilon() * scale) {
+                        0.000304586490452135 * scale) {
                     independent_depth = true;
                     break;
                 }
@@ -1299,16 +1301,37 @@ ReconstructionSummary run_global_mapping(
         fallback_resection.mult_depth_near,
         fallback_resection.mult_depth_far);
 
-    // Stage 3: short polish with distortion once geometry is stable.
+    // Stage 3: open distortion once geometry is stable. Eight iterations are
+    // a probe, not proof of convergence: large scenes can still be correcting
+    // local drift when this budget expires. Continue while the objective's
+    // tail is improving, retaining a bounded total budget.
     bundle.optimizer.maximum_iterations = 8;
     bundle.optimizer.optimize_rotations = true;
     bundle.optimizer.optimize_translations = !preserve_orbit_centers;
     bundle.optimizer.optimize_focal = true;
     bundle.optimizer.optimize_aspect_ratio = true;
     bundle.optimizer.optimize_distortion = true;
-    if (!run_bundle_adjustment(scene, bundle).success) {
+    auto polish = run_bundle_adjustment(scene, bundle);
+    if (!polish.success) {
         core::Logger::instance().warning(
             "global: final bundle polish failed; keeping previous solution");
+    }
+    for (unsigned continuation = 0; continuation < 3 && polish.success;
+         ++continuation) {
+        const auto& optimizer = polish.optimizer;
+        if (optimizer.termination != ba::TerminationReason::maximum_iterations ||
+            optimizer.iterations.size() < 3) break;
+        const double earlier = optimizer.iterations[optimizer.iterations.size()-3].cost;
+        const double improvement = (earlier-optimizer.final_cost)/std::max(earlier, 1e-12);
+        if (!std::isfinite(improvement) || improvement < 0.001) break;
+        core::Logger::instance().info(
+            "global: continuing final BA pass=", continuation+1,
+            " tail_relative_improvement=", improvement);
+        bundle.optimizer.maximum_iterations = 16;
+        polish = run_bundle_adjustment(scene, bundle);
+        if (!polish.success)
+            core::Logger::instance().warning(
+                "global: final BA continuation failed; retaining last usable solution");
     }
     const float fine_reproj_error =
         std::min(fallback_resection.max_reproj_error, 2.F);
@@ -1465,6 +1488,7 @@ ReconstructionSummary reconstruct(
                 prune_unsupported_registrations(
                     scene_out, config.minimum_final_observations_per_image,
                     config.maximum_final_reprojection_error_pixels);
+            recover_weakly_connected_views(scene_out);
             if (config.resection.checkpoint_callback)
                 config.resection.checkpoint_callback(scene_out);
             const ReconstructionSummary summary = summarize_scene(scene_out);
@@ -1614,6 +1638,7 @@ ReconstructionSummary reconstruct(
         prune_unsupported_registrations(
             scene_out, config.minimum_final_observations_per_image,
             config.maximum_final_reprojection_error_pixels);
+    recover_weakly_connected_views(scene_out);
     summary = summarize_scene(scene_out);
     if (config.resection.checkpoint_callback)
         config.resection.checkpoint_callback(scene_out);

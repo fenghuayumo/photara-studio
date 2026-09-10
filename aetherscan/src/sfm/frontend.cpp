@@ -289,7 +289,7 @@ void select_scene_camera_models(
                 scene.images[pair.id2].camera_id == camera.id) eligible.push_back(i);
         }
         std::vector<CameraModelProbe> probes;
-        const std::size_t count = std::min<std::size_t>(8, eligible.size());
+        const std::size_t count = std::min<std::size_t>(16, eligible.size());
         for (std::size_t i=0; i<count; ++i) {
             const auto& pair = raw_pairs[eligible[i*eligible.size()/count]];
             CameraModelProbe probe;

@@ -10,6 +10,27 @@ from sfm_acceptance import evaluate, reference_poses, rotation, similarity
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_single_bad_camera_cannot_hide_below_p95(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fields = ['name','registered','center_x','center_y','center_z',
+                      'qw','qx','qy','qz','observations','reprojection_rms_px','reprojection_p95_px']
+            xyz = np.random.default_rng(17).normal(size=(200,3))
+            with (root/'images.txt').open('w') as ref, (root/'diag.csv').open('w', newline='') as f:
+                writer = csv.writer(f); writer.writerow(fields)
+                for i, point in enumerate(xyz):
+                    ref.write(f'{i+1} 1 0 0 0 {-point[0]} {-point[1]} {-point[2]} 1 image{i}.png\n\n')
+                    estimated = point + ([0.4,0,0] if i == 0 else [0,0,0])
+                    q = [np.cos(.1),0,0,np.sin(.1)] if i == 0 else [1,0,0,0]
+                    writer.writerow([f'image{i}.png',1,*estimated,*q,100,.1,.2])
+            result = evaluate(root/'diag.csv',root)
+            self.assertTrue(result['gates']['center_p95'])
+            self.assertTrue(result['gates']['rotation_p95'])
+            self.assertFalse(result['gates']['center_max'])
+            self.assertFalse(result['gates']['rotation_max'])
+            self.assertFalse(result['passed'])
+            self.assertEqual(result['worst_rotation_cameras'][0]['name'], 'image0.png')
+
     def test_similarity_and_world_to_camera_convention(self):
         x = np.random.default_rng(12).normal(size=(20, 3))
         r = rotation([.9, .1, -.2, .3])

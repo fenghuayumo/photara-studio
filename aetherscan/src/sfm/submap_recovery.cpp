@@ -65,6 +65,83 @@ std::vector<std::uint8_t> find_structural_pair_risks(const Scene& scene) {
     return audit.reliable;
 }
 
+unsigned recover_weakly_connected_views(Scene& scene) {
+    Scene graph;
+    graph.images.resize(scene.images.size());
+    for (Index i=0;i<scene.images.size();++i) {
+        graph.images[i].id=i;
+        graph.images[i].registered=scene.images[i].registered;
+        graph.images[i].pose=scene.images[i].pose;
+    }
+    std::vector<float> strongest(scene.images.size(),0);
+    const auto eligible=[&](const ImagePair& pair) {
+        return pair.active && pair.relative_pose && !pair.zero_baseline &&
+            pair.id1<scene.images.size() && pair.id2<scene.images.size() &&
+            scene.images[pair.id1].registered && scene.images[pair.id2].registered;
+    };
+    for (const auto& pair:scene.pairs) if (eligible(pair)) {
+        const float weight=pair.composite_weight();
+        if (!std::isfinite(weight)) continue;
+        strongest[pair.id1]=std::max(strongest[pair.id1],weight);
+        strongest[pair.id2]=std::max(strongest[pair.id2],weight);
+    }
+    for (const auto& pair:scene.pairs) if (eligible(pair)) {
+        // Use the weaker endpoint's scale: a genuinely sparse camera should
+        // retain its best links even when attached to a very dense region.
+        const float threshold=0.01F*std::min(strongest[pair.id1],strongest[pair.id2]);
+        if (!std::isfinite(pair.composite_weight()) || pair.composite_weight()<threshold) continue;
+        ImagePair edge(pair.id1,pair.id2);
+        edge.relative_pose=pair.relative_pose;
+        graph.pairs.push_back(std::move(edge));
+    }
+    // Do not certify a weak branch using points optimized jointly with its
+    // suspect poses. The recovery below must triangulate fresh depths from
+    // stable-only observations before a branch can become an anchor.
+    auto stable=analyze_alignment_observability(graph).reliable;
+    unsigned candidates=0,anchors=0;
+    for (Index i=0;i<scene.images.size();++i) {
+        anchors+=stable[i]!=0;
+        candidates+=scene.images[i].registered && !stable[i];
+    }
+    if (!candidates || anchors<3) return 0;
+    core::Logger::instance().info("weak branch audit: candidates=",candidates," anchors=",anchors);
+    std::vector<std::uint8_t> originally_registered;
+    for (const auto& im:scene.images) originally_registered.push_back(im.registered);
+    unsigned recovered_count=0;
+    const auto propagate=[&]() {
+        for (unsigned pass=0;pass<8;++pass) {
+            const auto recovered=recover_stable_resections(scene,stable);
+            for (Index id:recovered) stable[id]=1;
+            recovered_count+=static_cast<unsigned>(recovered.size());
+            if (recovered.empty()) break;
+        }
+    };
+    propagate();
+    bool pending=false;
+    for (Index i=0;i<scene.images.size();++i) if (!stable[i]) {
+        pending=pending || originally_registered[i];
+        scene.images[i].registered=false;
+    }
+    if (pending) {
+        // Old global triangulation can split a good track around a drifting
+        // pose. Rebuild from the original verified matches, triangulating only
+        // the frozen anchors before trying the remaining cameras again.
+        build_tracks(scene);
+        triangulate_tracks(scene,false,2.F,1.F);
+        propagate();
+    }
+    unsigned rejected=0;
+    for (Index i=0;i<scene.images.size();++i) if (originally_registered[i] && !stable[i]) {
+        scene.images[i].registered=false;
+        ++rejected;
+        core::Logger::instance().warning("weak branch pose withheld: image=",
+            scene.images[i].path.filename()," reason=independent_validation_failed");
+    }
+    prune_unsupported_registrations(scene);
+    core::Logger::instance().info("weak branch recovery: recovered=",recovered_count," withheld=",rejected);
+    return recovered_count+rejected;
+}
+
 HierarchicalSubscene make_independent_submap(
     const Scene& parent, const std::vector<Index>& images) {
     HierarchicalSubscene sub;
@@ -352,7 +429,20 @@ SubmapRecoveryReport recover_independent_submap(
     return report;
 }
 std::vector<Index> recover_stable_resections(Scene& scene) {
-    const auto audit = analyze_alignment_observability(scene);
+    return recover_stable_resections(scene, analyze_alignment_observability(scene).reliable);
+}
+
+std::vector<Index> recover_stable_resections(
+    Scene& scene, const std::vector<std::uint8_t>& stable) {
+    if (stable.size()!=scene.images.size())
+        throw std::invalid_argument("stable mask must cover every scene image");
+    AlignmentObservability audit;
+    audit.reliable=stable;
+    for (std::size_t i=0;i<stable.size();++i) {
+        if (stable[i] && !scene.images[i].registered)
+            throw std::invalid_argument("stable anchors must have registered poses");
+        if (stable[i]) ++audit.reliable_views;
+    }
     if (audit.reliable_views == scene.images.size() || audit.reliable_views < 2) return {};
     struct Match { Index feature; Index track; Vec3 point; };
     std::vector<std::vector<Match>> matches(scene.images.size());
@@ -438,6 +528,8 @@ std::vector<Index> recover_stable_resections(Scene& scene) {
         options.max_reproj_error_px = 2;
         options.max_iterations = 10000;
         const auto pose = estimate_absolute_pose(bearings, points, camera, options);
+        core::Logger::instance().info("stable resection fit: image=", image.path.filename(),
+            " success=", pose.success, " inliers=", pose.num_inliers, '/', points.size());
         if (!pose.success || pose.num_inliers < 0.8 * points.size()) { reject("pose_consensus_failed"); continue; }
         unsigned heldout = 0;
         std::set<std::pair<int, int>> cells;

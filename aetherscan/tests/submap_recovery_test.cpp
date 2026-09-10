@@ -69,6 +69,35 @@ int main() {
         aetherscan::core::Logger::instance().configure({});
         const std::vector<Index> ids{4, 5, 6, 7};
         const std::vector<std::uint8_t> stable{1,1,1,1,0,0,0,0};
+        Scene weak_loop=fixture();
+        ImagePair weak_closure(2,5);
+        weak_closure.relative_pose=Pose3D::identity();
+        weak_closure.weight_spatial=1;
+        weak_closure.weight_geometry=1e-6F;
+        for (Index p=0;p<160;++p) weak_closure.matches.push_back({p,p});
+        weak_loop.pairs.push_back(weak_closure);
+        expect(analyze_alignment_observability(weak_loop).reliable_views==8,
+            "unweighted connectivity alone misses the weak loop");
+        const auto fixed_poses=weak_loop.images;
+        expect(recover_weakly_connected_views(weak_loop)==4,
+            "weak loop must trigger independent pose recovery");
+        for (Index i=0;i<4;++i)
+            expect(weak_loop.images[i].pose.C==fixed_poses[i].pose.C &&
+                   weak_loop.images[i].pose.R==fixed_poses[i].pose.R,
+                   "weak branch recovery freezes main poses exactly");
+        for (Index i=4;i<8;++i)
+            expect(weak_loop.images[i].registered &&
+                   (weak_loop.images[i].pose.C-Vec3(0.25*i,0.12*(i%2),0)).norm()<0.01,
+                   "weak loop recovery corrects drift without reference poses");
+        Scene unsupported=fixture(false);
+        expect(recover_weakly_connected_views(unsupported)==4,
+            "unsupported branch must be withheld rather than reported aligned");
+        for (Index i=4;i<8;++i)
+            expect(!unsupported.images[i].registered,"unanchored poses cannot remain registered");
+        bool bad_mask=false;
+        try { recover_stable_resections(unsupported,{1}); }
+        catch (const std::invalid_argument&) { bad_mask=true; }
+        expect(bad_mask,"explicit anchor masks must cover all views");
         Scene scene = fixture();
         const auto preview = make_alignment_preview(scene, 17);
         expect(preview.tracks.size() <= 17 && !preview.tracks.empty(), "preview must bound sampled points");

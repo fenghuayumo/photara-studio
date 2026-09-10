@@ -35,7 +35,7 @@ bool triangulate(const PinholeCamera& camera, const Pose3D& pose,
 void score_candidate(Candidate& candidate, const std::vector<CameraModelProbe>& probes) {
     candidate.scores.assign(probes.size(),0.0);
     for (std::size_t i=0; i<probes.size(); ++i) {
-        if (!candidate.fits[i].success || candidate.fits[i].degenerate_planar) continue;
+        if (!candidate.fits[i].success) continue;
         const auto& probe=probes[i];
         unsigned count=0;
         for (std::size_t j=0; j<probe.first.size(); j+=3) {
@@ -121,6 +121,11 @@ Candidate refine_calibration(Candidate candidate, const std::vector<CameraModelP
         refined.fits[groups[i]].pose.C=Vec3(p.cx,p.cy,p.cz);
     }
     score_candidate(refined,probes);
+    // Intrinsics are shared by every probe, including pairs excluded from BA.
+    // Refit training matches so those pairs are not scored with stale poses
+    // from a different focal/distortion hypothesis. Keep validation held out.
+    auto refitted = fit_candidate(refined.camera, probes);
+    if (refitted.score > refined.score) refined = std::move(refitted);
     return refined.score>candidate.score ? refined : candidate;
 }
 } // namespace
@@ -154,13 +159,12 @@ CameraModelSelection select_camera_model(
         std::sort(seeds.begin(),seeds.end(),[](const Candidate& a,const Candidate& b) {
             return a.score>b.score;
         });
-        std::vector<double> explored;
         for (auto& seed:seeds) {
-            if (seed.score<0.1 || explored.size()>=3) break;
-            if (std::any_of(explored.begin(),explored.end(),[&](double focal) {
-                    return std::abs(std::log(seed.camera.focal()/focal))<0.2;
-                })) continue;
-            explored.push_back(seed.camera.focal());
+            if (seed.score<0.1) break;
+            // A zero-distortion ranking can put every top seed in the same
+            // wrong focal basin. Give every coarse seed a shared-distortion
+            // fit before local focal search can move it into that basin.
+            Candidate coarse = refine_calibration(seed, probes, supplied_focal>0);
             Candidate candidate=std::move(seed);
             if (supplied_focal<=0) {
                 for (double span:{0.30,0.10,0.035}) {
@@ -172,23 +176,47 @@ CameraModelSelection select_camera_model(
                 }
             }
             candidate=refine_calibration(std::move(candidate),probes,supplied_focal>0);
+            if (coarse.score>candidate.score) candidate=std::move(coarse);
             core::Logger::instance().info("calibration hypothesis: model=",model,
                 " focal=",candidate.camera.focal()," validation=",candidate.score);
             if (candidate.score>best[model].score) best[model]=std::move(candidate);
         }
     }
+    if (requested==CameraModel::automatic) {
+        // Planarity depends on the undistortion hypothesis. Counting a planar
+        // pinhole fit as zero while accepting its warped fisheye counterpart
+        // manufactures evidence for fisheye (e.g. an object turntable). Exclude
+        // the pair symmetrically from model comparison if either fit is planar.
+        std::size_t comparable_pairs=0;
+        for (std::size_t i=0; i<probes.size(); ++i) {
+            const bool planar = (i<best[0].fits.size() && best[0].fits[i].degenerate_planar) ||
+                                (i<best[1].fits.size() && best[1].fits[i].degenerate_planar);
+            if (!planar) { ++comparable_pairs; continue; }
+            for (auto& candidate:best)
+                if (i<candidate.scores.size()) candidate.scores[i]=0;
+        }
+        for (auto& candidate:best)
+            candidate.score=std::accumulate(candidate.scores.begin(),candidate.scores.end(),0.0)/
+                std::max<std::size_t>(1,comparable_pairs);
+    }
     result.pinhole_score=best[0].score; result.fisheye_score=best[1].score;
     const int winner=best[1].score>best[0].score ? 1 : 0;
     if (best[winner].scores.empty()) return result;
+    // Near a perfect fit an absolute four-percent margin can reject a model
+    // that halves the validation loss. Retain the conservative absolute
+    // margin for noisy pairs, and a one-percent floor for numerical ties.
+    const auto margin = [](double other_score) {
+        return std::clamp(0.5*(1.0-other_score), 0.01, 0.04);
+    };
     unsigned wins=0;
     for (std::size_t i=0; i<probes.size(); ++i) {
         const double score=best[winner].scores[i];
         if (score>=0.25) ++result.informative_pairs;
         const double other=best[1-winner].scores.empty() ? 0 : best[1-winner].scores[i];
-        if (score>=other+0.04) ++wins;
+        if (score>=other+margin(other)) ++wins;
     }
     result.confident=result.informative_pairs>=2 && wins>=2 && best[winner].score>=0.3 &&
-        best[winner].score-best[1-winner].score>=0.04;
+        best[winner].score-best[1-winner].score>=margin(best[1-winner].score);
     const bool explicit_model=requested!=CameraModel::automatic;
     int selected=winner;
     if (!explicit_model && !result.confident) {

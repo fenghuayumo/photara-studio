@@ -119,7 +119,10 @@ def evaluate(diagnostics, reference):
                                 for r in registered if int(r['observations']) < 30],
                   worst_cameras=[dict(name=names[i], center_error_percent_radius=float(100*distances[i]/radius),
                                       rotation_error_deg=float(angles[i]))
-                                 for i in np.argsort(distances)[-10:][::-1]])
+                                 for i in np.argsort(distances)[-10:][::-1]],
+                  worst_rotation_cameras=[dict(name=names[i], rotation_error_deg=float(angles[i]),
+                                               center_error_percent_radius=float(100*distances[i]/radius))
+                                          for i in np.argsort(angles)[-10:][::-1]])
     # Explicit provisional engineering gates, not a claim of universal product quality.
     result['gates'] = dict(registration=result['registration_fraction'] >= .98,
                            reference_coverage=result['reference_registration_fraction'] >= .98,
@@ -127,6 +130,9 @@ def evaluate(diagnostics, reference):
                            reprojection=weighted_rms <= 1.0,
                            center_p95=result['center_error_percent_reference_radius']['p95'] <= 5.0,
                            rotation_p95=result['rotation_error_deg']['p95'] <= 3.0,
+                           # A few catastrophic cameras must not disappear below P95.
+                           center_max=result['center_error_percent_reference_radius']['max'] <= 10.0,
+                           rotation_max=result['rotation_error_deg']['max'] <= 5.0,
                            camera_support=bool(np.min(obs) >= 30))
     result['passed'] = all(result['gates'].values())
     return result

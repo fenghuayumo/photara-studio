@@ -121,17 +121,114 @@ int main() {
         std::cout << "auto model=" << static_cast<int>(model) << " selected=" << static_cast<int>(selection.model)
                   << " pinhole=" << selection.pinhole_score << " fish=" << selection.fisheye_score << '\n';
         expect(selection.model == model, "automatic camera model from synthetic geometry");
-        if (model == aetherscan::CameraModel::opencv_fisheye)
+        if (model == aetherscan::CameraModel::opencv_fisheye) {
             expect(selection.confident, "wide-angle fisheye evidence is decisive");
+            auto with_planes=probes;
+            for (int pair=0;pair<3;++pair) {
+                aetherscan::sfm::CameraModelProbe plane;
+                Pose3D pose;
+                pose.C=Vec3(0.3+0.1*pair,0.03*pair,0);
+                for (int x=-9;x<=9;++x) for (int y=-5;y<=5;++y) {
+                    const Vec3 point(0.2*x,0.15*y,3);
+                    plane.first.push_back(truth.project(point));
+                    plane.second.push_back(truth.project(pose.transform_world_to_camera(point)));
+                }
+                with_planes.push_back(std::move(plane));
+            }
+            const auto mixed_selection=aetherscan::sfm::select_camera_model(truth,with_planes);
+            expect(mixed_selection.model==model && mixed_selection.confident,
+                   "excluded planar pairs must not dilute valid model evidence");
+            auto initial = make_camera();
+            const auto explicit_fish = aetherscan::sfm::select_camera_model(
+                initial, probes, 0, false, aetherscan::CameraModel::opencv_fisheye);
+            expect(explicit_fish.model == model &&
+                   std::abs(explicit_fish.focal_pixels/truth.focal()-1) < 0.05,
+                   "explicit fisheye estimates focal without a supplied calibration");
+            auto distorted_truth = truth;
+            distorted_truth.k1 = 0.035;
+            distorted_truth.k2 = 0.01;
+            distorted_truth.p1 = -0.003;
+            distorted_truth.p2 = 0.001;
+            auto distorted_probes = probes;
+            for (auto& probe : distorted_probes) {
+                for (auto& pixel : probe.first)
+                    pixel = distorted_truth.project(truth.unproject_normalized(pixel));
+                for (auto& pixel : probe.second)
+                    pixel = distorted_truth.project(truth.unproject_normalized(pixel));
+            }
+            const auto distortion_fit = aetherscan::sfm::select_camera_model(
+                initial, distorted_probes, 0, false, model);
+            auto fitted = truth;
+            fitted.fx = fitted.fy = distortion_fit.focal_pixels;
+            fitted.k1 = distortion_fit.distortion[0];
+            fitted.k2 = distortion_fit.distortion[1];
+            fitted.p1 = distortion_fit.distortion[2];
+            fitted.p2 = distortion_fit.distortion[3];
+            for (double angle : {0.1, 0.4, 0.7, 0.9}) {
+                const Vec3 ray(std::sin(angle), 0, std::cos(angle));
+                expect((fitted.project(ray)-distorted_truth.project(ray)).norm() < 2,
+                       "joint fisheye focal/distortion fit predicts unseen rays");
+            }
+            // Some probe poses can be excluded from joint BA by a planar
+            // hypothesis. Changing shared intrinsics must still leave a
+            // calibration that predicts rays beyond the fitted point set.
+            for (auto& probe : with_planes) {
+                for (auto& pixel : probe.first)
+                    pixel = distorted_truth.project(truth.unproject_normalized(pixel));
+                for (auto& pixel : probe.second)
+                    pixel = distorted_truth.project(truth.unproject_normalized(pixel));
+            }
+            const auto mixed_distortion_fit = aetherscan::sfm::select_camera_model(
+                initial, with_planes, 0, false, model);
+            fitted.fx = fitted.fy = mixed_distortion_fit.focal_pixels;
+            fitted.k1 = mixed_distortion_fit.distortion[0];
+            fitted.k2 = mixed_distortion_fit.distortion[1];
+            fitted.p1 = mixed_distortion_fit.distortion[2];
+            fitted.p2 = mixed_distortion_fit.distortion[3];
+            for (double angle : {0.1, 0.4, 0.7, 0.9}) {
+                const Vec3 ray(std::sin(angle), 0, std::cos(angle));
+                expect((fitted.project(ray)-distorted_truth.project(ray)).norm() < 2,
+                       "mixed planar probes preserve fisheye ray calibration");
+            }
+        }
         else {
             const auto calibrated = aetherscan::sfm::select_camera_model(truth,probes,640);
             expect(calibrated.model == model && std::abs(calibrated.focal_pixels-640)<1e-6,
                    "known focal is preserved when model evidence is ambiguous");
+            if (!calibrated.confident)
+                expect(calibrated.distortion == std::array<double,4>{},
+                       "ambiguous pinhole calibration must not inject distortion");
         }
     }
     const auto ambiguous = aetherscan::sfm::select_camera_model(make_camera(),{});
     expect(ambiguous.model == aetherscan::CameraModel::pinhole && !ambiguous.confident,
            "insufficient model evidence falls back to pinhole");
+    std::vector<aetherscan::sfm::CameraModelProbe> planar_probes;
+    const auto planar_camera = make_camera();
+    for (int pair=0; pair<3; ++pair) {
+        aetherscan::sfm::CameraModelProbe probe;
+        Pose3D pose;
+        pose.C = Vec3(0.2+0.1*pair, 0.04*pair, 0.03);
+        pose.R = Eigen::AngleAxisd(0.03*pair, Vec3::UnitY()).toRotationMatrix();
+        for (int x=-9; x<=9; ++x) for (int y=-5; y<=5; ++y) {
+            const Vec3 point(0.12*x, 0.12*y, 3);
+            probe.first.push_back(planar_camera.project(point));
+            probe.second.push_back(planar_camera.project(pose.transform_world_to_camera(point)));
+        }
+        planar_probes.push_back(std::move(probe));
+    }
+    const auto planar_selection = aetherscan::sfm::select_camera_model(planar_camera, planar_probes);
+    expect(planar_selection.model == aetherscan::CameraModel::pinhole && !planar_selection.confident,
+           "planar support cannot manufacture confidence for another projection model");
+    aetherscan::sfm::CameraModelProbe malformed;
+    malformed.first.assign(60, Vec2(100, 100));
+    malformed.second.assign(59, Vec2(110, 100));
+    const auto explicit_empty = aetherscan::sfm::select_camera_model(
+        make_camera(), {malformed, malformed}, 0, false,
+        aetherscan::CameraModel::opencv_fisheye);
+    expect(explicit_empty.model == aetherscan::CameraModel::opencv_fisheye &&
+           !explicit_empty.confident && explicit_empty.focal_pixels == 640,
+           "invalid probe lengths preserve explicit fisheye initialization");
 
     // Synthetic two-view relative pose
     const PinholeCamera cam = make_camera();

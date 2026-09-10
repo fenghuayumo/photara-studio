@@ -748,6 +748,12 @@ void test_alignment_observability_reports_bridge_branch() {
         analyze_alignment_observability(scene);
     expect(anchored.bridge_edges == 0 && anchored.reliable_views == 7,
            "three non-collinear shared points make branch scale observable");
+    for (Index image_id=0;image_id<scene.images.size();++image_id)
+        scene.images[image_id].pose.C=Vec3(1e-5*image_id,0,0);
+    expect(analyze_alignment_observability(scene).unreliable_views==3,
+           "numerically distinct rays without useful parallax cannot certify branch depth");
+    for (Index image_id=0;image_id<scene.images.size();++image_id)
+        scene.images[image_id].pose.C=Vec3(static_cast<double>(image_id),0,0);
     scene.tracks.back().position = Vec3(2.0, 0.0, 4.0);
     expect(analyze_alignment_observability(scene).unreliable_views == 3,
            "collinear shared landmarks cannot certify a similarity");
