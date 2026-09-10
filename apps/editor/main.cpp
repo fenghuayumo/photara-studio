@@ -1474,6 +1474,30 @@ void snap_preview_to_index(App& app, const unsigned index) {
         app, true, app.preview_raster_width, app.preview_raster_height);
 }
 
+// Double-click a training frustum to look through that capture; otherwise
+// focus the orbit pivot on the point (or splat pixel) under the cursor.
+bool handle_viewport_double_click(
+    App& app, const bool accepts_input, const SceneDrawStats& stats,
+    const ImVec2 min, const ImVec2 max) {
+    if (!accepts_input || ImGui::GetIO().WantTextInput) return false;
+    if (!ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) return false;
+    if (stats.hovered_view >= 0 &&
+        static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size() &&
+        app.scene.views[static_cast<std::size_t>(stats.hovered_view)].registered) {
+        snap_preview_to_index(app, static_cast<unsigned>(stats.hovered_view));
+        app.camera.interacting = false;
+        return true;
+    }
+    Vec3 point;
+    if (!pick_orbit_focus_point(
+            app.scene, app.camera, min, max, ImGui::GetIO().MousePos, point))
+        return false;
+    app.camera.focus_on(point);
+    app.preview_follow_view = false;
+    app.camera.interacting = false;
+    return true;
+}
+
 [[nodiscard]] bool qa_capture_frame_ready(const App& app) {
     if (!app.qa_camera_valid || app.image_qa.selected < 0) return false;
     if (app.qa_preview_view != static_cast<unsigned>(app.image_qa.selected))
@@ -2742,6 +2766,8 @@ void draw_controls_window(App& app) {
         ImGui::BulletText("RMB drag: fly look");
         ImGui::BulletText("RMB + WASD/QE: fly; Shift accelerates");
         ImGui::BulletText("Mouse wheel: dolly; F: frame reconstruction");
+        ImGui::BulletText("Double-click a point: orbit around that point");
+        ImGui::BulletText("Double-click a camera frustum: look through it");
         ImGui::Spacing();
         ImGui::TextUnformatted("2D image QA");
         ImGui::Separator();
@@ -3218,12 +3244,13 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
 
     const bool gizmo_captures =
         draw_viewport_gizmo(app.gizmo, app.camera, min, max);
-    const bool frame_key = hovered && !gizmo_captures &&
+    const bool viewport_input = hovered && !gizmo_captures;
+    const bool frame_key = viewport_input &&
                            !ImGui::GetIO().WantTextInput &&
                            ImGui::IsKeyPressed(ImGuiKey_F);
     if (frame_key) app.camera.frame(app.scene);
-    update_orbit_camera(
-        app.camera, hovered && !gizmo_captures, app.scene.radius);
+    if (!handle_viewport_double_click(app, viewport_input, stats, min, max))
+        update_orbit_camera(app.camera, viewport_input, app.scene.radius);
 
     const char* overlay = app.settings.images_dir[0] != '\0' ? "NO ALIGNMENT"
                                                             : "NO IMAGES";
@@ -3277,13 +3304,14 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     }
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
-        "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  wheel dolly  |  F frame");
+        "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  wheel dolly  |  F frame  |  double-click focus");
 
     if (!gizmo_captures && stats.hovered_view >= 0 &&
         static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size()) {
         const ViewPose& pose = app.scene.views[stats.hovered_view];
         ImGui::SetTooltip(
-            "%s\n%u x %u  |  f %.1f px\n%zu observations  |  p95 %.2f px",
+            "%s\n%u x %u  |  f %.1f px\n%zu observations  |  p95 %.2f px\n"
+            "Double-click to look through this camera",
             pose.name.c_str(), pose.width, pose.height, pose.fx,
             pose.observations, pose.reprojection_p95);
     }
@@ -3349,7 +3377,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
             app.preview_view + 1, view_count);
 
     const char* controls = live
-        ? "LMB orbit  |  MMB pan  |  RMB + WASD fly  |  arrows snap capture"
+        ? "LMB orbit  |  MMB pan  |  RMB + WASD fly  |  arrows snap capture  |  double-click focus"
         : (app.has_model
                ? "Select a visualization mode to start the live preview"
                : "Train 3DGS to move this camera");
@@ -3378,12 +3406,16 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
 
     const bool gizmo_captures =
         draw_viewport_gizmo(app.gizmo, app.camera, min, max);
-    update_orbit_camera(
-        app.camera, hovered && !gizmo_captures, app.scene.radius);
-    if (app.camera.interacting ||
-        (hovered && !gizmo_captures && ImGui::GetIO().MouseWheel != 0.F))
+    const bool viewport_input = hovered && !gizmo_captures;
+    const bool used_double_click = handle_viewport_double_click(
+        app, viewport_input, overlay_stats, min, max);
+    if (!used_double_click)
+        update_orbit_camera(app.camera, viewport_input, app.scene.radius);
+    if (!used_double_click &&
+        (app.camera.interacting ||
+         (viewport_input && ImGui::GetIO().MouseWheel != 0.F)))
         app.preview_follow_view = false;
-    handle_preview_view_input(app, hovered && !gizmo_captures);
+    handle_preview_view_input(app, viewport_input);
     std::uint32_t raster_w = app.preview_raster_width;
     std::uint32_t raster_h = app.preview_raster_height;
     fit_preview_raster(max.x - min.x, max.y - min.y, raster_w, raster_h);
@@ -3434,7 +3466,8 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
             app.scene.views.size()) {
         const ViewPose& pose = app.scene.views[overlay_stats.hovered_view];
         ImGui::SetTooltip(
-            "%s\n%u x %u  |  f %.1f px\n%zu observations  |  p95 %.2f px",
+            "%s\n%u x %u  |  f %.1f px\n%zu observations  |  p95 %.2f px\n"
+            "Double-click to look through this camera",
             pose.name.c_str(), pose.width, pose.height, pose.fx,
             pose.observations, pose.reprojection_p95);
     }

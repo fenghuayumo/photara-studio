@@ -118,6 +118,8 @@ struct OrbitCamera {
     bool interacting{};
 
     void frame(const SparseScene& scene);
+    // SuperSplat-style pivot: keep the current eye, orbit around `point`.
+    void focus_on(const Vec3& point);
 };
 
 // Rasterizer-facing camera matching splat::Camera (OpenCV +Z, Y-down, W2C
@@ -169,6 +171,13 @@ void sampled_view_indices(
 // accelerates keyboard movement.
 void update_orbit_camera(
     OrbitCamera& camera, bool accepts_input, float scene_radius);
+
+// World point under the cursor for double-click orbit focus. Prefers a
+// reconstructed / Gaussian centre near the mouse; otherwise the current
+// look-at plane so a live splat pixel still has a pivot.
+bool pick_orbit_focus_point(
+    const SparseScene& scene, const OrbitCamera& camera, ImVec2 min,
+    ImVec2 max, ImVec2 mouse, Vec3& out_point);
 
 // Column-major view matrix used to project the top-right XYZ navigation axes.
 void camera_view_matrix(

@@ -188,6 +188,36 @@ bool point_in_convex_quad(const ImVec2 point, const ImVec2 quad[4]) {
            (s0 <= 0.F && s1 <= 0.F && s2 <= 0.F && s3 <= 0.F);
 }
 
+// Lower is better. The image-plane quad is only hittable when the frustum is
+// actually drawn, so undrawn cameras do not steal clicks through invisible
+// photo planes. Apexes stay hittable so a camera on the trajectory can be
+// selected even when it is not in the sampled marker set.
+float view_pick_score(
+    const ViewFrame& frame, const ViewPose& pose, const ImVec2 mouse,
+    const float length, const bool include_image_plane) {
+    float score = 1e9F;
+    ImVec2 apex_screen;
+    float apex_depth{};
+    if (project(frame, pose.centre, apex_screen, apex_depth)) {
+        const float dx = apex_screen.x - mouse.x;
+        const float dy = apex_screen.y - mouse.y;
+        score = std::sqrt(dx * dx + dy * dy);
+    }
+    if (!include_image_plane) return score;
+    Vec3 corners[4];
+    image_plane_corners(pose, length, corners);
+    ImVec2 corner_screen[4];
+    bool plane_visible = true;
+    for (int i = 0; i < 4; ++i) {
+        float corner_depth{};
+        plane_visible &=
+            project(frame, corners[i], corner_screen[i], corner_depth);
+    }
+    if (plane_visible && point_in_convex_quad(mouse, corner_screen))
+        score = std::min(score, 4.F);
+    return score;
+}
+
 float snap_grid_cell(const float desired) {
     const float value = std::max(desired, 1e-8F);
     const float exponent = std::floor(std::log10(value));
@@ -1379,6 +1409,73 @@ void OrbitCamera::frame(const SparseScene& scene) {
     distance = scene.radius / std::max(0.05F, std::tan(half_fov)) * 1.35F;
 }
 
+void OrbitCamera::focus_on(const Vec3& point) {
+    const float clamped_pitch = std::clamp(pitch, -1.53F, 1.53F);
+    const Vec3 offset{
+        std::cos(clamped_pitch) * std::sin(yaw), -std::sin(clamped_pitch),
+        std::cos(clamped_pitch) * std::cos(yaw)};
+    const Vec3 eye = target + offset * distance;
+    const Vec3 delta = eye - point;
+    const float length = std::sqrt(dot(delta, delta));
+    target = point;
+    distance = std::clamp(length, 1e-3F, 1e7F);
+    if (length < 1e-8F) return;
+    const Vec3 direction = delta * (1.F / length);
+    pitch = std::clamp(
+        std::asin(std::clamp(-direction.y, -1.F, 1.F)), -1.53F, 1.53F);
+    yaw = std::atan2(direction.x, direction.z);
+}
+
+bool pick_orbit_focus_point(
+    const SparseScene& scene, const OrbitCamera& camera, const ImVec2 min,
+    const ImVec2 max, const ImVec2 mouse, Vec3& out_point) {
+    const ViewFrame frame = build_frame(camera, min, max);
+    if (scene.has_points()) {
+        const std::size_t count = scene.points.size();
+        constexpr std::size_t k_pick_budget = 500'000;
+        const std::size_t stride =
+            std::max<std::size_t>(1, (count + k_pick_budget - 1) / k_pick_budget);
+        constexpr float k_radius = 12.F;
+        const float radius2 = k_radius * k_radius;
+        bool found = false;
+        float best_depth = std::numeric_limits<float>::max();
+        Vec3 best{};
+        for (std::size_t i = 0; i < count; i += stride) {
+            ImVec2 screen;
+            float depth{};
+            if (!project(frame, scene.points[i], screen, depth)) continue;
+            if (screen.x < min.x || screen.x > max.x || screen.y < min.y ||
+                screen.y > max.y)
+                continue;
+            const float dx = screen.x - mouse.x;
+            const float dy = screen.y - mouse.y;
+            if (dx * dx + dy * dy > radius2) continue;
+            if (!found || depth < best_depth) {
+                found = true;
+                best_depth = depth;
+                best = scene.points[i];
+            }
+        }
+        if (found) {
+            out_point = best;
+            return true;
+        }
+    }
+
+    // No reconstructed point under the cursor: pivot on the current look-at
+    // plane so a live splat pixel still focuses the orbit without a CPU hit.
+    const float sx = mouse.x - frame.centre.x;
+    const float sy = frame.centre.y - mouse.y;
+    const Vec3 dir = normalize(
+        frame.forward * frame.focal + frame.right * sx + frame.up * sy);
+    const float denom = dot(dir, frame.forward);
+    if (std::abs(denom) < 1e-6F) return false;
+    const float t = dot(camera.target - frame.eye, frame.forward) / denom;
+    if (t <= k_near_plane) return false;
+    out_point = frame.eye + dir * t;
+    return true;
+}
+
 void update_orbit_camera(
     OrbitCamera& camera, const bool accepts_input, const float scene_radius) {
     const ImGuiIO& io = ImGui::GetIO();
@@ -1545,35 +1642,32 @@ SceneDrawStats SceneRenderer::draw(
         // rings only draw a uniform subset so the cloud stays readable.
         const float length = std::max(1e-4F, scene.radius * options.view_scale);
 
-        // Pick the hovered marker before drawing so exactly one camera gets
-        // the bright treatment. The far-plane quad is also hittable so a
-        // textured image can be selected without aiming at the tiny apex.
+        std::vector<char> drawn(scene.views.size(), 0);
         for (const std::size_t index : markers) {
-            if (!hovered) break;
-            const ViewPose& pose = scene.views[index];
-            ImVec2 apex_screen;
-            float apex_depth{};
-            float score = 1e9F;
-            if (project(frame, pose.centre, apex_screen, apex_depth)) {
-                const float dx = apex_screen.x - mouse.x;
-                const float dy = apex_screen.y - mouse.y;
-                score = std::sqrt(dx * dx + dy * dy);
+            if (index < drawn.size()) drawn[index] = 1;
+        }
+
+        // Pick before drawing so exactly one camera gets the bright treatment.
+        // Sampled frustums are hittable on the far-plane quad; every registered
+        // camera remains hittable at its apex so a trajectory vertex can be
+        // chosen even when that frustum is not in the drawn subset.
+        if (hovered) {
+            for (std::size_t index = 0; index < scene.views.size(); ++index) {
+                const ViewPose& pose = scene.views[index];
+                if (!pose.registered) continue;
+                const float score = view_pick_score(
+                    frame, pose, mouse, length, drawn[index] != 0);
+                if (score < best_distance) {
+                    best_distance = score;
+                    stats.hovered_view = static_cast<int>(index);
+                }
             }
-            Vec3 corners[4];
-            image_plane_corners(pose, length, corners);
-            ImVec2 corner_screen[4];
-            bool plane_visible = true;
-            for (int i = 0; i < 4; ++i) {
-                float corner_depth{};
-                plane_visible &= project(
-                    frame, corners[i], corner_screen[i], corner_depth);
-            }
-            if (plane_visible && point_in_convex_quad(mouse, corner_screen))
-                score = std::min(score, 4.F);
-            if (score < best_distance) {
-                best_distance = score;
-                stats.hovered_view = static_cast<int>(index);
-            }
+        }
+        if (stats.hovered_view >= 0) {
+            const auto hovered_index =
+                static_cast<std::size_t>(stats.hovered_view);
+            if (hovered_index < drawn.size() && drawn[hovered_index] == 0)
+                markers.push_back(hovered_index);
         }
 
         for (const std::size_t index : markers) {
