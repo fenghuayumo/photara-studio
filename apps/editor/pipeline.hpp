@@ -304,6 +304,7 @@ struct ProjectLayout {
     std::filesystem::path preview_camera_file;
     std::filesystem::path preview_vis_file;
     std::filesystem::path working_sfm;
+    std::filesystem::path working_subject_bounds;
     std::filesystem::path working_splat;
     std::filesystem::path working_mesh;
     std::filesystem::path working_dense;

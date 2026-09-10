@@ -23,6 +23,8 @@ void save_mesh_ply(const Mesh& mesh, const std::filesystem::path& path);
 void save_mesh_obj(const Mesh& mesh, const std::filesystem::path& path);
 void save_subject_bounds(
     const OrientedBoundingBox& bounds, const std::filesystem::path& path);
+bool load_subject_bounds(
+    OrientedBoundingBox& bounds, const std::filesystem::path& path);
 
 std::vector<std::uint8_t> encode_mesh(const Mesh& mesh);
 Mesh decode_mesh(std::span<const std::uint8_t> bytes);

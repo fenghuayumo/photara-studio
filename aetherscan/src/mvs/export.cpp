@@ -508,6 +508,28 @@ void save_subject_bounds(
         << bounds.half_extent.y() << ' ' << bounds.half_extent.z() << '\n';
 }
 
+bool load_subject_bounds(
+    OrientedBoundingBox& bounds, const std::filesystem::path& path) {
+    bounds = {};
+    std::ifstream in(path);
+    if (!in) return false;
+    OrientedBoundingBox loaded;
+    in >> loaded.center.x() >> loaded.center.y() >> loaded.center.z();
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            in >> loaded.axes(row, column);
+    in >> loaded.half_extent.x() >> loaded.half_extent.y() >>
+        loaded.half_extent.z();
+    if (!in) return false;
+    loaded.valid = loaded.center.allFinite() &&
+        loaded.half_extent.allFinite() &&
+        (loaded.half_extent.array() > 0.F).all() &&
+        loaded.axes.allFinite();
+    if (!loaded.valid) return false;
+    bounds = loaded;
+    return true;
+}
+
 void save_dense_ply(const DenseCloud& cloud, const std::filesystem::path& path) {
     std::ofstream out(path, std::ios::binary);
     if (!out) throw std::runtime_error("Failed to create PLY: " + path.string());

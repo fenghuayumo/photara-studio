@@ -154,13 +154,236 @@ void apply_imguizmo_style() {
     style.Colors[ImGuizmo::SELECTION] = {0.29F, 0.71F, 0.96F, 0.90F};
 }
 
+float vec_component(const Vec3& v, const int axis) {
+    return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
+}
+
+void set_vec_component(Vec3& v, const int axis, const float value) {
+    if (axis == 0) v.x = value;
+    else if (axis == 1) v.y = value;
+    else v.z = value;
+}
+
+Vec3 axis_vector(const int axis) {
+    Vec3 v{};
+    set_vec_component(v, axis, 1.F);
+    return v;
+}
+
+struct BoxFace {
+    int axis{};
+    bool is_max{};
+};
+
+constexpr BoxFace k_box_faces[6] = {
+    {0, false}, {0, true}, {1, false}, {1, true}, {2, false}, {2, true}};
+
+Vec3 reconstruction_box_face_centre(
+    const ReconstructionBox& box, const BoxFace face) {
+    Vec3 centre = box.centre();
+    set_vec_component(
+        centre, face.axis,
+        vec_component(face.is_max ? box.max : box.min, face.axis));
+    return centre;
+}
+
+float squared_length(const Vec3 v) {
+    return v.x * v.x + v.y * v.y + v.z * v.z;
+}
+
+Vec3 add3(const Vec3 a, const Vec3 b) {
+    return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+Vec3 sub3(const Vec3 a, const Vec3 b) {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+Vec3 scale3(const Vec3 a, const float s) {
+    return {a.x * s, a.y * s, a.z * s};
+}
+float dot3(const Vec3 a, const Vec3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+Vec3 cross3(const Vec3 a, const Vec3 b) {
+    return {
+        a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+Vec3 norm3(const Vec3 v) {
+    const float length = std::sqrt(squared_length(v));
+    return length > 1e-20F ? scale3(v, 1.F / length) : Vec3{0.F, 0.F, 1.F};
+}
+
+bool intersect_plane(
+    const Vec3 origin, const Vec3 direction, const Vec3 point,
+    const Vec3 normal, Vec3& hit) {
+    const float denom = dot3(direction, normal);
+    if (std::abs(denom) < 1e-8F) return false;
+    const float t = dot3(sub3(point, origin), normal) / denom;
+    if (t <= 1e-4F) return false;
+    hit = add3(origin, scale3(direction, t));
+    return true;
+}
+
+bool draw_region_handles(
+    ViewportGizmoState& state, ReconstructionBox& box,
+    const ReconstructionTransform* xf, const OrbitCamera& camera,
+    const ImVec2 min, const ImVec2 max, const float scene_radius) {
+    if (!box.valid) {
+        state.box = {};
+        return false;
+    }
+
+    const ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 mouse = io.MousePos;
+    const bool in_view =
+        mouse.x >= min.x && mouse.x <= max.x && mouse.y >= min.y &&
+        mouse.y <= max.y;
+    const ImVec2 orient_min{
+        max.x - 108.F - 12.F, min.y + 12.F};
+    const bool over_orient =
+        mouse.x >= orient_min.x && mouse.x <= orient_min.x + 108.F &&
+        mouse.y >= orient_min.y && mouse.y <= orient_min.y + 108.F;
+
+    int hot = state.box.dragging ? state.box.face : -1;
+    ImVec2 handle_screen[6];
+    bool handle_ok[6]{};
+    float handle_depth[6]{};
+    float best = 12.F * 12.F;
+    for (int i = 0; i < 6; ++i) {
+        const Vec3 local = reconstruction_box_face_centre(box, k_box_faces[i]);
+        const Vec3 world = xf ? transform_point(*xf, local) : local;
+        if (!project_world_to_screen(
+                camera, min, max, world, handle_screen[i], handle_depth[i]))
+            continue;
+        handle_ok[i] = true;
+        if (state.box.dragging || !in_view || over_orient) continue;
+        const float distance = squared_distance(mouse, handle_screen[i]);
+        if (distance < best) {
+            best = distance;
+            hot = i;
+        }
+    }
+
+    if (!state.box.dragging && hot >= 0 &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const Vec3 local =
+            reconstruction_box_face_centre(box, k_box_faces[hot]);
+        state.box.dragging = true;
+        state.box.face = hot;
+        state.box.grab_point = xf ? transform_point(*xf, local) : local;
+        state.box.start = box;
+    }
+
+    if (state.box.dragging) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            state.box.dragging = false;
+            state.box.face = -1;
+        } else {
+            const BoxFace face = k_box_faces[state.box.face];
+            Vec3 eye;
+            Vec3 dir;
+            camera_world_ray(camera, min, max, mouse, eye, dir);
+            const Vec3 local_axis = axis_vector(face.axis);
+            Vec3 axis_world =
+                xf ? transform_vector(*xf, local_axis) : local_axis;
+            const float axis_len = std::sqrt(squared_length(axis_world));
+            if (axis_len > 1e-8F) {
+                const Vec3 axis_n = scale3(axis_world, 1.F / axis_len);
+                Vec3 plane_n = cross3(axis_n, sub3(state.box.grab_point, eye));
+                if (squared_length(plane_n) < 1e-10F)
+                    plane_n = cross3(axis_n, Vec3{0.F, 1.F, 0.F});
+                plane_n = cross3(plane_n, axis_n);
+                Vec3 hit;
+                if (intersect_plane(
+                        eye, dir, state.box.grab_point, norm3(plane_n), hit)) {
+                    float along = dot3(sub3(hit, state.box.grab_point), axis_n);
+                    if (io.KeyShift) along *= 0.1F;
+                    float local_delta = along / axis_len;
+                    box = state.box.start;
+                    float& side = face.is_max
+                        ? (face.axis == 0
+                               ? box.max.x
+                               : (face.axis == 1 ? box.max.y : box.max.z))
+                        : (face.axis == 0
+                               ? box.min.x
+                               : (face.axis == 1 ? box.min.y : box.min.z));
+                    side = vec_component(
+                               face.is_max ? state.box.start.max
+                                           : state.box.start.min,
+                               face.axis) +
+                           local_delta;
+                    if (io.KeyCtrl) {
+                        const float step = std::max(0.01F, scene_radius * 0.02F);
+                        side = std::round(side / step) * step;
+                    }
+                    constexpr float k_min_span = 1e-3F;
+                    if (face.is_max)
+                        side = std::max(
+                            side, vec_component(box.min, face.axis) + k_min_span);
+                    else
+                        side = std::min(
+                            side, vec_component(box.max, face.axis) - k_min_span);
+                    box.user_set = true;
+                    box.valid = true;
+                }
+            }
+        }
+    }
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (hot >= 0) {
+        const Vec3 mn = box.min;
+        const Vec3 mx = box.max;
+        const Vec3 local[8] = {
+            {mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mn.x, mx.y, mn.z},
+            {mx.x, mx.y, mn.z}, {mn.x, mn.y, mx.z}, {mx.x, mn.y, mx.z},
+            {mn.x, mx.y, mx.z}, {mx.x, mx.y, mx.z}};
+        constexpr int corners[6][4] = {
+            {0, 2, 6, 4}, {1, 3, 7, 5}, {0, 1, 5, 4},
+            {2, 3, 7, 6}, {0, 1, 3, 2}, {4, 5, 7, 6}};
+        ImVec2 screen[4];
+        bool visible = true;
+        float depth{};
+        for (int i = 0; i < 4; ++i) {
+            const Vec3 world = xf ? transform_point(*xf, local[corners[hot][i]])
+                                  : local[corners[hot][i]];
+            visible = visible &&
+                      project_world_to_screen(
+                          camera, min, max, world, screen[i], depth);
+        }
+        if (visible) {
+            draw->AddConvexPolyFilled(
+                screen, 4, theme::u32(theme::warning, 0.16F));
+            draw->AddPolyline(
+                screen, 4, theme::u32(theme::warning, 0.95F),
+                ImDrawFlags_Closed, 2.F);
+        }
+    }
+    for (int i = 0; i < 6; ++i) {
+        if (!handle_ok[i]) continue;
+        const bool active = i == hot;
+        const float radius = active ? 8.F : 6.F;
+        const ImU32 fill = active
+            ? theme::u32(theme::warning, 1.F)
+            : theme::u32(theme::warning, 0.82F);
+        draw->AddCircleFilled(handle_screen[i], radius + 1.4F, IM_COL32(20, 22, 28, 220), 12);
+        draw->AddCircleFilled(handle_screen[i], radius, fill, 12);
+    }
+
+    if (hot >= 0) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip(
+            "Drag a face to resize the reconstruction region\n"
+            "Shift: fine  ·  Ctrl: snap");
+    }
+    return state.box.dragging || hot >= 0;
+}
+
 bool draw_object_gizmo(
     ViewportGizmoState& state, ReconstructionTransform& xf,
     const OrbitCamera& camera, const ImVec2 min, const ImVec2 max,
     const float scene_radius) {
     if (state.tool == TransformTool::orbit) return false;
 
-    ImGuizmo::BeginFrame();
     apply_imguizmo_style();
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::AllowAxisFlip(false);
@@ -224,12 +447,19 @@ bool draw_object_gizmo(
 bool draw_viewport_gizmo(
     ViewportGizmoState& state, OrbitCamera& camera, const ImVec2 min,
     const ImVec2 max, ReconstructionTransform* transform,
-    const float scene_radius, const bool object_enabled) {
+    const float scene_radius, const bool object_enabled,
+    ReconstructionBox* region, const bool region_enabled) {
     if (!state.visible) return false;
+    ImGuizmo::BeginFrame();
     bool captures = false;
     if (object_enabled && transform != nullptr)
         captures = draw_object_gizmo(
             state, *transform, camera, min, max, scene_radius);
+    if (!captures && region_enabled && region != nullptr)
+        captures = draw_region_handles(
+            state, *region, transform, camera, min, max, scene_radius);
+    else if (!region_enabled || region == nullptr)
+        state.box = {};
     if (!captures) {
         captures = draw_axes_gizmo(camera, min, max);
         if (captures)

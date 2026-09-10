@@ -1022,6 +1022,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
                 temp / "AetherScan" / runtime_cache_key(layout.project_file);
     }
     layout.working_sfm = runtime_dir / "sfm.bin";
+    layout.working_subject_bounds = runtime_dir / "subject_bounds.txt";
     layout.working_splat = runtime_dir / "splat.ply";
     layout.working_mesh = runtime_dir / "mesh.ply";
     layout.working_dense = runtime_dir / "dense.ply";
@@ -1116,8 +1117,16 @@ std::string build_train_command(
     }
 
     command << " --splat --capture-mode "
-            << (settings.scene_mode ? "scene" : "object")
-            << " --splat-strategy " << strategy_flag(settings.strategy)
+            << (settings.scene_mode ? "scene" : "object");
+    if (!settings.scene_mode) {
+        std::error_code bounds_error;
+        if (!layout.working_subject_bounds.empty() &&
+            std::filesystem::exists(
+                layout.working_subject_bounds, bounds_error))
+            command << " --subject-bounds "
+                    << quote(layout.working_subject_bounds);
+    }
+    command << " --splat-strategy " << strategy_flag(settings.strategy)
             << " --splat-iterations " << settings.iterations
             << " --splat-preview-interval " << settings.preview_interval
             << " --splat-preview-view 0"
@@ -1230,6 +1239,16 @@ std::string build_dense_command(
                 << " --max-features " << settings.max_features;
         if (settings.reuse_cache)
             command << " --cache-dir " << quote(layout.cache);
+    }
+    command << " --capture-mode "
+            << (settings.scene_mode ? "scene" : "object");
+    if (!settings.scene_mode) {
+        std::error_code bounds_error;
+        if (!layout.working_subject_bounds.empty() &&
+            std::filesystem::exists(
+                layout.working_subject_bounds, bounds_error))
+            command << " --subject-bounds "
+                    << quote(layout.working_subject_bounds);
     }
     const bool mvs_mesh = mesh_from_mvs(settings);
     command << " --dense --mesh=" << (mvs_mesh ? "true" : "false");

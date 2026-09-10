@@ -106,6 +106,7 @@ struct ReconstructCli {
     bool splat{false};
     bool splat_view{false};
     std::string capture_mode{"object"};
+    std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
     std::string dataset_format{"auto"};
     std::string splat_output_format{"auto"};
@@ -397,6 +398,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
               << "  --colmap PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
               << "  --capture-mode object|scene  object uses SfM SubjectBounds\n"
+              << "  --subject-bounds PATH  load object focus region (SubjectBounds txt)\n"
               << "  --masks DIR optional foreground masks (auto: sibling masks/)\n"
               << "Texture (Stage B after --mesh; requires Vulkan + UVAtlas):\n"
               << "  --texture    UV unwrap + projective bake -> textured OBJ/MTL/PNG\n"
@@ -562,6 +564,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("capture-mode",
          "Capture type: object uses SfM SubjectBounds; scene is unbounded",
          cxxopts::value<std::string>()->default_value("object"))
+        ("subject-bounds",
+         "Load object-mode SubjectBounds / focus region from a text file",
+         cxxopts::value<std::string>()->default_value(""))
         ("splat-dataset",
          "External camera dataset: COLMAP root, RealityCapture CSV/dir, or OpenMVS .mvs",
          cxxopts::value<std::string>()->default_value(""))
@@ -971,6 +976,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")
         throw std::invalid_argument(
             "--capture-mode must be object or scene");
+    const std::string subject_bounds_text =
+        result["subject-bounds"].as<std::string>();
+    if (!subject_bounds_text.empty())
+        cli.subject_bounds = utf8_to_path(subject_bounds_text);
     const std::string splat_dataset_text =
         result["splat-dataset"].as<std::string>();
     if (!splat_dataset_text.empty())
@@ -1523,6 +1532,21 @@ std::string lower_extension(const std::filesystem::path& path) {
 }
 
 #if defined(AETHERSCAN_HAS_SPLAT)
+void apply_cli_subject_bounds(
+    const ReconstructCli& cli, aetherscan::mvs::MvsScene& scene) {
+    if (!cli.subject_bounds.empty()) {
+        if (!aetherscan::mvs::load_subject_bounds(
+                scene.subject_bounds, cli.subject_bounds))
+            throw std::runtime_error(
+                "Failed to load SubjectBounds: " +
+                cli.subject_bounds.string());
+        aetherscan::core::Logger::instance().info(
+            "subject_bounds=", cli.subject_bounds.string(), " source=file");
+        return;
+    }
+    if (cli.capture_mode == "scene") scene.subject_bounds = {};
+}
+
 void run_splat_view(
     const ReconstructCli& cli, aetherscan::project::Archive& archive) {
     const bool has_vulkan_preview =
@@ -3155,8 +3179,7 @@ int main(int argc, char** argv) {
             for (const std::string& warning : loaded.warnings)
                 aetherscan::core::Logger::instance().warning(
                     "splat dataset: ", warning);
-            if (cli.capture_mode == "scene")
-                loaded.scene.subject_bounds = {};
+            apply_cli_subject_bounds(cli, loaded.scene);
             aetherscan::core::Logger::instance().info(
                 "pipeline_handoff=external_dataset");
             aetherscan::core::Logger::instance().info(
@@ -3560,9 +3583,8 @@ int main(int argc, char** argv) {
                 aetherscan::mvs::build_mvs_scene(scene, mesh_options);
             aetherscan::splat::initialize_scene_from_sparse_points(
                 splat_scene);
-            if (cli.capture_mode == "scene")
-                splat_scene.subject_bounds = {};
-            if (cli.capture_mode == "object" &&
+            apply_cli_subject_bounds(cli, splat_scene);
+            if (cli.capture_mode == "object" && cli.subject_bounds.empty() &&
                 !splat_scene.subject_bounds.valid)
                 throw std::runtime_error(
                     "Could not estimate SubjectBounds from SfM sparse points");
@@ -3727,8 +3749,7 @@ int main(int argc, char** argv) {
                 // but use the caller's dense initialization directly.
                 mvs_scene =
                     aetherscan::mvs::build_mvs_scene(scene, densify_opts);
-                if (cli.capture_mode == "scene")
-                    mvs_scene.subject_bounds = {};
+                apply_cli_subject_bounds(cli, mvs_scene);
                 mvs_scene.dense_cloud =
                     aetherscan::mvs::load_dense_ply(cli.dense_ply);
                 aetherscan::core::Logger::instance().info(
@@ -3737,8 +3758,7 @@ int main(int argc, char** argv) {
             } else {
                 mvs_scene =
                     aetherscan::mvs::build_mvs_scene(scene, densify_opts);
-                if (cli.capture_mode == "scene")
-                    mvs_scene.subject_bounds = {};
+                apply_cli_subject_bounds(cli, mvs_scene);
                 aetherscan::mvs::densify(mvs_scene, densify_opts);
             }
             const double dense_elapsed = std::chrono::duration<double>(

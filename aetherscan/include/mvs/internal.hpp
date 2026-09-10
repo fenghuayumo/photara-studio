@@ -19,6 +19,10 @@ std::vector<ViewImage> load_view_images(
     const MvsScene& scene, const DensifyOptions& options);
 
 bool estimate_subject_bounds(
+    const std::vector<Vec3f>& points,
+    OrientedBoundingBox& result,
+    unsigned thread_count = 0, float padding_scale = 1.1F);
+bool estimate_subject_bounds(
     const std::vector<SparsePoint>& sparse_points,
     OrientedBoundingBox& result,
     unsigned thread_count = 0, float padding_scale = 1.1F);

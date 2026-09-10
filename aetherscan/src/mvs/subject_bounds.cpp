@@ -31,16 +31,11 @@ struct CellHash {
 }  // namespace
 
 bool estimate_subject_bounds(
-    const std::vector<SparsePoint>& sparse_points,
+    const std::vector<Vec3f>& points,
     OrientedBoundingBox& result,
     const unsigned thread_count, const float padding_scale) {
     core::StageScope stage("sfm.subject_bounds");
     result = {};
-    std::vector<Vec3f> points;
-    points.reserve(sparse_points.size());
-    for (const SparsePoint& point : sparse_points)
-        if (point.position.allFinite() && point.view_ids.size() >= 2)
-            points.push_back(point.position);
     if (points.empty()) {
         stage.finish();
         return false;
@@ -140,6 +135,19 @@ bool estimate_subject_bounds(
         " max=", (center + half_extent).transpose());
     stage.finish();
     return result.valid;
+}
+
+bool estimate_subject_bounds(
+    const std::vector<SparsePoint>& sparse_points,
+    OrientedBoundingBox& result,
+    const unsigned thread_count, const float padding_scale) {
+    std::vector<Vec3f> points;
+    points.reserve(sparse_points.size());
+    for (const SparsePoint& point : sparse_points)
+        if (point.position.allFinite() && point.view_ids.size() >= 2)
+            points.push_back(point.position);
+    return estimate_subject_bounds(
+        points, result, thread_count, padding_scale);
 }
 
 }  // namespace aetherscan::mvs::detail

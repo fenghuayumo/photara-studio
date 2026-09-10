@@ -196,6 +196,37 @@ void reconstruction_set_pivot(
 bool reconstruction_pose_equal(
     const ReconstructionTransform& a, const ReconstructionTransform& b);
 
+// Axis-aligned reconstruction volume in reconstruction space. Defaults to the
+// sparse-cloud AABB; later edits will clip densify / mesh / splat work.
+struct ReconstructionBox {
+    Vec3 min;
+    Vec3 max;
+    bool valid{};
+    bool user_set{};
+
+    [[nodiscard]] Vec3 centre() const {
+        return {
+            (min.x + max.x) * 0.5F, (min.y + max.y) * 0.5F,
+            (min.z + max.z) * 0.5F};
+    }
+    [[nodiscard]] Vec3 size() const {
+        return {max.x - min.x, max.y - min.y, max.z - min.z};
+    }
+    void clear() { *this = {}; }
+};
+
+void fit_reconstruction_box(
+    ReconstructionBox& box, const std::vector<Vec3>& points);
+bool write_reconstruction_box(
+    const ReconstructionBox& box, const std::filesystem::path& path);
+
+bool project_world_to_screen(
+    const OrbitCamera& camera, ImVec2 min, ImVec2 max, const Vec3& world,
+    ImVec2& screen, float& depth);
+bool camera_world_ray(
+    const OrbitCamera& camera, ImVec2 min, ImVec2 max, ImVec2 mouse,
+    Vec3& origin, Vec3& direction);
+
 // Rasterizer-facing camera matching splat::Camera (OpenCV +Z, Y-down, W2C
 // stored column-major).
 struct SplatPreviewCamera {
@@ -278,6 +309,7 @@ struct ViewOptions {
     bool show_trajectory = true;
     bool show_grid = true;
     bool show_axes = true;
+    bool show_region = true;
     bool draw_rings = false;
     bool draw_mesh = false;
     bool mesh_wireframe = false;
@@ -302,7 +334,8 @@ public:
         const OrbitCamera& camera, const ViewOptions& options,
         bool hovered, const ImTextureID* view_photos = nullptr,
         std::size_t view_photo_count = 0, const PreviewMesh* mesh = nullptr,
-        const ReconstructionTransform* transform = nullptr);
+        const ReconstructionTransform* transform = nullptr,
+        const ReconstructionBox* region = nullptr);
 
 private:
     struct Projected {

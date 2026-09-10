@@ -5,6 +5,8 @@
 
 #include "io/image.hpp"
 #include "mvs/export.hpp"
+#include "mvs/internal.hpp"
+#include "mvs/types.hpp"
 #include "project/archive.hpp"
 #include "splat/dataset.hpp"
 #include "splat/formats.hpp"
@@ -1870,6 +1872,24 @@ void camera_projection_matrix(
     projection[14] = (2.F * far_z * near_z) / (near_z - far_z);
 }
 
+bool project_world_to_screen(
+    const OrbitCamera& camera, const ImVec2 min, const ImVec2 max,
+    const Vec3& world, ImVec2& screen, float& depth) {
+    return project(build_frame(camera, min, max), world, screen, depth);
+}
+
+bool camera_world_ray(
+    const OrbitCamera& camera, const ImVec2 min, const ImVec2 max,
+    const ImVec2 mouse, Vec3& origin, Vec3& direction) {
+    const ViewFrame frame = build_frame(camera, min, max);
+    origin = frame.eye;
+    const float sx = mouse.x - frame.centre.x;
+    const float sy = frame.centre.y - mouse.y;
+    direction = normalize(
+        frame.forward * frame.focal + frame.right * sx + frame.up * sy);
+    return true;
+}
+
 namespace {
 
 constexpr float k_deg_to_rad = 0.01745329252F;
@@ -2089,6 +2109,59 @@ bool reconstruction_pose_equal(
            near(a.pivot.z, b.pivot.z, 1e-6F);
 }
 
+void fit_reconstruction_box(
+    ReconstructionBox& box, const std::vector<Vec3>& points) {
+    if (box.user_set) return;
+    if (points.empty()) {
+        box.valid = false;
+        return;
+    }
+    std::vector<aetherscan::mvs::Vec3f> world;
+    world.reserve(points.size());
+    for (const Vec3& point : points)
+        world.emplace_back(point.x, point.y, point.z);
+    aetherscan::mvs::OrientedBoundingBox bounds;
+    // Same padding splat object-mode uses for SubjectBounds / focus region.
+    if (!aetherscan::mvs::detail::estimate_subject_bounds(
+            world, bounds, 0, 1.15F) ||
+        !bounds.valid) {
+        box.valid = false;
+        return;
+    }
+    box.min = {
+        bounds.center.x() - bounds.half_extent.x(),
+        bounds.center.y() - bounds.half_extent.y(),
+        bounds.center.z() - bounds.half_extent.z()};
+    box.max = {
+        bounds.center.x() + bounds.half_extent.x(),
+        bounds.center.y() + bounds.half_extent.y(),
+        bounds.center.z() + bounds.half_extent.z()};
+    box.valid = true;
+}
+
+bool write_reconstruction_box(
+    const ReconstructionBox& box, const std::filesystem::path& path) {
+    if (!box.valid || path.empty()) return false;
+    aetherscan::mvs::OrientedBoundingBox bounds;
+    bounds.center = aetherscan::mvs::Vec3f{
+        (box.min.x + box.max.x) * 0.5F, (box.min.y + box.max.y) * 0.5F,
+        (box.min.z + box.max.z) * 0.5F};
+    bounds.half_extent = aetherscan::mvs::Vec3f{
+        std::max(1e-4F, (box.max.x - box.min.x) * 0.5F),
+        std::max(1e-4F, (box.max.y - box.min.y) * 0.5F),
+        std::max(1e-4F, (box.max.z - box.min.z) * 0.5F)};
+    bounds.axes = aetherscan::mvs::Mat3f::Identity();
+    bounds.valid = true;
+    try {
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        aetherscan::mvs::save_subject_bounds(bounds, path);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 ImU32 shade_u32(const ImU32 base, const float lambert) {
     const float t = 0.28F + 0.72F * std::clamp(lambert, 0.F, 1.F);
     const ImVec4 c = ImGui::ColorConvertU32ToFloat4(base);
@@ -2096,12 +2169,38 @@ ImU32 shade_u32(const ImU32 base, const float lambert) {
         {c.x * t, c.y * t, c.z * t, c.w});
 }
 
+void draw_reconstruction_box(
+    ImDrawList* draw, const ViewFrame& frame, const Vec3 corners[8]) {
+    constexpr int faces[6][4] = {
+        {0, 1, 3, 2}, {4, 6, 7, 5}, {0, 4, 5, 1},
+        {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 5, 7, 3}};
+    constexpr int edges[12][2] = {
+        {0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7},
+        {7, 6}, {6, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    const ImU32 fill = theme::u32(theme::warning, 0.07F);
+    for (const auto& face : faces) {
+        ImVec2 screen[4];
+        float depth{};
+        bool visible = true;
+        for (int i = 0; i < 4; ++i) {
+            visible = visible &&
+                      project(frame, corners[face[i]], screen[i], depth);
+        }
+        if (!visible) continue;
+        draw->AddConvexPolyFilled(screen, 4, fill);
+    }
+    const ImU32 wire = theme::u32(theme::warning, 0.82F);
+    for (const auto& edge : edges)
+        draw_segment(draw, frame, corners[edge[0]], corners[edge[1]], wire, 1.6F);
+}
+
 SceneDrawStats SceneRenderer::draw(
     ImDrawList* draw, const ImVec2 min, const ImVec2 max,
     const SparseScene& scene, const OrbitCamera& camera,
     const ViewOptions& options, const bool hovered,
     const ImTextureID* view_photos, const std::size_t view_photo_count,
-    const PreviewMesh* mesh, const ReconstructionTransform* transform) {
+    const PreviewMesh* mesh, const ReconstructionTransform* transform,
+    const ReconstructionBox* region) {
     SceneDrawStats stats;
     const ViewFrame frame = build_frame(camera, min, max);
     draw->PushClipRect(min, max, true);
@@ -2412,6 +2511,18 @@ SceneDrawStats SceneRenderer::draw(
                         is_hovered ? 0.95F : 0.38F));
             ++stats.drawn_views;
         }
+    }
+
+    if (options.show_region && region != nullptr && region->valid) {
+        const Vec3& mn = region->min;
+        const Vec3& mx = region->max;
+        const Vec3 local[8] = {
+            {mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mn.x, mx.y, mn.z},
+            {mx.x, mx.y, mn.z}, {mn.x, mn.y, mx.z}, {mx.x, mn.y, mx.z},
+            {mn.x, mx.y, mx.z}, {mx.x, mx.y, mx.z}};
+        Vec3 corners[8];
+        for (int i = 0; i < 8; ++i) corners[i] = world_of(local[i]);
+        draw_reconstruction_box(draw, frame, corners);
     }
 
     // World origin axes, drawn last so they stay readable. Green follows the
