@@ -237,9 +237,9 @@ struct ProjectSettings {
     int max_features = 27'000;
 
     // Video capture. images_dir may be a video file; these knobs control the
-    // ffmpeg extract + sharpness selection that runs before SfM.
+    // ffmpeg extract + sharpness selection that runs before SfM. ffmpeg is
+    // located automatically (PATH, next to the app, well-known installs).
     std::array<char, 1024> video_frames_dir{};
-    std::array<char, 260> ffmpeg_exe{};
     float video_fps = 2.0F;
     int video_sharp_window = 3;
     int video_max_frames = 0;
@@ -255,10 +255,11 @@ struct ProjectSettings {
     bool progressive_resolution = true;
     bool use_mask = false;
 
-    // Mesh extraction. Enabling it switches the trainer onto the depth/normal
-    // and multi-view geometry objectives that a watertight surface needs.
+    // Mesh extraction. `mesh_source` selects the product path:
+    // 0 = geometry-supervised 3DGS then extract, 1 = photogrammetry (MVS).
     bool build_mesh = false;
-    int mesh_method = 0;  // auto, tsdf, pam
+    int mesh_source = 0;
+    int mesh_method = 0;  // auto, tsdf, delaunay, pam
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;
@@ -283,6 +284,7 @@ struct ProjectLayout {
     std::filesystem::path splat_glb;
     std::filesystem::path splat_model;
     std::filesystem::path mesh_ply;
+    std::filesystem::path mvs_mesh_ply;
     std::filesystem::path dense_ply;
     std::filesystem::path align_log;
     std::filesystem::path train_log;
@@ -298,6 +300,15 @@ struct ProjectLayout {
 ProjectLayout resolve_layout(const ProjectSettings& settings);
 
 bool is_video_source(const ProjectSettings& settings);
+
+inline bool mesh_from_gaussians(const ProjectSettings& settings) {
+    return settings.build_mesh && settings.mesh_source == 0;
+}
+
+inline bool mesh_from_mvs(const ProjectSettings& settings) {
+    return settings.build_mesh && settings.mesh_source == 1;
+}
+
 // Folder of stills SfM/training actually reads. Equals images_dir for a photo
 // folder; the extract destination when images_dir is a video.
 std::filesystem::path reconstruction_images_dir(const ProjectSettings& settings);

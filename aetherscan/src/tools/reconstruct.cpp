@@ -1637,6 +1637,7 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.progressive_resolution = cli.splat_progressive_resolution;
     settings.use_mask = cli.splat_use_mask;
     settings.build_mesh = cli.mesh;
+    settings.mesh_source = (cli.dense && cli.mesh && !cli.splat) ? 1 : 0;
     if (cli.mesh_method == "tsdf") settings.mesh_method = 1;
     else if (cli.mesh_method == "pam") settings.mesh_method = 2;
     else settings.mesh_method = 0;

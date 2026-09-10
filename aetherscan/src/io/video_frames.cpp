@@ -167,19 +167,10 @@ std::wstring quote_windows_arg(const std::wstring& arg) {
 }
 
 std::filesystem::path resolve_ffmpeg(const std::filesystem::path& ffmpeg) {
-    std::filesystem::path exe = ffmpeg.empty()
-        ? std::filesystem::path(L"ffmpeg.exe")
-        : ffmpeg;
-    std::error_code error;
-    if (exe.has_parent_path() && std::filesystem::exists(exe, error))
-        return exe;
-    std::wstring name = exe.wstring();
-    if (name.find(L'.') == std::wstring::npos) name += L".exe";
-    wchar_t buffer[MAX_PATH]{};
-    const DWORD n = SearchPathW(
-        nullptr, name.c_str(), nullptr, MAX_PATH, buffer, nullptr);
-    if (n > 0 && n < MAX_PATH) return std::filesystem::path(buffer);
-    return exe;
+    const auto found = locate_ffmpeg(ffmpeg);
+    if (!found.empty()) return found;
+    if (!ffmpeg.empty()) return ffmpeg;
+    return std::filesystem::path(L"ffmpeg.exe");
 }
 
 int run_process(
@@ -305,28 +296,10 @@ int run_process(
 }
 #else
 std::filesystem::path resolve_ffmpeg(const std::filesystem::path& ffmpeg) {
-    std::filesystem::path exe = ffmpeg.empty()
-        ? std::filesystem::path("ffmpeg")
-        : ffmpeg;
-    std::error_code error;
-    if (exe.has_parent_path() && std::filesystem::exists(exe, error))
-        return exe;
-    const char* path_env = std::getenv("PATH");
-    if (path_env == nullptr) return exe;
-    std::string paths(path_env);
-    std::size_t begin = 0;
-    while (begin <= paths.size()) {
-        const std::size_t end = paths.find(':', begin);
-        const std::string dir = paths.substr(
-            begin, end == std::string::npos ? std::string::npos : end - begin);
-        const std::filesystem::path candidate = std::filesystem::path(dir) / exe;
-        if (std::filesystem::exists(candidate, error) &&
-            access(candidate.c_str(), X_OK) == 0)
-            return candidate;
-        if (end == std::string::npos) break;
-        begin = end + 1;
-    }
-    return exe;
+    const auto found = locate_ffmpeg(ffmpeg);
+    if (!found.empty()) return found;
+    if (!ffmpeg.empty()) return ffmpeg;
+    return std::filesystem::path("ffmpeg");
 }
 
 int run_process(
@@ -619,21 +592,122 @@ std::filesystem::path default_video_frames_dir(const std::filesystem::path& vide
     return folder / "images";
 }
 
-bool ffmpeg_available(const std::filesystem::path& ffmpeg) {
-    const auto resolved = resolve_ffmpeg(ffmpeg);
+namespace {
+
+bool ffmpeg_is_runnable(const std::filesystem::path& path) {
     std::error_code error;
-    if (resolved.has_parent_path() && std::filesystem::exists(resolved, error))
-        return true;
+    if (path.empty() || !std::filesystem::exists(path, error) || error)
+        return false;
 #if defined(_WIN32)
-    wchar_t buffer[MAX_PATH]{};
-    std::wstring name = resolved.wstring();
-    if (name.find(L'.') == std::wstring::npos) name += L".exe";
-    const DWORD n = SearchPathW(
-        nullptr, name.c_str(), nullptr, MAX_PATH, buffer, nullptr);
-    return n > 0 && n < MAX_PATH;
+    return true;
 #else
-    return access(resolved.c_str(), X_OK) == 0;
+    return access(path.c_str(), X_OK) == 0;
 #endif
+}
+
+std::filesystem::path process_directory() {
+#if defined(_WIN32)
+    wchar_t buffer[32768]{};
+    const DWORD n = GetModuleFileNameW(nullptr, buffer, 32768);
+    if (n == 0 || n >= 32768) return {};
+    return std::filesystem::path(buffer).parent_path();
+#else
+    char buffer[4096]{};
+    const ssize_t n = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (n <= 0) return {};
+    return std::filesystem::path(std::string(buffer, buffer + n)).parent_path();
+#endif
+}
+
+std::filesystem::path env_joined(const char* var, const char* relative) {
+    const char* value = std::getenv(var);
+    if (value == nullptr || value[0] == '\0') return {};
+    return std::filesystem::path(value) / relative;
+}
+
+std::filesystem::path search_ffmpeg_on_path(const std::filesystem::path& name) {
+#if defined(_WIN32)
+    std::wstring wide = name.wstring();
+    if (wide.find(L'.') == std::wstring::npos) wide += L".exe";
+    wchar_t buffer[MAX_PATH]{};
+    const DWORD n = SearchPathW(
+        nullptr, wide.c_str(), nullptr, MAX_PATH, buffer, nullptr);
+    if (n > 0 && n < MAX_PATH) return std::filesystem::path(buffer);
+    return {};
+#else
+    const char* path_env = std::getenv("PATH");
+    if (path_env == nullptr) return {};
+    const std::string paths(path_env);
+    std::size_t begin = 0;
+    while (begin <= paths.size()) {
+        const std::size_t end = paths.find(':', begin);
+        const std::string dir = paths.substr(
+            begin, end == std::string::npos ? std::string::npos : end - begin);
+        const std::filesystem::path candidate =
+            std::filesystem::path(dir) / name;
+        if (ffmpeg_is_runnable(candidate)) return candidate;
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return {};
+#endif
+}
+
+}  // namespace
+
+std::filesystem::path locate_ffmpeg(const std::filesystem::path& hint) {
+    if (!hint.empty() && hint.has_parent_path() &&
+        ffmpeg_is_runnable(hint))
+        return hint;
+
+#if defined(_WIN32)
+    const std::filesystem::path name = hint.empty()
+        ? std::filesystem::path(L"ffmpeg.exe")
+        : (hint.extension().empty()
+               ? std::filesystem::path(hint.native() + L".exe")
+               : hint);
+#else
+    const std::filesystem::path name =
+        hint.empty() ? std::filesystem::path("ffmpeg") : hint;
+#endif
+    const std::filesystem::path filename =
+        name.has_parent_path() ? name.filename() : name;
+    if (ffmpeg_is_runnable(name)) return name;
+
+    if (const auto on_path = search_ffmpeg_on_path(filename);
+        !on_path.empty() && ffmpeg_is_runnable(on_path))
+        return on_path;
+
+    const auto beside = process_directory() / filename;
+    if (ffmpeg_is_runnable(beside)) return beside;
+
+    const std::filesystem::path extras[] = {
+#if defined(_WIN32)
+        std::filesystem::path(L"C:\\ffmpeg\\bin") / filename,
+        std::filesystem::path(L"C:\\Program Files\\ffmpeg\\bin") / filename,
+        std::filesystem::path(L"C:\\Program Files (x86)\\ffmpeg\\bin") /
+            filename,
+        env_joined("ProgramFiles", "ffmpeg\\bin") / filename,
+        env_joined("LOCALAPPDATA", "Microsoft\\WinGet\\Links") / filename,
+        env_joined("ProgramData", "chocolatey\\bin") / filename,
+        env_joined("USERPROFILE", "scoop\\shims") / filename,
+        env_joined("USERPROFILE", "scoop\\apps\\ffmpeg\\current\\bin") /
+            filename,
+#else
+        std::filesystem::path("/usr/bin") / filename,
+        std::filesystem::path("/usr/local/bin") / filename,
+        std::filesystem::path("/opt/homebrew/bin") / filename,
+        env_joined("HOME", ".local/bin") / filename,
+#endif
+    };
+    for (const auto& candidate : extras) {
+        if (ffmpeg_is_runnable(candidate)) return candidate;
+    }
+    return {};
+}
+
+bool ffmpeg_available(const std::filesystem::path& ffmpeg) {
+    return !locate_ffmpeg(ffmpeg).empty();
 }
 
 bool probe_video(

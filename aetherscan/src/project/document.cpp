@@ -91,6 +91,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.video_quality));
     writer.value(settings.video_scale);
     writer.value(static_cast<std::int32_t>(settings.video_rotate));
+    writer.value(static_cast<std::int32_t>(settings.mesh_source));
     return writer.take();
 }
 
@@ -151,6 +152,8 @@ Settings decode_settings(
         settings.video_scale = reader.value<float>();
     if (reader.remaining() >= sizeof(std::int32_t))
         settings.video_rotate = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.mesh_source = reader.value<std::int32_t>();
     return settings;
 }
 

@@ -136,6 +136,9 @@ int main() {
     }
 
     if (aetherscan::io::ffmpeg_available()) {
+        expect(
+            !aetherscan::io::locate_ffmpeg().empty(),
+            "locate_ffmpeg finds a runnable ffmpeg");
         const auto video = dir / "testsrc.mp4";
         const auto extracted = dir / "extracted";
         const std::string synth =
@@ -167,7 +170,10 @@ int main() {
             std::cout << "ffmpeg could not write a test clip; skipping decode\n";
         }
     } else {
-        std::cout << "ffmpeg not on PATH; skipping decode test\n";
+        expect(
+            aetherscan::io::locate_ffmpeg().empty(),
+            "locate_ffmpeg is empty when ffmpeg is missing");
+        std::cout << "ffmpeg not found; skipping decode test\n";
     }
 
     std::filesystem::remove_all(dir, error);

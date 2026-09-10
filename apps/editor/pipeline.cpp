@@ -178,8 +178,6 @@ void append_video_extract_flags(
             << " --video-rotate " << settings.video_rotate
             << " --video-frames-dir "
             << quote(reconstruction_images_dir(settings));
-    if (settings.ffmpeg_exe[0] != '\0')
-        command << " --ffmpeg " << quote(settings.ffmpeg_exe.data());
 }
 
 std::string lower_extension(const std::filesystem::path& path) {
@@ -987,6 +985,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
         : settings.splat_format == 3 ? layout.splat_spz
         : settings.splat_format == 4 ? layout.splat_glb : layout.splat_ply;
     layout.mesh_ply = with_suffix("_splat_mesh.ply");
+    layout.mvs_mesh_ply = with_suffix("_mesh.ply");
     layout.dense_ply = with_suffix("_dense.ply");
     layout.align_log = with_suffix("_align.log");
     layout.train_log = with_suffix("_train.log");
@@ -1114,10 +1113,11 @@ std::string build_train_command(
     append_video_extract_flags(command, settings);
     append_gui_flags(command, layout);
 
-    // Mesh extraction is what turns on depth/normal and multi-view geometry
-    // supervision inside the trainer, so both travel together.
-    command << " --mesh=" << (settings.build_mesh ? "true" : "false");
-    if (settings.build_mesh) {
+    // Geometry-supervised 3DGS mesh: depth/normal + multi-view losses, then
+    // extract. Photogrammetry mesh is a separate Dense MVS job.
+    const bool gaussian_mesh = mesh_from_gaussians(settings);
+    command << " --mesh=" << (gaussian_mesh ? "true" : "false");
+    if (gaussian_mesh) {
         command << " --mesh-method " << mesh_method_flag(settings.mesh_method)
                 << " --splat-depth-normal-weight "
                 << settings.depth_normal_weight << " --splat-mv-geo-weight "
@@ -1208,9 +1208,13 @@ std::string build_dense_command(
         if (settings.reuse_cache)
             command << " --cache-dir " << quote(layout.cache);
     }
-    command << " --dense --mesh=" << (settings.build_mesh ? "true" : "false");
-    if (settings.build_mesh)
-        command << " --mesh-method " << mesh_method_flag(settings.mesh_method);
+    const bool mvs_mesh = mesh_from_mvs(settings);
+    command << " --dense --mesh=" << (mvs_mesh ? "true" : "false");
+    if (mvs_mesh) {
+        const int method =
+            settings.mesh_method == 3 ? 0 : settings.mesh_method;
+        command << " --mesh-method " << mesh_method_flag(method);
+    }
     append_video_extract_flags(command, settings);
     append_gui_flags(command, layout);
     return command.str();

@@ -145,6 +145,7 @@ int main() {
     settings.sfm_mode = 2;
     settings.max_features = 4096;
     settings.build_mesh = true;
+    settings.mesh_source = 1;
 
     Archive archive = Archive::create();
     replace_sfm_stage(archive, source, settings, ascan_path);
@@ -185,6 +186,7 @@ int main() {
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");
+    expect(round_trip.mesh_source == 1, "settings mesh source");
     const auto loaded_scene = read_sfm(loaded);
     expect(loaded_scene.has_value(), "read sfm from ascan");
     expect(loaded_scene && loaded_scene->cameras[0].k1 == 0.1, "ascan sfm distortion");

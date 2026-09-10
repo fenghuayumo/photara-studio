@@ -54,6 +54,12 @@ struct VideoExtractResult {
 
 bool ffmpeg_available(const std::filesystem::path& ffmpeg = "ffmpeg");
 
+// Locate a runnable ffmpeg. `hint` may be empty (search), a bare name
+// (`ffmpeg`), or a full path. Search order: explicit path, PATH, the
+// current process directory, then well-known install locations. Empty
+// means nothing runnable was found.
+std::filesystem::path locate_ffmpeg(const std::filesystem::path& hint = {});
+
 bool probe_video(
     const std::filesystem::path& ffmpeg,
     const std::filesystem::path& video,

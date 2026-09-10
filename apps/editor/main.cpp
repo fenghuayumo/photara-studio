@@ -527,7 +527,9 @@ void refresh_artifacts(App& app) {
         std::filesystem::exists(app.layout.sparse_ply, error) ||
         std::filesystem::exists(app.layout.working_sfm, error);
     app.has_model = !existing_splat_model(app).empty();
-    app.has_mesh = std::filesystem::exists(app.layout.mesh_ply, error);
+    app.has_mesh =
+        std::filesystem::exists(app.layout.mesh_ply, error) ||
+        std::filesystem::exists(app.layout.mvs_mesh_ply, error);
     app.project_writer_version = 0;
     app.project_min_reader_version = 0;
     if (app.layout.project_file.empty()) return;
@@ -639,6 +641,7 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
     settings.progressive_resolution = app.settings.progressive_resolution;
     settings.use_mask = app.settings.use_mask;
     settings.build_mesh = app.settings.build_mesh;
+    settings.mesh_source = app.settings.mesh_source;
     settings.mesh_method = app.settings.mesh_method;
     settings.depth_normal_weight = app.settings.depth_normal_weight;
     settings.multi_view_geo_weight = app.settings.multi_view_geo_weight;
@@ -693,6 +696,7 @@ void apply_project_settings(
     app.settings.progressive_resolution = settings.progressive_resolution;
     app.settings.use_mask = settings.use_mask;
     app.settings.build_mesh = settings.build_mesh;
+    app.settings.mesh_source = settings.mesh_source == 1 ? 1 : 0;
     app.settings.mesh_method = settings.mesh_method;
     app.settings.depth_normal_weight = settings.depth_normal_weight;
     app.settings.multi_view_geo_weight = settings.multi_view_geo_weight;
@@ -1829,11 +1833,12 @@ void delete_reconstruction_results(App& app) {
     stop_splat_view(app);
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
-    const std::array<std::filesystem::path, 15> generated_files = {
+    const std::array<std::filesystem::path, 16> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
         app.layout.splat_spz, app.layout.splat_glb, app.layout.mesh_ply,
-        app.layout.dense_ply, app.layout.align_log, app.layout.train_log,
+        app.layout.mvs_mesh_ply, app.layout.dense_ply, app.layout.align_log,
+        app.layout.train_log,
         app.layout.dense_log, app.layout.export_log, app.layout.view_log};
 
     std::uintmax_t removed = 0;
@@ -2065,16 +2070,11 @@ void start_align(App& app) {
             return;
         }
         const auto frames = reconstruction_images_path(app);
-        const std::filesystem::path ffmpeg_exe =
-            app.settings.ffmpeg_exe[0] != '\0'
-                ? path_from_utf8_field(app.settings.ffmpeg_exe.data())
-                : std::filesystem::path("ffmpeg");
         if (!directory_has_images(frames) &&
-            !aetherscan::io::ffmpeg_available(ffmpeg_exe)) {
+            !aetherscan::io::ffmpeg_available()) {
             set_message(
                 app,
-                "ffmpeg was not found. Install ffmpeg and add it to PATH, or set "
-                "the executable under Video extraction.",
+                "ffmpeg was not found. Install ffmpeg and add it to PATH.",
                 theme::danger);
             return;
         }
@@ -2383,7 +2383,7 @@ void start_train(App& app, const bool smoke) {
             app,
             has_external_dataset(app)
                 ? "Training from imported cameras..."
-                : (app.settings.build_mesh
+                : (mesh_from_gaussians(app.settings)
                        ? "Training with depth/normal geometry supervision..."
                        : "Training from aligned cameras..."),
             theme::accent);
@@ -2432,9 +2432,13 @@ void start_dense(App& app) {
         app.active_job = JobKind::dense;
         set_message(
             app,
-            has_external_dataset(app)
-                ? "Dense MVS from imported cameras..."
-                : "Dense MVS from aligned cameras...",
+            mesh_from_mvs(app.settings)
+                ? (has_external_dataset(app)
+                       ? "Building photogrammetry mesh from imported cameras..."
+                       : "Building photogrammetry mesh from aligned cameras...")
+                : (has_external_dataset(app)
+                       ? "Dense MVS from imported cameras..."
+                       : "Dense MVS from aligned cameras..."),
             theme::accent);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
@@ -2481,11 +2485,21 @@ void on_job_finished(App& app) {
         std::error_code error;
         const bool has_dense =
             std::filesystem::exists(app.layout.dense_ply, error);
-        set_message(
-            app,
-            has_dense ? "Dense MVS finished"
-                      : "Dense MVS finished but no dense.ply was written",
-            has_dense ? theme::success : theme::warning);
+        if (mesh_from_mvs(app.settings)) {
+            set_message(
+                app,
+                app.has_mesh ? "Photogrammetry mesh finished"
+                             : (has_dense
+                                    ? "Dense MVS finished but no mesh was written"
+                                    : "Dense MVS finished but no surface was written"),
+                app.has_mesh ? theme::success : theme::warning);
+        } else {
+            set_message(
+                app,
+                has_dense ? "Dense MVS finished"
+                          : "Dense MVS finished but no dense.ply was written",
+                has_dense ? theme::success : theme::warning);
+        }
         if (app.has_sparse || has_external_dataset(app))
             ensure_sparse_loaded(app);
         return;
@@ -2505,13 +2519,13 @@ void on_job_finished(App& app) {
     }
     set_message(
         app,
-        app.settings.build_mesh
+        mesh_from_gaussians(app.settings)
             ? (app.has_mesh ? "Training and mesh extraction finished"
                             : "Training finished, mesh extraction produced no "
                               "surface")
             : "Training finished",
-        app.settings.build_mesh && !app.has_mesh ? theme::warning
-                                                 : theme::success);
+        mesh_from_gaussians(app.settings) && !app.has_mesh ? theme::warning
+                                                           : theme::success);
     if (!app.smoke_mode && app.has_model) start_splat_view(app);
 }
 
@@ -2535,8 +2549,13 @@ int workflow_step(const App& app) {
         app.job.running() && app.active_job == JobKind::train;
     const bool aligning =
         app.job.running() && app.active_job == JobKind::align;
-    if (training && app.monitor.stage() == Stage::meshing) return 3;
-    if (app.job.running() && app.active_job == JobKind::dense) return 3;
+    const bool show_mesh = app.settings.build_mesh || app.has_mesh;
+    if (show_mesh &&
+        ((training && app.monitor.stage() == Stage::meshing) ||
+         (app.job.running() && app.active_job == JobKind::dense &&
+          mesh_from_mvs(app.settings)) ||
+         app.has_mesh))
+        return 3;
     if (training) return 2;
     if (aligning) return 1;
     if (app.has_model) return 2;
@@ -2707,13 +2726,15 @@ Action draw_menu_bar(App& app) {
                     !has_external_dataset(app)))
             action = Action::align;
         if (ImGui::MenuItem(
-                "Train 3DGS", nullptr, false,
+                mesh_from_gaussians(app.settings) ? "Train 3DGS + Mesh"
+                                                  : "Train 3DGS",
+                nullptr, false,
                 !busy && (app.settings.images_dir[0] != '\0' ||
                           has_external_dataset(app))))
             action = Action::train;
         if (ImGui::MenuItem(
-                "Dense MVS", nullptr, false,
-                !busy && alignment_ready(app)))
+                mesh_from_mvs(app.settings) ? "Build Mesh" : "Dense MVS",
+                nullptr, false, !busy && alignment_ready(app)))
             action = Action::dense;
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
@@ -2781,10 +2802,12 @@ Action draw_menu_bar(App& app) {
     ImGui::TextUnformatted("SCAN");
 
     const int current = workflow_step(app);
+    const bool show_mesh_crumb = app.settings.build_mesh || app.has_mesh;
     const std::array<const char*, 4> steps{
         {"Images", "Alignment", "Gaussians", "Mesh"}};
+    const int step_count = show_mesh_crumb ? 4 : 3;
     ImGui::SameLine(0.F, 22.F);
-    for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
+    for (int i = 0; i < step_count; ++i) {
         if (i > 0) {
             ImGui::SameLine(0.F, 8.F);
             theme::caption("\xE2\x80\xBA");
@@ -2989,12 +3012,18 @@ Action draw_toolbar(App& app) {
     ImGui::BeginDisabled(busy);
     ImGui::Checkbox("Build Mesh", &app.settings.build_mesh);
     ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip(
-            busy ? "Stop the running job first to change training options."
-                 : "Extract a surface after training.\n"
-                   "Enables depth-normal consistency and multi-view geometry/NCC\n"
-                   "supervision during optimisation, which the mesh needs.");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        const char* mesh_tip = busy
+            ? "Stop the running job first to change reconstruction options."
+            : (app.settings.mesh_source == 1
+                   ? "Extract a surface with dense multi-view stereo after alignment.\n"
+                     "Choose Photogrammetry or From Gaussians in the Mesh panel."
+                   : "Extract a surface after 3DGS training.\n"
+                     "From Gaussians enables depth-normal and multi-view geometry\n"
+                     "losses during optimisation. Switch to Photogrammetry in the\n"
+                     "Mesh panel for a dense MVS surface.");
+        ImGui::SetTooltip("%s", mesh_tip);
+    }
     ImGui::SameLine(0.F, 14.F);
 
     if (icons::labeled_button(
@@ -3188,19 +3217,21 @@ void draw_scene_panel(App& app) {
         training && stage != Stage::meshing
             ? StepState::active
             : (app.has_model ? StepState::done : StepState::pending),
-        app.settings.build_mesh ? "Geometry constraints on" : nullptr);
-    draw_step(
-        "05", "Extract mesh",
-        !app.settings.build_mesh &&
-                !(busy && app.active_job == JobKind::dense)
-            ? StepState::skipped
-            : ((training && stage == Stage::meshing) ||
-                       (busy && app.active_job == JobKind::dense)
-                   ? StepState::active
-                   : (app.has_mesh ? StepState::done : StepState::pending)),
-        busy && app.active_job == JobKind::dense
-            ? stage_name(stage)
-            : (app.settings.build_mesh ? nullptr : "Disabled"));
+        mesh_from_gaussians(app.settings) ? "Geometry constraints on" : nullptr);
+    if (app.settings.build_mesh) {
+        const bool extracting =
+            (mesh_from_gaussians(app.settings) && training &&
+             stage == Stage::meshing) ||
+            (mesh_from_mvs(app.settings) && busy &&
+             app.active_job == JobKind::dense);
+        draw_step(
+            "05", "Extract mesh",
+            extracting ? StepState::active
+                       : (app.has_mesh ? StepState::done : StepState::pending),
+            extracting ? stage_name(stage)
+                       : (mesh_from_mvs(app.settings) ? "Photogrammetry"
+                                                      : "From Gaussians"));
+    }
 
     ImGui::Dummy({0, 8.F});
     theme::section_header("SOURCE");
@@ -3716,9 +3747,22 @@ Action draw_inspector(App& app) {
             theme::caption("Video extraction");
             ImGui::PushTextWrapPos(0.F);
             theme::caption(
-                "Align Photos extracts the sharpest stills with ffmpeg, then "
-                "runs SfM. Requires ffmpeg on PATH.");
+                "Align Photos extracts the sharpest stills, then runs SfM.");
             ImGui::PopTextWrapPos();
+            const auto ffmpeg = aetherscan::io::locate_ffmpeg();
+            if (ffmpeg.empty()) {
+                theme::metric_coloured("ffmpeg", "Not found", theme::danger);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Install ffmpeg and add it to PATH. AetherScan also "
+                        "looks next to the app and in common install folders.");
+            } else {
+                theme::metric_coloured("ffmpeg", "Ready", theme::success);
+                if (ImGui::IsItemHovered()) {
+                    const std::string located = path_to_utf8(ffmpeg);
+                    ImGui::SetTooltip("%s", located.c_str());
+                }
+            }
             theme::caption("Target FPS");
             ImGui::SetNextItemWidth(-1.F);
             ImGui::InputFloat("##video_fps", &app.settings.video_fps, 0.5F, 1.F, "%.2f");
@@ -3726,52 +3770,48 @@ Action draw_inspector(App& app) {
                 ImGui::SetTooltip(
                     "Kept frames per second of source time.\n"
                     "2 FPS is a good default for handheld scans.");
-            theme::caption("Sharpness window");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputInt("##video_sharp_window", &app.settings.video_sharp_window);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Keep the sharpest of N consecutive candidates.\n"
-                    "1 disables blur selection. 3 matches Spirula Studio.");
             theme::caption("Max frames (0 = no cap)");
             ImGui::SetNextItemWidth(-1.F);
             ImGui::InputInt("##video_max_frames", &app.settings.video_max_frames);
-            theme::caption("JPEG quality");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputInt("##video_quality", &app.settings.video_quality);
-            theme::caption("Scale");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputFloat("##video_scale", &app.settings.video_scale, 0.1F, 0.25F, "%.2f");
-            theme::caption("Rotate");
-            ImGui::SetNextItemWidth(-1.F);
-            const char* rotations[] = {"0°", "90°", "180°", "270°"};
-            int rotate_choice = std::clamp(app.settings.video_rotate / 90, 0, 3);
-            if (ImGui::Combo("##video_rotate", &rotate_choice, rotations, 4))
-                app.settings.video_rotate = rotate_choice * 90;
-            theme::caption("Frames folder (optional)");
-            ImGui::SetNextItemWidth(-30.F);
-            ImGui::InputText(
-                "##video_frames_dir", app.settings.video_frames_dir.data(),
-                app.settings.video_frames_dir.size());
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Empty uses <video_stem>/images next to the file.");
-            ImGui::SameLine(0.F, 4.F);
-            if (ImGui::Button("...##pick_video_frames", {24.F, 0})) {
-                pick_folder(
-                    L"Select extracted frames folder",
-                    app.settings.video_frames_dir);
-            }
             const std::string frames_utf8 =
                 path_to_utf8(reconstruction_images_path(app));
             theme::metric("Will write", frames_utf8.c_str());
-            theme::caption("ffmpeg executable");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputText(
-                "##ffmpeg_exe", app.settings.ffmpeg_exe.data(),
-                app.settings.ffmpeg_exe.size());
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Empty uses ffmpeg from PATH.");
+            if (ImGui::TreeNodeEx("Advanced##video", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                theme::caption("Sharpness window");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::InputInt("##video_sharp_window", &app.settings.video_sharp_window);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Keep the sharpest of N consecutive candidates.\n"
+                        "1 disables blur selection. 3 is the default.");
+                theme::caption("JPEG quality");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::InputInt("##video_quality", &app.settings.video_quality);
+                theme::caption("Scale");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::InputFloat("##video_scale", &app.settings.video_scale, 0.1F, 0.25F, "%.2f");
+                theme::caption("Rotate");
+                ImGui::SetNextItemWidth(-1.F);
+                const char* rotations[] = {"0°", "90°", "180°", "270°"};
+                int rotate_choice = std::clamp(app.settings.video_rotate / 90, 0, 3);
+                if (ImGui::Combo("##video_rotate", &rotate_choice, rotations, 4))
+                    app.settings.video_rotate = rotate_choice * 90;
+                theme::caption("Frames folder (optional)");
+                ImGui::SetNextItemWidth(-30.F);
+                ImGui::InputText(
+                    "##video_frames_dir", app.settings.video_frames_dir.data(),
+                    app.settings.video_frames_dir.size());
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Empty uses <video_stem>/images next to the file.");
+                ImGui::SameLine(0.F, 4.F);
+                if (ImGui::Button("...##pick_video_frames", {24.F, 0})) {
+                    pick_folder(
+                        L"Select extracted frames folder",
+                        app.settings.video_frames_dir);
+                }
+                ImGui::TreePop();
+            }
         }
         theme::caption("Project file");
         ImGui::SetNextItemWidth(-30.F);
@@ -4016,50 +4056,87 @@ Action draw_inspector(App& app) {
     }
 
     if (ImGui::CollapsingHeader(
-            "Mesh & Geometry", ImGuiTreeNodeFlags_DefaultOpen)) {
+            "Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
         ImGui::BeginDisabled(busy);
-        ImGui::Checkbox(
-            "Build mesh after training", &app.settings.build_mesh);
-        ImGui::Spacing();
+        ImGui::Checkbox("Build mesh", &app.settings.build_mesh);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(
+                "Include a surface mesh in the reconstruction.\n"
+                "Choose From Gaussians or Photogrammetry below.");
         if (app.settings.build_mesh) {
+            ImGui::Spacing();
+            theme::caption("Method");
+            if (ImGui::RadioButton(
+                    "From Gaussians", app.settings.mesh_source == 0))
+                app.settings.mesh_source = 0;
             ImGui::PushTextWrapPos(0.F);
-            ImGui::PushStyleColor(ImGuiCol_Text, theme::accent);
-            ImGui::TextUnformatted(
-                "Training will add depth-normal consistency and multi-view "
-                "geometry/NCC supervision so the learned depth is metric "
-                "enough to fuse.");
-            ImGui::PopStyleColor();
+            theme::caption(
+                "Train 3DGS with depth and normal losses, then extract a "
+                "surface from the Gaussians.");
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
-            theme::caption("Surface backend");
+            if (ImGui::RadioButton(
+                    "Photogrammetry", app.settings.mesh_source == 1)) {
+                app.settings.mesh_source = 1;
+                if (app.settings.mesh_method == 3)
+                    app.settings.mesh_method = 0;
+            }
+            ImGui::PushTextWrapPos(0.F);
+            theme::caption(
+                "Dense multi-view stereo from aligned cameras, then fuse a "
+                "mesh. 3DGS training stays appearance-only.");
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+            theme::caption("Surface");
             ImGui::SetNextItemWidth(-1.F);
-            const char* methods[] = {"Auto", "TSDF", "Delaunay", "PAM"};
-            ImGui::Combo("##mesh_method", &app.settings.mesh_method, methods, 4);
-            theme::caption("Depth-normal weight");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::DragFloat(
-                "##depth_normal", &app.settings.depth_normal_weight, 0.005F,
-                0.F, 1.F, "%.3f");
-            theme::caption("Multi-view geometry weight");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::DragFloat(
-                "##mv_geo", &app.settings.multi_view_geo_weight, 0.005F, 0.F,
-                1.F, "%.3f");
-            theme::caption("Multi-view NCC weight");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::DragFloat(
-                "##mv_ncc", &app.settings.multi_view_ncc_weight, 0.01F, 0.F,
-                2.F, "%.2f");
-            theme::caption("Geometry loss start iteration");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::InputInt(
-                "##geo_from", &app.settings.geometry_from_iter, 500, 2000);
+            if (mesh_from_gaussians(app.settings)) {
+                const char* methods[] = {"Auto", "TSDF", "Delaunay", "PAM"};
+                ImGui::Combo(
+                    "##mesh_method", &app.settings.mesh_method, methods, 4);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "How depth is fused into triangles.\n"
+                        "PAM is GaussianWrapping occupancy meshing.");
+            } else {
+                if (app.settings.mesh_method == 3)
+                    app.settings.mesh_method = 0;
+                const char* methods[] = {"Auto", "TSDF", "Delaunay"};
+                ImGui::Combo(
+                    "##mesh_method", &app.settings.mesh_method, methods, 3);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "How MVS depth maps are fused into triangles.");
+            }
+            if (mesh_from_gaussians(app.settings) &&
+                ImGui::TreeNodeEx(
+                    "Geometry training", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                theme::caption("Depth-normal weight");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::DragFloat(
+                    "##depth_normal", &app.settings.depth_normal_weight,
+                    0.005F, 0.F, 1.F, "%.3f");
+                theme::caption("Multi-view geometry weight");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::DragFloat(
+                    "##mv_geo", &app.settings.multi_view_geo_weight, 0.005F,
+                    0.F, 1.F, "%.3f");
+                theme::caption("Multi-view NCC weight");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::DragFloat(
+                    "##mv_ncc", &app.settings.multi_view_ncc_weight, 0.01F,
+                    0.F, 2.F, "%.2f");
+                theme::caption("Geometry loss start iteration");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::InputInt(
+                    "##geo_from", &app.settings.geometry_from_iter, 500,
+                    2000);
+                ImGui::TreePop();
+            }
         } else {
             ImGui::PushTextWrapPos(0.F);
             theme::caption(
-                "Appearance-only training. Geometry losses stay off and no "
-                "surface is extracted.");
+                "Appearance-only. Train 3DGS without extracting a surface.");
             ImGui::PopTextWrapPos();
         }
         ImGui::EndDisabled();
@@ -4208,7 +4285,7 @@ Action draw_inspector(App& app) {
         theme::metric("Total loss", buffer);
         std::snprintf(buffer, sizeof(buffer), "%.4f", stats.rgb_loss);
         theme::metric("RGB", buffer);
-        if (app.settings.build_mesh) {
+        if (mesh_from_gaussians(app.settings)) {
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.depth_loss);
             theme::metric("Depth", buffer);
             std::snprintf(buffer, sizeof(buffer), "%.4f", stats.normal_loss);
@@ -4257,22 +4334,40 @@ Action draw_inspector(App& app) {
                 icons::ButtonStyle::danger, true, false, k_stop_job_tooltip))
             action = Action::stop;
     } else if (has_external_dataset(app)) {
-        if (theme::primary_button(
-                app.settings.build_mesh ? "Train External 3DGS + Mesh"
-                                        : "Train External 3DGS",
-                {-1.F, 40.F}, true))
-            action = Action::train;
-        ImGui::Dummy({0, 6.F});
-        if (theme::toolbar_button("Dense MVS", {-1.F, 32.F}))
-            action = Action::dense;
+        if (mesh_from_mvs(app.settings)) {
+            if (theme::primary_button("Build Mesh", {-1.F, 40.F}, true))
+                action = Action::dense;
+            ImGui::Dummy({0, 6.F});
+            if (theme::toolbar_button("Train 3DGS", {-1.F, 32.F}))
+                action = Action::train;
+        } else {
+            if (theme::primary_button(
+                    mesh_from_gaussians(app.settings)
+                        ? "Train External 3DGS + Mesh"
+                        : "Train External 3DGS",
+                    {-1.F, 40.F}, true))
+                action = Action::train;
+            ImGui::Dummy({0, 6.F});
+            if (theme::toolbar_button("Dense MVS", {-1.F, 32.F}))
+                action = Action::dense;
+        }
     } else if (!app.has_sparse) {
         if (theme::primary_button(
                 "Align Photos", {-1.F, 40.F},
                 app.settings.images_dir[0] != '\0'))
             action = Action::align;
+    } else if (mesh_from_mvs(app.settings)) {
+        if (theme::primary_button(
+                "Build Mesh", {-1.F, 40.F},
+                app.settings.images_dir[0] != '\0'))
+            action = Action::dense;
+        ImGui::Dummy({0, 6.F});
+        if (theme::toolbar_button("Train 3DGS", {-1.F, 32.F}))
+            action = Action::train;
     } else {
         if (theme::primary_button(
-                app.settings.build_mesh ? "Train 3DGS + Mesh" : "Train 3DGS",
+                mesh_from_gaussians(app.settings) ? "Train 3DGS + Mesh"
+                                                  : "Train 3DGS",
                 {-1.F, 40.F}, app.settings.images_dir[0] != '\0'))
             action = Action::train;
         ImGui::Dummy({0, 6.F});
