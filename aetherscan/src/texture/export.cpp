@@ -1,12 +1,15 @@
 #include "texture/export.hpp"
 
 #include "io/image.hpp"
+#include "../io/binary_codec.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace aetherscan::texture {
 namespace {
@@ -102,6 +105,119 @@ void save_textured_obj(
         emit(mesh.indices[f + 2]);
         obj << '\n';
     }
+}
+
+namespace {
+
+[[nodiscard]] std::string read_binary_file(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        throw std::runtime_error("Failed to read " + path.string());
+    return {
+        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+void write_binary_file(
+    const std::filesystem::path& path, const std::string& bytes) {
+    if (!path.parent_path().empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+    }
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output)
+        throw std::runtime_error("Failed to write " + path.string());
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+void replace_token(std::string& text, const std::string& from, const std::string& to) {
+    if (from.empty() || from == to) return;
+    std::size_t at = 0;
+    while ((at = text.find(from, at)) != std::string::npos) {
+        text.replace(at, from.size(), to);
+        at += to.size();
+    }
+}
+
+void write_blob(io::binary::BufferWriter& writer, const std::string& bytes) {
+    writer.value_size(bytes.size());
+    writer.bytes(bytes.data(), bytes.size());
+}
+
+std::string read_blob(io::binary::BufferReader& reader) {
+    std::string bytes(reader.size(1, 512ull * 1024ull * 1024ull), '\0');
+    reader.bytes(bytes.data(), bytes.size());
+    return bytes;
+}
+
+}  // namespace
+
+bool textured_obj_exists(const std::filesystem::path& stem) {
+    std::error_code error;
+    return !stem.empty() &&
+           std::filesystem::exists(textured_obj_path(stem), error) &&
+           std::filesystem::exists(textured_albedo_path(stem), error);
+}
+
+void copy_textured_obj(
+    const std::filesystem::path& source_stem,
+    const std::filesystem::path& destination_stem) {
+    if (source_stem.empty() || destination_stem.empty())
+        throw std::runtime_error("Textured mesh copy requires a source and destination");
+    if (!textured_obj_exists(source_stem))
+        throw std::runtime_error(
+            "No textured mesh at " + textured_obj_path(source_stem).string());
+
+    std::string obj = read_binary_file(textured_obj_path(source_stem));
+    std::string mtl;
+    std::error_code mtl_error;
+    if (std::filesystem::exists(textured_mtl_path(source_stem), mtl_error))
+        mtl = read_binary_file(textured_mtl_path(source_stem));
+    const std::string png = read_binary_file(textured_albedo_path(source_stem));
+    const std::string dest_obj = destination_stem.filename().string() + ".obj";
+    const std::string dest_mtl = destination_stem.filename().string() + ".mtl";
+    const std::string dest_png =
+        destination_stem.filename().string() + "_albedo.png";
+    replace_token(obj, source_stem.filename().string() + ".mtl", dest_mtl);
+    replace_token(mtl, source_stem.filename().string() + "_albedo.png", dest_png);
+    write_binary_file(textured_obj_path(destination_stem), obj);
+    write_binary_file(textured_mtl_path(destination_stem), mtl);
+    write_binary_file(textured_albedo_path(destination_stem), png);
+}
+
+std::vector<std::uint8_t> encode_textured_obj(const std::filesystem::path& stem) {
+    if (!textured_obj_exists(stem))
+        throw std::runtime_error(
+            "Cannot pack textured mesh; missing " +
+            textured_obj_path(stem).string());
+    io::binary::BufferWriter writer;
+    writer.value(k_texture_chunk_version);
+    writer.value(static_cast<std::uint32_t>(1));
+    write_blob(writer, read_binary_file(textured_obj_path(stem)));
+    std::error_code mtl_error;
+    write_blob(
+        writer,
+        std::filesystem::exists(textured_mtl_path(stem), mtl_error)
+            ? read_binary_file(textured_mtl_path(stem))
+            : std::string{});
+    write_blob(writer, read_binary_file(textured_albedo_path(stem)));
+    return writer.take();
+}
+
+void decode_textured_obj(
+    std::span<const std::uint8_t> bytes, const std::filesystem::path& stem) {
+    if (stem.empty())
+        throw std::runtime_error("Textured mesh decode requires a destination stem");
+    io::binary::BufferReader reader(bytes);
+    const auto version = reader.value<std::uint32_t>();
+    if (version == 0 || version > k_texture_chunk_version)
+        throw std::runtime_error("Unsupported textured mesh chunk version");
+    static_cast<void>(reader.value<std::uint32_t>());
+    const std::string obj = read_blob(reader);
+    const std::string mtl = reader.remaining() > 0 ? read_blob(reader) : std::string{};
+    const std::string png = reader.remaining() > 0 ? read_blob(reader) : std::string{};
+    write_binary_file(textured_obj_path(stem), obj);
+    if (!mtl.empty()) write_binary_file(textured_mtl_path(stem), mtl);
+    write_binary_file(textured_albedo_path(stem), png);
 }
 
 }  // namespace aetherscan::texture

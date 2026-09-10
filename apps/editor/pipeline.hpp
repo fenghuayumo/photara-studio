@@ -14,6 +14,7 @@
 #include <deque>
 #include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace editor {
@@ -21,7 +22,7 @@ namespace editor {
 // Alignment is the shared product of internal SfM or an imported camera
 // dataset. Downstream jobs (Train 3DGS, dense MVS) consume that product and
 // must not rebuild it.
-enum class JobKind { none, align, train, dense, export_sfm };
+enum class JobKind { none, align, train, dense, texture, export_sfm };
 
 const char* job_name(JobKind kind);
 
@@ -266,6 +267,13 @@ struct ProjectSettings {
     int geometry_from_iter = 3'000;
     // GaussianWrapping normal-field training. Off is the default GGGS path.
     bool normal_field = false;
+
+    // Texture projection after mesh extraction (aether_drender).
+    // quality: 0 Fast, 1 Standard, 2 High.
+    int texture_quality = 1;
+    int atlas_resolution = 2048;
+    bool texture_delight = false;
+    bool texture_optimize = true;
 };
 
 // Everything the editor reads or writes lives under the project directory.
@@ -299,6 +307,9 @@ struct ProjectLayout {
     std::filesystem::path working_splat;
     std::filesystem::path working_mesh;
     std::filesystem::path working_dense;
+    // Stem for textured.obj / .mtl / _albedo.png working copies.
+    std::filesystem::path working_texture;
+    std::filesystem::path texture_log;
 };
 
 ProjectLayout resolve_layout(const ProjectSettings& settings);
@@ -311,6 +322,57 @@ inline bool mesh_from_gaussians(const ProjectSettings& settings) {
 
 inline bool mesh_from_mvs(const ProjectSettings& settings) {
     return settings.build_mesh && settings.mesh_source == 1;
+}
+
+inline std::filesystem::path textured_obj_path(
+    const std::filesystem::path& stem) {
+    auto path = stem;
+    path += ".obj";
+    return path;
+}
+
+inline std::filesystem::path textured_mtl_path(
+    const std::filesystem::path& stem) {
+    auto path = stem;
+    path += ".mtl";
+    return path;
+}
+
+inline std::filesystem::path textured_albedo_path(
+    const std::filesystem::path& stem) {
+    auto path = stem;
+    path += "_albedo.png";
+    return path;
+}
+
+inline bool textured_mesh_on_disk(const std::filesystem::path& stem) {
+    std::error_code error;
+    return !stem.empty() &&
+           std::filesystem::exists(textured_obj_path(stem), error) &&
+           std::filesystem::exists(textured_albedo_path(stem), error);
+}
+
+inline void apply_texture_quality_preset(ProjectSettings& settings) {
+    switch (settings.texture_quality) {
+        case 0:
+            settings.atlas_resolution = 1024;
+            settings.texture_optimize = false;
+            break;
+        case 2:
+            settings.atlas_resolution = 4096;
+            settings.texture_optimize = true;
+            break;
+        default:
+            settings.atlas_resolution = 2048;
+            settings.texture_optimize = true;
+            break;
+    }
+}
+
+inline int texture_optimize_steps(const ProjectSettings& settings) {
+    if (settings.texture_quality == 0) return 400;
+    if (settings.texture_quality == 2) return 2000;
+    return 1000;
 }
 
 // Folder of stills SfM/training actually reads. Equals images_dir for a photo
@@ -349,6 +411,10 @@ std::string build_export_sfm_command(
     const ProjectLayout& layout);
 
 std::string build_dense_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout);
+
+std::string build_texture_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout);
 

@@ -12,11 +12,14 @@
 #include <Eigen/Core>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <stdexcept>
+#include <string>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -1008,6 +1011,147 @@ PreviewMesh preview_mesh_from_mvs(const aetherscan::mvs::Mesh& source) {
     if (mesh.normals.size() != mesh.vertices.size()) mesh.compute_normals();
     mesh.compute_bounds();
     return mesh;
+}
+
+namespace {
+
+int obj_index(const int value, const int count) {
+    if (value > 0) return value - 1;
+    if (value < 0) return count + value;
+    return -1;
+}
+
+bool parse_obj_corner(
+    const std::string& token, int& vertex, int& tex, int& normal) {
+    vertex = tex = normal = 0;
+    if (token.empty()) return false;
+    const std::size_t first = token.find('/');
+    if (first == std::string::npos) {
+        vertex = std::atoi(token.c_str());
+        return vertex != 0;
+    }
+    vertex = std::atoi(token.c_str());
+    const std::size_t second = token.find('/', first + 1);
+    if (second == std::string::npos) {
+        tex = std::atoi(token.c_str() + first + 1);
+        return vertex != 0;
+    }
+    if (second > first + 1) tex = std::atoi(token.c_str() + first + 1);
+    if (second + 1 < token.size())
+        normal = std::atoi(token.c_str() + second + 1);
+    return vertex != 0;
+}
+
+PreviewMesh preview_mesh_from_obj(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("Failed to open OBJ: " + path.string());
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+    std::vector<Vec2> texcoords;
+    PreviewMesh mesh;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream stream(line);
+        std::string tag;
+        stream >> tag;
+        if (tag == "v") {
+            Vec3 p;
+            stream >> p.x >> p.y >> p.z;
+            positions.push_back(p);
+        } else if (tag == "vt") {
+            Vec2 uv;
+            stream >> uv.x >> uv.y;
+            // OBJ V is up; the albedo PNG and Vulkan both sample V down.
+            texcoords.push_back({uv.x, 1.F - uv.y});
+        } else if (tag == "vn") {
+            Vec3 n;
+            stream >> n.x >> n.y >> n.z;
+            normals.push_back(n);
+        } else if (tag == "f") {
+            std::vector<std::array<int, 3>> corners;
+            std::string token;
+            while (stream >> token) {
+                int vertex = 0, tex = 0, normal = 0;
+                if (!parse_obj_corner(token, vertex, tex, normal)) continue;
+                corners.push_back({vertex, tex, normal});
+            }
+            if (corners.size() < 3) continue;
+            for (std::size_t i = 1; i + 1 < corners.size(); ++i) {
+                const std::array<std::array<int, 3>, 3> tri = {
+                    corners[0], corners[i], corners[i + 1]};
+                const std::size_t begin = mesh.vertices.size();
+                std::array<std::uint32_t, 3> face{};
+                bool ok = true;
+                for (int c = 0; c < 3; ++c) {
+                    const int vi = obj_index(
+                        tri[static_cast<std::size_t>(c)][0],
+                        static_cast<int>(positions.size()));
+                    const int ti = obj_index(
+                        tri[static_cast<std::size_t>(c)][1],
+                        static_cast<int>(texcoords.size()));
+                    const int ni = obj_index(
+                        tri[static_cast<std::size_t>(c)][2],
+                        static_cast<int>(normals.size()));
+                    if (vi < 0 ||
+                        static_cast<std::size_t>(vi) >= positions.size()) {
+                        ok = false;
+                        break;
+                    }
+                    face[static_cast<std::size_t>(c)] =
+                        static_cast<std::uint32_t>(mesh.vertices.size());
+                    mesh.vertices.push_back(
+                        positions[static_cast<std::size_t>(vi)]);
+                    if (ti >= 0 &&
+                        static_cast<std::size_t>(ti) < texcoords.size())
+                        mesh.uvs.push_back(
+                            texcoords[static_cast<std::size_t>(ti)]);
+                    else
+                        mesh.uvs.push_back({});
+                    if (ni >= 0 &&
+                        static_cast<std::size_t>(ni) < normals.size())
+                        mesh.normals.push_back(
+                            normals[static_cast<std::size_t>(ni)]);
+                }
+                if (ok) mesh.faces.push_back(face);
+                else {
+                    mesh.vertices.resize(begin);
+                    mesh.uvs.resize(begin);
+                    if (mesh.normals.size() > begin)
+                        mesh.normals.resize(begin);
+                }
+            }
+        }
+    }
+    if (mesh.uvs.size() != mesh.vertices.size()) mesh.uvs.clear();
+    if (mesh.normals.size() != mesh.vertices.size()) mesh.compute_normals();
+    mesh.compute_bounds();
+    return mesh;
+}
+
+}  // namespace
+
+MeshLoad load_preview_textured_mesh(std::filesystem::path stem) {
+    MeshLoad loaded;
+    try {
+        auto obj = stem;
+        obj += ".obj";
+        auto albedo = stem;
+        albedo += "_albedo.png";
+        std::error_code error;
+        if (stem.empty() || !std::filesystem::exists(obj, error)) {
+            loaded.error = "No textured OBJ to load";
+            return loaded;
+        }
+        loaded.mesh = preview_mesh_from_obj(obj);
+        if (std::filesystem::exists(albedo, error))
+            loaded.mesh.albedo_path = albedo;
+        loaded.ok = loaded.mesh.has();
+        if (!loaded.ok) loaded.error = "Textured mesh has no faces";
+    } catch (const std::exception& failure) {
+        loaded.error = failure.what();
+    }
+    return loaded;
 }
 
 MeshLoad load_preview_mesh(

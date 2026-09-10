@@ -92,6 +92,10 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.video_scale);
     writer.value(static_cast<std::int32_t>(settings.video_rotate));
     writer.value(static_cast<std::int32_t>(settings.mesh_source));
+    writer.value(static_cast<std::int32_t>(settings.texture_quality));
+    writer.value(static_cast<std::int32_t>(settings.atlas_resolution));
+    writer.value(static_cast<std::uint8_t>(settings.texture_delight));
+    writer.value(static_cast<std::uint8_t>(settings.texture_optimize));
     return writer.take();
 }
 
@@ -154,6 +158,14 @@ Settings decode_settings(
         settings.video_rotate = reader.value<std::int32_t>();
     if (reader.remaining() >= sizeof(std::int32_t))
         settings.mesh_source = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.texture_quality = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.atlas_resolution = reader.value<std::int32_t>();
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.texture_delight = reader.value<std::uint8_t>() != 0;
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.texture_optimize = reader.value<std::uint8_t>() != 0;
     return settings;
 }
 

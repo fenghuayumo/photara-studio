@@ -14,6 +14,11 @@
 
 namespace editor {
 
+struct Vec2 {
+    float x{};
+    float y{};
+};
+
 struct Vec3 {
     float x{};
     float y{};
@@ -82,12 +87,17 @@ struct SparseScene {
 struct PreviewMesh {
     std::vector<Vec3> vertices;
     std::vector<Vec3> normals;
+    std::vector<Vec2> uvs;
     std::vector<std::uint32_t> colours;
     std::vector<std::array<std::uint32_t, 3>> faces;
+    std::filesystem::path albedo_path;
     Vec3 centroid;
     float radius{1.F};
 
     [[nodiscard]] bool has() const { return !faces.empty(); }
+    [[nodiscard]] bool has_texture() const {
+        return uvs.size() == vertices.size() && !vertices.empty();
+    }
     void compute_normals();
     void compute_bounds();
     void clear() { *this = {}; }
@@ -129,6 +139,9 @@ SceneLoad sparse_scene_from_dataset(
 // Prefers `mesh_ply` when it exists; otherwise reads the mesh chunk of `.ascan`.
 MeshLoad load_preview_mesh(
     std::filesystem::path mesh_ply, std::filesystem::path ascan = {});
+
+// Loads a baked OBJ (with UVs) and records the sibling albedo PNG path.
+MeshLoad load_preview_textured_mesh(std::filesystem::path stem);
 
 struct OrbitCamera {
     float yaw{0.785398F};
@@ -228,6 +241,7 @@ struct ViewOptions {
     bool draw_mesh = false;
     bool mesh_wireframe = false;
     bool mesh_vertex_colour = false;
+    bool mesh_texture = true;
     int mesh_face_budget = 220'000;
     float view_scale = 0.045F;
 };

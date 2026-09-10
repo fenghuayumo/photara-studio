@@ -924,7 +924,9 @@ struct MeshGpuVertex {
     float px, py, pz, pad0;
     float nx, ny, nz, pad1;
     float r, g, b, pad2;
+    float u, v, pad3, pad4;
 };
+static_assert(sizeof(MeshGpuVertex) == 64, "mesh vertex must stay 16-byte aligned");
 
 struct MeshPush {
     float world_to_clip[16];
@@ -1030,6 +1032,124 @@ bool create_buffer_with_data(
     return true;
 }
 
+void destroy_image(
+    VkImage& image, VkDeviceMemory& memory, VkImageView& view) {
+    if (view) vkDestroyImageView(g_device, view, nullptr);
+    if (image) vkDestroyImage(g_device, image, nullptr);
+    if (memory) vkFreeMemory(g_device, memory, nullptr);
+    view = {};
+    image = {};
+    memory = {};
+}
+
+void create_sampled_image(
+    VkImage& image, VkDeviceMemory& memory, VkImageView& view,
+    const std::uint32_t width, const std::uint32_t height) {
+    destroy_image(image, memory, view);
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    info.extent = {width, height, 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    check(vkCreateImage(g_device, &info, nullptr, &image));
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(g_device, image, &requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = memory_type(
+        requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    check(vkAllocateMemory(g_device, &allocation, nullptr, &memory));
+    check(vkBindImageMemory(g_device, image, memory, 0));
+    VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    view_info.image = image;
+    check(vkCreateImageView(g_device, &view_info, nullptr, &view));
+}
+
+void upload_sampled_image(
+    VkImage image, const std::uint32_t width, const std::uint32_t height,
+    const std::uint8_t* rgba) {
+    const VkDeviceSize bytes =
+        static_cast<VkDeviceSize>(width) * height * 4U;
+    VkBuffer staging{};
+    VkDeviceMemory staging_memory{};
+    VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    buffer.size = bytes;
+    buffer.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    check(vkCreateBuffer(g_device, &buffer, nullptr, &staging));
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(g_device, staging, &requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = memory_type(
+        requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    check(vkAllocateMemory(g_device, &allocation, nullptr, &staging_memory));
+    check(vkBindBufferMemory(g_device, staging, staging_memory, 0));
+    void* mapped{};
+    check(vkMapMemory(g_device, staging_memory, 0, bytes, 0, &mapped));
+    std::memcpy(mapped, rgba, static_cast<std::size_t>(bytes));
+    vkUnmapMemory(g_device, staging_memory);
+
+    VkCommandPool pool{};
+    VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pool_info.queueFamilyIndex = g_queue_family;
+    check(vkCreateCommandPool(g_device, &pool_info, nullptr, &pool));
+    VkCommandBufferAllocateInfo cmd_info{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cmd_info.commandPool = pool;
+    cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmd_info.commandBufferCount = 1;
+    VkCommandBuffer command{};
+    check(vkAllocateCommandBuffers(g_device, &cmd_info, &command));
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check(vkBeginCommandBuffer(command, &begin));
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(
+        command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+        &barrier);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {width, height, 1};
+    vkCmdCopyBufferToImage(
+        command, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+        &copy);
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(
+        command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+        &barrier);
+    check(vkEndCommandBuffer(command));
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command;
+    check(vkQueueSubmit(g_queue, 1, &submit, {}));
+    check(vkQueueWaitIdle(g_queue));
+    vkDestroyCommandPool(g_device, pool, nullptr);
+    vkDestroyBuffer(g_device, staging, nullptr);
+    vkFreeMemory(g_device, staging_memory, nullptr);
+}
+
 VkPipeline create_mesh_pipeline(
     VkRenderPass render_pass, VkPipelineLayout layout, VkShaderModule vert,
     VkShaderModule frag, const VkPrimitiveTopology topology,
@@ -1047,7 +1167,7 @@ VkPipeline create_mesh_pipeline(
     VkVertexInputBindingDescription binding{};
     binding.stride = sizeof(MeshGpuVertex);
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    VkVertexInputAttributeDescription attributes[3]{};
+    VkVertexInputAttributeDescription attributes[4]{};
     attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[1].location = 1;
     attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1055,11 +1175,14 @@ VkPipeline create_mesh_pipeline(
     attributes[2].location = 2;
     attributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[2].offset = 32;
+    attributes[3].location = 3;
+    attributes[3].format = VK_FORMAT_R32G32_SFLOAT;
+    attributes[3].offset = 48;
     VkPipelineVertexInputStateCreateInfo vertex{
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertex.vertexBindingDescriptionCount = 1;
     vertex.pVertexBindingDescriptions = &binding;
-    vertex.vertexAttributeDescriptionCount = 3;
+    vertex.vertexAttributeDescriptionCount = 4;
     vertex.pVertexAttributeDescriptions = attributes;
 
     VkPipelineInputAssemblyStateCreateInfo assembly{
@@ -1184,6 +1307,38 @@ void MeshPreviewRenderer::destroy_frames() {
     write_ = 0;
 }
 
+void MeshPreviewRenderer::destroy_albedo() {
+    if (!g_device) {
+        albedo_image_ = {};
+        albedo_memory_ = {};
+        albedo_view_ = {};
+        albedo_sampler_ = {};
+        albedo_set_ = {};
+        albedo_pool_ = {};
+        albedo_layout_ = {};
+        albedo_width_ = 0;
+        albedo_height_ = 0;
+        return;
+    }
+    vkDeviceWaitIdle(g_device);
+    if (albedo_view_) vkDestroyImageView(g_device, albedo_view_, nullptr);
+    if (albedo_image_) vkDestroyImage(g_device, albedo_image_, nullptr);
+    if (albedo_memory_) vkFreeMemory(g_device, albedo_memory_, nullptr);
+    if (albedo_sampler_) vkDestroySampler(g_device, albedo_sampler_, nullptr);
+    if (albedo_pool_) vkDestroyDescriptorPool(g_device, albedo_pool_, nullptr);
+    if (albedo_layout_)
+        vkDestroyDescriptorSetLayout(g_device, albedo_layout_, nullptr);
+    albedo_view_ = {};
+    albedo_image_ = {};
+    albedo_memory_ = {};
+    albedo_sampler_ = {};
+    albedo_set_ = {};
+    albedo_pool_ = {};
+    albedo_layout_ = {};
+    albedo_width_ = 0;
+    albedo_height_ = 0;
+}
+
 void MeshPreviewRenderer::destroy_pipeline() {
     if (!g_device) {
         fill_pipeline_ = {};
@@ -1214,6 +1369,7 @@ void MeshPreviewRenderer::reset() {
     destroy_frames();
     destroy_mesh_buffers();
     destroy_pipeline();
+    destroy_albedo();
 }
 
 bool MeshPreviewRenderer::ensure_pipeline() {
@@ -1273,12 +1429,16 @@ bool MeshPreviewRenderer::ensure_pipeline() {
     pass.pDependencies = dependencies;
     check(vkCreateRenderPass(g_device, &pass, nullptr, &render_pass_));
 
+    if (!ensure_albedo()) return false;
+
     VkPushConstantRange push{};
     push.stageFlags =
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     push.size = sizeof(MeshPush);
     VkPipelineLayoutCreateInfo layout_info{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &albedo_layout_;
     layout_info.pushConstantRangeCount = 1;
     layout_info.pPushConstantRanges = &push;
     check(vkCreatePipelineLayout(
@@ -1305,6 +1465,114 @@ bool MeshPreviewRenderer::ensure_pipeline() {
     pool.queueFamilyIndex = g_queue_family;
     check(vkCreateCommandPool(g_device, &pool, nullptr, &command_pool_));
     return fill_pipeline_ && wire_pipeline_;
+}
+
+void MeshPreviewRenderer::bind_albedo_view(VkImageView view) {
+    if (!albedo_set_ || !albedo_sampler_ || !view) return;
+    VkDescriptorImageInfo image{};
+    image.sampler = albedo_sampler_;
+    image.imageView = view;
+    image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = albedo_set_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image;
+    vkUpdateDescriptorSets(g_device, 1, &write, 0, nullptr);
+}
+
+bool MeshPreviewRenderer::ensure_albedo() {
+    if (albedo_set_ && albedo_view_) return true;
+    if (!g_device) return false;
+
+    if (!albedo_layout_) {
+        VkDescriptorSetLayoutBinding binding{};
+        binding.binding = 0;
+        binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        binding.descriptorCount = 1;
+        binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo layout{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        layout.bindingCount = 1;
+        layout.pBindings = &binding;
+        check(vkCreateDescriptorSetLayout(
+            g_device, &layout, nullptr, &albedo_layout_));
+    }
+    if (!albedo_pool_) {
+        VkDescriptorPoolSize size{};
+        size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        size.descriptorCount = 1;
+        VkDescriptorPoolCreateInfo pool{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        pool.maxSets = 1;
+        pool.poolSizeCount = 1;
+        pool.pPoolSizes = &size;
+        check(vkCreateDescriptorPool(g_device, &pool, nullptr, &albedo_pool_));
+    }
+    if (!albedo_set_) {
+        VkDescriptorSetAllocateInfo alloc{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        alloc.descriptorPool = albedo_pool_;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &albedo_layout_;
+        check(vkAllocateDescriptorSets(g_device, &alloc, &albedo_set_));
+    }
+    if (!albedo_sampler_) {
+        VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sampler.magFilter = VK_FILTER_LINEAR;
+        sampler.minFilter = VK_FILTER_LINEAR;
+        sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sampler.addressModeU = sampler.addressModeV = sampler.addressModeW =
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler.maxLod = 1.F;
+        check(vkCreateSampler(g_device, &sampler, nullptr, &albedo_sampler_));
+    }
+    if (!albedo_view_) {
+        const std::uint8_t white[4] = {255, 255, 255, 255};
+        create_sampled_image(albedo_image_, albedo_memory_, albedo_view_, 1, 1);
+        upload_sampled_image(albedo_image_, 1, 1, white);
+        albedo_width_ = 1;
+        albedo_height_ = 1;
+        bind_albedo_view(albedo_view_);
+    }
+    return albedo_set_ != VK_NULL_HANDLE;
+}
+
+void MeshPreviewRenderer::set_albedo(const aetherscan::io::RgbImage& atlas) {
+    if (!g_device || !ensure_albedo()) return;
+    if (atlas.width == 0 || atlas.height == 0 || atlas.pixels.size() <
+            static_cast<std::size_t>(atlas.width) * atlas.height * 3U) {
+        if (albedo_width_ != 1 || albedo_height_ != 1) {
+            vkDeviceWaitIdle(g_device);
+            const std::uint8_t white[4] = {255, 255, 255, 255};
+            create_sampled_image(
+                albedo_image_, albedo_memory_, albedo_view_, 1, 1);
+            upload_sampled_image(albedo_image_, 1, 1, white);
+            albedo_width_ = 1;
+            albedo_height_ = 1;
+            bind_albedo_view(albedo_view_);
+        }
+        return;
+    }
+    vkDeviceWaitIdle(g_device);
+    create_sampled_image(
+        albedo_image_, albedo_memory_, albedo_view_, atlas.width, atlas.height);
+    std::vector<std::uint8_t> rgba(
+        static_cast<std::size_t>(atlas.width) * atlas.height * 4U);
+    const std::size_t pixels =
+        static_cast<std::size_t>(atlas.width) * atlas.height;
+    for (std::size_t i = 0; i < pixels; ++i) {
+        rgba[4U * i] = atlas.pixels[3U * i];
+        rgba[4U * i + 1U] = atlas.pixels[3U * i + 1U];
+        rgba[4U * i + 2U] = atlas.pixels[3U * i + 2U];
+        rgba[4U * i + 3U] = 255;
+    }
+    upload_sampled_image(
+        albedo_image_, atlas.width, atlas.height, rgba.data());
+    albedo_width_ = atlas.width;
+    albedo_height_ = atlas.height;
+    bind_albedo_view(albedo_view_);
 }
 
 bool MeshPreviewRenderer::ensure_frames(
@@ -1399,13 +1667,15 @@ bool MeshPreviewRenderer::ensure_frames(
 void MeshPreviewRenderer::set_mesh(
     const std::vector<float>& positions, const std::vector<float>& normals,
     const std::vector<float>& colours,
-    const std::vector<std::uint32_t>& indices) {
+    const std::vector<std::uint32_t>& indices,
+    const std::vector<float>& uvs) {
     destroy_mesh_buffers();
     const std::size_t vertex_count = positions.size() / 3U;
     if (vertex_count == 0 || indices.size() < 3) return;
     std::vector<MeshGpuVertex> vertices(vertex_count);
     const bool have_n = normals.size() == positions.size();
     const bool have_c = colours.size() == positions.size();
+    const bool have_uv = uvs.size() == vertex_count * 2U;
     for (std::size_t i = 0; i < vertex_count; ++i) {
         MeshGpuVertex& v = vertices[i];
         v.px = positions[3U * i];
@@ -1424,6 +1694,10 @@ void MeshPreviewRenderer::set_mesh(
             v.b = colours[3U * i + 2U];
         } else {
             v.r = v.g = v.b = 1.F;
+        }
+        if (have_uv) {
+            v.u = uvs[2U * i];
+            v.v = uvs[2U * i + 1U];
         }
     }
     std::vector<std::uint32_t> edges;
@@ -1502,11 +1776,17 @@ bool MeshPreviewRenderer::draw(
     push.clay_flags[0] = uniforms.clay[0];
     push.clay_flags[1] = uniforms.clay[1];
     push.clay_flags[2] = uniforms.clay[2];
-    push.clay_flags[3] = uniforms.vertex_colour ? 1.F : 0.F;
+    push.clay_flags[3] = uniforms.textured
+        ? 2.F
+        : (uniforms.vertex_colour ? 1.F : 0.F);
     vkCmdPushConstants(
         frame.command, pipeline_layout_,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
         sizeof(push), &push);
+    if (albedo_set_)
+        vkCmdBindDescriptorSets(
+            frame.command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
+            0, 1, &albedo_set_, 0, nullptr);
 
     const VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(frame.command, 0, 1, &vertex_buffer_, &offset);

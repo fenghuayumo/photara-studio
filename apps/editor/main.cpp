@@ -17,6 +17,9 @@
 #include "splat/formats.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
+#if defined(AETHERSCAN_HAS_TEXTURE)
+#include "texture/export.hpp"
+#endif
 
 #include "imgui_impl_glfw.h"
 #include "imgui_internal.h"
@@ -96,6 +99,7 @@ struct App {
     std::vector<float> mesh_gpu_positions;
     std::vector<float> mesh_gpu_normals;
     std::vector<float> mesh_gpu_colours;
+    std::vector<float> mesh_gpu_uvs;
     std::vector<std::uint32_t> mesh_gpu_indices;
     bool mesh_gpu_uploaded{};
     bool mesh_gpu_failed{};
@@ -125,6 +129,9 @@ struct App {
     bool has_mvs{};
     bool has_model{};
     bool has_mesh{};
+    bool has_texture{};
+    gpu::PreviewTexture atlas_preview;
+    std::filesystem::path atlas_preview_path;
     std::uint32_t project_writer_version{};
     std::uint32_t project_min_reader_version{};
     VisualizationMode view_mode{VisualizationMode::points};
@@ -354,7 +361,9 @@ std::optional<std::filesystem::path> resolve_dropped_image_directory(
     return parent;
 }
 
-enum class FilePickKind { project, dataset, point_cloud, splat_model, mesh, video };
+enum class FilePickKind {
+    project, dataset, point_cloud, splat_model, mesh, textured_mesh, video
+};
 
 #if defined(_WIN32)
 // Native folder picker. Failure simply leaves the text field untouched.
@@ -444,6 +453,9 @@ bool pick_file(
         COMDLG_FILTERSPEC mesh_filters[] = {
             {L"Mesh (*.ply)", L"*.ply"},
             {L"All files (*.*)", L"*.*"}};
+        COMDLG_FILTERSPEC textured_mesh_filters[] = {
+            {L"Textured mesh (*.obj)", L"*.obj"},
+            {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC video_filters[] = {
             {L"Video files (*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv)",
              L"*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv;*.mts;*.m2ts;*.360"},
@@ -453,6 +465,7 @@ bool pick_file(
         if (kind == FilePickKind::point_cloud) filters = point_cloud_filters;
         if (kind == FilePickKind::splat_model) filters = splat_model_filters;
         if (kind == FilePickKind::mesh) filters = mesh_filters;
+        if (kind == FilePickKind::textured_mesh) filters = textured_mesh_filters;
         if (kind == FilePickKind::video) filters = video_filters;
         dialog->SetFileTypes(2, filters);
         if (save && default_extension != nullptr)
@@ -554,6 +567,7 @@ void refresh_artifacts(App& app) {
         app.has_mvs = false;
         app.has_model = false;
         app.has_mesh = false;
+        app.has_texture = false;
         app.project_writer_version = 0;
         app.project_min_reader_version = 0;
         return;
@@ -571,6 +585,7 @@ void refresh_artifacts(App& app) {
         std::filesystem::exists(app.layout.mesh_ply, error) ||
         std::filesystem::exists(app.layout.mvs_mesh_ply, error) ||
         std::filesystem::exists(app.layout.mvs_raw_mesh_ply, error);
+    app.has_texture = textured_mesh_on_disk(app.layout.working_texture);
     app.project_writer_version = 0;
     app.project_min_reader_version = 0;
     if (app.layout.project_file.empty()) return;
@@ -587,6 +602,9 @@ void refresh_artifacts(App& app) {
             app.has_model;
         app.has_mesh =
             archive.has(aetherscan::project::ChunkType::mesh) || app.has_mesh;
+        app.has_texture =
+            archive.has(aetherscan::project::ChunkType::texture) ||
+            app.has_texture;
     } catch (...) {
     }
 }
@@ -689,6 +707,10 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
     settings.multi_view_ncc_weight = app.settings.multi_view_ncc_weight;
     settings.geometry_from_iter = app.settings.geometry_from_iter;
     settings.normal_field = app.settings.normal_field;
+    settings.texture_quality = app.settings.texture_quality;
+    settings.atlas_resolution = app.settings.atlas_resolution;
+    settings.texture_delight = app.settings.texture_delight;
+    settings.texture_optimize = app.settings.texture_optimize;
     return settings;
 }
 
@@ -744,6 +766,12 @@ void apply_project_settings(
     app.settings.multi_view_ncc_weight = settings.multi_view_ncc_weight;
     app.settings.geometry_from_iter = settings.geometry_from_iter;
     app.settings.normal_field = settings.normal_field;
+    app.settings.texture_quality = std::clamp(settings.texture_quality, 0, 2);
+    app.settings.atlas_resolution = settings.atlas_resolution > 0
+        ? settings.atlas_resolution
+        : 2048;
+    app.settings.texture_delight = settings.texture_delight;
+    app.settings.texture_optimize = settings.texture_optimize;
 }
 
 void request_asfm_scene_load(
@@ -939,6 +967,17 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             }
             break;
         }
+#if defined(AETHERSCAN_HAS_TEXTURE)
+        if (textured_mesh_on_disk(app.layout.working_texture)) {
+            try {
+                archive.set_chunk(
+                    aetherscan::project::ChunkType::texture,
+                    aetherscan::texture::encode_textured_obj(
+                        app.layout.working_texture));
+            } catch (...) {
+            }
+        }
+#endif
         archive.save(path);
         store_path_field(app.settings.project_dir, path);
         app.project_folder_automatic = false;
@@ -962,10 +1001,14 @@ void clear_viewport_scene(App& app) {
     app.mesh_gpu_positions.clear();
     app.mesh_gpu_normals.clear();
     app.mesh_gpu_colours.clear();
+    app.mesh_gpu_uvs.clear();
     app.mesh_gpu_indices.clear();
     app.mesh_gpu_uploaded = false;
     app.mesh_gpu_failed = false;
     app.mesh_renderer.set_mesh({}, {}, {}, {});
+    app.mesh_renderer.set_albedo({});
+    app.atlas_preview.reset();
+    app.atlas_preview_path.clear();
     app.scene_source.clear();
     app.camera = {};
     app.view_mode = VisualizationMode::points;
@@ -996,6 +1039,9 @@ void new_project(App& app) {
     app.has_mvs = false;
     app.has_model = false;
     app.has_mesh = false;
+    app.has_texture = false;
+    app.atlas_preview.reset();
+    app.atlas_preview_path.clear();
     app.project_writer_version = 0;
     app.project_min_reader_version = 0;
     app.project_folder_automatic = false;
@@ -1273,7 +1319,9 @@ void request_mesh_load(App& app, const bool frame_when_ready) {
     if (app.loading_scene) return;
     const auto ply = existing_mesh_path(app);
     const auto ascan = app.layout.project_file;
-    if (ply.empty() && ascan.empty()) {
+    const auto textured = app.layout.working_texture;
+    const bool have_textured = textured_mesh_on_disk(textured);
+    if (ply.empty() && ascan.empty() && !have_textured) {
         app.mesh_load_failed = true;
         set_message(app, "No mesh found to preview", theme::warning);
         return;
@@ -1284,12 +1332,15 @@ void request_mesh_load(App& app, const bool frame_when_ready) {
     app.pending_scene_load_generation = app.scene_load_generation;
     app.pending_mesh_load = std::async(
         std::launch::async,
-        [ply, ascan] { return load_preview_mesh(ply, ascan); });
+        [ply, ascan, textured, have_textured] {
+            if (have_textured) return load_preview_textured_mesh(textured);
+            return load_preview_mesh(ply, ascan);
+        });
 }
 
 void ensure_mesh_loaded(App& app) {
     if (app.mesh.has() || app.loading_scene || app.mesh_load_failed ||
-        !app.has_mesh)
+        (!app.has_mesh && !app.has_texture))
         return;
     request_mesh_load(app, true);
 }
@@ -1391,6 +1442,10 @@ bool can_export_mesh_file(const App& app) {
     return app.has_mesh || app.mesh.has();
 }
 
+bool can_export_textured_mesh(const App& app) {
+    return app.has_texture || textured_mesh_on_disk(app.layout.working_texture);
+}
+
 void export_sparse_cloud(App& app) {
     if (app.job.running() || !can_export_sparse(app)) return;
     if (!app.scene.has_points()) {
@@ -1426,7 +1481,7 @@ void export_trained_model(App& app) {
     const std::wstring name =
         export_stem_wide(app) + L"_splat." + std::wstring(extension);
     if (!pick_export_path(
-            L"Export Trained Model", destination, FilePickKind::splat_model,
+            L"Export Splat", destination, FilePickKind::splat_model,
             name.c_str(), extension))
         return;
     const std::filesystem::path out = path_from_utf8_field(destination.data());
@@ -1436,7 +1491,7 @@ void export_trained_model(App& app) {
         const auto dest_ext = lower_path_extension(out);
         if (!source.empty() && source_ext == dest_ext &&
             copy_existing_file(source, out)) {
-            set_message(app, "Exported trained model", theme::success);
+            set_message(app, "Exported splat", theme::success);
             return;
         }
         aetherscan::splat::GaussianModel model;
@@ -1449,7 +1504,7 @@ void export_trained_model(App& app) {
                 archive.chunk(aetherscan::project::ChunkType::gaussians));
         }
         aetherscan::splat::save_gaussians(model, out, format);
-        set_message(app, "Exported trained model", theme::success);
+        set_message(app, "Exported splat", theme::success);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
     }
@@ -1493,14 +1548,69 @@ void export_mesh_file(App& app) {
     }
 }
 
+void export_textured_mesh(App& app) {
+    if (app.job.running() || !can_export_textured_mesh(app)) return;
+    std::array<char, 1024> destination{};
+    const std::wstring name = export_stem_wide(app) + L"_textured.obj";
+    if (!pick_export_path(
+            L"Export Textured Mesh", destination, FilePickKind::textured_mesh,
+            name.c_str(), L"obj"))
+        return;
+    std::filesystem::path out = path_from_utf8_field(destination.data());
+    if (out.extension().empty()) out += ".obj";
+    std::filesystem::path dest_stem = out;
+    dest_stem.replace_extension();
+    try {
+#if defined(AETHERSCAN_HAS_TEXTURE)
+        if (textured_mesh_on_disk(app.layout.working_texture)) {
+            aetherscan::texture::copy_textured_obj(
+                app.layout.working_texture, dest_stem);
+            set_message(
+                app, "Exported textured mesh (OBJ + MTL + albedo PNG)",
+                theme::success);
+            return;
+        }
+        if (!app.layout.project_file.empty()) {
+            const auto archive =
+                aetherscan::project::Archive::open(app.layout.project_file);
+            if (archive.has(aetherscan::project::ChunkType::texture)) {
+                aetherscan::texture::decode_textured_obj(
+                    archive.chunk(aetherscan::project::ChunkType::texture),
+                    dest_stem);
+                set_message(
+                    app, "Exported textured mesh (OBJ + MTL + albedo PNG)",
+                    theme::success);
+                return;
+            }
+        }
+#endif
+        const auto source_obj = textured_obj_path(app.layout.working_texture);
+        const auto source_mtl = textured_mtl_path(app.layout.working_texture);
+        const auto source_png = textured_albedo_path(app.layout.working_texture);
+        if (copy_existing_file(source_obj, textured_obj_path(dest_stem)) &&
+            copy_existing_file(source_png, textured_albedo_path(dest_stem))) {
+            copy_existing_file(source_mtl, textured_mtl_path(dest_stem));
+            set_message(
+                app, "Exported textured mesh (OBJ + MTL + albedo PNG)",
+                theme::success);
+            return;
+        }
+        set_message(app, "No textured mesh to export yet", theme::warning);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+}
+
 void pack_mesh_gpu_buffers(App& app) {
     app.mesh_gpu_positions.clear();
     app.mesh_gpu_normals.clear();
     app.mesh_gpu_colours.clear();
+    app.mesh_gpu_uvs.clear();
     app.mesh_gpu_indices.clear();
     app.mesh_gpu_uploaded = false;
     if (!app.mesh.has()) {
         app.mesh_renderer.set_mesh({}, {}, {}, {});
+        app.mesh_renderer.set_albedo({});
         return;
     }
     const std::size_t count = app.mesh.vertices.size();
@@ -1530,6 +1640,13 @@ void pack_mesh_gpu_buffers(App& app) {
                 static_cast<float>((packed >> IM_COL32_B_SHIFT) & 255U) / 255.F;
         }
     }
+    if (app.mesh.uvs.size() == count) {
+        app.mesh_gpu_uvs.resize(count * 2U);
+        for (std::size_t i = 0; i < count; ++i) {
+            app.mesh_gpu_uvs[2U * i] = app.mesh.uvs[i].x;
+            app.mesh_gpu_uvs[2U * i + 1U] = app.mesh.uvs[i].y;
+        }
+    }
     app.mesh_gpu_indices.reserve(app.mesh.faces.size() * 3U);
     for (const auto& face : app.mesh.faces) {
         app.mesh_gpu_indices.push_back(face[0]);
@@ -1538,7 +1655,17 @@ void pack_mesh_gpu_buffers(App& app) {
     }
     app.mesh_renderer.set_mesh(
         app.mesh_gpu_positions, app.mesh_gpu_normals, app.mesh_gpu_colours,
-        app.mesh_gpu_indices);
+        app.mesh_gpu_indices, app.mesh_gpu_uvs);
+    if (!app.mesh.albedo_path.empty()) {
+        try {
+            app.mesh_renderer.set_albedo(
+                aetherscan::io::load_rgb(app.mesh.albedo_path));
+        } catch (...) {
+            app.mesh_renderer.set_albedo({});
+        }
+    } else {
+        app.mesh_renderer.set_albedo({});
+    }
     app.mesh_gpu_uploaded = true;
 }
 
@@ -1596,12 +1723,13 @@ bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
     uniforms.world_to_clip = mesh_world_to_clip(camera, near_z, far_z);
     uniforms.world_to_camera = camera.world_to_camera;
     uniforms.vertex_colour = app.view_options.mesh_vertex_colour;
+    uniforms.textured = app.view_options.mesh_texture && app.mesh.has_texture();
     uniforms.wireframe = app.view_options.mesh_wireframe;
     try {
         if (!app.mesh_gpu_uploaded) {
             app.mesh_renderer.set_mesh(
                 app.mesh_gpu_positions, app.mesh_gpu_normals,
-                app.mesh_gpu_colours, app.mesh_gpu_indices);
+                app.mesh_gpu_colours, app.mesh_gpu_indices, app.mesh_gpu_uvs);
             app.mesh_gpu_uploaded = true;
         }
         return app.mesh_renderer.draw(width, height, uniforms);
@@ -2139,6 +2267,18 @@ void apply_opened_project(App& app) {
             aetherscan::project::Archive::open(app.layout.project_file);
         apply_project_settings(app, aetherscan::project::read_settings(archive));
         refresh_artifacts(app);
+#if defined(AETHERSCAN_HAS_TEXTURE)
+        if (archive.has(aetherscan::project::ChunkType::texture) &&
+            !textured_mesh_on_disk(app.layout.working_texture)) {
+            try {
+                aetherscan::texture::decode_textured_obj(
+                    archive.chunk(aetherscan::project::ChunkType::texture),
+                    app.layout.working_texture);
+                refresh_artifacts(app);
+            } catch (...) {
+            }
+        }
+#endif
     } catch (const std::exception& error) {
         set_message(app, error.what(), theme::danger);
         return;
@@ -2276,7 +2416,7 @@ void save_project(App& app) {
 
 bool has_reconstruction_result(const App& app) {
     if (app.scene.has_points() || app.has_sparse || app.has_asfm ||
-        app.has_mvs || app.has_model || app.has_mesh)
+        app.has_mvs || app.has_model || app.has_mesh || app.has_texture)
         return true;
     std::error_code dense_error;
     if (!app.layout.dense_ply.empty() &&
@@ -2296,14 +2436,17 @@ void delete_reconstruction_results(App& app) {
     stop_splat_view(app);
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
-    const std::array<std::filesystem::path, 20> generated_files = {
+    const std::array<std::filesystem::path, 24> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
         app.layout.splat_spz, app.layout.splat_glb, app.layout.mesh_ply,
         app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply,
         app.layout.dense_ply, app.layout.working_splat, app.layout.working_mesh,
-        app.layout.working_dense, app.layout.align_log, app.layout.train_log,
-        app.layout.dense_log, app.layout.export_log, app.layout.view_log};
+        app.layout.working_dense, textured_obj_path(app.layout.working_texture),
+        textured_mtl_path(app.layout.working_texture),
+        textured_albedo_path(app.layout.working_texture),
+        app.layout.align_log, app.layout.train_log, app.layout.dense_log,
+        app.layout.texture_log, app.layout.export_log, app.layout.view_log};
 
     std::uintmax_t removed = 0;
     std::string failure;
@@ -2425,14 +2568,18 @@ void poll_mesh_load(App& app) {
     }
     app.mesh = std::move(loaded.mesh);
     app.mesh_load_failed = false;
+    if (app.mesh.has_texture()) app.view_options.mesh_texture = true;
     pack_mesh_gpu_buffers(app);
     app.camera.frame(app.mesh.centroid, app.mesh.radius);
     app.frame_mesh_on_load = false;
     app.view_mode = VisualizationMode::mesh;
     set_message(
         app,
-        "Mesh: " + format_count(app.mesh.vertices.size()) + " vertices, " +
-            format_count(app.mesh.faces.size()) + " faces",
+        app.mesh.has_texture()
+            ? ("Textured mesh: " + format_count(app.mesh.vertices.size()) +
+               " vertices, " + format_count(app.mesh.faces.size()) + " faces")
+            : ("Mesh: " + format_count(app.mesh.vertices.size()) +
+               " vertices, " + format_count(app.mesh.faces.size()) + " faces"),
         theme::success);
 }
 
@@ -2628,6 +2775,7 @@ const char* running_job_caption(const JobKind kind) {
         case JobKind::export_sfm: return "EXPORTING";
         case JobKind::train: return "TRAINING";
         case JobKind::dense: return "EXTRACT MESH";
+        case JobKind::texture: return "BAKE TEXTURE";
         case JobKind::none: return "READY";
     }
     return "READY";
@@ -2644,6 +2792,7 @@ const char* pause_job_label(const JobKind kind) {
         case JobKind::align: return "Pause Alignment";
         case JobKind::export_sfm: return "Pause Export";
         case JobKind::dense: return "Pause Extract Mesh";
+        case JobKind::texture: return "Pause Bake Texture";
         default: return "Pause Training";
     }
 }
@@ -2653,6 +2802,7 @@ const char* resume_job_label(const JobKind kind) {
         case JobKind::align: return "Resume Alignment";
         case JobKind::export_sfm: return "Resume Export";
         case JobKind::dense: return "Resume Extract Mesh";
+        case JobKind::texture: return "Resume Bake Texture";
         default: return "Resume Training";
     }
 }
@@ -2662,6 +2812,7 @@ const char* stop_job_label(const JobKind kind) {
         case JobKind::align: return "Stop Alignment";
         case JobKind::export_sfm: return "Stop Export";
         case JobKind::dense: return "Stop Extract Mesh";
+        case JobKind::texture: return "Stop Bake Texture";
         default: return "Stop Training";
     }
 }
@@ -2936,6 +3087,75 @@ void start_dense(App& app) {
     }
 }
 
+void start_texture(App& app) {
+    if (app.job.running()) return;
+    stop_splat_view(app);
+    assign_default_project_folder(app);
+    if (app.settings.project_dir[0] == '\0') {
+        set_message(app, "Save or choose a project file first", theme::warning);
+        return;
+    }
+    refresh_artifacts(app);
+    if (!alignment_ready(app) && !alignment_cache_present(app)) {
+        set_message(
+            app,
+            "Align photos or load an external camera dataset before Bake Texture",
+            theme::warning);
+        return;
+    }
+    if (!app.has_mesh) {
+        set_message(
+            app, "Extract a mesh before baking a texture", theme::warning);
+        return;
+    }
+    const auto mesh = existing_mesh_path(app);
+    if (mesh.empty() && !app.has_mesh) {
+        set_message(app, "No mesh file found to texture", theme::warning);
+        return;
+    }
+    if (!mesh.empty() && !app.layout.working_mesh.empty() &&
+        mesh != app.layout.working_mesh)
+        copy_existing_file(mesh, app.layout.working_mesh);
+#if !defined(AETHERSCAN_HAS_TEXTURE)
+    set_message(
+        app,
+        "This build was compiled without texture baking (Vulkan + aether_drender)",
+        theme::danger);
+    return;
+#endif
+    app.settings.atlas_resolution = std::max(64, app.settings.atlas_resolution);
+    refresh_artifacts(app);
+    std::error_code error;
+    std::filesystem::create_directories(app.layout.root, error);
+    if (error) {
+        set_message(app, "Cannot create project directory", theme::danger);
+        return;
+    }
+    if (!app.layout.working_texture.empty()) {
+        std::error_code parent_error;
+        std::filesystem::create_directories(
+            app.layout.working_texture.parent_path(), parent_error);
+    }
+    app.view_mode = VisualizationMode::mesh;
+    try {
+        app.monitor.begin(JobKind::texture);
+        app.log.open(app.layout.texture_log);
+        app.job.start(
+            build_texture_command(
+                AETHERSCAN_CLI_PATH, app.settings, app.layout),
+            app.layout.texture_log);
+        app.active_job = JobKind::texture;
+        set_message(
+            app,
+            app.settings.texture_delight
+                ? "Baking albedo texture (delight + projection)..."
+                : "Baking texture from calibrated photos...",
+            theme::accent);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+}
+
 void on_job_finished(App& app) {
     const int code = app.job.exit_code();
     app.monitor.mark_finished(code);
@@ -3000,6 +3220,24 @@ void on_job_finished(App& app) {
         }
         return;
     }
+    if (kind == JobKind::texture) {
+        refresh_artifacts(app);
+        set_message(
+            app,
+            app.has_texture
+                ? (app.settings.texture_delight
+                       ? "Textured mesh finished (albedo atlas)"
+                       : "Textured mesh finished")
+                : "Texture bake finished but no OBJ/atlas was written",
+            app.has_texture ? theme::success : theme::warning);
+        if (app.has_mesh || app.has_texture) {
+            app.mesh.clear();
+            show_mesh_view(app, true);
+        }
+        app.atlas_preview.reset();
+        app.atlas_preview_path.clear();
+        return;
+    }
     if (kind == JobKind::export_sfm) {
         std::error_code error;
         const bool has_asfm =
@@ -3038,6 +3276,7 @@ enum class Action {
     align,
     train,
     dense,
+    texture,
     export_sfm,
     pause,
     resume,
@@ -3046,13 +3285,14 @@ enum class Action {
 };
 
 struct WorkflowCrumbs {
-    std::array<const char*, 3> labels{};
+    std::array<const char*, 5> labels{};
     int count{1};
     int current{};
 };
 
-// Menu-bar trail follows the active route. Extract Mesh is the MVS mesh
-// pipeline and does not pass through 3DGS.
+// Menu-bar trail follows the reconstruction method the user selected, not
+// leftover artifacts. MVS is Alignment → MVS Mesh → Texture Baking.
+// 3DGS is Alignment → 3DGS → Extract Mesh → Texture Baking.
 WorkflowCrumbs workflow_crumbs(const App& app) {
     WorkflowCrumbs crumbs;
     crumbs.labels[0] = "Images";
@@ -3070,31 +3310,39 @@ WorkflowCrumbs workflow_crumbs(const App& app) {
         app.job.running() && app.active_job == JobKind::align;
     const bool densing =
         app.job.running() && app.active_job == JobKind::dense;
-    if (aligning) return crumbs;
+    const bool texturing =
+        app.job.running() && app.active_job == JobKind::texture;
+    const bool aligned = app.has_sparse || has_external_dataset(app);
+    if (aligning) {
+        crumbs.current = 1;
+        return crumbs;
+    }
+    if (!aligned && !training && !densing && !texturing) return crumbs;
 
-    const bool mvs_mesh =
-        densing || (app.has_mesh && mesh_from_mvs(app.settings));
-    const bool show_mvs =
-        mvs_mesh && !training &&
-        (densing || app.view_mode == VisualizationMode::mesh ||
-         !app.has_model);
-    if (show_mvs) {
-        crumbs.labels[2] = "Extract Mesh";
-        crumbs.count = 3;
-        crumbs.current = 2;
+    const bool mvs_route =
+        !training && (mesh_from_mvs(app.settings) || densing ||
+                      (app.settings.mesh_source == 1 && app.settings.build_mesh));
+    if (mvs_route) {
+        crumbs.labels[2] = "MVS Mesh";
+        crumbs.labels[3] = "Texture Baking";
+        crumbs.count = 4;
+        if (texturing || app.has_texture) crumbs.current = 3;
+        else if (densing || app.has_mesh) crumbs.current = 2;
+        else crumbs.current = 1;
         return crumbs;
     }
-    if (training || app.has_model) {
-        crumbs.labels[2] = "3DGS";
-        crumbs.count = 3;
-        crumbs.current = 2;
-        return crumbs;
-    }
-    if (mvs_mesh) {
-        crumbs.labels[2] = "Extract Mesh";
-        crumbs.count = 3;
-        crumbs.current = 2;
-    }
+
+    crumbs.labels[2] = "3DGS";
+    crumbs.labels[3] = "Extract Mesh";
+    crumbs.labels[4] = "Texture Baking";
+    crumbs.count = 5;
+    const bool extracting =
+        training && (app.monitor.stage() == Stage::meshing ||
+                     app.monitor.stage() == Stage::texturing);
+    if (texturing || app.has_texture) crumbs.current = 4;
+    else if (app.has_mesh || extracting) crumbs.current = 3;
+    else if (training || app.has_model) crumbs.current = 2;
+    else crumbs.current = 1;
     return crumbs;
 }
 
@@ -3235,13 +3483,17 @@ Action draw_menu_bar(App& app) {
                 !busy && can_export_sparse(app)))
             export_sparse_cloud(app);
         if (ImGui::MenuItem(
-                "Export Trained Model...", nullptr, false,
+                "Export Splat...", nullptr, false,
                 !busy && can_export_model(app)))
             export_trained_model(app);
         if (ImGui::MenuItem(
                 "Export Mesh...", nullptr, false,
                 !busy && can_export_mesh_file(app)))
             export_mesh_file(app);
+        if (ImGui::MenuItem(
+                "Export Textured Mesh...", nullptr, false,
+                !busy && can_export_textured_mesh(app)))
+            export_textured_mesh(app);
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
                 !busy && can_export_sfm(app)))
@@ -3272,6 +3524,10 @@ Action draw_menu_bar(App& app) {
                 "Extract Mesh", nullptr, false,
                 !busy && alignment_ready(app)))
             action = Action::dense;
+        if (ImGui::MenuItem(
+                app.has_texture ? "Re-bake Texture" : "Bake Texture", nullptr,
+                false, !busy && app.has_mesh))
+            action = Action::texture;
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
                 !busy && can_export_sfm(app)))
@@ -3703,6 +3959,10 @@ void draw_scene_panel(App& app) {
                 if (!representations.empty()) representations += "  ·  ";
                 representations += "Mesh";
             }
+            if (app.has_texture) {
+                if (!representations.empty()) representations += "  ·  ";
+                representations += "Texture";
+            }
             ImGui::SetCursorPosX(44.F);
             theme::caption(representations.c_str());
         }
@@ -3749,36 +4009,63 @@ void draw_scene_panel(App& app) {
                                               : (app.has_sparse ? "On disk"
                                                                 : nullptr)))));
     const bool densing = busy && app.active_job == JobKind::dense;
+    const bool texturing = busy && app.active_job == JobKind::texture;
     const bool aligned = app.has_sparse || external_dataset;
-    const char* gaussian_note = nullptr;
-    if (training)
-        gaussian_note = stage_name(stage);
-    else if (mesh_from_gaussians(app.settings) && app.has_model && app.has_mesh)
-        gaussian_note = "Mesh extracted";
-    else if (mesh_from_gaussians(app.settings))
-        gaussian_note = "Then extract mesh";
-    else if (aligned && !app.has_model)
-        gaussian_note = "Optional";
-    draw_step(
-        "04", "Train 3DGS",
-        training ? StepState::active
-                 : (app.has_model ? StepState::done : StepState::pending),
-        gaussian_note);
+    const bool mvs_route =
+        !training && (mesh_from_mvs(app.settings) || densing ||
+                      (app.settings.mesh_source == 1 && app.settings.build_mesh));
+    const char* texture_note = nullptr;
+    if (texturing)
+        texture_note = stage_name(stage);
+    else if (app.has_texture)
+        texture_note = app.settings.texture_delight ? "Albedo atlas"
+                                                    : "Projected atlas";
+    else if (app.has_mesh)
+        texture_note = "Project photos onto the mesh";
+    const StepState texture_state = texturing
+        ? StepState::active
+        : (app.has_texture
+               ? StepState::done
+               : (app.has_mesh ? StepState::pending : StepState::pending));
 
-    const char* dense_note = nullptr;
-    if (densing)
-        dense_note = stage_name(stage);
-    else if (app.has_mesh && mesh_from_mvs(app.settings))
-        dense_note = "MVS mesh";
-    else if (aligned)
-        dense_note = "Optional MVS mesh";
-    draw_step(
-        "05", "Extract Mesh",
-        densing ? StepState::active
-                : (app.has_mesh && mesh_from_mvs(app.settings)
-                       ? StepState::done
-                       : StepState::pending),
-        dense_note);
+    if (mvs_route) {
+        const char* mesh_note = densing ? stage_name(stage)
+                                        : (app.has_mesh ? "Photogrammetry" : nullptr);
+        draw_step(
+            "04", "MVS Mesh",
+            densing ? StepState::active
+                    : (app.has_mesh
+                           ? StepState::done
+                           : (aligned ? StepState::pending : StepState::pending)),
+            mesh_note);
+        draw_step("05", "Texture Baking", texture_state, texture_note);
+    } else {
+        const char* gaussian_note = nullptr;
+        if (training)
+            gaussian_note = stage_name(stage);
+        else if (mesh_from_gaussians(app.settings) && app.has_model &&
+                 app.has_mesh)
+            gaussian_note = "Mesh extracted";
+        else if (mesh_from_gaussians(app.settings))
+            gaussian_note = "Then extract mesh";
+        draw_step(
+            "04", "Train 3DGS",
+            training ? StepState::active
+                     : (app.has_model ? StepState::done : StepState::pending),
+            gaussian_note);
+        const bool extracting =
+            training && (stage == Stage::meshing || stage == Stage::texturing);
+        draw_step(
+            "05", "Extract Mesh",
+            extracting ? StepState::active
+                       : (app.has_mesh
+                              ? StepState::done
+                              : (mesh_from_gaussians(app.settings)
+                                     ? StepState::pending
+                                     : StepState::skipped)),
+            app.has_mesh ? "From Gaussians" : nullptr);
+        draw_step("06", "Texture Baking", texture_state, texture_note);
+    }
 
     ImGui::Dummy({0, 8.F});
     theme::section_header("SOURCE");
@@ -3949,7 +4236,10 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         overlay = "PREPARING 3DGS";
         overlay_dot = theme::warning;
     } else if (app.job.running() && app.active_job == JobKind::dense) {
-        overlay = "DENSE MVS";
+        overlay = "EXTRACT MESH";
+        overlay_dot = theme::accent;
+    } else if (app.job.running() && app.active_job == JobKind::texture) {
+        overlay = "BAKE TEXTURE";
         overlay_dot = theme::accent;
     } else if (app.loading_scene) {
         overlay = "LOADING";
@@ -4662,11 +4952,11 @@ Action draw_inspector(App& app) {
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Format used when you Export Trained Model: PLY, PlayCanvas\n"
+                "Format used when you Export Splat: PLY, PlayCanvas\n"
                 "SOG, Niantic SPZ, or Khronos KHR_gaussian_splatting GLB.\n"
                 "Training no longer writes this file automatically.");
         if (theme::toolbar_button(
-                "Export Trained Model", {-1.F, 28.F},
+                "Export Splat", {-1.F, 28.F},
                 !busy && can_export_model(app)))
             export_trained_model(app);
         ImGui::Spacing();
@@ -4768,6 +5058,110 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
     }
 
+    if (ImGui::CollapsingHeader(
+            "Texture", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(0.F);
+        theme::caption(
+            "Last reconstruction step. Unwrap the mesh, project calibrated "
+            "photos with aether_drender, then optionally refine the atlas.");
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+#if !defined(AETHERSCAN_HAS_TEXTURE)
+        theme::caption(
+            "This build was compiled without texture baking (Vulkan + aether_drender).");
+#else
+        ImGui::BeginDisabled(busy);
+        theme::caption("Quality");
+        ImGui::SetNextItemWidth(-1.F);
+        const char* texture_qualities[] = {"Fast", "Standard", "High"};
+        if (ImGui::Combo(
+                "##tex_quality", &app.settings.texture_quality,
+                texture_qualities, 3))
+            apply_texture_quality_preset(app.settings);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Fast: 1024 atlas, projection only.\n"
+                "Standard: 2048 atlas + photometric refine.\n"
+                "High: 4096 atlas + longer refine.");
+        theme::caption("Atlas size");
+        ImGui::SetNextItemWidth(-1.F);
+        int atlas_index = app.settings.atlas_resolution >= 8192
+            ? 3
+            : (app.settings.atlas_resolution >= 4096
+                   ? 2
+                   : (app.settings.atlas_resolution >= 2048 ? 1 : 0));
+        const char* atlas_sizes[] = {"1024", "2048", "4096", "8192"};
+        if (ImGui::Combo("##atlas", &atlas_index, atlas_sizes, 4)) {
+            const int sizes[] = {1024, 2048, 4096, 8192};
+            app.settings.atlas_resolution = sizes[atlas_index];
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Square albedo atlas written with the textured OBJ.");
+        ImGui::Checkbox("Remove lighting (albedo)", &app.settings.texture_delight);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Run Intrinsic delighter on the photos before projection.\n"
+                "Needs ONNX Runtime and the Intrinsic stage_*.onnx models.");
+        ImGui::Checkbox("Refine atlas", &app.settings.texture_optimize);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Photometric + seam optimization in aether_drender after the "
+                "projective bake. Off is faster; on cleans view seams.");
+        ImGui::EndDisabled();
+        if (app.has_texture) {
+            ImGui::Spacing();
+            theme::metric(
+                "Status",
+                app.settings.texture_delight ? "Albedo ready" : "Texture ready");
+            const auto albedo = textured_albedo_path(app.layout.working_texture);
+            if (app.atlas_preview_path != albedo) {
+                app.atlas_preview.reset();
+                app.atlas_preview_path = albedo;
+                std::error_code atlas_error;
+                if (std::filesystem::exists(albedo, atlas_error)) {
+                    try {
+                        app.atlas_preview.upload(aetherscan::io::load_rgb(albedo));
+                    } catch (...) {
+                        app.atlas_preview.reset();
+                    }
+                }
+            }
+            if (app.atlas_preview.descriptor != VK_NULL_HANDLE &&
+                app.atlas_preview.width > 0 && app.atlas_preview.height > 0) {
+                const float width = ImGui::GetContentRegionAvail().x;
+                const float height = width *
+                    static_cast<float>(app.atlas_preview.height) /
+                    static_cast<float>(app.atlas_preview.width);
+                ImGui::Image(
+                    reinterpret_cast<ImTextureID>(app.atlas_preview.descriptor),
+                    {width, (std::min)(height, 168.F)});
+            }
+        } else if (app.has_mesh) {
+            ImGui::Spacing();
+            theme::caption("Mesh is ready. Bake Texture to project the photos.");
+        }
+        if (theme::toolbar_button(
+                app.has_texture ? "Re-bake Texture" : "Bake Texture",
+                {-1.F, 28.F}, !busy && app.has_mesh))
+            action = Action::texture;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "UV unwrap + multi-view projection onto the current mesh.\n"
+                "Writes a working OBJ, MTL, and albedo PNG. Export to keep a copy.");
+        if (theme::toolbar_button(
+                "Export Textured Mesh", {-1.F, 28.F},
+                !busy && can_export_textured_mesh(app)))
+            export_textured_mesh(app);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Write OBJ + MTL + albedo PNG to a folder you choose.\n"
+                "Baking no longer writes these files automatically.");
+#endif
+        ImGui::Spacing();
+    }
+
     if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
         if (ImGui::Checkbox("Show cameras", &app.view_options.show_views))
@@ -4841,6 +5235,18 @@ Action draw_inspector(App& app) {
                 "Vertices", format_count(app.mesh.vertices.size()).c_str());
             theme::metric(
                 "Faces", format_count(app.mesh.faces.size()).c_str());
+            if (app.has_texture)
+                theme::metric(
+                    "Texture",
+                    app.settings.texture_delight ? "Albedo atlas" : "Projected atlas");
+            ImGui::BeginDisabled(!app.mesh.has_texture());
+            ImGui::Checkbox("Albedo texture", &app.view_options.mesh_texture);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(
+                    app.mesh.has_texture()
+                        ? "Sample the baked atlas with mesh UVs."
+                        : "Bake Texture to preview the albedo on the mesh.");
             ImGui::Checkbox("Wireframe", &app.view_options.mesh_wireframe);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
@@ -4970,6 +5376,28 @@ Action draw_inspector(App& app) {
                 stop_job_label(app.active_job), {-1.F, 36.F},
                 icons::ButtonStyle::danger, true, false, k_stop_job_tooltip))
             action = Action::stop;
+    } else if (app.has_mesh) {
+        if (theme::primary_button(
+                app.has_texture ? "Re-bake Texture" : "Bake Texture",
+                {-1.F, 40.F}, true))
+            action = Action::texture;
+        ImGui::Dummy({0, 6.F});
+        if (mesh_from_mvs(app.settings)) {
+            if (theme::toolbar_button("Extract Mesh", {-1.F, 32.F}))
+                action = Action::dense;
+            ImGui::Dummy({0, 6.F});
+            if (theme::toolbar_button("Train 3DGS", {-1.F, 32.F}))
+                action = Action::train;
+        } else {
+            if (theme::toolbar_button(
+                    mesh_from_gaussians(app.settings) ? "Train 3DGS + Mesh"
+                                                      : "Train 3DGS",
+                    {-1.F, 32.F}))
+                action = Action::train;
+            ImGui::Dummy({0, 6.F});
+            if (theme::toolbar_button("Extract Mesh", {-1.F, 32.F}))
+                action = Action::dense;
+        }
     } else if (has_external_dataset(app)) {
         if (mesh_from_mvs(app.settings)) {
             if (theme::primary_button("Extract Mesh", {-1.F, 40.F}, true))
@@ -5381,6 +5809,10 @@ int main(const int argc, char** argv) {
             std::clamp(app.settings.video_scale, 0.05F, 4.F);
         app.settings.video_rotate =
             std::clamp(app.settings.video_rotate / 90, 0, 3) * 90;
+        app.settings.texture_quality =
+            std::clamp(app.settings.texture_quality, 0, 2);
+        app.settings.atlas_resolution =
+            std::clamp(app.settings.atlas_resolution, 64, 8192);
 
         Action action = draw_menu_bar(app);
         const Action toolbar_action = draw_toolbar(app);
@@ -5403,6 +5835,9 @@ int main(const int argc, char** argv) {
                 break;
             case Action::dense:
                 if (!app.smoke_mode) start_dense(app);
+                break;
+            case Action::texture:
+                if (!app.smoke_mode) start_texture(app);
                 break;
             case Action::export_sfm:
                 if (!app.smoke_mode) start_export_sfm(app);
@@ -5480,6 +5915,7 @@ int main(const int argc, char** argv) {
     vkDeviceWaitIdle(gpu::device());
     app.image_qa_session.clear();
     app.photos.clear();
+    app.atlas_preview.reset();
     app.mesh_renderer.reset();
     app.preview.reset();
     ImGui_ImplVulkan_Shutdown();

@@ -57,6 +57,15 @@ constexpr Band k_dense_bands[] = {
 };
 
 // On the training run SfM is skipped when a working alignment exists.
+constexpr Band k_texture_bands[] = {
+    {"texture.load_views", Stage::texturing, 0.02F, 0.18F},
+    {"texture.delight", Stage::texturing, 0.18F, 0.32F},
+    {"texture.uv_unwrap", Stage::texturing, 0.32F, 0.50F},
+    {"texture.project", Stage::texturing, 0.50F, 0.78F},
+    {"texture.optimize", Stage::texturing, 0.78F, 0.98F},
+    {"texture.", Stage::texturing, 0.02F, 1.00F},
+};
+
 constexpr Band k_train_bands[] = {
     {"extract video frames", Stage::preparing, 0.00F, 0.02F},
     {"select sharp frames", Stage::preparing, 0.00F, 0.02F},
@@ -171,6 +180,8 @@ void append_gui_flags(
         command << " --working-mesh " << quote(layout.working_mesh);
     if (!layout.working_dense.empty())
         command << " --working-dense " << quote(layout.working_dense);
+    if (!layout.working_texture.empty())
+        command << " --working-texture " << quote(layout.working_texture);
 }
 
 void append_video_extract_flags(
@@ -354,6 +365,7 @@ const char* job_name(const JobKind kind) {
         case JobKind::align: return "Alignment";
         case JobKind::train: return "Training";
         case JobKind::dense: return "Extract Mesh";
+        case JobKind::texture: return "Bake Texture";
         case JobKind::export_sfm: return "SfM export";
         case JobKind::none: return "Job";
     }
@@ -547,6 +559,7 @@ void RunMonitor::begin(const JobKind kind) {
     kind_ = kind;
     if (kind == JobKind::train) stage_ = Stage::preparing;
     else if (kind == JobKind::dense) stage_ = Stage::dense;
+    else if (kind == JobKind::texture) stage_ = Stage::texturing;
     else stage_ = Stage::features;
     band_begin_ = 0.F;
     band_end_ = 0.F;
@@ -578,10 +591,14 @@ void RunMonitor::consume(const std::string& line) {
         if (line.find("pipeline_handoff=reconstruct") != std::string::npos) {
             if (kind_ == JobKind::train || kind_ == JobKind::dense)
                 enter_stage(Stage::features, 0.02F);
+            else if (kind_ == JobKind::texture)
+                enter_stage(Stage::texturing, 0.02F);
         } else if (kind_ == JobKind::train) {
             enter_stage(Stage::preparing, 0.04F);
         } else if (kind_ == JobKind::dense) {
             enter_stage(Stage::dense, 0.04F);
+        } else if (kind_ == JobKind::texture) {
+            enter_stage(Stage::texturing, 0.04F);
         }
         task_ = {};
         return;
@@ -591,6 +608,7 @@ void RunMonitor::consume(const std::string& line) {
         line.find("splat_dataset=") != std::string::npos) {
         if (kind_ == JobKind::train) enter_stage(Stage::preparing, 0.05F);
         else if (kind_ == JobKind::dense) enter_stage(Stage::dense, 0.05F);
+        else if (kind_ == JobKind::texture) enter_stage(Stage::texturing, 0.06F);
     }
     if (line.find("splat_input=") != std::string::npos ||
         line.find("mvs sparse colors:") != std::string::npos ||
@@ -658,7 +676,9 @@ void RunMonitor::consume(const std::string& line) {
                 name.rfind("mvs.mesh", 0) == 0 || name == "mvs.fuse")
                 enter_stage(Stage::meshing, k_meshing_band_begin);
             else if (name.rfind("texture.", 0) == 0)
-                enter_stage(Stage::texturing, 0.98F);
+                enter_stage(
+                    Stage::texturing,
+                    kind_ == JobKind::texture ? 0.08F : 0.98F);
         }
         return;
     }
@@ -703,6 +723,9 @@ void RunMonitor::consume(const std::string& line) {
     } else if (kind_ == JobKind::dense) {
         bands = k_dense_bands;
         band_count = std::size(k_dense_bands);
+    } else if (kind_ == JobKind::texture) {
+        bands = k_texture_bands;
+        band_count = std::size(k_texture_bands);
     }
     const Band* match = nullptr;
     for (std::size_t i = 0; i < band_count; ++i)
@@ -987,6 +1010,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.align_log = with_suffix("_align.log");
     layout.train_log = with_suffix("_train.log");
     layout.dense_log = with_suffix("_dense.log");
+    layout.texture_log = with_suffix("_texture.log");
     layout.export_log = with_suffix("_export.log");
     layout.view_log = with_suffix("_view.log");
     std::filesystem::path runtime_dir = layout.cache;
@@ -1001,6 +1025,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.working_splat = runtime_dir / "splat.ply";
     layout.working_mesh = runtime_dir / "mesh.ply";
     layout.working_dense = runtime_dir / "dense.ply";
+    layout.working_texture = runtime_dir / "textured";
     layout.preview_view_file = runtime_dir / "preview_view";
     layout.preview_camera_file = runtime_dir / "preview_camera";
     layout.preview_vis_file = runtime_dir / "preview_vis";
@@ -1213,6 +1238,43 @@ std::string build_dense_command(
             settings.mesh_method == 3 ? 0 : settings.mesh_method;
         command << " --mesh-method " << mesh_method_flag(method);
     }
+    append_video_extract_flags(command, settings);
+    append_gui_flags(command, layout);
+    return command.str();
+}
+
+std::string build_texture_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout) {
+    std::ostringstream command;
+    command << quote(cli_path) << " --images "
+            << quote(settings.images_dir.data()) << " --output "
+            << quote(layout.project_file.empty() ? layout.sparse_ply
+                                                 : layout.project_file);
+    if (settings.dataset_source[0] != '\0') {
+        command << " --splat-dataset "
+                << quote(settings.dataset_source.data())
+                << " --dataset-format "
+                << dataset_format_flag(settings.dataset_format);
+        if (settings.dataset_initial_cloud[0] != '\0')
+            command << " --dense-ply "
+                    << quote(settings.dataset_initial_cloud.data());
+    } else {
+        command << " --mode " << sfm_mode_flag(settings.sfm_mode)
+                << " --camera-model " << (settings.camera_model == 2 ? "auto" :
+                    settings.camera_model == 1 ? "opencv_fisheye" : "pinhole")
+                << " --max-features " << settings.max_features;
+        if (settings.reuse_cache)
+            command << " --cache-dir " << quote(layout.cache);
+    }
+    command << " --texture"
+            << " --atlas-resolution "
+            << std::max(64, settings.atlas_resolution)
+            << " --texture-optimize="
+            << (settings.texture_optimize ? "true" : "false")
+            << " --texture-optimize-steps "
+            << texture_optimize_steps(settings);
+    if (settings.texture_delight) command << " --delight";
     append_video_extract_flags(command, settings);
     append_gui_flags(command, layout);
     return command.str();

@@ -146,6 +146,10 @@ int main() {
     settings.max_features = 4096;
     settings.build_mesh = true;
     settings.mesh_source = 1;
+    settings.texture_quality = 2;
+    settings.atlas_resolution = 4096;
+    settings.texture_delight = true;
+    settings.texture_optimize = false;
 
     Archive archive = Archive::create();
     replace_sfm_stage(archive, source, settings, ascan_path);
@@ -187,6 +191,10 @@ int main() {
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");
     expect(round_trip.mesh_source == 1, "settings mesh source");
+    expect(round_trip.texture_quality == 2, "settings texture quality");
+    expect(round_trip.atlas_resolution == 4096, "settings atlas resolution");
+    expect(round_trip.texture_delight, "settings texture delight");
+    expect(!round_trip.texture_optimize, "settings texture optimize");
     const auto loaded_scene = read_sfm(loaded);
     expect(loaded_scene.has_value(), "read sfm from ascan");
     expect(loaded_scene && loaded_scene->cameras[0].k1 == 0.1, "ascan sfm distortion");

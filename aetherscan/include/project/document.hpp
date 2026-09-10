@@ -12,7 +12,7 @@
 
 namespace aetherscan::project {
 
-inline constexpr std::uint32_t k_settings_version = 2;
+inline constexpr std::uint32_t k_settings_version = 3;
 inline constexpr std::uint32_t k_settings_min_reader = 1;
 
 struct Settings {
@@ -51,6 +51,11 @@ struct Settings {
     // 0 = extract from geometry-supervised 3DGS, 1 = photogrammetry (MVS).
     int mesh_source = 0;
     int mesh_method = 0;
+    // Texture bake after mesh: 0 Fast, 1 Standard, 2 High.
+    int texture_quality = 1;
+    int atlas_resolution = 2048;
+    bool texture_delight = false;
+    bool texture_optimize = true;
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;

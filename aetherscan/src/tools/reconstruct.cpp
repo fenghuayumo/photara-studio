@@ -19,6 +19,7 @@
 #endif
 #if defined(AETHERSCAN_HAS_TEXTURE)
 #include "texture/bake.hpp"
+#include "texture/export.hpp"
 #include "texture/mask.hpp"
 #include "texture/options.hpp"
 #endif
@@ -45,6 +46,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -75,6 +77,8 @@ struct ReconstructCli {
     std::filesystem::path working_splat;
     std::filesystem::path working_mesh;
     std::filesystem::path working_dense;
+    std::filesystem::path working_texture;
+    bool texture_only{false};
     bool export_mvs_requested{false};
     std::filesystem::path export_mvs_path;
     std::size_t neighbor_window{3};
@@ -394,8 +398,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --colmap PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
               << "  --capture-mode object|scene  object uses SfM SubjectBounds\n"
               << "  --masks DIR optional foreground masks (auto: sibling masks/)\n"
-              << "Texture (optional Stage B after --mesh; requires Vulkan + UVAtlas):\n"
+              << "Texture (Stage B after --mesh; requires Vulkan + UVAtlas):\n"
               << "  --texture    UV unwrap + projective bake -> textured OBJ/MTL/PNG\n"
+              << "  --texture --working-mesh PATH  bake only; reuse an existing mesh\n"
               << "  --delight    Intrinsic image delighter before bake (albedo)\n"
               << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
@@ -414,6 +419,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --working-splat PATH  trained Gaussian working copy for --gui\n"
               << "  --working-mesh PATH  mesh working copy for --gui\n"
               << "  --working-dense PATH  dense cloud working copy for --gui\n"
+              << "  --working-texture STEM  textured OBJ/MTL/PNG working copy for --gui\n"
               << "Video (when --images is a video file, frames are extracted first):\n"
               << "  --video-fps F  kept frames per second (default 2)\n"
               << "  --video-sharp-window N  keep the sharpest of N candidates (default 3; 1 = off)\n"
@@ -485,6 +491,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("working-dense",
          "Dense cloud working copy used by --gui instead of a sidecar PLY",
+         cxxopts::value<std::string>()->default_value(""))
+        ("working-texture",
+         "Textured OBJ/MTL/PNG working-copy stem used by --gui",
          cxxopts::value<std::string>()->default_value(""))
         ("export-mvs",
          "Write OpenMVS Interface after SfM. Optional path; default is "
@@ -830,7 +839,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Foreground mask directory (auto, - to disable, or explicit path)",
          cxxopts::value<std::string>()->default_value("auto"))
         ("texture",
-         "UV unwrap + projective texture bake on MVS mesh (implies --mesh)",
+         "UV unwrap + projective texture bake. Implies --mesh unless "
+         "--working-mesh is set without --dense/--splat",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("delight",
          "Run Intrinsic delighter before texture bake (implies --texture)",
@@ -917,6 +927,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["working-dense"].as<std::string>();
     if (!working_dense_text.empty())
         cli.working_dense = utf8_to_path(working_dense_text);
+    const std::string working_texture_text =
+        result["working-texture"].as<std::string>();
+    if (!working_texture_text.empty())
+        cli.working_texture = utf8_to_path(working_texture_text);
     if (result.count("export-mvs") != 0) {
         cli.export_mvs_requested = true;
         const auto export_mvs_text = result["export-mvs"].as<std::string>();
@@ -1207,7 +1221,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.masks_dir = utf8_to_path(masks_text);
     }
     if (cli.delight) cli.texture = true;
-    if (cli.texture) cli.mesh = true;
+    const bool have_existing_mesh =
+        !cli.working_mesh.empty() || !cli.mask_mesh.empty();
+    cli.texture_only = cli.texture && have_existing_mesh && !cli.splat &&
+                       !cli.dense && result.count("mesh") == 0;
+    if (cli.texture && !cli.texture_only) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
     if (!cli.splat_model.empty()) cli.splat = true;
     // An explicitly selected capture mode is the product-level full rebuild
@@ -1237,7 +1255,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     // Internal SfM now follows the same sparse initialization path as direct
     // COLMAP/OpenMVS datasets. --dense remains an explicit MVS diagnostic.
-    if (external_splat_dataset && cli.splat && cli.texture)
+    if (external_splat_dataset && cli.splat && cli.texture && !cli.texture_only)
         throw std::invalid_argument(
             "--texture is not yet available in the direct external splat path");
 #if !defined(AETHERSCAN_HAS_SPLAT)
@@ -1676,6 +1694,12 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.multi_view_ncc_weight = cli.splat_multi_view_ncc_weight;
     settings.geometry_from_iter = static_cast<int>(cli.splat_geometry_from_iter);
     settings.normal_field = cli.splat_normal_field;
+    settings.atlas_resolution = static_cast<int>(cli.atlas_resolution);
+    settings.texture_delight = cli.delight;
+    settings.texture_optimize = cli.texture_optimize;
+    if (cli.atlas_resolution <= 1024) settings.texture_quality = 0;
+    else if (cli.atlas_resolution >= 4096) settings.texture_quality = 2;
+    else settings.texture_quality = 1;
     return settings;
 }
 
@@ -1731,6 +1755,108 @@ void write_mesh_artifact(
         " vertices=", mesh.vertices.size(),
         " faces=", mesh.faces.size());
 }
+
+#if defined(AETHERSCAN_HAS_TEXTURE)
+aetherscan::texture::TextureOptions texture_options_from_cli(
+    const ReconstructCli& cli) {
+    aetherscan::texture::TextureOptions options;
+    options.atlas_resolution = cli.atlas_resolution;
+    options.uv_parallel_partitions = cli.uv_parallel_partitions;
+    options.optimize = cli.texture_optimize;
+    options.optimize_steps = cli.texture_optimize_steps;
+    options.optimize_batch_size = cli.texture_optimize_batch_size;
+    options.seam_samples_per_edge = cli.texture_seam_samples;
+    options.delight = cli.delight;
+    options.mask_dir = cli.masks_dir;
+    return options;
+}
+
+aetherscan::mvs::Mesh load_texture_source_mesh(
+    const ReconstructCli& cli, const aetherscan::project::Archive& archive) {
+    std::error_code error;
+    if (!cli.working_mesh.empty() &&
+        std::filesystem::exists(cli.working_mesh, error))
+        return aetherscan::mvs::load_mesh_ply(cli.working_mesh);
+    if (!cli.mask_mesh.empty() &&
+        std::filesystem::exists(cli.mask_mesh, error))
+        return aetherscan::mvs::load_mesh_ply(cli.mask_mesh);
+    if (archive.has(aetherscan::project::ChunkType::mesh))
+        return aetherscan::mvs::decode_mesh(
+            archive.chunk(aetherscan::project::ChunkType::mesh));
+    const auto parent = cli.output.parent_path().empty()
+        ? std::filesystem::current_path()
+        : cli.output.parent_path();
+    const std::string stem = cli.output.stem().string();
+    const std::array<std::filesystem::path, 3> sidecars = {
+        parent / (stem + "_mesh.ply"),
+        parent / (stem + "_splat_mesh.ply"),
+        parent / (stem + "_mvs_mesh.ply")};
+    for (const auto& candidate : sidecars)
+        if (std::filesystem::exists(candidate, error))
+            return aetherscan::mvs::load_mesh_ply(candidate);
+    throw std::runtime_error(
+        "Bake Texture needs a reconstructed mesh (--working-mesh or a mesh "
+        "already in the project)");
+}
+
+void write_texture_artifact(
+    const ReconstructCli& cli, aetherscan::mvs::MvsScene& scene,
+    const std::filesystem::path& sidecar_stem,
+    aetherscan::project::Archive* archive, const bool write_project) {
+    if (scene.mesh.faces.empty())
+        throw std::runtime_error("Cannot bake texture for an empty mesh");
+    auto options = texture_options_from_cli(cli);
+    if (!cli.texture_only) {
+        if (cli.dense_quality == aetherscan::mvs::DensifyQuality::high) {
+            options.blend_mode =
+                aetherscan::texture::BlendMode::weighted_average;
+            options.visibility_mode =
+                aetherscan::texture::VisibilityMode::hybrid_ray_query;
+        } else if (
+            cli.dense_quality == aetherscan::mvs::DensifyQuality::preview) {
+            if (!cli.atlas_resolution_overridden)
+                options.atlas_resolution = 1024U;
+            options.visibility_mode =
+                aetherscan::texture::VisibilityMode::shadow_map;
+        }
+    }
+    const auto stem = artifact_path(cli, cli.working_texture, sidecar_stem);
+    if (stem.empty())
+        throw std::runtime_error("No textured-mesh output path");
+    ensure_artifact_parent(stem);
+    const auto started = std::chrono::steady_clock::now();
+    aetherscan::texture::bake_and_export(scene, stem, options);
+    const double elapsed = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - started)
+                               .count();
+    aetherscan::core::Logger::instance().info(
+        "textured_obj=", aetherscan::texture::textured_obj_path(stem),
+        " delight=", cli.delight,
+        " atlas=", options.atlas_resolution,
+        " optimized=", options.optimize,
+        " texture_s=", elapsed);
+    if (write_project && archive != nullptr) {
+        archive->set_chunk(
+            aetherscan::project::ChunkType::texture,
+            aetherscan::texture::encode_textured_obj(stem));
+        archive->save(cli.output);
+        aetherscan::core::Logger::instance().info(
+            "ascan_texture=", cli.output);
+    }
+}
+
+void bake_texture_only(
+    const ReconstructCli& cli, aetherscan::mvs::MvsScene& scene,
+    aetherscan::project::Archive& archive, const bool write_project) {
+    scene.mesh = load_texture_source_mesh(cli, archive);
+    const auto parent = cli.output.parent_path().empty()
+        ? std::filesystem::current_path()
+        : cli.output.parent_path();
+    write_texture_artifact(
+        cli, scene, parent / (cli.output.stem().string() + "_textured"),
+        write_project ? &archive : nullptr, write_project);
+}
+#endif
 
 bool load_working_sfm(
     const ReconstructCli& cli, aetherscan::sfm::Scene& scene) {
@@ -3007,7 +3133,7 @@ int main(int argc, char** argv) {
         }
 #endif
         const bool preserve_cameras =
-            (cli.splat || cli.dense) &&
+            (cli.splat || cli.dense || cli.texture) &&
             ((!cli.working_sfm.empty() &&
               std::filesystem::exists(cli.working_sfm, project_error)) ||
              archive.has(aetherscan::project::ChunkType::sfm));
@@ -3049,6 +3175,15 @@ int main(int argc, char** argv) {
                     ? std::string{}
                     : " initial_ply=" +
                           loaded.initial_point_cloud.string());
+            if (cli.texture_only) {
+#if defined(AETHERSCAN_HAS_TEXTURE)
+                bake_texture_only(cli, loaded.scene, archive, write_project);
+                return 0;
+#else
+                throw std::runtime_error(
+                    "Bake Texture requires AETHERSCAN_ENABLE_TEXTURE");
+#endif
+            }
             aetherscan::mvs::DensifyOptions mesh_options;
             aetherscan::mvs::apply_quality_preset(
                 mesh_options, cli.dense_quality);
@@ -3111,17 +3246,10 @@ int main(int argc, char** argv) {
                 }
 #if defined(AETHERSCAN_HAS_TEXTURE)
                 if (cli.texture) {
-                    aetherscan::texture::TextureOptions tex_opts;
-                    tex_opts.atlas_resolution = cli.atlas_resolution;
-                    tex_opts.uv_parallel_partitions = cli.uv_parallel_partitions;
-                    tex_opts.optimize = cli.texture_optimize;
-                    tex_opts.optimize_steps = cli.texture_optimize_steps;
-                    tex_opts.optimize_batch_size = cli.texture_optimize_batch_size;
-                    tex_opts.seam_samples_per_edge = cli.texture_seam_samples;
-                    tex_opts.delight = cli.delight;
-                    tex_opts.mask_dir = cli.masks_dir;
-                    aetherscan::texture::bake_and_export(loaded.scene,
-                        stem.string() + "_textured", tex_opts);
+                    write_texture_artifact(
+                        cli, loaded.scene,
+                        std::filesystem::path(stem.string() + "_textured"),
+                        write_project ? &archive : nullptr, write_project);
                 }
 #endif
                 return 0;
@@ -3203,7 +3331,7 @@ int main(int argc, char** argv) {
 
         aetherscan::sfm::Scene scene;
         bool loaded_project_sfm = false;
-        const bool needs_cameras = cli.splat || cli.dense;
+        const bool needs_cameras = cli.splat || cli.dense || cli.texture;
         if (project_output && needs_cameras &&
             archive.has(aetherscan::project::ChunkType::sfm)) {
             auto loaded = aetherscan::project::read_sfm(archive);
@@ -3225,6 +3353,29 @@ int main(int argc, char** argv) {
                 "pipeline_handoff=working_sfm");
         }
         if (loaded_project_sfm) ensure_scene_appearance(cli, scene);
+
+        if (cli.texture_only) {
+            if (!loaded_project_sfm)
+                throw std::runtime_error(
+                    "Bake Texture needs aligned cameras. Run Align Photos or "
+                    "load an external camera dataset first.");
+#if defined(AETHERSCAN_HAS_TEXTURE)
+            aetherscan::mvs::DensifyOptions texture_scene_options;
+            texture_scene_options.resolution_level = 0;
+            texture_scene_options.build_mesh = false;
+            texture_scene_options.mesh_method =
+                aetherscan::mvs::MeshMethod::none;
+            texture_scene_options.thread_count = scene.thread_count;
+            auto texture_scene = aetherscan::mvs::build_mvs_scene(
+                scene, texture_scene_options);
+            bake_texture_only(
+                cli, texture_scene, archive, write_project);
+            return 0;
+#else
+            throw std::runtime_error(
+                "Bake Texture requires AETHERSCAN_ENABLE_TEXTURE");
+#endif
+        }
 
         aetherscan::sfm::ReconstructionSummary summary{};
         double elapsed = 0.0;
@@ -3468,22 +3619,10 @@ int main(int argc, char** argv) {
 
 #if defined(AETHERSCAN_HAS_TEXTURE)
                 if (cli.texture) {
-                    aetherscan::texture::TextureOptions tex_opts;
-                    tex_opts.atlas_resolution = cli.atlas_resolution;
-                    tex_opts.uv_parallel_partitions =
-                        cli.uv_parallel_partitions;
-                    tex_opts.optimize = cli.texture_optimize;
-                    tex_opts.optimize_steps = cli.texture_optimize_steps;
-                    tex_opts.optimize_batch_size =
-                        cli.texture_optimize_batch_size;
-                    tex_opts.seam_samples_per_edge = cli.texture_seam_samples;
-                    tex_opts.delight = cli.delight;
-                    tex_opts.mask_dir = cli.masks_dir;
-                    const auto textured_stem =
-                        out_dir /
-                        (cli.output.stem().string() + "_textured");
-                    aetherscan::texture::bake_and_export(
-                        splat_scene, textured_stem, tex_opts);
+                    write_texture_artifact(
+                        cli, splat_scene,
+                        out_dir / (cli.output.stem().string() + "_textured"),
+                        write_project ? &archive : nullptr, write_project);
                 }
 #endif
             }
@@ -3672,47 +3811,12 @@ int main(int argc, char** argv) {
 
 #if defined(AETHERSCAN_HAS_TEXTURE)
                 if (cli.texture) {
-                    aetherscan::texture::TextureOptions tex_opts;
-                    tex_opts.atlas_resolution = cli.atlas_resolution;
-                    tex_opts.uv_parallel_partitions =
-                        cli.uv_parallel_partitions;
-                    tex_opts.optimize = cli.texture_optimize;
-                    tex_opts.optimize_steps = cli.texture_optimize_steps;
-                    tex_opts.optimize_batch_size =
-                        cli.texture_optimize_batch_size;
-                    tex_opts.seam_samples_per_edge = cli.texture_seam_samples;
-                    tex_opts.delight = cli.delight;
-                    tex_opts.mask_dir = effective_mask_dir;
-                    if (cli.dense_quality ==
-                        aetherscan::mvs::DensifyQuality::high) {
-                        tex_opts.blend_mode =
-                            aetherscan::texture::BlendMode::weighted_average;
-                        tex_opts.visibility_mode = aetherscan::texture::
-                            VisibilityMode::hybrid_ray_query;
-                    } else if (
-                        cli.dense_quality ==
-                        aetherscan::mvs::DensifyQuality::preview) {
-                        if (!cli.atlas_resolution_overridden)
-                            tex_opts.atlas_resolution = 1024U;
-                        tex_opts.visibility_mode =
-                            aetherscan::texture::VisibilityMode::shadow_map;
-                    }
-                    const auto textured_stem =
-                        out_dir / (cli.output.stem().string() + "_textured");
-                    const auto tex_started =
-                        std::chrono::steady_clock::now();
-                    aetherscan::texture::bake_and_export(
-                        mvs_scene, textured_stem, tex_opts);
-                    const double tex_elapsed =
-                        std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - tex_started)
-                            .count();
-                    aetherscan::core::Logger::instance().info(
-                        "textured_obj=", textured_stem.string() + ".obj",
-                        " delight=", cli.delight,
-                        " atlas=", tex_opts.atlas_resolution,
-                        " optimized=", tex_opts.optimize,
-                        " texture_s=", tex_elapsed);
+                    if (!effective_mask_dir.empty())
+                        cli.masks_dir = effective_mask_dir;
+                    write_texture_artifact(
+                        cli, mvs_scene,
+                        out_dir / (cli.output.stem().string() + "_textured"),
+                        write_project ? &archive : nullptr, write_project);
                 }
 #endif
             }

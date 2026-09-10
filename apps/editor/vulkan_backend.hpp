@@ -142,6 +142,7 @@ struct MeshPreviewUniforms {
     std::array<float, 3> clay{0.77F, 0.73F, 0.68F};
     std::array<float, 3> background{0.027F, 0.031F, 0.043F};
     bool vertex_colour{};
+    bool textured{};
     bool wireframe{};
 };
 
@@ -156,7 +157,9 @@ public:
         const std::vector<float>& positions,
         const std::vector<float>& normals,
         const std::vector<float>& colours,
-        const std::vector<std::uint32_t>& indices);
+        const std::vector<std::uint32_t>& indices,
+        const std::vector<float>& uvs = {});
+    void set_albedo(const aetherscan::io::RgbImage& atlas);
     bool draw(
         std::uint32_t width, std::uint32_t height,
         const MeshPreviewUniforms& uniforms);
@@ -186,14 +189,26 @@ private:
     void destroy_mesh_buffers();
     void destroy_frames();
     void destroy_pipeline();
+    void destroy_albedo();
     bool ensure_pipeline();
+    bool ensure_albedo();
     bool ensure_frames(std::uint32_t width, std::uint32_t height);
+    void bind_albedo_view(VkImageView view);
 
     VkRenderPass render_pass_{};
     VkPipelineLayout pipeline_layout_{};
     VkPipeline fill_pipeline_{};
     VkPipeline wire_pipeline_{};
     VkCommandPool command_pool_{};
+    VkDescriptorSetLayout albedo_layout_{};
+    VkDescriptorPool albedo_pool_{};
+    VkDescriptorSet albedo_set_{};
+    VkSampler albedo_sampler_{};
+    VkImage albedo_image_{};
+    VkDeviceMemory albedo_memory_{};
+    VkImageView albedo_view_{};
+    std::uint32_t albedo_width_{};
+    std::uint32_t albedo_height_{};
     VkBuffer vertex_buffer_{};
     VkBuffer index_buffer_{};
     VkBuffer edge_buffer_{};
