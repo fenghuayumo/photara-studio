@@ -744,8 +744,15 @@ void RunMonitor::consume(const std::string& line) {
 
 void RunMonitor::mark_finished(const int exit_code) {
     task_.active = false;
-    stage_ = exit_code == 0 ? Stage::complete : Stage::failed;
-    if (exit_code == 0) floor_ = 1.F;
+    if (exit_code == 0) {
+        stage_ = Stage::complete;
+        floor_ = 1.F;
+    } else if (exit_code == 2) {
+        // User abort, not a reconstruction failure.
+        stage_ = Stage::idle;
+    } else {
+        stage_ = Stage::failed;
+    }
     if (clock_running_) {
         stopped_ = std::chrono::steady_clock::now();
         clock_running_ = false;

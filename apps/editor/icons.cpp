@@ -77,7 +77,9 @@ void finish_button(
             theme::u32(theme::accent, 0.5F),
             ImGui::GetStyle().FrameRounding);
     }
-    if (tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+    if (tooltip &&
+        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", tooltip);
     (void)icon_colour;
 }
 

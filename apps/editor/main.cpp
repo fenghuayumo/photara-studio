@@ -972,7 +972,8 @@ void apply_dropped_image_source(
     App& app, const std::vector<std::string>& dropped) {
     if (app.job.running() || app.loading_scene) {
         set_message(
-            app, "Cannot change images while a job is running", theme::warning);
+            app, "Stop the running job first to change images or video",
+            theme::warning);
         return;
     }
     std::vector<std::filesystem::path> videos;
@@ -2164,6 +2165,26 @@ const char* resume_job_label(const JobKind kind) {
     }
 }
 
+const char* stop_job_label(const JobKind kind) {
+    switch (kind) {
+        case JobKind::align: return "Stop Alignment";
+        case JobKind::export_sfm: return "Stop Export";
+        case JobKind::dense: return "Stop Dense MVS";
+        default: return "Stop Training";
+    }
+}
+
+constexpr const char* k_stop_job_tooltip =
+    "Abort the running job so you can change images, video, or parameters "
+    "and start again.\nProgress since the last saved artifact is discarded.\n"
+    "Shift+Esc";
+
+constexpr const char* k_pause_job_tooltip =
+    "Freeze the running job without discarding progress. Resume to continue.";
+
+constexpr const char* k_busy_change_capture_tooltip =
+    "Stop the running job first to choose a different image folder or video.";
+
 void start_export_sfm(App& app) {
     if (app.job.running()) return;
     stop_splat_view(app);
@@ -2427,15 +2448,21 @@ void on_job_finished(App& app) {
     app.active_job = JobKind::none;
     refresh_artifacts(app);
 
+    if (code == 2) {
+        set_message(
+            app,
+            std::string(job_name(kind)) +
+                " stopped. You can change images, video, or parameters and run again.",
+            theme::warning);
+        return;
+    }
     if (code != 0) {
         std::string reason = app.monitor.last_error();
         if (reason.empty())
-            reason = code == 2 ? "Cancelled by user"
-                               : "Exited with code " + std::to_string(code);
+            reason = "Exited with code " + std::to_string(code);
         set_message(
-            app,
-            std::string(job_name(kind)) + " failed: " + reason,
-            code == 2 ? theme::warning : theme::danger);
+            app, std::string(job_name(kind)) + " failed: " + reason,
+            theme::danger);
         return;
     }
 
@@ -2632,9 +2659,13 @@ Action draw_menu_bar(App& app) {
         if (ImGui::MenuItem("Select Image Folder...", "Ctrl+O", false, !busy)) {
             select_image_folder(app);
         }
+        if (busy && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", k_busy_change_capture_tooltip);
         if (ImGui::MenuItem("Select Video...", nullptr, false, !busy)) {
             select_video_file(app);
         }
+        if (busy && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", k_busy_change_capture_tooltip);
         if (ImGui::MenuItem("Open Project...", "Ctrl+Shift+O", false, !busy)) {
             select_project_folder(app);
         }
@@ -2701,7 +2732,7 @@ Action draw_menu_bar(App& app) {
         } else if (ImGui::MenuItem("Pause Job", "Esc", false, busy)) {
             action = Action::pause;
         }
-        if (ImGui::MenuItem("Cancel Active Job", "Shift+Esc", false, busy))
+        if (ImGui::MenuItem("Stop Job", "Shift+Esc", false, busy))
             action = Action::stop;
         ImGui::EndMenu();
     }
@@ -2888,14 +2919,16 @@ Action draw_toolbar(App& app) {
     if (icons::labeled_button(
             "##image_folder", icons::Icon::folder, "Image Folder",
             {124.F, 32.F}, icons::ButtonStyle::normal, !busy, false,
-            "Select capture image folder, or drop photos / .asfm / .ascan on the viewport")) {
+            busy ? k_busy_change_capture_tooltip
+                 : "Select capture image folder, or drop photos / .asfm / .ascan on the viewport")) {
         select_image_folder(app);
     }
     ImGui::SameLine();
     if (icons::labeled_button(
             "##video_file", icons::Icon::camera, "Video",
             {88.F, 32.F}, icons::ButtonStyle::normal, !busy, false,
-            "Select a capture video. Align Photos extracts sharp frames, then runs SfM.")) {
+            busy ? k_busy_change_capture_tooltip
+                 : "Select a capture video. Align Photos extracts sharp frames, then runs SfM.")) {
         select_video_file(app);
     }
     ImGui::SameLine();
@@ -2906,7 +2939,8 @@ Action draw_toolbar(App& app) {
         icons::labeled_button(
             "##aligning", icons::Icon::align,
             app.job.paused() ? "Paused" : "Aligning...", {132.F, 32.F},
-            icons::ButtonStyle::primary, false, true);
+            icons::ButtonStyle::primary, false, true,
+            "Use Stop to abort alignment so you can change images or parameters.");
     } else if (icons::labeled_button(
                    "##align", icons::Icon::align,
                    app.has_sparse ? "Re-align Photos" : "Align Photos",
@@ -2922,7 +2956,8 @@ Action draw_toolbar(App& app) {
         icons::labeled_button(
             "##training", icons::Icon::train,
             app.job.paused() ? "Paused" : "Training...", {126.F, 32.F},
-            icons::ButtonStyle::primary, false, true);
+            icons::ButtonStyle::primary, false, true,
+            "Use Stop to abort training so you can change images or parameters.");
     } else {
         const bool ready = !busy && images_ready;
         if (app.has_sparse) {
@@ -2951,12 +2986,15 @@ Action draw_toolbar(App& app) {
     ImGui::SameLine();
 
     ImGui::AlignTextToFramePadding();
+    ImGui::BeginDisabled(busy);
     ImGui::Checkbox("Build Mesh", &app.settings.build_mesh);
-    if (ImGui::IsItemHovered())
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip(
-            "Extract a surface after training.\n"
-            "Enables depth-normal consistency and multi-view geometry/NCC\n"
-            "supervision during optimisation, which the mesh needs.");
+            busy ? "Stop the running job first to change training options."
+                 : "Extract a surface after training.\n"
+                   "Enables depth-normal consistency and multi-view geometry/NCC\n"
+                   "supervision during optimisation, which the mesh needs.");
     ImGui::SameLine(0.F, 14.F);
 
     if (icons::labeled_button(
@@ -2975,11 +3013,14 @@ Action draw_toolbar(App& app) {
         } else if (icons::labeled_button(
                        "##pause", icons::Icon::pause, "Pause", {96.F, 32.F},
                        icons::ButtonStyle::normal, true, false,
-                       "Freeze the running job without discarding progress.\n"
-                       "Cancel from Reconstruction > Cancel Active Job "
-                       "(Shift+Esc) to abort.")) {
+                       k_pause_job_tooltip)) {
             action = Action::pause;
         }
+        ImGui::SameLine();
+        if (icons::labeled_button(
+                "##stop", icons::Icon::stop, "Stop", {88.F, 32.F},
+                icons::ButtonStyle::danger, true, false, k_stop_job_tooltip))
+            action = Action::stop;
     }
 
     const char* transport = "CUDA / Vulkan  |  external memory";
@@ -3171,6 +3212,13 @@ void draw_scene_panel(App& app) {
         app.settings.images_dir[0] != '\0' ? app.settings.images_dir.data()
                                           : "(not selected)");
     ImGui::PopTextWrapPos();
+    if (busy) {
+        ImGui::Dummy({0, 4.F});
+        ImGui::PushTextWrapPos(wrap);
+        theme::caption(
+            "Stop the running job to choose a different capture.");
+        ImGui::PopTextWrapPos();
+    }
     if (is_video_source(app.settings)) {
         ImGui::Dummy({0, 4.F});
         theme::caption("EXTRACTED FRAMES");
@@ -3629,6 +3677,16 @@ Action draw_inspector(App& app) {
 
     if (ImGui::CollapsingHeader("Project", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
+        if (busy) {
+            ImGui::PushTextWrapPos(0.F);
+            ImGui::TextColored(
+                theme::warning,
+                "A reconstruction is running. Stop it to change images, "
+                "video, or parameters.");
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+        }
+        ImGui::BeginDisabled(busy);
         theme::caption("Image source");
         ImGui::SetNextItemWidth(-138.F);
         if (ImGui::InputText(
@@ -3728,6 +3786,7 @@ Action draw_inspector(App& app) {
         if (ImGui::Button("...##pick_project", {24.F, 0})) {
             select_project_folder(app);
         }
+        ImGui::EndDisabled();
         if (app.project_writer_version != 0) {
             ImGui::Spacing();
             const std::string format =
@@ -4188,11 +4247,15 @@ Action draw_inspector(App& app) {
                        "##pause_job", icons::Icon::pause,
                        pause_job_label(app.active_job), {-1.F, 40.F},
                        icons::ButtonStyle::normal, true, false,
-                       "Freeze the running job without discarding progress.\n"
-                       "Cancel from Reconstruction > Cancel Active Job "
-                       "(Shift+Esc) to abort.")) {
+                       k_pause_job_tooltip)) {
             action = Action::pause;
         }
+        ImGui::Dummy({0, 6.F});
+        if (icons::labeled_button(
+                "##stop_job", icons::Icon::stop,
+                stop_job_label(app.active_job), {-1.F, 36.F},
+                icons::ButtonStyle::danger, true, false, k_stop_job_tooltip))
+            action = Action::stop;
     } else if (has_external_dataset(app)) {
         if (theme::primary_button(
                 app.settings.build_mesh ? "Train External 3DGS + Mesh"
@@ -4624,7 +4687,14 @@ int main(const int argc, char** argv) {
                 break;
             case Action::stop:
                 app.job.stop();
-                set_message(app, "Cancelling...", theme::warning);
+                if (app.job.consume_completion())
+                    on_job_finished(app);
+                else
+                    set_message(
+                        app,
+                        "Stopped. You can change images, video, or parameters "
+                        "and run again.",
+                        theme::warning);
                 break;
             case Action::reveal: reveal_in_explorer(app.layout.root); break;
             case Action::none: break;
