@@ -4,29 +4,24 @@
 
 namespace editor {
 
-enum class TransformTool { orbit, translate, rotate, scale };
-enum class GizmoSpace { world, local };
-
 struct BoxDragState {
     bool dragging{};
-    int face{-1};
+    // 0-5 face resize, 6-8 axis translate, 9-11 plane translate.
+    int part{-1};
     Vec3 grab_point{};
     ReconstructionBox start{};
 };
 
 struct ViewportGizmoState {
     bool visible{true};
-    TransformTool tool{TransformTool::orbit};
-    GizmoSpace space{GizmoSpace::world};
     BoxDragState box;
 };
 
-// Top-right camera-orientation widget, ImGuizmo for the reconstruction
-// transform, and face handles to resize the reconstruction region box.
+// Top-right camera-orientation widget, plus a RealityScan-style region
+// gizmo: center arrows move the box, face handles resize it.
 bool draw_viewport_gizmo(
     ViewportGizmoState& state, OrbitCamera& camera, ImVec2 min, ImVec2 max,
-    ReconstructionTransform* transform = nullptr, float scene_radius = 1.F,
-    bool object_enabled = false, ReconstructionBox* region = nullptr,
-    bool region_enabled = false);
+    ReconstructionBox* region = nullptr, bool region_enabled = false,
+    float scene_radius = 1.F);
 
 }  // namespace editor

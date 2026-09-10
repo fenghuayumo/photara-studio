@@ -455,44 +455,9 @@ bool project_gaussian_ring(
     return ring.radius.x >= 0.75F || ring.radius.y >= 0.75F;
 }
 
-std::array<float, 4> quat_from_xyz_degrees(const Vec3& deg) {
-    const float hx = deg.x * 0.00872664626F;
-    const float hy = deg.y * 0.00872664626F;
-    const float hz = deg.z * 0.00872664626F;
-    const float cx = std::cos(hx), sx = std::sin(hx);
-    const float cy = std::cos(hy), sy = std::sin(hy);
-    const float cz = std::cos(hz), sz = std::sin(hz);
-    return {
-        cx * cy * cz + sx * sy * sz, sx * cy * cz - cx * sy * sz,
-        cx * sy * cz + sx * cy * sz, cx * cy * sz - sx * sy * cz};
-}
-
-std::array<float, 4> quat_mul(
-    const std::array<float, 4>& a, const std::array<float, 4>& b) {
-    return {
-        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
-        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
-        a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
-        a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]};
-}
-
-GaussianPrimitive transformed_gaussian(
-    const ReconstructionTransform& xf, const GaussianPrimitive& gaussian) {
-    GaussianPrimitive out = gaussian;
-    out.scale = {
-        gaussian.scale.x * xf.scale, gaussian.scale.y * xf.scale,
-        gaussian.scale.z * xf.scale};
-    if (std::abs(xf.rotation_deg.x) + std::abs(xf.rotation_deg.y) +
-            std::abs(xf.rotation_deg.z) >
-        1e-5F)
-        out.rotation = quat_mul(quat_from_xyz_degrees(xf.rotation_deg), gaussian.rotation);
-    return out;
-}
-
 std::size_t draw_gaussian_rings(
     ImDrawList* draw, const ViewFrame& frame, const SparseScene& scene,
-    const ViewOptions& options, const ImVec2 min, const ImVec2 max,
-    const ReconstructionTransform* xf) {
+    const ViewOptions& options, const ImVec2 min, const ImVec2 max) {
     const std::size_t count = scene.points.size();
     const std::size_t budget = static_cast<std::size_t>(
         std::max(1, options.ring_budget));
@@ -503,13 +468,9 @@ std::size_t draw_gaussian_rings(
     std::size_t drawn = 0;
     for (std::size_t i = 0; i < count; i += stride) {
         ProjectedRing ring;
-        const Vec3 mean =
-            xf ? transform_point(*xf, scene.points[i]) : scene.points[i];
-        const GaussianPrimitive gaussian =
-            xf ? transformed_gaussian(*xf, scene.gaussians[i])
-               : scene.gaussians[i];
         if (!project_gaussian_ring(
-                frame, mean, gaussian, options.ring_scale, ring))
+                frame, scene.points[i], scene.gaussians[i], options.ring_scale,
+                ring))
             continue;
         if (ring.centre.x + ring.radius.x < min.x ||
             ring.centre.x - ring.radius.x > max.x ||
@@ -1730,7 +1691,7 @@ void OrbitCamera::focus_on(const Vec3& point) {
 bool pick_orbit_focus_point(
     const SparseScene& scene, const OrbitCamera& camera, const ImVec2 min,
     const ImVec2 max, const ImVec2 mouse, Vec3& out_point,
-    const PreviewMesh* mesh, const ReconstructionTransform* transform) {
+    const PreviewMesh* mesh) {
     const ViewFrame frame = build_frame(camera, min, max);
     const auto pick_points = [&](const std::vector<Vec3>& points) {
         const std::size_t count = points.size();
@@ -1745,9 +1706,7 @@ bool pick_orbit_focus_point(
         for (std::size_t i = 0; i < count; i += stride) {
             ImVec2 screen;
             float depth{};
-            const Vec3 world =
-                transform ? transform_point(*transform, points[i]) : points[i];
-            if (!project(frame, world, screen, depth)) continue;
+            if (!project(frame, points[i], screen, depth)) continue;
             if (screen.x < min.x || screen.x > max.x || screen.y < min.y ||
                 screen.y > max.y)
                 continue;
@@ -1776,8 +1735,7 @@ bool pick_orbit_focus_point(
     if (std::abs(denom) < 1e-6F) return false;
     const float t = dot(camera.target - frame.eye, frame.forward) / denom;
     if (t <= k_near_plane) return false;
-    const Vec3 world = frame.eye + dir * t;
-    out_point = transform ? inverse_transform_point(*transform, world) : world;
+    out_point = frame.eye + dir * t;
     return true;
 }
 
@@ -1821,8 +1779,7 @@ void update_orbit_camera(
         }
     }
 
-    // Fly keys deliberately require RMB. This keeps W/E/R available for
-    // transform-gizmo shortcuts during ordinary viewport use.
+    // Fly keys deliberately require RMB so ordinary LMB orbit is not stolen.
     if (!accepts_input || !ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
         io.WantTextInput)
         return;
@@ -1853,25 +1810,6 @@ void camera_view_matrix(
 
 }
 
-void camera_projection_matrix(
-    const OrbitCamera& camera, const ImVec2 min, const ImVec2 max,
-    std::array<float, 16>& projection) {
-    const float width = std::max(1.F, max.x - min.x);
-    const float height = std::max(1.F, max.y - min.y);
-    const float aspect = width / height;
-    const float fov = std::clamp(camera.fov_degrees, 10.F, 120.F) *
-                      0.01745329252F;
-    const float f = 1.F / std::tan(fov * 0.5F);
-    const float near_z = std::max(1e-3F, camera.distance * 0.01F);
-    const float far_z = std::max(near_z + 1.F, camera.distance * 100.F);
-    projection = {};
-    projection[0] = f / aspect;
-    projection[5] = f;
-    projection[10] = (far_z + near_z) / (near_z - far_z);
-    projection[11] = -1.F;
-    projection[14] = (2.F * far_z * near_z) / (near_z - far_z);
-}
-
 bool project_world_to_screen(
     const OrbitCamera& camera, const ImVec2 min, const ImVec2 max,
     const Vec3& world, ImVec2& screen, float& depth) {
@@ -1888,225 +1826,6 @@ bool camera_world_ray(
     direction = normalize(
         frame.forward * frame.focal + frame.right * sx + frame.up * sy);
     return true;
-}
-
-namespace {
-
-constexpr float k_deg_to_rad = 0.01745329252F;
-constexpr float k_rad_to_deg = 57.29577951F;
-
-void rotation_matrix_xyz(const Vec3& deg, std::array<float, 9>& r) {
-    const float x = deg.x * k_deg_to_rad;
-    const float y = deg.y * k_deg_to_rad;
-    const float z = deg.z * k_deg_to_rad;
-    const float cx = std::cos(x), sx = std::sin(x);
-    const float cy = std::cos(y), sy = std::sin(y);
-    const float cz = std::cos(z), sz = std::sin(z);
-    r[0] = cy * cz;
-    r[1] = sx * sy * cz - cx * sz;
-    r[2] = cx * sy * cz + sx * sz;
-    r[3] = cy * sz;
-    r[4] = sx * sy * sz + cx * cz;
-    r[5] = cx * sy * sz - sx * cz;
-    r[6] = -sy;
-    r[7] = sx * cy;
-    r[8] = cx * cy;
-}
-
-Vec3 mul_rotation(const std::array<float, 9>& r, const Vec3& v) {
-    return {
-        r[0] * v.x + r[1] * v.y + r[2] * v.z,
-        r[3] * v.x + r[4] * v.y + r[5] * v.z,
-        r[6] * v.x + r[7] * v.y + r[8] * v.z};
-}
-
-Vec3 euler_xyz_from_matrix(const std::array<float, 9>& r) {
-    const float cy = std::sqrt(r[0] * r[0] + r[3] * r[3]);
-    if (cy > 1e-6F) {
-        return {
-            std::atan2(r[7], r[8]) * k_rad_to_deg,
-            std::atan2(-r[6], cy) * k_rad_to_deg,
-            std::atan2(r[3], r[0]) * k_rad_to_deg};
-    }
-    return {
-        std::atan2(-r[5], r[4]) * k_rad_to_deg,
-        std::atan2(-r[6], cy) * k_rad_to_deg, 0.F};
-}
-
-}  // namespace
-
-bool ReconstructionTransform::is_identity() const {
-    return std::abs(translation.x) <= 1e-7F &&
-           std::abs(translation.y) <= 1e-7F &&
-           std::abs(translation.z) <= 1e-7F &&
-           std::abs(rotation_deg.x) <= 1e-5F &&
-           std::abs(rotation_deg.y) <= 1e-5F &&
-           std::abs(rotation_deg.z) <= 1e-5F &&
-           std::abs(scale - 1.F) <= 1e-6F;
-}
-
-void ReconstructionTransform::reset_pose() {
-    translation = {};
-    rotation_deg = {};
-    scale = 1.F;
-}
-
-void ReconstructionTransform::ensure_pivot(const Vec3& centroid) {
-    if (has_pivot) return;
-    pivot = centroid;
-    has_pivot = true;
-}
-
-Vec3 transform_point(const ReconstructionTransform& xf, const Vec3& point) {
-    if (xf.is_identity()) return point;
-    std::array<float, 9> rotation;
-    rotation_matrix_xyz(xf.rotation_deg, rotation);
-    return mul_rotation(rotation, (point - xf.pivot) * xf.scale) + xf.pivot +
-           xf.translation;
-}
-
-Vec3 transform_vector(const ReconstructionTransform& xf, const Vec3& vector) {
-    if (xf.is_identity()) return vector;
-    std::array<float, 9> rotation;
-    rotation_matrix_xyz(xf.rotation_deg, rotation);
-    return mul_rotation(rotation, vector * xf.scale);
-}
-
-Vec3 transform_direction(const ReconstructionTransform& xf, const Vec3& vector) {
-    if (std::abs(xf.rotation_deg.x) <= 1e-5F &&
-        std::abs(xf.rotation_deg.y) <= 1e-5F &&
-        std::abs(xf.rotation_deg.z) <= 1e-5F)
-        return vector;
-    std::array<float, 9> rotation;
-    rotation_matrix_xyz(xf.rotation_deg, rotation);
-    return mul_rotation(rotation, vector);
-}
-
-Vec3 inverse_transform_point(
-    const ReconstructionTransform& xf, const Vec3& world) {
-    if (xf.is_identity()) return world;
-    std::array<float, 9> rotation;
-    rotation_matrix_xyz(xf.rotation_deg, rotation);
-    const Vec3 local = world - xf.pivot - xf.translation;
-    const Vec3 rotated = {
-        rotation[0] * local.x + rotation[3] * local.y + rotation[6] * local.z,
-        rotation[1] * local.x + rotation[4] * local.y + rotation[7] * local.z,
-        rotation[2] * local.x + rotation[5] * local.y + rotation[8] * local.z};
-    const float inv_scale = 1.F / std::max(1e-6F, xf.scale);
-    return xf.pivot + rotated * inv_scale;
-}
-
-void reconstruction_model_matrix(
-    const ReconstructionTransform& xf, std::array<float, 16>& matrix) {
-    std::array<float, 9> rotation;
-    rotation_matrix_xyz(xf.rotation_deg, rotation);
-    const float s = xf.scale;
-    matrix[0] = rotation[0] * s;
-    matrix[1] = rotation[3] * s;
-    matrix[2] = rotation[6] * s;
-    matrix[3] = 0.F;
-    matrix[4] = rotation[1] * s;
-    matrix[5] = rotation[4] * s;
-    matrix[6] = rotation[7] * s;
-    matrix[7] = 0.F;
-    matrix[8] = rotation[2] * s;
-    matrix[9] = rotation[5] * s;
-    matrix[10] = rotation[8] * s;
-    matrix[11] = 0.F;
-    const Vec3 rs_pivot = mul_rotation(rotation, xf.pivot * s);
-    const Vec3 translation = xf.pivot + xf.translation - rs_pivot;
-    matrix[12] = translation.x;
-    matrix[13] = translation.y;
-    matrix[14] = translation.z;
-    matrix[15] = 1.F;
-}
-
-void reconstruction_gizmo_matrix(
-    const ReconstructionTransform& xf, std::array<float, 16>& matrix) {
-    std::array<float, 9> rotation;
-    rotation_matrix_xyz(xf.rotation_deg, rotation);
-    const float s = xf.scale;
-    matrix[0] = rotation[0] * s;
-    matrix[1] = rotation[3] * s;
-    matrix[2] = rotation[6] * s;
-    matrix[3] = 0.F;
-    matrix[4] = rotation[1] * s;
-    matrix[5] = rotation[4] * s;
-    matrix[6] = rotation[7] * s;
-    matrix[7] = 0.F;
-    matrix[8] = rotation[2] * s;
-    matrix[9] = rotation[5] * s;
-    matrix[10] = rotation[8] * s;
-    matrix[11] = 0.F;
-    matrix[12] = xf.pivot.x + xf.translation.x;
-    matrix[13] = xf.pivot.y + xf.translation.y;
-    matrix[14] = xf.pivot.z + xf.translation.z;
-    matrix[15] = 1.F;
-}
-
-void reconstruction_from_gizmo_matrix(
-    ReconstructionTransform& xf, const std::array<float, 16>& matrix) {
-    Vec3 axis_x{matrix[0], matrix[1], matrix[2]};
-    Vec3 axis_y{matrix[4], matrix[5], matrix[6]};
-    Vec3 axis_z{matrix[8], matrix[9], matrix[10]};
-    const float length_x = std::sqrt(dot(axis_x, axis_x));
-    const float length_y = std::sqrt(dot(axis_y, axis_y));
-    const float length_z = std::sqrt(dot(axis_z, axis_z));
-    xf.scale = std::clamp(
-        (length_x + length_y + length_z) / 3.F, 0.01F, 100.F);
-    if (length_x > 1e-8F) axis_x = axis_x * (1.F / length_x);
-    if (length_y > 1e-8F) axis_y = axis_y * (1.F / length_y);
-    if (length_z > 1e-8F) axis_z = axis_z * (1.F / length_z);
-    std::array<float, 9> rotation{
-        axis_x.x, axis_y.x, axis_z.x, axis_x.y, axis_y.y, axis_z.y, axis_x.z,
-        axis_y.z, axis_z.z};
-    xf.rotation_deg = euler_xyz_from_matrix(rotation);
-    xf.translation = {
-        matrix[12] - xf.pivot.x, matrix[13] - xf.pivot.y,
-        matrix[14] - xf.pivot.z};
-}
-
-void multiply_mat4(
-    const std::array<float, 16>& a, const std::array<float, 16>& b,
-    std::array<float, 16>& out) {
-    std::array<float, 16> tmp{};
-    for (int col = 0; col < 4; ++col) {
-        for (int row = 0; row < 4; ++row) {
-            tmp[col * 4 + row] = a[0 * 4 + row] * b[col * 4 + 0] +
-                                 a[1 * 4 + row] * b[col * 4 + 1] +
-                                 a[2 * 4 + row] * b[col * 4 + 2] +
-                                 a[3 * 4 + row] * b[col * 4 + 3];
-        }
-    }
-    out = tmp;
-}
-
-void reconstruction_set_pivot(
-    ReconstructionTransform& xf, const Vec3& local_pivot) {
-    if (xf.has_pivot) {
-        const Vec3 delta = local_pivot - xf.pivot;
-        const Vec3 rotated_scaled = transform_vector(xf, delta);
-        xf.translation = xf.translation + (delta - rotated_scaled);
-    }
-    xf.pivot = local_pivot;
-    xf.has_pivot = true;
-}
-
-bool reconstruction_pose_equal(
-    const ReconstructionTransform& a, const ReconstructionTransform& b) {
-    const auto near = [](const float x, const float y, const float eps) {
-        return std::abs(x - y) <= eps;
-    };
-    return near(a.translation.x, b.translation.x, 1e-6F) &&
-           near(a.translation.y, b.translation.y, 1e-6F) &&
-           near(a.translation.z, b.translation.z, 1e-6F) &&
-           near(a.rotation_deg.x, b.rotation_deg.x, 1e-4F) &&
-           near(a.rotation_deg.y, b.rotation_deg.y, 1e-4F) &&
-           near(a.rotation_deg.z, b.rotation_deg.z, 1e-4F) &&
-           near(a.scale, b.scale, 1e-5F) &&
-           near(a.pivot.x, b.pivot.x, 1e-6F) &&
-           near(a.pivot.y, b.pivot.y, 1e-6F) &&
-           near(a.pivot.z, b.pivot.z, 1e-6F);
 }
 
 void fit_reconstruction_box(
@@ -2199,18 +1918,11 @@ SceneDrawStats SceneRenderer::draw(
     const SparseScene& scene, const OrbitCamera& camera,
     const ViewOptions& options, const bool hovered,
     const ImTextureID* view_photos, const std::size_t view_photo_count,
-    const PreviewMesh* mesh, const ReconstructionTransform* transform,
-    const ReconstructionBox* region) {
+    const PreviewMesh* mesh, const ReconstructionBox* region) {
     SceneDrawStats stats;
     const ViewFrame frame = build_frame(camera, min, max);
     draw->PushClipRect(min, max, true);
     const bool have_mesh = options.draw_mesh && mesh != nullptr && mesh->has();
-    const auto world_of = [&](const Vec3& point) {
-        return transform ? transform_point(*transform, point) : point;
-    };
-    const auto direction_of = [&](const Vec3& vector) {
-        return transform ? transform_direction(*transform, vector) : vector;
-    };
 
     if (options.show_grid) {
         // Empty stage sits on world Y=0. A loaded cloud gets a floor just
@@ -2228,7 +1940,7 @@ SceneDrawStats SceneRenderer::draw(
         // Overlay-only draw (live splat / training): cameras and grid stay.
     } else if (options.draw_rings && scene.has_gaussians()) {
         stats.drawn_points =
-            draw_gaussian_rings(draw, frame, scene, options, min, max, transform);
+            draw_gaussian_rings(draw, frame, scene, options, min, max);
     } else if (count > 0) {
         const std::size_t stride = std::max<std::size_t>(
             1, count / std::max(1, options.point_budget) + 1);
@@ -2244,7 +1956,7 @@ SceneDrawStats SceneRenderer::draw(
         for (std::size_t i = 0; i < count; i += stride) {
             ImVec2 screen;
             float depth{};
-            if (!project(frame, world_of(scene.points[i]), screen, depth)) continue;
+            if (!project(frame, scene.points[i], screen, depth)) continue;
             if (screen.x < min.x || screen.x > max.x || screen.y < min.y ||
                 screen.y > max.y)
                 continue;
@@ -2291,9 +2003,9 @@ SceneDrawStats SceneRenderer::draw(
         float far_depth = 0.F;
         for (std::size_t i = 0; i < face_count; i += stride) {
             const auto& face = mesh->faces[i];
-            const Vec3 v0 = world_of(mesh->vertices[face[0]]);
-            const Vec3 v1 = world_of(mesh->vertices[face[1]]);
-            const Vec3 v2 = world_of(mesh->vertices[face[2]]);
+            const Vec3& v0 = mesh->vertices[face[0]];
+            const Vec3& v1 = mesh->vertices[face[1]];
+            const Vec3& v2 = mesh->vertices[face[2]];
             ImVec2 s0, s1, s2;
             float d0{}, d1{}, d2{};
             if (!project(frame, v0, s0, d0) || !project(frame, v1, s1, d1) ||
@@ -2307,9 +2019,8 @@ SceneDrawStats SceneRenderer::draw(
                 continue;
             Vec3 n;
             if (use_normals) {
-                n = direction_of(mesh->normals[face[0]]) +
-                    direction_of(mesh->normals[face[1]]) +
-                    direction_of(mesh->normals[face[2]]);
+                n = mesh->normals[face[0]] + mesh->normals[face[1]] +
+                    mesh->normals[face[2]];
                 n = normalize(n);
             } else {
                 n = normalize(cross(v1 - v0, v2 - v0));
@@ -2377,8 +2088,7 @@ SceneDrawStats SceneRenderer::draw(
             if (!pose.registered) continue;
             if (previous)
                 draw_segment(
-                    draw, frame, world_of(previous->centre),
-                    world_of(pose.centre), colour, 1.F);
+                    draw, frame, previous->centre, pose.centre, colour, 1.F);
             previous = &pose;
         }
     }
@@ -2408,9 +2118,8 @@ SceneDrawStats SceneRenderer::draw(
                 if (!pose.registered) continue;
                 Vec3 corners[4];
                 image_plane_corners(pose, length, corners);
-                for (Vec3& corner : corners) corner = world_of(corner);
                 const float score = view_pick_score(
-                    frame, world_of(pose.centre), corners, mouse,
+                    frame, pose.centre, corners, mouse,
                     drawn[index] != 0);
                 if (score < best_distance) {
                     best_distance = score;
@@ -2429,8 +2138,7 @@ SceneDrawStats SceneRenderer::draw(
             const ViewPose& pose = scene.views[index];
             Vec3 corners[4];
             image_plane_corners(pose, length, corners);
-            for (Vec3& corner : corners) corner = world_of(corner);
-            const Vec3 apex = world_of(pose.centre);
+            const Vec3 apex = pose.centre;
 
             ImVec2 apex_screen;
             float apex_depth{};
@@ -2520,9 +2228,7 @@ SceneDrawStats SceneRenderer::draw(
             {mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mn.x, mx.y, mn.z},
             {mx.x, mx.y, mn.z}, {mn.x, mn.y, mx.z}, {mx.x, mn.y, mx.z},
             {mn.x, mx.y, mx.z}, {mx.x, mx.y, mx.z}};
-        Vec3 corners[8];
-        for (int i = 0; i < 8; ++i) corners[i] = world_of(local[i]);
-        draw_reconstruction_box(draw, frame, corners);
+        draw_reconstruction_box(draw, frame, local);
     }
 
     // World origin axes, drawn last so they stay readable. Green follows the

@@ -106,8 +106,6 @@ struct App {
     OrbitCamera camera;
     ViewOptions view_options;
     ViewportGizmoState gizmo;
-    ReconstructionTransform scene_transform;
-    ReconstructionTransform published_scene_transform;
     ReconstructionBox reconstruction_box;
     SceneRenderer renderer;
     std::future<SceneLoad> pending_load;
@@ -197,7 +195,6 @@ void stop_splat_view(App& app) {
 void start_splat_view(App& app);
 void sync_live_preview_camera(
     App& app, bool force, std::uint32_t width, std::uint32_t height);
-void compose_preview_camera_transform(App& app, SplatPreviewCamera& preview);
 void frame_reconstruction(App& app);
 bool live_preview_active(const App& app);
 void set_viewport_workspace(App& app, ViewportWorkspace workspace);
@@ -235,11 +232,6 @@ float reconstruction_local_radius(const App& app) {
     return 1.F;
 }
 
-void ensure_reconstruction_pivot(App& app) {
-    if (!reconstruction_available(app)) return;
-    app.scene_transform.ensure_pivot(reconstruction_local_centroid(app));
-}
-
 void ensure_reconstruction_box(App& app) {
     if (app.reconstruction_box.user_set) return;
     if (app.scene.has_points())
@@ -256,51 +248,8 @@ void write_working_subject_bounds(App& app) {
 }
 
 void frame_reconstruction(App& app) {
-    ensure_reconstruction_pivot(app);
     app.camera.frame(
-        transform_point(
-            app.scene_transform, reconstruction_local_centroid(app)),
-        reconstruction_local_radius(app) *
-            std::abs(app.scene_transform.scale));
-}
-
-void compose_preview_camera_transform(
-    App& app, SplatPreviewCamera& preview) {
-    if (app.scene_transform.is_identity()) return;
-    std::array<float, 16> model{};
-    std::array<float, 16> composed{};
-    reconstruction_model_matrix(app.scene_transform, model);
-    multiply_mat4(preview.world_to_camera, model, composed);
-    preview.world_to_camera = composed;
-}
-
-void publish_scene_transform_if_needed(App& app) {
-    if (reconstruction_pose_equal(
-            app.scene_transform, app.published_scene_transform))
-        return;
-    app.published_scene_transform = app.scene_transform;
-    if (live_preview_active(app))
-        sync_live_preview_camera(
-            app, true, app.preview_raster_width, app.preview_raster_height);
-}
-
-void handle_transform_shortcuts(App& app, const bool viewport_hot) {
-    const ImGuiIO& io = ImGui::GetIO();
-    if (!viewport_hot || io.WantTextInput || io.KeyCtrl || io.KeyAlt) return;
-    if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) return;
-    if (app.workspace != ViewportWorkspace::scene_3d) return;
-    if (!reconstruction_available(app)) return;
-    if (ImGui::IsKeyPressed(ImGuiKey_Q))
-        app.gizmo.tool = TransformTool::orbit;
-    if (ImGui::IsKeyPressed(ImGuiKey_W))
-        app.gizmo.tool = TransformTool::translate;
-    if (ImGui::IsKeyPressed(ImGuiKey_E))
-        app.gizmo.tool = TransformTool::rotate;
-    if (ImGui::IsKeyPressed(ImGuiKey_R))
-        app.gizmo.tool = TransformTool::scale;
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape) &&
-        app.gizmo.tool != TransformTool::orbit)
-        app.gizmo.tool = TransformTool::orbit;
+        reconstruction_local_centroid(app), reconstruction_local_radius(app));
 }
 
 std::filesystem::path existing_splat_model(const App& app) {
@@ -1105,10 +1054,7 @@ void clear_viewport_scene(App& app) {
     app.atlas_preview_path.clear();
     app.scene_source.clear();
     app.camera = {};
-    app.scene_transform = {};
-    app.published_scene_transform = {};
     app.reconstruction_box.clear();
-    app.gizmo.tool = TransformTool::orbit;
     app.gizmo.box = {};
     app.view_mode = VisualizationMode::points;
     ++app.scene_load_generation;
@@ -1812,11 +1758,8 @@ bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
         std::max(1.F, std::floor(max.y - min.y)));
     SplatPreviewCamera camera =
         make_preview_camera(app.camera, width, height);
-    compose_preview_camera_transform(app, camera);
-    const Vec3 world_centroid =
-        transform_point(app.scene_transform, app.mesh.centroid);
-    const float world_radius =
-        app.mesh.radius * std::abs(app.scene_transform.scale);
+    const Vec3 world_centroid = app.mesh.centroid;
+    const float world_radius = app.mesh.radius;
     const float* w2c = camera.world_to_camera.data();
     const float cam_z =
         w2c[2] * world_centroid.x + w2c[6] * world_centroid.y +
@@ -2074,51 +2017,6 @@ bool draw_scene_toggle_rail(App& app, const ImVec2 view_min) {
     return hovered;
 }
 
-void draw_transform_tool_cluster(App& app, const ImVec2 origin) {
-    struct Item {
-        const char* id;
-        icons::Icon icon;
-        TransformTool tool;
-        const char* tooltip;
-    };
-    const Item items[] = {
-        {"##xf_orbit", icons::Icon::select, TransformTool::orbit,
-         "Orbit camera (Q)"},
-        {"##xf_move", icons::Icon::translate, TransformTool::translate,
-         "Move reconstruction (W)"},
-        {"##xf_rotate", icons::Icon::rotate, TransformTool::rotate,
-         "Rotate reconstruction (E)"},
-        {"##xf_scale", icons::Icon::scale, TransformTool::scale,
-         "Scale reconstruction (R)"},
-    };
-    const bool enabled = reconstruction_available(app);
-    const ImVec2 cluster_min{origin.x + 136.F, origin.y + 5.F};
-    const ImVec2 cluster_max{cluster_min.x + 154.F, cluster_min.y + 26.F};
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(
-        cluster_min, cluster_max, theme::u32(theme::surface_2), 7.F);
-    draw->AddRect(
-        cluster_min, cluster_max, theme::u32(theme::border, 0.7F), 7.F);
-    for (int i = 0; i < 4; ++i) {
-        const ImVec2 button_min{
-            cluster_min.x + 3.F + static_cast<float>(i) * 26.F,
-            cluster_min.y + 1.F};
-        if (rail_icon_button(
-                items[i].id, items[i].icon, button_min, {24.F, 24.F},
-                app.gizmo.tool == items[i].tool, enabled, items[i].tooltip))
-            app.gizmo.tool = items[i].tool;
-    }
-    const ImVec2 world_min{cluster_min.x + 111.F, cluster_min.y + 1.F};
-    const bool world = app.gizmo.space == GizmoSpace::world;
-    if (rail_icon_button(
-            "##xf_space", icons::Icon::world, world_min, {24.F, 24.F}, world,
-            enabled,
-            world ? "Gizmo in world space\nClick for local axes"
-                  : "Gizmo in local space\nClick for world axes"))
-        app.gizmo.space =
-            world ? GizmoSpace::local : GizmoSpace::world;
-}
-
 void draw_workspace_toggle(App& app, const ImVec2 origin) {
     struct Item {
         const char* id;
@@ -2225,7 +2123,6 @@ void sync_live_preview_camera(
     app.preview_raster_height = height;
     SplatPreviewCamera preview =
         make_preview_camera(app.camera, width, height);
-    compose_preview_camera_transform(app, preview);
     const auto vis = editor_visualize_options(app);
     write_preview_camera_file(
         app.layout.preview_camera_file, preview, app.preview_camera_revision,
@@ -2243,17 +2140,8 @@ void snap_preview_to_index(App& app, const unsigned index) {
     app.preview_view = index;
     app.preview_follow_view = true;
     write_preview_view_index(app.layout, app.preview_view);
-    if (index < app.scene.views.size()) {
-        ViewPose world = app.scene.views[index];
-        world.centre = transform_point(app.scene_transform, world.centre);
-        const Vec3 look = transform_direction(
-            app.scene_transform,
-            {world.rotation[6], world.rotation[7], world.rotation[8]});
-        world.rotation[6] = look.x;
-        world.rotation[7] = look.y;
-        world.rotation[8] = look.z;
-        snap_orbit_to_view(app.camera, world);
-    }
+    if (index < app.scene.views.size())
+        snap_orbit_to_view(app.camera, app.scene.views[index]);
     sync_live_preview_camera(
         app, true, app.preview_raster_width, app.preview_raster_height);
 }
@@ -2275,16 +2163,9 @@ bool handle_viewport_double_click(
     Vec3 point;
     if (!pick_orbit_focus_point(
             app.scene, app.camera, min, max, ImGui::GetIO().MousePos, point,
-            app.view_mode == VisualizationMode::mesh ? &app.mesh : nullptr,
-            &app.scene_transform))
+            app.view_mode == VisualizationMode::mesh ? &app.mesh : nullptr))
         return false;
-    if (app.gizmo.tool != TransformTool::orbit &&
-        reconstruction_available(app)) {
-        reconstruction_set_pivot(app.scene_transform, point);
-        app.camera.interacting = false;
-        return true;
-    }
-    app.camera.focus_on(transform_point(app.scene_transform, point));
+    app.camera.focus_on(point);
     app.preview_follow_view = false;
     app.camera.interacting = false;
     return true;
@@ -2748,7 +2629,6 @@ void poll_mesh_load(App& app) {
     app.mesh_load_failed = false;
     if (app.mesh.has_texture()) app.view_options.mesh_texture = true;
     pack_mesh_gpu_buffers(app);
-    ensure_reconstruction_pivot(app);
     ensure_reconstruction_box(app);
     frame_reconstruction(app);
     app.frame_mesh_on_load = false;
@@ -2791,7 +2671,6 @@ void poll_scene_load(App& app) {
         app.image_qa.selected = app.scene.views.empty() ? -1 : 0;
     infer_images_dir_from_scene(app);
     attach_view_image_paths(app.scene, reconstruction_images_path(app));
-    ensure_reconstruction_pivot(app);
     ensure_reconstruction_box(app);
     if (!live_preview_active(app) && app.view_mode != VisualizationMode::mesh)
         frame_reconstruction(app);
@@ -2821,7 +2700,6 @@ void poll_alignment_preview(App& app) {
             app.alignment_preview_seen = true;
             if (first) {
                 app.photos.clear();
-                ensure_reconstruction_pivot(app);
                 frame_reconstruction(app);
                 app.view_mode = VisualizationMode::points;
             }
@@ -3752,26 +3630,6 @@ Action draw_menu_bar(App& app) {
             set_viewport_workspace(app, ViewportWorkspace::image_2d);
         ImGui::Separator();
         if (ImGui::MenuItem(
-                "Orbit Tool", "Q",
-                app.gizmo.tool == TransformTool::orbit))
-            app.gizmo.tool = TransformTool::orbit;
-        if (ImGui::MenuItem(
-                "Move Reconstruction", "W",
-                app.gizmo.tool == TransformTool::translate,
-                reconstruction_available(app)))
-            app.gizmo.tool = TransformTool::translate;
-        if (ImGui::MenuItem(
-                "Rotate Reconstruction", "E",
-                app.gizmo.tool == TransformTool::rotate,
-                reconstruction_available(app)))
-            app.gizmo.tool = TransformTool::rotate;
-        if (ImGui::MenuItem(
-                "Scale Reconstruction", "R",
-                app.gizmo.tool == TransformTool::scale,
-                reconstruction_available(app)))
-            app.gizmo.tool = TransformTool::scale;
-        ImGui::Separator();
-        if (ImGui::MenuItem(
                 "Show Cameras", nullptr, app.view_options.show_views))
             set_camera_overlays(
                 app.view_options, !app.view_options.show_views);
@@ -3849,14 +3707,10 @@ void draw_controls_window(App& app) {
         ImGui::BulletText("RMB drag: fly look");
         ImGui::BulletText("RMB + WASD/QE: fly; Shift accelerates");
         ImGui::BulletText("Mouse wheel: dolly; F: frame reconstruction");
-        ImGui::BulletText("Q orbit  |  W move  |  E rotate  |  R scale");
         ImGui::BulletText(
-            "Drag the gizmo to transform Sparse, Gaussians, Mesh, and cameras");
-        ImGui::BulletText(
-            "Drag a gold face handle to resize the reconstruction region");
-        ImGui::BulletText("Shift: fine control; Ctrl: snap (15° / grid)");
-        ImGui::BulletText(
-            "Double-click a point: orbit around it (or place the gizmo pivot)");
+            "Region gizmo: drag RGB arrows to move the box, face dots to resize");
+        ImGui::BulletText("Shift: fine control; Ctrl: snap");
+        ImGui::BulletText("Double-click a point: orbit around it");
         ImGui::BulletText("Double-click a camera frustum: look through it");
         ImGui::Spacing();
         ImGui::TextUnformatted("2D image QA");
@@ -4164,8 +4018,7 @@ void draw_scene_panel(App& app) {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
                     "One reconstruction. Switch Sparse / Gaussians / Mesh\n"
-                    "with the visualization buttons in the viewport.\n"
-                    "W / E / R move, rotate, or scale the whole object.");
+                    "with the visualization buttons in the viewport.");
             std::string representations;
             if (has_cloud) representations = "Sparse";
             if (has_gaussians) {
@@ -4423,21 +4276,18 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
 
     ViewOptions draw_options = app.view_options;
     if (app.view_mode == VisualizationMode::mesh) draw_options.show_cloud = false;
-    ensure_reconstruction_pivot(app);
     ensure_reconstruction_box(app);
     const SceneDrawStats stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, draw_options, hovered,
         app.photos.ids(), app.photos.size(),
         app.view_mode == VisualizationMode::mesh ? &app.mesh : nullptr,
-        &app.scene_transform, &app.reconstruction_box);
+        &app.reconstruction_box);
 
     const bool gizmo_captures = draw_viewport_gizmo(
-        app.gizmo, app.camera, min, max, &app.scene_transform,
-        reconstruction_local_radius(app), reconstruction_available(app),
-        &app.reconstruction_box,
-        app.view_options.show_region && app.reconstruction_box.valid);
+        app.gizmo, app.camera, min, max, &app.reconstruction_box,
+        app.view_options.show_region && app.reconstruction_box.valid,
+        reconstruction_local_radius(app));
     const bool viewport_input = hovered && !gizmo_captures;
-    handle_transform_shortcuts(app, hovered);
     const bool frame_key = viewport_input &&
                            !ImGui::GetIO().WantTextInput &&
                            ImGui::IsKeyPressed(ImGuiKey_F);
@@ -4445,7 +4295,6 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     if (!handle_viewport_double_click(app, viewport_input, stats, min, max))
         update_orbit_camera(
             app.camera, viewport_input, reconstruction_local_radius(app));
-    publish_scene_transform_if_needed(app);
 
     const char* overlay = app.settings.images_dir[0] != '\0' ? "NO ALIGNMENT"
                                                             : "NO IMAGES";
@@ -4536,9 +4385,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     }
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
-        app.gizmo.tool == TransformTool::orbit
-            ? "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  QWER tools  |  double-click focus"
-            : "Drag gizmo to transform  |  LMB empty orbit  |  Shift fine  |  Ctrl snap  |  double-click pivot  |  Q orbit");
+        "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  drag region gizmo  |  double-click focus");
 
     if (!gizmo_captures && stats.hovered_view >= 0 &&
         static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size()) {
@@ -4611,9 +4458,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
             app.preview_view + 1, view_count);
 
     const char* controls = live
-        ? (app.gizmo.tool == TransformTool::orbit
-               ? "LMB orbit  |  MMB pan  |  RMB + WASD fly  |  QWER tools  |  arrows snap capture"
-               : "Drag gizmo to transform  |  LMB empty orbit  |  Shift fine  |  Ctrl snap  |  Q orbit")
+        ? "LMB orbit  |  MMB pan  |  RMB + WASD fly  |  drag region gizmo  |  arrows snap capture"
         : (app.has_model
                ? "Select a visualization mode to start the live preview"
                : "Train 3DGS to move this camera");
@@ -4636,26 +4481,21 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     ViewOptions overlay = app.view_options;
     overlay.show_cloud = false;
     overlay.draw_rings = false;
-    ensure_reconstruction_pivot(app);
     ensure_reconstruction_box(app);
     const SceneDrawStats overlay_stats = app.renderer.draw(
         draw, min, max, app.scene, app.camera, overlay, hovered,
-        app.photos.ids(), app.photos.size(), nullptr, &app.scene_transform,
-        &app.reconstruction_box);
+        app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box);
 
     const bool gizmo_captures = draw_viewport_gizmo(
-        app.gizmo, app.camera, min, max, &app.scene_transform,
-        reconstruction_local_radius(app), reconstruction_available(app),
-        &app.reconstruction_box,
-        app.view_options.show_region && app.reconstruction_box.valid);
+        app.gizmo, app.camera, min, max, &app.reconstruction_box,
+        app.view_options.show_region && app.reconstruction_box.valid,
+        reconstruction_local_radius(app));
     const bool viewport_input = hovered && !gizmo_captures;
-    handle_transform_shortcuts(app, hovered);
     const bool used_double_click = handle_viewport_double_click(
         app, viewport_input, overlay_stats, min, max);
     if (!used_double_click)
         update_orbit_camera(
             app.camera, viewport_input, reconstruction_local_radius(app));
-    publish_scene_transform_if_needed(app);
     if (!used_double_click &&
         (app.camera.interacting ||
          (viewport_input && ImGui::GetIO().MouseWheel != 0.F)))
@@ -4759,8 +4599,6 @@ void draw_viewport_panel(App& app) {
         theme::u32(theme::border));
 
     draw_workspace_toggle(app, header_origin);
-    if (app.workspace == ViewportWorkspace::scene_3d)
-        draw_transform_tool_cluster(app, header_origin);
 
     const char* state = app.workspace == ViewportWorkspace::image_2d
         ? "IMAGE QA"
@@ -5052,58 +4890,6 @@ Action draw_inspector(App& app) {
                 "Load an existing PLY, SOG, SPZ, or GLB model for preview. "
                 "When set, it takes precedence over the trained working copy.");
         ImGui::EndDisabled();
-        ImGui::Spacing();
-    }
-
-    if (reconstruction_available(app) &&
-        ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-        theme::caption(
-            "One reconstruction. Sparse, Gaussians, Mesh, and cameras move "
-            "together. Files on disk are not rewritten.");
-        ImGui::Spacing();
-        ensure_reconstruction_pivot(app);
-        const float radius = reconstruction_local_radius(app);
-        const float pos_speed = std::max(0.001F, radius * 0.002F);
-        ImGui::TextUnformatted("Position");
-        ImGui::SetNextItemWidth(-1.F);
-        if (ImGui::DragFloat3(
-                "##xf_pos", &app.scene_transform.translation.x, pos_speed,
-                0.F, 0.F, "%.3f"))
-            publish_scene_transform_if_needed(app);
-        ImGui::TextUnformatted("Rotation");
-        ImGui::SetNextItemWidth(-1.F);
-        if (ImGui::DragFloat3(
-                "##xf_rot", &app.scene_transform.rotation_deg.x, 0.5F, 0.F,
-                0.F, "%.1f°"))
-            publish_scene_transform_if_needed(app);
-        ImGui::TextUnformatted("Scale");
-        ImGui::SetNextItemWidth(-1.F);
-        if (ImGui::DragFloat(
-                "##xf_scale", &app.scene_transform.scale, 0.01F, 0.01F,
-                100.F, "%.3f")) {
-            app.scene_transform.scale =
-                std::clamp(app.scene_transform.scale, 0.01F, 100.F);
-            publish_scene_transform_if_needed(app);
-        }
-        ImGui::TextUnformatted("Pivot");
-        ImGui::SetNextItemWidth(-1.F);
-        Vec3 pivot = app.scene_transform.pivot;
-        if (ImGui::DragFloat3("##xf_pivot", &pivot.x, pos_speed, 0.F, 0.F, "%.3f"))
-            reconstruction_set_pivot(app.scene_transform, pivot);
-        theme::caption(
-            "Move / Rotate / Scale in the viewport, or Q W E R. "
-            "Double-click the reconstruction to place the pivot.");
-        ImGui::Spacing();
-        if (theme::toolbar_button(
-                "Reset Transform", {-1.F, 28.F},
-                !app.scene_transform.is_identity())) {
-            app.scene_transform.reset_pose();
-            publish_scene_transform_if_needed(app);
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Restore identity. The pivot stays where you placed it.");
         ImGui::Spacing();
     }
 
@@ -5473,8 +5259,8 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Splat object-mode SubjectBounds / focus region.\n"
-                "Drag a face handle to resize. Object training and mesh\n"
-                "extraction use this volume.");
+                "Drag the center arrows to move the box, or a face dot\n"
+                "to resize. Object training and mesh extraction use this volume.");
         if (app.reconstruction_box.valid) {
             const Vec3 size = app.reconstruction_box.size();
             ImGui::Text("Size  %.3f × %.3f × %.3f", size.x, size.y, size.z);
