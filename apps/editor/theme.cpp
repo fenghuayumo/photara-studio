@@ -317,6 +317,43 @@ bool danger_button(const char* label, const ImVec2 size, const bool enabled) {
         ImVec4(0.313F, 0.129F, 0.137F, 1.F), danger);
 }
 
+bool choice_tile(
+    const char* id, const char* title, const char* subtitle, const bool selected,
+    const ImVec2 size) {
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, size);
+    const bool pressed = ImGui::IsItemClicked();
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec2 max{origin.x + size.x, origin.y + size.y};
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec4 fill = selected ? fade(accent, 0.16F)
+        : (hovered ? surface_3 : surface_2);
+    const ImVec4 outline = selected ? accent
+        : (hovered ? ImVec4(0.28F, 0.29F, 0.33F, 1.F) : border);
+    draw->AddRectFilled(origin, max, u32(fill), 6.F);
+    draw->AddRect(origin, max, u32(outline, selected ? 0.9F : 1.F), 6.F);
+
+    ImFont* title_font = ImGui::GetFont();
+    ImFont* sub_font = small_font();
+    const float title_size = title_font->FontSize;
+    const float sub_size = sub_font->FontSize;
+    const ImVec2 title_extent =
+        title_font->CalcTextSizeA(title_size, FLT_MAX, 0.F, title);
+    const ImVec2 sub_extent =
+        sub_font->CalcTextSizeA(sub_size, FLT_MAX, 0.F, subtitle);
+    const float stack = title_extent.y + 4.F + sub_extent.y;
+    const float text_y = origin.y + (size.y - stack) * 0.5F;
+    draw->AddText(
+        title_font, title_size,
+        {origin.x + (size.x - title_extent.x) * 0.5F, text_y},
+        u32(selected ? accent : text_bright), title);
+    draw->AddText(
+        sub_font, sub_size,
+        {origin.x + (size.x - sub_extent.x) * 0.5F, text_y + title_extent.y + 4.F},
+        u32(text_faint), subtitle);
+    return pressed;
+}
+
 void caption(const char* text) {
     ImGui::PushStyleColor(ImGuiCol_Text, text_faint);
     ImGui::TextUnformatted(text);

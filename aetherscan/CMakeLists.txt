@@ -311,6 +311,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/mvs/mesh_clean.cpp
         src/mvs/mesh_tsdf.cpp
         src/mvs/export.cpp
+        src/io/mesh.cpp  # PLY/OBJ stay in mvs/export; GLB interchange lives in io/
         src/mvs/densify.cpp)
     if(AETHERSCAN_ENABLE_CUDA)
         # Keep CUDA compilation isolated from image-codec targets whose

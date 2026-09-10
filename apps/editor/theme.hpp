@@ -68,6 +68,11 @@ bool toolbar_button(
     const char* label, ImVec2 size, bool enabled = true, bool active = false);
 bool danger_button(const char* label, ImVec2 size, bool enabled = true);
 
+// Compact selectable tile for mutually exclusive choices (export format, etc.).
+bool choice_tile(
+    const char* id, const char* title, const char* subtitle, bool selected,
+    ImVec2 size);
+
 void caption(const char* text);
 void metric(const char* key, const char* value);
 void metric_coloured(const char* key, const char* value, const ImVec4& colour);

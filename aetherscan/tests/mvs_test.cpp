@@ -3,21 +3,25 @@
 #include "mvs/internal.hpp"
 #include "mvs/maxflow.hpp"
 #include "io/image.hpp"
+#include "io/mesh.hpp"
 #include "sfm/scene.hpp"
 #include "texture/projection.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <numbers>
 #include <random>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -1079,6 +1083,83 @@ void test_mesh_ply_round_trip() {
         "mesh PLY loader lost colors");
 }
 
+std::string glb_json_chunk(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    require(static_cast<bool>(in), "failed to open exported GLB");
+    std::uint32_t header[5]{};
+    in.read(reinterpret_cast<char*>(header), sizeof(header));
+    require(static_cast<bool>(in), "truncated GLB header");
+    require(header[0] == 0x46546c67U, "GLB magic is wrong");
+    require(header[1] == 2U, "GLB version is not 2.0");
+    require(header[4] == 0x4e4f534aU, "GLB JSON chunk type is wrong");
+    std::string json(header[3], '\0');
+    in.read(json.data(), static_cast<std::streamsize>(header[3]));
+    require(static_cast<bool>(in), "truncated GLB JSON chunk");
+    return json;
+}
+
+void test_mesh_glb_export() {
+    Mesh source;
+    source.vertices = {
+        Vec3f{0.F, 0.F, 0.F},
+        Vec3f{1.F, 0.F, 0.F},
+        Vec3f{0.F, 1.F, 0.F}};
+    source.normals.assign(3, Vec3f{0.F, 0.F, 1.F});
+    source.colors = {
+        Vec3f{1.F, 0.F, 0.F},
+        Vec3f{0.F, 1.F, 0.F},
+        Vec3f{0.F, 0.F, 1.F}};
+    source.faces.emplace_back(0, 1, 2);
+    const auto geometry = std::filesystem::temp_directory_path() /
+                          "aetherscan_mesh_glb_geometry.glb";
+    aetherscan::io::save_mesh_glb(source, geometry);
+    const std::string geometry_json = glb_json_chunk(geometry);
+    std::filesystem::remove(geometry);
+    require(
+        geometry_json.find("\"POSITION\"") != std::string::npos,
+        "geometry GLB is missing POSITION");
+    require(
+        geometry_json.find("\"NORMAL\"") != std::string::npos,
+        "geometry GLB is missing NORMAL");
+    require(
+        geometry_json.find("\"COLOR_0\"") != std::string::npos,
+        "geometry GLB is missing COLOR_0");
+    require(
+        geometry_json.find("image/png") == std::string::npos,
+        "geometry GLB should not embed an image");
+
+    aetherscan::io::RgbImage atlas;
+    atlas.width = 1;
+    atlas.height = 1;
+    atlas.pixels = {255, 128, 64};
+    const auto png_path = std::filesystem::temp_directory_path() /
+                          "aetherscan_mesh_glb_atlas.png";
+    aetherscan::io::save_rgb_png(atlas, png_path);
+    std::ifstream png_in(png_path, std::ios::binary);
+    require(static_cast<bool>(png_in), "failed to read test atlas PNG");
+    const std::vector<std::uint8_t> png(
+        (std::istreambuf_iterator<char>(png_in)),
+        std::istreambuf_iterator<char>());
+    png_in.close();
+    std::filesystem::remove(png_path);
+    const std::array<Vec2f, 3> uvs{
+        Vec2f{0.F, 0.F}, Vec2f{1.F, 0.F}, Vec2f{0.F, 1.F}};
+    const auto textured = std::filesystem::temp_directory_path() /
+                          "aetherscan_mesh_glb_textured.glb";
+    aetherscan::io::save_mesh_glb(source, textured, uvs, png);
+    const std::string textured_json = glb_json_chunk(textured);
+    std::filesystem::remove(textured);
+    require(
+        textured_json.find("\"TEXCOORD_0\"") != std::string::npos,
+        "textured GLB is missing TEXCOORD_0");
+    require(
+        textured_json.find("image/png") != std::string::npos,
+        "textured GLB is missing an embedded PNG");
+    require(
+        textured_json.find("KHR_materials_unlit") != std::string::npos,
+        "textured GLB should use an unlit albedo material");
+}
+
 #if defined(AETHERSCAN_HAS_CGAL)
 void test_global_delaunay_mesh() {
     MvsScene scene;
@@ -1205,6 +1286,7 @@ int main() {
         test_dense_ply_round_trip();
         test_imported_scene_resolution();
         test_mesh_ply_round_trip();
+        test_mesh_glb_export();
 #if defined(AETHERSCAN_HAS_CGAL)
         test_global_delaunay_mesh();
 #endif

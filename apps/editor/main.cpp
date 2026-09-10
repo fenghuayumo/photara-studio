@@ -8,6 +8,7 @@
 #include "vulkan_backend.hpp"
 
 #include "io/image.hpp"
+#include "io/mesh.hpp"
 #include "io/video_frames.hpp"
 #include "mvs/export.hpp"
 #include "project/archive.hpp"
@@ -46,6 +47,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -179,6 +181,13 @@ struct App {
     bool show_inspector{true};
     bool show_status_bar{true};
     bool reset_dock_layout{};
+
+    struct MeshExportState {
+        bool show{};
+        bool initialized{};
+        int format{0};  // 0 PLY, 1 OBJ, 2 GLB
+        bool include_texture{true};
+    } mesh_export;
 
     // OS file drops arrive on the GLFW callback and are consumed against the
     // last viewport rectangle on the following frame.
@@ -405,7 +414,7 @@ std::optional<std::filesystem::path> resolve_dropped_image_directory(
 }
 
 enum class FilePickKind {
-    project, dataset, point_cloud, splat_model, mesh, textured_mesh, video
+    project, dataset, point_cloud, splat_model, mesh, video
 };
 
 #if defined(_WIN32)
@@ -494,11 +503,15 @@ bool pick_file(
             {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb)", L"*.ply;*.sog;*.spz;*.glb"},
             {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC mesh_filters[] = {
-            {L"Mesh (*.ply)", L"*.ply"},
+            {L"Stanford PLY (*.ply)", L"*.ply"},
             {L"All files (*.*)", L"*.*"}};
-        COMDLG_FILTERSPEC textured_mesh_filters[] = {
-            {L"Textured mesh (*.obj)", L"*.obj"},
-            {L"All files (*.*)", L"*.*"}};
+        if (kind == FilePickKind::mesh && default_extension != nullptr) {
+            if (std::wcscmp(default_extension, L"obj") == 0) {
+                mesh_filters[0] = {L"Wavefront OBJ (*.obj)", L"*.obj"};
+            } else if (std::wcscmp(default_extension, L"glb") == 0) {
+                mesh_filters[0] = {L"glTF Binary (*.glb)", L"*.glb"};
+            }
+        }
         COMDLG_FILTERSPEC video_filters[] = {
             {L"Video files (*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv)",
              L"*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv;*.mts;*.m2ts;*.360"},
@@ -508,7 +521,6 @@ bool pick_file(
         if (kind == FilePickKind::point_cloud) filters = point_cloud_filters;
         if (kind == FilePickKind::splat_model) filters = splat_model_filters;
         if (kind == FilePickKind::mesh) filters = mesh_filters;
-        if (kind == FilePickKind::textured_mesh) filters = textured_mesh_filters;
         if (kind == FilePickKind::video) filters = video_filters;
         dialog->SetFileTypes(2, filters);
         if (save && default_extension != nullptr)
@@ -1483,12 +1495,12 @@ bool can_export_sparse(const App& app) {
 
 bool can_export_model(const App& app) { return app.has_model; }
 
-bool can_export_mesh_file(const App& app) {
-    return app.has_mesh || app.mesh.has();
-}
-
 bool can_export_textured_mesh(const App& app) {
     return app.has_texture || textured_mesh_on_disk(app.layout.working_texture);
+}
+
+bool can_export_mesh_file(const App& app) {
+    return app.has_mesh || app.mesh.has() || can_export_textured_mesh(app);
 }
 
 void export_sparse_cloud(App& app) {
@@ -1555,92 +1567,202 @@ void export_trained_model(App& app) {
     }
 }
 
-void export_mesh_file(App& app) {
-    if (app.job.running() || !can_export_mesh_file(app)) return;
-    std::array<char, 1024> destination{};
-    const std::wstring name = export_stem_wide(app) + L"_mesh.ply";
-    if (!pick_export_path(
-            L"Export Mesh", destination, FilePickKind::mesh, name.c_str(),
-            L"ply"))
-        return;
-    const std::filesystem::path out = path_from_utf8_field(destination.data());
-    try {
-        const auto source = existing_mesh_path(app);
-        if (copy_existing_file(source, out)) {
-            set_message(app, "Exported mesh", theme::success);
-            return;
-        }
-        if (app.mesh.has()) {
-            aetherscan::mvs::save_mesh_ply(preview_mesh_to_mvs(app.mesh), out);
-            set_message(app, "Exported mesh", theme::success);
-            return;
-        }
-        if (!app.layout.project_file.empty()) {
-            const auto archive =
-                aetherscan::project::Archive::open(app.layout.project_file);
-            if (archive.has(aetherscan::project::ChunkType::mesh)) {
-                aetherscan::mvs::save_mesh_ply(
-                    aetherscan::mvs::decode_mesh(
-                        archive.chunk(aetherscan::project::ChunkType::mesh)),
-                    out);
-                set_message(app, "Exported mesh", theme::success);
-                return;
-            }
-        }
-        set_message(app, "No mesh to export yet", theme::warning);
-    } catch (const std::exception& failure) {
-        set_message(app, failure.what(), theme::danger);
+enum class MeshExportFormat { ply, obj, glb };
+
+MeshExportFormat mesh_export_format(const App& app) {
+    switch (app.mesh_export.format) {
+        case 1: return MeshExportFormat::obj;
+        case 2: return MeshExportFormat::glb;
+        default: return MeshExportFormat::ply;
     }
 }
 
-void export_textured_mesh(App& app) {
-    if (app.job.running() || !can_export_textured_mesh(app)) return;
+bool mesh_export_wants_texture(const App& app) {
+    return app.mesh_export.include_texture &&
+           mesh_export_format(app) != MeshExportFormat::ply &&
+           can_export_textured_mesh(app);
+}
+
+const wchar_t* mesh_export_extension_wide(const MeshExportFormat format) {
+    switch (format) {
+        case MeshExportFormat::obj: return L"obj";
+        case MeshExportFormat::glb: return L"glb";
+        case MeshExportFormat::ply:
+        default: return L"ply";
+    }
+}
+
+std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) throw std::runtime_error("Failed to read " + path.string());
+    const auto end = input.tellg();
+    if (end < 0)
+        throw std::runtime_error("Failed to size " + path.string());
+    const auto size = static_cast<std::size_t>(end);
+    input.seekg(0, std::ios::beg);
+    std::vector<std::uint8_t> bytes(size);
+    if (size > 0U)
+        input.read(
+            reinterpret_cast<char*>(bytes.data()),
+            static_cast<std::streamsize>(size));
+    if (!input) throw std::runtime_error("Failed to read " + path.string());
+    return bytes;
+}
+
+std::filesystem::path ensure_textured_stem(App& app) {
+    if (textured_mesh_on_disk(app.layout.working_texture))
+        return app.layout.working_texture;
+#if defined(AETHERSCAN_HAS_TEXTURE)
+    if (!app.layout.project_file.empty()) {
+        const auto archive =
+            aetherscan::project::Archive::open(app.layout.project_file);
+        if (archive.has(aetherscan::project::ChunkType::texture)) {
+            aetherscan::texture::decode_textured_obj(
+                archive.chunk(aetherscan::project::ChunkType::texture),
+                app.layout.working_texture);
+            refresh_artifacts(app);
+            if (textured_mesh_on_disk(app.layout.working_texture))
+                return app.layout.working_texture;
+        }
+    }
+#endif
+    return {};
+}
+
+aetherscan::mvs::Mesh load_geometry_mesh(App& app) {
+    const auto ply = existing_mesh_path(app);
+    if (!ply.empty()) return aetherscan::mvs::load_mesh_ply(ply);
+    if (!app.layout.project_file.empty()) {
+        const auto archive =
+            aetherscan::project::Archive::open(app.layout.project_file);
+        if (archive.has(aetherscan::project::ChunkType::mesh))
+            return aetherscan::mvs::decode_mesh(
+                archive.chunk(aetherscan::project::ChunkType::mesh));
+    }
+    if (app.mesh.has()) return preview_mesh_to_mvs(app.mesh);
+    const auto textured = ensure_textured_stem(app);
+    if (!textured.empty()) {
+        const MeshLoad loaded = load_preview_textured_mesh(textured);
+        if (loaded.ok) return preview_mesh_to_mvs(loaded.mesh);
+        if (!loaded.error.empty()) throw std::runtime_error(loaded.error);
+    }
+    throw std::runtime_error("No mesh to export yet");
+}
+
+void export_textured_obj_files(
+    App& app, const std::filesystem::path& destination_stem) {
+    const auto source = ensure_textured_stem(app);
+#if defined(AETHERSCAN_HAS_TEXTURE)
+    if (!source.empty()) {
+        aetherscan::texture::copy_textured_obj(source, destination_stem);
+        return;
+    }
+    if (!app.layout.project_file.empty()) {
+        const auto archive =
+            aetherscan::project::Archive::open(app.layout.project_file);
+        if (archive.has(aetherscan::project::ChunkType::texture)) {
+            aetherscan::texture::decode_textured_obj(
+                archive.chunk(aetherscan::project::ChunkType::texture),
+                destination_stem);
+            return;
+        }
+    }
+#endif
+    if (source.empty())
+        throw std::runtime_error("No textured mesh to export yet");
+    if (!copy_existing_file(
+            textured_obj_path(source), textured_obj_path(destination_stem)) ||
+        !copy_existing_file(
+            textured_albedo_path(source),
+            textured_albedo_path(destination_stem)))
+        throw std::runtime_error("Failed to copy textured mesh files");
+    copy_existing_file(
+        textured_mtl_path(source), textured_mtl_path(destination_stem));
+}
+
+void export_textured_glb(
+    App& app, const std::filesystem::path& destination) {
+    const auto source = ensure_textured_stem(app);
+    if (source.empty())
+        throw std::runtime_error("No textured mesh to export yet");
+    const MeshLoad loaded = load_preview_textured_mesh(source);
+    if (!loaded.ok)
+        throw std::runtime_error(
+            loaded.error.empty() ? "Textured mesh has no faces" : loaded.error);
+    aetherscan::mvs::Mesh mesh = preview_mesh_to_mvs(loaded.mesh);
+    std::vector<aetherscan::mvs::Vec2f> uvs;
+    if (loaded.mesh.uvs.size() == loaded.mesh.vertices.size()) {
+        uvs.reserve(loaded.mesh.uvs.size());
+        for (const Vec2& uv : loaded.mesh.uvs)
+            uvs.emplace_back(uv.x, 1.F - uv.y);
+    }
+    const auto png_path = loaded.mesh.albedo_path.empty()
+        ? textured_albedo_path(source)
+        : loaded.mesh.albedo_path;
+    aetherscan::io::save_mesh_glb(
+        mesh, destination, uvs, read_file_bytes(png_path));
+}
+
+void open_mesh_export_panel(App& app) {
+    if (app.job.running() || !can_export_mesh_file(app)) return;
+    if (!app.mesh_export.initialized) {
+        if (can_export_textured_mesh(app)) {
+            app.mesh_export.format = 2;
+            app.mesh_export.include_texture = true;
+        }
+        app.mesh_export.initialized = true;
+    }
+    app.mesh_export.show = true;
+}
+
+void export_mesh_file(App& app) {
+    if (app.job.running() || !can_export_mesh_file(app)) return;
+    const auto format = mesh_export_format(app);
+    const bool with_texture = mesh_export_wants_texture(app);
+    const wchar_t* extension = mesh_export_extension_wide(format);
     std::array<char, 1024> destination{};
-    const std::wstring name = export_stem_wide(app) + L"_textured.obj";
+    const std::wstring name =
+        export_stem_wide(app) + L"_mesh." + std::wstring(extension);
     if (!pick_export_path(
-            L"Export Textured Mesh", destination, FilePickKind::textured_mesh,
-            name.c_str(), L"obj"))
+            L"Export Mesh", destination, FilePickKind::mesh, name.c_str(),
+            extension))
         return;
     std::filesystem::path out = path_from_utf8_field(destination.data());
-    if (out.extension().empty()) out += ".obj";
-    std::filesystem::path dest_stem = out;
-    dest_stem.replace_extension();
+    if (out.extension().empty()) {
+        out += ".";
+        out += std::filesystem::path(extension);
+    }
     try {
-#if defined(AETHERSCAN_HAS_TEXTURE)
-        if (textured_mesh_on_disk(app.layout.working_texture)) {
-            aetherscan::texture::copy_textured_obj(
-                app.layout.working_texture, dest_stem);
+        if (with_texture && format == MeshExportFormat::obj) {
+            std::filesystem::path stem = out;
+            stem.replace_extension();
+            export_textured_obj_files(app, stem);
             set_message(
-                app, "Exported textured mesh (OBJ + MTL + albedo PNG)",
-                theme::success);
+                app, "Exported mesh (OBJ + MTL + albedo PNG)", theme::success);
             return;
         }
-        if (!app.layout.project_file.empty()) {
-            const auto archive =
-                aetherscan::project::Archive::open(app.layout.project_file);
-            if (archive.has(aetherscan::project::ChunkType::texture)) {
-                aetherscan::texture::decode_textured_obj(
-                    archive.chunk(aetherscan::project::ChunkType::texture),
-                    dest_stem);
-                set_message(
-                    app, "Exported textured mesh (OBJ + MTL + albedo PNG)",
-                    theme::success);
+        if (with_texture && format == MeshExportFormat::glb) {
+            export_textured_glb(app, out);
+            set_message(app, "Exported mesh (GLB with albedo)", theme::success);
+            return;
+        }
+        if (format == MeshExportFormat::ply) {
+            const auto source = existing_mesh_path(app);
+            if (copy_existing_file(source, out)) {
+                set_message(app, "Exported mesh", theme::success);
                 return;
             }
-        }
-#endif
-        const auto source_obj = textured_obj_path(app.layout.working_texture);
-        const auto source_mtl = textured_mtl_path(app.layout.working_texture);
-        const auto source_png = textured_albedo_path(app.layout.working_texture);
-        if (copy_existing_file(source_obj, textured_obj_path(dest_stem)) &&
-            copy_existing_file(source_png, textured_albedo_path(dest_stem))) {
-            copy_existing_file(source_mtl, textured_mtl_path(dest_stem));
-            set_message(
-                app, "Exported textured mesh (OBJ + MTL + albedo PNG)",
-                theme::success);
+            aetherscan::mvs::save_mesh_ply(load_geometry_mesh(app), out);
+            set_message(app, "Exported mesh", theme::success);
             return;
         }
-        set_message(app, "No textured mesh to export yet", theme::warning);
+        if (format == MeshExportFormat::obj) {
+            aetherscan::mvs::save_mesh_obj(load_geometry_mesh(app), out);
+            set_message(app, "Exported mesh", theme::success);
+            return;
+        }
+        aetherscan::io::save_mesh_glb(load_geometry_mesh(app), out);
+        set_message(app, "Exported mesh", theme::success);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
     }
@@ -3553,11 +3675,7 @@ Action draw_menu_bar(App& app) {
         if (ImGui::MenuItem(
                 "Export Mesh...", nullptr, false,
                 !busy && can_export_mesh_file(app)))
-            export_mesh_file(app);
-        if (ImGui::MenuItem(
-                "Export Textured Mesh...", nullptr, false,
-                !busy && can_export_textured_mesh(app)))
-            export_textured_mesh(app);
+            open_mesh_export_panel(app);
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
                 !busy && can_export_sfm(app)))
@@ -3772,6 +3890,131 @@ ClearResultsAction draw_clear_results_modal(App& app) {
     if (ImGui::Button("Cancel", {92.F, 30.F})) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
     return action;
+}
+
+std::string mesh_export_stem_utf8(const App& app) {
+    return path_to_utf8(
+               app.layout.project_file.empty()
+                   ? std::filesystem::path("project")
+                   : app.layout.project_file.stem()) +
+           "_mesh";
+}
+
+void draw_mesh_export_modal(App& app) {
+    constexpr const char* popup = "Export Mesh";
+    if (app.mesh_export.show) {
+        ImGui::OpenPopup(popup);
+        app.mesh_export.show = false;
+    }
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    ImGui::SetNextWindowSize({448.F, 0.F}, ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(
+            popup, nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        return;
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 416.F);
+    theme::caption("Choose a format, then pick where to save.");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+
+    theme::caption("Format");
+    const float gap = 8.F;
+    const float tile_w =
+        (ImGui::GetContentRegionAvail().x - gap * 2.F) / 3.F;
+    const ImVec2 tile{tile_w, 58.F};
+    if (theme::choice_tile(
+            "##fmt_ply", "PLY", "Geometry", app.mesh_export.format == 0, tile))
+        app.mesh_export.format = 0;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Binary mesh with vertex colour.\n"
+            "Best for CloudCompare and research tools.");
+    ImGui::SameLine(0.F, gap);
+    if (theme::choice_tile(
+            "##fmt_obj", "OBJ", "DCC", app.mesh_export.format == 1, tile))
+        app.mesh_export.format = 1;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Wavefront OBJ. Texture writes MTL + PNG alongside.\n"
+            "Opens in Blender, Maya, and MeshLab.");
+    ImGui::SameLine(0.F, gap);
+    if (theme::choice_tile(
+            "##fmt_glb", "GLB", "glTF", app.mesh_export.format == 2, tile))
+        app.mesh_export.format = 2;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Single-file glTF 2.0 binary.\n"
+            "Texture is packed into the file.");
+
+    ImGui::Spacing();
+    const bool ply = app.mesh_export.format == 0;
+    const bool has_texture = can_export_textured_mesh(app);
+    const bool texture_enabled = !ply && has_texture;
+    ImGui::BeginDisabled(!texture_enabled);
+    ImGui::Checkbox("Include texture", &app.mesh_export.include_texture);
+    ImGui::EndDisabled();
+    if (ply)
+        theme::caption("PLY keeps vertex colour only.");
+    else if (!has_texture)
+        theme::caption("Bake Texture to include an albedo atlas.");
+    else if (app.mesh_export.format == 1)
+        theme::caption("Writes OBJ, MTL, and albedo PNG next to each other.");
+    else
+        theme::caption("Embeds the albedo atlas in the GLB.");
+
+    ImGui::Spacing();
+    const bool with_texture = mesh_export_wants_texture(app);
+    const std::string stem = mesh_export_stem_utf8(app);
+    std::vector<std::string> files;
+    if (app.mesh_export.format == 0)
+        files.push_back(stem + ".ply");
+    else if (app.mesh_export.format == 1) {
+        files.push_back(stem + ".obj");
+        if (with_texture) {
+            files.push_back(stem + ".mtl");
+            files.push_back(stem + "_albedo.png");
+        }
+    } else {
+        files.push_back(stem + ".glb");
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_2);
+    const float writes_h =
+        ImGui::GetTextLineHeightWithSpacing() *
+            static_cast<float>(files.size() + 1) +
+        14.F;
+    ImGui::BeginChild(
+        "##export_writes", ImVec2(-1.F, writes_h), true,
+        ImGuiWindowFlags_NoScrollbar);
+    theme::caption("Writes");
+    ImGui::PushFont(theme::mono_font());
+    for (const std::string& file : files)
+        ImGui::TextUnformatted(file.c_str());
+    ImGui::PopFont();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const float export_w = 108.F;
+    const float cancel_w = 88.F;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::SetCursorPosX(
+        ImGui::GetCursorPosX() + std::max(0.F, avail - export_w - cancel_w - 8.F));
+    if (theme::toolbar_button("Cancel", {cancel_w, 30.F}))
+        ImGui::CloseCurrentPopup();
+    ImGui::SameLine(0.F, 8.F);
+    if (theme::primary_button("Export...", {export_w, 30.F})) {
+        ImGui::CloseCurrentPopup();
+        export_mesh_file(app);
+    }
+    ImGui::EndPopup();
 }
 
 Action draw_toolbar(App& app) {
@@ -5129,11 +5372,11 @@ Action draw_inspector(App& app) {
         if (theme::toolbar_button(
                 "Export Mesh", {-1.F, 28.F},
                 !busy && can_export_mesh_file(app)))
-            export_mesh_file(app);
+            open_mesh_export_panel(app);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Write the reconstructed surface to a PLY you choose.\n"
-                "Mesh extraction no longer writes this file automatically.");
+                "Save the reconstructed surface. Choose PLY, OBJ, or GLB,\n"
+                "and whether to include the baked texture.");
         ImGui::Spacing();
     }
 
@@ -5228,15 +5471,7 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "UV unwrap + multi-view projection onto the current mesh.\n"
-                "Writes a working OBJ, MTL, and albedo PNG. Export to keep a copy.");
-        if (theme::toolbar_button(
-                "Export Textured Mesh", {-1.F, 28.F},
-                !busy && can_export_textured_mesh(app)))
-            export_textured_mesh(app);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Write OBJ + MTL + albedo PNG to a folder you choose.\n"
-                "Baking no longer writes these files automatically.");
+                "Use Export Mesh to save the atlas with the model.");
 #endif
         ImGui::Spacing();
     }
@@ -5980,6 +6215,7 @@ int main(const int argc, char** argv) {
         }
 
         draw_controls_window(app);
+        draw_mesh_export_modal(app);
         const ClearResultsAction clear_results_action =
             draw_clear_results_modal(app);
         if (app.close_requested) glfwSetWindowShouldClose(window, GLFW_TRUE);
