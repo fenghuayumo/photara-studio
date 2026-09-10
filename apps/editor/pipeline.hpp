@@ -227,9 +227,9 @@ struct ProjectSettings {
     int dataset_format = 0;  // auto, COLMAP, RealityCapture, OpenMVS
     std::array<char, 1024> dataset_initial_cloud{};
     // Optional existing trained Gaussian file to preview/import. Empty uses
-    // the generated sidecar selected by splat_format.
+    // the working copy in cache, or a leftover sidecar from an older run.
     std::array<char, 1024> splat_model_source{};
-    int splat_format = 0;  // auto/PLY, PLY, SOG, SPZ, GLB
+    int splat_format = 0;  // export format: auto/PLY, PLY, SOG, SPZ, GLB
 
     int camera_model = 2;  // pinhole, OpenCV fisheye, automatic
     int sfm_mode = 0;  // global, incremental, hierarchical
@@ -296,6 +296,9 @@ struct ProjectLayout {
     std::filesystem::path preview_camera_file;
     std::filesystem::path preview_vis_file;
     std::filesystem::path working_sfm;
+    std::filesystem::path working_splat;
+    std::filesystem::path working_mesh;
+    std::filesystem::path working_dense;
 };
 
 ProjectLayout resolve_layout(const ProjectSettings& settings);

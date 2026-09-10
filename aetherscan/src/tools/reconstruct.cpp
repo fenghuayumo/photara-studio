@@ -67,10 +67,14 @@ struct ReconstructCli {
     bool trust_focal{false};
     bool structural_pair_expansion{false};
     std::filesystem::path output;
-    // Editor/interactive runs skip sidecars, eval PNG dumps, and the extra
-    // timestamped log file. The caller already captures stdout.
+    // Editor/interactive runs skip user-facing ascan/asfm/PLY sidecars, eval
+    // PNG dumps, and the extra timestamped log file. The caller already
+    // captures stdout. Working copies stay in cache for preview/export.
     bool gui{false};
     std::filesystem::path working_sfm;
+    std::filesystem::path working_splat;
+    std::filesystem::path working_mesh;
+    std::filesystem::path working_dense;
     bool export_mvs_requested{false};
     std::filesystem::path export_mvs_path;
     std::size_t neighbor_window{3};
@@ -405,8 +409,11 @@ void print_help(const cxxopts::Options& options) {
               << "  .ply    sparse XYZRGB point cloud\n"
               << "  .mvs    OpenMVS Interface (interop export)\n"
               << "  --export-mvs [path]  also write OpenMVS Interface after SfM\n"
-              << "  --gui  editor/interactive: no ascan/asfm/eval PNG/extra log\n"
+              << "  --gui  editor: no ascan/asfm/PLY sidecars, eval PNG, extra log\n"
               << "  --working-sfm PATH  compact SfM working copy for --gui\n"
+              << "  --working-splat PATH  trained Gaussian working copy for --gui\n"
+              << "  --working-mesh PATH  mesh working copy for --gui\n"
+              << "  --working-dense PATH  dense cloud working copy for --gui\n"
               << "Video (when --images is a video file, frames are extracted first):\n"
               << "  --video-fps F  kept frames per second (default 2)\n"
               << "  --video-sharp-window N  keep the sharpest of N candidates (default 3; 1 = off)\n"
@@ -465,10 +472,19 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Output path (.ascan, .asfm, .ply, or .mvs)",
          cxxopts::value<std::string>())
         ("gui",
-         "Editor run: skip ascan/asfm sidecars, eval dumps, and extra log file",
+         "Editor run: skip ascan/asfm/PLY sidecars, eval dumps, and extra log file",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("working-sfm",
          "Compact SfM working copy used by --gui (read on --splat, write after SfM)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("working-splat",
+         "Trained Gaussian working copy used by --gui instead of a sidecar PLY",
+         cxxopts::value<std::string>()->default_value(""))
+        ("working-mesh",
+         "Mesh working copy used by --gui instead of a sidecar PLY",
+         cxxopts::value<std::string>()->default_value(""))
+        ("working-dense",
+         "Dense cloud working copy used by --gui instead of a sidecar PLY",
          cxxopts::value<std::string>()->default_value(""))
         ("export-mvs",
          "Write OpenMVS Interface after SfM. Optional path; default is "
@@ -889,6 +905,18 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["working-sfm"].as<std::string>();
     if (!working_sfm_text.empty())
         cli.working_sfm = utf8_to_path(working_sfm_text);
+    const std::string working_splat_text =
+        result["working-splat"].as<std::string>();
+    if (!working_splat_text.empty())
+        cli.working_splat = utf8_to_path(working_splat_text);
+    const std::string working_mesh_text =
+        result["working-mesh"].as<std::string>();
+    if (!working_mesh_text.empty())
+        cli.working_mesh = utf8_to_path(working_mesh_text);
+    const std::string working_dense_text =
+        result["working-dense"].as<std::string>();
+    if (!working_dense_text.empty())
+        cli.working_dense = utf8_to_path(working_dense_text);
     if (result.count("export-mvs") != 0) {
         cli.export_mvs_requested = true;
         const auto export_mvs_text = result["export-mvs"].as<std::string>();
@@ -1496,6 +1524,8 @@ void run_splat_view(
     if (!cli.splat_model.empty()) {
         candidates.push_back(cli.splat_model);
     } else {
+        if (!cli.working_splat.empty())
+            candidates.push_back(cli.working_splat);
         const std::filesystem::path parent = cli.output.parent_path().empty()
             ? std::filesystem::current_path()
             : cli.output.parent_path();
@@ -1661,6 +1691,45 @@ void save_working_sfm(
         "working_sfm=", cli.working_sfm,
         " images=", scene.images.size(),
         " registered=", scene.registered_count());
+}
+
+void ensure_artifact_parent(const std::filesystem::path& path) {
+    if (path.empty() || path.parent_path().empty()) return;
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+}
+
+std::filesystem::path artifact_path(
+    const ReconstructCli& cli, const std::filesystem::path& working,
+    const std::filesystem::path& sidecar) {
+    return cli.gui ? working : sidecar;
+}
+
+void write_dense_artifact(
+    const ReconstructCli& cli, const aetherscan::mvs::DenseCloud& cloud,
+    const std::filesystem::path& sidecar) {
+    const auto path = artifact_path(cli, cli.working_dense, sidecar);
+    if (path.empty()) return;
+    ensure_artifact_parent(path);
+    aetherscan::mvs::save_dense_ply(cloud, path);
+    aetherscan::core::Logger::instance().info(
+        "dense_ply=", path, " points=", cloud.points.size());
+}
+
+void write_mesh_artifact(
+    const ReconstructCli& cli, const aetherscan::mvs::Mesh& mesh,
+    const std::filesystem::path& sidecar, const bool write_obj = false) {
+    const auto path = artifact_path(cli, cli.working_mesh, sidecar);
+    if (path.empty() || mesh.faces.empty()) return;
+    ensure_artifact_parent(path);
+    aetherscan::mvs::save_mesh_ply(mesh, path);
+    if (!cli.gui && write_obj)
+        aetherscan::mvs::save_mesh_obj(
+            mesh, path.parent_path() / (path.stem().string() + ".obj"));
+    aetherscan::core::Logger::instance().info(
+        "mesh_ply=", path,
+        " vertices=", mesh.vertices.size(),
+        " faces=", mesh.faces.size());
 }
 
 bool load_working_sfm(
@@ -2743,12 +2812,21 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             },
             evaluate, preview, device_preview);
     }
-    const auto model_path = cli.splat_model.empty()
-        ? out_dir / (cli.output.stem().string() + "_splat." +
-                     aetherscan::splat::gaussian_format_extension(output_format))
-        : cli.splat_model;
-    if (cli.splat_model.empty())
-        aetherscan::splat::save_gaussians(gaussians, model_path, output_format);
+    std::filesystem::path model_path = cli.splat_model;
+    if (model_path.empty()) {
+        model_path = cli.gui
+            ? cli.working_splat
+            : out_dir / (cli.output.stem().string() + "_splat." +
+                         aetherscan::splat::gaussian_format_extension(
+                             output_format));
+        if (!model_path.empty()) {
+            ensure_artifact_parent(model_path);
+            aetherscan::splat::save_gaussians(
+                gaussians, model_path,
+                cli.gui ? aetherscan::splat::GaussianFormat::ply
+                        : output_format);
+        }
+    }
     if (!cli.gui && !evaluation_views.empty()) {
     double final_psnr_sum = 0.0;
     double final_masked_psnr_sum = 0.0;
@@ -3015,16 +3093,16 @@ int main(int argc, char** argv) {
                 aetherscan::mvs::prepare_imported_scene(loaded.scene, mesh_options);
                 aetherscan::mvs::densify(loaded.scene, mesh_options);
                 const auto stem = cli.output.parent_path() / cli.output.stem();
-                aetherscan::mvs::save_dense_ply(loaded.scene.dense_cloud,
-                    stem.string() + "_dense.ply");
+                write_dense_artifact(
+                    cli, loaded.scene.dense_cloud,
+                    std::filesystem::path(stem.string() + "_dense.ply"));
                 if (cli.mesh) {
                     if (loaded.scene.mesh.faces.empty())
                         throw std::runtime_error("Calibrated MVS produced an empty mesh");
-                    aetherscan::mvs::save_mesh_ply(loaded.scene.mesh,
-                        stem.string() + "_mesh.ply");
-                    if (cli.mesh_obj)
-                        aetherscan::mvs::save_mesh_obj(loaded.scene.mesh,
-                            stem.string() + "_mesh.obj");
+                    write_mesh_artifact(
+                        cli, loaded.scene.mesh,
+                        std::filesystem::path(stem.string() + "_mesh.ply"),
+                        cli.mesh_obj);
                     if (write_project) {
                         archive.set_chunk(aetherscan::project::ChunkType::mesh,
                             aetherscan::mvs::encode_mesh(loaded.scene.mesh));
@@ -3108,13 +3186,7 @@ int main(int argc, char** argv) {
 #endif
                 const auto mesh_path = cli.output.parent_path() /
                     (cli.output.stem().string() + "_splat_mesh.ply");
-                aetherscan::mvs::save_mesh_ply(*mesh, mesh_path);
-                if (cli.mesh_obj)
-                    aetherscan::mvs::save_mesh_obj(
-                        *mesh, mesh_path.parent_path() /
-                            (mesh_path.stem().string() + ".obj"));
-                aetherscan::core::Logger::instance().info(
-                    "mesh_ply=", mesh_path, " faces=", mesh->faces.size());
+                write_mesh_artifact(cli, *mesh, mesh_path, cli.mesh_obj);
                 if (write_project) {
                     archive.set_chunk(
                         aetherscan::project::ChunkType::mesh,
@@ -3382,16 +3454,8 @@ int main(int argc, char** argv) {
                 const auto mesh_path =
                     out_dir /
                     (cli.output.stem().string() + "_splat_mesh.ply");
-                aetherscan::mvs::save_mesh_ply(
-                    splat_scene.mesh, mesh_path);
-                if (cli.mesh_obj)
-                    aetherscan::mvs::save_mesh_obj(
-                        splat_scene.mesh,
-                        mesh_path.parent_path() /
-                            (mesh_path.stem().string() + ".obj"));
-                aetherscan::core::Logger::instance().info(
-                    "mesh_ply=", mesh_path,
-                    " faces=", splat_scene.mesh.faces.size());
+                write_mesh_artifact(
+                    cli, splat_scene.mesh, mesh_path, cli.mesh_obj);
                 if (write_project) {
                     archive.set_chunk(
                         aetherscan::project::ChunkType::mesh,
@@ -3547,15 +3611,14 @@ int main(int argc, char** argv) {
                 cli.output.parent_path().empty()
                     ? std::filesystem::current_path()
                     : cli.output.parent_path();
-            const auto dense_ply = out_dir / (cli.output.stem().string() + "_dense.ply");
-            aetherscan::mvs::save_dense_ply(mvs_scene.dense_cloud, dense_ply);
+            write_dense_artifact(
+                cli, mvs_scene.dense_cloud,
+                out_dir / (cli.output.stem().string() + "_dense.ply"));
             aetherscan::core::Logger::instance().info(
-                "dense_ply=", dense_ply,
-                " points=", mvs_scene.dense_cloud.points.size(),
-                " densify_s=", dense_elapsed);
+                "densify_s=", dense_elapsed);
 
             std::filesystem::path effective_mask_dir = cli.masks_dir;
-            if (!mvs_scene.mesh.faces.empty()) {
+            if (!cli.gui && !mvs_scene.mesh.faces.empty()) {
                 const auto mvs_mesh_path =
                     out_dir /
                     (cli.output.stem().string() + "_mvs_mesh.ply");
@@ -3604,17 +3667,8 @@ int main(int argc, char** argv) {
                     : "_mesh";
                 const auto mesh_ply =
                     out_dir / (cli.output.stem().string() + mesh_tag + ".ply");
-                const auto mesh_obj =
-                    out_dir / (cli.output.stem().string() + mesh_tag + ".obj");
-                aetherscan::mvs::save_mesh_ply(mvs_scene.mesh, mesh_ply);
-                if (cli.mesh_obj)
-                    aetherscan::mvs::save_mesh_obj(mvs_scene.mesh, mesh_obj);
-                aetherscan::core::Logger::instance().info(
-                    "mesh_ply=", mesh_ply,
-                    cli.mesh_obj ? " mesh_obj=" : "",
-                    cli.mesh_obj ? mesh_obj.string() : std::string{},
-                    " active_mesh=", cli.splat ? "splat" : "mvs",
-                    " faces=", mvs_scene.mesh.faces.size());
+                write_mesh_artifact(
+                    cli, mvs_scene.mesh, mesh_ply, cli.mesh_obj);
 
 #if defined(AETHERSCAN_HAS_TEXTURE)
                 if (cli.texture) {

@@ -1981,13 +1981,19 @@ SceneDrawStats SceneRenderer::draw(
 
     // World origin axes, drawn last so they stay readable. Green follows the
     // gizmo convention: -Y is up in this Y-down reconstruction world.
-    const float axis = std::max(scene.radius * 0.25F, camera.distance * 0.08F);
-    draw_segment(
-        draw, frame, {0, 0, 0}, {axis, 0, 0}, IM_COL32(226, 82, 82, 200), 1.6F);
-    draw_segment(
-        draw, frame, {0, 0, 0}, {0, -axis, 0}, IM_COL32(86, 202, 121, 200), 1.6F);
-    draw_segment(
-        draw, frame, {0, 0, 0}, {0, 0, axis}, IM_COL32(79, 154, 235, 200), 1.6F);
+    if (options.show_axes) {
+        const float axis =
+            std::max(scene.radius * 0.25F, camera.distance * 0.08F);
+        draw_segment(
+            draw, frame, {0, 0, 0}, {axis, 0, 0}, IM_COL32(226, 82, 82, 200),
+            1.6F);
+        draw_segment(
+            draw, frame, {0, 0, 0}, {0, -axis, 0}, IM_COL32(86, 202, 121, 200),
+            1.6F);
+        draw_segment(
+            draw, frame, {0, 0, 0}, {0, 0, axis}, IM_COL32(79, 154, 235, 200),
+            1.6F);
+    }
 
     draw->PopClipRect();
     return stats;

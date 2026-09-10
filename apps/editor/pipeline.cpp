@@ -165,6 +165,12 @@ void append_gui_flags(
     command << " --gui";
     if (!layout.working_sfm.empty())
         command << " --working-sfm " << quote(layout.working_sfm);
+    if (!layout.working_splat.empty())
+        command << " --working-splat " << quote(layout.working_splat);
+    if (!layout.working_mesh.empty())
+        command << " --working-mesh " << quote(layout.working_mesh);
+    if (!layout.working_dense.empty())
+        command << " --working-dense " << quote(layout.working_dense);
 }
 
 void append_video_extract_flags(
@@ -341,23 +347,13 @@ const char* dataset_format_flag(const int index) {
     }
 }
 
-const char* splat_format_flag(const int index) {
-    switch (index) {
-        case 1: return "ply";
-        case 2: return "sog";
-        case 3: return "spz";
-        case 4: return "glb";
-        default: return "auto";
-    }
-}
-
 }  // namespace
 
 const char* job_name(const JobKind kind) {
     switch (kind) {
         case JobKind::align: return "Alignment";
         case JobKind::train: return "Training";
-        case JobKind::dense: return "Dense MVS";
+        case JobKind::dense: return "Extract Mesh";
         case JobKind::export_sfm: return "SfM export";
         case JobKind::none: return "Job";
     }
@@ -373,7 +369,7 @@ const char* stage_name(const Stage stage) {
         case Stage::mapping: return "Solving camera poses";
         case Stage::exporting: return "Writing sparse scene";
         case Stage::preparing: return "Preparing input";
-        case Stage::dense: return "Dense MVS";
+        case Stage::dense: return "MVS stereo";
         case Stage::training: return "Training Gaussians";
         case Stage::meshing: return "Extracting mesh";
         case Stage::texturing: return "Baking texture";
@@ -1002,6 +998,9 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
                 temp / "AetherScan" / runtime_cache_key(layout.project_file);
     }
     layout.working_sfm = runtime_dir / "sfm.bin";
+    layout.working_splat = runtime_dir / "splat.ply";
+    layout.working_mesh = runtime_dir / "mesh.ply";
+    layout.working_dense = runtime_dir / "dense.ply";
     layout.preview_view_file = runtime_dir / "preview_view";
     layout.preview_camera_file = runtime_dir / "preview_camera";
     layout.preview_vis_file = runtime_dir / "preview_vis";
@@ -1108,14 +1107,12 @@ std::string build_train_command(
             << (settings.progressive_resolution ? "true" : "false")
             << " --splat-use-mask=" << (settings.use_mask ? "true" : "false")
             << " --splat-normal-field="
-            << (settings.normal_field ? "true" : "false")
-            << " --splat-output-format "
-            << splat_format_flag(settings.splat_format);
+            << (settings.normal_field ? "true" : "false");
     append_video_extract_flags(command, settings);
     append_gui_flags(command, layout);
 
     // Geometry-supervised 3DGS mesh: depth/normal + multi-view losses, then
-    // extract. Photogrammetry mesh is a separate Dense MVS job.
+    // extract. Extract Mesh (MVS) is a separate photogrammetry job.
     const bool gaussian_mesh = mesh_from_gaussians(settings);
     command << " --mesh=" << (gaussian_mesh ? "true" : "false");
     if (gaussian_mesh) {
@@ -1161,9 +1158,9 @@ std::string build_view_command(
         std::filesystem::exists(imported_model, exists_error)) {
         command << " --splat-model " << quote(imported_model);
     } else {
-        const std::array<std::filesystem::path, 5> candidates = {
-            layout.splat_model, layout.splat_ply, layout.splat_sog,
-            layout.splat_spz, layout.splat_glb};
+        const std::array<std::filesystem::path, 6> candidates = {
+            layout.working_splat, layout.splat_model, layout.splat_ply,
+            layout.splat_sog, layout.splat_spz, layout.splat_glb};
         for (const auto& candidate : candidates) {
             if (!std::filesystem::exists(candidate, exists_error)) continue;
             command << " --splat-model " << quote(candidate);

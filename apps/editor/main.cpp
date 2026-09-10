@@ -9,10 +9,12 @@
 
 #include "io/image.hpp"
 #include "io/video_frames.hpp"
+#include "mvs/export.hpp"
 #include "project/archive.hpp"
 #include "project/document.hpp"
 #include "sfm/asfm.hpp"
 #include "sfm/export_mvs.hpp"
+#include "splat/formats.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
 
@@ -42,10 +44,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -203,9 +207,9 @@ std::filesystem::path existing_splat_model(const App& app) {
     std::error_code error;
     if (!imported.empty() && std::filesystem::exists(imported, error))
         return imported;
-    const std::array<std::filesystem::path, 5> candidates = {
-        app.layout.splat_model, app.layout.splat_ply, app.layout.splat_sog,
-        app.layout.splat_spz, app.layout.splat_glb};
+    const std::array<std::filesystem::path, 6> candidates = {
+        app.layout.working_splat, app.layout.splat_model, app.layout.splat_ply,
+        app.layout.splat_sog, app.layout.splat_spz, app.layout.splat_glb};
     for (const auto& candidate : candidates)
         if (std::filesystem::exists(candidate, error)) return candidate;
     return {};
@@ -350,6 +354,8 @@ std::optional<std::filesystem::path> resolve_dropped_image_directory(
     return parent;
 }
 
+enum class FilePickKind { project, dataset, point_cloud, splat_model, mesh, video };
+
 #if defined(_WIN32)
 // Native folder picker. Failure simply leaves the text field untouched.
 bool pick_folder(const wchar_t* title, std::array<char, 1024>& destination) {
@@ -399,11 +405,11 @@ bool copy_wide_path(const wchar_t* wide, std::array<char, 1024>& destination) {
     return true;
 }
 
-enum class FilePickKind { project, dataset, point_cloud, splat_model, video };
-
 bool pick_file(
     const wchar_t* title, std::array<char, 1024>& destination,
-    const bool save, const FilePickKind kind) {
+    const bool save, const FilePickKind kind,
+    const wchar_t* default_name = nullptr,
+    const wchar_t* default_extension = nullptr) {
     bool picked = false;
     const HRESULT initialised =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -435,6 +441,9 @@ bool pick_file(
         COMDLG_FILTERSPEC splat_model_filters[] = {
             {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb)", L"*.ply;*.sog;*.spz;*.glb"},
             {L"All files (*.*)", L"*.*"}};
+        COMDLG_FILTERSPEC mesh_filters[] = {
+            {L"Mesh (*.ply)", L"*.ply"},
+            {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC video_filters[] = {
             {L"Video files (*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv)",
              L"*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv;*.mts;*.m2ts;*.360"},
@@ -443,10 +452,15 @@ bool pick_file(
         if (kind == FilePickKind::dataset) filters = dataset_filters;
         if (kind == FilePickKind::point_cloud) filters = point_cloud_filters;
         if (kind == FilePickKind::splat_model) filters = splat_model_filters;
+        if (kind == FilePickKind::mesh) filters = mesh_filters;
         if (kind == FilePickKind::video) filters = video_filters;
         dialog->SetFileTypes(2, filters);
-        if (kind == FilePickKind::project && save)
+        if (save && default_extension != nullptr)
+            dialog->SetDefaultExtension(default_extension);
+        else if (kind == FilePickKind::project && save)
             dialog->SetDefaultExtension(L"ascan");
+        if (save && default_name != nullptr)
+            dialog->SetFileName(default_name);
         if (SUCCEEDED(dialog->Show(nullptr))) {
             IShellItem* item = nullptr;
             if (SUCCEEDED(dialog->GetResult(&item))) {
@@ -487,6 +501,14 @@ bool pick_video_file(
     return pick_file(title, destination, false, FilePickKind::video);
 }
 
+bool pick_export_path(
+    const wchar_t* title, std::array<char, 1024>& destination,
+    const FilePickKind kind, const wchar_t* default_name,
+    const wchar_t* default_extension) {
+    return pick_file(
+        title, destination, true, kind, default_name, default_extension);
+}
+
 void reveal_in_explorer(const std::filesystem::path& path) {
     std::error_code error;
     if (!std::filesystem::exists(path, error)) return;
@@ -507,6 +529,11 @@ bool pick_splat_model_file(const wchar_t*, std::array<char, 1024>&) {
     return false;
 }
 bool pick_video_file(const wchar_t*, std::array<char, 1024>&) {
+    return false;
+}
+bool pick_export_path(
+    const wchar_t*, std::array<char, 1024>&, FilePickKind, const wchar_t*,
+    const wchar_t*) {
     return false;
 }
 void reveal_in_explorer(const std::filesystem::path&) {}
@@ -536,10 +563,11 @@ void refresh_artifacts(App& app) {
     app.has_asfm = std::filesystem::exists(app.layout.sparse_asfm, error);
     app.has_mvs = std::filesystem::exists(app.layout.sparse_mvs, error);
     app.has_sparse =
-        std::filesystem::exists(app.layout.sparse_ply, error) ||
-        std::filesystem::exists(app.layout.working_sfm, error);
+        std::filesystem::exists(app.layout.working_sfm, error) ||
+        std::filesystem::exists(app.layout.sparse_ply, error);
     app.has_model = !existing_splat_model(app).empty();
     app.has_mesh =
+        std::filesystem::exists(app.layout.working_mesh, error) ||
         std::filesystem::exists(app.layout.mesh_ply, error) ||
         std::filesystem::exists(app.layout.mvs_mesh_ply, error) ||
         std::filesystem::exists(app.layout.mvs_raw_mesh_ply, error);
@@ -807,7 +835,7 @@ void apply_external_dataset_selection(App& app) {
     set_message(
         app,
         "External cameras loaded. Align Photos is skipped; Train 3DGS or "
-        "Dense MVS can run next.",
+        "Extract Mesh can run next.",
         theme::accent);
 }
 
@@ -884,6 +912,32 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             const auto scene = load_working_sfm(
                 app.layout.working_sfm, reconstruction_images_path(app));
             aetherscan::project::write_sfm(archive, scene, path);
+        }
+        const auto splat = existing_splat_model(app);
+        if (!splat.empty()) {
+            try {
+                archive.set_chunk(
+                    aetherscan::project::ChunkType::gaussians,
+                    aetherscan::splat::encode_gaussians(
+                        aetherscan::splat::load_gaussians(splat)));
+            } catch (...) {
+            }
+        }
+        const std::array<std::filesystem::path, 4> mesh_candidates = {
+            app.layout.working_mesh, app.layout.mesh_ply,
+            app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply};
+        for (const auto& mesh_path : mesh_candidates) {
+            if (mesh_path.empty() ||
+                !std::filesystem::exists(mesh_path, working_error))
+                continue;
+            try {
+                archive.set_chunk(
+                    aetherscan::project::ChunkType::mesh,
+                    aetherscan::mvs::encode_mesh(
+                        aetherscan::mvs::load_mesh_ply(mesh_path)));
+            } catch (...) {
+            }
+            break;
         }
         archive.save(path);
         store_path_field(app.settings.project_dir, path);
@@ -1204,7 +1258,8 @@ std::filesystem::path existing_mesh_path(const App& app) {
     const auto exists = [&](const std::filesystem::path& path) {
         return !path.empty() && std::filesystem::exists(path, error);
     };
-    const std::array<std::filesystem::path, 3> preferred = {
+    const std::array<std::filesystem::path, 4> preferred = {
+        app.layout.working_mesh,
         mesh_from_mvs(app.settings) ? app.layout.mvs_mesh_ply
                                     : app.layout.mesh_ply,
         app.layout.mesh_ply, app.layout.mvs_mesh_ply};
@@ -1220,7 +1275,7 @@ void request_mesh_load(App& app, const bool frame_when_ready) {
     const auto ascan = app.layout.project_file;
     if (ply.empty() && ascan.empty()) {
         app.mesh_load_failed = true;
-        set_message(app, "No mesh file found next to the project", theme::warning);
+        set_message(app, "No mesh found to preview", theme::warning);
         return;
     }
     app.loading_scene = true;
@@ -1237,6 +1292,205 @@ void ensure_mesh_loaded(App& app) {
         !app.has_mesh)
         return;
     request_mesh_load(app, true);
+}
+
+std::wstring export_stem_wide(const App& app) {
+    const std::filesystem::path stem = app.layout.project_file.empty()
+        ? std::filesystem::path("project")
+        : app.layout.project_file.stem();
+    return stem.wstring();
+}
+
+aetherscan::splat::GaussianFormat splat_export_format(const App& app) {
+    switch (app.settings.splat_format) {
+        case 2: return aetherscan::splat::GaussianFormat::sog;
+        case 3: return aetherscan::splat::GaussianFormat::spz;
+        case 4: return aetherscan::splat::GaussianFormat::glb;
+        default: return aetherscan::splat::GaussianFormat::ply;
+    }
+}
+
+const wchar_t* splat_export_extension_wide(const App& app) {
+    switch (app.settings.splat_format) {
+        case 2: return L"sog";
+        case 3: return L"spz";
+        case 4: return L"glb";
+        default: return L"ply";
+    }
+}
+
+bool copy_existing_file(
+    const std::filesystem::path& source, const std::filesystem::path& destination) {
+    std::error_code error;
+    if (source.empty() || !std::filesystem::exists(source, error)) return false;
+    std::filesystem::create_directories(destination.parent_path(), error);
+    std::filesystem::copy_file(
+        source, destination,
+        std::filesystem::copy_options::overwrite_existing, error);
+    return !error;
+}
+
+void write_sparse_ply(
+    const SparseScene& scene, const std::filesystem::path& path) {
+    std::ofstream output(path, std::ios::binary);
+    if (!output) throw std::runtime_error("Failed to create PLY: " + path.string());
+    const bool has_colour =
+        scene.colours.size() == scene.points.size() && !scene.colours.empty();
+    output << "ply\nformat ascii 1.0\nelement vertex " << scene.points.size()
+           << "\nproperty float x\nproperty float y\nproperty float z\n";
+    if (has_colour)
+        output << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    output << "end_header\n";
+    for (std::size_t i = 0; i < scene.points.size(); ++i) {
+        const Vec3& point = scene.points[i];
+        output << point.x << ' ' << point.y << ' ' << point.z;
+        if (has_colour) {
+            const std::uint32_t colour = scene.colours[i];
+            output << ' ' << ((colour >> IM_COL32_R_SHIFT) & 0xFF) << ' '
+                   << ((colour >> IM_COL32_G_SHIFT) & 0xFF) << ' '
+                   << ((colour >> IM_COL32_B_SHIFT) & 0xFF);
+        }
+        output << '\n';
+    }
+}
+
+aetherscan::mvs::Mesh preview_mesh_to_mvs(const PreviewMesh& mesh) {
+    aetherscan::mvs::Mesh out;
+    out.vertices.reserve(mesh.vertices.size());
+    for (const Vec3& vertex : mesh.vertices)
+        out.vertices.emplace_back(vertex.x, vertex.y, vertex.z);
+    if (mesh.normals.size() == mesh.vertices.size()) {
+        out.normals.reserve(mesh.normals.size());
+        for (const Vec3& normal : mesh.normals)
+            out.normals.emplace_back(normal.x, normal.y, normal.z);
+    }
+    if (mesh.colours.size() == mesh.vertices.size()) {
+        out.colors.reserve(mesh.colours.size());
+        for (const std::uint32_t colour : mesh.colours) {
+            out.colors.emplace_back(
+                static_cast<float>((colour >> IM_COL32_R_SHIFT) & 0xFF) / 255.F,
+                static_cast<float>((colour >> IM_COL32_G_SHIFT) & 0xFF) / 255.F,
+                static_cast<float>((colour >> IM_COL32_B_SHIFT) & 0xFF) / 255.F);
+        }
+    }
+    out.faces.reserve(mesh.faces.size());
+    for (const auto& face : mesh.faces)
+        out.faces.emplace_back(
+            static_cast<int>(face[0]), static_cast<int>(face[1]),
+            static_cast<int>(face[2]));
+    return out;
+}
+
+bool can_export_sparse(const App& app) {
+    return app.has_sparse || app.scene.has_points();
+}
+
+bool can_export_model(const App& app) { return app.has_model; }
+
+bool can_export_mesh_file(const App& app) {
+    return app.has_mesh || app.mesh.has();
+}
+
+void export_sparse_cloud(App& app) {
+    if (app.job.running() || !can_export_sparse(app)) return;
+    if (!app.scene.has_points()) {
+        if (app.loading_scene) {
+            set_message(app, "Sparse cloud is still loading", theme::warning);
+            return;
+        }
+        ensure_sparse_loaded(app);
+        if (!app.scene.has_points()) {
+            set_message(app, "No sparse cloud to export yet", theme::warning);
+            return;
+        }
+    }
+    std::array<char, 1024> destination{};
+    const std::wstring name = export_stem_wide(app) + L"_sparse.ply";
+    if (!pick_export_path(
+            L"Export Sparse Cloud", destination, FilePickKind::point_cloud,
+            name.c_str(), L"ply"))
+        return;
+    try {
+        write_sparse_ply(app.scene, path_from_utf8_field(destination.data()));
+        set_message(app, "Exported sparse cloud", theme::success);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+}
+
+void export_trained_model(App& app) {
+    if (app.job.running() || !can_export_model(app)) return;
+    const auto format = splat_export_format(app);
+    const auto* extension = splat_export_extension_wide(app);
+    std::array<char, 1024> destination{};
+    const std::wstring name =
+        export_stem_wide(app) + L"_splat." + std::wstring(extension);
+    if (!pick_export_path(
+            L"Export Trained Model", destination, FilePickKind::splat_model,
+            name.c_str(), extension))
+        return;
+    const std::filesystem::path out = path_from_utf8_field(destination.data());
+    try {
+        const auto source = existing_splat_model(app);
+        const auto source_ext = lower_path_extension(source);
+        const auto dest_ext = lower_path_extension(out);
+        if (!source.empty() && source_ext == dest_ext &&
+            copy_existing_file(source, out)) {
+            set_message(app, "Exported trained model", theme::success);
+            return;
+        }
+        aetherscan::splat::GaussianModel model;
+        if (!source.empty()) {
+            model = aetherscan::splat::load_gaussians(source);
+        } else {
+            const auto archive =
+                aetherscan::project::Archive::open(app.layout.project_file);
+            model = aetherscan::splat::decode_gaussians(
+                archive.chunk(aetherscan::project::ChunkType::gaussians));
+        }
+        aetherscan::splat::save_gaussians(model, out, format);
+        set_message(app, "Exported trained model", theme::success);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+}
+
+void export_mesh_file(App& app) {
+    if (app.job.running() || !can_export_mesh_file(app)) return;
+    std::array<char, 1024> destination{};
+    const std::wstring name = export_stem_wide(app) + L"_mesh.ply";
+    if (!pick_export_path(
+            L"Export Mesh", destination, FilePickKind::mesh, name.c_str(),
+            L"ply"))
+        return;
+    const std::filesystem::path out = path_from_utf8_field(destination.data());
+    try {
+        const auto source = existing_mesh_path(app);
+        if (copy_existing_file(source, out)) {
+            set_message(app, "Exported mesh", theme::success);
+            return;
+        }
+        if (app.mesh.has()) {
+            aetherscan::mvs::save_mesh_ply(preview_mesh_to_mvs(app.mesh), out);
+            set_message(app, "Exported mesh", theme::success);
+            return;
+        }
+        if (!app.layout.project_file.empty()) {
+            const auto archive =
+                aetherscan::project::Archive::open(app.layout.project_file);
+            if (archive.has(aetherscan::project::ChunkType::mesh)) {
+                aetherscan::mvs::save_mesh_ply(
+                    aetherscan::mvs::decode_mesh(
+                        archive.chunk(aetherscan::project::ChunkType::mesh)),
+                    out);
+                set_message(app, "Exported mesh", theme::success);
+                return;
+            }
+        }
+        set_message(app, "No mesh to export yet", theme::warning);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
 }
 
 void pack_mesh_gpu_buffers(App& app) {
@@ -2028,6 +2282,9 @@ bool has_reconstruction_result(const App& app) {
     if (!app.layout.dense_ply.empty() &&
         std::filesystem::exists(app.layout.dense_ply, dense_error))
         return true;
+    if (!app.layout.working_dense.empty() &&
+        std::filesystem::exists(app.layout.working_dense, dense_error))
+        return true;
     if (app.layout.cache.empty()) return false;
     std::error_code error;
     return std::filesystem::exists(app.layout.cache, error);
@@ -2039,12 +2296,13 @@ void delete_reconstruction_results(App& app) {
     stop_splat_view(app);
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
-    const std::array<std::filesystem::path, 17> generated_files = {
+    const std::array<std::filesystem::path, 20> generated_files = {
         app.layout.sparse_ply, app.layout.sparse_asfm, app.layout.sparse_mvs,
         app.layout.sparse_poses, app.layout.splat_ply, app.layout.splat_sog,
         app.layout.splat_spz, app.layout.splat_glb, app.layout.mesh_ply,
         app.layout.mvs_mesh_ply, app.layout.mvs_raw_mesh_ply,
-        app.layout.dense_ply, app.layout.align_log, app.layout.train_log,
+        app.layout.dense_ply, app.layout.working_splat, app.layout.working_mesh,
+        app.layout.working_dense, app.layout.align_log, app.layout.train_log,
         app.layout.dense_log, app.layout.export_log, app.layout.view_log};
 
     std::uintmax_t removed = 0;
@@ -2369,7 +2627,7 @@ const char* running_job_caption(const JobKind kind) {
         case JobKind::align: return "ALIGNING";
         case JobKind::export_sfm: return "EXPORTING";
         case JobKind::train: return "TRAINING";
-        case JobKind::dense: return "DENSE MVS";
+        case JobKind::dense: return "EXTRACT MESH";
         case JobKind::none: return "READY";
     }
     return "READY";
@@ -2385,7 +2643,7 @@ const char* pause_job_label(const JobKind kind) {
     switch (kind) {
         case JobKind::align: return "Pause Alignment";
         case JobKind::export_sfm: return "Pause Export";
-        case JobKind::dense: return "Pause Dense MVS";
+        case JobKind::dense: return "Pause Extract Mesh";
         default: return "Pause Training";
     }
 }
@@ -2394,7 +2652,7 @@ const char* resume_job_label(const JobKind kind) {
     switch (kind) {
         case JobKind::align: return "Resume Alignment";
         case JobKind::export_sfm: return "Resume Export";
-        case JobKind::dense: return "Resume Dense MVS";
+        case JobKind::dense: return "Resume Extract Mesh";
         default: return "Resume Training";
     }
 }
@@ -2403,7 +2661,7 @@ const char* stop_job_label(const JobKind kind) {
     switch (kind) {
         case JobKind::align: return "Stop Alignment";
         case JobKind::export_sfm: return "Stop Export";
-        case JobKind::dense: return "Stop Dense MVS";
+        case JobKind::dense: return "Stop Extract Mesh";
         default: return "Stop Training";
     }
 }
@@ -2640,10 +2898,13 @@ void start_dense(App& app) {
     if (!alignment_ready(app) && !alignment_cache_present(app)) {
         set_message(
             app,
-            "Align photos or load an external camera dataset before Dense MVS",
+            "Align photos or load an external camera dataset before Extract Mesh",
             theme::warning);
         return;
     }
+    app.settings.build_mesh = true;
+    app.settings.mesh_source = 1;
+    if (app.settings.mesh_method == 3) app.settings.mesh_method = 0;
     refresh_artifacts(app);
     std::error_code error;
     std::filesystem::create_directories(app.layout.root, error);
@@ -2666,13 +2927,9 @@ void start_dense(App& app) {
         app.active_job = JobKind::dense;
         set_message(
             app,
-            mesh_from_mvs(app.settings)
-                ? (has_external_dataset(app)
-                       ? "Building photogrammetry mesh from imported cameras..."
-                       : "Building photogrammetry mesh from aligned cameras...")
-                : (has_external_dataset(app)
-                       ? "Dense MVS from imported cameras..."
-                       : "Dense MVS from aligned cameras..."),
+            has_external_dataset(app)
+                ? "Building MVS mesh from imported cameras..."
+                : "Building MVS mesh from aligned cameras...",
             theme::accent);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
@@ -2718,20 +2975,21 @@ void on_job_finished(App& app) {
     if (kind == JobKind::dense) {
         std::error_code error;
         const bool has_dense =
+            std::filesystem::exists(app.layout.working_dense, error) ||
             std::filesystem::exists(app.layout.dense_ply, error);
         if (mesh_from_mvs(app.settings)) {
             set_message(
                 app,
-                app.has_mesh ? "Photogrammetry mesh finished"
+                app.has_mesh ? "MVS mesh finished"
                              : (has_dense
-                                    ? "Dense MVS finished but no mesh was written"
-                                    : "Dense MVS finished but no surface was written"),
+                                    ? "MVS finished but no mesh was written"
+                                    : "MVS finished but no surface was written"),
                 app.has_mesh ? theme::success : theme::warning);
         } else {
             set_message(
                 app,
-                has_dense ? "Dense MVS finished"
-                          : "Dense MVS finished but no dense.ply was written",
+                has_dense ? "MVS finished"
+                          : "MVS finished but no dense cloud was written",
                 has_dense ? theme::success : theme::warning);
         }
         if (app.has_mesh) {
@@ -2787,23 +3045,57 @@ enum class Action {
     reveal
 };
 
-int workflow_step(const App& app) {
+struct WorkflowCrumbs {
+    std::array<const char*, 3> labels{};
+    int count{1};
+    int current{};
+};
+
+// Menu-bar trail follows the active route. Extract Mesh is the MVS mesh
+// pipeline and does not pass through 3DGS.
+WorkflowCrumbs workflow_crumbs(const App& app) {
+    WorkflowCrumbs crumbs;
+    crumbs.labels[0] = "Images";
+    const bool have_images =
+        app.settings.images_dir[0] != '\0' || has_external_dataset(app);
+    if (!have_images) return crumbs;
+
+    crumbs.labels[1] = "Alignment";
+    crumbs.count = 2;
+    crumbs.current = 1;
+
     const bool training =
         app.job.running() && app.active_job == JobKind::train;
     const bool aligning =
         app.job.running() && app.active_job == JobKind::align;
-    const bool show_mesh = app.settings.build_mesh || app.has_mesh;
-    if (show_mesh &&
-        ((training && app.monitor.stage() == Stage::meshing) ||
-         (app.job.running() && app.active_job == JobKind::dense &&
-          mesh_from_mvs(app.settings)) ||
-         app.has_mesh))
-        return 3;
-    if (training) return 2;
-    if (aligning) return 1;
-    if (app.has_model) return 2;
-    if (app.has_sparse || has_external_dataset(app)) return 1;
-    return 0;
+    const bool densing =
+        app.job.running() && app.active_job == JobKind::dense;
+    if (aligning) return crumbs;
+
+    const bool mvs_mesh =
+        densing || (app.has_mesh && mesh_from_mvs(app.settings));
+    const bool show_mvs =
+        mvs_mesh && !training &&
+        (densing || app.view_mode == VisualizationMode::mesh ||
+         !app.has_model);
+    if (show_mvs) {
+        crumbs.labels[2] = "Extract Mesh";
+        crumbs.count = 3;
+        crumbs.current = 2;
+        return crumbs;
+    }
+    if (training || app.has_model) {
+        crumbs.labels[2] = "3DGS";
+        crumbs.count = 3;
+        crumbs.current = 2;
+        return crumbs;
+    }
+    if (mvs_mesh) {
+        crumbs.labels[2] = "Extract Mesh";
+        crumbs.count = 3;
+        crumbs.current = 2;
+    }
+    return crumbs;
 }
 
 void apply_default_dock_layout(const ImGuiID dockspace_id, const ImVec2 size) {
@@ -2939,16 +3231,17 @@ Action draw_menu_bar(App& app) {
         }
         ImGui::Separator();
         if (ImGui::MenuItem(
-                "Load Sparse Cloud", nullptr, false,
-                app.has_sparse && !app.loading_scene)) {
-            app.view_mode = VisualizationMode::points;
-            if (!app.layout.project_file.empty())
-                request_ascan_scene_load(app);
-            else
-                request_scene_load(
-                    app, app.layout.sparse_ply, app.layout.sparse_poses,
-                    "Sparse cloud");
-        }
+                "Export Sparse Cloud...", nullptr, false,
+                !busy && can_export_sparse(app)))
+            export_sparse_cloud(app);
+        if (ImGui::MenuItem(
+                "Export Trained Model...", nullptr, false,
+                !busy && can_export_model(app)))
+            export_trained_model(app);
+        if (ImGui::MenuItem(
+                "Export Mesh...", nullptr, false,
+                !busy && can_export_mesh_file(app)))
+            export_mesh_file(app);
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
                 !busy && can_export_sfm(app)))
@@ -2976,8 +3269,8 @@ Action draw_menu_bar(App& app) {
                           has_external_dataset(app))))
             action = Action::train;
         if (ImGui::MenuItem(
-                mesh_from_mvs(app.settings) ? "Build Mesh" : "Dense MVS",
-                nullptr, false, !busy && alignment_ready(app)))
+                "Extract Mesh", nullptr, false,
+                !busy && alignment_ready(app)))
             action = Action::dense;
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
@@ -3021,6 +3314,7 @@ Action draw_menu_bar(App& app) {
             set_camera_overlays(
                 app.view_options, !app.view_options.show_views);
         ImGui::MenuItem("Show Ground Grid", nullptr, &app.view_options.show_grid);
+        ImGui::MenuItem("Show Origin Axes", nullptr, &app.view_options.show_axes);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset Layout")) {
             app.show_scene = true;
@@ -3044,24 +3338,20 @@ Action draw_menu_bar(App& app) {
     ImGui::SameLine(0.F, 1.F);
     ImGui::TextUnformatted("SCAN");
 
-    const int current = workflow_step(app);
-    const bool show_mesh_crumb = app.settings.build_mesh || app.has_mesh;
-    const std::array<const char*, 4> steps{
-        {"Images", "Alignment", "Gaussians", "Mesh"}};
-    const int step_count = show_mesh_crumb ? 4 : 3;
+    const WorkflowCrumbs crumbs = workflow_crumbs(app);
     ImGui::SameLine(0.F, 22.F);
-    for (int i = 0; i < step_count; ++i) {
+    for (int i = 0; i < crumbs.count; ++i) {
         if (i > 0) {
             ImGui::SameLine(0.F, 8.F);
             theme::caption("\xE2\x80\xBA");
             ImGui::SameLine(0.F, 8.F);
         }
-        const bool reached = i <= current;
+        const bool reached = i <= crumbs.current;
         ImGui::PushStyleColor(
-            ImGuiCol_Text, i == current ? theme::accent
-                                        : (reached ? theme::text_muted
-                                                   : theme::text_faint));
-        ImGui::TextUnformatted(steps[static_cast<std::size_t>(i)]);
+            ImGuiCol_Text, i == crumbs.current ? theme::accent
+                                               : (reached ? theme::text_muted
+                                                          : theme::text_faint));
+        ImGui::TextUnformatted(crumbs.labels[static_cast<std::size_t>(i)]);
         ImGui::PopStyleColor();
     }
 
@@ -3259,12 +3549,12 @@ Action draw_toolbar(App& app) {
         const char* mesh_tip = busy
             ? "Stop the running job first to change reconstruction options."
             : (app.settings.mesh_source == 1
-                   ? "Extract a surface with dense multi-view stereo after alignment.\n"
-                     "Choose Photogrammetry or From Gaussians in the Mesh panel."
+                   ? "Extract a surface with the MVS mesh pipeline after alignment.\n"
+                     "Choose Extract Mesh (MVS) or From Gaussians in the Mesh panel."
                    : "Extract a surface after 3DGS training.\n"
                      "From Gaussians enables depth-normal and multi-view geometry\n"
-                     "losses during optimisation. Switch to Photogrammetry in the\n"
-                     "Mesh panel for a dense MVS surface.");
+                     "losses during optimisation. Switch to Extract Mesh (MVS) in the\n"
+                     "Mesh panel for a photogrammetry surface.");
         ImGui::SetTooltip("%s", mesh_tip);
     }
     ImGui::SameLine(0.F, 14.F);
@@ -3367,55 +3657,54 @@ void draw_scene_panel(App& app) {
     const bool has_cloud = app.has_sparse || app.scene.has_points();
     const bool has_gaussians = app.has_model;
     const bool has_mesh = app.has_mesh;
+    const bool has_reconstruction = has_cloud || has_gaussians || has_mesh;
     if (ImGui::TreeNodeEx(
             project_label.c_str(),
             ImGuiTreeNodeFlags_DefaultOpen |
                 ImGuiTreeNodeFlags_SpanAvailWidth)) {
-        const auto object_row = [](const char* label, const bool selected) {
-            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf |
-                                       ImGuiTreeNodeFlags_NoTreePushOnOpen |
-                                       ImGuiTreeNodeFlags_SpanAvailWidth;
-            if (selected) flags |= ImGuiTreeNodeFlags_Selected;
-            ImGui::TreeNodeEx(label, flags);
-            return ImGui::IsItemClicked();
-        };
-        if (!has_cloud && !has_gaussians && !has_mesh) {
+        if (!has_reconstruction) {
             ImGui::SetCursorPosX(22.F);
             ImGui::PushTextWrapPos(wrap);
             theme::caption(
                 external_dataset
-                    ? "External camera dataset selected. Train 3DGS to use it."
-                    : "Align photos to add a sparse cloud.");
+                    ? "External camera dataset selected. Train 3DGS or run Extract Mesh next."
+                    : "Align photos to start the reconstruction.");
             ImGui::PopTextWrapPos();
         } else {
-            if (has_cloud &&
-                object_row(
-                    "Sparse Cloud",
-                    app.view_mode == VisualizationMode::points &&
-                        !live_preview_active(app))) {
-                app.view_mode = VisualizationMode::points;
-                if (!alignment_job_running(app)) {
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf |
+                                       ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                       ImGuiTreeNodeFlags_SpanAvailWidth |
+                                       ImGuiTreeNodeFlags_Selected;
+            ImGui::TreeNodeEx("Reconstruction", flags);
+            if (ImGui::IsItemClicked()) {
+                if (app.view_mode == VisualizationMode::mesh)
+                    show_mesh_view(app, !app.mesh.has());
+                else if (
+                    (app.view_mode == VisualizationMode::splat ||
+                     app.view_mode == VisualizationMode::rings) &&
+                    app.has_model)
+                    set_visualization_mode(app, app.view_mode);
+                else if (!alignment_job_running(app)) {
                     app.suppress_scene_auto_load = false;
                     if (app.has_sparse) ensure_sparse_loaded(app);
                 }
-                write_preview_vis(app);
-                sync_live_preview_camera(
-                    app, true, app.preview_raster_width,
-                    app.preview_raster_height);
             }
-            if (has_gaussians &&
-                object_row(
-                    "Gaussians",
-                    app.view_mode == VisualizationMode::splat ||
-                        app.view_mode == VisualizationMode::rings ||
-                        live_preview_active(app))) {
-                set_visualization_mode(app, VisualizationMode::splat);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "One reconstruction. Switch Sparse / Gaussians / Mesh\n"
+                    "with the visualization buttons in the viewport.");
+            std::string representations;
+            if (has_cloud) representations = "Sparse";
+            if (has_gaussians) {
+                if (!representations.empty()) representations += "  ·  ";
+                representations += "Gaussians";
             }
-            if (has_mesh &&
-                object_row(
-                    "Mesh", app.view_mode == VisualizationMode::mesh)) {
-                set_visualization_mode(app, VisualizationMode::mesh);
+            if (has_mesh) {
+                if (!representations.empty()) representations += "  ·  ";
+                representations += "Mesh";
             }
+            ImGui::SetCursorPosX(44.F);
+            theme::caption(representations.c_str());
         }
         ImGui::TreePop();
     }
@@ -3459,26 +3748,37 @@ void draw_scene_panel(App& app) {
                           : (external_dataset ? "Imported cameras"
                                               : (app.has_sparse ? "On disk"
                                                                 : nullptr)))));
+    const bool densing = busy && app.active_job == JobKind::dense;
+    const bool aligned = app.has_sparse || external_dataset;
+    const char* gaussian_note = nullptr;
+    if (training)
+        gaussian_note = stage_name(stage);
+    else if (mesh_from_gaussians(app.settings) && app.has_model && app.has_mesh)
+        gaussian_note = "Mesh extracted";
+    else if (mesh_from_gaussians(app.settings))
+        gaussian_note = "Then extract mesh";
+    else if (aligned && !app.has_model)
+        gaussian_note = "Optional";
     draw_step(
-        "04", "Optimise Gaussians",
-        training && stage != Stage::meshing
-            ? StepState::active
-            : (app.has_model ? StepState::done : StepState::pending),
-        mesh_from_gaussians(app.settings) ? "Geometry constraints on" : nullptr);
-    if (app.settings.build_mesh) {
-        const bool extracting =
-            (mesh_from_gaussians(app.settings) && training &&
-             stage == Stage::meshing) ||
-            (mesh_from_mvs(app.settings) && busy &&
-             app.active_job == JobKind::dense);
-        draw_step(
-            "05", "Extract mesh",
-            extracting ? StepState::active
-                       : (app.has_mesh ? StepState::done : StepState::pending),
-            extracting ? stage_name(stage)
-                       : (mesh_from_mvs(app.settings) ? "Photogrammetry"
-                                                      : "From Gaussians"));
-    }
+        "04", "Train 3DGS",
+        training ? StepState::active
+                 : (app.has_model ? StepState::done : StepState::pending),
+        gaussian_note);
+
+    const char* dense_note = nullptr;
+    if (densing)
+        dense_note = stage_name(stage);
+    else if (app.has_mesh && mesh_from_mvs(app.settings))
+        dense_note = "MVS mesh";
+    else if (aligned)
+        dense_note = "Optional MVS mesh";
+    draw_step(
+        "05", "Extract Mesh",
+        densing ? StepState::active
+                : (app.has_mesh && mesh_from_mvs(app.settings)
+                       ? StepState::done
+                       : StepState::pending),
+        dense_note);
 
     ImGui::Dummy({0, 8.F});
     theme::section_header("SOURCE");
@@ -4169,7 +4469,7 @@ Action draw_inspector(App& app) {
         if (has_external_dataset(app)) {
             theme::caption(
                 "Imported cameras replace Align Photos. Review the cloud, then "
-                "run Train 3DGS or Dense MVS.");
+                "run Train 3DGS or Extract Mesh.");
             theme::caption("Dataset format");
             ImGui::SetNextItemWidth(-1.F);
             const char* formats[] = {
@@ -4224,7 +4524,7 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Load an existing PLY, SOG, SPZ, or GLB model for preview. "
-                "When set, it takes precedence over generated sidecars.");
+                "When set, it takes precedence over the trained working copy.");
         ImGui::EndDisabled();
         ImGui::Spacing();
     }
@@ -4261,8 +4561,9 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip(
                 "Write a project .cache folder so later Align/Train can\n"
                 "reuse extracted features. Off by default: skip that folder.\n"
-                "Align/Train do not write .ascan or .asfm unless you Save\n"
-                "Project or Export SfM.");
+                "Align/Train keep working copies for preview. They do not\n"
+                "write .ascan, .asfm, or PLY files unless you Save Project\n"
+                "or Export.");
         ImGui::EndDisabled();
 
         if (theme::toolbar_button(
@@ -4273,6 +4574,14 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip(
                 "Write the SfM stage to a standalone .asfm file and an\n"
                 "OpenMVS .mvs sidecar. Align/Train no longer write these.");
+        if (theme::toolbar_button(
+                "Export Sparse Cloud", {-1.F, 28.F},
+                !busy && can_export_sparse(app)))
+            export_sparse_cloud(app);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Write the sparse point cloud to a PLY you choose.\n"
+                "Alignment no longer writes this file automatically.");
         if (app.has_asfm) {
             ImGui::Spacing();
             const std::string asfm_name =
@@ -4343,7 +4652,7 @@ Action draw_inspector(App& app) {
                 "GaussianWrapping's learned normal field.\n"
                 "Off (default) trains the GGGS path.");
         ImGui::EndDisabled();
-        theme::caption("Splat output format");
+        theme::caption("Export format");
         ImGui::SetNextItemWidth(-1.F);
         const char* splat_formats[] = {
             "Auto (PLY)", "PLY", "SOG", "SPZ", "GLB"};
@@ -4353,8 +4662,13 @@ Action draw_inspector(App& app) {
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Format of the trained sidecar: PLY, PlayCanvas SOG, Niantic "
-                "SPZ, or Khronos KHR_gaussian_splatting GLB. Auto writes PLY.");
+                "Format used when you Export Trained Model: PLY, PlayCanvas\n"
+                "SOG, Niantic SPZ, or Khronos KHR_gaussian_splatting GLB.\n"
+                "Training no longer writes this file automatically.");
+        if (theme::toolbar_button(
+                "Export Trained Model", {-1.F, 28.F},
+                !busy && can_export_model(app)))
+            export_trained_model(app);
         ImGui::Spacing();
     }
 
@@ -4366,7 +4680,7 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
                 "Include a surface mesh in the reconstruction.\n"
-                "Choose From Gaussians or Photogrammetry below.");
+                "Choose From Gaussians or Extract Mesh (MVS) below.");
         if (app.settings.build_mesh) {
             ImGui::Spacing();
             theme::caption("Method");
@@ -4380,15 +4694,15 @@ Action draw_inspector(App& app) {
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
             if (ImGui::RadioButton(
-                    "Photogrammetry", app.settings.mesh_source == 1)) {
+                    "Extract Mesh (MVS)", app.settings.mesh_source == 1)) {
                 app.settings.mesh_source = 1;
                 if (app.settings.mesh_method == 3)
                     app.settings.mesh_method = 0;
             }
             ImGui::PushTextWrapPos(0.F);
             theme::caption(
-                "Dense multi-view stereo from aligned cameras, then fuse a "
-                "mesh. 3DGS training stays appearance-only.");
+                "PatchMatch stereo from aligned cameras, then fuse a mesh. "
+                "This is the MVS mesh pipeline. 3DGS stays appearance-only.");
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
             theme::caption("Surface");
@@ -4443,6 +4757,14 @@ Action draw_inspector(App& app) {
             ImGui::PopTextWrapPos();
         }
         ImGui::EndDisabled();
+        if (theme::toolbar_button(
+                "Export Mesh", {-1.F, 28.F},
+                !busy && can_export_mesh_file(app)))
+            export_mesh_file(app);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Write the reconstructed surface to a PLY you choose.\n"
+                "Mesh extraction no longer writes this file automatically.");
         ImGui::Spacing();
     }
 
@@ -4455,6 +4777,10 @@ Action draw_inspector(App& app) {
                 "Wire frustums and capture photos in the 3D / training view.");
         ImGui::Checkbox("Show trajectory", &app.view_options.show_trajectory);
         ImGui::Checkbox("Show ground grid", &app.view_options.show_grid);
+        ImGui::Checkbox("Show origin axes", &app.view_options.show_axes);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "RGB axes at the world origin (X red, Y green, Z blue).");
         ImGui::Spacing();
     }
 
@@ -4509,27 +4835,6 @@ Action draw_inspector(App& app) {
     if (app.view_mode != VisualizationMode::splat &&
         ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
-        if (theme::toolbar_button(
-                "Load Sparse Cloud", {-1.F, 28.F},
-                app.has_sparse && !app.loading_scene)) {
-            app.view_mode = VisualizationMode::points;
-            if (!app.layout.project_file.empty())
-                request_ascan_scene_load(app);
-            else
-                request_scene_load(
-                    app, app.layout.sparse_ply, app.layout.sparse_poses,
-                    "Sparse cloud");
-        }
-        if (theme::toolbar_button(
-                "Load Trained Model", {-1.F, 28.F},
-                app.has_model && !app.loading_scene))
-            request_gaussian_scene_load(app);
-        if (theme::toolbar_button(
-                "Load Mesh", {-1.F, 28.F},
-                app.has_mesh && !app.loading_scene)) {
-            app.mesh.clear();
-            show_mesh_view(app, true);
-        }
         if (app.view_mode == VisualizationMode::mesh) {
             ImGui::Spacing();
             theme::metric(
@@ -4667,7 +4972,7 @@ Action draw_inspector(App& app) {
             action = Action::stop;
     } else if (has_external_dataset(app)) {
         if (mesh_from_mvs(app.settings)) {
-            if (theme::primary_button("Build Mesh", {-1.F, 40.F}, true))
+            if (theme::primary_button("Extract Mesh", {-1.F, 40.F}, true))
                 action = Action::dense;
             ImGui::Dummy({0, 6.F});
             if (theme::toolbar_button("Train 3DGS", {-1.F, 32.F}))
@@ -4680,7 +4985,7 @@ Action draw_inspector(App& app) {
                     {-1.F, 40.F}, true))
                 action = Action::train;
             ImGui::Dummy({0, 6.F});
-            if (theme::toolbar_button("Dense MVS", {-1.F, 32.F}))
+            if (theme::toolbar_button("Extract Mesh", {-1.F, 32.F}))
                 action = Action::dense;
         }
     } else if (!app.has_sparse) {
@@ -4690,7 +4995,7 @@ Action draw_inspector(App& app) {
             action = Action::align;
     } else if (mesh_from_mvs(app.settings)) {
         if (theme::primary_button(
-                "Build Mesh", {-1.F, 40.F},
+                "Extract Mesh", {-1.F, 40.F},
                 app.settings.images_dir[0] != '\0'))
             action = Action::dense;
         ImGui::Dummy({0, 6.F});
@@ -4703,7 +5008,7 @@ Action draw_inspector(App& app) {
                 {-1.F, 40.F}, app.settings.images_dir[0] != '\0'))
             action = Action::train;
         ImGui::Dummy({0, 6.F});
-        if (theme::toolbar_button("Dense MVS", {-1.F, 32.F}))
+        if (theme::toolbar_button("Extract Mesh", {-1.F, 32.F}))
             action = Action::dense;
     }
 

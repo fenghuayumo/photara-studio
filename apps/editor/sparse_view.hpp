@@ -223,6 +223,7 @@ struct ViewOptions {
     bool show_camera_photos = true;
     bool show_trajectory = true;
     bool show_grid = true;
+    bool show_axes = true;
     bool draw_rings = false;
     bool draw_mesh = false;
     bool mesh_wireframe = false;
