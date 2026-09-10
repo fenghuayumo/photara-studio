@@ -2,6 +2,8 @@
 #include "project/document.hpp"
 #include "io/format_version.hpp"
 #include "sfm/asfm.hpp"
+#include "sfm/export_colmap.hpp"
+#include "sfm/export_nerfstudio.hpp"
 #include "sfm/scene.hpp"
 
 #include <cstring>
@@ -9,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -103,6 +106,60 @@ int main() {
     expect(restored.tracks[0].num_inliers == 2, "asfm inliers");
     expect(!restored.tracks[0].has_color, "asfm colour absent by default");
     expect(restored.pairs.empty(), "asfm omits pairs");
+
+    const auto ply_path = dir / "aetherscan_project_io_sparse.ply";
+    std::filesystem::remove(ply_path, error);
+    save_sparse_ply(source, ply_path);
+    std::ifstream ply(ply_path);
+    expect(static_cast<bool>(ply), "sparse ply opens");
+    std::string ply_line;
+    bool saw_vertex = false;
+    while (std::getline(ply, ply_line)) {
+        if (ply_line.find("element vertex 1") != std::string::npos)
+            saw_vertex = true;
+    }
+    expect(saw_vertex, "sparse ply writes triangulated tracks");
+    ply.close();
+    std::filesystem::remove(ply_path, error);
+
+    const auto colmap_dir = dir / "aetherscan_project_io_colmap";
+    std::filesystem::remove_all(colmap_dir, error);
+    save_colmap_text(source, colmap_dir, {}, true);
+    std::ifstream cameras_txt(colmap_dir / "cameras.txt");
+    expect(static_cast<bool>(cameras_txt), "colmap cameras.txt opens");
+    std::string cameras_body(
+        (std::istreambuf_iterator<char>(cameras_txt)),
+        std::istreambuf_iterator<char>());
+    expect(cameras_body.find("OPENCV") != std::string::npos, "colmap OPENCV camera");
+    std::ifstream images_txt(colmap_dir / "images.txt");
+    expect(static_cast<bool>(images_txt), "colmap images.txt opens");
+    std::string images_body(
+        (std::istreambuf_iterator<char>(images_txt)),
+        std::istreambuf_iterator<char>());
+    expect(images_body.find("50") != std::string::npos, "colmap writes 2D observations");
+    std::ifstream points_txt(colmap_dir / "points3D.txt");
+    expect(static_cast<bool>(points_txt), "colmap points3D.txt opens");
+    std::string points_body(
+        (std::istreambuf_iterator<char>(points_txt)),
+        std::istreambuf_iterator<char>());
+    expect(points_body.find("0.5") != std::string::npos, "colmap writes triangulated points");
+    std::filesystem::remove_all(colmap_dir, error);
+
+    const auto json_path = dir / "aetherscan_project_io_transforms.json";
+    std::filesystem::remove(json_path, error);
+    save_nerfstudio_transforms(source, json_path);
+    std::ifstream json(json_path);
+    expect(static_cast<bool>(json), "nerfstudio json opens");
+    std::string json_body(
+        (std::istreambuf_iterator<char>(json)),
+        std::istreambuf_iterator<char>());
+    expect(json_body.find("OPENCV") != std::string::npos, "nerfstudio camera model");
+    expect(
+        json_body.find("transform_matrix") != std::string::npos,
+        "nerfstudio transform_matrix");
+    expect(json_body.find("\"fl_x\":50") != std::string::npos, "nerfstudio fl_x");
+    json.close();
+    std::filesystem::remove(json_path, error);
 
     Scene colored = source;
     colored.tracks[0].has_color = true;

@@ -270,6 +270,35 @@ Scene decode_asfm(
     return scene;
 }
 
+void save_sparse_ply(
+    const Scene& scene, const std::filesystem::path& path) {
+    std::size_t count = 0;
+    for (const Track& track : scene.tracks)
+        if (track.is_triangulated()) ++count;
+    if (!path.parent_path().empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+    }
+    std::ofstream output(path);
+    if (!output)
+        throw std::runtime_error("Failed to create PLY: " + path.string());
+    output << "ply\nformat ascii 1.0\nelement vertex " << count
+           << "\nproperty float x\nproperty float y\nproperty float z\n"
+           << "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+           << "end_header\n";
+    for (const Track& track : scene.tracks) {
+        if (!track.is_triangulated()) continue;
+        const int red = track.has_color ? static_cast<int>(track.color_r) : 200;
+        const int green = track.has_color ? static_cast<int>(track.color_g) : 200;
+        const int blue = track.has_color ? static_cast<int>(track.color_b) : 200;
+        output << track.position.x() << ' ' << track.position.y() << ' '
+               << track.position.z() << ' ' << red << ' ' << green << ' '
+               << blue << '\n';
+    }
+    if (!output)
+        throw std::runtime_error("Failed while writing PLY: " + path.string());
+}
+
 void save_asfm(
     const Scene& scene,
     const std::filesystem::path& path,

@@ -14,7 +14,9 @@
 #include "project/archive.hpp"
 #include "project/document.hpp"
 #include "sfm/asfm.hpp"
+#include "sfm/export_colmap.hpp"
 #include "sfm/export_mvs.hpp"
+#include "sfm/export_nerfstudio.hpp"
 #include "splat/formats.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
@@ -188,6 +190,13 @@ struct App {
         int format{0};  // 0 PLY, 1 OBJ, 2 GLB
         bool include_texture{true};
     } mesh_export;
+
+    struct AlignmentExportState {
+        bool show{};
+        bool initialized{};
+        int format{0};  // 0 ASFM, 1 COLMAP, 2 Nerfstudio/Blender, 3 OpenMVS
+        bool write_ply{true};
+    } alignment_export;
 
     // OS file drops arrive on the GLFW callback and are consumed against the
     // last viewport rectangle on the following frame.
@@ -414,7 +423,7 @@ std::optional<std::filesystem::path> resolve_dropped_image_directory(
 }
 
 enum class FilePickKind {
-    project, dataset, point_cloud, splat_model, mesh, video
+    project, dataset, point_cloud, splat_model, mesh, alignment, video
 };
 
 #if defined(_WIN32)
@@ -512,6 +521,19 @@ bool pick_file(
                 mesh_filters[0] = {L"glTF Binary (*.glb)", L"*.glb"};
             }
         }
+        COMDLG_FILTERSPEC alignment_filters[] = {
+            {L"AetherScan SfM (*.asfm)", L"*.asfm"},
+            {L"All files (*.*)", L"*.*"}};
+        if (kind == FilePickKind::alignment && default_extension != nullptr) {
+            if (std::wcscmp(default_extension, L"mvs") == 0) {
+                alignment_filters[0] = {L"OpenMVS scene (*.mvs)", L"*.mvs"};
+            } else if (std::wcscmp(default_extension, L"json") == 0) {
+                alignment_filters[0] = {
+                    L"Nerfstudio / Blender (*.json)", L"*.json"};
+            } else if (std::wcscmp(default_extension, L"ply") == 0) {
+                alignment_filters[0] = {L"Sparse cloud (*.ply)", L"*.ply"};
+            }
+        }
         COMDLG_FILTERSPEC video_filters[] = {
             {L"Video files (*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv)",
              L"*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.insv;*.wmv;*.mts;*.m2ts;*.360"},
@@ -521,6 +543,7 @@ bool pick_file(
         if (kind == FilePickKind::point_cloud) filters = point_cloud_filters;
         if (kind == FilePickKind::splat_model) filters = splat_model_filters;
         if (kind == FilePickKind::mesh) filters = mesh_filters;
+        if (kind == FilePickKind::alignment) filters = alignment_filters;
         if (kind == FilePickKind::video) filters = video_filters;
         dialog->SetFileTypes(2, filters);
         if (save && default_extension != nullptr)
@@ -1501,33 +1524,6 @@ bool can_export_textured_mesh(const App& app) {
 
 bool can_export_mesh_file(const App& app) {
     return app.has_mesh || app.mesh.has() || can_export_textured_mesh(app);
-}
-
-void export_sparse_cloud(App& app) {
-    if (app.job.running() || !can_export_sparse(app)) return;
-    if (!app.scene.has_points()) {
-        if (app.loading_scene) {
-            set_message(app, "Sparse cloud is still loading", theme::warning);
-            return;
-        }
-        ensure_sparse_loaded(app);
-        if (!app.scene.has_points()) {
-            set_message(app, "No sparse cloud to export yet", theme::warning);
-            return;
-        }
-    }
-    std::array<char, 1024> destination{};
-    const std::wstring name = export_stem_wide(app) + L"_sparse.ply";
-    if (!pick_export_path(
-            L"Export Sparse Cloud", destination, FilePickKind::point_cloud,
-            name.c_str(), L"ply"))
-        return;
-    try {
-        write_sparse_ply(app.scene, path_from_utf8_field(destination.data()));
-        set_message(app, "Exported sparse cloud", theme::success);
-    } catch (const std::exception& failure) {
-        set_message(app, failure.what(), theme::danger);
-    }
 }
 
 void export_trained_model(App& app) {
@@ -3079,6 +3075,139 @@ void start_export_sfm(App& app) {
     }
 }
 
+bool can_export_alignment(const App& app) {
+    return can_export_sfm(app) || can_export_sparse(app);
+}
+
+bool alignment_mvs_supported(const App& app) {
+    for (const auto& view : app.scene.views) {
+        if (view.registered && view.camera_model == "OpenCV Fisheye")
+            return false;
+    }
+    return true;
+}
+
+std::optional<aetherscan::sfm::Scene> load_alignment_scene(const App& app) {
+    std::error_code error;
+    if (!app.layout.working_sfm.empty() &&
+        std::filesystem::exists(app.layout.working_sfm, error)) {
+        return load_working_sfm(
+            app.layout.working_sfm, reconstruction_images_path(app));
+    }
+    if (!app.layout.project_file.empty() &&
+        std::filesystem::exists(app.layout.project_file, error)) {
+        const auto archive =
+            aetherscan::project::Archive::open(app.layout.project_file);
+        return aetherscan::project::read_sfm(archive);
+    }
+    return std::nullopt;
+}
+
+enum class AlignmentExportFormat { asfm, colmap, nerfstudio, openmvs };
+
+AlignmentExportFormat alignment_export_format(const App& app) {
+    switch (app.alignment_export.format) {
+        case 1: return AlignmentExportFormat::colmap;
+        case 2: return AlignmentExportFormat::nerfstudio;
+        case 3: return AlignmentExportFormat::openmvs;
+        default: return AlignmentExportFormat::asfm;
+    }
+}
+
+void open_alignment_export_panel(App& app) {
+    if (app.job.running() || !can_export_alignment(app)) return;
+    if (!app.alignment_export.initialized) {
+        app.alignment_export.format = 0;
+        app.alignment_export.write_ply = true;
+        app.alignment_export.initialized = true;
+    }
+    app.alignment_export.show = true;
+}
+
+void export_alignment(App& app) {
+    if (app.job.running() || !can_export_alignment(app)) return;
+    const auto format = alignment_export_format(app);
+    const bool write_ply = app.alignment_export.write_ply;
+    if (format == AlignmentExportFormat::openmvs &&
+        !alignment_mvs_supported(app)) {
+        set_message(
+            app, "OpenMVS export needs rectified pinhole images",
+            theme::warning);
+        return;
+    }
+
+    std::array<char, 1024> destination{};
+    std::filesystem::path out;
+    if (format == AlignmentExportFormat::colmap) {
+        if (!pick_folder(L"Export COLMAP Model", destination)) return;
+        out = path_from_utf8_field(destination.data());
+    } else {
+        const wchar_t* extension = format == AlignmentExportFormat::openmvs
+            ? L"mvs"
+            : (format == AlignmentExportFormat::nerfstudio ? L"json" : L"asfm");
+        const std::wstring name =
+            export_stem_wide(app) + L"." + extension;
+        if (!pick_export_path(
+                L"Export SfM Alignment", destination, FilePickKind::alignment,
+                name.c_str(), extension))
+            return;
+        out = path_from_utf8_field(destination.data());
+        if (out.extension().empty()) {
+            out += ".";
+            out += std::filesystem::path(extension);
+        }
+    }
+    if (out.empty()) return;
+
+    try {
+        auto scene = load_alignment_scene(app);
+        if (!scene) {
+            set_message(
+                app, "Align photos before exporting SfM alignment",
+                theme::warning);
+            return;
+        }
+        const auto images = reconstruction_images_path(app);
+        std::filesystem::path ply;
+        if (write_ply) {
+            if (format == AlignmentExportFormat::colmap)
+                ply = out / "points3D.ply";
+            else {
+                ply = out;
+                ply.replace_extension();
+                ply += "_sparse.ply";
+            }
+        }
+
+        if (format == AlignmentExportFormat::asfm)
+            aetherscan::sfm::save_asfm(*scene, out);
+        else if (format == AlignmentExportFormat::colmap)
+            aetherscan::sfm::save_colmap_text(
+                *scene, out, images, write_ply);
+        else if (format == AlignmentExportFormat::nerfstudio)
+            aetherscan::sfm::save_nerfstudio_transforms(
+                *scene, out, images, ply);
+        else
+            aetherscan::sfm::export_openmvs_interface(*scene, out);
+
+        if (write_ply) aetherscan::sfm::save_sparse_ply(*scene, ply);
+        refresh_artifacts(app);
+        const char* label = format == AlignmentExportFormat::colmap
+            ? "COLMAP"
+            : (format == AlignmentExportFormat::nerfstudio
+                   ? "Nerfstudio / Blender"
+                   : (format == AlignmentExportFormat::openmvs ? "OpenMVS"
+                                                               : "ASFM"));
+        std::string message = "Exported SfM alignment (";
+        message += label;
+        if (write_ply) message += ", PLY";
+        message += ")";
+        set_message(app, message, theme::success);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+}
+
 void start_splat_view(App& app) {
     if (app.job.running() || app.viewer.running() || !app.has_model) return;
     if (app.settings.images_dir[0] == '\0' ||
@@ -3665,9 +3794,9 @@ Action draw_menu_bar(App& app) {
         }
         ImGui::Separator();
         if (ImGui::MenuItem(
-                "Export Sparse Cloud...", nullptr, false,
-                !busy && can_export_sparse(app)))
-            export_sparse_cloud(app);
+                "Export SfM Alignment...", nullptr, false,
+                !busy && can_export_alignment(app)))
+            open_alignment_export_panel(app);
         if (ImGui::MenuItem(
                 "Export Splat...", nullptr, false,
                 !busy && can_export_model(app)))
@@ -3676,10 +3805,6 @@ Action draw_menu_bar(App& app) {
                 "Export Mesh...", nullptr, false,
                 !busy && can_export_mesh_file(app)))
             open_mesh_export_panel(app);
-        if (ImGui::MenuItem(
-                "Export SfM Alignment...", nullptr, false,
-                !busy && can_export_sfm(app)))
-            action = Action::export_sfm;
         if (ImGui::MenuItem(
                 "Open Output Folder", nullptr, false,
                 app.layout.root.has_filename()))
@@ -3712,8 +3837,8 @@ Action draw_menu_bar(App& app) {
             action = Action::texture;
         if (ImGui::MenuItem(
                 "Export SfM Alignment...", nullptr, false,
-                !busy && can_export_sfm(app)))
-            action = Action::export_sfm;
+                !busy && can_export_alignment(app)))
+            open_alignment_export_panel(app);
         ImGui::Separator();
         if (ImGui::MenuItem(
                 "Clear Reconstruction Results...", nullptr, false,
@@ -4013,6 +4138,107 @@ void draw_mesh_export_modal(App& app) {
     if (theme::primary_button("Export...", {export_w, 30.F})) {
         ImGui::CloseCurrentPopup();
         export_mesh_file(app);
+    }
+    ImGui::EndPopup();
+}
+
+void draw_alignment_export_modal(App& app) {
+    constexpr const char* popup = "Export SfM Alignment";
+    if (app.alignment_export.show) {
+        ImGui::OpenPopup(popup);
+        app.alignment_export.show = false;
+    }
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    ImGui::SetNextWindowSize({448.F, 0.F}, ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(
+            popup, nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        return;
+
+    theme::caption("Format");
+    ImGui::SetNextItemWidth(-1.F);
+    const char* formats[] = {
+        "AetherScan ASFM", "COLMAP", "Nerfstudio / Blender", "OpenMVS"};
+    ImGui::Combo(
+        "##alignment_format", &app.alignment_export.format, formats, 4);
+    const auto format = alignment_export_format(app);
+    const bool mvs_ok = alignment_mvs_supported(app);
+    if (format == AlignmentExportFormat::asfm)
+        theme::caption("Native scene: cameras, keypoints, and tracks.");
+    else if (format == AlignmentExportFormat::colmap)
+        theme::caption("cameras.txt, images.txt, and points3D.txt in a folder.");
+    else if (format == AlignmentExportFormat::nerfstudio)
+        theme::caption("transforms.json for Nerfstudio and Blender.");
+    else if (!mvs_ok)
+        theme::caption("OpenMVS needs rectified pinhole images.");
+    else
+        theme::caption("OpenMVS interface for Viewer and densify import.");
+
+    ImGui::Spacing();
+    ImGui::Checkbox("Export point cloud", &app.alignment_export.write_ply);
+    if (format == AlignmentExportFormat::colmap)
+        theme::caption("Writes points3D.txt and points3D.ply.");
+    else
+        theme::caption("Writes a coloured PLY next to the scene file.");
+
+    ImGui::Spacing();
+    const std::string stem = path_to_utf8(
+        app.layout.project_file.empty()
+            ? std::filesystem::path("project")
+            : app.layout.project_file.stem());
+    std::vector<std::string> files;
+    if (format == AlignmentExportFormat::asfm)
+        files.push_back(stem + ".asfm");
+    else if (format == AlignmentExportFormat::colmap) {
+        files.push_back("cameras.txt");
+        files.push_back("images.txt");
+        files.push_back("points3D.txt");
+        if (app.alignment_export.write_ply)
+            files.push_back("points3D.ply");
+    } else if (format == AlignmentExportFormat::nerfstudio)
+        files.push_back(stem + ".json");
+    else
+        files.push_back(stem + ".mvs");
+    if (app.alignment_export.write_ply &&
+        format != AlignmentExportFormat::colmap)
+        files.push_back(stem + "_sparse.ply");
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_2);
+    const float writes_h =
+        ImGui::GetTextLineHeightWithSpacing() *
+            static_cast<float>(files.size() + 1) +
+        14.F;
+    ImGui::BeginChild(
+        "##alignment_writes", ImVec2(-1.F, writes_h), true,
+        ImGuiWindowFlags_NoScrollbar);
+    theme::caption("Writes");
+    ImGui::PushFont(theme::mono_font());
+    for (const std::string& file : files)
+        ImGui::TextUnformatted(file.c_str());
+    ImGui::PopFont();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const float export_w = 108.F;
+    const float cancel_w = 88.F;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::SetCursorPosX(
+        ImGui::GetCursorPosX() + std::max(0.F, avail - export_w - cancel_w - 8.F));
+    if (theme::toolbar_button("Cancel", {cancel_w, 30.F}))
+        ImGui::CloseCurrentPopup();
+    ImGui::SameLine(0.F, 8.F);
+    const bool can_go =
+        format != AlignmentExportFormat::openmvs || mvs_ok;
+    if (theme::primary_button("Export...", {export_w, 30.F}, can_go)) {
+        ImGui::CloseCurrentPopup();
+        export_alignment(app);
     }
     ImGui::EndPopup();
 }
@@ -5175,20 +5401,12 @@ Action draw_inspector(App& app) {
 
         if (theme::toolbar_button(
                 "Export SfM Alignment", {-1.F, 28.F},
-                !busy && can_export_sfm(app)))
-            action = Action::export_sfm;
+                !busy && can_export_alignment(app)))
+            open_alignment_export_panel(app);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Write the SfM stage to a standalone .asfm file and an\n"
-                "OpenMVS .mvs sidecar. Align/Train no longer write these.");
-        if (theme::toolbar_button(
-                "Export Sparse Cloud", {-1.F, 28.F},
-                !busy && can_export_sparse(app)))
-            export_sparse_cloud(app);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Write the sparse point cloud to a PLY you choose.\n"
-                "Alignment no longer writes this file automatically.");
+                "Save cameras and tracks as ASFM, COLMAP,\n"
+                "Nerfstudio / Blender, or OpenMVS.");
         if (app.has_asfm) {
             ImGui::Spacing();
             const std::string asfm_name =
@@ -6216,6 +6434,7 @@ int main(const int argc, char** argv) {
 
         draw_controls_window(app);
         draw_mesh_export_modal(app);
+        draw_alignment_export_modal(app);
         const ClearResultsAction clear_results_action =
             draw_clear_results_modal(app);
         if (app.close_requested) glfwSetWindowShouldClose(window, GLFW_TRUE);

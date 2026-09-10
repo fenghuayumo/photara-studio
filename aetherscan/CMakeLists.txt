@@ -205,6 +205,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/camera_selection.cpp
         src/sfm/reconstruct.cpp
         src/sfm/export_mvs.cpp
+        src/sfm/export_colmap.cpp
+        src/sfm/export_nerfstudio.cpp
         src/sfm/asfm.cpp
         src/sfm/appearance.cpp
         src/sfm/preview.cpp

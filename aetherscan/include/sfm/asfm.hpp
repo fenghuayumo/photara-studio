@@ -31,6 +31,11 @@ Scene load_asfm(
     const std::filesystem::path& path,
     const AsfmOptions& options = {});
 
+// ASCII XYZRGB PLY of triangulated tracks. Uses stored track colours when
+// present; otherwise writes a neutral grey.
+void save_sparse_ply(
+    const Scene& scene, const std::filesystem::path& path);
+
 std::vector<std::uint8_t> encode_asfm(
     const Scene& scene,
     const AsfmOptions& options = {});
