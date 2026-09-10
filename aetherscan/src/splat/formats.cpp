@@ -1421,6 +1421,19 @@ const char* gaussian_format_extension(const GaussianFormat format) noexcept {
     return "";
 }
 
+void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
+    if (degree > 3U)
+        throw std::runtime_error("SH degree must be between 0 and 3");
+    if (!model.sh.is_valid() || model.sh.shape().rank() != 3)
+        throw std::runtime_error("Gaussian model has no spherical harmonics");
+    if (degree >= model.sh_degree) return;
+    const auto bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
+    model.sh = model.sh.slice(1, 0, bases);
+    model.sh_degree = degree;
+    if (!model.sh.is_valid() || model.sh.shape()[1] != bases)
+        throw std::runtime_error("Failed to truncate spherical harmonics");
+}
+
 void save_gaussians(
     const GaussianModel& model, const std::filesystem::path& path,
     GaussianFormat format) {

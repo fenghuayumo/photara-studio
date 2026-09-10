@@ -195,8 +195,19 @@ struct App {
         bool show{};
         bool initialized{};
         int format{0};  // 0 ASFM, 1 COLMAP, 2 Nerfstudio/Blender, 3 OpenMVS
+        int path_format{-1};
         bool write_ply{true};
+        std::array<char, 1024> path{};
     } alignment_export;
+
+    struct SplatExportState {
+        bool show{};
+        bool initialized{};
+        int format{0};  // 0 PLY, 1 SOG, 2 SPZ, 3 GLB
+        int path_format{-1};
+        int sh_degree{3};
+        std::array<char, 1024> path{};
+    } splat_export;
 
     // OS file drops arrive on the GLFW callback and are consumed against the
     // last viewport rectangle on the following frame.
@@ -511,6 +522,18 @@ bool pick_file(
         COMDLG_FILTERSPEC splat_model_filters[] = {
             {L"Gaussian splat (*.ply;*.sog;*.spz;*.glb)", L"*.ply;*.sog;*.spz;*.glb"},
             {L"All files (*.*)", L"*.*"}};
+        if (kind == FilePickKind::splat_model && default_extension != nullptr) {
+            if (std::wcscmp(default_extension, L"sog") == 0) {
+                splat_model_filters[0] = {L"PlayCanvas SOG (*.sog)", L"*.sog"};
+            } else if (std::wcscmp(default_extension, L"spz") == 0) {
+                splat_model_filters[0] = {L"Niantic SPZ (*.spz)", L"*.spz"};
+            } else if (std::wcscmp(default_extension, L"glb") == 0) {
+                splat_model_filters[0] = {
+                    L"Khronos Gaussian GLB (*.glb)", L"*.glb"};
+            } else {
+                splat_model_filters[0] = {L"Gaussian PLY (*.ply)", L"*.ply"};
+            }
+        }
         COMDLG_FILTERSPEC mesh_filters[] = {
             {L"Stanford PLY (*.ply)", L"*.ply"},
             {L"All files (*.*)", L"*.*"}};
@@ -1425,29 +1448,124 @@ void ensure_mesh_loaded(App& app) {
     request_mesh_load(app, true);
 }
 
-std::wstring export_stem_wide(const App& app) {
-    const std::filesystem::path stem = app.layout.project_file.empty()
-        ? std::filesystem::path("project")
-        : app.layout.project_file.stem();
-    return stem.wstring();
+std::filesystem::path export_output_directory(const App& app) {
+    if (!app.layout.project_file.empty())
+        return app.layout.project_file.parent_path();
+    if (!app.layout.root.empty()) return app.layout.root;
+    return std::filesystem::current_path();
 }
 
+std::filesystem::path export_stem_path(const App& app) {
+    if (!app.layout.project_file.empty()) return app.layout.project_file.stem();
+    return std::filesystem::path("project");
+}
+
+std::wstring export_stem_wide(const App& app) {
+    return export_stem_path(app).wstring();
+}
+
+bool can_export_model(const App& app);
+
 aetherscan::splat::GaussianFormat splat_export_format(const App& app) {
-    switch (app.settings.splat_format) {
-        case 2: return aetherscan::splat::GaussianFormat::sog;
-        case 3: return aetherscan::splat::GaussianFormat::spz;
-        case 4: return aetherscan::splat::GaussianFormat::glb;
+    switch (app.splat_export.format) {
+        case 1: return aetherscan::splat::GaussianFormat::sog;
+        case 2: return aetherscan::splat::GaussianFormat::spz;
+        case 3: return aetherscan::splat::GaussianFormat::glb;
         default: return aetherscan::splat::GaussianFormat::ply;
     }
 }
 
 const wchar_t* splat_export_extension_wide(const App& app) {
-    switch (app.settings.splat_format) {
-        case 2: return L"sog";
-        case 3: return L"spz";
-        case 4: return L"glb";
+    switch (app.splat_export.format) {
+        case 1: return L"sog";
+        case 2: return L"spz";
+        case 3: return L"glb";
         default: return L"ply";
     }
+}
+
+int splat_export_format_from_settings(const int settings_format) {
+    switch (settings_format) {
+        case 2: return 1;
+        case 3: return 2;
+        case 4: return 3;
+        default: return 0;
+    }
+}
+
+int splat_settings_format_from_export(const int export_format) {
+    switch (export_format) {
+        case 1: return 2;
+        case 2: return 3;
+        case 3: return 4;
+        default: return 1;
+    }
+}
+
+std::filesystem::path suggested_splat_export_path(
+    const App& app, std::filesystem::path directory,
+    std::filesystem::path stem) {
+    if (directory.empty()) directory = export_output_directory(app);
+    if (stem.empty()) stem = export_stem_path(app);
+    auto path = directory / stem;
+    path += "_splat";
+    switch (app.splat_export.format) {
+        case 1: path += ".sog"; break;
+        case 2: path += ".spz"; break;
+        case 3: path += ".glb"; break;
+        default: path += ".ply"; break;
+    }
+    return path;
+}
+
+void sync_splat_export_path(App& app, const bool force) {
+    if (!force && app.splat_export.path_format == app.splat_export.format &&
+        app.splat_export.path[0] != '\0')
+        return;
+    std::filesystem::path directory = export_output_directory(app);
+    std::filesystem::path stem = export_stem_path(app);
+    if (app.splat_export.path[0] != '\0') {
+        const auto current = path_from_utf8_field(app.splat_export.path.data());
+        auto parent = current.parent_path();
+        if (!parent.empty()) directory = parent;
+        auto current_stem = current.stem();
+        const std::wstring text = current_stem.wstring();
+        constexpr wchar_t suffix[] = L"_splat";
+        const std::size_t suffix_n = 6;
+        if (text.size() > suffix_n &&
+            text.compare(text.size() - suffix_n, suffix_n, suffix) == 0)
+            current_stem = text.substr(0, text.size() - suffix_n);
+        if (!current_stem.empty()) stem = current_stem;
+    }
+    store_path_field(
+        app.splat_export.path, suggested_splat_export_path(app, directory, stem));
+    app.splat_export.path_format = app.splat_export.format;
+}
+
+bool browse_splat_export_path(App& app) {
+    sync_splat_export_path(app, false);
+    const wchar_t* extension = splat_export_extension_wide(app);
+    const auto current = path_from_utf8_field(app.splat_export.path.data());
+    const std::wstring name = current.filename().empty()
+        ? export_stem_wide(app) + L"_splat." + extension
+        : current.filename().wstring();
+    return pick_export_path(
+        L"Export Splat", app.splat_export.path, FilePickKind::splat_model,
+        name.c_str(), extension);
+}
+
+void open_splat_export_panel(App& app) {
+    if (app.job.running() || !can_export_model(app)) return;
+    if (!app.splat_export.initialized) {
+        app.splat_export.format =
+            splat_export_format_from_settings(app.settings.splat_format);
+        app.splat_export.sh_degree = 3;
+        app.splat_export.initialized = true;
+    }
+    app.splat_export.sh_degree =
+        std::clamp(app.splat_export.sh_degree, 0, 3);
+    sync_splat_export_path(app, app.splat_export.path[0] == '\0');
+    app.splat_export.show = true;
 }
 
 bool copy_existing_file(
@@ -1530,23 +1648,21 @@ void export_trained_model(App& app) {
     if (app.job.running() || !can_export_model(app)) return;
     const auto format = splat_export_format(app);
     const auto* extension = splat_export_extension_wide(app);
-    std::array<char, 1024> destination{};
-    const std::wstring name =
-        export_stem_wide(app) + L"_splat." + std::wstring(extension);
-    if (!pick_export_path(
-            L"Export Splat", destination, FilePickKind::splat_model,
-            name.c_str(), extension))
-        return;
-    const std::filesystem::path out = path_from_utf8_field(destination.data());
+    app.splat_export.sh_degree = std::clamp(app.splat_export.sh_degree, 0, 3);
+    std::filesystem::path out =
+        path_from_utf8_field(app.splat_export.path.data());
+    if (out.empty()) {
+        if (!browse_splat_export_path(app)) return;
+        out = path_from_utf8_field(app.splat_export.path.data());
+    }
+    if (out.empty()) return;
+    if (out.extension().empty()) {
+        out += ".";
+        out += std::filesystem::path(extension);
+        store_path_field(app.splat_export.path, out);
+    }
     try {
         const auto source = existing_splat_model(app);
-        const auto source_ext = lower_path_extension(source);
-        const auto dest_ext = lower_path_extension(out);
-        if (!source.empty() && source_ext == dest_ext &&
-            copy_existing_file(source, out)) {
-            set_message(app, "Exported splat", theme::success);
-            return;
-        }
         aetherscan::splat::GaussianModel model;
         if (!source.empty()) {
             model = aetherscan::splat::load_gaussians(source);
@@ -1556,8 +1672,26 @@ void export_trained_model(App& app) {
             model = aetherscan::splat::decode_gaussians(
                 archive.chunk(aetherscan::project::ChunkType::gaussians));
         }
+        const unsigned export_degree =
+            std::min(model.sh_degree,
+                     static_cast<unsigned>(app.splat_export.sh_degree));
+        const auto dest_ext = lower_path_extension(out);
+        const auto source_ext = lower_path_extension(source);
+        if (export_degree >= model.sh_degree && !source.empty() &&
+            source_ext == dest_ext && copy_existing_file(source, out)) {
+            app.settings.splat_format =
+                splat_settings_format_from_export(app.splat_export.format);
+            set_message(app, "Exported splat", theme::success);
+            return;
+        }
+        aetherscan::splat::restrict_sh_degree(model, export_degree);
         aetherscan::splat::save_gaussians(model, out, format);
-        set_message(app, "Exported splat", theme::success);
+        app.settings.splat_format =
+            splat_settings_format_from_export(app.splat_export.format);
+        std::string message = "Exported splat (SH ";
+        message += std::to_string(export_degree);
+        message += ")";
+        set_message(app, message, theme::success);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
     }
@@ -3114,6 +3248,94 @@ AlignmentExportFormat alignment_export_format(const App& app) {
     }
 }
 
+const wchar_t* alignment_export_extension_wide(const AlignmentExportFormat format) {
+    switch (format) {
+        case AlignmentExportFormat::colmap: return L"";
+        case AlignmentExportFormat::nerfstudio: return L"json";
+        case AlignmentExportFormat::openmvs: return L"mvs";
+        case AlignmentExportFormat::asfm:
+        default: return L"asfm";
+    }
+}
+
+std::filesystem::path alignment_export_directory(const App& app) {
+    return export_output_directory(app);
+}
+
+std::filesystem::path alignment_export_stem_name(const App& app) {
+    return export_stem_path(app);
+}
+
+std::filesystem::path suggested_alignment_export_path(
+    const App& app, const AlignmentExportFormat format,
+    std::filesystem::path directory, std::filesystem::path stem) {
+    if (directory.empty()) directory = alignment_export_directory(app);
+    if (stem.empty()) stem = alignment_export_stem_name(app);
+    auto path = directory / stem;
+    if (format == AlignmentExportFormat::colmap)
+        path += "_colmap";
+    else if (format == AlignmentExportFormat::nerfstudio)
+        path += ".json";
+    else if (format == AlignmentExportFormat::openmvs)
+        path += ".mvs";
+    else
+        path += ".asfm";
+    return path;
+}
+
+std::filesystem::path alignment_export_stem_from_path(
+    const std::filesystem::path& current, const bool current_is_colmap) {
+    std::filesystem::path name = current_is_colmap || current.extension().empty()
+        ? current.filename()
+        : current.stem();
+    const std::wstring text = name.wstring();
+    constexpr wchar_t suffix[] = L"_colmap";
+    const std::size_t suffix_n = 7;
+    if (text.size() > suffix_n &&
+        text.compare(text.size() - suffix_n, suffix_n, suffix) == 0)
+        name = text.substr(0, text.size() - suffix_n);
+    if (name.empty()) name = "project";
+    return name;
+}
+
+void sync_alignment_export_path(App& app, const bool force) {
+    const auto format = alignment_export_format(app);
+    if (!force && app.alignment_export.path_format == app.alignment_export.format &&
+        app.alignment_export.path[0] != '\0')
+        return;
+    std::filesystem::path directory = alignment_export_directory(app);
+    std::filesystem::path stem = alignment_export_stem_name(app);
+    if (app.alignment_export.path[0] != '\0') {
+        const auto current =
+            path_from_utf8_field(app.alignment_export.path.data());
+        const bool was_colmap = app.alignment_export.path_format == 1;
+        auto parent = current.parent_path();
+        if (!parent.empty()) directory = parent;
+        const auto current_stem =
+            alignment_export_stem_from_path(current, was_colmap);
+        if (!current_stem.empty()) stem = current_stem;
+    }
+    store_path_field(
+        app.alignment_export.path,
+        suggested_alignment_export_path(app, format, directory, stem));
+    app.alignment_export.path_format = app.alignment_export.format;
+}
+
+bool browse_alignment_export_path(App& app) {
+    const auto format = alignment_export_format(app);
+    sync_alignment_export_path(app, false);
+    if (format == AlignmentExportFormat::colmap)
+        return pick_folder(L"Export COLMAP Model", app.alignment_export.path);
+    const wchar_t* extension = alignment_export_extension_wide(format);
+    const auto current = path_from_utf8_field(app.alignment_export.path.data());
+    const std::wstring name = current.filename().empty()
+        ? export_stem_wide(app) + L"." + extension
+        : current.filename().wstring();
+    return pick_export_path(
+        L"Export SfM Alignment", app.alignment_export.path,
+        FilePickKind::alignment, name.c_str(), extension);
+}
+
 void open_alignment_export_panel(App& app) {
     if (app.job.running() || !can_export_alignment(app)) return;
     if (!app.alignment_export.initialized) {
@@ -3121,6 +3343,7 @@ void open_alignment_export_panel(App& app) {
         app.alignment_export.write_ply = true;
         app.alignment_export.initialized = true;
     }
+    sync_alignment_export_path(app, app.alignment_export.path[0] == '\0');
     app.alignment_export.show = true;
 }
 
@@ -3136,28 +3359,19 @@ void export_alignment(App& app) {
         return;
     }
 
-    std::array<char, 1024> destination{};
-    std::filesystem::path out;
-    if (format == AlignmentExportFormat::colmap) {
-        if (!pick_folder(L"Export COLMAP Model", destination)) return;
-        out = path_from_utf8_field(destination.data());
-    } else {
-        const wchar_t* extension = format == AlignmentExportFormat::openmvs
-            ? L"mvs"
-            : (format == AlignmentExportFormat::nerfstudio ? L"json" : L"asfm");
-        const std::wstring name =
-            export_stem_wide(app) + L"." + extension;
-        if (!pick_export_path(
-                L"Export SfM Alignment", destination, FilePickKind::alignment,
-                name.c_str(), extension))
-            return;
-        out = path_from_utf8_field(destination.data());
-        if (out.extension().empty()) {
-            out += ".";
-            out += std::filesystem::path(extension);
-        }
+    std::filesystem::path out =
+        path_from_utf8_field(app.alignment_export.path.data());
+    if (out.empty()) {
+        if (!browse_alignment_export_path(app)) return;
+        out = path_from_utf8_field(app.alignment_export.path.data());
     }
     if (out.empty()) return;
+    if (format != AlignmentExportFormat::colmap && out.extension().empty()) {
+        const wchar_t* extension = alignment_export_extension_wide(format);
+        out += ".";
+        out += std::filesystem::path(extension);
+        store_path_field(app.alignment_export.path, out);
+    }
 
     try {
         auto scene = load_alignment_scene(app);
@@ -3800,7 +4014,7 @@ Action draw_menu_bar(App& app) {
         if (ImGui::MenuItem(
                 "Export Splat...", nullptr, false,
                 !busy && can_export_model(app)))
-            export_trained_model(app);
+            open_splat_export_panel(app);
         if (ImGui::MenuItem(
                 "Export Mesh...", nullptr, false,
                 !busy && can_export_mesh_file(app)))
@@ -4162,8 +4376,9 @@ void draw_alignment_export_modal(App& app) {
     ImGui::SetNextItemWidth(-1.F);
     const char* formats[] = {
         "AetherScan ASFM", "COLMAP", "Nerfstudio / Blender", "OpenMVS"};
-    ImGui::Combo(
-        "##alignment_format", &app.alignment_export.format, formats, 4);
+    if (ImGui::Combo(
+            "##alignment_format", &app.alignment_export.format, formats, 4))
+        sync_alignment_export_path(app, true);
     const auto format = alignment_export_format(app);
     const bool mvs_ok = alignment_mvs_supported(app);
     if (format == AlignmentExportFormat::asfm)
@@ -4178,6 +4393,17 @@ void draw_alignment_export_modal(App& app) {
         theme::caption("OpenMVS interface for Viewer and densify import.");
 
     ImGui::Spacing();
+    theme::caption(
+        format == AlignmentExportFormat::colmap ? "Folder" : "Location");
+    ImGui::SetNextItemWidth(-78.F);
+    ImGui::InputText(
+        "##alignment_path", app.alignment_export.path.data(),
+        app.alignment_export.path.size());
+    ImGui::SameLine(0.F, 8.F);
+    if (ImGui::Button("Browse", {70.F, 0.F}))
+        browse_alignment_export_path(app);
+
+    ImGui::Spacing();
     ImGui::Checkbox("Export point cloud", &app.alignment_export.write_ply);
     if (format == AlignmentExportFormat::colmap)
         theme::caption("Writes points3D.txt and points3D.ply.");
@@ -4185,26 +4411,26 @@ void draw_alignment_export_modal(App& app) {
         theme::caption("Writes a coloured PLY next to the scene file.");
 
     ImGui::Spacing();
-    const std::string stem = path_to_utf8(
-        app.layout.project_file.empty()
-            ? std::filesystem::path("project")
-            : app.layout.project_file.stem());
+    const auto out = path_from_utf8_field(app.alignment_export.path.data());
+    const std::string file_name = path_to_utf8(
+        out.filename().empty() ? alignment_export_stem_name(app)
+                               : out.filename());
     std::vector<std::string> files;
-    if (format == AlignmentExportFormat::asfm)
-        files.push_back(stem + ".asfm");
-    else if (format == AlignmentExportFormat::colmap) {
+    if (format == AlignmentExportFormat::colmap) {
         files.push_back("cameras.txt");
         files.push_back("images.txt");
         files.push_back("points3D.txt");
         if (app.alignment_export.write_ply)
             files.push_back("points3D.ply");
-    } else if (format == AlignmentExportFormat::nerfstudio)
-        files.push_back(stem + ".json");
-    else
-        files.push_back(stem + ".mvs");
-    if (app.alignment_export.write_ply &&
-        format != AlignmentExportFormat::colmap)
-        files.push_back(stem + "_sparse.ply");
+    } else {
+        files.push_back(file_name);
+        if (app.alignment_export.write_ply) {
+            auto ply = out.empty() ? alignment_export_stem_name(app) : out;
+            ply.replace_extension();
+            ply += "_sparse.ply";
+            files.push_back(path_to_utf8(ply.filename()));
+        }
+    }
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_2);
     const float writes_h =
@@ -4235,10 +4461,96 @@ void draw_alignment_export_modal(App& app) {
         ImGui::CloseCurrentPopup();
     ImGui::SameLine(0.F, 8.F);
     const bool can_go =
-        format != AlignmentExportFormat::openmvs || mvs_ok;
-    if (theme::primary_button("Export...", {export_w, 30.F}, can_go)) {
+        app.alignment_export.path[0] != '\0' &&
+        (format != AlignmentExportFormat::openmvs || mvs_ok);
+    if (theme::primary_button("Export", {export_w, 30.F}, can_go)) {
         ImGui::CloseCurrentPopup();
         export_alignment(app);
+    }
+    ImGui::EndPopup();
+}
+
+void draw_splat_export_modal(App& app) {
+    constexpr const char* popup = "Export Splat";
+    if (app.splat_export.show) {
+        ImGui::OpenPopup(popup);
+        app.splat_export.show = false;
+    }
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    ImGui::SetNextWindowSize({448.F, 0.F}, ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(
+            popup, nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        return;
+
+    theme::caption("Format");
+    ImGui::SetNextItemWidth(-1.F);
+    const char* formats[] = {"PLY", "SOG", "SPZ", "GLB"};
+    if (ImGui::Combo("##splat_export_format", &app.splat_export.format, formats, 4))
+        sync_splat_export_path(app, true);
+    if (app.splat_export.format == 1)
+        theme::caption("PlayCanvas compressed Gaussians.");
+    else if (app.splat_export.format == 2)
+        theme::caption("Niantic SPZ.");
+    else if (app.splat_export.format == 3)
+        theme::caption("Khronos KHR_gaussian_splatting GLB.");
+    else
+        theme::caption("Standard 3DGS PLY.");
+
+    ImGui::Spacing();
+    theme::caption("SH degree");
+    ImGui::SetNextItemWidth(-1.F);
+    const char* degrees[] = {"0", "1", "2", "3"};
+    ImGui::Combo(
+        "##splat_sh_degree", &app.splat_export.sh_degree, degrees, 4);
+    theme::caption("0 keeps only base colour. 3 is the training default.");
+
+    ImGui::Spacing();
+    theme::caption("Location");
+    ImGui::SetNextItemWidth(-78.F);
+    ImGui::InputText(
+        "##splat_path", app.splat_export.path.data(),
+        app.splat_export.path.size());
+    ImGui::SameLine(0.F, 8.F);
+    if (ImGui::Button("Browse", {70.F, 0.F}))
+        browse_splat_export_path(app);
+
+    ImGui::Spacing();
+    const auto out = path_from_utf8_field(app.splat_export.path.data());
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::surface_2);
+    const float writes_h = ImGui::GetTextLineHeightWithSpacing() * 2.F + 14.F;
+    ImGui::BeginChild(
+        "##splat_writes", ImVec2(-1.F, writes_h), true,
+        ImGuiWindowFlags_NoScrollbar);
+    theme::caption("Writes");
+    ImGui::PushFont(theme::mono_font());
+    ImGui::TextUnformatted(
+        path_to_utf8(out.filename().empty() ? std::filesystem::path("splat")
+                                            : out.filename())
+            .c_str());
+    ImGui::PopFont();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const float export_w = 108.F;
+    const float cancel_w = 88.F;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::SetCursorPosX(
+        ImGui::GetCursorPosX() + std::max(0.F, avail - export_w - cancel_w - 8.F));
+    if (theme::toolbar_button("Cancel", {cancel_w, 30.F}))
+        ImGui::CloseCurrentPopup();
+    ImGui::SameLine(0.F, 8.F);
+    if (theme::primary_button(
+            "Export", {export_w, 30.F}, app.splat_export.path[0] != '\0')) {
+        ImGui::CloseCurrentPopup();
+        export_trained_model(app);
     }
     ImGui::EndPopup();
 }
@@ -5482,23 +5794,14 @@ Action draw_inspector(App& app) {
                 "GaussianWrapping's learned normal field.\n"
                 "Off (default) trains the GGGS path.");
         ImGui::EndDisabled();
-        theme::caption("Export format");
-        ImGui::SetNextItemWidth(-1.F);
-        const char* splat_formats[] = {
-            "Auto (PLY)", "PLY", "SOG", "SPZ", "GLB"};
-        ImGui::BeginDisabled(busy);
-        ImGui::Combo(
-            "##splat_format", &app.settings.splat_format, splat_formats, 5);
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Format used when you Export Splat: PLY, PlayCanvas\n"
-                "SOG, Niantic SPZ, or Khronos KHR_gaussian_splatting GLB.\n"
-                "Training no longer writes this file automatically.");
         if (theme::toolbar_button(
                 "Export Splat", {-1.F, 28.F},
                 !busy && can_export_model(app)))
-            export_trained_model(app);
+            open_splat_export_panel(app);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Save the trained Gaussians. Choose PLY, SOG, SPZ, or GLB\n"
+                "and the spherical-harmonics degree.");
         ImGui::Spacing();
     }
 
@@ -6435,6 +6738,7 @@ int main(const int argc, char** argv) {
         draw_controls_window(app);
         draw_mesh_export_modal(app);
         draw_alignment_export_modal(app);
+        draw_splat_export_modal(app);
         const ClearResultsAction clear_results_action =
             draw_clear_results_modal(app);
         if (app.close_requested) glfwSetWindowShouldClose(window, GLFW_TRUE);

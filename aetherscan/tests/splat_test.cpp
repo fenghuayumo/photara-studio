@@ -1110,6 +1110,19 @@ void test_gaussian_format_roundtrip() {
         std::filesystem::temp_directory_path() /
             "aetherscan_splat_roundtrip.glb",
         GaussianFormat::glb, 1e-5F, "GLB Gaussian round trip changed values");
+
+    restrict_sh_degree(model, 0);
+    require(model.sh_degree == 0, "SH restrict did not lower the degree");
+    require(
+        model.sh.shape()[1] == 1, "SH restrict did not drop higher bands");
+    const auto ply = std::filesystem::temp_directory_path() /
+                     "aetherscan_splat_sh0.ply";
+    save_gaussians(model, ply, GaussianFormat::ply);
+    const GaussianModel truncated = load_gaussians(ply);
+    std::filesystem::remove(ply);
+    require(truncated.sh_degree == 0, "PLY export did not keep SH degree 0");
+    require(
+        truncated.sh.shape()[1] == 1, "PLY export kept extra SH bands");
 }
 
 void test_pam_smoke() {
