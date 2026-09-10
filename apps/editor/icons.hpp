@@ -20,6 +20,8 @@ enum class Icon {
     train,
     output,
     stop,
+    pause,
+    play,
     points,
     splat,
     rings,

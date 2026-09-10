@@ -279,6 +279,23 @@ void draw(
                 point(min, max, 0.28F, 0.28F), point(min, max, 0.72F, 0.72F),
                 colour, 1.F);
             break;
+        case Icon::pause:
+            draw_list->AddRectFilled(
+                point(min, max, 0.28F, 0.22F), point(min, max, 0.44F, 0.78F),
+                colour, 1.F);
+            draw_list->AddRectFilled(
+                point(min, max, 0.56F, 0.22F), point(min, max, 0.72F, 0.78F),
+                colour, 1.F);
+            break;
+        case Icon::play: {
+            const ImVec2 triangle[] = {
+                point(min, max, 0.30F, 0.20F),
+                point(min, max, 0.30F, 0.80F),
+                point(min, max, 0.78F, 0.50F)};
+            draw_list->AddTriangleFilled(
+                triangle[0], triangle[1], triangle[2], colour);
+            break;
+        }
         case Icon::points:
             draw_list->AddCircleFilled(
                 point(min, max, 0.30F, 0.62F), extent * 0.09F, colour);

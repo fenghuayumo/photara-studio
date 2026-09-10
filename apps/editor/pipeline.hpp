@@ -143,6 +143,8 @@ public:
     void consume(const std::string& line);
     void mark_finished(int exit_code);
     void reset();
+    void pause_clock();
+    void resume_clock();
 
     [[nodiscard]] JobKind kind() const { return kind_; }
     [[nodiscard]] Stage stage() const { return stage_; }
@@ -190,15 +192,21 @@ public:
 
     void start(const std::string& command, const std::filesystem::path& log);
     void poll();
+    // Suspend the CLI and every process in its job object (including ffmpeg).
+    // Does not discard progress; pair with resume(). stop() still terminates.
+    void pause();
+    void resume();
     void stop();
 
     [[nodiscard]] bool running() const { return running_; }
+    [[nodiscard]] bool paused() const { return paused_; }
     [[nodiscard]] int exit_code() const { return exit_code_; }
     // True on the frame the process transitions from running to finished.
     [[nodiscard]] bool consume_completion();
 
 private:
     std::atomic_bool running_{};
+    std::atomic_bool paused_{};
     std::atomic_int exit_code_{-1};
     bool completion_pending_{};
 #if defined(_WIN32)

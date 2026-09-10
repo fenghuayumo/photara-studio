@@ -16,6 +16,10 @@
 #include <string_view>
 #include <utility>
 
+#if defined(_WIN32)
+#include <tlhelp32.h>
+#endif
+
 namespace editor {
 namespace {
 
@@ -196,6 +200,122 @@ const char* strategy_flag(const int index) {
         default: return "adc_plus";
     }
 }
+
+#if defined(_WIN32)
+using NtProcessOp = LONG(NTAPI*)(HANDLE);
+
+NtProcessOp load_nt_process_op(const char* name) {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return nullptr;
+    return reinterpret_cast<NtProcessOp>(GetProcAddress(ntdll, name));
+}
+
+bool set_threads_suspended(const DWORD pid, const bool suspend) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return false;
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    bool any = false;
+    if (Thread32First(snapshot, &entry)) {
+        do {
+            if (entry.th32OwnerProcessID != pid) continue;
+            HANDLE thread =
+                OpenThread(THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
+            if (!thread) continue;
+            const DWORD result = suspend ? SuspendThread(thread)
+                                         : ResumeThread(thread);
+            if (result != static_cast<DWORD>(-1)) any = true;
+            CloseHandle(thread);
+        } while (Thread32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return any;
+}
+
+bool set_handle_suspended(HANDLE process, const bool suspend) {
+    static const NtProcessOp nt_suspend = load_nt_process_op("NtSuspendProcess");
+    static const NtProcessOp nt_resume = load_nt_process_op("NtResumeProcess");
+    const NtProcessOp op = suspend ? nt_suspend : nt_resume;
+    if (op != nullptr) return op(process) >= 0;
+    const DWORD pid = GetProcessId(process);
+    if (pid == 0) return false;
+    return set_threads_suspended(pid, suspend);
+}
+
+void add_unique_pid(std::vector<DWORD>& pids, const DWORD pid) {
+    if (pid == 0) return;
+    for (const DWORD existing : pids)
+        if (existing == pid) return;
+    pids.push_back(pid);
+}
+
+std::vector<DWORD> job_process_ids(HANDLE job, HANDLE process) {
+    std::vector<DWORD> pids;
+    if (process) add_unique_pid(pids, GetProcessId(process));
+    if (!job) return pids;
+
+    std::size_t cap = 16;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        const std::size_t bytes =
+            offsetof(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) +
+            sizeof(ULONG_PTR) * cap;
+        std::vector<std::uint8_t> buffer(bytes);
+        auto* list =
+            reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(buffer.data());
+        if (QueryInformationJobObject(
+                job, JobObjectBasicProcessIdList, list,
+                static_cast<DWORD>(bytes), nullptr)) {
+            for (DWORD i = 0; i < list->NumberOfProcessIdsInList; ++i)
+                add_unique_pid(
+                    pids, static_cast<DWORD>(list->ProcessIdList[i]));
+            break;
+        }
+        if (GetLastError() != ERROR_MORE_DATA) break;
+        if (list->NumberOfAssignedProcesses > cap)
+            cap = list->NumberOfAssignedProcesses;
+        else
+            cap *= 2;
+    }
+    return pids;
+}
+
+HANDLE open_suspend_handle(HANDLE root_process, const DWORD pid) {
+    if (root_process && GetProcessId(root_process) == pid) return root_process;
+    HANDLE handle = OpenProcess(
+        PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+        pid);
+    if (!handle) handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    return handle;
+}
+
+bool apply_suspend_to_pid(
+    HANDLE root_process, const DWORD pid, const bool suspend) {
+    HANDLE handle = open_suspend_handle(root_process, pid);
+    if (!handle) return false;
+    const bool ok = set_handle_suspended(handle, suspend);
+    if (handle != root_process) CloseHandle(handle);
+    return ok;
+}
+
+// Freeze or thaw the CLI and every process in its job object (ffmpeg).
+// Suspend the root first so it cannot spawn new children mid-pause.
+bool set_job_tree_suspended(HANDLE job, HANDLE process, const bool suspend) {
+    if (!process) return false;
+    const DWORD root = GetProcessId(process);
+    if (root == 0) return false;
+    if (suspend) {
+        if (!apply_suspend_to_pid(process, root, true)) return false;
+        for (const DWORD pid : job_process_ids(job, process)) {
+            if (pid != root) apply_suspend_to_pid(process, pid, true);
+        }
+        return true;
+    }
+    for (const DWORD pid : job_process_ids(job, process)) {
+        if (pid != root) apply_suspend_to_pid(process, pid, false);
+    }
+    return apply_suspend_to_pid(process, root, false);
+}
+#endif
 
 const char* mesh_method_flag(const int index) {
     switch (index) {
@@ -632,6 +752,19 @@ void RunMonitor::mark_finished(const int exit_code) {
     }
 }
 
+void RunMonitor::pause_clock() {
+    if (!has_clock_ || !clock_running_) return;
+    stopped_ = std::chrono::steady_clock::now();
+    clock_running_ = false;
+}
+
+void RunMonitor::resume_clock() {
+    if (!has_clock_ || clock_running_) return;
+    const auto now = std::chrono::steady_clock::now();
+    started_ += now - stopped_;
+    clock_running_ = true;
+}
+
 double RunMonitor::elapsed_seconds() const {
     if (!has_clock_) return -1.0;
     const auto end = clock_running_ ? std::chrono::steady_clock::now()
@@ -691,6 +824,7 @@ ProcessJob::~ProcessJob() { stop(); }
 void ProcessJob::start(
     const std::string& command, const std::filesystem::path& log) {
     if (running_.exchange(true)) return;
+    paused_ = false;
     exit_code_ = -1;
     completion_pending_ = false;
 #if defined(_WIN32)
@@ -755,10 +889,27 @@ void ProcessJob::poll() {
     if (GetExitCodeProcess(process_, &code) && code != STILL_ACTIVE) {
         exit_code_ = static_cast<int>(code);
         running_ = false;
+        paused_ = false;
         completion_pending_ = true;
         CloseHandle(std::exchange(process_, nullptr));
         if (job_) CloseHandle(std::exchange(job_, nullptr));
     }
+#endif
+}
+
+void ProcessJob::pause() {
+#if defined(_WIN32)
+    if (!running_ || paused_ || !process_) return;
+    if (!set_job_tree_suspended(job_, process_, true)) return;
+    paused_ = true;
+#endif
+}
+
+void ProcessJob::resume() {
+#if defined(_WIN32)
+    if (!running_ || !paused_ || !process_) return;
+    if (!set_job_tree_suspended(job_, process_, false)) return;
+    paused_ = false;
 #endif
 }
 
@@ -776,6 +927,7 @@ void ProcessJob::stop() {
         completion_pending_ = true;
     }
 #endif
+    paused_ = false;
     running_ = false;
 }
 

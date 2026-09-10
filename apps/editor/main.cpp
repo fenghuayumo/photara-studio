@@ -2086,12 +2086,27 @@ const char* running_job_caption(const JobKind kind) {
     return "READY";
 }
 
-const char* stop_job_label(const JobKind kind) {
+const char* job_state_caption(const App& app) {
+    if (!app.job.running()) return app.viewer.running() ? "VIEWING" : "READY";
+    if (app.job.paused()) return "PAUSED";
+    return running_job_caption(app.active_job);
+}
+
+const char* pause_job_label(const JobKind kind) {
     switch (kind) {
-        case JobKind::align: return "Stop Alignment";
-        case JobKind::export_sfm: return "Stop Export";
-        case JobKind::dense: return "Stop Dense MVS";
-        default: return "Stop Training";
+        case JobKind::align: return "Pause Alignment";
+        case JobKind::export_sfm: return "Pause Export";
+        case JobKind::dense: return "Pause Dense MVS";
+        default: return "Pause Training";
+    }
+}
+
+const char* resume_job_label(const JobKind kind) {
+    switch (kind) {
+        case JobKind::align: return "Resume Alignment";
+        case JobKind::export_sfm: return "Resume Export";
+        case JobKind::dense: return "Resume Dense MVS";
+        default: return "Resume Training";
     }
 }
 
@@ -2361,7 +2376,7 @@ void on_job_finished(App& app) {
     if (code != 0) {
         std::string reason = app.monitor.last_error();
         if (reason.empty())
-            reason = code == 2 ? "Stopped by user"
+            reason = code == 2 ? "Cancelled by user"
                                : "Exited with code " + std::to_string(code);
         set_message(
             app,
@@ -2421,7 +2436,17 @@ void on_job_finished(App& app) {
 // ---------------------------------------------------------------------------
 // UI fragments
 
-enum class Action { none, align, train, dense, export_sfm, stop, reveal };
+enum class Action {
+    none,
+    align,
+    train,
+    dense,
+    export_sfm,
+    pause,
+    resume,
+    stop,
+    reveal
+};
 
 int workflow_step(const App& app) {
     const bool training =
@@ -2532,8 +2557,11 @@ Action draw_menu_bar(App& app) {
         if (io.KeyShift) save_project_as(app);
         else save_project(app);
     }
-    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape) && busy)
-        action = Action::stop;
+    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape) && busy) {
+        if (io.KeyShift) action = Action::stop;
+        else
+            action = app.job.paused() ? Action::resume : Action::pause;
+    }
     if (!io.WantTextInput && !io.KeyCtrl && !io.KeyAlt &&
         ImGui::IsKeyPressed(ImGuiKey_2))
         set_viewport_workspace(app, ViewportWorkspace::image_2d);
@@ -2612,7 +2640,13 @@ Action draw_menu_bar(App& app) {
                     has_reconstruction_result(app)))
             app.show_clear_results = true;
         ImGui::Separator();
-        if (ImGui::MenuItem("Stop Active Job", "Esc", false, busy))
+        if (app.job.paused()) {
+            if (ImGui::MenuItem("Resume Job", "Esc", false, busy))
+                action = Action::resume;
+        } else if (ImGui::MenuItem("Pause Job", "Esc", false, busy)) {
+            action = Action::pause;
+        }
+        if (ImGui::MenuItem("Cancel Active Job", "Shift+Esc", false, busy))
             action = Action::stop;
         ImGui::EndMenu();
     }
@@ -2813,7 +2847,8 @@ Action draw_toolbar(App& app) {
     const bool aligning = busy && app.active_job == JobKind::align;
     if (aligning) {
         icons::labeled_button(
-            "##aligning", icons::Icon::align, "Aligning...", {132.F, 32.F},
+            "##aligning", icons::Icon::align,
+            app.job.paused() ? "Paused" : "Aligning...", {132.F, 32.F},
             icons::ButtonStyle::primary, false, true);
     } else if (icons::labeled_button(
                    "##align", icons::Icon::align,
@@ -2828,7 +2863,8 @@ Action draw_toolbar(App& app) {
     const bool training = busy && app.active_job == JobKind::train;
     if (training) {
         icons::labeled_button(
-            "##training", icons::Icon::train, "Training...", {126.F, 32.F},
+            "##training", icons::Icon::train,
+            app.job.paused() ? "Paused" : "Training...", {126.F, 32.F},
             icons::ButtonStyle::primary, false, true);
     } else {
         const bool ready = !busy && images_ready;
@@ -2873,10 +2909,20 @@ Action draw_toolbar(App& app) {
         action = Action::reveal;
     if (busy) {
         ImGui::SameLine();
-        if (icons::labeled_button(
-                "##stop", icons::Icon::stop, "Stop", {76.F, 32.F},
-                icons::ButtonStyle::danger))
-            action = Action::stop;
+        if (app.job.paused()) {
+            if (icons::labeled_button(
+                    "##resume", icons::Icon::play, "Resume", {96.F, 32.F},
+                    icons::ButtonStyle::primary, true, false,
+                    "Continue the paused reconstruction."))
+                action = Action::resume;
+        } else if (icons::labeled_button(
+                       "##pause", icons::Icon::pause, "Pause", {96.F, 32.F},
+                       icons::ButtonStyle::normal, true, false,
+                       "Freeze the running job without discarding progress.\n"
+                       "Cancel from Reconstruction > Cancel Active Job "
+                       "(Shift+Esc) to abort.")) {
+            action = Action::pause;
+        }
     }
 
     const char* transport = "CUDA / Vulkan  |  external memory";
@@ -3438,9 +3484,7 @@ void draw_viewport_panel(App& app) {
 
     const char* state = app.workspace == ViewportWorkspace::image_2d
         ? "IMAGE QA"
-        : (app.job.running()
-               ? running_job_caption(app.active_job)
-               : (app.viewer.running() ? "VIEWING" : "READY"));
+        : job_state_caption(app);
     const float state_width = ImGui::CalcTextSize(state).x;
     ImGui::SetCursorPos({
         content_start.x + std::max(8.F, header_width - state_width - 14.F),
@@ -4057,9 +4101,22 @@ Action draw_inspector(App& app) {
     // Context-appropriate primary action pinned to the bottom of the panel.
     ImGui::Dummy({0, 10.F});
     if (busy) {
-        if (theme::danger_button(
-                stop_job_label(app.active_job), {-1.F, 40.F}))
-            action = Action::stop;
+        if (app.job.paused()) {
+            if (icons::labeled_button(
+                    "##resume_job", icons::Icon::play,
+                    resume_job_label(app.active_job), {-1.F, 40.F},
+                    icons::ButtonStyle::primary, true, false,
+                    "Continue the paused reconstruction."))
+                action = Action::resume;
+        } else if (icons::labeled_button(
+                       "##pause_job", icons::Icon::pause,
+                       pause_job_label(app.active_job), {-1.F, 40.F},
+                       icons::ButtonStyle::normal, true, false,
+                       "Freeze the running job without discarding progress.\n"
+                       "Cancel from Reconstruction > Cancel Active Job "
+                       "(Shift+Esc) to abort.")) {
+            action = Action::pause;
+        }
     } else if (has_external_dataset(app)) {
         if (theme::primary_button(
                 app.settings.build_mesh ? "Train External 3DGS + Mesh"
@@ -4115,9 +4172,11 @@ void draw_status_bar(const App& app) {
     if (!app.show_status_bar) return;
 
     const bool busy = app.job.running();
-    const ImVec4 background = busy
-        ? ImVec4(0.027F, 0.208F, 0.325F, 1.F)
-        : ImVec4(0.086F, 0.090F, 0.102F, 1.F);
+    const bool paused = busy && app.job.paused();
+    const ImVec4 background = paused
+        ? ImVec4(0.220F, 0.140F, 0.040F, 1.F)
+        : (busy ? ImVec4(0.027F, 0.208F, 0.325F, 1.F)
+                : ImVec4(0.086F, 0.090F, 0.102F, 1.F));
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(
         viewport->WorkPos.x,
@@ -4140,7 +4199,10 @@ void draw_status_bar(const App& app) {
     ImGui::SetCursorPos({12.F, centre_y});
     ImVec4 state_colour = theme::inactive;
     icons::Icon state_icon = icons::Icon::cube;
-    if (busy) {
+    if (paused) {
+        state_colour = theme::warning;
+        state_icon = icons::Icon::pause;
+    } else if (busy) {
         state_colour = theme::accent;
         state_icon = app.active_job == JobKind::train ? icons::Icon::train
                                                       : icons::Icon::align;
@@ -4159,7 +4221,9 @@ void draw_status_bar(const App& app) {
     ImGui::SameLine(0.F, 8.F);
     ImGui::SetCursorPosY(centre_y);
     if (busy) {
-        const std::string headline = app.monitor.headline();
+        const std::string headline = paused
+            ? ("Paused  |  " + app.monitor.headline())
+            : app.monitor.headline();
         ImGui::TextUnformatted(headline.c_str());
     } else if (!app.message.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, app.message_colour);
@@ -4204,7 +4268,14 @@ void draw_status_bar(const App& app) {
         const float fraction = app.monitor.fraction();
         const double eta = app.monitor.eta_seconds();
         char trailing[96];
-        if (fraction >= 0.F && eta >= 0.0)
+        if (paused) {
+            if (fraction >= 0.F)
+                std::snprintf(
+                    trailing, sizeof(trailing), "%3.0f%%   paused",
+                    fraction * 100.F);
+            else
+                std::snprintf(trailing, sizeof(trailing), "paused");
+        } else if (fraction >= 0.F && eta >= 0.0)
             std::snprintf(
                 trailing, sizeof(trailing), "%3.0f%%   ETA %s", fraction * 100.F,
                 format_duration(eta).c_str());
@@ -4220,8 +4291,11 @@ void draw_status_bar(const App& app) {
         ImGui::SameLine(bar_x);
         ImGui::SetCursorPosY((height - 7.F) * 0.5F);
         theme::progress_track(
-            {bar_width, 7.F}, fraction,
-            fraction < 0.F ? theme::accent : ImVec4(0.55F, 0.84F, 1.F, 1.F));
+            {bar_width, 7.F},
+            paused && fraction < 0.F ? 0.F : fraction,
+            paused ? theme::warning
+                   : (fraction < 0.F ? theme::accent
+                                     : ImVec4(0.55F, 0.84F, 1.F, 1.F)));
         ImGui::SameLine(0.F, 12.F);
         ImGui::SetCursorPosY(centre_y);
         ImGui::TextUnformatted(trailing);
@@ -4450,9 +4524,31 @@ int main(const int argc, char** argv) {
             case Action::export_sfm:
                 if (!app.smoke_mode) start_export_sfm(app);
                 break;
+            case Action::pause:
+                app.job.pause();
+                if (app.job.paused()) {
+                    app.monitor.pause_clock();
+                    set_message(
+                        app, "Paused. Press Resume to continue.",
+                        theme::warning);
+                } else {
+                    set_message(
+                        app, "Could not pause the running job", theme::danger);
+                }
+                break;
+            case Action::resume:
+                app.job.resume();
+                if (!app.job.paused()) {
+                    app.monitor.resume_clock();
+                    set_message(app, "Resumed", theme::accent);
+                } else {
+                    set_message(
+                        app, "Could not resume the paused job", theme::danger);
+                }
+                break;
             case Action::stop:
                 app.job.stop();
-                set_message(app, "Stopping...", theme::warning);
+                set_message(app, "Cancelling...", theme::warning);
                 break;
             case Action::reveal: reveal_in_explorer(app.layout.root); break;
             case Action::none: break;
