@@ -15,9 +15,6 @@
 #include "sfm/export_mvs.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
-#if defined(AETHERSCAN_HAS_TEXTURE)
-#include "texture/mesh_preview.hpp"
-#endif
 
 #include "imgui_impl_glfw.h"
 #include "imgui_internal.h"
@@ -91,19 +88,13 @@ struct App {
     std::future<MeshLoad> pending_mesh_load;
     bool frame_mesh_on_load{};
     bool mesh_load_failed{};
-#if defined(AETHERSCAN_HAS_TEXTURE)
-    std::unique_ptr<aetherscan::texture::MeshPreviewRasterizer>
-        mesh_rasterizer;
-    gpu::PreviewTexture mesh_preview;
+    gpu::MeshPreviewRenderer mesh_renderer;
     std::vector<float> mesh_gpu_positions;
     std::vector<float> mesh_gpu_normals;
     std::vector<float> mesh_gpu_colours;
     std::vector<std::uint32_t> mesh_gpu_indices;
-    SplatPreviewCamera mesh_gpu_camera{};
-    bool mesh_gpu_wireframe{};
-    bool mesh_gpu_vertex_colour{};
+    bool mesh_gpu_uploaded{};
     bool mesh_gpu_failed{};
-#endif
     OrbitCamera camera;
     ViewOptions view_options;
     ViewportGizmoState gizmo;
@@ -914,14 +905,13 @@ void clear_viewport_scene(App& app) {
     app.scene.clear();
     app.mesh.clear();
     app.mesh_load_failed = false;
-#if defined(AETHERSCAN_HAS_TEXTURE)
     app.mesh_gpu_positions.clear();
     app.mesh_gpu_normals.clear();
     app.mesh_gpu_colours.clear();
     app.mesh_gpu_indices.clear();
+    app.mesh_gpu_uploaded = false;
     app.mesh_gpu_failed = false;
-    app.mesh_preview.reset();
-#endif
+    app.mesh_renderer.set_mesh({}, {}, {}, {});
     app.scene_source.clear();
     app.camera = {};
     app.view_mode = VisualizationMode::points;
@@ -1250,13 +1240,15 @@ void ensure_mesh_loaded(App& app) {
 }
 
 void pack_mesh_gpu_buffers(App& app) {
-#if defined(AETHERSCAN_HAS_TEXTURE)
     app.mesh_gpu_positions.clear();
     app.mesh_gpu_normals.clear();
     app.mesh_gpu_colours.clear();
     app.mesh_gpu_indices.clear();
-    app.mesh_gpu_camera = {};
-    if (!app.mesh.has()) return;
+    app.mesh_gpu_uploaded = false;
+    if (!app.mesh.has()) {
+        app.mesh_renderer.set_mesh({}, {}, {}, {});
+        return;
+    }
     const std::size_t count = app.mesh.vertices.size();
     app.mesh_gpu_positions.resize(count * 3U);
     for (std::size_t i = 0; i < count; ++i) {
@@ -1290,64 +1282,75 @@ void pack_mesh_gpu_buffers(App& app) {
         app.mesh_gpu_indices.push_back(face[1]);
         app.mesh_gpu_indices.push_back(face[2]);
     }
-#else
-    (void)app;
-#endif
+    app.mesh_renderer.set_mesh(
+        app.mesh_gpu_positions, app.mesh_gpu_normals, app.mesh_gpu_colours,
+        app.mesh_gpu_indices);
+    app.mesh_gpu_uploaded = true;
+}
+
+std::array<float, 16> mesh_world_to_clip(
+    const SplatPreviewCamera& camera, const float near_z, const float far_z) {
+    const float* m = camera.world_to_camera.data();
+    const float r00 = m[0], r10 = m[1], r20 = m[2];
+    const float r01 = m[4], r11 = m[5], r21 = m[6];
+    const float r02 = m[8], r12 = m[9], r22 = m[10];
+    const float tx = m[12], ty = m[13], tz = m[14];
+    const float width = static_cast<float>(std::max(1U, camera.width));
+    const float height = static_cast<float>(std::max(1U, camera.height));
+    const float x_offset = 2.F * (camera.cx + 0.5F) / width - 1.F;
+    const float y_offset = 2.F * (camera.cy + 0.5F) / height - 1.F;
+    const float depth_scale = (far_z + near_z) / (far_z - near_z);
+    const float depth_offset = -2.F * far_z * near_z / (far_z - near_z);
+    const float fx_term = 2.F * camera.fx / width;
+    const float fy_term = 2.F * camera.fy / height;
+    std::array<float, 16> clip{};
+    clip[0 * 4 + 0] = fx_term * r00 + x_offset * r20;
+    clip[0 * 4 + 1] = fx_term * r01 + x_offset * r21;
+    clip[0 * 4 + 2] = fx_term * r02 + x_offset * r22;
+    clip[0 * 4 + 3] = fx_term * tx + x_offset * tz;
+    clip[1 * 4 + 0] = fy_term * r10 + y_offset * r20;
+    clip[1 * 4 + 1] = fy_term * r11 + y_offset * r21;
+    clip[1 * 4 + 2] = fy_term * r12 + y_offset * r22;
+    clip[1 * 4 + 3] = fy_term * ty + y_offset * tz;
+    clip[2 * 4 + 0] = depth_scale * r20;
+    clip[2 * 4 + 1] = depth_scale * r21;
+    clip[2 * 4 + 2] = depth_scale * r22;
+    clip[2 * 4 + 3] = depth_scale * tz + depth_offset;
+    clip[3 * 4 + 0] = r20;
+    clip[3 * 4 + 1] = r21;
+    clip[3 * 4 + 2] = r22;
+    clip[3 * 4 + 3] = tz;
+    return clip;
 }
 
 bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
-#if defined(AETHERSCAN_HAS_TEXTURE)
-    if (!app.mesh.has() || app.mesh_gpu_failed ||
-        app.mesh_gpu_indices.empty())
+    if (!app.mesh.has() || app.mesh_gpu_failed || app.mesh_gpu_indices.empty())
         return false;
     std::uint32_t width = static_cast<std::uint32_t>(
         std::max(1.F, std::floor(max.x - min.x)));
     std::uint32_t height = static_cast<std::uint32_t>(
         std::max(1.F, std::floor(max.y - min.y)));
-    const std::uint32_t cap = app.camera.interacting ? 960U : 1600U;
-    if (width > cap || height > cap) {
-        const float scale = static_cast<float>(cap) /
-                            static_cast<float>(std::max(width, height));
-        width = std::max(1U, static_cast<std::uint32_t>(width * scale));
-        height = std::max(1U, static_cast<std::uint32_t>(height * scale));
-    }
     const SplatPreviewCamera camera =
         make_preview_camera(app.camera, width, height);
-    const bool same =
-        app.mesh_preview.descriptor != nullptr &&
-        camera.width == app.mesh_gpu_camera.width &&
-        camera.height == app.mesh_gpu_camera.height &&
-        camera.fx == app.mesh_gpu_camera.fx &&
-        camera.cx == app.mesh_gpu_camera.cx &&
-        camera.cy == app.mesh_gpu_camera.cy &&
-        camera.world_to_camera == app.mesh_gpu_camera.world_to_camera &&
-        app.mesh_gpu_wireframe == app.view_options.mesh_wireframe &&
-        app.mesh_gpu_vertex_colour == app.view_options.mesh_vertex_colour;
-    if (same) return true;
+    const float* w2c = camera.world_to_camera.data();
+    const float cam_z =
+        w2c[2] * app.mesh.centroid.x + w2c[6] * app.mesh.centroid.y +
+        w2c[10] * app.mesh.centroid.z + w2c[14];
+    float near_z = std::max(1e-4F, std::abs(cam_z) - app.mesh.radius * 1.25F);
+    float far_z = std::max(near_z + 1e-3F, std::abs(cam_z) + app.mesh.radius * 1.25F);
+    gpu::MeshPreviewUniforms uniforms;
+    uniforms.world_to_clip = mesh_world_to_clip(camera, near_z, far_z);
+    uniforms.world_to_camera = camera.world_to_camera;
+    uniforms.vertex_colour = app.view_options.mesh_vertex_colour;
+    uniforms.wireframe = app.view_options.mesh_wireframe;
     try {
-        if (!app.mesh_rasterizer)
-            app.mesh_rasterizer =
-                std::make_unique<aetherscan::texture::MeshPreviewRasterizer>();
-        aetherscan::texture::MeshPreviewCamera gpu_camera;
-        gpu_camera.world_to_camera = camera.world_to_camera;
-        gpu_camera.position = camera.position;
-        gpu_camera.fx = camera.fx;
-        gpu_camera.fy = camera.fy;
-        gpu_camera.cx = camera.cx;
-        gpu_camera.cy = camera.cy;
-        gpu_camera.width = camera.width;
-        gpu_camera.height = camera.height;
-        aetherscan::texture::MeshPreviewOptions options;
-        options.wireframe = app.view_options.mesh_wireframe;
-        options.vertex_colour = app.view_options.mesh_vertex_colour;
-        const aetherscan::io::RgbImage image = app.mesh_rasterizer->render(
-            app.mesh_gpu_positions, app.mesh_gpu_normals,
-            app.mesh_gpu_colours, app.mesh_gpu_indices, gpu_camera, options);
-        app.mesh_preview.upload(image);
-        app.mesh_gpu_camera = camera;
-        app.mesh_gpu_wireframe = options.wireframe;
-        app.mesh_gpu_vertex_colour = options.vertex_colour;
-        return app.mesh_preview.descriptor != nullptr;
+        if (!app.mesh_gpu_uploaded) {
+            app.mesh_renderer.set_mesh(
+                app.mesh_gpu_positions, app.mesh_gpu_normals,
+                app.mesh_gpu_colours, app.mesh_gpu_indices);
+            app.mesh_gpu_uploaded = true;
+        }
+        return app.mesh_renderer.draw(width, height, uniforms);
     } catch (const std::exception& failure) {
         app.mesh_gpu_failed = true;
         set_message(
@@ -1355,12 +1358,6 @@ bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
             theme::warning);
         return false;
     }
-#else
-    (void)app;
-    (void)min;
-    (void)max;
-    return false;
-#endif
 }
 
 void show_mesh_view(App& app, const bool frame_when_ready) {
@@ -3587,13 +3584,11 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         update_gpu_mesh_preview(app, min, max);
     if (gpu_mesh) {
         app.view_options.draw_mesh = false;
-#if defined(AETHERSCAN_HAS_TEXTURE)
-        if (app.mesh_preview.descriptor) {
+        if (app.mesh_renderer.descriptor()) {
             draw->AddImage(
-                reinterpret_cast<ImTextureID>(app.mesh_preview.descriptor),
+                reinterpret_cast<ImTextureID>(app.mesh_renderer.descriptor()),
                 min, max);
         }
-#endif
     }
 
     ImGui::SetCursorScreenPos(min);
@@ -5180,10 +5175,7 @@ int main(const int argc, char** argv) {
     vkDeviceWaitIdle(gpu::device());
     app.image_qa_session.clear();
     app.photos.clear();
-#if defined(AETHERSCAN_HAS_TEXTURE)
-    app.mesh_preview.reset();
-    app.mesh_rasterizer.reset();
-#endif
+    app.mesh_renderer.reset();
     app.preview.reset();
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();

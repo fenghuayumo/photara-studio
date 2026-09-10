@@ -12,6 +12,7 @@
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <future>
@@ -132,5 +133,80 @@ std::uint64_t consumed_timeline_value();
 // Timeline value of a trainer frame that is signalled but not yet consumed.
 // Zero when nothing is pending.
 std::uint64_t ready_timeline_value();
+
+// Offscreen triangle rasterizer on the editor device. Orbit only updates a
+// 128-byte push constant; the mesh stays in GPU buffers (no CPU readback).
+struct MeshPreviewUniforms {
+    std::array<float, 16> world_to_clip{};
+    std::array<float, 16> world_to_camera{};
+    std::array<float, 3> clay{0.77F, 0.73F, 0.68F};
+    std::array<float, 3> background{0.027F, 0.031F, 0.043F};
+    bool vertex_colour{};
+    bool wireframe{};
+};
+
+class MeshPreviewRenderer {
+public:
+    MeshPreviewRenderer() = default;
+    MeshPreviewRenderer(const MeshPreviewRenderer&) = delete;
+    MeshPreviewRenderer& operator=(const MeshPreviewRenderer&) = delete;
+    ~MeshPreviewRenderer() { reset(); }
+
+    void set_mesh(
+        const std::vector<float>& positions,
+        const std::vector<float>& normals,
+        const std::vector<float>& colours,
+        const std::vector<std::uint32_t>& indices);
+    bool draw(
+        std::uint32_t width, std::uint32_t height,
+        const MeshPreviewUniforms& uniforms);
+    [[nodiscard]] VkDescriptorSet descriptor() const noexcept {
+        return display_ >= 0 ? frames_[static_cast<std::size_t>(display_)].descriptor
+                             : VK_NULL_HANDLE;
+    }
+    void reset();
+
+private:
+    static constexpr int k_frames = 3;
+
+    struct Frame {
+        VkImage color{};
+        VkImage depth{};
+        VkDeviceMemory color_memory{};
+        VkDeviceMemory depth_memory{};
+        VkImageView color_view{};
+        VkImageView depth_view{};
+        VkFramebuffer framebuffer{};
+        VkSampler sampler{};
+        VkDescriptorSet descriptor{};
+        VkCommandBuffer command{};
+        VkFence fence{};
+    };
+
+    void destroy_mesh_buffers();
+    void destroy_frames();
+    void destroy_pipeline();
+    bool ensure_pipeline();
+    bool ensure_frames(std::uint32_t width, std::uint32_t height);
+
+    VkRenderPass render_pass_{};
+    VkPipelineLayout pipeline_layout_{};
+    VkPipeline fill_pipeline_{};
+    VkPipeline wire_pipeline_{};
+    VkCommandPool command_pool_{};
+    VkBuffer vertex_buffer_{};
+    VkBuffer index_buffer_{};
+    VkBuffer edge_buffer_{};
+    VkDeviceMemory vertex_memory_{};
+    VkDeviceMemory index_memory_{};
+    VkDeviceMemory edge_memory_{};
+    std::uint32_t index_count_{};
+    std::uint32_t edge_count_{};
+    std::uint32_t width_{};
+    std::uint32_t height_{};
+    int write_{};
+    int display_{-1};
+    Frame frames_[k_frames]{};
+};
 
 }  // namespace editor::gpu
