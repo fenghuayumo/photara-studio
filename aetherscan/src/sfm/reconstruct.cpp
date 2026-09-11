@@ -1461,6 +1461,29 @@ ReconstructionSummary run_global_mapping(
     return summary;
 }
 
+namespace {
+void finish_alignment_recovery(Scene& scene, const ReconstructionConfig& config) {
+    prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
+                                   config.maximum_final_reprojection_error_pixels);
+    bool changed = !recover_stable_resections(scene).empty();
+    changed = recover_weakly_connected_views(scene) != 0 || changed;
+    if (!changed) return;
+    // Recovery rebuilds tracks and introduces new cross-branch constraints.
+    // Reconcile their points and poses before reporting a final alignment.
+    // Calibration stays fixed, so weak branches cannot change the lens model.
+    BundleOptions bundle;
+    bundle.optimizer.maximum_iterations = 32;
+    bundle.write_intrinsics = false;
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        if (!run_bundle_adjustment(scene, bundle).success) break;
+        filter_tracks(scene, 2.F, 1.F, 0.F, 0.F);
+        if (pass == 1 || recover_stable_resections(scene).empty()) break;
+    }
+    prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
+                                   config.maximum_final_reprojection_error_pixels);
+}
+}  // namespace
+
 ReconstructionSummary reconstruct(
     Scene& scene_out,
     const std::vector<std::filesystem::path>& image_paths,
@@ -1481,14 +1504,7 @@ ReconstructionSummary reconstruct(
             parallel::resolve_thread_count(config.frontend.thread_count);
         core::Logger::instance().info("checkpoint hit: reconstruction");
         if (config.mode != ReconstructionMode::incremental) {
-            prune_unsupported_registrations(
-                scene_out, config.minimum_final_observations_per_image,
-                config.maximum_final_reprojection_error_pixels);
-            if (!recover_stable_resections(scene_out).empty())
-                prune_unsupported_registrations(
-                    scene_out, config.minimum_final_observations_per_image,
-                    config.maximum_final_reprojection_error_pixels);
-            recover_weakly_connected_views(scene_out);
+            finish_alignment_recovery(scene_out, config);
             if (config.resection.checkpoint_callback)
                 config.resection.checkpoint_callback(scene_out);
             const ReconstructionSummary summary = summarize_scene(scene_out);
@@ -1631,14 +1647,7 @@ ReconstructionSummary reconstruct(
             }
         }
     }
-    prune_unsupported_registrations(
-        scene_out, config.minimum_final_observations_per_image,
-        config.maximum_final_reprojection_error_pixels);
-    if (!recover_stable_resections(scene_out).empty())
-        prune_unsupported_registrations(
-            scene_out, config.minimum_final_observations_per_image,
-            config.maximum_final_reprojection_error_pixels);
-    recover_weakly_connected_views(scene_out);
+    finish_alignment_recovery(scene_out, config);
     summary = summarize_scene(scene_out);
     if (config.resection.checkpoint_callback)
         config.resection.checkpoint_callback(scene_out);

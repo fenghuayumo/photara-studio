@@ -1,4 +1,5 @@
 #include "sfm/submap_recovery.hpp"
+#include "sfm/bundle.hpp"
 #include "sfm/reconstruct.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <numbers>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -108,12 +110,24 @@ unsigned recover_weakly_connected_views(Scene& scene) {
     std::vector<std::uint8_t> originally_registered;
     for (const auto& im:scene.images) originally_registered.push_back(im.registered);
     unsigned recovered_count=0;
+    std::vector<std::uint8_t> recovered(scene.images.size(),0);
     const auto propagate=[&]() {
         for (unsigned pass=0;pass<8;++pass) {
-            const auto recovered=recover_stable_resections(scene,stable);
-            for (Index id:recovered) stable[id]=1;
-            recovered_count+=static_cast<unsigned>(recovered.size());
-            if (recovered.empty()) break;
+            const auto relocated=recover_stable_resections(scene,stable);
+            for (Index id:relocated) {
+                stable[id]=1;
+                recovered[id]=1;
+            }
+            recovered_count+=static_cast<unsigned>(relocated.size());
+            if (relocated.empty()) break;
+            // A recovered pose has only validated observations reattached.
+            // Rebuild the original verified tracks so it can supply new
+            // depths to its neighbors; stale split tracks stop propagation.
+            // Suspect cameras must not contribute to this triangulation.
+            for (Index i=0;i<scene.images.size();++i)
+                if (!stable[i]) scene.images[i].registered=false;
+            build_tracks(scene);
+            triangulate_tracks(scene,false,2.F,1.F);
         }
     };
     propagate();
@@ -138,6 +152,47 @@ unsigned recover_weakly_connected_views(Scene& scene) {
             scene.images[i].path.filename()," reason=independent_validation_failed");
     }
     prune_unsupported_registrations(scene);
+    // Independent 2D-3D recovery places the weak branch, but a locally rigid
+    // low-parallax clique next to it can keep an along-view scale drift.
+    // Corridor PnP is itself along-view ambiguous; a short BA with recovered
+    // poses frozen lets those anchors pull the clique without unlocking the
+    // rest of the map.
+    if (recovered_count>0) {
+        constexpr Index k_radius=40;
+        BundleOptions local;
+        local.optimize_all_registered=false;
+        local.optimizer.maximum_iterations=16;
+        local.optimizer.optimize_focal=false;
+        local.optimizer.optimize_aspect_ratio=false;
+        local.optimizer.optimize_distortion=false;
+        unsigned free=0;
+        for (Index i=0;i<scene.images.size();++i) {
+            if (!scene.images[i].registered) continue;
+            bool near=false;
+            for (Index j=0;j<scene.images.size() && !near;++j) {
+                if (!recovered[j]) continue;
+                const Index d=i>j ? i-j : j-i;
+                near=d<=k_radius;
+            }
+            if (near && !recovered[i]) {
+                local.free_image_ids.push_back(i);
+                ++free;
+            } else local.fixed_image_ids.push_back(i);
+        }
+        const unsigned registered=scene.registered_count();
+        if (free>=2 && !local.fixed_image_ids.empty() &&
+            free*2<registered) {
+            core::Logger::instance().info(
+                "locally rigid neighborhood BA: free=",free,
+                " fixed=",local.fixed_image_ids.size(),
+                " recovered_anchors=",recovered_count);
+            triangulate_tracks(scene,false,2.F,1.F);
+            if (!run_bundle_adjustment(scene,local).success)
+                core::Logger::instance().warning(
+                    "locally rigid neighborhood BA failed; keeping previous poses");
+            triangulate_tracks(scene,false,2.F,1.F);
+        }
+    }
     core::Logger::instance().info("weak branch recovery: recovered=",recovered_count," withheld=",rejected);
     return recovered_count+rejected;
 }
@@ -444,8 +499,9 @@ std::vector<Index> recover_stable_resections(
         if (stable[i]) ++audit.reliable_views;
     }
     if (audit.reliable_views == scene.images.size() || audit.reliable_views < 2) return {};
-    struct Match { Index feature; Index track; Vec3 point; };
+    struct Match { Index feature; Index track; Vec3 point; unsigned independent_links; };
     std::vector<std::vector<Match>> matches(scene.images.size());
+    std::vector<std::vector<Index>> depth_anchors(scene.tracks.size());
     std::unordered_map<std::uint64_t, std::vector<Observation>> boundary;
     for (const auto& pair : scene.pairs) {
         if (!pair.active || !pair.relative_pose || pair.zero_baseline ||
@@ -466,17 +522,20 @@ std::vector<Index> recover_stable_resections(
         Track stable;
         std::map<Index, Index> stable_observations;
         std::set<std::pair<Index, Index>> targets;
+        std::map<std::pair<Index, Index>, std::set<Index>> target_anchors;
+        bool has_boundary = false;
         for (const auto& obs : source.observations) {
             if (obs.image_id >= scene.images.size()) continue;
             if (audit.reliable[obs.image_id]) {
                 stable_observations.emplace(obs.image_id, obs.feature_id);
-                if (const auto it = boundary.find(key(obs.image_id, obs.feature_id)); it != boundary.end())
-                    for (const auto& target : it->second) targets.emplace(target.image_id, target.feature_id);
+                has_boundary = has_boundary || boundary.contains(key(obs.image_id, obs.feature_id));
             } else targets.emplace(obs.image_id, obs.feature_id);
         }
-        if (targets.empty() || stable_observations.size() < 2) continue;
+        // Two-view triangulation can fit an accidental match exactly. A third
+        // stable view independently checks the depth before it anchors PnP.
+        if ((!has_boundary && targets.empty()) || stable_observations.size() < 3) continue;
         for (const auto& [image, feature] : stable_observations) stable.observations.push_back({image, feature});
-        if (triangulate_track(stable, scene, tri) < 2) continue;
+        if (triangulate_track(stable, scene, tri) < 3) continue;
         // Replacing a point must not discard valid observations in the frozen
         // map. A locally successful PnP is insufficient if its anchors damage
         // the geometry that made the main map reliable.
@@ -492,9 +551,24 @@ std::vector<Index> recover_stable_resections(
             }
         }
         if (!preserves_stable_support) continue;
+        for (std::size_t o = 0; o < stable.num_inliers; ++o) {
+            const auto& obs = stable.observations[o];
+            depth_anchors[t].push_back(obs.image_id);
+            // A graph-connected observation rejected by triangulation does
+            // not identify this landmark. Only the depth's inlier features
+            // may introduce additional 2D-3D links across the boundary.
+            // Otherwise one rejected anchor can make every correct match
+            // ambiguous before robust pose estimation even gets to see it.
+            if (const auto it = boundary.find(key(obs.image_id, obs.feature_id)); it != boundary.end())
+                for (const auto& target : it->second) {
+                    targets.emplace(target.image_id, target.feature_id);
+                    target_anchors[{target.image_id, target.feature_id}].insert(obs.image_id);
+                }
+        }
         for (const auto& [image, feature] : targets)
             if (feature < scene.images[image].features.keypoints.size())
-                matches[image].push_back({feature, t, stable.position});
+                matches[image].push_back({feature, t, stable.position,
+                    static_cast<unsigned>(target_anchors[{image, feature}].size())});
     }
     std::vector<Index> recovered;
     std::vector<std::vector<Match>> accepted(scene.images.size());
@@ -503,11 +577,34 @@ std::vector<Index> recover_stable_resections(
         const auto& image = scene.images[id];
         if (image.camera_id >= scene.cameras.size()) continue;
         const auto& camera = scene.camera_of(image);
-        std::map<Index, std::set<Index>> by_feature, by_track;
-        for (const auto& m : matches[id]) { by_feature[m.feature].insert(m.track); by_track[m.track].insert(m.feature); }
+        // Resolve the bipartite feature/landmark graph using independent
+        // anchor agreement. A duplicate pair or repeated edge gives no extra
+        // vote. A single link alone cannot overrule a conflicting track;
+        // multiple anchor views must close the correspondence cycle.
+        struct Consensus {
+            unsigned support{0};
+            unsigned ties{0};
+            void add(unsigned value) {
+                if (ties == 0 || value > support) { support = value; ties = 1; }
+                else if (value == support) ++ties;
+            }
+        };
+        const auto evidence = [](const Match& m) {
+            return m.independent_links > 1 ? m.independent_links : 0U;
+        };
+        std::map<Index, Consensus> by_feature, by_track;
+        for (const auto& m : matches[id]) {
+            by_feature[m.feature].add(evidence(m));
+            by_track[m.track].add(evidence(m));
+        }
         std::map<Index, Match> unique;
-        for (const auto& m : matches[id])
-            if (by_feature[m.feature].size() == 1 && by_track[m.track].size() == 1) unique.emplace(m.feature, m);
+        for (const auto& m : matches[id]) {
+            const auto& feature = by_feature.at(m.feature);
+            const auto& track = by_track.at(m.track);
+            if (feature.ties == 1 && track.ties == 1 &&
+                feature.support == evidence(m) && track.support == evidence(m))
+                unique.emplace(m.feature, m);
+        }
         core::Logger::instance().info("stable resection: image=", image.path.filename(), " correspondences=", unique.size());
         const auto reject = [&](const char* reason) {
             core::Logger::instance().info("stable resection rejected: image=", image.path.filename(), " reason=", reason);
@@ -530,7 +627,85 @@ std::vector<Index> recover_stable_resections(
         const auto pose = estimate_absolute_pose(bearings, points, camera, options);
         core::Logger::instance().info("stable resection fit: image=", image.path.filename(),
             " success=", pose.success, " inliers=", pose.num_inliers, '/', points.size());
-        if (!pose.success || pose.num_inliers < 0.8 * points.size()) { reject("pose_consensus_failed"); continue; }
+        // Repetitive structure can leave the robust pixel consensus below
+        // one half even when the pose is correct. Independent verified pair
+        // baselines provide a second certificate: require the strongest edge
+        // and a second anchor to agree with the candidate center direction.
+        // This never replaces the held-out pixel audit below; it only decides
+        // whether that audit may consider a minority PnP consensus.
+        double strongest_direction_error = 0.0;
+        float strongest_direction_weight = -1;
+        std::set<Index> direction_consensus;
+        for (const auto& pair : scene.pairs) {
+            if (!pair.active || !pair.relative_pose || pair.zero_baseline) continue;
+            const bool forward = pair.id2 == id &&
+                pair.id1 < stable.size() && stable[pair.id1];
+            const bool reverse = pair.id1 == id &&
+                pair.id2 < stable.size() && stable[pair.id2];
+            if (!forward && !reverse) continue;
+            const Pose3D& anchor_pose = forward
+                ? scene.images[pair.id1].pose
+                : scene.images[pair.id2].pose;
+            const Vec3 direction = anchor_pose.R * (pose.pose.C - anchor_pose.C);
+            const float weight = pair.composite_weight();
+            if (!direction.allFinite() || direction.norm() < 1e-10 ||
+                !pair.relative_pose->C.allFinite() ||
+                pair.relative_pose->C.norm() < 1e-10 ||
+                !std::isfinite(weight) || weight <= 0) continue;
+            const double angle = std::acos(std::clamp(
+                direction.normalized().dot(pair.relative_pose->C.normalized()),
+                -1.0, 1.0)) * 180.0 / std::numbers::pi;
+            if (angle <= 5.0)
+                direction_consensus.insert(forward ? pair.id1 : pair.id2);
+            if (weight > strongest_direction_weight) {
+                strongest_direction_weight = weight;
+                strongest_direction_error = angle;
+            }
+        }
+        const bool direction_certified = pose.success &&
+            strongest_direction_weight > 0 && strongest_direction_error <= 5.0 &&
+            direction_consensus.size() >= 2;
+        if (pose.success)
+            core::Logger::instance().info(
+                "stable resection baseline audit: image=", image.path.filename(),
+                " strongest_angle_deg=", strongest_direction_error,
+                " consensus_anchors=", direction_consensus.size());
+        if (!pose.success ||
+            (!direction_certified && pose.num_inliers < 0.5 * points.size())) {
+            reject("pose_consensus_failed");
+            continue;
+        }
+        std::unordered_map<Index,unsigned> anchor_support;
+        for (const auto& [feature,m]:unique) {
+            if (!supports(scene,{id,feature},m.point,pose.pose,2)) continue;
+            for (const auto anchor:depth_anchors[m.track]) ++anchor_support[anchor];
+        }
+        double direction_error=0, direction_weight=-1;
+        for (const auto& pair:scene.pairs) {
+            if (!pair.active || !pair.relative_pose || pair.zero_baseline) continue;
+            const bool forward=pair.id2==id && pair.id1<stable.size() && stable[pair.id1];
+            const bool reverse=pair.id1==id && pair.id2<stable.size() && stable[pair.id2];
+            if (!forward && !reverse) continue;
+            // Graph connectivity alone does not certify an anchor's pose.
+            // Use only neighbors that also support the independently
+            // triangulated depths of this candidate's pixel consensus.
+            const Index anchor=forward ? pair.id1 : pair.id2;
+            if (anchor_support[anchor]<3) continue;
+            const auto& a=forward ? scene.images[pair.id1].pose : pose.pose;
+            const auto& b=reverse ? scene.images[pair.id2].pose : pose.pose;
+            const Vec3 direction=a.R*(b.C-a.C);
+            const float weight=pair.composite_weight();
+            if (!direction.allFinite() || direction.norm()<1e-10 ||
+                !pair.relative_pose->C.allFinite() || pair.relative_pose->C.norm()<1e-10 ||
+                !std::isfinite(weight) || weight<=0) continue;
+            if (weight>direction_weight) {
+                direction_weight=weight;
+                direction_error=std::acos(std::clamp(direction.normalized().dot(pair.relative_pose->C.normalized()),-1.0,1.0))*180/3.141592653589793;
+            }
+        }
+        core::Logger::instance().info("stable resection direction: image=",image.path.filename(),
+            " angle_deg=",direction_error," weight=",direction_weight);
+        if (direction_weight>0 && direction_error>5) { reject("stable_pair_direction_failed"); continue; }
         unsigned heldout = 0;
         std::set<std::pair<int, int>> cells;
         std::vector<Vec3> heldout_points;
@@ -542,7 +717,18 @@ std::vector<Index> recover_stable_resections(
             cells.emplace(static_cast<int>(std::clamp(4*p.x/std::max(1u,camera.width), 0.F, 3.F)),
                           static_cast<int>(std::clamp(4*p.y/std::max(1u,camera.height), 0.F, 3.F)));
         }
-        if (heldout < 8 || heldout < 0.8 * validation.size()) { reject("heldout_consensus_failed"); continue; }
+        const double fit_ratio=static_cast<double>(pose.num_inliers)/points.size();
+        // Candidate tracks contain outliers; demand held-out support consistent
+        // with the robust fit, not 80% of every proposed correspondence.
+        // The Wilson lower 95% bound accounts for the finite fit sample.
+        constexpr double z2=3.841458820694124;
+        const double fit_count=static_cast<double>(points.size());
+        const double minimum_validation_ratio=(fit_ratio+z2/(2*fit_count)-
+            std::sqrt(z2*(fit_ratio*(1-fit_ratio)/fit_count+z2/(4*fit_count*fit_count))))/
+            (1+z2/fit_count);
+        core::Logger::instance().info("stable resection validation: image=",image.path.filename(),
+            " inliers=",heldout,'/',validation.size()," fit_ratio=",fit_ratio);
+        if (heldout < 12 || heldout < minimum_validation_ratio * validation.size()) { reject("heldout_consensus_failed"); continue; }
         if (cells.size() < 3 || !noncollinear(heldout_points)) { reject("ill_conditioned_validation"); continue; }
         for (const auto& [feature, m] : unique)
             if (supports(scene, {id, feature}, m.point, pose.pose, 2)) accepted[id].push_back(m);

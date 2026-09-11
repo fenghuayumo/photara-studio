@@ -11,10 +11,13 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 int main(int argc, char** argv) {
     using namespace aetherscan::sfm;
-    if (argc != 3) { std::cerr << "checkpoint.bin output_prefix\n"; return 1; }
+    if (argc != 3 && !(argc == 4 && std::string(argv[3]) == "reattach")) {
+        std::cerr << "checkpoint.bin output_prefix [reattach]\n"; return 1;
+    }
     const std::filesystem::path input(argv[1]), output(argv[2]);
     aetherscan::core::Logger::instance().configure(output.parent_path(), "recovery-probe");
     if (std::filesystem::exists(output.string()+".asfm")) return 2;
@@ -23,6 +26,10 @@ int main(int argc, char** argv) {
     CheckpointOptions options; options.directory=input.parent_path(); options.write=false;
     Scene scene;
     if (!CheckpointStore(options).load_scene(CheckpointStage::reconstruction,key,scene)) return 3;
+    // A rejected final checkpoint retains candidate poses but clears their
+    // registration flags. Offline component experiments need the original
+    // candidate set back to exercise recovery from the mapping state.
+    if (argc == 4) for (auto& image : scene.images) image.registered = true;
     auto audit=analyze_alignment_observability(scene);
     std::cout << "Original reliable " << audit.reliable_views << '\n';
     recover_weakly_connected_views(scene);
