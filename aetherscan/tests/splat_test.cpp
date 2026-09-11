@@ -1753,24 +1753,27 @@ void test_training_device_cache() {
     const auto first = cache.get(0);
     const auto hit = cache.get(0);
     const auto compare = [](const splat::TrainingView& a,
-                            const splat::TrainingView& b) {
+                            const splat::TrainingView& b,
+                            const char* stage) {
         require(a.rgb.to_vector() == b.rgb.to_vector() &&
                 a.gray.to_vector() == b.gray.to_vector() &&
                 a.mask.to_vector() == b.mask.to_vector() &&
                 a.depth.to_vector() == b.depth.to_vector() &&
                 a.normal.to_vector() == b.normal.to_vector() &&
                 a.has_mask == b.has_mask,
-                "Training cache changed RGB/mask/gray/depth/normal supervision");
+                stage);
     };
-    compare(reference, first);
-    compare(reference, hit);
+    compare(reference, first, "first changed supervision");
+    compare(reference, hit, "device hit changed supervision");
     require(cache.stats().device_hits == 1 &&
             cache.stats().uploaded_bytes == options.training_device_cache_bytes,
             "Training cache hit uploaded the frame again");
     const auto neighbour = cache.get(1);
-    compare(first, reference);  // Reference tensors must survive LRU eviction.
-    compare(neighbour, splat::make_training_view(views[1], options));
-    compare(cache.get(0), reference);
+    compare(first, reference,
+            "first changed after LRU eviction");  // Tensors must survive eviction.
+    compare(neighbour, splat::make_training_view(views[1], options),
+            "neighbour changed supervision");
+    compare(cache.get(0), reference, "reload changed supervision");
     require(cache.stats().device_hits == 1 &&
             cache.stats().device_resident_bytes <= options.training_device_cache_bytes,
             "Training device LRU did not enforce its budget");
@@ -1800,12 +1803,41 @@ void test_training_device_cache() {
         options.adaptive_training_cache = false;
         options.training_device_cache_bytes = budget;
         splat::training_data::TrainingDataLoader uncached(views, options);
-        compare(uncached.get(0), reference);
-        compare(uncached.get(0), reference);
+        compare(uncached.get(0), reference,
+                "uncached first changed supervision");
+        compare(uncached.get(0), reference,
+                "uncached second changed supervision");
         require(uncached.stats().device_hits == 0 &&
                 uncached.stats().device_resident_bytes == 0,
                 "Disabled/undersized CUDA cache retained an oversized view");
     }
+
+    options.adaptive_training_cache = false;
+    options.training_prefetch_views = 1;
+    options.training_view_cache_bytes = 64 * 1024;
+    options.training_device_cache_bytes = 256 * (4 + 4 + 12);
+    splat::training_data::TrainingDataLoader asynchronous(views, options);
+    const auto async_first = asynchronous.get(0);
+    const auto async_neighbour = asynchronous.get(1);
+    asynchronous.prefetch(0);
+    const auto async_prefetched = asynchronous.get(0);
+    compare(async_first, reference,
+            "asynchronous first changed supervision");
+    compare(async_prefetched, reference,
+            "asynchronous prefetch changed supervision");
+    compare(async_neighbour, splat::make_training_view(views[1], options),
+            "asynchronous neighbour changed supervision");
+    require(asynchronous.stats().device_prefetch_hits == 1 &&
+                    asynchronous.stats().device_prefetch_pending == 0 &&
+                    asynchronous.stats().device_prefetch_bytes == 0 &&
+                    asynchronous.stats().device_resident_bytes <=
+                        options.training_device_cache_bytes,
+            "Asynchronous packed CUDA prefetch did not preserve the view");
+    asynchronous.set_resolution_scale(0.5F);
+    require(asynchronous.stats().device_prefetch_pending == 0 &&
+                    asynchronous.stats().device_prefetch_bytes == 0 &&
+                    asynchronous.stats().device_resident_bytes == 0,
+            "Resolution transition retained asynchronous CUDA work");
     std::filesystem::remove_all(root);
 }
 

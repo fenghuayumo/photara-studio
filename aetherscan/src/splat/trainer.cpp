@@ -1463,9 +1463,12 @@ GaussianModel Trainer::train(
         core::Logger::instance().info(
             "splat_data_cache requests=", cache.requests,
             " device_hits=", cache.device_hits,
+            " device_prefetch_hits=", cache.device_prefetch_hits,
             " uploaded_bytes=", cache.uploaded_bytes,
             " device_resident_bytes=", cache.device_resident_bytes,
             " device_budget_bytes=", cache.device_budget_bytes,
+            " device_prefetch_pending=", cache.device_prefetch_pending,
+            " device_prefetch_bytes=", cache.device_prefetch_bytes,
             " host_budget_bytes=", cache.host_budget_bytes,
             " dataset_packed_bytes=", cache.dataset_packed_bytes);
     }

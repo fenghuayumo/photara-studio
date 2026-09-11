@@ -13,9 +13,12 @@ namespace aetherscan::splat::training_data {
 struct CacheStats {
     std::size_t requests{};
     std::size_t device_hits{};
+    std::size_t device_prefetch_hits{};
     std::size_t uploaded_bytes{};
     std::size_t device_resident_bytes{};
     std::size_t device_budget_bytes{};
+    std::size_t device_prefetch_pending{};
+    std::size_t device_prefetch_bytes{};
     std::size_t dataset_packed_bytes{};
     std::size_t host_budget_bytes{};
 };

@@ -7,15 +7,21 @@
 #include "splat/trainer.hpp"
 
 #include <cuda_runtime_api.h>
+#include "internal/cuda_stream_context.hpp"
 
 #include <Eigen/Geometry>
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <future>
 #include <list>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -440,6 +446,90 @@ struct HostTrainingView {
     }
 };
 
+class PinnedStagingBuffer {
+public:
+    PinnedStagingBuffer() = default;
+    ~PinnedStagingBuffer() {
+        if (data_) cudaFreeHost(data_);
+    }
+
+    PinnedStagingBuffer(const PinnedStagingBuffer&) = delete;
+    PinnedStagingBuffer& operator=(const PinnedStagingBuffer&) = delete;
+
+    void ensure(const std::size_t requested_bytes) {
+        if (requested_bytes <= capacity_bytes_) return;
+        if (data_) {
+            const cudaError_t free_error = cudaFreeHost(data_);
+            if (free_error != cudaSuccess)
+                throw std::runtime_error(
+                    std::string("Failed to free pinned staging memory: ") +
+                    cudaGetErrorString(free_error));
+            data_ = nullptr;
+            capacity_bytes_ = 0;
+        }
+        if (requested_bytes == 0) return;
+
+        void* pointer = nullptr;
+        const cudaError_t error = cudaHostAlloc(
+            &pointer, requested_bytes, cudaHostAllocDefault);
+        if (error != cudaSuccess)
+            throw std::runtime_error(
+                std::string("Failed to allocate pinned staging memory: ") +
+                cudaGetErrorString(error));
+        data_ = static_cast<std::uint8_t*>(pointer);
+        capacity_bytes_ = requested_bytes;
+    }
+
+    [[nodiscard]] std::uint8_t* data() noexcept { return data_; }
+    [[nodiscard]] std::size_t capacity() const noexcept {
+        return capacity_bytes_;
+    }
+
+private:
+    std::uint8_t* data_{};
+    std::size_t capacity_bytes_{};
+};
+
+class PinnedStagingPool {
+public:
+    std::unique_ptr<PinnedStagingBuffer> acquire(const std::size_t bytes) {
+        std::lock_guard lock(mutex_);
+        if (free_.empty()) {
+            auto buffer = std::make_unique<PinnedStagingBuffer>();
+            buffer->ensure(bytes);
+            return buffer;
+        }
+        auto buffer = std::move(free_.back());
+        free_.pop_back();
+        buffer->ensure(bytes);
+        return buffer;
+    }
+
+    void release(std::unique_ptr<PinnedStagingBuffer> buffer) {
+        if (!buffer) return;
+        std::lock_guard lock(mutex_);
+        free_.push_back(std::move(buffer));
+    }
+
+    void clear() {
+        std::lock_guard lock(mutex_);
+        free_.clear();
+    }
+
+private:
+    std::mutex mutex_;
+    std::vector<std::unique_ptr<PinnedStagingBuffer>> free_;
+};
+
+struct PinnedStagingLease {
+    std::unique_ptr<PinnedStagingBuffer> buffer;
+    PinnedStagingPool* pool{};
+
+    ~PinnedStagingLease() {
+        if (pool) pool->release(std::move(buffer));
+    }
+};
+
 std::size_t packed_training_view_bytes(
     const mvs::MvsView& view, const TrainingOptions& options,
     const float resolution_scale) {
@@ -645,12 +735,36 @@ struct TrainingDataLoader::Impl {
                   ? std::size_t{0}
                   : options.training_view_cache_bytes),
           resolution_scale_(resolution_scale) {
-        update_cache_budgets();
+        const cudaError_t stream_error = cudaStreamCreateWithFlags(
+            &copy_stream_, cudaStreamNonBlocking);
+        if (stream_error != cudaSuccess)
+            throw std::runtime_error(
+                std::string("Failed to create splat prefetch CUDA stream: ") +
+                cudaGetErrorString(stream_error));
+        try {
+            update_cache_budgets();
+        } catch (...) {
+            cudaStreamDestroy(copy_stream_);
+            copy_stream_ = nullptr;
+            throw;
+        }
         core::Logger::instance().info(
             "splat_data_cache host_budget_bytes=", capacity_bytes_,
             " device_budget_bytes=", device_capacity_bytes_,
             " dataset_packed_bytes=", dataset_packed_bytes_,
             " adaptive=", options_.adaptive_training_cache ? 1 : 0);
+    }
+
+    ~Impl() {
+        device_prefetches_.clear();
+        prefetches_.clear();
+        if (copy_stream_ != nullptr) {
+            const cudaError_t error = cudaStreamDestroy(copy_stream_);
+            if (error != cudaSuccess)
+                core::Logger::instance().warning(
+                    "Failed to destroy splat prefetch CUDA stream: ",
+                    cudaGetErrorString(error));
+        }
     }
 
     TrainingView get(const std::size_t index) {
@@ -662,6 +776,8 @@ struct TrainingDataLoader::Impl {
                 device_entries_.begin(), device_entries_, found->second);
             return decode_device_view(device_entries_.front());
         }
+        if (consume_device_prefetch(index))
+            return decode_device_view(device_entries_.front());
         const HostTrainingView& host = host_view(index);
         const std::size_t bytes = sizeof(int) * host.rgba.size() +
             sizeof(float) * (host.depth.size() + host.normal.size());
@@ -669,32 +785,12 @@ struct TrainingDataLoader::Impl {
         if (device_capacity_bytes_ == 0 || bytes > device_capacity_bytes_)
             return upload_training_view(
                 host, options_.multi_view_ncc_weight > 0.F);
-        while (!device_entries_.empty() &&
-               device_cached_bytes_ > device_capacity_bytes_ - bytes) {
-            const auto& evicted = device_entries_.back();
-            device_cached_bytes_ -= evicted.bytes;
-            device_lookup_.erase(evicted.index);
-            device_entries_.pop_back();
-        }
-        DeviceEntry entry;
-        entry.index = index;
-        entry.bytes = bytes;
-        entry.camera = host.camera;
-        entry.has_mask = host.has_mask;
-        entry.rgba = tinytensor::Tensor::from_vector(
-            host.rgba, {host.camera.height, host.camera.width},
-            tinytensor::Device::CUDA);
-        if (!host.depth.empty())
-            entry.depth = tinytensor::Tensor::from_vector(
-                host.depth, {host.camera.height, host.camera.width},
-                tinytensor::Device::CUDA);
-        if (!host.normal.empty())
-            entry.normal = tinytensor::Tensor::from_vector(
-                host.normal, {3, host.camera.height, host.camera.width},
-                tinytensor::Device::CUDA);
-        device_entries_.push_front(std::move(entry));
-        device_lookup_[index] = device_entries_.begin();
-        device_cached_bytes_ += bytes;
+        if (!make_room_for_device_bytes(bytes))
+            return upload_training_view(
+                host, options_.multi_view_ncc_weight > 0.F);
+        DeviceEntry entry = allocate_device_entry(index, host);
+        copy_device_entry_with_pinned_staging(host, entry);
+        insert_device_entry(std::move(entry));
         return decode_device_view(device_entries_.front());
     }
 
@@ -703,9 +799,63 @@ struct TrainingDataLoader::Impl {
             throw std::out_of_range(
                 "GGGS training prefetch index is out of range");
         if (options_.training_prefetch_views == 0 ||
-            device_lookup_.contains(index) || lookup_.contains(index) ||
-            prefetches_.contains(index))
+            device_lookup_.contains(index) ||
+            device_prefetches_.contains(index)) {
             return;
+        }
+
+        if (const auto host = cached_host_view(index)) {
+            const std::size_t bytes = packed_host_bytes(*host);
+            if (device_capacity_bytes_ == 0 ||
+                bytes > device_capacity_bytes_ ||
+                !make_room_for_device_bytes(bytes)) {
+                return;
+            }
+
+            DeviceEntry entry;
+            {
+                try {
+                    const tinytensor::CUDAStreamGuard stream_guard(
+                        copy_stream_);
+                    entry = allocate_device_entry(index, *host);
+                } catch (const std::exception& error) {
+                    core::Logger::instance().warning(
+                        "splat_data_cache device_prefetch_allocation_failed ",
+                        "index=", index, " error=", error.what());
+                    return;
+                }
+            }
+            device_prefetch_bytes_ += bytes;
+            try {
+                device_prefetches_.emplace(
+                    index,
+                    std::async(
+                        std::launch::async,
+                        [this, host = std::move(host),
+                         entry = std::move(entry)]() mutable {
+                            DevicePrefetchResult result;
+                            result.entry = std::move(entry);
+                            result.success = true;
+                            try {
+                                copy_device_entry_with_pinned_staging(
+                                    *host, result.entry);
+                            } catch (const std::exception& error) {
+                                cudaStreamSynchronize(copy_stream_);
+                                result.success = false;
+                                result.error = error.what();
+                            }
+                            return result;
+                        }));
+            } catch (const std::exception& error) {
+                device_prefetch_bytes_ -= bytes;
+                core::Logger::instance().warning(
+                    "splat_data_cache device_prefetch_launch_failed ",
+                    "index=", index, " error=", error.what());
+            }
+            return;
+        }
+
+        if (prefetches_.contains(index)) return;
         const float scale = resolution_scale_;
         prefetches_.emplace(
             index,
@@ -726,17 +876,20 @@ struct TrainingDataLoader::Impl {
     void set_resolution_scale(const float scale) {
         const float clamped = std::clamp(scale, 1e-3F, 1.F);
         if (std::abs(clamped - resolution_scale_) < 1e-6F) return;
+        // std::future from std::launch::async joins on destruction. Clear all
+        // old-scale work before publishing the new scale and dropping buffers.
+        device_prefetches_.clear();
+        device_prefetch_bytes_ = 0;
         entries_.clear();
         lookup_.clear();
         cached_bytes_ = 0;
         device_lookup_.clear();
         device_entries_.clear();
         device_cached_bytes_ = 0;
-        // std::future from std::launch::async joins on destruction. Clear all
-        // old-scale work before publishing the new scale.
         prefetches_.clear();
         resolution_scale_ = clamped;
         update_cache_budgets();
+        pinned_pool_.clear();
     }
 
     void ensure_device_headroom(const std::size_t bytes) {
@@ -748,7 +901,10 @@ struct TrainingDataLoader::Impl {
         }
 
         const std::size_t free_before = free_bytes;
-        const std::size_t resident = device_cached_bytes_;
+        const std::size_t resident =
+            device_cached_bytes_ + device_prefetch_bytes_;
+        device_prefetches_.clear();
+        device_prefetch_bytes_ = 0;
         device_lookup_.clear();
         device_entries_.clear();
         device_cached_bytes_ = 0;
@@ -763,9 +919,11 @@ struct TrainingDataLoader::Impl {
     }
 
     CacheStats stats() const {
-        return {requests_, device_hits_, uploaded_bytes_,
-                device_cached_bytes_, device_capacity_bytes_,
-                dataset_packed_bytes_, capacity_bytes_};
+        return {requests_, device_hits_, device_prefetch_hits_,
+                uploaded_bytes_, device_cached_bytes_,
+                device_capacity_bytes_, device_prefetches_.size(),
+                device_prefetch_bytes_, dataset_packed_bytes_,
+                capacity_bytes_};
     }
 
 private:
@@ -777,6 +935,135 @@ private:
         bool has_mask{};
     };
     using DeviceEntries = std::list<DeviceEntry>;
+
+    struct DevicePrefetchResult {
+        DeviceEntry entry;
+        bool success{};
+        std::string error;
+    };
+
+    [[nodiscard]] static std::size_t packed_host_bytes(
+        const HostTrainingView& host) {
+        return sizeof(int) * host.rgba.size() +
+            sizeof(float) * (host.depth.size() + host.normal.size());
+    }
+
+    [[nodiscard]] DeviceEntry allocate_device_entry(
+        const std::size_t index, const HostTrainingView& host) const {
+        DeviceEntry entry;
+        entry.index = index;
+        entry.bytes = packed_host_bytes(host);
+        entry.camera = host.camera;
+        entry.has_mask = host.has_mask;
+        entry.rgba = tinytensor::Tensor::empty(
+            {host.camera.height, host.camera.width},
+            tinytensor::Device::CUDA, tinytensor::DataType::Int32);
+        if (!host.depth.empty())
+            entry.depth = tinytensor::Tensor::empty(
+                {host.camera.height, host.camera.width},
+                tinytensor::Device::CUDA);
+        if (!host.normal.empty())
+            entry.normal = tinytensor::Tensor::empty(
+                {std::size_t{3}, host.camera.height, host.camera.width},
+                tinytensor::Device::CUDA);
+        return entry;
+    }
+
+    void copy_device_entry_with_pinned_staging(
+        const HostTrainingView& host, DeviceEntry& entry) {
+        const std::size_t rgba_bytes =
+            sizeof(int) * host.rgba.size();
+        const std::size_t depth_bytes =
+            sizeof(float) * host.depth.size();
+        const std::size_t normal_bytes =
+            sizeof(float) * host.normal.size();
+        const std::size_t total_bytes =
+            rgba_bytes + depth_bytes + normal_bytes;
+        PinnedStagingLease lease{pinned_pool_.acquire(total_bytes),
+                                 &pinned_pool_};
+        std::uint8_t* destination = lease.buffer->data();
+        std::uint8_t* rgba_source = destination;
+        std::memcpy(rgba_source, host.rgba.data(), rgba_bytes);
+        std::uint8_t* depth_source = rgba_source + rgba_bytes;
+        if (depth_bytes != 0)
+            std::memcpy(depth_source, host.depth.data(), depth_bytes);
+        std::uint8_t* normal_source = depth_source + depth_bytes;
+        if (normal_bytes != 0)
+            std::memcpy(normal_source, host.normal.data(), normal_bytes);
+
+        const auto check_copy = [](const cudaError_t error) {
+            if (error != cudaSuccess)
+                throw std::runtime_error(
+                    std::string("Failed to enqueue packed-view H2D copy: ") +
+                    cudaGetErrorString(error));
+        };
+        check_copy(cudaMemcpyAsync(
+            entry.rgba.data_ptr(), rgba_source, rgba_bytes,
+            cudaMemcpyHostToDevice, copy_stream_));
+        if (depth_bytes != 0)
+            check_copy(cudaMemcpyAsync(
+                entry.depth.data_ptr(), depth_source, depth_bytes,
+                cudaMemcpyHostToDevice, copy_stream_));
+        if (normal_bytes != 0)
+            check_copy(cudaMemcpyAsync(
+                entry.normal.data_ptr(), normal_source, normal_bytes,
+                cudaMemcpyHostToDevice, copy_stream_));
+
+        const cudaError_t sync_error = cudaStreamSynchronize(copy_stream_);
+        if (sync_error != cudaSuccess)
+            throw std::runtime_error(
+                std::string("Failed to synchronize packed-view H2D copy: ") +
+                cudaGetErrorString(sync_error));
+    }
+
+    [[nodiscard]] bool make_room_for_device_bytes(const std::size_t bytes) {
+        while (!device_entries_.empty() &&
+               device_cached_bytes_ + device_prefetch_bytes_ + bytes >
+                   device_capacity_bytes_) {
+            const auto& evicted = device_entries_.back();
+            device_cached_bytes_ -= evicted.bytes;
+            device_lookup_.erase(evicted.index);
+            device_entries_.pop_back();
+        }
+        return device_cached_bytes_ + device_prefetch_bytes_ + bytes <=
+            device_capacity_bytes_;
+    }
+
+    bool insert_device_entry(DeviceEntry&& entry) {
+        if (!make_room_for_device_bytes(entry.bytes)) return false;
+        const std::size_t index = entry.index;
+        device_entries_.push_front(std::move(entry));
+        device_lookup_[index] = device_entries_.begin();
+        device_cached_bytes_ += device_entries_.front().bytes;
+        return true;
+    }
+
+    bool consume_device_prefetch(const std::size_t index) {
+        const auto pending = device_prefetches_.find(index);
+        if (pending == device_prefetches_.end()) return false;
+
+        // The view being loaded is the current training view. Waiting here is
+        // intentional: the copy stream can overlap already-submitted CUDA
+        // training work while this thread waits for staging to finish.
+        if (pending->second.wait_for(std::chrono::seconds{0}) !=
+            std::future_status::ready) {
+            pending->second.wait();
+        }
+        DevicePrefetchResult result = pending->second.get();
+        device_prefetches_.erase(pending);
+        device_prefetch_bytes_ -= result.entry.bytes;
+
+        if (!result.success) {
+            core::Logger::instance().warning(
+                "splat_data_cache device_prefetch_failed index=", index,
+                " error=", result.error);
+            return false;
+        }
+
+        ++device_prefetch_hits_;
+        uploaded_bytes_ += result.entry.bytes;
+        return insert_device_entry(std::move(result.entry));
+    }
 
     TrainingView decode_device_view(const DeviceEntry& entry) const {
         TrainingView result;
@@ -800,7 +1087,7 @@ private:
     struct Entry {
         std::size_t index{};
         std::size_t bytes{};
-        HostTrainingView view;
+        std::shared_ptr<HostTrainingView> view;
     };
     using Entries = std::list<Entry>;
 
@@ -808,22 +1095,19 @@ private:
         if (index >= source_.size())
             throw std::out_of_range(
                 "GGGS training view index is out of range");
-        const auto found = lookup_.find(index);
-        if (found != lookup_.end()) {
-            entries_.splice(entries_.begin(), entries_, found->second);
-            return entries_.front().view;
-        }
+        if (const auto cached = cached_host_view(index))
+            return *cached;
 
-        HostTrainingView loaded;
+        auto loaded = std::make_shared<HostTrainingView>();
         const auto prefetched = prefetches_.find(index);
         if (prefetched != prefetches_.end()) {
-            loaded = prefetched->second.get();
+            *loaded = prefetched->second.get();
             prefetches_.erase(prefetched);
         } else {
-            loaded = load_host_training_view(
+            *loaded = load_host_training_view(
                 source_[index], options_, resolution_scale_);
         }
-        const std::size_t loaded_bytes = loaded.bytes();
+        const std::size_t loaded_bytes = loaded->bytes();
         while (!entries_.empty() &&
                (capacity_bytes_ == 0 ||
                 cached_bytes_ + loaded_bytes > capacity_bytes_)) {
@@ -837,19 +1121,33 @@ private:
         entries_.push_front({index, loaded_bytes, std::move(loaded)});
         lookup_[index] = entries_.begin();
         cached_bytes_ += loaded_bytes;
+        return *entries_.front().view;
+    }
+
+    std::shared_ptr<HostTrainingView> cached_host_view(
+        const std::size_t index) {
+        const auto found = lookup_.find(index);
+        if (found == lookup_.end()) return {};
+        entries_.splice(entries_.begin(), entries_, found->second);
         return entries_.front().view;
     }
 
     const std::vector<mvs::MvsView>& source_;
     const TrainingOptions& options_;
+    cudaStream_t copy_stream_{};
+    PinnedStagingPool pinned_pool_;
     std::size_t capacity_bytes_{};
     std::size_t cached_bytes_{};
     std::size_t device_capacity_bytes_{};
     std::size_t device_cached_bytes_{};
     std::size_t dataset_packed_bytes_{};
     std::size_t requests_{}, device_hits_{}, uploaded_bytes_{};
+    std::size_t device_prefetch_hits_{};
+    std::size_t device_prefetch_bytes_{};
     DeviceEntries device_entries_;
     std::unordered_map<std::size_t, DeviceEntries::iterator> device_lookup_;
+    std::unordered_map<std::size_t, std::future<DevicePrefetchResult>>
+        device_prefetches_;
     float resolution_scale_{1.F};
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;

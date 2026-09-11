@@ -20,6 +20,10 @@ Gaussian/optimizer state or rasterization scratch.
   CUDA memory pool, and disables the device cache rather than risking the
   non-reconstructable training state.
 - Added `--splat-cache-auto` and `--splat-prefetch-views`.
+- Added asynchronous packed CUDA prefetch. Once a view is present in the host
+  cache, upcoming shuffled views are copied through reusable pinned staging
+  buffers on a dedicated non-blocking CUDA stream and inserted into the CUDA
+  LRU before the training iteration needs them.
 
 Adaptive mode is enabled by default. Setting either explicit cache budget to
 zero still disables that cache. Pass `--splat-cache-auto=false` when an exact
@@ -76,11 +80,42 @@ policy deliberately caps this high-resolution dataset at one eighth of VRAM
 (~3 GiB), reducing peak VRAM to around 14 GiB with essentially the same
 throughput.
 
+### Asynchronous CUDA prefetch
+
+The pinned-staging prefetch pass uses the same adaptive budgets, 500k Gaussian
+cap, and 3,000 iterations:
+
+| Configuration | Steps/s | GPU mean | Peak VRAM | PSNR |
+|---|---:|---:|---:|---:|
+| Adaptive without CUDA prefetch | 180.07 | 73.72% | 13,873 MiB | 21.9803 dB |
+| Adaptive + pinned CUDA prefetch | **201.07** | **91.25%** | 13,894 MiB | 21.9842 dB |
+
+Final cache statistics:
+
+```text
+requests=3000
+device_hits=273
+device_prefetch_hits=1818
+device_prefetch_pending=3
+uploaded_bytes=22,618,828,800
+```
+
+Typical steady `data_load_ms` fell from roughly 0.45–0.48 ms to 0.07–0.11 ms;
+one sampled 100-step window still contained a 4.18 ms miss. This pass improves
+the steady state, while the first pass over 898 previously unseen JPEGs remains
+CPU decode-bound.
+
+A 6,000-step stability run completed without an OOM at 195.05 steps/s and
+14,203 MiB peak VRAM. Its final cache statistics were 564 ordinary CUDA hits,
+4,506 asynchronous prefetch hits, and 4 pending prefetches.
+
 Artifacts:
 
 - [Fixed-default baseline summary](../artifacts/splat_perf_office_20260911/fixed_old_3k/summary.json)
 - [Adaptive 3k summary](../artifacts/splat_perf_office_20260911/adaptive_safe_3k/summary.json)
 - [Adaptive 6k summary](../artifacts/splat_perf_office_20260911/adaptive_safe_6k/summary.json)
+- [Async CUDA prefetch summary](../artifacts/splat_perf_office_20260911/async_prefetch_3k/summary.json)
+- [Async CUDA prefetch 6k summary](../artifacts/splat_perf_office_20260911/async_prefetch_6k/summary.json)
 - [Comparison plot](../artifacts/splat_perf_office_20260911/office_cache_comparison.png)
 
 ## Usage
