@@ -139,6 +139,8 @@ struct ReconstructCli {
     float splat_progressive_initial_scale{0.25F};
     std::uint64_t splat_view_cache_mb{6'144};
     std::uint64_t splat_device_cache_mb{512};
+    bool splat_cache_auto{true};
+    unsigned splat_prefetch_views{4};
     unsigned splat_eval_split_every{0};
     bool splat_use_mask{true};
     std::string splat_alpha_mode{"transparent"};
@@ -337,6 +339,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
               << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
+              << "  --splat-cache-auto BOOL  grow cache budgets safely for large datasets (default true)\n"
+              << "  --splat-prefetch-views N  concurrent host image prefetch count (default 4)\n"
               << "  --splat-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --splat-kernel-size V  screen covariance low-pass variance; "
                  "0 disables, 0.1 matches Brush Mip\n"
@@ -654,7 +658,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-view-cache-mb", "Packed RGBA8 splat host-view LRU budget (0 = no cache)",
          cxxopts::value<std::uint64_t>()->default_value("6144"))
         ("splat-device-cache-mb", "Packed splat CUDA-view LRU budget, capped by free VRAM (0 = disabled)",
-         cxxopts::value<std::uint64_t>()->default_value("512"))
+          cxxopts::value<std::uint64_t>()->default_value("512"))
+        ("splat-cache-auto",
+         "Grow packed host/CUDA cache budgets within system and VRAM safety limits",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("splat-prefetch-views",
+         "Concurrent host decode/pack prefetch views (0 disables)",
+         cxxopts::value<unsigned>()->default_value("4"))
         ("splat-eval-split-every",
          "Hold out every Nth view for PSNR evaluation (0 = train all)",
          cxxopts::value<unsigned>()->default_value("0"))
@@ -1074,6 +1084,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-view-cache-mb"].as<std::uint64_t>();
     cli.splat_device_cache_mb =
         result["splat-device-cache-mb"].as<std::uint64_t>();
+    cli.splat_cache_auto = result["splat-cache-auto"].as<bool>();
+    cli.splat_prefetch_views =
+        result["splat-prefetch-views"].as<unsigned>();
+    if (cli.splat_prefetch_views > 16)
+        throw std::invalid_argument(
+            "--splat-prefetch-views must be in [0, 16]");
     cli.splat_eval_split_every =
         result["splat-eval-split-every"].as<unsigned>();
     cli.splat_use_mask = result["splat-use-mask"].as<bool>();
@@ -2543,6 +2559,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             cli.splat_device_cache_mb,
             (std::numeric_limits<std::size_t>::max)() / bytes_per_megabyte)
         * bytes_per_megabyte);
+    options.adaptive_training_cache = cli.splat_cache_auto;
+    options.training_prefetch_views = cli.splat_prefetch_views;
     if (!cli.gui) {
         for (const unsigned milestone :
              {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
@@ -2766,6 +2784,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         options.progressive_initial_scale,
         " host_view_cache_mb=",
         options.training_view_cache_bytes / (1024 * 1024),
+        " cache_auto=", options.adaptive_training_cache,
         " prefetch_views=", options.training_prefetch_views,
         " eval_split_every=", options.evaluation_split_every,
         " knn_scale=", options.initialize_scale_from_knn,

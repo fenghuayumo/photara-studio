@@ -1745,6 +1745,7 @@ void test_training_device_cache() {
     options.multi_view_ncc_weight = 0.6F;
     options.training_prefetch_views = 0;
     options.training_view_cache_bytes = 0;
+    options.adaptive_training_cache = false;
     // Exactly one RGBA8 + depth + normal frame; the next view must evict it.
     options.training_device_cache_bytes = 256 * (4 + 4 + 12);
     splat::training_data::TrainingDataLoader cache(views, options);
@@ -1781,7 +1782,22 @@ void test_training_device_cache() {
             resized.rgb.numel() == 3 * 8 * 8 &&
             cache.stats().device_hits == 1,
             "Resolution transition reused old-size CUDA supervision");
+    options.adaptive_training_cache = true;
+    options.training_device_cache_bytes = 1;
+    splat::training_data::TrainingDataLoader adaptive(views, options);
+    require(adaptive.stats().device_budget_bytes ==
+                2 * 256 * (4 + 4 + 12),
+            "Adaptive CUDA cache did not cover this small dataset");
+    const auto adaptive_first = adaptive.get(0);
+    const auto adaptive_hit = adaptive.get(0);
+    const auto adaptive_second = adaptive.get(1);
+    require(adaptive_first.rgb.numel() == 3 * 16 * 16 &&
+                    adaptive_hit.rgb.numel() == 3 * 16 * 16 &&
+                    adaptive_second.rgb.numel() == 3 * 16 * 16 &&
+                    adaptive.stats().device_hits == 1,
+            "Adaptive CUDA cache did not retain the packed views");
     for (const std::size_t budget : {std::size_t{0}, std::size_t{1}}) {
+        options.adaptive_training_cache = false;
         options.training_device_cache_bytes = budget;
         splat::training_data::TrainingDataLoader uncached(views, options);
         compare(uncached.get(0), reference);

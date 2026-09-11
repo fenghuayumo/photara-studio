@@ -192,9 +192,13 @@ struct TrainingOptions {
     float progressive_initial_scale{0.25F};
     std::size_t training_view_cache_bytes{
         std::size_t{6} * 1024 * 1024 * 1024};
+    // Expand the packed-view budgets when a dataset is larger than the defaults,
+    // while keeping both budgets bounded by fractions of system/CUDA memory.
+    // Explicitly setting either budget to zero still disables that cache.
+    bool adaptive_training_cache{true};
     // Packed RGBA8 plus optional depth/normal CUDA cache. Zero disables it.
-    // Also capped at 1/8 of free VRAM at loader construction to leave room
-    // for the model, Adam states, and rasterization scratch allocations.
+    // Adaptive mode is bounded by the projected training state and total VRAM;
+    // fixed mode retains the legacy free-VRAM/8 guard.
     std::size_t training_device_cache_bytes{std::size_t{512} * 1024 * 1024};
     // Decode upcoming shuffled views concurrently while CUDA processes the
     // current iteration. Zero disables prefetching.

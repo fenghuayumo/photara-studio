@@ -1268,6 +1268,19 @@ GaussianModel Trainer::train(
         if (densification_enabled) {
             const bool adc_plus =
                 is_adc_strategy(options_.densification_strategy);
+            if (refine::is_refinement_iteration(iteration, options_)) {
+                const std::size_t remaining =
+                    options_.densification_cap > model.size()
+                        ? options_.densification_cap - model.size()
+                        : 0;
+                const std::size_t expected_growth = std::min(
+                    remaining,
+                    std::max<std::size_t>(
+                        std::size_t{65'536}, model.size() / 4));
+                view_cache.ensure_device_headroom(
+                    std::size_t{512} * 1024 * 1024 +
+                    expected_growth * std::size_t{2} * 1024);
+            }
             latest_refinement = refine::refine_gaussians(
                 model, densification_stats, iteration,
                 adc_plus ? refinement_geometry.maximum_extent : scene_extent,
@@ -1452,7 +1465,9 @@ GaussianModel Trainer::train(
             " device_hits=", cache.device_hits,
             " uploaded_bytes=", cache.uploaded_bytes,
             " device_resident_bytes=", cache.device_resident_bytes,
-            " device_budget_bytes=", cache.device_budget_bytes);
+            " device_budget_bytes=", cache.device_budget_bytes,
+            " host_budget_bytes=", cache.host_budget_bytes,
+            " dataset_packed_bytes=", cache.dataset_packed_bytes);
     }
     finish_evaluation();
     const cudaError_t error = cudaDeviceSynchronize();

@@ -21,8 +21,67 @@
 #include <unordered_map>
 #include <utility>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#else
+#include <filesystem>
+#include <fstream>
+#endif
+
 namespace aetherscan::splat {
 namespace {
+
+constexpr std::size_t k_mib = std::size_t{1024} * 1024;
+constexpr std::size_t k_gib = k_mib * 1024;
+
+std::size_t saturate_add(
+    const std::size_t left, const std::size_t right) noexcept {
+    return left > std::numeric_limits<std::size_t>::max() - right
+        ? std::numeric_limits<std::size_t>::max()
+        : left + right;
+}
+
+std::size_t saturate_multiply(
+    const std::size_t left, const std::size_t right) noexcept {
+    if (left == 0 || right == 0) return 0;
+    return left > std::numeric_limits<std::size_t>::max() / right
+        ? std::numeric_limits<std::size_t>::max()
+        : left * right;
+}
+
+std::size_t available_system_memory_bytes() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status))
+        return static_cast<std::size_t>(status.ullAvailPhys);
+    return 0;
+#elif defined(__APPLE__)
+    uint64_t bytes = 0;
+    size_t size = sizeof(bytes);
+    if (sysctlbyname("hw.memsize", &bytes, &size, nullptr, 0) == 0)
+        return static_cast<std::size_t>(bytes / 4);
+    return 0;
+#else
+    std::error_code error;
+    const auto line = std::filesystem::path("/proc/meminfo");
+    if (std::filesystem::exists(line, error)) {
+        std::ifstream stream(line);
+        std::string key;
+        std::size_t value_kb = 0;
+        while (stream >> key >> value_kb) {
+            if (key == "MemAvailable:")
+                return saturate_multiply(value_kb, std::size_t{1024});
+        }
+    }
+    return 0;
+#endif
+}
 
 void finalize_equirect_intrinsics(Camera& camera) {
     camera.fx = camera.fy =
@@ -381,6 +440,38 @@ struct HostTrainingView {
     }
 };
 
+std::size_t packed_training_view_bytes(
+    const mvs::MvsView& view, const TrainingOptions& options,
+    const float resolution_scale) {
+    const Camera camera = training_data::training_camera(
+        view, options, resolution_scale);
+    const std::size_t pixels = saturate_multiply(
+        static_cast<std::size_t>(camera.width),
+        static_cast<std::size_t>(camera.height));
+    std::size_t bytes = saturate_multiply(pixels, sizeof(int));
+    const bool full_working_resolution =
+        camera.width == view.width && camera.height == view.height;
+    const bool can_use_mvs_maps =
+        full_working_resolution &&
+        !uses_native_splat_projection(camera.model);
+    if (can_use_mvs_maps && options.use_mvs_depth &&
+        view.depth_map.depth.size() ==
+            saturate_multiply(
+                static_cast<std::size_t>(view.width),
+                static_cast<std::size_t>(view.height))) {
+        bytes = saturate_add(bytes, saturate_multiply(pixels, sizeof(float)));
+    }
+    if (can_use_mvs_maps && options.use_mvs_normals &&
+        view.depth_map.normal.size() ==
+            saturate_multiply(
+                static_cast<std::size_t>(view.width),
+                static_cast<std::size_t>(view.height))) {
+        bytes = saturate_add(
+            bytes, saturate_multiply(pixels, 3 * sizeof(float)));
+    }
+    return bytes;
+}
+
 std::uint8_t quantize_channel(const float value) {
     return static_cast<std::uint8_t>(std::lround(
         std::clamp(value, 0.F, 1.F) * 255.F));
@@ -549,21 +640,17 @@ struct TrainingDataLoader::Impl {
         const std::vector<mvs::MvsView>& source,
         const TrainingOptions& options, const float resolution_scale = 1.F)
         : source_(source), options_(options),
-          capacity_bytes_(options.training_view_cache_bytes),
+          capacity_bytes_(
+              options.adaptive_training_cache
+                  ? std::size_t{0}
+                  : options.training_view_cache_bytes),
           resolution_scale_(resolution_scale) {
-        if (options.training_device_cache_bytes != 0) {
-            std::size_t free_bytes{}, total_bytes{};
-            const auto error = cudaMemGetInfo(&free_bytes, &total_bytes);
-            if (error != cudaSuccess)
-                throw std::runtime_error(
-                    std::string("Training cache VRAM query failed: ") +
-                    cudaGetErrorString(error));
-            device_capacity_bytes_ = std::min(
-                options.training_device_cache_bytes, free_bytes / 8);
-        }
+        update_cache_budgets();
         core::Logger::instance().info(
             "splat_data_cache host_budget_bytes=", capacity_bytes_,
-            " device_budget_bytes=", device_capacity_bytes_);
+            " device_budget_bytes=", device_capacity_bytes_,
+            " dataset_packed_bytes=", dataset_packed_bytes_,
+            " adaptive=", options_.adaptive_training_cache ? 1 : 0);
     }
 
     TrainingView get(const std::size_t index) {
@@ -649,11 +736,36 @@ struct TrainingDataLoader::Impl {
         // old-scale work before publishing the new scale.
         prefetches_.clear();
         resolution_scale_ = clamped;
+        update_cache_budgets();
+    }
+
+    void ensure_device_headroom(const std::size_t bytes) {
+        if (bytes == 0) return;
+        std::size_t free_bytes{}, total_bytes{};
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess ||
+            free_bytes >= bytes) {
+            return;
+        }
+
+        const std::size_t free_before = free_bytes;
+        const std::size_t resident = device_cached_bytes_;
+        device_lookup_.clear();
+        device_entries_.clear();
+        device_cached_bytes_ = 0;
+        device_capacity_bytes_ = 0;
+        tinytensor::Tensor::trim_memory_pool();
+        cudaMemGetInfo(&free_bytes, &total_bytes);
+        core::Logger::instance().warning(
+            "splat_data_cache low_vram_headroom_bytes=", bytes,
+            " free_before_bytes=", free_before,
+            " released_packed_bytes=", resident,
+            " action=disable_device_cache");
     }
 
     CacheStats stats() const {
         return {requests_, device_hits_, uploaded_bytes_,
-                device_cached_bytes_, device_capacity_bytes_};
+                device_cached_bytes_, device_capacity_bytes_,
+                dataset_packed_bytes_, capacity_bytes_};
     }
 
 private:
@@ -734,6 +846,7 @@ private:
     std::size_t cached_bytes_{};
     std::size_t device_capacity_bytes_{};
     std::size_t device_cached_bytes_{};
+    std::size_t dataset_packed_bytes_{};
     std::size_t requests_{}, device_hits_{}, uploaded_bytes_{};
     DeviceEntries device_entries_;
     std::unordered_map<std::size_t, DeviceEntries::iterator> device_lookup_;
@@ -741,6 +854,99 @@ private:
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;
     std::unordered_map<std::size_t, std::future<HostTrainingView>> prefetches_;
+
+    [[nodiscard]] std::size_t projected_gaussian_count() const noexcept {
+        std::size_t count = options_.max_gaussians;
+        if (options_.enable_densification)
+            count = std::max(count, options_.densification_cap);
+        if (count == 0) count = source_.size();
+        return count;
+    }
+
+    void update_cache_budgets() {
+        dataset_packed_bytes_ = 0;
+        for (const mvs::MvsView& view : source_) {
+            dataset_packed_bytes_ = saturate_add(
+                dataset_packed_bytes_,
+                packed_training_view_bytes(
+                    view, options_, resolution_scale_));
+        }
+
+        if (!options_.adaptive_training_cache) {
+            capacity_bytes_ = options_.training_view_cache_bytes;
+            device_capacity_bytes_ = 0;
+            if (options_.training_device_cache_bytes != 0) {
+                std::size_t free_bytes{}, total_bytes{};
+                const auto error = cudaMemGetInfo(&free_bytes, &total_bytes);
+                if (error != cudaSuccess)
+                    throw std::runtime_error(
+                        std::string("Training cache VRAM query failed: ") +
+                        cudaGetErrorString(error));
+                device_capacity_bytes_ = std::min(
+                    options_.training_device_cache_bytes, free_bytes / 8);
+            }
+            return;
+        }
+
+        const std::size_t available_ram = available_system_memory_bytes();
+        capacity_bytes_ = options_.training_view_cache_bytes;
+        if (capacity_bytes_ != 0) {
+            const std::size_t desired = std::max(
+                capacity_bytes_, dataset_packed_bytes_);
+            const std::size_t hard_limit = std::size_t{16} * k_gib;
+            const std::size_t ram_limit = available_ram == 0
+                ? hard_limit
+                : std::min(available_ram - available_ram / 4, hard_limit);
+            capacity_bytes_ = std::min(desired, ram_limit);
+        }
+
+        device_capacity_bytes_ = 0;
+        if (options_.training_device_cache_bytes == 0) return;
+        std::size_t free_bytes{}, total_bytes{};
+        const auto error = cudaMemGetInfo(&free_bytes, &total_bytes);
+        if (error != cudaSuccess)
+            throw std::runtime_error(
+                std::string("Training cache VRAM query failed: ") +
+                cudaGetErrorString(error));
+
+        // At least 75% of VRAM remains for Gaussian/optimizer state and
+        // raster scratch. A large projected model shrinks the image-cache
+        // share before the cache can starve topology updates.
+        const std::size_t projected_gaussians = projected_gaussian_count();
+        const std::size_t projected_training_bytes = saturate_add(
+            std::size_t{3} * k_gib / 2,
+            saturate_multiply(projected_gaussians, std::size_t{2} * 1024));
+        const double reserve_fraction = total_bytes == 0
+            ? 1.0
+            : static_cast<double>(projected_training_bytes) /
+                  static_cast<double>(total_bytes);
+        double cache_fraction = 0.25 - std::max(0.0, reserve_fraction - 0.50);
+        if (cache_fraction <= 0.0) {
+            // A very large configured Gaussian cap may itself be close to the
+            // GPU limit. Keep only the legacy small cache share; the trainer
+            // will drop even that if live free memory becomes low.
+            cache_fraction = 0.0;
+        }
+        std::size_t budget = cache_fraction == 0.0
+            ? std::min<std::size_t>(total_bytes / 8, 2 * k_gib)
+            : static_cast<std::size_t>(
+                  static_cast<double>(total_bytes) *
+                  std::min(cache_fraction, 0.25));
+        budget = std::min(budget, dataset_packed_bytes_);
+        // High-resolution views also need large raster/atomic scratch buffers.
+        // In that case cap the packed-image share at 1/8 of VRAM once the
+        // dataset exceeds the same size; small datasets can still be fully
+        // resident.
+        if (dataset_packed_bytes_ > total_bytes / 8 &&
+            !source_.empty() &&
+            dataset_packed_bytes_ / source_.size() > 4 * k_mib) {
+            budget = std::min<std::size_t>(budget, total_bytes / 8);
+        }
+        const std::size_t free_guard =
+            free_bytes > k_gib ? free_bytes - k_gib : 0;
+        budget = std::min(budget, free_guard);
+        device_capacity_bytes_ = budget;
+    }
 };
 
 
@@ -769,6 +975,10 @@ void TrainingDataLoader::prefetch(const std::size_t index) {
 
 void TrainingDataLoader::set_resolution_scale(const float scale) {
     impl_->set_resolution_scale(scale);
+}
+
+void TrainingDataLoader::ensure_device_headroom(const std::size_t bytes) {
+    impl_->ensure_device_headroom(bytes);
 }
 
 CacheStats TrainingDataLoader::stats() const {
