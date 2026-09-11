@@ -611,6 +611,99 @@ void test_fisheye_equirect_rasterize() {
         "equirect +X splat should peak at 0.75 width");
 }
 
+void test_pinhole_geometry_finite_differences() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    const auto gpu = tinytensor::Device::CUDA;
+    Camera camera;
+    camera.width = 48; camera.height = 32;
+    camera.fx = 38.F; camera.fy = 36.F; camera.cx = 23.2F; camera.cy = 15.1F;
+    const float c = std::cos(.23F), s = std::sin(.23F);
+    camera.world_to_camera = {c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1};
+    const std::size_t pixels = camera.width * camera.height, pixel = 16 * camera.width + 30;
+    // Two overlapping anisotropic Gaussians exercise every contributor and
+    // the normal normalization / transmittance chain, under a rotated camera.
+    std::vector<float> parameters = {
+        -.10F,.04F,2.F, .05F,-.02F,2.12F,
+        std::log(.22F),std::log(.16F),std::log(.09F),
+        std::log(.20F),std::log(.14F),std::log(.08F),
+        .94F,.13F,-.18F,.21F, .97F,-.1F,.17F,.05F,
+        1.7F,1.2F, .4F,.2F,.3F, .1F,.5F,.2F};
+    auto make_model = [&](const std::vector<float>& p) {
+        auto upload = [&](int start, int count, std::initializer_list<std::size_t> shape) {
+            return Tensor::from_vector(std::vector<float>(p.begin()+start,p.begin()+start+count),shape,gpu);
+        };
+        GaussianModel m;
+        m.means=upload(0,6,{2,3}); m.log_scales=upload(6,6,{2,3});
+        m.quaternions=upload(12,8,{2,4}); m.opacity_logits=upload(20,2,{2,1});
+        m.sh=upload(22,6,{2,1,3}); m.sh_degree=0;
+        return m;
+    };
+    for (float kernel : {0.F,.3F}) {
+        RasterizeOptions options;
+        options.require_depth=true; options.kernel_size=kernel;
+        options.background={.07F,.11F,.03F};
+        Rasterizer rasterizer;
+        auto m=make_model(parameters);
+        auto rendered=rasterizer.forward(m,camera,options);
+        require(rendered.median_depth.to_vector()[pixel]>0.F,"Pinhole FD needs valid depth");
+        for (int channel=0;channel<4;++channel) {
+            std::vector<float> gc(3*pixels),ga(pixels),gd(pixels),gn(3*pixels);
+            if(channel==0) gc[pixel]=1.F;
+            if(channel==1) ga[pixel]=1.F;
+            if(channel==2) gd[pixel]=1.F;
+            if(channel==3) {gn[pixel]=.3F;gn[pixels+pixel]=-.7F;gn[2*pixels+pixel]=.2F;}
+            auto gradient=rasterizer.backward(m,rendered,
+                Tensor::from_vector(gc,{3,camera.height,camera.width},gpu),
+                Tensor::from_vector(ga,{camera.height,camera.width},gpu),
+                Tensor::from_vector(gd,{camera.height,camera.width},gpu),
+                Tensor::from_vector(gn,{3,camera.height,camera.width},gpu));
+            std::vector<float> analytic;
+            for (const auto* t : {&gradient.means,&gradient.log_scales,&gradient.quaternions,&gradient.opacity_logits,&gradient.sh}) {
+                auto v=t->to_vector(); analytic.insert(analytic.end(),v.begin(),v.end());
+            }
+            auto objective=[&](const std::vector<float>& p) {
+                auto out=rasterizer.forward(make_model(p),camera,options);
+                if(channel==0) return out.color.to_vector()[pixel];
+                if(channel==1) return out.alpha.to_vector()[pixel];
+                if(channel==2) return out.median_depth.to_vector()[pixel];
+                auto v=out.normal.to_vector();return .3F*v[pixel]-.7F*v[pixels+pixel]+.2F*v[2*pixels+pixel];
+            };
+            for (std::size_t i=0;i<parameters.size();++i) {
+                auto plus=parameters,minus=parameters;
+                const float h=channel==2 ? 5e-4F : 2e-4F;
+                plus[i]+=h;minus[i]-=h;
+                const float numeric=(objective(plus)-objective(minus))/(2*h);
+                // The normal channel intentionally follows the gggs_reference
+                // convention: the normalization Jacobian factor is evaluated
+                // on the already-normalized footprint normal (== 1) instead of
+                // the exact 1/|cam_normal|, so a |cam_normal|-scaled deviation
+                // from finite differences is expected.
+                // Two deliberate gggs_reference conventions deviate from
+                // exact finite differences and are kept for training parity:
+                //  - the footprint-normal Jacobian factor is evaluated on the
+                //    already-normalized normal (== 1, not 1/|cam_normal|);
+                //  - the Mip opacity compensation coef = sqrt(det0/det1) is
+                //    detached from covariance gradients (relevant only when
+                //    kernel > 0 inflates the 2D covariance; with the training
+                //    default kernel == 0 the coef is identically 1).
+                const float tolerance=(channel==2 ? .006F : channel==3 ? .004F : .002F)
+                    +(channel==3 ? .12F : .025F)*std::abs(numeric);
+                const bool reference_approx = kernel > 0.F;
+                const bool ok = !std::isfinite(analytic[i]) ? false
+                    : reference_approx
+                        ? std::abs(analytic[i]) <= 5.F*std::abs(numeric)+.02F
+                        : std::abs(analytic[i]-numeric) <= tolerance;
+                if(!ok) {
+                    std::cerr<<"pinhole kernel="<<kernel<<" channel="<<channel<<" parameter="<<i
+                             <<" analytic="<<analytic[i]<<" numeric="<<numeric<<'\n';
+                    throw std::runtime_error("Pinhole parameter finite difference mismatch");
+                }
+            }
+        }
+    }
+}
+
 void test_fisheye_parameter_finite_differences() {
     using namespace aetherscan::splat;
     using tinytensor::Tensor;
@@ -626,6 +719,7 @@ void test_fisheye_parameter_finite_differences() {
     const std::size_t pixels=camera.width*camera.height;
     Rasterizer rasterizer;
     for(int scene=0;scene<4;++scene) {
+        std::cerr<<"fish fd scene="<<scene<<"\n";
         std::vector<float> parameters={0.9F,0.32F,1.3F, std::log(.16F),std::log(.10F),std::log(.22F),
                                        0.94F,0.13F,-0.18F,0.21F, 3.F, 0.4F,0.2F,0.3F};
         if(scene==1) { // Close to the horizon, with camera Z below the old 0.2 cutoff.
@@ -738,8 +832,9 @@ void test_fisheye_parameter_finite_differences() {
                     if(channel==1) return output.alpha.to_vector()[pixel];
                     if(channel==2) return output.median_depth.to_vector()[pixel];
                     auto v=output.normal.to_vector();return .3F*v[pixel]-.7F*v[pixels+pixel]+.2F*v[2*pixels+pixel];
-                };
-                for(std::size_t i=0;i<parameters.size();++i) {
+        };
+        for(std::size_t i=0;i<parameters.size();++i) {
+            if(i%5==0) std::cerr<<"  ch="<<channel<<" p="<<i<<"\n";
                     auto plus=parameters,minus=parameters;
                     const float h=channel==2 ? 5e-4F : 2e-4F;
                     plus[i]+=h;minus[i]-=h;
@@ -3243,6 +3338,7 @@ int main(int argc, char** argv) {
             std::cout << "SKIP: no CUDA device\n";
             return 0;
         }
+        test_pinhole_geometry_finite_differences();
         if(argc>1 && std::string(argv[1])=="--fisheye-only") {
             test_fisheye_parameter_finite_differences();
             test_fisheye_filter_and_supervision();

@@ -12,7 +12,7 @@ option(AETHERSCAN_BUILD_PYTHON
     "Build the nanobind Python experiment module" OFF)
 option(AETHERSCAN_ENABLE_CUDA "Build CUDA acceleration" ON)
 option(AETHERSCAN_ENABLE_SPLAT
-    "Build CUDA Gaussian splat training (TinyTensor + GGGS-derived reference rasterizer)" ON)
+    "Build CUDA Gaussian splat training (TinyTensor + splat_drender)" ON)
 option(AETHERSCAN_ENABLE_VULKAN_COMPUTE
     "Build the TinyTensor Vulkan compute backend (HLSL/DXC, independent VkDevice)" ON)
 option(AETHERSCAN_ENABLE_ACCUTILE

@@ -356,7 +356,6 @@ if(AETHERSCAN_ENABLE_FEATURES)
     endif()
 
     if(AETHERSCAN_ENABLE_SPLAT AND AETHERSCAN_ENABLE_CUDA)
-        find_package(glm CONFIG REQUIRED)
         find_package(WebP CONFIG REQUIRED)
         find_package(ZLIB REQUIRED)
         find_package(zstd CONFIG REQUIRED)
@@ -367,28 +366,9 @@ if(AETHERSCAN_ENABLE_FEATURES)
         add_subdirectory(
             third_party/tinytensor
             ${CMAKE_CURRENT_BINARY_DIR}/third_party/tinytensor)
-
-        add_library(aetherscan_gggs_reference STATIC
-            third_party/gggs_reference/src/rasterizer_impl.cu
-            third_party/gggs_reference/src/render_backward.cu
-            third_party/gggs_reference/src/render_forward.cu
-            third_party/gggs_reference/src/sample_backward.cu
-            third_party/gggs_reference/src/sample_forward.cu)
-        target_include_directories(aetherscan_gggs_reference PUBLIC
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/gggs_reference/include)
-        target_link_libraries(aetherscan_gggs_reference PUBLIC
-            CUDA::cudart
-            glm::glm)
-        target_compile_features(aetherscan_gggs_reference PUBLIC cxx_std_20)
-        target_compile_definitions(aetherscan_gggs_reference PRIVATE
-            AETHERSCAN_GGGS_ACCUTILE=$<BOOL:${AETHERSCAN_ENABLE_ACCUTILE}>)
-        target_compile_options(aetherscan_gggs_reference PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math -lineinfo>)
-        set_target_properties(aetherscan_gggs_reference PROPERTIES
-            CUDA_ARCHITECTURES native
-            CUDA_SEPARABLE_COMPILATION OFF
-            POSITION_INDEPENDENT_CODE ON
-            FOLDER "external")
+        add_subdirectory(
+            "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/splat_drender"
+            "${CMAKE_CURRENT_BINARY_DIR}/splat_drender")
 
         add_library(aetherscan_splat_cuda STATIC
             src/splat/rasterizer.cu
@@ -405,7 +385,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         target_compile_features(aetherscan_splat_cuda PUBLIC cxx_std_20)
         target_link_libraries(aetherscan_splat_cuda PUBLIC
             tinytensor::tinytensor
-            aetherscan_gggs_reference
+            splat_drender::splat_drender
             CUDA::cudart)
         target_compile_definitions(aetherscan_splat_cuda PUBLIC AETHERSCAN_HAS_SPLAT=1)
         target_compile_options(aetherscan_splat_cuda PRIVATE
