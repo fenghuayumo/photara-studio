@@ -795,6 +795,8 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
         std::max(0, app.settings.max_features));
     settings.scene_mode = app.settings.scene_mode;
     settings.iterations = app.settings.iterations;
+    settings.max_gaussians = app.settings.max_gaussians;
+    settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
     settings.max_resolution = app.settings.max_resolution;
@@ -854,6 +856,8 @@ void apply_project_settings(
     app.settings.max_features = static_cast<int>(settings.max_features);
     app.settings.scene_mode = settings.scene_mode;
     app.settings.iterations = settings.iterations;
+    app.settings.max_gaussians = settings.max_gaussians;
+    app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
     app.settings.max_resolution = settings.max_resolution;
@@ -2334,6 +2338,9 @@ bool orbit_pose_changed(const OrbitCamera& a, const OrbitCamera& b) {
     };
     return differs(a.yaw, b.yaw) || differs(a.pitch, b.pitch) ||
            differs(a.distance, b.distance) || differs(a.fov_degrees, b.fov_degrees) ||
+           differs(a.ortho_height, b.ortho_height) ||
+           differs(a.fisheye_k1, b.fisheye_k1) ||
+           a.projection != b.projection ||
            differs(a.target.x, b.target.x) || differs(a.target.y, b.target.y) ||
            differs(a.target.z, b.target.z);
 }
@@ -5231,9 +5238,22 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
                            gpu::consumed_timeline_value() > 0;
     const unsigned view_count = preview_camera_count(app);
     char camera_label[64];
-    if (!app.preview_follow_view || app.scene.views.empty())
-        std::snprintf(camera_label, sizeof(camera_label), "orbit camera");
-    else
+    if (!app.preview_follow_view || app.scene.views.empty()) {
+        if (app.camera.projection == EditorProjection::fisheye)
+            std::snprintf(
+                camera_label, sizeof(camera_label), "orbit · fisheye %.0f°",
+                app.camera.fov_degrees);
+        else if (app.camera.projection == EditorProjection::orthographic)
+            std::snprintf(
+                camera_label, sizeof(camera_label), "orbit · ortho %.2f",
+                app.camera.ortho_height);
+        else if (app.camera.projection == EditorProjection::panorama)
+            std::snprintf(camera_label, sizeof(camera_label), "orbit · panorama");
+        else
+            std::snprintf(
+                camera_label, sizeof(camera_label), "orbit · %.0f°",
+                app.camera.fov_degrees);
+    } else
         std::snprintf(
             camera_label, sizeof(camera_label), "camera %u / %u",
             app.preview_view + 1, view_count);
@@ -5778,6 +5798,23 @@ Action draw_inspector(App& app) {
         theme::caption("Iterations");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputInt("##iterations", &app.settings.iterations, 1000, 5000);
+        theme::caption("Max Gaussians");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::InputInt(
+            "##max_gaussians", &app.settings.max_gaussians, 100'000, 1'000'000);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Hard cap on Gaussian count during densification.\n"
+                "Default 10,000,000. Lower this to limit VRAM.");
+        theme::caption("SH degree");
+        ImGui::SetNextItemWidth(-1.F);
+        const char* sh_degrees[] = {"0", "1", "2", "3"};
+        ImGui::Combo(
+            "##sh_degree", &app.settings.sh_degree, sh_degrees, 4);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Spherical-harmonic colour bands.\n"
+                "0 is diffuse only. 3 is the training default.");
         theme::caption("Max training resolution");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputInt(
@@ -6044,6 +6081,7 @@ Action draw_inspector(App& app) {
             const ViewPose& pose =
                 app.scene.views[static_cast<std::size_t>(app.image_qa.selected)];
             theme::metric("Capture", pose.name.c_str());
+            theme::metric("Camera", pose.camera_model.c_str());
             char res[32];
             std::snprintf(
                 res, sizeof(res), "%u × %u", pose.width, pose.height);
@@ -6079,6 +6117,71 @@ Action draw_inspector(App& app) {
             std::snprintf(buffer, sizeof(buffer), "%.4f", metrics.rmse);
             theme::metric("RMSE", buffer);
         }
+        ImGui::Spacing();
+    }
+
+    if (app.workspace != ViewportWorkspace::image_2d &&
+        ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        theme::caption("Projection");
+        ImGui::SetNextItemWidth(-1.F);
+        int projection = static_cast<int>(app.camera.projection);
+        const char* projections[] = {
+            "Perspective", "Orthographic", "Fisheye", "Panorama"};
+        if (ImGui::Combo("##editor_projection", &projection, projections, 4)) {
+            set_editor_projection(
+                app.camera, static_cast<EditorProjection>(projection));
+            app.preview_follow_view = false;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Perspective — standard lens with field of view.\n"
+                "Orthographic — parallel view, no foreshortening.\n"
+                "Fisheye — OpenCV equidistant, same model as training.\n"
+                "Panorama — 360° × 180° spherical view.");
+
+        if (app.camera.projection == EditorProjection::perspective ||
+            app.camera.projection == EditorProjection::fisheye) {
+            theme::caption(
+                app.camera.projection == EditorProjection::fisheye
+                    ? "Fisheye field of view"
+                    : "Field of view");
+            ImGui::SetNextItemWidth(-1.F);
+            const float fov_min =
+                app.camera.projection == EditorProjection::fisheye ? 80.F : 10.F;
+            const float fov_max =
+                app.camera.projection == EditorProjection::fisheye ? 179.F
+                                                                   : 120.F;
+            ImGui::SliderFloat(
+                "##editor_fov", &app.camera.fov_degrees, fov_min, fov_max,
+                "%.0f°");
+        }
+        if (app.camera.projection == EditorProjection::fisheye) {
+            theme::caption("Lens distortion");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::SliderFloat(
+                "##fisheye_k1", &app.camera.fisheye_k1, -0.2F, 0.4F, "%.3f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "OpenCV fisheye k1. Zero is a pure equidistant lens.");
+        }
+        if (app.camera.projection == EditorProjection::orthographic) {
+            theme::caption("View height");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::DragFloat(
+                "##ortho_height", &app.camera.ortho_height, 0.05F, 0.01F,
+                1.0e5F, "%.3f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "World-space height visible in the viewport.\n"
+                    "Scroll the view to zoom.");
+        }
+        if (app.camera.projection == EditorProjection::panorama)
+            theme::caption("Full 360° × 180° spherical view around the camera.");
+        theme::caption("Fly speed");
+        ImGui::SetNextItemWidth(-1.F);
+        ImGui::SliderFloat(
+            "##fly_speed", &app.camera.move_speed, 0.1F, 10.F, "%.1fx");
         ImGui::Spacing();
     }
 
@@ -6151,10 +6254,6 @@ Action draw_inspector(App& app) {
         ImGui::SetNextItemWidth(-1.F);
         ImGui::SliderFloat(
             "##view_scale", &app.view_options.view_scale, 0.02F, 0.4F, "%.2f");
-        theme::caption("Fly speed");
-        ImGui::SetNextItemWidth(-1.F);
-        ImGui::SliderFloat(
-            "##fly_speed", &app.camera.move_speed, 0.1F, 10.F, "%.1fx");
         ImGui::Spacing();
         ImGui::Checkbox("Colour by depth", &app.view_options.colour_by_depth);
         if (ImGui::IsItemHovered())
@@ -6647,6 +6746,9 @@ int main(const int argc, char** argv) {
         consume_dropped_paths(app);
 
         app.settings.iterations = std::max(app.settings.iterations, 1);
+        app.settings.max_gaussians = std::clamp(
+            app.settings.max_gaussians, 10'000, 50'000'000);
+        app.settings.sh_degree = std::clamp(app.settings.sh_degree, 0, 3);
         app.settings.preview_interval =
             std::max(app.settings.preview_interval, 1);
         app.settings.max_features = std::max(app.settings.max_features, 512);

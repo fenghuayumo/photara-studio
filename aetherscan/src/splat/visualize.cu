@@ -1,5 +1,6 @@
 #include "splat/visualize.hpp"
 
+#include "core/camera_projection.hpp"
 #include "cuda_ops.hpp"
 #include "splat/rasterizer.hpp"
 
@@ -107,6 +108,33 @@ __device__ void eval_sh_color(
     b = fmaxf(b + 0.5F, 0.F);
 }
 
+__device__ bool project_overlay_pixel(
+    const float x, const float y, const float z, const int width,
+    const int height, const float fx, const float fy, const float cx,
+    const float cy, const int model, const float k1, const float k2,
+    const float k3, const float k4, float& u, float& v) {
+    if (model == static_cast<int>(aetherscan::CameraModel::equirectangular)) {
+        const auto pixel = project_equirectangular_camera(
+            x, y, z, width, height);
+        if (!pixel.valid) return false;
+        u = static_cast<float>(pixel.u);
+        v = static_cast<float>(pixel.v);
+        return true;
+    }
+    if (model == static_cast<int>(aetherscan::CameraModel::opencv_fisheye)) {
+        const auto pixel = project_fisheye_camera(
+            x, y, z, fx, fy, cx, cy, k1, k2, k3, k4);
+        if (!pixel.valid) return false;
+        u = static_cast<float>(pixel.u);
+        v = static_cast<float>(pixel.v);
+        return true;
+    }
+    if (z <= k_near) return false;
+    u = fx * x / z + cx;
+    v = fy * y / z + cy;
+    return true;
+}
+
 __device__ void blend_pixel(
     float* color, float* alpha, const int pixel, const int pixels,
     const float r, const float g, const float b, const float a) {
@@ -151,8 +179,9 @@ __global__ void visualize_points_kernel(
     const float* means, const float* sh, const float* w2c, float* color,
     float* alpha, const int count, const int width, const int height,
     const int bases, const int sh_degree, const float fx, const float fy,
-    const float cx, const float cy, const float camx, const float camy,
-    const float camz, const float point_size) {
+    const float cx, const float cy, const int model, const float k1,
+    const float k2, const float k3, const float k4, const float camx,
+    const float camy, const float camz, const float point_size) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     const float mx = means[3 * index];
@@ -160,9 +189,11 @@ __global__ void visualize_points_kernel(
     const float mz = means[3 * index + 2];
     float x, y, z;
     camera_point(w2c, mx, my, mz, x, y, z);
-    if (z <= k_near) return;
-    const float u = fx * x / z + cx;
-    const float v = fy * y / z + cy;
+    float u = 0.F, v = 0.F;
+    if (!project_overlay_pixel(
+            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, u,
+            v))
+        return;
     const int radius = max(1, static_cast<int>(ceilf(point_size)));
     const int pixels = width * height;
     float r, g, b;
@@ -185,8 +216,9 @@ __global__ void visualize_rings_kernel(
     const float* sh, const float* w2c, float* color, float* alpha,
     const int count, const int width, const int height, const int bases,
     const int sh_degree, const float fx, const float fy, const float cx,
-    const float cy, const float camx, const float camy, const float camz,
-    const float scale_modifier, const float ring_scale) {
+    const float cy, const int model, const float k1, const float k2,
+    const float k3, const float k4, const float camx, const float camy,
+    const float camz, const float scale_modifier, const float ring_scale) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     const float mx = means[3 * index];
@@ -194,7 +226,12 @@ __global__ void visualize_rings_kernel(
     const float mz = means[3 * index + 2];
     float x, y, z;
     camera_point(w2c, mx, my, mz, x, y, z);
-    if (z <= k_near) return;
+    float u = 0.F, v = 0.F;
+    if (!project_overlay_pixel(
+            x, y, z, width, height, fx, fy, cx, cy, model, k1, k2, k3, k4, u,
+            v))
+        return;
+    if (z <= k_near) z = k_near;
 
     float ax[3], ay[3], az[3];
     quat_scaled_axes(
@@ -229,8 +266,6 @@ __global__ void visualize_rings_kernel(
     const float rotation = 0.5F * atan2f(2.F * b, a - c);
     const float cos_r = cosf(rotation);
     const float sin_r = sinf(rotation);
-    const float u = fx * x * inv_z + cx;
-    const float v = fy * y * inv_z + cy;
     const int pixels = width * height;
     float red, green, blue;
     eval_sh_color(
@@ -312,7 +347,8 @@ tinytensor::Tensor render_debug_overlay(
             model.means.ptr<float>(), model.sh.ptr<float>(),
             view.ptr<float>(), color.ptr<float>(), alpha.ptr<float>(), count,
             width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
-            camera.cy, camera.position[0], camera.position[1],
+            camera.cy, static_cast<int>(camera.model), camera.k1, camera.k2,
+            camera.k3, camera.k4, camera.position[0], camera.position[1],
             camera.position[2], options.point_size_px);
     } else {
         visualize_rings_kernel<<<blocks, k_threads>>>(
@@ -320,7 +356,8 @@ tinytensor::Tensor render_debug_overlay(
             activated.quaternions.ptr<float>(), model.sh.ptr<float>(),
             view.ptr<float>(), color.ptr<float>(), alpha.ptr<float>(), count,
             width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
-            camera.cy, camera.position[0], camera.position[1],
+            camera.cy, static_cast<int>(camera.model), camera.k1, camera.k2,
+            camera.k3, camera.k4, camera.position[0], camera.position[1],
             camera.position[2], options.scale_modifier, options.ring_scale);
     }
     check_cuda(cudaGetLastError(), "launch overlay kernel");

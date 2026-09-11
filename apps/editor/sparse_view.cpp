@@ -3,6 +3,7 @@
 #include "imgui_internal.h"
 #include "theme.hpp"
 
+#include "core/camera_projection.hpp"
 #include "io/image.hpp"
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
@@ -10,6 +11,7 @@
 #include "project/archive.hpp"
 #include "splat/dataset.hpp"
 #include "splat/formats.hpp"
+#include "splat/visualize.hpp"
 
 #include <Eigen/Core>
 
@@ -60,6 +62,71 @@ Vec3 normalize(const Vec3 v) {
     return length > 1e-20F ? v * (1.F / length) : Vec3{0.F, 0.F, 1.F};
 }
 
+const char* camera_model_label(const aetherscan::CameraModel model) {
+    switch (model) {
+        case aetherscan::CameraModel::opencv_fisheye:
+            return "OpenCV Fisheye";
+        case aetherscan::CameraModel::equirectangular:
+            return "Equirectangular";
+        default:
+            return "Pinhole";
+    }
+}
+
+aetherscan::CameraModel parse_view_camera_model(const std::string& token) {
+    if (token == "opencv_fisheye" || token == "fisheye")
+        return aetherscan::CameraModel::opencv_fisheye;
+    if (token == "equirectangular" || token == "equirect")
+        return aetherscan::CameraModel::equirectangular;
+    return aetherscan::CameraModel::pinhole;
+}
+
+void apply_camera_model(ViewPose& pose, const aetherscan::CameraModel model) {
+    pose.model = model;
+    pose.camera_model = camera_model_label(model);
+}
+
+constexpr float k_pi = 3.14159265F;
+
+void orbit_intrinsics(
+    const OrbitCamera& camera, const std::uint32_t width,
+    const std::uint32_t height, float& fx, float& fy, float& cx, float& cy,
+    aetherscan::CameraModel& model, float& k1, float& k2, float& k3,
+    float& k4) {
+    const float w = static_cast<float>(std::max<std::uint32_t>(1, width));
+    const float h = static_cast<float>(std::max<std::uint32_t>(1, height));
+    cx = 0.5F * w;
+    cy = 0.5F * h;
+    k1 = k2 = k3 = k4 = 0.F;
+    model = aetherscan::CameraModel::pinhole;
+    if (camera.projection == EditorProjection::panorama) {
+        model = aetherscan::CameraModel::equirectangular;
+        fx = fy = w / (2.F * k_pi);
+        return;
+    }
+    if (camera.projection == EditorProjection::fisheye) {
+        model = aetherscan::CameraModel::opencv_fisheye;
+        k1 = camera.fisheye_k1;
+        const float theta = std::clamp(camera.fov_degrees, 20.F, 179.F) * 0.5F *
+                            k_pi / 180.F;
+        const float t2 = theta * theta;
+        const float theta_d = theta * (1.F + t2 * k1);
+        fy = (h * 0.5F) / std::max(1e-4F, theta_d);
+        fx = fy;
+        return;
+    }
+    if (camera.projection == EditorProjection::orthographic) {
+        const float view_h = std::max(1e-4F, camera.ortho_height);
+        fy = h * std::max(1e-4F, camera.distance) / view_h;
+        fx = fy;
+        return;
+    }
+    const float half = std::clamp(camera.fov_degrees, 10.F, 170.F) * 0.5F *
+                       k_pi / 180.F;
+    fy = h * 0.5F / std::max(1e-4F, std::tan(half));
+    fx = fy;
+}
+
 // A camera-space basis plus the pixel focal length for the current viewport.
 struct ViewFrame {
     Vec3 eye;
@@ -69,7 +136,20 @@ struct ViewFrame {
     float focal{};
     float half_x{};
     float half_y{};
+    ImVec2 min{};
     ImVec2 centre;
+    float fx{1.F};
+    float fy{1.F};
+    float cx{};
+    float cy{};
+    float k1{};
+    float k2{};
+    float k3{};
+    float k4{};
+    float width{1.F};
+    float height{1.F};
+    EditorProjection projection{EditorProjection::perspective};
+    aetherscan::CameraModel model{aetherscan::CameraModel::pinhole};
 };
 
 ViewFrame build_frame(
@@ -85,8 +165,16 @@ ViewFrame build_frame(
     frame.up = cross(frame.right, frame.forward);
     const float height = std::max(1.F, max.y - min.y);
     const float width = std::max(1.F, max.x - min.x);
-    const float half_fov = camera.fov_degrees * 0.5F * 3.14159265F / 180.F;
-    frame.focal = height * 0.5F / std::max(1e-4F, std::tan(half_fov));
+    frame.min = min;
+    frame.width = width;
+    frame.height = height;
+    frame.projection = camera.projection;
+    orbit_intrinsics(
+        camera, static_cast<std::uint32_t>(std::lround(width)),
+        static_cast<std::uint32_t>(std::lround(height)), frame.fx, frame.fy,
+        frame.cx, frame.cy, frame.model, frame.k1, frame.k2, frame.k3,
+        frame.k4);
+    frame.focal = frame.fy;
     frame.half_x = width * 0.5F;
     frame.half_y = height * 0.5F;
     frame.centre = {(min.x + max.x) * 0.5F, (min.y + max.y) * 0.5F};
@@ -97,11 +185,32 @@ ViewFrame build_frame(
 bool project(
     const ViewFrame& frame, const Vec3 world, ImVec2& screen, float& depth) {
     const Vec3 relative = world - frame.eye;
+    const float x = dot(relative, frame.right);
+    const float y = -dot(relative, frame.up);
     depth = dot(relative, frame.forward);
+    if (frame.projection == EditorProjection::panorama) {
+        const auto pixel = aetherscan::project_equirectangular_camera(
+            x, y, depth, static_cast<int>(std::lround(frame.width)),
+            static_cast<int>(std::lround(frame.height)));
+        if (!pixel.valid) return false;
+        screen = {frame.min.x + static_cast<float>(pixel.u),
+                  frame.min.y + static_cast<float>(pixel.v)};
+        depth = std::sqrt(x * x + y * y + depth * depth);
+        return true;
+    }
     if (depth <= k_near_plane) return false;
+    if (frame.projection == EditorProjection::fisheye) {
+        const auto pixel = aetherscan::project_fisheye_camera(
+            x, y, depth, frame.fx, frame.fy, frame.cx, frame.cy, frame.k1,
+            frame.k2, frame.k3, frame.k4);
+        if (!pixel.valid) return false;
+        screen = {frame.min.x + static_cast<float>(pixel.u),
+                  frame.min.y + static_cast<float>(pixel.v)};
+        return true;
+    }
     const float inverse = frame.focal / depth;
-    screen.x = frame.centre.x + dot(relative, frame.right) * inverse;
-    screen.y = frame.centre.y - dot(relative, frame.up) * inverse;
+    screen.x = frame.centre.x + x * inverse;
+    screen.y = frame.centre.y + y * inverse;
     return true;
 }
 
@@ -794,12 +903,18 @@ std::string load_poses(
         ViewPose pose;
         pose.name = fields[1];
         if (model_index < fields.size())
-            pose.camera_model = fields[model_index] == "opencv_fisheye" ? "OpenCV Fisheye" : "Pinhole";
+            apply_camera_model(pose, parse_view_camera_model(fields[model_index]));
         pose.registered = field_as_double(fields, 2) != 0.0;
         pose.width = static_cast<std::uint32_t>(field_as_double(fields, 4));
         pose.height = static_cast<std::uint32_t>(field_as_double(fields, 5));
         pose.fx = static_cast<float>(field_as_double(fields, 6));
         pose.fy = static_cast<float>(field_as_double(fields, 7));
+        pose.cx = static_cast<float>(field_as_double(fields, 8));
+        pose.cy = static_cast<float>(field_as_double(fields, 9));
+        pose.k1 = static_cast<float>(field_as_double(fields, 10));
+        pose.k2 = static_cast<float>(field_as_double(fields, 11));
+        pose.k3 = static_cast<float>(field_as_double(fields, 12));
+        pose.k4 = static_cast<float>(field_as_double(fields, 13));
         pose.centre = {
             static_cast<float>(field_as_double(fields, 14)),
             static_cast<float>(field_as_double(fields, 15)),
@@ -1232,12 +1347,15 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour
                     static_cast<float>(image.pose.R(row, column));
         if (image.camera_id < scene.cameras.size()) {
             const auto& camera = scene.cameras[image.camera_id];
-            pose.camera_model = camera.model == aetherscan::CameraModel::opencv_fisheye
-                ? "OpenCV Fisheye" : "Pinhole";
+            apply_camera_model(pose, camera.model);
             pose.fx = static_cast<float>(camera.fx);
             pose.fy = static_cast<float>(camera.fy);
             pose.cx = static_cast<float>(camera.cx);
             pose.cy = static_cast<float>(camera.cy);
+            pose.k1 = static_cast<float>(camera.k1);
+            pose.k2 = static_cast<float>(camera.k2);
+            pose.k3 = static_cast<float>(camera.p1);
+            pose.k4 = static_cast<float>(camera.p2);
             pose.width = camera.width;
             pose.height = camera.height;
         }
@@ -1339,12 +1457,27 @@ SceneLoad sparse_scene_from_dataset(
                 for (int column = 0; column < 3; ++column)
                     pose.rotation[static_cast<std::size_t>(row * 3 + column)] =
                         static_cast<float>(view.pose.R(row, column));
-            pose.fx = view.fx;
-            pose.fy = view.fy;
-            pose.cx = view.cx;
-            pose.cy = view.cy;
-            pose.width = view.width;
-            pose.height = view.height;
+            apply_camera_model(pose, view.source_model);
+            pose.k1 = view.k1;
+            pose.k2 = view.k2;
+            pose.k3 = view.p1;
+            pose.k4 = view.p2;
+            if (aetherscan::uses_native_splat_projection(view.source_model) &&
+                view.src_width != 0 && view.src_height != 0) {
+                pose.fx = view.src_fx;
+                pose.fy = view.src_fy;
+                pose.cx = view.src_cx;
+                pose.cy = view.src_cy;
+                pose.width = view.src_width;
+                pose.height = view.src_height;
+            } else {
+                pose.fx = view.fx;
+                pose.fy = view.fy;
+                pose.cx = view.cx;
+                pose.cy = view.cy;
+                pose.width = view.width;
+                pose.height = view.height;
+            }
             pose.registered = true;
             ++loaded.scene.registered_views;
             ++loaded.scene.total_views;
@@ -1655,9 +1788,14 @@ void OrbitCamera::frame(const Vec3& centroid, const float radius) {
     yaw = 0.785398F;
     pitch = 0.61548F;
     target = centroid;
-    const float half_fov = fov_degrees * 0.5F * 3.14159265F / 180.F;
     const float span = std::max(1e-3F, radius);
-    distance = span / std::max(0.05F, std::tan(half_fov)) * 1.35F;
+    const float half_fov = fov_degrees * 0.5F * k_pi / 180.F;
+    if (projection == EditorProjection::orthographic) {
+        distance = span * 2.5F;
+        ortho_height = span * 2.7F;
+    } else {
+        distance = span / std::max(0.05F, std::tan(half_fov)) * 1.35F;
+    }
 }
 
 void OrbitCamera::frame(const SparseScene& scene) {
@@ -1727,24 +1865,30 @@ bool pick_orbit_focus_point(
 
     // No reconstructed point under the cursor: pivot on the current look-at
     // plane so a live splat pixel still focuses the orbit without a CPU hit.
-    const float sx = mouse.x - frame.centre.x;
-    const float sy = frame.centre.y - mouse.y;
-    const Vec3 dir = normalize(
-        frame.forward * frame.focal + frame.right * sx + frame.up * sy);
+    Vec3 origin;
+    Vec3 dir;
+    if (!camera_world_ray(camera, min, max, mouse, origin, dir)) return false;
     const float denom = dot(dir, frame.forward);
     if (std::abs(denom) < 1e-6F) return false;
-    const float t = dot(camera.target - frame.eye, frame.forward) / denom;
+    const float t = dot(camera.target - origin, frame.forward) / denom;
     if (t <= k_near_plane) return false;
-    out_point = frame.eye + dir * t;
+    out_point = origin + dir * t;
     return true;
 }
 
 void update_orbit_camera(
     OrbitCamera& camera, const bool accepts_input, const float scene_radius) {
     const ImGuiIO& io = ImGui::GetIO();
-    if (accepts_input && io.MouseWheel != 0.F)
-        camera.distance = std::clamp(
-            camera.distance * std::exp(-io.MouseWheel * 0.16F), 1e-3F, 1e7F);
+    if (accepts_input && io.MouseWheel != 0.F) {
+        const float zoom = std::exp(-io.MouseWheel * 0.16F);
+        if (camera.projection == EditorProjection::orthographic) {
+            camera.ortho_height = std::clamp(
+                camera.ortho_height * zoom, 1e-3F, 1e7F);
+        } else {
+            camera.distance = std::clamp(
+                camera.distance * zoom, 1e-3F, 1e7F);
+        }
+    }
 
     const bool any_down = ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
                           ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
@@ -1773,7 +1917,11 @@ void update_orbit_camera(
             camera.pitch = std::clamp(
                 camera.pitch + delta.y * 0.008F, -1.53F, 1.53F);
         } else {
-            const float scale = camera.distance * 0.0018F;
+            const float pan_ref =
+                camera.projection == EditorProjection::orthographic
+                    ? camera.ortho_height
+                    : camera.distance;
+            const float scale = pan_ref * 0.0018F;
             camera.target = camera.target + right * (-delta.x * scale) +
                             up * (delta.y * scale);
         }
@@ -1821,6 +1969,32 @@ bool camera_world_ray(
     const ImVec2 mouse, Vec3& origin, Vec3& direction) {
     const ViewFrame frame = build_frame(camera, min, max);
     origin = frame.eye;
+    const float u = mouse.x - frame.min.x;
+    const float v = mouse.y - frame.min.y;
+    const auto to_world = [&](const double cx, const double cy,
+                              const double cz) {
+        const float x = static_cast<float>(cx);
+        const float y = static_cast<float>(cy);
+        const float z = static_cast<float>(cz);
+        return normalize(
+            frame.right * x + frame.up * (-y) + frame.forward * z);
+    };
+    if (frame.projection == EditorProjection::panorama) {
+        const auto ray = aetherscan::unproject_equirectangular_camera(
+            u, v, static_cast<int>(std::lround(frame.width)),
+            static_cast<int>(std::lround(frame.height)));
+        if (!ray.valid) return false;
+        direction = to_world(ray.x, ray.y, ray.z);
+        return true;
+    }
+    if (frame.projection == EditorProjection::fisheye) {
+        const auto ray = aetherscan::unproject_fisheye_camera(
+            u, v, frame.fx, frame.fy, frame.cx, frame.cy, frame.k1, frame.k2,
+            frame.k3, frame.k4);
+        if (!ray.valid) return false;
+        direction = to_world(ray.x, ray.y, ray.z);
+        return true;
+    }
     const float sx = mouse.x - frame.centre.x;
     const float sy = frame.centre.y - mouse.y;
     direction = normalize(
@@ -2285,6 +2459,18 @@ SplatPreviewCamera make_preview_camera_from_view(
                                 : src_h * 0.5F * (dst_h / src_h);
     preview.width = std::max<std::uint32_t>(1, width);
     preview.height = std::max<std::uint32_t>(1, height);
+    preview.model = pose.model;
+    preview.k1 = pose.k1;
+    preview.k2 = pose.k2;
+    preview.k3 = pose.k3;
+    preview.k4 = pose.k4;
+    if (preview.model == aetherscan::CameraModel::equirectangular) {
+        preview.fx = preview.fy =
+            static_cast<float>(preview.width) / (2.F * k_pi);
+        preview.cx = static_cast<float>(preview.width) * 0.5F;
+        preview.cy = static_cast<float>(preview.height) * 0.5F;
+        preview.k1 = preview.k2 = preview.k3 = preview.k4 = 0.F;
+    }
     return preview;
 }
 
@@ -2317,15 +2503,12 @@ SplatPreviewCamera make_preview_camera(
         r02, r12, r22, 0.F,
         tx, ty, tz, 1.F};
     preview.position = {eye.x, eye.y, eye.z};
-    const float half_fov = camera.fov_degrees * 0.5F * 3.14159265F / 180.F;
-    const float image_height =
-        static_cast<float>(std::max<std::uint32_t>(1, height));
-    preview.fy = image_height * 0.5F / std::max(1e-4F, std::tan(half_fov));
-    preview.fx = preview.fy;
-    preview.cx = static_cast<float>(std::max<std::uint32_t>(1, width)) * 0.5F;
-    preview.cy = image_height * 0.5F;
     preview.width = std::max<std::uint32_t>(1, width);
     preview.height = std::max<std::uint32_t>(1, height);
+    orbit_intrinsics(
+        camera, preview.width, preview.height, preview.fx, preview.fy,
+        preview.cx, preview.cy, preview.model, preview.k1, preview.k2,
+        preview.k3, preview.k4);
     return preview;
 }
 
@@ -2353,23 +2536,43 @@ bool write_preview_camera_file(
     const std::filesystem::path& path, const SplatPreviewCamera& camera,
     const std::uint64_t revision, const char* vis_mode,
     const float point_size_px, const float ring_scale) {
-    if (path.empty()) return false;
-    std::ofstream output(path, std::ios::trunc);
-    if (!output) return false;
-    output << std::setprecision(9);
-    output << revision << '\n';
-    for (std::size_t i = 0; i < camera.world_to_camera.size(); ++i) {
-        if (i) output << ' ';
-        output << camera.world_to_camera[i];
+    return aetherscan::splat::write_preview_camera_sidecar(
+        path, camera, revision, vis_mode, point_size_px, ring_scale);
+}
+
+const char* editor_projection_name(const EditorProjection projection) {
+    switch (projection) {
+        case EditorProjection::orthographic:
+            return "orthographic";
+        case EditorProjection::fisheye:
+            return "fisheye";
+        case EditorProjection::panorama:
+            return "panorama";
+        case EditorProjection::perspective:
+        default:
+            return "perspective";
     }
-    output << '\n'
-           << camera.position[0] << ' ' << camera.position[1] << ' '
-           << camera.position[2] << '\n'
-           << camera.fx << ' ' << camera.fy << ' ' << camera.cx << ' '
-           << camera.cy << ' ' << camera.width << ' ' << camera.height << '\n';
-    if (vis_mode != nullptr && vis_mode[0] != '\0')
-        output << vis_mode << ' ' << point_size_px << ' ' << ring_scale << '\n';
-    return static_cast<bool>(output);
+}
+
+void set_editor_projection(
+    OrbitCamera& camera, const EditorProjection projection) {
+    if (camera.projection == projection) return;
+    const float half = std::clamp(camera.fov_degrees, 10.F, 170.F) * 0.5F *
+                       k_pi / 180.F;
+    const float tan_half = std::max(1e-4F, std::tan(half));
+    if (camera.projection == EditorProjection::orthographic &&
+        projection != EditorProjection::orthographic) {
+        camera.distance = std::max(1e-3F, camera.ortho_height * 0.5F / tan_half);
+    } else if (camera.projection != EditorProjection::orthographic &&
+               projection == EditorProjection::orthographic) {
+        camera.ortho_height =
+            std::max(1e-3F, 2.F * camera.distance * tan_half);
+    }
+    if (projection == EditorProjection::fisheye && camera.fov_degrees < 80.F)
+        camera.fov_degrees = 140.F;
+    if (projection == EditorProjection::perspective && camera.fov_degrees > 120.F)
+        camera.fov_degrees = 90.F;
+    camera.projection = projection;
 }
 
 }  // namespace editor

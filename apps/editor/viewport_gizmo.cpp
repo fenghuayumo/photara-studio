@@ -266,6 +266,10 @@ void draw_arrow_head(
 float gizmo_world_length(
     const OrbitCamera& camera, const ImVec2 min, const ImVec2 max) {
     const float height = std::max(1.F, max.y - min.y);
+    if (camera.projection == EditorProjection::orthographic)
+        return 96.F * camera.ortho_height / std::max(1.F, height);
+    if (camera.projection == EditorProjection::panorama)
+        return camera.distance * 0.25F;
     const float half_fov = camera.fov_degrees * 0.5F * k_pi / 180.F;
     const float focal = height * 0.5F / std::max(1e-4F, std::tan(half_fov));
     return 96.F * camera.distance / std::max(1.F, focal);

@@ -42,6 +42,8 @@ struct Settings {
     unsigned max_features = 27'000;
     bool scene_mode = false;
     int iterations = 30'000;
+    int max_gaussians = 10'000'000;
+    int sh_degree = 3;
     int preview_interval = 50;
     int strategy = 1;
     int max_resolution = 1'920;

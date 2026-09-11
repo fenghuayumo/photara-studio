@@ -131,6 +131,7 @@ struct ReconstructCli {
     bool splat_profile_cuda{false};
     unsigned splat_profile_interval{100};
     std::uint64_t splat_max_gaussians{500'000};
+    unsigned splat_sh_degree{3};
     unsigned splat_max_resolution{1'920};
     bool splat_undistort{false};
     float splat_kernel_size{0.F};
@@ -342,6 +343,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-cache-auto BOOL  grow cache budgets safely for large datasets (default true)\n"
               << "  --splat-prefetch-views N  concurrent host image prefetch count (default 4)\n"
               << "  --splat-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
+              << "  --splat-sh-degree N  spherical-harmonic bands 0..3 (default 3)\n"
               << "  --splat-kernel-size V  screen covariance low-pass variance; "
                  "0 disables, 0.1 matches Brush Mip\n"
               << "  --splat-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
@@ -637,6 +639,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("100"))
         ("splat-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
          cxxopts::value<std::uint64_t>()->default_value("500000"))
+        ("splat-sh-degree", "Spherical-harmonic colour bands (0..3)",
+         cxxopts::value<unsigned>()->default_value("3"))
         ("splat-max-resolution", "Maximum splat training image dimension (0 = source)",
          cxxopts::value<unsigned>()->default_value("1920"))
         ("splat-undistort",
@@ -1070,6 +1074,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "--splat-profile-interval must be in [1, 1000]");
     cli.splat_max_gaussians =
         result["splat-max-gaussians"].as<std::uint64_t>();
+    cli.splat_sh_degree = result["splat-sh-degree"].as<unsigned>();
+    if (cli.splat_sh_degree > 3)
+        throw std::invalid_argument("--splat-sh-degree must be in [0, 3]");
     cli.splat_max_resolution =
         result["splat-max-resolution"].as<unsigned>();
     cli.splat_undistort = result["splat-undistort"].as<bool>();
@@ -2532,6 +2539,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         std::min<std::uint64_t>(
             cli.splat_max_gaussians,
             (std::numeric_limits<std::size_t>::max)()));
+    options.sh_degree = cli.splat_sh_degree;
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;
     options.use_source_resolution = true;

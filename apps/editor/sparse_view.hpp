@@ -39,6 +39,7 @@ struct ImageFeature {
 struct ViewPose {
     std::string name;
     std::string camera_model{"Unknown"};
+    aetherscan::CameraModel model{aetherscan::CameraModel::pinhole};
     std::filesystem::path image_path;
     Vec3 centre;
     std::array<float, 9> rotation{{1, 0, 0, 0, 1, 0, 0, 0, 1}};
@@ -48,6 +49,11 @@ struct ViewPose {
     // to the image centre.
     float cx{-1.F};
     float cy{-1.F};
+    // OpenCV fisheye k1..k4 (p1/p2 of the SfM camera). Unused for pinhole.
+    float k1{0.F};
+    float k2{0.F};
+    float k3{0.F};
+    float k4{0.F};
     std::uint32_t width{};
     std::uint32_t height{};
     float reprojection_p95{};
@@ -143,12 +149,19 @@ MeshLoad load_preview_mesh(
 // Loads a baked OBJ (with UVs) and records the sibling albedo PNG path.
 MeshLoad load_preview_textured_mesh(std::filesystem::path stem);
 
+enum class EditorProjection { perspective, orthographic, fisheye, panorama };
+
 struct OrbitCamera {
     float yaw{0.785398F};
     float pitch{0.61548F};
     float distance{6.F};
     Vec3 target;
+    EditorProjection projection{EditorProjection::perspective};
     float fov_degrees{50.F};
+    // Vertical world extent visible in orthographic mode.
+    float ortho_height{4.F};
+    // Extra OpenCV fisheye k1. Zero is equidistant.
+    float fisheye_k1{0.F};
     float move_speed{1.F};
     // Latched on press inside the viewport so a drag that wanders over the
     // side panels keeps rotating, and a drag started on a panel does not.
@@ -192,17 +205,8 @@ bool camera_world_ray(
     Vec3& origin, Vec3& direction);
 
 // Rasterizer-facing camera matching splat::Camera (OpenCV +Z, Y-down, W2C
-// stored column-major).
-struct SplatPreviewCamera {
-    std::array<float, 16> world_to_camera{};
-    std::array<float, 3> position{};
-    float fx{1.F};
-    float fy{1.F};
-    float cx{};
-    float cy{};
-    std::uint32_t width{};
-    std::uint32_t height{};
-};
+// stored column-major), including model and fisheye coefficients.
+using SplatPreviewCamera = aetherscan::splat::Camera;
 
 SplatPreviewCamera make_preview_camera(
     const OrbitCamera& camera, std::uint32_t width, std::uint32_t height);
@@ -213,6 +217,11 @@ SplatPreviewCamera make_preview_camera_from_view(
 
 // Places the orbit eye at the capture pose looking along camera +Z.
 void snap_orbit_to_view(OrbitCamera& camera, const ViewPose& pose);
+
+// Switches the editor camera projection while keeping the look-at scale.
+void set_editor_projection(OrbitCamera& camera, EditorProjection projection);
+
+[[nodiscard]] const char* editor_projection_name(EditorProjection projection);
 
 bool write_preview_camera_file(
     const std::filesystem::path& path, const SplatPreviewCamera& camera,

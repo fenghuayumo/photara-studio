@@ -199,6 +199,8 @@ int main() {
     settings.video_scale = 0.5F;
     settings.video_rotate = 90;
     settings.camera_model = 2;
+    settings.max_gaussians = 2'500'000;
+    settings.sh_degree = 2;
     settings.sfm_mode = 2;
     settings.max_features = 4096;
     settings.build_mesh = true;
@@ -244,6 +246,8 @@ int main() {
     expect(round_trip.video_scale == 0.5F, "video scale");
     expect(round_trip.video_rotate == 90, "video rotate");
     expect(round_trip.camera_model == 2, "settings camera model");
+    expect(round_trip.max_gaussians == 2'500'000, "settings max gaussians");
+    expect(round_trip.sh_degree == 2, "settings SH degree");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");

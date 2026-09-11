@@ -1,5 +1,6 @@
 #include "core/camera_projection.hpp"
 #include "splat/trainer.hpp"
+#include "splat/visualize.hpp"
 #include "splat/colmap.hpp"
 #include "splat/dataset.hpp"
 #include "splat/formats.hpp"
@@ -448,6 +449,77 @@ void test_camera_projection_roundtrip() {
     require(ray.valid && std::abs(ray.x - 1.0) < 1e-6 &&
                 std::abs(ray.y) < 1e-6 && std::abs(ray.z) < 1e-6,
             "equirect unproject of +X");
+}
+
+void test_preview_camera_sidecar_roundtrip() {
+    using namespace aetherscan::splat;
+    Camera camera;
+    camera.world_to_camera = {
+        0.F, 1.F, 0.F, 0.F, 0.F, 0.F, 1.F, 0.F, 1.F, 0.F, 0.F, 0.F,
+        0.1F, -0.2F, 0.3F, 1.F};
+    camera.position = {1.5F, -0.25F, 4.F};
+    camera.fx = 420.5F;
+    camera.fy = 418.25F;
+    camera.cx = 960.F;
+    camera.cy = 540.F;
+    camera.width = 1920;
+    camera.height = 1080;
+    camera.model = aetherscan::CameraModel::opencv_fisheye;
+    camera.k1 = 0.06F;
+    camera.k2 = -0.012F;
+    camera.k3 = 0.003F;
+    camera.k4 = -0.0004F;
+    const auto path = std::filesystem::temp_directory_path() /
+                      "aetherscan_preview_camera_sidecar_test";
+    require(
+        write_preview_camera_sidecar(path, camera, 9, "rings", 3.5F, 1.25F),
+        "write fisheye preview camera sidecar");
+    Camera loaded;
+    std::uint64_t revision = 0;
+    VisualizeOptions vis;
+    vis.mode = VisualizationMode::splat;
+    require(
+        load_preview_camera_sidecar(path, loaded, revision, &vis),
+        "load fisheye preview camera sidecar");
+    require(revision == 9, "preview camera sidecar revision");
+    require(
+        loaded.model == aetherscan::CameraModel::opencv_fisheye,
+        "preview camera sidecar kept the fisheye model");
+    require(loaded.width == 1920 && loaded.height == 1080,
+            "preview camera sidecar resolution");
+    require(std::abs(loaded.fx - camera.fx) < 1e-4F, "preview camera sidecar fx");
+    require(std::abs(loaded.k1 - camera.k1) < 1e-5F, "preview camera sidecar k1");
+    require(std::abs(loaded.k4 - camera.k4) < 1e-5F, "preview camera sidecar k4");
+    require(vis.mode == VisualizationMode::rings,
+            "preview camera sidecar vis mode");
+    require(std::abs(vis.point_size_px - 3.5F) < 1e-5F,
+            "preview camera sidecar point size");
+
+    {
+        std::ofstream legacy(path, std::ios::trunc);
+        legacy << "3\n"
+               << "1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\n"
+               << "0 0 0\n"
+               << "400 400 960 540 1920 1080\n"
+               << "splat 2.5 2.5\n";
+    }
+    Camera legacy_camera;
+    VisualizeOptions legacy_vis;
+    legacy_vis.mode = VisualizationMode::points;
+    std::uint64_t legacy_revision = 0;
+    require(
+        load_preview_camera_sidecar(
+            path, legacy_camera, legacy_revision, &legacy_vis),
+        "load legacy pinhole preview camera sidecar");
+    require(legacy_revision == 3, "legacy preview camera sidecar revision");
+    require(
+        legacy_camera.model == aetherscan::CameraModel::pinhole,
+        "legacy sidecar stays pinhole");
+    require(legacy_camera.k1 == 0.F && legacy_camera.k4 == 0.F,
+            "legacy sidecar has no distortion");
+    require(legacy_vis.mode == VisualizationMode::splat,
+            "legacy sidecar vis mode");
+    std::filesystem::remove(path);
 }
 
 void test_fisheye_equirect_rasterize() {
@@ -3175,6 +3247,7 @@ int main(int argc, char** argv) {
             test_fisheye_parameter_finite_differences();
             test_fisheye_filter_and_supervision();
             test_fisheye_equirect_rasterize();
+            test_preview_camera_sidecar_roundtrip();
             std::cout<<"Fisheye tests passed\n";
             return 0;
         }
@@ -3183,6 +3256,7 @@ int main(int argc, char** argv) {
         test_mvs_camera_conversion();
         test_camera_projection_roundtrip();
         test_fisheye_equirect_rasterize();
+        test_preview_camera_sidecar_roundtrip();
         test_gggs_3d_filter();
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();

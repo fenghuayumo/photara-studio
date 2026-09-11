@@ -250,6 +250,8 @@ struct ProjectSettings {
 
     bool scene_mode = false;
     int iterations = 30'000;
+    int max_gaussians = 10'000'000;
+    int sh_degree = 3;
     int preview_interval = 50;
     int strategy = 1;  // default, adc_plus, adc_igs, dense_adaptive
     int max_resolution = 1'920;

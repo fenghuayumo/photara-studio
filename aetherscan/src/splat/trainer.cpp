@@ -58,40 +58,7 @@ std::size_t requested_preview_view(
 bool load_preview_camera_file(
     const std::filesystem::path& path, Camera& camera,
     std::uint64_t& revision, VisualizeOptions* vis = nullptr) {
-    if (path.empty()) return false;
-    std::ifstream input(path);
-    if (!input) return false;
-    std::uint64_t parsed_revision{};
-    input >> parsed_revision;
-    for (float& value : camera.world_to_camera) input >> value;
-    input >> camera.position[0] >> camera.position[1] >> camera.position[2];
-    double fx{}, fy{}, cx{}, cy{};
-    unsigned width{}, height{};
-    input >> fx >> fy >> cx >> cy >> width >> height;
-    if (!input || width == 0 || height == 0 || !(fx > 0.0) || !(fy > 0.0))
-        return false;
-    constexpr unsigned k_max_preview_extent = 4096;
-    camera.fx = static_cast<float>(fx);
-    camera.fy = static_cast<float>(fy);
-    camera.cx = static_cast<float>(cx);
-    camera.cy = static_cast<float>(cy);
-    camera.width = std::min(width, k_max_preview_extent);
-    camera.height = std::min(height, k_max_preview_extent);
-    revision = parsed_revision;
-    if (vis != nullptr) {
-        std::string mode_text;
-        float point_size = vis->point_size_px;
-        float ring_scale = vis->ring_scale;
-        if (input >> mode_text >> point_size >> ring_scale) {
-            VisualizationMode mode = vis->mode;
-            if (parse_visualization_mode(mode_text, mode)) {
-                vis->mode = mode;
-                vis->point_size_px = std::max(0.5F, point_size);
-                vis->ring_scale = std::clamp(ring_scale, 0.5F, 8.F);
-            }
-        }
-    }
-    return true;
+    return load_preview_camera_sidecar(path, camera, revision, vis);
 }
 
 tinytensor::Tensor render_preview_color(
