@@ -2,6 +2,7 @@
 #include "core/logging.hpp"
 #include "sfm/triangulation.hpp"
 
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -38,7 +39,21 @@ float median_parallax_deg_for_camera(
     return angles[mid];
 }
 
+std::atomic<BundleBackendPreference>& backend_preference_storage() {
+    static std::atomic<BundleBackendPreference> value{
+        BundleBackendPreference::automatic};
+    return value;
+}
+
 }  // namespace
+
+void set_bundle_backend_preference(const BundleBackendPreference preference) {
+    backend_preference_storage().store(preference, std::memory_order_relaxed);
+}
+
+BundleBackendPreference bundle_backend_preference() {
+    return backend_preference_storage().load(std::memory_order_relaxed);
+}
 
 BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) {
     BundleSummary summary;
@@ -194,15 +209,26 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     const bool has_partial_pose_locks = std::any_of(
         problem.pose_constant.begin(), problem.pose_constant.end(),
         [](const std::uint8_t value) { return value != 0; });
-    const bool optimizes_intrinsics =
-        opt.optimize_focal || opt.optimize_principal_point ||
-        opt.optimize_distortion;
+    // The CUDA joint Schur/PCG solver now estimates shared intrinsic groups
+    // (focal / aspect / principal point / distortion) together with poses and
+    // points. Partial pose locks (local BA with fixed boundary views) still
+    // use the CPU backend.
     const bool supported_parameterization =
         (opt.optimize_rotations || opt.optimize_translations) &&
-        !has_partial_pose_locks && !optimizes_intrinsics;
-    use_cuda = options.prefer_cuda && supported_parameterization &&
+        !has_partial_pose_locks;
+    const BundleBackendPreference backend = bundle_backend_preference();
+    use_cuda = options.prefer_cuda && backend != BundleBackendPreference::cpu &&
+        supported_parameterization &&
         problem.observations.size() >= options.cuda_min_observations &&
         ba::CudaOptimizer::is_available();
+    if (backend == BundleBackendPreference::cuda && !use_cuda &&
+        options.prefer_cuda && supported_parameterization) {
+        core::Logger::instance().warning(
+            "ba-backend=cuda requested but this solve stays on the CPU: "
+            "observations=", problem.observations.size(),
+            " minimum=", options.cuda_min_observations,
+            " cuda_available=", ba::CudaOptimizer::is_available() ? 1 : 0);
+    }
     if (use_cuda) {
         try {
             core::Logger::instance().info(

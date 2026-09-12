@@ -8,12 +8,15 @@
 #include "sfm/resection.hpp"
 #include "sfm/tracks.hpp"
 #include "sfm/triangulation.hpp"
+#include "sfm/appearance.hpp"
+#include "io/image.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
 #include <random>
+#include <chrono>
 
 namespace {
 
@@ -954,9 +957,58 @@ void test_dirty_track_updates_are_isolated() {
         "dirty filtering leaves unselected tracks unchanged");
 }
 
+void test_parallel_track_colours() {
+    const auto directory=std::filesystem::temp_directory_path() /
+        ("aetherscan-colours-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    Scene scene;
+    scene.images.resize(13);
+    scene.tracks.resize(3);
+    for (Index i=0;i<13;++i) {
+        auto& image=scene.images[i];
+        image.path=directory/(std::to_string(i)+".png");
+        image.features.image_width=8;
+        image.features.image_height=8;
+        image.features.keypoints.resize(2);
+        image.features.keypoints[0].x=1.5F;
+        image.features.keypoints[0].y=2.F;
+        image.features.keypoints[1].x=-10.F;
+        if (i<12) {
+            aetherscan::io::RgbImage rgb{16,16,std::vector<std::uint8_t>(16*16*3)};
+            for (unsigned y=0;y<16;++y)
+                for (unsigned x=0;x<16;++x) {
+                    rgb.pixels[(y*16+x)*3]=static_cast<std::uint8_t>(i*10);
+                    rgb.pixels[(y*16+x)*3+1]=static_cast<std::uint8_t>(x);
+                    rgb.pixels[(y*16+x)*3+2]=static_cast<std::uint8_t>(y);
+                }
+            aetherscan::io::save_rgb_png(rgb,image.path);
+        }
+        scene.tracks[0].observations.push_back({i,0});
+        scene.tracks[1].observations.push_back({i,1});
+        scene.tracks[2].observations.push_back({i,99});
+    }
+    for (auto& track : scene.tracks) track.num_inliers=13;
+    Scene serial=scene;
+    serial.thread_count=1;
+    scene.thread_count=8;
+    expect(colour_triangulated_tracks(serial)==1,"serial colour valid samples only");
+    expect(colour_triangulated_tracks(scene)==1,"parallel colour valid samples only");
+    expect(scene.tracks[0].color_r==55 && scene.tracks[0].color_g==3 && scene.tracks[0].color_b==4,
+        "colour averages all loaded photos at scaled keypoints");
+    for (std::size_t i=0;i<scene.tracks.size();++i) {
+        const auto& a=scene.tracks[i];
+        const auto& b=serial.tracks[i];
+        expect(a.has_color==b.has_color && a.color_r==b.color_r && a.color_g==b.color_g && a.color_b==b.color_b,
+            "parallel colour exactly matches serial with missing photos and invalid samples");
+    }
+    expect(colour_triangulated_tracks(scene)==0,"already coloured tracks remain unchanged");
+    std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
+    test_parallel_track_colours();
     test_pair_cycle_weighting();
     test_global_rotation_weighting();
     test_global_rotation_dense_graph_iterative_solve();

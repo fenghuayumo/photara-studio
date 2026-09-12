@@ -1,6 +1,7 @@
 #include "sfm/vocabulary.hpp"
 
 #include "core/logging.hpp"
+#include "parallel/thread_pool.hpp"
 
 #include <algorithm>
 #include <array>
@@ -193,20 +194,25 @@ void VocabularyTree::build_into(
     std::vector<std::uint32_t> assignment(subset.size(), 0);
     for (unsigned iteration = 0; iteration < config_.max_iterations;
          ++iteration) {
-        for (std::size_t i = 0; i < subset.size(); ++i) {
-            const float* row = descriptors.data() + subset[i] * dimension_;
-            float best = std::numeric_limits<float>::infinity();
-            std::uint32_t best_center = 0;
-            for (std::uint32_t c = 0; c < branching; ++c) {
-                const float distance =
-                    squared_l2(row, center_values[c].data(), dimension_);
-                if (distance < best) {
-                    best = distance;
-                    best_center = c;
+        // Nearest-center search is the dominant k-means cost and writes only
+        // assignment[i], so a parallel_for reproduces the serial result
+        // bit-for-bit (the reduction steps below stay serial and ordered).
+        parallel::parallel_for(
+            subset.size(), parallel::resolve_thread_count(0),
+            [&](const std::size_t i) {
+                const float* row = descriptors.data() + subset[i] * dimension_;
+                float best = std::numeric_limits<float>::infinity();
+                std::uint32_t best_center = 0;
+                for (std::uint32_t c = 0; c < branching; ++c) {
+                    const float distance =
+                        squared_l2(row, center_values[c].data(), dimension_);
+                    if (distance < best) {
+                        best = distance;
+                        best_center = c;
+                    }
                 }
-            }
-            assignment[i] = best_center;
-        }
+                assignment[i] = best_center;
+            });
 
         std::vector<std::vector<float>> sums(
             branching, std::vector<float>(dimension_, 0.F));
@@ -308,44 +314,58 @@ void VocabularyTree::train(
     }
     if (dimension_ == 0) return;
 
+    // Sampling and L2-normalizing each image's descriptors is independent per
+    // image; rows are concatenated in image order afterwards so the training
+    // buffer matches the serial collection exactly (including the cap).
+    std::vector<std::vector<float>> image_rows(images.size());
+    parallel::parallel_for(
+        images.size(), parallel::resolve_thread_count(0),
+        [&](const std::size_t image_index) {
+            const features::FeatureSet* image = images[image_index];
+            if (image == nullptr) return;
+            const features::FeatureSet& features = *image;
+            if (features.descriptor_dimension != dimension_ ||
+                (features.descriptors.empty() &&
+                 features.descriptors_u8.empty()) ||
+                features.keypoints.empty())
+                return;
+            const auto samples = sample_descriptors_spatially(
+                features, config.max_descriptors_per_image, config.sample_grid);
+            std::vector<float>& rows = image_rows[image_index];
+            rows.reserve(samples.size() * dimension_);
+            for (const features::FeatureIndex index : samples) {
+                if (features.storage ==
+                    aetherscan::features::DescriptorStorage::float32) {
+                    const float* row = features.descriptors.data() +
+                        static_cast<std::size_t>(index) * dimension_;
+                    rows.insert(rows.end(), row, row + dimension_);
+                } else {
+                    const std::uint8_t* row = features.descriptors_u8.data() +
+                        static_cast<std::size_t>(index) * dimension_;
+                    double squared_norm = 0.0;
+                    for (std::size_t column = 0; column < dimension_; ++column)
+                        squared_norm += static_cast<double>(row[column]) *
+                                        static_cast<double>(row[column]);
+                    const float inverse_norm = static_cast<float>(
+                        1.0 / std::sqrt(std::max(squared_norm, 1e-24)));
+                    for (std::size_t column = 0; column < dimension_; ++column)
+                        rows.push_back(row[column] * inverse_norm);
+                }
+            }
+        });
     std::vector<float> training;
     training.reserve(
-        std::min(config.max_training_descriptors, images.size() * config.max_descriptors_per_image) *
+        std::min(config.max_training_descriptors,
+                 images.size() * config.max_descriptors_per_image) *
         dimension_);
-    for (const features::FeatureSet* image : images) {
-        if (image == nullptr) continue;
-        const features::FeatureSet& features = *image;
-        if (features.descriptor_dimension != dimension_ ||
-            (features.descriptors.empty() &&
-             features.descriptors_u8.empty()) ||
-            features.keypoints.empty())
-            continue;
-        const auto samples = sample_descriptors_spatially(
-            features, config.max_descriptors_per_image, config.sample_grid);
-        std::vector<float> converted(dimension_);
-        for (const features::FeatureIndex index : samples) {
-            if (training.size() / dimension_ >= config.max_training_descriptors)
-                break;
-            if (features.storage ==
-                aetherscan::features::DescriptorStorage::float32) {
-                const float* row = features.descriptors.data() +
-                    static_cast<std::size_t>(index) * dimension_;
-                training.insert(training.end(), row, row + dimension_);
-            } else {
-                const std::uint8_t* row = features.descriptors_u8.data() +
-                    static_cast<std::size_t>(index) * dimension_;
-                double squared_norm = 0.0;
-                for (std::size_t column = 0; column < dimension_; ++column)
-                    squared_norm += static_cast<double>(row[column]) *
-                                    static_cast<double>(row[column]);
-                const float inverse_norm = static_cast<float>(
-                    1.0 / std::sqrt(std::max(squared_norm, 1e-24)));
-                for (std::size_t column = 0; column < dimension_; ++column)
-                    converted[column] = row[column] * inverse_norm;
-                training.insert(
-                    training.end(), converted.begin(), converted.end());
-            }
-        }
+    for (const std::vector<float>& rows : image_rows) {
+        const std::size_t remaining =
+            config.max_training_descriptors - training.size() / dimension_;
+        const std::size_t copy =
+            std::min(remaining, rows.size() / dimension_);
+        training.insert(
+            training.end(), rows.begin(),
+            rows.begin() + static_cast<std::ptrdiff_t>(copy * dimension_));
         if (training.size() / dimension_ >= config.max_training_descriptors)
             break;
     }

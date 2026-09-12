@@ -1,6 +1,7 @@
 #include "sfm/camera_selection.hpp"
 #include "ba/optimizer.hpp"
 #include "core/logging.hpp"
+#include "parallel/thread_pool.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -52,24 +53,46 @@ void score_candidate(Candidate& candidate, const std::vector<CameraModelProbe>& 
     candidate.score=std::accumulate(candidate.scores.begin(),candidate.scores.end(),0.0)/probes.size();
 }
 
-Candidate fit_candidate(const PinholeCamera& camera, const std::vector<CameraModelProbe>& probes) {
-    Candidate candidate; candidate.camera=camera; candidate.fits.resize(probes.size());
+// Fits several focal/model hypotheses over the same probe set in one parallel
+// sweep. Each (hypothesis, probe) task runs one independent PoseLib RANSAC;
+// per-task results are deterministic, and scoring stays serial afterwards, so
+// this reproduces fit_candidate() exactly while removing the serial RANSAC
+// queue that dominated cold-start calibration time.
+std::vector<Candidate> fit_candidates(
+    const std::vector<PinholeCamera>& cameras,
+    const std::vector<CameraModelProbe>& probes) {
+    std::vector<Candidate> candidates(cameras.size());
+    for (std::size_t h=0; h<cameras.size(); ++h) {
+        candidates[h].camera=cameras[h];
+        candidates[h].fits.assign(probes.size(),{});
+    }
+    if (cameras.empty() || probes.empty()) return candidates;
+
     RelativePoseOptions options;
     options.max_iterations=1500; options.min_iterations=100;
     options.min_inliers=20; options.max_epipolar_error_px=3;
     options.max_reproj_error_px=4; options.min_ray_angle_deg=0.5;
-    for (std::size_t i=0; i<probes.size(); ++i) {
-        std::vector<Vec2> first,second;
-        for (std::size_t j=0; j<probes[i].first.size(); ++j) {
-            if (j%3==0 || !camera.unproject(probes[i].first[j]).allFinite() ||
-                !camera.unproject(probes[i].second[j]).allFinite()) continue;
-            first.push_back(probes[i].first[j]); second.push_back(probes[i].second[j]);
-        }
-        if (first.size()>=30)
-            candidate.fits[i]=estimate_relative_pose(first,second,camera,camera,options);
-    }
-    score_candidate(candidate,probes);
-    return candidate;
+
+    const std::size_t hypothesis_count=cameras.size();
+    const std::size_t probe_count=probes.size();
+    const std::size_t task_count=hypothesis_count*probe_count;
+    parallel::parallel_for(
+        task_count, parallel::resolve_thread_count(0),
+        [&](const std::size_t task) {
+            const std::size_t h=task/probe_count, i=task%probe_count;
+            const PinholeCamera& camera=cameras[h];
+            std::vector<Vec2> first,second;
+            for (std::size_t j=0; j<probes[i].first.size(); ++j) {
+                if (j%3==0 || !camera.unproject(probes[i].first[j]).allFinite() ||
+                    !camera.unproject(probes[i].second[j]).allFinite()) continue;
+                first.push_back(probes[i].first[j]); second.push_back(probes[i].second[j]);
+            }
+            if (first.size()>=30)
+                candidates[h].fits[i]=
+                    estimate_relative_pose(first,second,camera,camera,options);
+        });
+    for (auto& candidate:candidates) score_candidate(candidate,probes);
+    return candidates;
 }
 
 Candidate refine_calibration(Candidate candidate, const std::vector<CameraModelProbe>& probes,
@@ -124,7 +147,7 @@ Candidate refine_calibration(Candidate candidate, const std::vector<CameraModelP
     // Intrinsics are shared by every probe, including pairs excluded from BA.
     // Refit training matches so those pairs are not scored with stale poses
     // from a different focal/distortion hypothesis. Keep validation held out.
-    auto refitted = fit_candidate(refined.camera, probes);
+    auto refitted = std::move(fit_candidates({refined.camera}, probes)[0]);
     if (refitted.score > refined.score) refined = std::move(refitted);
     return refined.score>candidate.score ? refined : candidate;
 }
@@ -147,15 +170,23 @@ CameraModelSelection select_camera_model(
     std::array<Candidate,2> best;
     for (int model=0; model<2; ++model) {
         if (requested!=CameraModel::automatic && static_cast<int>(requested)!=model) continue;
-        auto fit=[&](double focal) {
+        const auto make_camera=[&](const double focal) {
             auto camera=source; camera.model=static_cast<CameraModel>(model);
             camera.fx=camera.fy=focal; camera.k1=camera.k2=camera.p1=camera.p2=0;
             camera.trust_intrinsics=true;
-            return fit_candidate(camera,probes);
+            return camera;
         };
         std::vector<Candidate> seeds;
-        if (supplied_focal>0) seeds.push_back(fit(supplied_focal));
-        else for (double ratio:ratios) seeds.push_back(fit(size*ratio));
+        {
+            std::vector<PinholeCamera> seed_cameras;
+            if (supplied_focal>0) {
+                seed_cameras.push_back(make_camera(supplied_focal));
+            } else {
+                for (double ratio:ratios)
+                    seed_cameras.push_back(make_camera(size*ratio));
+            }
+            seeds=fit_candidates(seed_cameras,probes);
+        }
         std::sort(seeds.begin(),seeds.end(),[](const Candidate& a,const Candidate& b) {
             return a.score>b.score;
         });
@@ -169,8 +200,12 @@ CameraModelSelection select_camera_model(
             if (supplied_focal<=0) {
                 for (double span:{0.30,0.10,0.035}) {
                     const double center=candidate.camera.focal();
+                    std::vector<PinholeCamera> trial_cameras;
                     for (int step:{-2,-1,1,2}) {
-                        auto trial=fit(center*std::exp(span*step/2));
+                        trial_cameras.push_back(
+                            make_camera(center*std::exp(span*step/2)));
+                    }
+                    for (auto& trial : fit_candidates(trial_cameras,probes)) {
                         if (trial.score>candidate.score) candidate=std::move(trial);
                     }
                 }

@@ -1,4 +1,5 @@
 #include "sfm/reconstruct.hpp"
+#include "sfm/bundle.hpp"
 #include "sfm/appearance.hpp"
 #include "sfm/asfm.hpp"
 #include "sfm/preview.hpp"
@@ -517,6 +518,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<double>()->default_value("0.005"))
         ("cache-dir", "Feature cache directory (- to disable)",
          cxxopts::value<std::string>()->default_value(""))
+        ("ba-backend",
+         "Bundle adjustment backend: automatic (default), cpu, or cuda "
+         "(cuda warns when a solve falls back)",
+         cxxopts::value<std::string>()->default_value("automatic"))
         ("extractor",
          "Feature extractor: siftgpu (default), sift, superpoint, disk, aliked",
          cxxopts::value<std::string>()->default_value("siftgpu"))
@@ -928,6 +933,19 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.mode != "hierarchical")
         throw std::invalid_argument(
             "--mode must be global, incremental, or hierarchical");
+    const std::string ba_backend = result["ba-backend"].as<std::string>();
+    if (ba_backend == "automatic")
+        aetherscan::sfm::set_bundle_backend_preference(
+            aetherscan::sfm::BundleBackendPreference::automatic);
+    else if (ba_backend == "cpu")
+        aetherscan::sfm::set_bundle_backend_preference(
+            aetherscan::sfm::BundleBackendPreference::cpu);
+    else if (ba_backend == "cuda")
+        aetherscan::sfm::set_bundle_backend_preference(
+            aetherscan::sfm::BundleBackendPreference::cuda);
+    else
+        throw std::invalid_argument(
+            "--ba-backend must be automatic, cpu, or cuda");
     cli.output = utf8_to_path(result["output"].as<std::string>());
     cli.gui = result["gui"].as<bool>();
     const std::string working_sfm_text =

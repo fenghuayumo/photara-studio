@@ -10,6 +10,17 @@ enum class BundleBackend {
     cuda,
 };
 
+// Process-wide backend override for A/B validation of the CUDA joint BA.
+// Set once from the CLI before reconstruction starts.
+enum class BundleBackendPreference {
+    automatic,  // CUDA when supported, silent CPU fallback (default)
+    cpu,        // never use CUDA
+    cuda,       // prefer CUDA; warn when any solve falls back to CPU
+};
+
+void set_bundle_backend_preference(BundleBackendPreference preference);
+[[nodiscard]] BundleBackendPreference bundle_backend_preference();
+
 struct BundleOptions {
     ba::OptimizerOptions optimizer{};
     bool optimize_points{true};
@@ -28,13 +39,13 @@ struct BundleOptions {
     unsigned min_views_for_intrinsics{3};
     float min_median_parallax_deg{1.0F};
     // Use the CUDA Schur/PCG backend when the problem is large enough and the
-    // requested parameterization is supported. Unsupported configurations
-    // (shared-intrinsic refinement, partial pose locks, or local fixed views)
-    // stay on the CPU without changing reconstruction semantics.
-    // Opt in after profiling the target GPU. The CUDA linearizer is fast, but
-    // the current end-to-end Schur/PCG path can still lose to the tuned CPU
-    // backend on ordinary SfM track distributions.
-    bool prefer_cuda{false};
+    // requested parameterization is supported. Partial pose locks (local BA
+    // with fixed boundary views) stay on the CPU without changing
+    // reconstruction semantics.
+    // Default on: the CUDA joint Schur/PCG backend supports shared intrinsic
+    // refinement and falls back to the CPU automatically when CUDA is
+    // unavailable or produces an unusable step.
+    bool prefer_cuda{true};
     std::size_t cuda_min_observations{50'000};
 };
 

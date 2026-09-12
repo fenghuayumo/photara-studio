@@ -33,6 +33,7 @@ struct BenchmarkConfig {
     std::size_t iterations{20};
     std::size_t solver_iterations{0};
     std::size_t gpu_solver_iterations{0};
+    bool gpu_intrinsics{false};
 };
 
 std::size_t parse_size(const std::string_view text, const char* option) {
@@ -56,10 +57,15 @@ BenchmarkConfig parse_arguments(const int argc, char** argv) {
                 << "  --observations-per-point N  Track length (default 6)\n"
                 << "  --iterations N              CUDA timed iterations (default 20)\n"
                 << "  --solver-iterations N       Run N CPU BA iterations (default disabled)\n"
-                << "  --gpu-solver-iterations N   Run N GPU BA iterations (default disabled)\n";
+                << "  --gpu-solver-iterations N   Run N GPU BA iterations (default disabled)\n"
+                << "  --gpu-intrinsics N          1 = GPU solves shared focal/aspect/distortion (default 0)\n";
             std::exit(0);
         }
         if (i + 1 >= argc) {
+            if (argument == "--gpu-intrinsics") {
+                config.gpu_intrinsics = true;
+                continue;
+            }
             throw std::invalid_argument("Missing value after " + std::string(argument));
         }
         const std::string_view value = argv[++i];
@@ -75,6 +81,8 @@ BenchmarkConfig parse_arguments(const int argc, char** argv) {
             config.solver_iterations = parse_size(value, "--solver-iterations");
         } else if (argument == "--gpu-solver-iterations") {
             config.gpu_solver_iterations = parse_size(value, "--gpu-solver-iterations");
+        } else if (argument == "--gpu-intrinsics") {
+            config.gpu_intrinsics = parse_size(value, "--gpu-intrinsics") > 0;
         } else {
             throw std::invalid_argument("Unknown option: " + std::string(argument));
         }
@@ -247,6 +255,13 @@ int main(int argc, char** argv) {
             Problem gpu_problem = problem;
             aetherscan::ba::OptimizerOptions optimizer_options;
             optimizer_options.maximum_iterations = config.gpu_solver_iterations;
+            if (config.gpu_intrinsics) {
+                optimizer_options.optimize_focal = true;
+                optimizer_options.optimize_aspect_ratio = true;
+                optimizer_options.optimize_distortion = true;
+            }
+            gpu_problem.pose_intrinsic.assign(gpu_problem.poses.size(), 0);
+            gpu_problem.intrinsics.resize(1);
             aetherscan::ba::CudaOptimizer optimizer(optimizer_options);
             optimizer.upload(gpu_problem);
             const auto summary = optimizer.optimize();

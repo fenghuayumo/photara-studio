@@ -435,6 +435,49 @@ int main() {
     }
 #if defined(AETHERSCAN_HAS_CUDA)
     if (CudaOptimizer::is_available()) {
+        // Shared intrinsics extend the Schur vector beyond the pose rows.
+        // Re-upload a different topology to the same solver to exercise graph
+        // invalidation as well as the non-multiple-of-ten PCG iteration cap.
+        OptimizerOptions joint_options=options;
+        joint_options.optimize_focal=true;
+        joint_options.optimize_aspect_ratio=true;
+        joint_options.optimize_principal_point=true;
+        joint_options.optimize_distortion=true;
+        joint_options.optimize_points=false;
+        joint_options.optimize_rotations=false;
+        joint_options.optimize_translations=false;
+        joint_options.focal_prior_weight=0.0;
+        joint_options.maximum_pcg_iterations=13;
+        CudaOptimizer joint_optimizer(joint_options);
+        for (const bool shared : {true,false}) {
+            Problem joint=shared ? make_problem() : make_grouped_intrinsics_problem();
+            joint.pose_constant.clear();
+            joint.observations=Observations{};
+            for (std::size_t point=0;point<joint.points.size();++point)
+                for (std::size_t camera=0;camera<joint.poses.size();++camera) {
+                    auto truth=joint.intrinsics[joint.intrinsic_index(camera)];
+                    truth.fx*=1.1;
+                    truth.fy*=1.1;
+                    const auto [x,y]=project(joint.poses[camera],truth,joint.points[point]);
+                    joint.observations.push_back(static_cast<Index>(camera),static_cast<Index>(point),x,y);
+                }
+            const double joint_initial=evaluate_cost(joint,joint_options.huber_delta);
+            joint_optimizer.upload(joint);
+            const auto joint_summary=joint_optimizer.optimize();
+            joint_optimizer.download(joint);
+            const double joint_final=evaluate_cost(joint,joint_options.huber_delta);
+            if (!joint_summary.usable() || joint_final>joint_initial*1e-3 ||
+                std::abs(joint_final-joint_summary.final_cost)>1e-6) {
+                std::cerr << "GPU joint intrinsics regression: " << joint_summary.brief_report()
+                          << " independently evaluated=" << joint_final << '\n';
+                return 13;
+            }
+            for (const auto& iteration : joint_summary.iterations)
+                if (iteration.pcg_iterations>joint_options.maximum_pcg_iterations) {
+                    std::cerr << "GPU PCG exceeded its iteration budget\n";
+                    return 14;
+                }
+        }
         const OptimizerSummary gpu_summary = optimize_cuda(gpu_problem, options);
         std::cout << "GPU " << gpu_summary.brief_report() << '\n';
         if (!gpu_summary.usable() || gpu_summary.successful_steps == 0 ||
