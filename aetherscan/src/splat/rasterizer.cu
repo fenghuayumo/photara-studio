@@ -156,6 +156,8 @@ splat_drender::RenderSettings settings_of(const RasterizeOptions& options) {
     s.kernel_size = options.kernel_size;
     s.need_depth = options.require_depth;
     s.debug = options.debug;
+    const char* fixed_points = std::getenv("AETHERSCAN_SPLAT_DEVICE_POINTS");
+    s.device_point_lists = fixed_points && fixed_points[0] == '1';
     return s;
 }
 

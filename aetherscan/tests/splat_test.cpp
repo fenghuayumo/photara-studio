@@ -1416,10 +1416,10 @@ void test_sample_depth_batch_boundary() {
         std::vector<float> point_gradients;
     };
     Rasterizer rasterizer;
-    const auto run = [&](const std::size_t count) {
+    const auto run = [&](const std::size_t count, const int invalid_every = 0) {
         std::vector<float> points(3 * count, 0.F);
         for (std::size_t index = 0; index < count; ++index)
-            points[3 * index + 2] = 2.F;
+            points[3 * index + 2] = invalid_every && index % invalid_every == 0 ? -2.F : 2.F;
         const auto world_points = tinytensor::Tensor::from_vector(
             points, {count, std::size_t{3}}, tinytensor::Device::CUDA);
         const DepthSampleResult sampled =
@@ -1469,6 +1469,23 @@ void test_sample_depth_batch_boundary() {
                 257.F * two_sample_tail.point_gradients[index]) < 2e-5F,
             "GGGS sample-depth batch-boundary point gradients differ");
     }
+    // Mixed and all-sentinel tails must leave invalid outputs and gradients zero.
+    for (int period : {1, 2}) {
+        const auto mixed = run(513, period);
+        for (std::size_t i = 0; i < mixed.inside.size(); ++i) {
+            const bool valid = i % period != 0;
+            require(mixed.inside[i] == valid, "Point-list sentinel leaked into a real tile");
+            for (int c = 0; c < 3; ++c) {
+                if (!valid)
+                    require(mixed.camera_points[3 * i + c] == 0.F && mixed.point_gradients[3 * i + c] == 0.F,
+                        "Invalid point retained sample output or gradient");
+                else
+                    require(std::abs(mixed.camera_points[3 * i + c] - two_sample_tail.camera_points[c]) < 1e-6F,
+                        "Compaction changed valid sample depth");
+            }
+        }
+    }
+
 }
 
 void test_contribution_visibility_rejects_occluded_gaussians() {
@@ -1721,6 +1738,58 @@ void test_fused_adam_parity() {
         "CUDA Adam differs from FasterGS FusedAdam on its first step");
 }
 
+void test_structure_adam_parity() {
+    using namespace aetherscan::splat;
+    constexpr std::size_t rows = 257; // Full CTA plus a partial final CTA.
+    const auto tensor = [](std::size_t stride, bool gradients) {
+        std::vector<float> values(rows * stride);
+        for (std::size_t i = 0; i < values.size(); ++i)
+            values[i] = float(int(i % 17) - 8) * (gradients ? 0.03F : 2.F);
+        values[0] = std::numeric_limits<float>::quiet_NaN();
+        values.back() = std::numeric_limits<float>::infinity();
+        return tinytensor::Tensor::from_vector(values, {rows, stride}, tinytensor::Device::CUDA);
+    };
+    GaussianModel model[2];
+    std::array<detail::AdamState, 4> states[2];
+    for (int k = 0; k < 2; ++k) {
+        model[k].means = tensor(3, false);
+        model[k].log_scales = tensor(3, false);
+        model[k].quaternions = tensor(4, false);
+        model[k].opacity_logits = tensor(1, false);
+        states[k] = {detail::make_adam_state(model[k].means),
+            detail::make_adam_state(model[k].log_scales),
+            detail::make_adam_state(model[k].quaternions),
+            detail::make_adam_state(model[k].opacity_logits)};
+    }
+    ModelGradients g;
+    g.means = tensor(3, true); g.log_scales = tensor(3, true);
+    g.quaternions = tensor(4, true); g.opacity_logits = tensor(1, true);
+    TrainingOptions options;
+    options.max_scale_ratio = 3.F;
+    for (unsigned step = 1; step <= 3; ++step) {
+        detail::adam_step(model[0].means, g.means, states[0][0], 0.01F, step, options);
+        detail::adam_step(model[0].log_scales, g.log_scales, states[0][1], options.scales_lr, step, options, 0, 0.F, -8.F, 2.F);
+        detail::constrain_scale_ratio(model[0].log_scales, options.max_scale_ratio);
+        detail::adam_step(model[0].quaternions, g.quaternions, states[0][2], options.quaternions_lr, step, options);
+        detail::adam_step(model[0].opacity_logits, g.opacity_logits, states[0][3], options.opacities_lr, step, options, 0, 0.F, -12.F, 12.F);
+        detail::adam_step_structure(model[1], g, states[1][0], states[1][1], states[1][2], states[1][3], 0.01F, step, options, -8.F, 2.F);
+    }
+    const auto equal = [](const tinytensor::Tensor& a, const tinytensor::Tensor& b) {
+        const auto av = a.to_vector(), bv = b.to_vector();
+        for (std::size_t i = 0; i < av.size(); ++i)
+            require(std::isfinite(av[i]) && std::isfinite(bv[i]) && std::abs(av[i] - bv[i]) < 1e-6F,
+                "Fused structure Adam changed parameters or moments");
+    };
+    equal(model[0].means, model[1].means);
+    equal(model[0].log_scales, model[1].log_scales);
+    equal(model[0].quaternions, model[1].quaternions);
+    equal(model[0].opacity_logits, model[1].opacity_logits);
+    for (int k = 0; k < 4; ++k) {
+        equal(states[0][k].first, states[1][k].first);
+        equal(states[0][k].second, states[1][k].second);
+    }
+}
+
 void test_reduced_second_sh_adam() {
     using namespace aetherscan::splat;
     auto parameter = tinytensor::Tensor::zeros(
@@ -1795,6 +1864,54 @@ void test_reduced_second_sh_adam() {
                 : prefix_values[index] == 0.F &&
                       prefix_first[index] == 0.F,
             "active-prefix reduced-second Adam touched the wrong SH band");
+    }
+}
+
+void test_adam_warp_rows_and_reset() {
+    using namespace aetherscan::splat;
+    constexpr std::size_t rows = 9, stride = 48;
+    auto p = tinytensor::Tensor::zeros({rows, 16, 3}, tinytensor::Device::CUDA);
+    std::vector<float> values(rows * stride);
+    for (std::size_t i = 0; i < values.size(); ++i) values[i] = float(i % 13 + 1) * 0.01F;
+    auto g = tinytensor::Tensor::from_vector(values, {rows, 16, 3}, tinytensor::Device::CUDA);
+    auto state = detail::make_reduced_second_adam_state(p);
+    TrainingOptions options;
+    std::vector<float> expected(rows, 0.F);
+    unsigned step = 0;
+    for (std::size_t active : {3U, 12U, 27U, 48U}) {
+        ++step;
+        const auto before = p.to_vector();
+        detail::adam_step_active_prefix(p, g, state, 0.001F, step, options, stride, active, 0.0001F);
+        const auto actual = state.second.to_vector();
+        const auto after = p.to_vector();
+        for (std::size_t row = 0; row < rows; ++row) {
+            float squares = 0.F;
+            for (std::size_t c = 0; c < active; ++c) squares += values[row * stride + c] * values[row * stride + c];
+            expected[row] = options.beta2 * expected[row] + (1.F - options.beta2) * squares / float(active);
+            require(std::abs(actual[row] - expected[row]) < 1e-8F,
+                "Warp Adam mixed rows or SH bands in second moment");
+            for (std::size_t c = active; c < stride; ++c)
+                require(before[row * stride + c] == after[row * stride + c], "Warp Adam updated inactive SH bands");
+        }
+    }
+    auto dense = detail::make_adam_state(g);
+    detail::adam_step(g, g, dense, 0.001F, 1, options);
+    const auto dense_before = dense.first.to_vector();
+    const auto first_before = state.first.to_vector();
+    const auto second_before = state.second.to_vector();
+    auto indices = tinytensor::Tensor::from_vector(std::vector<int>{1, 8}, {2}, tinytensor::Device::CUDA);
+    detail::zero_adam_rows(indices, {&state, &dense, nullptr, nullptr, nullptr, nullptr});
+    const auto first_after = state.first.to_vector();
+    const auto second_after = state.second.to_vector();
+    const auto dense_after = dense.first.to_vector();
+    for (std::size_t row = 0; row < rows; ++row) {
+        const bool reset = row == 1 || row == 8;
+        require(second_after[row] == (reset ? 0.F : second_before[row]), "Parent reset changed wrong reduced moment row");
+        for (std::size_t c = 0; c < stride; ++c) {
+            const auto i = row * stride + c;
+            require(first_after[i] == (reset ? 0.F : first_before[i]) && dense_after[i] == (reset ? 0.F : dense_before[i]),
+                "Parent reset changed wrong dense moment row");
+        }
     }
 }
 
@@ -2571,6 +2688,11 @@ void test_ssim_loss_and_scale_constraint() {
         std::abs(loss.rgb - 0.299324721F) < 2e-5F,
         "fused SSIM forward does not match the Python CUDA reference");
     require_finite(loss.color, "SSIM produced a non-finite gradient");
+    for (const auto* channel : {&loss.alpha, &loss.depth, &loss.normal}) {
+        const auto values = channel->to_vector();
+        require(std::all_of(values.begin(), values.end(), [](float v) { return v == 0.F; }),
+            "Disabled loss channel retained uninitialized gradients");
+    }
     const auto gradients = loss.color.to_vector();
     require(
         std::any_of(gradients.begin(), gradients.end(),
@@ -3365,8 +3487,10 @@ int main(int argc, char** argv) {
         test_alpha_parameter_gradients();
         test_adam_rejects_non_finite_gradients();
         test_fused_adam_parity();
+        test_structure_adam_parity();
         test_reduced_second_sh_adam();
         test_active_sh_prefix_adam();
+        test_adam_warp_rows_and_reset();
         test_mask_loading();
         test_training_device_cache();
         test_brush_quantile_selection();

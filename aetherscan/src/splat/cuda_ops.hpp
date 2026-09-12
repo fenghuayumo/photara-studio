@@ -46,6 +46,10 @@ struct DensificationStats {
     tinytensor::Tensor priority;
 };
 
+// Clear selected parent moments without temporary zero tensors or per-state scatters.
+void zero_adam_rows(const tinytensor::Tensor& indices,
+    const std::array<AdamState*, 6>& states);
+
 struct AdcPlusPruneResult {
     tinytensor::Tensor keep_indices;
     tinytensor::Tensor opacities;
@@ -193,6 +197,12 @@ void adam_step(
     float secondary_learning_rate = 0.F,
     float clamp_min = -std::numeric_limits<float>::infinity(),
     float clamp_max = std::numeric_limits<float>::infinity());
+
+// Update independent structure groups and project the scale ratio in one launch.
+void adam_step_structure(GaussianModel& model, const ModelGradients& gradient,
+    AdamState& means, AdamState& scales, AdamState& rotations, AdamState& opacity,
+    float means_lr, unsigned step, const TrainingOptions& options,
+    float minimum_log_scale, float maximum_log_scale);
 
 // brush AdamScaled shares the second moment across every trailing SH
 // coefficient of a Gaussian while retaining a per-coefficient first moment.

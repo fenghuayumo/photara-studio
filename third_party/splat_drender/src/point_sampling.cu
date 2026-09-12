@@ -19,9 +19,15 @@ namespace splat_drender::kernels {
 __global__ void preprocess_points(
     const int count, const float* __restrict__ points,
     const float* __restrict__ view, CameraIntrinsics K, int width, int height,
-    ws::PointState ps) {
+    ws::PointState ps, bool fixed_list) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
+    const int grid_x = (width + cfg::kTileWidth - 1) / cfg::kTileWidth;
+    const int grid_y = (height + cfg::kTileHeight - 1) / cfg::kTileHeight;
+    if (fixed_list) {
+        ps.point_key[0][i] = unsigned(grid_x * grid_y);
+        ps.point_value[0][i] = unsigned(i);
+    }
     ps.touched[i] = 0;
     const float3 p = make_float3(points[3 * i], points[3 * i + 1], points[3 * i + 2]);
     const float3 t = mat::xform_point(p, view);
@@ -34,6 +40,24 @@ __global__ void preprocess_points(
     ps.point2d[i] = make_float2(pr.pixel_x, pr.pixel_y);
     ps.point_t[i] = norm3df(t.x, t.y, t.z);
     ps.touched[i] = 1;
+    if (fixed_list) {
+        const int x = min(grid_x - 1, max(0, int((pr.pixel_x + 0.5f) / cfg::kTileWidth)));
+        const int y = min(grid_y - 1, max(0, int((pr.pixel_y + 0.5f) / cfg::kTileHeight)));
+        ps.point_key[0][i] = unsigned(y * grid_x + x);
+    }
+
+}
+
+// Sentinel key == tiles is sorted after every real tile. Invalid points must
+// neither index ranges[tiles] nor leave the final valid range open.
+__global__ void extract_point_ranges(int count, const unsigned* keys,
+    int tiles, uint2* ranges) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    const unsigned tile = keys[i];
+    if (tile >= unsigned(tiles)) return;
+    if (i == 0 || keys[i - 1] != tile) ranges[tile].x = unsigned(i);
+    if (i == count - 1 || keys[i + 1] != tile) ranges[tile].y = unsigned(i + 1);
 }
 
 __global__ void emit_point_instances(
@@ -696,11 +720,16 @@ namespace splat_drender::launch {
 
 void preprocess_points(int count, const float* points, const float* view,
                        CameraIntrinsics K, int width, int height,
-                       ws::PointState ps) {
+                       ws::PointState ps, bool fixed_list) {
     kernels::preprocess_points<<<(count + cfg::kGaussianBlock - 1) /
                                      cfg::kGaussianBlock,
                                  cfg::kGaussianBlock>>>(count, points, view, K,
-                                                        width, height, ps);
+                                                        width, height, ps, fixed_list);
+}
+
+void extract_point_ranges(int count, const unsigned* keys, int tiles, uint2* ranges) {
+    kernels::extract_point_ranges<<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
+        cfg::kGaussianBlock>>>(count, keys, tiles, ranges);
 }
 
 void emit_point_instances(int count, const float2* point2d,

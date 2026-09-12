@@ -111,7 +111,9 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
 
 void preprocess_points(int count, const float* points, const float* view,
                        CameraIntrinsics K, int width, int height,
-                       ws::PointState ps);
+                       ws::PointState ps, bool fixed_list);
+
+void extract_point_ranges(int count, const unsigned* keys, int tiles, uint2* ranges);
 
 void emit_point_instances(int count, const float2* point2d,
                           const unsigned* tile_offset, const unsigned* touched,

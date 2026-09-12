@@ -90,19 +90,7 @@ void zero_adam_rows(
     const std::vector<int>& rows, const AdamStates& states) {
     if (rows.empty()) return;
     const auto indices = index_tensor(rows);
-    for (detail::AdamState* state : states) {
-        const auto zero_rows = [&indices, &rows](
-                                   tinytensor::Tensor& tensor) {
-            std::vector<std::size_t> dimensions = tensor.shape().dims();
-            dimensions[0] = rows.size();
-            const auto zeros = tinytensor::Tensor::zeros(
-                tinytensor::TensorShape(dimensions),
-                tinytensor::Device::CUDA);
-            tensor.index_copy_(0, indices, zeros);
-        };
-        zero_rows(state->first);
-        zero_rows(state->second);
-    }
+    detail::zero_adam_rows(indices, states);
 }
 
 void select_training_rows(

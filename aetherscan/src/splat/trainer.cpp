@@ -1164,22 +1164,9 @@ GaussianModel Trainer::train(
         const bool update_structure = global_structure_active &&
             dense_structure_active;
         if (update_structure) {
-            detail::adam_step(
-                model.means, gradients.means, means_state, means_lr,
-                iteration, options_);
-            detail::adam_step(
-                model.log_scales, gradients.log_scales, scales_state,
-                options_.scales_lr, iteration, options_, 0, 0.F,
+            detail::adam_step_structure(model, gradients, means_state, scales_state,
+                rotations_state, opacity_state, means_lr, iteration, options_,
                 minimum_log_scale, maximum_log_scale);
-            detail::constrain_scale_ratio(
-                model.log_scales, options_.max_scale_ratio);
-            detail::adam_step(
-                model.quaternions, gradients.quaternions, rotations_state,
-                options_.quaternions_lr, iteration, options_);
-            detail::adam_step(
-                model.opacity_logits, gradients.opacity_logits, opacity_state,
-                options_.opacities_lr, iteration, options_, 0, 0.F,
-                -12.F, 12.F);
         }
         const std::size_t full_sh_stride = model.sh.shape()[1] * 3;
         const std::size_t active_sh_stride =

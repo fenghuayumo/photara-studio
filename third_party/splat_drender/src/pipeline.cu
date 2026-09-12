@@ -277,7 +277,7 @@ Gaussians colorless(const Gaussians& g) {
 
 PointListCounts build_point_lists(const WorkspacePools& pools, int point_count,
                       const float* world_points, const CameraView& cam,
-                      int grid_x, int grid_y, int tiles, ws::PointState& ps) {
+                      int grid_x, int grid_y, int tiles, ws::PointState& ps, bool fixed_list) {
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,
                                              (unsigned*)nullptr,
@@ -290,8 +290,19 @@ PointListCounts build_point_lists(const WorkspacePools& pools, int point_count,
     ps = ws::PointState::from_pool(pool, point_count, tiles, cub_bytes);
 
     launch::preprocess_points(point_count, world_points, cam.world_to_camera,
-                              intrinsics_of(cam), cam.width, cam.height, ps);
+                              intrinsics_of(cam), cam.width, cam.height, ps, fixed_list);
     check_cuda(cudaGetLastError(), "preprocess_points");
+
+    if (fixed_list) {
+        check_cuda(cudaMemset(ps.point_range, 0, tiles * sizeof(uint2)), "point range memset");
+        cub::DoubleBuffer<unsigned> keys(ps.point_key[0], ps.point_key[1]);
+        cub::DoubleBuffer<unsigned> vals(ps.point_value[0], ps.point_value[1]);
+        check_cuda(cub::DeviceRadixSort::SortPairs(ps.sort_scratch, ps.sort_bytes,
+            keys, vals, point_count, 0, msb_bits(unsigned(tiles))), "fixed point sort");
+        launch::extract_point_ranges(point_count, keys.Current(), tiles, ps.point_range);
+        check_cuda(cudaGetLastError(), "extract fixed point ranges");
+        return {-1, vals.selector};
+    }
 
     unsigned point_instances = 0;
     if (point_count > 0) {
@@ -496,7 +507,7 @@ Rasterizer::SampleCounts Rasterizer::sample_depth(
     ws::PointState ps;
     const PointListCounts point_counts =
         build_point_lists(pools, point_count, world_points, cam, grid_x, grid_y,
-                          tiles, ps);
+                          tiles, ps, s.device_point_lists);
 
     launch::evaluate_points(true, tst.range,
                             ist.instance_value[counts.instance_selector],
@@ -600,7 +611,7 @@ void Rasterizer::evaluate_occupancy(
     ws::PointState ps;
     const PointListCounts point_counts =
         build_point_lists(pools, point_count, world_points, cam, grid_x, grid_y,
-                          tiles, ps);
+                          tiles, ps, s.device_point_lists);
 
     launch::evaluate_points(false, tst.range,
                             ist.instance_value[counts.instance_selector],

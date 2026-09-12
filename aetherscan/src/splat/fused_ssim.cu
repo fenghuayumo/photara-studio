@@ -10,6 +10,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <cstdlib>
 
 namespace cg = cooperative_groups;
 
@@ -43,6 +44,41 @@ void check_cuda(const cudaError_t error, const char* operation) {
         throw std::runtime_error(
             std::string(operation) + ": " + cudaGetErrorString(error));
 }
+
+// Experimental opt-in: capture this allocation-free four-kernel suffix and
+// update addresses/scalars each invocation. Launch on the caller's default
+// stream so target uploads and loss initialization retain their ordering.
+struct SsimGraph {
+    cudaStream_t capture_stream{};
+    cudaGraphExec_t executable{};
+    SsimGraph() { check_cuda(cudaStreamCreateWithFlags(&capture_stream, cudaStreamNonBlocking), "create SSIM capture stream"); }
+    ~SsimGraph() {
+        if (executable) cudaGraphExecDestroy(executable);
+        if (capture_stream) cudaStreamDestroy(capture_stream);
+    }
+    void launch() {
+        cudaGraph_t graph{};
+        check_cuda(cudaStreamEndCapture(capture_stream, &graph), "end SSIM capture");
+        if (executable) {
+            cudaGraphExecUpdateResultInfo info{};
+            const auto status = cudaGraphExecUpdate(executable, graph, &info);
+            if (status == cudaErrorGraphExecUpdateFailure) {
+                cudaGetLastError();
+                cudaGraphExecDestroy(executable);
+                executable = nullptr;
+            } else if (status != cudaSuccess) {
+                cudaGraphDestroy(graph);
+                check_cuda(status, "update SSIM graph");
+            }
+        }
+        if (!executable) {
+            const auto status = cudaGraphInstantiate(&executable, graph, 0);
+            cudaGraphDestroy(graph);
+            check_cuda(status, "instantiate SSIM graph");
+        } else cudaGraphDestroy(graph);
+        check_cuda(cudaGraphLaunch(executable, nullptr), "launch SSIM graph");
+    }
+};
 
 __device__ __forceinline__ float get_pixel(
     const float* image, const int batch, const int channel,
@@ -211,7 +247,7 @@ __global__ void fused_l1_ssim_backward_kernel(
     const float ssim_weight, const int height, const int width,
     const int channels, const float* __restrict__ image1,
     const float* __restrict__ image2,
-    const float* __restrict__ dl_dmap,
+    const float normalization,
     float* __restrict__ dl_dimage1,
     const float* __restrict__ dm_dmu1,
     const float* __restrict__ dm_dsigma1_sq,
@@ -246,8 +282,8 @@ __global__ void fused_l1_ssim_backward_kernel(
             const int y = start_y + row - k_halo;
             for (int column = lane; column < k_shared_x; column += 32) {
                 const int x = start_x + column - k_halo;
-                const float chain = get_pixel(
-                    dl_dmap, batch, channel, y, x, channels, height, width);
+                const float chain = x >= k_halo && x < width - k_halo &&
+                    y >= k_halo && y < height - k_halo ? normalization : 0.F;
                 data[row][column][0] = -ssim_weight * get_pixel(
                     dm_dmu1, batch, channel, y, x, channels, height, width) * chain;
                 data[row][column][1] = -ssim_weight * get_pixel(
@@ -292,9 +328,8 @@ __global__ void fused_l1_ssim_backward_kernel(
                 sum2 += scratch[y + d - k_halo][x][2] * weight;
             }
             const int index = batch * channels * pixels + channel * pixels + pixel_id;
-            const float chain = get_pixel(
-                dl_dmap, batch, channel, pixel_y, pixel_x,
-                channels, height, width);
+            const float chain = pixel_x >= k_halo && pixel_x < width - k_halo &&
+                pixel_y >= k_halo && pixel_y < height - k_halo ? normalization : 0.F;
             const float sign = pixel1 == pixel2
                 ? 0.F
                 : copysignf(1.F, pixel1 - pixel2);
@@ -307,7 +342,7 @@ __global__ void fused_l1_ssim_backward_kernel(
 
 __global__ void valid_map_and_chain_kernel(
     const float* loss_map, const float* mask, const float* masked_gradient,
-    float* dl_dmap, float* output_gradient, float* scalar_terms,
+    float* output_gradient, float* scalar_terms,
     const int channels, const int height, const int width,
     const bool mask_enabled, const float normalization,
     const float photometric_weight) {
@@ -320,7 +355,6 @@ __global__ void valid_map_and_chain_kernel(
     const int x = pixel % width;
     const bool valid_window = x >= k_halo && x < width - k_halo &&
                               y >= k_halo && y < height - k_halo;
-    dl_dmap[index] = valid_window ? normalization : 0.F;
     const float valid = mask_enabled ? mask[pixel] : 1.F;
     output_gradient[index] += masked_gradient[index] * valid;
     if (scalar_terms && valid_window)
@@ -353,11 +387,21 @@ void fused_l1_ssim_loss(
     auto dm_dmu1 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
     auto dm_dsigma1_sq = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
     auto dm_dsigma12 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
-    auto dl_dmap = tinytensor::Tensor::zeros(shape, tinytensor::Device::CUDA);
     auto masked_gradient = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
 
+    const char* graph_env = std::getenv("AETHERSCAN_SPLAT_SSIM_GRAPH");
+    const bool use_graph = graph_env && graph_env[0] == '1';
+    SsimGraph* graph = nullptr;
+    cudaStream_t stream = nullptr;
+    if (use_graph) {
+        static thread_local SsimGraph state;
+        graph = &state;
+        stream = state.capture_stream;
+        check_cuda(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "begin SSIM capture");
+    }
+
     constexpr int threads = 256;
-    apply_mask_kernel<<<(count + threads - 1) / threads, threads>>>(
+    apply_mask_kernel<<<(count + threads - 1) / threads, threads, 0, stream>>>(
         prediction.ptr<float>(), target.ptr<float>(), mask.ptr<float>(),
         image1.ptr<float>(), image2.ptr<float>(), channels,
         static_cast<int>(height), static_cast<int>(width), mask_enabled);
@@ -368,7 +412,7 @@ void fused_l1_ssim_loss(
         (height + k_block_y - 1) / k_block_y, 1);
     constexpr float c1 = 0.01F * 0.01F;
     constexpr float c2 = 0.03F * 0.03F;
-    fused_l1_ssim_forward_kernel<<<grid, block>>>(
+    fused_l1_ssim_forward_kernel<<<grid, block, 0, stream>>>(
         ssim_weight, static_cast<int>(height), static_cast<int>(width),
         channels, c1, c2, image1.ptr<float>(), image2.ptr<float>(),
         loss_map.ptr<float>(), dm_dmu1.ptr<float>(),
@@ -376,30 +420,20 @@ void fused_l1_ssim_loss(
 
     const float normalization = photometric_weight /
         static_cast<float>(channels * (width - k_halo2) * (height - k_halo2));
-    // Establish dL/dmap before the backward launch. Gradient chaining and the
-    // scalar reduction happen after backward in the same kernel below.
-    check_cuda(cudaMemsetAsync(dl_dmap.data_ptr(), 0, count * sizeof(float)),
-               "clear fused SSIM chain map");
-    // Reuse a light kernel to initialize the valid crop. masked_gradient is not
-    // read until after backward, so pass a zero tensor during this first call.
-    auto zero_gradient = tinytensor::Tensor::zeros(shape, tinytensor::Device::CUDA);
-    valid_map_and_chain_kernel<<<(count + threads - 1) / threads, threads>>>(
-        loss_map.ptr<float>(), mask.ptr<float>(), zero_gradient.ptr<float>(),
-        dl_dmap.ptr<float>(), gradient.ptr<float>(), nullptr, channels,
-        static_cast<int>(height), static_cast<int>(width), mask_enabled,
-        normalization, photometric_weight);
-
-    fused_l1_ssim_backward_kernel<<<grid, block>>>(
+    // The valid-crop chain is a constant inside the crop and zero outside.
+    // Reconstruct it in backward instead of materializing and clearing images.
+    fused_l1_ssim_backward_kernel<<<grid, block, 0, stream>>>(
         ssim_weight, static_cast<int>(height), static_cast<int>(width), channels,
-        image1.ptr<float>(), image2.ptr<float>(), dl_dmap.ptr<float>(),
+        image1.ptr<float>(), image2.ptr<float>(), normalization,
         masked_gradient.ptr<float>(), dm_dmu1.ptr<float>(),
         dm_dsigma1_sq.ptr<float>(), dm_dsigma12.ptr<float>());
-    valid_map_and_chain_kernel<<<(count + threads - 1) / threads, threads>>>(
+    valid_map_and_chain_kernel<<<(count + threads - 1) / threads, threads, 0, stream>>>(
         loss_map.ptr<float>(), mask.ptr<float>(), masked_gradient.ptr<float>(),
-        dl_dmap.ptr<float>(), gradient.ptr<float>(), scalar_terms, channels,
+        gradient.ptr<float>(), scalar_terms, channels,
         static_cast<int>(height), static_cast<int>(width), mask_enabled,
         normalization, photometric_weight);
     check_cuda(cudaGetLastError(), "run fused L1+SSIM CUDA kernels");
+    if (graph) graph->launch();
 }
 
 }  // namespace aetherscan::splat::detail

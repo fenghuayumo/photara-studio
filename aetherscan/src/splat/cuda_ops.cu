@@ -17,7 +17,6 @@ namespace aetherscan::splat::detail {
 namespace {
 
 constexpr unsigned k_threads = 256;
-constexpr unsigned k_reduced_adam_threads = 64;
 constexpr unsigned k_geometry_summary_terms = 6;
 constexpr unsigned k_opacity_progress_terms = 3;
 
@@ -871,6 +870,13 @@ __global__ void loss_kernel(
     const float geometry_epsilon) {
     const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
     if (pixel >= pixels) return;
+    // Initialize all optional channels in their owning kernel, avoiding four
+    // full-image memset submissions before this pass.
+    grad_alpha[pixel] = 0.F;
+    grad_depth[pixel] = 0.F;
+    grad_normal[pixel] = 0.F;
+    grad_normal[pixels + pixel] = 0.F;
+    grad_normal[2 * pixels + pixel] = 0.F;
     const float valid = mask_enabled ? mask[pixel] : 1.F;
     const float inverse_pixels = 1.F / static_cast<float>(pixels);
     float rgb_loss = 0.F;
@@ -1189,15 +1195,13 @@ __global__ void normal_features_backward_kernel(
         (1.F - sign * sign) * tangent_projection;
 }
 
-__global__ void adam_kernel(
+__device__ __forceinline__ void adam_element(
     float* parameter, const float* gradient, float* first, float* second,
-    const std::size_t count, const float learning_rate,
+    const std::size_t index, const float learning_rate,
     const float secondary_learning_rate, const std::size_t group_stride,
     const float beta1, const float beta2, const float correction1,
     const float correction2, const float epsilon,
     const float clamp_min, const float clamp_max) {
-    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= count) return;
     const float previous = parameter[index];
     const float grad = gradient[index];
     // A single degenerate projected Gaussian can occasionally produce a
@@ -1230,6 +1234,83 @@ __global__ void adam_kernel(
     parameter[index] = fminf(fmaxf(updated, clamp_min), clamp_max);
 }
 
+__global__ void adam_kernel(
+    float* parameter, const float* gradient, float* first, float* second,
+    const std::size_t count, const float learning_rate,
+    const float secondary_learning_rate, const std::size_t group_stride,
+    const float beta1, const float beta2, const float correction1,
+    const float correction2, const float epsilon,
+    const float clamp_min, const float clamp_max) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    adam_element(parameter, gradient, first, second, index, learning_rate,
+        secondary_learning_rate, group_stride, beta1, beta2, correction1,
+        correction2, epsilon, clamp_min, clamp_max);
+}
+
+struct AdamGroup {
+    float* parameter;
+    const float* gradient;
+    float* first;
+    float* second;
+    float learning_rate;
+    float clamp_min;
+    float clamp_max;
+};
+
+// One owner per Gaussian allows scale-ratio projection immediately after
+// all three scale updates, without an inter-kernel dependency.
+__global__ void adam_structure_kernel(AdamGroup means, AdamGroup scales,
+    AdamGroup rotations, AdamGroup opacity, std::size_t count,
+    float beta1, float beta2, float correction1, float correction2,
+    float epsilon, float maximum_log_ratio) {
+    const std::size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= count) return;
+    const auto update = [&](AdamGroup g, std::size_t index) {
+        adam_element(g.parameter, g.gradient, g.first, g.second, index,
+            g.learning_rate, 0.F, 0, beta1, beta2, correction1, correction2,
+            epsilon, g.clamp_min, g.clamp_max);
+    };
+#pragma unroll
+    for (int c = 0; c < 3; ++c) {
+        update(means, row * 3 + c);
+        update(scales, row * 3 + c);
+    }
+    if (maximum_log_ratio > 0.F) {
+        float* v = scales.parameter + row * 3;
+        const float minimum = fminf(v[0], fminf(v[1], v[2]));
+        const float maximum = fmaxf(v[0], fmaxf(v[1], v[2]));
+        if (maximum - minimum > maximum_log_ratio) {
+            const float midpoint = 0.5F * (minimum + maximum);
+            const float half_range = 0.5F * maximum_log_ratio;
+#pragma unroll
+            for (int c = 0; c < 3; ++c)
+                v[c] = fminf(fmaxf(v[c], midpoint - half_range), midpoint + half_range);
+        }
+    }
+#pragma unroll
+    for (int c = 0; c < 4; ++c) update(rotations, row * 4 + c);
+    update(opacity, row);
+}
+
+struct AdamRows {
+    float* values[12];
+    std::size_t stride[12];
+    std::size_t rows[12];
+};
+
+__global__ void zero_adam_rows_kernel(const int* indices, std::size_t count,
+    std::size_t max_stride, AdamRows states) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count * max_stride) return;
+    const int row = indices[index / max_stride];
+    const std::size_t column = index % max_stride;
+#pragma unroll
+    for (int i = 0; i < 12; ++i)
+        if (row >= 0 && std::size_t(row) < states.rows[i] && column < states.stride[i])
+            states.values[i][std::size_t(row) * states.stride[i] + column] = 0.F;
+}
+
 __global__ void adam_reduced_second_kernel(
     float* parameter, const float* gradient, float* first, float* second,
     const std::size_t row_count, const std::size_t full_row_stride,
@@ -1237,31 +1318,31 @@ __global__ void adam_reduced_second_kernel(
     const float learning_rate, const float secondary_learning_rate,
     const float beta1, const float beta2, const float correction1,
     const float correction2, const float epsilon) {
-    const std::size_t row = blockIdx.x;
+    const std::size_t row = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
     if (row >= row_count) return;
-    const unsigned lane = threadIdx.x;
+    const unsigned lane = threadIdx.x & 31;
     const std::size_t row_begin = row * full_row_stride;
 
-    __shared__ float warp_square_sums[k_reduced_adam_threads / 32];
-    __shared__ float denominator;
-    __shared__ bool row_valid;
-
-    float local_square_sum = 0.F;
-    for (std::size_t column = lane; column < active_row_stride;
-         column += blockDim.x) {
+    // Reproduce the original two 32-lane sums (including their association)
+    // within one warp. Eight independent rows share a CTA; no CTA barriers.
+    float square0 = 0.F, square1 = 0.F;
+    for (std::size_t column = lane; column < active_row_stride; column += 64) {
         const float value = gradient[row_begin + column];
-        if (isfinite(value)) local_square_sum += value * value;
+        if (isfinite(value)) square0 += value * value;
     }
-    for (unsigned offset = 16; offset > 0; offset >>= 1)
-        local_square_sum += __shfl_down_sync(
-            0xffffffffU, local_square_sum, offset);
-    if ((lane & 31U) == 0)
-        warp_square_sums[lane >> 5U] = local_square_sum;
-    __syncthreads();
-
+    for (std::size_t column = lane + 32; column < active_row_stride; column += 64) {
+        const float value = gradient[row_begin + column];
+        if (isfinite(value)) square1 += value * value;
+    }
+    for (unsigned offset = 16; offset > 0; offset >>= 1) {
+        square0 += __shfl_down_sync(0xffffffffU, square0, offset);
+        square1 += __shfl_down_sync(0xffffffffU, square1, offset);
+    }
+    float denominator = 1.F;
+    int row_valid = 0;
     if (lane == 0) {
         const float square_sum =
-            warp_square_sums[0] + warp_square_sums[1];
+            square0 + square1;
         const float grad_square_mean =
             square_sum / static_cast<float>(active_row_stride);
         const float v =
@@ -1277,10 +1358,11 @@ __global__ void adam_reduced_second_kernel(
             denominator = 1.F;
         }
     }
-    __syncthreads();
+    denominator = __shfl_sync(0xffffffffU, denominator, 0);
+    row_valid = __shfl_sync(0xffffffffU, row_valid, 0);
 
     for (std::size_t column = lane; column < active_row_stride;
-         column += blockDim.x) {
+         column += 32) {
         const std::size_t index = row_begin + column;
         const float previous = parameter[index];
         const float grad = gradient[index];
@@ -2170,9 +2252,9 @@ void chain_parameter_gradients(
     const tinytensor::Tensor& grad_opacities,
     ModelGradients& gradients) {
     const std::size_t count = model.size();
-    gradients.log_scales = tinytensor::Tensor::zeros_like(model.log_scales);
-    gradients.quaternions = tinytensor::Tensor::zeros_like(model.quaternions);
-    gradients.opacity_logits = tinytensor::Tensor::zeros_like(model.opacity_logits);
+    gradients.log_scales = tinytensor::Tensor::empty(model.log_scales.shape(), model.log_scales.device());
+    gradients.quaternions = tinytensor::Tensor::empty(model.quaternions.shape(), model.quaternions.device());
+    gradients.opacity_logits = tinytensor::Tensor::empty(model.opacity_logits.shape(), model.opacity_logits.device());
     if (count == 0) return;
     chain_gradient_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
         model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
@@ -2193,10 +2275,10 @@ LossGradients compute_training_loss(
     const std::size_t pixels = static_cast<std::size_t>(target.camera.width) *
                                target.camera.height;
     LossGradients result{
-        tinytensor::Tensor::zeros_like(rendered.color),
-        tinytensor::Tensor::zeros_like(rendered.alpha),
-        tinytensor::Tensor::zeros_like(rendered.median_depth),
-        tinytensor::Tensor::zeros_like(rendered.normal)};
+        tinytensor::Tensor::empty(rendered.color.shape(), rendered.color.device()),
+        tinytensor::Tensor::empty(rendered.alpha.shape(), rendered.alpha.device()),
+        tinytensor::Tensor::empty(rendered.median_depth.shape(), rendered.median_depth.device()),
+        tinytensor::Tensor::empty(rendered.normal.shape(), rendered.normal.device())};
     tinytensor::Tensor terms;
     if (collect_scalar_terms)
         terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
@@ -2322,6 +2404,54 @@ void adam_step(
     check_cuda(cudaGetLastError(), "GGGS Adam update");
 }
 
+void zero_adam_rows(const tinytensor::Tensor& indices,
+    const std::array<AdamState*, 6>& states) {
+    if (indices.numel() == 0) return;
+    AdamRows rows{};
+    std::size_t max_stride = 0;
+    for (int i = 0; i < 6; ++i) {
+        if (!states[i]) continue;
+        tinytensor::Tensor* tensors[] = {&states[i]->first, &states[i]->second};
+        for (int m = 0; m < 2; ++m) {
+            auto& t = *tensors[m];
+            if (!t.is_valid() || t.numel() == 0) continue;
+            const int slot = 2 * i + m;
+            rows.values[slot] = t.ptr<float>();
+            rows.rows[slot] = t.shape()[0];
+            rows.stride[slot] = t.numel() / t.shape()[0];
+            max_stride = std::max(max_stride, rows.stride[slot]);
+        }
+    }
+    if (max_stride == 0) return;
+    zero_adam_rows_kernel<<<(indices.numel() * max_stride + k_threads - 1) / k_threads, k_threads>>>(
+        indices.ptr<int>(), indices.numel(), max_stride, rows);
+    check_cuda(cudaGetLastError(), "clear split parent Adam moments");
+}
+
+void adam_step_structure(GaussianModel& model, const ModelGradients& gradient,
+    AdamState& means, AdamState& scales, AdamState& rotations, AdamState& opacity,
+    float means_lr, unsigned step, const TrainingOptions& options,
+    float minimum_log_scale, float maximum_log_scale) {
+    if (model.size() == 0) return;
+    const auto group = [](tinytensor::Tensor& p, const tinytensor::Tensor& g,
+        AdamState& state, float lr, float low, float high) {
+        return AdamGroup{p.ptr<float>(), g.ptr<float>(), state.first.ptr<float>(),
+            state.second.ptr<float>(), lr, low, high};
+    };
+    const float inf = std::numeric_limits<float>::infinity();
+    const float correction1 = 1.F - std::pow(options.beta1, static_cast<float>(step));
+    const float correction2 = 1.F - std::pow(options.beta2, static_cast<float>(step));
+    adam_structure_kernel<<<(model.size() + k_threads - 1) / k_threads, k_threads>>>(
+        group(model.means, gradient.means, means, means_lr, -inf, inf),
+        group(model.log_scales, gradient.log_scales, scales, options.scales_lr,
+            minimum_log_scale, maximum_log_scale),
+        group(model.quaternions, gradient.quaternions, rotations, options.quaternions_lr, -inf, inf),
+        group(model.opacity_logits, gradient.opacity_logits, opacity, options.opacities_lr, -12.F, 12.F),
+        model.size(), options.beta1, options.beta2, correction1, correction2,
+        options.adam_epsilon, options.max_scale_ratio > 1.F ? std::log(options.max_scale_ratio) : 0.F);
+    check_cuda(cudaGetLastError(), "GGGS fused structure Adam update");
+}
+
 void adam_step_reduced_second(
     tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
     AdamState& state, const float learning_rate, const unsigned step,
@@ -2340,7 +2470,7 @@ void adam_step_reduced_second(
     const float correction2 =
         1.F - std::pow(options.beta2, static_cast<float>(step));
     adam_reduced_second_kernel<<<
-        row_count, k_reduced_adam_threads>>>(
+        (row_count + 7) / 8, 256>>>(
         parameter.ptr<float>(), gradient.ptr<float>(), state.first.ptr<float>(),
         state.second.ptr<float>(), row_count, row_stride, row_stride,
         learning_rate, secondary_learning_rate, options.beta1, options.beta2,
@@ -2373,7 +2503,7 @@ void adam_step_active_prefix(
                 "active-prefix reduced-second Adam state has an "
                 "incompatible shape");
         adam_reduced_second_kernel<<<
-            row_count, k_reduced_adam_threads>>>(
+            (row_count + 7) / 8, 256>>>(
             parameter.ptr<float>(), gradient.ptr<float>(),
             state.first.ptr<float>(), state.second.ptr<float>(), row_count,
             full_row_stride, active_row_stride, learning_rate,

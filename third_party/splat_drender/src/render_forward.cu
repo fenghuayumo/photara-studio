@@ -10,6 +10,7 @@
 #include <cooperative_groups.h>
 #include <type_traits>
 #include <cub/block/block_reduce.cuh>
+#include <cub/block/block_scan.cuh>
 
 namespace cg = cooperative_groups;
 using namespace splat_drender;
@@ -212,7 +213,8 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets,
                                       unsigned* __restrict__ bucket_count,
                                       unsigned* __restrict__ bucket_offset,
                                       unsigned* __restrict__ bucket_tile) {
-    __shared__ unsigned scan[cfg::kTileThreads];
+    using Scan = cub::BlockScan<unsigned, cfg::kTileThreads>;
+    __shared__ Scan::TempStorage scan;
     const int tid = threadIdx.x;
     unsigned carry = 0;
     for (int base = 0; base < tiles; base += cfg::kTileThreads) {
@@ -222,17 +224,13 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets,
             v = (range[t].y - range[t].x + 31u) >> 5;
             bucket_count[t] = v;
         }
-        scan[tid] = v;
-        __syncthreads();
-#pragma unroll
-        for (int off = 1; off < cfg::kTileThreads; off <<= 1) {
-            const unsigned add = tid >= off ? scan[tid - off] : 0u;
-            __syncthreads();
-            scan[tid] += add;
-            __syncthreads();
-        }
-        if (t < tiles) bucket_offset[t] = carry + scan[tid];
-        carry += scan[cfg::kTileThreads - 1];
+        // CUB preserves the inclusive integer offsets without the eight
+        // read/barrier/write/barrier stages of a Hillis-Steele scan.
+        unsigned prefix, aggregate;
+        Scan(scan).InclusiveSum(v, prefix, aggregate);
+        if (t < tiles) bucket_offset[t] = carry + prefix;
+        carry += aggregate;
+        // All threads must finish using TempStorage before the next chunk.
         __syncthreads();
     }
     // blend_tile fills bucket_tile for real buckets; park the upper-bound

@@ -68,23 +68,6 @@ void select_training_rows_gpu(
         select_adam_rows(*state, indices);
 }
 
-void zero_adam_rows_gpu(
-    const tinytensor::Tensor& indices, const AdamStates& states) {
-    if (indices.numel() == 0) return;
-    for (detail::AdamState* state : states) {
-        const auto zero_rows = [&indices](tinytensor::Tensor& tensor) {
-            std::vector<std::size_t> dimensions = tensor.shape().dims();
-            dimensions[0] = indices.numel();
-            const auto zeros = tinytensor::Tensor::zeros(
-                tinytensor::TensorShape(dimensions),
-                tinytensor::Device::CUDA);
-            tensor.index_copy_(0, indices, zeros);
-        };
-        zero_rows(state->first);
-        zero_rows(state->second);
-    }
-}
-
 void grow_adc_plus_gpu(
     GaussianModel& model, const tinytensor::Tensor& parents,
     const TrainingOptions& options, const AdamStates& states,
@@ -99,7 +82,7 @@ void grow_adc_plus_gpu(
         model, children, parents, samples, selected_screen, split_mode,
         options.prune_opacity,
         options.densify_screen_threshold);
-    zero_adam_rows_gpu(parents, states);
+    detail::zero_adam_rows(parents, states);
     append_model(model, children);
     for (detail::AdamState* state : states)
         append_zero_adam(*state, count);

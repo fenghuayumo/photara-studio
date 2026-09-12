@@ -45,6 +45,10 @@ struct RenderSettings {
     float kernel_size = 0.f;
     bool need_depth = true;
     bool debug = false;
+    // Point queries: sort a fixed-size list with a sentinel for invalid points,
+    // eliminating the point-count host readback. SampleCounts::point_instances
+    // is -1 (not collected) on this path; per-tile ranges remain exact.
+    bool device_point_lists = false;
 };
 
 struct RenderOutputs {
@@ -145,7 +149,7 @@ public:
     // Median-depth sampling of world-space query points (multi-view
     // photometric / geometric losses).
     struct SampleCounts {
-        int point_instances = 0;
+        int point_instances = 0; // -1 when device_point_lists skips count readback
         int gaussian_instances = 0;
         int visible_count = 0;
         int tile_blocks = 0;
