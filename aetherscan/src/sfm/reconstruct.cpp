@@ -2,6 +2,7 @@
 #include "sfm/appearance.hpp"
 
 #include "core/logging.hpp"
+#include "io/image.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/bundle.hpp"
 #include "sfm/pair_weighting.hpp"
@@ -655,6 +656,65 @@ unsigned repair_position_outliers(
     return quarantined + reseeded;
 }
 
+// Global layout is computed with one robust shared-intrinsic group so a small
+// number of zoom-transition pairs cannot be rejected before a connected graph
+// exists. Once poses are stable, EXIF-identified zoom/lens states become
+// separate BA groups: they share the proven layout as an initialization and
+// then adapt focal/aspect/distortion independently.
+unsigned split_intrinsics_by_camera_identity(Scene& scene) {
+    if (scene.cameras.empty() || scene.images.empty()) return 0;
+
+    std::vector<double> focal_lengths;
+    focal_lengths.reserve(scene.images.size());
+    for (const Image& image : scene.images)
+        if (image.focal_length_mm > 0.0)
+            focal_lengths.push_back(image.focal_length_mm);
+    const double median_focal_length =
+        focal_lengths.size() >= 4 ? median_value(focal_lengths) : 0.0;
+
+    std::unordered_map<std::string, Index> group_of_identity;
+    std::vector<PinholeCamera> grouped_cameras;
+    grouped_cameras.reserve(scene.cameras.size());
+    std::vector<unsigned> group_images;
+
+    for (Image& image : scene.images) {
+        const std::string& identity = image.camera_identity;
+        auto [iterator, inserted] = group_of_identity.emplace(
+            identity, static_cast<Index>(grouped_cameras.size()));
+        if (inserted) {
+            PinholeCamera camera = scene.cameras[image.camera_id];
+            if (median_focal_length > 0.0 && image.focal_length_mm > 0.0) {
+                const double focal =
+                    camera.fx * image.focal_length_mm / median_focal_length;
+                if (std::isfinite(focal) && focal > 0.0) {
+                    const double ratio = focal / camera.fx;
+                    camera.fx *= ratio;
+                    camera.fy *= ratio;
+                    camera.focal_prior = 0.5 * (camera.fx + camera.fy);
+                }
+            }
+            camera.id = static_cast<Index>(grouped_cameras.size());
+            grouped_cameras.push_back(camera);
+            group_images.push_back(0);
+        }
+        image.camera_id = iterator->second;
+        ++group_images[iterator->second];
+    }
+
+    if (grouped_cameras.size() <= 1) return 0;
+    scene.cameras = std::move(grouped_cameras);
+    std::string groups;
+    for (std::size_t i = 0; i < scene.cameras.size(); ++i) {
+        if (!groups.empty()) groups += ',';
+        groups += std::to_string(group_images[i]);
+    }
+    core::Logger::instance().info(
+        "global: split EXIF intrinsic groups=", scene.cameras.size(),
+        " images_per_group=", groups,
+        " median_focal_length_mm=", median_focal_length);
+    return static_cast<unsigned>(scene.cameras.size());
+}
+
 unsigned enforce_zero_baseline_pose_groups(Scene& scene) {
     if (scene.images.empty() || scene.pairs.empty()) return 0;
 
@@ -1255,6 +1315,7 @@ ReconstructionSummary run_global_mapping(
     bundle.optimizer.optimize_rotations = false;
     bundle.optimizer.optimize_focal = false;
     bundle.optimizer.optimize_distortion = false;
+    split_intrinsics_by_camera_identity(scene);
     if (!run_bundle_adjustment(scene, bundle).success) {
         core::Logger::instance().error(
             "global: position/structure bundle adjustment failed");
@@ -1482,6 +1543,19 @@ void finish_alignment_recovery(Scene& scene, const ReconstructionConfig& config)
     prune_unsupported_registrations(scene, config.minimum_final_observations_per_image,
                                    config.maximum_final_reprojection_error_pixels);
 }
+// Frontend checkpoints restore the compact scene but not EXIF metadata. The
+// late intrinsic split therefore refreshes it from the source files before
+// mapping, so cold starts and resumed runs take the same code path.
+void ensure_camera_identity_metadata(
+    Scene& scene, const FrontEndOptions& options) {
+    if (options.trust_focal_pixels) return;
+    for (Image& image : scene.images) {
+        if (!image.camera_identity.empty()) continue;
+        image.camera_identity = io::load_camera_identity(
+            image.path, &image.focal_length_mm);
+    }
+}
+
 }  // namespace
 
 ReconstructionSummary reconstruct(
@@ -1491,6 +1565,7 @@ ReconstructionSummary reconstruct(
     core::StageScope stage("sfm.reconstruct");
     FrontEndResult frontend = run_frontend(image_paths, config.frontend);
     scene_out = std::move(frontend.scene);
+    ensure_camera_identity_metadata(scene_out, config.frontend);
     // Small immutable snapshot used only if a large incremental run later
     // needs an independent hierarchical retry. Incremental BA mutates these
     // shared intrinsics in place.

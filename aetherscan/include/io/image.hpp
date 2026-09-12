@@ -19,6 +19,14 @@ ImageSize load_image_size(const std::filesystem::path& path);
 [[nodiscard]] bool image_has_alpha(const std::filesystem::path& path);
 // Optional EXIF lens description; empty when absent or unreadable.
 std::string load_lens_description(const std::filesystem::path& path);
+// Stable physical-camera identity used to avoid sharing intrinsics between
+// different bodies, lenses, or zoom settings. Empty when EXIF is unavailable.
+std::string load_camera_identity(
+	const std::filesystem::path& path,
+	double* focal_length_mm = nullptr,
+	std::uint32_t image_width = 0,
+	std::uint32_t image_height = 0,
+	double* focal_prior_px = nullptr);
 
 struct GrayImage {
     std::uint32_t width{};

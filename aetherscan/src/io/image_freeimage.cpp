@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <csetjmp>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
@@ -388,6 +389,103 @@ ImageSize load_image_size(const std::filesystem::path& path) {
     if (size.width == 0 || size.height == 0)
         throw std::runtime_error("Empty image: " + path.string());
     return size;
+}
+
+namespace {
+
+double metadata_number(FITAG* tag, FREE_IMAGE_MDMODEL metadata) {
+    const char* text = FreeImage_TagToString(metadata, tag);
+    if (!text || !*text) return 0.0;
+    char* end = nullptr;
+    const double numerator = std::strtod(text, &end);
+    if (end == text) return 0.0;
+    if (*end == '/') {
+        const char* denominator_text = end + 1;
+        const double denominator = std::strtod(denominator_text, &end);
+        if (end == denominator_text || denominator == 0.0) return 0.0;
+        return numerator / denominator;
+    }
+    return numerator;
+}
+
+}
+
+std::string load_camera_identity(
+    const std::filesystem::path& path, double* focal_length_mm,
+    const std::uint32_t image_width, const std::uint32_t image_height,
+    double* focal_prior_px) {
+    std::lock_guard lock(freeimage_mutex());
+    ensure_freeimage();
+    try {
+        const auto format = detect_format(path);
+        FIBITMAP* bitmap = FreeImage_Load(
+            format, path.string().c_str(), FIF_LOAD_NOPIXELS);
+        if (!bitmap) return {};
+        std::string identity;
+        double plane_x_resolution = 0.0;
+        double plane_resolution_unit = 0.0;
+        double sensor_pixel_width = 0.0;
+        for (const auto metadata : {FIMD_EXIF_MAIN, FIMD_EXIF_EXIF}) {
+            for (const char* key :
+                 {"Make", "Model", "BodySerialNumber", "LensMake", "LensModel",
+                  "FocalLength", "FocalLengthIn35mmFormat",
+                  "FocalPlaneXResolution", "FocalPlaneResolutionUnit",
+                  "PixelXDimension"}) {
+                FITAG* tag = nullptr;
+                if (FreeImage_GetMetadata(metadata, bitmap, key, &tag) && tag) {
+                    if (focal_length_mm && *focal_length_mm <= 0.0 &&
+                        std::string(key) == "FocalLength") {
+                        const double parsed = metadata_number(tag, metadata);
+                        if (parsed > 0.0) *focal_length_mm = parsed;
+                    }
+                    if (focal_prior_px && *focal_prior_px <= 0.0 &&
+                        std::string(key) == "FocalLengthIn35mmFormat") {
+                        const double focal_35mm = metadata_number(tag, metadata);
+                        if (focal_35mm > 0.0 && image_width > 0 && image_height > 0) {
+                            const double diagonal = std::sqrt(
+                                static_cast<double>(image_width) * image_width +
+                                static_cast<double>(image_height) * image_height);
+                            *focal_prior_px = focal_35mm / 43.27 * diagonal;
+                        }
+                    }
+                    if (std::string(key) == "FocalPlaneXResolution") {
+                        plane_x_resolution = metadata_number(tag, metadata);
+                    } else if (std::string(key) == "FocalPlaneResolutionUnit") {
+                        plane_resolution_unit = metadata_number(tag, metadata);
+                    } else if (std::string(key) == "PixelXDimension") {
+                        sensor_pixel_width = metadata_number(tag, metadata);
+                    }
+                    const char* value = FreeImage_TagToString(metadata, tag);
+                    if (value && *value) {
+                        identity += value;
+                        identity += '\n';
+                    }
+                }
+            }
+        }
+        if (focal_prior_px && *focal_prior_px <= 0.0 && *focal_length_mm > 0.0 &&
+            plane_x_resolution > 0.0 && plane_resolution_unit >= 2.0 &&
+            plane_resolution_unit <= 5.0) {
+            double pixels_per_mm = 0.0;
+            switch (static_cast<int>(plane_resolution_unit)) {
+                case 2: pixels_per_mm = plane_x_resolution / 25.4; break;
+                case 3: pixels_per_mm = plane_x_resolution / 10.0; break;
+                case 4: pixels_per_mm = plane_x_resolution; break;
+                case 5: pixels_per_mm = plane_x_resolution * 1000.0; break;
+                default: break;
+            }
+            if (sensor_pixel_width > 0.0 && image_width > 0)
+                pixels_per_mm *= static_cast<double>(image_width) / sensor_pixel_width;
+            const double focal_px = *focal_length_mm * pixels_per_mm;
+            const double long_edge = std::max(image_width, image_height);
+            if (focal_px > 0.1 * long_edge && focal_px < 100.0 * long_edge)
+                *focal_prior_px = focal_px;
+        }
+        FreeImage_Unload(bitmap);
+        return identity;
+    } catch (const std::exception&) {
+        return {};
+    }
 }
 
 bool image_has_alpha(const std::filesystem::path& path) {

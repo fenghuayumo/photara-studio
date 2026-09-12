@@ -60,7 +60,10 @@ struct FrontEndStageKeys {
 };
 
 void append_cache_build_identity(FingerprintBuilder& key) {
-    key.append_string(AETHERSCAN_FRONTEND_CACHE_BUILD_ID);
+	key.append_string(AETHERSCAN_FRONTEND_CACHE_BUILD_ID);
+	// Camera metadata now feeds a late intrinsic split; older geometry and
+	// track caches lack those fields.
+	key.append_string("camera-late-exif-split-v1");
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));
@@ -240,17 +243,53 @@ void initialize_cameras(
         ? CameraModel::pinhole : requested_model;
     scene.cameras.clear();
     scene.cameras.reserve(scene.images.size());
+    std::vector<double> exif_focals;
+    exif_focals.reserve(scene.images.size());
+    for (Index i = 0; i < scene.images.size(); ++i) {
+        Image& image = scene.images[i];
+        // Capture EXIF identity for late grouped refinement, but keep the
+        // view graph on the legacy shared group. Early hard grouping can turn
+        // sparse zoom-transition edges into disconnected registration
+        // components; the late split gets independent focal/distortion once a
+        // connected layout has already been established.
+        image.camera_identity = trust_focal_pixels
+            ? std::string{}
+            : io::load_camera_identity(
+                  image.path,
+                  &image.focal_length_mm,
+                  image.features.image_width,
+                  image.features.image_height,
+                  &image.exif_focal_px);
+        if (image.exif_focal_px > 0.0)
+            exif_focals.push_back(image.exif_focal_px);
+    }
+    const bool use_exif_prior =
+        focal_pixels <= 0.0 && exif_focals.size() * 4 >= scene.images.size();
+    double exif_focal_px = 0.0;
+    if (use_exif_prior) {
+        const std::size_t middle = exif_focals.size() / 2;
+        std::nth_element(
+            exif_focals.begin(), exif_focals.begin() + middle,
+            exif_focals.end());
+        exif_focal_px = exif_focals[middle];
+        core::Logger::instance().info(
+            "camera exif focal prior: pixels=", exif_focal_px,
+            " images=", exif_focals.size(), '/', scene.images.size());
+    }
     for (Index i = 0; i < scene.images.size(); ++i) {
         const auto& features = scene.images[i].features;
         PinholeCamera camera;
         camera.model = model;
         camera.width = features.image_width;
         camera.height = features.image_height;
-        const double focal =
-            focal_pixels > 0
-                ? focal_pixels
-                : (model == CameraModel::opencv_fisheye ? 0.5 : 1.2) *
-                  std::max(camera.width, camera.height);
+        const double geometric_focal =
+            (model == CameraModel::opencv_fisheye ? 0.5 : 1.2) *
+            std::max(camera.width, camera.height);
+        const double focal = focal_pixels > 0
+            ? focal_pixels
+            : (use_exif_prior && exif_focal_px > 0.0
+                   ? exif_focal_px
+                   : geometric_focal);
         camera.fx = focal;
         camera.fy = focal;
         camera.focal_prior = focal;
@@ -260,7 +299,8 @@ void initialize_cameras(
         const auto existing = std::find_if(
             scene.cameras.begin(), scene.cameras.end(),
             [&](const PinholeCamera& candidate) {
-                return candidate.width == camera.width &&
+                return candidate.focal_prior == camera.focal_prior &&
+                       candidate.width == camera.width &&
                        candidate.height == camera.height &&
                        std::abs(candidate.fx - camera.fx) < 1e-9 &&
                        std::abs(candidate.fy - camera.fy) < 1e-9;

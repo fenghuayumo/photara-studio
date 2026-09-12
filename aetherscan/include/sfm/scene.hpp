@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -17,6 +18,12 @@ struct Image {
     Index camera_id{k_invalid};
     std::filesystem::path path;
     features::FeatureSet features;
+    // Runtime metadata for grouped intrinsic refinement. ASFM does not persist
+    // these fields; reconstruction restores them from the source image when a
+    // frontend snapshot is loaded.
+    std::string camera_identity;
+    double focal_length_mm{0.0};
+    double exif_focal_px{0.0};
     Pose3D pose;
     bool registered{false};
 
