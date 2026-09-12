@@ -28,8 +28,8 @@ inline constexpr ImVec4 console_bg{0.022F, 0.024F, 0.029F, 1.F};
 
 struct Fonts {
     ImFont* regular{};
-    // Latin-only 12px face used for panel headers and small chrome. Chinese
-    // glyphs are baked only into the regular face to keep the atlas small.
+    // 12px chrome face. CJK glyphs (Chinese, Japanese, Korean) are merged
+    // into the UI faces so language switching does not rebuild the atlas.
     ImFont* small{};
     ImFont* mono{};
 };

@@ -1,23 +1,59 @@
 #include "theme.hpp"
 
+#include "i18n.hpp"
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <string>
 
 namespace editor::theme {
 namespace {
 
-const char* pick_ui_font() {
+const char* first_existing(const char* const* candidates, const int count) {
+    for (int i = 0; i < count; ++i)
+        if (std::filesystem::exists(candidates[i])) return candidates[i];
+    return nullptr;
+}
+
+const char* pick_latin_font() {
     static const char* const candidates[] = {
-        "C:\\Windows\\Fonts\\msyh.ttc",
         "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\msyh.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     };
-    for (const char* candidate : candidates)
-        if (std::filesystem::exists(candidate)) return candidate;
-    return nullptr;
+    return first_existing(candidates, 3);
+}
+
+const char* pick_chinese_font() {
+    static const char* const candidates[] = {
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\msyhbd.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    };
+    return first_existing(candidates, 3);
+}
+
+const char* pick_japanese_font() {
+    static const char* const candidates[] = {
+        "C:\\Windows\\Fonts\\YuGothR.ttc",
+        "C:\\Windows\\Fonts\\yugothic.ttf",
+        "C:\\Windows\\Fonts\\meiryo.ttc",
+        "C:\\Windows\\Fonts\\msgothic.ttc",
+    };
+    return first_existing(candidates, 4);
+}
+
+const char* pick_korean_font() {
+    static const char* const candidates[] = {
+        "C:\\Windows\\Fonts\\malgun.ttf",
+        "C:\\Windows\\Fonts\\malgunsl.ttf",
+        "C:\\Windows\\Fonts\\gulim.ttc",
+    };
+    return first_existing(candidates, 3);
 }
 
 const char* pick_mono_font() {
@@ -39,13 +75,53 @@ constexpr float header_height = 32.F;
 ImFont* g_small_font{};
 ImFont* g_mono_font{};
 
-ImFont* load_ui_font(ImGuiIO& io, const char* path, const float size) {
+const ImWchar* ui_glyph_ranges(ImGuiIO& io) {
+    static ImVector<ImWchar> ranges;
+    if (ranges.empty()) {
+        ImFontGlyphRangesBuilder builder;
+        builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+        builder.AddRanges(io.Fonts->GetGlyphRangesChineseFull());
+        builder.AddRanges(io.Fonts->GetGlyphRangesJapanese());
+        builder.AddRanges(io.Fonts->GetGlyphRangesKorean());
+        builder.BuildRanges(&ranges);
+    }
+    return ranges.Data;
+}
+
+ImFont* merge_cjk_fonts(ImGuiIO& io, ImFontConfig& config, const float size) {
+    config.MergeMode = true;
+    if (const char* chinese = pick_chinese_font())
+        io.Fonts->AddFontFromFileTTF(
+            chinese, size, &config, io.Fonts->GetGlyphRangesChineseFull());
+    if (const char* japanese = pick_japanese_font())
+        io.Fonts->AddFontFromFileTTF(
+            japanese, size, &config, io.Fonts->GetGlyphRangesJapanese());
+    if (const char* korean = pick_korean_font())
+        io.Fonts->AddFontFromFileTTF(
+            korean, size, &config, io.Fonts->GetGlyphRangesKorean());
+    config.MergeMode = false;
+    return io.Fonts->Fonts.empty() ? nullptr : io.Fonts->Fonts.back();
+}
+
+ImFont* load_ui_font(ImGuiIO& io, const float size) {
     ImFontConfig config;
-    // msyh.ttc is a collection; FontNo 0 is the regular face.
+    // TTC collections (YaHei, Yu Gothic, Meiryo) use face 0.
     config.FontNo = 0;
     config.PixelSnapH = true;
-    return io.Fonts->AddFontFromFileTTF(
-        path, size, &config, io.Fonts->GetGlyphRangesChineseFull());
+    const char* latin = pick_latin_font();
+    ImFont* font = nullptr;
+    if (latin) {
+        font = io.Fonts->AddFontFromFileTTF(
+            latin, size, &config, io.Fonts->GetGlyphRangesDefault());
+    }
+    if (font)
+        merge_cjk_fonts(io, config, size);
+    else if (const char* chinese = pick_chinese_font()) {
+        font = io.Fonts->AddFontFromFileTTF(
+            chinese, size, &config, ui_glyph_ranges(io));
+        if (font) merge_cjk_fonts(io, config, size);
+    }
+    return font;
 }
 
 ImFont* load_mono_font(ImGuiIO& io, const char* path, const float size) {
@@ -70,13 +146,12 @@ ImVec4 fade(const ImVec4& colour, const float alpha) {
 
 Fonts load_fonts(ImGuiIO& io) {
     Fonts fonts;
-    const char* path = pick_ui_font();
-    fonts.regular = path ? load_ui_font(io, path, 15.F) : nullptr;
+    fonts.regular = load_ui_font(io, 15.F);
     if (!fonts.regular) {
         fonts.regular = io.Fonts->AddFontDefault();
         fonts.small = fonts.regular;
     } else {
-        fonts.small = load_ui_font(io, path, 12.F);
+        fonts.small = load_ui_font(io, 12.F);
         if (!fonts.small) fonts.small = fonts.regular;
     }
     g_small_font = fonts.small;
@@ -179,8 +254,9 @@ void section_header(const char* title, const char* trailing) {
     ImFont* font = g_small_font ? g_small_font : ImGui::GetFont();
     const float size = font->FontSize;
     const float text_y = origin.y + (header_height - size) * 0.5F;
-    draw->AddText(font, size, {origin.x + 12.F, text_y}, u32(text_muted), title);
+    draw->AddText(font, size, {origin.x + 12.F, text_y}, u32(text_muted), i18n::tr(title));
     if (trailing) {
+        trailing = i18n::tr(trailing);
         const float trailing_width =
             font->CalcTextSizeA(size, FLT_MAX, 0.F, trailing).x;
         draw->AddText(
@@ -273,6 +349,18 @@ void progress_track(const ImVec2 size, const float fraction, const ImVec4& fill)
 
 namespace {
 
+const char* localize_label(const char* label) {
+    if (label == nullptr || label[0] == '\0') return "";
+    const char* hash = std::strstr(label, "##");
+    if (hash == nullptr) return i18n::tr(label);
+    const auto visible_n = static_cast<std::size_t>(hash - label);
+    thread_local char visible[160];
+    if (visible_n >= sizeof(visible)) return label;
+    std::memcpy(visible, label, visible_n);
+    visible[visible_n] = '\0';
+    return i18n::id(visible, hash);
+}
+
 bool styled_button(
     const char* label, const ImVec2 size, const bool enabled,
     const ImVec4& base, const ImVec4& hovered, const ImVec4& text_colour) {
@@ -281,7 +369,7 @@ bool styled_button(
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, hovered);
     ImGui::PushStyleColor(ImGuiCol_Text, text_colour);
     if (!enabled) ImGui::BeginDisabled();
-    const bool pressed = ImGui::Button(label, size);
+    const bool pressed = ImGui::Button(localize_label(label), size);
     if (!enabled) ImGui::EndDisabled();
     ImGui::PopStyleColor(4);
     return pressed && enabled;
@@ -320,6 +408,8 @@ bool danger_button(const char* label, const ImVec2 size, const bool enabled) {
 bool choice_tile(
     const char* id, const char* title, const char* subtitle, const bool selected,
     const ImVec2 size) {
+    title = i18n::tr(title);
+    subtitle = i18n::tr(subtitle);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(id, size);
     const bool pressed = ImGui::IsItemClicked();
@@ -356,7 +446,7 @@ bool choice_tile(
 
 void caption(const char* text) {
     ImGui::PushStyleColor(ImGuiCol_Text, text_faint);
-    ImGui::TextUnformatted(text);
+    ImGui::TextUnformatted(i18n::tr(text));
     ImGui::PopStyleColor();
 }
 
@@ -367,6 +457,7 @@ void metric(const char* key, const char* value) {
 void metric_coloured(
     const char* key, const char* value, const ImVec4& colour) {
     caption(key);
+    value = i18n::tr(value);
     const float value_width = ImGui::CalcTextSize(value).x;
     const float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
     ImGui::SameLine(std::max(ImGui::GetCursorPosX(), right - value_width));

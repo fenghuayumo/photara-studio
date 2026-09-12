@@ -661,13 +661,21 @@ if(AETHERSCAN_ENABLE_FEATURES)
             set(AETHERSCAN_EDITOR_DIR
                 "${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor")
             add_executable(aetherscan_editor
+                ${AETHERSCAN_EDITOR_DIR}/app_commands.cpp
                 ${AETHERSCAN_EDITOR_DIR}/console_view.cpp
+                ${AETHERSCAN_EDITOR_DIR}/file_dialogs.cpp
+                ${AETHERSCAN_EDITOR_DIR}/i18n.cpp
                 ${AETHERSCAN_EDITOR_DIR}/icons.cpp
                 ${AETHERSCAN_EDITOR_DIR}/image_qa_view.cpp
                 ${AETHERSCAN_EDITOR_DIR}/main.cpp
                 ${AETHERSCAN_EDITOR_DIR}/pipeline.cpp
                 ${AETHERSCAN_EDITOR_DIR}/sparse_view.cpp
                 ${AETHERSCAN_EDITOR_DIR}/theme.cpp
+                ${AETHERSCAN_EDITOR_DIR}/ui_chrome.cpp
+                ${AETHERSCAN_EDITOR_DIR}/ui_export.cpp
+                ${AETHERSCAN_EDITOR_DIR}/ui_inspector.cpp
+                ${AETHERSCAN_EDITOR_DIR}/ui_scene.cpp
+                ${AETHERSCAN_EDITOR_DIR}/ui_viewport.cpp
                 ${AETHERSCAN_EDITOR_DIR}/viewport_gizmo.cpp
                 ${AETHERSCAN_EDITOR_DIR}/vulkan_backend.cpp)
             target_include_directories(aetherscan_editor PRIVATE

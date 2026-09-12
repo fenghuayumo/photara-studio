@@ -1,5 +1,6 @@
 #include "image_qa_view.hpp"
 
+#include "i18n.hpp"
 #include "icons.hpp"
 #include "theme.hpp"
 
@@ -17,6 +18,8 @@
 
 namespace editor {
 namespace {
+
+using i18n::tr;
 
 constexpr float k_toolbar_h = 48.F;
 constexpr float k_filmstrip_h = 104.F;
@@ -605,14 +608,14 @@ void draw_image_qa(
     };
     const bool compare_ok = input.has_model || input.render_live;
     const ModeItem modes[] = {
-        {"##qa_photo", icons::Icon::photo, "Photo", ImageQaMode::photo, true,
-         "Capture image"},
-        {"##qa_feat", icons::Icon::features, "Features", ImageQaMode::features,
-         true, "Detected keypoints and triangulated tracks"},
-        {"##qa_cmp", icons::Icon::compare, "Compare", ImageQaMode::compare,
-         true, "Slide to compare 3DGS against the training view"},
-        {"##qa_err", icons::Icon::heatmap, "Error", ImageQaMode::error, true,
-         "Per-pixel photometric error map"},
+        {"##qa_photo", icons::Icon::photo, tr("Photo"), ImageQaMode::photo, true,
+         tr("Capture image")},
+        {"##qa_feat", icons::Icon::features, tr("Features"), ImageQaMode::features,
+         true, tr("Detected keypoints and triangulated tracks")},
+        {"##qa_cmp", icons::Icon::compare, tr("Compare"), ImageQaMode::compare,
+         true, tr("Slide to compare 3DGS against the training view")},
+        {"##qa_err", icons::Icon::heatmap, tr("Error"), ImageQaMode::error, true,
+         tr("Per-pixel photometric error map")},
     };
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {4.F, 0.F});
     for (const ModeItem& mode : modes) {
@@ -649,7 +652,7 @@ void draw_image_qa(
     ImGui::SetCursorScreenPos({prev_x, nav_y});
     if (icons::ghost_button(
             "##qa_prev", icons::Icon::chevron_left, nav_size, false, count > 1,
-            "Previous image"))
+            tr("Previous image")))
         select_image_qa_view(state, state.selected - 1, count);
     ImGui::SetCursorScreenPos(
         {label_x, nav_y + (nav_size.y - label_size.y) * 0.5F});
@@ -659,7 +662,7 @@ void draw_image_qa(
     ImGui::SetCursorScreenPos({next_x, nav_y});
     if (icons::ghost_button(
             "##qa_next", icons::Icon::chevron_right, nav_size, false, count > 1,
-            "Next image"))
+            tr("Next image")))
         select_image_qa_view(state, state.selected + 1, count);
 
     if (!item.name.empty() && (max.x - min.x) > 780.F) {
@@ -766,36 +769,36 @@ void draw_image_qa(
     draw->PushClipRect(canvas_min, canvas_max, true);
     if (count <= 0) {
         draw_empty(
-            draw, canvas_min, canvas_max, "No images to inspect",
-            "Select an image folder or align photos to open the 2D viewer");
+            draw, canvas_min, canvas_max, tr("No images to inspect"),
+            tr("Select an image folder or align photos to open the 2D viewer"));
     } else if (session.loading()) {
         draw_empty(
-            draw, canvas_min, canvas_max, "Loading capture…",
-            item.name.empty() ? "Reading the selected image"
+            draw, canvas_min, canvas_max, tr("Loading capture…"),
+            item.name.empty() ? tr("Reading the selected image")
                               : item.name.c_str());
     } else if (!has_gt) {
         draw_empty(
-            draw, canvas_min, canvas_max, "Capture unavailable",
-            item.path.empty() ? "This view has no image path"
-                              : "Could not decode the selected file");
+            draw, canvas_min, canvas_max, tr("Capture unavailable"),
+            item.path.empty() ? tr("This view has no image path")
+                              : tr("Could not decode the selected file"));
     } else if (state.mode == ImageQaMode::error) {
         if (session.has_error()) {
             draw->AddImage(session.error_id(), img_min, img_max);
         } else if (!compare_ok) {
             draw->AddImage(session.gt_id(), img_min, img_max);
             draw_empty(
-                draw, canvas_min, canvas_max, "Train 3DGS to build an error map",
-                "The heatmap compares the live splat against this capture");
+                draw, canvas_min, canvas_max, tr("Train 3DGS to build an error map"),
+                tr("The heatmap compares the live splat against this capture"));
         } else if (!input.has_render) {
             draw->AddImage(session.gt_id(), img_min, img_max);
             draw_empty(
-                draw, canvas_min, canvas_max, "Waiting for a rendered frame…",
-                "The live splat preview will appear here once it is ready");
+                draw, canvas_min, canvas_max, tr("Waiting for a rendered frame…"),
+                tr("The live splat preview will appear here once it is ready"));
         } else {
             draw->AddImage(session.gt_id(), img_min, img_max);
             draw_empty(
-                draw, canvas_min, canvas_max, "Computing error map…",
-                "PSNR / SSIM update as soon as both images are aligned");
+                draw, canvas_min, canvas_max, tr("Computing error map…"),
+                tr("PSNR / SSIM update as soon as both images are aligned"));
         }
     } else {
         draw->AddImage(session.gt_id(), img_min, img_max);
@@ -826,15 +829,15 @@ void draw_image_qa(
             draw->AddText(
                 {canvas_min.x + 16.F, canvas_max.y - 22.F},
                 theme::u32(theme::text_faint),
-                "Drag to wipe GT / 3DGS    ·    MMB pan    ·    wheel zoom");
+                tr("Drag to wipe GT / 3DGS    ·    MMB pan    ·    wheel zoom"));
         } else if (compare && !compare_ok) {
             draw_empty(
-                draw, canvas_min, canvas_max, "No splat to compare yet",
-                "Train 3DGS, then drag the vertical handle to wipe GT vs render");
+                draw, canvas_min, canvas_max, tr("No splat to compare yet"),
+                tr("Train 3DGS, then drag the vertical handle to wipe GT vs render"));
         } else if (compare && !input.has_render) {
             draw_empty(
-                draw, canvas_min, canvas_max, "Waiting for the live splat…",
-                "The renderer is snapping to this training camera");
+                draw, canvas_min, canvas_max, tr("Waiting for the live splat…"),
+                tr("The renderer is snapping to this training camera"));
         }
         if (state.mode == ImageQaMode::features && item.pose)
             draw_features(draw, *item.pose, img_min, img_max, state);
@@ -855,14 +858,14 @@ void draw_image_qa(
                 {canvas_min.x + 16.F, canvas_max.y - 40.F},
                 theme::u32(theme::warning),
                 input.external_alignment
-                    ? "No triangulated keypoints in this imported alignment"
-                    : "No keypoints in this reconstruction — re-align to inspect features");
+                    ? tr("No triangulated keypoints in this imported alignment")
+                    : tr("No keypoints in this reconstruction — re-align to inspect features"));
     } else if (state.mode == ImageQaMode::features && !item.pose &&
                input.external_alignment) {
         draw->AddText(
             {canvas_min.x + 16.F, canvas_max.y - 22.F},
             theme::u32(theme::warning),
-            "Loading imported cameras for the feature overlay…");
+            tr("Loading imported cameras for the feature overlay…"));
     }
 
     if (image_qa_needs_render(state.mode) && session.metrics_busy() &&

@@ -1,5 +1,6 @@
 #include "console_view.hpp"
 
+#include "i18n.hpp"
 #include "icons.hpp"
 #include "theme.hpp"
 
@@ -178,20 +179,20 @@ bool filter_chip(
 
 void draw_status_badge(const bool running, const Stage stage) {
     ImVec4 colour = theme::inactive;
-    const char* label = "IDLE";
+    const char* label = i18n::tr("IDLE");
     if (running) {
         colour = theme::accent;
-        label = "LIVE";
+        label = i18n::tr("LIVE");
         const float pulse =
             0.55F + 0.45F * (0.5F + 0.5F * std::sinf(
                 static_cast<float>(ImGui::GetTime()) * 3.4F));
         colour = theme::fade(theme::accent, pulse);
     } else if (stage == Stage::failed) {
         colour = theme::danger;
-        label = "FAILED";
+        label = i18n::tr("FAILED");
     } else if (stage == Stage::complete) {
         colour = theme::success;
-        label = "DONE";
+        label = i18n::tr("DONE");
     }
 
     theme::status_dot(colour, 8.F);
@@ -348,7 +349,7 @@ void draw_console(
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar;
     if (running) flags |= ImGuiWindowFlags_UnsavedDocument;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.F, 0.F));
-    const bool visible = ImGui::Begin("Console", &open, flags);
+    const bool visible = ImGui::Begin(i18n::id("Console", "###Console"), &open, flags);
     ImGui::PopStyleVar();
     if (!visible) {
         ImGui::End();
@@ -416,7 +417,7 @@ void draw_console(
     if (icons::ghost_button(
             "##follow", icons::Icon::follow, {k_btn, k_btn},
             view.follow && view.at_bottom, true,
-            view.follow ? "Follow output" : "Jump to latest")) {
+            view.follow ? i18n::tr("Follow output") : i18n::tr("Jump to latest"))) {
         view.follow = true;
         view.jump_to_end = true;
     }
@@ -424,7 +425,7 @@ void draw_console(
     ImGui::SameLine(0.F, k_btn_gap);
     if (icons::ghost_button(
             "##copy", icons::Icon::copy, {k_btn, k_btn}, false,
-            !view.visible.empty(), "Copy visible lines")) {
+            !view.visible.empty(), i18n::tr("Copy visible lines"))) {
         std::string text;
         for (const int index : view.visible) {
             text += format_line(lines[static_cast<std::size_t>(index)]);
@@ -435,7 +436,7 @@ void draw_console(
     ImGui::SameLine(0.F, k_btn_gap);
     if (icons::ghost_button(
             "##clear", icons::Icon::trash, {k_btn, k_btn}, false,
-            counts.total > 0, "Clear console")) {
+            counts.total > 0, i18n::tr("Clear console"))) {
         log.clear_display();
         view.selected = -1;
         view.seen_count = 0;
@@ -447,32 +448,32 @@ void draw_console(
         content_start.y + k_toolbar_height + (k_filter_height - 28.F) * 0.5F;
     ImGui::SetCursorPos({content_start.x + k_side_pad, filter_y});
     if (filter_chip(
-            "##all", "All", counts.total, view.filter == ConsoleFilter::all,
+            "##all", i18n::tr("All"), counts.total, view.filter == ConsoleFilter::all,
             theme::accent))
         view.filter = ConsoleFilter::all;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show every log line");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", i18n::tr("Show every log line"));
     ImGui::SameLine(0.F, 8.F);
     if (filter_chip(
-            "##info", "Info", counts.info, view.filter == ConsoleFilter::info,
+            "##info", i18n::tr("Info"), counts.info, view.filter == ConsoleFilter::info,
             ImVec4(0.55F, 0.72F, 0.86F, 1.F)))
         view.filter = view.filter == ConsoleFilter::info ? ConsoleFilter::all
                                                          : ConsoleFilter::info;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Info and debug output");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", i18n::tr("Info and debug output"));
     ImGui::SameLine(0.F, 8.F);
     if (filter_chip(
-            "##warn", "Warn", counts.warning,
+            "##warn", i18n::tr("Warn"), counts.warning,
             view.filter == ConsoleFilter::warning, theme::warning))
         view.filter = view.filter == ConsoleFilter::warning
             ? ConsoleFilter::all
             : ConsoleFilter::warning;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Warnings only");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", i18n::tr("Warnings only"));
     ImGui::SameLine(0.F, 8.F);
     if (filter_chip(
-            "##err", "Error", counts.error, view.filter == ConsoleFilter::error,
+            "##err", i18n::tr("Error"), counts.error, view.filter == ConsoleFilter::error,
             theme::danger))
         view.filter = view.filter == ConsoleFilter::error ? ConsoleFilter::all
                                                           : ConsoleFilter::error;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Errors only");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", i18n::tr("Errors only"));
 
     const float chips_end =
         ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
@@ -491,7 +492,7 @@ void draw_console(
             view.request_search_focus = false;
         }
         ImGui::InputTextWithHint(
-            "##console_search", "Filter logs", view.search.data(),
+            "##console_search", i18n::tr("Filter logs"), view.search.data(),
             view.search.size());
         ImGui::PopItemWidth();
         ImGui::PopFont();
@@ -524,16 +525,16 @@ void draw_console(
     if (lines.empty()) {
         draw_empty_state(
             ImGui::GetWindowDrawList(), log_min, log_max,
-            running ? "Listening for process output..."
-                    : "No reconstruction output yet",
-            running ? "Live logs from the active job stream here"
-                    : "Run Align Photos or Train 3DGS to stream logs");
+            running ? i18n::tr("Listening for process output...")
+                    : i18n::tr("No reconstruction output yet"),
+            running ? i18n::tr("Live logs from the active job stream here")
+                    : i18n::tr("Run Align Photos or Train 3DGS to stream logs"));
         ImGui::Dummy(log_region);
     } else if (view.visible.empty()) {
         draw_empty_state(
             ImGui::GetWindowDrawList(), log_min, log_max,
-            "No matching log lines",
-            "Clear the filter or search to see all output");
+            i18n::tr("No matching log lines"),
+            i18n::tr("Clear the filter or search to see all output"));
         ImGui::Dummy(log_region);
     } else {
         ImGuiListClipper clipper;
@@ -552,9 +553,9 @@ void draw_console(
     if (ImGui::BeginPopupContextWindow("##console_ctx")) {
         if (view.selected >= 0 &&
             view.selected < static_cast<int>(lines.size()) &&
-            ImGui::MenuItem("Copy Line"))
+            ImGui::MenuItem(i18n::tr("Copy Line")))
             copy_text(format_line(lines[static_cast<std::size_t>(view.selected)]));
-        if (ImGui::MenuItem("Copy Visible", nullptr, false, !view.visible.empty())) {
+        if (ImGui::MenuItem(i18n::tr("Copy Visible"), nullptr, false, !view.visible.empty())) {
             std::string text;
             for (const int index : view.visible) {
                 text += format_line(lines[static_cast<std::size_t>(index)]);
@@ -563,7 +564,7 @@ void draw_console(
             copy_text(text);
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Clear Console", nullptr, false, counts.total > 0)) {
+        if (ImGui::MenuItem(i18n::tr("Clear Console"), nullptr, false, counts.total > 0)) {
             log.clear_display();
             view.selected = -1;
             view.seen_count = 0;

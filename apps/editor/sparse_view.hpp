@@ -208,6 +208,8 @@ bool camera_world_ray(
 // stored column-major), including model and fisheye coefficients.
 using SplatPreviewCamera = aetherscan::splat::Camera;
 
+const ViewPose* first_registered_view(const SparseScene& scene);
+
 SplatPreviewCamera make_preview_camera(
     const OrbitCamera& camera, std::uint32_t width, std::uint32_t height);
 

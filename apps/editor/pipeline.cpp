@@ -1,5 +1,6 @@
 #include "pipeline.hpp"
 
+#include "i18n.hpp"
 #include "io/video_frames.hpp"
 
 #include <algorithm>
@@ -364,33 +365,33 @@ const char* dataset_format_flag(const int index) {
 
 const char* job_name(const JobKind kind) {
     switch (kind) {
-        case JobKind::align: return "Alignment";
-        case JobKind::train: return "Training";
-        case JobKind::dense: return "Extract Mesh";
-        case JobKind::texture: return "Bake Texture";
-        case JobKind::export_sfm: return "SfM export";
-        case JobKind::none: return "Job";
+        case JobKind::align: return i18n::tr("Alignment");
+        case JobKind::train: return i18n::tr("Training");
+        case JobKind::dense: return i18n::tr("Extract Mesh");
+        case JobKind::texture: return i18n::tr("Bake Texture");
+        case JobKind::export_sfm: return i18n::tr("SfM export");
+        case JobKind::none: return i18n::tr("Job");
     }
-    return "Job";
+    return i18n::tr("Job");
 }
 
 const char* stage_name(const Stage stage) {
     switch (stage) {
-        case Stage::idle: return "Idle";
-        case Stage::features: return "Extracting features";
-        case Stage::matching: return "Matching views";
-        case Stage::tracks: return "Building tracks";
-        case Stage::mapping: return "Solving camera poses";
-        case Stage::exporting: return "Writing sparse scene";
-        case Stage::preparing: return "Preparing input";
-        case Stage::dense: return "MVS stereo";
-        case Stage::training: return "Training Gaussians";
-        case Stage::meshing: return "Extracting mesh";
-        case Stage::texturing: return "Baking texture";
-        case Stage::complete: return "Complete";
-        case Stage::failed: return "Failed";
+        case Stage::idle: return i18n::tr("Idle");
+        case Stage::features: return i18n::tr("Extracting features");
+        case Stage::matching: return i18n::tr("Matching views");
+        case Stage::tracks: return i18n::tr("Building tracks");
+        case Stage::mapping: return i18n::tr("Solving camera poses");
+        case Stage::exporting: return i18n::tr("Writing sparse scene");
+        case Stage::preparing: return i18n::tr("Preparing input");
+        case Stage::dense: return i18n::tr("MVS stereo");
+        case Stage::training: return i18n::tr("Training Gaussians");
+        case Stage::meshing: return i18n::tr("Extracting mesh");
+        case Stage::texturing: return i18n::tr("Baking texture");
+        case Stage::complete: return i18n::tr("Complete");
+        case Stage::failed: return i18n::tr("Failed");
     }
-    return "Idle";
+    return i18n::tr("Idle");
 }
 
 // ---------------------------------------------------------------------------

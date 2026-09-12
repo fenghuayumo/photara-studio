@@ -1,5 +1,6 @@
 #include "viewport_gizmo.hpp"
 
+#include "i18n.hpp"
 #include "theme.hpp"
 
 #include "imgui.h"
@@ -581,12 +582,14 @@ bool draw_region_handles(
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (active >= k_part_axis)
             ImGui::SetTooltip(
-                "Drag arrows to move the reconstruction region\n"
-                "Shift: fine  ·  Ctrl: snap");
+                "%s", i18n::tr(
+                    "Drag arrows to move the reconstruction region\n"
+                    "Shift: fine  ·  Ctrl: snap"));
         else
             ImGui::SetTooltip(
-                "Drag a face handle to resize the reconstruction region\n"
-                "Shift: fine  ·  Ctrl: snap");
+                "%s", i18n::tr(
+                    "Drag a face handle to resize the reconstruction region\n"
+                    "Shift: fine  ·  Ctrl: snap"));
     }
     return state.box.dragging || active >= 0;
 }
@@ -607,7 +610,7 @@ bool draw_viewport_gizmo(
     if (!captures) {
         captures = draw_axes_gizmo(camera, min, max);
         if (captures)
-            ImGui::SetTooltip("Click an axis to change camera view");
+            ImGui::SetTooltip("%s", i18n::tr("Click an axis to change camera view"));
     } else {
         draw_axes_gizmo(camera, min, max);
     }
