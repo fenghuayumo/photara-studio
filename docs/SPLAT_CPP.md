@@ -126,26 +126,24 @@ viewer/mesh-extraction 接入。
 
 稠密 MVS 输入默认从 fused cloud 均匀选取最多 500,000 个初始 Gaussian，可用
 `--splat-max-gaussians N` 修改，`0` 表示使用全部 dense points。稠密点云已经具有高采样密度，
-因此默认关闭动态致密化；显式选择 `--splat-strategy dense_adaptive` 时，训练器会小批量回收
-低 opacity 点，并把预算重新分配到高屏幕梯度/大投影贡献区域。稀疏 COLMAP 输入则启用原有
-动态 Gaussian 管理。训练结束还会保存
+因此关闭动态致密化。稀疏 COLMAP 输入默认使用 ADC-IGS 动态 Gaussian 管理。训练结束还会保存
 第一个、中间和最后相机的
 `*_splat_view_*.png`，并在日志记录 PSNR、MAE 和 alpha coverage。
 
 可直接跳过内部 SfM/MVS，加载 COLMAP 相机位姿和稀疏点云。稀疏输入默认 30,000 步
-（致密化约至 15k），稠密 MVS 仍默认 10,000 步：
+（ADC 致密化持续到 95% 进度），稠密 MVS 仍默认 10,000 步：
 
 ```powershell
 aetherscan --images D:\ScanVideo\ori_img\images `
   --colmap D:\ScanVideo\ori_img `
   --output out\scene.mvs `
-  --splat-strategy default `
+  --splat-strategy adc_igs `
   --splat-max-gaussians 500000 `
   --splat-densification-cap 4000000
 ```
 
 调试基础优化收敛时，可用 `--splat-densification=false` 固定 COLMAP 初始化的
-Gaussian 数量；此模式禁用 split、prune 和 opacity reset，只验证 RGB、mask loss、
+Gaussian 数量；此模式禁用 split 和 prune，只验证 RGB、mask loss、
 光栅化反向与 CUDA Adam 的参数优化。因为没有 prune，固定拓扑模式也会在整个训练中
 保留 `--splat-max-scale-fraction` 上限；启用致密化后不逐步硬夹 scale，而与 pygsplat
 一样由 refine 阶段按 `0.1 * scene_scale` 清理过大的 Gaussian。不能先夹到同一个
@@ -168,14 +166,12 @@ quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN sca
 `THIN_PRISM_FISHEYE` 仍会明确拒绝。全景无法去畸变。非针孔相机上会跳过
 depth-normal 与多视图 NCC/几何项，RGB+SSIM 仍照常训练。
 
-当前支持四种策略，前三种用于稀疏输入，`dense_adaptive` 专用于 MVS 稠密输入：
+CLI 暴露两个稀疏输入策略，默认 `adc_igs`：
 
 | `--splat-strategy` | 统计与增长 | 默认调度 |
 |---|---|---|
-| `default` | 平均屏幕梯度；小 Gaussian clone，大 Gaussian split；opacity reset | 500–15k，每 100 步 |
-| `adc_plus` | 最大 refine weight、实际 alpha 贡献可见度和屏幕半径；预算回收、ADC split/decay/noise | 全程每 200 步；15k 后停止额外增长，只回收低 opacity 点 |
-| `adc_igs` | ADC+ pruning + Gumbel Top-K + 投影优先级 + 最大轴二分 | 增长至 15k，裁剪至 25k，每 200 步 |
-| `dense_adaptive` | 每轮最多回收 1% 低贡献点（异常/越界点另行删除）、额外增长 0.5%，按最大 refine weight 和投影半径做表面切平面二分；不使用 ADC noise/decay | 1k–5k，每 500 步；1k 后冻结结构 Adam，仅继续 SH |
+| `adc_plus` | 最大 refine weight、实际 alpha 贡献可见度和屏幕半径；预算回收、ADC split/decay/noise | 全程每 200 步，95% 进度截止 |
+| `adc_igs` | 继承 ADC+ 剪枝与预算；增长候选排除已选中父点，并使用保持协方差的最大轴二分 | 与 ADC+ 相同，持续到 95% 进度 |
 
 所有策略均受 `--splat-densification-cap` 硬上限约束，新增/裁剪数量写入训练日志。
 ADC+ 的“可见”要求 Gaussian 通过 alpha/transmittance 测试并实际参与至少一个像素合成；
@@ -187,7 +183,7 @@ ADC+ 的“可见”要求 Gaussian 通过 alpha/transmittance 测试并实际�
 
 ```powershell
 aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
-  --dense --splat --splat-strategy dense_adaptive `
+  --dense --splat `
   --splat-max-gaussians 500000 --splat-densification-cap 600000
 ```
 
@@ -214,7 +210,7 @@ aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
 雾层；可通过 `--splat-max-scale-fraction` 显式调整。
 纯光度稠密输入可在前 1,000 步 warm-up 后冻结 mean/scale/quaternion/opacity Adam；启用
 depth-normal 几何目标时会自动取消该冻结，使第 7,000 步后的几何梯度能够继续更新结构参数。
-SH 颜色参数始终继续训练，`dense_adaptive` 的受限回收和切平面二分也仍可执行。
+SH 颜色参数始终继续训练。
 
 `D:\ScanVideo\ori_img` 的 76/76 个 sibling masks 已用 `transparent` 模式完成 preview MVS +
 500,000 Gaussian / 300 步真实回归：alpha loss 从 0.03934 降到第 200 步的 0.00223，三个

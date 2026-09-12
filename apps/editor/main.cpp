@@ -859,7 +859,7 @@ void apply_project_settings(
     app.settings.max_gaussians = settings.max_gaussians;
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
-    app.settings.strategy = settings.strategy;
+    app.settings.strategy = settings.strategy == 1 ? 1 : 2;
     app.settings.max_resolution = settings.max_resolution;
     app.settings.progressive_resolution = settings.progressive_resolution;
     app.settings.use_mask = settings.use_mask;
@@ -5793,8 +5793,11 @@ Action draw_inspector(App& app) {
         theme::caption("Densification strategy");
         ImGui::SetNextItemWidth(-1.F);
         const char* strategies[] = {
-            "Default", "ADC Plus", "ADC IGS", "Dense adaptive"};
-        ImGui::Combo("##strategy", &app.settings.strategy, strategies, 4);
+            "ADC Plus", "ADC IGS"};
+        int strategy_index = app.settings.strategy - 1;
+        if (strategy_index < 0 || strategy_index > 1) strategy_index = 1;
+        ImGui::Combo("##strategy", &strategy_index, strategies, 2);
+        app.settings.strategy = strategy_index + 1;
         theme::caption("Iterations");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputInt("##iterations", &app.settings.iterations, 1000, 5000);

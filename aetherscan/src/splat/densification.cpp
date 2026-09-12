@@ -116,15 +116,12 @@ SceneGeometry brush_scene_geometry_cuda(
 }
 
 StrategySchedule strategy_schedule(const TrainingOptions& options) {
-    const bool dense_adaptive = options.densification_strategy ==
-                                DensificationStrategy::dense_adaptive;
     const bool adc = is_adc_strategy(options.densification_strategy);
-    const unsigned preset_stop = dense_adaptive ? 5'000U
-        : adc ? options.iterations : 15'000U;
+    const unsigned preset_stop = adc ? options.iterations : 5'000U;
     return {
         options.refine_start_iter != 0
             ? options.refine_start_iter
-            : dense_adaptive ? 750U : adc ? 0U : 500U,
+            : adc ? 0U : 750U,
         std::min(
             options.refine_stop_iter != 0
                 ? options.refine_stop_iter
@@ -132,7 +129,7 @@ StrategySchedule strategy_schedule(const TrainingOptions& options) {
             options.iterations),
         options.refine_every != 0
             ? options.refine_every
-            : dense_adaptive ? 500U : adc ? 200U : 100U};
+            : adc ? 200U : 500U};
 }
 
 GaussianModel clone_model(const GaussianModel& model) {
@@ -166,17 +163,9 @@ bool is_refinement_iteration(
     if (iteration <= schedule.start || iteration >= schedule.stop ||
         schedule.every == 0 || iteration % schedule.every != 0)
         return false;
-    const bool brush_managed =
-        options.densification_strategy ==
-            DensificationStrategy::adc_plus ||
-        options.densification_strategy ==
-            DensificationStrategy::adc_igs ||
-        options.densification_strategy ==
-            DensificationStrategy::dense_adaptive;
-    return !brush_managed ||
-        static_cast<float>(iteration) /
-                std::max(1.F, static_cast<float>(options.iterations)) <=
-            0.95F;
+    return static_cast<float>(iteration) /
+           std::max(1.F, static_cast<float>(options.iterations)) <=
+        0.95F;
 }
 
 }  // namespace aetherscan::splat::densification
@@ -196,7 +185,6 @@ void apply_strategy_defaults(TrainingOptions& options) {
         // Match ADC+ growth budget; the strategy changes candidate allocation.
         options.grow_stop_iter = std::max(options.grow_stop_iter, options.iterations);
         break;
-    case DensificationStrategy::default_strategy:
     case DensificationStrategy::dense_adaptive:
         break;
     }

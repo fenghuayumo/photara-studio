@@ -13,7 +13,6 @@ enum class AlphaMode {
 };
 
 enum class DensificationStrategy {
-    default_strategy,
     adc_plus,
     adc_igs,
     dense_adaptive,
@@ -43,7 +42,7 @@ struct TrainingOptions {
     bool input_is_dense{true};
     bool enable_densification{true};
     DensificationStrategy densification_strategy{
-        DensificationStrategy::default_strategy};
+        DensificationStrategy::adc_igs};
     std::size_t densification_cap{10'000'000};
     unsigned refine_start_iter{0};  // 0 selects the strategy preset
     unsigned refine_stop_iter{0};   // 0 selects the strategy preset
@@ -54,7 +53,6 @@ struct TrainingOptions {
     // the candidate set, but should not expose duplicate threshold knobs.
     float densify_gradient_threshold{0.0025F};
     float densify_select_fraction{0.25F};
-    float densify_scale_threshold{0.01F};
     float densify_screen_threshold{0.5F};
     // Dense MVS points already cover the surface. Recycle only a small part of
     // the budget per refinement and grow more conservatively than sparse ADC.

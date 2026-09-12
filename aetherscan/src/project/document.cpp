@@ -120,6 +120,8 @@ Settings decode_settings(
     settings.iterations = reader.value<std::int32_t>();
     settings.preview_interval = reader.value<std::int32_t>();
     settings.strategy = reader.value<std::int32_t>();
+    if (settings.strategy != 1 && settings.strategy != 2)
+        settings.strategy = 2;
     settings.max_resolution = reader.value<std::int32_t>();
     settings.progressive_resolution = reader.value<std::uint8_t>() != 0;
     settings.use_mask = reader.value<std::uint8_t>() != 0;

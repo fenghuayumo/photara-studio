@@ -1136,8 +1136,7 @@ GaussianModel Trainer::train(
                 gradients.refine_weight, rendered.visibility, rendered.radii,
                 densification_stats, target.camera.width,
                 target.camera.height,
-                options_.densification_strategy !=
-                    DensificationStrategy::default_strategy,
+                true,
                 is_adc_strategy(options_.densification_strategy));
         cuda_profiler.mark(CudaTrainingStage::densification_stats);
 
@@ -1240,16 +1239,6 @@ GaussianModel Trainer::train(
                 adc_plus ? refinement_geometry.maximum_extent : scene_extent,
                 adc_plus ? refinement_geometry.center : scene_center,
                 options_, random, adam_states);
-            if (options_.densification_strategy ==
-                    DensificationStrategy::default_strategy &&
-                iteration < refine::strategy_schedule(options_).stop &&
-                options_.opacity_reset_every != 0 && iteration > 0 &&
-                iteration % options_.opacity_reset_every == 0) {
-                detail::reset_opacity(
-                    model, options_.prune_opacity * 2.F);
-                opacity_state = detail::make_adam_state(
-                    model.opacity_logits);
-            }
             detail::constrain_scale_ratio(
                 model.log_scales, options_.max_scale_ratio);
             refinement_happened =

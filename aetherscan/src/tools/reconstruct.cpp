@@ -171,7 +171,7 @@ struct ReconstructCli {
     float splat_max_scale_ratio{0.F};
     bool splat_max_scale_ratio_overridden{false};
     bool splat_constrain_scales{false};
-    std::string splat_strategy{"default"};
+    std::string splat_strategy{"adc_igs"};
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
     std::uint64_t splat_densification_cap{10'000'000};
@@ -372,8 +372,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-max-scale-ratio R  hard anisotropy clamp "
                  "(0 disables; ADC+ visual default 100)\n"
               << "  --splat-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
-              << "  --splat-strategy default|adc_plus|adc_igs|dense_adaptive\n"
-              << "  --splat-densification=BOOL  enable split/prune/reset (default true)\n"
+              << "  --splat-strategy adc_plus|adc_igs\n"
+              << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
@@ -740,9 +740,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0"))
         ("splat-constrain-scales", "Clamp sparse KNN scales to configured fractions",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("splat-strategy", "Densification: default, adc_plus, adc_igs, dense_adaptive",
-         cxxopts::value<std::string>()->default_value("default"))
-        ("splat-densification", "Enable splat split/prune/opacity-reset",
+        ("splat-strategy", "Densification: adc_plus, adc_igs",
+         cxxopts::value<std::string>()->default_value("adc_igs"))
+        ("splat-densification", "Enable splat split/prune",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
@@ -1369,13 +1369,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.splat_max_scale_ratio != 0.F && cli.splat_max_scale_ratio < 1.F)
         throw std::invalid_argument(
             "--splat-max-scale-ratio must be 0 or >= 1");
-    if (cli.splat_strategy != "default" &&
-        cli.splat_strategy != "adc_plus" &&
-        cli.splat_strategy != "adc_igs" &&
-        cli.splat_strategy != "dense_adaptive")
+    if (cli.splat_strategy != "adc_plus" &&
+        cli.splat_strategy != "adc_igs")
         throw std::invalid_argument(
-            "--splat-strategy must be default, adc_plus, adc_igs, or "
-            "dense_adaptive");
+            "--splat-strategy must be adc_plus or adc_igs");
     if (cli.splat_densification_cap == 0)
         throw std::invalid_argument(
             "--splat-densification-cap must be positive");
@@ -1726,8 +1723,7 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.preview_interval = static_cast<int>(cli.splat_preview_interval);
     if (cli.splat_strategy == "adc_plus") settings.strategy = 1;
     else if (cli.splat_strategy == "adc_igs") settings.strategy = 2;
-    else if (cli.splat_strategy == "dense_adaptive") settings.strategy = 3;
-    else settings.strategy = 0;
+    else settings.strategy = 2;
     settings.max_resolution = static_cast<int>(cli.splat_max_resolution);
     settings.progressive_resolution = cli.splat_progressive_resolution;
     settings.use_mask = cli.splat_use_mask;
@@ -2586,37 +2582,17 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     if (cli.splat_strategy == "adc_plus")
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::adc_plus;
-    else if (cli.splat_strategy == "adc_igs")
-        options.densification_strategy =
-            aetherscan::splat::DensificationStrategy::adc_igs;
-    else if (cli.splat_strategy == "dense_adaptive")
-        options.densification_strategy =
-            aetherscan::splat::DensificationStrategy::dense_adaptive;
     else
         options.densification_strategy =
-            aetherscan::splat::DensificationStrategy::default_strategy;
+            aetherscan::splat::DensificationStrategy::adc_igs;
     // Shared densification knobs may default to different values per
     // strategy; user-provided CLI overrides are applied afterwards and keep
     // winning.
     aetherscan::splat::apply_strategy_defaults(options);
-    const bool dense_adaptive = dense_input &&
-        options.densification_strategy ==
-            aetherscan::splat::DensificationStrategy::dense_adaptive;
-    if (!dense_input && options.densification_strategy ==
-            aetherscan::splat::DensificationStrategy::dense_adaptive)
-        throw std::invalid_argument(
-            "--splat-strategy dense_adaptive requires dense MVS input");
-    options.enable_densification =
-        cli.splat_densification && (!dense_input || dense_adaptive);
+    options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;
-    if (dense_adaptive) {
-        options.max_gaussians = options.max_gaussians == 0
-            ? options.densification_cap
-            : (std::min)(options.max_gaussians, options.densification_cap);
-    }
-    if (!dense_input &&
-        aetherscan::splat::is_adc_strategy(options.densification_strategy)) {
-        // brush-train optimizer defaults. The trainer also switches ADC+ to
+    if (!dense_input) {
+        // brush-train optimizer defaults. The trainer also switches ADC to
         // brush's 2-NN/identity/0.5-opacity sparse initialization.
         options.means_lr = 2e-5F;
         options.scales_lr = 5e-3F;
@@ -2638,11 +2614,6 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         options.sh_degree_interval = 0;
         options.progressive_resolution = false;
         options.background_noise_strength = 0.1F;
-    } else if (
-        !dense_input &&
-        options.densification_strategy !=
-            aetherscan::splat::DensificationStrategy::default_strategy) {
-        options.opacities_lr = 0.025F;
     }
     const std::size_t projected_mask_views =
         static_cast<std::size_t>(std::count_if(

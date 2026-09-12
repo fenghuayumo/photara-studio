@@ -253,7 +253,7 @@ struct ProjectSettings {
     int max_gaussians = 10'000'000;
     int sh_degree = 3;
     int preview_interval = 50;
-    int strategy = 1;  // default, adc_plus, adc_igs, dense_adaptive
+    int strategy = 2;  // 1=adc_plus, 2=adc_igs
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;

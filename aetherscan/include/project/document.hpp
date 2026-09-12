@@ -45,7 +45,9 @@ struct Settings {
     int max_gaussians = 10'000'000;
     int sh_degree = 3;
     int preview_interval = 50;
-    int strategy = 1;
+    // 1=adc_plus, 2=adc_igs. Legacy serialized values 0 (default) and
+    // 3 (dense_adaptive) are migrated to 2 when an old project is loaded.
+    int strategy = 2;
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;

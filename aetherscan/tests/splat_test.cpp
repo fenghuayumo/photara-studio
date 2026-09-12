@@ -2271,6 +2271,8 @@ void test_source_resolution_and_knn_initialization() {
     options.sh_degree = 0;
     options.initialize_scale_from_knn = true;
     options.constrain_scale_range = false;
+    options.densification_strategy =
+        splat::DensificationStrategy::dense_adaptive;
     const auto model = splat::initialize_from_dense_cloud(scene, options);
     const auto scales = model.log_scales.to_vector();
     const float expected_offset_scale = std::sqrt(5.F / 3.F);
@@ -2299,7 +2301,7 @@ void test_source_resolution_and_knn_initialization() {
             std::abs(brush_model.opacity_logits.to_vector()[0]) < 1e-6F,
         "ADC+ sparse initialization does not match brush");
     options.densification_strategy =
-        splat::DensificationStrategy::default_strategy;
+        splat::DensificationStrategy::dense_adaptive;
     options.constrain_scale_range = true;
     options.minimum_scale_fraction = 1e-4F;
     options.maximum_scale_fraction = 0.1F;
@@ -2953,13 +2955,12 @@ aetherscan::splat::detail::DensificationStats make_default_refine_stats() {
 aetherscan::splat::TrainingOptions make_default_refine_options() {
     aetherscan::splat::TrainingOptions options;
     options.densification_strategy =
-        aetherscan::splat::DensificationStrategy::default_strategy;
+        aetherscan::splat::DensificationStrategy::dense_adaptive;
     options.refine_start_iter = 1;
     options.refine_stop_iter = 200;
     options.refine_every = 100;
     options.prune_opacity = 0.1F;
     options.densify_gradient_threshold = 0.1F;
-    options.densify_scale_threshold = 0.01F;
     options.densification_cap = 100;
     return options;
 }
@@ -3024,49 +3025,6 @@ void test_opacity_progress_summary_matches_host() {
         threw = true;
     }
     require(threw, "mismatched opacity progress tensors were accepted");
-}
-
-void test_default_refine_ignores_unused_host_downloads() {
-    using namespace aetherscan::splat;
-    auto options = make_default_refine_options();
-    const std::vector<float> finite_sh(12, 0.25F);
-    const std::vector<float> nan_sh(
-        12, std::numeric_limits<float>::quiet_NaN());
-
-    auto finite = make_refine_harness(make_default_refine_model(finite_sh));
-    auto poisoned = make_refine_harness(make_default_refine_model(nan_sh));
-    auto finite_stats = make_default_refine_stats();
-    auto poisoned_stats = make_default_refine_stats();
-    std::mt19937 finite_random(42);
-    std::mt19937 poisoned_random(42);
-    const auto finite_result = densification::refine_gaussians(
-        finite.model, finite_stats, 100, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, finite_random, finite.states());
-    const auto poisoned_result = densification::refine_gaussians(
-        poisoned.model, poisoned_stats, 100, 1.F,
-        aetherscan::mvs::Vec3f::Zero(), options, poisoned_random,
-        poisoned.states());
-
-    require(
-        finite_result.pruned == 1 && finite_result.grown == 2 &&
-            finite.model.size() == 5,
-        "default refine did not prune the low-opacity row and clone/split");
-    require(
-        poisoned_result.pruned == finite_result.pruned &&
-            poisoned_result.grown == finite_result.grown &&
-            poisoned.model.size() == finite.model.size(),
-        "default refine used SH values that should stay on the device");
-    require_close(
-        poisoned.model.means.to_vector(), finite.model.means.to_vector(),
-        1e-5F, "default refine changed means when SH was NaN on device");
-    require_close(
-        poisoned.model.log_scales.to_vector(),
-        finite.model.log_scales.to_vector(), 1e-5F,
-        "default refine changed scales when SH was NaN on device");
-    require_close(
-        poisoned.model.opacity_logits.to_vector(),
-        finite.model.opacity_logits.to_vector(), 1e-5F,
-        "default refine changed opacity when SH was NaN on device");
 }
 
 void test_dense_adaptive_still_prunes_nonfinite_geometry() {
@@ -3238,6 +3196,10 @@ void test_adc_plus_split_matches_brush() {
 void test_densification_strategies_and_dense_bypass() {
     using namespace aetherscan;
     require(
+        splat::TrainingOptions{}.densification_strategy ==
+            splat::DensificationStrategy::adc_igs,
+        "ADC-IGS is no longer the default densification strategy");
+    require(
         splat::TrainingOptions{}.adam_epsilon == 1e-15F,
         "ADC+ Adam epsilon no longer matches Brush");
 
@@ -3305,7 +3267,6 @@ void test_densification_strategies_and_dense_bypass() {
     options.densify_select_fraction = 1.F;
     options.log_interval = 1;
     for (const auto strategy : {
-             splat::DensificationStrategy::default_strategy,
              splat::DensificationStrategy::adc_plus,
              splat::DensificationStrategy::adc_igs}) {
         options.densification_strategy = strategy;
@@ -3330,9 +3291,7 @@ void test_densification_strategies_and_dense_bypass() {
             model.size() > scene.dense_cloud.points.size(),
             strategy == splat::DensificationStrategy::adc_plus
                 ? "sparse-input ADC+ did not grow Gaussians"
-                : strategy == splat::DensificationStrategy::adc_igs
-                    ? "sparse-input ADC-IGS did not grow Gaussians"
-                    : "sparse-input default strategy did not grow Gaussians");
+                : "sparse-input ADC-IGS did not grow Gaussians");
         require(model.size() <= options.densification_cap,
                 "densification exceeded its hard Gaussian cap");
     }
@@ -3506,7 +3465,6 @@ int main(int argc, char** argv) {
         test_gggs_depth_normal_parameter_gradients();
         test_adc_plus_split_matches_brush();
         test_opacity_progress_summary_matches_host();
-        test_default_refine_ignores_unused_host_downloads();
         test_dense_adaptive_still_prunes_nonfinite_geometry();
         test_igs_growth_budget();
         test_densification_strategies_and_dense_bypass();

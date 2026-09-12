@@ -226,12 +226,8 @@ NB_MODULE(aetherscan_native, module) {
 
     nb::enum_<splat::DensificationStrategy>(
         module, "DensificationStrategy")
-        .value("DEFAULT", splat::DensificationStrategy::default_strategy)
         .value("ADC_PLUS", splat::DensificationStrategy::adc_plus)
         .value("ADC_IGS", splat::DensificationStrategy::adc_igs)
-        .value(
-            "DENSE_ADAPTIVE",
-            splat::DensificationStrategy::dense_adaptive);
 
     nb::class_<sfm::FrontEndOptions>(module, "FrontEndOptions")
         .def(nb::init<>())
@@ -490,9 +486,6 @@ NB_MODULE(aetherscan_native, module) {
         .def_rw(
             "densify_select_fraction",
             &splat::TrainingOptions::densify_select_fraction)
-        .def_rw(
-            "densify_scale_threshold",
-            &splat::TrainingOptions::densify_scale_threshold)
         .def_rw(
             "densify_screen_threshold",
             &splat::TrainingOptions::densify_screen_threshold)

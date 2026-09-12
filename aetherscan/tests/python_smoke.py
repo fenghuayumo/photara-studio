@@ -18,8 +18,13 @@ import aetherscan_native as aes
 mvs = aes.MvsOptions()
 assert mvs.mesh_tsdf_truncation_voxels == 4.0
 training = aes.TrainingOptions()
+assert (
+    training.densification_strategy == aes.DensificationStrategy.ADC_IGS
+)
 training.densification_strategy = aes.DensificationStrategy.ADC_PLUS
 assert training.densification_strategy == aes.DensificationStrategy.ADC_PLUS
+assert not hasattr(aes.DensificationStrategy, "DEFAULT")
+assert not hasattr(aes.DensificationStrategy, "DENSE_ADAPTIVE")
 assert callable(aes.run_sfm)
 assert callable(aes.run_mvs)
 assert callable(aes.train_3dgs)
