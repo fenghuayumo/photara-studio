@@ -144,7 +144,7 @@ public:
             const std::string name = csv_text(fields, header, "name");
             if (name.empty()) continue;
             const auto image_path = resolve_image(name, request, root);
-            const io::RgbImage image = io::load_rgb(image_path);
+            const io::ImageSize image = io::load_image_size(image_path);
             if (image.width == 0 || image.height == 0)
                 throw std::runtime_error(
                     "RealityCapture image has empty dimensions: " +

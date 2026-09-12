@@ -326,8 +326,26 @@ std::pair<float, float> source_coordinate(
         (static_cast<double>(y) - output_camera.cy) / output_camera.fy;
     const auto pixel = project_camera_plane(view.source_model, xn, yn,
         view.k1, view.k2, view.p1, view.p2);
-    return {static_cast<float>(view.src_fx * pixel.x + view.src_cx),
-            static_cast<float>(view.src_fy * pixel.y + view.src_cy)};
+    float source_x = static_cast<float>(
+        view.src_fx * pixel.x + view.src_cx);
+    float source_y = static_cast<float>(
+        view.src_fy * pixel.y + view.src_cy);
+    // JPEG DCT scaling can reduce the decoded source relative to the camera
+    // metadata. Distortion is evaluated in normalized coordinates, then the
+    // resulting metadata-space pixel is mapped into the decoded bitmap.
+    const std::uint32_t metadata_width =
+        view.src_width != 0 ? view.src_width : view.width;
+    const std::uint32_t metadata_height =
+        view.src_height != 0 ? view.src_height : view.height;
+    if (metadata_width != 0 && metadata_height != 0 &&
+        (source.width != metadata_width ||
+         source.height != metadata_height)) {
+        source_x = (source_x + 0.5F) *
+            static_cast<float>(source.width) / metadata_width - 0.5F;
+        source_y = (source_y + 0.5F) *
+            static_cast<float>(source.height) / metadata_height - 0.5F;
+    }
+    return {source_x, source_y};
 }
 std::filesystem::path find_mask_path(
     const std::filesystem::path& directory,
@@ -585,9 +603,10 @@ HostTrainingView load_host_training_view(
     if (view.width == 0 || view.height == 0)
         throw std::invalid_argument(
             "Cannot build a GGGS training view with empty dimensions");
-    const io::RgbImage source = io::load_rgb(view.path);
     Camera camera =
         training_data::training_camera(view, options, resolution_scale);
+    const io::RgbImage source = io::load_rgb_with_minimum_size(
+        view.path, camera.width, camera.height);
     const std::size_t pixels =
         static_cast<std::size_t>(camera.width) * camera.height;
     io::GrayImage source_mask;
@@ -769,6 +788,7 @@ struct TrainingDataLoader::Impl {
 
     TrainingView get(const std::size_t index) {
         ++requests_;
+        collect_ready_host_prefetches();
         const auto found = device_lookup_.find(index);
         if (found != device_lookup_.end()) {
             ++device_hits_;
@@ -798,8 +818,10 @@ struct TrainingDataLoader::Impl {
         if (index >= source_.size())
             throw std::out_of_range(
                 "GGGS training prefetch index is out of range");
-        if (options_.training_prefetch_views == 0 ||
-            device_lookup_.contains(index) ||
+        if (options_.training_prefetch_views == 0)
+            return;
+        collect_ready_host_prefetches();
+        if (device_lookup_.contains(index) ||
             device_prefetches_.contains(index)) {
             return;
         }
@@ -868,9 +890,21 @@ struct TrainingDataLoader::Impl {
     }
 
     bool has_mask(const std::size_t index) {
+        if (index >= source_.size())
+            throw std::out_of_range(
+                "GGGS training view index is out of range");
         const auto found = device_lookup_.find(index);
         if (found != device_lookup_.end()) return found->second->has_mask;
-        return host_view(index).has_mask;
+        if (const auto cached = cached_host_view(index))
+            return cached->has_mask;
+
+        const mvs::MvsView& view = source_[index];
+        if (view.foreground_mask.size() ==
+            static_cast<std::size_t>(view.width) * view.height)
+            return true;
+        if (!options_.use_mask) return false;
+        if (!resolve_mask_path(view, options_).empty()) return true;
+        return io::image_has_alpha(view.path);
     }
 
     void set_resolution_scale(const float scale) {
@@ -1107,6 +1141,14 @@ private:
             *loaded = load_host_training_view(
                 source_[index], options_, resolution_scale_);
         }
+        store_host_view(index, std::move(loaded));
+        return *entries_.front().view;
+    }
+
+    void store_host_view(
+        const std::size_t index,
+        std::shared_ptr<HostTrainingView> loaded) {
+        if (cached_host_view(index)) return;
         const std::size_t loaded_bytes = loaded->bytes();
         while (!entries_.empty() &&
                (capacity_bytes_ == 0 ||
@@ -1121,7 +1163,21 @@ private:
         entries_.push_front({index, loaded_bytes, std::move(loaded)});
         lookup_[index] = entries_.begin();
         cached_bytes_ += loaded_bytes;
-        return *entries_.front().view;
+    }
+
+    void collect_ready_host_prefetches() {
+        for (auto it = prefetches_.begin(); it != prefetches_.end();) {
+            if (it->second.wait_for(std::chrono::seconds{0}) !=
+                std::future_status::ready) {
+                ++it;
+                continue;
+            }
+            auto loaded = std::make_shared<HostTrainingView>(
+                it->second.get());
+            const std::size_t index = it->first;
+            it = prefetches_.erase(it);
+            store_host_view(index, std::move(loaded));
+        }
     }
 
     std::shared_ptr<HostTrainingView> cached_host_view(

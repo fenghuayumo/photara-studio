@@ -30,7 +30,8 @@ set(AETHERSCAN_ONNX_VERSION "1.20.1" CACHE STRING
     "ONNX Runtime release version used by FETCH_ONNX")
 set(AETHERSCAN_ONNXRUNTIME_ROOT "" CACHE PATH
     "Optional local ONNX Runtime SDK root (skips FetchContent when valid)")
-# OpenCV is intentionally not a dependency. Image IO uses FreeImage; SIFT uses
+# OpenCV is intentionally not a dependency. JPEG/PNG decoding uses libjpeg and
+# libpng directly; FreeImage remains the fallback for other formats; SIFT uses
 # vendored VLFeat; multi-view geometry uses Eigen.
 
 # Texture baking (aether_drender / UVAtlas / Vulkan) + optional Intrinsic delight.

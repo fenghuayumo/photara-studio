@@ -209,9 +209,12 @@ std::string lower_extension(const std::filesystem::path& path) {
 
 const char* strategy_flag(const int index) {
     switch (index) {
+        case 0: return "adc_igs";
         case 1: return "adc_plus";
-        // Migrate removed strategies to the current ADC-IGS default.
-        default: return "adc_igs";
+        case 2: return "dense_adaptive";
+        default:
+            throw std::invalid_argument(
+                "Editor splat strategy index is invalid");
     }
 }
 

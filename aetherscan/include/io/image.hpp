@@ -15,6 +15,8 @@ struct ImageSize {
 
 // Reads image dimensions without converting or copying its pixel buffer.
 ImageSize load_image_size(const std::filesystem::path& path);
+// Probes whether the file carries an alpha channel without decoding pixels.
+[[nodiscard]] bool image_has_alpha(const std::filesystem::path& path);
 // Optional EXIF lens description; empty when absent or unreadable.
 std::string load_lens_description(const std::filesystem::path& path);
 
@@ -28,7 +30,8 @@ struct GrayImage {
     }
 };
 
-// Loads any FreeImage-supported format as 8-bit grayscale, top-left origin.
+// Loads an image as 8-bit grayscale, top-left origin. JPEG/PNG use direct
+// codec paths; other supported formats fall back to FreeImage.
 GrayImage load_gray(const std::filesystem::path& path);
 
 // Returns an empty image when the source has no alpha channel/transparency.
@@ -41,6 +44,13 @@ struct RgbImage {
 };
 
 RgbImage load_rgb(const std::filesystem::path& path);
+// Decodes JPEG with the largest libjpeg DCT scale (1/2, 1/4, or 1/8) whose
+// output still covers minimum_width x minimum_height. Other formats use the
+// ordinary full-resolution RGB decoder.
+[[nodiscard]] RgbImage load_rgb_with_minimum_size(
+    const std::filesystem::path& path,
+    std::uint32_t minimum_width,
+    std::uint32_t minimum_height);
 
 // Writes 8-bit RGB PNG (top-left origin).
 void save_rgb_png(const RgbImage& image, const std::filesystem::path& path);

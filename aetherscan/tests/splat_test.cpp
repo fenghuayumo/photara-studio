@@ -11,9 +11,12 @@
 #include "io/image.hpp"
 #include "sfm/export_mvs.hpp"
 
+#include <FreeImage.h>
+
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -23,12 +26,66 @@
 #include <numbers>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace {
 
 void require(const bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+void save_rgb_jpeg_for_test(
+    const aetherscan::io::RgbImage& image,
+    const std::filesystem::path& path) {
+    FreeImage_Initialise(FALSE);
+    FIBITMAP* bitmap = FreeImage_Allocate(
+        static_cast<int>(image.width), static_cast<int>(image.height), 24);
+    if (bitmap == nullptr)
+        throw std::runtime_error("Failed to allocate test JPEG bitmap");
+    for (std::uint32_t y = 0; y < image.height; ++y) {
+        BYTE* row = FreeImage_GetScanLine(
+            bitmap, static_cast<int>(image.height - 1U - y));
+        const std::uint8_t* source = image.pixels.data() +
+            static_cast<std::size_t>(y) * image.width * 3U;
+        for (std::uint32_t x = 0; x < image.width; ++x) {
+            row[3 * x + FI_RGBA_RED] = source[3 * x + 0];
+            row[3 * x + FI_RGBA_GREEN] = source[3 * x + 1];
+            row[3 * x + FI_RGBA_BLUE] = source[3 * x + 2];
+        }
+    }
+    const bool saved = FreeImage_Save(
+        FIF_JPEG, bitmap, path.string().c_str(), 95);
+    FreeImage_Unload(bitmap);
+    FreeImage_DeInitialise();
+    if (!saved) throw std::runtime_error("Failed to save test JPEG");
+}
+
+void save_rgba_png_for_test(
+    const std::filesystem::path& path,
+    const std::vector<std::uint8_t>& rgba,
+    const std::uint32_t width, const std::uint32_t height) {
+    FreeImage_Initialise(FALSE);
+    FIBITMAP* bitmap = FreeImage_Allocate(
+        static_cast<int>(width), static_cast<int>(height), 32);
+    if (bitmap == nullptr)
+        throw std::runtime_error("Failed to allocate test RGBA bitmap");
+    for (std::uint32_t y = 0; y < height; ++y) {
+        BYTE* row = FreeImage_GetScanLine(
+            bitmap, static_cast<int>(height - 1U - y));
+        const std::uint8_t* source = rgba.data() +
+            static_cast<std::size_t>(y) * width * 4U;
+        for (std::uint32_t x = 0; x < width; ++x) {
+            row[4 * x + FI_RGBA_RED] = source[4 * x + 0];
+            row[4 * x + FI_RGBA_GREEN] = source[4 * x + 1];
+            row[4 * x + FI_RGBA_BLUE] = source[4 * x + 2];
+            row[4 * x + FI_RGBA_ALPHA] = source[4 * x + 3];
+        }
+    }
+    const bool saved = FreeImage_Save(FIF_PNG, bitmap, path.string().c_str(), 0);
+    FreeImage_Unload(bitmap);
+    FreeImage_DeInitialise();
+    if (!saved) throw std::runtime_error("Failed to save test RGBA PNG");
 }
 
 template <typename T>
@@ -1963,6 +2020,43 @@ void test_mask_loading() {
     const auto image_path = root / "frame.png";
     io::save_rgb_png(source, image_path);
     io::save_rgb_png(mask, masks / "frame.png");
+    const io::ImageSize image_size = io::load_image_size(image_path);
+    require(
+        image_size.width == 2 && image_size.height == 2,
+        "Header-only image probing lost the source dimensions");
+    require(
+        !io::image_has_alpha(image_path),
+        "Header-only alpha probing reported alpha on an RGB PNG");
+    const auto alpha_path = root / "alpha.png";
+    save_rgba_png_for_test(
+        alpha_path, {255, 0, 0, 10, 0, 255, 0, 128,
+                     0, 0, 255, 200, 255, 255, 255, 255},
+        2, 2);
+    const io::GrayImage alpha = io::load_alpha(alpha_path);
+    require(
+        io::image_has_alpha(alpha_path) &&
+            alpha.width == 2 && alpha.height == 2 &&
+            alpha.pixels == std::vector<std::uint8_t>({10, 128, 200, 255}),
+        "Direct PNG alpha decode did not preserve the alpha channel");
+    io::save_rgb_png(mask, masks / "metadata-only.png");
+    mvs::MvsView metadata_only;
+    metadata_only.path = root / "metadata-only.png";
+    metadata_only.width = metadata_only.src_width = 2;
+    metadata_only.height = metadata_only.src_height = 2;
+    metadata_only.fx = metadata_only.fy =
+        metadata_only.src_fx = metadata_only.src_fy = 1.F;
+    metadata_only.cx = metadata_only.cy =
+        metadata_only.src_cx = metadata_only.src_cy = 0.5F;
+    splat::TrainingOptions metadata_options;
+    metadata_options.use_mask = true;
+    metadata_options.mask_dir = masks;
+    metadata_options.training_prefetch_views = 0;
+    const std::vector<mvs::MvsView> metadata_sources{metadata_only};
+    splat::training_data::TrainingDataLoader metadata_cache(
+        metadata_sources, metadata_options);
+    require(
+        metadata_cache.has_mask(0),
+        "Mask validation decoded the source image instead of probing metadata");
     mvs::MvsView view;
     view.path = image_path;
     view.width = view.src_width = 2;
@@ -2000,6 +2094,66 @@ void test_mask_loading() {
             soft_values[1] == 0.F && soft_values[2] == 0.F &&
             soft_values[3] == 1.F,
         "GGGS discarded grayscale coverage from an aether_drender mesh mask");
+    std::filesystem::remove_all(root);
+}
+
+void test_jpeg_dct_scaled_training_view() {
+    using namespace aetherscan;
+    const auto root = std::filesystem::temp_directory_path() /
+                      "aetherscan_splat_jpeg_dct_test";
+    std::filesystem::create_directories(root);
+    constexpr std::uint8_t red = 34;
+    constexpr std::uint8_t green = 119;
+    constexpr std::uint8_t blue = 204;
+    io::RgbImage source;
+    source.width = 64;
+    source.height = 32;
+    source.pixels.reserve(64 * 32 * 3);
+    for (std::size_t pixel = 0; pixel < 64 * 32; ++pixel)
+        source.pixels.insert(
+            source.pixels.end(), {red, green, blue});
+    const auto path = root / "frame.jpg";
+    save_rgb_jpeg_for_test(source, path);
+
+    const auto eighth = io::load_rgb_with_minimum_size(path, 16, 8);
+    const auto quarter = io::load_rgb_with_minimum_size(path, 32, 16);
+    const auto full = io::load_rgb_with_minimum_size(path, 64, 32);
+    const io::GrayImage direct_gray = io::load_gray(path);
+    require(
+        eighth.width == 16 && eighth.height == 8 &&
+            quarter.width == 32 && quarter.height == 16 &&
+            full.width == 64 && full.height == 32 &&
+            direct_gray.width == 64 && direct_gray.height == 32 &&
+            direct_gray.pixels.size() == 64 * 32,
+        "JPEG DCT scale selection did not cover the requested dimensions");
+
+    mvs::MvsView view;
+    view.path = path;
+    view.width = view.src_width = 64;
+    view.height = view.src_height = 32;
+    view.source_model = CameraModel::pinhole;
+    view.fx = view.fy = view.src_fx = view.src_fy = 64.F;
+    view.cx = view.cy = view.src_cx = view.src_cy = 31.5F;
+    splat::TrainingOptions options;
+    options.max_image_dimension = 16;
+    const splat::TrainingView training =
+        splat::make_training_view(view, options);
+    const auto rgb = training.rgb.to_vector();
+    bool colors_match = true;
+    constexpr std::array<float, 3> expected{
+        red / 255.F, green / 255.F, blue / 255.F};
+    const std::size_t plane_size = rgb.size() / 3;
+    for (std::size_t channel = 0; channel < 3; ++channel)
+        for (std::size_t index = 0; index < plane_size; ++index)
+            colors_match = colors_match &&
+                std::abs(
+                    rgb[channel * plane_size + index] -
+                    expected[channel]) <= 2.F / 255.F;
+    require(
+        training.camera.width == 16 && training.camera.height == 8 &&
+            rgb.size() == 3 * 16 * 8 &&
+            colors_match,
+        "DCT-scaled JPEG training view changed source supervision");
     std::filesystem::remove_all(root);
 }
 
@@ -2101,6 +2255,15 @@ void test_training_device_cache() {
     options.training_view_cache_bytes = 64 * 1024;
     options.training_device_cache_bytes = 256 * (4 + 4 + 12);
     splat::training_data::TrainingDataLoader asynchronous(views, options);
+    asynchronous.prefetch(0);
+    for (int attempt = 0; attempt < 1000 &&
+         asynchronous.stats().device_prefetch_pending == 0; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        asynchronous.prefetch(0);
+    }
+    require(
+        asynchronous.stats().device_prefetch_pending == 1,
+        "Ready host prefetches were not promoted to CUDA prefetches");
     const auto async_first = asynchronous.get(0);
     const auto async_neighbour = asynchronous.get(1);
     asynchronous.prefetch(0);
@@ -2111,7 +2274,7 @@ void test_training_device_cache() {
             "asynchronous prefetch changed supervision");
     compare(async_neighbour, splat::make_training_view(views[1], options),
             "asynchronous neighbour changed supervision");
-    require(asynchronous.stats().device_prefetch_hits == 1 &&
+    require(asynchronous.stats().device_prefetch_hits == 2 &&
                     asynchronous.stats().device_prefetch_pending == 0 &&
                     asynchronous.stats().device_prefetch_bytes == 0 &&
                     asynchronous.stats().device_resident_bytes <=
@@ -3200,6 +3363,12 @@ void test_densification_strategies_and_dense_bypass() {
             splat::DensificationStrategy::adc_igs,
         "ADC-IGS is no longer the default densification strategy");
     require(
+        static_cast<int>(splat::DensificationStrategy::adc_igs) == 0 &&
+            static_cast<int>(splat::DensificationStrategy::adc_plus) == 1 &&
+            static_cast<int>(splat::DensificationStrategy::dense_adaptive) ==
+                2,
+        "Densification strategy indices no longer match the project encoding");
+    require(
         splat::TrainingOptions{}.adam_epsilon == 1e-15F,
         "ADC+ Adam epsilon no longer matches Brush");
 
@@ -3451,6 +3620,7 @@ int main(int argc, char** argv) {
         test_active_sh_prefix_adam();
         test_adam_warp_rows_and_reset();
         test_mask_loading();
+        test_jpeg_dct_scaled_training_view();
         test_training_device_cache();
         test_brush_quantile_selection();
         test_source_resolution_and_knn_initialization();

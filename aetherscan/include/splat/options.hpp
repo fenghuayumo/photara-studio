@@ -13,8 +13,8 @@ enum class AlphaMode {
 };
 
 enum class DensificationStrategy {
-    adc_plus,
     adc_igs,
+    adc_plus,
     dense_adaptive,
 };
 
@@ -199,8 +199,10 @@ struct TrainingOptions {
     // fixed mode retains the legacy free-VRAM/8 guard.
     std::size_t training_device_cache_bytes{std::size_t{512} * 1024 * 1024};
     // Decode upcoming shuffled views concurrently while CUDA processes the
-    // current iteration. Zero disables prefetching.
-    std::size_t training_prefetch_views{4};
+    // current iteration. This mirrors a bounded disk-prefetch pipeline: keep
+    // several views in flight rather than decoding each one on a cache miss.
+    // Zero disables prefetching.
+    std::size_t training_prefetch_views{8};
     // Hold out every Nth source view from optimization (0 trains on all).
     // The caller may render these views through the evaluation callback.
     unsigned evaluation_split_every{0};

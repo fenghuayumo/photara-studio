@@ -124,8 +124,22 @@ Adaptive mode is already the default:
 
 ```powershell
 --splat-cache-auto=true
---splat-prefetch-views 4
+--splat-prefetch-views 8
 ```
+
+The 2026-09-12 loader follow-up keeps dataset construction header-only and
+starts the first shuffled decode window during trainer initialization. Ready
+host decodes are promoted into the asynchronous CUDA copy stream, so the first
+pass no longer waits for mask validation to decode every source image.
+The same follow-up replaces the JPEG/PNG decode main path with direct libjpeg
+and libpng output into the owning RGB/gray/alpha buffers; FreeImage is only
+used for non-JPEG/PNG fallback formats and image writing. JPEG additionally
+uses DCT scaling. On the office dataset's 900 JPEGs, a single-threaded decode
+probe measured approximately
+31.4 s for full FreeImage decode, 16.9 s for full-resolution direct libjpeg,
+and 10.2 s for the 1/4-resolution DCT-scaled training input. The scaled path is
+therefore about 3.1x faster than the old FreeImage path in that sequential
+probe; parallel prefetch can overlap the remaining decode cost.
 
 Use fixed budgets for A/B performance experiments:
 

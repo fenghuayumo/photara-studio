@@ -341,7 +341,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
               << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
               << "  --splat-cache-auto BOOL  grow cache budgets safely for large datasets (default true)\n"
-              << "  --splat-prefetch-views N  concurrent host image prefetch count (default 4)\n"
+              << "  --splat-prefetch-views N  concurrent host image prefetch count (default 8)\n"
               << "  --splat-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --splat-sh-degree N  spherical-harmonic bands 0..3 (default 3)\n"
               << "  --splat-kernel-size V  screen covariance low-pass variance; "
@@ -1722,8 +1722,7 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.iterations = static_cast<int>(cli.splat_iterations);
     settings.preview_interval = static_cast<int>(cli.splat_preview_interval);
     if (cli.splat_strategy == "adc_plus") settings.strategy = 1;
-    else if (cli.splat_strategy == "adc_igs") settings.strategy = 2;
-    else settings.strategy = 2;
+    else settings.strategy = 0;
     settings.max_resolution = static_cast<int>(cli.splat_max_resolution);
     settings.progressive_resolution = cli.splat_progressive_resolution;
     settings.use_mask = cli.splat_use_mask;

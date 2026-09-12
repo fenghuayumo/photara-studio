@@ -708,6 +708,16 @@ GaussianModel Trainer::train(
                     "Splat subject-only training requires a matching mask "
                     "file or source alpha channel for every selected view");
     }
+    std::mt19937 random(options_.seed);
+    std::vector<std::size_t> shuffled_views = view_indices;
+    std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
+    std::size_t shuffled_view_cursor = 0;
+    const std::size_t initial_prefetch_end = std::min(
+        shuffled_views.size(),
+        shuffled_view_cursor + options_.training_prefetch_views + 1);
+    for (std::size_t cursor = shuffled_view_cursor;
+         cursor < initial_prefetch_end; ++cursor)
+        view_cache.prefetch(shuffled_views[cursor]);
 
     std::vector<Camera> all_cameras;
     all_cameras.reserve(scene.views.size());
@@ -815,10 +825,6 @@ GaussianModel Trainer::train(
     refine::RefinementCounts latest_refinement;
     Rasterizer rasterizer;
     CudaTrainingProfiler cuda_profiler(options_);
-    std::mt19937 random(options_.seed);
-    std::vector<std::size_t> shuffled_views = view_indices;
-    std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
-    std::size_t shuffled_view_cursor = 0;
     std::size_t last_preview_view = std::numeric_limits<std::size_t>::max();
     std::uint64_t last_preview_camera_revision =
         std::numeric_limits<std::uint64_t>::max();

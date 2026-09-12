@@ -65,6 +65,8 @@ set_target_properties(aetherscan_ba PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(AETHERSCAN_ENABLE_FEATURES)
     find_package(freeimage CONFIG REQUIRED)
+    find_package(JPEG REQUIRED)
+    find_package(PNG REQUIRED)
     find_package(Eigen3 CONFIG REQUIRED)
     find_package(PoseLib CONFIG REQUIRED)
     # Some Ceres/glog vcpkg exports retain gflags::gflags in their link
@@ -135,6 +137,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
     target_compile_features(aetherscan_features PUBLIC cxx_std_20)
     target_link_libraries(aetherscan_features PUBLIC
         freeimage::FreeImage
+        JPEG::JPEG
+        PNG::PNG
         Eigen3::Eigen
         hnswlib::hnswlib
         aetherscan_vlfeat)

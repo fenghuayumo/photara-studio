@@ -199,6 +199,7 @@ int main() {
     settings.video_scale = 0.5F;
     settings.video_rotate = 90;
     settings.camera_model = 2;
+    settings.strategy = 1;
     settings.max_gaussians = 2'500'000;
     settings.sh_degree = 2;
     settings.sfm_mode = 2;
@@ -246,6 +247,7 @@ int main() {
     expect(round_trip.video_scale == 0.5F, "video scale");
     expect(round_trip.video_rotate == 90, "video rotate");
     expect(round_trip.camera_model == 2, "settings camera model");
+    expect(round_trip.strategy == 1, "settings splat strategy");
     expect(round_trip.max_gaussians == 2'500'000, "settings max gaussians");
     expect(round_trip.sh_degree == 2, "settings SH degree");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
@@ -296,6 +298,19 @@ int main() {
     const Settings additive = decode_settings(settings_bytes, ascan_path);
     expect(additive.name == "demo", "settings ignore trailing fields");
     expect(additive.iterations == 1234, "settings prefix still loads");
+
+    {
+        Settings invalid = updated;
+        invalid.strategy = 3;
+        bool threw = false;
+        try {
+            (void)decode_settings(
+                encode_settings(invalid, ascan_path), ascan_path);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        expect(threw, "invalid splat strategy index is rejected");
+    }
 
     {
         auto future = settings_bytes;

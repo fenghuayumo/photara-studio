@@ -233,10 +233,17 @@ ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-fai
 - Adam 的一阶矩、二阶矩和参数更新使用单 kernel，SH0/SH-rest 在同一 launch 中使用不同学习率；
 - forward context 保留 geometry/binning/image/tile buffer，backward 不重复预处理。
 
-目前为了避免每步磁盘 IO，训练开始时会把全部训练图、mask，以及启用直接 MVS 监督时所需的
-MVS depth/normal 常驻 GPU。
-中小场景速度优先时合理；大场景需要改成 pinned-host 预取、有限 VRAM cache 和多 CUDA stream，
-否则显存会随视图数量线性增长。
+数据集加载和训练缓存按流水线处理：COLMAP/OpenMVS/RealityCapture 读入时只探测图片头，
+不为了记录分辨率解码像素；mask 预检只查看投影 mask、匹配路径或图片 alpha 元数据。
+训练开始前先为首个 shuffled 窗口启动 host 解码，让它与相机/Adam 初始化重叠。训练中
+图片解码可并行执行，默认向前预取 8 个 view；已完成的 host 视图会被提升为
+pinned-host H2D CUDA 预取，再进入有限的 host/device LRU，而不是在首个 epoch 每个
+cache miss 都同步解码并上传。
+JPEG/PNG 主路径分别直连 libjpeg/libpng，并直接写入最终 RGB/gray/alpha buffer；
+FreeImage 只作为 TIFF/BMP 等其他格式和编码路径的 fallback。JPEG 训练视图根据目标
+相机尺寸选择 1/2、1/4 或 1/8 DCT scale，避免 progressive-resolution 前半程先解码
+完整原图再缩小。DCT 输出仍覆盖目标尺寸，剩余比例差由原有 bilinear source sampling
+完成；畸变视角先将归一化射线投影到原始相机，再把像素坐标映射到 DCT-scaled bitmap。
 
 ### `Rasterizer::sample_depth` Nsight Compute 分析（2026-07-31）
 

@@ -294,7 +294,7 @@ public:
             const auto& camera = platform.cameras[image.camera_id];
             const auto& pose = platform.poses[image.pose_id];
             const auto path = resolve_image(image.name, request, root);
-            const io::RgbImage decoded = io::load_rgb(path);
+            const io::ImageSize decoded = io::load_image_size(path);
             const double source_scale = camera.width != 0 && camera.height != 0
                 ? std::max(camera.width, camera.height)
                 : 1.0;

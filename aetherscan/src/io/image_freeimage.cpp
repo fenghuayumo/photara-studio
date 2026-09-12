@@ -5,9 +5,14 @@
 #endif
 
 #include <FreeImage.h>
+#include <jpeglib.h>
+#include <png.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <csetjmp>
+#include <fstream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -28,6 +33,281 @@ std::mutex& freeimage_mutex() {
 void ensure_freeimage() {
     static FreeImageRuntime runtime;
     (void)runtime;
+}
+
+bool has_jpeg_signature(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    std::array<char, 2> signature{};
+    return stream.read(signature.data(), signature.size()) &&
+           signature[0] == '\xff' && signature[1] == '\xd8';
+}
+
+bool has_png_signature(const std::filesystem::path& path) {
+    static constexpr std::array<unsigned char, 8> signature{
+        0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    std::ifstream stream(path, std::ios::binary);
+    std::array<unsigned char, 8> actual{};
+    return stream.read(
+               reinterpret_cast<char*>(actual.data()), actual.size()) &&
+           actual == signature;
+}
+
+enum class DirectImageFormat {
+    jpeg,
+    png,
+    other,
+};
+
+DirectImageFormat direct_image_format(const std::filesystem::path& path) {
+    if (has_jpeg_signature(path)) return DirectImageFormat::jpeg;
+    if (has_png_signature(path)) return DirectImageFormat::png;
+    return DirectImageFormat::other;
+}
+
+std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream)
+        throw std::runtime_error("Failed to open image: " + path.string());
+    const std::streampos end = stream.tellg();
+    if (end < 0)
+        throw std::runtime_error(
+            "Failed to determine image size: " + path.string());
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
+    stream.seekg(0);
+    if (!bytes.empty() &&
+        !stream.read(reinterpret_cast<char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size())))
+        throw std::runtime_error("Failed to read image: " + path.string());
+    return bytes;
+}
+
+struct JpegErrorManager {
+    jpeg_error_mgr public_error{};
+    jmp_buf jump{};
+    char message[JMSG_LENGTH_MAX]{};
+};
+
+void jpeg_error_exit(j_common_ptr context) {
+    auto* error = reinterpret_cast<JpegErrorManager*>(context->err);
+    (*context->err->format_message)(context, error->message);
+    std::longjmp(error->jump, 1);
+}
+
+std::uint32_t largest_safe_jpeg_denominator(
+    const jpeg_decompress_struct& context,
+    const std::uint32_t minimum_width,
+    const std::uint32_t minimum_height) {
+    for (const std::uint32_t denominator : {8U, 4U, 2U}) {
+        if (context.image_width / denominator >= minimum_width &&
+            context.image_height / denominator >= minimum_height)
+            return denominator;
+    }
+    return 1U;
+}
+
+[[noreturn]] void throw_jpeg_error(
+    const JpegErrorManager& error, const std::string& action) {
+    throw std::runtime_error(action + ": " + error.message);
+}
+
+RgbImage decode_jpeg_rgb(
+    const std::vector<std::uint8_t>& file,
+    const std::uint32_t minimum_width, const std::uint32_t minimum_height) {
+    jpeg_decompress_struct context{};
+    JpegErrorManager error;
+    context.err = jpeg_std_error(&error.public_error);
+    error.public_error.error_exit = jpeg_error_exit;
+
+    if (setjmp(error.jump) != 0) {
+        jpeg_destroy_decompress(&context);
+        throw_jpeg_error(error, "JPEG decode failed");
+    }
+
+    jpeg_create_decompress(&context);
+    jpeg_mem_src(
+        &context, const_cast<unsigned char*>(file.data()),
+        static_cast<unsigned long>(file.size()));
+    jpeg_read_header(&context, TRUE);
+    context.scale_num = 1;
+    context.scale_denom = largest_safe_jpeg_denominator(
+        context, std::max(minimum_width, 1U),
+        std::max(minimum_height, 1U));
+    context.out_color_space = JCS_RGB;
+    jpeg_start_decompress(&context);
+
+    if (context.output_components != 3)
+        throw std::runtime_error("JPEG decoder did not produce RGB output");
+
+    RgbImage image;
+    image.width = static_cast<std::uint32_t>(context.output_width);
+    image.height = static_cast<std::uint32_t>(context.output_height);
+    image.pixels.resize(
+        static_cast<std::size_t>(image.width) * image.height * 3U);
+    while (context.output_scanline < context.output_height) {
+        auto* row = image.pixels.data() +
+            static_cast<std::size_t>(context.output_scanline) *
+                image.width * 3U;
+        JSAMPROW rows[] = {row};
+        jpeg_read_scanlines(&context, rows, 1);
+    }
+    jpeg_finish_decompress(&context);
+    jpeg_destroy_decompress(&context);
+    return image;
+}
+
+GrayImage decode_jpeg_gray(const std::vector<std::uint8_t>& file) {
+    jpeg_decompress_struct context{};
+    JpegErrorManager error;
+    context.err = jpeg_std_error(&error.public_error);
+    error.public_error.error_exit = jpeg_error_exit;
+
+    if (setjmp(error.jump) != 0) {
+        jpeg_destroy_decompress(&context);
+        throw_jpeg_error(error, "JPEG grayscale decode failed");
+    }
+
+    jpeg_create_decompress(&context);
+    jpeg_mem_src(
+        &context, const_cast<unsigned char*>(file.data()),
+        static_cast<unsigned long>(file.size()));
+    jpeg_read_header(&context, TRUE);
+    context.scale_num = 1;
+    context.scale_denom = 1;
+    context.out_color_space = JCS_GRAYSCALE;
+    jpeg_start_decompress(&context);
+    if (context.output_components != 1)
+        throw std::runtime_error("JPEG decoder did not produce grayscale");
+
+    GrayImage image;
+    image.width = static_cast<std::uint32_t>(context.output_width);
+    image.height = static_cast<std::uint32_t>(context.output_height);
+    image.pixels.resize(
+        static_cast<std::size_t>(image.width) * image.height);
+    while (context.output_scanline < context.output_height) {
+        auto* row = image.pixels.data() +
+            static_cast<std::size_t>(context.output_scanline) * image.width;
+        JSAMPROW rows[] = {row};
+        jpeg_read_scanlines(&context, rows, 1);
+    }
+    jpeg_finish_decompress(&context);
+    jpeg_destroy_decompress(&context);
+    return image;
+}
+
+ImageSize jpeg_image_size(const std::vector<std::uint8_t>& file) {
+    jpeg_decompress_struct context{};
+    JpegErrorManager error;
+    context.err = jpeg_std_error(&error.public_error);
+    error.public_error.error_exit = jpeg_error_exit;
+
+    if (setjmp(error.jump) != 0) {
+        jpeg_destroy_decompress(&context);
+        throw_jpeg_error(error, "JPEG header probe failed");
+    }
+
+    jpeg_create_decompress(&context);
+    jpeg_mem_src(
+        &context, const_cast<unsigned char*>(file.data()),
+        static_cast<unsigned long>(file.size()));
+    jpeg_read_header(&context, TRUE);
+    const ImageSize size{
+        static_cast<std::uint32_t>(context.image_width),
+        static_cast<std::uint32_t>(context.image_height)};
+    jpeg_destroy_decompress(&context);
+    if (size.width == 0 || size.height == 0)
+        throw std::runtime_error("Empty JPEG image");
+    return size;
+}
+
+class PngImage {
+public:
+    PngImage() noexcept { image_.version = PNG_IMAGE_VERSION; }
+    ~PngImage() { png_image_free(&image_); }
+
+    png_image& get() noexcept { return image_; }
+    [[nodiscard]] const png_image& get() const noexcept { return image_; }
+
+    [[noreturn]] static void fail(
+        const png_image& image, const std::string& action) {
+        std::string message = image.message[0] != '\0'
+            ? image.message
+            : "unknown libpng error";
+        throw std::runtime_error(action + ": " + message);
+    }
+
+private:
+    png_image image_{};
+};
+
+void begin_png_read(
+    PngImage& image, const std::vector<std::uint8_t>& file) {
+    if (png_image_begin_read_from_memory(
+            &image.get(), file.data(), file.size()) == 0)
+        PngImage::fail(image.get(), "PNG header decode failed");
+}
+
+void finish_png_read(
+    PngImage& image, std::vector<std::uint8_t>& pixels) {
+    pixels.resize(PNG_IMAGE_SIZE(image.get()));
+    if (png_image_finish_read(
+            &image.get(), nullptr, pixels.data(), 0, nullptr) == 0)
+        PngImage::fail(image.get(), "PNG decode failed");
+}
+
+ImageSize png_image_size(const std::vector<std::uint8_t>& file) {
+    PngImage image;
+    begin_png_read(image, file);
+    const ImageSize size{
+        static_cast<std::uint32_t>(image.get().width),
+        static_cast<std::uint32_t>(image.get().height)};
+    if (size.width == 0 || size.height == 0)
+        throw std::runtime_error("Empty PNG image");
+    return size;
+}
+
+bool png_has_alpha(const std::vector<std::uint8_t>& file) {
+    PngImage image;
+    begin_png_read(image, file);
+    return (image.get().format & PNG_FORMAT_FLAG_ALPHA) != 0;
+}
+
+RgbImage decode_png_rgb(const std::vector<std::uint8_t>& file) {
+    PngImage image;
+    begin_png_read(image, file);
+    image.get().format = PNG_FORMAT_RGB;
+    RgbImage result;
+    result.width = static_cast<std::uint32_t>(image.get().width);
+    result.height = static_cast<std::uint32_t>(image.get().height);
+    finish_png_read(image, result.pixels);
+    return result;
+}
+
+GrayImage decode_png_gray(const std::vector<std::uint8_t>& file) {
+    PngImage image;
+    begin_png_read(image, file);
+    image.get().format = PNG_FORMAT_GRAY;
+    GrayImage result;
+    result.width = static_cast<std::uint32_t>(image.get().width);
+    result.height = static_cast<std::uint32_t>(image.get().height);
+    finish_png_read(image, result.pixels);
+    return result;
+}
+
+GrayImage decode_png_alpha(const std::vector<std::uint8_t>& file) {
+    PngImage image;
+    begin_png_read(image, file);
+    if ((image.get().format & PNG_FORMAT_FLAG_ALPHA) == 0) return {};
+    image.get().format = PNG_FORMAT_RGBA;
+    GrayImage result;
+    result.width = static_cast<std::uint32_t>(image.get().width);
+    result.height = static_cast<std::uint32_t>(image.get().height);
+    finish_png_read(image, result.pixels);
+    const std::size_t pixels = static_cast<std::size_t>(result.width) *
+        result.height;
+    for (std::size_t pixel = 0; pixel < pixels; ++pixel)
+        result.pixels[pixel] = result.pixels[4 * pixel + 3];
+    result.pixels.resize(pixels);
+    return result;
 }
 
 FREE_IMAGE_FORMAT detect_format(const std::filesystem::path& path) {
@@ -88,10 +368,18 @@ std::string load_lens_description(const std::filesystem::path& path) {
 }
 
 ImageSize load_image_size(const std::filesystem::path& path) {
-    std::lock_guard lock(freeimage_mutex());
+    const DirectImageFormat direct_format = direct_image_format(path);
+    if (direct_format == DirectImageFormat::jpeg)
+        return jpeg_image_size(read_file_bytes(path));
+    if (direct_format == DirectImageFormat::png)
+        return png_image_size(read_file_bytes(path));
+
     ensure_freeimage();
     const auto format = detect_format(path);
-    FIBITMAP* loaded = FreeImage_Load(format, path.string().c_str(), 0);
+    FIBITMAP* loaded = FreeImage_Load(
+        format, path.string().c_str(), FIF_LOAD_NOPIXELS);
+    if (!loaded)
+        loaded = FreeImage_Load(format, path.string().c_str(), 0);
     if (!loaded)
         throw std::runtime_error("Failed to load image: " + path.string());
     const ImageSize size{
@@ -102,8 +390,33 @@ ImageSize load_image_size(const std::filesystem::path& path) {
     return size;
 }
 
+bool image_has_alpha(const std::filesystem::path& path) {
+    const DirectImageFormat direct_format = direct_image_format(path);
+    if (direct_format == DirectImageFormat::jpeg) return false;
+    if (direct_format == DirectImageFormat::png)
+        return png_has_alpha(read_file_bytes(path));
+
+    ensure_freeimage();
+    const auto format = detect_format(path);
+    FIBITMAP* loaded = FreeImage_Load(
+        format, path.string().c_str(), FIF_LOAD_NOPIXELS);
+    if (!loaded)
+        loaded = FreeImage_Load(format, path.string().c_str(), 0);
+    if (!loaded)
+        throw std::runtime_error("Failed to load image: " + path.string());
+    const bool has_alpha = FreeImage_GetBPP(loaded) == 32 ||
+                           FreeImage_IsTransparent(loaded);
+    FreeImage_Unload(loaded);
+    return has_alpha;
+}
+
 GrayImage load_gray(const std::filesystem::path& path) {
-    std::lock_guard lock(freeimage_mutex());
+    const DirectImageFormat direct_format = direct_image_format(path);
+    if (direct_format == DirectImageFormat::jpeg)
+        return decode_jpeg_gray(read_file_bytes(path));
+    if (direct_format == DirectImageFormat::png)
+        return decode_png_gray(read_file_bytes(path));
+
     ensure_freeimage();
     const auto format = detect_format(path);
     FIBITMAP* loaded = FreeImage_Load(format, path.string().c_str(), 0);
@@ -124,7 +437,11 @@ GrayImage load_gray(const std::filesystem::path& path) {
 }
 
 GrayImage load_alpha(const std::filesystem::path& path) {
-    std::lock_guard lock(freeimage_mutex());
+    const DirectImageFormat direct_format = direct_image_format(path);
+    if (direct_format == DirectImageFormat::jpeg) return {};
+    if (direct_format == DirectImageFormat::png)
+        return decode_png_alpha(read_file_bytes(path));
+
     ensure_freeimage();
     const auto format = detect_format(path);
     FIBITMAP* loaded = FreeImage_Load(format, path.string().c_str(), 0);
@@ -154,7 +471,12 @@ GrayImage load_alpha(const std::filesystem::path& path) {
 }
 
 RgbImage load_rgb(const std::filesystem::path& path) {
-    std::lock_guard lock(freeimage_mutex());
+    const DirectImageFormat direct_format = direct_image_format(path);
+    if (direct_format == DirectImageFormat::jpeg)
+        return decode_jpeg_rgb(read_file_bytes(path), 1U, 1U);
+    if (direct_format == DirectImageFormat::png)
+        return decode_png_rgb(read_file_bytes(path));
+
     ensure_freeimage();
     const auto format = detect_format(path);
     FIBITMAP* loaded = FreeImage_Load(format, path.string().c_str(), 0);
@@ -172,6 +494,16 @@ RgbImage load_rgb(const std::filesystem::path& path) {
     copy_top_left(rgb, image.pixels, image.width, image.height, 3);
     FreeImage_Unload(rgb);
     return image;
+}
+
+RgbImage load_rgb_with_minimum_size(
+    const std::filesystem::path& path, const std::uint32_t minimum_width,
+    const std::uint32_t minimum_height) {
+    if (direct_image_format(path) != DirectImageFormat::jpeg)
+        return load_rgb(path);
+
+    const std::vector<std::uint8_t> file = read_file_bytes(path);
+    return decode_jpeg_rgb(file, minimum_width, minimum_height);
 }
 
 void save_rgb_png(const RgbImage& image, const std::filesystem::path& path) {
