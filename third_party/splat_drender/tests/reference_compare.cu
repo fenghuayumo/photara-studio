@@ -9,6 +9,9 @@
 #include <vector>
 #include <stdexcept>
 #include <fstream>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
 
 void check(cudaError_t e) { if(e!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(e)); }
 struct Arena {
@@ -38,7 +41,9 @@ void compare(const char* name,const float* a,const float* b,int n) {
 int main(int argc,char** argv) {
     const bool captured=argc>2;
     const bool geometry_arg=argc>1 && std::string(argv[1])=="geometry";
-    const int N=captured?22229:512,W=captured?640:64,H=captured?360:48,P=W*H;
+    const int N=captured?int(std::filesystem::file_size(std::string(argv[2])+".inputmeans")/(3*sizeof(float))):512;
+    const int W=argc>3?std::stoi(argv[3]):(captured?640:64);
+    const int H=argc>4?std::stoi(argv[4]):(captured?360:48),P=W*H;
     const bool geometry=geometry_arg;
     Arena a;
     auto means=a.get(3*N),scales=a.get(3*N),rot=a.get(4*N),opa=a.get(N),sh=a.get(48*N);
@@ -74,15 +79,18 @@ int main(int argc,char** argv) {
         grad[k]={a.get(3*N),a.get(48*N),a.get(3*N),a.get(N),a.get(3*N),a.get(4*N),a.get(6*N),a.get(N)};
     }
     Pool pool[10];auto cb=[&](int i){return [&,i](size_t n){return pool[i](n);};};
-    int instances=CudaRasterizer::Rasterizer::forward(cb(0),cb(1),cb(2),cb(3),N,3,16,0,0,bg,W,H,
+    auto reference_forward = [&]() { return CudaRasterizer::Rasterizer::forward(cb(0),cb(1),cb(2),cb(3),N,3,16,0,0,bg,W,H,
         means,nullptr,opa,scales,rot,nullptr,sh,nullptr,nullptr,nullptr,1,view,center,intrinsics[0],intrinsics[1],intrinsics[2],intrinsics[3],0,false,
-        out[0].color,out[0].median_depth,out[0].alpha,out[0].normal,out[0].visibility,out[0].radii,geometry);
+        out[0].color,out[0].median_depth,out[0].alpha,out[0].normal,out[0].visibility,out[0].radii,geometry); };
+    int instances=reference_forward();
     auto zero_scratch=[&](size_t n){auto p=pool[4](n);check(cudaMemset(p,0,n));return p;};
-    CudaRasterizer::Rasterizer::backward(zero_scratch,N,3,16,0,0,instances,bg,W,H,
+    ref_m2d=a.get(3*N);
+    auto reference_backward = [&]() { CudaRasterizer::Rasterizer::backward(zero_scratch,N,3,16,0,0,instances,bg,W,H,
         means,nullptr,opa,scales,rot,nullptr,sh,nullptr,nullptr,nullptr,1,view,center,intrinsics[0],intrinsics[1],intrinsics[2],intrinsics[3],0,
         out[0].radii,out[0].alpha,out[0].normal,out[0].median_depth,pool[0].p,pool[1].p,pool[2].p,pool[3].p,
-        gc,gd,ga,gn,grad[0].means,ref_m2d=a.get(3*N),grad[0].colors,grad[0].opacities,grad[0].scales,grad[0].rotations,
-        grad[0].covariances,grad[0].sh,nullptr,nullptr,nullptr,grad[0].refine_weight,geometry);
+        gc,gd,ga,gn,grad[0].means,ref_m2d,grad[0].colors,grad[0].opacities,grad[0].scales,grad[0].rotations,
+        grad[0].covariances,grad[0].sh,nullptr,nullptr,nullptr,grad[0].refine_weight,geometry); };
+    reference_backward();
     check(cudaDeviceSynchronize());
     splat_drender::WorkspacePools pools{cb(5),cb(6),cb(7),cb(8),cb(9),{}};
     splat_drender::Gaussians g{N,means,sh,nullptr,opa,scales,rot,nullptr,3,16};
@@ -91,9 +99,11 @@ int main(int argc,char** argv) {
     camera.fx=intrinsics[0];camera.fy=intrinsics[1];camera.cx=intrinsics[2];camera.cy=intrinsics[3];
     splat_drender::RenderSettings settings;settings.need_depth=geometry;
     std::copy(bg,bg+3,settings.background);
-    auto f=splat_drender::Rasterizer::forward(pools,g,camera,settings,out[1]);
-    splat_drender::Rasterizer::backward(pools,g,camera,settings,f,
-        {out[1].alpha,out[1].median_depth,out[1].normal,out[1].radii},{gc,ga,gd,gn},grad[1]);
+    auto new_forward = [&]() { return splat_drender::Rasterizer::forward(pools,g,camera,settings,out[1]); };
+    auto f=new_forward();
+    auto new_backward = [&]() { splat_drender::Rasterizer::backward(pools,g,camera,settings,f,
+        {out[1].alpha,out[1].median_depth,out[1].normal,out[1].radii},{gc,ga,gd,gn},grad[1]); };
+    new_backward();
     check(cudaDeviceSynchronize());
     printf("instances ref=%d new=%d geometry=%d\n",instances,f.instance_count,geometry);
     if(geometry){
@@ -117,4 +127,28 @@ int main(int argc,char** argv) {
     compare("mean",grad[0].means,grad[1].means,3*N);compare("scale",grad[0].scales,grad[1].scales,3*N);
     compare("rotation",grad[0].rotations,grad[1].rotations,4*N);compare("opacity",grad[0].opacities,grad[1].opacities,N);
     compare("sh",grad[0].sh,grad[1].sh,48*N);compare("refine",grad[0].refine_weight,grad[1].refine_weight,N);
+    // Timings follow correctness reads; warm-up restores managed-memory residency.
+    if (const char* value=std::getenv("SPLAT_BENCH_ITERS")) {
+        const int iterations=std::max(1,std::atoi(value));
+        auto benchmark=[&](const char* label,auto operation) {
+            for(int i=0;i<10;++i) operation();
+            check(cudaDeviceSynchronize());
+            cudaEvent_t begin,end;check(cudaEventCreate(&begin));check(cudaEventCreate(&end));
+            auto start=std::chrono::steady_clock::now();
+            check(cudaEventRecord(begin));
+            for(int i=0;i<iterations;++i) operation();
+            check(cudaEventRecord(end));check(cudaEventSynchronize(end));
+            const double wall=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+            float elapsed;check(cudaEventElapsedTime(&elapsed,begin,end));
+            printf("BENCH %s iterations=%d event_ms=%.6f wall_ms=%.6f\n",label,iterations,elapsed/iterations,wall/iterations);
+            check(cudaEventDestroy(begin));check(cudaEventDestroy(end));
+        };
+        benchmark("reference_forward",[&]{instances=reference_forward();});
+        benchmark("new_forward",[&]{f=new_forward();});
+        benchmark("reference_backward",reference_backward);
+        benchmark("new_backward",new_backward);
+        benchmark("reference_pair",[&]{instances=reference_forward();reference_backward();});
+        benchmark("new_pair",[&]{f=new_forward();new_backward();});
+    }
+
 }

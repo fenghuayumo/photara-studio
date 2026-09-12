@@ -17,6 +17,7 @@ namespace {
 
 using ws::GaussianState;
 using ws::GradState;
+using ws::bucket_upper_bound;
 using ws::InstanceState;
 using ws::PixelState;
 using ws::TileState;
@@ -66,6 +67,19 @@ std::size_t sort_scratch_bytes(int n) {
     return bytes;
 }
 
+std::size_t instance_sort_bytes(int visible, int instances) {
+    if (!InstanceState::single_sort(instances))
+        return std::max(sort_scratch_bytes(visible), sort_scratch_bytes(instances));
+    std::size_t bytes = 0;
+    if (instances > 0) {
+        cub::DoubleBuffer<unsigned long long> keys(nullptr, nullptr);
+        cub::DoubleBuffer<unsigned> values(nullptr, nullptr);
+        check_cuda(cub::DeviceRadixSort::SortPairs(nullptr, bytes, keys, values, instances),
+                   "packed sort size query");
+    }
+    return bytes;
+}
+
 unsigned read_u32(const unsigned* ptr) {
     unsigned v = 0;
     check_cuda(cudaMemcpy(&v, ptr, sizeof(unsigned), cudaMemcpyDeviceToHost),
@@ -100,15 +114,6 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
     check_cuda(cudaMemset(gst.n_visible, 0, 2 * sizeof(unsigned)),
                "counter memset");
 
-    char* tpool = pools.tile(TileState::bytes(tiles));
-    tst = TileState::from_pool(tpool, tiles);
-    // The tile-range memset must stay ordered with the previous frame's
-    // backward (which reads tst.range on the default stream) and with
-    // extract_ranges below. A non-blocking side stream let the memset race
-    // the in-flight backward and corrupt its tile ranges.
-    check_cuda(cudaMemsetAsync(tst.range, 0, tiles * sizeof(uint2)),
-               "range memset");
-
     launch::preprocess_gaussians(
         g.count, g.sh_degree, g.sh_bases, g.means, g.sh, g.colors, g.opacities,
         g.scales, g.rotations, g.covariances, cam.world_to_camera, cam.center,
@@ -117,16 +122,51 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
     check_cuda(cudaGetLastError(), "preprocess_gaussians");
 
     SortCounts counts;
-    counts.visible = int(read_u32(gst.n_visible));
-    counts.instances = int(read_u32(gst.n_instances));
+    // The counters are adjacent; one readback avoids a second host fence.
+    unsigned host_counts[2];
+    check_cuda(cudaMemcpy(host_counts, gst.n_visible, sizeof(host_counts),
+                          cudaMemcpyDeviceToHost), "read draw counts");
+    counts.visible = int(host_counts[0]);
+    counts.instances = int(host_counts[1]);
+
+    // Carve the tile pool only now: its bucket bookkeeping is sized from the
+    // instance count, and the deterministic upper bound keeps forward() and
+    // backward() layouts identical. The tile-range memset must stay ordered
+    // with the previous frame's backward (which reads tst.range on the
+    // default stream) and with extract_ranges below. A non-blocking side
+    // stream let the memset race the in-flight backward and corrupt its tile
+    // ranges.
+    const std::size_t buckets_ub =
+        bucket_upper_bound(counts.instances, tiles);
+    char* tpool = pools.tile(TileState::bytes(tiles, buckets_ub));
+    tst = TileState::from_pool(tpool, tiles, buckets_ub);
+    check_cuda(cudaMemsetAsync(tst.range, 0, tiles * sizeof(uint2)),
+               "range memset");
 
     const std::size_t sort_bytes =
-        std::max(sort_scratch_bytes(counts.visible),
-                 sort_scratch_bytes(counts.instances));
+        instance_sort_bytes(counts.visible, counts.instances);
     char* ipool = pools.instance(InstanceState::bytes(
         counts.visible, counts.instances, sort_bytes));
     ist = InstanceState::from_pool(ipool, counts.visible, counts.instances,
                                    sort_bytes);
+
+    if (InstanceState::single_sort(counts.instances)) {
+        if (counts.instances == 0) return counts;
+        check_cuda(cub::DeviceScan::InclusiveSum(gst.scan_scratch, gst.scan_bytes,
+                       gst.tiles_touched, gst.visible_offset, g.count), "tile scan");
+        launch::emit_packed_instances(g.count, gst, grid_x, grid_y, wrap_width,
+                                      ist.packed_key[0], ist.instance_value[0]);
+        check_cuda(cudaGetLastError(), "emit packed instances");
+        cub::DoubleBuffer<unsigned long long> keys(ist.packed_key[0], ist.packed_key[1]);
+        cub::DoubleBuffer<unsigned> values(ist.instance_value[0], ist.instance_value[1]);
+        check_cuda(cub::DeviceRadixSort::SortPairs(ist.sort_scratch, ist.sort_bytes,
+                       keys, values, counts.instances, 0,
+                       32 + msb_bits(unsigned(std::max(tiles - 1, 0)))), "packed sort");
+        counts.instance_selector = values.selector;
+        launch::extract_packed_ranges(counts.instances, keys.Current(), tst.range);
+        check_cuda(cudaGetLastError(), "extract packed ranges");
+        return counts;
+    }
 
     if (g.count > 0) {
         check_cuda(cub::DeviceScan::InclusiveSum(
@@ -188,8 +228,8 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
 
 void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
                    const CameraView& cam, int visible, int instances,
-                   GaussianState& gst, InstanceState& ist, TileState& tst,
-                   PixelState& pst) {
+                   bool geometry, GaussianState& gst, InstanceState& ist,
+                   TileState& tst, PixelState& pst) {
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,
                                              (unsigned*)nullptr,
@@ -199,19 +239,21 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
     gst = GaussianState::from_pool(gpool, g.count, scan_bytes);
 
     const std::size_t sort_bytes =
-        std::max(sort_scratch_bytes(visible), sort_scratch_bytes(instances));
+        instance_sort_bytes(visible, instances);
     char* ipool =
         pools.instance(InstanceState::bytes(visible, instances, sort_bytes));
     ist = InstanceState::from_pool(ipool, visible, instances, sort_bytes);
 
     const int grid_x = (cam.width + cfg::kTileWidth - 1) / cfg::kTileWidth;
     const int grid_y = (cam.height + cfg::kTileHeight - 1) / cfg::kTileHeight;
-    char* tpool = pools.tile(TileState::bytes(grid_x * grid_y));
-    tst = TileState::from_pool(tpool, grid_x * grid_y);
+    const int tiles = grid_x * grid_y;
+    const std::size_t buckets_ub = bucket_upper_bound(instances, tiles);
+    char* tpool = pools.tile(TileState::bytes(tiles, buckets_ub));
+    tst = TileState::from_pool(tpool, tiles, buckets_ub);
 
     const std::size_t pixels = std::size_t(cam.width) * cam.height;
-    char* ppool = pools.pixel(PixelState::bytes(pixels));
-    pst = PixelState::from_pool(ppool, pixels);
+    char* ppool = pools.pixel(PixelState::bytes(pixels, buckets_ub, geometry));
+    pst = PixelState::from_pool(ppool, pixels, buckets_ub, geometry);
 }
 
 struct PointListCounts {
@@ -337,15 +379,29 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
                                                tiles, wrap_width, gst, tst, ist,
                                                out.radii);
 
+    // Bucket metadata for the warp-per-bucket backward. The upper bound
+    // keeps the pool layout deterministic without a second host readback;
+    // tail entries park at tile 0 and are rejected by the range test.
+    const std::size_t buckets_ub =
+        bucket_upper_bound(counts.instances, tiles);
+    if (buckets_ub > 0) {
+        launch::bucket_offsets(tiles, int(buckets_ub), tst.range,
+                               tst.bucket_count, tst.bucket_offset,
+                               tst.bucket_tile);
+        check_cuda(cudaGetLastError(), "bucket_offsets");
+    }
+
     const std::size_t pixels = std::size_t(cam.width) * cam.height;
-    char* ppool = pools.pixel(PixelState::bytes(pixels));
-    PixelState pst = PixelState::from_pool(ppool, pixels);
+    char* ppool = pools.pixel(PixelState::bytes(pixels, buckets_ub, s.need_depth));
+    PixelState pst = PixelState::from_pool(ppool, pixels, buckets_ub,
+                                           s.need_depth);
 
     launch::blend(
         s.need_depth, tst.range, ist.instance_value[counts.instance_selector],
         cam.width, cam.height, K, wrap_width, gst.mean2d, gst.conic_opacity,
         gst.rgb, g.colors, gst.ray_plane, gst.normal, gst.screen_bounds,
-        pst.n_contrib, tst.max_contributor,
+        pst.n_contrib, tst.max_contributor, tst.bucket_offset, tst.bucket_tile,
+        pst,
         make_float3(s.background[0], s.background[1], s.background[2]),
         out.color, out.alpha, out.normal, out.median_depth, out.visibility,
         dim3(grid_x, grid_y));
@@ -377,21 +433,33 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
     InstanceState ist;
     TileState tst;
     PixelState pst;
-    rebuild_views(pools, g, cam, fwd.visible_count, fwd.instance_count, gst,
-                  ist, tst, pst);
+    rebuild_views(pools, g, cam, fwd.visible_count, fwd.instance_count,
+                  s.need_depth, gst, ist, tst, pst);
 
     GradState gs = zero_grad_state(pools, g.count);
 
-    launch::blend_backward(
+    if (s.need_depth) {
+        // Median-depth scale first: the bucket walk reads dL_dmt per pixel.
+        launch::median_scale_backward(
+            tst.range, ist.instance_value[fwd.instance_selector], cam.width,
+            cam.height, intrinsics_of(cam), wrap_width, gst.mean2d,
+            gst.conic_opacity, gst.ray_plane, gst.screen_bounds, pst.n_contrib,
+            tst.max_contributor, fo.median_depth, dL.median_depth, pst.dL_dmt,
+            dim3(grid_x, grid_y));
+        check_cuda(cudaGetLastError(), "median_scale_backward");
+    }
+
+    launch::blend_bucket_backward(
         s.need_depth, tst.range, ist.instance_value[fwd.instance_selector],
         cam.width, cam.height, intrinsics_of(cam), wrap_width,
         make_float3(s.background[0], s.background[1], s.background[2]),
         gst.mean2d, gst.conic_opacity, gst.rgb, g.colors, gst.ray_plane,
         gst.normal, gst.screen_bounds, fo.alpha, fo.normal, fo.median_depth,
-        pst.n_contrib, tst.max_contributor, dL.color, dL.median_depth, dL.alpha,
-        dL.normal, gs, reinterpret_cast<float*>(gs.d_color), grads.refine_weight,
-        dim3(grid_x, grid_y));
-    check_cuda(cudaGetLastError(), "blend_backward");
+        pst.n_contrib, tst.max_contributor, tst.bucket_offset, tst.bucket_tile,
+        pst, dL.color, dL.median_depth, dL.alpha, dL.normal, gs,
+        reinterpret_cast<float*>(gs.d_color), grads.refine_weight,
+        int(bucket_upper_bound(fwd.instance_count, grid_x * grid_y)));
+    check_cuda(cudaGetLastError(), "blend_bucket_backward");
 
     run_gaussian_backward(g, cam, s, gst, gs, grads, fo.radii, g.sh != nullptr);
 }
@@ -467,7 +535,7 @@ void Rasterizer::sample_depth_backward(
     TileState tst;
     PixelState pst;
     rebuild_views(pools, g, cam, counts.visible_count, counts.gaussian_instances,
-                  gst, ist, tst, pst);
+                  false, gst, ist, tst, pst);
 
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,

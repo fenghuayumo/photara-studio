@@ -116,6 +116,12 @@ struct GradState {
 //      sorted by tile id. CUB DoubleBuffer ping-pongs; selector is stored
 //      in ForwardResult so backward() rebuilds the same current pointer.
 struct InstanceState {
+    // Below this size launch/scan overhead outweighs the narrower double sort.
+    static bool single_sort(std::size_t instances) { return instances <= 131072; }
+    static std::size_t key_bytes(std::size_t instances) {
+        return instances * (single_sort(instances) ? sizeof(unsigned long long) : sizeof(unsigned));
+    }
+    unsigned long long* packed_key[2] = {nullptr, nullptr};
     unsigned* depth_key[2] = {nullptr, nullptr};
     unsigned* depth_value[2] = {nullptr, nullptr};
     unsigned* compact_offset = nullptr;  // InclusiveSum of tiles along depth order
@@ -128,7 +134,8 @@ struct InstanceState {
                              std::size_t cub_sort_bytes) {
         // from_pool aligns every array independently; mirror that exactly.
         return align_up(visible * sizeof(unsigned)) * 5 +
-               align_up(instances * sizeof(unsigned)) * 4 +
+               align_up(key_bytes(instances)) * 2 +
+               align_up(instances * sizeof(unsigned)) * 2 +
                align_up(cub_sort_bytes) + kAlign;
     }
 
@@ -142,8 +149,10 @@ struct InstanceState {
         s.depth_value[0] = reinterpret_cast<unsigned*>(take(c, visible * sizeof(unsigned)));
         s.depth_value[1] = reinterpret_cast<unsigned*>(take(c, visible * sizeof(unsigned)));
         s.compact_offset = reinterpret_cast<unsigned*>(take(c, visible * sizeof(unsigned)));
-        s.tile_key[0] = reinterpret_cast<unsigned*>(take(c, instances * sizeof(unsigned)));
-        s.tile_key[1] = reinterpret_cast<unsigned*>(take(c, instances * sizeof(unsigned)));
+        s.tile_key[0] = reinterpret_cast<unsigned*>(take(c, key_bytes(instances)));
+        s.tile_key[1] = reinterpret_cast<unsigned*>(take(c, key_bytes(instances)));
+        s.packed_key[0] = reinterpret_cast<unsigned long long*>(s.tile_key[0]);
+        s.packed_key[1] = reinterpret_cast<unsigned long long*>(s.tile_key[1]);
         s.instance_value[0] = reinterpret_cast<unsigned*>(take(c, instances * sizeof(unsigned)));
         s.instance_value[1] = reinterpret_cast<unsigned*>(take(c, instances * sizeof(unsigned)));
         s.sort_scratch = take(c, cub_sort_bytes);
@@ -153,17 +162,39 @@ struct InstanceState {
 };
 
 // ------------------------------------------------------------------ pixel --
+// Bucket snapshots enable the FasterGS warp-per-bucket backward: the forward
+// blender stores (color, transmittance[, accumulated normal]) for every tile
+// pixel at each 32-instance bucket boundary. total_color keeps the fully
+// accumulated color (before background) so backward can reconstruct the
+// "color after" state without the rendered image; dL_dmt is backward scratch
+// holding dL_dmedian * ray_z / max(-dT_dtm, 1e-7) per pixel.
 struct PixelState {
     unsigned* n_contrib = nullptr;   // per-pixel last contributor + 1
+    float* total_color = nullptr;    // [3,pixels] accumulated color, no bg
+    float4* snap_ct = nullptr;       // [buckets,256] rgb + T at bucket start
+    float4* snap_normal = nullptr;   // geometry: accumulated normal
+    float* dL_dmt = nullptr;         // backward: median-depth grad scale
 
-    static std::size_t bytes(std::size_t pixels) {
-        return align_up(pixels * sizeof(unsigned)) + kAlign;
+    static std::size_t bytes(std::size_t pixels, std::size_t buckets,
+                             bool geometry) {
+        const std::size_t snap = buckets * 256 * sizeof(float4);
+        return align_up(pixels * sizeof(unsigned)) +
+               align_up(pixels * 3 * sizeof(float)) +
+               align_up(snap) +
+               (geometry ? align_up(snap) : 0) +
+               align_up(pixels * sizeof(float)) + kAlign;
     }
 
-    static PixelState from_pool(char* base, std::size_t pixels) {
+    static PixelState from_pool(char* base, std::size_t pixels,
+                                std::size_t buckets, bool geometry) {
         PixelState s;
         char* c = base;
         s.n_contrib = reinterpret_cast<unsigned*>(take(c, pixels * sizeof(unsigned)));
+        s.total_color = reinterpret_cast<float*>(take(c, pixels * 3 * sizeof(float)));
+        s.snap_ct = reinterpret_cast<float4*>(take(c, buckets * 256 * sizeof(float4)));
+        if (geometry)
+            s.snap_normal = reinterpret_cast<float4*>(take(c, buckets * 256 * sizeof(float4)));
+        s.dL_dmt = reinterpret_cast<float*>(take(c, pixels * sizeof(float)));
         return s;
     }
 };
@@ -172,20 +203,34 @@ struct PixelState {
 struct TileState {
     uint2* range = nullptr;            // sorted instance range per tile
     unsigned* max_contributor = nullptr;
+    unsigned* bucket_count = nullptr;  // ceil(instances/32) per tile
+    unsigned* bucket_offset = nullptr; // inclusive scan of bucket_count
+    unsigned* bucket_tile = nullptr;   // owning tile per global bucket
 
-    static std::size_t bytes(std::size_t tiles) {
+    static std::size_t bytes(std::size_t tiles, std::size_t buckets) {
         return align_up(tiles * sizeof(uint2)) +
-               align_up(tiles * sizeof(unsigned)) + kAlign;
+               align_up(tiles * sizeof(unsigned)) * 3 +
+               align_up(buckets * sizeof(unsigned)) + kAlign;
     }
 
-    static TileState from_pool(char* base, std::size_t tiles) {
+    static TileState from_pool(char* base, std::size_t tiles,
+                               std::size_t buckets) {
         TileState s;
         char* c = base;
         s.range = reinterpret_cast<uint2*>(take(c, tiles * sizeof(uint2)));
         s.max_contributor = reinterpret_cast<unsigned*>(take(c, tiles * sizeof(unsigned)));
+        s.bucket_count = reinterpret_cast<unsigned*>(take(c, tiles * sizeof(unsigned)));
+        s.bucket_offset = reinterpret_cast<unsigned*>(take(c, tiles * sizeof(unsigned)));
+        s.bucket_tile = reinterpret_cast<unsigned*>(take(c, buckets * sizeof(unsigned)));
         return s;
     }
 };
+
+// Upper bound on total buckets: sum(ceil(t_i/32)) <= (instances+31*tiles)/32.
+inline std::size_t bucket_upper_bound(std::size_t instances, std::size_t tiles) {
+    if (instances == 0) return 0;
+    return (instances + 31 * tiles) / 32 + 1;
+}
 
 // ------------------------------------------------------------------ point --
 // Each visible query point lands in exactly one tile, so the instance

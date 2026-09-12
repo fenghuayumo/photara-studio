@@ -8,6 +8,7 @@
 #include "splat_drender/buffers.h"
 
 #include <cooperative_groups.h>
+#include <type_traits>
 #include <cub/block/block_reduce.cuh>
 
 namespace cg = cooperative_groups;
@@ -232,9 +233,10 @@ evaluate_points(const uint2* __restrict__ tile_range,
                 in_range[p] = pts[p].T_gauss <= cfg::kDepthMinTransmittance;
             }
 
-            auto refine = [&](bool first) {
-                const int s0 = first ? 0 : 1;
-                const int s1 = first ? cfg::kDepthSplit + 1 : cfg::kDepthSplit;
+            auto refine = [&](auto first_tag) {
+                constexpr bool first = decltype(first_tag)::value;
+                constexpr int s0 = first ? 0 : 1;
+                constexpr int s1 = first ? cfg::kDepthSplit + 1 : cfg::kDepthSplit;
 #pragma unroll
                 for (int p = 0; p < kPts; ++p)
 #pragma unroll
@@ -321,9 +323,9 @@ evaluate_points(const uint2* __restrict__ tile_range,
                 }
             };
 
-            refine(true);
+            refine(std::true_type{});
             for (int it = 0; it < cfg::kDepthRefinementsTesting - 1; ++it)
-                refine(false);
+                refine(std::false_type{});
 
 #pragma unroll
             for (int p = 0; p < kPts; ++p) {

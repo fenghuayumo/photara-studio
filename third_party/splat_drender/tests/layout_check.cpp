@@ -56,10 +56,17 @@ int main() {
                          InstanceState::bytes(1, 1, 4096), 1, 1, 4096);
     audit<InstanceState>("InstanceState v=999 i=1000",
                          InstanceState::bytes(999, 1000, 4096), 999, 1000, 4096);
-    audit<PixelState>("PixelState p=1", PixelState::bytes(1), 1);
-    audit<PixelState>("PixelState p=100000", PixelState::bytes(100000), 100000);
-    audit<TileState>("TileState t=1", TileState::bytes(1), 1);
-    audit<TileState>("TileState t=1000", TileState::bytes(1000), 1000);
+    audit<PixelState>("PixelState p=1 b=0", PixelState::bytes(1, 0, false),
+                      1, 0, false);
+    audit<PixelState>("PixelState p=100000 b=4096 geom",
+                      PixelState::bytes(100000, 4096, true),
+                      100000, 4096, true);
+    audit<PixelState>("PixelState p=100000 b=4096 rgb",
+                      PixelState::bytes(100000, 4096, false),
+                      100000, 4096, false);
+    audit<TileState>("TileState t=1 b=0", TileState::bytes(1, 0), 1, 0);
+    audit<TileState>("TileState t=1000 b=4096",
+                     TileState::bytes(1000, 4096), 1000, 4096);
     audit<PointState>("PointState p=1 t=1", PointState::bytes(1, 1, 4096),
                       1, 1, 4096);
     audit<PointState>("PointState p=1000 t=1000",

@@ -32,8 +32,19 @@ void emit_instances(int visible_count, const unsigned* depth_sorted_ids,
                     int wrap_width, unsigned* tile_key,
                     unsigned* instance_value);
 
+void emit_packed_instances(int count, ws::GaussianState st, int grid_x, int grid_y,
+                           int wrap_width, unsigned long long* keys, unsigned* values);
+void extract_packed_ranges(int count, const unsigned long long* keys, uint2* range);
+
 void extract_ranges(int instance_count, const unsigned* tile_key,
                     uint2* range);
+
+// Fills per-tile bucket counts, their inclusive-scan offsets and the
+// bucket->tile mapping (entries beyond the exact bucket count map to tile 0
+// so an upper-bound backward grid can safely early-return).
+void bucket_offsets(int tiles, int buckets, const uint2* range,
+                    unsigned* bucket_count, unsigned* bucket_offset,
+                    unsigned* bucket_tile);
 
 void blend(bool need_depth, const uint2* tile_range,
            const unsigned* instance_value, int width, int height,
@@ -41,23 +52,49 @@ void blend(bool need_depth, const uint2* tile_range,
            const float4* conic_opacity, const float3* rgb, const float* colors,
            const float4* ray_plane, const float3* normal,
            const ushort4* screen_bounds, unsigned* n_contrib,
-           unsigned* max_contributor, float3 background, float* out_color,
-           float* out_alpha, float* out_normal, float* out_median_depth,
-           float* visibility, dim3 grid);
+           unsigned* max_contributor, const unsigned* bucket_offset,
+           unsigned* bucket_tile, ws::PixelState pst, float3 background,
+           float* out_color, float* out_alpha, float* out_normal,
+           float* out_median_depth, float* visibility, dim3 grid);
 
-void blend_backward(bool need_depth, const uint2* tile_range,
-                    const unsigned* instance_value, int width, int height,
-                    CameraIntrinsics K, int wrap_width, float3 background,
-                    const float2* mean2d, const float4* conic_opacity,
-                    const float3* rgb, const float* colors,
-                    const float4* ray_plane, const float3* normal,
-                    const ushort4* screen_bounds, const float* alphas,
-                    const float* normal_map, const float* median_depth,
-                    const unsigned* n_contrib, const unsigned* max_contributor,
-                    const float* dL_color, const float* dL_median,
-                    const float* dL_alpha, const float* dL_normal,
-                    ws::GradState gs, float* dL_colors,
-                    float* refine_weight, dim3 grid);
+// Geometry pre-pass: computes dL_dmedian * ray_z / max(-dT_dtm, 1e-7) per
+// pixel. Warps split the tile's instance list so the formerly sequential
+// contributor walk runs eight-way parallel per pixel.
+void median_scale_backward(const uint2* tile_range,
+                           const unsigned* instance_value, int width,
+                           int height, CameraIntrinsics K, int wrap_width,
+                           const float2* mean2d,
+                           const float4* conic_opacity,
+                           const float4* ray_plane,
+                           const ushort4* screen_bounds,
+                           const unsigned* n_contrib,
+                           const unsigned* max_contributor,
+                           const float* median_depth,
+                           const float* dL_dmedian, float* dL_dmt,
+                           dim3 grid);
+
+// FasterGS-style bucket-parallel blending backward: one warp owns 32
+// instances of one tile bucket; each lane walks all 256 tile pixels while
+// the per-pixel (T, color-after[, normal-after]) state flows diagonally
+// through warp shuffles. Gradients accumulate in registers and commit once.
+void blend_bucket_backward(bool need_depth, const uint2* tile_range,
+                           const unsigned* instance_value, int width,
+                           int height, CameraIntrinsics K, int wrap_width,
+                           float3 background, const float2* mean2d,
+                           const float4* conic_opacity, const float3* rgb,
+                           const float* colors, const float4* ray_plane,
+                           const float3* normal,
+                           const ushort4* screen_bounds, const float* alphas,
+                           const float* normal_map, const float* median_depth,
+                           const unsigned* n_contrib,
+                           const unsigned* max_contributor,
+                           const unsigned* bucket_offset,
+                           const unsigned* bucket_tile,
+                           const ws::PixelState pst, const float* dL_color,
+                           const float* dL_median, const float* dL_alpha,
+                           const float* dL_normal, ws::GradState gs,
+                           float* dL_colors, float* refine_weight,
+                           int buckets);
 
 void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
                        int sh_bases, const float* means, const float* sh,

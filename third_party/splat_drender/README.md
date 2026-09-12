@@ -35,32 +35,59 @@ src/
     fisheye.cuh   native fisheye geometry with dual-number autodiff
     geometry.cuh  EWA splat projection forward/backward (fused)
   render_forward.cu   fused preprocessing + instance emission + tile blender
-  render_backward.cu  tile backward + fused per-Gaussian backward
+  render_backward.cu  bucket-parallel backward + fused per-Gaussian backward
   point_sampling.cu   unified point evaluation (occupancy / median depth)
   pipeline.cu         host orchestration
 ```
 
 ## Performance design (FasterGS-derived, order preserving)
 
-1. Double radix sort replaces the classic 64-bit (tile | depth-bits) key
-   sort: visible Gaussians are first stably sorted by their ordered 32-bit
-   depth key, then (gaussian, tile) instances are stably sorted by tile id
-   only. Cub radix sorts are stable, so the final within-tile depth order
-   (including tie order) is bit-identical to the reference while sorting
-   roughly half the key bits.
-2. Warp-level sub-tile culling in the forward/backward blenders: each warp
-   covers two tile rows and skips Gaussians whose screen bounds cannot
-   overlap them. The skip never changes the contributor numbering, so
-   n_contrib / max_contributor / last_contributor semantics (which the
-   median-depth bisection and backward traversal depend on) are unchanged.
+1. Adaptive stable radix sort: lists with at most 131,072 instances use one
+   64-bit (tile | depth-bits) sort to avoid the additional scans and launches
+   of a depth pre-sort. Larger lists use the FasterGS double sort: visible
+   Gaussians are sorted by 32-bit depth, then instances are stably sorted by
+   tile id. Both paths preserve Gaussian-index tie order. Workspace layout
+   and backward reconstruction select the same path from instance count.
+2. Per-pixel early termination in forward and median-depth traversal, with
+   median batches bounded by the last contributing instance. Depth probes
+   use separate compile-time first/refinement paths.
 3. Fused kernels: preprocessing computes projection + conic + SH color +
    tile enumeration + depth key + screen bounds in one launch; the backward
    per-Gaussian stage merges the EWA geometry backward, mean2d->mean3d and
    SH backward; occupancy and median-depth point queries share one
    templated evaluation kernel with in-kernel point rounds (no
    tile-duplication buffers or auxiliary count/expand kernels).
-4. Compact instance data: ushort4 screen bounds, 32-bit keys and
-   __restrict__ on all hot pointers.
+4. Warp-aggregated preprocessing counters on SM80+, a single adjacent-counter
+   readback, 32-bit keys for large lists, and __restrict__ on hot pointers.
+5. Bucket-parallel backward: the forward blender snapshots per-pixel
+   (color, transmittance[, accumulated normal]) at every 32-instance bucket
+   boundary together with the fully accumulated color, and one warp per
+   bucket then walks the bucket's 32 instances against all 256 tile pixels.
+   Per-lane gradient accumulators live in registers for the whole tile and
+   commit once, replacing the classic per-instance warp reductions, shared
+   memory staging and per-warp atomics of the thread-per-pixel walk. The
+   per-pixel (T, color-after, normal-after) state enters the warp at lane 0
+   from the bucket snapshot and flows diagonally through warp shuffles;
+   the reference's accum_rec chains are computed with the equivalent
+   "state-after" formulation. Bucket offsets are derived on device from the
+   sorted tile ranges; the launch grid uses a deterministic upper bound so
+   no second host readback is needed. The geometry median walk
+   (dT_dtm -> dL_dmt per pixel) runs as a separate thread-per-pixel kernel
+   before the bucket walk reads it.
+
+## Reproducible timing
+
+Build with `scripts/build_ab_compare.ps1`. The harness compares identical
+inputs before timing warmed forward, backward, and forward/backward pairs.
+`SPLAT_BENCH_ITERS` enables timing. Captured Gaussian counts are inferred from
+`.inputmeans`; optional trailing width/height arguments specify image shape.
+
+`experiments/benchmark_splat_rasterizer.py` runs serial repeats, rejects
+non-finite/mismatched comparison channels, saves raw logs and reports median
+wall time. Use `--geometry` to test depth/normal gradients. CUDA event timings
+include CPU submission gaps, not just kernel execution. The 131,072 crossover
+is a measured heuristic, not a hardware-independent optimum. See
+`docs/SPLAT_RENDERER_PERFORMANCE_20260911.md` for the measurements and limits.
 
 ## Correctness policy for the depth path
 
@@ -93,3 +120,7 @@ The A/B harness (tests/reference_compare.cu) links both rasterizers over
 identical inputs and reports every forward/backward channel at ~1e-6
 relative L2 (random scene) and ~1e-7 (captured 22k-Gaussian scene); the
 residual is atomic summation order.
+Bucket-snapshot backward changes floating-point association (front-to-back
+"state-after" products instead of back-to-front transmittance division), so
+gradients match the reference at ~1e-6 relative L2 rather than bit-exactly,
+well inside the harness tolerance (1e-4).

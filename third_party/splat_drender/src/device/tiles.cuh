@@ -17,7 +17,8 @@ namespace splat_drender::tiles {
 SD_D2 inline unsigned enumerate(
     float2 mean, float4 conic_opacity, int grid_x, int grid_y,
     unsigned gaussian_id, unsigned offset, unsigned* tile_out,
-    unsigned* value_out, int wrap_width) {
+    unsigned* value_out, int wrap_width,
+    unsigned long long* packed_out = nullptr, unsigned depth = 0) {
     const float a = conic_opacity.x, b = conic_opacity.y, c = conic_opacity.z;
     const float det = a * c - b * b;
     if (!(a > 0.f && c > 0.f) || !(conic_opacity.w >= 1.f / 255.f) ||
@@ -71,11 +72,14 @@ SD_D2 inline unsigned enumerate(
             const int v_min = max(0, min(gv, int(floorf(sv_min / blk_v))));
             const int v_max = max(0, min(gv, int(floorf(sv_max / blk_v)) + 1));
             for (int tv = v_min; tv < v_max; ++tv) {
-                if (tile_out) {
+                if (tile_out || packed_out) {
                     const int tx = iterate_x ? tu : tv;
                     const int ty = iterate_x ? tv : tu;
-                    tile_out[offset + count] =
-                        unsigned(ty) * unsigned(grid_x) + unsigned(tx);
+                    const unsigned tile = unsigned(ty) * unsigned(grid_x) + unsigned(tx);
+                    if (packed_out)
+                        packed_out[offset + count] = (static_cast<unsigned long long>(tile) << 32) | depth;
+                    else
+                        tile_out[offset + count] = tile;
                     value_out[offset + count] = gaussian_id;
                 }
                 ++count;
