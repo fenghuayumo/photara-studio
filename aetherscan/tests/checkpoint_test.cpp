@@ -33,6 +33,9 @@ int main() {
         image.camera_id = 0;
         image.path = std::filesystem::path(u8"测试-image.jpg");
         image.registered = true;
+        image.camera_identity = "body|crop";
+        image.focal_length_mm = 19.0;
+        image.exif_focal_px = 2100.0;
         image.pose.C = sfm::Vec3(1.0, 2.0, 3.0);
         image.features.image_width = 1280;
         image.features.image_height = 720;
@@ -71,6 +74,9 @@ int main() {
                 sfm::CheckpointStage::features, scene_key, restored) ||
             restored.thread_count != 7 || restored.images.size() != 2 ||
             restored.images[0].path != scene.images[0].path ||
+            restored.images[0].camera_identity != scene.images[0].camera_identity ||
+            restored.images[0].focal_length_mm != 19.0 ||
+            restored.images[0].exif_focal_px != 2100.0 ||
             restored.images[0].features.descriptors.size() != 2 ||
             restored.cameras[0].focal_prior != 875.0 ||
             restored.cameras[0].model != CameraModel::opencv_fisheye ||

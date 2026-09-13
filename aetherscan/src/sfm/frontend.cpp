@@ -27,6 +27,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -63,7 +64,7 @@ void append_cache_build_identity(FingerprintBuilder& key) {
 	key.append_string(AETHERSCAN_FRONTEND_CACHE_BUILD_ID);
 	// Camera metadata now feeds a late intrinsic split; older geometry and
 	// track caches lack those fields.
-	key.append_string("camera-late-exif-split-v1");
+	key.append_string("camera-late-exif-split-v3");
     key.append(static_cast<std::uint64_t>(__cplusplus));
 #if defined(_MSC_VER)
     key.append(static_cast<std::uint32_t>(_MSC_VER));
@@ -618,6 +619,102 @@ bool calibrate_view_graph_focals(Scene& scene) {
     return updated;
 }
 
+bool calibrate_exif_view_graph_focals(Scene& scene) {
+    struct ExifFocalGroup {
+        std::vector<FetzerSameCameraCost> costs;
+        std::vector<double> pair_focals;
+        Index first_image{k_invalid};
+        unsigned images{0};
+    };
+
+    const auto exif_key = [](const Image& image) {
+        return image.camera_identity.empty()
+            ? std::string{}
+            : "camera-" + std::to_string(image.camera_id) + "|" +
+                  image.camera_identity + "|focal-mm-" +
+                  std::to_string(image.focal_length_mm);
+    };
+
+    std::unordered_map<std::string, ExifFocalGroup> groups;
+    for (const Image& image : scene.images) {
+        const std::string key = exif_key(image);
+        if (key.empty()) continue;
+        ExifFocalGroup& group = groups[key];
+        ++group.images;
+        if (group.first_image == k_invalid) group.first_image = image.id;
+    }
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || pair.degenerate_planar || !pair.F.has_value() ||
+            pair.num_inliers() < 15 || pair.composite_weight() < 3.F ||
+            pair.id1 >= scene.images.size() ||
+            pair.id2 >= scene.images.size())
+            continue;
+        const std::string first_key = exif_key(scene.images[pair.id1]);
+        if (first_key.empty() || first_key != exif_key(scene.images[pair.id2]))
+            continue;
+        const Image& image = scene.images[pair.id1];
+        if (image.camera_id >= scene.cameras.size()) continue;
+        const PinholeCamera& camera = scene.cameras[image.camera_id];
+        if (camera.trust_intrinsics ||
+            camera.model == CameraModel::opencv_fisheye)
+            continue;
+        ExifFocalGroup& group = groups[first_key];
+        if (const auto cost = make_fetzer_same_camera_cost(*pair.F, camera))
+            group.costs.push_back(*cost);
+        if (pair.estimated_focal.has_value())
+            group.pair_focals.push_back(*pair.estimated_focal);
+    }
+
+    bool updated = false;
+    for (auto& [key, group] : groups) {
+        if (group.first_image >= scene.images.size() ||
+            group.costs.size() < 16)
+            continue;
+        const Image& image = scene.images[group.first_image];
+        const PinholeCamera& camera = scene.camera_of(image);
+        const double fetzer = solve_fetzer_focal(group.costs, camera);
+        const auto pair_consensus =
+            robust_pair_focal_fallback(group.pair_focals, camera);
+        double focal = fetzer;
+        bool used_pair_fallback = false;
+        if (!std::isfinite(focal) && pair_consensus.has_value()) {
+            focal = *pair_consensus;
+            used_pair_fallback = true;
+        }
+        const double initial = camera.focal();
+        if (!std::isfinite(focal) || focal < 0.1 * initial ||
+            focal > 10.0 * initial) {
+            core::Logger::instance().warning(
+                "EXIF view-graph focal unresolved: key=", key,
+                " pairs=", group.costs.size(),
+                " pair_candidates=", group.pair_focals.size());
+            continue;
+        }
+        if (std::isfinite(fetzer) && pair_consensus.has_value() &&
+            std::abs(std::log(fetzer / *pair_consensus)) >
+                std::log(1.5)) {
+            core::Logger::instance().warning(
+                "EXIF view-graph focal conflicting: key=", key,
+                " fetzer=", fetzer,
+                " pair_q75=", *pair_consensus,
+                " using_shared_initial=", initial);
+            continue;
+        }
+        for (Image& destination : scene.images) {
+            if (exif_key(destination) != key) continue;
+            destination.exif_focal_px = focal;
+        }
+        updated = true;
+        core::Logger::instance().info(
+            "EXIF view-graph focal: key=", key,
+            " images=", group.images,
+            " pairs=", group.costs.size(),
+            " focal=", focal,
+            " fallback=", used_pair_fallback ? "pair_q75" : "fetzer");
+    }
+    return updated;
+}
+
 void release_descriptors(Scene& scene) {
     for (Image& image : scene.images) image.features.release_descriptors();
 }
@@ -1089,10 +1186,11 @@ void finalize_view_graph(
     Scene& scene, const FrontEndOptions& options) {
     compute_pair_weights(scene, options.pair_weighting);
     const bool focal_updated = calibrate_view_graph_focals(scene);
+    const bool exif_focal_updated = calibrate_exif_view_graph_focals(scene);
     const bool has_untrusted_intrinsics = std::any_of(
         scene.cameras.begin(), scene.cameras.end(),
         [](const PinholeCamera& camera) { return !camera.trust_intrinsics; });
-    if (focal_updated || has_untrusted_intrinsics) {
+    if (focal_updated || exif_focal_updated || has_untrusted_intrinsics) {
         // Unknown-focal F-RANSAC deliberately defers cheirality and strict
         // reprojection filtering. Complete that pass even when calibration
         // keeps the initial focal; otherwise unchecked F support reaches
@@ -2069,10 +2167,19 @@ FrontEndResult run_frontend(
         runtime_options.neighbor_window + 1 < scene.images.size();
     if (can_expand_progressively) {
         std::vector<unsigned> verified_degree(scene.images.size(), 0U);
+        std::vector<unsigned> nonplanar_degree(scene.images.size(), 0U);
         for (const ImagePair& pair : scene.pairs) {
             if (!pair.active) continue;
             ++verified_degree[pair.id1];
             ++verified_degree[pair.id2];
+            // A few small accidental edges do not establish usable multi-view
+            // depth. Require two well-supported, non-planar neighbors before
+            // skipping the bounded high-feature rescue pass.
+            if (pair.relative_pose && !pair.degenerate_planar && !pair.zero_baseline &&
+                pair.matches.size() >= 100) {
+                ++nonplanar_degree[pair.id1];
+                ++nonplanar_degree[pair.id2];
+            }
         }
         std::vector<std::uint8_t> weak(scene.images.size(), 0);
         const auto structural_risk = runtime_options.structural_pair_expansion
@@ -2084,6 +2191,7 @@ FrontEndResult run_frontend(
             if (structural_risk[image_id]) ++structural_weak_images;
             if (verified_degree[image_id] >=
                 runtime_options.progressive_min_verified_degree &&
+                nonplanar_degree[image_id] >= 2 &&
                 !structural_risk[image_id])
                 continue;
             weak[image_id] = 1;
@@ -2139,13 +2247,22 @@ FrontEndResult run_frontend(
                 candidate_key(candidate.id1, candidate.id2));
         std::unordered_set<std::uint64_t> verified_pairs;
         for (const auto& pair : scene.pairs)
-            if (pair.active && !pair.matches.empty())
+            if ((pair.active || pair.zero_baseline) && !pair.matches.empty())
                 verified_pairs.insert(candidate_key(pair.id1, pair.id2));
 
         std::vector<PairCandidate> rescue_candidates;
         std::unordered_set<std::uint64_t> rescue_pair_keys;
+        const bool has_low_degree_views = std::any_of(
+            verified_degree.begin(), verified_degree.end(),
+            [&](unsigned degree) {
+                return degree < runtime_options.progressive_min_verified_degree;
+            });
+        // Well-connected but low-parallax views need better anchors, not an
+        // exhaustive second pass over a whole video. Reserve that cost for
+        // genuinely disconnected/structurally weak small view graphs.
         const bool exhaustive_rescue =
-            scene.images.size() <= runtime_options.progressive_max_images;
+            scene.images.size() <= runtime_options.progressive_max_images &&
+            (has_low_degree_views || structural_weak_images > 0);
         rescue_pair_keys.reserve(
             weak_images *
             std::max<std::size_t>(
@@ -2156,10 +2273,10 @@ FrontEndResult run_frontend(
             if (first > second) std::swap(first, second);
             const std::uint64_t key = candidate_key(first, second);
             // A failed primary match is not evidence that two images cannot
-            // connect. Retry structural-risk pairs with the rescue matcher;
+            // connect. Retry weak-view pairs with the rescue matcher;
             // never duplicate already verified edges.
             const bool retry_failed =
-                (structural_risk[first] || structural_risk[second]) &&
+                (weak[first] || weak[second]) &&
                 !verified_pairs.count(key);
             if ((primary_pairs.count(key) && !retry_failed) || rescue_pair_keys.count(key))
                 return false;

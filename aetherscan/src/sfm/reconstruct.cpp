@@ -661,29 +661,105 @@ unsigned repair_position_outliers(
 // exists. Once poses are stable, EXIF-identified zoom/lens states become
 // separate BA groups: they share the proven layout as an initialization and
 // then adapt focal/aspect/distortion independently.
+}  // namespace
+
 unsigned split_intrinsics_by_camera_identity(Scene& scene) {
     if (scene.cameras.empty() || scene.images.empty()) return 0;
 
-    std::vector<double> focal_lengths;
-    focal_lengths.reserve(scene.images.size());
+    std::unordered_map<Index, std::vector<double>> focal_lengths_by_camera;
     for (const Image& image : scene.images)
-        if (image.focal_length_mm > 0.0)
-            focal_lengths.push_back(image.focal_length_mm);
-    const double median_focal_length =
-        focal_lengths.size() >= 4 ? median_value(focal_lengths) : 0.0;
+        if (std::isfinite(image.focal_length_mm) && image.focal_length_mm > 0.0) {
+            focal_lengths_by_camera[image.camera_id].push_back(image.focal_length_mm);
+        }
+
+    // The EXIF identity names the physical camera/crop state and the recorded
+    // focal names the lens state. Keep the latter as a separate initial group:
+    // a small zoom segment can otherwise get stuck in its own focal minimum.
+    // Preserve the original camera partition, including trusted calibrations.
+    std::unordered_map<std::string, std::vector<Index>> images_by_identity;
+    std::vector<std::string> identity_order;
+    for (Index image_id = 0; image_id < scene.images.size(); ++image_id) {
+        const std::string& identity = scene.images[image_id].camera_identity;
+        auto [iterator, inserted] = images_by_identity.emplace(
+            identity, std::vector<Index>{});
+        if (inserted) identity_order.push_back(identity);
+        iterator->second.push_back(image_id);
+    }
+
+    std::vector<std::string> group_key(scene.images.size());
+    for (const std::string& identity : identity_order) {
+        std::vector<Index>& images = images_by_identity.at(identity);
+        for (const Index image_id : images) {
+            const Image& image = scene.images[image_id];
+            const std::string base =
+                "camera-" + std::to_string(image.camera_id) + "|";
+            if (identity.empty() || scene.camera_of(image).trust_intrinsics) {
+                group_key[image_id] = base;
+                continue;
+            }
+            const double focal = scene.images[image_id].focal_length_mm;
+            if (!std::isfinite(focal) || focal <= 0.0) {
+                group_key[image_id] = base + identity + "|unknown-focal";
+                continue;
+            }
+            group_key[image_id] =
+                base + identity + "|focal-mm-" + std::to_string(focal);
+        }
+    }
 
     std::unordered_map<std::string, Index> group_of_identity;
+    std::unordered_map<Index, std::vector<double>> pixel_focals_by_group;
+    unsigned next_group = 0;
     std::vector<PinholeCamera> grouped_cameras;
     grouped_cameras.reserve(scene.cameras.size());
     std::vector<unsigned> group_images;
+    std::vector<double> group_median_focal;
 
     for (Image& image : scene.images) {
-        const std::string& identity = image.camera_identity;
         auto [iterator, inserted] = group_of_identity.emplace(
-            identity, static_cast<Index>(grouped_cameras.size()));
+            group_key[static_cast<std::size_t>(image.id)],
+            static_cast<Index>(next_group));
+        if (inserted) ++next_group;
+        if (inserted) {
+            pixel_focals_by_group[iterator->second] = {};
+            group_median_focal.push_back(0.0);
+        }
+        if (std::isfinite(image.exif_focal_px) && image.exif_focal_px > 0.0) {
+            pixel_focals_by_group[iterator->second].push_back(
+                image.exif_focal_px);
+        }
+    }
+
+    // Pixel priors and physical focal lengths have different units. A group
+    // without a pixel estimate must use relative mm scaling below.
+    for (auto& [group, pixel_focals] : pixel_focals_by_group) {
+        const double median =
+            pixel_focals.empty() ? 0.0 : median_value(pixel_focals);
+        if (median > 0.0)
+            group_median_focal[static_cast<std::size_t>(group)] = median;
+    }
+    if (group_of_identity.size() <= 1) return 0;
+
+    for (Image& image : scene.images) {
+        const auto iterator = group_of_identity.find(
+            group_key[static_cast<std::size_t>(image.id)]);
+        if (iterator == group_of_identity.end()) continue;
+        const bool inserted = iterator->second == grouped_cameras.size();
         if (inserted) {
             PinholeCamera camera = scene.cameras[image.camera_id];
-            if (median_focal_length > 0.0 && image.focal_length_mm > 0.0) {
+            const double median_focal_px =
+                group_median_focal[iterator->second];
+            if (!camera.trust_intrinsics && std::isfinite(median_focal_px) &&
+                median_focal_px > 0.1 * std::max(camera.width, camera.height)) {
+                // A per-EXIF-group view-graph measurement is in the stored
+                // image's pixel scale and supersedes the relative mm scaling.
+                camera.fx = median_focal_px;
+                camera.fy = median_focal_px;
+                camera.focal_prior = median_focal_px;
+            } else if (!camera.trust_intrinsics && image.focal_length_mm > 0.0 &&
+                       focal_lengths_by_camera.contains(image.camera_id)) {
+                const double median_focal_length =
+                    median_value(focal_lengths_by_camera.at(image.camera_id));
                 const double focal =
                     camera.fx * image.focal_length_mm / median_focal_length;
                 if (std::isfinite(focal) && focal > 0.0) {
@@ -701,7 +777,18 @@ unsigned split_intrinsics_by_camera_identity(Scene& scene) {
         ++group_images[iterator->second];
     }
 
-    if (grouped_cameras.size() <= 1) return 0;
+    {
+        std::unordered_set<std::string> identities;
+        std::size_t measured_focals = 0;
+        for (const Image& image : scene.images) {
+            identities.insert(image.camera_identity);
+            measured_focals += image.focal_length_mm > 0.0 ? 1U : 0U;
+        }
+        core::Logger::instance().info(
+            "global: EXIF intrinsic audit identities=", identities.size(),
+            " focal_measurements=", measured_focals,
+            " grouped_keys=", group_of_identity.size());
+    }
     scene.cameras = std::move(grouped_cameras);
     std::string groups;
     for (std::size_t i = 0; i < scene.cameras.size(); ++i) {
@@ -711,8 +798,62 @@ unsigned split_intrinsics_by_camera_identity(Scene& scene) {
     core::Logger::instance().info(
         "global: split EXIF intrinsic groups=", scene.cameras.size(),
         " images_per_group=", groups,
-        " median_focal_length_mm=", median_focal_length);
+        " global_median_focal_px=",
+        median_value(group_median_focal));
     return static_cast<unsigned>(scene.cameras.size());
+}
+
+namespace {
+
+// A short zoom segment has too little parallax to establish its own focal and
+// distortion basin. After the first fixed-intrinsic solve, borrow the calibrated
+// start of the largest group with the same physical EXIF crop state, then let
+// the following joint BA move it if the segment really supports a difference.
+unsigned reconcile_exif_intrinsics(Scene& scene) {
+    std::unordered_map<Index, std::unordered_set<std::string>> identities;
+    std::unordered_map<std::string, std::vector<Index>> cameras_by_identity;
+    for (const Image& image : scene.images) {
+        if (image.camera_id >= scene.cameras.size()) continue;
+        const auto [_, inserted] =
+            identities[image.camera_id].insert(image.camera_identity);
+        if (inserted)
+            cameras_by_identity[image.camera_identity].push_back(image.camera_id);
+    }
+
+    unsigned reconciled = 0;
+    for (auto& [identity, cameras] : cameras_by_identity) {
+        if (cameras.size() < 2) continue;
+        std::vector<unsigned> counts(scene.cameras.size(), 0);
+        for (const Image& image : scene.images) {
+            if (image.camera_id < counts.size() &&
+                identities[image.camera_id].count(identity))
+                ++counts[image.camera_id];
+        }
+        const Index dominant = *std::max_element(
+            cameras.begin(), cameras.end(), [&](const Index left, const Index right) {
+                if (counts[left] != counts[right])
+                    return counts[left] < counts[right];
+                return left > right;
+            });
+        for (const Index camera_id : cameras) {
+            if (camera_id == dominant) continue;
+            PinholeCamera& destination = scene.cameras[camera_id];
+            const PinholeCamera& source = scene.cameras[dominant];
+            destination.fx = source.fx;
+            destination.fy = source.fy;
+            destination.focal_prior = source.focal_prior;
+            destination.k1 = source.k1;
+            destination.k2 = source.k2;
+            destination.p1 = source.p1;
+            destination.p2 = source.p2;
+            ++reconciled;
+        }
+        core::Logger::instance().info(
+            "global: reconciled EXIF crop intrinsics identity=", identity,
+            " groups=", cameras.size(),
+            " dominant_images=", counts[dominant]);
+    }
+    return reconciled;
 }
 
 unsigned enforce_zero_baseline_pose_groups(Scene& scene) {

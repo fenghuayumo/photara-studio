@@ -504,7 +504,7 @@ std::vector<Index> recover_stable_resections(
     std::vector<std::vector<Index>> depth_anchors(scene.tracks.size());
     std::unordered_map<std::uint64_t, std::vector<Observation>> boundary;
     for (const auto& pair : scene.pairs) {
-        if (!pair.active || !pair.relative_pose || pair.zero_baseline ||
+        if ((!pair.has_geometry() && !pair.H.has_value()) || pair.zero_baseline ||
             pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size()) continue;
         const bool forward = audit.reliable[pair.id1] && !audit.reliable[pair.id2];
         const bool reverse = audit.reliable[pair.id2] && !audit.reliable[pair.id1];
@@ -605,7 +605,9 @@ std::vector<Index> recover_stable_resections(
                 feature.support == evidence(m) && track.support == evidence(m))
                 unique.emplace(m.feature, m);
         }
-        core::Logger::instance().info("stable resection: image=", image.path.filename(), " correspondences=", unique.size());
+        core::Logger::instance().info("stable resection: image=", image.path.filename(),
+            " correspondences=", unique.size(), " proposals=", matches[id].size(),
+            " features=", by_feature.size(), " landmarks=", by_track.size());
         const auto reject = [&](const char* reason) {
             core::Logger::instance().info("stable resection rejected: image=", image.path.filename(), " reason=", reason);
         };
@@ -643,10 +645,11 @@ std::vector<Index> recover_stable_resections(
             const bool reverse = pair.id1 == id &&
                 pair.id2 < stable.size() && stable[pair.id2];
             if (!forward && !reverse) continue;
-            const Pose3D& anchor_pose = forward
-                ? scene.images[pair.id1].pose
-                : scene.images[pair.id2].pose;
-            const Vec3 direction = anchor_pose.R * (pose.pose.C - anchor_pose.C);
+            // Relative C is always expressed from id1 toward id2 in id1's
+            // frame, including when the recovering image is the first one.
+            const Pose3D& first_pose = forward ? scene.images[pair.id1].pose : pose.pose;
+            const Pose3D& second_pose = reverse ? scene.images[pair.id2].pose : pose.pose;
+            const Vec3 direction = first_pose.R * (second_pose.C - first_pose.C);
             const float weight = pair.composite_weight();
             if (!direction.allFinite() || direction.norm() < 1e-10 ||
                 !pair.relative_pose->C.allFinite() ||

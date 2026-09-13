@@ -12,11 +12,12 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include "sfm_focal_probe.hpp"
 
 int main(int argc, char** argv) {
     using namespace aetherscan::sfm;
-    if (argc != 3 && !(argc == 4 && std::string(argv[3]) == "reattach")) {
-        std::cerr << "checkpoint.bin output_prefix [reattach]\n"; return 1;
+    if (argc != 3 && !(argc == 4 && (std::string(argv[3]) == "reattach" || std::string(argv[3]) == "focal"))) {
+        std::cerr << "checkpoint.bin output_prefix [reattach|focal]\n"; return 1;
     }
     const std::filesystem::path input(argv[1]), output(argv[2]);
     aetherscan::core::Logger::instance().configure(output.parent_path(), "recovery-probe");
@@ -29,7 +30,9 @@ int main(int argc, char** argv) {
     // A rejected final checkpoint retains candidate poses but clears their
     // registration flags. Offline component experiments need the original
     // candidate set back to exercise recovery from the mapping state.
-    if (argc == 4) for (auto& image : scene.images) image.registered = true;
+    if (argc == 4 && std::string(argv[3]) == "reattach")
+        for (auto& image : scene.images) image.registered = true;
+    if (argc == 4 && std::string(argv[3]) == "focal") probe_small_group_focals(scene);
     auto audit=analyze_alignment_observability(scene);
     std::cout << "Original reliable " << audit.reliable_views << '\n';
     recover_weakly_connected_views(scene);

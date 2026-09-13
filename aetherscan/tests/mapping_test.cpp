@@ -1007,7 +1007,52 @@ void test_parallel_track_colours() {
 
 }  // namespace
 
+void test_intrinsic_group_units() {
+    Scene scene;
+    scene.cameras={cam()};
+    scene.cameras[0].trust_intrinsics=false;
+    scene.cameras[0].fx=scene.cameras[0].fy=2000;
+    scene.images.resize(6);
+    for (Index i=0;i<6;++i) {
+        auto& image=scene.images[i];
+        image.id=i;
+        image.camera_id=0;
+        image.camera_identity="same-body";
+        image.focal_length_mm=i<4?20.0:(i==4?17.0:19.0);
+        image.exif_focal_px=i<4?2100.0:0.0;
+    }
+    expect(split_intrinsics_by_camera_identity(scene)==3,"split sparse zoom groups");
+    expect(std::abs(scene.camera_of(scene.images[4]).fx-1700.0)<1e-9,
+        "millimetre focal uses a ratio, not a pixel value");
+    expect(std::abs(scene.camera_of(scene.images[5]).fx-1900.0)<1e-9,
+        "singleton zoom keeps a physically scaled pixel initialization");
+    expect(std::abs(scene.camera_of(scene.images[0]).fx-2100.0)<1e-9,
+        "pixel focal group uses its measured initialization");
+    Scene distinct;
+    distinct.cameras={cam(),cam()};
+    distinct.cameras[1].fx=700;
+    distinct.cameras[1].fy=710;
+    distinct.images.resize(2);
+    for (Index i=0;i<2;++i) {
+        distinct.images[i].id=i;
+        distinct.images[i].camera_id=i;
+    }
+    split_intrinsics_by_camera_identity(distinct);
+    expect(distinct.images[0].camera_id!=distinct.images[1].camera_id &&
+        distinct.camera_of(distinct.images[1]).fx==700 &&
+        distinct.camera_of(distinct.images[1]).fy==710,"missing EXIF cannot merge existing calibrations");
+    Scene locked=scene;
+    for (auto& camera:locked.cameras) camera.trust_intrinsics=true;
+    const auto before=locked.cameras;
+    for (auto& image:locked.images) image.exif_focal_px=9999;
+    split_intrinsics_by_camera_identity(locked);
+    for (std::size_t i=0;i<before.size();++i)
+        expect(locked.cameras[i].fx==before[i].fx && locked.cameras[i].fy==before[i].fy,
+            "trusted calibration is never overwritten by EXIF grouping");
+}
+
 int main() {
+    test_intrinsic_group_units();
     test_parallel_track_colours();
     test_pair_cycle_weighting();
     test_global_rotation_weighting();

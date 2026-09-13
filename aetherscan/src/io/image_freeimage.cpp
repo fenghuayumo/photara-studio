@@ -426,18 +426,21 @@ std::string load_camera_identity(
         double plane_resolution_unit = 0.0;
         double sensor_pixel_width = 0.0;
         for (const auto metadata : {FIMD_EXIF_MAIN, FIMD_EXIF_EXIF}) {
+            FITAG* tag = nullptr;
+            if (FreeImage_GetMetadata(
+                    metadata, bitmap, "FocalLength", &tag) &&
+                tag && focal_length_mm && *focal_length_mm <= 0.0) {
+                const double parsed = metadata_number(tag, metadata);
+                if (parsed > 0.0) *focal_length_mm = parsed;
+            }
+        }
+        for (const auto metadata : {FIMD_EXIF_MAIN, FIMD_EXIF_EXIF}) {
             for (const char* key :
                  {"Make", "Model", "BodySerialNumber", "LensMake", "LensModel",
-                  "FocalLength", "FocalLengthIn35mmFormat",
                   "FocalPlaneXResolution", "FocalPlaneResolutionUnit",
                   "PixelXDimension"}) {
                 FITAG* tag = nullptr;
                 if (FreeImage_GetMetadata(metadata, bitmap, key, &tag) && tag) {
-                    if (focal_length_mm && *focal_length_mm <= 0.0 &&
-                        std::string(key) == "FocalLength") {
-                        const double parsed = metadata_number(tag, metadata);
-                        if (parsed > 0.0) *focal_length_mm = parsed;
-                    }
                     if (focal_prior_px && *focal_prior_px <= 0.0 &&
                         std::string(key) == "FocalLengthIn35mmFormat") {
                         const double focal_35mm = metadata_number(tag, metadata);
@@ -463,7 +466,16 @@ std::string load_camera_identity(
                 }
             }
         }
-        if (focal_prior_px && *focal_prior_px <= 0.0 && *focal_length_mm > 0.0 &&
+        for (const auto metadata : {FIMD_EXIF_MAIN, FIMD_EXIF_EXIF}) {
+            FITAG* tag = nullptr;
+            if (FreeImage_GetMetadata(
+                    metadata, bitmap, "FocalLength", &tag) &&
+                tag && focal_length_mm && *focal_length_mm <= 0.0) {
+                const double parsed = metadata_number(tag, metadata);
+                if (parsed > 0.0) *focal_length_mm = parsed;
+            }
+        }
+        if (focal_prior_px && focal_length_mm && *focal_prior_px <= 0.0 && *focal_length_mm > 0.0 &&
             plane_x_resolution > 0.0 && plane_resolution_unit >= 2.0 &&
             plane_resolution_unit <= 5.0) {
             double pixels_per_mm = 0.0;

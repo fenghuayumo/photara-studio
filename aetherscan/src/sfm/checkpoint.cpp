@@ -35,7 +35,7 @@ namespace aetherscan::sfm {
 namespace {
 
 constexpr std::array<char, 8> magic{'A', 'E', 'T', 'H', 'C', 'K', 'P', 'T'};
-constexpr std::uint32_t schema_version = 8;
+constexpr std::uint32_t schema_version = 9;
 constexpr std::uint64_t fnv_offset = 14695981039346656037ULL;
 constexpr std::uint64_t fnv_prime = 1099511628211ULL;
 
@@ -446,6 +446,9 @@ void write_scene(
         writer.value(image.id);
         writer.value(image.camera_id);
         writer.string(path_utf8(image.path));
+        writer.string(image.camera_identity);
+        writer.value(image.focal_length_mm);
+        writer.value(image.exif_focal_px);
         write_feature_set(writer, image.features, include_descriptors);
         write_pose(writer, image.pose);
         writer.value(static_cast<std::uint8_t>(image.registered));
@@ -579,6 +582,9 @@ Scene read_scene(Reader& reader) {
         image.id = reader.value<Index>();
         image.camera_id = reader.value<Index>();
         image.path = path_from_utf8(reader.string());
+        image.camera_identity = reader.string();
+        image.focal_length_mm = reader.value<double>();
+        image.exif_focal_px = reader.value<double>();
         image.features = read_feature_set(reader);
         image.pose = read_pose(reader);
         image.registered = reader.value<std::uint8_t>() != 0;

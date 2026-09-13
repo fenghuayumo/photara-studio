@@ -212,12 +212,32 @@ int main() {
         for (Index anchor : {Index{0}, Index{1}, Index{2}}) {
             ImagePair pair(anchor, 4);
             pair.relative_pose =
-                direction_seed.images[4].pose / direction_seed.images[anchor].pose;
+                Pose3D{Mat3::Identity(), Vec3(1.0, 0.0, 0.0)} /
+                direction_seed.images[anchor].pose;
             pair.relative_pose->C.normalize();
             pair.weight_spatial = 1;
             for (Index p = 0; p < 160; ++p) pair.matches.push_back({p, p});
             direction_seed.pairs.push_back(std::move(pair));
         }
+        Scene reversed_seed = direction_seed;
+        std::reverse(reversed_seed.images.begin(), reversed_seed.images.end());
+        for (Index i = 0; i < 8; ++i) reversed_seed.images[i].id = i;
+        for (auto& track : reversed_seed.tracks)
+            for (auto& observation : track.observations)
+                observation.image_id = 7 - observation.image_id;
+        for (auto& pair : reversed_seed.pairs) {
+            const Index first = 7 - pair.id2;
+            pair.id2 = 7 - pair.id1;
+            pair.id1 = first;
+            if (pair.relative_pose) pair.relative_pose = pair.relative_pose->inverse();
+            for (auto& match : pair.matches) std::swap(match.query, match.train);
+        }
+        const auto reverse_recovered = recover_stable_resections(
+            reversed_seed, {0,0,0,0,1,1,1,1});
+        expect(std::find(reverse_recovered.begin(), reverse_recovered.end(), 3) !=
+                   reverse_recovered.end() &&
+               (reversed_seed.images[3].pose.C - Vec3(1.0, 0.0, 0)).norm() < 0.01,
+            "baseline certification must be invariant to image-pair ordering");
         const auto seeded_recovered =
             recover_stable_resections(direction_seed, stable);
         expect(std::find(seeded_recovered.begin(), seeded_recovered.end(), 4) !=
@@ -240,6 +260,26 @@ int main() {
         const auto boundary_recovered = recover_stable_resections(boundary_only, stable);
         expect(boundary_recovered.size() == 1 && boundary_recovered.front() == 4,
             "valid boundary links must recover a camera absent from the source tracks");
+        Scene geometry_only = fixture();
+        for (auto& track : geometry_only.tracks) track.observations.resize(4);
+        for (auto& pair : geometry_only.pairs) {
+            if (pair.id1 == 3 && pair.id2 == 4) {
+                pair.active = false;
+                pair.relative_pose.reset();
+                pair.H = Mat3::Identity();
+            }
+        }
+        Scene false_geometry = geometry_only;
+        for (auto& pair : false_geometry.pairs)
+            if (pair.id1 == 3 && pair.id2 == 4)
+                for (auto& match : pair.matches)
+                    match.train = (match.query * 37 + 13) % 160;
+        expect(recover_stable_resections(false_geometry, stable).empty(),
+            "inactive geometry proposals must not bypass independent PnP validation");
+        const auto geometry_recovered = recover_stable_resections(geometry_only, stable);
+        expect(geometry_recovered.size() == 1 && geometry_recovered.front() == 4 &&
+               (geometry_only.images[4].pose.C - Vec3(1.0, 0, 0)).norm() < 0.01,
+            "geometry-only inactive matches can propose independently validated resection");
         Scene rejected_anchor = fixture();
         const auto anchor_pixels = rejected_anchor.images[3].features.keypoints;
         for (Index p = 0; p < 160; ++p)

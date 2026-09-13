@@ -59,6 +59,10 @@ struct AlignmentObservability {
 
 AlignmentObservability analyze_alignment_observability(const Scene& scene);
 
+// Split untrusted camera/lens states for late BA. Millimetre focal lengths
+// only scale a pixel-space initialization; existing camera groups stay distinct.
+unsigned split_intrinsics_by_camera_identity(Scene& scene);
+
 // Remove registration flags from cameras that no longer have enough valid
 // landmark support after final filtering/BA. Returns the number invalidated.
 unsigned prune_unsupported_registrations(
