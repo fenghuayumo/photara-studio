@@ -136,8 +136,7 @@ median_scale_walk(const uint2* __restrict__ tile_range,
                             sxy[j].y - pixf.y);
             const float4 co = sconic[j];
             const float power =
-                -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
-                co.y * d.x * d.y;
+                geo::gaussian_power(co, d.x, d.y);
             if (power > 0.f) continue;
             const float alpha = fminf(cfg::kAlphaClip, co.w * expf(power));
             if (alpha < cfg::kAlphaFloor) continue;
@@ -407,7 +406,7 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
         const float dx = wrap_dx(xy.x - float(px), wrap_width, K.mode);
         const float dy = xy.y - float(py);
         const float power =
-            -0.5f * (co.x * dx * dx + co.z * dy * dy) - co.y * dx * dy;
+            geo::gaussian_power(co, dx, dy);
         if (power > 0.f) continue;
         const float G = expf(power);
         const float alpha = fminf(cfg::kAlphaClip, co.w * G);

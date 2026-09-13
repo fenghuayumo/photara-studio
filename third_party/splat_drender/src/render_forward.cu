@@ -344,8 +344,7 @@ blend_tile(const uint2* __restrict__ tile_range,
                                 sxy[j].y - pixf.y);
                 const float4 co = sconic[j];
                 const float power =
-                    -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
-                    co.y * d.x * d.y;
+                    geo::gaussian_power(co, d.x, d.y);
                 if (power > 0.f) continue;
                 const float alpha = fminf(cfg::kAlphaClip, co.w * expf(power));
                 if (alpha < cfg::kAlphaFloor) continue;
@@ -423,8 +422,7 @@ blend_tile(const uint2* __restrict__ tile_range,
                         sxy[j].y - pixf.y);
                     const float4 co = sconic[j];
                     const float power =
-                        -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) -
-                        co.y * d.x * d.y;
+                        geo::gaussian_power(co, d.x, d.y);
                     if (power > 0.f) continue;
                     const float alpha = fminf(cfg::kAlphaClip, co.w * expf(power));
                     if (alpha < cfg::kAlphaFloor) continue;

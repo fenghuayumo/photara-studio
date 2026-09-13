@@ -124,3 +124,21 @@ Bucket-snapshot backward changes floating-point association (front-to-back
 "state-after" products instead of back-to-front transmittance division), so
 gradients match the reference at ~1e-6 relative L2 rather than bit-exactly,
 well inside the harness tolerance (1e-4).
+
+### Thin-splat regression coverage
+
+Pixel forward, median traversal and bucket backward use an explicitly rounded
+Gaussian quadratic form. Identical source expressions alone are insufficient:
+CUDA contraction/common-subexpression choices in backward changed the alpha
+of a thin captured splat, yielding a 0.9% refine-gradient discrepancy despite
+matching forward images. The RGB path also skips the inverse-covariance
+depth/normal chain when its upstream gradients are all zero; otherwise an
+ill-conditioned splat can introduce NaNs through a mathematically unused branch.
+`test_thin_splat_rgb_backward` checks the exact single-splat color derivative
+against forward alpha and finite geometry gradients on captured fixtures.
+
+The small-scene tolerance above is not a guarantee for arbitrarily thin trained
+Gaussians. A 671k-Gaussian capture exposes non-finite gradients in the reference
+itself and larger residual relative errors. See
+`docs/SPLAT_QUALITY_20260913.md` in the AetherScan repository for the matched
+30k-step training comparison, fixes, and remaining numerical limits.

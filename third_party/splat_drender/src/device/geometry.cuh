@@ -18,6 +18,18 @@
 
 namespace splat_drender::geo {
 
+// Fix the contraction order in each pixel traversal. With thin splats the terms
+// nearly cancel; compiler CSE in backward can otherwise change alpha even
+// though forward and backward contain the same source expression.
+SD_D2 inline float gaussian_power(float4 conic, float dx, float dy) {
+    const float xx = __fmul_rn(conic.x, dx);
+    const float yy = __fmul_rn(__fmul_rn(conic.z, dy), dy);
+    const float xy = __fmul_rn(__fmul_rn(conic.y, dx), dy);
+    // Match the reference forward PTX: fuse the x-square sum, then round
+    // the half and cross-term subtraction separately.
+    return __fsub_rn(__fmul_rn(-0.5f, __fmaf_rn(dx, xx, yy)), xy);
+}
+
 struct Splat {
     float2 mean2d{};
     float cov2d[3]{};       // xx, xy, yy (kernel-inflated)
@@ -541,7 +553,12 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
     Mat3 dL_dVrk{};
     float3 dL_dr(0.f, 0.f, 0.f);
     float dL_du = 0.f, dL_dv = 0.f, dL_dz = 0.f;
-    {
+    // An unused depth/normal branch is exactly zero. Evaluating its inverse
+    // covariance algebra anyway can produce 0 * NaN for very thin splats,
+    // contaminating otherwise valid RGB derivatives (also in the reference).
+    if (io.d_normal.x != 0.f || io.d_normal.y != 0.f || io.d_normal.z != 0.f ||
+        d_ray_plane.x != 0.f || d_ray_plane.y != 0.f ||
+        d_ray_plane.z != 0.f || d_ray_plane.w != 0.f) {
         const float vb = mat::dot3(uvh_m, uvh);
         const float l = norm3df(t.x, t.y, t.z);
         const Mat3 nJ = detail::peak_nJ(t, l);

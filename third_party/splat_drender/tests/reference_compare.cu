@@ -34,9 +34,20 @@ struct Pool {
 float* ref_m2d=nullptr;
 void compare(const char* name,const float* a,const float* b,int n) {
     double error=0,energy=0; float maximum=0;int worst=0;
+    int nonfinite_ref=0,nonfinite_new=0,nonfinite_disagree=0;
     for(int i=0;i<n;++i) {double d=a[i]-b[i];error+=d*d;energy+=double(a[i])*a[i];
+        nonfinite_ref += !std::isfinite(a[i]);
+        nonfinite_new += !std::isfinite(b[i]);
+        nonfinite_disagree += std::isfinite(a[i]) != std::isfinite(b[i]);
         if(std::abs(d)>maximum){maximum=float(std::abs(d));worst=i;}}
-    printf("%s relative_l2=%g max=%g index=%d ref=%g new=%g\n",name,sqrt(error/std::max(energy,1e-30)),maximum,worst,a[worst],b[worst]);
+    printf("%s relative_l2=%g max=%g index=%d ref=%g new=%g nonfinite_ref=%d nonfinite_new=%d nonfinite_disagree=%d\n",name,sqrt(error/std::max(energy,1e-30)),maximum,worst,a[worst],b[worst],nonfinite_ref,nonfinite_new,nonfinite_disagree);
+    if (const char* prefix = std::getenv("SPLAT_COMPARE_DUMP")) {
+        for (int backend=0;backend<2;++backend) {
+            std::ofstream file(std::string(prefix)+(backend?".new.":".ref.")+name,std::ios::binary);
+            file.write(reinterpret_cast<const char*>(backend?b:a),size_t(n)*sizeof(float));
+            if (!file) throw std::runtime_error("Cannot write comparison dump");
+        }
+    }
 }
 int main(int argc,char** argv) {
     const bool captured=argc>2;
