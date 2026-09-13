@@ -25,6 +25,16 @@ public:
     virtual void clear_prepared() {}
     [[nodiscard]] virtual MatchSet match(
         const FeatureSet& query, const FeatureSet& train) const = 0;
+    using Pair = std::pair<const FeatureSet*, const FeatureSet*>;
+    // Preserve pair order; GPU implementations amortize submission/readback.
+    [[nodiscard]] virtual std::vector<MatchSet> match_batch(
+        std::span<const Pair> pairs) const {
+        std::vector<MatchSet> result;
+        result.reserve(pairs.size());
+        for (const auto& [query, train] : pairs)
+            result.push_back(match(*query, *train));
+        return result;
+    }
 };
 
 // Fused image-pair pipelines that own both detection and matching

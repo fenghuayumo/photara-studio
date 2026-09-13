@@ -131,6 +131,18 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/features/lightglue_matcher.cpp
         src/features/lightglue_pipeline.cpp)
     add_library(AetherScan::Features ALIAS aetherscan_features)
+    if(AETHERSCAN_ENABLE_CUDA)
+        add_library(aetherscan_match_cuda STATIC src/features/matcher_cuda.cu)
+        target_include_directories(aetherscan_match_cuda PRIVATE include)
+        target_compile_features(aetherscan_match_cuda PUBLIC cxx_std_20)
+        target_link_libraries(aetherscan_match_cuda PUBLIC CUDA::cudart)
+        set_target_properties(aetherscan_match_cuda PROPERTIES
+            CUDA_ARCHITECTURES native
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+        target_link_libraries(aetherscan_features PRIVATE aetherscan_match_cuda)
+        target_compile_definitions(aetherscan_features PRIVATE AETHERSCAN_MATCH_HAS_CUDA=1)
+    endif()
     target_include_directories(aetherscan_features PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)
@@ -232,6 +244,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/types.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/sfm/vocabulary.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/features/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/features/*.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/features/*.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/io/image_freeimage.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/checkpoint.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/frontend.cpp"
@@ -253,6 +267,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/sfm/*.cpp")
     list(SORT AETHERSCAN_FRONTEND_CACHE_ID_FILES)
     list(SORT AETHERSCAN_RECONSTRUCTION_CACHE_ID_FILES)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        ${AETHERSCAN_FRONTEND_CACHE_ID_FILES} ${AETHERSCAN_RECONSTRUCTION_CACHE_ID_FILES})
     set(_aetherscan_cache_build_options
         "cuda=${AETHERSCAN_ENABLE_CUDA};siftgpu=${AETHERSCAN_ENABLE_SIFTGPU};onnx=${AETHERSCAN_HAS_ONNXRUNTIME}\n")
     function(aetherscan_source_fingerprint output files_variable)
@@ -563,6 +579,15 @@ if(AETHERSCAN_ENABLE_FEATURES)
         endif()
         add_executable(aetherscan_pair_verify src/tools/pair_verify.cpp)
         add_executable(aetherscan_sfm_realign src/tools/sfm_realign.cpp)
+        add_executable(aetherscan_sfm_match_benchmark src/tools/sfm_match_benchmark.cpp)
+        target_link_libraries(aetherscan_sfm_match_benchmark PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_sfm_match_benchmark POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_match_benchmark>
+                    $<TARGET_FILE_DIR:aetherscan_sfm_match_benchmark>
+                COMMAND_EXPAND_LISTS)
+        endif()
         target_link_libraries(aetherscan_sfm_realign PRIVATE AetherScan::SfM)
         if(WIN32)
             add_custom_command(TARGET aetherscan_sfm_realign POST_BUILD

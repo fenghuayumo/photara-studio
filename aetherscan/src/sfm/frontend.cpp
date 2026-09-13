@@ -1213,7 +1213,8 @@ void match_and_verify_siftgpu_coordinator(
     features::FeatureMatcher& matcher, const FrontEndOptions& options,
     const unsigned worker_threads, std::vector<RawPairMatches>& raw_pairs,
     std::vector<PairDiagnostics>& diagnostics,
-    std::vector<ImagePair>& pair_slots, core::ProgressReporter& match_progress) {
+    std::vector<ImagePair>& pair_slots, core::ProgressReporter& match_progress,
+    const bool verify_geometry = true) {
     raw_pairs.resize(candidates.size());
     diagnostics.assign(candidates.size(), {});
     pair_slots.assign(candidates.size(), ImagePair{});
@@ -1227,18 +1228,26 @@ void match_and_verify_siftgpu_coordinator(
     parallel::FutureGroup geometry_tasks;
     geometry_tasks.reserve(candidates.size());
 
-    for (std::size_t pair_index = 0; pair_index < candidates.size();
-         ++pair_index) {
+    constexpr std::size_t batch_size = 8;
+    for (std::size_t begin = 0; begin < candidates.size(); begin += batch_size) {
+      const std::size_t end = std::min(begin + batch_size, candidates.size());
+      std::vector<features::FeatureMatcher::Pair> batch;
+      batch.reserve(end - begin);
+      for (std::size_t i = begin; i < end; ++i)
+          batch.emplace_back(&scene.images[candidates[i].id1].features,
+                             &scene.images[candidates[i].id2].features);
+      auto matched = matcher.match_batch(batch);
+      for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
         const PairCandidate candidate = candidates[pair_index];
         RawPairMatches raw;
         raw.id1 = candidate.id1;
         raw.id2 = candidate.id2;
-        raw.matches =
-            matcher
-                .match(
-                    scene.images[candidate.id1].features,
-                    scene.images[candidate.id2].features)
-                .matches;
+        raw.matches = std::move(matched[pair_index - begin].matches);
+        if (!verify_geometry) {
+            raw_pairs[pair_index] = std::move(raw);
+            match_progress.advance();
+            continue;
+        }
 
         {
             std::unique_lock lock(throttle_mutex);
@@ -1271,6 +1280,7 @@ void match_and_verify_siftgpu_coordinator(
                 }
                 release_slot();
             });
+      }
     }
     geometry_tasks.wait();
 }
@@ -1969,6 +1979,12 @@ FrontEndResult run_frontend(
         raw_pairs.resize(candidates.size());
         if (matcher->requires_owner_thread()) {
             std::vector<ImagePair> pair_slots;
+            // Automatic calibration consumes raw matches, then invalidates
+            // every preliminary geometry estimate. Hybrid rescue still needs
+            // preliminary geometry to choose which pairs to send to LightGlue.
+            const bool verify_now = runtime_options.matcher == "hybrid_lightglue" ||
+                !(options.camera_model == CameraModel::automatic ||
+                  (options.camera_model == CameraModel::opencv_fisheye && options.focal_pixels <= 0));
             core::ProgressReporter match_progress(
                 runtime_options.matcher == "hybrid_lightglue"
                     ? "fast match image pairs"
@@ -1976,7 +1992,7 @@ FrontEndResult run_frontend(
                 candidates.size());
             match_and_verify_siftgpu_coordinator(
                 scene, candidates, *matcher, options, threads, raw_pairs,
-                diagnostics, pair_slots, match_progress);
+                diagnostics, pair_slots, match_progress, verify_now);
             match_progress.finish();
 
             if (runtime_options.matcher == "hybrid_lightglue") {
@@ -2069,7 +2085,7 @@ FrontEndResult run_frontend(
                 scene.pairs.push_back(std::move(pair));
             }
 
-            geometry_verified_in_pipeline = true;
+            geometry_verified_in_pipeline = verify_now;
         } else {
             const unsigned match_threads = threads;
             std::vector<std::unique_ptr<features::FeatureMatcher>> match_workers(
@@ -2391,6 +2407,7 @@ FrontEndResult run_frontend(
     // Descriptors are no longer needed after matching and weak-view rescue;
     // keep keypoints only for track construction and mapping.
     release_descriptors(scene);
+    matcher->clear_prepared();
 
     verify_image_snapshot(
         image_paths, image_fingerprint, ImageSnapshotCheck::content);

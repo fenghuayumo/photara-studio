@@ -1,4 +1,7 @@
 #include "features/features.hpp"
+#if defined(AETHERSCAN_MATCH_HAS_CUDA)
+#include "matcher_cuda.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -173,12 +176,9 @@ public:
             gpu.reset();
             return;
         }
-        if (!gpu->Allocate(
-                static_cast<int>(options.maximum_features),
-                options.mutual_check ? 1 : 0)) {
-            gpu.reset();
-            return;
-        }
+        // SiftMatchCU grows its textures in SetDescriptors/GetSiftMatch.
+        // Allocate(maximum_features) eagerly reserves the worst-case square
+        // distance matrix even when this instance only uses the native path.
         available = true;
 #endif
     }
@@ -187,6 +187,7 @@ public:
     bool available{false};
     std::thread::id owner_thread;
     mutable std::mutex mutex;
+    mutable std::unique_ptr<FeatureMatcher> native;
     // Skip SetDescriptors when the same FeatureSet remains bound to a slot
     // (openMVS prevImageID1/prevImageID2 cache).
     mutable std::uint64_t slot0_identity{0};
@@ -224,8 +225,33 @@ std::unique_ptr<FeatureMatcher> SiftGpuMatcher::clone() const {
     return std::unique_ptr<FeatureMatcher>(new SiftGpuMatcher(impl_));
 }
 
+void SiftGpuMatcher::clear_prepared() { impl_->native.reset(); }
+
+std::vector<MatchSet> SiftGpuMatcher::match_batch(std::span<const Pair> pairs) const {
+    if (std::this_thread::get_id() != impl_->owner_thread)
+        throw std::runtime_error("SiftGPU matcher must run on its CUDA context owner thread");
+#if defined(AETHERSCAN_MATCH_HAS_CUDA)
+    if (impl_->available && impl_->options.native_cuda && !pairs.empty() &&
+        std::all_of(pairs.begin(), pairs.end(), [](const Pair& pair) {
+            return pair.first->storage == DescriptorStorage::uint8 &&
+                   pair.second->storage == DescriptorStorage::uint8;
+        })) {
+        if (!impl_->native) impl_->native = make_native_cuda_matcher(impl_->options);
+        return impl_->native->match_batch(pairs);
+    }
+#endif
+    return FeatureMatcher::match_batch(pairs);
+}
+
 MatchSet SiftGpuMatcher::match(
     const FeatureSet& query, const FeatureSet& train) const {
+#if defined(AETHERSCAN_MATCH_HAS_CUDA)
+    if (impl_->available && impl_->options.native_cuda &&
+        query.storage == DescriptorStorage::uint8 && train.storage == DescriptorStorage::uint8) {
+        const Pair pair{&query, &train};
+        return std::move(match_batch(std::span(&pair, 1))[0]);
+    }
+#endif
     if (!impl_->available)
         throw std::runtime_error(
             "SiftGPU matcher is not built or its CUDA context is unavailable");

@@ -6,8 +6,94 @@
 #include <iostream>
 #include <random>
 #include <vector>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <stdexcept>
+
+namespace {
+using namespace aetherscan::features;
+void same_matches(const MatchSet& a, const MatchSet& b) {
+    auto keys = [](const MatchSet& m) {
+        std::vector<std::pair<FeatureIndex, FeatureIndex>> v;
+        for (auto x : m.matches) v.emplace_back(x.query,x.train);
+        std::sort(v.begin(),v.end()); return v;
+    };
+    if (keys(a) != keys(b)) throw std::runtime_error("CUDA matcher correspondence mismatch");
+}
+MatchSet oracle(const FeatureSet& q, const FeatureSet& t, bool mutual) {
+    auto direction = [](const FeatureSet& a, const FeatureSet& b) {
+        std::vector<int> out(a.keypoints.size(),-1);
+        for (std::size_t i=0;i<a.keypoints.size();++i) {
+            int best=0,second=0,index=-1;
+            for (std::size_t j=0;j<b.keypoints.size();++j) {
+                int dot=0;
+                for (int k=0;k<128;++k) dot+=int(a.descriptors_u8[i*128+k])*b.descriptors_u8[j*128+k];
+                if (dot>best) { second=best;best=dot;index=static_cast<int>(j); }
+                else second=std::max(second,dot);
+            }
+            const float d=static_cast<float>(std::acos(std::min(best/262144.,1.)));
+            const float d2=static_cast<float>(std::acos(std::min(second/262144.,1.)));
+            if (d<.7f && d<.8f*d2) out[i]=index;
+        }
+        return out;
+    };
+    auto rows=direction(q,t),cols=direction(t,q);
+    MatchSet out;
+    for (std::size_t i=0;i<rows.size();++i)
+        if (rows[i]>=0 && (!mutual || cols[rows[i]]==int(i)))
+            out.matches.push_back({FeatureIndex(i),FeatureIndex(rows[i]),1.f});
+    return out;
+}
+void check_native(FeatureSet q, FeatureSet t) {
+    q.compress_descriptors_u8(); t.compress_descriptors_u8();
+    for (bool mutual : {false,true}) {
+        SiftGpuMatcherOptions options; options.mutual_check=mutual;
+        SiftGpuMatcher native(options);
+        options.native_cuda=false; SiftGpuMatcher legacy(options);
+        same_matches(native.match(q,t),legacy.match(q,t));
+        FeatureSet small=q, tail=t, empty=q;
+        small.keypoints.resize(33); small.descriptors_u8.resize(33*128); small.mark_descriptors_modified();
+        tail.keypoints.resize(65); tail.descriptors_u8.resize(65*128); tail.mark_descriptors_modified();
+        empty.keypoints.clear(); empty.descriptors_u8.clear(); empty.mark_descriptors_modified();
+        // Exact ties, zero descriptors, and tile tails exercise both top-two reductions.
+        std::copy_n(small.descriptors_u8.begin(),128,tail.descriptors_u8.begin());
+        std::copy_n(small.descriptors_u8.begin(),128,tail.descriptors_u8.begin()+128);
+        std::vector<FeatureMatcher::Pair> batch{{&small,&tail},{&tail,&small},{&empty,&small},{&small,&empty}};
+        for (int i=0;i<9;++i) batch.emplace_back(&small,&tail);
+        auto out=native.match_batch(batch);
+        for (std::size_t i=0;i<batch.size();++i) same_matches(out[i],oracle(*batch[i].first,*batch[i].second,mutual));
+        std::fill(small.descriptors_u8.begin(),small.descriptors_u8.end(),0);
+        small.mark_descriptors_modified();
+        same_matches(native.match(small,tail),oracle(small,tail,mutual));
+        native.clear_prepared();
+        same_matches(native.match(q,t),legacy.match(q,t));
+        // Office pair 816/818 exposed this one-ULP angular-ratio boundary.
+        // Reproduce its two exact dot products without requiring the dataset.
+        FeatureSet boundary_q, boundary_t;
+        boundary_q.image_width=boundary_t.image_width=64;
+        boundary_q.image_height=boundary_t.image_height=64;
+        boundary_q.storage=boundary_t.storage=DescriptorStorage::uint8;
+        boundary_q.descriptor_dimension=boundary_t.descriptor_dimension=128;
+        boundary_q.keypoints.resize(1); boundary_t.keypoints.resize(2);
+        boundary_q.descriptors_u8.assign(128,45); boundary_q.descriptors_u8[0]=46;
+        boundary_t.descriptors_u8.resize(256);
+        for (int j=0;j<2;++j) {
+            const int dot=j==0 ? 248262 : 240562;
+            const int first=dot%45, rest=(dot-first)/45-first;
+            boundary_t.descriptors_u8[j*128]=static_cast<std::uint8_t>(first);
+            for (int k=0;k<127;++k)
+                boundary_t.descriptors_u8[j*128+k+1]=static_cast<std::uint8_t>(rest/127+(k<rest%127));
+        }
+        const auto boundary=native.match(boundary_q,boundary_t);
+        same_matches(boundary,legacy.match(boundary_q,boundary_t));
+        if (boundary.matches.size()!=1) throw std::runtime_error("Angular ratio boundary rejected");
+    }
+}
+}
 
 int main() {
+    try {
     aetherscan::features::ensure_builtin_feature_backends();
     if (!aetherscan::features::has_extractor("aliked") ||
         !aetherscan::features::extractor_matcher_compatible(
@@ -85,7 +171,12 @@ int main() {
                 gpu_features1.keypoints.size() < 150 ||
                 gpu_matches.matches.size() < 80)
                 return 4;
+            check_native(gpu_features0,gpu_features1);
         }
     }
     return 0;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 10;
+    }
 }

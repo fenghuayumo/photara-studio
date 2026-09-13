@@ -106,6 +106,7 @@ struct SiftGpuMatcherOptions {
     bool mutual_check{true};
     std::size_t maximum_features{32768};
     int device_index{0};
+    bool native_cuda{true};
 };
 
 // SiftMatchGPU CUDA matcher. The underlying context is thread-affine, so
@@ -126,6 +127,9 @@ public:
     }
     [[nodiscard]] bool requires_owner_thread() const override { return true; }
     [[nodiscard]] std::unique_ptr<FeatureMatcher> clone() const override;
+    void clear_prepared() override;
+    [[nodiscard]] std::vector<MatchSet> match_batch(
+        std::span<const Pair> pairs) const override;
     [[nodiscard]] MatchSet match(
         const FeatureSet& query, const FeatureSet& train) const override;
 
