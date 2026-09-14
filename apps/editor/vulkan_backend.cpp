@@ -806,7 +806,11 @@ constexpr std::size_t k_max_inflight = 2;
 
 aetherscan::io::RgbImage load_camera_thumbnail(
     const std::filesystem::path& path) {
-    aetherscan::io::RgbImage rgb = aetherscan::io::load_rgb(path);
+    // Ask the JPEG decoder for the largest DCT scale that still covers the
+    // thumbnail: decoding the full capture to shrink it afterwards costs about
+    // five times more and only the thumbnail pixels survive.
+    aetherscan::io::RgbImage rgb = aetherscan::io::load_rgb_with_minimum_size(
+        path, k_thumb_long_edge, k_thumb_long_edge);
     const std::uint32_t long_edge = std::max(rgb.width, rgb.height);
     if (long_edge <= k_thumb_long_edge || long_edge == 0) return rgb;
     const float scale =

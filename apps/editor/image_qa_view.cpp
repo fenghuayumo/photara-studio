@@ -54,7 +54,11 @@ aetherscan::io::RgbImage resize_rgb(
 }
 
 aetherscan::io::RgbImage load_qa_image(const std::filesystem::path& path) {
-    aetherscan::io::RgbImage rgb = aetherscan::io::load_rgb(path);
+    // Decode straight to the largest DCT scale that still covers the QA
+    // texture, so the full capture never has to be materialised just to be
+    // scaled down. The texture size itself is unchanged.
+    aetherscan::io::RgbImage rgb = aetherscan::io::load_rgb_with_minimum_size(
+        path, k_qa_long_edge, k_qa_long_edge);
     const std::uint32_t long_edge = std::max(rgb.width, rgb.height);
     if (long_edge <= k_qa_long_edge || long_edge == 0) return rgb;
     const float scale =
@@ -405,7 +409,12 @@ ImageQaSession::~ImageQaSession() { clear(); }
 
 void ImageQaSession::clear() {
     if (pending_.valid()) pending_.wait();
+    for (auto& retired : retired_)
+        if (retired.second.valid()) retired.second.wait();
     if (metrics_pending_.valid()) metrics_pending_.wait();
+    retired_.clear();
+    gt_cache_.clear();
+    gt_cache_order_.clear();
     gt_.reset();
     error_.reset();
     gt_cpu_ = {};
@@ -422,6 +431,54 @@ void ImageQaSession::clear() {
     metrics_busy_ = false;
     failed_ = false;
     metrics_ = {};
+}
+
+void ImageQaSession::harvest_retired() {
+    for (auto it = retired_.begin(); it != retired_.end();) {
+        if (it->second.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::timeout) {
+            ++it;
+            continue;
+        }
+        try {
+            // A superseded decode cannot change what is on screen, but it is
+            // still a usable capture: keep it for the next visit.
+            const aetherscan::io::RgbImage image = it->second.get();
+            remember_gt(it->first, image);
+        } catch (...) {
+        }
+        it = retired_.erase(it);
+    }
+}
+
+void ImageQaSession::publish_gt(const aetherscan::io::RgbImage& image) {
+    if (image.width == 0 || image.height == 0 || image.pixels.empty())
+        throw std::runtime_error("empty capture");
+    gt_cpu_ = image;
+    gt_.upload(gt_cpu_);
+    // The previous heatmap belongs to another capture. Tear it down before this
+    // frame records ImGui image draws.
+    error_.reset();
+    metrics_ = {};
+    queue_metrics();
+}
+
+void ImageQaSession::remember_gt(
+    const std::filesystem::path::string_type& key,
+    const aetherscan::io::RgbImage& image) {
+    constexpr std::size_t k_cached_captures = 3;
+    if (image.width == 0 || image.height == 0 || image.pixels.empty()) return;
+    gt_cache_[key] = image;
+    gt_cache_order_.push_back(key);
+    while (gt_cache_order_.size() > k_cached_captures) {
+        const std::filesystem::path::string_type oldest =
+            gt_cache_order_.front();
+        gt_cache_order_.pop_front();
+        if (std::find(
+                gt_cache_order_.begin(), gt_cache_order_.end(), oldest) ==
+            gt_cache_order_.end())
+            gt_cache_.erase(oldest);
+    }
 }
 
 bool ImageQaSession::has_gt() const {
@@ -450,7 +507,33 @@ void ImageQaSession::request_gt(
     if (path.empty() || view_index < 0) return;
     if (loaded_view_ == view_index && loaded_path_ == path && has_gt()) return;
     if (loading_ && pending_view_ == view_index && pending_path_ == path) return;
-    if (pending_.valid()) pending_.wait();
+    harvest_retired();
+    // A capture that is already decoded in this session is published in place.
+    const std::filesystem::path::string_type key = path.native();
+    if (const auto found = gt_cache_.find(key); found != gt_cache_.end()) {
+        if (pending_.valid())
+            retired_.emplace_back(
+                pending_path_.native(), std::move(pending_));
+        loading_ = false;
+        failed_ = false;
+        pending_view_ = -1;
+        pending_path_.clear();
+        loaded_path_ = path;
+        loaded_view_ = view_index;
+        try {
+            publish_gt(found->second);
+        } catch (...) {
+            failed_ = true;
+            gt_.reset();
+            gt_cpu_ = {};
+            loaded_view_ = -1;
+        }
+        return;
+    }
+    // Never join the in-flight decode: it belongs to a capture the user has
+    // already moved past, and the UI must stay responsive while it lands.
+    if (pending_.valid())
+        retired_.emplace_back(pending_path_.native(), std::move(pending_));
     pending_path_ = path;
     pending_view_ = view_index;
     failed_ = false;
@@ -465,17 +548,10 @@ void ImageQaSession::poll() {
         pending_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         try {
             aetherscan::io::RgbImage image = pending_.get();
-            if (image.width == 0 || image.height == 0 || image.pixels.empty())
-                throw std::runtime_error("empty capture");
-            gt_cpu_ = std::move(image);
-            gt_.upload(gt_cpu_);
+            remember_gt(pending_path_.native(), image);
             loaded_path_ = pending_path_;
             loaded_view_ = pending_view_;
-            // The previous heatmap belongs to another capture. Tear it down
-            // here, before this frame records ImGui image draws.
-            error_.reset();
-            metrics_ = {};
-            queue_metrics();
+            publish_gt(image);
         } catch (...) {
             failed_ = true;
             gt_.reset();

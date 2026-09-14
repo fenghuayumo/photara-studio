@@ -6,9 +6,11 @@
 #include "imgui.h"
 
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <future>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace editor {
@@ -71,6 +73,13 @@ public:
 
 private:
     void queue_metrics();
+    // Decodes retired by a newer selection are harvested instead of joined, so
+    // switching cameras never blocks the UI on an in-flight capture.
+    void harvest_retired();
+    void publish_gt(const aetherscan::io::RgbImage& image);
+    void remember_gt(
+        const std::filesystem::path::string_type& key,
+        const aetherscan::io::RgbImage& image);
 
     struct MetricsJob {
         ImageQaMetrics metrics;
@@ -84,7 +93,18 @@ private:
     aetherscan::io::RgbImage gt_cpu_;
     aetherscan::io::RgbImage render_cpu_;
     std::future<aetherscan::io::RgbImage> pending_;
+    // Superseded requests keep their key so a decode that finishes after the
+    // selection moved on still lands in the cache instead of being thrown away.
+    std::vector<std::pair<std::filesystem::path::string_type,
+                          std::future<aetherscan::io::RgbImage>>>
+        retired_;
     std::future<MetricsJob> metrics_pending_;
+    // Decoded captures keyed by native path, most recent last: comparing a few
+    // cameras back and forth must not pay for the decode again.
+    std::unordered_map<std::filesystem::path::string_type,
+                       aetherscan::io::RgbImage>
+        gt_cache_;
+    std::deque<std::filesystem::path::string_type> gt_cache_order_;
     std::filesystem::path pending_path_;
     std::filesystem::path loaded_path_;
     int pending_view_{-1};
