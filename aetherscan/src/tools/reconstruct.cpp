@@ -69,6 +69,7 @@ struct ReconstructCli {
     std::string mode{"global"};
     bool trust_focal{false};
     bool structural_pair_expansion{false};
+    bool positioning_cuda{true};
     std::filesystem::path output;
     // Editor/interactive runs skip user-facing ascan/asfm/PLY sidecars, eval
     // PNG dumps, and the extra timestamped log file. The caller already
@@ -522,6 +523,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Bundle adjustment backend: automatic (default), cpu, or cuda "
          "(cuda warns when a solve falls back)",
          cxxopts::value<std::string>()->default_value("automatic"))
+        ("positioning-cuda", "Use CUDA for supported global bearing positioning solves (default: true)",
+         cxxopts::value<bool>()->default_value("true"))
         ("extractor",
          "Feature extractor: siftgpu (default), sift, superpoint, disk, aliked",
          cxxopts::value<std::string>()->default_value("siftgpu"))
@@ -934,6 +937,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument(
             "--mode must be global, incremental, or hierarchical");
     const std::string ba_backend = result["ba-backend"].as<std::string>();
+    cli.positioning_cuda = result["positioning-cuda"].as<bool>();
     if (ba_backend == "automatic")
         aetherscan::sfm::set_bundle_backend_preference(
             aetherscan::sfm::BundleBackendPreference::automatic);
@@ -3438,6 +3442,7 @@ int main(int argc, char** argv) {
         if (files.size() < 2) throw std::runtime_error("Need at least two images");
 
         aetherscan::sfm::ReconstructionConfig config;
+        config.global_positioning.prefer_cuda = cli.positioning_cuda;
         std::chrono::steady_clock::time_point last_alignment_preview{};
         bool has_alignment_preview = false;
         if (!cli.working_sfm.empty()) {

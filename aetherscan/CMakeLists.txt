@@ -13,6 +13,7 @@ if(AETHERSCAN_ENABLE_CUDA)
         find_package(CUDAToolkit 12.0 REQUIRED)
         list(APPEND AETHERSCAN_BA_SOURCES
             src/ba/linearizer_cuda.cu
+            src/ba/bearing_cuda.cu
             src/ba/optimizer_cuda.cu)
     else()
         message(WARNING "CUDA compiler not found; building CPU-only AetherScan")
@@ -36,7 +37,7 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 if(AETHERSCAN_ENABLE_CUDA)
-    target_link_libraries(aetherscan_ba PUBLIC CUDA::cudart)
+    target_link_libraries(aetherscan_ba PUBLIC CUDA::cudart CUDA::cusolver)
     target_compile_definitions(aetherscan_ba PUBLIC AETHERSCAN_HAS_CUDA=1)
     set_target_properties(aetherscan_ba PROPERTIES
         CUDA_ARCHITECTURES native
@@ -580,6 +581,14 @@ if(AETHERSCAN_ENABLE_FEATURES)
         add_executable(aetherscan_pair_verify src/tools/pair_verify.cpp)
         add_executable(aetherscan_sfm_realign src/tools/sfm_realign.cpp)
         add_executable(aetherscan_sfm_match_benchmark src/tools/sfm_match_benchmark.cpp)
+        add_executable(aetherscan_sfm_positioning_benchmark src/tools/sfm_positioning_benchmark.cpp)
+        target_link_libraries(aetherscan_sfm_positioning_benchmark PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_sfm_positioning_benchmark POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_positioning_benchmark>
+                    $<TARGET_FILE_DIR:aetherscan_sfm_positioning_benchmark> COMMAND_EXPAND_LISTS)
+        endif()
         target_link_libraries(aetherscan_sfm_match_benchmark PRIVATE AetherScan::SfM)
         if(WIN32)
             add_custom_command(TARGET aetherscan_sfm_match_benchmark POST_BUILD
@@ -736,6 +745,17 @@ if(AETHERSCAN_ENABLE_FEATURES)
 endif()
 
 if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
+    if(AETHERSCAN_ENABLE_CUDA AND TARGET Ceres::ceres)
+        add_executable(aetherscan_bearing_cuda_test tests/bearing_cuda_test.cpp)
+        target_link_libraries(aetherscan_bearing_cuda_test PRIVATE AetherScan::BA Ceres::ceres)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_bearing_cuda_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_bearing_cuda_test>
+                    $<TARGET_FILE_DIR:aetherscan_bearing_cuda_test> COMMAND_EXPAND_LISTS)
+        endif()
+        add_test(NAME aetherscan.bearing_cuda COMMAND aetherscan_bearing_cuda_test)
+    endif()
     add_executable(aetherscan_ba_test tests/ba_optimizer_test.cpp)
     target_link_libraries(aetherscan_ba_test PRIVATE AetherScan::BA)
     add_test(NAME aetherscan.ba.optimizer COMMAND aetherscan_ba_test)

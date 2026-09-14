@@ -414,6 +414,7 @@ std::uint64_t reconstruction_key(
     key.append(config.global_rotation.reject_planar_pairs);
     key.append(
         static_cast<std::uint32_t>(config.global_rotation.weight_type));
+    key.append(config.global_positioning.prefer_cuda);
     key.append(config.global_positioning.min_views_per_track);
     key.append(config.global_positioning.min_tracks_for_positioning);
     key.append(config.global_positioning.tracks_per_registered_image);

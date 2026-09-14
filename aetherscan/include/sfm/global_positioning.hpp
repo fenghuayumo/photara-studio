@@ -12,6 +12,9 @@ enum class GlobalPositioningConstraint {
 };
 
 struct GlobalPositioningOptions {
+    // Dense camera Schur system on CUDA for the fixed-rotation bearing solve.
+    // Camera-only initialization and unsupported sizes retain the CPU path.
+    bool prefer_cuda{true};
     // Prefer longer tracks; 4–5 cuts short noisy constraints on real scenes
     // and avoids unconstrained short tracks in the selected subset.
     unsigned min_views_per_track{4};
