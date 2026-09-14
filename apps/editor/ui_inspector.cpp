@@ -619,6 +619,7 @@ Action draw_inspector(App& app) {
                     app.reconstruction_box.user_set)) {
                 app.reconstruction_box.user_set = false;
                 app.gizmo.box = {};
+                invalidate_reconstruction_box(app.reconstruction_box);
                 ensure_reconstruction_box(app);
             }
             if (ImGui::IsItemHovered())

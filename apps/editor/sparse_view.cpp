@@ -1741,6 +1741,15 @@ bool load_view_poses(
 
 void attach_view_image_paths(
     SparseScene& scene, const std::filesystem::path& images_dir) {
+    // The viewport calls this every frame, and probing one capture file per
+    // view (739 of them for the indoor iPhone dataset) dwarfs every other
+    // per-frame cost in the editor. The answer only changes when the views or
+    // the image directory do, so remember what was already resolved.
+    if (scene.image_paths_dir == images_dir &&
+        scene.image_paths_view_count == scene.views.size())
+        return;
+    scene.image_paths_dir = images_dir;
+    scene.image_paths_view_count = scene.views.size();
     std::error_code error;
     for (ViewPose& pose : scene.views) {
         if (!pose.image_path.empty()) {

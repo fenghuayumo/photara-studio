@@ -81,11 +81,20 @@ float reconstruction_local_radius(const App& app) {
 }
 
 void ensure_reconstruction_box(App& app) {
-    if (app.reconstruction_box.user_set) return;
-    if (app.scene.has_points())
-        fit_reconstruction_box(app.reconstruction_box, app.scene.points);
-    else if (app.mesh.has())
-        fit_reconstruction_box(app.reconstruction_box, app.mesh.vertices);
+    ReconstructionBox& box = app.reconstruction_box;
+    if (box.user_set) return;
+    // Deriving the box walks every point with a spatial hash and a parallel
+    // outlier pass (~0.4 s for a 640k cloud), and this is called from the
+    // viewport draw path. It only depends on the loaded cloud/mesh, so cache
+    // it and refit when a load replaces the source or the user asks for it.
+    if (box.auto_fitted) return;
+    if (app.scene.has_points()) {
+        fit_reconstruction_box(box, app.scene.points);
+        box.auto_fitted = true;
+    } else if (app.mesh.has()) {
+        fit_reconstruction_box(box, app.mesh.vertices);
+        box.auto_fitted = true;
+    }
 }
 
 void write_working_subject_bounds(App& app) {
@@ -1975,6 +1984,7 @@ void poll_mesh_load(App& app) {
         return;
     }
     app.mesh = std::move(loaded.mesh);
+    invalidate_reconstruction_box(app.reconstruction_box);
     app.mesh_load_failed = false;
     if (app.mesh.has_texture()) app.view_options.mesh_texture = true;
     pack_mesh_gpu_buffers(app);
@@ -2009,6 +2019,7 @@ void poll_scene_load(App& app) {
     app.qa_preview_view = ~0U;
     app.qa_camera_valid = false;
     app.scene = std::move(loaded.scene);
+    invalidate_reconstruction_box(app.reconstruction_box);
     app.alignment_preview_seen = false;
     // When an internal SfM or Gaussian scene replaces the imported cameras,
     // allow the next ensure pass to restore the dataset view poses, which are
@@ -2044,6 +2055,7 @@ void poll_alignment_preview(App& app) {
             app.alignment_preview_load_generation == app.alignment_preview_generation) {
             const bool first = !app.alignment_preview_seen;
             app.scene = std::move(loaded.scene);
+            invalidate_reconstruction_box(app.reconstruction_box);
             app.scene_source = "Alignment preview";
             attach_view_image_paths(app.scene, reconstruction_images_path(app));
             app.alignment_preview_seen = true;

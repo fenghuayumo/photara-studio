@@ -81,6 +81,13 @@ struct SparseScene {
     std::size_t registered_views{};
     std::size_t total_views{};
     float mean_reprojection{};
+    // `attach_view_image_paths` cache: the directory the frame image paths were
+    // last resolved against and the view count at that moment. Probing one file
+    // per view costs more than the rest of a viewport update, so the pass is
+    // skipped while both still match. A freshly loaded scene starts empty and
+    // therefore resolves once.
+    std::filesystem::path image_paths_dir;
+    std::size_t image_paths_view_count{};
 
     [[nodiscard]] bool has_points() const { return !points.empty(); }
     [[nodiscard]] bool has_gaussians() const {
@@ -180,6 +187,10 @@ struct ReconstructionBox {
     Vec3 max;
     bool valid{};
     bool user_set{};
+    // True while the box reflects the currently loaded scene/mesh. Deriving it
+    // walks the whole cloud (spatial hash + outlier pass), so the result is
+    // cached instead of being recomputed on every viewport frame.
+    bool auto_fitted{};
 
     [[nodiscard]] Vec3 centre() const {
         return {
@@ -194,6 +205,11 @@ struct ReconstructionBox {
 
 void fit_reconstruction_box(
     ReconstructionBox& box, const std::vector<Vec3>& points);
+// Drops the cached auto-fit so the next ensure pass re-derives the box. A box
+// the user dragged (user_set) is preserved by that pass either way.
+inline void invalidate_reconstruction_box(ReconstructionBox& box) noexcept {
+    box.auto_fitted = false;
+}
 bool write_reconstruction_box(
     const ReconstructionBox& box, const std::filesystem::path& path);
 
@@ -235,7 +251,9 @@ bool write_preview_camera_file(
 bool load_view_poses(
     const std::filesystem::path& poses_csv, SparseScene& scene);
 
-// Fills missing ViewPose::image_path entries from `images_dir / name`.
+// Fills missing ViewPose::image_path entries from `images_dir / name`. The
+// result is cached on the scene, so repeat calls for the same views and
+// directory do no filesystem work.
 void attach_view_image_paths(
     SparseScene& scene, const std::filesystem::path& images_dir);
 
