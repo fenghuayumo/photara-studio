@@ -405,6 +405,8 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
     settings.multi_view_ncc_weight = app.settings.multi_view_ncc_weight;
     settings.geometry_from_iter = app.settings.geometry_from_iter;
     settings.normal_field = app.settings.normal_field;
+    settings.ppisp_layout = app.settings.ppisp_layout;
+    settings.bilateral_grid = app.settings.bilateral_grid;
     settings.texture_quality = app.settings.texture_quality;
     settings.atlas_resolution = app.settings.atlas_resolution;
     settings.texture_delight = app.settings.texture_delight;
@@ -458,6 +460,8 @@ void apply_project_settings(
     app.settings.multi_view_ncc_weight = settings.multi_view_ncc_weight;
     app.settings.geometry_from_iter = settings.geometry_from_iter;
     app.settings.normal_field = settings.normal_field;
+    app.settings.ppisp_layout = std::clamp(settings.ppisp_layout, 0, 2);
+    app.settings.bilateral_grid = settings.bilateral_grid;
     app.settings.texture_quality = std::clamp(settings.texture_quality, 0, 2);
     app.settings.atlas_resolution = settings.atlas_resolution > 0
         ? settings.atlas_resolution

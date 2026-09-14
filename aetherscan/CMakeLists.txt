@@ -394,6 +394,8 @@ if(AETHERSCAN_ENABLE_FEATURES)
         add_library(aetherscan_splat_cuda STATIC
             src/splat/rasterizer.cu
             src/splat/cuda_ops.cu
+            src/splat/bilateral_grid.cu
+            src/splat/ppisp.cu
             src/splat/cuda_vulkan_preview.cu
             src/splat/fused_ssim.cu
             src/splat/visualize.cu)

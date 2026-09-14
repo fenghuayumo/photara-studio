@@ -14,13 +14,15 @@ def main():
     p.add_argument('--reference', type=Path, required=True)
     p.add_argument('--candidate', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--reference-label', default='AetherScan v1')
+    p.add_argument('--candidate-label', default='revised ADC-IGS')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     rows = []
     content = ['<!doctype html><meta charset="utf-8"><title>IGS quality comparison</title>',
                '<style>body{font:16px system-ui;background:#15171b;color:#eee;margin:30px}'
                'img{width:32%;height:auto}section{margin:30px 0}p{color:#ccc}</style>',
-               '<h1>Ground truth / AetherScan v1 / revised ADC-IGS</h1>',
+               f'<h1>Ground truth / {html.escape(a.reference_label)} / {html.escape(a.candidate_label)}</h1>',
                '<p>Same held-out cameras. Primary valid-pixel metrics use the same camera-derived '
                'source validity mask for both models, excluding undefined undistortion borders. '
                'Full-frame metrics include those borders. '
@@ -54,11 +56,23 @@ def main():
         novel_ref = a.reference / f'novel_{view}.png'
         novel_new = a.candidate / f'novel_{view}.png'
         if novel_ref.exists() and novel_new.exists():
-            content.append('<details><summary>Novel midpoint camera: v1 / revised (no ground truth)</summary>')
+            content.append('<details><summary>Novel midpoint camera: reference / revised (no ground truth)</summary>')
             for label, path in [('v1', novel_ref), ('revised', novel_new)]:
                 out = a.output / f'novel_{label}_{view}.jpg'
                 Image.open(path).save(out, quality=95)
                 content.append(f'<img src="{out.name}" alt="novel {label}">')
+            content.append('</details>')
+        for percent in [-40, -20, 20, 40]:
+            paths = [(label, folder / f'dolly_{percent}_{view}.png')
+                     for label, folder in [('reference', a.reference), ('revised', a.candidate)]]
+            if not all(path.exists() for _, path in paths):
+                continue
+            content.append(f'<details><summary>Optical-axis displacement {percent}% '
+                           '(sparse median depth; no ground truth): reference / revised</summary>')
+            for label, path in paths:
+                out = a.output / f'dolly_{percent}_{label}_{view}.jpg'
+                Image.open(path).save(out, quality=95)
+                content.append(f'<a href="{out.name}"><img src="{out.name}" alt="{label}"></a>')
             content.append('</details>')
     if not rows:
         raise ValueError('No target images')

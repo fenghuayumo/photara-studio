@@ -224,6 +224,12 @@ NB_MODULE(aetherscan_native, module) {
         .value("MASKED", splat::AlphaMode::masked)
         .value("TRANSPARENT", splat::AlphaMode::transparent);
 
+    nb::enum_<splat::PpispParamType>(module, "PpispParamType")
+        .value("CHANNEL_GAIN_BIAS", splat::PpispParamType::channel_gain_bias)
+        .value("NO_CRF_NO_VIG", splat::PpispParamType::no_crf_no_vig)
+        .value("NO_CRF", splat::PpispParamType::no_crf)
+        .value("ORIGINAL", splat::PpispParamType::original);
+
     nb::enum_<splat::DensificationStrategy>(
         module, "DensificationStrategy")
         .value("ADC_PLUS", splat::DensificationStrategy::adc_plus)
@@ -507,6 +513,39 @@ NB_MODULE(aetherscan_native, module) {
             "photometric_weight",
             &splat::TrainingOptions::photometric_weight)
         .def_rw("ssim_weight", &splat::TrainingOptions::ssim_weight)
+        .def_rw(
+            "use_bilateral_grid",
+            &splat::TrainingOptions::use_bilateral_grid)
+        .def_rw(
+            "bilateral_grid_width",
+            &splat::TrainingOptions::bilateral_grid_width)
+        .def_rw(
+            "bilateral_grid_height",
+            &splat::TrainingOptions::bilateral_grid_height)
+        .def_rw(
+            "bilateral_grid_luma",
+            &splat::TrainingOptions::bilateral_grid_luma)
+        .def_rw(
+            "bilateral_grid_lr",
+            &splat::TrainingOptions::bilateral_grid_lr)
+        .def_rw(
+            "bilateral_grid_tv_weight",
+            &splat::TrainingOptions::bilateral_grid_tv_weight)
+        .def_rw("use_ppisp", &splat::TrainingOptions::use_ppisp)
+        .def_rw("ppisp_type", &splat::TrainingOptions::ppisp_type)
+        .def_rw("ppisp_lr", &splat::TrainingOptions::ppisp_lr)
+        .def_rw(
+            "ppisp_clamp_output",
+            &splat::TrainingOptions::ppisp_clamp_output)
+        .def_rw(
+            "ppisp_reg_exposure_mean",
+            &splat::TrainingOptions::ppisp_reg_exposure_mean)
+        .def_rw(
+            "ppisp_reg_color_mean",
+            &splat::TrainingOptions::ppisp_reg_color_mean)
+        .def_rw(
+            "ppisp_before_bilagrid",
+            &splat::TrainingOptions::ppisp_before_bilagrid)
         .def_rw(
             "use_depth_normal_loss",
             &splat::TrainingOptions::use_depth_normal_loss)

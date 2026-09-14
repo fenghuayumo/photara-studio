@@ -1,8 +1,10 @@
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
 
+#include "bilateral_grid.hpp"
 #include "cuda_ops.hpp"
 #include "fused_ssim.hpp"
+#include "ppisp.hpp"
 #include "core/camera_projection.hpp"
 #include "core/logging.hpp"
 #include "densification.hpp"
@@ -895,6 +897,19 @@ GaussianModel Trainer::train(
     const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
         &sh_state, &normal_features_state};
+    // Per-view photometric compensation. State is indexed by the source view,
+    // so it survives densification: rows change, cameras do not. PPISP carries
+    // both the physically-based ISP layouts and the lightweight gain/bias
+    // layout; the bilateral grid adds spatial variation on top.
+    const bool ppisp_enabled = options_.use_ppisp;
+    const bool bilagrid_enabled = options_.use_bilateral_grid;
+    const bool ppisp_before_bilagrid = options_.ppisp_before_bilagrid;
+    detail::PpispState ppisp_state = ppisp_enabled
+        ? detail::make_ppisp_state(scene.views.size(), options_)
+        : detail::PpispState{};
+    detail::BilateralGridState bilagrid_state = bilagrid_enabled
+        ? detail::make_bilateral_grid_state(scene.views.size(), options_)
+        : detail::BilateralGridState{};
     const bool densification_enabled = refine::is_enabled(options_);
     detail::DensificationStats densification_stats =
         detail::make_densification_stats(model.size());
@@ -1204,8 +1219,34 @@ GaussianModel Trainer::train(
             }
         }
         cuda_profiler.mark(CudaTrainingStage::preview);
+        // Colour correction is applied to the plane the photometric loss sees.
+        // Previews, held-out evaluation and exported models keep the canonical
+        // appearance, so these transforms never leave training.
+        RenderResult loss_render = rendered;
+        const tinytensor::Tensor* photo_color = &rendered.color;
+        const tinytensor::Tensor* ppisp_input = nullptr;
+        const tinytensor::Tensor* bilagrid_input = nullptr;
+        if (ppisp_enabled && ppisp_before_bilagrid) {
+            ppisp_input = photo_color;
+            detail::apply_ppisp(
+                *ppisp_input, ppisp_state, target.camera, view_index);
+            photo_color = &ppisp_state.output;
+        }
+        if (bilagrid_enabled) {
+            bilagrid_input = photo_color;
+            detail::apply_bilateral_grid(
+                *bilagrid_input, bilagrid_state, view_index);
+            photo_color = &bilagrid_state.output;
+        }
+        if (ppisp_enabled && !ppisp_before_bilagrid) {
+            ppisp_input = photo_color;
+            detail::apply_ppisp(
+                *ppisp_input, ppisp_state, target.camera, view_index);
+            photo_color = &ppisp_state.output;
+        }
+        loss_render.color = *photo_color;
         detail::LossGradients loss = detail::compute_training_loss(
-            rendered, target, options_, report_progress,
+            loss_render, target, options_, report_progress,
             depth_normal_active);
         RenderResult normal_field_render;
         detail::LossGradients normal_field_loss;
@@ -1300,11 +1341,43 @@ GaussianModel Trainer::train(
             const bool mask_enabled =
                 target.has_mask && (options_.use_mask || target.mask_is_validity);
             densify_map = detail::compute_ssim_cs_error_map(
-                rendered.color, target.rgb, target.mask, mask_enabled,
+                loss_render.color, target.rgb, target.mask, mask_enabled,
                 options_.densify_loss_map_power);
         }
+        tinytensor::Tensor* photo_grad = &loss.color;
+        if (ppisp_enabled && !ppisp_before_bilagrid) {
+            detail::backward_ppisp(
+                ppisp_state, *ppisp_input, *photo_grad, target.camera,
+                view_index);
+            detail::step_ppisp(ppisp_state, options_, iteration);
+            photo_grad = &ppisp_state.input_grad;
+        }
+        if (bilagrid_enabled) {
+            detail::backward_bilateral_grid(
+                bilagrid_state, *bilagrid_input, *photo_grad, view_index);
+            detail::step_bilateral_grid(bilagrid_state, options_, iteration);
+            photo_grad = &bilagrid_state.input_grad;
+        }
+        if (ppisp_enabled && ppisp_before_bilagrid) {
+            detail::backward_ppisp(
+                ppisp_state, *ppisp_input, *photo_grad, target.camera,
+                view_index);
+            detail::step_ppisp(ppisp_state, options_, iteration);
+            photo_grad = &ppisp_state.input_grad;
+        }
+        if (ppisp_enabled && report_progress) {
+            // How much exposure / white-balance drift the capture carried.
+            // The layout decides which parameters are gains.
+            const std::array<float, 2> deviation =
+                detail::ppisp_identity_deviation(ppisp_state);
+            core::Logger::instance().info(
+                "splat_ppisp view=", view_index,
+                " layout=", static_cast<int>(ppisp_state.type),
+                " mean_gain_deviation=", deviation[0],
+                " maximum_gain_deviation=", deviation[1]);
+        }
         ModelGradients gradients = rasterizer.backward(
-            model, rendered, loss.color, loss.alpha, loss.depth, loss.normal,
+            model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
             densify_map);
         if (normal_field_active)
             detail::add_model_gradients(

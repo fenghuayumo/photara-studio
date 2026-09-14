@@ -26,6 +26,9 @@ RealityCapture 或 OpenMVS。Gaussian 写出格式看 `--output` 后缀：`.sog`
 - `aetherscan/include/splat/`：公开的模型、相机、训练配置和训练器 API；
 - `aetherscan/src/splat/rasterizer.cu`：TinyTensor tensor 与 GGGS 原生 CUDA API 的桥接；
 - `aetherscan/src/splat/cuda_ops.cu`：参数激活、链式梯度、融合监督损失和融合 Adam；
+- `aetherscan/src/splat/bilateral_grid.cu`：仿射双边网格颜色校正（训练期、空间变化）；
+- `aetherscan/src/splat/ppisp.cu`：PPISP 颜色校正，含 `channel_gain_bias`（轻量级
+  每通道增益/偏置）、`no_crf_no_vig`（曝光 + 白平衡单应）与可选暗角 / CRF 布局；
 - `aetherscan/src/splat/fused_ssim.cu`：从 Python fused-ssim 完整移植的 11×11 CUDA
   forward/backward；
 - `aetherscan/src/splat/colmap.cpp`：COLMAP 文本/二进制相机、位姿、稀疏点和 track 加载；
@@ -37,7 +40,14 @@ RealityCapture 或 OpenMVS。Gaussian 写出格式看 `--output` 后缀：`.sog`
 模型使用可训练的世界坐标均值、log-scale、四元数、opacity logit 和最高三阶 SH。
 稠密点云法线用于初始化 Gaussian 朝向，像素足迹用于初始化尺度，点色用于初始化 SH0。
 训练损失包含与 `pygsplat/simple_trainer.py` 对齐的 `0.8 * L1 + 0.2 * SSIM` 光度项和可选
-mask/alpha loss。mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 splat depth-normal、
+mask/alpha loss。室外视频的自动曝光 / 白平衡漂移可以由两种训练期颜色校正吸收，两者都
+移植自 spirula-studio，都不写入导出模型，且都默认关闭：PPISP
+（`--splat-ppisp --splat-ppisp-type channel_gain_bias|no_crf_no_vig|no_crf|original`）
+与仿射双边网格（`--splat-bilateral-grid`）。每视图模型与场景颜色之间存在退化，因此
+PPISP 把跨视图曝光/色彩均值锚定到单位变换，双边网格在每次更新后把每视图网格均值
+投影回 identity 仿射——网格只表达空间变化，全局曝光归 PPISP。同时开启时默认先 PPISP、
+再双边网格。实测：这些功能提升“按帧曝光对齐后”的重建指标，但不改变导出模型的留出指标，
+详见 [颜色校正报告](SPLAT_COLOR_CORRECTION_20260914.md)。mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 splat depth-normal、
 权重 `0.02` 的多视图几何往返和权重 `0.6` 的平面单应 NCC。多视图几何通过 GGGS 原生
 `sampleDepth` 前后向在相邻视图查询表面点，梯度同时回传参考深度、查询点以及邻视图
 Gaussian；NCC 使用半像素 7×7 patch、鲁棒 diffuse confidence 和深度/法线解析梯度。

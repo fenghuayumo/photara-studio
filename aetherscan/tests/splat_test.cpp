@@ -4,9 +4,11 @@
 #include "splat/colmap.hpp"
 #include "splat/dataset.hpp"
 #include "splat/formats.hpp"
+#include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/fused_ssim.hpp"
+#include "../src/splat/ppisp.hpp"
 #include "../src/splat/multi_view_scheduler.hpp"
 #include "../src/splat/training_data_loader.hpp"
 #include "io/image.hpp"
@@ -1822,6 +1824,122 @@ void test_alpha_parameter_gradients() {
                 "GGGS covariance scale gradient differs from finite "
                 "differences");
     }
+}
+
+void test_photometric_colour_correction_identity() {
+    using namespace aetherscan::splat;
+    const std::uint32_t width = 8;
+    const std::uint32_t height = 6;
+    std::vector<float> pixels(3 * height * width);
+    for (std::size_t i = 0; i < pixels.size(); ++i)
+        pixels[i] = 0.15F + 0.7F * static_cast<float>(i % 17) / 16.F;
+    const auto color = tinytensor::Tensor::from_vector(
+        pixels, {std::size_t{3}, height, width}, tinytensor::Device::CUDA);
+    TrainingOptions options;
+    options.use_bilateral_grid = true;
+    options.use_ppisp = true;
+    auto grid = detail::make_bilateral_grid_state(2, options);
+    detail::apply_bilateral_grid(color, grid, 1);
+    const auto grid_out = grid.output.to_vector();
+    for (std::size_t i = 0; i < pixels.size(); ++i)
+        require(
+            std::abs(grid_out[i] - pixels[i]) < 1e-4F,
+            "identity bilateral grid changed the rendered colour");
+    auto ppisp = detail::make_ppisp_state(2, options);
+    Camera camera;
+    camera.width = width;
+    camera.height = height;
+    camera.cx = 0.5F * static_cast<float>(width);
+    camera.cy = 0.5F * static_cast<float>(height);
+    detail::apply_ppisp(color, ppisp, camera, 1);
+    const auto ppisp_out = ppisp.output.to_vector();
+    for (std::size_t i = 0; i < pixels.size(); ++i)
+        require(
+            std::abs(ppisp_out[i] - pixels[i]) < 2e-4F,
+            "identity PPISP changed the rendered colour");
+    auto exposure = ppisp.parameters.to_vector();
+    exposure[ppisp.num_params] = 1.F;
+    ppisp.parameters = tinytensor::Tensor::from_vector(
+        exposure, ppisp.parameters.shape(), tinytensor::Device::CUDA);
+    detail::apply_ppisp(color, ppisp, camera, 1);
+    const auto exposed = ppisp.output.to_vector();
+    const float gain = std::exp2(1.F);
+    for (std::size_t i = 0; i < pixels.size(); ++i)
+        require(
+            std::abs(exposed[i] - pixels[i] * gain) < 5e-4F,
+            "PPISP exposure did not scale the rendered colour");
+    // Lightweight layout: per-channel log2 gain and bias, the cheap model for
+    // auto-exposure / auto-white-balance drift.
+    const auto ones = tinytensor::Tensor::from_vector(
+        std::vector<float>(pixels.size(), 1.F), color.shape(),
+        tinytensor::Device::CUDA);
+    TrainingOptions channel_options;
+    channel_options.use_ppisp = true;
+    channel_options.ppisp_type = PpispParamType::channel_gain_bias;
+    auto channel = detail::make_ppisp_state(2, channel_options);
+    require(
+        channel.num_params == 6,
+        "channel_gain_bias must carry six parameters");
+    detail::apply_ppisp(color, channel, camera, 1);
+    const auto channel_identity = channel.output.to_vector();
+    for (std::size_t i = 0; i < pixels.size(); ++i)
+        require(
+            std::abs(channel_identity[i] - pixels[i]) < 1e-6F,
+            "identity channel gain/bias changed the rendered colour");
+    auto channel_values = channel.parameters.to_vector();
+    channel_values[6 + 0] = 1.F;
+    channel_values[6 + 1] = -1.F;
+    channel_values[6 + 3] = 0.25F;
+    channel.parameters = tinytensor::Tensor::from_vector(
+        channel_values, channel.parameters.shape(), tinytensor::Device::CUDA);
+    detail::apply_ppisp(color, channel, camera, 1);
+    const auto channel_out = channel.output.to_vector();
+    for (std::size_t p = 0; p < pixels.size() / 3; ++p) {
+        require(
+            std::abs(channel_out[p] - (2.F * pixels[p] + 0.25F)) < 1e-5F,
+            "channel gain/bias did not scale the red channel");
+        require(
+            std::abs(channel_out[pixels.size() / 3 + p] -
+                         0.5F * pixels[pixels.size() / 3 + p]) < 1e-5F,
+            "channel gain/bias did not scale the green channel");
+    }
+    channel_values = std::vector<float>(12, 0.F);
+    channel.parameters = tinytensor::Tensor::from_vector(
+        channel_values, channel.parameters.shape(), tinytensor::Device::CUDA);
+    detail::backward_ppisp(channel, color, ones, camera, 0);
+    const auto channel_grad = channel.input_grad.to_vector();
+    for (std::size_t i = 0; i < pixels.size(); ++i)
+        require(
+            std::abs(channel_grad[i] - 1.F) < 1e-5F,
+            "identity channel gain/bias backward did not pass the gradient");
+    const auto channel_parameter_grad = channel.gradient.to_vector();
+    // The incoming gradient is one per pixel (a sum, not a mean), so the gain
+    // gradient integrates the red plane and the bias gradient counts pixels.
+    const std::size_t plane = pixels.size() / 3;
+    const double total_red =
+        std::accumulate(pixels.begin(), pixels.begin() + plane, 0.0);
+    require(
+        std::abs(channel_parameter_grad[0] -
+                 static_cast<float>(total_red * std::log(2.F))) < 1e-2F,
+        "channel gain gradient does not match the exposure derivative");
+    require(
+        std::abs(channel_parameter_grad[3] -
+                 static_cast<float>(plane)) < 1e-2F,
+        "channel bias gradient does not match the pixel count");
+    ppisp.parameters = tinytensor::Tensor::zeros_like(ppisp.parameters);
+    detail::backward_ppisp(ppisp, color, ones, camera, 0);
+    const auto ppisp_grad = ppisp.input_grad.to_vector();
+    for (std::size_t i = 0; i < pixels.size(); ++i)
+        require(
+            std::abs(ppisp_grad[i] - 1.F) < 2e-3F,
+            "identity PPISP backward did not pass the colour gradient through");
+    detail::backward_bilateral_grid(grid, color, ones, 0);
+    const auto grid_grad = grid.input_grad.to_vector();
+    for (std::size_t i = 0; i < pixels.size(); ++i)
+        require(
+            std::abs(grid_grad[i] - 1.F) < 2e-3F,
+            "identity bilateral grid backward did not pass the colour "
+            "gradient through");
 }
 
 void test_adam_rejects_non_finite_gradients() {
@@ -3957,6 +4075,7 @@ int main(int argc, char** argv) {
         test_sample_depth_batch_boundary();
         test_contribution_visibility_rejects_occluded_gaussians();
         test_alpha_parameter_gradients();
+        test_photometric_colour_correction_identity();
         test_adam_rejects_non_finite_gradients();
         test_fused_adam_parity();
         test_structure_adam_parity();

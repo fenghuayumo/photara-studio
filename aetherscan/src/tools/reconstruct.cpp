@@ -143,6 +143,16 @@ struct ReconstructCli {
     unsigned splat_prefetch_views{4};
     unsigned splat_eval_split_every{8};
     bool splat_use_mask{true};
+    bool splat_bilateral_grid{false};
+    unsigned splat_bilateral_grid_width{16};
+    unsigned splat_bilateral_grid_height{16};
+    unsigned splat_bilateral_grid_luma{8};
+    float splat_bilateral_grid_lr{2e-3F};
+    float splat_bilateral_grid_tv{10.F};
+    bool splat_ppisp{false};
+    std::string splat_ppisp_type{"no_crf_no_vig"};
+    float splat_ppisp_lr{2e-3F};
+    bool splat_ppisp_before_bilagrid{true};
     std::string splat_alpha_mode{"transparent"};
     float splat_match_alpha_weight{0.25F};
     float splat_ssim_weight{0.2F};
@@ -366,6 +376,12 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-max-scale-ratio R  hard anisotropy clamp "
                  "(0 disables; ADC+ visual default 100)\n"
               << "  --splat-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
+              << "  --splat-bilateral-grid=BOOL  spatially-varying affine colour "
+                 "correction (default false)\n"
+              << "  --splat-ppisp=BOOL  PPISP exposure/white-balance correction "
+                 "(default false)\n"
+              << "  --splat-ppisp-type TYPE  channel_gain_bias, no_crf_no_vig "
+                 "(default), no_crf, or original\n"
               << "  --splat-strategy adc_plus|adc_igs\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
@@ -729,6 +745,30 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0"))
         ("splat-constrain-scales", "Clamp sparse KNN scales to configured fractions",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-bilateral-grid",
+         "Spatially-varying affine bilateral-grid colour correction",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-bilateral-grid-width", "Bilateral grid spatial width",
+         cxxopts::value<unsigned>()->default_value("16"))
+        ("splat-bilateral-grid-height", "Bilateral grid spatial height",
+         cxxopts::value<unsigned>()->default_value("16"))
+        ("splat-bilateral-grid-luma", "Bilateral grid luma bins",
+         cxxopts::value<unsigned>()->default_value("8"))
+        ("splat-bilateral-grid-lr", "Bilateral grid Adam learning rate",
+         cxxopts::value<float>()->default_value("0.002"))
+        ("splat-bilateral-grid-tv", "Bilateral grid total-variation weight",
+         cxxopts::value<float>()->default_value("10"))
+        ("splat-ppisp",
+         "PPISP per-view exposure/white-balance colour correction",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-ppisp-type",
+         "PPISP layout: channel_gain_bias, no_crf_no_vig, no_crf, or original",
+         cxxopts::value<std::string>()->default_value("no_crf_no_vig"))
+        ("splat-ppisp-lr", "PPISP Adam learning rate",
+         cxxopts::value<float>()->default_value("0.002"))
+        ("splat-ppisp-before-bilagrid",
+         "Run PPISP before the bilateral grid when both are enabled",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-strategy", "Densification: adc_plus, adc_igs",
          cxxopts::value<std::string>()->default_value("adc_igs"))
         ("splat-densification", "Enable splat split/prune",
@@ -1125,6 +1165,22 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_max_scale_ratio_overridden =
         result.count("splat-max-scale-ratio") != 0;
     cli.splat_constrain_scales = result["splat-constrain-scales"].as<bool>();
+    cli.splat_bilateral_grid = result["splat-bilateral-grid"].as<bool>();
+    cli.splat_bilateral_grid_width =
+        result["splat-bilateral-grid-width"].as<unsigned>();
+    cli.splat_bilateral_grid_height =
+        result["splat-bilateral-grid-height"].as<unsigned>();
+    cli.splat_bilateral_grid_luma =
+        result["splat-bilateral-grid-luma"].as<unsigned>();
+    cli.splat_bilateral_grid_lr =
+        result["splat-bilateral-grid-lr"].as<float>();
+    cli.splat_bilateral_grid_tv =
+        result["splat-bilateral-grid-tv"].as<float>();
+    cli.splat_ppisp = result["splat-ppisp"].as<bool>();
+    cli.splat_ppisp_type = result["splat-ppisp-type"].as<std::string>();
+    cli.splat_ppisp_lr = result["splat-ppisp-lr"].as<float>();
+    cli.splat_ppisp_before_bilagrid =
+        result["splat-ppisp-before-bilagrid"].as<bool>();
     cli.splat_strategy = result["splat-strategy"].as<std::string>();
     cli.splat_densification = result["splat-densification"].as<bool>();
     cli.splat_structure_freeze_iter =
@@ -1284,6 +1340,29 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.splat_alpha_mode != "transparent")
         throw std::invalid_argument(
             "--splat-alpha-mode must be masked or transparent");
+    if (cli.splat_ppisp_type != "channel_gain_bias" &&
+        cli.splat_ppisp_type != "no_crf_no_vig" &&
+        cli.splat_ppisp_type != "no_crf" &&
+        cli.splat_ppisp_type != "original")
+        throw std::invalid_argument(
+            "--splat-ppisp-type must be channel_gain_bias, no_crf_no_vig, "
+            "no_crf, or original");
+    if (cli.splat_bilateral_grid_width == 0 ||
+        cli.splat_bilateral_grid_height == 0 ||
+        cli.splat_bilateral_grid_luma == 0)
+        throw std::invalid_argument(
+            "--splat-bilateral-grid-width/height/luma must be positive");
+    if (!std::isfinite(cli.splat_bilateral_grid_lr) ||
+        cli.splat_bilateral_grid_lr < 0.F)
+        throw std::invalid_argument(
+            "--splat-bilateral-grid-lr must be finite and non-negative");
+    if (!std::isfinite(cli.splat_bilateral_grid_tv) ||
+        cli.splat_bilateral_grid_tv < 0.F)
+        throw std::invalid_argument(
+            "--splat-bilateral-grid-tv must be finite and non-negative");
+    if (!std::isfinite(cli.splat_ppisp_lr) || cli.splat_ppisp_lr < 0.F)
+        throw std::invalid_argument(
+            "--splat-ppisp-lr must be finite and non-negative");
     if (cli.splat_match_alpha_weight < 0.F)
         throw std::invalid_argument(
             "--splat-match-alpha-weight must be non-negative");
@@ -1718,6 +1797,10 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.multi_view_ncc_weight = cli.splat_multi_view_ncc_weight;
     settings.geometry_from_iter = static_cast<int>(cli.splat_geometry_from_iter);
     settings.normal_field = cli.splat_normal_field;
+    settings.ppisp_layout = !cli.splat_ppisp
+        ? 0
+        : cli.splat_ppisp_type == "channel_gain_bias" ? 1 : 2;
+    settings.bilateral_grid = cli.splat_bilateral_grid;
     settings.atlas_resolution = static_cast<int>(cli.atlas_resolution);
     settings.texture_delight = cli.delight;
     settings.texture_optimize = cli.texture_optimize;
@@ -2558,6 +2641,22 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     aetherscan::splat::apply_strategy_defaults(options);
     options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;
+    options.use_bilateral_grid = cli.splat_bilateral_grid;
+    options.bilateral_grid_width = cli.splat_bilateral_grid_width;
+    options.bilateral_grid_height = cli.splat_bilateral_grid_height;
+    options.bilateral_grid_luma = cli.splat_bilateral_grid_luma;
+    options.bilateral_grid_lr = cli.splat_bilateral_grid_lr;
+    options.bilateral_grid_tv_weight = cli.splat_bilateral_grid_tv;
+    options.use_ppisp = cli.splat_ppisp;
+    options.ppisp_type = cli.splat_ppisp_type == "original"
+        ? aetherscan::splat::PpispParamType::original
+        : cli.splat_ppisp_type == "no_crf"
+            ? aetherscan::splat::PpispParamType::no_crf
+            : cli.splat_ppisp_type == "channel_gain_bias"
+                ? aetherscan::splat::PpispParamType::channel_gain_bias
+                : aetherscan::splat::PpispParamType::no_crf_no_vig;
+    options.ppisp_lr = cli.splat_ppisp_lr;
+    options.ppisp_before_bilagrid = cli.splat_ppisp_before_bilagrid;
     if (!dense_input) {
         // brush-train optimizer defaults. The trainer also switches ADC to
         // brush's 2-NN/identity/0.5-opacity sparse initialization.
@@ -2706,6 +2805,17 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " grow_stop_iter=", options.grow_stop_iter,
         " opacity_decay=", options.opacity_decay,
         " scale_decay=", options.scale_decay,
+        " bilateral_grid=", options.use_bilateral_grid,
+        " bilateral_grid_shape=", options.bilateral_grid_width, 'x',
+        options.bilateral_grid_height, 'x', options.bilateral_grid_luma,
+        " bilateral_grid_lr=", options.bilateral_grid_lr,
+        " bilateral_grid_tv=", options.bilateral_grid_tv_weight,
+        " bilateral_grid_identity_projection=",
+        options.bilateral_grid_identity_projection,
+        " ppisp=", options.use_ppisp,
+        " ppisp_type=", cli.splat_ppisp_type,
+        " ppisp_lr=", options.ppisp_lr,
+        " ppisp_before_bilagrid=", options.ppisp_before_bilagrid,
         " densification_cap=", options.densification_cap,
         " dense_recycle_fraction=", options.dense_recycle_fraction,
         " dense_growth_fraction=", options.dense_growth_fraction,

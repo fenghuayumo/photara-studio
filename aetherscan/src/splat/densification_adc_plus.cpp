@@ -171,6 +171,13 @@ RefinementCounts AdcPlusStrategy::refine(
     if (options.densify_use_error_map)
         retained_gradient = detail::densify_mean_scores(
             retained_gradient, retained_count, 1.F);
+    if (options.densification_strategy == DensificationStrategy::adc_igs &&
+        options.densify_use_error_map)
+        // Retain ADC+'s near-camera footprint correction when replacing its
+        // gradient score with IGS image/world evidence. Use the corrected
+        // score for relocation and oversize ranking as well as net growth.
+        retained_gradient = detail::adc_plus_footprint_weights(
+            retained_gradient, retained_screen);
     select_training_rows_gpu(model, keep_indices, states);
     const std::size_t pruned = old_count - retained;
 

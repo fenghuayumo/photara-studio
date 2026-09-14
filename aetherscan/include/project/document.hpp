@@ -64,6 +64,11 @@ struct Settings {
     float multi_view_ncc_weight = 0.6F;
     int geometry_from_iter = 3'000;
     bool normal_field = false;
+    // Training-time colour correction for auto-exposure / auto-white-balance
+    // drift: ppisp_layout 0 = off, 1 = channel gain/bias, 2 = exposure and
+    // white balance. The bilateral grid adds spatially varying correction.
+    int ppisp_layout = 0;
+    bool bilateral_grid = false;
 };
 
 std::vector<std::uint8_t> encode_settings(

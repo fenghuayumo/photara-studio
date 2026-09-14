@@ -268,6 +268,12 @@ struct ProjectSettings {
     int geometry_from_iter = 3'000;
     // GaussianWrapping normal-field training. Off is the default GGGS path.
     bool normal_field = false;
+    // Training-time colour correction for auto-exposure / auto-white-balance
+    // drift. `ppisp_layout`: 0 off, 1 channel gain/bias, 2 exposure + white
+    // balance (PPISP homography). The bilateral grid adds spatially varying
+    // affine correction on top and is normally paired with PPISP.
+    int ppisp_layout = 0;
+    bool bilateral_grid = false;
 
     // Texture projection after mesh extraction (aether_drender).
     // quality: 0 Fast, 1 Standard, 2 High.

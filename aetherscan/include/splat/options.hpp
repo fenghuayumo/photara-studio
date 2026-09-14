@@ -18,6 +18,32 @@ enum class DensificationStrategy {
     dense_adaptive,
 };
 
+// PPISP (per-pixel image signal processing) parameter layout. The default
+// keeps exposure and a colour-homography white-balance; vignetting and the
+// CRF are opt-in for captures that need them. `channel_gain_bias` is the
+// lightweight layout: three log2 gains and three biases, which is what a video
+// capture needs when only auto-exposure and auto white balance drift.
+enum class PpispParamType {
+    channel_gain_bias,
+    no_crf_no_vig,
+    no_crf,
+    original,
+};
+
+[[nodiscard]] constexpr int ppisp_parameter_count(PpispParamType type) {
+    switch (type) {
+    case PpispParamType::channel_gain_bias:
+        return 6;
+    case PpispParamType::no_crf_no_vig:
+        return 9;
+    case PpispParamType::no_crf:
+        return 24;
+    case PpispParamType::original:
+        return 36;
+    }
+    return 9;
+}
+
 [[nodiscard]] constexpr bool is_adc_strategy(DensificationStrategy strategy) {
     return strategy == DensificationStrategy::adc_plus ||
            strategy == DensificationStrategy::adc_igs;
@@ -127,6 +153,35 @@ struct TrainingOptions {
     float adam_epsilon{1e-15F};
     float photometric_weight{1.F};
     float ssim_weight{0.2F};
+    // Training-time colour correction for auto-exposure / auto-white-balance
+    // drift in video captures. Both transforms are applied to the rendered
+    // image the photometric loss sees; evaluation, preview and exported models
+    // keep canonical appearance. The per-view gain/bias model is the
+    // `channel_gain_bias` PPISP layout rather than a separate code path.
+    bool use_bilateral_grid{false};
+    unsigned bilateral_grid_width{16};
+    unsigned bilateral_grid_height{16};
+    unsigned bilateral_grid_luma{8};
+    float bilateral_grid_lr{2e-3F};
+    float bilateral_grid_tv_weight{10.F};
+    // Keep every view's grid mean on the identity affine after each update.
+    // The matrix stays in the option struct (rather than being unconditional)
+    // so the projection can be ablated; disabling it is not recommended, since
+    // an unconstrained mean absorbs the global colour mapping.
+    bool bilateral_grid_identity_projection{true};
+    bool use_ppisp{false};
+    PpispParamType ppisp_type{PpispParamType::no_crf_no_vig};
+    float ppisp_lr{2e-3F};
+    float ppisp_reg_exposure_mean{1.F};
+    float ppisp_reg_color_mean{1.F};
+    float ppisp_reg_vig_center{0.02F};
+    float ppisp_reg_vig_non_pos{0.01F};
+    float ppisp_reg_vig_channel_var{0.1F};
+    float ppisp_reg_crf_channel_var{0.1F};
+    bool ppisp_clamp_output{false};
+    // When both PPISP and the bilateral grid are enabled, PPISP runs first
+    // (exposure/WB, then spatially-varying affine), matching spirula-studio.
+    bool ppisp_before_bilagrid{true};
     float depth_weight{0.05F};
     float normal_weight{0.01F};
     // GGGS meshing loss from the Python reference: cosine consistency between
