@@ -1,4 +1,6 @@
 #include "sfm/triangulation.hpp"
+#include "sfm/checkpoint.hpp"
+#include <bit>
 
 #include <charconv>
 #include <chrono>
@@ -6,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -24,6 +27,7 @@ struct Config {
     std::size_t views{6};
     std::size_t iterations{5};
     unsigned threads{0};
+    std::filesystem::path checkpoint;
 };
 
 std::size_t parse_size(const std::string_view text, const char* option) {
@@ -48,13 +52,16 @@ Config parse_arguments(const int argc, char** argv) {
                 << "  --views N       Observations per track (default 6)\n"
                 << "  --iterations N  Timed iterations (default 5)\n"
                 << "  --threads N     Worker threads, 0=hardware (default 0)\n";
+            std::cout << "  --checkpoint PATH  Use a real tracks/reconstruction checkpoint\n";
             std::exit(0);
         }
         if (i + 1 >= argc)
             throw std::invalid_argument(
                 "Missing value after " + std::string(argument));
         const std::string_view value = argv[++i];
-        if (argument == "--tracks")
+        if (argument == "--checkpoint")
+            config.checkpoint = std::filesystem::path(value);
+        else if (argument == "--tracks")
             config.tracks = parse_size(value, "--tracks");
         else if (argument == "--views")
             config.views = parse_size(value, "--views");
@@ -136,7 +143,24 @@ Scene make_scene(const Config& config) {
 int main(const int argc, char** argv) {
     try {
         const Config config = parse_arguments(argc, argv);
-        Scene scene = make_scene(config);
+        Scene scene;
+        if (config.checkpoint.empty()) scene = make_scene(config);
+        else {
+            const auto stem = config.checkpoint.stem().string();
+            const auto separator = stem.find('-');
+            const auto prefix = stem.substr(0, separator);
+            if (separator == std::string::npos || (prefix != "tracks" && prefix != "reconstruction"))
+                throw std::invalid_argument("Expected tracks-HEX.bin or reconstruction-HEX.bin");
+            const auto hex = std::string_view(stem).substr(separator + 1);
+            std::uint64_t key{};
+            const auto parsed = std::from_chars(hex.data(), hex.data() + hex.size(), key, 16);
+            if (parsed.ec != std::errc{} || parsed.ptr != hex.data() + hex.size())
+                throw std::invalid_argument("Invalid checkpoint fingerprint");
+            CheckpointOptions cache; cache.directory = config.checkpoint.parent_path(); cache.write = false;
+            if (!CheckpointStore(cache).load_scene(prefix == "tracks" ? CheckpointStage::tracks : CheckpointStage::reconstruction, key, scene))
+                throw std::runtime_error("Cannot load checkpoint");
+            scene.thread_count = config.threads;
+        }
         const std::vector<Track> input_tracks = scene.tracks;
         TriangulationOptions options;
         options.reproj_threshold_px = 4.0F;
@@ -147,6 +171,11 @@ int main(const int argc, char** argv) {
         options.use_lo_ransac = false;
         options.refine_nonlinear = false;
         options.split_tracks = false;
+        if (!config.checkpoint.empty()) {
+            options = TriangulationOptions{};
+            options.reproj_threshold_px = 2.F;
+            options.min_angle_deg = 1.F;
+        }
 
         double total_ms = 0.0;
         unsigned triangulated = 0;
@@ -162,20 +191,38 @@ int main(const int argc, char** argv) {
 
         const double average_ms =
             total_ms / static_cast<double>(config.iterations);
+        std::size_t observations = 0;
+        for (const auto& track : input_tracks) observations += track.observations.size();
         const double tracks_per_second =
-            static_cast<double>(config.tracks) * 1000.0 / average_ms;
+            static_cast<double>(input_tracks.size()) * 1000.0 / average_ms;
         const double observations_per_second =
-            tracks_per_second * static_cast<double>(config.views);
+            static_cast<double>(observations) * 1000.0 / average_ms;
         std::cout << std::fixed << std::setprecision(2)
-                  << "triangulation tracks=" << config.tracks
-                  << " views=" << config.views
+                  << "triangulation tracks=" << input_tracks.size()
+                  << " observations=" << observations
                   << " iterations=" << config.iterations
                   << " triangulated=" << triangulated
                   << " average_ms=" << average_ms
                   << " tracks_per_s=" << tracks_per_second
                   << " observations_per_s=" << observations_per_second
                   << '\n';
-        return triangulated == config.tracks ? 0 : 2;
+        std::uint64_t digest = 14695981039346656037ULL;
+        const auto mix = [&](std::uint64_t value) {
+            for (unsigned byte = 0; byte < 8; ++byte) {
+                digest = (digest ^ (value & 255)) * 1099511628211ULL;
+                value >>= 8;
+            }
+        };
+        mix(scene.tracks.size());
+        for (const auto& track : scene.tracks) {
+            for (unsigned axis = 0; axis < 3; ++axis) mix(std::bit_cast<std::uint64_t>(track.position[axis]));
+            mix(track.num_inliers); mix(track.split_generation); mix(track.observations.size());
+            for (const auto& observation : track.observations) {
+                mix(observation.image_id); mix(observation.feature_id);
+            }
+        }
+        std::cout << "output_tracks=" << scene.tracks.size() << " ordered_geometry_digest=" << digest << '\n';
+        return !config.checkpoint.empty() || triangulated == config.tracks ? 0 : 2;
     } catch (const std::exception& error) {
         std::cerr << "triangulation benchmark error: " << error.what() << '\n';
         return 1;

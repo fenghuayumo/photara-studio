@@ -202,17 +202,17 @@ double score_consensus(
     return sum / static_cast<double>(inliers.size());
 }
 
-std::vector<std::size_t> classify_inliers(
+void classify_inliers(
     const std::vector<ObservationGeometry>& cams,
     const Vec3& position,
-    const float reproj_threshold_px) {
-    std::vector<std::size_t> inliers;
+    const float reproj_threshold_px,
+    std::vector<std::size_t>& inliers) {
+    inliers.clear();
     inliers.reserve(cams.size());
     for (std::size_t i = 0; i < cams.size(); ++i) {
         if (observation_supports_point(cams[i], position, reproj_threshold_px))
             inliers.push_back(i);
     }
-    return inliers;
 }
 
 float min_ray_angle_deg_for_indices(
@@ -294,24 +294,25 @@ bool refine_point_nonlinear(
     return position.allFinite();
 }
 
-void local_optimize(
+bool local_optimize(
     const std::vector<ObservationGeometry>& cams,
     Consensus& consensus,
     const TriangulationOptions& options) {
     for (unsigned pass = 0; pass < 2; ++pass) {
         if (!solve_linear_lls(cams, consensus.inlier_indices, consensus.position))
-            return;
+            return false;
         if (options.refine_nonlinear)
             refine_point_nonlinear(
                 cams, consensus.inlier_indices, consensus.position,
                 options.refine_iterations);
-        consensus.inlier_indices = classify_inliers(
-            cams, consensus.position, options.reproj_threshold_px);
-        if (consensus.inlier_indices.size() < options.min_inliers) return;
+        classify_inliers(cams, consensus.position, options.reproj_threshold_px,
+            consensus.inlier_indices);
+        if (consensus.inlier_indices.size() < options.min_inliers) return false;
     }
     consensus.score = score_consensus(
         cams, consensus.inlier_indices, consensus.position,
         options.reproj_threshold_px);
+    return true;
 }
 
 Consensus run_lo_ransac(
@@ -324,6 +325,8 @@ Consensus run_lo_ransac(
     std::uniform_int_distribution<std::size_t> pick(0, cams.size() - 1);
 
     const unsigned iterations = std::max(1U, options.ransac_iterations);
+    Consensus candidate, cached;
+    std::uint64_t cached_support = 0;
     for (unsigned iter = 0; iter < iterations; ++iter) {
         const std::size_t i = pick(generator);
         std::size_t j = pick(generator);
@@ -333,13 +336,24 @@ Consensus run_lo_ransac(
         // Prefer a non-trivial baseline when possible.
         if ((cams[i].center - cams[j].center).squaredNorm() < 1e-12) continue;
 
-        Consensus candidate;
+        candidate.score = std::numeric_limits<double>::infinity();
         if (!triangulate_two_view_midpoint(cams[i], cams[j], candidate.position))
             continue;
-        candidate.inlier_indices = classify_inliers(
-            cams, candidate.position, options.reproj_threshold_px);
+        classify_inliers(cams, candidate.position, options.reproj_threshold_px,
+            candidate.inlier_indices);
         if (candidate.inlier_indices.size() < options.min_inliers) continue;
-        local_optimize(cams, candidate, options);
+        // LO starts by solving the same linear system for a given support
+        // set, discarding the sampled point. Reuse only fully completed LO
+        // results; failed solves may retain their sampled point. Keep every
+        // RANSAC draw, tie-break and iteration unchanged.
+        std::uint64_t support = 0;
+        if (cams.size() <= 64)
+            for (const auto index : candidate.inlier_indices) support |= std::uint64_t{1} << index;
+        if (support != 0 && support == cached_support) candidate = cached;
+        else if (local_optimize(cams, candidate, options) && support != 0) {
+            cached_support = support;
+            cached = candidate;
+        }
         if (candidate.inlier_indices.size() < options.min_inliers) continue;
         if (min_ray_angle_deg_for_indices(
                 cams, candidate.inlier_indices, candidate.position) <
@@ -348,7 +362,7 @@ Consensus run_lo_ransac(
         if (candidate.inlier_indices.size() > best.inlier_indices.size() ||
             (candidate.inlier_indices.size() == best.inlier_indices.size() &&
              candidate.score < best.score))
-            best = std::move(candidate);
+            std::swap(best, candidate);
     }
     return best;
 }
@@ -360,8 +374,8 @@ Consensus triangulate_linear_consensus(
     std::vector<std::size_t> all(cams.size());
     std::iota(all.begin(), all.end(), 0);
     if (!solve_linear_lls(cams, all, consensus.position)) return consensus;
-    consensus.inlier_indices = classify_inliers(
-        cams, consensus.position, options.reproj_threshold_px);
+    classify_inliers(cams, consensus.position, options.reproj_threshold_px,
+        consensus.inlier_indices);
     if (consensus.inlier_indices.size() < options.min_inliers) {
         consensus.inlier_indices.clear();
         return consensus;

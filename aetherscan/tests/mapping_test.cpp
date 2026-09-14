@@ -870,6 +870,26 @@ void test_fast_split_gate() {
     options.ransac_iterations = 48;
     options.refine_nonlinear = false;
     options.max_splits_per_track = 1;
+    Scene serial = scene;
+    for (unsigned repeat = 1; repeat < 512; ++repeat)
+        serial.tracks.insert(serial.tracks.end(), scene.tracks.begin(), scene.tracks.end());
+    Scene parallel = serial;
+    serial.thread_count = 1;
+    parallel.thread_count = 4;
+    triangulate_tracks(serial, true, options);
+    triangulate_tracks(parallel, true, options);
+    expect(serial.tracks.size() == parallel.tracks.size(), "parallel split preserves child count");
+    for (std::size_t t = 0; t < std::min(serial.tracks.size(), parallel.tracks.size()); ++t) {
+        const auto& a = serial.tracks[t];
+        const auto& b = parallel.tracks[t];
+        expect(a.position == b.position && a.num_inliers == b.num_inliers &&
+               a.split_generation == b.split_generation && a.observations.size() == b.observations.size(),
+            "parallel split preserves ordered geometry exactly");
+        for (std::size_t o = 0; o < std::min(a.observations.size(), b.observations.size()); ++o)
+            expect(a.observations[o].image_id == b.observations[o].image_id &&
+                   a.observations[o].feature_id == b.observations[o].feature_id,
+                "parallel split preserves observation order and child IDs");
+    }
     triangulate_tracks(scene, true, options);
 
     expect(
