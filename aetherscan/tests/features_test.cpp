@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
+#include <future>
 
 namespace {
 using namespace aetherscan::features;
@@ -161,6 +162,21 @@ int main() {
                 gpu_extractor.extract_gray(first, width, height);
             const auto gpu_features1 =
                 gpu_extractor.extract_gray(second, width, height);
+            auto deferred = gpu_extractor.extract_gray_deferred(first, width, height);
+            if (deferred.metric != aetherscan::features::DescriptorMetric::l2) return 11;
+            auto synchronous = deferred;
+            gpu_extractor.finalize_descriptors(synchronous);
+            auto finalized = std::async(std::launch::async, [&] {
+                gpu_extractor.finalize_descriptors(deferred);
+            });
+            const auto concurrent = gpu_extractor.extract_gray(second, width, height);
+            finalized.get();
+            if (concurrent.keypoints.empty() || deferred.metric != synchronous.metric ||
+                deferred.descriptors != synchronous.descriptors ||
+                deferred.keypoints.size() != synchronous.keypoints.size()) return 12;
+            const auto normalized = deferred.descriptors;
+            gpu_extractor.finalize_descriptors(deferred);
+            if (deferred.descriptors != normalized) return 13;
             const auto gpu_matches =
                 gpu_matcher.match(gpu_features0, gpu_features1);
             std::cout << " gpu_features=" << gpu_features0.keypoints.size()

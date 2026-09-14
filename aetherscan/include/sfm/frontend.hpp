@@ -76,7 +76,7 @@ struct FrontEndOptions {
     std::size_t progressive_rescue_max_pairs_per_image{96};
     // Re-detect only weak views at this larger budget. Existing descriptors
     // remain first so cached primary-match feature indices stay valid.
-    unsigned progressive_rescue_max_features{27000};
+    unsigned progressive_rescue_max_features{54000};
     bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};
     CheckpointOptions checkpoint{};

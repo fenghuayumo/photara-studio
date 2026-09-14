@@ -2,6 +2,7 @@
 #include "sfm/checkpoint.hpp"
 #include "sfm/reconstruct.hpp"
 #include "sfm/submap_recovery.hpp"
+#include "core/logging.hpp"
 #include <charconv>
 #include <chrono>
 #include <fstream>
@@ -15,8 +16,9 @@ using namespace aetherscan::sfm;
 
 int main(int argc, char** argv) {
     try {
+        aetherscan::core::Logger::instance().configure({});
         if (argc != 3 && argc != 4) {
-            std::cerr << "Usage: aetherscan_sfm_realign reconstruction-HEX.bin NEW_OUTPUT_DIRECTORY [ADDITIONAL_RISK_NAMES.txt]\n";
+            std::cerr << "Usage: aetherscan_sfm_realign reconstruction-HEX.bin NEW_OUTPUT_DIRECTORY [ADDITIONAL_RISK_NAMES.txt|--resection]\n";
             return 1;
         }
         const std::filesystem::path input(argv[1]), output(argv[2]);
@@ -36,6 +38,18 @@ int main(int argc, char** argv) {
         if (!CheckpointStore(options).load_scene(CheckpointStage::reconstruction, fingerprint, scene))
             throw std::runtime_error("cannot load checkpoint");
         prune_unsupported_registrations(scene);
+        if (argc == 4 && std::string_view(argv[3]) == "--resection") {
+            const auto before_count = scene.registered_count();
+            recover_weakly_connected_views(scene);
+            std::vector<std::uint8_t> stable(scene.images.size());
+            for (const auto& image : scene.images) stable[image.id] = image.registered;
+            const auto recovered = recover_stable_resections(scene, stable);
+            std::filesystem::create_directories(output);
+            save_asfm(scene, output / "reconstruction.asfm");
+            std::cout << "resection probe: registered=" << before_count << " -> "
+                      << scene.registered_count() << " additional=" << recovered.size() << '\n';
+            return 0;
+        }
         auto audit = analyze_alignment_observability(scene);
         // Prior risk evidence must not disappear solely because added pair
         // edges close a graph cycle. The optional list adds candidates; it

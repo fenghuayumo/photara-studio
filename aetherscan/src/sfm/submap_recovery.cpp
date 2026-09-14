@@ -10,6 +10,8 @@
 #include <cmath>
 #include <map>
 #include <numbers>
+#include <numeric>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -611,12 +613,26 @@ std::vector<Index> recover_stable_resections(
         const auto reject = [&](const char* reason) {
             core::Logger::instance().info("stable resection rejected: image=", image.path.filename(), " reason=", reason);
         };
-        if (unique.size() < 40) { reject("insufficient_independent_depths"); continue; }
+        // Keep enough observations for both the 30-inlier fit and the
+        // independent 12-inlier audit; a fixed 20% holdout cannot do so for
+        // small correspondence sets, even with perfect geometry.
+        if (unique.size() < 42) { reject("insufficient_independent_depths"); continue; }
+        const std::size_t validation_count = std::min(unique.size() - 30,
+            std::max<std::size_t>(12, unique.size() / 3));
+        // Feature order can correlate with scale, location, or repeated texture.
+        // Shuffle once, independently of residuals, so validation stays held out.
+        std::vector<std::size_t> order(unique.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::mt19937 split_rng(0x53464d);
+        std::shuffle(order.begin(), order.end(), split_rng);
+        std::vector<bool> is_validation(unique.size(), false);
+        for (std::size_t j = 0; j < validation_count; ++j) is_validation[order[j]] = true;
         std::vector<Vec3> bearings, points;
         std::vector<Match> validation;
         std::size_t n = 0;
         for (const auto& [feature, m] : unique) {
-            if (n++ % 5 == 0) { validation.push_back(m); continue; }
+            const bool held_out = is_validation[n++];
+            if (held_out) { validation.push_back(m); continue; }
             const auto& p = image.features.keypoints[feature];
             bearings.push_back(camera.unproject(Vec2(p.x, p.y)));
             points.push_back(m.point);

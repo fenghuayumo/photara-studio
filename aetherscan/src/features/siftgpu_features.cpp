@@ -90,6 +90,14 @@ std::unique_ptr<FeatureExtractor> SiftGpuExtractor::clone() const {
 FeatureSet SiftGpuExtractor::extract_gray(
     const std::span<const std::uint8_t> pixels, const std::uint32_t width,
     const std::uint32_t height, std::size_t row_stride) const {
+    auto result = extract_gray_deferred(pixels, width, height, row_stride);
+    finalize_descriptors(result);
+    return result;
+}
+
+FeatureSet SiftGpuExtractor::extract_gray_deferred(
+    const std::span<const std::uint8_t> pixels, const std::uint32_t width,
+    const std::uint32_t height, std::size_t row_stride) const {
     if (!impl_->available)
         throw std::runtime_error("SiftGPU is not built or its CUDA/OpenGL context is unavailable");
     if (std::this_thread::get_id() != impl_->owner_thread)
@@ -124,12 +132,27 @@ FeatureSet SiftGpuExtractor::extract_gray(
     result.image_width = width;
     result.image_height = height;
     result.descriptor_dimension = 128;
-    result.metric = info().metric;
+    result.metric = DescriptorMetric::l2;
     result.extractor_name = std::string(name());
     result.keypoints.reserve(keys.size());
     for (const auto& key : keys)
         result.keypoints.push_back({key.x, key.y, key.s, key.o, 0.0F});
     result.descriptors = std::move(descriptors);
+    return result;
+#else
+    (void)pixels;
+    (void)width;
+    (void)height;
+    (void)row_stride;
+    return {};
+#endif
+}
+
+void SiftGpuExtractor::finalize_descriptors(FeatureSet& result) const {
+    if (result.metric == DescriptorMetric::l2_root) return;
+    if (result.metric != DescriptorMetric::l2 || result.descriptor_dimension != 128 ||
+        result.descriptors.size() != result.keypoints.size() * 128)
+        throw std::invalid_argument("Invalid deferred SiftGPU descriptors");
     if (impl_->options.root_sift) {
         for (std::size_t row = 0; row < result.keypoints.size(); ++row) {
             float* descriptor = result.descriptors.data() + row * 128;
@@ -141,15 +164,8 @@ FeatureSet SiftGpuExtractor::extract_gray(
                 descriptor[column] =
                     std::sqrt((std::max)(0.0F, descriptor[column]) * inverse);
         }
+        result.metric = DescriptorMetric::l2_root;
     }
-    return result;
-#else
-    (void)pixels;
-    (void)width;
-    (void)height;
-    (void)row_stride;
-    return {};
-#endif
 }
 
 class SiftGpuMatcher::Impl {

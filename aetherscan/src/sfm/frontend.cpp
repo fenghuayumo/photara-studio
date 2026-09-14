@@ -944,6 +944,7 @@ void extract_features_siftgpu_coordinator(
     core::ProgressReporter& progress, const bool compress_u8 = false) {
     const std::size_t count = image_paths.size();
     scene.images.resize(count);
+    if (count == 0) return;
     auto& pool = parallel::global_thread_pool();
     parallel::FutureGroup post_tasks;
     post_tasks.reserve(count);
@@ -952,27 +953,38 @@ void extract_features_siftgpu_coordinator(
         extractor.info().accepts_gray && !extractor.info().accepts_rgb;
 
     if (use_gray_prefetch) {
-        std::future<io::GrayImage> current_load = std::async(
-            std::launch::async,
-            [&image_paths] { return io::load_gray(image_paths[0]); });
-
+        constexpr std::size_t prefetch_depth = 4;
+        std::array<std::future<io::GrayImage>, prefetch_depth> loads;
+        const auto schedule_load = [&](std::size_t index) {
+            auto task = std::make_shared<std::packaged_task<io::GrayImage()>>(
+                [path = image_paths[index]] { return io::load_gray(path); });
+            auto future = task->get_future();
+            pool.submit([task] { (*task)(); });
+            return future;
+        };
+        for (std::size_t i = 0; i < std::min(count, prefetch_depth); ++i)
+            loads[i] = schedule_load(i);
+        const auto* sift_gpu = dynamic_cast<const features::SiftGpuExtractor*>(&extractor);
+        double decode_wait_seconds = 0, owner_extract_seconds = 0;
         for (std::size_t index = 0; index < count; ++index) {
-            std::future<io::GrayImage> next_load;
-            if (index + 1 < count) {
-                const std::filesystem::path next_path = image_paths[index + 1];
-                next_load = std::async(
-                    std::launch::async,
-                    [next_path] { return io::load_gray(next_path); });
-            }
-
-            io::GrayImage gray = current_load.get();
-            features::FeatureSet features = extractor.extract_gray(
-                gray.pixels, gray.width, gray.height);
+            const auto wait_start = std::chrono::steady_clock::now();
+            io::GrayImage gray = loads[index % prefetch_depth].get();
+            decode_wait_seconds += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - wait_start).count();
+            if (index + prefetch_depth < count)
+                loads[index % prefetch_depth] = schedule_load(index + prefetch_depth);
+            const auto extract_start = std::chrono::steady_clock::now();
+            features::FeatureSet features = sift_gpu
+                ? sift_gpu->extract_gray_deferred(gray.pixels, gray.width, gray.height)
+                : extractor.extract_gray(gray.pixels, gray.width, gray.height);
+            owner_extract_seconds += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - extract_start).count();
 
             post_tasks.submit(
                 pool,
-                [&, index, path = image_paths[index],
+                [&, index, sift_gpu, path = image_paths[index],
                  features = std::move(features)]() mutable {
+                    if (sift_gpu) sift_gpu->finalize_descriptors(features);
                     features = select_top_features_grid_3x3(
                         std::move(features), max_features);
                     if (compress_u8) features.compress_descriptors_u8();
@@ -984,9 +996,9 @@ void extract_features_siftgpu_coordinator(
             // Bound the float32 descriptors retained by queued work, even
             // when extraction outruns CPU grid selection / quantization.
             if ((index + 1) % 8 == 0) post_tasks.wait();
-
-            if (index + 1 < count) current_load = std::move(next_load);
         }
+        core::Logger::instance().info("feature extraction pipeline: prefetch=", prefetch_depth,
+            " decode_wait_s=", decode_wait_seconds, " owner_extract_s=", owner_extract_seconds);
     } else {
         // Learned RGB extractors (DISK) / SuperPoint via extract_file.
         // Skip grid selection; models already apply top-k.
@@ -2189,7 +2201,7 @@ FrontEndResult run_frontend(
             ++verified_degree[pair.id1];
             ++verified_degree[pair.id2];
             // A few small accidental edges do not establish usable multi-view
-            // depth. Require two well-supported, non-planar neighbors before
+            // depth. Require three well-supported, non-planar neighbors before
             // skipping the bounded high-feature rescue pass.
             if (pair.relative_pose && !pair.degenerate_planar && !pair.zero_baseline &&
                 pair.matches.size() >= 100) {
@@ -2207,13 +2219,17 @@ FrontEndResult run_frontend(
             if (structural_risk[image_id]) ++structural_weak_images;
             if (verified_degree[image_id] >=
                 runtime_options.progressive_min_verified_degree &&
-                nonplanar_degree[image_id] >= 2 &&
+                // Stable resection validates depths from at least three
+                // anchors. Two neighbors can only form a locally connected
+                // pocket and must not suppress feature augmentation.
+                nonplanar_degree[image_id] >= 3 &&
                 !structural_risk[image_id])
                 continue;
             weak[image_id] = 1;
             ++weak_images;
         }
 
+        std::vector<std::uint8_t> augmented(scene.images.size(), 0);
         if (weak_images > 0 && runtime_options.extractor == "siftgpu" &&
             runtime_options.progressive_rescue_max_features >
                 runtime_options.max_features) {
@@ -2238,9 +2254,11 @@ FrontEndResult run_frontend(
                 additional = select_top_features_grid_3x3(
                     std::move(additional),
                     runtime_options.progressive_rescue_max_features);
-                appended_features += append_new_features_preserving_indices(
+                const auto appended = append_new_features_preserving_indices(
                     scene.images[image_id].features, std::move(additional),
                     runtime_options.progressive_rescue_max_features);
+                augmented[image_id] = appended != 0;
+                appended_features += appended;
                 augmentation_progress.advance();
             }
             augmentation_progress.finish();
@@ -2294,7 +2312,8 @@ FrontEndResult run_frontend(
             const bool retry_failed =
                 (weak[first] || weak[second]) &&
                 !verified_pairs.count(key);
-            if ((primary_pairs.count(key) && !retry_failed) || rescue_pair_keys.count(key))
+            const bool retry_augmented = augmented[first] || augmented[second];
+            if ((primary_pairs.count(key) && !retry_failed && !retry_augmented) || rescue_pair_keys.count(key))
                 return false;
             const std::size_t budget =
                 runtime_options.progressive_rescue_max_pairs_per_image;
@@ -2308,6 +2327,12 @@ FrontEndResult run_frontend(
             if (weak[second]) ++rescue_degree[second];
             return true;
         };
+
+        // Newly detected keypoints must also reach existing neighbors. More
+        // edges alone do not help when their old tracks have too little depth.
+        for (const auto& pair : scene.pairs)
+            if (!pair.zero_baseline && (augmented[pair.id1] || augmented[pair.id2]))
+                add_rescue_candidate(pair.id1, pair.id2);
 
         if (exhaustive_rescue) {
             for (Index first = 0; first < scene.images.size(); ++first) {
@@ -2387,9 +2412,22 @@ FrontEndResult run_frontend(
                 rescue_pair_slots, rescue_progress);
             rescue_progress.finish();
 
-            unsigned rescued_pairs = 0;
+            unsigned rescued_pairs = 0, strengthened_pairs = 0;
+            std::unordered_map<std::uint64_t, std::size_t> existing_pairs;
+            for (std::size_t i = 0; i < scene.pairs.size(); ++i)
+                existing_pairs.emplace(candidate_key(scene.pairs[i].id1, scene.pairs[i].id2), i);
             for (ImagePair& pair : rescue_pair_slots) {
                 if (pair.matches.empty()) continue;
+                const auto existing = existing_pairs.find(candidate_key(pair.id1, pair.id2));
+                if (existing != existing_pairs.end()) {
+                    auto& previous = scene.pairs[existing->second];
+                    if (!previous.zero_baseline && pair.matches.size() > previous.matches.size() &&
+                        (!pair.degenerate_planar || previous.degenerate_planar)) {
+                        previous = std::move(pair);
+                        ++strengthened_pairs;
+                    }
+                    continue;
+                }
                 scene.pairs.push_back(std::move(pair));
                 ++rescued_pairs;
             }
@@ -2401,6 +2439,7 @@ FrontEndResult run_frontend(
                 " accepted=", rescued_pairs,
                 " ratio=", rescue_options.match_ratio,
                 " min_inliers=", rescue_options.relative.min_inliers,
+                " strengthened=", strengthened_pairs,
                 " pairs_total=", scene.pairs.size());
         }
     }

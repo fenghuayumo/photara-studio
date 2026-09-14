@@ -96,6 +96,13 @@ public:
         std::uint32_t height,
         std::size_t row_stride = 0) const override;
 
+    // GPU work stays on the owner thread. The returned L2 descriptors may
+    // be finalized on a worker while the next image is being extracted.
+    [[nodiscard]] FeatureSet extract_gray_deferred(
+        std::span<const std::uint8_t> pixels, std::uint32_t width,
+        std::uint32_t height, std::size_t row_stride = 0) const;
+    void finalize_descriptors(FeatureSet& features) const;
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

@@ -8,6 +8,7 @@
 #include <iostream>
 #include <chrono>
 #include <random>
+#include <numeric>
 #include <stdexcept>
 
 using namespace aetherscan::sfm;
@@ -190,6 +191,25 @@ int main() {
                 "resection must not reuse drifting depths");
         expect(analyze_alignment_observability(resected).unreliable_views == 0,
             "independent stable-depth support must certify corrected singletons");
+        for (const std::size_t count : {41, 42, 50}) {
+            Scene small = fixture();
+            small.tracks.resize(count);
+            for (auto& image : small.images) image.features.keypoints.resize(count);
+            for (auto& pair : small.pairs) pair.matches.resize(count);
+            const auto original = small.images;
+            const auto recovered = recover_stable_resections(small, stable);
+            expect(recovered.size() == (count >= 42 ? 4 : 0),
+                "small resection must reserve at least 30 fit and 12 validation observations");
+            for (Index i = 0; i < 8; ++i) {
+                if (i < 4 || count < 42)
+                    expect(small.images[i].pose.C == original[i].pose.C &&
+                           small.images[i].pose.R == original[i].pose.R,
+                        "stable and rejected small-sample poses must remain unchanged");
+                else
+                    expect((small.images[i].pose.C - Vec3(0.25*i, 0.12*(i%2), 0)).norm() < 0.01,
+                        "small-sample resection must recover accurate poses");
+            }
+        }
         Scene no_anchor = fixture(false);
         expect(recover_stable_resections(no_anchor).empty(), "resection must reject missing stable depths");
         Scene noisy = fixture();
@@ -345,10 +365,16 @@ int main() {
         expect(std::find(direction_recovered.begin(),direction_recovered.end(),4)==direction_recovered.end(),
             "pixel consensus must not override an inconsistent stable pair baseline");
         Scene heldout_mismatch = fixture();
+        std::vector<std::size_t> heldout_order(160);
+        std::iota(heldout_order.begin(), heldout_order.end(), 0);
+        std::mt19937 split_rng(0x53464d);
+        std::shuffle(heldout_order.begin(), heldout_order.end(), split_rng);
         for (Index i = 4; i < 8; ++i) {
             const auto original_features = heldout_mismatch.images[i].features.keypoints;
-            for (Index p = 0; p < 160; p += 5)
+            for (std::size_t j = 0; j < 53; ++j) {
+                const auto p = heldout_order[j];
                 heldout_mismatch.images[i].features.keypoints[p] = original_features[(p + 75) % 160];
+            }
         }
         const auto rejected_poses = heldout_mismatch.images;
         expect(recover_stable_resections(heldout_mismatch).empty(),
