@@ -290,9 +290,13 @@ void sync_live_preview_camera(
     if (app.layout.preview_camera_file.empty()) return;
     width = std::max<std::uint32_t>(1, width);
     height = std::max<std::uint32_t>(1, height);
+    const auto raster_delta = [](const std::uint32_t a, const std::uint32_t b) {
+        return a > b ? a - b : b - a;
+    };
     if (!force && app.has_last_preview_orbit &&
         !orbit_pose_changed(app.camera, app.last_preview_orbit) &&
-        width == app.preview_raster_width && height == app.preview_raster_height)
+        raster_delta(width, app.preview_raster_width) <= 2 &&
+        raster_delta(height, app.preview_raster_height) <= 2)
         return;
     ++app.preview_camera_revision;
     app.preview_raster_width = width;

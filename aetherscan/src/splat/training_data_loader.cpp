@@ -279,24 +279,43 @@ std::vector<std::vector<std::size_t>> compute_multi_view_neighbours(
 
 namespace {
 
-float sample_rgb(
-    const io::RgbImage& image, const float x, const float y, const int channel) {
+void sample_rgb(
+    const io::RgbImage& image, const float x, const float y,
+    std::uint8_t& red, std::uint8_t& green, std::uint8_t& blue) {
     if (x < 0.F || y < 0.F || x > static_cast<float>(image.width - 1) ||
-        y > static_cast<float>(image.height - 1))
-        return 0.F;
+        y > static_cast<float>(image.height - 1)) {
+        red = green = blue = 0;
+        return;
+    }
     const int x0 = static_cast<int>(x);
     const int y0 = static_cast<int>(y);
     const int x1 = std::min(x0 + 1, static_cast<int>(image.width) - 1);
     const int y1 = std::min(y0 + 1, static_cast<int>(image.height) - 1);
     const float tx = x - static_cast<float>(x0);
     const float ty = y - static_cast<float>(y0);
-    const auto at = [&](const int px, const int py) {
+    const float w00 = (1.F - tx) * (1.F - ty);
+    const float w10 = tx * (1.F - ty);
+    const float w01 = (1.F - tx) * ty;
+    const float w11 = tx * ty;
+    const auto at = [&](const int px, const int py, const int channel) {
         return static_cast<float>(image.pixels[
-            (static_cast<std::size_t>(py) * image.width + px) * 3 + channel]);
+            (static_cast<std::size_t>(py) * image.width +
+             static_cast<std::size_t>(px)) *
+                3 +
+            static_cast<std::size_t>(channel)]);
     };
-    return ((at(x0, y0) * (1.F - tx) + at(x1, y0) * tx) * (1.F - ty) +
-            (at(x0, y1) * (1.F - tx) + at(x1, y1) * tx) * ty) /
-           255.F;
+    const auto quantize = [](const float value) {
+        return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.F, 255.F)));
+    };
+    red = quantize(
+        at(x0, y0, 0) * w00 + at(x1, y0, 0) * w10 + at(x0, y1, 0) * w01 +
+        at(x1, y1, 0) * w11);
+    green = quantize(
+        at(x0, y0, 1) * w00 + at(x1, y0, 1) * w10 + at(x0, y1, 1) * w01 +
+        at(x1, y1, 1) * w11);
+    blue = quantize(
+        at(x0, y0, 2) * w00 + at(x1, y0, 2) * w10 + at(x0, y1, 2) * w01 +
+        at(x1, y1, 2) * w11);
 }
 
 std::pair<float, float> source_coordinate(
@@ -645,6 +664,9 @@ HostTrainingView load_host_training_view(
         (uses_native_splat_projection(camera.model) ||
          (view.k1 == 0.F && view.k2 == 0.F &&
           view.p1 == 0.F && view.p2 == 0.F));
+#if defined(AETHERSCAN_HAS_OPENMP)
+#pragma omp parallel for schedule(static) if (pixels >= 4096)
+#endif
     for (std::int64_t linear = 0;
          linear < static_cast<std::int64_t>(pixels); ++linear) {
         const auto pixel = static_cast<std::size_t>(linear);
@@ -688,9 +710,7 @@ HostTrainingView load_host_training_view(
                 sx > static_cast<float>(source.width - 1) ||
                 sy > static_cast<float>(source.height - 1)))
             alpha = 0;
-        red = quantize_channel(sample_rgb(source, sx, sy, 0));
-        green = quantize_channel(sample_rgb(source, sx, sy, 1));
-        blue = quantize_channel(sample_rgb(source, sx, sy, 2));
+        sample_rgb(source, sx, sy, red, green, blue);
         if (has_source_mask)
             alpha = quantize_channel(
                 sample_mask_coverage(source_mask, source, sx, sy));

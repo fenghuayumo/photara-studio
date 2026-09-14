@@ -2911,6 +2911,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                          << " mv_ncc=" << progress.multi_view_ncc_loss;
                 line << " image=" << progress.image_width << 'x'
                      << progress.image_height
+                     << " instances=" << progress.rendered_instances
                      << " sh_degree=" << progress.active_sh_degree
                      << " step_ms=" << progress.milliseconds;
                 aetherscan::core::Logger::instance().info(line.str());

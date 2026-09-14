@@ -62,6 +62,23 @@ bool load_preview_camera_file(
     return load_preview_camera_sidecar(path, camera, revision, vis);
 }
 
+bool preview_camera_equivalent(const Camera& left, const Camera& right) {
+    if (left.width != right.width || left.height != right.height ||
+        left.model != right.model)
+        return false;
+    const auto close = [](const float a, const float b) {
+        return std::abs(a - b) <=
+            1e-4F * std::max(1.F, std::abs(a) + std::abs(b));
+    };
+    if (!close(left.fx, right.fx) || !close(left.fy, right.fy) ||
+        !close(left.cx, right.cx) || !close(left.cy, right.cy))
+        return false;
+    for (std::size_t i = 0; i < left.world_to_camera.size(); ++i)
+        if (!close(left.world_to_camera[i], right.world_to_camera[i]))
+            return false;
+    return true;
+}
+
 tinytensor::Tensor render_preview_color(
     const GaussianModel& model, const Camera& camera,
     const TrainingOptions& options, const unsigned active_sh_degree,
@@ -859,6 +876,9 @@ GaussianModel Trainer::train(
     unsigned last_progress_iteration = 0;
     double ema_step_ms = 0.0;
     auto next_preview_poll = std::chrono::steady_clock::time_point::min();
+    auto next_extra_preview = std::chrono::steady_clock::time_point::min();
+    Camera last_preview_camera{};
+    bool has_last_preview_camera = false;
     const bool preview_has_sidecars = !options_.preview_camera_file.empty() ||
         !options_.preview_view_file.empty() || !options_.preview_vis_file.empty();
 
@@ -961,14 +981,14 @@ GaussianModel Trainer::train(
         const bool preview_scheduled = preview_enabled &&
             (iteration == 1 || iteration == options_.iterations ||
              iteration % options_.preview_interval == 0);
-        // Check interactive camera controls at most once per display frame,
-        // rather than opening/parsing three files for every optimizer step.
-        // Explicit iteration cadence and the final preview are still honored.
+        // Sidecar polls are for interactive orbit/vis changes. They must not
+        // launch a second full raster every optimizer step: the editor can
+        // rewrite the camera file when the viewport jitters by a pixel.
         if (preview_enabled && (preview_scheduled ||
                 (preview_has_sidecars &&
                  std::chrono::steady_clock::now() >= next_preview_poll))) {
-            next_preview_poll = std::chrono::steady_clock::now() +
-                std::chrono::milliseconds(16);
+            const auto preview_now = std::chrono::steady_clock::now();
+            next_preview_poll = preview_now + std::chrono::milliseconds(50);
             Camera preview_camera;
             std::uint64_t camera_revision = 0;
             VisualizeOptions camera_vis;
@@ -981,12 +1001,19 @@ GaussianModel Trainer::train(
             VisualizeOptions vis_peek = camera_vis;
             load_visualization_sidecar(
                 options_.preview_vis_file, vis_peek, vis_revision);
+            const bool pose_changed = custom_camera &&
+                (!has_last_preview_camera ||
+                 !preview_camera_equivalent(
+                     preview_camera, last_preview_camera));
+            const bool extra_preview_allowed =
+                preview_now >= next_extra_preview;
             const bool due =
-                iteration % options_.preview_interval == 0 ||
+                iteration == 1 ||
                 iteration == options_.iterations ||
+                iteration % options_.preview_interval == 0 ||
                 vis_revision != last_preview_vis_revision ||
                 (custom_camera
-                     ? camera_revision != last_preview_camera_revision
+                     ? pose_changed && extra_preview_allowed
                      : preview_index != last_preview_view);
             if (due) {
                 if (!custom_camera) {
@@ -998,6 +1025,11 @@ GaussianModel Trainer::train(
                 last_preview_view = preview_index;
                 last_preview_camera_revision = camera_revision;
                 last_preview_vis_revision = vis_revision;
+                last_preview_camera = preview_camera;
+                has_last_preview_camera = true;
+                if (pose_changed && !preview_scheduled)
+                    next_extra_preview =
+                        preview_now + std::chrono::milliseconds(200);
                 if (device_preview) {
                     device_preview(
                         iteration, preview_index, preview_camera,

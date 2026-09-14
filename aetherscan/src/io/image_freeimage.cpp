@@ -111,6 +111,23 @@ std::uint32_t largest_safe_jpeg_denominator(
     throw std::runtime_error(action + ": " + error.message);
 }
 
+void read_jpeg_scanlines(
+    jpeg_decompress_struct& context, std::uint8_t* pixels,
+    const std::uint32_t width, const std::uint32_t components) {
+    constexpr JDIMENSION k_batch = 32;
+    JSAMPROW rows[k_batch];
+    const std::size_t stride =
+        static_cast<std::size_t>(width) * components;
+    while (context.output_scanline < context.output_height) {
+        const JDIMENSION start = context.output_scanline;
+        const JDIMENSION batch = std::min(
+            k_batch, context.output_height - start);
+        for (JDIMENSION i = 0; i < batch; ++i)
+            rows[i] = pixels + (static_cast<std::size_t>(start + i) * stride);
+        jpeg_read_scanlines(&context, rows, batch);
+    }
+}
+
 RgbImage decode_jpeg_rgb(
     const std::vector<std::uint8_t>& file,
     const std::uint32_t minimum_width, const std::uint32_t minimum_height) {
@@ -144,13 +161,7 @@ RgbImage decode_jpeg_rgb(
     image.height = static_cast<std::uint32_t>(context.output_height);
     image.pixels.resize(
         static_cast<std::size_t>(image.width) * image.height * 3U);
-    while (context.output_scanline < context.output_height) {
-        auto* row = image.pixels.data() +
-            static_cast<std::size_t>(context.output_scanline) *
-                image.width * 3U;
-        JSAMPROW rows[] = {row};
-        jpeg_read_scanlines(&context, rows, 1);
-    }
+    read_jpeg_scanlines(context, image.pixels.data(), image.width, 3U);
     jpeg_finish_decompress(&context);
     jpeg_destroy_decompress(&context);
     return image;
@@ -184,12 +195,7 @@ GrayImage decode_jpeg_gray(const std::vector<std::uint8_t>& file) {
     image.height = static_cast<std::uint32_t>(context.output_height);
     image.pixels.resize(
         static_cast<std::size_t>(image.width) * image.height);
-    while (context.output_scanline < context.output_height) {
-        auto* row = image.pixels.data() +
-            static_cast<std::size_t>(context.output_scanline) * image.width;
-        JSAMPROW rows[] = {row};
-        jpeg_read_scanlines(&context, rows, 1);
-    }
+    read_jpeg_scanlines(context, image.pixels.data(), image.width, 1U);
     jpeg_finish_decompress(&context);
     jpeg_destroy_decompress(&context);
     return image;
