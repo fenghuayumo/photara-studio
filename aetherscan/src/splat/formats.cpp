@@ -1399,6 +1399,14 @@ GaussianFormat parse_gaussian_format(const std::string_view value) {
         "' (expected auto, ply, sog, spz, or glb)");
 }
 
+GaussianFormat gaussian_format_from_path(const std::filesystem::path& path) noexcept {
+    const auto extension = lower(path.extension().string());
+    if (extension == ".sog") return GaussianFormat::sog;
+    if (extension == ".spz") return GaussianFormat::spz;
+    if (extension == ".glb") return GaussianFormat::glb;
+    return GaussianFormat::ply;
+}
+
 const char* gaussian_format_name(const GaussianFormat format) noexcept {
     switch (format) {
         case GaussianFormat::auto_detect: return "auto";
@@ -1437,13 +1445,8 @@ void restrict_sh_degree(GaussianModel& model, const unsigned degree) {
 void save_gaussians(
     const GaussianModel& model, const std::filesystem::path& path,
     GaussianFormat format) {
-    if (format == GaussianFormat::auto_detect) {
-        const auto extension = lower(path.extension().string());
-        format = extension == ".sog" ? GaussianFormat::sog
-            : extension == ".spz" ? GaussianFormat::spz
-            : extension == ".glb" ? GaussianFormat::glb
-            : GaussianFormat::ply;
-    }
+    if (format == GaussianFormat::auto_detect)
+        format = gaussian_format_from_path(path);
     switch (format) {
         case GaussianFormat::ply:
             save_gaussians_ply(model, path);
@@ -1466,15 +1469,9 @@ void save_gaussians(
 GaussianModel load_gaussians(
     const std::filesystem::path& path, GaussianFormat format) {
     if (format == GaussianFormat::auto_detect) {
-        if (std::filesystem::is_directory(path) ||
-            lower(path.extension().string()) == ".sog")
-            format = GaussianFormat::sog;
-        else if (lower(path.extension().string()) == ".spz")
-            format = GaussianFormat::spz;
-        else if (lower(path.extension().string()) == ".glb")
-            format = GaussianFormat::glb;
-        else
-            format = GaussianFormat::ply;
+        format = std::filesystem::is_directory(path)
+            ? GaussianFormat::sog
+            : gaussian_format_from_path(path);
     }
     switch (format) {
         case GaussianFormat::ply: return load_gaussians_ply(path);

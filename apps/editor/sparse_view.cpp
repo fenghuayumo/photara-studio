@@ -1429,7 +1429,7 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour
 }
 
 SceneLoad sparse_scene_from_dataset(
-    const std::filesystem::path& source, const std::string& dataset_format,
+    const std::filesystem::path& source,
     const std::filesystem::path& initial_point_cloud,
     const std::filesystem::path& image_directory) {
     SceneLoad loaded;
@@ -1438,8 +1438,6 @@ SceneLoad sparse_scene_from_dataset(
         request.source = source;
         request.image_directory = image_directory;
         request.initial_point_cloud = initial_point_cloud;
-        request.format =
-            aetherscan::splat::parse_dataset_format(dataset_format);
         const aetherscan::splat::DatasetLoadResult dataset =
             aetherscan::splat::load_splat_dataset(request);
         const aetherscan::mvs::MvsScene& scene = dataset.scene;

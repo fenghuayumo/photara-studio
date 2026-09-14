@@ -171,12 +171,15 @@ std::string quote(const char* utf8_path) {
 }
 
 void append_gui_flags(
-    std::ostringstream& command, const ProjectLayout& layout) {
+    std::ostringstream& command, const ProjectLayout& layout,
+    const std::filesystem::path& splat_override = {}) {
     command << " --gui";
     if (!layout.working_sfm.empty())
         command << " --working-sfm " << quote(layout.working_sfm);
-    if (!layout.working_splat.empty())
-        command << " --working-splat " << quote(layout.working_splat);
+    const auto& splat =
+        splat_override.empty() ? layout.working_splat : splat_override;
+    if (!splat.empty())
+        command << " --working-splat " << quote(splat);
     if (!layout.working_mesh.empty())
         command << " --working-mesh " << quote(layout.working_mesh);
     if (!layout.working_dense.empty())
@@ -349,15 +352,6 @@ const char* sfm_mode_flag(const int index) {
         case 1: return "incremental";
         case 2: return "hierarchical";
         default: return "global";
-    }
-}
-
-const char* dataset_format_flag(const int index) {
-    switch (index) {
-        case 1: return "colmap";
-        case 2: return "realitycapture";
-        case 3: return "openmvs";
-        default: return "auto";
     }
 }
 
@@ -1111,9 +1105,7 @@ std::string build_train_command(
 
     if (settings.dataset_source[0] != '\0') {
         command << " --splat-dataset "
-                << quote(settings.dataset_source.data())
-                << " --dataset-format "
-                << dataset_format_flag(settings.dataset_format);
+                << quote(settings.dataset_source.data());
         if (settings.dataset_initial_cloud[0] != '\0')
             command << " --dense-ply "
                     << quote(settings.dataset_initial_cloud.data());
@@ -1132,7 +1124,7 @@ std::string build_train_command(
     command << " --splat-strategy " << strategy_flag(settings.strategy)
             << " --splat-iterations " << settings.iterations
             << " --splat-densification-cap "
-            << std::max(1, settings.max_gaussians)
+            << std::max(1, settings.densification_cap)
             << " --splat-sh-degree "
             << std::clamp(settings.sh_degree, 0, 3)
             << " --splat-preview-interval " << settings.preview_interval
@@ -1191,23 +1183,24 @@ std::string build_view_command(
             << quote(layout.preview_camera_file)
             << " --splat-preview-vis-file "
             << quote(layout.preview_vis_file);
-    append_gui_flags(command, layout);
     std::error_code exists_error;
+    std::filesystem::path view_splat;
     const std::filesystem::path imported_model =
         path_from_utf8_field(settings.splat_model_source.data());
     if (!imported_model.empty() &&
         std::filesystem::exists(imported_model, exists_error)) {
-        command << " --splat-model " << quote(imported_model);
+        view_splat = imported_model;
     } else {
         const std::array<std::filesystem::path, 6> candidates = {
             layout.working_splat, layout.splat_model, layout.splat_ply,
             layout.splat_sog, layout.splat_spz, layout.splat_glb};
         for (const auto& candidate : candidates) {
             if (!std::filesystem::exists(candidate, exists_error)) continue;
-            command << " --splat-model " << quote(candidate);
+            view_splat = candidate;
             break;
         }
     }
+    append_gui_flags(command, layout, view_splat);
     append_video_extract_flags(command, settings);
     if (preview.memory && preview.semaphore) {
         command << " --splat-preview-vk-memory-handle " << preview.memory
@@ -1233,9 +1226,7 @@ std::string build_dense_command(
                                                  : layout.project_file);
     if (settings.dataset_source[0] != '\0') {
         command << " --splat-dataset "
-                << quote(settings.dataset_source.data())
-                << " --dataset-format "
-                << dataset_format_flag(settings.dataset_format);
+                << quote(settings.dataset_source.data());
         if (settings.dataset_initial_cloud[0] != '\0')
             command << " --dense-ply "
                     << quote(settings.dataset_initial_cloud.data());
@@ -1279,9 +1270,7 @@ std::string build_texture_command(
                                                  : layout.project_file);
     if (settings.dataset_source[0] != '\0') {
         command << " --splat-dataset "
-                << quote(settings.dataset_source.data())
-                << " --dataset-format "
-                << dataset_format_flag(settings.dataset_format);
+                << quote(settings.dataset_source.data());
         if (settings.dataset_initial_cloud[0] != '\0')
             command << " --dense-ply "
                     << quote(settings.dataset_initial_cloud.data());

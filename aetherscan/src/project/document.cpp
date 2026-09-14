@@ -96,7 +96,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.atlas_resolution));
     writer.value(static_cast<std::uint8_t>(settings.texture_delight));
     writer.value(static_cast<std::uint8_t>(settings.texture_optimize));
-    writer.value(static_cast<std::int32_t>(settings.max_gaussians));
+    writer.value(static_cast<std::int32_t>(settings.densification_cap));
     writer.value(static_cast<std::int32_t>(settings.sh_degree));
     return writer.take();
 }
@@ -171,7 +171,7 @@ Settings decode_settings(
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.texture_optimize = reader.value<std::uint8_t>() != 0;
     if (reader.remaining() >= sizeof(std::int32_t))
-        settings.max_gaussians = reader.value<std::int32_t>();
+        settings.densification_cap = reader.value<std::int32_t>();
     if (reader.remaining() >= sizeof(std::int32_t))
         settings.sh_degree = reader.value<std::int32_t>();
     return settings;

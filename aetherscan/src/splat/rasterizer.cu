@@ -274,13 +274,16 @@ ModelGradients Rasterizer::backward(
     const tinytensor::Tensor& grad_color,
     const tinytensor::Tensor& grad_alpha,
     const tinytensor::Tensor& grad_depth,
-    const tinytensor::Tensor& grad_normal) const {
+    const tinytensor::Tensor& grad_normal,
+    const tinytensor::Tensor& densify_map) const {
     if (!rendered.context.impl)
         throw std::invalid_argument("Splat backward requires a live forward context");
     require_cuda_float_contiguous(grad_color, "grad_color");
     require_cuda_float_contiguous(grad_alpha, "grad_alpha");
     require_cuda_float_contiguous(grad_depth, "grad_depth");
     require_cuda_float_contiguous(grad_normal, "grad_normal");
+    if (densify_map.is_valid() && densify_map.numel() != 0)
+        require_cuda_float_contiguous(densify_map, "densify_map");
     const auto& context = *rendered.context.impl;
     const auto count = model.size();
 
@@ -295,6 +298,16 @@ ModelGradients Rasterizer::backward(
         {count, 4}, tinytensor::Device::CUDA);
     auto refine_weight = tinytensor::Tensor::zeros(
         {count}, tinytensor::Device::CUDA);
+    tinytensor::Tensor densify_weight;
+    tinytensor::Tensor densify_weight_den;
+    const bool scatter_densify =
+        densify_map.is_valid() && densify_map.numel() != 0;
+    if (scatter_densify) {
+        densify_weight = tinytensor::Tensor::zeros(
+            {count}, tinytensor::Device::CUDA);
+        densify_weight_den = tinytensor::Tensor::zeros(
+            {count}, tinytensor::Device::CUDA);
+    }
     tinytensor::Tensor grad_colors;
     if (context.colors_precomp.is_valid())
         grad_colors = tinytensor::Tensor::zeros(
@@ -311,6 +324,7 @@ ModelGradients Rasterizer::backward(
         dL.alpha = grad_alpha.ptr<float>();
         dL.median_depth = grad_depth.ptr<float>();
         dL.normal = grad_normal.ptr<float>();
+        dL.densify_map = scatter_densify ? densify_map.ptr<float>() : nullptr;
         splat_drender::ModelGradients grads;
         grads.means = gradients.means.ptr<float>();
         grads.sh = context.colors_precomp.is_valid()
@@ -321,6 +335,10 @@ ModelGradients Rasterizer::backward(
         grads.scales = grad_scales.ptr<float>();
         grads.rotations = grad_quaternions.ptr<float>();
         grads.refine_weight = refine_weight.ptr<float>();
+        grads.densify_weight =
+            scatter_densify ? densify_weight.ptr<float>() : nullptr;
+        grads.densify_weight_den =
+            scatter_densify ? densify_weight_den.ptr<float>() : nullptr;
         splat_drender::Rasterizer::backward(
             pools_of(*rendered.context.impl),
             gaussians_of(model, context.activated, context.options,
@@ -332,6 +350,8 @@ ModelGradients Rasterizer::backward(
         model, context.activated, grad_scales, grad_quaternions,
         grad_opacities, gradients);
     gradients.refine_weight = std::move(refine_weight);
+    gradients.densify_weight = std::move(densify_weight);
+    gradients.densify_weight_den = std::move(densify_weight_den);
     if (context.colors_precomp.is_valid())
         gradients.colors_precomp = std::move(grad_colors);
     if (const char* prefix = std::getenv("AETHERSCAN_SPLAT_GRAD_DUMP")) {
@@ -358,6 +378,17 @@ ModelGradients Rasterizer::backward(
         }
     }
     return gradients;
+}
+
+const float* Rasterizer::projected_mean2d(const RenderResult& rendered) const {
+    if (!rendered.context.impl) return nullptr;
+    const auto& buffer = rendered.context.impl->gaussian_buffer;
+    const std::size_t count = rendered.radii.is_valid()
+        ? rendered.radii.numel() : 0;
+    if (!buffer.is_valid() || count == 0 ||
+        buffer.numel() < count * sizeof(float) * 2)
+        return nullptr;
+    return reinterpret_cast<const float*>(buffer.data_ptr());
 }
 
 DepthSampleResult Rasterizer::sample_depth(

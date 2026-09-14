@@ -5,6 +5,7 @@
 #include "splat/options.hpp"
 #include "splat/types.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <random>

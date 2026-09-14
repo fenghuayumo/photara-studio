@@ -27,7 +27,8 @@ public:
         const tinytensor::Tensor& grad_color,
         const tinytensor::Tensor& grad_alpha,
         const tinytensor::Tensor& grad_depth,
-        const tinytensor::Tensor& grad_normal) const;
+        const tinytensor::Tensor& grad_normal,
+        const tinytensor::Tensor& densify_map = {}) const;
 
     DepthSampleResult sample_depth(
         const GaussianModel& model, const tinytensor::Tensor& world_points,
@@ -42,6 +43,9 @@ public:
         const GaussianModel& model, const tinytensor::Tensor& world_points,
         const Camera& camera,
         const RasterizeOptions& options = {}) const;
+
+    // Packed [N,2] xy pixel centres from the last forward, or null.
+    const float* projected_mean2d(const RenderResult& rendered) const;
 };
 
 }  // namespace aetherscan::splat

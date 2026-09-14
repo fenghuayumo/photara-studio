@@ -2,7 +2,7 @@
 
 Example (run before/after serially, with other GPU workloads stopped):
   python experiments/benchmark_splat_training.py --exe build/aetherscan/Release/aetherscan.exe \
-    --images D:/ScanVideo/ori_img/images --colmap D:/ScanVideo/ori_img \
+    --images D:/ScanVideo/ori_img/images --splat-dataset D:/ScanVideo/ori_img \
     --output artifacts/splat_perf/after --iterations 6000 --strategy adc_plus
 
 Utilization is the driver's sampled busy percentage, not kernel occupancy.
@@ -28,8 +28,8 @@ def main():
     parser.add_argument("--exe", type=Path, required=True)
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument(
-        "--colmap", type=Path,
-        help="Optional external COLMAP root; omit it to reuse internal SfM")
+        "--splat-dataset", type=Path,
+        help="Optional external camera dataset; omit it to reuse internal SfM")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--iterations", type=int, default=6000)
     parser.add_argument("--warmup", type=int, default=1000)
@@ -40,12 +40,12 @@ def main():
         "--cache-auto", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--prefetch-views", type=int)
     parser.add_argument("--working-sfm", type=Path)
-    parser.add_argument("--cap", type=int, default=500000)
+    parser.add_argument("--cap", type=int, default=1000000)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     # Internal SfM caches are keyed by the output stem. Preserve the source
     # directory stem so repeated benchmarks reuse the existing reconstruction.
-    output_name = "scene.ply" if args.colmap is not None else (
+    output_name = "scene.ply" if args.splat_dataset is not None else (
         args.images.stem + ".ply")
     command = [str(args.exe.resolve()), "--images", str(args.images),
                "--output", str(args.output / output_name),
@@ -54,8 +54,8 @@ def main():
                "--splat-densification-cap", str(args.cap),
                "--splat-progressive-resolution=false", "--splat-log-interval", "100",
                "--splat-profile-cuda=true", "--splat-profile-interval", "100"]
-    if args.colmap is not None:
-        command += ["--colmap", str(args.colmap)]
+    if args.splat_dataset is not None:
+        command += ["--splat-dataset", str(args.splat_dataset)]
     else:
         command += ["--splat"]
     if args.device_cache_mb is not None:

@@ -436,4 +436,74 @@ void fused_l1_ssim_loss(
     if (graph) graph->launch();
 }
 
+__global__ void reduce_ssim_metric_kernel(
+    const float* loss_map, const float* mask, float* sum, float* count,
+    const int channels, const int height, const int width,
+    const bool mask_enabled) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::size_t pixels = static_cast<std::size_t>(height) * width;
+    const std::size_t n = static_cast<std::size_t>(channels) * pixels;
+    if (index >= n) return;
+    const int pixel = static_cast<int>(index % pixels);
+    const int y = pixel / width;
+    const int x = pixel % width;
+    if (x < k_halo || x >= width - k_halo ||
+        y < k_halo || y >= height - k_halo)
+        return;
+    if (mask_enabled && mask[pixel] <= 0.F) return;
+    atomicAdd(sum, 1.F - loss_map[index]);
+    atomicAdd(count, 1.F);
+}
+
+float fused_ssim_metric(
+    const tinytensor::Tensor& prediction,
+    const tinytensor::Tensor& target,
+    const tinytensor::Tensor& mask,
+    const bool mask_enabled,
+    const std::uint32_t width,
+    const std::uint32_t height) {
+    if (width <= k_halo2 || height <= k_halo2) return 0.F;
+    constexpr int channels = 3;
+    const std::size_t count = static_cast<std::size_t>(channels) * width * height;
+    const auto shape = prediction.shape();
+    auto image1 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
+    auto image2 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
+    auto loss_map = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
+    auto dm_dmu1 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
+    auto dm_dsigma1_sq = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
+    auto dm_dsigma12 = tinytensor::Tensor::empty(shape, tinytensor::Device::CUDA);
+    auto sum = tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
+    auto count_t = tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
+
+    constexpr int threads = 256;
+    apply_mask_kernel<<<(count + threads - 1) / threads, threads>>>(
+        prediction.ptr<float>(), target.ptr<float>(),
+        mask.is_valid() ? mask.ptr<float>() : nullptr,
+        image1.ptr<float>(), image2.ptr<float>(), channels,
+        static_cast<int>(height), static_cast<int>(width),
+        mask_enabled && mask.is_valid());
+
+    const dim3 block(k_block_x, k_block_y);
+    const dim3 grid(
+        (width + k_block_x - 1) / k_block_x,
+        (height + k_block_y - 1) / k_block_y, 1);
+    constexpr float c1 = 0.01F * 0.01F;
+    constexpr float c2 = 0.03F * 0.03F;
+    fused_l1_ssim_forward_kernel<<<grid, block>>>(
+        1.F, static_cast<int>(height), static_cast<int>(width),
+        channels, c1, c2, image1.ptr<float>(), image2.ptr<float>(),
+        loss_map.ptr<float>(), dm_dmu1.ptr<float>(),
+        dm_dsigma1_sq.ptr<float>(), dm_dsigma12.ptr<float>());
+    reduce_ssim_metric_kernel<<<(count + threads - 1) / threads, threads>>>(
+        loss_map.ptr<float>(),
+        mask.is_valid() ? mask.ptr<float>() : nullptr,
+        sum.ptr<float>(), count_t.ptr<float>(),
+        channels, static_cast<int>(height), static_cast<int>(width),
+        mask_enabled && mask.is_valid());
+    check_cuda(cudaGetLastError(), "run fused SSIM metric");
+    const float host_sum = sum.to_vector()[0];
+    const float host_count = count_t.to_vector()[0];
+    return host_count <= 0.F ? 0.F : host_sum / host_count;
+}
+
 }  // namespace aetherscan::splat::detail

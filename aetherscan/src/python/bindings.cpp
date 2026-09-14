@@ -457,7 +457,6 @@ NB_MODULE(aetherscan_native, module) {
         .def_rw(
             "cuda_profile_interval",
             &splat::TrainingOptions::cuda_profile_interval)
-        .def_rw("max_gaussians", &splat::TrainingOptions::max_gaussians)
         .def_rw("input_is_dense", &splat::TrainingOptions::input_is_dense)
         .def_rw(
             "enable_densification",

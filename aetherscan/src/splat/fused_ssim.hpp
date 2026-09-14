@@ -20,4 +20,15 @@ void fused_l1_ssim_loss(
     std::uint32_t width,
     std::uint32_t height);
 
+// Mean 11x11 Gaussian SSIM over valid interior pixels (and the mask, if
+// enabled). Matches the training fused-SSIM window. Returns 0 if the image
+// is too small for a valid window.
+float fused_ssim_metric(
+    const tinytensor::Tensor& prediction,
+    const tinytensor::Tensor& target,
+    const tinytensor::Tensor& mask,
+    bool mask_enabled,
+    std::uint32_t width,
+    std::uint32_t height);
+
 }  // namespace aetherscan::splat::detail

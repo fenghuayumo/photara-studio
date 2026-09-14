@@ -469,6 +469,7 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
         pst.n_contrib, tst.max_contributor, tst.bucket_offset, tst.bucket_tile,
         pst, dL.color, dL.median_depth, dL.alpha, dL.normal, gs,
         reinterpret_cast<float*>(gs.d_color), grads.refine_weight,
+        dL.densify_map, grads.densify_weight, grads.densify_weight_den,
         int(bucket_upper_bound(fwd.instance_count, grid_x * grid_y)));
     check_cuda(cudaGetLastError(), "blend_bucket_backward");
 

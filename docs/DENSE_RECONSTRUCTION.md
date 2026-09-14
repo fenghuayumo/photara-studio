@@ -624,7 +624,7 @@ MVS 不再是默认阶段，也不负责生成前景 Mask。物体模式使用�
 When calibrated COLMAP cameras already exist, use the explicit dense path:
 
 ```powershell
-build/aetherscan/Release/aetherscan.exe --images D:/ScanVideo/ori_img/images --colmap D:/ScanVideo/ori_img --output artifacts/ori_img_calibrated_high/scene.ply --dense --mesh --dense-quality high --mesh-max-points 1000000 --texture --atlas-resolution 2048 --texture-optimize-steps 100
+build/aetherscan/Release/aetherscan.exe --images D:/ScanVideo/ori_img/images --splat-dataset D:/ScanVideo/ori_img --output artifacts/ori_img_calibrated_high/scene.ply --dense --mesh --dense-quality high --mesh-max-points 1000000 --texture --atlas-resolution 2048 --texture-optimize-steps 100
 ```
 
 This preserves the imported poses, uses the MVS quality preset for image resolution,

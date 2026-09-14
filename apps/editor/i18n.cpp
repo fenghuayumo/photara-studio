@@ -462,12 +462,13 @@ constexpr Entry k_entries[] = {
     {"ADC IGS", "ADC IGS", "ADC IGS", "ADC IGS"},
     {"ADC Plus", "ADC Plus", "ADC Plus", "ADC Plus"},
     {"Iterations", "迭代次数", "イテレーション", "반복"},
-    {"Max Gaussians", "最大高斯数", "最大ガウシアン", "최대 가우시안"},
-    {"Hard cap on Gaussian count during densification.\n"
-     "Default 10,000,000. Lower this to limit VRAM.",
-     "稠密化时高斯数量上限。\n默认 10,000,000。降低可节省显存。",
-     "稠密化中のガウシアン数上限。\n既定 10,000,000。VRAM 節約なら下げてください。",
-     "밀집화 중 가우시안 수 상한.\n기본 10,000,000. VRAM을 줄이려면 낮추세요."},
+    {"Densification cap", "致密化上限", "稠密化上限", "밀집화 상한"},
+    {"Maximum Gaussian count during densification.\n"
+     "Initialization uses the full source cloud.\n"
+     "Default 1,000,000.",
+     "致密化过程中的高斯数量上限。\n初始化使用全部源点云。\n默认 1,000,000。",
+     "稠密化中のガウシアン数上限。\n初期化は入力点群をすべて使います。\n既定 1,000,000。",
+     "밀집화 중 가우시안 수 상한.\n초기화는 원본 점군을 전부 사용합니다.\n기본 1,000,000."},
     {"Spherical-harmonic colour bands.\n"
      "0 is diffuse only. 3 is the training default.",
      "球谐颜色阶。\n0 仅为漫反射。3 为训练默认。",

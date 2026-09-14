@@ -201,8 +201,8 @@ UVAtlas 默认用 `--uv-parallel-partitions 8` 做空间分区并发展开，最
 `--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 aether mesh 后处理。Splat mesh 模式
 默认在第 7,000 步开启权重 0.05 的 median-depth/rendered-normal 几何一致性优化。
 
-稠密 MVS 输入默认使用全部融合点初始化 splat（`--splat-max-gaussians 0`），避免随机截断到
-50 万点后在薄结构和遮挡区域形成永久覆盖缺口；显存受限时可显式设置较小上限。
+稠密 MVS 输入使用全部融合点初始化 splat，不再抽样。稀疏输入的 Gaussian 增长由
+`--splat-densification-cap` 限制（默认 1,000,000）。
 Splat mesh 导出只使用 alpha 0.5 与有效深度掩码，不再默认执行额外的 60° depth-normal 硬过滤；
 这与 pygsplat/GS-2M 的默认 TSDF 输入一致，避免在高曲率和薄结构区域人为打洞。
 

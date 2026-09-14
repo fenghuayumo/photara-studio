@@ -42,7 +42,7 @@ struct Settings {
     unsigned max_features = 27'000;
     bool scene_mode = false;
     int iterations = 30'000;
-    int max_gaussians = 10'000'000;
+    int densification_cap = 1'000'000;
     int sh_degree = 3;
     int preview_interval = 50;
     // 0=adc_igs, 1=adc_plus, 2=dense_adaptive.

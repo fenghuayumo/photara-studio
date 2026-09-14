@@ -1444,14 +1444,23 @@ __global__ void accumulate_densification_kernel(
     const float* refine_weight, const float* visibility, const int* radii,
     float* gradient, float* count, float* max_screen_radius, float* priority,
     const std::size_t gaussian_count, const float inverse_resolution,
-    const bool use_maximum, const bool require_contribution_visibility) {
+    const bool use_maximum, const bool require_contribution_visibility,
+    const float step_score_power, const float oversize_screen_threshold,
+    const float* geometry_gradient, float* max_geometry_gradient) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= gaussian_count || radii[index] <= 0 ||
         (require_contribution_visibility && visibility[index] <= 0.F))
         return;
-    const float weight = isfinite(refine_weight[index])
+    const float raw_weight = isfinite(refine_weight[index])
         ? fmaxf(refine_weight[index], 0.F)
         : 0.F;
+    if (geometry_gradient != nullptr && isfinite(geometry_gradient[index]))
+        max_geometry_gradient[index] = fmaxf(
+            max_geometry_gradient[index], geometry_gradient[index]);
+    // Compress each observation before the temporal reduction.
+    // Power(mean(error)) otherwise rewards isolated view-specific spikes.
+    const float weight = step_score_power == 1.F ? raw_weight
+        : powf(raw_weight, step_score_power);
     if (use_maximum)
         gradient[index] = fmaxf(gradient[index], weight);
     else
@@ -1459,7 +1468,36 @@ __global__ void accumulate_densification_kernel(
     count[index] += 1.F;
     const float screen = radii[index] * inverse_resolution;
     max_screen_radius[index] = fmaxf(max_screen_radius[index], screen);
-    priority[index] += weight * (1.F + screen);
+    // In IGS this buffer stores accumulated oversize evidence. A single
+    // close view must not rank like persistent oversize in many views.
+    priority[index] += oversize_screen_threshold > 0.F
+        ? fmaxf(log2f(screen / oversize_screen_threshold), 0.F)
+        : weight * (1.F + screen);
+}
+
+__global__ void densify_blend_world_gradient_kernel(
+    const float* image_score, const float* means_gradient,
+    const float* log_scales, float* output, const std::size_t count,
+    const float blend) {
+    const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    const float x = means_gradient[3 * i];
+    const float y = means_gradient[3 * i + 1];
+    const float z = means_gradient[3 * i + 2];
+    const float scale = expf(fmaxf(log_scales[3 * i],
+        fmaxf(log_scales[3 * i + 1], log_scales[3 * i + 2])));
+    const float world_score = sqrtf(x * x + y * y + z * z) * scale;
+    const float image = fmaxf(image_score[i], 0.F);
+    const float score = blend >= 1.F ? world_score
+        : powf(image, 1.F - blend) * powf(world_score, blend);
+    output[i] = isfinite(score) ? fmaxf(score, 0.F) : 0.F;
+}
+
+__global__ void sh_regularization_kernel(const float* sh, float* gradient,
+    const std::size_t count, const std::size_t stride, const float factor) {
+    const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count && i % stride >= 3 && isfinite(sh[i]))
+        gradient[i] += factor * sh[i];
 }
 
 __device__ void rotate_quaternion(
@@ -1487,7 +1525,8 @@ __global__ void split_gaussians_kernel(
     float* child_opacity_logits, const int* parent_indices,
     const float* random_samples, const float* screen_sizes,
     const std::size_t split_count, const int mode,
-    const float minimum_opacity, const float split_at_screen_size) {
+    const float minimum_opacity, const float split_at_screen_size,
+    const float split_opacity_k) {
     const std::size_t child = blockIdx.x * blockDim.x + threadIdx.x;
     if (child >= split_count) return;
     const std::size_t parent = static_cast<std::size_t>(parent_indices[child]);
@@ -1534,6 +1573,20 @@ __global__ void split_gaussians_kernel(
         local[largest] = expf(parent_log_scales[3 * parent + largest]) *
             sqrtf(fmaxf(1.F - k * k, 0.F));
         log_scale_delta[largest] = logf(fmaxf(k, 1e-12F));
+    } else if (mode == 6) {
+        // Long-axis split (https://arxiv.org/abs/2508.12313). Shrink the
+        // longest axis by 1/2 and the others by 0.85, then offset along the
+        // longest eigenvector by half that axis length.
+        int largest = 0;
+        for (int axis = 1; axis < 3; ++axis)
+            if (parent_log_scales[3 * parent + axis] >
+                parent_log_scales[3 * parent + largest]) largest = axis;
+        local[largest] = 0.5F * expf(parent_log_scales[3 * parent + largest]);
+        const float shrink_long = logf(0.5F);
+        const float shrink_short = logf(0.85F);
+        for (int axis = 0; axis < 3; ++axis)
+            log_scale_delta[axis] =
+                axis == largest ? shrink_long : shrink_short;
     } else if (mode == 2) {
         // Match brush-train's ADC+ covariance-aware split. The offset is
         // deterministic and anti-correlated, preserving the centroid. Axes
@@ -1584,12 +1637,20 @@ __global__ void split_gaussians_kernel(
         child_log_scales[3 * child + axis] += log_scale_delta[axis];
     }
     const float opacity = sigmoid(parent_opacity_logits[parent]);
-    const float opacity_floor = mode == 1 ? 1e-8F : minimum_opacity;
-    const float opacity_power = (mode == 2 || mode == 5) ? rsqrtf(2.F) : 0.5F;
-    const float revised = fminf(fmaxf(
-        1.F - powf(fmaxf(1.F - opacity, 0.F), opacity_power),
-        opacity_floor), 1.F - opacity_floor);
-    const float revised_logit = logf(revised / (1.F - revised));
+    float revised_logit;
+    if (mode == 6) {
+        const float k = fminf(fmaxf(split_opacity_k, 1e-3F), 0.99F);
+        const float raw = fminf(fmaxf(k * opacity, 1e-7F), 1.F - 1e-7F);
+        revised_logit = logf(raw / (1.F - raw));
+    } else {
+        const float opacity_floor = mode == 1 ? 1e-8F : minimum_opacity;
+        const float opacity_power =
+            (mode == 2 || mode == 5) ? rsqrtf(2.F) : 0.5F;
+        const float revised = fminf(fmaxf(
+            1.F - powf(fmaxf(1.F - opacity, 0.F), opacity_power),
+            opacity_floor), 1.F - opacity_floor);
+        revised_logit = logf(revised / (1.F - revised));
+    }
     parent_opacity_logits[parent] = revised_logit;
     child_opacity_logits[child] = revised_logit;
 }
@@ -1656,6 +1717,211 @@ __global__ void inject_adc_noise_kernel(
             -maximum_noise), maximum_noise);
         means[3 * index + axis] += noise;
     }
+}
+
+__global__ void inject_revised_noise_kernel(
+    float* means, const float* log_scales, const float* quaternions,
+    const float* opacity_logits, const float* visibility, const int* radii,
+    const std::size_t count, const float scaler, const unsigned seed) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count || visibility[index] <= 0.F) return;
+    if (radii != nullptr && radii[index] <= 0) return;
+    const float opacity = sigmoid(opacity_logits[index]);
+    const float op_pow = powf(1.F - opacity, 150.F);
+    const float extend = sqrtf(2.F * logf(fmaxf(255.F * opacity, 1.F)));
+    // Revised noise uses a dimensionless schedule. The local Gaussian
+    // standard deviations supply the scene units, exactly once.
+    constexpr float typical_scale = 0.05F;
+    const float noise_lr = fminf(
+        typical_scale * scaler * extend * op_pow, 1.F);
+    if (!(noise_lr > 0.F)) return;
+    float local[3];
+    for (std::uint32_t axis = 0; axis < 3; ++axis) {
+        // sqrt(covariance) has eigenvalues scale, not sqrt(scale).
+        const float axis_scale = expf(log_scales[3 * index + axis]);
+        local[axis] = axis_scale * noise_lr *
+            normal_sample(static_cast<std::uint32_t>(index), seed, axis);
+    }
+    float world_x{}, world_y{}, world_z{};
+    rotate_quaternion(
+        quaternions + 4 * index, local[0], local[1], local[2],
+        world_x, world_y, world_z);
+    means[3 * index + 0] += world_x;
+    means[3 * index + 1] += world_y;
+    means[3 * index + 2] += world_z;
+}
+
+__constant__ float k_ssim_gauss[11] = {
+    0.001028380123898387F,
+    0.0075987582094967365F,
+    0.036000773310661316F,
+    0.10936068743467331F,
+    0.21300552785396576F,
+    0.26601171493530273F,
+    0.21300552785396576F,
+    0.10936068743467331F,
+    0.036000773310661316F,
+    0.0075987582094967365F,
+    0.001028380123898387F};
+
+__global__ void ssim_cs_error_map_kernel(
+    const float* prediction, const float* target, const float* mask,
+    float* error, const int height, const int width, const bool mask_enabled,
+    const float power) {
+    constexpr int k_halo = 5;
+    constexpr int k_block = 16;
+    constexpr int k_shared = k_block + 2 * k_halo;
+    __shared__ float tile_p[k_shared][k_shared];
+    __shared__ float tile_t[k_shared][k_shared];
+    const int pixel_y = static_cast<int>(blockIdx.y) * k_block +
+                        static_cast<int>(threadIdx.y);
+    const int pixel_x = static_cast<int>(blockIdx.x) * k_block +
+                        static_cast<int>(threadIdx.x);
+    const int tile_y0 = static_cast<int>(blockIdx.y) * k_block;
+    const int tile_x0 = static_cast<int>(blockIdx.x) * k_block;
+    const int pixels = height * width;
+    const int threads = k_block * k_block;
+    const int tile_size = k_shared * k_shared;
+    for (int id = static_cast<int>(threadIdx.y) * k_block +
+                  static_cast<int>(threadIdx.x);
+         id < tile_size; id += threads) {
+        const int local_y = id / k_shared;
+        const int local_x = id % k_shared;
+        const int y = tile_y0 + local_y - k_halo;
+        const int x = tile_x0 + local_x - k_halo;
+        float pred = 0.F;
+        float gt = 0.F;
+        if (x >= 0 && x < width && y >= 0 && y < height) {
+            const int pix = y * width + x;
+            const float valid = mask_enabled ? mask[pix] : 1.F;
+            pred = (0.299F * prediction[pix] +
+                    0.587F * prediction[pixels + pix] +
+                    0.114F * prediction[2 * pixels + pix]) *
+                   valid;
+            gt = (0.299F * target[pix] +
+                  0.587F * target[pixels + pix] +
+                  0.114F * target[2 * pixels + pix]) *
+                 valid;
+        }
+        tile_p[local_y][local_x] = pred;
+        tile_t[local_y][local_x] = gt;
+    }
+    __syncthreads();
+    if (pixel_x >= width || pixel_y >= height) return;
+    float sum_p = 0.F, sum_p2 = 0.F, sum_t = 0.F, sum_t2 = 0.F, sum_pt = 0.F;
+    for (int dy = 0; dy <= 10; ++dy) {
+        const float wy = k_ssim_gauss[dy];
+        const int ly = static_cast<int>(threadIdx.y) + dy;
+        for (int dx = 0; dx <= 10; ++dx) {
+            const float w = wy * k_ssim_gauss[dx];
+            const float p = tile_p[ly][static_cast<int>(threadIdx.x) + dx];
+            const float t = tile_t[ly][static_cast<int>(threadIdx.x) + dx];
+            sum_p += p * w;
+            sum_p2 += p * p * w;
+            sum_t += t * w;
+            sum_t2 += t * t * w;
+            sum_pt += p * t * w;
+        }
+    }
+    constexpr float c2 = 0.03F * 0.03F;
+    const float sigma_p2 = fmaxf(sum_p2 - sum_p * sum_p, 0.F);
+    const float sigma_t2 = fmaxf(sum_t2 - sum_t * sum_t, 0.F);
+    const float sigma_pt = sum_pt - sum_p * sum_t;
+    const float cs = (2.F * sigma_pt + c2) / (sigma_p2 + sigma_t2 + c2);
+    const int pix = pixel_y * width + pixel_x;
+    const float valid = mask_enabled ? mask[pix] : 1.F;
+    const float raw = fmaxf(1.F - cs, 0.F) * valid;
+    error[pix] = power == 1.F ? raw : powf(raw, power);
+}
+
+__global__ void mae_error_map_kernel(
+    const float* prediction, const float* target, const float* mask,
+    float* error, const int pixels, const bool mask_enabled) {
+    const int pix = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (pix >= pixels) return;
+    const float valid = mask_enabled ? mask[pix] : 1.F;
+    const float mae =
+        (fabsf(prediction[pix] - target[pix]) +
+         fabsf(prediction[pixels + pix] - target[pixels + pix]) +
+         fabsf(prediction[2 * pixels + pix] - target[2 * pixels + pix])) *
+        (1.F / 3.F);
+    error[pix] = mae * valid;
+}
+
+__global__ void scatter_error_map_kernel(
+    const float* error, const float* mean2d, const int* radii,
+    const float* visibility, float* scores, const int width, const int height,
+    const std::size_t count) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    scores[index] = 0.F;
+    if (mean2d == nullptr || radii[index] <= 0 || visibility[index] <= 0.F)
+        return;
+    const int x = static_cast<int>(floorf(mean2d[2 * index]));
+    const int y = static_cast<int>(floorf(mean2d[2 * index + 1]));
+    if (x < -1 || y < -1 || x > width || y > height) return;
+    float best = 0.F;
+    for (int dy = -1; dy <= 1; ++dy) {
+        const int yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int xx = x + dx;
+            if (xx < 0 || xx >= width) continue;
+            best = fmaxf(best, error[yy * width + xx]);
+        }
+    }
+    scores[index] = best;
+}
+
+__global__ void densify_avg_scores_kernel(
+    const float* numerator, const float* denominator, float* out,
+    const std::size_t n) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= n) return;
+    const float den = denominator[index];
+    out[index] = den > 1e-12F ? numerator[index] / den : 0.F;
+}
+
+__global__ void densify_mean_scores_kernel(
+    const float* sum, const float* count, float* out, const std::size_t n,
+    const float power) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= n) return;
+    const float mean = count[index] > 0.F ? sum[index] / count[index] : 0.F;
+    const float clipped = fmaxf(mean, 0.F);
+    out[index] = power == 1.F ? clipped : powf(clipped, power);
+}
+
+__global__ void densify_oversize_weights_kernel(
+    const float* scores, const float* screens, float* weights,
+    const std::size_t n, const float threshold, const float blend) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= n) return;
+    const float screen = screens[index];
+    if (!(screen > threshold) || !(threshold > 0.F)) {
+        weights[index] = 0.F;
+        return;
+    }
+    float w = log2f(screen / threshold);
+    const float s = fmaxf(scores[index], 0.F);
+    if (blend > 0.F)
+        w *= (blend == 1.F) ? s : powf(s, blend);
+    weights[index] = isfinite(w) ? w : 0.F;
+}
+
+__global__ void clip_log_scale_by_screen_kernel(
+    float* log_scales, const float* screens, const std::size_t count,
+    const float threshold, const float hardness) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    if (!(threshold > 0.F) || !(screens[index] > threshold)) return;
+    float oversize = screens[index] / threshold;
+    if (isfinite(hardness)) oversize = fminf(oversize, hardness);
+    if (!(oversize > 1.F)) return;
+    const float delta = logf(oversize);
+    log_scales[3 * index + 0] -= delta;
+    log_scales[3 * index + 1] -= delta;
+    log_scales[3 * index + 2] -= delta;
 }
 
 __global__ void reset_opacity_kernel(
@@ -2282,7 +2548,8 @@ LossGradients compute_training_loss(
     tinytensor::Tensor terms;
     if (collect_scalar_terms)
         terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
-    const bool mask_enabled = options.use_mask && target.has_mask;
+    const bool mask_enabled = target.has_mask &&
+        (options.use_mask || target.mask_is_validity);
     const bool use_fused_photometric =
         target.camera.width > 10 && target.camera.height > 10;
     const float ssim_weight = std::clamp(options.ssim_weight, 0.F, 1.F);
@@ -2298,7 +2565,8 @@ LossGradients compute_training_loss(
         options.use_mvs_depth ? options.depth_weight : 0.F,
         options.use_mvs_normals ? options.normal_weight : 0.F,
         mask_enabled,
-        options.alpha_mode == AlphaMode::masked ? 0 : 1,
+        target.mask_is_validity ? -1 :
+            options.alpha_mode == AlphaMode::masked ? 0 : 1,
         options.match_alpha_weight, 1.F,
         options.geometry_epsilon);
     check_cuda(cudaGetLastError(), "compute GGGS training loss");
@@ -2542,7 +2810,38 @@ DensificationStats make_densification_stats(const std::size_t count) {
         tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
         tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
         tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
+        tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
         tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA)};
+}
+
+tinytensor::Tensor densify_blend_world_gradient(
+    const tinytensor::Tensor& image_score,
+    const tinytensor::Tensor& means_gradient,
+    const tinytensor::Tensor& log_scales, const float blend) {
+    if (!(blend > 0.F)) return image_score;
+    const std::size_t count = image_score.numel();
+    auto output = tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA);
+    if (count != 0) {
+        densify_blend_world_gradient_kernel<<<
+            (count + k_threads - 1) / k_threads, k_threads>>>(
+            image_score.ptr<float>(), means_gradient.ptr<float>(),
+            log_scales.ptr<float>(), output.ptr<float>(), count,
+            std::min(blend, 1.F));
+        check_cuda(cudaGetLastError(), "blend densify world-gradient evidence");
+    }
+    return output;
+}
+
+void add_sh_regularization(const tinytensor::Tensor& sh,
+    tinytensor::Tensor& gradient, const float weight) {
+    if (!(weight > 0.F) || sh.numel() == 0 || sh.shape()[1] <= 1) return;
+    const std::size_t stride = sh.shape()[1] * 3;
+    const float factor = 2.F * weight /
+        static_cast<float>(sh.shape()[0] * (stride - 3));
+    sh_regularization_kernel<<<
+        (sh.numel() + k_threads - 1) / k_threads, k_threads>>>(
+        sh.ptr<float>(), gradient.ptr<float>(), sh.numel(), stride, factor);
+    check_cuda(cudaGetLastError(), "regularize view-dependent SH coefficients");
 }
 
 void accumulate_densification_stats(
@@ -2553,7 +2852,9 @@ void accumulate_densification_stats(
     const std::uint32_t width,
     const std::uint32_t height,
     const bool use_maximum,
-    const bool require_contribution_visibility) {
+    const bool require_contribution_visibility,
+    const float step_score_power, const float oversize_screen_threshold,
+    const tinytensor::Tensor& geometry_gradient) {
     const std::size_t count = refine_weight.numel();
     if (count == 0) return;
     const float inverse_resolution = 1.F /
@@ -2564,7 +2865,9 @@ void accumulate_densification_stats(
         stats.gradient.ptr<float>(), stats.count.ptr<float>(),
         stats.max_screen_radius.ptr<float>(), stats.priority.ptr<float>(),
         count, inverse_resolution, use_maximum,
-        require_contribution_visibility);
+        require_contribution_visibility, step_score_power, oversize_screen_threshold,
+        geometry_gradient.is_valid() ? geometry_gradient.ptr<float>() : nullptr,
+        stats.geometry_gradient.ptr<float>());
     check_cuda(cudaGetLastError(), "accumulate GGGS densification stats");
 }
 
@@ -2576,7 +2879,8 @@ void split_gaussians(
     const tinytensor::Tensor& screen_sizes,
     const int mode,
     const float minimum_opacity,
-    const float split_at_screen_size) {
+    const float split_at_screen_size,
+    const float split_opacity_k) {
     const std::size_t count = parent_indices.numel();
     if (count == 0) return;
     split_gaussians_kernel<<<
@@ -2588,7 +2892,8 @@ void split_gaussians(
         random_samples.ptr<float>(),
         screen_sizes.is_valid() ? screen_sizes.ptr<float>() : nullptr,
         count, mode, std::clamp(minimum_opacity, 1e-8F, 0.49F),
-        std::max(split_at_screen_size, 0.F));
+        std::max(split_at_screen_size, 0.F),
+        std::clamp(split_opacity_k, 1e-3F, 0.99F));
     check_cuda(cudaGetLastError(), "split GGGS Gaussians");
 }
 
@@ -2626,14 +2931,143 @@ void inject_adc_noise(
     const tinytensor::Tensor& visibility,
     const float standard_deviation,
     const float maximum_noise,
-    const unsigned seed) {
+    const unsigned seed,
+    const tinytensor::Tensor& radii,
+    const bool revised) {
     if (model.size() == 0 || standard_deviation <= 0.F) return;
+    if (revised) {
+        inject_revised_noise_kernel<<<
+            (model.size() + k_threads - 1) / k_threads, k_threads>>>(
+            model.means.ptr<float>(), model.log_scales.ptr<float>(),
+            model.quaternions.ptr<float>(), model.opacity_logits.ptr<float>(),
+            visibility.ptr<float>(),
+            radii.is_valid() ? radii.ptr<int>() : nullptr,
+            model.size(), standard_deviation, seed);
+        check_cuda(cudaGetLastError(), "inject revised exploration noise");
+        return;
+    }
     inject_adc_noise_kernel<<<
         (model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.means.ptr<float>(), model.opacity_logits.ptr<float>(),
         visibility.ptr<float>(), model.size(), standard_deviation,
         std::max(maximum_noise, 0.F), seed);
     check_cuda(cudaGetLastError(), "inject ADC exploration noise");
+}
+
+tinytensor::Tensor compute_ssim_cs_error_map(
+    const tinytensor::Tensor& prediction,
+    const tinytensor::Tensor& target,
+    const tinytensor::Tensor& mask,
+    const bool mask_enabled,
+    const float power) {
+    if (!prediction.is_valid() || prediction.shape().rank() != 3)
+        throw std::invalid_argument("SSIM-CS error map requires CHW prediction");
+    const int channels = static_cast<int>(prediction.shape()[0]);
+    const int height = static_cast<int>(prediction.shape()[1]);
+    const int width = static_cast<int>(prediction.shape()[2]);
+    const int pixels = height * width;
+    auto error = tinytensor::Tensor::zeros(
+        {static_cast<std::size_t>(height), static_cast<std::size_t>(width)},
+        tinytensor::Device::CUDA);
+    if (pixels == 0 || channels < 3) return error;
+    const float* mask_ptr = mask_enabled && mask.is_valid()
+        ? mask.ptr<float>() : nullptr;
+    if (width >= 11 && height >= 11) {
+        dim3 block(16, 16);
+        dim3 grid(
+            (width + 15) / 16,
+            (height + 15) / 16);
+        ssim_cs_error_map_kernel<<<grid, block>>>(
+            prediction.ptr<float>(), target.ptr<float>(),
+            mask_ptr, error.ptr<float>(), height, width,
+            mask_enabled && mask_ptr != nullptr, power);
+    } else {
+        mae_error_map_kernel<<<
+            (pixels + k_threads - 1) / k_threads, k_threads>>>(
+            prediction.ptr<float>(), target.ptr<float>(),
+            mask_ptr, error.ptr<float>(), pixels,
+            mask_enabled && mask_ptr != nullptr);
+    }
+    check_cuda(cudaGetLastError(), "compute SSIM-CS densify error map");
+    return error;
+}
+
+tinytensor::Tensor scatter_error_map_to_gaussians(
+    const tinytensor::Tensor& error_hw,
+    const float* mean2d,
+    const tinytensor::Tensor& radii,
+    const tinytensor::Tensor& visibility) {
+    const std::size_t count = radii.numel();
+    auto scores = tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA);
+    if (count == 0 || !error_hw.is_valid() || error_hw.shape().rank() != 2)
+        return scores;
+    const int height = static_cast<int>(error_hw.shape()[0]);
+    const int width = static_cast<int>(error_hw.shape()[1]);
+    scatter_error_map_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        error_hw.ptr<float>(), mean2d, radii.ptr<int>(),
+        visibility.ptr<float>(), scores.ptr<float>(), width, height, count);
+    check_cuda(cudaGetLastError(), "scatter densify error map");
+    return scores;
+}
+
+tinytensor::Tensor densify_avg_scores(
+    const tinytensor::Tensor& numerator,
+    const tinytensor::Tensor& denominator) {
+    const std::size_t n = numerator.numel();
+    auto out = tinytensor::Tensor::zeros({n}, tinytensor::Device::CUDA);
+    if (n == 0 || !denominator.is_valid() || denominator.numel() != n)
+        return out;
+    densify_avg_scores_kernel<<<
+        (n + k_threads - 1) / k_threads, k_threads>>>(
+        numerator.ptr<float>(), denominator.ptr<float>(), out.ptr<float>(), n);
+    check_cuda(cudaGetLastError(), "densify avg scores");
+    return out;
+}
+
+tinytensor::Tensor densify_mean_scores(
+    const tinytensor::Tensor& sum,
+    const tinytensor::Tensor& count,
+    const float power) {
+    const std::size_t n = sum.numel();
+    auto out = tinytensor::Tensor::zeros({n}, tinytensor::Device::CUDA);
+    if (n == 0) return out;
+    densify_mean_scores_kernel<<<
+        (n + k_threads - 1) / k_threads, k_threads>>>(
+        sum.ptr<float>(), count.ptr<float>(), out.ptr<float>(), n,
+        std::max(power, 1e-6F));
+    check_cuda(cudaGetLastError(), "finalize densify mean scores");
+    return out;
+}
+
+tinytensor::Tensor densify_oversize_weights(
+    const tinytensor::Tensor& scores,
+    const tinytensor::Tensor& screens,
+    const float screen_threshold,
+    const float blend) {
+    const std::size_t n = scores.numel();
+    auto weights = tinytensor::Tensor::zeros({n}, tinytensor::Device::CUDA);
+    if (n == 0) return weights;
+    densify_oversize_weights_kernel<<<
+        (n + k_threads - 1) / k_threads, k_threads>>>(
+        scores.ptr<float>(), screens.ptr<float>(), weights.ptr<float>(), n,
+        screen_threshold, blend);
+    check_cuda(cudaGetLastError(), "build densify oversize weights");
+    return weights;
+}
+
+void clip_log_scale_by_screen(
+    tinytensor::Tensor& log_scales,
+    const tinytensor::Tensor& screens,
+    const float screen_threshold,
+    const float hardness) {
+    const std::size_t count = screens.numel();
+    if (count == 0 || !(screen_threshold > 0.F)) return;
+    clip_log_scale_by_screen_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        log_scales.ptr<float>(), screens.ptr<float>(), count,
+        screen_threshold, hardness);
+    check_cuda(cudaGetLastError(), "clip log-scale by screen share");
 }
 
 void reset_opacity(GaussianModel& model, const float maximum_opacity) {

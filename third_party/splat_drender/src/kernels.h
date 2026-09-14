@@ -94,7 +94,8 @@ void blend_bucket_backward(bool need_depth, const uint2* tile_range,
                            const float* dL_median, const float* dL_alpha,
                            const float* dL_normal, ws::GradState gs,
                            float* dL_colors, float* refine_weight,
-                           int buckets);
+                           const float* densify_map, float* densify_weight,
+                           float* densify_weight_den, int buckets);
 
 void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
                        int sh_bases, const float* means, const float* sh,

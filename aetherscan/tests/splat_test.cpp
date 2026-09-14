@@ -6,6 +6,7 @@
 #include "splat/formats.hpp"
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/densification.hpp"
+#include "../src/splat/fused_ssim.hpp"
 #include "../src/splat/multi_view_scheduler.hpp"
 #include "../src/splat/training_data_loader.hpp"
 #include "io/image.hpp"
@@ -668,6 +669,71 @@ void test_fisheye_equirect_rasterize() {
         "equirect +X splat should peak at 0.75 width");
 }
 
+void test_thin_splat_rgb_backward() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    const auto gpu = tinytensor::Device::CUDA;
+    Camera camera;
+    camera.width = 640; camera.height = 360;
+    camera.fx = camera.fy = 581.1552124F;
+    camera.cx = 319.75F; camera.cy = 179.75F;
+    camera.world_to_camera = {
+        .3124826849F,-.3835008442F,.8690694571F,0.F,
+        .3029498458F,.9073431492F,.2914615273F,0.F,
+        -.9003199339F,.1722077578F,.3997105360F,0.F,
+        -.7320452929F,-1.593179226F,2.917489529F,1.F};
+    camera.position = {-2.917735100F,.8169972301F,-1.550868511F};
+    // Two actual late-training splats: cancellation in the footprint power,
+    // and an ill-conditioned inverse covariance with no geometry loss.
+    const std::array<std::array<float, 3>, 2> means{{
+        {-.2691904306F,1.285746336F,-.4768541157F},
+        {.87730736F,1.1177711F,.52421576F}}};
+    const std::array<std::array<float, 3>, 2> scales{{
+        {.009814070538F,.001056014560F,3.274591791e-6F},
+        {3.3371716e-8F,.0019804370F,.0049294555F}}};
+    const std::array<std::array<float, 4>, 2> rotations{{
+        {.8961859345F,.4393746555F,-.06146703660F,.004758699797F},
+        {.74959874F,.15781423F,.4023349F,.5013212F}}};
+    const std::size_t pixels = camera.width * camera.height;
+    for (std::size_t sample = 0; sample < means.size(); ++sample) {
+        GaussianModel model;
+        model.means = Tensor::from_vector(
+            std::vector<float>(means[sample].begin(), means[sample].end()), {1,3}, gpu);
+        std::vector<float> logs;
+        for (float s : scales[sample]) logs.push_back(std::log(s));
+        model.log_scales = Tensor::from_vector(logs, {1,3}, gpu);
+        model.quaternions = Tensor::from_vector(
+            std::vector<float>(rotations[sample].begin(), rotations[sample].end()), {1,4}, gpu);
+        model.opacity_logits = Tensor::from_vector(std::vector<float>{-.6190475F}, {1,1}, gpu);
+        model.sh = Tensor::zeros({1,1,3}, gpu);
+        model.sh_degree = 0;
+        RasterizeOptions options;
+        options.require_depth = false;
+        options.colors_precomp = Tensor::from_vector(std::vector<float>{.3F,.4F,.5F}, {1,3}, gpu);
+        Rasterizer rasterizer;
+        auto rendered = rasterizer.forward(model, camera, options);
+        require(rendered.rendered_instances > 0,
+            "Thin splat fixture must reach Gaussian backward");
+        std::vector<float> gc(3 * pixels, 0.F);
+        std::fill(gc.begin(), gc.begin() + pixels, 1.F);
+        auto zero = Tensor::zeros({camera.height,camera.width}, gpu);
+        auto gradients = rasterizer.backward(model, rendered,
+            Tensor::from_vector(gc, {3,camera.height,camera.width}, gpu),
+            zero, zero, Tensor::zeros({3,camera.height,camera.width}, gpu));
+        const auto alpha = rendered.alpha.to_vector();
+        const double expected = std::accumulate(alpha.begin(), alpha.end(), 0.0);
+        require(sample != 0 || expected > 0.01,
+            "Thin splat fixture must contribute to an image pixel");
+        const auto colors = gradients.colors_precomp.to_vector();
+        require(std::abs(colors[0] - expected) < 2e-6 * std::max(expected, 1.0),
+            "Thin splat color backward must use the forward alpha");
+        for (const Tensor* tensor : {&gradients.means, &gradients.log_scales,
+                &gradients.quaternions, &gradients.opacity_logits})
+            for (float value : tensor->to_vector())
+                require(std::isfinite(value), "Thin RGB splat must have finite gradients");
+    }
+}
+
 void test_pinhole_geometry_finite_differences() {
     using namespace aetherscan::splat;
     using tinytensor::Tensor;
@@ -1239,6 +1305,14 @@ void test_normal_field_parameterization_and_occupancy() {
 
 void test_gaussian_format_roundtrip() {
     using namespace aetherscan::splat;
+    require(
+        gaussian_format_from_path("scene.sog") == GaussianFormat::sog &&
+            gaussian_format_from_path("scene.spz") == GaussianFormat::spz &&
+            gaussian_format_from_path("scene.glb") == GaussianFormat::glb &&
+            gaussian_format_from_path("scene.ply") == GaussianFormat::ply &&
+            gaussian_format_from_path("scene.ascan") == GaussianFormat::ply,
+        "Gaussian format should follow the file suffix");
+
     constexpr std::size_t count = 3;
     constexpr unsigned degree = 1;
     const std::vector<float> means{
@@ -2094,6 +2168,27 @@ void test_mask_loading() {
             soft_values[1] == 0.F && soft_values[2] == 0.F &&
             soft_values[3] == 1.F,
         "GGGS discarded grayscale coverage from an aether_drender mesh mask");
+    source = io::RgbImage{5, 5, std::vector<std::uint8_t>(75, 128)};
+    for (int c = 0; c < 3; ++c) source.pixels[3 * 12 + c] = 0;
+    io::save_rgb_png(source, image_path);
+    view.width = view.src_width = view.height = view.src_height = 5;
+    view.fx = view.fy = view.src_fx = view.src_fy = 2.F;
+    view.cx = view.cy = view.src_cx = view.src_cy = 2.F;
+    view.k1 = 0.5F;
+    options.use_mask = false;
+    options.ignore_undistortion_border = true;
+    options.training_prefetch_views = 0;
+    const auto valid_training = splat::make_training_view(view, options);
+    const auto validity = valid_training.mask.to_vector();
+    require(valid_training.mask_is_validity && validity.front() == 0.F &&
+                validity[12] == 1.F && valid_training.rgb.to_vector()[12] == 0.F,
+            "Undistortion validity must reject absent rays, not genuine black pixels");
+    const std::vector<mvs::MvsView> validity_views{view};
+    splat::training_data::TrainingDataLoader validity_cache(validity_views, options);
+    const auto cached_validity = validity_cache.get(0);
+    require(cached_validity.mask_is_validity &&
+                cached_validity.mask.to_vector() == validity && !validity_cache.has_mask(0),
+            "Validity metadata must survive the cache without impersonating an object mask");
     std::filesystem::remove_all(root);
 }
 
@@ -2430,13 +2525,16 @@ void test_source_resolution_and_knn_initialization() {
         point.color = mvs::Vec3f::Constant(0.5F);
         scene.dense_cloud.points.push_back(point);
     }
-    options.max_gaussians = 0;
+    options.densification_cap = 2;
     options.sh_degree = 0;
     options.initialize_scale_from_knn = true;
     options.constrain_scale_range = false;
     options.densification_strategy =
         splat::DensificationStrategy::dense_adaptive;
     const auto model = splat::initialize_from_dense_cloud(scene, options);
+    require(
+        model.size() == 4,
+        "splat init subsampled the source cloud against densification_cap");
     const auto scales = model.log_scales.to_vector();
     const float expected_offset_scale = std::sqrt(5.F / 3.F);
     require(
@@ -2817,6 +2915,17 @@ void test_mask_loss_modes() {
     require(std::all_of(alpha_gradient.begin(), alpha_gradient.end(),
                         [](float value) { return value == 0.F; }),
             "missing per-view mask incorrectly enabled alpha supervision");
+    target.has_mask = true;
+    target.mask_is_validity = true;
+    options.use_mask = false;
+    loss = detail::compute_training_loss(rendered, target, options, true);
+    rgb_gradient = loss.color.to_vector();
+    alpha_gradient = loss.alpha.to_vector();
+    require(rgb_gradient[0] != 0.F && rgb_gradient[1] == 0.F &&
+                loss.alpha_value == 0.F &&
+                std::all_of(alpha_gradient.begin(), alpha_gradient.end(),
+                    [](float value) { return value == 0.F; }),
+            "Missing image rays must have neither RGB nor alpha supervision");
 }
 
 void test_ssim_loss_and_scale_constraint() {
@@ -2852,6 +2961,11 @@ void test_ssim_loss_and_scale_constraint() {
     require(
         std::abs(loss.rgb - 0.299324721F) < 2e-5F,
         "fused SSIM forward does not match the Python CUDA reference");
+    const float identical_ssim = detail::fused_ssim_metric(
+        target.rgb, target.rgb, target.mask, true, side, side);
+    require(
+        identical_ssim > 0.999F,
+        "identical images should have SSIM near 1");
     require_finite(loss.color, "SSIM produced a non-finite gradient");
     for (const auto* channel : {&loss.alpha, &loss.depth, &loss.normal}) {
         const auto values = channel->to_vector();
@@ -3253,7 +3367,7 @@ void test_igs_growth_budget() {
     options.densify_gradient_threshold = 0.01F;
     std::mt19937 random(42);
     const auto result = densification::refine_gaussians(
-        model, stats, 200, 1.F, aetherscan::mvs::Vec3f::Zero(), options, random, states);
+        model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(), options, random, states);
     require(result.grown == 3 && model.size() == 7,
             "IGS lost growth budget to an already selected oversized parent");
     for (const auto* state : states)
@@ -3261,6 +3375,66 @@ void test_igs_growth_budget() {
                 "IGS topology and Adam rows diverged");
     require_finite(model.means, "IGS produced non-finite means");
     require_finite(model.log_scales, "IGS produced non-finite scales");
+}
+
+void test_densification_cap_stops_igs_growth() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    GaussianModel model;
+    model.means = Tensor::zeros({4, 3}, gpu);
+    model.log_scales = Tensor::full({4, 3}, -3.F, gpu);
+    model.quaternions = Tensor::from_vector(
+        std::vector<float>{1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0}, {4,4}, gpu);
+    model.opacity_logits = Tensor::zeros({4,1}, gpu);
+    model.sh = Tensor::zeros({4,1,3}, gpu);
+    auto harness = make_refine_harness(std::move(model));
+    auto stats = detail::make_densification_stats(4);
+    stats.gradient = Tensor::full({4}, 1.F, gpu);
+    stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.max_screen_radius = Tensor::full({4}, 0.01F, gpu);
+    TrainingOptions options;
+    options.densification_strategy = DensificationStrategy::adc_igs;
+    apply_strategy_defaults(options);
+    options.densification_cap = 4;
+    options.densify_growth_factor = 2.F;
+    options.grow_stop_iter = 10'000;
+    std::mt19937 random(42);
+    const auto result = densification::refine_gaussians(
+        harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
+        options, random, harness.states());
+    require(harness.model.size() == 4,
+            "densification_cap did not stop ADC-IGS from growing past the cap");
+    require(result.grown == 0,
+            "ADC-IGS still scheduled extra splits after hitting densification_cap");
+    options.densification_cap = 8;
+    stats = detail::make_densification_stats(4);
+    stats.gradient = Tensor::full({4}, 1.F, gpu);
+    stats.count = Tensor::full({4}, 1.F, gpu);
+    stats.max_screen_radius = Tensor::full({4}, 0.01F, gpu);
+    const auto single_view = densification::refine_gaussians(
+        harness.model, stats, 700, 1.F, aetherscan::mvs::Vec3f::Zero(),
+        options, random, harness.states());
+    require(single_view.grown == 0 && single_view.pruned == 0 && harness.model.size() == 4,
+            "IGS must retain opaque single-observation parents without replicating them");
+    stats = detail::make_densification_stats(4);
+    stats.gradient = Tensor::full({4}, 1.F, gpu);
+    stats.count = Tensor::full({4}, 10.F, gpu);
+    options.densify_geometry_gradient_threshold = 0.0025F;
+    const auto resolved = densification::refine_gaussians(
+        harness.model, stats, 800, 1.F, aetherscan::mvs::Vec3f::Zero(),
+        options, random, harness.states());
+    require(resolved.grown == 0 && harness.model.size() == 4,
+            "IGS must not fill the cap when projected geometry is already resolved");
+    stats = detail::make_densification_stats(4);
+    stats.gradient = Tensor::full({4}, 1.F, gpu);
+    stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.geometry_gradient = Tensor::full({4}, 1.F, gpu);
+    const auto unresolved = densification::refine_gaussians(
+        harness.model, stats, 900, 1.F, aetherscan::mvs::Vec3f::Zero(),
+        options, random, harness.states());
+    require(unresolved.grown == 1 && harness.model.size() == 5,
+            "IGS must allocate the interval-normalized unresolved geometry budget");
 }
 
 void test_adc_plus_split_matches_brush() {
@@ -3354,6 +3528,155 @@ void test_adc_plus_split_matches_brush() {
             std::abs(children.opacity_logits.to_vector()[0] -
                      expected_logit) < 1e-5F,
         "ADC+ split opacity does not match brush's transmittance power");
+}
+
+void test_las_split_matches_reference() {
+    using namespace aetherscan::splat;
+    GaussianModel parents;
+    parents.means = tinytensor::Tensor::zeros(
+        {1, 3}, tinytensor::Device::CUDA);
+    parents.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{std::log(2.F), 0.F, std::log(0.5F)},
+        {1, 3}, tinytensor::Device::CUDA);
+    parents.quaternions = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F},
+        {1, 4}, tinytensor::Device::CUDA);
+    parents.opacity_logits = tinytensor::Tensor::zeros(
+        {1, 1}, tinytensor::Device::CUDA);
+    parents.sh = tinytensor::Tensor::zeros(
+        {1, 1, 3}, tinytensor::Device::CUDA);
+    parents.sh_degree = 0;
+    {
+        auto noise_model = densification::clone_model(parents);
+        noise_model.opacity_logits = tinytensor::Tensor::full(
+            {1, 1}, std::log(0.01F / 0.99F), tinytensor::Device::CUDA);
+        auto scaled_model = densification::clone_model(noise_model);
+        scaled_model.log_scales = scaled_model.log_scales + std::log(10.F);
+        const auto visible = tinytensor::Tensor::ones({1}, tinytensor::Device::CUDA);
+        const auto radii = tinytensor::Tensor::from_vector(
+            std::vector<int>{1}, {1}, tinytensor::Device::CUDA);
+        detail::inject_adc_noise(noise_model, visible, 80.F, 1.F, 123, radii, true);
+        detail::inject_adc_noise(scaled_model, visible, 80.F, 1.F, 123, radii, true);
+        const auto displacement = noise_model.means.to_vector();
+        const auto scaled_displacement = scaled_model.means.to_vector();
+        float magnitude = 0.F;
+        for (int axis = 0; axis < 3; ++axis) {
+            magnitude += std::abs(displacement[axis]);
+            require(std::abs(scaled_displacement[axis] - 10.F * displacement[axis]) < 1e-4F,
+                    "Revised noise must scale linearly with scene units");
+        }
+        require(magnitude > 1e-6F, "Revised noise test must exercise nonzero motion");
+        const auto invisible = tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
+        detail::inject_adc_noise(noise_model, invisible, 80.F, 1.F, 456, radii, true);
+        require(noise_model.means.to_vector() == displacement,
+                "Revised noise must leave invisible Gaussians stationary");
+    }
+    GaussianModel children = densification::clone_model(parents);
+    const auto indices = tinytensor::Tensor::from_vector(
+        std::vector<int>{0}, {1}, tinytensor::Device::CUDA);
+    const auto unused_random = tinytensor::Tensor::zeros(
+        {1, 3}, tinytensor::Device::CUDA);
+    const auto screen_sizes = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F}, {1}, tinytensor::Device::CUDA);
+    detail::split_gaussians(
+        parents, children, indices, unused_random, screen_sizes, 6,
+        1.F / 255.F, 0.5F, 0.6F);
+    const auto parent_means = parents.means.to_vector();
+    const auto child_means = children.means.to_vector();
+    const auto parent_scales = parents.log_scales.to_vector();
+    require(
+        std::abs(parent_means[0] + 1.F) < 1e-5F &&
+            std::abs(child_means[0] - 1.F) < 1e-5F &&
+            std::abs(parent_means[1]) < 1e-5F &&
+            std::abs(parent_means[2]) < 1e-5F,
+        "LAS split offset is not half the longest axis");
+    require(
+        std::abs(parent_scales[0] - std::log(1.F)) < 1e-5F &&
+            std::abs(parent_scales[1] - std::log(0.85F)) < 1e-5F &&
+            std::abs(parent_scales[2] - (std::log(0.5F) + std::log(0.85F))) <
+                1e-5F,
+        "LAS split scale shrink is not 0.5 / 0.85");
+    const float expected_opacity = 0.6F * 0.5F;
+    const float expected_logit =
+        std::log(expected_opacity / (1.F - expected_opacity));
+    require(
+        std::abs(parents.opacity_logits.to_vector()[0] - expected_logit) <
+            1e-5F,
+        "LAS split opacity is not logit(k * sigmoid(alpha))");
+}
+
+void test_densify_mean_scores_and_oversize_weights() {
+    using namespace aetherscan::splat;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    // Equal arithmetic means, different consistency: a single-view spike
+    // must receive less budget than persistent error after per-view power.
+    auto stats = detail::make_densification_stats(2);
+    const auto visible = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 1.F}, {2}, gpu);
+    const auto radii = tinytensor::Tensor::from_vector(
+        std::vector<int>{1, 1}, {2}, gpu);
+    for (const auto& observation : {std::vector<float>{0.F, 4.F},
+                                    std::vector<float>{8.F, 4.F}}) {
+        detail::accumulate_densification_stats(
+            tinytensor::Tensor::from_vector(observation, {2}, gpu),
+            visible, radii, stats, 100, 100, false, true, 0.5F);
+    }
+    const auto temporal = detail::densify_mean_scores(
+        stats.gradient, stats.count, 1.F).to_vector();
+    require(std::abs(temporal[0] - std::sqrt(8.F) / 2.F) < 1e-5F &&
+                std::abs(temporal[1] - 2.F) < 1e-5F &&
+                temporal[0] < temporal[1],
+            "IGS must compress per-view errors before averaging the window");
+    auto oversize_stats = detail::make_densification_stats(2);
+    for (const auto& radius : {std::vector<int>{20, 20}, std::vector<int>{1, 20}}) {
+        detail::accumulate_densification_stats(
+            visible, visible, tinytensor::Tensor::from_vector(radius, {2}, gpu),
+            oversize_stats, 100, 100, false, true, 1.F, 0.1F);
+    }
+    const auto oversize_evidence = oversize_stats.priority.to_vector();
+    require(std::abs(oversize_evidence[0] - 1.F) < 1e-5F &&
+                std::abs(oversize_evidence[1] - 2.F) < 1e-5F,
+            "IGS oversize budget must prefer repeated support over one close view");
+    const auto image_scores = tinytensor::Tensor::from_vector(
+        std::vector<float>{4.F, 4.F}, {2}, gpu);
+    const auto world_gradients = tinytensor::Tensor::from_vector(
+        std::vector<float>{3.F, 4.F, 0.F, 0.F, 0.F, 0.F}, {2, 3}, gpu);
+    const auto world_scales = tinytensor::Tensor::full({2, 3}, std::log(2.F), gpu);
+    const auto blend = detail::densify_blend_world_gradient(
+        image_scores, world_gradients, world_scales, 0.5F).to_vector();
+    const auto rescaled = detail::densify_blend_world_gradient(
+        image_scores, world_gradients / 10.F, world_scales + std::log(10.F),
+        0.5F).to_vector();
+    require(std::abs(blend[0] - std::sqrt(40.F)) < 1e-5F && blend[1] == 0.F,
+            "IGS world-gradient blend must reject geometry-insensitive error");
+    require(std::abs(blend[0] - rescaled[0]) < 1e-5F,
+            "IGS world-gradient ranking must be invariant to scene units");
+    const auto sh_prior = tinytensor::Tensor::ones({2, 2, 3}, gpu);
+    auto sh_gradient = tinytensor::Tensor::full({2, 2, 3}, 0.2F, gpu);
+    detail::add_sh_regularization(sh_prior, sh_gradient, 0.3F);
+    const auto regularized = sh_gradient.to_vector();
+    for (std::size_t i = 0; i < regularized.size(); ++i)
+        require(std::abs(regularized[i] - (i % 6 < 3 ? 0.2F : 0.3F)) < 1e-6F,
+                "SH prior must preserve DC and normalize over non-DC coefficients");
+    const auto sum = tinytensor::Tensor::from_vector(
+        std::vector<float>{2.F, 0.F, 8.F}, {3}, gpu);
+    const auto count = tinytensor::Tensor::from_vector(
+        std::vector<float>{2.F, 0.F, 2.F}, {3}, gpu);
+    const auto scores = detail::densify_mean_scores(sum, count, 1.F);
+    const auto values = scores.to_vector();
+    require(
+        std::abs(values[0] - 1.F) < 1e-5F &&
+            values[1] == 0.F &&
+            std::abs(values[2] - 4.F) < 1e-5F,
+        "densify mean scores did not divide the window sum by count");
+    const auto screens = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.6F, 0.1F, 0.9F}, {3}, gpu);
+    const auto weights = detail::densify_oversize_weights(
+        scores, screens, 0.3F, 1.F);
+    const auto w = weights.to_vector();
+    require(
+        w[0] > 0.F && w[1] == 0.F && w[2] > w[0],
+        "oversize weights should rank only rows above the screen cap");
 }
 
 void test_densification_strategies_and_dense_bypass() {
@@ -3491,10 +3814,18 @@ void test_densification_strategies_and_dense_bypass() {
     splat::apply_strategy_defaults(igs_schedule);
     require(igs_schedule.grow_stop_iter >= igs_schedule.iterations,
             "IGS unexpectedly truncates ADC+ growth budget");
-    for (unsigned step : {200U, 600U, 24000U, 28400U, 28600U})
-        require(splat::densification::is_refinement_iteration(step, igs_schedule) ==
-                    splat::densification::is_refinement_iteration(step, full_brush_schedule),
-                "IGS and ADC+ refinement schedules differ");
+    require(
+        !splat::densification::is_refinement_iteration(200, igs_schedule),
+        "IGS densify should wait until iteration 500");
+    require(
+        splat::densification::is_refinement_iteration(600, igs_schedule),
+        "IGS densify should run every 100 steps after 500");
+    require(
+        splat::densification::is_refinement_iteration(24'000, igs_schedule),
+        "IGS should keep densifying until max(14000, N-2500)");
+    require(
+        !splat::densification::is_refinement_iteration(28'400, igs_schedule),
+        "IGS should stop densify at max(14000, N-2500)");
     const auto brush_schedule_model =
         splat::Trainer(brush_schedule).train(scene);
     require(
@@ -3588,7 +3919,20 @@ int main(int argc, char** argv) {
             std::cout << "SKIP: no CUDA device\n";
             return 0;
         }
+        test_thin_splat_rgb_backward();
         test_pinhole_geometry_finite_differences();
+        if (argc > 1 && std::string(argv[1]) == "--igs-only") {
+            test_mask_loading();
+            test_mask_loss_modes();
+            test_contribution_visibility_rejects_occluded_gaussians();
+            test_las_split_matches_reference();
+            test_densify_mean_scores_and_oversize_weights();
+            test_igs_growth_budget();
+            test_densification_cap_stops_igs_growth();
+            test_densification_strategies_and_dense_bypass();
+            std::cout << "IGS tests passed\n";
+            return 0;
+        }
         if(argc>1 && std::string(argv[1])=="--fisheye-only") {
             test_fisheye_parameter_finite_differences();
             test_fisheye_filter_and_supervision();
@@ -3634,9 +3978,12 @@ int main(int argc, char** argv) {
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
         test_adc_plus_split_matches_brush();
+        test_las_split_matches_reference();
+        test_densify_mean_scores_and_oversize_weights();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();
         test_igs_growth_budget();
+        test_densification_cap_stops_igs_growth();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";
         return 0;

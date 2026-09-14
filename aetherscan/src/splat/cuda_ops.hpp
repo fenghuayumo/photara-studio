@@ -43,7 +43,9 @@ struct DensificationStats {
     tinytensor::Tensor gradient;
     tinytensor::Tensor count;
     tinytensor::Tensor max_screen_radius;
+    // Dense/ADC+: weighted priority. IGS: accumulated log2 screen oversize.
     tinytensor::Tensor priority;
+    tinytensor::Tensor geometry_gradient;
 };
 
 // Clear selected parent moments without temporary zero tensors or per-state scatters.
@@ -225,6 +227,14 @@ void constrain_scale_ratio(
 
 DensificationStats make_densification_stats(std::size_t count);
 
+tinytensor::Tensor densify_blend_world_gradient(
+    const tinytensor::Tensor& image_score,
+    const tinytensor::Tensor& means_gradient,
+    const tinytensor::Tensor& log_scales, float blend);
+
+void add_sh_regularization(const tinytensor::Tensor& sh,
+    tinytensor::Tensor& gradient, float weight);
+
 void accumulate_densification_stats(
     const tinytensor::Tensor& refine_weight,
     const tinytensor::Tensor& visibility,
@@ -233,11 +243,53 @@ void accumulate_densification_stats(
     std::uint32_t width,
     std::uint32_t height,
     bool use_maximum,
-    bool require_contribution_visibility);
+    bool require_contribution_visibility,
+    float step_score_power = 1.F,
+    float oversize_screen_threshold = 0.F,
+    const tinytensor::Tensor& geometry_gradient = {});
+
+// Per-pixel nonnegative (1 - SSIM contrast-structure)^power, shape [H, W].
+tinytensor::Tensor compute_ssim_cs_error_map(
+    const tinytensor::Tensor& prediction,
+    const tinytensor::Tensor& target,
+    const tinytensor::Tensor& mask,
+    bool mask_enabled,
+    float power = 1.F);
+
+// Per-view Avg reduction: sum(error*alpha*T) / sum(alpha*T).
+tinytensor::Tensor densify_avg_scores(
+    const tinytensor::Tensor& numerator,
+    const tinytensor::Tensor& denominator);
+
+// Sample the error map at each Gaussian's projected mean (3x3 max).
+tinytensor::Tensor scatter_error_map_to_gaussians(
+    const tinytensor::Tensor& error_hw,
+    const float* mean2d,
+    const tinytensor::Tensor& radii,
+    const tinytensor::Tensor& visibility);
+
+// Convert a window sum into (sum/count)^power for error-map ranking.
+tinytensor::Tensor densify_mean_scores(
+    const tinytensor::Tensor& sum,
+    const tinytensor::Tensor& count,
+    float power);
+
+tinytensor::Tensor densify_oversize_weights(
+    const tinytensor::Tensor& scores,
+    const tinytensor::Tensor& screens,
+    float screen_threshold,
+    float blend);
+
+void clip_log_scale_by_screen(
+    tinytensor::Tensor& log_scales,
+    const tinytensor::Tensor& screens,
+    float screen_threshold,
+    float hardness);
 
 // Mutate selected parents and their already-cloned children in place.
 // mode: 1=default, 2=ADC+, 3=legacy stochastic IGS,
-//       4=dense-MVS tangent plane, 5=IGS moment-preserving major-axis split.
+//       4=dense-MVS tangent plane, 5=IGS moment-preserving major-axis split,
+//       6=long-axis split (LAS).
 void split_gaussians(
     GaussianModel& parents,
     GaussianModel& children,
@@ -246,7 +298,8 @@ void split_gaussians(
     const tinytensor::Tensor& screen_sizes,
     int mode,
     float minimum_opacity,
-    float split_at_screen_size);
+    float split_at_screen_size,
+    float split_opacity_k = 0.6F);
 
 void apply_adc_decay(
     GaussianModel& model, float opacity_decay, float scale_decay);
@@ -260,7 +313,9 @@ void inject_adc_noise(
     const tinytensor::Tensor& visibility,
     float standard_deviation,
     float maximum_noise,
-    unsigned seed);
+    unsigned seed,
+    const tinytensor::Tensor& radii = {},
+    bool revised = false);
 
 void reset_opacity(GaussianModel& model, float maximum_opacity);
 

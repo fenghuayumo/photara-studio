@@ -73,6 +73,9 @@ struct LossGradients {
     const float* alpha = nullptr;         // [H,W]
     const float* median_depth = nullptr;  // [H,W]
     const float* normal = nullptr;        // [3,H,W]
+    // Optional [H,W] densify error map. Backward accumulates
+    // error * alpha * T onto densify_weight / densify_weight_den.
+    const float* densify_map = nullptr;
 };
 
 struct ModelGradients {
@@ -86,6 +89,8 @@ struct ModelGradients {
     // Brush-style densification signal: accumulated per-Gaussian
     // ||dL/d(mean2d)|| * (W,H) / final alpha. Null disables it.
     float* refine_weight = nullptr;  // [N]
+    float* densify_weight = nullptr;      // [N] sum(error * alpha * T)
+    float* densify_weight_den = nullptr;  // [N] sum(alpha * T)
 };
 
 // Forward outputs that backward() needs again.

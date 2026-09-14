@@ -58,6 +58,9 @@ struct TrainingView {
     tinytensor::Tensor normal;  // [3,H,W], camera space
     tinytensor::Tensor mask;    // [H,W], 0 or 1
     bool has_mask{false};
+    // The mask denotes available source pixels, not object occupancy.
+    // Such a mask never generates alpha supervision.
+    bool mask_is_validity{false};
 };
 
 struct ModelGradients {
@@ -73,6 +76,9 @@ struct ModelGradients {
     // Per-Gaussian image-plane refine weight emitted by the GGGS backward
     // kernel. This drives default/ADC+/ADC-IGS densification.
     tinytensor::Tensor refine_weight;
+    // Error-map densify score: sum(error * alpha * T) and sum(alpha * T).
+    tinytensor::Tensor densify_weight;
+    tinytensor::Tensor densify_weight_den;
 };
 
 struct RasterContextImpl;

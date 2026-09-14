@@ -182,7 +182,10 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
                       const float* __restrict__ dL_dalpha_in,
                       const float* __restrict__ dL_dnormal_in,
                       ws::GradState gs, float* __restrict__ dL_dcolors,
-                      float* __restrict__ refine_weight, int buckets) {
+                      float* __restrict__ refine_weight,
+                      const float* __restrict__ densify_map,
+                      float* __restrict__ densify_weight,
+                      float* __restrict__ densify_weight_den, int buckets) {
     const int warp_id = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
     const int bucket_idx = blockIdx.x * 8 + warp_id;
@@ -240,6 +243,8 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
     float3 acc_mean2d = make_float3(0.f, 0.f, 0.f);
     float4 acc_conic = make_float4(0.f, 0.f, 0.f, 0.f);
     float acc_refine = 0.f;
+    float acc_densify = 0.f;
+    float acc_densify_den = 0.f;
     float3 acc_normal = make_float3(0.f, 0.f, 0.f);
     float4 acc_ray_plane = make_float4(0.f, 0.f, 0.f, 0.f);
 
@@ -506,6 +511,11 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
             const float gy = dL_ddely_render * float(height);
             acc_refine += sqrtf(gx * gx + gy * gy) / fmaxf(1.f - T_final, 1.0e-5f);
         }
+        if (densify_map != nullptr) {
+            const unsigned pid = unsigned(width) * py + px;
+            acc_densify += densify_map[pid] * blend_weight;
+            acc_densify_den += blend_weight;
+        }
 
         T *= 1.f - alpha;
     }
@@ -522,6 +532,9 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
         atomicAdd(&gs.d_conic[g].z, acc_conic.z);
         atomicAdd(&gs.d_conic[g].w, acc_conic.w);
         if (refine_weight != nullptr) atomicAdd(&refine_weight[g], acc_refine);
+        if (densify_weight != nullptr) atomicAdd(&densify_weight[g], acc_densify);
+        if (densify_weight_den != nullptr)
+            atomicAdd(&densify_weight_den[g], acc_densify_den);
         if constexpr (GEOMETRY) {
             atomicAdd(&gs.d_normal[g].x, acc_normal.x);
             atomicAdd(&gs.d_normal[g].y, acc_normal.y);
@@ -645,7 +658,8 @@ void blend_bucket_backward(bool need_depth, const uint2* tile_range,
                            const float* dL_median, const float* dL_alpha,
                            const float* dL_normal, ws::GradState gs,
                            float* dL_colors, float* refine_weight,
-                           int buckets) {
+                           const float* densify_map, float* densify_weight,
+                           float* densify_weight_den, int buckets) {
     if (buckets <= 0) return;
     const dim3 grid((buckets + 7) / 8, 1, 1);
     if (need_depth) {
@@ -655,7 +669,8 @@ void blend_bucket_backward(bool need_depth, const uint2* tile_range,
             screen_bounds, alphas, normal_map, median_depth,
             n_contrib, max_contributor, bucket_offset, bucket_tile, pst,
             dL_color, dL_median, dL_alpha, dL_normal, gs, dL_colors,
-            refine_weight, buckets);
+            refine_weight, densify_map, densify_weight, densify_weight_den,
+            buckets);
     } else {
         kernels::blend_bucket_backward<false><<<grid, 256>>>(
             tile_range, instance_value, width, height, K, wrap_width,
@@ -663,7 +678,8 @@ void blend_bucket_backward(bool need_depth, const uint2* tile_range,
             screen_bounds, alphas, normal_map, median_depth,
             n_contrib, max_contributor, bucket_offset, bucket_tile, pst,
             dL_color, dL_median, dL_alpha, dL_normal, gs, dL_colors,
-            refine_weight, buckets);
+            refine_weight, densify_map, densify_weight, densify_weight_den,
+            buckets);
     }
 }
 

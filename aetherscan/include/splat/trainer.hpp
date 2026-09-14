@@ -50,6 +50,8 @@ struct RenderMetrics {
     // pygsplat-compatible PSNR: prediction and target are masked, then MSE is
     // averaged over every image pixel.
     float masked_psnr{};
+    // Mean 11x11 Gaussian SSIM on the valid interior, matching training.
+    float ssim{};
     float alpha_bce{};
     float alpha_coverage{};
 };

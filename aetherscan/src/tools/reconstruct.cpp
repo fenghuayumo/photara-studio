@@ -45,6 +45,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -110,11 +111,7 @@ struct ReconstructCli {
     std::string capture_mode{"object"};
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
-    std::string dataset_format{"auto"};
-    std::string splat_output_format{"auto"};
-    std::filesystem::path colmap_model;
     std::filesystem::path dense_ply;
-    std::filesystem::path splat_model;
     unsigned splat_iterations{10'000};
     unsigned splat_log_interval{100};
     unsigned splat_preview_interval{0};
@@ -132,7 +129,6 @@ struct ReconstructCli {
     unsigned splat_preview_vk_device_node_mask{};
     bool splat_profile_cuda{false};
     unsigned splat_profile_interval{100};
-    std::uint64_t splat_max_gaussians{500'000};
     unsigned splat_sh_degree{3};
     unsigned splat_max_resolution{1'920};
     bool splat_undistort{false};
@@ -144,7 +140,7 @@ struct ReconstructCli {
     std::uint64_t splat_device_cache_mb{512};
     bool splat_cache_auto{true};
     unsigned splat_prefetch_views{4};
-    unsigned splat_eval_split_every{0};
+    unsigned splat_eval_split_every{8};
     bool splat_use_mask{true};
     std::string splat_alpha_mode{"transparent"};
     float splat_match_alpha_weight{0.25F};
@@ -176,7 +172,7 @@ struct ReconstructCli {
     std::string splat_strategy{"adc_igs"};
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
-    std::uint64_t splat_densification_cap{10'000'000};
+    std::uint64_t splat_densification_cap{1'000'000};
     bool mesh{false};
     bool mvs_mesh_only{false};
     std::filesystem::path mask_mesh;
@@ -322,15 +318,10 @@ void print_help(const cxxopts::Options& options) {
               << "  global       rotation averaging + global positioning + BA\n"
               << "Dense (optional Stage A Fast MVS after SfM):\n"
               << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
-              << "  --splat       train CUDA Gaussian splats -> *_splat.<format>\n"
+              << "  --splat       train CUDA Gaussian splats -> *_splat.ply, or --output .sog/.spz/.glb\n"
               << "  --splat-view  orbit-preview a trained splat from the camera sidecar\n"
-              << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS camera data\n"
-              << "  --dataset-format auto|colmap|realitycapture|openmvs\n"
-              << "  --splat-format VALUE  deprecated alias for --dataset-format\n"
-              << "  --colmap PATH  compatibility alias for --dataset-format colmap\n"
+              << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
-              << "  --splat-output-format auto|ply|sog|spz|glb  final Gaussian format (default auto)\n"
-              << "  --splat-model PATH  load a trained splat PLY/SOG/SPZ/GLB and skip optimization\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
               << "  --splat-log-interval N  training-stat log every N steps (default 100, 0 = first/last)\n"
               << "  --splat-preview-interval N  emit a live preview every N steps (0 disables)\n"
@@ -344,13 +335,12 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
               << "  --splat-cache-auto BOOL  grow cache budgets safely for large datasets (default true)\n"
               << "  --splat-prefetch-views N  concurrent host image prefetch count (default 8)\n"
-              << "  --splat-max-gaussians N  fixed-model cap (0 = all; default 500000)\n"
               << "  --splat-sh-degree N  spherical-harmonic bands 0..3 (default 3)\n"
               << "  --splat-kernel-size V  screen covariance low-pass variance; "
                  "0 disables, 0.1 matches Brush Mip\n"
               << "  --splat-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
               << "  --splat-progressive-interval N  iterations per resolution level (default 3000)\n"
-              << "  --splat-eval-split-every N  hold out every Nth view for PSNR\n"
+              << "  --splat-eval-split-every N  hold out every Nth view for PSNR/SSIM (default 8; 0 trains all)\n"
               << "  --splat-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
               << "  --splat-alpha-mode masked|transparent (default transparent)\n"
               << "  --splat-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
@@ -377,7 +367,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-strategy adc_plus|adc_igs\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
-              << "  --splat-densification-cap N  dynamic Gaussian hard cap (default 10M)\n"
+              << "  --splat-densification-cap N  densify growth ceiling (default 1000000)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mask-mesh PATH  load an existing PLY mesh and render masks/previews\n"
               << "  --mesh-method auto|tsdf|delaunay|pam\n"
@@ -404,7 +394,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-tsdf-smooth-iters N  boundary-locked Taubin passes (default 2)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
-              << "  --colmap PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
+              << "  --splat-dataset PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
               << "  --capture-mode object|scene  object uses SfM SubjectBounds\n"
               << "  --subject-bounds PATH  load object focus region (SubjectBounds txt)\n"
               << "  --masks DIR optional foreground masks (auto: sibling masks/)\n"
@@ -421,7 +411,8 @@ void print_help(const cxxopts::Options& options) {
               << "Output formats:\n"
               << "  .ascan  AetherScan project (settings + completed stages)\n"
               << "  .asfm   native SfM scene (cameras, keypoints, tracks)\n"
-              << "  .ply    sparse XYZRGB point cloud\n"
+              << "  .ply    sparse XYZRGB point cloud; splat sidecar is {stem}_splat.ply\n"
+              << "  .sog/.spz/.glb  trained Gaussian file (format from the suffix)\n"
               << "  .mvs    OpenMVS Interface (interop export)\n"
               << "  --export-mvs [path]  also write OpenMVS Interface after SfM\n"
               << "  --gui  editor: no ascan/asfm/PLY sidecars, eval PNG, extra log\n"
@@ -485,7 +476,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("sfm-structural-rescue", "Experimental bridge-branch pair expansion (not validated for production)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("o,output",
-         "Output path (.ascan, .asfm, .ply, or .mvs)",
+         "Output path (.ascan, .asfm, .ply, .mvs, or .sog/.spz/.glb for Gaussians)",
          cxxopts::value<std::string>())
         ("gui",
          "Editor run: skip ascan/asfm/PLY sidecars, eval dumps, and extra log file",
@@ -494,7 +485,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Compact SfM working copy used by --gui (read on --splat, write after SfM)",
          cxxopts::value<std::string>()->default_value(""))
         ("working-splat",
-         "Trained Gaussian working copy used by --gui instead of a sidecar PLY",
+         "Gaussian file used by --gui training and --splat-view",
          cxxopts::value<std::string>()->default_value(""))
         ("working-mesh",
          "Mesh working copy used by --gui instead of a sidecar PLY",
@@ -584,20 +575,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-dataset",
          "External camera dataset: COLMAP root, RealityCapture CSV/dir, or OpenMVS .mvs",
          cxxopts::value<std::string>()->default_value(""))
-        ("dataset-format",
-         "External dataset format: auto, colmap, realitycapture, or openmvs",
-         cxxopts::value<std::string>()->default_value("auto"))
-        ("splat-output-format",
-         "Final Gaussian format: auto, ply, sog, spz, or glb",
-         cxxopts::value<std::string>()->default_value("auto"))
-        ("splat-format",
-         "Deprecated alias for --dataset-format",
-         cxxopts::value<std::string>()->default_value(""))
-        ("colmap", "Compatibility alias for --splat-dataset PATH --dataset-format colmap",
-         cxxopts::value<std::string>()->default_value(""))
         ("dense-ply", "Dense PLY initializer for external or internal-SfM cameras",
-         cxxopts::value<std::string>()->default_value(""))
-        ("splat-model", "Trained splat PLY/SOG/SPZ/GLB to load instead of optimizing",
          cxxopts::value<std::string>()->default_value(""))
         ("splat-iterations", "Splat optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
@@ -645,8 +623,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-profile-interval",
          "CUDA profiling aggregation window (1..1000 iterations)",
          cxxopts::value<unsigned>()->default_value("100"))
-        ("splat-max-gaussians", "Maximum initial Gaussians (0 = all dense points)",
-         cxxopts::value<std::uint64_t>()->default_value("500000"))
         ("splat-sh-degree", "Spherical-harmonic colour bands (0..3)",
          cxxopts::value<unsigned>()->default_value("3"))
         ("splat-max-resolution", "Maximum splat training image dimension (0 = source)",
@@ -678,8 +654,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Concurrent host decode/pack prefetch views (0 disables)",
          cxxopts::value<unsigned>()->default_value("4"))
         ("splat-eval-split-every",
-         "Hold out every Nth view for PSNR evaluation (0 = train all)",
-         cxxopts::value<unsigned>()->default_value("0"))
+         "Hold out every Nth view for PSNR/SSIM evaluation (0 = train all)",
+         cxxopts::value<unsigned>()->default_value("8"))
         ("splat-use-mask", "Enable pygsplat-compatible foreground-mask training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-alpha-mode", "Mask alpha mode: masked or transparent",
@@ -754,8 +730,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
-        ("splat-densification-cap", "Dynamic Gaussian hard cap",
-         cxxopts::value<std::uint64_t>()->default_value("10000000"))
+        ("splat-densification-cap", "Densify growth ceiling",
+         cxxopts::value<std::uint64_t>()->default_value("1000000"))
         ("mesh", "Build TSDF mesh from splats (or MVS mesh with --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mvs-mesh-only",
@@ -1020,37 +996,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-dataset"].as<std::string>();
     if (!splat_dataset_text.empty())
         cli.splat_dataset = utf8_to_path(splat_dataset_text);
-    cli.dataset_format = result["dataset-format"].as<std::string>();
-    cli.splat_output_format =
-        result["splat-output-format"].as<std::string>();
-    const std::string legacy_dataset_format =
-        result["splat-format"].as<std::string>();
-    if (!legacy_dataset_format.empty()) {
-        if (cli.dataset_format != "auto" &&
-            cli.dataset_format != legacy_dataset_format)
-            throw std::invalid_argument(
-                "--dataset-format and deprecated --splat-format disagree");
-        cli.dataset_format = legacy_dataset_format;
-    }
-    const std::string colmap_text = result["colmap"].as<std::string>();
-    if (!colmap_text.empty()) cli.colmap_model = utf8_to_path(colmap_text);
-    if (!cli.colmap_model.empty()) {
-        if (!cli.splat_dataset.empty() &&
-            cli.splat_dataset != cli.colmap_model)
-            throw std::invalid_argument(
-                "--colmap and --splat-dataset cannot name different inputs");
-        if (cli.dataset_format != "auto" && cli.dataset_format != "colmap")
-            throw std::invalid_argument(
-                "--colmap conflicts with non-COLMAP --dataset-format");
-        cli.splat_dataset = cli.colmap_model;
-        cli.dataset_format = "colmap";
-    }
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
-    const std::string splat_model_text =
-        result["splat-model"].as<std::string>();
-    if (!splat_model_text.empty())
-        cli.splat_model = utf8_to_path(splat_model_text);
     cli.splat_iterations = result["splat-iterations"].as<unsigned>();
     cli.splat_log_interval = result["splat-log-interval"].as<unsigned>();
     cli.splat_preview_interval =
@@ -1094,8 +1041,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.splat_profile_interval > 1'000)
         throw std::invalid_argument(
             "--splat-profile-interval must be in [1, 1000]");
-    cli.splat_max_gaussians =
-        result["splat-max-gaussians"].as<std::uint64_t>();
     cli.splat_sh_degree = result["splat-sh-degree"].as<unsigned>();
     if (cli.splat_sh_degree > 3)
         throw std::invalid_argument("--splat-sh-degree must be in [0, 3]");
@@ -1281,7 +1226,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
                        !cli.dense && result.count("mesh") == 0;
     if (cli.texture && !cli.texture_only) cli.mesh = true;
     if (cli.mesh_obj) cli.mesh = true;
-    if (!cli.splat_model.empty()) cli.splat = true;
     // An explicitly selected capture mode is the product-level full rebuild
     // preset. Omitting it keeps the low-level SfM-only developer workflow.
     // An explicit --mesh still wins, so a caller can request appearance-only
@@ -1317,9 +1261,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument(
             "--splat requires CUDA and AETHERSCAN_ENABLE_SPLAT=ON");
     }
-#else
-    static_cast<void>(
-        aetherscan::splat::parse_dataset_format(cli.dataset_format));
 #endif
     if (!cli.splat_view && cli.splat_iterations == 0)
         throw std::invalid_argument("--splat-iterations must be positive");
@@ -1424,7 +1365,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     if (cli.mesh_method == "pam" && !cli.splat)
         throw std::invalid_argument(
-            "--mesh-method pam requires splat training or --splat-model");
+            "--mesh-method pam requires splat training");
     if (cli.pam_max_points < 4 || cli.pam_pivot_max_points < 4 ||
         cli.pam_neighbors == 0 ||
         cli.pam_points_per_tetrahedron == 0 ||
@@ -1574,6 +1515,20 @@ std::string lower_extension(const std::filesystem::path& path) {
 }
 
 #if defined(AETHERSCAN_HAS_SPLAT)
+bool is_gaussian_output(const std::filesystem::path& path) {
+    const auto extension = lower_extension(path);
+    return extension == ".sog" || extension == ".spz" || extension == ".glb";
+}
+
+std::filesystem::path splat_file_path(const ReconstructCli& cli) {
+    if (cli.gui && !cli.working_splat.empty()) return cli.working_splat;
+    if (is_gaussian_output(cli.output)) return cli.output;
+    const auto parent = cli.output.parent_path().empty()
+        ? std::filesystem::current_path()
+        : cli.output.parent_path();
+    return parent / (cli.output.stem().string() + "_splat.ply");
+}
+
 void apply_cli_subject_bounds(
     const ReconstructCli& cli, aetherscan::mvs::MvsScene& scene) {
     if (!cli.subject_bounds.empty()) {
@@ -1605,26 +1560,18 @@ void run_splat_view(
     std::filesystem::path model_path;
     std::error_code exists_error;
     std::vector<std::filesystem::path> candidates;
-    if (!cli.splat_model.empty()) {
-        candidates.push_back(cli.splat_model);
-    } else {
-        if (!cli.working_splat.empty())
-            candidates.push_back(cli.working_splat);
-        const std::filesystem::path parent = cli.output.parent_path().empty()
-            ? std::filesystem::current_path()
-            : cli.output.parent_path();
-        const std::string stem = cli.output.stem().string() + "_splat";
-        const auto requested =
-            aetherscan::splat::parse_gaussian_format(cli.splat_output_format);
-        if (requested != aetherscan::splat::GaussianFormat::auto_detect)
-            candidates.push_back(
-                parent / (stem + "." +
-                          aetherscan::splat::gaussian_format_extension(requested)));
-        candidates.push_back(parent / (stem + ".sog"));
-        candidates.push_back(parent / (stem + ".spz"));
-        candidates.push_back(parent / (stem + ".glb"));
-        candidates.push_back(parent / (stem + ".ply"));
-    }
+    if (!cli.working_splat.empty())
+        candidates.push_back(cli.working_splat);
+    if (is_gaussian_output(cli.output))
+        candidates.push_back(cli.output);
+    const std::filesystem::path parent = cli.output.parent_path().empty()
+        ? std::filesystem::current_path()
+        : cli.output.parent_path();
+    const std::string stem = cli.output.stem().string() + "_splat";
+    candidates.push_back(parent / (stem + ".sog"));
+    candidates.push_back(parent / (stem + ".spz"));
+    candidates.push_back(parent / (stem + ".glb"));
+    candidates.push_back(parent / (stem + ".ply"));
     for (const auto& candidate : candidates) {
         if (!std::filesystem::exists(candidate, exists_error)) continue;
         model_path = candidate;
@@ -1725,9 +1672,13 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.image_directory =
         cli.video_source.empty() ? cli.images_dir : cli.video_source;
     settings.dataset_source = cli.splat_dataset;
-    settings.dataset_format = cli.dataset_format;
+    settings.dataset_format = "auto";
     settings.dataset_initial_cloud = cli.dense_ply;
-    settings.splat_output_format = cli.splat_output_format;
+#if defined(AETHERSCAN_HAS_SPLAT)
+    settings.splat_output_format =
+        aetherscan::splat::gaussian_format_name(
+            aetherscan::splat::gaussian_format_from_path(cli.output));
+#endif
     settings.video_frames_dir =
         cli.video_source.empty() ? cli.video_frames_dir : cli.images_dir;
     settings.video_fps = cli.video_fps;
@@ -2532,18 +2483,6 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     const aetherscan::mvs::DensifyOptions* mesh_options = nullptr,
     const std::filesystem::path& generated_mask_dir = {},
     aetherscan::project::Archive* project_archive = nullptr) {
-    const auto requested_output_format =
-        aetherscan::splat::parse_gaussian_format(cli.splat_output_format);
-    const auto output_format = requested_output_format ==
-            aetherscan::splat::GaussianFormat::auto_detect
-        ? (lower_extension(cli.output) == ".sog"
-                ? aetherscan::splat::GaussianFormat::sog
-                : lower_extension(cli.output) == ".spz"
-                    ? aetherscan::splat::GaussianFormat::spz
-                : lower_extension(cli.output) == ".glb"
-                    ? aetherscan::splat::GaussianFormat::glb
-                    : aetherscan::splat::GaussianFormat::ply)
-        : requested_output_format;
     aetherscan::splat::TrainingOptions options;
     options.iterations = cli.splat_iterations;
     options.log_interval = cli.splat_log_interval;
@@ -2552,10 +2491,6 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.preview_view_file = cli.splat_preview_view_file;
     options.preview_camera_file = cli.splat_preview_camera_file;
     options.preview_vis_file = cli.splat_preview_vis_file;
-    options.max_gaussians = static_cast<std::size_t>(
-        std::min<std::uint64_t>(
-            cli.splat_max_gaussians,
-            (std::numeric_limits<std::size_t>::max)()));
     options.sh_degree = cli.splat_sh_degree;
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;
@@ -2591,15 +2526,16 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
              {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
             if (milestone < options.iterations)
                 options.evaluation_iterations.push_back(milestone);
+        if (std::find(
+                options.evaluation_iterations.begin(),
+                options.evaluation_iterations.end(),
+                options.iterations) == options.evaluation_iterations.end())
+            options.evaluation_iterations.push_back(options.iterations);
     }
     options.densification_cap = static_cast<std::size_t>(
         std::min<std::uint64_t>(
             cli.splat_densification_cap,
             (std::numeric_limits<std::size_t>::max)()));
-    if (!dense_input)
-        options.max_gaussians = options.max_gaussians == 0
-            ? options.densification_cap
-            : (std::min)(options.max_gaussians, options.densification_cap);
     if (cli.splat_strategy == "adc_plus")
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::adc_plus;
@@ -2754,7 +2690,6 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " log_interval=", options.log_interval,
         " input=", dense_input ? "dense_points" : "sparse_points",
         " input_points=", scene.dense_cloud.points.size(),
-        " max_initial_gaussians=", options.max_gaussians,
         " densification_strategy=", effective_strategy,
         " densification_enabled=", options.enable_densification,
         " structure_freeze_iter=", options.structure_freeze_iter,
@@ -2828,11 +2763,16 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         : cli.output.parent_path();
     std::vector<std::size_t> evaluation_views;
     aetherscan::splat::EvaluationCallback evaluate;
+    const bool held_out_eval =
+        !cli.gui && options.evaluation_split_every != 0 &&
+        scene.views.size() > 1;
     if (!cli.gui) {
-        if (options.evaluation_split_every != 0) {
+        if (held_out_eval) {
             for (std::size_t index = 0; index < scene.views.size(); ++index)
                 if (index % options.evaluation_split_every == 0)
                     evaluation_views.push_back(index);
+            if (evaluation_views.size() >= scene.views.size())
+                evaluation_views.pop_back();
         } else if (!scene.views.empty()) {
             evaluation_views = {
                 0, scene.views.size() / 2, scene.views.size() - 1};
@@ -2841,11 +2781,20 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         evaluation_views.erase(
             std::unique(evaluation_views.begin(), evaluation_views.end()),
             evaluation_views.end());
+        const std::size_t train_views = held_out_eval
+            ? scene.views.size() - evaluation_views.size()
+            : scene.views.size();
+        aetherscan::core::Logger::instance().info(
+            "splat_eval_split every=", options.evaluation_split_every,
+            " train_views=", train_views,
+            " held_out_views=",
+            held_out_eval ? evaluation_views.size() : 0,
+            held_out_eval ? "" : " (eval views are trained)");
         evaluate =
             [&](const unsigned iteration,
                 const aetherscan::splat::GaussianModel& model) {
                 double psnr_sum = 0.0;
-                double masked_psnr_sum = 0.0;
+                double ssim_sum = 0.0;
                 for (const std::size_t view_index : evaluation_views) {
                     const auto render_path = out_dir /
                         (cli.output.stem().string() + "_splat_iter_" +
@@ -2858,21 +2807,18 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                     aetherscan::core::Logger::instance().info(
                         "splat_eval_iteration=", iteration,
                         " view=", view_index,
-                        " foreground_psnr=", metrics.psnr,
-                        " masked_psnr=", metrics.masked_psnr,
-                        " mae=", metrics.mae,
-                        " alpha_bce=", metrics.alpha_bce,
-                        " alpha_coverage=", metrics.alpha_coverage,
-                        " render=", render_path);
+                        " psnr=", metrics.psnr,
+                        " ssim=", metrics.ssim,
+                        " foreground_psnr=", metrics.psnr);
                     psnr_sum += metrics.psnr;
-                    masked_psnr_sum += metrics.masked_psnr;
+                    ssim_sum += metrics.ssim;
                 }
                 aetherscan::core::Logger::instance().info(
                     "splat_eval_iteration=", iteration,
                     " views=", evaluation_views.size(),
+                    " held_out=", held_out_eval ? 1 : 0,
                     " average_psnr=", psnr_sum / evaluation_views.size(),
-                    " average_masked_psnr=",
-                    masked_psnr_sum / evaluation_views.size());
+                    " average_ssim=", ssim_sum / evaluation_views.size());
             };
     }
     const auto started = std::chrono::steady_clock::now();
@@ -2940,65 +2886,45 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                 " view=", frame.view_index, " image=", path);
         };
     }
-    aetherscan::splat::GaussianModel gaussians;
-    if (!cli.splat_model.empty()) {
-        gaussians =
-            aetherscan::splat::load_gaussians(cli.splat_model);
-    } else {
-        gaussians = aetherscan::splat::Trainer(options).train(
+    aetherscan::splat::GaussianModel gaussians =
+        aetherscan::splat::Trainer(options).train(
             scene,
             [](const aetherscan::splat::TrainingProgress& progress) {
-                aetherscan::core::Logger::instance().info(
-                    "splat iteration=", progress.iteration, '/',
-                    progress.total_iterations,
-                    " view=", progress.view_index,
-                    " gaussians=", progress.gaussian_count,
-                    " tile_instances=", progress.rendered_instances,
-                    " grown=", progress.grown_count,
-                    " pruned=", progress.pruned_count,
-                    " loss=", progress.loss,
-                    " rgb=", progress.rgb_loss,
-                    " alpha=", progress.alpha_loss,
-                    " depth=", progress.depth_loss,
-                    " normal=", progress.normal_loss,
-                    " mv_geo=", progress.multi_view_geometry_loss,
-                    " mv_ncc=", progress.multi_view_ncc_loss,
-                    " mv_geo_pixels=", progress.multi_view_geometry_pixels,
-                    " mv_ncc_pixels=", progress.multi_view_ncc_pixels,
-                    " mv_interval=", progress.multi_view_interval,
-                    " mv_depth_consistency=",
-                    progress.multi_view_depth_consistency,
-                    " opacity_grad_mean=", progress.opacity_gradient_mean,
-                    " opacity_grad_positive=",
-                    progress.opacity_gradient_positive_fraction,
-                    " opacity_mean=", progress.opacity_mean,
-                    " resolution_scale=", progress.resolution_scale,
-                    " image=", progress.image_width, 'x',
-                    progress.image_height,
-                    " sh_degree=", progress.active_sh_degree,
-                    " step_ms=", progress.milliseconds);
+                std::ostringstream line;
+                line << "splat iteration=" << progress.iteration << '/'
+                     << progress.total_iterations
+                     << " view=" << progress.view_index
+                     << " gaussians=" << progress.gaussian_count;
+                if (progress.grown_count != 0 || progress.pruned_count != 0)
+                    line << " grown=" << progress.grown_count
+                         << " pruned=" << progress.pruned_count;
+                line << " loss=" << progress.loss
+                     << " rgb=" << progress.rgb_loss
+                     << " alpha=" << progress.alpha_loss;
+                if (progress.depth_loss != 0.F)
+                    line << " depth=" << progress.depth_loss;
+                if (progress.normal_loss != 0.F)
+                    line << " normal=" << progress.normal_loss;
+                if (progress.multi_view_geometry_loss != 0.F ||
+                    progress.multi_view_ncc_loss != 0.F)
+                    line << " mv_geo=" << progress.multi_view_geometry_loss
+                         << " mv_ncc=" << progress.multi_view_ncc_loss;
+                line << " image=" << progress.image_width << 'x'
+                     << progress.image_height
+                     << " sh_degree=" << progress.active_sh_degree
+                     << " step_ms=" << progress.milliseconds;
+                aetherscan::core::Logger::instance().info(line.str());
                 return true;
             },
             evaluate, preview, device_preview);
-    }
-    std::filesystem::path model_path = cli.splat_model;
-    if (model_path.empty()) {
-        model_path = cli.gui
-            ? cli.working_splat
-            : out_dir / (cli.output.stem().string() + "_splat." +
-                         aetherscan::splat::gaussian_format_extension(
-                             output_format));
-        if (!model_path.empty()) {
-            ensure_artifact_parent(model_path);
-            aetherscan::splat::save_gaussians(
-                gaussians, model_path,
-                cli.gui ? aetherscan::splat::GaussianFormat::ply
-                        : output_format);
-        }
+    const std::filesystem::path model_path = splat_file_path(cli);
+    if (!model_path.empty()) {
+        ensure_artifact_parent(model_path);
+        aetherscan::splat::save_gaussians(gaussians, model_path);
     }
     if (!cli.gui && !evaluation_views.empty()) {
     double final_psnr_sum = 0.0;
-    double final_masked_psnr_sum = 0.0;
+    double final_ssim_sum = 0.0;
     for (const std::size_t view_index : evaluation_views) {
         const auto render_path = out_dir /
             (cli.output.stem().string() + "_splat_view_" +
@@ -3008,26 +2934,24 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         aetherscan::core::Logger::instance().info(
             "splat_render=", render_path,
             " view=", view_index,
-            " foreground_psnr=", metrics.psnr,
-            " masked_psnr=", metrics.masked_psnr,
-            " mae=", metrics.mae,
-            " alpha_bce=", metrics.alpha_bce,
-            " alpha_coverage=", metrics.alpha_coverage);
+            " psnr=", metrics.psnr,
+            " ssim=", metrics.ssim,
+            " foreground_psnr=", metrics.psnr);
         final_psnr_sum += metrics.psnr;
-        final_masked_psnr_sum += metrics.masked_psnr;
+        final_ssim_sum += metrics.ssim;
     }
     aetherscan::core::Logger::instance().info(
         "splat_final_evaluation_views=", evaluation_views.size(),
+        " held_out=", held_out_eval ? 1 : 0,
         " average_psnr=", final_psnr_sum / evaluation_views.size(),
-        " average_masked_psnr=",
-        final_masked_psnr_sum / evaluation_views.size());
+        " average_ssim=", final_ssim_sum / evaluation_views.size());
     }
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
     aetherscan::core::Logger::instance().info(
         "splat_model=", model_path,
         " gaussians=", gaussians.size(),
-        cli.splat_model.empty() ? " training_s=" : " model_load_s=",
+        " training_s=",
         elapsed);
     if (project_archive) {
         project_archive->set_chunk(
@@ -3191,8 +3115,6 @@ int main(int argc, char** argv) {
             request.source = cli.splat_dataset;
             request.image_directory = cli.images_dir;
             request.initial_point_cloud = cli.dense_ply;
-            request.format =
-                aetherscan::splat::parse_dataset_format(cli.dataset_format);
             auto loaded =
                 aetherscan::splat::load_splat_dataset(request);
             for (const std::string& warning : loaded.warnings)

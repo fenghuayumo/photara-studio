@@ -200,7 +200,7 @@ int main() {
     settings.video_rotate = 90;
     settings.camera_model = 2;
     settings.strategy = 1;
-    settings.max_gaussians = 2'500'000;
+    settings.densification_cap = 2'500'000;
     settings.sh_degree = 2;
     settings.sfm_mode = 2;
     settings.max_features = 4096;
@@ -248,7 +248,9 @@ int main() {
     expect(round_trip.video_rotate == 90, "video rotate");
     expect(round_trip.camera_model == 2, "settings camera model");
     expect(round_trip.strategy == 1, "settings splat strategy");
-    expect(round_trip.max_gaussians == 2'500'000, "settings max gaussians");
+    expect(
+        round_trip.densification_cap == 2'500'000,
+        "settings densification cap");
     expect(round_trip.sh_degree == 2, "settings SH degree");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");

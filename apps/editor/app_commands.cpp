@@ -355,11 +355,7 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
         path_from_utf8_field(app.settings.images_dir.data());
     settings.dataset_source =
         path_from_utf8_field(app.settings.dataset_source.data());
-    settings.dataset_format = app.settings.dataset_format == 1
-        ? "colmap"
-        : app.settings.dataset_format == 2
-            ? "realitycapture"
-            : app.settings.dataset_format == 3 ? "openmvs" : "auto";
+    settings.dataset_format = "auto";
     settings.dataset_initial_cloud =
         path_from_utf8_field(app.settings.dataset_initial_cloud.data());
     settings.splat_model_source =
@@ -385,7 +381,7 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
         std::max(0, app.settings.max_features));
     settings.scene_mode = app.settings.scene_mode;
     settings.iterations = app.settings.iterations;
-    settings.max_gaussians = app.settings.max_gaussians;
+    settings.densification_cap = app.settings.densification_cap;
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
@@ -412,14 +408,6 @@ void apply_project_settings(
     if (!settings.image_directory.empty())
         store_path_field(app.settings.images_dir, settings.image_directory);
     store_path_field(app.settings.dataset_source, settings.dataset_source);
-    if (settings.dataset_format == "colmap")
-        app.settings.dataset_format = 1;
-    else if (settings.dataset_format == "realitycapture")
-        app.settings.dataset_format = 2;
-    else if (settings.dataset_format == "openmvs")
-        app.settings.dataset_format = 3;
-    else
-        app.settings.dataset_format = 0;
     store_path_field(
         app.settings.dataset_initial_cloud, settings.dataset_initial_cloud);
     store_path_field(app.settings.splat_model_source, settings.splat_model_source);
@@ -446,7 +434,7 @@ void apply_project_settings(
     app.settings.max_features = static_cast<int>(settings.max_features);
     app.settings.scene_mode = settings.scene_mode;
     app.settings.iterations = settings.iterations;
-    app.settings.max_gaussians = settings.max_gaussians;
+    app.settings.densification_cap = settings.densification_cap;
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
@@ -492,21 +480,10 @@ void request_asfm_scene_load(
 std::string external_dataset_signature(const App& app) {
     std::string key(app.settings.dataset_source.data());
     key += '|';
-    key += std::to_string(app.settings.dataset_format);
-    key += '|';
     key += app.settings.dataset_initial_cloud.data();
     key += '|';
     key += app.settings.images_dir.data();
     return key;
-}
-
-std::string external_dataset_format(const App& app) {
-    switch (app.settings.dataset_format) {
-        case 1: return "colmap";
-        case 2: return "realitycapture";
-        case 3: return "openmvs";
-        default: return "auto";
-    }
 }
 
 // Loads the imported camera alignment into the editor scene. Without those
@@ -516,7 +493,6 @@ std::string external_dataset_format(const App& app) {
 void request_dataset_scene_load(App& app) {
     if (app.loading_scene || !has_external_dataset(app)) return;
     const std::filesystem::path source(app.settings.dataset_source.data());
-    const std::string format = external_dataset_format(app);
     const std::filesystem::path initial_cloud(
         app.settings.dataset_initial_cloud.data());
     const std::filesystem::path images = reconstruction_images_path(app);
@@ -526,9 +502,9 @@ void request_dataset_scene_load(App& app) {
     app.loading_scene = true;
     app.scene_source = "External dataset";
     app.pending_load = std::async(
-        std::launch::async, [source, format, initial_cloud, images] {
+        std::launch::async, [source, initial_cloud, images] {
             return sparse_scene_from_dataset(
-                source, format, initial_cloud, images);
+                source, initial_cloud, images);
         });
 }
 
@@ -921,7 +897,6 @@ void request_gaussian_scene_load(App& app) {
     if (model_path.empty() && ascan.empty()) return;
     const bool dataset = has_external_dataset(app);
     const std::filesystem::path dataset_source(app.settings.dataset_source.data());
-    const std::string dataset_format = external_dataset_format(app);
     const std::filesystem::path dataset_initial_cloud(
         app.settings.dataset_initial_cloud.data());
     const std::filesystem::path dataset_images = reconstruction_images_path(app);
@@ -931,7 +906,7 @@ void request_gaussian_scene_load(App& app) {
     app.scene_source = "Gaussian centres";
     app.pending_load = std::async(
         std::launch::async,
-        [model_path, ascan, poses, dataset, dataset_source, dataset_format,
+        [model_path, ascan, poses, dataset, dataset_source,
          dataset_initial_cloud, dataset_images] {
             const auto merge_dataset_views = [&](SceneLoad& loaded) {
                 // External-dataset training uses the imported cameras, not
@@ -939,8 +914,7 @@ void request_gaussian_scene_load(App& app) {
                 // QA snap to the same views the trainer used.
                 if (!dataset || !loaded.ok) return;
                 SceneLoad imported = sparse_scene_from_dataset(
-                    dataset_source, dataset_format, dataset_initial_cloud,
-                    dataset_images);
+                    dataset_source, dataset_initial_cloud, dataset_images);
                 if (!imported.ok) return;
                 loaded.scene.views = std::move(imported.scene.views);
                 loaded.scene.registered_views =
@@ -2633,7 +2607,7 @@ void start_train(App& app, const bool smoke) {
             << app.settings.images_dir.data() << "\" --output \""
             << app.layout.model_output.string()
             << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
-            << " --dataset-format colmap --splat-use-mask false"
+            << " --splat-use-mask false"
             << " --splat --splat-strategy adc_plus --splat-iterations "
             << app.settings.iterations << " --splat-preview-interval "
             << app.settings.preview_interval

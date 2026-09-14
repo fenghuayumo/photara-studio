@@ -21,7 +21,7 @@ for scene in args.scenes:
         out = args.output / f'{scene}_{strategy}'
         out.mkdir(exist_ok=False)
         command = [str(exe), '--images', str(dataset / 'images'), '--output', str(out / 'reconstruction.ply'),
-            '--splat', '--splat-dataset', str(dataset / 'sparse'), '--dataset-format', 'colmap',
+            '--splat', '--splat-dataset', str(dataset / 'sparse'),
             '--splat-strategy', strategy, '--splat-iterations', str(args.iterations),
             '--splat-max-resolution', str(args.resolution), '--splat-eval-split-every', '8',
             '--splat-progressive-resolution=false', '--splat-use-mask=false',

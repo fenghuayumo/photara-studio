@@ -18,6 +18,7 @@ enum class GaussianFormat {
 };
 
 GaussianFormat parse_gaussian_format(std::string_view value);
+GaussianFormat gaussian_format_from_path(const std::filesystem::path& path) noexcept;
 const char* gaussian_format_name(GaussianFormat format) noexcept;
 const char* gaussian_format_extension(GaussianFormat format) noexcept;
 

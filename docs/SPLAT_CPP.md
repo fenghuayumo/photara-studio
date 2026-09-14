@@ -17,9 +17,9 @@ images + COLMAP sparse model ─────────────────
 这条路径不依赖 LibTorch、PyBind 或 Python 运行时。MVS 继续负责充分利用 CPU；Gaussian
 投影、排序、混合、反向传播、损失与参数更新在 CUDA 上执行。
 
-外部相机对齐数据通过 `--splat-dataset` 配合 `--dataset-format` 传入；格式可选
-`auto`、`colmap`、`realitycapture` 和 `openmvs`。`--splat-format` 仅作为旧脚本的
-兼容别名，不再作为推荐参数名。
+外部相机对齐数据通过 `--splat-dataset` 传入，程序会从路径自动识别 COLMAP、
+RealityCapture 或 OpenMVS。Gaussian 写出格式看 `--output` 后缀：`.sog` / `.spz` /
+`.glb` 写到该文件，其它输出路径旁生成 `{stem}_splat.ply`。
 
 ## 目录与职责
 
@@ -124,9 +124,9 @@ weight 设为 0 可做关闭 A/B。
 PLY 保存训练参数（opacity 和 scale 仍是 logit/log-domain），可用于检查训练结果和后续
 viewer/mesh-extraction 接入。
 
-稠密 MVS 输入默认从 fused cloud 均匀选取最多 500,000 个初始 Gaussian，可用
-`--splat-max-gaussians N` 修改，`0` 表示使用全部 dense points。稠密点云已经具有高采样密度，
-因此关闭动态致密化。稀疏 COLMAP 输入默认使用 ADC-IGS 动态 Gaussian 管理。训练结束还会保存
+稠密 MVS 输入使用全部 fused points 初始化 Gaussian。稠密点云已经具有高采样密度，
+因此关闭动态致密化。稀疏 COLMAP 输入默认使用 ADC-IGS 动态 Gaussian 管理，增长受
+`--splat-densification-cap` 约束（默认 1,000,000）。训练结束还会保存
 第一个、中间和最后相机的
 `*_splat_view_*.png`，并在日志记录 PSNR、MAE 和 alpha coverage。
 
@@ -135,11 +135,10 @@ viewer/mesh-extraction 接入。
 
 ```powershell
 aetherscan --images D:\ScanVideo\ori_img\images `
-  --colmap D:\ScanVideo\ori_img `
+  --splat-dataset D:\ScanVideo\ori_img `
   --output out\scene.mvs `
   --splat-strategy adc_igs `
-  --splat-max-gaussians 500000 `
-  --splat-densification-cap 4000000
+  --splat-densification-cap 1000000
 ```
 
 调试基础优化收敛时，可用 `--splat-densification=false` 固定 COLMAP 初始化的
@@ -183,8 +182,7 @@ ADC+ 的“可见”要求 Gaussian 通过 alpha/transmittance 测试并实际�
 
 ```powershell
 aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
-  --dense --splat `
-  --splat-max-gaussians 500000 --splat-densification-cap 600000
+  --dense --splat
 ```
 
 Splat 默认启用 Mask 训练，只重建主体并抑制背景；可用 `--splat-use-mask=false` 显式关闭。

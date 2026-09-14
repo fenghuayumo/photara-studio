@@ -29,6 +29,7 @@ struct DatasetLoadRequest {
     std::filesystem::path image_directory;
     // Optional PLY replacing the source sparse cloud.
     std::filesystem::path initial_point_cloud;
+    // Readers probe the path. Leave auto_detect unless a caller must pin one.
     DatasetFormat format{DatasetFormat::auto_detect};
     // Used only when camera metadata has no initial points.
     std::size_t random_initial_point_count{10'000};

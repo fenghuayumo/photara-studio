@@ -4,8 +4,10 @@
 
 namespace aetherscan::splat::densification {
 
-// Retain ADC+ visibility, pruning and footprint-weighted sampling. Avoid
-// duplicate budget allocation and preserve mixture moments when splitting.
+// image/world-gradient evidence and anisotropic exploration.
+// Retain covariance-preserving long-axis splits and ADC+ pruning; require
+// repeated contribution before growth. The preset adds about 5% per 200
+// optimizer steps, refining every 100 with a final convergence interval.
 class IgsStrategy final : public AdcPlusStrategy {
 protected:
     int split_mode() const override { return 5; }

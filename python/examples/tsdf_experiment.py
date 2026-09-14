@@ -25,7 +25,6 @@ def main() -> None:
     request.source = args.colmap
     request.image_directory = args.images
     request.initial_point_cloud = args.points
-    request.format = aes.DatasetFormat.COLMAP
     scene = aes.load_dataset(request)
     model = aes.load_3dgs(args.model)
 

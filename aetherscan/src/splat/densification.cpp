@@ -116,20 +116,27 @@ SceneGeometry brush_scene_geometry_cuda(
 }
 
 StrategySchedule strategy_schedule(const TrainingOptions& options) {
+    const bool igs =
+        options.densification_strategy == DensificationStrategy::adc_igs;
     const bool adc = is_adc_strategy(options.densification_strategy);
-    const unsigned preset_stop = adc ? options.iterations : 5'000U;
+    const unsigned stop_iter = options.refine_stop_iter != 0
+        ? options.refine_stop_iter
+        : igs ? 14'000U : adc ? options.iterations : 5'000U;
+    const unsigned stop_from_end =
+        options.iterations > options.refine_stop_num_iter
+            ? options.iterations - options.refine_stop_num_iter
+            : 0U;
+    const unsigned stop = igs
+        ? std::min(std::max(stop_iter, stop_from_end), options.iterations)
+        : std::min(stop_iter, options.iterations);
     return {
         options.refine_start_iter != 0
             ? options.refine_start_iter
-            : adc ? 0U : 750U,
-        std::min(
-            options.refine_stop_iter != 0
-                ? options.refine_stop_iter
-                : preset_stop,
-            options.iterations),
+            : igs ? 500U : adc ? 0U : 750U,
+        stop,
         options.refine_every != 0
             ? options.refine_every
-            : adc ? 200U : 500U};
+            : igs ? 100U : adc ? 200U : 500U};
 }
 
 GaussianModel clone_model(const GaussianModel& model) {
@@ -163,6 +170,8 @@ bool is_refinement_iteration(
     if (iteration <= schedule.start || iteration >= schedule.stop ||
         schedule.every == 0 || iteration % schedule.every != 0)
         return false;
+    if (options.densification_strategy == DensificationStrategy::adc_igs)
+        return true;
     return static_cast<float>(iteration) /
            std::max(1.F, static_cast<float>(options.iterations)) <=
         0.95F;
@@ -182,8 +191,28 @@ void apply_strategy_defaults(TrainingOptions& options) {
             std::max(options.grow_stop_iter, options.iterations);
         break;
     case DensificationStrategy::adc_igs:
-        // Match ADC+ growth budget; the strategy changes candidate allocation.
+        // image/world evidence, conservative growth, relocation.
         options.grow_stop_iter = std::max(options.grow_stop_iter, options.iterations);
+        options.densify_use_error_map = true;
+        // Keep the per-optimizer-step growth rate when using a 100-step
+        // refinement interval: two refinements together add 5%, not 10.25%.
+        options.densify_growth_factor = std::sqrt(1.05F);
+        options.densify_screen_threshold = 0.3F;
+        options.densify_oversize_split_fraction = 0.15F;
+        options.densify_oversize_score_blend = 1.F;
+        options.densify_loss_map_power = 4.F;
+        options.densify_score_power = 0.4F;
+        options.densify_world_gradient_blend = 0.5F;
+        options.densify_geometry_gradient_threshold = 0.00125F;
+        options.densify_clip_screen_size = true;
+        options.densify_gradient_threshold = 0.F;
+        options.densify_revised_noise = true;
+        options.densify_relocate = true;
+        options.densify_keep_parent_adam = false;
+        options.densify_las_opacity_k_warmup = 15'000;
+        options.mean_noise_weight = 10.F;
+        options.sh_regularization_weight = 0.001F;
+        options.ignore_undistortion_border = true;
         break;
     case DensificationStrategy::dense_adaptive:
         break;

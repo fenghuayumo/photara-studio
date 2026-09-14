@@ -36,16 +36,19 @@ struct TrainingOptions {
     // accidentally unbounded CUDA event pool.
     bool profile_cuda{false};
     unsigned cuda_profile_interval{100};
-    std::size_t max_gaussians{500'000};
     // Sparse COLMAP initialization enables dynamic Gaussian management. Dense
     // MVS initialization only enables it for the explicit dense_adaptive mode.
     bool input_is_dense{true};
     bool enable_densification{true};
     DensificationStrategy densification_strategy{
         DensificationStrategy::adc_igs};
-    std::size_t densification_cap{10'000'000};
+    // Growth ceiling while densify is enabled. Initialization always uses the
+    // full source cloud; this does not subsample it.
+    std::size_t densification_cap{1'000'000};
     unsigned refine_start_iter{0};  // 0 selects the strategy preset
     unsigned refine_stop_iter{0};   // 0 selects the strategy preset
+    // IGS stop is max(refine_stop_iter, iterations - refine_stop_num_iter).
+    unsigned refine_stop_num_iter{2'500};
     unsigned grow_stop_iter{15'000};
     unsigned refine_every{0};       // 0 selects the strategy preset
     unsigned opacity_reset_every{3'000};
@@ -54,6 +57,37 @@ struct TrainingOptions {
     float densify_gradient_threshold{0.0025F};
     float densify_select_fraction{0.25F};
     float densify_screen_threshold{0.5F};
+    // When true, densify ranks Gaussians by a SSIM contrast-structure error
+    // map instead of ||dL/dmean2d||. ADC-IGS enables this in
+    // apply_strategy_defaults().
+    bool densify_use_error_map{false};
+    // Per-view exponent after image-to-splat reduction, before window averaging.
+    float densify_score_power{0.4F};
+    // Geometric blend with ||dL/dmean_world|| * max(scale), following
+    // optional world-gradient score. Zero retains image-only ranking.
+    float densify_world_gradient_blend{0.F};
+    // Gate net IGS growth on unresolved projected geometry gradients.
+    // The error-map score still chooses where that budget is spent.
+    float densify_geometry_gradient_threshold{0.F};
+    // Per-pixel error-map exponent before raster scatter ( default 4).
+    float densify_loss_map_power{4.F};
+    // Extra Gaussians per refine as a multiplier of the live count. Values
+    // <= 1 fall back to densify_select_fraction of above-threshold rows.
+    float densify_growth_factor{0.F};
+    // Share of the growth budget spent on oversized (screen-cap) parents.
+    // 0 keeps the legacy "split every oversized row that fits" path.
+    float densify_oversize_split_fraction{0.F};
+    float densify_oversize_score_blend{1.F};
+    bool densify_clip_screen_size{false};
+    float densify_screen_clip_hardness{1.5F};
+    // Long-axis-split opacity factor k, scheduled from init to final.
+    float densify_las_opacity_k_init{0.5F};
+    float densify_las_opacity_k_final{0.6F};
+    unsigned densify_las_opacity_k_warmup{4'500};
+    bool densify_revised_noise{false};
+    // Sample replacement parents by densify score rather than opacity.
+    bool densify_relocate{false};
+    bool densify_keep_parent_adam{false};
     // Dense MVS points already cover the surface. Recycle only a small part of
     // the budget per refinement and grow more conservatively than sparse ADC.
     float dense_recycle_fraction{0.01F};
@@ -84,6 +118,8 @@ struct TrainingOptions {
     float quaternions_lr{1e-3F};
     float sh0_lr{2.5e-3F};
     float sh_rest_lr{1.25e-4F};
+    // Mean-square prior on non-DC SH coefficients; zero disables.
+    float sh_regularization_weight{0.F};
     float beta1{0.9F};
     float beta2{0.999F};
     // Match pygsplat/FusedAdam. The raster gradients are averaged over every
@@ -171,6 +207,9 @@ struct TrainingOptions {
     // Train against source-resolution undistorted images rather than the MVS
     // working resolution.
     bool use_source_resolution{false};
+    // In unmasked images, undistortion outside the source is missing data,
+    // not black/transparent geometry. Ignore those rays in RGB supervision.
+    bool ignore_undistortion_border{false};
     // When true, resample OpenCV fisheye views onto a pinhole working camera.
     // Native fisheye/equirectangular rasterization is used otherwise. Equirect
     // cannot be undistorted and always trains natively.
@@ -205,6 +244,8 @@ struct TrainingOptions {
     std::size_t training_prefetch_views{8};
     // Hold out every Nth source view from optimization (0 trains on all).
     // The caller may render these views through the evaluation callback.
+    // The reconstruction CLI defaults this to 8 so held-out PSNR/SSIM is on
+    // unless the user explicitly trains every view.
     unsigned evaluation_split_every{0};
     // Iterations at which the caller may render fixed-view parity snapshots.
     std::vector<unsigned> evaluation_iterations;

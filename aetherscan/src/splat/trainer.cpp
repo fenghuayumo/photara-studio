@@ -2,6 +2,7 @@
 #include "splat/visualize.hpp"
 
 #include "cuda_ops.hpp"
+#include "fused_ssim.hpp"
 #include "core/camera_projection.hpp"
 #include "core/logging.hpp"
 #include "densification.hpp"
@@ -512,10 +513,7 @@ GaussianModel initialize_from_dense_cloud(
         throw std::invalid_argument("Splat initialization requires a non-empty dense cloud");
     if (options.sh_degree > 3)
         throw std::invalid_argument("The current splat CUDA backend supports SH degree <= 3");
-    const std::size_t source_count = scene.dense_cloud.points.size();
-    const std::size_t count = options.max_gaussians == 0
-        ? source_count
-        : std::min(source_count, options.max_gaussians);
+    const std::size_t count = scene.dense_cloud.points.size();
     const std::size_t bases = static_cast<std::size_t>(options.sh_degree + 1U) *
                               (options.sh_degree + 1U);
     const bool brush_adc_plus = is_adc_strategy(options.densification_strategy);
@@ -526,15 +524,9 @@ GaussianModel initialize_from_dense_cloud(
     std::vector<float> sh(count * bases * 3, 0.F);
     std::vector<float> normal_features(count * 4, 0.F);
 
-    const auto source_index = [source_count, count](const std::size_t index) {
-        return count == source_count
-            ? index
-            : std::min(source_count - 1, index * source_count / count);
-    };
     std::vector<mvs::Vec3f> selected_positions(count);
     for (std::size_t index = 0; index < count; ++index)
-        selected_positions[index] =
-            scene.dense_cloud.points[source_index(index)].position;
+        selected_positions[index] = scene.dense_cloud.points[index].position;
     float initialization_extent{};
     if (options.input_is_dense) {
         mvs::Vec3f minimum = selected_positions.front();
@@ -590,7 +582,7 @@ GaussianModel initialize_from_dense_cloud(
     std::uniform_real_distribution<float> quaternion_uniform(0.F, 1.F);
 
     for (std::size_t index = 0; index < count; ++index) {
-        const auto& point = scene.dense_cloud.points[source_index(index)];
+        const auto& point = scene.dense_cloud.points[index];
         for (int axis = 0; axis < 3; ++axis)
             means[3 * index + axis] = point.position(axis);
         float footprint = std::numeric_limits<float>::infinity();
@@ -1127,8 +1119,17 @@ GaussianModel Trainer::train(
             cuda_profiler.mark(
                 CudaTrainingStage::multi_view_sample_backward);
         }
+        tinytensor::Tensor densify_map;
+        if (densification_enabled && options_.densify_use_error_map) {
+            const bool mask_enabled =
+                target.has_mask && (options_.use_mask || target.mask_is_validity);
+            densify_map = detail::compute_ssim_cs_error_map(
+                rendered.color, target.rgb, target.mask, mask_enabled,
+                options_.densify_loss_map_power);
+        }
         ModelGradients gradients = rasterizer.backward(
-            model, rendered, loss.color, loss.alpha, loss.depth, loss.normal);
+            model, rendered, loss.color, loss.alpha, loss.depth, loss.normal,
+            densify_map);
         if (normal_field_active)
             detail::add_model_gradients(
                 normal_field_gradients, gradients, false);
@@ -1137,13 +1138,29 @@ GaussianModel Trainer::train(
             detail::add_sample_depth_model_gradients(
                 multi_view_sample_gradients, gradients);
         cuda_profiler.mark(CudaTrainingStage::multi_view_gradient_merge);
-        if (densification_enabled)
+        if (densification_enabled) {
+            tinytensor::Tensor step_score = gradients.refine_weight;
+            bool use_maximum = true;
+            if (options_.densify_use_error_map &&
+                gradients.densify_weight.is_valid()) {
+                step_score = detail::densify_avg_scores(
+                    gradients.densify_weight, gradients.densify_weight_den);
+                step_score = detail::densify_blend_world_gradient(
+                    step_score, gradients.means, model.log_scales,
+                    options_.densify_world_gradient_blend);
+                use_maximum = false;
+            }
             detail::accumulate_densification_stats(
-                gradients.refine_weight, rendered.visibility, rendered.radii,
+                step_score, rendered.visibility, rendered.radii,
                 densification_stats, target.camera.width,
                 target.camera.height,
-                true,
-                is_adc_strategy(options_.densification_strategy));
+                use_maximum,
+                is_adc_strategy(options_.densification_strategy),
+                options_.densify_use_error_map ? options_.densify_score_power : 1.F,
+                options_.densification_strategy == DensificationStrategy::adc_igs
+                    ? options_.densify_screen_threshold : 0.F,
+                gradients.refine_weight);
+        }
         cuda_profiler.mark(CudaTrainingStage::densification_stats);
 
         // Dense MVS already provides accurate surface positions. Decaying the
@@ -1174,6 +1191,8 @@ GaussianModel Trainer::train(
                 minimum_log_scale, maximum_log_scale);
         }
         const std::size_t full_sh_stride = model.sh.shape()[1] * 3;
+        detail::add_sh_regularization(
+            model.sh, gradients.sh, options_.sh_regularization_weight);
         const std::size_t active_sh_stride =
             static_cast<std::size_t>(active_sh_degree + 1) *
             (active_sh_degree + 1) * 3;
@@ -1200,18 +1219,19 @@ GaussianModel Trainer::train(
 
         if (densification_enabled &&
             is_adc_strategy(options_.densification_strategy)) {
-            const unsigned noise_stop = options_.densification_strategy ==
-                    DensificationStrategy::adc_igs
-                ? options_.grow_stop_iter
-                : refine::strategy_schedule(options_).stop;
+            const unsigned noise_stop = refine::strategy_schedule(options_).stop;
             if (iteration < noise_stop)
                 detail::inject_adc_noise(
                     model, rendered.visibility,
-                    means_lr * options_.mean_noise_weight,
+                    options_.densify_revised_noise
+                        ? options_.mean_noise_weight * std::pow(0.01F, progress_fraction)
+                        : means_lr * options_.mean_noise_weight,
                     is_adc_strategy(options_.densification_strategy)
                         ? refinement_geometry.scale
                         : scene_extent,
-                    options_.seed + iteration);
+                    options_.seed + iteration,
+                    rendered.radii,
+                    options_.densify_revised_noise);
         }
         cuda_profiler.mark(CudaTrainingStage::adc_noise);
 
@@ -1445,6 +1465,9 @@ RenderMetrics render_evaluation_png(
     options.require_depth = false;
     const RenderResult rendered = Rasterizer().forward(
         model, target.camera, options);
+    const float ssim = detail::fused_ssim_metric(
+        rendered.color, target.rgb, target.mask, target.has_mask,
+        target.camera.width, target.camera.height);
     const std::vector<float> color = download<float>(rendered.color);
     const std::vector<float> alpha = download<float>(rendered.alpha);
     const std::vector<float> target_rgb = download<float>(target.rgb);
@@ -1499,6 +1522,7 @@ RenderMetrics render_evaluation_png(
     metrics.masked_psnr = masked_mse > 0.0
         ? static_cast<float>(-10.0 * std::log10(masked_mse))
         : std::numeric_limits<float>::infinity();
+    metrics.ssim = ssim;
     metrics.alpha_bce = static_cast<float>(alpha_bce /
         static_cast<double>(std::max<std::size_t>(pixels, 1)));
     metrics.alpha_coverage = pixels != 0

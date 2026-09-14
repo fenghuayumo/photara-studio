@@ -457,6 +457,7 @@ struct HostTrainingView {
     std::vector<float> depth;
     std::vector<float> normal;
     bool has_mask{false};
+    bool mask_is_validity{false};
 
     [[nodiscard]] std::size_t bytes() const noexcept {
         return sizeof(*this) + sizeof(int) * rgba.capacity() +
@@ -634,6 +635,11 @@ HostTrainingView load_host_training_view(
         ? 1.F
         : 255.F;
     std::vector<int> rgba(pixels);
+    const bool validity_only = options.ignore_undistortion_border &&
+        !has_source_mask && !has_projected_mask &&
+        !uses_native_splat_projection(camera.model) &&
+        (view.source_model == CameraModel::opencv_fisheye ||
+         view.k1 != 0.F || view.k2 != 0.F || view.p1 != 0.F || view.p2 != 0.F);
     const bool direct_source =
         camera.width == source.width && camera.height == source.height &&
         (uses_native_splat_projection(camera.model) ||
@@ -678,6 +684,10 @@ HostTrainingView load_host_training_view(
         }
         const auto [sx, sy] =
             source_coordinate(view, x, y, camera, source);
+        if (validity_only && (sx < 0.F || sy < 0.F ||
+                sx > static_cast<float>(source.width - 1) ||
+                sy > static_cast<float>(source.height - 1)))
+            alpha = 0;
         red = quantize_channel(sample_rgb(source, sx, sy, 0));
         green = quantize_channel(sample_rgb(source, sx, sy, 1));
         blue = quantize_channel(sample_rgb(source, sx, sy, 2));
@@ -709,11 +719,11 @@ HostTrainingView load_host_training_view(
                     view.depth_map.normal[pixel](axis);
         }
     }
-    const bool has_mask = has_source_mask || has_projected_mask;
+    const bool has_mask = has_source_mask || has_projected_mask || validity_only;
 
     return {
         camera, std::move(rgba), std::move(depth), std::move(normals),
-        has_mask};
+        has_mask, validity_only};
 }
 
 TrainingView upload_training_view(
@@ -737,6 +747,7 @@ TrainingView upload_training_view(
               tinytensor::Device::CUDA);
     result.mask = std::move(decoded.mask);
     result.has_mask = host.has_mask;
+    result.mask_is_validity = host.mask_is_validity;
     return result;
 }
 
@@ -894,9 +905,10 @@ struct TrainingDataLoader::Impl {
             throw std::out_of_range(
                 "GGGS training view index is out of range");
         const auto found = device_lookup_.find(index);
-        if (found != device_lookup_.end()) return found->second->has_mask;
+        if (found != device_lookup_.end())
+            return found->second->has_mask && !found->second->mask_is_validity;
         if (const auto cached = cached_host_view(index))
-            return cached->has_mask;
+            return cached->has_mask && !cached->mask_is_validity;
 
         const mvs::MvsView& view = source_[index];
         if (view.foreground_mask.size() ==
@@ -967,6 +979,7 @@ private:
         Camera camera;
         tinytensor::Tensor rgba, depth, normal;
         bool has_mask{};
+        bool mask_is_validity{};
     };
     using DeviceEntries = std::list<DeviceEntry>;
 
@@ -989,6 +1002,7 @@ private:
         entry.bytes = packed_host_bytes(host);
         entry.camera = host.camera;
         entry.has_mask = host.has_mask;
+        entry.mask_is_validity = host.mask_is_validity;
         entry.rgba = tinytensor::Tensor::empty(
             {host.camera.height, host.camera.width},
             tinytensor::Device::CUDA, tinytensor::DataType::Int32);
@@ -1103,6 +1117,7 @@ private:
         TrainingView result;
         result.camera = entry.camera;
         result.has_mask = entry.has_mask;
+        result.mask_is_validity = entry.mask_is_validity;
         auto decoded = detail::decode_packed_training_pixels(
             entry.rgba, entry.camera.width, entry.camera.height,
             entry.has_mask, options_.multi_view_ncc_weight > 0.F);
@@ -1210,11 +1225,9 @@ private:
     std::unordered_map<std::size_t, std::future<HostTrainingView>> prefetches_;
 
     [[nodiscard]] std::size_t projected_gaussian_count() const noexcept {
-        std::size_t count = options_.max_gaussians;
         if (options_.enable_densification)
-            count = std::max(count, options_.densification_cap);
-        if (count == 0) count = source_.size();
-        return count;
+            return options_.densification_cap;
+        return 0;
     }
 
     void update_cache_budgets() {

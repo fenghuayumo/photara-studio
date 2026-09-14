@@ -138,7 +138,7 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour
 // landmarks are projected into each view so the 2D QA feature overlay works
 // for imported alignments, which carry no per-image keypoints.
 SceneLoad sparse_scene_from_dataset(
-    const std::filesystem::path& source, const std::string& dataset_format,
+    const std::filesystem::path& source,
     const std::filesystem::path& initial_point_cloud = {},
     const std::filesystem::path& image_directory = {});
 

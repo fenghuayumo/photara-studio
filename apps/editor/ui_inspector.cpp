@@ -196,13 +196,6 @@ Action draw_inspector(App& app) {
             theme::caption(
                 "Imported cameras replace Align Photos. Review the cloud, then "
                 "run Train 3DGS or Extract Mesh.");
-            theme::caption("Dataset format");
-            ImGui::SetNextItemWidth(-1.F);
-            const char* formats[] = {
-                tr("Auto detect"), "COLMAP", "RealityCapture", "OpenMVS"};
-            ImGui::Combo(
-                "##dataset_format", &app.settings.dataset_format, formats, 4);
-
             theme::caption("Initial point cloud (optional)");
             ImGui::SetNextItemWidth(-82.F);
             if (ImGui::InputText(
@@ -223,7 +216,6 @@ Action draw_inspector(App& app) {
             if (ImGui::Button(tr("Clear external dataset"), {-1.F, 26.F})) {
                 app.settings.dataset_source.fill('\0');
                 app.settings.dataset_initial_cloud.fill('\0');
-                app.settings.dataset_format = 0;
                 clear_loaded_result(app);
                 refresh_artifacts(app);
                 if (app.has_sparse) request_ascan_scene_load(app);
@@ -361,14 +353,16 @@ Action draw_inspector(App& app) {
         theme::caption("Iterations");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputInt("##iterations", &app.settings.iterations, 1000, 5000);
-        theme::caption("Max Gaussians");
+        theme::caption("Densification cap");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputInt(
-            "##max_gaussians", &app.settings.max_gaussians, 100'000, 1'000'000);
+            "##densification_cap",
+            &app.settings.densification_cap, 100'000, 1'000'000);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Hard cap on Gaussian count during densification.\n"
-                "Default 10,000,000. Lower this to limit VRAM.");
+            ImGui::SetTooltip("%s", tr(
+                "Maximum Gaussian count during densification.\n"
+                "Initialization uses the full source cloud.\n"
+                "Default 1,000,000."));
         theme::caption("SH degree");
         ImGui::SetNextItemWidth(-1.F);
         const char* sh_degrees[] = {"0", "1", "2", "3"};

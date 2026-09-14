@@ -225,7 +225,6 @@ struct ProjectSettings {
     // Optional external SfM/camera dataset. When set, Train 3DGS bypasses
     // AetherScan's own image alignment and uses this dataset directly.
     std::array<char, 1024> dataset_source{};
-    int dataset_format = 0;  // auto, COLMAP, RealityCapture, OpenMVS
     std::array<char, 1024> dataset_initial_cloud{};
     // Optional existing trained Gaussian file to preview/import. Empty uses
     // the working copy in cache, or a leftover sidecar from an older run.
@@ -250,7 +249,7 @@ struct ProjectSettings {
 
     bool scene_mode = false;
     int iterations = 30'000;
-    int max_gaussians = 10'000'000;
+    int densification_cap = 1'000'000;
     int sh_degree = 3;
     int preview_interval = 50;
     int strategy = 0;  // 0=adc_igs, 1=adc_plus, 2=dense_adaptive

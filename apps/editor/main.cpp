@@ -182,14 +182,12 @@ int main(const int argc, char** argv) {
         editor::consume_dropped_paths(app);
 
         app.settings.iterations = std::max(app.settings.iterations, 1);
-        app.settings.max_gaussians = std::clamp(
-            app.settings.max_gaussians, 10'000, 50'000'000);
+        app.settings.densification_cap = std::clamp(
+            app.settings.densification_cap, 10'000, 50'000'000);
         app.settings.sh_degree = std::clamp(app.settings.sh_degree, 0, 3);
         app.settings.preview_interval =
             std::max(app.settings.preview_interval, 1);
         app.settings.max_features = std::max(app.settings.max_features, 512);
-        app.settings.dataset_format = std::clamp(
-            app.settings.dataset_format, 0, 3);
         app.settings.geometry_from_iter =
             std::max(app.settings.geometry_from_iter, 0);
         app.settings.video_fps = std::clamp(app.settings.video_fps, 0.05F, 60.F);
