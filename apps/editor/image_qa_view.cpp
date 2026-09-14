@@ -471,6 +471,10 @@ void ImageQaSession::poll() {
             gt_.upload(gt_cpu_);
             loaded_path_ = pending_path_;
             loaded_view_ = pending_view_;
+            // The previous heatmap belongs to another capture. Tear it down
+            // here, before this frame records ImGui image draws.
+            error_.reset();
+            metrics_ = {};
             queue_metrics();
         } catch (...) {
             failed_ = true;
@@ -514,7 +518,8 @@ void ImageQaSession::queue_metrics() {
     if (loaded_view_ < 0 || render_view_ != loaded_view_) return;
     if (metrics_busy_) return;
     metrics_ = {};
-    error_.reset();
+    // Keep the previous error texture until poll() replaces it. capture_qa_render
+    // calls set_render() after draw_image_qa has already recorded AddImage.
     metrics_busy_ = true;
     const int view = render_view_;
     const std::uint64_t revision = render_revision_;
@@ -782,7 +787,10 @@ void draw_image_qa(
             item.path.empty() ? tr("This view has no image path")
                               : tr("Could not decode the selected file"));
     } else if (state.mode == ImageQaMode::error) {
-        if (session.has_error()) {
+        const bool error_current =
+            session.has_error() && session.loaded_view() == state.selected &&
+            session.render_view() == state.selected;
+        if (error_current) {
             draw->AddImage(session.error_id(), img_min, img_max);
         } else if (!compare_ok) {
             draw->AddImage(session.gt_id(), img_min, img_max);

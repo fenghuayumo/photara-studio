@@ -103,6 +103,57 @@ void record_shared_copy(VkCommandBuffer command) {
         static_cast<std::uint32_t>(release.size()), release.data());
 }
 
+// One-shot copies must not steal the swapchain frame command pool. Present()
+// records into Frames[FrameIndex] and submits it with a fence; UI-thread
+// uploads (2D QA GT / error / thumbnails) run before the next acquire and
+// would otherwise vkResetCommandPool a still-pending buffer. That race is
+// much more likely while compare keeps the splat copy on the GPU.
+class OneShotRecorder {
+public:
+    OneShotRecorder() {
+        check(vkQueueWaitIdle(g_queue));
+        VkCommandPoolCreateInfo pool_info{
+            VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pool_info.queueFamilyIndex = g_queue_family;
+        check(vkCreateCommandPool(g_device, &pool_info, nullptr, &pool_));
+        VkCommandBufferAllocateInfo cmd_info{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cmd_info.commandPool = pool_;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        check(vkAllocateCommandBuffers(g_device, &cmd_info, &command_));
+        VkCommandBufferBeginInfo begin{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check(vkBeginCommandBuffer(command_, &begin));
+    }
+
+    OneShotRecorder(const OneShotRecorder&) = delete;
+    OneShotRecorder& operator=(const OneShotRecorder&) = delete;
+
+    ~OneShotRecorder() {
+        if (pool_ && g_device) vkDestroyCommandPool(g_device, pool_, nullptr);
+    }
+
+    [[nodiscard]] VkCommandBuffer command() const { return command_; }
+
+    void submit(VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO}) {
+        check(vkEndCommandBuffer(command_));
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &command_;
+        check(vkQueueSubmit(g_queue, 1, &submit, {}));
+        check(vkQueueWaitIdle(g_queue));
+        vkDestroyCommandPool(g_device, pool_, nullptr);
+        pool_ = {};
+        command_ = {};
+    }
+
+private:
+    VkCommandPool pool_{};
+    VkCommandBuffer command_{};
+};
+
 }  // namespace
 
 void check(const VkResult result) {
@@ -357,6 +408,12 @@ void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
         reset();
         return;
     }
+    const std::size_t pixels =
+        static_cast<std::size_t>(source.width) * source.height;
+    if (source.pixels.size() < pixels * 3) {
+        reset();
+        return;
+    }
     const bool recreate =
         image == nullptr || width != source.width || height != source.height;
     if (recreate) {
@@ -367,7 +424,6 @@ void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
     const VkDeviceSize bytes =
         static_cast<VkDeviceSize>(width) * height * 4;
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(bytes));
-    const std::size_t pixels = static_cast<std::size_t>(width) * height;
     for (std::size_t i = 0; i < pixels; ++i) {
         rgba[4 * i] = source.pixels[3 * i];
         rgba[4 * i + 1] = source.pixels[3 * i + 1];
@@ -396,111 +452,66 @@ void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
     std::memcpy(mapped, rgba.data(), static_cast<std::size_t>(bytes));
     vkUnmapMemory(g_device, staging_memory);
 
-    if (!recreate) {
-        auto& frame = g_window.Frames[g_window.FrameIndex];
-        check(vkResetCommandPool(g_device, frame.CommandPool, 0));
-        VkCommandBufferBeginInfo begin{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
+    if (recreate) {
+        VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        image_info.extent = {width, height, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                           VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                           VK_IMAGE_USAGE_SAMPLED_BIT;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        check(vkCreateImage(g_device, &image_info, nullptr, &image));
+        vkGetImageMemoryRequirements(g_device, image, &requirements);
+        allocation.allocationSize = requirements.size;
+        allocation.memoryTypeIndex = memory_type(
+            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        check(vkAllocateMemory(g_device, &allocation, nullptr, &memory));
+        check(vkBindImageMemory(g_device, image, memory, 0));
+    }
+
+    {
+        OneShotRecorder recorder;
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.oldLayout = recreate ? VK_IMAGE_LAYOUT_UNDEFINED
+                                     : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.image = image;
         barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.srcAccessMask =
+            recreate ? VkAccessFlags{} : VK_ACCESS_SHADER_READ_BIT;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            recorder.command(),
+            recreate ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                     : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
             &barrier);
         VkBufferImageCopy copy{};
         copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         copy.imageExtent = {width, height, 1};
         vkCmdCopyBufferToImage(
-            frame.CommandBuffer, staging, image,
+            recorder.command(), staging, image,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
         barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(
-            frame.CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            recorder.command(), VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
             1, &barrier);
-        check(vkEndCommandBuffer(frame.CommandBuffer));
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &frame.CommandBuffer;
-        check(vkQueueSubmit(g_queue, 1, &submit, {}));
-        check(vkQueueWaitIdle(g_queue));
-        vkDestroyBuffer(g_device, staging, nullptr);
-        vkFreeMemory(g_device, staging_memory, nullptr);
-        return;
+        recorder.submit();
     }
-
-    VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    image_info.imageType = VK_IMAGE_TYPE_2D;
-    image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-    image_info.extent = {width, height, 1};
-    image_info.mipLevels = 1;
-    image_info.arrayLayers = 1;
-    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                       VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                       VK_IMAGE_USAGE_SAMPLED_BIT;
-    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    check(vkCreateImage(g_device, &image_info, nullptr, &image));
-    vkGetImageMemoryRequirements(g_device, image, &requirements);
-    allocation.allocationSize = requirements.size;
-    allocation.memoryTypeIndex = memory_type(
-        requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    check(vkAllocateMemory(g_device, &allocation, nullptr, &memory));
-    check(vkBindImageMemory(g_device, image, memory, 0));
-
-    auto& frame = g_window.Frames[g_window.FrameIndex];
-    check(vkResetCommandPool(g_device, frame.CommandPool, 0));
-    VkCommandBufferBeginInfo begin{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(
-        frame.CommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-        &barrier);
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {width, height, 1};
-    vkCmdCopyBufferToImage(
-        frame.CommandBuffer, staging, image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(
-        frame.CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-        &barrier);
-    check(vkEndCommandBuffer(frame.CommandBuffer));
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &frame.CommandBuffer;
-    check(vkQueueSubmit(g_queue, 1, &submit, {}));
-    check(vkQueueWaitIdle(g_queue));
     vkDestroyBuffer(g_device, staging, nullptr);
     vkFreeMemory(g_device, staging_memory, nullptr);
+    if (!recreate) return;
 
     VkImageViewCreateInfo view_info{
         VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -543,13 +554,7 @@ bool PreviewTexture::download_rgb(aetherscan::io::RgbImage& destination) const {
     check(vkAllocateMemory(g_device, &allocation, nullptr, &staging_memory));
     check(vkBindBufferMemory(g_device, staging, staging_memory, 0));
 
-    check(vkQueueWaitIdle(g_queue));
-    auto& frame = g_window.Frames[g_window.FrameIndex];
-    check(vkResetCommandPool(g_device, frame.CommandPool, 0));
-    VkCommandBufferBeginInfo begin{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
+    OneShotRecorder recorder;
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -560,29 +565,24 @@ bool PreviewTexture::download_rgb(aetherscan::io::RgbImage& destination) const {
     barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(
-        frame.CommandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        recorder.command(), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
         &barrier);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {width, height, 1};
     vkCmdCopyImageToBuffer(
-        frame.CommandBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        recorder.command(), image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         staging, 1, &copy);
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(
-        frame.CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        recorder.command(), VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
         &barrier);
-    check(vkEndCommandBuffer(frame.CommandBuffer));
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &frame.CommandBuffer;
-    check(vkQueueSubmit(g_queue, 1, &submit, {}));
-    check(vkQueueWaitIdle(g_queue));
+    recorder.submit();
 
     void* mapped{};
     check(vkMapMemory(g_device, staging_memory, 0, bytes, 0, &mapped));
@@ -683,12 +683,7 @@ void ExternalPreview::create(
 
     renew_export_handles();
 
-    auto& frame = g_window.Frames[g_window.FrameIndex];
-    check(vkResetCommandPool(g_device, frame.CommandPool, 0));
-    VkCommandBufferBeginInfo begin{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
+    OneShotRecorder recorder;
     VkImageMemoryBarrier release{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     release.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -697,15 +692,10 @@ void ExternalPreview::create(
     release.image = image;
     release.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdPipelineBarrier(
-        frame.CommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        recorder.command(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
         &release);
-    check(vkEndCommandBuffer(frame.CommandBuffer));
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &frame.CommandBuffer;
-    check(vkQueueSubmit(g_queue, 1, &submit, {}));
-    check(vkQueueWaitIdle(g_queue));
+    recorder.submit();
 
     g_external_image = image;
     g_external_timeline = timeline;
@@ -759,15 +749,8 @@ void ExternalPreview::poll() {
 
 void ExternalPreview::consume_without_present() {
     if (g_ready_value <= g_consumed_value) return;
-    check(vkQueueWaitIdle(g_queue));
-    auto& frame = g_window.Frames[g_window.FrameIndex];
-    check(vkResetCommandPool(g_device, frame.CommandPool, 0));
-    VkCommandBufferBeginInfo begin{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(vkBeginCommandBuffer(frame.CommandBuffer, &begin));
-    record_shared_copy(frame.CommandBuffer);
-    check(vkEndCommandBuffer(frame.CommandBuffer));
+    OneShotRecorder recorder;
+    record_shared_copy(recorder.command());
 
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     const std::uint64_t signal_value = g_ready_value + 1;
@@ -782,12 +765,9 @@ void ExternalPreview::consume_without_present() {
     submit.waitSemaphoreCount = 1;
     submit.pWaitSemaphores = &timeline;
     submit.pWaitDstStageMask = &wait_stage;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &frame.CommandBuffer;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &timeline;
-    check(vkQueueSubmit(g_queue, 1, &submit, {}));
-    check(vkQueueWaitIdle(g_queue));
+    recorder.submit(submit);
     g_consumed_value = g_ready_value;
 }
 
