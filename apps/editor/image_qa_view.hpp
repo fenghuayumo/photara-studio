@@ -15,6 +15,10 @@
 
 namespace editor {
 
+// Metrics and the QA error map are computed at this long edge, so the capture
+// readback is downscaled to it instead of transferring the whole render.
+inline constexpr std::uint32_t k_image_qa_metric_extent = 640;
+
 enum class ImageQaMode { photo, features, compare, error };
 
 struct ImageQaMetrics {

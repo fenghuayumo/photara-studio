@@ -538,12 +538,63 @@ void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
         sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
-bool PreviewTexture::download_rgb(aetherscan::io::RgbImage& destination) const {
+bool PreviewTexture::download_rgb(
+    aetherscan::io::RgbImage& destination,
+    const std::uint32_t max_long_edge) const {
     destination = {};
     if (!g_device || !image || width == 0 || height == 0) return false;
 
+    // The QA metrics only read a small long edge, so scale here on the GPU: a
+    // 1920 square costs 14.7 MB of transfer and 3.7 M host pixels to convert,
+    // where the 640 square costs 1.2 MB and 0.3 M.
+    std::uint32_t read_width = width;
+    std::uint32_t read_height = height;
+    if (max_long_edge != 0) {
+        const std::uint32_t long_edge = std::max(width, height);
+        if (long_edge > max_long_edge) {
+            const double scale =
+                static_cast<double>(max_long_edge) / long_edge;
+            read_width = std::max<std::uint32_t>(
+                1, static_cast<std::uint32_t>(
+                       std::lround(static_cast<double>(width) * scale)));
+            read_height = std::max<std::uint32_t>(
+                1, static_cast<std::uint32_t>(
+                       std::lround(static_cast<double>(height) * scale)));
+        }
+    }
+    const bool scaled = read_width != width || read_height != height;
+
+    VkImage scratch{};
+    VkDeviceMemory scratch_memory{};
+    if (scaled) {
+        VkImageCreateInfo scratch_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        scratch_info.imageType = VK_IMAGE_TYPE_2D;
+        scratch_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        scratch_info.extent = {read_width, read_height, 1};
+        scratch_info.mipLevels = 1;
+        scratch_info.arrayLayers = 1;
+        scratch_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        scratch_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        scratch_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        scratch_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        check(vkCreateImage(g_device, &scratch_info, nullptr, &scratch));
+        VkMemoryRequirements scratch_requirements{};
+        vkGetImageMemoryRequirements(
+            g_device, scratch, &scratch_requirements);
+        VkMemoryAllocateInfo scratch_allocation{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        scratch_allocation.allocationSize = scratch_requirements.size;
+        scratch_allocation.memoryTypeIndex = memory_type(
+            scratch_requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        check(vkAllocateMemory(
+            g_device, &scratch_allocation, nullptr, &scratch_memory));
+        check(vkBindImageMemory(g_device, scratch, scratch_memory, 0));
+    }
+
     const VkDeviceSize bytes =
-        static_cast<VkDeviceSize>(width) * height * 4;
+        static_cast<VkDeviceSize>(read_width) * read_height * 4;
     VkBuffer staging{};
     VkDeviceMemory staging_memory{};
     VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -575,11 +626,50 @@ bool PreviewTexture::download_rgb(aetherscan::io::RgbImage& destination) const {
         recorder.command(), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
         &barrier);
+    if (scaled) {
+        VkImageMemoryBarrier scratch_barrier{
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        scratch_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        scratch_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        scratch_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        scratch_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        scratch_barrier.image = scratch;
+        scratch_barrier.subresourceRange = {
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        scratch_barrier.srcAccessMask = 0;
+        scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            recorder.command(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+            &scratch_barrier);
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[1] = {
+            static_cast<std::int32_t>(width),
+            static_cast<std::int32_t>(height), 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.dstOffsets[1] = {
+            static_cast<std::int32_t>(read_width),
+            static_cast<std::int32_t>(read_height), 1};
+        vkCmdBlitImage(
+            recorder.command(), image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            scratch, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+            VK_FILTER_LINEAR);
+        scratch_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        scratch_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        scratch_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(
+            recorder.command(), VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+            &scratch_barrier);
+    }
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {width, height, 1};
+    copy.imageExtent = {read_width, read_height, 1};
     vkCmdCopyImageToBuffer(
-        recorder.command(), image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        recorder.command(),
+        scaled ? scratch : image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         staging, 1, &copy);
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -594,10 +684,12 @@ bool PreviewTexture::download_rgb(aetherscan::io::RgbImage& destination) const {
     void* mapped{};
     check(vkMapMemory(g_device, staging_memory, 0, bytes, 0, &mapped));
     const auto* rgba = static_cast<const std::uint8_t*>(mapped);
-    destination.width = width;
-    destination.height = height;
-    destination.pixels.resize(static_cast<std::size_t>(width) * height * 3);
-    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    destination.width = read_width;
+    destination.height = read_height;
+    destination.pixels.resize(
+        static_cast<std::size_t>(read_width) * read_height * 3);
+    const std::size_t pixels =
+        static_cast<std::size_t>(read_width) * read_height;
     for (std::size_t i = 0; i < pixels; ++i) {
         destination.pixels[3 * i] = rgba[4 * i];
         destination.pixels[3 * i + 1] = rgba[4 * i + 1];
@@ -606,6 +698,10 @@ bool PreviewTexture::download_rgb(aetherscan::io::RgbImage& destination) const {
     vkUnmapMemory(g_device, staging_memory);
     vkDestroyBuffer(g_device, staging, nullptr);
     vkFreeMemory(g_device, staging_memory, nullptr);
+    if (scaled) {
+        vkDestroyImage(g_device, scratch, nullptr);
+        vkFreeMemory(g_device, scratch_memory, nullptr);
+    }
     return !destination.pixels.empty();
 }
 

@@ -24,7 +24,7 @@ using i18n::tr;
 constexpr float k_toolbar_h = 48.F;
 constexpr float k_filmstrip_h = 104.F;
 constexpr std::uint32_t k_qa_long_edge = 1600;
-constexpr std::uint32_t k_metric_long_edge = 640;
+constexpr std::uint32_t k_metric_long_edge = k_image_qa_metric_extent;
 
 bool is_image_extension(std::string extension) {
     std::transform(

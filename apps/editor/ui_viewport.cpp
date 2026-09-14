@@ -449,7 +449,8 @@ void capture_qa_render(App& app) {
         return;
     }
     aetherscan::io::RgbImage render;
-    if (!app.preview.display.download_rgb(render)) return;
+    if (!app.preview.display.download_rgb(render, k_image_qa_metric_extent))
+        return;
     app.image_qa_session.set_render(
         std::move(render), app.image_qa.selected, revision);
     app.image_qa.metrics_dirty = false;
