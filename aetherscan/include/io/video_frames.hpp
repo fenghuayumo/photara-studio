@@ -33,7 +33,6 @@ struct VideoExtractOptions {
     // Kept frames per second of source time. ffmpeg `fps=` filter.
     float fps = 2.0F;
     // Keep the sharpest of N consecutive candidates (1 = every fps sample).
-    // Matches spirula DatasetPrep::sharp_window / extract_frames.py --keep.
     int sharp_window = 3;
     // 0 = no cap.
     int max_frames = 0;
