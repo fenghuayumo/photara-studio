@@ -1653,6 +1653,20 @@ void publish_preview_vis(App& app) {
     write_preview_vis(app);
 }
 
+void publish_preview_ack(App& app) {
+    if (app.layout.preview_ack_file.empty()) return;
+    // Only the external-memory transport has a shared image to hand over; the
+    // offline preview paths have no handshake for the trainer to relax.
+    if (!app.preview.timeline) return;
+    const std::uint64_t copied = gpu::copied_preview_frames();
+    if (copied == app.preview_ack_frames) return;
+    std::ofstream output(app.layout.preview_ack_file, std::ios::trunc);
+    if (!output) return;
+    output << copied << '\n';
+    if (!output) return;
+    app.preview_ack_frames = copied;
+}
+
 void set_visualization_mode(App& app, const VisualizationMode mode) {
     app.view_mode = mode;
     // Changing the rail mode is an explicit request to show scene data again.
@@ -2629,6 +2643,8 @@ void start_train(App& app, const bool smoke) {
             << app.layout.preview_camera_file.string() << '"'
             << " --splat-preview-vis-file \""
             << app.layout.preview_vis_file.string() << '"'
+            << " --splat-preview-ack-file \""
+            << app.layout.preview_ack_file.string() << '"'
             << " --splat-preview-vk-memory-handle " << handles.memory
             << " --splat-preview-vk-semaphore-handle " << handles.semaphore
             << " --splat-preview-vk-allocation-size " << handles.allocation_size

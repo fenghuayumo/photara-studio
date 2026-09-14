@@ -79,6 +79,73 @@ bool preview_camera_equivalent(const Camera& left, const Camera& right) {
     return true;
 }
 
+// Interactive preview pacing. The orbit camera is polled at k_preview_poll_ms
+// so a drag lands within a frame or two, an interactive preview is only worth a
+// raster once the pivot moved k_preview_pose_min_px on screen, and interactive
+// previews are kept inside a fixed share of the training loop.
+constexpr unsigned k_preview_poll_ms = 15;
+constexpr float k_preview_pose_min_px = 0.35F;
+constexpr unsigned k_preview_pose_hold_ms = 500;
+constexpr unsigned k_preview_interactive_min_ms = 33;
+constexpr float k_preview_interactive_budget = 5.F;
+
+// Screen-space shift of `reference` between two cameras, in raster pixels.
+// Cameras the reference cannot be projected into (non-pinhole models, pivots
+// behind the camera) report an infinite shift so the caller always redraws.
+[[nodiscard]] float preview_pose_shift_px(
+    const Camera& left, const Camera& right,
+    const std::array<float, 3>& reference) {
+    if (left.model != CameraModel::pinhole ||
+        right.model != CameraModel::pinhole)
+        return std::numeric_limits<float>::infinity();
+    const auto project = [&reference](
+                             const Camera& camera, float& u, float& v) {
+        const float* matrix = camera.world_to_camera.data();
+        const float x = matrix[0] * reference[0] + matrix[4] * reference[1] +
+                        matrix[8] * reference[2] + matrix[12];
+        const float y = matrix[1] * reference[0] + matrix[5] * reference[1] +
+                        matrix[9] * reference[2] + matrix[13];
+        const float z = matrix[2] * reference[0] + matrix[6] * reference[1] +
+                        matrix[10] * reference[2] + matrix[14];
+        if (!(z > 1e-4F)) return false;
+        u = camera.fx * x / z + camera.cx;
+        v = camera.fy * y / z + camera.cy;
+        return true;
+    };
+    float left_u = 0.F, left_v = 0.F, right_u = 0.F, right_v = 0.F;
+    if (!project(left, left_u, left_v) || !project(right, right_u, right_v))
+        return std::numeric_limits<float>::infinity();
+    return std::max(std::abs(left_u - right_u), std::abs(left_v - right_v));
+}
+
+// Intrinsics changes (zoom, raster resize, camera model) always need a redraw;
+// only a pure pose change is subject to the pixel threshold.
+[[nodiscard]] bool preview_intrinsics_close(
+    const Camera& left, const Camera& right) {
+    if (left.width != right.width || left.height != right.height ||
+        left.model != right.model)
+        return false;
+    const auto close = [](const float a, const float b) {
+        return std::abs(a - b) <=
+            1e-4F * std::max(1.F, std::abs(a) + std::abs(b));
+    };
+    return close(left.fx, right.fx) && close(left.fy, right.fy) &&
+           close(left.cx, right.cx) && close(left.cy, right.cy);
+}
+
+// The editor publishes how many preview frames it has copied out of the shared
+// image. Returns false when the sidecar is absent or unreadable, which keeps
+// the pre-acknowledgement behaviour of waiting on the shared image.
+[[nodiscard]] bool read_preview_ack_frames(
+    const std::filesystem::path& path, std::uint64_t& frames) {
+    if (path.empty()) return false;
+    std::ifstream input(path);
+    std::uint64_t parsed{};
+    if (!(input >> parsed)) return false;
+    frames = parsed;
+    return true;
+}
+
 tinytensor::Tensor render_preview_color(
     const GaussianModel& model, const Camera& camera,
     const TrainingOptions& options, const unsigned active_sh_degree,
@@ -879,6 +946,21 @@ GaussianModel Trainer::train(
     auto next_extra_preview = std::chrono::steady_clock::time_point::min();
     Camera last_preview_camera{};
     bool has_last_preview_camera = false;
+    // Interactive previews are gated on the pivot's screen shift, so the pivot
+    // is the scene centre the reconstruction is framed around.
+    const std::array<float, 3> preview_pivot{
+        scene_center.x(), scene_center.y(), scene_center.z()};
+    auto next_pose_hold = std::chrono::steady_clock::time_point::min();
+    // Preview frames handed to the device transport; the editor acknowledges
+    // them through the ack sidecar.
+    std::uint64_t preview_frames_queued = 0;
+    // Last acknowledgement the editor published. Once it has published one, a
+    // transiently unreadable sidecar keeps this value instead of dropping back
+    // to the blocking handshake.
+    std::uint64_t preview_ack_frames = 0;
+    bool has_preview_ack = false;
+    bool reported_preview_ack = false;
+    auto next_preview_drop_log = std::chrono::steady_clock::time_point::min();
     const bool preview_has_sidecars = !options_.preview_camera_file.empty() ||
         !options_.preview_view_file.empty() || !options_.preview_vis_file.empty();
 
@@ -982,13 +1064,15 @@ GaussianModel Trainer::train(
             (iteration == 1 || iteration == options_.iterations ||
              iteration % options_.preview_interval == 0);
         // Sidecar polls are for interactive orbit/vis changes. They must not
-        // launch a second full raster every optimizer step: the editor can
-        // rewrite the camera file when the viewport jitters by a pixel.
+        // launch a second full raster every optimizer step, so the pixel gate
+        // and the interactive pacing below decide what is worth a raster: the
+        // sidecars are tiny and only rewritten when the editor has news.
         if (preview_enabled && (preview_scheduled ||
                 (preview_has_sidecars &&
                  std::chrono::steady_clock::now() >= next_preview_poll))) {
             const auto preview_now = std::chrono::steady_clock::now();
-            next_preview_poll = preview_now + std::chrono::milliseconds(50);
+            next_preview_poll =
+                preview_now + std::chrono::milliseconds(k_preview_poll_ms);
             Camera preview_camera;
             std::uint64_t camera_revision = 0;
             VisualizeOptions camera_vis;
@@ -1001,10 +1085,27 @@ GaussianModel Trainer::train(
             VisualizeOptions vis_peek = camera_vis;
             load_visualization_sidecar(
                 options_.preview_vis_file, vis_peek, vis_revision);
-            const bool pose_changed = custom_camera &&
+            const bool any_pose_change = custom_camera &&
                 (!has_last_preview_camera ||
                  !preview_camera_equivalent(
                      preview_camera, last_preview_camera));
+            // A sub-pixel orbit update is not worth a raster, but it must not
+            // stall the live view either: force one once the change has been
+            // pending for k_preview_pose_hold_ms. The shift accumulates against
+            // the camera the editor last received, so a slow but visible drag
+            // still reaches the pixel threshold on its own.
+            bool pose_changed = any_pose_change;
+            if (any_pose_change && has_last_preview_camera &&
+                preview_intrinsics_close(
+                    preview_camera, last_preview_camera)) {
+                const float shift = preview_pose_shift_px(
+                    last_preview_camera, preview_camera, preview_pivot);
+                pose_changed = shift >= k_preview_pose_min_px ||
+                    preview_now >= next_pose_hold;
+            }
+            if (pose_changed)
+                next_pose_hold = preview_now +
+                    std::chrono::milliseconds(k_preview_pose_hold_ms);
             const bool extra_preview_allowed =
                 preview_now >= next_extra_preview;
             const bool due =
@@ -1015,7 +1116,39 @@ GaussianModel Trainer::train(
                 (custom_camera
                      ? pose_changed && extra_preview_allowed
                      : preview_index != last_preview_view);
-            if (due) {
+            // The editor publishes how many preview frames it has copied out of
+            // the shared image. While that sidecar is readable, drop this
+            // preview instead of entering the handshake: the shared image still
+            // holds the frame the editor is working on, and the semaphore wait
+            // inside submit() remains the real barrier, so a stale
+            // acknowledgement can cost an update but can never tear the image.
+            std::uint64_t ack_frames = 0;
+            if (device_preview &&
+                read_preview_ack_frames(
+                    options_.preview_ack_file, ack_frames)) {
+                has_preview_ack = true;
+                preview_ack_frames = ack_frames;
+                if (!reported_preview_ack) {
+                    reported_preview_ack = true;
+                    core::Logger::instance().info(
+                        "splat_preview_ack_frames=", ack_frames,
+                        " file=\"", options_.preview_ack_file, '"');
+                }
+            }
+            const bool shared_image_free =
+                !has_preview_ack || preview_ack_frames >= preview_frames_queued;
+            if (due && !shared_image_free && preview_now >= next_preview_drop_log) {
+                // The editor is still copying the previous frame. Dropping this
+                // preview keeps the optimizer moving; the next poll retries.
+                next_preview_drop_log = preview_now + std::chrono::seconds(2);
+                core::Logger::instance().info(
+                    "splat_preview_dropped iteration=", iteration,
+                    " editor_frames=", preview_ack_frames,
+                    " queued_frames=", preview_frames_queued,
+                    " action=skip");
+            }
+            if (due && shared_image_free) {
+                const auto preview_started = std::chrono::steady_clock::now();
                 if (!custom_camera) {
                     preview_camera = all_cameras[preview_index];
                 }
@@ -1027,13 +1160,11 @@ GaussianModel Trainer::train(
                 last_preview_vis_revision = vis_revision;
                 last_preview_camera = preview_camera;
                 has_last_preview_camera = true;
-                if (pose_changed && !preview_scheduled)
-                    next_extra_preview =
-                        preview_now + std::chrono::milliseconds(200);
                 if (device_preview) {
                     device_preview(
                         iteration, preview_index, preview_camera,
                         preview_color);
+                    ++preview_frames_queued;
                 } else {
                     const std::vector<float> planar =
                         download<float>(preview_color);
@@ -1056,6 +1187,19 @@ GaussianModel Trainer::train(
                         }
                     }
                     preview(std::move(frame));
+                }
+                if (pose_changed && !preview_scheduled) {
+                    // Keep interactive previews inside a fixed share of the
+                    // loop: never sooner than the render that just happened.
+                    const auto cost = std::chrono::duration_cast<
+                        std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - preview_started);
+                    next_extra_preview = preview_now + std::max(
+                        std::chrono::milliseconds(
+                            k_preview_interactive_min_ms),
+                        std::chrono::milliseconds(static_cast<long long>(
+                            static_cast<float>(cost.count()) *
+                            k_preview_interactive_budget)));
                 }
             }
         }
@@ -1459,6 +1603,12 @@ GaussianModel Trainer::train(
             launch_evaluation(iteration, model);
     }
     cuda_profiler.flush();
+    if (device_preview) {
+        core::Logger::instance().info(
+            "splat_preview_frames_queued=", preview_frames_queued,
+            " editor_ack_frames=", preview_ack_frames,
+            " acknowledged=", has_preview_ack ? 1 : 0);
+    }
     if (options_.profile_cuda) {
         const auto cache = view_cache.stats();
         core::Logger::instance().info(

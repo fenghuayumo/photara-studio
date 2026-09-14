@@ -34,6 +34,9 @@ std::uint32_t g_external_width{};
 std::uint32_t g_external_height{};
 std::uint64_t g_ready_value{};
 std::uint64_t g_consumed_value{};
+// Preview frames copied out of the shared image. Published to the trainer so it
+// can skip a preview instead of waiting for the editor to catch up.
+std::uint64_t g_copied_frames{};
 
 bool has_extension(
     const ImVector<VkExtensionProperties>& properties, const char* name) {
@@ -175,6 +178,7 @@ std::uint32_t device_node_mask() { return g_device_node_mask; }
 bool swapchain_needs_rebuild() { return g_rebuild_swapchain; }
 void clear_swapchain_rebuild() { g_rebuild_swapchain = false; }
 std::uint64_t consumed_timeline_value() { return g_consumed_value; }
+std::uint64_t copied_preview_frames() { return g_copied_frames; }
 std::uint64_t ready_timeline_value() { return g_ready_value; }
 
 void create_context(ImVector<const char*> extensions) {
@@ -365,7 +369,10 @@ void present(ImDrawData* draw, const ImVec4& clear_colour) {
     submit.signalSemaphoreCount = copy_shared ? 2U : 1U;
     submit.pSignalSemaphores = signals.data();
     check(vkQueueSubmit(g_queue, 1, &submit, frame.Fence));
-    if (copy_shared) g_consumed_value = g_ready_value;
+    if (copy_shared) {
+        g_consumed_value = g_ready_value;
+        ++g_copied_frames;
+    }
 
     VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     info.waitSemaphoreCount = 1;
@@ -703,6 +710,7 @@ void ExternalPreview::create(
     g_external_height = height;
     g_ready_value = 0;
     g_consumed_value = 0;
+    g_copied_frames = 0;
 #endif
 }
 
@@ -769,6 +777,7 @@ void ExternalPreview::consume_without_present() {
     submit.pSignalSemaphores = &timeline;
     recorder.submit(submit);
     g_consumed_value = g_ready_value;
+    ++g_copied_frames;
 }
 
 void ExternalPreview::reset() {
@@ -777,7 +786,7 @@ void ExternalPreview::reset() {
     g_external_image = {};
     g_display_image = {};
     g_external_timeline = {};
-    g_ready_value = g_consumed_value = 0;
+    g_ready_value = g_consumed_value = g_copied_frames = 0;
     close_export_handles();
     if (timeline) vkDestroySemaphore(g_device, timeline, nullptr);
     if (image) vkDestroyImage(g_device, image, nullptr);

@@ -172,6 +172,7 @@ int main(const int argc, char** argv) {
             editor::gpu::resize_window(width, height);
         if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
             app.preview.consume_without_present();
+            editor::publish_preview_ack(app);
             ImGui_ImplGlfw_Sleep(10);
             continue;
         }
@@ -287,6 +288,7 @@ int main(const int argc, char** argv) {
         ImDrawData* draw_data = ImGui::GetDrawData();
         if (draw_data->DisplaySize.x > 0.F && draw_data->DisplaySize.y > 0.F)
             editor::gpu::present(draw_data, editor::theme::surface_0);
+        editor::publish_preview_ack(app);
 
         if (app.pending_align_viewport_clear) {
             app.pending_align_viewport_clear = false;

@@ -122,6 +122,9 @@ struct App {
     bool qa_camera_valid{};
     unsigned preview_view{};
     std::uint64_t preview_camera_revision{};
+    // Last preview frame count published to the trainer's acknowledgement
+    // sidecar, so the editor only writes it when the value actually changes.
+    std::uint64_t preview_ack_frames{};
     bool preview_follow_view{true};
     OrbitCamera last_preview_orbit{};
     bool has_last_preview_orbit{};
@@ -252,6 +255,7 @@ void set_camera_overlays(ViewOptions& options, bool visible);
 void show_mesh_view(App& app, bool frame_when_ready);
 void publish_preview_vis(App& app);
 void write_preview_vis(App& app);
+void publish_preview_ack(App& app);
 aetherscan::splat::VisualizeOptions editor_visualize_options(const App& app);
 void sync_live_preview_camera(
     App& app, bool force, std::uint32_t width, std::uint32_t height);

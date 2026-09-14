@@ -263,20 +263,30 @@ bool orbit_pose_changed(const OrbitCamera& a, const OrbitCamera& b) {
 }
 
 void fit_preview_raster(
-    const float viewport_w, const float viewport_h, std::uint32_t& width,
-    std::uint32_t& height) {
+    const float viewport_w, const float viewport_h, const bool interacting,
+    std::uint32_t& width, std::uint32_t& height) {
     const float view_w = std::max(1.F, viewport_w);
     const float view_h = std::max(1.F, viewport_h);
+    // Raster at the pixels the viewport actually shows, capped by the shared
+    // image. While the camera moves the frame is replaced as soon as the mouse
+    // moves again, so half resolution trades detail that is about to change for
+    // latency in the live view and GPU time returned to the optimizer.
+    constexpr std::uint32_t k_min_extent = 256;
+    const float extent = std::min(
+        static_cast<float>(k_preview_extent),
+        std::max(view_w, view_h) * (interacting ? 0.5F : 1.F));
     if (view_w >= view_h) {
-        width = k_preview_extent;
+        width = std::max<std::uint32_t>(
+            k_min_extent, static_cast<std::uint32_t>(std::lround(extent)));
         height = std::max<std::uint32_t>(
             1, static_cast<std::uint32_t>(std::lround(
-                   static_cast<double>(k_preview_extent) * view_h / view_w)));
+                   static_cast<double>(width) * view_h / view_w)));
     } else {
-        height = k_preview_extent;
+        height = std::max<std::uint32_t>(
+            k_min_extent, static_cast<std::uint32_t>(std::lround(extent)));
         width = std::max<std::uint32_t>(
             1, static_cast<std::uint32_t>(std::lround(
-                   static_cast<double>(k_preview_extent) * view_w / view_h)));
+                   static_cast<double>(height) * view_w / view_h)));
     }
 }
 
@@ -825,7 +835,9 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     handle_preview_view_input(app, viewport_input);
     std::uint32_t raster_w = app.preview_raster_width;
     std::uint32_t raster_h = app.preview_raster_height;
-    fit_preview_raster(max.x - min.x, max.y - min.y, raster_w, raster_h);
+    fit_preview_raster(
+        max.x - min.x, max.y - min.y, app.camera.interacting, raster_w,
+        raster_h);
     sync_live_preview_camera(app, false, raster_w, raster_h);
 
     const char* overlay_label = tr("IDLE");

@@ -119,6 +119,7 @@ struct ReconstructCli {
     std::filesystem::path splat_preview_view_file;
     std::filesystem::path splat_preview_camera_file;
     std::filesystem::path splat_preview_vis_file;
+    std::filesystem::path splat_preview_ack_file;
     std::filesystem::path splat_preview_dir;
     std::uint64_t splat_preview_vk_memory_handle{};
     std::uint64_t splat_preview_vk_semaphore_handle{};
@@ -329,6 +330,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-preview-view-file PATH  optional file the editor updates to switch cameras\n"
               << "  --splat-preview-camera-file PATH  optional orbit-camera sidecar (overrides view index)\n"
               << "  --splat-preview-vis-file PATH  optional splat/points/rings visualization sidecar\n"
+              << "  --splat-preview-ack-file PATH  optional sidecar the editor updates with the frames it copied\n"
               << "  --splat-preview-dir PATH  editor preview PNG directory\n"
               << "  --splat-profile-cuda BOOL  CUDA-event timings for training stages (default false)\n"
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
@@ -596,6 +598,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-preview-vis-file",
          "Sidecar file selecting live preview shading: splat, points, or rings",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-preview-ack-file",
+         "Sidecar file the editor updates with the preview frames it consumed",
          cxxopts::value<std::string>()->default_value(""))
         ("splat-preview-dir", "Directory for live training preview PNGs",
          cxxopts::value<std::string>()->default_value(""))
@@ -1016,6 +1021,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-preview-vis-file"].as<std::string>();
     if (!splat_preview_vis_file_text.empty())
         cli.splat_preview_vis_file = utf8_to_path(splat_preview_vis_file_text);
+    const std::string splat_preview_ack_file_text =
+        result["splat-preview-ack-file"].as<std::string>();
+    if (!splat_preview_ack_file_text.empty())
+        cli.splat_preview_ack_file = utf8_to_path(splat_preview_ack_file_text);
     const std::string splat_preview_dir_text =
         result["splat-preview-dir"].as<std::string>();
     if (!splat_preview_dir_text.empty())
@@ -2491,6 +2500,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.preview_view_file = cli.splat_preview_view_file;
     options.preview_camera_file = cli.splat_preview_camera_file;
     options.preview_vis_file = cli.splat_preview_vis_file;
+    options.preview_ack_file = cli.splat_preview_ack_file;
     options.sh_degree = cli.splat_sh_degree;
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;
@@ -2858,6 +2868,9 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             "splat_preview_transport=cuda_vulkan_external_memory extent=",
             cli.splat_preview_vk_width, 'x',
             cli.splat_preview_vk_height);
+        if (!cli.splat_preview_ack_file.empty())
+            aetherscan::core::Logger::instance().info(
+                "splat_preview_ack_file=\"", cli.splat_preview_ack_file, '"');
     } else if (options.preview_interval != 0 && !cli.gui) {
         const std::filesystem::path preview_dir =
             cli.splat_preview_dir.empty()

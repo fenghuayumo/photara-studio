@@ -259,6 +259,11 @@ struct TrainingOptions {
     std::filesystem::path preview_camera_file;
     // Editor visualization mode sidecar: splat / points / rings.
     std::filesystem::path preview_vis_file;
+    // Optional editor acknowledgement sidecar: the number of preview frames it
+    // has finished copying out of the shared image. While it is readable the
+    // trainer drops a preview instead of waiting for the editor, so a busy
+    // editor can never stall the optimizer.
+    std::filesystem::path preview_ack_file;
 };
 
 // Strategy-specific defaults for shared densification knobs. The CLI applies

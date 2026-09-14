@@ -130,6 +130,9 @@ struct ExternalPreview {
 };
 
 std::uint64_t consumed_timeline_value();
+// Preview frames copied out of the shared CUDA/Vulkan image so far. The editor
+// publishes this to the trainer's acknowledgement sidecar.
+std::uint64_t copied_preview_frames();
 // Timeline value of a trainer frame that is signalled but not yet consumed.
 // Zero when nothing is pending.
 std::uint64_t ready_timeline_value();

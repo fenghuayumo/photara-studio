@@ -1027,6 +1027,7 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.preview_view_file = runtime_dir / "preview_view";
     layout.preview_camera_file = runtime_dir / "preview_camera";
     layout.preview_vis_file = runtime_dir / "preview_vis";
+    layout.preview_ack_file = runtime_dir / "preview_ack";
     return layout;
 }
 
@@ -1135,6 +1136,8 @@ std::string build_train_command(
             << quote(layout.preview_camera_file)
             << " --splat-preview-vis-file "
             << quote(layout.preview_vis_file)
+            << " --splat-preview-ack-file "
+            << quote(layout.preview_ack_file)
             << " --splat-max-resolution " << settings.max_resolution
             << " --splat-progressive-resolution="
             << (settings.progressive_resolution ? "true" : "false")
