@@ -845,10 +845,20 @@ void ExternalPreview::close_export_handles() {
 
 void ExternalPreview::poll() {
     if (!timeline) return;
+    // The protocol pins the counter: the trainer announces frame f by
+    // signalling 2f-1 and cannot start frame f+1 until this editor answers
+    // frame f with 2f, so after consuming frame f the only value that can
+    // legitimately appear is 2f+1 (or 1 before anything is consumed). Anything
+    // else -- a counter left behind by a trainer that exited mid-run (observed
+    // as all ones), a recycled handle -- would otherwise be mistaken for a new
+    // frame and make the editor copy an image that will never be written again.
+    const std::uint64_t expected =
+        g_consumed_value == 0 ? 1 : g_consumed_value + 2;
     std::uint64_t value{};
-    if (vkGetSemaphoreCounterValue(g_device, timeline, &value) == VK_SUCCESS &&
-        (value & 1U) != 0 && value > g_consumed_value)
-        g_ready_value = value;
+    if (vkGetSemaphoreCounterValue(g_device, timeline, &value) != VK_SUCCESS)
+        return;
+    if (value != expected) return;
+    g_ready_value = value;
 }
 
 void ExternalPreview::consume_without_present() {
