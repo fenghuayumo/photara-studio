@@ -1,5 +1,7 @@
 # SfM 鱼眼相机支持
 
+> 等距柱状全景（360°）相机是另一条独立链路，见 [SfM 全景相机支持](SFM_EQUIRECTANGULAR.md)。
+
 ## 使用
 
 编辑器的 **Camera Alignment → Camera model** 提供 **Auto / Pinhole / OpenCV Fisheye**，新项目默认 Auto。下方 **Result camera** 显示已加载或已完成对齐的实际类型；尚无结果时显示 Pending alignment。选择模式随 `.ascan` 项目保存，旧项目保留原来的显式选择。

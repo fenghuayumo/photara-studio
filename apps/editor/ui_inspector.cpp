@@ -466,7 +466,7 @@ Action draw_inspector(App& app) {
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(
                         "How depth is fused into triangles.\n"
-                        "PAM is GaussianWrapping occupancy meshing.");
+                        "PAM is 3DGS occupancy meshing.");
             } else {
                 if (app.settings.mesh_method == 3)
                     app.settings.mesh_method = 0;
