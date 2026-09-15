@@ -237,8 +237,8 @@ void draw_workspace_toggle(App& app, const ImVec2 origin) {
         if (hovered)
             ImGui::SetTooltip(
                 items[i].workspace == ViewportWorkspace::scene_3d
-                    ? "3D scene view"
-                    : "2D image QA — features, GT vs 3DGS, error map");
+                    ? tr("3D scene view")
+                    : tr("2D image QA — features, GT vs 3DGS, error map"));
     }
 }
 
@@ -456,7 +456,10 @@ void capture_qa_render(App& app) {
     app.image_qa.metrics_dirty = false;
 }
 
-void set_viewport_workspace(App& app, const ViewportWorkspace workspace) {
+void set_viewport_workspace(
+    App& app, const ViewportWorkspace workspace, const bool user_driven) {
+    if (user_driven && alignment_job_running(app) && app.workspace != workspace)
+        app.alignment_workspace_user_override = true;
     if (app.workspace == workspace) return;
     app.workspace = workspace;
     app.qa_preview_view = ~0U;
@@ -935,9 +938,17 @@ void draw_viewport_panel(App& app) {
 
     draw_workspace_toggle(app, header_origin);
 
-    const char* state = app.workspace == ViewportWorkspace::image_2d
-        ? "IMAGE QA"
-        : job_state_caption(app);
+    const char* state = job_state_caption(app);
+    if (app.workspace == ViewportWorkspace::image_2d) {
+        if (alignment_job_running(app) &&
+            app.monitor.stage() == Stage::features)
+            state = tr("Extracting features");
+        else if (alignment_job_running(app) &&
+                 app.monitor.stage() == Stage::matching)
+            state = tr("Matching views");
+        else
+            state = tr("IMAGE QA");
+    }
     const float state_width = ImGui::CalcTextSize(state).x;
     ImGui::SetCursorPos({
         content_start.x + std::max(8.F, header_width - state_width - 14.F),
@@ -970,6 +981,11 @@ void draw_viewport_panel(App& app) {
         input.render_live = live_preview_active(app);
         input.has_model = app.has_model;
         input.external_alignment = has_external_dataset(app);
+        if (alignment_job_running(app) &&
+            app.align_live.kind != aetherscan::sfm::AlignLiveKind::none) {
+            input.live = &app.align_live;
+            input.pair_session = &app.align_match_session;
+        }
         draw_image_qa(
             app.image_qa, app.image_qa_session, input, view_min, view_max);
         sync_qa_selection_to_preview(app, previous);

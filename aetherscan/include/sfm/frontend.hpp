@@ -12,6 +12,8 @@
 
 namespace aetherscan::sfm {
 
+class AlignLivePreview;
+
 struct FrontEndOptions {
     CameraModel camera_model{CameraModel::pinhole};
     double focal_pixels{0.0};  // 0 => 1.2 * max(w,h), fisheye: 0.5 * max(w,h)
@@ -80,6 +82,8 @@ struct FrontEndOptions {
     bool compress_descriptors_u8{true};
     RetrievalOptions retrieval{};
     CheckpointOptions checkpoint{};
+    // Editor sidecar. Null when running from the CLI without --working-sfm.
+    AlignLivePreview* live_preview{};
 };
 
 struct FrontEndTiming {

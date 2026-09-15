@@ -387,6 +387,41 @@ void draw_features(
     draw->PopClipRect();
 }
 
+void draw_live_keypoints(
+    ImDrawList* draw, const std::vector<aetherscan::sfm::AlignLiveKeypoint>& points,
+    const ImVec2 img_min, const ImVec2 img_max, const ImU32 colour) {
+    const float w = img_max.x - img_min.x;
+    const float h = img_max.y - img_min.y;
+    if (w < 8.F || h < 8.F || points.empty()) return;
+    draw->PushClipRect(img_min, img_max, true);
+    for (const auto& point : points) {
+        const ImVec2 p{img_min.x + point.u * w, img_min.y + point.v * h};
+        const float radius = std::clamp(point.scale * w * 0.55F, 1.6F, 6.F);
+        draw->AddCircle(p, radius, colour, 7, 1.1F);
+    }
+    draw->PopClipRect();
+}
+
+void draw_live_matches(
+    ImDrawList* draw, const std::vector<aetherscan::sfm::AlignLiveMatch>& matches,
+    const ImVec2 a_min, const ImVec2 a_max, const ImVec2 b_min,
+    const ImVec2 b_max) {
+    const float aw = a_max.x - a_min.x;
+    const float ah = a_max.y - a_min.y;
+    const float bw = b_max.x - b_min.x;
+    const float bh = b_max.y - b_min.y;
+    if (aw < 8.F || ah < 8.F || bw < 8.F || bh < 8.F || matches.empty()) return;
+    const ImU32 line = theme::u32(theme::accent, 0.42F);
+    const ImU32 dot = theme::u32(theme::accent, 0.9F);
+    for (const auto& match : matches) {
+        const ImVec2 p0{a_min.x + match.u0 * aw, a_min.y + match.v0 * ah};
+        const ImVec2 p1{b_min.x + match.u1 * bw, b_min.y + match.v1 * bh};
+        draw->AddLine(p0, p1, line, 1.1F);
+        draw->AddCircleFilled(p0, 2.2F, dot);
+        draw->AddCircleFilled(p1, 2.2F, dot);
+    }
+}
+
 void fit_image_rect(
     const ImVec2 canvas_min, const ImVec2 canvas_max, const float img_w,
     const float img_h, const float zoom, const ImVec2 pan, ImVec2& out_min,
@@ -466,7 +501,7 @@ void ImageQaSession::publish_gt(const aetherscan::io::RgbImage& image) {
 void ImageQaSession::remember_gt(
     const std::filesystem::path::string_type& key,
     const aetherscan::io::RgbImage& image) {
-    constexpr std::size_t k_cached_captures = 3;
+    constexpr std::size_t k_cached_captures = 8;
     if (image.width == 0 || image.height == 0 || image.pixels.empty()) return;
     gt_cache_[key] = image;
     gt_cache_order_.push_back(key);
@@ -662,14 +697,29 @@ void draw_image_qa(
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg));
     session.poll();
+    if (input.pair_session != nullptr) input.pair_session->poll();
 
     const SparseScene empty_scene;
     const SparseScene& scene = input.scene ? *input.scene : empty_scene;
+    const aetherscan::sfm::AlignLiveFrame* live = input.live;
+    const bool live_features =
+        live != nullptr && live->kind == aetherscan::sfm::AlignLiveKind::features;
+    const bool live_matching =
+        live != nullptr && live->kind == aetherscan::sfm::AlignLiveKind::matching;
     const int count = image_qa_count(state, scene);
     if (state.selected < 0 && count > 0) state.selected = 0;
     if (state.selected >= count) state.selected = count > 0 ? count - 1 : -1;
     const QaItem item = item_at(state, scene, state.selected);
-    if (!item.path.empty()) session.request_gt(state.selected, item.path);
+    const std::filesystem::path live_a =
+        live_features || live_matching ? live->path_a : std::filesystem::path{};
+    if (!live_a.empty())
+        session.request_gt(
+            live->index_a >= 0 ? live->index_a : state.selected, live_a);
+    else if (!item.path.empty())
+        session.request_gt(state.selected, item.path);
+    if (live_matching && input.pair_session != nullptr && !live->path_b.empty())
+        input.pair_session->request_gt(
+            live->index_b >= 0 ? live->index_b : 0, live->path_b);
 
     const ImVec2 toolbar_max{max.x, min.y + k_toolbar_h};
     draw->AddRectFilled(
@@ -688,32 +738,52 @@ void draw_image_qa(
         const char* tooltip;
     };
     const bool compare_ok = input.has_model || input.render_live;
-    const ModeItem modes[] = {
-        {"##qa_photo", icons::Icon::photo, tr("Photo"), ImageQaMode::photo, true,
-         tr("Capture image")},
-        {"##qa_feat", icons::Icon::features, tr("Features"), ImageQaMode::features,
-         true, tr("Detected keypoints and triangulated tracks")},
-        {"##qa_cmp", icons::Icon::compare, tr("Compare"), ImageQaMode::compare,
-         true, tr("Slide to compare 3DGS against the training view")},
-        {"##qa_err", icons::Icon::heatmap, tr("Error"), ImageQaMode::error, true,
-         tr("Per-pixel photometric error map")},
-    };
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {4.F, 0.F});
-    for (const ModeItem& mode : modes) {
-        if (mode_chip(
-                mode.id, mode.icon, mode.label, state.mode == mode.mode,
-                mode.enabled)) {
-            if (state.mode != mode.mode) {
-                state.mode = mode.mode;
-                if (image_qa_needs_render(state.mode))
-                    state.metrics_dirty = true;
-            }
+    const bool live_align = live_features || live_matching;
+    if (live_align) {
+        ImFont* small = theme::small_font();
+        char status[160];
+        if (live_matching) {
+            std::snprintf(
+                status, sizeof(status), "%s  ·  %u %s",
+                tr("Matching views"), live->total_matches, tr("inliers"));
+        } else {
+            std::snprintf(
+                status, sizeof(status), "%s  ·  %u %s",
+                tr("Extracting features"), live->total_keypoints_a,
+                tr("keypoints"));
         }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
-            ImGui::SetTooltip("%s", mode.tooltip);
-        ImGui::SameLine();
+        draw->AddText(
+            small, small->FontSize, {min.x + 14.F, min.y + 16.F},
+            theme::u32(theme::accent), status);
+    } else {
+        const ModeItem modes[] = {
+            {"##qa_photo", icons::Icon::photo, tr("Photo"), ImageQaMode::photo,
+             true, tr("Capture image")},
+            {"##qa_feat", icons::Icon::features, tr("Features"),
+             ImageQaMode::features, true,
+             tr("Detected keypoints and triangulated tracks")},
+            {"##qa_cmp", icons::Icon::compare, tr("Compare"), ImageQaMode::compare,
+             true, tr("Slide to compare 3DGS against the training view")},
+            {"##qa_err", icons::Icon::heatmap, tr("Error"), ImageQaMode::error,
+             true, tr("Per-pixel photometric error map")},
+        };
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {4.F, 0.F});
+        for (const ModeItem& mode : modes) {
+            if (mode_chip(
+                    mode.id, mode.icon, mode.label, state.mode == mode.mode,
+                    mode.enabled)) {
+                if (state.mode != mode.mode) {
+                    state.mode = mode.mode;
+                    if (image_qa_needs_render(state.mode))
+                        state.metrics_dirty = true;
+                }
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("%s", mode.tooltip);
+            ImGui::SameLine();
+        }
+        ImGui::PopStyleVar();
     }
-    ImGui::PopStyleVar();
 
     const ImVec2 nav_size{28.F, 28.F};
     char index_label[32];
@@ -796,7 +866,7 @@ void draw_image_qa(
             img_max);
     }
 
-    const bool compare = state.mode == ImageQaMode::compare;
+    const bool compare = !live_align && state.mode == ImageQaMode::compare;
     const bool show_render = compare && input.has_render && has_gt;
     const float image_span = img_max.x - img_min.x;
     const float wipe_x =
@@ -848,7 +918,61 @@ void draw_image_qa(
     }
 
     draw->PushClipRect(canvas_min, canvas_max, true);
-    if (count <= 0) {
+    if (live_matching) {
+        const float gap = 8.F;
+        const float mid = (canvas_min.x + canvas_max.x) * 0.5F;
+        const ImVec2 left_max{mid - gap * 0.5F, canvas_max.y};
+        const ImVec2 right_min{mid + gap * 0.5F, canvas_min.y};
+        const bool has_b =
+            input.pair_session != nullptr && input.pair_session->has_gt();
+        ImVec2 a_min{};
+        ImVec2 a_max{};
+        ImVec2 b_min{};
+        ImVec2 b_max{};
+        const float aw = has_gt ? static_cast<float>(session.gt_width()) : 4.F;
+        const float ah = has_gt ? static_cast<float>(session.gt_height()) : 3.F;
+        const float bw = has_b
+            ? static_cast<float>(input.pair_session->gt_width())
+            : 4.F;
+        const float bh = has_b
+            ? static_cast<float>(input.pair_session->gt_height())
+            : 3.F;
+        fit_image_rect(
+            canvas_min, left_max, aw, ah, state.zoom, state.pan, a_min, a_max);
+        fit_image_rect(
+            right_min, canvas_max, bw, bh, state.zoom, state.pan, b_min, b_max);
+        if (has_gt) draw->AddImage(session.gt_id(), a_min, a_max);
+        else
+            draw_empty(
+                draw, canvas_min, left_max, tr("Loading capture…"),
+                tr("Reading the selected image"));
+        if (has_b) draw->AddImage(input.pair_session->gt_id(), b_min, b_max);
+        else
+            draw_empty(
+                draw, right_min, canvas_max, tr("Loading pair…"),
+                tr("Reading the matched image"));
+        if (has_gt && has_b)
+            draw_live_matches(draw, live->matches, a_min, a_max, b_min, b_max);
+        if (has_gt)
+            draw_live_keypoints(
+                draw, live->keypoints_a, a_min, a_max,
+                theme::u32(theme::warning, 0.7F));
+        if (has_b)
+            draw_live_keypoints(
+                draw, live->keypoints_b, b_min, b_max,
+                theme::u32(theme::warning, 0.7F));
+        char pair_legend[192];
+        std::snprintf(
+            pair_legend, sizeof(pair_legend),
+            "%s  ·  %u %s",
+            live->path_b.empty()
+                ? ""
+                : live->path_b.filename().string().c_str(),
+            live->total_matches, tr("inliers"));
+        draw->AddText(
+            {canvas_min.x + 16.F, canvas_max.y - 22.F},
+            theme::u32(theme::text_muted), pair_legend);
+    } else if (count <= 0 && !live_features) {
         draw_empty(
             draw, canvas_min, canvas_max, tr("No images to inspect"),
             tr("Select an image folder or align photos to open the 2D viewer"));
@@ -862,7 +986,7 @@ void draw_image_qa(
             draw, canvas_min, canvas_max, tr("Capture unavailable"),
             item.path.empty() ? tr("This view has no image path")
                               : tr("Could not decode the selected file"));
-    } else if (state.mode == ImageQaMode::error) {
+    } else if (!live_align && state.mode == ImageQaMode::error) {
         const bool error_current =
             session.has_error() && session.loaded_view() == state.selected &&
             session.render_view() == state.selected;
@@ -923,12 +1047,25 @@ void draw_image_qa(
                 draw, canvas_min, canvas_max, tr("Waiting for the live splat…"),
                 tr("The renderer is snapping to this training camera"));
         }
-        if (state.mode == ImageQaMode::features && item.pose)
+        if (live_features)
+            draw_live_keypoints(
+                draw, live->keypoints_a, img_min, img_max,
+                theme::u32(theme::warning, 0.85F));
+        else if (state.mode == ImageQaMode::features && item.pose)
             draw_features(draw, *item.pose, img_min, img_max, state);
     }
     draw->PopClipRect();
 
-    if (has_gt && state.mode == ImageQaMode::features && item.pose) {
+    if (live_features && has_gt) {
+        char legend[128];
+        std::snprintf(
+            legend, sizeof(legend), "%u %s", live->total_keypoints_a,
+            tr("keypoints"));
+        draw->AddText(
+            {canvas_min.x + 16.F, canvas_max.y - 22.F},
+            theme::u32(theme::text_muted), legend);
+    } else if (!live_align && has_gt && state.mode == ImageQaMode::features &&
+               item.pose) {
         char legend[128];
         std::snprintf(
             legend, sizeof(legend),
@@ -944,21 +1081,22 @@ void draw_image_qa(
                 input.external_alignment
                     ? tr("No triangulated keypoints in this imported alignment")
                     : tr("No keypoints in this reconstruction — re-align to inspect features"));
-    } else if (state.mode == ImageQaMode::features && !item.pose &&
-               input.external_alignment) {
+    } else if (!live_align && state.mode == ImageQaMode::features &&
+               !item.pose && input.external_alignment) {
         draw->AddText(
             {canvas_min.x + 16.F, canvas_max.y - 22.F},
             theme::u32(theme::warning),
             tr("Loading imported cameras for the feature overlay…"));
     }
 
-    if (image_qa_needs_render(state.mode) && session.metrics_busy() &&
-        !session.metrics().valid) {
+    if (!live_align && image_qa_needs_render(state.mode) &&
+        session.metrics_busy() && !session.metrics().valid) {
         ImVec2 card{canvas_min.x + 14.F, canvas_max.y - 58.F};
         draw_metric_card(draw, card, "PSNR", "…", theme::text_muted);
         draw_metric_card(draw, card, "SSIM", "…", theme::text_muted);
         draw_metric_card(draw, card, "MAE", "…", theme::text_muted);
-    } else if (image_qa_needs_render(state.mode) && session.metrics().valid) {
+    } else if (!live_align && image_qa_needs_render(state.mode) &&
+               session.metrics().valid) {
         const ImageQaMetrics& m = session.metrics();
         ImVec2 card{canvas_min.x + 14.F, canvas_max.y - 58.F};
         char psnr[32];

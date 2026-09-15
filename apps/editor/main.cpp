@@ -144,6 +144,7 @@ int main(const int argc, char** argv) {
         editor::poll_scene_load(app);
         editor::poll_mesh_load(app);
         editor::poll_alignment_preview(app);
+        editor::poll_align_live(app);
         editor::poll_camera_photos(app);
 
         if (app.smoke_mode) {

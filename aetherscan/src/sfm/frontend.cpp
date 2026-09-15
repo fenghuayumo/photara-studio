@@ -9,6 +9,7 @@
 #include "sfm/tracks.hpp"
 #include "sfm/camera_selection.hpp"
 #include <cctype>
+#include "sfm/align_live.hpp"
 #include "sfm/submap_recovery.hpp"
 
 #include <algorithm>
@@ -975,12 +976,61 @@ Image make_image_from_features(
     return image;
 }
 
+std::vector<AlignLiveIndexMatch> live_matches_from_raw(
+    const std::vector<features::FeatureMatch>& matches) {
+    std::vector<AlignLiveIndexMatch> out;
+    out.reserve(matches.size());
+    for (const features::FeatureMatch& match : matches)
+        out.push_back({match.query, match.train, match.score});
+    return out;
+}
+
+std::vector<AlignLiveIndexMatch> live_matches_from_inliers(
+    const std::vector<FeatureMatch>& matches) {
+    std::vector<AlignLiveIndexMatch> out;
+    out.reserve(matches.size());
+    for (const FeatureMatch& match : matches)
+        out.push_back({match.query, match.train, 1.F});
+    return out;
+}
+
+void emit_live_features(
+    AlignLivePreview* live, const std::size_t index,
+    const std::filesystem::path& path, const features::FeatureSet& features) {
+    if (live == nullptr) return;
+    live->publish_features(index, path, features);
+}
+
+void emit_live_raw_matches(
+    AlignLivePreview* live, const Scene& scene, const Index id1,
+    const Index id2, const std::vector<features::FeatureMatch>& matches) {
+    if (live == nullptr || matches.empty()) return;
+    if (id1 >= scene.images.size() || id2 >= scene.images.size()) return;
+    const auto packed = live_matches_from_raw(matches);
+    live->publish_matches(
+        id1, scene.images[id1].path, scene.images[id1].features, id2,
+        scene.images[id2].path, scene.images[id2].features, packed);
+}
+
+void emit_live_inliers(
+    AlignLivePreview* live, const Scene& scene, const ImagePair& pair) {
+    if (live == nullptr || pair.matches.empty()) return;
+    if (pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size())
+        return;
+    const auto packed = live_matches_from_inliers(pair.matches);
+    live->publish_matches(
+        pair.id1, scene.images[pair.id1].path, scene.images[pair.id1].features,
+        pair.id2, scene.images[pair.id2].path, scene.images[pair.id2].features,
+        packed);
+}
+
 // Owner-thread extract coordinator: main thread owns CUDA/ORT context while
 // worker threads overlap CPU post-processing (grid selection / Image packing).
 void extract_features_siftgpu_coordinator(
     Scene& scene, const std::vector<std::filesystem::path>& image_paths,
     features::FeatureExtractor& extractor, const unsigned max_features,
-    core::ProgressReporter& progress, const bool compress_u8 = false) {
+    core::ProgressReporter& progress, const bool compress_u8 = false,
+    AlignLivePreview* live = nullptr) {
     const std::size_t count = image_paths.size();
     scene.images.resize(count);
     if (count == 0) return;
@@ -1029,6 +1079,8 @@ void extract_features_siftgpu_coordinator(
                     if (compress_u8) features.compress_descriptors_u8();
                     scene.images[index] = make_image_from_features(
                         static_cast<Index>(index), path, std::move(features));
+                    emit_live_features(
+                        live, index, path, scene.images[index].features);
                     progress.advance();
                 });
 
@@ -1051,6 +1103,8 @@ void extract_features_siftgpu_coordinator(
                     if (compress_u8) features.compress_descriptors_u8();
                     scene.images[index] = make_image_from_features(
                         static_cast<Index>(index), path, std::move(features));
+                    emit_live_features(
+                        live, index, path, scene.images[index].features);
                     progress.advance();
                 });
             if ((index + 1) % 8 == 0) post_tasks.wait();
@@ -1058,6 +1112,7 @@ void extract_features_siftgpu_coordinator(
     }
 
     post_tasks.wait();
+    if (live != nullptr) live->flush();
 }
 
 struct GeometryVerifyResult {
@@ -1265,7 +1320,7 @@ void match_and_verify_siftgpu_coordinator(
     const unsigned worker_threads, std::vector<RawPairMatches>& raw_pairs,
     std::vector<PairDiagnostics>& diagnostics,
     std::vector<ImagePair>& pair_slots, core::ProgressReporter& match_progress,
-    const bool verify_geometry = true) {
+    const bool verify_geometry = true, AlignLivePreview* live = nullptr) {
     raw_pairs.resize(candidates.size());
     diagnostics.assign(candidates.size(), {});
     pair_slots.assign(candidates.size(), ImagePair{});
@@ -1295,6 +1350,8 @@ void match_and_verify_siftgpu_coordinator(
         raw.id2 = candidate.id2;
         raw.matches = std::move(matched[pair_index - begin].matches);
         if (!verify_geometry) {
+            emit_live_raw_matches(
+                live, scene, candidate.id1, candidate.id2, raw.matches);
             raw_pairs[pair_index] = std::move(raw);
             match_progress.advance();
             continue;
@@ -1323,7 +1380,10 @@ void match_and_verify_siftgpu_coordinator(
                         scene, candidate, raw_pairs[pair_index].matches,
                         options.relative);
                     diagnostics[pair_index] = verified.diagnostics;
-                    if (verified.pair) pair_slots[pair_index] = *verified.pair;
+                    if (verified.pair) {
+                        pair_slots[pair_index] = *verified.pair;
+                        emit_live_inliers(live, scene, pair_slots[pair_index]);
+                    }
                     match_progress.advance();
                 } catch (...) {
                     release_slot();
@@ -1334,6 +1394,7 @@ void match_and_verify_siftgpu_coordinator(
       }
     }
     geometry_tasks.wait();
+    if (live != nullptr) live->flush();
 }
 
 std::vector<PairCandidate> build_pair_list(
@@ -1609,7 +1670,8 @@ void match_and_verify_lightglue(
     std::vector<RawPairMatches>& raw_pairs,
     std::vector<PairDiagnostics>& diagnostics,
     std::vector<ImagePair>& pair_slots,
-    core::ProgressReporter& match_progress) {
+    core::ProgressReporter& match_progress,
+    AlignLivePreview* live = nullptr) {
     raw_pairs.resize(candidates.size());
     diagnostics.assign(candidates.size(), {});
     pair_slots.assign(candidates.size(), ImagePair{});
@@ -1668,6 +1730,8 @@ void match_and_verify_lightglue(
                  merge_lightglue_keypoint(features1, kp1.x, kp1.y),
                  match.score});
         }
+        emit_live_raw_matches(
+            live, scene, candidate.id1, candidate.id2, raw.matches);
         match_progress.advance();
     }
     match_progress.finish();
@@ -1688,10 +1752,14 @@ void match_and_verify_lightglue(
             scene, candidate, raw_pairs[pair_index].matches,
             options.relative);
         diagnostics[pair_index] = verified.diagnostics;
-        if (verified.pair) pair_slots[pair_index] = *verified.pair;
+        if (verified.pair) {
+            pair_slots[pair_index] = *verified.pair;
+            emit_live_inliers(live, scene, pair_slots[pair_index]);
+        }
         geometry_progress.advance();
     }
     geometry_progress.finish();
+    if (live != nullptr) live->flush();
     (void)worker_threads;
 }
 
@@ -1837,7 +1905,8 @@ FrontEndResult run_frontend(
                 "lightglue match pairs", candidates.size());
             match_and_verify_lightglue(
                 scene, candidates, pipeline, runtime_options, threads,
-                raw_pairs, diagnostics, pair_slots, match_progress);
+                raw_pairs, diagnostics, pair_slots, match_progress,
+                runtime_options.live_preview);
             scene.pairs.clear();
             scene.pairs.reserve(pair_slots.size());
             for (ImagePair& pair : pair_slots) {
@@ -1942,7 +2011,8 @@ FrontEndResult run_frontend(
         if (extractor->info().thread_affine) {
             extract_features_siftgpu_coordinator(
                 scene, image_paths, *extractor, options.max_features, progress,
-                runtime_options.compress_descriptors_u8);
+                runtime_options.compress_descriptors_u8,
+                runtime_options.live_preview);
         } else {
             const unsigned extraction_threads = threads;
             std::vector<std::unique_ptr<features::FeatureExtractor>> workers(
@@ -1965,9 +2035,14 @@ FrontEndResult run_frontend(
                     scene.images[i] = make_image_from_features(
                         static_cast<Index>(i), image_paths[i],
                         std::move(features));
+                    emit_live_features(
+                        runtime_options.live_preview, i, image_paths[i],
+                        scene.images[i].features);
                     progress.advance();
                 });
         }
+        if (runtime_options.live_preview != nullptr)
+            runtime_options.live_preview->flush();
 
         initialize_cameras(
             scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
@@ -2043,7 +2118,8 @@ FrontEndResult run_frontend(
                 candidates.size());
             match_and_verify_siftgpu_coordinator(
                 scene, candidates, *matcher, options, threads, raw_pairs,
-                diagnostics, pair_slots, match_progress, verify_now);
+                diagnostics, pair_slots, match_progress, verify_now,
+                runtime_options.live_preview);
             match_progress.finish();
 
             if (runtime_options.matcher == "hybrid_lightglue") {
@@ -2102,7 +2178,8 @@ FrontEndResult run_frontend(
                         scene, rescue_candidates, *rescue_matcher,
                         rescue_options,
                         threads, rescue_raw_pairs, rescue_diagnostics,
-                        rescue_pair_slots, rescue_progress);
+                        rescue_pair_slots, rescue_progress, true,
+                        runtime_options.live_preview);
                     rescue_progress.finish();
 
                     std::size_t rescued = 0;
@@ -2216,10 +2293,16 @@ FrontEndResult run_frontend(
                 GeometryVerifyResult verified = verify_pair_geometry(
                     scene, cand, raw_pairs[ci].matches, options.relative);
                 diagnostics[ci] = verified.diagnostics;
-                if (verified.pair) pairs[ci] = std::move(*verified.pair);
+                if (verified.pair) {
+                    pairs[ci] = std::move(*verified.pair);
+                    emit_live_inliers(
+                        runtime_options.live_preview, scene, pairs[ci]);
+                }
                 geometry_progress.advance();
             });
         geometry_progress.finish();
+        if (runtime_options.live_preview != nullptr)
+            runtime_options.live_preview->flush();
 
         scene.pairs.reserve(pairs.size());
         for (auto& pair : pairs) {
@@ -2448,7 +2531,8 @@ FrontEndResult run_frontend(
             match_and_verify_siftgpu_coordinator(
                 scene, rescue_candidates, *rescue_matcher, rescue_options,
                 threads, rescue_raw_pairs, rescue_diagnostics,
-                rescue_pair_slots, rescue_progress);
+                rescue_pair_slots, rescue_progress, true,
+                runtime_options.live_preview);
             rescue_progress.finish();
 
             unsigned rescued_pairs = 0, strengthened_pairs = 0;

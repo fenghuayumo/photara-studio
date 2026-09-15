@@ -8,6 +8,7 @@
 #include "viewport_gizmo.hpp"
 #include "vulkan_backend.hpp"
 
+#include "sfm/align_live.hpp"
 #include "splat/visualize.hpp"
 
 #include "imgui.h"
@@ -116,6 +117,9 @@ struct App {
     ViewportWorkspace workspace{ViewportWorkspace::scene_3d};
     ImageQaState image_qa;
     ImageQaSession image_qa_session;
+    ImageQaSession align_match_session;
+    aetherscan::sfm::AlignLiveFrame align_live;
+    bool alignment_workspace_user_override{};
     unsigned qa_preview_view{~0U};
     std::chrono::steady_clock::time_point qa_metrics_after{};
     std::uint64_t qa_camera_timeline{};
@@ -238,6 +242,7 @@ void ensure_dataset_scene_loaded(App& app);
 void poll_scene_load(App& app);
 void poll_mesh_load(App& app);
 void poll_alignment_preview(App& app);
+void poll_align_live(App& app);
 void poll_camera_photos(App& app);
 
 void stop_splat_view(App& app);
@@ -250,7 +255,8 @@ void start_export_sfm(App& app);
 void on_job_finished(App& app);
 
 void set_visualization_mode(App& app, VisualizationMode mode);
-void set_viewport_workspace(App& app, ViewportWorkspace workspace);
+void set_viewport_workspace(
+    App& app, ViewportWorkspace workspace, bool user_driven = true);
 void set_camera_overlays(ViewOptions& options, bool visible);
 void show_mesh_view(App& app, bool frame_when_ready);
 void publish_preview_vis(App& app);

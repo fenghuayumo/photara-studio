@@ -2064,6 +2064,44 @@ void poll_scene_load(App& app) {
         theme::success);
 }
 
+void poll_align_live(App& app) {
+    const bool aligning = alignment_job_running(app);
+    if (!aligning) return;
+
+    aetherscan::sfm::AlignLiveFrame frame;
+    const bool have_live =
+        aetherscan::sfm::load_align_live_frame(app.layout.align_live, frame);
+    if (have_live &&
+        (frame.revision != app.align_live.revision ||
+         frame.kind != app.align_live.kind ||
+         frame.index_a != app.align_live.index_a ||
+         frame.index_b != app.align_live.index_b)) {
+        app.align_live = std::move(frame);
+        refresh_image_qa_folder(
+            app.image_qa, reconstruction_images_path(app));
+        const int count = image_qa_count(app.image_qa, app.scene);
+        if (app.align_live.index_a >= 0)
+            select_image_qa_view(app.image_qa, app.align_live.index_a, count);
+        if (app.align_live.kind == aetherscan::sfm::AlignLiveKind::features)
+            app.image_qa.mode = ImageQaMode::features;
+    }
+
+    if (app.alignment_workspace_user_override) return;
+    const Stage stage = app.monitor.stage();
+    const bool live_2d =
+        app.align_live.kind == aetherscan::sfm::AlignLiveKind::features ||
+        app.align_live.kind == aetherscan::sfm::AlignLiveKind::matching;
+    refresh_image_qa_folder(app.image_qa, reconstruction_images_path(app));
+    const int count = image_qa_count(app.image_qa, app.scene);
+    if ((stage == Stage::features || stage == Stage::matching) &&
+        (live_2d || count > 0))
+        set_viewport_workspace(app, ViewportWorkspace::image_2d, false);
+    else if (
+        stage == Stage::tracks || stage == Stage::mapping ||
+        stage == Stage::exporting)
+        set_viewport_workspace(app, ViewportWorkspace::scene_3d, false);
+}
+
 void poll_alignment_preview(App& app) {
     const bool aligning = app.job.running() && app.active_job == JobKind::align;
     if (app.alignment_preview_load.valid()) {
@@ -2170,6 +2208,11 @@ void start_align(App& app) {
         preview_path += ".preview.asfm";
         std::error_code preview_error;
         std::filesystem::remove(preview_path, preview_error);
+        std::error_code live_error;
+        std::filesystem::remove(app.layout.align_live, live_error);
+        app.align_live = {};
+        app.align_match_session.clear();
+        app.alignment_workspace_user_override = false;
         app.alignment_preview_stamp = {};
         if (preview_error) {
             app.alignment_preview_stamp = std::filesystem::last_write_time(preview_path, preview_error);
@@ -2832,6 +2875,9 @@ void on_job_finished(App& app) {
     }
 
     if (kind == JobKind::align) {
+        app.align_live = {};
+        app.align_match_session.clear();
+        app.alignment_workspace_user_override = false;
         app.suppress_scene_auto_load = false;
         if (app.has_sparse) {
             request_ascan_scene_load(app);

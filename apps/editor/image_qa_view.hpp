@@ -3,6 +3,8 @@
 #include "sparse_view.hpp"
 #include "vulkan_backend.hpp"
 
+#include "sfm/align_live.hpp"
+
 #include "imgui.h"
 
 #include <cstdint>
@@ -139,6 +141,8 @@ struct ImageQaDrawInput {
     bool render_live{};
     bool has_model{};
     bool external_alignment{};
+    const aetherscan::sfm::AlignLiveFrame* live{};
+    ImageQaSession* pair_session{};
 };
 
 void draw_image_qa(

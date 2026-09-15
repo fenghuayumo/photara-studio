@@ -227,6 +227,7 @@ if(AETHERSCAN_ENABLE_FEATURES)
         src/sfm/asfm.cpp
         src/sfm/appearance.cpp
         src/sfm/preview.cpp
+        src/sfm/align_live.cpp
         src/project/archive.cpp
         src/project/document.cpp)
 

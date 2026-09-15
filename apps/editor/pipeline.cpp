@@ -1030,6 +1030,8 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
                 temp / "AetherScan" / runtime_cache_key(layout.project_file);
     }
     layout.working_sfm = runtime_dir / "sfm.bin";
+    layout.align_live = layout.working_sfm;
+    layout.align_live += ".live";
     layout.working_subject_bounds = runtime_dir / "subject_bounds.txt";
     layout.working_splat = runtime_dir / "splat.ply";
     layout.working_mesh = runtime_dir / "mesh.ply";

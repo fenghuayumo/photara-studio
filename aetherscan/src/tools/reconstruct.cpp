@@ -3,6 +3,7 @@
 #include "sfm/appearance.hpp"
 #include "sfm/asfm.hpp"
 #include "sfm/preview.hpp"
+#include "sfm/align_live.hpp"
 #include "sfm/export_mvs.hpp"
 #include "sfm/export_colmap.hpp"
 #include "project/archive.hpp"
@@ -3564,6 +3565,13 @@ int main(int argc, char** argv) {
         // lightglue_end2end uses a temporary SiftGPU extract for BoW only.
         config.frontend.augment_sequential_with_retrieval = true;
         config.frontend.checkpoint.directory = cli.cache_dir;
+        aetherscan::sfm::AlignLivePreview live_preview;
+        if (!cli.working_sfm.empty()) {
+            auto live_path = cli.working_sfm;
+            live_path += ".live";
+            live_preview.set_path(live_path);
+            config.frontend.live_preview = &live_preview;
+        }
 
         const auto started = std::chrono::steady_clock::now();
         summary = aetherscan::sfm::reconstruct(scene, files, config);
