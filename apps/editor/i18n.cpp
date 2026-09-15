@@ -479,11 +479,27 @@ constexpr Entry k_entries[] = {
     {"Coarse-to-fine resolution", "由粗到细分辨率", "粗い解像度から細かく", "거친 해상도에서 세밀하게"},
     {"Foreground mask training", "前景蒙版训练", "前景マスク学習", "전경 마스크 학습"},
     {"Normal field", "法向场", "法線場", "법선 필드"},
-    {"GaussianWrapping's learned normal field.\n"
+    {"3DGS's learned normal field.\n"
      "Off (default) trains the GGGS path.",
-     "GaussianWrapping 学习的法向场。\n关闭（默认）走 GGGS 路径。",
-     "GaussianWrapping の学習法線場。\nオフ（既定）は GGGS 経路で学習。",
-     "GaussianWrapping의 학습 법선 필드.\n끄면(기본) GGGS 경로로 학습합니다."},
+     "3DGS 学习的法向场。\n关闭（默认）走 GGGS 路径。",
+     "3DGS の学習法線場。\nオフ（既定）は GGGS 経路で学習。",
+     "3DGS의 학습 법선 필드.\n끄면(기본) GGGS 경로로 학습합니다."},
+    {"PPISP colour correction", "PPISP 色彩校正", "PPISP 色補正", "PPISP 색 보정"},
+    {"Per-view exposure and white-balance correction for video\n"
+     "captures with auto exposure. Trained only; never baked into\n"
+     "the exported model.",
+     "针对自动曝光视频采集的逐视图曝光与白平衡校正。\n仅在训练中使用，不会烘焙进导出模型。",
+     "自動露出の動画撮影向けのビューごとの露出・ホワイトバランス補正。\n学習時のみ使用し、書き出しモデルには焼き込みません。",
+     "자동 노출 영상 촬영을 위한 뷰별 노출 및 화이트밸런스 보정.\n학습에만 쓰이며 내보낸 모델에는 굽지 않습니다."},
+    {"Bilateral grid colour correction",
+     "双边网格色彩校正",
+     "バイラテラルグリッド色補正",
+     "양방향 그리드 색 보정"},
+    {"Spatially varying affine colour correction (lens shading and\n"
+     "vignetting). Pairs with PPISP, which owns the global exposure.",
+     "空间变化的仿射色彩校正（镜头阴影与暗角）。\n与 PPISP 搭配使用，全局曝光由 PPISP 负责。",
+     "空間変化するアフィン色補正（レンズシェーディングと周辺減光）。\nグローバル露出は PPISP が担当し、併用します。",
+     "공간적으로 변하는 아핀 색 보정(렌즈 셰이딩 및 비네팅).\n전역 노출은 PPISP가 담당하며 함께 사용합니다."},
     {"Save the trained Gaussians. Choose PLY, SOG, SPZ, or GLB\n"
      "and the spherical-harmonics degree.",
      "保存训练得到的高斯。可选 PLY、SOG、SPZ 或 GLB，以及球谐阶数。",
@@ -512,10 +528,10 @@ constexpr Entry k_entries[] = {
     {"Delaunay", "Delaunay", "ドロネー", "들로네"},
     {"PAM", "PAM", "PAM", "PAM"},
     {"How depth is fused into triangles.\n"
-     "PAM is GaussianWrapping occupancy meshing.",
-     "深度如何融合成三角形。\nPAM 是 GaussianWrapping 占用网格。",
-     "深度を三角形へ融合する方法。\nPAM は GaussianWrapping の占有メッシュ。",
-     "깊이를 삼각형으로 융합하는 방식.\nPAM은 GaussianWrapping 점유 메시입니다."},
+     "PAM is 3DGS occupancy meshing.",
+     "深度如何融合成三角形。\nPAM 是 3DGS 占用网格。",
+     "深度を三角形へ融合する方法。\nPAM は 3DGS の占有メッシュ。",
+     "깊이를 삼각형으로 융합하는 방식.\nPAM은 3DGS 점유 메시입니다."},
     {"How MVS depth maps are fused into triangles.",
      "MVS 深度图如何融合成三角形。",
      "MVS 深度マップを三角形へ融合する方法。",

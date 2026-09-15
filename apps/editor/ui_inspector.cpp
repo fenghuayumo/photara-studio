@@ -339,10 +339,10 @@ Action draw_inspector(App& app) {
         if (ImGui::Combo("##capture", &capture_index, capture, 2))
             app.settings.scene_mode = capture_index == 1;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
+            ImGui::SetTooltip("%s", tr(
                 "Object uses the reconstruction region as Splat SubjectBounds "
                 "(focus region).\n"
-                "Scene trains unbounded and ignores the box.");
+                "Scene trains unbounded and ignores the box."));
         theme::caption("Densification strategy");
         ImGui::SetNextItemWidth(-1.F);
         const char* strategies[] = {
@@ -369,9 +369,9 @@ Action draw_inspector(App& app) {
         ImGui::Combo(
             "##sh_degree", &app.settings.sh_degree, sh_degrees, 4);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
+            ImGui::SetTooltip("%s", tr(
                 "Spherical-harmonic colour bands.\n"
-                "0 is diffuse only. 3 is the training default.");
+                "0 is diffuse only. 3 is the training default."));
         theme::caption("Max training resolution");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputInt(
@@ -384,33 +384,33 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox(tr("Foreground mask training"), &app.settings.use_mask);
         ImGui::Checkbox(tr("Normal field"), &app.settings.normal_field);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "GaussianWrapping's learned normal field.\n"
-                "Off (default) trains the GGGS path.");
+            ImGui::SetTooltip("%s", tr(
+                "3DGS's learned normal field.\n"
+                "Off (default) trains the GGGS path."));
         bool ppisp_enabled = app.settings.ppisp_layout != 0;
         if (ImGui::Checkbox(tr("PPISP colour correction"), &ppisp_enabled))
             app.settings.ppisp_layout = ppisp_enabled ? 1 : 0;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
+            ImGui::SetTooltip("%s", tr(
                 "Per-view exposure and white-balance correction for video\n"
                 "captures with auto exposure. Trained only; never baked into\n"
-                "the exported model.");
+                "the exported model."));
         ImGui::Checkbox(
             tr("Bilateral grid colour correction"),
             &app.settings.bilateral_grid);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
+            ImGui::SetTooltip("%s", tr(
                 "Spatially varying affine colour correction (lens shading and\n"
-                "vignetting). Pairs with PPISP, which owns the global exposure.");
+                "vignetting). Pairs with PPISP, which owns the global exposure."));
         ImGui::EndDisabled();
         if (theme::toolbar_button(
-                "Export Splat", {-1.F, 28.F},
+                tr("Export Splat"), {-1.F, 28.F},
                 !busy && can_export_model(app)))
             open_splat_export_panel(app);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
+            ImGui::SetTooltip("%s", tr(
                 "Save the trained Gaussians. Choose PLY, SOG, SPZ, or GLB\n"
-                "and the spherical-harmonics degree.");
+                "and the spherical-harmonics degree."));
         ImGui::Spacing();
     }
 
