@@ -1408,7 +1408,7 @@ GaussianModel Trainer::train(
                 options_.densify_use_error_map ? options_.densify_score_power : 1.F,
                 options_.densification_strategy == DensificationStrategy::adc_igs
                     ? options_.densify_screen_threshold : 0.F,
-                gradients.refine_weight);
+                gradients.refine_weight, static_cast<int>(view_index));
         }
         cuda_profiler.mark(CudaTrainingStage::densification_stats);
 

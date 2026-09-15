@@ -191,11 +191,11 @@ RefinementCounts AdcPlusStrategy::refine(
     std::size_t oversized_selected_count = 0;
     std::size_t growth_selected_count = 0;
     if (capacity != 0 && retained != 0) {
-        // A single contributing observation is insufficient evidence to
-        // replicate geometry. Keep its parent, but spend IGS growth/recycle
-        // budget on rows observed repeatedly within this refinement window.
+        // Repeated samples of one camera do not provide multi-view evidence.
+        // Require two distinct contributing cameras before IGS replication.
         const auto visible = options.densification_strategy == DensificationStrategy::adc_igs
-            ? retained_count.ge(2.F) : retained_count.gt(0.F);
+            ? stats.view_support.index_select(0, keep_indices).ge(2.F)
+            : retained_count.gt(0.F);
         auto growth_eligible = visible;
         const bool geometry_gated_growth =
             options.densification_strategy == DensificationStrategy::adc_igs &&

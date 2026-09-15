@@ -21,16 +21,17 @@
 int main(int argc, char** argv) {
     try {
         if (argc != 6 && argc != 7)
-            throw std::runtime_error("Usage: splat_quality_eval DATASET IMAGES MODEL OUTPUT_DIR SPLIT_EVERY [--visibility-audit]");
+            throw std::runtime_error("Usage: splat_quality_eval DATASET IMAGES MODEL OUTPUT_DIR SPLIT_EVERY [--visibility-audit|--prune-unobserved]");
         const bool visibility_audit = argc == 7 && std::string(argv[6]) == "--visibility-audit";
-        if (argc == 7 && !visibility_audit) throw std::runtime_error("Unknown evaluation mode");
+        const bool prune_unobserved = argc == 7 && std::string(argv[6]) == "--prune-unobserved";
+        if (argc == 7 && !visibility_audit && !prune_unobserved) throw std::runtime_error("Unknown evaluation mode");
         const unsigned split = std::stoul(argv[5]);
         if (split < 2) throw std::runtime_error("SPLIT_EVERY must be >= 2");
         aetherscan::splat::DatasetLoadRequest request;
         request.source = argv[1];
         request.image_directory = argv[2];
         const auto dataset = aetherscan::splat::load_splat_dataset(request);
-        const auto model = aetherscan::splat::load_gaussians(argv[3]);
+        auto model = aetherscan::splat::load_gaussians(argv[3]);
         const std::filesystem::path output(argv[4]);
         std::filesystem::create_directories(output);
         aetherscan::splat::TrainingOptions options;
@@ -38,7 +39,7 @@ int main(int argc, char** argv) {
         options.use_source_resolution = true;
         options.ignore_undistortion_border = true;
         options.progressive_resolution = false;
-        if (visibility_audit) {
+        if (visibility_audit || prune_unobserved) {
             std::vector<unsigned> observations(model.size(), 0);
             for (std::size_t i = 0; i < dataset.scene.views.size(); ++i) {
                 if (i % split == 0) continue;
@@ -61,6 +62,18 @@ int main(int argc, char** argv) {
             for (std::size_t i = 0; i < counts.size(); ++i)
                 audit << i << ',' << counts[i] << ',' << mass[i] << '\n';
             std::cout << "invisible=" << counts[0] << " opacity_sum=" << mass[0] << '\n';
+            if (prune_unobserved) {
+                std::vector<int> retained;
+                for (std::size_t g = 0; g < observations.size(); ++g)
+                    if (observations[g] != 0) retained.push_back(static_cast<int>(g));
+                if (retained.empty()) throw std::runtime_error("No observed Gaussians; refusing empty export");
+                const auto indices = tinytensor::Tensor::from_vector(
+                    retained, {retained.size()}, tinytensor::Device::CUDA);
+                for (auto* tensor : {&model.means, &model.log_scales, &model.quaternions,
+                         &model.opacity_logits, &model.sh, &model.normal_features, &model.filter_3d})
+                    if (tensor->is_valid()) *tensor = tensor->index_select(0, indices);
+                aetherscan::splat::save_gaussians_ply(model, output / "model_splat.ply");
+            }
             return 0;
         }
         std::ofstream csv(output / "metrics.csv");

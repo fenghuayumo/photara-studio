@@ -3342,6 +3342,7 @@ aetherscan::splat::detail::DensificationStats make_default_refine_stats() {
     stats.gradient = Tensor::from_vector(
         std::vector<float>{1.F, 10.F, 10.F, 0.1F}, {4}, gpu);
     stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.view_support = Tensor::full({4}, 2.F, gpu);
     stats.priority = Tensor::full({4}, 10.F, gpu);
     stats.max_screen_radius = Tensor::zeros({4}, gpu);
     return stats;
@@ -3474,6 +3475,7 @@ void test_igs_growth_budget() {
     auto stats = detail::make_densification_stats(4);
     stats.gradient = Tensor::full({4}, 1.F, gpu);
     stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.view_support = Tensor::full({4}, 2.F, gpu);
     stats.priority = Tensor::full({4}, 10.F, gpu);
     stats.max_screen_radius = Tensor::from_vector(
         std::vector<float>{0.5F,0.01F,0.01F,0.01F}, {4}, gpu);
@@ -3510,6 +3512,7 @@ void test_densification_cap_stops_igs_growth() {
     auto stats = detail::make_densification_stats(4);
     stats.gradient = Tensor::full({4}, 1.F, gpu);
     stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.view_support = Tensor::full({4}, 2.F, gpu);
     stats.max_screen_radius = Tensor::full({4}, 0.01F, gpu);
     TrainingOptions options;
     options.densification_strategy = DensificationStrategy::adc_igs;
@@ -3528,16 +3531,18 @@ void test_densification_cap_stops_igs_growth() {
     options.densification_cap = 8;
     stats = detail::make_densification_stats(4);
     stats.gradient = Tensor::full({4}, 1.F, gpu);
-    stats.count = Tensor::full({4}, 1.F, gpu);
+    stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.view_support = Tensor::full({4}, 1.F, gpu);
     stats.max_screen_radius = Tensor::full({4}, 0.01F, gpu);
     const auto single_view = densification::refine_gaussians(
         harness.model, stats, 700, 1.F, aetherscan::mvs::Vec3f::Zero(),
         options, random, harness.states());
     require(single_view.grown == 0 && single_view.pruned == 0 && harness.model.size() == 4,
-            "IGS must retain opaque single-observation parents without replicating them");
+            "IGS must retain opaque single-camera parents without replicating them");
     stats = detail::make_densification_stats(4);
     stats.gradient = Tensor::full({4}, 1.F, gpu);
     stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.view_support = Tensor::full({4}, 2.F, gpu);
     options.densify_geometry_gradient_threshold = 0.0025F;
     const auto resolved = densification::refine_gaussians(
         harness.model, stats, 800, 1.F, aetherscan::mvs::Vec3f::Zero(),
@@ -3547,6 +3552,7 @@ void test_densification_cap_stops_igs_growth() {
     stats = detail::make_densification_stats(4);
     stats.gradient = Tensor::full({4}, 1.F, gpu);
     stats.count = Tensor::full({4}, 10.F, gpu);
+    stats.view_support = Tensor::full({4}, 2.F, gpu);
     stats.geometry_gradient = Tensor::full({4}, 1.F, gpu);
     const auto unresolved = densification::refine_gaussians(
         harness.model, stats, 900, 1.F, aetherscan::mvs::Vec3f::Zero(),
@@ -3733,6 +3739,23 @@ void test_densify_mean_scores_and_oversize_weights() {
         std::vector<float>{1.F, 1.F}, {2}, gpu);
     const auto radii = tinytensor::Tensor::from_vector(
         std::vector<int>{1, 1}, {2}, gpu);
+    auto support_stats = detail::make_densification_stats(2);
+    const auto one_visible = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F}, {2}, gpu);
+    for (int repeat = 0; repeat < 3; ++repeat)
+        detail::accumulate_densification_stats(
+            visible, visible, radii, support_stats, 100, 100,
+            false, true, 1.F, 0.F, {}, 7);
+    require(support_stats.view_support.to_vector() ==
+                std::vector<float>({1.F, 1.F}),
+            "Repeated training camera must not qualify as multi-view support");
+    detail::accumulate_densification_stats(
+        visible, one_visible, radii, support_stats, 100, 100,
+        false, true, 1.F, 0.F, {}, 8);
+    require(support_stats.view_support.to_vector() ==
+                std::vector<float>({2.F, 1.F}) &&
+                support_stats.count.to_vector() == std::vector<float>({4.F, 3.F}),
+            "Only contributing distinct cameras qualify; score denominator stays per-step");
     for (const auto& observation : {std::vector<float>{0.F, 4.F},
                                     std::vector<float>{8.F, 4.F}}) {
         detail::accumulate_densification_stats(

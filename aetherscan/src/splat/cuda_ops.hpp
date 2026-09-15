@@ -46,6 +46,9 @@ struct DensificationStats {
     // Dense/ADC+: weighted priority. IGS: accumulated log2 screen oversize.
     tinytensor::Tensor priority;
     tinytensor::Tensor geometry_gradient;
+    // Distinct contributing camera support, saturated at two per window.
+    tinytensor::Tensor first_view;
+    tinytensor::Tensor view_support;
 };
 
 // Clear selected parent moments without temporary zero tensors or per-state scatters.
@@ -246,7 +249,8 @@ void accumulate_densification_stats(
     bool require_contribution_visibility,
     float step_score_power = 1.F,
     float oversize_screen_threshold = 0.F,
-    const tinytensor::Tensor& geometry_gradient = {});
+    const tinytensor::Tensor& geometry_gradient = {},
+    int view_index = -1);
 
 // Per-pixel nonnegative (1 - SSIM contrast-structure)^power, shape [H, W].
 tinytensor::Tensor compute_ssim_cs_error_map(
