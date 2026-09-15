@@ -2332,7 +2332,10 @@ bool can_export_alignment(const App& app) {
 
 bool alignment_mvs_supported(const App& app) {
     for (const auto& view : app.scene.views) {
-        if (view.registered && view.camera_model == "OpenCV Fisheye")
+        // Neither a fisheye nor an equirectangular source image can be resampled
+        // into the pinhole working camera the dense pipeline requires.
+        if (view.registered && (view.camera_model == "OpenCV Fisheye" ||
+                                view.camera_model == "Equirectangular"))
             return false;
     }
     return true;

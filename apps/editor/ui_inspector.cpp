@@ -257,13 +257,23 @@ Action draw_inspector(App& app) {
         ImGui::Combo("##sfm_mode", &app.settings.sfm_mode, modes, 3);
         theme::caption("Camera model");
         ImGui::SetNextItemWidth(-1.F);
-        const char* camera_models[] = {tr("Auto"), tr("Pinhole"), tr("OpenCV Fisheye")};
-        int camera_choice = app.settings.camera_model == 2 ? 0 : app.settings.camera_model + 1;
-        if (ImGui::Combo("##camera_model", &camera_choice, camera_models, 3))
-            app.settings.camera_model = camera_choice == 0 ? 2 : camera_choice - 1;
+        // Choice order is Auto / Pinhole / Fisheye / Panorama; the stored value
+        // mirrors aetherscan::CameraModel (2 = automatic, 3 = equirectangular).
+        const char* camera_models[] = {
+            tr("Auto"), tr("Pinhole"), tr("OpenCV Fisheye"),
+            tr("Equirectangular 360")};
+        const int choice_to_model[] = {2, 0, 1, 3};
+        int camera_choice = 0;
+        for (int index = 0; index < 4; ++index)
+            if (choice_to_model[index] == app.settings.camera_model)
+                camera_choice = index;
+        if (ImGui::Combo("##camera_model", &camera_choice, camera_models, 4))
+            app.settings.camera_model = choice_to_model[camera_choice];
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Auto compares matched image geometry and EXIF lens hints.\n"
-                              "Ambiguous results use Pinhole. You can override the model.");
+                              "Ambiguous results use Pinhole. You can override the model.\n"
+                              "Equirectangular 360 aligns full-sphere panoramas natively:\n"
+                              "the model is only auto-detected for 2:1 image sizes.");
         std::string result_model;
         for (const auto& view : app.scene.views) {
             if (!view.registered) continue;

@@ -571,7 +571,7 @@ Scene read_scene(Reader& reader) {
         camera.p1 = reader.value<double>();
         camera.p2 = reader.value<double>();
         const auto model = reader.value<std::uint32_t>();
-        if (model > static_cast<std::uint32_t>(CameraModel::opencv_fisheye))
+        if (model > static_cast<std::uint32_t>(CameraModel::equirectangular))
             throw std::runtime_error("Unsupported checkpoint camera model");
         camera.model = static_cast<CameraModel>(model);
         camera.focal_prior = reader.value<double>();

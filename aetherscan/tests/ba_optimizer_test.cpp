@@ -170,10 +170,12 @@ int main() {
         linearize_cpu(fish_original,cpu);
         CudaLinearizer device;
         device.upload(fish_original); device.evaluate(); device.download(gpu);
-        for (std::size_t i=0; i<cpu.observations.size(); ++i)
+        for (std::size_t i=0; i<cpu.observations.size(); ++i) {
+            if (cpu.observations[i].valid != gpu.observations[i].valid) return 23;
             for (int axis=0; axis<2; ++axis)
                 if (std::abs(cpu.observations[i].residual[axis]-gpu.observations[i].residual[axis])>1e-8)
                     return 23;
+        }
         auto fish_gpu=fish_original;
         const auto gpu_summary=optimize_cuda(fish_gpu,fish_options);
         if (!gpu_summary.usable() || gpu_summary.final_cost>fish_initial*1e-3) {

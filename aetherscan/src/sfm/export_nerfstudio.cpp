@@ -64,6 +64,7 @@ std::string json_string(const std::string& value) {
 }
 
 const char* nerfstudio_camera_model(const PinholeCamera& camera) {
+    if (camera.model == CameraModel::equirectangular) return "EQUIRECTANGULAR";
     return camera.model == CameraModel::opencv_fisheye ? "OPENCV_FISHEYE"
                                                        : "OPENCV";
 }

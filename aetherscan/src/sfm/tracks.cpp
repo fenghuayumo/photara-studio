@@ -248,8 +248,18 @@ TrackFilterStats filter_track(
         const double minimum_cosine =
             std::cos(camera.pixel_error_to_angular(max_reproj_error_px));
         if (cosine < minimum_cosine) continue;
-        const Vec2 projected = camera.project(Xc);
-        const double error = (projected - Vec2(kp.x, kp.y)).norm();
+        // Equirectangular pixels are compared in the tangent plane: a pixel
+        // distance would wrap at the azimuth seam and collapse at the poles.
+        double error = 0.0;
+        if (camera.is_equirectangular()) {
+            const auto local =
+                camera.local_reprojection(Xc, Vec2(kp.x, kp.y));
+            if (!local.valid) continue;
+            error = local.residual.norm();
+        } else {
+            const Vec2 projected = camera.project(Xc);
+            error = (projected - Vec2(kp.x, kp.y)).norm();
+        }
         if (!std::isfinite(error) || error > max_reproj_error_px) continue;
         if (kept != i)
             std::swap(track.observations[kept], track.observations[i]);

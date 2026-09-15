@@ -95,4 +95,12 @@ float compute_spatial_weight(
     std::uint32_t height,
     int grid = 8);
 
+// Model-aware coverage weight: equirectangular images are binned by equal solid
+// angle (azimuth x sin(elevation)) instead of by image area, so a panorama is
+// not scored as if its poles carried the same weight as its equator.
+float compute_spatial_weight(
+    const std::vector<Vec2>& pixels,
+    const PinholeCamera& camera,
+    int grid = 8);
+
 }  // namespace aetherscan::sfm

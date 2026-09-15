@@ -178,6 +178,17 @@ bool observation_supports_point(
     Vec2 proj;
     const Vec3 camera_point =
         cam.image->pose.transform_world_to_camera(position);
+    // Equirectangular observations are scored on the tangent plane: the pixel
+    // difference wraps at the azimuth seam and is meaningless at the poles.
+    if (cam.camera->is_equirectangular()) {
+        const auto local =
+            cam.camera->local_reprojection(camera_point, cam.pixel);
+        if (!local.valid) return false;
+        const double error = local.residual.norm();
+        if (reproj_error) *reproj_error = error;
+        return std::isfinite(error) &&
+               error <= static_cast<double>(reproj_threshold_px);
+    }
     if (!cam.camera->project_checked(camera_point, proj)) return false;
     const double error = (proj - cam.pixel).norm();
     if (reproj_error) *reproj_error = error;
@@ -246,6 +257,19 @@ bool refine_point_nonlinear(
         for (const std::size_t index : indices) {
             const ObservationGeometry& cam = cams[index];
             const Vec3 Xc = cam.image->pose.transform_world_to_camera(position);
+            if (cam.camera->is_equirectangular()) {
+                // Ray-based cheirality (any direction on the sphere) and the
+                // tangent-plane residual/Jacobian, both valid behind the camera.
+                const auto local =
+                    cam.camera->local_reprojection(Xc, cam.pixel);
+                if (!local.valid) return false;
+                cost += local.residual.squaredNorm();
+                const Eigen::Matrix<double, 2, 3> J =
+                    local.jacobian * cam.image->pose.R;
+                H += J.transpose() * J;
+                g += J.transpose() * local.residual;
+                continue;
+            }
             if (Xc.z() <= 1e-8) return false;
             const double inv_z = 1.0 / Xc.z();
             const double x = Xc.x() * inv_z;
@@ -273,10 +297,21 @@ bool refine_point_nonlinear(
         bool candidate_valid = true;
         for (const std::size_t index : indices) {
             const ObservationGeometry& cam = cams[index];
+            const Vec3 candidate_camera_point =
+                cam.image->pose.transform_world_to_camera(candidate);
+            if (cam.camera->is_equirectangular()) {
+                const auto local = cam.camera->local_reprojection(
+                    candidate_camera_point, cam.pixel);
+                if (!local.valid) {
+                    candidate_valid = false;
+                    break;
+                }
+                candidate_cost += local.residual.squaredNorm();
+                continue;
+            }
             Vec2 proj;
             if (!cam.camera->project_checked(
-                    cam.image->pose.transform_world_to_camera(candidate),
-                    proj)) {
+                    candidate_camera_point, proj)) {
                 candidate_valid = false;
                 break;
             }

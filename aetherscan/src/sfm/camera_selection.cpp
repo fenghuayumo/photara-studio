@@ -8,6 +8,14 @@
 #include <numeric>
 
 namespace aetherscan::sfm {
+bool is_equirectangular_image_size(
+    const std::uint32_t width, const std::uint32_t height) {
+    if (width == 0 || height == 0) return false;
+    const double expected = 2.0 * static_cast<double>(height);
+    return std::abs(static_cast<double>(width) - expected) <=
+           0.01 * static_cast<double>(width);
+}
+
 namespace {
 struct Candidate {
     PinholeCamera camera;
@@ -28,7 +36,24 @@ bool triangulate(const PinholeCamera& camera, const Pose3D& pose,
     const double depth2 = (cosine*ac-bc)/denominator;
     if (depth1 <= 0 || depth2 <= 0) return false;
     point = 0.5*(depth1*a+pose.C+depth2*b);
-    return point.allFinite() && point.z()>1e-8 && pose.transform_world_to_camera(point).z()>1e-8;
+    if (!point.allFinite()) return false;
+    // Positive depth along each observed ray is the cheirality test for every
+    // central camera; the pinhole z>0 form is its front-hemisphere special case.
+    if (camera.is_equirectangular())
+        return pose.transform_world_to_camera(point).dot(b) > 0.0;
+    return point.z()>1e-8 && pose.transform_world_to_camera(point).z()>1e-8;
+}
+
+// Panorama validation error: the tangent-plane residual is the pixel metric that
+// stays valid across the azimuth seam and at the poles, where a pixel difference
+// between an image coordinate and a projected ray is meaningless.
+double reprojection_error_sq(const PinholeCamera& camera, const Vec3& camera_point,
+                             const Vec2& observed) {
+    if (camera.is_equirectangular()) {
+        const auto local = camera.local_reprojection(camera_point, observed);
+        return local.valid ? local.residual.squaredNorm() : 1e12;
+    }
+    return (camera.project(camera_point)-observed).squaredNorm();
 }
 
 // Validation matches are never used by RANSAC or calibration BA. Native pixel
@@ -44,8 +69,8 @@ void score_candidate(Candidate& candidate, const std::vector<CameraModelProbe>& 
             Vec3 point;
             const auto& pose=candidate.fits[i].pose;
             if (!triangulate(candidate.camera,pose,probe.first[j],probe.second[j],point)) continue;
-            const double error2=0.5*((candidate.camera.project(point)-probe.first[j]).squaredNorm()+
-                (candidate.camera.project(pose.transform_world_to_camera(point))-probe.second[j]).squaredNorm());
+            const double error2=0.5*(reprojection_error_sq(candidate.camera,point,probe.first[j])+
+                reprojection_error_sq(candidate.camera,pose.transform_world_to_camera(point),probe.second[j]));
             if (std::isfinite(error2)) candidate.scores[i]+=std::max(0.0,1.0-error2/9.0);
         }
         if (count) candidate.scores[i]/=count;
@@ -155,8 +180,21 @@ Candidate refine_calibration(Candidate candidate, const std::vector<CameraModelP
 
 CameraModelSelection select_camera_model(
     const PinholeCamera& source, const std::vector<CameraModelProbe>& input,
-    const double supplied_focal, const bool fisheye_lens_hint, const CameraModel requested) {
+    const double supplied_focal, const bool fisheye_lens_hint,
+    const CameraModel requested, const bool panorama_size_hint) {
     CameraModelSelection result;
+    // An explicitly requested panorama needs no calibration search: the chart is
+    // fixed by the image size, so there is no focal or distortion to fit.
+    if (requested == CameraModel::equirectangular) {
+        PinholeCamera panorama = source;
+        panorama.set_equirectangular_intrinsics();
+        result.model = CameraModel::equirectangular;
+        result.focal_pixels = panorama.fx;
+        result.distortion = {0.0, 0.0, 0.0, 0.0};
+        result.confident = true;
+        result.reason = "requested equirectangular panorama";
+        return result;
+    }
     const double size=static_cast<double>(std::max(source.width,source.height));
     if (requested==CameraModel::opencv_fisheye) result.model=requested;
     result.focal_pixels=supplied_focal>0 ? supplied_focal :
@@ -243,6 +281,48 @@ CameraModelSelection select_camera_model(
     const auto margin = [](double other_score) {
         return std::clamp(0.5*(1.0-other_score), 0.01, 0.04);
     };
+    // Panorama hypothesis: only for 2:1 imagery. The equirectangular chart has no
+    // intrinsics to fit, so its held-out score is directly comparable with the
+    // perspective candidates'.
+    std::string panorama_veto;
+    if (requested == CameraModel::automatic && panorama_size_hint) {
+        PinholeCamera panorama = source;
+        panorama.set_equirectangular_intrinsics();
+        Candidate pano = fit_candidates({panorama}, probes)[0];
+        result.equirect_score = pano.score;
+        const double pano_informative = static_cast<double>(std::count_if(
+            pano.scores.begin(), pano.scores.end(),
+            [](double score) { return score >= 0.25; }));
+        const double perspective = std::max(best[0].score, best[1].score);
+        // The 2:1 image size is decisive here, and deliberately so: the
+        // projection of a 360 capture cannot be recovered from geometry when the
+        // matched features sit inside a narrow forward cone, because any
+        // monotone radial warp of a central camera stays nearly epipolar-
+        // consistent at the small baselines a hand-held panorama produces.
+        // The guard below is therefore a sanity bound rather than a competition:
+        // a genuine panorama still scores *lower* than a narrow perspective fit
+        // (the comparison is per pair, and a video-length baseline leaves a
+        // single pair's translation under-determined - which the honest
+        // spherical chart reports and a warped perspective fit does not). What
+        // it rejects is the case where the perspective model explains the
+        // matches several times better, which is what a 2:1 *rectilinear* photo
+        // looks like.
+        constexpr double k_panorama_relative_score = 0.25;
+        if (pano_informative >= 2.0 &&
+            pano.score >= k_panorama_relative_score * perspective) {
+            result.model = CameraModel::equirectangular;
+            result.focal_pixels = panorama.fx;
+            result.distortion = {0.0, 0.0, 0.0, 0.0};
+            result.confident = true;
+            result.informative_pairs = static_cast<unsigned>(pano_informative);
+            result.reason = "2:1 image size with geometrically sound panorama "
+                            "hypotheses";
+            return result;
+        }
+        panorama_veto =
+            " (2:1 image size, but the perspective fit explains the kept-out "
+            "matches much better: not a panorama chart)";
+    }
     unsigned wins=0;
     for (std::size_t i=0; i<probes.size(); ++i) {
         const double score=best[winner].scores[i];
@@ -259,12 +339,15 @@ CameraModelSelection select_camera_model(
     }
     result.informative_pairs=static_cast<unsigned>(std::count_if(
         best[selected].scores.begin(),best[selected].scores.end(),[](double score) {return score>=0.25;}));
-    if (best[selected].score<0.25 || result.informative_pairs<2) return result;
+    if (best[selected].score<0.25 || result.informative_pairs<2) {
+        result.reason += panorama_veto;
+        return result;
+    }
     // Ambiguous pinhole/fisheye fits can trade extreme focal against distortion.
     // Preserve the ordinary pinhole view-graph self-calibration instead of
     // injecting those unsupported coefficients into the full reconstruction.
     if (!explicit_model && !result.confident && selected==0) {
-        result.reason="ambiguous model; retain pinhole self-calibration";
+        result.reason="ambiguous model; retain pinhole self-calibration" + panorama_veto;
         return result;
     }
     result.model=static_cast<CameraModel>(selected);
@@ -273,6 +356,7 @@ CameraModelSelection select_camera_model(
         best[selected].camera.p1,best[selected].camera.p2};
     result.reason=explicit_model ? "requested model, validated calibration" : result.confident
         ? "held-out geometry after calibration" : "ambiguous model; calibrated fallback";
+    result.reason += panorama_veto;
     return result;
 }
 } // namespace aetherscan::sfm

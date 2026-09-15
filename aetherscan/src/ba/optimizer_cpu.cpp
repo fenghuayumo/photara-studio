@@ -1659,16 +1659,40 @@ double evaluate_cost(const Problem& problem, const double huber_delta, const dou
         const double px = r00 * dx + r01 * dy + r02 * dz;
         const double py = r10 * dx + r11 * dy + r12 * dz;
         const double pz = r20 * dx + r21 * dy + r22 * dz;
-        if (pz <= minimum_depth || !std::isfinite(pz)) {
-            // Invalidating observations must never look like an improvement.
-            cost += problem.observations.weight[observation] * 1e12;
-            continue;
+        double rx = 0.0, ry = 0.0;
+        if (uses_bearing_projection(intrinsics.model)) {
+            // No cheirality for a full-sphere camera; the residual is taken in
+            // the tangent plane so the seam and the poles stay well behaved.
+            const double length2 = px * px + py * py + pz * pz;
+            if (!(length2 > minimum_depth * minimum_depth) ||
+                !std::isfinite(length2)) {
+                cost += problem.observations.weight[observation] * 1e12;
+                continue;
+            }
+            const EquirectTangentBasis basis = equirect_tangent_basis(
+                problem.observations.x[observation],
+                problem.observations.y[observation], intrinsics.fx,
+                intrinsics.fy, intrinsics.cx, intrinsics.cy);
+            const EquirectLocalReprojection local =
+                equirect_local_reprojection(px, py, pz, basis);
+            if (!local.valid) {
+                cost += problem.observations.weight[observation] * 1e12;
+                continue;
+            }
+            rx = local.residual_x;
+            ry = local.residual_y;
+        } else {
+            if (pz <= minimum_depth || !std::isfinite(pz)) {
+                // Invalidating observations must never look like an improvement.
+                cost += problem.observations.weight[observation] * 1e12;
+                continue;
+            }
+            const auto projection = project_camera_plane(intrinsics.model, px/pz, py/pz,
+                intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2);
+            const double distorted_x = projection.x, distorted_y = projection.y;
+            rx = intrinsics.fx * distorted_x + intrinsics.cx - problem.observations.x[observation];
+            ry = intrinsics.fy * distorted_y + intrinsics.cy - problem.observations.y[observation];
         }
-        const auto projection = project_camera_plane(intrinsics.model, px/pz, py/pz,
-            intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2);
-        const double distorted_x = projection.x, distorted_y = projection.y;
-        const double rx = intrinsics.fx * distorted_x + intrinsics.cx - problem.observations.x[observation];
-        const double ry = intrinsics.fy * distorted_y + intrinsics.cy - problem.observations.y[observation];
         const double norm = std::sqrt(rx * rx + ry * ry);
         if (!std::isfinite(norm)) {
             cost += problem.observations.weight[observation] * 1e12;

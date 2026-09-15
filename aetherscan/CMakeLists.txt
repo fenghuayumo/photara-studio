@@ -825,6 +825,14 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
         add_executable(aetherscan_two_view_test tests/two_view_test.cpp)
         target_link_libraries(aetherscan_two_view_test PRIVATE AetherScan::SfM)
         add_test(NAME aetherscan.sfm.two_view COMMAND aetherscan_two_view_test)
+        add_executable(aetherscan_equirect_test tests/equirect_test.cpp)
+        target_link_libraries(aetherscan_equirect_test PRIVATE AetherScan::SfM)
+        add_test(NAME aetherscan.sfm.equirect COMMAND aetherscan_equirect_test)
+        # Manual verification tool (not a ctest entry): aligns a folder of
+        # equirectangular panoramas and exports COLMAP text for external checking.
+        add_executable(aetherscan_equirect_dataset_check
+            tests/equirect_dataset_check.cpp)
+        target_link_libraries(aetherscan_equirect_dataset_check PRIVATE AetherScan::SfM)
         add_executable(aetherscan_mapping_test tests/mapping_test.cpp)
         add_executable(aetherscan_sfm_refine_probe ../experiments/sfm_refine_probe.cpp)
         target_link_libraries(aetherscan_sfm_refine_probe PRIVATE AetherScan::SfM)

@@ -231,7 +231,10 @@ struct ProjectSettings {
     std::array<char, 1024> splat_model_source{};
     int splat_format = 0;  // export format: auto/PLY, PLY, SOG, SPZ, GLB
 
-    int camera_model = 2;  // pinhole, OpenCV fisheye, automatic
+    // 0 = pinhole, 1 = OpenCV fisheye, 2 = automatic, 3 = equirectangular
+    // (the values mirror aetherscan::CameraModel so the CLI flag and the
+    // persisted project setting stay in sync).
+    int camera_model = 2;
     int sfm_mode = 0;  // global, incremental, hierarchical
     bool reuse_cache = false;
     int max_features = 27'000;

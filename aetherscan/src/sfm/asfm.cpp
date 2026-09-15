@@ -154,7 +154,7 @@ Scene read_payload(BufferReader& reader, const AsfmOptions& options) {
             camera.trust_intrinsics = record.value<std::uint8_t>() != 0;
             if (record.remaining() >= sizeof(std::uint32_t)) {
                 const auto model = record.value<std::uint32_t>();
-                if (model > static_cast<std::uint32_t>(CameraModel::opencv_fisheye))
+                if (model > static_cast<std::uint32_t>(CameraModel::equirectangular))
                     throw std::runtime_error("Unsupported SfM camera model");
                 camera.model = static_cast<CameraModel>(model);
             }
@@ -240,7 +240,13 @@ std::vector<std::uint8_t> encode_asfm(
     file.value(k_asfm_version);
     const bool fisheye = std::any_of(scene.cameras.begin(), scene.cameras.end(),
         [](const PinholeCamera& camera) { return camera.model == CameraModel::opencv_fisheye; });
-    file.value(fisheye ? k_asfm_fisheye_min_reader : k_asfm_min_reader);
+    const bool equirectangular = std::any_of(
+        scene.cameras.begin(), scene.cameras.end(), [](const PinholeCamera& camera) {
+            return camera.model == CameraModel::equirectangular;
+        });
+    file.value(equirectangular ? k_asfm_equirectangular_min_reader
+                               : (fisheye ? k_asfm_fisheye_min_reader
+                                          : k_asfm_min_reader));
     file.value(payload.size());
     file.value(payload.checksum());
     file.bytes(payload.buffer().data(), payload.buffer().size());

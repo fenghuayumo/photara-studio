@@ -98,8 +98,37 @@ struct PinholeCamera {
 
     [[nodiscard]] double focal() const { return 0.5 * (fx + fy); }
 
-    // Pixel -> normalized forward plane (z=1), with model-specific inverse distortion.
+    [[nodiscard]] bool is_equirectangular() const {
+        return model == CameraModel::equirectangular;
+    }
+
+    // Equirectangular cameras carry no free intrinsics: the projection is fully
+    // determined by the image size (fx = width / 2pi, fy = height / pi, the
+    // principal point at the image centre). Callers that estimate or optimize
+    // focal length / distortion must skip these cameras.
+    void set_equirectangular_intrinsics() {
+        model = CameraModel::equirectangular;
+        fx = equirect_pixel_scale_x(static_cast<int>(width));
+        fy = equirect_pixel_scale_y(static_cast<int>(height));
+        cx = 0.5 * static_cast<double>(width);
+        cy = 0.5 * static_cast<double>(height);
+        k1 = k2 = p1 = p2 = 0.0;
+        focal_prior = fx;
+        trust_intrinsics = true;
+    }
+
+    // Pixel -> unit bearing in camera space, with model-specific inverse
+    // distortion. Pinhole and fisheye return a point on the z=1 normalized
+    // plane (z > 0); equirectangular returns the true unit bearing over the
+    // full sphere, whose z is negative behind the camera.
     [[nodiscard]] Vec3 unproject(const Vec2& pixel) const {
+        if (model == CameraModel::equirectangular) {
+            const CameraRay ray = unproject_equirectangular_camera(
+                pixel.x(), pixel.y(), static_cast<int>(width),
+                static_cast<int>(height));
+            if (!ray.valid) return Vec3::Constant(std::numeric_limits<double>::quiet_NaN());
+            return Vec3(ray.x, ray.y, ray.z);
+        }
         double x = (pixel.x() - cx) / fx;
         double y = (pixel.y() - cy) / fy;
         if (model == CameraModel::opencv_fisheye) {
@@ -150,6 +179,12 @@ struct PinholeCamera {
     }
 
     [[nodiscard]] Vec2 project(const Vec3& camera_point) const {
+        if (model == CameraModel::equirectangular) {
+            const CameraPixel projected = project_equirectangular_camera(
+                camera_point.x(), camera_point.y(), camera_point.z(),
+                static_cast<int>(width), static_cast<int>(height));
+            return {projected.u, projected.v};
+        }
         const double inv_z = 1.0 / camera_point.z();
         const double x = camera_point.x() * inv_z;
         const double y = camera_point.y() * inv_z;
@@ -158,13 +193,93 @@ struct PinholeCamera {
     }
 
     [[nodiscard]] bool project_checked(const Vec3& camera_point, Vec2& pixel) const {
+        if (model == CameraModel::equirectangular) {
+            // No cheirality for a full-sphere camera: only the degenerate case
+            // of a point at the optical centre is unobservable.
+            if (!camera_point.allFinite() ||
+                camera_point.norm() <= 1e-12) return false;
+            pixel = project(camera_point);
+            return std::isfinite(pixel.x()) && std::isfinite(pixel.y());
+        }
         if (camera_point.z() <= 1e-8) return false;
         pixel = project(camera_point);
         return std::isfinite(pixel.x()) && std::isfinite(pixel.y());
     }
 
     [[nodiscard]] double pixel_error_to_angular(const double pixel_error) const {
+        if (model == CameraModel::equirectangular) {
+            // One pixel spans 2 pi / width radians along the azimuth, but the
+            // chart samples the sphere far more coarsely than a rectilinear lens
+            // samples the image plane: a 2048 px panorama is 0.176 deg/px, where
+            // a 50 mm pinhole frame of the same width is ~0.03 deg/px. Every
+            // pixel-space threshold in the pipeline (epipolar, reprojection,
+            // track filtering, resection RANSAC) would therefore be several
+            // times looser in angle for a panorama. The scale below restores a
+            // comparable angular precision so that "N pixels" means the same
+            // geometry on both camera types.
+            if (width == 0) return 0.0;
+            return pixel_error * 2.0 * k_pi / static_cast<double>(width) *
+                   k_equirect_threshold_scale;
+        }
         return std::atan2(pixel_error, focal());
+    }
+
+    // Tangent-plane reprojection residual (pixels) and its 2x3 Jacobian with
+    // respect to the camera-space point. For pinhole and fisheye this is the
+    // ordinary pixel difference; for equirectangular it is the seam- and
+    // pole-safe angular residual. The point is reported in camera space on
+    // purpose: the world-to-camera derivative is model independent.
+    struct LocalResidual {
+        Vec2 residual{Vec2::Zero()};
+        Eigen::Matrix<double, 2, 3> jacobian{Eigen::Matrix<double, 2, 3>::Zero()};
+        bool valid{false};
+    };
+
+    [[nodiscard]] LocalResidual local_reprojection(
+        const Vec3& camera_point, const Vec2& observed) const {
+        LocalResidual out;
+        if (model == CameraModel::equirectangular) {
+            const EquirectTangentBasis basis = equirect_tangent_basis(
+                observed.x(), observed.y(), fx, fy, cx, cy);
+            const EquirectLocalReprojection local =
+                equirect_local_reprojection(
+                    camera_point.x(), camera_point.y(), camera_point.z(), basis);
+            if (!local.valid) return out;
+            out.residual = {local.residual_x, local.residual_y};
+            out.jacobian << local.j00, local.j01, local.j02,
+                            local.j10, local.j11, local.j12;
+            out.valid = true;
+            return out;
+        }
+        Vec2 projected;
+        if (!project_checked(camera_point, projected)) return out;
+        const double inv_z = 1.0 / camera_point.z();
+        out.residual = projected - observed;
+        // Distortion derivatives are deliberately ignored (the residual still
+        // uses the full projection), matching the historical refinement.
+        out.jacobian << fx * inv_z, 0.0, -fx * camera_point.x() * inv_z * inv_z,
+            0.0, fy * inv_z, -fy * camera_point.y() * inv_z * inv_z;
+        out.valid = true;
+        return out;
+    }
+
+    // Angular distance between a camera-space point and an observed pixel,
+    // expressed in pixels on this camera's image. Valid for every model, so
+    // filtering code can share one threshold.
+    [[nodiscard]] double angular_error_px(
+        const Vec3& camera_point, const Vec2& observed) const {
+        const Vec3 predicted = camera_point.normalized();
+        const Vec3 observation = unproject_normalized(observed);
+        if (!predicted.allFinite() || !observation.allFinite()) {
+            return std::numeric_limits<double>::infinity();
+        }
+        const double angle = bearing_angle(
+            predicted.x(), predicted.y(), predicted.z(),
+            observation.x(), observation.y(), observation.z());
+        if (!std::isfinite(angle)) {
+            return std::numeric_limits<double>::infinity();
+        }
+        return angle / std::max(focal(), 1e-12);
     }
 };
 

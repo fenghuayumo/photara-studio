@@ -4,6 +4,7 @@
 #include "sfm/asfm.hpp"
 #include "sfm/preview.hpp"
 #include "sfm/export_mvs.hpp"
+#include "sfm/export_colmap.hpp"
 #include "project/archive.hpp"
 #include "project/document.hpp"
 #include "mvs/densify.hpp"
@@ -72,6 +73,10 @@ struct ReconstructCli {
     bool structural_pair_expansion{false};
     bool positioning_cuda{true};
     std::filesystem::path output;
+    // Optional COLMAP text model written next to the native output, so the
+    // alignment can be inspected by COLMAP-family tools (and by scripts that
+    // validate poses against a reference reconstruction).
+    std::filesystem::path export_colmap_dir;
     // Editor/interactive runs skip user-facing ascan/asfm/PLY sidecars, eval
     // PNG dumps, and the extra timestamped log file. The caller already
     // captures stdout. Working copies stay in cache for preview/export.
@@ -487,12 +492,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("m,mode",
          "Reconstruction mode: global (default), incremental, or hierarchical",
          cxxopts::value<std::string>()->default_value("global"))
-        ("camera-model", "Camera model: auto | pinhole | opencv_fisheye (alias fisheye)",
+        ("camera-model", "Camera model: auto | pinhole | opencv_fisheye (alias fisheye) | equirectangular (aliases panorama, equirect)",
          cxxopts::value<std::string>()->default_value("auto"))
         ("trust-focal", "Lock externally calibrated --focal and zero distortion",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("sfm-structural-rescue", "Experimental bridge-branch pair expansion (not validated for production)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("export-colmap",
+         "Also write the aligned scene as a COLMAP text model into this folder",
+         cxxopts::value<std::string>()->default_value(""))
         ("o,output",
          "Output path (.ascan, .asfm, .ply, .mvs, or .sog/.spz/.glb for Gaussians)",
          cxxopts::value<std::string>())
@@ -942,13 +950,18 @@ ReconstructCli parse_cli(int argc, char** argv) {
     const auto camera_model = result["camera-model"].as<std::string>();
     if (camera_model == "fisheye" || camera_model == "opencv_fisheye")
         cli.camera_model = aetherscan::CameraModel::opencv_fisheye;
+    else if (camera_model == "equirectangular" || camera_model == "equirect" ||
+             camera_model == "panorama" || camera_model == "spherical")
+        cli.camera_model = aetherscan::CameraModel::equirectangular;
     else if (camera_model == "auto")
         cli.camera_model = aetherscan::CameraModel::automatic;
     else if (camera_model == "pinhole")
         cli.camera_model = aetherscan::CameraModel::pinhole;
     else
-        throw std::invalid_argument("--camera-model must be auto, pinhole or opencv_fisheye");
+        throw std::invalid_argument(
+            "--camera-model must be auto, pinhole, opencv_fisheye or equirectangular");
     cli.focal_pixels = result["focal"].as<double>();
+    cli.export_colmap_dir = result["export-colmap"].as<std::string>();
     cli.mode = result["mode"].as<std::string>();
     cli.trust_focal = result["trust-focal"].as<bool>();
     cli.structural_pair_expansion = result["sfm-structural-rescue"].as<bool>();
@@ -2276,7 +2289,10 @@ std::filesystem::path write_sfm_diagnostics(
                << ',' << graph.maximum_composite_weight << ','
                << mean_ray_angle_deg << ','
                << (camera && camera->model == aetherscan::CameraModel::opencv_fisheye
-                       ? "opencv_fisheye" : "pinhole") << '\n';
+                       ? "opencv_fisheye"
+                       : (camera && camera->model == aetherscan::CameraModel::equirectangular
+                              ? "equirectangular"
+                              : "pinhole")) << '\n';
     }
 
     const auto pair_csv_path = reconstruction_path.parent_path() /
@@ -3581,6 +3597,15 @@ int main(int argc, char** argv) {
         }
 
         save_working_sfm(cli, scene);
+
+        if (!cli.export_colmap_dir.empty() && scene.registered_count() >= 2) {
+            // Diagnostics-grade export: cameras, poses and the sparse cloud in
+            // the COLMAP text layout (equirectangular cameras become model 17).
+            aetherscan::sfm::save_colmap_text(
+                scene, cli.export_colmap_dir, cli.images_dir, true);
+            aetherscan::core::Logger::instance().info(
+                "colmap_export=", cli.export_colmap_dir);
+        }
 
         if (output_ext == ".mvs") {
             aetherscan::sfm::export_openmvs_interface(scene, cli.output);

@@ -58,35 +58,68 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
     const double px = r00 * dx + r01 * dy + r02 * dz;
     const double py = r10 * dx + r11 * dy + r12 * dz;
     const double pz = r20 * dx + r21 * dy + r22 * dz;
-    if (!(pz > options.minimum_depth) || !::isfinite(pz)) {
+    // Equirectangular cameras see the whole sphere, so the usual "point in
+    // front of the camera" invariant does not exist: only a point at the optical
+    // centre is unobservable.
+    const bool equirect = uses_bearing_projection(intrinsics.model);
+    if (equirect) {
+        const double length2 = px * px + py * py + pz * pz;
+        if (!(length2 > options.minimum_depth * options.minimum_depth) ||
+            !::isfinite(length2)) {
+            return;
+        }
+    } else if (!(pz > options.minimum_depth) || !::isfinite(pz)) {
         return;
     }
 
-    const double inv_z = 1.0 / pz;
-    const double xn = px * inv_z;
-    const double yn = py * inv_z;
-    const auto projection = project_camera_plane(intrinsics.model, xn, yn,
-        intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2);
-    const double x_distorted = projection.x;
-    const double y_distorted = projection.y;
-
-    const double projected_x = intrinsics.fx * x_distorted + intrinsics.cx;
-    const double projected_y = intrinsics.fy * y_distorted + intrinsics.cy;
-    const double raw_rx = projected_x - observed_x;
-    const double raw_ry = projected_y - observed_y;
+    // Residual and its 2x3 Jacobian with respect to the camera-space point.
+    // Pinhole/fisheye use the pixel difference; equirectangular uses the
+    // tangent-plane (azimuth/elevation scaled) residual, which is the correct
+    // metric everywhere on the sphere and stays in pixels for the Huber weight.
+    double raw_rx = 0.0;
+    double raw_ry = 0.0;
+    double j00 = 0.0, j01 = 0.0, j02 = 0.0;
+    double j10 = 0.0, j11 = 0.0, j12 = 0.0;
+    double x_distorted = 0.0;
+    double y_distorted = 0.0;
+    CameraProjection projection{};
+    if (equirect) {
+        const EquirectTangentBasis basis = equirect_tangent_basis(
+            observed_x, observed_y, intrinsics.fx, intrinsics.fy, intrinsics.cx,
+            intrinsics.cy);
+        const EquirectLocalReprojection local =
+            equirect_local_reprojection(px, py, pz, basis);
+        if (!local.valid) return;
+        raw_rx = local.residual_x;
+        raw_ry = local.residual_y;
+        j00 = local.j00;
+        j01 = local.j01;
+        j02 = local.j02;
+        j10 = local.j10;
+        j11 = local.j11;
+        j12 = local.j12;
+    } else {
+        const double inv_z = 1.0 / pz;
+        const double xn = px * inv_z;
+        const double yn = py * inv_z;
+        projection = project_camera_plane(intrinsics.model, xn, yn,
+            intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2);
+        x_distorted = projection.x;
+        y_distorted = projection.y;
+        const double projected_x = intrinsics.fx * x_distorted + intrinsics.cx;
+        const double projected_y = intrinsics.fy * y_distorted + intrinsics.cy;
+        raw_rx = projected_x - observed_x;
+        raw_ry = projected_y - observed_y;
+        j00 = intrinsics.fx * projection.xx * inv_z;
+        j01 = intrinsics.fx * projection.xy * inv_z;
+        j02 = -(j00 * px + j01 * py) * inv_z;
+        j10 = intrinsics.fy * projection.yx * inv_z;
+        j11 = intrinsics.fy * projection.yy * inv_z;
+        j12 = -(j10 * px + j11 * py) * inv_z;
+    }
     if (!::isfinite(raw_rx) || !::isfinite(raw_ry)) {
         return;
     }
-
-    const double dxd_dx = projection.xx, dxd_dy = projection.xy;
-    const double dyd_dx = projection.yx, dyd_dy = projection.yy;
-
-    const double j00 = intrinsics.fx * dxd_dx * inv_z;
-    const double j01 = intrinsics.fx * dxd_dy * inv_z;
-    const double j02 = -(j00 * px + j01 * py) * inv_z;
-    const double j10 = intrinsics.fy * dyd_dx * inv_z;
-    const double j11 = intrinsics.fy * dyd_dy * inv_z;
-    const double j12 = -(j10 * px + j11 * py) * inv_z;
 
     double robust_weight = observation_weight;
     if (options.huber_delta > 0.0) {
@@ -133,6 +166,12 @@ AETHERSCAN_HD AETHERSCAN_FORCEINLINE void linearize_observation(
     }
 
     // Shared intrinsic Jacobians (param order matches intrinsic_dof()).
+    // An equirectangular camera has no free intrinsics: the projection is fixed
+    // by the image size, so the group carries no gradient and stays frozen.
+    if (equirect) {
+        result.valid = true;
+        return;
+    }
     int intrinsic_column = 0;
     if (options.optimize_focal) {
         if (options.optimize_aspect_ratio) {

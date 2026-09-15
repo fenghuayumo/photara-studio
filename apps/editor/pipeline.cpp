@@ -24,6 +24,17 @@
 namespace editor {
 namespace {
 
+// Project setting -> CLI flag. The stored value mirrors aetherscan::CameraModel:
+// 0 pinhole, 1 OpenCV fisheye, 2 automatic, 3 equirectangular panorama.
+const char* camera_model_flag(const int model) {
+    switch (model) {
+        case 0: return "pinhole";
+        case 1: return "opencv_fisheye";
+        case 3: return "equirectangular";
+        default: return "auto";
+    }
+}
+
 // Maps a ProgressReporter label onto a stage and a slice of the overall bar.
 // Longer, more specific prefixes must precede their shorter relatives.
 struct Band {
@@ -1077,8 +1088,7 @@ std::string build_align_command(
             << quote(layout.project_file.empty() ? layout.sparse_ply
                                                  : layout.project_file) << " --mode "
             << sfm_mode_flag(settings.sfm_mode)
-            << " --camera-model " << (settings.camera_model == 2 ? "auto" :
-                settings.camera_model == 1 ? "opencv_fisheye" : "pinhole") << " --max-features "
+            << " --camera-model " << camera_model_flag(settings.camera_model) << " --max-features "
             << settings.max_features;
     if (settings.reuse_cache)
         command << " --cache-dir " << quote(layout.cache);
@@ -1098,8 +1108,7 @@ std::string build_train_command(
     // Training reloads SfM from the working copy (or a saved .ascan),
     // unless an external dataset is selected.
     command << " --mode " << sfm_mode_flag(settings.sfm_mode)
-            << " --camera-model " << (settings.camera_model == 2 ? "auto" :
-                settings.camera_model == 1 ? "opencv_fisheye" : "pinhole")
+            << " --camera-model " << camera_model_flag(settings.camera_model)
             << " --max-features " << settings.max_features;
     if (settings.reuse_cache)
         command << " --cache-dir " << quote(layout.cache);
@@ -1239,8 +1248,7 @@ std::string build_dense_command(
                     << quote(settings.dataset_initial_cloud.data());
     } else {
         command << " --mode " << sfm_mode_flag(settings.sfm_mode)
-                << " --camera-model " << (settings.camera_model == 2 ? "auto" :
-                    settings.camera_model == 1 ? "opencv_fisheye" : "pinhole")
+                << " --camera-model " << camera_model_flag(settings.camera_model)
                 << " --max-features " << settings.max_features;
         if (settings.reuse_cache)
             command << " --cache-dir " << quote(layout.cache);
@@ -1283,8 +1291,7 @@ std::string build_texture_command(
                     << quote(settings.dataset_initial_cloud.data());
     } else {
         command << " --mode " << sfm_mode_flag(settings.sfm_mode)
-                << " --camera-model " << (settings.camera_model == 2 ? "auto" :
-                    settings.camera_model == 1 ? "opencv_fisheye" : "pinhole")
+                << " --camera-model " << camera_model_flag(settings.camera_model)
                 << " --max-features " << settings.max_features;
         if (settings.reuse_cache)
             command << " --cache-dir " << quote(layout.cache);
@@ -1310,8 +1317,7 @@ std::string build_export_sfm_command(
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.sparse_asfm) << " --mode "
             << sfm_mode_flag(settings.sfm_mode)
-            << " --camera-model " << (settings.camera_model == 2 ? "auto" :
-                settings.camera_model == 1 ? "opencv_fisheye" : "pinhole") << " --max-features "
+            << " --camera-model " << camera_model_flag(settings.camera_model) << " --max-features "
             << settings.max_features;
     std::error_code exists_error;
     if (settings.reuse_cache &&

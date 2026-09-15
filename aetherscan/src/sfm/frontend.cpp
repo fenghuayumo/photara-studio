@@ -283,6 +283,28 @@ void initialize_cameras(
         camera.model = model;
         camera.width = features.image_width;
         camera.height = features.image_height;
+        if (model == CameraModel::equirectangular) {
+            // The panorama chart is fully determined by the image size: no focal
+            // search and no EXIF focal prior (a 360 export has no meaningful
+            // 35 mm equivalent). Repeated below for the shared-group test.
+            camera.set_equirectangular_intrinsics();
+            const auto existing = std::find_if(
+                scene.cameras.begin(), scene.cameras.end(),
+                [&](const PinholeCamera& candidate) {
+                    return candidate.is_equirectangular() &&
+                           candidate.width == camera.width &&
+                           candidate.height == camera.height;
+                });
+            if (existing == scene.cameras.end()) {
+                camera.id = static_cast<Index>(scene.cameras.size());
+                scene.images[i].camera_id = camera.id;
+                scene.cameras.push_back(camera);
+            } else {
+                scene.images[i].camera_id =
+                    static_cast<Index>(existing - scene.cameras.begin());
+            }
+            continue;
+        }
         const double geometric_focal =
             (model == CameraModel::opencv_fisheye ? 0.5 : 1.2) *
             std::max(camera.width, camera.height);
@@ -357,15 +379,29 @@ void select_scene_camera_models(
             if (++inspected == 3) break;
         }
         core::Logger::instance().info("auto camera: evaluating group=",camera.id," pairs=",probes.size());
-        const auto selected = select_camera_model(camera,probes,options.focal_pixels,lens_hint,options.camera_model);
-        camera.model = selected.model;
-        camera.k1=selected.distortion[0]; camera.k2=selected.distortion[1];
-        camera.p1=selected.distortion[2]; camera.p2=selected.distortion[3];
-        camera.fx = camera.fy = camera.focal_prior = selected.focal_pixels;
+        // A 2:1 image size is the only admissible evidence that a still image
+        // covers the full sphere; any other aspect ratio keeps the perspective
+        // hypotheses only.
+        const bool panorama_hint =
+            is_equirectangular_image_size(camera.width, camera.height);
+        const auto selected = select_camera_model(
+            camera,probes,options.focal_pixels,lens_hint,options.camera_model,
+            panorama_hint);
+        if (selected.model == CameraModel::equirectangular) {
+            camera.set_equirectangular_intrinsics();
+        } else {
+            camera.model = selected.model;
+            camera.k1=selected.distortion[0]; camera.k2=selected.distortion[1];
+            camera.p1=selected.distortion[2]; camera.p2=selected.distortion[3];
+            camera.fx = camera.fy = camera.focal_prior = selected.focal_pixels;
+        }
         core::Logger::instance().info("auto camera: group=",camera.id,
-            " selected=",camera.model == CameraModel::opencv_fisheye ? "opencv_fisheye" : "pinhole",
+            " selected=", selected.model == CameraModel::equirectangular ? "equirectangular"
+                : (selected.model == CameraModel::opencv_fisheye ? "opencv_fisheye" : "pinhole"),
             " focal=",camera.focal()," pinhole_score=",selected.pinhole_score,
-            " fisheye_score=",selected.fisheye_score," informative_pairs=",selected.informative_pairs,
+            " fisheye_score=",selected.fisheye_score,
+            " equirect_score=",selected.equirect_score,
+            " informative_pairs=",selected.informative_pairs,
             " confident=",selected.confident," reason=",selected.reason);
     }
 }
@@ -544,7 +580,8 @@ bool calibrate_view_graph_focals(Scene& scene) {
         if (first_group != second_group || first_group >= scene.cameras.size())
             continue;
         const PinholeCamera& camera = scene.cameras[first_group];
-        if (camera.trust_intrinsics || camera.model == CameraModel::opencv_fisheye) continue;
+        if (camera.trust_intrinsics || camera.model == CameraModel::opencv_fisheye ||
+            camera.model == CameraModel::equirectangular) continue;
         if (const auto cost =
                 make_fetzer_same_camera_cost(*pair.F, camera))
             grouped[first_group].push_back(*cost);
@@ -553,7 +590,8 @@ bool calibrate_view_graph_focals(Scene& scene) {
     }
 
     for (std::size_t group = 0; group < grouped.size(); ++group) {
-        if (scene.cameras[group].model == CameraModel::opencv_fisheye) continue;
+        if (scene.cameras[group].model == CameraModel::opencv_fisheye ||
+            scene.cameras[group].model == CameraModel::equirectangular) continue;
         const auto& costs = grouped[group];
         // openMVS requires a meaningful view-graph consensus rather than
         // trusting a handful of independently degenerate pairs.
@@ -656,7 +694,8 @@ bool calibrate_exif_view_graph_focals(Scene& scene) {
         if (image.camera_id >= scene.cameras.size()) continue;
         const PinholeCamera& camera = scene.cameras[image.camera_id];
         if (camera.trust_intrinsics ||
-            camera.model == CameraModel::opencv_fisheye)
+            camera.model == CameraModel::opencv_fisheye ||
+            camera.model == CameraModel::equirectangular)
             continue;
         ExifFocalGroup& group = groups[first_key];
         if (const auto cost = make_fetzer_same_camera_cost(*pair.F, camera))

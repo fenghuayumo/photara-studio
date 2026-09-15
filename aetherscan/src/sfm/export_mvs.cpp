@@ -120,9 +120,19 @@ void export_openmvs_interface(
     const ExportMvsOptions& options) {
     core::StageScope stage("sfm.export_openmvs");
     for (const auto& image : scene.images)
-        if (image.registered && scene.camera_of(image).model == CameraModel::opencv_fisheye)
+        if (image.registered &&
+            scene.camera_of(image).model == CameraModel::opencv_fisheye)
             throw std::runtime_error(
                 "OpenMVS interface requires rectified pinhole images; use .asfm for fisheye alignment");
+    // An equirectangular chart cannot be resampled into a pinhole working camera
+    // (the sphere has no single plane), so the dense pipeline is unavailable for
+    // panoramas exactly like uncorrected fisheye. Gaussian splat training
+    // consumes them natively instead.
+    for (const auto& image : scene.images)
+        if (image.registered &&
+            scene.camera_of(image).model == CameraModel::equirectangular)
+            throw std::runtime_error(
+                "OpenMVS interface requires rectified pinhole images; use .asfm for equirectangular alignment");
     std::vector<std::uint32_t> registered;
     registered.reserve(scene.images.size());
     for (std::uint32_t i = 0; i < scene.images.size(); ++i) {
