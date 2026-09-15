@@ -159,11 +159,22 @@ struct TrainingOptions {
     // keep canonical appearance. The per-view gain/bias model is the
     // `channel_gain_bias` PPISP layout rather than a separate code path.
     bool use_bilateral_grid{false};
+    // One grid shared by every view (the default) or one grid per view. A
+    // per-view grid has more free parameters than the view has pixels and
+    // absorbs that frame's appearance, which costs held-out quality even with
+    // the mean projection below; the shared form can only learn variation that
+    // is consistent across views (lens shading, vignetting, sensor response).
+    bool bilateral_grid_shared{true};
     unsigned bilateral_grid_width{16};
     unsigned bilateral_grid_height{16};
     unsigned bilateral_grid_luma{8};
-    float bilateral_grid_lr{2e-3F};
+    // The grid is a low-resolution LUT with Adam; a large rate diverges and
+    // produces non-finite renders, so the default is deliberately gentle.
+    float bilateral_grid_lr{2e-4F};
     float bilateral_grid_tv_weight{10.F};
+    // Maximum distance of any grid coefficient from its identity value. Zero
+    // disables the bound (not recommended).
+    float bilateral_grid_deviation_limit{0.5F};
     // Keep every view's grid mean on the identity affine after each update.
     // The matrix stays in the option struct (rather than being unconditional)
     // so the projection can be ablated; disabling it is not recommended, since

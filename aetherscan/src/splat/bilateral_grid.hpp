@@ -19,6 +19,9 @@ struct BilateralGridState {
     AdamState adam;
     tinytensor::Tensor output;      // [3, H, W]
     tinytensor::Tensor input_grad;  // [3, H, W]
+    // True when every view shares the first grid row: the grid can then only
+    // learn appearance variation that is consistent across views.
+    bool shared{true};
     int luma{8};
     int grid_height{16};
     int grid_width{16};

@@ -144,6 +144,7 @@ struct ReconstructCli {
     unsigned splat_eval_split_every{8};
     bool splat_use_mask{true};
     bool splat_bilateral_grid{false};
+    bool splat_bilateral_grid_shared{true};
     unsigned splat_bilateral_grid_width{16};
     unsigned splat_bilateral_grid_height{16};
     unsigned splat_bilateral_grid_luma{8};
@@ -750,12 +751,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-bilateral-grid-width", "Bilateral grid spatial width",
          cxxopts::value<unsigned>()->default_value("16"))
+        ("splat-bilateral-grid-per-view",
+         "Give every view its own grid instead of one shared grid",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-bilateral-grid-height", "Bilateral grid spatial height",
          cxxopts::value<unsigned>()->default_value("16"))
         ("splat-bilateral-grid-luma", "Bilateral grid luma bins",
          cxxopts::value<unsigned>()->default_value("8"))
         ("splat-bilateral-grid-lr", "Bilateral grid Adam learning rate",
-         cxxopts::value<float>()->default_value("0.002"))
+         cxxopts::value<float>()->default_value("0.0002"))
         ("splat-bilateral-grid-tv", "Bilateral grid total-variation weight",
          cxxopts::value<float>()->default_value("10"))
         ("splat-ppisp",
@@ -1166,6 +1170,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result.count("splat-max-scale-ratio") != 0;
     cli.splat_constrain_scales = result["splat-constrain-scales"].as<bool>();
     cli.splat_bilateral_grid = result["splat-bilateral-grid"].as<bool>();
+    cli.splat_bilateral_grid_shared =
+        !result["splat-bilateral-grid-per-view"].as<bool>();
     cli.splat_bilateral_grid_width =
         result["splat-bilateral-grid-width"].as<unsigned>();
     cli.splat_bilateral_grid_height =
@@ -2642,6 +2648,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;
     options.use_bilateral_grid = cli.splat_bilateral_grid;
+    options.bilateral_grid_shared = cli.splat_bilateral_grid_shared;
     options.bilateral_grid_width = cli.splat_bilateral_grid_width;
     options.bilateral_grid_height = cli.splat_bilateral_grid_height;
     options.bilateral_grid_luma = cli.splat_bilateral_grid_luma;
@@ -2806,10 +2813,13 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " opacity_decay=", options.opacity_decay,
         " scale_decay=", options.scale_decay,
         " bilateral_grid=", options.use_bilateral_grid,
+        " bilateral_grid_shared=", options.bilateral_grid_shared,
         " bilateral_grid_shape=", options.bilateral_grid_width, 'x',
         options.bilateral_grid_height, 'x', options.bilateral_grid_luma,
         " bilateral_grid_lr=", options.bilateral_grid_lr,
         " bilateral_grid_tv=", options.bilateral_grid_tv_weight,
+        " bilateral_grid_deviation_limit=",
+        options.bilateral_grid_deviation_limit,
         " bilateral_grid_identity_projection=",
         options.bilateral_grid_identity_projection,
         " ppisp=", options.use_ppisp,

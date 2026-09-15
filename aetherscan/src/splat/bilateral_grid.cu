@@ -45,12 +45,14 @@ __global__ void bilateral_identity_kernel(
     grids[base + 11] = 0.F;
 }
 
-// One block per (view, coefficient). The block reduces that coefficient over
-// every cell of the view and subtracts its deviation from identity, which is
-// the projection onto the affine-with-identity-mean subspace.
-__global__ void bilateral_mean_projection_kernel(
+// One block per (row, coefficient). The block optionally subtracts the row mean
+// of that coefficient (the projection onto the affine-with-identity-mean
+// subspace) and always bounds the coefficient's distance from identity: without
+// the bound an Adam update on a table this large can diverge and produce
+// non-finite renders.
+__global__ void bilateral_constrain_kernel(
     float* grids, const int views, const int luma, const int grid_h,
-    const int grid_w) {
+    const int grid_w, const int project_mean, const float limit) {
     const int channel = blockIdx.x % k_affine_channels;
     const int view = blockIdx.x / k_affine_channels;
     if (view >= views) return;
@@ -58,6 +60,15 @@ __global__ void bilateral_mean_projection_kernel(
     if (cells == 0) return;
     float* base = grids +
         static_cast<long long>(view) * cells * k_affine_channels;
+    const float identity = k_identity_affine[channel];
+    if (!project_mean) {
+        if (limit <= 0.F) return;
+        for (long long cell = threadIdx.x; cell < cells; cell += blockDim.x) {
+            float& value = base[cell * k_affine_channels + channel];
+            value = fminf(fmaxf(value, identity - limit), identity + limit);
+        }
+        return;
+    }
     float local = 0.F;
     for (long long cell = threadIdx.x; cell < cells; cell += blockDim.x)
         local += base[cell * k_affine_channels + channel];
@@ -77,10 +88,14 @@ __global__ void bilateral_mean_projection_kernel(
             scratch[0] = value / static_cast<float>(cells);
     }
     __syncthreads();
-    const float offset = scratch[0] - k_identity_affine[channel];
-    if (offset == 0.F) return;
-    for (long long cell = threadIdx.x; cell < cells; cell += blockDim.x)
-        base[cell * k_affine_channels + channel] -= offset;
+    const float offset = scratch[0] - identity;
+    for (long long cell = threadIdx.x; cell < cells; cell += blockDim.x) {
+        float& value = base[cell * k_affine_channels + channel];
+        float updated = value - offset;
+        if (limit > 0.F)
+            updated = fminf(fmaxf(updated, identity - limit), identity + limit);
+        value = updated;
+    }
 }
 
 __global__ void bilateral_forward_kernel(
@@ -361,13 +376,15 @@ BilateralGridState make_bilateral_grid_state(
     state.grid_height = static_cast<int>(
         std::max(options.bilateral_grid_height, 1U));
     state.luma = static_cast<int>(std::max(options.bilateral_grid_luma, 1U));
+    state.shared = options.bilateral_grid_shared;
+    const std::size_t rows = state.shared ? 1 : views;
     state.grids = tinytensor::Tensor::empty(
-        {views, static_cast<std::size_t>(state.luma),
+        {rows, static_cast<std::size_t>(state.luma),
             static_cast<std::size_t>(state.grid_height),
             static_cast<std::size_t>(state.grid_width),
             static_cast<std::size_t>(k_affine_channels)},
         tinytensor::Device::CUDA);
-    const long long cells = static_cast<long long>(views) * state.luma *
+    const long long cells = static_cast<long long>(rows) * state.luma *
         state.grid_height * state.grid_width;
     launch_identity(state.grids.ptr<float>(), cells);
     state.gradient = tinytensor::Tensor::zeros_like(state.grids);
@@ -382,8 +399,9 @@ void apply_bilateral_grid(
     if (!state.is_valid())
         throw std::invalid_argument(
             "bilateral grid requires an initialized state");
-    if (view >= state.grids.shape()[0])
+    if (!state.shared && view >= state.grids.shape()[0])
         throw std::invalid_argument("bilateral grid view index is out of range");
+    const int row = state.shared ? 0 : static_cast<int>(view);
     if (color.shape().rank() != 3 || color.shape()[0] != 3)
         throw std::invalid_argument("bilateral grid expects planar [3,H,W]");
     ensure_same_shape(state.output, color);
@@ -394,7 +412,7 @@ void apply_bilateral_grid(
     bilateral_forward_kernel<<<
         (pixels + k_cuda_threads - 1) / k_cuda_threads, k_cuda_threads>>>(
         color.ptr<float>(), state.output.ptr<float>(), state.grids.ptr<float>(),
-        static_cast<int>(view), state.luma, state.grid_height, state.grid_width,
+        row, state.luma, state.grid_height, state.grid_width,
         height, width);
     check_cuda(cudaGetLastError(), "apply bilateral grid colour correction");
 }
@@ -409,11 +427,14 @@ void backward_bilateral_grid(
     const int pixels = height * width;
     if (pixels == 0) return;
     state.gradient.zero_();
+    if (!state.shared && view >= state.grids.shape()[0])
+        throw std::invalid_argument("bilateral grid view index is out of range");
+    const int row = state.shared ? 0 : static_cast<int>(view);
     bilateral_backward_kernel<<<
         (pixels + k_cuda_threads - 1) / k_cuda_threads, k_cuda_threads>>>(
         color.ptr<float>(), state.grids.ptr<float>(),
         output_gradient.ptr<float>(), state.gradient.ptr<float>(),
-        state.input_grad.ptr<float>(), static_cast<int>(view), state.luma,
+        state.input_grad.ptr<float>(), row, state.luma,
         state.grid_height, state.grid_width, height, width);
     check_cuda(cudaGetLastError(), "backward bilateral grid colour correction");
 }
@@ -439,21 +460,22 @@ void step_bilateral_grid(
     adam_step(
         state.grids, state.gradient, state.adam, options.bilateral_grid_lr,
         iteration, options);
-    if (!options.bilateral_grid_identity_projection) return;
-    // One view's grid carries 12 coefficients per cell over a 16x16x8 grid,
-    // more free parameters than the view has pixels. An unconstrained per-view
-    // mean would absorb the global colour mapping: the Gaussians lose their
-    // colour and the exported (canonical) model renders wrong. Projecting the
-    // mean back onto the identity affine keeps the grid a spatial residual and
-    // leaves global exposure / white balance to the anchored PPISP model.
-    const int views = static_cast<int>(state.grids.shape()[0]);
-    if (views <= 0) return;
-    bilateral_mean_projection_kernel<<<
-        static_cast<unsigned>(views * k_affine_channels), k_cuda_threads>>>(
-        state.grids.ptr<float>(), views, state.luma, state.grid_height,
-        state.grid_width);
+    // A grid row carries 12 coefficients per cell over a 16x16x8 grid. An
+    // unconstrained row mean absorbs the global colour mapping: the Gaussians
+    // lose their colour and the exported (canonical) model renders wrong.
+    // Projecting the mean back onto the identity affine keeps the grid a
+    // spatial residual and leaves global exposure / white balance to the
+    // anchored PPISP model. The bound keeps a divergent row from producing
+    // non-finite renders.
+    const int rows = static_cast<int>(state.grids.shape()[0]);
+    if (rows <= 0) return;
+    bilateral_constrain_kernel<<<
+        static_cast<unsigned>(rows * k_affine_channels), k_cuda_threads>>>(
+        state.grids.ptr<float>(), rows, state.luma, state.grid_height,
+        state.grid_width, options.bilateral_grid_identity_projection ? 1 : 0,
+        options.bilateral_grid_deviation_limit);
     check_cuda(
-        cudaGetLastError(), "project bilateral grid mean onto identity");
+        cudaGetLastError(), "constrain bilateral grid coefficients");
 }
 
 }  // namespace aetherscan::splat::detail
