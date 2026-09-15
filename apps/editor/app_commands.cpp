@@ -460,7 +460,7 @@ void apply_project_settings(
     app.settings.multi_view_ncc_weight = settings.multi_view_ncc_weight;
     app.settings.geometry_from_iter = settings.geometry_from_iter;
     app.settings.normal_field = settings.normal_field;
-    app.settings.ppisp_layout = std::clamp(settings.ppisp_layout, 0, 2);
+    app.settings.ppisp_layout = settings.ppisp_layout != 0 ? 1 : 0;
     app.settings.bilateral_grid = settings.bilateral_grid;
     app.settings.texture_quality = std::clamp(settings.texture_quality, 0, 2);
     app.settings.atlas_resolution = settings.atlas_resolution > 0

@@ -65,8 +65,9 @@ struct Settings {
     int geometry_from_iter = 3'000;
     bool normal_field = false;
     // Training-time colour correction for auto-exposure / auto-white-balance
-    // drift: ppisp_layout 0 = off, 1 = channel gain/bias, 2 = exposure and
-    // white balance. The bilateral grid adds spatially varying correction.
+    // drift: ppisp_layout 0 = off, nonzero = PPISP on. Legacy value 2
+    // (exposure + white balance) is treated as on. The bilateral grid adds
+    // spatially varying correction.
     int ppisp_layout = 0;
     bool bilateral_grid = false;
 };

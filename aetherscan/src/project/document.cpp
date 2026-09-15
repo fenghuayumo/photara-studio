@@ -98,7 +98,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::uint8_t>(settings.texture_optimize));
     writer.value(static_cast<std::int32_t>(settings.densification_cap));
     writer.value(static_cast<std::int32_t>(settings.sh_degree));
-    writer.value(static_cast<std::int32_t>(settings.ppisp_layout));
+    writer.value(static_cast<std::int32_t>(settings.ppisp_layout != 0 ? 1 : 0));
     writer.value(static_cast<std::uint8_t>(settings.bilateral_grid));
     return writer.take();
 }
@@ -177,7 +177,8 @@ Settings decode_settings(
     if (reader.remaining() >= sizeof(std::int32_t))
         settings.sh_degree = reader.value<std::int32_t>();
     if (reader.remaining() >= sizeof(std::int32_t))
-        settings.ppisp_layout = reader.value<std::int32_t>();
+        settings.ppisp_layout =
+            reader.value<std::int32_t>() != 0 ? 1 : 0;
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.bilateral_grid = reader.value<std::uint8_t>() != 0;
     return settings;

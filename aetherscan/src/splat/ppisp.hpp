@@ -46,9 +46,8 @@ void backward_ppisp(
 void step_ppisp(
     PpispState& state, const TrainingOptions& options, unsigned iteration);
 
-// Diagnostics for the training log: mean and maximum |gain - 1| over the
-// parameter table. The layout decides which parameters are gains
-// (channel_gain_bias: three per view, every other layout: the exposure).
+// Diagnostics for the training log: mean and maximum |2^exposure - 1|
+// over the per-view PPISP table.
 [[nodiscard]] std::array<float, 2> ppisp_identity_deviation(
     const PpispState& state);
 

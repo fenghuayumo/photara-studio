@@ -381,8 +381,7 @@ void print_help(const cxxopts::Options& options) {
                  "correction (default false)\n"
               << "  --splat-ppisp=BOOL  PPISP exposure/white-balance correction "
                  "(default false)\n"
-              << "  --splat-ppisp-type TYPE  channel_gain_bias, no_crf_no_vig "
-                 "(default), no_crf, or original\n"
+              << "  --splat-ppisp-type TYPE  no_crf_no_vig (default), no_crf, or original\n"
               << "  --splat-strategy adc_plus|adc_igs\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
@@ -766,7 +765,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "PPISP per-view exposure/white-balance colour correction",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-ppisp-type",
-         "PPISP layout: channel_gain_bias, no_crf_no_vig, no_crf, or original",
+         "PPISP layout: no_crf_no_vig, no_crf, or original",
          cxxopts::value<std::string>()->default_value("no_crf_no_vig"))
         ("splat-ppisp-lr", "PPISP Adam learning rate",
          cxxopts::value<float>()->default_value("0.002"))
@@ -1346,13 +1345,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.splat_alpha_mode != "transparent")
         throw std::invalid_argument(
             "--splat-alpha-mode must be masked or transparent");
-    if (cli.splat_ppisp_type != "channel_gain_bias" &&
-        cli.splat_ppisp_type != "no_crf_no_vig" &&
+    if (cli.splat_ppisp_type != "no_crf_no_vig" &&
         cli.splat_ppisp_type != "no_crf" &&
         cli.splat_ppisp_type != "original")
         throw std::invalid_argument(
-            "--splat-ppisp-type must be channel_gain_bias, no_crf_no_vig, "
-            "no_crf, or original");
+            "--splat-ppisp-type must be no_crf_no_vig, no_crf, or original");
     if (cli.splat_bilateral_grid_width == 0 ||
         cli.splat_bilateral_grid_height == 0 ||
         cli.splat_bilateral_grid_luma == 0)
@@ -1803,9 +1800,7 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.multi_view_ncc_weight = cli.splat_multi_view_ncc_weight;
     settings.geometry_from_iter = static_cast<int>(cli.splat_geometry_from_iter);
     settings.normal_field = cli.splat_normal_field;
-    settings.ppisp_layout = !cli.splat_ppisp
-        ? 0
-        : cli.splat_ppisp_type == "channel_gain_bias" ? 1 : 2;
+    settings.ppisp_layout = cli.splat_ppisp ? 1 : 0;
     settings.bilateral_grid = cli.splat_bilateral_grid;
     settings.atlas_resolution = static_cast<int>(cli.atlas_resolution);
     settings.texture_delight = cli.delight;
@@ -2659,9 +2654,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         ? aetherscan::splat::PpispParamType::original
         : cli.splat_ppisp_type == "no_crf"
             ? aetherscan::splat::PpispParamType::no_crf
-            : cli.splat_ppisp_type == "channel_gain_bias"
-                ? aetherscan::splat::PpispParamType::channel_gain_bias
-                : aetherscan::splat::PpispParamType::no_crf_no_vig;
+            : aetherscan::splat::PpispParamType::no_crf_no_vig;
     options.ppisp_lr = cli.splat_ppisp_lr;
     options.ppisp_before_bilagrid = cli.splat_ppisp_before_bilagrid;
     if (!dense_input) {

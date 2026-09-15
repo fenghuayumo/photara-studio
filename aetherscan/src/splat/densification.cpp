@@ -214,8 +214,7 @@ void apply_strategy_defaults(TrainingOptions& options) {
         options.sh_regularization_weight = 0.001F;
         options.ignore_undistortion_border = true;
         // Colour correction for auto-exposure / white-balance drift stays
-        // opt-in: `--splat-ppisp` (including its channel_gain_bias layout) and
-        // `--splat-bilateral-grid`.
+        // opt-in: `--splat-ppisp` and `--splat-bilateral-grid`.
         break;
     case DensificationStrategy::dense_adaptive:
         break;

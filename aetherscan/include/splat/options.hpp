@@ -20,11 +20,8 @@ enum class DensificationStrategy {
 
 // PPISP (per-pixel image signal processing) parameter layout. The default
 // keeps exposure and a colour-homography white-balance; vignetting and the
-// CRF are opt-in for captures that need them. `channel_gain_bias` is the
-// lightweight layout: three log2 gains and three biases, which is what a video
-// capture needs when only auto-exposure and auto white balance drift.
+// CRF are opt-in for captures that need them.
 enum class PpispParamType {
-    channel_gain_bias,
     no_crf_no_vig,
     no_crf,
     original,
@@ -32,8 +29,6 @@ enum class PpispParamType {
 
 [[nodiscard]] constexpr int ppisp_parameter_count(PpispParamType type) {
     switch (type) {
-    case PpispParamType::channel_gain_bias:
-        return 6;
     case PpispParamType::no_crf_no_vig:
         return 9;
     case PpispParamType::no_crf:
@@ -156,8 +151,7 @@ struct TrainingOptions {
     // Training-time colour correction for auto-exposure / auto-white-balance
     // drift in video captures. Both transforms are applied to the rendered
     // image the photometric loss sees; evaluation, preview and exported models
-    // keep canonical appearance. The per-view gain/bias model is the
-    // `channel_gain_bias` PPISP layout rather than a separate code path.
+    // keep canonical appearance.
     bool use_bilateral_grid{false};
     // One grid shared by every view (the default) or one grid per view. A
     // per-view grid has more free parameters than the view has pixels and

@@ -898,9 +898,8 @@ GaussianModel Trainer::train(
         &means_state, &scales_state, &rotations_state, &opacity_state,
         &sh_state, &normal_features_state};
     // Per-view photometric compensation. State is indexed by the source view,
-    // so it survives densification: rows change, cameras do not. PPISP carries
-    // both the physically-based ISP layouts and the lightweight gain/bias
-    // layout; the bilateral grid adds spatial variation on top.
+    // so it survives densification: rows change, cameras do not. PPISP owns
+    // exposure and white-balance; the bilateral grid adds spatial variation.
     const bool ppisp_enabled = options_.use_ppisp;
     const bool bilagrid_enabled = options_.use_bilateral_grid;
     const bool ppisp_before_bilagrid = options_.ppisp_before_bilagrid;

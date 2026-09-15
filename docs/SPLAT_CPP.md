@@ -27,8 +27,8 @@ RealityCapture 或 OpenMVS。Gaussian 写出格式看 `--output` 后缀：`.sog`
 - `aetherscan/src/splat/rasterizer.cu`：TinyTensor tensor 与 GGGS 原生 CUDA API 的桥接；
 - `aetherscan/src/splat/cuda_ops.cu`：参数激活、链式梯度、融合监督损失和融合 Adam；
 - `aetherscan/src/splat/bilateral_grid.cu`：仿射双边网格颜色校正（训练期、空间变化）；
-- `aetherscan/src/splat/ppisp.cu`：PPISP 颜色校正，含 `channel_gain_bias`（轻量级
-  每通道增益/偏置）、`no_crf_no_vig`（曝光 + 白平衡单应）与可选暗角 / CRF 布局；
+- `aetherscan/src/splat/ppisp.cu`：PPISP 颜色校正，默认 `no_crf_no_vig`（曝光 +
+  白平衡单应），可选暗角 / CRF 布局；
 - `aetherscan/src/splat/fused_ssim.cu`：从 Python fused-ssim 完整移植的 11×11 CUDA
   forward/backward；
 - `aetherscan/src/splat/colmap.cpp`：COLMAP 文本/二进制相机、位姿、稀疏点和 track 加载；
@@ -42,7 +42,7 @@ RealityCapture 或 OpenMVS。Gaussian 写出格式看 `--output` 后缀：`.sog`
 训练损失包含与 `pygsplat/simple_trainer.py` 对齐的 `0.8 * L1 + 0.2 * SSIM` 光度项和可选
 mask/alpha loss。室外视频的自动曝光 / 白平衡漂移可以由两种训练期颜色校正吸收，两者都
 移植自 spirula-studio，都不写入导出模型，且都默认关闭：PPISP
-（`--splat-ppisp --splat-ppisp-type channel_gain_bias|no_crf_no_vig|no_crf|original`）
+（`--splat-ppisp --splat-ppisp-type no_crf_no_vig|no_crf|original`）
 与仿射双边网格（`--splat-bilateral-grid`）。每视图模型与场景颜色之间存在退化，因此
 PPISP 把跨视图曝光/色彩均值锚定到单位变换，双边网格在每次更新后把每视图网格均值
 投影回 identity 仿射——网格只表达空间变化，全局曝光归 PPISP。同时开启时默认先 PPISP、

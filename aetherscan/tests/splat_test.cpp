@@ -1868,64 +1868,9 @@ void test_photometric_colour_correction_identity() {
         require(
             std::abs(exposed[i] - pixels[i] * gain) < 5e-4F,
             "PPISP exposure did not scale the rendered colour");
-    // Lightweight layout: per-channel log2 gain and bias, the cheap model for
-    // auto-exposure / auto-white-balance drift.
     const auto ones = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels.size(), 1.F), color.shape(),
         tinytensor::Device::CUDA);
-    TrainingOptions channel_options;
-    channel_options.use_ppisp = true;
-    channel_options.ppisp_type = PpispParamType::channel_gain_bias;
-    auto channel = detail::make_ppisp_state(2, channel_options);
-    require(
-        channel.num_params == 6,
-        "channel_gain_bias must carry six parameters");
-    detail::apply_ppisp(color, channel, camera, 1);
-    const auto channel_identity = channel.output.to_vector();
-    for (std::size_t i = 0; i < pixels.size(); ++i)
-        require(
-            std::abs(channel_identity[i] - pixels[i]) < 1e-6F,
-            "identity channel gain/bias changed the rendered colour");
-    auto channel_values = channel.parameters.to_vector();
-    channel_values[6 + 0] = 1.F;
-    channel_values[6 + 1] = -1.F;
-    channel_values[6 + 3] = 0.25F;
-    channel.parameters = tinytensor::Tensor::from_vector(
-        channel_values, channel.parameters.shape(), tinytensor::Device::CUDA);
-    detail::apply_ppisp(color, channel, camera, 1);
-    const auto channel_out = channel.output.to_vector();
-    for (std::size_t p = 0; p < pixels.size() / 3; ++p) {
-        require(
-            std::abs(channel_out[p] - (2.F * pixels[p] + 0.25F)) < 1e-5F,
-            "channel gain/bias did not scale the red channel");
-        require(
-            std::abs(channel_out[pixels.size() / 3 + p] -
-                         0.5F * pixels[pixels.size() / 3 + p]) < 1e-5F,
-            "channel gain/bias did not scale the green channel");
-    }
-    channel_values = std::vector<float>(12, 0.F);
-    channel.parameters = tinytensor::Tensor::from_vector(
-        channel_values, channel.parameters.shape(), tinytensor::Device::CUDA);
-    detail::backward_ppisp(channel, color, ones, camera, 0);
-    const auto channel_grad = channel.input_grad.to_vector();
-    for (std::size_t i = 0; i < pixels.size(); ++i)
-        require(
-            std::abs(channel_grad[i] - 1.F) < 1e-5F,
-            "identity channel gain/bias backward did not pass the gradient");
-    const auto channel_parameter_grad = channel.gradient.to_vector();
-    // The incoming gradient is one per pixel (a sum, not a mean), so the gain
-    // gradient integrates the red plane and the bias gradient counts pixels.
-    const std::size_t plane = pixels.size() / 3;
-    const double total_red =
-        std::accumulate(pixels.begin(), pixels.begin() + plane, 0.0);
-    require(
-        std::abs(channel_parameter_grad[0] -
-                 static_cast<float>(total_red * std::log(2.F))) < 1e-2F,
-        "channel gain gradient does not match the exposure derivative");
-    require(
-        std::abs(channel_parameter_grad[3] -
-                 static_cast<float>(plane)) < 1e-2F,
-        "channel bias gradient does not match the pixel count");
     ppisp.parameters = tinytensor::Tensor::zeros_like(ppisp.parameters);
     detail::backward_ppisp(ppisp, color, ones, camera, 0);
     const auto ppisp_grad = ppisp.input_grad.to_vector();

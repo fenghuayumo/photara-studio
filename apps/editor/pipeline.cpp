@@ -1145,9 +1145,7 @@ std::string build_train_command(
             << " --splat-normal-field="
             << (settings.normal_field ? "true" : "false");
     if (settings.ppisp_layout != 0)
-        command << " --splat-ppisp=true --splat-ppisp-type "
-                << (settings.ppisp_layout == 2 ? "no_crf_no_vig"
-                                               : "channel_gain_bias");
+        command << " --splat-ppisp=true";
     if (settings.bilateral_grid)
         command << " --splat-bilateral-grid=true";
     append_video_extract_flags(command, settings);

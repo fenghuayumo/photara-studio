@@ -31,8 +31,8 @@
   一个 log2 曝光 + 8 个色彩单应参数，常量矩阵与 spirula-studio 的
   `generated/ppisp.cuh` 完全一致）；另提供 `no_crf`（24 参数，含暗角）与 `original`
   （36 参数，含 CRF）布局。色彩单应的雅可比在设备端用中心差分求，暗角/CRF 的 VJP 同样
-  移植。**`channel_gain_bias`（6 参数：三通道 log2 增益 + 三通道偏置）也并入本模块**，
-  作为“轻量级”布局，而不是独立代码路径：状态、优化器、正则化只有一套。
+  移植。早期还带过 `channel_gain_bias`（6 参数：三通道 log2 增益 + 三通道偏置）；
+  与默认 PPISP 功能重复且 canonical 指标更差，该布局已删除。
 - `aetherscan/src/splat/bilateral_grid.cu`：仿射双边网格（每格 3×4 矩阵，12 通道，
   通道后置），在 (x, y, 亮度) 上三线性插值；TV 正则梯度、Adam 更新、identity 初始化与
   reference 的 fused-bilagrid 归一化一致。
@@ -139,7 +139,6 @@ python experiments/run_ab.py `
   --dataset D:/ScanVideo/antman_nomask `
   --output artifacts/igs_quality_next_20260914/antman_matrix --camera-audit --visibility-audit `
   --config "baseline:--splat-bilateral-grid=false,--splat-ppisp=false" `
-  --config "ppisp_channel:--splat-ppisp=true,--splat-ppisp-type=channel_gain_bias" `
   --config "ppisp_isp:--splat-ppisp=true,--splat-ppisp-type=no_crf_no_vig" `
   --config "bilagrid:--splat-bilateral-grid=true" `
   --config "both:--splat-bilateral-grid=true,--splat-ppisp=true"

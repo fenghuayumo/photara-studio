@@ -395,19 +395,6 @@ Action draw_inspector(App& app) {
                 "Per-view exposure and white-balance correction for video\n"
                 "captures with auto exposure. Trained only; never baked into\n"
                 "the exported model.");
-        if (app.settings.ppisp_layout != 0) {
-            ImGui::SetNextItemWidth(-1.F);
-            const char* layouts[] = {
-                "Channel gain/bias (light)", "Exposure + white balance"};
-            int layout = app.settings.ppisp_layout - 1;
-            if (ImGui::Combo("##ppisp_layout", &layout, layouts, 2))
-                app.settings.ppisp_layout = layout + 1;
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Channel gain/bias fits one exposure and white-balance\n"
-                    "gain per channel. Exposure + white balance uses the\n"
-                    "physically-based PPISP colour homography.");
-        }
         ImGui::Checkbox(
             tr("Bilateral grid colour correction"),
             &app.settings.bilateral_grid);

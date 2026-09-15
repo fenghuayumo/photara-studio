@@ -225,7 +225,6 @@ NB_MODULE(aetherscan_native, module) {
         .value("TRANSPARENT", splat::AlphaMode::transparent);
 
     nb::enum_<splat::PpispParamType>(module, "PpispParamType")
-        .value("CHANNEL_GAIN_BIAS", splat::PpispParamType::channel_gain_bias)
         .value("NO_CRF_NO_VIG", splat::PpispParamType::no_crf_no_vig)
         .value("NO_CRF", splat::PpispParamType::no_crf)
         .value("ORIGINAL", splat::PpispParamType::original);

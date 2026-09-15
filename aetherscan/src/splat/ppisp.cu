@@ -10,7 +10,6 @@ namespace aetherscan::splat::detail {
 namespace {
 
 constexpr int k_max_params = 36;
-constexpr int k_channel_params = 6;
 constexpr float k_ln2 = 0.69314718056F;
 constexpr float k_color_eps = 1e-3F;
 
@@ -278,52 +277,10 @@ __device__ int color_offset(const int num_params) {
     return num_params == 9 ? 1 : 16;
 }
 
-// Lightweight layout: one log2 gain and one bias per channel. It is the
-// cheapest model that explains auto-exposure and auto-white-balance drift, and
-// it lives in this module so there is a single optimizer, regularization and
-// state path for every per-view photometric model.
-__device__ float3 apply_channel_gain_bias(
-    const float3 rgb, const float* params, const bool clamp_output) {
-    float3 out = make_float3(
-        exp2f(params[0]) * rgb.x + params[3],
-        exp2f(params[1]) * rgb.y + params[4],
-        exp2f(params[2]) * rgb.z + params[5]);
-    if (clamp_output) {
-        out.x = fminf(fmaxf(out.x, 0.F), 1.F);
-        out.y = fminf(fmaxf(out.y, 0.F), 1.F);
-        out.z = fminf(fmaxf(out.z, 0.F), 1.F);
-    }
-    return out;
-}
-
-__device__ void apply_channel_gain_bias_vjp(
-    const float3 rgb, const float* params, const bool clamp_output,
-    float3 d_out, float3& d_rgb, float* d_params) {
-    if (clamp_output) {
-        const float3 pre = apply_channel_gain_bias(rgb, params, false);
-        if (pre.x <= 0.F || pre.x >= 1.F) d_out.x = 0.F;
-        if (pre.y <= 0.F || pre.y >= 1.F) d_out.y = 0.F;
-        if (pre.z <= 0.F || pre.z >= 1.F) d_out.z = 0.F;
-    }
-    const float3 gain = make_float3(
-        exp2f(params[0]), exp2f(params[1]), exp2f(params[2]));
-    d_rgb.x += d_out.x * gain.x;
-    d_rgb.y += d_out.y * gain.y;
-    d_rgb.z += d_out.z * gain.z;
-    d_params[0] += d_out.x * rgb.x * gain.x * k_ln2;
-    d_params[1] += d_out.y * rgb.y * gain.y * k_ln2;
-    d_params[2] += d_out.z * rgb.z * gain.z * k_ln2;
-    d_params[3] += d_out.x;
-    d_params[4] += d_out.y;
-    d_params[5] += d_out.z;
-}
-
 __device__ float3 apply_ppisp_pixel(
     float3 rgb, const float2 pix, const float2 center, const float2 size,
     const float* params, const int num_params, const bool clamp_output,
     const float H[9]) {
-    if (num_params == k_channel_params)
-        return apply_channel_gain_bias(rgb, params, clamp_output);
     const float gain = exp2f(params[0]);
     rgb = make_float3(rgb.x * gain, rgb.y * gain, rgb.z * gain);
     if (num_params >= 24) rgb = apply_vignetting(rgb, pix, center, size, params + 1);
@@ -346,7 +303,7 @@ __global__ void ppisp_forward_kernel(
     if (threadIdx.x < num_params)
         shared_params[threadIdx.x] = params[view * num_params + threadIdx.x];
     __syncthreads();
-    if (threadIdx.x == 0 && num_params != k_channel_params)
+    if (threadIdx.x == 0)
         compute_homography(shared_params + color_offset(num_params), H);
     __syncthreads();
     const int pixel = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -377,7 +334,7 @@ __global__ void ppisp_backward_kernel(
     if (threadIdx.x < num_params)
         shared_params[threadIdx.x] = params[view * num_params + threadIdx.x];
     __syncthreads();
-    if (threadIdx.x == 0 && num_params != k_channel_params)
+    if (threadIdx.x == 0)
         homography_jacobian(shared_params + color_offset(num_params), H, dH);
     __syncthreads();
     const int pixel = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -399,10 +356,6 @@ __global__ void ppisp_backward_kernel(
             const float2 center = make_float2(cx, cy);
             const float2 size = make_float2(
                 static_cast<float>(width), static_cast<float>(height));
-            if (num_params == k_channel_params) {
-                apply_channel_gain_bias_vjp(
-                    rgb, shared_params, clamp_output, d_out, d_in, local);
-            } else {
             const float gain = exp2f(shared_params[0]);
             const float3 exposed =
                 make_float3(rgb.x * gain, rgb.y * gain, rgb.z * gain);
@@ -440,7 +393,6 @@ __global__ void ppisp_backward_kernel(
             local[0] += (d_out.x * exposed.x + d_out.y * exposed.y +
                             d_out.z * exposed.z) *
                 k_ln2;
-            }
         }
         input_grad[pixel] = d_in.x;
         input_grad[pixels + pixel] = d_in.y;
@@ -471,16 +423,6 @@ __global__ void ppisp_reg_sum_kernel(
     const int view = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (view >= views) return;
     const float* row = params + view * num_params;
-    if (num_params == k_channel_params) {
-        // Gains (as log2 stops) and biases are each anchored to identity by
-        // their own mean, so the scene keeps its canonical exposure instead of
-        // the transform silently absorbing a global colour shift.
-        for (int c = 0; c < 3; ++c) {
-            atomicAdd(sums + c, row[c]);
-            atomicAdd(sums + 3 + c, row[3 + c]);
-        }
-        return;
-    }
     atomicAdd(sums + 0, row[0]);
     float zca[8];
     zca_color(row + color_offset(num_params), zca);
@@ -502,20 +444,6 @@ __global__ void ppisp_reg_grad_kernel(
     const float inv_n = 1.F / static_cast<float>(views);
     const float* row = params + view * num_params;
     float* grad = grads + view * num_params;
-    if (num_params == k_channel_params) {
-        for (int c = 0; c < 3; ++c) {
-            // The anchor is a property of the cross-view mean, not of one
-            // view: dividing by the view count here would scale the prior with
-            // the dataset size and let the mean drift away from identity,
-            // which silently moves the canonical appearance of the trained
-            // model away from the photographs.
-            grad[c] += exposure_weight *
-                smooth_l1_grad(sums[c] * inv_n, 0.1F);
-            grad[3 + c] += color_weight *
-                smooth_l1_grad(sums[3 + c] * inv_n, 0.005F);
-        }
-        return;
-    }
     const float mean_e = sums[0] * inv_n;
     grad[0] += exposure_weight * smooth_l1_grad(mean_e, 0.1F);
     const int color = color_offset(num_params);
@@ -682,17 +610,14 @@ std::array<float, 2> ppisp_identity_deviation(const PpispState& state) {
     const std::size_t views =
         values.size() / static_cast<std::size_t>(state.num_params);
     if (views == 0) return result;
-    const int gains = state.num_params == k_channel_params ? 3 : 1;
     double total = 0.0;
     std::size_t count = 0;
     for (std::size_t view = 0; view < views; ++view) {
         const float* row = values.data() + view * state.num_params;
-        for (int channel = 0; channel < gains; ++channel) {
-            const float deviation = std::abs(std::exp2(row[channel]) - 1.F);
-            total += deviation;
-            ++count;
-            result[1] = std::max(result[1], deviation);
-        }
+        const float deviation = std::abs(std::exp2(row[0]) - 1.F);
+        total += deviation;
+        ++count;
+        result[1] = std::max(result[1], deviation);
     }
     if (count != 0) result[0] = static_cast<float>(total / count);
     return result;

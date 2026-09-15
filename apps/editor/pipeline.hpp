@@ -269,9 +269,8 @@ struct ProjectSettings {
     // GaussianWrapping normal-field training. Off is the default GGGS path.
     bool normal_field = false;
     // Training-time colour correction for auto-exposure / auto-white-balance
-    // drift. `ppisp_layout`: 0 off, 1 channel gain/bias, 2 exposure + white
-    // balance (PPISP homography). The bilateral grid adds spatially varying
-    // affine correction on top and is normally paired with PPISP.
+    // drift. `ppisp_layout`: 0 off, nonzero on (PPISP exposure + white
+    // balance). The bilateral grid adds spatially varying affine correction.
     int ppisp_layout = 0;
     bool bilateral_grid = false;
 
