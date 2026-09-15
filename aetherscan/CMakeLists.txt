@@ -718,6 +718,22 @@ if(AETHERSCAN_ENABLE_FEATURES)
                 ${AETHERSCAN_EDITOR_DIR}/ui_viewport.cpp
                 ${AETHERSCAN_EDITOR_DIR}/viewport_gizmo.cpp
                 ${AETHERSCAN_EDITOR_DIR}/vulkan_backend.cpp)
+            if(WIN32)
+                get_filename_component(_aetherscan_editor_icon
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../apps/icons/icon.ico"
+                    ABSOLUTE)
+                file(TO_CMAKE_PATH
+                    "${_aetherscan_editor_icon}" AETHERSCAN_EDITOR_ICON)
+                configure_file(
+                    "${AETHERSCAN_EDITOR_DIR}/aetherscan_editor.rc.in"
+                    "${CMAKE_CURRENT_BINARY_DIR}/aetherscan_editor.rc"
+                    @ONLY)
+                target_sources(aetherscan_editor PRIVATE
+                    "${CMAKE_CURRENT_BINARY_DIR}/aetherscan_editor.rc")
+                set_source_files_properties(
+                    "${CMAKE_CURRENT_BINARY_DIR}/aetherscan_editor.rc"
+                    PROPERTIES OBJECT_DEPENDS "${_aetherscan_editor_icon}")
+            endif()
             target_include_directories(aetherscan_editor PRIVATE
                 ${AETHERSCAN_EDITOR_DIR})
             target_link_libraries(aetherscan_editor PRIVATE
