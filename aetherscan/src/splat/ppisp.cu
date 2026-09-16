@@ -11,6 +11,8 @@ namespace aetherscan::splat::detail {
 namespace {
 
 constexpr int k_max_params = 36;
+// Entries of the colour homography, and of its pull-back vector.
+constexpr int k_affine_pullback = 9;
 constexpr float k_ln2 = 0.69314718056F;
 // Step of the device-side central difference that builds the colour-homography
 // Jacobian. At 1e-3 the float32 round-off of `compute_homography` dominated the
@@ -84,30 +86,21 @@ __device__ void compute_homography(const float* c, float H[9]) {
     }
 }
 
-// Colour homography and its eight-parameter Jacobian. The homography itself
-// and the sixteen perturbed evaluations are independent, so a block spreads
-// them over seventeen lanes instead of serialising them on thread zero; the
-// eight columns of the Jacobian then come out of the perturbed pairs.
-__device__ void homography_jacobian_parallel(
-    const float* color, float H[9], float dH[8][9], float perturbed[16][9]) {
-    const int lane = static_cast<int>(threadIdx.x);
-    if (lane == 0) compute_homography(color, H);
-    if (lane >= 1 && lane <= 16) {
-        const int index = lane - 1;
-        const int parameter = index >> 1;
-        const float sign = (index & 1) == 0 ? 1.F : -1.F;
-        float candidate[8];
-#pragma unroll
-        for (int i = 0; i < 8; ++i) candidate[i] = color[i];
-        candidate[parameter] += sign * k_color_eps;
-        compute_homography(candidate, perturbed[index]);
-    }
-    __syncthreads();
-    if (lane < 8) {
-#pragma unroll
+__device__ void homography_jacobian(
+    const float* color, float H[9], float dH[8][9]) {
+    compute_homography(color, H);
+    float perturbed[8];
+    for (int i = 0; i < 8; ++i) perturbed[i] = color[i];
+    for (int i = 0; i < 8; ++i) {
+        float plus[9];
+        float minus[9];
+        perturbed[i] = color[i] + k_color_eps;
+        compute_homography(perturbed, plus);
+        perturbed[i] = color[i] - k_color_eps;
+        compute_homography(perturbed, minus);
+        perturbed[i] = color[i];
         for (int k = 0; k < 9; ++k)
-            dH[lane][k] = (perturbed[2 * lane][k] - perturbed[2 * lane + 1][k]) /
-                (2.F * k_color_eps);
+            dH[i][k] = (plus[k] - minus[k]) / (2.F * k_color_eps);
     }
 }
 
@@ -123,9 +116,15 @@ __device__ float3 apply_color(const float3 rgb, const float H[9]) {
     return make_float3(out_r, out_g, intensity - out_r - out_g);
 }
 
-__device__ void apply_color_vjp(
-    const float3 rgb, const float H[9], const float dH[8][9],
-    const float3 d_out, float3& d_rgb, float d_color[8]) {
+// VJP of the colour homography. The chain is unchanged; what used to be a
+// per-pixel contraction with the eight-by-nine Jacobian now accumulates the
+// nine-element pull-back, and the contraction happens once per view in
+// ppisp_colour_grad_kernel. The Jacobian is the same for every pixel of a
+// view, so contracting per pixel spent 72 fused multiplies per pixel on work
+// that belongs to the view.
+__device__ void apply_color_vjp_pullback(
+    const float3 rgb, const float H[9], const float3 d_out, float3& d_rgb,
+    float colour_pullback[k_affine_pullback]) {
     const float intensity = rgb.x + rgb.y + rgb.z;
     const float3 rgi_in = make_float3(rgb.x, rgb.y, intensity);
     const float3 rgi_out = mat3_mul_vec(H, rgi_in);
@@ -143,21 +142,19 @@ __device__ void apply_color_vjp(
     float d_rgi_z = 0.F;
     if (rgi_out.z > zmin) d_rgi_z += d_z;
     else d_int += d_z * (intensity >= 0.F ? 1.0e-4F : -1.0e-4F);
-    float dH_acc[9] = {
+    const float accumulated[9] = {
         d_rgi_x * rgi_in.x, d_rgi_x * rgi_in.y, d_rgi_x * rgi_in.z,
         d_rgi_y * rgi_in.x, d_rgi_y * rgi_in.y, d_rgi_y * rgi_in.z,
         d_rgi_z * rgi_in.x, d_rgi_z * rgi_in.y, d_rgi_z * rgi_in.z};
+#pragma unroll
+    for (int k = 0; k < k_affine_pullback; ++k)
+        colour_pullback[k] += accumulated[k];
     const float d_r = H[0] * d_rgi_x + H[3] * d_rgi_y + H[6] * d_rgi_z;
     const float d_g = H[1] * d_rgi_x + H[4] * d_rgi_y + H[7] * d_rgi_z;
     d_int += H[2] * d_rgi_x + H[5] * d_rgi_y + H[8] * d_rgi_z;
     d_rgb.x += d_r + d_int;
     d_rgb.y += d_g + d_int;
     d_rgb.z += d_int;
-    for (int i = 0; i < 8; ++i) {
-        float sum = 0.F;
-        for (int k = 0; k < 9; ++k) sum += dH_acc[k] * dH[i][k];
-        d_color[i] += sum;
-    }
 }
 
 __device__ float3 apply_vignetting(
@@ -419,90 +416,204 @@ __global__ void ppisp_forward_kernel(
     corrected[2 * pixels + pixel] = out.z;
 }
 
+// Per-pixel pull-back of the PPISP chain. Colour and output gradient arrive per
+// pixel; parameter contributions accumulate into `local`, while the colour
+// homography accumulates the nine-element pull-back vector that the view-level
+// contraction turns into eight parameter gradients afterwards.
+template <int k_params>
+__device__ __forceinline__ void ppisp_pixel_vjp(
+    const float3 rgb, const float3 d_out_in, const float2 pix,
+    const float2 center, const float2 size, const float* shared_params,
+    const float H[9], const bool clamp_output, float* local,
+    float* colour_pullback, float3& d_in) {
+    if (d_out_in.x == 0.F && d_out_in.y == 0.F && d_out_in.z == 0.F) return;
+    float3 d_out = d_out_in;
+    const float gain = exp2f(shared_params[0]);
+    const float3 exposed =
+        make_float3(rgb.x * gain, rgb.y * gain, rgb.z * gain);
+    const float3 vig = k_params >= 24
+        ? apply_vignetting(exposed, pix, center, size, shared_params + 1)
+        : exposed;
+    const float3 coloured = apply_color(vig, H);
+    float3 pre_clamp = coloured;
+    if constexpr (k_params == 36)
+        pre_clamp = apply_crf(coloured, shared_params + 24);
+    if (clamp_output) {
+        if (pre_clamp.x <= 0.F || pre_clamp.x >= 1.F) d_out.x = 0.F;
+        if (pre_clamp.y <= 0.F || pre_clamp.y >= 1.F) d_out.y = 0.F;
+        if (pre_clamp.z <= 0.F || pre_clamp.z >= 1.F) d_out.z = 0.F;
+    }
+    float3 d_stage = make_float3(0.F, 0.F, 0.F);
+    if constexpr (k_params == 36) {
+        apply_crf_vjp(
+            coloured, shared_params + 24, d_out, d_stage, local + 24);
+        d_out = d_stage;
+        d_stage = make_float3(0.F, 0.F, 0.F);
+    }
+    apply_color_vjp_pullback(vig, H, d_out, d_stage, colour_pullback);
+    d_out = d_stage;
+    d_stage = make_float3(0.F, 0.F, 0.F);
+    if constexpr (k_params >= 24) {
+        apply_vignetting_vjp(
+            exposed, pix, center, size, shared_params + 1, d_out, d_stage,
+            local + 1);
+        d_out = d_stage;
+    }
+    d_in.x += d_out.x * gain;
+    d_in.y += d_out.y * gain;
+    d_in.z += d_out.z * gain;
+    local[0] += (d_out.x * exposed.x + d_out.y * exposed.y +
+                    d_out.z * exposed.z) *
+        k_ln2;
+}
+
+// Backward pass of PPISP. One thread owns a run of `k_pixels` consecutive
+// pixels loaded as float4, so a warp keeps four times as many bytes in flight:
+// the per-pixel version spent 56% of its warp cycles on long-scoreboard stalls
+// (global loads) and 26% on short-scoreboard ones (shared and shuffle
+// results). The run's parameter contributions are summed in registers before
+// the warp reduction, which cuts that reduction by the run length as well.
 template <int k_params>
 __global__ void ppisp_backward_kernel(
-    const float* color, const float* params, const float* output_grad,
-    float* input_grad, float* param_grad, const int view, const int height,
-    const int width, const float cx, const float cy, const bool clamp_output) {
+    const float* __restrict__ color, const float* __restrict__ params,
+    const float* __restrict__ output_grad, float* __restrict__ input_grad,
+    float* __restrict__ param_grad, float* __restrict__ colour_pullback_view,
+    const int view, const int height, const int width, const float cx,
+    const float cy, const bool clamp_output) {
+    constexpr int k_pixels = 4;
     constexpr int k_color = layout_color_offset<k_params>();
     __shared__ float shared_params[k_params];
     __shared__ float H[9];
-    __shared__ float dH[8][9];
-    __shared__ float perturbed_homographies[16][9];
     if (threadIdx.x < k_params)
         shared_params[threadIdx.x] = params[view * k_params + threadIdx.x];
     __syncthreads();
-    homography_jacobian_parallel(
-        shared_params + k_color, H, dH, perturbed_homographies);
-    const int pixel = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    // The eight-by-nine Jacobian is gone from this kernel: the pull-back it
+    // used to contract is now summed per view.
+    if (threadIdx.x == 0)
+        compute_homography(shared_params + k_color, H);
+    __syncthreads();
+
     const int pixels = height * width;
-    const bool inside = pixel < pixels;
+    const int first =
+        static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x) * k_pixels;
     float local[k_params]{};
-    float3 d_in = make_float3(0.F, 0.F, 0.F);
-    if (inside) {
-        const int x = pixel % width;
-        const int y = pixel / width;
-        float3 rgb = make_float3(
-            color[pixel], color[pixels + pixel], color[2 * pixels + pixel]);
-        float3 d_out = make_float3(
-            output_grad[pixel], output_grad[pixels + pixel],
-            output_grad[2 * pixels + pixel]);
-        if (d_out.x != 0.F || d_out.y != 0.F || d_out.z != 0.F) {
-            const float2 pix =
-                make_float2(static_cast<float>(x), static_cast<float>(y));
-            const float2 center = make_float2(cx, cy);
-            const float2 size = make_float2(
-                static_cast<float>(width), static_cast<float>(height));
-            const float gain = exp2f(shared_params[0]);
-            const float3 exposed =
-                make_float3(rgb.x * gain, rgb.y * gain, rgb.z * gain);
-            const float3 vig = k_params >= 24
-                ? apply_vignetting(exposed, pix, center, size, shared_params + 1)
-                : exposed;
-            const float3 coloured = apply_color(vig, H);
-            float3 pre_clamp = coloured;
-            if constexpr (k_params == 36)
-                pre_clamp = apply_crf(coloured, shared_params + 24);
-            if (clamp_output) {
-                if (pre_clamp.x <= 0.F || pre_clamp.x >= 1.F) d_out.x = 0.F;
-                if (pre_clamp.y <= 0.F || pre_clamp.y >= 1.F) d_out.y = 0.F;
-                if (pre_clamp.z <= 0.F || pre_clamp.z >= 1.F) d_out.z = 0.F;
-            }
-            float3 d_stage = make_float3(0.F, 0.F, 0.F);
-            if constexpr (k_params == 36) {
-                apply_crf_vjp(
-                    coloured, shared_params + 24, d_out, d_stage, local + 24);
-                d_out = d_stage;
-                d_stage = make_float3(0.F, 0.F, 0.F);
-            }
-            apply_color_vjp(vig, H, dH, d_out, d_stage, local + k_color);
-            d_out = d_stage;
-            d_stage = make_float3(0.F, 0.F, 0.F);
-            if constexpr (k_params >= 24) {
-                apply_vignetting_vjp(
-                    exposed, pix, center, size, shared_params + 1, d_out,
-                    d_stage, local + 1);
-                d_out = d_stage;
-            }
-            d_in.x += d_out.x * gain;
-            d_in.y += d_out.y * gain;
-            d_in.z += d_out.z * gain;
-            local[0] += (d_out.x * exposed.x + d_out.y * exposed.y +
-                            d_out.z * exposed.z) *
-                k_ln2;
-        }
-        input_grad[pixel] = d_in.x;
-        input_grad[pixels + pixel] = d_in.y;
-        input_grad[2 * pixels + pixel] = d_in.z;
-    }
+    float pullback[k_affine_pullback]{};
+    if (first < pixels) {
+        float3 rgb[k_pixels];
+        float3 d_out[k_pixels];
+        float3 d_in[k_pixels];
+        const bool vector_ok = (pixels % k_pixels) == 0;
 #pragma unroll
-    for (int i = 0; i < k_params; ++i) {
-        float value = isfinite(local[i]) ? local[i] : 0.F;
+        for (int slot = 0; slot < k_pixels; ++slot) {
+            rgb[slot] = make_float3(0.F, 0.F, 0.F);
+            d_out[slot] = make_float3(0.F, 0.F, 0.F);
+            d_in[slot] = make_float3(0.F, 0.F, 0.F);
+        }
+        if (vector_ok) {
+            float4 colour[3];
+            float4 gradient[3];
+#pragma unroll
+            for (int channel = 0; channel < 3; ++channel) {
+                colour[channel] = *reinterpret_cast<const float4*>(
+                    color + channel * pixels + first);
+                gradient[channel] = *reinterpret_cast<const float4*>(
+                    output_grad + channel * pixels + first);
+            }
+#pragma unroll
+            for (int slot = 0; slot < k_pixels; ++slot) {
+                const float* colour_slot =
+                    reinterpret_cast<const float*>(colour);
+                const float* gradient_slot =
+                    reinterpret_cast<const float*>(gradient);
+                rgb[slot] = make_float3(
+                    colour_slot[slot], colour_slot[k_pixels + slot],
+                    colour_slot[2 * k_pixels + slot]);
+                d_out[slot] = make_float3(
+                    gradient_slot[slot], gradient_slot[k_pixels + slot],
+                    gradient_slot[2 * k_pixels + slot]);
+            }
+        } else {
+#pragma unroll
+            for (int slot = 0; slot < k_pixels; ++slot) {
+                const int pixel = first + slot;
+                if (pixel >= pixels) break;
+                rgb[slot] = make_float3(
+                    color[pixel], color[pixels + pixel],
+                    color[2 * pixels + pixel]);
+                d_out[slot] = make_float3(
+                    output_grad[pixel], output_grad[pixels + pixel],
+                    output_grad[2 * pixels + pixel]);
+            }
+        }
+        const float2 center = make_float2(cx, cy);
+        const float2 size =
+            make_float2(static_cast<float>(width), static_cast<float>(height));
+#pragma unroll
+        for (int slot = 0; slot < k_pixels; ++slot) {
+            const int pixel = first + slot;
+            if (pixel >= pixels) break;
+            ppisp_pixel_vjp<k_params>(
+                rgb[slot], d_out[slot],
+                make_float2(
+                    static_cast<float>(pixel % width),
+                    static_cast<float>(pixel / width)),
+                center, size, shared_params, H, clamp_output, local, pullback,
+                d_in[slot]);
+        }
+#pragma unroll
+        for (int slot = 0; slot < k_pixels; ++slot) {
+            const int pixel = first + slot;
+            if (pixel >= pixels) break;
+            input_grad[pixel] = d_in[slot].x;
+            input_grad[pixels + pixel] = d_in[slot].y;
+            input_grad[2 * pixels + pixel] = d_in[slot].z;
+        }
+    }
+
+    // The colour pull-back is shared by the whole view, so it lands in its own
+    // buffer; the eight colour gradients come out of a single contraction per
+    // view in ppisp_colour_grad_kernel.
+#pragma unroll
+    for (int i = 0; i < k_params + k_affine_pullback; ++i) {
+        float value = i < k_params ? local[i] : pullback[i - k_params];
+        value = isfinite(value) ? value : 0.F;
         for (int offset = 16; offset > 0; offset >>= 1)
             value += __shfl_down_sync(0xffffffffU, value, offset);
-        if ((threadIdx.x & 31U) == 0U && value != 0.F)
+        if ((threadIdx.x & 31U) != 0U || value == 0.F) continue;
+        if (i < k_params)
             atomicAdd(param_grad + view * k_params + i, value);
+        else
+            atomicAdd(colour_pullback_view + i - k_params, value);
     }
+}
+
+// Contraction of one view's colour pull-back into its eight parameter
+// gradients: d_p[i] = sum_k dH[i][k] * pullback[k]. It runs over the whole
+// view table but only the view that just trained has a non-zero pull-back.
+template <int k_params>
+__global__ void ppisp_colour_grad_kernel(
+    const float* __restrict__ params, const float* __restrict__ pullback,
+    float* __restrict__ param_grad, const int views) {
+    constexpr int k_color = layout_color_offset<k_params>();
+    const int view = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (view >= views) return;
+    const float* row = pullback + view * k_affine_pullback;
+    float magnitude = 0.F;
+#pragma unroll
+    for (int k = 0; k < k_affine_pullback; ++k)
+        magnitude += fabsf(row[k]);
+    if (magnitude == 0.F) return;
+    float H[9];
+    float dH[8][9];
+    homography_jacobian(params + view * k_params + k_color, H, dH);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        float value = 0.F;
+#pragma unroll
+        for (int k = 0; k < 9; ++k) value += dH[i][k] * row[k];
+        param_grad[view * k_params + k_color + i] = value;
+    }
+    (void)H;
 }
 
 __device__ void zca_color(const float* latent, float zca[8]) {
@@ -630,6 +741,8 @@ PpispState make_ppisp_state(
     state.adam = make_adam_state(state.parameters);
     state.raw_sums = tinytensor::Tensor::zeros(
         {std::size_t{9}}, tinytensor::Device::CUDA);
+    state.colour_pullback = tinytensor::Tensor::zeros(
+        {views, std::size_t{k_affine_pullback}}, tinytensor::Device::CUDA);
     return state;
 }
 
@@ -672,15 +785,24 @@ void backward_ppisp(
     const int pixels = height * width;
     if (pixels == 0) return;
     state.gradient.zero_();
+    state.colour_pullback.zero_();
+    const unsigned threads = k_cuda_threads;
     const unsigned blocks =
-        (pixels + k_cuda_threads - 1) / k_cuda_threads;
+        (static_cast<unsigned>(pixels) + 4 * threads - 1) / (4 * threads);
     const auto launch = [&](auto layout) {
-        ppisp_backward_kernel<decltype(layout)::value>
-            <<<blocks, k_cuda_threads>>>(
-                color.ptr<float>(), state.parameters.ptr<float>(),
-                output_gradient.ptr<float>(), state.input_grad.ptr<float>(),
-                state.gradient.ptr<float>(), static_cast<int>(view), height,
-                width, camera.cx, camera.cy, state.clamp_output);
+        constexpr int k_params = decltype(layout)::value;
+        ppisp_backward_kernel<k_params><<<blocks, threads>>>(
+            color.ptr<float>(), state.parameters.ptr<float>(),
+            output_gradient.ptr<float>(), state.input_grad.ptr<float>(),
+            state.gradient.ptr<float>(), state.colour_pullback.ptr<float>(),
+            static_cast<int>(view), height, width, camera.cx, camera.cy,
+            state.clamp_output);
+        const unsigned views =
+            static_cast<unsigned>(state.parameters.shape()[0]);
+        ppisp_colour_grad_kernel<k_params><<<
+            (views + threads - 1) / threads, threads>>>(
+            state.parameters.ptr<float>(), state.colour_pullback.ptr<float>(),
+            state.gradient.ptr<float>(), static_cast<int>(views));
     };
     dispatch_ppisp_layout(state.num_params, launch);
     check_cuda(cudaGetLastError(), "backward PPISP colour correction");

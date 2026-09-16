@@ -22,6 +22,10 @@ struct PpispState {
     tinytensor::Tensor output;      // [3, H, W]
     tinytensor::Tensor input_grad;  // [3, H, W]
     tinytensor::Tensor raw_sums;    // regularization scratch
+    // Per-view sum of the colour homography's nine-element pull-back. The
+    // eight colour gradients are contracted from it once per view instead of
+    // once per pixel.
+    tinytensor::Tensor colour_pullback;  // [views, 9]
     PpispParamType type{PpispParamType::no_crf_no_vig};
     int num_params{9};
     bool clamp_output{false};
