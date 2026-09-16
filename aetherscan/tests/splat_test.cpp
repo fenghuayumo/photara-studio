@@ -2624,6 +2624,17 @@ void test_source_resolution_and_knn_initialization() {
             brush_rotations[2] == 0.F && brush_rotations[3] == 0.F &&
             std::abs(brush_model.opacity_logits.to_vector()[0]) < 1e-6F,
         "ADC+ sparse initialization does not match brush");
+    options.densification_strategy = splat::DensificationStrategy::adc_igs;
+    for (const float initial_opacity : {0.1F, 0.25F}) {
+        options.initial_opacity = initial_opacity;
+        const auto igs_model = splat::initialize_from_dense_cloud(scene, options);
+        require(igs_model.log_scales.to_vector() == brush_scales &&
+                    igs_model.quaternions.to_vector() == brush_rotations,
+                "IGS opacity initialization must preserve ADC+ scales and orientation");
+        for (const float logit : igs_model.opacity_logits.to_vector())
+            require(std::abs(1.F / (1.F + std::exp(-logit)) - initial_opacity) < 1e-6F,
+                    "IGS ignored the configured initial opacity");
+    }
     options.densification_strategy =
         splat::DensificationStrategy::dense_adaptive;
     options.constrain_scale_range = true;
@@ -4077,6 +4088,7 @@ int main(int argc, char** argv) {
         test_thin_splat_rgb_backward();
         test_pinhole_geometry_finite_differences();
         if (argc > 1 && std::string(argv[1]) == "--igs-only") {
+            test_source_resolution_and_knn_initialization();
             test_mask_loading();
             test_mask_loss_modes();
             test_contribution_visibility_rejects_occluded_gaussians();

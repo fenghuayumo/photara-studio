@@ -642,7 +642,11 @@ GaussianModel initialize_from_dense_cloud(
                   options.minimum_scale_fraction)
         : std::numeric_limits<float>::infinity();
     const float opacity = std::clamp(
-        splat_adc_plus ? 0.5F : options.initial_opacity,
+        // IGS starts sparse observations with the configured confidence,
+        // allowing overlapping surfaces to receive gradients before opacity
+        // converges. Preserve Brush's initialization for ADC+ itself.
+        options.densification_strategy == DensificationStrategy::adc_plus
+            ? 0.5F : options.initial_opacity,
         1e-6F, 1.F - 1e-6F);
     const float opacity_logit = std::log(opacity / (1.F - opacity));
     std::vector<float> knn_scales(count, 0.F);
