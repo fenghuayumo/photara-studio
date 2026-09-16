@@ -64,6 +64,13 @@ cmake -S . -B build `
   -DAETHERSCAN_ENABLE_CUDA=ON `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 cmake --build build --config Release --parallel
+```
+
+默认只编译 `aetherscan.exe` 和 `aetherscan_editor.exe`。需要正确性测试或额外工具时再打开：
+
+```powershell
+cmake -S . -B build -DAETHERSCAN_BUILD_TESTS=ON -DAETHERSCAN_BUILD_BENCHMARKS=ON
+cmake --build build --config Release --target aetherscan_tests --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
@@ -95,6 +102,8 @@ cmake -S . -B build `
 
 | CMake 选项 | 默认 | 含义 |
 |------------|------|------|
+| `AETHERSCAN_BUILD_TESTS` | OFF | 是否生成正确性测试可执行文件 |
+| `AETHERSCAN_BUILD_BENCHMARKS` | OFF | 是否生成额外 CLI / benchmark 工具 |
 | `AETHERSCAN_ENABLE_ONNX` | OFF | 是否编译 ONNX/LightGlue |
 | `AETHERSCAN_FETCH_ONNX` | ON | 开启 ONNX 时是否自动下载 SDK |
 | `AETHERSCAN_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
