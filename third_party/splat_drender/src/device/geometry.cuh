@@ -11,6 +11,7 @@
 // Formulas translated from column-major notation use Mat3::at(col,row).
 #pragma once
 
+#include "equirect.cuh"
 #include "fisheye.cuh"
 #include "matrix.cuh"
 #include "sh.cuh"
@@ -428,8 +429,14 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
     } else {
         const Projection p = project(t, io.K, io.width, io.height);
         if (!p.valid) return;
-        J.m[0][0] = p.J.du[0]; J.m[0][1] = p.J.du[1]; J.m[0][2] = p.J.du[2];
-        J.m[1][0] = p.J.dv[0]; J.m[1][1] = p.J.dv[1]; J.m[1][2] = p.J.dv[2];
+        // Stored exactly like the forward: J holds the transpose of the 2x3
+        // projection Jacobian, so J.m[axis][row] = d(pixel row)/d(axis).
+        // Filling it the other way round silently transposes the projected
+        // covariance. That is invisible for a pinhole, whose four live entries
+        // sit on the diagonal, but it corrupts every panorama.
+        J.m[0][0] = p.J.du[0]; J.m[0][1] = p.J.dv[0];
+        J.m[1][0] = p.J.du[1]; J.m[1][1] = p.J.dv[1];
+        J.m[2][0] = p.J.du[2]; J.m[2][1] = p.J.dv[2];
         u = t.x / fmaxf(t.z, 1.0e-6f);
         v = t.y / fmaxf(t.z, 1.0e-6f);
     }
@@ -792,17 +799,51 @@ SD_D2 inline void splat_backward(SplatBackward& io) {
     const float dL_dJ02 = W.at(2, 0) * dL_dT00 + W.at(2, 1) * dL_dT01 + W.at(2, 2) * dL_dT02;
     const float dL_dJ11 = W.at(1, 0) * dL_dT10 + W.at(1, 1) * dL_dT11 + W.at(1, 2) * dL_dT12;
     const float dL_dJ12 = W.at(2, 0) * dL_dT10 + W.at(2, 1) * dL_dT11 + W.at(2, 2) * dL_dT12;
+    // The pinhole chain below only needs the four entries the perspective
+    // Jacobian keeps; a panorama also has dv/dx live, so both off-entries are
+    // formed here and consumed by the equirect branch underneath.
+    const float dL_dJ01 = W.at(1, 0) * dL_dT00 + W.at(1, 1) * dL_dT01 + W.at(1, 2) * dL_dT02;
+    const float dL_dJ10 = W.at(0, 0) * dL_dT10 + W.at(0, 1) * dL_dT11 + W.at(0, 2) * dL_dT12;
 
     const float tz = 1.f / t.z;
     const float tz2 = tz * tz;
-    const float tz3 = tz2 * tz;
-    const float dL_dtx = x_mul * (-h_x * tz2 * dL_dJ02 + dL_du * tz);
-    const float dL_dty = y_mul * (-h_y * tz2 * dL_dJ12 + dL_dv * tz);
-    const float dL_dtz =
-        -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 +
-        ((1.f + x_mul) * h_x * t.x) * tz3 * dL_dJ02 +
-        ((1.f + y_mul) * h_y * t.y) * tz3 * dL_dJ12 -
-        (x_mul * dL_du * t.x + y_mul * dL_dv * t.y) * tz2 + dL_dz;
+    float dL_dtx = 0.f, dL_dty = 0.f, dL_dtz = 0.f;
+    if (is_equirect(io.K.mode)) {
+        // Polar projection: every Jacobian entry is live and its position
+        // derivatives come from the longitude/latitude mapping itself, not
+        // from the perspective identities.
+        const equirect::Jacobian jacobian =
+            equirect::project_jacobian(t, io.width, io.height);
+        const float dL_dJ[2][3] = {{dL_dJ00, dL_dJ01, dL_dJ02},
+                                   {dL_dJ10, dL_dJ11, dL_dJ12}};
+        // The u/v terms below stay in the perspective (x/z) parameterization
+        // the ray-plane and footprint-normal branches are written in; those
+        // branches are opt-in and unused by the native-camera presets.
+        float gradient[3] = {dL_du * tz, dL_dv * tz,
+                             -(dL_du * t.x + dL_dv * t.y) * tz2 + dL_dz};
+        if (jacobian.valid) {
+#pragma unroll
+            for (int row = 0; row < 2; ++row)
+#pragma unroll
+                for (int axis = 0; axis < 3; ++axis)
+#pragma unroll
+                    for (int other = 0; other < 3; ++other)
+                        gradient[other] += dL_dJ[row][axis] *
+                                            jacobian.dj[row][axis][other];
+        }
+        dL_dtx = gradient[0];
+        dL_dty = gradient[1];
+        dL_dtz = gradient[2];
+    } else {
+        const float tz3 = tz2 * tz;
+        dL_dtx = x_mul * (-h_x * tz2 * dL_dJ02 + dL_du * tz);
+        dL_dty = y_mul * (-h_y * tz2 * dL_dJ12 + dL_dv * tz);
+        dL_dtz =
+            -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 +
+            ((1.f + x_mul) * h_x * t.x) * tz3 * dL_dJ02 +
+            ((1.f + y_mul) * h_y * t.y) * tz3 * dL_dJ12 -
+            (x_mul * dL_du * t.x + y_mul * dL_dv * t.y) * tz2 + dL_dz;
+    }
 
     const float3 gm = mat::xform_dir_transpose(
         make_float3(dL_dtx + dL_dt_tc.x, dL_dty + dL_dt_tc.y, dL_dtz + dL_dt_tc.z),

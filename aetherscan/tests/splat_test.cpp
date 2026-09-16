@@ -669,6 +669,77 @@ void test_fisheye_equirect_rasterize() {
         right_peak % equirect.width == 48 &&
             right_peak / equirect.width == 24,
         "equirect +X splat should peak at 0.75 width");
+
+    // A full panorama must rasterize across the longitude seam, and its
+    // position gradients must optimize geometry on either side of it.
+    std::vector<float> probe(3 * fish_pixels);
+    for (std::size_t i = 0; i < probe.size(); ++i) {
+        const auto pixel = i % fish_pixels;
+        probe[i] = (0.5F + std::sin(6.2831853F *
+            static_cast<float>(pixel % equirect.width) / equirect.width) +
+            0.3F * static_cast<float>(pixel / equirect.width) / equirect.height) /
+            static_cast<float>(fish_pixels);
+    }
+    const auto probe_tensor = tinytensor::Tensor::from_vector(
+        probe, {3, equirect.height, equirect.width}, tinytensor::Device::CUDA);
+    for (const std::array<float, 3> position :
+         {std::array<float, 3>{0.2F, 0.1F, 2.F},
+          std::array<float, 3>{0.02F, 0.1F, -2.F},
+          std::array<float, 3>{-0.7F, -0.2F, 0.6F},
+          std::array<float, 3>{0.3F, 1.5F, 0.8F}}) {
+        const auto set_position = [&](const std::array<float, 3>& value) {
+            model.means = tinytensor::Tensor::from_vector(
+                std::vector<float>(value.begin(), value.end()), {1, 3},
+                tinytensor::Device::CUDA);
+        };
+        set_position(position);
+        const auto rendered = rasterizer.forward(model, equirect);
+        if (position[2] < 0.F) {
+            const auto alpha = rendered.alpha.to_vector();
+            float left = 0.F, right = 0.F;
+            for (unsigned y = 0; y < equirect.height; ++y) {
+                left += alpha[y * equirect.width];
+                right += alpha[y * equirect.width + equirect.width - 1];
+            }
+            require(left > 0.F && right > 0.F,
+                    "Panorama seam splat must contribute to both image edges");
+        }
+        const auto gradients = rasterizer.backward(
+            model, rendered, probe_tensor, zero_a, zero_a, zero_n);
+        require_finite(gradients.means, "equirect mean gradient");
+        const auto analytic = gradients.means.to_vector();
+        const auto objective = [&]() {
+            const auto colors = rasterizer.forward(model, equirect).color.to_vector();
+            double sum = 0.;
+            for (std::size_t i = 0; i < colors.size(); ++i)
+                sum += colors[i] * probe[i];
+            return sum;
+        };
+        // 1e-3 is too coarse for the close-range probe: the longitude/latitude
+        // mapping curves hard there and the central difference picks up an 18%
+        // third-order error, which would look like a backward bug.
+        constexpr float epsilon = 1e-4F;
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            auto offset = position;
+            offset[axis] += epsilon;
+            set_position(offset);
+            const auto plus = objective();
+            offset[axis] -= 2.F * epsilon;
+            set_position(offset);
+            const auto numeric = (plus - objective()) / (2.F * epsilon);
+            const double relative = std::abs(numeric) > 1e-12
+                ? std::abs(analytic[axis] - numeric) / std::abs(numeric)
+                : 0.0;
+            std::cout << "  panorama fd t=" << position[0] << ',' << position[1]
+                      << ',' << position[2] << " axis=" << axis
+                      << " analytic=" << analytic[axis]
+                      << " numeric=" << numeric
+                      << " rel=" << relative << '\n';
+            require(std::abs(analytic[axis] - numeric) <
+                        1e-5 + 0.05 * std::abs(numeric),
+                    "Panorama mean gradient differs from finite differences");
+        }
+    }
 }
 
 void test_thin_splat_rgb_backward() {
@@ -4103,6 +4174,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if(argc>1 && std::string(argv[1])=="--fisheye-only") {
+            test_colmap_fisheye_and_equirect_loading();
             test_fisheye_parameter_finite_differences();
             test_fisheye_filter_and_supervision();
             test_fisheye_equirect_rasterize();
