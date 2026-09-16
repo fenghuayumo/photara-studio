@@ -13,6 +13,9 @@ namespace {
 constexpr int k_max_params = 36;
 // Entries of the colour homography, and of its pull-back vector.
 constexpr int k_affine_pullback = 9;
+// Pixels per thread in the per-pixel kernels. The launch and the kernels must
+// agree: a mismatch leaves part of the image unwritten.
+constexpr int k_ppisp_pixels_per_thread = 4;
 constexpr float k_ln2 = 0.69314718056F;
 // Step of the device-side central difference that builds the colour-homography
 // Jacobian. At 1e-3 the float32 round-off of `compute_homography` dominated the
@@ -480,7 +483,7 @@ __global__ void ppisp_backward_kernel(
     float* __restrict__ param_grad, float* __restrict__ colour_pullback_view,
     const int view, const int height, const int width, const float cx,
     const float cy, const bool clamp_output) {
-    constexpr int k_pixels = 4;
+    constexpr int k_pixels = k_ppisp_pixels_per_thread;
     constexpr int k_color = layout_color_offset<k_params>();
     __shared__ float shared_params[k_params];
     __shared__ float H[9];
@@ -570,20 +573,35 @@ __global__ void ppisp_backward_kernel(
         }
     }
 
-    // The colour pull-back is shared by the whole view, so it lands in its own
-    // buffer; the eight colour gradients come out of a single contraction per
-    // view in ppisp_colour_grad_kernel.
+    // Parameter and pull-back reduction. The shuffle tree this replaces issued
+    // five dependent shuffles per value per thread, which saturated the MIO
+    // pipe: 58% of this kernel's warp stalls were short-scoreboard or MIO
+    // throttle. Each thread deposits its values instead -- conflict-free, one
+    // store per value -- and one thread per value sums the block and adds it
+    // to the gradient exactly once. The inner extent tracks k_cuda_threads:
+    // the launch uses that block size, and the padding keeps the second phase
+    // free of bank conflicts. The widest layout needs 45 rows (46 KB), which
+    // stays inside the 48 KB static shared-memory limit.
+    __shared__ float contribution[k_params + k_affine_pullback]
+                                 [k_cuda_threads + 1];
 #pragma unroll
     for (int i = 0; i < k_params + k_affine_pullback; ++i) {
-        float value = i < k_params ? local[i] : pullback[i - k_params];
-        value = isfinite(value) ? value : 0.F;
-        for (int offset = 16; offset > 0; offset >>= 1)
-            value += __shfl_down_sync(0xffffffffU, value, offset);
-        if ((threadIdx.x & 31U) != 0U || value == 0.F) continue;
-        if (i < k_params)
-            atomicAdd(param_grad + view * k_params + i, value);
-        else
-            atomicAdd(colour_pullback_view + i - k_params, value);
+        const float value = i < k_params ? local[i] : pullback[i - k_params];
+        contribution[i][threadIdx.x] = isfinite(value) ? value : 0.F;
+    }
+    __syncthreads();
+    if (threadIdx.x < k_params + k_affine_pullback) {
+        float total = 0.F;
+        for (int thread = 0; thread < static_cast<int>(blockDim.x); ++thread)
+            total += contribution[threadIdx.x][thread];
+        if (total != 0.F) {
+            if (threadIdx.x < k_params)
+                atomicAdd(
+                    param_grad + view * k_params + threadIdx.x, total);
+            else
+                atomicAdd(
+                    colour_pullback_view + threadIdx.x - k_params, total);
+        }
     }
 }
 
@@ -787,8 +805,11 @@ void backward_ppisp(
     state.gradient.zero_();
     state.colour_pullback.zero_();
     const unsigned threads = k_cuda_threads;
+    const unsigned per_thread =
+        static_cast<unsigned>(k_ppisp_pixels_per_thread);
     const unsigned blocks =
-        (static_cast<unsigned>(pixels) + 4 * threads - 1) / (4 * threads);
+        (static_cast<unsigned>(pixels) + per_thread * threads - 1) /
+        (per_thread * threads);
     const auto launch = [&](auto layout) {
         constexpr int k_params = decltype(layout)::value;
         ppisp_backward_kernel<k_params><<<blocks, threads>>>(
