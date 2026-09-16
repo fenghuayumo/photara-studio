@@ -219,6 +219,16 @@ aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
 - `transparent`（默认）：前景 RGB loss + `0.25 * BCE(render_alpha, mask)`；
 - `masked`：仅前景 RGB loss + 背景 alpha leakage penalty。
 
+`masked` 的泄漏惩罚权重由 `--splat-alpha-leak-weight` 控制（默认 `1`，与 pygsplat 一致）。
+动态遮挡物（例如持镜人）会挡住其他视角必须保持不透明的静态背景，惩罚与多视角一致性冲突时
+会在人物位置长出半透明气泡；固定机位实拍建议 `--splat-alpha-leak-weight 0`，只屏蔽 RGB，
+把被遮挡的背景交还给其他视角。详见
+`docs/ADC_IGS_NATIVE_CAMERAS_R2_20260916.md`。
+
+稀疏初始化的点数由 `--splat-init-point-budget` 限制（默认 `0` = 使用全部输入点）。稀疏 SfM
+点云经常超过 `--splat-densification-cap`，此时第一次 refine 会把点云剪回上限、之后不再有
+增长空间，压低初始化点数或抬高上限才能让 IGS 继续生长。
+
 主体模式要求每个训练视图都有匹配 mask 或源图 alpha channel；任何视图缺失都会立即报错，
 避免背景意外进入模型。日志会单独输出 `rgb/alpha/depth/normal` 四项 loss。
 默认将最大 Gaussian 尺度限制为场景范围的 `0.002`，防止 splat 扩张到背景并形成不透明
