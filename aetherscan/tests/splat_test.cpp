@@ -1931,14 +1931,21 @@ ColourProbe make_colour_probe() {
 
 }  // namespace
 
+// The backward kernel merges a run of pixels that shares all eight trilinear
+// neighbours into one set of grid reductions. Both the coarse-grid run (where
+// neighbouring pixels share cells and the merge triggers) and the fine-grid
+// run (where they do not, and the per-pixel path runs) are probed against
+// central differences.
 void test_bilateral_grid_finite_differences() {
     using namespace aetherscan::splat;
+    for (const auto grid_size :
+         {std::array<unsigned, 3>{5, 4, 3}, std::array<unsigned, 3>{2, 2, 2}}) {
     ColourProbe probe = make_colour_probe();
     TrainingOptions options;
     options.use_bilateral_grid = true;
-    options.bilateral_grid_width = 5;
-    options.bilateral_grid_height = 4;
-    options.bilateral_grid_luma = 3;
+    options.bilateral_grid_width = grid_size[0];
+    options.bilateral_grid_height = grid_size[1];
+    options.bilateral_grid_luma = grid_size[2];
     auto state = detail::make_bilateral_grid_state(1, options);
 
     // Move the grid off identity, but stay inside the deviation bound so the
@@ -2018,6 +2025,7 @@ void test_bilateral_grid_finite_differences() {
         require(
             relative_error(colour_gradient[index], numeric) < 2e-2,
             "bilateral grid colour gradient differs from finite differences");
+    }
     }
 }
 

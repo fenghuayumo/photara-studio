@@ -84,21 +84,30 @@ __device__ void compute_homography(const float* c, float H[9]) {
     }
 }
 
-__device__ void homography_jacobian(
-    const float* color, float H[9], float dH[8][9]) {
-    compute_homography(color, H);
-    float perturbed[8];
-    for (int i = 0; i < 8; ++i) perturbed[i] = color[i];
-    for (int i = 0; i < 8; ++i) {
-        float plus[9];
-        float minus[9];
-        perturbed[i] = color[i] + k_color_eps;
-        compute_homography(perturbed, plus);
-        perturbed[i] = color[i] - k_color_eps;
-        compute_homography(perturbed, minus);
-        perturbed[i] = color[i];
+// Colour homography and its eight-parameter Jacobian. The homography itself
+// and the sixteen perturbed evaluations are independent, so a block spreads
+// them over seventeen lanes instead of serialising them on thread zero; the
+// eight columns of the Jacobian then come out of the perturbed pairs.
+__device__ void homography_jacobian_parallel(
+    const float* color, float H[9], float dH[8][9], float perturbed[16][9]) {
+    const int lane = static_cast<int>(threadIdx.x);
+    if (lane == 0) compute_homography(color, H);
+    if (lane >= 1 && lane <= 16) {
+        const int index = lane - 1;
+        const int parameter = index >> 1;
+        const float sign = (index & 1) == 0 ? 1.F : -1.F;
+        float candidate[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) candidate[i] = color[i];
+        candidate[parameter] += sign * k_color_eps;
+        compute_homography(candidate, perturbed[index]);
+    }
+    __syncthreads();
+    if (lane < 8) {
+#pragma unroll
         for (int k = 0; k < 9; ++k)
-            dH[i][k] = (plus[k] - minus[k]) / (2.F * k_color_eps);
+            dH[lane][k] = (perturbed[2 * lane][k] - perturbed[2 * lane + 1][k]) /
+                (2.F * k_color_eps);
     }
 }
 
@@ -419,12 +428,12 @@ __global__ void ppisp_backward_kernel(
     __shared__ float shared_params[k_params];
     __shared__ float H[9];
     __shared__ float dH[8][9];
+    __shared__ float perturbed_homographies[16][9];
     if (threadIdx.x < k_params)
         shared_params[threadIdx.x] = params[view * k_params + threadIdx.x];
     __syncthreads();
-    if (threadIdx.x == 0)
-        homography_jacobian(shared_params + k_color, H, dH);
-    __syncthreads();
+    homography_jacobian_parallel(
+        shared_params + k_color, H, dH, perturbed_homographies);
     const int pixel = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     const int pixels = height * width;
     const bool inside = pixel < pixels;

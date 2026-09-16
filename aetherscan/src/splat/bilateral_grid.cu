@@ -196,58 +196,89 @@ __global__ void bilateral_forward_kernel(
     corrected[2 * pixels + pixel] = db;
 }
 
-// One pixel of the grid-gradient scatter. The eight trilinear neighbours are
-// visited once, and both the grid gradient and the input-colour gradient come
-// out of that single pass.
+// Everything one member of a pixel group needs. The group path below keeps
+// these in registers: every array is indexed by an unrolled loop counter, so
+// the compiler resolves the indices at compile time.
+struct BilateralPixel {
+    int pixel;
+    float colour[3];
+    float gradient[3];
+    int x0, x1, y0, y1, z0, z1;
+    float fx, fy, fz;
+    bool gz_in_range;
+};
+
+// Colour, output gradient and the eight trilinear neighbours of one pixel.
+// Returns false when the incoming gradient is zero: both the input gradient
+// and every grid gradient are linear in it, so such a pixel contributes
+// nothing anywhere.
 template <bool k_vectorized>
-__device__ __forceinline__ void bilateral_backward_pixel(
-    const float* __restrict__ color, const float* __restrict__ grids,
-    const float* __restrict__ output_grad, float* __restrict__ grid_grad,
-    float* __restrict__ input_grad, const long long row_base, const int luma,
-    const int grid_h, const int grid_w, const int height, const int width,
-    const int pixel, const int pixels) {
+__device__ __forceinline__ bool bilateral_pixel_geometry(
+    const float* __restrict__ color, const float* __restrict__ output_grad,
+    const int luma, const int grid_h, const int grid_w, const int height,
+    const int width, const int pixels, const int pixel, BilateralPixel& out) {
+    (void)k_vectorized;
+    out.pixel = pixel;
+    out.colour[0] = color[pixel];
+    out.colour[1] = color[pixels + pixel];
+    out.colour[2] = color[2 * pixels + pixel];
+    out.gradient[0] = output_grad[pixel];
+    out.gradient[1] = output_grad[pixels + pixel];
+    out.gradient[2] = output_grad[2 * pixels + pixel];
+    if (out.gradient[0] == 0.F && out.gradient[1] == 0.F &&
+        out.gradient[2] == 0.F)
+        return false;
     const int x = pixel % width;
     const int y = pixel / width;
-    const float sr = color[pixel];
-    const float sg = color[pixels + pixel];
-    const float sb = color[2 * pixels + pixel];
-    const float dr = output_grad[pixel];
-    const float dg = output_grad[pixels + pixel];
-    const float db = output_grad[2 * pixels + pixel];
-    // The input gradient and every grid gradient are linear in the incoming
-    // gradient, so a zero one -- a masked or background pixel, mostly --
-    // contributes nothing anywhere.
-    if (dr == 0.F && dg == 0.F && db == 0.F) {
-        input_grad[pixel] = 0.F;
-        input_grad[pixels + pixel] = 0.F;
-        input_grad[2 * pixels + pixel] = 0.F;
-        return;
-    }
     const float gx = width > 1 ? static_cast<float>(x) /
         static_cast<float>(width - 1) : 0.F;
     const float gy = height > 1 ? static_cast<float>(y) /
         static_cast<float>(height - 1) : 0.F;
-    const float gz_raw = k_c2g_r * sr + k_c2g_g * sg + k_c2g_b * sb;
-    const bool gz_in_range = gz_raw >= 0.F && gz_raw <= 1.F;
-    const float gz = fminf(fmaxf(gz_raw, 0.F), 1.F);
+    const float gz_raw = k_c2g_r * out.colour[0] + k_c2g_g * out.colour[1] +
+        k_c2g_b * out.colour[2];
+    out.gz_in_range = gz_raw >= 0.F && gz_raw <= 1.F;
     const float fx_grid = gx * static_cast<float>(grid_w - 1);
     const float fy_grid = gy * static_cast<float>(grid_h - 1);
-    const float fz_grid = gz * static_cast<float>(luma - 1);
+    const float fz_grid =
+        fminf(fmaxf(gz_raw, 0.F), 1.F) * static_cast<float>(luma - 1);
     const int x0_raw = static_cast<int>(floorf(fx_grid));
     const int y0_raw = static_cast<int>(floorf(fy_grid));
     const int z0_raw = static_cast<int>(floorf(fz_grid));
-    const float fx = fx_grid - static_cast<float>(x0_raw);
-    const float fy = fy_grid - static_cast<float>(y0_raw);
-    const float fz = fz_grid - static_cast<float>(z0_raw);
-    const int x0 = min(max(x0_raw, 0), grid_w - 1);
-    const int x1 = min(max(x0_raw + 1, 0), grid_w - 1);
-    const int y0 = min(max(y0_raw, 0), grid_h - 1);
-    const int y1 = min(max(y0_raw + 1, 0), grid_h - 1);
-    const int z0 = min(max(z0_raw, 0), luma - 1);
-    const int z1 = min(max(z0_raw + 1, 0), luma - 1);
-    const float wx[2] = {1.F - fx, fx};
-    const float wy[2] = {1.F - fy, fy};
-    const float wz[2] = {1.F - fz, fz};
+    out.fx = fx_grid - static_cast<float>(x0_raw);
+    out.fy = fy_grid - static_cast<float>(y0_raw);
+    out.fz = fz_grid - static_cast<float>(z0_raw);
+    out.x0 = min(max(x0_raw, 0), grid_w - 1);
+    out.x1 = min(max(x0_raw + 1, 0), grid_w - 1);
+    out.y0 = min(max(y0_raw, 0), grid_h - 1);
+    out.y1 = min(max(y0_raw + 1, 0), grid_h - 1);
+    out.z0 = min(max(z0_raw, 0), luma - 1);
+    out.z1 = min(max(z0_raw + 1, 0), luma - 1);
+    return true;
+}
+
+// Scatter of a single pixel: one visit per trilinear neighbour, both the grid
+// gradient and the input-colour gradient out of the same pass.
+template <bool k_vectorized>
+__device__ __forceinline__ void bilateral_backward_pixel(
+    const BilateralPixel& geometry, const float* __restrict__ grids,
+    float* __restrict__ grid_grad, float* __restrict__ input_grad,
+    const long long row_base, const int luma, const int grid_h,
+    const int grid_w, const int pixels, const bool active) {
+    if (!active) {
+        input_grad[geometry.pixel] = 0.F;
+        input_grad[pixels + geometry.pixel] = 0.F;
+        input_grad[2 * pixels + geometry.pixel] = 0.F;
+        return;
+    }
+    const float sr = geometry.colour[0];
+    const float sg = geometry.colour[1];
+    const float sb = geometry.colour[2];
+    const float dr = geometry.gradient[0];
+    const float dg = geometry.gradient[1];
+    const float db = geometry.gradient[2];
+    const float wx[2] = {1.F - geometry.fx, geometry.fx};
+    const float wy[2] = {1.F - geometry.fy, geometry.fy};
+    const float wz[2] = {1.F - geometry.fz, geometry.fz};
     const float luma_scale = static_cast<float>(luma - 1);
     float in_r = 0.F;
     float in_g = 0.F;
@@ -256,13 +287,13 @@ __device__ __forceinline__ void bilateral_backward_pixel(
     float gz_grad = 0.F;
 #pragma unroll
     for (int cz = 0; cz < 2; ++cz) {
-        const int z = cz == 0 ? z0 : z1;
+        const int z = cz == 0 ? geometry.z0 : geometry.z1;
 #pragma unroll
         for (int cy = 0; cy < 2; ++cy) {
-            const int cell_y = cy == 0 ? y0 : y1;
+            const int cell_y = cy == 0 ? geometry.y0 : geometry.y1;
 #pragma unroll
             for (int cx = 0; cx < 2; ++cx) {
-                const int cell_x = cx == 0 ? x0 : x1;
+                const int cell_x = cx == 0 ? geometry.x0 : geometry.x1;
                 const int cell = (z * grid_h + cell_y) * grid_w + cell_x;
                 const float* cell_in =
                     grids + row_base + cell * k_affine_channels;
@@ -331,23 +362,24 @@ __device__ __forceinline__ void bilateral_backward_pixel(
     }
     (void)in_bias;
     // The clamp on the luma coordinate is inactive inside [0, 1].
-    if (!gz_in_range) gz_grad = 0.F;
-    input_grad[pixel] = in_r + k_c2g_r * gz_grad;
-    input_grad[pixels + pixel] = in_g + k_c2g_g * gz_grad;
-    input_grad[2 * pixels + pixel] = in_b + k_c2g_b * gz_grad;
+    if (!geometry.gz_in_range) gz_grad = 0.F;
+    input_grad[geometry.pixel] = in_r + k_c2g_r * gz_grad;
+    input_grad[pixels + geometry.pixel] = in_g + k_c2g_g * gz_grad;
+    input_grad[2 * pixels + geometry.pixel] = in_b + k_c2g_b * gz_grad;
 }
 
-// Backward pass of the affine bilateral grid. One thread walks `k_pixels`
-// pixels strided by the launch, which keeps several independent reduction
-// streams in flight per warp: the kernel is limited by the latency of the grid
-// reductions rather than by arithmetic, and four pixels per thread measured
-// 1.8 ms faster than one on a 1728x1120 view.
+// Backward pass of the affine bilateral grid. One thread owns a run of
+// `k_pixels` consecutive pixels.
 //
-// Reading a cell as three float4s and reducing its coefficients with float4
-// reductions turns the previous 96 scalar loads plus 96 scalar atomicAdds per
-// pixel into 24 vector loads plus 24 vector reductions. The previous version
-// was 84% stalled on the L1 load/store queue ("LG throttle") at ~23 ms per
-// 1728x1120 view; the arithmetic is unchanged.
+// The grid gradient dominates the colour-correction cost. Reading a cell as
+// three float4s and reducing its coefficients with float4 reductions already
+// turned the previous 96 scalar loads plus 96 scalar atomicAdds per pixel into
+// 24 vector loads plus 24 vector reductions; a run of pixels that shares all
+// eight of its trilinear neighbours -- the common case inside a smooth region,
+// where the spatial cells cover a hundred pixels and the luma bins span a
+// small part of the range -- then shares both, folding the whole run into one
+// set of 24 reductions. The previous version was 84% stalled on the L1
+// load/store queue ("LG throttle") at ~23 ms per 1728x1120 view.
 //
 // `k_vectorized` is false when the grid or its gradient is not 16-byte
 // aligned, in which case the same math runs through scalar accesses.
@@ -360,15 +392,173 @@ __global__ void bilateral_backward_kernel(
     const int pixels = height * width;
     const long long row_base = static_cast<long long>(view) *
         (luma * grid_h * grid_w) * k_affine_channels;
-    const int stride = static_cast<int>(gridDim.x * blockDim.x);
-    const int first = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int first =
+        static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x) * k_pixels;
+    if (first >= pixels) return;
+
+    BilateralPixel group[k_pixels];
+    bool active[k_pixels];
+    bool mergeable = true;
 #pragma unroll
     for (int slot = 0; slot < k_pixels; ++slot) {
-        const int pixel = first + slot * stride;
-        if (pixel >= pixels) return;
+        const int pixel = first + slot;
+        group[slot].pixel = pixel;
+        active[slot] = false;
+        if (pixel < pixels) {
+            active[slot] = bilateral_pixel_geometry<k_vectorized>(
+                color, output_grad, luma, grid_h, grid_w, height, width,
+                pixels, pixel, group[slot]);
+        }
+        if (!active[slot] || !mergeable) {
+            mergeable = false;
+            continue;
+        }
+        if (slot > 0 &&
+            (group[slot].x0 != group[0].x0 || group[slot].x1 != group[0].x1 ||
+             group[slot].y0 != group[0].y0 || group[slot].y1 != group[0].y1 ||
+             group[slot].z0 != group[0].z0 || group[slot].z1 != group[0].z1))
+            mergeable = false;
+    }
+
+    if (mergeable) {
+        const int x0 = group[0].x0;
+        const int x1 = group[0].x1;
+        const int y0 = group[0].y0;
+        const int y1 = group[0].y1;
+        const int z0 = group[0].z0;
+        const int z1 = group[0].z1;
+        const float luma_scale = static_cast<float>(luma - 1);
+        float in_r[k_pixels];
+        float in_g[k_pixels];
+        float in_b[k_pixels];
+        float in_bias[k_pixels];
+        float gz_grad[k_pixels];
+#pragma unroll
+        for (int slot = 0; slot < k_pixels; ++slot) {
+            in_r[slot] = 0.F;
+            in_g[slot] = 0.F;
+            in_b[slot] = 0.F;
+            in_bias[slot] = 0.F;
+            gz_grad[slot] = 0.F;
+        }
+#pragma unroll
+        for (int cz = 0; cz < 2; ++cz) {
+            const int z = cz == 0 ? z0 : z1;
+#pragma unroll
+            for (int cy = 0; cy < 2; ++cy) {
+                const int cell_y = cy == 0 ? y0 : y1;
+#pragma unroll
+                for (int cx = 0; cx < 2; ++cx) {
+                    const int cell_x = cx == 0 ? x0 : x1;
+                    const int cell = (z * grid_h + cell_y) * grid_w + cell_x;
+                    const float* cell_in =
+                        grids + row_base + cell * k_affine_channels;
+                    float* cell_out =
+                        grid_grad + row_base + cell * k_affine_channels;
+                    float4 c0;
+                    float4 c1;
+                    float4 c2;
+                    if constexpr (k_vectorized) {
+                        const float4* vector =
+                            reinterpret_cast<const float4*>(cell_in);
+                        c0 = vector[0];
+                        c1 = vector[1];
+                        c2 = vector[2];
+                    } else {
+                        c0 = make_float4(
+                            cell_in[0], cell_in[1], cell_in[2], cell_in[3]);
+                        c1 = make_float4(
+                            cell_in[4], cell_in[5], cell_in[6], cell_in[7]);
+                        c2 = make_float4(
+                            cell_in[8], cell_in[9], cell_in[10], cell_in[11]);
+                    }
+                    float4 sum0 = make_float4(0.F, 0.F, 0.F, 0.F);
+                    float4 sum1 = sum0;
+                    float4 sum2 = sum0;
+#pragma unroll
+                    for (int slot = 0; slot < k_pixels; ++slot) {
+                        const float wx = cx == 0
+                            ? 1.F - group[slot].fx : group[slot].fx;
+                        const float wy = cy == 0
+                            ? 1.F - group[slot].fy : group[slot].fy;
+                        const float wz = cz == 0
+                            ? 1.F - group[slot].fz : group[slot].fz;
+                        const float sr = group[slot].colour[0];
+                        const float sg = group[slot].colour[1];
+                        const float sb = group[slot].colour[2];
+                        const float dr = group[slot].gradient[0];
+                        const float dg = group[slot].gradient[1];
+                        const float db = group[slot].gradient[2];
+                        const float p0 = c0.x * dr + c1.x * dg + c2.x * db;
+                        const float p1 = c0.y * dr + c1.y * dg + c2.y * db;
+                        const float p2 = c0.z * dr + c1.z * dg + c2.z * db;
+                        const float p3 = c0.w * dr + c1.w * dg + c2.w * db;
+                        const float weight = wx * wy * wz;
+                        in_r[slot] += weight * p0;
+                        in_g[slot] += weight * p1;
+                        in_b[slot] += weight * p2;
+                        in_bias[slot] += weight * p3;
+                        gz_grad[slot] += wx * wy * (cz == 0 ? -1.F : 1.F) *
+                            luma_scale * (p0 * sr + p1 * sg + p2 * sb + p3);
+                        // The 12 coefficients of the cell in three float4s:
+                        // one per output channel, input coefficients inside.
+                        const float wr = weight * dr;
+                        const float wg = weight * dg;
+                        const float wb = weight * db;
+                        sum0.x += wr * sr;
+                        sum0.y += wr * sg;
+                        sum0.z += wr * sb;
+                        sum0.w += wr;
+                        sum1.x += wg * sr;
+                        sum1.y += wg * sg;
+                        sum1.z += wg * sb;
+                        sum1.w += wg;
+                        sum2.x += wb * sr;
+                        sum2.y += wb * sg;
+                        sum2.z += wb * sb;
+                        sum2.w += wb;
+                    }
+                    if constexpr (k_vectorized) {
+                        red_add4(cell_out, sum0);
+                        red_add4(cell_out + 4, sum1);
+                        red_add4(cell_out + 8, sum2);
+                    } else {
+                        atomicAdd(cell_out + 0, sum0.x);
+                        atomicAdd(cell_out + 1, sum0.y);
+                        atomicAdd(cell_out + 2, sum0.z);
+                        atomicAdd(cell_out + 3, sum0.w);
+                        atomicAdd(cell_out + 4, sum1.x);
+                        atomicAdd(cell_out + 5, sum1.y);
+                        atomicAdd(cell_out + 6, sum1.z);
+                        atomicAdd(cell_out + 7, sum1.w);
+                        atomicAdd(cell_out + 8, sum2.x);
+                        atomicAdd(cell_out + 9, sum2.y);
+                        atomicAdd(cell_out + 10, sum2.z);
+                        atomicAdd(cell_out + 11, sum2.w);
+                    }
+                }
+            }
+        }
+        (void)in_bias;
+#pragma unroll
+        for (int slot = 0; slot < k_pixels; ++slot) {
+            const int pixel = group[slot].pixel;
+            const float gz =
+                group[slot].gz_in_range ? gz_grad[slot] : 0.F;
+            input_grad[pixel] = in_r[slot] + k_c2g_r * gz;
+            input_grad[pixels + pixel] = in_g[slot] + k_c2g_g * gz;
+            input_grad[2 * pixels + pixel] = in_b[slot] + k_c2g_b * gz;
+        }
+        return;
+    }
+
+#pragma unroll
+    for (int slot = 0; slot < k_pixels; ++slot) {
+        const int pixel = group[slot].pixel;
+        if (pixel >= pixels) continue;
         bilateral_backward_pixel<k_vectorized>(
-            color, grids, output_grad, grid_grad, input_grad, row_base, luma,
-            grid_h, grid_w, height, width, pixel, pixels);
+            group[slot], grids, grid_grad, input_grad, row_base, luma, grid_h,
+            grid_w, pixels, active[slot]);
     }
 }
 
@@ -507,30 +697,36 @@ void backward_bilateral_grid(
     };
     const bool vectorized = aligned(state.grids.ptr<float>()) &&
         aligned(state.gradient.ptr<float>());
-    // One thread walks four pixels. The grid reductions, not the arithmetic,
-    // set the kernel time, and four independent reduction streams per thread
-    // hide far more of their latency than one does.
-    constexpr int k_pixels_per_thread = 4;
+    // One thread walks a run of pixels and folds the run into a single set of
+    // grid reductions whenever the run shares its eight trilinear neighbours.
+    // A wide run wins on large views (the reductions, not the arithmetic, set
+    // the kernel time) but starves the device on small ones, where the launch
+    // no longer covers the SMs: 1.11 ms against 0.70 ms at 1728x1120 for a run
+    // of four against sixteen, and the opposite at 512x332.
     const unsigned threads = k_cuda_threads;
-    const unsigned total =
-        (static_cast<unsigned>(pixels) + k_pixels_per_thread - 1) /
-        k_pixels_per_thread;
+    const bool wide_run = pixels >= 1'000'000;
+    const unsigned total = wide_run
+        ? (static_cast<unsigned>(pixels) + 15) / 16
+        : (static_cast<unsigned>(pixels) + 3) / 4;
     const unsigned blocks = (total + threads - 1) / threads;
-    if (vectorized) {
-        bilateral_backward_kernel<true, k_pixels_per_thread>
-            <<<blocks, threads>>>(
-                color.ptr<float>(), state.grids.ptr<float>(),
-                output_gradient.ptr<float>(), state.gradient.ptr<float>(),
-                state.input_grad.ptr<float>(), row, state.luma,
-                state.grid_height, state.grid_width, height, width);
+    if (vectorized && wide_run) {
+        bilateral_backward_kernel<true, 16><<<blocks, threads>>>(
+            color.ptr<float>(), state.grids.ptr<float>(),
+            output_gradient.ptr<float>(), state.gradient.ptr<float>(),
+            state.input_grad.ptr<float>(), row, state.luma,
+            state.grid_height, state.grid_width, height, width);
+    } else if (vectorized) {
+        bilateral_backward_kernel<true, 4><<<blocks, threads>>>(
+            color.ptr<float>(), state.grids.ptr<float>(),
+            output_gradient.ptr<float>(), state.gradient.ptr<float>(),
+            state.input_grad.ptr<float>(), row, state.luma,
+            state.grid_height, state.grid_width, height, width);
     } else {
-        bilateral_backward_kernel<false, 1><<<
-            (static_cast<unsigned>(pixels) + threads - 1) / threads,
-            threads>>>(
-                color.ptr<float>(), state.grids.ptr<float>(),
-                output_gradient.ptr<float>(), state.gradient.ptr<float>(),
-                state.input_grad.ptr<float>(), row, state.luma,
-                state.grid_height, state.grid_width, height, width);
+        bilateral_backward_kernel<false, 4><<<blocks, threads>>>(
+            color.ptr<float>(), state.grids.ptr<float>(),
+            output_gradient.ptr<float>(), state.gradient.ptr<float>(),
+            state.input_grad.ptr<float>(), row, state.luma,
+            state.grid_height, state.grid_width, height, width);
     }
     check_cuda(cudaGetLastError(), "backward bilateral grid colour correction");
 }
