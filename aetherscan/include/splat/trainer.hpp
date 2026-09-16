@@ -44,9 +44,14 @@ struct TrainingProgress {
 
 struct RenderMetrics {
     float mae{};
-    // Error over foreground samples only. This is stricter than pygsplat's
-    // validation metric because it does not average masked-out zeros.
+    // PSNR over every image pixel. Comparable across runs with and without a
+    // mask, which is what an "is this run better" question needs.
     float psnr{};
+    // PSNR over the unmasked (foreground) samples only: with a mask this is
+    // the static region, without one it equals `psnr`. Stricter than
+    // pygsplat's validation metric because masked-out zeros never enter the
+    // average.
+    float foreground_psnr{};
     // pygsplat-compatible PSNR: prediction and target are masked, then MSE is
     // averaged over every image pixel.
     float masked_psnr{};

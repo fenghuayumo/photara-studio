@@ -867,7 +867,7 @@ __global__ void loss_kernel(
     const float depth_weight, const float normal_weight,
     const bool mask_enabled, const int alpha_mode,
     const float match_alpha_weight, const float l1_weight,
-    const float geometry_epsilon) {
+    const float geometry_epsilon, const float mask_alpha_leak_weight) {
     const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
     if (pixel >= pixels) return;
     // Initialize all optional channels in their owning kernel, avoiding four
@@ -935,10 +935,11 @@ __global__ void loss_kernel(
     if (mask_enabled && alpha_mode == 0) {
         // pygsplat alpha_mode="masked": discourage any opacity outside the
         // foreground without forcing the foreground itself to be opaque.
-        grad_alpha[pixel] = (1.F - valid) * inverse_pixels;
+        grad_alpha[pixel] = mask_alpha_leak_weight * (1.F - valid) * inverse_pixels;
         if (terms)
             atomicAdd(
-                terms + 3, alpha[pixel] * (1.F - valid) * inverse_pixels);
+                terms + 3, mask_alpha_leak_weight * alpha[pixel] * (1.F - valid) *
+                    inverse_pixels);
     } else if (mask_enabled && alpha_mode == 1 && match_alpha_weight > 0.F) {
         // pygsplat alpha_mode="transparent": full-image BCE(alpha, mask).
         constexpr float clamp_epsilon = 1e-7F;
@@ -2549,7 +2550,7 @@ LossGradients compute_training_loss(
         target.mask_is_validity ? -1 :
             options.alpha_mode == AlphaMode::masked ? 0 : 1,
         options.match_alpha_weight, 1.F,
-        options.geometry_epsilon);
+        options.geometry_epsilon, options.mask_alpha_leak_weight);
     check_cuda(cudaGetLastError(), "compute GGGS training loss");
     if (use_fused_photometric)
         fused_l1_ssim_loss(

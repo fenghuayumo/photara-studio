@@ -162,6 +162,7 @@ struct ReconstructCli {
     bool splat_ppisp_before_bilagrid{true};
     std::string splat_alpha_mode{"transparent"};
     float splat_match_alpha_weight{0.25F};
+    float splat_alpha_leak_weight{1.F};
     float splat_ssim_weight{0.2F};
     float splat_opacity_reg{0.F};
     float splat_log_scale_reg{0.F};
@@ -193,6 +194,7 @@ struct ReconstructCli {
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
     std::uint64_t splat_densification_cap{1'000'000};
+    std::uint64_t splat_init_point_budget{0};
     bool mesh{false};
     bool mvs_mesh_only{false};
     std::filesystem::path mask_mesh;
@@ -365,6 +367,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
               << "  --splat-alpha-mode masked|transparent (default transparent)\n"
               << "  --splat-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
+              << "  --splat-alpha-leak-weight W  masked-mode opacity leak weight (default 1; 0 masks RGB only)\n"
               << "  --splat-ssim-weight W  structural loss blend (default 0.2)\n"
               << "  --splat-opacity-reg W  per-Gaussian opacity prior (default 0)\n"
               << "  --splat-log-scale-reg W  per-Gaussian log-scale prior (default 0)\n"
@@ -396,6 +399,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  densify growth ceiling (default 1000000)\n"
+              << "  --splat-init-point-budget N  cap the initialization cloud (default 0 = keep all)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mask-mesh PATH  load an existing PLY mesh and render masks/previews\n"
               << "  --mesh-method auto|tsdf|delaunay|pam\n"
@@ -696,6 +700,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("transparent"))
         ("splat-match-alpha-weight", "Alpha BCE weight in transparent mode",
          cxxopts::value<float>()->default_value("0.25"))
+        ("splat-alpha-leak-weight",
+         "Masked-mode opacity-leakage weight outside the mask (0 = mask RGB "
+         "only, leave occluded background to the other views)",
+         cxxopts::value<float>()->default_value("1"))
         ("splat-ssim-weight", "SSIM blend in the photometric loss",
          cxxopts::value<float>()->default_value("0.2"))
         ("splat-opacity-reg", "Per-Gaussian opacity regularization weight",
@@ -797,6 +805,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("0"))
         ("splat-densification-cap", "Densify growth ceiling",
          cxxopts::value<std::uint64_t>()->default_value("1000000"))
+        ("splat-init-point-budget",
+         "Cap on the initialization Gaussians built from the input cloud "
+         "(0 keeps every point)",
+         cxxopts::value<std::uint64_t>()->default_value("0"))
         ("mesh", "Build TSDF mesh from splats (or MVS mesh with --dense)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mvs-mesh-only",
@@ -1144,6 +1156,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_alpha_mode = result["splat-alpha-mode"].as<std::string>();
     cli.splat_match_alpha_weight =
         result["splat-match-alpha-weight"].as<float>();
+    cli.splat_alpha_leak_weight =
+        result["splat-alpha-leak-weight"].as<float>();
     cli.splat_ssim_weight = result["splat-ssim-weight"].as<float>();
     cli.splat_opacity_reg = result["splat-opacity-reg"].as<float>();
     cli.splat_log_scale_reg = result["splat-log-scale-reg"].as<float>();
@@ -1216,6 +1230,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-structure-freeze-iter"].as<unsigned>();
     cli.splat_densification_cap =
         result["splat-densification-cap"].as<std::uint64_t>();
+    cli.splat_init_point_budget =
+        result["splat-init-point-budget"].as<std::uint64_t>();
     cli.mesh = result["mesh"].as<bool>();
     cli.mvs_mesh_only = result["mvs-mesh-only"].as<bool>();
     const std::string mask_mesh_text = result["mask-mesh"].as<std::string>();
@@ -1393,6 +1409,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.splat_match_alpha_weight < 0.F)
         throw std::invalid_argument(
             "--splat-match-alpha-weight must be non-negative");
+    if (!std::isfinite(cli.splat_alpha_leak_weight) ||
+        cli.splat_alpha_leak_weight < 0.F)
+        throw std::invalid_argument(
+            "--splat-alpha-leak-weight must be finite and non-negative");
     if (cli.splat_ssim_weight < 0.F || cli.splat_ssim_weight > 1.F)
         throw std::invalid_argument("--splat-ssim-weight must be in [0,1]");
     if (!std::isfinite(cli.splat_opacity_reg) || cli.splat_opacity_reg < 0.F ||
@@ -2660,6 +2680,10 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         std::min<std::uint64_t>(
             cli.splat_densification_cap,
             (std::numeric_limits<std::size_t>::max)()));
+    options.initial_point_budget = static_cast<std::size_t>(
+        std::min<std::uint64_t>(
+            cli.splat_init_point_budget,
+            (std::numeric_limits<std::size_t>::max)()));
     if (cli.splat_strategy == "adc_plus")
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::adc_plus;
@@ -2761,6 +2785,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         ? aetherscan::splat::AlphaMode::masked
         : aetherscan::splat::AlphaMode::transparent;
     options.match_alpha_weight = cli.splat_match_alpha_weight;
+    options.mask_alpha_leak_weight = cli.splat_alpha_leak_weight;
     options.ssim_weight = cli.splat_ssim_weight;
     options.opacity_regularization_weight = cli.splat_opacity_reg;
     options.log_scale_regularization_weight = cli.splat_log_scale_reg;
@@ -2833,6 +2858,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " input_points=", scene.dense_cloud.points.size(),
         " densification_strategy=", effective_strategy,
         " densification_enabled=", options.enable_densification,
+        " initial_point_budget=", options.initial_point_budget,
         " structure_freeze_iter=", options.structure_freeze_iter,
         " grow_stop_iter=", options.grow_stop_iter,
         " opacity_decay=", options.opacity_decay,
@@ -2951,6 +2977,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             [&](const unsigned iteration,
                 const aetherscan::splat::GaussianModel& model) {
                 double psnr_sum = 0.0;
+                double foreground_psnr_sum = 0.0;
                 double ssim_sum = 0.0;
                 for (const std::size_t view_index : evaluation_views) {
                     const auto render_path = out_dir /
@@ -2966,8 +2993,9 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                         " view=", view_index,
                         " psnr=", metrics.psnr,
                         " ssim=", metrics.ssim,
-                        " foreground_psnr=", metrics.psnr);
+                        " foreground_psnr=", metrics.foreground_psnr);
                     psnr_sum += metrics.psnr;
+                    foreground_psnr_sum += metrics.foreground_psnr;
                     ssim_sum += metrics.ssim;
                 }
                 aetherscan::core::Logger::instance().info(
@@ -2975,7 +3003,9 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                     " views=", evaluation_views.size(),
                     " held_out=", held_out_eval ? 1 : 0,
                     " average_psnr=", psnr_sum / evaluation_views.size(),
-                    " average_ssim=", ssim_sum / evaluation_views.size());
+                    " average_ssim=", ssim_sum / evaluation_views.size(),
+                    " average_foreground_psnr=",
+                    foreground_psnr_sum / evaluation_views.size());
             };
     }
     const auto started = std::chrono::steady_clock::now();
@@ -3085,6 +3115,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     }
     if (!cli.gui && !evaluation_views.empty()) {
     double final_psnr_sum = 0.0;
+    double final_foreground_psnr_sum = 0.0;
     double final_ssim_sum = 0.0;
     for (const std::size_t view_index : evaluation_views) {
         const auto render_path = out_dir /
@@ -3097,15 +3128,18 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             " view=", view_index,
             " psnr=", metrics.psnr,
             " ssim=", metrics.ssim,
-            " foreground_psnr=", metrics.psnr);
+            " foreground_psnr=", metrics.foreground_psnr);
         final_psnr_sum += metrics.psnr;
+        final_foreground_psnr_sum += metrics.foreground_psnr;
         final_ssim_sum += metrics.ssim;
     }
     aetherscan::core::Logger::instance().info(
         "splat_final_evaluation_views=", evaluation_views.size(),
         " held_out=", held_out_eval ? 1 : 0,
         " average_psnr=", final_psnr_sum / evaluation_views.size(),
-        " average_ssim=", final_ssim_sum / evaluation_views.size());
+        " average_ssim=", final_ssim_sum / evaluation_views.size(),
+        " average_foreground_psnr=",
+        final_foreground_psnr_sum / evaluation_views.size());
     }
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();

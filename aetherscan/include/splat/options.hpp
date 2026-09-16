@@ -63,9 +63,14 @@ struct TrainingOptions {
     bool enable_densification{true};
     DensificationStrategy densification_strategy{
         DensificationStrategy::adc_igs};
-    // Growth ceiling while densify is enabled. Initialization always uses the
-    // full source cloud; this does not subsample it.
+    // Growth ceiling while densify is enabled. Initialization uses the full
+    // source cloud unless initial_point_budget asks for a subset.
     std::size_t densification_cap{1'000'000};
+    // Upper bound on the Gaussians built from the input point cloud. Sparse
+    // SfM clouds regularly outnumber the growth ceiling, and an initialization
+    // already sitting on it leaves IGS no room to refine anything: every later
+    // step just swaps rows. 0 keeps every input point.
+    std::size_t initial_point_budget{0};
     unsigned refine_start_iter{0};  // 0 selects the strategy preset
     unsigned refine_stop_iter{0};   // 0 selects the strategy preset
     // IGS stop is max(refine_stop_iter, iterations - refine_stop_num_iter).
@@ -246,6 +251,13 @@ struct TrainingOptions {
     bool use_mask{false};
     AlphaMode alpha_mode{AlphaMode::transparent};
     float match_alpha_weight{0.25F};
+    // Weight of the masked-mode "no opacity outside the foreground" penalty.
+    // A dynamic occluder hides static geometry that other views still need
+    // opaque, so the penalty fights the multi-view-consistent surface behind
+    // it and grows semi-transparent bubbles where the subject stands. Setting
+    // 0 keeps the static-region RGB supervision and drops the penalty, which
+    // leaves those rays to the other views instead of forcing them empty.
+    float mask_alpha_leak_weight{1.F};
     std::filesystem::path mask_dir;
     float minimum_scale_fraction{1e-4F};
     float maximum_scale_fraction{0.002F};

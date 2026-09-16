@@ -599,7 +599,29 @@ GaussianModel initialize_from_dense_cloud(
         throw std::invalid_argument("Splat initialization requires a non-empty dense cloud");
     if (options.sh_degree > 3)
         throw std::invalid_argument("The current splat CUDA backend supports SH degree <= 3");
-    const std::size_t count = scene.dense_cloud.points.size();
+    const std::size_t source_count = scene.dense_cloud.points.size();
+    // Deterministic uniform subsample when the input cloud is larger than the
+    // requested initialization budget. Selection has to happen before the
+    // growth ceiling is reached, otherwise the first refinement step prunes
+    // the cloud back to the cap and IGS never gets capacity again.
+    std::vector<std::size_t> selection;
+    const std::size_t count =
+        options.initial_point_budget != 0 &&
+                options.initial_point_budget < source_count
+            ? options.initial_point_budget
+            : source_count;
+    if (count != source_count) {
+        selection.resize(source_count);
+        for (std::size_t index = 0; index < source_count; ++index)
+            selection[index] = index;
+        std::mt19937 selection_random(options.seed);
+        std::shuffle(selection.begin(), selection.end(), selection_random);
+        selection.resize(count);
+        std::sort(selection.begin(), selection.end());
+    }
+    const auto source_index = [&selection](const std::size_t index) {
+        return selection.empty() ? index : selection[index];
+    };
     const std::size_t bases = static_cast<std::size_t>(options.sh_degree + 1U) *
                               (options.sh_degree + 1U);
     const bool splat_adc_plus = is_adc_strategy(options.densification_strategy);
@@ -612,7 +634,8 @@ GaussianModel initialize_from_dense_cloud(
 
     std::vector<mvs::Vec3f> selected_positions(count);
     for (std::size_t index = 0; index < count; ++index)
-        selected_positions[index] = scene.dense_cloud.points[index].position;
+        selected_positions[index] =
+            scene.dense_cloud.points[source_index(index)].position;
     float initialization_extent{};
     if (options.input_is_dense) {
         mvs::Vec3f minimum = selected_positions.front();
@@ -672,7 +695,7 @@ GaussianModel initialize_from_dense_cloud(
     std::uniform_real_distribution<float> quaternion_uniform(0.F, 1.F);
 
     for (std::size_t index = 0; index < count; ++index) {
-        const auto& point = scene.dense_cloud.points[index];
+        const auto& point = scene.dense_cloud.points[source_index(index)];
         for (int axis = 0; axis < 3; ++axis)
             means[3 * index + axis] = point.position(axis);
         float footprint = std::numeric_limits<float>::infinity();
@@ -1761,6 +1784,7 @@ RenderMetrics render_evaluation_png(
     image.pixels.resize(3 * pixels);
     double absolute_error = 0.0;
     double squared_error = 0.0;
+    double full_squared_error = 0.0;
     double alpha_bce = 0.0;
     std::size_t samples = 0;
     std::size_t covered = 0;
@@ -1778,6 +1802,9 @@ RenderMetrics render_evaluation_png(
             const float prediction = std::clamp(color[planar], 0.F, 1.F);
             image.pixels[3 * pixel + channel] = static_cast<std::uint8_t>(
                 std::lround(prediction * 255.F));
+            const double full_difference =
+                static_cast<double>(prediction - target_rgb[planar]);
+            full_squared_error += full_difference * full_difference;
             if (foreground) {
                 const double difference =
                     static_cast<double>(prediction - target_rgb[planar]);
@@ -1790,11 +1817,19 @@ RenderMetrics render_evaluation_png(
     io::save_rgb_png(image, path);
     const double inverse_samples = 1.0 / std::max<std::size_t>(samples, 1);
     const double mse = squared_error * inverse_samples;
+    const double full_mse =
+        full_squared_error / static_cast<double>(std::max<std::size_t>(3 * pixels, 1));
     RenderMetrics metrics;
-    metrics.mae = static_cast<float>(absolute_error * inverse_samples);
-    metrics.psnr = mse > 0.0
+    // Both numbers come from the same render: `psnr` covers every pixel,
+    // `foreground_psnr` only the unmasked ones. Comparing a masked run against
+    // an unmasked one is only meaningful on the pixel set they share.
+    metrics.psnr = full_mse > 0.0
+        ? static_cast<float>(-10.0 * std::log10(full_mse))
+        : std::numeric_limits<float>::infinity();
+    metrics.foreground_psnr = mse > 0.0
         ? static_cast<float>(-10.0 * std::log10(mse))
         : std::numeric_limits<float>::infinity();
+    metrics.mae = static_cast<float>(absolute_error * inverse_samples);
     const double masked_mse = squared_error /
         static_cast<double>(std::max<std::size_t>(3 * pixels, 1));
     metrics.masked_psnr = masked_mse > 0.0
