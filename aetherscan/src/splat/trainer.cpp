@@ -163,11 +163,13 @@ enum class CudaTrainingStage : std::size_t {
     data_load,
     raster_forward,
     preview,
+    colour_forward,
     training_loss,
     multi_view_unproject,
     multi_view_sample_forward,
     multi_view_loss,
     multi_view_sample_backward,
+    colour_backward,
     raster_backward,
     multi_view_gradient_merge,
     densification_stats,
@@ -211,9 +213,9 @@ public:
         }
         core::Logger::instance().info(
             "splat_cuda_profile enabled=1 interval=", interval_,
-            " stages=data_load,raster_forward,preview,training_loss,multi_view_unproject,"
-            "multi_view_sample_forward,multi_view_loss,"
-            "multi_view_sample_backward,raster_backward,"
+            " stages=data_load,raster_forward,preview,colour_forward,training_loss,"
+            "multi_view_unproject,multi_view_sample_forward,multi_view_loss,"
+            "multi_view_sample_backward,colour_backward,raster_backward,"
             "multi_view_gradient_merge,densification_stats,optimizer,"
             "adc_noise,refinement,filter_3d");
     }
@@ -364,6 +366,10 @@ private:
             value(CudaTrainingStage::multi_view_sample_backward),
             " multi_view_sample_backward_pct=",
             percent(CudaTrainingStage::multi_view_sample_backward),
+            " colour_forward_ms=", value(CudaTrainingStage::colour_forward),
+            " colour_forward_pct=", percent(CudaTrainingStage::colour_forward),
+            " colour_backward_ms=", value(CudaTrainingStage::colour_backward),
+            " colour_backward_pct=", percent(CudaTrainingStage::colour_backward),
             " raster_backward_ms=",
             value(CudaTrainingStage::raster_backward),
             " raster_backward_pct=",
@@ -1285,6 +1291,10 @@ GaussianModel Trainer::train(
                 *ppisp_input, ppisp_state, target.camera, view_index);
             photo_color = &ppisp_state.output;
         }
+        // The colour correction and the photometric loss it feeds are their
+        // own stages: they used to be charged to the preview and the backward
+        // buckets, which hid their cost.
+        cuda_profiler.mark(CudaTrainingStage::colour_forward);
         loss_render.color = *photo_color;
         detail::LossGradients loss = detail::compute_training_loss(
             loss_render, target, options_, report_progress,
@@ -1417,6 +1427,10 @@ GaussianModel Trainer::train(
                 " mean_gain_deviation=", deviation[0],
                 " maximum_gain_deviation=", deviation[1]);
         }
+        // Everything between this mark and the previous one is the colour
+        // correction backward and its optimizer step; what follows the next
+        // mark is the rasterizer's own backward.
+        cuda_profiler.mark(CudaTrainingStage::colour_backward);
         ModelGradients gradients = rasterizer.backward(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
             densify_map);

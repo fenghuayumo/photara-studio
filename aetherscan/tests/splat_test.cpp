@@ -1897,6 +1897,257 @@ void test_alpha_parameter_gradients() {
     }
 }
 
+// Colour correction is only safe to optimize if its gradients are exact. The
+// identity checks above cannot see a wrong scatter weight, so both models are
+// probed away from identity against central differences of the same forward
+// kernel: grid coefficients and colours for the bilateral grid, per-layout
+// parameters and colours for PPISP.
+namespace {
+
+struct ColourProbe {
+    std::uint32_t height;
+    std::uint32_t width;
+    std::size_t pixels;
+    std::vector<float> colors;
+    std::vector<float> weights;
+};
+
+ColourProbe make_colour_probe() {
+    ColourProbe probe;
+    probe.height = 7;
+    probe.width = 9;
+    probe.pixels = static_cast<std::size_t>(probe.height) * probe.width;
+    probe.colors.resize(3 * probe.pixels);
+    for (std::size_t i = 0; i < probe.colors.size(); ++i)
+        probe.colors[i] =
+            0.25F + 0.5F * static_cast<float>((i * 7 + 3) % 11) / 10.F;
+    // A sign-changing weight vector: every row of the Jacobian is exercised.
+    probe.weights.resize(3 * probe.pixels);
+    for (std::size_t i = 0; i < probe.weights.size(); ++i)
+        probe.weights[i] =
+            std::sin(0.7F * static_cast<float>(i)) * 0.6F + 0.25F;
+    return probe;
+}
+
+}  // namespace
+
+void test_bilateral_grid_finite_differences() {
+    using namespace aetherscan::splat;
+    ColourProbe probe = make_colour_probe();
+    TrainingOptions options;
+    options.use_bilateral_grid = true;
+    options.bilateral_grid_width = 5;
+    options.bilateral_grid_height = 4;
+    options.bilateral_grid_luma = 3;
+    auto state = detail::make_bilateral_grid_state(1, options);
+
+    // Move the grid off identity, but stay inside the deviation bound so the
+    // clamp never activates and the map stays smooth.
+    const auto shape = state.grids.shape();
+    std::vector<float> coefficients = state.grids.to_vector();
+    for (std::size_t cell = 0; cell < coefficients.size() / 12; ++cell)
+        for (std::size_t channel = 0; channel < 12; ++channel)
+            coefficients[cell * 12 + channel] +=
+                0.18F * std::sin(0.31F * static_cast<float>(
+                    cell * 12 + channel + 1));
+    const auto set_coefficients = [&](const std::vector<float>& values) {
+        state.grids = tinytensor::Tensor::from_vector(
+            values, shape, tinytensor::Device::CUDA);
+    };
+    const auto set_colors = [&](const std::vector<float>& values) {
+        return tinytensor::Tensor::from_vector(
+            values, {std::size_t{3}, probe.height, probe.width},
+            tinytensor::Device::CUDA);
+    };
+    set_coefficients(coefficients);
+    const auto weights = tinytensor::Tensor::from_vector(
+        probe.weights, {std::size_t{3}, probe.height, probe.width},
+        tinytensor::Device::CUDA);
+    const auto loss = [&](const std::vector<float>& values) {
+        detail::apply_bilateral_grid(set_colors(values), state, 0);
+        const std::vector<float> rendered = state.output.to_vector();
+        double total = 0.0;
+        for (std::size_t i = 0; i < rendered.size(); ++i)
+            total += static_cast<double>(rendered[i]) * probe.weights[i];
+        return total;
+    };
+
+    const auto analytic_color = set_colors(probe.colors);
+    detail::backward_bilateral_grid(state, analytic_color, weights, 0);
+    const std::vector<float> grid_gradient = state.gradient.to_vector();
+    const std::vector<float> colour_gradient = state.input_grad.to_vector();
+
+    // 1e-3 is below the float32 noise floor of the rendered probe image: the
+    // loss difference cancels to a few machine epsilons. 1e-2 keeps the
+    // central difference truncation error near 1e-4 relative while staying
+    // clear of that floor.
+    constexpr float step = 1e-2F;
+    const auto relative_error = [](const double analytic, const double numeric) {
+        return std::abs(analytic - numeric) /
+            std::max(std::abs(numeric), 1e-4);
+    };
+    for (std::size_t index :
+         {std::size_t{0}, std::size_t{5}, std::size_t{23}, std::size_t{61},
+          std::size_t{119}, std::size_t{181}, std::size_t{250}}) {
+        if (index >= coefficients.size()) continue;
+        const float original = coefficients[index];
+        coefficients[index] = original + step;
+        set_coefficients(coefficients);
+        const double plus = loss(probe.colors);
+        coefficients[index] = original - step;
+        set_coefficients(coefficients);
+        const double minus = loss(probe.colors);
+        coefficients[index] = original;
+        const double numeric = (plus - minus) / (2.0 * step);
+        set_coefficients(coefficients);
+        require(
+            relative_error(grid_gradient[index], numeric) < 2e-2,
+            "bilateral grid coefficient gradient differs from finite "
+            "differences");
+    }
+    for (std::size_t index : {std::size_t{0}, std::size_t{37}, std::size_t{95},
+                              std::size_t{150}}) {
+        if (index >= probe.colors.size()) continue;
+        const float original = probe.colors[index];
+        probe.colors[index] = original + step;
+        const double plus = loss(probe.colors);
+        probe.colors[index] = original - step;
+        const double minus = loss(probe.colors);
+        probe.colors[index] = original;
+        const double numeric = (plus - minus) / (2.0 * step);
+        require(
+            relative_error(colour_gradient[index], numeric) < 2e-2,
+            "bilateral grid colour gradient differs from finite differences");
+    }
+}
+
+void test_ppisp_finite_differences() {
+    using namespace aetherscan::splat;
+    ColourProbe probe = make_colour_probe();
+    for (const auto type :
+         {PpispParamType::no_crf_no_vig, PpispParamType::no_crf,
+          PpispParamType::original}) {
+        TrainingOptions options;
+        options.use_ppisp = true;
+        options.ppisp_type = type;
+        auto state = detail::make_ppisp_state(1, options);
+        Camera camera;
+        camera.width = static_cast<int>(probe.width);
+        camera.height = static_cast<int>(probe.height);
+        camera.cx = 0.5F * static_cast<float>(probe.width);
+        camera.cy = 0.5F * static_cast<float>(probe.height);
+
+        const auto shape = state.parameters.shape();
+        std::vector<float> parameters = state.parameters.to_vector();
+        // Perturb the layout's own identity initialisation instead of drawing
+        // parameters from scratch: a synthetic table can land in a degenerate
+        // corner (a vignetting falloff clamped to zero, a saturated tone
+        // curve) where the forward map is flat and its finite differences say
+        // nothing about the gradient.
+        for (std::size_t i = 0; i < parameters.size(); ++i)
+            parameters[i] +=
+                0.04F * std::sin(0.53F * static_cast<float>(i + 2));
+        const auto set_parameters = [&](const std::vector<float>& values) {
+            state.parameters = tinytensor::Tensor::from_vector(
+                values, shape, tinytensor::Device::CUDA);
+        };
+        const auto set_colors = [&](const std::vector<float>& values) {
+            return tinytensor::Tensor::from_vector(
+                values, {std::size_t{3}, probe.height, probe.width},
+                tinytensor::Device::CUDA);
+        };
+        set_parameters(parameters);
+        const auto weights = tinytensor::Tensor::from_vector(
+            probe.weights, {std::size_t{3}, probe.height, probe.width},
+            tinytensor::Device::CUDA);
+        const auto loss = [&](const std::vector<float>& values) {
+            detail::apply_ppisp(set_colors(values), state, camera, 0);
+            const std::vector<float> rendered = state.output.to_vector();
+            double total = 0.0;
+            for (std::size_t i = 0; i < rendered.size(); ++i)
+                total += static_cast<double>(rendered[i]) * probe.weights[i];
+            return total;
+        };
+
+        const auto analytic_color = set_colors(probe.colors);
+        detail::backward_ppisp(state, analytic_color, weights, camera, 0);
+        const std::vector<float> parameter_gradient = state.gradient.to_vector();
+        const std::vector<float> colour_gradient = state.input_grad.to_vector();
+
+        constexpr float step = 1e-2F;
+        const auto relative_error = [](const double analytic,
+                                       const double numeric) {
+            return std::abs(analytic - numeric) /
+                std::max(std::abs(numeric), 1e-4);
+        };
+        const int parameters_count = state.num_params;
+        // Every rendered channel is probed: a broken stage shows up as a
+        // single-pixel outlier long before it moves a per-parameter average.
+        for (std::size_t index = 0; index < probe.colors.size(); ++index) {
+            const float original = probe.colors[index];
+            probe.colors[index] = original + step;
+            const double plus = loss(probe.colors);
+            probe.colors[index] = original - step;
+            const double minus = loss(probe.colors);
+            probe.colors[index] = original;
+            const double numeric = (plus - minus) / (2.0 * step);
+            require(
+                relative_error(colour_gradient[index], numeric) < 3e-2,
+                "PPISP colour gradient differs from finite differences");
+        }
+        for (int index = 0; index < parameters_count; ++index) {
+            const float original = parameters[index];
+            parameters[index] = original + step;
+            set_parameters(parameters);
+            const double plus = loss(probe.colors);
+            parameters[index] = original - step;
+            set_parameters(parameters);
+            const double minus = loss(probe.colors);
+            parameters[index] = original;
+            set_parameters(parameters);
+            const double numeric = (plus - minus) / (2.0 * step);
+            // The colour-homography Jacobian is a device-side central
+            // difference (see k_color_eps), so it agrees with the host-side
+            // probe to a few percent rather than to the exact-derivative
+            // tolerance used everywhere else.
+            const bool homography_parameter =
+                index >= 16 || (parameters_count == 9 && index >= 1);
+            const double tolerance = homography_parameter ? 5e-2 : 3e-2;
+            if (relative_error(parameter_gradient[index], numeric) >=
+                tolerance) {
+                std::cout << "ppisp fd layout=" << static_cast<int>(type)
+                          << " parameter=" << index
+                          << " analytic=" << parameter_gradient[index]
+                          << " numeric=" << numeric
+                          << " rel="
+                          << relative_error(parameter_gradient[index], numeric)
+                          << '\n';
+                throw std::runtime_error(
+                    "PPISP parameter gradient differs from finite differences");
+            }
+        }
+        for (std::size_t index : {std::size_t{0}, std::size_t{37}, std::size_t{95},
+                                  std::size_t{150}}) {
+            if (index >= probe.colors.size()) continue;
+            const float original = probe.colors[index];
+            probe.colors[index] = original + step;
+            const double plus = loss(probe.colors);
+            probe.colors[index] = original - step;
+            const double minus = loss(probe.colors);
+            probe.colors[index] = original;
+            const double numeric = (plus - minus) / (2.0 * step);
+            if (relative_error(colour_gradient[index], numeric) >= 3e-2) {
+                std::cout << "ppisp color fd layout=" << static_cast<int>(type)
+                          << " index=" << index
+                          << " analytic=" << colour_gradient[index]
+                          << " numeric=" << numeric << '\n';
+                throw std::runtime_error(
+                    "PPISP colour gradient differs from finite differences");
+            }
+        }
+    }
+}
+
 void test_photometric_colour_correction_identity() {
     using namespace aetherscan::splat;
     const std::uint32_t width = 8;
@@ -3073,6 +3324,80 @@ void test_mask_loss_modes() {
             "Missing image rays must have neither RGB nor alpha supervision");
 }
 
+// The photometric loss has two paths through the fused L1+SSIM kernels: with
+// and without a foreground mask. The masked path pre-multiplies the images and
+// then masks the gradient, so it is checked against central differences of the
+// same loss rather than against its own backward.
+void test_masked_photometric_gradient() {
+    using namespace aetherscan::splat;
+    constexpr std::size_t side = 13;
+    constexpr std::size_t pixels = side * side;
+    std::vector<float> prediction(3 * pixels, 0.4F);
+    std::vector<float> reference(3 * pixels, 0.35F);
+    prediction[5 * side + 5] = 0.75F;
+    std::vector<float> mask(pixels, 1.F);
+    for (std::size_t y = 2; y < 5; ++y)
+        for (std::size_t x = 2; x < 5; ++x) mask[y * side + x] = 0.F;
+
+    RenderResult rendered;
+    rendered.alpha = tinytensor::Tensor::zeros(
+        {side, side}, tinytensor::Device::CUDA);
+    rendered.median_depth = tinytensor::Tensor::zeros(
+        {side, side}, tinytensor::Device::CUDA);
+    rendered.normal = tinytensor::Tensor::zeros(
+        {3, side, side}, tinytensor::Device::CUDA);
+    TrainingView target;
+    target.camera.width = target.camera.height = side;
+    target.rgb = tinytensor::Tensor::from_vector(
+        reference, {3, side, side}, tinytensor::Device::CUDA);
+    target.depth = tinytensor::Tensor::zeros(
+        {side, side}, tinytensor::Device::CUDA);
+    target.normal = tinytensor::Tensor::zeros(
+        {3, side, side}, tinytensor::Device::CUDA);
+    target.mask = tinytensor::Tensor::from_vector(
+        mask, {side, side}, tinytensor::Device::CUDA);
+    target.has_mask = true;
+    TrainingOptions options;
+    options.use_mask = true;
+    options.alpha_mode = AlphaMode::masked;
+    options.ssim_weight = 0.2F;
+    options.use_mvs_depth = false;
+    options.use_mvs_normals = false;
+
+    const auto loss_at = [&](const std::vector<float>& values) {
+        rendered.color = tinytensor::Tensor::from_vector(
+            values, {3, side, side}, tinytensor::Device::CUDA);
+        return static_cast<double>(detail::compute_training_loss(
+            rendered, target, options, true).rgb);
+    };
+    rendered.color = tinytensor::Tensor::from_vector(
+        prediction, {3, side, side}, tinytensor::Device::CUDA);
+    const auto loss = detail::compute_training_loss(
+        rendered, target, options, true);
+    const auto gradients = loss.color.to_vector();
+    require(
+        std::isfinite(loss.rgb) && loss.rgb > 0.F,
+        "masked photometric loss is not finite and positive");
+    require(
+        gradients[2 * side + 2] == 0.F && gradients[4 * side + 4] == 0.F,
+        "masked photometric loss left a gradient outside the foreground");
+    constexpr float step = 1e-2F;
+    for (const std::size_t pixel : {std::size_t{5 * side + 5},
+                                    std::size_t{7 * side + 8}}) {
+        std::vector<float> probe = prediction;
+        probe[pixel] += step;
+        const double plus = loss_at(probe);
+        probe[pixel] -= 2.F * step;
+        const double minus = loss_at(probe);
+        const double numeric = (plus - minus) / (2.0 * step);
+        const double analytic = gradients[pixel];
+        require(
+            std::abs(analytic - numeric) <=
+                0.05 * std::max(std::abs(numeric), 1e-4) + 1e-6,
+            "masked photometric gradient differs from finite differences");
+    }
+}
+
 void test_ssim_loss_and_scale_constraint() {
     using namespace aetherscan::splat;
     constexpr std::size_t side = 13;
@@ -4199,6 +4524,8 @@ int main(int argc, char** argv) {
         test_contribution_visibility_rejects_occluded_gaussians();
         test_alpha_parameter_gradients();
         test_photometric_colour_correction_identity();
+        test_bilateral_grid_finite_differences();
+        test_ppisp_finite_differences();
         test_adam_rejects_non_finite_gradients();
         test_fused_adam_parity();
         test_structure_adam_parity();
@@ -4217,6 +4544,7 @@ int main(int argc, char** argv) {
         test_sparse_init_keeps_photo_colors();
         test_mask_loss_modes();
         test_ssim_loss_and_scale_constraint();
+        test_masked_photometric_gradient();
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
         test_adc_plus_split_matches_brush();

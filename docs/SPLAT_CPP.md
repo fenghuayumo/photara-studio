@@ -47,7 +47,10 @@ mask/alpha loss。室外视频的自动曝光 / 白平衡漂移可以由两种�
 PPISP 把跨视图曝光/色彩均值锚定到单位变换，双边网格在每次更新后把每视图网格均值
 投影回 identity 仿射——网格只表达空间变化，全局曝光归 PPISP。同时开启时默认先 PPISP、
 再双边网格。实测：这些功能提升“按帧曝光对齐后”的重建指标，但不改变导出模型的留出指标，
-详见 [颜色校正报告](SPLAT_COLOR_CORRECTION_20260914.md)。mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 splat depth-normal、
+详见 [颜色校正报告](SPLAT_COLOR_CORRECTION_20260914.md)。两者的每像素 kernel 与光度损失
+路径的开销见 [颜色校正性能报告](SPLAT_COLOR_CORRECTION_PERF_20260916.md)：训练步内两项合计
+约 1.5 ms（1728×1120、约 4 万高斯），profiler 的 `colour_forward_ms` / `colour_backward_ms`
+就是这两项的耗时。mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 splat depth-normal、
 权重 `0.02` 的多视图几何往返和权重 `0.6` 的平面单应 NCC。多视图几何通过 GGGS 原生
 `sampleDepth` 前后向在相邻视图查询表面点，梯度同时回传参考深度、查询点以及邻视图
 Gaussian；NCC 使用半像素 7×7 patch、鲁棒 diffuse confidence 和深度/法线解析梯度。

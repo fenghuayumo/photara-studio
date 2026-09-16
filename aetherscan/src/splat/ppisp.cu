@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace aetherscan::splat::detail {
@@ -11,7 +12,11 @@ namespace {
 
 constexpr int k_max_params = 36;
 constexpr float k_ln2 = 0.69314718056F;
-constexpr float k_color_eps = 1e-3F;
+// Step of the device-side central difference that builds the colour-homography
+// Jacobian. At 1e-3 the float32 round-off of `compute_homography` dominated the
+// estimate (measured ~3% against a host-side finite difference); 1e-2 moves the
+// balance to the truncation side, where the residual is under 1%.
+constexpr float k_color_eps = 1e-2F;
 
 __device__ __forceinline__ void mat3_mul(
     const float a[9], const float b[9], float o[9]) {
@@ -209,6 +214,10 @@ __device__ float softplus(const float x) {
     return x > 20.F ? x : logf(1.F + expf(x));
 }
 
+__device__ float softplus_gradient(const float x) {
+    return x > 20.F ? 1.F : 1.F / (1.F + expf(-x));
+}
+
 __device__ float crf_channel(
     float x, const float toe_raw, const float shoulder_raw,
     const float gamma_raw, const float center_raw) {
@@ -236,56 +245,133 @@ __device__ float3 apply_crf(const float3 rgb, const float* p) {
         crf_channel(rgb.z, p[8], p[9], p[10], p[11]));
 }
 
+// Value and derivatives of one tone-curve channel. `crf_channel` is evaluated
+// term by term so the analytic VJP reproduces it exactly; the finite-difference
+// VJP this replaces needed fifteen full curve evaluations per pixel.
+__device__ void crf_channel_grad(
+    const float x_raw, const float toe_raw, const float shoulder_raw,
+    const float gamma_raw, const float center_raw, float& value, float& dy_dx,
+    float dy_dparameter[4]) {
+    const float toe = 0.3F + softplus(toe_raw);
+    const float shoulder = 0.3F + softplus(shoulder_raw);
+    const float gamma = 0.1F + softplus(gamma_raw);
+    const float center_unclamped = 1.F / (1.F + expf(-center_raw));
+    const bool center_clamped =
+        center_unclamped < 1.0e-4F || center_unclamped > 1.F - 1.0e-4F;
+    const float center =
+        fminf(fmaxf(center_unclamped, 1.0e-4F), 1.F - 1.0e-4F);
+    const float lerp_value = (1.F - center) * toe + center * shoulder;
+    const float denominator = fmaxf(lerp_value, 1.0e-8F);
+    const float a = (shoulder * center) / denominator;
+    const float b = 1.F - a;
+    const float inverse_squared = 1.F / (denominator * denominator);
+    const float da_dtoe =
+        -shoulder * center * (1.F - center) * inverse_squared;
+    const float da_dshoulder =
+        center * (denominator - shoulder * center) * inverse_squared;
+    const float da_dcenter = (shoulder * denominator -
+        shoulder * center * (shoulder - toe)) * inverse_squared;
+
+    const bool x_in_range = x_raw >= 0.F && x_raw <= 1.F;
+    const float x = fminf(fmaxf(x_raw, 0.F), 1.F);
+    float y = 0.F;
+    float dy_dx_local = 0.F;
+    float dy_dtoe = 0.F;
+    float dy_dshoulder = 0.F;
+    float dy_dcenter = 0.F;
+    if (x <= center) {
+        const float u = x / center;
+        const float p = powf(u, toe);
+        y = a * p;
+        dy_dx_local = a * toe * powf(u, toe - 1.F) / center;
+        dy_dtoe = da_dtoe * p + a * p * (u > 0.F ? logf(u) : 0.F);
+        dy_dshoulder = da_dshoulder * p;
+        dy_dcenter = da_dcenter * p - a * toe * p / center;
+    } else {
+        const float v = (1.F - x) / (1.F - center);
+        const float q = powf(v, shoulder);
+        y = 1.F - b * q;
+        dy_dx_local = b * shoulder * powf(v, shoulder - 1.F) / (1.F - center);
+        dy_dtoe = da_dtoe * q;
+        dy_dshoulder = da_dshoulder * q - b * q * (v > 0.F ? logf(v) : 0.F);
+        dy_dcenter =
+            da_dcenter * q - b * q * shoulder / (1.F - center);
+    }
+    const float base = fmaxf(y, 0.F);
+    value = powf(base, gamma);
+    const bool positive = base > 0.F;
+    const float dvalue_dy = positive ? gamma * value / base : 0.F;
+    const float dvalue_dgamma = positive ? value * logf(base) : 0.F;
+    dy_dx = x_in_range ? dvalue_dy * dy_dx_local : 0.F;
+    dy_dparameter[0] = dvalue_dy * dy_dtoe * softplus_gradient(toe_raw);
+    dy_dparameter[1] = dvalue_dy * dy_dshoulder * softplus_gradient(shoulder_raw);
+    dy_dparameter[2] = dvalue_dgamma * softplus_gradient(gamma_raw);
+    dy_dparameter[3] = dvalue_dy * dy_dcenter *
+        (center_clamped ? 0.F : center * (1.F - center));
+}
+
 __device__ void apply_crf_vjp(
     const float3 rgb, const float* p, const float3 d_out, float3& d_rgb,
     float* d_p) {
-    const float eps = 1.0e-3F;
-    const float3 y = apply_crf(rgb, p);
-    (void)y;
-    for (int c = 0; c < 3; ++c) {
-        float3 plus = rgb;
-        float3 minus = rgb;
-        const float value = c == 0 ? rgb.x : c == 1 ? rgb.y : rgb.z;
-        (c == 0 ? plus.x : c == 1 ? plus.y : plus.z) = value + eps;
-        (c == 0 ? minus.x : c == 1 ? minus.y : minus.z) = value - eps;
-        const float3 yp = apply_crf(plus, p);
-        const float3 ym = apply_crf(minus, p);
-        const float dyc = ((c == 0 ? yp.x : c == 1 ? yp.y : yp.z) -
-                              (c == 0 ? ym.x : c == 1 ? ym.y : ym.z)) /
-            (2.F * eps);
-        (c == 0 ? d_rgb.x : c == 1 ? d_rgb.y : d_rgb.z) +=
-            (c == 0 ? d_out.x : c == 1 ? d_out.y : d_out.z) * dyc;
-    }
-    for (int i = 0; i < 12; ++i) {
-        float plus[12];
-        float minus[12];
-        for (int k = 0; k < 12; ++k) {
-            plus[k] = p[k];
-            minus[k] = p[k];
-        }
-        plus[i] += eps;
-        minus[i] -= eps;
-        const float3 yp = apply_crf(rgb, plus);
-        const float3 ym = apply_crf(rgb, minus);
-        d_p[i] += (d_out.x * (yp.x - ym.x) + d_out.y * (yp.y - ym.y) +
-                      d_out.z * (yp.z - ym.z)) /
-            (2.F * eps);
-    }
+    float value = 0.F;
+    float dy_dx = 0.F;
+    float dy_dparameter[4] = {0.F, 0.F, 0.F, 0.F};
+    crf_channel_grad(
+        rgb.x, p[0], p[1], p[2], p[3], value, dy_dx, dy_dparameter);
+    d_rgb.x += d_out.x * dy_dx;
+    for (int i = 0; i < 4; ++i) d_p[i] += d_out.x * dy_dparameter[i];
+    crf_channel_grad(
+        rgb.y, p[4], p[5], p[6], p[7], value, dy_dx, dy_dparameter);
+    d_rgb.y += d_out.y * dy_dx;
+    for (int i = 0; i < 4; ++i) d_p[4 + i] += d_out.y * dy_dparameter[i];
+    crf_channel_grad(
+        rgb.z, p[8], p[9], p[10], p[11], value, dy_dx, dy_dparameter);
+    d_rgb.z += d_out.z * dy_dx;
+    for (int i = 0; i < 4; ++i) d_p[8 + i] += d_out.z * dy_dparameter[i];
 }
 
-__device__ int color_offset(const int num_params) {
+constexpr int color_offset(const int num_params) {
     return num_params == 9 ? 1 : 16;
 }
 
+// The parameter layout is a compile-time property: the per-pixel kernels are
+// templated on it so the vignetting / tone-curve branches disappear and the
+// per-parameter reduction only walks the parameters the layout owns. The
+// runtime version executed the widest layout's loop for every layout.
+template <int k_params>
+constexpr int layout_color_offset() {
+    return color_offset(k_params);
+}
+
+// Instantiate the per-pixel kernels once per layout and pick at the call site.
+template <typename Launcher>
+void dispatch_ppisp_layout(const int num_params, const Launcher& launcher) {
+    switch (num_params) {
+    case 9:
+        launcher(std::integral_constant<int, 9>{});
+        break;
+    case 24:
+        launcher(std::integral_constant<int, 24>{});
+        break;
+    case 36:
+        launcher(std::integral_constant<int, 36>{});
+        break;
+    default:
+        throw std::invalid_argument("unsupported PPISP parameter layout");
+    }
+}
+
+template <int k_params>
 __device__ float3 apply_ppisp_pixel(
     float3 rgb, const float2 pix, const float2 center, const float2 size,
-    const float* params, const int num_params, const bool clamp_output,
-    const float H[9]) {
+    const float* params, const bool clamp_output, const float H[9]) {
     const float gain = exp2f(params[0]);
     rgb = make_float3(rgb.x * gain, rgb.y * gain, rgb.z * gain);
-    if (num_params >= 24) rgb = apply_vignetting(rgb, pix, center, size, params + 1);
+    if constexpr (k_params >= 24)
+        rgb = apply_vignetting(rgb, pix, center, size, params + 1);
     rgb = apply_color(rgb, H);
-    if (num_params == 36) rgb = apply_crf(rgb, params + 24);
+    if constexpr (k_params == 36)
+        rgb = apply_crf(rgb, params + 24);
     if (clamp_output) {
         rgb.x = fminf(fmaxf(rgb.x, 0.F), 1.F);
         rgb.y = fminf(fmaxf(rgb.y, 0.F), 1.F);
@@ -294,17 +380,18 @@ __device__ float3 apply_ppisp_pixel(
     return rgb;
 }
 
+template <int k_params>
 __global__ void ppisp_forward_kernel(
-    const float* color, float* corrected, const float* params,
-    const int view, const int num_params, const int height, const int width,
-    const float cx, const float cy, const bool clamp_output) {
-    __shared__ float shared_params[k_max_params];
+    const float* color, float* corrected, const float* params, const int view,
+    const int height, const int width, const float cx, const float cy,
+    const bool clamp_output) {
+    __shared__ float shared_params[k_params];
     __shared__ float H[9];
-    if (threadIdx.x < num_params)
-        shared_params[threadIdx.x] = params[view * num_params + threadIdx.x];
+    if (threadIdx.x < k_params)
+        shared_params[threadIdx.x] = params[view * k_params + threadIdx.x];
     __syncthreads();
     if (threadIdx.x == 0)
-        compute_homography(shared_params + color_offset(num_params), H);
+        compute_homography(shared_params + layout_color_offset<k_params>(), H);
     __syncthreads();
     const int pixel = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     const int pixels = height * width;
@@ -313,34 +400,35 @@ __global__ void ppisp_forward_kernel(
     const int y = pixel / width;
     const float3 rgb = make_float3(
         color[pixel], color[pixels + pixel], color[2 * pixels + pixel]);
-    const float3 out = apply_ppisp_pixel(
+    const float3 out = apply_ppisp_pixel<k_params>(
         rgb, make_float2(static_cast<float>(x), static_cast<float>(y)),
         make_float2(cx, cy),
         make_float2(static_cast<float>(width), static_cast<float>(height)),
-        shared_params, num_params, clamp_output, H);
+        shared_params, clamp_output, H);
     corrected[pixel] = out.x;
     corrected[pixels + pixel] = out.y;
     corrected[2 * pixels + pixel] = out.z;
 }
 
+template <int k_params>
 __global__ void ppisp_backward_kernel(
     const float* color, const float* params, const float* output_grad,
-    float* input_grad, float* param_grad, const int view, const int num_params,
-    const int height, const int width, const float cx, const float cy,
-    const bool clamp_output) {
-    __shared__ float shared_params[k_max_params];
+    float* input_grad, float* param_grad, const int view, const int height,
+    const int width, const float cx, const float cy, const bool clamp_output) {
+    constexpr int k_color = layout_color_offset<k_params>();
+    __shared__ float shared_params[k_params];
     __shared__ float H[9];
     __shared__ float dH[8][9];
-    if (threadIdx.x < num_params)
-        shared_params[threadIdx.x] = params[view * num_params + threadIdx.x];
+    if (threadIdx.x < k_params)
+        shared_params[threadIdx.x] = params[view * k_params + threadIdx.x];
     __syncthreads();
     if (threadIdx.x == 0)
-        homography_jacobian(shared_params + color_offset(num_params), H, dH);
+        homography_jacobian(shared_params + k_color, H, dH);
     __syncthreads();
     const int pixel = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     const int pixels = height * width;
     const bool inside = pixel < pixels;
-    float local[k_max_params]{};
+    float local[k_params]{};
     float3 d_in = make_float3(0.F, 0.F, 0.F);
     if (inside) {
         const int x = pixel % width;
@@ -359,29 +447,29 @@ __global__ void ppisp_backward_kernel(
             const float gain = exp2f(shared_params[0]);
             const float3 exposed =
                 make_float3(rgb.x * gain, rgb.y * gain, rgb.z * gain);
-            const float3 vig = num_params >= 24
+            const float3 vig = k_params >= 24
                 ? apply_vignetting(exposed, pix, center, size, shared_params + 1)
                 : exposed;
             const float3 coloured = apply_color(vig, H);
             float3 pre_clamp = coloured;
-            if (num_params == 36) pre_clamp = apply_crf(coloured, shared_params + 24);
+            if constexpr (k_params == 36)
+                pre_clamp = apply_crf(coloured, shared_params + 24);
             if (clamp_output) {
                 if (pre_clamp.x <= 0.F || pre_clamp.x >= 1.F) d_out.x = 0.F;
                 if (pre_clamp.y <= 0.F || pre_clamp.y >= 1.F) d_out.y = 0.F;
                 if (pre_clamp.z <= 0.F || pre_clamp.z >= 1.F) d_out.z = 0.F;
             }
             float3 d_stage = make_float3(0.F, 0.F, 0.F);
-            if (num_params == 36) {
+            if constexpr (k_params == 36) {
                 apply_crf_vjp(
                     coloured, shared_params + 24, d_out, d_stage, local + 24);
                 d_out = d_stage;
                 d_stage = make_float3(0.F, 0.F, 0.F);
             }
-            apply_color_vjp(
-                vig, H, dH, d_out, d_stage, local + color_offset(num_params));
+            apply_color_vjp(vig, H, dH, d_out, d_stage, local + k_color);
             d_out = d_stage;
             d_stage = make_float3(0.F, 0.F, 0.F);
-            if (num_params >= 24) {
+            if constexpr (k_params >= 24) {
                 apply_vignetting_vjp(
                     exposed, pix, center, size, shared_params + 1, d_out,
                     d_stage, local + 1);
@@ -398,12 +486,13 @@ __global__ void ppisp_backward_kernel(
         input_grad[pixels + pixel] = d_in.y;
         input_grad[2 * pixels + pixel] = d_in.z;
     }
-    for (int i = 0; i < num_params; ++i) {
+#pragma unroll
+    for (int i = 0; i < k_params; ++i) {
         float value = isfinite(local[i]) ? local[i] : 0.F;
         for (int offset = 16; offset > 0; offset >>= 1)
             value += __shfl_down_sync(0xffffffffU, value, offset);
         if ((threadIdx.x & 31U) == 0U && value != 0.F)
-            atomicAdd(param_grad + view * num_params + i, value);
+            atomicAdd(param_grad + view * k_params + i, value);
     }
 }
 
@@ -550,11 +639,16 @@ void apply_ppisp(
     const int width = static_cast<int>(color.shape()[2]);
     const int pixels = height * width;
     if (pixels == 0) return;
-    ppisp_forward_kernel<<<
-        (pixels + k_cuda_threads - 1) / k_cuda_threads, k_cuda_threads>>>(
-        color.ptr<float>(), state.output.ptr<float>(),
-        state.parameters.ptr<float>(), static_cast<int>(view), state.num_params,
-        height, width, camera.cx, camera.cy, state.clamp_output);
+    const unsigned blocks =
+        (pixels + k_cuda_threads - 1) / k_cuda_threads;
+    const auto launch = [&](auto layout) {
+        ppisp_forward_kernel<decltype(layout)::value>
+            <<<blocks, k_cuda_threads>>>(
+                color.ptr<float>(), state.output.ptr<float>(),
+                state.parameters.ptr<float>(), static_cast<int>(view), height,
+                width, camera.cx, camera.cy, state.clamp_output);
+    };
+    dispatch_ppisp_layout(state.num_params, launch);
     check_cuda(cudaGetLastError(), "apply PPISP colour correction");
 }
 
@@ -569,12 +663,17 @@ void backward_ppisp(
     const int pixels = height * width;
     if (pixels == 0) return;
     state.gradient.zero_();
-    ppisp_backward_kernel<<<
-        (pixels + k_cuda_threads - 1) / k_cuda_threads, k_cuda_threads>>>(
-        color.ptr<float>(), state.parameters.ptr<float>(),
-        output_gradient.ptr<float>(), state.input_grad.ptr<float>(),
-        state.gradient.ptr<float>(), static_cast<int>(view), state.num_params,
-        height, width, camera.cx, camera.cy, state.clamp_output);
+    const unsigned blocks =
+        (pixels + k_cuda_threads - 1) / k_cuda_threads;
+    const auto launch = [&](auto layout) {
+        ppisp_backward_kernel<decltype(layout)::value>
+            <<<blocks, k_cuda_threads>>>(
+                color.ptr<float>(), state.parameters.ptr<float>(),
+                output_gradient.ptr<float>(), state.input_grad.ptr<float>(),
+                state.gradient.ptr<float>(), static_cast<int>(view), height,
+                width, camera.cx, camera.cy, state.clamp_output);
+    };
+    dispatch_ppisp_layout(state.num_params, launch);
     check_cuda(cudaGetLastError(), "backward PPISP colour correction");
 }
 
