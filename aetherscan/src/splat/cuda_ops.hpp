@@ -238,6 +238,9 @@ tinytensor::Tensor densify_blend_world_gradient(
 void add_sh_regularization(const tinytensor::Tensor& sh,
     tinytensor::Tensor& gradient, float weight);
 
+void add_geometry_regularization(const GaussianModel& model,
+    ModelGradients& gradients, float opacity_weight, float log_scale_weight);
+
 void accumulate_densification_stats(
     const tinytensor::Tensor& refine_weight,
     const tinytensor::Tensor& visibility,
@@ -290,20 +293,26 @@ void clip_log_scale_by_screen(
     float screen_threshold,
     float hardness);
 
+// Split operators with a live caller. The kernel used to carry six variants;
+// ADC-IGS now shares ADC+'s split, so only these two remain.
+enum class SplitMode {
+    // Brush ADC+ covariance-aware split: per-axis shrink proportional to the
+    // axis variance share, anti-correlated offset that preserves the centroid.
+    adc_covariance,
+    // Dense MVS tangent-plane split: local Z keeps the fused normal thickness.
+    dense_tangent,
+};
+
 // Mutate selected parents and their already-cloned children in place.
-// mode: 1=default, 2=ADC+, 3=legacy stochastic IGS,
-//       4=dense-MVS tangent plane, 5=IGS moment-preserving major-axis split,
-//       6=long-axis split (LAS).
 void split_gaussians(
     GaussianModel& parents,
     GaussianModel& children,
     const tinytensor::Tensor& parent_indices,
     const tinytensor::Tensor& random_samples,
     const tinytensor::Tensor& screen_sizes,
-    int mode,
+    SplitMode mode,
     float minimum_opacity,
-    float split_at_screen_size,
-    float split_opacity_k = 0.6F);
+    float split_at_screen_size);
 
 void apply_adc_decay(
     GaussianModel& model, float opacity_decay, float scale_decay);

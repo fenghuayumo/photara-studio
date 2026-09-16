@@ -14,7 +14,6 @@ public:
         const TrainingOptions& options, const AdamStates& states) const;
 
 protected:
-    virtual int split_mode() const { return 2; }
     virtual tinytensor::Tensor growth_candidates(
         const tinytensor::Tensor& eligible,
         const tinytensor::Tensor& selected) const;

@@ -4,13 +4,14 @@
 
 namespace aetherscan::splat::densification {
 
-// image/world-gradient evidence and anisotropic exploration.
-// Retain covariance-preserving long-axis splits and ADC+ pruning; require
-// repeated contribution before growth. The preset adds about 5% per 200
-// optimizer steps, refining every 100 with a final convergence interval.
+// Image/world-gradient evidence, relocation and the ADC+ refinement skeleton.
+// The differentiation from ADC+ is entirely in what counts as evidence and
+// what ranks growth: an SSIM contrast-structure error map blended with the
+// world-space position gradient, a screen-gradient gate, two distinct
+// contributing cameras before replication, and score-sampled relocation.
+// Geometry (split, cadence, screen cap) is shared with ADC+.
 class IgsStrategy final : public AdcPlusStrategy {
 protected:
-    int split_mode() const override { return 5; }
     tinytensor::Tensor growth_candidates(
         const tinytensor::Tensor& eligible,
         const tinytensor::Tensor& selected) const override;

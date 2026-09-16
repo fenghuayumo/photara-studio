@@ -21,10 +21,11 @@
 int main(int argc, char** argv) {
     try {
         if (argc != 6 && argc != 7)
-            throw std::runtime_error("Usage: splat_quality_eval DATASET IMAGES MODEL OUTPUT_DIR SPLIT_EVERY [--visibility-audit|--prune-unobserved]");
+            throw std::runtime_error("Usage: splat_quality_eval DATASET IMAGES MODEL OUTPUT_DIR SPLIT_EVERY [--visibility-audit|--prune-unobserved|--sampled-novel]");
         const bool visibility_audit = argc == 7 && std::string(argv[6]) == "--visibility-audit";
         const bool prune_unobserved = argc == 7 && std::string(argv[6]) == "--prune-unobserved";
-        if (argc == 7 && !visibility_audit && !prune_unobserved) throw std::runtime_error("Unknown evaluation mode");
+        const bool sampled_novel = argc == 7 && std::string(argv[6]) == "--sampled-novel";
+        if (argc == 7 && !visibility_audit && !prune_unobserved && !sampled_novel) throw std::runtime_error("Unknown evaluation mode");
         const unsigned split = std::stoul(argv[5]);
         if (split < 2) throw std::runtime_error("SPLIT_EVERY must be >= 2");
         aetherscan::splat::DatasetLoadRequest request;
@@ -96,7 +97,12 @@ int main(int argc, char** argv) {
             aetherscan::io::save_rgb_png(image, output / ("target_" + std::to_string(i) + ".png"));
             // Extrapolation diagnostics: move along the optical axis using
             // a scene-derived distance, independent of the trained model.
+            // Keep all metric views; optionally save a fixed subset of novel
+            // poses for large datasets. The selection never depends on quality.
+            const bool save_novel = !sampled_novel || (i / split) % 8 == 0 ||
+                i + split >= dataset.scene.views.size();
             std::vector<float> depths;
+            if (save_novel)
             for (const auto& point : dataset.scene.sparse_points) {
                 if (std::find(point.view_ids.begin(), point.view_ids.end(), i) == point.view_ids.end())
                     continue;
@@ -129,7 +135,7 @@ int main(int argc, char** argv) {
             }
             // Unmeasured novel-camera diagnostic for floaters. Every model
             // receives the same midpoint pose, independent of its geometry.
-            if (i + split < dataset.scene.views.size()) {
+            if (save_novel && i + split < dataset.scene.views.size()) {
                 auto camera = target.camera;
                 const auto peer = aetherscan::splat::make_training_view(
                     dataset.scene.views[i + split], options).camera;

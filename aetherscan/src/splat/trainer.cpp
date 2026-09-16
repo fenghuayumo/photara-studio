@@ -602,7 +602,7 @@ GaussianModel initialize_from_dense_cloud(
     const std::size_t count = scene.dense_cloud.points.size();
     const std::size_t bases = static_cast<std::size_t>(options.sh_degree + 1U) *
                               (options.sh_degree + 1U);
-    const bool brush_adc_plus = is_adc_strategy(options.densification_strategy);
+    const bool splat_adc_plus = is_adc_strategy(options.densification_strategy);
     std::vector<float> means(count * 3);
     std::vector<float> scales(count * 3);
     std::vector<float> quaternions(count * 4);
@@ -642,14 +642,14 @@ GaussianModel initialize_from_dense_cloud(
                   options.minimum_scale_fraction)
         : std::numeric_limits<float>::infinity();
     const float opacity = std::clamp(
-        brush_adc_plus ? 0.5F : options.initial_opacity,
+        splat_adc_plus ? 0.5F : options.initial_opacity,
         1e-6F, 1.F - 1e-6F);
     const float opacity_logit = std::log(opacity / (1.F - opacity));
     std::vector<float> knn_scales(count, 0.F);
     if (options.initialize_scale_from_knn &&
-        count >= (brush_adc_plus ? 3U : 4U)) {
+        count >= (splat_adc_plus ? 3U : 4U)) {
         const KdTree tree(selected_positions);
-        const float brush_maximum_scale = 0.1F *
+        const float maximum_scale = 0.1F *
             percentile_median_size(selected_positions, 0.75F);
 #if defined(AETHERSCAN_HAS_OPENMP)
 #pragma omp parallel for schedule(static)
@@ -657,11 +657,11 @@ GaussianModel initialize_from_dense_cloud(
         for (std::int64_t index = 0;
              index < static_cast<std::int64_t>(count); ++index)
             knn_scales[static_cast<std::size_t>(index)] =
-                brush_adc_plus
+                splat_adc_plus
                 ? std::clamp(
                       tree.two_neighbor_half_average(
                           static_cast<std::size_t>(index)),
-                      1e-3F, brush_maximum_scale)
+                      1e-3F, maximum_scale)
                 : tree.three_neighbor_rms(static_cast<std::size_t>(index));
     }
     std::mt19937 quaternion_random(options.seed);
@@ -695,7 +695,7 @@ GaussianModel initialize_from_dense_cloud(
         for (int axis = 0; axis < 3; ++axis)
             scales[3 * index + axis] = std::log(scale);
 
-        if (!options.input_is_dense && !brush_adc_plus) {
+        if (!options.input_is_dense && !splat_adc_plus) {
             // Exact pygsplat sparse-SfM initialization: raw U[0,1) quaternion
             // parameters. The raster path normalizes them before use.
             for (int component = 0; component < 4; ++component)
@@ -830,6 +830,21 @@ GaussianModel Trainer::train(
         all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
             return uses_native_splat_projection(camera.model);
         });
+    if (native_non_pinhole) {
+        // Panorama and fisheye training rasterize the source projection
+        // directly; state which models are in play so a run that silently fell
+        // back to pinhole working cameras is obvious from the log.
+        unsigned fisheye = 0, equirectangular = 0;
+        for (const Camera& camera : all_cameras) {
+            if (camera.model == CameraModel::opencv_fisheye) ++fisheye;
+            if (camera.model == CameraModel::equirectangular)
+                ++equirectangular;
+        }
+        core::Logger::instance().info(
+            "splat native projection: equirectangular=", equirectangular,
+            " fisheye=", fisheye, " of ", all_cameras.size(),
+            " cameras (training on the source projection, no undistortion)");
+    }
     if (native_non_pinhole &&
         (options_.multi_view_geo_weight > 0.F ||
          options_.multi_view_ncc_weight > 0.F ||
@@ -1434,6 +1449,11 @@ GaussianModel Trainer::train(
         const bool update_structure = global_structure_active &&
             dense_structure_active;
         if (update_structure) {
+            const float remaining = std::max(0.F, 1.F -
+                static_cast<float>(iteration) / std::max(1U, options_.iterations));
+            detail::add_geometry_regularization(model, gradients,
+                options_.opacity_regularization_weight * remaining,
+                options_.log_scale_regularization_weight * std::pow(remaining, 0.4F));
             detail::adam_step_structure(model, gradients, means_state, scales_state,
                 rotations_state, opacity_state, means_lr, iteration, options_,
                 minimum_log_scale, maximum_log_scale);

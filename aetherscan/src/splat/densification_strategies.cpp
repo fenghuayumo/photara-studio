@@ -122,7 +122,8 @@ void grow_training_model(
     auto screen_tensor = tinytensor::Tensor::from_vector(
         selected_screen_sizes, {parents.size()}, tinytensor::Device::CUDA);
     detail::split_gaussians(
-        model, children, indices, random_tensor, screen_tensor, 4,
+        model, children, indices, random_tensor, screen_tensor,
+        detail::SplitMode::dense_tangent,
         options.prune_opacity, 0.F);
     // Splitting mutates the retained parent as well as creating a child.
     // Both are new primitives and must start with clean optimizer moments,

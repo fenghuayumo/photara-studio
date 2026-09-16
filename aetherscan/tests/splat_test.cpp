@@ -3442,6 +3442,75 @@ void test_igs_growth_budget() {
     require_finite(model.log_scales, "IGS produced non-finite scales");
 }
 
+void test_igs_fog_evidence_paths() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    for (const float oversize_fraction : {0.F, 1.F}) {
+        auto model = make_default_refine_model(std::vector<float>(12, 0.F));
+        model.opacity_logits = Tensor::from_vector(
+            std::vector<float>{-20.F, 0.F, 0.F, 0.F}, {4, 1}, gpu);
+        auto harness = make_refine_harness(std::move(model));
+        auto stats = make_default_refine_stats();
+        stats.max_screen_radius = Tensor::full({4}, 0.8F, gpu);
+        TrainingOptions options;
+        options.densification_strategy = DensificationStrategy::adc_igs;
+        options.densification_cap = 20;
+        options.densify_geometry_gradient_threshold = 0.001F;
+        options.densify_oversize_split_fraction = oversize_fraction;
+        options.densify_select_fraction = 1.F;
+        options.densify_gradient_threshold = 0.F;
+        std::mt19937 random(42);
+        const auto result = densification::refine_gaussians(
+            harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
+            options, random, harness.states());
+        require(result.pruned == 1 && result.grown == 0 && harness.model.size() == 3,
+                "IGS replacement/oversize must not bypass the geometry gate");
+        for (const auto* state : harness.states())
+            require(state->first.shape()[0] == 3 && state->second.shape()[0] == 3,
+                    "Geometry-gated pruning misaligned Adam rows");
+    }
+    {
+        auto model = make_default_refine_model(std::vector<float>(12, 0.F));
+        model.opacity_logits = Tensor::zeros({4, 1}, gpu);
+        auto harness = make_refine_harness(std::move(model));
+        auto stats = make_default_refine_stats();
+        stats.geometry_gradient = Tensor::from_vector(
+            std::vector<float>{0.1F, 0, 0, 0}, {4}, gpu);
+        stats.priority = Tensor::from_vector(std::vector<float>{0, 10, 10, 10}, {4}, gpu);
+        TrainingOptions options;
+        options.densification_strategy = DensificationStrategy::adc_igs;
+        options.densification_cap = 20;
+        options.densify_geometry_gradient_threshold = 0.001F;
+        options.densify_oversize_split_fraction = 1.F;
+        options.densify_select_fraction = 2.F;
+        options.densify_gradient_threshold = 0.F;
+        std::mt19937 random(42);
+        const auto result = densification::refine_gaussians(
+            harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
+            options, random, harness.states());
+        require(result.grown == 1 && result.pruned == 0,
+                "Sampled oversize budget must fall back to the sole geometry-supported parent");
+    }
+    auto model = make_default_refine_model(std::vector<float>(12, 0.F));
+    model.opacity_logits = Tensor::from_vector(
+        std::vector<float>{-4.F, -4.F, -4.F, 0.F}, {4, 1}, gpu);
+    auto harness = make_refine_harness(std::move(model));
+    auto stats = make_default_refine_stats();
+    stats.count = Tensor::from_vector(std::vector<float>{10, 0, 10, 10}, {4}, gpu);
+    stats.view_support = Tensor::from_vector(std::vector<float>{1, 0, 2, 1}, {4}, gpu);
+    TrainingOptions options;
+    options.densification_strategy = DensificationStrategy::adc_igs;
+    options.densification_cap = 3;
+    std::mt19937 random(42);
+    const auto result = densification::refine_gaussians(
+        harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
+        options, random, harness.states());
+    require(result.pruned == 1 && result.grown == 0 &&
+                harness.model.means.to_vector()[0] == 1.F,
+            "IGS must prune repeated-camera weak opacity while preserving unseen/multiview/opaque rows");
+}
+
 void test_densification_cap_stops_igs_growth() {
     using namespace aetherscan::splat;
     using tinytensor::Tensor;
@@ -3462,6 +3531,9 @@ void test_densification_cap_stops_igs_growth() {
     TrainingOptions options;
     options.densification_strategy = DensificationStrategy::adc_igs;
     apply_strategy_defaults(options);
+    // This test drives refinements itself and checks the budget arithmetic, so
+    // it pins the interval instead of inheriting the preset cadence.
+    options.refine_every = 100;
     options.densification_cap = 4;
     options.densify_growth_factor = 2.F;
     options.grow_stop_iter = 10'000;
@@ -3543,29 +3615,9 @@ void test_adc_plus_split_matches_brush() {
     const auto screen_sizes = tinytensor::Tensor::from_vector(
         std::vector<float>{1.F}, {1}, tinytensor::Device::CUDA);
 
-    auto igs_parents = densification::clone_model(parents);
-    auto igs_children = densification::clone_model(children);
     detail::split_gaussians(
-        igs_parents, igs_children, indices, unused_random, screen_sizes, 5,
-        1.F / 255.F, 0.5F);
-    const auto igs_parent_mean = igs_parents.means.to_vector();
-    const auto igs_child_mean = igs_children.means.to_vector();
-    const auto igs_scale = igs_parents.log_scales.to_vector();
-    const float original_variance[3]{4.F, 1.F, 0.25F};
-    for (int row = 0; row < 3; ++row) {
-        require(std::abs(igs_parent_mean[row] + igs_child_mean[row]) < 1e-5F,
-                "IGS split changed the mixture centroid");
-        for (int col = 0; col < 3; ++col) {
-            const float covariance = (row == col ? std::exp(2.F * igs_scale[row]) : 0.F)
-                + igs_child_mean[row] * igs_child_mean[col];
-            require(std::abs(covariance - (row == col ? original_variance[row] : 0.F)) < 1e-5F,
-                    "IGS split changed the mixture covariance");
-        }
-    }
-
-    detail::split_gaussians(
-        parents, children, indices, unused_random, screen_sizes, 2,
-        1.F / 255.F, 0.5F);
+        parents, children, indices, unused_random, screen_sizes,
+        detail::SplitMode::adc_covariance, 1.F / 255.F, 0.5F);
 
     const auto parent_means = parents.means.to_vector();
     const auto child_means = children.means.to_vector();
@@ -3599,7 +3651,7 @@ void test_adc_plus_split_matches_brush() {
         "ADC+ split opacity does not match brush's transmittance power");
 }
 
-void test_las_split_matches_reference() {
+void test_revised_noise_scales_with_scene_units() {
     using namespace aetherscan::splat;
     GaussianModel parents;
     parents.means = tinytensor::Tensor::zeros(
@@ -3640,38 +3692,49 @@ void test_las_split_matches_reference() {
         require(noise_model.means.to_vector() == displacement,
                 "Revised noise must leave invisible Gaussians stationary");
     }
-    GaussianModel children = densification::clone_model(parents);
-    const auto indices = tinytensor::Tensor::from_vector(
-        std::vector<int>{0}, {1}, tinytensor::Device::CUDA);
-    const auto unused_random = tinytensor::Tensor::zeros(
-        {1, 3}, tinytensor::Device::CUDA);
-    const auto screen_sizes = tinytensor::Tensor::from_vector(
-        std::vector<float>{1.F}, {1}, tinytensor::Device::CUDA);
-    detail::split_gaussians(
-        parents, children, indices, unused_random, screen_sizes, 6,
-        1.F / 255.F, 0.5F, 0.6F);
-    const auto parent_means = parents.means.to_vector();
-    const auto child_means = children.means.to_vector();
-    const auto parent_scales = parents.log_scales.to_vector();
-    require(
-        std::abs(parent_means[0] + 1.F) < 1e-5F &&
-            std::abs(child_means[0] - 1.F) < 1e-5F &&
-            std::abs(parent_means[1]) < 1e-5F &&
-            std::abs(parent_means[2]) < 1e-5F,
-        "LAS split offset is not half the longest axis");
-    require(
-        std::abs(parent_scales[0] - std::log(1.F)) < 1e-5F &&
-            std::abs(parent_scales[1] - std::log(0.85F)) < 1e-5F &&
-            std::abs(parent_scales[2] - (std::log(0.5F) + std::log(0.85F))) <
-                1e-5F,
-        "LAS split scale shrink is not 0.5 / 0.85");
-    const float expected_opacity = 0.6F * 0.5F;
-    const float expected_logit =
-        std::log(expected_opacity / (1.F - expected_opacity));
-    require(
-        std::abs(parents.opacity_logits.to_vector()[0] - expected_logit) <
-            1e-5F,
-        "LAS split opacity is not logit(k * sigmoid(alpha))");
+}
+
+void test_geometry_regularization() {
+    using namespace aetherscan::splat;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    const std::vector<float> logits{-3.F, 3.F};
+    const std::vector<float> scales{-41.F, -2.F, 0.F, -1.F, 0.5F, 2.F};
+    GaussianModel model;
+    model.means = tinytensor::Tensor::zeros({2, 3}, gpu);
+    model.opacity_logits = tinytensor::Tensor::from_vector(logits, {2, 1}, gpu);
+    model.log_scales = tinytensor::Tensor::from_vector(scales, {2, 3}, gpu);
+    ModelGradients gradients;
+    gradients.opacity_logits = tinytensor::Tensor::full({2, 1}, 0.2F, gpu);
+    gradients.log_scales = tinytensor::Tensor::full({2, 3}, 0.3F, gpu);
+    detail::add_geometry_regularization(model, gradients, 0.02F, 0.6F);
+    const auto opacity_grad = gradients.opacity_logits.to_vector();
+    const auto scale_grad = gradients.log_scales.to_vector();
+    constexpr double eps = 1e-3;
+    // Both priors are means over the model: `opacity_reg * mean(sigmoid(x))`
+    // and `log_scale_reg * mean(exp(log s))` per axis. The scale prior is
+    // linear in the scale itself, so a millimetre splat keeps its data
+    // gradient while a metre-wide sheet is pushed down hard, and the prior is
+    // skipped entirely at or below the -40 log-scale floor.
+    const auto opacity_loss = [](double x) {
+        return 0.02 / 2.0 * (1.0 / (1.0 + std::exp(-x)));
+    };
+    const auto scale_loss = [](double x) {
+        return x > -40.0 ? 0.6 / 6.0 * std::exp(x) : 0.0;
+    };
+    for (std::size_t i = 0; i < logits.size(); ++i) {
+        const double fd = (opacity_loss(logits[i] + eps) - opacity_loss(logits[i] - eps)) / (2 * eps);
+        require(std::abs(opacity_grad[i] - 0.2 - fd) < 1e-6,
+                "Opacity prior gradient disagrees with mean(sigmoid(x))");
+    }
+    for (std::size_t i = 0; i < scales.size(); ++i) {
+        const double fd = (scale_loss(scales[i] + eps) - scale_loss(scales[i] - eps)) / (2 * eps);
+        require(std::abs(scale_grad[i] - 0.3 - fd) < 1e-6,
+                "Scale prior gradient disagrees with mean(exp(log s)) under the floor");
+    }
+    detail::add_geometry_regularization(model, gradients, 0.F, 0.F);
+    require(gradients.opacity_logits.to_vector() == opacity_grad &&
+                gradients.log_scales.to_vector() == scale_grad,
+            "Disabled geometry priors changed data gradients");
 }
 
 void test_densify_mean_scores_and_oversize_weights() {
@@ -3900,12 +3963,18 @@ void test_densification_strategies_and_dense_bypass() {
     splat::apply_strategy_defaults(igs_schedule);
     require(igs_schedule.grow_stop_iter >= igs_schedule.iterations,
             "IGS unexpectedly truncates ADC+ growth budget");
+    // IGS now shares ADC+'s cadence: 200-step windows starting at the first
+    // one, with the shared threshold growth budget instead of a fixed rate.
     require(
-        !splat::densification::is_refinement_iteration(200, igs_schedule),
-        "IGS densify should wait until iteration 500");
+        !splat::densification::is_refinement_iteration(100, igs_schedule) &&
+            !splat::densification::is_refinement_iteration(201, igs_schedule),
+        "IGS densify should run on 200-step windows");
     require(
-        splat::densification::is_refinement_iteration(600, igs_schedule),
-        "IGS densify should run every 100 steps after 500");
+        splat::densification::is_refinement_iteration(200, igs_schedule) &&
+            splat::densification::is_refinement_iteration(600, igs_schedule),
+        "IGS densify should run every 200 steps from the first window");
+    require(igs_schedule.densify_growth_factor == 0.F,
+            "IGS should use the shared threshold growth budget");
     require(
         splat::densification::is_refinement_iteration(24'000, igs_schedule),
         "IGS should keep densifying until max(14000, N-2500)");
@@ -4011,9 +4080,11 @@ int main(int argc, char** argv) {
             test_mask_loading();
             test_mask_loss_modes();
             test_contribution_visibility_rejects_occluded_gaussians();
-            test_las_split_matches_reference();
+            test_revised_noise_scales_with_scene_units();
+            test_geometry_regularization();
             test_densify_mean_scores_and_oversize_weights();
             test_igs_growth_budget();
+            test_igs_fog_evidence_paths();
             test_densification_cap_stops_igs_growth();
             test_densification_strategies_and_dense_bypass();
             std::cout << "IGS tests passed\n";
@@ -4065,11 +4136,13 @@ int main(int argc, char** argv) {
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
         test_adc_plus_split_matches_brush();
-        test_las_split_matches_reference();
+        test_revised_noise_scales_with_scene_units();
+        test_geometry_regularization();
         test_densify_mean_scores_and_oversize_weights();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();
         test_igs_growth_budget();
+        test_igs_fog_evidence_paths();
         test_densification_cap_stops_igs_growth();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";

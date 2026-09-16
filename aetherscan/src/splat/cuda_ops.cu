@@ -1502,6 +1502,33 @@ __global__ void densify_blend_world_gradient_kernel(
     output[i] = isfinite(score) ? fmaxf(score, 0.F) : 0.F;
 }
 
+__global__ void geometry_regularization_kernel(const float* logits,
+    const float* log_scales, float* opacity_gradient, float* scale_gradient,
+    const std::size_t count, const float opacity_factor, const float scale_factor) {
+    const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    const float x = logits[i];
+    if (isfinite(x) && opacity_factor > 0.F) {
+        const float alpha = sigmoid(x);
+        // d mean(sigmoid(x)) / dx. The prior is linear in alpha, so a
+        // saturated row keeps its whole gradient instead of losing it to the
+        // sigmoid derivative.
+        opacity_gradient[i] += opacity_factor * alpha * (1.F - alpha);
+    }
+    if (scale_factor > 0.F)
+        for (int axis = 0; axis < 3; ++axis) {
+            const auto k = 3 * i + axis;
+            const float log_scale = log_scales[k];
+            // d mean(exp(log s)) / d log s. Linear in the scale itself: a
+            // metre-wide haze sheet feels the whole prior while a millimetre
+            // splat keeps its data gradient. A constant log-scale prior
+            // instead drives every axis without data support to exp(-40) and
+            // produces degenerate needles.
+            if (isfinite(log_scale) && log_scale > -40.F)
+                scale_gradient[k] += scale_factor * expf(log_scale);
+        }
+}
+
 __global__ void sh_regularization_kernel(const float* sh, float* gradient,
     const std::size_t count, const std::size_t stride, const float factor) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1533,16 +1560,15 @@ __global__ void split_gaussians_kernel(
     float* child_means, float* child_log_scales,
     float* child_opacity_logits, const int* parent_indices,
     const float* random_samples, const float* screen_sizes,
-    const std::size_t split_count, const int mode,
-    const float minimum_opacity, const float split_at_screen_size,
-    const float split_opacity_k) {
+    const std::size_t split_count, const bool dense_tangent,
+    const float minimum_opacity, const float split_at_screen_size) {
     const std::size_t child = blockIdx.x * blockDim.x + threadIdx.x;
     if (child >= split_count) return;
     const std::size_t parent = static_cast<std::size_t>(parent_indices[child]);
     const float* parent_quaternion = parent_quaternions + 4 * parent;
     float local[3]{};
     float log_scale_delta[3]{};
-    if (mode == 4) {
+    if (dense_tangent) {
         // Dense MVS already constrains the surface normal accurately. Split
         // only in the local tangent plane (local Z is initialized from the
         // fused-cloud normal) and preserve the normal-axis thickness.
@@ -1556,48 +1582,8 @@ __global__ void split_gaussians_kernel(
         log_scale_delta[0] = logf(tangent_scale);
         log_scale_delta[1] = logf(tangent_scale);
         log_scale_delta[2] = 0.F;
-    } else if (mode == 3) {
-        int largest = 0;
-        if (parent_log_scales[3 * parent + 1] >
-            parent_log_scales[3 * parent + largest]) largest = 1;
-        if (parent_log_scales[3 * parent + 2] >
-            parent_log_scales[3 * parent + largest]) largest = 2;
-        for (int axis = 0; axis < 3; ++axis) {
-            local[axis] = expf(parent_log_scales[3 * parent + axis]) *
-                          random_samples[3 * child];
-            log_scale_delta[axis] = axis == largest ? logf(0.5F) : 0.F;
-        }
-    } else if (mode == 5) {
-        // Equal-weight mixture: C_child + d*d^T == C_parent. Restrict d
-        // to one eigenvector so no off-diagonal covariance is introduced.
-        int largest = 0;
-        for (int axis = 1; axis < 3; ++axis)
-            if (parent_log_scales[3 * parent + axis] >
-                parent_log_scales[3 * parent + largest]) largest = axis;
-        const float screen = screen_sizes != nullptr
-            ? fmaxf(screen_sizes[child], 1e-6F) : 1e-6F;
-        const float k = split_at_screen_size > 0.F
-            ? fminf(rsqrtf(2.F), split_at_screen_size / screen)
-            : rsqrtf(2.F);
-        local[largest] = expf(parent_log_scales[3 * parent + largest]) *
-            sqrtf(fmaxf(1.F - k * k, 0.F));
-        log_scale_delta[largest] = logf(fmaxf(k, 1e-12F));
-    } else if (mode == 6) {
-        // Long-axis split (https://arxiv.org/abs/2508.12313). Shrink the
-        // longest axis by 1/2 and the others by 0.85, then offset along the
-        // longest eigenvector by half that axis length.
-        int largest = 0;
-        for (int axis = 1; axis < 3; ++axis)
-            if (parent_log_scales[3 * parent + axis] >
-                parent_log_scales[3 * parent + largest]) largest = axis;
-        local[largest] = 0.5F * expf(parent_log_scales[3 * parent + largest]);
-        const float shrink_long = logf(0.5F);
-        const float shrink_short = logf(0.85F);
-        for (int axis = 0; axis < 3; ++axis)
-            log_scale_delta[axis] =
-                axis == largest ? shrink_long : shrink_short;
-    } else if (mode == 2) {
-        // Match brush-train's ADC+ covariance-aware split. The offset is
+    } else {
+        // ADC/ADC-IGS: brush-train's covariance-aware split. The offset is
         // deterministic and anti-correlated, preserving the centroid. Axes
         // shrink in proportion to their covariance contribution; oversized
         // splats shrink harder so their largest on-screen extent reaches the
@@ -1625,13 +1611,6 @@ __global__ void split_gaussians_kernel(
             local[axis] = sqrtf(fmaxf(1.F - k * k, 0.F)) * scale;
             log_scale_delta[axis] = logf(fmaxf(k, 1e-12F));
         }
-    } else {
-        const float scale_factor = 1.F / 1.6F;
-        for (int axis = 0; axis < 3; ++axis) {
-            local[axis] = expf(parent_log_scales[3 * parent + axis]) *
-                          random_samples[3 * child + axis];
-            log_scale_delta[axis] = logf(scale_factor);
-        }
     }
     float offset_x{}, offset_y{}, offset_z{};
     rotate_quaternion(
@@ -1646,20 +1625,13 @@ __global__ void split_gaussians_kernel(
         child_log_scales[3 * child + axis] += log_scale_delta[axis];
     }
     const float opacity = sigmoid(parent_opacity_logits[parent]);
-    float revised_logit;
-    if (mode == 6) {
-        const float k = fminf(fmaxf(split_opacity_k, 1e-3F), 0.99F);
-        const float raw = fminf(fmaxf(k * opacity, 1e-7F), 1.F - 1e-7F);
-        revised_logit = logf(raw / (1.F - raw));
-    } else {
-        const float opacity_floor = mode == 1 ? 1e-8F : minimum_opacity;
-        const float opacity_power =
-            (mode == 2 || mode == 5) ? rsqrtf(2.F) : 0.5F;
-        const float revised = fminf(fmaxf(
-            1.F - powf(fmaxf(1.F - opacity, 0.F), opacity_power),
-            opacity_floor), 1.F - opacity_floor);
-        revised_logit = logf(revised / (1.F - revised));
-    }
+    // Two children with this alpha reproduce the parent's coverage along the
+    // split axis; the dense tangent path doubles the covered lobes instead.
+    const float opacity_power = dense_tangent ? 0.5F : rsqrtf(2.F);
+    const float revised = fminf(fmaxf(
+        1.F - powf(fmaxf(1.F - opacity, 0.F), opacity_power),
+        minimum_opacity), 1.F - minimum_opacity);
+    const float revised_logit = logf(revised / (1.F - revised));
     parent_opacity_logits[parent] = revised_logit;
     child_opacity_logits[child] = revised_logit;
 }
@@ -2856,6 +2828,22 @@ void add_sh_regularization(const tinytensor::Tensor& sh,
     check_cuda(cudaGetLastError(), "regularize view-dependent SH coefficients");
 }
 
+void add_geometry_regularization(const GaussianModel& model,
+    ModelGradients& gradients, const float opacity_weight,
+    const float log_scale_weight) {
+    const std::size_t count = model.size();
+    if (count == 0 || (!(opacity_weight > 0.F) && !(log_scale_weight > 0.F))) return;
+    // Both priors are means over the model (spirula-studio applies
+    // `opacity_reg * mean(alpha)` and `scale_reg * mean(exp(log_scale))`), so
+    // the weights do not depend on the Gaussian count.
+    geometry_regularization_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(
+        model.opacity_logits.ptr<float>(), model.log_scales.ptr<float>(),
+        gradients.opacity_logits.ptr<float>(), gradients.log_scales.ptr<float>(),
+        count, std::max(opacity_weight, 0.F) / static_cast<float>(count),
+        std::max(log_scale_weight, 0.F) / (3.F * static_cast<float>(count)));
+    check_cuda(cudaGetLastError(), "regularize Gaussian opacity and log scale");
+}
+
 void accumulate_densification_stats(
     const tinytensor::Tensor& refine_weight,
     const tinytensor::Tensor& visibility,
@@ -2890,10 +2878,9 @@ void split_gaussians(
     const tinytensor::Tensor& parent_indices,
     const tinytensor::Tensor& random_samples,
     const tinytensor::Tensor& screen_sizes,
-    const int mode,
+    const SplitMode mode,
     const float minimum_opacity,
-    const float split_at_screen_size,
-    const float split_opacity_k) {
+    const float split_at_screen_size) {
     const std::size_t count = parent_indices.numel();
     if (count == 0) return;
     split_gaussians_kernel<<<
@@ -2904,9 +2891,9 @@ void split_gaussians(
         children.opacity_logits.ptr<float>(), parent_indices.ptr<int>(),
         random_samples.ptr<float>(),
         screen_sizes.is_valid() ? screen_sizes.ptr<float>() : nullptr,
-        count, mode, std::clamp(minimum_opacity, 1e-8F, 0.49F),
-        std::max(split_at_screen_size, 0.F),
-        std::clamp(split_opacity_k, 1e-3F, 0.99F));
+        count, mode == SplitMode::dense_tangent,
+        std::clamp(minimum_opacity, 1e-8F, 0.49F),
+        std::max(split_at_screen_size, 0.F));
     check_cuda(cudaGetLastError(), "split GGGS Gaussians");
 }
 

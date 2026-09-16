@@ -61,7 +61,7 @@ ADC-IGS 结果里某些平滑区域（天花板、地面）会出现成块的云
 | + 渐进分辨率 + PPISP | 21.4509 | 0.941815 | 946,332 | **0.705** | **23.761** |
 | + 双边网格 | 20.6895 | 0.941368 | 983,419 | 0.856 | 22.466 |
 | + PPISP + 双边网格 | 21.0130 | 0.942982 | 993,168 | 0.688 | 23.488 |
-| + 长轴分裂（`--splat-long-axis-split`） | 21.3017 | 0.940426 | 1,000,000 | 0.949 | 22.674 |
+| + 长轴分裂（当时的临时开关，现该分支已删除） | 21.3017 | 0.940426 | 1,000,000 | 0.949 | 22.674 |
 | spirula-studio 30k（参考，30k 且非同一命令） | 22.1409 | 0.9501 | 994,506 | 0.460 | 24.874 |
 
 说明：
@@ -75,8 +75,9 @@ ADC-IGS 结果里某些平滑区域（天花板、地面）会出现成块的云
   明显减少（见 `artifacts/igs_fog_20260915/report_compare/ceiling_ppisp_sheet.png`
   与 `ceiling_round4_sheet.png`）。这与本仓库早先在 antman/WeChat 上"颜色校正提升
   对齐质量、降低 canonical 指标"的结论一致。
-- `--splat-initial-opacity 0.1` 是本轮唯一同时提升 canonical PSNR 与 SSIM 的单项改动
-  （+0.12 dB / +0.0006），但它不改变中频结构误差，也就是不解决雾团。
+- 用临时 override 把初始 opacity 从 brush 的 0.5 改成 0.1 是本轮唯一同时提升
+  canonical PSNR 与 SSIM 的单项改动（+0.12 dB / +0.0006），但它不改变中频结构误差，
+  也就是不解决雾团；该 override 属于实验脚手架，验证完已删除，没有进入产品参数面。
 - 单项里的最高 canonical PSNR 是"渐进分辨率 + 初始 opacity 0.1"（21.6433，+0.16 dB），
   它的中频结构误差也略优于基线（0.727 对 0.807）。愿意用 canonical PSNR 换画质时，
   "渐进分辨率 + PPISP"把结构误差压到 0.705 且对齐后 PSNR 高 0.82 dB，代价是
@@ -88,21 +89,51 @@ ADC-IGS 结果里某些平滑区域（天花板、地面）会出现成块的云
 
 ## 还没有定论的
 
-- `--splat-long-axis-split`（参考实现的 `use_long_axis_split`）仍未跑对照；它更接近
-  参考实现的分裂方式，但雾团看起来更偏外观/alpha 而不是分裂几何。
 - 训练分辨率（我们 1920，参考 2560）未在本轮口径下复核。
 - 尚未复现参考实现的 `erank_reg` / `max_gauss_ratio` / `quat_norm_reg` 等整栈正则，
   因此不能声称"我们已经追平参考质量"。
 
 ## 本轮代码改动
 
+### 已落地：ADC-IGS 采用 ADC+ 的几何/节奏层
+
+按"两层互补"分解做了实验（`artifacts/igs_fog_20260915/experiment_a|experiment_b|experiment_b_repeat`）：
+
+| 配置 | 留出 PSNR | SSIM | 高斯数 | 结构误差(相对) | 对齐后 PSNR | 近相机(0.5) |
+|---|---:|---:|---:|---:|---:|---:|
+| adc_plus | 21.791 | 0.94476 | 803k | 0.722 | 23.121 | 793 |
+| adc_igs 旧默认 | 21.484 | 0.94250 | 989k | 0.807 | 22.940 | 997 |
+| A：ADC+ 决策层 + IGS 几何层 | 21.599 | 0.94388 | 1000k | 0.775 | 22.807 | — |
+| B：IGS 决策层 + ADC+ 几何/节奏层 | 21.907 | 0.94499 | 1000k | 0.690 | 23.194 | — |
+| B 复现 | 21.901 | 0.94485 | 1000k | — | — | — |
+| **落地后的新默认** | **21.908** | **0.94478** | 1000k | — | — | **255** |
+
+几何/节奏层的三个单项改动单独都是负收益（增长改阈值路径 21.393、节奏改 200 步
+21.358、分裂算子改 mode 2 21.424），整层一起换才是 +0.42 dB：这一层的旋钮互相耦合
+（增长是"每次 refine 固定比例"，所以改节奏等于改总量；预算路径与屏幕上限又必须与
+分裂算子的形变匹配）。因此落地方式是整层替换，而不是逐个调参：
+
+- `apply_strategy_defaults` 的 `adc_igs` 分支：`refine_every=200`、`refine_start_iter=1`、
+  `densify_growth_factor=0`（改用共享的阈值预算）、`densify_screen_threshold=0.5`、
+  `densify_clip_screen_size=false`、`ignore_undistortion_border=false`；决策层
+  （误差图评分、世界梯度混合、几何门槛、不同相机证据、priority 排序、按分数迁移、
+  revised 噪声）保持不变。
+- `IgsStrategy` 不再选择分裂算子：`AdcPlusStrategy::split_mode()` 虚函数与 IGS preset 里
+  只对 mode 6 有效的 `densify_las_opacity_k_warmup` 一并删除，`split_gaussians` 只剩
+  ADC+ 协方差感知分裂与稠密 MVS 切平面分裂两个分支。
+- 回归：`splat_test.cpp` 里编码旧节奏期望的两个用例更新为 200 步窗口，并新增
+  `densify_growth_factor == 0` 与"显式 initial opacity 覆盖 brush 默认"的断言；
+  `aetherscan_splat_test.exe` 全部通过。
+
 - ADC-IGS 预设不再默认打开 SH 正则（`sh_regularization_weight` 保持 `0`，仍可用
   `--splat-sh-*` 显式开启）。
-- `--splat-progressive-resolution` 在稀疏输入下会被**尊重**：此前稀疏分支无条件把
-  渐进分辨率关掉，用户显式传 `true` 也会被静默丢弃；现在只有默认值被改写。
-  `--splat-sh-degree-interval` 这类只为本轮对照临时加的参数没有保留。
-- 新增 `--splat-initial-opacity W`（显式覆盖 ADC 的 brush 0.5 初值）与
-  `--splat-long-axis-split`（ADC-IGS 使用长轴分裂 mode 6）。
+- 实验期间用过的临时 override（初始 opacity、稀疏渐进分辨率强制生效、长轴分裂开关）
+  在结论落地后全部删除，没有留在产品 CLI 里；稀疏输入的渐进分辨率仍是"由 presets
+  关闭"的既有默认行为。
+- 长轴分裂（mode 6）与 IGS 的保持协方差最大轴分裂（mode 5）对照后都是负收益，已随
+  分支一起删除：`split_gaussians` 现在只有两个可达分支（ADC 协方差感知分裂、稠密 MVS
+  切平面分裂），用 `detail::SplitMode` 枚举取代原先的 1..6 魔数，
+  `AdcPlusStrategy::split_mode()` 虚函数与 `densify_las_opacity_k_*` 也一并去掉。
 - `add_geometry_regularization` 的 scale 先验改为对**线性尺度**求导
   （`d mean(exp(log s)) / d log s`）。此前的常数 log-scale 梯度在 Adam 的逐坐标
   归一化下会把没有数据支撑的轴压到 `exp(-40)`，实测产生 1e15 量级的各向异性针状

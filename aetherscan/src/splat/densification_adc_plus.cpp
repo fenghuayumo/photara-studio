@@ -71,8 +71,7 @@ void select_training_rows_gpu(
 void grow_adc_plus_gpu(
     GaussianModel& model, const tinytensor::Tensor& parents,
     const TrainingOptions& options, const AdamStates& states,
-    const tinytensor::Tensor& screen_sizes, const int split_mode,
-    const float split_opacity_k) {
+    const tinytensor::Tensor& screen_sizes) {
     const std::size_t count = parents.numel();
     if (count == 0) return;
     GaussianModel children = select_model_rows(model, parents);
@@ -80,30 +79,14 @@ void grow_adc_plus_gpu(
         {count, std::size_t{3}}, tinytensor::Device::CUDA);
     auto selected_screen = screen_sizes.index_select(0, parents);
     detail::split_gaussians(
-        model, children, parents, samples, selected_screen, split_mode,
-        options.prune_opacity,
-        options.densify_screen_threshold,
-        split_opacity_k);
+        model, children, parents, samples, selected_screen,
+        detail::SplitMode::adc_covariance, options.prune_opacity,
+        options.densify_screen_threshold);
     if (!options.densify_keep_parent_adam)
         detail::zero_adam_rows(parents, states);
     append_model(model, children);
     for (detail::AdamState* state : states)
         append_zero_adam(*state, count);
-}
-
-float scheduled_las_opacity_k(
-    const TrainingOptions& options, const unsigned iteration) {
-    float k = options.densify_las_opacity_k_final;
-    if (options.densify_las_opacity_k_warmup > 0) {
-        const float t = std::clamp(
-            static_cast<float>(iteration) /
-                static_cast<float>(options.densify_las_opacity_k_warmup),
-            0.F, 1.F);
-        k = options.densify_las_opacity_k_init +
-            t * (options.densify_las_opacity_k_final -
-                 options.densify_las_opacity_k_init);
-    }
-    return k;
 }
 
 }  // namespace
@@ -147,7 +130,14 @@ RefinementCounts AdcPlusStrategy::refine(
             stats.count.index_select(0, keep_indices);
         const auto kept_opacities =
             pruning.opacities.index_select(0, keep_indices);
-        const auto supported = kept_counts.ge(k_evidence_visible_steps)
+        // IGS counts distinct contributing cameras, not repeated samples of
+        // one camera. Leave unobserved rows alone: a short window cannot
+        // establish negative evidence for an entire indoor scan.
+        const auto evidence = options.densification_strategy == DensificationStrategy::adc_igs
+            ? stats.view_support.index_select(0, keep_indices)
+                  .ge(k_evidence_visible_steps).logical_or(kept_counts.eq(0.F))
+            : kept_counts.ge(k_evidence_visible_steps);
+        const auto supported = evidence
             .logical_or(kept_opacities.ge(low_visibility_opacity));
         const auto supported_positions =
             supported.nonzero().squeeze(1).to(
@@ -204,7 +194,10 @@ RefinementCounts AdcPlusStrategy::refine(
             growth_eligible = visible.logical_and(
                 stats.geometry_gradient.index_select(0, keep_indices).gt(
                     options.densify_geometry_gradient_threshold));
-        auto visible_indices = visible.nonzero().squeeze(1).to(
+        // Every replication path must obey the geometry gate, including
+        // replacement and oversize splits, otherwise resolved view-specific
+        // appearance errors can continually attract new Gaussians.
+        auto visible_indices = growth_eligible.nonzero().squeeze(1).to(
             tinytensor::DataType::Int32);
         const std::size_t replacement_count = std::min(
             {pruning.pruned, capacity, visible_indices.numel()});
@@ -241,7 +234,7 @@ RefinementCounts AdcPlusStrategy::refine(
                         requested > pruning.pruned ? requested - pruning.pruned : 0);
                 }
             } else {
-                auto growth_mask = visible.logical_and(
+                auto growth_mask = growth_eligible.logical_and(
                     retained_gradient.gt(
                         options.densify_gradient_threshold));
                 const auto eligible_count = growth_mask.nonzero().numel();
@@ -285,7 +278,7 @@ RefinementCounts AdcPlusStrategy::refine(
             }
             oversize_weights = oversize_weights.masked_fill(selected, 0.F);
             oversize_weights =
-                oversize_weights.masked_fill(visible.logical_not(), 0.F);
+                oversize_weights.masked_fill(growth_eligible.logical_not(), 0.F);
             auto oversize_indices = oversize_weights.gt(0.F)
                 .nonzero().squeeze(1).to(tinytensor::DataType::Int32);
             n_oversize = std::min(n_oversize, oversize_indices.numel());
@@ -302,7 +295,7 @@ RefinementCounts AdcPlusStrategy::refine(
                 extra_budget -= n_oversize;
             }
         } else {
-            auto oversized = visible.logical_and(
+            auto oversized = growth_eligible.logical_and(
                 retained_screen.gt(
                     options.densify_screen_threshold));
             oversized = oversized.logical_and(!selected);
@@ -349,9 +342,7 @@ RefinementCounts AdcPlusStrategy::refine(
 
     auto split_parents = selected.nonzero().squeeze(1).to(
         tinytensor::DataType::Int32);
-    grow_adc_plus_gpu(
-        model, split_parents, options, states, retained_screen, split_mode(),
-        scheduled_las_opacity_k(options, iteration));
+    grow_adc_plus_gpu(model, split_parents, options, states, retained_screen);
     const float remaining_progress = 1.F -
         static_cast<float>(iteration) /
             std::max(1.F, static_cast<float>(options.iterations));

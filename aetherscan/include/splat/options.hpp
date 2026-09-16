@@ -101,10 +101,6 @@ struct TrainingOptions {
     float densify_oversize_score_blend{1.F};
     bool densify_clip_screen_size{false};
     float densify_screen_clip_hardness{1.5F};
-    // Long-axis-split opacity factor k, scheduled from init to final.
-    float densify_las_opacity_k_init{0.5F};
-    float densify_las_opacity_k_final{0.6F};
-    unsigned densify_las_opacity_k_warmup{4'500};
     bool densify_revised_noise{false};
     // Sample replacement parents by densify score rather than opacity.
     bool densify_relocate{false};
@@ -141,6 +137,9 @@ struct TrainingOptions {
     float sh_rest_lr{1.25e-4F};
     // Mean-square prior on non-DC SH coefficients; zero disables.
     float sh_regularization_weight{0.F};
+    // Optional per-Gaussian priors; independent of colour correction.
+    float opacity_regularization_weight{0.F};
+    float log_scale_regularization_weight{0.F};
     float beta1{0.9F};
     float beta2{0.999F};
     // Match pygsplat/FusedAdam. The raster gradients are averaged over every
