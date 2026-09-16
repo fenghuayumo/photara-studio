@@ -572,98 +572,36 @@ if(AETHERSCAN_ENABLE_FEATURES)
         endif()
     endif()
 
-    if(AETHERSCAN_BUILD_BENCHMARKS)
-    add_executable(aetherscan_ba_benchmark src/tools/ba_benchmark.cpp)
-    target_link_libraries(aetherscan_ba_benchmark PRIVATE AetherScan::BA)
-    if(TARGET aetherscan_features)
-        add_executable(aetherscan_features_match src/tools/features_match.cpp)
-        target_link_libraries(aetherscan_features_match PRIVATE AetherScan::Features)
-        if(WIN32)
-            add_custom_command(TARGET aetherscan_features_match POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:aetherscan_features_match>
-                    $<TARGET_FILE_DIR:aetherscan_features_match>
-                COMMAND_EXPAND_LISTS)
-        endif()
-        add_executable(aetherscan_pair_verify src/tools/pair_verify.cpp)
-        add_executable(aetherscan_sfm_realign src/tools/sfm_realign.cpp)
-        add_executable(aetherscan_sfm_match_benchmark src/tools/sfm_match_benchmark.cpp)
-        add_executable(aetherscan_sfm_positioning_benchmark src/tools/sfm_positioning_benchmark.cpp)
-        target_link_libraries(aetherscan_sfm_positioning_benchmark PRIVATE AetherScan::SfM)
-        if(WIN32)
-            add_custom_command(TARGET aetherscan_sfm_positioning_benchmark POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_positioning_benchmark>
-                    $<TARGET_FILE_DIR:aetherscan_sfm_positioning_benchmark> COMMAND_EXPAND_LISTS)
-        endif()
-        target_link_libraries(aetherscan_sfm_match_benchmark PRIVATE AetherScan::SfM)
-        if(WIN32)
-            add_custom_command(TARGET aetherscan_sfm_match_benchmark POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_match_benchmark>
-                    $<TARGET_FILE_DIR:aetherscan_sfm_match_benchmark>
-                COMMAND_EXPAND_LISTS)
-        endif()
-        target_link_libraries(aetherscan_sfm_realign PRIVATE AetherScan::SfM)
-        if(WIN32)
-            add_custom_command(TARGET aetherscan_sfm_realign POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_realign>
-                    $<TARGET_FILE_DIR:aetherscan_sfm_realign>
-                COMMAND_EXPAND_LISTS)
-        endif()
-        target_link_libraries(aetherscan_pair_verify PRIVATE AetherScan::SfM)
-        if(WIN32)
-            add_custom_command(TARGET aetherscan_pair_verify POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:aetherscan_pair_verify>
-                    $<TARGET_FILE_DIR:aetherscan_pair_verify>
-                COMMAND_EXPAND_LISTS)
-        endif()
-        add_executable(
-            aetherscan_triangulation_benchmark
-            src/tools/triangulation_benchmark.cpp)
-        target_link_libraries(
-            aetherscan_triangulation_benchmark PRIVATE AetherScan::SfM)
-        if(WIN32)
-            add_custom_command(
-                TARGET aetherscan_triangulation_benchmark POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:aetherscan_triangulation_benchmark>
-                    $<TARGET_FILE_DIR:aetherscan_triangulation_benchmark>
-                COMMAND_EXPAND_LISTS)
-        endif()
-        add_library(aetherscan_cxxopts INTERFACE)
-        add_library(cxxopts::cxxopts ALIAS aetherscan_cxxopts)
-        target_include_directories(aetherscan_cxxopts INTERFACE
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxxopts/include)
+if(TARGET aetherscan_features)
+    add_library(aetherscan_cxxopts INTERFACE)
+    add_library(cxxopts::cxxopts ALIAS aetherscan_cxxopts)
+    target_include_directories(aetherscan_cxxopts INTERFACE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxxopts/include)
 
-        add_executable(aetherscan src/tools/reconstruct.cpp)
-        target_link_libraries(aetherscan PRIVATE AetherScan::MVS cxxopts::cxxopts)
-        if(TARGET aetherscan_splat)
-            add_executable(aetherscan_mvs_compare src/tools/mvs_compare.cpp)
-            target_link_libraries(aetherscan_mvs_compare PRIVATE AetherScan::Splat AetherScan::MVS)
-            target_link_libraries(aetherscan PRIVATE AetherScan::Splat)
-            target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_SPLAT=1)
-        endif()
-        if(TARGET aetherscan_texture)
-            target_link_libraries(aetherscan PRIVATE AetherScan::Texture)
-            target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_TEXTURE=1)
-        endif()
-        if(TARGET aether::mesh)
-            target_link_libraries(aetherscan PRIVATE aether::mesh)
-            target_compile_definitions(
-                aetherscan PRIVATE AETHERSCAN_HAS_AETHER_MESH=1)
-        endif()
-        if(WIN32)
-            add_custom_command(TARGET aetherscan POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    $<TARGET_RUNTIME_DLLS:aetherscan>
-                    $<TARGET_FILE_DIR:aetherscan>
-                COMMAND_EXPAND_LISTS)
-        endif()
+    add_executable(aetherscan src/tools/reconstruct.cpp)
+    target_link_libraries(aetherscan PRIVATE AetherScan::MVS cxxopts::cxxopts)
+    if(TARGET aetherscan_splat)
+        target_link_libraries(aetherscan PRIVATE AetherScan::Splat)
+        target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_SPLAT=1)
+    endif()
+    if(TARGET aetherscan_texture)
+        target_link_libraries(aetherscan PRIVATE AetherScan::Texture)
+        target_compile_definitions(aetherscan PRIVATE AETHERSCAN_HAS_TEXTURE=1)
+    endif()
+    if(TARGET aether::mesh)
+        target_link_libraries(aetherscan PRIVATE aether::mesh)
+        target_compile_definitions(
+            aetherscan PRIVATE AETHERSCAN_HAS_AETHER_MESH=1)
+    endif()
+    if(WIN32)
+        add_custom_command(TARGET aetherscan POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:aetherscan>
+                $<TARGET_FILE_DIR:aetherscan>
+            COMMAND_EXPAND_LISTS)
+    endif()
 
-        if(AETHERSCAN_BUILD_EDITOR)
+    if(AETHERSCAN_BUILD_EDITOR)
             find_package(Vulkan 1.2 REQUIRED)
             find_package(glfw3 CONFIG REQUIRED)
             include(FetchContent)
@@ -763,11 +701,90 @@ if(AETHERSCAN_ENABLE_FEATURES)
                         $<TARGET_FILE_DIR:aetherscan_editor>
                     COMMAND_EXPAND_LISTS)
             endif()
-        endif()
     endif()
 endif()
 
+if(AETHERSCAN_BUILD_BENCHMARKS)
+    add_executable(aetherscan_ba_benchmark src/tools/ba_benchmark.cpp)
+    target_link_libraries(aetherscan_ba_benchmark PRIVATE AetherScan::BA)
+    if(TARGET aetherscan_features)
+        add_executable(aetherscan_features_match src/tools/features_match.cpp)
+        target_link_libraries(aetherscan_features_match PRIVATE AetherScan::Features)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_features_match POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_features_match>
+                    $<TARGET_FILE_DIR:aetherscan_features_match>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        add_executable(aetherscan_pair_verify src/tools/pair_verify.cpp)
+        add_executable(aetherscan_sfm_realign src/tools/sfm_realign.cpp)
+        add_executable(aetherscan_sfm_match_benchmark src/tools/sfm_match_benchmark.cpp)
+        add_executable(aetherscan_sfm_positioning_benchmark src/tools/sfm_positioning_benchmark.cpp)
+        target_link_libraries(aetherscan_sfm_positioning_benchmark PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_sfm_positioning_benchmark POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_positioning_benchmark>
+                    $<TARGET_FILE_DIR:aetherscan_sfm_positioning_benchmark>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        target_link_libraries(aetherscan_sfm_match_benchmark PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_sfm_match_benchmark POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_match_benchmark>
+                    $<TARGET_FILE_DIR:aetherscan_sfm_match_benchmark>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        target_link_libraries(aetherscan_sfm_realign PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_sfm_realign POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_sfm_realign>
+                    $<TARGET_FILE_DIR:aetherscan_sfm_realign>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        target_link_libraries(aetherscan_pair_verify PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(TARGET aetherscan_pair_verify POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_pair_verify>
+                    $<TARGET_FILE_DIR:aetherscan_pair_verify>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        add_executable(
+            aetherscan_triangulation_benchmark
+            src/tools/triangulation_benchmark.cpp)
+        target_link_libraries(
+            aetherscan_triangulation_benchmark PRIVATE AetherScan::SfM)
+        if(WIN32)
+            add_custom_command(
+                TARGET aetherscan_triangulation_benchmark POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:aetherscan_triangulation_benchmark>
+                    $<TARGET_FILE_DIR:aetherscan_triangulation_benchmark>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        if(TARGET aetherscan_splat)
+            add_executable(aetherscan_mvs_compare src/tools/mvs_compare.cpp)
+            target_link_libraries(aetherscan_mvs_compare PRIVATE
+                AetherScan::Splat AetherScan::MVS)
+        endif()
+    endif()
+    aetherscan_exclude_from_default(
+        aetherscan_ba_benchmark
+        aetherscan_features_match
+        aetherscan_pair_verify
+        aetherscan_sfm_realign
+        aetherscan_sfm_match_benchmark
+        aetherscan_sfm_positioning_benchmark
+        aetherscan_triangulation_benchmark
+        aetherscan_mvs_compare)
+endif()
+
 if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
+    add_custom_target(aetherscan_tests)
     if(AETHERSCAN_ENABLE_CUDA AND TARGET Ceres::ceres)
         add_executable(aetherscan_bearing_cuda_test tests/bearing_cuda_test.cpp)
         target_link_libraries(aetherscan_bearing_cuda_test PRIVATE AetherScan::BA Ceres::ceres)
@@ -861,4 +878,32 @@ if(AETHERSCAN_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(aetherscan_mvs_test PRIVATE AetherScan::MVS)
         add_test(NAME aetherscan.mvs.pipeline COMMAND aetherscan_mvs_test)
     endif()
+    set(_aetherscan_test_targets
+        aetherscan_bearing_cuda_test
+        aetherscan_ba_test
+        aetherscan_thread_pool_test
+        aetherscan_logging_test
+        aetherscan_splat_test
+        aetherscan_splat_quality_eval
+        aetherscan_tinytensor_vulkan_test
+        aetherscan_features_test
+        aetherscan_video_frames_test
+        aetherscan_two_view_test
+        aetherscan_equirect_test
+        aetherscan_equirect_dataset_check
+        aetherscan_mapping_test
+        aetherscan_sfm_refine_probe
+        aetherscan_vocabulary_test
+        aetherscan_checkpoint_test
+        aetherscan_hierarchical_test
+        aetherscan_submap_recovery_test
+        aetherscan_export_mvs_test
+        aetherscan_project_io_test
+        aetherscan_mvs_test)
+    aetherscan_exclude_from_default(${_aetherscan_test_targets})
+    foreach(_aetherscan_test_target IN LISTS _aetherscan_test_targets)
+        if(TARGET "${_aetherscan_test_target}")
+            add_dependencies(aetherscan_tests "${_aetherscan_test_target}")
+        endif()
+    endforeach()
 endif()

@@ -5,9 +5,23 @@ project(AetherScan
     DESCRIPTION "High-performance GPU-first Structure from Motion"
     LANGUAGES C CXX)
 
-option(AETHERSCAN_BUILD_BENCHMARKS "Build performance benchmarks" ON)
-option(AETHERSCAN_BUILD_TESTS "Build correctness tests" ON)
+option(AETHERSCAN_BUILD_BENCHMARKS
+    "Build extra CLI tools and performance benchmarks" OFF)
+option(AETHERSCAN_BUILD_TESTS "Build correctness tests" OFF)
 option(AETHERSCAN_BUILD_EDITOR "Build the Vulkan + Dear ImGui reconstruction editor" ON)
+
+# Keep extra tools/tests out of ALL_BUILD and Visual Studio "Build Solution".
+# Build them explicitly, e.g. cmake --build build --target aetherscan_splat_test.
+function(aetherscan_exclude_from_default)
+    foreach(_target IN LISTS ARGN)
+        if(TARGET "${_target}")
+            set_target_properties("${_target}" PROPERTIES
+                EXCLUDE_FROM_ALL TRUE
+                EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+        endif()
+    endforeach()
+endfunction()
+
 option(AETHERSCAN_BUILD_PYTHON
     "Build the nanobind Python experiment module" OFF)
 option(AETHERSCAN_ENABLE_CUDA "Build CUDA acceleration" ON)
