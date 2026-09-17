@@ -449,9 +449,11 @@ aetherscan --images images --capture-mode scene
 | SubjectBounds | 半径过滤保留 125,777/125,818 | 通过；41 个孤立点被过滤 |
 | sparse ADCPlus smoke | 125,818 初始 Gaussian，`densification_enabled=1`，`patchmatch=false` | 通过 |
 | 稀疏 ADCPlus | 10k 步，123,557 → 402,291 Gaussians | 通过 |
-| ADCPlus 30k + MV tail interval=2 | 478.244 s，125,818 → 627,470 Gaussians，PSNR 21.0766 dB | `ori_img` 通过；仅作为显式 fast mode |
+| ADCPlus 30k + MV tail interval=2 | 478.244 s，125,818 → 627,470 Gaussians，PSNR 21.0766 dB | 数值通过；**mesh 质量会回退**，只在允许质量折衷时使用 |
 | masked Splat | masked PSNR 28.87 dB | 通过 |
 | TSDF + Clean（30k 无 Mask） | 20.392 s，1,347,617 顶点 / 2,668,110 面 | 数值通过，拓扑仍需门禁 |
+| ADCPlus 30k + **MV 每步（interval=1）** + 参考点查询精度 | 968.8 s，1,000,000 Gaussians（cap），PSNR **22.2237** / SSIM 0.9343；TSDF 深度一致性 0.994–0.999 | 通过；当前 `ori_img` 的几何重建参考 |
+| 同上 TSDF + Clean | 46.5 s，**5,697,315 顶点 / 11,235,411 面**（marching cubes 2286 万面 → 最大连通域 1119 万面） | 通过；密度受 1M 高斯 cap 影响，非文档 627k 档 |
 
 当前 smoke test 已证明内部 SfM 可以完全跳过 MVS，直接进入 ADCPlus。10k 质量基线中的
 Mask 来自已删除的实验性 depth-ROI 路径，只保留其数值作为历史对照，不能作为当前产品流程
@@ -535,13 +537,14 @@ aetherscan ... --splat-mv-tail-interval 2
 第 15,001–30,000 步每两步执行一次昂贵的 `sample_depth + NCC + backward`，活跃步权重乘 2，
 保持多视图目标的期望不变。`ori_img` 完整 30k A/B 中，稳定 CUDA 时间由 21.2029
 降到 14.8752 ms/iter（-29.84%），Splat wall time 由 575.389 降到 478.244 s
-（-16.88%），三视角 PSNR 由 20.9876 提高到 21.0766 dB；Clean 网格面数变化 -1.31%。
-但 `antman_nomask` 同一 OpenMVS 场景 A/B 中，interval=2 虽将训练由 442.813 降至
+（-16.88%），三视角 PSNR 由 20.9876 提高到 21.0766 dB。**但这不是质量中性的**：
+`ori_img` 的 Clean 网格面数 -1.31% 落在 ADC 跨进程非确定性范围内、不能当作无回退，实际
+重建质量评估显示 mesh 质量明显下降；`antman_nomask` 同一 OpenMVS 场景 A/B 中，interval=2 虽将训练由 442.813 降至
 380.596 s（-14.05%），PSNR 却由 37.8694 降到 36.7273 dB，Clean 主体网格面数由
 14,736,038 降到 10,612,585（-27.98%）。ADCPlus 在 15k 后仍持续 prune、replacement、
-noise 和 refine，因此按 `grow_stop_iter` 立即降频并不安全。默认值保持 interval=1；
-在引入几何稳定性触发或完整质量门禁前，interval=2 只能用于预览/快速模式。该优化只降低
-GPU 几何监督频率，不以提高 CPU 占用率为目标。
+noise 和 refine，因此按 `grow_stop_iter` 立即降频并不安全。**默认值保持 interval=1；
+只要 TSDF mesh 是交付物就必须保持 interval=1**，interval=2 只能用于预览/快速模式。
+该优化只降低 GPU 几何监督频率，不以提高 CPU 占用率为目标。
 
 保持 interval=1 的 plane-warp NCC 底层优化不会减少 multi-view 监督频率。当前实现复用邻
 视图 2×2 角点、在 RGBA8 上传时按需生成灰度平面，并由 `32×8` CTA 在 shared memory

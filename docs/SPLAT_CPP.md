@@ -444,7 +444,13 @@ atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后
 | 最终 Gaussian | 653,367 | 627,470 | -3.96% |
 | TSDF Clean 顶点 / 面 | 1,365,794 / 2,703,392 | 1,347,617 / 2,668,110 | -1.33% / -1.31% |
 
-interval=2 在 `ori_img` 上没有观察到 PSNR 或主体网格完整性回退，训练少用 97.145 秒。
+**更正（2026-09-17）：`interval=2` 不是质量中性的加速，会降低几何重建的 TSDF mesh 质量。**
+上表的网格数量差（-1.33%）落在 ADC 跨进程非确定性范围内，而数量差说明不了孔洞、薄覆盖与
+噪声；实际重建质量评估显示 `interval=2` 明显拉低 mesh 质量，机制与下面 `antman_nomask` 的
+A/B 一致：multi-view 几何/NCC 项是约束表面的主要信号，降到每两步一次等于单位时间的表面
+约束减半，薄覆盖/低视差区域首先出现孔洞与噪声。因此**只要 mesh 是交付物就必须用
+`interval=1`（默认值）；`interval=2` 只能用于预览/快速模式。** `ori_img` 上 interval=1 的
+几何重建参考结果见 [DENSE_RECONSTRUCTION.md](DENSE_RECONSTRUCTION.md) 的 `ori_img` 表。
 完整日志分别为
 `artifacts/ori_img_mv_tail_interval1_30k_20260731/stdout.log` 和
 `artifacts/ori_img_mv_tail_interval2_30k_20260731/stdout.log`。

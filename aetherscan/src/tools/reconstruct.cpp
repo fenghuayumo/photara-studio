@@ -382,7 +382,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-mv-geo-weight W  multi-view round-trip loss (default 0.02)\n"
               << "  --splat-mv-ncc-weight W  plane-warp NCC loss (default 0.6)\n"
               << "  --splat-mv-neighbors N  nearest camera candidates (default 8)\n"
-              << "  --splat-mv-tail-interval N  multi-view interval after ADC growth stops (default 1)\n"
+              << "  --splat-mv-tail-interval N  multi-view interval after ADC growth stops (default 1;\n"
+              << "                              N>1 lowers geometry/mesh quality - previews only)\n"
               << "  --splat-mv-adaptive BOOL  lower multi-view frequency only after geometry stabilizes\n"
               << "  --splat-mv-adaptive-max-interval N  adaptive interval ceiling (default 2)\n"
               << "  --splat-mv-stable-refinements N  stable refine windows before each reduction (default 5)\n"
@@ -743,7 +744,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-mv-neighbors", "Number of nearest multi-view candidates",
          cxxopts::value<unsigned>()->default_value("8"))
         ("splat-mv-tail-interval",
-         "Multi-view sampling interval after ADC growth stops",
+         "Multi-view sampling interval after ADC growth stops (N>1 lowers geometry/mesh quality; "
+         "keep 1 when meshing)",
          cxxopts::value<unsigned>()->default_value("1"))
         ("splat-mv-adaptive",
          "Adapt multi-view frequency from geometry stability",
@@ -2844,6 +2846,13 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.multi_view_num = cli.splat_multi_view_num;
     options.multi_view_tail_interval =
         cli.splat_multi_view_tail_interval;
+    if (cli.mesh && cli.splat_multi_view_tail_interval > 1)
+        aetherscan::core::Logger::instance().warning(
+            "splat_mv_tail_interval=", cli.splat_multi_view_tail_interval,
+            " meshing=1: multi-view geometry supervision runs every ",
+            cli.splat_multi_view_tail_interval,
+            " steps, which lowers TSDF mesh quality. Keep interval=1 when the "
+            "mesh is the deliverable.");
     options.multi_view_adaptive_frequency =
         cli.splat_multi_view_adaptive;
     options.multi_view_adaptive_max_interval =
