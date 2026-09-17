@@ -191,37 +191,15 @@ void apply_strategy_defaults(TrainingOptions& options) {
             std::max(options.grow_stop_iter, options.iterations);
         break;
     case DensificationStrategy::adc_igs:
-        // Image/world evidence scoring with ADC+'s refinement cadence, budget
-        // and split. Growth on a fixed per-refinement rate (`sqrt(1.05)` every
-        // 100 steps) coupled the row count to the cadence, so halving the
-        // cadence also halved the model, while keeping it over-densified the
-        // capture. Pairing the IGS decisions with the shared threshold budget
-        // measured ~0.42 dB better on the indoor 7k protocol than the rate
-        // growth it replaced, and beat ADC+ itself on the same protocol.
-        options.grow_stop_iter = std::max(options.grow_stop_iter, options.iterations);
-        options.refine_every = 200;
-        // 0 re-selects the strategy default in the schedule, so ask for the
-        // first window explicitly.
-        options.refine_start_iter = 1;
-        options.densify_growth_factor = 0.F;
+        // ADC-IGS keeps the legacy refinement decisions: gradient-gated
+        // growth sampled by opacity/edge evidence, gumbel selection, the
+        // random-axis exact-alpha split and the default cadence. The SSIM
+        // error-map / footprint-weighted scoring that replaced it
+        // systematically favours hard-to-fit background rays; on turntable
+        // captures that bloated alpha coverage from ~40% to ~90% of the
+        // frame and wrapped meshes in floater shells.
         options.densify_screen_threshold = 0.5F;
-        options.densify_clip_screen_size = false;
-        options.ignore_undistortion_border = false;
-        // Evidence and scoring rules that stay IGS-specific.
-        options.densify_use_error_map = true;
-        options.densify_oversize_split_fraction = 0.15F;
-        options.densify_oversize_score_blend = 1.F;
-        options.densify_loss_map_power = 4.F;
-        options.densify_score_power = 0.4F;
-        options.densify_world_gradient_blend = 0.5F;
-        options.densify_geometry_gradient_threshold = 0.00125F;
-        options.densify_gradient_threshold = 0.F;
-        options.densify_revised_noise = true;
-        options.densify_relocate = true;
-        options.densify_keep_parent_adam = false;
-        options.mean_noise_weight = 10.F;
-        // Colour correction for auto-exposure / white-balance drift stays
-        // opt-in: `--splat-ppisp` and `--splat-bilateral-grid`.
+        options.densify_use_error_map = false;
         break;
     case DensificationStrategy::dense_adaptive:
         break;

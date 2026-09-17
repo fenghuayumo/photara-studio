@@ -103,7 +103,7 @@ void select_training_rows(
 
 void grow_training_model(
     GaussianModel& model, const std::vector<int>& parents,
-    const TrainingOptions& options,
+    const detail::SplitMode split_mode, const TrainingOptions& options,
     std::mt19937& random, const AdamStates& states,
     const std::vector<float>& screen_sizes) {
     if (parents.empty()) return;
@@ -123,8 +123,11 @@ void grow_training_model(
         selected_screen_sizes, {parents.size()}, tinytensor::Device::CUDA);
     detail::split_gaussians(
         model, children, indices, random_tensor, screen_tensor,
-        detail::SplitMode::dense_tangent,
-        options.prune_opacity, 0.F);
+        split_mode,
+        options.prune_opacity,
+        split_mode == detail::SplitMode::adc_covariance
+            ? options.densify_screen_threshold
+            : 0.F);
     // Splitting mutates the retained parent as well as creating a child.
     // Both are new primitives and must start with clean optimizer moments,
     // matching pygsplat's replacement-based split.
@@ -136,7 +139,7 @@ void grow_training_model(
 
 std::vector<std::size_t> weighted_unique_sample(
     const std::vector<std::pair<std::size_t, float>>& candidates,
-    const std::size_t requested, std::mt19937& random) {
+    const std::size_t requested, const bool gumbel, std::mt19937& random) {
     if (requested == 0 || candidates.empty()) return {};
     std::vector<std::pair<std::size_t, float>> valid;
     valid.reserve(candidates.size());
@@ -145,6 +148,28 @@ std::vector<std::size_t> weighted_unique_sample(
             valid.push_back(candidate);
     if (valid.empty()) return {};
     const std::size_t count = std::min(requested, valid.size());
+    if (gumbel) {
+        // Gumbel top-k sampling: log-weight plus standard Gumbel noise,
+        // then take the requested largest perturbed scores. This is the
+        // legacy ADC-IGS selection rule.
+        std::uniform_real_distribution<float> uniform(1e-7F, 1.F - 1e-7F);
+        std::vector<std::pair<float, std::size_t>> scores;
+        scores.reserve(valid.size());
+        for (const auto& [index, weight] : valid) {
+            const float u = uniform(random);
+            scores.emplace_back(
+                std::log(weight) - std::log(-std::log(u)), index);
+        }
+        const auto middle = scores.begin() +
+            static_cast<std::ptrdiff_t>(count);
+        std::partial_sort(scores.begin(), middle, scores.end(),
+                          std::greater<>());
+        std::vector<std::size_t> result;
+        result.reserve(count);
+        for (std::size_t i = 0; i < count; ++i)
+            result.push_back(scores[i].second);
+        return result;
+    }
     std::vector<double> weights;
     weights.reserve(valid.size());
     for (const auto& candidate : valid)
@@ -179,9 +204,6 @@ RefinementCounts refine_gaussians(
     if (!is_refinement_iteration(iteration, options) || model.size() == 0)
         return {};
 
-    if (options.densification_strategy == DensificationStrategy::adc_igs)
-        return IgsStrategy{}.refine(
-            model, stats, iteration, scene_extent, scene_center, options, states);
     if (options.densification_strategy == DensificationStrategy::adc_plus)
         return AdcPlusStrategy{}.refine(
             model, stats, iteration, scene_extent, scene_center,
@@ -191,6 +213,7 @@ RefinementCounts refine_gaussians(
     const auto gradients = download<float>(stats.gradient);
     const auto counts = download<float>(stats.count);
     const auto screen = download<float>(stats.max_screen_radius);
+    const auto priorities = download<float>(stats.priority);
     const auto opacities = download<float>(model.opacity_logits);
     const auto log_scales = download<float>(model.log_scales);
     // dense_adaptive performs a non-finite and bounds sweep over the complete
@@ -290,11 +313,15 @@ RefinementCounts refine_gaussians(
         bool oversized{};
     };
     std::vector<Candidate> candidates;
+    std::vector<float> positive_priorities;
     for (std::size_t index = 0; index < old_count; ++index) {
         if (remap[index] < 0 || counts[index] <= 0.F) continue;
         candidates.push_back({
             index, static_cast<std::size_t>(remap[index]), gradients[index],
             screen[index] > options.densify_screen_threshold});
+        const float priority = priorities[index] /
+                               std::max(counts[index], 1.F);
+        if (priority > 0.F) positive_priorities.push_back(priority);
     }
     select_training_rows(model, keep, states);
 
@@ -302,6 +329,17 @@ RefinementCounts refine_gaussians(
         ? options.densification_cap - model.size()
         : 0;
     if (capacity == 0) {
+        if (options.densification_strategy == DensificationStrategy::adc_igs) {
+            const float remaining_progress = 1.F -
+                static_cast<float>(iteration) /
+                    std::max(1.F, static_cast<float>(options.iterations));
+            detail::apply_adc_decay(
+                model,
+                options.opacity_decay *
+                    std::max(remaining_progress, 0.F),
+                options.scale_decay *
+                    std::max(remaining_progress, 0.F));
+        }
         stats = detail::make_densification_stats(model.size());
         return {0, pruned};
     }
@@ -310,37 +348,67 @@ RefinementCounts refine_gaussians(
     std::vector<std::pair<std::size_t, float>> replacement_weights;
     std::vector<std::pair<std::size_t, float>> growth_weights;
     std::unordered_set<std::size_t> forced;
+    const bool adc = options.densification_strategy ==
+                     DensificationStrategy::adc_igs;
+    float priority_median = 1.F;
+    if (!positive_priorities.empty()) {
+        const auto middle = positive_priorities.begin() +
+            static_cast<std::ptrdiff_t>(positive_priorities.size() / 2);
+        std::nth_element(
+            positive_priorities.begin(), middle,
+            positive_priorities.end());
+        priority_median = std::max(*middle, 1e-9F);
+    }
+    const bool allow_growth = !adc || iteration < options.grow_stop_iter;
     for (const Candidate& candidate : candidates) {
+        const float opacity = 1.F /
+            (1.F + std::exp(-opacities[candidate.old_index]));
+        float edge_factor = 1.F;
+        if (adc) {
+            const float priority = priorities[candidate.old_index] /
+                std::max(counts[candidate.old_index], 1.F);
+            if (priority > 0.F)
+                edge_factor += 0.25F * std::min(
+                    priority / priority_median, 10.F);
+        }
         const float screen_factor = candidate.oversized ? 2.F : 1.F;
         replacement_weights.emplace_back(
             candidate.new_index,
-            std::max(candidate.score, 1e-12F) * screen_factor);
-        if (candidate.score > options.densify_gradient_threshold)
+            adc ? opacity * edge_factor
+                : std::max(candidate.score, 1e-12F) * screen_factor);
+        if (allow_growth &&
+            candidate.score > options.densify_gradient_threshold)
             growth_weights.emplace_back(
-                candidate.new_index, candidate.score * screen_factor);
+                candidate.new_index,
+                candidate.score * edge_factor * screen_factor);
+        if (adc && allow_growth && candidate.oversized)
+            forced.insert(candidate.new_index);
     }
+    const bool gumbel = adc;
     auto selected = weighted_unique_sample(
-        replacement_weights, std::min(pruned, capacity), random);
+        replacement_weights, std::min(pruned, capacity), gumbel, random);
     forced.insert(selected.begin(), selected.end());
     std::size_t desired_growth = static_cast<std::size_t>(std::llround(
         growth_weights.size() * options.densify_select_fraction));
-    desired_growth = std::min(
-        desired_growth,
-        static_cast<std::size_t>(std::ceil(
-            model.size() * std::clamp(
-                options.dense_growth_fraction, 0.F, 1.F))));
-    growth_weights.erase(
-        std::remove_if(
-            growth_weights.begin(), growth_weights.end(),
-            [&](const auto& candidate) {
-                return forced.contains(candidate.first);
-            }),
-        growth_weights.end());
+    if (!adc) {
+        desired_growth = std::min(
+            desired_growth,
+            static_cast<std::size_t>(std::ceil(
+                model.size() * std::clamp(
+                    options.dense_growth_fraction, 0.F, 1.F))));
+        growth_weights.erase(
+            std::remove_if(
+                growth_weights.begin(), growth_weights.end(),
+                [&](const auto& candidate) {
+                    return forced.contains(candidate.first);
+                }),
+            growth_weights.end());
+    }
     const std::size_t remaining = capacity > forced.size()
         ? capacity - forced.size()
         : 0;
     selected = weighted_unique_sample(
-        growth_weights, std::min(remaining, desired_growth), random);
+        growth_weights, std::min(remaining, desired_growth), gumbel, random);
     forced.insert(selected.begin(), selected.end());
     split_parents.reserve(std::min(capacity, forced.size()));
     for (const std::size_t parent : forced) {
@@ -354,8 +422,22 @@ RefinementCounts refine_gaussians(
         retained_screen.push_back(
             screen[static_cast<std::size_t>(old_index)]);
     grow_training_model(
-        model, split_parents, options, random, states,
+        model, split_parents,
+        adc ? detail::SplitMode::igs_random
+            : detail::SplitMode::dense_tangent,
+        options, random, states,
         retained_screen);
+    if (adc) {
+        const float remaining_progress = 1.F -
+            static_cast<float>(iteration) /
+                std::max(1.F, static_cast<float>(options.iterations));
+        detail::apply_adc_decay(
+            model,
+            options.opacity_decay *
+                std::max(remaining_progress, 0.F),
+            options.scale_decay *
+                std::max(remaining_progress, 0.F));
+    }
     stats = detail::make_densification_stats(model.size());
     return {split_parents.size(), pruned};
 }

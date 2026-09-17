@@ -305,6 +305,10 @@ enum class SplitMode {
     adc_covariance,
     // Dense MVS tangent-plane split: local Z keeps the fused normal thickness.
     dense_tangent,
+    // Legacy ADC-IGS split: one shared random scalar offsets every axis by
+    // its own scale, the largest axis halves and the two children's alpha
+    // composites reproduce the parent exactly.
+    igs_random,
 };
 
 // Mutate selected parents and their already-cloned children in place.

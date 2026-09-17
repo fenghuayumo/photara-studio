@@ -2731,9 +2731,14 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
             : aetherscan::splat::PpispParamType::no_crf_no_vig;
     options.ppisp_lr = cli.splat_ppisp_lr;
     options.ppisp_before_bilagrid = cli.splat_ppisp_before_bilagrid;
-    if (!dense_input) {
-        // brush-train optimizer defaults. The trainer also switches ADC to
-        // brush's 2-NN/identity/0.5-opacity sparse initialization.
+    if (!dense_input &&
+        options.densification_strategy ==
+            aetherscan::splat::DensificationStrategy::adc_plus) {
+        // brush-train optimizer defaults. The trainer also switches ADC+ to
+        // brush's 2-NN/identity/0.5-opacity sparse initialization. ADC-IGS
+        // keeps the default optimizer schedule: forcing brush's 100x lower
+        // means LR plus fixed-resolution full-SH training on sparse input
+        // collapsed held-out quality on turntable captures.
         options.means_lr = 2e-5F;
         options.scales_lr = 5e-3F;
         options.opacities_lr = 0.012F;
@@ -2754,6 +2759,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         options.sh_degree_interval = 0;
         options.progressive_resolution = false;
         options.background_noise_strength = 0.1F;
+    } else if (!dense_input) {
+        options.opacities_lr = 0.025F;
     }
     const std::size_t projected_mask_views =
         static_cast<std::size_t>(std::count_if(

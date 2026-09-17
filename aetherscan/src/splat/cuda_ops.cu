@@ -1589,7 +1589,7 @@ __global__ void split_gaussians_kernel(
     float* child_means, float* child_log_scales,
     float* child_opacity_logits, const int* parent_indices,
     const float* random_samples, const float* screen_sizes,
-    const std::size_t split_count, const bool dense_tangent,
+    const std::size_t split_count, const SplitMode mode,
     const float minimum_opacity, const float split_at_screen_size) {
     const std::size_t child = blockIdx.x * blockDim.x + threadIdx.x;
     if (child >= split_count) return;
@@ -1597,7 +1597,7 @@ __global__ void split_gaussians_kernel(
     const float* parent_quaternion = parent_quaternions + 4 * parent;
     float local[3]{};
     float log_scale_delta[3]{};
-    if (dense_tangent) {
+    if (mode == SplitMode::dense_tangent) {
         // Dense MVS already constrains the surface normal accurately. Split
         // only in the local tangent plane (local Z is initialized from the
         // fused-cloud normal) and preserve the normal-axis thickness.
@@ -1611,7 +1611,7 @@ __global__ void split_gaussians_kernel(
         log_scale_delta[0] = logf(tangent_scale);
         log_scale_delta[1] = logf(tangent_scale);
         log_scale_delta[2] = 0.F;
-    } else {
+    } else if (mode == SplitMode::adc_covariance) {
         // Split along one principal axis. Moving both children along all
         // three axes introduces off-diagonal covariance (d*d^T), even if
         // each diagonal variance is preserved, and displaces thin surfaces
@@ -1641,6 +1641,21 @@ __global__ void split_gaussians_kernel(
             local[axis] = sqrtf(fmaxf(1.F - k * k, 0.F)) * scale;
             log_scale_delta[axis] = logf(fmaxf(k, 1e-12F));
         }
+    } else if (mode == SplitMode::igs_random) {
+        // Legacy ADC-IGS split. One shared random scalar offsets every axis
+        // by its own scale, so the displacement direction is random in the
+        // local frame. Only the largest axis halves, and the children keep
+        // the alpha whose two-way composite reproduces the parent exactly.
+        int largest = 0;
+        if (parent_log_scales[3 * parent + 1] >
+            parent_log_scales[3 * parent + largest]) largest = 1;
+        if (parent_log_scales[3 * parent + 2] >
+            parent_log_scales[3 * parent + largest]) largest = 2;
+        for (int axis = 0; axis < 3; ++axis) {
+            local[axis] = expf(parent_log_scales[3 * parent + axis]) *
+                          random_samples[3 * child];
+            log_scale_delta[axis] = axis == largest ? logf(0.5F) : 0.F;
+        }
     }
     float offset_x{}, offset_y{}, offset_z{};
     rotate_quaternion(
@@ -1657,7 +1672,8 @@ __global__ void split_gaussians_kernel(
     const float opacity = sigmoid(parent_opacity_logits[parent]);
     // Two children with this alpha reproduce the parent's coverage along the
     // split axis; the dense tangent path doubles the covered lobes instead.
-    const float opacity_power = dense_tangent ? 0.5F : rsqrtf(2.F);
+    const float opacity_power =
+        mode == SplitMode::adc_covariance ? rsqrtf(2.F) : 0.5F;
     const float revised = fminf(fmaxf(
         1.F - powf(fmaxf(1.F - opacity, 0.F), opacity_power),
         minimum_opacity), 1.F - minimum_opacity);
@@ -2942,7 +2958,7 @@ void split_gaussians(
         children.opacity_logits.ptr<float>(), parent_indices.ptr<int>(),
         random_samples.ptr<float>(),
         screen_sizes.is_valid() ? screen_sizes.ptr<float>() : nullptr,
-        count, mode == SplitMode::dense_tangent,
+        count, mode,
         std::clamp(minimum_opacity, 1e-8F, 0.49F),
         std::max(split_at_screen_size, 0.F));
     check_cuda(cudaGetLastError(), "split GGGS Gaussians");

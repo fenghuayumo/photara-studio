@@ -7,6 +7,7 @@
 #include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/densification.hpp"
+#include "../src/splat/densification_igs.hpp"
 #include "../src/splat/densification_adc_plus.hpp"
 #include "../src/splat/fused_ssim.hpp"
 #include "../src/splat/ppisp.hpp"
@@ -3131,9 +3132,9 @@ void test_source_resolution_and_knn_initialization() {
     for (const float initial_opacity : {0.1F, 0.25F}) {
         options.initial_opacity = initial_opacity;
         const auto igs_model = splat::initialize_from_dense_cloud(scene, options);
-        require(igs_model.log_scales.to_vector() == brush_scales &&
-                    igs_model.quaternions.to_vector() == brush_rotations,
-                "IGS opacity initialization must preserve ADC+ scales and orientation");
+        require(igs_model.log_scales.to_vector() != brush_scales ||
+                    igs_model.quaternions.to_vector() != brush_rotations,
+                "IGS must keep the legacy KNN/random-quaternion initialization");
         for (const float logit : igs_model.opacity_logits.to_vector())
             require(std::abs(1.F / (1.F + std::exp(-logit)) - initial_opacity) < 1e-6F,
                     "IGS ignored the configured initial opacity");
@@ -4037,8 +4038,8 @@ void test_igs_growth_budget() {
     options.densify_screen_threshold = 0.1F;
     options.densify_gradient_threshold = 0.01F;
     std::mt19937 random(42);
-    const auto result = densification::refine_gaussians(
-        model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(), options, random, states);
+    const auto result = densification::IgsStrategy{}.refine(
+        model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(), options, states);
     require(result.grown == 3 && model.size() == 7,
             "IGS lost growth budget to an already selected oversized parent");
     for (const auto* state : states)
@@ -4067,9 +4068,9 @@ void test_igs_fog_evidence_paths() {
         options.densify_select_fraction = 1.F;
         options.densify_gradient_threshold = 0.F;
         std::mt19937 random(42);
-        const auto result = densification::refine_gaussians(
+        const auto result = densification::IgsStrategy{}.refine(
             harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-            options, random, harness.states());
+            options, harness.states());
         require(result.pruned == 1 && result.grown == 0 && harness.model.size() == 3,
                 "IGS replacement/oversize must not bypass the geometry gate");
         for (const auto* state : harness.states())
@@ -4092,9 +4093,9 @@ void test_igs_fog_evidence_paths() {
         options.densify_select_fraction = 2.F;
         options.densify_gradient_threshold = 0.F;
         std::mt19937 random(42);
-        const auto result = densification::refine_gaussians(
+        const auto result = densification::IgsStrategy{}.refine(
             harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-            options, random, harness.states());
+            options, harness.states());
         require(result.grown == 1 && result.pruned == 0,
                 "Sampled oversize budget must fall back to the sole geometry-supported parent");
     }
@@ -4109,9 +4110,9 @@ void test_igs_fog_evidence_paths() {
     options.densification_strategy = DensificationStrategy::adc_igs;
     options.densification_cap = 3;
     std::mt19937 random(42);
-    const auto result = densification::refine_gaussians(
+    const auto result = densification::IgsStrategy{}.refine(
         harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, random, harness.states());
+        options, harness.states());
     require(result.pruned == 1 && result.grown == 0 &&
                 harness.model.means.to_vector()[0] == 1.F,
             "IGS must prune repeated-camera weak opacity while preserving unseen/multiview/opaque rows");
@@ -4144,9 +4145,9 @@ void test_densification_cap_stops_igs_growth() {
     options.densify_growth_factor = 2.F;
     options.grow_stop_iter = 10'000;
     std::mt19937 random(42);
-    const auto result = densification::refine_gaussians(
+    const auto result = densification::IgsStrategy{}.refine(
         harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, random, harness.states());
+        options, harness.states());
     require(harness.model.size() == 4,
             "densification_cap did not stop ADC-IGS from growing past the cap");
     require(result.grown == 0,
@@ -4157,9 +4158,9 @@ void test_densification_cap_stops_igs_growth() {
     stats.count = Tensor::full({4}, 10.F, gpu);
     stats.view_support = Tensor::full({4}, 1.F, gpu);
     stats.max_screen_radius = Tensor::full({4}, 0.01F, gpu);
-    const auto single_view = densification::refine_gaussians(
+    const auto single_view = densification::IgsStrategy{}.refine(
         harness.model, stats, 700, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, random, harness.states());
+        options, harness.states());
     require(single_view.grown == 0 && single_view.pruned == 0 && harness.model.size() == 4,
             "IGS must retain opaque single-camera parents without replicating them");
     stats = detail::make_densification_stats(4);
@@ -4167,9 +4168,9 @@ void test_densification_cap_stops_igs_growth() {
     stats.count = Tensor::full({4}, 10.F, gpu);
     stats.view_support = Tensor::full({4}, 2.F, gpu);
     options.densify_geometry_gradient_threshold = 0.0025F;
-    const auto resolved = densification::refine_gaussians(
+    const auto resolved = densification::IgsStrategy{}.refine(
         harness.model, stats, 800, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, random, harness.states());
+        options, harness.states());
     require(resolved.grown == 0 && harness.model.size() == 4,
             "IGS must not fill the cap when projected geometry is already resolved");
     stats = detail::make_densification_stats(4);
@@ -4177,9 +4178,9 @@ void test_densification_cap_stops_igs_growth() {
     stats.count = Tensor::full({4}, 10.F, gpu);
     stats.view_support = Tensor::full({4}, 2.F, gpu);
     stats.geometry_gradient = Tensor::full({4}, 1.F, gpu);
-    const auto unresolved = densification::refine_gaussians(
+    const auto unresolved = densification::IgsStrategy{}.refine(
         harness.model, stats, 900, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, random, harness.states());
+        options, harness.states());
     require(unresolved.grown == 1 && harness.model.size() == 5,
             "IGS must allocate the interval-normalized unresolved geometry budget");
 }
@@ -4638,26 +4639,24 @@ void test_densification_strategies_and_dense_bypass() {
     auto igs_schedule = full_brush_schedule;
     igs_schedule.densification_strategy = splat::DensificationStrategy::adc_igs;
     splat::apply_strategy_defaults(igs_schedule);
-    require(igs_schedule.grow_stop_iter >= igs_schedule.iterations,
-            "IGS unexpectedly truncates ADC+ growth budget");
-    // IGS now shares ADC+'s cadence: 200-step windows starting at the first
-    // one, with the shared threshold growth budget instead of a fixed rate.
+    // IGS keeps the legacy default cadence and grow-stop window; only the
+    // split screen threshold is pinned so oversized repair stays active.
     require(
         !splat::densification::is_refinement_iteration(100, igs_schedule) &&
-            !splat::densification::is_refinement_iteration(201, igs_schedule),
-        "IGS densify should run on 200-step windows");
+            !splat::densification::is_refinement_iteration(499, igs_schedule),
+        "IGS should wait for the legacy 500-step warmup");
     require(
-        splat::densification::is_refinement_iteration(200, igs_schedule) &&
-            splat::densification::is_refinement_iteration(600, igs_schedule),
-        "IGS densify should run every 200 steps from the first window");
-    require(igs_schedule.densify_growth_factor == 0.F,
-            "IGS should use the shared threshold growth budget");
+        splat::densification::is_refinement_iteration(600, igs_schedule) &&
+            splat::densification::is_refinement_iteration(700, igs_schedule),
+        "IGS should refine every 100 steps after the warmup");
     require(
         splat::densification::is_refinement_iteration(24'000, igs_schedule),
         "IGS should keep densifying until max(14000, N-2500)");
     require(
         !splat::densification::is_refinement_iteration(28'400, igs_schedule),
         "IGS should stop densify at max(14000, N-2500)");
+    require(igs_schedule.densify_screen_threshold == 0.5F,
+            "IGS oversized screen threshold should stay at the legacy value");
     const auto brush_schedule_model =
         splat::Trainer(brush_schedule).train(scene);
     require(

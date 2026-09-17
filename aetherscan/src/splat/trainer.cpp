@@ -811,7 +811,7 @@ GaussianModel initialize_from_dense_cloud(
     };
     const std::size_t bases = static_cast<std::size_t>(options.sh_degree + 1U) *
                               (options.sh_degree + 1U);
-    const bool splat_adc_plus = is_adc_strategy(options.densification_strategy);
+    const bool splat_adc_plus = options.densification_strategy == DensificationStrategy::adc_plus;
     std::vector<float> means(count * 3);
     std::vector<float> scales(count * 3);
     std::vector<float> quaternions(count * 4);
@@ -1039,11 +1039,12 @@ GaussianModel Trainer::train(
         }
     }
     const float filter_3d_factor =
-        is_adc_strategy(options_.densification_strategy)
+        options_.densification_strategy ==
+                DensificationStrategy::adc_plus
             ? 0.1F
             : 0.2F;
-    const bool brush_filter =
-        is_adc_strategy(options_.densification_strategy);
+    const bool brush_filter = options_.densification_strategy ==
+                DensificationStrategy::adc_plus;
     // Keep the Mip-Splatting floor separate from the canonical parameters.
     // pygsplat applies this filter only while rasterizing and recomputes it
     // after topology changes; repeatedly baking it into scale/opacity causes
@@ -1141,7 +1142,8 @@ GaussianModel Trainer::train(
     detail::AdamState rotations_state = detail::make_adam_state(model.quaternions);
     detail::AdamState opacity_state = detail::make_adam_state(model.opacity_logits);
     detail::AdamState sh_state =
-        is_adc_strategy(options_.densification_strategy)
+        options_.densification_strategy ==
+                DensificationStrategy::adc_plus
             ? detail::make_reduced_second_adam_state(model.sh)
             : detail::make_adam_state(model.sh);
     detail::AdamState normal_features_state =
@@ -1178,7 +1180,7 @@ GaussianModel Trainer::train(
     const mvs::Vec3f scene_center = scene_geometry.center;
     float means_learning_rate_scale = scene_extent;
     refine::SceneGeometry refinement_geometry = scene_geometry;
-    if (is_adc_strategy(options_.densification_strategy)) {
+    if (options_.densification_strategy == DensificationStrategy::adc_plus) {
         refinement_geometry = refine::brush_scene_geometry_cuda(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
     }
@@ -1760,7 +1762,7 @@ GaussianModel Trainer::train(
                     model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
                     options_, full_sh_stride, active_sh_stride,
                     options_.sh_rest_lr);
-            else if (is_adc_strategy(options_.densification_strategy))
+            else if (options_.densification_strategy == DensificationStrategy::adc_plus)
                 detail::adam_step_reduced_second(
                     model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
                     options_, full_sh_stride, options_.sh_rest_lr);
@@ -1778,7 +1780,8 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::optimizer);
 
         if (densification_enabled &&
-            is_adc_strategy(options_.densification_strategy)) {
+            options_.densification_strategy ==
+                DensificationStrategy::adc_plus) {
             const unsigned noise_stop = refine::strategy_schedule(options_).stop;
             if (iteration < noise_stop)
                 detail::inject_adc_noise(
@@ -1786,7 +1789,8 @@ GaussianModel Trainer::train(
                     options_.densify_revised_noise
                         ? options_.mean_noise_weight * std::pow(0.01F, progress_fraction)
                         : means_lr * options_.mean_noise_weight,
-                    is_adc_strategy(options_.densification_strategy)
+                    options_.densification_strategy ==
+                            DensificationStrategy::adc_plus
                         ? refinement_geometry.scale
                         : scene_extent,
                     options_.seed + iteration,
@@ -1806,7 +1810,8 @@ GaussianModel Trainer::train(
         bool refinement_happened = false;
         if (densification_enabled) {
             const bool adc_plus =
-                is_adc_strategy(options_.densification_strategy);
+                options_.densification_strategy ==
+                    DensificationStrategy::adc_plus;
             if (refine::is_refinement_iteration(iteration, options_)) {
                 const std::size_t remaining =
                     options_.densification_cap > model.size()
@@ -1830,7 +1835,10 @@ GaussianModel Trainer::train(
             refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
             if (refinement_happened && adc_plus) {
-                refinement_geometry = refine::brush_scene_geometry_cuda(model.means);
+                if (options_.densification_strategy ==
+                    DensificationStrategy::adc_plus)
+                    refinement_geometry =
+                        refine::brush_scene_geometry_cuda(model.means);
                 means_learning_rate_scale = refinement_geometry.scale;
             }
             if (refinement_happened && report_progress) {
@@ -1912,7 +1920,8 @@ GaussianModel Trainer::train(
         bool filter_refreshed = false;
         if (use_3d_filter) {
             const bool adc_plus_refine =
-                is_adc_strategy(options_.densification_strategy) &&
+                options_.densification_strategy ==
+                    DensificationStrategy::adc_plus &&
                 refine::is_refinement_iteration(iteration, options_);
             const float training_progress =
                 static_cast<float>(iteration) /
@@ -1921,7 +1930,8 @@ GaussianModel Trainer::train(
             // through 95%, then periodically while the fixed-topology tail
             // continues moving Gaussian means.
             const bool adc_plus_refresh =
-                is_adc_strategy(options_.densification_strategy) &&
+                options_.densification_strategy ==
+                    DensificationStrategy::adc_plus &&
                 (adc_plus_refine ||
                  (training_progress > 0.95F &&
                   options_.filter_3d_update_interval != 0 &&
@@ -1929,7 +1939,8 @@ GaussianModel Trainer::train(
                   iteration + options_.filter_3d_update_interval <
                       options_.iterations));
             const bool other_refresh =
-                !is_adc_strategy(options_.densification_strategy) &&
+                options_.densification_strategy !=
+                    DensificationStrategy::adc_plus &&
                 (latest_refinement.grown != 0 ||
                  latest_refinement.pruned != 0 ||
                  (options_.filter_3d_update_interval != 0 &&
