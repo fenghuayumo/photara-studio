@@ -12,6 +12,7 @@
 #include <cfloat>
 #include <climits>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace aetherscan::splat::detail {
@@ -810,6 +811,17 @@ __global__ void unproject_depth_to_world_kernel(
     const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
     if (pixel >= pixels) return;
     const float z = depth[pixel];
+    // Pixels without a median depth cannot contribute to the multi-view
+    // geometry term (the loss gates on the reference depth), and sampling them
+    // costs a full median-depth walk at the principal-point tile. Mark them
+    // NaN so the point query rejects them instead of evaluating them.
+    if (!(z > 0.F) || !isfinite(z)) {
+        const float invalid = std::numeric_limits<float>::quiet_NaN();
+        points[3 * pixel] = invalid;
+        points[3 * pixel + 1] = invalid;
+        points[3 * pixel + 2] = invalid;
+        return;
+    }
     const float x = (static_cast<float>(pixel % camera.width) - camera.cx) /
                     camera.fx * z;
     const float y = (static_cast<float>(pixel / camera.width) - camera.cy) /

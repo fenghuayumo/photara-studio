@@ -476,3 +476,44 @@ gaussian_backward(...)
 - 建议：修好之前保持 `--splat-prefetch-views 0`；修复方向是让 prefetch 与 eviction 的
   分配/释放都在 `copy_stream_` 上排序（`CUDAStreamGuard(copy_stream_)` 包住 eviction 与
   clear 路径），并复查 `maybe_prefetch` 中被移除的 `make_room_for_device_bytes` 预算闸门。
+
+## 7. 点采样（sample_forward）继续优化：两轮实测（2026-09-17）
+
+### 7.1 按查询点 tile 反剔高斯：实测无效，已回退
+
+实现过（`tiles::enumerate` 加 `tile_points` 过滤参数，`preprocess_gaussians` /
+`emit_instances` / `emit_packed_instances` 三处枚举共用同一过滤，`sample_depth` 先建点列表
+再用 `point_range` 反剔），语义上是精确剔除——没有查询点的 tile 本来就不会被读。
+
+实测（`ori_img` + `--mesh`，adc_igs，同窗口对齐）：
+
+| 窗口 | `multi_view_sample_forward` 过滤前 -> 后 |
+|---|---:|
+| 2101（126K 高斯） | 4.69 -> 4.75 ms |
+| 3101（179K 高斯） | 5.99 -> 5.96 ms |
+
+**结论：稠密多视图损失里查询点来自参考视图的每个像素，投影后几乎覆盖邻居相机的全部
+tile，mask 近似全 1，一个实例也剔不掉。** 因为测不到收益，这套过滤代码与配套的点列表
+重排已整体回退（不在树里）；只有稀疏查询点的调用者才可能受益，将来真出现这种调用者时
+再按本文记录的方式实现。
+### 7.2 无效深度像素不再参与点查询：−2.7% / 质量中性
+
+`unproject_depth_to_world` 过去对 `median_depth <= 0` 的像素也生成点（退化成相机中心、
+投影到主点 tile），既进入点列表又被完整走查一遍，而损失本身用参考深度把它全部丢弃。
+现在这些像素写 NaN，点在 `preprocess_points` 阶段即被拒绝。
+
+同配置窗口 3101：`multi_view_sample_forward` 5.96 -> 5.80 ms（−2.7%）、
+`multi_view_loss` 3.53 -> 3.39 ms、整步 17.83 -> 17.49 ms（−1.9%）；窗口 2101 持平。
+这份数据集画面几乎铺满，无效像素占比小；天空/背景占比大的场景收益更大。
+
+### 7.3 现状分布（ncu，约 180K 高斯）
+
+| kernel | 平均 |
+|---|---:|
+| `evaluate_points<1>` | 1.39 ms |
+| `sample_depth_backward` | 0.60 ms |
+| 像素渲染 blend / gaussian_backward | 0.72 / 0.08 ms |
+| preprocess / emit / radix sort / scan 合计 | ~0.1 ms/步 |
+
+即点查询路径现在由走查本身主导（约 58%），draw list 构建在 180K 规模只占少数；随模型增大
+两者都线性增长，所以下一档优化应瞄准「每个查询点要走多少高斯 × 走几趟」，而不是排序。
