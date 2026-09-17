@@ -7,6 +7,7 @@
 #include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/densification.hpp"
+#include "../src/splat/densification_adc_plus.hpp"
 #include "../src/splat/fused_ssim.hpp"
 #include "../src/splat/ppisp.hpp"
 #include "../src/splat/multi_view_scheduler.hpp"
@@ -4111,7 +4112,68 @@ void test_densification_cap_stops_igs_growth() {
             "IGS must allocate the interval-normalized unresolved geometry budget");
 }
 
-void test_adc_plus_split_matches_brush() {
+void test_adc_recycled_capacity_repairs_oversize() {
+    using namespace aetherscan::splat;
+    struct ExposedStrategy : densification::AdcPlusStrategy {
+        using AdcPlusStrategy::growth_candidates;
+    };
+    const auto eligible = tinytensor::Tensor::ones({3}, tinytensor::Device::CUDA).gt(0.F);
+    const auto selected = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 1.F, 0.F}, {3}, tinytensor::Device::CUDA).gt(0.F);
+    const auto candidates = ExposedStrategy().growth_candidates(eligible, selected);
+    require(candidates.numel() == 2 &&
+                candidates.to(tinytensor::DataType::Float32).to_vector() ==
+                    std::vector<float>({0.F, 2.F}),
+            "ADC growth must exclude parents selected by earlier paths");
+    for (const bool sampled : {false, true}) {
+        GaussianModel model;
+        model.means = tinytensor::Tensor::from_vector(
+            std::vector<float>{0,0,0, 0,0,0, 10,0,0}, {3,3}, tinytensor::Device::CUDA);
+        model.log_scales = tinytensor::Tensor::from_vector(
+            std::vector<float>{0,0,0, std::log(2.F),0,std::log(.5F), 0,0,0},
+            {3,3}, tinytensor::Device::CUDA);
+        model.quaternions = tinytensor::Tensor::from_vector(
+            std::vector<float>{1,0,0,0, 1,0,0,0, 1,0,0,0}, {3,4}, tinytensor::Device::CUDA);
+        model.opacity_logits = tinytensor::Tensor::from_vector(
+            std::vector<float>{-20,0,0}, {3,1}, tinytensor::Device::CUDA);
+        model.sh = tinytensor::Tensor::zeros({3,1,3}, tinytensor::Device::CUDA);
+        model.normal_features = tinytensor::Tensor::zeros({3,3}, tinytensor::Device::CUDA);
+        std::array<detail::AdamState, 6> adam{
+            detail::make_adam_state(model.means), detail::make_adam_state(model.log_scales),
+            detail::make_adam_state(model.quaternions), detail::make_adam_state(model.opacity_logits),
+            detail::make_adam_state(model.sh), detail::make_adam_state(model.normal_features)};
+        densification::AdamStates states;
+        for (std::size_t i = 0; i < adam.size(); ++i) states[i] = &adam[i];
+        auto stats = detail::make_densification_stats(3);
+        stats.count.fill_(2.F);
+        stats.view_support.fill_(2.F);
+        stats.gradient.fill_(1.F);
+        stats.priority.fill_(1.F);
+        stats.max_screen_radius = tinytensor::Tensor::from_vector(
+            std::vector<float>{0,1,0}, {3}, tinytensor::Device::CUDA);
+        if (sampled)
+            stats.priority = stats.max_screen_radius.clone();
+        TrainingOptions options;
+        options.densification_strategy = sampled ? DensificationStrategy::adc_igs : DensificationStrategy::adc_plus;
+        options.densification_cap = 3;
+        options.iterations = 1000;
+        options.grow_stop_iter = 0;
+        options.opacity_decay = 0;
+        options.densify_oversize_split_fraction = sampled ? 1.F : 0.F;
+        const auto counts = ExposedStrategy().refine(
+            model, stats, 200, 1.F, aetherscan::mvs::Vec3f::Zero(), options, states);
+        require(model.size() == 3 && counts.grown == 1 && counts.pruned == 1,
+                "ADC recycled refinement must preserve the hard count cap");
+        const auto centers = model.means.to_vector();
+        require(centers[0] < -1.F && centers[6] > 1.F && centers[3] == 10.F,
+                "ADC must repair the oversized parent before generic replacement at cap");
+        for (const auto& state : adam)
+            require(state.first.shape()[0] == 3 && state.second.shape()[0] == 3,
+                    "ADC topology repair misaligned optimizer rows");
+    }
+}
+
+void test_adc_plus_split_preserves_covariance() {
     using namespace aetherscan::splat;
     GaussianModel parents;
     parents.means = tinytensor::Tensor::zeros(
@@ -4156,7 +4218,7 @@ void test_adc_plus_split_matches_brush() {
     const auto child_means = children.means.to_vector();
     const auto parent_scales = parents.log_scales.to_vector();
     const auto child_scales = children.log_scales.to_vector();
-    const float k[3]{0.5F, 0.875F, 0.96875F};
+    const float k[3]{0.5F, 1.F, 1.F};
     const float scale[3]{2.F, 1.F, 0.5F};
     for (int axis = 0; axis < 3; ++axis) {
         const float offset =
@@ -4164,14 +4226,24 @@ void test_adc_plus_split_matches_brush() {
         require(
             std::abs(parent_means[axis] + offset) < 1e-5F &&
                 std::abs(child_means[axis] - offset) < 1e-5F,
-            "ADC+ split does not match brush's centroid-preserving offset");
+            "ADC+ split must offset only along its major principal axis");
         const float expected_log_scale =
             std::log(scale[axis] * k[axis]);
         require(
             std::abs(parent_scales[axis] - expected_log_scale) < 1e-5F &&
                 std::abs(child_scales[axis] - expected_log_scale) < 1e-5F,
-            "ADC+ split does not match brush's covariance-aware shrink");
+            "ADC+ split must preserve its transverse scales");
     }
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col) {
+            const float covariance =
+                0.5F * (parent_means[row] * parent_means[col] +
+                        child_means[row] * child_means[col]) +
+                (row == col ? std::exp(2.F * parent_scales[row]) : 0.F);
+            require(std::abs(covariance -
+                        (row == col ? scale[row] * scale[row] : 0.F)) < 1e-5F,
+                    "ADC+ split changed the full mixture covariance");
+        }
     const float expected_opacity =
         1.F - std::pow(0.5F, std::numbers::sqrt2_v<float> / 2.F);
     const float expected_logit =
@@ -4680,7 +4752,8 @@ int main(int argc, char** argv) {
         test_masked_photometric_gradient();
         test_gggs_depth_normal_consistency();
         test_gggs_depth_normal_parameter_gradients();
-        test_adc_plus_split_matches_brush();
+        test_adc_plus_split_preserves_covariance();
+        test_adc_recycled_capacity_repairs_oversize();
         test_revised_noise_scales_with_scene_units();
         test_geometry_regularization();
         test_densify_mean_scores_and_oversize_weights();

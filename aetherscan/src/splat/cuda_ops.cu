@@ -1607,18 +1607,21 @@ __global__ void split_gaussians_kernel(
         log_scale_delta[1] = logf(tangent_scale);
         log_scale_delta[2] = 0.F;
     } else {
-        // ADC/ADC-IGS: brush-train's covariance-aware split. The offset is
-        // deterministic and anti-correlated, preserving the centroid. Axes
-        // shrink in proportion to their covariance contribution; oversized
-        // splats shrink harder so their largest on-screen extent reaches the
-        // configured cap.
+        // Split along one principal axis. Moving both children along all
+        // three axes introduces off-diagonal covariance (d*d^T), even if
+        // each diagonal variance is preserved, and displaces thin surfaces
+        // along their normal. A rank-one offset with shrink on that same
+        // axis preserves the full mixture covariance and surface thickness.
         float maximum_scale_squared = 0.F;
         float scale_squared[3]{};
+        int major_axis = 0;
         for (int axis = 0; axis < 3; ++axis) {
             const float scale = expf(parent_log_scales[3 * parent + axis]);
             scale_squared[axis] = scale * scale;
-            maximum_scale_squared =
-                fmaxf(maximum_scale_squared, scale_squared[axis]);
+            if (scale_squared[axis] > maximum_scale_squared) {
+                maximum_scale_squared = scale_squared[axis];
+                major_axis = axis;
+            }
         }
         const float standard_k = rsqrtf(2.F);
         const float screen = screen_sizes != nullptr
@@ -1628,9 +1631,7 @@ __global__ void split_gaussians_kernel(
             ? fminf(standard_k, split_at_screen_size / screen)
             : standard_k;
         for (int axis = 0; axis < 3; ++axis) {
-            const float ratio = scale_squared[axis] /
-                fmaxf(maximum_scale_squared, 1e-30F);
-            const float k = 1.F - ratio * (1.F - maximum_k);
+            const float k = axis == major_axis ? maximum_k : 1.F;
             const float scale = sqrtf(scale_squared[axis]);
             local[axis] = sqrtf(fmaxf(1.F - k * k, 0.F)) * scale;
             log_scale_delta[axis] = logf(fmaxf(k, 1e-12F));

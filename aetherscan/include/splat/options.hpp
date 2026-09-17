@@ -83,7 +83,9 @@ struct TrainingOptions {
     // the candidate set, but should not expose duplicate threshold knobs.
     float densify_gradient_threshold{0.0025F};
     float densify_select_fraction{0.25F};
-    float densify_screen_threshold{0.5F};
+    // Broad semi-transparent splats that own the rendered median depth wrap
+    // meshes in a floater shell. Start size repair past a quarter frame.
+    float densify_screen_threshold{0.25F};
     // When true, densify ranks Gaussians by a SSIM contrast-structure error
     // map instead of ||dL/dmean2d||. ADC-IGS enables this in
     // apply_strategy_defaults().

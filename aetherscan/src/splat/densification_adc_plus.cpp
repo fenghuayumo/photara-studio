@@ -92,8 +92,9 @@ void grow_adc_plus_gpu(
 }  // namespace
 
 tinytensor::Tensor AdcPlusStrategy::growth_candidates(
-    const tinytensor::Tensor& eligible, const tinytensor::Tensor&) const {
-    return eligible.nonzero().squeeze(1).to(tinytensor::DataType::Int32);
+    const tinytensor::Tensor& eligible, const tinytensor::Tensor& selected) const {
+    return eligible.logical_and(!selected).nonzero().squeeze(1).to(
+        tinytensor::DataType::Int32);
 }
 
 RefinementCounts AdcPlusStrategy::refine(
@@ -197,24 +198,6 @@ RefinementCounts AdcPlusStrategy::refine(
         // Every replication path must obey the geometry gate, including
         // replacement and oversize splits, otherwise resolved view-specific
         // appearance errors can continually attract new Gaussians.
-        auto visible_indices = growth_eligible.nonzero().squeeze(1).to(
-            tinytensor::DataType::Int32);
-        const std::size_t replacement_count = std::min(
-            {pruning.pruned, capacity, visible_indices.numel()});
-        if (replacement_count != 0) {
-            auto weights = options.densify_relocate
-                ? retained_gradient.index_select(0, visible_indices)
-                : retained_opacity.index_select(0, visible_indices);
-            weights = weights.clamp_min(1e-12F);
-            auto sampled_slots = tinytensor::Tensor::multinomial(
-                weights, static_cast<int>(replacement_count), false);
-            auto sampled = visible_indices.index_select(
-                0, sampled_slots).to(tinytensor::DataType::Int32);
-            selected.index_fill_(0, sampled, 1.F);
-            selected_count = replacement_count;
-            replacement_selected = replacement_count;
-        }
-
         std::size_t extra_budget = 0;
         if (iteration < options.grow_stop_iter &&
             selected_count < capacity) {
@@ -252,12 +235,16 @@ RefinementCounts AdcPlusStrategy::refine(
         const bool sampled_oversize =
             options.densify_oversize_split_fraction > 0.F;
         if (sampled_oversize) {
-            std::size_t n_oversize = extra_budget == 0
+            // Recycled slots remain usable at the cap. Previously generic
+            // replacements consumed every freed slot before size repair.
+            const std::size_t repair_budget = std::min(
+                capacity, extra_budget + std::min(pruning.pruned, capacity));
+            std::size_t n_oversize = repair_budget == 0
                 ? 0
                 : static_cast<std::size_t>(std::llround(
-                      static_cast<double>(extra_budget) *
+                      static_cast<double>(repair_budget) *
                       options.densify_oversize_split_fraction));
-            n_oversize = std::min(n_oversize, extra_budget);
+            n_oversize = std::min(n_oversize, repair_budget);
             tinytensor::Tensor oversize_weights;
             if (options.densification_strategy == DensificationStrategy::adc_igs) {
                 // max_screen_radius remains the hard-clip backstop; budget
@@ -292,7 +279,6 @@ RefinementCounts AdcPlusStrategy::refine(
                 selected.index_fill_(0, sampled, 1.F);
                 selected_count += n_oversize;
                 oversized_selected_count = n_oversize;
-                extra_budget -= n_oversize;
             }
         } else {
             auto oversized = growth_eligible.logical_and(
@@ -311,6 +297,30 @@ RefinementCounts AdcPlusStrategy::refine(
                 selected_count += oversized_count;
                 oversized_selected_count = oversized_count;
             }
+        }
+
+        // Repair large splats first, then spend the remaining recycled slots
+        // on ordinary replacements. All paths select disjoint parent rows.
+        const std::size_t repair_growth = selected_count > pruning.pruned
+            ? selected_count - pruning.pruned : 0;
+        if (sampled_oversize)
+            extra_budget -= std::min(extra_budget, repair_growth);
+        auto visible_indices = growth_eligible.logical_and(!selected)
+            .nonzero().squeeze(1).to(tinytensor::DataType::Int32);
+        const std::size_t replacement_count = std::min(
+            {pruning.pruned > selected_count ? pruning.pruned - selected_count : 0,
+             capacity - selected_count, visible_indices.numel()});
+        if (replacement_count != 0) {
+            auto weights = options.densify_relocate
+                ? retained_gradient.index_select(0, visible_indices)
+                : retained_opacity.index_select(0, visible_indices);
+            auto sampled_slots = tinytensor::Tensor::multinomial(
+                weights.clamp_min(1e-12F), static_cast<int>(replacement_count), false);
+            auto sampled = visible_indices.index_select(0, sampled_slots)
+                .to(tinytensor::DataType::Int32);
+            selected.index_fill_(0, sampled, 1.F);
+            selected_count += replacement_count;
+            replacement_selected = replacement_count;
         }
 
         if (extra_budget > 0 && selected_count < capacity) {
