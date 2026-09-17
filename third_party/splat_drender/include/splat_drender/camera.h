@@ -168,6 +168,14 @@ SD_HD inline bool camera_visible(float3 t, CameraMode m) {
 SD_D inline float3 pixel_unit_ray(float px, float py, const CameraIntrinsics& K) {
     const float x = (px - K.cx) / K.fx;
     const float y = (py - K.cy) / K.fy;
+    if (is_equirect(K.mode)) {
+        // The panorama convention (fx = fy = width / 2pi, cx = width / 2)
+        // makes those offsets the azimuth and elevation in radians, so the ray
+        // is the spherical direction rather than a perspective (x, y, 1).
+        const float cos_elevation = cosf(y);
+        return make_float3(cos_elevation * sinf(x), sinf(y),
+                           cos_elevation * cosf(x));
+    }
     if (!is_fisheye(K.mode)) {
         const float inv = rnorm3df(x, y, 1.f);
         return make_float3(x * inv, y * inv, inv);
@@ -185,6 +193,10 @@ SD_D inline float3 pixel_unit_ray(float px, float py, const CameraIntrinsics& K)
 }
 
 SD_D inline float pixel_ray_z(float px, float py, const CameraIntrinsics& K) {
+    // The rasterizer accumulates |t|, the distance along the ray. Pinhole and
+    // fisheye convert that to camera-space Z, but a panorama has no global Z
+    // axis: the distance along the ray is already its depth.
+    if (is_equirect(K.mode)) return 1.f;
     return pixel_unit_ray(px, py, K).z;
 }
 #endif  // __CUDACC__

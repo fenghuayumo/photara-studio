@@ -593,7 +593,8 @@ void Rasterizer::sample_depth_backward(
         ps.point_value[counts.point_selector], intrinsics_of(cam), ps.point2d,
         gst.mean2d,
         gst.conic_opacity, gst.ray_plane, fwd.n_contrib, fwd.median_depth,
-        fwd.inside, dL_dray_points, gs, ps.grad_point2d, tiles);
+        fwd.inside, dL_dray_points, gs, ps.grad_point2d, tiles, cam.width,
+        cam.height);
     check_cuda(cudaGetLastError(), "sample_depth_backward");
 
     launch::point_2d_backward(point_count, world_points, cam.world_to_camera,

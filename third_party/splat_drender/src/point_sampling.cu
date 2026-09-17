@@ -444,7 +444,8 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                       const bool* __restrict__ inside,
                       const float3* __restrict__ dL_dray_points,
                       ws::GradState gs,
-                      float2* __restrict__ dL_dpoint2d) {
+                      float2* __restrict__ dL_dpoint2d,
+                      const int width, const int height) {
     auto block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
     const int tile = blockIdx.x;
@@ -483,7 +484,7 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                 any_active = true;
 
                 const float3 dl = dL_dray_points[pid];
-                if (is_pinhole(K.mode) || is_equirect(K.mode)) {
+                if (is_pinhole(K.mode)) {
                     const float2 nf = make_float2((xy[p].x - K.cx) / K.fx,
                                                   (xy[p].y - K.cy) / K.fy);
                     const float rln = rnorm3df(nf.x, nf.y, 1.f);
@@ -496,11 +497,16 @@ sample_depth_backward(const uint2* __restrict__ tile_range,
                         (dl.x - aux * nf.x) * depth, (dl.y - aux * nf.y) * depth);
                     dL_dxy[p] = make_float2(dnf.x / K.fx, dnf.y / K.fy);
                 }
-                if (is_fisheye(K.mode)) {
+                if (is_fisheye(K.mode) || is_equirect(K.mode)) {
                     const float3 ray = pixel_unit_ray(xy[p].x, xy[p].y, K);
                     dL_dDepth[p] =
                         ray.x * dl.x + ray.y * dl.y + ray.z * dl.z;
-                    const Projection pj = project_fisheye(ray, K);
+                    // Both models place the query along its pixel ray, so the
+                    // point-to-pixel chain is the projection Jacobian either
+                    // way; a panorama differentiates its own polar mapping.
+                    const Projection pj = is_equirect(K.mode)
+                        ? project_equirect(ray, width, height)
+                        : project_fisheye(ray, K);
                     const float3 ju = make_float3(pj.J.du[0], pj.J.du[1], pj.J.du[2]);
                     const float3 jv = make_float3(pj.J.dv[0], pj.J.dv[1], pj.J.dv[2]);
                     const float aa = mat::dot3(ju, ju);
@@ -829,11 +835,12 @@ void sample_depth_backward(const uint2* tile_range,
                            const float4* ray_plane, const unsigned* n_contrib,
                            const float* median_depth, const bool* inside,
                            const float3* dL_dray_points, ws::GradState gs,
-                           float2* dL_dpoint2d, int tiles) {
+                           float2* dL_dpoint2d, int tiles, int width,
+                           int height) {
     kernels::sample_depth_backward<<<tiles, cfg::kTileThreads>>>(
         tile_range, gauss_value, point_range, point_value, K, point2d, mean2d,
         conic_opacity, ray_plane, n_contrib, median_depth, inside,
-        dL_dray_points, gs, dL_dpoint2d);
+        dL_dray_points, gs, dL_dpoint2d, width, height);
 }
 
 void point_2d_backward(int count, const float* points, const float* view,

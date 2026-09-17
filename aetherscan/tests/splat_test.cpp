@@ -583,6 +583,60 @@ void test_preview_camera_sidecar_roundtrip() {
     std::filesystem::remove(path);
 }
 
+// A panorama has no global camera Z: the rasterized depth is the distance
+// along the pixel ray, for every direction, including behind the camera.
+void test_equirect_depth_convention() {
+    using namespace aetherscan::splat;
+    Camera camera;
+    camera.world_to_camera[0] = 1.F;
+    camera.world_to_camera[5] = 1.F;
+    camera.world_to_camera[10] = 1.F;
+    camera.world_to_camera[15] = 1.F;
+    camera.width = 128;
+    camera.height = 64;
+    camera.model = aetherscan::CameraModel::equirectangular;
+    camera.fx = camera.fy = static_cast<float>(camera.width) /
+        (2.F * 3.14159265358979323846F);
+    camera.cx = 0.5F * static_cast<float>(camera.width);
+    camera.cy = 0.5F * static_cast<float>(camera.height);
+    for (const std::array<float, 3> position :
+         {std::array<float, 3>{0.F, 0.F, 2.F},
+          std::array<float, 3>{0.F, 0.F, -2.F},
+          std::array<float, 3>{0.F, 1.5F, 0.5F}}) {
+        GaussianModel model;
+        model.means = tinytensor::Tensor::from_vector(
+            std::vector<float>(position.begin(), position.end()), {1, 3},
+            tinytensor::Device::CUDA);
+        model.log_scales = tinytensor::Tensor::from_vector(
+            std::vector<float>{std::log(0.04F), std::log(0.04F),
+                               std::log(0.04F)},
+            {1, 3}, tinytensor::Device::CUDA);
+        model.quaternions = tinytensor::Tensor::from_vector(
+            std::vector<float>{1.F, 0.F, 0.F, 0.F}, {1, 4},
+            tinytensor::Device::CUDA);
+        model.opacity_logits = tinytensor::Tensor::from_vector(
+            std::vector<float>{3.F}, {1, 1}, tinytensor::Device::CUDA);
+        model.sh = tinytensor::Tensor::from_vector(
+            std::vector<float>{0.5F, 0.25F, 0.1F}, {1, 1, 3},
+            tinytensor::Device::CUDA);
+        model.sh_degree = 0;
+        RasterizeOptions options;
+        options.require_depth = true;
+        const auto rendered = Rasterizer().forward(model, camera, options);
+        const auto alpha = rendered.alpha.to_vector();
+        const auto depth = rendered.median_depth.to_vector();
+        std::size_t peak = 0;
+        for (std::size_t i = 1; i < alpha.size(); ++i)
+            if (alpha[i] > alpha[peak]) peak = i;
+        const float distance = std::sqrt(
+            position[0] * position[0] + position[1] * position[1] +
+            position[2] * position[2]);
+        require(
+            alpha[peak] > 0.5F && std::abs(depth[peak] - distance) < 0.06F,
+            "equirect depth is not the distance along the pixel ray");
+    }
+}
+
 void test_fisheye_equirect_rasterize() {
     using namespace aetherscan::splat;
     auto identity_camera = []() {
@@ -4706,6 +4760,7 @@ int main(int argc, char** argv) {
             test_colmap_fisheye_and_equirect_loading();
             test_fisheye_parameter_finite_differences();
             test_fisheye_filter_and_supervision();
+            test_equirect_depth_convention();
             test_fisheye_equirect_rasterize();
             test_preview_camera_sidecar_roundtrip();
             std::cout<<"Fisheye tests passed\n";
@@ -4715,6 +4770,7 @@ int main(int argc, char** argv) {
         test_fisheye_filter_and_supervision();
         test_mvs_camera_conversion();
         test_camera_projection_roundtrip();
+        test_equirect_depth_convention();
         test_fisheye_equirect_rasterize();
         test_preview_camera_sidecar_roundtrip();
         test_gggs_3d_filter();

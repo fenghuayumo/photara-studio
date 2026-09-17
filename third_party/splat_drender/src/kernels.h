@@ -143,9 +143,9 @@ void sample_depth_backward(const uint2* tile_range,
                            const float2* point2d, const float2* mean2d,
                            const float4* conic_opacity,
                            const float4* ray_plane, const unsigned* n_contrib,
-                           const float* median_depth, const bool* inside,
-                           const float3* dL_dray_points, ws::GradState gs,
-                           float2* dL_dpoint2d, int tiles);
+                          const float* median_depth, const bool* inside,
+                          const float3* dL_dray_points, ws::GradState gs,
+                          float2* dL_dpoint2d, int tiles, int width, int height);
 
 void point_2d_backward(int count, const float* points, const float* view,
                        CameraIntrinsics K, int width, int height,
