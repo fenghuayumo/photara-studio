@@ -3456,6 +3456,24 @@ void test_mask_loss_modes() {
     require(std::abs(alpha_gradient[0] + 0.15625F) < 1e-5F &&
                 std::abs(alpha_gradient[1] - 0.625F) < 1e-5F,
             "transparent mode BCE gradient differs from pygsplat");
+
+    // The leakage weight scales only the background half of that BCE, so a
+    // panorama can keep asking for an opaque subject without also demanding
+    // that the static surface behind a moving occluder be empty.
+    options.mask_alpha_leak_weight = 0.5F;
+    loss = detail::compute_training_loss(rendered, target, options, true);
+    alpha_gradient = loss.alpha.to_vector();
+    require(std::abs(alpha_gradient[0] + 0.15625F) < 1e-5F &&
+                std::abs(alpha_gradient[1] - 0.3125F) < 1e-5F,
+            "transparent mode leak weight did not scale the background BCE");
+    options.mask_alpha_leak_weight = 0.F;
+    loss = detail::compute_training_loss(rendered, target, options, true);
+    alpha_gradient = loss.alpha.to_vector();
+    require(std::abs(alpha_gradient[0] + 0.15625F) < 1e-5F &&
+                alpha_gradient[1] == 0.F,
+            "transparent mode leak weight 0 did not drop the background BCE");
+    options.mask_alpha_leak_weight = 1.F;
+
     constexpr float finite_difference_step = 1e-3F;
     const auto alpha_loss_at = [&](const float foreground_alpha) {
         rendered.alpha = tinytensor::Tensor::from_vector(

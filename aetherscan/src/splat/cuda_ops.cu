@@ -965,6 +965,10 @@ __global__ void loss_kernel(
                     inverse_pixels);
     } else if (mask_enabled && alpha_mode == 1 && match_alpha_weight > 0.F) {
         // pygsplat alpha_mode="transparent": full-image BCE(alpha, mask).
+        // The background half is scaled by the leakage weight so a panorama
+        // can stop pushing the static surface behind a moving occluder to
+        // zero; 1 reproduces pygsplat exactly, 0 leaves only the foreground
+        // BCE that asks for an opaque subject.
         constexpr float clamp_epsilon = 1e-7F;
         const float raw_prediction = alpha[pixel];
         const float prediction = fminf(
@@ -976,15 +980,16 @@ __global__ void loss_kernel(
         const bool inside_clamp =
             raw_prediction > clamp_epsilon &&
             raw_prediction < 1.F - clamp_epsilon;
+        const float background = (1.F - valid) * mask_alpha_leak_weight;
         grad_alpha[pixel] = inside_clamp
             ? match_alpha_weight * inverse_pixels *
-                  (prediction - valid) /
+                  (background * prediction - valid * (1.F - prediction)) /
                   (prediction * (1.F - prediction))
             : 0.F;
         if (terms)
             atomicAdd(terms + 3, -match_alpha_weight * inverse_pixels *
                 (valid * logf(prediction) +
-                 (1.F - valid) * logf(1.F - prediction)));
+                 background * logf(1.F - prediction)));
     }
 }
 
