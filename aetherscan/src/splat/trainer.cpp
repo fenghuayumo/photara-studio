@@ -12,6 +12,8 @@
 #include "io/image.hpp"
 #include "multi_view_scheduler.hpp"
 #include "training_data_loader.hpp"
+#include "core/vram_profiler.hpp"
+#include "internal/memory_pool.hpp"
 
 #include <cuda_runtime.h>
 
@@ -183,6 +185,40 @@ enum class CudaTrainingStage : std::size_t {
 constexpr std::size_t k_cuda_training_stage_count =
     static_cast<std::size_t>(CudaTrainingStage::count);
 
+// Stage names in enum order; used by the enable banner and the VRAM report.
+constexpr std::array<const char*, k_cuda_training_stage_count>
+    k_cuda_training_stage_names{
+        "data_load", "raster_forward", "preview", "colour_forward",
+        "training_loss", "multi_view_unproject", "multi_view_sample_forward",
+        "multi_view_loss", "multi_view_sample_backward", "colour_backward",
+        "raster_backward", "multi_view_gradient_merge", "densification_stats",
+        "optimizer", "adc_noise", "refinement", "filter_3d"};
+
+std::string cuda_training_stage_list() {
+    std::string joined;
+    for (const char* name : k_cuda_training_stage_names) {
+        if (!joined.empty()) joined += ',';
+        joined += name;
+    }
+    return joined;
+}
+
+// Device-wide memory in use, i.e. the number nvidia-smi reports. It includes
+// the allocator cache and the CUDA async pool (so it shows what training
+// actually holds, not only what is live), but it also includes every other
+// process on the device - treat it as a bounded context number, and use the
+// per-stage deltas for attribution. Only queried for the first step of each
+// profile window.
+std::size_t query_vram_used_bytes() {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
+        cudaGetLastError();  // clear a sticky error; the probe is advisory
+        return 0;
+    }
+    return total_bytes - free_bytes;
+}
+
 void check_profile_cuda(const cudaError_t error, const char* operation) {
     if (error == cudaSuccess) return;
     throw std::runtime_error(
@@ -213,14 +249,14 @@ public:
         }
         core::Logger::instance().info(
             "splat_cuda_profile enabled=1 interval=", interval_,
-            " stages=data_load,raster_forward,preview,colour_forward,training_loss,"
-            "multi_view_unproject,multi_view_sample_forward,multi_view_loss,"
-            "multi_view_sample_backward,colour_backward,raster_backward,"
-            "multi_view_gradient_merge,densification_stats,optimizer,"
-            "adc_noise,refinement,filter_3d");
+            " stages=", cuda_training_stage_list(),
+            " vram_probe=1");
     }
 
-    ~CudaTrainingProfiler() { destroy_events(); }
+    ~CudaTrainingProfiler() {
+        if (allocation_scope_) tinytensor::VramProfiler::instance().popScope();
+        destroy_events();
+    }
 
     CudaTrainingProfiler(const CudaTrainingProfiler&) = delete;
     CudaTrainingProfiler& operator=(const CudaTrainingProfiler&) = delete;
@@ -237,6 +273,19 @@ public:
             first_gaussians_ = gaussian_count;
         }
         active_stage_ = 0;
+        auto& allocation_profiler = tinytensor::VramProfiler::instance();
+        allocation_profiler.beginIteration(static_cast<int>(iteration));
+        allocation_profiler.pushScope(k_cuda_training_stage_names[0]);
+        allocation_scope_ = true;
+        // Device bytes are sampled for the first iteration of each window
+        // only: the cudaMemGetInfo driver call is far cheaper to pay once per
+        // window than once per stage of every step, and the transient pattern
+        // it exposes is the same on every step.
+        if (sample_cursor_ == 0) {
+            vram_trace_[0] = query_vram_used_bytes();
+            vram_trace_iteration_ = iteration;
+            vram_trace_valid_ = true;
+        }
         check_profile_cuda(
             cudaEventRecord(
                 samples_[sample_cursor_].boundaries.front(), nullptr),
@@ -253,7 +302,15 @@ public:
             cudaEventRecord(
                 samples_[sample_cursor_].boundaries[index + 1], nullptr),
             "stage record");
+        if (sample_cursor_ == 0) {
+            vram_trace_[index + 1] = query_vram_used_bytes();
+        }
         ++active_stage_;
+        auto& allocation_profiler = tinytensor::VramProfiler::instance();
+        allocation_profiler.popScope();
+        allocation_scope_ = active_stage_ < k_cuda_training_stage_count;
+        if (allocation_scope_)
+            allocation_profiler.pushScope(k_cuda_training_stage_names[active_stage_]);
     }
 
     void end_iteration(
@@ -281,7 +338,45 @@ public:
     }
 
 private:
+    bool allocation_scope_ = false;
     void report_and_reset() {
+        auto& allocation_profiler = tinytensor::VramProfiler::instance();
+        allocation_profiler.sampleCudaMemory();
+        const auto memory = allocation_profiler.snapshot();
+        const auto& p = memory.process;
+        const auto [allocator_live, bucket_padding] =
+            tinytensor::CudaMemoryPool::instance().live_requested_and_bucket_padding();
+        const bool pool_valid = p.cuda_pool_valid &&
+            p.cuda_pool_reserved <= p.cuda_total &&
+            p.cuda_pool_used <= p.cuda_pool_reserved;
+        core::Logger::instance().info(
+            "splat_vram_alloc iteration=", last_iteration_,
+            " live_bytes=", memory.accounted_live_bytes,
+            " peak_bytes=", memory.accounted_peak_bytes,
+            " allocator_requested_live_bytes=", allocator_live,
+            " bucket_padding_live_bytes=", bucket_padding,
+            " bucket_cache_bytes=", p.cuda_pool_bucket_cache_bytes,
+            " slab_reserved_bytes=", p.cuda_slab_reserved_bytes,
+            " device_used_bytes=", p.cuda_used,
+            " cuda_pool_valid=", pool_valid,
+            " cuda_pool_reserved_bytes=", pool_valid ? p.cuda_pool_reserved : 0,
+            " cuda_pool_used_bytes=", pool_valid ? p.cuda_pool_used : 0,
+            " note=device_used_includes_other_processes;pool_fields_overlap_live");
+        for (const auto& row : memory.rows) {
+            if (row.peak_bytes == 0) continue;
+            core::Logger::instance().info("splat_vram_group scope=", row.scope,
+                " label=", row.label, " live_bytes=", row.live_bytes,
+                " peak_bytes=", row.peak_bytes,
+                " allocated_bytes=", row.allocated_bytes,
+                " freed_bytes=", row.freed_bytes);
+        }
+        for (const auto& row : memory.tree) {
+            if (row.timer_call_count == 0) continue;
+            core::Logger::instance().info("splat_host_timing scope=", row.path,
+                " calls=", row.timer_call_count, " total_ms=", row.total_ms,
+                " mean_ms=", row.total_ms / row.timer_call_count,
+                " p95_ms=", row.wall_p95_ms, " max_ms=", row.max_ms);
+        }
         check_profile_cuda(
             cudaEventSynchronize(
                 samples_[sample_cursor_ - 1].boundaries.back()),
@@ -390,6 +485,50 @@ private:
             " refinement_pct=", percent(CudaTrainingStage::refinement),
             " filter_3d_ms=", value(CudaTrainingStage::filter_3d),
             " filter_3d_pct=", percent(CudaTrainingStage::filter_3d));
+        if (vram_trace_valid_) {
+            const auto mib = [&](const std::size_t boundary) {
+                return static_cast<long long>(vram_trace_[boundary] >> 20);
+            };
+            // Per-stage device bytes for one step of the window: a stage whose
+            // number is above the step start is the one holding the transient
+            // (render workspace, bucket snapshots, loss gradients). Only the
+            // stages that move the number are printed.
+            std::size_t peak = 0;
+            std::size_t peak_stage = k_cuda_training_stage_count;
+            std::string per_stage;
+            for (std::size_t boundary = 0;
+                 boundary <= k_cuda_training_stage_count; ++boundary) {
+                const std::size_t used = vram_trace_[boundary];
+                if (used == 0) continue;
+                if (used > peak) {
+                    peak = used;
+                    peak_stage = boundary;
+                }
+                if (boundary == 0) continue;
+                const long long delta = mib(boundary) - mib(0);
+                if (delta > -8 && delta < 16) continue;
+                if (!per_stage.empty()) per_stage += ',';
+                per_stage += k_cuda_training_stage_names[boundary - 1];
+                per_stage += ':';
+                per_stage += std::to_string(delta);
+            }
+            core::Logger::instance().info(
+                "splat_cuda_vram iterations=", first_iteration_, '-',
+                last_iteration_, " sampled_iteration=", vram_trace_iteration_,
+                " vram_start_mib=", mib(0),
+                " vram_peak_mib=", peak >> 20,
+                " vram_peak_stage=",
+                peak_stage == 0
+                    ? std::string_view{"iteration_start"}
+                    : std::string_view{
+                          k_cuda_training_stage_names[peak_stage - 1]},
+                " vram_step_end_delta_mib=",
+                mib(k_cuda_training_stage_count) - mib(0),
+                " vram_stage_delta_mib=",
+                per_stage.empty() ? std::string_view{"-"}
+                                  : std::string_view{per_stage});
+            vram_trace_valid_ = false;
+        }
         sample_cursor_ = 0;
         rendered_instances_sum_ = 0;
         depth_normal_steps_ = 0;
@@ -410,6 +549,10 @@ private:
     unsigned interval_{};
     std::vector<CudaProfileSample> samples_;
     std::size_t sample_cursor_{};
+    // Device-byte trace of the first step of the current window.
+    std::array<std::size_t, k_cuda_training_stage_count + 1> vram_trace_{};
+    unsigned vram_trace_iteration_{};
+    bool vram_trace_valid_{false};
     std::size_t active_stage_{};
     unsigned first_iteration_{};
     unsigned last_iteration_{};
@@ -421,6 +564,44 @@ private:
     std::uint64_t refinement_steps_{};
     std::uint64_t filter_refresh_steps_{};
 };
+
+// Optimizer state and parameters are the part of the footprint that scales
+// with the Gaussian count, so they are worth reporting every time the model
+// grows: the number is what a densification-cap budget has to be derived from.
+struct ModelMemoryBudget {
+    std::size_t gaussians{};
+    std::size_t parameter_bytes{};
+    std::size_t optimizer_bytes{};
+
+    [[nodiscard]] double state_bytes_per_gaussian() const {
+        return gaussians == 0
+            ? 0.0
+            : static_cast<double>(parameter_bytes + optimizer_bytes) /
+                  static_cast<double>(gaussians);
+    }
+};
+
+ModelMemoryBudget model_memory_budget(
+    const GaussianModel& model, const refine::AdamStates& states) {
+    ModelMemoryBudget budget;
+    budget.gaussians = model.size();
+    const auto add = [](std::size_t& total, const tinytensor::Tensor& tensor) {
+        if (tensor.is_valid()) total += tensor.numel() * sizeof(float);
+    };
+    add(budget.parameter_bytes, model.means);
+    add(budget.parameter_bytes, model.log_scales);
+    add(budget.parameter_bytes, model.quaternions);
+    add(budget.parameter_bytes, model.opacity_logits);
+    add(budget.parameter_bytes, model.sh);
+    add(budget.parameter_bytes, model.normal_features);
+    add(budget.parameter_bytes, model.filter_3d);
+    for (const detail::AdamState* state : states) {
+        if (state == nullptr) continue;
+        add(budget.optimizer_bytes, state->first);
+        add(budget.optimizer_bytes, state->second);
+    }
+    return budget;
+}
 
 class KdTree {
 public:
@@ -793,9 +974,20 @@ GaussianModel Trainer::train(
     const mvs::MvsScene& scene, ProgressCallback progress,
     EvaluationCallback evaluate, PreviewCallback preview,
     DevicePreviewCallback device_preview) const {
+    struct AllocationProfiling {
+        bool previous = tinytensor::VramProfiler::instance().enabled();
+        explicit AllocationProfiling(bool enable) {
+            if (enable) tinytensor::VramProfiler::instance().setEnabled(true);
+        }
+        ~AllocationProfiling() { tinytensor::VramProfiler::instance().setEnabled(previous); }
+    } allocation_profiling(options_.profile_cuda);
+    tinytensor::VramScope training_scope("splat_training");
     if (scene.views.empty())
         throw std::invalid_argument("Splat training requires at least one MVS view");
-    GaussianModel model = initialize_from_dense_cloud(scene, options_);
+    GaussianModel model = [&] {
+        tinytensor::VramScope scope("model.initialize");
+        return initialize_from_dense_cloud(scene, options_);
+    }();
     const bool use_3d_filter =
         options_.use_depth_normal_loss &&
         options_.depth_normal_weight > 0.F;
@@ -1082,6 +1274,27 @@ GaussianModel Trainer::train(
         }
         raster_options.kernel_size = options_.kernel_size;
         raster_options.scale_modifier = options_.scale_modifier;
+        // Multi-view point queries only feed a depth-consistency loss: it needs
+        // the neighbour median depth to a fraction of the scene extent, not to
+        // the reference's +/-200 window refined eight times. Narrowing the seed
+        // window and stopping once the bracket is 0.2% of the scene cuts the
+        // point-query kernel's traversals from nine to five. A negative option
+        // keeps the reference behavior for quality baselines.
+        const float point_query_extent = std::max(scene_extent, 1.0e-3F);
+        const float point_query_bracket =
+            options_.multi_view_depth_bracket > 0.F
+                ? options_.multi_view_depth_bracket
+                : options_.multi_view_depth_bracket == 0.F
+                      ? 4.F * point_query_extent
+                      : 0.F;
+        const float point_query_tolerance =
+            options_.multi_view_depth_tolerance > 0.F
+                ? options_.multi_view_depth_tolerance
+                : options_.multi_view_depth_tolerance == 0.F
+                      ? 2.0e-3F * point_query_extent
+                      : 0.F;
+        raster_options.point_depth_bracket = point_query_bracket;
+        raster_options.point_depth_tolerance = point_query_tolerance;
         const bool depth_normal_active = !native_non_pinhole &&
             options_.use_depth_normal_loss &&
             options_.depth_normal_weight > 0.F &&
@@ -1113,11 +1326,26 @@ GaussianModel Trainer::train(
             multi_view_neighbour_index =
                 candidates[select_neighbour(random)];
         }
-        raster_options.require_depth = options_.use_mvs_depth ||
-                                       options_.use_mvs_normals ||
-                                       depth_normal_active ||
-                                       normal_field_active ||
-                                       multi_view_active;
+        // One flag drives the render channels and the matching loss-gradient
+        // tensors: when it is false the depth/normal images, their gradients
+        // and the rasterizer's per-Gaussian geometry scratch are all skipped.
+        const bool need_geometry_channels = options_.use_mvs_depth ||
+                                            options_.use_mvs_normals ||
+                                            depth_normal_active ||
+                                            normal_field_active ||
+                                            multi_view_active;
+        raster_options.require_depth = need_geometry_channels;
+        // Environment override for measurement (see
+        // AETHERSCAN_SPLAT_FORCE_GEOMETRY_WORKSPACE in the rasterizer): keep
+        // the older "always allocate the geometry gradient images" behavior so
+        // the footprint change can be A/B'd inside one binary.
+        static const bool force_geometry_channels = [] {
+            const char* value =
+                std::getenv("AETHERSCAN_SPLAT_FORCE_GEOMETRY_CHANNELS");
+            return value != nullptr && value[0] == '1';
+        }();
+        const bool allocate_geometry_gradients =
+            force_geometry_channels || need_geometry_channels;
         RenderResult rendered = rasterizer.forward(model, target.camera, raster_options);
         cuda_profiler.mark(CudaTrainingStage::raster_forward);
         const bool preview_enabled = (preview || device_preview) &&
@@ -1298,7 +1526,7 @@ GaussianModel Trainer::train(
         loss_render.color = *photo_color;
         detail::LossGradients loss = detail::compute_training_loss(
             loss_render, target, options_, report_progress,
-            depth_normal_active);
+            depth_normal_active, allocate_geometry_gradients);
         RenderResult normal_field_render;
         detail::LossGradients normal_field_loss;
         ModelGradients normal_field_gradients;
@@ -1431,9 +1659,18 @@ GaussianModel Trainer::train(
         // correction backward and its optimizer step; what follows the next
         // mark is the rasterizer's own backward.
         cuda_profiler.mark(CudaTrainingStage::colour_backward);
+        // Auxiliary normal-field merges retain the general gradient path.
+        // Empty renders also use the standalone optimizer (zero-gradient decay).
+        const bool fused_sh = options_.fuse_sh_adam && !normal_field_active &&
+            rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
+        SHAdamUpdate sh_update{sh_state.first, sh_state.second,
+            options_.sh0_lr, options_.sh_rest_lr, options_.beta1, options_.beta2,
+            1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
+            1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
+            options_.adam_epsilon, options_.sh_regularization_weight};
         ModelGradients gradients = rasterizer.backward(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
-            densify_map);
+            densify_map, fused_sh ? &sh_update : nullptr);
         if (normal_field_active)
             detail::add_model_gradients(
                 normal_field_gradients, gradients, false);
@@ -1500,24 +1737,26 @@ GaussianModel Trainer::train(
                 minimum_log_scale, maximum_log_scale);
         }
         const std::size_t full_sh_stride = model.sh.shape()[1] * 3;
-        detail::add_sh_regularization(
-            model.sh, gradients.sh, options_.sh_regularization_weight);
-        const std::size_t active_sh_stride =
-            static_cast<std::size_t>(active_sh_degree + 1) *
-            (active_sh_degree + 1) * 3;
-        if (active_sh_stride < full_sh_stride)
-            detail::adam_step_active_prefix(
-                model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
-                options_, full_sh_stride, active_sh_stride,
-                options_.sh_rest_lr);
-        else if (is_adc_strategy(options_.densification_strategy))
-            detail::adam_step_reduced_second(
-                model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
-                options_, full_sh_stride, options_.sh_rest_lr);
-        else
-            detail::adam_step(
-                model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
-                options_, full_sh_stride, options_.sh_rest_lr);
+        if (!fused_sh) {
+            detail::add_sh_regularization(
+                model.sh, gradients.sh, options_.sh_regularization_weight);
+            const std::size_t active_sh_stride =
+                static_cast<std::size_t>(active_sh_degree + 1) *
+                (active_sh_degree + 1) * 3;
+            if (active_sh_stride < full_sh_stride)
+                detail::adam_step_active_prefix(
+                    model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
+                    options_, full_sh_stride, active_sh_stride,
+                    options_.sh_rest_lr);
+            else if (is_adc_strategy(options_.densification_strategy))
+                detail::adam_step_reduced_second(
+                    model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
+                    options_, full_sh_stride, options_.sh_rest_lr);
+            else
+                detail::adam_step(
+                    model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
+                    options_, full_sh_stride, options_.sh_rest_lr);
+        }
         if (normal_field_active)
             detail::adam_step(
                 model.normal_features,
@@ -1581,6 +1820,17 @@ GaussianModel Trainer::train(
             if (refinement_happened && adc_plus) {
                 refinement_geometry = refine::brush_scene_geometry_cuda(model.means);
                 means_learning_rate_scale = refinement_geometry.scale;
+            }
+            if (refinement_happened && report_progress) {
+                const ModelMemoryBudget budget =
+                    model_memory_budget(model, adam_states);
+                core::Logger::instance().info(
+                    "splat_memory iteration=", iteration,
+                    " gaussians=", budget.gaussians,
+                    " parameter_mb=", budget.parameter_bytes >> 20,
+                    " optimizer_mb=", budget.optimizer_bytes >> 20,
+                    " state_bytes_per_gaussian=",
+                    budget.state_bytes_per_gaussian());
             }
         }
         if (adaptive_multi_view && refinement_happened) {
@@ -1747,12 +1997,10 @@ GaussianModel Trainer::train(
         core::Logger::instance().info(
             "splat_data_cache requests=", cache.requests,
             " device_hits=", cache.device_hits,
-            " device_prefetch_hits=", cache.device_prefetch_hits,
+            " get_wall_ms=", cache.get_wall_ms,
             " uploaded_bytes=", cache.uploaded_bytes,
             " device_resident_bytes=", cache.device_resident_bytes,
             " device_budget_bytes=", cache.device_budget_bytes,
-            " device_prefetch_pending=", cache.device_prefetch_pending,
-            " device_prefetch_bytes=", cache.device_prefetch_bytes,
             " host_budget_bytes=", cache.host_budget_bytes,
             " dataset_packed_bytes=", cache.dataset_packed_bytes);
     }

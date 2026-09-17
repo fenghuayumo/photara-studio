@@ -47,11 +47,22 @@ void audit(const char* name, std::size_t claimed, Args... args) {
 
 int main() {
     audit<GaussianState>("GaussianState n=1",
-                         GaussianState::bytes(1, 4096), 1, 4096);
+                         GaussianState::bytes(1, 4096, true), 1, 4096, true);
+    audit<GaussianState>("GaussianState n=1 rgb-only",
+                         GaussianState::bytes(1, 4096, false), 1, 4096, false);
     audit<GaussianState>("GaussianState n=1000",
-                         GaussianState::bytes(1000, 4096), 1000, 4096);
-    audit<GradState>("GradState n=1", GradState::bytes(1), 1);
-    audit<GradState>("GradState n=1000", GradState::bytes(1000), 1000);
+                         GaussianState::bytes(1000, 4096, true), 1000, 4096,
+                         true);
+    audit<GaussianState>("GaussianState n=1000 rgb-only",
+                         GaussianState::bytes(1000, 4096, false), 1000, 4096,
+                         false);
+    audit<GradState>("GradState n=1", GradState::bytes(1, true), 1, true);
+    audit<GradState>("GradState n=1 rgb-only", GradState::bytes(1, false), 1,
+                     false);
+    audit<GradState>("GradState n=1000", GradState::bytes(1000, true), 1000,
+                     true);
+    audit<GradState>("GradState n=1000 rgb-only",
+                     GradState::bytes(1000, false), 1000, false);
     audit<InstanceState>("InstanceState v=1 i=1",
                          InstanceState::bytes(1, 1, 4096), 1, 1, 4096);
     audit<InstanceState>("InstanceState v=999 i=1000",

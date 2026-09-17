@@ -1,6 +1,7 @@
 #include "splat/rasterizer.hpp"
 
 #include "cuda_ops.hpp"
+#include "core/vram_profiler.hpp"
 
 #include "splat_drender/api.h"
 
@@ -83,8 +84,9 @@ void require_cuda_float_contiguous(
             std::string(name) + " must be a contiguous CUDA float32 tensor");
 }
 
-std::function<char*(std::size_t)> resize_buffer(tinytensor::Tensor& buffer) {
-    return [&buffer](const std::size_t bytes) -> char* {
+std::function<char*(std::size_t)> resize_buffer(tinytensor::Tensor& buffer, const char* label) {
+    return [&buffer, label](const std::size_t bytes) -> char* {
+        tinytensor::VramScope scope(label);
         if (!buffer.is_valid() || buffer.numel() < bytes)
             buffer = tinytensor::Tensor::empty(
                 {bytes}, tinytensor::Device::CUDA, tinytensor::DataType::UInt8);
@@ -152,33 +154,41 @@ splat_drender::RenderSettings settings_of(const RasterizeOptions& options) {
     s.background[0] = options.background[0];
     s.background[1] = options.background[1];
     s.background[2] = options.background[2];
+    s.point_depth_bracket = options.point_depth_bracket;
+    s.point_depth_tolerance = options.point_depth_tolerance;
     s.scale_modifier = options.scale_modifier;
     s.kernel_size = options.kernel_size;
     s.need_depth = options.require_depth;
     s.debug = options.debug;
     const char* fixed_points = std::getenv("AETHERSCAN_SPLAT_DEVICE_POINTS");
     s.device_point_lists = fixed_points && fixed_points[0] == '1';
+    // Measurement override: keep the pre-optimization per-Gaussian workspace
+    // (always allocate the ray-plane/normal scratch) so the footprint change
+    // can be A/B'd inside one binary.
+    const char* force_geometry =
+        std::getenv("AETHERSCAN_SPLAT_FORCE_GEOMETRY_WORKSPACE");
+    s.force_geometry_workspace = force_geometry && force_geometry[0] == '1';
     return s;
 }
 
 splat_drender::WorkspacePools pools_of(RasterContextImpl& context) {
     splat_drender::WorkspacePools pools;
-    pools.gaussian = resize_buffer(context.gaussian_buffer);
-    pools.grad = resize_buffer(context.grad_buffer);
-    pools.instance = resize_buffer(context.instance_buffer);
-    pools.pixel = resize_buffer(context.pixel_buffer);
-    pools.tile = resize_buffer(context.tile_buffer);
+    pools.gaussian = resize_buffer(context.gaussian_buffer, "workspace.gaussian");
+    pools.grad = resize_buffer(context.grad_buffer, "workspace.grad");
+    pools.instance = resize_buffer(context.instance_buffer, "workspace.instance");
+    pools.pixel = resize_buffer(context.pixel_buffer, "workspace.pixel");
+    pools.tile = resize_buffer(context.tile_buffer, "workspace.tile");
     return pools;
 }
 
 splat_drender::WorkspacePools pools_of(DepthSampleContextImpl& context) {
     splat_drender::WorkspacePools pools;
-    pools.gaussian = resize_buffer(context.gaussian_buffer);
-    pools.grad = resize_buffer(context.grad_buffer);
-    pools.instance = resize_buffer(context.instance_buffer);
-    pools.pixel = resize_buffer(context.pixel_buffer);
-    pools.tile = resize_buffer(context.tile_buffer);
-    pools.point = resize_buffer(context.point_buffer);
+    pools.gaussian = resize_buffer(context.gaussian_buffer, "workspace.gaussian");
+    pools.grad = resize_buffer(context.grad_buffer, "workspace.grad");
+    pools.instance = resize_buffer(context.instance_buffer, "workspace.instance");
+    pools.pixel = resize_buffer(context.pixel_buffer, "workspace.pixel");
+    pools.tile = resize_buffer(context.tile_buffer, "workspace.tile");
+    pools.point = resize_buffer(context.point_buffer, "workspace.point");
     return pools;
 }
 
@@ -240,10 +250,15 @@ RenderResult Rasterizer::forward(
         {3, camera.height, camera.width}, tinytensor::Device::CUDA);
     result.alpha = tinytensor::Tensor::zeros(
         {camera.height, camera.width}, tinytensor::Device::CUDA);
-    result.median_depth = tinytensor::Tensor::zeros(
-        {camera.height, camera.width}, tinytensor::Device::CUDA);
-    result.normal = tinytensor::Tensor::zeros(
-        {3, camera.height, camera.width}, tinytensor::Device::CUDA);
+    // Color-only renders (RasterizeOptions::require_depth off) neither write
+    // nor read these two channels; allocating them meant two zeroed images per
+    // render. The renderer receives null pointers for them in that case.
+    if (context->options.require_depth) {
+        result.median_depth = tinytensor::Tensor::zeros(
+            {camera.height, camera.width}, tinytensor::Device::CUDA);
+        result.normal = tinytensor::Tensor::zeros(
+            {3, camera.height, camera.width}, tinytensor::Device::CUDA);
+    }
     result.radii = tinytensor::Tensor::zeros(
         {model.size()}, tinytensor::Device::CUDA, tinytensor::DataType::Int32);
     result.visibility = tinytensor::Tensor::zeros(
@@ -275,21 +290,31 @@ ModelGradients Rasterizer::backward(
     const tinytensor::Tensor& grad_alpha,
     const tinytensor::Tensor& grad_depth,
     const tinytensor::Tensor& grad_normal,
-    const tinytensor::Tensor& densify_map) const {
+    const tinytensor::Tensor& densify_map, const SHAdamUpdate* sh_adam) const {
     if (!rendered.context.impl)
         throw std::invalid_argument("Splat backward requires a live forward context");
+    const auto& context = *rendered.context.impl;
     require_cuda_float_contiguous(grad_color, "grad_color");
     require_cuda_float_contiguous(grad_alpha, "grad_alpha");
-    require_cuda_float_contiguous(grad_depth, "grad_depth");
-    require_cuda_float_contiguous(grad_normal, "grad_normal");
+    // The depth and normal channels only exist when the matching forward
+    // rendered them; a color-only step passes empty tensors instead.
+    if (context.options.require_depth) {
+        require_cuda_float_contiguous(grad_depth, "grad_depth");
+        require_cuda_float_contiguous(grad_normal, "grad_normal");
+    }
     if (densify_map.is_valid() && densify_map.numel() != 0)
         require_cuda_float_contiguous(densify_map, "densify_map");
-    const auto& context = *rendered.context.impl;
     const auto count = model.size();
 
     ModelGradients gradients;
     gradients.means = tinytensor::Tensor::zeros_like(model.means);
-    gradients.sh = tinytensor::Tensor::zeros_like(model.sh);
+    if (sh_adam && (context.colors_precomp.is_valid() ||
+        context.forward.instance_count <= 0 || model.sh.shape()[1] > 16 ||
+        sh_adam->first.numel() != model.sh.numel() ||
+        (sh_adam->second.numel() != model.size() &&
+         sh_adam->second.numel() != model.sh.numel())))
+        throw std::invalid_argument("Incompatible fused SH Adam context/state");
+    if (!sh_adam) gradients.sh = tinytensor::Tensor::zeros_like(model.sh);
     auto grad_opacities = tinytensor::Tensor::zeros(
         {count, 1}, tinytensor::Device::CUDA);
     auto grad_scales = tinytensor::Tensor::zeros(
@@ -326,6 +351,19 @@ ModelGradients Rasterizer::backward(
         dL.normal = grad_normal.ptr<float>();
         dL.densify_map = scatter_densify ? densify_map.ptr<float>() : nullptr;
         splat_drender::ModelGradients grads;
+        if (sh_adam) {
+            const auto stride = model.sh.shape()[1] * 3;
+            // Tensor copies share storage; this opt-in backward owns the SH update.
+            auto parameter = model.sh;
+            auto first = sh_adam->first;
+            auto second = sh_adam->second;
+            grads.sh_adam = {parameter.ptr<float>(), first.ptr<float>(),
+                second.ptr<float>(), sh_adam->second.numel() == count,
+                sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
+                sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon,
+                stride > 3 && sh_adam->regularization_weight > 0.F
+                    ? 2.F * sh_adam->regularization_weight / float(count * (stride - 3)) : 0.F};
+        }
         grads.means = gradients.means.ptr<float>();
         grads.sh = context.colors_precomp.is_valid()
             ? nullptr
@@ -509,10 +547,10 @@ OccupancyResult Rasterizer::evaluate_occupancy(
     result.inside = tinytensor::Tensor::zeros(
         {point_count}, tinytensor::Device::CUDA, tinytensor::DataType::Bool);
     splat_drender::WorkspacePools pools;
-    pools.gaussian = resize_buffer(gaussian_buffer);
-    pools.instance = resize_buffer(instance_buffer);
-    pools.tile = resize_buffer(tile_buffer);
-    pools.point = resize_buffer(point_buffer);
+    pools.gaussian = resize_buffer(gaussian_buffer, "workspace.gaussian");
+    pools.instance = resize_buffer(instance_buffer, "workspace.instance");
+    pools.tile = resize_buffer(tile_buffer, "workspace.tile");
+    pools.point = resize_buffer(point_buffer, "workspace.point");
     splat_drender::OccupancyOutputs out;
     out.occupancy = result.occupancy.ptr<float>();
     out.inside = result.inside.ptr<bool>();

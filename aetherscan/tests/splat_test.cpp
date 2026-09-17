@@ -682,6 +682,38 @@ void test_fisheye_equirect_rasterize() {
     }
     const auto probe_tensor = tinytensor::Tensor::from_vector(
         probe, {3, equirect.height, equirect.width}, tinytensor::Device::CUDA);
+    const auto check_color_only_parity = [&](const Camera& camera) {
+        RasterizeOptions full_options;
+        full_options.require_depth = true;
+        auto color_options = full_options;
+        color_options.require_depth = false;
+        const auto full = rasterizer.forward(model, camera, full_options);
+        const auto color = rasterizer.forward(model, camera, color_options);
+        require(!color.median_depth.is_valid() && !color.normal.is_valid(),
+                "Color-only render unexpectedly allocated geometry images");
+        const auto full_grad = rasterizer.backward(
+            model, full, probe_tensor, zero_a, zero_a, zero_n);
+        const auto color_grad = rasterizer.backward(
+            model, color, probe_tensor, zero_a, {}, {});
+        const auto compare = [](const tinytensor::Tensor& a,
+                                const tinytensor::Tensor& b) {
+            const auto left = a.to_vector();
+            const auto right = b.to_vector();
+            require(left.size() == right.size(), "Color-only parity shape mismatch");
+            for (std::size_t i = 0; i < left.size(); ++i)
+                require(std::isfinite(right[i]) &&
+                            std::abs(left[i] - right[i]) <=
+                                1e-6F + 1e-4F * std::abs(left[i]),
+                        "Color-only geometry workspace changed RGB or gradients");
+        };
+        compare(full.color, color.color);
+        compare(full.alpha, color.alpha);
+        compare(full_grad.means, color_grad.means);
+        compare(full_grad.log_scales, color_grad.log_scales);
+        compare(full_grad.quaternions, color_grad.quaternions);
+        compare(full_grad.opacity_logits, color_grad.opacity_logits);
+        compare(full_grad.sh, color_grad.sh);
+    };
     for (const std::array<float, 3> position :
          {std::array<float, 3>{0.2F, 0.1F, 2.F},
           std::array<float, 3>{0.02F, 0.1F, -2.F},
@@ -693,6 +725,13 @@ void test_fisheye_equirect_rasterize() {
                 tinytensor::Device::CUDA);
         };
         set_position(position);
+        check_color_only_parity(equirect);
+        if (position[2] > 0.F) {
+            check_color_only_parity(fisheye);
+            auto pinhole = fisheye;
+            pinhole.model = aetherscan::CameraModel::pinhole;
+            check_color_only_parity(pinhole);
+        }
         const auto rendered = rasterizer.forward(model, equirect);
         if (position[2] < 0.F) {
             const auto alpha = rendered.alpha.to_vector();
@@ -1174,6 +1213,87 @@ void test_colmap_fisheye_and_equirect_loading() {
     }
     require(refused_fov, "COLMAP FOV must still be rejected");
     std::filesystem::remove_all(root);
+}
+
+void test_fused_sh_adam() {
+    using namespace aetherscan::splat;
+    using aetherscan::CameraModel;
+    using tinytensor::Tensor;
+    constexpr auto device = tinytensor::Device::CUDA;
+    constexpr std::size_t n = 257;
+    std::vector<float> means(n * 3), rotations(n * 4), coefficients(n * 48);
+    for (std::size_t i = 0; i < n; ++i) {
+        means[i * 3] = .02F * float(int(i % 11) - 5);
+        means[i * 3 + 1] = .02F * float(int(i % 7) - 3);
+        means[i * 3 + 2] = 2.F + .001F * i;
+        rotations[i * 4] = 1.F;
+        for (std::size_t j = 0; j < 48; ++j)
+            coefficients[i * 48 + j] = .04F * std::sin(float(i + j));
+        if (i % 5 == 0) coefficients[i * 48] = -3.F; // clamped red
+    }
+    means[(n - 1) * 3 + 2] = -2.F; // culled row, with nonzero Adam moments
+    GaussianModel model;
+    model.means = Tensor::from_vector(means, {n, 3}, device);
+    model.log_scales = Tensor::from_vector(std::vector<float>(n * 3, -.7F), {n, 3}, device);
+    model.quaternions = Tensor::from_vector(rotations, {n, 4}, device);
+    model.opacity_logits = Tensor::from_vector(std::vector<float>(n, -3.F), {n, 1}, device);
+    model.sh = Tensor::from_vector(coefficients, {n, 16, 3}, device);
+    model.sh_degree = 3;
+    Camera camera;
+    camera.width = 37; camera.height = 29; camera.fx = 25; camera.fy = 25;
+    camera.cx = 18; camera.cy = 14;
+    camera.world_to_camera = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    const std::size_t pixels = camera.width * camera.height;
+    std::vector<float> probe(pixels * 3);
+    for (std::size_t i = 0; i < probe.size(); ++i) probe[i] = .001F * std::cos(float(i));
+    const auto color_grad = Tensor::from_vector(probe, {3, camera.height, camera.width}, device);
+    const auto alpha_grad = Tensor::from_vector(std::vector<float>(pixels, .001F), {camera.height, camera.width}, device);
+    const auto compare = [](const Tensor& a, const Tensor& b, const char* message) {
+        const auto x = a.to_vector(), y = b.to_vector();
+        require(x.size() == y.size(), message);
+        for (std::size_t i = 0; i < x.size(); ++i)
+            if (!std::isfinite(y[i]) || std::abs(x[i] - y[i]) > 2e-6F + 3e-4F * std::abs(x[i])) {
+                std::cerr << message << " index=" << i << " reference=" << x[i] << " actual=" << y[i] << '\n';
+                require(false, message);
+            }
+    };
+    Rasterizer rasterizer;
+    camera.model = CameraModel::pinhole;
+    for (bool reduced : {false, true}) for (unsigned degree : {0U, 1U, 2U, 3U}) {
+        model.sh = Tensor::from_vector(coefficients, {n, 16, 3}, device);
+        auto fused_model = model;
+        fused_model.sh = Tensor::from_vector(coefficients, {n, 16, 3}, device);
+        auto state = reduced ? detail::make_reduced_second_adam_state(model.sh) : detail::make_adam_state(model.sh);
+        auto fused_state = reduced ? detail::make_reduced_second_adam_state(model.sh) : detail::make_adam_state(model.sh);
+        state.first = Tensor::from_vector(std::vector<float>(n * 48, .002F), {n,16,3}, device);
+        fused_state.first = Tensor::from_vector(std::vector<float>(n * 48, .002F), {n,16,3}, device);
+        const std::size_t second_size = reduced ? n : n * 48;
+        state.second = Tensor::from_vector(std::vector<float>(second_size, .0003F), {second_size}, device);
+        fused_state.second = Tensor::from_vector(std::vector<float>(second_size, .0003F), {second_size}, device);
+        RasterizeOptions options;
+        options.active_sh_degree = degree;
+        options.require_depth = false;
+        TrainingOptions training;
+        training.sh_regularization_weight = .03F;
+        for (unsigned step : {7U, 8U, 9U}) {
+            const auto ref = rasterizer.forward(model, camera, options);
+            const auto fused = rasterizer.forward(fused_model, camera, options);
+            auto g = rasterizer.backward(model, ref, color_grad, alpha_grad, {}, {});
+            SHAdamUpdate update{fused_state.first, fused_state.second,
+                training.sh0_lr, training.sh_rest_lr, training.beta1, training.beta2,
+                1.F - std::pow(training.beta1, float(step)), 1.F - std::pow(training.beta2, float(step)),
+                training.adam_epsilon, training.sh_regularization_weight};
+            const auto fg = rasterizer.backward(fused_model, fused, color_grad, alpha_grad, {}, {}, {}, &update);
+            require(!fg.sh.is_valid(), "Fused SH backward retained a full gradient buffer");
+            compare(g.means, fg.means, "Fused SH changed projection mean gradient");
+            detail::add_sh_regularization(model.sh, g.sh, training.sh_regularization_weight);
+            detail::adam_step_active_prefix(model.sh, g.sh, state, training.sh0_lr, step,
+                training, 48, (degree + 1) * (degree + 1) * 3, training.sh_rest_lr);
+            compare(model.sh, fused_model.sh, "Fused SH parameter parity");
+            compare(state.first, fused_state.first, "Fused SH first moment parity");
+            compare(state.second, fused_state.second, "Fused SH second moment parity");
+        }
+    }
 }
 
 void test_forward_backward() {
@@ -2714,19 +2834,20 @@ void test_training_device_cache() {
     options.adaptive_training_cache = true;
     options.training_device_cache_bytes = 1;
     splat::training_data::TrainingDataLoader adaptive(views, options);
-    require(adaptive.stats().device_budget_bytes ==
-                2 * 256 * (4 + 4 + 12),
-            "Adaptive CUDA cache did not cover this small dataset");
+    require(adaptive.stats().device_budget_bytes == 1,
+            "Adaptive CUDA cache exceeded the explicit upper bound");
     const auto adaptive_first = adaptive.get(0);
     const auto adaptive_hit = adaptive.get(0);
     const auto adaptive_second = adaptive.get(1);
     require(adaptive_first.rgb.numel() == 3 * 16 * 16 &&
                     adaptive_hit.rgb.numel() == 3 * 16 * 16 &&
                     adaptive_second.rgb.numel() == 3 * 16 * 16 &&
-                    adaptive.stats().device_hits == 1,
-            "Adaptive CUDA cache did not retain the packed views");
+                    adaptive.stats().device_hits == 0,
+            "Adaptive CUDA cache retained an oversized view");
     for (const std::size_t budget : {std::size_t{0}, std::size_t{1}}) {
         options.adaptive_training_cache = false;
+        options.training_prefetch_views = 1;
+        options.training_view_cache_bytes = 64 * 1024;
         options.training_device_cache_bytes = budget;
         splat::training_data::TrainingDataLoader uncached(views, options);
         compare(uncached.get(0), reference,
@@ -2736,22 +2857,20 @@ void test_training_device_cache() {
         require(uncached.stats().device_hits == 0 &&
                 uncached.stats().device_resident_bytes == 0,
                 "Disabled/undersized CUDA cache retained an oversized view");
+        uncached.prefetch(0);
+        compare(uncached.get(0), reference, "uncached prefetch changed supervision");
+        require(uncached.stats().device_resident_bytes == 0,
+                "Undersized CUDA cache retained packed views");
     }
 
     options.adaptive_training_cache = false;
     options.training_prefetch_views = 1;
     options.training_view_cache_bytes = 64 * 1024;
+    // Exactly one packed frame fits, so the neighbour request must evict it and
+    // the repeat must be served from the host cache and re-uploaded.
     options.training_device_cache_bytes = 256 * (4 + 4 + 12);
     splat::training_data::TrainingDataLoader asynchronous(views, options);
     asynchronous.prefetch(0);
-    for (int attempt = 0; attempt < 1000 &&
-         asynchronous.stats().device_prefetch_pending == 0; ++attempt) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-        asynchronous.prefetch(0);
-    }
-    require(
-        asynchronous.stats().device_prefetch_pending == 1,
-        "Ready host prefetches were not promoted to CUDA prefetches");
     const auto async_first = asynchronous.get(0);
     const auto async_neighbour = asynchronous.get(1);
     asynchronous.prefetch(0);
@@ -2762,17 +2881,16 @@ void test_training_device_cache() {
             "asynchronous prefetch changed supervision");
     compare(async_neighbour, splat::make_training_view(views[1], options),
             "asynchronous neighbour changed supervision");
-    require(asynchronous.stats().device_prefetch_hits == 2 &&
-                    asynchronous.stats().device_prefetch_pending == 0 &&
-                    asynchronous.stats().device_prefetch_bytes == 0 &&
+    require(asynchronous.stats().device_hits == 0 &&
                     asynchronous.stats().device_resident_bytes <=
                         options.training_device_cache_bytes,
-            "Asynchronous packed CUDA prefetch did not preserve the view");
+            "Single-frame CUDA cache retained more than one view");
+    require(asynchronous.stats().uploaded_bytes ==
+                3 * options.training_device_cache_bytes,
+            "Host prefetch did not re-upload the evicted view");
     asynchronous.set_resolution_scale(0.5F);
-    require(asynchronous.stats().device_prefetch_pending == 0 &&
-                    asynchronous.stats().device_prefetch_bytes == 0 &&
-                    asynchronous.stats().device_resident_bytes == 0,
-            "Resolution transition retained asynchronous CUDA work");
+    require(asynchronous.stats().device_resident_bytes == 0,
+            "Resolution transition retained packed CUDA views");
     std::filesystem::remove_all(root);
 }
 
@@ -4489,6 +4607,12 @@ int main(int argc, char** argv) {
             std::cout << "SKIP: no CUDA device\n";
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "--memory-only") {
+            test_fused_sh_adam();
+            test_training_device_cache();
+            std::cout << "Memory optimization tests passed\n";
+            return 0;
+        }
         test_thin_splat_rgb_backward();
         test_pinhole_geometry_finite_differences();
         if (argc > 1 && std::string(argv[1]) == "--igs-only") {
@@ -4525,6 +4649,7 @@ int main(int argc, char** argv) {
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();
         test_forward_backward();
+        test_fused_sh_adam();
         test_normal_field_parameterization_and_occupancy();
         test_gaussian_format_roundtrip();
         test_pam_smoke();

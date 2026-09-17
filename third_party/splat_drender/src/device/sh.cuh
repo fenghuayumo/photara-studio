@@ -74,6 +74,7 @@ SD_D2 inline float3 evaluate(int idx, int degree, int bases,
 struct BackwardIO {
     float3 grad_mean;      // accumulated in/out
     float3* grad_sh;       // [N, bases, 3]
+    float3* grad_sh_row = nullptr; // optional register-local row for fused Adam
 };
 
 SD_D2 inline void backward(int idx, int degree, int bases,
@@ -96,7 +97,7 @@ SD_D2 inline void backward(int idx, int degree, int bases,
     float3 dxyz[3] = {make_float3(0.f, 0.f, 0.f), make_float3(0.f, 0.f, 0.f),
                       make_float3(0.f, 0.f, 0.f)};
     const float x = dir.x, y = dir.y, z = dir.z;
-    float3* g = reinterpret_cast<float3*>(io.grad_sh) + idx * bases;
+    float3* g = io.grad_sh_row ? io.grad_sh_row : io.grad_sh + idx * bases;
 
     g[0].x += kC0 * dl.x;
     g[0].y += kC0 * dl.y;

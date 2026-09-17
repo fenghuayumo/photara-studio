@@ -178,7 +178,11 @@ void chain_parameter_gradients(
 LossGradients compute_training_loss(
     const RenderResult& rendered, const TrainingView& target,
     const TrainingOptions& options, bool collect_scalar_terms,
-    bool depth_normal_active = false);
+    bool depth_normal_active = false,
+    // False when the render carried no depth/normal channels
+    // (RasterizeOptions::require_depth off): the two full-image gradient
+    // tensors are then neither allocated nor written.
+    bool need_geometry_gradients = true);
 
 LossGradients compute_normal_field_loss(
     const RenderResult& rendered, const Camera& camera, float weight,

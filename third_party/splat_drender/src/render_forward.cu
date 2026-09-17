@@ -22,6 +22,9 @@ SD_D2 inline unsigned depth_bits(float d) { return __float_as_uint(d); }
 
 // Fuses EWA projection, conic, SH color, tile counting, depth key, screen
 // bounds and the visibility scan flag into one launch.
+// GEOMETRY = false skips the ray-plane / footprint-normal stores; the caller
+// then leaves those two arrays unallocated (color-only photometric steps).
+template <bool GEOMETRY>
 __global__ void preprocess_gaussians(
     const int count, const int sh_degree, const int sh_bases,
     const float* __restrict__ means, const float* __restrict__ sh,
@@ -90,8 +93,10 @@ __global__ void preprocess_gaussians(
 
     st.mean2d[i] = make_float2(p.pixel_x, p.pixel_y);
     st.depth_key[i] = depth_bits(norm3df(t.x, t.y, t.z));
-    st.ray_plane[i] = splat.ray_plane;
-    st.normal[i] = splat.normal;
+    if constexpr (GEOMETRY) {
+        st.ray_plane[i] = splat.ray_plane;
+        st.normal[i] = splat.normal;
+    }
     st.conic_opacity[i] = conic_opacity;
     st.tiles_touched[i] = touched;
     st.visible_flag[i] = 1;
@@ -498,13 +503,20 @@ void preprocess_gaussians(
     const float* rotations, const float* cov6, const float* view,
     const float* camera_center, CameraIntrinsics K, int width, int height,
     float kernel_size, float scale_modifier, int grid_x, int grid_y,
-    int wrap_width, ws::GaussianState st, int* radii) {
-    kernels::preprocess_gaussians<<<(count + cfg::kGaussianBlock - 1) /
-                                        cfg::kGaussianBlock,
-                                    cfg::kGaussianBlock>>>(
-        count, sh_degree, sh_bases, means, sh, colors, opacities, scales,
-        rotations, cov6, view, camera_center, K, width, height, kernel_size,
-        scale_modifier, grid_x, grid_y, wrap_width, st, radii);
+    int wrap_width, bool geometry, ws::GaussianState st, int* radii) {
+    const unsigned blocks =
+        (count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock;
+    if (geometry) {
+        kernels::preprocess_gaussians<true><<<blocks, cfg::kGaussianBlock>>>(
+            count, sh_degree, sh_bases, means, sh, colors, opacities, scales,
+            rotations, cov6, view, camera_center, K, width, height, kernel_size,
+            scale_modifier, grid_x, grid_y, wrap_width, st, radii);
+    } else {
+        kernels::preprocess_gaussians<false><<<blocks, cfg::kGaussianBlock>>>(
+            count, sh_degree, sh_bases, means, sh, colors, opacities, scales,
+            rotations, cov6, view, camera_center, K, width, height, kernel_size,
+            scale_modifier, grid_x, grid_y, wrap_width, st, radii);
+    }
 }
 
 void emit_depth_entries(int count, const unsigned* visible_offset,

@@ -181,6 +181,24 @@ SD_D2 inline unsigned block_max(unsigned v, unsigned* warp_scratch) {
     __syncthreads();  // scratch may be reused by the next point batch
     return result;
 }
+
+// Float sibling of block_max, for block-uniform convergence tests. Must be
+// called by every thread in the block, like block_max itself.
+SD_D2 inline float block_max(float v, float* warp_scratch) {
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, offset));
+    const int rank = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+    const int lane = rank & 31;
+    const int warp = rank >> 5;
+    const int num_warps = int(blockDim.x * blockDim.y * blockDim.z + 31) >> 5;
+    if (lane == 0) warp_scratch[warp] = v;
+    __syncthreads();
+    float result = warp_scratch[0];
+    for (int w = 1; w < num_warps; ++w) result = fmaxf(result, warp_scratch[w]);
+    __syncthreads();  // scratch may be reused by the next point batch
+    return result;
+}
 #endif  // __CUDACC__
 
 }  // namespace splat_drender::mat

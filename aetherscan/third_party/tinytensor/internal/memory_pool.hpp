@@ -268,6 +268,19 @@ namespace tinytensor {
             LOG_DEBUG("Size-bucketed pool enabled (256KB-16GB, reduces fragmentation)");
         }
 
+        // Live allocation-map snapshot, independent of driver pool counters
+        // (which can be invalid under WDDM). Bucket padding is not a cache.
+        std::pair<std::size_t, std::size_t> live_requested_and_bucket_padding() {
+            std::lock_guard<std::mutex> lock(map_mutex_);
+            std::size_t requested = 0, padding = 0;
+            for (const auto& [ptr, allocation] : allocation_map_) {
+                requested += allocation.size;
+                if (allocation.method == AllocMethod::Bucketed)
+                    padding += SizeBucketedPool::get_bucket_size(allocation.size) - allocation.size;
+            }
+            return {requested, padding};
+        }
+
         std::string get_stats() const {
             std::ostringstream oss;
             oss << "Memory Pool Stats:\n";

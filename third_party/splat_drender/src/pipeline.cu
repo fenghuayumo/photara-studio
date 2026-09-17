@@ -93,23 +93,33 @@ struct SortCounts {
     int instance_selector = 0;
 };
 
+// Per-Gaussian geometry scratch (ray plane + footprint normal, and their
+// gradient counterparts) is allocated when the render produces depth or
+// normals; RenderSettings::force_geometry_workspace restores the older
+// "always allocate" layout for measurement.
+bool gaussian_workspace_geometry(const RenderSettings& s, bool geometry) {
+    return geometry || s.force_geometry_workspace;
+}
+
 // Preprocessing + FasterGS double sort shared by render and point-query
 // passes. Instances are emitted in depth order so the subsequent stable
 // tile sort preserves the GGGS 64-bit (tile | depth) order, including ties.
 SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
                             const CameraView& cam, const RenderSettings& s,
                             int grid_x, int grid_y, int tiles, int wrap_width,
-                            GaussianState& gst, TileState& tst,
+                            bool geometry, GaussianState& gst, TileState& tst,
                             InstanceState& ist, int* radii) {
     const CameraIntrinsics K = intrinsics_of(cam);
+    geometry = gaussian_workspace_geometry(s, geometry);
 
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,
                                              (unsigned*)nullptr,
                                              (unsigned*)nullptr, g.count),
                "scan size query");
-    char* gpool = pools.gaussian(GaussianState::bytes(g.count, scan_bytes));
-    gst = GaussianState::from_pool(gpool, g.count, scan_bytes);
+    char* gpool =
+        pools.gaussian(GaussianState::bytes(g.count, scan_bytes, geometry));
+    gst = GaussianState::from_pool(gpool, g.count, scan_bytes, geometry);
     if (radii == nullptr) radii = gst.radius;  // internal fallback (samples)
     check_cuda(cudaMemset(gst.n_visible, 0, 2 * sizeof(unsigned)),
                "counter memset");
@@ -118,7 +128,7 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
         g.count, g.sh_degree, g.sh_bases, g.means, g.sh, g.colors, g.opacities,
         g.scales, g.rotations, g.covariances, cam.world_to_camera, cam.center,
         K, cam.width, cam.height, s.kernel_size, s.scale_modifier, grid_x,
-        grid_y, wrap_width, gst, radii);
+        grid_y, wrap_width, geometry, gst, radii);
     check_cuda(cudaGetLastError(), "preprocess_gaussians");
 
     SortCounts counts;
@@ -228,15 +238,18 @@ SortCounts build_draw_lists(const WorkspacePools& pools, const Gaussians& g,
 
 void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
                    const CameraView& cam, int visible, int instances,
-                   bool geometry, GaussianState& gst, InstanceState& ist,
-                   TileState& tst, PixelState& pst) {
+                   bool pixel_geometry, bool gaussian_geometry,
+                   GaussianState& gst, InstanceState& ist, TileState& tst,
+                   PixelState& pst) {
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,
                                              (unsigned*)nullptr,
                                              (unsigned*)nullptr, g.count),
                "scan size query");
-    char* gpool = pools.gaussian(GaussianState::bytes(g.count, scan_bytes));
-    gst = GaussianState::from_pool(gpool, g.count, scan_bytes);
+    char* gpool = pools.gaussian(
+        GaussianState::bytes(g.count, scan_bytes, gaussian_geometry));
+    gst = GaussianState::from_pool(gpool, g.count, scan_bytes,
+                                   gaussian_geometry);
 
     const std::size_t sort_bytes =
         instance_sort_bytes(visible, instances);
@@ -252,8 +265,9 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
     tst = TileState::from_pool(tpool, tiles, buckets_ub);
 
     const std::size_t pixels = std::size_t(cam.width) * cam.height;
-    char* ppool = pools.pixel(PixelState::bytes(pixels, buckets_ub, geometry));
-    pst = PixelState::from_pool(ppool, pixels, buckets_ub, geometry);
+    char* ppool =
+        pools.pixel(PixelState::bytes(pixels, buckets_ub, pixel_geometry));
+    pst = PixelState::from_pool(ppool, pixels, buckets_ub, pixel_geometry);
 }
 
 struct PointListCounts {
@@ -350,15 +364,17 @@ void run_gaussian_backward(const Gaussians& g, const CameraView& cam,
                               s.kernel_size, s.scale_modifier, radius,
                               gst.clamped, gst, gs, grads.means, grads.sh,
                               grads.colors, grads.opacities, grads.scales,
-                              grads.rotations, grads.covariances);
+                              grads.rotations, grads.covariances, grads.sh_adam);
     check_cuda(cudaGetLastError(), "gaussian_backward");
 }
 
-GradState zero_grad_state(const WorkspacePools& pools, int count) {
-    char* gradpool = pools.grad(GradState::bytes(count));
-    check_cuda(cudaMemset(gradpool, 0, GradState::bytes(count)),
+GradState zero_grad_state(const WorkspacePools& pools, int count,
+                          bool geometry) {
+    const std::size_t bytes = GradState::bytes(count, geometry);
+    char* gradpool = pools.grad(bytes);
+    check_cuda(cudaMemset(gradpool, 0, bytes),
                "grad scratch memset");
-    return GradState::from_pool(gradpool, count);
+    return GradState::from_pool(gradpool, count, geometry);
 }
 
 }  // namespace
@@ -387,8 +403,8 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
     TileState tst;
     InstanceState ist;
     const SortCounts counts = build_draw_lists(pools, g, cam, s, grid_x, grid_y,
-                                               tiles, wrap_width, gst, tst, ist,
-                                               out.radii);
+                                               tiles, wrap_width, s.need_depth,
+                                               gst, tst, ist, out.radii);
 
     // Bucket metadata for the warp-per-bucket backward. The upper bound
     // keeps the pool layout deterministic without a second host readback;
@@ -403,7 +419,8 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
     }
 
     const std::size_t pixels = std::size_t(cam.width) * cam.height;
-    char* ppool = pools.pixel(PixelState::bytes(pixels, buckets_ub, s.need_depth));
+    char* ppool =
+        pools.pixel(PixelState::bytes(pixels, buckets_ub, s.need_depth));
     PixelState pst = PixelState::from_pool(ppool, pixels, buckets_ub,
                                            s.need_depth);
 
@@ -444,10 +461,12 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
     InstanceState ist;
     TileState tst;
     PixelState pst;
+    const bool geometry_workspace =
+        gaussian_workspace_geometry(s, s.need_depth);
     rebuild_views(pools, g, cam, fwd.visible_count, fwd.instance_count,
-                  s.need_depth, gst, ist, tst, pst);
+                  s.need_depth, geometry_workspace, gst, ist, tst, pst);
 
-    GradState gs = zero_grad_state(pools, g.count);
+    GradState gs = zero_grad_state(pools, g.count, geometry_workspace);
 
     if (s.need_depth) {
         // Median-depth scale first: the bucket walk reads dL_dmt per pixel.
@@ -503,8 +522,8 @@ Rasterizer::SampleCounts Rasterizer::sample_depth(
     TileState tst;
     InstanceState ist;
     const SortCounts counts = build_draw_lists(pools, gq, cam, s, grid_x, grid_y,
-                                               tiles, wrap_width, gst, tst, ist,
-                                               nullptr);
+                                               tiles, wrap_width, true, gst,
+                                               tst, ist, nullptr);
     ws::PointState ps;
     const PointListCounts point_counts =
         build_point_lists(pools, point_count, world_points, cam, grid_x, grid_y,
@@ -516,7 +535,8 @@ Rasterizer::SampleCounts Rasterizer::sample_depth(
                             cam.width,
                             cam.height, intrinsics_of(cam), ps.point2d,
                             ps.point_t, gst.mean2d, gst.conic_opacity,
-                            gst.ray_plane, nullptr, out.ray_points,
+                            gst.ray_plane, s.point_depth_bracket,
+                            s.point_depth_tolerance, nullptr, out.ray_points,
                             out.median_depth, out.n_contrib, out.inside, tiles);
     check_cuda(cudaGetLastError(), "evaluate_points median");
 
@@ -547,7 +567,7 @@ void Rasterizer::sample_depth_backward(
     TileState tst;
     PixelState pst;
     rebuild_views(pools, g, cam, counts.visible_count, counts.gaussian_instances,
-                  false, gst, ist, tst, pst);
+                  false, true, gst, ist, tst, pst);
 
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,
@@ -560,7 +580,7 @@ void Rasterizer::sample_depth_backward(
     ws::PointState ps =
         ws::PointState::from_pool(ppool, point_count, tiles, cub_bytes);
 
-    GradState gs = zero_grad_state(pools, g.count);
+    GradState gs = zero_grad_state(pools, g.count, true);
     check_cuda(cudaMemset(ps.grad_point2d, 0, point_count * sizeof(float2)),
                "point2d grad memset");
     if (point_grads.points)
@@ -607,8 +627,8 @@ void Rasterizer::evaluate_occupancy(
     TileState tst;
     InstanceState ist;
     const SortCounts counts = build_draw_lists(pools, gq, cam, s, grid_x, grid_y,
-                                               tiles, wrap_width, gst, tst, ist,
-                                               nullptr);
+                                               tiles, wrap_width, true, gst,
+                                               tst, ist, nullptr);
     ws::PointState ps;
     const PointListCounts point_counts =
         build_point_lists(pools, point_count, world_points, cam, grid_x, grid_y,
@@ -620,7 +640,8 @@ void Rasterizer::evaluate_occupancy(
                             cam.width,
                             cam.height, intrinsics_of(cam), ps.point2d,
                             ps.point_t, gst.mean2d, gst.conic_opacity,
-                            gst.ray_plane, out.occupancy, nullptr, nullptr,
+                            gst.ray_plane, s.point_depth_bracket,
+                            s.point_depth_tolerance, out.occupancy, nullptr, nullptr,
                             nullptr, out.inside, tiles);
     check_cuda(cudaGetLastError(), "evaluate_points occupancy");
 }

@@ -46,11 +46,16 @@ struct GaussianState {
     char* scan_scratch = nullptr;
     std::size_t scan_bytes = 0;
 
-    static std::size_t bytes(std::size_t n, std::size_t cub_scan_bytes) {
+    // `geometry` adds the ray-plane / footprint-normal arrays used only by the
+    // median-depth and normal channels. Callers that render color only (the
+    // photometric training path with need_depth = false) skip 28 bytes per
+    // Gaussian of allocation and of preprocess stores.
+    static std::size_t bytes(std::size_t n, std::size_t cub_scan_bytes,
+                             bool geometry) {
         // from_pool aligns every array independently; mirror that exactly.
         return align_up(n * sizeof(float2)) +
-               align_up(n * sizeof(float4)) * 2 +
-               align_up(n * sizeof(float3)) * 2 +
+               align_up(n * sizeof(float4)) * (geometry ? 2 : 1) +
+               align_up(n * sizeof(float3)) * (geometry ? 2 : 1) +
                align_up(n * 3 * sizeof(bool)) +
                align_up(n * sizeof(unsigned)) * 4 +
                align_up(n * sizeof(ushort4)) +
@@ -60,12 +65,16 @@ struct GaussianState {
     }
 
     static GaussianState from_pool(char* base, std::size_t n,
-                                   std::size_t cub_scan_bytes) {
+                                   std::size_t cub_scan_bytes,
+                                   bool geometry) {
         GaussianState s;
         char* c = base;
         s.mean2d = reinterpret_cast<float2*>(take(c, n * sizeof(float2)));
-        s.ray_plane = reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
-        s.normal = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
+        if (geometry) {
+            s.ray_plane =
+                reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
+            s.normal = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
+        }
         s.conic_opacity = reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
         s.rgb = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
         s.clamped = reinterpret_cast<bool*>(take(c, n * 3 * sizeof(bool)));
@@ -91,18 +100,25 @@ struct GradState {
     float3* d_mean2d = nullptr;    // xy grads, z: refine magnitude
     float3* d_color = nullptr;     // blended RGB grads, separate from SH
 
-    static std::size_t bytes(std::size_t n) {
+    // `geometry` keeps the ray-plane / footprint-normal gradient scratch; it
+    // is also what the backward memset counts, so a color-only step clears
+    // 28 bytes less per Gaussian.
+    static std::size_t bytes(std::size_t n, bool geometry) {
         // from_pool aligns each array independently; mirror that exactly.
-        return align_up(n * sizeof(float4)) * 2 +
-               align_up(n * sizeof(float3)) * 3 + kAlign;
+        return align_up(n * sizeof(float4)) * (geometry ? 2 : 1) +
+               align_up(n * sizeof(float3)) * (geometry ? 3 : 2) + kAlign;
     }
 
-    static GradState from_pool(char* base, std::size_t n) {
+    static GradState from_pool(char* base, std::size_t n, bool geometry) {
         GradState s;
         char* c = base;
         s.d_conic = reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
-        s.d_ray_plane = reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
-        s.d_normal = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
+        if (geometry) {
+            s.d_ray_plane =
+                reinterpret_cast<float4*>(take(c, n * sizeof(float4)));
+            s.d_normal =
+                reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
+        }
         s.d_mean2d = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
         s.d_color = reinterpret_cast<float3*>(take(c, n * sizeof(float3)));
         return s;

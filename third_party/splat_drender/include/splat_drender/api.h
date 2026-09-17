@@ -45,6 +45,19 @@ struct RenderSettings {
     float kernel_size = 0.f;
     bool need_depth = true;
     bool debug = false;
+    // Point-query (sample_depth) median-depth search. Zero keeps the
+    // reference behavior: a +/-SAMPLE_RANGE_TESTING*2 seed window refined
+    // kDepthRefinementsTesting times. A positive bracket narrows that window
+    // (world units) and a positive tolerance stops refining once the block's
+    // bracket is that tight, which is what makes the multi-view geometry pass
+    // affordable: the loss needs ~1e-3 of the ray length, not 1e-5.
+    float point_depth_bracket = 0.f;
+    float point_depth_tolerance = 0.f;
+    // Allocate and fill the per-Gaussian ray-plane / footprint-normal scratch
+    // even when this render does not produce depth or normals. Only used to
+    // A/B the workspace reduction; the default matches "allocate when the
+    // channels are rendered".
+    bool force_geometry_workspace = false;
     // Point queries: sort a fixed-size list with a sentinel for invalid points,
     // eliminating the point-count host readback. SampleCounts::point_instances
     // is -1 (not collected) on this path; per-tile ranges remain exact.
@@ -78,7 +91,21 @@ struct LossGradients {
     const float* densify_map = nullptr;
 };
 
+// Optional SH-only Adam update after the projection derivative has consumed
+// the original coefficients. No global SH gradient buffer is needed.
+struct SHAdam {
+    float* parameter = nullptr;
+    float* first = nullptr;
+    float* second = nullptr;
+    bool reduced_second = false;
+    float lr = 0.f, rest_lr = 0.f;
+    float beta1 = .9f, beta2 = .999f;
+    float correction1 = 1.f, correction2 = 1.f, epsilon = 1e-8f;
+    float regularization_factor = 0.f;
+};
+
 struct ModelGradients {
+    SHAdam sh_adam{};
     float* means = nullptr;        // [N,3]
     float* sh = nullptr;           // [N,sh_bases,3]
     float* colors = nullptr;       // [N,3]

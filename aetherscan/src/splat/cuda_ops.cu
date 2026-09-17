@@ -1,5 +1,6 @@
 #include "cuda_ops.hpp"
 #include "fused_ssim.hpp"
+#include "core/vram_profiler.hpp"
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -873,10 +874,14 @@ __global__ void loss_kernel(
     // Initialize all optional channels in their owning kernel, avoiding four
     // full-image memset submissions before this pass.
     grad_alpha[pixel] = 0.F;
-    grad_depth[pixel] = 0.F;
-    grad_normal[pixel] = 0.F;
-    grad_normal[pixels + pixel] = 0.F;
-    grad_normal[2 * pixels + pixel] = 0.F;
+    // The depth/normal channels are skipped entirely when the caller renders
+    // color only; their buffers are then not even allocated.
+    if (grad_depth != nullptr) grad_depth[pixel] = 0.F;
+    if (grad_normal != nullptr) {
+        grad_normal[pixel] = 0.F;
+        grad_normal[pixels + pixel] = 0.F;
+        grad_normal[2 * pixels + pixel] = 0.F;
+    }
     const float valid = mask_enabled ? mask[pixel] : 1.F;
     const float inverse_pixels = 1.F / static_cast<float>(pixels);
     float rgb_loss = 0.F;
@@ -899,8 +904,9 @@ __global__ void loss_kernel(
         const float difference = (depth[pixel] - target_depth[pixel]) / scale;
         const float robust = sqrtf(
             difference * difference + geometry_epsilon * geometry_epsilon);
-        grad_depth[pixel] = depth_weight * inverse_pixels * difference /
-                            (robust * scale);
+        if (grad_depth != nullptr)
+            grad_depth[pixel] = depth_weight * inverse_pixels * difference /
+                                (robust * scale);
         if (terms)
             atomicAdd(terms + 1, depth_weight * robust * inverse_pixels);
     }
@@ -927,9 +933,14 @@ __global__ void loss_kernel(
             atomicAdd(
                 terms + 2,
                 normal_weight * (1.F - dot) * inverse_pixels);
-        grad_normal[pixel] = -normal_weight * tx * inverse_target_length * inverse_pixels;
-        grad_normal[pixels + pixel] = -normal_weight * ty * inverse_target_length * inverse_pixels;
-        grad_normal[2 * pixels + pixel] = -normal_weight * tz * inverse_target_length * inverse_pixels;
+        if (grad_normal != nullptr) {
+            grad_normal[pixel] =
+                -normal_weight * tx * inverse_target_length * inverse_pixels;
+            grad_normal[pixels + pixel] =
+                -normal_weight * ty * inverse_target_length * inverse_pixels;
+            grad_normal[2 * pixels + pixel] =
+                -normal_weight * tz * inverse_target_length * inverse_pixels;
+        }
     }
 
     if (mask_enabled && alpha_mode == 0) {
@@ -2519,14 +2530,25 @@ void chain_parameter_gradients(
 LossGradients compute_training_loss(
     const RenderResult& rendered, const TrainingView& target,
     const TrainingOptions& options, const bool collect_scalar_terms,
-    const bool depth_normal_active) {
+    const bool depth_normal_active, const bool need_geometry_gradients) {
     const std::size_t pixels = static_cast<std::size_t>(target.camera.width) *
                                target.camera.height;
-    LossGradients result{
-        tinytensor::Tensor::empty(rendered.color.shape(), rendered.color.device()),
-        tinytensor::Tensor::empty(rendered.alpha.shape(), rendered.alpha.device()),
-        tinytensor::Tensor::empty(rendered.median_depth.shape(), rendered.median_depth.device()),
-        tinytensor::Tensor::empty(rendered.normal.shape(), rendered.normal.device())};
+    // Depth and normal gradients exist only when the render carried those
+    // channels; otherwise they were two full-image allocations plus a
+    // full-image zeroing store per step for nothing.
+    const std::size_t height = target.camera.height;
+    const std::size_t width = target.camera.width;
+    LossGradients result;
+    result.color =
+        tinytensor::Tensor::empty({3, height, width}, tinytensor::Device::CUDA);
+    result.alpha =
+        tinytensor::Tensor::empty({height, width}, tinytensor::Device::CUDA);
+    if (need_geometry_gradients) {
+        result.depth =
+            tinytensor::Tensor::empty({height, width}, tinytensor::Device::CUDA);
+        result.normal =
+            tinytensor::Tensor::empty({3, height, width}, tinytensor::Device::CUDA);
+    }
     tinytensor::Tensor terms;
     if (collect_scalar_terms)
         terms = tinytensor::Tensor::zeros({4}, tinytensor::Device::CUDA);
@@ -2535,6 +2557,14 @@ LossGradients compute_training_loss(
     const bool use_fused_photometric =
         target.camera.width > 10 && target.camera.height > 10;
     const float ssim_weight = std::clamp(options.ssim_weight, 0.F, 1.F);
+    // The weights are already zero whenever the geometry path is inactive, so
+    // this only expresses the same state to the kernel.
+    const float depth_weight = options.use_mvs_depth
+        ? options.depth_weight
+        : 0.F;
+    const float normal_weight = options.use_mvs_normals
+        ? options.normal_weight
+        : 0.F;
     loss_kernel<<<(pixels + k_threads - 1) / k_threads, k_threads>>>(
         rendered.color.ptr<float>(), rendered.alpha.ptr<float>(),
         rendered.median_depth.ptr<float>(), rendered.normal.ptr<float>(),
@@ -2544,8 +2574,7 @@ LossGradients compute_training_loss(
         result.depth.ptr<float>(), result.normal.ptr<float>(),
         collect_scalar_terms ? terms.ptr<float>() : nullptr,
         pixels, use_fused_photometric ? 0.F : options.photometric_weight,
-        options.use_mvs_depth ? options.depth_weight : 0.F,
-        options.use_mvs_normals ? options.normal_weight : 0.F,
+        depth_weight, normal_weight,
         mask_enabled,
         target.mask_is_validity ? -1 :
             options.alpha_mode == AlphaMode::masked ? 0 : 1,
@@ -2558,7 +2587,8 @@ LossGradients compute_training_loss(
             ssim_weight, options.photometric_weight, result.color,
             collect_scalar_terms ? terms.ptr<float>() : nullptr,
             target.camera.width, target.camera.height);
-    if (depth_normal_active && options.depth_normal_weight > 0.F) {
+    if (depth_normal_active && result.depth.is_valid() &&
+        result.normal.is_valid() && options.depth_normal_weight > 0.F) {
         depth_normal_consistency_kernel<<<
             (pixels + k_threads - 1) / k_threads, k_threads>>>(
             rendered.median_depth.ptr<float>(), rendered.normal.ptr<float>(),
@@ -2620,12 +2650,14 @@ LossGradients compute_normal_field_loss(
 }
 
 AdamState make_adam_state(const tinytensor::Tensor& parameter) {
+    tinytensor::VramScope scope("optimizer.state");
     return {tinytensor::Tensor::zeros_like(parameter),
             tinytensor::Tensor::zeros_like(parameter)};
 }
 
 AdamState make_reduced_second_adam_state(
     const tinytensor::Tensor& parameter) {
+    tinytensor::VramScope scope("optimizer.state.reduced_second");
     const auto dimensions = parameter.shape().dims();
     if (dimensions.empty())
         throw std::invalid_argument(

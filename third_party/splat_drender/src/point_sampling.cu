@@ -153,6 +153,8 @@ evaluate_points(const uint2* __restrict__ tile_range,
                  const float2* __restrict__ mean2d,
                  const float4* __restrict__ conic_opacity,
                  const float4* __restrict__ ray_plane,
+                 const float depth_bracket,
+                 const float depth_tolerance,
                  float* __restrict__ out_occupancy,
                  float3* __restrict__ out_ray_point,
                  float* __restrict__ out_median_depth,
@@ -240,6 +242,7 @@ evaluate_points(const uint2* __restrict__ tile_range,
             // Median-depth bisection per point, bounded by the block max
             // of last_contributor over this round's points.
             __shared__ unsigned warp_scratch[cfg::kTileThreads / 32];
+            __shared__ float depth_scratch[cfg::kTileThreads / 32];
             unsigned local_max = 0;
 #pragma unroll
             for (int p = 0; p < kPts; ++p)
@@ -250,10 +253,13 @@ evaluate_points(const uint2* __restrict__ tile_range,
             float depth_min[kPts], depth_max[kPts];
             float T_p[kPts][cfg::kDepthSplit + 1];
             bool in_range[kPts];
+            const float seed_window = depth_bracket > 0.f
+                ? depth_bracket
+                : cfg::kDepthSeedWindowTesting;
 #pragma unroll
             for (int p = 0; p < kPts; ++p) {
-                depth_min[p] = fmaxf(pts[p].depth_seed - cfg::kDepthSeedWindowTesting, 0.f);
-                depth_max[p] = fmaxf(pts[p].depth_seed + cfg::kDepthSeedWindowTesting, 0.f);
+                depth_min[p] = fmaxf(pts[p].depth_seed - seed_window, 0.f);
+                depth_max[p] = fmaxf(pts[p].depth_seed + seed_window, 0.f);
                 in_range[p] = pts[p].T_gauss <= cfg::kDepthMinTransmittance;
             }
 
@@ -312,16 +318,44 @@ evaluate_points(const uint2* __restrict__ tile_range,
                             const float t_peak = rpl.x * d.x + rpl.y * d.y + rpl.z;
                             const float rsigma = rpl.w;
                             const bool ball = rsigma > 0.f;
+                            // Depth-band test: a gaussian whose peak lies
+                            // outside the whole bracket contributes either
+                            // nothing (peak beyond the probes: every factor
+                            // is omg*rsqrt(omg) with g ~ 0, i.e. 1 in fp32) or
+                            // exactly (1-alpha) on every probe (peak in front
+                            // of them). Both let the per-probe expf/rsqrt go
+                            // away; only the band actually touching the
+                            // bracket needs the full loop.
+                            const float w_lo =
+                                depth_min[p] + interval[p] * float(s0);
+                            const float w_hi =
+                                depth_min[p] + interval[p] * float(s1 - 1);
+                            int band = 0;  // 0 = touches, 1 = behind, -1 = in front
+                            if (ball) {
+                                const float band_half = cfg::kDepthBandSigmas / rsigma;
+                                if (t_peak - band_half > w_hi) band = 1;
+                                else if (t_peak + band_half < w_lo) band = -1;
+                            }
+                            if (band == 1) {
+                                // Nothing to accumulate.
+                            } else if (band == -1) {
+                                const float occlusion = 1.f - alpha;
 #pragma unroll
-                            for (int s = s0; s < s1; ++s) {
-                                const float ts = depth_min[p] + interval[p] * float(s);
-                                const float delta = (ts - t_peak) * rsigma;
-                                const float g =
-                                    ball ? expf(-0.5f * delta * delta) : 0.f;
-                                const float omg = 1.f - alpha * g;
-                                const float rv = rsqrtf(omg);
-                                T_p[p][s] *=
-                                    (ts > t_peak ? (1.f - alpha) : omg) * rv;
+                                for (int s = s0; s < s1; ++s)
+                                    T_p[p][s] *= occlusion;
+                            } else {
+#pragma unroll
+                                for (int s = s0; s < s1; ++s) {
+                                    const float ts =
+                                        depth_min[p] + interval[p] * float(s);
+                                    const float delta = (ts - t_peak) * rsigma;
+                                    const float g =
+                                        ball ? expf(-0.5f * delta * delta) : 0.f;
+                                    const float omg = 1.f - alpha * g;
+                                    const float rv = rsqrtf(omg);
+                                    T_p[p][s] *=
+                                        (ts > t_peak ? (1.f - alpha) : omg) * rv;
+                                }
                             }
                             if (contributor2 >= pts[p].last_contributor) {
                                 done[p] = true;
@@ -348,8 +382,24 @@ evaluate_points(const uint2* __restrict__ tile_range,
             };
 
             refine(std::true_type{});
-            for (int it = 0; it < cfg::kDepthRefinementsTesting - 1; ++it)
+            for (int it = 0; it < cfg::kDepthRefinementsTesting - 1; ++it) {
+                if (depth_tolerance > 0.f) {
+                    // Stop refining once the widest bracket still open in this
+                    // block is tighter than the caller's tolerance. The block
+                    // is uniform, so this cannot change which points finish.
+                    float local_widest = 0.f;
+#pragma unroll
+                    for (int p = 0; p < kPts; ++p)
+                        if (in_range[p] && pts[p].active &&
+                            pts[p].last_contributor != 0)
+                            local_widest = fmaxf(
+                                local_widest, depth_max[p] - depth_min[p]);
+                    if (mat::block_max(local_widest, depth_scratch) <=
+                        depth_tolerance)
+                        break;
+                }
                 refine(std::false_type{});
+            }
 
 #pragma unroll
             for (int p = 0; p < kPts; ++p) {
@@ -749,6 +799,7 @@ void evaluate_points(bool median_mode, const uint2* tile_range,
                      CameraIntrinsics K, const float2* point2d,
                      const float* point_t, const float2* mean2d,
                      const float4* conic_opacity, const float4* ray_plane,
+                     const float depth_bracket, const float depth_tolerance,
                      float* out_occupancy, float3* out_ray_point,
                      float* out_median_depth, unsigned* out_n_contrib,
                      bool* inside, int tiles) {
@@ -756,12 +807,14 @@ void evaluate_points(bool median_mode, const uint2* tile_range,
         kernels::evaluate_points<1><<<tiles, cfg::kTileThreads>>>(
             tile_range, gauss_value, point_range, point_value, width, height,
             K, point2d, point_t, mean2d, conic_opacity, ray_plane,
+            depth_bracket, depth_tolerance,
             out_occupancy, out_ray_point, out_median_depth, out_n_contrib,
             inside);
     } else {
         kernels::evaluate_points<0><<<tiles, cfg::kTileThreads>>>(
             tile_range, gauss_value, point_range, point_value, width, height,
             K, point2d, point_t, mean2d, conic_opacity, ray_plane,
+            depth_bracket, depth_tolerance,
             out_occupancy, out_ray_point, out_median_depth, out_n_contrib,
             inside);
     }

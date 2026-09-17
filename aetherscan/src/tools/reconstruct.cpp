@@ -135,6 +135,7 @@ struct ReconstructCli {
     std::uint64_t splat_preview_vk_device_luid{};
     unsigned splat_preview_vk_device_node_mask{};
     bool splat_profile_cuda{false};
+    bool splat_fuse_sh_adam{true};
     unsigned splat_profile_interval{100};
     unsigned splat_sh_degree{3};
     unsigned splat_max_resolution{1'920};
@@ -173,6 +174,8 @@ struct ReconstructCli {
     unsigned splat_normal_field_from_iter{8'001};
     float splat_multi_view_geo_weight{0.02F};
     float splat_multi_view_ncc_weight{0.6F};
+    float splat_multi_view_depth_bracket{0.F};
+    float splat_multi_view_depth_tolerance{0.F};
     unsigned splat_multi_view_num{8};
     unsigned splat_multi_view_tail_interval{1};
     bool splat_multi_view_adaptive{false};
@@ -357,7 +360,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
               << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
               << "  --splat-cache-auto BOOL  grow cache budgets safely for large datasets (default true)\n"
-              << "  --splat-prefetch-views N  concurrent host image prefetch count (default 8)\n"
+        << "  --splat-prefetch-views N  concurrent host image prefetch count (default 4)\n"
               << "  --splat-sh-degree N  spherical-harmonic bands 0..3 (default 3)\n"
               << "  --splat-kernel-size V  screen covariance low-pass variance; "
                  "0 disables, 0.1 matches Brush Mip\n"
@@ -685,11 +688,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("6144"))
         ("splat-device-cache-mb", "Packed splat CUDA-view LRU budget, capped by free VRAM (0 = disabled)",
           cxxopts::value<std::uint64_t>()->default_value("512"))
+        ("splat-fuse-sh-adam", "Fuse SH projection gradients into Adam",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-cache-auto",
-         "Grow packed host/CUDA cache budgets within system and VRAM safety limits",
+         "Grow host cache; shrink CUDA cache within its explicit budget and VRAM safety limits",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-prefetch-views",
-         "Concurrent host decode/pack prefetch views (0 disables)",
+         "Concurrent host decode/pack prefetch views (0 disables; host-side only)",
          cxxopts::value<unsigned>()->default_value("4"))
         ("splat-eval-split-every",
          "Hold out every Nth view for PSNR/SSIM evaluation (0 = train all)",
@@ -725,6 +730,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("8001"))
         ("splat-mv-geo-weight", "Multi-view depth round-trip loss weight",
          cxxopts::value<float>()->default_value("0.02"))
+        ("splat-mv-depth-bracket",
+         "Multi-view point-query median-depth seed window in world units "
+         "(0 = derive from the scene extent, < 0 = reference +/-200)",
+         cxxopts::value<float>()->default_value("0"))
+        ("splat-mv-depth-tolerance",
+         "Multi-view point-query depth precision in world units "
+         "(0 = derive from the scene extent, < 0 = reference 8 refinements)",
+         cxxopts::value<float>()->default_value("0"))
         ("splat-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
          cxxopts::value<float>()->default_value("0.6"))
         ("splat-mv-neighbors", "Number of nearest multi-view candidates",
@@ -1121,6 +1134,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_preview_vk_device_node_mask =
         result["splat-preview-vk-device-node-mask"].as<unsigned>();
     cli.splat_profile_cuda = result["splat-profile-cuda"].as<bool>();
+    cli.splat_fuse_sh_adam = result["splat-fuse-sh-adam"].as<bool>();
     cli.splat_profile_interval =
         result["splat-profile-interval"].as<unsigned>();
     if (cli.splat_profile_interval == 0 ||
@@ -1163,6 +1177,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_log_scale_reg = result["splat-log-scale-reg"].as<float>();
     cli.splat_depth_normal_weight =
         result["splat-depth-normal-weight"].as<float>();
+    cli.splat_multi_view_depth_bracket =
+        result["splat-mv-depth-bracket"].as<float>();
+    cli.splat_multi_view_depth_tolerance =
+        result["splat-mv-depth-tolerance"].as<float>();
     cli.splat_normal_field = result["splat-normal-field"].as<bool>();
     cli.splat_normal_field_weight =
         result["splat-normal-field-weight"].as<float>();
@@ -2795,6 +2813,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         cli.splat_normal_field_depth_ratio;
     options.normal_field_from_iter = cli.splat_normal_field_from_iter;
     options.profile_cuda = cli.splat_profile_cuda;
+    options.fuse_sh_adam = cli.splat_fuse_sh_adam;
     options.cuda_profile_interval = cli.splat_profile_interval;
     options.minimum_scale_fraction = cli.splat_min_scale_fraction;
     options.maximum_scale_fraction = cli.splat_max_scale_fraction;
@@ -2820,6 +2839,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.multi_view_ncc_weight = cli.mesh
         ? cli.splat_multi_view_ncc_weight
         : 0.F;
+    options.multi_view_depth_bracket = cli.splat_multi_view_depth_bracket;
+    options.multi_view_depth_tolerance = cli.splat_multi_view_depth_tolerance;
     options.multi_view_num = cli.splat_multi_view_num;
     options.multi_view_tail_interval =
         cli.splat_multi_view_tail_interval;
@@ -2917,6 +2938,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " filter_3d=", options.use_depth_normal_loss,
         " multi_view_geo_weight=", options.multi_view_geo_weight,
         " multi_view_ncc_weight=", options.multi_view_ncc_weight,
+        " multi_view_depth_bracket=", options.multi_view_depth_bracket,
+        " multi_view_depth_tolerance=", options.multi_view_depth_tolerance,
         " multi_view_neighbours=", options.multi_view_num,
         " multi_view_tail_interval=", options.multi_view_tail_interval,
         " multi_view_adaptive=",

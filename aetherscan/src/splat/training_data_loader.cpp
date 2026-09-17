@@ -8,6 +8,7 @@
 
 #include <cuda_runtime_api.h>
 #include "internal/cuda_stream_context.hpp"
+#include "core/vram_profiler.hpp"
 
 #include <Eigen/Geometry>
 
@@ -22,6 +23,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -528,46 +530,6 @@ private:
     std::size_t capacity_bytes_{};
 };
 
-class PinnedStagingPool {
-public:
-    std::unique_ptr<PinnedStagingBuffer> acquire(const std::size_t bytes) {
-        std::lock_guard lock(mutex_);
-        if (free_.empty()) {
-            auto buffer = std::make_unique<PinnedStagingBuffer>();
-            buffer->ensure(bytes);
-            return buffer;
-        }
-        auto buffer = std::move(free_.back());
-        free_.pop_back();
-        buffer->ensure(bytes);
-        return buffer;
-    }
-
-    void release(std::unique_ptr<PinnedStagingBuffer> buffer) {
-        if (!buffer) return;
-        std::lock_guard lock(mutex_);
-        free_.push_back(std::move(buffer));
-    }
-
-    void clear() {
-        std::lock_guard lock(mutex_);
-        free_.clear();
-    }
-
-private:
-    std::mutex mutex_;
-    std::vector<std::unique_ptr<PinnedStagingBuffer>> free_;
-};
-
-struct PinnedStagingLease {
-    std::unique_ptr<PinnedStagingBuffer> buffer;
-    PinnedStagingPool* pool{};
-
-    ~PinnedStagingLease() {
-        if (pool) pool->release(std::move(buffer));
-    }
-};
-
 std::size_t packed_training_view_bytes(
     const mvs::MvsView& view, const TrainingOptions& options,
     const float resolution_scale) {
@@ -620,13 +582,16 @@ int pack_rgba(
 HostTrainingView load_host_training_view(
     const mvs::MvsView& view, const TrainingOptions& options,
     const float resolution_scale = 1.F) {
+    tinytensor::TraceScope load_scope("data.host_load_pack");
     if (view.width == 0 || view.height == 0)
         throw std::invalid_argument(
             "Cannot build a GGGS training view with empty dimensions");
     Camera camera =
         training_data::training_camera(view, options, resolution_scale);
-    const io::RgbImage source = io::load_rgb_with_minimum_size(
-        view.path, camera.width, camera.height);
+    const io::RgbImage source = [&] {
+        tinytensor::TraceScope scope("data.read_decode");
+        return io::load_rgb_with_minimum_size(view.path, camera.width, camera.height);
+    }();
     const std::size_t pixels =
         static_cast<std::size_t>(camera.width) * camera.height;
     io::GrayImage source_mask;
@@ -785,19 +750,7 @@ struct TrainingDataLoader::Impl {
                   ? std::size_t{0}
                   : options.training_view_cache_bytes),
           resolution_scale_(resolution_scale) {
-        const cudaError_t stream_error = cudaStreamCreateWithFlags(
-            &copy_stream_, cudaStreamNonBlocking);
-        if (stream_error != cudaSuccess)
-            throw std::runtime_error(
-                std::string("Failed to create splat prefetch CUDA stream: ") +
-                cudaGetErrorString(stream_error));
-        try {
-            update_cache_budgets();
-        } catch (...) {
-            cudaStreamDestroy(copy_stream_);
-            copy_stream_ = nullptr;
-            throw;
-        }
+        update_cache_budgets();
         core::Logger::instance().info(
             "splat_data_cache host_budget_bytes=", capacity_bytes_,
             " device_budget_bytes=", device_capacity_bytes_,
@@ -806,18 +759,18 @@ struct TrainingDataLoader::Impl {
     }
 
     ~Impl() {
-        device_prefetches_.clear();
         prefetches_.clear();
-        if (copy_stream_ != nullptr) {
-            const cudaError_t error = cudaStreamDestroy(copy_stream_);
-            if (error != cudaSuccess)
-                core::Logger::instance().warning(
-                    "Failed to destroy splat prefetch CUDA stream: ",
-                    cudaGetErrorString(error));
-        }
     }
 
     TrainingView get(const std::size_t index) {
+        tinytensor::TraceScope get_scope("data.get_wall");
+        struct Timer {
+            double& total;
+            std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            ~Timer() { total += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count(); }
+        } timer{get_wall_ms_};
+        tinytensor::VramScope scope("data.decode");
         ++requests_;
         collect_ready_host_prefetches();
         const auto found = device_lookup_.find(index);
@@ -827,8 +780,6 @@ struct TrainingDataLoader::Impl {
                 device_entries_.begin(), device_entries_, found->second);
             return decode_device_view(device_entries_.front());
         }
-        if (consume_device_prefetch(index))
-            return decode_device_view(device_entries_.front());
         const HostTrainingView& host = host_view(index);
         const std::size_t bytes = sizeof(int) * host.rgba.size() +
             sizeof(float) * (host.depth.size() + host.normal.size());
@@ -852,63 +803,12 @@ struct TrainingDataLoader::Impl {
         if (options_.training_prefetch_views == 0)
             return;
         collect_ready_host_prefetches();
-        if (device_lookup_.contains(index) ||
-            device_prefetches_.contains(index)) {
-            return;
-        }
-
-        if (const auto host = cached_host_view(index)) {
-            const std::size_t bytes = packed_host_bytes(*host);
-            if (device_capacity_bytes_ == 0 ||
-                bytes > device_capacity_bytes_ ||
-                !make_room_for_device_bytes(bytes)) {
-                return;
-            }
-
-            DeviceEntry entry;
-            {
-                try {
-                    const tinytensor::CUDAStreamGuard stream_guard(
-                        copy_stream_);
-                    entry = allocate_device_entry(index, *host);
-                } catch (const std::exception& error) {
-                    core::Logger::instance().warning(
-                        "splat_data_cache device_prefetch_allocation_failed ",
-                        "index=", index, " error=", error.what());
-                    return;
-                }
-            }
-            device_prefetch_bytes_ += bytes;
-            try {
-                device_prefetches_.emplace(
-                    index,
-                    std::async(
-                        std::launch::async,
-                        [this, host = std::move(host),
-                         entry = std::move(entry)]() mutable {
-                            DevicePrefetchResult result;
-                            result.entry = std::move(entry);
-                            result.success = true;
-                            try {
-                                copy_device_entry_with_pinned_staging(
-                                    *host, result.entry);
-                            } catch (const std::exception& error) {
-                                cudaStreamSynchronize(copy_stream_);
-                                result.success = false;
-                                result.error = error.what();
-                            }
-                            return result;
-                        }));
-            } catch (const std::exception& error) {
-                device_prefetch_bytes_ -= bytes;
-                core::Logger::instance().warning(
-                    "splat_data_cache device_prefetch_launch_failed ",
-                    "index=", index, " error=", error.what());
-            }
-            return;
-        }
-
-        if (prefetches_.contains(index)) return;
+        // Host-side only: decode and pack on a background thread. Device
+        // uploads stay on the training thread (see copy_device_entry_*), so the
+        // loader never touches CUDA from another thread.
+        if (device_lookup_.contains(index)) return;
+        if (prefetches_.contains(index) ||
+            prefetches_.size() >= options_.training_prefetch_views) return;
         const float scale = resolution_scale_;
         prefetches_.emplace(
             index,
@@ -944,8 +844,6 @@ struct TrainingDataLoader::Impl {
         if (std::abs(clamped - resolution_scale_) < 1e-6F) return;
         // std::future from std::launch::async joins on destruction. Clear all
         // old-scale work before publishing the new scale and dropping buffers.
-        device_prefetches_.clear();
-        device_prefetch_bytes_ = 0;
         entries_.clear();
         lookup_.clear();
         cached_bytes_ = 0;
@@ -955,7 +853,7 @@ struct TrainingDataLoader::Impl {
         prefetches_.clear();
         resolution_scale_ = clamped;
         update_cache_budgets();
-        pinned_pool_.clear();
+        staging_.ensure(0);
     }
 
     void ensure_device_headroom(const std::size_t bytes) {
@@ -967,10 +865,7 @@ struct TrainingDataLoader::Impl {
         }
 
         const std::size_t free_before = free_bytes;
-        const std::size_t resident =
-            device_cached_bytes_ + device_prefetch_bytes_;
-        device_prefetches_.clear();
-        device_prefetch_bytes_ = 0;
+        const std::size_t resident = device_cached_bytes_;
         device_lookup_.clear();
         device_entries_.clear();
         device_cached_bytes_ = 0;
@@ -985,11 +880,9 @@ struct TrainingDataLoader::Impl {
     }
 
     CacheStats stats() const {
-        return {requests_, device_hits_, device_prefetch_hits_,
-                uploaded_bytes_, device_cached_bytes_,
-                device_capacity_bytes_, device_prefetches_.size(),
-                device_prefetch_bytes_, dataset_packed_bytes_,
-                capacity_bytes_};
+        return {requests_, device_hits_, uploaded_bytes_,
+                device_cached_bytes_, device_capacity_bytes_,
+                dataset_packed_bytes_, capacity_bytes_, get_wall_ms_};
     }
 
 private:
@@ -1002,12 +895,6 @@ private:
         bool mask_is_validity{};
     };
     using DeviceEntries = std::list<DeviceEntry>;
-
-    struct DevicePrefetchResult {
-        DeviceEntry entry;
-        bool success{};
-        std::string error;
-    };
 
     [[nodiscard]] static std::size_t packed_host_bytes(
         const HostTrainingView& host) {
@@ -1047,53 +934,51 @@ private:
             sizeof(float) * host.normal.size();
         const std::size_t total_bytes =
             rgba_bytes + depth_bytes + normal_bytes;
-        PinnedStagingLease lease{pinned_pool_.acquire(total_bytes),
-                                 &pinned_pool_};
-        std::uint8_t* destination = lease.buffer->data();
+        staging_.ensure(total_bytes);
+        std::uint8_t* destination = staging_.data();
         std::uint8_t* rgba_source = destination;
-        std::memcpy(rgba_source, host.rgba.data(), rgba_bytes);
         std::uint8_t* depth_source = rgba_source + rgba_bytes;
-        if (depth_bytes != 0)
-            std::memcpy(depth_source, host.depth.data(), depth_bytes);
         std::uint8_t* normal_source = depth_source + depth_bytes;
-        if (normal_bytes != 0)
-            std::memcpy(normal_source, host.normal.data(), normal_bytes);
+        {
+            tinytensor::TraceScope scope("data.pinned_memcpy");
+            std::memcpy(rgba_source, host.rgba.data(), rgba_bytes);
+            if (depth_bytes != 0) std::memcpy(depth_source, host.depth.data(), depth_bytes);
+            if (normal_bytes != 0) std::memcpy(normal_source, host.normal.data(), normal_bytes);
+        }
+        tinytensor::TraceScope copy_scope("data.h2d_copy");
 
         const auto check_copy = [](const cudaError_t error) {
             if (error != cudaSuccess)
                 throw std::runtime_error(
-                    std::string("Failed to enqueue packed-view H2D copy: ") +
+                    std::string("Failed to copy packed view to CUDA: ") +
                     cudaGetErrorString(error));
         };
-        check_copy(cudaMemcpyAsync(
+        // Synchronous on the calling thread: the data loader never issues CUDA
+        // work from a background thread, so there is no cross-stream lifetime
+        // to reason about and the pinned buffer is free to reuse on return.
+        check_copy(cudaMemcpy(
             entry.rgba.data_ptr(), rgba_source, rgba_bytes,
-            cudaMemcpyHostToDevice, copy_stream_));
+            cudaMemcpyHostToDevice));
         if (depth_bytes != 0)
-            check_copy(cudaMemcpyAsync(
+            check_copy(cudaMemcpy(
                 entry.depth.data_ptr(), depth_source, depth_bytes,
-                cudaMemcpyHostToDevice, copy_stream_));
+                cudaMemcpyHostToDevice));
         if (normal_bytes != 0)
-            check_copy(cudaMemcpyAsync(
+            check_copy(cudaMemcpy(
                 entry.normal.data_ptr(), normal_source, normal_bytes,
-                cudaMemcpyHostToDevice, copy_stream_));
-
-        const cudaError_t sync_error = cudaStreamSynchronize(copy_stream_);
-        if (sync_error != cudaSuccess)
-            throw std::runtime_error(
-                std::string("Failed to synchronize packed-view H2D copy: ") +
-                cudaGetErrorString(sync_error));
+                cudaMemcpyHostToDevice));
     }
 
     [[nodiscard]] bool make_room_for_device_bytes(const std::size_t bytes) {
         while (!device_entries_.empty() &&
-               device_cached_bytes_ + device_prefetch_bytes_ + bytes >
+               device_cached_bytes_ + bytes >
                    device_capacity_bytes_) {
             const auto& evicted = device_entries_.back();
             device_cached_bytes_ -= evicted.bytes;
             device_lookup_.erase(evicted.index);
             device_entries_.pop_back();
         }
-        return device_cached_bytes_ + device_prefetch_bytes_ + bytes <=
+        return device_cached_bytes_ + bytes <=
             device_capacity_bytes_;
     }
 
@@ -1104,33 +989,6 @@ private:
         device_lookup_[index] = device_entries_.begin();
         device_cached_bytes_ += device_entries_.front().bytes;
         return true;
-    }
-
-    bool consume_device_prefetch(const std::size_t index) {
-        const auto pending = device_prefetches_.find(index);
-        if (pending == device_prefetches_.end()) return false;
-
-        // The view being loaded is the current training view. Waiting here is
-        // intentional: the copy stream can overlap already-submitted CUDA
-        // training work while this thread waits for staging to finish.
-        if (pending->second.wait_for(std::chrono::seconds{0}) !=
-            std::future_status::ready) {
-            pending->second.wait();
-        }
-        DevicePrefetchResult result = pending->second.get();
-        device_prefetches_.erase(pending);
-        device_prefetch_bytes_ -= result.entry.bytes;
-
-        if (!result.success) {
-            core::Logger::instance().warning(
-                "splat_data_cache device_prefetch_failed index=", index,
-                " error=", result.error);
-            return false;
-        }
-
-        ++device_prefetch_hits_;
-        uploaded_bytes_ += result.entry.bytes;
-        return insert_device_entry(std::move(result.entry));
     }
 
     TrainingView decode_device_view(const DeviceEntry& entry) const {
@@ -1161,6 +1019,7 @@ private:
     using Entries = std::list<Entry>;
 
     const HostTrainingView& host_view(const std::size_t index) {
+        tinytensor::TraceScope scope("data.host_get_wait");
         if (index >= source_.size())
             throw std::out_of_range(
                 "GGGS training view index is out of range");
@@ -1225,20 +1084,18 @@ private:
 
     const std::vector<mvs::MvsView>& source_;
     const TrainingOptions& options_;
-    cudaStream_t copy_stream_{};
-    PinnedStagingPool pinned_pool_;
+    // Pinned staging for the packed-view H2D copy, reused by the training
+    // thread (the loader issues no CUDA work from background threads).
+    PinnedStagingBuffer staging_;
     std::size_t capacity_bytes_{};
     std::size_t cached_bytes_{};
     std::size_t device_capacity_bytes_{};
     std::size_t device_cached_bytes_{};
     std::size_t dataset_packed_bytes_{};
     std::size_t requests_{}, device_hits_{}, uploaded_bytes_{};
-    std::size_t device_prefetch_hits_{};
-    std::size_t device_prefetch_bytes_{};
+    double get_wall_ms_{};
     DeviceEntries device_entries_;
     std::unordered_map<std::size_t, DeviceEntries::iterator> device_lookup_;
-    std::unordered_map<std::size_t, std::future<DevicePrefetchResult>>
-        device_prefetches_;
     float resolution_scale_{1.F};
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;
@@ -1319,7 +1176,9 @@ private:
             : static_cast<std::size_t>(
                   static_cast<double>(total_bytes) *
                   std::min(cache_fraction, 0.25));
-        budget = std::min(budget, dataset_packed_bytes_);
+        // Auto sizing may shrink the configured budget, never silently grow it.
+        budget = std::min({budget, dataset_packed_bytes_,
+                           options_.training_device_cache_bytes});
         // High-resolution views also need large raster/atomic scratch buffers.
         // In that case cap the packed-image share at 1/8 of VRAM once the
         // dataset exceeds the same size; small datasets can still be fully

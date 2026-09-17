@@ -227,7 +227,8 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
     const int pix_min_x = int(tile_id % tiles_x) * cfg::kTileWidth;
     const int pix_min_y = int(tile_id / tiles_x) * cfg::kTileHeight;
     const std::size_t pixels = std::size_t(width) * height;
-    const float4* __restrict__ snap_ct = pst.snap_ct + (std::size_t(bucket_idx) << 8);
+    const float4* __restrict__ snap_ct =
+        pst.snap_ct + (std::size_t(bucket_idx) << 8);
     const float4* __restrict__ snap_normal =
         GEOMETRY ? pst.snap_normal + (std::size_t(bucket_idx) << 8) : nullptr;
 
@@ -547,9 +548,111 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
     }
 }
 
-// Fused per-Gaussian backward: EWA geometry + mean2d + SH.
-template <bool HasSH, bool HasCov>
-__global__ void gaussian_backward(
+// Warp-cooperative SH Adam for the fused path. The projection backward leaves
+// each Gaussian's coefficients in a shared tile, then one warp per 32 rows
+// updates them with lane l owning columns l and l+32 of the row in flight.
+//
+// Two reasons this is not the per-thread form it replaces: the per-thread row
+// cost 48 registers per thread, and the parameter/first/second accesses of
+// adjacent lanes were a row stride (192 B) apart, so every load fetched 32
+// separate 32-byte sectors. Lane-per-column makes those accesses contiguous,
+// exactly like the standalone optimizer kernels, and it also reproduces their
+// two-tree reduction for the reduced second moment - so the update matches the
+// unfused pipeline element for element.
+__device__ inline void update_sh_adam_rows(
+    int row0, int rows, int count, int bases, int degree,
+    float* __restrict__ warp_tile, const SHAdam& a) {
+    const int lane = threadIdx.x & 31;
+    const int active = (degree + 1) * (degree + 1) * 3;
+    const float regularization = a.regularization_factor;
+    for (int r = 0; r < rows; ++r) {
+        const int row = row0 + r;
+        if (row >= count) break;
+        float* g = warp_tile + r * cfg::kShRowStride;
+        const int base = row * bases * 3;
+        // Fold the SH regularization in first, where the unfused pipeline adds
+        // it to the gradient buffer.
+        if (regularization > 0.f) {
+            for (int j = 3 + lane; j < active; j += 32)
+                if (isfinite(a.parameter[base + j]))
+                    g[j] += regularization * a.parameter[base + j];
+        }
+        float denominator = 1.f;
+        bool row_valid = true;
+        if (a.reduced_second) {
+            float square0 = 0.f, square1 = 0.f;
+            for (int j = lane; j < active; j += 64) {
+                const float value = g[j];
+                if (isfinite(value)) square0 += value * value;
+            }
+            for (int j = lane + 32; j < active; j += 64) {
+                const float value = g[j];
+                if (isfinite(value)) square1 += value * value;
+            }
+            for (unsigned offset = 16; offset > 0; offset >>= 1) {
+                square0 += __shfl_down_sync(0xffffffffu, square0, offset);
+                square1 += __shfl_down_sync(0xffffffffu, square1, offset);
+            }
+            if (lane == 0) {
+                const float v = a.beta2 * a.second[row] + (1.f - a.beta2) *
+                    ((square0 + square1) / float(active));
+                row_valid = isfinite(v);
+                if (row_valid) {
+                    a.second[row] = v;
+                    denominator = sqrtf(v / a.correction2) + a.epsilon;
+                    row_valid = isfinite(denominator) && denominator > 0.f;
+                }
+                if (!row_valid) {
+                    a.second[row] = 0.f;
+                    denominator = 1.f;
+                }
+            }
+            denominator = __shfl_sync(0xffffffffu, denominator, 0);
+            row_valid = __shfl_sync(0xffffffffu, unsigned(row_valid), 0) != 0u;
+        }
+        for (int j = lane; j < active; j += 32) {
+            const int index = base + j;
+            const float previous = a.parameter[index];
+            const float grad = g[j];
+            if (!row_valid) {
+                a.first[index] = 0.f;
+                continue;
+            }
+            if (!isfinite(previous) || !isfinite(grad)) {
+                a.first[index] = 0.f;
+                if (!a.reduced_second) a.second[index] = 0.f;
+                a.parameter[index] = isfinite(previous) ? previous : 0.f;
+                continue;
+            }
+            const float m = a.beta1 * a.first[index] + (1.f - a.beta1) * grad;
+            if (a.reduced_second) {
+                if (!isfinite(m)) {
+                    a.first[index] = 0.f;
+                    continue;
+                }
+            } else {
+                const float v =
+                    a.beta2 * a.second[index] + (1.f - a.beta2) * grad * grad;
+                if (!isfinite(m) || !isfinite(v)) {
+                    a.first[index] = 0.f;
+                    a.second[index] = 0.f;
+                    continue;
+                }
+                a.second[index] = v;
+                denominator = sqrtf(v / a.correction2) + a.epsilon;
+            }
+            a.first[index] = m;
+            const float lr = j >= 3 ? a.rest_lr : a.lr;
+            const float candidate =
+                previous - lr * (m / a.correction1) / denominator;
+            a.parameter[index] = isfinite(candidate) ? candidate : previous;
+        }
+    }
+}
+
+template <bool HasSH, bool HasCov, bool FusedSH>
+__global__ void __launch_bounds__(cfg::kGaussianBlock, FusedSH ? 2 : 1)
+gaussian_backward(
     const int count, const int sh_degree, const int sh_bases,
     const float* __restrict__ means,
     const float* __restrict__ sh, const float* __restrict__ opacities,
@@ -561,61 +664,97 @@ __global__ void gaussian_backward(
     ws::GaussianState st, ws::GradState gs, float* __restrict__ grad_mean,
     float* __restrict__ grad_sh, float* __restrict__ grad_colors,
     float* __restrict__ grad_opacity, float* __restrict__ grad_scale,
-    float* __restrict__ grad_rotation, float* __restrict__ grad_cov) {
+    float* __restrict__ grad_rotation, float* __restrict__ grad_cov, SHAdam sh_adam) {
+    // Fused SH keeps the coefficients of this thread's Gaussian in a shared
+    // tile instead of a 48-register row: the warp then updates all 32 rows it
+    // owns with one lane per column, which is the coalesced pattern the
+    // standalone optimizer used.
+    __shared__ float4 sh_tile[FusedSH
+        ? cfg::kGaussianBlock * cfg::kShRowWords
+        : 1];
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count || !(radius[i] > 0)) return;
-
-    geo::SplatBackward io;
-    io.d_conic = gs.d_conic[i];
-    io.d_ray_plane = gs.d_ray_plane[i];
-    io.d_normal = gs.d_normal[i];
-    io.d_mean2d = make_float2(gs.d_mean2d[i].x, gs.d_mean2d[i].y);
-    io.mean = make_float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
-    io.view = view;
-    io.K = K;
-    io.width = width;
-    io.height = height;
-    io.kernel_size = kernel_size;
-    io.scale_modifier = scale_modifier;
-    io.scale = scales ? reinterpret_cast<const float3*>(scales) + i : nullptr;
-    io.rotation =
-        rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
-    io.cov6 = HasCov ? cov6 + 6 * i : nullptr;
-    io.opacity = opacities[i];
-    geo::splat_backward(io);
-    grad_mean[3 * i + 0] += io.grad_mean.x;
-    grad_mean[3 * i + 1] += io.grad_mean.y;
-    grad_mean[3 * i + 2] += io.grad_mean.z;
-    grad_opacity[i] += io.grad_opacity;
-    if (HasCov) {
+    float* shared_row = nullptr;
+    if constexpr (FusedSH) {
+        shared_row = reinterpret_cast<float*>(
+            &sh_tile[threadIdx.x * cfg::kShRowWords]);
 #pragma unroll
-        for (int k = 0; k < 6; ++k) grad_cov[6 * i + k] += io.grad_cov6[k];
-    } else {
-        grad_scale[3 * i + 0] += io.grad_scale.x;
-        grad_scale[3 * i + 1] += io.grad_scale.y;
-        grad_scale[3 * i + 2] += io.grad_scale.z;
-        grad_rotation[4 * i + 0] += io.grad_rotation.x;
-        grad_rotation[4 * i + 1] += io.grad_rotation.y;
-        grad_rotation[4 * i + 2] += io.grad_rotation.z;
-        grad_rotation[4 * i + 3] += io.grad_rotation.w;
+        for (int k = 0; k < cfg::kShRowWords; ++k)
+            sh_tile[threadIdx.x * cfg::kShRowWords + k] =
+                make_float4(0.f, 0.f, 0.f, 0.f);
     }
+    // Culled rows keep their zeroed shared row: their Adam moments still decay,
+    // exactly as the standalone optimizer did on zeroed gradients.
+    if (i < count && radius[i] > 0) {
 
-    if (HasSH) {
-        sh::BackwardIO bwd;
-        bwd.grad_mean = make_float3(0.f, 0.f, 0.f);
-        bwd.grad_sh = reinterpret_cast<float3*>(grad_sh);
-        sh::backward(i, sh_degree, sh_bases,
-                     reinterpret_cast<const float3*>(means),
-                     make_float3(camera_center[0], camera_center[1],
-                                 camera_center[2]),
-                     sh, st.clamped, gs.d_color, bwd);
-        grad_mean[3 * i + 0] += bwd.grad_mean.x;
-        grad_mean[3 * i + 1] += bwd.grad_mean.y;
-        grad_mean[3 * i + 2] += bwd.grad_mean.z;
-    } else if (grad_colors) {
-        grad_colors[3 * i + 0] += gs.d_color[i].x;
-        grad_colors[3 * i + 1] += gs.d_color[i].y;
-        grad_colors[3 * i + 2] += gs.d_color[i].z;
+        geo::SplatBackward io;
+        io.d_conic = gs.d_conic[i];
+        // Color-only pools leave the geometry scratch unallocated; zero inputs
+        // make splat_backward() take its unused-branch early-out, exactly like a
+        // memset-to-zero scratch buffer did.
+        io.d_ray_plane =
+            gs.d_ray_plane ? gs.d_ray_plane[i] : make_float4(0.f, 0.f, 0.f, 0.f);
+        io.d_normal =
+            gs.d_normal ? gs.d_normal[i] : make_float3(0.f, 0.f, 0.f);
+        io.d_mean2d = make_float2(gs.d_mean2d[i].x, gs.d_mean2d[i].y);
+        io.mean = make_float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
+        io.view = view;
+        io.K = K;
+        io.width = width;
+        io.height = height;
+        io.kernel_size = kernel_size;
+        io.scale_modifier = scale_modifier;
+        io.scale = scales ? reinterpret_cast<const float3*>(scales) + i : nullptr;
+        io.rotation =
+            rotations ? reinterpret_cast<const float4*>(rotations) + i : nullptr;
+        io.cov6 = HasCov ? cov6 + 6 * i : nullptr;
+        io.opacity = opacities[i];
+        geo::splat_backward(io);
+        grad_mean[3 * i + 0] += io.grad_mean.x;
+        grad_mean[3 * i + 1] += io.grad_mean.y;
+        grad_mean[3 * i + 2] += io.grad_mean.z;
+        grad_opacity[i] += io.grad_opacity;
+        if (HasCov) {
+    #pragma unroll
+            for (int k = 0; k < 6; ++k) grad_cov[6 * i + k] += io.grad_cov6[k];
+        } else {
+            grad_scale[3 * i + 0] += io.grad_scale.x;
+            grad_scale[3 * i + 1] += io.grad_scale.y;
+            grad_scale[3 * i + 2] += io.grad_scale.z;
+            grad_rotation[4 * i + 0] += io.grad_rotation.x;
+            grad_rotation[4 * i + 1] += io.grad_rotation.y;
+            grad_rotation[4 * i + 2] += io.grad_rotation.z;
+            grad_rotation[4 * i + 3] += io.grad_rotation.w;
+        }
+
+        if (HasSH) {
+            sh::BackwardIO bwd;
+            bwd.grad_mean = make_float3(0.f, 0.f, 0.f);
+            bwd.grad_sh = reinterpret_cast<float3*>(grad_sh);
+            if constexpr (FusedSH)
+                bwd.grad_sh_row = reinterpret_cast<float3*>(shared_row);
+            sh::backward(i, sh_degree, sh_bases,
+                         reinterpret_cast<const float3*>(means),
+                         make_float3(camera_center[0], camera_center[1],
+                                     camera_center[2]),
+                         sh, st.clamped, gs.d_color, bwd);
+            grad_mean[3 * i + 0] += bwd.grad_mean.x;
+            grad_mean[3 * i + 1] += bwd.grad_mean.y;
+            grad_mean[3 * i + 2] += bwd.grad_mean.z;
+        } else if (grad_colors) {
+            grad_colors[3 * i + 0] += gs.d_color[i].x;
+            grad_colors[3 * i + 1] += gs.d_color[i].y;
+            grad_colors[3 * i + 2] += gs.d_color[i].z;
+        }
+    }
+    if constexpr (FusedSH) {
+        __syncthreads();
+        const int warp_thread0 = (int(threadIdx.x) >> 5) * 32;
+        const int warp_row0 = int(blockIdx.x) * int(blockDim.x) + warp_thread0;
+        update_sh_adam_rows(warp_row0, 32, count, sh_bases, sh_degree,
+                            reinterpret_cast<float*>(sh_tile) +
+                                std::size_t(warp_thread0) *
+                                    cfg::kShRowStride,
+                            sh_adam);
     }
 }
 
@@ -694,25 +833,31 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
                        ws::GaussianState st, ws::GradState gs, float* grad_mean,
                        float* grad_sh, float* grad_colors, float* grad_opacity,
                        float* grad_scale, float* grad_rotation,
-                       float* grad_cov) {
-    auto dispatch = [&](auto sh_c, auto cov_c) {
+                       float* grad_cov, SHAdam sh_adam) {
+    auto dispatch = [&](auto sh_c, auto cov_c, auto fused_c) {
         constexpr bool kSH = decltype(sh_c)::value;
         constexpr bool kCov = decltype(cov_c)::value;
-        kernels::gaussian_backward<kSH, kCov>
+        constexpr bool kFused = decltype(fused_c)::value;
+        kernels::gaussian_backward<kSH, kCov, kFused>
             <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
                 cfg::kGaussianBlock>>>(
                 count, sh_degree, sh_bases, means, sh, opacities, scales,
                 rotations, cov6, view, camera_center, K, width, height,
                 kernel_size, scale_modifier, radius, clamped, st, gs, grad_mean,
                 grad_sh, grad_colors, grad_opacity, grad_scale, grad_rotation,
-                grad_cov);
+                grad_cov, sh_adam);
     };
     if (has_sh) {
-        if (has_cov) dispatch(std::true_type{}, std::true_type{});
-        else dispatch(std::true_type{}, std::false_type{});
+        if (sh_adam.parameter) {
+            if (has_cov) dispatch(std::true_type{}, std::true_type{}, std::true_type{});
+            else dispatch(std::true_type{}, std::false_type{}, std::true_type{});
+        } else {
+            if (has_cov) dispatch(std::true_type{}, std::true_type{}, std::false_type{});
+            else dispatch(std::true_type{}, std::false_type{}, std::false_type{});
+        }
     } else {
-        if (has_cov) dispatch(std::false_type{}, std::true_type{});
-        else dispatch(std::false_type{}, std::false_type{});
+        if (has_cov) dispatch(std::false_type{}, std::true_type{}, std::false_type{});
+        else dispatch(std::false_type{}, std::false_type{}, std::false_type{});
     }
 }
 

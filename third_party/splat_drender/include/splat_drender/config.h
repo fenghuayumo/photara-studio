@@ -25,6 +25,10 @@ constexpr float kDepthSeedWindow = 0.4f;
 // matching the reference evaluateSDFCUDA numerics exactly.
 constexpr int kDepthRefinementsTesting = 8;
 constexpr float kDepthSeedWindowTesting = 200.0f;
+// Half-width, in peak-depth sigmas (rsigma units, see the ray-plane w
+// component), outside of which a gaussian's contribution to a probe depth is
+// 1.0 in fp32. Used by the point query to skip probes it cannot influence.
+constexpr float kDepthBandSigmas = 8.0f;
 constexpr float kDepthMinTransmittance = 0.45f;
 
 // Alpha-blending thresholds (identical to the reference semantics).
@@ -39,5 +43,11 @@ constexpr float kNormalEpsilon = 1.0e-12f;
 
 // Points per thread block in per-Gaussian kernels.
 constexpr int kGaussianBlock = 256;
+
+// SH coefficients per Gaussian (16 bases * 3 channels) in the fused
+// projection-backward + optimizer shared tile. Rows are padded to a whole
+// float4 so the tile can be indexed as 128-bit words.
+constexpr int kShRowStride = 48;
+constexpr int kShRowWords = kShRowStride / 4;
 
 }  // namespace splat_drender::cfg

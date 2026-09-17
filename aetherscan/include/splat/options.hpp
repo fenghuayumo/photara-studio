@@ -56,6 +56,7 @@ struct TrainingOptions {
     // profiling events. The interval is capped by the trainer to avoid an
     // accidentally unbounded CUDA event pool.
     bool profile_cuda{false};
+    bool fuse_sh_adam{true};
     unsigned cuda_profile_interval{100};
     // Sparse COLMAP initialization enables dynamic Gaussian management. Dense
     // MVS initialization only enables it for the explicit dense_adaptive mode.
@@ -218,6 +219,11 @@ struct TrainingOptions {
     // plane-induced homography and the original image pair.
     float multi_view_geo_weight{0.F};
     float multi_view_ncc_weight{0.F};
+    // Multi-view point-query median-depth search. > 0 overrides the
+    // scene-derived default, 0 derives it from the scene extent, < 0 keeps the
+    // rasterizer reference behavior (+/-200 window, eight refinements).
+    float multi_view_depth_bracket{0.F};
+    float multi_view_depth_tolerance{0.F};
     unsigned multi_view_num{8};
     // Subsample the expensive multi-view objective after ADC growth stops.
     // Active-step weights are multiplied by this interval so the stochastic
@@ -300,19 +306,19 @@ struct TrainingOptions {
     float progressive_initial_scale{0.25F};
     std::size_t training_view_cache_bytes{
         std::size_t{6} * 1024 * 1024 * 1024};
-    // Expand the packed-view budgets when a dataset is larger than the defaults,
-    // while keeping both budgets bounded by fractions of system/CUDA memory.
-    // Explicitly setting either budget to zero still disables that cache.
+    // Expand the host budget when possible. The device budget is a hard upper
+    // bound even in adaptive mode. Zero disables the historical cache only;
+    // bounded device prefetch remains available independently.
     bool adaptive_training_cache{true};
     // Packed RGBA8 plus optional depth/normal CUDA cache. Zero disables it.
     // Adaptive mode is bounded by the projected training state and total VRAM;
     // fixed mode retains the legacy free-VRAM/8 guard.
     std::size_t training_device_cache_bytes{std::size_t{512} * 1024 * 1024};
-    // Decode upcoming shuffled views concurrently while CUDA processes the
-    // current iteration. This mirrors a bounded disk-prefetch pipeline: keep
-    // several views in flight rather than decoding each one on a cache miss.
-    // Zero disables prefetching.
-    std::size_t training_prefetch_views{8};
+    // Decode and pack upcoming shuffled views on background threads while CUDA
+    // processes the current iteration, so a host cache miss does not stall the
+    // step on image I/O. Host-side only: all CUDA calls stay on the training
+    // thread. Zero disables prefetching.
+    std::size_t training_prefetch_views{4};
     // Hold out every Nth source view from optimization (0 trains on all).
     // The caller may render these views through the evaluation callback.
     // The reconstruction CLI defaults this to 8 so held-out PSNR/SSIM is on
