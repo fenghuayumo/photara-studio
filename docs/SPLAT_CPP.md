@@ -269,8 +269,15 @@ ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-fai
 解码越慢，前瞻越长；已经驻留 host cache 的 view 不会重复解码，也不会占用前瞻槽位。
 已完成的 host 视图会被提升为 pinned-host H2D CUDA 预取，再进入有限的 host/device
 缓存。缓存淘汰不使用 LRU：一个 epoch 恰好访问每个 view 一次，LRU 会优先淘汰最近才需要
-的条目；trainer 会把当前 epoch 的访问顺序发布给 loader，缓存改为淘汰“下次使用最远”的
+的条目；trainer 会把当前 epoch 的访问顺序发布给 loader，缓存改为淘汰"下次使用最远"的
 条目，`--splat-prefetch-adaptive=false` 只关闭前瞻自适应，不改变淘汰策略。
+device 侧缓存预算可用 `--splat-device-cache-max-mb` 放大到 `--splat-device-cache-mb` 之上：
+loader 按"这一迭代是否还需要从 host 上传"统计 device 命中率，命中率低于目标且显存有余量时逐级
+放大，上限同时受数据集、空闲显存（扣除投影训练状态）与显存占比约束；显存吃紧时先退还放大的部分。
+默认 0 表示不放大——实测在 2MP / 1M Gaussian 这个量级上，上传已被计算掩盖，放大缓存反而因为占用
+显存而略慢（alameda +0.8%、iPhone 生产长度 +2.4%），只有在迭代很短、loader 真在关键路径上时放大
+才有意义。每次放大/收回都写入训练日志（`splat_data_cache device_budget_*`），命中率随
+`--splat-profile-cuda=true` 的统计行输出。
 JPEG/PNG 主路径分别直连 libjpeg/libpng，并直接写入最终 RGB/gray/alpha buffer；
 FreeImage 只作为 TIFF/BMP 等其他格式和编码路径的 fallback。JPEG 训练视图根据目标
 相机尺寸选择 1/2、1/4 或 1/8 DCT scale，避免 progressive-resolution 前半程先解码

@@ -638,6 +638,9 @@ NB_MODULE(aetherscan_native, module) {
             "training_prefetch_adaptive",
             &splat::TrainingOptions::training_prefetch_adaptive)
         .def_rw(
+            "training_device_cache_max_bytes",
+            &splat::TrainingOptions::training_device_cache_max_bytes)
+        .def_rw(
             "evaluation_split_every",
             &splat::TrainingOptions::evaluation_split_every)
         .def_rw(

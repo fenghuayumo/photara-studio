@@ -16,6 +16,11 @@ struct CacheStats {
     std::size_t uploaded_bytes{};
     std::size_t device_resident_bytes{};
     std::size_t device_budget_bytes{};
+    // Device cache budget feedback: the hit rate measured over the last window,
+    // the ceiling the adaptive budget may grow to, and how often it grew.
+    double device_hit_rate{};
+    std::size_t device_budget_ceiling_bytes{};
+    std::size_t device_budget_growths{};
     std::size_t dataset_packed_bytes{};
     std::size_t host_budget_bytes{};
     double get_wall_ms{};

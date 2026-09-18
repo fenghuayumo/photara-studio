@@ -46,6 +46,13 @@ namespace {
 
 constexpr std::size_t k_mib = std::size_t{1024} * 1024;
 constexpr std::size_t k_gib = k_mib * 1024;
+// Device cache budget feedback. The window is long enough that one decision
+// costs nothing and short enough to react inside a single epoch.
+constexpr std::size_t k_device_budget_window = 512;
+constexpr std::size_t k_min_device_budget = std::size_t{64} * k_mib;
+constexpr std::size_t k_min_device_growth = std::size_t{256} * k_mib;
+constexpr double k_device_hit_rate_target = 0.5;
+constexpr double k_device_cache_max_share = 0.4;
 
 std::size_t saturate_add(
     const std::size_t left, const std::size_t right) noexcept {
@@ -788,10 +795,12 @@ struct TrainingDataLoader::Impl {
         const auto found = device_lookup_.find(index);
         if (found != device_lookup_.end()) {
             ++device_hits_;
+            note_device_cache_access(true);
             device_entries_.splice(
                 device_entries_.begin(), device_entries_, found->second);
             return decode_device_view(device_entries_.front());
         }
+        note_device_cache_access(false);
         const bool host_resident = lookup_.contains(index);
         const HostTrainingView& host = host_view(index);
         if (host_resident) ++host_hits_;
@@ -874,6 +883,11 @@ struct TrainingDataLoader::Impl {
         device_lookup_.clear();
         device_entries_.clear();
         device_cached_bytes_ = 0;
+        // Budget feedback starts over at the new scale.
+        device_budget_window_requests_ = 0;
+        device_budget_window_hits_ = 0;
+        device_budget_window_step_ms_ = 0.0;
+        device_budget_saturated_ = false;
         prefetches_.clear();
         resolution_scale_ = clamped;
         update_cache_budgets();
@@ -932,6 +946,8 @@ struct TrainingDataLoader::Impl {
     CacheStats stats() const {
         return {requests_, device_hits_, uploaded_bytes_,
                 device_cached_bytes_, device_capacity_bytes_,
+                device_hit_rate_, device_ceiling_bytes_,
+                device_budget_growths_,
                 dataset_packed_bytes_, capacity_bytes_, get_wall_ms_,
                 host_hits_, prefetch_issued_, host_load_mean_ms_,
                 step_mean_ms_, prefetch_limit()};
@@ -1153,6 +1169,14 @@ private:
     std::size_t cached_bytes_{};
     std::size_t device_capacity_bytes_{};
     std::size_t device_cached_bytes_{};
+    std::size_t device_ceiling_bytes_{};
+    std::size_t training_reserve_bytes_{};
+    std::size_t device_budget_window_requests_{};
+    std::size_t device_budget_window_hits_{};
+    std::size_t device_budget_growths_{};
+    double device_budget_window_step_ms_{};
+    bool device_budget_saturated_{false};
+    double device_hit_rate_{};
     std::size_t dataset_packed_bytes_{};
     std::size_t requests_{}, device_hits_{}, uploaded_bytes_{};
     std::size_t host_hits_{};
@@ -1189,6 +1213,7 @@ private:
             step_mean_ms_ = step_mean_ms_ <= 0.0
                 ? ms
                 : (1.0 - k_timing_ema) * step_mean_ms_ + k_timing_ema * ms;
+            device_budget_window_step_ms_ += ms;
         }
         last_request_time_ = now;
         has_last_request_time_ = true;
@@ -1275,6 +1300,107 @@ private:
         return 0;
     }
 
+    // Model, optimizer state and per-iteration raster scratch. Used as the
+    // reserve the image cache must never eat into.
+    [[nodiscard]] std::size_t projected_training_state_bytes() const {
+        return saturate_add(
+            std::size_t{3} * k_gib / 2,
+            saturate_multiply(
+                projected_gaussian_count(), std::size_t{2} * 1024));
+    }
+
+    // One budget decision per epoch at most: a bigger cache only starts hitting
+    // as the epoch walks the views, so a shorter window cannot show the effect.
+    [[nodiscard]] std::size_t device_budget_window_requests() const {
+        return std::max<std::size_t>(k_device_budget_window, source_.size());
+    }
+
+    // Device cache budget feedback. Called once per get(); the expensive part
+    // (a VRAM query plus a decision) runs once per window.
+    void note_device_cache_access(const bool hit) {
+        if (!options_.adaptive_training_cache || device_capacity_bytes_ == 0)
+            return;
+        ++device_budget_window_requests_;
+        if (hit) ++device_budget_window_hits_;
+        if (device_budget_window_requests_ >= device_budget_window_requests()) {
+            const std::size_t intervals =
+                device_budget_window_requests_ > 1
+                ? device_budget_window_requests_ - 1
+                : 1;
+            evaluate_device_budget(
+                device_budget_window_step_ms_ /
+                static_cast<double>(intervals));
+        }
+    }
+
+    void evaluate_device_budget(const double mean_step_ms) {
+        const std::size_t requests = device_budget_window_requests_;
+        const std::size_t hits = device_budget_window_hits_;
+        device_budget_window_requests_ = 0;
+        device_budget_window_hits_ = 0;
+        device_budget_window_step_ms_ = 0.0;
+        if (requests == 0) return;
+        const double hit_rate =
+            static_cast<double>(hits) / static_cast<double>(requests);
+        device_hit_rate_ = hit_rate;
+        std::size_t free_bytes{}, total_bytes{};
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) return;
+        const std::size_t reserve =
+            std::max(training_reserve_bytes_, projected_training_state_bytes());
+        const std::size_t capacity = device_capacity_bytes_;
+
+        // The cache is competing with live training state: give memory back
+        // rather than wait for a refinement to force it.
+        if (free_bytes < reserve) {
+            // Release the grown part first; the configured budget is the floor
+            // the trainer's own headroom check may take away in an emergency.
+            const std::size_t floor_bytes = std::max<std::size_t>(
+                options_.training_device_cache_bytes, k_min_device_budget);
+            const std::size_t target =
+                std::max<std::size_t>(capacity / 2, floor_bytes);
+            if (target < capacity) {
+                device_capacity_bytes_ = target;
+                make_room_for_device_bytes(0);
+                core::Logger::instance().warning(
+                    "splat_data_cache device_budget_shrink budget_bytes=",
+                    target, " free_bytes=", free_bytes,
+                    " reserve_bytes=", reserve, " hit_rate=", hit_rate);
+            }
+            return;
+        }
+
+        if (device_budget_saturated_ || hit_rate >= k_device_hit_rate_target)
+            return;
+        if (device_ceiling_bytes_ <= capacity) {
+            device_budget_saturated_ = true;
+            return;
+        }
+        const std::size_t idle =
+            free_bytes > reserve ? free_bytes - reserve : 0;
+        if (idle < k_min_device_growth) {
+            device_budget_saturated_ = true;
+            return;
+        }
+        // Grow by half of the current budget (at least one step) and never past
+        // what the idle VRAM, the dataset and the device share allow.
+        const std::size_t step = std::max<std::size_t>(
+            capacity / 2, k_min_device_growth);
+        const std::size_t target = std::min(
+            device_ceiling_bytes_,
+            saturate_add(capacity, std::min(idle, step)));
+        if (target <= capacity) {
+            device_budget_saturated_ = true;
+            return;
+        }
+        device_capacity_bytes_ = target;
+        ++device_budget_growths_;
+        core::Logger::instance().info(
+            "splat_data_cache device_budget_grow budget_bytes=", target,
+            " previous_bytes=", capacity, " free_bytes=", free_bytes,
+            " reserve_bytes=", reserve, " hit_rate=", hit_rate,
+            " step_ms=", mean_step_ms, " growths=", device_budget_growths_);
+    }
+
     void update_cache_budgets() {
         dataset_packed_bytes_ = 0;
         for (const mvs::MvsView& view : source_) {
@@ -1324,10 +1450,9 @@ private:
         // At least 75% of VRAM remains for Gaussian/optimizer state and
         // raster scratch. A large projected model shrinks the image-cache
         // share before the cache can starve topology updates.
-        const std::size_t projected_gaussians = projected_gaussian_count();
-        const std::size_t projected_training_bytes = saturate_add(
-            std::size_t{3} * k_gib / 2,
-            saturate_multiply(projected_gaussians, std::size_t{2} * 1024));
+        const std::size_t projected_training_bytes =
+            projected_training_state_bytes();
+        training_reserve_bytes_ = projected_training_bytes;
         const double reserve_fraction = total_bytes == 0
             ? 1.0
             : static_cast<double>(projected_training_bytes) /
@@ -1344,7 +1469,8 @@ private:
             : static_cast<std::size_t>(
                   static_cast<double>(total_bytes) *
                   std::min(cache_fraction, 0.25));
-        // Auto sizing may shrink the configured budget, never silently grow it.
+        // The configured value is the floor in adaptive mode; the tuner may grow
+        // the budget later once the hit rate and the free VRAM say it helps.
         budget = std::min({budget, dataset_packed_bytes_,
                            options_.training_device_cache_bytes});
         // High-resolution views also need large raster/atomic scratch buffers.
@@ -1360,6 +1486,29 @@ private:
             free_bytes > k_gib ? free_bytes - k_gib : 0;
         budget = std::min(budget, free_guard);
         device_capacity_bytes_ = budget;
+
+        // Ceiling for the adaptive growth: idle VRAM beyond the projected
+        // training state, capped by the dataset and by a fixed share of the
+        // device so a second process still finds room.
+        const std::size_t idle = free_bytes > projected_training_bytes
+            ? free_bytes - projected_training_bytes
+            : 0;
+        // Take half of the idle VRAM at most: the pool, the raster scratch and
+        // a densification burst all grow into the same space. Without a
+        // configured ceiling the budget stays where the caller put it.
+        const std::size_t idle_share = static_cast<std::size_t>(
+            static_cast<double>(idle) * 0.5);
+        device_ceiling_bytes_ = std::min(
+            dataset_packed_bytes_,
+            std::min(
+                options_.training_device_cache_max_bytes,
+                std::min(
+                    saturate_add(
+                        options_.training_device_cache_bytes, idle_share),
+                    static_cast<std::size_t>(
+                        static_cast<double>(total_bytes) *
+                        k_device_cache_max_share))));
+        device_ceiling_bytes_ = std::max(device_ceiling_bytes_, budget);
     }
 };
 

@@ -2947,6 +2947,40 @@ void test_training_device_cache() {
     asynchronous.set_resolution_scale(0.5F);
     require(asynchronous.stats().device_resident_bytes == 0,
             "Resolution transition retained packed CUDA views");
+
+    // Adaptive device budget: the configured value is the floor, the loader
+    // grows into a ceiling derived from the dataset and the idle VRAM once the
+    // observed hit rate falls short, and a growth step is only kept while the
+    // measured iteration time improves. A toy dataset cannot show a real
+    // speed-up, so this checks the budget movement and the supervision.
+    options.adaptive_training_cache = true;
+    options.training_prefetch_views = 1;
+    options.training_view_cache_bytes = 64 * 1024;
+    options.training_device_cache_bytes = 256 * (4 + 4 + 12);
+    options.training_device_cache_max_bytes = 4 * 256 * (4 + 4 + 12);
+    splat::training_data::TrainingDataLoader tuner(views, options);
+    require(tuner.stats().device_budget_bytes ==
+                options.training_device_cache_bytes,
+            "Adaptive device cache did not start at the configured floor");
+    require(tuner.stats().device_budget_ceiling_bytes >
+                options.training_device_cache_bytes,
+            "Adaptive device cache derived no ceiling");
+    for (std::size_t step = 0; step < 520; ++step) {
+        const auto loaded = tuner.get(step % views.size());
+        require(loaded.rgb.numel() == 3 * 16 * 16,
+                "Adaptive budget changed supervision");
+    }
+    require(tuner.stats().device_budget_growths >= 1,
+            "Adaptive device cache never grew below its hit-rate target");
+    require(tuner.stats().device_budget_bytes >
+                options.training_device_cache_bytes,
+            "Adaptive device cache did not raise its budget");
+    require(tuner.stats().device_budget_bytes <=
+                tuner.stats().device_budget_ceiling_bytes,
+            "Adaptive device cache exceeded its ceiling");
+    compare(tuner.get(0), reference,
+            "Adaptive device cache changed supervision");
+
     std::filesystem::remove_all(root);
 }
 

@@ -346,9 +346,16 @@ struct TrainingOptions {
     // bounded device prefetch remains available independently.
     bool adaptive_training_cache{true};
     // Packed RGBA8 plus optional depth/normal CUDA cache. Zero disables it.
-    // Adaptive mode is bounded by the projected training state and total VRAM;
-    // fixed mode retains the earlier free-VRAM/8 guard.
+    // In adaptive mode this is the floor of the budget. Fixed mode retains the
+    // earlier free-VRAM/8 guard and never exceeds the configured value.
     std::size_t training_device_cache_bytes{std::size_t{512} * 1024 * 1024};
+    // Ceiling the adaptive budget may grow to, using the observed device-cache
+    // hit rate as feedback and the idle VRAM as a guard. Zero keeps the budget
+    // at training_device_cache_bytes: measured on the alameda and iPhone sets,
+    // a larger packed-image cache only pays while the uploads are exposed on the
+    // critical path, and at 2MP/1M Gaussians they are already hidden behind
+    // compute, so the VRAM is better left to the training state.
+    std::size_t training_device_cache_max_bytes{0};
     // Decode and pack upcoming shuffled views on background threads while CUDA
     // processes the current iteration, so a host cache miss does not stall the
     // step on image I/O. Host-side only: all CUDA calls stay on the training
