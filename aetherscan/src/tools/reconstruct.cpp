@@ -39,6 +39,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <crtdbg.h>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -3326,6 +3328,45 @@ int wmain(int argc, wchar_t** argv) {
 #else
 int main(int argc, char** argv) {
 #endif
+    // Report CRT parameter failures (which otherwise abort with no trace).
+    _set_invalid_parameter_handler(
+        [](const wchar_t* expression, const wchar_t* function,
+           const wchar_t* file, unsigned line, std::uintptr_t) {
+            const auto narrow = [](const wchar_t* text) {
+                if (text == nullptr) return std::string{"?"};
+                std::string out;
+                for (; *text != L'\0'; ++text)
+                    out.push_back(*text < 128 ? static_cast<char>(*text) : '?');
+                return out;
+            };
+            aetherscan::core::Logger::instance().error(
+                "invalid_parameter function=", narrow(function),
+                " file=", narrow(file), " line=", line,
+                " expression=", narrow(expression));
+            std::_Exit(3);
+        });
+    // A terminate from a worker thread or a destructor used to abort without
+    // leaving any trace in the log; report what is known before aborting.
+    std::set_terminate([] {
+        try {
+            if (std::current_exception() == nullptr) {
+                aetherscan::core::Logger::instance().error(
+                    "terminate: no active exception");
+            } else {
+                try {
+                    std::rethrow_exception(std::current_exception());
+                } catch (const std::exception& error) {
+                    aetherscan::core::Logger::instance().error(
+                        "terminate: ", error.what());
+                } catch (...) {
+                    aetherscan::core::Logger::instance().error(
+                        "terminate: non-standard exception");
+                }
+            }
+        } catch (...) {
+        }
+        std::abort();
+    });
     try {
         Utf8Argv utf8_argv(argc, argv);
         ReconstructCli cli = parse_cli(utf8_argv.argc(), utf8_argv.argv());
