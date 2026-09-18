@@ -17,6 +17,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <list>
@@ -53,6 +54,7 @@ constexpr std::size_t k_min_device_budget = std::size_t{64} * k_mib;
 constexpr std::size_t k_min_device_growth = std::size_t{256} * k_mib;
 constexpr double k_device_hit_rate_target = 0.5;
 constexpr double k_device_cache_max_share = 0.4;
+constexpr std::size_t k_max_pending_device_uploads = 2;
 // A larger cache has to recover at least this much iteration time during the
 // following observation window. Smaller changes are indistinguishable from
 // normal training noise and do not justify retaining the extra VRAM.
@@ -549,6 +551,139 @@ private:
     std::size_t capacity_bytes_{};
 };
 
+// Training-thread-only pool. Buffers are returned only after the CUDA event for
+// their transfer has completed, so a subsequent upload can never overwrite
+// bytes still being consumed by DMA.
+class PinnedStagingPool {
+public:
+    [[nodiscard]] std::unique_ptr<PinnedStagingBuffer> acquire(
+        const std::size_t bytes) {
+        std::unique_ptr<PinnedStagingBuffer> buffer;
+        if (free_.empty()) {
+            buffer = std::make_unique<PinnedStagingBuffer>();
+        } else {
+            buffer = std::move(free_.back());
+            free_.pop_back();
+        }
+        buffer->ensure(bytes);
+        return buffer;
+    }
+
+    void release(std::unique_ptr<PinnedStagingBuffer> buffer) {
+        if (buffer) free_.push_back(std::move(buffer));
+    }
+
+    void clear() { free_.clear(); }
+
+private:
+    std::vector<std::unique_ptr<PinnedStagingBuffer>> free_;
+};
+
+// Loader-owned device staging ring for the upload pipeline. The copy engine must
+// never write into pool memory: the pool hands blocks between streams and
+// threads without any ordering, and testing (see CacheStats::async_upload_*) had
+// a packed view overwritten behind an in-flight transfer. These slots are plain
+// cudaMalloc buffers owned by the loader and reused only after every reader
+// finished, so the DMA destination is never something the pool can recycle.
+class DeviceUploadRing {
+public:
+    static constexpr std::size_t k_slot_count = 2;
+
+    struct Slot {
+        std::uint8_t* data{};
+        std::size_t capacity{};
+        cudaEvent_t ready{};      // packed-view H2D on the copy stream completed
+        cudaEvent_t reusable{};   // device-to-device hop on the compute stream done
+        bool busy{};              // owned by a pending upload
+    };
+
+    DeviceUploadRing() {
+        for (Slot& slot : slots_) {
+            if (cudaEventCreateWithFlags(&slot.ready, cudaEventDisableTiming) !=
+                cudaSuccess)
+                slot.ready = nullptr;
+            if (cudaEventCreateWithFlags(&slot.reusable, cudaEventDisableTiming) !=
+                cudaSuccess)
+                slot.reusable = nullptr;
+            // An event that was never recorded queries as complete, so a fresh
+            // ring starts out fully reusable.
+        }
+    }
+
+    ~DeviceUploadRing() { clear(); }
+
+    DeviceUploadRing(const DeviceUploadRing&) = delete;
+    DeviceUploadRing& operator=(const DeviceUploadRing&) = delete;
+
+    // Hand out a slot whose readers finished. Never blocks: returning nullptr
+    // simply keeps the caller on the synchronous upload path.
+    [[nodiscard]] Slot* try_acquire(const std::size_t bytes) {
+        for (Slot& slot : slots_) {
+            if (slot.ready == nullptr || slot.reusable == nullptr) continue;
+            if (slot.busy) continue;
+            // `reusable` is only recorded once a hop read this slot; an event
+            // that was never recorded queries as complete.
+            if (cudaEventQuery(slot.reusable) != cudaSuccess) continue;
+            if (bytes > slot.capacity && !grow(slot, bytes)) continue;
+            slot.busy = true;
+            return &slot;
+        }
+        return nullptr;
+    }
+
+    static void release(Slot& slot) { slot.busy = false; }
+
+    static void mark_ready(Slot& slot, const cudaStream_t stream) {
+        if (slot.ready != nullptr) cudaEventRecord(slot.ready, stream);
+    }
+
+    static void mark_reusable(Slot& slot, const cudaStream_t stream) {
+        if (slot.reusable != nullptr) cudaEventRecord(slot.reusable, stream);
+    }
+
+    // Block until no slot is being read or written, then release the buffers.
+    void clear() noexcept {
+        for (Slot& slot : slots_) {
+            drain(slot);
+            if (slot.data != nullptr) {
+                cudaFree(slot.data);
+                slot.data = nullptr;
+                slot.capacity = 0;
+            }
+            if (slot.ready != nullptr) {
+                cudaEventDestroy(slot.ready);
+                slot.ready = nullptr;
+            }
+            if (slot.reusable != nullptr) {
+                cudaEventDestroy(slot.reusable);
+                slot.reusable = nullptr;
+            }
+        }
+    }
+
+    // Wait for the slot's readers without giving the buffers back.
+    void drain() noexcept {
+        for (Slot& slot : slots_) drain(slot);
+    }
+
+private:
+    static void drain(Slot& slot) noexcept {
+        if (slot.ready != nullptr) cudaEventSynchronize(slot.ready);
+        if (slot.reusable != nullptr) cudaEventSynchronize(slot.reusable);
+    }
+
+    static bool grow(Slot& slot, const std::size_t bytes) {
+        void* pointer = nullptr;
+        if (cudaMalloc(&pointer, bytes) != cudaSuccess) return false;
+        if (slot.data != nullptr) cudaFree(slot.data);
+        slot.data = static_cast<std::uint8_t*>(pointer);
+        slot.capacity = bytes;
+        return true;
+    }
+
+    std::array<Slot, k_slot_count> slots_{};
+};
+
 std::size_t packed_training_view_bytes(
     const mvs::MvsView& view, const TrainingOptions& options,
     const float resolution_scale) {
@@ -769,7 +904,22 @@ struct TrainingDataLoader::Impl {
                   ? std::size_t{0}
                   : options.training_view_cache_bytes),
           resolution_scale_(resolution_scale) {
-        update_cache_budgets();
+        if (options_.training_async_upload &&
+            options_.training_device_cache_bytes != 0) {
+            const cudaError_t error = cudaStreamCreateWithFlags(
+                &copy_stream_, cudaStreamNonBlocking);
+            if (error != cudaSuccess)
+                throw std::runtime_error(
+                    std::string("Failed to create splat upload stream: ") +
+                    cudaGetErrorString(error));
+        }
+        try {
+            update_cache_budgets();
+        } catch (...) {
+            if (copy_stream_ != nullptr) cudaStreamDestroy(copy_stream_);
+            copy_stream_ = nullptr;
+            throw;
+        }
         core::Logger::instance().info(
             "splat_data_cache host_budget_bytes=", capacity_bytes_,
             " device_budget_bytes=", device_capacity_bytes_,
@@ -779,6 +929,17 @@ struct TrainingDataLoader::Impl {
 
     ~Impl() {
         prefetches_.clear();
+        clear_pending_device_uploads();
+        staging_pool_.clear();
+        device_ring_.clear();
+        if (copy_stream_ != nullptr) {
+            const cudaError_t error = cudaStreamDestroy(copy_stream_);
+            if (error != cudaSuccess)
+                core::Logger::instance().warning(
+                    "Failed to destroy splat upload stream: ",
+                    cudaGetErrorString(error));
+            copy_stream_ = nullptr;
+        }
         // The plan order belongs to the caller; stop referring to it before the
         // caller's storage goes away.
         plan_order_ = nullptr;
@@ -799,12 +960,32 @@ struct TrainingDataLoader::Impl {
         const auto found = device_lookup_.find(index);
         if (found != device_lookup_.end()) {
             ++device_hits_;
-            note_device_cache_access(true);
             device_entries_.splice(
                 device_entries_.begin(), device_entries_, found->second);
+            // Budget feedback runs only after the entry sits at the front of the
+            // list: evaluating may evict entries, and `found` must not be used
+            // after that.
+            note_device_cache_access(true);
             return decode_device_view(device_entries_.front());
         }
-        note_device_cache_access(false);
+        const auto pending = device_uploads_.find(index);
+        if (pending != device_uploads_.end()) {
+            // Count it as a cache miss for budget feedback: the transfer was
+            // still necessary even when it completed before get(). Budget
+            // evaluation is deferred while any transfer owns reserved bytes.
+            note_device_cache_access(false);
+            DeviceEntry staged_entry;
+            if (consume_device_upload(index, staged_entry)) {
+                ++async_upload_hits_;
+                if (insert_device_entry(std::move(staged_entry)))
+                    return decode_device_view(device_entries_.front());
+                // No room: the hop already landed in this entry, so serve the
+                // view from it instead of uploading again.
+                return decode_device_view(staged_entry);
+            }
+        } else {
+            note_device_cache_access(false);
+        }
         const bool host_resident = lookup_.contains(index);
         const HostTrainingView& host = host_view(index);
         if (host_resident) ++host_hits_;
@@ -817,7 +998,9 @@ struct TrainingDataLoader::Impl {
         if (!make_room_for_device_bytes(bytes))
             return upload_training_view(
                 host, options_.multi_view_ncc_weight > 0.F);
-        DeviceEntry entry = allocate_device_entry(index, host);
+        DeviceEntry entry = allocate_device_entry(
+            index, host.camera, host.has_mask, host.mask_is_validity,
+            !host.depth.empty(), !host.normal.empty());
         copy_device_entry_with_pinned_staging(host, entry);
         insert_device_entry(std::move(entry));
         return decode_device_view(device_entries_.front());
@@ -830,14 +1013,20 @@ struct TrainingDataLoader::Impl {
         if (options_.training_prefetch_views == 0)
             return;
         collect_ready_host_prefetches();
-        // Host-side only: decode and pack on a background thread. Device
-        // uploads stay on the training thread (see copy_device_entry_*), so the
-        // loader never touches CUDA from another thread.
-        if (device_lookup_.contains(index)) return;
+        // Host decoding is the only background-thread work. CUDA allocation,
+        // staging and copy enqueue all remain on this training thread.
+        if (device_lookup_.contains(index) || device_uploads_.contains(index))
+            return;
+        const auto cached = lookup_.find(index);
+        if (cached != lookup_.end()) {
+            if (copy_stream_ != nullptr &&
+                device_uploads_.size() < k_max_pending_device_uploads)
+                schedule_device_upload(index, *cached->second->view);
+            return;
+        }
         // Already decoded: decoding it again would only occupy a lookahead slot
         // that a genuinely cold view needs (the earlier implementation re-read
         // every already-cached view on every iteration).
-        if (lookup_.contains(index)) return;
         if (prefetches_.contains(index) ||
             prefetches_.size() >= prefetch_limit()) return;
         const float scale = resolution_scale_;
@@ -881,6 +1070,7 @@ struct TrainingDataLoader::Impl {
         if (std::abs(clamped - resolution_scale_) < 1e-6F) return;
         // std::future from std::launch::async joins on destruction. Clear all
         // old-scale work before publishing the new scale and dropping buffers.
+        clear_pending_device_uploads();
         entries_.clear();
         lookup_.clear();
         cached_bytes_ = 0;
@@ -898,6 +1088,8 @@ struct TrainingDataLoader::Impl {
         resolution_scale_ = clamped;
         update_cache_budgets();
         staging_.ensure(0);
+        staging_pool_.clear();
+        device_ring_.drain();
     }
 
     void set_epoch_plan(
@@ -935,7 +1127,9 @@ struct TrainingDataLoader::Impl {
         }
 
         const std::size_t free_before = free_bytes;
-        const std::size_t resident = device_cached_bytes_;
+        const std::size_t resident =
+            device_cached_bytes_ + device_pending_bytes_;
+        clear_pending_device_uploads();
         device_lookup_.clear();
         device_entries_.clear();
         device_cached_bytes_ = 0;
@@ -950,13 +1144,31 @@ struct TrainingDataLoader::Impl {
     }
 
     CacheStats stats() const {
-        return {requests_, device_hits_, uploaded_bytes_,
-                device_cached_bytes_, device_capacity_bytes_,
-                device_hit_rate_, device_ceiling_bytes_,
-                device_budget_growths_, device_budget_rollbacks_,
-                dataset_packed_bytes_, capacity_bytes_, get_wall_ms_,
-                host_hits_, prefetch_issued_, host_load_mean_ms_,
-                step_mean_ms_, prefetch_limit()};
+        CacheStats result;
+        result.requests = requests_;
+        result.device_hits = device_hits_;
+        result.async_upload_hits = async_upload_hits_;
+        result.async_upload_issued = async_upload_issued_;
+        result.async_upload_waits = async_upload_waits_;
+        result.async_upload_failures = async_upload_failures_;
+        result.async_upload_pending = device_uploads_.size();
+        result.async_upload_pending_bytes = device_pending_bytes_;
+        result.uploaded_bytes = uploaded_bytes_;
+        result.device_resident_bytes = device_cached_bytes_;
+        result.device_budget_bytes = device_capacity_bytes_;
+        result.device_hit_rate = device_hit_rate_;
+        result.device_budget_ceiling_bytes = device_ceiling_bytes_;
+        result.device_budget_growths = device_budget_growths_;
+        result.device_budget_rollbacks = device_budget_rollbacks_;
+        result.dataset_packed_bytes = dataset_packed_bytes_;
+        result.host_budget_bytes = capacity_bytes_;
+        result.get_wall_ms = get_wall_ms_;
+        result.host_hits = host_hits_;
+        result.prefetch_issued = prefetch_issued_;
+        result.host_load_mean_ms = host_load_mean_ms_;
+        result.step_mean_ms = step_mean_ms_;
+        result.prefetch_depth = prefetch_limit();
+        return result;
     }
 
     [[nodiscard]] std::size_t prefetch_depth() const {
@@ -974,32 +1186,82 @@ private:
     };
     using DeviceEntries = std::list<DeviceEntry>;
 
+    struct PendingDeviceUpload {
+        std::size_t bytes{};
+        Camera camera;
+        bool has_mask{};
+        bool mask_is_validity{};
+        bool has_depth{};
+        bool has_normal{};
+        // Loader-owned device staging the copy engine is allowed to write.
+        DeviceUploadRing::Slot* slot{};
+        std::unique_ptr<PinnedStagingBuffer> staging;
+        // Diagnostic (SPLAT_VERIFY_UPLOAD=1): the packed bytes the transfer is
+        // supposed to deliver, so the consumed tensor can be compared against
+        // them before use.
+        std::vector<int> expected_rgba;
+    };
+
     [[nodiscard]] static std::size_t packed_host_bytes(
         const HostTrainingView& host) {
         return sizeof(int) * host.rgba.size() +
             sizeof(float) * (host.depth.size() + host.normal.size());
     }
 
+    // Diagnostic switch (SPLAT_VERIFY_UPLOAD=1): compare the packed bytes a
+    // transfer delivered against the host view they were copied from. A
+    // mismatch means the copy stream and the pool/allocator disagreed about who
+    // owns the memory a transfer touched.
+    [[nodiscard]] static bool verify_uploads() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("SPLAT_VERIFY_UPLOAD");
+            return value != nullptr && value[0] == '1';
+        }();
+        return enabled;
+    }
+
     [[nodiscard]] DeviceEntry allocate_device_entry(
-        const std::size_t index, const HostTrainingView& host) const {
+        const std::size_t index, const Camera& camera, const bool has_mask,
+        const bool mask_is_validity, const bool has_depth,
+        const bool has_normal) const {
         DeviceEntry entry;
         entry.index = index;
-        entry.bytes = packed_host_bytes(host);
-        entry.camera = host.camera;
-        entry.has_mask = host.has_mask;
-        entry.mask_is_validity = host.mask_is_validity;
+        entry.bytes = sizeof(int) * camera.width * camera.height;
+        if (has_depth)
+            entry.bytes += sizeof(float) * camera.width * camera.height;
+        if (has_normal)
+            entry.bytes += sizeof(float) * 3 * camera.width * camera.height;
+        entry.camera = camera;
+        entry.has_mask = has_mask;
+        entry.mask_is_validity = mask_is_validity;
         entry.rgba = tinytensor::Tensor::empty(
-            {host.camera.height, host.camera.width},
+            {camera.height, camera.width},
             tinytensor::Device::CUDA, tinytensor::DataType::Int32);
-        if (!host.depth.empty())
+        if (has_depth)
             entry.depth = tinytensor::Tensor::empty(
-                {host.camera.height, host.camera.width},
+                {camera.height, camera.width},
                 tinytensor::Device::CUDA);
-        if (!host.normal.empty())
+        if (has_normal)
             entry.normal = tinytensor::Tensor::empty(
-                {std::size_t{3}, host.camera.height, host.camera.width},
+                {std::size_t{3}, camera.height, camera.width},
                 tinytensor::Device::CUDA);
         return entry;
+    }
+
+    static void pack_device_staging(
+        const HostTrainingView& host, PinnedStagingBuffer& staging) {
+        const std::size_t rgba_bytes = sizeof(int) * host.rgba.size();
+        const std::size_t depth_bytes = sizeof(float) * host.depth.size();
+        const std::size_t normal_bytes = sizeof(float) * host.normal.size();
+        staging.ensure(rgba_bytes + depth_bytes + normal_bytes);
+        std::uint8_t* rgba_destination = staging.data();
+        std::uint8_t* depth_destination = rgba_destination + rgba_bytes;
+        std::uint8_t* normal_destination = depth_destination + depth_bytes;
+        std::memcpy(rgba_destination, host.rgba.data(), rgba_bytes);
+        if (depth_bytes != 0)
+            std::memcpy(depth_destination, host.depth.data(), depth_bytes);
+        if (normal_bytes != 0)
+            std::memcpy(normal_destination, host.normal.data(), normal_bytes);
     }
 
     void copy_device_entry_with_pinned_staging(
@@ -1047,16 +1309,185 @@ private:
                 cudaMemcpyHostToDevice));
     }
 
+    bool schedule_device_upload(
+        const std::size_t index,
+        const HostTrainingView& host) {
+        if (copy_stream_ == nullptr ||
+            device_uploads_.contains(index) ||
+            device_lookup_.contains(index) ||
+            device_uploads_.size() >= k_max_pending_device_uploads)
+            return false;
+        const std::size_t bytes = packed_host_bytes(host);
+        if (device_capacity_bytes_ == 0 || bytes > device_capacity_bytes_ ||
+            !make_room_for_device_bytes(bytes))
+            return false;
+
+        const auto [pending, inserted] = device_uploads_.try_emplace(index);
+        if (!inserted) return false;
+        PendingDeviceUpload& upload = pending->second;
+        DeviceUploadRing::Slot* slot = device_ring_.try_acquire(bytes);
+        if (slot == nullptr) {
+            device_uploads_.erase(pending);
+            return false;
+        }
+        upload.slot = slot;
+        upload.bytes = bytes;
+        upload.camera = host.camera;
+        upload.has_mask = host.has_mask;
+        upload.mask_is_validity = host.mask_is_validity;
+        upload.has_depth = !host.depth.empty();
+        upload.has_normal = !host.normal.empty();
+        const auto check = [](const cudaError_t error, const char* action) {
+            if (error != cudaSuccess)
+                throw std::runtime_error(
+                    std::string(action) + ": " + cudaGetErrorString(error));
+        };
+        try {
+            // Host packing and every CUDA call stay on the training thread; only
+            // the DMA itself executes asynchronously, and it writes the
+            // loader-owned slot rather than pool memory.
+            upload.staging = staging_pool_.acquire(bytes);
+            {
+                tinytensor::TraceScope scope("data.async_pinned_memcpy");
+                pack_device_staging(host, *upload.staging);
+            }
+            if (verify_uploads()) upload.expected_rgba = host.rgba;
+            // The packed layout is contiguous in both the pinned buffer and the
+            // slot, so one transfer covers RGBA, depth and normals.
+            check(cudaMemcpyAsync(
+                      slot->data, upload.staging->data(), bytes,
+                      cudaMemcpyHostToDevice, copy_stream_),
+                  "Failed to enqueue packed view upload");
+            DeviceUploadRing::mark_ready(*slot, copy_stream_);
+            device_pending_bytes_ += bytes;
+            ++async_upload_issued_;
+            return true;
+        } catch (const std::exception& error) {
+            // A partially enqueued transfer still owns the slot: drain it before
+            // the slot can be handed out again.
+            cudaStreamSynchronize(copy_stream_);
+            staging_pool_.release(std::move(upload.staging));
+            if (slot != nullptr) DeviceUploadRing::release(*slot);
+            device_uploads_.erase(pending);
+            ++async_upload_failures_;
+            core::Logger::instance().warning(
+                "splat_data_cache async_upload_schedule_failed index=", index,
+                " error=", error.what());
+            return false;
+        }
+    }
+
+    static void check_cuda(const cudaError_t error, const char* action) {
+        if (error != cudaSuccess)
+            throw std::runtime_error(
+                std::string(action) + ": " + cudaGetErrorString(error));
+    }
+
+    // Adopt a staged packed view. The transfer landed in loader-owned memory, so
+    // the packed bytes are hopped into the entry on the compute stream before the
+    // slot is recycled: the pool never sees a copy-engine write, and the hop is
+    // ordered ahead of the expansion kernels that read it.
+    [[nodiscard]] bool consume_device_upload(
+        const std::size_t index, DeviceEntry& entry) {
+        const auto found = device_uploads_.find(index);
+        if (found == device_uploads_.end()) return false;
+        PendingDeviceUpload upload = std::move(found->second);
+        device_uploads_.erase(found);
+        device_pending_bytes_ -= upload.bytes;
+
+        if (upload.slot == nullptr) {
+            ++async_upload_failures_;
+            return false;
+        }
+        const cudaError_t query = cudaEventQuery(upload.slot->ready);
+        if (query == cudaErrorNotReady) ++async_upload_waits_;
+        const cudaError_t sync = query == cudaSuccess
+            ? cudaSuccess
+            : cudaEventSynchronize(upload.slot->ready);
+        if (verify_uploads() && !upload.expected_rgba.empty()) {
+            std::vector<int> observed(upload.expected_rgba.size());
+            const cudaError_t read = cudaMemcpy(
+                observed.data(), upload.slot->data,
+                observed.size() * sizeof(int), cudaMemcpyDeviceToHost);
+            std::size_t first_mismatch = observed.size();
+            if (read == cudaSuccess)
+                for (std::size_t i = 0; i < observed.size(); ++i)
+                    if (observed[i] != upload.expected_rgba[i]) {
+                        first_mismatch = i;
+                        break;
+                    }
+            if (read != cudaSuccess || first_mismatch != observed.size())
+                core::Logger::instance().warning(
+                    "splat_data_cache async_upload_data_mismatch index=", index,
+                    " first_mismatch=", first_mismatch,
+                    " words=", observed.size(),
+                    " read_error=", cudaGetErrorString(read));
+        }
+        staging_pool_.release(std::move(upload.staging));
+        if (sync != cudaSuccess) {
+            ++async_upload_failures_;
+            core::Logger::instance().warning(
+                "splat_data_cache async_upload_consume_failed index=", index,
+                " sync_error=", cudaGetErrorString(sync));
+            return false;
+        }
+        const cudaStream_t compute_stream = tinytensor::getCurrentCUDAStream();
+        entry = allocate_device_entry(
+            index, upload.camera, upload.has_mask, upload.mask_is_validity,
+            upload.has_depth, upload.has_normal);
+        const std::size_t rgba_bytes = sizeof(int) * entry.camera.width * entry.camera.height;
+        const std::size_t depth_bytes = upload.has_depth
+            ? sizeof(float) * entry.camera.width * entry.camera.height
+            : 0;
+        const std::size_t normal_bytes = upload.has_normal
+            ? sizeof(float) * 3 * entry.camera.width * entry.camera.height
+            : 0;
+        const auto hop = [&](void* target, const std::size_t count,
+                             const std::size_t offset) {
+            if (count == 0) return;
+            check_cuda(cudaMemcpyAsync(
+                target, upload.slot->data + offset, count,
+                cudaMemcpyDeviceToDevice, compute_stream),
+                "Failed to hop packed view into the cache: ");
+        };
+        hop(entry.rgba.data_ptr(), rgba_bytes, 0);
+        hop(entry.depth.data_ptr(), depth_bytes, rgba_bytes);
+        hop(entry.normal.data_ptr(), normal_bytes, rgba_bytes + depth_bytes);
+        DeviceUploadRing::mark_reusable(*upload.slot, compute_stream);
+        DeviceUploadRing::release(*upload.slot);
+        uploaded_bytes_ += entry.bytes;
+        return true;
+    }
+
+    void clear_pending_device_uploads() noexcept {
+        for (auto& [index, upload] : device_uploads_) {
+            // The transfer owns loader-owned staging: wait for it before the slot
+            // can be handed to another upload.
+            const cudaError_t sync =
+                upload.slot == nullptr || upload.slot->ready == nullptr
+                ? cudaSuccess
+                : cudaEventSynchronize(upload.slot->ready);
+            if (sync != cudaSuccess)
+                core::Logger::instance().warning(
+                    "splat_data_cache async_upload_cleanup_failed index=", index,
+                    " sync_error=", cudaGetErrorString(sync));
+            if (upload.slot != nullptr) DeviceUploadRing::release(*upload.slot);
+            staging_pool_.release(std::move(upload.staging));
+        }
+        device_uploads_.clear();
+        device_pending_bytes_ = 0;
+    }
+
     [[nodiscard]] bool make_room_for_device_bytes(const std::size_t bytes) {
         while (!device_entries_.empty() &&
-               device_cached_bytes_ + bytes >
+               device_cached_bytes_ + device_pending_bytes_ + bytes >
                    device_capacity_bytes_) {
             const auto evicted = select_eviction_victim(device_entries_);
             device_cached_bytes_ -= evicted->bytes;
             device_lookup_.erase(evicted->index);
             device_entries_.erase(evicted);
         }
-        return device_cached_bytes_ + bytes <=
+        return device_cached_bytes_ + device_pending_bytes_ + bytes <=
             device_capacity_bytes_;
     }
 
@@ -1168,13 +1599,19 @@ private:
 
     const std::vector<mvs::MvsView>& source_;
     const TrainingOptions& options_;
+    cudaStream_t copy_stream_{};
     // Pinned staging for the packed-view H2D copy, reused by the training
-    // thread (the loader issues no CUDA work from background threads).
+    // thread's synchronous fallback.
     PinnedStagingBuffer staging_;
+    PinnedStagingPool staging_pool_;
+    // Loader-owned device staging for the copy-stream lookahead. Never pool
+    // memory: see DeviceUploadRing.
+    DeviceUploadRing device_ring_;
     std::size_t capacity_bytes_{};
     std::size_t cached_bytes_{};
     std::size_t device_capacity_bytes_{};
     std::size_t device_cached_bytes_{};
+    std::size_t device_pending_bytes_{};
     std::size_t device_ceiling_bytes_{};
     std::size_t device_floor_bytes_{};
     std::size_t training_reserve_bytes_{};
@@ -1189,6 +1626,10 @@ private:
     double device_hit_rate_{};
     std::size_t dataset_packed_bytes_{};
     std::size_t requests_{}, device_hits_{}, uploaded_bytes_{};
+    std::size_t async_upload_hits_{};
+    std::size_t async_upload_issued_{};
+    std::size_t async_upload_waits_{};
+    std::size_t async_upload_failures_{};
     std::size_t host_hits_{};
     std::size_t prefetch_issued_{};
     double get_wall_ms_{};
@@ -1201,6 +1642,7 @@ private:
     bool has_last_request_time_{false};
     DeviceEntries device_entries_;
     std::unordered_map<std::size_t, DeviceEntries::iterator> device_lookup_;
+    std::unordered_map<std::size_t, PendingDeviceUpload> device_uploads_;
     float resolution_scale_{1.F};
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;
@@ -1336,7 +1778,8 @@ private:
             return;
         ++device_budget_window_requests_;
         if (hit) ++device_budget_window_hits_;
-        if (device_budget_window_requests_ >= device_budget_window_requests()) {
+        if (device_budget_window_requests_ >= device_budget_window_requests() &&
+            device_uploads_.empty()) {
             const std::size_t intervals =
                 device_budget_window_requests_ > 1
                 ? device_budget_window_requests_ - 1

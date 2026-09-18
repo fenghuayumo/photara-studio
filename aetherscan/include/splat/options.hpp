@@ -356,6 +356,16 @@ struct TrainingOptions {
     // critical path, and at 2MP/1M Gaussians they are already hidden behind
     // compute, so the VRAM is better left to the training state.
     std::size_t training_device_cache_max_bytes{0};
+    // Upload already-decoded future views on a non-blocking CUDA copy stream.
+    // CUDA allocation and enqueue remain on the training thread; each in-flight
+    // transfer owns its pinned staging storage until its completion event fires.
+    // The copy engine only ever writes loader-owned device staging; the packed
+    // view is hopped into the cache entry on the compute stream, because pool
+    // memory must not be touched by a transfer from another stream (the pool
+    // hands blocks between streams and threads without any ordering). Measured
+    // -3% iteration time on the alameda and iPhone sets with the integrity check
+    // and ten repeat runs clean.
+    bool training_async_upload{true};
     // Decode and pack upcoming shuffled views on background threads while CUDA
     // processes the current iteration, so a host cache miss does not stall the
     // step on image I/O. Host-side only: all CUDA calls stay on the training

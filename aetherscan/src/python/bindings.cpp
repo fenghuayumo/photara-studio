@@ -641,6 +641,9 @@ NB_MODULE(aetherscan_native, module) {
             "training_device_cache_max_bytes",
             &splat::TrainingOptions::training_device_cache_max_bytes)
         .def_rw(
+            "training_async_upload",
+            &splat::TrainingOptions::training_async_upload)
+        .def_rw(
             "evaluation_split_every",
             &splat::TrainingOptions::evaluation_split_every)
         .def_rw(

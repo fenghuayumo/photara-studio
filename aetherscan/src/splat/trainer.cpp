@@ -2098,6 +2098,12 @@ GaussianModel Trainer::train(
         core::Logger::instance().info(
             "splat_data_cache requests=", cache.requests,
             " device_hits=", cache.device_hits,
+            " async_upload_hits=", cache.async_upload_hits,
+            " async_upload_issued=", cache.async_upload_issued,
+            " async_upload_waits=", cache.async_upload_waits,
+            " async_upload_failures=", cache.async_upload_failures,
+            " async_upload_pending=", cache.async_upload_pending,
+            " async_upload_pending_bytes=", cache.async_upload_pending_bytes,
             " get_wall_ms=", cache.get_wall_ms,
             " uploaded_bytes=", cache.uploaded_bytes,
             " device_resident_bytes=", cache.device_resident_bytes,

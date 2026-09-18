@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <limits>
@@ -125,6 +126,20 @@ namespace tinytensor {
             const size_t bucket_idx = get_bucket_index(bucket_size);
             if (bucket_idx >= NUM_BUCKETS)
                 return false;
+
+            // Diagnostic switch: TINYTENSOR_NO_BUCKET_CACHE=1 returns every freed
+            // block to the driver with stream ordering instead of parking it in
+            // the free list, so a block can never be handed out again while work
+            // that still uses it is pending on another stream.
+            static const bool bypass_bucket_cache = [] {
+                const char* value = std::getenv("TINYTENSOR_NO_BUCKET_CACHE");
+                return value != nullptr && value[0] == '1';
+            }();
+            if (bypass_bucket_cache) {
+                cudaFreeAsync(ptr, stream);
+                publish_cache_bytes();
+                return true;
+            }
 
             {
                 std::lock_guard<std::mutex> lock(buckets_[bucket_idx].mutex);

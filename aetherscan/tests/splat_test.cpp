@@ -2942,6 +2942,9 @@ void test_training_device_cache() {
     // Exactly one packed frame fits, so the neighbour request must evict it and
     // the repeat must be served from the host cache and re-uploaded.
     options.training_device_cache_bytes = 256 * (4 + 4 + 12);
+    // The copy-stream pipeline is opt-in (see TrainingOptions), so the test
+    // enables it explicitly.
+    options.training_async_upload = true;
     splat::training_data::TrainingDataLoader asynchronous(views, options);
     asynchronous.prefetch(0);
     const auto async_first = asynchronous.get(0);
@@ -2955,9 +2958,12 @@ void test_training_device_cache() {
     compare(async_neighbour, splat::make_training_view(views[1], options),
             "asynchronous neighbour changed supervision");
     require(asynchronous.stats().device_hits == 0 &&
+                    asynchronous.stats().async_upload_hits == 1 &&
+                    asynchronous.stats().async_upload_issued == 1 &&
+                    asynchronous.stats().async_upload_failures == 0 &&
                     asynchronous.stats().device_resident_bytes <=
                         options.training_device_cache_bytes,
-            "Single-frame CUDA cache retained more than one view");
+            "Asynchronous upload did not safely populate the single-frame cache");
     require(asynchronous.stats().uploaded_bytes ==
                 3 * options.training_device_cache_bytes,
             "Host prefetch did not re-upload the evicted view");

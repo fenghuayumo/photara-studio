@@ -271,6 +271,12 @@ ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-fai
 缓存。缓存淘汰不使用 LRU：一个 epoch 恰好访问每个 view 一次，LRU 会优先淘汰最近才需要
 的条目；trainer 会把当前 epoch 的访问顺序发布给 loader，缓存改为淘汰"下次使用最远"的
 条目，`--splat-prefetch-adaptive=false` 只关闭前瞻自适应，不改变淘汰策略。
+上传流水线（默认开，`--splat-async-upload=false` 可关）：预取阶段已解码的视图会被打包进
+pinned 缓冲，在独立非阻塞流上提前一迭代做 H2D，写到 **loader 自持的 device staging**（不是
+显存池的块），认领时再在同一条 compute stream 上做一次 D2D 进缓存条目——因为 tinytensor 的
+内存池在流/线程之间没有任何顺序保证，实测让 copy engine 直接写池内存在约 1/3 的运行里把数据
+覆盖或触发 illegal memory access。实测每迭代约 -3%（alameda / iPhone，4000 迭代交错 A/B），
+`get_wall_ms` 降低约 60%，10 次重复运行 0 崩溃 0 数据错（`SPLAT_VERIFY_UPLOAD=1` 校验）。
 device 侧缓存预算可用 `--splat-device-cache-max-mb` 放大到 `--splat-device-cache-mb` 之上：
 loader 按"这一迭代是否还需要从 host 上传"统计 device 命中率，命中率低于目标且显存有余量时逐级
 放大，上限同时受数据集、空闲显存（扣除投影训练状态）与显存占比约束；下一完整统计窗口的端到端

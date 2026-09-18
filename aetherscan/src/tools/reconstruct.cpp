@@ -153,6 +153,7 @@ struct ReconstructCli {
     std::uint64_t splat_view_cache_mb{6'144};
     std::uint64_t splat_device_cache_mb{512};
     std::uint64_t splat_device_cache_max_mb{0};
+    bool splat_async_upload{true};
     bool splat_cache_auto{true};
     unsigned splat_prefetch_views{4};
     bool splat_prefetch_adaptive{true};
@@ -372,6 +373,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
               << "  --splat-device-cache-max-mb N  ceiling for the adaptive device cache\n"
               << "                              (default 0 = keep --splat-device-cache-mb)\n"
+              << "  --splat-async-upload BOOL  overlap future packed-view H2D copies (default true)\n"
               << "  --splat-cache-auto BOOL  grow cache budgets safely for large datasets (default true)\n"
         << "  --splat-prefetch-views N  minimum concurrent host image prefetch count (default 4)\n"
         << "  --splat-prefetch-adaptive BOOL  grow the prefetch lookahead from the measured\n"
@@ -711,6 +713,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-device-cache-max-mb",
          "Ceiling the adaptive splat CUDA-view cache may grow to (0 = no growth)",
          cxxopts::value<std::uint64_t>()->default_value("0"))
+        ("splat-async-upload",
+         "Upload decoded future splat views on a non-blocking CUDA copy stream",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-fuse-sh-adam", "Fuse SH projection gradients into Adam",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-cache-auto",
@@ -1197,6 +1202,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-device-cache-mb"].as<std::uint64_t>();
     cli.splat_device_cache_max_mb =
         result["splat-device-cache-max-mb"].as<std::uint64_t>();
+    cli.splat_async_upload = result["splat-async-upload"].as<bool>();
     cli.splat_cache_auto = result["splat-cache-auto"].as<bool>();
     cli.splat_prefetch_views =
         result["splat-prefetch-views"].as<unsigned>();
@@ -2741,6 +2747,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
                   (std::numeric_limits<std::size_t>::max)() /
                       bytes_per_megabyte) *
               bytes_per_megabyte);
+    options.training_async_upload = cli.splat_async_upload;
     options.adaptive_training_cache = cli.splat_cache_auto;
     options.training_prefetch_views = cli.splat_prefetch_views;
     options.training_prefetch_adaptive = cli.splat_prefetch_adaptive;
@@ -2998,6 +3005,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         options.training_device_cache_bytes / (1024 * 1024),
         " device_cache_max_mb=",
         options.training_device_cache_max_bytes / (1024 * 1024),
+        " async_upload=", options.training_async_upload,
         " cache_auto=", options.adaptive_training_cache,
         " prefetch_views=", options.training_prefetch_views,
         " prefetch_adaptive=", options.training_prefetch_adaptive,
