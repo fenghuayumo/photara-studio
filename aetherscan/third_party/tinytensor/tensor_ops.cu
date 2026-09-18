@@ -2317,13 +2317,13 @@ namespace tinytensor::tensor_ops {
         const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
 
     // Scalar operations (uses constant_iterator, different from scalar_right_op!)
-    template LFS_CORE_API void launch_scalar_op_generic<float, float, ops::add_op>(
+    template YISON_CORE_API void launch_scalar_op_generic<float, float, ops::add_op>(
         const float*, float, float*, size_t, ops::add_op, cudaStream_t);
-    template LFS_CORE_API void launch_scalar_op_generic<float, float, ops::sub_op>(
+    template YISON_CORE_API void launch_scalar_op_generic<float, float, ops::sub_op>(
         const float*, float, float*, size_t, ops::sub_op, cudaStream_t);
-    template LFS_CORE_API void launch_scalar_op_generic<float, float, ops::mul_op>(
+    template YISON_CORE_API void launch_scalar_op_generic<float, float, ops::mul_op>(
         const float*, float, float*, size_t, ops::mul_op, cudaStream_t);
-    template LFS_CORE_API void launch_scalar_op_generic<float, float, ops::div_op>(
+    template YISON_CORE_API void launch_scalar_op_generic<float, float, ops::div_op>(
         const float*, float, float*, size_t, ops::div_op, cudaStream_t);
 
     // scalar_right_op instantiations for various operations (comprehensive list)

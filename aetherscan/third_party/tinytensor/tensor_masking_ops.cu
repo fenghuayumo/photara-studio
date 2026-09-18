@@ -1072,25 +1072,25 @@ namespace tinytensor::tensor_ops {
 
     // ============= Explicit Instantiations for Fused Gather =============
     // We need to explicitly instantiate the common functor types used with gather
-    template LFS_CORE_API void launch_gather_fused_unary<ops::abs_op>(const float*, const int*, float*, size_t, size_t, ops::abs_op, cudaStream_t);
-    template LFS_CORE_API void launch_gather_fused_unary<ops::sqrt_op>(const float*, const int*, float*, size_t, size_t, ops::sqrt_op, cudaStream_t);
-    template LFS_CORE_API void launch_gather_fused_unary<ops::neg_op>(const float*, const int*, float*, size_t, size_t, ops::neg_op, cudaStream_t);
+    template YISON_CORE_API void launch_gather_fused_unary<ops::abs_op>(const float*, const int*, float*, size_t, size_t, ops::abs_op, cudaStream_t);
+    template YISON_CORE_API void launch_gather_fused_unary<ops::sqrt_op>(const float*, const int*, float*, size_t, size_t, ops::sqrt_op, cudaStream_t);
+    template YISON_CORE_API void launch_gather_fused_unary<ops::neg_op>(const float*, const int*, float*, size_t, size_t, ops::neg_op, cudaStream_t);
 
     // ============= Explicit Instantiations for Scatter Operations =============
     // Instantiate for float, int, and byte-sized mask types
-    template LFS_CORE_API void launch_scatter<float>(float*, const int*, const float*, const size_t*, const size_t*, size_t, int, size_t, int, cudaStream_t);
-    template LFS_CORE_API void launch_scatter<int>(int*, const int*, const int*, const size_t*, const size_t*, size_t, int, size_t, int, cudaStream_t);
-    template LFS_CORE_API void launch_scatter<uint8_t>(uint8_t*, const int*, const uint8_t*, const size_t*, const size_t*, size_t, int, size_t, int, cudaStream_t);
+    template YISON_CORE_API void launch_scatter<float>(float*, const int*, const float*, const size_t*, const size_t*, size_t, int, size_t, int, cudaStream_t);
+    template YISON_CORE_API void launch_scatter<int>(int*, const int*, const int*, const size_t*, const size_t*, size_t, int, size_t, int, cudaStream_t);
+    template YISON_CORE_API void launch_scatter<uint8_t>(uint8_t*, const int*, const uint8_t*, const size_t*, const size_t*, size_t, int, size_t, int, cudaStream_t);
 
-    template LFS_CORE_API void launch_index_add<float>(float*, const int*, const float*, const size_t*, size_t, int, size_t, cudaStream_t);
-    template LFS_CORE_API void launch_index_add<int>(int*, const int*, const int*, const size_t*, size_t, int, size_t, cudaStream_t);
+    template YISON_CORE_API void launch_index_add<float>(float*, const int*, const float*, const size_t*, size_t, int, size_t, cudaStream_t);
+    template YISON_CORE_API void launch_index_add<int>(int*, const int*, const int*, const size_t*, size_t, int, size_t, cudaStream_t);
 
-    template LFS_CORE_API void launch_index_copy<float>(float*, const int*, const float*, const size_t*, size_t, int, size_t, cudaStream_t);
-    template LFS_CORE_API void launch_index_copy<int>(int*, const int*, const int*, const size_t*, size_t, int, size_t, cudaStream_t);
-    template LFS_CORE_API void launch_index_copy<uint8_t>(uint8_t*, const int*, const uint8_t*, const size_t*, size_t, int, size_t, cudaStream_t);
+    template YISON_CORE_API void launch_index_copy<float>(float*, const int*, const float*, const size_t*, size_t, int, size_t, cudaStream_t);
+    template YISON_CORE_API void launch_index_copy<int>(int*, const int*, const int*, const size_t*, size_t, int, size_t, cudaStream_t);
+    template YISON_CORE_API void launch_index_copy<uint8_t>(uint8_t*, const int*, const uint8_t*, const size_t*, size_t, int, size_t, cudaStream_t);
 
-    template LFS_CORE_API void launch_index_fill<float>(float*, const int*, float, const size_t*, size_t, int, size_t, cudaStream_t);
-    template LFS_CORE_API void launch_index_fill<int>(int*, const int*, int, const size_t*, size_t, int, size_t, cudaStream_t);
-    template LFS_CORE_API void launch_index_fill<uint8_t>(uint8_t*, const int*, uint8_t, const size_t*, size_t, int, size_t, cudaStream_t);
+    template YISON_CORE_API void launch_index_fill<float>(float*, const int*, float, const size_t*, size_t, int, size_t, cudaStream_t);
+    template YISON_CORE_API void launch_index_fill<int>(int*, const int*, int, const size_t*, size_t, int, size_t, cudaStream_t);
+    template YISON_CORE_API void launch_index_fill<uint8_t>(uint8_t*, const int*, uint8_t, const size_t*, size_t, int, size_t, cudaStream_t);
 
 } // namespace tinytensor::tensor_ops

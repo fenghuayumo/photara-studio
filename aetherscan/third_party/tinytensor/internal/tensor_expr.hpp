@@ -64,7 +64,7 @@ namespace tinytensor {
     // LEAF EXPRESSION: Wraps an existing Tensor
     // ============================================================================
 
-    class LFS_CORE_API TensorLeaf : public TensorExpr<TensorLeaf> {
+    class YISON_CORE_API TensorLeaf : public TensorExpr<TensorLeaf> {
     private:
         // Use shared_ptr to avoid needing complete Tensor type in header
         std::shared_ptr<Tensor> tensor_ptr_;

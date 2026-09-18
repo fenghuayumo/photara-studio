@@ -33,7 +33,7 @@ namespace tinytensor {
             size_t blocks_per_class[NUM_SIZE_CLASSES]{0};
         };
 
-        static LFS_CORE_API GPUSlabAllocator& instance();
+        static YISON_CORE_API GPUSlabAllocator& instance();
 
         void shutdown() {
             bool expected = false;

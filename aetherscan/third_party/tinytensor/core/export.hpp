@@ -6,6 +6,6 @@
 #define TINYTENSOR_API
 #define TINYTENSOR_EXPORT
 
-// For backward compatibility with original code using LFS_* macros
-#define LFS_CORE_API TINYTENSOR_API
-#define LFS_CORE_EXPORT TINYTENSOR_EXPORT
+// Export qualifiers used throughout the TinyTensor headers (YISON_ prefix).
+#define YISON_CORE_API TINYTENSOR_API
+#define YISON_CORE_EXPORT TINYTENSOR_EXPORT
