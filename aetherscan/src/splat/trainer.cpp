@@ -2104,6 +2104,7 @@ GaussianModel Trainer::train(
             " device_budget_bytes=", cache.device_budget_bytes,
             " device_budget_ceiling_bytes=", cache.device_budget_ceiling_bytes,
             " device_budget_growths=", cache.device_budget_growths,
+            " device_budget_rollbacks=", cache.device_budget_rollbacks,
             " device_hit_rate=", cache.device_hit_rate,
             " host_budget_bytes=", cache.host_budget_bytes,
             " dataset_packed_bytes=", cache.dataset_packed_bytes,

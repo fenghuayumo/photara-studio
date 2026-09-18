@@ -53,6 +53,10 @@ constexpr std::size_t k_min_device_budget = std::size_t{64} * k_mib;
 constexpr std::size_t k_min_device_growth = std::size_t{256} * k_mib;
 constexpr double k_device_hit_rate_target = 0.5;
 constexpr double k_device_cache_max_share = 0.4;
+// A larger cache has to recover at least this much iteration time during the
+// following observation window. Smaller changes are indistinguishable from
+// normal training noise and do not justify retaining the extra VRAM.
+constexpr double k_device_step_improvement = 0.01;
 
 std::size_t saturate_add(
     const std::size_t left, const std::size_t right) noexcept {
@@ -888,6 +892,8 @@ struct TrainingDataLoader::Impl {
         device_budget_window_hits_ = 0;
         device_budget_window_step_ms_ = 0.0;
         device_budget_saturated_ = false;
+        device_budget_previous_capacity_ = 0;
+        device_budget_baseline_step_ms_ = 0.0;
         prefetches_.clear();
         resolution_scale_ = clamped;
         update_cache_budgets();
@@ -947,7 +953,7 @@ struct TrainingDataLoader::Impl {
         return {requests_, device_hits_, uploaded_bytes_,
                 device_cached_bytes_, device_capacity_bytes_,
                 device_hit_rate_, device_ceiling_bytes_,
-                device_budget_growths_,
+                device_budget_growths_, device_budget_rollbacks_,
                 dataset_packed_bytes_, capacity_bytes_, get_wall_ms_,
                 host_hits_, prefetch_issued_, host_load_mean_ms_,
                 step_mean_ms_, prefetch_limit()};
@@ -1170,11 +1176,15 @@ private:
     std::size_t device_capacity_bytes_{};
     std::size_t device_cached_bytes_{};
     std::size_t device_ceiling_bytes_{};
+    std::size_t device_floor_bytes_{};
     std::size_t training_reserve_bytes_{};
     std::size_t device_budget_window_requests_{};
     std::size_t device_budget_window_hits_{};
     std::size_t device_budget_growths_{};
+    std::size_t device_budget_rollbacks_{};
+    std::size_t device_budget_previous_capacity_{};
     double device_budget_window_step_ms_{};
+    double device_budget_baseline_step_ms_{};
     bool device_budget_saturated_{false};
     double device_hit_rate_{};
     std::size_t dataset_packed_bytes_{};
@@ -1309,9 +1319,13 @@ private:
                 projected_gaussian_count(), std::size_t{2} * 1024));
     }
 
-    // One budget decision per epoch at most: a bigger cache only starts hitting
-    // as the epoch walks the views, so a shorter window cannot show the effect.
+    // Initial growth decisions observe at least one epoch. Once a growth is
+    // pending, 512 subsequent iterations are enough to determine whether the
+    // extra hits improved end-to-end cadence without waiting for another full
+    // large-dataset epoch.
     [[nodiscard]] std::size_t device_budget_window_requests() const {
+        if (device_budget_previous_capacity_ != 0)
+            return k_device_budget_window;
         return std::max<std::size_t>(k_device_budget_window, source_.size());
     }
 
@@ -1352,20 +1366,61 @@ private:
         // The cache is competing with live training state: give memory back
         // rather than wait for a refinement to force it.
         if (free_bytes < reserve) {
-            // Release the grown part first; the configured budget is the floor
-            // the trainer's own headroom check may take away in an emergency.
-            const std::size_t floor_bytes = std::max<std::size_t>(
-                options_.training_device_cache_bytes, k_min_device_budget);
+            // Release the grown part first. The effective floor is the safe
+            // initial budget after dataset, resolution and free-VRAM guards;
+            // the configured value may be larger than that safe budget.
+            const std::size_t floor_bytes = device_floor_bytes_;
             const std::size_t target =
                 std::max<std::size_t>(capacity / 2, floor_bytes);
             if (target < capacity) {
                 device_capacity_bytes_ = target;
-                make_room_for_device_bytes(0);
+                (void)make_room_for_device_bytes(0);
                 core::Logger::instance().warning(
                     "splat_data_cache device_budget_shrink budget_bytes=",
                     target, " free_bytes=", free_bytes,
                     " reserve_bytes=", reserve, " hit_rate=", hit_rate);
             }
+            device_budget_previous_capacity_ = 0;
+            device_budget_baseline_step_ms_ = 0.0;
+            return;
+        }
+
+        // Judge a growth step over the next complete window. Roll it back when
+        // the end-to-end iteration cadence did not improve: a higher cache hit
+        // rate alone is not useful when uploads are a negligible part of the
+        // critical path.
+        if (device_budget_previous_capacity_ != 0) {
+            const bool improved =
+                std::isfinite(mean_step_ms) && mean_step_ms > 0.0 &&
+                device_budget_baseline_step_ms_ > 0.0 &&
+                mean_step_ms <= device_budget_baseline_step_ms_ *
+                    (1.0 - k_device_step_improvement);
+            if (!improved) {
+                const std::size_t grown_capacity = device_capacity_bytes_;
+                device_capacity_bytes_ = device_budget_previous_capacity_;
+                (void)make_room_for_device_bytes(0);
+                ++device_budget_rollbacks_;
+                device_budget_saturated_ = true;
+                core::Logger::instance().info(
+                    "splat_data_cache device_budget_rollback budget_bytes=",
+                    device_capacity_bytes_, " grown_budget_bytes=", grown_capacity,
+                    " baseline_step_ms=", device_budget_baseline_step_ms_,
+                    " observed_step_ms=", mean_step_ms,
+                    " hit_rate=", hit_rate,
+                    " rollbacks=", device_budget_rollbacks_);
+            } else {
+                core::Logger::instance().info(
+                    "splat_data_cache device_budget_accept budget_bytes=",
+                    device_capacity_bytes_, " previous_bytes=",
+                    device_budget_previous_capacity_,
+                    " baseline_step_ms=", device_budget_baseline_step_ms_,
+                    " observed_step_ms=", mean_step_ms,
+                    " hit_rate=", hit_rate);
+            }
+            device_budget_previous_capacity_ = 0;
+            device_budget_baseline_step_ms_ = 0.0;
+            // Keep an accepted step for a full window before considering the
+            // next growth, avoiding multiple changes from the same sample.
             return;
         }
 
@@ -1377,10 +1432,8 @@ private:
         }
         const std::size_t idle =
             free_bytes > reserve ? free_bytes - reserve : 0;
-        if (idle < k_min_device_growth) {
-            device_budget_saturated_ = true;
-            return;
-        }
+        // A transient allocation spike must not permanently disable tuning.
+        if (idle < k_min_device_growth) return;
         // Grow by half of the current budget (at least one step) and never past
         // what the idle VRAM, the dataset and the device share allow.
         const std::size_t step = std::max<std::size_t>(
@@ -1392,6 +1445,8 @@ private:
             device_budget_saturated_ = true;
             return;
         }
+        device_budget_previous_capacity_ = capacity;
+        device_budget_baseline_step_ms_ = mean_step_ms;
         device_capacity_bytes_ = target;
         ++device_budget_growths_;
         core::Logger::instance().info(
@@ -1486,6 +1541,7 @@ private:
             free_bytes > k_gib ? free_bytes - k_gib : 0;
         budget = std::min(budget, free_guard);
         device_capacity_bytes_ = budget;
+        device_floor_bytes_ = budget;
 
         // Ceiling for the adaptive growth: idle VRAM beyond the projected
         // training state, capped by the dataset and by a fixed share of the

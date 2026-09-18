@@ -21,6 +21,7 @@ struct CacheStats {
     double device_hit_rate{};
     std::size_t device_budget_ceiling_bytes{};
     std::size_t device_budget_growths{};
+    std::size_t device_budget_rollbacks{};
     std::size_t dataset_packed_bytes{};
     std::size_t host_budget_bytes{};
     double get_wall_ms{};

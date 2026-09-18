@@ -273,7 +273,9 @@ ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-fai
 条目，`--splat-prefetch-adaptive=false` 只关闭前瞻自适应，不改变淘汰策略。
 device 侧缓存预算可用 `--splat-device-cache-max-mb` 放大到 `--splat-device-cache-mb` 之上：
 loader 按"这一迭代是否还需要从 host 上传"统计 device 命中率，命中率低于目标且显存有余量时逐级
-放大，上限同时受数据集、空闲显存（扣除投影训练状态）与显存占比约束；显存吃紧时先退还放大的部分。
+放大，上限同时受数据集、空闲显存（扣除投影训练状态）与显存占比约束；下一完整统计窗口的端到端
+迭代耗时至少改善 1% 才保留新增预算，否则自动回退。显存吃紧时先退还放大的部分，暂时的显存峰值
+不会永久关闭后续检查。
 默认 0 表示不放大——实测在 2MP / 1M Gaussian 这个量级上，上传已被计算掩盖，放大缓存反而因为占用
 显存而略慢（alameda +0.8%、iPhone 生产长度 +2.4%），只有在迭代很短、loader 真在关键路径上时放大
 才有意义。每次放大/收回都写入训练日志（`splat_data_cache device_budget_*`），命中率随

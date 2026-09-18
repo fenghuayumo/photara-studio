@@ -2826,13 +2826,13 @@ void test_training_device_cache() {
     const auto root = std::filesystem::temp_directory_path() /
         "aetherscan_training_device_cache_test";
     std::filesystem::create_directories(root);
-    std::vector<mvs::MvsView> views(2);
+    std::vector<mvs::MvsView> views(4);
     for (std::size_t i = 0; i < views.size(); ++i) {
         auto& view = views[i];
         view.path = root / (std::to_string(i) + ".png");
         io::save_rgb_png(
             io::RgbImage{16, 16, std::vector<std::uint8_t>(
-                16 * 16 * 3, static_cast<std::uint8_t>(60 + 90 * i))},
+                16 * 16 * 3, static_cast<std::uint8_t>(40 + 50 * i))},
             view.path);
         view.width = view.src_width = view.height = view.src_height = 16;
         view.fx = view.fy = view.src_fx = view.src_fy = 12.F;
@@ -2870,6 +2870,23 @@ void test_training_device_cache() {
     require(cache.stats().device_hits == 1 &&
             cache.stats().uploaded_bytes == options.training_device_cache_bytes,
             "Training cache hit uploaded the frame again");
+
+    // With two resident entries, LRU would evict view 2 after seeding 2 and 3.
+    // The published epoch plan knows that 2 is needed before 3 and retains it.
+    options.training_device_cache_bytes = 2 * 256 * (4 + 4 + 12);
+    splat::training_data::TrainingDataLoader planned(views, options);
+    const std::vector<std::size_t> epoch_plan{0, 1, 2, 3};
+    (void)planned.get(2);
+    (void)planned.get(3);
+    planned.set_epoch_plan(&epoch_plan, 0);
+    (void)planned.get(0);
+    planned.set_epoch_plan(&epoch_plan, 1);
+    (void)planned.get(1);
+    planned.set_epoch_plan(&epoch_plan, 2);
+    compare(planned.get(2), splat::make_training_view(views[2], options),
+            "Next-use cache eviction changed supervision");
+    require(planned.stats().device_hits == 1,
+            "Next-use cache eviction discarded the nearer planned view");
     const auto neighbour = cache.get(1);
     compare(first, reference,
             "first changed after LRU eviction");  // Tensors must survive eviction.
@@ -2952,7 +2969,8 @@ void test_training_device_cache() {
     // grows into a ceiling derived from the dataset and the idle VRAM once the
     // observed hit rate falls short, and a growth step is only kept while the
     // measured iteration time improves. A toy dataset cannot show a real
-    // speed-up, so this checks the budget movement and the supervision.
+    // speed-up, so this checks the budget movement and the supervision; the
+    // following complete window performs the keep/rollback decision.
     options.adaptive_training_cache = true;
     options.training_prefetch_views = 1;
     options.training_view_cache_bytes = 64 * 1024;
