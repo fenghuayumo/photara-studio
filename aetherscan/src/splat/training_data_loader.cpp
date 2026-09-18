@@ -1167,8 +1167,8 @@ private:
         double cache_fraction = 0.25 - std::max(0.0, reserve_fraction - 0.50);
         if (cache_fraction <= 0.0) {
             // A very large configured Gaussian cap may itself be close to the
-            // GPU limit. Keep only the legacy small cache share; the trainer
-            // will drop even that if live free memory becomes low.
+            // GPU limit. Keep only the small fixed share; the trainer will
+            // drop even that if live free memory becomes low.
             cache_fraction = 0.0;
         }
         std::size_t budget = cache_fraction == 0.0
