@@ -3129,6 +3129,25 @@ void test_source_resolution_and_knn_initialization() {
             std::abs(brush_model.opacity_logits.to_vector()[0]) < 1e-6F,
         "ADC+ sparse initialization does not match brush");
     options.densification_strategy = splat::DensificationStrategy::adc_igs;
+    for (const auto strategy : {splat::DensificationStrategy::adc_plus,
+                                splat::DensificationStrategy::adc_igs}) {
+        auto shared = options;
+        shared.densification_strategy = strategy;
+        shared.input_is_dense = false;
+        shared.progressive_resolution = true;
+        splat::apply_strategy_defaults(shared);
+        require(shared.means_lr == 2e-5F && shared.opacities_lr == 0.012F &&
+                    shared.initial_opacity == 0.5F &&
+                    shared.densify_gradient_threshold == 0.0025F &&
+                    shared.densify_select_fraction == 0.25F &&
+                    shared.densify_screen_threshold == 0.5F &&
+                    shared.progressive_resolution,
+                "Both ADC presets must share Brush parameters and preserve progressive resolution");
+        const auto initialized = splat::initialize_from_dense_cloud(scene, shared);
+        for (const float logit : initialized.opacity_logits.to_vector())
+            require(std::abs(logit) < 1e-6F,
+                    "Both ADC presets must initialize opacity at 0.5");
+    }
     for (const float initial_opacity : {0.1F, 0.25F}) {
         options.initial_opacity = initial_opacity;
         const auto igs_model = splat::initialize_from_dense_cloud(scene, options);
@@ -4415,6 +4434,58 @@ void test_geometry_regularization() {
             "Disabled geometry priors changed data gradients");
 }
 
+void test_igs_error_guidance_preserves_gradient_gate() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    auto stats = detail::make_densification_stats(2);
+    const auto gradient = Tensor::from_vector(std::vector<float>{.003F, .001F}, {2}, gpu);
+    const auto visible = Tensor::ones({2}, gpu);
+    const auto radii = Tensor::from_vector(std::vector<int>{1,1}, {2}, gpu);
+    const auto errors = Tensor::from_vector(std::vector<float>{.1F, 100.F}, {2}, gpu);
+    for (const int view : {0, 1})
+        detail::accumulate_densification_stats(
+            gradient, visible, radii, stats, 100, 100, true, true,
+            1.F, .5F, gradient, view, errors);
+    require(stats.gradient.to_vector() == gradient.to_vector(),
+            "Image error must not replace the legacy maximum gradient");
+    require(stats.image_error.to_vector() == std::vector<float>({.2F, 200.F}),
+            "Image error must accumulate independently across observations");
+    require(densification::error_map_sampling_factor(1e30F, 1.F, .25F) <= 1.25F &&
+                densification::error_map_sampling_factor(0.F, 1.F, .25F) >= .75F &&
+                densification::error_map_sampling_factor(1.F, 1.F, .25F) == 1.F &&
+                densification::error_map_sampling_factor(1.F, 0.F, .25F) == 1.F &&
+                densification::error_map_sampling_factor(1.F, 1.F, 0.F) == 1.F,
+            "Image error weights must be bounded and neutral without evidence/strength");
+    for (const float raw_gradient : {0.F, 1.F}) {
+        std::vector<float> baseline_centers;
+        for (const bool error_enabled : {false, true}) {
+            auto harness = make_refine_harness(make_default_refine_model(std::vector<float>(12, 0.F)));
+            harness.model.opacity_logits = Tensor::zeros({4,1}, gpu);
+            auto evidence = make_default_refine_stats();
+            evidence.gradient = Tensor::from_vector(
+                std::vector<float>{raw_gradient,0,0,0}, {4}, gpu);
+            evidence.max_screen_radius.fill_(0.F);
+            evidence.image_error = Tensor::from_vector(std::vector<float>{1,1e6F,1e6F,1e6F}, {4}, gpu);
+            evidence.view_support.fill_(2.F);
+            TrainingOptions options;
+            options.densification_strategy = DensificationStrategy::adc_igs;
+            options.densify_use_error_map = error_enabled;
+            options.densify_select_fraction = 1.F;
+            options.densification_cap = 8;
+            std::mt19937 random(42);
+            auto result = densification::refine_gaussians(
+                harness.model, evidence, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
+                options, random, harness.states());
+            require(result.grown == (raw_gradient > 0.F ? 1U : 0U),
+                    "Large image errors must not create growth eligibility or budget");
+            if (!error_enabled) baseline_centers = harness.model.means.to_vector();
+            else require(harness.model.means.to_vector() == baseline_centers,
+                    "Image error must not change the sole eligible parent or split rule");
+        }
+    }
+}
+
 void test_densify_mean_scores_and_oversize_weights() {
     using namespace aetherscan::splat;
     constexpr auto gpu = tinytensor::Device::CUDA;
@@ -4639,16 +4710,17 @@ void test_densification_strategies_and_dense_bypass() {
     auto igs_schedule = full_brush_schedule;
     igs_schedule.densification_strategy = splat::DensificationStrategy::adc_igs;
     splat::apply_strategy_defaults(igs_schedule);
-    // IGS keeps the legacy default cadence and grow-stop window; only the
-    // split screen threshold is pinned so oversized repair stays active.
+    // Both ADC presets start at step 200 without a warmup. IGS retains its
+    // existing stop window; explicit schedule overrides remain supported.
     require(
         !splat::densification::is_refinement_iteration(100, igs_schedule) &&
             !splat::densification::is_refinement_iteration(499, igs_schedule),
-        "IGS should wait for the legacy 500-step warmup");
+        "IGS must only refine at multiples of 200 by default");
     require(
-        splat::densification::is_refinement_iteration(600, igs_schedule) &&
-            splat::densification::is_refinement_iteration(700, igs_schedule),
-        "IGS should refine every 100 steps after the warmup");
+        splat::densification::is_refinement_iteration(200, igs_schedule) &&
+            splat::densification::is_refinement_iteration(400, igs_schedule) &&
+            !splat::densification::is_refinement_iteration(700, igs_schedule),
+        "IGS should start at step 200 with no warmup and refine every 200 steps");
     require(
         splat::densification::is_refinement_iteration(24'000, igs_schedule),
         "IGS should keep densifying until max(14000, N-2500)");
@@ -4656,7 +4728,14 @@ void test_densification_strategies_and_dense_bypass() {
         !splat::densification::is_refinement_iteration(28'400, igs_schedule),
         "IGS should stop densify at max(14000, N-2500)");
     require(igs_schedule.densify_screen_threshold == 0.5F,
-            "IGS oversized screen threshold should stay at the legacy value");
+            "IGS oversized screen threshold should match Brush");
+    auto overridden_schedule = igs_schedule;
+    overridden_schedule.refine_start_iter = 500;
+    overridden_schedule.refine_every = 100;
+    require(!splat::densification::is_refinement_iteration(400, overridden_schedule) &&
+                splat::densification::is_refinement_iteration(600, overridden_schedule) &&
+                splat::densification::is_refinement_iteration(700, overridden_schedule),
+            "Explicit refinement schedule overrides must remain effective");
     const auto brush_schedule_model =
         splat::Trainer(brush_schedule).train(scene);
     require(
@@ -4759,6 +4838,7 @@ int main(int argc, char** argv) {
         test_thin_splat_rgb_backward();
         test_pinhole_geometry_finite_differences();
         if (argc > 1 && std::string(argv[1]) == "--igs-only") {
+            test_igs_error_guidance_preserves_gradient_gate();
             test_source_resolution_and_knn_initialization();
             test_mask_loading();
             test_mask_loss_modes();
@@ -4829,6 +4909,7 @@ int main(int argc, char** argv) {
         test_adc_recycled_capacity_repairs_oversize();
         test_revised_noise_scales_with_scene_units();
         test_geometry_regularization();
+        test_igs_error_guidance_preserves_gradient_gate();
         test_densify_mean_scores_and_oversize_weights();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();

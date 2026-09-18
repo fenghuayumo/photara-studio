@@ -1180,7 +1180,10 @@ GaussianModel Trainer::train(
     const mvs::Vec3f scene_center = scene_geometry.center;
     float means_learning_rate_scale = scene_extent;
     refine::SceneGeometry refinement_geometry = scene_geometry;
-    if (options_.densification_strategy == DensificationStrategy::adc_plus) {
+    const bool brush_mean_lr_scale =
+        options_.densification_strategy == DensificationStrategy::adc_plus ||
+        (!options_.input_is_dense && is_adc_strategy(options_.densification_strategy));
+    if (brush_mean_lr_scale) {
         refinement_geometry = refine::brush_scene_geometry_cuda(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
     }
@@ -1635,7 +1638,8 @@ GaussianModel Trainer::train(
                 target.has_mask && (options_.use_mask || target.mask_is_validity);
             densify_map = detail::compute_ssim_cs_error_map(
                 loss_render.color, target.rgb, target.mask, mask_enabled,
-                options_.densify_loss_map_power);
+                options_.densification_strategy == DensificationStrategy::adc_igs
+                    ? 1.F : options_.densify_loss_map_power);
         }
         tinytensor::Tensor* photo_grad = &loss.color;
         if (ppisp_enabled && !ppisp_before_bilagrid) {
@@ -1695,15 +1699,23 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::multi_view_gradient_merge);
         if (densification_enabled) {
             tinytensor::Tensor step_score = gradients.refine_weight;
+            tinytensor::Tensor image_error;
+            const bool igs = options_.densification_strategy == DensificationStrategy::adc_igs;
             bool use_maximum = true;
             if (options_.densify_use_error_map &&
                 gradients.densify_weight.is_valid()) {
-                step_score = detail::densify_avg_scores(
+                auto error_score = detail::densify_avg_scores(
                     gradients.densify_weight, gradients.densify_weight_den);
-                step_score = detail::densify_blend_world_gradient(
-                    step_score, gradients.means, model.log_scales,
-                    options_.densify_world_gradient_blend);
-                use_maximum = false;
+                if (igs) {
+                    // Keep the gradient gate and the edge evidence: the
+                    // image error only re-orders qualified growth parents.
+                    image_error = std::move(error_score);
+                } else {
+                    step_score = detail::densify_blend_world_gradient(
+                        error_score, gradients.means, model.log_scales,
+                        options_.densify_world_gradient_blend);
+                    use_maximum = false;
+                }
             }
             detail::accumulate_densification_stats(
                 step_score, rendered.visibility, rendered.radii,
@@ -1711,10 +1723,11 @@ GaussianModel Trainer::train(
                 target.camera.height,
                 use_maximum,
                 is_adc_strategy(options_.densification_strategy),
-                options_.densify_use_error_map ? options_.densify_score_power : 1.F,
+                options_.densify_use_error_map && !igs ? options_.densify_score_power : 1.F,
                 options_.densification_strategy == DensificationStrategy::adc_igs
                     ? options_.densify_screen_threshold : 0.F,
-                gradients.refine_weight, static_cast<int>(view_index));
+                gradients.refine_weight, static_cast<int>(view_index),
+                image_error);
         }
         cuda_profiler.mark(CudaTrainingStage::densification_stats);
 
@@ -1780,8 +1793,7 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::optimizer);
 
         if (densification_enabled &&
-            options_.densification_strategy ==
-                DensificationStrategy::adc_plus) {
+            is_adc_strategy(options_.densification_strategy)) {
             const unsigned noise_stop = refine::strategy_schedule(options_).stop;
             if (iteration < noise_stop)
                 detail::inject_adc_noise(
@@ -1789,10 +1801,7 @@ GaussianModel Trainer::train(
                     options_.densify_revised_noise
                         ? options_.mean_noise_weight * std::pow(0.01F, progress_fraction)
                         : means_lr * options_.mean_noise_weight,
-                    options_.densification_strategy ==
-                            DensificationStrategy::adc_plus
-                        ? refinement_geometry.scale
-                        : scene_extent,
+                    refinement_geometry.scale,
                     options_.seed + iteration,
                     rendered.radii,
                     options_.densify_revised_noise);
@@ -1834,11 +1843,9 @@ GaussianModel Trainer::train(
                 model.log_scales, options_.max_scale_ratio);
             refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
-            if (refinement_happened && adc_plus) {
-                if (options_.densification_strategy ==
-                    DensificationStrategy::adc_plus)
-                    refinement_geometry =
-                        refine::brush_scene_geometry_cuda(model.means);
+            if (refinement_happened && brush_mean_lr_scale) {
+                refinement_geometry =
+                    refine::brush_scene_geometry_cuda(model.means);
                 means_learning_rate_scale = refinement_geometry.scale;
             }
             if (refinement_happened && report_progress) {

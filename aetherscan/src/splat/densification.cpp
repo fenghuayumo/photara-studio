@@ -132,11 +132,11 @@ StrategySchedule strategy_schedule(const TrainingOptions& options) {
     return {
         options.refine_start_iter != 0
             ? options.refine_start_iter
-            : igs ? 500U : adc ? 0U : 750U,
+            : adc ? 0U : 750U,
         stop,
         options.refine_every != 0
             ? options.refine_every
-            : igs ? 100U : adc ? 200U : 500U};
+            : adc ? 200U : 500U};
 }
 
 GaussianModel clone_model(const GaussianModel& model) {
@@ -182,6 +182,18 @@ bool is_refinement_iteration(
 namespace aetherscan::splat {
 
 void apply_strategy_defaults(TrainingOptions& options) {
+    if (is_adc_strategy(options.densification_strategy)) {
+        // Shared training parameters. Apply explicit caller overrides
+        // after this preset; dense input keeps its separate optimizer setup.
+        options.densify_gradient_threshold = 0.0025F;
+        options.densify_select_fraction = 0.25F;
+        options.densify_screen_threshold = 0.5F;
+        if (!options.input_is_dense) {
+            options.means_lr = 2e-5F;
+            options.opacities_lr = 0.012F;
+            options.initial_opacity = 0.5F;
+        }
+    }
     switch (options.densification_strategy) {
     case DensificationStrategy::adc_plus:
         // Brush ADC+ grows through the whole refinement window: floater
@@ -191,14 +203,17 @@ void apply_strategy_defaults(TrainingOptions& options) {
             std::max(options.grow_stop_iter, options.iterations);
         break;
     case DensificationStrategy::adc_igs:
-        // ADC-IGS keeps the legacy refinement decisions: gradient-gated
-        // growth sampled by opacity/edge evidence, gumbel selection, the
-        // random-axis exact-alpha split and the default cadence. The SSIM
-        // error-map / footprint-weighted scoring that replaced it
-        // systematically favours hard-to-fit background rays; on turntable
-        // captures that bloated alpha coverage from ~40% to ~90% of the
-        // frame and wrapped meshes in floater shells.
-        options.densify_screen_threshold = 0.5F;
+        // ADC-IGS decides growth with the projected-position gradient gate,
+        // opacity/edge evidence sampling, gumbel selection, the random-axis
+        // exact-alpha split and the default cadence. A scoring pipeline that
+        // replaced that gate with an SSIM error-map/footprint score
+        // systematically favoured hard-to-fit background rays; on turntable
+        // captures it bloated alpha coverage from ~40% to ~90% of the frame
+        // and wrapped meshes in floater shells. The bounded re-order form
+        // (densify_use_error_map) keeps the gradient gate and only reshuffles
+        // which qualified parents spend the growth budget; the 2026-09-18
+        // sweep measured it inside the ori seed noise on every dataset
+        // (docs/ADC_IGS_ERROR_MAP_20260917).
         options.densify_use_error_map = false;
         break;
     case DensificationStrategy::dense_adaptive:

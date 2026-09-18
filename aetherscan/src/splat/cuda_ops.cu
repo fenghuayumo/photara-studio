@@ -1476,7 +1476,8 @@ __global__ void accumulate_densification_kernel(
     const bool use_maximum, const bool require_contribution_visibility,
     const float step_score_power, const float oversize_screen_threshold,
     const float* geometry_gradient, float* max_geometry_gradient,
-    int* first_view, float* view_support, const int view_index) {
+    int* first_view, float* view_support, const int view_index,
+    const float* image_error, float* accumulated_error) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= gaussian_count || radii[index] <= 0 ||
         (require_contribution_visibility && visibility[index] <= 0.F))
@@ -1496,6 +1497,8 @@ __global__ void accumulate_densification_kernel(
     else
         gradient[index] += weight;
     count[index] += 1.F;
+    if (image_error != nullptr && isfinite(image_error[index]))
+        accumulated_error[index] += fmaxf(image_error[index], 0.F);
     if (view_index >= 0) {
         if (first_view[index] == 0) {
             first_view[index] = view_index + 1;
@@ -1642,10 +1645,10 @@ __global__ void split_gaussians_kernel(
             log_scale_delta[axis] = logf(fmaxf(k, 1e-12F));
         }
     } else if (mode == SplitMode::igs_random) {
-        // Legacy ADC-IGS split. One shared random scalar offsets every axis
-        // by its own scale, so the displacement direction is random in the
-        // local frame. Only the largest axis halves, and the children keep
-        // the alpha whose two-way composite reproduces the parent exactly.
+        // ADC-IGS split. One shared random scalar offsets every axis by its
+        // own scale, so the displacement direction is random in the local
+        // frame. Only the largest axis halves, and the children keep the
+        // alpha whose two-way composite reproduces the parent exactly.
         int largest = 0;
         if (parent_log_scales[3 * parent + 1] >
             parent_log_scales[3 * parent + largest]) largest = 1;
@@ -2862,6 +2865,7 @@ DensificationStats make_densification_stats(const std::size_t count) {
         tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
         tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA).to(
             tinytensor::DataType::Int32),
+        tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA),
         tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA)};
 }
 
@@ -2921,7 +2925,8 @@ void accumulate_densification_stats(
     const bool use_maximum,
     const bool require_contribution_visibility,
     const float step_score_power, const float oversize_screen_threshold,
-    const tinytensor::Tensor& geometry_gradient, const int view_index) {
+    const tinytensor::Tensor& geometry_gradient, const int view_index,
+    const tinytensor::Tensor& image_error) {
     const std::size_t count = refine_weight.numel();
     if (count == 0) return;
     const float inverse_resolution = 1.F /
@@ -2935,7 +2940,9 @@ void accumulate_densification_stats(
         require_contribution_visibility, step_score_power, oversize_screen_threshold,
         geometry_gradient.is_valid() ? geometry_gradient.ptr<float>() : nullptr,
         stats.geometry_gradient.ptr<float>(), stats.first_view.ptr<int>(),
-        stats.view_support.ptr<float>(), view_index);
+        stats.view_support.ptr<float>(), view_index,
+        image_error.is_valid() ? image_error.ptr<float>() : nullptr,
+        stats.image_error.ptr<float>());
     check_cuda(cudaGetLastError(), "accumulate GGGS densification stats");
 }
 

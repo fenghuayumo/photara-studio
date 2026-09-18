@@ -2,6 +2,7 @@
 
 #include "densification_adc_plus.hpp"
 #include "densification_igs.hpp"
+#include "core/logging.hpp"
 
 #include <cuda_runtime.h>
 
@@ -151,7 +152,7 @@ std::vector<std::size_t> weighted_unique_sample(
     if (gumbel) {
         // Gumbel top-k sampling: log-weight plus standard Gumbel noise,
         // then take the requested largest perturbed scores. This is the
-        // legacy ADC-IGS selection rule.
+        // ADC-IGS selection rule.
         std::uniform_real_distribution<float> uniform(1e-7F, 1.F - 1e-7F);
         std::vector<std::pair<float, std::size_t>> scores;
         scores.reserve(valid.size());
@@ -214,6 +215,10 @@ RefinementCounts refine_gaussians(
     const auto counts = download<float>(stats.count);
     const auto screen = download<float>(stats.max_screen_radius);
     const auto priorities = download<float>(stats.priority);
+    const bool error_guided = options.densification_strategy == DensificationStrategy::adc_igs &&
+        options.densify_use_error_map && options.densify_error_map_weight != 0.F;
+    const auto image_error = error_guided ? download<float>(stats.image_error) : std::vector<float>{};
+    const auto view_support = error_guided ? download<float>(stats.view_support) : std::vector<float>{};
     const auto opacities = download<float>(model.opacity_logits);
     const auto log_scales = download<float>(model.log_scales);
     // dense_adaptive performs a non-finite and bounds sweep over the complete
@@ -337,6 +342,7 @@ RefinementCounts refine_gaussians(
                 model,
                 options.opacity_decay *
                     std::max(remaining_progress, 0.F),
+                // Optional scale decay; zero by default (Brush parity).
                 options.scale_decay *
                     std::max(remaining_progress, 0.F));
         }
@@ -360,6 +366,32 @@ RefinementCounts refine_gaussians(
         priority_median = std::max(*middle, 1e-9F);
     }
     const bool allow_growth = !adc || iteration < options.grow_stop_iter;
+    // One candidate's mean error over the observations that saw it. The
+    // accumulated value is a contribution-weighted average per view, so the
+    // division is the temporal average over those observations.
+    const auto sample_error = [&](const std::size_t index) {
+        return image_error[index] / std::max(counts[index], 1.F);
+    };
+    std::vector<float> candidate_errors;
+    if (error_guided && allow_growth)
+        for (const auto& candidate : candidates) {
+            const auto i = candidate.old_index;
+            if (candidate.score <= options.densify_gradient_threshold || view_support[i] < 2.F)
+                continue;
+            const float error = sample_error(i);
+            if (std::isfinite(error) && error > 0.F) candidate_errors.push_back(error);
+        }
+    float error_median = 0.F;
+    if (!candidate_errors.empty()) {
+        auto middle = candidate_errors.begin() + candidate_errors.size() / 2;
+        std::nth_element(candidate_errors.begin(), middle, candidate_errors.end());
+        error_median = *middle;
+    }
+    // Selected-error diagnostics: the ratio between the median error of the
+    // parents that actually spent the growth budget and the candidate median.
+    // One means the error evidence did not move the choice at all.
+    std::vector<float> error_by_row(error_guided ? model.size() : 0, 0.F);
+    std::size_t error_reweighted = 0;
     for (const Candidate& candidate : candidates) {
         const float opacity = 1.F /
             (1.F + std::exp(-opacities[candidate.old_index]));
@@ -377,10 +409,20 @@ RefinementCounts refine_gaussians(
             adc ? opacity * edge_factor
                 : std::max(candidate.score, 1e-12F) * screen_factor);
         if (allow_growth &&
-            candidate.score > options.densify_gradient_threshold)
+            candidate.score > options.densify_gradient_threshold) {
+            float error_factor = 1.F;
+            if (error_guided && view_support[candidate.old_index] >= 2.F &&
+                error_median > 0.F) {
+                const float error = sample_error(candidate.old_index);
+                error_by_row[candidate.new_index] = error;
+                error_factor = error_map_sampling_factor(
+                    error, error_median, options.densify_error_map_weight);
+                ++error_reweighted;
+            }
             growth_weights.emplace_back(
                 candidate.new_index,
-                candidate.score * edge_factor * screen_factor);
+                candidate.score * edge_factor * screen_factor * error_factor);
+        }
         if (adc && allow_growth && candidate.oversized)
             forced.insert(candidate.new_index);
     }
@@ -410,6 +452,19 @@ RefinementCounts refine_gaussians(
     selected = weighted_unique_sample(
         growth_weights, std::min(remaining, desired_growth), gumbel, random);
     forced.insert(selected.begin(), selected.end());
+    float selected_error_ratio = 0.F;
+    if (error_guided && !selected.empty()) {
+        std::vector<float> chosen;
+        chosen.reserve(selected.size());
+        for (const std::size_t index : selected)
+            if (error_by_row[index] > 0.F)
+                chosen.push_back(error_by_row[index]);
+        if (!chosen.empty()) {
+            auto middle = chosen.begin() + chosen.size() / 2;
+            std::nth_element(chosen.begin(), middle, chosen.end());
+            selected_error_ratio = *middle / error_median;
+        }
+    }
     split_parents.reserve(std::min(capacity, forced.size()));
     for (const std::size_t parent : forced) {
         if (split_parents.size() >= capacity) break;
@@ -435,10 +490,20 @@ RefinementCounts refine_gaussians(
             model,
             options.opacity_decay *
                 std::max(remaining_progress, 0.F),
+            // Optional scale decay; zero by default (Brush parity).
             options.scale_decay *
                 std::max(remaining_progress, 0.F));
     }
     stats = detail::make_densification_stats(model.size());
+    if (error_guided)
+        core::Logger::instance().info("igs_error_refine iteration=", iteration,
+            " weight=", options.densify_error_map_weight,
+            " candidates=", growth_weights.size(),
+            " reweighted=", error_reweighted,
+            " error_median=", error_median,
+            " selected_error_ratio=", selected_error_ratio,
+            " grown=", split_parents.size(),
+            " pruned=", pruned, " gaussians=", model.size());
     return {split_parents.size(), pruned};
 }
 

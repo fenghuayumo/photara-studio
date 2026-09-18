@@ -86,10 +86,17 @@ struct TrainingOptions {
     // Broad semi-transparent splats that own the rendered median depth wrap
     // meshes in a floater shell. Start size repair past a quarter frame.
     float densify_screen_threshold{0.25F};
-    // When true, densify ranks Gaussians by a SSIM contrast-structure error
-    // map instead of ||dL/dmean2d||. ADC-IGS enables this in
-    // apply_strategy_defaults().
+    // ADC-IGS uses error only to re-order gradient-qualified growth parents;
+    // its gradient threshold, growth budget, replacement and split rule are
+    // untouched, so the bounded multiplier can only reshuffle which quarter
+    // of the qualified set spends the budget. ADC+ keeps its separate
+    // error-score mode. Opt-in: the 2026-09-17 sweep found the effect on the
+    // ori protocol inside the +-0.4 dB seed noise (docs/ADC_IGS_ERROR_MAP).
     bool densify_use_error_map{false};
+    // Sampling strength in [0, 1]: 0 disables the re-order, 1 lets a
+    // candidate's own error ratio move its growth weight by up to +-100%.
+    // 0.25 is the tested reference setting.
+    float densify_error_map_weight{0.25F};
     // Per-view exponent after image-to-splat reduction, before window averaging.
     float densify_score_power{0.4F};
     // Geometric blend with ||dL/dmean_world|| * max(scale), following
@@ -104,7 +111,7 @@ struct TrainingOptions {
     // <= 1 fall back to densify_select_fraction of above-threshold rows.
     float densify_growth_factor{0.F};
     // Share of the growth budget spent on oversized (screen-cap) parents.
-    // 0 keeps the legacy "split every oversized row that fits" path.
+    // 0 keeps the default "split every oversized row that fits" path.
     float densify_oversize_split_fraction{0.F};
     float densify_oversize_score_blend{1.F};
     bool densify_clip_screen_size{false};
@@ -119,11 +126,15 @@ struct TrainingOptions {
     float dense_growth_fraction{0.005F};
     float prune_opacity{1.F / 255.F};
     float opacity_decay{0.004F};
-    // Legacy scale-decay setting. ADC+ and IGS only decay opacity.
-    float scale_decay{0.002F};
+    // Optional per-refine scale shrink, tapered by remaining training
+    // progress. Disabled by default: the 2026-09-18 six-seed paired A/B
+    // found no detectable quality effect on either ADC strategy
+    // (artifacts/scale_decay_ab_20260918), and Brush does not decay scales.
+    float scale_decay{0.F};
     float mean_noise_weight{50.F};
     // Uniform noise around a black background, clamped to [0,1].
-    // Kept disabled for dense GGGS; ADC+ CLI parity enables brush's 0.1.
+    // Kept disabled for dense GGGS; the CLI enables brush's 0.1 for both
+    // ADC strategies.
     float background_noise_strength{0.F};
     float initial_opacity{0.1F};
     float initial_scale{1.F};
@@ -314,7 +325,7 @@ struct TrainingOptions {
     bool adaptive_training_cache{true};
     // Packed RGBA8 plus optional depth/normal CUDA cache. Zero disables it.
     // Adaptive mode is bounded by the projected training state and total VRAM;
-    // fixed mode retains the legacy free-VRAM/8 guard.
+    // fixed mode retains the earlier free-VRAM/8 guard.
     std::size_t training_device_cache_bytes{std::size_t{512} * 1024 * 1024};
     // Decode and pack upcoming shuffled views on background threads while CUDA
     // processes the current iteration, so a host cache miss does not stall the

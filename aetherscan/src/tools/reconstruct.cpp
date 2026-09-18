@@ -194,6 +194,9 @@ struct ReconstructCli {
     bool splat_max_scale_ratio_overridden{false};
     bool splat_constrain_scales{false};
     std::string splat_strategy{"adc_igs"};
+    bool splat_densify_error_map{false};
+    float splat_densify_error_weight{0.25F};
+    unsigned splat_seed{42};
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
     std::uint64_t splat_densification_cap{1'000'000};
@@ -403,6 +406,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  densify growth ceiling (default 1000000)\n"
+              << "  --splat-densify-error-map BOOL  bounded error guidance for ADC-IGS growth (default false)\n"
+              << "  --splat-densify-error-weight W  sampling strength in [0,1] (default 0.25)\n"
               << "  --splat-init-point-budget N  cap the initialization cloud (default 0 = keep all)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mask-mesh PATH  load an existing PLY mesh and render masks/previews\n"
@@ -816,6 +821,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("adc_igs"))
         ("splat-densification", "Enable splat split/prune",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("splat-densify-error-map", "Enable bounded error guidance for ADC-IGS growth",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-densify-error-weight", "Error sampling strength in [0,1]",
+         cxxopts::value<float>()->default_value("0.25"))
+        ("splat-seed", "Splat training RNG seed",
+         cxxopts::value<unsigned>()->default_value("42"))
         ("splat-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
         ("splat-densification-cap", "Densify growth ceiling",
@@ -1246,6 +1257,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-ppisp-before-bilagrid"].as<bool>();
     cli.splat_strategy = result["splat-strategy"].as<std::string>();
     cli.splat_densification = result["splat-densification"].as<bool>();
+    cli.splat_densify_error_map = result["splat-densify-error-map"].as<bool>();
+    cli.splat_densify_error_weight = result["splat-densify-error-weight"].as<float>();
+    if (!std::isfinite(cli.splat_densify_error_weight) ||
+        cli.splat_densify_error_weight < 0.F || cli.splat_densify_error_weight > 1.F)
+        throw std::invalid_argument("--splat-densify-error-weight must be finite and in [0,1]");
+    cli.splat_seed = result["splat-seed"].as<unsigned>();
+    if (cli.splat_densify_error_map && cli.splat_strategy != "adc_igs")
+        throw std::invalid_argument("--splat-densify-error-map requires adc_igs");
     cli.splat_structure_freeze_iter =
         result["splat-structure-freeze-iter"].as<unsigned>();
     cli.splat_densification_cap =
@@ -2710,10 +2729,12 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     else
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::adc_igs;
-    // Shared densification knobs may default to different values per
-    // strategy; user-provided CLI overrides are applied afterwards and keep
-    // winning.
+    // ADC+ and ADC-IGS share the Brush learning rates, initial opacity and
+    // growth thresholds. Apply user overrides after the strategy preset.
     aetherscan::splat::apply_strategy_defaults(options);
+    options.densify_use_error_map = cli.splat_densify_error_map;
+    options.densify_error_map_weight = cli.splat_densify_error_weight;
+    options.seed = cli.splat_seed;
     options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;
     options.use_bilateral_grid = cli.splat_bilateral_grid;
@@ -2732,16 +2753,11 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.ppisp_lr = cli.splat_ppisp_lr;
     options.ppisp_before_bilagrid = cli.splat_ppisp_before_bilagrid;
     if (!dense_input &&
-        options.densification_strategy ==
-            aetherscan::splat::DensificationStrategy::adc_plus) {
-        // brush-train optimizer defaults. The trainer also switches ADC+ to
-        // brush's 2-NN/identity/0.5-opacity sparse initialization. ADC-IGS
-        // keeps the default optimizer schedule: forcing brush's 100x lower
-        // means LR plus fixed-resolution full-SH training on sparse input
-        // collapsed held-out quality on turntable captures.
-        options.means_lr = 2e-5F;
+        aetherscan::splat::is_adc_strategy(options.densification_strategy)) {
+        // Remaining Brush optimizer settings, shared by ADC+ and ADC-IGS so
+        // the strategies differ only in densification. The means/opacity
+        // learning rates and initial opacity are set above.
         options.scales_lr = 5e-3F;
-        options.opacities_lr = 0.012F;
         options.quaternions_lr = 2e-3F;
         options.sh0_lr = 2e-3F;
         options.sh_rest_lr = 2e-4F;
@@ -2750,17 +2766,10 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         // Brush explicitly constructs AdamScaled with epsilon=1e-15; the
         // means scheduler decays by 100x to 2e-7 over the configured run.
         options.adam_epsilon = 1e-15F;
-        // brush trains every configured SH band from the first step and keeps
-        // a fixed image scale.  Letting geometry first fit quarter-resolution
-        // images with only DC color gives ADC+ a strong incentive to create
-        // large view-dependent sheets; later stages can recover training-view
-        // PSNR without removing that erroneous geometry, so it appears as
-        // floaters in extrapolated views.
+        // Keep Brush's SH schedule. Both strategies honor the same explicit
+        // progressive-resolution settings loaded from the CLI above.
         options.sh_degree_interval = 0;
-        options.progressive_resolution = false;
         options.background_noise_strength = 0.1F;
-    } else if (!dense_input) {
-        options.opacities_lr = 0.025F;
     }
     const std::size_t projected_mask_views =
         static_cast<std::size_t>(std::count_if(
@@ -2917,6 +2926,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " ppisp_lr=", options.ppisp_lr,
         " ppisp_before_bilagrid=", options.ppisp_before_bilagrid,
         " densification_cap=", options.densification_cap,
+        " densify_error_map=", options.densify_use_error_map,
+        " densify_error_weight=", options.densify_error_map_weight,
         " dense_recycle_fraction=", options.dense_recycle_fraction,
         " dense_growth_fraction=", options.dense_growth_fraction,
         " use_mask=", options.use_mask,
@@ -3529,7 +3540,8 @@ int main(int argc, char** argv) {
 
         aetherscan::sfm::Scene scene;
         bool loaded_project_sfm = false;
-        const bool needs_cameras = cli.splat || cli.dense || cli.texture;
+        const bool needs_cameras = cli.splat || cli.dense || cli.texture ||
+            !cli.export_colmap_dir.empty();
         if (project_output && needs_cameras &&
             archive.has(aetherscan::project::ChunkType::sfm)) {
             auto loaded = aetherscan::project::read_sfm(archive);

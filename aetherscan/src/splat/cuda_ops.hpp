@@ -49,6 +49,8 @@ struct DensificationStats {
     // Distinct contributing camera support, saturated at two per window.
     tinytensor::Tensor first_view;
     tinytensor::Tensor view_support;
+    // Sum of contribution-normalized image error, independent of gradients.
+    tinytensor::Tensor image_error;
 };
 
 // Clear selected parent moments without temporary zero tensors or per-state scatters.
@@ -257,7 +259,8 @@ void accumulate_densification_stats(
     float step_score_power = 1.F,
     float oversize_screen_threshold = 0.F,
     const tinytensor::Tensor& geometry_gradient = {},
-    int view_index = -1);
+    int view_index = -1,
+    const tinytensor::Tensor& image_error = {});
 
 // Per-pixel nonnegative (1 - SSIM contrast-structure)^power, shape [H, W].
 tinytensor::Tensor compute_ssim_cs_error_map(
@@ -297,17 +300,29 @@ void clip_log_scale_by_screen(
     float screen_threshold,
     float hardness);
 
-// Split operators with a live caller. The kernel used to carry six variants;
-// ADC-IGS now shares ADC+'s split, so only these two remain.
+// Split operators with a live caller, one per densification strategy.
 enum class SplitMode {
-    // Brush ADC+ covariance-aware split: per-axis shrink proportional to the
-    // axis variance share, anti-correlated offset that preserves the centroid.
+    // ADC+ (Brush) split along the major variance axis only: k = 1/sqrt(2)
+    // keeps the rank-one mixture covariance, and a parent whose projected
+    // radius exceeds split_at_screen_size tightens k so the children land on
+    // that size. Offsets stay on the major axis, so thin surfaces keep their
+    // normal thickness, and the alpha maps (1-a) -> (1-a')^sqrt(2).
     adc_covariance,
     // Dense MVS tangent-plane split: local Z keeps the fused normal thickness.
     dense_tangent,
-    // Legacy ADC-IGS split: one shared random scalar offsets every axis by
-    // its own scale, the largest axis halves and the two children's alpha
-    // composites reproduce the parent exactly.
+    // ADC-IGS split: one shared normal scalar xi pushes both children apart
+    // along every local axis by its own scale, so the direction is random in
+    // the local frame and the mixture variance grows instead of being
+    // preserved. Only the largest axis halves, there is no screen-size trim,
+    // and the alpha maps (1-a) -> (1-a')^2 so the two children composite back
+    // to the parent exactly. ADC-IGS must keep this operator: routing its
+    // growth through adc_covariance instead cost 1.33 dB and 1.50 dB on the
+    // ori protocol at seeds 42 and 7 (SSIM -0.009 / -0.014). The covariance
+    // operator shrinks and displaces along the major axis only, so its
+    // children stay wide across the other two while its alpha mapping is the
+    // milder (1-a)^(1/sqrt2) one; ADC-IGS then keeps half the surface width
+    // repaired and the mesh turns soft (Marching Cubes 12.1M faces against
+    // 7.1M for the same seed).
     igs_random,
 };
 

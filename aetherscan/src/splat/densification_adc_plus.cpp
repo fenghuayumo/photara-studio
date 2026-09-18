@@ -358,13 +358,10 @@ RefinementCounts AdcPlusStrategy::refine(
             std::max(1.F, static_cast<float>(options.iterations));
     detail::apply_adc_decay(
         model,
-        // opacity_decay was calibrated for ADC+'s 200-step interval.
-        // IGS refining every 100 steps must not double that regularizer.
-        options.opacity_decay * std::max(remaining_progress, 0.F) *
-            (options.densification_strategy == DensificationStrategy::adc_igs
-                ? static_cast<float>(strategy_schedule(options).every) / 200.F
-                : 1.F),
-        0.F);
+        // Calibrated for the shared 200-step refinement interval; the
+        // optional scale factor defaults to zero (Brush parity).
+        options.opacity_decay * std::max(remaining_progress, 0.F),
+        options.scale_decay * std::max(remaining_progress, 0.F));
     stats = detail::make_densification_stats(model.size());
     aetherscan::core::Logger::instance().info(
         name(), "_refine iteration=", iteration,
