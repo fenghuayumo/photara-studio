@@ -106,7 +106,8 @@ void grow_training_model(
     GaussianModel& model, const std::vector<int>& parents,
     const detail::SplitMode split_mode, const TrainingOptions& options,
     std::mt19937& random, const AdamStates& states,
-    const std::vector<float>& screen_sizes) {
+    const std::vector<float>& screen_sizes,
+    const float split_opacity_k = 0.5F) {
     if (parents.empty()) return;
     const auto indices = index_tensor(parents);
     GaussianModel children = select_model_rows(model, indices);
@@ -128,7 +129,8 @@ void grow_training_model(
         options.prune_opacity,
         split_mode == detail::SplitMode::adc_covariance
             ? options.densify_screen_threshold
-            : 0.F);
+            : 0.F,
+        split_opacity_k);
     // Splitting mutates the retained parent as well as creating a child.
     // Both are new primitives and must start with clean optimizer moments.
     zero_adam_rows(parents, states);
@@ -196,6 +198,183 @@ std::vector<std::size_t> weighted_unique_sample(
 
 }  // namespace
 
+RefinementCounts refine_emc(
+    GaussianModel& model, detail::DensificationStats& stats,
+    const unsigned iteration, const TrainingOptions& options,
+    std::mt19937& random, const AdamStates& states) {
+    const std::size_t old_count = model.size();
+    const auto errors = download<float>(stats.image_error);
+    const auto counts = download<float>(stats.count);
+    const auto oversize = download<float>(stats.priority);
+    const auto opacity_logits = download<float>(model.opacity_logits);
+    const auto log_scales = download<float>(model.log_scales);
+
+    // The long-axis opacity split factor is scheduled from 0.5 to 0.6
+    // over the first 15k iterations.
+    const float split_k = 0.5F + 0.1F * std::min(
+        1.F, static_cast<float>(iteration) / 15'000.F);
+
+    std::vector<float> score(old_count, 0.F);
+    std::vector<char> dead(old_count, 0);
+    std::size_t dead_count = 0;
+    constexpr float k_dead_log_scale = -40.F;
+    for (std::size_t index = 0; index < old_count; ++index) {
+        const float opacity =
+            1.F / (1.F + std::exp(-opacity_logits[index]));
+        float maximum_log_scale = -std::numeric_limits<float>::infinity();
+        bool finite = std::isfinite(opacity_logits[index]);
+        for (int axis = 0; axis < 3; ++axis) {
+            const float log_scale = log_scales[3 * index + axis];
+            finite = finite && std::isfinite(log_scale);
+            maximum_log_scale = std::max(maximum_log_scale, log_scale);
+        }
+        dead[index] = !finite ||
+            opacity < options.prune_opacity ||
+            maximum_log_scale <= k_dead_log_scale;
+        if (dead[index]) {
+            ++dead_count;
+            continue;
+        }
+        if (counts[index] <= 0.F) continue;
+        // EMC score shape: contribution-weighted mean image error,
+        // opacity-gated so invisible rows can never draw budget, then
+        // compressed by the score power. The window mean is already the
+        // accumulated error divided by the observation count.
+        const float mean_error =
+            errors[index] / std::max(counts[index], 1.F);
+        if (!(mean_error > 0.F)) continue;
+        score[index] = std::pow(
+            mean_error * opacity,
+            std::max(options.densify_score_power, 1e-3F));
+    }
+
+    // Recycle dead rows in place: each dead row becomes the +delta child of
+    // an error-sampled parent. The total count is preserved, which is the
+    // MCMC property that keeps error-primary selection from bloating the
+    // model when the error map drifts toward background rays.
+    std::size_t relocated = 0;
+    if (dead_count != 0) {
+        std::vector<std::pair<std::size_t, float>> parents;
+        parents.reserve(old_count);
+        for (std::size_t index = 0; index < old_count; ++index)
+            if (!dead[index] && score[index] > 0.F)
+                parents.emplace_back(index, score[index]);
+        const auto selected = weighted_unique_sample(
+            parents, dead_count, true, random);
+        if (!selected.empty()) {
+            relocated = selected.size();
+            std::vector<int> parent_rows;
+            std::vector<int> destination_rows;
+            parent_rows.reserve(relocated);
+            destination_rows.reserve(relocated);
+            auto dead_row = dead.begin();
+            for (const std::size_t parent : selected) {
+                while (dead_row != dead.end() && !*dead_row) ++dead_row;
+                if (dead_row == dead.end()) break;
+                const std::size_t destination =
+                    static_cast<std::size_t>(
+                        dead_row - dead.begin());
+                ++dead_row;
+                parent_rows.push_back(static_cast<int>(parent));
+                destination_rows.push_back(static_cast<int>(destination));
+            }
+            if (!parent_rows.empty()) {
+                const auto parent_tensor = index_tensor(parent_rows);
+                const auto destination_tensor =
+                    index_tensor(destination_rows);
+                model.sh.index_copy_(
+                    0, destination_tensor,
+                    model.sh.index_select(0, parent_tensor));
+                if (model.normal_features.is_valid())
+                    model.normal_features.index_copy_(
+                        0, destination_tensor,
+                        model.normal_features.index_select(
+                            0, parent_tensor));
+                detail::relocate_long_axis(
+                    model, parent_tensor, destination_tensor, split_k);
+                zero_adam_rows(destination_rows, states);
+            }
+        }
+    }
+
+    // Fixed-budget growth: a plain multiplier of the live count, all draws
+    // error-sampled, with a reserved share for accumulated oversize rows.
+    std::size_t grown = 0;
+    std::size_t oversize_grown = 0;
+    std::size_t desired = old_count;
+    if (options.densify_growth_factor > 1.F) {
+        const auto target = static_cast<std::size_t>(std::floor(
+            options.densify_growth_factor *
+            static_cast<float>(old_count)));
+        desired = std::min(options.densification_cap, target);
+    }
+    std::size_t additions = desired > old_count ? desired - old_count : 0;
+    if (additions != 0) {
+        std::vector<std::size_t> split_parents;
+        split_parents.reserve(additions);
+        const float oversize_share = std::clamp(
+            options.densify_oversize_split_fraction, 0.F, 1.F);
+        if (oversize_share > 0.F) {
+            std::vector<std::pair<std::size_t, float>> weights;
+            weights.reserve(old_count);
+            for (std::size_t index = 0; index < old_count; ++index) {
+                if (dead[index] || score[index] <= 0.F ||
+                    !(oversize[index] > 0.F))
+                    continue;
+                weights.emplace_back(
+                    index,
+                    (oversize[index] + 1e-3F) *
+                        std::pow(
+                            score[index],
+                            std::clamp(
+                                options.densify_oversize_score_blend,
+                                0.F, 1.F)));
+            }
+            const std::size_t oversize_budget = std::min(
+                additions,
+                static_cast<std::size_t>(std::floor(
+                    oversize_share * static_cast<float>(additions))));
+            for (const auto index : weighted_unique_sample(
+                     weights, oversize_budget, true, random)) {
+                split_parents.push_back(index);
+                ++oversize_grown;
+            }
+        }
+        if (split_parents.size() < additions) {
+            std::vector<std::pair<std::size_t, float>> weights;
+            weights.reserve(old_count);
+            for (std::size_t index = 0; index < old_count; ++index)
+                if (!dead[index] && score[index] > 0.F)
+                    weights.emplace_back(index, score[index]);
+            for (const auto index : weighted_unique_sample(
+                     weights, additions - split_parents.size(), true,
+                     random))
+                split_parents.push_back(index);
+        }
+        if (!split_parents.empty()) {
+            std::vector<int> rows;
+            rows.reserve(split_parents.size());
+            for (const std::size_t parent : split_parents)
+                rows.push_back(static_cast<int>(parent));
+            grow_training_model(
+                model, rows, detail::SplitMode::long_axis, options,
+                random, states, {}, split_k);
+            grown = rows.size();
+        }
+    }
+
+    stats = detail::make_densification_stats(model.size());
+    core::Logger::instance().info(
+        "emc_refine iteration=", iteration,
+        " split_k=", split_k,
+        " dead=", dead_count,
+        " relocated=", relocated,
+        " oversize_grown=", oversize_grown,
+        " grown=", grown,
+        " gaussians=", model.size());
+    return {grown, 0};
+}
+
 RefinementCounts refine_gaussians(
     GaussianModel& model, detail::DensificationStats& stats,
     const unsigned iteration, const float scene_extent,
@@ -208,6 +387,8 @@ RefinementCounts refine_gaussians(
         return AdcPlusStrategy{}.refine(
             model, stats, iteration, scene_extent, scene_center,
             options, states);
+    if (options.densification_strategy == DensificationStrategy::emc)
+        return refine_emc(model, stats, iteration, options, random, states);
 
     const std::size_t old_count = model.size();
     const auto gradients = download<float>(stats.gradient);

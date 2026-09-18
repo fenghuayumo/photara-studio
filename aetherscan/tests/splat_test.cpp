@@ -4486,6 +4486,135 @@ void test_igs_error_guidance_preserves_gradient_gate() {
     }
 }
 
+void test_emc_long_axis_split_math() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    auto model = make_default_refine_model(std::vector<float>(12, 0.5F));
+    auto scales = model.log_scales.to_vector();
+    scales[0] = std::log(0.001F);
+    scales[1] = std::log(0.05F);
+    scales[2] = std::log(0.002F);
+    model.log_scales = Tensor::from_vector(scales, {4, 3}, gpu);
+    model.opacity_logits = Tensor::zeros({4, 1}, gpu);
+
+    GaussianModel children;
+    children.means = model.means.clone();
+    children.log_scales = model.log_scales.clone();
+    children.opacity_logits = model.opacity_logits.clone();
+    children.quaternions = model.quaternions.clone();
+    const auto indices =
+        Tensor::from_vector(std::vector<int>{0}, {1}, gpu);
+    const auto noise =
+        Tensor::from_vector(std::vector<float>{0.3F, 0.2F, 0.7F}, {1, 3}, gpu);
+    const auto screens = Tensor::zeros({1}, gpu);
+    aetherscan::splat::detail::split_gaussians(
+        model, children, indices, noise, screens,
+        aetherscan::splat::detail::SplitMode::long_axis, 1e-3F, 0.F, 0.5F);
+
+    const auto parent_means = model.means.to_vector();
+    const auto child_means = children.means.to_vector();
+    // Identity rotation: the offset stays on the local Y (major) axis and is
+    // half the major scale (0.5 * 0.05).
+    require(std::fabs(parent_means[1] - (-0.025F)) < 1e-6F &&
+                std::fabs(child_means[1] - 0.025F) < 1e-6F &&
+                std::fabs(parent_means[0]) < 1e-6F &&
+                std::fabs(child_means[2]) < 1e-6F,
+            "EMC long-axis split offset left the major axis");
+    const auto parent_scales = model.log_scales.to_vector();
+    const auto child_scales = children.log_scales.to_vector();
+    require(std::fabs(parent_scales[0] - std::log(0.001F * 0.85F)) < 1e-5F &&
+                std::fabs(parent_scales[1] - std::log(0.05F * 0.5F)) < 1e-5F &&
+                std::fabs(parent_scales[2] - std::log(0.002F * 0.85F)) < 1e-5F,
+            "EMC parent scale shrink does not follow 0.5/0.85");
+    require(std::fabs(child_scales[1] - parent_scales[1]) < 1e-6F,
+            "EMC child scale diverged from the parent");
+    // a' = k / (1 + (1-a) + ...): with a = 0.5, k = 0.5 -> 1/3.
+    const auto parent_opacity = model.opacity_logits.to_vector();
+    const auto child_opacity = children.opacity_logits.to_vector();
+    require(std::fabs(parent_opacity[0] - std::log(0.5F)) < 1e-4F &&
+                std::fabs(child_opacity[0] - std::log(0.5F)) < 1e-4F,
+            "EMC opacity mapping does not match the scheduled k factor");
+}
+
+void test_emc_refine_relocates_and_grows() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    auto model = make_default_refine_model(std::vector<float>(12, 0.5F));
+    auto logits = model.opacity_logits.to_vector();
+    logits[0] = -4.F;  // sigmoid -> 0.018, below the prune threshold.
+    model.opacity_logits = Tensor::from_vector(logits, {4, 1}, gpu);
+    auto harness = make_refine_harness(std::move(model));
+    auto stats = make_default_refine_stats();
+    stats.image_error = Tensor::from_vector(
+        std::vector<float>{0.2F, 0.4F, 0.8F, 0.F}, {4}, gpu);
+    stats.priority = Tensor::zeros({4}, gpu);
+    TrainingOptions options;
+    options.densification_strategy = DensificationStrategy::emc;
+    options.densification_cap = 10;
+    options.densify_growth_factor = 2.F;
+    options.densify_oversize_split_fraction = 0.F;
+    options.densify_score_power = 1.F;
+    options.prune_opacity = 0.1F;
+    std::mt19937 random(42);
+    const auto result = densification::refine_emc(
+        harness.model, stats, 600, options, random, harness.states());
+    // Target count is floor(2 * 4) = 8, but only two rows carry positive
+    // error score, and the draws are without replacement.
+    require(result.grown == 2,
+            "EMC growth must draw unique error-scored parents");
+    require(result.pruned == 0,
+            "EMC relocation must not remove rows");
+    require(harness.model.size() == 6,
+            "EMC count changed by something other than its growth budget");
+    for (const auto* state : harness.states())
+        require(state->first.shape()[0] == 6 && state->second.shape()[0] == 6,
+                "EMC topology and Adam rows diverged");
+    require_finite(harness.model.means, "EMC produced non-finite means");
+    require_finite(harness.model.log_scales,
+                   "EMC produced non-finite scales");
+
+    // A dead row was recycled in place through a parent with real error
+    // evidence: its opacity must now follow the scheduled split factor.
+    const auto recycled = harness.model.opacity_logits.to_vector();
+    const float k = 0.5F + 0.1F * std::min(1.F, 600.F / 15'000.F);
+    const float mapped = k / (2.F - k);  // parent logit 0 -> exp(-l) = 1.
+    require(std::fabs(recycled[0] -
+                      std::log(mapped / (1.F - mapped))) < 1e-4F,
+            "EMC did not recycle the dead row in place");
+}
+
+void test_emc_revised_noise_gates_and_scales() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    auto model = make_default_refine_model(std::vector<float>(12, 0.F));
+    auto logits = model.opacity_logits.to_vector();
+    // Row 0: opacity 0.5, the (1-a)^150 gate vanishes -> no movement.
+    // Row 1: opacity ~0.01 -> active gate, reachable exploration.
+    logits[0] = 0.F;
+    logits[1] = std::log(0.01F / 0.99F);
+    model.opacity_logits = Tensor::from_vector(logits, {4, 1}, gpu);
+    const auto before = model.means.to_vector();
+    const auto radii =
+        Tensor::from_vector(std::vector<int>{1, 1, 1, 1}, {4}, gpu);
+    aetherscan::splat::detail::inject_emc_noise(model, radii, 80.F, 7U);
+    const auto after = model.means.to_vector();
+    require(std::fabs(after[0] - before[0]) < 1e-7F &&
+                std::fabs(after[1] - before[1]) < 1e-7F &&
+                std::fabs(after[2] - before[2]) < 1e-7F,
+            "EMC revised noise moved a half-opaque splat");
+    const float dx = std::fabs(after[3] - before[3]);
+    const float dy = std::fabs(after[4] - before[4]);
+    const float dz = std::fabs(after[5] - before[5]);
+    // Row 1 carries 1e-3 scales (sqrt -> 0.0316) and noise_lr <= 1, so a
+    // per-axis displacement near the local scale means broken math.
+    require((dx + dy + dz) > 1e-12F && dx < 1.F && dy < 1.F && dz < 1.F,
+            "EMC revised noise ignored the low-opacity gate or scale axes");
+    require_finite(model.means, "EMC revised noise produced non-finite means");
+}
+
 void test_densify_mean_scores_and_oversize_weights() {
     using namespace aetherscan::splat;
     constexpr auto gpu = tinytensor::Device::CUDA;
@@ -4729,6 +4858,25 @@ void test_densification_strategies_and_dense_bypass() {
         "IGS should stop densify at max(14000, N-2500)");
     require(igs_schedule.densify_screen_threshold == 0.5F,
             "IGS oversized screen threshold should match Brush");
+    auto emc_schedule = full_brush_schedule;
+    emc_schedule.densification_strategy =
+        splat::DensificationStrategy::emc;
+    splat::apply_strategy_defaults(emc_schedule);
+    require(emc_schedule.densify_growth_factor == 1.05F &&
+                emc_schedule.densify_oversize_split_fraction == 0.15F,
+            "EMC preset lost its fixed-budget growth controls");
+    require(!splat::densification::is_refinement_iteration(
+                    400, emc_schedule) &&
+                !splat::densification::is_refinement_iteration(
+                    500, emc_schedule) &&
+                splat::densification::is_refinement_iteration(
+                    600, emc_schedule) &&
+                splat::densification::is_refinement_iteration(
+                    700, emc_schedule),
+            "EMC does not follow its start-500 every-100 cadence");
+    require(
+        splat::densification::is_refinement_iteration(24'000, emc_schedule),
+        "EMC stopped refining before the 75% mark");
     auto overridden_schedule = igs_schedule;
     overridden_schedule.refine_start_iter = 500;
     overridden_schedule.refine_every = 100;
@@ -4910,6 +5058,9 @@ int main(int argc, char** argv) {
         test_revised_noise_scales_with_scene_units();
         test_geometry_regularization();
         test_igs_error_guidance_preserves_gradient_gate();
+        test_emc_long_axis_split_math();
+        test_emc_refine_relocates_and_grows();
+        test_emc_revised_noise_gates_and_scales();
         test_densify_mean_scores_and_oversize_weights();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();

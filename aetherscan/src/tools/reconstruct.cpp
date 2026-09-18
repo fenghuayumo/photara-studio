@@ -196,6 +196,7 @@ struct ReconstructCli {
     std::string splat_strategy{"adc_igs"};
     bool splat_densify_error_map{false};
     float splat_densify_error_weight{0.25F};
+    float splat_growth_factor{0.F};
     unsigned splat_seed{42};
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
@@ -402,12 +403,13 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-ppisp=BOOL  PPISP exposure/white-balance correction "
                  "(default false)\n"
               << "  --splat-ppisp-type TYPE  no_crf_no_vig (default), no_crf, or original\n"
-              << "  --splat-strategy adc_plus|adc_igs\n"
+              << "  --splat-strategy adc_plus|adc_igs|emc\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  densify growth ceiling (default 1000000)\n"
               << "  --splat-densify-error-map BOOL  bounded error guidance for ADC-IGS growth (default false)\n"
               << "  --splat-densify-error-weight W  sampling strength in [0,1] (default 0.25)\n"
+              << "  --splat-growth-factor W  EMC per-refine count multiplier; 0 keeps the strategy preset\n"
               << "  --splat-init-point-budget N  cap the initialization cloud (default 0 = keep all)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
               << "  --mask-mesh PATH  load an existing PLY mesh and render masks/previews\n"
@@ -825,6 +827,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-densify-error-weight", "Error sampling strength in [0,1]",
          cxxopts::value<float>()->default_value("0.25"))
+        ("splat-growth-factor",
+         "EMC per-refine growth multiplier (0 = strategy preset)",
+         cxxopts::value<float>()->default_value("0"))
         ("splat-seed", "Splat training RNG seed",
          cxxopts::value<unsigned>()->default_value("42"))
         ("splat-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
@@ -1262,6 +1267,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!std::isfinite(cli.splat_densify_error_weight) ||
         cli.splat_densify_error_weight < 0.F || cli.splat_densify_error_weight > 1.F)
         throw std::invalid_argument("--splat-densify-error-weight must be finite and in [0,1]");
+    cli.splat_growth_factor = result["splat-growth-factor"].as<float>();
+    if (!std::isfinite(cli.splat_growth_factor) || cli.splat_growth_factor < 0.F)
+        throw std::invalid_argument("--splat-growth-factor must be finite and >= 0");
     cli.splat_seed = result["splat-seed"].as<unsigned>();
     if (cli.splat_densify_error_map && cli.splat_strategy != "adc_igs")
         throw std::invalid_argument("--splat-densify-error-map requires adc_igs");
@@ -1510,9 +1518,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument(
             "--splat-max-scale-ratio must be 0 or >= 1");
     if (cli.splat_strategy != "adc_plus" &&
-        cli.splat_strategy != "adc_igs")
+        cli.splat_strategy != "adc_igs" &&
+        cli.splat_strategy != "emc")
         throw std::invalid_argument(
-            "--splat-strategy must be adc_plus or adc_igs");
+            "--splat-strategy must be adc_plus, adc_igs or emc");
     if (cli.splat_densification_cap == 0)
         throw std::invalid_argument(
             "--splat-densification-cap must be positive");
@@ -2726,6 +2735,9 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     if (cli.splat_strategy == "adc_plus")
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::adc_plus;
+    else if (cli.splat_strategy == "emc")
+        options.densification_strategy =
+            aetherscan::splat::DensificationStrategy::emc;
     else
         options.densification_strategy =
             aetherscan::splat::DensificationStrategy::adc_igs;
@@ -2734,6 +2746,8 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     aetherscan::splat::apply_strategy_defaults(options);
     options.densify_use_error_map = cli.splat_densify_error_map;
     options.densify_error_map_weight = cli.splat_densify_error_weight;
+    if (cli.splat_growth_factor > 0.F)
+        options.densify_growth_factor = cli.splat_growth_factor;
     options.seed = cli.splat_seed;
     options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;
@@ -2753,7 +2767,9 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.ppisp_lr = cli.splat_ppisp_lr;
     options.ppisp_before_bilagrid = cli.splat_ppisp_before_bilagrid;
     if (!dense_input &&
-        aetherscan::splat::is_adc_strategy(options.densification_strategy)) {
+        (aetherscan::splat::is_adc_strategy(options.densification_strategy) ||
+         options.densification_strategy ==
+             aetherscan::splat::DensificationStrategy::emc)) {
         // Remaining Brush optimizer settings, shared by ADC+ and ADC-IGS so
         // the strategies differ only in densification. The means/opacity
         // learning rates and initial opacity are set above.
@@ -2842,7 +2858,10 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     options.constrain_scale_range = cli.splat_constrain_scales;
     options.max_scale_ratio =
         !dense_input &&
-                aetherscan::splat::is_adc_strategy(options.densification_strategy) &&
+                (aetherscan::splat::is_adc_strategy(
+                     options.densification_strategy) ||
+                 options.densification_strategy ==
+                     aetherscan::splat::DensificationStrategy::emc) &&
                 !cli.splat_max_scale_ratio_overridden
             ? 0.F
             : cli.splat_max_scale_ratio;

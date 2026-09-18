@@ -16,6 +16,11 @@ enum class DensificationStrategy {
     adc_igs,
     adc_plus,
     dense_adaptive,
+    // Error-map MCMC: the contribution-weighted image error is the
+    // primary densification score, dead rows are recycled in place through a
+    // long-axis split, and growth is a fixed per-refine multiplier of the
+    // live count rather than a gradient-qualified fraction.
+    emc,
 };
 
 // PPISP (per-pixel image signal processing) parameter layout. The default

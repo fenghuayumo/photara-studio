@@ -1593,7 +1593,8 @@ __global__ void split_gaussians_kernel(
     float* child_opacity_logits, const int* parent_indices,
     const float* random_samples, const float* screen_sizes,
     const std::size_t split_count, const SplitMode mode,
-    const float minimum_opacity, const float split_at_screen_size) {
+    const float minimum_opacity, const float split_at_screen_size,
+    const float split_opacity_k) {
     const std::size_t child = blockIdx.x * blockDim.x + threadIdx.x;
     if (child >= split_count) return;
     const std::size_t parent = static_cast<std::size_t>(parent_indices[child]);
@@ -1659,6 +1660,22 @@ __global__ void split_gaussians_kernel(
                           random_samples[3 * child];
             log_scale_delta[axis] = axis == largest ? logf(0.5F) : 0.F;
         }
+    } else if (mode == SplitMode::long_axis) {
+        // EMC long-axis split (arXiv:2508.12313): the largest axis halves,
+        // the other two shrink to 0.85, and the offset is half the major
+        // scale along that axis only, so thin surfaces keep their thickness.
+        int largest = 0;
+        for (int axis = 1; axis < 3; ++axis)
+            if (parent_log_scales[3 * parent + axis] >
+                parent_log_scales[3 * parent + largest])
+                largest = axis;
+        const float offset = 0.5F *
+            expf(parent_log_scales[3 * parent + largest]);
+        for (int axis = 0; axis < 3; ++axis) {
+            local[axis] = axis == largest ? offset : 0.F;
+            log_scale_delta[axis] =
+                axis == largest ? logf(0.5F) : logf(0.85F);
+        }
     }
     float offset_x{}, offset_y{}, offset_z{};
     rotate_quaternion(
@@ -1671,6 +1688,20 @@ __global__ void split_gaussians_kernel(
         child_means[3 * child + axis] = center + offsets[axis];
         parent_log_scales[3 * parent + axis] += log_scale_delta[axis];
         child_log_scales[3 * child + axis] += log_scale_delta[axis];
+    }
+    if (mode == SplitMode::long_axis) {
+        // EMC opacity mapping: a' = k / (1 + exp(-l) - k), i.e. the
+        // two children approximately composite back to the parent alpha.
+        const float denominator =
+            1.F + expf(-parent_opacity_logits[parent]) - split_opacity_k;
+        const float mapped = denominator > 1e-6F
+            ? fminf(fmaxf(split_opacity_k / denominator, 1e-6F),
+                    1.F - 1e-6F)
+            : 1.F - 1e-6F;
+        const float mapped_logit = logf(mapped / (1.F - mapped));
+        parent_opacity_logits[parent] = mapped_logit;
+        child_opacity_logits[child] = mapped_logit;
+        return;
     }
     const float opacity = sigmoid(parent_opacity_logits[parent]);
     // Two children with this alpha reproduce the parent's coverage along the
@@ -1710,6 +1741,47 @@ __global__ void adc_plus_footprint_weights_kernel(
     // small floor only disables the correction for near-invisible rows.
     const float footprint = fmaxf(screens[index], 0.05F);
     weights[index] = gradient / footprint;
+}
+
+__device__ float normal_sample(
+    const std::uint32_t index, const std::uint32_t seed,
+    const std::uint32_t axis);
+
+__global__ void inject_emc_noise_kernel(
+    float* means, const float* log_scales, const float* quaternions,
+    const float* opacity_logits, const int* radii,
+    const std::size_t count, const float scaler, const unsigned seed) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count || radii[index] <= 0) return;
+    const float opacity = sigmoid(opacity_logits[index]);
+    // EMC revised noise: only nearly-transparent splats
+    // explore, the reach grows with opacity (255*alpha coverage floor), and
+    // the movement is scaled by the local sqrt(scale) axes.
+    const float opacity_gate = powf(1.F - opacity, 150.F);
+    if (!(opacity_gate > 0.F)) return;
+    const float extend = sqrtf(
+        2.F * logf(fmaxf(255.F * opacity, 1.F)));
+    const float noise_lr = fminf(
+        0.05F * scaler * extend * opacity_gate, 1.F);
+    if (!(noise_lr > 0.F)) return;
+    float axes[3][3]{};
+    for (int axis = 0; axis < 3; ++axis) {
+        float unit[3]{};
+        unit[axis] = 1.F;
+        rotate_quaternion(
+            quaternions + 4 * index, unit[0], unit[1], unit[2],
+            axes[axis][0], axes[axis][1], axes[axis][2]);
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        const float sigma = expf(0.5F * log_scales[3 * index + axis]);
+        const float displacement =
+            noise_lr * sigma * normal_sample(
+                static_cast<std::uint32_t>(index), seed,
+                static_cast<std::uint32_t>(axis));
+        for (int component = 0; component < 3; ++component)
+            means[3 * index + component] +=
+                axes[axis][component] * displacement;
+    }
 }
 
 __device__ std::uint32_t hash_u32(std::uint32_t value) {
@@ -2954,7 +3026,8 @@ void split_gaussians(
     const tinytensor::Tensor& screen_sizes,
     const SplitMode mode,
     const float minimum_opacity,
-    const float split_at_screen_size) {
+    const float split_at_screen_size,
+    const float split_opacity_k) {
     const std::size_t count = parent_indices.numel();
     if (count == 0) return;
     split_gaussians_kernel<<<
@@ -2967,8 +3040,90 @@ void split_gaussians(
         screen_sizes.is_valid() ? screen_sizes.ptr<float>() : nullptr,
         count, mode,
         std::clamp(minimum_opacity, 1e-8F, 0.49F),
-        std::max(split_at_screen_size, 0.F));
+        std::max(split_at_screen_size, 0.F),
+        std::clamp(split_opacity_k, 1e-4F, 1.F - 1e-4F));
     check_cuda(cudaGetLastError(), "split GGGS Gaussians");
+}
+
+__global__ void relocate_long_axis_kernel(
+    float* means, float* log_scales, float* opacity_logits,
+    float* quaternions,
+    const int* parent_indices, const int* destination_indices,
+    const std::size_t count, const float split_opacity_k) {
+    const std::size_t pair = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pair >= count) return;
+    const std::size_t parent =
+        static_cast<std::size_t>(parent_indices[pair]);
+    const std::size_t destination =
+        static_cast<std::size_t>(destination_indices[pair]);
+    int largest = 0;
+    for (int axis = 1; axis < 3; ++axis)
+        if (log_scales[3 * parent + axis] >
+            log_scales[3 * parent + largest])
+            largest = axis;
+    const float offset = 0.5F * expf(log_scales[3 * parent + largest]);
+    float local[3]{};
+    for (int axis = 0; axis < 3; ++axis)
+        local[axis] = axis == largest ? offset : 0.F;
+    float world[3]{};
+    rotate_quaternion(
+        quaternions + 4 * parent, local[0], local[1], local[2],
+        world[0], world[1], world[2]);
+    for (int axis = 0; axis < 3; ++axis) {
+        const float center = means[3 * parent + axis];
+        means[3 * parent + axis] = center - world[axis];
+        means[3 * destination + axis] = center + world[axis];
+        const float delta =
+            axis == largest ? logf(0.5F) : logf(0.85F);
+        log_scales[3 * parent + axis] += delta;
+        log_scales[3 * destination + axis] =
+            log_scales[3 * parent + axis];
+    }
+    const float denominator =
+        1.F + expf(-opacity_logits[parent]) - split_opacity_k;
+    const float mapped = denominator > 1e-6F
+        ? fminf(fmaxf(split_opacity_k / denominator, 1e-6F), 1.F - 1e-6F)
+        : 1.F - 1e-6F;
+    const float mapped_logit = logf(mapped / (1.F - mapped));
+    opacity_logits[parent] = mapped_logit;
+    opacity_logits[destination] = mapped_logit;
+    for (int component = 0; component < 4; ++component)
+        quaternions[4 * destination + component] =
+            quaternions[4 * parent + component];
+}
+
+void relocate_long_axis(
+    GaussianModel& model,
+    const tinytensor::Tensor& parent_indices,
+    const tinytensor::Tensor& destination_indices,
+    const float split_opacity_k) {
+    const std::size_t count = parent_indices.numel();
+    if (count == 0 || destination_indices.numel() != count)
+        throw std::invalid_argument(
+            "EMC relocation requires matching index tensors");
+    relocate_long_axis_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        model.means.ptr<float>(), model.log_scales.ptr<float>(),
+        model.opacity_logits.ptr<float>(),
+        model.quaternions.ptr<float>(),
+        parent_indices.ptr<int>(), destination_indices.ptr<int>(), count,
+        std::clamp(split_opacity_k, 1e-4F, 1.F - 1e-4F));
+    check_cuda(cudaGetLastError(), "relocate EMC long-axis children");
+}
+
+void inject_emc_noise(
+    GaussianModel& model, const tinytensor::Tensor& radii,
+    const float scaler, const unsigned seed) {
+    if (model.size() == 0 || !radii.is_valid() ||
+        radii.numel() != model.size() || !(scaler > 0.F))
+        return;
+    inject_emc_noise_kernel<<<
+        (model.size() + k_threads - 1) / k_threads, k_threads>>>(
+        model.means.ptr<float>(), model.log_scales.ptr<float>(),
+        model.quaternions.ptr<float>(),
+        model.opacity_logits.ptr<float>(), radii.ptr<int>(), model.size(),
+        scaler, seed);
+    check_cuda(cudaGetLastError(), "inject EMC revised noise");
 }
 
 void apply_adc_decay(

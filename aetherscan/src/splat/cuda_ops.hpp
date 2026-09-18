@@ -324,6 +324,12 @@ enum class SplitMode {
     // repaired and the mesh turns soft (Marching Cubes 12.1M faces against
     // 7.1M for the same seed).
     igs_random,
+    // EMC long-axis split, arXiv:2508.12313: the largest axis halves, the
+    // other two shrink to 0.85, and both children move apart along the major
+    // axis by half its scale. Opacity maps through the scheduled factor k:
+    // a' = k / (1 + exp(-l) - k) so the two children composite back to
+    // the parent.
+    long_axis,
 };
 
 // Mutate selected parents and their already-cloned children in place.
@@ -335,7 +341,25 @@ void split_gaussians(
     const tinytensor::Tensor& screen_sizes,
     SplitMode mode,
     float minimum_opacity,
-    float split_at_screen_size);
+    float split_at_screen_size,
+    float split_opacity_k = 0.5F);
+
+// EMC relocation: overwrite each destination row with the +delta child of a
+// long-axis split while the parent takes the -delta side in place. Only
+// means/scales/opacity/quaternions are touched; the caller copies appearance
+// rows and clears the destination optimizer moments.
+void relocate_long_axis(
+    GaussianModel& model,
+    const tinytensor::Tensor& parent_indices,
+    const tinytensor::Tensor& destination_indices,
+    float split_opacity_k);
+
+// EMC revised mean noise: per-step, opacity-gated exploration whose
+// reach scales with each local sqrt(scale) axis. `scaler` follows the
+// noise_lr -> noise_lr_final exponential schedule.
+void inject_emc_noise(
+    GaussianModel& model, const tinytensor::Tensor& radii,
+    float scaler, unsigned seed);
 
 void apply_adc_decay(
     GaussianModel& model, float opacity_decay, float scale_decay);

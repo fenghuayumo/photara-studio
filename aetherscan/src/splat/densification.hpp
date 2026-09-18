@@ -75,4 +75,13 @@ RefinementCounts refine_gaussians(
     const mvs::Vec3f& scene_center, const TrainingOptions& options,
     std::mt19937& random, const AdamStates& states);
 
+// EMC (error-map MCMC) refinement: recycle dead rows in place through a
+// long-axis split at error-sampled parents, then grow by a fixed multiplier
+// of the live count, also error-sampled, with a reserved oversize share.
+// Exposed for unit tests.
+RefinementCounts refine_emc(
+    GaussianModel& model, detail::DensificationStats& stats,
+    unsigned iteration, const TrainingOptions& options,
+    std::mt19937& random, const AdamStates& states);
+
 }  // namespace aetherscan::splat::densification

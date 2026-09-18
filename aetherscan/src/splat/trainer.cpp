@@ -1182,7 +1182,9 @@ GaussianModel Trainer::train(
     refine::SceneGeometry refinement_geometry = scene_geometry;
     const bool brush_mean_lr_scale =
         options_.densification_strategy == DensificationStrategy::adc_plus ||
-        (!options_.input_is_dense && is_adc_strategy(options_.densification_strategy));
+        options_.densification_strategy == DensificationStrategy::emc ||
+        (!options_.input_is_dense &&
+            is_adc_strategy(options_.densification_strategy));
     if (brush_mean_lr_scale) {
         refinement_geometry = refine::brush_scene_geometry_cuda(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
@@ -1633,7 +1635,9 @@ GaussianModel Trainer::train(
                 CudaTrainingStage::multi_view_sample_backward);
         }
         tinytensor::Tensor densify_map;
-        if (densification_enabled && options_.densify_use_error_map) {
+        if (densification_enabled &&
+            (options_.densify_use_error_map ||
+             options_.densification_strategy == DensificationStrategy::emc)) {
             const bool mask_enabled =
                 target.has_mask && (options_.use_mask || target.mask_is_validity);
             densify_map = detail::compute_ssim_cs_error_map(
@@ -1701,14 +1705,18 @@ GaussianModel Trainer::train(
             tinytensor::Tensor step_score = gradients.refine_weight;
             tinytensor::Tensor image_error;
             const bool igs = options_.densification_strategy == DensificationStrategy::adc_igs;
+            const bool emc =
+                options_.densification_strategy ==
+                DensificationStrategy::emc;
             bool use_maximum = true;
-            if (options_.densify_use_error_map &&
+            if ((options_.densify_use_error_map || emc) &&
                 gradients.densify_weight.is_valid()) {
                 auto error_score = detail::densify_avg_scores(
                     gradients.densify_weight, gradients.densify_weight_den);
-                if (igs) {
-                    // Keep the gradient gate and the edge evidence: the
-                    // image error only re-orders qualified growth parents.
+                if (igs || emc) {
+                    // ADC-IGS keeps the gradient gate and only re-orders
+                    // qualified growth parents by error; EMC consumes the
+                    // same evidence directly as its primary score.
                     image_error = std::move(error_score);
                 } else {
                     step_score = detail::densify_blend_world_gradient(
@@ -1722,9 +1730,11 @@ GaussianModel Trainer::train(
                 densification_stats, target.camera.width,
                 target.camera.height,
                 use_maximum,
-                is_adc_strategy(options_.densification_strategy),
+                is_adc_strategy(options_.densification_strategy) || emc,
                 options_.densify_use_error_map && !igs ? options_.densify_score_power : 1.F,
-                options_.densification_strategy == DensificationStrategy::adc_igs
+                (options_.densification_strategy ==
+                     DensificationStrategy::adc_igs ||
+                 emc)
                     ? options_.densify_screen_threshold : 0.F,
                 gradients.refine_weight, static_cast<int>(view_index),
                 image_error);
@@ -1805,6 +1815,21 @@ GaussianModel Trainer::train(
                     options_.seed + iteration,
                     rendered.radii,
                     options_.densify_revised_noise);
+        } else if (densification_enabled &&
+                   options_.densification_strategy ==
+                       DensificationStrategy::emc) {
+            // EMC revised noise runs every training step with an
+            // exponentially decaying magnitude (80 -> 0.8 over the run).
+            const float noise_progress =
+                (static_cast<float>(iteration) - 0.5F) /
+                std::max(1.F, static_cast<float>(options_.iterations));
+            constexpr float k_noise_lr = 80.F;
+            constexpr float k_noise_lr_final = 0.8F;
+            detail::inject_emc_noise(
+                model, rendered.radii,
+                k_noise_lr * std::pow(
+                    k_noise_lr_final / k_noise_lr, noise_progress),
+                options_.seed + iteration);
         }
         cuda_profiler.mark(CudaTrainingStage::adc_noise);
 

@@ -119,24 +119,26 @@ StrategySchedule strategy_schedule(const TrainingOptions& options) {
     const bool igs =
         options.densification_strategy == DensificationStrategy::adc_igs;
     const bool adc = is_adc_strategy(options.densification_strategy);
+    const bool emc =
+        options.densification_strategy == DensificationStrategy::emc;
     const unsigned stop_iter = options.refine_stop_iter != 0
         ? options.refine_stop_iter
-        : igs ? 14'000U : adc ? options.iterations : 5'000U;
+        : (igs || emc) ? 14'000U : adc ? options.iterations : 5'000U;
     const unsigned stop_from_end =
         options.iterations > options.refine_stop_num_iter
             ? options.iterations - options.refine_stop_num_iter
             : 0U;
-    const unsigned stop = igs
+    const unsigned stop = (igs || emc)
         ? std::min(std::max(stop_iter, stop_from_end), options.iterations)
         : std::min(stop_iter, options.iterations);
     return {
         options.refine_start_iter != 0
             ? options.refine_start_iter
-            : adc ? 0U : 750U,
+            : emc ? 500U : adc ? 0U : 750U,
         stop,
         options.refine_every != 0
             ? options.refine_every
-            : adc ? 200U : 500U};
+            : emc ? 100U : adc ? 200U : 500U};
 }
 
 GaussianModel clone_model(const GaussianModel& model) {
@@ -170,7 +172,8 @@ bool is_refinement_iteration(
     if (iteration <= schedule.start || iteration >= schedule.stop ||
         schedule.every == 0 || iteration % schedule.every != 0)
         return false;
-    if (options.densification_strategy == DensificationStrategy::adc_igs)
+    if (options.densification_strategy == DensificationStrategy::adc_igs ||
+        options.densification_strategy == DensificationStrategy::emc)
         return true;
     return static_cast<float>(iteration) /
            std::max(1.F, static_cast<float>(options.iterations)) <=
@@ -182,7 +185,9 @@ bool is_refinement_iteration(
 namespace aetherscan::splat {
 
 void apply_strategy_defaults(TrainingOptions& options) {
-    if (is_adc_strategy(options.densification_strategy)) {
+    const bool emc = options.densification_strategy ==
+        DensificationStrategy::emc;
+    if (is_adc_strategy(options.densification_strategy) || emc) {
         // Shared training parameters. Apply explicit caller overrides
         // after this preset; dense input keeps its separate optimizer setup.
         options.densify_gradient_threshold = 0.0025F;
@@ -215,6 +220,15 @@ void apply_strategy_defaults(TrainingOptions& options) {
         // sweep measured it inside the ori seed noise on every dataset
         // (docs/ADC_IGS_ERROR_MAP_20260917).
         options.densify_use_error_map = false;
+        break;
+    case DensificationStrategy::emc:
+        // Fixed-budget growth: net growth is a fixed multiplier of the
+        // live count per refinement, and a fixed share of that budget is
+        // reserved for accumulated on-screen oversize repair. The error map
+        // is the strategy itself, so no flag is required.
+        options.densify_growth_factor = 1.05F;
+        options.densify_oversize_split_fraction = 0.15F;
+        options.densify_oversize_score_blend = 1.F;
         break;
     case DensificationStrategy::dense_adaptive:
         break;
