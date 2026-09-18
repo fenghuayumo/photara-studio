@@ -19,6 +19,14 @@ struct CacheStats {
     std::size_t dataset_packed_bytes{};
     std::size_t host_budget_bytes{};
     double get_wall_ms{};
+    // Requests served without a host decode, background host loads issued, and
+    // the measured host-load / iteration cadence that drives the adaptive
+    // prefetch lookahead.
+    std::size_t host_hits{};
+    std::size_t prefetch_issued{};
+    double host_load_mean_ms{};
+    double step_mean_ms{};
+    std::size_t prefetch_depth{};
 };
 
 // Owns bounded host and CUDA packed RGBA8 caches. Resident views are expanded
@@ -41,7 +49,17 @@ public:
     [[nodiscard]] TrainingView get(std::size_t index);
     [[nodiscard]] bool has_mask(std::size_t index);
     void prefetch(std::size_t index);
+    // Current prefetch lookahead in views. Callers offer at least this many
+    // upcoming views; the value grows while host loads take longer than one
+    // iteration (see TrainingOptions::training_prefetch_adaptive).
+    [[nodiscard]] std::size_t prefetch_depth() const;
     void set_resolution_scale(float scale);
+    // Publish the trainer's current epoch order and cursor. One shuffled epoch
+    // visits every training view exactly once, which makes least-recently-used
+    // eviction degenerate (it evicts the view that is needed soonest). With the
+    // order known, the image caches evict the entry whose next use is farthest
+    // away instead. Passing nullptr restores plain LRU.
+    void set_epoch_plan(const std::vector<std::size_t>* order, std::size_t cursor);
     // Image caches are reconstructable; Gaussian/optimizer state is not. Drop
     // packed CUDA views (and trim the CUDA memory pool) when a refinement is
     // about to need more headroom than currently remains.

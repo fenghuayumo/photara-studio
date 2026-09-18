@@ -195,8 +195,8 @@ CLI 暴露两个稀疏输入策略，默认 `adc_igs`：
 所有策略均受 `--splat-densification-cap` 硬上限约束，新增/裁剪数量写入训练日志。
 ADC+ 的“可见”要求 Gaussian 通过 alpha/transmittance 测试并实际参与至少一个像素合成；
 仅投影进相机视锥但被前景遮挡的 Gaussian 不再累计支持度、参与回收采样或注入探索噪声。
-稀疏 ADC+ 默认还将轴比限制为 `100`，抑制只对训练相机正面成立、在范围外视角变成漂浮片的
-极薄 Gaussian；可用 `--splat-max-scale-ratio 0` 显式关闭，或传入其他上限。
+轴比默认不设上限（与 Brush 一致，三种策略相同）；需要抑制只对训练相机正面成立、在范围外
+视角变成漂浮片的极薄 Gaussian 时，可显式传入 `--splat-max-scale-ratio R`（例如 `10`）。
 
 稠密点云建议配置：
 
@@ -264,9 +264,13 @@ ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-fai
 数据集加载和训练缓存按流水线处理：COLMAP/OpenMVS/RealityCapture 读入时只探测图片头，
 不为了记录分辨率解码像素；mask 预检只查看投影 mask、匹配路径或图片 alpha 元数据。
 训练开始前先为首个 shuffled 窗口启动 host 解码，让它与相机/Adam 初始化重叠。训练中
-图片解码可并行执行，默认向前预取 8 个 view；已完成的 host 视图会被提升为
-pinned-host H2D CUDA 预取，再进入有限的 host/device LRU，而不是在首个 epoch 每个
-cache miss 都同步解码并上传。
+图片解码可并行执行，预取深度按实测的 host 解码耗时与迭代耗时自适应（以
+`--splat-prefetch-views` 为下限、默认 4，上限受 512MB 在飞视图约束），因此数据越大、
+解码越慢，前瞻越长；已经驻留 host cache 的 view 不会重复解码，也不会占用前瞻槽位。
+已完成的 host 视图会被提升为 pinned-host H2D CUDA 预取，再进入有限的 host/device
+缓存。缓存淘汰不使用 LRU：一个 epoch 恰好访问每个 view 一次，LRU 会优先淘汰最近才需要
+的条目；trainer 会把当前 epoch 的访问顺序发布给 loader，缓存改为淘汰“下次使用最远”的
+条目，`--splat-prefetch-adaptive=false` 只关闭前瞻自适应，不改变淘汰策略。
 JPEG/PNG 主路径分别直连 libjpeg/libpng，并直接写入最终 RGB/gray/alpha buffer；
 FreeImage 只作为 TIFF/BMP 等其他格式和编码路径的 fallback。JPEG 训练视图根据目标
 相机尺寸选择 1/2、1/4 或 1/8 DCT scale，避免 progressive-resolution 前半程先解码

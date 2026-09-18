@@ -486,6 +486,14 @@ struct HostTrainingView {
     }
 };
 
+// Result of a background host load. The duration is carried alongside the view
+// so the training thread can fold it into the prefetch-lookahead estimate
+// without any cross-thread synchronisation.
+struct HostTrainingLoad {
+    std::shared_ptr<HostTrainingView> view;
+    double host_load_ms{0.0};
+};
+
 class PinnedStagingBuffer {
 public:
     PinnedStagingBuffer() = default;
@@ -760,6 +768,9 @@ struct TrainingDataLoader::Impl {
 
     ~Impl() {
         prefetches_.clear();
+        // The plan order belongs to the caller; stop referring to it before the
+        // caller's storage goes away.
+        plan_order_ = nullptr;
     }
 
     TrainingView get(const std::size_t index) {
@@ -772,6 +783,7 @@ struct TrainingDataLoader::Impl {
         } timer{get_wall_ms_};
         tinytensor::VramScope scope("data.decode");
         ++requests_;
+        note_request_cadence();
         collect_ready_host_prefetches();
         const auto found = device_lookup_.find(index);
         if (found != device_lookup_.end()) {
@@ -780,7 +792,9 @@ struct TrainingDataLoader::Impl {
                 device_entries_.begin(), device_entries_, found->second);
             return decode_device_view(device_entries_.front());
         }
+        const bool host_resident = lookup_.contains(index);
         const HostTrainingView& host = host_view(index);
+        if (host_resident) ++host_hits_;
         const std::size_t bytes = sizeof(int) * host.rgba.size() +
             sizeof(float) * (host.depth.size() + host.normal.size());
         uploaded_bytes_ += bytes;
@@ -807,17 +821,27 @@ struct TrainingDataLoader::Impl {
         // uploads stay on the training thread (see copy_device_entry_*), so the
         // loader never touches CUDA from another thread.
         if (device_lookup_.contains(index)) return;
+        // Already decoded: decoding it again would only occupy a lookahead slot
+        // that a genuinely cold view needs (the earlier implementation re-read
+        // every already-cached view on every iteration).
+        if (lookup_.contains(index)) return;
         if (prefetches_.contains(index) ||
-            prefetches_.size() >= options_.training_prefetch_views) return;
+            prefetches_.size() >= prefetch_limit()) return;
         const float scale = resolution_scale_;
         prefetches_.emplace(
             index,
             std::async(
                 std::launch::async,
                 [this, index, scale] {
-                    return load_host_training_view(
-                        source_[index], options_, scale);
+                    HostTrainingLoad load;
+                    const auto start = std::chrono::steady_clock::now();
+                    load.view = std::make_shared<HostTrainingView>(
+                        load_host_training_view(source_[index], options_, scale));
+                    load.host_load_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count();
+                    return load;
                 }));
+        ++prefetch_issued_;
     }
 
     bool has_mask(const std::size_t index) {
@@ -856,6 +880,32 @@ struct TrainingDataLoader::Impl {
         staging_.ensure(0);
     }
 
+    void set_epoch_plan(
+        const std::vector<std::size_t>* order, const std::size_t cursor) {
+        if (order == nullptr || order->empty()) {
+            plan_order_ = nullptr;
+            plan_position_.clear();
+            plan_cursor_ = 0;
+            return;
+        }
+        // The trainer reshuffles in place and resets its cursor to zero, so a
+        // cursor that moves backwards marks a fresh epoch that needs a new
+        // position map.
+        if (order != plan_order_ || order->size() != plan_size_ ||
+            cursor < plan_cursor_ || plan_position_.size() != source_.size()) {
+            plan_position_.assign(source_.size(), k_absent_plan_position);
+            for (std::size_t position = 0; position < order->size(); ++position) {
+                const std::size_t index = (*order)[position];
+                if (index < plan_position_.size())
+                    plan_position_[index] =
+                        static_cast<std::uint32_t>(position);
+            }
+            plan_order_ = order;
+            plan_size_ = order->size();
+        }
+        plan_cursor_ = cursor;
+    }
+
     void ensure_device_headroom(const std::size_t bytes) {
         if (bytes == 0) return;
         std::size_t free_bytes{}, total_bytes{};
@@ -882,7 +932,13 @@ struct TrainingDataLoader::Impl {
     CacheStats stats() const {
         return {requests_, device_hits_, uploaded_bytes_,
                 device_cached_bytes_, device_capacity_bytes_,
-                dataset_packed_bytes_, capacity_bytes_, get_wall_ms_};
+                dataset_packed_bytes_, capacity_bytes_, get_wall_ms_,
+                host_hits_, prefetch_issued_, host_load_mean_ms_,
+                step_mean_ms_, prefetch_limit()};
+    }
+
+    [[nodiscard]] std::size_t prefetch_depth() const {
+        return prefetch_limit();
     }
 
 private:
@@ -973,10 +1029,10 @@ private:
         while (!device_entries_.empty() &&
                device_cached_bytes_ + bytes >
                    device_capacity_bytes_) {
-            const auto& evicted = device_entries_.back();
-            device_cached_bytes_ -= evicted.bytes;
-            device_lookup_.erase(evicted.index);
-            device_entries_.pop_back();
+            const auto evicted = select_eviction_victim(device_entries_);
+            device_cached_bytes_ -= evicted->bytes;
+            device_lookup_.erase(evicted->index);
+            device_entries_.erase(evicted);
         }
         return device_cached_bytes_ + bytes <=
             device_capacity_bytes_;
@@ -1026,14 +1082,20 @@ private:
         if (const auto cached = cached_host_view(index))
             return *cached;
 
-        auto loaded = std::make_shared<HostTrainingView>();
+        std::shared_ptr<HostTrainingView> loaded;
         const auto prefetched = prefetches_.find(index);
         if (prefetched != prefetches_.end()) {
-            *loaded = prefetched->second.get();
+            HostTrainingLoad result = prefetched->second.get();
             prefetches_.erase(prefetched);
+            note_host_load(result.host_load_ms);
+            loaded = std::move(result.view);
         } else {
-            *loaded = load_host_training_view(
-                source_[index], options_, resolution_scale_);
+            const auto start = std::chrono::steady_clock::now();
+            loaded = std::make_shared<HostTrainingView>(
+                load_host_training_view(
+                    source_[index], options_, resolution_scale_));
+            note_host_load(std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count());
         }
         store_host_view(index, std::move(loaded));
         return *entries_.front().view;
@@ -1047,10 +1109,10 @@ private:
         while (!entries_.empty() &&
                (capacity_bytes_ == 0 ||
                 cached_bytes_ + loaded_bytes > capacity_bytes_)) {
-            const auto& evicted = entries_.back();
-            cached_bytes_ -= evicted.bytes;
-            lookup_.erase(evicted.index);
-            entries_.pop_back();
+            const auto evicted = select_eviction_victim(entries_);
+            cached_bytes_ -= evicted->bytes;
+            lookup_.erase(evicted->index);
+            entries_.erase(evicted);
         }
         // Keep one decoded view even when caching is disabled or a single
         // image exceeds the budget. It remains valid until the next miss.
@@ -1066,11 +1128,11 @@ private:
                 ++it;
                 continue;
             }
-            auto loaded = std::make_shared<HostTrainingView>(
-                it->second.get());
+            HostTrainingLoad result = it->second.get();
             const std::size_t index = it->first;
             it = prefetches_.erase(it);
-            store_host_view(index, std::move(loaded));
+            note_host_load(result.host_load_ms);
+            store_host_view(index, std::move(result.view));
         }
     }
 
@@ -1093,13 +1155,119 @@ private:
     std::size_t device_cached_bytes_{};
     std::size_t dataset_packed_bytes_{};
     std::size_t requests_{}, device_hits_{}, uploaded_bytes_{};
+    std::size_t host_hits_{};
+    std::size_t prefetch_issued_{};
     double get_wall_ms_{};
+    // Prefetch lookahead sizing: how long a host load takes versus how long one
+    // training iteration takes. Both are exponentially smoothed on the training
+    // thread only.
+    double host_load_mean_ms_{};
+    double step_mean_ms_{};
+    std::chrono::steady_clock::time_point last_request_time_{};
+    bool has_last_request_time_{false};
     DeviceEntries device_entries_;
     std::unordered_map<std::size_t, DeviceEntries::iterator> device_lookup_;
     float resolution_scale_{1.F};
     Entries entries_;
     std::unordered_map<std::size_t, Entries::iterator> lookup_;
-    std::unordered_map<std::size_t, std::future<HostTrainingView>> prefetches_;
+    std::unordered_map<std::size_t, std::future<HostTrainingLoad>> prefetches_;
+    // Epoch access plan. Positions index the trainer's shuffled order; entries
+    // outside the plan (for example held-out views) are evicted first.
+    static constexpr std::uint32_t k_absent_plan_position =
+        std::numeric_limits<std::uint32_t>::max();
+    static constexpr double k_timing_ema = 0.1;
+    const std::vector<std::size_t>* plan_order_{};
+    std::vector<std::uint32_t> plan_position_;
+    std::size_t plan_cursor_{};
+    std::size_t plan_size_{};
+
+    void note_request_cadence() {
+        const auto now = std::chrono::steady_clock::now();
+        if (has_last_request_time_) {
+            const double ms = std::chrono::duration<double, std::milli>(
+                now - last_request_time_).count();
+            step_mean_ms_ = step_mean_ms_ <= 0.0
+                ? ms
+                : (1.0 - k_timing_ema) * step_mean_ms_ + k_timing_ema * ms;
+        }
+        last_request_time_ = now;
+        has_last_request_time_ = true;
+    }
+
+    void note_host_load(const double host_load_ms) {
+        if (!std::isfinite(host_load_ms) || host_load_ms <= 0.0) return;
+        host_load_mean_ms_ = host_load_mean_ms_ <= 0.0
+            ? host_load_ms
+            : (1.0 - k_timing_ema) * host_load_mean_ms_ +
+                  k_timing_ema * host_load_ms;
+    }
+
+    // A host load must be started far enough ahead of its use to cover one
+    // decode plus one iteration of slack. Measured decode and iteration times
+    // replace the previous fixed view count, bounded by a fixed share of host
+    // memory for the in-flight packed views.
+    [[nodiscard]] std::size_t prefetch_limit() const {
+        const std::size_t configured = options_.training_prefetch_views;
+        if (configured == 0) return 0;
+        if (!options_.training_prefetch_adaptive ||
+            host_load_mean_ms_ <= 0.0 || step_mean_ms_ <= 0.0)
+            return configured;
+        std::size_t ceiling =
+            std::max<std::size_t>(saturate_multiply(configured, 4), 8);
+        ceiling = std::min<std::size_t>(ceiling, 32);
+        const std::size_t mean_view_bytes =
+            source_.empty() ? 0 : dataset_packed_bytes_ / source_.size();
+        if (mean_view_bytes != 0) {
+            const std::size_t in_flight_budget = std::size_t{512} * k_mib;
+            ceiling = std::min<std::size_t>(
+                ceiling,
+                std::max<std::size_t>(in_flight_budget / mean_view_bytes, 8));
+        }
+        if (ceiling <= configured) return configured;
+        const double lookahead =
+            host_load_mean_ms_ / std::max(step_mean_ms_, 1.0) + 1.0;
+        return std::clamp<std::size_t>(
+            static_cast<std::size_t>(std::ceil(lookahead)), configured,
+            ceiling);
+    }
+
+    // Distance, in requests, until the view is needed again. Views outside the
+    // current epoch are evicted before any scheduled view.
+    [[nodiscard]] std::uint64_t next_use_distance(
+        const std::size_t index) const {
+        constexpr std::uint64_t absent =
+            std::numeric_limits<std::uint64_t>::max();
+        if (plan_order_ == nullptr || plan_position_.size() != source_.size())
+            return absent;
+        if (index >= plan_position_.size() ||
+            plan_position_[index] == k_absent_plan_position)
+            return absent;
+        const std::size_t size = plan_order_->size();
+        if (size == 0) return absent;
+        const std::size_t position = plan_position_[index];
+        const std::size_t cursor = plan_cursor_ % size;
+        return position >= cursor ? position - cursor
+                                  : position + size - cursor;
+    }
+
+    // Evict the entry that is needed farthest in the future. Ties keep the
+    // least recently used entry, which is the list tail, so a loader without a
+    // published epoch plan still behaves exactly like the previous LRU.
+    template <typename EntryList>
+    typename EntryList::iterator select_eviction_victim(EntryList& entries) {
+        auto victim = std::prev(entries.end());
+        if (plan_order_ == nullptr || entries.size() < 2) return victim;
+        std::uint64_t victim_distance = next_use_distance(victim->index);
+        for (auto candidate = std::prev(victim);; --candidate) {
+            const std::uint64_t distance = next_use_distance(candidate->index);
+            if (distance > victim_distance) {
+                victim = candidate;
+                victim_distance = distance;
+            }
+            if (candidate == entries.begin()) break;
+        }
+        return victim;
+    }
 
     [[nodiscard]] std::size_t projected_gaussian_count() const noexcept {
         if (options_.enable_densification)
@@ -1219,8 +1387,17 @@ void TrainingDataLoader::prefetch(const std::size_t index) {
     impl_->prefetch(index);
 }
 
+std::size_t TrainingDataLoader::prefetch_depth() const {
+    return impl_->prefetch_depth();
+}
+
 void TrainingDataLoader::set_resolution_scale(const float scale) {
     impl_->set_resolution_scale(scale);
+}
+
+void TrainingDataLoader::set_epoch_plan(
+    const std::vector<std::size_t>* order, const std::size_t cursor) {
+    impl_->set_epoch_plan(order, cursor);
 }
 
 void TrainingDataLoader::ensure_device_headroom(const std::size_t bytes) {

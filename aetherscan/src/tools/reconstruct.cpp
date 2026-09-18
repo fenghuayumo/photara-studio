@@ -65,6 +65,10 @@
 
 namespace {
 
+// Atlas size used when neither --atlas-resolution nor a quality preset picks
+// one; kept in sync with aetherscan::texture::TextureOptions.
+constexpr std::uint32_t kDefaultAtlasResolution{2048U};
+
 struct ReconstructCli {
     std::filesystem::path images_dir;
     double focal_pixels{};
@@ -148,6 +152,7 @@ struct ReconstructCli {
     std::uint64_t splat_device_cache_mb{512};
     bool splat_cache_auto{true};
     unsigned splat_prefetch_views{4};
+    bool splat_prefetch_adaptive{true};
     unsigned splat_eval_split_every{8};
     bool splat_use_mask{true};
     bool splat_bilateral_grid{false};
@@ -191,7 +196,6 @@ struct ReconstructCli {
     float splat_min_scale_fraction{1e-4F};
     float splat_max_scale_fraction{0.002F};
     float splat_max_scale_ratio{0.F};
-    bool splat_max_scale_ratio_overridden{false};
     bool splat_constrain_scales{false};
     std::string splat_strategy{"adc_igs"};
     bool splat_densify_error_map{false};
@@ -237,13 +241,13 @@ struct ReconstructCli {
     unsigned patchmatch_concurrent_views{8};
     aetherscan::mvs::DensifyQuality dense_quality{
         aetherscan::mvs::DensifyQuality::default_quality};
-    unsigned dense_resolution_level{1};
-    bool dense_resolution_overridden{false};
+    // Unset follows --dense-quality instead of forcing a working resolution.
+    std::optional<unsigned> dense_resolution_level;
     std::filesystem::path masks_dir;
     bool texture{false};
     bool delight{false};
-    std::uint32_t atlas_resolution{2048};
-    bool atlas_resolution_overridden{false};
+    // Unset keeps the default atlas size (kDefaultAtlasResolution).
+    std::optional<std::uint32_t> atlas_resolution;
     std::uint32_t uv_parallel_partitions{8};
     bool texture_optimize{true};
     std::uint32_t texture_optimize_steps{1000};
@@ -364,7 +368,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-profile-interval N  profiling aggregation window (default 100, max 1000)\n"
               << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
               << "  --splat-cache-auto BOOL  grow cache budgets safely for large datasets (default true)\n"
-        << "  --splat-prefetch-views N  concurrent host image prefetch count (default 4)\n"
+        << "  --splat-prefetch-views N  minimum concurrent host image prefetch count (default 4)\n"
+        << "  --splat-prefetch-adaptive BOOL  grow the prefetch lookahead from the measured\n"
+        << "                              host-load/iteration times (default true)\n"
               << "  --splat-sh-degree N  spherical-harmonic bands 0..3 (default 3)\n"
               << "  --splat-kernel-size V  screen covariance low-pass variance; "
                  "0 disables, 0.1 matches Brush Mip\n"
@@ -395,8 +401,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-geometry-from-iter N  start geometry loss (default 3000)\n"
               << "  --splat-min-scale-fraction F  minimum scale / scene extent (default 1e-4)\n"
               << "  --splat-max-scale-fraction F  maximum scale / scene extent (default 0.002)\n"
-              << "  --splat-max-scale-ratio R  hard anisotropy clamp "
-                 "(0 disables; ADC+ visual default 100)\n"
+              << "  --splat-max-scale-ratio R  hard anisotropy clamp (default 0 = no limit)\n"
               << "  --splat-constrain-scales=BOOL  clamp sparse KNN scales (default false)\n"
               << "  --splat-bilateral-grid=BOOL  spatially-varying affine colour "
                  "correction (default false)\n"
@@ -437,6 +442,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-tsdf-smooth-iters N  boundary-locked Taubin passes (default 2)\n"
               << "  --mesh-obj   additionally write the much slower ASCII OBJ\n"
               << "  --dense-quality preview|default|high (whole-pipeline preset)\n"
+              << "  --dense-resolution-level N  MVS downscale steps; unset follows\n"
+                 "                              --dense-quality (0=full, 1~=half)\n"
               << "  --splat-dataset PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
               << "  --capture-mode object|scene  object uses SfM SubjectBounds\n"
               << "  --subject-bounds PATH  load object focus region (SubjectBounds txt)\n"
@@ -702,8 +709,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Grow host cache; shrink CUDA cache within its explicit budget and VRAM safety limits",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-prefetch-views",
-         "Concurrent host decode/pack prefetch views (0 disables; host-side only)",
+         "Minimum concurrent host decode/pack prefetch views (0 disables; host-side only)",
          cxxopts::value<unsigned>()->default_value("4"))
+        ("splat-prefetch-adaptive",
+         "Grow the prefetch lookahead to cover one measured host load plus one iteration",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-eval-split-every",
          "Hold out every Nth view for PSNR/SSIM evaluation (0 = train all)",
          cxxopts::value<unsigned>()->default_value("8"))
@@ -788,7 +798,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-max-scale-fraction", "Maximum Gaussian scale / scene extent",
          cxxopts::value<float>()->default_value("0.002"))
         ("splat-max-scale-ratio",
-         "Maximum Gaussian axis ratio (0 disables; ADC+ defaults to 100)",
+         "Maximum Gaussian axis ratio (0 disables; default 0 = no limit)",
          cxxopts::value<float>()->default_value("0"))
         ("splat-constrain-scales", "Clamp sparse KNN scales to configured fractions",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -944,8 +954,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "MVS quality preset: preview, default, or high",
          cxxopts::value<std::string>()->default_value("default"))
         ("dense-resolution-level",
-         "MVS image downscale steps (0=full, 1~=half)",
-         cxxopts::value<unsigned>()->default_value("1"))
+         "MVS image downscale steps (0=full, 1~=half); unset follows "
+         "--dense-quality",
+         cxxopts::value<unsigned>())
         ("masks",
          "Foreground mask directory (auto, - to disable, or explicit path)",
          cxxopts::value<std::string>()->default_value("auto"))
@@ -956,8 +967,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("delight",
          "Run Intrinsic delighter before texture bake (implies --texture)",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("atlas-resolution", "Texture atlas resolution",
-         cxxopts::value<std::uint32_t>()->default_value("2048"))
+        ("atlas-resolution", "Texture atlas resolution (default 2048)",
+         cxxopts::value<std::uint32_t>())
         ("uv-parallel-partitions",
          "Spatial UVAtlas partitioning level (1 = serial)",
          cxxopts::value<std::uint32_t>()->default_value("8"));
@@ -1182,6 +1193,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.splat_prefetch_views > 16)
         throw std::invalid_argument(
             "--splat-prefetch-views must be in [0, 16]");
+    cli.splat_prefetch_adaptive = result["splat-prefetch-adaptive"].as<bool>();
     cli.splat_eval_split_every =
         result["splat-eval-split-every"].as<unsigned>();
     cli.splat_use_mask = result["splat-use-mask"].as<bool>();
@@ -1239,8 +1251,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-max-scale-fraction"].as<float>();
     cli.splat_max_scale_ratio =
         result["splat-max-scale-ratio"].as<float>();
-    cli.splat_max_scale_ratio_overridden =
-        result.count("splat-max-scale-ratio") != 0;
     cli.splat_constrain_scales = result["splat-constrain-scales"].as<bool>();
     cli.splat_bilateral_grid = result["splat-bilateral-grid"].as<bool>();
     cli.splat_bilateral_grid_shared =
@@ -1287,9 +1297,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.mesh_obj = result["mesh-obj"].as<bool>();
     cli.texture = result["texture"].as<bool>();
     cli.delight = result["delight"].as<bool>();
-    cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
-    cli.atlas_resolution_overridden =
-        result.count("atlas-resolution") != 0;
+    if (result.count("atlas-resolution") != 0)
+        cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
     cli.uv_parallel_partitions =
         result["uv-parallel-partitions"].as<std::uint32_t>();
     cli.texture_optimize = result["texture-optimize"].as<bool>();
@@ -1364,10 +1373,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         throw std::invalid_argument(
             "--dense-quality must be preview, default, or high");
     }
-    cli.dense_resolution_level =
-        result["dense-resolution-level"].as<unsigned>();
-    cli.dense_resolution_overridden =
-        result.count("dense-resolution-level") != 0;
+    if (result.count("dense-resolution-level") != 0)
+        cli.dense_resolution_level =
+            result["dense-resolution-level"].as<unsigned>();
     const std::string masks_text = result["masks"].as<std::string>();
     if (masks_text == "auto") {
         const std::filesystem::path candidate =
@@ -1532,7 +1540,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "(Vulkan SDK + aether_drender)");
     }
 #endif
-    if (cli.atlas_resolution < 64) {
+    if (cli.atlas_resolution && *cli.atlas_resolution < 64) {
         throw std::invalid_argument("--atlas-resolution must be >= 64");
     }
     if (cli.uv_parallel_partitions == 0)
@@ -1897,11 +1905,13 @@ aetherscan::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.normal_field = cli.splat_normal_field;
     settings.ppisp_layout = cli.splat_ppisp ? 1 : 0;
     settings.bilateral_grid = cli.splat_bilateral_grid;
-    settings.atlas_resolution = static_cast<int>(cli.atlas_resolution);
+    const std::uint32_t atlas_resolution =
+        cli.atlas_resolution.value_or(kDefaultAtlasResolution);
+    settings.atlas_resolution = static_cast<int>(atlas_resolution);
     settings.texture_delight = cli.delight;
     settings.texture_optimize = cli.texture_optimize;
-    if (cli.atlas_resolution <= 1024) settings.texture_quality = 0;
-    else if (cli.atlas_resolution >= 4096) settings.texture_quality = 2;
+    if (atlas_resolution <= 1024) settings.texture_quality = 0;
+    else if (atlas_resolution >= 4096) settings.texture_quality = 2;
     else settings.texture_quality = 1;
     return settings;
 }
@@ -1963,7 +1973,8 @@ void write_mesh_artifact(
 aetherscan::texture::TextureOptions texture_options_from_cli(
     const ReconstructCli& cli) {
     aetherscan::texture::TextureOptions options;
-    options.atlas_resolution = cli.atlas_resolution;
+    options.atlas_resolution =
+        cli.atlas_resolution.value_or(options.atlas_resolution);
     options.uv_parallel_partitions = cli.uv_parallel_partitions;
     options.optimize = cli.texture_optimize;
     options.optimize_steps = cli.texture_optimize_steps;
@@ -2017,7 +2028,7 @@ void write_texture_artifact(
                 aetherscan::texture::VisibilityMode::hybrid_ray_query;
         } else if (
             cli.dense_quality == aetherscan::mvs::DensifyQuality::preview) {
-            if (!cli.atlas_resolution_overridden)
+            if (!cli.atlas_resolution)
                 options.atlas_resolution = 1024U;
             options.visibility_mode =
                 aetherscan::texture::VisibilityMode::shadow_map;
@@ -2713,6 +2724,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         * bytes_per_megabyte);
     options.adaptive_training_cache = cli.splat_cache_auto;
     options.training_prefetch_views = cli.splat_prefetch_views;
+    options.training_prefetch_adaptive = cli.splat_prefetch_adaptive;
     if (!cli.gui) {
         for (const unsigned milestone :
              {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
@@ -2856,15 +2868,9 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     // forcing it for every dense input clips tangential splats and removes
     // legitimate surface coverage in sparsely sampled detail regions.
     options.constrain_scale_range = cli.splat_constrain_scales;
-    options.max_scale_ratio =
-        !dense_input &&
-                (aetherscan::splat::is_adc_strategy(
-                     options.densification_strategy) ||
-                 options.densification_strategy ==
-                     aetherscan::splat::DensificationStrategy::emc) &&
-                !cli.splat_max_scale_ratio_overridden
-            ? 0.F
-            : cli.splat_max_scale_ratio;
+    // Every strategy now shares the CLI clamp: ADC+/ADC-IGS follow Brush and
+    // leave the axis ratio unconstrained unless the user asks for a limit.
+    options.max_scale_ratio = cli.splat_max_scale_ratio;
     options.use_mvs_depth = false;
     options.use_mvs_normals = false;
     options.use_depth_normal_loss = cli.mesh &&
@@ -2971,6 +2977,7 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         options.training_view_cache_bytes / (1024 * 1024),
         " cache_auto=", options.adaptive_training_cache,
         " prefetch_views=", options.training_prefetch_views,
+        " prefetch_adaptive=", options.training_prefetch_adaptive,
         " eval_split_every=", options.evaluation_split_every,
         " knn_scale=", options.initialize_scale_from_knn,
         " dense_structure_freeze_iter=",
@@ -3442,8 +3449,8 @@ int main(int argc, char** argv) {
                     : aetherscan::mvs::MeshMethod::delaunay_cut;
                 mesh_options.build_mesh = cli.mesh;
                 mesh_options.mesh_max_points = cli.mesh_max_points;
-                if (cli.dense_resolution_overridden)
-                    mesh_options.resolution_level = cli.dense_resolution_level;
+                if (cli.dense_resolution_level)
+                    mesh_options.resolution_level = *cli.dense_resolution_level;
                 if (cli.mesh_dist_insert_px >= 0.F)
                     mesh_options.mesh_dist_insert_px = cli.mesh_dist_insert_px;
                 mesh_options.mesh_use_free_space_support = cli.mesh_free_space_support;
@@ -3879,8 +3886,8 @@ int main(int argc, char** argv) {
             aetherscan::mvs::DensifyOptions densify_opts;
             aetherscan::mvs::apply_quality_preset(
                 densify_opts, cli.dense_quality);
-            if (cli.dense_resolution_overridden)
-                densify_opts.resolution_level = cli.dense_resolution_level;
+            if (cli.dense_resolution_level)
+                densify_opts.resolution_level = *cli.dense_resolution_level;
             densify_opts.mask_dir = cli.masks_dir;
             densify_opts.mesh_max_points = cli.mesh_max_points;
             // GGGS resolves the native voxel to max_depth/2048, matching

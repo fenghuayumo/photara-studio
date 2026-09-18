@@ -352,8 +352,16 @@ struct TrainingOptions {
     // Decode and pack upcoming shuffled views on background threads while CUDA
     // processes the current iteration, so a host cache miss does not stall the
     // step on image I/O. Host-side only: all CUDA calls stay on the training
-    // thread. Zero disables prefetching.
+    // thread. Zero disables prefetching. The value is the minimum lookahead;
+    // with training_prefetch_adaptive the loader grows it to cover one measured
+    // host decode plus one iteration of slack.
     std::size_t training_prefetch_views{4};
+    // Size the prefetch lookahead from the measured host-load and iteration
+    // times instead of using training_prefetch_views as a fixed count. Large
+    // datasets decode for far longer than one iteration, so a fixed count of
+    // four views leaves most of the decode exposed on the critical path.
+    // Bounded to 32 views and to 512MB of in-flight packed views.
+    bool training_prefetch_adaptive{true};
     // Hold out every Nth source view from optimization (0 trains on all).
     // The caller may render these views through the evaluation callback.
     // The reconstruction CLI defaults this to 8 so held-out PSNR/SSIM is on

@@ -1015,10 +1015,14 @@ GaussianModel Trainer::train(
     std::vector<std::size_t> shuffled_views = view_indices;
     std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
     std::size_t shuffled_view_cursor = 0;
+    view_cache.set_epoch_plan(&shuffled_views, shuffled_view_cursor);
     const std::size_t initial_prefetch_end = std::min(
         shuffled_views.size(),
-        shuffled_view_cursor + options_.training_prefetch_views + 1);
-    for (std::size_t cursor = shuffled_view_cursor;
+        shuffled_view_cursor + view_cache.prefetch_depth() + 1);
+    // The current view is decoded by get(); only the views after it belong in
+    // the lookahead, otherwise a slot is wasted on work that is awaited
+    // immediately.
+    for (std::size_t cursor = shuffled_view_cursor + 1;
          cursor < initial_prefetch_end; ++cursor)
         view_cache.prefetch(shuffled_views[cursor]);
 
@@ -1267,10 +1271,13 @@ GaussianModel Trainer::train(
             std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
             shuffled_view_cursor = 0;
         }
+        // Publish the order before any cache mutation: eviction keeps the views
+        // that this epoch still needs and drops the ones that are an epoch away.
+        view_cache.set_epoch_plan(&shuffled_views, shuffled_view_cursor);
         const std::size_t prefetch_end = std::min(
             shuffled_views.size(),
-            shuffled_view_cursor + options_.training_prefetch_views + 1);
-        for (std::size_t cursor = shuffled_view_cursor;
+            shuffled_view_cursor + view_cache.prefetch_depth() + 1);
+        for (std::size_t cursor = shuffled_view_cursor + 1;
              cursor < prefetch_end; ++cursor)
             view_cache.prefetch(shuffled_views[cursor]);
         const std::size_t view_index =
@@ -2096,7 +2103,12 @@ GaussianModel Trainer::train(
             " device_resident_bytes=", cache.device_resident_bytes,
             " device_budget_bytes=", cache.device_budget_bytes,
             " host_budget_bytes=", cache.host_budget_bytes,
-            " dataset_packed_bytes=", cache.dataset_packed_bytes);
+            " dataset_packed_bytes=", cache.dataset_packed_bytes,
+            " host_hits=", cache.host_hits,
+            " prefetch_issued=", cache.prefetch_issued,
+            " prefetch_depth=", cache.prefetch_depth,
+            " host_load_mean_ms=", cache.host_load_mean_ms,
+            " step_mean_ms=", cache.step_mean_ms);
     }
     finish_evaluation();
     const cudaError_t error = cudaDeviceSynchronize();

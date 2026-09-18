@@ -189,7 +189,7 @@ MVS 中表现为轮廓双层、底座重叠或缺失。程序会在输出旁生�
 应先通过该报告确认 SfM，再调整 MVS 阈值。
 
 `default` 面向常规交付；`high` 使用全分辨率、更多邻居和更严格的多视图几何/融合约束。
-`--dense-resolution-level` 可在预设之后单独覆盖工作分辨率。
+`--dense-resolution-level` 可在预设之后单独覆盖工作分辨率；不传则跟随 `--dense-quality`。
 
 CPU PatchMatch 会一次缓存所有图像金字塔，并默认同时处理 8 个参考视图；每个视图内部再按
 8 行 tile 做 red/black 并行传播。可用 `--patchmatch-concurrent-views` 和

@@ -635,6 +635,9 @@ NB_MODULE(aetherscan_native, module) {
             "training_prefetch_views",
             &splat::TrainingOptions::training_prefetch_views)
         .def_rw(
+            "training_prefetch_adaptive",
+            &splat::TrainingOptions::training_prefetch_adaptive)
+        .def_rw(
             "evaluation_split_every",
             &splat::TrainingOptions::evaluation_split_every)
         .def_rw(
