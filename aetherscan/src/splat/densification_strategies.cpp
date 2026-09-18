@@ -203,6 +203,14 @@ RefinementCounts refine_emc(
     const unsigned iteration, const TrainingOptions& options,
     std::mt19937& random, const AdamStates& states) {
     const std::size_t old_count = model.size();
+    // Hard on-screen clip backstop. The per-step soft penalty leaves the
+    // scale above the limit on purpose so both can balance; once per
+    // refinement the remainder is clipped (bounded by the hardness factor).
+    if (oversize_penalty_at(options, iteration) > 0.F)
+        detail::clip_log_scale_by_screen(
+            model.log_scales, stats.max_screen_radius,
+            options.oversize_screen_limit,
+            options.oversize_clip_hardness);
     const auto errors = download<float>(stats.image_error);
     const auto counts = download<float>(stats.count);
     const auto oversize = download<float>(stats.priority);
@@ -389,6 +397,13 @@ RefinementCounts refine_gaussians(
             options, states);
     if (options.densification_strategy == DensificationStrategy::emc)
         return refine_emc(model, stats, iteration, options, random, states);
+    // Shared hard on-screen clip backstop (the EMC path applies it inside
+    // refine_emc before its own scoring).
+    if (oversize_penalty_at(options, iteration) > 0.F)
+        detail::clip_log_scale_by_screen(
+            model.log_scales, stats.max_screen_radius,
+            options.oversize_screen_limit,
+            options.oversize_clip_hardness);
 
     const std::size_t old_count = model.size();
     const auto gradients = download<float>(stats.gradient);

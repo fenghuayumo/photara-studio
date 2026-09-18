@@ -229,6 +229,16 @@ void apply_strategy_defaults(TrainingOptions& options) {
         options.densify_growth_factor = 1.05F;
         options.densify_oversize_split_fraction = 0.15F;
         options.densify_oversize_score_blend = 1.F;
+        // The log-scale shrink pressure from the reference MCMC family is
+        // disabled: with our per-pixel loss normalization and Adam it
+        // systematically under-sizes splats and cost 0.57 dB on the office
+        // protocol (artifacts/office_emc_v3*_20260918). The erank and
+        // quaternion pulls measured neutral-to-positive and stay on.
+        options.shape_scale_reg = 0.F;
+        options.shape_erank_reg = 0.001F;
+        options.shape_quat_norm_reg = 0.01F;
+        options.oversize_screen_limit = 0.3F;
+        options.oversize_penalty = 1.F;
         break;
     case DensificationStrategy::dense_adaptive:
         break;

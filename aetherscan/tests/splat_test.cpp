@@ -4615,6 +4615,114 @@ void test_emc_revised_noise_gates_and_scales() {
     require_finite(model.means, "EMC revised noise produced non-finite means");
 }
 
+void test_emc_regularizers_match_finite_differences() {
+    using namespace aetherscan::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    auto model = make_default_refine_model(std::vector<float>(12, 0.F));
+    auto scales = model.log_scales.to_vector();
+    // Row 0/1/3: anisotropic (active erank region), row 2 isotropic
+    // (erank inactive, r - c > 1).
+    scales[0] = std::log(0.01F);   scales[1] = std::log(0.001F);
+    scales[2] = std::log(0.0001F);
+    scales[3] = std::log(0.01F);   scales[4] = std::log(0.008F);
+    scales[5] = std::log(0.006F);
+    scales[9] = std::log(0.02F);   scales[10] = std::log(0.0002F);
+    scales[11] = std::log(0.00002F);
+    model.log_scales = Tensor::from_vector(scales, {4, 3}, gpu);
+    auto quats = model.quaternions.to_vector();
+    for (int component = 0; component < 4; ++component)
+        quats[component] *= 0.8F;  // non-unit norm row 0.
+    model.quaternions = Tensor::from_vector(quats, {4, 4}, gpu);
+
+    constexpr float k_scale = 0.0137F;
+    constexpr float k_erank = 0.0021F;
+    constexpr float k_s3 = 0.0007F;
+    constexpr float k_quat = 0.0173F;
+    ModelGradients gradients;
+    gradients.log_scales = Tensor::zeros_like(model.log_scales);
+    gradients.quaternions = Tensor::zeros_like(model.quaternions);
+    aetherscan::splat::detail::apply_shape_regularizers(
+        model, gradients, k_scale, k_erank, k_s3, k_quat);
+    const auto scale_grad = gradients.log_scales.to_vector();
+    const auto quat_grad = gradients.quaternions.to_vector();
+    const auto host_scales = model.log_scales.to_vector();
+    const auto host_quats = model.quaternions.to_vector();
+
+    const auto host_loss = [&](const std::size_t row,
+                               const std::vector<float>& ls_override,
+                               const std::vector<float>& quat_override) {
+        // Double precision: near-degenerate rows carry r - c ~ 1e-3, and a
+        // float host cannot resolve finite differences through that
+        // subtraction (the perturbation is below one ulp of r).
+        double loss = 0.0;
+        for (int axis = 0; axis < 3; ++axis)
+            loss += static_cast<double>(k_scale) / 3.0 *
+                    std::max(
+                        static_cast<double>(ls_override[3 * row + axis]),
+                        -40.0);
+        double largest = ls_override[3 * row];
+        for (int axis = 1; axis < 3; ++axis)
+            largest = std::max<double>(
+                largest, ls_override[3 * row + axis]);
+        double x[3]{};
+        for (int axis = 0; axis < 3; ++axis)
+            x[axis] = std::exp(
+                2.0 * (ls_override[3 * row + axis] - largest));
+        const double sum = x[0] + x[1] + x[2];
+        const double p1 = std::max({x[0], x[1], x[2]}) / sum;
+        const double p3 = std::max(
+            std::min({x[0], x[1], x[2]}) / sum, 1e-30);
+        const double p2 = std::max(1.0 - p1 - p3, 1e-30);
+        const double entropy = -(
+            p1 * std::log(p1) + p2 * std::log(p2) + p3 * std::log(p3));
+        const double rank = std::exp(entropy);
+        loss += static_cast<double>(k_erank) * std::max(
+            -std::log(std::max(rank - 0.99999, 1e-12)), 0.0);
+        loss += static_cast<double>(k_s3) * p3;
+        const double norm = std::sqrt(
+            static_cast<double>(quat_override[4 * row]) *
+                quat_override[4 * row] +
+            static_cast<double>(quat_override[4 * row + 1]) *
+                quat_override[4 * row + 1] +
+            static_cast<double>(quat_override[4 * row + 2]) *
+                quat_override[4 * row + 2] +
+            static_cast<double>(quat_override[4 * row + 3]) *
+                quat_override[4 * row + 3]);
+        loss += static_cast<double>(k_quat) *
+            (norm - 1.0 - std::log(std::max(norm, 1e-12)));
+        return loss;
+    };
+
+    const float eps = 1e-4F;
+    for (std::size_t row = 0; row < 4; ++row) {
+        for (int axis = 0; axis < 3; ++axis) {
+            std::vector<float> up = host_scales;
+            std::vector<float> down = host_scales;
+            up[3 * row + axis] += eps;
+            down[3 * row + axis] -= eps;
+            const double fd =
+                (host_loss(row, up, host_quats) -
+                 host_loss(row, down, host_quats)) / (2.F * eps);
+            const float kernel = scale_grad[3 * row + axis];
+            require(std::fabs(fd - kernel) < 2e-4 + 0.05 * std::fabs(fd),
+                    "EMC erank/scale gradient diverged from host math");
+        }
+        for (int component = 0; component < 4; ++component) {
+            std::vector<float> up = host_quats;
+            std::vector<float> down = host_quats;
+            up[4 * row + component] += eps;
+            down[4 * row + component] -= eps;
+            const double fd =
+                (host_loss(row, host_scales, up) -
+                 host_loss(row, host_scales, down)) / (2.F * eps);
+            const float kernel = quat_grad[4 * row + component];
+            require(std::fabs(fd - kernel) < 2e-4 + 0.05 * std::fabs(fd),
+                    "EMC quaternion regularizer gradient diverged");
+        }
+    }
+}
+
 void test_densify_mean_scores_and_oversize_weights() {
     using namespace aetherscan::splat;
     constexpr auto gpu = tinytensor::Device::CUDA;
@@ -5061,6 +5169,7 @@ int main(int argc, char** argv) {
         test_emc_long_axis_split_math();
         test_emc_refine_relocates_and_grows();
         test_emc_revised_noise_gates_and_scales();
+        test_emc_regularizers_match_finite_differences();
         test_densify_mean_scores_and_oversize_weights();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();

@@ -115,6 +115,22 @@ struct TrainingOptions {
     // Extra Gaussians per refine as a multiplier of the live count. Values
     // <= 1 fall back to densify_select_fraction of above-threshold rows.
     float densify_growth_factor{0.F};
+    // Strategy-neutral per-splat shape regularizers, added to the
+    // scale/quaternion gradients when their weights are non-zero. The
+    // scale weight follows the front-loaded (p+1)(1-t)^p schedule so its
+    // integral over the run is fixed.
+    float shape_scale_reg{0.F};
+    float shape_scale_reg_decay_power{0.4F};
+    float shape_erank_reg{0.F};
+    float shape_erank_s3_reg{0.F};
+    float shape_quat_norm_reg{0.F};
+    // Strategy-neutral on-screen size control: every step spends a share
+    // of one scale learning-rate step per octave over the limit, and each
+    // refinement hard-clips the remainder (bounded by the hardness
+    // factor).
+    float oversize_screen_limit{0.F};
+    float oversize_penalty{0.F};
+    float oversize_clip_hardness{1.5F};
     // Share of the growth budget spent on oversized (screen-cap) parents.
     // 0 keeps the default "split every oversized row that fits" path.
     float densify_oversize_split_fraction{0.F};
@@ -367,5 +383,21 @@ struct TrainingOptions {
 // same option name can carry a different default value per densification
 // strategy without duplicating parameters.
 void apply_strategy_defaults(TrainingOptions& options);
+
+// The oversize hinge is a strong early stabilizer but holds back the late
+// fine-tuning phase, so its strength decays linearly to zero over the run
+// (office, ADC-IGS: +2.2 dB at 1k with the full penalty but -0.2 dB at
+// 30k; the decayed form keeps the early gain, artifacts/office_igs_*).
+[[nodiscard]] inline float oversize_penalty_at(
+    const TrainingOptions& options, const unsigned iteration) {
+    if (options.oversize_penalty <= 0.F ||
+        options.oversize_screen_limit <= 0.F)
+        return 0.F;
+    const float progress = std::min(
+        static_cast<float>(iteration - 1) /
+            static_cast<float>(std::max(options.iterations, 1U)),
+        1.F);
+    return options.oversize_penalty * std::max(1.F - progress, 0.F);
+}
 
 }  // namespace aetherscan::splat

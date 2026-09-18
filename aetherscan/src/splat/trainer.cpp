@@ -1768,10 +1768,49 @@ GaussianModel Trainer::train(
                 static_cast<float>(iteration) / std::max(1U, options_.iterations));
             detail::add_geometry_regularization(model, gradients,
                 options_.opacity_regularization_weight * remaining,
-                options_.log_scale_regularization_weight * std::pow(remaining, 0.4F));
+                options_.log_scale_regularization_weight *
+                    std::pow(remaining, 0.4F));
+            if (options_.shape_scale_reg > 0.F ||
+                options_.shape_erank_reg > 0.F ||
+                options_.shape_erank_s3_reg > 0.F ||
+                options_.shape_quat_norm_reg > 0.F) {
+                // Strategy-neutral per-splat shape priors: the scale weight
+                // follows the front-loaded (p+1)(1-t)^p schedule with unit
+                // run integral; every weight is averaged over the splats.
+                const float progress = std::min(
+                    static_cast<float>(iteration - 1) /
+                        std::max(1U, options_.iterations),
+                    1.F);
+                const float power = std::max(
+                    options_.shape_scale_reg_decay_power, 0.F);
+                const float decay =
+                    (power + 1.F) * std::pow(1.F - progress, power);
+                const float inverse_count =
+                    1.F / static_cast<float>(std::max<std::size_t>(
+                              model.size(), 1));
+                detail::apply_shape_regularizers(
+                    model, gradients,
+                    options_.shape_scale_reg * decay * inverse_count,
+                    options_.shape_erank_reg * inverse_count,
+                    options_.shape_erank_s3_reg * inverse_count,
+                    options_.shape_quat_norm_reg * inverse_count);
+            }
             detail::adam_step_structure(model, gradients, means_state, scales_state,
                 rotations_state, opacity_state, means_lr, iteration, options_,
                 minimum_log_scale, maximum_log_scale);
+        }
+        const float oversize_penalty =
+            oversize_penalty_at(options_, iteration);
+        if (oversize_penalty > 0.F) {
+            // Soft on-screen limit: each step spends a share of one scale
+            // learning-rate step per octave above the limit. The hard clip
+            // at refinement is the backstop, not the primary control.
+            detail::apply_oversize_penalty(
+                model, rendered.radii,
+                1.F / static_cast<float>(std::max<std::uint32_t>(
+                    1, std::min(target.camera.width, target.camera.height))),
+                options_.oversize_screen_limit,
+                oversize_penalty, options_.scales_lr);
         }
         const std::size_t full_sh_stride = model.sh.shape()[1] * 3;
         if (!fused_sh) {

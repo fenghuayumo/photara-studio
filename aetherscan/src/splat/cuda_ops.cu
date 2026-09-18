@@ -3126,6 +3126,170 @@ void inject_emc_noise(
     check_cuda(cudaGetLastError(), "inject EMC revised noise");
 }
 
+__global__ void apply_shape_regularizers_kernel(
+    const float* log_scales, const float* quaternions,
+    float* scale_gradients, float* quaternion_gradients,
+    const std::size_t count, const float scale_weight,
+    const float erank_weight, const float erank_s3_weight,
+    const float quat_weight) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+
+    // Linear pressure on the floored log scale: an unused splat keeps
+    // moving toward the relocation threshold instead of vanishing.
+    if (scale_weight > 0.F)
+        for (int axis = 0; axis < 3; ++axis)
+            if (log_scales[3 * index + axis] > -40.F)
+                scale_gradients[3 * index + axis] += scale_weight / 3.F;
+
+    // Quaternion norm pull: |q| - 1 - log|q| has its minimum on the unit
+    // sphere and never saturates.
+    if (quat_weight > 0.F) {
+        const float norm_squared =
+            quaternions[4 * index + 0] * quaternions[4 * index + 0] +
+            quaternions[4 * index + 1] * quaternions[4 * index + 1] +
+            quaternions[4 * index + 2] * quaternions[4 * index + 2] +
+            quaternions[4 * index + 3] * quaternions[4 * index + 3];
+        if (norm_squared > 1e-20F) {
+            const float norm = sqrtf(norm_squared);
+            const float factor = quat_weight * (norm - 1.F) / norm_squared;
+            for (int component = 0; component < 4; ++component)
+                quaternion_gradients[4 * index + component] +=
+                    factor * quaternions[4 * index + component];
+        }
+    }
+
+    if (erank_weight <= 0.F && erank_s3_weight <= 0.F) return;
+
+    // Effective-rank penalty on the relative squared scale shares
+    // x_i = exp(2 (ls_i - ls_max)); r = exp(entropy(p)), penalized below
+    // rank two. Sub-gradients keep the max/min axis selection fixed.
+    float log_scale[3]{};
+    int largest = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        log_scale[axis] = log_scales[3 * index + axis];
+        if (!(log_scale[axis] > -1e4F)) log_scale[axis] = -1e4F;
+        if (axis > 0 && log_scale[axis] > log_scale[largest])
+            largest = axis;
+    }
+    float x[3]{};
+    for (int axis = 0; axis < 3; ++axis)
+        x[axis] = expf(2.F * (log_scale[axis] - log_scale[largest]));
+    const float sum = x[0] + x[1] + x[2];
+    if (!(sum > 0.F)) return;
+    int smallest = 0;
+    for (int axis = 1; axis < 3; ++axis)
+        if (x[axis] < x[smallest]) smallest = axis;
+    const float share_largest = x[largest] / sum;
+    const float raw_share_smallest = x[smallest] / sum;
+    const bool smallest_clamped = !(raw_share_smallest > 1e-30F);
+    const float share_smallest =
+        smallest_clamped ? 1e-30F : raw_share_smallest;
+    const float middle_complement = 1.F - share_largest - share_smallest;
+    const bool middle_clamped = !(middle_complement > 1e-30F);
+    const float share_middle = middle_clamped ? 1e-30F : middle_complement;
+    const float entropy = -(
+        share_largest * logf(share_largest) +
+        share_middle * logf(share_middle) +
+        share_smallest * logf(share_smallest));
+    const float rank = expf(entropy);
+    // reg = max(-log(r - 0.99999), 0): only splats flatter than rank two
+    // carry gradient.
+    float dreg_dshare[3]{};  // largest, middle, smallest order.
+    if (erank_weight > 0.F && rank - 0.99999F < 1.F) {
+        const float shares[3]{share_largest, share_middle, share_smallest};
+        for (int k = 0; k < 3; ++k)
+            dreg_dshare[k] =
+                rank * (logf(shares[k]) + 1.F) / (rank - 0.99999F);
+    }
+    const float dloss_dshare_smallest = dreg_dshare[2] + erank_s3_weight;
+    float dloss_dx[3]{};
+    for (int axis = 0; axis < 3; ++axis) {
+        float d_largest = 0.F;
+        float d_smallest = 0.F;
+        if (axis == largest) d_largest = (1.F - share_largest) / sum;
+        else d_largest = -share_largest / sum;
+        if (axis == smallest) {
+            if (!smallest_clamped)
+                d_smallest = (1.F - share_smallest) / sum;
+        } else {
+            d_smallest = -share_smallest / sum;
+        }
+        const float d_middle = middle_clamped
+            ? 0.F
+            : -(d_largest + d_smallest);
+        const float axis_dloss_dx =
+            dreg_dshare[0] * d_largest +
+            dreg_dshare[1] * d_middle +
+            dloss_dshare_smallest * d_smallest;
+        dloss_dx[axis] = axis_dloss_dx;
+    }
+    // x_largest is identically one, but every other x_j carries
+    // dx_j/dls_largest = -2 x_j through the shared max subtraction.
+    for (int axis = 0; axis < 3; ++axis) {
+        if (axis == largest) {
+            float pull = 0.F;
+            for (int other = 0; other < 3; ++other)
+                if (other != largest) pull += dloss_dx[other] * x[other];
+            scale_gradients[3 * index + axis] +=
+                erank_weight * (-2.F * pull);
+        } else {
+            scale_gradients[3 * index + axis] +=
+                erank_weight * dloss_dx[axis] * 2.F * x[axis];
+        }
+    }
+}
+
+void apply_shape_regularizers(
+    GaussianModel& model, ModelGradients& gradients,
+    const float scale_weight, const float erank_weight,
+    const float erank_s3_weight, const float quat_weight) {
+    if (model.size() == 0) return;
+    apply_shape_regularizers_kernel<<<
+        (model.size() + k_threads - 1) / k_threads, k_threads>>>(
+        model.log_scales.ptr<float>(), model.quaternions.ptr<float>(),
+        gradients.log_scales.ptr<float>(),
+        gradients.quaternions.ptr<float>(), model.size(), scale_weight,
+        erank_weight, erank_s3_weight, quat_weight);
+    check_cuda(cudaGetLastError(), "apply EMC regularizers");
+}
+
+__global__ void apply_oversize_penalty_kernel(
+    float* log_scales, const int* radii, const std::size_t count,
+    const float inverse_resolution, const float screen_limit,
+    const float penalty, const float scales_lr) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count || radii[index] <= 0) return;
+    const float screen = static_cast<float>(radii[index]) *
+                         inverse_resolution;
+    if (!(screen > screen_limit) || !(penalty > 0.F)) return;
+    const float push = penalty * log2f(screen / screen_limit);
+    float largest = log_scales[3 * index];
+    for (int axis = 0; axis < 3; ++axis)
+        largest = fmaxf(largest, log_scales[3 * index + axis]);
+    for (int axis = 0; axis < 3; ++axis) {
+        const float axis_share =
+            expf(2.F * (log_scales[3 * index + axis] - largest));
+        log_scales[3 * index + axis] -=
+            scales_lr * push * axis_share;
+    }
+}
+
+void apply_oversize_penalty(
+    GaussianModel& model, const tinytensor::Tensor& radii,
+    const float inverse_resolution, const float screen_limit,
+    const float penalty, const float scales_lr) {
+    if (model.size() == 0 || !radii.is_valid() ||
+        radii.numel() != model.size() || !(screen_limit > 0.F) ||
+        !(penalty > 0.F))
+        return;
+    apply_oversize_penalty_kernel<<<
+        (model.size() + k_threads - 1) / k_threads, k_threads>>>(
+        model.log_scales.ptr<float>(), radii.ptr<int>(), model.size(),
+        inverse_resolution, screen_limit, penalty, scales_lr);
+    check_cuda(cudaGetLastError(), "apply EMC screen penalty");
+}
+
 void apply_adc_decay(
     GaussianModel& model, const float opacity_decay,
     const float scale_decay) {
