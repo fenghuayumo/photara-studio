@@ -1,21 +1,26 @@
 #pragma once
 
-#include "densification_adc_plus.hpp"
+#include "densification.hpp"
+
+#include <random>
 
 namespace aetherscan::splat::densification {
 
-// Image/world-gradient evidence, relocation and the ADC+ refinement skeleton.
-// The differentiation from ADC+ is entirely in what counts as evidence and
-// what ranks growth: an SSIM contrast-structure error map blended with the
-// world-space position gradient, a screen-gradient gate, two distinct
-// contributing cameras before replication, and score-sampled relocation.
-// Geometry (split, cadence, screen cap) is shared with ADC+.
-class IgsStrategy final : public AdcPlusStrategy {
-protected:
-    tinytensor::Tensor growth_candidates(
-        const tinytensor::Tensor& eligible,
-        const tinytensor::Tensor& selected) const override;
-    const char* name() const override;
+// ADC-IGS refinement. Every decision - prune masks, candidate scores and
+// weights, replacement and growth sampling, which parents split - is taken on
+// the GPU from the per-step statistics: the recycle-fraction/best-row/cap
+// pruning policy, the accumulated-gradient gate, opacity x edge-factor
+// replacement sampling, forced oversized splits and the exact-alpha
+// random-axis split. Only the sampled parent rows cross back to the host, so
+// a refinement no longer stalls the GPU behind a model download and a host
+// sort. Shared device plumbing lives in densification_internal.hpp.
+class IgsStrategy {
+public:
+    RefinementCounts refine(
+        GaussianModel& model, detail::DensificationStats& stats,
+        unsigned iteration, float scene_extent,
+        const mvs::Vec3f& scene_center, const TrainingOptions& options,
+        std::mt19937& random, const AdamStates& states) const;
 };
 
 }  // namespace aetherscan::splat::densification

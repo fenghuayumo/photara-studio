@@ -33,21 +33,6 @@ struct SceneGeometry {
 
 using AdamStates = std::array<detail::AdamState*, 6>;
 
-// Bounded sampling factor from one candidate's own error against the median
-// error of the eligible set: higher-error candidates are sampled more often,
-// never by more than `strength` (clamped to one). The factor is exactly one
-// whenever the evidence is unusable (no positive median, non-finite input or
-// zero strength), so the multiplier can never invert the ranking.
-inline float error_map_sampling_factor(
-    const float error, const float median, const float strength) {
-    if (!std::isfinite(error) || !std::isfinite(median) ||
-        !std::isfinite(strength) || !(median > 0.F) || strength == 0.F)
-        return 1.F;
-    const double value = std::max(error, 0.F);
-    return 1.F + std::clamp(strength, 0.F, 1.F) *
-        static_cast<float>(2.0 * value / (value + median) - 1.0);
-}
-
 [[nodiscard]] SceneGeometry training_scene_geometry(
     const mvs::MvsScene& scene, bool dense_input);
 

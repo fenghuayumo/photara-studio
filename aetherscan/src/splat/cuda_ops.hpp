@@ -133,6 +133,21 @@ AdcPlusPruneResult adc_plus_prune(
     const std::array<float, 3>& scene_center,
     std::size_t maximum_count);
 
+// The same opacity/non-finite/bounds sweep as adc_plus_prune, returned as raw
+// device masks so a caller can keep its own recycle/cap policy on the GPU
+// instead of paying a host round trip. Nothing crosses back to the host.
+struct PruneMasks {
+    tinytensor::Tensor keep;       // Bool {N}: not hard and opacity >= floor
+    tinytensor::Tensor hard;       // Bool {N}: non-finite / out of bounds
+    tinytensor::Tensor opacities;  // Float32 {N}: sigmoid(opacity_logits)
+};
+
+PruneMasks prune_masks(
+    const GaussianModel& model,
+    float minimum_opacity,
+    float maximum_bounds,
+    const std::array<float, 3>& scene_center);
+
 tinytensor::Tensor compute_3d_filter(
     const tinytensor::Tensor& means,
     const std::vector<Camera>& cameras,

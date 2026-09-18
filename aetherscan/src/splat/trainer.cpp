@@ -1012,6 +1012,9 @@ GaussianModel Trainer::train(
                     "file or source alpha channel for every selected view");
     }
     std::mt19937 random(options_.seed);
+    // Densification samples replacement and growth parents on the device, so
+    // the device generator has to follow the training seed as well.
+    tinytensor::Tensor::manual_seed(options_.seed);
     std::vector<std::size_t> shuffled_views = view_indices;
     std::shuffle(shuffled_views.begin(), shuffled_views.end(), random);
     std::size_t shuffled_view_cursor = 0;

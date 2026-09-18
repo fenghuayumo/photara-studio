@@ -397,6 +397,11 @@ RefinementCounts refine_gaussians(
             options, states);
     if (options.densification_strategy == DensificationStrategy::emc)
         return refine_emc(model, stats, iteration, options, random, states);
+    if (options.densification_strategy == DensificationStrategy::adc_igs)
+        return IgsStrategy{}.refine(
+            model, stats, iteration, scene_extent, scene_center, options,
+            random, states);
+    // Dense MVT input is the only strategy left with host-side decisions.
     // Shared hard on-screen clip backstop (the EMC path applies it inside
     // refine_emc before its own scoring).
     if (oversize_penalty_at(options, iteration) > 0.F)
@@ -409,11 +414,6 @@ RefinementCounts refine_gaussians(
     const auto gradients = download<float>(stats.gradient);
     const auto counts = download<float>(stats.count);
     const auto screen = download<float>(stats.max_screen_radius);
-    const auto priorities = download<float>(stats.priority);
-    const bool error_guided = options.densification_strategy == DensificationStrategy::adc_igs &&
-        options.densify_use_error_map && options.densify_error_map_weight != 0.F;
-    const auto image_error = error_guided ? download<float>(stats.image_error) : std::vector<float>{};
-    const auto view_support = error_guided ? download<float>(stats.view_support) : std::vector<float>{};
     const auto opacities = download<float>(model.opacity_logits);
     const auto log_scales = download<float>(model.log_scales);
     // dense_adaptive performs a non-finite and bounds sweep over the complete
@@ -513,15 +513,11 @@ RefinementCounts refine_gaussians(
         bool oversized{};
     };
     std::vector<Candidate> candidates;
-    std::vector<float> positive_priorities;
     for (std::size_t index = 0; index < old_count; ++index) {
         if (remap[index] < 0 || counts[index] <= 0.F) continue;
         candidates.push_back({
             index, static_cast<std::size_t>(remap[index]), gradients[index],
             screen[index] > options.densify_screen_threshold});
-        const float priority = priorities[index] /
-                               std::max(counts[index], 1.F);
-        if (priority > 0.F) positive_priorities.push_back(priority);
     }
     select_training_rows(model, keep, states);
 
@@ -529,18 +525,6 @@ RefinementCounts refine_gaussians(
         ? options.densification_cap - model.size()
         : 0;
     if (capacity == 0) {
-        if (options.densification_strategy == DensificationStrategy::adc_igs) {
-            const float remaining_progress = 1.F -
-                static_cast<float>(iteration) /
-                    std::max(1.F, static_cast<float>(options.iterations));
-            detail::apply_adc_decay(
-                model,
-                options.opacity_decay *
-                    std::max(remaining_progress, 0.F),
-                // Optional scale decay; zero by default (matching Brush).
-                options.scale_decay *
-                    std::max(remaining_progress, 0.F));
-        }
         stats = detail::make_densification_stats(model.size());
         return {0, pruned};
     }
@@ -548,120 +532,45 @@ RefinementCounts refine_gaussians(
     std::vector<int> split_parents;
     std::vector<std::pair<std::size_t, float>> replacement_weights;
     std::vector<std::pair<std::size_t, float>> growth_weights;
-    std::unordered_set<std::size_t> forced;
-    const bool adc = options.densification_strategy ==
-                     DensificationStrategy::adc_igs;
-    float priority_median = 1.F;
-    if (!positive_priorities.empty()) {
-        const auto middle = positive_priorities.begin() +
-            static_cast<std::ptrdiff_t>(positive_priorities.size() / 2);
-        std::nth_element(
-            positive_priorities.begin(), middle,
-            positive_priorities.end());
-        priority_median = std::max(*middle, 1e-9F);
-    }
-    const bool allow_growth = !adc || iteration < options.grow_stop_iter;
-    // One candidate's mean error over the observations that saw it. The
-    // accumulated value is a contribution-weighted average per view, so the
-    // division is the temporal average over those observations.
-    const auto sample_error = [&](const std::size_t index) {
-        return image_error[index] / std::max(counts[index], 1.F);
-    };
-    std::vector<float> candidate_errors;
-    if (error_guided && allow_growth)
-        for (const auto& candidate : candidates) {
-            const auto i = candidate.old_index;
-            if (candidate.score <= options.densify_gradient_threshold || view_support[i] < 2.F)
-                continue;
-            const float error = sample_error(i);
-            if (std::isfinite(error) && error > 0.F) candidate_errors.push_back(error);
-        }
-    float error_median = 0.F;
-    if (!candidate_errors.empty()) {
-        auto middle = candidate_errors.begin() + candidate_errors.size() / 2;
-        std::nth_element(candidate_errors.begin(), middle, candidate_errors.end());
-        error_median = *middle;
-    }
-    // Selected-error diagnostics: the ratio between the median error of the
-    // parents that actually spent the growth budget and the candidate median.
-    // One means the error evidence did not move the choice at all.
-    std::vector<float> error_by_row(error_guided ? model.size() : 0, 0.F);
-    std::size_t error_reweighted = 0;
     for (const Candidate& candidate : candidates) {
-        const float opacity = 1.F /
-            (1.F + std::exp(-opacities[candidate.old_index]));
-        float edge_factor = 1.F;
-        if (adc) {
-            const float priority = priorities[candidate.old_index] /
-                std::max(counts[candidate.old_index], 1.F);
-            if (priority > 0.F)
-                edge_factor += 0.25F * std::min(
-                    priority / priority_median, 10.F);
-        }
         const float screen_factor = candidate.oversized ? 2.F : 1.F;
         replacement_weights.emplace_back(
             candidate.new_index,
-            adc ? opacity * edge_factor
-                : std::max(candidate.score, 1e-12F) * screen_factor);
-        if (allow_growth &&
-            candidate.score > options.densify_gradient_threshold) {
-            float error_factor = 1.F;
-            if (error_guided && view_support[candidate.old_index] >= 2.F &&
-                error_median > 0.F) {
-                const float error = sample_error(candidate.old_index);
-                error_by_row[candidate.new_index] = error;
-                error_factor = error_map_sampling_factor(
-                    error, error_median, options.densify_error_map_weight);
-                ++error_reweighted;
-            }
+            std::max(candidate.score, 1e-12F) * screen_factor);
+        if (candidate.score > options.densify_gradient_threshold)
             growth_weights.emplace_back(
-                candidate.new_index,
-                candidate.score * edge_factor * screen_factor * error_factor);
-        }
-        if (adc && allow_growth && candidate.oversized)
-            forced.insert(candidate.new_index);
+                candidate.new_index, candidate.score * screen_factor);
     }
-    const bool gumbel = adc;
     auto selected = weighted_unique_sample(
-        replacement_weights, std::min(pruned, capacity), gumbel, random);
-    forced.insert(selected.begin(), selected.end());
+        replacement_weights, std::min(pruned, capacity), false, random);
     std::size_t desired_growth = static_cast<std::size_t>(std::llround(
         growth_weights.size() * options.densify_select_fraction));
-    if (!adc) {
-        desired_growth = std::min(
-            desired_growth,
-            static_cast<std::size_t>(std::ceil(
-                model.size() * std::clamp(
-                    options.dense_growth_fraction, 0.F, 1.F))));
-        growth_weights.erase(
-            std::remove_if(
-                growth_weights.begin(), growth_weights.end(),
-                [&](const auto& candidate) {
-                    return forced.contains(candidate.first);
-                }),
-            growth_weights.end());
-    }
-    const std::size_t remaining = capacity > forced.size()
-        ? capacity - forced.size()
+    // Dense MVS input also caps net growth by a fraction of the live count.
+    desired_growth = std::min(
+        desired_growth,
+        static_cast<std::size_t>(std::ceil(
+            model.size() *
+            std::clamp(options.dense_growth_fraction, 0.F, 1.F))));
+    const std::unordered_set<std::size_t> replaced(
+        selected.begin(), selected.end());
+    growth_weights.erase(
+        std::remove_if(
+            growth_weights.begin(), growth_weights.end(),
+            [&](const auto& candidate) {
+                return replaced.contains(candidate.first);
+            }),
+        growth_weights.end());
+    const std::size_t remaining = capacity > selected.size()
+        ? capacity - selected.size()
         : 0;
-    selected = weighted_unique_sample(
-        growth_weights, std::min(remaining, desired_growth), gumbel, random);
-    forced.insert(selected.begin(), selected.end());
-    float selected_error_ratio = 0.F;
-    if (error_guided && !selected.empty()) {
-        std::vector<float> chosen;
-        chosen.reserve(selected.size());
-        for (const std::size_t index : selected)
-            if (error_by_row[index] > 0.F)
-                chosen.push_back(error_by_row[index]);
-        if (!chosen.empty()) {
-            auto middle = chosen.begin() + chosen.size() / 2;
-            std::nth_element(chosen.begin(), middle, chosen.end());
-            selected_error_ratio = *middle / error_median;
-        }
+    const auto grown = weighted_unique_sample(
+        growth_weights, std::min(remaining, desired_growth), false, random);
+    split_parents.reserve(std::min(capacity, selected.size() + grown.size()));
+    for (const std::size_t parent : selected) {
+        if (split_parents.size() >= capacity) break;
+        split_parents.push_back(static_cast<int>(parent));
     }
-    split_parents.reserve(std::min(capacity, forced.size()));
-    for (const std::size_t parent : forced) {
+    for (const std::size_t parent : grown) {
         if (split_parents.size() >= capacity) break;
         split_parents.push_back(static_cast<int>(parent));
     }
@@ -672,33 +581,9 @@ RefinementCounts refine_gaussians(
         retained_screen.push_back(
             screen[static_cast<std::size_t>(old_index)]);
     grow_training_model(
-        model, split_parents,
-        adc ? detail::SplitMode::igs_random
-            : detail::SplitMode::dense_tangent,
-        options, random, states,
-        retained_screen);
-    if (adc) {
-        const float remaining_progress = 1.F -
-            static_cast<float>(iteration) /
-                std::max(1.F, static_cast<float>(options.iterations));
-        detail::apply_adc_decay(
-            model,
-            options.opacity_decay *
-                std::max(remaining_progress, 0.F),
-            // Optional scale decay; zero by default (matching Brush).
-            options.scale_decay *
-                std::max(remaining_progress, 0.F));
-    }
+        model, split_parents, detail::SplitMode::dense_tangent, options,
+        random, states, retained_screen);
     stats = detail::make_densification_stats(model.size());
-    if (error_guided)
-        core::Logger::instance().info("igs_error_refine iteration=", iteration,
-            " weight=", options.densify_error_map_weight,
-            " candidates=", growth_weights.size(),
-            " reweighted=", error_reweighted,
-            " error_median=", error_median,
-            " selected_error_ratio=", selected_error_ratio,
-            " grown=", split_parents.size(),
-            " pruned=", pruned, " gaussians=", model.size());
     return {split_parents.size(), pruned};
 }
 

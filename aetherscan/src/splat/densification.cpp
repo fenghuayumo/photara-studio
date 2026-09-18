@@ -210,15 +210,10 @@ void apply_strategy_defaults(TrainingOptions& options) {
     case DensificationStrategy::adc_igs:
         // ADC-IGS decides growth with the projected-position gradient gate,
         // opacity/edge evidence sampling, gumbel selection, the random-axis
-        // exact-alpha split and the default cadence. A scoring pipeline that
-        // replaced that gate with an SSIM error-map/footprint score
-        // systematically favoured hard-to-fit background rays; on turntable
-        // captures it bloated alpha coverage from ~40% to ~90% of the frame
-        // and wrapped meshes in floater shells. The bounded re-order form
-        // (densify_use_error_map) keeps the gradient gate and only reshuffles
-        // which qualified parents spend the growth budget; the 2026-09-18
-        // sweep measured it inside the ori seed noise on every dataset
-        // (docs/ADC_IGS_ERROR_MAP_20260917).
+        // exact-alpha split and the default cadence. It has no error-map path:
+        // re-ordering qualified parents by SSIM error measured inside the seed
+        // noise on every dataset (docs/ADC_IGS_ERROR_MAP_20260917), so the
+        // knob only belongs to ADC+.
         options.densify_use_error_map = false;
         break;
     case DensificationStrategy::emc:

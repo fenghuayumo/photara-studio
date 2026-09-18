@@ -2207,24 +2207,11 @@ AdcPlusPruneResult adc_plus_prune(
     const std::array<float, 3>& scene_center,
     const std::size_t maximum_count) {
     const std::size_t count = model.size();
-    auto keep = tinytensor::Tensor::zeros_bool(
-        {count}, tinytensor::Device::CUDA);
-    auto hard = tinytensor::Tensor::zeros_bool(
-        {count}, tinytensor::Device::CUDA);
-    auto opacities = tinytensor::Tensor::empty(
-        {count}, tinytensor::Device::CUDA);
-    if (count != 0) {
-        adc_plus_prune_kernel<<<
-            (count + k_threads - 1) / k_threads, k_threads>>>(
-            model.means.ptr<float>(), model.log_scales.ptr<float>(),
-            model.quaternions.ptr<float>(),
-            model.opacity_logits.ptr<float>(), model.sh.ptr<float>(),
-            model.sh.numel() / count, keep.ptr<unsigned char>(),
-            hard.ptr<unsigned char>(), opacities.ptr<float>(), count,
-            minimum_opacity, maximum_bounds, scene_center[0],
-            scene_center[1], scene_center[2]);
-        check_cuda(cudaGetLastError(), "select ADC+ prune mask");
-    }
+    auto masks = prune_masks(
+        model, minimum_opacity, maximum_bounds, scene_center);
+    auto keep = std::move(masks.keep);
+    auto hard = std::move(masks.hard);
+    auto opacities = std::move(masks.opacities);
 
     std::size_t retained = keep.count_nonzero();
     if ((retained == 0 && count != 0) ||
@@ -2280,6 +2267,29 @@ AdcPlusPruneResult adc_plus_prune(
         tinytensor::DataType::Int32);
     return {std::move(keep_indices), std::move(opacities),
             count - retained};
+}
+
+PruneMasks prune_masks(
+    const GaussianModel& model, const float minimum_opacity,
+    const float maximum_bounds,
+    const std::array<float, 3>& scene_center) {
+    const std::size_t count = model.size();
+    PruneMasks masks{
+        tinytensor::Tensor::zeros_bool({count}, tinytensor::Device::CUDA),
+        tinytensor::Tensor::zeros_bool({count}, tinytensor::Device::CUDA),
+        tinytensor::Tensor::empty({count}, tinytensor::Device::CUDA)};
+    if (count == 0) return masks;
+    adc_plus_prune_kernel<<<
+        (count + k_threads - 1) / k_threads, k_threads>>>(
+        model.means.ptr<float>(), model.log_scales.ptr<float>(),
+        model.quaternions.ptr<float>(),
+        model.opacity_logits.ptr<float>(), model.sh.ptr<float>(),
+        model.sh.numel() / count, masks.keep.ptr<unsigned char>(),
+        masks.hard.ptr<unsigned char>(), masks.opacities.ptr<float>(),
+        count, minimum_opacity, maximum_bounds, scene_center[0],
+        scene_center[1], scene_center[2]);
+    check_cuda(cudaGetLastError(), "select prune masks");
+    return masks;
 }
 
 tinytensor::Tensor compute_3d_filter(

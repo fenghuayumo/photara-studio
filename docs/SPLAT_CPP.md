@@ -183,14 +183,22 @@ CLI 暴露两个稀疏输入策略，默认 `adc_igs`：
 | `--splat-strategy` | 统计与增长 | 默认调度 |
 |---|---|---|
 | `adc_plus` | 最大 refine weight、实际 alpha 贡献可见度和屏幕半径；预算回收、ADC split/decay/noise | 全程每 200 步，95% 进度截止 |
-| `adc_igs` | SSIM 对比度/结构误差图与世界梯度混合评分、屏幕梯度门槛、要求两个不同相机贡献、按分数迁移；增长候选排除已选中父点 | 与 ADC+ 相同：每 200 步、第一个窗口起，一直到 `max(14000, N−2500)` |
+| `adc_igs` | 累积 refine weight 门槛 + 不透明度×边缘证据（priority/观测数）采样、oversize 强制分裂、`dense_recycle_fraction` 回收预算、best-row 豁免 | 每 200 步、第一个窗口起，一直到 `max(14000, N−2500)` |
 
-`adc_igs` 的差异只在"什么是证据、按什么排序增长"，几何（分裂算子、refine 间隔、
-屏幕上限）与 `adc_plus` 共用。此前它使用"每次 refine 固定 +2.5%、每 100 步"的速率
-增长与保持协方差的最大轴二分，并在精修时硬裁剪屏幕半径；把这套几何换成 ADC+ 的
-之后，同一 7k 口径下留出 PSNR 从 21.484 提升到 21.908、SSIM 0.9425→0.9448、
-近相机代理指标从 997 降到 255（0.5 阈值），并且优于 ADC+ 本身（21.791/0.9448/793）。
-数值、命令与对照见 `docs/ADC_IGS_FOG_DIAGNOSIS_20260915.md`。
+`--splat-densify-error-map` 只属于 `adc_plus`：ADC-IGS 完全没有 error-map 路径
+（2026-09-17 的扫描显示按 SSIM 误差重排序在所有数据集上都落在 seed 噪声内，
+见 `docs/ADC_IGS_ERROR_MAP_20260917.md`），EMC 则把 error map 当作策略本身。
+
+`adc_igs` 保留随机轴精确 alpha 分裂（最大轴减半、子代复现父代 alpha 合成），
+不采用 ADC+ 的协方差分裂；refine 间隔与屏幕上限与 ADC+ 相同。
+
+**每次 refine 的决策全部在 GPU 上完成**：硬剪枝（非有限/越界/超大）、不透明度下限、
+回收预算、best-row 豁免、上限裁剪、候选权重、以及替换/生长父点的采样都在设备张量上计算，
+只有被选中的父点下标回传主机。此前这些判断在主机侧完成，每次 refine 要回传整个模型
+（1M Gaussian 的 SH 就有 64MB）并在 CPU 上做 O(N) 扫描与排序，1M 规模下每 200 步制造
+0.3–0.44s 的 GPU 空转（`nvidia-smi` 采样表现为 90↔60 的锯齿）；现在同一位置的开销降到
+毫秒级。设备采样使用 tinytensor 的多项式采样器（Plackett–Luce，与原先的主机 Gumbel top-k
+同分布），其随机源在训练开始时按 `--splat-seed` 播种，因此同一 seed 仍可复现。
 
 所有策略均受 `--splat-densification-cap` 硬上限约束，新增/裁剪数量写入训练日志。
 ADC+ 的“可见”要求 Gaussian 通过 alpha/transmittance 测试并实际参与至少一个像素合成；

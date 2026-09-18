@@ -203,7 +203,6 @@ struct ReconstructCli {
     bool splat_constrain_scales{false};
     std::string splat_strategy{"adc_igs"};
     bool splat_densify_error_map{false};
-    float splat_densify_error_weight{0.25F};
     float splat_growth_factor{0.F};
     unsigned splat_seed{42};
     bool splat_densification{true};
@@ -419,8 +418,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  densify growth ceiling (default 1000000)\n"
-              << "  --splat-densify-error-map BOOL  bounded error guidance for ADC-IGS growth (default false)\n"
-              << "  --splat-densify-error-weight W  sampling strength in [0,1] (default 0.25)\n"
+              << "  --splat-densify-error-map BOOL  ADC+ error-score growth mode (default false)\n"
               << "  --splat-growth-factor W  EMC per-refine count multiplier; 0 keeps the strategy preset\n"
               << "  --splat-init-point-budget N  cap the initialization cloud (default 0 = keep all)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
@@ -846,10 +844,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("adc_igs"))
         ("splat-densification", "Enable splat split/prune",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("splat-densify-error-map", "Enable bounded error guidance for ADC-IGS growth",
+        ("splat-densify-error-map", "Enable the ADC+ error-score growth mode",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("splat-densify-error-weight", "Error sampling strength in [0,1]",
-         cxxopts::value<float>()->default_value("0.25"))
         ("splat-growth-factor",
          "EMC per-refine growth multiplier (0 = strategy preset)",
          cxxopts::value<float>()->default_value("0"))
@@ -1289,16 +1285,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_strategy = result["splat-strategy"].as<std::string>();
     cli.splat_densification = result["splat-densification"].as<bool>();
     cli.splat_densify_error_map = result["splat-densify-error-map"].as<bool>();
-    cli.splat_densify_error_weight = result["splat-densify-error-weight"].as<float>();
-    if (!std::isfinite(cli.splat_densify_error_weight) ||
-        cli.splat_densify_error_weight < 0.F || cli.splat_densify_error_weight > 1.F)
-        throw std::invalid_argument("--splat-densify-error-weight must be finite and in [0,1]");
     cli.splat_growth_factor = result["splat-growth-factor"].as<float>();
     if (!std::isfinite(cli.splat_growth_factor) || cli.splat_growth_factor < 0.F)
         throw std::invalid_argument("--splat-growth-factor must be finite and >= 0");
     cli.splat_seed = result["splat-seed"].as<unsigned>();
-    if (cli.splat_densify_error_map && cli.splat_strategy != "adc_igs")
-        throw std::invalid_argument("--splat-densify-error-map requires adc_igs");
+    if (cli.splat_densify_error_map && cli.splat_strategy != "adc_plus")
+        throw std::invalid_argument("--splat-densify-error-map requires adc_plus");
     cli.splat_structure_freeze_iter =
         result["splat-structure-freeze-iter"].as<unsigned>();
     cli.splat_densification_cap =
@@ -2783,7 +2775,6 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     // growth thresholds. Apply user overrides after the strategy preset.
     aetherscan::splat::apply_strategy_defaults(options);
     options.densify_use_error_map = cli.splat_densify_error_map;
-    options.densify_error_map_weight = cli.splat_densify_error_weight;
     if (cli.splat_growth_factor > 0.F)
         options.densify_growth_factor = cli.splat_growth_factor;
     options.seed = cli.splat_seed;
@@ -2978,7 +2969,6 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " ppisp_before_bilagrid=", options.ppisp_before_bilagrid,
         " densification_cap=", options.densification_cap,
         " densify_error_map=", options.densify_use_error_map,
-        " densify_error_weight=", options.densify_error_map_weight,
         " dense_recycle_fraction=", options.dense_recycle_fraction,
         " dense_growth_fraction=", options.dense_growth_fraction,
         " use_mask=", options.use_mask,

@@ -91,25 +91,17 @@ struct TrainingOptions {
     // Broad semi-transparent splats that own the rendered median depth wrap
     // meshes in a floater shell. Start size repair past a quarter frame.
     float densify_screen_threshold{0.25F};
-    // ADC-IGS uses error only to re-order gradient-qualified growth parents;
-    // its gradient threshold, growth budget, replacement and split rule are
-    // untouched, so the bounded multiplier can only reshuffle which quarter
-    // of the qualified set spends the budget. ADC+ keeps its separate
-    // error-score mode. Opt-in: the 2026-09-17 sweep found the effect on the
-    // ori protocol inside the +-0.4 dB seed noise (docs/ADC_IGS_ERROR_MAP).
+    // ADC+ error-score mode: replace the maximum refine weight with the
+    // per-view image error before it ranks growth. ADC-IGS has no error-map
+    // path at all (the 2026-09-17 sweep measured the re-order inside the ori
+    // seed noise on every dataset, docs/ADC_IGS_ERROR_MAP), and EMC consumes
+    // the error map as its strategy itself.
     bool densify_use_error_map{false};
-    // Sampling strength in [0, 1]: 0 disables the re-order, 1 lets a
-    // candidate's own error ratio move its growth weight by up to +-100%.
-    // 0.25 is the tested reference setting.
-    float densify_error_map_weight{0.25F};
     // Per-view exponent after image-to-splat reduction, before window averaging.
     float densify_score_power{0.4F};
     // Geometric blend with ||dL/dmean_world|| * max(scale), following
     // optional world-gradient score. Zero retains image-only ranking.
     float densify_world_gradient_blend{0.F};
-    // Gate net IGS growth on unresolved projected geometry gradients.
-    // The error-map score still chooses where that budget is spent.
-    float densify_geometry_gradient_threshold{0.F};
     // Per-pixel error-map exponent before raster scatter ( default 4).
     float densify_loss_map_power{4.F};
     // Extra Gaussians per refine as a multiplier of the live count. Values

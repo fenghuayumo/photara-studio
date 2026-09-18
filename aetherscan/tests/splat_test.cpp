@@ -4082,117 +4082,145 @@ void test_dense_adaptive_still_prunes_nonfinite_geometry() {
         harness.model.sh, "dense_adaptive kept a non-finite SH row");
 }
 
-void test_igs_growth_budget() {
+// ADC-IGS takes every refinement decision on the device. These are the exact
+// decisions the host path used to take, asserted directly: the hard prune, the
+// opacity-floor recycle budget, the best-row rescue, the cap clamp and the
+// growth budget.
+void test_igs_refinement_decisions() {
     using namespace aetherscan::splat;
     using tinytensor::Tensor;
     constexpr auto gpu = tinytensor::Device::CUDA;
-    GaussianModel model;
-    model.means = Tensor::zeros({4, 3}, gpu);
-    model.log_scales = Tensor::full({4, 3}, -3.F, gpu);
-    model.quaternions = Tensor::from_vector(
-        std::vector<float>{1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0}, {4,4}, gpu);
-    model.opacity_logits = Tensor::zeros({4,1}, gpu);
-    model.sh = Tensor::zeros({4,1,3}, gpu);
-    model.normal_features = Tensor::zeros({4,3}, gpu);
-    auto means = detail::make_adam_state(model.means);
-    auto scales = detail::make_adam_state(model.log_scales);
-    auto rotations = detail::make_adam_state(model.quaternions);
-    auto opacity = detail::make_adam_state(model.opacity_logits);
-    auto sh = detail::make_reduced_second_adam_state(model.sh);
-    auto normals = detail::make_adam_state(model.normal_features);
-    densification::AdamStates states{&means, &scales, &rotations, &opacity, &sh, &normals};
-    auto stats = detail::make_densification_stats(4);
-    stats.gradient = Tensor::full({4}, 1.F, gpu);
-    stats.count = Tensor::full({4}, 10.F, gpu);
-    stats.view_support = Tensor::full({4}, 2.F, gpu);
-    stats.priority = Tensor::full({4}, 10.F, gpu);
-    stats.max_screen_radius = Tensor::from_vector(
-        std::vector<float>{0.5F,0.01F,0.01F,0.01F}, {4}, gpu);
+
+    const auto build_model = [](
+        const std::vector<float>& opacity_logits,
+        const std::vector<float>& means) {
+        const std::size_t count = opacity_logits.size();
+        std::vector<float> quaternions;
+        quaternions.reserve(4 * count);
+        for (std::size_t index = 0; index < count; ++index)
+            quaternions.insert(quaternions.end(), {1.F, 0.F, 0.F, 0.F});
+        GaussianModel model;
+        model.means = Tensor::from_vector(
+            means, {count, std::size_t{3}}, gpu);
+        model.log_scales = Tensor::full(
+            {count, std::size_t{3}}, -3.F, gpu);
+        model.quaternions = Tensor::from_vector(
+            quaternions, {count, std::size_t{4}}, gpu);
+        model.opacity_logits = Tensor::from_vector(
+            opacity_logits, {count, std::size_t{1}}, gpu);
+        model.sh = Tensor::zeros(
+            {count, std::size_t{1}, std::size_t{3}}, gpu);
+        model.normal_features = Tensor::zeros(
+            {count, std::size_t{3}}, gpu);
+        return model;
+    };
+    // Means encode the row index, so the surviving rows are readable.
+    const auto indexed_means = [](
+        const std::size_t count,
+        const std::size_t out_of_bounds = std::numeric_limits<std::size_t>::max()) {
+        std::vector<float> means;
+        means.reserve(3 * count);
+        for (std::size_t index = 0; index < count; ++index) {
+            const float x = index == out_of_bounds
+                ? 200.F
+                : static_cast<float>(index);
+            means.insert(means.end(), {x, 0.F, 0.F});
+        }
+        return means;
+    };
+    struct Arm {
+        RefineHarness harness;
+        densification::RefinementCounts counts{};
+    };
+    const auto run = [&](const TrainingOptions& arm,
+                         const GaussianModel& seed,
+                         const std::size_t count) {
+        Arm result;
+        result.harness = make_refine_harness(densification::clone_model(seed));
+        auto stats = detail::make_densification_stats(count);
+        stats.gradient = Tensor::full({count}, 1.F, gpu);
+        stats.count = Tensor::full({count}, 10.F, gpu);
+        stats.view_support = Tensor::full({count}, 2.F, gpu);
+        stats.priority = Tensor::full({count}, 10.F, gpu);
+        stats.max_screen_radius = Tensor::full({count}, 0.01F, gpu);
+        std::mt19937 random(42);
+        result.counts = densification::refine_gaussians(
+            result.harness.model, stats, 100, 1.F,
+            aetherscan::mvs::Vec3f::Zero(), arm, random,
+            result.harness.states());
+        return result;
+    };
+
     TrainingOptions options;
     options.densification_strategy = DensificationStrategy::adc_igs;
-    options.densification_cap = 7;
-    options.densify_select_fraction = 0.5F;
-    options.densify_screen_threshold = 0.1F;
-    options.densify_gradient_threshold = 0.01F;
-    std::mt19937 random(42);
-    const auto result = densification::IgsStrategy{}.refine(
-        model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(), options, states);
-    require(result.grown == 3 && model.size() == 7,
-            "IGS lost growth budget to an already selected oversized parent");
-    for (const auto* state : states)
-        require(state->first.shape()[0] == 7 && state->second.shape()[0] == 7,
-                "IGS topology and Adam rows diverged");
-    require_finite(model.means, "IGS produced non-finite means");
-    require_finite(model.log_scales, "IGS produced non-finite scales");
-}
+    options.refine_start_iter = 0;
+    options.refine_stop_iter = 200;
+    options.refine_every = 100;
 
-void test_igs_fog_evidence_paths() {
-    using namespace aetherscan::splat;
-    using tinytensor::Tensor;
-    constexpr auto gpu = tinytensor::Device::CUDA;
-    for (const float oversize_fraction : {0.F, 1.F}) {
-        auto model = make_default_refine_model(std::vector<float>(12, 0.F));
-        model.opacity_logits = Tensor::from_vector(
-            std::vector<float>{-20.F, 0.F, 0.F, 0.F}, {4, 1}, gpu);
-        auto harness = make_refine_harness(std::move(model));
-        auto stats = make_default_refine_stats();
-        stats.max_screen_radius = Tensor::full({4}, 0.8F, gpu);
-        TrainingOptions options;
-        options.densification_strategy = DensificationStrategy::adc_igs;
-        options.densification_cap = 20;
-        options.densify_geometry_gradient_threshold = 0.001F;
-        options.densify_oversize_split_fraction = oversize_fraction;
-        options.densify_select_fraction = 1.F;
-        options.densify_gradient_threshold = 0.F;
-        std::mt19937 random(42);
-        const auto result = densification::IgsStrategy{}.refine(
-            harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-            options, harness.states());
-        require(result.pruned == 1 && result.grown == 0 && harness.model.size() == 3,
-                "IGS replacement/oversize must not bypass the geometry gate");
-        for (const auto* state : harness.states())
-            require(state->first.shape()[0] == 3 && state->second.shape()[0] == 3,
-                    "Geometry-gated pruning misaligned Adam rows");
+    {
+        // Row 5 sits outside the 100x scene bound, rows 0..2 are below the
+        // opacity floor. The recycle budget is ceil(8 * 0.25) = 2 slots, one
+        // of them spent on the hard row: only row 0 is recycled.
+        TrainingOptions pruning = options;
+        pruning.prune_opacity = 0.05F;
+        pruning.dense_recycle_fraction = 0.25F;
+        pruning.densification_cap = 6;
+        pruning.grow_stop_iter = 0;
+        auto arm = run(pruning, build_model(
+            {-8.F, -7.F, -6.F, -1.F, 0.F, 1.F, 2.F, 3.F},
+            indexed_means(8, 5)), 8);
+        require(arm.counts.pruned == 2 && arm.counts.grown == 0 &&
+                    arm.harness.model.size() == 6,
+            "ADC-IGS device prune/recycle budget diverged");
+        require(arm.harness.model.means.to_vector() ==
+                    std::vector<float>{1.F, 0.F, 0.F, 2.F, 0.F, 0.F,
+                                       3.F, 0.F, 0.F, 4.F, 0.F, 0.F,
+                                       6.F, 0.F, 0.F, 7.F, 0.F, 0.F},
+            "ADC-IGS device prune kept different rows");
     }
     {
-        auto model = make_default_refine_model(std::vector<float>(12, 0.F));
-        model.opacity_logits = Tensor::zeros({4, 1}, gpu);
-        auto harness = make_refine_harness(std::move(model));
-        auto stats = make_default_refine_stats();
-        stats.geometry_gradient = Tensor::from_vector(
-            std::vector<float>{0.1F, 0, 0, 0}, {4}, gpu);
-        stats.priority = Tensor::from_vector(std::vector<float>{0, 10, 10, 10}, {4}, gpu);
-        TrainingOptions options;
-        options.densification_strategy = DensificationStrategy::adc_igs;
-        options.densification_cap = 20;
-        options.densify_geometry_gradient_threshold = 0.001F;
-        options.densify_oversize_split_fraction = 1.F;
-        options.densify_select_fraction = 2.F;
-        options.densify_gradient_threshold = 0.F;
-        std::mt19937 random(42);
-        const auto result = densification::IgsStrategy{}.refine(
-            harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-            options, harness.states());
-        require(result.grown == 1 && result.pruned == 0,
-                "Sampled oversize budget must fall back to the sole geometry-supported parent");
+        // Cap clamp: the two least opaque rows go, the strongest survives.
+        TrainingOptions capped = options;
+        capped.prune_opacity = 0.001F;
+        capped.dense_recycle_fraction = 0.F;
+        capped.densification_cap = 4;
+        auto arm = run(capped, build_model(
+            {-5.F, -4.F, -3.F, 0.F, 2.F, 3.F}, indexed_means(6)), 6);
+        require(arm.counts.pruned == 2 && arm.counts.grown == 0 &&
+                    arm.harness.model.size() == 4,
+            "ADC-IGS device cap clamp diverged");
+        require(arm.harness.model.means.to_vector() ==
+                    std::vector<float>{2.F, 0.F, 0.F, 3.F, 0.F, 0.F,
+                                       4.F, 0.F, 0.F, 5.F, 0.F, 0.F},
+            "ADC-IGS device cap clamp kept different rows");
     }
-    auto model = make_default_refine_model(std::vector<float>(12, 0.F));
-    model.opacity_logits = Tensor::from_vector(
-        std::vector<float>{-4.F, -4.F, -4.F, 0.F}, {4, 1}, gpu);
-    auto harness = make_refine_harness(std::move(model));
-    auto stats = make_default_refine_stats();
-    stats.count = Tensor::from_vector(std::vector<float>{10, 0, 10, 10}, {4}, gpu);
-    stats.view_support = Tensor::from_vector(std::vector<float>{1, 0, 2, 1}, {4}, gpu);
-    TrainingOptions options;
-    options.densification_strategy = DensificationStrategy::adc_igs;
-    options.densification_cap = 3;
-    std::mt19937 random(42);
-    const auto result = densification::IgsStrategy{}.refine(
-        harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, harness.states());
-    require(result.pruned == 1 && result.grown == 0 &&
-                harness.model.means.to_vector()[0] == 1.F,
-            "IGS must prune repeated-camera weak opacity while preserving unseen/multiview/opaque rows");
+    {
+        // Growth budget: half of the six gradient-qualified parents, nothing
+        // oversized and nothing pruned, so the split count is exact.
+        TrainingOptions growing = options;
+        growing.densification_cap = 12;
+        growing.densify_select_fraction = 0.5F;
+        growing.densify_gradient_threshold = 0.F;
+        growing.densify_screen_threshold = 10.F;
+        growing.grow_stop_iter = 1000;
+        auto arm = run(growing, build_model(
+            {0.F, 0.F, 0.F, 0.F, 0.F, 0.F}, indexed_means(6)), 6);
+        require(arm.counts.pruned == 0 && arm.counts.grown == 3 &&
+                    arm.harness.model.size() == 9,
+            "ADC-IGS device growth budget diverged");
+        const auto states = arm.harness.states();
+        require(std::all_of(
+                    states.begin(), states.end(),
+                    [&](const detail::AdamState* state) {
+                        return state != nullptr &&
+                            state->first.shape()[0] == 9 &&
+                            state->second.shape()[0] == 9;
+                    }),
+            "ADC-IGS device growth misaligned Adam rows");
+        require_finite(arm.harness.model.means, "ADC-IGS produced non-finite means");
+        require_finite(
+            arm.harness.model.log_scales, "ADC-IGS produced non-finite scales");
+    }
 }
 
 void test_densification_cap_stops_igs_growth() {
@@ -4219,47 +4247,15 @@ void test_densification_cap_stops_igs_growth() {
     // it pins the interval instead of inheriting the preset cadence.
     options.refine_every = 100;
     options.densification_cap = 4;
-    options.densify_growth_factor = 2.F;
     options.grow_stop_iter = 10'000;
     std::mt19937 random(42);
     const auto result = densification::IgsStrategy{}.refine(
         harness.model, stats, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, harness.states());
+        options, random, harness.states());
     require(harness.model.size() == 4,
             "densification_cap did not stop ADC-IGS from growing past the cap");
     require(result.grown == 0,
             "ADC-IGS still scheduled extra splits after hitting densification_cap");
-    options.densification_cap = 8;
-    stats = detail::make_densification_stats(4);
-    stats.gradient = Tensor::full({4}, 1.F, gpu);
-    stats.count = Tensor::full({4}, 10.F, gpu);
-    stats.view_support = Tensor::full({4}, 1.F, gpu);
-    stats.max_screen_radius = Tensor::full({4}, 0.01F, gpu);
-    const auto single_view = densification::IgsStrategy{}.refine(
-        harness.model, stats, 700, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, harness.states());
-    require(single_view.grown == 0 && single_view.pruned == 0 && harness.model.size() == 4,
-            "IGS must retain opaque single-camera parents without replicating them");
-    stats = detail::make_densification_stats(4);
-    stats.gradient = Tensor::full({4}, 1.F, gpu);
-    stats.count = Tensor::full({4}, 10.F, gpu);
-    stats.view_support = Tensor::full({4}, 2.F, gpu);
-    options.densify_geometry_gradient_threshold = 0.0025F;
-    const auto resolved = densification::IgsStrategy{}.refine(
-        harness.model, stats, 800, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, harness.states());
-    require(resolved.grown == 0 && harness.model.size() == 4,
-            "IGS must not fill the cap when projected geometry is already resolved");
-    stats = detail::make_densification_stats(4);
-    stats.gradient = Tensor::full({4}, 1.F, gpu);
-    stats.count = Tensor::full({4}, 10.F, gpu);
-    stats.view_support = Tensor::full({4}, 2.F, gpu);
-    stats.geometry_gradient = Tensor::full({4}, 1.F, gpu);
-    const auto unresolved = densification::IgsStrategy{}.refine(
-        harness.model, stats, 900, 1.F, aetherscan::mvs::Vec3f::Zero(),
-        options, harness.states());
-    require(unresolved.grown == 1 && harness.model.size() == 5,
-            "IGS must allocate the interval-normalized unresolved geometry budget");
 }
 
 void test_adc_recycled_capacity_repairs_oversize() {
@@ -4492,7 +4488,9 @@ void test_geometry_regularization() {
             "Disabled geometry priors changed data gradients");
 }
 
-void test_igs_error_guidance_preserves_gradient_gate() {
+// EMC consumes the error evidence directly and ADC+ keeps it beside the
+// gradient score, so the two statistics have to accumulate independently.
+void test_image_error_statistics_are_independent() {
     using namespace aetherscan::splat;
     using tinytensor::Tensor;
     constexpr auto gpu = tinytensor::Device::CUDA;
@@ -4509,39 +4507,6 @@ void test_igs_error_guidance_preserves_gradient_gate() {
             "Image error must not replace the legacy maximum gradient");
     require(stats.image_error.to_vector() == std::vector<float>({.2F, 200.F}),
             "Image error must accumulate independently across observations");
-    require(densification::error_map_sampling_factor(1e30F, 1.F, .25F) <= 1.25F &&
-                densification::error_map_sampling_factor(0.F, 1.F, .25F) >= .75F &&
-                densification::error_map_sampling_factor(1.F, 1.F, .25F) == 1.F &&
-                densification::error_map_sampling_factor(1.F, 0.F, .25F) == 1.F &&
-                densification::error_map_sampling_factor(1.F, 1.F, 0.F) == 1.F,
-            "Image error weights must be bounded and neutral without evidence/strength");
-    for (const float raw_gradient : {0.F, 1.F}) {
-        std::vector<float> baseline_centers;
-        for (const bool error_enabled : {false, true}) {
-            auto harness = make_refine_harness(make_default_refine_model(std::vector<float>(12, 0.F)));
-            harness.model.opacity_logits = Tensor::zeros({4,1}, gpu);
-            auto evidence = make_default_refine_stats();
-            evidence.gradient = Tensor::from_vector(
-                std::vector<float>{raw_gradient,0,0,0}, {4}, gpu);
-            evidence.max_screen_radius.fill_(0.F);
-            evidence.image_error = Tensor::from_vector(std::vector<float>{1,1e6F,1e6F,1e6F}, {4}, gpu);
-            evidence.view_support.fill_(2.F);
-            TrainingOptions options;
-            options.densification_strategy = DensificationStrategy::adc_igs;
-            options.densify_use_error_map = error_enabled;
-            options.densify_select_fraction = 1.F;
-            options.densification_cap = 8;
-            std::mt19937 random(42);
-            auto result = densification::refine_gaussians(
-                harness.model, evidence, 600, 1.F, aetherscan::mvs::Vec3f::Zero(),
-                options, random, harness.states());
-            require(result.grown == (raw_gradient > 0.F ? 1U : 0U),
-                    "Large image errors must not create growth eligibility or budget");
-            if (!error_enabled) baseline_centers = harness.model.means.to_vector();
-            else require(harness.model.means.to_vector() == baseline_centers,
-                    "Image error must not change the sole eligible parent or split rule");
-        }
-    }
 }
 
 void test_emc_long_axis_split_math() {
@@ -5152,7 +5117,7 @@ int main(int argc, char** argv) {
         test_thin_splat_rgb_backward();
         test_pinhole_geometry_finite_differences();
         if (argc > 1 && std::string(argv[1]) == "--igs-only") {
-            test_igs_error_guidance_preserves_gradient_gate();
+            test_image_error_statistics_are_independent();
             test_source_resolution_and_knn_initialization();
             test_mask_loading();
             test_mask_loss_modes();
@@ -5160,8 +5125,7 @@ int main(int argc, char** argv) {
             test_revised_noise_scales_with_scene_units();
             test_geometry_regularization();
             test_densify_mean_scores_and_oversize_weights();
-            test_igs_growth_budget();
-            test_igs_fog_evidence_paths();
+            test_igs_refinement_decisions();
             test_densification_cap_stops_igs_growth();
             test_densification_strategies_and_dense_bypass();
             std::cout << "IGS tests passed\n";
@@ -5223,7 +5187,7 @@ int main(int argc, char** argv) {
         test_adc_recycled_capacity_repairs_oversize();
         test_revised_noise_scales_with_scene_units();
         test_geometry_regularization();
-        test_igs_error_guidance_preserves_gradient_gate();
+        test_image_error_statistics_are_independent();
         test_emc_long_axis_split_math();
         test_emc_refine_relocates_and_grows();
         test_emc_revised_noise_gates_and_scales();
@@ -5231,8 +5195,7 @@ int main(int argc, char** argv) {
         test_densify_mean_scores_and_oversize_weights();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();
-        test_igs_growth_budget();
-        test_igs_fog_evidence_paths();
+        test_igs_refinement_decisions();
         test_densification_cap_stops_igs_growth();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";
