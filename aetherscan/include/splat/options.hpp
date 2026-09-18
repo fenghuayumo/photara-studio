@@ -133,13 +133,13 @@ struct TrainingOptions {
     float scale_decay{0.F};
     float mean_noise_weight{50.F};
     // Uniform noise around a black background, clamped to [0,1].
-    // Kept disabled for dense GGGS; the CLI enables brush's 0.1 for both
-    // ADC strategies.
+    // Dense MVS input trains with a fixed background; both ADC strategies
+    // run with Brush's 0.1 through the reconstruction CLI.
     float background_noise_strength{0.F};
     float initial_opacity{0.1F};
     float initial_scale{1.F};
-    // Match pygsplat: initialize isotropic scales from the RMS distance to the
-    // three nearest neighbours in the selected input cloud.
+    // Initialize isotropic scales from the RMS distance to the three nearest
+    // neighbours in the selected input cloud.
     bool initialize_scale_from_knn{false};
     // Freeze dense MVS structure after its warm-up and keep optimizing the
     // progressively enabled SH bands. dense_adaptive may still recycle/split
@@ -161,8 +161,8 @@ struct TrainingOptions {
     float log_scale_regularization_weight{0.F};
     float beta1{0.9F};
     float beta2{0.999F};
-    // Match pygsplat/FusedAdam. The raster gradients are averaged over every
-    // image pixel, so 1e-8 suppresses useful geometry updates.
+    // The raster gradients are averaged over every image pixel; a value as
+    // large as 1e-8 would suppress useful geometry updates.
     float adam_epsilon{1e-15F};
     float photometric_weight{1.F};
     float ssim_weight{0.2F};
@@ -234,7 +234,7 @@ struct TrainingOptions {
     float multi_view_ncc_weight{0.F};
     // Multi-view point-query median-depth search. > 0 overrides the
     // scene-derived default, 0 derives it from the scene extent, < 0 keeps the
-    // rasterizer reference behavior (+/-200 window, eight refinements).
+    // wide default search (+/-200 window, eight refinements).
     float multi_view_depth_bracket{0.F};
     float multi_view_depth_tolerance{0.F};
     unsigned multi_view_num{8};
@@ -263,7 +263,7 @@ struct TrainingOptions {
     float multi_view_ncc_lambda_reference{0.45F};
     float multi_view_ncc_sharpness{12.F};
     float multi_view_ncc_min_weight{0.F};
-    // Match pygsplat's mask-training controls. In masked mode RGB is supervised
+    // Mask training. In masked mode RGB is supervised
     // only in the foreground and background alpha leakage is penalized. In
     // transparent mode the same foreground RGB loss is combined with full-image
     // BCE(predicted alpha, mask) * match_alpha_weight.
@@ -280,18 +280,18 @@ struct TrainingOptions {
     std::filesystem::path mask_dir;
     float minimum_scale_fraction{1e-4F};
     float maximum_scale_fraction{0.002F};
-    // Disabled for pygsplat parity. Its default strategy does not hard-clamp
-    // anisotropy; it only prunes Gaussians whose largest axis exceeds 10% of
-    // the scene scale during refinement.
+    // Hard anisotropy clamp; 0 disables it. Flat "pancake" splats are the
+    // correct model for thin surfaces, so the best-quality default does not
+    // clamp them.
     float max_scale_ratio{0.F};
     bool constrain_scale_range{true};
     float geometry_epsilon{1e-3F};
-    // Match pygsplat's default classic rasterization. A positive kernel enables
-    // antialiasing and must be selected explicitly.
+    // Classic rasterization. A positive kernel enables antialiasing and must
+    // be selected explicitly.
     float kernel_size{0.F};
     float scale_modifier{1.F};
-    // Photometric parity baseline. Geometry supervision is opt-in and can be
-    // reintroduced after fixed-model L1+SSIM convergence is verified.
+    // Photometric training baseline. Geometry supervision is opt-in and can
+    // be added after fixed-model L1+SSIM convergence is verified.
     bool use_mvs_depth{false};
     bool use_mvs_normals{false};
     // Train against source-resolution undistorted images rather than the MVS
@@ -313,14 +313,15 @@ struct TrainingOptions {
     // 1/4, doubles every 3k iterations, and caps at max_image_dimension.
     // Advancing a level clears the previous decoded RGB/mask cache.
     // Library callers opt in explicitly; the reconstruction CLI enables this
-    // by default while parity/unit-test configurations remain fixed-size.
+    // by default while unit-test configurations remain fixed-size.
     bool progressive_resolution{false};
     unsigned progressive_resolution_interval{3'000};
     float progressive_initial_scale{0.25F};
     std::size_t training_view_cache_bytes{
         std::size_t{6} * 1024 * 1024 * 1024};
     // Expand the host budget when possible. The device budget is a hard upper
-    // bound even in adaptive mode. Zero disables the historical cache only;
+    // bound even in adaptive mode. Zero disables the host-side decoded-image
+    // cache only;
     // bounded device prefetch remains available independently.
     bool adaptive_training_cache{true};
     // Packed RGBA8 plus optional depth/normal CUDA cache. Zero disables it.
@@ -337,7 +338,7 @@ struct TrainingOptions {
     // The reconstruction CLI defaults this to 8 so held-out PSNR/SSIM is on
     // unless the user explicitly trains every view.
     unsigned evaluation_split_every{0};
-    // Iterations at which the caller may render fixed-view parity snapshots.
+    // Iterations at which the caller may render fixed-view comparison snapshots.
     std::vector<unsigned> evaluation_iterations;
     unsigned preview_interval{0};
     // Live preview camera. 0 is the first captured frame. An optional sidecar

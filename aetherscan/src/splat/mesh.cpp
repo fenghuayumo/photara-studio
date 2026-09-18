@@ -30,7 +30,7 @@ namespace {
         if (camera.allFinite())
             radius = std::max(radius, (camera - center).norm());
     }
-    // pygsplat follows the original 3DGS normalization convention.
+    // Original 3DGS camera-extent normalization.
     return std::isfinite(radius) ? 1.1F * radius : 0.F;
 }
 
@@ -289,8 +289,8 @@ SplatMeshResult extract_splat_mesh(
                 const std::size_t pixel =
                     static_cast<std::size_t>(y) * geometry_view.width + x;
                 const float d = depth[pixel];
-                // pygsplat uses the dataset mask when present and falls back
-                // to alpha>=0.5 only for datasets without masks.
+                // Use the dataset mask when present; fall back to
+                // alpha>=0.5 only for datasets without masks.
                 if (mask[pixel] <= 0.5F ||
                     (!target.has_mask &&
                      alpha[pixel] < mesh_options.alpha_threshold) ||

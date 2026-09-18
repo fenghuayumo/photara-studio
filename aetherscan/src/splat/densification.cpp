@@ -22,10 +22,10 @@ SceneGeometry training_scene_geometry(
         0.5F * (maximum - minimum).maxCoeff()};
     if (scene.views.empty()) return geometry;
 
-    // Match pygsplat's COLMAP convention: optimization scale is measured from
-    // camera centers, not the untrimmed sparse-point AABB. A handful of bad
-    // triangulations can make that AABB tens of times too large, which in turn
-    // inflates both the means LR and the minimum Gaussian scale.
+    // Optimization scale is measured from camera centers (COLMAP convention),
+    // not the untrimmed sparse-point AABB. A handful of bad triangulations
+    // can make that AABB tens of times too large, which in turn inflates both
+    // the means LR and the minimum Gaussian scale.
     mvs::Vec3f camera_center = mvs::Vec3f::Zero();
     std::size_t finite_cameras = 0;
     for (const auto& view : scene.views) {

@@ -130,8 +130,7 @@ void grow_training_model(
             ? options.densify_screen_threshold
             : 0.F);
     // Splitting mutates the retained parent as well as creating a child.
-    // Both are new primitives and must start with clean optimizer moments,
-    // matching pygsplat's replacement-based split.
+    // Both are new primitives and must start with clean optimizer moments.
     zero_adam_rows(parents, states);
     append_model(model, children);
     for (detail::AdamState* state : states)
@@ -342,7 +341,7 @@ RefinementCounts refine_gaussians(
                 model,
                 options.opacity_decay *
                     std::max(remaining_progress, 0.F),
-                // Optional scale decay; zero by default (Brush parity).
+                // Optional scale decay; zero by default (matching Brush).
                 options.scale_decay *
                     std::max(remaining_progress, 0.F));
         }
@@ -490,7 +489,7 @@ RefinementCounts refine_gaussians(
             model,
             options.opacity_decay *
                 std::max(remaining_progress, 0.F),
-            // Optional scale decay; zero by default (Brush parity).
+            // Optional scale decay; zero by default (matching Brush).
             options.scale_decay *
                 std::max(remaining_progress, 0.F));
     }

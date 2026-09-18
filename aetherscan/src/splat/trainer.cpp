@@ -910,8 +910,8 @@ GaussianModel initialize_from_dense_cloud(
             scales[3 * index + axis] = std::log(scale);
 
         if (!options.input_is_dense && !splat_adc_plus) {
-            // Exact pygsplat sparse-SfM initialization: raw U[0,1) quaternion
-            // parameters. The raster path normalizes them before use.
+            // Sparse-SfM initialization: raw U[0,1) quaternion parameters.
+            // The raster path normalizes them before use.
             for (int component = 0; component < 4; ++component)
                 quaternions[4 * index + component] = quaternion_uniform(
                     quaternion_random);
@@ -1046,9 +1046,9 @@ GaussianModel Trainer::train(
     const bool brush_filter = options_.densification_strategy ==
                 DensificationStrategy::adc_plus;
     // Keep the Mip-Splatting floor separate from the canonical parameters.
-    // pygsplat applies this filter only while rasterizing and recomputes it
-    // after topology changes; repeatedly baking it into scale/opacity causes
-    // a cumulative opacity loss.
+    // The filter is applied only while rasterizing and recomputed after
+    // topology changes; repeatedly baking it into scale/opacity causes a
+    // cumulative opacity loss.
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras, filter_3d_factor, brush_filter);
@@ -1192,7 +1192,7 @@ GaussianModel Trainer::train(
               scene_extent *
               std::max(options_.minimum_scale_fraction, 1e-8F))
         : -std::numeric_limits<float>::infinity();
-    // pygsplat does not clamp scales to its 0.1*scene prune threshold between
+    // Scales are not clamped to the 0.1*scene prune threshold between
     // refinements. Clamping exactly at that boundary and then comparing
     // exp(log_scale) > threshold is numerically unsafe: round-off caused tens
     // of thousands of boundary Gaussians to be pruned after opacity reset.
@@ -1293,10 +1293,10 @@ GaussianModel Trainer::train(
         raster_options.scale_modifier = options_.scale_modifier;
         // Multi-view point queries only feed a depth-consistency loss: it needs
         // the neighbour median depth to a fraction of the scene extent, not to
-        // the reference's +/-200 window refined eight times. Narrowing the seed
+        // the wide +/-200 window refined eight times. Narrowing the seed
         // window and stopping once the bracket is 0.2% of the scene cuts the
         // point-query kernel's traversals from nine to five. A negative option
-        // keeps the reference behavior for quality baselines.
+        // keeps the wide default search for quality baselines.
         const float point_query_extent = std::max(scene_extent, 1.0e-3F);
         const float point_query_bracket =
             options_.multi_view_depth_bracket > 0.F
@@ -1923,7 +1923,7 @@ GaussianModel Trainer::train(
 
         // The Mip-Splatting radius depends on Gaussian positions and count.
         // Refresh immediately after topology changes and periodically while
-        // the means continue to move, matching pygsplat's GGGS schedule.
+        // the means continue to move.
         bool filter_refreshed = false;
         if (use_3d_filter) {
             const bool adc_plus_refine =
@@ -1933,9 +1933,9 @@ GaussianModel Trainer::train(
             const float training_progress =
                 static_cast<float>(iteration) /
                 std::max(1.F, static_cast<float>(options_.iterations));
-            // Match pygsplat: recompute after every ADC+ topology update
-            // through 95%, then periodically while the fixed-topology tail
-            // continues moving Gaussian means.
+            // Recompute after every ADC+ topology update through 95%, then
+            // periodically while the fixed-topology tail continues moving
+            // Gaussian means.
             const bool adc_plus_refresh =
                 options_.densification_strategy ==
                     DensificationStrategy::adc_plus &&

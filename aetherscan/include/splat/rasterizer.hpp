@@ -13,7 +13,7 @@ struct RasterizeOptions {
     bool debug{false};
     // Multi-view point queries (sample_depth): median-depth seed window in
     // world units, and the bracket width at which refinement stops. Zero keeps
-    // the reference behavior (+/-200 with 8 refinements), which is far more
+    // the wide default search (+/-200 with 8 refinements), which is far more
     // precision than a depth-consistency loss can use.
     float point_depth_bracket{0.F};
     float point_depth_tolerance{0.F};

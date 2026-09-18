@@ -49,11 +49,11 @@ struct RenderMetrics {
     float psnr{};
     // PSNR over the unmasked (foreground) samples only: with a mask this is
     // the static region, without one it equals `psnr`. Stricter than
-    // pygsplat's validation metric because masked-out zeros never enter the
-    // average.
+    // a full-image average because masked-out zeros never enter it.
     float foreground_psnr{};
-    // pygsplat-compatible PSNR: prediction and target are masked, then MSE is
-    // averaged over every image pixel.
+    // PSNR with prediction and target masked, then MSE averaged over every
+    // image pixel. Only use it when comparing against tools that score this
+    // way.
     float masked_psnr{};
     // Mean 11x11 Gaussian SSIM on the valid interior, matching training.
     float ssim{};
@@ -72,17 +72,16 @@ struct TrainingPreview {
 };
 
 struct SplatMeshOptions {
-    // GS-2M/pygsplat fallback threshold when the dataset has no input mask.
-    // With a mask, the mask alone defines valid extraction pixels.
+    // Fallback threshold when the dataset has no input mask. With a mask,
+    // the mask alone defines valid extraction pixels.
     float alpha_threshold{0.5F};
-    // Zero selects gs2mesh.py's automatic cutoff (2 * camera scene extent).
+    // Zero selects the automatic cutoff (2 * camera scene extent).
     float max_depth{0.F};
     // Optional directory for representative median-depth, normal and alpha
     // PNGs used to audit geometry before TSDF fusion.
     std::filesystem::path diagnostics_dir;
-    // Optional MVS-inspired extraction guard. Values below -1 disable it,
-    // matching pygsplat/GS-2M whose abs-dot 100-degree test rejects no sample.
-    // Set 0.5 explicitly to request the former strict 60-degree filter.
+    // Optional MVS-inspired extraction guard. Values below -1 disable it.
+    // Set 0.5 explicitly to request the strict 60-degree filter.
     float min_depth_normal_cosine{-2.F};
     mvs::DensifyOptions fusion;
 };

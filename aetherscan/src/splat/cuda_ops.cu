@@ -956,25 +956,25 @@ __global__ void loss_kernel(
     }
 
     if (mask_enabled && alpha_mode == 0) {
-        // pygsplat alpha_mode="masked": discourage any opacity outside the
-        // foreground without forcing the foreground itself to be opaque.
+        // Masked mode: discourage any opacity outside the foreground
+        // without forcing the foreground itself to be opaque.
         grad_alpha[pixel] = mask_alpha_leak_weight * (1.F - valid) * inverse_pixels;
         if (terms)
             atomicAdd(
                 terms + 3, mask_alpha_leak_weight * alpha[pixel] * (1.F - valid) *
                     inverse_pixels);
     } else if (mask_enabled && alpha_mode == 1 && match_alpha_weight > 0.F) {
-        // pygsplat alpha_mode="transparent": full-image BCE(alpha, mask).
-        // The background half is scaled by the leakage weight so a panorama
-        // can stop pushing the static surface behind a moving occluder to
-        // zero; 1 reproduces pygsplat exactly, 0 leaves only the foreground
-        // BCE that asks for an opaque subject.
+        // Transparent mode: full-image BCE(alpha, mask). The background half
+        // is scaled by the leakage weight so a panorama can stop pushing the
+        // static surface behind a moving occluder to zero; 1 applies the full
+        // background BCE, 0 leaves only the foreground BCE that asks for an
+        // opaque subject.
         constexpr float clamp_epsilon = 1e-7F;
         const float raw_prediction = alpha[pixel];
         const float prediction = fminf(
             fmaxf(raw_prediction, clamp_epsilon), 1.F - clamp_epsilon);
-        // torch.clamp, used by pygsplat before BCE, has zero derivative outside
-        // its interval. Continuing to differentiate the clamped value produces
+        // Clamping before BCE has zero derivative outside its interval.
+        // Continuing to differentiate the clamped value produces
         // enormous gradients at saturated pixels and destabilizes opacity,
         // refine-weight accumulation, and pruning.
         const bool inside_clamp =

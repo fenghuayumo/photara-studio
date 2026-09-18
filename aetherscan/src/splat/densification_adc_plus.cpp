@@ -359,7 +359,7 @@ RefinementCounts AdcPlusStrategy::refine(
     detail::apply_adc_decay(
         model,
         // Calibrated for the shared 200-step refinement interval; the
-        // optional scale factor defaults to zero (Brush parity).
+        // optional scale factor defaults to zero (matching Brush).
         options.opacity_decay * std::max(remaining_progress, 0.F),
         options.scale_decay * std::max(remaining_progress, 0.F));
     stats = detail::make_densification_stats(model.size());
