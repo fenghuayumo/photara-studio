@@ -81,7 +81,11 @@ struct TrainingOptions {
     unsigned refine_stop_iter{0};   // 0 selects the strategy preset
     // IGS stop is max(refine_stop_iter, iterations - refine_stop_num_iter).
     unsigned refine_stop_num_iter{2'500};
-    unsigned grow_stop_iter{15'000};
+    // Iteration after which densification stops adding parents and only
+    // prunes, replaces recovered slots, splits oversized splats and decays.
+    // 0 selects the Brush proportion (half of `iterations`, resolved by
+    // apply_strategy_defaults); an explicit value always wins.
+    unsigned grow_stop_iter{0};
     unsigned refine_every{0};       // 0 selects the strategy preset
     unsigned opacity_reset_every{3'000};
     // Shared split/growth controls. Strategies may differ in how they build
@@ -365,8 +369,9 @@ struct TrainingOptions {
     bool training_prefetch_adaptive{true};
     // Hold out every Nth source view from optimization (0 trains on all).
     // The caller may render these views through the evaluation callback.
-    // The reconstruction CLI defaults this to 8 so held-out PSNR/SSIM is on
-    // unless the user explicitly trains every view.
+    // Zero trains every view; the reconstruction CLI keeps that default and
+    // only holds out views when the user asks for a stride. Held-out metrics
+    // need an explicit --splat-eval-split-every N.
     unsigned evaluation_split_every{0};
     // Iterations at which the caller may render fixed-view comparison snapshots.
     std::vector<unsigned> evaluation_iterations;
@@ -394,6 +399,18 @@ struct TrainingOptions {
 void apply_strategy_defaults(TrainingOptions& options);
 
 // The oversize hinge is a strong early stabilizer but holds back the late
+// Growth cutoff: 0 selects the Brush proportion (half of `iterations`, which
+// is its 15000 of 30000); the dense MVS path predates that cadence and keeps
+// its historical absolute start. Callers that pin a value always win.
+[[nodiscard]] inline unsigned grow_stop_iteration(
+    const TrainingOptions& options) {
+    if (options.grow_stop_iter != 0) return options.grow_stop_iter;
+    return options.densification_strategy ==
+            DensificationStrategy::dense_adaptive
+        ? 15'000U
+        : std::max(1U, options.iterations / 2);
+}
+
 // fine-tuning phase, so its strength decays linearly to zero over the run
 // (office, ADC-IGS: +2.2 dB at 1k with the full penalty but -0.2 dB at
 // 30k; the decayed form keeps the early gain, artifacts/office_igs_*).

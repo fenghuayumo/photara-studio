@@ -454,7 +454,8 @@ atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后
 #### ADC tail 多视图随机调度 A/B（2026-07-31）
 
 新增 `--splat-mv-tail-interval N`。默认值为 1，即每步执行；`N=2` 是显式性能模式。
-调度只在 `iteration > grow_stop_iter` 后生效，ADCPlus 默认即第 15,001–30,000 步。
+调度只在 `iteration > grow_stop_iter` 后生效，`grow_stop_iter` 默认是训练步数的一半
+（Brush 的 15,000/30,000 比例，30k 跑即第 15,001–30,000 步）。
 被跳过的迭代仍消费邻视角选择 RNG，避免改变后续随机流；活跃迭代把 geometry/NCC 权重
 乘以 `N`，因此是无偏的随机目标估计。它不会改变 depth-normal 的执行频率。
 
@@ -497,7 +498,7 @@ ADC 的 GPU 原子与 refine 会造成跨进程非逐元素确定性，因此 Ga
 | TSDF Clean 顶点 / 面 | 7,470,759 / 14,736,038 | 5,355,665 / 10,612,585 | **-28.31% / -27.98%** |
 
 虽然调度仍有稳定性能收益，但 `antman_nomask` 的 PSNR 和最大连通网格覆盖明显回退。
-原因是 ADCPlus 的 `grow_stop_iter=15,000` 只停止新增 Gaussian，prune、replacement、
+原因是 ADCPlus 的 `grow_stop_iter`（默认训练步数的一半，30k 跑即 15,000）只停止新增 Gaussian，prune、replacement、
 ADC noise 和每 200 步 refine 默认持续到训练结束；因此“停止增长”并不等价于拓扑与几何
 已经收敛。在未实现基于几何稳定性或 refine-stop 的自适应触发前，interval=1 保持为默认值，
 interval=2 只能作为允许质量折衷的显式 fast mode。对应日志为

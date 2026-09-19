@@ -1335,7 +1335,7 @@ GaussianModel Trainer::train(
             iteration >= options_.depth_normal_from_iter &&
             !multi_view_neighbours[view_index].empty();
         const bool multi_view_tail = !adaptive_multi_view &&
-            iteration > options_.grow_stop_iter;
+            iteration > grow_stop_iteration(options_);
         const unsigned active_multi_view_interval = adaptive_multi_view
             ? multi_view_scheduler.interval()
             : multi_view_tail ? multi_view_tail_interval : 1U;
@@ -1343,7 +1343,7 @@ GaussianModel Trainer::train(
             active_multi_view_interval == 1U ||
             (adaptive_multi_view
                 ? iteration % active_multi_view_interval == 0
-                : (iteration - options_.grow_stop_iter) %
+                : (iteration - grow_stop_iteration(options_)) %
                         active_multi_view_interval == 0);
         const bool multi_view_active =
             multi_view_eligible && multi_view_scheduled;

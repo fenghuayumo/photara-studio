@@ -4878,6 +4878,9 @@ void test_densification_strategies_and_dense_bypass() {
     options.densify_gradient_threshold = -1.F;
     options.densify_select_fraction = 1.F;
     options.log_interval = 1;
+    // Toy schedule: the default cutoff is half the run, which is inside the
+    // first refinement at this scale, so pin it to the refine window.
+    options.grow_stop_iter = options.refine_stop_iter;
     for (const auto strategy : {
              splat::DensificationStrategy::adc_plus,
              splat::DensificationStrategy::adc_igs}) {
@@ -4917,8 +4920,26 @@ void test_densification_strategies_and_dense_bypass() {
     brush_schedule.refine_every = 0;
     brush_schedule.densify_gradient_threshold = -1.F;
     brush_schedule.densify_select_fraction = 1.F;
+    // Same pinning as the toy run above: this schedule only spans one step.
+    brush_schedule.grow_stop_iter = brush_schedule.iterations;
     auto full_brush_schedule = brush_schedule;
     full_brush_schedule.iterations = 30'000;
+    // The default cutoff follows Brush's proportion: half of the run, which is
+    // its 15000 of 30000.
+    full_brush_schedule.grow_stop_iter = 0;
+    full_brush_schedule.densification_strategy =
+        splat::DensificationStrategy::adc_plus;
+    splat::apply_strategy_defaults(full_brush_schedule);
+    require(full_brush_schedule.grow_stop_iter == 15'000U,
+            "ADC+ growth should stop at half of the run by default");
+    full_brush_schedule.grow_stop_iter = 0;
+    full_brush_schedule.iterations = 10'000;
+    splat::apply_strategy_defaults(full_brush_schedule);
+    require(full_brush_schedule.grow_stop_iter == 5'000U,
+            "ADC+ growth should scale with the run length");
+    full_brush_schedule.iterations = 30'000;
+    full_brush_schedule.grow_stop_iter = 0;
+    splat::apply_strategy_defaults(full_brush_schedule);
     require(
         splat::densification::is_refinement_iteration(
             28'400, full_brush_schedule),

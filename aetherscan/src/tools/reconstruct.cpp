@@ -125,7 +125,6 @@ struct ReconstructCli {
     std::filesystem::path splat_dataset;
     std::filesystem::path dense_ply;
     unsigned splat_iterations{10'000};
-    unsigned splat_grow_stop_iter{0};
     unsigned splat_log_interval{100};
     unsigned splat_preview_interval{0};
     unsigned splat_preview_view{0};
@@ -359,7 +358,6 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
-              << "  --splat-grow-stop-iter N  stop densify growth after N steps (0 = strategy preset)\n"
               << "  --splat-log-interval N  training-stat log every N steps (default 100, 0 = first/last)\n"
               << "  --splat-preview-interval N  emit a live preview every N steps (0 disables)\n"
               << "  --splat-preview-view N  camera index for live preview (default 0, first frame)\n"
@@ -383,7 +381,7 @@ void print_help(const cxxopts::Options& options) {
                  "0 disables, 0.1 matches Brush Mip\n"
               << "  --splat-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
               << "  --splat-progressive-interval N  iterations per resolution level (default 3000)\n"
-              << "  --splat-eval-split-every N  hold out every Nth view for PSNR/SSIM (default 8; 0 trains all)\n"
+              << "  --splat-eval-split-every N  hold out every Nth view for PSNR/SSIM (default 0 = every view trains; metrics then come from three training views)\n"
               << "  --splat-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
               << "  --splat-alpha-mode masked|transparent (default transparent)\n"
               << "  --splat-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
@@ -637,9 +635,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-iterations", "Splat optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
-        ("splat-grow-stop-iter",
-         "Stop splat growth after N iterations (0 = strategy preset)",
-         cxxopts::value<unsigned>()->default_value("0"))
         ("splat-log-interval",
          "Log splat training stats every N iterations (0 = first and last only)",
          cxxopts::value<unsigned>()->default_value("100"))
@@ -730,7 +725,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-eval-split-every",
          "Hold out every Nth view for PSNR/SSIM evaluation (0 = train all)",
-         cxxopts::value<unsigned>()->default_value("8"))
+         cxxopts::value<unsigned>()->default_value("0"))
         ("splat-use-mask", "Enable pygsplat-compatible foreground-mask training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-alpha-mode", "Mask alpha mode: masked or transparent",
@@ -1133,8 +1128,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.splat_iterations = result["splat-iterations"].as<unsigned>();
-    cli.splat_grow_stop_iter =
-        result["splat-grow-stop-iter"].as<unsigned>();
     cli.splat_log_interval = result["splat-log-interval"].as<unsigned>();
     cli.splat_preview_interval =
         result["splat-preview-interval"].as<unsigned>();
@@ -2776,8 +2769,6 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     aetherscan::splat::apply_strategy_defaults(options);
     if (cli.splat_growth_factor > 0.F)
         options.densify_growth_factor = cli.splat_growth_factor;
-    if (cli.splat_grow_stop_iter != 0)
-        options.grow_stop_iter = cli.splat_grow_stop_iter;
     options.seed = cli.splat_seed;
     options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;

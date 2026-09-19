@@ -172,7 +172,7 @@ RefinementCounts IgsStrategy::refine(
         .mul(0.25F)
         .add(1.F);
 
-    const bool allow_growth = iteration < options.grow_stop_iter;
+    const bool allow_growth = iteration < grow_stop_iteration(options);
     const auto oversized = candidate.logical_and(
         retained_screen.gt(options.densify_screen_threshold));
     // Replacement parents: opacity x edge evidence over every candidate.

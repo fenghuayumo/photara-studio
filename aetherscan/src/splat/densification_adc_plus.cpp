@@ -209,7 +209,8 @@ RefinementCounts AdcPlusStrategy::refine(
     if (capacity != 0 && retained != 0) {
         const auto growth_eligible = retained_count.gt(0.F);
         std::size_t extra_budget = 0;
-        if (iteration < options.grow_stop_iter &&
+        const unsigned grow_stop_iter = grow_stop_iteration(options);
+        if (iteration < grow_stop_iter &&
             selected_count < capacity) {
             auto growth_mask = growth_eligible.logical_and(
                 retained_gradient.gt(options.densify_gradient_threshold));
@@ -349,7 +350,7 @@ RefinementCounts AdcPlusStrategy::refine(
         " growth_selected=", growth_selected_count,
         " capacity=", capacity,
         " count_cap=", count_cap,
-        " growing=", iteration < options.grow_stop_iter);
+        " growing=", iteration < grow_stop_iteration(options));
     return {split_parents.numel(), pruned};
 }
 
