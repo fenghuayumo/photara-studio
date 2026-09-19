@@ -125,6 +125,7 @@ struct ReconstructCli {
     std::filesystem::path splat_dataset;
     std::filesystem::path dense_ply;
     unsigned splat_iterations{10'000};
+    unsigned splat_grow_stop_iter{0};
     unsigned splat_log_interval{100};
     unsigned splat_preview_interval{0};
     unsigned splat_preview_view{0};
@@ -202,7 +203,6 @@ struct ReconstructCli {
     float splat_max_scale_ratio{0.F};
     bool splat_constrain_scales{false};
     std::string splat_strategy{"adc_igs"};
-    bool splat_densify_error_map{false};
     float splat_growth_factor{0.F};
     unsigned splat_seed{42};
     bool splat_densification{true};
@@ -359,6 +359,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
+              << "  --splat-grow-stop-iter N  stop densify growth after N steps (0 = strategy preset)\n"
               << "  --splat-log-interval N  training-stat log every N steps (default 100, 0 = first/last)\n"
               << "  --splat-preview-interval N  emit a live preview every N steps (0 disables)\n"
               << "  --splat-preview-view N  camera index for live preview (default 0, first frame)\n"
@@ -418,7 +419,6 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  densify growth ceiling (default 1000000)\n"
-              << "  --splat-densify-error-map BOOL  ADC+ error-score growth mode (default false)\n"
               << "  --splat-growth-factor W  EMC per-refine count multiplier; 0 keeps the strategy preset\n"
               << "  --splat-init-point-budget N  cap the initialization cloud (default 0 = keep all)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
@@ -637,6 +637,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("splat-iterations", "Splat optimizer iterations",
          cxxopts::value<unsigned>()->default_value("10000"))
+        ("splat-grow-stop-iter",
+         "Stop splat growth after N iterations (0 = strategy preset)",
+         cxxopts::value<unsigned>()->default_value("0"))
         ("splat-log-interval",
          "Log splat training stats every N iterations (0 = first and last only)",
          cxxopts::value<unsigned>()->default_value("100"))
@@ -844,8 +847,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value("adc_igs"))
         ("splat-densification", "Enable splat split/prune",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("splat-densify-error-map", "Enable the ADC+ error-score growth mode",
-         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-growth-factor",
          "EMC per-refine growth multiplier (0 = strategy preset)",
          cxxopts::value<float>()->default_value("0"))
@@ -1132,6 +1133,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
     cli.splat_iterations = result["splat-iterations"].as<unsigned>();
+    cli.splat_grow_stop_iter =
+        result["splat-grow-stop-iter"].as<unsigned>();
     cli.splat_log_interval = result["splat-log-interval"].as<unsigned>();
     cli.splat_preview_interval =
         result["splat-preview-interval"].as<unsigned>();
@@ -1284,13 +1287,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-ppisp-before-bilagrid"].as<bool>();
     cli.splat_strategy = result["splat-strategy"].as<std::string>();
     cli.splat_densification = result["splat-densification"].as<bool>();
-    cli.splat_densify_error_map = result["splat-densify-error-map"].as<bool>();
     cli.splat_growth_factor = result["splat-growth-factor"].as<float>();
     if (!std::isfinite(cli.splat_growth_factor) || cli.splat_growth_factor < 0.F)
         throw std::invalid_argument("--splat-growth-factor must be finite and >= 0");
     cli.splat_seed = result["splat-seed"].as<unsigned>();
-    if (cli.splat_densify_error_map && cli.splat_strategy != "adc_plus")
-        throw std::invalid_argument("--splat-densify-error-map requires adc_plus");
     cli.splat_structure_freeze_iter =
         result["splat-structure-freeze-iter"].as<unsigned>();
     cli.splat_densification_cap =
@@ -2774,9 +2774,10 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
     // ADC+ and ADC-IGS share the Brush learning rates, initial opacity and
     // growth thresholds. Apply user overrides after the strategy preset.
     aetherscan::splat::apply_strategy_defaults(options);
-    options.densify_use_error_map = cli.splat_densify_error_map;
     if (cli.splat_growth_factor > 0.F)
         options.densify_growth_factor = cli.splat_growth_factor;
+    if (cli.splat_grow_stop_iter != 0)
+        options.grow_stop_iter = cli.splat_grow_stop_iter;
     options.seed = cli.splat_seed;
     options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;
@@ -2968,7 +2969,6 @@ std::optional<aetherscan::mvs::Mesh> run_splat_training(
         " ppisp_lr=", options.ppisp_lr,
         " ppisp_before_bilagrid=", options.ppisp_before_bilagrid,
         " densification_cap=", options.densification_cap,
-        " densify_error_map=", options.densify_use_error_map,
         " dense_recycle_fraction=", options.dense_recycle_fraction,
         " dense_growth_fraction=", options.dense_growth_fraction,
         " use_mask=", options.use_mask,

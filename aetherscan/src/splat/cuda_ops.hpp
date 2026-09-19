@@ -251,11 +251,6 @@ void constrain_scale_ratio(
 
 DensificationStats make_densification_stats(std::size_t count);
 
-tinytensor::Tensor densify_blend_world_gradient(
-    const tinytensor::Tensor& image_score,
-    const tinytensor::Tensor& means_gradient,
-    const tinytensor::Tensor& log_scales, float blend);
-
 void add_sh_regularization(const tinytensor::Tensor& sh,
     tinytensor::Tensor& gradient, float weight);
 
@@ -296,12 +291,6 @@ tinytensor::Tensor scatter_error_map_to_gaussians(
     const float* mean2d,
     const tinytensor::Tensor& radii,
     const tinytensor::Tensor& visibility);
-
-// Convert a window sum into (sum/count)^power for error-map ranking.
-tinytensor::Tensor densify_mean_scores(
-    const tinytensor::Tensor& sum,
-    const tinytensor::Tensor& count,
-    float power);
 
 tinytensor::Tensor densify_oversize_weights(
     const tinytensor::Tensor& scores,

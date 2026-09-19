@@ -201,20 +201,27 @@ void apply_strategy_defaults(TrainingOptions& options) {
     }
     switch (options.densification_strategy) {
     case DensificationStrategy::adc_plus:
-        // Brush ADC+ grows through the whole refinement window: floater
-        // control comes from evidence-conditional decay/pruning rather than
-        // a growth cutoff, so never stop net growth before the 95% gate.
+        // Brush's default growth window is growth_stop_iter = 15000 out of
+        // total_train_iters = 30000: growth stops halfway and the remaining
+        // refinements only prune, replace recovered slots, split oversized
+        // splats and decay opacity. Our preset instead keeps growing up to the
+        // 95% refinement gate: on the 10k-iteration protocols we run, cutting
+        // growth short leaves the model under-fitted. Measured on the ori
+        // statue set (10k iters, seed 42), stopping at 50% / 25% moved held-out
+        // PSNR by -0.2 / +0.5 dB but cost 3.0 / 4.0 dB of training-view PSNR
+        // (artifacts/ori_igs_device_20260918/growstop). The cutoff stays
+        // available per run through --splat-grow-stop-iter.
         options.grow_stop_iter =
             std::max(options.grow_stop_iter, options.iterations);
         break;
     case DensificationStrategy::adc_igs:
         // ADC-IGS decides growth with the projected-position gradient gate,
         // opacity/edge evidence sampling, gumbel selection, the random-axis
-        // exact-alpha split and the default cadence. It has no error-map path:
-        // re-ordering qualified parents by SSIM error measured inside the seed
-        // noise on every dataset (docs/ADC_IGS_ERROR_MAP_20260917), so the
-        // knob only belongs to ADC+.
-        options.densify_use_error_map = false;
+        // exact-alpha split and the default cadence. Neither ADC-IGS nor ADC+
+        // scores by image error: the 2026-09-17 sweep measured the re-order
+        // inside the ori seed noise on every dataset
+        // (docs/ADC_IGS_ERROR_MAP_20260917), so the error map stays EMC's
+        // strategy.
         break;
     case DensificationStrategy::emc:
         // Fixed-budget growth: net growth is a fixed multiplier of the

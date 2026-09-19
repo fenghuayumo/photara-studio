@@ -91,17 +91,9 @@ struct TrainingOptions {
     // Broad semi-transparent splats that own the rendered median depth wrap
     // meshes in a floater shell. Start size repair past a quarter frame.
     float densify_screen_threshold{0.25F};
-    // ADC+ error-score mode: replace the maximum refine weight with the
-    // per-view image error before it ranks growth. ADC-IGS has no error-map
-    // path at all (the 2026-09-17 sweep measured the re-order inside the ori
-    // seed noise on every dataset, docs/ADC_IGS_ERROR_MAP), and EMC consumes
-    // the error map as its strategy itself.
-    bool densify_use_error_map{false};
-    // Per-view exponent after image-to-splat reduction, before window averaging.
+    // Per-view exponent after image-to-splat reduction, before window
+    // averaging. EMC is the only strategy that scores by image error.
     float densify_score_power{0.4F};
-    // Geometric blend with ||dL/dmean_world|| * max(scale), following
-    // optional world-gradient score. Zero retains image-only ranking.
-    float densify_world_gradient_blend{0.F};
     // Per-pixel error-map exponent before raster scatter ( default 4).
     float densify_loss_map_power{4.F};
     // Extra Gaussians per refine as a multiplier of the live count. Values

@@ -194,9 +194,6 @@ RefinementCounts AdcPlusStrategy::refine(
         stats.max_screen_radius.index_select(0, keep_indices);
     auto retained_opacity =
         pruning.opacities.index_select(0, keep_indices);
-    if (options.densify_use_error_map)
-        retained_gradient = detail::densify_mean_scores(
-            retained_gradient, retained_count, 1.F);
     gpu_detail::select_training_rows_gpu(model, keep_indices, states);
     const std::size_t pruned = old_count - retained;
 
@@ -309,14 +306,12 @@ RefinementCounts AdcPlusStrategy::refine(
                 {extra_budget, capacity - selected_count,
                  growth_indices.numel()});
             if (growth_count != 0) {
-                auto raw_weights =
+                const auto raw_weights =
                     retained_gradient.index_select(0, growth_indices);
-                auto weights = options.densify_use_error_map
-                    ? raw_weights
-                    : detail::adc_plus_footprint_weights(
-                          raw_weights,
-                          retained_screen.index_select(0, growth_indices));
-                weights = weights.clamp_min(1e-12F);
+                const auto weights = detail::adc_plus_footprint_weights(
+                    raw_weights,
+                    retained_screen.index_select(0, growth_indices))
+                    .clamp_min(1e-12F);
                 auto sampled_slots = tinytensor::Tensor::multinomial(
                     weights, static_cast<int>(growth_count), false);
                 auto sampled = growth_indices.index_select(

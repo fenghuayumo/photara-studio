@@ -4746,12 +4746,9 @@ void test_emc_regularizers_match_finite_differences() {
     }
 }
 
-void test_densify_mean_scores_and_oversize_weights() {
+void test_densify_statistics_and_oversize_weights() {
     using namespace aetherscan::splat;
     constexpr auto gpu = tinytensor::Device::CUDA;
-    // Equal arithmetic means, different consistency: a single-view spike
-    // must receive less budget than persistent error after per-view power.
-    auto stats = detail::make_densification_stats(2);
     const auto visible = tinytensor::Tensor::from_vector(
         std::vector<float>{1.F, 1.F}, {2}, gpu);
     const auto radii = tinytensor::Tensor::from_vector(
@@ -4773,18 +4770,6 @@ void test_densify_mean_scores_and_oversize_weights() {
                 std::vector<float>({2.F, 1.F}) &&
                 support_stats.count.to_vector() == std::vector<float>({4.F, 3.F}),
             "Only contributing distinct cameras qualify; score denominator stays per-step");
-    for (const auto& observation : {std::vector<float>{0.F, 4.F},
-                                    std::vector<float>{8.F, 4.F}}) {
-        detail::accumulate_densification_stats(
-            tinytensor::Tensor::from_vector(observation, {2}, gpu),
-            visible, radii, stats, 100, 100, false, true, 0.5F);
-    }
-    const auto temporal = detail::densify_mean_scores(
-        stats.gradient, stats.count, 1.F).to_vector();
-    require(std::abs(temporal[0] - std::sqrt(8.F) / 2.F) < 1e-5F &&
-                std::abs(temporal[1] - 2.F) < 1e-5F &&
-                temporal[0] < temporal[1],
-            "IGS must compress per-view errors before averaging the window");
     auto oversize_stats = detail::make_densification_stats(2);
     for (const auto& radius : {std::vector<int>{20, 20}, std::vector<int>{1, 20}}) {
         detail::accumulate_densification_stats(
@@ -4795,20 +4780,6 @@ void test_densify_mean_scores_and_oversize_weights() {
     require(std::abs(oversize_evidence[0] - 1.F) < 1e-5F &&
                 std::abs(oversize_evidence[1] - 2.F) < 1e-5F,
             "IGS oversize budget must prefer repeated support over one close view");
-    const auto image_scores = tinytensor::Tensor::from_vector(
-        std::vector<float>{4.F, 4.F}, {2}, gpu);
-    const auto world_gradients = tinytensor::Tensor::from_vector(
-        std::vector<float>{3.F, 4.F, 0.F, 0.F, 0.F, 0.F}, {2, 3}, gpu);
-    const auto world_scales = tinytensor::Tensor::full({2, 3}, std::log(2.F), gpu);
-    const auto blend = detail::densify_blend_world_gradient(
-        image_scores, world_gradients, world_scales, 0.5F).to_vector();
-    const auto rescaled = detail::densify_blend_world_gradient(
-        image_scores, world_gradients / 10.F, world_scales + std::log(10.F),
-        0.5F).to_vector();
-    require(std::abs(blend[0] - std::sqrt(40.F)) < 1e-5F && blend[1] == 0.F,
-            "IGS world-gradient blend must reject geometry-insensitive error");
-    require(std::abs(blend[0] - rescaled[0]) < 1e-5F,
-            "IGS world-gradient ranking must be invariant to scene units");
     const auto sh_prior = tinytensor::Tensor::ones({2, 2, 3}, gpu);
     auto sh_gradient = tinytensor::Tensor::full({2, 2, 3}, 0.2F, gpu);
     detail::add_sh_regularization(sh_prior, sh_gradient, 0.3F);
@@ -4816,17 +4787,8 @@ void test_densify_mean_scores_and_oversize_weights() {
     for (std::size_t i = 0; i < regularized.size(); ++i)
         require(std::abs(regularized[i] - (i % 6 < 3 ? 0.2F : 0.3F)) < 1e-6F,
                 "SH prior must preserve DC and normalize over non-DC coefficients");
-    const auto sum = tinytensor::Tensor::from_vector(
-        std::vector<float>{2.F, 0.F, 8.F}, {3}, gpu);
-    const auto count = tinytensor::Tensor::from_vector(
-        std::vector<float>{2.F, 0.F, 2.F}, {3}, gpu);
-    const auto scores = detail::densify_mean_scores(sum, count, 1.F);
-    const auto values = scores.to_vector();
-    require(
-        std::abs(values[0] - 1.F) < 1e-5F &&
-            values[1] == 0.F &&
-            std::abs(values[2] - 4.F) < 1e-5F,
-        "densify mean scores did not divide the window sum by count");
+    const auto scores = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 4.F}, {3}, gpu);
     const auto screens = tinytensor::Tensor::from_vector(
         std::vector<float>{0.6F, 0.1F, 0.9F}, {3}, gpu);
     const auto weights = detail::densify_oversize_weights(
@@ -5124,7 +5086,7 @@ int main(int argc, char** argv) {
             test_contribution_visibility_rejects_occluded_gaussians();
             test_revised_noise_scales_with_scene_units();
             test_geometry_regularization();
-            test_densify_mean_scores_and_oversize_weights();
+            test_densify_statistics_and_oversize_weights();
             test_igs_refinement_decisions();
             test_densification_cap_stops_igs_growth();
             test_densification_strategies_and_dense_bypass();
@@ -5192,7 +5154,7 @@ int main(int argc, char** argv) {
         test_emc_refine_relocates_and_grows();
         test_emc_revised_noise_gates_and_scales();
         test_emc_regularizers_match_finite_differences();
-        test_densify_mean_scores_and_oversize_weights();
+        test_densify_statistics_and_oversize_weights();
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();
         test_igs_refinement_decisions();

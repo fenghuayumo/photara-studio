@@ -1646,14 +1646,12 @@ GaussianModel Trainer::train(
         }
         tinytensor::Tensor densify_map;
         if (densification_enabled &&
-            (options_.densify_use_error_map ||
-             options_.densification_strategy == DensificationStrategy::emc)) {
+            options_.densification_strategy == DensificationStrategy::emc) {
             const bool mask_enabled =
                 target.has_mask && (options_.use_mask || target.mask_is_validity);
             densify_map = detail::compute_ssim_cs_error_map(
                 loss_render.color, target.rgb, target.mask, mask_enabled,
-                options_.densification_strategy == DensificationStrategy::adc_igs
-                    ? 1.F : options_.densify_loss_map_power);
+                options_.densify_loss_map_power);
         }
         tinytensor::Tensor* photo_grad = &loss.color;
         if (ppisp_enabled && !ppisp_before_bilagrid) {
@@ -1712,36 +1710,22 @@ GaussianModel Trainer::train(
                 multi_view_sample_gradients, gradients);
         cuda_profiler.mark(CudaTrainingStage::multi_view_gradient_merge);
         if (densification_enabled) {
-            tinytensor::Tensor step_score = gradients.refine_weight;
             tinytensor::Tensor image_error;
-            const bool igs = options_.densification_strategy == DensificationStrategy::adc_igs;
             const bool emc =
                 options_.densification_strategy ==
                 DensificationStrategy::emc;
-            bool use_maximum = true;
-            if ((options_.densify_use_error_map || emc) &&
-                gradients.densify_weight.is_valid()) {
-                auto error_score = detail::densify_avg_scores(
+            // EMC consumes the error map as its primary score; every other
+            // strategy ranks growth by the refine weight alone.
+            if (emc && gradients.densify_weight.is_valid())
+                image_error = detail::densify_avg_scores(
                     gradients.densify_weight, gradients.densify_weight_den);
-                if (igs || emc) {
-                    // ADC-IGS keeps the gradient gate and only re-orders
-                    // qualified growth parents by error; EMC consumes the
-                    // same evidence directly as its primary score.
-                    image_error = std::move(error_score);
-                } else {
-                    step_score = detail::densify_blend_world_gradient(
-                        error_score, gradients.means, model.log_scales,
-                        options_.densify_world_gradient_blend);
-                    use_maximum = false;
-                }
-            }
             detail::accumulate_densification_stats(
-                step_score, rendered.visibility, rendered.radii,
+                gradients.refine_weight, rendered.visibility, rendered.radii,
                 densification_stats, target.camera.width,
                 target.camera.height,
-                use_maximum,
+                true,
                 is_adc_strategy(options_.densification_strategy) || emc,
-                options_.densify_use_error_map && !igs ? options_.densify_score_power : 1.F,
+                1.F,
                 (options_.densification_strategy ==
                      DensificationStrategy::adc_igs ||
                  emc)

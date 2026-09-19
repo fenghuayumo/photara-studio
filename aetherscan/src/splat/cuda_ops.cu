@@ -1516,24 +1516,6 @@ __global__ void accumulate_densification_kernel(
         : weight * (1.F + screen);
 }
 
-__global__ void densify_blend_world_gradient_kernel(
-    const float* image_score, const float* means_gradient,
-    const float* log_scales, float* output, const std::size_t count,
-    const float blend) {
-    const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
-    const float x = means_gradient[3 * i];
-    const float y = means_gradient[3 * i + 1];
-    const float z = means_gradient[3 * i + 2];
-    const float scale = expf(fmaxf(log_scales[3 * i],
-        fmaxf(log_scales[3 * i + 1], log_scales[3 * i + 2])));
-    const float world_score = sqrtf(x * x + y * y + z * z) * scale;
-    const float image = fmaxf(image_score[i], 0.F);
-    const float score = blend >= 1.F ? world_score
-        : powf(image, 1.F - blend) * powf(world_score, blend);
-    output[i] = isfinite(score) ? fmaxf(score, 0.F) : 0.F;
-}
-
 __global__ void geometry_regularization_kernel(const float* logits,
     const float* log_scales, float* opacity_gradient, float* scale_gradient,
     const std::size_t count, const float opacity_factor, const float scale_factor) {
@@ -1982,16 +1964,6 @@ __global__ void densify_avg_scores_kernel(
     if (index >= n) return;
     const float den = denominator[index];
     out[index] = den > 1e-12F ? numerator[index] / den : 0.F;
-}
-
-__global__ void densify_mean_scores_kernel(
-    const float* sum, const float* count, float* out, const std::size_t n,
-    const float power) {
-    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= n) return;
-    const float mean = count[index] > 0.F ? sum[index] / count[index] : 0.F;
-    const float clipped = fmaxf(mean, 0.F);
-    out[index] = power == 1.F ? clipped : powf(clipped, power);
 }
 
 __global__ void densify_oversize_weights_kernel(
@@ -2951,24 +2923,6 @@ DensificationStats make_densification_stats(const std::size_t count) {
         tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA)};
 }
 
-tinytensor::Tensor densify_blend_world_gradient(
-    const tinytensor::Tensor& image_score,
-    const tinytensor::Tensor& means_gradient,
-    const tinytensor::Tensor& log_scales, const float blend) {
-    if (!(blend > 0.F)) return image_score;
-    const std::size_t count = image_score.numel();
-    auto output = tinytensor::Tensor::zeros({count}, tinytensor::Device::CUDA);
-    if (count != 0) {
-        densify_blend_world_gradient_kernel<<<
-            (count + k_threads - 1) / k_threads, k_threads>>>(
-            image_score.ptr<float>(), means_gradient.ptr<float>(),
-            log_scales.ptr<float>(), output.ptr<float>(), count,
-            std::min(blend, 1.F));
-        check_cuda(cudaGetLastError(), "blend densify world-gradient evidence");
-    }
-    return output;
-}
-
 void add_sh_regularization(const tinytensor::Tensor& sh,
     tinytensor::Tensor& gradient, const float weight) {
     if (!(weight > 0.F) || sh.numel() == 0 || sh.shape()[1] <= 1) return;
@@ -3425,21 +3379,6 @@ tinytensor::Tensor densify_avg_scores(
         (n + k_threads - 1) / k_threads, k_threads>>>(
         numerator.ptr<float>(), denominator.ptr<float>(), out.ptr<float>(), n);
     check_cuda(cudaGetLastError(), "densify avg scores");
-    return out;
-}
-
-tinytensor::Tensor densify_mean_scores(
-    const tinytensor::Tensor& sum,
-    const tinytensor::Tensor& count,
-    const float power) {
-    const std::size_t n = sum.numel();
-    auto out = tinytensor::Tensor::zeros({n}, tinytensor::Device::CUDA);
-    if (n == 0) return out;
-    densify_mean_scores_kernel<<<
-        (n + k_threads - 1) / k_threads, k_threads>>>(
-        sum.ptr<float>(), count.ptr<float>(), out.ptr<float>(), n,
-        std::max(power, 1e-6F));
-    check_cuda(cudaGetLastError(), "finalize densify mean scores");
     return out;
 }
 
