@@ -1,6 +1,7 @@
 # Photara
 
-面向大规模摄影测量的 GPU-first SfM / MVS / 3DGS 引擎，使用 C++20 与 CUDA。
+面向大规模场景的摄影测量与 3D 高斯溅射引擎：SfM、MVS 与 3DGS 训练一体化，
+使用 C++20 编写，核心计算在 CUDA 上加速。
 
 典型链路是 **SfM → 3DGS（Splat）→ 网格 → 贴图**，MVS 是显式的可选稠密路径：
 

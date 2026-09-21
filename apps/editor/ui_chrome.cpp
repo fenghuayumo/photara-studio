@@ -491,13 +491,13 @@ void draw_about_window(App& app) {
     };
     centred("Photara Studio", theme::text_bright);
     centred(
-        tr("GPU-first photogrammetry for photos, video, and 3DGS"),
+        tr("Photogrammetry and 3D Gaussian splatting"),
         theme::text_muted);
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
     theme::metric("Version", PHOTARA_VERSION);
-    theme::metric("Engine", "Photara reconstruction engine");
+    theme::metric("Pipeline", "SfM / MVS / 3DGS / mesh / texture");
     theme::metric("Backends", "CUDA / Vulkan");
     theme::metric("Developer", "Photara");
     theme::metric("Copyright", "© 2026 Photara");

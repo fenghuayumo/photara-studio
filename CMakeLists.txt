@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 project(Photara
     VERSION 0.2.0
-    DESCRIPTION "High-performance GPU-first Structure from Motion"
+    DESCRIPTION "Structure from motion, dense reconstruction, and 3D Gaussian splatting"
     LANGUAGES C CXX)
 
 option(PHOTARA_BUILD_BENCHMARKS
