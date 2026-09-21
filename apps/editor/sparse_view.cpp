@@ -8,6 +8,7 @@
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
 #include "mvs/types.hpp"
+#include "parallel/thread_pool.hpp"
 #include "project/archive.hpp"
 #include "splat/dataset.hpp"
 #include "splat/formats.hpp"
@@ -964,15 +965,32 @@ bool sample_photo_rgb(
     return true;
 }
 
-void colour_points_from_photos(
+// Photos are decoded at the coarsest JPEG DCT scale that still covers this many
+// pixels per side: landmark colours come from averaging many observations, so
+// 1/4-resolution samples are visually identical and decode several times
+// faster.
+constexpr std::uint32_t k_min_photo_sample = 640;
+// Measured on a 739-photo iPhone set (16-core host): 39.5 s serial
+// full-resolution, 17.7 s serial at DCT 1/4, 1.8 s on 16 threads. The pass only
+// runs for files that genuinely lack colour, so it may use most of the machine.
+constexpr unsigned k_max_colour_threads = 16;
+// Sampling a handful of stray landmarks is not worth touching the photos at
+// all; the pass only runs when a meaningful share of the cloud lacks colour.
+constexpr double k_min_missing_share = 0.01;
+
+// Samples photos for the landmarks in `missing` (indices into loaded.colours)
+// and patches their colour in. Runs off the UI thread and in parallel, because
+// a colourless 739-photo set otherwise costs tens of seconds of serial
+// full-resolution decodes on every load.
+void colour_missing_points(
     const aetherscan::sfm::Scene& scene, SparseScene& loaded,
-    const std::vector<std::size_t>& track_ids) {
-    if (loaded.points.empty() || track_ids.size() != loaded.points.size())
-        return;
+    const std::vector<std::size_t>& track_ids,
+    const std::vector<std::size_t>& missing) {
+    if (missing.empty()) return;
 
     std::vector<std::vector<std::pair<std::size_t, aetherscan::sfm::Index>>>
         observations_by_image(scene.images.size());
-    for (std::size_t point = 0; point < track_ids.size(); ++point) {
+    for (const std::size_t point : missing) {
         const auto& track = scene.tracks[track_ids[point]];
         const std::size_t inliers = std::min<std::size_t>(
             track.num_inliers, track.observations.size());
@@ -984,66 +1002,85 @@ void colour_points_from_photos(
         }
     }
 
-    std::vector<double> sum_r(loaded.points.size());
-    std::vector<double> sum_g(loaded.points.size());
-    std::vector<double> sum_b(loaded.points.size());
-    std::vector<std::uint32_t> samples(loaded.points.size());
+    // Slot lookup so the reduction below stays independent of the scheduling
+    // order of the decode workers.
+    constexpr std::size_t k_no_slot = static_cast<std::size_t>(-1);
+    std::vector<std::size_t> slot(loaded.points.size(), k_no_slot);
+    for (std::size_t i = 0; i < missing.size(); ++i) slot[missing[i]] = i;
 
+    std::vector<std::vector<std::uint32_t>> pixels_by_image(scene.images.size());
+    const unsigned threads = std::min(
+        k_max_colour_threads, aetherscan::parallel::resolve_thread_count(0));
+    aetherscan::parallel::parallel_for(
+        scene.images.size(), threads, [&](const std::size_t image_id) {
+            const auto& observations = observations_by_image[image_id];
+            if (observations.empty()) return;
+            const auto& image = scene.images[image_id];
+            if (image.path.empty()) return;
+            aetherscan::io::RgbImage rgb;
+            try {
+                rgb = aetherscan::io::load_rgb_with_minimum_size(
+                    image.path, k_min_photo_sample, k_min_photo_sample);
+            } catch (...) {
+                return;
+            }
+            if (rgb.width == 0 || rgb.height == 0) return;
+            const float scale_x =
+                image.features.image_width > 0
+                    ? static_cast<float>(rgb.width) /
+                          static_cast<float>(image.features.image_width)
+                    : 1.F;
+            const float scale_y =
+                image.features.image_height > 0
+                    ? static_cast<float>(rgb.height) /
+                          static_cast<float>(image.features.image_height)
+                    : 1.F;
+            auto& pixels = pixels_by_image[image_id];
+            pixels.assign(observations.size(), 0U);
+            for (std::size_t i = 0; i < observations.size(); ++i) {
+                const aetherscan::sfm::Index feature_id = observations[i].second;
+                if (feature_id >= image.features.keypoints.size()) continue;
+                const auto& keypoint = image.features.keypoints[feature_id];
+                double r = 0.0;
+                double g = 0.0;
+                double b = 0.0;
+                if (!sample_photo_rgb(
+                        rgb, keypoint.x * scale_x, keypoint.y * scale_y, r, g, b))
+                    continue;
+                pixels[i] = 0x01000000U | static_cast<std::uint32_t>(r) |
+                            (static_cast<std::uint32_t>(g) << 8) |
+                            (static_cast<std::uint32_t>(b) << 16);
+            }
+        });
+
+    std::vector<double> sum_r(missing.size());
+    std::vector<double> sum_g(missing.size());
+    std::vector<double> sum_b(missing.size());
+    std::vector<std::uint32_t> samples(missing.size());
     for (std::size_t image_id = 0; image_id < scene.images.size(); ++image_id) {
-        if (observations_by_image[image_id].empty()) continue;
-        const auto& image = scene.images[image_id];
-        if (image.path.empty()) continue;
-        aetherscan::io::RgbImage rgb;
-        try {
-            rgb = aetherscan::io::load_rgb(image.path);
-        } catch (...) {
-            continue;
-        }
-        const float scale_x =
-            image.features.image_width > 0
-                ? static_cast<float>(rgb.width) /
-                      static_cast<float>(image.features.image_width)
-                : 1.F;
-        const float scale_y =
-            image.features.image_height > 0
-                ? static_cast<float>(rgb.height) /
-                      static_cast<float>(image.features.image_height)
-                : 1.F;
-        for (const auto& [point, feature_id] :
-             observations_by_image[image_id]) {
-            if (feature_id >= image.features.keypoints.size()) continue;
-            const auto& keypoint = image.features.keypoints[feature_id];
-            double r = 0.0;
-            double g = 0.0;
-            double b = 0.0;
-            if (!sample_photo_rgb(
-                    rgb, keypoint.x * scale_x, keypoint.y * scale_y, r, g, b))
-                continue;
-            sum_r[point] += r;
-            sum_g[point] += g;
-            sum_b[point] += b;
-            ++samples[point];
+        const auto& pixels = pixels_by_image[image_id];
+        const auto& observations = observations_by_image[image_id];
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            const std::uint32_t pixel = pixels[i];
+            if (!(pixel & 0x01000000U)) continue;
+            const std::size_t point = observations[i].first;
+            const std::size_t index = slot[point];
+            if (index == k_no_slot) continue;
+            sum_r[index] += static_cast<double>(pixel & 255U);
+            sum_g[index] += static_cast<double>((pixel >> 8) & 255U);
+            sum_b[index] += static_cast<double>((pixel >> 16) & 255U);
+            ++samples[index];
         }
     }
-
-    loaded.colours.clear();
-    loaded.colours.reserve(loaded.points.size());
-    bool any = false;
-    for (std::size_t i = 0; i < loaded.points.size(); ++i) {
-        if (samples[i] == 0) {
-            loaded.colours.push_back(IM_COL32(180, 180, 180, 255));
-            continue;
-        }
-        any = true;
+    for (std::size_t i = 0; i < missing.size(); ++i) {
+        if (samples[i] == 0) continue;  // keeps the neutral grey stored earlier
         const auto channel = [count = samples[i]](const double sum) {
             return static_cast<int>(
                 std::clamp(std::lround(sum / count), 0L, 255L));
         };
-        loaded.colours.push_back(
-            IM_COL32(
-                channel(sum_r[i]), channel(sum_g[i]), channel(sum_b[i]), 255));
+        loaded.colours[missing[i]] = IM_COL32(
+            channel(sum_r[i]), channel(sum_g[i]), channel(sum_b[i]), 255);
     }
-    if (!any) loaded.colours.clear();
 }
 
 }  // namespace
@@ -1408,22 +1445,40 @@ SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour
         loaded.scene.views.push_back(std::move(pose));
     }
     loaded.scene.total_views = scene.images.size();
-    bool used_track_colours = !track_ids.empty();
+    // Landmarks normally carry their colour in the working copy, so this walks
+    // the tracks once and only pays for photo sampling where colour is missing.
+    // The previous all-or-nothing rule threw the whole palette away as soon as a
+    // single track lacked colour, which on a 739-photo set meant ~40 s of
+    // serial full-resolution decodes before the cloud could be shown.
     if (!track_ids.empty()) {
-        loaded.scene.colours.resize(track_ids.size());
-        for (std::size_t i = 0; i < track_ids.size(); ++i) {
-            const auto& track = scene.tracks[track_ids[i]];
-            if (!track.has_color) {
-                used_track_colours = false;
-                break;
+        std::size_t coloured_tracks = 0;
+        for (const std::size_t id : track_ids)
+            if (scene.tracks[id].has_color) ++coloured_tracks;
+        const bool use_default_colour =
+            coloured_tracks == 0 && !colour_from_photos;
+        if (!use_default_colour) {
+            loaded.scene.colours.resize(
+                track_ids.size(), IM_COL32(180, 180, 180, 255));
+            std::vector<std::size_t> missing;
+            missing.reserve(track_ids.size() - coloured_tracks);
+            for (std::size_t i = 0; i < track_ids.size(); ++i) {
+                const auto& track = scene.tracks[track_ids[i]];
+                if (!track.has_color) {
+                    missing.push_back(i);
+                    continue;
+                }
+                loaded.scene.colours[i] = IM_COL32(
+                    track.color_r, track.color_g, track.color_b, 255);
             }
-            loaded.scene.colours[i] = IM_COL32(
-                track.color_r, track.color_g, track.color_b, 255);
+            const bool worth_sampling =
+                colour_from_photos &&
+                static_cast<double>(missing.size()) >=
+                    k_min_missing_share *
+                        static_cast<double>(track_ids.size());
+            if (worth_sampling)
+                colour_missing_points(scene, loaded.scene, track_ids, missing);
         }
-        if (!used_track_colours) loaded.scene.colours.clear();
     }
-    if (!used_track_colours && colour_from_photos)
-        colour_points_from_photos(scene, loaded.scene, track_ids);
     loaded.scene.compute_bounds();
     return loaded;
 }
