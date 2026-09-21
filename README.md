@@ -1,42 +1,51 @@
 # Photara
 
-面向大规模摄影测量的 GPU-first SfM/MVS 引擎，使用 C++20 与 CUDA。
+面向大规模摄影测量的 GPU-first SfM / MVS / 3DGS 引擎，使用 C++20 与 CUDA。
 
-当前里程碑聚焦 SfM 的性能瓶颈：Bundle Adjustment 后端。现已具备：
+典型链路是 **SfM → 3DGS（Splat）→ 网格 → 贴图**，MVS 是显式的可选稠密路径：
 
-- 解析针孔 + 径向/切向畸变 Jacobian；
-- OpenMP CPU 与 CUDA 并行线性化，GPU 参数和观测持久驻留；
-- Huber IRLS 鲁棒加权；
-- CPU 块 Schur 消元、matrix-free Schur 乘法、块预条件 PCG；
-- Levenberg-Marquardt 接受/拒绝、阻尼调整、规范自由度固定；
+```text
+images → SfM → 稀疏点/位姿 → 3DGS 训练 →（--mesh）TSDF / PAM →（--texture）烘焙
+images → SfM →（--dense）MVS PatchMatch → 融合点云 → Delaunay/TSDF mesh
+```
+
+现已具备：
+
+- 解析针孔 + 径向/切向/鱼眼 Jacobian，原生等距柱状（360°）相机模型；
+- Huber IRLS + Levenberg-Marquardt（接受/拒绝、阻尼调整、规范自由度固定）；
+- CPU 与 CUDA 两套 BA：CUDA 侧线性化、Schur 组装、块预条件 PCG、
+  位姿/点/内参更新与代价评估全部驻留 GPU，并用 CUDA Graph 复用 PCG 序列；
 - FreeImage 图像 IO + VLFeat SIFT/RootSIFT（默认不依赖 OpenCV）；
-- 可插拔特征后端（`FeatureExtractor` / `FeatureMatcher` / registry，便于接 SuperPoint 等）；
-- AVX2 L2 mutual-ratio 描述子匹配与外层任务池并行前端；
+- 可插拔特征后端（`FeatureExtractor` / `FeatureMatcher` / registry）；
+- AVX2/CUDA mutual-ratio 匹配、学习型词袋检索与渐进式弱视图增强；
 - Eigen 多视几何（E/F/H RANSAC、PnP、三角化）；
-- DISK/SuperPoint + LightGlue（可选 ONNX Runtime）；
-- 可选 CUDA SiftGPU 适配（因上游许可限制默认关闭）；
-- 增量式 PnP/局部 BA 与全局 rotation/translation averaging；
+- DISK/SuperPoint/ALIKED + LightGlue（可选 ONNX Runtime）；
+- SiftGPU 适配（`PHOTARA_ENABLE_SIFTGPU`，因上游许可边界需自行确认）；
+- 增量式 PnP/局部 BA、层次化 Sim(3) 合并与全局 rotation/positioning averaging；
+- CUDA Gaussian Splatting 训练（ADC+/ADC-IGS/EMC 致密化、多视图几何与 NCC 监督）；
+- MVS PatchMatch（CUDA 优先，CPU 回退）+ CGAL 全局 Delaunay graph-cut / 稀疏 TSDF；
 - OpenMVS Interface（`.mvs` / MVSI）导出，可直接用 OpenMVS Viewer 查看；
-- CPU/CUDA 数值一致性 benchmark 和端到端优化测试。
+- CPU/CUDA 数值一致性 benchmark、端到端优化测试与 MVS/TSDF 拓扑回归。
 
-完整的 GPU BA 尚未完成：目前 Schur 组装、PCG 和状态更新仍在 CPU，CUDA
-只负责线性化。下一里程碑会让正规方程、Schur-PCG 和参数更新全程驻留 GPU，
-避免每轮 PCIe 往返。
+架构按阶段拆分：[流水线总览](docs/PIPELINE.md)、[SfM](docs/SFM_ARCHITECTURE.md)、
+[MVS](docs/MVS_ARCHITECTURE.md)、[稠密重建与贴图](docs/DENSE_RECONSTRUCTION.md)、
+[Splat C++ 后端](docs/SPLAT_CPP.md)、[特征后端](docs/FEATURES_BACKENDS.md)。
 
 ## 目录
 
 ```text
 Photara/
 ├── CMakeLists.txt                 总工程入口
-├── third_party/
-│   └── aether_drender/            纹理烘焙 / 网格预处理（git submodule）
+├── apps/editor/                   Photara Studio（Vulkan + Dear ImGui 编辑器）
+├── docs/                          架构、特性与质量文档
 ├── photara/
-│   ├── CMakeLists.txt             核心库子项目
-│   ├── include/                   稳定的公开 C++ API（ba/features/sfm/...）
+│   ├── CMakeLists.txt             核心库（Photara::BA/Features/SfM/MVS/Splat/Texture）
+│   ├── include/                   稳定的公开 C++ API（ba/features/sfm/mvs/splat/texture/...）
 │   ├── third_party/vlfeat/        精简 VLFeat SIFT（BSD）
-│   ├── src/                       BA / features / geometry / sfm
-│   └── tests/                     正确性测试
-└── docs/                          架构与性能路线
+│   ├── src/                       ba / features / io / sfm / mvs / splat / texture / project / tools
+│   └── tests/                     CTest 正确性测试
+└── third_party/
+    └── aether_drender/            纹理烘焙 / 网格预处理（git submodule）
 ```
 
 ## 依赖
@@ -104,14 +113,24 @@ cmake -S . -B build `
 |------------|------|------|
 | `PHOTARA_BUILD_TESTS` | OFF | 是否生成正确性测试可执行文件 |
 | `PHOTARA_BUILD_BENCHMARKS` | OFF | 是否生成额外 CLI / benchmark 工具 |
+| `PHOTARA_BUILD_STUDIO` | ON | 是否生成 Vulkan + Dear ImGui 编辑器 `photara_studio` |
+| `PHOTARA_BUILD_PYTHON` | OFF | 是否生成 nanobind Python 实验模块 |
+| `PHOTARA_ENABLE_CUDA` | ON | CUDA 加速（BA / splat / MVS PatchMatch） |
+| `PHOTARA_ENABLE_SPLAT` | ON | CUDA Gaussian splat 训练（TinyTensor + splat_drender） |
+| `PHOTARA_ENABLE_VULKAN_COMPUTE` | ON | TinyTensor 的 Vulkan 计算后端（HLSL/DXC） |
+| `PHOTARA_ENABLE_ACCUTILE` | ON | opacity-aware SnugBox/AccuTile 枚举 |
+| `PHOTARA_ENABLE_FEATURES` | ON | 特征提取与匹配模块 |
+| `PHOTARA_ENABLE_SIFTGPU` | ON | 可选的 SiftGPU 适配（上游为非商用许可） |
+| `PHOTARA_ENABLE_NATIVE_ARCH` | ON | 针对构建机 CPU 优化 |
 | `PHOTARA_ENABLE_ONNX` | OFF | 是否编译 ONNX/LightGlue |
 | `PHOTARA_FETCH_ONNX` | ON | 开启 ONNX 时是否自动下载 SDK |
 | `PHOTARA_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
 | `PHOTARA_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
 | `PHOTARA_ENABLE_TEXTURE` | ON | UVAtlas + Vulkan 贴图烘焙 |
 | `PHOTARA_ENABLE_AETHER_MESH` | ON | CGAL aether_drender 网格修复/减面 |
+| `PHOTARA_ENABLE_INSTANT_REMESH` | ON | CGAL 减面前先做 Instant Meshes 重拓扑 |
 | `PHOTARA_AETHER_DRENDER_ROOT` | 自动 | aether_drender 路径（默认 `third_party/aether_drender`） |
-| `PHOTARA_INTRINSIC_MODELS_DIR` | `${BUILD}/Models/Intrinsic` | Delight 的 `stage_*.onnx` 目录 |
+| `PHOTARA_INTRINSIC_MODELS_DIR` | `${BUILD}/Models/Intrinsic` | Delight 的 `stage_*.onnx` 目录（许可见 [LICENSE-Intrinsic.md](docs/LICENSE-Intrinsic.md)） |
 
 特征后端可自由组合（提取 × 匹配），例如：
 
@@ -165,8 +184,9 @@ LightGlue，并用更严格的几何阈值接纳救援边。
 
 `--focal` 默认只是初值；若输入是已标定的零畸变图像，可同时传入
 `--trust-focal --focal <像素焦距>` 锁定内参。自动自标定退化时，全部图片注册和低重投影
-误差仍可能对应错误轨迹。当前真实数据结果、已知问题和可重复执行的质量门槛见
-[SfM 真实数据验收](docs/SFM_ACCEPTANCE_20260905.md)。
+误差仍可能对应错误轨迹；请先用输出旁的 `*_sfm_diagnostics.csv`（逐图 RMS/P95 误差、
+相机中心、相邻位姿步长与 `alignment_reliable`）确认对齐质量。结构与质量门禁见
+[SfM 架构](docs/SFM_ARCHITECTURE.md)，端到端阶段映射见[流水线总览](docs/PIPELINE.md)。
 
 稠密重建使用整条流水线质量预设，而不只是调整图像分辨率：
 
@@ -196,33 +216,27 @@ CPU PatchMatch 会一次缓存所有图像金字塔，并默认同时处理 8 �
 `--patchmatch-tile-rows` 调整。`--mesh-method auto` 在 splat 路径使用 median-depth TSDF；
 MVS-only 的 preview/default/high 均使用 CGAL 全局 Delaunay visibility
 graph-cut，不再提供 projective mesh。全局图的输入上限由
-`--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。三个 mesh backend 都会经过统一
-Clean；构建了 `aether::mesh` 且 splat mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
+`--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。Delaunay 与 TSDF 两个 mesh 后端
+都会经过统一 Clean；构建了 `aether::mesh` 且 splat mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
 Meshes field-aligned remesh 和 CGAL repair/decimate。已经低于目标面数的网格结果会直接保留，
 避免无意义的重采样和修复引入新边界。目标面数默认为 1,000,000；Instant 的 quad 目标自动
 换算为约一半，重拓扑前后会清理微小连通碎片。
 
-Splat + TSDF 默认把自动估计体素放大到 `2.3x`，直接提取约百万面的局部规则网格后再做 UV
-展开和投影纹理，避免高密 TSDF 经通用减面产生跨孔长三角。可用
-`--mesh-tsdf-voxel-scale` 显式调整；`--mesh-target-faces 0` 保留原始 TSDF 分辨率用于诊断。
+Splat + TSDF 默认按 `max_depth / 2048` 取体素（与 gs2mesh.py 一致，即
+`--mesh-tsdf-voxel-scale 1`），需要更粗但更规则的网格时再用
+`--mesh-tsdf-voxel-scale` 放大，从而避免高密 TSDF 经通用减面产生跨孔长三角。
+`--mesh-target-faces 0` 保留原始 TSDF 分辨率用于诊断。
 UVAtlas 默认用 `--uv-parallel-partitions 8` 做空间分区并发展开，最后统一打包到单张 atlas；
 设为 `1` 可回到串行展开。
 `--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 aether mesh 后处理。Splat mesh 模式
-默认在第 7,000 步开启权重 0.05 的 median-depth/rendered-normal 几何一致性优化。
+默认从 `--splat-geometry-from-iter`（默认 3,000 步）开启权重 0.05 的
+median-depth/rendered-normal 几何一致性优化。
 
 稠密 MVS 输入使用全部融合点初始化 splat，不再抽样。稀疏输入的 Gaussian 增长由
 `--splat-densification-cap` 限制（默认 1,000,000）。
 Splat mesh 导出只使用 alpha 0.5 与有效深度掩码，不再默认执行额外的 60° depth-normal 硬过滤；
-这与 pygsplat/GS-2M 的默认 TSDF 输入一致，避免在高曲率和薄结构区域人为打洞。
 
-ADCPlus 在 brush 版本上做了证据化增强：每次 refinement 会额外剪枝“观测窗口内贡献步数
-不足且 opacity 低于软阈值”的低可见 floater 行；growth 采样权重按投影 footprint
-（屏幕占比）归一，抵近镜头 splat 在屏幕空间梯度上的系统性超权。二者只复用光栅化阶段
-已经在统计的 count / refine_weight / screen 半径，不引入额外监督或新参数；每次
-refinement 输出 `adc_plus_refine` 诊断日志（剪枝原因、replacement/oversized/growth
-数量与容量）。共享致密化参数可通过 `apply_strategy_defaults` 按策略取不同默认值
-（ADC+ 全程增长，ADC-IGS 预留后 40% 为巩固期）。
-当前 splat 训练借鉴 GGGS 的几何监督，但已融合 ADCPlus、GaussianWrapping normal field 与
+当前 splat 训练借鉴 GGGS 的几何监督，但已融合 GaussianWrapping normal field 与
 独立 mesh 后端，命令行统一使用 `--splat` / `--splat-*`。GaussianWrapping 几何路径可用
 `--mesh-method pam`：训练默认从第 8,001 步学习四通道
 normal field。PAM 不经过 TSDF：先从 Gaussian center 与 learned-normal pivot 运行
@@ -230,7 +244,7 @@ normal field。PAM 不经过 TSDF：先从 Gaussian center 与 learned-normal pi
 occupancy 等值面，并通过第二次 CGAL Delaunay 四面体分类提取表面。可用
 `--pam-pivot-max-points`、`--pam-max-points`、`--pam-occupancy-iso-value`、
 `--pam-refinement-steps` 和 `--pam-neighbors` 控制质量与耗时。PAM 对完整场景重建，不使用
-相机 focus、自动 ROI、场景 SubjectBounds 或外部凸包裁剪 mesh；细结构保留由 ADCPlus、
+相机 focus、自动 ROI、场景 SubjectBounds 或外部凸包裁剪 mesh；细结构保留由致密化、
 learned normal field、occupancy 和自适应采样负责。该后端要求构建时找到 CGAL。
 
 - `scene.mvs`：OpenMVS Interface（MVSI），可用 OpenMVS Viewer 打开验证相机与稀疏点
@@ -245,8 +259,8 @@ git submodule `third_party/aether_drender`（https://github.com/fenghuayumo/aeth
 
 `--delight` 纯 C++ **ONNX Runtime** 推理（与 LightGlue 相同开关
 `-DPHOTARA_ENABLE_ONNX=ON`），无 Python/PyTorch。将 `stage_0..3.onnx` 放到
-`PHOTARA_INTRINSIC_MODELS_DIR`（默认 `build-*/Models/Intrinsic`；许可见
-`docs/LICENSE-Intrinsic.md`）。
+`PHOTARA_INTRINSIC_MODELS_DIR`（默认 `build-*/Models/Intrinsic`）。
+Intrinsic 权重为学术/非商用许可，产品发布前必须完成许可证审查。
 
 ```powershell
 .\build-cgal\photara\Release\photara.exe `
@@ -261,6 +275,14 @@ git submodule `third_party/aether_drender`（https://github.com/fenghuayumo/aeth
   --dense --mesh --texture --delight
 ```
 
-详细设计见 [SfM 架构](docs/SFM_ARCHITECTURE.md)、
-[稠密重建架构](docs/DENSE_RECONSTRUCTION.md) 与
-[MVS 质量回归](docs/MVS_QUALITY_REPORT.md)。
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [PIPELINE.md](docs/PIPELINE.md) | 端到端流水线：SfM → MVS → 3DGS → mesh → 贴图的阶段、触发条件、产物 |
+| [SFM_ARCHITECTURE.md](docs/SFM_ARCHITECTURE.md) | 前端、三种 mapping 模式、BA 后端、相机模型、导出与诊断 |
+| [MVS_ARCHITECTURE.md](docs/MVS_ARCHITECTURE.md) | PatchMatch 深度、深度融合、Delaunay/TSDF 网格、Clean 与质量预设 |
+| [DENSE_RECONSTRUCTION.md](docs/DENSE_RECONSTRUCTION.md) | Splat/TSDF/贴图主链路设计与当前实现状态 |
+| [SPLAT_CPP.md](docs/SPLAT_CPP.md) | CUDA splat 后端、致密化策略、训练数据流水线与性能分析 |
+| [FEATURES_BACKENDS.md](docs/FEATURES_BACKENDS.md) | 特征提取 × 匹配后端的组合与兼容矩阵 |
+| [LICENSE-Intrinsic.md](docs/LICENSE-Intrinsic.md) | Delight（Intrinsic）权重的许可边界与放置位置 |

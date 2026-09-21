@@ -26,7 +26,8 @@ matchers:    gpu_mutual_ratio (default) | mutual_ratio | lightglue | hybrid_ligh
 pipelines:   none (default) | lightglue_end2end
 ```
 
-Default behavior is unchanged: `siftgpu` × `gpu_mutual_ratio`.
+Default behavior is unchanged: `siftgpu` × `gpu_mutual_ratio`
+(`--matcher siftgpu` is a legacy alias for `gpu_mutual_ratio`).
 
 ### Compose freely
 

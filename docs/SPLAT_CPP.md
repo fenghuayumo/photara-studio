@@ -7,15 +7,18 @@ Photara 已有一条可编译、可前反向传播、可由 CLI 启动的 Gaussi
 normal field、PAM/TSDF 等独立能力，因此公开接口统一称为 `splat`，不再以 GGGS 命名：
 
 ```text
-images → SfM → CPU/OpenMP PatchMatch MVS → fused dense cloud ─┐
-images + COLMAP sparse model ──────────────────────────────────┤
-                                                              ↓
-  Gaussian 初始化 → Splat CUDA forward/backward
-  → fused 11×11 L1+SSIM → TinyTensor Adam → *_splat.ply
+images → SfM（或 --splat-dataset 的外部相机/稀疏点）
+       → 稀疏点 + 位姿 → Gaussian 初始化
+       → Splat CUDA forward/backward
+       → fused 11×11 L1+SSIM → TinyTensor Adam → *_splat.ply / .sog / .spz / .glb
+
+（可选）--dense → CPU/CUDA PatchMatch MVS → fused dense cloud → 同上（稠密初始化）
 ```
 
-这条路径不依赖 LibTorch、PyBind 或 Python 运行时。MVS 继续负责充分利用 CPU；Gaussian
-投影、排序、混合、反向传播、损失与参数更新在 CUDA 上执行。
+默认链路**不经过 MVS**：SfM 稀疏点直接初始化 Gaussian，日志以
+`splat_input=sfm_sparse`、`patchmatch=false` 标识。MVS 是显式的 `--dense` 路径
+（见 [MVS 架构](MVS_ARCHITECTURE.md)）。这条路径不依赖 LibTorch、PyBind 或 Python
+运行时；Gaussian 投影、排序、混合、反向传播、损失与参数更新在 CUDA 上执行。
 
 外部相机对齐数据通过 `--splat-dataset` 传入，程序会从路径自动识别 COLMAP、
 RealityCapture 或 OpenMVS。Gaussian 写出格式看 `--output` 后缀：`.sog` / `.spz` /
@@ -46,11 +49,11 @@ mask/alpha loss。室外视频的自动曝光 / 白平衡漂移可以由两种�
 与仿射双边网格（`--splat-bilateral-grid`）。每视图模型与场景颜色之间存在退化，因此
 PPISP 把跨视图曝光/色彩均值锚定到单位变换，双边网格在每次更新后把每视图网格均值
 投影回 identity 仿射——网格只表达空间变化，全局曝光归 PPISP。同时开启时默认先 PPISP、
-再双边网格。实测：这些功能提升“按帧曝光对齐后”的重建指标，但不改变导出模型的留出指标，
-详见 [颜色校正报告](SPLAT_COLOR_CORRECTION_20260914.md)。两者的每像素 kernel 与光度损失
-路径的开销见 [颜色校正性能报告](SPLAT_COLOR_CORRECTION_PERF_20260916.md)：训练步内两项合计
-约 1.5 ms（1728×1120、约 4 万高斯），profiler 的 `colour_forward_ms` / `colour_backward_ms`
-就是这两项的耗时。mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 splat depth-normal、
+再双边网格。实测：这些功能提升“按帧曝光对齐后”的重建指标，但不改变导出模型的留出指标
+（详细 A/B 记录见 `artifacts/` 下对应的颜色校正运行）。两者的每像素 kernel 与光度损失
+路径的开销：训练步内两项合计约 1.5 ms（1728×1120、约 4 万高斯），profiler 的
+`colour_forward_ms` / `colour_backward_ms` 就是这两项的耗时。
+mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 splat depth-normal、
 权重 `0.02` 的多视图几何往返和权重 `0.6` 的平面单应 NCC。多视图几何通过 GGGS 原生
 `sampleDepth` 前后向在相邻视图查询表面点，梯度同时回传参考深度、查询点以及邻视图
 Gaussian；NCC 使用半像素 7×7 patch、鲁棒 diffuse confidence 和深度/法线解析梯度。
@@ -133,9 +136,11 @@ appearance-only 3DGS 的独立开关。可用 `--splat-depth-normal-weight`、
 `--splat-mv-pixel-noise` 和 `--splat-geometry-from-iter` 调整；将两个 multi-view
 weight 设为 0 可做关闭 A/B。
 
-`--splat` 隐含 `--dense`。输出包括 `scene_dense.ply` 和 `scene_splat.ply`。当前 Gaussian
-PLY 保存训练参数（opacity 和 scale 仍是 logit/log-domain），可用于检查训练结果和后续
-viewer/mesh-extraction 接入。
+`--splat` 单独使用时不触发 MVS：它从 SfM 稀疏点（或 `--splat-dataset` 的稀疏模型）
+初始化 Gaussian，输出 `<stem>_splat.ply`（或按后缀写入 `.sog` / `.spz` / `.glb`）；
+只有再显式加 `--dense` 才会先跑 PatchMatch 融合、再以稠密点云初始化。
+当前 Gaussian PLY 保存训练参数（opacity 和 scale 仍是 logit/log-domain），
+可用于检查训练结果和后续 viewer/mesh-extraction 接入。
 
 稠密 MVS 输入使用全部 fused points 初始化 Gaussian。稠密点云已经具有高采样密度，
 因此关闭动态致密化。稀疏 COLMAP 输入默认使用 ADC-IGS 动态 Gaussian 管理，增长受
@@ -143,8 +148,10 @@ viewer/mesh-extraction 接入。
 第一个、中间和最后相机的
 `*_splat_view_*.png`，并在日志记录 PSNR、MAE 和 alpha coverage。
 
-可直接跳过内部 SfM/MVS，加载 COLMAP 相机位姿和稀疏点云。稀疏输入默认 30,000 步
-（ADC 致密化持续到 95% 进度），稠密 MVS 仍默认 10,000 步：
+可直接跳过内部 SfM/MVS，加载 COLMAP 相机位姿和稀疏点云。
+`--splat-iterations` 默认 10,000 步；ADC+ 的 refine 到 95% 进度截止，
+ADC-IGS 到 `min(refine_stop_iter, N − 2500)`（默认 `refine_stop_iter = 14,000`），
+`grow_stop_iter` 默认取总步数的一半（Brush 节奏）：
 
 ```powershell
 photara --images D:\ScanVideo\ori_img\images `
@@ -178,16 +185,18 @@ quaternion；光栅化前才归一化 quaternion。稀疏云可能包含 KNN sca
 `THIN_PRISM_FISHEYE` 仍会明确拒绝。全景无法去畸变。非针孔相机上会跳过
 depth-normal 与多视图 NCC/几何项，RGB+SSIM 仍照常训练。
 
-CLI 暴露两个稀疏输入策略，默认 `adc_igs`：
+CLI 暴露的致密化策略（`--splat-strategy`，默认 `adc_igs`）：
 
-| `--splat-strategy` | 统计与增长 | 默认调度 |
+| 策略 | 统计与增长 | 默认调度 |
 |---|---|---|
-| `adc_plus` | 最大 refine weight、实际 alpha 贡献可见度和屏幕半径；预算回收、ADC split/decay/noise | 全程每 200 步，95% 进度截止 |
-| `adc_igs` | 累积 refine weight 门槛 + 不透明度×边缘证据（priority/观测数）采样、oversize 强制分裂、`dense_recycle_fraction` 回收预算、best-row 豁免 | 每 200 步、第一个窗口起，一直到 `max(14000, N−2500)` |
+| `adc_igs`（默认） | 累积 refine weight 门槛 + 不透明度×边缘证据（priority/观测数）采样、oversize 强制分裂、`dense_recycle_fraction` 回收预算、best-row 豁免 | 从第 1 步起每 200 步，直到 `min(max(14000, N−2500), N)` |
+| `adc_plus` | 最大 refine weight、实际 alpha 贡献可见度和屏幕半径；预算回收、ADC split/decay/noise | 每 200 步，到 95% 进度截止 |
+| `emc` | 误差图（error map）即策略本身：以贡献加权图像误差打分，死行按长轴精确分裂原位回收，增长为每次 refine 的固定倍数（`densify_growth_factor`，预设 1.05） | 从第 500 步起每 100 步，到 `min(max(14000, N−2500), N)` |
+| `dense_adaptive` | 供显式稠密输入：小比例回收与保守增长 | 起始 750 步、每 500 步 |
 
-`--splat-densify-error-map` 只属于 `adc_plus`：ADC-IGS 完全没有 error-map 路径
-（2026-09-17 的扫描显示按 SSIM 误差重排序在所有数据集上都落在 seed 噪声内，
-见 `docs/ADC_IGS_ERROR_MAP_20260917.md`），EMC 则把 error map 当作策略本身。
+ADC+ 与 ADC-IGS **都不按图像误差打分**：2026-09-17 的扫描显示按 SSIM 误差重排序
+在所有数据集上都落在 seed 噪声内，因此误差图归 EMC 独占，ADC 系列没有
+error-map 选项。`--splat-growth-factor` 可覆盖 EMC 的每次 refine 增长倍数。
 
 `adc_igs` 保留随机轴精确 alpha 分裂（最大轴减半、子代复现父代 alpha 合成），
 不采用 ADC+ 的协方差分裂；refine 间隔与屏幕上限与 ADC+ 相同。
@@ -233,8 +242,7 @@ photara --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
 `masked` 的泄漏惩罚权重由 `--splat-alpha-leak-weight` 控制（默认 `1`，与 pygsplat 一致）。
 动态遮挡物（例如持镜人）会挡住其他视角必须保持不透明的静态背景，惩罚与多视角一致性冲突时
 会在人物位置长出半透明气泡；固定机位实拍建议 `--splat-alpha-leak-weight 0`，只屏蔽 RGB，
-把被遮挡的背景交还给其他视角。详见
-`docs/ADC_IGS_NATIVE_CAMERAS_R2_20260916.md`。
+把被遮挡的背景交还给其他视角（结论来自 `artifacts/` 下对应的定机位 A/B 运行）。
 
 稀疏初始化的点数由 `--splat-init-point-budget` 限制（默认 `0` = 使用全部输入点）。稀疏 SfM
 点云经常超过 `--splat-densification-cap`，此时第一次 refine 会把点云剪回上限、之后不再有
@@ -560,7 +568,7 @@ Instant 的 quad-dominant 目标会按最终三角面数的一半设置，remesh
 `--mesh-remesh=false` 可跳过重拓扑做 A/B，`--mesh-target-faces 0` 可关闭整个后处理。
 
 `D:\ScanVideo\ori_img\images` 的 76 视角稠密初始化 / 500,000 Gaussian / 10,000 步实测中，
-第 7,000 步开启几何项后 normal loss 从 `0.004108` 降至 `0.000700`；三个固定视角 masked
+在该次运行的几何监督起始步之后，normal loss 从 `0.004108` 降至 `0.000700`；三个固定视角 masked
 PSNR 为 `30.44 / 36.96 / 35.98 dB`。depth-normal 提取过滤拒绝 `146,061 / 7,420,379`
 个可比较样本（1.97%）；最终网格为 515,644 顶点、995,937 三角形、单边连通分量、绕序一致、
 0 条非流形边。网格仍有 37,689 条开放边，因此当前交付是开放表面而不是 watertight 实体。
@@ -571,7 +579,9 @@ PSNR 为 `30.44 / 36.96 / 35.98 dB`。depth-normal 提取过滤拒绝 `146,061 /
   glossy normal TV 分支，Photara MVS depth/normal 直接监督仍为可选项；
 - ADC-IGS 当前以 raster refine weight、可见度和屏幕半径构造投影优先级，尚未实现 Python
   版本基于 Sobel/逐像素误差反投影的完整 edge/error ownership map；
-- 未实现 checkpoint/resume、out-of-core view cache、多 GPU 和 mixed precision；
+- host 视图缓存（`--splat-view-cache-mb`）、自适应预取与异步上传已实现；
+  仍未实现完整的训练 resume（当前只有 `.ascan` 的 gaussians/mesh chunk）、
+  多 GPU 和 mixed precision；
 - 还需要更多数据集的质量基准和 30k 步动态致密化稳定性验证。
 
 建议后续按“TSDF 边界/体素参数回归 → ADC-IGS pixel ownership → checkpoint/streaming →

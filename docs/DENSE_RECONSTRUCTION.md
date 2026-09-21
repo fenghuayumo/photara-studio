@@ -2,11 +2,12 @@
 
 ## 目标边界
 
-在已完成的 SfM 之上，默认产品主链路直接使用相机位姿与稀疏点云初始化 ADCPlus，
+在已完成的 SfM 之上，默认产品主链路直接使用相机位姿与稀疏点云初始化 Splat
+（默认致密化策略 ADC-IGS，可选 ADC+ / EMC），
 由 Splat 优化多视图几何，再从 Gaussian 渲染的深度、法线和 alpha 进行 TSDF 网格重建：
 
 ```text
-SfM → sparse points → ADCPlus / Splat → TSDF → Clean → Texture / Delight
+SfM → sparse points → Splat（ADC-IGS / ADC+ / EMC） → TSDF → Clean → Texture / Delight
 ```
 
 默认路径明确跳过以下阶段：
@@ -128,13 +129,17 @@ RebuildScene
   delighted_images[]
 ```
 
-Checkpoint 按阶段落盘：
+当前代码里的落盘状态分两类：
 
 ```text
-sfm-* / subject-* / splat-warmup-* / masks-* / splat-* / tsdf-* / mesh-* / texture-*
+SfM 检查点（--cache-dir）：features / matches / geometry / tracks / reconstruction
+.ascan 工程 chunk：        settings / sfm / gaussians / mesh
 ```
 
-支持从任意阶段续跑。MVS 产物使用独立的 `diagnostics-mvs-*` 命名，不进入默认依赖图。
+编辑器路径另外使用工作副本（`--working-sfm/splat/mesh/dense/texture`）在阶段之间传递结果。
+上表中 `subject_*`、`splat-warmup-*`、`masks-*` 等分阶段 checkpoint 仍属于设计目标，
+尚未在 CLI 中实现。MVS 产物使用 `<stem>_dense.ply` 与 `<stem>_mvs_mesh.ply` 命名，
+不进入默认依赖图。
 
 ---
 
@@ -335,10 +340,11 @@ GPU→CPU readback 与 PNG 编码。
 1. **直接稀疏入口 P0（已完成）**：`sfm::Scene` 直接构造 Splat 数据集，跳过 densify；
 2. **策略语义 P0（已完成）**：明确 sparse 初始化状态，ADCPlus 保持动态致密化；
 3. **物体主体 P0**：支持外部软 Mask，并实现 warmup → Gaussian 主体选择 → soft-mask 自举；
+   （外部软 Mask 已支持；自举尚未实现）
 4. **TSDF P0**：拆出独立 `Photara::TSDF` API，增加 Open3D 同帧回归与拓扑门禁；
 5. **细结构 P0**：增加细线质量档，联合控制 alpha、voxel、truncation 与 Clean；
 6. **编排/checkpoint P1**：支持从 SfM、warmup、正式 Splat、TSDF 和 Texture 任意阶段续跑；
-7. **Texture/Delight P1**：只消费最终 TSDF/Clean mesh；
+7. **Texture/Delight P1（已完成）**：只消费最终 TSDF/Clean mesh；
 8. **MVS diagnostics P2**：保留现有 CUDA PatchMatch、fusion 和 Delaunay 作为独立对照工具。
 
 当前内部 SfM 分支已经直接执行
@@ -566,19 +572,24 @@ NCC loss kernel 从 2.1737 降到 2.0694 ms（-4.80%），稳定 CUDA/iter 从 1
 - `capture_mode=object|scene` 与 SfM 稀疏点自动 `SubjectBounds`；
 - sparse ADCPlus 初始化保持 densification 开启；
 - Splat CUDA rasterizer forward/backward、SSIM、Adam；
-- sparse `default/adc_plus/adc_igs` 动态 grow/split/clone/prune；
+- sparse `adc_igs`（默认）/ `adc_plus` / `emc` 动态 grow/split/clone/prune
+  （`dense_adaptive` 仅用于显式稠密输入）；
 - Mip-Splatting 3D filter、Splat 多视图几何与 NCC；
 - median depth/normal/alpha → TSDF → Clean；
 - 外部 `--masks` 与透明/前景训练模式；
-- Texture/Delight 骨架。
+- Texture（UVAtlas + `aether_drender` 投影与接缝优化）与 Delight（ONNX，可选）。
 
 仍需完成：
 
 - object 模式 Gaussian 主体自举与置信度门禁；
 - 独立 `Photara::TSDF` 公共 API；
 - raw MC/后处理分阶段拓扑门禁；
-- direct SfM 分支的 Texture/checkpoint 编排；
-- out-of-core view cache 和 ADC-IGS edge/error ownership。
+- 从 subject / splat-warmup / masks 等中间阶段续跑的分阶段 checkpoint；
+- ADC-IGS 的 edge/error ownership（当前只用 raster refine weight、可见度与屏幕半径）；
+
+注：`--splat` 分支已经接上 Texture（`write_texture_artifact`）与 `.ascan` 工程 chunk
+（sfm / gaussians / mesh），host 视图缓存与自适应预取也已落地，
+因此不再列为缺口。
 
 实现、构建和许可证细节见 [SPLAT_CPP.md](SPLAT_CPP.md)。
 
