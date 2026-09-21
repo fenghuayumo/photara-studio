@@ -3,6 +3,7 @@
 #include "file_dialogs.hpp"
 #include "i18n.hpp"
 #include "icons.hpp"
+#include "core/version.hpp"
 
 #include "imgui_internal.h"
 
@@ -22,9 +23,6 @@
 
 #ifndef PHOTARA_CLI_PATH
 #define PHOTARA_CLI_PATH "photara"
-#endif
-#ifndef PHOTARA_VERSION
-#define PHOTARA_VERSION "0.2.0"
 #endif
 
 #if defined(_WIN32)
@@ -807,7 +805,7 @@ void draw_status_bar(const App& app) {
 
     // Persistent right-hand telemetry: backend and build tag always remain
     // visible; idle mode also shows viewport, point and active-tool state.
-    const char* tag = "Photara Studio 0.2";
+    const char* tag = PHOTARA_STUDIO_VERSION_STRING;
     const float tag_width = ImGui::CalcTextSize(tag).x;
     float right = ImGui::GetWindowWidth() - tag_width - 14.F;
     ImGui::SetCursorPos({right, centre_y});

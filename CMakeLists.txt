@@ -1,7 +1,14 @@
 cmake_minimum_required(VERSION 3.28)
 
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PHOTARA_VERSION LIMIT_COUNT 1)
+string(STRIP "${PHOTARA_VERSION}" PHOTARA_VERSION)
+if(NOT PHOTARA_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR
+        "VERSION must contain a MAJOR.MINOR.PATCH number (got '${PHOTARA_VERSION}')")
+endif()
+
 project(Photara
-    VERSION 0.2.0
+    VERSION ${PHOTARA_VERSION}
     DESCRIPTION "Structure from motion, dense reconstruction, and 3D Gaussian splatting"
     LANGUAGES C CXX)
 

@@ -22,12 +22,18 @@ if(PHOTARA_ENABLE_CUDA)
     endif()
 endif()
 
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/core/version.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/include/core/version.hpp"
+    @ONLY)
+
 add_library(photara_ba ${PHOTARA_BA_SOURCES})
 add_library(Photara::BA ALIAS photara_ba)
 
 target_include_directories(photara_ba
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
         $<INSTALL_INTERFACE:include>)
 target_compile_features(photara_ba PUBLIC cxx_std_20)
 
@@ -693,8 +699,7 @@ if(TARGET photara_features)
                 target_compile_options(photara_studio PRIVATE /utf-8)
             endif()
             target_compile_definitions(photara_studio PRIVATE
-                PHOTARA_CLI_PATH="$<TARGET_FILE:photara>"
-                PHOTARA_VERSION="${PROJECT_VERSION}")
+                PHOTARA_CLI_PATH="$<TARGET_FILE:photara>")
             add_dependencies(photara_studio photara)
             add_custom_command(TARGET photara_studio POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different

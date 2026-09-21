@@ -12,6 +12,7 @@
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
 #include "core/logging.hpp"
+#include "core/version.hpp"
 #include "io/image.hpp"
 #include "io/video_frames.hpp"
 #if defined(PHOTARA_HAS_SPLAT)
@@ -346,7 +347,8 @@ struct Utf8Argv {
 };
 
 void print_help(const cxxopts::Options& options) {
-    std::cout << options.help() << '\n'
+    std::cout << PHOTARA_VERSION_STRING << '\n'
+              << options.help() << '\n'
               << "Feature backends:\n"
               << "  default   --extractor siftgpu --matcher gpu_mutual_ratio\n"
               << "  compose   any compatible --extractor × --matcher\n"
@@ -501,6 +503,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     options.custom_help("[options]");
     options.add_options()
         ("h,help", "Print usage")
+        ("v,version", "Print version")
         ("i,images", "Image directory or video file", cxxopts::value<std::string>())
         ("video-fps", "Kept frames per second when --images is a video",
          cxxopts::value<float>()->default_value("2"))
@@ -992,6 +995,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint32_t>()->default_value("8"));
 
     const auto result = options.parse(argc, argv);
+    if (result.count("version")) {
+        std::cout << PHOTARA_VERSION_STRING << '\n';
+        std::exit(0);
+    }
     if (result.count("help") || argc <= 1) {
         print_help(options);
         std::exit(0);
@@ -3415,8 +3422,9 @@ int main(int argc, char** argv) {
                 cli.gui ? photara::core::LogLevel::off
                         : photara::core::LogLevel::trace);
         photara::core::Logger::instance().info(
-            "Photara started: mode=", cli.mode, " images_dir=", cli.images_dir,
-            " output=", cli.output, " log=", log_path);
+            PHOTARA_VERSION_STRING, " started: mode=", cli.mode,
+            " images_dir=", cli.images_dir, " output=", cli.output,
+            " log=", log_path);
 
         const auto output_ext = lower_extension(cli.output);
         const bool project_output = output_ext == ".ascan";

@@ -7,6 +7,17 @@ import os
 from pathlib import Path
 import sys
 
+
+def _read_version() -> str:
+    path = Path(__file__).resolve().parents[2] / "VERSION"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "0.0.0"
+
+
+__version__ = _read_version()
+
 _dll_directories = []
 
 

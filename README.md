@@ -1,7 +1,8 @@
 # Photara
 
 面向大规模场景的摄影测量与 3D 高斯溅射引擎：SfM、MVS 与 3DGS 训练一体化，
-使用 C++20 编写，核心计算在 CUDA 上加速。
+使用 C++20 编写，核心计算在 CUDA 上加速。产品版本号只维护仓库根目录的
+`VERSION`（当前 `0.2.0`）；CMake、Photara Studio、CLI 和 Python 包都从这里读取。
 
 典型链路是 **SfM → 3DGS（Splat）→ 网格 → 贴图**，MVS 是显式的可选稠密路径：
 
