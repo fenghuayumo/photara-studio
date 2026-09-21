@@ -1021,11 +1021,23 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.texture_log = with_suffix("_texture.log");
     layout.export_log = with_suffix("_export.log");
     layout.view_log = with_suffix("_view.log");
+    // Working copies (sfm.bin, splat.ply, mesh/dense, preview sidecars) sit
+    // next to the project by default so a dataset on a data drive cannot fill
+    // the system drive with multi-GB caches. A configured cache folder
+    // overrides that, and a session without any project path (no usable
+    // <root>) falls back to the per-project temp namespace.
+    const std::filesystem::path cache_root =
+        path_from_utf8_field(settings.cache_dir.data());
     std::filesystem::path runtime_dir = layout.cache;
-    if (!settings.reuse_cache) {
+    if (!cache_root.empty()) {
+        runtime_dir = cache_root / runtime_cache_key(layout.project_file);
+    } else if (layout.root.empty()) {
         std::error_code temp_error;
         const auto temp = std::filesystem::temp_directory_path(temp_error);
-        if (!temp_error)
+        if (temp_error)
+            runtime_dir = std::filesystem::path("aetherscan_cache") /
+                          runtime_cache_key(layout.project_file);
+        else
             runtime_dir =
                 temp / "AetherScan" / runtime_cache_key(layout.project_file);
     }
@@ -1083,8 +1095,8 @@ std::string build_align_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout) {
     std::ostringstream command;
-    // Align keeps SfM in a working copy (project .cache when reuse is on,
-    // otherwise a temp folder). .ascan is only written on Save Project.
+    // Align keeps SfM in a working copy (project .cache by default, or the
+    // configured cache folder). .ascan is only written on Save Project.
     command << quote(cli_path) << " --images "
             << quote(settings.images_dir.data()) << " --output "
             << quote(layout.project_file.empty() ? layout.sparse_ply

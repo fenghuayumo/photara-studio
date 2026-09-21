@@ -440,14 +440,21 @@ constexpr Entry k_entries[] = {
     {"Mixed", "混合", "混在", "혼합"},
     {"Max features per image", "每图最大特征数", "画像あたり最大特徴", "이미지당 최대 특징"},
     {"Reuse cached alignment", "复用缓存对齐", "キャッシュしたアライメントを再利用", "캐시된 정렬 재사용"},
-    {"Write a project .cache folder so later Align/Train can\n"
-     "reuse extracted features. Off by default: skip that folder.\n"
-     "Align/Train keep working copies for preview. They do not\n"
-     "write .ascan, .asfm, or PLY files unless you Save Project\n"
-     "or Export.",
-     "写入项目 .cache 以便后续对齐/训练复用特征。默认关闭。\n对齐/训练会保留预览用工作副本，除非保存项目或导出，否则不写 .ascan、.asfm 或 PLY。",
-     "プロジェクト .cache を書き、後のアライメント/学習で特徴を再利用。既定はオフ。\nプレビュー用作業コピーは残しますが、保存または書き出しまで .ascan / .asfm / PLY は出しません。",
-     "프로젝트 .cache를 써서 이후 정렬/학습이 특징을 재사용합니다. 기본은 끔.\n미리보기용 작업본은 남지만, 프로젝트 저장 또는 내보내기 전에는 .ascan, .asfm, PLY를 쓰지 않습니다."},
+    {"Cache extracted features and matches in the project\n"
+     ".cache folder so the next Align/Train can reuse them.\n"
+     "Off by default. Working copies for preview are always\n"
+     "kept; .ascan, .asfm, and PLY files are only written when\n"
+     "you Save Project or Export.",
+     "把提取的特征与匹配缓存到项目 .cache，供下次对齐/训练复用。默认关闭。\n预览用工作副本始终保留；.ascan、.asfm、PLY 只在保存项目或导出时写出。",
+     "抽出した特徴とマッチをプロジェクト .cache に保存し、次回のアライメント/学習で再利用します。既定はオフ。\nプレビュー用作業コピーは常に残し、.ascan / .asfm / PLY は保存または書き出し時のみ出力します。",
+     "추출한 특징과 매칭을 프로젝트 .cache에 저장해 다음 정렬/학습에서 재사용합니다. 기본은 끔.\n미리보기용 작업본은 항상 남고, .ascan / .asfm / PLY는 저장 또는 내보내기 때만 씁니다."},
+    {"Cache folder", "缓存目录", "キャッシュフォルダー", "캐시 폴더"},
+    {"Leave empty to keep the working copies next to the project\n"
+     "(<project folder>/<project name>.cache). Set a folder to\n"
+     "collect every dataset's cache on another drive.",
+     "留空 = 工作副本放在项目旁（<项目目录>/<项目名>.cache）。\n指定目录可把所有数据集的缓存集中到其它盘。",
+     "空欄なら作業コピーをプロジェクト隣（<プロジェクト>/<名前>.cache）に置きます。\nフォルダを指定すると全データセットのキャッシュを別ドライブに集約できます。",
+     "비워 두면 작업본을 프로젝트 옆(<프로젝트 폴더>/<이름>.cache)에 둡니다.\n폴더를 지정하면 모든 데이터셋 캐시를 다른 드라이브에 모을 수 있습니다."},
     {"Export SfM Alignment", "导出 SfM 对齐", "SfM アライメントを書き出し", "SfM 정렬 내보내기"},
     {"Save cameras and tracks as ASFM, COLMAP,\n"
      "Nerfstudio / Blender, or OpenMVS.",

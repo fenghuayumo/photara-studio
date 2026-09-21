@@ -214,6 +214,10 @@ void frame_reconstruction(App& app);
 std::filesystem::path reconstruction_images_path(const App& app);
 std::filesystem::path existing_splat_model(const App& app);
 std::filesystem::path resolve_editor_ini();
+// Editor-level cache root override, persisted next to editor.ini.
+void load_editor_cache_dir(App& app);
+void store_editor_cache_dir(const App& app);
+void select_cache_folder(App& app);
 
 void store_path_field(
     std::array<char, 1024>& field, const std::filesystem::path& path);

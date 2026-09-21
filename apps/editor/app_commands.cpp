@@ -718,7 +718,10 @@ void new_project(App& app) {
     if (app.job.running() || app.loading_scene) return;
     stop_splat_view(app);
     clear_loaded_result(app);
+    // The cache root is an editor-wide setting, not part of the project.
+    const auto cache_dir = app.settings.cache_dir;
     app.settings = {};
+    app.settings.cache_dir = cache_dir;
     app.layout = {};
     app.has_sparse = false;
     app.has_asfm = false;
@@ -756,6 +759,41 @@ void select_image_folder(App& app) {
         return;
     app.settings.video_frames_dir.fill('\0');
     apply_image_directory_selection(app);
+}
+
+std::filesystem::path editor_cache_dir_file() {
+    return resolve_editor_ini().parent_path() / "editor.cache_dir";
+}
+
+// Editor-level cache root, stored next to editor.ini. It is deliberately not
+// written into .ascan: the folder is machine specific, and opening a project
+// elsewhere must fall back to that machine's own choice.
+void load_editor_cache_dir(App& app) {
+    std::ifstream input(editor_cache_dir_file(), std::ios::binary);
+    if (!input) return;
+    std::string text;
+    std::getline(input, text);
+    if (text.empty()) return;
+    store_utf8_path_field(
+        app.settings.cache_dir, path_from_utf8_field(text.c_str()));
+}
+
+void store_editor_cache_dir(const App& app) {
+    const auto path = editor_cache_dir_file();
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return;
+    output << app.settings.cache_dir.data() << '\n';
+}
+
+void select_cache_folder(App& app) {
+    if (app.job.running() || app.loading_scene) return;
+    if (!pick_folder(L"Select a cache folder", app.settings.cache_dir)) return;
+    clear_loaded_result(app);
+    store_editor_cache_dir(app);
+    refresh_artifacts(app);
+    set_message(app, "Cache folder updated", theme::text_muted);
 }
 
 void apply_video_selection(App& app) {
@@ -1926,19 +1964,25 @@ void delete_reconstruction_results(App& app) {
         if (error && failure.empty()) failure = error.message();
     }
 
-    // With reuse_cache disabled, resolve_layout() places the live sfm.bin and
-    // preview sidecars under %TEMP%/AetherScan/<project-hash>, not in
-    // layout.cache. Delete that exact namespaced directory as well; leaving it
-    // behind makes refresh_artifacts() resurrect the supposedly deleted scene.
+    // The live sfm.bin and preview sidecars live in a per-project namespace:
+    // <cache root>/<project-hash> when a cache folder is configured, otherwise
+    // %TEMP%/AetherScan/<project-hash>. Delete that exact namespaced directory
+    // as well; leaving it behind makes refresh_artifacts() resurrect the
+    // supposedly deleted scene. The project-adjacent default is covered by the
+    // .cache check above.
     const std::filesystem::path runtime =
         app.layout.working_sfm.parent_path().lexically_normal();
     std::error_code temp_error;
     const std::filesystem::path temp_root =
         (std::filesystem::temp_directory_path(temp_error) / "AetherScan")
             .lexically_normal();
-    const bool safe_runtime =
-        !temp_error && !runtime.empty() && runtime != temp_root &&
-        runtime.parent_path() == temp_root;
+    const std::filesystem::path configured_root =
+        path_from_utf8_field(app.settings.cache_dir.data()).lexically_normal();
+    const bool under_temp = !temp_error && runtime.parent_path() == temp_root;
+    const bool under_configured = !configured_root.empty() &&
+                                  runtime.parent_path() == configured_root;
+    const bool safe_runtime = !runtime.empty() && runtime != temp_root &&
+                              (under_temp || under_configured);
     if (safe_runtime) {
         std::error_code error;
         removed += std::filesystem::remove_all(runtime, error);

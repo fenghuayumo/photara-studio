@@ -237,6 +237,13 @@ struct ProjectSettings {
     int camera_model = 2;
     int sfm_mode = 0;  // global, incremental, hierarchical
     bool reuse_cache = false;
+    // Optional cache root for the runtime working copies (sfm.bin, splat.ply,
+    // mesh/dense, preview sidecars). Empty keeps them next to the project
+    // (<project folder>/<project name>.cache); a set folder collects every
+    // dataset's working copy there instead, which keeps the system drive free
+    // and lets a dataset on a slow or read-only volume keep its cache local.
+    // Editor-level only: never persisted into .ascan.
+    std::array<char, 1024> cache_dir{};
     int max_features = 27'000;
 
     // Video capture. images_dir may be a video file; these knobs control the

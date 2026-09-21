@@ -39,6 +39,7 @@ int main(const int argc, char** argv) {
     if (!app.smoke_mode)
         editor::i18n::load(
             editor::resolve_editor_ini().parent_path() / "editor.language");
+    if (!app.smoke_mode) editor::load_editor_cache_dir(app);
 
     if (app.smoke_mode) {
         std::snprintf(

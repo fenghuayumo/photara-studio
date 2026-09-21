@@ -287,11 +287,35 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox(tr("Reuse cached alignment"), &app.settings.reuse_cache);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Write a project .cache folder so later Align/Train can\n"
-                "reuse extracted features. Off by default: skip that folder.\n"
-                "Align/Train keep working copies for preview. They do not\n"
-                "write .ascan, .asfm, or PLY files unless you Save Project\n"
-                "or Export.");
+                "%s",
+                tr("Cache extracted features and matches in the project\n"
+                   ".cache folder so the next Align/Train can reuse them.\n"
+                   "Off by default. Working copies for preview are always\n"
+                   "kept; .ascan, .asfm, and PLY files are only written when\n"
+                   "you Save Project or Export."));
+        theme::caption(tr("Cache folder"));
+        ImGui::SetNextItemWidth(-30.F);
+        if (ImGui::InputText(
+                "##cache_dir", app.settings.cache_dir.data(),
+                app.settings.cache_dir.size())) {
+            // The displayed result belongs to the previous cache folder; drop
+            // it the same way a project-file edit does so the viewport cannot
+            // show data that Save Project would no longer find.
+            clear_loaded_result(app);
+            refresh_artifacts(app);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) store_editor_cache_dir(app);
+        ImGui::SameLine(0.F, 4.F);
+        if (ImGui::Button("...##pick_cache_dir", {24.F, 0}))
+            select_cache_folder(app);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s",
+                tr("Leave empty to keep the working copies next to the project\n"
+                   "(<project folder>/<project name>.cache). Set a folder to\n"
+                   "collect every dataset's cache on another drive."));
+        if (!app.layout.working_sfm.empty())
+            theme::caption(path_to_utf8(app.layout.working_sfm.parent_path()).c_str());
         ImGui::EndDisabled();
 
         if (theme::toolbar_button(
