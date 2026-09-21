@@ -287,7 +287,7 @@ struct ProjectSettings {
     int ppisp_layout = 0;
     bool bilateral_grid = false;
 
-    // Texture projection after mesh extraction (aether_drender).
+    // Texture projection after mesh extraction (photara_drender).
     // quality: 0 Fast, 1 Standard, 2 High.
     int texture_quality = 1;
     int atlas_resolution = 2048;

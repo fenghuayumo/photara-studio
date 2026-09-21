@@ -29,7 +29,7 @@ struct MeshPreviewOptions {
     std::array<float, 3> background{0.027F, 0.031F, 0.043F};
 };
 
-// GPU triangle rasterizer (aether_drender) with a real Z-buffer. Keeps the
+// GPU triangle rasterizer (photara_drender) with a real Z-buffer. Keeps the
 // Vulkan context alive across frames; construct once per editor session.
 class MeshPreviewRasterizer {
 public:

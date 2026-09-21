@@ -3,9 +3,9 @@
 #include <cstdint>
 
 #if defined(__CUDACC__)
-#define AETHER_CAMERA_HD __host__ __device__
+#define PHOTARA_CAMERA_HD __host__ __device__
 #else
-#define AETHER_CAMERA_HD
+#define PHOTARA_CAMERA_HD
 #endif
 
 namespace photara {
@@ -17,7 +17,7 @@ enum class CameraModel : std::uint32_t {
     equirectangular = 3
 };
 
-AETHER_CAMERA_HD [[nodiscard]] constexpr bool uses_native_splat_projection(
+PHOTARA_CAMERA_HD [[nodiscard]] constexpr bool uses_native_splat_projection(
     const CameraModel model) noexcept {
     return model == CameraModel::opencv_fisheye ||
            model == CameraModel::equirectangular;
@@ -29,7 +29,7 @@ AETHER_CAMERA_HD [[nodiscard]] constexpr bool uses_native_splat_projection(
 // compress toward the poles). Every consumer that compares a reprojection with
 // an observation must use the angular/tangent-plane helpers below instead of a
 // raw pixel difference.
-AETHER_CAMERA_HD [[nodiscard]] constexpr bool uses_bearing_projection(
+PHOTARA_CAMERA_HD [[nodiscard]] constexpr bool uses_bearing_projection(
     const CameraModel model) noexcept {
     return model == CameraModel::equirectangular;
 }
@@ -56,7 +56,7 @@ struct CameraProjection {
     double x, y, xx, xy, yx, yy;
     double dx[4], dy[4];
 };
-AETHER_CAMERA_HD inline CameraProjection project_camera_plane(
+PHOTARA_CAMERA_HD inline CameraProjection project_camera_plane(
     CameraModel model, double x, double y,
     double k1, double k2, double p1, double p2) {
     CameraProjection out{};
@@ -106,7 +106,7 @@ struct CameraPixel {
 };
 
 // OpenCV fisheye: theta_d = theta * (1 + k1 theta^2 + ... + k4 theta^8).
-AETHER_CAMERA_HD inline CameraPixel project_fisheye_camera(
+PHOTARA_CAMERA_HD inline CameraPixel project_fisheye_camera(
     double X, double Y, double Z,
     double fx, double fy, double cx, double cy,
     double k1, double k2, double k3, double k4) {
@@ -131,7 +131,7 @@ AETHER_CAMERA_HD inline CameraPixel project_fisheye_camera(
     return out;
 }
 
-AETHER_CAMERA_HD inline CameraPixel project_equirectangular_camera(
+PHOTARA_CAMERA_HD inline CameraPixel project_equirectangular_camera(
     double X, double Y, double Z, int width, int height) {
     CameraPixel out{};
     const double length = ::sqrt(X * X + Y * Y + Z * Z);
@@ -145,7 +145,7 @@ AETHER_CAMERA_HD inline CameraPixel project_equirectangular_camera(
     return out;
 }
 
-AETHER_CAMERA_HD inline CameraRay unproject_fisheye_camera(
+PHOTARA_CAMERA_HD inline CameraRay unproject_fisheye_camera(
     double u, double v,
     double fx, double fy, double cx, double cy,
     double k1, double k2, double k3, double k4) {
@@ -185,7 +185,7 @@ AETHER_CAMERA_HD inline CameraRay unproject_fisheye_camera(
     return out;
 }
 
-AETHER_CAMERA_HD inline CameraRay unproject_equirectangular_camera(
+PHOTARA_CAMERA_HD inline CameraRay unproject_equirectangular_camera(
     double u, double v, int width, int height) {
     CameraRay out{};
     if (width <= 0 || height <= 0) return out;
@@ -219,11 +219,11 @@ struct EquirectTangentBasis {
 // Pixel scale of an equirectangular image: a full turn covers `width` pixels
 // (and a half turn `height`), which is exactly what fx = width / (2 pi) and
 // fy = height / pi encode in the camera intrinsics.
-AETHER_CAMERA_HD inline double equirect_pixel_scale_x(const int width) {
+PHOTARA_CAMERA_HD inline double equirect_pixel_scale_x(const int width) {
     return static_cast<double>(width) / (2.0 * k_pi);
 }
 
-AETHER_CAMERA_HD inline double equirect_pixel_scale_y(const int height) {
+PHOTARA_CAMERA_HD inline double equirect_pixel_scale_y(const int height) {
     return static_cast<double>(height) / k_pi;
 }
 
@@ -232,7 +232,7 @@ AETHER_CAMERA_HD inline double equirect_pixel_scale_y(const int height) {
 // elevation = (v - cy)/fy), which is what makes the BA able to evaluate the
 // residual without carrying the image size: for an equirectangular camera
 // fx = width / (2 pi) and fy = height / pi by construction.
-AETHER_CAMERA_HD inline EquirectTangentBasis equirect_tangent_basis(
+PHOTARA_CAMERA_HD inline EquirectTangentBasis equirect_tangent_basis(
     double u, double v,
     double fx, double fy, double cx, double cy) {
     EquirectTangentBasis out{};
@@ -266,7 +266,7 @@ struct EquirectLocalReprojection {
     bool valid;
 };
 
-AETHER_CAMERA_HD inline EquirectLocalReprojection equirect_local_reprojection(
+PHOTARA_CAMERA_HD inline EquirectLocalReprojection equirect_local_reprojection(
     double px, double py, double pz,
     const EquirectTangentBasis& basis) {
     EquirectLocalReprojection out{};
@@ -313,11 +313,11 @@ AETHER_CAMERA_HD inline EquirectLocalReprojection equirect_local_reprojection(
 }
 
 // Angular distance (radians) between two unit bearings.
-AETHER_CAMERA_HD inline double bearing_angle(
+PHOTARA_CAMERA_HD inline double bearing_angle(
     const double ax, const double ay, const double az,
     const double bx, const double by, const double bz) {
     const double dot = ax * bx + ay * by + az * bz;
     return ::acos(::fmax(-1.0, ::fmin(1.0, dot)));
 }
 } // namespace photara
-#undef AETHER_CAMERA_HD
+#undef PHOTARA_CAMERA_HD

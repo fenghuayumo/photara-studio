@@ -471,7 +471,7 @@ if(PHOTARA_ENABLE_FEATURES)
         endif()
     endif()
 
-    if(PHOTARA_HAS_TEXTURE AND TARGET aether::render)
+    if(PHOTARA_HAS_TEXTURE AND TARGET photara::render)
         add_library(photara_texture
             src/texture/bake.cpp
             src/texture/delight.cpp
@@ -485,7 +485,7 @@ if(PHOTARA_ENABLE_FEATURES)
         target_compile_features(photara_texture PUBLIC cxx_std_20)
         target_link_libraries(photara_texture PUBLIC
             Photara::MVS
-            aether::render)
+            photara::render)
         target_compile_definitions(photara_texture PUBLIC PHOTARA_HAS_TEXTURE=1)
         file(TO_CMAKE_PATH "${PHOTARA_INTRINSIC_MODELS_DIR}"
             PHOTARA_INTRINSIC_MODELS_DIR)
@@ -588,10 +588,10 @@ if(TARGET photara_features)
         target_link_libraries(photara PRIVATE Photara::Texture)
         target_compile_definitions(photara PRIVATE PHOTARA_HAS_TEXTURE=1)
     endif()
-    if(TARGET aether::mesh)
-        target_link_libraries(photara PRIVATE aether::mesh)
+    if(TARGET photara::mesh)
+        target_link_libraries(photara PRIVATE photara::mesh)
         target_compile_definitions(
-            photara PRIVATE PHOTARA_HAS_AETHER_MESH=1)
+            photara PRIVATE PHOTARA_HAS_MESH_TOOLS=1)
     endif()
     if(WIN32)
         add_custom_command(TARGET photara POST_BUILD

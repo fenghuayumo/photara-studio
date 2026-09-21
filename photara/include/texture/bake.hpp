@@ -8,7 +8,7 @@
 
 namespace photara::texture {
 
-// UV unwrap + multi-view projective texture bake via aether_drender.
+// UV unwrap + multi-view projective texture bake via photara_drender.
 // When options.delight is true, photographs are Intrinsic-decomposed first.
 [[nodiscard]] TexturedMesh bake_mesh_texture(
     const mvs::MvsScene& scene, const TextureOptions& options = {});

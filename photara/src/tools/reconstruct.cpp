@@ -26,8 +26,8 @@
 #include "texture/mask.hpp"
 #include "texture/options.hpp"
 #endif
-#if defined(PHOTARA_HAS_AETHER_MESH)
-#include "aether_mesh/mesh_ops.hpp"
+#if defined(PHOTARA_HAS_MESH_TOOLS)
+#include "photara_mesh/mesh_ops.hpp"
 #endif
 
 #include <cxxopts.hpp>
@@ -439,7 +439,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --mesh-adaptive-sigma BOOL  adapt visibility scale to local point density\n"
               << "  --mesh-max-edge-scale F  reject gap-spanning cut facets (default 4; 0 disables)\n"
               << "  --mesh-free-space-quantile Q  support-scale calibration (0 disables)\n"
-              << "  --mesh-target-faces N  aether/CGAL repair + decimate target (0 disables)\n"
+              << "  --mesh-target-faces N  photara/CGAL repair + decimate target (0 disables)\n"
               << "  --mesh-remesh BOOL  Instant Meshes before CGAL repair (default true)\n"
               << "  --mesh-tsdf-voxel-scale F  inferred voxel multiplier (-1 = auto)\n"
               << "  --mesh-tsdf-bounds-padding F  point-cloud bounds multiplier (default 2)\n"
@@ -910,7 +910,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Maximum samples inserted into global Delaunay (0 = unlimited)",
          cxxopts::value<std::uint64_t>()->default_value("2000000"))
         ("mesh-target-faces",
-         "Optional aether/CGAL repair and decimation target (0 disables)",
+         "Optional photara/CGAL repair and decimation target (0 disables)",
          cxxopts::value<std::uint64_t>()->default_value("0"))
         ("mesh-remesh", "Run Instant Meshes before CGAL repair",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -2502,7 +2502,7 @@ std::filesystem::path write_sfm_diagnostics(
     return csv_path;
 }
 
-#if defined(PHOTARA_HAS_AETHER_MESH)
+#if defined(PHOTARA_HAS_MESH_TOOLS)
 void retain_largest_edge_component(
     std::vector<float>& positions, std::vector<std::uint32_t>& indices) {
     const std::size_t face_count = indices.size() / 3;
@@ -2600,9 +2600,9 @@ bool repair_and_decimate_mesh(
         static_cast<std::size_t>(
             (std::numeric_limits<std::uint32_t>::max)()))
         throw std::runtime_error(
-            "aether mesh preprocessing requires 32-bit vertex indices");
+            "photara mesh preprocessing requires 32-bit vertex indices");
 
-    photara::core::StageScope stage("mesh.aether_repair_decimate");
+    photara::core::StageScope stage("mesh.photara_repair_decimate");
     std::vector<float> positions;
     positions.reserve(mesh.vertices.size() * 3);
     for (const auto& vertex : mesh.vertices) {
@@ -2621,9 +2621,9 @@ bool repair_and_decimate_mesh(
         indices.push_back(static_cast<std::uint32_t>(face[2]));
     }
 
-    if (use_instant_remesh && aether_mesh::has_instant_meshes_backend()) {
+    if (use_instant_remesh && photara_mesh::has_instant_meshes_backend()) {
         photara::core::StageScope remesh_stage("mesh.instant_remesh");
-        aether_mesh::RemeshOptions remesh_options;
+        photara_mesh::RemeshOptions remesh_options;
         // PoSy=4 produces approximately one quad per requested face; the
         // binding triangulates each regular quad for the downstream pipeline.
         const std::uint64_t instant_faces =
@@ -2633,7 +2633,7 @@ bool repair_and_decimate_mesh(
             static_cast<std::uint64_t>((std::numeric_limits<int>::max)())));
         remesh_options.deterministic = true;
         try {
-            auto remeshed = aether_mesh::remesh_field_aligned(
+            auto remeshed = photara_mesh::remesh_field_aligned(
                 positions, indices, remesh_options);
             photara::core::Logger::instance().info(
                 "instant mesh: vertices=", positions.size() / 3, " -> ",
@@ -2653,9 +2653,9 @@ bool repair_and_decimate_mesh(
             "Instant Meshes backend unavailable; continuing with CGAL repair");
     }
 
-    auto result = aether_mesh::repair_and_decimate(
+    auto result = photara_mesh::repair_and_decimate(
         positions, indices,
-        aether_mesh::DecimateOptions{
+        photara_mesh::DecimateOptions{
             static_cast<std::size_t>(target_faces), false});
     retain_largest_edge_component(result.positions, result.indices);
     photara::mvs::Mesh processed;
@@ -2689,7 +2689,7 @@ bool repair_and_decimate_mesh(
         if (normal.squaredNorm() > 1e-12F) normal.normalize();
 
     photara::core::Logger::instance().info(
-        "aether mesh: vertices=", mesh.vertices.size(), " -> ",
+        "photara mesh: vertices=", mesh.vertices.size(), " -> ",
         processed.vertices.size(), " faces=", mesh.faces.size(), " -> ",
         processed.faces.size(), " target_faces=", target_faces);
     mesh = std::move(processed);
@@ -3613,7 +3613,7 @@ int main(int argc, char** argv) {
                 cli.mesh ? &mesh_options : nullptr, {},
                 write_project ? &archive : nullptr);
             if (mesh) {
-#if defined(PHOTARA_HAS_AETHER_MESH)
+#if defined(PHOTARA_HAS_MESH_TOOLS)
                 if (cli.mesh_target_faces > 0)
                     repair_and_decimate_mesh(
                         *mesh, cli.mesh_target_faces, cli.mesh_remesh);
@@ -3921,7 +3921,7 @@ int main(int argc, char** argv) {
                 cli.masks_dir,
                 write_project ? &archive : nullptr);
             if (mesh) {
-#if defined(PHOTARA_HAS_AETHER_MESH)
+#if defined(PHOTARA_HAS_MESH_TOOLS)
                 if (cli.mesh_target_faces > 0)
                     repair_and_decimate_mesh(
                         *mesh, cli.mesh_target_faces, cli.mesh_remesh);
@@ -4106,7 +4106,7 @@ int main(int argc, char** argv) {
 #endif
 
             if (cli.mesh && !mvs_scene.mesh.faces.empty()) {
-#if defined(PHOTARA_HAS_AETHER_MESH)
+#if defined(PHOTARA_HAS_MESH_TOOLS)
                 if (cli.splat && cli.mesh_target_faces > 0) {
                     try {
                         repair_and_decimate_mesh(
@@ -4114,14 +4114,14 @@ int main(int argc, char** argv) {
                             cli.mesh_remesh);
                     } catch (const std::exception& error) {
                         photara::core::Logger::instance().warning(
-                            "aether mesh postprocess failed; retaining cleaned "
+                            "photara mesh postprocess failed; retaining cleaned "
                             "mesh: ", error.what());
                     }
                 }
 #else
                 if (cli.splat && cli.mesh_target_faces > 0)
                     photara::core::Logger::instance().warning(
-                        "aether mesh postprocess unavailable (CGAL mesh tools "
+                        "photara mesh postprocess unavailable (CGAL mesh tools "
                         "were not built); retaining cleaned mesh");
 #endif
                 const std::string mesh_tag = cli.splat

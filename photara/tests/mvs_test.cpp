@@ -409,7 +409,7 @@ void test_manual_obb_file() {
 
 #endif
 
-void test_aether_texture_camera_projection() {
+void test_photara_texture_camera_projection() {
     MvsView view;
     view.width = 641;
     view.height = 479;
@@ -440,7 +440,7 @@ void test_aether_texture_camera_projection() {
             matrix[static_cast<std::size_t>(4 * row + 1)] * world.y() +
             matrix[static_cast<std::size_t>(4 * row + 2)] * world.z() +
             matrix[static_cast<std::size_t>(4 * row + 3)];
-    require(clip[3] > 0.F, "aether texture camera reversed positive depth");
+    require(clip[3] > 0.F, "photara texture camera reversed positive depth");
     const float pixel_corner_x =
         (clip[0] / clip[3] * 0.5F + 0.5F) *
         static_cast<float>(view.width);
@@ -451,15 +451,15 @@ void test_aether_texture_camera_projection() {
         view.fx * camera_point.x() / camera_point.z() + view.cx;
     const float expected_y =
         view.fy * camera_point.y() / camera_point.z() + view.cy;
-    // aether_drender samples photo texels at pixel_corner - 0.5.
+    // photara_drender samples photo texels at pixel_corner - 0.5.
     require(
         std::abs((pixel_corner_x - 0.5F) - expected_x) < 1e-4F &&
             std::abs((pixel_corner_y - 0.5F) - expected_y) < 1e-4F,
-        "Photara/aether_drender texture projection has a half-pixel offset");
+        "Photara/photara_drender texture projection has a half-pixel offset");
     const float ndc_depth = clip[2] / clip[3];
     require(
         ndc_depth > -1.F && ndc_depth < 1.F,
-        "aether_drender texture projection produced invalid clip depth");
+        "photara_drender texture projection produced invalid clip depth");
 
     view.foreground_mask.assign(
         static_cast<std::size_t>(view.width) * view.height, 0);
@@ -1270,7 +1270,7 @@ int main() {
         test_build_mvs_scene_samples_sparse_colors();
         test_mask_constrained_fusion();
         test_subject_bounds_from_sparse_points();
-        test_aether_texture_camera_projection();
+        test_photara_texture_camera_projection();
         test_quality_presets();
 #if !defined(PHOTARA_HAS_CGAL)
         test_missing_cgal_fails_before_densify();

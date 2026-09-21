@@ -2736,7 +2736,7 @@ void test_mask_loading() {
             std::abs(soft_values[0] - 128.F / 255.F) < 1e-6F &&
             soft_values[1] == 0.F && soft_values[2] == 0.F &&
             soft_values[3] == 1.F,
-        "GGGS discarded grayscale coverage from an aether_drender mesh mask");
+        "GGGS discarded grayscale coverage from an photara_drender mesh mask");
     source = io::RgbImage{5, 5, std::vector<std::uint8_t>(75, 128)};
     for (int c = 0; c < 3; ++c) source.pixels[3 * 12 + c] = 0;
     io::save_rgb_png(source, image_path);

@@ -1,6 +1,6 @@
 #include "texture/mask.hpp"
 
-#include "aether_drender/aether_drender.hpp"
+#include "photara_drender/photara_drender.hpp"
 #include "core/logging.hpp"
 #include "io/image.hpp"
 #include "texture/projection.hpp"
@@ -251,10 +251,10 @@ MeshMaskSummary render_mesh_foreground_masks(
     std::filesystem::create_directories(output_directory);
     if (!options.preview_directory.empty())
         std::filesystem::create_directories(options.preview_directory);
-    core::StageScope stage("mask.aether_drender_mvs_mesh");
-    aether_drender::Context context(
+    core::StageScope stage("mask.photara_drender_mvs_mesh");
+    photara_drender::Context context(
         {options.vulkan_device_index, false});
-    aether_drender::Rasterizer rasterizer(context);
+    photara_drender::Rasterizer rasterizer(context);
     std::vector<float> clip_positions(scene.mesh.vertices.size() * 4U);
 
     for (const mvs::MvsView& view : scene.views) {
@@ -283,12 +283,12 @@ MeshMaskSummary render_mesh_foreground_masks(
                     matrix[4U * static_cast<std::size_t>(row) + 3U];
         }
 
-        aether_drender::RasterizeOptions raster_options;
+        photara_drender::RasterizeOptions raster_options;
         raster_options.width = render_view.width;
         raster_options.height = render_view.height;
-        raster_options.cull_mode = aether_drender::CullMode::none;
+        raster_options.cull_mode = photara_drender::CullMode::none;
         raster_options.output_barycentric_derivatives = false;
-        const aether_drender::RasterizeOutput rendered =
+        const photara_drender::RasterizeOutput rendered =
             rasterizer.forward(clip_positions, indices, raster_options);
         std::vector<float> interpolated_normals;
         if (!vertex_normal_attributes.empty()) {
@@ -301,7 +301,7 @@ MeshMaskSummary render_mesh_foreground_masks(
             render_view.height * 4U;
         if (rendered.raster.size() != expected)
             throw std::runtime_error(
-                "aether_drender returned an unexpected mask raster size");
+                "photara_drender returned an unexpected mask raster size");
 
         const std::size_t pixels =
             static_cast<std::size_t>(target_width) * target_height;
@@ -408,7 +408,7 @@ MeshMaskSummary render_mesh_foreground_masks(
     }
 
     core::Logger::instance().info(
-        "MVS mesh masks: renderer=aether_drender views=",
+        "MVS mesh masks: renderer=photara_drender views=",
         summary.image_count,
         " resolution=source supersample=", supersample,
         " foreground_fraction=",

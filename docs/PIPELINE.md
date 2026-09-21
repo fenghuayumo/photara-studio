@@ -92,7 +92,7 @@ photara/tests/      CTest 正确性/回归测试
 | 深度融合 | `mvs.fuse` | `src/mvs/fuse.cpp` | `DenseCloud` → `<stem>_dense.ply` |
 | Mesh 提取 | `mvs.mesh` → `mvs.mesh_global_cgal` 或 `mvs.mesh.tsdf` | `src/mvs/mesh_cgal.cpp`、`mesh_tsdf.cpp` | `Mesh` |
 | Mesh 清理 | `mvs.mesh_clean` / `mvs.mesh_clean.tsdf` | `src/mvs/mesh_clean.cpp` | 清理后的单一网格 |
-| aether 后处理 | `repair_and_decimate_mesh` | `reconstruct.cpp`（需要 CGAL / Instant Meshes） | 目标面数网格 |
+| photara 后处理 | `repair_and_decimate_mesh` | `reconstruct.cpp`（需要 CGAL / Instant Meshes） | 目标面数网格 |
 | 3DGS 训练 | 无独立 StageScope；训练日志 `splat iteration=…`、profiler 行 | `src/splat/trainer.cpp`、`rasterizer.cu`、`densification_*.cpp` | `<stem>_splat.ply` / `.sog` / `.spz` / `.glb` |
 | Splat mesh | `mvs.mesh` → `mvs.mesh.tsdf`（TSDF）或 `splat.pam`（PAM） | `src/splat/mesh.cpp`、`pam_mesh.cpp` | `<stem>_splat_mesh.ply`、`*_pam_*` |
 | 贴图 | `texture.load_views` → `texture.uv_unwrap` → `texture.project` → `texture.optimize`（可选 `texture.delight`） | `src/texture/*`、`third_party/photara_drender` | `<stem>_textured.obj/.mtl/_albedo.png` |
@@ -164,7 +164,7 @@ photara/tests/      CTest 正确性/回归测试
    渲染的 alpha/depth/normal；`object` 模式要求每个训练视图都有匹配 Mask，否则报错。
 4. **Mesh 后端取决于来源。** splat 来源 = TSDF（默认）或 PAM；MVS 来源 =
    CGAL 全局 Delaunay graph-cut（默认）或 TSDF。`--mesh-remesh` /
-   `--mesh-target-faces` 仅在构建了 aether mesh 时生效。
+   `--mesh-target-faces` 仅在构建了 photara mesh 时生效。
 5. **Texture/Delight 只消费 mesh。** 贴图不反馈到 splat 训练，也不重新参与对齐。
 6. **无 CUDA 不训练 splat。** `PHOTARA_ENABLE_SPLAT=OFF` 时 `--splat` 直接报错；
    MVS PatchMatch 会自动回退到 CPU 实现。

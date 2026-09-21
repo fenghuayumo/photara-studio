@@ -30,7 +30,6 @@ MVS 实现保留为可选诊断、算法对照和兼容导出后端，不是 Spl
 - pygsplat/GS-2M：Gaussian 深度渲染与 TSDF 提取约定；
 - Open3D：稀疏体素块 TSDF 的公开接口与数值回归参考；
 - OpenMVS：仅作为可选 densify/mesh 对照，不复制对象模型；
-- AIHoloImager：TextureReconstruction 与图像域 Delight。
 
 与 SfM 文档一致：紧凑索引与 SoA、公开 API 与执行布局分离；默认构建不依赖 OpenCV；
 图像 IO 使用 FreeImage。ADCPlus/Splat 以 CUDA 为主，TSDF/Clean 使用多核 CPU。
@@ -365,10 +364,10 @@ photara --images images --output object.ply --capture-mode object --texture --de
 photara --images images --output object.ply --texture --texture-optimize=false
 ```
 
-- 默认使用 git submodule `third_party/photara_drender`（仓库已由 `aether_drender`
-  改名而来；库内的 C++ 命名空间与 CMake 目标仍是 `aether_drender` / `aether::render`）；
-- UVAtlas 展开后先由 `aether_drender::TextureBaker` 做 Vulkan 可见性投影，再默认由
-  `aether_drender::TextureRefiner` 做多视图光度 Adam 优化与 seam-only polish；
+- 默认使用 git submodule `third_party/photara_drender`，
+  提供 `photara_drender` 库（CMake 目标 `photara::render` / `photara::mesh`）；
+- UVAtlas 展开后先由 `photara_drender::TextureBaker` 做 Vulkan 可见性投影，再默认由
+  `photara_drender::TextureRefiner` 做多视图光度 Adam 优化与 seam-only polish；
 - `--texture-optimize-steps`、`--texture-optimize-batch-size` 和
   `--texture-seam-samples` 控制原生优化；整个优化阶段不经过 PyTorch；
 - Delight 使用 C++ ONNX Runtime；模型放在 `PHOTARA_INTRINSIC_MODELS_DIR`；

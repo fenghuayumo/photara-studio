@@ -21,7 +21,7 @@ struct TextureOptions {
     float uv_gutter{1.F};
     float uv_max_stretch{1.F / 3.F};
     // UVAtlas charting is otherwise largely serial on large meshes. The
-    // aether_drender wrapper partitions faces spatially, unwraps groups concurrently,
+    // photara_drender wrapper partitions faces spatially, unwraps groups concurrently,
     // then packs the combined charts into one atlas.
     std::uint32_t uv_parallel_partitions{8};
 
@@ -31,7 +31,7 @@ struct TextureOptions {
     bool allow_visibility_fallback{true};
 
     // The projective bake is only an initialization. By default, refine the
-    // atlas directly against all calibrated views with aether_drender's native
+    // atlas directly against all calibrated views with photara_drender's native
     // Vulkan/Adam optimizer, followed by seam-only polish.
     bool optimize{true};
     std::uint32_t optimize_steps{1000};

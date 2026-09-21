@@ -1,6 +1,6 @@
 #include "texture/mesh_preview.hpp"
 
-#include "aether_drender/aether_drender.hpp"
+#include "photara_drender/photara_drender.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -136,18 +136,18 @@ public:
             }
         }
 
-        aether_drender::RasterizeOptions raster_options;
+        photara_drender::RasterizeOptions raster_options;
         raster_options.width = width;
         raster_options.height = height;
-        raster_options.cull_mode = aether_drender::CullMode::none;
+        raster_options.cull_mode = photara_drender::CullMode::none;
         raster_options.output_barycentric_derivatives = false;
-        const aether_drender::RasterizeOutput rendered = rasterizer_.forward(
+        const photara_drender::RasterizeOutput rendered = rasterizer_.forward(
             clip_positions_, indices, raster_options);
         const std::size_t pixels =
             static_cast<std::size_t>(width) * height;
         if (rendered.raster.size() != pixels * 4U)
             throw std::runtime_error(
-                "aether_drender returned an unexpected mesh raster size");
+                "photara_drender returned an unexpected mesh raster size");
 
         const bool have_normals = normals.size() == positions.size();
         const bool have_colours =
@@ -245,8 +245,8 @@ public:
     }
 
 private:
-    aether_drender::Context context_{};
-    aether_drender::Rasterizer rasterizer_;
+    photara_drender::Context context_{};
+    photara_drender::Rasterizer rasterizer_;
     std::vector<float> clip_positions_;
 };
 

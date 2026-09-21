@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pygsplat-repo", type=Path, required=True)
     parser.add_argument("--colmap-data", type=Path, required=True)
-    parser.add_argument("--aether-transforms", type=Path, required=True)
+    parser.add_argument("--photara-transforms", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -58,31 +58,31 @@ def main() -> None:
         normalize=False,
         test_every=0,
     )
-    aether = json.loads(args.aether_transforms.read_text(encoding="utf-8"))
-    aether_by_name = {
-        Path(frame["file_path"]).name: frame for frame in aether["frames"]
+    photara = json.loads(args.photara_transforms.read_text(encoding="utf-8"))
+    photara_by_name = {
+        Path(frame["file_path"]).name: frame for frame in photara["frames"]
     }
     missing = [
-        name for name in colmap.image_names if name not in aether_by_name
+        name for name in colmap.image_names if name not in photara_by_name
     ]
     if missing:
-        raise ValueError(f"{len(missing)} COLMAP images lack Aether cameras")
+        raise ValueError(f"{len(missing)} COLMAP images lack Photara cameras")
 
     flip = np.diag([1.0, -1.0, -1.0, 1.0])
-    aether_c2w_cv = []
+    photara_c2w_cv = []
     ordered_frames = []
     for name in colmap.image_names:
-        frame = aether_by_name[name]
-        aether_c2w_cv.append(
+        frame = photara_by_name[name]
+        photara_c2w_cv.append(
             np.asarray(frame["transform_matrix"], dtype=np.float64) @ flip
         )
         ordered_frames.append(frame)
-    aether_c2w_cv = np.stack(aether_c2w_cv)
+    photara_c2w_cv = np.stack(photara_c2w_cv)
     colmap_c2w_cv = np.asarray(colmap.camtoworlds, dtype=np.float64)
 
     scale, rotation, translation = estimate_similarity(
         colmap_c2w_cv[:, :3, 3],
-        aether_c2w_cv[:, :3, 3],
+        photara_c2w_cv[:, :3, 3],
     )
     predicted_centers = (
         scale
@@ -90,24 +90,24 @@ def main() -> None:
         + translation
     )
     center_errors = np.linalg.norm(
-        predicted_centers - aether_c2w_cv[:, :3, 3], axis=1
+        predicted_centers - photara_c2w_cv[:, :3, 3], axis=1
     )
     orientation_errors = np.asarray(
         [
             rotation_angle_degrees(
                 (rotation @ colmap_c2w_cv[i, :3, :3]).T
-                @ aether_c2w_cv[i, :3, :3]
+                @ photara_c2w_cv[i, :3, :3]
             )
             for i in range(len(colmap_c2w_cv))
         ]
     )
 
     output_frames = []
-    for frame, c2w_aether in zip(ordered_frames, aether_c2w_cv):
+    for frame, c2w_photara in zip(ordered_frames, photara_c2w_cv):
         c2w_colmap = np.eye(4, dtype=np.float64)
-        c2w_colmap[:3, :3] = rotation.T @ c2w_aether[:3, :3]
+        c2w_colmap[:3, :3] = rotation.T @ c2w_photara[:3, :3]
         c2w_colmap[:3, 3] = (
-            rotation.T @ (c2w_aether[:3, 3] - translation) / scale
+            rotation.T @ (c2w_photara[:3, 3] - translation) / scale
         )
         converted = dict(frame)
         converted["transform_matrix"] = (c2w_colmap @ flip).tolist()
@@ -116,7 +116,7 @@ def main() -> None:
     result = {
         "camera_model": "OPENCV",
         "frames": output_frames,
-        "similarity_colmap_to_aether": {
+        "similarity_colmap_to_photara": {
             "scale": scale,
             "rotation": rotation.tolist(),
             "translation": translation.tolist(),
@@ -135,7 +135,7 @@ def main() -> None:
             ),
             "orientation_error_deg_max": float(orientation_errors.max()),
         },
-        "aether_equivalent_tsdf_scale_factor": 1.0 / scale,
+        "photara_equivalent_tsdf_scale_factor": 1.0 / scale,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
@@ -143,7 +143,7 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"Wrote {len(output_frames)} cameras to {args.output}")
-    print(f"COLMAP -> Aether scale: {scale:.12g}")
+    print(f"COLMAP -> Photara scale: {scale:.12g}")
     print(
         "Center error mean/p95/max: "
         f"{center_errors.mean():.6g} / "

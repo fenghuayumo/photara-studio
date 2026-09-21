@@ -18,7 +18,7 @@ QUANTILES = np.asarray([0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 99.9, 100])
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pygsplat-repo", type=Path, required=True)
-    parser.add_argument("--aether-ply", type=Path, required=True)
+    parser.add_argument("--photara-ply", type=Path, required=True)
     parser.add_argument("--pygsplat-ply", type=Path, required=True)
     parser.add_argument("--pygsplat-world-scale", type=float, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -105,7 +105,7 @@ def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.pygsplat_repo.resolve()))
     report = {
-        "aether": summarize_model(args.aether_ply, 1.0),
+        "photara": summarize_model(args.photara_ply, 1.0),
         "pygsplat": summarize_model(
             args.pygsplat_ply, args.pygsplat_world_scale
         ),

@@ -7,7 +7,7 @@
 #include "texture/export.hpp"
 #include "texture/projection.hpp"
 
-#include "aether_drender/aether_drender.hpp"
+#include "photara_drender/photara_drender.hpp"
 
 #include <algorithm>
 #include <array>
@@ -242,9 +242,9 @@ struct SeamEdgeUse {
 
 // UVAtlas duplicates vertices along chart boundaries. Match the two copies of
 // each original manifold edge and sample corresponding UVs for the native
-// aether_drender seam-polish pass.
+// photara_drender seam-polish pass.
 std::vector<float> build_dense_seam_pairs(
-    const aether_drender::UvAtlasOutput& mesh,
+    const photara_drender::UvAtlasOutput& mesh,
     const std::uint32_t samples_per_edge) {
     if (samples_per_edge == 0 || mesh.indices.size() % 3U != 0 ||
         mesh.uv.size() % 2U != 0 ||
@@ -313,9 +313,9 @@ TexturedMesh bake_mesh_texture(
         throw std::runtime_error("Cannot bake texture: mesh is empty");
     if (scene.views.size() < 2)
         throw std::runtime_error("Cannot bake texture: need at least 2 views");
-    if (!aether_drender::has_uv_atlas_backend())
+    if (!photara_drender::has_uv_atlas_backend())
         throw std::runtime_error(
-            "UVAtlas backend unavailable; rebuild with AETHER_ENABLE_UVATLAS");
+            "UVAtlas backend unavailable; rebuild with PHOTARA_ENABLE_UVATLAS");
 
     auto views = load_texture_views(scene, options);
     if (options.delight) {
@@ -336,7 +336,7 @@ TexturedMesh bake_mesh_texture(
     }
 
     core::StageScope unwrap_stage("texture.uv_unwrap");
-    aether_drender::UvAtlasOptions uv_opts;
+    photara_drender::UvAtlasOptions uv_opts;
     uv_opts.width = options.atlas_resolution;
     uv_opts.height = options.atlas_resolution;
     uv_opts.gutter = options.uv_gutter;
@@ -348,8 +348,8 @@ TexturedMesh bake_mesh_texture(
         " atlas=", uv_opts.width, "x", uv_opts.height,
         " gutter=", uv_opts.gutter,
         " max_stretch=", uv_opts.max_stretch);
-    const aether_drender::UvAtlasOutput unwrapped =
-        aether_drender::unwrap_uv(positions, indices, uv_opts);
+    const photara_drender::UvAtlasOutput unwrapped =
+        photara_drender::unwrap_uv(positions, indices, uv_opts);
     core::Logger::instance().info(
         "texture UV result: partitions=", unwrapped.partition_count,
         " charts=", unwrapped.chart_count,
@@ -371,12 +371,12 @@ TexturedMesh bake_mesh_texture(
             unwrapped.positions, unwrapped.indices, normals);
     }
 
-    std::vector<aether_drender::ProjectionView> projections;
+    std::vector<photara_drender::ProjectionView> projections;
     projections.reserve(scene.views.size());
     for (std::size_t i = 0; i < scene.views.size(); ++i) {
         const mvs::MvsView& view = scene.views[i];
         const auto [near_z, far_z] = depth_range_for_view(view, scene.mesh);
-        aether_drender::ProjectionView proj;
+        photara_drender::ProjectionView proj;
         proj.width = views[i].width;
         proj.height = views[i].height;
         proj.channel_count = 3;
@@ -389,23 +389,23 @@ TexturedMesh bake_mesh_texture(
     }
 
     core::StageScope bake_stage("texture.project");
-    aether_drender::Context context({options.vulkan_device_index, false});
-    aether_drender::TextureBaker baker(context);
-    aether_drender::TextureBakeOptions bake_opts;
+    photara_drender::Context context({options.vulkan_device_index, false});
+    photara_drender::TextureBaker baker(context);
+    photara_drender::TextureBakeOptions bake_opts;
     bake_opts.width = options.atlas_resolution;
     bake_opts.height = options.atlas_resolution;
     bake_opts.blend_mode =
         options.blend_mode == BlendMode::best_view
-            ? aether_drender::ProjectionBlendMode::best_view
-            : aether_drender::ProjectionBlendMode::weighted_average;
+            ? photara_drender::ProjectionBlendMode::best_view
+            : photara_drender::ProjectionBlendMode::weighted_average;
     bake_opts.visibility_mode =
         options.visibility_mode == VisibilityMode::shadow_map
-            ? aether_drender::VisibilityMode::shadow_map
-            : aether_drender::VisibilityMode::hybrid_ray_query;
+            ? photara_drender::VisibilityMode::shadow_map
+            : photara_drender::VisibilityMode::hybrid_ray_query;
     bake_opts.pcf_radius = options.pcf_radius;
     bake_opts.allow_visibility_fallback = options.allow_visibility_fallback;
 
-    const aether_drender::TextureBakeOutput baked = baker.bake(
+    const photara_drender::TextureBakeOutput baked = baker.bake(
         unwrapped.positions, normals, unwrapped.uv, unwrapped.indices,
         projections, bake_opts);
     bake_stage.finish();
@@ -424,7 +424,7 @@ TexturedMesh bake_mesh_texture(
             final_rgb[pixel * 3U + channel] =
                 baked.color[pixel * baked_channels + channel];
 
-    aether_drender::TextureRefineOutput refined;
+    photara_drender::TextureRefineOutput refined;
     std::vector<float> seam_pairs;
     if (options.optimize) {
         if (options.optimize_steps == 0 || options.optimize_batch_size == 0)
@@ -433,7 +433,7 @@ TexturedMesh bake_mesh_texture(
         seam_pairs = build_dense_seam_pairs(
             unwrapped, options.seam_samples_per_edge);
         core::StageScope refine_stage("texture.optimize");
-        aether_drender::TextureRefineOptions refine_opts;
+        photara_drender::TextureRefineOptions refine_opts;
         refine_opts.width = baked.width;
         refine_opts.height = baked.height;
         refine_opts.steps = options.optimize_steps;
@@ -442,7 +442,7 @@ TexturedMesh bake_mesh_texture(
         refine_opts.minimum_learning_rate = options.optimize_min_learning_rate;
         refine_opts.seam_polish_steps = options.seam_polish_steps;
         refine_opts.seam_learning_rate = options.seam_learning_rate;
-        aether_drender::TextureRefiner refiner(context);
+        photara_drender::TextureRefiner refiner(context);
         refined = refiner.refine(
             final_rgb, unwrapped.positions, unwrapped.uv, unwrapped.indices,
             projections, seam_pairs, refine_opts);

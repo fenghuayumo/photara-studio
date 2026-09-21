@@ -25,7 +25,7 @@ namespace photara::texture {
 }
 
 // Converts Photara's OpenCV-style camera (positive Z, image Y down, integer
-// pixel centers) to aether_drender clip coordinates. aether_drender maps NDC to
+// pixel centers) to photara_drender clip coordinates. photara_drender maps NDC to
 // pixel-corner coordinates and subtracts 0.5 before sampling the photograph,
 // hence the explicit +0.5 principal-point offset below.
 [[nodiscard]] inline std::array<float, 16> world_to_clip_row_major(

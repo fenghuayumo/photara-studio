@@ -49,21 +49,21 @@ set(PHOTARA_ONNXRUNTIME_ROOT "" CACHE PATH
 # vendored VLFeat; multi-view geometry uses Eigen.
 
 # Texture baking (photara_drender / UVAtlas / Vulkan) + optional Intrinsic delight.
-# Default source is the git submodule at third_party/photara_drender. The
-# library inside it is still exported as aether_drender / aether::render.
+# Default source is the git submodule at third_party/photara_drender, which
+# exports the photara_drender library (photara::render, photara::mesh).
 option(PHOTARA_ENABLE_TEXTURE
     "Enable mesh UV unwrap + projective texture baking (photara_drender)" ON)
-option(PHOTARA_ENABLE_AETHER_MESH
+option(PHOTARA_ENABLE_MESH_TOOLS
     "Use optional CGAL mesh repair/decimation from photara_drender" ON)
 option(PHOTARA_ENABLE_INSTANT_REMESH
     "Use Instant Meshes field-aligned remeshing before CGAL decimation" ON)
-set(PHOTARA_AETHER_DRENDER_ROOT "" CACHE PATH
+set(PHOTARA_DRENDER_ROOT "" CACHE PATH
     "Path to photara_drender sources (empty = auto-detect submodule / sibling)")
 
-function(photara_resolve_aether_drender_root out_var)
-    if(PHOTARA_AETHER_DRENDER_ROOT AND
-       EXISTS "${PHOTARA_AETHER_DRENDER_ROOT}/CMakeLists.txt")
-        set(${out_var} "${PHOTARA_AETHER_DRENDER_ROOT}" PARENT_SCOPE)
+function(photara_resolve_drender_root out_var)
+    if(PHOTARA_DRENDER_ROOT AND
+       EXISTS "${PHOTARA_DRENDER_ROOT}/CMakeLists.txt")
+        set(${out_var} "${PHOTARA_DRENDER_ROOT}" PARENT_SCOPE)
         return()
     endif()
     set(_candidates
@@ -89,39 +89,39 @@ photara_setup_onnxruntime()
 
 set(PHOTARA_HAS_TEXTURE OFF)
 if(PHOTARA_ENABLE_TEXTURE)
-    photara_resolve_aether_drender_root(_photara_drender_root)
+    photara_resolve_drender_root(_photara_drender_root)
     if(NOT _photara_drender_root)
         message(WARNING
             "PHOTARA_ENABLE_TEXTURE=ON but photara_drender not found. "
             "Initialize the git submodule at third_party/photara_drender "
             "(git submodule update --init --recursive), "
-            "or set -DPHOTARA_AETHER_DRENDER_ROOT=. Disabling texture module.")
+            "or set -DPHOTARA_DRENDER_ROOT=. Disabling texture module.")
         set(PHOTARA_ENABLE_TEXTURE OFF)
     else()
-        set(PHOTARA_AETHER_DRENDER_ROOT "${_photara_drender_root}"
+        set(PHOTARA_DRENDER_ROOT "${_photara_drender_root}"
             CACHE PATH "Path to photara_drender sources" FORCE)
-        message(STATUS "photara_drender: ${PHOTARA_AETHER_DRENDER_ROOT}")
+        message(STATUS "photara_drender: ${PHOTARA_DRENDER_ROOT}")
         find_package(Vulkan 1.2 QUIET)
         if(NOT Vulkan_FOUND)
             message(WARNING
                 "Vulkan SDK 1.2+ not found; disabling PHOTARA_ENABLE_TEXTURE")
             set(PHOTARA_ENABLE_TEXTURE OFF)
         else()
-            set(AETHER_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
-            set(AETHER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+            set(PHOTARA_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+            set(PHOTARA_BUILD_NATIVE_TESTS OFF CACHE BOOL "" FORCE)
             find_package(CGAL CONFIG QUIET)
-            if(PHOTARA_ENABLE_AETHER_MESH AND CGAL_FOUND)
-                set(AETHER_BUILD_MESH_TOOLS ON CACHE BOOL "" FORCE)
-                set(AETHER_ENABLE_INSTANT_MESHES
+            if(PHOTARA_ENABLE_MESH_TOOLS AND CGAL_FOUND)
+                set(PHOTARA_BUILD_MESH_TOOLS ON CACHE BOOL "" FORCE)
+                set(PHOTARA_ENABLE_INSTANT_MESHES
                     ${PHOTARA_ENABLE_INSTANT_REMESH} CACHE BOOL "" FORCE)
                 message(STATUS
-                    "Enabling aether::mesh repair/decimation; Instant Meshes="
+                    "Enabling photara::mesh repair/decimation; Instant Meshes="
                     "${PHOTARA_ENABLE_INSTANT_REMESH}")
             else()
-                set(AETHER_BUILD_MESH_TOOLS OFF CACHE BOOL "" FORCE)
+                set(PHOTARA_BUILD_MESH_TOOLS OFF CACHE BOOL "" FORCE)
             endif()
             add_subdirectory(
-                "${PHOTARA_AETHER_DRENDER_ROOT}"
+                "${PHOTARA_DRENDER_ROOT}"
                 "${CMAKE_BINARY_DIR}/_deps/photara_drender")
             set(PHOTARA_HAS_TEXTURE ON)
             include(FetchIntrinsicModels)

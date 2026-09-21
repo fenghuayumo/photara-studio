@@ -128,9 +128,9 @@ cmake -S . -B build `
 | `PHOTARA_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
 | `PHOTARA_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
 | `PHOTARA_ENABLE_TEXTURE` | ON | UVAtlas + Vulkan 贴图烘焙 |
-| `PHOTARA_ENABLE_AETHER_MESH` | ON | CGAL 网格修复/减面（由 photara_drender 提供） |
+| `PHOTARA_ENABLE_MESH_TOOLS` | ON | CGAL 网格修复/减面（由 photara_drender 提供） |
 | `PHOTARA_ENABLE_INSTANT_REMESH` | ON | CGAL 减面前先做 Instant Meshes 重拓扑 |
-| `PHOTARA_AETHER_DRENDER_ROOT` | 自动 | photara_drender 路径（默认 `third_party/photara_drender`） |
+| `PHOTARA_DRENDER_ROOT` | 自动 | photara_drender 路径（默认 `third_party/photara_drender`） |
 | `PHOTARA_INTRINSIC_MODELS_DIR` | `${BUILD}/Models/Intrinsic` | Delight 的 `stage_*.onnx` 目录（许可见 [LICENSE-Intrinsic.md](docs/LICENSE-Intrinsic.md)） |
 
 特征后端可自由组合（提取 × 匹配），例如：
@@ -218,7 +218,7 @@ CPU PatchMatch 会一次缓存所有图像金字塔，并默认同时处理 8 �
 MVS-only 的 preview/default/high 均使用 CGAL 全局 Delaunay visibility
 graph-cut，不再提供 projective mesh。全局图的输入上限由
 `--mesh-max-points` 控制（默认 2,000,000，0 表示不限）。Delaunay 与 TSDF 两个 mesh 后端
-都会经过统一 Clean；构建了 `aether::mesh` 且 splat mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
+都会经过统一 Clean；构建了 `photara::mesh` 且 splat mesh 超过 `--mesh-target-faces` 时，随后执行 Instant
 Meshes field-aligned remesh 和 CGAL repair/decimate。已经低于目标面数的网格结果会直接保留，
 避免无意义的重采样和修复引入新边界。目标面数默认为 1,000,000；Instant 的 quad 目标自动
 换算为约一半，重拓扑前后会清理微小连通碎片。
@@ -229,7 +229,7 @@ Splat + TSDF 默认按 `max_depth / 2048` 取体素（与 gs2mesh.py 一致，�
 `--mesh-target-faces 0` 保留原始 TSDF 分辨率用于诊断。
 UVAtlas 默认用 `--uv-parallel-partitions 8` 做空间分区并发展开，最后统一打包到单张 atlas；
 设为 `1` 可回到串行展开。
-`--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 aether mesh 后处理。Splat mesh 模式
+`--mesh-remesh=false` 只关闭 remesh，目标面数设 0 可关闭整个 photara mesh 后处理。Splat mesh 模式
 默认从 `--splat-geometry-from-iter`（默认 3,000 步）开启权重 0.05 的
 median-depth/rendered-normal 几何一致性优化。
 

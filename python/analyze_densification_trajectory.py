@@ -22,7 +22,7 @@ PYGSPLAT_EVENT = re.compile(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--aether-log", type=Path, required=True)
+    parser.add_argument("--photara-log", type=Path, required=True)
     parser.add_argument("--pygsplat-log", type=Path)
     parser.add_argument("--pygsplat-cfg", type=Path, required=True)
     parser.add_argument("--pygsplat-initial-ply", type=Path, required=True)
@@ -122,7 +122,7 @@ def summarize_rows(
 def main() -> None:
     args = parse_args()
     rows = []
-    for line in read_log_text(args.aether_log).splitlines():
+    for line in read_log_text(args.photara_log).splitlines():
         match = ITERATION.search(line)
         if match:
             iteration, total, count, grown, pruned = map(
@@ -205,8 +205,8 @@ def main() -> None:
         }
 
     report = {
-        "aether": {
-            "log": str(args.aether_log.resolve()),
+        "photara": {
+            "log": str(args.photara_log.resolve()),
             **summarize_rows(rows, rows[0]["count"]),
         },
         "pygsplat": pyg_report,
