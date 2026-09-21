@@ -55,7 +55,7 @@ SceneGeometry training_scene_geometry(
     return {1.1F * camera_radius, camera_center, 1.1F * camera_radius};
 }
 
-SceneGeometry brush_scene_geometry(
+SceneGeometry splat_scene_geometry(
     const std::vector<float>& xyz, const float percentile) {
     std::array<std::vector<float>, 3> axes;
     const std::size_t count = xyz.size() / 3;
@@ -103,7 +103,7 @@ SceneGeometry brush_scene_geometry(
         extents[2]};
 }
 
-SceneGeometry brush_scene_geometry_cuda(
+SceneGeometry splat_scene_geometry_cuda(
     const tinytensor::Tensor& means, const float percentile) {
     const auto bounds = detail::percentile_bounds(means, percentile);
     const mvs::Vec3f minimum(bounds[0], bounds[1], bounds[2]);

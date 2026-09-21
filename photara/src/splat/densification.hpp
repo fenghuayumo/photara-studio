@@ -39,9 +39,9 @@ using AdamStates = std::array<detail::AdamState*, 6>;
 // Brush derives its optimizer/refinement bounds from the middle 80% of the
 // current Gaussian means. scale is BoundingBox::median_size(), while
 // maximum_extent is the largest half-extent used by its out-of-bounds prune.
-[[nodiscard]] SceneGeometry brush_scene_geometry(
+[[nodiscard]] SceneGeometry splat_scene_geometry(
     const std::vector<float>& xyz, float percentile = 0.8F);
-[[nodiscard]] SceneGeometry brush_scene_geometry_cuda(
+[[nodiscard]] SceneGeometry splat_scene_geometry_cuda(
     const tinytensor::Tensor& means, float percentile = 0.8F);
 
 [[nodiscard]] StrategySchedule strategy_schedule(

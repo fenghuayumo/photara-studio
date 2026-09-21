@@ -3008,7 +3008,7 @@ void test_training_device_cache() {
     std::filesystem::remove_all(root);
 }
 
-void test_brush_quantile_selection() {
+void test_splat_quantile_selection() {
     using namespace photara;
     for (const std::size_t count : {1U, 2U, 11U, 257U, 100003U}) {
         std::vector<float> xyz(count * 3);
@@ -3033,8 +3033,8 @@ void test_brush_quantile_selection() {
                     static_cast<std::size_t>(
                         (1.F + p) * 0.5F * static_cast<float>(sorted.size())))];
             }
-            const auto actual = splat::densification::brush_scene_geometry(xyz, p);
-            const auto device = splat::densification::brush_scene_geometry_cuda(
+            const auto actual = splat::densification::splat_scene_geometry(xyz, p);
+            const auto device = splat::densification::splat_scene_geometry_cuda(
                 tinytensor::Tensor::from_vector(
                     xyz, {count, 3}, tinytensor::Device::CUDA), p);
             require(actual.center == device.center && actual.scale == device.scale &&
@@ -3052,7 +3052,7 @@ void test_brush_quantile_selection() {
     for (const std::vector<float>& xyz : {
              std::vector<float>{},
              std::vector<float>{std::numeric_limits<float>::infinity(), 1.F, 2.F}}) {
-        const auto actual = splat::densification::brush_scene_geometry_cuda(
+        const auto actual = splat::densification::splat_scene_geometry_cuda(
             tinytensor::Tensor::from_vector(
                 xyz, {xyz.size() / 3, 3}, tinytensor::Device::CUDA));
         require(actual.center.isZero() && actual.scale == 2.F &&
@@ -3172,19 +3172,19 @@ void test_source_resolution_and_knn_initialization() {
         "GGGS KNN initialization does not match three-neighbour RMS scale");
     options.densification_strategy =
         splat::DensificationStrategy::adc_plus;
-    const auto brush_model =
+    const auto splat_model =
         splat::initialize_from_dense_cloud(scene, options);
-    const auto brush_scales = brush_model.log_scales.to_vector();
-    const auto brush_rotations = brush_model.quaternions.to_vector();
+    const auto splat_scales = splat_model.log_scales.to_vector();
+    const auto splat_rotations = splat_model.quaternions.to_vector();
     require(
         std::all_of(
-            brush_scales.begin(), brush_scales.end(),
+            splat_scales.begin(), splat_scales.end(),
             [](const float log_scale) {
                 return std::abs(std::exp(log_scale) - 0.1F) < 1e-5F;
             }) &&
-            brush_rotations[0] == 1.F && brush_rotations[1] == 0.F &&
-            brush_rotations[2] == 0.F && brush_rotations[3] == 0.F &&
-            std::abs(brush_model.opacity_logits.to_vector()[0]) < 1e-6F,
+            splat_rotations[0] == 1.F && splat_rotations[1] == 0.F &&
+            splat_rotations[2] == 0.F && splat_rotations[3] == 0.F &&
+            std::abs(splat_model.opacity_logits.to_vector()[0]) < 1e-6F,
         "ADC+ sparse initialization does not match brush");
     options.densification_strategy = splat::DensificationStrategy::adc_igs;
     for (const auto strategy : {splat::DensificationStrategy::adc_plus,
@@ -3209,8 +3209,8 @@ void test_source_resolution_and_knn_initialization() {
     for (const float initial_opacity : {0.1F, 0.25F}) {
         options.initial_opacity = initial_opacity;
         const auto igs_model = splat::initialize_from_dense_cloud(scene, options);
-        require(igs_model.log_scales.to_vector() != brush_scales ||
-                    igs_model.quaternions.to_vector() != brush_rotations,
+        require(igs_model.log_scales.to_vector() != splat_scales ||
+                    igs_model.quaternions.to_vector() != splat_rotations,
                 "IGS must keep the legacy KNN/random-quaternion initialization");
         for (const float logit : igs_model.opacity_logits.to_vector())
             require(std::abs(1.F / (1.F + std::exp(-logit)) - initial_opacity) < 1e-6F,
@@ -4815,22 +4815,22 @@ void test_densification_strategies_and_dense_bypass() {
         splat::TrainingOptions{}.adam_epsilon == 1e-15F,
         "ADC+ Adam epsilon no longer matches Brush");
 
-    std::vector<float> brush_points;
+    std::vector<float> splat_points;
     for (const float value : {
              -100.F, 0.F, 1.F, 2.F, 3.F, 4.F,
              5.F, 6.F, 7.F, 8.F, 100.F})
-        brush_points.insert(
-            brush_points.end(), {value, 2.F * value, 3.F * value});
-    const auto brush_bounds =
-        splat::densification::brush_scene_geometry(brush_points);
+        splat_points.insert(
+            splat_points.end(), {value, 2.F * value, 3.F * value});
+    const auto splat_bounds =
+        splat::densification::splat_scene_geometry(splat_points);
     require(
-        (brush_bounds.center - mvs::Vec3f(4.F, 8.F, 12.F)).norm() <
+        (splat_bounds.center - mvs::Vec3f(4.F, 8.F, 12.F)).norm() <
                 1e-6F &&
-            std::abs(brush_bounds.scale - 16.F) < 1e-6F &&
-            std::abs(brush_bounds.maximum_extent - 12.F) < 1e-6F,
+            std::abs(splat_bounds.scale - 16.F) < 1e-6F &&
+            std::abs(splat_bounds.maximum_extent - 12.F) < 1e-6F,
         "ADC+ percentile bounds no longer match Brush");
     const auto fallback_bounds =
-        splat::densification::brush_scene_geometry({});
+        splat::densification::splat_scene_geometry({});
     require(
         fallback_bounds.center.isZero() &&
             fallback_bounds.scale == 2.F &&
@@ -4911,46 +4911,46 @@ void test_densification_strategies_and_dense_bypass() {
                 "densification exceeded its hard Gaussian cap");
     }
     // brush ADC+ refines from iteration 200 with no warm-up delay.
-    auto brush_schedule = options;
-    brush_schedule.iterations = 220;
-    brush_schedule.densification_strategy =
+    auto splat_schedule = options;
+    splat_schedule.iterations = 220;
+    splat_schedule.densification_strategy =
         splat::DensificationStrategy::adc_plus;
-    brush_schedule.refine_start_iter = 0;
-    brush_schedule.refine_stop_iter = 0;
-    brush_schedule.refine_every = 0;
-    brush_schedule.densify_gradient_threshold = -1.F;
-    brush_schedule.densify_select_fraction = 1.F;
+    splat_schedule.refine_start_iter = 0;
+    splat_schedule.refine_stop_iter = 0;
+    splat_schedule.refine_every = 0;
+    splat_schedule.densify_gradient_threshold = -1.F;
+    splat_schedule.densify_select_fraction = 1.F;
     // Same pinning as the toy run above: this schedule only spans one step.
-    brush_schedule.grow_stop_iter = brush_schedule.iterations;
-    auto full_brush_schedule = brush_schedule;
-    full_brush_schedule.iterations = 30'000;
+    splat_schedule.grow_stop_iter = splat_schedule.iterations;
+    auto full_splat_schedule = splat_schedule;
+    full_splat_schedule.iterations = 30'000;
     // The default cutoff follows Brush's proportion: half of the run, which is
     // its 15000 of 30000.
-    full_brush_schedule.grow_stop_iter = 0;
-    full_brush_schedule.densification_strategy =
+    full_splat_schedule.grow_stop_iter = 0;
+    full_splat_schedule.densification_strategy =
         splat::DensificationStrategy::adc_plus;
-    splat::apply_strategy_defaults(full_brush_schedule);
-    require(full_brush_schedule.grow_stop_iter == 15'000U,
+    splat::apply_strategy_defaults(full_splat_schedule);
+    require(full_splat_schedule.grow_stop_iter == 15'000U,
             "ADC+ growth should stop at half of the run by default");
-    full_brush_schedule.grow_stop_iter = 0;
-    full_brush_schedule.iterations = 10'000;
-    splat::apply_strategy_defaults(full_brush_schedule);
-    require(full_brush_schedule.grow_stop_iter == 5'000U,
+    full_splat_schedule.grow_stop_iter = 0;
+    full_splat_schedule.iterations = 10'000;
+    splat::apply_strategy_defaults(full_splat_schedule);
+    require(full_splat_schedule.grow_stop_iter == 5'000U,
             "ADC+ growth should scale with the run length");
-    full_brush_schedule.iterations = 30'000;
-    full_brush_schedule.grow_stop_iter = 0;
-    splat::apply_strategy_defaults(full_brush_schedule);
+    full_splat_schedule.iterations = 30'000;
+    full_splat_schedule.grow_stop_iter = 0;
+    splat::apply_strategy_defaults(full_splat_schedule);
     require(
         splat::densification::is_refinement_iteration(
-            28'400, full_brush_schedule),
+            28'400, full_splat_schedule),
         "ADC+ stopped before Brush's final 30k refinement");
     require(
         !splat::densification::is_refinement_iteration(
-            28'600, full_brush_schedule) &&
+            28'600, full_splat_schedule) &&
             !splat::densification::is_refinement_iteration(
-                29'800, full_brush_schedule),
+                29'800, full_splat_schedule),
         "ADC+ refined after Brush's 95% cutoff");
-    auto igs_schedule = full_brush_schedule;
+    auto igs_schedule = full_splat_schedule;
     igs_schedule.densification_strategy = splat::DensificationStrategy::adc_igs;
     splat::apply_strategy_defaults(igs_schedule);
     // Both ADC presets start at step 200 without a warmup. IGS retains its
@@ -4972,7 +4972,7 @@ void test_densification_strategies_and_dense_bypass() {
         "IGS should stop densify at max(14000, N-2500)");
     require(igs_schedule.densify_screen_threshold == 0.5F,
             "IGS oversized screen threshold should match Brush");
-    auto emc_schedule = full_brush_schedule;
+    auto emc_schedule = full_splat_schedule;
     emc_schedule.densification_strategy =
         splat::DensificationStrategy::emc;
     splat::apply_strategy_defaults(emc_schedule);
@@ -4998,10 +4998,10 @@ void test_densification_strategies_and_dense_bypass() {
                 splat::densification::is_refinement_iteration(600, overridden_schedule) &&
                 splat::densification::is_refinement_iteration(700, overridden_schedule),
             "Explicit refinement schedule overrides must remain effective");
-    const auto brush_schedule_model =
-        splat::Trainer(brush_schedule).train(scene);
+    const auto splat_schedule_model =
+        splat::Trainer(splat_schedule).train(scene);
     require(
-        brush_schedule_model.size() > scene.dense_cloud.points.size(),
+        splat_schedule_model.size() > scene.dense_cloud.points.size(),
         "ADC+ did not use brush's first refinement at iteration 200");
 
     options.input_is_dense = true;
@@ -5154,7 +5154,7 @@ int main(int argc, char** argv) {
         test_mask_loading();
         test_jpeg_dct_scaled_training_view();
         test_training_device_cache();
-        test_brush_quantile_selection();
+        test_splat_quantile_selection();
         test_source_resolution_and_knn_initialization();
         test_colmap_text_loading();
         test_colmap_fisheye_and_equirect_loading();

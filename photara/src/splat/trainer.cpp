@@ -1050,7 +1050,7 @@ GaussianModel Trainer::train(
                 DensificationStrategy::adc_plus
             ? 0.1F
             : 0.2F;
-    const bool brush_filter = options_.densification_strategy ==
+    const bool splat_filter = options_.densification_strategy ==
                 DensificationStrategy::adc_plus;
     // Keep the Mip-Splatting floor separate from the canonical parameters.
     // The filter is applied only while rasterizing and recomputed after
@@ -1058,7 +1058,7 @@ GaussianModel Trainer::train(
     // cumulative opacity loss.
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
-            model.means, filter_cameras, filter_3d_factor, brush_filter);
+            model.means, filter_cameras, filter_3d_factor, splat_filter);
     const bool native_non_pinhole = std::any_of(
         all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
             return uses_native_splat_projection(camera.model);
@@ -1135,7 +1135,7 @@ GaussianModel Trainer::train(
             if (use_3d_filter)
                 snapshot.filter_3d = detail::compute_3d_filter(
                     snapshot.means, full_resolution_filter_cameras,
-                    filter_3d_factor, brush_filter);
+                    filter_3d_factor, splat_filter);
             evaluation_future = std::async(
                 std::launch::async,
                 [evaluate, iteration,
@@ -1187,13 +1187,13 @@ GaussianModel Trainer::train(
     const mvs::Vec3f scene_center = scene_geometry.center;
     float means_learning_rate_scale = scene_extent;
     refine::SceneGeometry refinement_geometry = scene_geometry;
-    const bool brush_mean_lr_scale =
+    const bool splat_mean_lr_scale =
         options_.densification_strategy == DensificationStrategy::adc_plus ||
         options_.densification_strategy == DensificationStrategy::emc ||
         (!options_.input_is_dense &&
             is_adc_strategy(options_.densification_strategy));
-    if (brush_mean_lr_scale) {
-        refinement_geometry = refine::brush_scene_geometry_cuda(model.means);
+    if (splat_mean_lr_scale) {
+        refinement_geometry = refine::splat_scene_geometry_cuda(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
     }
     const float minimum_log_scale = options_.constrain_scale_range
@@ -1263,7 +1263,7 @@ GaussianModel Trainer::train(
                     filter_cameras.push_back(all_cameras[index]);
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras, filter_3d_factor,
-                    brush_filter);
+                    splat_filter);
             }
         }
         const bool report_progress = progress &&
@@ -1901,9 +1901,9 @@ GaussianModel Trainer::train(
                 model.log_scales, options_.max_scale_ratio);
             refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
-            if (refinement_happened && brush_mean_lr_scale) {
+            if (refinement_happened && splat_mean_lr_scale) {
                 refinement_geometry =
-                    refine::brush_scene_geometry_cuda(model.means);
+                    refine::splat_scene_geometry_cuda(model.means);
                 means_learning_rate_scale = refinement_geometry.scale;
             }
             if (refinement_happened && report_progress) {
@@ -2016,7 +2016,7 @@ GaussianModel Trainer::train(
             if (filter_refreshed)
                 model.filter_3d = detail::compute_3d_filter(
                     model.means, filter_cameras, filter_3d_factor,
-                    brush_filter);
+                    splat_filter);
         }
         cuda_profiler.mark(CudaTrainingStage::filter_3d);
         cuda_profiler.end_iteration(
@@ -2116,7 +2116,7 @@ GaussianModel Trainer::train(
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, full_resolution_filter_cameras,
-            filter_3d_factor, brush_filter);
+            filter_3d_factor, splat_filter);
     return model;
 }
 
