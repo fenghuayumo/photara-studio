@@ -93,6 +93,10 @@ struct ReconstructCli {
     std::filesystem::path working_mesh;
     std::filesystem::path working_dense;
     std::filesystem::path working_texture;
+    // Handshake files the editor consumes while Align runs. Empty keeps the
+    // historical behaviour of deriving them next to the working copy.
+    std::filesystem::path align_live;
+    std::filesystem::path align_preview;
     bool texture_only{false};
     bool export_mvs_requested{false};
     std::filesystem::path export_mvs_path;
@@ -474,6 +478,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --working-mesh PATH  mesh working copy for --gui\n"
               << "  --working-dense PATH  dense cloud working copy for --gui\n"
               << "  --working-texture STEM  textured OBJ/MTL/PNG working copy for --gui\n"
+              << "  --align-live PATH  alignment live frame (default <working-sfm>.live)\n"
+              << "  --align-preview PATH  alignment preview snapshot\n"
               << "Video (when --images is a video file, frames are extracted first):\n"
               << "  --video-fps F  kept frames per second (default 2)\n"
               << "  --video-sharp-window N  keep the sharpest of N candidates (default 3; 1 = off)\n"
@@ -551,6 +557,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("working-texture",
          "Textured OBJ/MTL/PNG working-copy stem used by --gui",
+         cxxopts::value<std::string>()->default_value(""))
+        ("align-live",
+         "Editor alignment live-frame path (default: <working-sfm>.live)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("align-preview",
+         "Editor alignment preview snapshot path "
+         "(default: <working-sfm>.preview.asfm)",
          cxxopts::value<std::string>()->default_value(""))
         ("export-mvs",
          "Write OpenMVS Interface after SfM. Optional path; default is "
@@ -1077,6 +1090,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["working-texture"].as<std::string>();
     if (!working_texture_text.empty())
         cli.working_texture = utf8_to_path(working_texture_text);
+    const std::string align_live_text = result["align-live"].as<std::string>();
+    if (!align_live_text.empty())
+        cli.align_live = utf8_to_path(align_live_text);
+    const std::string align_preview_text =
+        result["align-preview"].as<std::string>();
+    if (!align_preview_text.empty())
+        cli.align_preview = utf8_to_path(align_preview_text);
     if (result.count("export-mvs") != 0) {
         cli.export_mvs_requested = true;
         const auto export_mvs_text = result["export-mvs"].as<std::string>();
@@ -3698,8 +3718,9 @@ int main(int argc, char** argv) {
                      now - last_alignment_preview < std::chrono::seconds(3))) return;
                 last_alignment_preview = now;
                 has_alignment_preview = true;
-                auto path = cli.working_sfm;
-                path += ".preview.asfm";
+                auto path = cli.align_preview.empty() ? cli.working_sfm
+                                                      : cli.align_preview;
+                if (cli.align_preview.empty()) path += ".preview.asfm";
                 try {
                     aetherscan::sfm::save_alignment_preview(partial, path);
                     aetherscan::core::Logger::instance().info(
@@ -3746,8 +3767,9 @@ int main(int argc, char** argv) {
         config.frontend.checkpoint.directory = cli.cache_dir;
         aetherscan::sfm::AlignLivePreview live_preview;
         if (!cli.working_sfm.empty()) {
-            auto live_path = cli.working_sfm;
-            live_path += ".live";
+            auto live_path =
+                cli.align_live.empty() ? cli.working_sfm : cli.align_live;
+            if (cli.align_live.empty()) live_path += ".live";
             live_preview.set_path(live_path);
             config.frontend.live_preview = &live_preview;
         }

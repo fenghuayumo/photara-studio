@@ -641,6 +641,7 @@ if(TARGET aetherscan_features)
                 "${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor")
             add_executable(aetherscan_editor
                 ${AETHERSCAN_EDITOR_DIR}/app_commands.cpp
+                ${AETHERSCAN_EDITOR_DIR}/cache_maintenance.cpp
                 ${AETHERSCAN_EDITOR_DIR}/console_view.cpp
                 ${AETHERSCAN_EDITOR_DIR}/file_dialogs.cpp
                 ${AETHERSCAN_EDITOR_DIR}/i18n.cpp

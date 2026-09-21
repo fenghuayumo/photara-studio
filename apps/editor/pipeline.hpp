@@ -244,6 +244,9 @@ struct ProjectSettings {
     // and lets a dataset on a slow or read-only volume keep its cache local.
     // Editor-level only: never persisted into .ascan.
     std::array<char, 1024> cache_dir{};
+    // 0 disables the automatic sweep of cache folders that no project has
+    // touched for this many days.
+    int cache_retention_days = 0;
     int max_features = 27'000;
 
     // Video capture. images_dir may be a video file; these knobs control the
@@ -316,6 +319,12 @@ struct ProjectLayout {
     std::filesystem::path dense_log;
     std::filesystem::path export_log;
     std::filesystem::path view_log;
+    // Per-process handshake files: orbit camera, visualization options, preview
+    // frame index/ack, the alignment live frame and its preview snapshot. They
+    // are written every frame (or every 500 ms during Align) and die with the
+    // session, so they live in a process-private temp folder instead of next to
+    // the working copies, which outlive the run.
+    std::filesystem::path session_dir;
     std::filesystem::path preview_view_file;
     std::filesystem::path preview_camera_file;
     std::filesystem::path preview_vis_file;
@@ -324,6 +333,7 @@ struct ProjectLayout {
     std::filesystem::path preview_ack_file;
     std::filesystem::path working_sfm;
     std::filesystem::path align_live;
+    std::filesystem::path align_preview;
     std::filesystem::path working_subject_bounds;
     std::filesystem::path working_splat;
     std::filesystem::path working_mesh;

@@ -19,10 +19,22 @@
 
 #if defined(_WIN32)
 #include <tlhelp32.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace editor {
 namespace {
+
+// Session folder name: one per editor process, so a second instance (and a
+// crashed one whose pid was reused later) can never share handshake files.
+std::string session_directory_name() {
+#if defined(_WIN32)
+    return "session-" + std::to_string(GetCurrentProcessId());
+#else
+    return "session-" + std::to_string(static_cast<long>(::getpid()));
+#endif
+}
 
 // Project setting -> CLI flag. The stored value mirrors aetherscan::CameraModel:
 // 0 pinhole, 1 OpenCV fisheye, 2 automatic, 3 equirectangular panorama.
@@ -197,6 +209,13 @@ void append_gui_flags(
         command << " --working-dense " << quote(layout.working_dense);
     if (!layout.working_texture.empty())
         command << " --working-texture " << quote(layout.working_texture);
+    // The alignment preview and live frame are handshake files, not products:
+    // point them at the session folder so a Train that has to run SfM does not
+    // leave them next to the working copies either.
+    if (!layout.align_live.empty())
+        command << " --align-live " << quote(layout.align_live);
+    if (!layout.align_preview.empty())
+        command << " --align-preview " << quote(layout.align_preview);
 }
 
 void append_video_extract_flags(
@@ -1042,17 +1061,28 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
                 temp / "AetherScan" / runtime_cache_key(layout.project_file);
     }
     layout.working_sfm = runtime_dir / "sfm.bin";
-    layout.align_live = layout.working_sfm;
-    layout.align_live += ".live";
-    layout.working_subject_bounds = runtime_dir / "subject_bounds.txt";
     layout.working_splat = runtime_dir / "splat.ply";
     layout.working_mesh = runtime_dir / "mesh.ply";
     layout.working_dense = runtime_dir / "dense.ply";
     layout.working_texture = runtime_dir / "textured";
-    layout.preview_view_file = runtime_dir / "preview_view";
-    layout.preview_camera_file = runtime_dir / "preview_camera";
-    layout.preview_vis_file = runtime_dir / "preview_vis";
-    layout.preview_ack_file = runtime_dir / "preview_ack";
+    // Handshake files are per process, not per project: the editor, the CLI
+    // child, the trainer and the splat viewer exchange them for one session, and
+    // nothing may read them after that. Keeping them in a session folder lets the
+    // cache folder hold products only, and stops their per-frame writes (and
+    // always-fresh mtimes) from landing on a slow cache drive or from hiding an
+    // otherwise unused cache from maintenance.
+    std::error_code session_error;
+    const auto session_temp = std::filesystem::temp_directory_path(session_error);
+    layout.session_dir = session_error
+        ? std::filesystem::path("aetherscan_session")
+        : session_temp / "AetherScan" / session_directory_name();
+    layout.preview_view_file = layout.session_dir / "preview_view";
+    layout.preview_camera_file = layout.session_dir / "preview_camera";
+    layout.preview_vis_file = layout.session_dir / "preview_vis";
+    layout.preview_ack_file = layout.session_dir / "preview_ack";
+    layout.align_live = layout.session_dir / "align.live";
+    layout.align_preview = layout.session_dir / "align.preview.asfm";
+    layout.working_subject_bounds = layout.session_dir / "subject_bounds.txt";
     return layout;
 }
 

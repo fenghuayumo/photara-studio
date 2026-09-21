@@ -455,6 +455,21 @@ constexpr Entry k_entries[] = {
      "留空 = 工作副本放在项目旁（<项目目录>/<项目名>.cache）。\n指定目录可把所有数据集的缓存集中到其它盘。",
      "空欄なら作業コピーをプロジェクト隣（<プロジェクト>/<名前>.cache）に置きます。\nフォルダを指定すると全データセットのキャッシュを別ドライブに集約できます。",
      "비워 두면 작업본을 프로젝트 옆(<프로젝트 폴더>/<이름>.cache)에 둡니다.\n폴더를 지정하면 모든 데이터셋 캐시를 다른 드라이브에 모을 수 있습니다."},
+    {"Cache", "缓存", "キャッシュ", "캐시"},
+    {"folders", "个目录", "フォルダー", "폴더"},
+    {"unused", "未使用", "未使用", "미사용"},
+    {"days", "天", "日", "일"},
+    {"Refresh cache usage", "刷新占用", "使用量を更新", "사용량 새로 고침"},
+    {"Clean unused caches", "清理未使用缓存", "未使用キャッシュを削除", "미사용 캐시 정리"},
+    {"Cleaned %zu cache folders, freed %s", "已清理 %zu 个缓存目录，释放 %s",
+     "%zu 個のキャッシュを削除、%s を解放", "%zu개 캐시 폴더 정리, %s 확보"},
+    {"Removes the working copies of datasets that are not open\n"
+     "here. Unsaved results live in those folders: save the\n"
+     "project first if you want to keep them.",
+     "删除未打开数据集的缓存目录。未保存的结果就在这些目录里，\n想保留就先保存项目。",
+     "開いていないデータセットの作業コピーを削除します。未保存の結果も\nそこにあります。残す場合は先にプロジェクトを保存してください。",
+     "열려 있지 않은 데이터셋의 작업본을 삭제합니다. 저장하지 않은 결과도\n그 안에 있으니, 남기려면 먼저 프로젝트를 저장하세요."},
+    {"Auto-clean caches unused for", "自动清理超过", "未使用の期間が次を超えたら自動削除", "다음 기간 미사용 캐시 자동 정리"},
     {"Export SfM Alignment", "导出 SfM 对齐", "SfM アライメントを書き出し", "SfM 정렬 내보내기"},
     {"Save cameras and tracks as ASFM, COLMAP,\n"
      "Nerfstudio / Blender, or OpenMVS.",

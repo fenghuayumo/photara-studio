@@ -3,6 +3,7 @@
 #include "console_view.hpp"
 #include "image_qa_view.hpp"
 #include "pipeline.hpp"
+#include "cache_maintenance.hpp"
 #include "sparse_view.hpp"
 #include "theme.hpp"
 #include "viewport_gizmo.hpp"
@@ -113,6 +114,9 @@ struct App {
     std::filesystem::path atlas_preview_path;
     std::uint32_t project_writer_version{};
     std::uint32_t project_min_reader_version{};
+    // Last cache scan, refreshed at startup and whenever the Inspector asks for
+    // it. Sizes come from file metadata only.
+    CacheUsage cache_usage;
     VisualizationMode view_mode{VisualizationMode::points};
     ViewportWorkspace workspace{ViewportWorkspace::scene_3d};
     ImageQaState image_qa;
@@ -218,6 +222,9 @@ std::filesystem::path resolve_editor_ini();
 void load_editor_cache_dir(App& app);
 void store_editor_cache_dir(const App& app);
 void select_cache_folder(App& app);
+// Handshake-file folder for this process: created at startup, removed on exit.
+void prepare_cache_session(const App& app);
+void cleanup_cache_session(const App& app);
 
 void store_path_field(
     std::array<char, 1024>& field, const std::filesystem::path& path);

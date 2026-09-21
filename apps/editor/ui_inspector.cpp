@@ -316,6 +316,64 @@ Action draw_inspector(App& app) {
                    "collect every dataset's cache on another drive."));
         if (!app.layout.working_sfm.empty())
             theme::caption(path_to_utf8(app.layout.working_sfm.parent_path()).c_str());
+        // Cache occupancy and maintenance. The scan is metadata-only, so it runs
+        // on demand instead of every frame.
+        if (app.cache_usage.valid) {
+            char summary[192];
+            std::snprintf(
+                summary, sizeof(summary), "%s: %s \xC2\xB7 %zu %s \xC2\xB7 %zu %s",
+                tr("Cache"), format_cache_bytes(app.cache_usage.bytes).c_str(),
+                app.cache_usage.folders.size(), tr("folders"),
+                app.cache_usage.unused_folders, tr("unused"));
+            theme::caption(summary);
+        }
+        if (theme::toolbar_button(tr("Refresh cache usage"), {150.F, 0.F}))
+            app.cache_usage = scan_cache_usage(
+                app.settings, app.layout.working_sfm.parent_path());
+        ImGui::SameLine(0.F, 6.F);
+        if (theme::toolbar_button(tr("Clean unused caches"), {160.F, 0.F})) {
+            // Half an hour of idle keeps the folders of a second editor instance
+            // that is mid-run, and this project's folder is excluded outright.
+            std::uintmax_t freed = 0;
+            const std::size_t removed = clean_unused_caches(
+                app.settings, app.layout.working_sfm.parent_path(),
+                std::chrono::minutes(30), &freed);
+            app.cache_usage = scan_cache_usage(
+                app.settings, app.layout.working_sfm.parent_path());
+            if (removed == 0) {
+                set_message(app, "No unused cache folders to clean", theme::text_muted);
+            } else {
+                char text[200];
+                std::snprintf(
+                    text, sizeof(text), tr("Cleaned %zu cache folders, freed %s"),
+                    removed, format_cache_bytes(freed).c_str());
+                set_message(app, text, theme::success);
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s",
+                tr("Removes the working copies of datasets that are not open\n"
+                   "here. Unsaved results live in those folders: save the\n"
+                   "project first if you want to keep them."));
+        bool auto_clean = app.settings.cache_retention_days > 0;
+        if (ImGui::Checkbox(tr("Auto-clean caches unused for"), &auto_clean)) {
+            app.settings.cache_retention_days = auto_clean ? 30 : 0;
+            store_editor_cache_dir(app);
+        }
+        ImGui::SameLine(0.F, 6.F);
+        ImGui::BeginDisabled(!auto_clean);
+        ImGui::SetNextItemWidth(72.F);
+        if (ImGui::InputInt(
+                "##cache_retention_days", &app.settings.cache_retention_days, 1,
+                7)) {
+            app.settings.cache_retention_days =
+                std::clamp(app.settings.cache_retention_days, 1, 3650);
+            store_editor_cache_dir(app);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0.F, 4.F);
+        theme::caption(tr("days"));
         ImGui::EndDisabled();
 
         if (theme::toolbar_button(

@@ -718,10 +718,13 @@ void new_project(App& app) {
     if (app.job.running() || app.loading_scene) return;
     stop_splat_view(app);
     clear_loaded_result(app);
-    // The cache root is an editor-wide setting, not part of the project.
+    // The cache root and its retention policy are editor-wide settings, not
+    // part of the project.
     const auto cache_dir = app.settings.cache_dir;
+    const int cache_retention_days = app.settings.cache_retention_days;
     app.settings = {};
     app.settings.cache_dir = cache_dir;
+    app.settings.cache_retention_days = cache_retention_days;
     app.layout = {};
     app.has_sparse = false;
     app.has_asfm = false;
@@ -761,30 +764,59 @@ void select_image_folder(App& app) {
     apply_image_directory_selection(app);
 }
 
-std::filesystem::path editor_cache_dir_file() {
-    return resolve_editor_ini().parent_path() / "editor.cache_dir";
+std::filesystem::path editor_cache_file() {
+    return resolve_editor_ini().parent_path() / "editor.cache";
 }
 
-// Editor-level cache root, stored next to editor.ini. It is deliberately not
-// written into .ascan: the folder is machine specific, and opening a project
-// elsewhere must fall back to that machine's own choice.
+// Editor-level cache settings, stored next to editor.ini. They are deliberately
+// not written into .ascan: the folder and the retention policy are machine
+// specific, and opening a project elsewhere must use that machine's own choice.
+//
+// Layout: "dir=<utf8 path>" and "retention_days=<n>", one per line. The
+// pre-existing single-line editor.cache_dir file is still read as a fallback.
 void load_editor_cache_dir(App& app) {
-    std::ifstream input(editor_cache_dir_file(), std::ios::binary);
-    if (!input) return;
-    std::string text;
-    std::getline(input, text);
-    if (text.empty()) return;
-    store_utf8_path_field(
-        app.settings.cache_dir, path_from_utf8_field(text.c_str()));
+    std::ifstream input(editor_cache_file(), std::ios::binary);
+    if (!input) {
+        std::ifstream legacy(
+            resolve_editor_ini().parent_path() / "editor.cache_dir",
+            std::ios::binary);
+        if (!legacy) return;
+        std::string text;
+        std::getline(legacy, text);
+        if (text.empty()) return;
+        store_utf8_path_field(
+            app.settings.cache_dir, path_from_utf8_field(text.c_str()));
+        return;
+    }
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::size_t equals = line.find('=');
+        if (equals == std::string::npos) continue;
+        const std::string key = line.substr(0, equals);
+        const std::string value = line.substr(equals + 1);
+        if (key == "dir") {
+            if (!value.empty())
+                store_utf8_path_field(
+                    app.settings.cache_dir, path_from_utf8_field(value.c_str()));
+        } else if (key == "retention_days") {
+            try {
+                app.settings.cache_retention_days =
+                    std::clamp(std::stoi(value), 0, 3650);
+            } catch (...) {
+            }
+        }
+    }
 }
 
 void store_editor_cache_dir(const App& app) {
-    const auto path = editor_cache_dir_file();
+    const auto path = editor_cache_file();
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) return;
-    output << app.settings.cache_dir.data() << '\n';
+    output << "dir=" << app.settings.cache_dir.data() << '\n'
+           << "retention_days=" << app.settings.cache_retention_days << '\n';
 }
 
 void select_cache_folder(App& app) {
@@ -794,6 +826,46 @@ void select_cache_folder(App& app) {
     store_editor_cache_dir(app);
     refresh_artifacts(app);
     set_message(app, "Cache folder updated", theme::text_muted);
+}
+
+// A crashed editor leaves its session folder behind. Sweep the ones that are
+// clearly stale, and leave recent folders alone so a second running instance
+// keeps the handshake files its child processes are reading.
+void sweep_stale_cache_sessions(const std::filesystem::path& root) {
+    if (root.empty()) return;
+    std::error_code error;
+    std::filesystem::directory_iterator entries(root, error);
+    if (error) return;
+    const auto now = std::filesystem::file_time_type::clock::now();
+    for (const auto& entry : entries) {
+        std::error_code entry_error;
+        if (!entry.is_directory(entry_error)) continue;
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("session-", 0) != 0) continue;
+        std::error_code stamp_error;
+        const auto stamp =
+            std::filesystem::last_write_time(entry.path(), stamp_error);
+        if (stamp_error) continue;
+        if (now - stamp < std::chrono::hours(48)) continue;
+        std::error_code remove_error;
+        std::filesystem::remove_all(entry.path(), remove_error);
+    }
+}
+
+void prepare_cache_session(const App& app) {
+    const std::filesystem::path& dir = app.layout.session_dir;
+    if (dir.empty()) return;
+    std::error_code error;
+    // Ours from a process that reused this pid: nothing can be reading it.
+    std::filesystem::remove_all(dir, error);
+    std::filesystem::create_directories(dir, error);
+    sweep_stale_cache_sessions(dir.parent_path());
+}
+
+void cleanup_cache_session(const App& app) {
+    if (app.layout.session_dir.empty()) return;
+    std::error_code error;
+    std::filesystem::remove_all(app.layout.session_dir, error);
 }
 
 void apply_video_selection(App& app) {
@@ -2174,8 +2246,8 @@ void poll_alignment_preview(App& app) {
     const auto now = std::chrono::steady_clock::now();
     if (now < app.alignment_preview_poll) return;
     app.alignment_preview_poll = now + std::chrono::milliseconds(500);
-    auto path = app.layout.working_sfm;
-    path += ".preview.asfm";
+    const auto path = app.layout.align_preview;
+    if (path.empty()) return;
     std::error_code error;
     const auto stamp = std::filesystem::last_write_time(path, error);
     if (error || stamp == app.alignment_preview_stamp) return;
@@ -2248,10 +2320,10 @@ void start_align(App& app) {
     }
     try {
         app.monitor.begin(JobKind::align);
-        auto preview_path = app.layout.working_sfm;
-        preview_path += ".preview.asfm";
+        const auto preview_path = app.layout.align_preview;
         std::error_code preview_error;
-        std::filesystem::remove(preview_path, preview_error);
+        if (!preview_path.empty())
+            std::filesystem::remove(preview_path, preview_error);
         std::error_code live_error;
         std::filesystem::remove(app.layout.align_live, live_error);
         app.align_live = {};

@@ -120,6 +120,23 @@ int main(const int argc, char** argv) {
     ImGui_ImplVulkan_Init(&init);
 
     editor::refresh_artifacts(app);
+    editor::prepare_cache_session(app);
+    app.cache_usage = editor::scan_cache_usage(
+        app.settings, app.layout.working_sfm.parent_path());
+    if (app.settings.cache_retention_days > 0) {
+        const std::size_t removed = editor::clean_unused_caches(
+            app.settings, app.layout.working_sfm.parent_path(),
+            std::chrono::minutes(60 * 24 * app.settings.cache_retention_days));
+        if (removed > 0) {
+            editor::set_message(
+                app,
+                "Cache sweep removed " + std::to_string(removed) +
+                    " unused folders",
+                editor::theme::text_muted);
+            app.cache_usage = editor::scan_cache_usage(
+                app.settings, app.layout.working_sfm.parent_path());
+        }
+    }
     app.preview.create(k_preview_extent, k_preview_extent);
 
     const auto smoke_begin = std::chrono::steady_clock::now();
@@ -311,6 +328,7 @@ int main(const int argc, char** argv) {
 
     if (app.viewer.running()) app.viewer.stop();
     if (app.job.running()) app.job.stop();
+    editor::cleanup_cache_session(app);
     vkDeviceWaitIdle(editor::gpu::device());
     app.image_qa_session.clear();
     app.photos.clear();
