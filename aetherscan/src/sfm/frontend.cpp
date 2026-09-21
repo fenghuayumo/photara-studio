@@ -2067,15 +2067,11 @@ FrontEndResult run_frontend(
             scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
         core::Logger::instance().info("checkpoint hit: features");
         if (runtime_options.live_preview != nullptr && !scene.images.empty()) {
-            const std::size_t n = scene.images.size();
-            const std::size_t stride = n <= 8 ? 1 : std::max<std::size_t>(1, n / 8);
-            for (std::size_t i = 0; i < n; ++i) {
-                if (i + 1 != n && i % stride != 0) continue;
-                emit_live_features(
-                    runtime_options.live_preview, i, scene.images[i].path,
-                    scene.images[i].features);
-                runtime_options.live_preview->flush();
-            }
+            const std::size_t last = scene.images.size() - 1;
+            emit_live_features(
+                runtime_options.live_preview, last, scene.images[last].path,
+                scene.images[last].features);
+            runtime_options.live_preview->flush();
         }
     }
     result.timing.extract_seconds =
