@@ -16,7 +16,12 @@ enum class AlignLiveKind : std::uint32_t {
     none = 0,
     features = 1,
     matching = 2,
+    inliers = 3,
 };
+
+[[nodiscard]] inline bool is_live_pair_kind(const AlignLiveKind kind) {
+    return kind == AlignLiveKind::matching || kind == AlignLiveKind::inliers;
+}
 
 struct AlignLiveKeypoint {
     float u{};
@@ -29,6 +34,7 @@ struct AlignLiveMatch {
     float v0{};
     float u1{};
     float v1{};
+    float score{};
 };
 
 struct AlignLiveIndexMatch {
@@ -69,7 +75,8 @@ public:
         const features::FeatureSet& features_a, std::size_t index_b,
         const std::filesystem::path& path_b,
         const features::FeatureSet& features_b,
-        std::span<const AlignLiveIndexMatch> matches);
+        std::span<const AlignLiveIndexMatch> matches,
+        AlignLiveKind kind = AlignLiveKind::matching);
     void flush();
 
 private:

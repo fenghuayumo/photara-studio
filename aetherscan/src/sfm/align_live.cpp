@@ -1,11 +1,11 @@
 #include "sfm/align_live.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iterator>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -23,7 +23,7 @@ namespace aetherscan::sfm {
 namespace {
 
 constexpr char k_magic[4] = {'A', 'S', 'A', 'L'};
-constexpr std::uint32_t k_version = 1;
+constexpr std::uint32_t k_version = 2;
 constexpr std::size_t k_max_keypoints = 2'000;
 constexpr std::size_t k_max_matches = 400;
 constexpr auto k_min_write_interval = std::chrono::milliseconds(90);
@@ -80,27 +80,73 @@ std::vector<AlignLiveKeypoint> subsample_keypoints(
     const auto& keypoints = features.keypoints;
     const float width = std::max(1.F, static_cast<float>(features.image_width));
     const float height = std::max(1.F, static_cast<float>(features.image_height));
-    std::vector<std::size_t> order(keypoints.size());
-    std::iota(order.begin(), order.end(), 0);
-    if (order.size() > k_max_keypoints) {
-        std::partial_sort(
-            order.begin(),
-            order.begin() + static_cast<std::ptrdiff_t>(k_max_keypoints),
-            order.end(), [&](const std::size_t a, const std::size_t b) {
-                return keypoints[a].response > keypoints[b].response;
-            });
-        order.resize(k_max_keypoints);
-    }
-    std::vector<AlignLiveKeypoint> out;
-    out.reserve(order.size());
-    for (const std::size_t i : order) {
+    auto to_live = [&](const std::size_t i) {
         const auto& keypoint = keypoints[i];
         AlignLiveKeypoint point;
         point.u = keypoint.x / width;
         point.v = keypoint.y / height;
         point.scale = std::clamp(keypoint.scale / width, 0.002F, 0.08F);
-        out.push_back(point);
+        return point;
+    };
+    if (keypoints.size() <= k_max_keypoints) {
+        std::vector<AlignLiveKeypoint> out;
+        out.reserve(keypoints.size());
+        for (std::size_t i = 0; i < keypoints.size(); ++i)
+            out.push_back(to_live(i));
+        return out;
     }
+
+    // Cover the frame instead of taking the first/highest-response slice.
+    // SiftGPU leaves response at 0 and VLFeat at 1, so a global top-K by
+    // response collapses to detection order (top of the image).
+    constexpr int k_grid = 16;
+    const float cell_w = width / static_cast<float>(k_grid);
+    const float cell_h = height / static_cast<float>(k_grid);
+    std::array<std::vector<std::size_t>, k_grid * k_grid> cells;
+    for (std::size_t i = 0; i < keypoints.size(); ++i) {
+        const auto& keypoint = keypoints[i];
+        const int column = std::clamp(
+            static_cast<int>(keypoint.x / cell_w), 0, k_grid - 1);
+        const int row = std::clamp(
+            static_cast<int>(keypoint.y / cell_h), 0, k_grid - 1);
+        cells[static_cast<std::size_t>(row * k_grid + column)].push_back(i);
+    }
+    const auto stronger = [&](const std::size_t a, const std::size_t b) {
+        const auto& left = keypoints[a];
+        const auto& right = keypoints[b];
+        if (left.response != right.response)
+            return left.response > right.response;
+        if (left.scale != right.scale) return left.scale > right.scale;
+        return a < b;
+    };
+    for (auto& cell : cells) {
+        if (cell.size() > 1) std::sort(cell.begin(), cell.end(), stronger);
+    }
+
+    std::vector<std::size_t> selected;
+    selected.reserve(k_max_keypoints);
+    std::array<std::size_t, k_grid * k_grid> offsets{};
+    for (int current = 0; selected.size() < k_max_keypoints;
+         current = (current + 1) % (k_grid * k_grid)) {
+        auto& offset = offsets[static_cast<std::size_t>(current)];
+        const auto& cell = cells[static_cast<std::size_t>(current)];
+        if (offset >= cell.size()) {
+            bool remaining = false;
+            for (std::size_t i = 0; i < cells.size(); ++i) {
+                if (offsets[i] < cells[i].size()) {
+                    remaining = true;
+                    break;
+                }
+            }
+            if (!remaining) break;
+            continue;
+        }
+        selected.push_back(cell[offset++]);
+    }
+
+    std::vector<AlignLiveKeypoint> out;
+    out.reserve(selected.size());
+    for (const std::size_t i : selected) out.push_back(to_live(i));
     return out;
 }
 
@@ -135,6 +181,7 @@ std::vector<AlignLiveMatch> subsample_matches(
         line.v0 = p0.y / ah;
         line.u1 = p1.x / bw;
         line.v1 = p1.y / bh;
+        line.score = match.score;
         out.push_back(line);
     }
     return out;
@@ -172,6 +219,7 @@ void encode_frame(const AlignLiveFrame& frame, std::string& out) {
         append_pod(out, line.v0);
         append_pod(out, line.u1);
         append_pod(out, line.v1);
+        append_pod(out, line.score);
     }
     append_pod(out, frame.total_keypoints_a);
     append_pod(out, frame.total_keypoints_b);
@@ -187,7 +235,8 @@ bool decode_frame(const std::string& in, AlignLiveFrame& frame) {
     if (!read_bytes(in, offset, magic, 4)) return false;
     if (std::memcmp(magic, k_magic, 4) != 0) return false;
     std::uint32_t version{};
-    if (!read_pod(in, offset, version) || version != k_version) return false;
+    if (!read_pod(in, offset, version) || (version != 1 && version != 2))
+        return false;
     std::uint32_t kind{};
     if (!read_pod(in, offset, kind)) return false;
     frame = {};
@@ -218,6 +267,11 @@ bool decode_frame(const std::string& in, AlignLiveFrame& frame) {
         if (!read_pod(in, offset, line.u0) || !read_pod(in, offset, line.v0) ||
             !read_pod(in, offset, line.u1) || !read_pod(in, offset, line.v1))
             return false;
+        if (version >= 2) {
+            if (!read_pod(in, offset, line.score)) return false;
+        } else {
+            line.score = 1.F;
+        }
     }
     if (!read_pod(in, offset, frame.total_keypoints_a) ||
         !read_pod(in, offset, frame.total_keypoints_b) ||
@@ -300,10 +354,11 @@ void AlignLivePreview::publish_matches(
     const std::size_t index_a, const std::filesystem::path& path_a,
     const features::FeatureSet& features_a, const std::size_t index_b,
     const std::filesystem::path& path_b, const features::FeatureSet& features_b,
-    const std::span<const AlignLiveIndexMatch> matches) {
-    if (matches.empty()) return;
+    const std::span<const AlignLiveIndexMatch> matches,
+    const AlignLiveKind kind) {
+    if (matches.empty() && kind != AlignLiveKind::inliers) return;
     AlignLiveFrame frame;
-    frame.kind = AlignLiveKind::matching;
+    frame.kind = is_live_pair_kind(kind) ? kind : AlignLiveKind::matching;
     frame.index_a = static_cast<std::int32_t>(index_a);
     frame.index_b = static_cast<std::int32_t>(index_b);
     frame.path_a = path_a;

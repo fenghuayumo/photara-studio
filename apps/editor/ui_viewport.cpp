@@ -190,6 +190,96 @@ bool draw_scene_toggle_rail(App& app, const ImVec2 view_min) {
     return hovered;
 }
 
+int align_step_rank(const Stage stage) {
+    switch (stage) {
+        case Stage::preparing:
+        case Stage::features: return 0;
+        case Stage::matching: return 1;
+        case Stage::tracks: return 2;
+        case Stage::mapping:
+        case Stage::exporting: return 3;
+        default: return -1;
+    }
+}
+
+void draw_align_step_bar(const App& app, const ImVec2 origin, const float width) {
+    struct Step {
+        const char* label;
+    };
+    const Step steps[] = {
+        {tr("Features")},
+        {tr("Matching")},
+        {tr("Tracks")},
+        {tr("Poses")},
+    };
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 bar_max{origin.x + width, origin.y + 36.F};
+    draw->AddRectFilled(origin, bar_max, theme::u32(theme::surface_2));
+    draw->AddLine(
+        {origin.x, bar_max.y - 1.F}, {bar_max.x, bar_max.y - 1.F},
+        theme::u32(theme::border));
+
+    const int current = align_step_rank(app.monitor.stage());
+    const float pad = 10.F;
+    const float inner = std::max(1.F, width - pad * 2.F);
+    const float cell = inner / 4.F;
+    ImFont* small = theme::small_font();
+    for (int i = 0; i < 4; ++i) {
+        const float x = origin.x + pad + cell * static_cast<float>(i);
+        const bool active = i == current;
+        const bool done = current > i;
+        if (i < 3) {
+            const ImVec2 a{x + cell - 18.F, origin.y + 18.F};
+            const ImVec2 b{x + cell + 6.F, origin.y + 18.F};
+            draw->AddLine(
+                a, b,
+                theme::u32(done ? theme::success : theme::border, 0.85F), 1.6F);
+        }
+        const ImVec2 chip_min{x + 2.F, origin.y + 6.F};
+        const ImVec2 chip_max{
+            x + std::min(cell - 20.F, 118.F), origin.y + 30.F};
+        if (active) {
+            draw->AddRectFilled(
+                chip_min, chip_max, theme::u32(theme::fade(theme::accent, 0.22F)),
+                6.F);
+            draw->AddRect(
+                chip_min, chip_max, theme::u32(theme::accent, 0.8F), 6.F);
+        } else if (done) {
+            draw->AddRectFilled(
+                chip_min, chip_max, theme::u32(theme::fade(theme::success, 0.12F)),
+                6.F);
+        }
+        char index[4];
+        std::snprintf(index, sizeof(index), "%d", i + 1);
+        const ImVec4 colour = active
+            ? theme::accent
+            : (done ? theme::success : theme::text_faint);
+        draw->AddCircleFilled(
+            {chip_min.x + 12.F, origin.y + 18.F}, 7.F, theme::u32(colour, 0.9F));
+        const ImVec2 ns = ImGui::CalcTextSize(index);
+        draw->AddText(
+            {chip_min.x + 12.F - ns.x * 0.5F,
+             origin.y + 18.F - ns.y * 0.5F},
+            theme::u32(theme::surface_0), index);
+        draw->AddText(
+            small, small->FontSize, {chip_min.x + 24.F, origin.y + 11.F},
+            theme::u32(colour), steps[i].label);
+    }
+
+    const SubTask& task = app.monitor.task();
+    if (task.total > 0 && width > 520.F) {
+        char progress[48];
+        std::snprintf(
+            progress, sizeof(progress), "%llu / %llu",
+            static_cast<unsigned long long>(task.completed),
+            static_cast<unsigned long long>(task.total));
+        const ImVec2 size = ImGui::CalcTextSize(progress);
+        draw->AddText(
+            {bar_max.x - size.x - 14.F, origin.y + 10.F},
+            theme::u32(theme::text_muted), progress);
+    }
+}
+
 void draw_workspace_toggle(App& app, const ImVec2 origin) {
     struct Item {
         const char* id;
@@ -584,17 +674,27 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
 
     if (!app.loading_scene && !app.scene.has_points() && !app.mesh.has() &&
         (aligning || !app.has_sparse || app.suppress_scene_auto_load)) {
-        draw_empty_viewport(
-            draw, min, max,
-            aligning ? tr("Aligning photos...")
-                     : app.settings.images_dir[0] != '\0'
-                    ? tr("Ready to align cameras")
-                    : tr("Drop photos, a video, or a reconstruction"),
-            aligning
-                ? tr("Cameras and points appear as soon as geometry is available")
-                : app.settings.images_dir[0] != '\0'
-                ? tr("Run Align Photos, or drop a different folder, video, .asfm, or .ascan")
-                : tr("Drop an image folder, photos, a video, .asfm, or .ascan onto this view"));
+        const char* headline = tr("Drop photos, a video, or a reconstruction");
+        const char* hint = tr(
+            "Drop an image folder, photos, a video, .asfm, or .ascan onto this view");
+        if (aligning) {
+            const Stage stage = app.monitor.stage();
+            if (stage == Stage::features || stage == Stage::preparing) {
+                headline = tr("Extracting features in 2D");
+                hint = tr("Switch to 2D to watch keypoints appear on each photo");
+            } else if (stage == Stage::matching) {
+                headline = tr("Matching images in 2D");
+                hint = tr("Switch to 2D to watch correspondence lines between pairs");
+            } else {
+                headline = tr("Aligning photos...");
+                hint = tr("Cameras and points appear as soon as geometry is available");
+            }
+        } else if (app.settings.images_dir[0] != '\0') {
+            headline = tr("Ready to align cameras");
+            hint = tr(
+                "Run Align Photos, or drop a different folder, video, .asfm, or .ascan");
+        }
+        draw_empty_viewport(draw, min, max, headline, hint);
     }
 
     ViewOptions draw_options = app.view_options;
@@ -706,9 +806,12 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         draw->AddText(
             {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_faint), hint);
     }
+    const bool align_waiting = aligning && !app.scene.has_points();
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
-        tr("LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  drag region gizmo  |  double-click focus"));
+        align_waiting
+            ? tr("2 / 3: switch 2D image QA and 3D scene")
+            : tr("LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  drag region gizmo  |  double-click focus"));
 
     if (!gizmo_captures && stats.hovered_view >= 0 &&
         static_cast<std::size_t>(stats.hovered_view) < app.scene.views.size()) {
@@ -924,6 +1027,9 @@ void draw_viewport_panel(App& app) {
     app.viewport_bounds_valid = true;
 
     constexpr float k_header_height = 36.F;
+    constexpr float k_align_steps_h = 36.F;
+    const bool align_steps = alignment_job_running(app);
+    const float top_h = k_header_height + (align_steps ? k_align_steps_h : 0.F);
     const ImVec2 content_start = ImGui::GetCursorPos();
     const ImVec2 header_origin = ImGui::GetCursorScreenPos();
     const float header_width = ImGui::GetContentRegionAvail().x;
@@ -931,10 +1037,12 @@ void draw_viewport_panel(App& app) {
         header_origin,
         {header_origin.x + header_width, header_origin.y + k_header_height},
         theme::u32(theme::surface_3));
-    ImGui::GetWindowDrawList()->AddLine(
-        {header_origin.x, header_origin.y + k_header_height - 1.F},
-        {header_origin.x + header_width, header_origin.y + k_header_height - 1.F},
-        theme::u32(theme::border));
+    if (!align_steps)
+        ImGui::GetWindowDrawList()->AddLine(
+            {header_origin.x, header_origin.y + k_header_height - 1.F},
+            {header_origin.x + header_width,
+             header_origin.y + k_header_height - 1.F},
+            theme::u32(theme::border));
 
     draw_workspace_toggle(app, header_origin);
 
@@ -945,7 +1053,10 @@ void draw_viewport_panel(App& app) {
             state = tr("Extracting features");
         else if (alignment_job_running(app) &&
                  app.monitor.stage() == Stage::matching)
-            state = tr("Matching views");
+            state = app.align_live.kind ==
+                    aetherscan::sfm::AlignLiveKind::inliers
+                ? tr("Verified pairs")
+                : tr("Matching views");
         else
             state = tr("IMAGE QA");
     }
@@ -954,7 +1065,11 @@ void draw_viewport_panel(App& app) {
         content_start.x + std::max(8.F, header_width - state_width - 14.F),
         content_start.y + 10.F});
     theme::caption(state);
-    ImGui::SetCursorPos({content_start.x, content_start.y + k_header_height});
+    if (align_steps)
+        draw_align_step_bar(
+            app, {header_origin.x, header_origin.y + k_header_height},
+            header_width);
+    ImGui::SetCursorPos({content_start.x, content_start.y + top_h});
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
@@ -1001,8 +1116,12 @@ void draw_viewport_panel(App& app) {
         draw_scene_toggle_rail(app, view_min);
     } else {
         draw_sparse_tab(app, view_min, view_max);
-        draw_view_mode_rail(app, view_min);
-        draw_scene_toggle_rail(app, view_min);
+        const bool align_waiting =
+            alignment_job_running(app) && !app.scene.has_points();
+        if (!align_waiting) {
+            draw_view_mode_rail(app, view_min);
+            draw_scene_toggle_rail(app, view_min);
+        }
     }
     ImGui::EndChild();
     ImGui::End();

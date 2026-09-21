@@ -40,6 +40,7 @@ struct ImageQaState {
     ImVec2 pan{};
     bool show_untracked{true};
     bool show_triangulated{true};
+    bool show_live_keypoints{false};
     int filmstrip_first{};
     int filmstrip_last{};
     bool filmstrip_reselect{};
@@ -130,6 +131,10 @@ void refresh_image_qa_folder(
 
 [[nodiscard]] int image_qa_count(
     const ImageQaState& state, const SparseScene& scene);
+
+[[nodiscard]] int image_qa_index_for_path(
+    const ImageQaState& state, const SparseScene& scene,
+    const std::filesystem::path& path, int fallback);
 
 void select_image_qa_view(ImageQaState& state, int index, int count);
 

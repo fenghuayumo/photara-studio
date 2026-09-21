@@ -740,8 +740,26 @@ Action draw_inspector(App& app) {
         ImGui::CollapsingHeader(
             tr("Image QA"), ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
+        const bool live_pair =
+            alignment_job_running(app) &&
+            aetherscan::sfm::is_live_pair_kind(app.align_live.kind);
         const int count = image_qa_count(app.image_qa, app.scene);
-        if (app.image_qa.selected >= 0 && app.image_qa.selected < count &&
+        if (live_pair) {
+            const auto& live = app.align_live;
+            const std::string name_a = live.path_a.empty()
+                ? std::string{"—"}
+                : live.path_a.filename().string();
+            const std::string name_b = live.path_b.empty()
+                ? std::string{"—"}
+                : live.path_b.filename().string();
+            theme::metric("A", name_a.c_str());
+            theme::metric("B", name_b.c_str());
+            theme::metric(
+                live.kind == aetherscan::sfm::AlignLiveKind::inliers
+                    ? tr("inliers")
+                    : tr("matches"),
+                std::to_string(live.total_matches).c_str());
+        } else if (app.image_qa.selected >= 0 && app.image_qa.selected < count &&
             static_cast<std::size_t>(app.image_qa.selected) <
                 app.scene.views.size()) {
             const ViewPose& pose =
@@ -767,8 +785,16 @@ Action draw_inspector(App& app) {
             theme::caption("Align photos to inspect cameras and features.");
         }
         ImGui::Spacing();
-        ImGui::Checkbox(tr("Show triangulated"), &app.image_qa.show_triangulated);
-        ImGui::Checkbox(tr("Show untracked keypoints"), &app.image_qa.show_untracked);
+        if (live_pair) {
+            ImGui::Checkbox(
+                tr("Show unmatched keypoints"),
+                &app.image_qa.show_live_keypoints);
+        } else {
+            ImGui::Checkbox(
+                tr("Show triangulated"), &app.image_qa.show_triangulated);
+            ImGui::Checkbox(
+                tr("Show untracked keypoints"), &app.image_qa.show_untracked);
+        }
         if (app.image_qa_session.metrics().valid) {
             ImGui::Spacing();
             theme::section_header("COMPARE");

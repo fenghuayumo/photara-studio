@@ -2196,8 +2196,12 @@ void poll_align_live(App& app) {
         refresh_image_qa_folder(
             app.image_qa, reconstruction_images_path(app));
         const int count = image_qa_count(app.image_qa, app.scene);
-        if (app.align_live.index_a >= 0)
-            select_image_qa_view(app.image_qa, app.align_live.index_a, count);
+        if (app.align_live.index_a >= 0) {
+            const int index = image_qa_index_for_path(
+                app.image_qa, app.scene, app.align_live.path_a,
+                app.align_live.index_a);
+            select_image_qa_view(app.image_qa, index, count);
+        }
         if (app.align_live.kind == aetherscan::sfm::AlignLiveKind::features)
             app.image_qa.mode = ImageQaMode::features;
     }
@@ -2206,7 +2210,7 @@ void poll_align_live(App& app) {
     const Stage stage = app.monitor.stage();
     const bool live_2d =
         app.align_live.kind == aetherscan::sfm::AlignLiveKind::features ||
-        app.align_live.kind == aetherscan::sfm::AlignLiveKind::matching;
+        aetherscan::sfm::is_live_pair_kind(app.align_live.kind);
     refresh_image_qa_folder(app.image_qa, reconstruction_images_path(app));
     const int count = image_qa_count(app.image_qa, app.scene);
     if ((stage == Stage::features || stage == Stage::matching) &&

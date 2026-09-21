@@ -14,6 +14,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace editor {
@@ -402,24 +403,128 @@ void draw_live_keypoints(
     draw->PopClipRect();
 }
 
+ImVec4 lerp_colour(const ImVec4& a, const ImVec4& b, const float t) {
+    const float x = std::clamp(t, 0.F, 1.F);
+    return {
+        a.x + (b.x - a.x) * x, a.y + (b.y - a.y) * x,
+        a.z + (b.z - a.z) * x, a.w + (b.w - a.w) * x};
+}
+
+float dist2_to_segment(const ImVec2 p, const ImVec2 a, const ImVec2 b) {
+    const float abx = b.x - a.x;
+    const float aby = b.y - a.y;
+    const float apx = p.x - a.x;
+    const float apy = p.y - a.y;
+    const float ab2 = abx * abx + aby * aby;
+    const float t = ab2 > 1e-8F
+        ? std::clamp((apx * abx + apy * aby) / ab2, 0.F, 1.F)
+        : 0.F;
+    const float dx = apx - abx * t;
+    const float dy = apy - aby * t;
+    return dx * dx + dy * dy;
+}
+
+int pick_live_match(
+    const std::vector<aetherscan::sfm::AlignLiveMatch>& matches,
+    const ImVec2 a_min, const ImVec2 a_max, const ImVec2 b_min,
+    const ImVec2 b_max, const ImVec2 mouse) {
+    const float aw = a_max.x - a_min.x;
+    const float ah = a_max.y - a_min.y;
+    const float bw = b_max.x - b_min.x;
+    const float bh = b_max.y - b_min.y;
+    if (aw < 8.F || ah < 8.F || bw < 8.F || bh < 8.F || matches.empty())
+        return -1;
+    constexpr float k_max = 14.F * 14.F;
+    int best = -1;
+    float best_d = k_max;
+    for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
+        const auto& match = matches[static_cast<std::size_t>(i)];
+        const ImVec2 p0{a_min.x + match.u0 * aw, a_min.y + match.v0 * ah};
+        const ImVec2 p1{b_min.x + match.u1 * bw, b_min.y + match.v1 * bh};
+        const float d = dist2_to_segment(mouse, p0, p1);
+        if (d < best_d) {
+            best_d = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
 void draw_live_matches(
     ImDrawList* draw, const std::vector<aetherscan::sfm::AlignLiveMatch>& matches,
     const ImVec2 a_min, const ImVec2 a_max, const ImVec2 b_min,
-    const ImVec2 b_max) {
+    const ImVec2 b_max, const int hovered, const bool verified) {
     const float aw = a_max.x - a_min.x;
     const float ah = a_max.y - a_min.y;
     const float bw = b_max.x - b_min.x;
     const float bh = b_max.y - b_min.y;
     if (aw < 8.F || ah < 8.F || bw < 8.F || bh < 8.F || matches.empty()) return;
-    const ImU32 line = theme::u32(theme::accent, 0.42F);
-    const ImU32 dot = theme::u32(theme::accent, 0.9F);
+    float lo = matches.front().score;
+    float hi = matches.front().score;
     for (const auto& match : matches) {
+        lo = std::min(lo, match.score);
+        hi = std::max(hi, match.score);
+    }
+    const float span = std::max(1e-5F, hi - lo);
+    const bool isolate = hovered >= 0 &&
+                         hovered < static_cast<int>(matches.size());
+    const ImVec4 high = verified ? theme::success : theme::accent;
+    const ImVec4 low = verified ? theme::fade(theme::success, 0.55F)
+                                : theme::warning;
+    for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
+        const auto& match = matches[static_cast<std::size_t>(i)];
         const ImVec2 p0{a_min.x + match.u0 * aw, a_min.y + match.v0 * ah};
         const ImVec2 p1{b_min.x + match.u1 * bw, b_min.y + match.v1 * bh};
-        draw->AddLine(p0, p1, line, 1.1F);
-        draw->AddCircleFilled(p0, 2.2F, dot);
-        draw->AddCircleFilled(p1, 2.2F, dot);
+        const float t = verified ? 1.F : (match.score - lo) / span;
+        const bool hot = isolate && i == hovered;
+        const bool dim = isolate && !hot;
+        const ImVec4 colour = hot ? theme::text_bright : lerp_colour(low, high, t);
+        const float alpha = dim ? 0.07F : (hot ? 1.F : 0.32F + 0.60F * t);
+        draw->AddLine(p0, p1, theme::u32(colour, alpha), hot ? 2.4F : 1.25F);
+        if (dim) continue;
+        const float radius = hot ? 3.6F : 2.2F;
+        const ImU32 dot = theme::u32(hot ? theme::text_bright : high, 0.95F);
+        draw->AddCircleFilled(p0, radius, dot);
+        draw->AddCircleFilled(p1, radius, dot);
     }
+}
+
+void draw_colour_key(
+    ImDrawList* draw, ImVec2& origin, const ImVec4& colour, const char* label) {
+    ImFont* small = theme::small_font();
+    const float text_w =
+        small->CalcTextSizeA(small->FontSize, 240.F, 0.F, label).x;
+    draw->AddCircleFilled(
+        {origin.x + 5.F, origin.y + small->FontSize * 0.55F}, 4.F,
+        theme::u32(colour));
+    draw->AddText(
+        small, small->FontSize, {origin.x + 14.F, origin.y},
+        theme::u32(theme::text_muted), label);
+    origin.x += text_w + 28.F;
+}
+
+void draw_named_chip(
+    ImDrawList* draw, const ImVec2 origin, const char* tag, const char* name,
+    const ImVec4& mark) {
+    char text[192];
+    if (name != nullptr && name[0] != '\0')
+        std::snprintf(text, sizeof(text), "%s  %s", tag, name);
+    else
+        std::snprintf(text, sizeof(text), "%s", tag);
+    ImFont* small = theme::small_font();
+    const ImVec2 size =
+        small->CalcTextSizeA(small->FontSize, 260.F, 0.F, text);
+    const ImVec2 max{origin.x + size.x + 18.F, origin.y + size.y + 10.F};
+    draw->AddRectFilled(
+        origin, max, theme::u32(theme::fade(theme::surface_0, 0.78F)), 5.F);
+    draw->AddRectFilled(
+        {origin.x, origin.y + 5.F}, {origin.x + 3.F, max.y - 5.F},
+        theme::u32(mark));
+    draw->PushClipRect(origin, max, true);
+    draw->AddText(
+        small, small->FontSize, {origin.x + 10.F, origin.y + 5.F},
+        theme::u32(theme::text_bright), text);
+    draw->PopClipRect();
 }
 
 void fit_image_rect(
@@ -675,6 +780,29 @@ int image_qa_count(const ImageQaState& state, const SparseScene& scene) {
     return static_cast<int>(state.folder_images.size());
 }
 
+int image_qa_index_for_path(
+    const ImageQaState& state, const SparseScene& scene,
+    const std::filesystem::path& path, const int fallback) {
+    if (path.empty()) return fallback;
+    if (!scene.views.empty()) {
+        for (int i = 0; i < static_cast<int>(scene.views.size()); ++i) {
+            if (scene.views[static_cast<std::size_t>(i)].image_path == path)
+                return i;
+        }
+        return fallback;
+    }
+    for (int i = 0; i < static_cast<int>(state.folder_images.size()); ++i) {
+        if (state.folder_images[static_cast<std::size_t>(i)] == path)
+            return i;
+    }
+    const auto name = path.filename();
+    for (int i = 0; i < static_cast<int>(state.folder_images.size()); ++i) {
+        if (state.folder_images[static_cast<std::size_t>(i)].filename() == name)
+            return i;
+    }
+    return fallback;
+}
+
 void select_image_qa_view(
     ImageQaState& state, const int index, const int count) {
     if (count <= 0) {
@@ -705,7 +833,9 @@ void draw_image_qa(
     const bool live_features =
         live != nullptr && live->kind == aetherscan::sfm::AlignLiveKind::features;
     const bool live_matching =
-        live != nullptr && live->kind == aetherscan::sfm::AlignLiveKind::matching;
+        live != nullptr && aetherscan::sfm::is_live_pair_kind(live->kind);
+    const bool live_inliers =
+        live != nullptr && live->kind == aetherscan::sfm::AlignLiveKind::inliers;
     const int count = image_qa_count(state, scene);
     if (state.selected < 0 && count > 0) state.selected = 0;
     if (state.selected >= count) state.selected = count > 0 ? count - 1 : -1;
@@ -744,8 +874,8 @@ void draw_image_qa(
         char status[160];
         if (live_matching) {
             std::snprintf(
-                status, sizeof(status), "%s  ·  %u %s",
-                tr("Matching views"), live->total_matches, tr("inliers"));
+                status, sizeof(status), "%s",
+                live_inliers ? tr("Verified pairs") : tr("Matching views"));
         } else {
             std::snprintf(
                 status, sizeof(status), "%s  ·  %u %s",
@@ -755,6 +885,17 @@ void draw_image_qa(
         draw->AddText(
             small, small->FontSize, {min.x + 14.F, min.y + 16.F},
             theme::u32(theme::accent), status);
+        if (live_matching) {
+            const float status_w = small->CalcTextSizeA(
+                small->FontSize, 1e6F, 0.F, status).x;
+            ImGui::SetCursorScreenPos({min.x + 22.F + status_w, min.y + 9.F});
+            if (mode_chip(
+                    "##qa_live_kp", icons::Icon::features, tr("Keypoints"),
+                    state.show_live_keypoints, true))
+                state.show_live_keypoints = !state.show_live_keypoints;
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("%s", tr("Show unmatched keypoints"));
+        }
     } else {
         const ModeItem modes[] = {
             {"##qa_photo", icons::Icon::photo, tr("Photo"), ImageQaMode::photo,
@@ -797,26 +938,30 @@ void draw_image_qa(
     const float label_w = std::max(label_size.x, 56.F);
     const float nav_y = min.y + (k_toolbar_h - nav_size.y) * 0.5F;
     const float next_x = max.x - 12.F - nav_size.x;
-    const float label_x = next_x - 8.F - label_w;
+    const float label_x = live_matching
+        ? max.x - 16.F - label_w
+        : next_x - 8.F - label_w;
     const float prev_x = label_x - 8.F - nav_size.x;
 
-    ImGui::SetCursorScreenPos({prev_x, nav_y});
-    if (icons::ghost_button(
-            "##qa_prev", icons::Icon::chevron_left, nav_size, false, count > 1,
-            tr("Previous image")))
-        select_image_qa_view(state, state.selected - 1, count);
     ImGui::SetCursorScreenPos(
         {label_x, nav_y + (nav_size.y - label_size.y) * 0.5F});
     ImGui::PushStyleColor(ImGuiCol_Text, theme::text_muted);
     ImGui::TextUnformatted(index_label);
     ImGui::PopStyleColor();
-    ImGui::SetCursorScreenPos({next_x, nav_y});
-    if (icons::ghost_button(
-            "##qa_next", icons::Icon::chevron_right, nav_size, false, count > 1,
-            tr("Next image")))
-        select_image_qa_view(state, state.selected + 1, count);
+    if (!live_matching) {
+        ImGui::SetCursorScreenPos({prev_x, nav_y});
+        if (icons::ghost_button(
+                "##qa_prev", icons::Icon::chevron_left, nav_size, false, count > 1,
+                tr("Previous image")))
+            select_image_qa_view(state, state.selected - 1, count);
+        ImGui::SetCursorScreenPos({next_x, nav_y});
+        if (icons::ghost_button(
+                "##qa_next", icons::Icon::chevron_right, nav_size, false,
+                count > 1, tr("Next image")))
+            select_image_qa_view(state, state.selected + 1, count);
+    }
 
-    if (!item.name.empty() && (max.x - min.x) > 780.F) {
+    if (!live_matching && !item.name.empty() && (max.x - min.x) > 780.F) {
         ImFont* small = theme::small_font();
         const float name_w =
             small->CalcTextSizeA(small->FontSize, 220.F, 0.F, item.name.c_str()).x;
@@ -826,7 +971,7 @@ void draw_image_qa(
             theme::u32(theme::text_faint), item.name.c_str());
     }
 
-    const bool show_strip = count > 0;
+    const bool show_strip = count > 0 && !live_matching;
     const ImVec2 canvas_min{min.x, toolbar_max.y};
     const ImVec2 canvas_max{
         max.x, show_strip ? max.y - k_filmstrip_h : max.y};
@@ -907,10 +1052,12 @@ void draw_image_qa(
             img_max);
     }
     if (canvas_hovered && !io.WantTextInput) {
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
-            select_image_qa_view(state, state.selected - 1, count);
-        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
-            select_image_qa_view(state, state.selected + 1, count);
+        if (!live_matching) {
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
+                select_image_qa_view(state, state.selected - 1, count);
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
+                select_image_qa_view(state, state.selected + 1, count);
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_F)) {
             state.zoom = 1.F;
             state.pan = {};
@@ -951,24 +1098,62 @@ void draw_image_qa(
             draw_empty(
                 draw, right_min, canvas_max, tr("Loading pair…"),
                 tr("Reading the matched image"));
+        const int hovered_match = has_gt && has_b && canvas_hovered && !panning
+            ? pick_live_match(
+                  live->matches, a_min, a_max, b_min, b_max, io.MousePos)
+            : -1;
+        if (state.show_live_keypoints) {
+            if (has_gt)
+                draw_live_keypoints(
+                    draw, live->keypoints_a, a_min, a_max,
+                    theme::u32(theme::warning, 0.28F));
+            if (has_b)
+                draw_live_keypoints(
+                    draw, live->keypoints_b, b_min, b_max,
+                    theme::u32(theme::warning, 0.28F));
+        }
         if (has_gt && has_b)
-            draw_live_matches(draw, live->matches, a_min, a_max, b_min, b_max);
-        if (has_gt)
-            draw_live_keypoints(
-                draw, live->keypoints_a, a_min, a_max,
-                theme::u32(theme::warning, 0.7F));
-        if (has_b)
-            draw_live_keypoints(
-                draw, live->keypoints_b, b_min, b_max,
-                theme::u32(theme::warning, 0.7F));
+            draw_live_matches(
+                draw, live->matches, a_min, a_max, b_min, b_max, hovered_match,
+                live_inliers);
+        if (has_gt) {
+            const std::string name_a = live->path_a.empty()
+                ? std::string{}
+                : live->path_a.filename().string();
+            draw_named_chip(
+                draw, {a_min.x + 8.F, a_min.y + 8.F}, "A", name_a.c_str(),
+                theme::accent);
+        }
+        if (has_b) {
+            const std::string name_b = live->path_b.empty()
+                ? std::string{}
+                : live->path_b.filename().string();
+            draw_named_chip(
+                draw, {b_min.x + 8.F, b_min.y + 8.F}, "B", name_b.c_str(),
+                theme::warning);
+        }
+        if (hovered_match >= 0 &&
+            hovered_match < static_cast<int>(live->matches.size())) {
+            if (live_inliers) {
+                ImGui::SetTooltip("%s", tr("line = verified correspondence"));
+            } else {
+                ImGui::SetTooltip(
+                    "%s  %.3f", tr("score"),
+                    live->matches[static_cast<std::size_t>(hovered_match)].score);
+            }
+        }
         char pair_legend[192];
-        std::snprintf(
-            pair_legend, sizeof(pair_legend),
-            "%s  ·  %u %s",
-            live->path_b.empty()
-                ? ""
-                : live->path_b.filename().string().c_str(),
-            live->total_matches, tr("inliers"));
+        if (live_inliers) {
+            std::snprintf(
+                pair_legend, sizeof(pair_legend), "%u %s    ·    %s",
+                live->total_matches, tr("inliers"),
+                tr("line = verified correspondence"));
+        } else {
+            std::snprintf(
+                pair_legend, sizeof(pair_legend), "%u %s    ·    %s",
+                live->total_matches, tr("matches"),
+                tr("brighter line = higher score"));
+        }
         draw->AddText(
             {canvas_min.x + 16.F, canvas_max.y - 22.F},
             theme::u32(theme::text_muted), pair_legend);
@@ -1047,11 +1232,18 @@ void draw_image_qa(
                 draw, canvas_min, canvas_max, tr("Waiting for the live splat…"),
                 tr("The renderer is snapping to this training camera"));
         }
-        if (live_features)
+        if (live_features) {
             draw_live_keypoints(
                 draw, live->keypoints_a, img_min, img_max,
                 theme::u32(theme::warning, 0.85F));
-        else if (state.mode == ImageQaMode::features && item.pose)
+            const std::string name_a = live->path_a.empty()
+                ? std::string{}
+                : live->path_a.filename().string();
+            if (!name_a.empty())
+                draw_named_chip(
+                    draw, {img_min.x + 8.F, img_min.y + 8.F}, tr("Photo"),
+                    name_a.c_str(), theme::accent);
+        } else if (state.mode == ImageQaMode::features && item.pose)
             draw_features(draw, *item.pose, img_min, img_max, state);
     }
     draw->PopClipRect();
@@ -1066,14 +1258,23 @@ void draw_image_qa(
             theme::u32(theme::text_muted), legend);
     } else if (!live_align && has_gt && state.mode == ImageQaMode::features &&
                item.pose) {
-        char legend[128];
+        const std::size_t untracked =
+            item.pose->features.size() > item.pose->triangulated_features
+                ? item.pose->features.size() - item.pose->triangulated_features
+                : 0;
+        char tri_label[64];
+        char untracked_label[64];
         std::snprintf(
-            legend, sizeof(legend),
-            "%zu features   %zu triangulated", item.pose->features.size(),
-            item.pose->triangulated_features);
-        draw->AddText(
-            {canvas_min.x + 16.F, canvas_max.y - 22.F},
-            theme::u32(theme::text_muted), legend);
+            tri_label, sizeof(tri_label), "%zu %s",
+            item.pose->triangulated_features, tr("triangulated"));
+        std::snprintf(
+            untracked_label, sizeof(untracked_label), "%zu %s", untracked,
+            tr("untracked"));
+        ImVec2 key{canvas_min.x + 16.F, canvas_max.y - 22.F};
+        if (state.show_triangulated)
+            draw_colour_key(draw, key, theme::accent, tri_label);
+        if (state.show_untracked)
+            draw_colour_key(draw, key, theme::warning, untracked_label);
         if (item.pose->features.empty())
             draw->AddText(
                 {canvas_min.x + 16.F, canvas_max.y - 40.F},
@@ -1147,8 +1348,20 @@ void draw_image_qa(
         if (i) ImGui::SameLine(0.F, k_gap);
         ImGui::PushID(i);
         const ImVec2 thumb_min = ImGui::GetCursorScreenPos();
-        const bool selected = i == state.selected;
-        if (ImGui::InvisibleButton("##thumb", {k_thumb, strip_h})) {
+        const QaItem thumb = item_at(state, scene, i);
+        const bool pair_a = live_matching &&
+            (live->index_a == i ||
+             (!live->path_a.empty() && !thumb.path.empty() &&
+              (thumb.path == live->path_a ||
+               thumb.path.filename() == live->path_a.filename())));
+        const bool pair_b = live_matching && !pair_a &&
+            (live->index_b == i ||
+             (!live->path_b.empty() && !thumb.path.empty() &&
+              (thumb.path == live->path_b ||
+               thumb.path.filename() == live->path_b.filename())));
+        const bool selected = live_matching ? pair_a : (i == state.selected);
+        if (ImGui::InvisibleButton("##thumb", {k_thumb, strip_h}) &&
+            !live_matching) {
             select_image_qa_view(state, i, count);
             state.filmstrip_reselect = false;
         }
@@ -1156,17 +1369,19 @@ void draw_image_qa(
             ImGui::SetScrollHereX(0.5F);
         const bool hovered = ImGui::IsItemHovered();
         const ImVec2 thumb_max{thumb_min.x + k_thumb, thumb_min.y + strip_h};
-        const QaItem thumb = item_at(state, scene, i);
         ImDrawList* strip = ImGui::GetWindowDrawList();
         strip->AddRectFilled(
             thumb_min, thumb_max,
-            selected ? IM_COL32(28, 36, 48, 255) : IM_COL32(18, 20, 26, 255),
+            selected || pair_b ? IM_COL32(28, 36, 48, 255)
+                               : IM_COL32(18, 20, 26, 255),
             6.F);
+        const ImU32 thumb_border = selected
+            ? theme::u32(theme::accent, 0.9F)
+            : (pair_b ? theme::u32(theme::warning, 0.9F)
+                      : theme::u32(theme::border, hovered ? 0.9F : 0.55F));
         strip->AddRect(
-            thumb_min, thumb_max,
-            selected ? theme::u32(theme::accent, 0.9F)
-                     : theme::u32(theme::border, hovered ? 0.9F : 0.55F),
-            6.F, 0, selected ? 1.8F : 1.F);
+            thumb_min, thumb_max, thumb_border, 6.F, 0,
+            (selected || pair_b) ? 1.8F : 1.F);
 
         const ImVec2 pic_min{thumb_min.x + 4.F, thumb_min.y + 4.F};
         const ImVec2 pic_max{thumb_max.x - 4.F, thumb_max.y - 18.F};
@@ -1185,6 +1400,13 @@ void draw_image_qa(
                  (pic_min.y + pic_max.y - ns.y) * 0.5F},
                 theme::u32(theme::text_faint), n);
         }
+        if (pair_a || pair_b) {
+            ImFont* small = theme::small_font();
+            strip->AddText(
+                small, small->FontSize, {pic_min.x + 4.F, pic_min.y + 2.F},
+                theme::u32(pair_a ? theme::accent : theme::warning),
+                pair_a ? "A" : "B");
+        }
         if (thumb.registered || (!scene.views.empty() && thumb.pose)) {
             strip->AddCircleFilled(
                 {pic_max.x - 6.F, pic_min.y + 6.F}, 3.F,
@@ -1197,7 +1419,7 @@ void draw_image_qa(
             {thumb_max.x - 3.F, thumb_max.y - 2.F}, true);
         strip->AddText(
             small, small->FontSize, {thumb_min.x + 5.F, thumb_max.y - 15.F},
-            theme::u32(selected ? theme::text_bright : theme::text_faint),
+            theme::u32((selected || pair_b) ? theme::text_bright : theme::text_faint),
             label);
         strip->PopClipRect();
         if (hovered && !thumb.name.empty())

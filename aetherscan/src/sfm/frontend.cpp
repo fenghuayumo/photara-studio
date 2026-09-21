@@ -1014,14 +1014,14 @@ void emit_live_raw_matches(
 
 void emit_live_inliers(
     AlignLivePreview* live, const Scene& scene, const ImagePair& pair) {
-    if (live == nullptr || pair.matches.empty()) return;
+    if (live == nullptr) return;
     if (pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size())
         return;
     const auto packed = live_matches_from_inliers(pair.matches);
     live->publish_matches(
         pair.id1, scene.images[pair.id1].path, scene.images[pair.id1].features,
         pair.id2, scene.images[pair.id2].path, scene.images[pair.id2].features,
-        packed);
+        packed, AlignLiveKind::inliers);
 }
 
 // Owner-thread extract coordinator: main thread owns CUDA/ORT context while
@@ -2059,6 +2059,17 @@ FrontEndResult run_frontend(
         initialize_cameras(
             scene, options.focal_pixels, options.trust_focal_pixels, options.camera_model);
         core::Logger::instance().info("checkpoint hit: features");
+        if (runtime_options.live_preview != nullptr && !scene.images.empty()) {
+            const std::size_t n = scene.images.size();
+            const std::size_t stride = n <= 8 ? 1 : std::max<std::size_t>(1, n / 8);
+            for (std::size_t i = 0; i < n; ++i) {
+                if (i + 1 != n && i % stride != 0) continue;
+                emit_live_features(
+                    runtime_options.live_preview, i, scene.images[i].path,
+                    scene.images[i].features);
+                runtime_options.live_preview->flush();
+            }
+        }
     }
     result.timing.extract_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - extract_started)
