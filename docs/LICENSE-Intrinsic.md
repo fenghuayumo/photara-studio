@@ -15,7 +15,7 @@
 ## 影响面
 
 - 该许可只约束 Delight 权重与推理，不改变仓库其余部分（SfM / MVS / Splat /
-  aether_drender 贴图）的边界；
+  photara_drender 贴图）的边界；
 - 导出产物只有在显式使用 `--delight` 时才包含由这些权重生成的 albedo；
 - GGGS 参考 CUDA rasterizer 的许可边界另见
   `photara/third_party/gggs_reference/NOTICE.md`，

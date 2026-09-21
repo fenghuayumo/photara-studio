@@ -48,16 +48,17 @@ set(PHOTARA_ONNXRUNTIME_ROOT "" CACHE PATH
 # libpng directly; FreeImage remains the fallback for other formats; SIFT uses
 # vendored VLFeat; multi-view geometry uses Eigen.
 
-# Texture baking (aether_drender / UVAtlas / Vulkan) + optional Intrinsic delight.
-# Default source is the git submodule at third_party/aether_drender.
+# Texture baking (photara_drender / UVAtlas / Vulkan) + optional Intrinsic delight.
+# Default source is the git submodule at third_party/photara_drender. The
+# library inside it is still exported as aether_drender / aether::render.
 option(PHOTARA_ENABLE_TEXTURE
-    "Enable mesh UV unwrap + projective texture baking (aether_drender)" ON)
+    "Enable mesh UV unwrap + projective texture baking (photara_drender)" ON)
 option(PHOTARA_ENABLE_AETHER_MESH
-    "Use optional CGAL aether_drender mesh repair/decimation" ON)
+    "Use optional CGAL mesh repair/decimation from photara_drender" ON)
 option(PHOTARA_ENABLE_INSTANT_REMESH
     "Use Instant Meshes field-aligned remeshing before CGAL decimation" ON)
 set(PHOTARA_AETHER_DRENDER_ROOT "" CACHE PATH
-    "Path to aether_drender sources (empty = auto-detect submodule / sibling)")
+    "Path to photara_drender sources (empty = auto-detect submodule / sibling)")
 
 function(photara_resolve_aether_drender_root out_var)
     if(PHOTARA_AETHER_DRENDER_ROOT AND
@@ -66,8 +67,8 @@ function(photara_resolve_aether_drender_root out_var)
         return()
     endif()
     set(_candidates
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/aether_drender"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../aether_drender")
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/photara_drender"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../photara_drender")
     foreach(_cand IN LISTS _candidates)
         get_filename_component(_cand_abs "${_cand}" ABSOLUTE)
         if(EXISTS "${_cand_abs}/CMakeLists.txt")
@@ -91,15 +92,15 @@ if(PHOTARA_ENABLE_TEXTURE)
     photara_resolve_aether_drender_root(_photara_drender_root)
     if(NOT _photara_drender_root)
         message(WARNING
-            "PHOTARA_ENABLE_TEXTURE=ON but aether_drender not found. "
-            "Initialize the git submodule at third_party/aether_drender "
+            "PHOTARA_ENABLE_TEXTURE=ON but photara_drender not found. "
+            "Initialize the git submodule at third_party/photara_drender "
             "(git submodule update --init --recursive), "
             "or set -DPHOTARA_AETHER_DRENDER_ROOT=. Disabling texture module.")
         set(PHOTARA_ENABLE_TEXTURE OFF)
     else()
         set(PHOTARA_AETHER_DRENDER_ROOT "${_photara_drender_root}"
-            CACHE PATH "Path to aether_drender sources" FORCE)
-        message(STATUS "aether_drender: ${PHOTARA_AETHER_DRENDER_ROOT}")
+            CACHE PATH "Path to photara_drender sources" FORCE)
+        message(STATUS "photara_drender: ${PHOTARA_AETHER_DRENDER_ROOT}")
         find_package(Vulkan 1.2 QUIET)
         if(NOT Vulkan_FOUND)
             message(WARNING
@@ -121,7 +122,7 @@ if(PHOTARA_ENABLE_TEXTURE)
             endif()
             add_subdirectory(
                 "${PHOTARA_AETHER_DRENDER_ROOT}"
-                "${CMAKE_BINARY_DIR}/_deps/aether_drender")
+                "${CMAKE_BINARY_DIR}/_deps/photara_drender")
             set(PHOTARA_HAS_TEXTURE ON)
             include(FetchIntrinsicModels)
             photara_setup_intrinsic_models()

@@ -2941,7 +2941,7 @@ void start_texture(App& app) {
 #if !defined(PHOTARA_HAS_TEXTURE)
     set_message(
         app,
-        "This build was compiled without texture baking (Vulkan + aether_drender)",
+        "This build was compiled without texture baking (Vulkan + photara_drender).",
         theme::danger);
     return;
 #endif

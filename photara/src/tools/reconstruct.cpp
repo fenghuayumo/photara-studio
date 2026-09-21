@@ -461,7 +461,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --delight    Intrinsic image delighter before bake (albedo)\n"
               << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
-              << "  --texture-optimize BOOL  aether_drender photometric + seam optimization (default true)\n"
+              << "  --texture-optimize BOOL  photara_drender photometric + seam optimization (default true)\n"
               << "  --texture-optimize-steps N  native Vulkan Adam steps (default 1000)\n"
               << "  --texture-optimize-batch-size N  calibrated views per optimizer step (default 4)\n"
               << "  --texture-seam-samples N  samples per UV chart seam edge (default 4)\n"
@@ -876,7 +876,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("mask-mesh",
          "Existing PLY mesh for --mvs-mesh-only; bypasses Delaunay and renders "
-         "aether_drender masks plus normal-shaded previews",
+         "photara_drender masks plus normal-shaded previews",
          cxxopts::value<std::string>()->default_value(""))
         ("mesh-method",
          "Mesh backend: auto, tsdf, delaunay, or pam",
@@ -952,7 +952,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Quantile used to calibrate fused support to OpenMVS scale",
          cxxopts::value<float>()->default_value("0.95"))
         ("texture-optimize",
-         "Refine projected atlas with aether_drender's native optimizer",
+         "Refine projected atlas with photara_drender's native optimizer",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("texture-optimize-steps", "Native texture optimization steps",
          cxxopts::value<std::uint32_t>()->default_value("1000"))
@@ -1558,7 +1558,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.texture || cli.delight) {
         throw std::invalid_argument(
             "--texture/--delight require a build with PHOTARA_ENABLE_TEXTURE "
-            "(Vulkan SDK + aether_drender)");
+            "(Vulkan SDK + photara_drender)");
     }
 #endif
     if (cli.atlas_resolution && *cli.atlas_resolution < 64) {

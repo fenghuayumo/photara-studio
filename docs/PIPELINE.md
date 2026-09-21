@@ -46,7 +46,7 @@
   `--splat-dataset` 当作 splat 训练，因此该组合走**固定导入位姿的 MVS**；
   若再显式加 `--splat`，则回到 splat 训练（使用数据集点云，不再跑 PatchMatch）。
 - `--mvs-mesh-only`（配合 `--mask-mesh` 或 `--dense-ply`）：直接由已有密集点云
-  建 CGAL 网格、或直接读入已有 PLY 网格，然后用 `aether_drender` 渲染
+  建 CGAL 网格、或直接读入已有 PLY 网格，然后用 `photara_drender` 渲染
   `<stem>_masks/` 前景掩码与 `<stem>_mesh_previews/` 预览，用于外部网格的质量门禁。
 
 ---
@@ -60,7 +60,7 @@ photara/
   src/mvs/          PatchMatch 深度、深度融合、Delaunay/TSDF mesh、Clean、导出
   src/splat/        dataset 读取、CUDA 训练器、致密化策略、mesh 提取、格式读写
   src/ba/           LM + Schur + PCG 的 CPU/CUDA 后端（SfM 与其它阶段共享）
-  src/texture/      UVAtlas + aether_drender 投影烘焙 + Intrinsic delight
+  src/texture/      UVAtlas + photara_drender 投影烘焙 + Intrinsic delight
   src/project/      .ascan 工程容器（settings / sfm / gaussians / mesh）
   src/tools/        CLI：reconstruct.cpp（photara.exe）与 benchmark 工具
 apps/editor/        Photara Studio（Vulkan + ImGui 编辑器，驱动 photara.exe）
@@ -95,7 +95,7 @@ photara/tests/      CTest 正确性/回归测试
 | aether 后处理 | `repair_and_decimate_mesh` | `reconstruct.cpp`（需要 CGAL / Instant Meshes） | 目标面数网格 |
 | 3DGS 训练 | 无独立 StageScope；训练日志 `splat iteration=…`、profiler 行 | `src/splat/trainer.cpp`、`rasterizer.cu`、`densification_*.cpp` | `<stem>_splat.ply` / `.sog` / `.spz` / `.glb` |
 | Splat mesh | `mvs.mesh` → `mvs.mesh.tsdf`（TSDF）或 `splat.pam`（PAM） | `src/splat/mesh.cpp`、`pam_mesh.cpp` | `<stem>_splat_mesh.ply`、`*_pam_*` |
-| 贴图 | `texture.load_views` → `texture.uv_unwrap` → `texture.project` → `texture.optimize`（可选 `texture.delight`） | `src/texture/*`、`third_party/aether_drender` | `<stem>_textured.obj/.mtl/_albedo.png` |
+| 贴图 | `texture.load_views` → `texture.uv_unwrap` → `texture.project` → `texture.optimize`（可选 `texture.delight`） | `src/texture/*`、`third_party/photara_drender` | `<stem>_textured.obj/.mtl/_albedo.png` |
 
 ---
 

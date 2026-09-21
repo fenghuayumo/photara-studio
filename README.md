@@ -46,7 +46,7 @@ Photara/
 │   ├── src/                       ba / features / io / sfm / mvs / splat / texture / project / tools
 │   └── tests/                     CTest 正确性测试
 └── third_party/
-    └── aether_drender/            纹理烘焙 / 网格预处理（git submodule）
+└── photara_drender/           纹理烘焙 / 网格预处理（git submodule）
 ```
 
 ## 依赖
@@ -63,7 +63,7 @@ Photara/
 
 ## 构建
 
-克隆后先初始化 submodule（贴图模块依赖 `third_party/aether_drender`）：
+克隆后先初始化 submodule（贴图模块依赖 `third_party/photara_drender`）：
 
 ```powershell
 git submodule update --init --recursive
@@ -128,9 +128,9 @@ cmake -S . -B build `
 | `PHOTARA_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
 | `PHOTARA_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
 | `PHOTARA_ENABLE_TEXTURE` | ON | UVAtlas + Vulkan 贴图烘焙 |
-| `PHOTARA_ENABLE_AETHER_MESH` | ON | CGAL aether_drender 网格修复/减面 |
+| `PHOTARA_ENABLE_AETHER_MESH` | ON | CGAL 网格修复/减面（由 photara_drender 提供） |
 | `PHOTARA_ENABLE_INSTANT_REMESH` | ON | CGAL 减面前先做 Instant Meshes 重拓扑 |
-| `PHOTARA_AETHER_DRENDER_ROOT` | 自动 | aether_drender 路径（默认 `third_party/aether_drender`） |
+| `PHOTARA_AETHER_DRENDER_ROOT` | 自动 | photara_drender 路径（默认 `third_party/photara_drender`） |
 | `PHOTARA_INTRINSIC_MODELS_DIR` | `${BUILD}/Models/Intrinsic` | Delight 的 `stage_*.onnx` 目录（许可见 [LICENSE-Intrinsic.md](docs/LICENSE-Intrinsic.md)） |
 
 特征后端可自由组合（提取 × 匹配），例如：
@@ -253,10 +253,10 @@ learned normal field、occupancy 和自适应采样负责。该后端要求构�
 - `scene_dense.ply`：多轮几何一致性和深度过滤后的稠密点云
 - `scene_mesh.ply`：启用 `--mesh` 时生成的网格
 - `scene_textured.obj` / `.mtl` / `_albedo.png`：启用 `--texture` 时由
-  `aether_drender` UVAtlas + Vulkan 投影烘焙（可选 `--delight` 去光照）
+  `photara_drender` UVAtlas + Vulkan 投影烘焙（可选 `--delight` 去光照）
 
 贴图模块默认开启（`PHOTARA_ENABLE_TEXTURE=ON`），依赖 Vulkan SDK（含 `dxc`）与
-git submodule `third_party/aether_drender`（https://github.com/fenghuayumo/aether_drender）。
+git submodule `third_party/photara_drender`（https://github.com/fenghuayumo/photara_drender）。
 
 `--delight` 纯 C++ **ONNX Runtime** 推理（与 LightGlue 相同开关
 `-DPHOTARA_ENABLE_ONNX=ON`），无 Python/PyTorch。将 `stage_0..3.onnx` 放到

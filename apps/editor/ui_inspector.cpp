@@ -612,12 +612,12 @@ Action draw_inspector(App& app) {
         ImGui::PushTextWrapPos(0.F);
         theme::caption(
             "Last reconstruction step. Unwrap the mesh, project calibrated "
-            "photos with aether_drender, then optionally refine the atlas.");
+            "photos with photara_drender, then optionally refine the atlas.");
         ImGui::PopTextWrapPos();
         ImGui::Spacing();
 #if !defined(PHOTARA_HAS_TEXTURE)
         theme::caption(
-            "This build was compiled without texture baking (Vulkan + aether_drender).");
+            "This build was compiled without texture baking (Vulkan + photara_drender).");
 #else
         ImGui::BeginDisabled(busy);
         theme::caption("Quality");
@@ -655,7 +655,7 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox(tr("Refine atlas"), &app.settings.texture_optimize);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Photometric + seam optimization in aether_drender after the "
+                "Photometric + seam optimization in photara_drender after the "
                 "projective bake. Off is faster; on cleans view seams.");
         ImGui::EndDisabled();
         if (app.has_texture) {

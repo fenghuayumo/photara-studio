@@ -561,8 +561,9 @@ COLMAP 模型直接加载，不能与上文旧的 26,127 点 OpenMVS 30k 基线�
 稀疏体素块投影融合，并用标准 Marching Cubes 抽取、保留最大连通分量。`--splat --mesh` 会把
 `active_mesh` 切换为 `*_splat_mesh.ply`，不再使用 projective MVS patch mesh。
 
-若构建时找到 CGAL，可通过非零 `--mesh-target-faces` 显式调用 aether_drender 的 Instant Meshes
-field-aligned remesh，再调用 `aether_mesh::repair_and_decimate`；默认保留原生 Marching Cubes 网格；
+若构建时找到 CGAL，可通过非零 `--mesh-target-faces` 显式调用 photara_drender 的 Instant Meshes
+field-aligned remesh，再调用 `aether_mesh::repair_and_decimate`（命名空间不变）；
+默认保留原生 Marching Cubes 网格；
 Instant 的 quad-dominant 目标会按最终三角面数的一半设置，remesh 与 CGAL 后都会剔除微小
 边连通碎片。
 `--mesh-remesh=false` 可跳过重拓扑做 A/B，`--mesh-target-faces 0` 可关闭整个后处理。

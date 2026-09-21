@@ -361,11 +361,12 @@ cmake --build build-cgal --config Release --parallel
 photara --images images --output object.ply --capture-mode object --texture
 photara --images images --output object.ply --capture-mode object --texture --delight
 
-# 只导出 aether_drender 投影初值，不做光度/接缝优化
+# 只导出 photara_drender 投影初值，不做光度/接缝优化
 photara --images images --output object.ply --texture --texture-optimize=false
 ```
 
-- aether_drender 默认使用 git submodule `third_party/aether_drender`；
+- 默认使用 git submodule `third_party/photara_drender`（仓库已由 `aether_drender`
+  改名而来；库内的 C++ 命名空间与 CMake 目标仍是 `aether_drender` / `aether::render`）；
 - UVAtlas 展开后先由 `aether_drender::TextureBaker` 做 Vulkan 可见性投影，再默认由
   `aether_drender::TextureRefiner` 做多视图光度 Adam 优化与 seam-only polish；
 - `--texture-optimize-steps`、`--texture-optimize-batch-size` 和
@@ -577,7 +578,7 @@ NCC loss kernel 从 2.1737 降到 2.0694 ms（-4.80%），稳定 CUDA/iter 从 1
 - Mip-Splatting 3D filter、Splat 多视图几何与 NCC；
 - median depth/normal/alpha → TSDF → Clean；
 - 外部 `--masks` 与透明/前景训练模式；
-- Texture（UVAtlas + `aether_drender` 投影与接缝优化）与 Delight（ONNX，可选）。
+- Texture（UVAtlas + `photara_drender` 投影与接缝优化）与 Delight（ONNX，可选）。
 
 仍需完成：
 
@@ -643,7 +644,7 @@ build/photara/Release/photara.exe --images D:/ScanVideo/ori_img/images --splat-d
 
 This preserves the imported poses, uses the MVS quality preset for image resolution,
 and writes `scene_dense.ply`, `scene_mesh.ply`, and `scene_textured.obj/.mtl/_albedo.png`.
-Texture projection and Adam/seam refinement run through `aether_drender`.
+Texture projection and Adam/seam refinement run through `photara_drender`.
 Explicit `--splat` still selects Gaussian training. An external dataset alone also
 keeps the existing Gaussian default; `--dense` or `--mesh` selects calibrated MVS.
 
