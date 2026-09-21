@@ -36,35 +36,35 @@ namespace tinytensor {
             size_t buffer_bytes = 0;
         };
 
-        YISON_CORE_API bool lazy_ir_active();
-        YISON_CORE_API void clear_lazy_ir_for_testing();
+        PHOTARA_CORE_API bool lazy_ir_active();
+        PHOTARA_CORE_API void clear_lazy_ir_for_testing();
 
-        YISON_CORE_API bool tensor_has_lazy_expr(const Tensor& tensor);
-        YISON_CORE_API uint64_t tensor_lazy_expr_id(const Tensor& tensor);
-        YISON_CORE_API std::optional<LazyExprDebugInfo> tensor_lazy_expr_info(const Tensor& tensor);
-        YISON_CORE_API std::optional<LazyExprDebugInfo> lazy_ir_node_info(uint64_t node_id);
-        YISON_CORE_API std::vector<LazyExprDebugInfo> lazy_ir_collect_topological_subgraph(uint64_t root_node_id);
+        PHOTARA_CORE_API bool tensor_has_lazy_expr(const Tensor& tensor);
+        PHOTARA_CORE_API uint64_t tensor_lazy_expr_id(const Tensor& tensor);
+        PHOTARA_CORE_API std::optional<LazyExprDebugInfo> tensor_lazy_expr_info(const Tensor& tensor);
+        PHOTARA_CORE_API std::optional<LazyExprDebugInfo> lazy_ir_node_info(uint64_t node_id);
+        PHOTARA_CORE_API std::vector<LazyExprDebugInfo> lazy_ir_collect_topological_subgraph(uint64_t root_node_id);
         // Update an existing node's dependency edges. Used to wire deferred pointwise chains.
-        YISON_CORE_API bool lazy_ir_set_node_inputs(uint64_t node_id, const std::vector<uint64_t>& input_ids);
+        PHOTARA_CORE_API bool lazy_ir_set_node_inputs(uint64_t node_id, const std::vector<uint64_t>& input_ids);
 
-        YISON_CORE_API void lazy_ir_record_unary(const Tensor& input,
+        PHOTARA_CORE_API void lazy_ir_record_unary(const Tensor& input,
                                                const Tensor& output,
                                                std::string_view op_name);
-        YISON_CORE_API void lazy_ir_record_binary(const Tensor& left,
+        PHOTARA_CORE_API void lazy_ir_record_binary(const Tensor& left,
                                                 const Tensor& right,
                                                 const Tensor& output,
                                                 std::string_view op_name);
-        YISON_CORE_API void lazy_ir_record_scalar_unary(const Tensor& input,
+        PHOTARA_CORE_API void lazy_ir_record_scalar_unary(const Tensor& input,
                                                       const Tensor& output,
                                                       std::string_view op_name);
-        YISON_CORE_API void lazy_ir_record_permutation(const Tensor& input,
+        PHOTARA_CORE_API void lazy_ir_record_permutation(const Tensor& input,
                                                      const Tensor& indices,
                                                      const Tensor& output,
                                                      std::string_view op_name);
-        YISON_CORE_API void lazy_ir_record_reduce(const Tensor& input,
+        PHOTARA_CORE_API void lazy_ir_record_reduce(const Tensor& input,
                                                 const Tensor& output,
                                                 std::string_view op_name);
-        YISON_CORE_API uint64_t lazy_ir_record_deferred(const Tensor& output,
+        PHOTARA_CORE_API uint64_t lazy_ir_record_deferred(const Tensor& output,
                                                       std::string_view op_name = "deferred_expr",
                                                       const std::vector<uint64_t>& input_ids = {});
 

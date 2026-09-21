@@ -14,12 +14,12 @@ namespace tinytensor {
 
     namespace internal {
 
-        YISON_CORE_API void reset_lazy_telemetry();
-        YISON_CORE_API LazyTelemetrySnapshot lazy_telemetry_snapshot();
+        PHOTARA_CORE_API void reset_lazy_telemetry();
+        PHOTARA_CORE_API LazyTelemetrySnapshot lazy_telemetry_snapshot();
 
-        YISON_CORE_API void telemetry_record_expr_node(uint64_t count = 1);
-        YISON_CORE_API void telemetry_record_materialization(uint64_t bytes);
-        YISON_CORE_API void telemetry_record_kernel_launch(uint64_t count = 1);
+        PHOTARA_CORE_API void telemetry_record_expr_node(uint64_t count = 1);
+        PHOTARA_CORE_API void telemetry_record_materialization(uint64_t bytes);
+        PHOTARA_CORE_API void telemetry_record_kernel_launch(uint64_t count = 1);
 
     } // namespace internal
 

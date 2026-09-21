@@ -25,11 +25,11 @@ namespace tinytensor {
                                        Direct };
 
     // Multi-tier CUDA memory pool: slab (≤256KB), bucketed (≤16GB), cudaMallocAsync.
-    class YISON_CORE_API CudaMemoryPool {
+    class PHOTARA_CORE_API CudaMemoryPool {
     public:
         static CudaMemoryPool& instance();
 
-        class YISON_CORE_API LabelGuard {
+        class PHOTARA_CORE_API LabelGuard {
         public:
             explicit LabelGuard(std::string_view label);
             ~LabelGuard();

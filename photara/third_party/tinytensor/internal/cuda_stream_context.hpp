@@ -10,8 +10,8 @@ namespace tinytensor {
 
     // Thread-local current CUDA stream (PyTorch-style).
     // Exported from lfs_core so the singleton is shared across DSO boundaries.
-    YISON_CORE_API cudaStream_t getCurrentCUDAStream();
-    YISON_CORE_API void setCurrentCUDAStream(cudaStream_t stream);
+    PHOTARA_CORE_API cudaStream_t getCurrentCUDAStream();
+    PHOTARA_CORE_API void setCurrentCUDAStream(cudaStream_t stream);
 
     inline void waitForCUDAStream(cudaStream_t execution_stream, cudaStream_t dependency_stream) {
         if (dependency_stream == nullptr || dependency_stream == execution_stream) {

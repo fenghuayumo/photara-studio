@@ -157,7 +157,7 @@ namespace tinytensor {
         Multinomial = 10
     };
 
-    class YISON_CORE_API TensorShape {
+    class PHOTARA_CORE_API TensorShape {
     private:
         std::vector<size_t> dims_;
         size_t total_elements_ = 1;
@@ -254,7 +254,7 @@ namespace tinytensor {
             args;
     };
 
-    class YISON_CORE_API RandomGenerator {
+    class PHOTARA_CORE_API RandomGenerator {
     public:
         static RandomGenerator& instance();
         void manual_seed(uint64_t seed);
@@ -288,7 +288,7 @@ namespace tinytensor {
 
 namespace tinytensor {
 
-    class YISON_CORE_API Tensor {
+    class PHOTARA_CORE_API Tensor {
     private:
         struct TensorState {
             // Capacity management for in-place growth (like std::vector)
@@ -2114,7 +2114,7 @@ namespace tinytensor {
 
     // ============= TensorRowProxy for operator[] =============
     // Implementations in tensor_row_proxy.cpp (except template methods)
-    class YISON_CORE_API TensorRowProxy {
+    class PHOTARA_CORE_API TensorRowProxy {
     private:
         Tensor* tensor_;
         size_t row_index_;
@@ -2283,7 +2283,7 @@ namespace tinytensor {
     }
 
     // Helper classes
-    class YISON_CORE_API MaskedTensorProxy {
+    class PHOTARA_CORE_API MaskedTensorProxy {
     private:
         const Tensor* tensor_;
         Tensor mask_;
@@ -2298,7 +2298,7 @@ namespace tinytensor {
         operator Tensor() const;
     };
 
-    class YISON_CORE_API TensorIndexer {
+    class PHOTARA_CORE_API TensorIndexer {
     private:
         Tensor* tensor_;
         std::vector<Tensor> indices_;
@@ -2313,7 +2313,7 @@ namespace tinytensor {
         operator Tensor() const;
     };
 
-    class YISON_CORE_API TensorError : public std::runtime_error {
+    class PHOTARA_CORE_API TensorError : public std::runtime_error {
     public:
         TensorError(const std::string& msg, const Tensor* t = nullptr);
         const std::string& tensor_info() const { return tensor_info_; }
@@ -2323,7 +2323,7 @@ namespace tinytensor {
     };
 
     // Memory info
-    class YISON_CORE_API MemoryInfo {
+    class PHOTARA_CORE_API MemoryInfo {
     public:
         size_t free_bytes = 0;
         size_t total_bytes = 0;
