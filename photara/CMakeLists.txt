@@ -693,8 +693,13 @@ if(TARGET photara_features)
                 target_compile_options(photara_studio PRIVATE /utf-8)
             endif()
             target_compile_definitions(photara_studio PRIVATE
-                PHOTARA_CLI_PATH="$<TARGET_FILE:photara>")
+                PHOTARA_CLI_PATH="$<TARGET_FILE:photara>"
+                PHOTARA_VERSION="${PROJECT_VERSION}")
             add_dependencies(photara_studio photara)
+            add_custom_command(TARGET photara_studio POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../apps/icons/icon.png"
+                    "$<TARGET_FILE_DIR:photara_studio>/icon.png")
             if(WIN32)
                 add_custom_command(TARGET photara_studio POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different

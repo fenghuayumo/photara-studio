@@ -13,6 +13,7 @@ void draw_viewport_panel(App& app);
 void draw_console_panel(App& app);
 void draw_status_bar(const App& app);
 void draw_controls_window(App& app);
+void draw_about_window(App& app);
 void draw_mesh_export_modal(App& app);
 void draw_alignment_export_modal(App& app);
 void draw_splat_export_modal(App& app);

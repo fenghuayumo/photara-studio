@@ -14,11 +14,27 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #ifndef PHOTARA_CLI_PATH
 #define PHOTARA_CLI_PATH "photara"
+#endif
+#ifndef PHOTARA_VERSION
+#define PHOTARA_VERSION "0.2.0"
+#endif
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 namespace editor {
@@ -331,6 +347,8 @@ Action draw_menu_bar(App& app) {
     }
     if (ImGui::BeginMenu(tr("Help"))) {
         if (ImGui::MenuItem(tr("Viewport Controls"))) app.show_controls = true;
+        ImGui::Separator();
+        if (ImGui::MenuItem(tr("About Photara Studio"))) app.show_about = true;
         ImGui::EndMenu();
     }
 
@@ -400,6 +418,94 @@ void draw_controls_window(App& app) {
         ImGui::BulletText("%s", tr("Compare: drag the vertical handle to wipe GT vs 3DGS"));
         ImGui::BulletText("%s", tr("2 / 3: switch 2D image QA and 3D scene"));
     }
+    ImGui::End();
+}
+
+std::filesystem::path studio_icon_path() {
+    std::filesystem::path exe_dir;
+#if defined(_WIN32)
+    wchar_t buffer[MAX_PATH]{};
+    const DWORD n = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    if (n > 0 && n < MAX_PATH)
+        exe_dir = std::filesystem::path(buffer).parent_path();
+#endif
+    const std::filesystem::path candidates[] = {
+        exe_dir / "icon.png",
+        exe_dir / "icons" / "icon.png",
+        exe_dir / ".." / ".." / ".." / "apps" / "icons" / "icon.png",
+    };
+    std::error_code error;
+    for (const auto& path : candidates) {
+        if (!path.empty() && std::filesystem::is_regular_file(path, error))
+            return path;
+    }
+    return {};
+}
+
+void ensure_about_icon(App& app) {
+    if (app.about_icon_ready || app.about_icon.descriptor != nullptr)
+        return;
+    app.about_icon_ready = true;
+    const auto path = studio_icon_path();
+    if (path.empty()) return;
+    try {
+        app.about_icon.upload(photara::io::load_rgb(path));
+    } catch (const std::exception&) {
+        app.about_icon.reset();
+    }
+}
+
+void draw_about_window(App& app) {
+    if (!app.show_about) return;
+    ensure_about_icon(app);
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    ImGui::SetNextWindowSize({420.F, 0.F}, ImGuiCond_Appearing);
+    if (!ImGui::Begin(
+            i18n::id("About Photara Studio", "###AboutPhotaraStudio"),
+            &app.show_about, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::End();
+        return;
+    }
+
+    const float width = ImGui::GetContentRegionAvail().x;
+    if (app.about_icon.descriptor != nullptr) {
+        const float icon = 96.F;
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const ImVec2 min{origin.x + (width - icon) * 0.5F, origin.y};
+        const ImVec2 max{min.x + icon, min.y + icon};
+        ImGui::GetWindowDrawList()->AddImageRounded(
+            reinterpret_cast<ImTextureID>(app.about_icon.descriptor), min, max,
+            {0.F, 0.F}, {1.F, 1.F}, IM_COL32_WHITE, 20.F);
+        ImGui::Dummy({width, icon});
+        ImGui::Spacing();
+    }
+
+    auto centred = [width](const char* text, const ImVec4& colour) {
+        const float text_w = ImGui::CalcTextSize(text).x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (width - text_w) * 0.5F);
+        ImGui::PushStyleColor(ImGuiCol_Text, colour);
+        ImGui::TextUnformatted(text);
+        ImGui::PopStyleColor();
+    };
+    centred("Photara Studio", theme::text_bright);
+    centred(
+        tr("GPU-first photogrammetry for photos, video, and 3DGS"),
+        theme::text_muted);
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    theme::metric("Version", PHOTARA_VERSION);
+    theme::metric("Engine", "Photara reconstruction engine");
+    theme::metric("Backends", "CUDA / Vulkan");
+    theme::metric("Developer", "Photara");
+    theme::metric("Copyright", "© 2026 Photara");
+    ImGui::Spacing();
+    const float button_w = 120.F;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (width - button_w) * 0.5F);
+    if (theme::toolbar_button(tr("Close"), {button_w, 0.F}))
+        app.show_about = false;
     ImGui::End();
 }
 

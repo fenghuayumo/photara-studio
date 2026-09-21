@@ -297,6 +297,7 @@ int main(const int argc, char** argv) {
         }
 
         editor::draw_controls_window(app);
+        editor::draw_about_window(app);
         editor::draw_mesh_export_modal(app);
         editor::draw_alignment_export_modal(app);
         editor::draw_splat_export_modal(app);
@@ -333,6 +334,7 @@ int main(const int argc, char** argv) {
     app.image_qa_session.clear();
     app.photos.clear();
     app.atlas_preview.reset();
+    app.about_icon.reset();
     app.mesh_renderer.reset();
     app.preview.reset();
     ImGui_ImplVulkan_Shutdown();

@@ -147,6 +147,9 @@ struct App {
     bool smoke_success{};
     bool close_requested{};
     bool show_controls{};
+    bool show_about{};
+    gpu::PreviewTexture about_icon;
+    bool about_icon_ready{};
     bool show_clear_results{};
     bool project_folder_automatic{};
     bool suppress_scene_auto_load{};
