@@ -2196,13 +2196,21 @@ void poll_align_live(App& app) {
         refresh_image_qa_folder(
             app.image_qa, reconstruction_images_path(app));
         const int count = image_qa_count(app.image_qa, app.scene);
-        if (app.align_live.index_a >= 0) {
+        const Stage stage = app.monitor.stage();
+        const bool follow_pair =
+            stage == Stage::matching &&
+            aetherscan::sfm::is_live_pair_kind(app.align_live.kind);
+        const bool follow_features =
+            app.align_live.kind == aetherscan::sfm::AlignLiveKind::features &&
+            (stage == Stage::features || stage == Stage::preparing ||
+             stage == Stage::matching);
+        if ((follow_pair || follow_features) && app.align_live.index_a >= 0) {
             const int index = image_qa_index_for_path(
                 app.image_qa, app.scene, app.align_live.path_a,
                 app.align_live.index_a);
             select_image_qa_view(app.image_qa, index, count);
         }
-        if (app.align_live.kind == aetherscan::sfm::AlignLiveKind::features)
+        if (follow_features)
             app.image_qa.mode = ImageQaMode::features;
     }
 

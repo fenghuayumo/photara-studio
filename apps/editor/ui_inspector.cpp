@@ -742,6 +742,7 @@ Action draw_inspector(App& app) {
         ImGui::Spacing();
         const bool live_pair =
             alignment_job_running(app) &&
+            app.monitor.stage() == Stage::matching &&
             aetherscan::sfm::is_live_pair_kind(app.align_live.kind);
         const int count = image_qa_count(app.image_qa, app.scene);
         if (live_pair) {

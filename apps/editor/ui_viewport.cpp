@@ -1098,8 +1098,20 @@ void draw_viewport_panel(App& app) {
         input.external_alignment = has_external_dataset(app);
         if (alignment_job_running(app) &&
             app.align_live.kind != aetherscan::sfm::AlignLiveKind::none) {
-            input.live = &app.align_live;
-            input.pair_session = &app.align_match_session;
+            const Stage stage = app.monitor.stage();
+            const auto kind = app.align_live.kind;
+            const bool pair = aetherscan::sfm::is_live_pair_kind(kind);
+            const bool features =
+                kind == aetherscan::sfm::AlignLiveKind::features;
+            if (pair && stage == Stage::matching) {
+                input.live = &app.align_live;
+                input.pair_session = &app.align_match_session;
+            } else if (
+                features &&
+                (stage == Stage::features || stage == Stage::preparing ||
+                 stage == Stage::matching)) {
+                input.live = &app.align_live;
+            }
         }
         draw_image_qa(
             app.image_qa, app.image_qa_session, input, view_min, view_max);
