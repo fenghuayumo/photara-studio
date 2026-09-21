@@ -133,7 +133,7 @@ CGAL 未就绪时 `delaunay_cut` 会在 `densify` 入口直接报错
 
 | 参数 | 默认 | 含义 |
 |---|---|---|
-| `mesh_tsdf_voxel_size` | 0（推断） | 世界单位体素；GGGS/gs2mesh 用 `max_depth / 2048` |
+| `mesh_tsdf_voxel_size` | 0（推断） | 世界单位体素；按 gs2mesh 约定取 `max_depth / 2048` |
 | `mesh_tsdf_voxel_scale` | 1（CLI `-1` = 1x） | 只放大推断值，直接提取更粗但规则的面 |
 | `mesh_tsdf_truncation_voxels` | 4 | 截断半宽（体素） |
 | `mesh_tsdf_pixel_step` | 4 | 稀疏块分配步长（1 保留亚像素细线） |

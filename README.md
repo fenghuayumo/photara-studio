@@ -238,8 +238,9 @@ median-depth/rendered-normal 几何一致性优化。
 `--splat-densification-cap` 限制（默认 1,000,000）。
 Splat mesh 导出只使用 alpha 0.5 与有效深度掩码，不再默认执行额外的 60° depth-normal 硬过滤；
 
-当前 splat 训练借鉴 GGGS 的几何监督，但已融合 GaussianWrapping normal field 与
-独立 mesh 后端，命令行统一使用 `--splat` / `--splat-*`。GaussianWrapping 几何路径可用
+当前 splat 训练的几何监督由 median-depth/rendered-normal 一致性、多视图几何往返与平面
+单应 NCC 组成，并融合 GaussianWrapping normal field 与独立 mesh 后端，命令行统一使用
+`--splat` / `--splat-*`。GaussianWrapping 几何路径可用
 `--mesh-method pam`：训练默认从第 8,001 步学习四通道
 normal field。PAM 不经过 TSDF：先从 Gaussian center 与 learned-normal pivot 运行
 `tetra_triangulation` + Marching Tetrahedra，再将自适应采样点投影到多视图 Gaussian

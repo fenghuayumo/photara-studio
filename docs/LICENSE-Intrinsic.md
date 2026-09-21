@@ -17,6 +17,5 @@
 - 该许可只约束 Delight 权重与推理，不改变仓库其余部分（SfM / MVS / Splat /
   photara_drender 贴图）的边界；
 - 导出产物只有在显式使用 `--delight` 时才包含由这些权重生成的 albedo；
-- GGGS 参考 CUDA rasterizer 的许可边界另见
-  `photara/third_party/gggs_reference/NOTICE.md`，
-  fused SSIM 移植见 `photara/third_party/fused_ssim/LICENSE`。
+- 仓库其余第三方组件（VLFeat、cxxopts、tinytensor、`photara_drender` 子模块）各自的
+  许可见 [SPLAT_CPP.md](SPLAT_CPP.md) 的「许可证边界」一节与对应目录。

@@ -3,8 +3,8 @@
 ## 当前实现状态
 
 Photara 已有一条可编译、可前反向传播、可由 CLI 启动的 Gaussian splat 训练路径。
-当前实现参考了 GGGS 的几何监督与 CUDA rasterizer，但已组合 ADCPlus、GaussianWrapping
-normal field、PAM/TSDF 等独立能力，因此公开接口统一称为 `splat`，不再以 GGGS 命名：
+当前实现组合了 ADCPlus、GaussianWrapping normal field、PAM/TSDF 等独立能力，
+CUDA rasterizer 由本仓库的 `splat_drender` 提供，公开接口统一称为 `splat`：
 
 ```text
 images → SfM（或 --splat-dataset 的外部相机/稀疏点）
@@ -27,17 +27,14 @@ RealityCapture 或 OpenMVS。Gaussian 写出格式看 `--output` 后缀：`.sog`
 ## 目录与职责
 
 - `photara/include/splat/`：公开的模型、相机、训练配置和训练器 API；
-- `photara/src/splat/rasterizer.cu`：TinyTensor tensor 与 GGGS 原生 CUDA API 的桥接；
+- `photara/src/splat/rasterizer.cu`：TinyTensor tensor 与 `splat_drender` CUDA API 的桥接；
 - `photara/src/splat/cuda_ops.cu`：参数激活、链式梯度、融合监督损失和融合 Adam；
 - `photara/src/splat/bilateral_grid.cu`：仿射双边网格颜色校正（训练期、空间变化）；
 - `photara/src/splat/ppisp.cu`：PPISP 颜色校正，默认 `no_crf_no_vig`（曝光 +
   白平衡单应），可选暗角 / CRF 布局；
-- `photara/src/splat/fused_ssim.cu`：从 Python fused-ssim 完整移植的 11×11 CUDA
-  forward/backward；
+- `photara/src/splat/fused_ssim.cu`：11×11 valid-window CUDA SSIM forward/backward；
 - `photara/src/splat/colmap.cpp`：COLMAP 文本/二进制相机、位姿、稀疏点和 track 加载；
 - `photara/src/splat/trainer.cpp`：点云初始化、动态 Gaussian 管理、训练和 PLY 导出；
-- `photara/third_party/gggs_reference/`：从 Python GGGS 参考工程移入的原始 CUDA
-  rasterizer core，不包含 Torch/PyBind wrapper；
 - `photara/third_party/tinytensor/`：tensor 存储、CUDA 内存和基础运算。
 
 模型使用可训练的世界坐标均值、log-scale、四元数、opacity logit 和最高三阶 SH。
@@ -54,8 +51,8 @@ PPISP 把跨视图曝光/色彩均值锚定到单位变换，双边网格在每�
 路径的开销：训练步内两项合计约 1.5 ms（1728×1120、约 4 万高斯），profiler 的
 `colour_forward_ms` / `colour_backward_ms` 就是这两项的耗时。
 mesh 模式默认在第 3,000 步同时启用权重 `0.05` 的 splat depth-normal、
-权重 `0.02` 的多视图几何往返和权重 `0.6` 的平面单应 NCC。多视图几何通过 GGGS 原生
-`sampleDepth` 前后向在相邻视图查询表面点，梯度同时回传参考深度、查询点以及邻视图
+权重 `0.02` 的多视图几何往返和权重 `0.6` 的平面单应 NCC。多视图几何通过 `splat_drender`
+的 `sample_depth` 前后向在相邻视图查询表面点，梯度同时回传参考深度、查询点以及邻视图
 Gaussian；NCC 使用半像素 7×7 patch、鲁棒 diffuse confidence 和深度/法线解析梯度。
 此外默认启用 Mip-Splatting 3D filter，按所有训练相机可见距离扩大亚像素 Gaussian，并以
 行列式比例补偿 opacity；filter 在拓扑变化后和训练期间周期重算，并写入 PLY 的 `filter_3D`。
@@ -63,8 +60,7 @@ Gaussian；NCC 使用半像素 7×7 patch、鲁棒 diffuse confidence 和深度/
 depth-normal self-consistency：从 median depth 反投影中心四邻域，以
 `cross(dy, dx)` 求 depth normal，
 再最小化 `mean(1-dot(rendered_normal, depth_normal))`；梯度同时回传 rendered normal 和
-median depth。所有参数通过显式
-GGGS backward 和 TinyTensor Adam 更新。SSIM 已完整移植 Python fused-ssim 的 11×11
+median depth。所有参数通过显式 CUDA backward 和 TinyTensor Adam 更新。SSIM 使用 11×11
 Gaussian separable CUDA forward/backward 和 `padding="valid"` 边界语义，不依赖 LibTorch；
 mask 会在计算 L1/SSIM 前同时作用于预测图和目标图。13×13 确定性输入的 loss、中心梯度、
 梯度和与绝对梯度和均有严格数值回归，误差阈值为 `2e-5`。
@@ -270,7 +266,7 @@ ctest --test-dir build -C Release -R photara.splat.rasterizer --output-on-failur
 ## 性能设计
 
 - MVS 沿用现有并发 view/tile 调度和 OpenMP CPU 并行；
-- rasterizer 沿用 GGGS 的 tile binning、CUDA 排序和前反向 kernel；
+- rasterizer 使用 tile binning、CUDA 排序和前反向 kernel；
 - scale/quaternion/opacity 激活和对应链式梯度使用融合 kernel；
 - L1/depth/normal/alpha 主损失在一次像素 kernel 中生成 loss 与四种输出梯度；SSIM 使用完整
   的 11×11 separable forward/backward CUDA kernel，并在设备端融合 L1、valid-map 与梯度链；
@@ -337,14 +333,16 @@ Nsight Compute 使用 kernel replay、19 passes 和默认 cold-cache 行为，�
 - `artifacts/nsight_sampledepth_20260731/ori_img/sample_depth_stable.ncu-rep`
 - `artifacts/nsight_sampledepth_20260731/antman/sample_depth_stable.ncu-rep`
 
+> 说明：本节数据采集于改写前的参考 CUDA rasterizer（该实现已从仓库移除），因此不再保留
+> 指向那些源码的文件/行号引用；数值保留用于与当前 `splat_drender` 实现对照。
+
 #### 全分辨率采样量与 tile batch 利用率
 
 multi-view 在每个有效迭代中先把当前视图的整张 median-depth 图反投影到世界坐标，
 再送入邻视角 `sample_depth`，见
 [`trainer.cpp`](../photara/src/splat/trainer.cpp#L821)。
-GGGS reference 使用 16×16、256-thread CTA 和 `SAMPLE_BATCH_SIZE=2`，因此每个
-duplicated-tile CTA 最多容纳 512 个点，配置见
-[`config.h`](../photara/third_party/gggs_reference/include/config.h#L22)。
+当时的参考 rasterizer 使用 16×16、256-thread CTA 和 `SAMPLE_BATCH_SIZE=2`，因此每个
+duplicated-tile CTA 最多容纳 512 个点。
 
 由 forward SASS 中两组最终输出 store 的实际执行线程数可恢复进入 kernel 的点数：
 
@@ -359,11 +357,7 @@ duplicated-tile CTA 最多容纳 512 个点，配置见
 但所有线程仍为双 sample 状态承担相同的寄存器分配。
 
 tile/point binning 需要对完整 point list 做 scan、sort、range identification 和 batch
-rounding，见
-[`rasterizer_impl.cu`](../photara/third_party/gggs_reference/src/rasterizer_impl.cu#L1378)
-及
-[`rasterizer_impl.cu`](../photara/third_party/gggs_reference/src/rasterizer_impl.cu#L1423)。
-因此减少整图输入量和减少 tile 尾块浪费是两个不同的优化层级。
+rounding。因此减少整图输入量和减少 tile 尾块浪费是两个不同的优化层级。
 
 #### Forward：寄存器受限的重复 tile traversal
 
@@ -382,16 +376,10 @@ rounding，见
 forward 的主要问题不是 DRAM 带宽。99 registers/thread 使寄存器成为 occupancy 限制项：
 每个 SM 只能驻留两个 256-thread CTA，理论 occupancy 上限约 33.3%。寄存器压力来自
 per-sample `done/Depth/T/point_xy/last_contributor` 等状态，以及
-`T_p[SAMPLE_BATCH_SIZE][SPLIT+1]`；当前配置实际为 `T_p[2][9]`，见
-[`sample_forward.cu`](../photara/third_party/gggs_reference/src/sample_forward.cu#L574)
-和
-[`sample_forward.cu`](../photara/third_party/gggs_reference/src/sample_forward.cu#L694)。
+`T_p[SAMPLE_BATCH_SIZE][SPLIT+1]`；当前配置实际为 `T_p[2][9]`。
 
 每个 CTA 先遍历一次 Gaussian tile range 以确定初始深度和 `last_contributor`，然后执行
-1 次完整 8-way split 和 4 次后续 refinement，总计 5 次 refinement traversal，见
-[`sample_forward.cu`](../photara/third_party/gggs_reference/src/sample_forward.cu#L700)
-和
-[`sample_forward.cu`](../photara/third_party/gggs_reference/src/sample_forward.cu#L789)。
+1 次完整 8-way split 和 4 次后续 refinement，总计 5 次 refinement traversal。
 因此 forward 更准确的描述是“低 occupancy 下重复遍历同一 Gaussian range 的计算/控制流
 瓶颈”，而不是显存带宽瓶颈。
 
@@ -420,13 +408,8 @@ backward 的 occupancy 已经较高，但动态索引的 per-sample 局部数组
 吞吐的是 local load/store 的 cache 管线和依赖延迟，而不是外部显存带宽。这与高
 long-scoreboard、MIO throttle 和仅约 1.3–1.5 eligible warps/scheduler 一致。
 
-backward 还会对 Gaussian contributor range 完整遍历两次，见
-[`sample_backward.cu`](../photara/third_party/gggs_reference/src/sample_backward.cu#L170)
-和
-[`sample_backward.cu`](../photara/third_party/gggs_reference/src/sample_backward.cu#L232)；
-第二次遍历对每个 Gaussian 聚合梯度，先做 warp reduction，再由每个 warp 的 lane 0
-执行 10 次 `atomicAdd`，见
-[`sample_backward.cu`](../photara/third_party/gggs_reference/src/sample_backward.cu#L328)。
+backward 还会对 Gaussian contributor range 完整遍历两次；第二次遍历对每个 Gaussian
+聚合梯度，先做 warp reduction，再由每个 warp 的 lane 0 执行 10 次 `atomicAdd`。
 atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后会更加突出。
 
 #### 优化顺序与预期收益
@@ -590,10 +573,16 @@ PSNR 为 `30.44 / 36.96 / 35.98 dB`。depth-normal 提取过滤拒绝 `146,061 /
 
 ## 许可证边界
 
-参考 GGGS CUDA 文件的源注释限定为非商业研究/评估用途，而 Python 参考目录中没有附带其
-所指向的完整 `LICENSE.md`。因此 `gggs_reference` 只能视为原型验证代码，不能直接作为商业
-RealityScan 类产品发布。详细记录见 `photara/third_party/gggs_reference/NOTICE.md`；商业化前
-必须取得明确授权，或以洁净室方式替换该 rasterizer core。
+仓库不再内置第三方 CUDA rasterizer 参考实现：`photara/src/splat/rasterizer.cu` 与
+`cuda_ops.cu` 使用本仓库的 `splat_drender` 实现，文档不再保留已移除参考实现的源码或链接。
 
-fused SSIM 移植源为 `dvsplat_utils/fused-ssim/ssim.cu`，按其 MIT 许可保留版权与许可文本，见
-`photara/third_party/fused_ssim/LICENSE`；这不改变上述 GGGS rasterizer core 的授权边界。
+仍在仓库中的第三方组件与位置：
+
+- VLFeat（BSD）：`photara/third_party/vlfeat`；
+- cxxopts、tinytensor：`photara/third_party/`；
+- 贴图 / 网格子模块 `photara_drender`：许可见该仓库的 LICENSE；
+- 可选依赖 SiftGPU（`PHOTARA_ENABLE_SIFTGPU`，上游非商用）与 Intrinsic 权重
+  （`--delight`）：见 README 与 [LICENSE-Intrinsic.md](LICENSE-Intrinsic.md)。
+
+注意：`photara/src/splat/fused_ssim.cu` 的文件头仍保留其来源的 MIT 版权声明。
+如果该实现已经按重写处理，应同步更新或移除这段声明。

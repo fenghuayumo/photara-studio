@@ -25,8 +25,9 @@ MVS 实现保留为可选诊断、算法对照和兼容导出后端，不是 Spl
 
 参考：
 
-- Photara Splat：当前产品实现；其几何监督参考 *Geometry-Grounded Gaussian
-  Splatting (GGGS)*，并融合 ADCPlus、GaussianWrapping normal field 与独立 mesh 后端；
+- Photara Splat：当前产品实现；几何监督由 median-depth/rendered-normal 一致性、
+  多视图几何往返与平面单应 NCC 组成，并融合 ADCPlus、GaussianWrapping normal field
+  与独立 mesh 后端；
 - pygsplat/GS-2M：Gaussian 深度渲染与 TSDF 提取约定；
 - Open3D：稀疏体素块 TSDF 的公开接口与数值回归参考；
 - OpenMVS：仅作为可选 densify/mesh 对照，不复制对象模型；
