@@ -1,6 +1,6 @@
 # Feature backends
 
-AetherScan treats **extraction** and **matching** as independent, swappable
+Photara treats **extraction** and **matching** as independent, swappable
 backends. Mix any compatible pair; do not treat SuperPoint+LightGlue as one
 bundled algorithm.
 

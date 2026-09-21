@@ -95,9 +95,9 @@ features 和 matches 两个检查点的载荷长度、FNV 校验值均与原版�
 ## 复现
 
 ```powershell
-cmake --build build --config Release --target aetherscan aetherscan_features_test aetherscan_sfm_match_benchmark --parallel 8
-build/aetherscan/Release/aetherscan_features_test.exe
-python experiments/profile_sfm_gpu.py --output artifacts/sfm_gpu_office_20260913/recheck -- build/aetherscan/Release/aetherscan_sfm_match_benchmark.exe artifacts/sfm_gpu_office_20260913/cache_before/features-782dcc4bbb107403.bin artifacts/sfm_gpu_office_20260913/cache_before/matches-38f6b939463a9235.bin native 0
+cmake --build build --config Release --target photara photara_features_test photara_sfm_match_benchmark --parallel 8
+build/photara/Release/photara_features_test.exe
+python experiments/profile_sfm_gpu.py --output artifacts/sfm_gpu_office_20260913/recheck -- build/photara/Release/photara_sfm_match_benchmark.exe artifacts/sfm_gpu_office_20260913/cache_before/features-782dcc4bbb107403.bin artifacts/sfm_gpu_office_20260913/cache_before/matches-38f6b939463a9235.bin native 0
 ```
 
 `legacy` 可替换 `native`；最后的 `0` 表示全部图像对，非零表示均匀抽样。

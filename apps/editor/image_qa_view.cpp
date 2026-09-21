@@ -38,27 +38,27 @@ bool is_image_extension(std::string extension) {
            extension == ".tiff" || extension == ".bmp";
 }
 
-aetherscan::io::RgbImage resize_rgb(
-    const aetherscan::io::RgbImage& source, const std::uint32_t width,
+photara::io::RgbImage resize_rgb(
+    const photara::io::RgbImage& source, const std::uint32_t width,
     const std::uint32_t height) {
-    aetherscan::io::RgbImage out;
+    photara::io::RgbImage out;
     if (source.width == 0 || source.height == 0 || width == 0 || height == 0)
         return out;
     if (source.width == width && source.height == height) return source;
     out.width = width;
     out.height = height;
     out.pixels.resize(static_cast<std::size_t>(width) * height * 3);
-    aetherscan::io::resize_bilinear(
+    photara::io::resize_bilinear(
         source.pixels.data(), source.width, source.height, 3, out.pixels.data(),
         width, height);
     return out;
 }
 
-aetherscan::io::RgbImage load_qa_image(const std::filesystem::path& path) {
+photara::io::RgbImage load_qa_image(const std::filesystem::path& path) {
     // Decode straight to the largest DCT scale that still covers the QA
     // texture, so the full capture never has to be materialised just to be
     // scaled down. The texture size itself is unchanged.
-    aetherscan::io::RgbImage rgb = aetherscan::io::load_rgb_with_minimum_size(
+    photara::io::RgbImage rgb = photara::io::load_rgb_with_minimum_size(
         path, k_qa_long_edge, k_qa_long_edge);
     const std::uint32_t long_edge = std::max(rgb.width, rgb.height);
     if (long_edge <= k_qa_long_edge || long_edge == 0) return rgb;
@@ -99,7 +99,7 @@ void fit_metric_size(
 }
 
 ImageQaMetrics compute_metrics(
-    const aetherscan::io::RgbImage& gt, const aetherscan::io::RgbImage& render) {
+    const photara::io::RgbImage& gt, const photara::io::RgbImage& render) {
     ImageQaMetrics metrics;
     if (gt.width == 0 || gt.height == 0 || render.width == 0 ||
         render.height == 0)
@@ -108,8 +108,8 @@ ImageQaMetrics compute_metrics(
     std::uint32_t mw{};
     std::uint32_t mh{};
     fit_metric_size(gt.width, gt.height, mw, mh);
-    const aetherscan::io::RgbImage a = resize_rgb(gt, mw, mh);
-    const aetherscan::io::RgbImage b = resize_rgb(render, mw, mh);
+    const photara::io::RgbImage a = resize_rgb(gt, mw, mh);
+    const photara::io::RgbImage b = resize_rgb(render, mw, mh);
     if (a.pixels.size() != b.pixels.size() || a.pixels.empty()) return metrics;
 
     const std::size_t pixels = static_cast<std::size_t>(mw) * mh;
@@ -202,11 +202,11 @@ void turbo_colour(const float t, std::uint8_t& r, std::uint8_t& g, std::uint8_t&
         std::lround((stops[i][2] + (stops[i + 1][2] - stops[i][2]) * f) * 255.F));
 }
 
-aetherscan::io::RgbImage make_error_map(
-    const aetherscan::io::RgbImage& gt, const aetherscan::io::RgbImage& render) {
-    aetherscan::io::RgbImage map;
+photara::io::RgbImage make_error_map(
+    const photara::io::RgbImage& gt, const photara::io::RgbImage& render) {
+    photara::io::RgbImage map;
     if (gt.width == 0 || gt.height == 0) return map;
-    const aetherscan::io::RgbImage aligned =
+    const photara::io::RgbImage aligned =
         resize_rgb(render, gt.width, gt.height);
     if (aligned.pixels.size() != gt.pixels.size()) return map;
 
@@ -389,7 +389,7 @@ void draw_features(
 }
 
 void draw_live_keypoints(
-    ImDrawList* draw, const std::vector<aetherscan::sfm::AlignLiveKeypoint>& points,
+    ImDrawList* draw, const std::vector<photara::sfm::AlignLiveKeypoint>& points,
     const ImVec2 img_min, const ImVec2 img_max, const ImU32 colour) {
     const float w = img_max.x - img_min.x;
     const float h = img_max.y - img_min.y;
@@ -425,7 +425,7 @@ float dist2_to_segment(const ImVec2 p, const ImVec2 a, const ImVec2 b) {
 }
 
 int pick_live_match(
-    const std::vector<aetherscan::sfm::AlignLiveMatch>& matches,
+    const std::vector<photara::sfm::AlignLiveMatch>& matches,
     const ImVec2 a_min, const ImVec2 a_max, const ImVec2 b_min,
     const ImVec2 b_max, const ImVec2 mouse) {
     const float aw = a_max.x - a_min.x;
@@ -451,7 +451,7 @@ int pick_live_match(
 }
 
 void draw_live_matches(
-    ImDrawList* draw, const std::vector<aetherscan::sfm::AlignLiveMatch>& matches,
+    ImDrawList* draw, const std::vector<photara::sfm::AlignLiveMatch>& matches,
     const ImVec2 a_min, const ImVec2 a_max, const ImVec2 b_min,
     const ImVec2 b_max, const int hovered, const bool verified) {
     const float aw = a_max.x - a_min.x;
@@ -583,7 +583,7 @@ void ImageQaSession::harvest_retired() {
         try {
             // A superseded decode cannot change what is on screen, but it is
             // still a usable capture: keep it for the next visit.
-            const aetherscan::io::RgbImage image = it->second.get();
+            const photara::io::RgbImage image = it->second.get();
             remember_gt(it->first, image);
         } catch (...) {
         }
@@ -591,7 +591,7 @@ void ImageQaSession::harvest_retired() {
     }
 }
 
-void ImageQaSession::publish_gt(const aetherscan::io::RgbImage& image) {
+void ImageQaSession::publish_gt(const photara::io::RgbImage& image) {
     if (image.width == 0 || image.height == 0 || image.pixels.empty())
         throw std::runtime_error("empty capture");
     gt_cpu_ = image;
@@ -605,7 +605,7 @@ void ImageQaSession::publish_gt(const aetherscan::io::RgbImage& image) {
 
 void ImageQaSession::remember_gt(
     const std::filesystem::path::string_type& key,
-    const aetherscan::io::RgbImage& image) {
+    const photara::io::RgbImage& image) {
     constexpr std::size_t k_cached_captures = 8;
     if (image.width == 0 || image.height == 0 || image.pixels.empty()) return;
     gt_cache_[key] = image;
@@ -687,7 +687,7 @@ void ImageQaSession::poll() {
     if (loading_ && pending_.valid() &&
         pending_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         try {
-            aetherscan::io::RgbImage image = pending_.get();
+            photara::io::RgbImage image = pending_.get();
             remember_gt(pending_path_.native(), image);
             loaded_path_ = pending_path_;
             loaded_view_ = pending_view_;
@@ -721,7 +721,7 @@ void ImageQaSession::poll() {
 }
 
 void ImageQaSession::set_render(
-    aetherscan::io::RgbImage render, const int view,
+    photara::io::RgbImage render, const int view,
     const std::uint64_t revision) {
     render_cpu_ = std::move(render);
     render_view_ = view;
@@ -739,8 +739,8 @@ void ImageQaSession::queue_metrics() {
     metrics_busy_ = true;
     const int view = render_view_;
     const std::uint64_t revision = render_revision_;
-    aetherscan::io::RgbImage gt = gt_cpu_;
-    aetherscan::io::RgbImage render = render_cpu_;
+    photara::io::RgbImage gt = gt_cpu_;
+    photara::io::RgbImage render = render_cpu_;
     metrics_pending_ = std::async(
         std::launch::async,
         [gt = std::move(gt), render = std::move(render), view, revision] {
@@ -829,13 +829,13 @@ void draw_image_qa(
 
     const SparseScene empty_scene;
     const SparseScene& scene = input.scene ? *input.scene : empty_scene;
-    const aetherscan::sfm::AlignLiveFrame* live = input.live;
+    const photara::sfm::AlignLiveFrame* live = input.live;
     const bool live_features =
-        live != nullptr && live->kind == aetherscan::sfm::AlignLiveKind::features;
+        live != nullptr && live->kind == photara::sfm::AlignLiveKind::features;
     const bool live_matching =
-        live != nullptr && aetherscan::sfm::is_live_pair_kind(live->kind);
+        live != nullptr && photara::sfm::is_live_pair_kind(live->kind);
     const bool live_inliers =
-        live != nullptr && live->kind == aetherscan::sfm::AlignLiveKind::inliers;
+        live != nullptr && live->kind == photara::sfm::AlignLiveKind::inliers;
     const int count = image_qa_count(state, scene);
     if (state.selected < 0 && count > 0) state.selected = 0;
     if (state.selected >= count) state.selected = count > 0 ? count - 1 : -1;

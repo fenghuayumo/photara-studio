@@ -8,7 +8,7 @@
 命令行（`--camera-model equirectangular`，别名 `equirect` / `panorama` / `spherical`）：
 
 ```powershell
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:\ScanVideo\street_360\images `
   --output artifacts\street_360.asfm `
   --camera-model equirectangular --mode global
@@ -70,7 +70,7 @@
 测试取每 6 帧一张、共 60 张，降采样到 2048×1024，`--window 12 --max-features 8000`：
 
 ```powershell
-.\build\aetherscan\Release\aetherscan_equirect_dataset_check.exe `
+.\build\photara\Release\photara_equirect_dataset_check.exe `
   artifacts\equirect_street\images artifacts\equirect_street\colmap_global `
   --window 12 --max-features 8000 --mode global --camera-model equirectangular
 python scripts\compare_equirect_reference.py `
@@ -171,7 +171,7 @@ python experiments/sfm_acceptance.py \
 同一份对齐（120 张）导出 COLMAP 全景模型后再训练，确认走了**原生球面光栅化**而不是去畸变到针孔：
 
 ```powershell
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images artifacts\equirect_street\images `
   --splat-dataset artifacts\equirect_street\colmap_pano120 `
   --output artifacts\equirect_street\splat_pano_native\model.ply --splat-iterations 2500
@@ -182,9 +182,9 @@ python experiments/sfm_acceptance.py \
 
 说明：该数据为视频帧，图像对旋转中位数仅 1.6°（最大 5.0°），基线很小；旋转**角度**在规范与坐标约定下
 都是严格不变量，因此上表第一列是最强的位姿一致性证据。相机中心比对只用几何（中心与相机坐标轴向无关），
-对齐后残差约轨迹尺度的 0.5%。参考模型的文件尺寸/系数与 AetherScan 无关，仅位姿被比较。
+对齐后残差约轨迹尺度的 0.5%。参考模型的文件尺寸/系数与 Photara 无关，仅位姿被比较。
 
-自动化测试（`aetherscan.sfm.equirect`，`tests/equirect_test.cpp`）覆盖：
+自动化测试（`photara.sfm.equirect`，`tests/equirect_test.cpp`）覆盖：
 
 - 图卡约定与全（含后向半球、方位缝、极点）投影/反投影往返；
 - 切平面残差：观测光线上残差为零、跨方位缝不跳变、极点有界、对相机点雅可比与有限差分一致；
@@ -217,19 +217,19 @@ OpenMVS 结果确认走了球面路径（位姿 CSV 中 `fx=fy=1, cx=cy=0` 即 `
 | 运行 | 图像对旋转角误差（中位 / p90） | 相对旋转 SO(3) 差（中位） | 相机中心（中位 / P95，参考布局半径归一化） | 稀疏点 | 耗时 |
 |---|---:|---:|---:|---:|---:|
 | OpenMVS（球面相机） | 0.053° / 0.231° | 0.139° | 0.42% / 1.09% | 135,482 | 2 m 06 s |
-| AetherScan（8k 特征，阈值未归一化） | 0.073° / 0.279° | 0.154° | 0.52% / 1.29% | 36,863 | 27 s |
-| AetherScan（27k 特征，阈值未归一化） | 0.065° / 0.239° | 0.158° | — | 45,938 | 21 s |
-| AetherScan（8k 特征，阈值已归一化，**最终**） | 0.070° / 0.205° | 0.207° | 0.39% / 1.06% | 19,961 | 23 s |
+| Photara（8k 特征，阈值未归一化） | 0.073° / 0.279° | 0.154° | 0.52% / 1.29% | 36,863 | 27 s |
+| Photara（27k 特征，阈值未归一化） | 0.065° / 0.239° | 0.158° | — | 45,938 | 21 s |
+| Photara（8k 特征，阈值已归一化，**最终**） | 0.070° / 0.205° | 0.207° | 0.39% / 1.06% | 19,961 | 23 s |
 
-AetherScan（最终设置）120 张结果直接与 OpenMVS 互比（**不涉及参考模型，是两个独立实现互检**）：
+Photara（最终设置）120 张结果直接与 OpenMVS 互比（**不涉及参考模型，是两个独立实现互检**）：
 图像对旋转角误差中位 **0.078°**、p90 0.213°、max 0.316°；相机中心 **0.43% / 0.96%（中位/P95）**。
-归一化后 AetherScan 的自洽性明显优于两者（RMS 0.177 px，逐相机 P95 中位约 0.3 px），
+归一化后 Photara 的自洽性明显优于两者（RMS 0.177 px，逐相机 P95 中位约 0.3 px），
 而与 OpenMVS 的差异仍小于 0.1°——即两者在同一条质量水平线上，差异量级远低于工程门槛。
 
-两个估计结果直接互比（AetherScan 120 张 vs OpenMVS）：图像对旋转角误差中位 **0.057°**、p90 0.138°，
+两个估计结果直接互比（Photara 120 张 vs OpenMVS）：图像对旋转角误差中位 **0.057°**、p90 0.138°，
 相机中心 Sim(3) 残差 **0.287%**（轨迹尺度）。三方差异都在 0.02°–0.03° 量级，而参考模型本身是另一次 SfM 估计
-（非真值），因此结论是"三者精度同级、无系统性偏差"，而不是"AetherScan 严格优于/劣于 OpenMVS"。
-另需注意特征预算不同：OpenMVS 每张图约 4 万–5 万特征，AetherScan 为 8 千/2.7 万；AetherScan 在同级精度下
+（非真值），因此结论是"三者精度同级、无系统性偏差"，而不是"Photara 严格优于/劣于 OpenMVS"。
+另需注意特征预算不同：OpenMVS 每张图约 4 万–5 万特征，Photara 为 8 千/2.7 万；Photara 在同级精度下
 耗时约 1/6。
 
 ## 限制

@@ -56,7 +56,7 @@ PSNR +0.0663 dB，SSIM +0.004799。目视检查 view 0，自行车车架、辐�
 
 ## 验证与结论
 
-Release 编译成功；`aetherscan_splat_test.exe --igs-only` 通过（含新增初始化回归检查），
+Release 编译成功；`photara_splat_test.exe --igs-only` 通过（含新增初始化回归检查），
 Python 实验脚本语法检查和修改文件的 `git diff --check` 通过。
 保留这项小改动：两个场景的留出指标均改善，室内雾团相关代理量也改善。
 这是有限的基础质量提升，不能替代颜色校正，也不能宣称消除了漂浮物。

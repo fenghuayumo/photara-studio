@@ -36,7 +36,7 @@ std::string session_directory_name() {
 #endif
 }
 
-// Project setting -> CLI flag. The stored value mirrors aetherscan::CameraModel:
+// Project setting -> CLI flag. The stored value mirrors photara::CameraModel:
 // 0 pinhole, 1 OpenCV fisheye, 2 automatic, 3 equirectangular panorama.
 const char* camera_model_flag(const int model) {
     switch (model) {
@@ -1054,11 +1054,11 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
         std::error_code temp_error;
         const auto temp = std::filesystem::temp_directory_path(temp_error);
         if (temp_error)
-            runtime_dir = std::filesystem::path("aetherscan_cache") /
+            runtime_dir = std::filesystem::path("photara_cache") /
                           runtime_cache_key(layout.project_file);
         else
             runtime_dir =
-                temp / "AetherScan" / runtime_cache_key(layout.project_file);
+                temp / "Photara" / runtime_cache_key(layout.project_file);
     }
     layout.working_sfm = runtime_dir / "sfm.bin";
     layout.working_splat = runtime_dir / "splat.ply";
@@ -1074,8 +1074,8 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     std::error_code session_error;
     const auto session_temp = std::filesystem::temp_directory_path(session_error);
     layout.session_dir = session_error
-        ? std::filesystem::path("aetherscan_session")
-        : session_temp / "AetherScan" / session_directory_name();
+        ? std::filesystem::path("photara_session")
+        : session_temp / "Photara" / session_directory_name();
     layout.preview_view_file = layout.session_dir / "preview_view";
     layout.preview_camera_file = layout.session_dir / "preview_camera";
     layout.preview_vis_file = layout.session_dir / "preview_vis";
@@ -1108,17 +1108,17 @@ std::string path_to_utf8(const std::filesystem::path& path) {
 }
 
 bool is_video_source(const ProjectSettings& settings) {
-    return aetherscan::io::is_video_path(
+    return photara::io::is_video_path(
         path_from_utf8_field(settings.images_dir.data()));
 }
 
 std::filesystem::path reconstruction_images_dir(const ProjectSettings& settings) {
     const std::filesystem::path source =
         path_from_utf8_field(settings.images_dir.data());
-    if (!aetherscan::io::is_video_path(source)) return source;
+    if (!photara::io::is_video_path(source)) return source;
     if (settings.video_frames_dir[0] != '\0')
         return path_from_utf8_field(settings.video_frames_dir.data());
-    return aetherscan::io::default_video_frames_dir(source);
+    return photara::io::default_video_frames_dir(source);
 }
 
 std::string build_align_command(

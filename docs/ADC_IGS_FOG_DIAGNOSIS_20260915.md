@@ -123,7 +123,7 @@ ADC-IGS 结果里某些平滑区域（天花板、地面）会出现成块的云
   ADC+ 协方差感知分裂与稠密 MVS 切平面分裂两个分支。
 - 回归：`splat_test.cpp` 里编码旧节奏期望的两个用例更新为 200 步窗口，并新增
   `densify_growth_factor == 0` 与"显式 initial opacity 覆盖 brush 默认"的断言；
-  `aetherscan_splat_test.exe` 全部通过。
+  `photara_splat_test.exe` 全部通过。
 
 - ADC-IGS 预设不再默认打开 SH 正则（`sh_regularization_weight` 保持 `0`，仍可用
   `--splat-sh-*` 显式开启）。
@@ -138,5 +138,5 @@ ADC-IGS 结果里某些平滑区域（天花板、地面）会出现成块的云
   （`d mean(exp(log s)) / d log s`）。此前的常数 log-scale 梯度在 Adam 的逐坐标
   归一化下会把没有数据支撑的轴压到 `exp(-40)`，实测产生 1e15 量级的各向异性针状
   高斯；同一权重下线性形式把 p99 轴比从 7.7e11 降到 95。
-- 回归：`aetherscan_splat_test.exe`（含 IGS 子集与新增的几何正则解析梯度/覆盖检查）
+- 回归：`photara_splat_test.exe`（含 IGS 子集与新增的几何正则解析梯度/覆盖检查）
   通过；`git diff --check` 通过。

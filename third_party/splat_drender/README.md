@@ -1,7 +1,7 @@
 # splat_drender
 
 Standalone CUDA backend for differentiable 3D Gaussian splatting, built for
-AetherScan. It renders RGB, alpha, accumulated surface normals and median
+Photara. It renders RGB, alpha, accumulated surface normals and median
 depth, and provides analytically matching backward gradients for all of
 them, including the median-depth bisection chain (T_p vacancy products,
 dT/dtm accumulation, dL/dt_peak, dL/drsigma), which is the most
@@ -94,7 +94,7 @@ is a measured heuristic, not a hardware-independent optimum. See
 The median-depth forward (seed + bisection) and backward (dT_dtm
 accumulation, dL_dmt_dT_dtm, per-Gaussian dL_dGt / dL_dopa_sigma /
 dL_drsigma / ray-plane gradients) are reimplemented formula-for-formula and
-verified with central finite differences in aetherscan_splat_test
+verified with central finite differences in photara_splat_test
 ("Depth Gradients" case).
 
 ## Reference-parity conventions
@@ -140,5 +140,5 @@ against forward alpha and finite geometry gradients on captured fixtures.
 The small-scene tolerance above is not a guarantee for arbitrarily thin trained
 Gaussians. A 671k-Gaussian capture exposes non-finite gradients in the reference
 itself and larger residual relative errors. See
-`docs/SPLAT_QUALITY_20260913.md` in the AetherScan repository for the matched
+`docs/SPLAT_QUALITY_20260913.md` in the Photara repository for the matched
 30k-step training comparison, fixes, and remaining numerical limits.

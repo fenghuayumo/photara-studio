@@ -1,13 +1,13 @@
-# AetherScan SfM 架构与性能路线
+# Photara SfM 架构与性能路线
 
 ## 目标边界
 
 RealityScan 类产品不是单个重建算法，而是图像导入、特征、检索、匹配、几何验证、
-初始化、增量/全局 SfM、BA、稠密 MVS、网格与纹理的一整条流水线。AetherScan
+初始化、增量/全局 SfM、BA、稠密 MVS、网格与纹理的一整条流水线。Photara
 先把 BA 做成可独立压测的基础设施，再向前接 SfM，能避免前端完成后被后端吞吐量
 卡住。
 
-参考 openMVS `libs/SFM` 的职责划分，但不复制其对象模型：AetherScan 的核心数据
+参考 openMVS `libs/SFM` 的职责划分，但不复制其对象模型：Photara 的核心数据
 采用紧凑索引、SoA 热数据和可持久驻留设备内存，公开 API 与执行期布局分离。
 
 ## 目标模块

@@ -34,8 +34,8 @@ LO-RANSAC 中，不同采样常得到完全相同的初始内点集合。局部�
 `ctest_final.log`：重新编译后，映射与弱分支恢复测试均通过。原有测试覆盖污染轨迹分裂、真实三维点恢复、错误分裂候选拒绝等；扩展检查将包含吸收、拒绝和分裂三类情况的 1536 条轨迹分别以 1/4 个线程运行，要求位置、内点、分裂代数、子轨迹及观测顺序逐项一致。
 
 ```powershell
-build/aetherscan/Release/aetherscan_triangulation_benchmark.exe --checkpoint artifacts/sfm_weak_frontend_20260914/cache_three_anchor/reconstruction-e6e2392ef5456456.bin --iterations 3 --threads 32
-ctest --test-dir build -C Release -R 'aetherscan.sfm.mapping' --output-on-failure
+build/photara/Release/photara_triangulation_benchmark.exe --checkpoint artifacts/sfm_weak_frontend_20260914/cache_three_anchor/reconstruction-e6e2392ef5456456.bin --iterations 3 --threads 32
+ctest --test-dir build -C Release -R 'photara.sfm.mapping' --output-on-failure
 ```
 
 基准新增 `--checkpoint`，支持 tracks/reconstruction 检查点，输出有序几何摘要。合成基准仍保留原用法。上述性能是特定真实输入的 CPU 子阶段结果，不能直接当作完整 SfM 的加速比例，也不表示 GPU 已持续满载。

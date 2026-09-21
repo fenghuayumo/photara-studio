@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export AetherScan TSDF camera frames as a pygsplat Nerfstudio dataset.
+"""Export Photara TSDF camera frames as a pygsplat Nerfstudio dataset.
 
 The TSDF frame manifest stores OpenCV world-to-camera extrinsics. Nerfstudio
 stores OpenGL camera-to-world matrices, so this script inverts the extrinsic
@@ -84,7 +84,7 @@ def main() -> None:
     output = {
         "camera_model": "OPENCV",
         "frames": frames,
-        "aetherscan_source_frames": str(args.frames_csv.resolve()),
+        "photara_source_frames": str(args.frames_csv.resolve()),
         "maximum_world_to_camera_roundtrip_error": maximum_roundtrip_error,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

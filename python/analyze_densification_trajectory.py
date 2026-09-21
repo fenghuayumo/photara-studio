@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize AetherScan and pygsplat grow/prune trajectories."""
+"""Summarize Photara and pygsplat grow/prune trajectories."""
 
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def main() -> None:
                 }
             )
     if not rows:
-        raise ValueError("No AetherScan iteration rows found")
+        raise ValueError("No Photara iteration rows found")
 
     cfg_text = args.pygsplat_cfg.read_text(
         encoding="utf-8", errors="replace"

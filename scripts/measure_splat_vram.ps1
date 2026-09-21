@@ -39,18 +39,18 @@ $arguments = @(
     '--splat-prefetch-views', '4'
 )
 
-$exe = Join-Path $root 'build/aetherscan/Release/aetherscan.exe'
+$exe = Join-Path $root 'build/photara/Release/photara.exe'
 $log = Join-Path $logDir "$Tag.log"
 if ($ForceGeometryChannels -ne '') {
-    $env:AETHERSCAN_SPLAT_FORCE_GEOMETRY_CHANNELS = $ForceGeometryChannels
+    $env:PHOTARA_SPLAT_FORCE_GEOMETRY_CHANNELS = $ForceGeometryChannels
     # Must be set together: the two knobs cover the caller-owned gradient
     # images and the rasterizer-owned per-Gaussian workspace.
-    $env:AETHERSCAN_SPLAT_FORCE_GEOMETRY_WORKSPACE = $ForceGeometryChannels
+    $env:PHOTARA_SPLAT_FORCE_GEOMETRY_WORKSPACE = $ForceGeometryChannels
 }
 $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru `
     -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err"
-Remove-Item Env:AETHERSCAN_SPLAT_FORCE_GEOMETRY_CHANNELS -ErrorAction SilentlyContinue
-Remove-Item Env:AETHERSCAN_SPLAT_FORCE_GEOMETRY_WORKSPACE -ErrorAction SilentlyContinue
+Remove-Item Env:PHOTARA_SPLAT_FORCE_GEOMETRY_CHANNELS -ErrorAction SilentlyContinue
+Remove-Item Env:PHOTARA_SPLAT_FORCE_GEOMETRY_WORKSPACE -ErrorAction SilentlyContinue
 
 $peak = 0
 $floor = [int]::MaxValue

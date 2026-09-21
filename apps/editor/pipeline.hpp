@@ -223,7 +223,7 @@ struct ProjectSettings {
     std::array<char, 1024> project_dir{};  // .ascan path, or legacy folder
 
     // Optional external SfM/camera dataset. When set, Train 3DGS bypasses
-    // AetherScan's own image alignment and uses this dataset directly.
+    // Photara's own image alignment and uses this dataset directly.
     std::array<char, 1024> dataset_source{};
     std::array<char, 1024> dataset_initial_cloud{};
     // Optional existing trained Gaussian file to preview/import. Empty uses
@@ -232,7 +232,7 @@ struct ProjectSettings {
     int splat_format = 0;  // export format: auto/PLY, PLY, SOG, SPZ, GLB
 
     // 0 = pinhole, 1 = OpenCV fisheye, 2 = automatic, 3 = equirectangular
-    // (the values mirror aetherscan::CameraModel so the CLI flag and the
+    // (the values mirror photara::CameraModel so the CLI flag and the
     // persisted project setting stay in sync).
     int camera_model = 2;
     int sfm_mode = 0;  // global, incremental, hierarchical

@@ -1,8 +1,8 @@
-# AetherScan Splat C++ / TinyTensor 后端
+# Photara Splat C++ / TinyTensor 后端
 
 ## 当前实现状态
 
-AetherScan 已有一条可编译、可前反向传播、可由 CLI 启动的 Gaussian splat 训练路径。
+Photara 已有一条可编译、可前反向传播、可由 CLI 启动的 Gaussian splat 训练路径。
 当前实现参考了 GGGS 的几何监督与 CUDA rasterizer，但已组合 ADCPlus、GaussianWrapping
 normal field、PAM/TSDF 等独立能力，因此公开接口统一称为 `splat`，不再以 GGGS 命名：
 
@@ -23,19 +23,19 @@ RealityCapture 或 OpenMVS。Gaussian 写出格式看 `--output` 后缀：`.sog`
 
 ## 目录与职责
 
-- `aetherscan/include/splat/`：公开的模型、相机、训练配置和训练器 API；
-- `aetherscan/src/splat/rasterizer.cu`：TinyTensor tensor 与 GGGS 原生 CUDA API 的桥接；
-- `aetherscan/src/splat/cuda_ops.cu`：参数激活、链式梯度、融合监督损失和融合 Adam；
-- `aetherscan/src/splat/bilateral_grid.cu`：仿射双边网格颜色校正（训练期、空间变化）；
-- `aetherscan/src/splat/ppisp.cu`：PPISP 颜色校正，默认 `no_crf_no_vig`（曝光 +
+- `photara/include/splat/`：公开的模型、相机、训练配置和训练器 API；
+- `photara/src/splat/rasterizer.cu`：TinyTensor tensor 与 GGGS 原生 CUDA API 的桥接；
+- `photara/src/splat/cuda_ops.cu`：参数激活、链式梯度、融合监督损失和融合 Adam；
+- `photara/src/splat/bilateral_grid.cu`：仿射双边网格颜色校正（训练期、空间变化）；
+- `photara/src/splat/ppisp.cu`：PPISP 颜色校正，默认 `no_crf_no_vig`（曝光 +
   白平衡单应），可选暗角 / CRF 布局；
-- `aetherscan/src/splat/fused_ssim.cu`：从 Python fused-ssim 完整移植的 11×11 CUDA
+- `photara/src/splat/fused_ssim.cu`：从 Python fused-ssim 完整移植的 11×11 CUDA
   forward/backward；
-- `aetherscan/src/splat/colmap.cpp`：COLMAP 文本/二进制相机、位姿、稀疏点和 track 加载；
-- `aetherscan/src/splat/trainer.cpp`：点云初始化、动态 Gaussian 管理、训练和 PLY 导出；
-- `aetherscan/third_party/gggs_reference/`：从 Python GGGS 参考工程移入的原始 CUDA
+- `photara/src/splat/colmap.cpp`：COLMAP 文本/二进制相机、位姿、稀疏点和 track 加载；
+- `photara/src/splat/trainer.cpp`：点云初始化、动态 Gaussian 管理、训练和 PLY 导出；
+- `photara/third_party/gggs_reference/`：从 Python GGGS 参考工程移入的原始 CUDA
   rasterizer core，不包含 Torch/PyBind wrapper；
-- `aetherscan/third_party/tinytensor/`：tensor 存储、CUDA 内存和基础运算。
+- `photara/third_party/tinytensor/`：tensor 存储、CUDA 内存和基础运算。
 
 模型使用可训练的世界坐标均值、log-scale、四元数、opacity logit 和最高三阶 SH。
 稠密点云法线用于初始化 Gaussian 朝向，像素足迹用于初始化尺度，点色用于初始化 SH0。
@@ -96,7 +96,7 @@ SubjectBounds 或外部凸包裁剪 pivot、候选点和最终 mesh。中间候�
 bicycle 回归可直接使用 `images_2`：
 
 ```powershell
-build/aetherscan/Release/aetherscan.exe `
+build/photara/Release/photara.exe `
   --images D:\Models\360_extra_scenes_1\bicycle\images_2 `
   --splat-dataset D:\Models\360_extra_scenes_1\bicycle\sparse\0 `
   --output artifacts\bicycle\scene.mvs --splat `
@@ -113,14 +113,14 @@ build/aetherscan/Release/aetherscan.exe `
 需要 CUDA Toolkit 和 glm：
 
 ```powershell
-cmake -S . -B build -DAETHERSCAN_ENABLE_CUDA=ON -DAETHERSCAN_ENABLE_SPLAT=ON
-cmake --build build --config Release --target aetherscan -- /m
+cmake -S . -B build -DPHOTARA_ENABLE_CUDA=ON -DPHOTARA_ENABLE_SPLAT=ON
+cmake --build build --config Release --target photara -- /m
 ```
 
 完整流程：
 
 ```powershell
-build/aetherscan/Release/aetherscan.exe `
+build/photara/Release/photara.exe `
   --images data/images `
   --output output/scene.mvs `
   --splat `
@@ -147,7 +147,7 @@ viewer/mesh-extraction 接入。
 （ADC 致密化持续到 95% 进度），稠密 MVS 仍默认 10,000 步：
 
 ```powershell
-aetherscan --images D:\ScanVideo\ori_img\images `
+photara --images D:\ScanVideo\ori_img\images `
   --splat-dataset D:\ScanVideo\ori_img `
   --output out\scene.mvs `
   --splat-strategy adc_igs `
@@ -209,7 +209,7 @@ ADC+ 的“可见”要求 Gaussian 通过 alpha/transmittance 测试并实际�
 稠密点云建议配置：
 
 ```powershell
-aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
+photara --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
   --dense --splat
 ```
 
@@ -219,7 +219,7 @@ Mask 复用 `--masks` 指定的目录（默认寻找 `images/` 的同级 `masks/
 找不到独立 mask 时回退到源图 alpha channel：
 
 ```powershell
-aetherscan --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
+photara --images D:\ScanVideo\ori_img\images --output out\scene.mvs `
   --dense --splat --splat-use-mask `
   --splat-alpha-mode transparent --splat-match-alpha-weight 0.25 `
   --splat-ssim-weight 0.2 `
@@ -256,7 +256,7 @@ mask 内诊断视角 PSNR 为 22.87 / 22.32 / 24.55 dB，导出 PLY 的 31,000,0
 CUDA 前反向冒烟测试：
 
 ```powershell
-ctest --test-dir build -C Release -R aetherscan.splat.rasterizer --output-on-failure
+ctest --test-dir build -C Release -R photara.splat.rasterizer --output-on-failure
 ```
 
 ## 性能设计
@@ -308,7 +308,7 @@ backward 做了稳定窗口采集。训练配置为 ADC+、30,000 步、最大�
 关闭 progressive resolution，几何项从第 3,000 步开启，每步从最多 8 个候选邻视角中
 随机选择一个邻视角。`--splat-mv-neighbors 8` 只是候选池大小，并不会在一次迭代中执行
 8 次 `sample_depth`；实际选择逻辑见
-[`trainer.cpp`](../aetherscan/src/splat/trainer.cpp#L813)。
+[`trainer.cpp`](../photara/src/splat/trainer.cpp#L813)。
 
 训练 profiler 的稳定窗口是第 15,001–30,000 步的 CUDA event 平均值：
 
@@ -333,10 +333,10 @@ Nsight Compute 使用 kernel replay、19 passes 和默认 cold-cache 行为，�
 
 multi-view 在每个有效迭代中先把当前视图的整张 median-depth 图反投影到世界坐标，
 再送入邻视角 `sample_depth`，见
-[`trainer.cpp`](../aetherscan/src/splat/trainer.cpp#L821)。
+[`trainer.cpp`](../photara/src/splat/trainer.cpp#L821)。
 GGGS reference 使用 16×16、256-thread CTA 和 `SAMPLE_BATCH_SIZE=2`，因此每个
 duplicated-tile CTA 最多容纳 512 个点，配置见
-[`config.h`](../aetherscan/third_party/gggs_reference/include/config.h#L22)。
+[`config.h`](../photara/third_party/gggs_reference/include/config.h#L22)。
 
 由 forward SASS 中两组最终输出 store 的实际执行线程数可恢复进入 kernel 的点数：
 
@@ -352,9 +352,9 @@ duplicated-tile CTA 最多容纳 512 个点，配置见
 
 tile/point binning 需要对完整 point list 做 scan、sort、range identification 和 batch
 rounding，见
-[`rasterizer_impl.cu`](../aetherscan/third_party/gggs_reference/src/rasterizer_impl.cu#L1378)
+[`rasterizer_impl.cu`](../photara/third_party/gggs_reference/src/rasterizer_impl.cu#L1378)
 及
-[`rasterizer_impl.cu`](../aetherscan/third_party/gggs_reference/src/rasterizer_impl.cu#L1423)。
+[`rasterizer_impl.cu`](../photara/third_party/gggs_reference/src/rasterizer_impl.cu#L1423)。
 因此减少整图输入量和减少 tile 尾块浪费是两个不同的优化层级。
 
 #### Forward：寄存器受限的重复 tile traversal
@@ -375,15 +375,15 @@ forward 的主要问题不是 DRAM 带宽。99 registers/thread 使寄存器成�
 每个 SM 只能驻留两个 256-thread CTA，理论 occupancy 上限约 33.3%。寄存器压力来自
 per-sample `done/Depth/T/point_xy/last_contributor` 等状态，以及
 `T_p[SAMPLE_BATCH_SIZE][SPLIT+1]`；当前配置实际为 `T_p[2][9]`，见
-[`sample_forward.cu`](../aetherscan/third_party/gggs_reference/src/sample_forward.cu#L574)
+[`sample_forward.cu`](../photara/third_party/gggs_reference/src/sample_forward.cu#L574)
 和
-[`sample_forward.cu`](../aetherscan/third_party/gggs_reference/src/sample_forward.cu#L694)。
+[`sample_forward.cu`](../photara/third_party/gggs_reference/src/sample_forward.cu#L694)。
 
 每个 CTA 先遍历一次 Gaussian tile range 以确定初始深度和 `last_contributor`，然后执行
 1 次完整 8-way split 和 4 次后续 refinement，总计 5 次 refinement traversal，见
-[`sample_forward.cu`](../aetherscan/third_party/gggs_reference/src/sample_forward.cu#L700)
+[`sample_forward.cu`](../photara/third_party/gggs_reference/src/sample_forward.cu#L700)
 和
-[`sample_forward.cu`](../aetherscan/third_party/gggs_reference/src/sample_forward.cu#L789)。
+[`sample_forward.cu`](../photara/third_party/gggs_reference/src/sample_forward.cu#L789)。
 因此 forward 更准确的描述是“低 occupancy 下重复遍历同一 Gaussian range 的计算/控制流
 瓶颈”，而不是显存带宽瓶颈。
 
@@ -413,12 +413,12 @@ backward 的 occupancy 已经较高，但动态索引的 per-sample 局部数组
 long-scoreboard、MIO throttle 和仅约 1.3–1.5 eligible warps/scheduler 一致。
 
 backward 还会对 Gaussian contributor range 完整遍历两次，见
-[`sample_backward.cu`](../aetherscan/third_party/gggs_reference/src/sample_backward.cu#L170)
+[`sample_backward.cu`](../photara/third_party/gggs_reference/src/sample_backward.cu#L170)
 和
-[`sample_backward.cu`](../aetherscan/third_party/gggs_reference/src/sample_backward.cu#L232)；
+[`sample_backward.cu`](../photara/third_party/gggs_reference/src/sample_backward.cu#L232)；
 第二次遍历对每个 Gaussian 聚合梯度，先做 warp reduction，再由每个 warp 的 lane 0
 执行 10 次 `atomicAdd`，见
-[`sample_backward.cu`](../aetherscan/third_party/gggs_reference/src/sample_backward.cu#L328)。
+[`sample_backward.cu`](../photara/third_party/gggs_reference/src/sample_backward.cu#L328)。
 atomic/MIO 和 CTA barrier 是次要瓶颈，但在 local-memory 压力降低后会更加突出。
 
 #### 优化顺序与预期收益
@@ -568,7 +568,7 @@ PSNR 为 `30.44 / 36.96 / 35.98 dB`。depth-normal 提取过滤拒绝 `146,061 /
 仍未完成的产品工作：
 
 - 3D filter、PatchMatch sample-depth、多视图几何与 plane-warp NCC 已移植；尚未加入 Python
-  glossy normal TV 分支，AetherScan MVS depth/normal 直接监督仍为可选项；
+  glossy normal TV 分支，Photara MVS depth/normal 直接监督仍为可选项；
 - ADC-IGS 当前以 raster refine weight、可见度和屏幕半径构造投影优先级，尚未实现 Python
   版本基于 Sobel/逐像素误差反投影的完整 edge/error ownership map；
 - 未实现 checkpoint/resume、out-of-core view cache、多 GPU 和 mixed precision；
@@ -581,8 +581,8 @@ PSNR 为 `30.44 / 36.96 / 35.98 dB`。depth-normal 提取过滤拒绝 `146,061 /
 
 参考 GGGS CUDA 文件的源注释限定为非商业研究/评估用途，而 Python 参考目录中没有附带其
 所指向的完整 `LICENSE.md`。因此 `gggs_reference` 只能视为原型验证代码，不能直接作为商业
-RealityScan 类产品发布。详细记录见 `aetherscan/third_party/gggs_reference/NOTICE.md`；商业化前
+RealityScan 类产品发布。详细记录见 `photara/third_party/gggs_reference/NOTICE.md`；商业化前
 必须取得明确授权，或以洁净室方式替换该 rasterizer core。
 
 fused SSIM 移植源为 `dvsplat_utils/fused-ssim/ssim.cu`，按其 MIT 许可保留版权与许可文本，见
-`aetherscan/third_party/fused_ssim/LICENSE`；这不改变上述 GGGS rasterizer core 的授权边界。
+`photara/third_party/fused_ssim/LICENSE`；这不改变上述 GGGS rasterizer core 的授权边界。

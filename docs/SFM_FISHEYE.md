@@ -23,7 +23,7 @@ EXIF 中明确包含 fisheye 的镜头描述仅作为辅助提示，仍须得到
 命令行支持 `--camera-model opencv_fisheye`（简写 `fisheye`）：
 
 ```powershell
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:\ScanVideo\alameda\images_2 `
   --output artifacts\alameda_fisheye.asfm `
   --camera-model opencv_fisheye --mode global
@@ -50,7 +50,7 @@ EXIF 中明确包含 fisheye 的镜头描述仅作为辅助提示，仍须得到
 用户提供的 `D:\ScanVideo\alameda\images\_2` 不存在，实际使用 `D:\ScanVideo\alameda\images_2`。源目录共有 1,742 张 JPG，按文件名排序取前 64 张（DSC06436.JPG 起），在 `artifacts/fisheye_alameda_64/images` 创建硬链接，不修改源图像。
 
 ```powershell
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images artifacts\fisheye_alameda_64\images `
   --output artifacts\fisheye_alameda_64\global.asfm `
   --camera-model opencv_fisheye --mode global --max-features 6000 --window 6

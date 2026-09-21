@@ -23,11 +23,11 @@ $src = @(
     "third_party\splat_drender\src\render_forward.cu",
     "third_party\splat_drender\src\render_backward.cu",
     "third_party\splat_drender\src\point_sampling.cu",
-    "aetherscan\third_party\gggs_reference\src\rasterizer_impl.cu",
-    "aetherscan\third_party\gggs_reference\src\render_forward.cu",
-    "aetherscan\third_party\gggs_reference\src\render_backward.cu",
-    "aetherscan\third_party\gggs_reference\src\sample_forward.cu",
-    "aetherscan\third_party\gggs_reference\src\sample_backward.cu",
+    "photara\third_party\gggs_reference\src\rasterizer_impl.cu",
+    "photara\third_party\gggs_reference\src\render_forward.cu",
+    "photara\third_party\gggs_reference\src\render_backward.cu",
+    "photara\third_party\gggs_reference\src\sample_forward.cu",
+    "photara\third_party\gggs_reference\src\sample_backward.cu",
     "third_party\splat_drender\tests\$Target.cu"
 ) | ForEach-Object { Join-Path $repo $_ }
 
@@ -40,10 +40,10 @@ try {
         '--expt-relaxed-constexpr', '-use_fast_math', '-DNOMINMAX',
         '-I', (Join-Path $repo "third_party\splat_drender\include"),
         '-I', (Join-Path $repo "third_party\splat_drender\src"),
-        '-I', (Join-Path $repo "aetherscan\third_party\gggs_reference\include"),
-        '-I', $VcpkgInclude, '-DAETHERSCAN_GGGS_ACCUTILE=1', '-Xcompiler=/EHsc')
+        '-I', (Join-Path $repo "photara\third_party\gggs_reference\include"),
+        '-I', $VcpkgInclude, '-DPHOTARA_GGGS_ACCUTILE=1', '-Xcompiler=/EHsc')
     # A conservative header timestamp invalidates every object after layout changes.
-    $headerRoots = @('third_party\splat_drender', 'aetherscan\third_party\gggs_reference')
+    $headerRoots = @('third_party\splat_drender', 'photara\third_party\gggs_reference')
     $dependencyTime = (Get-Item -LiteralPath $PSCommandPath).LastWriteTimeUtc
     foreach ($root in $headerRoots) {
         Get-ChildItem -LiteralPath (Join-Path $repo $root) -Recurse -File |

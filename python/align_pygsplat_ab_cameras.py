@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Express AetherScan cameras in a pygsplat/COLMAP model's world frame.
+"""Express Photara cameras in a pygsplat/COLMAP model's world frame.
 
 The script matches cameras by image name, estimates the Sim(3) mapping from
-the COLMAP camera centers to the AetherScan camera centers, reports center and
+the COLMAP camera centers to the Photara camera centers, reports center and
 orientation residuals, and writes a Nerfstudio transforms file that preserves
-the AetherScan intrinsics while using the pygsplat model's native coordinates.
+the Photara intrinsics while using the pygsplat model's native coordinates.
 """
 
 from __future__ import annotations

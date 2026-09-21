@@ -113,7 +113,7 @@ alameda 的 P95 门槛已经通过，但最大中心误差仍为参考半径的 
 
 ```powershell
 python experiments/run_sfm_acceptance.py `
-  --exe build/aetherscan/Release/aetherscan.exe `
+  --exe build/photara/Release/photara.exe `
   --images D:/ScanVideo/chuan/images `
   --reference D:/ScanVideo/chuan/sparse/0 `
   --output-dir artifacts/my-sfm-regression --name chuan `
@@ -121,7 +121,7 @@ python experiments/run_sfm_acceptance.py `
 
 # 诊断标定对照；实际产品中必须使用该相机自身的可信标定。
 python experiments/run_sfm_acceptance.py `
-  --exe build/aetherscan/Release/aetherscan.exe `
+  --exe build/photara/Release/photara.exe `
   --images D:/ScanVideo/chuan/images `
   --reference D:/ScanVideo/chuan/sparse/0 `
   --output-dir artifacts/my-sfm-regression --name chuan-calibrated `

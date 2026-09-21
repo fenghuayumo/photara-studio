@@ -119,19 +119,19 @@ RealityScan 或 COLMAP CLI，未做同机同数据对拍，因此不能据本轮
 
 ```powershell
 python experiments/run_sfm_acceptance.py `
-  --exe build/aetherscan/Release/aetherscan.exe `
+  --exe build/photara/Release/photara.exe `
   --images D:/Models/nyc/images_2 --reference D:/Models/nyc/sparse/0 `
   --output-dir artifacts/sfm_acceptance_halfres_20260906 --name nyc_rerun `
   --timeout-seconds 1800
 
 python experiments/run_sfm_acceptance.py `
-  --exe build/aetherscan/Release/aetherscan.exe `
+  --exe build/photara/Release/photara.exe `
   --images D:/Models/alameda/images_2 --reference D:/Models/alameda/sparse/0 `
   --output-dir artifacts/sfm_acceptance_halfres_20260906 --name alameda_rerun `
   --timeout-seconds 1800
 
 python experiments/run_sfm_acceptance.py `
-  --exe build/aetherscan/Release/aetherscan.exe `
+  --exe build/photara/Release/photara.exe `
   --images D:/Models/alameda/images --reference D:/Models/alameda/sparse/0 `
   --output-dir artifacts/sfm_acceptance_halfres_20260906 --name alameda_fullres_rerun `
   --timeout-seconds 3600
@@ -147,7 +147,7 @@ python experiments/sfm_graph_audit.py `
 （`nyc_halfres_comparison.png`、`nyc_fullres_comparison.png`、
 `alameda_halfres_comparison.png`、`alameda_fullres_comparison.png`）。构建指纹：
 git `c7e8ea08b6bac870785db0806fceff61ab7eee07`，
-aetherscan.exe SHA-256
+photara.exe SHA-256
 `255bace6fb8cbfb917905282b589e9ac2614fdcc6114e6b956ad9693648ba9ae`。
 
 验证：ctest 相关 10/10 通过（ba.optimizer、features、sfm.two_view/mapping/

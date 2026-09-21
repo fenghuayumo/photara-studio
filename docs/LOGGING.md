@@ -5,14 +5,14 @@
 
 ## CLI behavior
 
-The `aetherscan` executable writes logs to both the console and a timestamped
+The `photara` executable writes logs to both the console and a timestamped
 file next to the requested output file:
 
 ```text
-aetherscan-YYYYMMDD-HHMMSS-mmm.log
+photara-YYYYMMDD-HHMMSS-mmm.log
 ```
 
-Console verbosity defaults to `info`. Set `AETHERSCAN_LOG_LEVEL` to one of:
+Console verbosity defaults to `info`. Set `PHOTARA_LOG_LEVEL` to one of:
 
 ```text
 error | warning | info | debug | trace | off
@@ -21,8 +21,8 @@ error | warning | info | debug | trace | off
 PowerShell example:
 
 ```powershell
-$env:AETHERSCAN_LOG_LEVEL = "debug"
-.\aetherscan.exe --images images --focal 900 --mode incremental --output scene.mvs
+$env:PHOTARA_LOG_LEVEL = "debug"
+.\photara.exe --images images --focal 900 --mode incremental --output scene.mvs
 ```
 
 The log file always records through `trace`, independently of console
@@ -44,12 +44,12 @@ contend on the output mutex.
 
 ## Library use
 
-Applications embedding AetherScan can configure logging before invoking SfM:
+Applications embedding Photara can configure logging before invoking SfM:
 
 ```cpp
 #include "core/logging.hpp"
 
-using namespace aetherscan::core;
+using namespace photara::core;
 Logger::instance().configure("logs", "my-product", LogLevel::info, LogLevel::trace);
 ```
 

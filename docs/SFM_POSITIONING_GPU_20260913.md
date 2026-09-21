@@ -22,13 +22,13 @@ GPU 全局定位已恢复默认启用，库默认配置和命令行默认值一�
 
 最终版本再次执行，**不传 `--positioning-cuda`**，确认默认路径日志为 `global positioning backend=cuda bearing_schur`，且不是读取重建缓存跳过定位。`default_gpu.log`：定位 6.959 s、全局重建 29.004 s、完整缓存流程 85.169 s，897/900（集合相同）、819132 地标、RMS 0.691168 px。相对 CPU 对照的相机位置变化中位数 0.005756%、P95 0.009801%、最大 1.5132% 场景半径；旋转差最大 0.05661°。最大位置差仍位于弱约束的 `video08_00235.jpeg`，绝对差 0.113 场景单位，支持观测为 316（CPU 为 313），没有首轮退化到 96 个观测及约 199% 半径位移的问题。**不声称逐相机或不同运行之间完全相同**；浮点归约和非线性弱约束方向仍存在差异。参见 `default_comparison.json`。
 
-最终构建通过；`aetherscan.bearing_cuda` 回归通过；对新内核执行 Compute Sanitizer memcheck、synccheck，均为 0 errors，日志为 `final_memcheck.log`、`final_synccheck.log`。相机初始化、IRLS 统计、三角化和恢复仍有 CPU 工作，并不表示整条管线持续满 GPU。
+最终构建通过；`photara.bearing_cuda` 回归通过；对新内核执行 Compute Sanitizer memcheck、synccheck，均为 0 errors，日志为 `final_memcheck.log`、`final_synccheck.log`。相机初始化、IRLS 统计、三角化和恢复仍有 CPU 工作，并不表示整条管线持续满 GPU。
 
 最终真实问题断言测试亦通过（`final_real_fixture.log`），第 1、8、30 步 CPU/GPU 相机最大参数差分别为 2.01e-11、6.58e-11、2.08e-9，成本差通过 1e-8 的绝对阈值。默认运行整卡平均采样利用率 24.78%，峰值 100%，仅供整卡趋势参考。
 
 以下保留首轮实验记录及修复依据，不将早期失败版本的性能当作最终验收结果。
 
-本次将固定旋转的 bearing 全局定位主求解移入 CUDA：方向残差与雅可比、点块消元、相机 Schur 矩阵装配、cuSolver 双精度 Cholesky、点回代与 LM 更新。观测拓扑和工作区跨 IRLS 轮次复用。参考 Spirula Studio `src/sfm/ba/README.md` 的 GPU Schur/LM 组织方式，针对 AetherScan 的三维方向残差实现独立 CUDA 求解器。
+本次将固定旋转的 bearing 全局定位主求解移入 CUDA：方向残差与雅可比、点块消元、相机 Schur 矩阵装配、cuSolver 双精度 Cholesky、点回代与 LM 更新。观测拓扑和工作区跨 IRLS 轮次复用。参考 Spirula Studio `src/sfm/ba/README.md` 的 GPU Schur/LM 组织方式，针对 Photara 的三维方向残差实现独立 CUDA 求解器。
 
 保留原有 Huber 目标、单相机平移锚点、标量基线尺度约束及自适应 IRLS。没有额外锁死第二个相机中心。相机初始化、IRLS 权重更新、三角化和质量检查仍包含 CPU 工作，因此不能声称整个稀疏重建阶段都在 GPU 上运行。
 
@@ -53,11 +53,11 @@ GPU 数据为 nvidia-smi 每约 0.5 秒整卡采样，包含桌面等其他应�
 
 ## 验证与边界
 
-`aetherscan_bearing_cuda_test` 使用已知相机/点几何验证恢复精度与锚点不漂移，并以独立 Ceres AutoDiff 求解验证含异常点、不同权重的 Huber 目标。干净问题相机最大误差约 2.1e-14；加权异常点问题 CPU/GPU 最终目标差约 7.3e-12。另验证非法权重拒绝。
+`photara_bearing_cuda_test` 使用已知相机/点几何验证恢复精度与锚点不漂移，并以独立 Ceres AutoDiff 求解验证含异常点、不同权重的 Huber 目标。干净问题相机最大误差约 2.1e-14；加权异常点问题 CPU/GPU 最终目标差约 7.3e-12。另验证非法权重拒绝。
 
 首轮因下述局部稳定性回归曾暂时默认关闭，修复验收后已改为默认开启。已有特征提取、匹配和大型 BA 的 GPU 路径不受该定位开关影响。当前 CUDA 定位路径用于至少 50000 个观测且最多 2000 个注册相机的 bearing 问题；无 CUDA、规模不支持、初始化或求解失败时回退 Ceres。稠密相机矩阵内存随相机数平方增长，大规模矩阵无关 PCG 尚未实现。
 
-新选项已计入重建缓存键。新增独立 `aetherscan_sfm_positioning_benchmark` 支持同轨迹检查点 CPU/CUDA 对照；输出拒绝覆盖已有文件。
+新选项已计入重建缓存键。新增独立 `photara_sfm_positioning_benchmark` 支持同轨迹检查点 CPU/CUDA 对照；输出拒绝覆盖已有文件。
 
 ## 完整冷启动与质量审查
 
@@ -67,7 +67,7 @@ GPU 数据为 nvidia-smi 每约 0.5 秒整卡采样，包含桌面等其他应�
 
 进一步使用本轮相同前端缓存关闭 CUDA 定位，得到 `full_cpu_control.log`：897/900，819126 地标，RMS 0.691158 px，确认了首轮局部位置差异，因此首轮未默认启用。该 CPU 控制运行命中前端缓存（前端仅 3.133 s），其总耗时 118.634 s **不能**直接与 CUDA 冷启动耗时比较。`controlled_comparison.json` 自动生成的总耗时比值不作为性能结论。
 
-Compute Sanitizer 对新 `aetherscan` CUDA 内核执行 memcheck 和 synccheck，均为 0 errors；见 `memcheck.log`、`synccheck.log`。未据此声称完整数据集或 cuSolver 内部内核已经过 Sanitizer 全覆盖。
+Compute Sanitizer 对新 `photara` CUDA 内核执行 memcheck 和 synccheck，均为 0 errors；见 `memcheck.log`、`synccheck.log`。未据此声称完整数据集或 cuSolver 内部内核已经过 Sanitizer 全覆盖。
 
 ## 后续修复：变量缩放与阻尼
 

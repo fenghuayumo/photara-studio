@@ -31,7 +31,7 @@
 
 ## 回归测试
 
-Release 编译及完整 `aetherscan_splat_test.exe` 通过。
+Release 编译及完整 `photara_splat_test.exe` 通过。
 全景有限差分 4 个位置、3 个轴的最大相对误差约 0.69%，含接缝、近景及高仰角。
 
 本轮另补充 `check_color_only_parity`：在针孔、鱼眼和全景中比较开启/关闭几何工作区
@@ -78,7 +78,7 @@ Release 编译及完整 `aetherscan_splat_test.exe` 通过。
 重复运行的训练器静态曲线：1k 21.8333 → 5k 23.2509 → 10k 20.3222 → 15k 18.3080。
 延长训练并未修复该视角，反而进一步变差。
 
-使用最新版 `aetherscan_splat_quality_eval.exe` 独立读取重复运行的导出模型，
+使用最新版 `photara_splat_quality_eval.exe` 独立读取重复运行的导出模型，
 对 view 344 重渲染，和训练器输出的 8-bit RGB 最大像素差及平均差均为 0。
 所以不能归因于临时评估缓冲或保存图片；也不能仅凭两次训练定位到具体哪个 kernel。
 

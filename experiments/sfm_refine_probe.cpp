@@ -15,12 +15,12 @@
 #include "sfm_focal_probe.hpp"
 
 int main(int argc, char** argv) {
-    using namespace aetherscan::sfm;
+    using namespace photara::sfm;
     if (argc != 3 && !(argc == 4 && (std::string(argv[3]) == "reattach" || std::string(argv[3]) == "focal"))) {
         std::cerr << "checkpoint.bin output_prefix [reattach|focal]\n"; return 1;
     }
     const std::filesystem::path input(argv[1]), output(argv[2]);
-    aetherscan::core::Logger::instance().configure(output.parent_path(), "recovery-probe");
+    photara::core::Logger::instance().configure(output.parent_path(), "recovery-probe");
     if (std::filesystem::exists(output.string()+".asfm")) return 2;
     const auto stem = input.stem().string();
     const auto key = std::stoull(stem.substr(stem.find('-')+1), nullptr, 16);

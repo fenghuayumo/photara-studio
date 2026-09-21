@@ -102,7 +102,7 @@ def render_views(
     normals = np.asarray(mesh.vertex_normals)
     visualizer = o3d.visualization.Visualizer()
     if not visualizer.create_window(
-        window_name="AetherScan mesh renderer",
+        window_name="Photara mesh renderer",
         width=width,
         height=height,
         visible=False,

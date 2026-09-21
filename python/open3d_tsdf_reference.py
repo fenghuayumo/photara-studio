@@ -1,4 +1,4 @@
-"""Reconstruct an Open3D/pygsplat TSDF mesh from AetherScan-exported frames."""
+"""Reconstruct an Open3D/pygsplat TSDF mesh from Photara-exported frames."""
 
 from __future__ import annotations
 

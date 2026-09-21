@@ -1,4 +1,4 @@
-# AetherScan 稠密重建与贴图架构
+# Photara 稠密重建与贴图架构
 
 ## 目标边界
 
@@ -24,7 +24,7 @@ MVS 实现保留为可选诊断、算法对照和兼容导出后端，不是 Spl
 
 参考：
 
-- AetherScan Splat：当前产品实现；其几何监督参考 *Geometry-Grounded Gaussian
+- Photara Splat：当前产品实现；其几何监督参考 *Geometry-Grounded Gaussian
   Splatting (GGGS)*，并融合 ADCPlus、GaussianWrapping normal field 与独立 mesh 后端；
 - pygsplat/GS-2M：Gaussian 深度渲染与 TSDF 提取约定；
 - Open3D：稀疏体素块 TSDF 的公开接口与数值回归参考；
@@ -86,9 +86,9 @@ scene            → 不使用前景 Mask
 CLI 示意：
 
 ```powershell
-aetherscan --images images --output object.ply --capture-mode object
-aetherscan --images images --output object.ply --capture-mode object --masks masks
-aetherscan --images images --output scene.ply --capture-mode scene
+photara --images images --output object.ply --capture-mode object
+photara --images images --output object.ply --capture-mode object --masks masks
+photara --images images --output scene.ply --capture-mode scene
 ```
 
 显式指定 `--capture-mode` 会作为产品级完整重建预设，自动开启 Splat 与 TSDF Mesh；
@@ -98,7 +98,7 @@ aetherscan --images images --output scene.ply --capture-mode scene
 ### 模块划分
 
 ```text
-aetherscan/
+photara/
   sfm/           # 相机位姿、稀疏点、观测
   splat/         # sparse init、ADCPlus、Splat、Gaussian 渲染
   subject/       # SubjectBounds、主体 Gaussian 选择、软 Mask 自举
@@ -109,7 +109,7 @@ aetherscan/
   mvs/           # 可选诊断/兼容后端
 ```
 
-建议将 TSDF 拆为独立 `AetherScan::TSDF` 目标，只依赖 Eigen/OpenMP；MVS、Splat 通过 adapter
+建议将 TSDF 拆为独立 `Photara::TSDF` 目标，只依赖 Eigen/OpenMP；MVS、Splat 通过 adapter
 提供深度帧，不让 TSDF 公开 API 依赖 `MvsScene`。
 
 ### 数据模型：`RebuildScene`
@@ -301,18 +301,18 @@ run_rebuild(scene, cfg):
 
 ### Vulkan 编辑器与训练预览
 
-`aetherscan_editor` 使用 GLFW + Dear ImGui + Vulkan。编辑器创建可导出的 Vulkan image 与
-timeline semaphore，以可继承 Win32 HANDLE 启动独立 `aetherscan` 重建进程。训练进程按 Vulkan
+`photara_studio` 使用 GLFW + Dear ImGui + Vulkan。编辑器创建可导出的 Vulkan image 与
+timeline semaphore，以可继承 Win32 HANDLE 启动独立 `photara` 重建进程。训练进程按 Vulkan
 physical-device LUID 选择同一块 CUDA GPU，导入 image/semaphore，并把该步已有的 planar-float
 raster color 直接写入 Vulkan image；不克隆 GaussianModel、不额外渲染、不经过 CPU/PNG：
 
 ```powershell
-cmake -S . -B build -DAETHERSCAN_BUILD_EDITOR=ON
-cmake --build build --config Release --target aetherscan_editor --parallel
-build\aetherscan\Release\aetherscan_editor.exe
+cmake -S . -B build -DPHOTARA_BUILD_STUDIO=ON
+cmake --build build --config Release --target photara_studio --parallel
+build\photara\Release\photara_studio.exe
 
 # 同一预览接口也可脱离 GUI 使用
-aetherscan --images images --output object.ply --splat `
+photara --images images --output object.ply --splat `
   --splat-strategy adc_plus --splat-preview-interval 50 `
   --splat-preview-dir live_previews
 ```
@@ -335,7 +335,7 @@ GPU→CPU readback 与 PNG 编码。
 1. **直接稀疏入口 P0（已完成）**：`sfm::Scene` 直接构造 Splat 数据集，跳过 densify；
 2. **策略语义 P0（已完成）**：明确 sparse 初始化状态，ADCPlus 保持动态致密化；
 3. **物体主体 P0**：支持外部软 Mask，并实现 warmup → Gaussian 主体选择 → soft-mask 自举；
-4. **TSDF P0**：拆出独立 `AetherScan::TSDF` API，增加 Open3D 同帧回归与拓扑门禁；
+4. **TSDF P0**：拆出独立 `Photara::TSDF` API，增加 Open3D 同帧回归与拓扑门禁；
 5. **细结构 P0**：增加细线质量档，联合控制 alpha、voxel、truncation 与 Clean；
 6. **编排/checkpoint P1**：支持从 SfM、warmup、正式 Splat、TSDF 和 Texture 任意阶段续跑；
 7. **Texture/Delight P1**：只消费最终 TSDF/Clean mesh；
@@ -349,14 +349,14 @@ GPU→CPU readback 与 PNG 编码。
 ### Texture / Delight 构建与用法
 
 ```powershell
-cmake -S . -B build-cgal -DAETHERSCAN_ENABLE_TEXTURE=ON -DAETHERSCAN_ENABLE_ONNX=ON
+cmake -S . -B build-cgal -DPHOTARA_ENABLE_TEXTURE=ON -DPHOTARA_ENABLE_ONNX=ON
 cmake --build build-cgal --config Release --parallel
 
-aetherscan --images images --output object.ply --capture-mode object --texture
-aetherscan --images images --output object.ply --capture-mode object --texture --delight
+photara --images images --output object.ply --capture-mode object --texture
+photara --images images --output object.ply --capture-mode object --texture --delight
 
 # 只导出 aether_drender 投影初值，不做光度/接缝优化
-aetherscan --images images --output object.ply --texture --texture-optimize=false
+photara --images images --output object.ply --texture --texture-optimize=false
 ```
 
 - aether_drender 默认使用 git submodule `third_party/aether_drender`；
@@ -364,7 +364,7 @@ aetherscan --images images --output object.ply --texture --texture-optimize=fals
   `aether_drender::TextureRefiner` 做多视图光度 Adam 优化与 seam-only polish；
 - `--texture-optimize-steps`、`--texture-optimize-batch-size` 和
   `--texture-seam-samples` 控制原生优化；整个优化阶段不经过 PyTorch；
-- Delight 使用 C++ ONNX Runtime；模型放在 `AETHERSCAN_INTRINSIC_MODELS_DIR`；
+- Delight 使用 C++ ONNX Runtime；模型放在 `PHOTARA_INTRINSIC_MODELS_DIR`；
 - Intrinsic 权重为学术/非商用许可，产品发布前必须完成许可证审查；
 - 未通过 mesh 拓扑门禁时不进入 UV/Texture。
 
@@ -408,9 +408,9 @@ SubjectBounds 与 Mask 是两类不同约束：
 产品只暴露 object/scene 模式与可选 `--masks`：
 
 ```powershell
-aetherscan --images images --capture-mode object
-aetherscan --images images --capture-mode object --masks masks
-aetherscan --images images --capture-mode scene
+photara --images images --capture-mode object
+photara --images images --capture-mode object --masks masks
+photara --images images --capture-mode scene
 ```
 
 - object + 外部 Mask：按原分辨率读取 soft alpha；
@@ -483,7 +483,7 @@ Mask 来自已删除的实验性 depth-ROI 路径，只保留其数值作为历�
 
 | 实现 | 原始顶点 | 原始三角形 |
 |---|---:|---:|
-| AetherScan，support closing 关闭 | 1,123,104 | 2,113,376 |
+| Photara，support closing 关闭 | 1,123,104 | 2,113,376 |
 | Open3D | 1,127,370 | 2,122,973 |
 | 相对差异 | -0.38% | -0.45% |
 
@@ -511,7 +511,7 @@ block allocator、扁平哈希表和两阶段计数/写出。
 Splat 子阶段性能分析使用可选 CUDA event profiler：
 
 ```bash
-aetherscan ... --splat \
+photara ... --splat \
   --splat-profile-cuda \
   --splat-profile-interval 100
 ```
@@ -531,7 +531,7 @@ ADCPlus 默认保持每步执行多视图；tail 调度是显式 fast mode：
 
 ```bash
 # 默认值 1；只有允许质量折衷时才显式设置 2
-aetherscan ... --splat-mv-tail-interval 2
+photara ... --splat-mv-tail-interval 2
 ```
 
 第 15,001–30,000 步每两步执行一次昂贵的 `sample_depth + NCC + backward`，活跃步权重乘 2，
@@ -575,7 +575,7 @@ NCC loss kernel 从 2.1737 降到 2.0694 ms（-4.80%），稳定 CUDA/iter 从 1
 仍需完成：
 
 - object 模式 Gaussian 主体自举与置信度门禁；
-- 独立 `AetherScan::TSDF` 公共 API；
+- 独立 `Photara::TSDF` 公共 API；
 - raw MC/后处理分阶段拓扑门禁；
 - direct SfM 分支的 Texture/checkpoint 编排；
 - out-of-core view cache 和 ADC-IGS edge/error ownership。
@@ -608,7 +608,7 @@ graph-cut 提取后还会删除最长边超过 cut-facet 中位数 4 倍的无�
 
 ## 小结
 
-AetherScan 默认几何路线确定为：
+Photara 默认几何路线确定为：
 
 ```text
 SfM cameras + sparse points
@@ -627,7 +627,7 @@ MVS 不再是默认阶段，也不负责生成前景 Mask。物体模式使用�
 When calibrated COLMAP cameras already exist, use the explicit dense path:
 
 ```powershell
-build/aetherscan/Release/aetherscan.exe --images D:/ScanVideo/ori_img/images --splat-dataset D:/ScanVideo/ori_img --output artifacts/ori_img_calibrated_high/scene.ply --dense --mesh --dense-quality high --mesh-max-points 1000000 --texture --atlas-resolution 2048 --texture-optimize-steps 100
+build/photara/Release/photara.exe --images D:/ScanVideo/ori_img/images --splat-dataset D:/ScanVideo/ori_img --output artifacts/ori_img_calibrated_high/scene.ply --dense --mesh --dense-quality high --mesh-max-points 1000000 --texture --atlas-resolution 2048 --texture-optimize-steps 100
 ```
 
 This preserves the imported poses, uses the MVS quality preset for image resolution,

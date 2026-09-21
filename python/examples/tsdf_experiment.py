@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import aetherscan as aes
+import photara as aes
 
 
 def main() -> None:

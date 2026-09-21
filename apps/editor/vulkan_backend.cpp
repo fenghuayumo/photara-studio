@@ -194,7 +194,7 @@ void create_context(ImVector<const char*> extensions) {
             VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = "AetherScan Editor";
+    app.pApplicationName = "Photara Studio";
     app.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo create{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     create.pApplicationInfo = &app;
@@ -410,7 +410,7 @@ void PreviewTexture::reset() {
     *this = {};
 }
 
-void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
+void PreviewTexture::upload(const photara::io::RgbImage& source) {
     if (source.width == 0 || source.height == 0) {
         reset();
         return;
@@ -539,7 +539,7 @@ void PreviewTexture::upload(const aetherscan::io::RgbImage& source) {
 }
 
 bool PreviewTexture::download_rgb(
-    aetherscan::io::RgbImage& destination,
+    photara::io::RgbImage& destination,
     const std::uint32_t max_long_edge) const {
     destination = {};
     if (!g_device || !image || width == 0 || height == 0) return false;
@@ -711,7 +711,7 @@ void ExternalPreview::create(
     width = image_width;
     height = image_height;
 
-    aetherscan::io::RgbImage placeholder;
+    photara::io::RgbImage placeholder;
     placeholder.width = width;
     placeholder.height = height;
     placeholder.pixels.assign(
@@ -910,12 +910,12 @@ namespace {
 constexpr std::uint32_t k_thumb_long_edge = 320;
 constexpr std::size_t k_max_inflight = 2;
 
-aetherscan::io::RgbImage load_camera_thumbnail(
+photara::io::RgbImage load_camera_thumbnail(
     const std::filesystem::path& path) {
     // Ask the JPEG decoder for the largest DCT scale that still covers the
     // thumbnail: decoding the full capture to shrink it afterwards costs about
     // five times more and only the thumbnail pixels survive.
-    aetherscan::io::RgbImage rgb = aetherscan::io::load_rgb_with_minimum_size(
+    photara::io::RgbImage rgb = photara::io::load_rgb_with_minimum_size(
         path, k_thumb_long_edge, k_thumb_long_edge);
     const std::uint32_t long_edge = std::max(rgb.width, rgb.height);
     if (long_edge <= k_thumb_long_edge || long_edge == 0) return rgb;
@@ -927,11 +927,11 @@ aetherscan::io::RgbImage load_camera_thumbnail(
     const std::uint32_t height = std::max(
         1U, static_cast<std::uint32_t>(std::lround(
                 static_cast<float>(rgb.height) * scale)));
-    aetherscan::io::RgbImage thumb;
+    photara::io::RgbImage thumb;
     thumb.width = width;
     thumb.height = height;
     thumb.pixels.resize(static_cast<std::size_t>(width) * height * 3);
-    aetherscan::io::resize_bilinear(
+    photara::io::resize_bilinear(
         rgb.pixels.data(), rgb.width, rgb.height, 3, thumb.pixels.data(),
         width, height);
     return thumb;
@@ -999,7 +999,7 @@ void CameraPhotoCache::poll() {
             std::future_status::ready)
             continue;
         try {
-            const aetherscan::io::RgbImage image = slot->pending.get();
+            const photara::io::RgbImage image = slot->pending.get();
             if (image.width == 0 || image.height == 0 || image.pixels.empty())
                 throw std::runtime_error("empty camera thumbnail");
             slot->texture.upload(image);
@@ -1638,7 +1638,7 @@ bool MeshPreviewRenderer::ensure_albedo() {
     return albedo_set_ != VK_NULL_HANDLE;
 }
 
-void MeshPreviewRenderer::set_albedo(const aetherscan::io::RgbImage& atlas) {
+void MeshPreviewRenderer::set_albedo(const photara::io::RgbImage& atlas) {
     if (!g_device || !ensure_albedo()) return;
     if (atlas.width == 0 || atlas.height == 0 || atlas.pixels.size() <
             static_cast<std::size_t>(atlas.width) * atlas.height * 3U) {

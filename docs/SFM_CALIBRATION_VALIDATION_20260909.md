@@ -1,6 +1,6 @@
 # SfM 自动标定与重建质量验证（2026-09-09）
 
-本轮修复自动相机选择的焦距局部最优、针孔歧义候选污染内参，以及全局重建最终 BA 固定短迭代问题。所有 AetherScan 实拍运行均使用 `--camera-model auto --mode global --max-features 6000 --window 6`，未输入参考焦距、位姿、特征或三维点。
+本轮修复自动相机选择的焦距局部最优、针孔歧义候选污染内参，以及全局重建最终 BA 固定短迭代问题。所有 Photara 实拍运行均使用 `--camera-model auto --mode global --max-features 6000 --window 6`，未输入参考焦距、位姿、特征或三维点。
 
 ## 标定策略
 
@@ -14,7 +14,7 @@
 
 - Alameda 原始鱼眼：`D:/ScanVideo/alameda/images_2`，1,742 张，1752×1168。用户最初的 `images/_2` 路径不存在。
 - 前 64 张与紧接的 128 张为互不重叠子集，使用文件硬链接，不修改源照片。
-- 两个子集分别新跑 COLMAP 4.1.0（fa8e3b3 CUDA），OPENCV_FISHEYE，共享相机，SIFT 6000/0.005，穷举匹配，CPU mapper 8 线程、seed 0。COLMAP 的初始焦距为 876；最终标定不传入 AetherScan。
+- 两个子集分别新跑 COLMAP 4.1.0（fa8e3b3 CUDA），OPENCV_FISHEYE，共享相机，SIFT 6000/0.005，穷举匹配，CPU mapper 8 线程、seed 0。COLMAP 的初始焦距为 876；最终标定不传入 Photara。
 - 普通针孔控制：`D:/ScanVideo/chuan/images`，109 张，参考为已有 `D:/ScanVideo/chuan/sparse/0`。
 - 全量参考：已有 `D:/Models/alameda/sparse/0`，1,734 张，是相同拍摄序列的去畸变版本，不能称为本轮新跑的原始鱼眼 COLMAP 全量结果。仅去掉 `indoor_` 文件名前缀，旋转、平移原样保留。原参考相机为 PINHOLE 2789×1586；其 `images_2` 图像为 1394×793。人工核对首帧场景内容，并检查所有规范化文件名唯一且存在于输入目录。
 
@@ -50,7 +50,7 @@ v5–v9 的实测产物已经保留；2026-09-10 继续验证及最终重跑见 
 实拍日志、ASFM、逐相机诊断、逐对诊断、指标 JSON 均位于 `artifacts/sfm_product_validation_20260909/`；前 64 的新 COLMAP 基准位于 `artifacts/colmap_comparison_64_20260908/opencv_fisheye/sparse/0`，独立 128 的新基准位于本轮目录 `colmap_holdout128/0`。
 
 ```powershell
-python experiments/run_sfm_acceptance.py --exe build/aetherscan/Release/aetherscan.exe --images D:/ScanVideo/alameda/images_2 --reference artifacts/sfm_product_validation_20260909/alameda_existing_reference --output-dir artifacts/sfm_product_validation_20260909 --name alameda_repeat --timeout-seconds 1800 -- --camera-model auto --mode global --max-features 6000 --window 6
+python experiments/run_sfm_acceptance.py --exe build/photara/Release/photara.exe --images D:/ScanVideo/alameda/images_2 --reference artifacts/sfm_product_validation_20260909/alameda_existing_reference --output-dir artifacts/sfm_product_validation_20260909 --name alameda_repeat --timeout-seconds 1800 -- --camera-model auto --mode global --max-features 6000 --window 6
 python experiments/plot_sfm_comparison.py --diagnostics artifacts/sfm_product_validation_20260909/alameda1742_v4_sfm_diagnostics.csv --reference artifacts/sfm_product_validation_20260909/alameda_existing_reference --output artifacts/sfm_product_validation_20260909/alameda1742_v4.png
 ```
 

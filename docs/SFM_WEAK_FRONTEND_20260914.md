@@ -11,13 +11,13 @@
 - 跳过补强现在要求至少三个有足够内点的非平面邻居，与独立重定位需要三个稳定视角提供深度相配合。原来的两个邻居条件漏掉了 `video06_00545.jpeg` 和两张未注册的 `video08` 图片。
 - 重定位至少保留 30 个拟合对应和 12 个独立验证对应。验证预算为 `min(N-30, max(12, N/3))`，使用固定种子打乱划分，避免特征排列与周期性错匹配重合。没有降低 PnP 内点、像素误差、稳定深度、基线方向、空间分布或验证一致性门槛，也不根据验证结果反复选择划分。
 
-参考检查了 `D:\ProgramCode\C++\spirula-studio\src\sfm\feature\Sift.h` 的 GPU 提交/回读流程。本轮改变 AetherScan 的流水线和恢复策略，没有替换为该项目的实现。
+参考检查了 `D:\ProgramCode\C++\spirula-studio\src\sfm\feature\Sift.h` 的 GPU 提交/回读流程。本轮改变 Photara 的流水线和恢复策略，没有替换为该项目的实现。
 
 ## 验证方法
 
-证据目录：`artifacts/sfm_weak_frontend_20260914`。`profile_sfm_gpu.py` 保存完整命令、日志及每约 0.5 秒的整卡 GPU 采样。这里的冷启动指不复用 AetherScan 缓存，不代表清空操作系统文件缓存。整卡利用率包含其他应用，不能解释为内核 occupancy。
+证据目录：`artifacts/sfm_weak_frontend_20260914`。`profile_sfm_gpu.py` 保存完整命令、日志及每约 0.5 秒的整卡 GPU 采样。这里的冷启动指不复用 Photara 缓存，不代表清空操作系统文件缓存。整卡利用率包含其他应用，不能解释为内核 occupancy。
 
-`ctest_release.log`：撤回局部加速并重新编译后，`aetherscan.features` 和 `aetherscan.sfm.submap_recovery` 均通过。包含延迟描述子跨线程后处理一致性、41 个对应拒绝、42/50 个对应恢复、固定相机不变、异常对应容忍、错误独立验证拒绝等检查。`audit_numeric_test.log` 验证独立审查脚本的精确投影、错误目标平移和零基线处理。
+`ctest_release.log`：撤回局部加速并重新编译后，`photara.features` 和 `photara.sfm.submap_recovery` 均通过。包含延迟描述子跨线程后处理一致性、41 个对应拒绝、42/50 个对应恢复、固定相机不变、异常对应容忍、错误独立验证拒绝等检查。`audit_numeric_test.log` 验证独立审查脚本的精确投影、错误目标平移和零基线处理。
 
 `before`、`after`、`final`、`validated`、`three_anchor`、`optimized` 六次基础特征缓存的载荷大小均为 3497057737 字节，内置校验值均为 15480428303957363015。缓存键因源码变化而不同。流水线优化没有减少基础输出特征；弱视角增补发生在这之后。
 
@@ -58,8 +58,8 @@
 复现完整运行：
 
 ```powershell
-python experiments/profile_sfm_gpu.py --output artifacts/sfm_weak_frontend_20260914/NEW_RUN -- build/aetherscan/Release/aetherscan.exe --images 'D:\BaiduNetdiskDownload\标准数据集-办公室\images' --output artifacts/sfm_weak_frontend_20260914/NEW_RUN.asfm --cache-dir artifacts/sfm_weak_frontend_20260914/NEW_CACHE
-ctest --test-dir build -C Release -R 'aetherscan\.(sfm\.submap_recovery|features)' --output-on-failure
+python experiments/profile_sfm_gpu.py --output artifacts/sfm_weak_frontend_20260914/NEW_RUN -- build/photara/Release/photara.exe --images 'D:\BaiduNetdiskDownload\标准数据集-办公室\images' --output artifacts/sfm_weak_frontend_20260914/NEW_RUN.asfm --cache-dir artifacts/sfm_weak_frontend_20260914/NEW_CACHE
+ctest --test-dir build -C Release -R 'photara\.(sfm\.submap_recovery|features)' --output-on-failure
 ```
 
 使用新的输出名，保留已有证据。

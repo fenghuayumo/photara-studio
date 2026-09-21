@@ -1,4 +1,0 @@
-// Application icon for Explorer, the taskbar, and the GLFW window.
-// GLFW looks up the named resource GLFW_ICON on Win32.
-1 ICON "@AETHERSCAN_EDITOR_ICON@"
-GLFW_ICON ICON "@AETHERSCAN_EDITOR_ICON@"

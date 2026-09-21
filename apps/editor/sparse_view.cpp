@@ -63,26 +63,26 @@ Vec3 normalize(const Vec3 v) {
     return length > 1e-20F ? v * (1.F / length) : Vec3{0.F, 0.F, 1.F};
 }
 
-const char* camera_model_label(const aetherscan::CameraModel model) {
+const char* camera_model_label(const photara::CameraModel model) {
     switch (model) {
-        case aetherscan::CameraModel::opencv_fisheye:
+        case photara::CameraModel::opencv_fisheye:
             return "OpenCV Fisheye";
-        case aetherscan::CameraModel::equirectangular:
+        case photara::CameraModel::equirectangular:
             return "Equirectangular";
         default:
             return "Pinhole";
     }
 }
 
-aetherscan::CameraModel parse_view_camera_model(const std::string& token) {
+photara::CameraModel parse_view_camera_model(const std::string& token) {
     if (token == "opencv_fisheye" || token == "fisheye")
-        return aetherscan::CameraModel::opencv_fisheye;
+        return photara::CameraModel::opencv_fisheye;
     if (token == "equirectangular" || token == "equirect")
-        return aetherscan::CameraModel::equirectangular;
-    return aetherscan::CameraModel::pinhole;
+        return photara::CameraModel::equirectangular;
+    return photara::CameraModel::pinhole;
 }
 
-void apply_camera_model(ViewPose& pose, const aetherscan::CameraModel model) {
+void apply_camera_model(ViewPose& pose, const photara::CameraModel model) {
     pose.model = model;
     pose.camera_model = camera_model_label(model);
 }
@@ -92,21 +92,21 @@ constexpr float k_pi = 3.14159265F;
 void orbit_intrinsics(
     const OrbitCamera& camera, const std::uint32_t width,
     const std::uint32_t height, float& fx, float& fy, float& cx, float& cy,
-    aetherscan::CameraModel& model, float& k1, float& k2, float& k3,
+    photara::CameraModel& model, float& k1, float& k2, float& k3,
     float& k4) {
     const float w = static_cast<float>(std::max<std::uint32_t>(1, width));
     const float h = static_cast<float>(std::max<std::uint32_t>(1, height));
     cx = 0.5F * w;
     cy = 0.5F * h;
     k1 = k2 = k3 = k4 = 0.F;
-    model = aetherscan::CameraModel::pinhole;
+    model = photara::CameraModel::pinhole;
     if (camera.projection == EditorProjection::panorama) {
-        model = aetherscan::CameraModel::equirectangular;
+        model = photara::CameraModel::equirectangular;
         fx = fy = w / (2.F * k_pi);
         return;
     }
     if (camera.projection == EditorProjection::fisheye) {
-        model = aetherscan::CameraModel::opencv_fisheye;
+        model = photara::CameraModel::opencv_fisheye;
         k1 = camera.fisheye_k1;
         const float theta = std::clamp(camera.fov_degrees, 20.F, 179.F) * 0.5F *
                             k_pi / 180.F;
@@ -150,7 +150,7 @@ struct ViewFrame {
     float width{1.F};
     float height{1.F};
     EditorProjection projection{EditorProjection::perspective};
-    aetherscan::CameraModel model{aetherscan::CameraModel::pinhole};
+    photara::CameraModel model{photara::CameraModel::pinhole};
 };
 
 ViewFrame build_frame(
@@ -190,7 +190,7 @@ bool project(
     const float y = -dot(relative, frame.up);
     depth = dot(relative, frame.forward);
     if (frame.projection == EditorProjection::panorama) {
-        const auto pixel = aetherscan::project_equirectangular_camera(
+        const auto pixel = photara::project_equirectangular_camera(
             x, y, depth, static_cast<int>(std::lround(frame.width)),
             static_cast<int>(std::lround(frame.height)));
         if (!pixel.valid) return false;
@@ -201,7 +201,7 @@ bool project(
     }
     if (depth <= k_near_plane) return false;
     if (frame.projection == EditorProjection::fisheye) {
-        const auto pixel = aetherscan::project_fisheye_camera(
+        const auto pixel = photara::project_fisheye_camera(
             x, y, depth, frame.fx, frame.fy, frame.cx, frame.cy, frame.k1,
             frame.k2, frame.k3, frame.k4);
         if (!pixel.valid) return false;
@@ -945,7 +945,7 @@ std::string load_poses(
 }
 
 bool sample_photo_rgb(
-    const aetherscan::io::RgbImage& image, const float x, const float y,
+    const photara::io::RgbImage& image, const float x, const float y,
     double& r, double& g, double& b) {
     if (image.width == 0 || image.height == 0 || image.pixels.size() < 3)
         return false;
@@ -983,12 +983,12 @@ constexpr double k_min_missing_share = 0.01;
 // a colourless 739-photo set otherwise costs tens of seconds of serial
 // full-resolution decodes on every load.
 void colour_missing_points(
-    const aetherscan::sfm::Scene& scene, SparseScene& loaded,
+    const photara::sfm::Scene& scene, SparseScene& loaded,
     const std::vector<std::size_t>& track_ids,
     const std::vector<std::size_t>& missing) {
     if (missing.empty()) return;
 
-    std::vector<std::vector<std::pair<std::size_t, aetherscan::sfm::Index>>>
+    std::vector<std::vector<std::pair<std::size_t, photara::sfm::Index>>>
         observations_by_image(scene.images.size());
     for (const std::size_t point : missing) {
         const auto& track = scene.tracks[track_ids[point]];
@@ -1010,16 +1010,16 @@ void colour_missing_points(
 
     std::vector<std::vector<std::uint32_t>> pixels_by_image(scene.images.size());
     const unsigned threads = std::min(
-        k_max_colour_threads, aetherscan::parallel::resolve_thread_count(0));
-    aetherscan::parallel::parallel_for(
+        k_max_colour_threads, photara::parallel::resolve_thread_count(0));
+    photara::parallel::parallel_for(
         scene.images.size(), threads, [&](const std::size_t image_id) {
             const auto& observations = observations_by_image[image_id];
             if (observations.empty()) return;
             const auto& image = scene.images[image_id];
             if (image.path.empty()) return;
-            aetherscan::io::RgbImage rgb;
+            photara::io::RgbImage rgb;
             try {
-                rgb = aetherscan::io::load_rgb_with_minimum_size(
+                rgb = photara::io::load_rgb_with_minimum_size(
                     image.path, k_min_photo_sample, k_min_photo_sample);
             } catch (...) {
                 return;
@@ -1038,7 +1038,7 @@ void colour_missing_points(
             auto& pixels = pixels_by_image[image_id];
             pixels.assign(observations.size(), 0U);
             for (std::size_t i = 0; i < observations.size(); ++i) {
-                const aetherscan::sfm::Index feature_id = observations[i].second;
+                const photara::sfm::Index feature_id = observations[i].second;
                 if (feature_id >= image.features.keypoints.size()) continue;
                 const auto& keypoint = image.features.keypoints[feature_id];
                 double r = 0.0;
@@ -1127,7 +1127,7 @@ void PreviewMesh::compute_bounds() {
     radius = std::max(1e-3F, distances[p95] * 1.25F);
 }
 
-PreviewMesh preview_mesh_from_mvs(const aetherscan::mvs::Mesh& source) {
+PreviewMesh preview_mesh_from_mvs(const photara::mvs::Mesh& source) {
     PreviewMesh mesh;
     mesh.vertices.reserve(source.vertices.size());
     for (const auto& v : source.vertices)
@@ -1313,16 +1313,16 @@ MeshLoad load_preview_mesh(
         std::error_code error;
         if (!mesh_ply.empty() && std::filesystem::exists(mesh_ply, error)) {
             loaded.mesh = preview_mesh_from_mvs(
-                aetherscan::mvs::load_mesh_ply(mesh_ply));
+                photara::mvs::load_mesh_ply(mesh_ply));
         } else if (!ascan.empty() && std::filesystem::exists(ascan, error)) {
-            const auto archive = aetherscan::project::Archive::open(ascan);
-            if (!archive.has(aetherscan::project::ChunkType::mesh)) {
+            const auto archive = photara::project::Archive::open(ascan);
+            if (!archive.has(photara::project::ChunkType::mesh)) {
                 loaded.error = "Project has no mesh chunk";
                 return loaded;
             }
             loaded.mesh = preview_mesh_from_mvs(
-                aetherscan::mvs::decode_mesh(
-                    archive.chunk(aetherscan::project::ChunkType::mesh)));
+                photara::mvs::decode_mesh(
+                    archive.chunk(photara::project::ChunkType::mesh)));
         } else {
             loaded.error = "No mesh file to load";
             return loaded;
@@ -1335,7 +1335,7 @@ MeshLoad load_preview_mesh(
     return loaded;
 }
 
-SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour_from_photos) {
+SceneLoad sparse_scene_from_sfm(const photara::sfm::Scene& scene, bool colour_from_photos) {
     SceneLoad loaded;
     loaded.ok = true;
     std::size_t point_count = 0;
@@ -1489,13 +1489,13 @@ SceneLoad sparse_scene_from_dataset(
     const std::filesystem::path& image_directory) {
     SceneLoad loaded;
     try {
-        aetherscan::splat::DatasetLoadRequest request;
+        photara::splat::DatasetLoadRequest request;
         request.source = source;
         request.image_directory = image_directory;
         request.initial_point_cloud = initial_point_cloud;
-        const aetherscan::splat::DatasetLoadResult dataset =
-            aetherscan::splat::load_splat_dataset(request);
-        const aetherscan::mvs::MvsScene& scene = dataset.scene;
+        const photara::splat::DatasetLoadResult dataset =
+            photara::splat::load_splat_dataset(request);
+        const photara::mvs::MvsScene& scene = dataset.scene;
 
         loaded.scene.views.reserve(scene.views.size());
         for (const auto& view : scene.views) {
@@ -1515,7 +1515,7 @@ SceneLoad sparse_scene_from_dataset(
             pose.k2 = view.k2;
             pose.k3 = view.p1;
             pose.k4 = view.p2;
-            if (aetherscan::uses_native_splat_projection(view.source_model) &&
+            if (photara::uses_native_splat_projection(view.source_model) &&
                 view.src_width != 0 && view.src_height != 0) {
                 pose.fx = view.src_fx;
                 pose.fy = view.src_fy;
@@ -1582,7 +1582,7 @@ SceneLoad sparse_scene_from_dataset(
                     observations[view_id].push_back(index);
         constexpr std::size_t k_max_dataset_features = 24'000;
         const auto project_point = [](ViewPose& pose,
-                                      const aetherscan::mvs::MvsView& view,
+                                      const photara::mvs::MvsView& view,
                                       const Eigen::Vector3f& position) {
             if (view.width == 0 || view.height == 0) return;
             if (pose.features.size() >= k_max_dataset_features) return;
@@ -1707,7 +1707,7 @@ SceneLoad load_sparse_scene(
 }
 
 SceneLoad gaussian_scene_from_model(
-    const aetherscan::splat::GaussianModel& model,
+    const photara::splat::GaussianModel& model,
     std::filesystem::path poses_csv) {
     SceneLoad result;
     try {
@@ -1774,7 +1774,7 @@ SceneLoad gaussian_scene_from_model(
 SceneLoad load_gaussian_scene(
     std::filesystem::path model_path, std::filesystem::path poses_csv) {
     try {
-        const auto model = aetherscan::splat::load_gaussians(model_path);
+        const auto model = photara::splat::load_gaussians(model_path);
         return gaussian_scene_from_model(model, std::move(poses_csv));
     } catch (const std::exception& failure) {
         SceneLoad result;
@@ -2042,7 +2042,7 @@ bool camera_world_ray(
             frame.right * x + frame.up * (-y) + frame.forward * z);
     };
     if (frame.projection == EditorProjection::panorama) {
-        const auto ray = aetherscan::unproject_equirectangular_camera(
+        const auto ray = photara::unproject_equirectangular_camera(
             u, v, static_cast<int>(std::lround(frame.width)),
             static_cast<int>(std::lround(frame.height)));
         if (!ray.valid) return false;
@@ -2050,7 +2050,7 @@ bool camera_world_ray(
         return true;
     }
     if (frame.projection == EditorProjection::fisheye) {
-        const auto ray = aetherscan::unproject_fisheye_camera(
+        const auto ray = photara::unproject_fisheye_camera(
             u, v, frame.fx, frame.fy, frame.cx, frame.cy, frame.k1, frame.k2,
             frame.k3, frame.k4);
         if (!ray.valid) return false;
@@ -2071,13 +2071,13 @@ void fit_reconstruction_box(
         box.valid = false;
         return;
     }
-    std::vector<aetherscan::mvs::Vec3f> world;
+    std::vector<photara::mvs::Vec3f> world;
     world.reserve(points.size());
     for (const Vec3& point : points)
         world.emplace_back(point.x, point.y, point.z);
-    aetherscan::mvs::OrientedBoundingBox bounds;
+    photara::mvs::OrientedBoundingBox bounds;
     // Same padding splat object-mode uses for SubjectBounds / focus region.
-    if (!aetherscan::mvs::detail::estimate_subject_bounds(
+    if (!photara::mvs::detail::estimate_subject_bounds(
             world, bounds, 0, 1.15F) ||
         !bounds.valid) {
         box.valid = false;
@@ -2097,20 +2097,20 @@ void fit_reconstruction_box(
 bool write_reconstruction_box(
     const ReconstructionBox& box, const std::filesystem::path& path) {
     if (!box.valid || path.empty()) return false;
-    aetherscan::mvs::OrientedBoundingBox bounds;
-    bounds.center = aetherscan::mvs::Vec3f{
+    photara::mvs::OrientedBoundingBox bounds;
+    bounds.center = photara::mvs::Vec3f{
         (box.min.x + box.max.x) * 0.5F, (box.min.y + box.max.y) * 0.5F,
         (box.min.z + box.max.z) * 0.5F};
-    bounds.half_extent = aetherscan::mvs::Vec3f{
+    bounds.half_extent = photara::mvs::Vec3f{
         std::max(1e-4F, (box.max.x - box.min.x) * 0.5F),
         std::max(1e-4F, (box.max.y - box.min.y) * 0.5F),
         std::max(1e-4F, (box.max.z - box.min.z) * 0.5F)};
-    bounds.axes = aetherscan::mvs::Mat3f::Identity();
+    bounds.axes = photara::mvs::Mat3f::Identity();
     bounds.valid = true;
     try {
         std::error_code error;
         std::filesystem::create_directories(path.parent_path(), error);
-        aetherscan::mvs::save_subject_bounds(bounds, path);
+        photara::mvs::save_subject_bounds(bounds, path);
         return true;
     } catch (...) {
         return false;
@@ -2526,7 +2526,7 @@ SplatPreviewCamera make_preview_camera_from_view(
     preview.k2 = pose.k2;
     preview.k3 = pose.k3;
     preview.k4 = pose.k4;
-    if (preview.model == aetherscan::CameraModel::equirectangular) {
+    if (preview.model == photara::CameraModel::equirectangular) {
         preview.fx = preview.fy =
             static_cast<float>(preview.width) / (2.F * k_pi);
         preview.cx = static_cast<float>(preview.width) * 0.5F;
@@ -2598,7 +2598,7 @@ bool write_preview_camera_file(
     const std::filesystem::path& path, const SplatPreviewCamera& camera,
     const std::uint64_t revision, const char* vis_mode,
     const float point_size_px, const float ring_scale) {
-    return aetherscan::splat::write_preview_camera_sidecar(
+    return photara::splat::write_preview_camera_sidecar(
         path, camera, revision, vis_mode, point_size_px, ring_scale);
 }
 

@@ -48,7 +48,7 @@ alameda 的 `images` 有 1742 张，sparse 注册 1741 张，只训练注册视�
 - 鱼眼：`equirectangular=0 fisheye=1741 ... no undistortion`
 - 全景：`equirectangular=375 fisheye=0 ... no undistortion`
 
-`aetherscan_splat_test --fisheye-only` 在
+`photara_splat_test --fisheye-only` 在
 `artifacts/native_camera_20260916/projection_tests.log` 以
 
 `Panorama mean gradient differs from finite differences`
@@ -151,7 +151,7 @@ masked 训练器曲线：1k 19.37 → 5k 19.12 → 10k 20.33 → 15k 22.35。
 
 ```powershell
 # 鱼眼（无人物 mask）
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:/ScanVideo/alameda/images_2_dataset/images `
   --splat-dataset D:/ScanVideo/alameda/images_2_dataset/sparse/0 `
   --output artifacts/native_camera_20260916/fisheye/model.ply `
@@ -164,7 +164,7 @@ masked 训练器曲线：1k 19.37 → 5k 19.12 → 10k 20.33 → 15k 22.35。
   --splat-cache-auto=false --splat-device-cache-mb=0
 
 # 全景（必须开 mask；masks/ 与 images/ 同级，可省略 --masks）
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:/BaiduNetdiskDownload/VID_20260911_145523_00_007_dataset/images `
   --splat-dataset D:/BaiduNetdiskDownload/VID_20260911_145523_00_007_dataset/sparse/0 `
   --output artifacts/native_camera_20260916/panorama_masked/model.ply `

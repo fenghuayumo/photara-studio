@@ -82,7 +82,7 @@ SD_D2 inline float dot3(float3 a, float3 b) {
 }
 
 // World-to-camera transform stored as 16 contiguous floats (row-major
-// 3x4); matches the layout produced by aetherscan's Camera.
+// 3x4); matches the layout produced by photara's Camera.
 SD_D2 inline float3 xform_point(const float3 p, const float* v) {
     return make_float3(
         v[0] * p.x + v[4] * p.y + v[8] * p.z + v[12],

@@ -122,7 +122,7 @@ struct App {
     ImageQaState image_qa;
     ImageQaSession image_qa_session;
     ImageQaSession align_match_session;
-    aetherscan::sfm::AlignLiveFrame align_live;
+    photara::sfm::AlignLiveFrame align_live;
     bool alignment_workspace_user_override{};
     unsigned qa_preview_view{~0U};
     std::chrono::steady_clock::time_point qa_metrics_after{};
@@ -273,7 +273,7 @@ void show_mesh_view(App& app, bool frame_when_ready);
 void publish_preview_vis(App& app);
 void write_preview_vis(App& app);
 void publish_preview_ack(App& app);
-aetherscan::splat::VisualizeOptions editor_visualize_options(const App& app);
+photara::splat::VisualizeOptions editor_visualize_options(const App& app);
 void sync_live_preview_camera(
     App& app, bool force, std::uint32_t width, std::uint32_t height);
 bool update_gpu_mesh_preview(App& app, ImVec2 min, ImVec2 max);

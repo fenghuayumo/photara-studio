@@ -7,9 +7,9 @@
 // Offline hypothesis test: reference poses are never read. Reconstruct depths
 // from at least three cameras outside the tested intrinsic group, fit on 80%
 // of those observations, and report the remaining 20% separately.
-inline void probe_small_group_focals(aetherscan::sfm::Scene& scene) {
-    using namespace aetherscan::sfm;
-    namespace ba = aetherscan::ba;
+inline void probe_small_group_focals(photara::sfm::Scene& scene) {
+    using namespace photara::sfm;
+    namespace ba = photara::ba;
     struct Sample { Index image, feature; Vec3 point; bool heldout; };
     std::vector<unsigned> counts(scene.cameras.size());
     for (const auto& image : scene.images)

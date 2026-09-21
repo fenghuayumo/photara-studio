@@ -47,7 +47,7 @@ int main(const int argc, char** argv) {
             "D:\\ScanVideo\\ori_img\\images");
         std::snprintf(
             app.settings.project_dir.data(), app.settings.project_dir.size(),
-            "D:\\ProgramCode\\C++\\3dgs\\AetherScan\\artifacts\\cuda_vulkan_smoke");
+            "D:\\ProgramCode\\C++\\3dgs\\Photara\\artifacts\\cuda_vulkan_smoke");
         app.settings.iterations = 100;
     }
 
@@ -57,7 +57,7 @@ int main(const int argc, char** argv) {
     if (!glfwInit() || !glfwVulkanSupported()) return 1;
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(
-        1600, 940, tr("AetherScan Reconstruction Editor"), nullptr, nullptr);
+        1600, 940, tr("Photara Studio"), nullptr, nullptr);
     glfwSetWindowUserPointer(window, &app);
     glfwSetDropCallback(
         window, [](GLFWwindow* handle, const int count, const char** paths) {

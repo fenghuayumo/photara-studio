@@ -1,4 +1,4 @@
-# AetherScan
+# Photara
 
 面向大规模摄影测量的 GPU-first SfM/MVS 引擎，使用 C++20 与 CUDA。
 
@@ -26,11 +26,11 @@
 ## 目录
 
 ```text
-AetherScan/
+Photara/
 ├── CMakeLists.txt                 总工程入口
 ├── third_party/
 │   └── aether_drender/            纹理烘焙 / 网格预处理（git submodule）
-├── aetherscan/
+├── photara/
 │   ├── CMakeLists.txt             核心库子项目
 │   ├── include/                   稳定的公开 C++ API（ba/features/sfm/...）
 │   ├── third_party/vlfeat/        精简 VLFeat SIFT（BSD）
@@ -61,23 +61,23 @@ git submodule update --init --recursive
 
 ```powershell
 cmake -S . -B build `
-  -DAETHERSCAN_ENABLE_CUDA=ON `
+  -DPHOTARA_ENABLE_CUDA=ON `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 cmake --build build --config Release --parallel
 ```
 
-默认只编译 `aetherscan.exe` 和 `aetherscan_editor.exe`。需要正确性测试或额外工具时再打开：
+默认只编译 `photara.exe` 和 `photara_studio.exe`。需要正确性测试或额外工具时再打开：
 
 ```powershell
-cmake -S . -B build -DAETHERSCAN_BUILD_TESTS=ON -DAETHERSCAN_BUILD_BENCHMARKS=ON
-cmake --build build --config Release --target aetherscan_tests --parallel
+cmake -S . -B build -DPHOTARA_BUILD_TESTS=ON -DPHOTARA_BUILD_BENCHMARKS=ON
+cmake --build build --config Release --target photara_tests --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
 CPU-only：
 
 ```powershell
-cmake -S . -B build-cpu -DAETHERSCAN_ENABLE_CUDA=OFF `
+cmake -S . -B build-cpu -DPHOTARA_ENABLE_CUDA=OFF `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 cmake --build build-cpu --config Release --parallel
 ```
@@ -88,30 +88,30 @@ cmake --build build-cpu --config Release --parallel
 # A) 本地已有 SDK（推荐，跳过下载）
 cmake -S . -B build `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-  -DAETHERSCAN_ENABLE_ONNX=ON `
-  -DAETHERSCAN_FETCH_ONNX=OFF `
-  -DAETHERSCAN_ONNXRUNTIME_ROOT="D:/sdk/onnxruntime-win-x64-gpu-1.20.1"
+  -DPHOTARA_ENABLE_ONNX=ON `
+  -DPHOTARA_FETCH_ONNX=OFF `
+  -DPHOTARA_ONNXRUNTIME_ROOT="D:/sdk/onnxruntime-win-x64-gpu-1.20.1"
 
 # B) 自动 FetchContent 拉取官方包（需能访问 GitHub）
 cmake -S . -B build `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-  -DAETHERSCAN_ENABLE_ONNX=ON `
-  -DAETHERSCAN_FETCH_ONNX=ON `
-  -DAETHERSCAN_ONNX_VERSION=1.20.1
+  -DPHOTARA_ENABLE_ONNX=ON `
+  -DPHOTARA_FETCH_ONNX=ON `
+  -DPHOTARA_ONNX_VERSION=1.20.1
 ```
 
 | CMake 选项 | 默认 | 含义 |
 |------------|------|------|
-| `AETHERSCAN_BUILD_TESTS` | OFF | 是否生成正确性测试可执行文件 |
-| `AETHERSCAN_BUILD_BENCHMARKS` | OFF | 是否生成额外 CLI / benchmark 工具 |
-| `AETHERSCAN_ENABLE_ONNX` | OFF | 是否编译 ONNX/LightGlue |
-| `AETHERSCAN_FETCH_ONNX` | ON | 开启 ONNX 时是否自动下载 SDK |
-| `AETHERSCAN_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
-| `AETHERSCAN_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
-| `AETHERSCAN_ENABLE_TEXTURE` | ON | UVAtlas + Vulkan 贴图烘焙 |
-| `AETHERSCAN_ENABLE_AETHER_MESH` | ON | CGAL aether_drender 网格修复/减面 |
-| `AETHERSCAN_AETHER_DRENDER_ROOT` | 自动 | aether_drender 路径（默认 `third_party/aether_drender`） |
-| `AETHERSCAN_INTRINSIC_MODELS_DIR` | `${BUILD}/Models/Intrinsic` | Delight 的 `stage_*.onnx` 目录 |
+| `PHOTARA_BUILD_TESTS` | OFF | 是否生成正确性测试可执行文件 |
+| `PHOTARA_BUILD_BENCHMARKS` | OFF | 是否生成额外 CLI / benchmark 工具 |
+| `PHOTARA_ENABLE_ONNX` | OFF | 是否编译 ONNX/LightGlue |
+| `PHOTARA_FETCH_ONNX` | ON | 开启 ONNX 时是否自动下载 SDK |
+| `PHOTARA_ONNX_VERSION` | 1.20.1 | Fetch 的 ORT 版本 |
+| `PHOTARA_ONNXRUNTIME_ROOT` | 空 | 本地 SDK；有效时优先于 Fetch |
+| `PHOTARA_ENABLE_TEXTURE` | ON | UVAtlas + Vulkan 贴图烘焙 |
+| `PHOTARA_ENABLE_AETHER_MESH` | ON | CGAL aether_drender 网格修复/减面 |
+| `PHOTARA_AETHER_DRENDER_ROOT` | 自动 | aether_drender 路径（默认 `third_party/aether_drender`） |
+| `PHOTARA_INTRINSIC_MODELS_DIR` | `${BUILD}/Models/Intrinsic` | Delight 的 `stage_*.onnx` 目录 |
 
 特征后端可自由组合（提取 × 匹配），例如：
 
@@ -153,7 +153,7 @@ LightGlue，并用更严格的几何阈值接纳救援边。
 ## 运行
 
 ```powershell
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:\ScanVideo\chuan\images `
   --output scene.mvs `
   --window 3
@@ -161,7 +161,7 @@ LightGlue，并用更严格的几何阈值接纳救援边。
 
 默认使用 `global` SfM；需要实验其它后端时可显式传入 `--mode incremental` 或
 `--mode hierarchical`。必填参数为 `--images`、`--output`。`--focal` 可选：省略或
-`0` 时用 `1.2 * max(宽,高)` 作初始值，再由 view-graph 共识与 BA 精化；已知标定可显式传入。其余选项见 `aetherscan --help`。
+`0` 时用 `1.2 * max(宽,高)` 作初始值，再由 view-graph 共识与 BA 精化；已知标定可显式传入。其余选项见 `photara --help`。
 
 `--focal` 默认只是初值；若输入是已标定的零畸变图像，可同时传入
 `--trust-focal --focal <像素焦距>` 锁定内参。自动自标定退化时，全部图片注册和低重投影
@@ -171,7 +171,7 @@ LightGlue，并用更严格的几何阈值接纳救援边。
 稠密重建使用整条流水线质量预设，而不只是调整图像分辨率：
 
 ```powershell
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:\ScanVideo\ori_img\images `
   --mode global `
   --output scene.ply `
@@ -240,22 +240,22 @@ learned normal field、occupancy 和自适应采样负责。该后端要求构�
 - `scene_textured.obj` / `.mtl` / `_albedo.png`：启用 `--texture` 时由
   `aether_drender` UVAtlas + Vulkan 投影烘焙（可选 `--delight` 去光照）
 
-贴图模块默认开启（`AETHERSCAN_ENABLE_TEXTURE=ON`），依赖 Vulkan SDK（含 `dxc`）与
+贴图模块默认开启（`PHOTARA_ENABLE_TEXTURE=ON`），依赖 Vulkan SDK（含 `dxc`）与
 git submodule `third_party/aether_drender`（https://github.com/fenghuayumo/aether_drender）。
 
 `--delight` 纯 C++ **ONNX Runtime** 推理（与 LightGlue 相同开关
-`-DAETHERSCAN_ENABLE_ONNX=ON`），无 Python/PyTorch。将 `stage_0..3.onnx` 放到
-`AETHERSCAN_INTRINSIC_MODELS_DIR`（默认 `build-*/Models/Intrinsic`；许可见
+`-DPHOTARA_ENABLE_ONNX=ON`），无 Python/PyTorch。将 `stage_0..3.onnx` 放到
+`PHOTARA_INTRINSIC_MODELS_DIR`（默认 `build-*/Models/Intrinsic`；许可见
 `docs/LICENSE-Intrinsic.md`）。
 
 ```powershell
-.\build-cgal\aetherscan\Release\aetherscan.exe `
+.\build-cgal\photara\Release\photara.exe `
   --images D:\ScanVideo\ori_img\images `
   --output scene.mvs `
   --dense --mesh --texture --atlas-resolution 2048
 
 # albedo（需 ONNX Runtime + stage_*.onnx）
-.\build-cgal\aetherscan\Release\aetherscan.exe `
+.\build-cgal\photara\Release\photara.exe `
   --images D:\ScanVideo\ori_img\images `
   --output scene.mvs `
   --dense --mesh --texture --delight

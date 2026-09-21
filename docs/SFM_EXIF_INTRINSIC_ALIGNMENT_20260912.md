@@ -48,7 +48,7 @@ RTX 5090 D v2。参考模型仍只是既有 COLMAP 输出的一致性对照，�
 ## 复现
 
 ```powershell
-build/aetherscan/Release/aetherscan.exe --images 'D:\BaiduNetdiskDownload\室内iphone\images' --output artifacts/sfm_align_probe_20260912/iphone_exif_prior.asfm --cache-dir artifacts/sfm_align_probe_20260912/cache_iphone_exif_prior --camera-model auto --mode global --max-features 6000 --window 6
+build/photara/Release/photara.exe --images 'D:\BaiduNetdiskDownload\室内iphone\images' --output artifacts/sfm_align_probe_20260912/iphone_exif_prior.asfm --cache-dir artifacts/sfm_align_probe_20260912/cache_iphone_exif_prior --camera-model auto --mode global --max-features 6000 --window 6
 python experiments/sfm_acceptance.py --diagnostics artifacts/sfm_align_probe_20260912/iphone_exif_prior_sfm_diagnostics.csv --reference 'D:\BaiduNetdiskDownload\室内iphone\sparse\0' --output artifacts/sfm_align_probe_20260912/iphone_exif_prior_vs_reference.json
 python experiments/compare_sfm_runs.py --before artifacts/sfm_gpu_iphone_20260912/final.log --after artifacts/sfm_align_probe_20260912/iphone_exif_prior.log --output artifacts/sfm_align_probe_20260912/iphone_exif_prior_stability.json
 ```

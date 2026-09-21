@@ -110,7 +110,7 @@ ADC+ 的原有步数判据保留。没有引入稀疏深度自由空间硬裁剪
 
 CUDA 测试覆盖同一相机重复采样、不同相机但无贡献、不同相机实际贡献、逐步打分分母不变，
 以及高不透明度单相机点不能被复制。原有 ADC+、ADC-IGS 生长预算和上限测试继续执行。
-最终 Release 的 `aetherscan`、`aetherscan_editor`、`aetherscan_splat_test` 均编译成功，
+最终 Release 的 `photara`、`photara_studio`、`photara_splat_test` 均编译成功，
 完整 splat 测试通过（`tests_selected.log`），`git diff --check` 通过。
 
 ## 复现
@@ -124,7 +124,7 @@ python experiments/run_ab.py --dataset D:/ScanVideo/antman_nomask `
 可选清理实验：
 
 ```powershell
-build/aetherscan/Release/aetherscan_splat_quality_eval.exe `
+build/photara/Release/photara_splat_quality_eval.exe `
   D:/ScanVideo/antman_nomask/sparse/0 D:/ScanVideo/antman_nomask/images `
   INPUT_MODEL.ply OUTPUT_DIR 8 --prune-unobserved
 ```

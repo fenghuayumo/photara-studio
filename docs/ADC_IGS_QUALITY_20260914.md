@@ -4,7 +4,7 @@
 
 ## Scope and reproducibility
 
-Dataset: `D:/ScanVideo/WeChat_20250712175936/sparse/0`, using its current 198 images and 38,405 sparse points. The reference is the user's `D:/SoftwareTool/aetherscan-v1.0/aetherscan.exe`. Earlier reports using a different sparse point count are not comparable.
+Dataset: `D:/ScanVideo/WeChat_20250712175936/sparse/0`, using its current 198 images and 38,405 sparse points. The reference is the user's `D:/SoftwareTool/photara-v1.0/photara.exe`. Earlier reports using a different sparse point count are not comparable.
 
 The final comparison uses 30,000 iterations, a 1,000,000 Gaussian cap, full source resolution, RGB supervision, no foreground mask, and every eighth camera held out (173 training / 25 evaluation views). Depth-normal, multi-view geometry and NCC losses are explicitly zero for both executables. Runs are serial; two fresh processes per executable use the default seed. This checks numerical repeatability, not robustness across seeds or scenes. The dataset was used for tuning, so these held-out-camera results are not an untouched benchmark.
 
@@ -22,11 +22,11 @@ Reference implementations read from `D:/ProgramCode/C++/spirula-studio/src/engin
 - Add a 0.001 mean-square prior on non-DC SH coefficients to constrain excessive view-dependent appearance without penalizing DC color.
 - Exclude undefined undistortion rays from RGB loss and densification error evidence. Their camera-derived validity uses the existing packed alpha channel and creates no alpha/foreground loss. Valid black source pixels remain supervised. The current validity-only path applies to distorted, unmasked images rendered through the pinhole undistortion path; real foreground masks keep their previous behavior.
 
-The new settings are selected by the `adc_igs` preset. Core changes are in `aetherscan/src/splat/{densification.cpp,densification_adc_plus.cpp,cuda_ops.cu,trainer.cpp,training_data_loader.cpp}` and the corresponding public/internal headers. Existing unrelated workspace edits were preserved.
+The new settings are selected by the `adc_igs` preset. Core changes are in `photara/src/splat/{densification.cpp,densification_adc_plus.cpp,cuda_ops.cu,trainer.cpp,training_data_loader.cpp}` and the corresponding public/internal headers. Existing unrelated workspace edits were preserved.
 
 ## Evaluation domains
 
-Both reference and candidate PLYs are re-rendered with the same `aetherscan_splat_quality_eval` executable, camera loader, rasterizer and SH degree. Primary PSNR/SSIM use the same camera-derived source validity mask for both models: approximately 98.08% of pixels are valid. The remaining pixels have no source observation after undistortion; their black fill is not measured scene color. Validity is determined by camera geometry, not by prediction quality or pixel brightness.
+Both reference and candidate PLYs are re-rendered with the same `photara_splat_quality_eval` executable, camera loader, rasterizer and SH degree. Primary PSNR/SSIM use the same camera-derived source validity mask for both models: approximately 98.08% of pixels are valid. The remaining pixels have no source observation after undistortion; their black fill is not measured scene color. Validity is determined by camera geometry, not by prediction quality or pixel brightness.
 
 Full-frame PSNR/SSIM are also recorded. Ignoring undefined black borders during training can lower full-frame PSNR while improving measured source pixels. The report retains that regression rather than comparing the old full-frame score with the new valid-pixel score. Fixed central-90% PNG measurements are supplemental only; native float-render valid-pixel scores determine the comparison.
 
@@ -34,7 +34,7 @@ Midpoint-pose images provide qualitative novel-view checks with identical poses 
 
 ## Validation and outputs
 
-The Release CLI, editor, splat test and canonical evaluator were built successfully. The complete `aetherscan_splat_test` passed; its final log is `artifacts/igs_quality_20260913/final_full_tests.log`. Added checks cover score accumulation, world/noise scale behavior, oversize evidence, SH gradients, growth budgets, observation support, and validity-mask cache/loss behavior. One earlier full-suite attempt had an asynchronous neighbour-supervision failure; subsequent full runs including the final run passed, and that existing synchronization code was not changed.
+The Release CLI, editor, splat test and canonical evaluator were built successfully. The complete `photara_splat_test` passed; its final log is `artifacts/igs_quality_20260913/final_full_tests.log`. Added checks cover score accumulation, world/noise scale behavior, oversize evidence, SH gradients, growth budgets, observation support, and validity-mask cache/loss behavior. One earlier full-suite attempt had an asynchronous neighbour-supervision failure; subsequent full runs including the final run passed, and that existing synchronization code was not changed.
 
 After CMake regeneration, all four targets were rebuilt and the full splat suite passed again (`artifacts/igs_quality_20260914_confirm/build_verify.log` and `splat_tests.log`). The exported full model's vertex count, binary payload size and all 66 float properties were checked: every parameter is finite (`final_full/validation.json`). `delivery_hashes.json` identifies the final build and retained benchmark binaries separately.
 
@@ -58,12 +58,12 @@ Mean final Gaussian counts are 464,287 (v1) and 712,274 (revised), approximately
 
 Repeat 1 improves valid PSNR on 22/25 cameras and valid SSIM on 24/25. The representative visual report uses repeat 1, selected by run order, not by the best score: `artifacts/igs_quality_20260914_confirm/report/comparison.html`. It includes all held-out views and available midpoint views. In midpoint view 40, a bottom-edge black shard visible in v1 is absent in the revised output. `report/novel_comparison.jpg` contains a compact comparison of views 40 and 120.
 
-The full-198-camera model is `artifacts/igs_quality_20260914_confirm/final_full/reconstruction_splat.ply`: 706,717 Gaussians, 186,575,035 bytes, 30,000 steps, 137.815 s reported training time. Its cameras are training data, so its rendered scores are not reported as held-out validation. Exact command and model hash accompany the output. The CLI and evaluator used for confirmation are retained as `build/aetherscan/Release/aetherscan_igs_confirmed_20260914.exe` and `aetherscan_splat_quality_eval_confirmed_20260914.exe`.
+The full-198-camera model is `artifacts/igs_quality_20260914_confirm/final_full/reconstruction_splat.ply`: 706,717 Gaussians, 186,575,035 bytes, 30,000 steps, 137.815 s reported training time. Its cameras are training data, so its rendered scores are not reported as held-out validation. Exact command and model hash accompany the output. The CLI and evaluator used for confirmation are retained as `build/photara/Release/photara_igs_confirmed_20260914.exe` and `photara_splat_quality_eval_confirmed_20260914.exe`.
 
 To repeat the comparison in a new output directory:
 
 ```powershell
-python experiments/benchmark_igs_quality.py --dataset D:/ScanVideo/WeChat_20250712175936 --reference D:/SoftwareTool/aetherscan-v1.0/aetherscan.exe --candidate build/aetherscan/Release/aetherscan.exe --evaluator build/aetherscan/Release/aetherscan_splat_quality_eval.exe --output artifacts/igs_quality_repeat --iterations 30000 --cap 1000000 --repeats 2 --split 8
+python experiments/benchmark_igs_quality.py --dataset D:/ScanVideo/WeChat_20250712175936 --reference D:/SoftwareTool/photara-v1.0/photara.exe --candidate build/photara/Release/photara.exe --evaluator build/photara/Release/photara_splat_quality_eval.exe --output artifacts/igs_quality_repeat --iterations 30000 --cap 1000000 --repeats 2 --split 8
 ```
 
-The evaluator is a CMake target alongside the splat tests (`AETHERSCAN_BUILD_TESTS` and `BUILD_TESTING` enabled). Rebuild with `cmake --build build --config Release --target aetherscan aetherscan_editor aetherscan_splat_test aetherscan_splat_quality_eval -j 12`.
+The evaluator is a CMake target alongside the splat tests (`PHOTARA_BUILD_TESTS` and `BUILD_TESTING` enabled). Rebuild with `cmake --build build --config Release --target photara photara_studio photara_splat_test photara_splat_quality_eval -j 12`.

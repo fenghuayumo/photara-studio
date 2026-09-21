@@ -114,7 +114,7 @@
 
 ```powershell
 # 全景实拍（有持镜人）：默认 mask 模式 + 关掉背景 alpha 目标
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:/BaiduNetdiskDownload/VID_20260911_145523_00_007_dataset/images `
   --splat-dataset D:/BaiduNetdiskDownload/VID_20260911_145523_00_007_dataset/sparse/0 `
   --output artifacts/native_camera_20260916_round3/pano_transparent_leak0/model.ply `

@@ -5,4 +5,4 @@ derived from [compphoto/Intrinsic](https://github.com/compphoto/Intrinsic)
 checkpoints. Those weights are released for **academic / non-commercial** use.
 Review the upstream license before any commercial deployment.
 
-Runtime inference in AetherScan uses ONNX Runtime in C++ only.
+Runtime inference in Photara uses ONNX Runtime in C++ only.

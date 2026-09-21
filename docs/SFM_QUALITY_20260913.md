@@ -14,7 +14,7 @@
 
 数据集为室内 iphone 的 739 张，以及两个 WeChat 视频的 198 / 153 张。输入照片未删减；已有 `sparse/0` 只用于事后比较，未参与重建。比较使用全部共同相机的一次正尺度 Sim(3)，不删除异常相机；位置百分比以参考相机布局 RMS 半径归一化。已有重建不是测量真值，参考差异需要与观测支持一起解释。
 
-基线为本轮开始时工作区实际编译版本（包含尚未提交的 EXIF 改动），保存在 `build/aetherscan/Release/aetherscan_quality_before.exe`。其室内结果为 727/739，与上一轮报告中的 738/739 不是同一版本，不能混淆。
+基线为本轮开始时工作区实际编译版本（包含尚未提交的 EXIF 改动），保存在 `build/photara/Release/photara_quality_before.exe`。其室内结果为 727/739，与上一轮报告中的 738/739 不是同一版本，不能混淆。
 
 全部日志、ASFM、逐相机/逐图像对诊断、参考比较 JSON 保存在 `artifacts/sfm_quality_20260913/`。快速配置统一为 `--camera-model auto --mode global --max-features 6000 --window 6`，每次完整性能测试使用独立缓存目录。
 
@@ -45,14 +45,14 @@
 ## GPU、构建与回归
 
 - Release CLI 和编辑器构建成功。稀疏 BA 日志确认 `backend=cuda`、`NVIDIA GeForce RTX 5090 D v2`；特征提取和匹配仍使用 SiftGPU/GPU matcher。相机模型小规模探测和部分恢复校验继续在 CPU 执行，未声称 SfM 所有阶段均为 GPU。
-- `aetherscan.ba.optimizer`、`aetherscan.sfm.two_view`、`aetherscan.sfm.mapping`、`aetherscan.sfm.checkpoint`、`aetherscan.sfm.submap_recovery` 五项全部通过。新增覆盖毫米/像素单位、标定分区保护、元数据缓存、停用几何边的正确与错误恢复，以及图像对正反排列的一致性。
+- `photara.ba.optimizer`、`photara.sfm.two_view`、`photara.sfm.mapping`、`photara.sfm.checkpoint`、`photara.sfm.submap_recovery` 五项全部通过。新增覆盖毫米/像素单位、标定分区保护、元数据缓存、停用几何边的正确与错误恢复，以及图像对正反排列的一致性。
 - `iphone_cached` 命中 tracks / reconstruction 缓存，仍为 739/739，耗时 5.047 秒。739 行相机的注册、相机组、焦距、畸变、位姿及观测计数与首次结果逐字段相同，见 `cache_roundtrip.json`。缓存耗时不用于完整重建加速比较。
 - `git diff --check` 通过（仅 Windows 行尾提示）。测试 CLI SHA256：`F3D21930E3A00EFDEF9F33BF4E6C883F74E317F18F495A40C39D925A9BD0F143`。
 
 复现示例（PowerShell，切换到仓库根目录；使用新缓存目录进行完整计时）：
 
 ```powershell
-& build/aetherscan/Release/aetherscan.exe --images 'D:\BaiduNetdiskDownload\室内iphone\images' --output artifacts/sfm_quality_20260913/repro.asfm --cache-dir artifacts/sfm_quality_20260913/cache_repro --camera-model auto --mode global --max-features 6000 --window 6
+& build/photara/Release/photara.exe --images 'D:\BaiduNetdiskDownload\室内iphone\images' --output artifacts/sfm_quality_20260913/repro.asfm --cache-dir artifacts/sfm_quality_20260913/cache_repro --camera-model auto --mode global --max-features 6000 --window 6
 ctest --test-dir build -C Release -R 'ba.optimizer|sfm.two_view|sfm.mapping|sfm.checkpoint|sfm.submap_recovery' --output-on-failure
 ```
 

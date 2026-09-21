@@ -37,12 +37,12 @@ chuan 最终默认回归 `chuan_auto_final`：109/109 注册，重投影 RMS 0.5
 
 原 `07344–07359` 的 16 相机支路全部注册，但位置 P95 从旧对照的 55.85% 变为 58.14%，最大从 56.24% 变为 58.67%（均用全体公共相机拟合的变换和全体参考半径归一化）。更关键的是，这 16 个相机的结构可靠标记从 0 个变成 16 个：新增图边掩盖了风险，却没有消除几何偏移。`branch_comparison.json` 保存这项反例，不将补匹配实验发布为默认修复。
 
-独立恢复工具新增可选的历史风险图片名单：`aetherscan_sfm_realign checkpoint.bin NEW_OUTPUT_DIRECTORY ADDITIONAL_RISK_NAMES.txt`。名单仅将相机加入待验证集合，不能提供坐标或提升主体可靠性，用于防止风险仅因图中增加一个环而被遗忘。
+独立恢复工具新增可选的历史风险图片名单：`photara_sfm_realign checkpoint.bin NEW_OUTPUT_DIRECTORY ADDITIONAL_RISK_NAMES.txt`。名单仅将相机加入待验证集合，不能提供坐标或提升主体可靠性，用于防止风险仅因图中增加一个环而被遗忘。
 
 `alameda_independent_after_expansion` 对补配后的模型带入原支路名单进行独立验证：16/16 局部注册，4303 个局部点，223 个边界匹配，仅 2 个双侧独立共享点（旧实验为 0）。返回 `insufficient_independent_shared_points`，没有接受坐标写回。相邻 `branch_names.txt` 仅包含图片名；输入模型和 COLMAP 参考坐标不参与独立相似变换拟合。该结果再次说明支路还没有修复。
 
 ```powershell
-build/aetherscan/Release/aetherscan_sfm_realign.exe `
+build/photara/Release/photara_sfm_realign.exe `
   artifacts/sfm_acceptance_20260906/cache/alameda_structural_expansion/reconstruction-e901675f28dfa481.bin `
   artifacts/sfm_acceptance_20260906/alameda_independent_rerun `
   artifacts/sfm_acceptance_20260906/branch_names.txt
@@ -54,7 +54,7 @@ build/aetherscan/Release/aetherscan_sfm_realign.exe `
 
 ```powershell
 python experiments/run_sfm_acceptance.py `
-  --exe build/aetherscan/Release/aetherscan.exe `
+  --exe build/photara/Release/photara.exe `
   --images D:/ScanVideo/ori_img/images `
   --reference artifacts/sfm_acceptance_20260906/reference_ori_original_text `
   --output-dir artifacts/sfm_acceptance_20260906 --name ori_rerun `

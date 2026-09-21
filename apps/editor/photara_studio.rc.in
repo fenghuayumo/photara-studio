@@ -1,0 +1,4 @@
+// Application icon for Explorer, the taskbar, and the GLFW window.
+// GLFW looks up the named resource GLFW_ICON on Win32.
+1 ICON "@PHOTARA_STUDIO_ICON@"
+GLFW_ICON ICON "@PHOTARA_STUDIO_ICON@"

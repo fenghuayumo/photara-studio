@@ -15,8 +15,8 @@
 #include <string>
 #include <vector>
 
-#ifndef AETHERSCAN_CLI_PATH
-#define AETHERSCAN_CLI_PATH "aetherscan"
+#ifndef PHOTARA_CLI_PATH
+#define PHOTARA_CLI_PATH "photara"
 #endif
 
 namespace editor {
@@ -166,7 +166,7 @@ void draw_alignment_export_modal(App& app) {
     theme::caption("Format");
     ImGui::SetNextItemWidth(-1.F);
     const char* formats[] = {
-        "AetherScan ASFM", "COLMAP", "Nerfstudio / Blender", "OpenMVS"};
+        "Photara ASFM", "COLMAP", "Nerfstudio / Blender", "OpenMVS"};
     if (ImGui::Combo(
             "##alignment_format", &app.alignment_export.format, formats, 4))
         sync_alignment_export_path(app, true);

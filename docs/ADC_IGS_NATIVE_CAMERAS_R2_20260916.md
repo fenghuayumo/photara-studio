@@ -7,7 +7,7 @@
 
 1. **全景反传的两个缺陷已定位并修复**（第 1 轮列为最高优先级）。有限差分相对误差从
    `9.8% / 19.6% / 21.5%`（缝前点）和 `0.4% / 48.8% / 106.8%`（过缝点）降到 **≤0.2%**。
-   `aetherscan_splat_test --fisheye-only` 现在通过。
+   `photara_splat_test --fisheye-only` 现在通过。
 2. **修复本身就能提高质量。** 同一命令、同一数据、同一留出视角，只换二进制（静态区 PNG）：
    全景 no-mask `24.98 → 25.91 dB`，masked(leak=1) `22.59 → 24.14 dB`。
 3. **全景气泡/雾团的直接原因是 mask 的 alpha 泄漏惩罚。** leak `1 → 0.25 → 0` 单调改善
@@ -32,11 +32,11 @@
 |---|---|
 | `third_party/splat_drender/src/device/geometry.cuh` | 全景反向：Jacobian 存储方向与 forward 对齐；补 `dL_dJ01/dL_dJ10`；equirect 走精确二阶链（pinhole 路径逐字未变） |
 | `third_party/splat_drender/src/device/equirect.cuh`（新增） | 嵌套前向 dual，一次求出等距柱状投影的一阶与二阶导数 |
-| `aetherscan/src/splat/cuda_ops.cu` | loss kernel 增加 `mask_alpha_leak_weight` |
-| `aetherscan/include/splat/options.hpp` | 新增 `mask_alpha_leak_weight`、`initial_point_budget` |
-| `aetherscan/src/splat/trainer.cpp` | 评测把 `psnr`（全图）与 `foreground_psnr`（前景）分别算对；初始化点数预算 |
-| `aetherscan/src/tools/reconstruct.cpp` | 新增 `--splat-alpha-leak-weight`、`--splat-init-point-budget` |
-| `aetherscan/tests/splat_test.cpp` | 全景 FD 探针打印解析值/差分值/相对误差 |
+| `photara/src/splat/cuda_ops.cu` | loss kernel 增加 `mask_alpha_leak_weight` |
+| `photara/include/splat/options.hpp` | 新增 `mask_alpha_leak_weight`、`initial_point_budget` |
+| `photara/src/splat/trainer.cpp` | 评测把 `psnr`（全图）与 `foreground_psnr`（前景）分别算对；初始化点数预算 |
+| `photara/src/tools/reconstruct.cpp` | 新增 `--splat-alpha-leak-weight`、`--splat-init-point-budget` |
+| `photara/tests/splat_test.cpp` | 全景 FD 探针打印解析值/差分值/相对误差 |
 
 ## 全景反传：到底修了什么
 
@@ -57,7 +57,7 @@ forward 用 `J.m[axis][pixel] = d(pixel)/d(axis)`（即真 Jacobian 的转置）
 二阶导，六个元素与它们的三个方向导数一起得到，反向按
 `dL/dt_k = Σ_{r,c} dL/dA[r][c] · ∂A[r][c]/∂t_k` 精确链式回传。
 
-### 验证（`aetherscan_splat_test --fisheye-only`，单高斯 + 平滑探针，中心差分）
+### 验证（`photara_splat_test --fisheye-only`，单高斯 + 平滑探针，中心差分）
 
 修复前后都用同一套探针，`ε=1e-3`：
 
@@ -175,7 +175,7 @@ forward 用 `J.m[axis][pixel] = d(pixel)/d(axis)`（即真 Jacobian 的转置）
 
 ```powershell
 # 全景：修好反传 + 静态背景优先的 mask 训练（本轮最佳）
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:/BaiduNetdiskDownload/VID_20260911_145523_00_007_dataset/images `
   --splat-dataset D:/BaiduNetdiskDownload/VID_20260911_145523_00_007_dataset/sparse/0 `
   --output artifacts/native_camera_20260916_round2/panorama_fix_mask_leak000/model.ply `
@@ -189,7 +189,7 @@ forward 用 `J.m[axis][pixel] = d(pixel)/d(axis)`（即真 Jacobian 的转置）
   --splat-cache-auto=false --splat-device-cache-mb=0
 
 # 鱼眼：抬高容量上限
-.\build\aetherscan\Release\aetherscan.exe `
+.\build\photara\Release\photara.exe `
   --images D:/ScanVideo/alameda/images_2_dataset/images `
   --splat-dataset D:/ScanVideo/alameda/images_2_dataset/sparse/0 `
   --output artifacts/native_camera_20260916_round2/fisheye_fix_cap2m/model.ply `
@@ -223,7 +223,7 @@ forward 用 `J.m[axis][pixel] = d(pixel)/d(axis)`（即真 Jacobian 的转置）
    +1.5 / +2.9 dB 的量级远在噪声之上。
    （注：把 `--splat-iterations` 从 15000 改成 1000 会让第 1000 步的指标差 0.2 dB——那是
    训练日程随总步数变化，不是噪声，不能拿来当重复性度量。）
-   另：`aetherscan_splat_test` 的 `test_training_device_cache`（异步 CUDA 预取）在**有别的
+   另：`photara_splat_test` 的 `test_training_device_cache`（异步 CUDA 预取）在**有别的
    CUDA 进程正在运行或正在退出**时会假失败（`asynchronous neighbour changed supervision`），
    GPU 空载时 6/6 通过。跑测试前先确认没有训练在跑；这条与投影/mask 改动无关，但异步预取
    这条链路本身的抗干扰性值得单独查一次。

@@ -111,7 +111,7 @@ std::vector<std::filesystem::path> cache_roots(
     if (!configured.empty()) roots.push_back(configured);
     std::error_code error;
     const auto temp = std::filesystem::temp_directory_path(error);
-    if (!error) roots.push_back(temp / "AetherScan");
+    if (!error) roots.push_back(temp / "Photara");
     return roots;
 }
 

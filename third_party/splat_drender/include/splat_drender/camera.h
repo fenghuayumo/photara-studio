@@ -16,7 +16,7 @@
 
 namespace splat_drender {
 
-// Integer values match aetherscan::CameraModel for the models the
+// Integer values match photara::CameraModel for the models the
 // rasterizer understands.
 enum class CameraMode : int {
     pinhole = 0,

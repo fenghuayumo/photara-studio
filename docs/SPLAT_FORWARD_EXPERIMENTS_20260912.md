@@ -38,7 +38,7 @@ warp 裁剪仅用于 median 探针，不改 pass 1 或快照，使用原始实�
 
 ## 功能验证
 
-- Release `aetherscan`、`aetherscan_splat_test` 构建成功；完整 splat tests passed。
+- Release `photara`、`photara_splat_test` 构建成功；完整 splat tests passed。
 - 随机 RGB / geometry reference_compare 执行完成；随机 geometry Compute Sanitizer synccheck：0 errors。
 - WeChat_20250712175936：3000 步，1280×720，显式关闭几何损失；日志 depth/normal/mv_geo/mv_ncc 均为 0。82,738 Gaussians，training_s=7.07818；3 视图 average_psnr=20.0482、masked=27.6239。
 - ori_img：1000 步，1000×1000，`--splat --mesh --splat-geometry-from-iter 10`；depth/normal/mv_geo/mv_ncc 均非零。53,071 Gaussians，training_s=16.1091；TSDF 输出 867,929 顶点、1,722,559 面。

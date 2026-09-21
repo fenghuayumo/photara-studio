@@ -60,7 +60,7 @@ public:
     void poll();
     void request_gt(int view_index, const std::filesystem::path& path);
     void set_render(
-        aetherscan::io::RgbImage render, int view, std::uint64_t revision);
+        photara::io::RgbImage render, int view, std::uint64_t revision);
 
     [[nodiscard]] bool loading() const { return loading_; }
     [[nodiscard]] bool metrics_busy() const { return metrics_busy_; }
@@ -83,33 +83,33 @@ private:
     // Decodes retired by a newer selection are harvested instead of joined, so
     // switching cameras never blocks the UI on an in-flight capture.
     void harvest_retired();
-    void publish_gt(const aetherscan::io::RgbImage& image);
+    void publish_gt(const photara::io::RgbImage& image);
     void remember_gt(
         const std::filesystem::path::string_type& key,
-        const aetherscan::io::RgbImage& image);
+        const photara::io::RgbImage& image);
 
     struct MetricsJob {
         ImageQaMetrics metrics;
-        aetherscan::io::RgbImage error;
+        photara::io::RgbImage error;
         int view{-1};
         std::uint64_t revision{};
     };
 
     gpu::PreviewTexture gt_;
     gpu::PreviewTexture error_;
-    aetherscan::io::RgbImage gt_cpu_;
-    aetherscan::io::RgbImage render_cpu_;
-    std::future<aetherscan::io::RgbImage> pending_;
+    photara::io::RgbImage gt_cpu_;
+    photara::io::RgbImage render_cpu_;
+    std::future<photara::io::RgbImage> pending_;
     // Superseded requests keep their key so a decode that finishes after the
     // selection moved on still lands in the cache instead of being thrown away.
     std::vector<std::pair<std::filesystem::path::string_type,
-                          std::future<aetherscan::io::RgbImage>>>
+                          std::future<photara::io::RgbImage>>>
         retired_;
     std::future<MetricsJob> metrics_pending_;
     // Decoded captures keyed by native path, most recent last: comparing a few
     // cameras back and forth must not pay for the decode again.
     std::unordered_map<std::filesystem::path::string_type,
-                       aetherscan::io::RgbImage>
+                       photara::io::RgbImage>
         gt_cache_;
     std::deque<std::filesystem::path::string_type> gt_cache_order_;
     std::filesystem::path pending_path_;
@@ -146,7 +146,7 @@ struct ImageQaDrawInput {
     bool render_live{};
     bool has_model{};
     bool external_alignment{};
-    const aetherscan::sfm::AlignLiveFrame* live{};
+    const photara::sfm::AlignLiveFrame* live{};
     ImageQaSession* pair_session{};
 };
 

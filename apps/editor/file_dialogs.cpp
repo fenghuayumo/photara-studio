@@ -95,7 +95,7 @@ bool pick_file(
             dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
         dialog->SetTitle(title);
         COMDLG_FILTERSPEC project_filters[] = {
-            {L"AetherScan Project (*.ascan)", L"*.ascan"},
+            {L"Photara Project (*.ascan)", L"*.ascan"},
             {L"All files (*.*)", L"*.*"}};
         COMDLG_FILTERSPEC dataset_filters[] = {
             {L"Camera datasets (*.csv;*.mvs)", L"*.csv;*.mvs"},
@@ -129,7 +129,7 @@ bool pick_file(
             }
         }
         COMDLG_FILTERSPEC alignment_filters[] = {
-            {L"AetherScan SfM (*.asfm)", L"*.asfm"},
+            {L"Photara SfM (*.asfm)", L"*.asfm"},
             {L"All files (*.*)", L"*.*"}};
         if (kind == FilePickKind::alignment && default_extension != nullptr) {
             if (std::wcscmp(default_extension, L"mvs") == 0) {

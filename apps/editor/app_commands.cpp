@@ -16,7 +16,7 @@
 #include "splat/formats.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
-#if defined(AETHERSCAN_HAS_TEXTURE)
+#if defined(PHOTARA_HAS_TEXTURE)
 #include "texture/export.hpp"
 #endif
 
@@ -35,8 +35,8 @@
 #include <string_view>
 #include <vector>
 
-#ifndef AETHERSCAN_CLI_PATH
-#define AETHERSCAN_CLI_PATH "aetherscan"
+#ifndef PHOTARA_CLI_PATH
+#define PHOTARA_CLI_PATH "photara"
 #endif
 
 namespace editor {
@@ -131,9 +131,9 @@ bool live_preview_active(const App& app) {
 std::filesystem::path resolve_editor_ini() {
 #if defined(_WIN32)
     if (const char* appdata = std::getenv("APPDATA"))
-        return std::filesystem::path(appdata) / "AetherScan" / "editor.ini";
+        return std::filesystem::path(appdata) / "Photara" / "editor.ini";
 #endif
-    return std::filesystem::current_path() / "aetherscan_editor.ini";
+    return std::filesystem::current_path() / "photara_studio.ini";
 }
 
 void set_message(App& app, std::string text, const ImVec4& colour) {
@@ -292,18 +292,18 @@ void refresh_artifacts(App& app) {
     try {
         if (!std::filesystem::exists(app.layout.project_file, error)) return;
         const auto archive =
-            aetherscan::project::Archive::open(app.layout.project_file);
+            photara::project::Archive::open(app.layout.project_file);
         app.project_writer_version = archive.writer_version();
         app.project_min_reader_version = archive.min_reader_version();
         app.has_sparse =
-            archive.has(aetherscan::project::ChunkType::sfm) || app.has_sparse;
+            archive.has(photara::project::ChunkType::sfm) || app.has_sparse;
         app.has_model =
-            archive.has(aetherscan::project::ChunkType::gaussians) ||
+            archive.has(photara::project::ChunkType::gaussians) ||
             app.has_model;
         app.has_mesh =
-            archive.has(aetherscan::project::ChunkType::mesh) || app.has_mesh;
+            archive.has(photara::project::ChunkType::mesh) || app.has_mesh;
         app.has_texture =
-            archive.has(aetherscan::project::ChunkType::texture) ||
+            archive.has(photara::project::ChunkType::texture) ||
             app.has_texture;
     } catch (...) {
     }
@@ -347,16 +347,16 @@ void store_utf8_path_field(
     store_path_field(field, path);
 }
 
-aetherscan::sfm::Scene load_working_sfm(
+photara::sfm::Scene load_working_sfm(
     const std::filesystem::path& path,
     const std::filesystem::path& images_dir) {
-    aetherscan::sfm::AsfmOptions options;
+    photara::sfm::AsfmOptions options;
     options.path_base = images_dir;
-    return aetherscan::sfm::load_asfm(path, options);
+    return photara::sfm::load_asfm(path, options);
 }
 
-aetherscan::project::Settings collect_project_settings(const App& app) {
-    aetherscan::project::Settings settings;
+photara::project::Settings collect_project_settings(const App& app) {
+    photara::project::Settings settings;
     settings.name = app.layout.project_file.empty()
         ? std::string("Untitled")
         : path_to_utf8(app.layout.project_file.stem());
@@ -415,7 +415,7 @@ aetherscan::project::Settings collect_project_settings(const App& app) {
 }
 
 void apply_project_settings(
-    App& app, const aetherscan::project::Settings& settings) {
+    App& app, const photara::project::Settings& settings) {
     if (!settings.image_directory.empty())
         store_path_field(app.settings.images_dir, settings.image_directory);
     store_path_field(app.settings.dataset_source, settings.dataset_source);
@@ -592,8 +592,8 @@ void request_ascan_scene_load(App& app) {
                 }
                 if (!ascan.empty() && std::filesystem::exists(ascan, error)) {
                     const auto archive =
-                        aetherscan::project::Archive::open(ascan);
-                    const auto scene = aetherscan::project::read_sfm(archive);
+                        photara::project::Archive::open(ascan);
+                    const auto scene = photara::project::read_sfm(archive);
                     if (scene) return sparse_scene_from_sfm(*scene);
                 }
                 if (!asfm.empty() && std::filesystem::exists(asfm, error))
@@ -609,29 +609,29 @@ void request_ascan_scene_load(App& app) {
 bool save_project_to_path(App& app, const std::filesystem::path& path) {
     try {
         std::error_code error;
-        aetherscan::project::Archive archive =
-            aetherscan::project::Archive::create();
+        photara::project::Archive archive =
+            photara::project::Archive::create();
         const auto current = app.layout.project_file;
         if (!current.empty() && std::filesystem::exists(current, error))
-            archive = aetherscan::project::Archive::open(current);
+            archive = photara::project::Archive::open(current);
         else if (std::filesystem::exists(path, error))
-            archive = aetherscan::project::Archive::open(path);
-        aetherscan::project::write_settings(
+            archive = photara::project::Archive::open(path);
+        photara::project::write_settings(
             archive, collect_project_settings(app), path);
         std::error_code working_error;
         if (!app.layout.working_sfm.empty() &&
             std::filesystem::exists(app.layout.working_sfm, working_error)) {
             const auto scene = load_working_sfm(
                 app.layout.working_sfm, reconstruction_images_path(app));
-            aetherscan::project::write_sfm(archive, scene, path);
+            photara::project::write_sfm(archive, scene, path);
         }
         const auto splat = existing_splat_model(app);
         if (!splat.empty()) {
             try {
                 archive.set_chunk(
-                    aetherscan::project::ChunkType::gaussians,
-                    aetherscan::splat::encode_gaussians(
-                        aetherscan::splat::load_gaussians(splat)));
+                    photara::project::ChunkType::gaussians,
+                    photara::splat::encode_gaussians(
+                        photara::splat::load_gaussians(splat)));
             } catch (...) {
             }
         }
@@ -644,19 +644,19 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
                 continue;
             try {
                 archive.set_chunk(
-                    aetherscan::project::ChunkType::mesh,
-                    aetherscan::mvs::encode_mesh(
-                        aetherscan::mvs::load_mesh_ply(mesh_path)));
+                    photara::project::ChunkType::mesh,
+                    photara::mvs::encode_mesh(
+                        photara::mvs::load_mesh_ply(mesh_path)));
             } catch (...) {
             }
             break;
         }
-#if defined(AETHERSCAN_HAS_TEXTURE)
+#if defined(PHOTARA_HAS_TEXTURE)
         if (textured_mesh_on_disk(app.layout.working_texture)) {
             try {
                 archive.set_chunk(
-                    aetherscan::project::ChunkType::texture,
-                    aetherscan::texture::encode_textured_obj(
+                    photara::project::ChunkType::texture,
+                    photara::texture::encode_textured_obj(
                         app.layout.working_texture));
             } catch (...) {
             }
@@ -907,7 +907,7 @@ void apply_dropped_image_source(
         const std::filesystem::path path = path_from_drop(text);
         std::error_code status;
         if (std::filesystem::is_regular_file(path, status) &&
-            aetherscan::io::is_video_path(path))
+            photara::io::is_video_path(path))
             videos.push_back(path);
     }
     if (videos.size() > 1) {
@@ -1055,13 +1055,13 @@ void request_gaussian_scene_load(App& app) {
                 std::error_code error;
                 if (std::filesystem::exists(ascan, error)) {
                     const auto archive =
-                        aetherscan::project::Archive::open(ascan);
-                    if (archive.has(aetherscan::project::ChunkType::gaussians))
+                        photara::project::Archive::open(ascan);
+                    if (archive.has(photara::project::ChunkType::gaussians))
                     {
                         SceneLoad loaded = gaussian_scene_from_model(
-                            aetherscan::splat::decode_gaussians(
+                            photara::splat::decode_gaussians(
                                 archive.chunk(
-                                    aetherscan::project::ChunkType::gaussians)),
+                                    photara::project::ChunkType::gaussians)),
                             poses);
                         merge_dataset_views(loaded);
                         return loaded;
@@ -1158,12 +1158,12 @@ std::wstring export_stem_wide(const App& app) {
 
 bool can_export_model(const App& app);
 
-aetherscan::splat::GaussianFormat splat_export_format(const App& app) {
+photara::splat::GaussianFormat splat_export_format(const App& app) {
     switch (app.splat_export.format) {
-        case 1: return aetherscan::splat::GaussianFormat::sog;
-        case 2: return aetherscan::splat::GaussianFormat::spz;
-        case 3: return aetherscan::splat::GaussianFormat::glb;
-        default: return aetherscan::splat::GaussianFormat::ply;
+        case 1: return photara::splat::GaussianFormat::sog;
+        case 2: return photara::splat::GaussianFormat::spz;
+        case 3: return photara::splat::GaussianFormat::glb;
+        default: return photara::splat::GaussianFormat::ply;
     }
 }
 
@@ -1295,8 +1295,8 @@ void write_sparse_ply(
     }
 }
 
-aetherscan::mvs::Mesh preview_mesh_to_mvs(const PreviewMesh& mesh) {
-    aetherscan::mvs::Mesh out;
+photara::mvs::Mesh preview_mesh_to_mvs(const PreviewMesh& mesh) {
+    photara::mvs::Mesh out;
     out.vertices.reserve(mesh.vertices.size());
     for (const Vec3& vertex : mesh.vertices)
         out.vertices.emplace_back(vertex.x, vertex.y, vertex.z);
@@ -1355,14 +1355,14 @@ void export_trained_model(App& app) {
     }
     try {
         const auto source = existing_splat_model(app);
-        aetherscan::splat::GaussianModel model;
+        photara::splat::GaussianModel model;
         if (!source.empty()) {
-            model = aetherscan::splat::load_gaussians(source);
+            model = photara::splat::load_gaussians(source);
         } else {
             const auto archive =
-                aetherscan::project::Archive::open(app.layout.project_file);
-            model = aetherscan::splat::decode_gaussians(
-                archive.chunk(aetherscan::project::ChunkType::gaussians));
+                photara::project::Archive::open(app.layout.project_file);
+            model = photara::splat::decode_gaussians(
+                archive.chunk(photara::project::ChunkType::gaussians));
         }
         const unsigned export_degree =
             std::min(model.sh_degree,
@@ -1376,8 +1376,8 @@ void export_trained_model(App& app) {
             set_message(app, "Exported splat", theme::success);
             return;
         }
-        aetherscan::splat::restrict_sh_degree(model, export_degree);
-        aetherscan::splat::save_gaussians(model, out, format);
+        photara::splat::restrict_sh_degree(model, export_degree);
+        photara::splat::save_gaussians(model, out, format);
         app.settings.splat_format =
             splat_settings_format_from_export(app.splat_export.format);
         std::string message = "Exported splat (SH ";
@@ -1434,13 +1434,13 @@ std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
 std::filesystem::path ensure_textured_stem(App& app) {
     if (textured_mesh_on_disk(app.layout.working_texture))
         return app.layout.working_texture;
-#if defined(AETHERSCAN_HAS_TEXTURE)
+#if defined(PHOTARA_HAS_TEXTURE)
     if (!app.layout.project_file.empty()) {
         const auto archive =
-            aetherscan::project::Archive::open(app.layout.project_file);
-        if (archive.has(aetherscan::project::ChunkType::texture)) {
-            aetherscan::texture::decode_textured_obj(
-                archive.chunk(aetherscan::project::ChunkType::texture),
+            photara::project::Archive::open(app.layout.project_file);
+        if (archive.has(photara::project::ChunkType::texture)) {
+            photara::texture::decode_textured_obj(
+                archive.chunk(photara::project::ChunkType::texture),
                 app.layout.working_texture);
             refresh_artifacts(app);
             if (textured_mesh_on_disk(app.layout.working_texture))
@@ -1451,15 +1451,15 @@ std::filesystem::path ensure_textured_stem(App& app) {
     return {};
 }
 
-aetherscan::mvs::Mesh load_geometry_mesh(App& app) {
+photara::mvs::Mesh load_geometry_mesh(App& app) {
     const auto ply = existing_mesh_path(app);
-    if (!ply.empty()) return aetherscan::mvs::load_mesh_ply(ply);
+    if (!ply.empty()) return photara::mvs::load_mesh_ply(ply);
     if (!app.layout.project_file.empty()) {
         const auto archive =
-            aetherscan::project::Archive::open(app.layout.project_file);
-        if (archive.has(aetherscan::project::ChunkType::mesh))
-            return aetherscan::mvs::decode_mesh(
-                archive.chunk(aetherscan::project::ChunkType::mesh));
+            photara::project::Archive::open(app.layout.project_file);
+        if (archive.has(photara::project::ChunkType::mesh))
+            return photara::mvs::decode_mesh(
+                archive.chunk(photara::project::ChunkType::mesh));
     }
     if (app.mesh.has()) return preview_mesh_to_mvs(app.mesh);
     const auto textured = ensure_textured_stem(app);
@@ -1474,17 +1474,17 @@ aetherscan::mvs::Mesh load_geometry_mesh(App& app) {
 void export_textured_obj_files(
     App& app, const std::filesystem::path& destination_stem) {
     const auto source = ensure_textured_stem(app);
-#if defined(AETHERSCAN_HAS_TEXTURE)
+#if defined(PHOTARA_HAS_TEXTURE)
     if (!source.empty()) {
-        aetherscan::texture::copy_textured_obj(source, destination_stem);
+        photara::texture::copy_textured_obj(source, destination_stem);
         return;
     }
     if (!app.layout.project_file.empty()) {
         const auto archive =
-            aetherscan::project::Archive::open(app.layout.project_file);
-        if (archive.has(aetherscan::project::ChunkType::texture)) {
-            aetherscan::texture::decode_textured_obj(
-                archive.chunk(aetherscan::project::ChunkType::texture),
+            photara::project::Archive::open(app.layout.project_file);
+        if (archive.has(photara::project::ChunkType::texture)) {
+            photara::texture::decode_textured_obj(
+                archive.chunk(photara::project::ChunkType::texture),
                 destination_stem);
             return;
         }
@@ -1511,8 +1511,8 @@ void export_textured_glb(
     if (!loaded.ok)
         throw std::runtime_error(
             loaded.error.empty() ? "Textured mesh has no faces" : loaded.error);
-    aetherscan::mvs::Mesh mesh = preview_mesh_to_mvs(loaded.mesh);
-    std::vector<aetherscan::mvs::Vec2f> uvs;
+    photara::mvs::Mesh mesh = preview_mesh_to_mvs(loaded.mesh);
+    std::vector<photara::mvs::Vec2f> uvs;
     if (loaded.mesh.uvs.size() == loaded.mesh.vertices.size()) {
         uvs.reserve(loaded.mesh.uvs.size());
         for (const Vec2& uv : loaded.mesh.uvs)
@@ -1521,7 +1521,7 @@ void export_textured_glb(
     const auto png_path = loaded.mesh.albedo_path.empty()
         ? textured_albedo_path(source)
         : loaded.mesh.albedo_path;
-    aetherscan::io::save_mesh_glb(
+    photara::io::save_mesh_glb(
         mesh, destination, uvs, read_file_bytes(png_path));
 }
 
@@ -1574,16 +1574,16 @@ void export_mesh_file(App& app) {
                 set_message(app, "Exported mesh", theme::success);
                 return;
             }
-            aetherscan::mvs::save_mesh_ply(load_geometry_mesh(app), out);
+            photara::mvs::save_mesh_ply(load_geometry_mesh(app), out);
             set_message(app, "Exported mesh", theme::success);
             return;
         }
         if (format == MeshExportFormat::obj) {
-            aetherscan::mvs::save_mesh_obj(load_geometry_mesh(app), out);
+            photara::mvs::save_mesh_obj(load_geometry_mesh(app), out);
             set_message(app, "Exported mesh", theme::success);
             return;
         }
-        aetherscan::io::save_mesh_glb(load_geometry_mesh(app), out);
+        photara::io::save_mesh_glb(load_geometry_mesh(app), out);
         set_message(app, "Exported mesh", theme::success);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
@@ -1648,7 +1648,7 @@ void pack_mesh_gpu_buffers(App& app) {
     if (!app.mesh.albedo_path.empty()) {
         try {
             app.mesh_renderer.set_albedo(
-                aetherscan::io::load_rgb(app.mesh.albedo_path));
+                photara::io::load_rgb(app.mesh.albedo_path));
         } catch (...) {
             app.mesh_renderer.set_albedo({});
         }
@@ -1744,13 +1744,13 @@ void show_mesh_view(App& app, const bool frame_when_ready) {
     request_mesh_load(app, frame_when_ready);
 }
 
-aetherscan::splat::VisualizeOptions editor_visualize_options(const App& app) {
-    aetherscan::splat::VisualizeOptions options;
+photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
+    photara::splat::VisualizeOptions options;
     options.mode = app.view_mode == VisualizationMode::points
-        ? aetherscan::splat::VisualizationMode::points
+        ? photara::splat::VisualizationMode::points
         : app.view_mode == VisualizationMode::rings
-            ? aetherscan::splat::VisualizationMode::rings
-            : aetherscan::splat::VisualizationMode::splat;
+            ? photara::splat::VisualizationMode::rings
+            : photara::splat::VisualizationMode::splat;
     options.point_size_px = app.view_options.point_size;
     options.ring_scale = app.view_options.ring_scale;
     return options;
@@ -1758,7 +1758,7 @@ aetherscan::splat::VisualizeOptions editor_visualize_options(const App& app) {
 
 void write_preview_vis(App& app) {
     if (app.layout.preview_vis_file.empty()) return;
-    aetherscan::splat::write_visualization_sidecar(
+    photara::splat::write_visualization_sidecar(
         app.layout.preview_vis_file, editor_visualize_options(app),
         app.preview_camera_revision);
 }
@@ -1810,15 +1810,15 @@ void apply_opened_project(App& app) {
     refresh_artifacts(app);
     try {
         const auto archive =
-            aetherscan::project::Archive::open(app.layout.project_file);
-        apply_project_settings(app, aetherscan::project::read_settings(archive));
+            photara::project::Archive::open(app.layout.project_file);
+        apply_project_settings(app, photara::project::read_settings(archive));
         refresh_artifacts(app);
-#if defined(AETHERSCAN_HAS_TEXTURE)
-        if (archive.has(aetherscan::project::ChunkType::texture) &&
+#if defined(PHOTARA_HAS_TEXTURE)
+        if (archive.has(photara::project::ChunkType::texture) &&
             !textured_mesh_on_disk(app.layout.working_texture)) {
             try {
-                aetherscan::texture::decode_textured_obj(
-                    archive.chunk(aetherscan::project::ChunkType::texture),
+                photara::texture::decode_textured_obj(
+                    archive.chunk(photara::project::ChunkType::texture),
                     app.layout.working_texture);
                 refresh_artifacts(app);
             } catch (...) {
@@ -1845,7 +1845,7 @@ void apply_opened_project(App& app) {
 void select_project_folder(App& app) {
     if (app.job.running() || app.loading_scene) return;
     if (!pick_project_file(
-            L"Open AetherScan Project", app.settings.project_dir, false))
+            L"Open Photara Project", app.settings.project_dir, false))
         return;
     apply_opened_project(app);
 }
@@ -1902,9 +1902,9 @@ void open_asfm_from_path(App& app, const std::filesystem::path& asfm) {
         try {
             refresh_artifacts(app);
             const auto archive =
-                aetherscan::project::Archive::open(app.layout.project_file);
+                photara::project::Archive::open(app.layout.project_file);
             apply_project_settings(
-                app, aetherscan::project::read_settings(archive));
+                app, photara::project::read_settings(archive));
         } catch (...) {
         }
     } else {
@@ -1928,7 +1928,7 @@ void open_asfm_from_path(App& app, const std::filesystem::path& asfm) {
 void save_project_as(App& app) {
     if (app.job.running()) return;
     if (!pick_project_file(
-            L"Save AetherScan Project", app.settings.project_dir, true))
+            L"Save Photara Project", app.settings.project_dir, true))
         return;
     {
         std::filesystem::path path =
@@ -2007,12 +2007,12 @@ void delete_reconstruction_results(App& app) {
         try {
             if (std::filesystem::exists(app.layout.project_file)) {
                 auto archive =
-                    aetherscan::project::Archive::open(app.layout.project_file);
-                archive.erase_chunk(aetherscan::project::ChunkType::sfm);
-                archive.erase_chunk(aetherscan::project::ChunkType::gaussians);
-                archive.erase_chunk(aetherscan::project::ChunkType::mesh);
-                archive.erase_chunk(aetherscan::project::ChunkType::texture);
-                aetherscan::project::write_settings(
+                    photara::project::Archive::open(app.layout.project_file);
+                archive.erase_chunk(photara::project::ChunkType::sfm);
+                archive.erase_chunk(photara::project::ChunkType::gaussians);
+                archive.erase_chunk(photara::project::ChunkType::mesh);
+                archive.erase_chunk(photara::project::ChunkType::texture);
+                photara::project::write_settings(
                     archive, collect_project_settings(app),
                     app.layout.project_file);
                 archive.save(app.layout.project_file);
@@ -2039,7 +2039,7 @@ void delete_reconstruction_results(App& app) {
 
     // The live sfm.bin and preview sidecars live in a per-project namespace:
     // <cache root>/<project-hash> when a cache folder is configured, otherwise
-    // %TEMP%/AetherScan/<project-hash>. Delete that exact namespaced directory
+    // %TEMP%/Photara/<project-hash>. Delete that exact namespaced directory
     // as well; leaving it behind makes refresh_artifacts() resurrect the
     // supposedly deleted scene. The project-adjacent default is covered by the
     // .cache check above.
@@ -2047,7 +2047,7 @@ void delete_reconstruction_results(App& app) {
         app.layout.working_sfm.parent_path().lexically_normal();
     std::error_code temp_error;
     const std::filesystem::path temp_root =
-        (std::filesystem::temp_directory_path(temp_error) / "AetherScan")
+        (std::filesystem::temp_directory_path(temp_error) / "Photara")
             .lexically_normal();
     const std::filesystem::path configured_root =
         path_from_utf8_field(app.settings.cache_dir.data()).lexically_normal();
@@ -2185,9 +2185,9 @@ void poll_align_live(App& app) {
     const bool aligning = alignment_job_running(app);
     if (!aligning) return;
 
-    aetherscan::sfm::AlignLiveFrame frame;
+    photara::sfm::AlignLiveFrame frame;
     const bool have_live =
-        aetherscan::sfm::load_align_live_frame(app.layout.align_live, frame);
+        photara::sfm::load_align_live_frame(app.layout.align_live, frame);
     if (have_live &&
         (frame.revision != app.align_live.revision ||
          frame.kind != app.align_live.kind ||
@@ -2200,9 +2200,9 @@ void poll_align_live(App& app) {
         const Stage stage = app.monitor.stage();
         const bool follow_pair =
             stage == Stage::matching &&
-            aetherscan::sfm::is_live_pair_kind(app.align_live.kind);
+            photara::sfm::is_live_pair_kind(app.align_live.kind);
         const bool follow_features =
-            app.align_live.kind == aetherscan::sfm::AlignLiveKind::features &&
+            app.align_live.kind == photara::sfm::AlignLiveKind::features &&
             (stage == Stage::features || stage == Stage::preparing ||
              stage == Stage::matching);
         if ((follow_pair || follow_features) && app.align_live.index_a >= 0) {
@@ -2218,8 +2218,8 @@ void poll_align_live(App& app) {
     if (app.alignment_workspace_user_override) return;
     const Stage stage = app.monitor.stage();
     const bool live_2d =
-        app.align_live.kind == aetherscan::sfm::AlignLiveKind::features ||
-        aetherscan::sfm::is_live_pair_kind(app.align_live.kind);
+        app.align_live.kind == photara::sfm::AlignLiveKind::features ||
+        photara::sfm::is_live_pair_kind(app.align_live.kind);
     refresh_image_qa_folder(app.image_qa, reconstruction_images_path(app));
     const int count = image_qa_count(app.image_qa, app.scene);
     if ((stage == Stage::features || stage == Stage::matching) &&
@@ -2318,7 +2318,7 @@ void start_align(App& app) {
         }
         const auto frames = reconstruction_images_path(app);
         if (!directory_has_images(frames) &&
-            !aetherscan::io::ffmpeg_available()) {
+            !photara::io::ffmpeg_available()) {
             set_message(
                 app,
                 "ffmpeg was not found. Install ffmpeg and add it to PATH.",
@@ -2353,7 +2353,7 @@ void start_align(App& app) {
         app.log.open(app.layout.align_log);
         app.job.start(
             build_align_command(
-                AETHERSCAN_CLI_PATH, app.settings, app.layout),
+                PHOTARA_CLI_PATH, app.settings, app.layout),
             app.layout.align_log);
         app.active_job = JobKind::align;
         // Drop the previous cloud so the next frame only shows this run.
@@ -2457,8 +2457,8 @@ void start_export_sfm(App& app) {
             if (std::filesystem::exists(app.layout.working_sfm, exists_error)) {
                 const auto scene = load_working_sfm(
                     app.layout.working_sfm, reconstruction_images_path(app));
-                aetherscan::sfm::save_asfm(scene, app.layout.sparse_asfm);
-                aetherscan::sfm::export_openmvs_interface(
+                photara::sfm::save_asfm(scene, app.layout.sparse_asfm);
+                photara::sfm::export_openmvs_interface(
                     scene, app.layout.sparse_mvs);
                 refresh_artifacts(app);
                 set_message(
@@ -2471,11 +2471,11 @@ void start_export_sfm(App& app) {
             std::error_code exists_error;
             if (std::filesystem::exists(app.layout.project_file, exists_error)) {
                 const auto archive =
-                    aetherscan::project::Archive::open(app.layout.project_file);
-                const auto scene = aetherscan::project::read_sfm(archive);
+                    photara::project::Archive::open(app.layout.project_file);
+                const auto scene = photara::project::read_sfm(archive);
                 if (scene) {
-                    aetherscan::sfm::save_asfm(*scene, app.layout.sparse_asfm);
-                    aetherscan::sfm::export_openmvs_interface(
+                    photara::sfm::save_asfm(*scene, app.layout.sparse_asfm);
+                    photara::sfm::export_openmvs_interface(
                         *scene, app.layout.sparse_mvs);
                     refresh_artifacts(app);
                     set_message(
@@ -2489,7 +2489,7 @@ void start_export_sfm(App& app) {
         app.log.open(app.layout.export_log);
         app.job.start(
             build_export_sfm_command(
-                AETHERSCAN_CLI_PATH, app.settings, app.layout),
+                PHOTARA_CLI_PATH, app.settings, app.layout),
             app.layout.export_log);
         app.active_job = JobKind::export_sfm;
         set_message(app, "Exporting SfM alignment...", theme::accent);
@@ -2513,7 +2513,7 @@ bool alignment_mvs_supported(const App& app) {
     return true;
 }
 
-std::optional<aetherscan::sfm::Scene> load_alignment_scene(const App& app) {
+std::optional<photara::sfm::Scene> load_alignment_scene(const App& app) {
     std::error_code error;
     if (!app.layout.working_sfm.empty() &&
         std::filesystem::exists(app.layout.working_sfm, error)) {
@@ -2523,8 +2523,8 @@ std::optional<aetherscan::sfm::Scene> load_alignment_scene(const App& app) {
     if (!app.layout.project_file.empty() &&
         std::filesystem::exists(app.layout.project_file, error)) {
         const auto archive =
-            aetherscan::project::Archive::open(app.layout.project_file);
-        return aetherscan::project::read_sfm(archive);
+            photara::project::Archive::open(app.layout.project_file);
+        return photara::project::read_sfm(archive);
     }
     return std::nullopt;
 }
@@ -2685,17 +2685,17 @@ void export_alignment(App& app) {
         }
 
         if (format == AlignmentExportFormat::asfm)
-            aetherscan::sfm::save_asfm(*scene, out);
+            photara::sfm::save_asfm(*scene, out);
         else if (format == AlignmentExportFormat::colmap)
-            aetherscan::sfm::save_colmap_text(
+            photara::sfm::save_colmap_text(
                 *scene, out, images, write_ply);
         else if (format == AlignmentExportFormat::nerfstudio)
-            aetherscan::sfm::save_nerfstudio_transforms(
+            photara::sfm::save_nerfstudio_transforms(
                 *scene, out, images, ply);
         else
-            aetherscan::sfm::export_openmvs_interface(*scene, out);
+            photara::sfm::export_openmvs_interface(*scene, out);
 
-        if (write_ply) aetherscan::sfm::save_sparse_ply(*scene, ply);
+        if (write_ply) photara::sfm::save_sparse_ply(*scene, ply);
         refresh_artifacts(app);
         const char* label = format == AlignmentExportFormat::colmap
             ? "COLMAP"
@@ -2744,7 +2744,7 @@ void start_splat_view(App& app) {
     try {
         app.viewer.start(
             build_view_command(
-                AETHERSCAN_CLI_PATH, app.settings, app.layout, handles),
+                PHOTARA_CLI_PATH, app.settings, app.layout, handles),
             app.layout.view_log);
     } catch (const std::exception& failure) {
         set_message(app, failure.what(), theme::danger);
@@ -2808,7 +2808,7 @@ void start_train(App& app, const bool smoke) {
         // Fixed COLMAP dataset used only by --interop-smoke.
         std::ostringstream smoke_command;
         smoke_command
-            << '"' << AETHERSCAN_CLI_PATH << "\" --images \""
+            << '"' << PHOTARA_CLI_PATH << "\" --images \""
             << app.settings.images_dir.data() << "\" --output \""
             << app.layout.model_output.string()
             << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
@@ -2835,7 +2835,7 @@ void start_train(App& app, const bool smoke) {
         command = smoke_command.str();
     } else {
         command = build_train_command(
-            AETHERSCAN_CLI_PATH, app.settings, app.layout, handles);
+            PHOTARA_CLI_PATH, app.settings, app.layout, handles);
     }
 
     try {
@@ -2895,7 +2895,7 @@ void start_dense(App& app) {
         app.log.open(app.layout.dense_log);
         app.job.start(
             build_dense_command(
-                AETHERSCAN_CLI_PATH, app.settings, app.layout),
+                PHOTARA_CLI_PATH, app.settings, app.layout),
             app.layout.dense_log);
         app.active_job = JobKind::dense;
         set_message(
@@ -2938,7 +2938,7 @@ void start_texture(App& app) {
     if (!mesh.empty() && !app.layout.working_mesh.empty() &&
         mesh != app.layout.working_mesh)
         copy_existing_file(mesh, app.layout.working_mesh);
-#if !defined(AETHERSCAN_HAS_TEXTURE)
+#if !defined(PHOTARA_HAS_TEXTURE)
     set_message(
         app,
         "This build was compiled without texture baking (Vulkan + aether_drender)",
@@ -2964,7 +2964,7 @@ void start_texture(App& app) {
         app.log.open(app.layout.texture_log);
         app.job.start(
             build_texture_command(
-                AETHERSCAN_CLI_PATH, app.settings, app.layout),
+                PHOTARA_CLI_PATH, app.settings, app.layout),
             app.layout.texture_log);
         app.active_job = JobKind::texture;
         set_message(

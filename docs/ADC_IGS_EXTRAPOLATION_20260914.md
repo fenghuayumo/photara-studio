@@ -62,6 +62,6 @@
 
 ## 构建与回归
 
-正式训练改动仅在 `aetherscan/src/splat/densification_adc_plus.cpp`：IGS 的窗口平均误差分数经既有 ADC+ 投影面积修正，再用于后续选择。没有修改 ADC+ 本身的选择路径，也没有新增正式训练参数。评估器与报告脚本增加外推诊断，`experiments/igs_camera_audit.py` 提供相机邻域统计。
+正式训练改动仅在 `photara/src/splat/densification_adc_plus.cpp`：IGS 的窗口平均误差分数经既有 ADC+ 投影面积修正，再用于后续选择。没有修改 ADC+ 本身的选择路径，也没有新增正式训练参数。评估器与报告脚本增加外推诊断，`experiments/igs_camera_audit.py` 提供相机邻域统计。
 
 Release CLI、编辑器和评估器已构建；完整 splat 测试通过（`artifacts/igs_freespace_20260914/selected_tests.log`）。此前一次与 GPU 训练同时运行的完整测试出现既有 `asynchronous neighbour changed supervision` 失败，空闲 GPU 上复测通过，缓存同步代码未修改。本次不将训练日志时间用于严格速度对比。

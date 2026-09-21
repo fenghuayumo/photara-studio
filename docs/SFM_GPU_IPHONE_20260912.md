@@ -100,11 +100,11 @@ CPU↔CPU 接近逐位一致；CPU↔CUDA 的差异来自 GPU 浮点归约顺序
 CLI 和 Editor Release 构建成功。BA、two_view、mapping、checkpoint 四项 CTest 通过；CUDA Compute Sanitizer memcheck 为 **0 errors**。新增回归覆盖共享/多组内参、独立代价核验、不同拓扑重复上传、PCG 上限以及串/并行着色一致性（包含坐标缩放、缺失照片、无效特征和越界采样）。
 
 ```powershell
-build/aetherscan/Release/aetherscan.exe --images 'D:\BaiduNetdiskDownload\室内iphone\images' --output artifacts/sfm_gpu_iphone_20260912/new.asfm --cache-dir artifacts/sfm_gpu_iphone_20260912/cache_new --camera-model auto --mode global --max-features 6000 --window 6
+build/photara/Release/photara.exe --images 'D:\BaiduNetdiskDownload\室内iphone\images' --output artifacts/sfm_gpu_iphone_20260912/new.asfm --cache-dir artifacts/sfm_gpu_iphone_20260912/cache_new --camera-model auto --mode global --max-features 6000 --window 6
 python experiments/compare_sfm_runs.py --before artifacts/sfm_gpu_iphone_20260912/before.log --after artifacts/sfm_gpu_iphone_20260912/final.log --output artifacts/sfm_gpu_iphone_20260912/comparison_new.json
-build/aetherscan/Release/aetherscan_ba_benchmark.exe --cameras 739 --points 200000 --observations-per-point 6 --iterations 2 --gpu-solver-iterations 20 --gpu-intrinsics 1
-ctest --test-dir build -C Release -R 'aetherscan\.(ba\.optimizer|sfm\.(mapping|two_view|checkpoint))$' --output-on-failure
-compute-sanitizer --tool memcheck --error-exitcode 99 build/aetherscan/Release/aetherscan_ba_test.exe
+build/photara/Release/photara_ba_benchmark.exe --cameras 739 --points 200000 --observations-per-point 6 --iterations 2 --gpu-solver-iterations 20 --gpu-intrinsics 1
+ctest --test-dir build -C Release -R 'photara\.(ba\.optimizer|sfm\.(mapping|two_view|checkpoint))$' --output-on-failure
+compute-sanitizer --tool memcheck --error-exitcode 99 build/photara/Release/photara_ba_test.exe
 ```
 
 `compare_sfm_runs.py` 要求对应 CLI 日志和同前缀的 `_sfm_diagnostics.csv`。它报告全部公共相机，不按误差剔除相机，不将较小注册子集伪装成整体精度提升。

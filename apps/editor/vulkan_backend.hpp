@@ -63,13 +63,13 @@ struct PreviewTexture {
     std::uint32_t height{};
 
     void reset();
-    void upload(const aetherscan::io::RgbImage& source);
+    void upload(const photara::io::RgbImage& source);
     // Copies the sampled image back to host RGB. Used by the 2D QA compare path.
     // When max_long_edge is non-zero the image is scaled down on the GPU first,
     // so the transfer and the host conversion only cover the pixels the caller
     // actually needs.
     bool download_rgb(
-        aetherscan::io::RgbImage& destination,
+        photara::io::RgbImage& destination,
         std::uint32_t max_long_edge = 0) const;
 };
 
@@ -93,7 +93,7 @@ struct CameraPhotoCache {
 private:
     struct Slot {
         PreviewTexture texture;
-        std::future<aetherscan::io::RgbImage> pending;
+        std::future<photara::io::RgbImage> pending;
         std::filesystem::path path;
         bool loading{};
         bool failed{};
@@ -167,7 +167,7 @@ public:
         const std::vector<float>& colours,
         const std::vector<std::uint32_t>& indices,
         const std::vector<float>& uvs = {});
-    void set_albedo(const aetherscan::io::RgbImage& atlas);
+    void set_albedo(const photara::io::RgbImage& atlas);
     bool draw(
         std::uint32_t width, std::uint32_t height,
         const MeshPreviewUniforms& uniforms);

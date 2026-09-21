@@ -147,7 +147,7 @@ constexpr Entry k_entries[] = {
     {"Writes", "将写入", "出力ファイル", "저장될 파일"},
     {"Export...", "导出...", "書き出し...", "내보내기..."},
     {"Export SfM Alignment", "导出 SfM 对齐", "SfM アライメントを書き出し", "SfM 정렬 내보내기"},
-    {"AetherScan ASFM", "AetherScan ASFM", "AetherScan ASFM", "AetherScan ASFM"},
+    {"Photara ASFM", "Photara ASFM", "Photara ASFM", "Photara ASFM"},
     {"COLMAP", "COLMAP", "COLMAP", "COLMAP"},
     {"Nerfstudio / Blender", "Nerfstudio / Blender", "Nerfstudio / Blender", "Nerfstudio / Blender"},
     {"OpenMVS", "OpenMVS", "OpenMVS", "OpenMVS"},
@@ -375,9 +375,9 @@ constexpr Entry k_entries[] = {
      "写真アライメントが最も鮮明な静止画を抽出し、SfM を実行します。",
      "사진 정렬이 가장 선명한 프레임을 추출한 뒤 SfM을 실행합니다."},
     {"Not found", "未找到", "見つかりません", "없음"},
-    {"Install ffmpeg and add it to PATH. AetherScan also "
+    {"Install ffmpeg and add it to PATH. Photara also "
      "looks next to the app and in common install folders.",
-     "请安装 ffmpeg 并将其加入 PATH。AetherScan 也会在程序旁及常见安装目录查找。",
+     "请安装 ffmpeg 并将其加入 PATH。Photara 也会在程序旁及常见安装目录查找。",
      "ffmpeg をインストールして PATH に追加してください。アプリ隣と一般的な導入先も検索します。",
      "ffmpeg를 설치하고 PATH에 추가하세요. 앱 옆과 일반적인 설치 폴더도 검색합니다."},
     {"Ready", "就绪", "準備完了", "준비됨"},
@@ -940,7 +940,7 @@ constexpr Entry k_entries[] = {
     {"Click an axis to change camera view", "点击坐标轴切换相机视角", "軸をクリックしてカメラ視点を変更", "축을 클릭해 카메라 시점을 바꿉니다"},
 
     // Window title / messages
-    {"AetherScan Reconstruction Editor", "AetherScan 重建编辑器", "AetherScan 再構成エディタ", "AetherScan 재구성 편집기"},
+    {"Photara Studio", "Photara Studio", "Photara Studio", "Photara Studio"},
     {"New project", "新项目", "新規プロジェクト", "새 프로젝트"},
     {"Image dataset selected; previous viewport result cleared",
      "已选择图像数据集；已清除先前视口结果",

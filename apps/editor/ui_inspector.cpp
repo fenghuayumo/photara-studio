@@ -18,8 +18,8 @@
 #include <string>
 #include <vector>
 
-#ifndef AETHERSCAN_CLI_PATH
-#define AETHERSCAN_CLI_PATH "aetherscan"
+#ifndef PHOTARA_CLI_PATH
+#define PHOTARA_CLI_PATH "photara"
 #endif
 
 namespace editor {
@@ -77,12 +77,12 @@ Action draw_inspector(App& app) {
             theme::caption(
                 "Align Photos extracts the sharpest stills, then runs SfM.");
             ImGui::PopTextWrapPos();
-            const auto ffmpeg = aetherscan::io::locate_ffmpeg();
+            const auto ffmpeg = photara::io::locate_ffmpeg();
             if (ffmpeg.empty()) {
                 theme::metric_coloured("ffmpeg", "Not found", theme::danger);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(
-                        "Install ffmpeg and add it to PATH. AetherScan also "
+                        "Install ffmpeg and add it to PATH. Photara also "
                         "looks next to the app and in common install folders.");
             } else {
                 theme::metric_coloured("ffmpeg", "Ready", theme::success);
@@ -258,7 +258,7 @@ Action draw_inspector(App& app) {
         theme::caption("Camera model");
         ImGui::SetNextItemWidth(-1.F);
         // Choice order is Auto / Pinhole / Fisheye / Panorama; the stored value
-        // mirrors aetherscan::CameraModel (2 = automatic, 3 = equirectangular).
+        // mirrors photara::CameraModel (2 = automatic, 3 = equirectangular).
         const char* camera_models[] = {
             tr("Auto"), tr("Pinhole"), tr("OpenCV Fisheye"),
             tr("Equirectangular 360")};
@@ -615,7 +615,7 @@ Action draw_inspector(App& app) {
             "photos with aether_drender, then optionally refine the atlas.");
         ImGui::PopTextWrapPos();
         ImGui::Spacing();
-#if !defined(AETHERSCAN_HAS_TEXTURE)
+#if !defined(PHOTARA_HAS_TEXTURE)
         theme::caption(
             "This build was compiled without texture baking (Vulkan + aether_drender).");
 #else
@@ -670,7 +670,7 @@ Action draw_inspector(App& app) {
                 std::error_code atlas_error;
                 if (std::filesystem::exists(albedo, atlas_error)) {
                     try {
-                        app.atlas_preview.upload(aetherscan::io::load_rgb(albedo));
+                        app.atlas_preview.upload(photara::io::load_rgb(albedo));
                     } catch (...) {
                         app.atlas_preview.reset();
                     }
@@ -747,7 +747,7 @@ Action draw_inspector(App& app) {
         const bool live_pair =
             alignment_job_running(app) &&
             app.monitor.stage() == Stage::matching &&
-            aetherscan::sfm::is_live_pair_kind(app.align_live.kind);
+            photara::sfm::is_live_pair_kind(app.align_live.kind);
         const int count = image_qa_count(app.image_qa, app.scene);
         if (live_pair) {
             const auto& live = app.align_live;
@@ -760,7 +760,7 @@ Action draw_inspector(App& app) {
             theme::metric("A", name_a.c_str());
             theme::metric("B", name_b.c_str());
             theme::metric(
-                live.kind == aetherscan::sfm::AlignLiveKind::inliers
+                live.kind == photara::sfm::AlignLiveKind::inliers
                     ? tr("inliers")
                     : tr("matches"),
                 std::to_string(live.total_matches).c_str());

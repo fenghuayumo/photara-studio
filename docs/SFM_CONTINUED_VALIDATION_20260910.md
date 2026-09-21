@@ -2,7 +2,7 @@
 
 后续弱连接恢复修改及最终版本冷启动结果见 [2026-09-11 恢复验证](SFM_RECOVERY_VALIDATION_20260911.md)。下文保留本轮历史结果。
 
-本轮在工作区已有 v9 改动之上修复共享内参更新后的候选姿态评分，并重新运行真实图像实验。没有向 AetherScan 输入 COLMAP 的焦距、畸变、姿态、特征或三维点。保留此前工作区的其他修改。
+本轮在工作区已有 v9 改动之上修复共享内参更新后的候选姿态评分，并重新运行真实图像实验。没有向 Photara 输入 COLMAP 的焦距、畸变、姿态、特征或三维点。保留此前工作区的其他修改。
 
 ## 算法修改
 
@@ -14,7 +14,7 @@
 
 输入为已有 `alameda_tail64/images`，DSC06988–DSC07051 共 64 张原始鱼眼照片；参考是已保存的、独立运行的 COLMAP OPENCV_FISHEYE incremental mapper 64/64 结果。
 
-三次 AetherScan 均注册 38/64，但具体相机集合不同。下表仅对三次共同注册的 **29 张固定相机**进行一次正尺度、无反射 Sim(3)；没有按误差剔除相机。这是固定集合几何诊断，不替代全部 64 张的注册验收。
+三次 Photara 均注册 38/64，但具体相机集合不同。下表仅对三次共同注册的 **29 张固定相机**进行一次正尺度、无反射 Sim(3)；没有按误差剔除相机。这是固定集合几何诊断，不替代全部 64 张的注册验收。
 
 | 版本 | 固定公共相机 | 位置 P95 / 最大（参考半径 %） | 旋转 P95 / 最大（°） |
 |---|---:|---:|---:|
@@ -30,7 +30,7 @@
 
 ## 回归与全量
 
-所有本轮 AetherScan 运行均为新输出名和新缓存，参数 `--camera-model auto --mode global --max-features 6000 --window 6`。全部同名已注册相机参与各自对照的 Sim(3)。位置百分比为相机中心差异除以参考相机中心 RMS 半径，不能换算为厘米；不同子集半径不同，也不能横向当作同一绝对误差。
+所有本轮 Photara 运行均为新输出名和新缓存，参数 `--camera-model auto --mode global --max-features 6000 --window 6`。全部同名已注册相机参与各自对照的 Sim(3)。位置百分比为相机中心差异除以参考相机中心 RMS 半径，不能换算为厘米；不同子集半径不同，也不能横向当作同一绝对误差。
 
 | 数据 | 注册 | 位置 P95（参考半径 %） | 旋转 P95（°） | 自身观测 RMS（px） | 工程门槛 |
 |---|---:|---:|---:|---:|---|
@@ -51,7 +51,7 @@
 
 前 64 和独立 128 使用此前新跑的原始鱼眼 COLMAP 子集参考；Chuan 使用已有模型。全量主要对照仍为旧去畸变序列的 1734 张参考，名字映射与来源见 2026-09-09 报告。
 
-额外核查了已完成的原始鱼眼全量 COLMAP `global_mapper` 模型（1742 张）。它与旧全量参考在全部 1734 张公共相机上的位置 P95 差异为 83.140%、最大 2048.738%，最大离群为 DSC07958；旋转 P95 为 2.304°。不删除离群点、不以它替换主要参考，也不把它称作可靠真值。该模型匹配候选含 AetherScan 检索的图像对名称及更宽序列邻域，特征、匹配和重建由 COLMAP 独立计算；它不是完全独立的候选对检索实验。
+额外核查了已完成的原始鱼眼全量 COLMAP `global_mapper` 模型（1742 张）。它与旧全量参考在全部 1734 张公共相机上的位置 P95 差异为 83.140%、最大 2048.738%，最大离群为 DSC07958；旋转 P95 为 2.304°。不删除离群点、不以它替换主要参考，也不把它称作可靠真值。该模型匹配候选含 Photara 检索的图像对名称及更宽序列邻域，特征、匹配和重建由 COLMAP 独立计算；它不是完全独立的候选对检索实验。
 
 困难局部 COLMAP 64 张与旧全量参考也不完全一致：全部 64 张的一次 Sim(3) 后位置 P95 为 35.012%、旋转 P95 为 7.592°。在首次修改后保留的 38 张上单独诊断，两参考位置 P95 为 0.836%、旋转 P95 为 0.698°；这说明局部不同连接部分之间仍有明显争议，不能据某一个参考断言全部相机的物理精度。
 
@@ -66,7 +66,7 @@
 复现局部实验（输出名必须新建）：
 
 ```powershell
-python experiments/run_sfm_acceptance.py --exe build/aetherscan/Release/aetherscan.exe --images artifacts/sfm_product_validation_20260909/alameda_tail64/images --reference artifacts/sfm_product_validation_20260909/colmap_tail64/sparse/0 --output-dir artifacts/sfm_validation_20260910 --name tail64_new --timeout-seconds 600 -- --camera-model auto --mode global --max-features 6000 --window 6
+python experiments/run_sfm_acceptance.py --exe build/photara/Release/photara.exe --images artifacts/sfm_product_validation_20260909/alameda_tail64/images --reference artifacts/sfm_product_validation_20260909/colmap_tail64/sparse/0 --output-dir artifacts/sfm_validation_20260910 --name tail64_new --timeout-seconds 600 -- --camera-model auto --mode global --max-features 6000 --window 6
 ```
 
 后续重点是弱连接相机的独立深度与跨段约束，以及参考模型之间的局部几何争议。本轮没有解决困难子集的 26 张未注册问题。

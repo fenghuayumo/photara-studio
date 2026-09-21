@@ -406,7 +406,7 @@ void sync_live_preview_camera(
     const auto vis = editor_visualize_options(app);
     write_preview_camera_file(
         app.layout.preview_camera_file, preview, app.preview_camera_revision,
-        aetherscan::splat::visualization_mode_name(vis.mode),
+        photara::splat::visualization_mode_name(vis.mode),
         vis.point_size_px, vis.ring_scale);
     // The shared camera sidecar now describes the orbit camera, not the QA
     // capture pose; drop the QA freshness marker until it is rewritten.
@@ -507,11 +507,11 @@ void sync_qa_preview_camera(App& app) {
     app.qa_camera_timeline = gpu::consumed_timeline_value();
     app.qa_camera_valid = true;
     write_preview_view_index(app.layout, app.preview_view);
-    aetherscan::splat::VisualizeOptions vis;
-    vis.mode = aetherscan::splat::VisualizationMode::splat;
+    photara::splat::VisualizeOptions vis;
+    vis.mode = photara::splat::VisualizationMode::splat;
     vis.point_size_px = app.view_options.point_size;
     vis.ring_scale = app.view_options.ring_scale;
-    aetherscan::splat::write_visualization_sidecar(
+    photara::splat::write_visualization_sidecar(
         app.layout.preview_vis_file, vis, app.preview_camera_revision);
     app.qa_metrics_after =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(220);
@@ -538,7 +538,7 @@ void capture_qa_render(App& app) {
         app.image_qa.metrics_dirty = false;
         return;
     }
-    aetherscan::io::RgbImage render;
+    photara::io::RgbImage render;
     if (!app.preview.display.download_rgb(render, k_image_qa_metric_extent))
         return;
     app.image_qa_session.set_render(
@@ -1054,7 +1054,7 @@ void draw_viewport_panel(App& app) {
         else if (alignment_job_running(app) &&
                  app.monitor.stage() == Stage::matching)
             state = app.align_live.kind ==
-                    aetherscan::sfm::AlignLiveKind::inliers
+                    photara::sfm::AlignLiveKind::inliers
                 ? tr("Verified pairs")
                 : tr("Matching views");
         else
@@ -1097,12 +1097,12 @@ void draw_viewport_panel(App& app) {
         input.has_model = app.has_model;
         input.external_alignment = has_external_dataset(app);
         if (alignment_job_running(app) &&
-            app.align_live.kind != aetherscan::sfm::AlignLiveKind::none) {
+            app.align_live.kind != photara::sfm::AlignLiveKind::none) {
             const Stage stage = app.monitor.stage();
             const auto kind = app.align_live.kind;
-            const bool pair = aetherscan::sfm::is_live_pair_kind(kind);
+            const bool pair = photara::sfm::is_live_pair_kind(kind);
             const bool features =
-                kind == aetherscan::sfm::AlignLiveKind::features;
+                kind == photara::sfm::AlignLiveKind::features;
             if (pair && stage == Stage::matching) {
                 input.live = &app.align_live;
                 input.pair_session = &app.align_match_session;

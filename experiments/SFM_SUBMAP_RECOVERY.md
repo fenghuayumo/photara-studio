@@ -6,7 +6,7 @@
 
 ## 实现与接受条件
 
-`aetherscan_sfm_realign` 只读加载明确指定的 reconstruction checkpoint，先执行原有最终观测筛查和结构审计，冻结主体相机名单，再按非主体相机之间的有效配对连接提取候选子图。不会自动将后来恢复的支路作为其他支路的对齐基准。
+`photara_sfm_realign` 只读加载明确指定的 reconstruction checkpoint，先执行原有最终观测筛查和结构审计，冻结主体相机名单，再按非主体相机之间的有效配对连接提取候选子图。不会自动将后来恢复的支路作为其他支路的对齐基准。
 
 - 子图仅复制关键点、内部已验证配对和当前内参；清空原位姿、三维点、tracks 和注册状态，重新建立 tracks、执行 star 初始化和增量注册。内参固定，因此这是独立的局部几何求解，不是独立的相机标定或前端重新匹配。
 - 主体侧深度从至少两个不同主体相机的观测重新三角化，不使用旧三维点坐标，也不使用支路相机求主体深度。最小视差 1°，最大重投影误差 2 px；重合视点无法提供深度。共享点同时利用原轨迹观测身份及有效边界配对，拒绝非一对一关联。
@@ -43,8 +43,8 @@
 ## 复现
 
 ```powershell
-cmake --build build --config Release --target aetherscan_sfm_realign aetherscan_submap_recovery_test -j 4
-build/aetherscan/Release/aetherscan_sfm_realign.exe `
+cmake --build build --config Release --target photara_sfm_realign photara_submap_recovery_test -j 4
+build/photara/Release/photara_sfm_realign.exe `
   artifacts/sfm_acceptance_20260905/cache/alameda/reconstruction-bdd89e87a4956da8.bin `
   artifacts/sfm_acceptance_20260905/alameda_submap_recovery_v3
 ctest --test-dir build -C Release --output-on-failure -R 'sfm.(submap_recovery|mapping|hierarchical)'

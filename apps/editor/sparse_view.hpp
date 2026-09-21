@@ -39,7 +39,7 @@ struct ImageFeature {
 struct ViewPose {
     std::string name;
     std::string camera_model{"Unknown"};
-    aetherscan::CameraModel model{aetherscan::CameraModel::pinhole};
+    photara::CameraModel model{photara::CameraModel::pinhole};
     std::filesystem::path image_path;
     Vec3 centre;
     std::array<float, 9> rotation{{1, 0, 0, 0, 1, 0, 0, 0, 1}};
@@ -135,9 +135,9 @@ SceneLoad load_sparse_scene(
 SceneLoad load_gaussian_scene(
     std::filesystem::path model, std::filesystem::path poses_csv);
 SceneLoad gaussian_scene_from_model(
-    const aetherscan::splat::GaussianModel& model,
+    const photara::splat::GaussianModel& model,
     std::filesystem::path poses_csv);
-SceneLoad sparse_scene_from_sfm(const aetherscan::sfm::Scene& scene, bool colour_from_photos = true);
+SceneLoad sparse_scene_from_sfm(const photara::sfm::Scene& scene, bool colour_from_photos = true);
 
 // Loads an external camera alignment dataset (COLMAP / RealityCapture /
 // OpenMVS) into editor view poses. The same reader order is used by the
@@ -222,7 +222,7 @@ bool camera_world_ray(
 
 // Rasterizer-facing camera matching splat::Camera (OpenCV +Z, Y-down, W2C
 // stored column-major), including model and fisheye coefficients.
-using SplatPreviewCamera = aetherscan::splat::Camera;
+using SplatPreviewCamera = photara::splat::Camera;
 
 const ViewPose* first_registered_view(const SparseScene& scene);
 

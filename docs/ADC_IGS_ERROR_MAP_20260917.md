@@ -77,7 +77,7 @@ ori 协议的轨迹噪声极大：同一构建同 seed 重复约 ±0.05 dB，**�
 - ori（seed 42，10k，cap 1M，10 视角外部评测）：IGS 25.6755 vs IGS+EM 25.6027
   （-0.07 dB，SSIM +0.001，高斯 +9.6% 至 700,663；selected_error_ratio ~1.07，
   重排几乎不改变实际增长的父节点集合）。
-- 办公室 900 视图（AetherScan SfM 缓存导出 COLMAP，30k，cap 3M，113 held-out）：
+- 办公室 900 视图（Photara SfM 缓存导出 COLMAP，30k，cap 3M，113 held-out）：
   IGS 25.6546 vs IGS+EM 25.6480（打平；EM 反而最早到 3M 上限 ~8.4k 步）。
 
 结论：维持**默认关闭**（options / CLI / 策略预设三处默认均已是 false）。

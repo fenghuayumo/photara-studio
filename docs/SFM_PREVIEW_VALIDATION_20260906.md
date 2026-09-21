@@ -44,7 +44,7 @@ C++ 映射与子图恢复测试通过，覆盖：独立深度恢复已知漂移�
 重跑时同时发生了编辑器编译及工作区其他活动，墙钟时间只能记录本次运行，不能作为隔离环境下的性能对照，更不能据此宣称达到 RealityScan 的质量或性能。
 
 ```powershell
-python experiments/run_sfm_acceptance.py --exe build/aetherscan/Release/aetherscan.exe `
+python experiments/run_sfm_acceptance.py --exe build/photara/Release/photara.exe `
   --images D:/Models/nyc/images_2 --reference D:/Models/nyc/sparse/0 `
   --output-dir artifacts/sfm_nyc_preview_20260906 --name nyc_rerun `
   --timeout-seconds 1200 -- --working-sfm artifacts/sfm_nyc_preview_20260906/rerun.bin
