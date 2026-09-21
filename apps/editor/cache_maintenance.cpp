@@ -143,6 +143,26 @@ CacheUsage scan_cache_usage(
             usage.folders.push_back(std::move(folder));
         }
     }
+    if (!current_dir.empty()) {
+        std::error_code error;
+        if (std::filesystem::is_directory(current_dir, error)) {
+            bool listed = false;
+            for (const auto& folder : usage.folders) {
+                if (same_directory(folder.path, current_dir)) {
+                    listed = true;
+                    break;
+                }
+            }
+            if (!listed) {
+                CacheFolder folder;
+                folder.path = current_dir;
+                measure_folder(folder.path, folder.bytes, folder.last_used);
+                folder.in_use = true;
+                usage.bytes += folder.bytes;
+                usage.folders.push_back(std::move(folder));
+            }
+        }
+    }
     return usage;
 }
 

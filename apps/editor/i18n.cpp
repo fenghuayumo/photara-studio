@@ -466,8 +466,10 @@ constexpr Entry k_entries[] = {
     {"folders", "个目录", "フォルダー", "폴더"},
     {"unused", "未使用", "未使用", "미사용"},
     {"days", "天", "日", "일"},
-    {"Refresh cache usage", "刷新占用", "使用量を更新", "사용량 새로 고침"},
+    {"Cache cleanup", "缓存清理", "キャッシュ整理", "캐시 정리"},
     {"Clean unused caches", "清理未使用缓存", "未使用キャッシュを削除", "미사용 캐시 정리"},
+    {"Auto-clean unused caches", "自动清理未使用缓存", "未使用キャッシュを自動削除", "미사용 캐시 자동 정리"},
+    {"days unused", "天未使用", "日未使用", "일 미사용"},
     {"Cleaned %zu cache folders, freed %s", "已清理 %zu 个缓存目录，释放 %s",
      "%zu 個のキャッシュを削除、%s を解放", "%zu개 캐시 폴더 정리, %s 확보"},
     {"Removes the working copies of datasets that are not open\n"

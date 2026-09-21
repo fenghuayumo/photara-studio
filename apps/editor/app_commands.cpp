@@ -825,6 +825,7 @@ void select_cache_folder(App& app) {
     clear_loaded_result(app);
     store_editor_cache_dir(app);
     refresh_artifacts(app);
+    app.cache_usage.valid = false;
     set_message(app, "Cache folder updated", theme::text_muted);
 }
 
