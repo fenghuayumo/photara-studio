@@ -39,6 +39,14 @@ enum sam3_model_type {
     SAM3_MODEL_EDGETAM     = 3,  // EdgeTAM (RepViT + Perceiver, no text/detector)
 };
 
+enum sam3_backend {
+    SAM3_BACKEND_AUTO = 0,
+    SAM3_BACKEND_CPU,
+    SAM3_BACKEND_CUDA,
+    SAM3_BACKEND_VULKAN,
+    SAM3_BACKEND_METAL,
+};
+
 /*****************************************************************************
 ** Public Data Types
 **
@@ -95,6 +103,8 @@ struct sam3_result {
 struct sam3_params {
     std::string model_path;
     int         n_threads       = 4;
+    sam3_backend backend        = SAM3_BACKEND_AUTO;
+    // Kept for source compatibility. AUTO uses CPU only when this is false.
     bool        use_gpu         = true;
     int         encode_img_size = 0;  // 0 = model default; override input resolution
 };
@@ -180,6 +190,9 @@ struct sam3_video_info {
 ** Returns nullptr on failure.
 */
 std::shared_ptr<sam3_model> sam3_load_model(const sam3_params & params);
+
+/* Returns the name of the backend selected for a loaded model. */
+const char * sam3_model_backend_name(const sam3_model & model);
 
 /* Free all resources held by a loaded model. */
 void sam3_free_model(sam3_model & model);

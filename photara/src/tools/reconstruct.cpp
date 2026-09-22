@@ -255,11 +255,12 @@ struct ReconstructCli {
     std::filesystem::path masks_dir;
     bool masks_auto{true};
     std::filesystem::path sam_model;
+    std::string sam_backend{"auto"};
     std::string sam_text;
     std::string sam_negative_text;
     bool sam_keep_prompted{true};
     bool sam_video{true};
-    int sam_max_size{1600};
+    int sam_max_size{0};
     bool sam_refresh{false};
     bool texture{false};
     bool delight{false};
@@ -996,6 +997,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("sam-model",
          "SAM 3 GGML checkpoint. Empty uses the Photara model cache",
          cxxopts::value<std::string>()->default_value(""))
+        ("sam-backend",
+         "SAM 3 backend: auto, cpu, cuda, vulkan, or metal",
+         cxxopts::value<std::string>()->default_value("auto"))
         ("sam-text",
          "SAM 3 prompt. Semicolons separate phrases. Generates masks before SfM",
          cxxopts::value<std::string>()->default_value(""))
@@ -1009,8 +1013,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Track the prompt across the ordered frames",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("sam-max-size",
-         "Longest side SAM sees; the mask is written at the source resolution",
-         cxxopts::value<int>()->default_value("1600"))
+         "SAM inference size (0 = checkpoint native); the mask is written at "
+         "the source resolution",
+         cxxopts::value<int>()->default_value("0"))
         ("sam-refresh",
          "Regenerate SAM masks even when the mask directory already has files",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -1449,6 +1454,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     const std::string sam_model_text = result["sam-model"].as<std::string>();
     if (!sam_model_text.empty())
         cli.sam_model = utf8_to_path(sam_model_text);
+    cli.sam_backend = result["sam-backend"].as<std::string>();
+    if (cli.sam_backend != "auto" && cli.sam_backend != "cpu" &&
+        cli.sam_backend != "cuda" && cli.sam_backend != "vulkan" &&
+        cli.sam_backend != "metal")
+        throw std::invalid_argument(
+            "--sam-backend must be auto, cpu, cuda, vulkan, or metal");
     cli.sam_text = result["sam-text"].as<std::string>();
     cli.sam_negative_text = result["sam-neg-text"].as<std::string>();
     cli.sam_keep_prompted = result["sam-keep-prompted"].as<bool>();
@@ -1962,6 +1973,7 @@ void ensure_sam_masks(ReconstructCli& cli) {
     }
     photara::sam::GenerateOptions options;
     options.model = cli.sam_model;
+    options.backend = cli.sam_backend;
     options.output_dir = output;
     options.images = list_still_images(cli.images_dir);
     options.text = cli.sam_text;

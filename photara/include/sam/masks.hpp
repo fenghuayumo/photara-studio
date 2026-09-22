@@ -17,11 +17,15 @@ struct GenerateOptions {
     std::vector<std::filesystem::path> images;
     std::string text;
     std::string negative_text;
+    // auto, cpu, cuda, vulkan, or metal.
+    std::string backend = "auto";
     // The prompt names the subject to keep. Off means the prompt names
     // distractors to remove.
     bool keep_prompted = true;
     bool video = true;
-    int max_size = 1600;
+    // 0 uses the checkpoint's native resolution. Non-native graph shapes are
+    // accepted only when the selected SAM model supports them.
+    int max_size = 0;
     float threshold = 0.5F;
     float nms = 0.1F;
 };
@@ -35,7 +39,7 @@ struct GenerateResult {
 
 // Writes one PNG per image, named `<stem>.png`, in sorted call order so video
 // tracking sees the capture in sequence. Throws on a model or frame failure.
-// The Vulkan device is released before the function returns.
+// The selected inference backend is released before the function returns.
 GenerateResult generate_masks(const GenerateOptions& options);
 
 }  // namespace photara::sam

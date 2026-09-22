@@ -71,6 +71,32 @@ sam3_image image_from_rgb(io::RgbImage rgb) {
     image.data = std::move(rgb.pixels);
     return image;
 }
+
+// The checkpoint runs at 1008. Passing the full photo makes SAM resize every
+// detection mask back to that full size on the CPU.
+io::RgbImage fit_long_side(io::RgbImage image, const int max_side) {
+    const int width = static_cast<int>(image.width);
+    const int height = static_cast<int>(image.height);
+    const int long_side = std::max(width, height);
+    if (long_side <= max_side || width <= 0 || height <= 0) return image;
+    const int fitted_width = std::max(
+        1, static_cast<int>(
+            (static_cast<std::int64_t>(width) * max_side + long_side / 2) /
+            long_side));
+    const int fitted_height = std::max(
+        1, static_cast<int>(
+            (static_cast<std::int64_t>(height) * max_side + long_side / 2) /
+            long_side));
+    io::RgbImage fitted;
+    fitted.width = static_cast<std::uint32_t>(fitted_width);
+    fitted.height = static_cast<std::uint32_t>(fitted_height);
+    fitted.pixels.resize(
+        static_cast<std::size_t>(fitted_width) * fitted_height * 3U);
+    io::resize_bilinear(
+        image.pixels.data(), image.width, image.height, 3,
+        fitted.pixels.data(), fitted.width, fitted.height);
+    return fitted;
+}
 #endif
 
 }  // namespace
@@ -108,12 +134,26 @@ GenerateResult generate_masks(const GenerateOptions& options) {
 
     sam3_params params;
     params.model_path = model_path.string();
-    params.use_gpu = true;
+    if (options.backend == "auto")
+        params.backend = SAM3_BACKEND_AUTO;
+    else if (options.backend == "cpu")
+        params.backend = SAM3_BACKEND_CPU;
+    else if (options.backend == "cuda")
+        params.backend = SAM3_BACKEND_CUDA;
+    else if (options.backend == "vulkan")
+        params.backend = SAM3_BACKEND_VULKAN;
+    else if (options.backend == "metal")
+        params.backend = SAM3_BACKEND_METAL;
+    else
+        throw std::invalid_argument(
+            "SAM backend must be auto, cpu, cuda, vulkan, or metal");
     params.n_threads = 4;
     params.encode_img_size = std::max(0, options.max_size);
     std::shared_ptr<sam3_model> model = sam3_load_model(params);
     if (!model)
-        throw std::runtime_error("Failed to load the SAM 3 checkpoint");
+        throw std::runtime_error(
+            "Failed to load the SAM 3 checkpoint with backend \"" +
+            options.backend + "\"");
     sam3_state_ptr state = sam3_create_state(*model, params);
     if (!state)
         throw std::runtime_error("Failed to create the SAM 3 inference state");
@@ -143,7 +183,35 @@ GenerateResult generate_masks(const GenerateOptions& options) {
     core::ProgressReporter progress("generate sam masks", options.images.size());
     GenerateResult result;
     for (const auto& image_path : options.images) {
-        io::RgbImage rgb = io::load_rgb(image_path);
+        // JPEG reads used by the rest of the pipeline may be reduced. The
+        // mask has to match the file's stored pixel size.
+        const io::ImageSize file_size = io::load_image_size(image_path);
+        const std::uint32_t file_long_side =
+            std::max(file_size.width, file_size.height);
+        // Decode at sufficient resolution for the checkpoint's native input.
+        // In particular, do not select libjpeg's 1/2 DCT path for 1920-wide
+        // inputs: its small speed gain measurably moves mask boundaries.
+        constexpr std::uint32_t jpeg_decode_side = 1008U;
+        const std::uint32_t decode_width = file_long_side <= jpeg_decode_side
+            ? file_size.width
+            : std::max(
+                  1U, static_cast<std::uint32_t>(
+                          (static_cast<std::uint64_t>(file_size.width) *
+                               jpeg_decode_side +
+                           file_long_side - 1U) /
+                          file_long_side));
+        const std::uint32_t decode_height = file_long_side <= jpeg_decode_side
+            ? file_size.height
+            : std::max(
+                  1U, static_cast<std::uint32_t>(
+                          (static_cast<std::uint64_t>(file_size.height) *
+                               jpeg_decode_side +
+                           file_long_side - 1U) /
+                          file_long_side));
+        io::RgbImage rgb = fit_long_side(
+            io::load_rgb_with_minimum_size(
+                image_path, decode_width, decode_height),
+            1008);
         const int width = static_cast<int>(rgb.width);
         const int height = static_cast<int>(rgb.height);
         sam3_image frame = image_from_rgb(std::move(rgb));
@@ -179,15 +247,25 @@ GenerateResult generate_masks(const GenerateOptions& options) {
                 sam3_segment_pcs(*state, *model, prompt), false);
         }
 
+        const int output_width = static_cast<int>(file_size.width);
+        const int output_height = static_cast<int>(file_size.height);
         io::GrayImage gray;
-        gray.width = static_cast<std::uint32_t>(width);
-        gray.height = static_cast<std::uint32_t>(height);
-        gray.pixels.resize(selected.size());
-        for (std::size_t index = 0; index < selected.size(); ++index) {
-            const bool hit = selected[index] != 0;
-            gray.pixels[index] = options.keep_prompted
-                ? static_cast<std::uint8_t>(hit ? 255 : 0)
-                : static_cast<std::uint8_t>(hit ? 0 : 255);
+        gray.width = file_size.width;
+        gray.height = file_size.height;
+        gray.pixels.resize(
+            static_cast<std::size_t>(output_width) * output_height);
+        for (int y = 0; y < output_height; ++y) {
+            const int source_y = y * height / output_height;
+            const auto* row =
+                selected.data() + static_cast<std::size_t>(source_y) * width;
+            auto* destination = gray.pixels.data() +
+                static_cast<std::size_t>(y) * output_width;
+            for (int x = 0; x < output_width; ++x) {
+                const bool hit = row[x * width / output_width] != 0;
+                destination[x] = options.keep_prompted
+                    ? static_cast<std::uint8_t>(hit ? 255 : 0)
+                    : static_cast<std::uint8_t>(hit ? 0 : 255);
+            }
         }
         io::save_gray_png(
             gray, options.output_dir / (image_path.stem().string() + ".png"));
@@ -197,7 +275,8 @@ GenerateResult generate_masks(const GenerateOptions& options) {
     core::Logger::instance().info(
         "sam_masks=", result.written, " dir=", options.output_dir,
         " model=", model_path, " keep_prompted=", options.keep_prompted,
-        " video=", options.video, " gpu=", params.use_gpu);
+        " video=", options.video,
+        " backend=", sam3_model_backend_name(*model));
     trackers.clear();
     state.reset();
     model.reset();

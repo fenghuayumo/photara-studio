@@ -1,7 +1,8 @@
-# In-tree SAM 3 on ggml. CUDA is the default GPU backend when the CUDA
-# toolkit is available. Vulkan is left off so a GPU run does not pick it.
+# In-tree SAM 3 on ggml. Runtime selection prefers CUDA, then Vulkan, then
+# Metal, and falls back to CPU.
 
 option(PHOTARA_ENABLE_SAM "Build in-process SAM 3 mask generation" ON)
+option(PHOTARA_ENABLE_SAM_VULKAN "Build the SAM 3 ggml Vulkan backend" ON)
 
 set(PHOTARA_HAS_SAM OFF)
 
@@ -12,7 +13,18 @@ if(PHOTARA_ENABLE_SAM)
     set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(GGML_METAL OFF CACHE BOOL "" FORCE)
-    set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+    if(PHOTARA_ENABLE_SAM_VULKAN)
+        find_package(Vulkan QUIET COMPONENTS glslc)
+        if(Vulkan_FOUND AND Vulkan_GLSLC_EXECUTABLE)
+            set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+        else()
+            message(STATUS
+                "SAM 3: Vulkan SDK/glslc not found; Vulkan backend disabled")
+            set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+        endif()
+    else()
+        set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+    endif()
     set(GGML_BLAS OFF CACHE BOOL "" FORCE)
     if(PHOTARA_ENABLE_CUDA)
         include(CheckLanguage)
@@ -39,6 +51,14 @@ if(PHOTARA_ENABLE_SAM)
         add_subdirectory(
             "${PHOTARA_SAM3_ROOT}/ggml"
             "${CMAKE_BINARY_DIR}/ggml")
+        if(TARGET ggml-cuda)
+            # The repository may carry an old global CUDA architecture cache
+            # (for example sm_52). SAM 3 needs the attention kernels compiled
+            # for the GPU that will execute them, matching Photara's other CUDA
+            # targets.
+            set_target_properties(ggml-cuda PROPERTIES
+                CUDA_ARCHITECTURES native)
+        endif()
         add_library(photara_sam3 STATIC
             "${PHOTARA_SAM3_ROOT}/sam3.cpp"
             "${PHOTARA_SAM3_ROOT}/sam3.h")
@@ -52,10 +72,13 @@ if(PHOTARA_ENABLE_SAM)
             target_compile_definitions(photara_sam3 PRIVATE NOMINMAX)
         endif()
         set(PHOTARA_HAS_SAM ON)
+        set(_photara_sam_backends "CPU")
         if(GGML_CUDA)
-            message(STATUS "SAM 3: ggml CUDA backend")
-        else()
-            message(STATUS "SAM 3: ggml CPU backend")
+            list(APPEND _photara_sam_backends "CUDA")
         endif()
+        if(GGML_VULKAN)
+            list(APPEND _photara_sam_backends "Vulkan")
+        endif()
+        message(STATUS "SAM 3 ggml backends: ${_photara_sam_backends}")
     endif()
 endif()
