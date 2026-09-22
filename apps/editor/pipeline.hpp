@@ -34,6 +34,7 @@ enum class Stage {
     mapping,
     exporting,
     preparing,
+    masking,
     dense,
     training,
     meshing,
@@ -140,7 +141,7 @@ private:
 // Parses the CLI log into a stage, the active sub-task and an overall fraction.
 class RunMonitor {
 public:
-    void begin(JobKind kind);
+    void begin(JobKind kind, Stage opening = Stage::idle);
     void consume(const std::string& line);
     void mark_finished(int exit_code);
     void reset();

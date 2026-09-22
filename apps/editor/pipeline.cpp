@@ -60,7 +60,7 @@ struct Band {
 constexpr Band k_align_bands[] = {
     {"extract video frames", Stage::preparing, 0.00F, 0.06F},
     {"select sharp frames", Stage::preparing, 0.06F, 0.08F},
-    {"generate sam masks", Stage::preparing, 0.08F, 0.12F},
+    {"generate sam masks", Stage::masking, 0.08F, 0.12F},
     {"extract features", Stage::features, 0.12F, 0.38F},
     {"prepare image pairs", Stage::matching, 0.38F, 0.40F},
     {"fast match image pairs", Stage::matching, 0.40F, 0.54F},
@@ -95,7 +95,7 @@ constexpr Band k_texture_bands[] = {
 constexpr Band k_train_bands[] = {
     {"extract video frames", Stage::preparing, 0.00F, 0.02F},
     {"select sharp frames", Stage::preparing, 0.00F, 0.02F},
-    {"generate sam masks", Stage::preparing, 0.02F, 0.04F},
+    {"generate sam masks", Stage::masking, 0.02F, 0.04F},
     {"extract features", Stage::features, 0.04F, 0.06F},
     {"match image pairs", Stage::matching, 0.04F, 0.07F},
     {"fast match image pairs", Stage::matching, 0.04F, 0.07F},
@@ -446,7 +446,8 @@ const char* stage_name(const Stage stage) {
         case Stage::tracks: return i18n::tr("Building tracks");
         case Stage::mapping: return i18n::tr("Solving camera poses");
         case Stage::exporting: return i18n::tr("Writing sparse scene");
-        case Stage::preparing: return i18n::tr("Preparing input");
+        case Stage::preparing: return i18n::tr("Extracting frames");
+        case Stage::masking: return i18n::tr("Generating masks");
         case Stage::dense: return i18n::tr("MVS stereo");
         case Stage::training: return i18n::tr("Training Gaussians");
         case Stage::meshing: return i18n::tr("Extracting mesh");
@@ -620,10 +621,11 @@ void RunMonitor::reset() {
     stopped_ = {};
 }
 
-void RunMonitor::begin(const JobKind kind) {
+void RunMonitor::begin(const JobKind kind, const Stage opening) {
     reset();
     kind_ = kind;
-    if (kind == JobKind::train) stage_ = Stage::preparing;
+    if (opening != Stage::idle) stage_ = opening;
+    else if (kind == JobKind::train) stage_ = Stage::preparing;
     else if (kind == JobKind::dense) stage_ = Stage::dense;
     else if (kind == JobKind::texture) stage_ = Stage::texturing;
     else stage_ = Stage::features;

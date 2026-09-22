@@ -190,28 +190,26 @@ bool draw_scene_toggle_rail(App& app, const ImVec2 view_min) {
     return hovered;
 }
 
-int align_step_rank(const Stage stage) {
-    switch (stage) {
-        case Stage::preparing:
-        case Stage::features: return 0;
-        case Stage::matching: return 1;
-        case Stage::tracks: return 2;
-        case Stage::mapping:
-        case Stage::exporting: return 3;
-        default: return -1;
-    }
-}
-
 void draw_align_step_bar(const App& app, const ImVec2 origin, const float width) {
     struct Step {
         const char* label;
+        Stage stage;
     };
-    const Step steps[] = {
-        {tr("Features")},
-        {tr("Matching")},
-        {tr("Tracks")},
-        {tr("Poses")},
+    Step steps[6];
+    int step_count = 0;
+    auto add_step = [&](const char* label, const Stage stage) {
+        if (step_count >= 6) return;
+        steps[step_count++] = {label, stage};
     };
+    if (is_video_source(app.settings))
+        add_step(tr("Frames"), Stage::preparing);
+    if (app.settings.sam_masks)
+        add_step(tr("Masks"), Stage::masking);
+    add_step(tr("Features"), Stage::features);
+    add_step(tr("Matching"), Stage::matching);
+    add_step(tr("Tracks"), Stage::tracks);
+    add_step(tr("Poses"), Stage::mapping);
+
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImVec2 bar_max{origin.x + width, origin.y + 36.F};
     draw->AddRectFilled(origin, bar_max, theme::u32(theme::surface_2));
@@ -219,16 +217,27 @@ void draw_align_step_bar(const App& app, const ImVec2 origin, const float width)
         {origin.x, bar_max.y - 1.F}, {bar_max.x, bar_max.y - 1.F},
         theme::u32(theme::border));
 
-    const int current = align_step_rank(app.monitor.stage());
+    const Stage stage = app.monitor.stage();
+    const Stage ranked =
+        stage == Stage::exporting ? Stage::mapping : stage;
+    int current = 0;
+    for (int i = 0; i < step_count; ++i) {
+        if (steps[i].stage == ranked) {
+            current = i;
+            break;
+        }
+    }
     const float pad = 10.F;
-    const float inner = std::max(1.F, width - pad * 2.F);
-    const float cell = inner / 4.F;
+    const bool show_count = app.monitor.task().total > 0 && width > 640.F;
+    const float reserve = show_count ? 96.F : 0.F;
+    const float inner = std::max(1.F, width - pad * 2.F - reserve);
+    const float cell = inner / static_cast<float>(std::max(1, step_count));
     ImFont* small = theme::small_font();
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < step_count; ++i) {
         const float x = origin.x + pad + cell * static_cast<float>(i);
         const bool active = i == current;
         const bool done = current > i;
-        if (i < 3) {
+        if (i + 1 < step_count) {
             const ImVec2 a{x + cell - 18.F, origin.y + 18.F};
             const ImVec2 b{x + cell + 6.F, origin.y + 18.F};
             draw->AddLine(
@@ -267,7 +276,7 @@ void draw_align_step_bar(const App& app, const ImVec2 origin, const float width)
     }
 
     const SubTask& task = app.monitor.task();
-    if (task.total > 0 && width > 520.F) {
+    if (show_count) {
         char progress[48];
         std::snprintf(
             progress, sizeof(progress), "%llu / %llu",
@@ -679,7 +688,14 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
             "Drop an image folder, photos, a video, .asfm, or .ascan onto this view");
         if (aligning) {
             const Stage stage = app.monitor.stage();
-            if (stage == Stage::features || stage == Stage::preparing) {
+            if (stage == Stage::preparing) {
+                headline = tr("Extracting frames");
+                hint = tr("Sharp frames are chosen before masks and alignment");
+            } else if (stage == Stage::masking) {
+                headline = tr("Generating masks");
+                hint = tr(
+                    "Each frame gets a foreground mask, then alignment uses it");
+            } else if (stage == Stage::features) {
                 headline = tr("Extracting features in 2D");
                 hint = tr("Switch to 2D to watch keypoints appear on each photo");
             } else if (stage == Stage::matching) {
@@ -1049,7 +1065,13 @@ void draw_viewport_panel(App& app) {
     const char* state = job_state_caption(app);
     if (app.workspace == ViewportWorkspace::image_2d) {
         if (alignment_job_running(app) &&
-            app.monitor.stage() == Stage::features)
+            app.monitor.stage() == Stage::preparing)
+            state = tr("Extracting frames");
+        else if (alignment_job_running(app) &&
+                 app.monitor.stage() == Stage::masking)
+            state = tr("Generating masks");
+        else if (alignment_job_running(app) &&
+                 app.monitor.stage() == Stage::features)
             state = tr("Extracting features");
         else if (alignment_job_running(app) &&
                  app.monitor.stage() == Stage::matching)

@@ -2940,7 +2940,7 @@ void add_geometry_regularization(const GaussianModel& model,
     const float log_scale_weight) {
     const std::size_t count = model.size();
     if (count == 0 || (!(opacity_weight > 0.F) && !(log_scale_weight > 0.F))) return;
-    // Both priors are means over the model (spirula-studio applies
+    // Both priors are means over the model (applies
     // `opacity_reg * mean(alpha)` and `scale_reg * mean(exp(log_scale))`), so
     // the weights do not depend on the Gaussian count.
     geometry_regularization_kernel<<<(count + k_threads - 1) / k_threads, k_threads>>>(

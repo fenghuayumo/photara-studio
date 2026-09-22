@@ -76,7 +76,9 @@ Action draw_inspector(App& app) {
             theme::caption("Video extraction");
             ImGui::PushTextWrapPos(0.F);
             theme::caption(
-                "Align Photos extracts the sharpest stills, then runs SfM.");
+                app.settings.sam_masks
+                    ? "Align Photos extracts frames, generates masks, then aligns cameras."
+                    : "Align Photos extracts the sharpest stills, then runs SfM.");
             ImGui::PopTextWrapPos();
             const auto ffmpeg = photara::io::locate_ffmpeg();
             if (ffmpeg.empty()) {

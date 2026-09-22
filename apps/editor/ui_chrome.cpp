@@ -39,7 +39,7 @@ namespace editor {
 using i18n::tr;
 
 struct WorkflowCrumbs {
-    std::array<const char*, 5> labels{};
+    std::array<const char*, 8> labels{};
     int count{1};
     int current{};
 };
@@ -51,9 +51,23 @@ WorkflowCrumbs workflow_crumbs(const App& app) {
         app.settings.images_dir[0] != '\0' || has_external_dataset(app);
     if (!have_images) return crumbs;
 
-    crumbs.labels[1] = tr("Alignment");
-    crumbs.count = 2;
-    crumbs.current = 1;
+    const bool video = is_video_source(app.settings);
+    const bool masks = app.settings.sam_masks && !has_external_dataset(app);
+    int index = 1;
+    int frames_index = -1;
+    int masks_index = -1;
+    if (video) {
+        frames_index = index;
+        crumbs.labels[static_cast<std::size_t>(index++)] = tr("Frames");
+    }
+    if (masks) {
+        masks_index = index;
+        crumbs.labels[static_cast<std::size_t>(index++)] = tr("Masks");
+    }
+    const int align_index = index;
+    crumbs.labels[static_cast<std::size_t>(index++)] = tr("Alignment");
+    crumbs.count = index;
+    crumbs.current = video ? frames_index : (masks ? masks_index : align_index);
 
     const bool training =
         app.job.running() && app.active_job == JobKind::train;
@@ -65,7 +79,13 @@ WorkflowCrumbs workflow_crumbs(const App& app) {
         app.job.running() && app.active_job == JobKind::texture;
     const bool aligned = app.has_sparse || has_external_dataset(app);
     if (aligning) {
-        crumbs.current = 1;
+        const Stage stage = app.monitor.stage();
+        if (stage == Stage::preparing && frames_index >= 0)
+            crumbs.current = frames_index;
+        else if (stage == Stage::masking && masks_index >= 0)
+            crumbs.current = masks_index;
+        else
+            crumbs.current = align_index;
         return crumbs;
     }
     if (!aligned && !training && !densing && !texturing) return crumbs;
@@ -74,26 +94,26 @@ WorkflowCrumbs workflow_crumbs(const App& app) {
         !training && (mesh_from_mvs(app.settings) || densing ||
                       (app.settings.mesh_source == 1 && app.settings.build_mesh));
     if (mvs_route) {
-        crumbs.labels[2] = tr("MVS Mesh");
-        crumbs.labels[3] = tr("Texture Baking");
-        crumbs.count = 4;
-        if (texturing || app.has_texture) crumbs.current = 3;
-        else if (densing || app.has_mesh) crumbs.current = 2;
-        else crumbs.current = 1;
+        crumbs.labels[static_cast<std::size_t>(index++)] = tr("MVS Mesh");
+        crumbs.labels[static_cast<std::size_t>(index++)] = tr("Texture Baking");
+        crumbs.count = index;
+        if (texturing || app.has_texture) crumbs.current = index - 1;
+        else if (densing || app.has_mesh) crumbs.current = index - 2;
+        else crumbs.current = align_index;
         return crumbs;
     }
 
-    crumbs.labels[2] = tr("3DGS");
-    crumbs.labels[3] = tr("Extract Mesh");
-    crumbs.labels[4] = tr("Texture Baking");
-    crumbs.count = 5;
+    crumbs.labels[static_cast<std::size_t>(index++)] = tr("3DGS");
+    crumbs.labels[static_cast<std::size_t>(index++)] = tr("Extract Mesh");
+    crumbs.labels[static_cast<std::size_t>(index++)] = tr("Texture Baking");
+    crumbs.count = index;
     const bool extracting =
         training && (app.monitor.stage() == Stage::meshing ||
                      app.monitor.stage() == Stage::texturing);
-    if (texturing || app.has_texture) crumbs.current = 4;
-    else if (app.has_mesh || extracting) crumbs.current = 3;
-    else if (training || app.has_model) crumbs.current = 2;
-    else crumbs.current = 1;
+    if (texturing || app.has_texture) crumbs.current = index - 1;
+    else if (app.has_mesh || extracting) crumbs.current = index - 2;
+    else if (training || app.has_model) crumbs.current = index - 3;
+    else crumbs.current = align_index;
     return crumbs;
 }
 
@@ -595,7 +615,9 @@ Action draw_toolbar(App& app) {
             "##video_file", icons::Icon::camera, tr("Video"),
             {88.F, 32.F}, icons::ButtonStyle::normal, !busy, false,
             busy ? tr(k_busy_change_capture_tooltip)
-                 : tr("Select a capture video. Align Photos extracts sharp frames, then runs SfM."))) {
+                 : tr(app.settings.sam_masks
+                        ? "Select a capture video. Align Photos extracts frames, generates masks, then aligns cameras."
+                        : "Select a capture video. Align Photos extracts sharp frames, then runs SfM."))) {
         select_video_file(app);
     }
     ImGui::SameLine();

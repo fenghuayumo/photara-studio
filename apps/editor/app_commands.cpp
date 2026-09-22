@@ -900,7 +900,10 @@ void apply_video_selection(App& app) {
     assign_default_project_folder(app);
     refresh_artifacts(app);
     set_message(
-        app, "Video selected; Align Photos will extract sharp frames, then run SfM",
+        app,
+        app.settings.sam_masks
+            ? "Video selected. Align Photos extracts frames, generates masks, then aligns cameras"
+            : "Video selected; Align Photos will extract sharp frames, then run SfM",
         theme::text_muted);
 }
 
@@ -2355,7 +2358,10 @@ void start_align(App& app) {
         return;
     }
     try {
-        app.monitor.begin(JobKind::align);
+        const Stage opening = is_video_source(app.settings)
+            ? Stage::preparing
+            : (app.settings.sam_masks ? Stage::masking : Stage::features);
+        app.monitor.begin(JobKind::align, opening);
         const auto preview_path = app.layout.align_preview;
         std::error_code preview_error;
         if (!preview_path.empty())
