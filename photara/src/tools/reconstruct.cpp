@@ -456,7 +456,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-dataset PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
               << "  --capture-mode object|scene  object uses SfM SubjectBounds\n"
               << "  --subject-bounds PATH  load object focus region (SubjectBounds txt)\n"
-              << "  --masks DIR optional foreground masks (auto: sibling masks/)\n"
+              << "  --masks DIR optional valid-region masks for default SfM/MVS/training; "
+                 "black pixels are ignored (auto: sibling masks/)\n"
               << "Texture (Stage B after --mesh; requires Vulkan + UVAtlas):\n"
               << "  --texture    UV unwrap + projective bake -> textured OBJ/MTL/PNG\n"
               << "  --texture --working-mesh PATH  bake only; reuse an existing mesh\n"
@@ -979,7 +980,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "--dense-quality",
          cxxopts::value<unsigned>())
         ("masks",
-         "Foreground mask directory (auto, - to disable, or explicit path)",
+         "Valid-region mask directory; black pixels are ignored by default SfM and "
+         "downstream stages (auto, - to disable, or explicit path)",
          cxxopts::value<std::string>()->default_value("auto"))
         ("texture",
          "UV unwrap + projective texture bake. Implies --mesh unless "
@@ -3747,6 +3749,7 @@ int main(int argc, char** argv) {
         config.frontend.camera_model = cli.camera_model;
         config.frontend.focal_pixels = cli.focal_pixels;
         config.frontend.trust_focal_pixels = cli.trust_focal;
+        config.frontend.mask_dir = cli.masks_dir;
         config.frontend.structural_pair_expansion = cli.structural_pair_expansion;
         config.frontend.neighbor_window = cli.neighbor_window;
         config.frontend.sift_contrast_threshold = cli.sift_contrast;

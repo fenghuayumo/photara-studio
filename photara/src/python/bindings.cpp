@@ -243,6 +243,7 @@ NB_MODULE(photara_native, module) {
         .def_rw(
             "neighbor_window", &sfm::FrontEndOptions::neighbor_window)
         .def_rw("thread_count", &sfm::FrontEndOptions::thread_count)
+        .def_rw("mask_dir", &sfm::FrontEndOptions::mask_dir)
         .def_rw("extractor", &sfm::FrontEndOptions::extractor)
         .def_rw("matcher", &sfm::FrontEndOptions::matcher)
         .def_rw("pipeline", &sfm::FrontEndOptions::pipeline)

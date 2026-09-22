@@ -61,6 +61,58 @@ struct FrontEndStageKeys {
     std::uint64_t tracks{};
 };
 
+struct ResolvedFeatureMasks {
+    std::vector<std::filesystem::path> paths;
+    std::uint64_t fingerprint{};
+    std::size_t count{};
+};
+
+std::filesystem::path find_feature_mask_path(
+    const std::filesystem::path& directory,
+    const std::filesystem::path& image_path) {
+    if (directory.empty() || !std::filesystem::is_directory(directory))
+        return {};
+    const auto exact = directory / image_path.filename();
+    if (std::filesystem::is_regular_file(exact)) return exact;
+    static constexpr std::array<const char*, 6> extensions{
+        ".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"};
+    for (const char* extension : extensions) {
+        const auto candidate =
+            directory / (image_path.stem().string() + extension);
+        if (std::filesystem::is_regular_file(candidate)) return candidate;
+    }
+    return {};
+}
+
+ResolvedFeatureMasks resolve_feature_masks(
+    const std::vector<std::filesystem::path>& image_paths,
+    const std::filesystem::path& mask_dir) {
+    ResolvedFeatureMasks result;
+    result.paths.resize(image_paths.size());
+    FingerprintBuilder mapping;
+    mapping.append_string("sfm-valid-region-masks-v1");
+    std::vector<std::filesystem::path> existing;
+    existing.reserve(image_paths.size());
+    for (std::size_t index = 0; index < image_paths.size(); ++index) {
+        result.paths[index] = find_feature_mask_path(mask_dir, image_paths[index]);
+        mapping.append_string(result.paths[index].string());
+        if (!result.paths[index].empty()) existing.push_back(result.paths[index]);
+    }
+    result.count = existing.size();
+    mapping.append(fingerprint_images(existing));
+    result.fingerprint = mapping.value();
+    return result;
+}
+
+features::FeatureSet apply_feature_mask(
+    features::FeatureSet features,
+    const std::filesystem::path& mask_path) {
+    if (mask_path.empty()) return features;
+    const io::GrayImage mask = io::load_gray(mask_path);
+    return features::filter_features_by_mask(
+        std::move(features), mask.pixels, mask.width, mask.height);
+}
+
 void append_cache_build_identity(FingerprintBuilder& key) {
 	key.append_string(PHOTARA_FRONTEND_CACHE_BUILD_ID);
 	// Camera metadata now feeds a late intrinsic split; older geometry and
@@ -138,12 +190,14 @@ void normalize_feature_selection(FrontEndOptions& options) {
 
 FrontEndStageKeys make_stage_keys(
     const FrontEndOptions& options,
-    const ImageSetFingerprint& images) {
+    const ImageSetFingerprint& images,
+    const std::uint64_t mask_fingerprint) {
     FingerprintBuilder features;
     features.append_string("features");
     features.append_string("rootsift-u8-scale512-v1");
     append_cache_build_identity(features);
     features.append(images.value);
+    features.append(mask_fingerprint);
     features.append_string(options.extractor);
     features.append(options.sift_contrast_threshold);
     features.append(options.max_features);
@@ -1033,6 +1087,7 @@ void emit_live_inliers(
 // worker threads overlap CPU post-processing (grid selection / Image packing).
 void extract_features_siftgpu_coordinator(
     Scene& scene, const std::vector<std::filesystem::path>& image_paths,
+    const std::vector<std::filesystem::path>& mask_paths,
     features::FeatureExtractor& extractor, const unsigned max_features,
     core::ProgressReporter& progress, const bool compress_u8 = false,
     AlignLivePreview* live = nullptr) {
@@ -1079,6 +1134,8 @@ void extract_features_siftgpu_coordinator(
                 [&, index, sift_gpu, path = image_paths[index],
                  features = std::move(features)]() mutable {
                     if (sift_gpu) sift_gpu->finalize_descriptors(features);
+                    features = apply_feature_mask(
+                        std::move(features), mask_paths[index]);
                     features = select_top_features_grid_3x3(
                         std::move(features), max_features);
                     if (compress_u8) features.compress_descriptors_u8();
@@ -1101,6 +1158,8 @@ void extract_features_siftgpu_coordinator(
         for (std::size_t index = 0; index < count; ++index) {
             features::FeatureSet features =
                 extractor.extract_file(image_paths[index]);
+            features = apply_feature_mask(
+                std::move(features), mask_paths[index]);
             post_tasks.submit(
                 pool,
                 [&, index, path = image_paths[index],
@@ -1788,8 +1847,21 @@ FrontEndResult run_frontend(
     }
     const ImageSetFingerprint image_fingerprint =
         fingerprint_image_set(image_paths);
+    const ResolvedFeatureMasks feature_masks =
+        resolve_feature_masks(image_paths, runtime_options.mask_dir);
     const FrontEndStageKeys stage_keys =
-        make_stage_keys(runtime_options, image_fingerprint);
+        make_stage_keys(
+            runtime_options, image_fingerprint, feature_masks.fingerprint);
+    if (feature_masks.count != 0)
+        core::Logger::instance().info(
+            "SfM valid-region masks: ", feature_masks.count, '/',
+            image_paths.size(), " directory=", runtime_options.mask_dir);
+    if (!runtime_options.mask_dir.empty() &&
+        feature_masks.count != image_paths.size())
+        core::Logger::instance().warning(
+            "SfM masks missing for ",
+            image_paths.size() - feature_masks.count,
+            " image(s); those images will be matched without a mask");
     result.tracks_checkpoint_key = stage_keys.tracks;
     CheckpointStore checkpoints(options.checkpoint);
     Scene& scene = result.scene;
@@ -1875,8 +1947,8 @@ FrontEndResult run_frontend(
             core::ProgressReporter retrieval_extract(
                 "extract features (lightglue retrieval)", image_paths.size());
             extract_features_siftgpu_coordinator(
-                retrieval_scene, image_paths, extractor, options.max_features,
-                retrieval_extract, true);
+                retrieval_scene, image_paths, feature_masks.paths, extractor,
+                options.max_features, retrieval_extract, true);
             retrieval_extract.finish();
             candidates = build_pair_candidates(retrieval_scene, runtime_options);
         } else {
@@ -2017,7 +2089,8 @@ FrontEndResult run_frontend(
         scene.cameras.reserve(image_paths.size());
         if (extractor->info().thread_affine) {
             extract_features_siftgpu_coordinator(
-                scene, image_paths, *extractor, options.max_features, progress,
+                scene, image_paths, feature_masks.paths, *extractor,
+                options.max_features, progress,
                 runtime_options.compress_descriptors_u8,
                 runtime_options.live_preview);
         } else {
@@ -2035,6 +2108,8 @@ FrontEndResult run_frontend(
                         workers[tid] ? workers[tid].get() : extractor.get();
                     features::FeatureSet features =
                         local->extract_file(image_paths[i]);
+                    features = apply_feature_mask(
+                        std::move(features), feature_masks.paths[i]);
                     features = select_top_features_grid_3x3(
                         std::move(features), options.max_features);
                     if (runtime_options.compress_descriptors_u8)
@@ -2387,6 +2462,8 @@ FrontEndResult run_frontend(
                 features::FeatureSet additional =
                     rescue_extractor.extract_gray(
                         gray.pixels, gray.width, gray.height);
+                additional = apply_feature_mask(
+                    std::move(additional), feature_masks.paths[image_id]);
                 additional = select_top_features_grid_3x3(
                     std::move(additional),
                     runtime_options.progressive_rescue_max_features);

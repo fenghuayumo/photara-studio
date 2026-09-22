@@ -39,4 +39,13 @@ public:
         std::size_t row_stride = 0) const;
 };
 
+// Keep only features whose keypoint lands on a non-zero mask pixel. The mask
+// may have a different resolution from the source image; keypoint centers are
+// mapped proportionally. Descriptor rows remain aligned with keypoints.
+[[nodiscard]] FeatureSet filter_features_by_mask(
+    FeatureSet features,
+    std::span<const std::uint8_t> mask,
+    std::uint32_t mask_width,
+    std::uint32_t mask_height);
+
 }  // namespace photara::features

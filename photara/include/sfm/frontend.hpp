@@ -22,6 +22,9 @@ struct FrontEndOptions {
     bool trust_focal_pixels{false};
     std::size_t neighbor_window{0};  // 0 => exhaustive for small sets, else sequential window
     unsigned thread_count{0};
+    // Optional valid-region masks matched by image filename/stem. Zero pixels
+    // are excluded before retrieval and matching; non-zero pixels are kept.
+    std::filesystem::path mask_dir;
     // Composable path: extractor × matcher (default siftgpu × gpu_mutual_ratio).
     std::string extractor{"siftgpu"};
     double sift_contrast_threshold{0.005};

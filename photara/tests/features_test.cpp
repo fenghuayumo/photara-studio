@@ -111,6 +111,26 @@ int main() {
             "aliked", "mutual_ratio"))
         return 5;
 
+    photara::features::FeatureSet mask_probe;
+    mask_probe.image_width = mask_probe.image_height = 4;
+    mask_probe.descriptor_dimension = 2;
+    mask_probe.keypoints = {
+        {0.5F, 0.5F}, {2.5F, 0.5F},
+        {0.5F, 2.5F}, {2.5F, 2.5F}};
+    mask_probe.descriptors = {0.F, 1.F, 2.F, 3.F, 4.F, 5.F, 6.F, 7.F};
+    const std::vector<std::uint8_t> valid_mask{255, 0, 0, 255};
+    const auto masked_float = photara::features::filter_features_by_mask(
+        mask_probe, valid_mask, 2, 2);
+    if (masked_float.keypoints.size() != 2 ||
+        masked_float.descriptors != std::vector<float>({0.F, 1.F, 6.F, 7.F}))
+        return 14;
+    mask_probe.compress_descriptors_u8();
+    const auto masked_u8 = photara::features::filter_features_by_mask(
+        mask_probe, valid_mask, 2, 2);
+    if (masked_u8.keypoints.size() != 2 ||
+        masked_u8.descriptors_u8.size() != 4)
+        return 15;
+
     constexpr std::uint32_t width = 512, height = 384;
     std::vector<std::uint8_t> first(static_cast<std::size_t>(width) * height);
     std::vector<std::uint8_t> second(first.size(), 0);
