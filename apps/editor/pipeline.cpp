@@ -2,6 +2,7 @@
 
 #include "i18n.hpp"
 #include "io/video_frames.hpp"
+#include "sam/model_cache.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -57,8 +58,9 @@ struct Band {
 };
 
 constexpr Band k_align_bands[] = {
-    {"extract video frames", Stage::preparing, 0.00F, 0.08F},
-    {"select sharp frames", Stage::preparing, 0.08F, 0.12F},
+    {"extract video frames", Stage::preparing, 0.00F, 0.06F},
+    {"select sharp frames", Stage::preparing, 0.06F, 0.08F},
+    {"generate sam masks", Stage::preparing, 0.08F, 0.12F},
     {"extract features", Stage::features, 0.12F, 0.38F},
     {"prepare image pairs", Stage::matching, 0.38F, 0.40F},
     {"fast match image pairs", Stage::matching, 0.40F, 0.54F},
@@ -93,7 +95,8 @@ constexpr Band k_texture_bands[] = {
 constexpr Band k_train_bands[] = {
     {"extract video frames", Stage::preparing, 0.00F, 0.02F},
     {"select sharp frames", Stage::preparing, 0.00F, 0.02F},
-    {"extract features", Stage::features, 0.01F, 0.04F},
+    {"generate sam masks", Stage::preparing, 0.02F, 0.04F},
+    {"extract features", Stage::features, 0.04F, 0.06F},
     {"match image pairs", Stage::matching, 0.04F, 0.07F},
     {"fast match image pairs", Stage::matching, 0.04F, 0.07F},
     {"lightglue match pairs", Stage::matching, 0.04F, 0.07F},
@@ -191,6 +194,42 @@ std::string quote(const std::filesystem::path& path) {
 
 std::string quote(const char* utf8_path) {
     return std::string("\"") + (utf8_path == nullptr ? "" : utf8_path) + '"';
+}
+
+std::string quote_text(const char* text) {
+    std::string out = "\"";
+    if (text != nullptr) {
+        for (const char value : std::string_view(text)) {
+            if (value == '\\' || value == '"') out.push_back('\\');
+            out.push_back(value);
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+void append_sam_flags(
+    std::ostringstream& command, const ProjectSettings& settings,
+    const bool refresh) {
+    const bool want_masks = settings.sam_masks || settings.use_mask;
+    if (!want_masks) return;
+    const auto images = reconstruction_images_dir(settings);
+    if (!images.empty())
+        command << " --masks " << quote(images.parent_path() / "masks");
+    if (!settings.sam_masks) return;
+    std::filesystem::path model =
+        path_from_utf8_field(settings.sam_model.data());
+    if (model.empty()) model = photara::sam::locate_model();
+    if (!model.empty()) command << " --sam-model " << quote(model);
+    command << " --sam-text " << quote_text(settings.sam_text.data());
+    if (settings.sam_negative_text[0] != '\0')
+        command << " --sam-neg-text "
+                << quote_text(settings.sam_negative_text.data());
+    command << " --sam-keep-prompted="
+            << (settings.sam_keep_prompted ? "true" : "false")
+            << " --sam-video=" << (settings.sam_video ? "true" : "false")
+            << " --sam-max-size " << std::max(0, settings.sam_max_size)
+            << " --sam-refresh=" << (refresh ? "true" : "false");
 }
 
 void append_gui_flags(
@@ -1137,6 +1176,7 @@ std::string build_align_command(
     if (settings.reuse_cache)
         command << " --cache-dir " << quote(layout.cache);
     append_video_extract_flags(command, settings);
+    append_sam_flags(command, settings, true);
     append_gui_flags(command, layout);
     return command.str();
 }
@@ -1194,7 +1234,8 @@ std::string build_train_command(
             << " --splat-max-resolution " << settings.max_resolution
             << " --splat-progressive-resolution="
             << (settings.progressive_resolution ? "true" : "false")
-            << " --splat-use-mask=" << (settings.use_mask ? "true" : "false")
+            << " --splat-use-mask="
+            << ((settings.use_mask || settings.sam_masks) ? "true" : "false")
             << " --splat-normal-field="
             << (settings.normal_field ? "true" : "false");
     if (settings.ppisp_layout != 0)
@@ -1202,6 +1243,7 @@ std::string build_train_command(
     if (settings.bilateral_grid)
         command << " --splat-bilateral-grid=true";
     append_video_extract_flags(command, settings);
+    append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
 
     // Geometry-supervised 3DGS mesh: depth/normal + multi-view losses, then
@@ -1315,6 +1357,7 @@ std::string build_dense_command(
         command << " --mesh-method " << mesh_method_flag(method);
     }
     append_video_extract_flags(command, settings);
+    append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
     return command.str();
 }
@@ -1349,6 +1392,7 @@ std::string build_texture_command(
             << texture_optimize_steps(settings);
     if (settings.texture_delight) command << " --delight";
     append_video_extract_flags(command, settings);
+    append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
     return command.str();
 }
@@ -1368,6 +1412,7 @@ std::string build_export_sfm_command(
         std::filesystem::exists(layout.cache, exists_error))
         command << " --cache-dir " << quote(layout.cache);
     append_video_extract_flags(command, settings);
+    append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
     return command.str();
 }

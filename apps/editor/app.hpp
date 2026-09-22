@@ -3,6 +3,7 @@
 #include "console_view.hpp"
 #include "image_qa_view.hpp"
 #include "pipeline.hpp"
+#include "sam_model.hpp"
 #include "cache_maintenance.hpp"
 #include "sparse_view.hpp"
 #include "theme.hpp"
@@ -148,6 +149,9 @@ struct App {
     bool close_requested{};
     bool show_controls{};
     bool show_about{};
+    bool show_sam_license{};
+    bool sam_license_tick{};
+    SamModelDownload sam_download;
     gpu::PreviewTexture about_icon;
     bool about_icon_ready{};
     bool show_clear_results{};

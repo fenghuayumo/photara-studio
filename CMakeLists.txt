@@ -138,4 +138,5 @@ if(PHOTARA_ENABLE_TEXTURE)
 endif()
 
 include(CTest)
+include(PhotaraSam)
 add_subdirectory(photara)

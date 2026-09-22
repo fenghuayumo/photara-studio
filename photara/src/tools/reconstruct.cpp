@@ -15,6 +15,8 @@
 #include "core/version.hpp"
 #include "io/image.hpp"
 #include "io/video_frames.hpp"
+#include "sam/masks.hpp"
+#include "sam/model_cache.hpp"
 #if defined(PHOTARA_HAS_SPLAT)
 #include "splat/dataset.hpp"
 #include "splat/cuda_vulkan_preview.hpp"
@@ -251,6 +253,14 @@ struct ReconstructCli {
     // Unset follows --dense-quality instead of forcing a working resolution.
     std::optional<unsigned> dense_resolution_level;
     std::filesystem::path masks_dir;
+    bool masks_auto{true};
+    std::filesystem::path sam_model;
+    std::string sam_text;
+    std::string sam_negative_text;
+    bool sam_keep_prompted{true};
+    bool sam_video{true};
+    int sam_max_size{1600};
+    bool sam_refresh{false};
     bool texture{false};
     bool delight{false};
     // Unset keeps the default atlas size (kDefaultAtlasResolution).
@@ -983,6 +993,27 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Valid-region mask directory; black pixels are ignored by default SfM and "
          "downstream stages (auto, - to disable, or explicit path)",
          cxxopts::value<std::string>()->default_value("auto"))
+        ("sam-model",
+         "SAM 3 GGML checkpoint. Empty uses the Photara model cache",
+         cxxopts::value<std::string>()->default_value(""))
+        ("sam-text",
+         "SAM 3 prompt. Semicolons separate phrases. Generates masks before SfM",
+         cxxopts::value<std::string>()->default_value(""))
+        ("sam-neg-text",
+         "SAM 3 phrases to remove from the mask",
+         cxxopts::value<std::string>()->default_value(""))
+        ("sam-keep-prompted",
+         "Keep the prompted subject (true) or remove the prompted distractors",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("sam-video",
+         "Track the prompt across the ordered frames",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("sam-max-size",
+         "Longest side SAM sees; the mask is written at the source resolution",
+         cxxopts::value<int>()->default_value("1600"))
+        ("sam-refresh",
+         "Regenerate SAM masks even when the mask directory already has files",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("texture",
          "UV unwrap + projective texture bake. Implies --mesh unless "
          "--working-mesh is set without --dense/--splat",
@@ -1407,13 +1438,25 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.dense_resolution_level =
             result["dense-resolution-level"].as<unsigned>();
     const std::string masks_text = result["masks"].as<std::string>();
-    if (masks_text == "auto") {
+    cli.masks_auto = masks_text == "auto";
+    if (cli.masks_auto) {
         const std::filesystem::path candidate =
             cli.images_dir.parent_path() / "masks";
         if (std::filesystem::is_directory(candidate)) cli.masks_dir = candidate;
     } else if (!masks_text.empty() && masks_text != "-") {
         cli.masks_dir = utf8_to_path(masks_text);
     }
+    const std::string sam_model_text = result["sam-model"].as<std::string>();
+    if (!sam_model_text.empty())
+        cli.sam_model = utf8_to_path(sam_model_text);
+    cli.sam_text = result["sam-text"].as<std::string>();
+    cli.sam_negative_text = result["sam-neg-text"].as<std::string>();
+    cli.sam_keep_prompted = result["sam-keep-prompted"].as<bool>();
+    cli.sam_video = result["sam-video"].as<bool>();
+    cli.sam_max_size = result["sam-max-size"].as<int>();
+    cli.sam_refresh = result["sam-refresh"].as<bool>();
+    if (cli.sam_max_size < 0)
+        throw std::invalid_argument("--sam-max-size must be non-negative");
     if (cli.delight) cli.texture = true;
     const bool have_existing_mesh =
         !cli.working_mesh.empty() || !cli.mask_mesh.empty();
@@ -1861,6 +1904,76 @@ void adopt_video_frames(
     ReconstructCli& cli, const std::filesystem::path& frames_dir) {
     cli.video_source = cli.images_dir;
     cli.images_dir = frames_dir;
+}
+
+bool is_still_image(const std::filesystem::path& path) {
+    const auto extension = lower_extension(path);
+    return extension == ".jpg" || extension == ".jpeg" || extension == ".png" ||
+           extension == ".tif" || extension == ".tiff";
+}
+
+std::vector<std::filesystem::path> list_still_images(
+    const std::filesystem::path& directory) {
+    std::vector<std::filesystem::path> files;
+    std::error_code error;
+    if (!std::filesystem::is_directory(directory, error)) return files;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(directory, error)) {
+        if (error || !entry.is_regular_file() || !is_still_image(entry.path()))
+            continue;
+        files.push_back(entry.path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+bool directory_has_mask(const std::filesystem::path& directory) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(directory, error)) return false;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(directory, error)) {
+        if (error || !entry.is_regular_file()) continue;
+        const auto extension = lower_extension(entry.path());
+        if (extension == ".png" || extension == ".jpg" || extension == ".jpeg")
+            return true;
+    }
+    return false;
+}
+
+void refresh_auto_masks(ReconstructCli& cli) {
+    if (!cli.masks_auto) return;
+    cli.masks_dir.clear();
+    const auto candidate = cli.images_dir.parent_path() / "masks";
+    std::error_code error;
+    if (std::filesystem::is_directory(candidate, error))
+        cli.masks_dir = candidate;
+}
+
+void ensure_sam_masks(ReconstructCli& cli) {
+    if (cli.sam_text.empty()) return;
+    auto output = cli.masks_dir.empty()
+        ? cli.images_dir.parent_path() / "masks"
+        : cli.masks_dir;
+    if (!cli.sam_refresh && directory_has_mask(output)) {
+        cli.masks_dir = output;
+        photara::core::Logger::instance().info(
+            "sam_masks=reused dir=", output);
+        return;
+    }
+    photara::sam::GenerateOptions options;
+    options.model = cli.sam_model;
+    options.output_dir = output;
+    options.images = list_still_images(cli.images_dir);
+    options.text = cli.sam_text;
+    options.negative_text = cli.sam_negative_text;
+    options.keep_prompted = cli.sam_keep_prompted;
+    options.video = cli.sam_video;
+    options.max_size = cli.sam_max_size;
+    if (options.images.size() < 1)
+        throw std::runtime_error(
+            "SAM mask generation needs images in " + cli.images_dir.string());
+    photara::sam::generate_masks(options);
+    cli.masks_dir = output;
 }
 
 void ensure_video_frames(ReconstructCli& cli, const bool preserve_cameras) {
@@ -3457,6 +3570,8 @@ int main(int argc, char** argv) {
               std::filesystem::exists(cli.working_sfm, project_error)) ||
              archive.has(photara::project::ChunkType::sfm));
         ensure_video_frames(cli, preserve_cameras);
+        refresh_auto_masks(cli);
+        ensure_sam_masks(cli);
 
 #if defined(PHOTARA_HAS_SPLAT)
         if (!cli.splat_dataset.empty()) {

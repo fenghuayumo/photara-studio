@@ -584,8 +584,15 @@ if(TARGET photara_features)
     target_include_directories(photara_cxxopts INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxxopts/include)
 
-    add_executable(photara src/tools/reconstruct.cpp)
+    add_executable(photara
+        src/tools/reconstruct.cpp
+        src/tools/sam_model_cache.cpp
+        src/tools/sam_masks.cpp)
     target_link_libraries(photara PRIVATE Photara::MVS cxxopts::cxxopts)
+    if(PHOTARA_HAS_SAM)
+        target_link_libraries(photara PRIVATE photara_sam3)
+        target_compile_definitions(photara PRIVATE PHOTARA_HAS_SAM=1)
+    endif()
     if(TARGET photara_splat)
         target_link_libraries(photara PRIVATE Photara::Splat)
         target_compile_definitions(photara PRIVATE PHOTARA_HAS_SPLAT=1)
@@ -655,6 +662,8 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/image_qa_view.cpp
                 ${PHOTARA_STUDIO_DIR}/main.cpp
                 ${PHOTARA_STUDIO_DIR}/pipeline.cpp
+                ${PHOTARA_STUDIO_DIR}/sam_model.cpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/sam_model_cache.cpp
                 ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
                 ${PHOTARA_STUDIO_DIR}/theme.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_chrome.cpp
@@ -697,6 +706,9 @@ if(TARGET photara_features)
             target_compile_features(photara_studio PRIVATE cxx_std_20)
             if(MSVC)
                 target_compile_options(photara_studio PRIVATE /utf-8)
+            endif()
+            if(PHOTARA_HAS_SAM)
+                target_compile_definitions(photara_studio PRIVATE PHOTARA_HAS_SAM=1)
             endif()
             target_compile_definitions(photara_studio PRIVATE
                 PHOTARA_CLI_PATH="$<TARGET_FILE:photara>")

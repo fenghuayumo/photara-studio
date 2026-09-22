@@ -50,6 +50,15 @@ struct Settings {
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;
+    // SAM 3 masks generated before alignment. The checkpoint itself is not
+    // stored in the project; only the prompt and whether generation is on.
+    bool sam_masks = false;
+    std::string sam_model;
+    std::string sam_text;
+    std::string sam_negative_text;
+    bool sam_keep_prompted = true;
+    bool sam_video = true;
+    int sam_max_size = 1600;
     bool build_mesh = false;
     // 0 = extract from geometry-supervised 3DGS, 1 = photogrammetry (MVS).
     int mesh_source = 0;

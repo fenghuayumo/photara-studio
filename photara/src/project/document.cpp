@@ -100,6 +100,13 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.sh_degree));
     writer.value(static_cast<std::int32_t>(settings.ppisp_layout != 0 ? 1 : 0));
     writer.value(static_cast<std::uint8_t>(settings.bilateral_grid));
+    writer.value(static_cast<std::uint8_t>(settings.sam_masks));
+    writer.string(store_path(path_from_utf8(settings.sam_model), base));
+    writer.string(settings.sam_text);
+    writer.string(settings.sam_negative_text);
+    writer.value(static_cast<std::uint8_t>(settings.sam_keep_prompted));
+    writer.value(static_cast<std::uint8_t>(settings.sam_video));
+    writer.value(static_cast<std::int32_t>(settings.sam_max_size));
     return writer.take();
 }
 
@@ -181,6 +188,19 @@ Settings decode_settings(
             reader.value<std::int32_t>() != 0 ? 1 : 0;
     if (reader.remaining() >= sizeof(std::uint8_t))
         settings.bilateral_grid = reader.value<std::uint8_t>() != 0;
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.sam_masks = reader.value<std::uint8_t>() != 0;
+    if (reader.remaining() > 0)
+        settings.sam_model = path_utf8(load_path(reader.string(), base));
+    if (reader.remaining() > 0) settings.sam_text = reader.string();
+    if (reader.remaining() > 0) settings.sam_negative_text = reader.string();
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.sam_keep_prompted = reader.value<std::uint8_t>() != 0;
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.sam_video = reader.value<std::uint8_t>() != 0;
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.sam_max_size = reader.value<std::int32_t>();
+    if (settings.sam_max_size <= 0) settings.sam_max_size = 1600;
     return settings;
 }
 

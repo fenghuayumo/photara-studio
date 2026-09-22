@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64 (Metal)
+            os: macos-latest
+            artifact: sam3-darwin-arm64
+            cmake_args: "-DBUILD_SHARED_LIBS=OFF"
+            build_args: ""
+            ext: tar.gz
+
+          - name: macOS x86_64
+            os: macos-latest
+            artifact: sam3-darwin-x86_64
+            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_NATIVE=OFF"
+            build_args: ""
+            ext: tar.gz
+
+          - name: Linux x86_64
+            os: ubuntu-latest
+            artifact: sam3-linux-x86_64
+            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF"
+            build_args: ""
+            ext: tar.gz
+
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+            artifact: sam3-linux-arm64
+            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF"
+            build_args: ""
+            ext: tar.gz
+
+          - name: Windows x86_64
+            os: windows-latest
+            artifact: sam3-win-x86_64
+            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF -A x64"
+            build_args: "--config Release"
+            ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: release-${{ matrix.artifact }}
+
+      - name: Configure
+        run: >
+          cmake -B build
+          ${{ runner.os != 'Windows' && '-G Ninja' || '' }}
+          ${{ matrix.cmake_args }}
+          ${{ runner.os != 'Windows' && '-DCMAKE_BUILD_TYPE=Release' || '' }}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build ${{ matrix.build_args }} --parallel
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging/${{ matrix.artifact }}/{lib,include,bin}
+
+          cp build/libsam3.a staging/${{ matrix.artifact }}/lib/
+          find build/ggml -name "*.a" -exec cp {} staging/${{ matrix.artifact }}/lib/ \;
+
+          cp sam3.h staging/${{ matrix.artifact }}/include/
+          cp -r ggml/include/* staging/${{ matrix.artifact }}/include/
+
+          for bin in sam3_quantize sam3_benchmark sam3_profile_edgetam; do
+            if [ -f "build/examples/${bin}" ]; then
+              cp "build/examples/${bin}" staging/${{ matrix.artifact }}/bin/
+            fi
+          done
+
+          cd staging
+          tar czf ../${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging/${{ matrix.artifact }}/lib
+          New-Item -ItemType Directory -Force -Path staging/${{ matrix.artifact }}/include
+          New-Item -ItemType Directory -Force -Path staging/${{ matrix.artifact }}/bin
+
+          # Library (MSVC multi-config puts outputs in Release/)
+          $libPaths = @("build/Release/sam3.lib", "build/sam3.lib")
+          foreach ($p in $libPaths) {
+            if (Test-Path $p) { Copy-Item $p staging/${{ matrix.artifact }}/lib/; break }
+          }
+
+          # ggml static libs
+          Get-ChildItem -Path build/ggml -Recurse -Filter "*.lib" | Copy-Item -Destination staging/${{ matrix.artifact }}/lib/
+
+          # Headers
+          Copy-Item sam3.h staging/${{ matrix.artifact }}/include/
+          Get-ChildItem -Path ggml/include -Filter "*.h" | Copy-Item -Destination staging/${{ matrix.artifact }}/include/
+
+          # Example binaries
+          foreach ($bin in @("sam3_quantize", "sam3_benchmark", "sam3_profile_edgetam")) {
+            $paths = @("build/examples/Release/${bin}.exe", "build/examples/${bin}.exe")
+            foreach ($p in $paths) {
+              if (Test-Path $p) { Copy-Item $p staging/${{ matrix.artifact }}/bin/; break }
+            }
+          }
+
+          Compress-Archive -Path staging/${{ matrix.artifact }} -DestinationPath ${{ matrix.artifact }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.${{ matrix.ext }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: sam3.cpp ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+          generate_release_notes: true
+          files: |
+            artifacts/sam3-darwin-arm64/*.tar.gz
+            artifacts/sam3-darwin-x86_64/*.tar.gz
+            artifacts/sam3-linux-x86_64/*.tar.gz
+            artifacts/sam3-linux-arm64/*.tar.gz
+            artifacts/sam3-win-x86_64/*.zip

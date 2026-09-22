@@ -397,6 +397,13 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.max_resolution = app.settings.max_resolution;
     settings.progressive_resolution = app.settings.progressive_resolution;
     settings.use_mask = app.settings.use_mask;
+    settings.sam_masks = app.settings.sam_masks;
+    settings.sam_model = app.settings.sam_model.data();
+    settings.sam_text = app.settings.sam_text.data();
+    settings.sam_negative_text = app.settings.sam_negative_text.data();
+    settings.sam_keep_prompted = app.settings.sam_keep_prompted;
+    settings.sam_video = app.settings.sam_video;
+    settings.sam_max_size = app.settings.sam_max_size;
     settings.build_mesh = app.settings.build_mesh;
     settings.mesh_source = app.settings.mesh_source;
     settings.mesh_method = app.settings.mesh_method;
@@ -452,6 +459,21 @@ void apply_project_settings(
     app.settings.max_resolution = settings.max_resolution;
     app.settings.progressive_resolution = settings.progressive_resolution;
     app.settings.use_mask = settings.use_mask;
+    app.settings.sam_masks = settings.sam_masks;
+    store_path_field(
+        app.settings.sam_model,
+        path_from_utf8_field(settings.sam_model.c_str()));
+    const auto store_text = [](auto& field, const std::string& text) {
+        if (text.size() + 1 > field.size()) return;
+        std::memcpy(field.data(), text.data(), text.size());
+        field[text.size()] = '\0';
+    };
+    store_text(app.settings.sam_text, settings.sam_text);
+    store_text(app.settings.sam_negative_text, settings.sam_negative_text);
+    app.settings.sam_keep_prompted = settings.sam_keep_prompted;
+    app.settings.sam_video = settings.sam_video;
+    app.settings.sam_max_size =
+        settings.sam_max_size > 0 ? settings.sam_max_size : 1600;
     app.settings.build_mesh = settings.build_mesh;
     app.settings.mesh_source = settings.mesh_source == 1 ? 1 : 0;
     app.settings.mesh_method = settings.mesh_method;
@@ -2279,6 +2301,7 @@ void poll_alignment_preview(App& app) {
 
 void start_align(App& app) {
     if (app.job.running()) return;
+    if (!ensure_sam_ready(app)) return;
     stop_splat_view(app);
     if (has_external_dataset(app)) {
         set_message(
@@ -2433,6 +2456,7 @@ const char* stop_job_label(const JobKind kind) {
 
 void start_export_sfm(App& app) {
     if (app.job.running()) return;
+    if (!ensure_sam_ready(app)) return;
     stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
@@ -2754,6 +2778,7 @@ void start_splat_view(App& app) {
 
 void start_train(App& app, const bool smoke) {
     if (app.job.running()) return;
+    if (!smoke && !ensure_sam_ready(app)) return;
     stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
@@ -2861,6 +2886,7 @@ void start_train(App& app, const bool smoke) {
 
 void start_dense(App& app) {
     if (app.job.running()) return;
+    if (!ensure_sam_ready(app)) return;
     stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
@@ -2911,6 +2937,7 @@ void start_dense(App& app) {
 
 void start_texture(App& app) {
     if (app.job.running()) return;
+    if (!ensure_sam_ready(app)) return;
     stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {

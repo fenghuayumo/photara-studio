@@ -1,0 +1,41 @@
+# PDF paper
+*.pdf
+
+# Build
+build/
+cmake-build-*/
+.cache/
+
+# Models/weights
+models/
+*.ggml
+*.bin
+*.pt
+*.pth
+
+# OS
+.DS_Store
+Thumbs.db
+
+__pycache__
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+/tmp/
+tests/output/
+tests/cpp_*
+tests/debug_*
+tests/ref*/
+raw_weights/
+
+# Test data
+data/
+
+# ImGui runtime layout
+imgui.ini

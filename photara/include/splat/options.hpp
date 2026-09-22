@@ -212,7 +212,7 @@ struct TrainingOptions {
     float ppisp_reg_crf_channel_var{0.1F};
     bool ppisp_clamp_output{false};
     // When both PPISP and the bilateral grid are enabled, PPISP runs first
-    // (exposure/WB, then spatially-varying affine), matching spirula-studio.
+    // (exposure and white balance, then the spatially varying affine).
     bool ppisp_before_bilagrid{true};
     float depth_weight{0.05F};
     float normal_weight{0.01F};

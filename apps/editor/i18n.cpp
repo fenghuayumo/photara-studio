@@ -534,6 +534,71 @@ constexpr Entry k_entries[] = {
     {"Live preview cadence", "实时预览间隔", "ライブプレビュー間隔", "실시간 미리보기 주기"},
     {"Coarse-to-fine resolution", "由粗到细分辨率", "粗い解像度から細かく", "거친 해상도에서 세밀하게"},
     {"Foreground mask training", "前景蒙版训练", "前景マスク学習", "전경 마스크 학습"},
+    {"SAM3 masks", "SAM3 蒙版", "SAM3 マスク", "SAM3 마스크"},
+    {"Generate SAM3 masks", "生成 SAM3 蒙版", "SAM3 マスクを生成", "SAM3 마스크 생성"},
+    {"SAM 3 segments a text prompt into a foreground mask before alignment.\n"
+     "The same masks are used for camera alignment and 3DGS training.\n"
+     "The model is Meta's and is downloaded only after you accept its licence.",
+     "SAM 3 在对齐前把文字提示分成前景蒙版。\n"
+     "同一份蒙版用于相机对齐和 3DGS 训练。\n"
+     "模型属于 Meta，只有在你接受其许可协议后才会下载。",
+     "SAM 3 はアライメント前にテキストから前景マスクを作ります。\n"
+     "同じマスクをカメラアライメントと 3DGS 学習に使います。\n"
+     "モデルは Meta のもので、ライセンスに同意したあとだけダウンロードします。",
+     "SAM 3는 정렬 전에 텍스트 프롬프트로 전경 마스크를 만듭니다.\n"
+     "같은 마스크를 카메라 정렬과 3DGS 학습에 사용합니다.\n"
+     "모델은 Meta의 것이며, 라이선스에 동의한 뒤에만 다운로드합니다."},
+    {"Prompt", "提示词", "プロンプト", "프롬프트"},
+    {"Several phrases, separated by semicolons.",
+     "多个短语用分号隔开。",
+     "複数の語句はセミコロンで区切ります。",
+     "여러 구문은 세미콜론으로 구분합니다."},
+    {"Negative prompt", "负向提示词", "除外プロンプト", "제외 프롬프트"},
+    {"Regions matching a negative phrase are removed from the mask.",
+     "匹配负向提示词的区域会从蒙版中去掉。",
+     "除外語句に合う領域はマスクから除きます。",
+     "제외 구문과 맞는 영역은 마스크에서 빼니다."},
+    {"Keep prompted subject", "保留提示的主体", "指示した被写体を残す", "지시한 대상을 유지"},
+    {"On: the prompt names the subject to keep.\n"
+     "Off: the prompt names distractors to remove.",
+     "打开：提示词是要保留的主体。\n关闭：提示词是要去掉的干扰物。",
+     "オン：残す被写体を指定します。\nオフ：除くものを指定します。",
+     "켜짐: 남길 대상을 지정합니다.\n꺼짐: 제거할 대상을 지정합니다."},
+    {"Track across frames", "跨帧跟踪", "フレーム間で追跡", "프레임 간 추적"},
+    {"SAM3 model", "SAM3 模型", "SAM3 モデル", "SAM3 모델"},
+    {"Model ready", "模型已就绪", "モデル準備完了", "모델 준비됨"},
+    {"Model not downloaded", "模型尚未下载", "モデル未ダウンロード", "모델이 다운로드되지 않음"},
+    {"License and download", "许可协议并下载", "ライセンスとダウンロード", "라이선스 및 다운로드"},
+    {"SAM 3 License (Meta)", "SAM 3 许可协议（Meta）", "SAM 3 ライセンス（Meta）", "SAM 3 라이선스(Meta)"},
+    {"SAM 3 is Meta's model, not part of Photara, and it comes with its "
+     "own licence. It is free to use, including commercially, but only on "
+     "Meta's terms. Photara cannot ship the weights or accept the licence "
+     "for you. Read the licence itself before continuing.",
+     "SAM 3 是 Meta 的模型，不属于 Photara，并且带有它自己的许可协议。"
+     "它可以免费使用，包括商业用途，但只在 Meta 的条件之下。"
+     "Photara 既不能随应用分发权重，也不能代你接受协议。"
+     "请在继续之前阅读协议本身。",
+     "SAM 3 は Meta のモデルで Photara の一部ではなく、独自のライセンスが"
+     "付いています。商用を含めて無償で使えますが、Meta の条件のもとでのみです。"
+     "Photara は重みを同梱することも、同意を代行することもできません。"
+     "続ける前にライセンス本文を読んでください。",
+     "SAM 3는 Meta의 모델이며 Photara의 일부가 아니고 자체 라이선스가 있습니다. "
+     "상업적 사용을 포함해 무료이지만 Meta의 조건 아래에서만 그렇습니다. "
+     "Photara는 가중치를 함께 배포하거나 대신 동의할 수 없습니다. "
+     "계속하기 전에 라이선스 본문을 읽으세요."},
+    {"Read the license", "阅读许可协议", "ライセンスを読む", "라이선스 읽기"},
+    {"Copy link", "复制链接", "リンクをコピー", "링크 복사"},
+    {"Download size about 707 MB", "下载大小约 707 MB", "ダウンロードサイズ約 707 MB", "다운로드 크기 약 707 MB"},
+    {"I have read and accept the SAM 3 License",
+     "我已阅读并接受 SAM 3 许可协议",
+     "SAM 3 ライセンスを読み、同意します",
+     "SAM 3 라이선스를 읽었으며 동의합니다"},
+    {"Download model", "下载模型", "モデルをダウンロード", "모델 다운로드"},
+    {"SAM 3 model is ready", "SAM 3 模型已就绪", "SAM 3 モデルの準備ができました", "SAM 3 모델이 준비되었습니다"},
+    {"This build does not include SAM mask generation.",
+     "此构建未包含 SAM 蒙版生成。",
+     "このビルドには SAM マスク生成が含まれていません。",
+     "이 빌드에는 SAM 마스크 생성이 포함되어 있지 않습니다."},
     {"Normal field", "法向场", "法線場", "법선 필드"},
     {"3DGS's learned normal field.\n"
      "Off (default) trains the GGGS path.",

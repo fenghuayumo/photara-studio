@@ -54,7 +54,7 @@ ColmapCamera colmap_camera_from(const PinholeCamera& camera, const std::uint32_t
     if (camera.model == CameraModel::equirectangular) {
         // COLMAP-fork spherical model (id 17). The chart is fixed by the image
         // size, and the parameter pair carries the resolution so that readers
-        // which do look at it (spirula, LichtFeld-style converters) can rebuild
+        // which do look at it can rebuild
         // fx = width / 2 pi without guessing.
         out.model = "EQUIRECTANGULAR";
         out.parameters = {static_cast<double>(camera.width),

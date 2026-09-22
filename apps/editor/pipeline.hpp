@@ -269,6 +269,13 @@ struct ProjectSettings {
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;
+    bool sam_masks = false;
+    std::array<char, 1024> sam_model{};
+    std::array<char, 512> sam_text{};
+    std::array<char, 512> sam_negative_text{};
+    bool sam_keep_prompted = true;
+    bool sam_video = true;
+    int sam_max_size = 1600;
 
     // Mesh extraction. `mesh_source` selects the product path:
     // 0 = geometry-supervised 3DGS then extract, 1 = photogrammetry (MVS).

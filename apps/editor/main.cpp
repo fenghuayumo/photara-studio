@@ -301,6 +301,7 @@ int main(const int argc, char** argv) {
         editor::draw_mesh_export_modal(app);
         editor::draw_alignment_export_modal(app);
         editor::draw_splat_export_modal(app);
+        editor::draw_sam_license_modal(app);
         const ClearResultsAction clear_results_action =
             editor::draw_clear_results_modal(app);
         if (app.close_requested) glfwSetWindowShouldClose(window, GLFW_TRUE);

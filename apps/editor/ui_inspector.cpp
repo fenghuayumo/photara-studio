@@ -6,6 +6,7 @@
 
 #include "io/image.hpp"
 #include "io/video_frames.hpp"
+#include "sam/model_cache.hpp"
 
 #include "imgui_internal.h"
 
@@ -142,6 +143,63 @@ Action draw_inspector(App& app) {
                 ImGui::TreePop();
             }
         }
+#if defined(PHOTARA_HAS_SAM)
+        ImGui::Spacing();
+        theme::caption(tr("SAM3 masks"));
+        if (ImGui::Checkbox(tr("Generate SAM3 masks"), &app.settings.sam_masks)) {
+            if (app.settings.sam_masks) {
+                app.settings.use_mask = true;
+                if (!photara::sam::license_accepted() ||
+                    photara::sam::locate_model().empty()) {
+                    app.sam_license_tick = photara::sam::license_accepted();
+                    app.show_sam_license = true;
+                }
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr(
+                "SAM 3 segments a text prompt into a foreground mask before alignment.\n"
+                "The same masks are used for camera alignment and 3DGS training.\n"
+                "The model is Meta's and is downloaded only after you accept its licence."));
+        if (app.settings.sam_masks) {
+            theme::caption(tr("Prompt"));
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputText(
+                "##sam_text", app.settings.sam_text.data(),
+                app.settings.sam_text.size());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr("Several phrases, separated by semicolons."));
+            theme::caption(tr("Negative prompt"));
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputText(
+                "##sam_neg", app.settings.sam_negative_text.data(),
+                app.settings.sam_negative_text.size());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr(
+                    "Regions matching a negative phrase are removed from the mask."));
+            ImGui::Checkbox(
+                tr("Keep prompted subject"), &app.settings.sam_keep_prompted);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr(
+                    "On: the prompt names the subject to keep.\n"
+                    "Off: the prompt names distractors to remove."));
+            ImGui::Checkbox(tr("Track across frames"), &app.settings.sam_video);
+            // The licence dialog is only how the weights get onto disk.
+            // Once a checkpoint is present there is nothing left to download.
+            if (photara::sam::locate_model().empty()) {
+                theme::metric(tr("SAM3 model"), tr("Model not downloaded"));
+                if (ImGui::Button(tr("License and download"), {-1.F, 0.F})) {
+                    app.sam_license_tick = photara::sam::license_accepted();
+                    app.show_sam_license = true;
+                }
+            }
+        }
+#else
+        ImGui::Spacing();
+        theme::caption(tr("SAM3 masks"));
+        ImGui::TextWrapped("%s", tr(
+            "This build does not include SAM mask generation."));
+#endif
         theme::caption("Project file");
         ImGui::SetNextItemWidth(-30.F);
         if (ImGui::InputText(

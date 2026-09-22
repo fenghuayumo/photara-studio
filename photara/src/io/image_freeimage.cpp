@@ -622,6 +622,41 @@ RgbImage load_rgb_with_minimum_size(
     return decode_jpeg_rgb(file, minimum_width, minimum_height);
 }
 
+void save_gray_png(const GrayImage& image, const std::filesystem::path& path) {
+    if (image.width == 0 || image.height == 0 ||
+        image.pixels.size() !=
+            static_cast<std::size_t>(image.width) * image.height)
+        throw std::invalid_argument("Invalid grayscale image for PNG export");
+    png_image png{};
+    png.version = PNG_IMAGE_VERSION;
+    png.width = image.width;
+    png.height = image.height;
+    png.format = PNG_FORMAT_GRAY;
+    png_alloc_size_t bytes = 0;
+    if (png_image_write_to_memory(
+            &png, nullptr, &bytes, 0, image.pixels.data(), 0, nullptr) == 0)
+        PngImage::fail(png, "PNG mask size failed");
+    std::vector<std::uint8_t> encoded(bytes);
+    if (png_image_write_to_memory(
+            &png, encoded.data(), &bytes, 0, image.pixels.data(), 0,
+            nullptr) == 0) {
+        png_image_free(&png);
+        PngImage::fail(png, "PNG mask encode failed");
+    }
+    png_image_free(&png);
+    encoded.resize(bytes);
+    if (!path.parent_path().empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+    }
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output ||
+        !output.write(
+            reinterpret_cast<const char*>(encoded.data()),
+            static_cast<std::streamsize>(encoded.size())))
+        throw std::runtime_error("Failed to save PNG: " + path.string());
+}
+
 void save_rgb_png(const RgbImage& image, const std::filesystem::path& path) {
     if (image.width == 0 || image.height == 0 ||
         image.pixels.size() !=

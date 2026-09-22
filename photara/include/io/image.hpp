@@ -63,6 +63,9 @@ RgbImage load_rgb(const std::filesystem::path& path);
 // Writes 8-bit RGB PNG (top-left origin).
 void save_rgb_png(const RgbImage& image, const std::filesystem::path& path);
 
+// Writes 8-bit grayscale PNG (top-left origin). Used for foreground masks.
+void save_gray_png(const GrayImage& image, const std::filesystem::path& path);
+
 // Bilinear resize of grayscale or interleaved RGB (channels = 1 or 3).
 void resize_bilinear(
     const std::uint8_t* source, std::uint32_t source_width, std::uint32_t source_height,
