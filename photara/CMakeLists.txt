@@ -10,6 +10,12 @@ if(PHOTARA_ENABLE_CUDA)
     check_language(CUDA)
     if(CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
+        photara_resolve_cuda_architectures(
+            _photara_cuda_architectures)
+        set(CMAKE_CUDA_ARCHITECTURES
+            "${_photara_cuda_architectures}")
+        message(STATUS
+            "Photara CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
         find_package(CUDAToolkit 12.0 REQUIRED)
         list(APPEND PHOTARA_BA_SOURCES
             src/ba/linearizer_cuda.cu
@@ -46,7 +52,7 @@ if(PHOTARA_ENABLE_CUDA)
     target_link_libraries(photara_ba PUBLIC CUDA::cudart CUDA::cusolver)
     target_compile_definitions(photara_ba PUBLIC PHOTARA_HAS_CUDA=1)
     set_target_properties(photara_ba PROPERTIES
-        CUDA_ARCHITECTURES native
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 endif()
@@ -144,7 +150,7 @@ if(PHOTARA_ENABLE_FEATURES)
         target_compile_features(photara_match_cuda PUBLIC cxx_std_20)
         target_link_libraries(photara_match_cuda PUBLIC CUDA::cudart)
         set_target_properties(photara_match_cuda PROPERTIES
-            CUDA_ARCHITECTURES native
+            CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
             CUDA_SEPARABLE_COMPILATION ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON)
         target_link_libraries(photara_features PRIVATE photara_match_cuda)
@@ -355,7 +361,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/W4,-EHsc>)
         endif()
         set_target_properties(photara_mvs_cuda PROPERTIES
-            CUDA_ARCHITECTURES native
+            CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
             CUDA_SEPARABLE_COMPILATION ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON
             POSITION_INDEPENDENT_CODE ON)
@@ -421,7 +427,7 @@ if(PHOTARA_ENABLE_FEATURES)
         target_compile_options(photara_splat_cuda PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
         set_target_properties(photara_splat_cuda PROPERTIES
-            CUDA_ARCHITECTURES native
+            CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
             CUDA_SEPARABLE_COMPILATION OFF
             POSITION_INDEPENDENT_CODE ON)
 

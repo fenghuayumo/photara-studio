@@ -31,6 +31,10 @@ if(PHOTARA_ENABLE_SAM)
         check_language(CUDA)
         if(CMAKE_CUDA_COMPILER)
             enable_language(CUDA)
+            photara_resolve_cuda_architectures(
+                _photara_cuda_architectures)
+            set(CMAKE_CUDA_ARCHITECTURES
+                "${_photara_cuda_architectures}")
             set(GGML_CUDA ON CACHE BOOL "" FORCE)
         else()
             message(WARNING
@@ -52,12 +56,8 @@ if(PHOTARA_ENABLE_SAM)
             "${PHOTARA_SAM3_ROOT}/ggml"
             "${CMAKE_BINARY_DIR}/ggml")
         if(TARGET ggml-cuda)
-            # The repository may carry an old global CUDA architecture cache
-            # (for example sm_52). SAM 3 needs the attention kernels compiled
-            # for the GPU that will execute them, matching Photara's other CUDA
-            # targets.
             set_target_properties(ggml-cuda PROPERTIES
-                CUDA_ARCHITECTURES native)
+                CUDA_ARCHITECTURES "${_photara_cuda_architectures}")
         endif()
         add_library(photara_sam3 STATIC
             "${PHOTARA_SAM3_ROOT}/sam3.cpp"

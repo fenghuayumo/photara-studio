@@ -24,7 +24,7 @@ target_include_directories(splat_drender
 target_compile_features(splat_drender PUBLIC cxx_std_20)
 target_link_libraries(splat_drender PUBLIC CUDA::cudart)
 set_target_properties(splat_drender PROPERTIES
-    CUDA_ARCHITECTURES native
+    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
     POSITION_INDEPENDENT_CODE ON)
 
 if(MSVC)

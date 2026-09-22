@@ -165,6 +165,7 @@ ctest --test-dir build -C Release --output-on-failure
 | `PHOTARA_BUILD_BENCHMARKS` | `OFF` | Configure auxiliary tools and benchmarks |
 | `PHOTARA_BUILD_PYTHON` | `OFF` | Build the experimental nanobind module |
 | `PHOTARA_ENABLE_CUDA` | `ON` | Enable CUDA BA and MVS acceleration |
+| `PHOTARA_CUDA_ARCHITECTURES` | auto | CUDA targets; auto builds RTX 20/30/40 cubins, RTX 50 with CUDA 12.8+, and PTX fallback |
 | `PHOTARA_ENABLE_SPLAT` | `ON` | Build CUDA Gaussian training and extraction |
 | `PHOTARA_ENABLE_FEATURES` | `ON` | Build image features, SfM, MVS, and the CLI |
 | `PHOTARA_ENABLE_SIFTGPU` | `ON` | Enable the optional SiftGPU adapter |
@@ -179,6 +180,16 @@ ctest --test-dir build -C Release --output-on-failure
 | `PHOTARA_ENABLE_ACCUTILE` | `ON` | Use opacity-aware SnugBox/AccuTile enumeration |
 | `PHOTARA_ENABLE_NATIVE_ARCH` | `ON` | Optimize CPU code for the build host |
 | `PHOTARA_DRENDER_ROOT` | auto | Override the `photara_drender` source directory |
+
+The automatic CUDA release set contains native cubins for Turing (`sm_75`),
+Ampere (`sm_86`), Ada (`sm_89`), and, with CUDA 12.8 or newer, Blackwell
+(`sm_120`). It also embeds `compute_75` PTX for forward compatibility. Override
+the complete set when producing a specialized build:
+
+```powershell
+cmake -S . -B build `
+  -DPHOTARA_CUDA_ARCHITECTURES="75-real;86-real;89-real;120-real;75-virtual"
+```
 
 To use a local ONNX Runtime SDK instead of `FetchContent`:
 

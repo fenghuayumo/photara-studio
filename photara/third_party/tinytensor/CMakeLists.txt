@@ -62,10 +62,10 @@ add_library(tinytensor_cuda OBJECT ${TINYTENSOR_CUDA_SOURCES})
 target_include_directories(tinytensor_cuda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Set CUDA architectures explicitly for the target
-# Use the configured project architecture. Native keeps local developer builds
-# fast while allowing release builds to pass an explicit architecture list.
+# Use the architecture set resolved by the parent project so every CUDA object
+# in the final executable has the same deployment coverage.
 set_target_properties(tinytensor_cuda PROPERTIES
-    CUDA_ARCHITECTURES "native"
+    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
     FOLDER "external"
 )
 

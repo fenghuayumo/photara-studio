@@ -32,6 +32,34 @@ endfunction()
 option(PHOTARA_BUILD_PYTHON
     "Build the nanobind Python experiment module" OFF)
 option(PHOTARA_ENABLE_CUDA "Build CUDA acceleration" ON)
+set(PHOTARA_CUDA_ARCHITECTURES "" CACHE STRING
+    "CUDA architectures for Photara targets (empty = RTX 20+ release set)")
+
+# Resolve one architecture set for every in-tree and bundled CUDA target.
+# The default ships native cubins for the desktop RTX generations supported by
+# the active toolkit, plus compute_75 PTX for forward compatibility. CUDA 12.8
+# is the first toolkit in this project that can emit sm_120 for RTX 50 cards.
+function(photara_resolve_cuda_architectures out_var)
+    if(PHOTARA_CUDA_ARCHITECTURES)
+        set(_photara_cuda_architectures
+            ${PHOTARA_CUDA_ARCHITECTURES})
+    else()
+        set(_photara_cuda_architectures
+            75-real   # Turing: RTX 20
+            86-real   # Ampere: RTX 30
+            89-real)  # Ada: RTX 40
+        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.8")
+            list(APPEND _photara_cuda_architectures
+                120-real) # Blackwell: RTX 50
+        endif()
+        list(APPEND _photara_cuda_architectures
+            75-virtual) # PTX fallback for later architectures
+    endif()
+    set(CMAKE_CUDA_ARCHITECTURES
+        "${_photara_cuda_architectures}" CACHE STRING
+        "CUDA architectures used by Photara and bundled dependencies" FORCE)
+    set(${out_var} "${_photara_cuda_architectures}" PARENT_SCOPE)
+endfunction()
 option(PHOTARA_ENABLE_SPLAT
     "Build CUDA Gaussian splat training (TinyTensor + splat_drender)" ON)
 option(PHOTARA_ENABLE_VULKAN_COMPUTE
