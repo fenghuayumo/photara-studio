@@ -1,21 +1,29 @@
-# Intrinsic / Delight 模型许可边界
+# Intrinsic / Delight model license boundary
 
-`--delight`（图像域去光照）使用 **Intrinsic** 的 `stage_0.onnx` … `stage_3.onnx`
-权重，通过 C++ ONNX Runtime 推理（`photara/src/texture/delight.cpp`）。
+`--delight` performs image-space intrinsic decomposition with the Intrinsic
+`stage_0.onnx` through `stage_3.onnx` weights. Inference is implemented with
+the C++ ONNX Runtime path in `photara/src/texture/delight.cpp`.
 
-## 现状
+## Current status
 
-- 仓库**不分发**这些权重。请自行获取并放到 `PHOTARA_INTRINSIC_MODELS_DIR`
-  （默认 `${CMAKE_BINARY_DIR}/Models/Intrinsic`，见 `cmake/FetchIntrinsicModels.cmake`）。
-- 上游（`compphoto/Intrinsic`）按项目记录为**学术 / 非商用**许可。
-  该结论来自项目内部记录，**不是法律意见**；以商业化产品发布前，
-  必须由法务或负责人对照上游仓库的 LICENSE 与模型卡逐条复核。
-- 未放置权重时 `--delight` 会报错；此时改用 `--texture` 仍可得到投影烘焙结果。
+- This repository does not distribute the model weights. Obtain them
+  separately and place them in `PHOTARA_INTRINSIC_MODELS_DIR`, which defaults
+  to `${CMAKE_BINARY_DIR}/Models/Intrinsic`; see
+  `cmake/FetchIntrinsicModels.cmake`.
+- Internal project records classify the upstream `compphoto/Intrinsic`
+  project and its weights as academic/non-commercial. This statement is not
+  legal advice. Before any commercial release, the responsible owner or legal
+  counsel must verify the upstream license and model card directly.
+- `--delight` fails when the weights are unavailable. Plain `--texture`
+  remains available for projection-based texture baking.
 
-## 影响面
+## Scope
 
-- 该许可只约束 Delight 权重与推理，不改变仓库其余部分（SfM / MVS / Splat /
-  photara_drender 贴图）的边界；
-- 导出产物只有在显式使用 `--delight` 时才包含由这些权重生成的 albedo；
-- 仓库其余第三方组件（VLFeat、cxxopts、tinytensor、`photara_drender` 子模块）各自的
-  许可见 [SPLAT_CPP.md](SPLAT_CPP.md) 的「许可证边界」一节与对应目录。
+- This boundary applies only to the Delight weights and inference path. It
+  does not change the license boundaries of SfM, MVS, Splat, or
+  `photara_drender` texture baking.
+- Exported albedo is influenced by these weights only when `--delight` is
+  explicitly enabled.
+- Other third-party components, including VLFeat, cxxopts, TinyTensor, and the
+  `photara_drender` submodule, retain their own licenses. See the license
+  section in [SPLAT_CPP.md](SPLAT_CPP.md) and the corresponding source trees.
