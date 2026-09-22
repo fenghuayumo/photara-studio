@@ -958,8 +958,14 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     handle_preview_view_input(app, viewport_input);
     std::uint32_t raster_w = app.preview_raster_width;
     std::uint32_t raster_h = app.preview_raster_height;
+    // During optimization, a smaller interactive raster keeps camera motion
+    // responsive without taking too much GPU time away from training. Once
+    // training has handed the model to the standalone viewer, the GPU is free
+    // to render camera motion at the viewport's full resolution.
+    const bool use_interactive_downscale =
+        training && app.camera.interacting;
     fit_preview_raster(
-        max.x - min.x, max.y - min.y, app.camera.interacting, raster_w,
+        max.x - min.x, max.y - min.y, use_interactive_downscale, raster_w,
         raster_h);
     sync_live_preview_camera(app, false, raster_w, raster_h);
 
