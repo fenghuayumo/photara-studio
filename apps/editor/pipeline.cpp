@@ -111,7 +111,6 @@ constexpr Band k_train_bands[] = {
 };
 
 constexpr float k_training_band_begin = 0.12F;
-constexpr float k_training_band_end = 0.88F;
 constexpr float k_meshing_band_begin = 0.88F;
 
 std::string runtime_cache_key(const std::filesystem::path& project_file) {
@@ -724,6 +723,15 @@ void RunMonitor::consume(const std::string& line) {
             number_after(line, " sh_degree=", training_.sh_degree);
             number_after(line, " step_ms=", training_.step_milliseconds);
             enter_stage(Stage::training, k_training_band_begin);
+            const float iteration_ratio = std::clamp(
+                static_cast<float>(training_.iteration) /
+                    static_cast<float>(
+                        std::max(training_.total_iterations, 1U)),
+                0.F, 1.F);
+            // Training progress is presented as iteration / total_iterations.
+            // Keep the same value as the monotonic floor so saving the model
+            // after the final iteration cannot make the status bar regress.
+            floor_ = std::max(floor_, iteration_ratio);
             task_ = {};
         }
         return;
@@ -868,12 +876,10 @@ float RunMonitor::fraction() const {
     if (stage_ == Stage::complete) return 1.F;
     if (stage_ == Stage::training && training_.valid &&
         training_.total_iterations > 0) {
-        const float ratio = static_cast<float>(training_.iteration) /
-                            static_cast<float>(training_.total_iterations);
-        return std::max(
-            floor_, k_training_band_begin +
-                        std::clamp(ratio, 0.F, 1.F) *
-                            (k_training_band_end - k_training_band_begin));
+        return std::clamp(
+            static_cast<float>(training_.iteration) /
+                static_cast<float>(training_.total_iterations),
+            0.F, 1.F);
     }
     if (task_.active && task_.total > 0 && band_end_ > band_begin_) {
         const float ratio = std::clamp(task_.percent / 100.F, 0.F, 1.F);
