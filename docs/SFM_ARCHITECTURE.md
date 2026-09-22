@@ -106,11 +106,16 @@ is the sibling `masks/` directory; an explicit `--masks` path overrides it.
 
 `--sam-neg-text` removes named distractors, `--sam-keep-prompted=false`
 interprets the main prompt as the content to remove, `--sam-video` enables
-ordered-frame tracking, and `--sam-max-size` controls inference resolution.
-Existing masks are reused unless `--sam-refresh` is set.
+ordered-frame tracking, and `--sam-max-size=0` uses the checkpoint's native
+inference resolution (the default). Existing masks are reused unless
+`--sam-refresh` is set.
 
-SAM support is compiled from `third_party/sam3` with ggml. CUDA is the GPU
-backend when the toolkit is available; otherwise inference stays on CPU.
+SAM support is compiled from `third_party/sam3` with ggml. Builds always have
+the CPU backend, add CUDA when the CUDA toolkit is available, and add Vulkan
+when a Vulkan SDK with `glslc` is available. `--sam-backend` accepts `auto`,
+`cpu`, `cuda`, `vulkan`, or `metal`; `auto` prefers CUDA, then Vulkan/Metal,
+and finally CPU. An explicitly requested unavailable backend is an error and
+never silently falls back.
 Model weights are not bundled. `--sam-model` selects a local GGML checkpoint;
 otherwise Photara searches its user cache and `PHOTARA_SAM_MODEL`. The editor
 requires explicit acceptance of Meta's SAM 3 license before downloading the

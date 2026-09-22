@@ -200,7 +200,7 @@ Settings decode_settings(
         settings.sam_video = reader.value<std::uint8_t>() != 0;
     if (reader.remaining() >= sizeof(std::int32_t))
         settings.sam_max_size = reader.value<std::int32_t>();
-    if (settings.sam_max_size <= 0) settings.sam_max_size = 1600;
+    if (settings.sam_max_size < 0) settings.sam_max_size = 0;
     return settings;
 }
 

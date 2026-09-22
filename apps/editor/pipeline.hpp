@@ -276,7 +276,7 @@ struct ProjectSettings {
     std::array<char, 512> sam_negative_text{};
     bool sam_keep_prompted = true;
     bool sam_video = true;
-    int sam_max_size = 1600;
+    int sam_max_size = 0;
 
     // Mesh extraction. `mesh_source` selects the product path:
     // 0 = geometry-supervised 3DGS then extract, 1 = photogrammetry (MVS).

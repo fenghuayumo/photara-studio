@@ -170,6 +170,7 @@ ctest --test-dir build -C Release --output-on-failure
 | `PHOTARA_ENABLE_FEATURES` | `ON` | Build image features, SfM, MVS, and the CLI |
 | `PHOTARA_ENABLE_SIFTGPU` | `ON` | Enable the optional SiftGPU adapter |
 | `PHOTARA_ENABLE_SAM` | `ON` | Build in-process SAM 3 mask generation with ggml |
+| `PHOTARA_ENABLE_SAM_VULKAN` | `ON` | Build the ggml Vulkan backend when a Vulkan SDK with `glslc` is available |
 | `PHOTARA_ENABLE_ONNX` | `OFF` | Enable ONNX Runtime feature and delight models |
 | `PHOTARA_FETCH_ONNX` | `ON` | Download ONNX Runtime when no local SDK is set |
 | `PHOTARA_ONNXRUNTIME_ROOT` | empty | Path to a local ONNX Runtime SDK |

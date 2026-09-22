@@ -472,8 +472,7 @@ void apply_project_settings(
     store_text(app.settings.sam_negative_text, settings.sam_negative_text);
     app.settings.sam_keep_prompted = settings.sam_keep_prompted;
     app.settings.sam_video = settings.sam_video;
-    app.settings.sam_max_size =
-        settings.sam_max_size > 0 ? settings.sam_max_size : 1600;
+    app.settings.sam_max_size = std::max(0, settings.sam_max_size);
     app.settings.build_mesh = settings.build_mesh;
     app.settings.mesh_source = settings.mesh_source == 1 ? 1 : 0;
     app.settings.mesh_method = settings.mesh_method;

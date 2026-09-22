@@ -58,7 +58,7 @@ struct Settings {
     std::string sam_negative_text;
     bool sam_keep_prompted = true;
     bool sam_video = true;
-    int sam_max_size = 1600;
+    int sam_max_size = 0;
     bool build_mesh = false;
     // 0 = extract from geometry-supervised 3DGS, 1 = photogrammetry (MVS).
     int mesh_source = 0;

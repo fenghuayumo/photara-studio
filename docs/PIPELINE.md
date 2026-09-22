@@ -112,7 +112,8 @@ Current constraints:
   semantics.
 - `--splat` requires CUDA and `PHOTARA_ENABLE_SPLAT=ON`.
 - SAM preprocessing requires `PHOTARA_ENABLE_SAM=ON` and a local SAM 3 GGML
-  checkpoint. The in-tree ggml runtime uses CUDA when the toolkit is available.
+  checkpoint. Select `--sam-backend auto|cpu|cuda|vulkan|metal`; automatic
+  selection prefers CUDA, then Vulkan/Metal, and then CPU.
 
 ## 5. Artifacts
 
