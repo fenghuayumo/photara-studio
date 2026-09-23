@@ -685,10 +685,10 @@ Action draw_toolbar(App& app) {
             ? tr("Stop the running job first to change reconstruction options.")
             : (app.settings.mesh_source == 1
                    ? tr("Extract a surface with the MVS mesh pipeline after alignment.\n"
-                     "Choose Extract Mesh (MVS) or From Gaussians in the Mesh panel.")
+                     "Choose From MVS or From Gaussians in the Mesh panel.")
                    : tr("Extract a surface after 3DGS training.\n"
                      "From Gaussians enables depth-normal and multi-view geometry\n"
-                     "losses during optimisation. Switch to Extract Mesh (MVS) in the\n"
+                     "losses during optimisation. Switch to From MVS in the\n"
                      "Mesh panel for a photogrammetry surface."));
         ImGui::SetTooltip("%s", mesh_tip);
     }

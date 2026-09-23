@@ -596,7 +596,7 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
                 "Include a surface mesh in the reconstruction.\n"
-                "Choose From Gaussians or Extract Mesh (MVS) below.");
+                "Choose From Gaussians or From MVS below.");
         if (app.settings.build_mesh) {
             ImGui::Spacing();
             theme::caption("Method");
@@ -610,15 +610,15 @@ Action draw_inspector(App& app) {
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
             if (ImGui::RadioButton(
-                    tr("Extract Mesh (MVS)"), app.settings.mesh_source == 1)) {
+                    tr("From MVS"), app.settings.mesh_source == 1)) {
                 app.settings.mesh_source = 1;
                 if (app.settings.mesh_method == 3)
                     app.settings.mesh_method = 0;
             }
             ImGui::PushTextWrapPos(0.F);
             theme::caption(
-                "PatchMatch stereo from aligned cameras, then fuse a mesh. "
-                "This is the MVS mesh pipeline. 3DGS stays appearance-only.");
+                "PatchMatch stereo from aligned cameras, then fuse a mesh "
+                "from the dense cloud. 3DGS stays appearance-only.");
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
             theme::caption("Surface");
@@ -769,7 +769,8 @@ Action draw_inspector(App& app) {
             theme::caption("Mesh is ready. Bake Texture to project the photos.");
         }
         if (theme::toolbar_button(
-                app.has_texture ? "Re-bake Texture" : "Bake Texture",
+                app.has_texture ? "Re-bake Texture##texture_section"
+                                : "Bake Texture##texture_section",
                 {-1.F, 28.F}, !busy && app.has_mesh))
             action = Action::texture;
         if (ImGui::IsItemHovered())
@@ -1084,6 +1085,26 @@ Action draw_inspector(App& app) {
     }
 
     // Context-appropriate primary action pinned to the bottom of the panel.
+    const auto hover_tip = [](const char* english) {
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", tr(english));
+    };
+    const char* const train_tip = mesh_from_gaussians(app.settings)
+        ? "Train 3DGS with depth and normal losses, then extract a "
+          "surface from the Gaussians."
+        : "Train appearance-only 3DGS from the aligned cameras. "
+          "The mesh stays on the MVS path.";
+    const char* const extract_tip = mesh_from_gaussians(app.settings)
+        ? (app.has_model
+               ? "Extract a surface from the trained 3DGS model.\n"
+                 "Uses the saved Gaussians. Training is not started again."
+               : "Extract a surface from the Gaussians.\n"
+                 "Trains with depth and normal losses, then builds the selected surface.")
+        : "Build a mesh from the MVS dense cloud.\n"
+          "PatchMatch stereo from the aligned cameras, then fuse triangles.";
+    const char* const bake_tip = app.has_texture
+        ? "Unwrap UVs again and reproject the calibrated photos onto the current mesh."
+        : "Unwrap UVs and project the calibrated photos onto the current mesh.";
     ImGui::Dummy({0, 10.F});
     if (busy) {
         if (app.job.paused()) {
@@ -1108,25 +1129,33 @@ Action draw_inspector(App& app) {
             action = Action::stop;
     } else if (app.has_mesh) {
         if (theme::primary_button(
-                app.has_texture ? "Re-bake Texture" : "Bake Texture",
+                app.has_texture ? "Re-bake Texture##primary"
+                                : "Bake Texture##primary",
                 {-1.F, 40.F}, true))
             action = Action::texture;
+        hover_tip(bake_tip);
         ImGui::Dummy({0, 6.F});
         if (mesh_from_mvs(app.settings)) {
-            if (theme::toolbar_button("Extract Mesh", {-1.F, 32.F}))
+            if (theme::toolbar_button("Extract Mesh##primary_mvs", {-1.F, 32.F}))
                 action = Action::dense;
+            hover_tip(extract_tip);
             ImGui::Dummy({0, 6.F});
-            if (theme::toolbar_button("Train 3DGS", {-1.F, 32.F}))
+            if (theme::toolbar_button("Train 3DGS##primary_mvs", {-1.F, 32.F}))
                 action = Action::train;
+            hover_tip(train_tip);
         } else {
             if (theme::toolbar_button(
-                    mesh_from_gaussians(app.settings) ? "Train 3DGS + Mesh"
-                                                      : "Train 3DGS",
+                    mesh_from_gaussians(app.settings)
+                        ? "Train 3DGS + Mesh##primary_gaussian"
+                        : "Train 3DGS##primary_gaussian",
                     {-1.F, 32.F}))
                 action = Action::train;
+            hover_tip(train_tip);
             ImGui::Dummy({0, 6.F});
-            if (theme::toolbar_button("Extract Mesh", {-1.F, 32.F}))
+            if (theme::toolbar_button(
+                    "Extract Mesh##primary_gaussian", {-1.F, 32.F}))
                 action = Action::dense;
+            hover_tip(extract_tip);
         }
     } else if (has_external_dataset(app)) {
         if (mesh_from_mvs(app.settings)) {

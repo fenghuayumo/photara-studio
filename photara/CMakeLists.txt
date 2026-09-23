@@ -499,6 +499,11 @@ if(PHOTARA_ENABLE_FEATURES)
             Photara::MVS
             photara::render)
         target_compile_definitions(photara_texture PUBLIC PHOTARA_HAS_TEXTURE=1)
+        if(TARGET photara::mesh)
+            target_link_libraries(photara_texture PRIVATE photara::mesh)
+            target_compile_definitions(
+                photara_texture PRIVATE PHOTARA_HAS_MESH_TOOLS=1)
+        endif()
         file(TO_CMAKE_PATH "${PHOTARA_INTRINSIC_MODELS_DIR}"
             PHOTARA_INTRINSIC_MODELS_DIR)
         configure_file(

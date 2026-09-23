@@ -2891,8 +2891,66 @@ void start_train(App& app, const bool smoke) {
     app.preview.close_export_handles();
 }
 
+void start_splat_mesh(App& app) {
+    if (app.job.running()) return;
+    if (!ensure_sam_ready(app)) return;
+    stop_splat_view(app);
+    assign_default_project_folder(app);
+    if (app.settings.project_dir[0] == '\0') {
+        set_message(app, "Save or choose a project file first", theme::warning);
+        return;
+    }
+    if (!alignment_ready(app) && !alignment_cache_present(app)) {
+        set_message(
+            app,
+            "Align photos or load an external camera dataset before Extract Mesh",
+            theme::warning);
+        return;
+    }
+    refresh_artifacts(app);
+    const auto model = existing_splat_model(app);
+    if (model.empty()) {
+        start_train(app, false);
+        return;
+    }
+    app.settings.build_mesh = true;
+    write_working_subject_bounds(app);
+    std::error_code error;
+    std::filesystem::create_directories(app.layout.root, error);
+    if (error) {
+        set_message(app, "Cannot create project directory", theme::danger);
+        return;
+    }
+    app.view_mode = VisualizationMode::splat;
+    try {
+        app.monitor.begin(JobKind::dense, Stage::meshing);
+        app.log.open(app.layout.dense_log);
+        app.job.start(
+            build_splat_mesh_command(
+                PHOTARA_CLI_PATH, app.settings, app.layout, model),
+            app.layout.dense_log);
+        app.active_job = JobKind::dense;
+        set_message(
+            app, "Extracting mesh from the trained 3DGS model...",
+            theme::accent);
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+    }
+}
+
 void start_dense(App& app) {
     if (app.job.running()) return;
+    // From Gaussians extracts the surface from the saved 3DGS model.
+    // From MVS fuses the mesh from the dense photogrammetry cloud.
+    if (mesh_from_gaussians(app.settings)) {
+        refresh_artifacts(app);
+        if (app.has_model) {
+            start_splat_mesh(app);
+            return;
+        }
+        start_train(app, false);
+        return;
+    }
     if (!ensure_sam_ready(app)) return;
     stop_splat_view(app);
     assign_default_project_folder(app);
@@ -3056,7 +3114,14 @@ void on_job_finished(App& app) {
         const bool has_dense =
             std::filesystem::exists(app.layout.working_dense, error) ||
             std::filesystem::exists(app.layout.dense_ply, error);
-        if (mesh_from_mvs(app.settings)) {
+        if (mesh_from_gaussians(app.settings)) {
+            set_message(
+                app,
+                app.has_mesh
+                    ? "Mesh extracted from the trained 3DGS model"
+                    : "Extract Mesh finished but no mesh was written",
+                app.has_mesh ? theme::success : theme::warning);
+        } else if (mesh_from_mvs(app.settings)) {
             set_message(
                 app,
                 app.has_mesh ? "MVS mesh finished"

@@ -444,6 +444,10 @@ std::string build_train_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout, const PreviewHandles& preview);
 
+std::string build_splat_mesh_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout, const std::filesystem::path& splat_model);
+
 std::string build_view_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout, const PreviewHandles& preview);

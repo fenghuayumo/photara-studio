@@ -127,6 +127,7 @@ struct ReconstructCli {
     bool dense{false};
     bool splat{false};
     bool splat_view{false};
+    bool splat_mesh_only{false};
     std::string capture_mode{"object"};
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
@@ -372,6 +373,7 @@ void print_help(const cxxopts::Options& options) {
               << "               (does not train splats unless --splat is also set)\n"
               << "  --splat       train CUDA Gaussian splats -> *_splat.ply, or --output .sog/.spz/.glb\n"
               << "  --splat-view  orbit-preview a trained splat from the camera sidecar\n"
+              << "  --splat-mesh-only  mesh an existing trained splat; does not run the optimizer\n"
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
               << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
@@ -649,6 +651,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-view",
          "Orbit-preview a trained splat from --splat-preview-camera-file",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-mesh-only",
+         "Extract a mesh from an existing trained splat without running the optimizer",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("capture-mode",
          "Capture type: object uses SfM SubjectBounds; scene is unbounded",
@@ -1175,6 +1180,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.dense = result["dense"].as<bool>();
     cli.splat = result["splat"].as<bool>();
     cli.splat_view = result["splat-view"].as<bool>();
+    cli.splat_mesh_only = result["splat-mesh-only"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")
         throw std::invalid_argument(
@@ -1501,6 +1507,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
                (!external_splat_dataset && !cli.dense_ply.empty())) {
         cli.splat = true;
     }
+    if (cli.splat_mesh_only) {
+        if (cli.mvs_mesh_only)
+            throw std::invalid_argument(
+                "--splat-mesh-only cannot be combined with --mvs-mesh-only");
+        cli.splat = true;
+        cli.mesh = true;
+        cli.dense = false;
+    }
     // Internal SfM now follows the same sparse initialization path as direct
     // COLMAP/OpenMVS datasets. --dense remains an explicit MVS diagnostic.
     if (external_splat_dataset && cli.splat && cli.texture && !cli.texture_only)
@@ -1512,7 +1526,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "--splat requires CUDA and PHOTARA_ENABLE_SPLAT=ON");
     }
 #endif
-    if (!cli.splat_view && cli.splat_iterations == 0)
+    if (!cli.splat_view && !cli.splat_mesh_only && cli.splat_iterations == 0)
         throw std::invalid_argument("--splat-iterations must be positive");
     if (cli.splat_view && cli.splat_preview_camera_file.empty())
         throw std::invalid_argument(
@@ -1887,6 +1901,44 @@ void run_splat_view(
             vulkan_preview->submit(color, camera.width, camera.height);
         },
         cli.splat_kernel_size, cli.splat_preview_vis_file);
+}
+
+photara::splat::GaussianModel load_trained_gaussians(
+    const ReconstructCli& cli, photara::project::Archive* archive) {
+    std::error_code exists_error;
+    std::vector<std::filesystem::path> candidates;
+    if (!cli.working_splat.empty())
+        candidates.push_back(cli.working_splat);
+    if (is_gaussian_output(cli.output))
+        candidates.push_back(cli.output);
+    const std::filesystem::path parent = cli.output.parent_path().empty()
+        ? std::filesystem::current_path()
+        : cli.output.parent_path();
+    const std::string stem = cli.output.stem().string() + "_splat";
+    candidates.push_back(parent / (stem + ".sog"));
+    candidates.push_back(parent / (stem + ".spz"));
+    candidates.push_back(parent / (stem + ".glb"));
+    candidates.push_back(parent / (stem + ".ply"));
+    for (const auto& candidate : candidates) {
+        if (!std::filesystem::exists(candidate, exists_error)) continue;
+        auto model = photara::splat::load_gaussians(candidate);
+        if (model.size() == 0) continue;
+        photara::core::Logger::instance().info(
+            "splat_mesh_model=", candidate, " gaussians=", model.size());
+        return model;
+    }
+    if (archive != nullptr &&
+        archive->has(photara::project::ChunkType::gaussians)) {
+        auto model = photara::splat::decode_gaussians(
+            archive->chunk(photara::project::ChunkType::gaussians));
+        if (model.size() != 0) {
+            photara::core::Logger::instance().info(
+                "splat_mesh_model=ascan gaussians=", model.size());
+            return model;
+        }
+    }
+    throw std::runtime_error(
+        "Extract Mesh needs a trained 3DGS model. Train 3DGS first.");
 }
 #endif
 
@@ -2838,6 +2890,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     const photara::mvs::DensifyOptions* mesh_options = nullptr,
     const std::filesystem::path& generated_mask_dir = {},
     photara::project::Archive* project_archive = nullptr) {
+    if (cli.splat_mesh_only)
+        photara::core::Logger::instance().info("splat_mesh_only=1");
     photara::splat::TrainingOptions options;
     options.iterations = cli.splat_iterations;
     options.log_interval = cli.splat_log_interval;
@@ -3318,7 +3372,11 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                 " view=", frame.view_index, " image=", path);
         };
     }
-    photara::splat::GaussianModel gaussians =
+    photara::splat::GaussianModel gaussians;
+    if (cli.splat_mesh_only) {
+        gaussians = load_trained_gaussians(cli, project_archive);
+    } else {
+    gaussians =
         photara::splat::Trainer(options).train(
             scene,
             [](const photara::splat::TrainingProgress& progress) {
@@ -3397,6 +3455,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         project_archive->save(cli.output);
         photara::core::Logger::instance().info(
             "ascan_gaussians=", cli.output, " count=", gaussians.size());
+    }
     }
     if (!cli.mesh) return std::nullopt;
     if (cli.mesh_method == "pam") {

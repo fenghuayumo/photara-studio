@@ -8,13 +8,19 @@
 #include "texture/projection.hpp"
 
 #include "photara_drender/photara_drender.hpp"
+#if defined(PHOTARA_HAS_MESH_TOOLS)
+#include "photara_mesh/mesh_ops.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 namespace photara::texture {
@@ -305,6 +311,197 @@ std::vector<float> build_dense_seam_pairs(
     return pairs;
 }
 
+enum class ManifoldDefect { none, degenerate_edge, non_manifold_edge, bowtie };
+
+struct ManifoldEdgeKey {
+    std::uint32_t first{};
+    std::uint32_t second{};
+    bool operator==(const ManifoldEdgeKey&) const = default;
+};
+
+struct ManifoldEdgeHash {
+    std::size_t operator()(const ManifoldEdgeKey& edge) const noexcept {
+        return (static_cast<std::size_t>(edge.first) * 73856093u) ^
+               (static_cast<std::size_t>(edge.second) * 19349663u);
+    }
+};
+
+struct ManifoldEdgeAdj {
+    std::uint32_t faces[2]{
+        std::numeric_limits<std::uint32_t>::max(),
+        std::numeric_limits<std::uint32_t>::max()};
+    std::uint8_t count{0};
+};
+
+// Same rejection UVAtlas uses for edges, plus bow-tie vertices. A boundary is
+// allowed: each edge may belong to one or two faces, and every vertex fan
+// must be a single chain.
+[[nodiscard]] ManifoldDefect classify_triangle_mesh(
+    const std::size_t vertex_count, const std::vector<std::uint32_t>& indices) {
+    if (indices.size() % 3U != 0) return ManifoldDefect::degenerate_edge;
+    const std::size_t face_count = indices.size() / 3U;
+    std::unordered_map<ManifoldEdgeKey, ManifoldEdgeAdj, ManifoldEdgeHash> edges;
+    edges.reserve(face_count * 2U);
+    for (std::uint32_t face = 0; face < face_count; ++face) {
+        const std::uint32_t corners[3] = {
+            indices[static_cast<std::size_t>(face) * 3U],
+            indices[static_cast<std::size_t>(face) * 3U + 1U],
+            indices[static_cast<std::size_t>(face) * 3U + 2U]};
+        if (corners[0] >= vertex_count || corners[1] >= vertex_count ||
+            corners[2] >= vertex_count || corners[0] == corners[1] ||
+            corners[1] == corners[2] || corners[2] == corners[0])
+            return ManifoldDefect::degenerate_edge;
+        for (int slot = 0; slot < 3; ++slot) {
+            const std::uint32_t a = corners[slot];
+            const std::uint32_t b = corners[(slot + 1) % 3];
+            const ManifoldEdgeKey key{std::min(a, b), std::max(a, b)};
+            auto [it, inserted] = edges.emplace(key, ManifoldEdgeAdj{});
+            if (!inserted && it->second.count >= 2)
+                return ManifoldDefect::non_manifold_edge;
+            ManifoldEdgeAdj& adjacent = it->second;
+            adjacent.faces[adjacent.count++] = face;
+        }
+    }
+
+    std::vector<std::uint32_t> degree(vertex_count, 0);
+    for (const std::uint32_t index : indices) ++degree[index];
+    std::vector<std::uint32_t> offset(vertex_count + 1U, 0);
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex)
+        offset[vertex + 1U] = offset[vertex] + degree[vertex];
+    std::vector<std::uint32_t> incident(offset.back());
+    std::vector<std::uint32_t> cursor = offset;
+    for (std::uint32_t face = 0; face < face_count; ++face) {
+        for (int slot = 0; slot < 3; ++slot) {
+            const std::uint32_t vertex =
+                indices[static_cast<std::size_t>(face) * 3U +
+                        static_cast<std::size_t>(slot)];
+            incident[cursor[vertex]++] = face;
+        }
+    }
+
+    std::vector<int> face_to_local(face_count, -1);
+    std::vector<int> parent;
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const std::uint32_t begin = offset[vertex];
+        const std::uint32_t end = offset[vertex + 1U];
+        if (end <= begin + 1U) continue;
+        const std::uint32_t valence = end - begin;
+        parent.resize(valence);
+        for (std::uint32_t local = 0; local < valence; ++local) {
+            parent[local] = static_cast<int>(local);
+            face_to_local[incident[begin + local]] = static_cast<int>(local);
+        }
+        const auto find = [&](int value) {
+            int root = value;
+            while (parent[static_cast<std::size_t>(root)] != root)
+                root = parent[static_cast<std::size_t>(root)];
+            while (parent[static_cast<std::size_t>(value)] != value) {
+                const int next = parent[static_cast<std::size_t>(value)];
+                parent[static_cast<std::size_t>(value)] = root;
+                value = next;
+            }
+            return root;
+        };
+        const auto unite = [&](const int a, const int b) {
+            const int root_a = find(a);
+            const int root_b = find(b);
+            if (root_a != root_b)
+                parent[static_cast<std::size_t>(root_b)] = root_a;
+        };
+        for (std::uint32_t local = 0; local < valence; ++local) {
+            const std::uint32_t face = incident[begin + local];
+            const std::uint32_t corners[3] = {
+                indices[static_cast<std::size_t>(face) * 3U],
+                indices[static_cast<std::size_t>(face) * 3U + 1U],
+                indices[static_cast<std::size_t>(face) * 3U + 2U]};
+            for (int slot = 0; slot < 3; ++slot) {
+                const std::uint32_t a = corners[slot];
+                const std::uint32_t b = corners[(slot + 1) % 3];
+                if (a != vertex && b != vertex) continue;
+                const ManifoldEdgeKey key{std::min(a, b), std::max(a, b)};
+                const auto found = edges.find(key);
+                if (found == edges.end() || found->second.count < 2) continue;
+                const std::uint32_t neighbor = found->second.faces[0] == face
+                    ? found->second.faces[1]
+                    : found->second.faces[0];
+                const int neighbor_local = face_to_local[neighbor];
+                if (neighbor_local >= 0)
+                    unite(static_cast<int>(local), neighbor_local);
+            }
+        }
+        const int first_root = find(0);
+        bool bowtie = false;
+        for (std::uint32_t local = 1; local < valence; ++local) {
+            if (find(static_cast<int>(local)) != first_root) {
+                bowtie = true;
+                break;
+            }
+        }
+        for (std::uint32_t local = 0; local < valence; ++local)
+            face_to_local[incident[begin + local]] = -1;
+        if (bowtie) return ManifoldDefect::bowtie;
+    }
+    return ManifoldDefect::none;
+}
+
+[[nodiscard]] const char* manifold_defect_name(const ManifoldDefect defect) {
+    switch (defect) {
+    case ManifoldDefect::degenerate_edge: return "degenerate_edge";
+    case ManifoldDefect::non_manifold_edge: return "non_manifold_edge";
+    case ManifoldDefect::bowtie: return "bowtie";
+    case ManifoldDefect::none: return "none";
+    }
+    return "none";
+}
+
+// Repair only when unwrap would reject the mesh. target_face_count is the
+// current face count, so CGAL edge collapse does not decimate.
+[[nodiscard]] bool repair_non_manifold_mesh(
+    std::vector<float>& positions, std::vector<std::uint32_t>& indices) {
+    const std::size_t vertex_count = positions.size() / 3U;
+    const ManifoldDefect defect = classify_triangle_mesh(vertex_count, indices);
+    if (defect == ManifoldDefect::none) {
+        core::Logger::instance().info(
+            "texture manifold check: faces=", indices.size() / 3U,
+            " manifold=1");
+        return false;
+    }
+    core::Logger::instance().info(
+        "texture manifold check: faces=", indices.size() / 3U,
+        " manifold=0 defect=", manifold_defect_name(defect));
+#if !defined(PHOTARA_HAS_MESH_TOOLS)
+    throw std::runtime_error(
+        "Cannot bake texture: mesh is not manifold. Rebuild with "
+        "PHOTARA_ENABLE_MESH_TOOLS and CGAL so photara_mesh can repair it");
+#else
+    core::StageScope stage("texture.manifold_repair");
+    const std::size_t faces_before = indices.size() / 3U;
+    const std::size_t vertices_before = vertex_count;
+    photara_mesh::DecimateOptions options;
+    options.target_face_count = std::max<std::size_t>(4, faces_before);
+    options.check_self_intersections = false;
+    photara_mesh::TriangleMesh repaired = photara_mesh::repair_and_decimate(
+        positions, indices, options);
+    if (repaired.indices.size() < 3U || repaired.positions.size() < 9U)
+        throw std::runtime_error(
+            "Manifold repair produced an empty mesh");
+    const ManifoldDefect remaining = classify_triangle_mesh(
+        repaired.positions.size() / 3U, repaired.indices);
+    if (remaining != ManifoldDefect::none)
+        throw std::runtime_error(
+            std::string("Manifold repair left a non-manifold mesh: ") +
+            manifold_defect_name(remaining));
+    core::Logger::instance().info(
+        "texture manifold repair: vertices=", vertices_before, " -> ",
+        repaired.positions.size() / 3U, " faces=", faces_before, " -> ",
+        repaired.indices.size() / 3U);
+    positions = std::move(repaired.positions);
+    indices = std::move(repaired.indices);
+    stage.finish();
+    return true;
+#endif
+}
+
 }  // namespace
 
 TexturedMesh bake_mesh_texture(
@@ -334,6 +531,7 @@ TexturedMesh bake_mesh_texture(
         indices[i * 3 + 1] = static_cast<std::uint32_t>(scene.mesh.faces[i][1]);
         indices[i * 3 + 2] = static_cast<std::uint32_t>(scene.mesh.faces[i][2]);
     }
+    const bool topology_repaired = repair_non_manifold_mesh(positions, indices);
 
     core::StageScope unwrap_stage("texture.uv_unwrap");
     photara_drender::UvAtlasOptions uv_opts;
@@ -343,7 +541,7 @@ TexturedMesh bake_mesh_texture(
     uv_opts.max_stretch = options.uv_max_stretch;
     uv_opts.parallel_partitions = options.uv_parallel_partitions;
     core::Logger::instance().info(
-        "texture UV config: faces=", scene.mesh.faces.size(),
+        "texture UV config: faces=", indices.size() / 3U,
         " requested_partitions=", uv_opts.parallel_partitions,
         " atlas=", uv_opts.width, "x", uv_opts.height,
         " gutter=", uv_opts.gutter,
@@ -358,7 +556,8 @@ TexturedMesh bake_mesh_texture(
     unwrap_stage.finish();
 
     std::vector<float> normals;
-    if (scene.mesh.normals.size() == scene.mesh.vertices.size()) {
+    if (!topology_repaired &&
+        scene.mesh.normals.size() == scene.mesh.vertices.size()) {
         normals.resize(unwrapped.positions.size());
         for (std::size_t i = 0; i < unwrapped.vertex_remap.size(); ++i) {
             const std::uint32_t src = unwrapped.vertex_remap[i];

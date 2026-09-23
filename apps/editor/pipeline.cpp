@@ -655,6 +655,12 @@ void RunMonitor::consume(const std::string& line) {
         resumed_ = true;
 
     if (line.find("pipeline_handoff=") != std::string::npos) {
+        // Gaussian mesh extraction opens already in meshing. Later handoff
+        // lines must not relabel that job as MVS stereo.
+        if (stage_ == Stage::meshing) {
+            task_ = {};
+            return;
+        }
         if (line.find("pipeline_handoff=reconstruct") != std::string::npos) {
             if (kind_ == JobKind::train || kind_ == JobKind::dense)
                 enter_stage(Stage::features, 0.02F);
@@ -670,9 +676,10 @@ void RunMonitor::consume(const std::string& line) {
         task_ = {};
         return;
     }
-    if (line.find("working_sfm_loaded=") != std::string::npos ||
-        line.find("ascan_sfm_loaded") != std::string::npos ||
-        line.find("splat_dataset=") != std::string::npos) {
+    if (stage_ != Stage::meshing &&
+        (line.find("working_sfm_loaded=") != std::string::npos ||
+         line.find("ascan_sfm_loaded") != std::string::npos ||
+         line.find("splat_dataset=") != std::string::npos)) {
         if (kind_ == JobKind::train) enter_stage(Stage::preparing, 0.05F);
         else if (kind_ == JobKind::dense) enter_stage(Stage::dense, 0.05F);
         else if (kind_ == JobKind::texture) enter_stage(Stage::texturing, 0.06F);
@@ -690,6 +697,9 @@ void RunMonitor::consume(const std::string& line) {
         line.find(" mvs=") != std::string::npos)
         artifacts_.mvs = true;
     if (line.find("dense_ply=") != std::string::npos) artifacts_.dense = true;
+    if (line.find("splat_mesh_only=") != std::string::npos ||
+        line.find("splat_mesh_model=") != std::string::npos)
+        enter_stage(Stage::meshing, k_meshing_band_begin);
     if (line.find("splat_model=") != std::string::npos ||
         line.find("splat_ply=") != std::string::npos) {
         artifacts_.splat = true;
@@ -1281,6 +1291,47 @@ std::string build_train_command(
                 << " --splat-preview-vk-device-node-mask "
                 << preview.device_node_mask;
     }
+    return command.str();
+}
+
+std::string build_splat_mesh_command(
+    const char* cli_path, const ProjectSettings& settings,
+    const ProjectLayout& layout, const std::filesystem::path& splat_model) {
+    std::ostringstream command;
+    command << quote(cli_path) << " --images "
+            << quote(settings.images_dir.data()) << " --output "
+            << quote(layout.model_output);
+    command << " --mode " << sfm_mode_flag(settings.sfm_mode)
+            << " --camera-model " << camera_model_flag(settings.camera_model)
+            << " --max-features " << settings.max_features;
+    if (settings.reuse_cache)
+        command << " --cache-dir " << quote(layout.cache);
+    if (settings.dataset_source[0] != '\0') {
+        command << " --splat-dataset "
+                << quote(settings.dataset_source.data());
+        if (settings.dataset_initial_cloud[0] != '\0')
+            command << " --dense-ply "
+                    << quote(settings.dataset_initial_cloud.data());
+    }
+    command << " --splat --mesh=true --splat-mesh-only"
+            << " --capture-mode "
+            << (settings.scene_mode ? "scene" : "object");
+    if (!settings.scene_mode) {
+        std::error_code bounds_error;
+        if (!layout.working_subject_bounds.empty() &&
+            std::filesystem::exists(
+                layout.working_subject_bounds, bounds_error))
+            command << " --subject-bounds "
+                    << quote(layout.working_subject_bounds);
+    }
+    command << " --mesh-method " << mesh_method_flag(settings.mesh_method)
+            << " --splat-preview-interval 0"
+            << " --splat-max-resolution " << settings.max_resolution
+            << " --splat-use-mask="
+            << ((settings.use_mask || settings.sam_masks) ? "true" : "false");
+    append_video_extract_flags(command, settings);
+    append_sam_flags(command, settings, false);
+    append_gui_flags(command, layout, splat_model);
     return command.str();
 }
 
