@@ -368,7 +368,8 @@ void print_help(const cxxopts::Options& options) {
               << "  hierarchical clustered incremental SfM + Sim(3) merge\n"
               << "  global       rotation averaging + global positioning + BA\n"
               << "Dense (optional Stage A Fast MVS after SfM):\n"
-              << "  --dense      PatchMatch depth + fuse -> dense.ply\n"
+              << "  --dense      PatchMatch depth + fuse -> dense.ply; with --mesh, an MVS surface\n"
+              << "               (does not train splats unless --splat is also set)\n"
               << "  --splat       train CUDA Gaussian splats -> *_splat.ply, or --output .sog/.spz/.glb\n"
               << "  --splat-view  orbit-preview a trained splat from the camera sidecar\n"
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
@@ -463,7 +464,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --dense-resolution-level N  MVS downscale steps; unset follows\n"
                  "                              --dense-quality (0=full, 1~=half)\n"
               << "  --splat-dataset PATH --dense --mesh  MVS with fixed imported cameras (no splat training)\n"
-              << "  --capture-mode object|scene  object uses SfM SubjectBounds\n"
+              << "  --capture-mode object|scene  object uses SfM SubjectBounds; with --dense\n"
+              << "               and without --splat this only selects the bounds\n"
               << "  --subject-bounds PATH  load object focus region (SubjectBounds txt)\n"
               << "  --masks DIR optional valid-region masks for default SfM/MVS/training; "
                  "black pixels are ignored (auto: sibling masks/)\n"
@@ -1472,9 +1474,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
     // preset. Omitting it keeps the low-level SfM-only developer workflow.
     // An explicit --mesh still wins, so a caller can request appearance-only
     // splat training in either capture mode.
+    //
+    // --dense without an explicit --splat is MVS (dense cloud, and a mesh when
+    // --mesh is set). Capture mode then only chooses object bounds versus an
+    // unbounded scene. Dense-cloud initialization of 3DGS stays --dense --splat.
     if (result.count("capture-mode") != 0) {
-        cli.splat = true;
-        if (result.count("mesh") == 0) cli.mesh = true;
+        const bool mvs_request = result.count("dense") != 0 &&
+            (result.count("splat") == 0 || !cli.splat);
+        if (!mvs_request) cli.splat = true;
+        if (!mvs_request && result.count("mesh") == 0) cli.mesh = true;
     }
     if (!cli.mask_mesh.empty()) cli.mvs_mesh_only = true;
     if (cli.mvs_mesh_only) cli.mesh = true;

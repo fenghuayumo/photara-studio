@@ -1360,7 +1360,10 @@ std::string build_dense_command(
                     << quote(layout.working_subject_bounds);
     }
     const bool mvs_mesh = mesh_from_mvs(settings);
-    command << " --dense --mesh=" << (mvs_mesh ? "true" : "false");
+    // Capture mode only selects object bounds versus an unbounded scene.
+    // --splat=false keeps this job on the MVS mesh path.
+    command << " --dense --splat=false --mesh="
+            << (mvs_mesh ? "true" : "false");
     if (mvs_mesh) {
         const int method =
             settings.mesh_method == 3 ? 0 : settings.mesh_method;

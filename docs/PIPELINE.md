@@ -36,14 +36,17 @@ does not silently run MVS before Splat training.
 | External dataset | `--splat-dataset` | dataset sparse model or `--dense-ply` | yes | no |
 | External dataset + MVS | `--splat-dataset --dense` | imported poses | no | yes |
 
-`--capture-mode object|scene` is a product preset. It enables Splat and mesh;
-object mode also estimates `SubjectBounds` from SfM sparse points. Omitting
-the option preserves low-level SfM-only behavior.
+`--capture-mode object|scene` is a product preset. It enables Splat and mesh
+unless the command is an MVS request (`--dense` without `--splat`), in which
+case it only selects object bounds versus an unbounded scene. Object mode
+also estimates `SubjectBounds` from SfM sparse points. Omitting the option
+preserves low-level SfM-only behavior.
 
 Two combinations deserve special attention:
 
 - `--splat-dataset --dense` runs MVS with fixed imported poses unless
-  `--splat` is also explicitly supplied.
+  `--splat` is also explicitly supplied. `--capture-mode` does not request
+  Splat on that command.
 - `--mvs-mesh-only` uses an existing dense cloud or `--mask-mesh`, creates or
   loads a mesh, and renders `<stem>_masks/` plus mesh previews for quality
   inspection.
@@ -93,6 +96,8 @@ optional MVS capabilities.
 
 ```text
 --capture-mode object|scene  -> --splat and, unless explicit, --mesh
+                                unless --dense is set without --splat
+                                (then it only selects object/scene bounds)
 --delight                    -> --texture
 --texture                    -> --mesh; without --splat this also implies --dense
 --mesh without --splat       -> --dense
