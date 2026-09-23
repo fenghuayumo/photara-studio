@@ -205,6 +205,7 @@ int main(const int argc, char** argv) {
         app.settings.densification_cap = std::clamp(
             app.settings.densification_cap, 10'000, 50'000'000);
         app.settings.sh_degree = std::clamp(app.settings.sh_degree, 0, 3);
+        app.settings.mask_mode = app.settings.mask_mode == 1 ? 1 : 0;
         app.settings.preview_interval =
             std::max(app.settings.preview_interval, 1);
         app.settings.max_features = std::max(app.settings.max_features, 512);

@@ -397,6 +397,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.max_resolution = app.settings.max_resolution;
     settings.progressive_resolution = app.settings.progressive_resolution;
     settings.use_mask = app.settings.use_mask;
+    settings.mask_mode = app.settings.mask_mode == 1 ? 1 : 0;
     settings.sam_masks = app.settings.sam_masks;
     settings.sam_model = app.settings.sam_model.data();
     settings.sam_text = app.settings.sam_text.data();
@@ -459,6 +460,7 @@ void apply_project_settings(
     app.settings.max_resolution = settings.max_resolution;
     app.settings.progressive_resolution = settings.progressive_resolution;
     app.settings.use_mask = settings.use_mask;
+    app.settings.mask_mode = settings.mask_mode == 1 ? 1 : 0;
     app.settings.sam_masks = settings.sam_masks;
     store_path_field(
         app.settings.sam_model,

@@ -546,6 +546,29 @@ constexpr Entry k_entries[] = {
     {"Live preview cadence", "实时预览间隔", "ライブプレビュー間隔", "실시간 미리보기 주기"},
     {"Coarse-to-fine resolution", "由粗到细分辨率", "粗い解像度から細かく", "거친 해상도에서 세밀하게"},
     {"Foreground mask training", "前景蒙版训练", "前景マスク学習", "전경 마스크 학습"},
+    {"Mask mode", "蒙版模式", "マスクモード", "마스크 모드"},
+    {"Ignore masked pixels", "忽略被遮挡像素", "マスク外を無視", "가려진 픽셀 무시"},
+    {"Train output alpha", "训练输出透明度", "出力アルファを学習", "출력 알파 학습"},
+    {"Ignore masked pixels: those rays are missing observations.\n"
+     "Colour is trained only where the mask is valid, and alpha is left alone.\n"
+     "Use this when a moving person hides static geometry.\n"
+     "Train output alpha: the mask is the target opacity.\n"
+     "Valid pixels stay opaque and masked pixels become transparent.",
+     "忽略被遮挡像素：这些射线当作没有观测。\n"
+     "只在蒙版有效处训练颜色，不约束透明度。\n"
+     "拍摄者在走动、挡住静止背景时用这个。\n"
+     "训练输出透明度：蒙版就是目标不透明度。\n"
+     "有效区域保持不透明，被遮挡区域训练成透明。",
+     "マスク外を無視：その光線は観測なしとして扱います。\n"
+     "色はマスクが有効な場所だけ学習し、アルファは拘束しません。\n"
+     "動く人が静止した背景を隠すときに使います。\n"
+     "出力アルファを学習：マスクが目標の不透明度です。\n"
+     "有効領域は不透明のまま、隠れた領域は透明へ学習します。",
+     "가려진 픽셀 무시: 그 광선은 관측이 없는 것으로 봅니다.\n"
+     "색은 마스크가 유효한 곳만 학습하고 알파는 제약하지 않습니다.\n"
+     "움직이는 사람이 정적인 배경을 가릴 때 사용합니다.\n"
+     "출력 알파 학습: 마스크가 목표 불투명도입니다.\n"
+     "유효 영역은 불투명하게 두고, 가려진 영역은 투명하게 학습합니다."},
     {"SAM3 masks", "SAM3 蒙版", "SAM3 マスク", "SAM3 마스크"},
     {"Generate SAM3 masks", "生成 SAM3 蒙版", "SAM3 マスクを生成", "SAM3 마스크 생성"},
     {"SAM 3 segments a text prompt into a foreground mask before alignment.\n"

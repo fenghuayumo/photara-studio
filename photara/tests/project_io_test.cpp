@@ -210,6 +210,7 @@ int main() {
     settings.atlas_resolution = 4096;
     settings.texture_delight = true;
     settings.texture_optimize = false;
+    settings.mask_mode = 1;
 
     Archive archive = Archive::create();
     replace_sfm_stage(archive, source, settings, ascan_path);
@@ -252,6 +253,7 @@ int main() {
         round_trip.densification_cap == 2'500'000,
         "settings densification cap");
     expect(round_trip.sh_degree == 2, "settings SH degree");
+    expect(round_trip.mask_mode == 1, "settings mask mode");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");

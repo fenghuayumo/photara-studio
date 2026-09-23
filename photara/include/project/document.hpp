@@ -50,6 +50,9 @@ struct Settings {
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;
+    // 0 = masked (invalid rays are missing observations),
+    // 1 = transparent (the mask is the target output alpha).
+    int mask_mode = 0;
     // SAM 3 masks generated before alignment. The checkpoint itself is not
     // stored in the project; only the prompt and whether generation is on.
     bool sam_masks = false;

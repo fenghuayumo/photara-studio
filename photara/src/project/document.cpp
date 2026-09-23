@@ -107,6 +107,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::uint8_t>(settings.sam_keep_prompted));
     writer.value(static_cast<std::uint8_t>(settings.sam_video));
     writer.value(static_cast<std::int32_t>(settings.sam_max_size));
+    writer.value(static_cast<std::int32_t>(settings.mask_mode == 1 ? 1 : 0));
     return writer.take();
 }
 
@@ -201,6 +202,8 @@ Settings decode_settings(
     if (reader.remaining() >= sizeof(std::int32_t))
         settings.sam_max_size = reader.value<std::int32_t>();
     if (settings.sam_max_size < 0) settings.sam_max_size = 0;
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.mask_mode = reader.value<std::int32_t>() == 1 ? 1 : 0;
     return settings;
 }
 

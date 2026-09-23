@@ -2037,6 +2037,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.max_resolution = static_cast<int>(cli.splat_max_resolution);
     settings.progressive_resolution = cli.splat_progressive_resolution;
     settings.use_mask = cli.splat_use_mask;
+    settings.mask_mode = cli.splat_alpha_mode == "transparent" ? 1 : 0;
     settings.build_mesh = cli.mesh;
     settings.mesh_source = (cli.dense && cli.mesh && !cli.splat) ? 1 : 0;
     if (cli.mesh_method == "tsdf") settings.mesh_method = 1;

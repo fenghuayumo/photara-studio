@@ -1244,6 +1244,8 @@ std::string build_train_command(
             << (settings.progressive_resolution ? "true" : "false")
             << " --splat-use-mask="
             << ((settings.use_mask || settings.sam_masks) ? "true" : "false")
+            << " --splat-alpha-mode "
+            << (settings.mask_mode == 1 ? "transparent" : "masked")
             << " --splat-normal-field="
             << (settings.normal_field ? "true" : "false");
     if (settings.ppisp_layout != 0)

@@ -270,6 +270,9 @@ struct ProjectSettings {
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;
+    // 0 = masked (invalid rays are missing observations),
+    // 1 = transparent (the mask is the target output alpha).
+    int mask_mode = 0;
     bool sam_masks = false;
     std::array<char, 1024> sam_model{};
     std::array<char, 512> sam_text{};
