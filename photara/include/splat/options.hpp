@@ -164,7 +164,7 @@ struct TrainingOptions {
     float sh0_lr{2.5e-3F};
     float sh_rest_lr{1.25e-4F};
     // Mean-square prior on non-DC SH coefficients; zero disables.
-    float sh_regularization_weight{0.F};
+    float sh_regularization_weight{0.001F};
     // Optional per-Gaussian priors; independent of colour correction.
     float opacity_regularization_weight{0.F};
     float log_scale_regularization_weight{0.F};
