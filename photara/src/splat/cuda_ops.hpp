@@ -51,6 +51,8 @@ struct DensificationStats {
     tinytensor::Tensor view_support;
     // Sum of contribution-normalized image error, independent of gradients.
     tinytensor::Tensor image_error;
+    // Optional temporary growth ceiling; never used to prune existing rows.
+    std::size_t growth_cap{};
 };
 
 // Clear selected parent moments without temporary zero tensors or per-state scatters.
@@ -270,7 +272,15 @@ void accumulate_densification_stats(
     float oversize_screen_threshold = 0.F,
     const tinytensor::Tensor& geometry_gradient = {},
     int view_index = -1,
-    const tinytensor::Tensor& image_error = {});
+    const tinytensor::Tensor& image_error = {},
+    const tinytensor::Tensor& normalized_size = {});
+
+// World-covariance tangent-plane 3-sigma angular radius, normalized to the
+// shared screen threshold with an internal 30-degree oversize gate. Independent
+// of image resolution, camera orientation, longitude seam and latitude stretch.
+tinytensor::Tensor panorama_densification_sizes(
+    const GaussianModel& model, const std::array<float, 3>& camera_position,
+    float screen_threshold, float scale_modifier = 1.F);
 
 // Per-pixel nonnegative (1 - SSIM contrast-structure)^power, shape [H, W].
 tinytensor::Tensor compute_ssim_cs_error_map(

@@ -1077,18 +1077,6 @@ GaussianModel Trainer::train(
             "splat native projection: equirectangular=", equirectangular,
             " fisheye=", fisheye, " of ", all_cameras.size(),
             " cameras (training on the source projection, no undistortion)");
-        if (equirectangular != 0 && options_.use_mask &&
-            options_.mask_alpha_leak_weight > 0.F) {
-            // A panorama usually has the operator in frame, and the static
-            // surface behind them is needed by the other views. Both mask modes
-            // push that region's alpha to zero at this weight, which is what
-            // grows semi-transparent bubbles along the subject silhouette.
-            core::Logger::instance().info(
-                "panorama masks keep the background alpha target at weight ",
-                options_.mask_alpha_leak_weight,
-                "; use --splat-alpha-leak-weight 0 when a moving subject "
-                "occludes static geometry");
-        }
     }
     if (native_non_pinhole &&
         (options_.multi_view_geo_weight > 0.F ||
@@ -1171,6 +1159,17 @@ GaussianModel Trainer::train(
         ? detail::make_bilateral_grid_state(scene.views.size(), options_)
         : detail::BilateralGridState{};
     const bool densification_enabled = refine::is_enabled(options_);
+    const bool panorama_adc =
+        is_adc_strategy(options_.densification_strategy) &&
+        std::any_of(all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
+            return camera.model == CameraModel::equirectangular;
+        });
+    const std::size_t initial_gaussian_count = model.size();
+    if (panorama_adc)
+        core::Logger::instance().info("adc_panorama angular_threshold_degrees=30",
+            " growth_reserve=0.5 initial_growth_cap=",
+            refine::panorama_progressive_growth_cap(
+                initial_gaussian_count, 1, options_));
     detail::DensificationStats densification_stats =
         detail::make_densification_stats(model.size());
     refine::RefinementCounts latest_refinement;
@@ -1538,8 +1537,11 @@ GaussianModel Trainer::train(
         }
         if (bilagrid_enabled) {
             bilagrid_input = photo_color;
+            const bool wrap_horizontal =
+                target.camera.model == CameraModel::equirectangular;
             detail::apply_bilateral_grid(
-                *bilagrid_input, bilagrid_state, view_index);
+                *bilagrid_input, bilagrid_state, view_index,
+                wrap_horizontal);
             photo_color = &bilagrid_state.output;
         }
         if (ppisp_enabled && !ppisp_before_bilagrid) {
@@ -1662,9 +1664,13 @@ GaussianModel Trainer::train(
             photo_grad = &ppisp_state.input_grad;
         }
         if (bilagrid_enabled) {
+            const bool wrap_horizontal =
+                target.camera.model == CameraModel::equirectangular;
             detail::backward_bilateral_grid(
-                bilagrid_state, *bilagrid_input, *photo_grad, view_index);
-            detail::step_bilateral_grid(bilagrid_state, options_, iteration);
+                bilagrid_state, *bilagrid_input, *photo_grad, view_index,
+                wrap_horizontal);
+            detail::step_bilateral_grid(
+                bilagrid_state, options_, iteration, wrap_horizontal);
             photo_grad = &bilagrid_state.input_grad;
         }
         if (ppisp_enabled && ppisp_before_bilagrid) {
@@ -1711,6 +1717,12 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::multi_view_gradient_merge);
         if (densification_enabled) {
             tinytensor::Tensor image_error;
+            tinytensor::Tensor normalized_size;
+            if (panorama_adc && target.camera.model == CameraModel::equirectangular) {
+                normalized_size = detail::panorama_densification_sizes(
+                    model, target.camera.position,
+                    options_.densify_screen_threshold, options_.scale_modifier);
+            }
             const bool emc =
                 options_.densification_strategy ==
                 DensificationStrategy::emc;
@@ -1731,7 +1743,7 @@ GaussianModel Trainer::train(
                  emc)
                     ? options_.densify_screen_threshold : 0.F,
                 gradients.refine_weight, static_cast<int>(view_index),
-                image_error);
+                image_error, normalized_size);
         }
         cuda_profiler.mark(CudaTrainingStage::densification_stats);
 
@@ -1892,6 +1904,9 @@ GaussianModel Trainer::train(
                     std::size_t{512} * 1024 * 1024 +
                     expected_growth * std::size_t{2} * 1024);
             }
+            if (panorama_adc)
+                densification_stats.growth_cap = refine::panorama_progressive_growth_cap(
+                    initial_gaussian_count, iteration, options_);
             latest_refinement = refine::refine_gaussians(
                 model, densification_stats, iteration,
                 adc_plus ? refinement_geometry.maximum_extent : scene_extent,

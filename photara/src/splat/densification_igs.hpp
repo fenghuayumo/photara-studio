@@ -6,6 +6,19 @@
 
 namespace photara::splat::densification {
 
+struct IgsSelection {
+    tinytensor::Tensor parents;
+    std::size_t replacement{}, oversized{}, growth{};
+};
+
+// Allocate disjoint sets before their union, preserving replacement priority.
+IgsSelection select_igs_parents(
+    const tinytensor::Tensor& replacement_weights,
+    const tinytensor::Tensor& oversize_scores,
+    const tinytensor::Tensor& growth_weights,
+    std::size_t replacement_slots, std::size_t desired_growth,
+    std::size_t capacity);
+
 // ADC-IGS refinement. Every decision - prune masks, candidate scores and
 // weights, replacement and growth sampling, which parents split - is taken on
 // the GPU from the per-step statistics: the recycle-fraction/best-row/cap

@@ -2393,6 +2393,78 @@ void test_photometric_colour_correction_identity() {
             "gradient through");
 }
 
+void test_panorama_bilateral_grid_wraps_horizontal_seam() {
+    using namespace photara::splat;
+    constexpr std::uint32_t width = 64;
+    constexpr std::uint32_t height = 1;
+    TrainingOptions options;
+    options.bilateral_grid_width = 4;
+    options.bilateral_grid_height = 1;
+    options.bilateral_grid_luma = 1;
+    auto state = detail::make_bilateral_grid_state(1, options);
+    std::vector<float> coefficients = state.grids.to_vector();
+    // Red affine bias: the last two cells differ from the first two.  A
+    // panorama must interpolate from the last cell back to the first one near
+    // x=W, instead of pinning the last image column to the last grid cell.
+    coefficients[2 * 12 + 3] = 1.F;
+    coefficients[3 * 12 + 3] = 1.F;
+    state.grids = tinytensor::Tensor::from_vector(
+        coefficients, state.grids.shape(), tinytensor::Device::CUDA);
+    const auto color = tinytensor::Tensor::zeros(
+        {std::size_t{3}, height, width}, tinytensor::Device::CUDA);
+    detail::apply_bilateral_grid(color, state, 0, true);
+    const std::vector<float> wrapped = state.output.to_vector();
+    require(
+        std::abs(wrapped.front() - wrapped[width - 1]) < 0.1F,
+        "panorama bilateral grid is discontinuous at the horizontal seam");
+    detail::apply_bilateral_grid(color, state, 0, false);
+    const std::vector<float> clamped = state.output.to_vector();
+    require(
+        clamped[width - 1] > 0.9F,
+        "rectilinear bilateral grid unexpectedly wrapped horizontally");
+}
+
+void test_ppisp_identity_projection_and_bounds() {
+    using namespace photara::splat;
+    TrainingOptions options;
+    options.ppisp_type = PpispParamType::no_crf;
+    options.ppisp_lr = 0.F;
+    options.ppisp_reg_exposure_mean = 0.F;
+    options.ppisp_reg_color_mean = 0.F;
+    options.ppisp_exposure_limit = 0.75F;
+    options.ppisp_color_limit = 0.5F;
+    auto state = detail::make_ppisp_state(4, options);
+    std::vector<float> parameters = state.parameters.to_vector();
+    for (int view = 0; view < 4; ++view) {
+        parameters[view * state.num_params] = 4.F - view;
+        for (int component = 0; component < 8; ++component)
+            parameters[view * state.num_params + 16 + component] =
+                10.F + static_cast<float>(view) + 0.1F * component;
+    }
+    state.parameters = tinytensor::Tensor::from_vector(
+        parameters, state.parameters.shape(), tinytensor::Device::CUDA);
+    state.gradient.zero_();
+    detail::step_ppisp(state, options, 1);
+    parameters = state.parameters.to_vector();
+    for (int component = 0; component < 9; ++component) {
+        const int parameter = component == 0 ? 0 : 15 + component;
+        const float limit = component == 0
+            ? options.ppisp_exposure_limit
+            : options.ppisp_color_limit;
+        float mean = 0.F;
+        for (int view = 0; view < 4; ++view) {
+            const float value = parameters[view * state.num_params + parameter];
+            require(
+                std::abs(value) <= limit + 1e-5F,
+                "PPISP residual escaped its configured bound");
+            mean += value;
+        }
+        require(
+            std::abs(mean / 4.F) < 1e-5F,
+            "PPISP identity projection did not remove the shared colour gauge");
+    }
+}
+
 void test_adam_rejects_non_finite_gradients() {
     using namespace photara::splat;
     auto parameter = tinytensor::Tensor::from_vector(
@@ -3522,10 +3594,10 @@ void test_mask_loss_modes() {
     require(rgb_gradient[0] != 0.F && rgb_gradient[1] == 0.F,
             "masked mode did not restrict RGB supervision to foreground");
     require(std::abs(alpha_gradient[0]) < 1e-6F &&
-                std::abs(alpha_gradient[1] - 0.5F) < 1e-6F,
-            "masked mode background-alpha penalty differs from pygsplat");
-    require(std::abs(loss.alpha_value - 0.4F) < 1e-6F,
-            "masked mode reported the wrong alpha loss");
+                std::abs(alpha_gradient[1]) < 1e-6F,
+            "masked mode incorrectly supervised alpha on an occluded ray");
+    require(std::abs(loss.alpha_value) < 1e-6F,
+            "masked mode reported an alpha loss");
 
     options.alpha_mode = AlphaMode::transparent;
     options.match_alpha_weight = 0.25F;
@@ -3534,23 +3606,6 @@ void test_mask_loss_modes() {
     require(std::abs(alpha_gradient[0] + 0.15625F) < 1e-5F &&
                 std::abs(alpha_gradient[1] - 0.625F) < 1e-5F,
             "transparent mode BCE gradient differs from pygsplat");
-
-    // The leakage weight scales only the background half of that BCE, so a
-    // panorama can keep asking for an opaque subject without also demanding
-    // that the static surface behind a moving occluder be empty.
-    options.mask_alpha_leak_weight = 0.5F;
-    loss = detail::compute_training_loss(rendered, target, options, true);
-    alpha_gradient = loss.alpha.to_vector();
-    require(std::abs(alpha_gradient[0] + 0.15625F) < 1e-5F &&
-                std::abs(alpha_gradient[1] - 0.3125F) < 1e-5F,
-            "transparent mode leak weight did not scale the background BCE");
-    options.mask_alpha_leak_weight = 0.F;
-    loss = detail::compute_training_loss(rendered, target, options, true);
-    alpha_gradient = loss.alpha.to_vector();
-    require(std::abs(alpha_gradient[0] + 0.15625F) < 1e-5F &&
-                alpha_gradient[1] == 0.F,
-            "transparent mode leak weight 0 did not drop the background BCE");
-    options.mask_alpha_leak_weight = 1.F;
 
     constexpr float finite_difference_step = 1e-3F;
     const auto alpha_loss_at = [&](const float foreground_alpha) {
@@ -4134,10 +4189,12 @@ void test_igs_refinement_decisions() {
     };
     const auto run = [&](const TrainingOptions& arm,
                          const GaussianModel& seed,
-                         const std::size_t count) {
+                         const std::size_t count,
+                         const std::size_t growth_cap = 0) {
         Arm result;
         result.harness = make_refine_harness(densification::clone_model(seed));
         auto stats = detail::make_densification_stats(count);
+        stats.growth_cap = growth_cap;
         stats.gradient = Tensor::full({count}, 1.F, gpu);
         stats.count = Tensor::full({count}, 10.F, gpu);
         stats.view_support = Tensor::full({count}, 2.F, gpu);
@@ -4223,6 +4280,81 @@ void test_igs_refinement_decisions() {
     }
 }
 
+void test_igs_budgeted_selection_and_panorama_sizes() {
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    constexpr auto gpu = tinytensor::Device::CUDA;
+    const auto vector = [&](std::initializer_list<float> values) {
+        return Tensor::from_vector(std::vector<float>(values), {values.size()}, gpu);
+    };
+    // A high-index replacement must survive, and the most oversized parent
+    // must win the one remaining slot even when stored after weaker parents.
+    auto selected = densification::select_igs_parents(
+        vector({0,0,0,0,1}), vector({1,2,9,3,0}), vector({1,1,1,1,1}), 1, 5, 2);
+    require(selected.parents.to_vector_int() == std::vector<int>({2,4}) &&
+        selected.replacement == 1 && selected.oversized == 1 && selected.growth == 0,
+        "IGS cap must preserve replacements and rank oversize by severity");
+    selected = densification::select_igs_parents(
+        vector({1,0,0,0,0}), vector({0,3,9,2,1}), {}, 1, 0, 2);
+    require(selected.parents.to_vector_int() == std::vector<int>({0,2}),
+        "IGS selection must follow scores after permuting parent rows");
+    selected = densification::select_igs_parents(
+        vector({0,0,0,0,1}), vector({0,0,9,0,0}), vector({1,1,1,1,1}), 1, 5, 5);
+    require(selected.parents.numel() == 5 && selected.growth == 3,
+        "IGS growth must exclude already selected parents and fill available slots");
+
+    GaussianModel model;
+    model.means = Tensor::from_vector(std::vector<float>{
+        0,0,2, 0,2,0, 0,0,-2, 2,0,0, 0,0,2, 0,0,2}, {6,3}, gpu);
+    std::vector<float> scales(18, std::log(0.1F));
+    scales[14] = scales[17] = 0.F; // Long radial axis for rows 4/5.
+    model.log_scales = Tensor::from_vector(scales, {6,3}, gpu);
+    const float q = std::sqrt(0.5F);
+    model.quaternions = Tensor::from_vector(std::vector<float>{
+        1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0, q,0,q,0}, {6,4}, gpu);
+    const auto sizes = detail::panorama_densification_sizes(
+        model, {0,0,0}, 0.5F).to_vector();
+    const float expected = std::atan(0.15F) / (30.F * 3.14159265F / 180.F) * 0.5F;
+    for (int i = 0; i < 5; ++i)
+        require(std::abs(sizes[i] - expected) < 1e-5F,
+            "Panorama angular size must be pole/seam invariant and ignore radial elongation");
+    require(sizes[5] > 0.5F && sizes[4] < 0.5F,
+        "Panorama size must detect rotated tangent elongation");
+    model.means = model.means.mul(10.F);
+    model.log_scales = model.log_scales.add(std::log(10.F));
+    const auto scaled = detail::panorama_densification_sizes(
+        model, {0,0,0}, 0.5F).to_vector();
+    for (int i = 0; i < 6; ++i)
+        require(std::abs(scaled[i] - sizes[i]) < 1e-5F,
+            "Panorama angular size must be invariant to scene units");
+    auto stats = detail::make_densification_stats(6);
+    detail::accumulate_densification_stats(Tensor::full({6}, 1.F, gpu),
+        Tensor::full({6}, 1.F, gpu),
+        Tensor::from_vector(std::vector<int>(6, 10000), {6}, gpu),
+        stats, 1920, 960, true, true, 1.F, 0.5F, {}, 0, {},
+        Tensor::from_vector(sizes, {6}, gpu));
+    const auto recorded = stats.max_screen_radius.to_vector();
+    require(std::abs(recorded[0] - expected) < 1e-5F,
+        "IGS statistics must use angular size instead of stretched raster radius");
+
+    TrainingOptions options;
+    options.iterations = 30000;
+    options.densification_cap = 1000;
+    options.progressive_resolution = true;
+    require(densification::panorama_progressive_growth_cap(100, 3400, options) == 550 &&
+        densification::panorama_progressive_growth_cap(100, 6001, options) == 550 &&
+        densification::panorama_progressive_growth_cap(100, 7501, options) == 775 &&
+        densification::panorama_progressive_growth_cap(100, 9001, options) == 1000,
+        "Panorama must reserve growth until full resolution and release it gradually");
+    options.progressive_resolution = false;
+    require(densification::panorama_progressive_growth_cap(100, 1, options) == 1000,
+        "Full-resolution-only runs must not reserve growth");
+    options.progressive_resolution = true;
+    options.grow_stop_iter = 5000;
+    require(densification::panorama_progressive_growth_cap(100, 1, options) == 1000,
+        "Short runs must not strand growth after growth stops");
+}
+
 void test_densification_cap_stops_igs_growth() {
     using namespace photara::splat;
     using tinytensor::Tensor;
@@ -4291,6 +4423,7 @@ void test_adc_recycled_capacity_repairs_oversize() {
         densification::AdamStates states;
         for (std::size_t i = 0; i < adam.size(); ++i) states[i] = &adam[i];
         auto stats = detail::make_densification_stats(3);
+        stats.growth_cap = 3;
         stats.count.fill_(2.F);
         stats.view_support.fill_(2.F);
         stats.gradient.fill_(1.F);
@@ -4301,7 +4434,7 @@ void test_adc_recycled_capacity_repairs_oversize() {
             stats.priority = stats.max_screen_radius.clone();
         TrainingOptions options;
         options.densification_strategy = sampled ? DensificationStrategy::adc_igs : DensificationStrategy::adc_plus;
-        options.densification_cap = 3;
+        options.densification_cap = 8;
         options.iterations = 1000;
         options.grow_stop_iter = 0;
         options.opacity_decay = 0;
@@ -4309,7 +4442,7 @@ void test_adc_recycled_capacity_repairs_oversize() {
         const auto counts = ExposedStrategy().refine(
             model, stats, 200, 1.F, photara::mvs::Vec3f::Zero(), options, states);
         require(model.size() == 3 && counts.grown == 1 && counts.pruned == 1,
-                "ADC recycled refinement must preserve the hard count cap");
+                "ADC+ recycled refinement must honor the temporary panorama growth cap");
         const auto centers = model.means.to_vector();
         require(centers[0] < -1.F && centers[6] > 1.F && centers[3] == 10.F,
                 "ADC must repair the oversized parent before generic replacement at cap");
@@ -5109,6 +5242,7 @@ int main(int argc, char** argv) {
             test_geometry_regularization();
             test_densify_statistics_and_oversize_weights();
             test_igs_refinement_decisions();
+            test_igs_budgeted_selection_and_panorama_sizes();
             test_densification_cap_stops_igs_growth();
             test_densification_strategies_and_dense_bypass();
             std::cout << "IGS tests passed\n";
@@ -5145,6 +5279,8 @@ int main(int argc, char** argv) {
         test_photometric_colour_correction_identity();
         test_bilateral_grid_finite_differences();
         test_ppisp_finite_differences();
+        test_panorama_bilateral_grid_wraps_horizontal_seam();
+        test_ppisp_identity_projection_and_bounds();
         test_adam_rejects_non_finite_gradients();
         test_fused_adam_parity();
         test_structure_adam_parity();
@@ -5179,6 +5315,7 @@ int main(int argc, char** argv) {
         test_opacity_progress_summary_matches_host();
         test_dense_adaptive_still_prunes_nonfinite_geometry();
         test_igs_refinement_decisions();
+        test_igs_budgeted_selection_and_panorama_sizes();
         test_densification_cap_stops_igs_growth();
         test_densification_strategies_and_dense_bypass();
         std::cout << "splat tests passed\n";

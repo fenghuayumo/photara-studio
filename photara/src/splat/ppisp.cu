@@ -732,6 +732,51 @@ __global__ void ppisp_original_init_kernel(float* params, const int views) {
     }
 }
 
+// Remove the global colour gauge which otherwise lets a training-only PPISP
+// table explain the images while the canonical Gaussian colours collapse.
+// One block owns exposure or one of the eight homography latents.  The mean is
+// projected to identity and every per-view residual is bounded afterwards.
+__global__ void ppisp_constrain_kernel(
+    float* params, const int views, const int num_params,
+    const int project_mean, const float exposure_limit,
+    const float color_limit) {
+    const int component = static_cast<int>(blockIdx.x);
+    if (component >= 9 || views <= 0) return;
+    const int parameter = component == 0
+        ? 0
+        : color_offset(num_params) + component - 1;
+    const float limit = component == 0 ? exposure_limit : color_limit;
+    float local = 0.F;
+    for (int view = static_cast<int>(threadIdx.x); view < views;
+         view += static_cast<int>(blockDim.x))
+        local += params[view * num_params + parameter];
+    for (int offset = 16; offset > 0; offset >>= 1)
+        local += __shfl_down_sync(0xffffffffU, local, offset);
+    __shared__ float scratch[32];
+    const unsigned warps = blockDim.x >> 5;
+    if ((threadIdx.x & 31U) == 0U) scratch[threadIdx.x >> 5] = local;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        float value = threadIdx.x < static_cast<int>(warps)
+            ? scratch[threadIdx.x]
+            : 0.F;
+        for (int offset = 16; offset > 0; offset >>= 1)
+            value += __shfl_down_sync(0xffffffffU, value, offset);
+        if (threadIdx.x == 0)
+            scratch[0] = project_mean
+                ? value / static_cast<float>(views)
+                : 0.F;
+    }
+    __syncthreads();
+    const float mean = scratch[0];
+    for (int view = static_cast<int>(threadIdx.x); view < views;
+         view += static_cast<int>(blockDim.x)) {
+        float value = params[view * num_params + parameter] - mean;
+        if (limit > 0.F) value = fminf(fmaxf(value, -limit), limit);
+        params[view * num_params + parameter] = value;
+    }
+}
+
 }  // namespace
 
 PpispState make_ppisp_state(
@@ -852,6 +897,11 @@ void step_ppisp(
     adam_step(
         state.parameters, state.gradient, state.adam, options.ppisp_lr,
         iteration, options);
+    ppisp_constrain_kernel<<<9, k_cuda_threads>>>(
+        state.parameters.ptr<float>(), views, state.num_params,
+        options.ppisp_identity_projection ? 1 : 0,
+        options.ppisp_exposure_limit, options.ppisp_color_limit);
+    check_cuda(cudaGetLastError(), "constrain PPISP colour correction");
 }
 
 std::array<float, 2> ppisp_identity_deviation(const PpispState& state) {

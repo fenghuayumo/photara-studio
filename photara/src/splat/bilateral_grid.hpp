@@ -36,14 +36,15 @@ BilateralGridState make_bilateral_grid_state(
 
 void apply_bilateral_grid(
     const tinytensor::Tensor& color, BilateralGridState& state,
-    std::size_t view);
+    std::size_t view, bool wrap_horizontal = false);
 
 void backward_bilateral_grid(
     BilateralGridState& state, const tinytensor::Tensor& color,
-    const tinytensor::Tensor& output_gradient, std::size_t view);
+    const tinytensor::Tensor& output_gradient, std::size_t view,
+    bool wrap_horizontal = false);
 
 void step_bilateral_grid(
     BilateralGridState& state, const TrainingOptions& options,
-    unsigned iteration);
+    unsigned iteration, bool wrap_horizontal = false);
 
 }  // namespace photara::splat::detail

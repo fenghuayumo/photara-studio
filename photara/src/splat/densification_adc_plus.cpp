@@ -198,8 +198,11 @@ RefinementCounts AdcPlusStrategy::refine(
     const std::size_t pruned = old_count - retained;
 
 
+    const std::size_t growth_cap = stats.growth_cap == 0
+        ? count_cap
+        : std::min(count_cap, std::max(old_count, stats.growth_cap));
     const std::size_t capacity =
-        count_cap > retained ? count_cap - retained : 0;
+        growth_cap > retained ? growth_cap - retained : 0;
     auto selected = tinytensor::Tensor::zeros_bool(
         {retained}, tinytensor::Device::CUDA);
     std::size_t selected_count = 0;
@@ -349,6 +352,7 @@ RefinementCounts AdcPlusStrategy::refine(
         " oversized_selected=", oversized_selected_count,
         " growth_selected=", growth_selected_count,
         " capacity=", capacity,
+        " growth_cap=", growth_cap,
         " count_cap=", count_cap,
         " growing=", iteration < grow_stop_iteration(options));
     return {split_parents.numel(), pruned};

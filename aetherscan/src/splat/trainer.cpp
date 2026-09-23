@@ -1077,18 +1077,6 @@ GaussianModel Trainer::train(
             "splat native projection: equirectangular=", equirectangular,
             " fisheye=", fisheye, " of ", all_cameras.size(),
             " cameras (training on the source projection, no undistortion)");
-        if (equirectangular != 0 && options_.use_mask &&
-            options_.mask_alpha_leak_weight > 0.F) {
-            // A panorama usually has the operator in frame, and the static
-            // surface behind them is needed by the other views. Both mask modes
-            // push that region's alpha to zero at this weight, which is what
-            // grows semi-transparent bubbles along the subject silhouette.
-            core::Logger::instance().info(
-                "panorama masks keep the background alpha target at weight ",
-                options_.mask_alpha_leak_weight,
-                "; use --splat-alpha-leak-weight 0 when a moving subject "
-                "occludes static geometry");
-        }
     }
     if (native_non_pinhole &&
         (options_.multi_view_geo_weight > 0.F ||

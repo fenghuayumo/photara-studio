@@ -880,7 +880,7 @@ __global__ void loss_kernel(
     const float depth_weight, const float normal_weight,
     const bool mask_enabled, const int alpha_mode,
     const float match_alpha_weight, const float l1_weight,
-    const float geometry_epsilon, const float mask_alpha_leak_weight) {
+    const float geometry_epsilon) {
     const std::size_t pixel = blockIdx.x * blockDim.x + threadIdx.x;
     if (pixel >= pixels) return;
     // Initialize all optional channels in their owning kernel, avoiding four
@@ -955,20 +955,12 @@ __global__ void loss_kernel(
         }
     }
 
-    if (mask_enabled && alpha_mode == 0) {
-        // Masked mode: discourage any opacity outside the foreground
-        // without forcing the foreground itself to be opaque.
-        grad_alpha[pixel] = mask_alpha_leak_weight * (1.F - valid) * inverse_pixels;
-        if (terms)
-            atomicAdd(
-                terms + 3, mask_alpha_leak_weight * alpha[pixel] * (1.F - valid) *
-                    inverse_pixels);
-    } else if (mask_enabled && alpha_mode == 1 && match_alpha_weight > 0.F) {
-        // Transparent mode: full-image BCE(alpha, mask). The background half
-        // is scaled by the leakage weight so a panorama can stop pushing the
-        // static surface behind a moving occluder to zero; 1 applies the full
-        // background BCE, 0 leaves only the foreground BCE that asks for an
-        // opaque subject.
+    // Masked mode deliberately leaves alpha unsupervised: a zero-mask pixel is
+    // an unavailable observation (for example a moving person), not evidence
+    // that the static scene behind it is empty. Transparent mode is the
+    // explicit opt-in where the mask really is an output-alpha target.
+    if (mask_enabled && alpha_mode == 1 && match_alpha_weight > 0.F) {
+        // Transparent mode: full-image BCE(alpha, mask).
         constexpr float clamp_epsilon = 1e-7F;
         const float raw_prediction = alpha[pixel];
         const float prediction = fminf(
@@ -980,7 +972,7 @@ __global__ void loss_kernel(
         const bool inside_clamp =
             raw_prediction > clamp_epsilon &&
             raw_prediction < 1.F - clamp_epsilon;
-        const float background = (1.F - valid) * mask_alpha_leak_weight;
+        const float background = 1.F - valid;
         grad_alpha[pixel] = inside_clamp
             ? match_alpha_weight * inverse_pixels *
                   (background * prediction - valid * (1.F - prediction)) /
@@ -1477,7 +1469,8 @@ __global__ void accumulate_densification_kernel(
     const float step_score_power, const float oversize_screen_threshold,
     const float* geometry_gradient, float* max_geometry_gradient,
     int* first_view, float* view_support, const int view_index,
-    const float* image_error, float* accumulated_error) {
+    const float* image_error, float* accumulated_error,
+    const float* normalized_size) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= gaussian_count || radii[index] <= 0 ||
         (require_contribution_visibility && visibility[index] <= 0.F))
@@ -1507,7 +1500,8 @@ __global__ void accumulate_densification_kernel(
             view_support[index] = 2.F;
         }
     }
-    const float screen = radii[index] * inverse_resolution;
+    const float screen = normalized_size != nullptr
+        ? normalized_size[index] : radii[index] * inverse_resolution;
     max_screen_radius[index] = fmaxf(max_screen_radius[index], screen);
     // In IGS this buffer stores accumulated oversize evidence. A single
     // close view must not rank like persistent oversize in many views.
@@ -1566,6 +1560,44 @@ __device__ void rotate_quaternion(
     out_x = x + w * tx + (qy * tz - qz * ty);
     out_y = y + w * ty + (qz * tx - qx * tz);
     out_z = z + w * tz + (qx * ty - qy * tx);
+}
+
+__global__ void panorama_sizes_kernel(
+    const float* means, const float* log_scales, const float* quaternions,
+    float* sizes, const std::size_t count, const float3 camera,
+    const float angular_normalization, const float scale_modifier) {
+    const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    const float x = means[3*i] - camera.x;
+    const float y = means[3*i+1] - camera.y;
+    const float z = means[3*i+2] - camera.z;
+    const float distance = sqrtf(x*x + y*y + z*z);
+    if (!(distance > 1e-8F) || !isfinite(distance)) {
+        sizes[i] = 0.F;
+        return;
+    }
+    const float3 n = make_float3(x/distance, y/distance, z/distance);
+    // Orthonormal basis of the viewing ray's tangent plane in WORLD space.
+    float3 u = fabsf(n.z) < 0.9F ? make_float3(-n.y, n.x, 0.F)
+                                : make_float3(0.F, -n.z, n.y);
+    const float inv_u = rsqrtf(u.x*u.x + u.y*u.y + u.z*u.z);
+    u.x *= inv_u; u.y *= inv_u; u.z *= inv_u;
+    const float3 v = make_float3(n.y*u.z-n.z*u.y,
+        n.z*u.x-n.x*u.z, n.x*u.y-n.y*u.x);
+    float a = 0.F, b = 0.F, c = 0.F;
+    for (int axis = 0; axis < 3; ++axis) {
+        float rx, ry, rz;
+        rotate_quaternion(quaternions + 4*i,
+            axis == 0 ? 1.F : 0.F, axis == 1 ? 1.F : 0.F,
+            axis == 2 ? 1.F : 0.F, rx, ry, rz);
+        const float du = rx*u.x + ry*u.y + rz*u.z;
+        const float dv = rx*v.x + ry*v.y + rz*v.z;
+        const float variance = expf(2.F * log_scales[3*i+axis]);
+        a += variance*du*du; b += variance*du*dv; c += variance*dv*dv;
+    }
+    const float lambda = 0.5F * (a+c + sqrtf((a-c)*(a-c) + 4.F*b*b));
+    const float angle = atan2f(3.F * scale_modifier * sqrtf(fmaxf(lambda, 0.F)), distance);
+    sizes[i] = isfinite(angle) ? angle * angular_normalization : 0.F;
 }
 
 __global__ void split_gaussians_kernel(
@@ -2670,7 +2702,7 @@ LossGradients compute_training_loss(
         target.mask_is_validity ? -1 :
             options.alpha_mode == AlphaMode::masked ? 0 : 1,
         options.match_alpha_weight, 1.F,
-        options.geometry_epsilon, options.mask_alpha_leak_weight);
+        options.geometry_epsilon);
     check_cuda(cudaGetLastError(), "compute GGGS training loss");
     if (use_fused_photometric)
         fused_l1_ssim_loss(
@@ -2962,7 +2994,8 @@ void accumulate_densification_stats(
     const bool require_contribution_visibility,
     const float step_score_power, const float oversize_screen_threshold,
     const tinytensor::Tensor& geometry_gradient, const int view_index,
-    const tinytensor::Tensor& image_error) {
+    const tinytensor::Tensor& image_error,
+    const tinytensor::Tensor& normalized_size) {
     const std::size_t count = refine_weight.numel();
     if (count == 0) return;
     const float inverse_resolution = 1.F /
@@ -2978,8 +3011,25 @@ void accumulate_densification_stats(
         stats.geometry_gradient.ptr<float>(), stats.first_view.ptr<int>(),
         stats.view_support.ptr<float>(), view_index,
         image_error.is_valid() ? image_error.ptr<float>() : nullptr,
-        stats.image_error.ptr<float>());
+        stats.image_error.ptr<float>(),
+        normalized_size.is_valid() ? normalized_size.ptr<float>() : nullptr);
     check_cuda(cudaGetLastError(), "accumulate GGGS densification stats");
+}
+
+tinytensor::Tensor panorama_densification_sizes(
+    const GaussianModel& model, const std::array<float, 3>& camera_position,
+    const float screen_threshold, const float scale_modifier) {
+    auto sizes = tinytensor::Tensor::empty({model.size()}, tinytensor::Device::CUDA);
+    if (model.size() == 0) return sizes;
+    constexpr float k_angular_threshold_radians = 30.F * CUDART_PI_F / 180.F;
+    panorama_sizes_kernel<<<(model.size() + k_threads - 1) / k_threads, k_threads>>>(
+        model.means.ptr<float>(), model.log_scales.ptr<float>(),
+        model.quaternions.ptr<float>(), sizes.ptr<float>(), model.size(),
+        make_float3(camera_position[0], camera_position[1], camera_position[2]),
+        screen_threshold / k_angular_threshold_radians,
+        scale_modifier);
+    check_cuda(cudaGetLastError(), "panorama angular densification sizes");
+    return sizes;
 }
 
 void split_gaussians(

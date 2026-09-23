@@ -67,23 +67,25 @@ and optimizer state together.
 
 Splat masks are independent of the SfM feature-mask threshold:
 
-- `--splat-use-mask` enables subject-only training.
+- `--splat-use-mask` enables mask-aware training.
 - `--masks` selects the shared external mask directory.
 - If no external mask exists, Splat may use source-image alpha.
 - Projected MVS validity masks can also contribute where the selected path
   provides them.
 - Source and projected coverage are resampled to the training camera.
-- Subject-only training requires every training view to have a real foreground
-  mask or source alpha; validity-only masks do not satisfy that requirement.
+- Masked training requires every training view to have a real mask or source
+  alpha; validity-only undistortion masks do not satisfy that requirement.
 
 Two alpha modes are available:
 
-- `transparent` (default): foreground RGB plus alpha BCE supervision.
-- `masked`: foreground RGB plus an opacity-leak penalty outside the mask.
+- `masked` (default): the mask marks observed pixels; masked-out rays provide
+  no RGB, geometry, or alpha target. This is appropriate for moving people and
+  other occluders because another view may still observe the static background.
+- `transparent`: the mask is the desired output alpha, so foreground RGB is
+  combined with full-image alpha BCE supervision.
 
-Soft coverage is preserved. Panorama training can retain a configurable
-background alpha target so one view does not erase geometry required by
-another view.
+Soft coverage is preserved. The two modes encode mask meaning directly; there
+is no separate background-alpha leakage weight to tune.
 
 SfM uses the same mask directory earlier in the pipeline but interprets zero
 as invalid and every non-zero value as valid. Therefore binary lossless PNG
@@ -97,10 +99,13 @@ variation without changing the exported Gaussian model:
 - PPISP: `--splat-ppisp` with `no_crf_no_vig`, `no_crf`, or `original`.
 - Affine bilateral grid: `--splat-bilateral-grid`.
 
-PPISP is anchored to an identity mean across views. The bilateral grid is
+PPISP is projected back to an identity mean across views after every update,
+and its exposure and white-balance residuals are bounded so the training-only
+table cannot absorb the canonical Gaussian colour. The bilateral grid is
 projected back to identity mean after updates so it represents spatial
-variation while PPISP handles global exposure. When both are enabled, PPISP is
-applied first.
+variation while PPISP handles global exposure. For equirectangular cameras its
+horizontal lookup and total variation wrap across the panorama seam. When both
+are enabled, PPISP is applied first.
 
 ## 6. Geometry supervision
 
@@ -164,6 +169,25 @@ Strategies share the same renderer, losses, optimizer, masks, and export
 formats. Topology changes preserve all active model fields and optimizer state.
 An initialization point budget can cap the sparse seed without changing the
 source SfM scene.
+
+ADC-IGS allocates replacement slots first, ranks remaining oversized parents
+by size times persistent oversize evidence, then samples disjoint gradient
+growth parents. The union is never truncated in storage-index order. Logs
+distinguish `oversized_candidates` from the actual `oversized_selected` count.
+
+For equirectangular views, both ADC-Plus and ADC-IGS use
+`atan(3 * tangent_sigma / distance)` from the world-space Gaussian covariance,
+with an internal 30-degree oversize gate. This angular footprint estimate avoids
+longitude stretching at the poles; it is not an exact projection of a large 3D
+ellipsoid. Pinhole and fisheye retain their existing pixel-size criterion. For
+mixed datasets each observation is normalized to the same oversize gate.
+
+When panorama ADC uses progressive resolution, half the capacity above the
+initial model count is reserved until full resolution. The reserve is released
+over one resolution interval, shortened when necessary to finish before growth
+stops. This temporary cap never prunes existing Gaussians. Full-resolution-only
+and short runs that cannot grow at full resolution bypass the reserve. These are
+internal panorama policies rather than additional CLI tuning controls.
 
 ## 9. Training data and memory
 

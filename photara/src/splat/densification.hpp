@@ -52,6 +52,11 @@ using AdamStates = std::array<detail::AdamState*, 6>;
 [[nodiscard]] bool is_refinement_iteration(
     unsigned iteration, const TrainingOptions& options);
 
+// Shared by panorama ADC strategies; the hard model cap is unchanged.
+[[nodiscard]] std::size_t panorama_progressive_growth_cap(
+    std::size_t initial_count, unsigned iteration,
+    const TrainingOptions& options);
+
 [[nodiscard]] GaussianModel clone_model(const GaussianModel& model);
 
 RefinementCounts refine_gaussians(

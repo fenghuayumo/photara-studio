@@ -177,9 +177,8 @@ struct ReconstructCli {
     std::string splat_ppisp_type{"no_crf_no_vig"};
     float splat_ppisp_lr{2e-3F};
     bool splat_ppisp_before_bilagrid{true};
-    std::string splat_alpha_mode{"transparent"};
+    std::string splat_alpha_mode{"masked"};
     float splat_match_alpha_weight{0.25F};
-    float splat_alpha_leak_weight{1.F};
     float splat_ssim_weight{0.2F};
     float splat_opacity_reg{0.F};
     float splat_log_scale_reg{0.F};
@@ -399,10 +398,9 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-progressive-resolution BOOL  1/4 -> 1/2 -> full schedule (default true)\n"
               << "  --splat-progressive-interval N  iterations per resolution level (default 3000)\n"
               << "  --splat-eval-split-every N  hold out every Nth view for PSNR/SSIM (default 0 = every view trains; metrics then come from three training views)\n"
-              << "  --splat-use-mask BOOL  isolate the subject using masks/ or source alpha (default true)\n"
-              << "  --splat-alpha-mode masked|transparent (default transparent)\n"
+              << "  --splat-use-mask BOOL  apply masks/ or source alpha to training (default true)\n"
+              << "  --splat-alpha-mode masked|transparent (default masked)\n"
               << "  --splat-match-alpha-weight W  transparent alpha BCE weight (default 0.25)\n"
-              << "  --splat-alpha-leak-weight W  masked-mode opacity leak weight (default 1; 0 masks RGB only)\n"
               << "  --splat-ssim-weight W  structural loss blend (default 0.2)\n"
               << "  --splat-opacity-reg W  per-Gaussian opacity prior (default 0)\n"
               << "  --splat-log-scale-reg W  per-Gaussian log-scale prior (default 0)\n"
@@ -754,16 +752,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-eval-split-every",
          "Hold out every Nth view for PSNR/SSIM evaluation (0 = train all)",
          cxxopts::value<unsigned>()->default_value("0"))
-        ("splat-use-mask", "Enable pygsplat-compatible foreground-mask training",
+        ("splat-use-mask", "Enable mask-aware training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("splat-alpha-mode", "Mask alpha mode: masked or transparent",
-         cxxopts::value<std::string>()->default_value("transparent"))
+        ("splat-alpha-mode",
+         "Mask semantics: masked ignores invalid rays; transparent trains output alpha",
+         cxxopts::value<std::string>()->default_value("masked"))
         ("splat-match-alpha-weight", "Alpha BCE weight in transparent mode",
          cxxopts::value<float>()->default_value("0.25"))
-        ("splat-alpha-leak-weight",
-         "Masked-mode opacity-leakage weight outside the mask (0 = mask RGB "
-         "only, leave occluded background to the other views)",
-         cxxopts::value<float>()->default_value("1"))
         ("splat-ssim-weight", "SSIM blend in the photometric loss",
          cxxopts::value<float>()->default_value("0.2"))
         ("splat-opacity-reg", "Per-Gaussian opacity regularization weight",
@@ -1273,8 +1268,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.splat_alpha_mode = result["splat-alpha-mode"].as<std::string>();
     cli.splat_match_alpha_weight =
         result["splat-match-alpha-weight"].as<float>();
-    cli.splat_alpha_leak_weight =
-        result["splat-alpha-leak-weight"].as<float>();
     cli.splat_ssim_weight = result["splat-ssim-weight"].as<float>();
     cli.splat_opacity_reg = result["splat-opacity-reg"].as<float>();
     cli.splat_log_scale_reg = result["splat-log-scale-reg"].as<float>();
@@ -1548,10 +1541,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.splat_match_alpha_weight < 0.F)
         throw std::invalid_argument(
             "--splat-match-alpha-weight must be non-negative");
-    if (!std::isfinite(cli.splat_alpha_leak_weight) ||
-        cli.splat_alpha_leak_weight < 0.F)
-        throw std::invalid_argument(
-            "--splat-alpha-leak-weight must be finite and non-negative");
     if (cli.splat_ssim_weight < 0.F || cli.splat_ssim_weight > 1.F)
         throw std::invalid_argument("--splat-ssim-weight must be in [0,1]");
     if (!std::isfinite(cli.splat_opacity_reg) || cli.splat_opacity_reg < 0.F ||
@@ -3012,7 +3001,6 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         ? photara::splat::AlphaMode::masked
         : photara::splat::AlphaMode::transparent;
     options.match_alpha_weight = cli.splat_match_alpha_weight;
-    options.mask_alpha_leak_weight = cli.splat_alpha_leak_weight;
     options.ssim_weight = cli.splat_ssim_weight;
     options.opacity_regularization_weight = cli.splat_opacity_reg;
     options.log_scale_regularization_weight = cli.splat_log_scale_reg;
@@ -3112,6 +3100,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " ppisp=", options.use_ppisp,
         " ppisp_type=", cli.splat_ppisp_type,
         " ppisp_lr=", options.ppisp_lr,
+        " ppisp_identity_projection=", options.ppisp_identity_projection,
+        " ppisp_exposure_limit=", options.ppisp_exposure_limit,
+        " ppisp_color_limit=", options.ppisp_color_limit,
         " ppisp_before_bilagrid=", options.ppisp_before_bilagrid,
         " densification_cap=", options.densification_cap,
         " dense_recycle_fraction=", options.dense_recycle_fraction,

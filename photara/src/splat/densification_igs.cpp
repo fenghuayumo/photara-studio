@@ -33,6 +33,46 @@ float positive_upper_median(
 
 }  // namespace
 
+IgsSelection select_igs_parents(
+    const tinytensor::Tensor& replacement_weights,
+    const tinytensor::Tensor& oversize_scores,
+    const tinytensor::Tensor& growth_weights,
+    const std::size_t replacement_slots, const std::size_t desired_growth,
+    const std::size_t capacity) {
+    IgsSelection result;
+    auto chosen = tinytensor::Tensor::zeros_bool(
+        {replacement_weights.numel()}, tinytensor::Device::CUDA);
+    const auto replacement = gpu_detail::weighted_sample_without_replacement(
+        replacement_weights, std::min(replacement_slots, capacity));
+    result.replacement = replacement.numel();
+    if (result.replacement) chosen.index_fill_(0, replacement, 1.F);
+    std::size_t remaining = capacity - result.replacement;
+    if (remaining && oversize_scores.is_valid()) {
+        const auto eligible = oversize_scores.isfinite()
+            .logical_and(oversize_scores.gt(0.F)).logical_and(chosen.logical_not());
+        result.oversized = std::min(remaining, eligible.count_nonzero());
+        if (result.oversized) {
+            // Rank actual severity, never the storage position. Equal scores
+            // are equivalent; no later truncation can evict replacements.
+            const auto ranked = oversize_scores.masked_fill(
+                eligible.logical_not(), -std::numeric_limits<float>::infinity())
+                .sort(0, true);
+            chosen.index_fill_(0, ranked.second.slice(0, 0, result.oversized)
+                .to(tinytensor::DataType::Int32), 1.F);
+            remaining -= result.oversized;
+        }
+    }
+    if (remaining && desired_growth && growth_weights.is_valid()) {
+        const auto growth = gpu_detail::weighted_sample_without_replacement(
+            growth_weights.masked_fill(chosen, 0.F),
+            std::min(remaining, desired_growth));
+        result.growth = growth.numel();
+        if (result.growth) chosen.index_fill_(0, growth, 1.F);
+    }
+    result.parents = chosen.nonzero().squeeze(1).to(tinytensor::DataType::Int32);
+    return result;
+}
+
 RefinementCounts IgsStrategy::refine(
     GaussianModel& model, detail::DensificationStats& stats,
     const unsigned iteration, const float scene_extent,
@@ -134,8 +174,11 @@ RefinementCounts IgsStrategy::refine(
         stats.max_screen_radius.index_select(0, keep_indices);
     gpu_detail::select_training_rows_gpu(model, keep_indices, states);
 
-    const std::size_t capacity = options.densification_cap > model.size()
-        ? options.densification_cap - model.size()
+    const std::size_t growth_cap = stats.growth_cap == 0
+        ? options.densification_cap
+        : std::min(options.densification_cap, std::max(old_count, stats.growth_cap));
+    const std::size_t capacity = growth_cap > model.size()
+        ? growth_cap - model.size()
         : 0;
     const float remaining_progress = 1.F -
         static_cast<float>(iteration) /
@@ -157,7 +200,7 @@ RefinementCounts IgsStrategy::refine(
     const auto retained_priority = stats.priority.index_select(0, keep_indices);
     const auto retained_opacity = masks.opacities.index_select(0, keep_indices);
     const auto candidate = retained_count.gt(0.F);
-    // Edge evidence: accumulated priority per observation.
+    // Persistent oversize evidence per contributing observation.
     const auto priority = retained_priority.div(retained_count.clamp_min(1.F));
     const auto positive = candidate.logical_and(priority.gt(0.F));
     const std::size_t positive_count = positive.count_nonzero();
@@ -196,37 +239,14 @@ RefinementCounts IgsStrategy::refine(
             static_cast<double>(options.densify_select_fraction)));
     }
 
-    // Replacement slots first, then the oversize repair set, then the growth
-    // budget: the host order, so the same rows win the same budget.
-    const auto replacement_selected =
-        gpu_detail::weighted_sample_without_replacement(
-            replacement_weights, std::min(pruned, capacity));
-    auto chosen = tinytensor::Tensor::zeros_bool(
-        {retained}, tinytensor::Device::CUDA);
-    if (replacement_selected.numel() != 0)
-        chosen.index_fill_(0, replacement_selected, 1.F);
     const std::size_t oversized_count =
         allow_growth ? oversized.count_nonzero() : 0;
-    if (allow_growth) chosen = chosen.logical_or(oversized);
-    std::size_t growth_selected = 0;
-    const std::size_t chosen_count = chosen.count_nonzero();
-    if (allow_growth && desired_growth != 0 && chosen_count < capacity) {
-        const auto sampled = gpu_detail::weighted_sample_without_replacement(
-            growth_weights,
-            std::min(capacity - chosen_count, desired_growth));
-        growth_selected = sampled.numel();
-        if (growth_selected != 0) {
-            auto growth_choice = tinytensor::Tensor::zeros_bool(
-                {retained}, tinytensor::Device::CUDA);
-            growth_choice.index_fill_(0, sampled, 1.F);
-            chosen = chosen.logical_or(growth_choice);
-        }
-    }
-
-    auto split_parents =
-        chosen.nonzero().squeeze(1).to(tinytensor::DataType::Int32);
-    if (split_parents.numel() > capacity)
-        split_parents = split_parents.slice(0, 0, capacity);
+    const auto oversize_scores = allow_growth
+        ? retained_screen.mul(edge_factor).masked_fill(oversized.logical_not(), 0.F)
+        : tinytensor::Tensor{};
+    const auto selection = select_igs_parents(replacement_weights,
+        oversize_scores, growth_weights, pruned, desired_growth, capacity);
+    const auto& split_parents = selection.parents;
     const std::size_t grown = split_parents.numel();
     gpu_detail::grow_igs_random_gpu(
         model, split_parents, retained_screen, options, random, states);
@@ -238,11 +258,13 @@ RefinementCounts IgsStrategy::refine(
         " gaussians=", model.size(),
         " pruned=", pruned,
         " retained=", retained,
-        " replacement_selected=", replacement_selected.numel(),
-        " oversized_selected=", oversized_count,
-        " growth_selected=", growth_selected,
+        " replacement_selected=", selection.replacement,
+        " oversized_candidates=", oversized_count,
+        " oversized_selected=", selection.oversized,
+        " growth_selected=", selection.growth,
         " grown=", grown,
         " capacity=", capacity,
+        " growth_cap=", growth_cap,
         " growing=", allow_growth);
     return {grown, pruned};
 }

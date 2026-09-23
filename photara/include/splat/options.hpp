@@ -204,6 +204,14 @@ struct TrainingOptions {
     bool use_ppisp{false};
     PpispParamType ppisp_type{PpispParamType::no_crf_no_vig};
     float ppisp_lr{2e-3F};
+    // PPISP is a training-only transform.  Without an exact identity gauge,
+    // the per-view table can absorb the scene's canonical colour while the
+    // exported Gaussians become progressively darker.  Projection removes
+    // the shared component after every step; the bounds keep sparsely visited
+    // views from developing implausible exposure / white-balance corrections.
+    bool ppisp_identity_projection{true};
+    float ppisp_exposure_limit{1.F};
+    float ppisp_color_limit{2.F};
     float ppisp_reg_exposure_mean{1.F};
     float ppisp_reg_color_mean{1.F};
     float ppisp_reg_vig_center{0.02F};
@@ -272,20 +280,13 @@ struct TrainingOptions {
     float multi_view_ncc_lambda_reference{0.45F};
     float multi_view_ncc_sharpness{12.F};
     float multi_view_ncc_min_weight{0.F};
-    // Mask training. In masked mode RGB is supervised
-    // only in the foreground and background alpha leakage is penalized. In
-    // transparent mode the same foreground RGB loss is combined with full-image
-    // BCE(predicted alpha, mask) * match_alpha_weight.
+    // Mask training. `masked` treats zero-mask pixels as missing observations:
+    // RGB/geometry are supervised only where the mask is valid and alpha is
+    // not constrained. `transparent` treats the mask as the desired output
+    // alpha and adds full-image BCE(predicted alpha, mask).
     bool use_mask{false};
-    AlphaMode alpha_mode{AlphaMode::transparent};
+    AlphaMode alpha_mode{AlphaMode::masked};
     float match_alpha_weight{0.25F};
-    // Weight of the masked-mode "no opacity outside the foreground" penalty.
-    // A dynamic occluder hides static geometry that other views still need
-    // opaque, so the penalty fights the multi-view-consistent surface behind
-    // it and grows semi-transparent bubbles where the subject stands. Setting
-    // 0 keeps the static-region RGB supervision and drops the penalty, which
-    // leaves those rays to the other views instead of forcing them empty.
-    float mask_alpha_leak_weight{1.F};
     std::filesystem::path mask_dir;
     float minimum_scale_fraction{1e-4F};
     float maximum_scale_fraction{0.002F};

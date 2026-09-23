@@ -121,7 +121,7 @@ __global__ void bilateral_constrain_kernel(
 __global__ void bilateral_forward_kernel(
     const float* color, float* corrected, const float* grids, const int view,
     const int luma, const int grid_h, const int grid_w, const int height,
-    const int width) {
+    const int width, const bool wrap_horizontal) {
     const int pixel = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     const int pixels = height * width;
     if (pixel >= pixels) return;
@@ -131,12 +131,13 @@ __global__ void bilateral_forward_kernel(
     const float sg = color[pixels + pixel];
     const float sb = color[2 * pixels + pixel];
     const float gx = width > 1 ? static_cast<float>(x) /
-        static_cast<float>(width - 1) : 0.F;
+        static_cast<float>(wrap_horizontal ? width : width - 1) : 0.F;
     const float gy = height > 1 ? static_cast<float>(y) /
         static_cast<float>(height - 1) : 0.F;
     const float gz = fminf(fmaxf(k_c2g_r * sr + k_c2g_g * sg + k_c2g_b * sb,
         0.F), 1.F);
-    const float fx_grid = gx * static_cast<float>(grid_w - 1);
+    const float fx_grid = gx * static_cast<float>(
+        wrap_horizontal ? grid_w : grid_w - 1);
     const float fy_grid = gy * static_cast<float>(grid_h - 1);
     const float fz_grid = gz * static_cast<float>(luma - 1);
     int x0 = static_cast<int>(floorf(fx_grid));
@@ -146,7 +147,7 @@ __global__ void bilateral_forward_kernel(
     int y1 = y0 + 1;
     int z1 = z0 + 1;
     x0 = min(max(x0, 0), grid_w - 1);
-    x1 = min(max(x1, 0), grid_w - 1);
+    x1 = wrap_horizontal ? x1 % grid_w : min(max(x1, 0), grid_w - 1);
     y0 = min(max(y0, 0), grid_h - 1);
     y1 = min(max(y1, 0), grid_h - 1);
     z0 = min(max(z0, 0), luma - 1);
@@ -216,7 +217,8 @@ template <bool k_vectorized>
 __device__ __forceinline__ bool bilateral_pixel_geometry(
     const float* __restrict__ color, const float* __restrict__ output_grad,
     const int luma, const int grid_h, const int grid_w, const int height,
-    const int width, const int pixels, const int pixel, BilateralPixel& out) {
+    const int width, const int pixels, const int pixel,
+    const bool wrap_horizontal, BilateralPixel& out) {
     (void)k_vectorized;
     out.pixel = pixel;
     out.colour[0] = color[pixel];
@@ -231,13 +233,14 @@ __device__ __forceinline__ bool bilateral_pixel_geometry(
     const int x = pixel % width;
     const int y = pixel / width;
     const float gx = width > 1 ? static_cast<float>(x) /
-        static_cast<float>(width - 1) : 0.F;
+        static_cast<float>(wrap_horizontal ? width : width - 1) : 0.F;
     const float gy = height > 1 ? static_cast<float>(y) /
         static_cast<float>(height - 1) : 0.F;
     const float gz_raw = k_c2g_r * out.colour[0] + k_c2g_g * out.colour[1] +
         k_c2g_b * out.colour[2];
     out.gz_in_range = gz_raw >= 0.F && gz_raw <= 1.F;
-    const float fx_grid = gx * static_cast<float>(grid_w - 1);
+    const float fx_grid = gx * static_cast<float>(
+        wrap_horizontal ? grid_w : grid_w - 1);
     const float fy_grid = gy * static_cast<float>(grid_h - 1);
     const float fz_grid =
         fminf(fmaxf(gz_raw, 0.F), 1.F) * static_cast<float>(luma - 1);
@@ -248,7 +251,9 @@ __device__ __forceinline__ bool bilateral_pixel_geometry(
     out.fy = fy_grid - static_cast<float>(y0_raw);
     out.fz = fz_grid - static_cast<float>(z0_raw);
     out.x0 = min(max(x0_raw, 0), grid_w - 1);
-    out.x1 = min(max(x0_raw + 1, 0), grid_w - 1);
+    out.x1 = wrap_horizontal
+        ? (x0_raw + 1) % grid_w
+        : min(max(x0_raw + 1, 0), grid_w - 1);
     out.y0 = min(max(y0_raw, 0), grid_h - 1);
     out.y1 = min(max(y0_raw + 1, 0), grid_h - 1);
     out.z0 = min(max(z0_raw, 0), luma - 1);
@@ -388,7 +393,8 @@ __global__ void bilateral_backward_kernel(
     const float* __restrict__ color, const float* __restrict__ grids,
     const float* __restrict__ output_grad, float* __restrict__ grid_grad,
     float* __restrict__ input_grad, const int view, const int luma,
-    const int grid_h, const int grid_w, const int height, const int width) {
+    const int grid_h, const int grid_w, const int height, const int width,
+    const bool wrap_horizontal) {
     const int pixels = height * width;
     const long long row_base = static_cast<long long>(view) *
         (luma * grid_h * grid_w) * k_affine_channels;
@@ -407,7 +413,7 @@ __global__ void bilateral_backward_kernel(
         if (pixel < pixels) {
             active[slot] = bilateral_pixel_geometry<k_vectorized>(
                 color, output_grad, luma, grid_h, grid_w, height, width,
-                pixels, pixel, group[slot]);
+                pixels, pixel, wrap_horizontal, group[slot]);
         }
         if (!active[slot] || !mergeable) {
             mergeable = false;
@@ -564,7 +570,8 @@ __global__ void bilateral_backward_kernel(
 
 __global__ void bilateral_tv_backward_kernel(
     const float* grids, float* grads, const int views, const int luma,
-    const int grid_h, const int grid_w, const float tv_weight) {
+    const int grid_h, const int grid_w, const float tv_weight,
+    const bool wrap_horizontal) {
     const long long cells = static_cast<long long>(views) * luma * grid_h *
         grid_w;
     const long long cell =
@@ -582,7 +589,8 @@ __global__ void bilateral_tv_backward_kernel(
     const float nx = grid_w > 1
         ? tv_weight * 2.F /
             static_cast<float>(
-                views * luma * grid_h * (grid_w - 1) * k_affine_channels)
+                views * luma * grid_h *
+                (wrap_horizontal ? grid_w : grid_w - 1) * k_affine_channels)
         : 0.F;
     const float ny = grid_h > 1
         ? tv_weight * 2.F /
@@ -603,9 +611,18 @@ __global__ void bilateral_tv_backward_kernel(
     for (int c = 0; c < k_affine_channels; ++c) {
         const float val = grids[base + c];
         float g = 0.F;
-        if (grid_w > 1 && x > 0) g += (val - grids[base + c - sw]) * nx;
-        if (grid_w > 1 && x + 1 < grid_w)
-            g += (val - grids[base + c + sw]) * nx;
+        if (grid_w > 1 && (wrap_horizontal || x > 0)) {
+            const long long left = x > 0
+                ? base + c - sw
+                : base + c + static_cast<long long>(grid_w - 1) * sw;
+            g += (val - grids[left]) * nx;
+        }
+        if (grid_w > 1 && (wrap_horizontal || x + 1 < grid_w)) {
+            const long long right = x + 1 < grid_w
+                ? base + c + sw
+                : base + c - static_cast<long long>(grid_w - 1) * sw;
+            g += (val - grids[right]) * nx;
+        }
         if (grid_h > 1 && y > 0) g += (val - grids[base + c - sh]) * ny;
         if (grid_h > 1 && y + 1 < grid_h)
             g += (val - grids[base + c + sh]) * ny;
@@ -652,7 +669,7 @@ BilateralGridState make_bilateral_grid_state(
 
 void apply_bilateral_grid(
     const tinytensor::Tensor& color, BilateralGridState& state,
-    const std::size_t view) {
+    const std::size_t view, const bool wrap_horizontal) {
     if (color.numel() == 0) return;
     if (!state.is_valid())
         throw std::invalid_argument(
@@ -671,13 +688,14 @@ void apply_bilateral_grid(
         (pixels + k_cuda_threads - 1) / k_cuda_threads, k_cuda_threads>>>(
         color.ptr<float>(), state.output.ptr<float>(), state.grids.ptr<float>(),
         row, state.luma, state.grid_height, state.grid_width,
-        height, width);
+        height, width, wrap_horizontal);
     check_cuda(cudaGetLastError(), "apply bilateral grid colour correction");
 }
 
 void backward_bilateral_grid(
     BilateralGridState& state, const tinytensor::Tensor& color,
-    const tinytensor::Tensor& output_gradient, const std::size_t view) {
+    const tinytensor::Tensor& output_gradient, const std::size_t view,
+    const bool wrap_horizontal) {
     if (color.numel() == 0) return;
     ensure_same_shape(state.input_grad, color);
     const int height = static_cast<int>(color.shape()[1]);
@@ -714,26 +732,29 @@ void backward_bilateral_grid(
             color.ptr<float>(), state.grids.ptr<float>(),
             output_gradient.ptr<float>(), state.gradient.ptr<float>(),
             state.input_grad.ptr<float>(), row, state.luma,
-            state.grid_height, state.grid_width, height, width);
+            state.grid_height, state.grid_width, height, width,
+            wrap_horizontal);
     } else if (vectorized) {
         bilateral_backward_kernel<true, 4><<<blocks, threads>>>(
             color.ptr<float>(), state.grids.ptr<float>(),
             output_gradient.ptr<float>(), state.gradient.ptr<float>(),
             state.input_grad.ptr<float>(), row, state.luma,
-            state.grid_height, state.grid_width, height, width);
+            state.grid_height, state.grid_width, height, width,
+            wrap_horizontal);
     } else {
         bilateral_backward_kernel<false, 4><<<blocks, threads>>>(
             color.ptr<float>(), state.grids.ptr<float>(),
             output_gradient.ptr<float>(), state.gradient.ptr<float>(),
             state.input_grad.ptr<float>(), row, state.luma,
-            state.grid_height, state.grid_width, height, width);
+            state.grid_height, state.grid_width, height, width,
+            wrap_horizontal);
     }
     check_cuda(cudaGetLastError(), "backward bilateral grid colour correction");
 }
 
 void step_bilateral_grid(
     BilateralGridState& state, const TrainingOptions& options,
-    const unsigned iteration) {
+    const unsigned iteration, const bool wrap_horizontal) {
     if (!state.is_valid()) return;
     if (options.bilateral_grid_tv_weight > 0.F) {
         const long long cells = static_cast<long long>(state.grids.shape()[0]) *
@@ -746,7 +767,7 @@ void step_bilateral_grid(
                 state.grids.ptr<float>(), state.gradient.ptr<float>(),
                 static_cast<int>(state.grids.shape()[0]), state.luma,
                 state.grid_height, state.grid_width,
-                options.bilateral_grid_tv_weight);
+                options.bilateral_grid_tv_weight, wrap_horizontal);
         check_cuda(cudaGetLastError(), "bilateral grid total-variation");
     }
     adam_step(

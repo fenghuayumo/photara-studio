@@ -180,6 +180,35 @@ bool is_refinement_iteration(
         0.95F;
 }
 
+std::size_t panorama_progressive_growth_cap(
+    const std::size_t initial_count, const unsigned iteration,
+    const TrainingOptions& options) {
+    const auto cap = options.densification_cap;
+    if (!options.progressive_resolution ||
+        options.progressive_resolution_interval == 0 || initial_count >= cap)
+        return cap;
+    float scale = std::clamp(options.progressive_initial_scale, 1e-3F, 1.F);
+    std::uint64_t full_start = 1;
+    while (scale < 1.F) {
+        scale *= 2.F;
+        full_start += options.progressive_resolution_interval;
+    }
+    const auto stop = grow_stop_iteration(options);
+    // Short runs that never grow at full resolution must not strand capacity.
+    if (full_start == 1 || full_start >= stop) return cap;
+    const auto release_end = std::min<std::uint64_t>(
+        full_start + options.progressive_resolution_interval, stop - 1);
+    const double released = iteration <= full_start ? 0.0 :
+        std::min(1.0, static_cast<double>(iteration - full_start) /
+            std::max<std::uint64_t>(1, release_end - full_start));
+    // Keep this policy internal: it is a consequence of progressive panorama
+    // training, not another user-facing tuning dimension.
+    constexpr double k_growth_reserve = 0.5;
+    const double fraction = 1.0 - k_growth_reserve * (1.0 - released);
+    return initial_count + static_cast<std::size_t>(
+        std::floor(static_cast<double>(cap - initial_count) * fraction));
+}
+
 }  // namespace photara::splat::densification
 
 namespace photara::splat {
