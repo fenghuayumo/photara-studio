@@ -356,6 +356,7 @@ constexpr Entry k_entries[] = {
     {"GAUSSIAN CENTRES", "高斯中心", "ガウシアン中心", "가우시안 중심"},
     {"LIVE TRAINING PREVIEW", "实时训练预览", "ライブ学習プレビュー", "실시간 학습 미리보기"},
     {"LIVE SPLAT VIEW", "实时溅射视图", "ライブスプラット表示", "실시간 스플랫 보기"},
+    {"VULKAN 3DGUT", "Vulkan 3DGUT", "Vulkan 3DGUT", "Vulkan 3DGUT"},
     {"LAST TRAINING FRAME", "上次训练帧", "最後の学習フレーム", "마지막 학습 프레임"},
     {"TRAINING", "训练中", "学習中", "학습 중"},
     {"VIEWING", "预览中", "表示中", "보는 중"},

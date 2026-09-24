@@ -9,6 +9,7 @@
 #include "theme.hpp"
 #include "viewport_gizmo.hpp"
 #include "vulkan_backend.hpp"
+#include "splat_render/renderer.hpp"
 
 #include "sfm/align_live.hpp"
 #include "splat/visualize.hpp"
@@ -80,6 +81,11 @@ struct App {
     bool frame_mesh_on_load{};
     bool mesh_load_failed{};
     gpu::MeshPreviewRenderer mesh_renderer;
+    splat_render::Renderer splat_renderer;
+    std::array<VkDescriptorSet, 3> splat_preview_sets{};
+    std::array<VkImageView, 3> splat_preview_views{};
+    std::uint64_t splat_frames_epoch{};
+    std::string splat_load_failed_key;
     std::vector<float> mesh_gpu_positions;
     std::vector<float> mesh_gpu_normals;
     std::vector<float> mesh_gpu_colours;
@@ -265,6 +271,8 @@ void poll_camera_photos(App& app);
 
 void stop_splat_view(App& app);
 void start_splat_view(App& app);
+bool ensure_splat_renderer(App& app);
+void release_splat_preview(App& app);
 void start_align(App& app);
 void start_train(App& app, bool smoke);
 void start_dense(App& app);

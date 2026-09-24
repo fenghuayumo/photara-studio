@@ -151,6 +151,7 @@ struct ViewFrame {
     float height{1.F};
     EditorProjection projection{EditorProjection::perspective};
     photara::CameraModel model{photara::CameraModel::pinhole};
+    float ortho_height{4.F};
 };
 
 ViewFrame build_frame(
@@ -170,6 +171,7 @@ ViewFrame build_frame(
     frame.width = width;
     frame.height = height;
     frame.projection = camera.projection;
+    frame.ortho_height = std::max(1e-4F, camera.ortho_height);
     orbit_intrinsics(
         camera, static_cast<std::uint32_t>(std::lround(width)),
         static_cast<std::uint32_t>(std::lround(height)), frame.fx, frame.fy,
@@ -200,6 +202,12 @@ bool project(
         return true;
     }
     if (depth <= k_near_plane) return false;
+    if (frame.projection == EditorProjection::orthographic) {
+        const float scale = frame.height / frame.ortho_height;
+        screen.x = frame.centre.x + x * scale;
+        screen.y = frame.centre.y + y * scale;
+        return true;
+    }
     if (frame.projection == EditorProjection::fisheye) {
         const auto pixel = photara::project_fisheye_camera(
             x, y, depth, frame.fx, frame.fy, frame.cx, frame.cy, frame.k1,
@@ -248,6 +256,18 @@ void draw_segment(
     const float dz = bz - az;
     float t0 = 0.F;
     float t1 = 1.F;
+    if (frame.projection == EditorProjection::orthographic) {
+        if (!keep_halfspace(k_near_plane - az, dz, t0, t1)) return;
+        if (!keep_halfspace(az - k_far_plane, -dz, t0, t1)) return;
+        const float scale = frame.height / frame.ortho_height;
+        const auto to_screen = [&](const float t) {
+            return ImVec2{
+                frame.centre.x + (ax + dx * t) * scale,
+                frame.centre.y - (ay + dy * t) * scale};
+        };
+        draw->AddLine(to_screen(t0), to_screen(t1), colour, thickness);
+        return;
+    }
     if (!keep_halfspace(k_near_plane - az, dz, t0, t1)) return;
     if (!keep_halfspace(az - k_far_plane, -dz, t0, t1)) return;
     const float pad = 1.15F;
@@ -355,17 +375,26 @@ bool is_multiple(const float value, const float step) {
 float grid_horizon_extent(
     const ViewFrame& frame, const OrbitCamera& camera, const float plane_y,
     const float focus_x, const float focus_z) {
-    float extent = camera.distance * 4.F;
+    float extent = camera.projection == EditorProjection::orthographic
+        ? camera.ortho_height * 4.F
+        : camera.distance * 4.F;
+    const float ortho_scale = frame.height / frame.ortho_height;
     const float xs[3] = {-frame.half_x, 0.F, frame.half_x};
     const float ys[3] = {-frame.half_y, 0.F, frame.half_y};
     for (const float sx : xs) {
         for (const float sy : ys) {
-            const Vec3 dir = normalize(
+            Vec3 origin = frame.eye;
+            Vec3 dir = normalize(
                 frame.forward * frame.focal + frame.right * sx + frame.up * sy);
+            if (camera.projection == EditorProjection::orthographic) {
+                origin = frame.eye + frame.right * (sx / ortho_scale) +
+                         frame.up * (sy / ortho_scale);
+                dir = frame.forward;
+            }
             if (std::abs(dir.y) < 1e-6F) continue;
-            const float t = (plane_y - frame.eye.y) / dir.y;
+            const float t = (plane_y - origin.y) / dir.y;
             if (t <= k_near_plane) continue;
-            const Vec3 hit = frame.eye + dir * t;
+            const Vec3 hit = origin + dir * t;
             const float dx = hit.x - focus_x;
             const float dz = hit.z - focus_z;
             extent = std::max(extent, std::sqrt(dx * dx + dz * dz));
@@ -2041,6 +2070,14 @@ bool camera_world_ray(
         return normalize(
             frame.right * x + frame.up * (-y) + frame.forward * z);
     };
+    if (frame.projection == EditorProjection::orthographic) {
+        const float scale = frame.height / frame.ortho_height;
+        const float x = (u - frame.cx) / scale;
+        const float y = (v - frame.cy) / scale;
+        origin = frame.eye + frame.right * x + frame.up * (-y);
+        direction = frame.forward;
+        return true;
+    }
     if (frame.projection == EditorProjection::panorama) {
         const auto ray = photara::unproject_equirectangular_camera(
             u, v, static_cast<int>(std::lround(frame.width)),

@@ -716,6 +716,8 @@ void clear_viewport_scene(App& app) {
     app.mesh_gpu_failed = false;
     app.mesh_renderer.set_mesh({}, {}, {}, {});
     app.mesh_renderer.set_albedo({});
+    app.splat_renderer.clear_model();
+    app.splat_load_failed_key.clear();
     app.atlas_preview.reset();
     app.atlas_preview_path.clear();
     app.scene_source.clear();
@@ -1822,14 +1824,18 @@ void set_visualization_mode(App& app, const VisualizationMode mode) {
     }
     const bool training =
         app.job.running() && app.active_job == JobKind::train;
-    if (app.has_model && !training)
-        start_splat_view(app);
-    else if (mode == VisualizationMode::points && !live_preview_active(app) &&
-             !app.scene.has_points())
+    if (training) {
+        write_preview_vis(app);
+        sync_live_preview_camera(
+            app, true, app.preview_raster_width, app.preview_raster_height);
+        return;
+    }
+    // After training the splat image is drawn in-process. CUDA stays on the
+    // training job.
+    stop_splat_view(app);
+    if (mode == VisualizationMode::points && !app.scene.has_points())
         ensure_sparse_loaded(app);
     write_preview_vis(app);
-    sync_live_preview_camera(
-        app, true, app.preview_raster_width, app.preview_raster_height);
 }
 void apply_opened_project(App& app) {
     stop_splat_view(app);
@@ -3189,8 +3195,91 @@ void on_job_finished(App& app) {
     if (app.has_mesh) {
         app.mesh.clear();
         show_mesh_view(app, true);
-    } else if (!app.smoke_mode && app.has_model) {
-        start_splat_view(app);
+    }
+}
+
+bool ensure_splat_renderer(App& app) {
+    if (!app.has_model) return false;
+    if (app.job.running() && app.active_job == JobKind::train) return false;
+    if (!app.splat_renderer.attached()) {
+        app.splat_renderer.attach(splat_render::Device{
+            gpu::physical_device(), gpu::device(), gpu::queue(),
+            gpu::queue_family()});
+    }
+    std::string key;
+    try {
+        photara::splat::GaussianModel model;
+        const auto path = existing_splat_model(app);
+        if (!path.empty()) {
+            std::error_code error;
+            const auto stamp = std::filesystem::last_write_time(path, error);
+            key = path.string();
+            if (!error) {
+                key += ":";
+                key += std::to_string(
+                    static_cast<long long>(stamp.time_since_epoch().count()));
+            }
+            if (key == app.splat_load_failed_key) return false;
+            if (key == app.splat_renderer.source_key() &&
+                app.splat_renderer.splat_count() > 0)
+                return app.splat_renderer.supported();
+            model = photara::splat::load_gaussians(path);
+        } else if (!app.layout.project_file.empty()) {
+            const auto archive =
+                photara::project::Archive::open(app.layout.project_file);
+            if (!archive.has(photara::project::ChunkType::gaussians))
+                return false;
+            key = app.layout.project_file.string();
+            key += ":gaussians:";
+            key += std::to_string(archive.writer_version());
+            if (key == app.splat_load_failed_key) return false;
+            if (key == app.splat_renderer.source_key() &&
+                app.splat_renderer.splat_count() > 0)
+                return app.splat_renderer.supported();
+            model = photara::splat::decode_gaussians(
+                archive.chunk(photara::project::ChunkType::gaussians));
+        } else {
+            return false;
+        }
+
+        const auto count = static_cast<std::uint32_t>(model.size());
+        const auto means = model.means.to_vector();
+        const auto scales = model.log_scales.to_vector();
+        const auto quaternions = model.quaternions.to_vector();
+        const auto opacity = model.opacity_logits.to_vector();
+        const auto sh =
+            model.sh.is_valid() ? model.sh.to_vector() : std::vector<float>{};
+        std::uint32_t bases = 1;
+        if (model.sh.is_valid() && model.sh.shape().rank() >= 2)
+            bases = static_cast<std::uint32_t>(model.sh.shape()[1]);
+        if (means.size() < static_cast<std::size_t>(count) * 3U ||
+            scales.size() < static_cast<std::size_t>(count) * 3U ||
+            quaternions.size() < static_cast<std::size_t>(count) * 4U ||
+            opacity.size() < count) {
+            throw std::runtime_error(
+                "Trained Gaussian model has an unexpected layout");
+        }
+        splat_render::GaussianCloud cloud;
+        cloud.count = count;
+        cloud.sh_degree = model.sh_degree;
+        cloud.sh_bases = bases;
+        cloud.means = means.empty() ? nullptr : means.data();
+        cloud.log_scales = scales.empty() ? nullptr : scales.data();
+        cloud.quaternions = quaternions.empty() ? nullptr : quaternions.data();
+        cloud.opacity_logits = opacity.empty() ? nullptr : opacity.data();
+        cloud.sh = sh.empty() ? nullptr : sh.data();
+        if (!app.splat_renderer.upload(cloud, key)) {
+            app.splat_load_failed_key = key;
+            if (!app.splat_renderer.failure().empty())
+                set_message(app, app.splat_renderer.failure(), theme::danger);
+            return false;
+        }
+        app.splat_load_failed_key.clear();
+        return true;
+    } catch (const std::exception& failure) {
+        app.splat_load_failed_key = key;
+        set_message(app, failure.what(), theme::danger);
+        return false;
     }
 }
 

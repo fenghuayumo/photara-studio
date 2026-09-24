@@ -337,6 +337,7 @@ int main(const int argc, char** argv) {
     app.photos.clear();
     app.atlas_preview.reset();
     app.about_icon.reset();
+    editor::release_splat_preview(app);
     app.mesh_renderer.reset();
     app.preview.reset();
     ImGui_ImplVulkan_Shutdown();

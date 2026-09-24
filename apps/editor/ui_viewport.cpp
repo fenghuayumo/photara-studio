@@ -4,6 +4,7 @@
 #include "icons.hpp"
 #include "viewport_gizmo.hpp"
 
+#include "imgui_impl_vulkan.h"
 #include "imgui_internal.h"
 #include "io/image.hpp"
 #include "splat/visualize.hpp"
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace editor {
 using i18n::tr;
@@ -533,14 +535,22 @@ void capture_qa_render(App& app) {
     if (app.image_qa.dragging_wipe) return;
     if (!app.image_qa.metrics_dirty) return;
     if (app.image_qa_session.metrics_busy()) return;
-    if (!app.preview.display.descriptor || !qa_capture_frame_ready(app))
+    const bool training =
+        app.job.running() && app.active_job == JobKind::train;
+    if (training) {
+        if (!app.preview.display.descriptor || !qa_capture_frame_ready(app))
+            return;
+    } else if (app.splat_renderer.splat_count() == 0) {
         return;
+    }
     if (!app.image_qa_session.has_gt() ||
         app.image_qa_session.loaded_view() != app.image_qa.selected)
         return;
     if (std::chrono::steady_clock::now() < app.qa_metrics_after) return;
 
-    const std::uint64_t revision = gpu::consumed_timeline_value();
+    const std::uint64_t revision = training
+        ? gpu::consumed_timeline_value()
+        : app.splat_renderer.frames_epoch();
     if (app.image_qa_session.has_render_pixels() &&
         app.image_qa_session.render_view() == app.image_qa.selected &&
         app.image_qa_session.metrics().valid) {
@@ -548,8 +558,20 @@ void capture_qa_render(App& app) {
         return;
     }
     photara::io::RgbImage render;
-    if (!app.preview.display.download_rgb(render, k_image_qa_metric_extent))
-        return;
+    if (training) {
+        if (!app.preview.display.download_rgb(render, k_image_qa_metric_extent))
+            return;
+    } else {
+        std::vector<std::uint8_t> pixels;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        if (!app.splat_renderer.download_rgb(
+                pixels, width, height, k_image_qa_metric_extent))
+            return;
+        render.width = width;
+        render.height = height;
+        render.pixels = std::move(pixels);
+    }
     app.image_qa_session.set_render(
         std::move(render), app.image_qa.selected, revision);
     app.image_qa.metrics_dirty = false;
@@ -582,13 +604,10 @@ void set_viewport_workspace(
 
 void ensure_qa_preview(App& app) {
     if (app.workspace != ViewportWorkspace::image_2d) return;
-    // Publish the capture pose before starting the viewer so the first
-    // streamed frame is already the photo being inspected, not the orbit eye.
-    sync_qa_preview_camera(app);
-    if (image_qa_needs_render(app.image_qa.mode) && app.has_model &&
-        !live_preview_active(app) && !app.job.running())
-        start_splat_view(app);
-    sync_qa_preview_camera(app);
+    // Training still publishes the capture pose to the CUDA child. After
+    // training, the 2D compare draws that pose with the Vulkan rasterizer.
+    if (app.job.running() && app.active_job == JobKind::train)
+        sync_qa_preview_camera(app);
     capture_qa_render(app);
 }
 
@@ -1021,6 +1040,205 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     }
 }
 
+std::uint32_t gut_projection(const EditorProjection projection) {
+    switch (projection) {
+        case EditorProjection::orthographic:
+            return splat_render::k_camera_orthographic;
+        case EditorProjection::fisheye:
+            return splat_render::k_camera_fisheye;
+        case EditorProjection::panorama:
+            return splat_render::k_camera_equirectangular;
+        case EditorProjection::perspective:
+        default:
+            return splat_render::k_camera_pinhole;
+    }
+}
+
+std::uint32_t gut_projection(const photara::CameraModel model) {
+    switch (model) {
+        case photara::CameraModel::opencv_fisheye:
+            return splat_render::k_camera_fisheye;
+        case photara::CameraModel::equirectangular:
+            return splat_render::k_camera_equirectangular;
+        case photara::CameraModel::pinhole:
+        case photara::CameraModel::automatic:
+        default:
+            return splat_render::k_camera_pinhole;
+    }
+}
+
+splat_render::Camera gut_camera_from(const SplatPreviewCamera& preview) {
+    splat_render::Camera camera;
+    camera.world_to_camera = preview.world_to_camera;
+    camera.position = preview.position;
+    camera.fx = preview.fx;
+    camera.fy = preview.fy;
+    camera.cx = preview.cx;
+    camera.cy = preview.cy;
+    camera.k1 = preview.k1;
+    camera.k2 = preview.k2;
+    camera.k3 = preview.k3;
+    camera.k4 = preview.k4;
+    camera.width = preview.width;
+    camera.height = preview.height;
+    camera.model = gut_projection(preview.model);
+    return camera;
+}
+
+void release_splat_preview_sets(App& app) {
+    for (VkDescriptorSet& set : app.splat_preview_sets) {
+        if (set) ImGui_ImplVulkan_RemoveTexture(set);
+        set = VK_NULL_HANDLE;
+    }
+    app.splat_preview_views.fill(VK_NULL_HANDLE);
+}
+
+VkDescriptorSet splat_preview_texture(
+    App& app, const splat_render::FrameTarget& frame) {
+    if (app.splat_frames_epoch != app.splat_renderer.frames_epoch()) {
+        release_splat_preview_sets(app);
+        app.splat_frames_epoch = app.splat_renderer.frames_epoch();
+    }
+    if (frame.slot < 0 || frame.slot >= 3 || !frame.view || !frame.sampler)
+        return VK_NULL_HANDLE;
+    VkImageView& cached = app.splat_preview_views[static_cast<std::size_t>(frame.slot)];
+    VkDescriptorSet& set = app.splat_preview_sets[static_cast<std::size_t>(frame.slot)];
+    if (cached == frame.view && set) return set;
+    if (set) ImGui_ImplVulkan_RemoveTexture(set);
+    set = ImGui_ImplVulkan_AddTexture(frame.sampler, frame.view, frame.layout);
+    cached = frame.view;
+    return set;
+}
+
+void release_splat_preview(App& app) {
+    release_splat_preview_sets(app);
+    app.splat_frames_epoch = 0;
+    app.splat_renderer.reset();
+}
+
+splat_render::Camera gut_camera_for_orbit(
+    const SplatPreviewCamera& preview, const OrbitCamera& orbit) {
+    splat_render::Camera camera = gut_camera_from(preview);
+    camera.model = gut_projection(orbit.projection);
+    if (orbit.projection != EditorProjection::orthographic) return camera;
+    const float height = std::max(1.F, static_cast<float>(camera.height));
+    const float pixels_per_unit =
+        height / std::max(1e-4F, orbit.ortho_height);
+    camera.fx = pixels_per_unit;
+    camera.fy = pixels_per_unit;
+    camera.cx = 0.5F * static_cast<float>(camera.width);
+    camera.cy = 0.5F * height;
+    camera.k1 = camera.k2 = camera.k3 = camera.k4 = 0.F;
+    return camera;
+}
+
+bool draw_gut_image(
+    App& app, const SplatPreviewCamera& preview, ImTextureID& texture,
+    const OrbitCamera* orbit = nullptr) {
+    texture = ImTextureID{};
+    if (!ensure_splat_renderer(app)) return false;
+    const splat_render::Camera camera = orbit == nullptr
+        ? gut_camera_from(preview)
+        : gut_camera_for_orbit(preview, *orbit);
+    splat_render::FrameTarget target;
+    if (!app.splat_renderer.draw(camera, target)) return false;
+    const VkDescriptorSet set = splat_preview_texture(app, target);
+    if (!set) return false;
+    texture = reinterpret_cast<ImTextureID>(set);
+    return true;
+}
+
+bool qa_preview_camera(const App& app, SplatPreviewCamera& camera) {
+    if (app.image_qa.selected < 0 ||
+        static_cast<std::size_t>(app.image_qa.selected) >= app.scene.views.size())
+        return false;
+    const ViewPose& pose =
+        app.scene.views[static_cast<std::size_t>(app.image_qa.selected)];
+    std::uint32_t width = k_preview_extent;
+    std::uint32_t height = k_preview_extent;
+    if (pose.width > 0 && pose.height > 0) {
+        if (pose.width >= pose.height) {
+            width = k_preview_extent;
+            height = std::max<std::uint32_t>(
+                1, static_cast<std::uint32_t>(std::lround(
+                       static_cast<double>(k_preview_extent) * pose.height /
+                       pose.width)));
+        } else {
+            height = k_preview_extent;
+            width = std::max<std::uint32_t>(
+                1, static_cast<std::uint32_t>(std::lround(
+                       static_cast<double>(k_preview_extent) * pose.width /
+                       pose.height)));
+        }
+    }
+    camera = make_preview_camera_from_view(pose, width, height);
+    return true;
+}
+
+void draw_splat_render_tab(App& app, const ImVec2 min, const ImVec2 max) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg));
+    ImGui::SetCursorScreenPos(min);
+    ImGui::SetNextItemAllowOverlap();
+    ImGui::InvisibleButton(
+        "##gut_view",
+        {std::max(1.F, max.x - min.x), std::max(1.F, max.y - min.y)},
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
+            ImGuiButtonFlags_MouseButtonMiddle);
+    const bool hovered =
+        ImGui::IsItemHovered() &&
+        !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
+
+    std::uint32_t raster_w = app.preview_raster_width;
+    std::uint32_t raster_h = app.preview_raster_height;
+    fit_preview_raster(max.x - min.x, max.y - min.y, false, raster_w, raster_h);
+    const SplatPreviewCamera preview =
+        make_preview_camera(app.camera, raster_w, raster_h);
+    ImTextureID texture{};
+    const bool shown = draw_gut_image(app, preview, texture, &app.camera);
+    if (shown) draw->AddImage(texture, min, max);
+    else {
+        const std::string& failure = app.splat_renderer.failure();
+        draw_empty_viewport(
+            draw, min, max, tr("VULKAN 3DGUT"),
+            failure.empty() ? tr("Train 3DGS to view the splat") : failure.c_str());
+    }
+
+    ViewOptions overlay = app.view_options;
+    overlay.show_cloud = false;
+    overlay.draw_rings = false;
+    ensure_reconstruction_box(app);
+    const SceneDrawStats stats = app.renderer.draw(
+        draw, min, max, app.scene, app.camera, overlay, hovered,
+        app.photos.ids(), app.photos.size(), nullptr, &app.reconstruction_box);
+    const bool gizmo_captures = draw_viewport_gizmo(
+        app.gizmo, app.camera, min, max, &app.reconstruction_box,
+        app.view_options.show_region && app.reconstruction_box.valid,
+        reconstruction_local_radius(app));
+    const bool viewport_input = hovered && !gizmo_captures;
+    if (!handle_viewport_double_click(app, viewport_input, stats, min, max))
+        update_orbit_camera(
+            app.camera, viewport_input, reconstruction_local_radius(app));
+    if (app.camera.interacting ||
+        (viewport_input && ImGui::GetIO().MouseWheel != 0.F))
+        app.preview_follow_view = false;
+    handle_preview_view_input(app, viewport_input);
+
+    draw_viewport_overlay(
+        draw, min, tr("VULKAN 3DGUT"),
+        shown ? theme::success : theme::warning);
+    char readout[160];
+    std::snprintf(
+        readout, sizeof(readout), "%s gaussians  |  %u x %u",
+        format_count(app.splat_renderer.splat_count()).c_str(),
+        preview.width, preview.height);
+    draw->AddText(
+        {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
+    draw->AddText(
+        {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
+        tr("LMB orbit  |  MMB pan  |  RMB + WASD fly  |  arrows snap capture"));
+}
+
 void draw_viewport_panel(App& app) {
     if (!app.show_viewport) {
         app.viewport_bounds_valid = false;
@@ -1113,15 +1331,28 @@ void draw_viewport_panel(App& app) {
         refresh_image_qa_folder(
             app.image_qa, reconstruction_images_path(app));
         const int previous = app.image_qa.selected;
+        const bool training_now =
+            app.job.running() && app.active_job == JobKind::train;
+        ImTextureID gut_texture{};
+        bool gut_ready = false;
+        if (!training_now && image_qa_needs_render(app.image_qa.mode) &&
+            app.has_model) {
+            SplatPreviewCamera qa_camera;
+            if (qa_preview_camera(app, qa_camera))
+                gut_ready = draw_gut_image(app, qa_camera, gut_texture);
+        }
         ImageQaDrawInput input;
         input.scene = &app.scene;
         input.photos = &app.photos;
-        input.render = app.preview.display.descriptor
-            ? reinterpret_cast<ImTextureID>(app.preview.display.descriptor)
-            : ImTextureID{};
-        input.has_render = app.preview.display.descriptor &&
-                           qa_capture_frame_ready(app);
-        input.render_live = live_preview_active(app);
+        input.render = gut_ready
+            ? gut_texture
+            : (app.preview.display.descriptor
+                   ? reinterpret_cast<ImTextureID>(app.preview.display.descriptor)
+                   : ImTextureID{});
+        input.has_render = gut_ready ||
+                           (app.preview.display.descriptor &&
+                            qa_capture_frame_ready(app));
+        input.render_live = training_now && live_preview_active(app);
         input.has_model = app.has_model;
         input.external_alignment = has_external_dataset(app);
         if (alignment_job_running(app) &&
@@ -1148,6 +1379,11 @@ void draw_viewport_panel(App& app) {
         ensure_qa_preview(app);
     } else if (app.view_mode == VisualizationMode::mesh) {
         draw_sparse_tab(app, view_min, view_max);
+        draw_view_mode_rail(app, view_min);
+        draw_scene_toggle_rail(app, view_min);
+    } else if (app.view_mode == VisualizationMode::splat && app.has_model &&
+               !(app.job.running() && app.active_job == JobKind::train)) {
+        draw_splat_render_tab(app, view_min, view_max);
         draw_view_mode_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if (live_preview_active(app) && !waiting_for_train_preview(app)) {

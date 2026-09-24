@@ -1,0 +1,35 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 10) readonly buffer WgCounts { uint wg_counts[]; };
+layout(set = 0, binding = 11) writeonly buffer WgOffsets { uint wg_offsets[]; };
+layout(set = 0, binding = 13) writeonly buffer Totals { uint totals[]; };
+layout(set = 0, binding = 14) writeonly buffer BinStart { uint bin_start[]; };
+
+layout(push_constant) uniform Push {
+    uint count;
+    uint groups;
+    uint shift;
+    uint parity;
+} push;
+
+shared uint totals_shared[256];
+
+void main() {
+    uint digit = gl_LocalInvocationID.x;
+    uint sum = 0u;
+    for (uint group = 0u; group < push.groups; ++group) {
+        uint value = wg_counts[group * 256u + digit];
+        wg_offsets[group * 256u + digit] = sum;
+        sum += value;
+    }
+    totals[digit] = sum;
+    totals_shared[digit] = sum;
+    barrier();
+    if (digit != 0u) return;
+    uint acc = 0u;
+    for (int bin = 0; bin < 256; ++bin) {
+        bin_start[uint(bin)] = acc;
+        acc += totals_shared[bin];
+    }
+}

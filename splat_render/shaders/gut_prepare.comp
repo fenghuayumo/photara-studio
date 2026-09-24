@@ -1,0 +1,269 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "gut_frame.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) uniform FrameBlock { GutFrame frame; } frame_block;
+layout(set = 0, binding = 1) readonly buffer Centers { vec4 centers[]; };
+layout(set = 0, binding = 2) readonly buffer Scales { vec4 scales[]; };
+layout(set = 0, binding = 3) readonly buffer Rotations { vec4 rotations[]; };
+layout(set = 0, binding = 4) readonly buffer Harmonics { float harmonics[]; };
+layout(set = 0, binding = 5) writeonly buffer Quads { vec4 quads[]; };
+layout(set = 0, binding = 8) readonly buffer Sorted { uint sorted[]; };
+
+layout(push_constant) uniform Push {
+    uint count;
+    uint groups;
+    uint shift;
+    uint parity;
+} push;
+
+struct QuadItem {
+    vec4 color;
+    vec4 center;
+    vec4 scale;
+    vec4 row0;
+    vec4 row1;
+    vec4 row2;
+    vec4 box;
+};
+
+void store_quad(uint slot, QuadItem item) {
+    uint base = slot * 7u;
+    quads[base + 0u] = item.color;
+    quads[base + 1u] = item.center;
+    quads[base + 2u] = item.scale;
+    quads[base + 3u] = item.row0;
+    quads[base + 4u] = item.row1;
+    quads[base + 5u] = item.row2;
+    quads[base + 6u] = item.box;
+}
+
+bool inside_margin(vec2 pixel, vec2 resolution) {
+    vec2 margin = resolution * 0.1;
+    return pixel.x > -margin.x && pixel.y > -margin.y &&
+           pixel.x < resolution.x + margin.x &&
+           pixel.y < resolution.y + margin.y;
+}
+
+// Writes the pixel even when the point is outside the margin. The return
+// value only counts a sigma point as valid, matching the 3DGUT projector.
+bool project_point(vec3 world, int model, vec2 resolution, out vec2 pixel) {
+    GutFrame frame = frame_block.frame;
+    vec3 camera = (frame.world_to_camera * vec4(world, 1.0)).xyz;
+    float fx = frame.intrinsics.x;
+    float fy = frame.intrinsics.y;
+    float cx = frame.intrinsics.z;
+    float cy = frame.intrinsics.w;
+    if (model == k_model_equirect) {
+        float len = length(camera);
+        if (!(len > 1e-8)) {
+            pixel = vec2(0.0);
+            return false;
+        }
+        float azimuth = atan(camera.x, camera.z);
+        float elevation = asin(clamp(camera.y / len, -1.0, 1.0));
+        pixel.x = (azimuth / (2.0 * 3.14159265) + 0.5) * resolution.x;
+        pixel.y = (elevation / 3.14159265 + 0.5) * resolution.y;
+        return true;
+    }
+    if (model == k_model_fisheye) {
+        if (!(camera.z > 1e-8)) {
+            pixel = vec2(0.0);
+            return false;
+        }
+        float radius = length(camera.xy);
+        float theta = atan(radius, camera.z);
+        float t2 = theta * theta;
+        vec4 k = frame.distortion;
+        float poly = 1.0 + t2 * (k.x + t2 * (k.y + t2 * (k.z + t2 * k.w)));
+        float theta_d = theta * poly;
+        if (theta_d < 0.0) {
+            pixel = vec2(0.0);
+            return false;
+        }
+        if (radius < 1e-12) {
+            pixel = vec2(cx, cy);
+            return inside_margin(pixel, resolution);
+        }
+        float scale = theta_d / radius;
+        pixel = vec2(fx * scale * camera.x + cx, fy * scale * camera.y + cy);
+        return inside_margin(pixel, resolution);
+    }
+    if (model == k_model_ortho) {
+        pixel = vec2(fx * camera.x + cx, fy * camera.y + cy);
+        return camera.z > 1e-4 && inside_margin(pixel, resolution);
+    }
+    if (!(camera.z > 1e-8)) {
+        pixel = vec2(0.0);
+        return false;
+    }
+    pixel = vec2(fx * camera.x / camera.z + cx, fy * camera.y / camera.z + cy);
+    return inside_margin(pixel, resolution);
+}
+
+float wrap_delta(float delta, float period) {
+    float x = delta / period;
+    x -= floor(x);
+    if (x > 0.5) x -= 1.0;
+    return x * period;
+}
+
+vec3 sh_color(uint id, vec3 center, uint degree, uint bases) {
+    GutFrame frame = frame_block.frame;
+    uint stride = bases * 3u;
+    uint base = id * stride;
+    vec3 rgb = k_sh_c0 * vec3(
+        harmonics[base], harmonics[base + 1u], harmonics[base + 2u]);
+    vec3 dir = center - frame.eye.xyz;
+    float len = length(dir);
+    if (degree == 0u || len < 1e-8) return max(rgb + 0.5, vec3(0.0));
+    dir /= len;
+    float x = dir.x;
+    float y = dir.y;
+    float z = dir.z;
+    vec3 c1 = vec3(harmonics[base + 3u], harmonics[base + 4u], harmonics[base + 5u]);
+    vec3 c2 = vec3(harmonics[base + 6u], harmonics[base + 7u], harmonics[base + 8u]);
+    vec3 c3 = vec3(harmonics[base + 9u], harmonics[base + 10u], harmonics[base + 11u]);
+    rgb += k_sh_c1 * (-c1 * y + c2 * z - c3 * x);
+    if (degree > 1u && bases >= 9u) {
+        float xx = x * x;
+        float yy = y * y;
+        float zz = z * z;
+        float xy = x * y;
+        float yz = y * z;
+        float xz = x * z;
+        float q2[5] = float[5](xy, yz, 2.0 * zz - xx - yy, xz, xx - yy);
+        for (int i = 0; i < 5; ++i) {
+            uint o = base + uint(4 + i) * 3u;
+            rgb += k_sh_c2[i] * q2[i] *
+                   vec3(harmonics[o], harmonics[o + 1u], harmonics[o + 2u]);
+        }
+        if (degree > 2u && bases >= 16u) {
+            float q3[7] = float[7](
+                y * (3.0 * xx - yy), xy * z, y * (4.0 * zz - xx - yy),
+                z * (2.0 * zz - 3.0 * xx - 3.0 * yy),
+                x * (4.0 * zz - xx - yy), z * (xx - yy), x * (xx - 3.0 * yy));
+            for (int i = 0; i < 7; ++i) {
+                uint o = base + uint(9 + i) * 3u;
+                rgb += k_sh_c3[i] * q3[i] *
+                       vec3(harmonics[o], harmonics[o + 1u], harmonics[o + 2u]);
+            }
+        }
+    }
+    return max(rgb + 0.5, vec3(0.0));
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    QuadItem item;
+    item.color = vec4(0.0);
+    item.center = vec4(0.0);
+    item.scale = vec4(1.0);
+    item.row0 = vec4(1.0, 0.0, 0.0, 0.0);
+    item.row1 = vec4(0.0, 1.0, 0.0, 0.0);
+    item.row2 = vec4(0.0, 0.0, 1.0, 0.0);
+    item.box = vec4(0.0);
+    if (slot >= push.count) return;
+    GutFrame frame = frame_block.frame;
+    uint id = sorted[slot];
+    vec4 center_opacity = centers[id];
+    float opacity = center_opacity.w;
+    if (opacity <= k_alpha_cull) {
+        store_quad(slot, item);
+        return;
+    }
+    vec3 center = center_opacity.xyz;
+    vec3 scale = max(scales[id].xyz, vec3(1e-8));
+    vec4 q = rotations[id];
+    float qn = length(q);
+    if (qn < 1e-8) q = vec4(1.0, 0.0, 0.0, 0.0);
+    else q /= qn;
+    float r = q.x;
+    float x = q.y;
+    float y = q.z;
+    float z = q.w;
+    float xx = x * x;
+    float yy = y * y;
+    float zz = z * z;
+    float xy = x * y;
+    float xz = x * z;
+    float yz = y * z;
+    float rx = r * x;
+    float ry = r * y;
+    float rz = r * z;
+    vec3 row0 = vec3(1.0 - 2.0 * (yy + zz), 2.0 * (xy + rz), 2.0 * (xz - ry));
+    vec3 row1 = vec3(2.0 * (xy - rz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + rx));
+    vec3 row2 = vec3(2.0 * (xz + ry), 2.0 * (yz - rx), 1.0 - 2.0 * (xx + yy));
+    vec3 rows[3] = vec3[3](row0, row1, row2);
+
+    int model = int(frame.eye.w + 0.5);
+    vec2 resolution = max(frame.viewport.xy, vec2(1.0));
+    vec2 sigma[7];
+    int valid = 0;
+    bool center_ok = project_point(center, model, resolution, sigma[0]);
+    if (center_ok) valid++;
+    vec2 mean = sigma[0] * 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        vec3 delta = k_gut_delta * scale[axis] * rows[axis];
+        if (project_point(center + delta, model, resolution, sigma[1 + axis]))
+            valid++;
+        mean += k_gut_weight_i * sigma[1 + axis];
+        if (project_point(center - delta, model, resolution, sigma[4 + axis]))
+            valid++;
+        mean += k_gut_weight_i * sigma[4 + axis];
+    }
+    if (valid == 0) {
+        store_quad(slot, item);
+        return;
+    }
+    if (model == k_model_equirect) {
+        for (int i = 1; i < 7; ++i)
+            sigma[i].x = sigma[0].x + wrap_delta(sigma[i].x - sigma[0].x, resolution.x);
+        mean = sigma[0] * 0.0;
+        for (int i = 1; i < 7; ++i) mean += k_gut_weight_i * sigma[i];
+    }
+
+    vec3 cov = vec3(0.0);
+    vec2 d0 = sigma[0] - mean;
+    cov += k_gut_weight0_cov * vec3(d0.x * d0.x, d0.x * d0.y, d0.y * d0.y);
+    for (int i = 1; i < 7; ++i) {
+        vec2 d = sigma[i] - mean;
+        cov += k_gut_weight_i * vec3(d.x * d.x, d.x * d.y, d.y * d.y);
+    }
+    vec3 dilated = vec3(cov.x + k_cov_dilation, cov.y, cov.z + k_cov_dilation);
+    float det = dilated.x * dilated.z - dilated.y * dilated.y;
+    if (!(det > 1e-12) || opacity < k_alpha_threshold) {
+        store_quad(slot, item);
+        return;
+    }
+    float power = log(opacity / k_alpha_threshold);
+    float extent_factor = min(3.33, sqrt(max(0.0, 2.0 * power)));
+    float mid = 0.5 * (dilated.x + dilated.z);
+    float lambda = mid + sqrt(max(0.01, mid * mid - det));
+    float radius = extent_factor * sqrt(max(lambda, 0.0));
+    if (!(radius > 0.0)) {
+        store_quad(slot, item);
+        return;
+    }
+    vec2 extent = min(
+        extent_factor * sqrt(max(vec2(dilated.x, dilated.z), vec2(0.0))),
+        vec2(radius));
+    extent = min(extent, resolution * 2.0);
+    if (mean.x + extent.x < 0.0 || mean.y + extent.y < 0.0 ||
+        mean.x - extent.x > resolution.x || mean.y - extent.y > resolution.y) {
+        store_quad(slot, item);
+        return;
+    }
+
+    item.color = vec4(
+        sh_color(id, center, frame.meta.x, frame.meta.z), opacity);
+    item.center = vec4(center, 1.0);
+    item.scale = vec4(scale, 0.0);
+    item.row0 = vec4(row0, 0.0);
+    item.row1 = vec4(row1, 0.0);
+    item.row2 = vec4(row2, 0.0);
+    item.box = vec4(mean, extent);
+    store_quad(slot, item);
+}
