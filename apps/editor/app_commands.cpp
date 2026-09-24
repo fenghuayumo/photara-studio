@@ -2817,6 +2817,15 @@ void start_train(App& app, const bool smoke) {
         app, true, app.preview_raster_width, app.preview_raster_height);
     ensure_sparse_loaded(app);
 
+    // The preview keeps the whole model resident (attributes plus the sort
+    // buffers) and the trainer needs that VRAM. An unsaved edit session is the
+    // only copy of those deletions, so it keeps the preview alive until it is
+    // saved or superseded by the trained model.
+    if (!app.splat_edit.dirty()) {
+        app.splat_renderer.clear_model();
+        app.splat_edit.clear();
+    }
+
     // The trainer inherits the shared allocation, so the exported handles are
     // recreated per run: the timeline counter has to restart from zero.
     app.preview.create(k_preview_extent, k_preview_extent);
