@@ -2248,17 +2248,18 @@ void SplatEdit::draw_volume(
         draw->AddLine(a, b, IM_COL32(6, 8, 12, 170), width + 2.2F);
         draw->AddLine(a, b, colour, width);
     };
-    const auto ring = [&](const float u[3], const float v[3], const float radius,
-                          const ImU32 colour, const float width) {
+    const auto ring = [&](const float origin[3], const float u[3], const float v[3],
+                          const float radius, const ImU32 colour, const float width) {
         ImVec2 previous;
         bool have = false;
-        for (int step = 0; step <= 48; ++step) {
-            const float angle = static_cast<float>(step) / 48.F * 6.2831853F;
+        constexpr int k_steps = 96;
+        for (int step = 0; step <= k_steps; ++step) {
+            const float angle = static_cast<float>(step) / static_cast<float>(k_steps) * 6.2831853F;
             const float c = std::cos(angle);
             const float s = std::sin(angle);
             float point[3];
             for (int k = 0; k < 3; ++k)
-                point[k] = volume_center_[k] + (u[k] * c + v[k] * s) * radius;
+                point[k] = origin[k] + (u[k] * c + v[k] * s) * radius;
             ImVec2 screen;
             float depth = 0.F;
             const bool ok = project_world(camera, view_min, view_max, point, screen, depth);
@@ -2270,15 +2271,33 @@ void SplatEdit::draw_volume(
 
     if (sphere) {
         const ImU32 wire = IM_COL32(236, 242, 248, 210);
-        ring(axis[1], axis[2], half[0], wire, 1.35F);
-        ring(axis[0], axis[2], half[0], wire, 1.35F);
-        ring(axis[0], axis[1], half[0], wire, 1.35F);
+        // Eight meridians and seven parallels.
+        for (int meridian = 0; meridian < 8; ++meridian) {
+            const float turn = static_cast<float>(meridian) * 0.39269908F;
+            const float turn_c = std::cos(turn);
+            const float turn_s = std::sin(turn);
+            float heading[3];
+            for (int k = 0; k < 3; ++k)
+                heading[k] = axis[0][k] * turn_c + axis[2][k] * turn_s;
+            ring(volume_center_, heading, axis[1], half[0], wire, 1.35F);
+        }
+        const float latitudes[7] = {
+            0.F, 0.39269908F, -0.39269908F, 0.78539816F, -0.78539816F,
+            1.17809725F, -1.17809725F};
+        for (const float latitude : latitudes) {
+            const float parallel_radius = half[0] * std::cos(latitude);
+            const float height = half[0] * std::sin(latitude);
+            float origin[3];
+            for (int k = 0; k < 3; ++k)
+                origin[k] = volume_center_[k] + axis[1][k] * height;
+            ring(origin, axis[0], axis[2], parallel_radius, wire, 1.35F);
+        }
         float view[3];
         view_direction(camera, volume_center_, view);
         float u[3];
         float v[3];
         volume_basis(view, u, v);
-        ring(u, v, half[0], IM_COL32(255, 255, 255, 235), 1.7F);
+        ring(volume_center_, u, v, half[0], IM_COL32(255, 255, 255, 235), 1.7F);
     } else {
         struct Corner {
             ImVec2 screen;
