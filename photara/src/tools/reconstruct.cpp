@@ -269,6 +269,11 @@ struct ReconstructCli {
     std::uint32_t uv_parallel_partitions{8};
     bool texture_optimize{true};
     std::string texture_color_space{"srgb"};
+    std::string texture_blend{"softmax"};
+    std::uint32_t texture_padding{4};
+    bool texture_fill_unobserved{true};
+    float texture_mask_floor{0.05F};
+    float texture_softmax_scale{0.F};
     std::uint32_t texture_optimize_steps{1000};
     std::uint32_t texture_optimize_batch_size{4};
     std::uint32_t texture_seam_samples{4};
@@ -973,6 +978,24 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("texture-color-space",
          "Texture blend space: srgb (default, matches photographs) or linear",
          cxxopts::value<std::string>()->default_value("srgb"))
+        ("texture-blend",
+         "Texture blending: softmax (default, pixel-footprint exponential), "
+         "average (linear weighted mean), or best_view",
+         cxxopts::value<std::string>()->default_value("softmax"))
+        ("texture-softmax-scale",
+         "Exponential sharpness of softmax blending (0 = scene-relative)",
+         cxxopts::value<float>()->default_value("0"))
+        ("texture-padding",
+         "Guard band in texels filled around every baked chart",
+         cxxopts::value<std::uint32_t>()->default_value("4"))
+        ("texture-mask-floor",
+         "Lowest sample confidence a masked-out pixel keeps (0 = strict mask, "
+         "1 = ignore masks during the bake)",
+         cxxopts::value<float>()->default_value("0.05"))
+        ("texture-fill-unobserved",
+         "Fill rasterized atlas texels that received no projection sample from "
+         "the nearest valid texel",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("texture-optimize",
          "Refine projected atlas with photara_drender's native optimizer",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -1378,6 +1401,19 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.texture_color_space != "linear")
         throw std::invalid_argument(
             "--texture-color-space must be srgb or linear");
+    cli.texture_blend = result["texture-blend"].as<std::string>();
+    if (cli.texture_blend != "softmax" && cli.texture_blend != "average" &&
+        cli.texture_blend != "best_view")
+        throw std::invalid_argument(
+            "--texture-blend must be softmax, average, or best_view");
+    cli.texture_softmax_scale = result["texture-softmax-scale"].as<float>();
+    cli.texture_padding = result["texture-padding"].as<std::uint32_t>();
+    cli.texture_fill_unobserved =
+        result["texture-fill-unobserved"].as<bool>();
+    cli.texture_mask_floor = result["texture-mask-floor"].as<float>();
+    if (!(cli.texture_mask_floor >= 0.F && cli.texture_mask_floor <= 1.F))
+        throw std::invalid_argument(
+            "--texture-mask-floor must be within [0, 1]");
     cli.texture_optimize = result["texture-optimize"].as<bool>();
     cli.texture_optimize_steps =
         result["texture-optimize-steps"].as<std::uint32_t>();
@@ -2195,6 +2231,18 @@ photara::texture::TextureOptions texture_options_from_cli(
     options.color_space = cli.texture_color_space == "linear"
         ? photara::texture::BlendColorSpace::linear
         : photara::texture::BlendColorSpace::srgb;
+    if (cli.texture_blend == "best_view") {
+        options.blend_mode = photara::texture::BlendMode::best_view;
+    } else if (cli.texture_blend == "average") {
+        options.blend_mode = photara::texture::BlendMode::weighted_average;
+    } else {
+        options.blend_mode = photara::texture::BlendMode::softmax;
+    }
+    options.softmax_scale = cli.texture_softmax_scale;
+    options.texture_mask_floor = cli.texture_mask_floor;
+    options.atlas_padding = cli.texture_padding > 0;
+    options.atlas_padding_margin = cli.texture_padding;
+    options.atlas_fill_unobserved = cli.texture_fill_unobserved;
     options.optimize = cli.texture_optimize;
     options.optimize_steps = cli.texture_optimize_steps;
     options.optimize_batch_size = cli.texture_optimize_batch_size;

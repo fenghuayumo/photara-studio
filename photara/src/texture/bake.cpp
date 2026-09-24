@@ -599,7 +599,11 @@ TexturedMesh bake_mesh_texture(
     bake_opts.blend_mode =
         options.blend_mode == BlendMode::best_view
             ? photara_drender::ProjectionBlendMode::best_view
-            : photara_drender::ProjectionBlendMode::weighted_average;
+            : (options.blend_mode == BlendMode::softmax
+                   ? photara_drender::ProjectionBlendMode::softmax
+                   : photara_drender::ProjectionBlendMode::weighted_average);
+    bake_opts.softmax_scale = options.softmax_scale;
+    bake_opts.mask_floor = options.texture_mask_floor;
     bake_opts.visibility_mode =
         options.visibility_mode == VisibilityMode::shadow_map
             ? photara_drender::VisibilityMode::shadow_map
@@ -607,10 +611,35 @@ TexturedMesh bake_mesh_texture(
     bake_opts.pcf_radius = options.pcf_radius;
     bake_opts.allow_visibility_fallback = options.allow_visibility_fallback;
 
-    const photara_drender::TextureBakeOutput baked = baker.bake(
+    photara_drender::TextureBakeOutput baked = baker.bake(
         unwrapped.positions, normals, unwrapped.uv, unwrapped.indices,
         projections, bake_opts);
     bake_stage.finish();
+
+    // Guard-band fill: extend measured texels into the chart gutter and give
+    // rasterized texels that never received a sample a plausible colour. Without
+    // it filtered sampling shows black cracks and unseen surfaces stay black.
+    photara_drender::TexturePaddingStats padding_stats;
+    if (options.atlas_padding || options.atlas_fill_unobserved) {
+        core::StageScope padding_stage("texture.padding");
+        photara_drender::TexturePaddingOptions padding_options;
+        padding_options.margin =
+            options.atlas_padding ? options.atlas_padding_margin : 0U;
+        padding_options.fill_unobserved = options.atlas_fill_unobserved;
+        padding_options.maximum_fill_distance =
+            options.atlas_fill_maximum_distance;
+        padding_stats =
+            photara_drender::pad_texture_atlas(baked, padding_options);
+        padding_stage.finish();
+        core::Logger::instance().info(
+            "texture padding: margin=", padding_options.margin,
+            " fill_unobserved=", padding_options.fill_unobserved,
+            " valid=", padding_stats.valid_texels,
+            " gutter=", padding_stats.gutter_texels,
+            " unobserved=", padding_stats.unobserved_texels,
+            " remaining=", padding_stats.remaining_unobserved,
+            " s=", padding_stats.seconds);
+    }
 
     std::vector<float> final_rgb(
         static_cast<std::size_t>(baked.width) * baked.height * 3U);
@@ -683,6 +712,7 @@ TexturedMesh bake_mesh_texture(
     result.atlas_height = baked.height;
     result.atlas_confidence = baked.confidence;
     result.atlas_valid = baked.valid_mask;
+    result.atlas_filled = baked.filled_mask;
     result.used_ray_query = baked.used_ray_query;
     result.linear_rgb = options.color_space == BlendColorSpace::linear;
     result.delighted = options.delight;
@@ -704,6 +734,13 @@ TexturedMesh bake_mesh_texture(
             ? 0.0
             : static_cast<double>(valid) /
                   static_cast<double>(result.atlas_valid.size()),
+        " filled=",
+        result.atlas_filled.empty()
+            ? 0.0
+            : static_cast<double>(std::count_if(
+                  result.atlas_filled.begin(), result.atlas_filled.end(),
+                  [](const float value) { return value > 0.5F; })) /
+                  static_cast<double>(result.atlas_filled.size()),
         " ray_query=", result.used_ray_query,
         " color_space=", result.linear_rgb ? "linear" : "srgb",
         " delight=", result.delighted,

@@ -27,6 +27,8 @@ struct TexturedMesh {
     std::vector<float> atlas_rgb;
     std::vector<float> atlas_confidence;
     std::vector<float> atlas_valid;  // 0/1 coverage mask
+    // 0/1 texels whose color was extrapolated by the atlas padding pass.
+    std::vector<float> atlas_filled;
     bool used_ray_query{false};
     bool linear_rgb{false};
     bool delighted{false};
