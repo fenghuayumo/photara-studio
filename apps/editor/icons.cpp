@@ -625,6 +625,31 @@ void draw(
             }
             break;
         }
+        case Icon::box_select: {
+            const ImVec2 a = point(min, max, 0.22F, 0.62F);
+            const ImVec2 b = point(min, max, 0.58F, 0.78F);
+            const ImVec2 c = point(min, max, 0.82F, 0.58F);
+            const ImVec2 d = point(min, max, 0.46F, 0.42F);
+            const ImVec2 e = point(min, max, 0.22F, 0.38F);
+            const ImVec2 f = point(min, max, 0.58F, 0.22F);
+            const ImVec2 g = point(min, max, 0.82F, 0.38F);
+            draw_list->AddQuad(a, b, c, d, colour, thickness);
+            draw_list->AddQuad(e, a, d, g, colour, thickness);
+            draw_list->AddLine(e, f, colour, thickness);
+            draw_list->AddLine(f, g, colour, thickness);
+            draw_list->AddLine(b, f, colour, thickness);
+            break;
+        }
+        case Icon::sphere_select: {
+            draw_list->AddCircle(centre, extent * 0.32F, colour, 24, thickness);
+            draw_list->AddEllipse(
+                centre, {extent * 0.32F, extent * 0.13F}, colour, 0.F, 24,
+                thickness);
+            draw_list->AddEllipse(
+                centre, {extent * 0.13F, extent * 0.32F}, colour, 0.F, 24,
+                thickness);
+            break;
+        }
     }
 }
 

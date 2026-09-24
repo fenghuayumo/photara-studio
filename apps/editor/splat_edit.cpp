@@ -5,10 +5,12 @@
 #include "icons.hpp"
 #include "theme.hpp"
 
+#include "core/camera_projection.hpp"
 #include "splat/types.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -254,6 +256,184 @@ void keep_front_surface(std::vector<ScreenHit>& hits) {
         hits.end());
 }
 
+float dot3(const float a[3], const float b[3]) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+void cross3(const float a[3], const float b[3], float out[3]) {
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+float length3(const float v[3]) {
+    return std::sqrt(dot3(v, v));
+}
+
+bool normalize3(float v[3]) {
+    const float len = length3(v);
+    if (len < 1e-8F) return false;
+    v[0] /= len;
+    v[1] /= len;
+    v[2] /= len;
+    return true;
+}
+
+void quat_axes(const float q[4], float axis[3][3]) {
+    const float w = q[0];
+    const float x = q[1];
+    const float y = q[2];
+    const float z = q[3];
+    axis[0][0] = 1.F - 2.F * (y * y + z * z);
+    axis[0][1] = 2.F * (x * y + w * z);
+    axis[0][2] = 2.F * (x * z - w * y);
+    axis[1][0] = 2.F * (x * y - w * z);
+    axis[1][1] = 1.F - 2.F * (x * x + z * z);
+    axis[1][2] = 2.F * (y * z + w * x);
+    axis[2][0] = 2.F * (x * z + w * y);
+    axis[2][1] = 2.F * (y * z - w * x);
+    axis[2][2] = 1.F - 2.F * (x * x + y * y);
+}
+
+void quat_mul(const float a[4], const float b[4], float out[4]) {
+    out[0] = a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3];
+    out[1] = a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2];
+    out[2] = a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1];
+    out[3] = a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0];
+}
+
+void quat_from_axis(const float axis[3], const float radians, float out[4]) {
+    const float s = std::sin(radians * 0.5F);
+    out[0] = std::cos(radians * 0.5F);
+    out[1] = axis[0] * s;
+    out[2] = axis[1] * s;
+    out[3] = axis[2] * s;
+}
+
+void camera_basis(
+    const splat_render::Camera& camera, float right[3], float up[3],
+    float forward[3]) {
+    const float* m = camera.world_to_camera.data();
+    right[0] = m[0];
+    right[1] = m[4];
+    right[2] = m[8];
+    up[0] = m[1];
+    up[1] = m[5];
+    up[2] = m[9];
+    forward[0] = m[2];
+    forward[1] = m[6];
+    forward[2] = m[10];
+}
+
+struct WorldRay {
+    float origin[3]{};
+    float direction[3]{};
+    bool valid{};
+};
+
+WorldRay camera_ray(
+    const splat_render::Camera& camera, const ImVec2 view_min, const ImVec2 view_max,
+    const ImVec2 mouse) {
+    WorldRay ray;
+    ray.origin[0] = camera.position[0];
+    ray.origin[1] = camera.position[1];
+    ray.origin[2] = camera.position[2];
+    float right[3];
+    float up[3];
+    float forward[3];
+    camera_basis(camera, right, up, forward);
+    const ImVec2 raster = view_to_raster(camera, view_min, view_max, mouse);
+    const auto aim = [&](const float x, const float y, const float z) {
+        const float wx = right[0] * x + up[0] * y + forward[0] * z;
+        const float wy = right[1] * x + up[1] * y + forward[1] * z;
+        const float wz = right[2] * x + up[2] * y + forward[2] * z;
+        const float len = std::sqrt(wx * wx + wy * wy + wz * wz);
+        if (len < 1e-8F) return false;
+        ray.direction[0] = wx / len;
+        ray.direction[1] = wy / len;
+        ray.direction[2] = wz / len;
+        return true;
+    };
+    if (camera.model == splat_render::k_camera_orthographic) {
+        const float cx = (raster.x - camera.cx) / std::max(camera.fx, 1e-6F);
+        const float cy = (raster.y - camera.cy) / std::max(camera.fy, 1e-6F);
+        ray.origin[0] += right[0] * cx + up[0] * cy;
+        ray.origin[1] += right[1] * cx + up[1] * cy;
+        ray.origin[2] += right[2] * cx + up[2] * cy;
+        ray.valid = aim(0.F, 0.F, 1.F);
+        return ray;
+    }
+    if (camera.model == splat_render::k_camera_fisheye) {
+        const auto local = photara::unproject_fisheye_camera(
+            raster.x, raster.y, camera.fx, camera.fy, camera.cx, camera.cy,
+            camera.k1, camera.k2, camera.k3, camera.k4);
+        if (!local.valid) return ray;
+        ray.valid = aim(static_cast<float>(local.x), static_cast<float>(local.y),
+                        static_cast<float>(local.z));
+        return ray;
+    }
+    if (camera.model == splat_render::k_camera_equirectangular) {
+        const auto local = photara::unproject_equirectangular_camera(
+            raster.x, raster.y, static_cast<int>(camera.width),
+            static_cast<int>(camera.height));
+        if (!local.valid) return ray;
+        ray.valid = aim(static_cast<float>(local.x), static_cast<float>(local.y),
+                        static_cast<float>(local.z));
+        return ray;
+    }
+    const float cx = (raster.x - camera.cx) / std::max(camera.fx, 1e-6F);
+    const float cy = (raster.y - camera.cy) / std::max(camera.fy, 1e-6F);
+    ray.valid = aim(cx, cy, 1.F);
+    return ray;
+}
+
+bool project_world(
+    const splat_render::Camera& camera, const ImVec2 view_min, const ImVec2 view_max,
+    const float point[3], ImVec2& screen, float& depth) {
+    const RayHit hit = project_center(camera, point[0], point[1], point[2]);
+    if (!hit.valid) return false;
+    screen = raster_to_view(camera, view_min, view_max, hit.u, hit.v);
+    depth = hit.depth;
+    return true;
+}
+
+float world_from_screen(
+    const splat_render::Camera& camera, const ImVec2 view_min, const ImVec2 view_max,
+    const float depth, const float screen_px) {
+    const float view_w = std::max(1.F, view_max.x - view_min.x);
+    const float raster_px =
+        screen_px * static_cast<float>(std::max(1U, camera.width)) / view_w;
+    if (camera.model == splat_render::k_camera_orthographic)
+        return raster_px / std::max(camera.fx, 1e-4F);
+    return raster_px * std::max(depth, 1e-3F) / std::max(camera.fx, 1.F);
+}
+
+float dist2_segment(const ImVec2 p, const ImVec2 a, const ImVec2 b) {
+    const float abx = b.x - a.x;
+    const float aby = b.y - a.y;
+    const float ab2 = abx * abx + aby * aby;
+    const float t = ab2 > 1e-6F
+        ? std::clamp(((p.x - a.x) * abx + (p.y - a.y) * aby) / ab2, 0.F, 1.F)
+        : 0.F;
+    const float dx = p.x - (a.x + abx * t);
+    const float dy = p.y - (a.y + aby * t);
+    return dx * dx + dy * dy;
+}
+
+bool ray_plane(
+    const WorldRay& ray, const float point[3], const float normal[3], float hit[3]) {
+    const float denom = dot3(ray.direction, normal);
+    if (std::fabs(denom) < 1e-6F) return false;
+    const float rel[3] = {
+        point[0] - ray.origin[0], point[1] - ray.origin[1], point[2] - ray.origin[2]};
+    const float t = dot3(rel, normal) / denom;
+    if (t < 0.F) return false;
+    hit[0] = ray.origin[0] + ray.direction[0] * t;
+    hit[1] = ray.origin[1] + ray.direction[1] * t;
+    hit[2] = ray.origin[2] + ray.direction[2] * t;
+    return true;
+}
+
 }  // namespace
 
 void SplatEdit::clear() {
@@ -281,6 +461,11 @@ void SplatEdit::clear() {
     stroking_ = false;
     stroke_changed_ = false;
     stroke_moved_ = false;
+    volume_placed_ = false;
+    volume_drag_ = -1;
+    volume_gesture_ = VolumeGesture::move;
+    volume_quat_[0] = 1.F;
+    volume_quat_[1] = volume_quat_[2] = volume_quat_[3] = 0.F;
 }
 
 void SplatEdit::sync(const std::string& key, const Host& host) {
@@ -496,7 +681,7 @@ bool SplatEdit::project_ellipse(
         }
     }
 
-    // Same contour as the rings shader: 0.3px dilation, minor-axis floor,
+    // Same contour as ring_prepare.cs.hlsl: 0.3px dilation, minor-axis floor,
     // and a uniform cap so a long splat keeps its shape.
     const float a = px[0] * px[0] + px[1] * px[1] + px[2] * px[2] + 0.3F;
     const float b = px[0] * py[0] + px[1] * py[1] + px[2] * py[2];
@@ -798,6 +983,18 @@ void SplatEdit::undo(App& app) {
         upload_model(app);
         return;
     }
+    if (step.kind == Snapshot::Kind::volume) {
+        Snapshot current;
+        current.kind = Snapshot::Kind::volume;
+        std::copy(std::begin(volume_center_), std::end(volume_center_), current.volume_center);
+        std::copy(std::begin(volume_quat_), std::end(volume_quat_), current.volume_quat);
+        std::copy(std::begin(volume_size_), std::end(volume_size_), current.volume_size);
+        std::copy(std::begin(step.volume_center), std::end(step.volume_center), volume_center_);
+        std::copy(std::begin(step.volume_quat), std::end(step.volume_quat), volume_quat_);
+        std::copy(std::begin(step.volume_size), std::end(step.volume_size), volume_size_);
+        redo_.push_back(std::move(current));
+        return;
+    }
     Snapshot current;
     current.selected = selected_;
     if (!step.xyz.empty()) current.xyz = capture_xyz();
@@ -814,6 +1011,18 @@ void SplatEdit::redo(App& app) {
         undo_.push_back(std::move(step));
         upload_model(app);
         dirty_ = true;
+        return;
+    }
+    if (step.kind == Snapshot::Kind::volume) {
+        Snapshot current;
+        current.kind = Snapshot::Kind::volume;
+        std::copy(std::begin(volume_center_), std::end(volume_center_), current.volume_center);
+        std::copy(std::begin(volume_quat_), std::end(volume_quat_), current.volume_quat);
+        std::copy(std::begin(volume_size_), std::end(volume_size_), current.volume_size);
+        std::copy(std::begin(step.volume_center), std::end(step.volume_center), volume_center_);
+        std::copy(std::begin(step.volume_quat), std::end(step.volume_quat), volume_quat_);
+        std::copy(std::begin(step.volume_size), std::end(step.volume_size), volume_size_);
+        undo_.push_back(std::move(current));
         return;
     }
     Snapshot current;
@@ -1014,7 +1223,16 @@ void SplatEdit::set_tool(App& app, const Tool tool) {
         else abort_stroke(app);
     }
     if (tool != Tool::polygon) polygon_.clear();
+    const Tool previous = tool_;
     tool_ = tool;
+    volume_drag_ = -1;
+    if (tool == Tool::box || tool == Tool::sphere) {
+        if (!volume_placed_) place_volume(app);
+        else if ((previous == Tool::box || previous == Tool::sphere) && previous != tool)
+            adopt_volume_kind(tool);
+        if (tool == Tool::sphere && volume_gesture_ == VolumeGesture::rotate)
+            volume_gesture_ = VolumeGesture::move;
+    }
 }
 
 void SplatEdit::toggle_tool(App& app, const Tool tool) {
@@ -1136,12 +1354,46 @@ void SplatEdit::handle_keys(App& app) {
         if (ImGui::IsKeyPressed(ImGuiKey_RightBracket, true))
             brush_radius_ = std::min(180.F, brush_radius_ + 4.F);
     }
+    if (volume_tool() && !mouse_busy) {
+        const bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                           ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+        if (enter && io.KeyCtrl && !io.KeyAlt && !io.KeyShift) {
+            apply_volume(VolumeOp::intersect);
+            return;
+        }
+        if (enter && io.KeyShift && !io.KeyCtrl) {
+            apply_volume(VolumeOp::add);
+            return;
+        }
+        if (enter && io.KeyAlt && !io.KeyCtrl) {
+            apply_volume(VolumeOp::remove);
+            return;
+        }
+        if (!io.KeyCtrl && !io.KeyAlt && !io.KeyShift) {
+            if (ImGui::IsKeyPressed(ImGuiKey_G, false))
+                volume_gesture_ = VolumeGesture::move;
+            else if (ImGui::IsKeyPressed(ImGuiKey_T, false) && tool_ == Tool::box)
+                volume_gesture_ = VolumeGesture::rotate;
+            else if (ImGui::IsKeyPressed(ImGuiKey_S, false))
+                volume_gesture_ = VolumeGesture::scale;
+            else if (enter) apply_volume(VolumeOp::replace);
+            else if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, true) ||
+                     ImGui::IsKeyPressed(ImGuiKey_RightBracket, true)) {
+                const float factor =
+                    ImGui::IsKeyPressed(ImGuiKey_LeftBracket, true) ? 0.9F : 1.1F;
+                for (float& side : volume_size_)
+                    side = std::max(0.02F, side * factor);
+            }
+        }
+    }
 
     if (mouse_busy || stroking_ || io.KeyCtrl || io.KeyAlt || io.KeyShift) return;
     if (ImGui::IsKeyPressed(ImGuiKey_R, false)) toggle_tool(app, Tool::pick);
     else if (ImGui::IsKeyPressed(ImGuiKey_C, false)) toggle_tool(app, Tool::circle);
     else if (ImGui::IsKeyPressed(ImGuiKey_P, false)) toggle_tool(app, Tool::polygon);
     else if (ImGui::IsKeyPressed(ImGuiKey_B, false)) toggle_tool(app, Tool::brush);
+    else if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) toggle_tool(app, Tool::box);
+    else if (ImGui::IsKeyPressed(ImGuiKey_U, false)) toggle_tool(app, Tool::sphere);
     else if (ImGui::IsKeyPressed(ImGuiKey_N, false)) front_only_ = !front_only_;
 }
 
@@ -1174,6 +1426,18 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
                 tr("Delete removes the selection"), tr("Esc clears the selection"));
         else
             std::snprintf(buffer, size, "%s", orbit);
+        return;
+    }
+    if (volume_tool()) {
+        const char* shape = tool_ == Tool::box ? tr("Box") : tr("Sphere");
+        const char* gesture = volume_gesture_ == VolumeGesture::rotate
+            ? tr("Rotate")
+            : volume_gesture_ == VolumeGesture::scale ? tr("Scale")
+                                                      : tr("Move");
+        std::snprintf(
+            buffer, size, "%s  |  %s  |  %s  |  %s", shape, gesture,
+            tr("Drag a handle or the volume"),
+            tr("Enter selects  |  Shift+Enter adds  |  Alt+Enter removes  |  Ctrl+Enter intersects"));
         return;
     }
     const char* gesture = tr("Click or drag a box");
@@ -1230,6 +1494,12 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         {icons::Icon::brush, "##splat_brush", "Brush select",
          "Paint over Gaussians. [ ] or Alt+wheel changes the brush size.",
          "B", 6, false},
+        {icons::Icon::box_select, "##splat_box", "Box select",
+         "Place a box in the scene. Drag it, then Enter selects the Gaussians inside.",
+         "Y", 7, false},
+        {icons::Icon::sphere_select, "##splat_sphere", "Sphere select",
+         "Place a sphere in the scene. Drag it, then Enter selects the Gaussians inside.",
+         "U", 8, false},
         {icons::Icon::depth_front, "##splat_front", "Front surface",
          "The next gesture keeps only the nearest Gaussian in each small screen cell.",
          "N", 20, true},
@@ -1269,7 +1539,7 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         toolbar_min_, toolbar_max_, IM_COL32(255, 255, 255, 18), 9.F);
 
     const Tool tools[] = {
-        Tool::pick, Tool::circle, Tool::polygon, Tool::brush};
+        Tool::pick, Tool::circle, Tool::polygon, Tool::brush, Tool::box, Tool::sphere};
     float cursor_x = left + k_pad;
     for (int index = 0; index < static_cast<int>(std::size(items)); ++index) {
         const Item& item = items[index];
@@ -1288,7 +1558,7 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
             : item.action == 1 ? !redo_.empty()
                                : true;
         const bool active = item.action == 2 ? tool_ == Tool::none
-            : item.action >= 3 && item.action <= 6
+            : item.action >= 3 && item.action <= 8
                 ? tool_ == tools[item.action - 3]
             : item.action == 20 ? front_only_
             : item.action == 21 ? !front_only_
@@ -1323,7 +1593,7 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         if (item.action == 0) undo(app);
         else if (item.action == 1) redo(app);
         else if (item.action == 2) set_tool(app, Tool::none);
-        else if (item.action >= 3 && item.action <= 6)
+        else if (item.action >= 3 && item.action <= 8)
             toggle_tool(app, tools[item.action - 3]);
         else if (item.action == 20) front_only_ = true;
         else if (item.action == 21) front_only_ = false;
@@ -1335,7 +1605,9 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
             hit_chosen_ = true;
         }
     }
-    return ImGui::IsMouseHoveringRect(toolbar_min_, toolbar_max_, false);
+    const bool over_volume = draw_volume_bar(view_min, view_max);
+    return over_volume ||
+           ImGui::IsMouseHoveringRect(toolbar_min_, toolbar_max_, false);
 }
 
 void SplatEdit::draw_overlay(
@@ -1343,6 +1615,8 @@ void SplatEdit::draw_overlay(
     const splat_render::Camera& camera) const {
     if (count_ == 0 || draw == nullptr) return;
     draw->PushClipRect(view_min, view_max, true);
+    if (volume_tool() && volume_placed_)
+        draw_volume(draw, view_min, view_max, camera);
     const std::uint32_t stride = std::max(1U, selected_count_ / 8000U);
     std::uint32_t seen = 0;
     const ImU32 mark = theme::u32(theme::accent);
@@ -1457,6 +1731,10 @@ void SplatEdit::handle_pointer(
         if (stroking_) abort_stroke(app);
         return;
     }
+    if (volume_tool()) {
+        handle_volume(app, view_min, view_max, camera, hot);
+        return;
+    }
 
     const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
@@ -1554,6 +1832,851 @@ void SplatEdit::handle_pointer(
         }
     }
     if (release) finish_gesture(app, camera, view_min, view_max, mouse);
+}
+
+namespace {
+
+void view_direction(
+    const splat_render::Camera& camera, const float point[3], float out[3]) {
+    float right[3];
+    float up[3];
+    float forward[3];
+    camera_basis(camera, right, up, forward);
+    if (camera.model == splat_render::k_camera_orthographic) {
+        out[0] = forward[0];
+        out[1] = forward[1];
+        out[2] = forward[2];
+        normalize3(out);
+        return;
+    }
+    out[0] = point[0] - camera.position[0];
+    out[1] = point[1] - camera.position[1];
+    out[2] = point[2] - camera.position[2];
+    if (!normalize3(out)) {
+        out[0] = forward[0];
+        out[1] = forward[1];
+        out[2] = forward[2];
+        normalize3(out);
+    }
+}
+
+void axis_plane_normal(const float axis[3], const float view[3], float normal[3]) {
+    normal[0] = view[0] - axis[0] * dot3(view, axis);
+    normal[1] = view[1] - axis[1] * dot3(view, axis);
+    normal[2] = view[2] - axis[2] * dot3(view, axis);
+    if (!normalize3(normal)) {
+        const float helper[3] = {
+            std::fabs(axis[1]) < 0.9F ? 0.F : 1.F,
+            std::fabs(axis[1]) < 0.9F ? 1.F : 0.F, 0.F};
+        cross3(axis, helper, normal);
+        normalize3(normal);
+    }
+}
+
+}  // namespace
+
+void SplatEdit::place_volume(const App& app) {
+    float lo[3] = {1e30F, 1e30F, 1e30F};
+    float hi[3] = {-1e30F, -1e30F, -1e30F};
+    bool any = false;
+    if (selected_count_ > 0) {
+        for (std::uint32_t index = 0; index < count_; ++index) {
+            if (!selected_[index]) continue;
+            const float* point = centers_.data() + static_cast<std::size_t>(index) * 4U;
+            for (int axis = 0; axis < 3; ++axis) {
+                lo[axis] = std::min(lo[axis], point[axis]);
+                hi[axis] = std::max(hi[axis], point[axis]);
+            }
+            any = true;
+        }
+    }
+    volume_quat_[0] = 1.F;
+    volume_quat_[1] = volume_quat_[2] = volume_quat_[3] = 0.F;
+    volume_gesture_ = VolumeGesture::move;
+    if (any) {
+        for (int axis = 0; axis < 3; ++axis) {
+            volume_center_[axis] = 0.5F * (lo[axis] + hi[axis]);
+            volume_size_[axis] = std::max(0.05F, (hi[axis] - lo[axis]) * 1.12F);
+        }
+        if (tool_ == Tool::sphere) {
+            const float radius = 0.5F * std::max(
+                volume_size_[0], std::max(volume_size_[1], volume_size_[2]));
+            volume_size_[0] = std::max(0.02F, radius);
+        }
+    } else {
+        volume_center_[0] = app.camera.target.x;
+        volume_center_[1] = app.camera.target.y;
+        volume_center_[2] = app.camera.target.z;
+        const float span = std::max(0.25F, app.camera.distance * 0.22F);
+        if (tool_ == Tool::sphere) volume_size_[0] = span * 0.5F;
+        else
+            volume_size_[0] = volume_size_[1] = volume_size_[2] = span;
+    }
+    volume_placed_ = true;
+}
+
+void SplatEdit::adopt_volume_kind(const Tool tool) {
+    if (tool == Tool::sphere) {
+        const float radius = 0.5F * std::max(
+            volume_size_[0], std::max(volume_size_[1], volume_size_[2]));
+        volume_size_[0] = std::max(0.02F, radius);
+    } else {
+        const float side = std::max(0.05F, volume_size_[0] * 2.F);
+        volume_size_[0] = volume_size_[1] = volume_size_[2] = side;
+    }
+}
+
+void SplatEdit::apply_volume(const VolumeOp op) {
+    if (!volume_placed_ || count_ == 0 || stroking_) return;
+    float axis[3][3];
+    if (tool_ == Tool::sphere) {
+        axis[0][0] = 1.F;
+        axis[0][1] = axis[0][2] = 0.F;
+        axis[1][1] = 1.F;
+        axis[1][0] = axis[1][2] = 0.F;
+        axis[2][2] = 1.F;
+        axis[2][0] = axis[2][1] = 0.F;
+    } else
+        quat_axes(volume_quat_, axis);
+    const bool sphere = tool_ == Tool::sphere;
+    const float half[3] = {
+        sphere ? volume_size_[0] : volume_size_[0] * 0.5F,
+        sphere ? volume_size_[0] : volume_size_[1] * 0.5F,
+        sphere ? volume_size_[0] : volume_size_[2] * 0.5F};
+    const auto contains = [&](const std::uint32_t index) {
+        const float* point = centers_.data() + static_cast<std::size_t>(index) * 4U;
+        const float rel[3] = {
+            point[0] - volume_center_[0], point[1] - volume_center_[1],
+            point[2] - volume_center_[2]};
+        const float local[3] = {
+            dot3(rel, axis[0]), dot3(rel, axis[1]), dot3(rel, axis[2])};
+        float closest[3];
+        float distance = 0.F;
+        if (sphere) {
+            const float len = length3(local);
+            if (len <= half[0]) return true;
+            const float scale = half[0] / std::max(len, 1e-8F);
+            for (int k = 0; k < 3; ++k)
+                closest[k] = volume_center_[k] +
+                             (axis[0][k] * local[0] + axis[1][k] * local[1] +
+                              axis[2][k] * local[2]) *
+                                 scale;
+            distance = len - half[0];
+        } else {
+            float clamped[3];
+            bool inside = true;
+            for (int k = 0; k < 3; ++k) {
+                clamped[k] = std::clamp(local[k], -half[k], half[k]);
+                if (clamped[k] != local[k]) inside = false;
+            }
+            if (inside) return true;
+            for (int k = 0; k < 3; ++k)
+                closest[k] = volume_center_[k] + axis[0][k] * clamped[0] +
+                             axis[1][k] * clamped[1] + axis[2][k] * clamped[2];
+            const float delta[3] = {
+                point[0] - closest[0], point[1] - closest[1], point[2] - closest[2]};
+            distance = length3(delta);
+        }
+        if (!rings_hit_ || !rings_ready() || distance <= 1e-5F) return false;
+        float toward[3] = {
+            closest[0] - point[0], closest[1] - point[1], closest[2] - point[2]};
+        if (!normalize3(toward)) return false;
+        const float* rotation =
+            quaternions_.data() + static_cast<std::size_t>(index) * 4U;
+        const float* log_scale =
+            log_scales_.data() + static_cast<std::size_t>(index) * 3U;
+        float gaussian[3][3];
+        quat_axes(rotation, gaussian);
+        const float lx = dot3(toward, gaussian[0]);
+        const float ly = dot3(toward, gaussian[1]);
+        const float lz = dot3(toward, gaussian[2]);
+        const float sx = std::exp(std::clamp(log_scale[0], -12.F, 8.F));
+        const float sy = std::exp(std::clamp(log_scale[1], -12.F, 8.F));
+        const float sz = std::exp(std::clamp(log_scale[2], -12.F, 8.F));
+        const float support = ring_sigma_ * std::sqrt(
+            sx * lx * sx * lx + sy * ly * sy * ly + sz * lz * sz * lz);
+        return distance <= support;
+    };
+
+    std::vector<std::uint8_t> before = selected_;
+    if (op == VolumeOp::replace) std::fill(selected_.begin(), selected_.end(), 0);
+    for (std::uint32_t index = 0; index < count_; ++index) {
+        const float opacity = centers_[static_cast<std::size_t>(index) * 4U + 3U];
+        const bool inside = contains(index);
+        if (op == VolumeOp::replace || op == VolumeOp::add) {
+            if (inside && opacity >= k_min_opacity) selected_[index] = 1;
+        } else if (op == VolumeOp::remove) {
+            if (inside) selected_[index] = 0;
+        } else if (!inside) {
+            selected_[index] = 0;
+        }
+    }
+    if (before == selected_) {
+        if (op == VolumeOp::replace) selected_ = before;
+        return;
+    }
+    Snapshot snap;
+    snap.selected = std::move(before);
+    push_undo(std::move(snap));
+    recount();
+}
+
+bool SplatEdit::draw_volume_bar(const ImVec2 view_min, const ImVec2 view_max) {
+    volume_bar_min_ = volume_bar_max_ = {};
+    if (!volume_tool()) return false;
+    struct Item {
+        icons::Icon icon;
+        const char* id;
+        const char* tip;
+        const char* detail;
+        const char* shortcut;
+        int action;
+        bool gap;
+        bool glyph;
+    };
+    const bool box = tool_ == Tool::box;
+    const Item items[] = {
+        {icons::Icon::translate, "##vol_move", "Move",
+         "Drag an axis to slide the volume. Drag the volume itself to move it on the view.",
+         "G", 0, false, false},
+        {icons::Icon::rotate, "##vol_rotate", "Rotate",
+         "Drag a ring to turn the box.", "T", 1, false, false},
+        {icons::Icon::scale, "##vol_scale", "Scale",
+         "Drag a face handle. [ ] changes the size.", "S", 2, false, false},
+        {icons::Icon::select, "##vol_set", "Replace",
+         "Select only the Gaussians inside the volume.", "Enter", 3, true, true},
+        {icons::Icon::select, "##vol_add", "Add",
+         "Add the Gaussians inside the volume to the selection.", "Shift+Enter", 4,
+         false, true},
+        {icons::Icon::select, "##vol_remove", "Remove",
+         "Remove the Gaussians inside the volume from the selection.", "Alt+Enter", 5,
+         false, true},
+        {icons::Icon::select, "##vol_intersect", "Intersect",
+         "Keep only the selected Gaussians that are also inside the volume.",
+         "Ctrl+Enter", 6, false, true},
+    };
+    constexpr float k_button = 34.F;
+    constexpr float k_gap = 4.F;
+    constexpr float k_pad = 6.F;
+    constexpr float k_group = 16.F;
+    float content_w = 0.F;
+    for (const Item& item : items) {
+        if (!box && item.action == 1) continue;
+        content_w += k_button + k_gap + (item.gap ? k_group : 0.F);
+    }
+    content_w -= k_gap;
+    const float bar_w = k_pad * 2.F + content_w;
+    const float bar_h = k_pad * 2.F + k_button;
+    const float left = view_min.x + (view_max.x - view_min.x - bar_w) * 0.5F;
+    const float top = toolbar_max_.y + 8.F;
+    volume_bar_min_ = {left, top};
+    volume_bar_max_ = {left + bar_w, top + bar_h};
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(
+        {volume_bar_min_.x + 1.F, volume_bar_min_.y + 3.F},
+        {volume_bar_max_.x + 1.F, volume_bar_max_.y + 3.F}, IM_COL32(0, 0, 0, 70),
+        9.F);
+    draw->AddRectFilled(
+        volume_bar_min_, volume_bar_max_, IM_COL32(22, 24, 28, 236), 9.F);
+    draw->AddRect(
+        volume_bar_min_, volume_bar_max_, IM_COL32(255, 255, 255, 18), 9.F);
+    float cursor_x = left + k_pad;
+    for (const Item& item : items) {
+        if (!box && item.action == 1) continue;
+        if (item.gap) {
+            const float separator_x = cursor_x + k_group * 0.5F;
+            draw->AddLine(
+                {separator_x, top + k_pad + 7.F},
+                {separator_x, top + k_pad + k_button - 7.F},
+                IM_COL32(255, 255, 255, 36), 1.F);
+            cursor_x += k_group;
+        }
+        const ImVec2 min{cursor_x, top + k_pad};
+        const ImVec2 max{min.x + k_button, min.y + k_button};
+        cursor_x += k_button + k_gap;
+        const bool active = item.action == 0
+            ? volume_gesture_ == VolumeGesture::move
+            : item.action == 1 ? volume_gesture_ == VolumeGesture::rotate
+            : item.action == 2 ? volume_gesture_ == VolumeGesture::scale
+                               : false;
+        ImGui::SetCursorScreenPos(min);
+        ImGui::PushID(item.id);
+        const bool pressed = ImGui::InvisibleButton(item.id, {k_button, k_button});
+        const bool hovered = ImGui::IsItemHovered();
+        ImGui::PopID();
+        ImU32 fill = active ? theme::u32(theme::fade(theme::accent, 0.24F))
+                            : hovered ? IM_COL32(58, 62, 72, 255)
+                                      : theme::u32(theme::surface_3);
+        draw->AddRectFilled(min, max, fill, 6.F);
+        if (active)
+            draw->AddRect(min, max, theme::u32(theme::accent, 0.75F), 6.F, 0, 1.F);
+        const ImU32 colour = theme::u32(
+            active ? theme::accent : hovered ? theme::text_bright : theme::text_muted);
+        if (!item.glyph) {
+            icons::draw(
+                draw, item.icon, {min.x + 7.F, min.y + 7.F}, {max.x - 7.F, max.y - 7.F},
+                colour, 1.5F);
+        } else {
+            const ImVec2 c{(min.x + max.x) * 0.5F, (min.y + max.y) * 0.5F};
+            if (item.action == 3) {
+                draw->AddRectFilled({c.x - 5.F, c.y - 5.F}, {c.x + 5.F, c.y + 5.F}, colour, 1.5F);
+            } else if (item.action == 4) {
+                draw->AddLine({c.x - 6.F, c.y}, {c.x + 6.F, c.y}, colour, 1.7F);
+                draw->AddLine({c.x, c.y - 6.F}, {c.x, c.y + 6.F}, colour, 1.7F);
+            } else if (item.action == 5) {
+                draw->AddLine({c.x - 6.F, c.y}, {c.x + 6.F, c.y}, colour, 1.7F);
+            } else {
+                draw->AddCircle(c, 5.5F, colour, 16, 1.4F);
+                draw->AddCircle({c.x + 4.F, c.y}, 5.5F, colour, 16, 1.4F);
+            }
+        }
+        if (hovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            show_tip(item.tip, item.shortcut, item.detail);
+        }
+        if (!pressed) continue;
+        if (item.action == 0) volume_gesture_ = VolumeGesture::move;
+        else if (item.action == 1) volume_gesture_ = VolumeGesture::rotate;
+        else if (item.action == 2) volume_gesture_ = VolumeGesture::scale;
+        else if (item.action == 3) apply_volume(VolumeOp::replace);
+        else if (item.action == 4) apply_volume(VolumeOp::add);
+        else if (item.action == 5) apply_volume(VolumeOp::remove);
+        else apply_volume(VolumeOp::intersect);
+    }
+    return ImGui::IsMouseHoveringRect(volume_bar_min_, volume_bar_max_, false);
+}
+
+namespace {
+
+bool volume_ray_hit(
+    const WorldRay& ray, const float center[3], const float axis[3][3],
+    const float half[3], const bool sphere) {
+    if (!ray.valid) return false;
+    const float rel[3] = {
+        ray.origin[0] - center[0], ray.origin[1] - center[1],
+        ray.origin[2] - center[2]};
+    const float origin[3] = {
+        dot3(rel, axis[0]), dot3(rel, axis[1]), dot3(rel, axis[2])};
+    const float direction[3] = {
+        dot3(ray.direction, axis[0]), dot3(ray.direction, axis[1]),
+        dot3(ray.direction, axis[2])};
+    if (sphere) {
+        const float along = dot3(origin, direction);
+        const float height = along * along - (dot3(origin, origin) - half[0] * half[0]);
+        if (height < 0.F) return false;
+        const float root = std::sqrt(height);
+        float t = -along - root;
+        if (t < 0.F) t = -along + root;
+        return t >= 0.F;
+    }
+    float enter = -1e30F;
+    float exit = 1e30F;
+    for (int axis_index = 0; axis_index < 3; ++axis_index) {
+        if (std::fabs(direction[axis_index]) < 1e-8F) {
+            if (origin[axis_index] < -half[axis_index] ||
+                origin[axis_index] > half[axis_index])
+                return false;
+            continue;
+        }
+        float t_enter = (-half[axis_index] - origin[axis_index]) / direction[axis_index];
+        float t_exit = (half[axis_index] - origin[axis_index]) / direction[axis_index];
+        if (t_enter > t_exit) std::swap(t_enter, t_exit);
+        enter = std::max(enter, t_enter);
+        exit = std::min(exit, t_exit);
+        if (enter > exit) return false;
+    }
+    return exit >= 0.F;
+}
+
+void volume_basis(const float normal[3], float u[3], float v[3]) {
+    const float helper[3] = {
+        std::fabs(normal[1]) < 0.9F ? 0.F : 1.F,
+        std::fabs(normal[1]) < 0.9F ? 1.F : 0.F, 0.F};
+    cross3(normal, helper, u);
+    normalize3(u);
+    cross3(normal, u, v);
+    normalize3(v);
+}
+
+}  // namespace
+
+void SplatEdit::draw_volume(
+    ImDrawList* draw, const ImVec2 view_min, const ImVec2 view_max,
+    const splat_render::Camera& camera) const {
+    const bool sphere = tool_ == Tool::sphere;
+    float axis[3][3];
+    if (sphere) {
+        axis[0][0] = axis[1][1] = axis[2][2] = 1.F;
+        axis[0][1] = axis[0][2] = axis[1][0] = axis[1][2] = axis[2][0] = axis[2][1] =
+            0.F;
+    } else
+        quat_axes(volume_quat_, axis);
+    const float half[3] = {
+        sphere ? volume_size_[0] : std::max(0.02F, volume_size_[0] * 0.5F),
+        sphere ? volume_size_[0] : std::max(0.02F, volume_size_[1] * 0.5F),
+        sphere ? volume_size_[0] : std::max(0.02F, volume_size_[2] * 0.5F)};
+    ImVec2 center_screen;
+    float center_depth = 1.F;
+    const bool center_ok = project_world(
+        camera, view_min, view_max, volume_center_, center_screen, center_depth);
+    const float handle = center_ok
+        ? world_from_screen(camera, view_min, view_max, center_depth, 70.F)
+        : 0.F;
+    const int hot = volume_drag_ >= 0
+        ? volume_drag_
+        : pick_volume(view_min, view_max, camera, ImGui::GetIO().MousePos);
+    const ImU32 axis_colour[3] = {
+        IM_COL32(232, 92, 82, 255), IM_COL32(78, 196, 122, 255),
+        IM_COL32(86, 156, 236, 255)};
+    const auto stroke = [&](const ImVec2 a, const ImVec2 b, const ImU32 colour,
+                            const float width) {
+        draw->AddLine(a, b, IM_COL32(6, 8, 12, 170), width + 2.2F);
+        draw->AddLine(a, b, colour, width);
+    };
+    const auto ring = [&](const float u[3], const float v[3], const float radius,
+                          const ImU32 colour, const float width) {
+        ImVec2 previous;
+        bool have = false;
+        for (int step = 0; step <= 48; ++step) {
+            const float angle = static_cast<float>(step) / 48.F * 6.2831853F;
+            const float c = std::cos(angle);
+            const float s = std::sin(angle);
+            float point[3];
+            for (int k = 0; k < 3; ++k)
+                point[k] = volume_center_[k] + (u[k] * c + v[k] * s) * radius;
+            ImVec2 screen;
+            float depth = 0.F;
+            const bool ok = project_world(camera, view_min, view_max, point, screen, depth);
+            if (have && ok) stroke(previous, screen, colour, width);
+            have = ok;
+            previous = screen;
+        }
+    };
+
+    if (sphere) {
+        const ImU32 wire = IM_COL32(236, 242, 248, 210);
+        ring(axis[1], axis[2], half[0], wire, 1.35F);
+        ring(axis[0], axis[2], half[0], wire, 1.35F);
+        ring(axis[0], axis[1], half[0], wire, 1.35F);
+        float view[3];
+        view_direction(camera, volume_center_, view);
+        float u[3];
+        float v[3];
+        volume_basis(view, u, v);
+        ring(u, v, half[0], IM_COL32(255, 255, 255, 235), 1.7F);
+    } else {
+        struct Corner {
+            ImVec2 screen;
+            float depth{};
+            bool ok{};
+        };
+        Corner corner[8];
+        for (int index = 0; index < 8; ++index) {
+            const float sign[3] = {
+                (index & 1) ? 1.F : -1.F, (index & 2) ? 1.F : -1.F,
+                (index & 4) ? 1.F : -1.F};
+            float point[3];
+            for (int k = 0; k < 3; ++k)
+                point[k] = volume_center_[k] + axis[0][k] * half[0] * sign[0] +
+                           axis[1][k] * half[1] * sign[1] +
+                           axis[2][k] * half[2] * sign[2];
+            corner[index].ok = project_world(
+                camera, view_min, view_max, point, corner[index].screen,
+                corner[index].depth);
+        }
+        const int faces[6][4] = {
+            {1, 3, 7, 5}, {0, 4, 6, 2}, {2, 6, 7, 3},
+            {0, 1, 5, 4}, {4, 5, 7, 6}, {0, 2, 3, 1}};
+        const int face_axis[6] = {0, 0, 1, 1, 2, 2};
+        const float face_sign[6] = {1.F, -1.F, 1.F, -1.F, 1.F, -1.F};
+        struct Face {
+            ImVec2 screen[4];
+            float depth{};
+        };
+        Face visible[6];
+        int visible_count = 0;
+        for (int face = 0; face < 6; ++face) {
+            bool ok = true;
+            float depth = 0.F;
+            for (int vertex = 0; vertex < 4; ++vertex) {
+                const Corner& sample = corner[faces[face][vertex]];
+                if (!sample.ok) {
+                    ok = false;
+                    break;
+                }
+                visible[visible_count].screen[vertex] = sample.screen;
+                depth += sample.depth;
+            }
+            if (!ok) continue;
+            float outward[3];
+            const int axis_index = face_axis[face];
+            for (int k = 0; k < 3; ++k)
+                outward[k] = axis[axis_index][k] * face_sign[face];
+            const float to_camera[3] = {
+                camera.position[0] - volume_center_[0],
+                camera.position[1] - volume_center_[1],
+                camera.position[2] - volume_center_[2]};
+            if (dot3(outward, to_camera) <= 0.F) continue;
+            visible[visible_count].depth = depth * 0.25F;
+            ++visible_count;
+        }
+        std::sort(visible, visible + visible_count, [](const Face& a, const Face& b) {
+            return a.depth > b.depth;
+        });
+        for (int face = 0; face < visible_count; ++face)
+            draw->AddConvexPolyFilled(visible[face].screen, 4, IM_COL32(74, 181, 245, 32));
+        struct Edge {
+            ImVec2 a;
+            ImVec2 b;
+            float depth{};
+        };
+        Edge edges[12];
+        int edge_count = 0;
+        for (int index = 0; index < 8; ++index) {
+            for (int bit = 0; bit < 3; ++bit) {
+                if (index & (1 << bit)) continue;
+                const int other = index | (1 << bit);
+                if (!corner[index].ok || !corner[other].ok) continue;
+                edges[edge_count].a = corner[index].screen;
+                edges[edge_count].b = corner[other].screen;
+                edges[edge_count].depth =
+                    0.5F * (corner[index].depth + corner[other].depth);
+                ++edge_count;
+            }
+        }
+        std::sort(edges, edges + edge_count, [](const Edge& a, const Edge& b) {
+            return a.depth > b.depth;
+        });
+        for (int edge = 0; edge < edge_count; ++edge)
+            stroke(edges[edge].a, edges[edge].b, IM_COL32(236, 242, 248, 220), 1.45F);
+    }
+
+    if (!center_ok) return;
+    const auto arrow = [&](const ImVec2 from, const ImVec2 to, const ImU32 colour) {
+        const float dx = to.x - from.x;
+        const float dy = to.y - from.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 2.F) return;
+        const float nx = dx / len;
+        const float ny = dy / len;
+        const ImVec2 tip = to;
+        const ImVec2 base{to.x - nx * 11.F, to.y - ny * 11.F};
+        const ImVec2 side{-ny * 4.5F, nx * 4.5F};
+        draw->AddTriangleFilled(
+            tip, {base.x + side.x, base.y + side.y}, {base.x - side.x, base.y - side.y},
+            colour);
+    };
+    if (volume_gesture_ == VolumeGesture::rotate && !sphere) {
+        const float radius = world_from_screen(camera, view_min, view_max, center_depth, 58.F);
+        for (int index = 0; index < 3; ++index) {
+            float u[3];
+            float v[3];
+            volume_basis(axis[index], u, v);
+            const bool active = hot == index;
+            ImVec2 previous;
+            bool have = false;
+            for (int step = 0; step <= 28; ++step) {
+                const float angle = 0.4F + static_cast<float>(step) / 28.F * 4.7F;
+                float point[3];
+                const float c = std::cos(angle);
+                const float s = std::sin(angle);
+                for (int k = 0; k < 3; ++k)
+                    point[k] = volume_center_[k] + (u[k] * c + v[k] * s) * radius;
+                ImVec2 screen;
+                float depth = 0.F;
+                const bool ok =
+                    project_world(camera, view_min, view_max, point, screen, depth);
+                if (have && ok)
+                    stroke(previous, screen, axis_colour[index], active ? 2.6F : 1.6F);
+                have = ok;
+                previous = screen;
+            }
+        }
+    } else if (volume_gesture_ == VolumeGesture::scale) {
+        for (int index = 0; index < 3; ++index) {
+            float point[3];
+            for (int k = 0; k < 3; ++k)
+                point[k] = volume_center_[k] + axis[index][k] * half[index];
+            ImVec2 screen;
+            float depth = 0.F;
+            if (!project_world(camera, view_min, view_max, point, screen, depth)) continue;
+            const float extent = hot == index ? 7.F : 5.F;
+            draw->AddRectFilled(
+                {screen.x - extent, screen.y - extent},
+                {screen.x + extent, screen.y + extent}, IM_COL32(8, 10, 14, 220), 2.F);
+            draw->AddRect(
+                {screen.x - extent, screen.y - extent},
+                {screen.x + extent, screen.y + extent}, axis_colour[index], 2.F, 0,
+                hot == index ? 2.2F : 1.5F);
+        }
+    } else {
+        const float gap = world_from_screen(camera, view_min, view_max, center_depth, 14.F);
+        for (int index = 0; index < 3; ++index) {
+            float from[3];
+            float to[3];
+            for (int k = 0; k < 3; ++k) {
+                from[k] = volume_center_[k] + axis[index][k] * gap;
+                to[k] = volume_center_[k] + axis[index][k] * handle;
+            }
+            ImVec2 a;
+            ImVec2 b;
+            float depth_a = 0.F;
+            float depth_b = 0.F;
+            if (!project_world(camera, view_min, view_max, from, a, depth_a) ||
+                !project_world(camera, view_min, view_max, to, b, depth_b))
+                continue;
+            stroke(a, b, axis_colour[index], hot == index ? 2.8F : 1.8F);
+            arrow(a, b, axis_colour[index]);
+        }
+        draw->AddCircleFilled(center_screen, 5.5F, IM_COL32(8, 10, 14, 220));
+        draw->AddCircle(center_screen, 5.5F, IM_COL32(236, 242, 248, 230), 16, 1.4F);
+    }
+    if (hot >= 0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+}
+
+int SplatEdit::pick_volume(
+    const ImVec2 view_min, const ImVec2 view_max, const splat_render::Camera& camera,
+    const ImVec2 mouse) const {
+    const bool sphere = tool_ == Tool::sphere;
+    float axis[3][3];
+    if (sphere) {
+        axis[0][0] = axis[1][1] = axis[2][2] = 1.F;
+        axis[0][1] = axis[0][2] = axis[1][0] = axis[1][2] = axis[2][0] = axis[2][1] =
+            0.F;
+    } else
+        quat_axes(volume_quat_, axis);
+    const float half[3] = {
+        sphere ? volume_size_[0] : volume_size_[0] * 0.5F,
+        sphere ? volume_size_[0] : volume_size_[1] * 0.5F,
+        sphere ? volume_size_[0] : volume_size_[2] * 0.5F};
+    ImVec2 center_screen;
+    float center_depth = 1.F;
+    const bool center_ok = project_world(
+        camera, view_min, view_max, volume_center_, center_screen, center_depth);
+    float best = 9.F * 9.F;
+    int best_axis = -1;
+    const auto consider = [&](const int index, const float distance) {
+        if (distance < best) {
+            best = distance;
+            best_axis = index;
+        }
+    };
+    if (volume_gesture_ == VolumeGesture::rotate && !sphere) {
+        const float radius =
+            world_from_screen(camera, view_min, view_max, center_depth, 58.F);
+        for (int index = 0; index < 3; ++index) {
+            float u[3];
+            float v[3];
+            volume_basis(axis[index], u, v);
+            ImVec2 previous;
+            bool have = false;
+            for (int step = 0; step <= 28; ++step) {
+                const float angle = 0.4F + static_cast<float>(step) / 28.F * 4.7F;
+                float point[3];
+                const float c = std::cos(angle);
+                const float s = std::sin(angle);
+                for (int k = 0; k < 3; ++k)
+                    point[k] = volume_center_[k] + (u[k] * c + v[k] * s) * radius;
+                ImVec2 screen;
+                float depth = 0.F;
+                const bool ok =
+                    project_world(camera, view_min, view_max, point, screen, depth);
+                if (have && ok)
+                    consider(index, dist2_segment(mouse, previous, screen));
+                have = ok;
+                previous = screen;
+            }
+        }
+    } else if (volume_gesture_ == VolumeGesture::scale) {
+        for (int index = 0; index < 3; ++index) {
+            float point[3];
+            for (int k = 0; k < 3; ++k)
+                point[k] = volume_center_[k] + axis[index][k] * half[index];
+            ImVec2 screen;
+            float depth = 0.F;
+            if (!project_world(camera, view_min, view_max, point, screen, depth))
+                continue;
+            const float dx = mouse.x - screen.x;
+            const float dy = mouse.y - screen.y;
+            consider(index, dx * dx + dy * dy);
+        }
+    } else {
+        const float gap = world_from_screen(camera, view_min, view_max, center_depth, 14.F);
+        const float length = world_from_screen(camera, view_min, view_max, center_depth, 70.F);
+        for (int index = 0; index < 3; ++index) {
+            float from[3];
+            float to[3];
+            for (int k = 0; k < 3; ++k) {
+                from[k] = volume_center_[k] + axis[index][k] * gap;
+                to[k] = volume_center_[k] + axis[index][k] * length;
+            }
+            ImVec2 a;
+            ImVec2 b;
+            float depth_a = 0.F;
+            float depth_b = 0.F;
+            if (!project_world(camera, view_min, view_max, from, a, depth_a) ||
+                !project_world(camera, view_min, view_max, to, b, depth_b))
+                continue;
+            consider(index, dist2_segment(mouse, a, b));
+        }
+        if (center_ok) {
+            const float dx = mouse.x - center_screen.x;
+            const float dy = mouse.y - center_screen.y;
+            if (dx * dx + dy * dy <= best) return 3;
+        }
+    }
+    if (best_axis >= 0) return best_axis;
+    const WorldRay ray = camera_ray(camera, view_min, view_max, mouse);
+    if (volume_ray_hit(ray, volume_center_, axis, half, sphere)) return 3;
+    return -1;
+}
+
+void SplatEdit::begin_volume_drag(
+    const int handle, const ImVec2 view_min, const ImVec2 view_max,
+    const splat_render::Camera& camera, const ImVec2 mouse) {
+    std::copy(std::begin(volume_center_), std::end(volume_center_), volume_drag_center_);
+    std::copy(std::begin(volume_quat_), std::end(volume_quat_), volume_drag_quat_);
+    std::copy(std::begin(volume_size_), std::end(volume_size_), volume_drag_size_);
+    volume_drag_ = handle;
+    const WorldRay ray = camera_ray(camera, view_min, view_max, mouse);
+    float axis[3][3];
+    if (tool_ == Tool::sphere) {
+        axis[0][0] = axis[1][1] = axis[2][2] = 1.F;
+        axis[0][1] = axis[0][2] = axis[1][0] = axis[1][2] = axis[2][0] = axis[2][1] =
+            0.F;
+    } else
+        quat_axes(volume_drag_quat_, axis);
+    float view[3];
+    view_direction(camera, volume_drag_center_, view);
+    float hit[3];
+    if (handle == 3) {
+        if (!ray_plane(ray, volume_drag_center_, view, hit)) {
+            volume_drag_ = -1;
+            return;
+        }
+        std::copy(std::begin(hit), std::end(hit), volume_drag_vec_);
+        return;
+    }
+    const float* direction = axis[handle];
+    if (volume_gesture_ == VolumeGesture::rotate) {
+        if (!ray_plane(ray, volume_drag_center_, direction, hit)) {
+            volume_drag_ = -1;
+            return;
+        }
+        volume_drag_vec_[0] = hit[0] - volume_drag_center_[0];
+        volume_drag_vec_[1] = hit[1] - volume_drag_center_[1];
+        volume_drag_vec_[2] = hit[2] - volume_drag_center_[2];
+        return;
+    }
+    float normal[3];
+    axis_plane_normal(direction, view, normal);
+    if (!ray_plane(ray, volume_drag_center_, normal, hit)) {
+        volume_drag_ = -1;
+        return;
+    }
+    const float rel[3] = {
+        hit[0] - volume_drag_center_[0], hit[1] - volume_drag_center_[1],
+        hit[2] - volume_drag_center_[2]};
+    volume_drag_param_ = dot3(rel, direction);
+}
+
+void SplatEdit::update_volume_drag(
+    const ImVec2 view_min, const ImVec2 view_max, const splat_render::Camera& camera,
+    const ImVec2 mouse) {
+    if (volume_drag_ < 0) return;
+    const WorldRay ray = camera_ray(camera, view_min, view_max, mouse);
+    float axis[3][3];
+    if (tool_ == Tool::sphere) {
+        axis[0][0] = axis[1][1] = axis[2][2] = 1.F;
+        axis[0][1] = axis[0][2] = axis[1][0] = axis[1][2] = axis[2][0] = axis[2][1] =
+            0.F;
+    } else
+        quat_axes(volume_drag_quat_, axis);
+    float view[3];
+    view_direction(camera, volume_drag_center_, view);
+    float hit[3];
+    if (volume_drag_ == 3) {
+        if (!ray_plane(ray, volume_drag_center_, view, hit)) return;
+        for (int k = 0; k < 3; ++k)
+            volume_center_[k] =
+                volume_drag_center_[k] + hit[k] - volume_drag_vec_[k];
+        return;
+    }
+    const float* direction = axis[volume_drag_];
+    if (volume_gesture_ == VolumeGesture::rotate) {
+        if (!ray_plane(ray, volume_drag_center_, direction, hit)) return;
+        const float current[3] = {
+            hit[0] - volume_drag_center_[0], hit[1] - volume_drag_center_[1],
+            hit[2] - volume_drag_center_[2]};
+        float crossed[3];
+        cross3(volume_drag_vec_, current, crossed);
+        const float angle = std::atan2(dot3(crossed, direction), dot3(volume_drag_vec_, current));
+        float delta[4];
+        quat_from_axis(direction, angle, delta);
+        quat_mul(delta, volume_drag_quat_, volume_quat_);
+        const float qlen = std::sqrt(
+            volume_quat_[0] * volume_quat_[0] + volume_quat_[1] * volume_quat_[1] +
+            volume_quat_[2] * volume_quat_[2] + volume_quat_[3] * volume_quat_[3]);
+        if (qlen > 1e-8F) {
+            for (float& component : volume_quat_) component /= qlen;
+        }
+        return;
+    }
+    float normal[3];
+    axis_plane_normal(direction, view, normal);
+    if (!ray_plane(ray, volume_drag_center_, normal, hit)) return;
+    const float rel[3] = {
+        hit[0] - volume_drag_center_[0], hit[1] - volume_drag_center_[1],
+        hit[2] - volume_drag_center_[2]};
+    const float param = dot3(rel, direction);
+    if (volume_gesture_ == VolumeGesture::scale) {
+        const float ratio = std::fabs(volume_drag_param_) > 1e-4F
+            ? std::fabs(param / volume_drag_param_)
+            : 1.F;
+        if (tool_ == Tool::sphere)
+            volume_size_[0] = std::max(0.02F, volume_drag_size_[0] * ratio);
+        else
+            volume_size_[volume_drag_] =
+                std::max(0.04F, volume_drag_size_[volume_drag_] * ratio);
+        return;
+    }
+    for (int k = 0; k < 3; ++k)
+        volume_center_[k] = volume_drag_center_[k] +
+                            direction[k] * (param - volume_drag_param_);
+}
+
+void SplatEdit::end_volume_drag() {
+    if (volume_drag_ < 0) return;
+    volume_drag_ = -1;
+    bool same = true;
+    for (int k = 0; k < 3; ++k) {
+        if (std::fabs(volume_center_[k] - volume_drag_center_[k]) > 1e-5F) same = false;
+        if (std::fabs(volume_size_[k] - volume_drag_size_[k]) > 1e-5F) same = false;
+    }
+    for (int k = 0; k < 4; ++k)
+        if (std::fabs(volume_quat_[k] - volume_drag_quat_[k]) > 1e-5F) same = false;
+    if (same) return;
+    Snapshot snap;
+    snap.kind = Snapshot::Kind::volume;
+    std::copy(std::begin(volume_drag_center_), std::end(volume_drag_center_), snap.volume_center);
+    std::copy(std::begin(volume_drag_quat_), std::end(volume_drag_quat_), snap.volume_quat);
+    std::copy(std::begin(volume_drag_size_), std::end(volume_drag_size_), snap.volume_size);
+    push_undo(std::move(snap));
+}
+
+void SplatEdit::handle_volume(
+    App&, const ImVec2 view_min, const ImVec2 view_max,
+    const splat_render::Camera& camera, const bool hot) {
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    if (volume_drag_ >= 0) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            update_volume_drag(view_min, view_max, camera, mouse);
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) end_volume_drag();
+        return;
+    }
+    if (!(hot && ImGui::IsMouseClicked(ImGuiMouseButton_Left))) return;
+    const int handle = pick_volume(view_min, view_max, camera, mouse);
+    if (handle >= 0) begin_volume_drag(handle, view_min, view_max, camera, mouse);
 }
 
 }  // namespace editor

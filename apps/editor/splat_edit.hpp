@@ -20,7 +20,7 @@ struct App;
 // matches the inspector projection ids used by the Vulkan preview.
 class SplatEdit {
 public:
-    enum class Tool { none, pick, move, circle, polygon, brush };
+    enum class Tool { none, pick, move, circle, polygon, brush, box, sphere };
 
     // Host arrays copied at load. Pointers are only read during sync.
     struct Host {
@@ -78,9 +78,12 @@ public:
 
 private:
     struct Snapshot {
-        enum class Kind { selection, deletion };
+        enum class Kind { selection, deletion, volume };
         Kind kind{Kind::selection};
         std::vector<std::uint8_t> selected;
+        float volume_center[3]{};
+        float volume_quat[4]{1.F, 0.F, 0.F, 0.F};
+        float volume_size[3]{1.F, 1.F, 1.F};
         std::vector<float> xyz;
         // Indices into the model from before this deletion, ascending.
         std::vector<std::uint32_t> removed_index;
@@ -119,6 +122,33 @@ private:
         App& app, const splat_render::Camera& camera, ImVec2 view_min,
         ImVec2 view_max, ImVec2 mouse);
     void handle_keys(App& app);
+
+    enum class VolumeGesture { move, rotate, scale };
+    enum class VolumeOp { replace, add, remove, intersect };
+    [[nodiscard]] bool volume_tool() const noexcept {
+        return tool_ == Tool::box || tool_ == Tool::sphere;
+    }
+    void place_volume(const App& app);
+    void adopt_volume_kind(Tool tool);
+    void apply_volume(VolumeOp op);
+    void draw_volume(
+        ImDrawList* draw, ImVec2 view_min, ImVec2 view_max,
+        const splat_render::Camera& camera) const;
+    // True while the pointer is over the volume's action row.
+    bool draw_volume_bar(ImVec2 view_min, ImVec2 view_max);
+    void handle_volume(
+        App& app, ImVec2 view_min, ImVec2 view_max,
+        const splat_render::Camera& camera, bool hot);
+    [[nodiscard]] int pick_volume(
+        ImVec2 view_min, ImVec2 view_max, const splat_render::Camera& camera,
+        ImVec2 mouse) const;
+    void begin_volume_drag(
+        int handle, ImVec2 view_min, ImVec2 view_max,
+        const splat_render::Camera& camera, ImVec2 mouse);
+    void update_volume_drag(
+        ImVec2 view_min, ImVec2 view_max, const splat_render::Camera& camera,
+        ImVec2 mouse);
+    void end_volume_drag();
 
     struct ScreenEllipse {
         float u{};
@@ -165,6 +195,21 @@ private:
     float ring_sigma_{2.828427F};
     bool hit_chosen_{};
     float brush_radius_{26.F};
+    // World volume for box and sphere selection. Persists while the model is loaded.
+    bool volume_placed_{};
+    VolumeGesture volume_gesture_{VolumeGesture::move};
+    float volume_center_[3]{};
+    float volume_quat_[4]{1.F, 0.F, 0.F, 0.F};
+    // Box: full side lengths. Sphere: radius in [0].
+    float volume_size_[3]{1.F, 1.F, 1.F};
+    int volume_drag_{-1};
+    float volume_drag_param_{};
+    float volume_drag_center_[3]{};
+    float volume_drag_quat_[4]{1.F, 0.F, 0.F, 0.F};
+    float volume_drag_size_[3]{1.F, 1.F, 1.F};
+    float volume_drag_vec_[3]{};
+    ImVec2 volume_bar_min_{};
+    ImVec2 volume_bar_max_{};
     std::vector<ImVec2> polygon_;
     bool stroking_{};
     bool stroke_changed_{};
