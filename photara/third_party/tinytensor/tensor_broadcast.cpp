@@ -3,6 +3,9 @@
 #include "internal/cuda_stream_context.hpp"
 #include "internal/tensor_impl.hpp"
 #include "internal/tensor_ops.hpp"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "vulkan/ops.hpp"
+#endif
 
 namespace tinytensor {
 
@@ -38,6 +41,12 @@ namespace tinytensor {
         if (src.shape() == target) {
             return src.clone();
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (src.device() == Device::Vulkan) {
+            return vulkan::broadcast_to(src, target);
+        }
+#endif
 
         Tensor result;
         if (src.device() == Device::CUDA) {

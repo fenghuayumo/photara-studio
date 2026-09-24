@@ -24,6 +24,14 @@ enum class ShaderId : std::uint32_t {
     ScanAdd,
     Compact,
     Multinomial,
+    Reduce,
+    Matmul,
+    Random,
+    Cumsum,
+    Pool,
+    Scatter,
+    SelectCompact,
+    Cat,
     Count
 };
 

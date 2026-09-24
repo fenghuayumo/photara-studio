@@ -3,7 +3,9 @@
 struct PushConstants
 {
     uint n_indices;
+    uint outer;
     uint dim_size;
+    uint inner;
     uint elem_size;
     uint dst_offset;
     uint idx_offset;
@@ -28,13 +30,21 @@ int read_index(uint i)
 [numthreads(TT_GROUP_SIZE, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
+    const uint inner = max(pc.inner, 1u);
+    const uint n_indices = max(pc.n_indices, 1u);
+    const uint total = max(pc.outer, 1u) * n_indices * inner;
     const uint index = dtid.x;
-    if (index >= pc.n_indices)
+    if (index >= total)
     {
         return;
     }
 
-    int sel = read_index(index);
+    const uint j = index % inner;
+    const uint tmp = index / inner;
+    const uint i = tmp % n_indices;
+    const uint o = tmp / n_indices;
+
+    int sel = read_index(i);
     if (sel < 0)
     {
         sel += int(pc.dim_size);
@@ -44,9 +54,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
+    const uint dst_elem = (o * pc.dim_size + uint(sel)) * inner + j;
     store_from_float(
         dst,
-        pc.dst_offset + uint(sel) * pc.elem_size,
+        pc.dst_offset + dst_elem * pc.elem_size,
         pc.dtype,
         asfloat(pc.value_bits));
 }

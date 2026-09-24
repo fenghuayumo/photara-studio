@@ -120,6 +120,95 @@ uint dtype_size(uint dtype)
     return 4;
 }
 
+float unpack_f16(uint bits)
+{
+    const uint sign = (bits >> 15) & 1u;
+    const uint exponent = (bits >> 10) & 31u;
+    const uint fraction = bits & 1023u;
+    if (exponent == 0u)
+    {
+        if (fraction == 0u)
+        {
+            return sign != 0u ? -0.0f : 0.0f;
+        }
+        const float value = float(fraction) * exp2(-24.0f);
+        return sign != 0u ? -value : value;
+    }
+    if (exponent == 31u)
+    {
+        if (fraction == 0u)
+        {
+            return asfloat(sign != 0u ? 0xFF800000u : 0x7F800000u);
+        }
+        return asfloat(0x7FC00000u);
+    }
+    const float value = (1.0f + float(fraction) * (1.0f / 1024.0f)) * exp2(float(int(exponent) - 15));
+    return sign != 0u ? -value : value;
+}
+
+uint pack_f16(float value)
+{
+    const uint bits = asuint(value);
+    const uint sign = (bits >> 16) & 0x8000u;
+    const uint raw_exp = (bits >> 23) & 0xFFu;
+    uint mantissa = bits & 0x7FFFFFu;
+    if (raw_exp == 0xFFu)
+    {
+        return sign | (mantissa == 0u ? 0x7C00u : 0x7E00u);
+    }
+    int exponent = int(raw_exp) - 127 + 15;
+    if (exponent <= 0)
+    {
+        if (exponent < -10)
+        {
+            return sign;
+        }
+        mantissa |= 0x800000u;
+        const uint shift = uint(1 - exponent);
+        return sign | (mantissa >> (shift + 13));
+    }
+    if (exponent >= 31)
+    {
+        return sign | 0x7C00u;
+    }
+    uint rounded = mantissa + 0x1000u;
+    if ((rounded & 0x800000u) != 0u)
+    {
+        rounded = 0u;
+        exponent += 1;
+        if (exponent >= 31)
+        {
+            return sign | 0x7C00u;
+        }
+    }
+    return sign | (uint(exponent) << 10) | (rounded >> 13);
+}
+
+float load_f16(RWByteAddressBuffer buf, uint byte_offset)
+{
+    return unpack_f16(load_u16(buf, byte_offset));
+}
+
+void store_f16(RWByteAddressBuffer buf, uint byte_offset, float value)
+{
+    store_u16(buf, byte_offset, pack_f16(value));
+}
+
+int cmp_i64(uint2 lhs, uint2 rhs)
+{
+    const int hi_lhs = asint(lhs.y);
+    const int hi_rhs = asint(rhs.y);
+    if (hi_lhs != hi_rhs)
+    {
+        return hi_lhs < hi_rhs ? -1 : 1;
+    }
+    if (lhs.x != rhs.x)
+    {
+        return lhs.x < rhs.x ? -1 : 1;
+    }
+    return 0;
+}
+
 float load_as_float(RWByteAddressBuffer buf, uint byte_offset, uint dtype)
 {
     if (dtype == kDtypeBool || dtype == kDtypeUInt8)
@@ -132,7 +221,13 @@ float load_as_float(RWByteAddressBuffer buf, uint byte_offset, uint dtype)
     }
     if (dtype == kDtypeInt64)
     {
-        return float(i64_as_i32(load_u64(buf, byte_offset)));
+        const uint2 words = load_u64(buf, byte_offset);
+        const float hi = float(asint(words.y)) * 4294967296.0f;
+        return hi + float(words.x);
+    }
+    if (dtype == kDtypeFloat16)
+    {
+        return load_f16(buf, byte_offset);
     }
     return load_f32(buf, byte_offset);
 }
@@ -158,6 +253,11 @@ void store_from_float(RWByteAddressBuffer buf, uint byte_offset, uint dtype, flo
     if (dtype == kDtypeInt64)
     {
         store_i64_from_i32(buf, byte_offset, int(value));
+        return;
+    }
+    if (dtype == kDtypeFloat16)
+    {
+        store_f16(buf, byte_offset, value);
         return;
     }
     store_f32(buf, byte_offset, value);

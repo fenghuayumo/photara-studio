@@ -84,7 +84,12 @@ void main(uint3 dtid : SV_DispatchThreadID, uint gidx : SV_GroupIndex)
         {
             return;
         }
-        const float w = max(asfloat(weights.Load(pc.weights_offset + index * 4u)), 1e-10f);
+        const float w = asfloat(weights.Load(pc.weights_offset + index * 4u));
+        if (w <= 0.0f)
+        {
+            aux.Store(pc.keys_offset + index * 4u, asuint(-3.4e38f));
+            return;
+        }
         float u = rand01(pc.seed, index);
         u = clamp(u, 1e-10f, 1.0f - 1e-10f);
         const float gumbel = -log(-log(u));

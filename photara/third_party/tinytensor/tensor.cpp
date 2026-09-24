@@ -1889,6 +1889,14 @@ namespace tinytensor {
             return *this;
         }
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            Tensor clipped = vulkan::clamp(*this, min_val, max_val);
+            vulkan::copy_same_layout(*this, clipped);
+            return *this;
+        }
+#endif
+
         if (device_ == Device::CUDA) {
             if (dtype_ == DataType::Float32) {
                 tensor_ops::launch_clamp_scalar(ptr<float>(), min_val, max_val, numel(), stream());
@@ -1940,6 +1948,12 @@ namespace tinytensor {
             LOG_ERROR("Invalid dimension for cumsum: {}", dim);
             return Tensor();
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::cumsum(*this, dim);
+        }
+#endif
 
         auto result = clone();
 

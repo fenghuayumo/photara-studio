@@ -54,6 +54,12 @@ namespace tinytensor {
         const Tensor& a = is_contiguous() ? *this : contiguous();
         const Tensor& b = other.is_contiguous() ? other : other.contiguous();
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::matmul(a, b, false, 1);
+        }
+#endif
+
         // GPU: use tiled CUDA sgemm kernel
         if (device_ == Device::CUDA) {
             auto result = empty({m, n}, Device::CUDA, dtype_);
@@ -101,6 +107,12 @@ namespace tinytensor {
 
         const Tensor& a = is_contiguous() ? *this : contiguous();
         const Tensor& b = other.is_contiguous() ? other : other.contiguous();
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::matmul(a, b, false, batch_size);
+        }
+#endif
 
         // GPU: use tiled CUDA batched sgemm kernel
         if (device_ == Device::CUDA) {

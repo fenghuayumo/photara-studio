@@ -190,6 +190,13 @@ namespace tinytensor {
                              static_cast<size_t>(H_out), static_cast<size_t>(W_out)},
                             device_, dtype_);
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            vulkan::max_pool2d(input_cont, output, kernel_size, stride, padding, H_out, W_out);
+            return output;
+        }
+#endif
+
         if (device_ == Device::CUDA) {
             tensor_ops::launch_max_pool2d(input_cont.ptr<float>(), output.ptr<float>(),
                                           N, C, H_in, W_in, H_out, W_out,
@@ -217,6 +224,13 @@ namespace tinytensor {
         auto output = empty({static_cast<size_t>(N), static_cast<size_t>(C),
                              static_cast<size_t>(output_h), static_cast<size_t>(output_w)},
                             device_, dtype_);
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            vulkan::adaptive_avg_pool2d(input_cont, output, output_h, output_w);
+            return output;
+        }
+#endif
 
         if (device_ == Device::CUDA) {
             tensor_ops::launch_adaptive_avg_pool2d(input_cont.ptr<float>(), output.ptr<float>(),

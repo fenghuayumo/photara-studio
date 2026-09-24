@@ -399,7 +399,6 @@ Photara's own source in this repository is licensed under the Apache License,
 Version 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
 
 Third-party code, optional backends, and model weights keep their upstream
-terms. SiftGPU has non-commercial restrictions when enabled. Delight/Intrinsic
-weights are documented in
+terms. Delight/Intrinsic weights are documented in
 [`docs/LICENSE-Intrinsic.md`](docs/LICENSE-Intrinsic.md). Review every enabled
 optional dependency before distribution.

@@ -13,14 +13,22 @@
 #include <stdlib.h>
 #endif
 
+#include "cat.hlsl.embedded.hpp"
 #include "compact.hlsl.embedded.hpp"
+#include "cumsum.hlsl.embedded.hpp"
 #include "elementwise.hlsl.embedded.hpp"
 #include "index_fill.hlsl.embedded.hpp"
 #include "index_select.hlsl.embedded.hpp"
 #include "mask_flags.hlsl.embedded.hpp"
+#include "matmul.hlsl.embedded.hpp"
 #include "multinomial.hlsl.embedded.hpp"
+#include "pool.hlsl.embedded.hpp"
+#include "random.hlsl.embedded.hpp"
+#include "reduce.hlsl.embedded.hpp"
 #include "scan_add.hlsl.embedded.hpp"
 #include "scan_block.hlsl.embedded.hpp"
+#include "scatter.hlsl.embedded.hpp"
+#include "select_compact.hlsl.embedded.hpp"
 #include "strided_copy.hlsl.embedded.hpp"
 
 namespace tinytensor::vulkan::runtime {
@@ -156,15 +164,23 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
     using std::as_bytes;
     using std::span;
     return {{
-        {ShaderId::Elementwise, as_bytes(span{elementwise_hlsl_spv}), 3, 56},
-        {ShaderId::StridedCopy, as_bytes(span{strided_copy_hlsl_spv}), 2, 52},
+        {ShaderId::Elementwise, as_bytes(span{elementwise_hlsl_spv}), 4, 72},
+        {ShaderId::StridedCopy, as_bytes(span{strided_copy_hlsl_spv}), 2, 96},
         {ShaderId::IndexSelect, as_bytes(span{index_select_hlsl_spv}), 3, 40},
-        {ShaderId::IndexFill, as_bytes(span{index_fill_hlsl_spv}), 2, 32},
+        {ShaderId::IndexFill, as_bytes(span{index_fill_hlsl_spv}), 2, 40},
         {ShaderId::MaskFlags, as_bytes(span{mask_flags_hlsl_spv}), 2, 16},
         {ShaderId::ScanBlock, as_bytes(span{scan_block_hlsl_spv}), 3, 24},
         {ShaderId::ScanAdd, as_bytes(span{scan_add_hlsl_spv}), 2, 16},
-        {ShaderId::Compact, as_bytes(span{compact_hlsl_spv}), 3, 36},
+        {ShaderId::Compact, as_bytes(span{compact_hlsl_spv}), 3, 52},
         {ShaderId::Multinomial, as_bytes(span{multinomial_hlsl_spv}), 3, 32},
+        {ShaderId::Reduce, as_bytes(span{reduce_hlsl_spv}), 3, 40},
+        {ShaderId::Matmul, as_bytes(span{matmul_hlsl_spv}), 3, 56},
+        {ShaderId::Random, as_bytes(span{random_hlsl_spv}), 2, 44},
+        {ShaderId::Cumsum, as_bytes(span{cumsum_hlsl_spv}), 2, 28},
+        {ShaderId::Pool, as_bytes(span{pool_hlsl_spv}), 2, 48},
+        {ShaderId::Scatter, as_bytes(span{scatter_hlsl_spv}), 3, 44},
+        {ShaderId::SelectCompact, as_bytes(span{select_compact_hlsl_spv}), 4, 28},
+        {ShaderId::Cat, as_bytes(span{cat_hlsl_spv}), 3, 24},
     }};
 }
 
@@ -189,7 +205,8 @@ std::mutex& singleton_mutex() {
 } // namespace
 
 Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes, bool host_visible)
-    : device_(logical), size_(std::max<VkDeviceSize>(bytes, kMinBufferBytes)) {
+    : device_(logical),
+      size_((std::max<VkDeviceSize>(bytes, kMinBufferBytes) + 3u) & ~VkDeviceSize{3}) {
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     buffer_info.size = size_;
     buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -385,6 +402,12 @@ void Context::pick_device() {
     info_.vendor_id = properties.vendorID;
     info_.device_id = properties.deviceID;
     info_.api_version = properties.apiVersion;
+    if (properties.limits.maxComputeWorkGroupInvocations < 256 ||
+        properties.limits.maxComputeWorkGroupSize[0] < 256 ||
+        properties.limits.maxPushConstantsSize < 128) {
+        throw std::runtime_error(
+            "The selected Vulkan device cannot run TinyTensor compute shaders");
+    }
 
     VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
     VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -604,7 +627,16 @@ void Context::fill_zero(Buffer& buffer, std::size_t offset, std::size_t bytes) {
     }
     std::scoped_lock lock(mutex_);
     const VkDeviceSize aligned_offset = offset & ~std::size_t{3};
-    const VkDeviceSize aligned_size = align_up_size(offset + bytes, 4) - aligned_offset;
+    VkDeviceSize aligned_size = align_up_size(offset + bytes, 4) - aligned_offset;
+    if (aligned_offset >= buffer.size()) {
+        return;
+    }
+    if (aligned_offset + aligned_size > buffer.size()) {
+        aligned_size = buffer.size() - aligned_offset;
+    }
+    if (aligned_size == 0) {
+        return;
+    }
     VkCommandBuffer cmd = begin_commands();
     vkCmdFillBuffer(cmd, buffer.handle(), aligned_offset, aligned_size, 0);
     barrier_buffer(cmd, buffer.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,

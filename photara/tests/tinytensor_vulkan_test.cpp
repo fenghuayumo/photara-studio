@@ -1,7 +1,9 @@
 #include "internal/tensor_impl.hpp"
 #include "vulkan/backend.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -20,6 +22,14 @@ void require_near(const float actual, const float expected, const float eps, con
         throw std::runtime_error(
             std::string(message) + " actual=" + std::to_string(actual) +
             " expected=" + std::to_string(expected));
+    }
+}
+
+void require_vector_near(const std::vector<float>& actual, const std::vector<float>& expected,
+                         const float eps, const char* message) {
+    require(actual.size() == expected.size(), message);
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        require_near(actual[i], expected[i], eps, message);
     }
 }
 
@@ -113,6 +123,96 @@ void test_multinomial() {
     require(seen[0] == 1 && seen[1] == 1 && seen[2] == 1, "without-replacement unique");
 }
 
+void test_elementwise_and_where() {
+    using namespace tinytensor;
+    auto a = Tensor::from_vector(std::vector<float>{-1.F, 0.F, 1.F, 2.F}, {2, 2}, Device::Vulkan);
+    auto b = Tensor::from_vector(std::vector<float>{2.F, 3.F}, {1, 2}, Device::Vulkan);
+    require_vector_near((a + b).to_vector(), {1.F, 3.F, 3.F, 5.F}, 1e-5F, "broadcast add");
+    require_vector_near(a.abs().to_vector(), {1.F, 0.F, 1.F, 2.F}, 1e-5F, "abs");
+    require_vector_near(a.exp().log().to_vector(), a.to_vector(), 2e-5F, "exp/log");
+    require_vector_near(a.clamp(0.F, 1.F).to_vector(), {0.F, 0.F, 1.F, 1.F}, 1e-5F,
+                        "clamp");
+    auto condition = a.gt(0.F);
+    auto selected = Tensor::where(condition, a, Tensor::zeros(a.shape(), Device::Vulkan));
+    require_vector_near(selected.to_vector(), {0.F, 0.F, 1.F, 2.F}, 1e-5F, "where");
+}
+
+void test_reduce_and_cumsum() {
+    using namespace tinytensor;
+    auto a = Tensor::from_vector(std::vector<float>{1.F, 2.F, 3.F, 4.F, 5.F, 6.F},
+                                 {2, 3}, Device::Vulkan);
+    require_vector_near(a.sum(1).to_vector(), {6.F, 15.F}, 1e-5F, "sum dim1");
+    require_vector_near(a.mean(0).to_vector(), {2.5F, 3.5F, 4.5F}, 1e-5F, "mean dim0");
+    require_vector_near(a.max(1).to_vector(), {3.F, 6.F}, 1e-5F, "max dim1");
+    require_vector_near(a.var(1).to_vector(), {1.F, 1.F}, 1e-5F, "var dim1");
+    require_vector_near(a.std(1).to_vector(), {1.F, 1.F}, 1e-5F, "std dim1");
+    require_vector_near(a.cumsum(1).to_vector(), {1.F, 3.F, 6.F, 4.F, 9.F, 15.F}, 1e-5F,
+                        "cumsum");
+    constexpr std::array<int, 1> axis{1};
+    require(a.argmax(axis).to_vector_int64() == std::vector<std::int64_t>({2, 2}), "argmax");
+
+    auto empty = Tensor::empty({0, 3}, Device::Vulkan);
+    require_vector_near(empty.sum(0).to_vector(), {0.F, 0.F, 0.F}, 1e-5F, "empty sum");
+    auto scalar = Tensor::from_vector(std::vector<float>{7.F}, {}, Device::Vulkan);
+    require_vector_near(scalar.sum().to_vector(), {7.F}, 1e-5F, "scalar sum");
+}
+
+void test_matmul_cat_and_indexing() {
+    using namespace tinytensor;
+    auto a = Tensor::from_vector(std::vector<float>{1.F, 2.F, 3.F, 4.F, 5.F, 6.F},
+                                 {2, 3}, Device::Vulkan);
+    auto b = Tensor::from_vector(std::vector<float>{7.F, 8.F, 9.F, 10.F, 11.F, 12.F},
+                                 {3, 2}, Device::Vulkan);
+    require_vector_near(a.mm(b).to_vector(), {58.F, 64.F, 139.F, 154.F}, 1e-4F, "mm");
+
+    auto batch_a = a.reshape({1, 2, 3});
+    auto batch_b = b.reshape({1, 3, 2});
+    auto batch_product = batch_a.bmm(batch_b);
+    require(batch_product.shape() == TensorShape({1, 2, 2}), "bmm batch-one shape");
+    require_vector_near(batch_product.to_vector(), {58.F, 64.F, 139.F, 154.F}, 1e-4F,
+                        "bmm batch-one values");
+
+    auto left = Tensor::from_vector(std::vector<float>{1.F, 2.F, 3.F, 4.F}, {2, 2}, Device::Vulkan);
+    auto right = Tensor::from_vector(std::vector<float>{5.F, 6.F}, {2, 1}, Device::Vulkan);
+    auto joined = Tensor::cat({left, right}, 1);
+    require_vector_near(joined.to_vector(), {1.F, 2.F, 5.F, 3.F, 4.F, 6.F}, 1e-5F, "cat dim1");
+
+    auto indices = Tensor::from_vector(std::vector<int>{2, 0}, {2}, Device::Vulkan);
+    auto filled = Tensor::zeros({2, 3}, Device::Vulkan);
+    filled.index_fill_(1, indices, 7.F);
+    require_vector_near(filled.to_vector(), {7.F, 0.F, 7.F, 7.F, 0.F, 7.F}, 1e-5F,
+                        "index_fill dim1");
+    auto source = Tensor::from_vector(std::vector<float>{1.F, 2.F, 3.F, 4.F}, {2, 2}, Device::Vulkan);
+    filled.scatter_(1, indices, source);
+    require_vector_near(filled.to_vector(), {2.F, 0.F, 1.F, 4.F, 0.F, 3.F}, 1e-5F, "scatter");
+}
+
+void test_mask_factory_and_pool() {
+    using namespace tinytensor;
+    auto values = Tensor::from_vector(std::vector<float>{1.F, 2.F, 3.F, 4.F}, {4}, Device::Vulkan);
+    auto mask = Tensor::from_vector(std::vector<bool>{true, false, true, false}, {4}, Device::Vulkan);
+    require_vector_near(values.masked_select(mask).to_vector(), {1.F, 3.F}, 1e-5F,
+                        "masked_select");
+    values.masked_fill_(mask, -2.F);
+    require_vector_near(values.to_vector(), {-2.F, 2.F, -2.F, 4.F}, 1e-5F, "masked_fill");
+
+    auto random = Tensor::uniform({128}, -2.F, 3.F, Device::Vulkan);
+    for (float value : random.to_vector()) require(value >= -2.F && value < 3.F, "uniform range");
+    require_vector_near(Tensor::eye(3, Device::Vulkan).to_vector(),
+                        {1.F, 0.F, 0.F, 0.F, 1.F, 0.F, 0.F, 0.F, 1.F}, 1e-5F, "eye");
+    auto diagonal = Tensor::from_vector(std::vector<float>{2.F, 3.F}, {2}, Device::Vulkan);
+    require_vector_near(Tensor::diag(diagonal).to_vector(), {2.F, 0.F, 0.F, 3.F}, 1e-5F,
+                        "diag");
+
+    auto image = Tensor::from_vector(
+        std::vector<float>{1.F, 2.F, 3.F, 4.F, 5.F, 6.F, 7.F, 8.F, 9.F},
+        {1, 1, 3, 3}, Device::Vulkan);
+    require_vector_near(image.max_pool2d(2, 1).to_vector(), {5.F, 6.F, 8.F, 9.F}, 1e-5F,
+                        "max_pool2d");
+    require_vector_near(image.adaptive_avg_pool2d(1, 1).to_vector(), {5.F}, 1e-5F,
+                        "adaptive_avg_pool2d");
+}
+
 } // namespace
 
 int main() {
@@ -126,10 +226,18 @@ int main() {
                   << " subgroup=" << info.subgroup_size
                   << " atomic_f32=" << (info.buffer_atomic_f32 ? "yes" : "no")
                   << "\n";
-        test_factory_and_roundtrip();
-        test_cat_index_squeeze();
-        test_mask_and_convert();
-        test_multinomial();
+        const auto run = [](const char* name, auto&& test) {
+            std::cout << "  " << name << "\n";
+            test();
+        };
+        run("factory_and_roundtrip", test_factory_and_roundtrip);
+        run("cat_index_squeeze", test_cat_index_squeeze);
+        run("mask_and_convert", test_mask_and_convert);
+        run("multinomial", test_multinomial);
+        run("elementwise_and_where", test_elementwise_and_where);
+        run("reduce_and_cumsum", test_reduce_and_cumsum);
+        run("matmul_cat_and_indexing", test_matmul_cat_and_indexing);
+        run("mask_factory_and_pool", test_mask_factory_and_pool);
         std::cout << "tinytensor vulkan tests passed\n";
         tinytensor::vulkan::shutdown();
         return 0;

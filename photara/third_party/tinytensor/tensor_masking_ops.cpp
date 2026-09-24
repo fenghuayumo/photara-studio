@@ -75,6 +75,12 @@ namespace tinytensor {
             return empty({0}, device_, dtype_);
         }
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::masked_select(*this, mask);
+        }
+#endif
+
         auto result = empty({output_size}, device_, dtype_);
 
         if (device_ == Device::CUDA) {
@@ -125,6 +131,13 @@ namespace tinytensor {
                       device_name(mask.device()), device_name(device_));
             return *this;
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            vulkan::masked_fill(*this, mask, value);
+            return *this;
+        }
+#endif
 
         if (device_ == Device::CUDA) {
             switch (dtype_) {
@@ -530,16 +543,25 @@ namespace tinytensor {
     // Scatter Operations
     Tensor& Tensor::scatter_(int dim, const Tensor& idx, const Tensor& src, ScatterMode mode) {
         materialize_if_deferred();
-        if (mode == ScatterMode::Add) {
-            return index_add_(dim, idx, src);
-        }
-
         if (!is_valid() || !idx.is_valid() || !src.is_valid())
             return *this;
 
         dim = resolve_dim(dim);
         if (dim < 0 || dim >= static_cast<int>(shape_.rank()))
             return *this;
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            if (mode != ScatterMode::None && mode != ScatterMode::Add)
+                throw std::runtime_error("Vulkan scatter supports replace and add modes");
+            vulkan::scatter(*this, idx, src, dim, mode == ScatterMode::Add);
+            return *this;
+        }
+#endif
+
+        if (mode == ScatterMode::Add) {
+            return index_add_(dim, idx, src);
+        }
 
         if (shape_.rank() == 1 && dim == 0) {
             if (idx.ndim() != 1 || src.ndim() != 1) {
@@ -756,10 +778,7 @@ namespace tinytensor {
 #ifdef TINYTENSOR_HAS_VULKAN
         if (device_ == Device::Vulkan) {
             dim = resolve_dim(dim);
-            if (dim != 0 || ndim() != 1) {
-                throw std::runtime_error("Vulkan index_fill_ currently supports 1D dim=0");
-            }
-            vulkan::index_fill(*this, idx, val);
+            vulkan::index_fill(*this, idx, val, dim);
             return *this;
         }
 #endif

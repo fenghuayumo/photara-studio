@@ -124,7 +124,15 @@ if(TINYTENSOR_ENABLE_VULKAN)
         scan_block.hlsl
         scan_add.hlsl
         compact.hlsl
-        multinomial.hlsl)
+        multinomial.hlsl
+        reduce.hlsl
+        matmul.hlsl
+        random.hlsl
+        cumsum.hlsl
+        pool.hlsl
+        scatter.hlsl
+        select_compact.hlsl
+        cat.hlsl)
     set(TINYTENSOR_SHADER_BINARIES)
     set(TINYTENSOR_SHADER_EMBEDDED_HEADERS)
     foreach(shader IN LISTS TINYTENSOR_SHADER_SOURCES)

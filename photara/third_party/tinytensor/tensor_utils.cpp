@@ -59,6 +59,13 @@ namespace tinytensor {
         size_t n = diagonal.numel();
         auto result = Tensor::zeros({n, n}, diagonal.device());
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (diagonal.device() == Device::Vulkan) {
+            vulkan::diag(result, diagonal);
+            return result;
+        }
+#endif
+
         if (diagonal.device() == Device::CUDA) {
             tensor_ops::launch_diag(diagonal.ptr<float>(), result.ptr<float>(), n, result.stream());
             // No sync - returns tensor

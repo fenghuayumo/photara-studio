@@ -292,6 +292,14 @@ namespace tinytensor {
 
             size_t count = static_cast<size_t>(std::ceil((end - start) / step));
 
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (args.device == Device::Vulkan) {
+                result = vulkan::TensorStorage::empty(TensorShape{count}, args.dtype);
+                vulkan::arange(result, start, step);
+                break;
+            }
+#endif
+
             result.shape_ = TensorShape{count};
             result.strides_ = result.shape_.strides(); // Initialize to contiguous strides
             result.storage_offset_ = 0;
@@ -371,6 +379,15 @@ namespace tinytensor {
             if (!result.is_valid() || result.numel() == 0)
                 return result;
 
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (result.device_ == Device::Vulkan) {
+                vulkan::random_uniform(
+                    result, low, high,
+                    static_cast<std::uint32_t>(RandomGenerator::instance().get_next_cuda_seed()));
+                break;
+            }
+#endif
+
             if (result.device_ == Device::CUDA) {
                 const cudaStream_t stream = result.stream();
                 if (result.dtype_ == DataType::Float32) {
@@ -411,6 +428,15 @@ namespace tinytensor {
             if (!result.is_valid() || result.numel() == 0)
                 return result;
 
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (result.device_ == Device::Vulkan) {
+                vulkan::random_normal(
+                    result, mean, std,
+                    static_cast<std::uint32_t>(RandomGenerator::instance().get_next_cuda_seed()));
+                break;
+            }
+#endif
+
             if (result.device_ == Device::CUDA) {
                 // Use Philox RNG without resetting offset (stateful like PyTorch - much faster!)
                 curandGenerator_t* gen = static_cast<curandGenerator_t*>(
@@ -440,6 +466,15 @@ namespace tinytensor {
             result = load(LoadOp::Empty, args);
             if (!result.is_valid() || result.numel() == 0)
                 return result;
+
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (result.device_ == Device::Vulkan) {
+                vulkan::random_randint(
+                    result, low, high,
+                    static_cast<std::uint32_t>(RandomGenerator::instance().get_next_cuda_seed()));
+                break;
+            }
+#endif
 
             if (result.device_ == Device::CUDA) {
                 const cudaStream_t stream = result.stream();
@@ -510,6 +545,15 @@ namespace tinytensor {
             result = load(LoadOp::Empty, args);
             if (!result.is_valid() || result.numel() == 0)
                 return result;
+
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (result.device_ == Device::Vulkan) {
+                vulkan::random_bernoulli(
+                    result, p,
+                    static_cast<std::uint32_t>(RandomGenerator::instance().get_next_cuda_seed()));
+                break;
+            }
+#endif
 
             if (result.device_ == Device::CUDA) {
                 tensor_ops::launch_bernoulli(result.ptr<float>(), result.numel(), p,
@@ -609,6 +653,13 @@ namespace tinytensor {
             size_t m = args.shape[0];
             size_t n = args.shape[1];
             size_t min_dim = std::min(m, n);
+
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (result.device_ == Device::Vulkan) {
+                vulkan::eye(result, static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(n));
+                break;
+            }
+#endif
 
             if (result.device_ == Device::CUDA) {
                 tensor_ops::launch_eye(result.ptr<float>(), m, n, result.stream());
@@ -900,6 +951,7 @@ namespace tinytensor {
 
             ReduceArgs mean_args = args;
             mean_args.args = std::monostate{}; // Clear variant args for mean calculation
+            mean_args.keepdim = true;
             auto mean_tensor = reduce(ReduceOp::Mean, mean_args);
 
             Tensor mean_broadcast = (mean_tensor.shape() == shape_)
@@ -910,7 +962,9 @@ namespace tinytensor {
             auto squared = diff.mul(diff);
 
             // Compute sum of squared differences
-            auto sum_sq = squared.reduce(ReduceOp::Sum, mean_args);
+            ReduceArgs sum_args = args;
+            sum_args.args = std::monostate{};
+            auto sum_sq = squared.reduce(ReduceOp::Sum, sum_args);
 
             // Calculate N (number of elements being reduced)
             std::vector<int> axes = args.axes;
@@ -970,6 +1024,25 @@ namespace tinytensor {
             // Bool reductions return Int64 (PyTorch behavior)
             out_dtype = DataType::Int64;
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (input->device_ == Device::Vulkan) {
+            vulkan::ReduceKind kind;
+            switch (op) {
+            case ReduceOp::Sum: kind = vulkan::ReduceKind::Sum; break;
+            case ReduceOp::Mean: kind = vulkan::ReduceKind::Mean; break;
+            case ReduceOp::Max: kind = vulkan::ReduceKind::Max; break;
+            case ReduceOp::Min: kind = vulkan::ReduceKind::Min; break;
+            case ReduceOp::Prod: kind = vulkan::ReduceKind::Prod; break;
+            case ReduceOp::Any: kind = vulkan::ReduceKind::Any; break;
+            case ReduceOp::All: kind = vulkan::ReduceKind::All; break;
+            case ReduceOp::Argmax: kind = vulkan::ReduceKind::Argmax; break;
+            case ReduceOp::Argmin: kind = vulkan::ReduceKind::Argmin; break;
+            default: throw std::runtime_error("Unsupported Vulkan reduction");
+            }
+            return vulkan::reduce(*input, axes, args.keepdim, kind);
+        }
+#endif
 
         std::optional<CUDAStreamGuard> execution_guard;
         if (input->device_ == Device::CUDA) {
@@ -1470,6 +1543,12 @@ namespace tinytensor {
             return Tensor();
         }
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::where(a_broadcast, b_cast, c_cast);
+        }
+#endif
+
         if (device_ == Device::CUDA && out_dtype == DataType::Float32) {
             auto result = Tensor::empty(shape_abc, device_, out_dtype);
             tensor_ops::launch_where(
@@ -1867,6 +1946,13 @@ namespace tinytensor {
         LOG_DEBUG("  Created new tensor: id={}, data_ptr={}, capacity={}",
                   result.id_, result.data_ptr(), result.capacity());
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (first_device == Device::Vulkan) {
+            vulkan::cat_along(result, tensors, resolved_dim);
+            return result;
+        }
+#endif
+
         size_t element_size = dtype_size(first_dtype);
 
         // ============= OPTIMIZED PATH: First dimension =============
@@ -2070,6 +2156,12 @@ namespace tinytensor {
         if (numel() == 0) {
             return empty(shape_, device_, dtype_);
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            return vulkan::clamp(*this, min_val, max_val);
+        }
+#endif
 
         // FUSED VERSION: Allocate output + clamp in one pass (avoids separate clone)
         auto result = empty(shape_, device_, dtype_);
