@@ -626,21 +626,33 @@ void draw(
             break;
         }
         case Icon::box_select: {
-            const ImVec2 a = point(min, max, 0.22F, 0.62F);
-            const ImVec2 b = point(min, max, 0.58F, 0.78F);
-            const ImVec2 c = point(min, max, 0.82F, 0.58F);
-            const ImVec2 d = point(min, max, 0.46F, 0.42F);
-            const ImVec2 e = point(min, max, 0.22F, 0.38F);
-            const ImVec2 f = point(min, max, 0.58F, 0.22F);
-            const ImVec2 g = point(min, max, 0.82F, 0.38F);
-            draw_list->AddQuad(a, b, c, d, colour, thickness);
-            draw_list->AddQuad(e, a, d, g, colour, thickness);
-            draw_list->AddLine(e, f, colour, thickness);
-            draw_list->AddLine(f, g, colour, thickness);
-            draw_list->AddLine(b, f, colour, thickness);
+            const ImVec2 top = point(min, max, 0.50F, 0.14F);
+            const ImVec2 left = point(min, max, 0.18F, 0.32F);
+            const ImVec2 right = point(min, max, 0.82F, 0.32F);
+            const ImVec2 mid = point(min, max, 0.50F, 0.50F);
+            const ImVec2 low_left = point(min, max, 0.18F, 0.68F);
+            const ImVec2 low_right = point(min, max, 0.82F, 0.68F);
+            const ImVec2 bottom = point(min, max, 0.50F, 0.86F);
+            const auto shade = [&](const unsigned alpha) {
+                return (colour & 0x00FFFFFFu) | (alpha << 24);
+            };
+            const ImVec2 top_face[] = {top, right, mid, left};
+            const ImVec2 left_face[] = {left, mid, bottom, low_left};
+            const ImVec2 right_face[] = {mid, right, low_right, bottom};
+            draw_list->AddConvexPolyFilled(top_face, 4, shade(235));
+            draw_list->AddConvexPolyFilled(left_face, 4, shade(160));
+            draw_list->AddConvexPolyFilled(right_face, 4, shade(95));
+            draw_list->AddPolyline(top_face, 4, colour, ImDrawFlags_Closed, thickness);
+            draw_list->AddLine(left, low_left, colour, thickness);
+            draw_list->AddLine(mid, bottom, colour, thickness);
+            draw_list->AddLine(right, low_right, colour, thickness);
+            draw_list->AddLine(low_left, bottom, colour, thickness);
+            draw_list->AddLine(bottom, low_right, colour, thickness);
             break;
         }
         case Icon::sphere_select: {
+            const ImU32 fill = (colour & 0x00FFFFFFu) | (90u << 24);
+            draw_list->AddCircleFilled(centre, extent * 0.32F, fill, 24);
             draw_list->AddCircle(centre, extent * 0.32F, colour, 24, thickness);
             draw_list->AddEllipse(
                 centre, {extent * 0.32F, extent * 0.13F}, colour, 0.F, 24,

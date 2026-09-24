@@ -1398,11 +1398,20 @@ void SplatEdit::handle_keys(App& app) {
 }
 
 bool SplatEdit::consume_alt_wheel(const bool pointer_in_view) {
-    if (tool_ != Tool::brush || !pointer_in_view) return false;
+    if (!pointer_in_view) return false;
     ImGuiIO& io = ImGui::GetIO();
     if (!io.KeyAlt || io.KeyCtrl || io.MouseWheel == 0.F) return false;
-    brush_radius_ = std::clamp(brush_radius_ + io.MouseWheel * 8.F, 4.F, 180.F);
-    return true;
+    if (tool_ == Tool::brush) {
+        brush_radius_ = std::clamp(brush_radius_ + io.MouseWheel * 8.F, 4.F, 180.F);
+        return true;
+    }
+    if (volume_tool()) {
+        const float factor = io.MouseWheel > 0.F ? 1.08F : 1.F / 1.08F;
+        for (float& side : volume_size_)
+            side = std::max(0.02F, side * factor);
+        return true;
+    }
+    return false;
 }
 
 void SplatEdit::write_status(char* buffer, const std::size_t size) const {
@@ -1436,7 +1445,7 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
                                                       : tr("Move");
         std::snprintf(
             buffer, size, "%s  |  %s  |  %s  |  %s", shape, gesture,
-            tr("Drag a handle or the volume"),
+            tr("Drag the coloured squares or Alt+wheel to resize"),
             tr("Enter selects  |  Shift+Enter adds  |  Alt+Enter removes  |  Ctrl+Enter intersects"));
         return;
     }
@@ -1495,10 +1504,10 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
          "Paint over Gaussians. [ ] or Alt+wheel changes the brush size.",
          "B", 6, false},
         {icons::Icon::box_select, "##splat_box", "Box select",
-         "Place a box in the scene. Drag it, then Enter selects the Gaussians inside.",
+         "Place a box in the scene. Drag the coloured squares, or Alt+wheel, to resize it.",
          "Y", 7, false},
         {icons::Icon::sphere_select, "##splat_sphere", "Sphere select",
-         "Place a sphere in the scene. Drag it, then Enter selects the Gaussians inside.",
+         "Place a sphere in the scene. Drag the coloured squares, or Alt+wheel, to resize it.",
          "U", 8, false},
         {icons::Icon::depth_front, "##splat_front", "Front surface",
          "The next gesture keeps only the nearest Gaussian in each small screen cell.",
@@ -1654,13 +1663,18 @@ void SplatEdit::draw_overlay(
     const bool over_bar = toolbar_visible_ &&
                           mouse.x >= toolbar_min_.x && mouse.x <= toolbar_max_.x &&
                           mouse.y >= toolbar_min_.y && mouse.y <= toolbar_max_.y;
+    const bool over_volume_bar =
+        volume_bar_max_.x > volume_bar_min_.x &&
+        mouse.x >= volume_bar_min_.x && mouse.x <= volume_bar_max_.x &&
+        mouse.y >= volume_bar_min_.y && mouse.y <= volume_bar_max_.y;
     // Left mode rail: pad 10, top 52, 44px wide, through the scene toggle.
     const bool over_rail = mouse.x <= view_min.x + 62.F &&
                            mouse.y >= view_min.y + 48.F &&
                            mouse.y <= view_min.y + 340.F;
     const ImU32 stroke = gesture_stroke();
     const ImU32 fill = gesture_fill();
-    const bool show_cursor = tool_ != Tool::none && in_view && !over_bar && !over_rail;
+    const bool show_cursor = tool_ != Tool::none && !volume_tool() && in_view &&
+                             !over_bar && !over_volume_bar && !over_rail;
     if (show_cursor) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
     if (tool_ == Tool::brush && (show_cursor || stroking_)) {
@@ -2042,7 +2056,8 @@ bool SplatEdit::draw_volume_bar(const ImVec2 view_min, const ImVec2 view_max) {
         {icons::Icon::rotate, "##vol_rotate", "Rotate",
          "Drag a ring to turn the box.", "T", 1, false, false},
         {icons::Icon::scale, "##vol_scale", "Scale",
-         "Drag a face handle. [ ] changes the size.", "S", 2, false, false},
+         "Scale mode. The coloured squares on the volume always resize it, and Alt+wheel does too.",
+         "S", 2, false, false},
         {icons::Icon::select, "##vol_set", "Replace",
          "Select only the Gaussians inside the volume.", "Enter", 3, true, true},
         {icons::Icon::select, "##vol_add", "Add",
@@ -2392,24 +2407,7 @@ void SplatEdit::draw_volume(
                 previous = screen;
             }
         }
-    } else if (volume_gesture_ == VolumeGesture::scale) {
-        for (int index = 0; index < 3; ++index) {
-            float point[3];
-            for (int k = 0; k < 3; ++k)
-                point[k] = volume_center_[k] + axis[index][k] * half[index];
-            ImVec2 screen;
-            float depth = 0.F;
-            if (!project_world(camera, view_min, view_max, point, screen, depth)) continue;
-            const float extent = hot == index ? 7.F : 5.F;
-            draw->AddRectFilled(
-                {screen.x - extent, screen.y - extent},
-                {screen.x + extent, screen.y + extent}, IM_COL32(8, 10, 14, 220), 2.F);
-            draw->AddRect(
-                {screen.x - extent, screen.y - extent},
-                {screen.x + extent, screen.y + extent}, axis_colour[index], 2.F, 0,
-                hot == index ? 2.2F : 1.5F);
-        }
-    } else {
+    } else if (volume_gesture_ != VolumeGesture::scale) {
         const float gap = world_from_screen(camera, view_min, view_max, center_depth, 14.F);
         for (int index = 0; index < 3; ++index) {
             float from[3];
@@ -2431,7 +2429,25 @@ void SplatEdit::draw_volume(
         draw->AddCircleFilled(center_screen, 5.5F, IM_COL32(8, 10, 14, 220));
         draw->AddCircle(center_screen, 5.5F, IM_COL32(236, 242, 248, 230), 16, 1.4F);
     }
-    if (hot >= 0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    for (int index = 0; index < 3; ++index) {
+        float point[3];
+        for (int k = 0; k < 3; ++k)
+            point[k] = volume_center_[k] + axis[index][k] * half[index];
+        ImVec2 screen;
+        float depth = 0.F;
+        if (!project_world(camera, view_min, view_max, point, screen, depth)) continue;
+        const bool active = hot == 10 + index;
+        const float extent = active ? 8.F : 6.F;
+        draw->AddRectFilled(
+            {screen.x - extent, screen.y - extent},
+            {screen.x + extent, screen.y + extent}, axis_colour[index], 2.F);
+        draw->AddRect(
+            {screen.x - extent - 1.5F, screen.y - extent - 1.5F},
+            {screen.x + extent + 1.5F, screen.y + extent + 1.5F},
+            IM_COL32(8, 10, 14, 230), 2.F, 0, 1.6F);
+    }
+    if (hot >= 10) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+    else if (hot >= 0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 }
 
 int SplatEdit::pick_volume(
@@ -2453,14 +2469,25 @@ int SplatEdit::pick_volume(
     float center_depth = 1.F;
     const bool center_ok = project_world(
         camera, view_min, view_max, volume_center_, center_screen, center_depth);
-    float best = 9.F * 9.F;
+    float best = 1.e9F;
     int best_axis = -1;
-    const auto consider = [&](const int index, const float distance) {
-        if (distance < best) {
+    const auto consider = [&](const int index, const float distance, const float limit) {
+        if (distance <= limit * limit && distance < best) {
             best = distance;
             best_axis = index;
         }
     };
+    for (int index = 0; index < 3; ++index) {
+        float point[3];
+        for (int k = 0; k < 3; ++k)
+            point[k] = volume_center_[k] + axis[index][k] * half[index];
+        ImVec2 screen;
+        float depth = 0.F;
+        if (!project_world(camera, view_min, view_max, point, screen, depth)) continue;
+        const float dx = mouse.x - screen.x;
+        const float dy = mouse.y - screen.y;
+        consider(10 + index, dx * dx + dy * dy, 12.F);
+    }
     if (volume_gesture_ == VolumeGesture::rotate && !sphere) {
         const float radius =
             world_from_screen(camera, view_min, view_max, center_depth, 58.F);
@@ -2482,25 +2509,12 @@ int SplatEdit::pick_volume(
                 const bool ok =
                     project_world(camera, view_min, view_max, point, screen, depth);
                 if (have && ok)
-                    consider(index, dist2_segment(mouse, previous, screen));
+                    consider(index, dist2_segment(mouse, previous, screen), 9.F);
                 have = ok;
                 previous = screen;
             }
         }
-    } else if (volume_gesture_ == VolumeGesture::scale) {
-        for (int index = 0; index < 3; ++index) {
-            float point[3];
-            for (int k = 0; k < 3; ++k)
-                point[k] = volume_center_[k] + axis[index][k] * half[index];
-            ImVec2 screen;
-            float depth = 0.F;
-            if (!project_world(camera, view_min, view_max, point, screen, depth))
-                continue;
-            const float dx = mouse.x - screen.x;
-            const float dy = mouse.y - screen.y;
-            consider(index, dx * dx + dy * dy);
-        }
-    } else {
+    } else if (volume_gesture_ != VolumeGesture::scale) {
         const float gap = world_from_screen(camera, view_min, view_max, center_depth, 14.F);
         const float length = world_from_screen(camera, view_min, view_max, center_depth, 70.F);
         for (int index = 0; index < 3; ++index) {
@@ -2517,7 +2531,7 @@ int SplatEdit::pick_volume(
             if (!project_world(camera, view_min, view_max, from, a, depth_a) ||
                 !project_world(camera, view_min, view_max, to, b, depth_b))
                 continue;
-            consider(index, dist2_segment(mouse, a, b));
+            consider(index, dist2_segment(mouse, a, b), 9.F);
         }
         if (center_ok) {
             const float dx = mouse.x - center_screen.x;
@@ -2557,8 +2571,14 @@ void SplatEdit::begin_volume_drag(
         std::copy(std::begin(hit), std::end(hit), volume_drag_vec_);
         return;
     }
-    const float* direction = axis[handle];
-    if (volume_gesture_ == VolumeGesture::rotate) {
+    const bool scaling = handle >= 10;
+    const int axis_index = scaling ? handle - 10 : handle;
+    if (axis_index < 0 || axis_index > 2) {
+        volume_drag_ = -1;
+        return;
+    }
+    const float* direction = axis[axis_index];
+    if (!scaling && volume_gesture_ == VolumeGesture::rotate) {
         if (!ray_plane(ray, volume_drag_center_, direction, hit)) {
             volume_drag_ = -1;
             return;
@@ -2602,8 +2622,11 @@ void SplatEdit::update_volume_drag(
                 volume_drag_center_[k] + hit[k] - volume_drag_vec_[k];
         return;
     }
-    const float* direction = axis[volume_drag_];
-    if (volume_gesture_ == VolumeGesture::rotate) {
+    const bool scaling = volume_drag_ >= 10;
+    const int axis_index = scaling ? volume_drag_ - 10 : volume_drag_;
+    if (axis_index < 0 || axis_index > 2) return;
+    const float* direction = axis[axis_index];
+    if (!scaling && volume_gesture_ == VolumeGesture::rotate) {
         if (!ray_plane(ray, volume_drag_center_, direction, hit)) return;
         const float current[3] = {
             hit[0] - volume_drag_center_[0], hit[1] - volume_drag_center_[1],
@@ -2629,15 +2652,15 @@ void SplatEdit::update_volume_drag(
         hit[0] - volume_drag_center_[0], hit[1] - volume_drag_center_[1],
         hit[2] - volume_drag_center_[2]};
     const float param = dot3(rel, direction);
-    if (volume_gesture_ == VolumeGesture::scale) {
+    if (scaling) {
         const float ratio = std::fabs(volume_drag_param_) > 1e-4F
             ? std::fabs(param / volume_drag_param_)
             : 1.F;
         if (tool_ == Tool::sphere)
             volume_size_[0] = std::max(0.02F, volume_drag_size_[0] * ratio);
         else
-            volume_size_[volume_drag_] =
-                std::max(0.04F, volume_drag_size_[volume_drag_] * ratio);
+            volume_size_[axis_index] =
+                std::max(0.04F, volume_drag_size_[axis_index] * ratio);
         return;
     }
     for (int k = 0; k < 3; ++k)
