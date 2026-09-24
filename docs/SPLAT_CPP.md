@@ -305,12 +305,16 @@ quality thresholds, and resumable warmup/mask/final-training stages.
 
 ## 15. License boundaries
 
-- This repository's own source follows the repository license.
+- Photara is developed by Bingyang Hu. This repository's own source is
+  licensed under Apache-2.0. See [LICENSE](../LICENSE) and [NOTICE](../NOTICE).
+- TinyTensor is derived from LichtFeld Studio and is GPL-3.0-or-later. It is
+  linked when splat training is enabled.
 - SiftGPU has upstream non-commercial restrictions and is optional.
 - Delight/Intrinsic model weights are not distributed here and have a
   separate academic/non-commercial boundary; see
   [LICENSE-Intrinsic.md](LICENSE-Intrinsic.md).
-- CUDA, ONNX Runtime, CGAL, FreeImage, VLFeat, cxxopts, TinyTensor, and
+- CUDA, ONNX Runtime, CGAL, FreeImage, VLFeat, cxxopts, and
   `photara_drender` retain their respective upstream licenses.
+- The full inventory is [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 - Before commercial distribution, review every enabled optional dependency and
   every externally supplied model weight.

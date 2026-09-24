@@ -517,8 +517,9 @@ void draw_about_window(App& app) {
     theme::metric("Version", PHOTARA_VERSION);
     theme::metric("Pipeline", "SfM / MVS / 3DGS / mesh / texture");
     theme::metric("Backends", "CUDA / Vulkan");
-    theme::metric("Developer", "Photara");
-    theme::metric("Copyright", "© 2026 Photara");
+    theme::metric("Developer", "Bingyang Hu");
+    theme::metric("Copyright", "© 2026 Bingyang Hu");
+    theme::metric("License", "Apache-2.0");
     ImGui::Spacing();
     const float button_w = 120.F;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (width - button_w) * 0.5F);

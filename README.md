@@ -76,6 +76,8 @@ geometry code uses Eigen, PoseLib, and Ceres.
 │   ├── sam3/                    Native SAM implementation
 │   └── splat_drender/           Differentiable Gaussian rasterizer
 ├── CMakeLists.txt
+├── LICENSE
+├── NOTICE
 └── VERSION
 ```
 
@@ -380,6 +382,8 @@ lookup rules.
 | [`docs/DENSE_RECONSTRUCTION.md`](docs/DENSE_RECONSTRUCTION.md) | Dense, splat, mesh, and texture design |
 | [`docs/SPLAT_CPP.md`](docs/SPLAT_CPP.md) | CUDA splat trainer and TinyTensor backend |
 | [`docs/FEATURES_BACKENDS.md`](docs/FEATURES_BACKENDS.md) | Extractor/matcher combinations and compatibility |
+| [`LICENSE`](LICENSE) | Apache-2.0 terms for Photara's own source |
+| [`NOTICE`](NOTICE) | Copyright attribution required by Apache-2.0 |
 | [`docs/LICENSE-Intrinsic.md`](docs/LICENSE-Intrinsic.md) | Delight model licensing and placement |
 
 ## Logging and validation
@@ -388,3 +392,14 @@ Set `PHOTARA_LOG_LEVEL` to `error`, `warning`, `info`, `debug`, `trace`, or
 `off`. For development builds, enable `PHOTARA_BUILD_TESTS` and use CTest.
 Benchmark and diagnostic executables are available behind
 `PHOTARA_BUILD_BENCHMARKS` and are intentionally not part of the default build.
+
+## License
+
+Photara's own source in this repository is licensed under the Apache License,
+Version 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+Third-party code, optional backends, and model weights keep their upstream
+terms. SiftGPU has non-commercial restrictions when enabled. Delight/Intrinsic
+weights are documented in
+[`docs/LICENSE-Intrinsic.md`](docs/LICENSE-Intrinsic.md). Review every enabled
+optional dependency before distribution.

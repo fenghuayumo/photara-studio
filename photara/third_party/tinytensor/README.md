@@ -81,4 +81,9 @@ target_link_libraries(your_target PRIVATE tinytensor)
 
 ## License
 
-This code was extracted from another project. Please refer to the original project's license for usage terms.
+TinyTensor was extracted from [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio)
+(`lfs::core`) and is licensed under GPL-3.0-or-later, matching that project.
+`core/vram_profiler.*` still carry the LichtFeld Studio SPDX header.
+
+OffsetAllocator (`internal/offset_allocator.hpp`) is separately licensed MIT,
+copyright Sebastian Aaltonen 2023.

@@ -20,10 +20,10 @@ the C++ ONNX Runtime path in `photara/src/texture/delight.cpp`.
 ## Scope
 
 - This boundary applies only to the Delight weights and inference path. It
-  does not change the license boundaries of SfM, MVS, Splat, or
-  `photara_drender` texture baking.
+  does not change the Apache-2.0 license of Photara's own source, or the
+  license boundaries of SfM, MVS, Splat, or `photara_drender` texture baking.
 - Exported albedo is influenced by these weights only when `--delight` is
   explicitly enabled.
 - Other third-party components, including VLFeat, cxxopts, TinyTensor, and the
-  `photara_drender` submodule, retain their own licenses. See the license
-  section in [SPLAT_CPP.md](SPLAT_CPP.md) and the corresponding source trees.
+  `photara_drender` submodule, retain their own licenses. See
+  [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
