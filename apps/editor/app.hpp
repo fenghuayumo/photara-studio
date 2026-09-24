@@ -66,7 +66,6 @@ struct App {
     ProjectLayout layout;
 
     ProcessJob job;
-    ProcessJob viewer;
     JobKind active_job{JobKind::none};
     RunMonitor monitor;
     LogStream log;
@@ -271,8 +270,6 @@ void poll_alignment_preview(App& app);
 void poll_align_live(App& app);
 void poll_camera_photos(App& app);
 
-void stop_splat_view(App& app);
-void start_splat_view(App& app);
 bool ensure_splat_renderer(App& app);
 void release_splat_preview(App& app);
 void start_align(App& app);

@@ -939,8 +939,6 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         !view_mode_rail_contains(min, ImGui::GetIO().MousePos);
 
     const bool training = app.job.running() && app.active_job == JobKind::train;
-    const bool viewing = app.viewer.running();
-    const bool live = training || viewing;
     const bool has_frame = app.preview.display.descriptor &&
                            gpu::consumed_timeline_value() > 0;
     const unsigned view_count = preview_camera_count(app);
@@ -965,7 +963,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
             camera_label, sizeof(camera_label), "camera %u / %u",
             app.preview_view + 1, view_count);
 
-    const char* controls = live
+    const char* controls = training
         ? "LMB orbit  |  MMB pan  |  RMB + WASD fly  |  drag region gizmo  |  arrows snap capture"
         : (app.has_model
                ? "Select a visualization mode to start the live preview"
@@ -974,12 +972,12 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     if (!has_frame) {
         draw_empty_viewport(
             draw, min, max,
-            live ? "Waiting for the first rendered view..."
-                 : "No live preview",
-            live ? "Orbit the view; the first frame uses this camera"
-                 : (app.has_model
-                        ? "Select Points, Splat, or Rings to render the model"
-                        : "Run Train 3DGS to stream the optimiser output"));
+            training ? "Waiting for the first rendered view..."
+                     : "No live preview",
+            training ? "Orbit the view; the first frame uses this camera"
+                     : (app.has_model
+                            ? "Select Points, Splat, or Rings to render the model"
+                            : "Run Train 3DGS to stream the optimiser output"));
     } else {
         draw->AddImage(
             reinterpret_cast<ImTextureID>(app.preview.display.descriptor),
@@ -1012,9 +1010,9 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     std::uint32_t raster_w = app.preview_raster_width;
     std::uint32_t raster_h = app.preview_raster_height;
     // During optimization, a smaller interactive raster keeps camera motion
-    // responsive without taking too much GPU time away from training. Once
-    // training has handed the model to the standalone viewer, the GPU is free
-    // to render camera motion at the viewport's full resolution.
+    // responsive without taking too much GPU time away from training. After
+    // training the in-process renderer draws camera motion at the viewport's
+    // full resolution.
     const bool use_interactive_downscale =
         training && app.camera.interacting;
     fit_preview_raster(
@@ -1031,15 +1029,15 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         else if (training)
             overlay_label = tr("LIVE TRAINING PREVIEW");
         else
-            overlay_label = viewing ? tr("LIVE SPLAT VIEW") : tr("LAST TRAINING FRAME");
-    } else if (live) {
-        overlay_label = training ? tr("TRAINING") : tr("VIEWING");
+            overlay_label = tr("LAST TRAINING FRAME");
+    } else if (training) {
+        overlay_label = tr("TRAINING");
     }
     draw_viewport_overlay(
         draw, min, overlay_label,
         has_frame
-            ? (live ? theme::success : theme::inactive)
-            : (live ? theme::warning : theme::inactive));
+            ? (training ? theme::success : theme::inactive)
+            : (training ? theme::warning : theme::inactive));
 
     const TrainingStats& stats = app.monitor.training();
     if (has_frame && stats.valid) {
@@ -1445,7 +1443,7 @@ void draw_viewport_panel(App& app) {
     } else if ((app.view_mode == VisualizationMode::splat ||
                 app.view_mode == VisualizationMode::rings) &&
                app.has_model &&
-               !(app.job.running() && app.active_job == JobKind::train)) {
+               !live_preview_active(app)) {
         draw_splat_render_tab(
             app, view_min, view_max, app.view_mode == VisualizationMode::rings);
         draw_view_mode_rail(app, view_min);

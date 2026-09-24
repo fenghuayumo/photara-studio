@@ -144,21 +144,11 @@ int main(const int argc, char** argv) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         app.job.poll();
-        app.viewer.poll();
         app.preview.poll();
         app.log.poll(app.fresh_lines);
         for (const std::string& line : app.fresh_lines)
             app.monitor.consume(line);
         if (app.job.consume_completion()) editor::on_job_finished(app);
-        if (app.viewer.consume_completion()) {
-            const int view_code = app.viewer.exit_code();
-            if (view_code != 0 && view_code != 2)
-                editor::set_message(
-                    app,
-                    "Splat viewer exited with code " +
-                        std::to_string(view_code),
-                    editor::theme::warning);
-        }
         editor::poll_scene_load(app);
         editor::poll_mesh_load(app);
         editor::poll_alignment_preview(app);
@@ -329,7 +319,6 @@ int main(const int argc, char** argv) {
         }
     }
 
-    if (app.viewer.running()) app.viewer.stop();
     if (app.job.running()) app.job.stop();
     editor::cleanup_cache_session(app);
     vkDeviceWaitIdle(editor::gpu::device());

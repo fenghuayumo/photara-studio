@@ -331,7 +331,6 @@ struct ProjectLayout {
     std::filesystem::path train_log;
     std::filesystem::path dense_log;
     std::filesystem::path export_log;
-    std::filesystem::path view_log;
     // Per-process handshake files: orbit camera, visualization options, preview
     // frame index/ack, the alignment live frame and its preview snapshot. They
     // are written every frame (or every 500 ms during Align) and die with the
@@ -449,10 +448,6 @@ std::string build_train_command(
 std::string build_splat_mesh_command(
     const char* cli_path, const ProjectSettings& settings,
     const ProjectLayout& layout, const std::filesystem::path& splat_model);
-
-std::string build_view_command(
-    const char* cli_path, const ProjectSettings& settings,
-    const ProjectLayout& layout, const PreviewHandles& preview);
 
 std::string build_export_sfm_command(
     const char* cli_path, const ProjectSettings& settings,

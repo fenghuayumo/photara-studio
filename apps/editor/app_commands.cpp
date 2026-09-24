@@ -42,11 +42,6 @@
 namespace editor {
 using i18n::tr;
 
-void stop_splat_view(App& app) {
-    if (app.viewer.running()) app.viewer.stop();
-}
-
-
 bool has_external_dataset(const App& app) {
     return app.settings.dataset_source[0] != '\0';
 }
@@ -123,8 +118,7 @@ std::filesystem::path existing_splat_model(const App& app) {
 }
 
 bool live_preview_active(const App& app) {
-    return (app.job.running() && app.active_job == JobKind::train) ||
-           app.viewer.running();
+    return app.job.running() && app.active_job == JobKind::train;
 }
 
 
@@ -761,7 +755,6 @@ bool alignment_job_running(const App& app) {
 
 void new_project(App& app) {
     if (app.job.running() || app.loading_scene) return;
-    stop_splat_view(app);
     clear_loaded_result(app);
     // The cache root and its retention policy are editor-wide settings, not
     // part of the project.
@@ -786,7 +779,6 @@ void new_project(App& app) {
 }
 
 void apply_image_directory_selection(App& app) {
-    stop_splat_view(app);
     clear_loaded_result(app);
     // An image-folder selection starts a different reconstruction. Retaining
     // an explicitly opened project here makes refresh_artifacts() immediately
@@ -915,7 +907,6 @@ void cleanup_cache_session(const App& app) {
 }
 
 void apply_video_selection(App& app) {
-    stop_splat_view(app);
     clear_loaded_result(app);
     app.settings.video_frames_dir.fill('\0');
     app.settings.project_dir.fill('\0');
@@ -1809,7 +1800,6 @@ bool update_gpu_mesh_preview(App& app, const ImVec2 min, const ImVec2 max) {
 
 void show_mesh_view(App& app, const bool frame_when_ready) {
     app.view_mode = VisualizationMode::mesh;
-    stop_splat_view(app);
     if (app.mesh.has()) {
         frame_reconstruction(app);
         return;
@@ -1876,13 +1866,11 @@ void set_visualization_mode(App& app, const VisualizationMode mode) {
     }
     // After training the splat image is drawn in-process. CUDA stays on the
     // training job.
-    stop_splat_view(app);
     if (mode == VisualizationMode::points && !app.scene.has_points())
         ensure_sparse_loaded(app);
     write_preview_vis(app);
 }
 void apply_opened_project(App& app) {
-    stop_splat_view(app);
     clear_loaded_result(app);
     app.project_folder_automatic = false;
     refresh_artifacts(app);
@@ -1969,7 +1957,6 @@ void open_asfm_from_path(App& app, const std::filesystem::path& asfm) {
             app, "Cannot open SfM while a job is running", theme::warning);
         return;
     }
-    stop_splat_view(app);
     clear_loaded_result(app);
 
     const auto sibling = asfm.parent_path() / (asfm.stem().string() + ".ascan");
@@ -2057,7 +2044,6 @@ bool has_reconstruction_result(const App& app) {
 void delete_reconstruction_results(App& app) {
     if (app.job.running() || app.loading_scene || app.layout.root.empty()) return;
 
-    stop_splat_view(app);
     clear_loaded_result(app);
     app.suppress_scene_auto_load = true;
     const std::array<std::filesystem::path, 24> generated_files = {
@@ -2070,7 +2056,7 @@ void delete_reconstruction_results(App& app) {
         textured_mtl_path(app.layout.working_texture),
         textured_albedo_path(app.layout.working_texture),
         app.layout.align_log, app.layout.train_log, app.layout.dense_log,
-        app.layout.texture_log, app.layout.export_log, app.layout.view_log};
+        app.layout.texture_log, app.layout.export_log};
 
     std::uintmax_t removed = 0;
     std::string failure;
@@ -2358,7 +2344,6 @@ void poll_alignment_preview(App& app) {
 void start_align(App& app) {
     if (app.job.running()) return;
     if (!ensure_sam_ready(app)) return;
-    stop_splat_view(app);
     if (has_external_dataset(app)) {
         set_message(
             app,
@@ -2477,7 +2462,7 @@ const char* running_job_caption(const JobKind kind) {
 }
 
 const char* job_state_caption(const App& app) {
-    if (!app.job.running()) return app.viewer.running() ? tr("VIEWING") : tr("READY");
+    if (!app.job.running()) return tr("READY");
     if (app.job.paused()) return tr("PAUSED");
     return running_job_caption(app.active_job);
 }
@@ -2516,7 +2501,6 @@ const char* stop_job_label(const JobKind kind) {
 void start_export_sfm(App& app) {
     if (app.job.running()) return;
     if (!ensure_sam_ready(app)) return;
-    stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -2796,49 +2780,9 @@ void export_alignment(App& app) {
     }
 }
 
-void start_splat_view(App& app) {
-    if (app.job.running() || app.viewer.running() || !app.has_model) return;
-    if (app.settings.images_dir[0] == '\0' ||
-        app.settings.project_dir[0] == '\0')
-        return;
-    refresh_artifacts(app);
-    if (!app.has_model) return;
-    std::error_code error;
-    std::filesystem::create_directories(app.layout.root, error);
-    if (!app.layout.preview_camera_file.empty()) {
-        std::error_code preview_error;
-        std::filesystem::create_directories(
-            app.layout.preview_camera_file.parent_path(), preview_error);
-    }
-    sync_live_preview_camera(
-        app, true, app.preview_raster_width, app.preview_raster_height);
-
-    app.preview.create(k_preview_extent, k_preview_extent);
-    PreviewHandles handles;
-    handles.memory =
-        reinterpret_cast<std::uintptr_t>(app.preview.memory_handle);
-    handles.semaphore =
-        reinterpret_cast<std::uintptr_t>(app.preview.semaphore_handle);
-    handles.allocation_size = app.preview.allocation_size;
-    handles.width = app.preview.width;
-    handles.height = app.preview.height;
-    handles.device_luid = gpu::device_luid();
-    handles.device_node_mask = gpu::device_node_mask();
-    try {
-        app.viewer.start(
-            build_view_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout, handles),
-            app.layout.view_log);
-    } catch (const std::exception& failure) {
-        set_message(app, failure.what(), theme::danger);
-    }
-    app.preview.close_export_handles();
-}
-
 void start_train(App& app, const bool smoke) {
     if (app.job.running()) return;
     if (!smoke && !ensure_sam_ready(app)) return;
-    stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -2946,7 +2890,6 @@ void start_train(App& app, const bool smoke) {
 void start_splat_mesh(App& app) {
     if (app.job.running()) return;
     if (!ensure_sam_ready(app)) return;
-    stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -3006,7 +2949,6 @@ void start_dense(App& app) {
         return;
     }
     if (!ensure_sam_ready(app)) return;
-    stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -3057,7 +2999,6 @@ void start_dense(App& app) {
 void start_texture(App& app) {
     if (app.job.running()) return;
     if (!ensure_sam_ready(app)) return;
-    stop_splat_view(app);
     assign_default_project_folder(app);
     if (app.settings.project_dir[0] == '\0') {
         set_message(app, "Save or choose a project file first", theme::warning);
@@ -3246,7 +3187,8 @@ void on_job_finished(App& app) {
 
 bool ensure_splat_renderer(App& app) {
     if (!app.has_model) return false;
-    if (app.job.running() && app.active_job == JobKind::train) return false;
+    // The CUDA live preview owns the viewport while it streams.
+    if (live_preview_active(app)) return false;
     if (!app.splat_renderer.attached()) {
         app.splat_renderer.attach(splat_render::Device{
             gpu::physical_device(), gpu::device(), gpu::queue(),

@@ -1096,7 +1096,6 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.dense_log = with_suffix("_dense.log");
     layout.texture_log = with_suffix("_texture.log");
     layout.export_log = with_suffix("_export.log");
-    layout.view_log = with_suffix("_view.log");
     // Working copies (sfm.bin, splat.ply, mesh/dense, preview sidecars) sit
     // next to the project by default so a dataset on a data drive cannot fill
     // the system drive with multi-GB caches. A configured cache folder
@@ -1123,8 +1122,8 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.working_dense = runtime_dir / "dense.ply";
     layout.working_texture = runtime_dir / "textured";
     // Handshake files are per process, not per project: the editor, the CLI
-    // child, the trainer and the splat viewer exchange them for one session, and
-    // nothing may read them after that. Keeping them in a session folder lets the
+    // child and the trainer exchange them for one session, and nothing may read
+    // them after that. Keeping them in a session folder lets the
     // cache folder hold products only, and stops their per-frame writes (and
     // always-fresh mtimes) from landing on a slow cache drive or from hiding an
     // otherwise unused cache from maintenance.
@@ -1332,50 +1331,6 @@ std::string build_splat_mesh_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout, splat_model);
-    return command.str();
-}
-
-std::string build_view_command(
-    const char* cli_path, const ProjectSettings& settings,
-    const ProjectLayout& layout, const PreviewHandles& preview) {
-    std::ostringstream command;
-    command << quote(cli_path) << " --images "
-            << quote(settings.images_dir.data()) << " --output "
-            << quote(layout.model_output) << " --splat-view"
-            << " --splat-preview-camera-file "
-            << quote(layout.preview_camera_file)
-            << " --splat-preview-vis-file "
-            << quote(layout.preview_vis_file);
-    std::error_code exists_error;
-    std::filesystem::path view_splat;
-    const std::filesystem::path imported_model =
-        path_from_utf8_field(settings.splat_model_source.data());
-    if (!imported_model.empty() &&
-        std::filesystem::exists(imported_model, exists_error)) {
-        view_splat = imported_model;
-    } else {
-        const std::array<std::filesystem::path, 6> candidates = {
-            layout.working_splat, layout.splat_model, layout.splat_ply,
-            layout.splat_sog, layout.splat_spz, layout.splat_glb};
-        for (const auto& candidate : candidates) {
-            if (!std::filesystem::exists(candidate, exists_error)) continue;
-            view_splat = candidate;
-            break;
-        }
-    }
-    append_gui_flags(command, layout, view_splat);
-    append_video_extract_flags(command, settings);
-    if (preview.memory && preview.semaphore) {
-        command << " --splat-preview-vk-memory-handle " << preview.memory
-                << " --splat-preview-vk-semaphore-handle " << preview.semaphore
-                << " --splat-preview-vk-allocation-size "
-                << preview.allocation_size << " --splat-preview-vk-width "
-                << preview.width << " --splat-preview-vk-height "
-                << preview.height << " --splat-preview-vk-device-luid "
-                << preview.device_luid
-                << " --splat-preview-vk-device-node-mask "
-                << preview.device_node_mask;
-    }
     return command.str();
 }
 
