@@ -658,6 +658,9 @@ void draw_viewport_overlay(
         theme::u32(theme::text_bright), label);
 }
 
+splat_render::Camera gut_camera_for_orbit(
+    const SplatPreviewCamera& preview, const OrbitCamera& orbit);
+
 void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const bool aligning = alignment_job_running(app);
     if (app.view_mode == VisualizationMode::mesh)
@@ -745,14 +748,40 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
-    const bool viewport_input = hovered && !gizmo_captures;
-    const bool frame_key = viewport_input &&
+    const bool ring_edit =
+        app.view_mode == VisualizationMode::rings && ensure_splat_renderer(app) &&
+        app.splat_edit.bound_to(app.splat_renderer.source_key());
+    app.splat_edit.note_view(ring_edit);
+    splat_render::Camera ring_camera{};
+    if (ring_edit) {
+        const auto view_w = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(std::lround(max.x - min.x)));
+        const auto view_h = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(std::lround(max.y - min.y)));
+        ring_camera = gut_camera_for_orbit(
+            make_preview_camera(app.camera, view_w, view_h), app.camera);
+        app.splat_edit.draw_overlay(draw, min, max, ring_camera);
+    }
+    const bool over_toolbar =
+        ring_edit && app.splat_edit.draw_toolbar(app, min, max);
+    const bool viewport_input = hovered && !gizmo_captures && !over_toolbar;
+    if (ring_edit && app.splat_edit.consume_alt_wheel(viewport_input))
+        ImGui::GetIO().MouseWheel = 0.F;
+    const bool armed = ring_edit && app.splat_edit.tool_armed();
+    const bool frame_key = viewport_input && !armed &&
                            !ImGui::GetIO().WantTextInput &&
                            ImGui::IsKeyPressed(ImGuiKey_F);
     if (frame_key) frame_reconstruction(app);
-    if (!handle_viewport_double_click(app, viewport_input, stats, min, max))
+    if (!armed &&
+        !handle_viewport_double_click(app, viewport_input, stats, min, max))
         update_orbit_camera(
             app.camera, viewport_input, reconstruction_local_radius(app));
+    else if (armed)
+        update_orbit_camera(
+            app.camera, viewport_input, reconstruction_local_radius(app), false);
+    if (ring_edit)
+        app.splat_edit.handle_pointer(
+            app, min, max, ring_camera, hovered && !gizmo_captures, over_toolbar);
 
     const char* overlay = app.settings.images_dir[0] != '\0' ? tr("NO ALIGNMENT")
                                                             : tr("NO IMAGES");
@@ -842,9 +871,14 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
             {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_faint), hint);
     }
     const bool align_waiting = aligning && !app.scene.has_points();
+    char ring_hint[384];
+    ring_hint[0] = '\0';
+    if (ring_edit) app.splat_edit.write_status(ring_hint, sizeof(ring_hint));
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
-        align_waiting
+        ring_edit && ring_hint[0] != '\0'
+            ? ring_hint
+            : align_waiting
             ? tr("2 / 3: switch 2D image QA and 3D scene")
             : tr("LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  drag region gizmo  |  double-click focus"));
 
@@ -1216,6 +1250,7 @@ void draw_splat_render_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    app.splat_edit.note_view(false);
     app.splat_edit.draw_overlay(draw, min, max, gut_camera);
     const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max);
     const bool viewport_input = hovered && !gizmo_captures && !over_toolbar;

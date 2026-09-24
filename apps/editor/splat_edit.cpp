@@ -260,6 +260,8 @@ void SplatEdit::clear() {
     key_.clear();
     synced_ = false;
     dirty_ = false;
+    rings_hit_ = false;
+    hit_chosen_ = false;
     count_ = 0;
     selected_count_ = 0;
     sh_degree_ = 0;
@@ -385,6 +387,197 @@ void SplatEdit::end_stroke(App& app) {
     push_undo(std::move(stroke_before_));
 }
 
+void SplatEdit::note_view(const bool rings_view) {
+    if (!hit_chosen_) rings_hit_ = rings_view;
+}
+
+bool SplatEdit::rings_ready() const noexcept {
+    return count_ > 0 &&
+           log_scales_.size() >= static_cast<std::size_t>(count_) * 3U &&
+           quaternions_.size() >= static_cast<std::size_t>(count_) * 4U;
+}
+
+float SplatEdit::ellipse_reach(
+    const splat_render::Camera& camera, const float depth,
+    const std::uint32_t index) const {
+    constexpr float k_scale = 2.5F;
+    constexpr float k_cap = 480.F;
+    if (!rings_ready()) return 0.F;
+    const float* scale = log_scales_.data() + static_cast<std::size_t>(index) * 3U;
+    const float sigma = std::exp(std::min(8.F, std::max(scale[0], std::max(scale[1], scale[2]))));
+    const float focal = std::max(camera.fx, camera.fy);
+    float reach = k_cap;
+    if (camera.model == splat_render::k_camera_orthographic)
+        reach = sigma * focal * k_scale;
+    else if (camera.model != splat_render::k_camera_equirectangular)
+        reach = sigma * focal / std::max(depth, 1e-3F) * k_scale;
+    return std::min(k_cap, std::max(4.F, reach));
+}
+
+bool SplatEdit::project_ellipse(
+    const splat_render::Camera& camera, const std::uint32_t index,
+    ScreenEllipse& ellipse) const {
+    ellipse = {};
+    if (!rings_ready() || index >= count_) return false;
+    const float* center = centers_.data() + static_cast<std::size_t>(index) * 4U;
+    const RayHit origin = project_center(camera, center[0], center[1], center[2]);
+    if (!origin.valid) return false;
+    const float* scale = log_scales_.data() + static_cast<std::size_t>(index) * 3U;
+    const float* rotation = quaternions_.data() + static_cast<std::size_t>(index) * 4U;
+    const float sx = std::exp(std::clamp(scale[0], -12.F, 8.F));
+    const float sy = std::exp(std::clamp(scale[1], -12.F, 8.F));
+    const float sz = std::exp(std::clamp(scale[2], -12.F, 8.F));
+    float qw = rotation[0];
+    float qx = rotation[1];
+    float qy = rotation[2];
+    float qz = rotation[3];
+    const float qn = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+    if (qn < 1e-8F) return false;
+    qw /= qn;
+    qx /= qn;
+    qy /= qn;
+    qz /= qn;
+    const float xx = qx * qx;
+    const float yy = qy * qy;
+    const float zz = qz * qz;
+    const float xy = qx * qy;
+    const float xz = qx * qz;
+    const float yz = qy * qz;
+    const float wx = qw * qx;
+    const float wy = qw * qy;
+    const float wz = qw * qz;
+    const float axis_x[3] = {
+        (1.F - 2.F * (yy + zz)) * sx, (2.F * (xy + wz)) * sx, (2.F * (xz - wy)) * sx};
+    const float axis_y[3] = {
+        (2.F * (xy - wz)) * sy, (1.F - 2.F * (xx + zz)) * sy, (2.F * (yz + wx)) * sy};
+    const float axis_z[3] = {
+        (2.F * (xz + wy)) * sz, (2.F * (yz - wx)) * sz, (1.F - 2.F * (xx + yy)) * sz};
+
+    const float* m = camera.world_to_camera.data();
+    const float cam_x = m[0] * center[0] + m[4] * center[1] + m[8] * center[2] + m[12];
+    const float cam_y = m[1] * center[0] + m[5] * center[1] + m[9] * center[2] + m[13];
+    const float cam_z = m[2] * center[0] + m[6] * center[1] + m[10] * center[2] + m[14];
+    float px[3]{};
+    float py[3]{};
+    const float* axes[3] = {axis_x, axis_y, axis_z};
+    const bool linear = camera.model == splat_render::k_camera_pinhole ||
+                        camera.model == splat_render::k_camera_orthographic;
+    if (linear && cam_z > 1e-4F) {
+        const float inv_z = 1.F / cam_z;
+        const float inv_z2 = inv_z * inv_z;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float ax = m[0] * axes[axis][0] + m[4] * axes[axis][1] + m[8] * axes[axis][2];
+            const float ay = m[1] * axes[axis][0] + m[5] * axes[axis][1] + m[9] * axes[axis][2];
+            const float az = m[2] * axes[axis][0] + m[6] * axes[axis][1] + m[10] * axes[axis][2];
+            if (camera.model == splat_render::k_camera_orthographic) {
+                px[axis] = camera.fx * ax;
+                py[axis] = camera.fy * ay;
+            } else {
+                px[axis] = camera.fx * inv_z * ax - camera.fx * cam_x * inv_z2 * az;
+                py[axis] = camera.fy * inv_z * ay - camera.fy * cam_y * inv_z2 * az;
+            }
+        }
+    } else {
+        const float width = static_cast<float>(std::max(1U, camera.width));
+        for (int axis = 0; axis < 3; ++axis) {
+            const RayHit end = project_center(
+                camera, center[0] + axes[axis][0], center[1] + axes[axis][1],
+                center[2] + axes[axis][2]);
+            if (!end.valid) continue;
+            float du = end.u - origin.u;
+            float dv = end.v - origin.v;
+            if (camera.model == splat_render::k_camera_equirectangular) {
+                if (du > width * 0.5F) du -= width;
+                if (du < -width * 0.5F) du += width;
+            }
+            px[axis] = du;
+            py[axis] = dv;
+        }
+    }
+
+    const float a = px[0] * px[0] + px[1] * px[1] + px[2] * px[2];
+    const float b = px[0] * py[0] + px[1] * py[1] + px[2] * py[2];
+    const float c = py[0] * py[0] + py[1] * py[1] + py[2] * py[2];
+    const float mid = 0.5F * (a + c);
+    const float extent =
+        0.5F * std::sqrt(std::max(0.F, (a - c) * (a - c) + 4.F * b * b));
+    constexpr float k_scale = 2.5F;
+    constexpr float k_cap = 480.F;
+    ellipse.u = origin.u;
+    ellipse.v = origin.v;
+    ellipse.depth = origin.depth;
+    ellipse.rx = std::min(k_cap, std::max(3.F, k_scale * std::sqrt(std::max(0.F, mid + extent))));
+    ellipse.ry = std::min(k_cap, std::max(3.F, k_scale * std::sqrt(std::max(0.F, mid - extent))));
+    ellipse.rotation = 0.5F * std::atan2(2.F * b, a - c);
+    ellipse.valid = true;
+    return true;
+}
+
+bool SplatEdit::ellipse_contains(const ScreenEllipse& ellipse, const float x, const float y) {
+    if (!ellipse.valid || ellipse.rx < 1e-3F || ellipse.ry < 1e-3F) return false;
+    const float dx = x - ellipse.u;
+    const float dy = y - ellipse.v;
+    const float c = std::cos(ellipse.rotation);
+    const float s = std::sin(ellipse.rotation);
+    const float local_x = c * dx + s * dy;
+    const float local_y = -s * dx + c * dy;
+    return (local_x * local_x) / (ellipse.rx * ellipse.rx) +
+               (local_y * local_y) / (ellipse.ry * ellipse.ry) <=
+           1.F;
+}
+
+bool SplatEdit::ellipse_hits(
+    const ScreenEllipse& ellipse, const int mode, const ImVec2 ra, const ImVec2 rb,
+    const std::vector<ImVec2>* polygon, const float radius) const {
+    if (!ellipse.valid) return false;
+    const auto rim = [&](const auto& accept) {
+        const float c = std::cos(ellipse.rotation);
+        const float s = std::sin(ellipse.rotation);
+        for (int step = 0; step < 8; ++step) {
+            const float angle = static_cast<float>(step) * 0.78539816F;
+            const float local_x = ellipse.rx * std::cos(angle);
+            const float local_y = ellipse.ry * std::sin(angle);
+            if (accept(ellipse.u + c * local_x - s * local_y,
+                       ellipse.v + s * local_x + c * local_y))
+                return true;
+        }
+        return false;
+    };
+    if (mode == 0) {
+        const float min_x = std::min(ra.x, rb.x);
+        const float max_x = std::max(ra.x, rb.x);
+        const float min_y = std::min(ra.y, rb.y);
+        const float max_y = std::max(ra.y, rb.y);
+        if (ellipse.u >= min_x && ellipse.u <= max_x && ellipse.v >= min_y &&
+            ellipse.v <= max_y)
+            return true;
+        const float closest_x = std::clamp(ellipse.u, min_x, max_x);
+        const float closest_y = std::clamp(ellipse.v, min_y, max_y);
+        if (ellipse_contains(ellipse, closest_x, closest_y)) return true;
+        return rim([&](const float x, const float y) {
+            return x >= min_x && x <= max_x && y >= min_y && y <= max_y;
+        });
+    }
+    if (mode == 1 || mode == 2) {
+        const float du = ellipse.u - ra.x;
+        const float dv = ellipse.v - ra.y;
+        if (du * du + dv * dv <= radius * radius) return true;
+        if (ellipse_contains(ellipse, ra.x, ra.y)) return true;
+        return rim([&](const float x, const float y) {
+            const float dx = x - ra.x;
+            const float dy = y - ra.y;
+            return dx * dx + dy * dy <= radius * radius;
+        });
+    }
+    if (polygon == nullptr || polygon->size() < 3) return false;
+    if (inside_polygon(*polygon, {ellipse.u, ellipse.v})) return true;
+    for (const ImVec2& point : *polygon)
+        if (ellipse_contains(ellipse, point.x, point.y)) return true;
+    return rim([&](const float x, const float y) {
+        return inside_polygon(*polygon, {x, y});
+    });
+}
+
 void SplatEdit::select_at(
     const splat_render::Camera& camera, const ImVec2 view_min, const ImVec2 view_max,
     const ImVec2 mouse, const bool replace_first) {
@@ -409,7 +602,16 @@ void SplatEdit::select_at(
         const float du = hit.u - raster.x;
         const float dv = hit.v - raster.y;
         const float d2 = du * du + dv * dv;
-        if (d2 > gate) continue;
+        if (rings_hit_ && rings_ready()) {
+            const float reach = ellipse_reach(camera, hit.depth, index);
+            if (d2 > reach * reach) continue;
+            ScreenEllipse ellipse;
+            if (!project_ellipse(camera, index, ellipse) ||
+                !ellipse_contains(ellipse, raster.x, raster.y))
+                continue;
+        } else if (d2 > gate) {
+            continue;
+        }
         const bool closer_front = front_only_ && hit.depth < best_depth;
         const bool closer_cursor = !front_only_ && d2 < best_screen;
         if (best_index < 0 || closer_front || closer_cursor) {
@@ -456,23 +658,51 @@ void SplatEdit::apply_region(
         const RayHit hit = project_center(camera, center[0], center[1], center[2]);
         if (!hit.valid) continue;
         bool inside = false;
-        if (mode == 0) {
-            const float min_x = std::min(ra.x, rb.x);
-            const float max_x = std::max(ra.x, rb.x);
-            const float min_y = std::min(ra.y, rb.y);
-            const float max_y = std::max(ra.y, rb.y);
-            inside = hit.u >= min_x && hit.u <= max_x && hit.v >= min_y && hit.v <= max_y;
+        const float rect_min_x = std::min(ra.x, rb.x);
+        const float rect_max_x = std::max(ra.x, rb.x);
+        const float rect_min_y = std::min(ra.y, rb.y);
+        const float rect_max_y = std::max(ra.y, rb.y);
+        const float circle_radius = mode == 1
+            ? std::sqrt((rb.x - ra.x) * (rb.x - ra.x) + (rb.y - ra.y) * (rb.y - ra.y))
+            : brush_radius_ * raster_scale;
+        if (rings_hit_ && rings_ready()) {
+            float clearance = 0.F;
+            if (mode == 0) {
+                const float dx = hit.u < rect_min_x ? rect_min_x - hit.u
+                    : hit.u > rect_max_x ? hit.u - rect_max_x : 0.F;
+                const float dy = hit.v < rect_min_y ? rect_min_y - hit.v
+                    : hit.v > rect_max_y ? hit.v - rect_max_y : 0.F;
+                clearance = std::sqrt(dx * dx + dy * dy);
+            } else if (mode == 1 || mode == 2) {
+                const ImVec2 origin = mode == 1 ? ra : rb;
+                const float dx = hit.u - origin.x;
+                const float dy = hit.v - origin.y;
+                clearance = std::max(0.F, std::sqrt(dx * dx + dy * dy) - circle_radius);
+            }
+            if (clearance <= ellipse_reach(camera, hit.depth, index)) {
+                ScreenEllipse ellipse;
+                if (project_ellipse(camera, index, ellipse)) {
+                    if (mode == 1)
+                        inside = ellipse_hits(ellipse, 1, ra, rb, nullptr, circle_radius);
+                    else if (mode == 2)
+                        inside = ellipse_hits(ellipse, 1, rb, rb, nullptr, circle_radius);
+                    else
+                        inside = ellipse_hits(
+                            ellipse, mode, ra, rb,
+                            raster_poly.size() >= 3 ? &raster_poly : nullptr, 0.F);
+                }
+            }
+        } else if (mode == 0) {
+            inside = hit.u >= rect_min_x && hit.u <= rect_max_x &&
+                     hit.v >= rect_min_y && hit.v <= rect_max_y;
         } else if (mode == 1) {
-            const float radius = std::sqrt(
-                (rb.x - ra.x) * (rb.x - ra.x) + (rb.y - ra.y) * (rb.y - ra.y));
             const float du = hit.u - ra.x;
             const float dv = hit.v - ra.y;
-            inside = du * du + dv * dv <= radius * radius;
+            inside = du * du + dv * dv <= circle_radius * circle_radius;
         } else if (mode == 2) {
             const float du = hit.u - rb.x;
             const float dv = hit.v - rb.y;
-            const float radius = brush_radius_ * raster_scale;
-            inside = du * du + dv * dv <= radius * radius;
+            inside = du * du + dv * dv <= circle_radius * circle_radius;
         } else if (raster_poly.size() >= 3) {
             inside = inside_polygon(raster_poly, {hit.u, hit.v});
         }
@@ -935,10 +1165,17 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
     if (tool_ == Tool::circle) gesture = tr("Drag a circle");
     else if (tool_ == Tool::polygon) gesture = tr("Click points, Enter closes");
     else if (tool_ == Tool::brush) gesture = tr("Paint across Gaussians");
-    std::snprintf(
-        buffer, size, "%s  |  %s  |  %s",
-        tr(front_only_ ? "Front surface" : "All depths"), gesture,
-        tr("Shift add  |  Alt remove  |  RMB orbit  |  Esc steps back"));
+    if (rings_hit_) {
+        std::snprintf(
+            buffer, size, "%s  |  %s  |  %s  |  %s", tr("By ring"),
+            tr(front_only_ ? "Front surface" : "All depths"), gesture,
+            tr("Shift add  |  Alt remove  |  RMB orbit  |  Esc steps back"));
+    } else {
+        std::snprintf(
+            buffer, size, "%s  |  %s  |  %s",
+            tr(front_only_ ? "Front surface" : "All depths"), gesture,
+            tr("Shift add  |  Alt remove  |  RMB orbit  |  Esc steps back"));
+    }
     if (selected_count_ > 0) {
         const std::string gesture_line(buffer);
         std::snprintf(
@@ -984,6 +1221,12 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
         {icons::Icon::depth_through, "##splat_through", "All depths",
          "The next gesture selects every layer it covers, including Gaussians hidden behind the front one.",
          "N", 21, false},
+        {icons::Icon::points, "##splat_centres", "Select by centre",
+         "A Gaussian counts only when its centre is inside the gesture.",
+         nullptr, 22, true},
+        {icons::Icon::rings, "##splat_rings", "Select by ring",
+         "A Gaussian counts when its ring crosses the gesture. Wide splats are easier to grab, using the same ellipse as Rings view.",
+         nullptr, 23, false},
     };
     constexpr float k_button = 34.F;
     constexpr float k_gap = 4.F;
@@ -1034,6 +1277,8 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
                 ? tool_ == tools[item.action - 3]
             : item.action == 20 ? front_only_
             : item.action == 21 ? !front_only_
+            : item.action == 22 ? !rings_hit_
+            : item.action == 23 ? rings_hit_
                                 : false;
         ImGui::SetCursorScreenPos(min);
         ImGui::PushID(item.id);
@@ -1067,6 +1312,13 @@ bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_
             toggle_tool(app, tools[item.action - 3]);
         else if (item.action == 20) front_only_ = true;
         else if (item.action == 21) front_only_ = false;
+        else if (item.action == 22) {
+            rings_hit_ = false;
+            hit_chosen_ = true;
+        } else if (item.action == 23) {
+            rings_hit_ = true;
+            hit_chosen_ = true;
+        }
     }
     return ImGui::IsMouseHoveringRect(toolbar_min_, toolbar_max_, false);
 }
@@ -1091,6 +1343,18 @@ void SplatEdit::draw_overlay(
             continue;
         draw->AddCircleFilled(screen, 3.1F, IM_COL32(6, 10, 16, 170));
         draw->AddCircleFilled(screen, 1.8F, mark);
+        if (rings_hit_) {
+            ScreenEllipse ellipse;
+            if (project_ellipse(camera, index, ellipse) && ellipse.valid) {
+                const float scale_x = (view_max.x - view_min.x) /
+                                      std::max(1.F, static_cast<float>(camera.width));
+                const float scale_y = (view_max.y - view_min.y) /
+                                      std::max(1.F, static_cast<float>(camera.height));
+                draw->AddEllipse(
+                    screen, {ellipse.rx * scale_x, ellipse.ry * scale_y}, mark,
+                    ellipse.rotation, ellipse.rx > 18.F ? 20 : 12, 1.5F);
+            }
+        }
     }
 
     const ImVec2 mouse = ImGui::GetIO().MousePos;

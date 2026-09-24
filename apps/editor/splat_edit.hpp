@@ -53,6 +53,8 @@ public:
     void clear_selection();
     void invert_selection();
     void delete_selected(App& app);
+    // Rings view selects by the covariance ellipse until the user picks a mode.
+    void note_view(bool rings_view);
     [[nodiscard]] Tool tool() const noexcept { return tool_; }
     // A selection tool is armed. Otherwise the left button orbits.
     [[nodiscard]] bool tool_armed() const noexcept {
@@ -118,6 +120,27 @@ private:
         ImVec2 view_max, ImVec2 mouse);
     void handle_keys(App& app);
 
+    struct ScreenEllipse {
+        float u{};
+        float v{};
+        float rx{};
+        float ry{};
+        float rotation{};
+        float depth{};
+        bool valid{};
+    };
+    [[nodiscard]] bool rings_ready() const noexcept;
+    bool project_ellipse(
+        const splat_render::Camera& camera, std::uint32_t index,
+        ScreenEllipse& ellipse) const;
+    [[nodiscard]] float ellipse_reach(
+        const splat_render::Camera& camera, float depth, std::uint32_t index) const;
+    [[nodiscard]] static bool ellipse_contains(
+        const ScreenEllipse& ellipse, float x, float y);
+    [[nodiscard]] bool ellipse_hits(
+        const ScreenEllipse& ellipse, int mode, ImVec2 ra, ImVec2 rb,
+        const std::vector<ImVec2>* polygon, float radius) const;
+
     std::string key_;
     bool synced_{};
     bool dirty_{};
@@ -136,6 +159,9 @@ private:
     Tool tool_{Tool::none};
     // True: only the front surface in each screen cell. False: every layer.
     bool front_only_{true};
+    // Hit the projected covariance ellipse instead of the centre.
+    bool rings_hit_{};
+    bool hit_chosen_{};
     float brush_radius_{26.F};
     std::vector<ImVec2> polygon_;
     bool stroking_{};
