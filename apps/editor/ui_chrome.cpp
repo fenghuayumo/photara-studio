@@ -269,6 +269,22 @@ Action draw_menu_bar(App& app) {
         if (ImGui::MenuItem(tr("Exit"), "Alt+F4")) app.close_requested = true;
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu(tr("Selection"))) {
+        const bool splats =
+            app.splat_edit.bound_to(app.splat_renderer.source_key()) &&
+            app.splat_edit.gaussian_count() > 0;
+        const bool any_selected = splats && app.splat_edit.selected_count() > 0;
+        if (ImGui::MenuItem(tr("Select All"), "Ctrl+A", false, splats))
+            app.splat_edit.select_all();
+        if (ImGui::MenuItem(tr("Deselect All"), "Ctrl+Shift+A", false, any_selected))
+            app.splat_edit.clear_selection();
+        if (ImGui::MenuItem(tr("Invert Selection"), "Ctrl+I", false, splats))
+            app.splat_edit.invert_selection();
+        ImGui::Separator();
+        if (ImGui::MenuItem(tr("Delete Selected"), "Delete", false, any_selected))
+            app.splat_edit.delete_selected(app);
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu(tr("Reconstruction"))) {
         if (ImGui::MenuItem(
                 app.has_sparse ? tr("Re-align Photos") : tr("Align Photos"), nullptr,

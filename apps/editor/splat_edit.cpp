@@ -5,6 +5,8 @@
 #include "icons.hpp"
 #include "theme.hpp"
 
+#include "splat/types.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -168,6 +170,70 @@ std::uint64_t depth_cell(const float u, const float v) {
     return (static_cast<std::uint64_t>(x) << 32) | y;
 }
 
+void take_strided(
+    std::vector<float>& values, const std::uint32_t stride,
+    const std::vector<std::uint8_t>& drop, const std::uint32_t count,
+    std::vector<float>& removed) {
+    removed.clear();
+    if (values.empty() || stride == 0 || count == 0) return;
+    std::vector<float> kept;
+    kept.reserve(values.size());
+    removed.reserve(static_cast<std::size_t>(count) * stride / 4U);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const float* src =
+            values.data() + static_cast<std::size_t>(index) * stride;
+        if (index < drop.size() && drop[index])
+            removed.insert(removed.end(), src, src + stride);
+        else
+            kept.insert(kept.end(), src, src + stride);
+    }
+    values.swap(kept);
+}
+
+void keep_strided(
+    std::vector<float>& values, const std::uint32_t stride,
+    const std::vector<std::uint8_t>& drop, const std::uint32_t count) {
+    if (values.empty() || stride == 0 || count == 0) return;
+    std::vector<float> kept;
+    kept.reserve(values.size());
+    for (std::uint32_t index = 0; index < count; ++index) {
+        if (index < drop.size() && drop[index]) continue;
+        const float* src =
+            values.data() + static_cast<std::size_t>(index) * stride;
+        kept.insert(kept.end(), src, src + stride);
+    }
+    values.swap(kept);
+}
+
+std::vector<float> splice_strided(
+    const std::vector<float>& kept, const std::uint32_t stride,
+    const std::vector<std::uint32_t>& index, const std::vector<float>& removed) {
+    if (stride == 0 || (kept.empty() && removed.empty())) return {};
+    const std::uint32_t removed_count =
+        static_cast<std::uint32_t>(index.size());
+    const std::uint32_t kept_count =
+        static_cast<std::uint32_t>(kept.size() / stride);
+    const std::uint32_t total = kept_count + removed_count;
+    std::vector<float> out(static_cast<std::size_t>(total) * stride);
+    std::uint32_t kept_index = 0;
+    std::uint32_t removed_index = 0;
+    for (std::uint32_t dst = 0; dst < total; ++dst) {
+        const float* src = nullptr;
+        if (removed_index < removed_count && index[removed_index] == dst) {
+            src = removed.data() + static_cast<std::size_t>(removed_index) * stride;
+            ++removed_index;
+        } else if (kept_index < kept_count) {
+            src = kept.data() + static_cast<std::size_t>(kept_index) * stride;
+            ++kept_index;
+        }
+        if (src == nullptr) continue;
+        std::copy(
+            src, src + stride,
+            out.begin() + static_cast<std::ptrdiff_t>(dst) * stride);
+    }
+    return out;
+}
+
 void keep_front_surface(std::vector<ScreenHit>& hits) {
     if (hits.size() < 2) return;
     std::unordered_map<std::uint64_t, float> nearest;
@@ -192,9 +258,19 @@ void keep_front_surface(std::vector<ScreenHit>& hits) {
 
 void SplatEdit::clear() {
     key_.clear();
+    synced_ = false;
+    dirty_ = false;
     count_ = 0;
     selected_count_ = 0;
+    sh_degree_ = 0;
+    sh_bases_ = 1;
     centers_.clear();
+    log_scales_.clear();
+    quaternions_.clear();
+    opacity_.clear();
+    sh_.clear();
+    normals_.clear();
+    filter_.clear();
     selected_.clear();
     polygon_.clear();
     undo_.clear();
@@ -205,22 +281,42 @@ void SplatEdit::clear() {
     stroke_moved_ = false;
 }
 
-void SplatEdit::sync(
-    const std::string& key, const float* means, const float* opacity_logits,
-    const std::uint32_t count) {
+void SplatEdit::sync(const std::string& key, const Host& host) {
     if (bound_to(key)) return;
     clear();
-    if (count == 0 || means == nullptr || opacity_logits == nullptr) return;
+    if (host.count == 0 || host.means == nullptr || host.log_scales == nullptr ||
+        host.quaternions == nullptr || host.opacity_logits == nullptr)
+        return;
+    const std::uint32_t count = host.count;
+    const std::uint32_t bases = std::max(1U, host.sh_bases);
     key_ = key;
+    synced_ = true;
     count_ = count;
+    sh_degree_ = host.sh == nullptr ? 0U : host.sh_degree;
+    sh_bases_ = host.sh == nullptr ? 1U : bases;
     centers_.resize(static_cast<std::size_t>(count) * 4U);
+    log_scales_.assign(
+        host.log_scales, host.log_scales + static_cast<std::size_t>(count) * 3U);
+    quaternions_.assign(
+        host.quaternions, host.quaternions + static_cast<std::size_t>(count) * 4U);
+    opacity_.assign(host.opacity_logits, host.opacity_logits + count);
+    if (host.sh != nullptr)
+        sh_.assign(
+            host.sh, host.sh + static_cast<std::size_t>(count) * sh_bases_ * 3U);
+    if (host.normals != nullptr)
+        normals_.assign(
+            host.normals, host.normals + static_cast<std::size_t>(count) * 4U);
+    if (host.filter_3d != nullptr)
+        filter_.assign(host.filter_3d, host.filter_3d + count);
     selected_.assign(count, 0);
     for (std::uint32_t index = 0; index < count; ++index) {
-        centers_[static_cast<std::size_t>(index) * 4U] = means[index * 3U];
-        centers_[static_cast<std::size_t>(index) * 4U + 1U] = means[index * 3U + 1U];
-        centers_[static_cast<std::size_t>(index) * 4U + 2U] = means[index * 3U + 2U];
+        centers_[static_cast<std::size_t>(index) * 4U] = host.means[index * 3U];
+        centers_[static_cast<std::size_t>(index) * 4U + 1U] =
+            host.means[index * 3U + 1U];
+        centers_[static_cast<std::size_t>(index) * 4U + 2U] =
+            host.means[index * 3U + 2U];
         centers_[static_cast<std::size_t>(index) * 4U + 3U] =
-            activate_opacity(opacity_logits[index]);
+            activate_opacity(host.opacity_logits[index]);
     }
 }
 
@@ -449,20 +545,199 @@ std::vector<float> SplatEdit::capture_xyz() const {
 
 void SplatEdit::undo(App& app) {
     if (undo_.empty() || stroking_) return;
-    Snapshot current{
-        selected_, undo_.back().xyz.empty() ? std::vector<float>{} : capture_xyz()};
-    restore(app, undo_.back());
-    redo_.push_back(std::move(current));
+    Snapshot step = std::move(undo_.back());
     undo_.pop_back();
+    if (step.kind == Snapshot::Kind::deletion) {
+        reinsert(step);
+        redo_.push_back(std::move(step));
+        upload_model(app);
+        return;
+    }
+    Snapshot current;
+    current.selected = selected_;
+    if (!step.xyz.empty()) current.xyz = capture_xyz();
+    restore(app, step);
+    redo_.push_back(std::move(current));
 }
 
 void SplatEdit::redo(App& app) {
     if (redo_.empty() || stroking_) return;
-    Snapshot current{
-        selected_, redo_.back().xyz.empty() ? std::vector<float>{} : capture_xyz()};
-    restore(app, redo_.back());
-    undo_.push_back(std::move(current));
+    Snapshot step = std::move(redo_.back());
     redo_.pop_back();
+    if (step.kind == Snapshot::Kind::deletion) {
+        erase_recorded(step);
+        undo_.push_back(std::move(step));
+        upload_model(app);
+        dirty_ = true;
+        return;
+    }
+    Snapshot current;
+    current.selected = selected_;
+    if (!step.xyz.empty()) current.xyz = capture_xyz();
+    restore(app, step);
+    undo_.push_back(std::move(current));
+}
+
+void SplatEdit::upload_model(App& app) {
+    std::vector<float> means(static_cast<std::size_t>(count_) * 3U);
+    for (std::uint32_t index = 0; index < count_; ++index) {
+        means[static_cast<std::size_t>(index) * 3U] =
+            centers_[static_cast<std::size_t>(index) * 4U];
+        means[static_cast<std::size_t>(index) * 3U + 1U] =
+            centers_[static_cast<std::size_t>(index) * 4U + 1U];
+        means[static_cast<std::size_t>(index) * 3U + 2U] =
+            centers_[static_cast<std::size_t>(index) * 4U + 2U];
+    }
+    splat_render::GaussianCloud cloud;
+    cloud.count = count_;
+    cloud.sh_degree = sh_.empty() ? 0U : sh_degree_;
+    cloud.sh_bases = sh_.empty() ? 1U : sh_bases_;
+    cloud.means = count_ == 0 ? nullptr : means.data();
+    cloud.log_scales = count_ == 0 ? nullptr : log_scales_.data();
+    cloud.quaternions = count_ == 0 ? nullptr : quaternions_.data();
+    cloud.opacity_logits = count_ == 0 ? nullptr : opacity_.data();
+    cloud.sh = sh_.empty() ? nullptr : sh_.data();
+    if (!app.splat_renderer.upload(cloud, key_)) {
+        if (!app.splat_renderer.failure().empty())
+            set_message(app, app.splat_renderer.failure(), theme::danger);
+    }
+}
+
+void SplatEdit::reinsert(const Snapshot& snapshot) {
+    const std::uint32_t kept = count_;
+    centers_ = splice_strided(centers_, 4, snapshot.removed_index, snapshot.removed_centers);
+    log_scales_ =
+        splice_strided(log_scales_, 3, snapshot.removed_index, snapshot.removed_scales);
+    quaternions_ =
+        splice_strided(quaternions_, 4, snapshot.removed_index, snapshot.removed_quats);
+    opacity_ =
+        splice_strided(opacity_, 1, snapshot.removed_index, snapshot.removed_opacity);
+    if (!sh_.empty() || !snapshot.removed_sh.empty())
+        sh_ = splice_strided(
+            sh_, sh_bases_ * 3U, snapshot.removed_index, snapshot.removed_sh);
+    if (!normals_.empty() || !snapshot.removed_normals.empty())
+        normals_ = splice_strided(
+            normals_, 4, snapshot.removed_index, snapshot.removed_normals);
+    if (!filter_.empty() || !snapshot.removed_filter.empty())
+        filter_ = splice_strided(
+            filter_, 1, snapshot.removed_index, snapshot.removed_filter);
+    count_ = kept + static_cast<std::uint32_t>(snapshot.removed_index.size());
+    if (snapshot.selected.size() == count_) {
+        selected_ = snapshot.selected;
+        recount();
+    } else {
+        selected_.assign(count_, 0);
+        selected_count_ = 0;
+    }
+}
+
+void SplatEdit::erase_recorded(const Snapshot& snapshot) {
+    std::vector<std::uint8_t> drop(count_, 0);
+    std::uint32_t removed = 0;
+    for (const std::uint32_t index : snapshot.removed_index) {
+        if (index >= count_ || drop[index]) continue;
+        drop[index] = 1;
+        ++removed;
+    }
+    keep_strided(centers_, 4, drop, count_);
+    keep_strided(log_scales_, 3, drop, count_);
+    keep_strided(quaternions_, 4, drop, count_);
+    keep_strided(opacity_, 1, drop, count_);
+    keep_strided(sh_, sh_bases_ * 3U, drop, count_);
+    keep_strided(normals_, 4, drop, count_);
+    keep_strided(filter_, 1, drop, count_);
+    count_ = count_ - removed;
+    selected_.assign(count_, 0);
+    selected_count_ = 0;
+}
+
+void SplatEdit::delete_selected(App& app) {
+    if (!synced_ || count_ == 0 || selected_count_ == 0 || stroking_) return;
+    Snapshot step;
+    step.kind = Snapshot::Kind::deletion;
+    step.selected = selected_;
+    const std::uint32_t removed = selected_count_;
+    take_strided(centers_, 4, selected_, count_, step.removed_centers);
+    take_strided(log_scales_, 3, selected_, count_, step.removed_scales);
+    take_strided(quaternions_, 4, selected_, count_, step.removed_quats);
+    take_strided(opacity_, 1, selected_, count_, step.removed_opacity);
+    take_strided(sh_, sh_bases_ * 3U, selected_, count_, step.removed_sh);
+    take_strided(normals_, 4, selected_, count_, step.removed_normals);
+    take_strided(filter_, 1, selected_, count_, step.removed_filter);
+    step.removed_index.reserve(removed);
+    for (std::uint32_t index = 0; index < count_; ++index) {
+        if (selected_[index]) step.removed_index.push_back(index);
+    }
+    count_ -= removed;
+    selected_.assign(count_, 0);
+    selected_count_ = 0;
+    polygon_.clear();
+    try {
+        upload_model(app);
+    } catch (const std::exception& failure) {
+        reinsert(step);
+        try {
+            upload_model(app);
+        } catch (...) {
+        }
+        set_message(app, failure.what(), theme::danger);
+        return;
+    }
+    if (!app.splat_renderer.failure().empty()) {
+        const std::string failure = app.splat_renderer.failure();
+        reinsert(step);
+        try {
+            upload_model(app);
+        } catch (...) {
+        }
+        set_message(app, failure, theme::danger);
+        return;
+    }
+    dirty_ = true;
+    if (app.scene.has_gaussians()) {
+        app.scene.points.clear();
+        app.scene.colours.clear();
+        app.scene.gaussians.clear();
+    }
+    push_undo(std::move(step));
+    set_message(
+        app, std::to_string(removed) + " " + tr("gaussians removed"), theme::success);
+}
+
+bool SplatEdit::copy_model(photara::splat::GaussianModel& model) const {
+    if (!synced_) return false;
+    model = {};
+    model.sh_degree = sh_degree_;
+    const std::size_t count = count_;
+    std::vector<float> means(count * 3U);
+    for (std::uint32_t index = 0; index < count_; ++index) {
+        means[static_cast<std::size_t>(index) * 3U] =
+            centers_[static_cast<std::size_t>(index) * 4U];
+        means[static_cast<std::size_t>(index) * 3U + 1U] =
+            centers_[static_cast<std::size_t>(index) * 4U + 1U];
+        means[static_cast<std::size_t>(index) * 3U + 2U] =
+            centers_[static_cast<std::size_t>(index) * 4U + 2U];
+    }
+    const std::uint32_t bases = std::max(1U, sh_.empty() ? 1U : sh_bases_);
+    std::vector<float> sh = sh_;
+    if (sh.size() < count * bases * 3U) sh.resize(count * bases * 3U, 0.F);
+    model.means = tinytensor::Tensor::from_vector(
+        means, {count, 3}, tinytensor::Device::CPU);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        log_scales_, {count, 3}, tinytensor::Device::CPU);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        quaternions_, {count, 4}, tinytensor::Device::CPU);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        opacity_, {count, 1}, tinytensor::Device::CPU);
+    model.sh = tinytensor::Tensor::from_vector(
+        sh, {count, static_cast<std::size_t>(bases), 3}, tinytensor::Device::CPU);
+    if (normals_.size() == count * 4U)
+        model.normal_features = tinytensor::Tensor::from_vector(
+            normals_, {count, 4}, tinytensor::Device::CPU);
+    if (filter_.size() == count)
+        model.filter_3d = tinytensor::Tensor::from_vector(
+            filter_, {count, 1}, tinytensor::Device::CPU);
+    return true;
 }
 
 void SplatEdit::abort_stroke(App& app) {
@@ -503,16 +778,32 @@ void SplatEdit::toggle_tool(App& app, const Tool tool) {
 
 void SplatEdit::clear_selection() {
     if (selected_count_ == 0 || stroking_) return;
-    push_undo(Snapshot{selected_, {}});
+    Snapshot snap;
+    snap.selected = selected_;
+    push_undo(std::move(snap));
     std::fill(selected_.begin(), selected_.end(), 0);
     selected_count_ = 0;
 }
 
 void SplatEdit::select_all() {
     if (count_ == 0 || stroking_ || selected_count_ == count_) return;
-    push_undo(Snapshot{selected_, {}});
+    Snapshot snap;
+    snap.selected = selected_;
+    push_undo(std::move(snap));
     std::fill(selected_.begin(), selected_.end(), 1);
     selected_count_ = count_;
+}
+
+void SplatEdit::invert_selection() {
+    if (count_ == 0 || stroking_) return;
+    Snapshot snap;
+    snap.selected = selected_;
+    push_undo(std::move(snap));
+    selected_count_ = 0;
+    for (std::uint8_t& bit : selected_) {
+        bit = bit ? 0 : 1;
+        if (bit) ++selected_count_;
+    }
 }
 
 void SplatEdit::finish_gesture(
@@ -582,6 +873,17 @@ void SplatEdit::handle_keys(App& app) {
         else select_all();
         return;
     }
+    if (io.KeyCtrl && !io.KeyAlt && !io.KeyShift && !mouse_busy &&
+        ImGui::IsKeyPressed(ImGuiKey_I, false)) {
+        invert_selection();
+        return;
+    }
+    if (!io.KeyCtrl && !io.KeyAlt && !io.KeyShift && !mouse_busy && !stroking_ &&
+        ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+        polygon_.clear();
+        delete_selected(app);
+        return;
+    }
 
     if (tool_ == Tool::brush && !io.KeyCtrl && !io.KeyAlt && !io.KeyShift) {
         if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, true))
@@ -609,13 +911,22 @@ bool SplatEdit::consume_alt_wheel(const bool pointer_in_view) {
 void SplatEdit::write_status(char* buffer, const std::size_t size) const {
     if (buffer == nullptr || size == 0) return;
     buffer[0] = '\0';
-    if (count_ == 0) return;
+    if (!synced_) return;
+    if (count_ == 0) {
+        std::snprintf(
+            buffer, size, "%s",
+            undo_.empty()
+                ? tr("LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  double-click focus")
+                : tr("Ctrl+Z restores the deleted Gaussians"));
+        return;
+    }
     if (tool_ == Tool::none) {
         const char* orbit = tr(
             "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  double-click focus");
         if (selected_count_ > 0)
             std::snprintf(
-                buffer, size, "%s  |  %s", orbit, tr("Esc clears the selection"));
+                buffer, size, "%s  |  %s  |  %s", orbit,
+                tr("Delete removes the selection"), tr("Esc clears the selection"));
         else
             std::snprintf(buffer, size, "%s", orbit);
         return;
@@ -628,11 +939,17 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
         buffer, size, "%s  |  %s  |  %s",
         tr(front_only_ ? "Front surface" : "All depths"), gesture,
         tr("Shift add  |  Alt remove  |  RMB orbit  |  Esc steps back"));
+    if (selected_count_ > 0) {
+        const std::string gesture_line(buffer);
+        std::snprintf(
+            buffer, size, "%s  |  %s", gesture_line.c_str(),
+            tr("Delete removes the selection"));
+    }
 }
 
 bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_max) {
     toolbar_visible_ = false;
-    if (count_ == 0) return false;
+    if (!synced_) return false;
     struct Item {
         icons::Icon icon;
         const char* id;
@@ -849,7 +1166,7 @@ void SplatEdit::handle_pointer(
     App& app, const ImVec2 view_min, const ImVec2 view_max,
     const splat_render::Camera& camera, const bool viewport_hot,
     const bool over_toolbar) {
-    if (count_ == 0) return;
+    if (!synced_) return;
     const ImGuiIO& io = ImGui::GetIO();
     const bool keys_hot = viewport_hot && !io.WantTextInput;
     const bool hot = keys_hot && !over_toolbar;

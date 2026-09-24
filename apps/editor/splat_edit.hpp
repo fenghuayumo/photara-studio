@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+namespace photara::splat {
+struct GaussianModel;
+}
+
 namespace editor {
 
 struct App;
@@ -18,16 +22,37 @@ class SplatEdit {
 public:
     enum class Tool { none, pick, move, circle, polygon, brush };
 
+    // Host arrays copied at load. Pointers are only read during sync.
+    struct Host {
+        const float* means{};
+        const float* log_scales{};
+        const float* quaternions{};
+        const float* opacity_logits{};
+        const float* sh{};
+        const float* normals{};
+        const float* filter_3d{};
+        std::uint32_t count{};
+        std::uint32_t sh_degree{};
+        std::uint32_t sh_bases{1};
+    };
+
     void clear();
-    void sync(
-        const std::string& key, const float* means, const float* opacity_logits,
-        std::uint32_t count);
+    void sync(const std::string& key, const Host& host);
+    // True after a model is loaded, including after every Gaussian is deleted.
     [[nodiscard]] bool bound_to(const std::string& key) const noexcept {
-        return !key_.empty() && key_ == key && count_ > 0;
+        return synced_ && key_ == key;
     }
+    [[nodiscard]] bool dirty() const noexcept { return dirty_; }
+    // CPU copy of the splats currently in the viewport, including deletions.
+    bool copy_model(photara::splat::GaussianModel& model) const;
     [[nodiscard]] std::uint32_t selected_count() const noexcept {
         return selected_count_;
     }
+    [[nodiscard]] std::uint32_t gaussian_count() const noexcept { return count_; }
+    void select_all();
+    void clear_selection();
+    void invert_selection();
+    void delete_selected(App& app);
     [[nodiscard]] Tool tool() const noexcept { return tool_; }
     // A selection tool is armed. Otherwise the left button orbits.
     [[nodiscard]] bool tool_armed() const noexcept {
@@ -51,8 +76,19 @@ public:
 
 private:
     struct Snapshot {
+        enum class Kind { selection, deletion };
+        Kind kind{Kind::selection};
         std::vector<std::uint8_t> selected;
         std::vector<float> xyz;
+        // Indices into the model from before this deletion, ascending.
+        std::vector<std::uint32_t> removed_index;
+        std::vector<float> removed_centers;
+        std::vector<float> removed_scales;
+        std::vector<float> removed_quats;
+        std::vector<float> removed_opacity;
+        std::vector<float> removed_sh;
+        std::vector<float> removed_normals;
+        std::vector<float> removed_filter;
     };
 
     void push_undo(Snapshot snapshot);
@@ -74,17 +110,28 @@ private:
     void abort_stroke(App& app);
     void set_tool(App& app, Tool tool);
     void toggle_tool(App& app, Tool tool);
-    void clear_selection();
-    void select_all();
+    void upload_model(App& app);
+    void reinsert(const Snapshot& snapshot);
+    void erase_recorded(const Snapshot& snapshot);
     void finish_gesture(
         App& app, const splat_render::Camera& camera, ImVec2 view_min,
         ImVec2 view_max, ImVec2 mouse);
     void handle_keys(App& app);
 
     std::string key_;
+    bool synced_{};
+    bool dirty_{};
     std::uint32_t count_{};
     std::uint32_t selected_count_{};
+    std::uint32_t sh_degree_{};
+    std::uint32_t sh_bases_{1};
     std::vector<float> centers_;
+    std::vector<float> log_scales_;
+    std::vector<float> quaternions_;
+    std::vector<float> opacity_;
+    std::vector<float> sh_;
+    std::vector<float> normals_;
+    std::vector<float> filter_;
     std::vector<std::uint8_t> selected_;
     Tool tool_{Tool::none};
     // True: only the front surface in each screen cell. False: every layer.

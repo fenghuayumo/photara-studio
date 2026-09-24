@@ -651,7 +651,24 @@ bool save_project_to_path(App& app, const std::filesystem::path& path) {
             photara::project::write_sfm(archive, scene, path);
         }
         const auto splat = existing_splat_model(app);
-        if (!splat.empty()) {
+        if (app.splat_edit.dirty()) {
+            photara::splat::GaussianModel edited;
+            if (app.splat_edit.copy_model(edited)) {
+                archive.set_chunk(
+                    photara::project::ChunkType::gaussians,
+                    photara::splat::encode_gaussians(edited));
+                const bool project_owned =
+                    edited.size() > 0 && !splat.empty() &&
+                    (splat == app.layout.working_splat ||
+                     splat == app.layout.splat_ply ||
+                     splat == app.layout.splat_model ||
+                     splat == app.layout.splat_sog ||
+                     splat == app.layout.splat_spz ||
+                     splat == app.layout.splat_glb);
+                if (project_owned)
+                    photara::splat::save_gaussians(edited, splat);
+            }
+        } else if (!splat.empty()) {
             try {
                 archive.set_chunk(
                     photara::project::ChunkType::gaussians,
@@ -1044,9 +1061,31 @@ void request_scene_load(
         [cloud, poses] { return load_sparse_scene(cloud, poses); });
 }
 
+std::filesystem::path write_edited_splat_file(App& app) {
+    if (!app.splat_edit.dirty()) return {};
+    try {
+        photara::splat::GaussianModel model;
+        if (!app.splat_edit.copy_model(model) || model.size() == 0) return {};
+        const std::filesystem::path out = app.layout.root.empty()
+            ? std::filesystem::temp_directory_path() / "photara_edited_gaussians.ply"
+            : app.layout.root / "edited_gaussians.ply";
+        std::error_code error;
+        if (out.has_parent_path())
+            std::filesystem::create_directories(out.parent_path(), error);
+        photara::splat::save_gaussians(
+            model, out, photara::splat::GaussianFormat::ply);
+        return out;
+    } catch (const std::exception& failure) {
+        set_message(app, failure.what(), theme::danger);
+        return {};
+    }
+}
+
 void request_gaussian_scene_load(App& app) {
     if (app.loading_scene) return;
-    const auto model_path = existing_splat_model(app);
+    std::filesystem::path model_path = existing_splat_model(app);
+    if (const auto edited = write_edited_splat_file(app); !edited.empty())
+        model_path = edited;
     const auto ascan = app.layout.project_file;
     const auto poses = app.layout.sparse_poses;
     if (model_path.empty() && ascan.empty()) return;
@@ -1387,20 +1426,24 @@ void export_trained_model(App& app) {
     try {
         const auto source = existing_splat_model(app);
         photara::splat::GaussianModel model;
-        if (!source.empty()) {
-            model = photara::splat::load_gaussians(source);
-        } else {
-            const auto archive =
-                photara::project::Archive::open(app.layout.project_file);
-            model = photara::splat::decode_gaussians(
-                archive.chunk(photara::project::ChunkType::gaussians));
+        const bool from_edit =
+            app.splat_edit.dirty() && app.splat_edit.copy_model(model);
+        if (!from_edit) {
+            if (!source.empty()) {
+                model = photara::splat::load_gaussians(source);
+            } else {
+                const auto archive =
+                    photara::project::Archive::open(app.layout.project_file);
+                model = photara::splat::decode_gaussians(
+                    archive.chunk(photara::project::ChunkType::gaussians));
+            }
         }
         const unsigned export_degree =
             std::min(model.sh_degree,
                      static_cast<unsigned>(app.splat_export.sh_degree));
         const auto dest_ext = lower_path_extension(out);
         const auto source_ext = lower_path_extension(source);
-        if (export_degree >= model.sh_degree && !source.empty() &&
+        if (!from_edit && export_degree >= model.sh_degree && !source.empty() &&
             source_ext == dest_ext && copy_existing_file(source, out)) {
             app.settings.splat_format =
                 splat_settings_format_from_export(app.splat_export.format);
@@ -2917,7 +2960,9 @@ void start_splat_mesh(App& app) {
         return;
     }
     refresh_artifacts(app);
-    const auto model = existing_splat_model(app);
+    auto model = existing_splat_model(app);
+    if (const auto edited = write_edited_splat_file(app); !edited.empty())
+        model = edited;
     if (model.empty()) {
         start_train(app, false);
         return;
@@ -3222,7 +3267,6 @@ bool ensure_splat_renderer(App& app) {
             }
             if (key == app.splat_load_failed_key) return false;
             if (key == app.splat_renderer.source_key() &&
-                app.splat_renderer.splat_count() > 0 &&
                 app.splat_edit.bound_to(key))
                 return app.splat_renderer.supported();
             model = photara::splat::load_gaussians(path);
@@ -3236,7 +3280,6 @@ bool ensure_splat_renderer(App& app) {
             key += std::to_string(archive.writer_version());
             if (key == app.splat_load_failed_key) return false;
             if (key == app.splat_renderer.source_key() &&
-                app.splat_renderer.splat_count() > 0 &&
                 app.splat_edit.bound_to(key))
                 return app.splat_renderer.supported();
             model = photara::splat::decode_gaussians(
@@ -3278,9 +3321,27 @@ bool ensure_splat_renderer(App& app) {
             return false;
         }
         app.splat_load_failed_key.clear();
-        app.splat_edit.sync(
-            key, means.empty() ? nullptr : means.data(),
-            opacity.empty() ? nullptr : opacity.data(), count);
+        SplatEdit::Host host;
+        host.means = means.empty() ? nullptr : means.data();
+        host.log_scales = scales.empty() ? nullptr : scales.data();
+        host.quaternions = quaternions.empty() ? nullptr : quaternions.data();
+        host.opacity_logits = opacity.empty() ? nullptr : opacity.data();
+        host.sh = sh.empty() ? nullptr : sh.data();
+        host.count = count;
+        host.sh_degree = model.sh_degree;
+        host.sh_bases = bases;
+        const auto normals = model.normal_features.is_valid() &&
+                                     model.normal_features.numel() ==
+                                         static_cast<std::size_t>(count) * 4U
+                                 ? model.normal_features.to_vector()
+                                 : std::vector<float>{};
+        const auto filter = model.filter_3d.is_valid() &&
+                                    model.filter_3d.numel() == count
+                                ? model.filter_3d.to_vector()
+                                : std::vector<float>{};
+        host.normals = normals.empty() ? nullptr : normals.data();
+        host.filter_3d = filter.empty() ? nullptr : filter.data();
+        app.splat_edit.sync(key, host);
         return true;
     } catch (const std::exception& failure) {
         app.splat_load_failed_key = key;
