@@ -1194,13 +1194,14 @@ void draw_splat_render_tab(App& app, const ImVec2 min, const ImVec2 max) {
     fit_preview_raster(max.x - min.x, max.y - min.y, false, raster_w, raster_h);
     const SplatPreviewCamera preview =
         make_preview_camera(app.camera, raster_w, raster_h);
+    const splat_render::Camera gut_camera = gut_camera_for_orbit(preview, app.camera);
     ImTextureID texture{};
     const bool shown = draw_gut_image(app, preview, texture, &app.camera);
     if (shown) draw->AddImage(texture, min, max);
     else {
         const std::string& failure = app.splat_renderer.failure();
         draw_empty_viewport(
-            draw, min, max, tr("VULKAN 3DGUT"),
+            draw, min, max, tr("Gaussian Splats"),
             failure.empty() ? tr("Train 3DGS to view the splat") : failure.c_str());
     }
 
@@ -1215,28 +1216,48 @@ void draw_splat_render_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
-    const bool viewport_input = hovered && !gizmo_captures;
-    if (!handle_viewport_double_click(app, viewport_input, stats, min, max))
+    app.splat_edit.draw_overlay(draw, min, max, gut_camera);
+    const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max);
+    const bool viewport_input = hovered && !gizmo_captures && !over_toolbar;
+    if (app.splat_edit.consume_alt_wheel(viewport_input))
+        ImGui::GetIO().MouseWheel = 0.F;
+    const bool armed = app.splat_edit.tool_armed();
+    if (!armed &&
+        !handle_viewport_double_click(app, viewport_input, stats, min, max))
         update_orbit_camera(
             app.camera, viewport_input, reconstruction_local_radius(app));
+    else if (armed)
+        update_orbit_camera(
+            app.camera, viewport_input, reconstruction_local_radius(app), false);
+    if (!armed && viewport_input && !ImGui::GetIO().WantTextInput &&
+        ImGui::IsKeyPressed(ImGuiKey_F, false))
+        frame_reconstruction(app);
+    app.splat_edit.handle_pointer(
+        app, min, max, gut_camera, hovered && !gizmo_captures, over_toolbar);
     if (app.camera.interacting ||
         (viewport_input && ImGui::GetIO().MouseWheel != 0.F))
         app.preview_follow_view = false;
     handle_preview_view_input(app, viewport_input);
 
     draw_viewport_overlay(
-        draw, min, tr("VULKAN 3DGUT"),
+        draw, min, tr("Gaussian Splats"),
         shown ? theme::success : theme::warning);
     char readout[160];
     std::snprintf(
-        readout, sizeof(readout), "%s gaussians  |  %u x %u",
+        readout, sizeof(readout), "%s gaussians  |  %s %s  |  %u x %u",
         format_count(app.splat_renderer.splat_count()).c_str(),
+        format_count(app.splat_edit.selected_count()).c_str(), tr("selected"),
         preview.width, preview.height);
+    char hint[384];
+    app.splat_edit.write_status(hint, sizeof(hint));
+    draw->PushClipRect(min, max, true);
     draw->AddText(
         {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
-        tr("LMB orbit  |  MMB pan  |  RMB + WASD fly  |  arrows snap capture"));
+        hint[0] != '\0' ? hint
+                        : tr("LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  double-click focus"));
+    draw->PopClipRect();
 }
 
 void draw_viewport_panel(App& app) {

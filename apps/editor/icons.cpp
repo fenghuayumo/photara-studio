@@ -513,6 +513,118 @@ void draw(
             draw_list->AddPolyline(hill, 3, colour, 0, thickness);
             break;
         }
+        case Icon::undo:
+        case Icon::redo: {
+            const float sign = icon == Icon::undo ? 1.F : -1.F;
+            const ImVec2 arc = point(min, max, 0.52F, 0.54F);
+            const float radius = extent * 0.26F;
+            const float a0 = icon == Icon::undo ? 0.55F : 2.59F;
+            const float a1 = icon == Icon::undo ? 5.15F : -2.01F;
+            draw_list->PathArcTo(arc, radius, a0, a1, 18);
+            draw_list->PathStroke(colour, 0, thickness);
+            const ImVec2 tip = point(
+                min, max, 0.50F - sign * 0.22F, 0.30F);
+            arrow_head(
+                draw_list, tip,
+                {tip.x + sign * extent * 0.12F, tip.y + extent * 0.02F},
+                {tip.x + sign * 0.02F, tip.y + extent * 0.13F}, colour,
+                thickness);
+            break;
+        }
+        case Icon::target: {
+            draw_list->AddCircle(centre, extent * 0.30F, colour, 28, thickness);
+            draw_list->AddCircle(centre, extent * 0.14F, colour, 20, thickness);
+            draw_list->AddCircleFilled(centre, std::max(1.4F, extent * 0.045F), colour);
+            break;
+        }
+        case Icon::marquee: {
+            const ImVec2 cursor[] = {
+                point(min, max, 0.30F, 0.22F),
+                point(min, max, 0.72F, 0.52F),
+                point(min, max, 0.52F, 0.56F),
+                point(min, max, 0.64F, 0.78F),
+                point(min, max, 0.54F, 0.82F),
+                point(min, max, 0.42F, 0.60F),
+                point(min, max, 0.28F, 0.72F)};
+            draw_list->AddPolyline(cursor, 7, colour, 0, thickness);
+            line(draw_list, min, max, 0.28F, 0.72F, 0.30F, 0.22F, colour, thickness);
+            const auto dash = [&](float x0, float y0, float x1, float y1) {
+                line(draw_list, min, max, x0, y0, x1, y1, colour, thickness * 0.9F);
+            };
+            dash(0.16F, 0.20F, 0.16F, 0.34F);
+            dash(0.16F, 0.20F, 0.30F, 0.20F);
+            dash(0.16F, 0.78F, 0.16F, 0.64F);
+            dash(0.16F, 0.78F, 0.28F, 0.78F);
+            break;
+        }
+        case Icon::circle_select: {
+            const float radius = extent * 0.30F;
+            for (int i = 0; i < 8; ++i) {
+                const float a = static_cast<float>(i) * 0.785398F;
+                draw_list->PathArcTo(centre, radius, a, a + 0.42F, 6);
+                draw_list->PathStroke(colour, 0, thickness);
+            }
+            break;
+        }
+        case Icon::polygon_select: {
+            const ImVec2 verts[] = {
+                point(min, max, 0.24F, 0.72F),
+                point(min, max, 0.46F, 0.26F),
+                point(min, max, 0.78F, 0.62F)};
+            for (int edge = 0; edge < 3; ++edge) {
+                const ImVec2 a = verts[edge];
+                const ImVec2 b = verts[(edge + 1) % 3];
+                for (int dash = 0; dash < 3; ++dash) {
+                    const float t0 = static_cast<float>(dash) / 3.F;
+                    const float t1 = t0 + 0.18F;
+                    draw_list->AddLine(
+                        {a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0},
+                        {a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1},
+                        colour, thickness);
+                }
+            }
+            const float handle = std::max(2.2F, extent * 0.07F);
+            draw_list->AddRectFilled(
+                {verts[1].x - handle, verts[1].y - handle},
+                {verts[1].x + handle, verts[1].y + handle}, colour, 1.F);
+            break;
+        }
+        case Icon::brush: {
+            const ImVec2 back = point(min, max, 0.28F, 0.74F);
+            const ImVec2 neck = point(min, max, 0.58F, 0.36F);
+            draw_list->AddLine(back, neck, colour, thickness * 1.35F);
+            draw_list->AddCircleFilled(back, thickness * 0.85F, colour);
+            const ImVec2 nib[] = {
+                point(min, max, 0.52F, 0.30F),
+                point(min, max, 0.78F, 0.20F),
+                point(min, max, 0.66F, 0.42F)};
+            draw_list->AddConvexPolyFilled(nib, 3, colour);
+            break;
+        }
+        case Icon::depth_front:
+        case Icon::depth_through: {
+            const bool through = icon == Icon::depth_through;
+            const ImU32 back = through ? colour
+                                       : (colour & 0x00FFFFFFu) | (90u << 24);
+            line(draw_list, min, max, 0.18F, 0.34F, 0.82F, 0.34F, colour, thickness);
+            draw_list->AddCircleFilled(
+                point(min, max, 0.50F, 0.34F), extent * 0.09F, colour);
+            if (through) {
+                line(draw_list, min, max, 0.18F, 0.68F, 0.82F, 0.68F, back, thickness);
+                draw_list->AddCircleFilled(
+                    point(min, max, 0.50F, 0.68F), extent * 0.09F, back);
+            } else {
+                for (int i = 0; i < 5; ++i) {
+                    const float x0 = 0.18F + static_cast<float>(i) * 0.14F;
+                    line(draw_list, min, max, x0, 0.68F, x0 + 0.06F, 0.68F, back,
+                         thickness);
+                }
+                draw_list->AddCircle(
+                    point(min, max, 0.50F, 0.68F), extent * 0.075F, back, 16,
+                    thickness);
+            }
+            break;
+        }
     }
 }
 

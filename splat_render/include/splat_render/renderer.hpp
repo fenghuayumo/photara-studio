@@ -75,6 +75,8 @@ public:
     [[nodiscard]] bool attached() const noexcept { return device_ != VK_NULL_HANDLE; }
 
     bool upload(const GaussianCloud& cloud, std::string_view source_key);
+    // Replaces world positions. `centers` is xyzw, and w is the activated opacity.
+    bool update_centers(const float* centers, std::uint32_t count);
     void clear_model();
 
     // Sorts back-to-front and draws. An unchanged camera reuses the last image.

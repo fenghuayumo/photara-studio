@@ -39,6 +39,15 @@ enum class Icon {
     chevron_right,
     frustum,
     photo,
+    undo,
+    redo,
+    target,
+    marquee,
+    circle_select,
+    polygon_select,
+    brush,
+    depth_front,
+    depth_through,
 };
 
 enum class ButtonStyle { normal, primary, danger };

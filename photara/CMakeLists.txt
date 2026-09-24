@@ -679,6 +679,7 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/sam_model.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/sam_model_cache.cpp
                 ${PHOTARA_STUDIO_DIR}/sparse_view.cpp
+                ${PHOTARA_STUDIO_DIR}/splat_edit.cpp
                 ${PHOTARA_STUDIO_DIR}/theme.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_chrome.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_export.cpp

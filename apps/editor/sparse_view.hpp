@@ -268,7 +268,8 @@ void sampled_view_indices(
 // viewport owns input. Holding RMB switches mouse motion to fly-look; Shift
 // accelerates keyboard movement.
 void update_orbit_camera(
-    OrbitCamera& camera, bool accepts_input, float scene_radius);
+    OrbitCamera& camera, bool accepts_input, float scene_radius,
+    bool left_button_orbits = true);
 
 // World point under the cursor for double-click orbit focus. Prefers a
 // reconstructed / Gaussian centre near the mouse; otherwise the current

@@ -629,6 +629,49 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     return true;
 }
 
+bool Renderer::update_centers(const float* centers, const std::uint32_t count) {
+    if (!ready_ || centers == nullptr || count != count_ || count_ == 0) return false;
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(count) * sizeof(float) * 4U;
+    if (!centers_.buffer || centers_.size < bytes) return false;
+    Storage staging{};
+    create_storage(
+        staging, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    void* mapped{};
+    check(vkMapMemory(device_, staging.memory, 0, bytes, 0, &mapped), "vkMapMemory");
+    std::memcpy(mapped, centers, static_cast<std::size_t>(bytes));
+    vkUnmapMemory(device_, staging.memory);
+    wait_gpu();
+    check(vkResetFences(device_, 1, &fence_), "vkResetFences");
+    check(vkResetCommandBuffer(command_, 0), "vkResetCommandBuffer");
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer");
+    VkBufferCopy copy{};
+    copy.size = bytes;
+    vkCmdCopyBuffer(command_, staging.buffer, centers_.buffer, 1, &copy);
+    VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = centers_.buffer;
+    barrier.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(
+        command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 1, &barrier, 0, nullptr);
+    check(vkEndCommandBuffer(command_), "vkEndCommandBuffer");
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command_;
+    check(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit");
+    wait_gpu();
+    destroy_storage(staging);
+    cache_valid_ = false;
+    ++generation_;
+    return true;
+}
+
 bool Renderer::ensure_frames(const std::uint32_t width, const std::uint32_t height) {
     if (frames_[0].color && frames_[0].width == width && frames_[0].height == height)
         return true;

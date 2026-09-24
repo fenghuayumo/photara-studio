@@ -717,6 +717,7 @@ void clear_viewport_scene(App& app) {
     app.mesh_renderer.set_mesh({}, {}, {}, {});
     app.mesh_renderer.set_albedo({});
     app.splat_renderer.clear_model();
+    app.splat_edit.clear();
     app.splat_load_failed_key.clear();
     app.atlas_preview.reset();
     app.atlas_preview_path.clear();
@@ -3221,7 +3222,8 @@ bool ensure_splat_renderer(App& app) {
             }
             if (key == app.splat_load_failed_key) return false;
             if (key == app.splat_renderer.source_key() &&
-                app.splat_renderer.splat_count() > 0)
+                app.splat_renderer.splat_count() > 0 &&
+                app.splat_edit.bound_to(key))
                 return app.splat_renderer.supported();
             model = photara::splat::load_gaussians(path);
         } else if (!app.layout.project_file.empty()) {
@@ -3234,7 +3236,8 @@ bool ensure_splat_renderer(App& app) {
             key += std::to_string(archive.writer_version());
             if (key == app.splat_load_failed_key) return false;
             if (key == app.splat_renderer.source_key() &&
-                app.splat_renderer.splat_count() > 0)
+                app.splat_renderer.splat_count() > 0 &&
+                app.splat_edit.bound_to(key))
                 return app.splat_renderer.supported();
             model = photara::splat::decode_gaussians(
                 archive.chunk(photara::project::ChunkType::gaussians));
@@ -3275,6 +3278,9 @@ bool ensure_splat_renderer(App& app) {
             return false;
         }
         app.splat_load_failed_key.clear();
+        app.splat_edit.sync(
+            key, means.empty() ? nullptr : means.data(),
+            opacity.empty() ? nullptr : opacity.data(), count);
         return true;
     } catch (const std::exception& failure) {
         app.splat_load_failed_key = key;

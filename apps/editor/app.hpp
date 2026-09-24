@@ -8,6 +8,7 @@
 #include "sparse_view.hpp"
 #include "theme.hpp"
 #include "viewport_gizmo.hpp"
+#include "splat_edit.hpp"
 #include "vulkan_backend.hpp"
 #include "splat_render/renderer.hpp"
 
@@ -82,6 +83,7 @@ struct App {
     bool mesh_load_failed{};
     gpu::MeshPreviewRenderer mesh_renderer;
     splat_render::Renderer splat_renderer;
+    SplatEdit splat_edit;
     std::array<VkDescriptorSet, 3> splat_preview_sets{};
     std::array<VkImageView, 3> splat_preview_views{};
     std::uint64_t splat_frames_epoch{};

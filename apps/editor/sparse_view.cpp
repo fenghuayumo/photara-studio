@@ -1968,7 +1968,8 @@ bool pick_orbit_focus_point(
 }
 
 void update_orbit_camera(
-    OrbitCamera& camera, const bool accepts_input, const float scene_radius) {
+    OrbitCamera& camera, const bool accepts_input, const float scene_radius,
+    const bool left_button_orbits) {
     const ImGuiIO& io = ImGui::GetIO();
     if (accepts_input && io.MouseWheel != 0.F) {
         const float zoom = std::exp(-io.MouseWheel * 0.16F);
@@ -1985,9 +1986,10 @@ void update_orbit_camera(
                           ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
                           ImGui::IsMouseDown(ImGuiMouseButton_Middle);
     if (!any_down) camera.interacting = false;
-    if (accepts_input && (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
-                    ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
-                    ImGui::IsMouseClicked(ImGuiMouseButton_Middle)))
+    if (accepts_input &&
+        ((left_button_orbits && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
+         ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+         ImGui::IsMouseClicked(ImGuiMouseButton_Middle)))
         camera.interacting = true;
 
     const float pitch = std::clamp(camera.pitch, -1.53F, 1.53F);
@@ -1999,7 +2001,8 @@ void update_orbit_camera(
     const Vec3 up = cross(right, forward);
 
     if (camera.interacting) {
-        const bool orbiting = ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        const bool orbiting = left_button_orbits &&
+                              ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
                               !io.KeyShift;
         const bool looking = ImGui::IsMouseDown(ImGuiMouseButton_Right);
         const ImVec2 delta = io.MouseDelta;
