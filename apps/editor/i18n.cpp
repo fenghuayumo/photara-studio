@@ -545,7 +545,31 @@ constexpr Entry k_entries[] = {
     {"Max training resolution", "最大训练分辨率", "最大学習解像度", "최대 학습 해상도"},
     {"Live preview cadence", "实时预览间隔", "ライブプレビュー間隔", "실시간 미리보기 주기"},
     {"Coarse-to-fine resolution", "由粗到细分辨率", "粗い解像度から細かく", "거친 해상도에서 세밀하게"},
+    {"Starts training at a lower image resolution and increases it\n"
+     "in stages. This reduces early GPU memory and compute cost.\n"
+     "Turn it off to use the maximum resolution from the start.",
+     "先以较低的图像分辨率开始训练，再分阶段提高分辨率。\n"
+     "这样可降低训练初期的显存占用和计算开销。\n"
+     "关闭后将从一开始就使用最大分辨率。",
+     "低い画像解像度で学習を開始し、段階的に解像度を上げます。\n"
+     "学習初期の GPU メモリ使用量と計算負荷を抑えます。\n"
+     "オフにすると最初から最大解像度を使用します。",
+     "낮은 이미지 해상도로 학습을 시작한 뒤 단계적으로 해상도를 높입니다.\n"
+     "초기 GPU 메모리 사용량과 연산 비용을 줄입니다.\n"
+     "끄면 처음부터 최대 해상도를 사용합니다."},
     {"Foreground mask training", "前景蒙版训练", "前景マスク学習", "전경 마스크 학습"},
+    {"Uses each view's mask or source alpha during 3DGS training.\n"
+     "A mask is required for every training image. Choose below\n"
+     "whether masked pixels are ignored or trained as transparent.",
+     "在 3DGS 训练中使用每个视图的蒙版或源图像 Alpha。\n"
+     "每张训练图像都必须有蒙版。请在下方选择将蒙版像素\n"
+     "忽略，还是将其训练为透明。",
+     "3DGS 学習で各ビューのマスクまたは入力アルファを使用します。\n"
+     "すべての学習画像にマスクが必要です。マスク画素を無視するか、\n"
+     "透明として学習するかを下で選択します。",
+     "3DGS 학습에서 각 뷰의 마스크 또는 원본 알파를 사용합니다.\n"
+     "모든 학습 이미지에 마스크가 필요합니다. 마스크 픽셀을 무시할지,\n"
+     "투명하게 학습할지 아래에서 선택하세요."},
     {"Mask mode", "蒙版模式", "マスクモード", "마스크 모드"},
     {"Ignore masked pixels", "忽略被遮挡像素", "マスク外を無視", "가려진 픽셀 무시"},
     {"Train output alpha", "训练输出透明度", "出力アルファを学習", "출력 알파 학습"},

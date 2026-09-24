@@ -537,7 +537,17 @@ Action draw_inspector(App& app) {
         ImGui::InputInt("##cadence", &app.settings.preview_interval, 10, 50);
         ImGui::Checkbox(
             tr("Coarse-to-fine resolution"), &app.settings.progressive_resolution);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", tr(
+                "Starts training at a lower image resolution and increases it\n"
+                "in stages. This reduces early GPU memory and compute cost.\n"
+                "Turn it off to use the maximum resolution from the start."));
         ImGui::Checkbox(tr("Foreground mask training"), &app.settings.use_mask);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", tr(
+                "Uses each view's mask or source alpha during 3DGS training.\n"
+                "A mask is required for every training image. Choose below\n"
+                "whether masked pixels are ignored or trained as transparent."));
         if (app.settings.use_mask || app.settings.sam_masks) {
             theme::caption(tr("Mask mode"));
             ImGui::SetNextItemWidth(-1.F);
@@ -557,14 +567,14 @@ Action draw_inspector(App& app) {
                     "Valid pixels stay opaque and masked pixels become transparent."));
         }
         ImGui::Checkbox(tr("Normal field"), &app.settings.normal_field);
-        if (ImGui::IsItemHovered())
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", tr(
                 "3DGS's learned normal field.\n"
                 "Off (default) trains the GGGS path."));
         bool ppisp_enabled = app.settings.ppisp_layout != 0;
         if (ImGui::Checkbox(tr("PPISP colour correction"), &ppisp_enabled))
             app.settings.ppisp_layout = ppisp_enabled ? 1 : 0;
-        if (ImGui::IsItemHovered())
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", tr(
                 "Per-view exposure and white-balance correction for video\n"
                 "captures with auto exposure. Trained only; never baked into\n"
@@ -572,7 +582,7 @@ Action draw_inspector(App& app) {
         ImGui::Checkbox(
             tr("Bilateral grid colour correction"),
             &app.settings.bilateral_grid);
-        if (ImGui::IsItemHovered())
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", tr(
                 "Spatially varying affine colour correction (lens shading and\n"
                 "vignetting). Pairs with PPISP, which owns the global exposure."));
