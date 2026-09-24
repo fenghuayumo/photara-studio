@@ -244,7 +244,7 @@ void set_editor_projection(OrbitCamera& camera, EditorProjection projection);
 bool write_preview_camera_file(
     const std::filesystem::path& path, const SplatPreviewCamera& camera,
     std::uint64_t revision, const char* vis_mode = nullptr,
-    float point_size_px = 2.5F, float ring_scale = 2.5F);
+    float point_size_px = 2.5F, float ring_scale = 2.828427F);
 
 // Loads registered cameras from the SfM diagnostics CSV without touching
 // points. Returns false when the file is missing or has no rows.
@@ -288,8 +288,8 @@ struct ViewOptions {
     float point_size = 1.7F;
     int point_budget = 160'000;
     int ring_budget = 8'000;
-    // SuperSplat-style contour: multiples of the projected 2D Gaussian sigma.
-    float ring_scale = 2.5F;
+    // Projected-sigma contour. 2*sqrt(2) is SuperSplat's exp(-4) ellipse edge.
+    float ring_scale = 2.828427F;
     // Depth ramp is an overlay. Vertex RGB from the PLY is the default.
     bool colour_by_depth = false;
     bool show_cloud = true;

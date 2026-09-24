@@ -11,8 +11,8 @@ struct GutFrame {
     vec4 eye;          // xyz = camera position, w = camera model
     vec4 intrinsics;   // fx, fy, cx, cy. Orthographic fx/fy are pixels per world unit.
     vec4 distortion;   // OpenCV fisheye k1..k4
-    vec4 viewport;     // width, height, unused, unused
-    uvec4 meta;        // sh degree, splat count, sh bases, reserved
+    vec4 viewport;     // width, height, ring contour in sigmas (0 = 2*sqrt(2)), unused
+    uvec4 meta;        // sh degree, splat count, sh bases, shading (0 gaussian, 1 rings)
 };
 
 // Inspector combo order: Perspective, Orthographic, Fisheye, Panorama.

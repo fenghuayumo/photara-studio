@@ -54,7 +54,7 @@ public:
     void invert_selection();
     void delete_selected(App& app);
     // Rings view selects by the covariance ellipse until the user picks a mode.
-    void note_view(bool rings_view);
+    void note_view(bool rings_view, float ring_scale = 2.828427F);
     [[nodiscard]] Tool tool() const noexcept { return tool_; }
     // A selection tool is armed. Otherwise the left button orbits.
     [[nodiscard]] bool tool_armed() const noexcept {
@@ -161,6 +161,8 @@ private:
     bool front_only_{true};
     // Hit the projected covariance ellipse instead of the centre.
     bool rings_hit_{};
+    // Contour in projected sigmas. 2*sqrt(2) is SuperSplat's exp(-4) edge.
+    float ring_sigma_{2.828427F};
     bool hit_chosen_{};
     float brush_radius_{26.F};
     std::vector<ImVec2> polygon_;

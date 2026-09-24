@@ -1034,18 +1034,26 @@ Action draw_inspector(App& app) {
             "%d");
         }
         if (app.view_mode == VisualizationMode::rings) {
-            theme::caption("Ring budget");
-            ImGui::SetNextItemWidth(-1.F);
-            ImGui::SliderInt(
-                "##ring_budget", &app.view_options.ring_budget, 1'000, 40'000,
-                "%d");
-            theme::caption("Ring scale");
+            const bool gpu_rings =
+                app.has_model &&
+                !(app.job.running() && app.active_job == JobKind::train);
+            if (!gpu_rings) {
+                theme::caption("Ring budget");
+                ImGui::SetNextItemWidth(-1.F);
+                ImGui::SliderInt(
+                    "##ring_budget", &app.view_options.ring_budget, 1'000, 40'000,
+                    "%d");
+            }
+            theme::caption("Ring radius");
             ImGui::SetNextItemWidth(-1.F);
             if (ImGui::SliderFloat(
                     "##ring_scale", &app.view_options.ring_scale, 1.F, 4.F,
-                    "%.1f σ") &&
+                    "%.2f σ") &&
                 live_preview_active(app))
                 publish_preview_vis(app);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Ellipse size in projected sigmas. 2.83 matches SuperSplat's ring contour.");
         }
         theme::caption("Camera marker size");
         ImGui::SetNextItemWidth(-1.F);

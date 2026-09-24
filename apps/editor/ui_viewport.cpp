@@ -751,7 +751,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
     const bool ring_edit =
         app.view_mode == VisualizationMode::rings && ensure_splat_renderer(app) &&
         app.splat_edit.bound_to(app.splat_renderer.source_key());
-    app.splat_edit.note_view(ring_edit);
+    app.splat_edit.note_view(ring_edit, app.view_options.ring_scale);
     splat_render::Camera ring_camera{};
     if (ring_edit) {
         const auto view_w = std::max<std::uint32_t>(
@@ -1168,14 +1168,18 @@ splat_render::Camera gut_camera_for_orbit(
 
 bool draw_gut_image(
     App& app, const SplatPreviewCamera& preview, ImTextureID& texture,
-    const OrbitCamera* orbit = nullptr) {
+    const OrbitCamera* orbit = nullptr, const bool rings = false) {
     texture = ImTextureID{};
     if (!ensure_splat_renderer(app)) return false;
-    const splat_render::Camera camera = orbit == nullptr
+    splat_render::Camera camera = orbit == nullptr
         ? gut_camera_from(preview)
         : gut_camera_for_orbit(preview, *orbit);
+    if (rings) camera.ring_sigma = app.view_options.ring_scale;
     splat_render::FrameTarget target;
-    if (!app.splat_renderer.draw(camera, target)) return false;
+    if (!app.splat_renderer.draw(
+            camera, target,
+            rings ? splat_render::Shading::rings : splat_render::Shading::gaussian))
+        return false;
     const VkDescriptorSet set = splat_preview_texture(app, target);
     if (!set) return false;
     texture = reinterpret_cast<ImTextureID>(set);
@@ -1209,7 +1213,8 @@ bool qa_preview_camera(const App& app, SplatPreviewCamera& camera) {
     return true;
 }
 
-void draw_splat_render_tab(App& app, const ImVec2 min, const ImVec2 max) {
+void draw_splat_render_tab(
+    App& app, const ImVec2 min, const ImVec2 max, const bool rings) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(min, max, theme::u32(theme::viewport_bg));
     ImGui::SetCursorScreenPos(min);
@@ -1230,12 +1235,12 @@ void draw_splat_render_tab(App& app, const ImVec2 min, const ImVec2 max) {
         make_preview_camera(app.camera, raster_w, raster_h);
     const splat_render::Camera gut_camera = gut_camera_for_orbit(preview, app.camera);
     ImTextureID texture{};
-    const bool shown = draw_gut_image(app, preview, texture, &app.camera);
+    const bool shown = draw_gut_image(app, preview, texture, &app.camera, rings);
     if (shown) draw->AddImage(texture, min, max);
     else {
         const std::string& failure = app.splat_renderer.failure();
         draw_empty_viewport(
-            draw, min, max, tr("Gaussian Splats"),
+            draw, min, max, rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
             failure.empty() ? tr("Train 3DGS to view the splat") : failure.c_str());
     }
 
@@ -1250,7 +1255,7 @@ void draw_splat_render_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
-    app.splat_edit.note_view(false);
+    app.splat_edit.note_view(rings, app.view_options.ring_scale);
     app.splat_edit.draw_overlay(draw, min, max, gut_camera);
     const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max);
     const bool viewport_input = hovered && !gizmo_captures && !over_toolbar;
@@ -1275,7 +1280,7 @@ void draw_splat_render_tab(App& app, const ImVec2 min, const ImVec2 max) {
     handle_preview_view_input(app, viewport_input);
 
     draw_viewport_overlay(
-        draw, min, tr("Gaussian Splats"),
+        draw, min, rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
         shown ? theme::success : theme::warning);
     char readout[160];
     std::snprintf(
@@ -1437,9 +1442,12 @@ void draw_viewport_panel(App& app) {
         draw_sparse_tab(app, view_min, view_max);
         draw_view_mode_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
-    } else if (app.view_mode == VisualizationMode::splat && app.has_model &&
+    } else if ((app.view_mode == VisualizationMode::splat ||
+                app.view_mode == VisualizationMode::rings) &&
+               app.has_model &&
                !(app.job.running() && app.active_job == JobKind::train)) {
-        draw_splat_render_tab(app, view_min, view_max);
+        draw_splat_render_tab(
+            app, view_min, view_max, app.view_mode == VisualizationMode::rings);
         draw_view_mode_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if (live_preview_active(app) && !waiting_for_train_preview(app)) {

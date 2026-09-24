@@ -153,7 +153,9 @@ void Renderer::destroy_device_objects() {
     if (scan_pipeline_) vkDestroyPipeline(device_, scan_pipeline_, nullptr);
     if (scatter_pipeline_) vkDestroyPipeline(device_, scatter_pipeline_, nullptr);
     if (prepare_pipeline_) vkDestroyPipeline(device_, prepare_pipeline_, nullptr);
+    if (ring_prepare_pipeline_) vkDestroyPipeline(device_, ring_prepare_pipeline_, nullptr);
     if (draw_pipeline_) vkDestroyPipeline(device_, draw_pipeline_, nullptr);
+    if (ring_pipeline_) vkDestroyPipeline(device_, ring_pipeline_, nullptr);
     if (render_pass_) vkDestroyRenderPass(device_, render_pass_, nullptr);
     if (pipeline_layout_) vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     if (set_layout_) vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
@@ -165,7 +167,9 @@ void Renderer::destroy_device_objects() {
     scan_pipeline_ = {};
     scatter_pipeline_ = {};
     prepare_pipeline_ = {};
+    ring_prepare_pipeline_ = {};
     draw_pipeline_ = {};
+    ring_pipeline_ = {};
     render_pass_ = {};
     pipeline_layout_ = {};
     set_layout_ = {};
@@ -407,74 +411,85 @@ bool Renderer::ensure_device() {
         gut_spv::gut_scatter_comp, std::size(gut_spv::gut_scatter_comp));
     prepare_pipeline_ = make_compute(
         gut_spv::gut_prepare_comp, std::size(gut_spv::gut_prepare_comp));
+    ring_prepare_pipeline_ = make_compute(
+        gut_spv::ring_prepare_cs_hlsl, std::size(gut_spv::ring_prepare_cs_hlsl));
 
-    const VkShaderModule vert = shader_module(
-        device_, gut_spv::gut_splat_vert, std::size(gut_spv::gut_splat_vert));
-    const VkShaderModule frag = shader_module(
-        device_, gut_spv::gut_splat_frag, std::size(gut_spv::gut_splat_frag));
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vert;
-    stages[0].pName = "main";
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = frag;
-    stages[1].pName = "main";
-    VkPipelineVertexInputStateCreateInfo vertex{
-        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    VkPipelineInputAssemblyStateCreateInfo assembly{
-        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkPipelineViewportStateCreateInfo viewport{
-        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-    viewport.viewportCount = 1;
-    viewport.scissorCount = 1;
-    VkPipelineRasterizationStateCreateInfo raster{
-        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-    raster.polygonMode = VK_POLYGON_MODE_FILL;
-    raster.cullMode = VK_CULL_MODE_NONE;
-    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    raster.lineWidth = 1.F;
-    VkPipelineMultisampleStateCreateInfo multisample{
-        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    VkPipelineColorBlendAttachmentState blend{};
-    blend.blendEnable = VK_TRUE;
-    blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blend.colorBlendOp = VK_BLEND_OP_ADD;
-    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blend.alphaBlendOp = VK_BLEND_OP_ADD;
-    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    VkPipelineColorBlendStateCreateInfo blending{
-        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    blending.attachmentCount = 1;
-    blending.pAttachments = &blend;
-    const VkDynamicState dynamic_states[] = {
-        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynamic{
-        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dynamic.dynamicStateCount = 2;
-    dynamic.pDynamicStates = dynamic_states;
-    VkGraphicsPipelineCreateInfo graphics{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    graphics.stageCount = 2;
-    graphics.pStages = stages;
-    graphics.pVertexInputState = &vertex;
-    graphics.pInputAssemblyState = &assembly;
-    graphics.pViewportState = &viewport;
-    graphics.pRasterizationState = &raster;
-    graphics.pMultisampleState = &multisample;
-    graphics.pColorBlendState = &blending;
-    graphics.pDynamicState = &dynamic;
-    graphics.layout = pipeline_layout_;
-    graphics.renderPass = render_pass_;
-    check(vkCreateGraphicsPipelines(device_, {}, 1, &graphics, nullptr, &draw_pipeline_),
-          "vkCreateGraphicsPipelines");
-    vkDestroyShaderModule(device_, vert, nullptr);
-    vkDestroyShaderModule(device_, frag, nullptr);
+    const auto make_graphics = [&](const std::uint32_t* vert_words, std::size_t vert_count,
+                                   const std::uint32_t* frag_words, std::size_t frag_count) {
+        const VkShaderModule vert = shader_module(device_, vert_words, vert_count);
+        const VkShaderModule frag = shader_module(device_, frag_words, frag_count);
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vert;
+        stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = frag;
+        stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vertex{
+            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo assembly{
+            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo viewport{
+            VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        viewport.viewportCount = 1;
+        viewport.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo raster{
+            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode = VK_CULL_MODE_NONE;
+        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        raster.lineWidth = 1.F;
+        VkPipelineMultisampleStateCreateInfo multisample{
+            VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState blend{};
+        blend.blendEnable = VK_TRUE;
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.colorBlendOp = VK_BLEND_OP_ADD;
+        blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.alphaBlendOp = VK_BLEND_OP_ADD;
+        blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo blending{
+            VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        blending.attachmentCount = 1;
+        blending.pAttachments = &blend;
+        const VkDynamicState dynamic_states[] = {
+            VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamic{
+            VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dynamic.dynamicStateCount = 2;
+        dynamic.pDynamicStates = dynamic_states;
+        VkGraphicsPipelineCreateInfo graphics{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        graphics.stageCount = 2;
+        graphics.pStages = stages;
+        graphics.pVertexInputState = &vertex;
+        graphics.pInputAssemblyState = &assembly;
+        graphics.pViewportState = &viewport;
+        graphics.pRasterizationState = &raster;
+        graphics.pMultisampleState = &multisample;
+        graphics.pColorBlendState = &blending;
+        graphics.pDynamicState = &dynamic;
+        graphics.layout = pipeline_layout_;
+        graphics.renderPass = render_pass_;
+        VkPipeline pipeline{};
+        check(vkCreateGraphicsPipelines(device_, {}, 1, &graphics, nullptr, &pipeline),
+              "vkCreateGraphicsPipelines");
+        vkDestroyShaderModule(device_, vert, nullptr);
+        vkDestroyShaderModule(device_, frag, nullptr);
+        return pipeline;
+    };
+    draw_pipeline_ = make_graphics(
+        gut_spv::gut_splat_vert, std::size(gut_spv::gut_splat_vert),
+        gut_spv::gut_splat_frag, std::size(gut_spv::gut_splat_frag));
+    ring_pipeline_ = make_graphics(
+        gut_spv::ring_draw_vs_hlsl, std::size(gut_spv::ring_draw_vs_hlsl),
+        gut_spv::ring_draw_ps_hlsl, std::size(gut_spv::ring_draw_ps_hlsl));
 
     VkCommandPoolCreateInfo command_pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     command_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -727,7 +742,7 @@ bool Renderer::ensure_frames(const std::uint32_t width, const std::uint32_t heig
     return true;
 }
 
-bool Renderer::draw(const Camera& camera, FrameTarget& target) {
+bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading shading) {
     target = {};
     if (!ensure_device()) return false;
     static_assert(sizeof(FrameData) == 144);
@@ -750,9 +765,13 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target) {
     frame.distortion[3] = camera.k4;
     frame.viewport[0] = static_cast<float>(width);
     frame.viewport[1] = static_cast<float>(height);
+    frame.viewport[2] = shading == Shading::rings
+        ? (camera.ring_sigma > 0.F ? camera.ring_sigma : 2.828427F)
+        : 0.F;
     frame.sh_degree = sh_degree_;
     frame.count = count_;
     frame.bases = sh_bases_;
+    frame.reserved = static_cast<std::uint32_t>(shading);
     if (cache_valid_ && display_ >= 0 && cached_generation_ == generation_ &&
         frames_[display_].width == width && frames_[display_].height == height &&
         std::memcmp(&cached_, &frame, sizeof(frame)) == 0) {
@@ -803,7 +822,9 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target) {
         }
         push.shift = 0;
         push.parity = 0;
-        dispatch(prepare_pipeline_, push, groups);
+        dispatch(
+            shading == Shading::rings ? ring_prepare_pipeline_ : prepare_pipeline_,
+            push, groups);
         memory_barrier(
             command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
@@ -811,7 +832,9 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target) {
 
     Frame& image = frames_[write_];
     VkClearValue clear{};
-    clear.color = {{0.F, 0.F, 0.F, 1.F}};
+    clear.color = shading == Shading::rings
+        ? VkClearColorValue{{9.F / 255.F, 11.F / 255.F, 16.F / 255.F, 1.F}}
+        : VkClearColorValue{{0.F, 0.F, 0.F, 1.F}};
     VkRenderPassBeginInfo render{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     render.renderPass = render_pass_;
     render.framebuffer = image.framebuffer;
@@ -828,7 +851,9 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target) {
     vkCmdSetViewport(command_, 0, 1, &viewport);
     vkCmdSetScissor(command_, 0, 1, &scissor);
     if (count_ > 0) {
-        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, draw_pipeline_);
+        vkCmdBindPipeline(
+            command_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            shading == Shading::rings ? ring_pipeline_ : draw_pipeline_);
         vkCmdBindDescriptorSets(
             command_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 1, &set_,
             0, nullptr);

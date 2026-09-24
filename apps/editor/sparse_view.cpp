@@ -580,18 +580,28 @@ bool project_gaussian_ring(
     const float a = p0.x * p0.x + p1.x * p1.x + p2.x * p2.x;
     const float b = p0.x * p0.y + p1.x * p1.y + p2.x * p2.y;
     const float c = p0.y * p0.y + p1.y * p1.y + p2.y * p2.y;
-    const float mid = 0.5F * (a + c);
-    const float ext = 0.5F * std::sqrt(std::max(0.F, (a - c) * (a - c) + 4.F * b * b));
+    const float a_d = a + 0.3F;
+    const float c_d = c + 0.3F;
+    const float mid = 0.5F * (a_d + c_d);
+    const float ext =
+        0.5F * std::sqrt(std::max(0.F, (a_d - c_d) * (a_d - c_d) + 4.F * b * b));
     const float lambda0 = std::max(0.F, mid + ext);
-    const float lambda1 = std::max(0.F, mid - ext);
+    const float lambda1 = std::max(0.1F, mid - ext);
+    float rx = ring_scale * std::sqrt(lambda0);
+    float ry = ring_scale * std::sqrt(lambda1);
+    const float cap = std::min(1024.F, std::min(frame.width, frame.height));
+    const float major = std::max(rx, ry);
+    if (major > cap && major > 1e-4F) {
+        const float fit = cap / major;
+        rx *= fit;
+        ry *= fit;
+    }
     ring.centre = {
         frame.centre.x + cam_x * frame.focal * inv_z,
         frame.centre.y - cam_y * frame.focal * inv_z};
-    ring.radius = {
-        std::min(80.F, ring_scale * std::sqrt(lambda0)),
-        std::min(80.F, ring_scale * std::sqrt(lambda1))};
+    ring.radius = {rx, ry};
     ring.rotation = 0.5F * std::atan2(2.F * b, a - c);
-    return ring.radius.x >= 0.75F || ring.radius.y >= 0.75F;
+    return major >= 0.75F;
 }
 
 std::size_t draw_gaussian_rings(
@@ -616,12 +626,19 @@ std::size_t draw_gaussian_rings(
             ring.centre.y + ring.radius.y < min.y ||
             ring.centre.y - ring.radius.y > max.y)
             continue;
+        const ImU32 fill = source_colours
+            ? (scene.colours[i] & 0x00FFFFFF) | IM_COL32(0, 0, 0, 40)
+            : theme::u32(theme::accent, 0.16F);
         const ImU32 colour = source_colours
-            ? (scene.colours[i] & 0x00FFFFFF) | IM_COL32(0, 0, 0, 200)
+            ? (scene.colours[i] & 0x00FFFFFF) | IM_COL32(0, 0, 0, 170)
             : theme::u32(theme::accent, 0.72F);
-        const int segments = ring.radius.x > 18.F ? 18 : 12;
+        const float radius = std::max(ring.radius.x, ring.radius.y);
+        const int segments = std::clamp(static_cast<int>(radius * 0.65F), 24, 72);
+        const float thickness = std::clamp(radius * 0.045F, 1.25F, 3.5F);
+        draw->AddEllipseFilled(
+            ring.centre, ring.radius, fill, ring.rotation, segments);
         draw->AddEllipse(
-            ring.centre, ring.radius, colour, ring.rotation, segments, 1.15F);
+            ring.centre, ring.radius, colour, ring.rotation, segments, thickness);
         ++drawn;
     }
     return drawn;

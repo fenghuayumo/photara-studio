@@ -211,9 +211,19 @@ __global__ void visualize_points_kernel(
     }
 }
 
+__device__ float ring_shade(const float r2, const float opacity) {
+    if (r2 > 1.F) return 0.F;
+    constexpr float k_exp4 = 0.01831563889F;
+    float shade = fmaxf(
+        0.05F, (expf(-4.F * r2) - k_exp4) / (1.F - k_exp4) * opacity);
+    if (r2 >= 0.96F) shade = 0.6F;
+    return shade;
+}
+
 __global__ void visualize_rings_kernel(
     const float* means, const float* scales, const float* quaternions,
-    const float* sh, const float* w2c, float* color, float* alpha,
+    const float* opacities, const float* sh, const float* w2c, float* color,
+    float* alpha,
     const int count, const int width, const int height, const int bases,
     const int sh_degree, const float fx, const float fy, const float cx,
     const float cy, const int model, const float k1, const float k2,
@@ -221,6 +231,8 @@ __global__ void visualize_rings_kernel(
     const float camz, const float scale_modifier, const float ring_scale) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
+    const float opacity = opacities[index];
+    if (opacity <= 1.F / 255.F) return;
     const float mx = means[3 * index];
     const float my = means[3 * index + 1];
     const float mz = means[3 * index + 2];
@@ -254,14 +266,24 @@ __global__ void visualize_rings_kernel(
     const float p1y = jy_y * cay[1] + jy_z * cay[2];
     const float p2x = jx_x * caz[0] + jx_z * caz[2];
     const float p2y = jy_y * caz[1] + jy_z * caz[2];
-    const float a = p0x * p0x + p1x * p1x + p2x * p2x;
-    const float b = p0x * p0y + p1x * p1y + p2x * p2y;
-    const float c = p0y * p0y + p1y * p1y + p2y * p2y;
+    float a = p0x * p0x + p1x * p1x + p2x * p2x + 0.3F;
+    float b = p0x * p0y + p1x * p1y + p2x * p2y;
+    float c = p0y * p0y + p1y * p1y + p2y * p2y + 0.3F;
     const float mid = 0.5F * (a + c);
     const float ext =
         0.5F * sqrtf(fmaxf(0.F, (a - c) * (a - c) + 4.F * b * b));
-    const float rx = fminf(80.F, ring_scale * sqrtf(fmaxf(0.F, mid + ext)));
-    const float ry = fminf(80.F, ring_scale * sqrtf(fmaxf(0.F, mid - ext)));
+    const float lambda1 = fmaxf(0.F, mid + ext);
+    const float lambda2 = fmaxf(0.1F, mid - ext);
+    float rx = ring_scale * sqrtf(lambda1);
+    float ry = ring_scale * sqrtf(lambda2);
+    const float cap = fminf(
+        1024.F, fminf(static_cast<float>(width), static_cast<float>(height)));
+    const float major = fmaxf(rx, ry);
+    if (major > cap) {
+        const float fit = cap / major;
+        rx *= fit;
+        ry *= fit;
+    }
     if (rx < 0.75F && ry < 0.75F) return;
     const float rotation = 0.5F * atan2f(2.F * b, a - c);
     const float cos_r = cosf(rotation);
@@ -272,12 +294,41 @@ __global__ void visualize_rings_kernel(
         sh, index, bases, sh_degree, mx, my, mz, camx, camy, camz, red,
         green, blue);
 
+    // Small footprints fill like SuperSplat. Larger ones keep a solid rim so
+    // the preview does not rasterize every pixel of a screen-sized ellipse.
+    if (fmaxf(rx, ry) <= 12.F) {
+        const int x0 = max(0, static_cast<int>(floorf(u - rx - 1.F)));
+        const int x1 = min(width - 1, static_cast<int>(ceilf(u + rx + 1.F)));
+        const int y0 = max(0, static_cast<int>(floorf(v - ry - 1.F)));
+        const int y1 = min(height - 1, static_cast<int>(ceilf(v + ry + 1.F)));
+        const float inv_rx = 1.F / fmaxf(rx, 0.25F);
+        const float inv_ry = 1.F / fmaxf(ry, 0.25F);
+        for (int iy = y0; iy <= y1; ++iy) {
+            for (int ix = x0; ix <= x1; ++ix) {
+                const float dx = static_cast<float>(ix) + 0.5F - u;
+                const float dy = static_cast<float>(iy) + 0.5F - v;
+                const float lx = cos_r * dx + sin_r * dy;
+                const float ly = -sin_r * dx + cos_r * dy;
+                const float r2 = lx * lx * inv_rx * inv_rx + ly * ly * inv_ry * inv_ry;
+                const float shade = ring_shade(r2, opacity);
+                if (shade <= 0.F) continue;
+                blend_pixel(
+                    color, alpha, iy * width + ix, pixels, red, green, blue,
+                    shade);
+            }
+        }
+        return;
+    }
+
+    const float circumference = 6.2831853F * 0.5F * (rx + ry);
+    const int segments = min(
+        96, max(k_ring_segments, static_cast<int>(ceilf(circumference / 3.F))));
     float prev_x = 0.F;
     float prev_y = 0.F;
-    for (int segment = 0; segment <= k_ring_segments; ++segment) {
+    for (int segment = 0; segment <= segments; ++segment) {
         const float theta =
-            6.28318530718F * static_cast<float>(segment) /
-            static_cast<float>(k_ring_segments);
+            6.2831853F * static_cast<float>(segment) /
+            static_cast<float>(segments);
         const float local_x = rx * cosf(theta);
         const float local_y = ry * sinf(theta);
         const float px = u + local_x * cos_r - local_y * sin_r;
@@ -285,19 +336,22 @@ __global__ void visualize_rings_kernel(
         if (segment > 0) {
             const float dx = px - prev_x;
             const float dy = py - prev_y;
-            const int steps = max(
-                1, static_cast<int>(ceilf(sqrtf(dx * dx + dy * dy))));
+            const float len = sqrtf(dx * dx + dy * dy);
+            const float nx = len > 1e-4F ? -dy / len : 0.F;
+            const float ny = len > 1e-4F ? dx / len : 0.F;
+            const int steps = max(1, static_cast<int>(ceilf(len)));
             for (int step = 0; step <= steps; ++step) {
-                const float t = static_cast<float>(step) /
-                                static_cast<float>(steps);
-                const int ix = static_cast<int>(
-                    floorf(prev_x + dx * t));
-                const int iy = static_cast<int>(
-                    floorf(prev_y + dy * t));
-                if (ix < 0 || iy < 0 || ix >= width || iy >= height) continue;
-                blend_pixel(
-                    color, alpha, iy * width + ix, pixels, red, green, blue,
-                    1.F);
+                const float t = static_cast<float>(step) / static_cast<float>(steps);
+                const float sx = prev_x + dx * t;
+                const float sy = prev_y + dy * t;
+                for (int side = -1; side <= 1; ++side) {
+                    const int ix = static_cast<int>(floorf(sx + nx * static_cast<float>(side)));
+                    const int iy = static_cast<int>(floorf(sy + ny * static_cast<float>(side)));
+                    if (ix < 0 || iy < 0 || ix >= width || iy >= height) continue;
+                    blend_pixel(
+                        color, alpha, iy * width + ix, pixels, red, green, blue,
+                        side == 0 ? 0.6F : 0.35F);
+                }
             }
         }
         prev_x = px;
@@ -353,7 +407,8 @@ tinytensor::Tensor render_debug_overlay(
     } else {
         visualize_rings_kernel<<<blocks, k_threads>>>(
             model.means.ptr<float>(), activated.scales.ptr<float>(),
-            activated.quaternions.ptr<float>(), model.sh.ptr<float>(),
+            activated.quaternions.ptr<float>(), activated.opacities.ptr<float>(),
+            model.sh.ptr<float>(),
             view.ptr<float>(), color.ptr<float>(), alpha.ptr<float>(), count,
             width, height, bases, sh_degree, camera.fx, camera.fy, camera.cx,
             camera.cy, static_cast<int>(camera.model), camera.k1, camera.k2,

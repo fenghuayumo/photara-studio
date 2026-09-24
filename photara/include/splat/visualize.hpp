@@ -24,7 +24,8 @@ struct VisualizeOptions {
     float kernel_size{0.F};
     float scale_modifier{1.F};
     float point_size_px{2.5F};
-    float ring_scale{2.5F};
+    // Projected-sigma contour. 2*sqrt(2) is SuperSplat's exp(-4) ellipse edge.
+    float ring_scale{2.828427F};
 };
 
 [[nodiscard]] inline const char* visualization_mode_name(
@@ -128,7 +129,7 @@ inline bool parse_camera_model_token(
 inline bool write_preview_camera_sidecar(
     const std::filesystem::path& path, const Camera& camera,
     const std::uint64_t revision, const char* vis_mode = nullptr,
-    const float point_size_px = 2.5F, const float ring_scale = 2.5F) {
+    const float point_size_px = 2.5F, const float ring_scale = 2.828427F) {
     if (path.empty()) return false;
     std::ofstream output(path, std::ios::trunc);
     if (!output) return false;

@@ -6,11 +6,50 @@ import subprocess
 import sys
 
 
+def compile_shader(glslang, dxc, include, shader, spv_path):
+    if shader.suffix == ".hlsl":
+        stages = {".cs": "cs_6_0", ".vs": "vs_6_0", ".ps": "ps_6_0"}
+        stage_suffix = shader.suffixes[-2] if len(shader.suffixes) >= 2 else ""
+        stage = stages.get(stage_suffix)
+        if stage is None:
+            raise SystemExit(
+                f"{shader.name} must be named *.cs.hlsl, *.vs.hlsl, or *.ps.hlsl")
+        command = [
+            dxc,
+            "-spirv",
+            "-fspv-target-env=vulkan1.2",
+            "-fvk-use-gl-layout",
+            "-T",
+            stage,
+            "-E",
+            "main",
+            "-I",
+            include,
+            "-Fo",
+            str(spv_path),
+            str(shader),
+        ]
+    else:
+        command = [
+            glslang,
+            "-V",
+            "--target-env",
+            "vulkan1.2",
+            "-I" + include,
+            "-o",
+            str(spv_path),
+            str(shader),
+        ]
+    return subprocess.run(
+        command, check=False, capture_output=True, text=True)
+
+
 def main() -> None:
     glslang = sys.argv[1]
-    output = pathlib.Path(sys.argv[2])
-    include = sys.argv[3]
-    shaders = [pathlib.Path(path) for path in sys.argv[4:]]
+    dxc = sys.argv[2]
+    output = pathlib.Path(sys.argv[3])
+    include = sys.argv[4]
+    shaders = [pathlib.Path(path) for path in sys.argv[5:]]
     work = output.parent
     work.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -20,21 +59,7 @@ def main() -> None:
     ]
     for shader in shaders:
         spv_path = work / (shader.name + ".spv")
-        result = subprocess.run(
-            [
-                glslang,
-                "-V",
-                "--target-env",
-                "vulkan1.2",
-                "-I" + include,
-                "-o",
-                str(spv_path),
-                str(shader),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        result = compile_shader(glslang, dxc, include, shader, spv_path)
         if result.returncode != 0:
             sys.stderr.write(result.stdout)
             sys.stderr.write(result.stderr)

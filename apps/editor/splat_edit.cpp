@@ -387,8 +387,9 @@ void SplatEdit::end_stroke(App& app) {
     push_undo(std::move(stroke_before_));
 }
 
-void SplatEdit::note_view(const bool rings_view) {
+void SplatEdit::note_view(const bool rings_view, const float ring_scale) {
     if (!hit_chosen_) rings_hit_ = rings_view;
+    if (ring_scale > 0.F) ring_sigma_ = ring_scale;
 }
 
 bool SplatEdit::rings_ready() const noexcept {
@@ -400,18 +401,18 @@ bool SplatEdit::rings_ready() const noexcept {
 float SplatEdit::ellipse_reach(
     const splat_render::Camera& camera, const float depth,
     const std::uint32_t index) const {
-    constexpr float k_scale = 2.5F;
-    constexpr float k_cap = 480.F;
     if (!rings_ready()) return 0.F;
     const float* scale = log_scales_.data() + static_cast<std::size_t>(index) * 3U;
     const float sigma = std::exp(std::min(8.F, std::max(scale[0], std::max(scale[1], scale[2]))));
     const float focal = std::max(camera.fx, camera.fy);
-    float reach = k_cap;
+    float reach = 1024.F;
     if (camera.model == splat_render::k_camera_orthographic)
-        reach = sigma * focal * k_scale;
+        reach = sigma * focal * ring_sigma_;
     else if (camera.model != splat_render::k_camera_equirectangular)
-        reach = sigma * focal / std::max(depth, 1e-3F) * k_scale;
-    return std::min(k_cap, std::max(4.F, reach));
+        reach = sigma * focal / std::max(depth, 1e-3F) * ring_sigma_;
+    // One axis underestimates the screen-edge Jacobian. Dilation adds a couple of pixels.
+    reach = std::min(1024.F, reach * 2.F + ring_sigma_ * 2.F);
+    return std::max(6.F, reach);
 }
 
 bool SplatEdit::project_ellipse(
@@ -495,22 +496,36 @@ bool SplatEdit::project_ellipse(
         }
     }
 
-    const float a = px[0] * px[0] + px[1] * px[1] + px[2] * px[2];
+    // Same contour as the rings shader: 0.3px dilation, minor-axis floor,
+    // and a uniform cap so a long splat keeps its shape.
+    const float a = px[0] * px[0] + px[1] * px[1] + px[2] * px[2] + 0.3F;
     const float b = px[0] * py[0] + px[1] * py[1] + px[2] * py[2];
-    const float c = py[0] * py[0] + py[1] * py[1] + py[2] * py[2];
+    const float c = py[0] * py[0] + py[1] * py[1] + py[2] * py[2] + 0.3F;
     const float mid = 0.5F * (a + c);
     const float extent =
         0.5F * std::sqrt(std::max(0.F, (a - c) * (a - c) + 4.F * b * b));
-    constexpr float k_scale = 2.5F;
-    constexpr float k_cap = 480.F;
+    const float lambda1 = std::max(0.F, mid + extent);
+    const float lambda2 = std::max(0.1F, mid - extent);
+    float rx = ring_sigma_ * std::sqrt(lambda1);
+    float ry = ring_sigma_ * std::sqrt(lambda2);
+    const float cap = std::min(
+        1024.F, std::min(
+                    static_cast<float>(std::max(1U, camera.width)),
+                    static_cast<float>(std::max(1U, camera.height))));
+    const float major = std::max(rx, ry);
+    if (major > cap && major > 1e-4F) {
+        const float fit = cap / major;
+        rx *= fit;
+        ry *= fit;
+    }
     ellipse.u = origin.u;
     ellipse.v = origin.v;
     ellipse.depth = origin.depth;
-    ellipse.rx = std::min(k_cap, std::max(3.F, k_scale * std::sqrt(std::max(0.F, mid + extent))));
-    ellipse.ry = std::min(k_cap, std::max(3.F, k_scale * std::sqrt(std::max(0.F, mid - extent))));
+    ellipse.rx = rx;
+    ellipse.ry = ry;
     ellipse.rotation = 0.5F * std::atan2(2.F * b, a - c);
-    ellipse.valid = true;
-    return true;
+    ellipse.valid = major >= 0.5F;
+    return ellipse.valid;
 }
 
 bool SplatEdit::ellipse_contains(const ScreenEllipse& ellipse, const float x, const float y) {
@@ -1350,9 +1365,11 @@ void SplatEdit::draw_overlay(
                                       std::max(1.F, static_cast<float>(camera.width));
                 const float scale_y = (view_max.y - view_min.y) /
                                       std::max(1.F, static_cast<float>(camera.height));
+                const int segments = std::clamp(
+                    static_cast<int>(ellipse.rx * 0.5F), 16, 64);
                 draw->AddEllipse(
                     screen, {ellipse.rx * scale_x, ellipse.ry * scale_y}, mark,
-                    ellipse.rotation, ellipse.rx > 18.F ? 20 : 12, 1.5F);
+                    ellipse.rotation, segments, 1.5F);
             }
         }
     }

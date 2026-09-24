@@ -17,6 +17,11 @@ inline constexpr std::uint32_t k_camera_pinhole = 0;
 inline constexpr std::uint32_t k_camera_orthographic = 1;
 inline constexpr std::uint32_t k_camera_fisheye = 2;
 inline constexpr std::uint32_t k_camera_equirectangular = 3;
+
+// gaussian is the 3DGUT ray kernel. rings is the projected ellipse: a faint
+// disc plus the SuperSplat rim, drawn from the same sorted Gaussians.
+enum class Shading : std::uint32_t { gaussian = 0, rings = 1 };
+
 struct Camera {
     std::array<float, 16> world_to_camera{};
     std::array<float, 3> position{};
@@ -31,6 +36,8 @@ struct Camera {
     std::uint32_t width{1};
     std::uint32_t height{1};
     std::uint32_t model{};
+    // Rings contour in projected sigmas. 0 selects 2*sqrt(2), the exp(-4) edge.
+    float ring_sigma{};
 };
 
 // Host Gaussian attributes. Scales are log-space and opacity is a logit.
@@ -79,8 +86,8 @@ public:
     bool update_centers(const float* centers, std::uint32_t count);
     void clear_model();
 
-    // Sorts back-to-front and draws. An unchanged camera reuses the last image.
-    bool draw(const Camera& camera, FrameTarget& target);
+    // Sorts back-to-front and draws. An unchanged camera and shading reuse the last image.
+    bool draw(const Camera& camera, FrameTarget& target, Shading shading = Shading::gaussian);
     bool download_rgb(
         std::vector<std::uint8_t>& rgb, std::uint32_t& width,
         std::uint32_t& height, std::uint32_t max_long_edge = 0);
@@ -116,7 +123,7 @@ private:
         std::uint32_t sh_degree{};
         std::uint32_t count{};
         std::uint32_t bases{};
-        std::uint32_t reserved{};
+        std::uint32_t reserved{};  // Shading: 0 gaussian, 1 rings
     };
 
     bool ensure_device();
@@ -157,7 +164,9 @@ private:
     VkPipeline scan_pipeline_{};
     VkPipeline scatter_pipeline_{};
     VkPipeline prepare_pipeline_{};
+    VkPipeline ring_prepare_pipeline_{};
     VkPipeline draw_pipeline_{};
+    VkPipeline ring_pipeline_{};
     VkCommandPool command_pool_{};
     VkCommandBuffer command_{};
     VkFence fence_{};
