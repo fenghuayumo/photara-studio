@@ -162,10 +162,13 @@ std::vector<TextureViewImage> load_texture_views(
                     }
                     const std::size_t dst =
                         (static_cast<std::size_t>(y) * view.width + x) * 3U;
+                    const bool linear =
+                        options.color_space == BlendColorSpace::linear;
                     for (int c = 0; c < 3; ++c) {
+                        const float encoded =
+                            sample_channel(sx, sy, c) / 255.F;
                         out.rgb[dst + static_cast<std::size_t>(c)] =
-                            srgb_to_linear(
-                                sample_channel(sx, sy, c) / 255.F);
+                            linear ? srgb_to_linear(encoded) : encoded;
                     }
                     if (!out.mask.empty()) {
                         const std::size_t output_index =
@@ -681,6 +684,7 @@ TexturedMesh bake_mesh_texture(
     result.atlas_confidence = baked.confidence;
     result.atlas_valid = baked.valid_mask;
     result.used_ray_query = baked.used_ray_query;
+    result.linear_rgb = options.color_space == BlendColorSpace::linear;
     result.delighted = options.delight;
     result.optimized = options.optimize;
     result.atlas_rgb = std::move(final_rgb);
@@ -701,6 +705,7 @@ TexturedMesh bake_mesh_texture(
             : static_cast<double>(valid) /
                   static_cast<double>(result.atlas_valid.size()),
         " ray_query=", result.used_ray_query,
+        " color_space=", result.linear_rgb ? "linear" : "srgb",
         " delight=", result.delighted,
         " optimized=", result.optimized);
     return result;

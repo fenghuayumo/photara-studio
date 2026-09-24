@@ -751,6 +751,17 @@ constexpr Entry k_entries[] = {
      "高速: 1024 アトラス、投影のみ。\n標準: 2048 + 測光洗練。\n高: 4096 + 長めの洗練。",
      "빠르게: 1024 아틀라스, 투영만.\n표준: 2048 + 측광 정제.\n높음: 4096 + 더 긴 정제."},
     {"Atlas size", "图集尺寸", "アトラスサイズ", "아틀라스 크기"},
+    {"Blend space", "融合空间", "ブレンド空間", "블렌드 공간"},
+    {"sRGB", "sRGB", "sRGB", "sRGB"},
+    {"Linear", "线性", "リニア", "선형"},
+    {"sRGB blends like the photographs, so the textured mesh matches them.\n"
+     "Linear blends in scene-linear light, then encodes sRGB on export.",
+     "sRGB 与照片同一空间融合，贴图网格应对齐照片。\n"
+     "线性在场景线性光下融合，导出 PNG 时再编码为 sRGB。",
+     "sRGB は写真と同じ空間で合成し、テクスチャ付きメッシュが写真に揃います。\n"
+     "リニアはシーンリニアで合成し、PNG 書き出し時に sRGB へ符号化します。",
+     "sRGB는 사진과 같은 공간에서 합성해 텍스처 메시가 사진과 맞습니다.\n"
+     "선형은 장면 선형 광에서 합성하고 PNG로 보낼 때 sRGB로 인코딩합니다."},
     {"Square albedo atlas written with the textured OBJ.",
      "随带纹理 OBJ 写出的方形反照率图集。",
      "テクスチャ付き OBJ と一緒に書く正方形アルベドアトラス。",

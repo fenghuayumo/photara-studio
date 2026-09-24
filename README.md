@@ -307,7 +307,9 @@ therefore requires both splat support and a CGAL-enabled build.
 ```
 
 `--texture` implies mesh generation unless an editor working mesh is supplied.
-It creates UVs and bakes projective color through `photara_drender`. Add
+It creates UVs and bakes projective color through `photara_drender`. Blending
+defaults to sRGB so the atlas matches the photographs. Pass
+`--texture-color-space linear` to blend in scene-linear light instead. Add
 `--delight` to run the optional intrinsic-image model before baking; this
 requires ONNX Runtime and the licensed `stage_0.onnx` through `stage_3.onnx`
 weights in the configured intrinsic-model directory.

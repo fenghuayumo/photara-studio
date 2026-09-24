@@ -304,6 +304,8 @@ struct ProjectSettings {
     int atlas_resolution = 2048;
     bool texture_delight = false;
     bool texture_optimize = true;
+    // false = sRGB blend (matches photographs). true = scene-linear blend.
+    bool texture_blend_linear = false;
 };
 
 // Everything the editor reads or writes lives under the project directory.

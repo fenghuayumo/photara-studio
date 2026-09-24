@@ -735,6 +735,17 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
                 "Square albedo atlas written with the textured OBJ.");
+        theme::caption("Blend space");
+        ImGui::SetNextItemWidth(-1.F);
+        int blend_space = app.settings.texture_blend_linear ? 1 : 0;
+        const char* blend_spaces[] = {tr("sRGB"), tr("Linear")};
+        if (ImGui::Combo("##tex_blend", &blend_space, blend_spaces, 2))
+            app.settings.texture_blend_linear = blend_space == 1;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "%s",
+                tr("sRGB blends like the photographs, so the textured mesh matches them.\n"
+                   "Linear blends in scene-linear light, then encodes sRGB on export."));
         ImGui::Checkbox(tr("Remove lighting (albedo)"), &app.settings.texture_delight);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(

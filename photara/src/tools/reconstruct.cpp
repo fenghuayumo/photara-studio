@@ -268,6 +268,7 @@ struct ReconstructCli {
     std::optional<std::uint32_t> atlas_resolution;
     std::uint32_t uv_parallel_partitions{8};
     bool texture_optimize{true};
+    std::string texture_color_space{"srgb"};
     std::uint32_t texture_optimize_steps{1000};
     std::uint32_t texture_optimize_batch_size{4};
     std::uint32_t texture_seam_samples{4};
@@ -477,6 +478,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --delight    Intrinsic image delighter before bake (albedo)\n"
               << "  --atlas-resolution N  atlas size (default 2048)\n"
               << "  --uv-parallel-partitions N  concurrent UVAtlas partitioning (default 8)\n"
+              << "  --texture-color-space srgb|linear  blend space (default srgb, matches photographs)\n"
               << "  --texture-optimize BOOL  photara_drender photometric + seam optimization (default true)\n"
               << "  --texture-optimize-steps N  native Vulkan Adam steps (default 1000)\n"
               << "  --texture-optimize-batch-size N  calibrated views per optimizer step (default 4)\n"
@@ -968,6 +970,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("mesh-free-space-quantile",
          "Quantile used to calibrate fused support to OpenMVS scale",
          cxxopts::value<float>()->default_value("0.95"))
+        ("texture-color-space",
+         "Texture blend space: srgb (default, matches photographs) or linear",
+         cxxopts::value<std::string>()->default_value("srgb"))
         ("texture-optimize",
          "Refine projected atlas with photara_drender's native optimizer",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -1368,6 +1373,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.atlas_resolution = result["atlas-resolution"].as<std::uint32_t>();
     cli.uv_parallel_partitions =
         result["uv-parallel-partitions"].as<std::uint32_t>();
+    cli.texture_color_space = result["texture-color-space"].as<std::string>();
+    if (cli.texture_color_space != "srgb" &&
+        cli.texture_color_space != "linear")
+        throw std::invalid_argument(
+            "--texture-color-space must be srgb or linear");
     cli.texture_optimize = result["texture-optimize"].as<bool>();
     cli.texture_optimize_steps =
         result["texture-optimize-steps"].as<std::uint32_t>();
@@ -2115,6 +2125,7 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.atlas_resolution = static_cast<int>(atlas_resolution);
     settings.texture_delight = cli.delight;
     settings.texture_optimize = cli.texture_optimize;
+    settings.texture_blend_linear = cli.texture_color_space == "linear";
     if (atlas_resolution <= 1024) settings.texture_quality = 0;
     else if (atlas_resolution >= 4096) settings.texture_quality = 2;
     else settings.texture_quality = 1;
@@ -2181,6 +2192,9 @@ photara::texture::TextureOptions texture_options_from_cli(
     options.atlas_resolution =
         cli.atlas_resolution.value_or(options.atlas_resolution);
     options.uv_parallel_partitions = cli.uv_parallel_partitions;
+    options.color_space = cli.texture_color_space == "linear"
+        ? photara::texture::BlendColorSpace::linear
+        : photara::texture::BlendColorSpace::srgb;
     options.optimize = cli.texture_optimize;
     options.optimize_steps = cli.texture_optimize_steps;
     options.optimize_batch_size = cli.texture_optimize_batch_size;

@@ -71,6 +71,8 @@ struct Settings {
     int atlas_resolution = 2048;
     bool texture_delight = false;
     bool texture_optimize = true;
+    // false = blend and export in sRGB (matches photographs). true = linear.
+    bool texture_blend_linear = false;
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;

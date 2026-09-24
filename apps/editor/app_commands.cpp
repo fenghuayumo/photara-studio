@@ -419,6 +419,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.atlas_resolution = app.settings.atlas_resolution;
     settings.texture_delight = app.settings.texture_delight;
     settings.texture_optimize = app.settings.texture_optimize;
+    settings.texture_blend_linear = app.settings.texture_blend_linear;
     return settings;
 }
 
@@ -491,6 +492,7 @@ void apply_project_settings(
         : 2048;
     app.settings.texture_delight = settings.texture_delight;
     app.settings.texture_optimize = settings.texture_optimize;
+    app.settings.texture_blend_linear = settings.texture_blend_linear;
 }
 
 void request_asfm_scene_load(

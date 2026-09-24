@@ -15,6 +15,13 @@ enum class VisibilityMode : std::uint8_t {
     hybrid_ray_query = 1,
 };
 
+// sRGB matches photographs and the Gaussian renderer. Linear blends in
+// scene-referred light and encodes sRGB only when the atlas PNG is written.
+enum class BlendColorSpace : std::uint8_t {
+    srgb = 0,
+    linear = 1,
+};
+
 struct TextureOptions {
     // Atlas resolution (square).
     std::uint32_t atlas_resolution{2048};
@@ -26,6 +33,7 @@ struct TextureOptions {
     std::uint32_t uv_parallel_partitions{8};
 
     BlendMode blend_mode{BlendMode::weighted_average};
+    BlendColorSpace color_space{BlendColorSpace::srgb};
     VisibilityMode visibility_mode{VisibilityMode::hybrid_ray_query};
     std::uint32_t pcf_radius{1};
     bool allow_visibility_fallback{true};

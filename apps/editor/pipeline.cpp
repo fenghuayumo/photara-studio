@@ -1453,7 +1453,9 @@ std::string build_texture_command(
             << " --texture-optimize="
             << (settings.texture_optimize ? "true" : "false")
             << " --texture-optimize-steps "
-            << texture_optimize_steps(settings);
+            << texture_optimize_steps(settings)
+            << " --texture-color-space "
+            << (settings.texture_blend_linear ? "linear" : "srgb");
     if (settings.texture_delight) command << " --delight";
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);

@@ -295,10 +295,12 @@ public:
         return out;
     }
 
-    void process_view(TextureViewImage& view) {
+    void process_view(TextureViewImage& view, const bool store_linear) {
         TensorNCHW linear_src;
+        // sRGB views are already display-referred. Linear views are converted
+        // back to sRGB before Intrinsic's gamma-2.2 training transform.
         srgb_bytes_to_linear_nchw(
-            view.rgb.data(), true, view.width, view.height, linear_src);
+            view.rgb.data(), store_linear, view.width, view.height, linear_src);
         const std::int64_t orig_h = linear_src.h;
         const std::int64_t orig_w = linear_src.w;
         constexpr int base_dim = 384;
@@ -378,17 +380,18 @@ public:
                 const std::size_t dst =
                     static_cast<std::size_t>(y * orig_w + x) * 3U;
                 for (int c = 0; c < 3; ++c) {
-                    // Network albedo is linear-ish after sigmoid; convert
-                    // with Intrinsic's gamma (1/2.2) then treat as sRGB and
-                    // store linear for the baker.
+                    // Network albedo is linear-ish after sigmoid. Intrinsic's
+                    // gamma (1/2.2) returns a display value. Keep that sRGB
+                    // value when the bake blends in sRGB; otherwise store linear.
                     float srgb = std::pow(
                         std::clamp(high.at(c, y, x), 0.F, 1.F), 1.F / 2.2F);
                     srgb = std::clamp(srgb, 0.F, 1.F);
-                    const float linear =
-                        srgb <= 0.04045F
-                            ? srgb / 12.92F
-                            : std::pow((srgb + 0.055F) / 1.055F, 2.4F);
-                    view.rgb[dst + static_cast<std::size_t>(c)] = linear;
+                    const float stored = store_linear
+                        ? (srgb <= 0.04045F
+                               ? srgb / 12.92F
+                               : std::pow((srgb + 0.055F) / 1.055F, 2.4F))
+                        : srgb;
+                    view.rgb[dst + static_cast<std::size_t>(c)] = stored;
                 }
             }
         }
@@ -439,7 +442,8 @@ void delight_texture_views(
         resolve_model_dir(options), options.delight_use_cuda);
     core::ProgressReporter progress("texture.delight", views.size());
     for (auto& view : views) {
-        delighter.process_view(view);
+        delighter.process_view(
+            view, options.color_space == BlendColorSpace::linear);
         progress.advance();
     }
     stage.finish();

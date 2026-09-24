@@ -40,8 +40,12 @@ void save_atlas_png(
     image.height = mesh.atlas_height;
     image.pixels.resize(
         static_cast<std::size_t>(image.width) * image.height * 3U);
-    for (std::size_t i = 0; i < image.pixels.size(); ++i)
-        image.pixels[i] = to_u8(linear_to_srgb(mesh.atlas_rgb[i]));
+    for (std::size_t i = 0; i < image.pixels.size(); ++i) {
+        const float encoded = mesh.linear_rgb
+            ? linear_to_srgb(mesh.atlas_rgb[i])
+            : std::clamp(mesh.atlas_rgb[i], 0.F, 1.F);
+        image.pixels[i] = to_u8(encoded);
+    }
     io::save_rgb_png(image, path);
 }
 

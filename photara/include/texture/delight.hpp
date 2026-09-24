@@ -9,7 +9,7 @@
 namespace photara::texture {
 
 // Run Intrinsic delighter via ONNX Runtime (C++). Replaces each view's rgb
-// with delighted albedo (still stored as linear RGB).
+// with delighted albedo in the same color space as TextureOptions::color_space.
 void delight_texture_views(
     std::vector<TextureViewImage>& views, const TextureOptions& options);
 

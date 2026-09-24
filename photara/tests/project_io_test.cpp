@@ -210,6 +210,7 @@ int main() {
     settings.atlas_resolution = 4096;
     settings.texture_delight = true;
     settings.texture_optimize = false;
+    settings.texture_blend_linear = true;
     settings.mask_mode = 1;
 
     Archive archive = Archive::create();
@@ -262,6 +263,7 @@ int main() {
     expect(round_trip.atlas_resolution == 4096, "settings atlas resolution");
     expect(round_trip.texture_delight, "settings texture delight");
     expect(!round_trip.texture_optimize, "settings texture optimize");
+    expect(round_trip.texture_blend_linear, "settings texture blend linear");
     const auto loaded_scene = read_sfm(loaded);
     expect(loaded_scene.has_value(), "read sfm from ascan");
     expect(loaded_scene && loaded_scene->cameras[0].k1 == 0.1, "ascan sfm distortion");
