@@ -2,6 +2,8 @@
 
 #include <splat_drender/vulkan_api.h>
 #include <splat_drender/api.h>
+#include "internal/tensor_impl.hpp"
+#include "vulkan/backend.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -92,6 +94,7 @@ struct Scene {
     bool use_sh = false;
     bool use_covariance = false;
     bool expect_double_sort = false;
+    bool check_backward = false;
     std::uint32_t sh_degree = 0;
     std::vector<float> means;
     std::vector<float> colors;
@@ -100,6 +103,10 @@ struct Scene {
     std::vector<float> scales;
     std::vector<float> rotations;
     std::vector<float> covariances;
+    std::vector<float> log_scales;
+    std::vector<float> raw_rotations;
+    std::vector<float> opacity_logits;
+    std::vector<float> filter_3d;
 };
 
 void add_gaussian(Scene& scene, Rng& rng, float x, float y, float z, float scale, bool color) {
@@ -166,6 +173,35 @@ void fill_covariance(Scene& scene) {
     }
 }
 
+void enable_activation_chain(Scene& scene) {
+    const std::size_t count = scene.means.size() / 3;
+    scene.log_scales.resize(count * 3);
+    scene.raw_rotations.resize(count * 4);
+    scene.opacity_logits.resize(count);
+    scene.filter_3d.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const float filter = 0.012F + 0.003F * static_cast<float>(i % 4);
+        scene.filter_3d[i] = filter;
+        float determinant_ratio = 1.0F;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const std::size_t offset = i * 3 + axis;
+            const float raw_scale = scene.scales[offset];
+            scene.log_scales[offset] = std::log(raw_scale);
+            const float filtered = std::sqrt(raw_scale * raw_scale + filter * filter);
+            scene.scales[offset] = filtered;
+            determinant_ratio *= raw_scale / filtered;
+        }
+        const float base_opacity = scene.opacities[i];
+        scene.opacity_logits[i] = std::log(base_opacity / (1.0F - base_opacity));
+        scene.opacities[i] = base_opacity * determinant_ratio;
+        const float quaternion_scale = 1.25F + 0.1F * static_cast<float>(i % 3);
+        for (std::size_t component = 0; component < 4; ++component) {
+            const std::size_t offset = i * 4 + component;
+            scene.raw_rotations[offset] = scene.rotations[offset] * quaternion_scale;
+        }
+    }
+}
+
 double rel_l2(const std::vector<float>& got, const std::vector<float>& reference) {
     double numerator = 0;
     double denominator = 0;
@@ -219,6 +255,10 @@ void compare_case(const Scene& scene) {
         gaussians.scales = scene.scales;
         gaussians.rotations = scene.rotations;
     }
+    gaussians.log_scales = scene.log_scales;
+    gaussians.raw_rotations = scene.raw_rotations;
+    gaussians.opacity_logits = scene.opacity_logits;
+    gaussians.filter_3d = scene.filter_3d;
     splat_drender::vulkan::SplatSettings settings;
     settings.background[0] = background[0];
     settings.background[1] = background[1];
@@ -226,6 +266,7 @@ void compare_case(const Scene& scene) {
     settings.kernel_size = scene.kernel_size;
     settings.scale_modifier = scene.scale_modifier;
     settings.need_depth = scene.need_depth;
+    settings.pixel_snapshots = scene.check_backward;
 
     splat_drender::vulkan::Context context;
     splat_drender::vulkan::SplatRasterizer rasterizer(context);
@@ -335,6 +376,137 @@ void compare_case(const Scene& scene) {
     if (scene.need_depth) {
         require(depth_error < 1e-4 && normal_error < 1e-4, scene.name + " depth or normal exceeds 1e-4 relative L2");
     }
+
+    if (scene.check_backward) {
+        std::vector<float> loss_color(pixels * 3);
+        std::vector<float> loss_alpha(pixels);
+        for (std::size_t i = 0; i < loss_color.size(); ++i) {
+            loss_color[i] = 0.3F * std::sin(static_cast<float>(i) * 0.013F) + 0.05F;
+        }
+        for (std::size_t i = 0; i < loss_alpha.size(); ++i) {
+            loss_alpha[i] = 0.2F * std::cos(static_cast<float>(i) * 0.017F) - 0.03F;
+        }
+        const auto vulkan_grad = rasterizer.backward(loss_color, loss_alpha);
+
+        CudaBuffer loss_color_dev, loss_alpha_dev, loss_depth_dev, loss_normal_dev;
+        CudaBuffer grad_means, grad_features, grad_opacity, grad_scales, grad_rotations, grad_covariance;
+        splat_drender::ForwardOutputsView cuda_fwd_view;
+        cuda_fwd_view.alpha = static_cast<const float*>(out_alpha.ptr);
+        cuda_fwd_view.radii = static_cast<const int*>(out_radii.ptr);
+        if (scene.need_depth) {
+            cuda_fwd_view.median_depth = static_cast<const float*>(out_depth.ptr);
+            cuda_fwd_view.normal = static_cast<const float*>(out_normal.ptr);
+        }
+        splat_drender::LossGradients cuda_loss;
+        cuda_loss.color = loss_color_dev.upload(loss_color);
+        cuda_loss.alpha = loss_alpha_dev.upload(loss_alpha);
+        if (scene.need_depth) {
+            cuda_loss.median_depth = loss_depth_dev.zeros<float>(pixels);
+            cuda_loss.normal = loss_normal_dev.zeros<float>(pixels * 3);
+        }
+        splat_drender::ModelGradients cuda_grad;
+        cuda_grad.means = grad_means.zeros<float>(static_cast<std::size_t>(count) * 3);
+        if (scene.use_sh) {
+            cuda_grad.sh = grad_features.zeros<float>(scene.sh.size());
+        } else {
+            cuda_grad.colors = grad_features.zeros<float>(static_cast<std::size_t>(count) * 3);
+        }
+        cuda_grad.opacities = grad_opacity.zeros<float>(static_cast<std::size_t>(count));
+        if (scene.use_covariance) {
+            cuda_grad.covariances = grad_covariance.zeros<float>(static_cast<std::size_t>(count) * 6);
+        } else {
+            cuda_grad.scales = grad_scales.zeros<float>(static_cast<std::size_t>(count) * 3);
+            cuda_grad.rotations = grad_rotations.zeros<float>(static_cast<std::size_t>(count) * 4);
+        }
+        splat_drender::Rasterizer::backward(
+            pools, cuda_g, cuda_camera, cuda_settings, cuda_result,
+            cuda_fwd_view, cuda_loss, cuda_grad);
+        check_cuda(cudaGetLastError(), "cuda backward");
+        check_cuda(cudaDeviceSynchronize(), "cuda backward synchronize");
+        const auto cuda_mean_grad = grad_means.download<float>(static_cast<std::size_t>(count) * 3);
+        const auto cuda_feature_grad = grad_features.download<float>(
+            scene.use_sh ? scene.sh.size() : static_cast<std::size_t>(count) * 3);
+        const auto cuda_opacity_grad = grad_opacity.download<float>(static_cast<std::size_t>(count));
+        const auto& vulkan_feature_grad = scene.use_sh ? vulkan_grad.sh : vulkan_grad.colors;
+        const double mean_grad_error = rel_l2(vulkan_grad.means, cuda_mean_grad);
+        const double feature_grad_error = rel_l2(vulkan_feature_grad, cuda_feature_grad);
+        const double opacity_grad_error = rel_l2(vulkan_grad.opacities, cuda_opacity_grad);
+        std::cout << "  backward mean=" << mean_grad_error
+                  << " feature=" << feature_grad_error
+                  << " opacity=" << opacity_grad_error;
+        double geometry_grad_error = 0.0;
+        if (scene.use_covariance) {
+            geometry_grad_error = rel_l2(
+                vulkan_grad.covariances,
+                grad_covariance.download<float>(static_cast<std::size_t>(count) * 6));
+            std::cout << " covariance=" << geometry_grad_error;
+        } else {
+            const double scale_error = rel_l2(
+                vulkan_grad.scales,
+                grad_scales.download<float>(static_cast<std::size_t>(count) * 3));
+            const double rotation_error = rel_l2(
+                vulkan_grad.rotations,
+                grad_rotations.download<float>(static_cast<std::size_t>(count) * 4));
+            geometry_grad_error = std::max(scale_error, rotation_error);
+            std::cout << " scale=" << scale_error << " rotation=" << rotation_error;
+        }
+        double activation_grad_error = 0.0;
+        if (!scene.log_scales.empty()) {
+            const auto cuda_scale_grad = grad_scales.download<float>(static_cast<std::size_t>(count) * 3);
+            const auto cuda_rotation_grad = grad_rotations.download<float>(static_cast<std::size_t>(count) * 4);
+            std::vector<float> expected_log_scale(static_cast<std::size_t>(count) * 3);
+            std::vector<float> expected_raw_rotation(static_cast<std::size_t>(count) * 4);
+            std::vector<float> expected_logit(static_cast<std::size_t>(count));
+            for (int i = 0; i < count; ++i) {
+                const float filter2 = scene.filter_3d[static_cast<std::size_t>(i)] *
+                                      scene.filter_3d[static_cast<std::size_t>(i)];
+                for (int axis = 0; axis < 3; ++axis) {
+                    const std::size_t offset = static_cast<std::size_t>(i) * 3 + axis;
+                    const float raw_scale = std::exp(scene.log_scales[offset]);
+                    const float filtered_scale = scene.scales[offset];
+                    expected_log_scale[offset] =
+                        cuda_scale_grad[offset] * raw_scale * raw_scale / filtered_scale +
+                        cuda_opacity_grad[static_cast<std::size_t>(i)] *
+                            scene.opacities[static_cast<std::size_t>(i)] * filter2 /
+                            (filtered_scale * filtered_scale);
+                }
+                const std::size_t qbase = static_cast<std::size_t>(i) * 4;
+                float norm2 = 0.0F;
+                for (int q = 0; q < 4; ++q) {
+                    const float raw = scene.raw_rotations[qbase + q];
+                    norm2 += raw * raw;
+                }
+                const float inv_norm = 1.0F / std::sqrt(std::max(norm2, 1e-20F));
+                float product = 0.0F;
+                for (int q = 0; q < 4; ++q) {
+                    product += scene.raw_rotations[qbase + q] * inv_norm *
+                               cuda_rotation_grad[qbase + q];
+                }
+                for (int q = 0; q < 4; ++q) {
+                    const float normalized = scene.raw_rotations[qbase + q] * inv_norm;
+                    expected_raw_rotation[qbase + q] =
+                        inv_norm * (cuda_rotation_grad[qbase + q] - normalized * product);
+                }
+                const float logit = scene.opacity_logits[static_cast<std::size_t>(i)];
+                const float opacity = 1.0F / (1.0F + std::exp(-logit));
+                expected_logit[static_cast<std::size_t>(i)] =
+                    cuda_opacity_grad[static_cast<std::size_t>(i)] *
+                    scene.opacities[static_cast<std::size_t>(i)] * (1.0F - opacity);
+            }
+            const double log_scale_error = rel_l2(vulkan_grad.log_scales, expected_log_scale);
+            const double raw_rotation_error = rel_l2(vulkan_grad.raw_rotations, expected_raw_rotation);
+            const double logit_error = rel_l2(vulkan_grad.opacity_logits, expected_logit);
+            activation_grad_error = std::max({log_scale_error, raw_rotation_error, logit_error});
+            std::cout << " log_scale=" << log_scale_error
+                      << " raw_rotation=" << raw_rotation_error
+                      << " logit=" << logit_error;
+        }
+        std::cout << '\n';
+        require(mean_grad_error < 5e-4 && feature_grad_error < 5e-4 &&
+                    opacity_grad_error < 5e-4 && geometry_grad_error < 5e-4 &&
+                    activation_grad_error < 5e-4,
+                scene.name + " full backward exceeds 5e-4 relative L2");
+    }
 }
 
 Scene pinhole_scene(const char* name, int count, float scale, bool depth) {
@@ -408,8 +580,8 @@ void smoke_case() {
             "Centered Gaussian did not contribute red");
     require(output.alpha[0] < 0.05F, "Splat coverage reached the far corner");
 
-    // Snapshot generation is the forward half of the future Vulkan backward
-    // pass. It must preserve the normal render while building its bucket
+    // Snapshot generation is the forward half of the Vulkan backward pass.
+    // It must preserve the normal render while building its bucket
     // prefix and per-pixel transmittance state entirely on the GPU.
     scene.settings.pixel_snapshots = true;
     const auto snapshot_output = rasterizer.forward(scene.gaussians, scene.camera, scene.settings);
@@ -419,6 +591,89 @@ void smoke_case() {
     require(snapshot_output.instance_count == output.instance_count, "Enabling snapshots changed the instance count");
     std::cout << "single-gaussian smoke: instances=" << output.instance_count
               << " center_alpha=" << output.alpha[center] << " snapshots=ok\n";
+}
+
+// TinyTensor owns the device and all loss/gradient storage; splat_drender
+// adopts that device and binds the tensor buffers directly. This is the path
+// training will use, and catches accidental host staging or cross-device use.
+void tinytensor_interop_case() {
+    require(tinytensor::vulkan::available(), "TinyTensor Vulkan backend is unavailable");
+    SingleGaussianScene scene;
+    scene.settings.need_depth = false;
+    scene.settings.pixel_snapshots = true;
+    const auto handles = tinytensor::vulkan::device_handles();
+    splat_drender::vulkan::ContextOptions options;
+    options.external_device.instance = handles.instance;
+    options.external_device.physical_device = handles.physical_device;
+    options.external_device.device = handles.device;
+    options.external_device.queue = handles.queue;
+    options.external_device.queue_family = handles.queue_family;
+    splat_drender::vulkan::Context context(options);
+    splat_drender::vulkan::SplatRasterizer rasterizer(context);
+    const auto forward = rasterizer.forward(scene.gaussians, scene.camera, scene.settings);
+    const std::size_t pixels = static_cast<std::size_t>(scene.camera.width) * scene.camera.height;
+    std::vector<float> color_loss(pixels * 3, 0.0F);
+    std::vector<float> alpha_loss(pixels, 0.0F);
+    for (std::size_t i = 0; i < pixels; ++i) {
+        color_loss[i] = 0.1F;
+        color_loss[pixels + i] = -0.2F;
+        color_loss[2 * pixels + i] = 0.05F;
+        alpha_loss[i] = 0.03F;
+    }
+    const auto expected = rasterizer.backward_blend(color_loss, alpha_loss);
+    const auto expected_model = rasterizer.backward(color_loss, alpha_loss);
+    auto device_color = tinytensor::Tensor::from_vector(
+        color_loss, {color_loss.size()}, tinytensor::Device::Vulkan);
+    auto device_alpha = tinytensor::Tensor::from_vector(
+        alpha_loss, {alpha_loss.size()}, tinytensor::Device::Vulkan);
+    auto device_gradient = tinytensor::Tensor::zeros(
+        {static_cast<std::size_t>(rasterizer.blend_gradient_float_count())},
+        tinytensor::Device::Vulkan, tinytensor::DataType::Float32);
+    tinytensor::vulkan::synchronize();
+    const auto color_view = tinytensor::vulkan::buffer_view(device_color);
+    const auto alpha_view = tinytensor::vulkan::buffer_view(device_alpha);
+    const auto gradient_view = tinytensor::vulkan::buffer_view(device_gradient);
+    rasterizer.backward_blend_device(
+        {color_view.buffer, color_view.offset, color_view.bytes},
+        {alpha_view.buffer, alpha_view.offset, alpha_view.bytes},
+        {gradient_view.buffer, gradient_view.offset, gradient_view.bytes});
+    const auto got = device_gradient.to_vector();
+    std::vector<float> reference;
+    reference.reserve(expected.mean2d.size() + expected.conic_opacity.size() + expected.colors.size());
+    reference.insert(reference.end(), expected.mean2d.begin(), expected.mean2d.end());
+    reference.insert(reference.end(), expected.conic_opacity.begin(), expected.conic_opacity.end());
+    reference.insert(reference.end(), expected.colors.begin(), expected.colors.end());
+    require(rel_l2(got, reference) < 1e-6, "TinyTensor zero-copy blend gradients differ");
+    auto device_model_gradient = tinytensor::Tensor::zeros(
+        {static_cast<std::size_t>(rasterizer.model_gradient_float_count())},
+        tinytensor::Device::Vulkan, tinytensor::DataType::Float32);
+    // Flush TinyTensor's initialization before another owner records writes
+    // against the shared queue and buffer.
+    tinytensor::vulkan::synchronize();
+    const auto model_gradient_view = tinytensor::vulkan::buffer_view(device_model_gradient);
+    rasterizer.backward_device(
+        {color_view.buffer, color_view.offset, color_view.bytes},
+        {alpha_view.buffer, alpha_view.offset, alpha_view.bytes},
+        {model_gradient_view.buffer, model_gradient_view.offset, model_gradient_view.bytes});
+    const auto got_model = device_model_gradient.to_vector();
+    std::vector<float> model_reference;
+    const auto append = [&](const std::vector<float>& values) {
+        model_reference.insert(model_reference.end(), values.begin(), values.end());
+    };
+    append(expected_model.means);
+    append(expected_model.colors);
+    append(expected_model.opacities);
+    append(expected_model.scales);
+    append(expected_model.rotations);
+    model_reference.insert(model_reference.end(), 6, 0.0F);
+    model_reference.insert(model_reference.end(), 8, 0.0F);
+    require(got_model.size() == model_reference.size(), "TinyTensor model gradient layout differs");
+    require(rel_l2(got_model, model_reference) < 1e-6,
+            "TinyTensor zero-copy model gradients differ");
+    std::cout << "tinytensor zero-copy backward: device=" << context.device_info().name
+              << " gradients=" << got.size() << " rel_l2=" << rel_l2(got, reference)
+              << " model_rel_l2=" << rel_l2(got_model, model_reference)
+              << " instances=" << forward.instance_count << '\n';
 }
 
 // A Context may adopt a device the caller already owns. It then creates no
@@ -469,14 +724,20 @@ int main() {
     try {
         check_cuda(cudaSetDevice(0), "cudaSetDevice");
         smoke_case();
+        tinytensor_interop_case();
         adopted_device_case();
-        compare_case(pinhole_scene("pinhole-color", 24, 0.08F, true));
+        auto color_backward = pinhole_scene("pinhole-color", 24, 0.08F, false);
+        color_backward.check_backward = true;
+        color_backward.scale_modifier = 1.3F;
+        enable_activation_chain(color_backward);
+        compare_case(color_backward);
 
         auto sh = pinhole_scene("pinhole-sh", 12, 0.1F, true);
         sh.use_sh = true;
         sh.sh_degree = 3;
         sh.kernel_size = 0.3F;
         sh.colors.clear();
+        sh.check_backward = true;
         Rng rng{7};
         fill_sh(sh, rng);
         compare_case(sh);
@@ -484,6 +745,7 @@ int main() {
         auto covariance = pinhole_scene("pinhole-covariance", 10, 0.09F, true);
         covariance.use_covariance = true;
         covariance.scale_modifier = 1.25F;
+        covariance.check_backward = true;
         fill_covariance(covariance);
         compare_case(covariance);
 
@@ -501,6 +763,7 @@ int main() {
         fisheye.k2 = 0.02F;
         fisheye.fx = 30;
         fisheye.fy = 30;
+        fisheye.check_backward = true;
         compare_case(fisheye);
 
         Scene equirect;
@@ -523,6 +786,7 @@ int main() {
         }
         add_gaussian(equirect, equirect_rng, 0.05F, 0.0F, -1.4F, 0.45F, true);
         add_gaussian(equirect, equirect_rng, -0.08F, 0.1F, -1.3F, 0.45F, true);
+        equirect.check_backward = true;
         compare_case(equirect);
 
         Scene large = pinhole_scene("large-sort", 8000, 2.5F, false);

@@ -7,6 +7,7 @@
 #include "sfm/asfm.hpp"
 
 #include "splat_drender/vulkan_api.h"
+#include "vulkan/backend.hpp"
 
 #include <cuda_runtime.h>
 
@@ -58,6 +59,22 @@ double relative_l2(const std::vector<T>& got, const std::vector<T>& reference) {
     }
     if (!(denominator > 1e-30)) return std::sqrt(numerator);
     return std::sqrt(numerator / denominator);
+}
+
+double relative_l2_slice(
+    const std::vector<float>& packed, const std::size_t offset,
+    const std::vector<float>& reference) {
+    if (offset + reference.size() > packed.size())
+        return std::numeric_limits<double>::infinity();
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (std::size_t i = 0; i < reference.size(); ++i) {
+        const double delta = static_cast<double>(packed[offset + i]) - reference[i];
+        numerator += delta * delta;
+        denominator += static_cast<double>(reference[i]) * reference[i];
+    }
+    return denominator > 1e-30 ? std::sqrt(numerator / denominator)
+                               : std::sqrt(numerator);
 }
 
 Image to_image(const std::vector<float>& planar, const std::uint32_t width, const std::uint32_t height) {
@@ -390,7 +407,9 @@ int run_benchmark(int argc, char** argv) {
     model.quaternions = tinytensor::Tensor::from_vector(raw_quaternions, {count, 4U}, tinytensor::Device::CUDA);
     model.opacity_logits = tinytensor::Tensor::from_vector(opacity_logits, {count, 1U}, tinytensor::Device::CUDA);
     model.sh = tinytensor::Tensor::from_vector(sh, {count, bases, 3U}, tinytensor::Device::CUDA);
-    model.filter_3d = {};
+    model.filter_3d = filter_3d.empty()
+        ? tinytensor::Tensor{}
+        : tinytensor::Tensor::from_vector(filter_3d, {count, 1U}, tinytensor::Device::CUDA);
     model.normal_features = {};
     std::vector<float> scales(count * 3U);
     std::vector<float> quaternions(count * 4U);
@@ -416,7 +435,16 @@ int run_benchmark(int argc, char** argv) {
         opacities[i] = (1.0F / (1.0F + std::exp(-opacity_logits[i]))) * determinant_ratio;
     }
 
-    splat_drender::vulkan::Context context;
+    // Adopt TinyTensor's device so its tensors can be bound directly by the
+    // differentiable rasterizer without copies or external-memory export.
+    const auto tensor_device = tinytensor::vulkan::device_handles();
+    splat_drender::vulkan::ContextOptions context_options;
+    context_options.external_device.instance = tensor_device.instance;
+    context_options.external_device.physical_device = tensor_device.physical_device;
+    context_options.external_device.device = tensor_device.device;
+    context_options.external_device.queue = tensor_device.queue;
+    context_options.external_device.queue_family = tensor_device.queue_family;
+    splat_drender::vulkan::Context context(context_options);
     splat_drender::vulkan::SplatRasterizer vulkan(context);
     splat_drender::vulkan::SplatGaussians vulkan_gaussians;
     vulkan_gaussians.means = means;
@@ -424,6 +452,10 @@ int run_benchmark(int argc, char** argv) {
     vulkan_gaussians.opacities = opacities;
     vulkan_gaussians.scales = scales;
     vulkan_gaussians.rotations = quaternions;
+    vulkan_gaussians.log_scales = log_scales;
+    vulkan_gaussians.raw_rotations = raw_quaternions;
+    vulkan_gaussians.opacity_logits = opacity_logits;
+    vulkan_gaussians.filter_3d = filter_3d;
     vulkan_gaussians.sh_degree = model.sh_degree;
     vulkan_gaussians.sh_bases = static_cast<std::uint32_t>(bases);
     const auto upload_start = std::chrono::steady_clock::now();
@@ -499,6 +531,110 @@ int run_benchmark(int argc, char** argv) {
                 sink += result.color[0];
             },
             3, iterations), cuda_color);
+    // The host row includes upload/readback. The device rows bind TinyTensor
+    // buffers directly and measure the training path without PCIe staging.
+    const std::size_t benchmark_pixels = static_cast<std::size_t>(width) * height;
+    std::vector<float> backward_color(benchmark_pixels * 3U, 1.0F / 3.0F);
+    std::vector<float> backward_alpha(benchmark_pixels, 0.125F);
+    const auto backward_forward = vulkan.render(vulkan_camera, vulkan_training);
+    sink += backward_forward.instance_count;
+    row("vulkan blend backward (host I/O)", time_ms(
+            [&] {
+                const auto gradients = vulkan.backward_blend(backward_color, backward_alpha);
+                sink += gradients.colors.empty() ? 0.0 : gradients.colors[0];
+            },
+            3, iterations), 0.0);
+    auto device_backward_color = tinytensor::Tensor::from_vector(
+        backward_color, {backward_color.size()}, tinytensor::Device::Vulkan);
+    auto device_backward_alpha = tinytensor::Tensor::from_vector(
+        backward_alpha, {backward_alpha.size()}, tinytensor::Device::Vulkan);
+    auto device_backward_gradient = tinytensor::Tensor::zeros(
+        {static_cast<std::size_t>(vulkan.blend_gradient_float_count())},
+        tinytensor::Device::Vulkan, tinytensor::DataType::Float32);
+    tinytensor::vulkan::synchronize();
+    const auto device_color_view = tinytensor::vulkan::buffer_view(device_backward_color);
+    const auto device_alpha_view = tinytensor::vulkan::buffer_view(device_backward_alpha);
+    const auto device_gradient_view = tinytensor::vulkan::buffer_view(device_backward_gradient);
+    const splat_drender::vulkan::SplatBufferView device_color_loss{
+        device_color_view.buffer, device_color_view.offset, device_color_view.bytes};
+    const splat_drender::vulkan::SplatBufferView device_alpha_loss{
+        device_alpha_view.buffer, device_alpha_view.offset, device_alpha_view.bytes};
+    const splat_drender::vulkan::SplatBufferView device_packed_gradient{
+        device_gradient_view.buffer, device_gradient_view.offset, device_gradient_view.bytes};
+    const double vulkan_blend_device = time_ms(
+        [&] {
+            vulkan.backward_blend_device(
+                device_color_loss, device_alpha_loss, device_packed_gradient);
+        },
+        3, iterations);
+    auto device_model_gradient = tinytensor::Tensor::zeros(
+        {static_cast<std::size_t>(vulkan.model_gradient_float_count())},
+        tinytensor::Device::Vulkan, tinytensor::DataType::Float32);
+    tinytensor::vulkan::synchronize();
+    const auto device_model_gradient_view = tinytensor::vulkan::buffer_view(device_model_gradient);
+    const splat_drender::vulkan::SplatBufferView device_packed_model_gradient{
+        device_model_gradient_view.buffer, device_model_gradient_view.offset,
+        device_model_gradient_view.bytes};
+    const double vulkan_full_device = time_ms(
+        [&] {
+            vulkan.backward_device(
+                device_color_loss, device_alpha_loss, device_packed_model_gradient);
+        },
+        3, iterations);
+    auto cuda_backward_color = tinytensor::Tensor::from_vector(
+        backward_color, {3U, height, width}, tinytensor::Device::CUDA);
+    auto cuda_backward_alpha = tinytensor::Tensor::from_vector(
+        backward_alpha, {height, width}, tinytensor::Device::CUDA);
+    photara::splat::Rasterizer cuda_backward_rasterizer;
+    const auto cuda_backward_frame =
+        cuda_backward_rasterizer.forward(model, camera, color_only);
+    const double cuda_full_backward = time_ms(
+        [&] {
+            const auto gradients = cuda_backward_rasterizer.backward(
+                model, cuda_backward_frame, cuda_backward_color,
+                cuda_backward_alpha, {}, {});
+            cudaDeviceSynchronize();
+            sink += gradients.means.numel();
+        },
+        3, iterations);
+    row("vulkan blend backward (device)", vulkan_blend_device, 0.0);
+    row("full backward (device)", vulkan_full_device, cuda_full_backward);
+    const auto cuda_reference_gradients = cuda_backward_rasterizer.backward(
+        model, cuda_backward_frame, cuda_backward_color,
+        cuda_backward_alpha, {}, {});
+    cudaDeviceSynchronize();
+    const auto packed_model_gradients = device_model_gradient.to_vector();
+    const std::size_t mean_offset = 0;
+    const std::size_t feature_offset = count * 3U;
+    const std::size_t feature_count = count * bases * 3U;
+    const std::size_t opacity_offset = feature_offset + feature_count;
+    const std::size_t scale_offset = opacity_offset + count;
+    const std::size_t rotation_offset = scale_offset + count * 3U;
+    const std::size_t covariance_offset = rotation_offset + count * 4U;
+    const std::size_t log_scale_offset = covariance_offset + count * 6U;
+    const std::size_t raw_rotation_offset = log_scale_offset + count * 3U;
+    const std::size_t logit_offset = raw_rotation_offset + count * 4U;
+    std::cout << "gradient rel_l2: mean="
+              << relative_l2_slice(
+                     packed_model_gradients, mean_offset,
+                     cuda_reference_gradients.means.to_vector())
+              << " sh="
+              << relative_l2_slice(
+                     packed_model_gradients, feature_offset,
+                     cuda_reference_gradients.sh.to_vector())
+              << " log_scale="
+              << relative_l2_slice(
+                     packed_model_gradients, log_scale_offset,
+                     cuda_reference_gradients.log_scales.to_vector())
+              << " quaternion="
+              << relative_l2_slice(
+                     packed_model_gradients, raw_rotation_offset,
+                     cuda_reference_gradients.quaternions.to_vector())
+              << " opacity_logit="
+              << relative_l2_slice(
+                     packed_model_gradients, logit_offset,
+                     cuda_reference_gradients.opacity_logits.to_vector())
+              << '\n';
     row("vulkan render_rgba (editor path)", time_ms(
             [&] {
                 std::vector<std::uint8_t> rgba;

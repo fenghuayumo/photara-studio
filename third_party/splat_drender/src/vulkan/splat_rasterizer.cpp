@@ -82,6 +82,9 @@ public:
           scatter_(context.create_pipeline("splat_radix_scatter.hlsl.spv", 8, sizeof(Push))),
           ranges_(context.create_pipeline("splat_ranges.hlsl.spv", 3, sizeof(Push))),
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
+          blend_backward_(context.create_pipeline("splat_blend_backward.hlsl.spv", 10, sizeof(Push))),
+          project_backward_(context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
+          clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))) {
         clear_buffer(dummy_);
     }
@@ -125,6 +128,26 @@ public:
         } else {
             require(gaussians.covariances.size() == static_cast<std::size_t>(count) * 6, "covariances must have shape [N, 6]");
         }
+        const bool any_raw = !gaussians.log_scales.empty() || !gaussians.raw_rotations.empty() ||
+                             !gaussians.opacity_logits.empty();
+        const bool raw_chain = !gaussians.log_scales.empty() && !gaussians.raw_rotations.empty() &&
+                               !gaussians.opacity_logits.empty();
+        require(!any_raw || raw_chain,
+                "log_scales, raw_rotations, and opacity_logits must be supplied together");
+        require(!raw_chain || has_scales, "the raw activation chain requires scales and rotations");
+        if (raw_chain) {
+            require(gaussians.log_scales.size() == static_cast<std::size_t>(count) * 3,
+                    "log_scales must have shape [N, 3]");
+            require(gaussians.raw_rotations.size() == static_cast<std::size_t>(count) * 4,
+                    "raw_rotations must have shape [N, 4]");
+            require(gaussians.opacity_logits.size() == count,
+                    "opacity_logits must have shape [N]");
+            require(gaussians.filter_3d.empty() || gaussians.filter_3d.size() == count,
+                    "filter_3d must be empty or have shape [N]");
+        } else {
+            require(gaussians.filter_3d.empty(),
+                    "filter_3d requires the raw activation parameters");
+        }
 
         const auto& color_src = has_sh ? gaussians.sh : gaussians.colors;
         const std::scoped_lock lock(context_.dispatch_mutex);
@@ -134,6 +157,10 @@ public:
         Buffer& rotations = grow(rotations_, (has_scales ? gaussians.rotations.size() : 1) * sizeof(float));
         Buffer& covariances = grow(covariances_, (has_cov ? gaussians.covariances.size() : 1) * sizeof(float));
         Buffer& colors = grow(colors_, color_src.size() * sizeof(float));
+        Buffer& raw_log_scales = grow(raw_log_scales_, (raw_chain ? gaussians.log_scales.size() : 1) * sizeof(float));
+        Buffer& raw_rotations = grow(raw_rotations_, (raw_chain ? gaussians.raw_rotations.size() : 1) * sizeof(float));
+        Buffer& opacity_logits = grow(opacity_logits_, (raw_chain ? gaussians.opacity_logits.size() : 1) * sizeof(float));
+        Buffer& filter_3d = grow(filter_3d_, (raw_chain ? count : 1) * sizeof(float));
         context_.write_buffer(means, gaussians.means.data(), gaussians.means.size() * sizeof(float));
         context_.write_buffer(opacities, gaussians.opacities.data(), gaussians.opacities.size() * sizeof(float));
         if (has_scales) {
@@ -144,12 +171,24 @@ public:
             context_.write_buffer(covariances, gaussians.covariances.data(), gaussians.covariances.size() * sizeof(float));
         }
         context_.write_buffer(colors, color_src.data(), color_src.size() * sizeof(float));
+        if (raw_chain) {
+            context_.write_buffer(raw_log_scales, gaussians.log_scales.data(), gaussians.log_scales.size_bytes());
+            context_.write_buffer(raw_rotations, gaussians.raw_rotations.data(), gaussians.raw_rotations.size_bytes());
+            context_.write_buffer(opacity_logits, gaussians.opacity_logits.data(), gaussians.opacity_logits.size_bytes());
+            if (gaussians.filter_3d.empty()) {
+                zero_buffer(context_, filter_3d, static_cast<std::size_t>(count) * sizeof(float));
+            } else {
+                context_.write_buffer(filter_3d, gaussians.filter_3d.data(), gaussians.filter_3d.size_bytes());
+            }
+        }
         has_sh_ = has_sh;
         has_scales_ = has_scales;
+        raw_chain_ = raw_chain;
         count_ = count;
         sh_degree_ = gaussians.sh_degree;
         sh_bases_ = gaussians.sh_bases;
         model_ready_ = true;
+        last_frame_has_snapshots_ = false;
     }
 
     void update_means_and_opacities(std::span<const float> means, std::span<const float> opacities) {
@@ -159,9 +198,10 @@ public:
         const std::scoped_lock lock(context_.dispatch_mutex);
         context_.write_buffer(means_, means.data(), means.size() * sizeof(float));
         context_.write_buffer(opacities_, opacities.data(), opacities.size() * sizeof(float));
+        last_frame_has_snapshots_ = false;
     }
 
-    void clear_model() { model_ready_ = false; count_ = 0; }
+    void clear_model() { model_ready_ = false; count_ = 0; last_frame_has_snapshots_ = false; }
     bool has_model() const noexcept { return model_ready_; }
 
     struct FrameCounts {
@@ -328,8 +368,12 @@ public:
         Buffer& snap = settings.pixel_snapshots
             ? grow(snap_, static_cast<std::uint64_t>(snap_buckets) * 256ull * 2ull * sizeof(float) * 4)
             : dummy_;
-        if (!pack_rgba)
-            zero_buffer(context_, *out_u, static_cast<std::size_t>(count) * sizeof(std::uint32_t));
+        if (!pack_rgba) {
+            const std::size_t clear_uints = settings.pixel_snapshots
+                ? static_cast<std::size_t>(count) + pixels + tiles + snap_buckets
+                : count;
+            zero_buffer(context_, *out_u, clear_uints * sizeof(std::uint32_t));
+        }
 
         Push blend_push{};
         blend_push.u[0] = camera.width;
@@ -365,6 +409,29 @@ public:
             dispatch(pack_, {&out_f, &rgba}, pack_push, div_up(pixels, 256));
         }
         flush_batch();
+        last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
+        last_instance_values_ = instance_values;
+        last_width_ = camera.width;
+        last_height_ = camera.height;
+        last_grid_x_ = grid_x;
+        last_tiles_ = tiles;
+        last_pixels_ = pixels;
+        last_bucket_limit_ = snap_buckets;
+        last_mode_ = camera.mode;
+        last_wrap_width_ = wrap_width;
+        last_fx_ = camera.fx;
+        last_fy_ = camera.fy;
+        last_cx_ = camera.cx;
+        last_cy_ = camera.cy;
+        last_k1_ = camera.k1;
+        last_k2_ = camera.k2;
+        last_k3_ = camera.k3;
+        last_k4_ = camera.k4;
+        last_kernel_size_ = settings.kernel_size;
+        last_scale_modifier_ = settings.scale_modifier;
+        last_background_[0] = settings.background[0];
+        last_background_[1] = settings.background[1];
+        last_background_[2] = settings.background[2];
         return {instances, visible};
     }
 
@@ -405,6 +472,276 @@ public:
         return collect(camera, settings, counts, gauss_u_, out_f_, out_u_);
     }
 
+    SplatBlendGradients backward_blend(
+        const std::span<const float> dL_color, const std::span<const float> dL_alpha) {
+        require(last_frame_has_snapshots_,
+                "backward_blend requires the latest render to use pixel_snapshots=true");
+        require(dL_color.size() == static_cast<std::size_t>(last_pixels_) * 3,
+                "dL_color must have shape [3,H,W]");
+        require(dL_alpha.size() == last_pixels_, "dL_alpha must have shape [H,W]");
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& loss_color = grow(loss_color_, dL_color.size_bytes());
+        Buffer& loss_alpha = grow(loss_alpha_, dL_alpha.size_bytes());
+        const std::size_t grad_count = static_cast<std::size_t>(count_) * 10;
+        Buffer& grad = grow(blend_grad_, grad_count * sizeof(float));
+        context_.write_buffer(loss_color, dL_color.data(), dL_color.size_bytes());
+        context_.write_buffer(loss_alpha, dL_alpha.data(), dL_alpha.size_bytes());
+        zero_buffer(context_, grad, grad_count * sizeof(float));
+
+        Push push{};
+        push.u[0] = last_width_;
+        push.u[1] = last_height_;
+        push.u[2] = last_grid_x_;
+        push.u[3] = last_mode_;
+        push.u[4] = static_cast<std::uint32_t>(last_wrap_width_);
+        push.u[5] = count_;
+        push.u[6] = last_pixels_;
+        push.u[7] = last_tiles_;
+        push.u[8] = last_bucket_limit_;
+        set_float(push, 9, last_background_[0]);
+        set_float(push, 10, last_background_[1]);
+        set_float(push, 11, last_background_[2]);
+        dispatch(
+            blend_backward_,
+            {&tile_ranges_, last_instance_values_, &gauss_f_, &out_f_, &out_u_,
+             &bucket_offsets_, &snap_, &loss_color, &loss_alpha, &grad},
+            push, div_up(last_bucket_limit_, 8));
+        flush_batch();
+
+        const auto packed = download_vector<float>(context_, grad, grad_count);
+        SplatBlendGradients output;
+        output.mean2d.assign(packed.begin(), packed.begin() + static_cast<std::ptrdiff_t>(count_) * 3);
+        output.conic_opacity.assign(
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 3,
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7);
+        output.colors.assign(
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7, packed.end());
+        return output;
+    }
+
+    SplatModelGradients backward(
+        const std::span<const float> dL_color, const std::span<const float> dL_alpha) {
+        // This also leaves the packed blend gradients resident for the model
+        // pass below. Keeping this path simple makes the public CPU API useful
+        // for parity tests; the device-resident training API can fuse the two
+        // submissions without changing either shader.
+        (void)backward_blend(dL_color, dL_alpha);
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        const std::size_t feature_count = has_sh_
+            ? static_cast<std::size_t>(count_) * sh_bases_ * 3
+            : static_cast<std::size_t>(count_) * 3;
+        const std::size_t total_count = feature_count + static_cast<std::size_t>(count_) * 25;
+        Buffer& gradient = grow(model_grad_, total_count * sizeof(float));
+
+        Push push{};
+        push.u[0] = count_;
+        push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
+                    (raw_chain_ ? 4u : 0u);
+        push.u[2] = last_mode_;
+        push.u[3] = last_width_;
+        push.u[4] = last_height_;
+        push.u[5] = sh_degree_;
+        push.u[6] = sh_bases_;
+        set_float(push, 7, last_fx_);
+        set_float(push, 8, last_fy_);
+        set_float(push, 9, last_cx_);
+        set_float(push, 10, last_cy_);
+        set_float(push, 11, last_k1_);
+        set_float(push, 12, last_k2_);
+        set_float(push, 13, last_k3_);
+        set_float(push, 14, last_k4_);
+        set_float(push, 15, last_kernel_size_);
+        set_float(push, 16, last_scale_modifier_);
+        dispatch(
+            project_backward_,
+            {&means_, &opacities_, &scales_, &rotations_, &covariances_, &colors_,
+             &camera_, &gauss_f_, &gauss_u_, &blend_grad_, &raw_log_scales_,
+             &raw_rotations_, &opacity_logits_, &filter_3d_, &gradient},
+            push, div_up(count_, 256));
+        flush_batch();
+
+        const auto packed = download_vector<float>(context_, gradient, total_count);
+        SplatModelGradients output;
+        std::size_t offset = 0;
+        const auto take = [&](std::vector<float>& destination, const std::size_t size) {
+            destination.assign(packed.begin() + static_cast<std::ptrdiff_t>(offset),
+                               packed.begin() + static_cast<std::ptrdiff_t>(offset + size));
+            offset += size;
+        };
+        take(output.means, static_cast<std::size_t>(count_) * 3);
+        if (has_sh_) take(output.sh, feature_count);
+        else take(output.colors, feature_count);
+        take(output.opacities, count_);
+        if (has_scales_) {
+            take(output.scales, static_cast<std::size_t>(count_) * 3);
+            take(output.rotations, static_cast<std::size_t>(count_) * 4);
+            offset += static_cast<std::size_t>(count_) * 6;
+        } else {
+            offset += static_cast<std::size_t>(count_) * 7;
+            take(output.covariances, static_cast<std::size_t>(count_) * 6);
+        }
+        if (raw_chain_) {
+            take(output.log_scales, static_cast<std::size_t>(count_) * 3);
+            take(output.raw_rotations, static_cast<std::size_t>(count_) * 4);
+            take(output.opacity_logits, count_);
+        }
+        return output;
+    }
+
+    void backward_blend_device(
+        const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+        const SplatBufferView& packed_gradients) {
+        require(last_frame_has_snapshots_,
+                "backward_blend_device requires the latest render to use pixel_snapshots=true");
+        const std::uint64_t color_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
+        const std::uint64_t alpha_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
+        const std::uint64_t gradient_bytes = static_cast<std::uint64_t>(count_) * 10 * sizeof(float);
+        require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
+                "device dL_color is too small");
+        require(dL_alpha.buffer != VK_NULL_HANDLE && dL_alpha.bytes >= alpha_bytes,
+                "device dL_alpha is too small");
+        require(packed_gradients.buffer != VK_NULL_HANDLE && packed_gradients.bytes >= gradient_bytes,
+                "device packed_gradients is too small");
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+        const std::uint64_t alignment = std::max<std::uint64_t>(
+            4, properties.limits.minStorageBufferOffsetAlignment);
+        require(dL_color.offset % alignment == 0 && dL_alpha.offset % alignment == 0 &&
+                    packed_gradients.offset % alignment == 0,
+                "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
+
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Push clear_push{};
+        clear_push.u[0] = static_cast<std::uint32_t>(gradient_bytes / sizeof(float));
+        dispatch_infos(
+            clear_, {{packed_gradients.buffer, packed_gradients.offset, gradient_bytes}},
+            clear_push, div_up(clear_push.u[0], 256));
+
+        Push push{};
+        push.u[0] = last_width_;
+        push.u[1] = last_height_;
+        push.u[2] = last_grid_x_;
+        push.u[3] = last_mode_;
+        push.u[4] = static_cast<std::uint32_t>(last_wrap_width_);
+        push.u[5] = count_;
+        push.u[6] = last_pixels_;
+        push.u[7] = last_tiles_;
+        push.u[8] = last_bucket_limit_;
+        set_float(push, 9, last_background_[0]);
+        set_float(push, 10, last_background_[1]);
+        set_float(push, 11, last_background_[2]);
+        std::vector<VkDescriptorBufferInfo> infos{
+            descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
+            descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
+            {dL_color.buffer, dL_color.offset, color_bytes},
+            {dL_alpha.buffer, dL_alpha.offset, alpha_bytes},
+            {packed_gradients.buffer, packed_gradients.offset, gradient_bytes}};
+        dispatch_infos(blend_backward_, infos, push, div_up(last_bucket_limit_, 8));
+        flush_batch();
+    }
+
+    std::uint64_t blend_gradient_float_count() const noexcept {
+        return static_cast<std::uint64_t>(count_) * 10;
+    }
+
+    std::uint64_t model_gradient_float_count() const noexcept {
+        const std::uint64_t feature_count = has_sh_
+            ? static_cast<std::uint64_t>(count_) * sh_bases_ * 3
+            : static_cast<std::uint64_t>(count_) * 3;
+        return feature_count + static_cast<std::uint64_t>(count_) * 25;
+    }
+
+    void backward_device(
+        const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+        const SplatBufferView& packed_model_gradients) {
+        require(last_frame_has_snapshots_,
+                "backward_device requires the latest render to use pixel_snapshots=true");
+        const std::uint64_t color_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
+        const std::uint64_t alpha_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
+        const std::uint64_t blend_bytes = blend_gradient_float_count() * sizeof(float);
+        const std::uint64_t model_bytes = model_gradient_float_count() * sizeof(float);
+        require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
+                "device dL_color is too small");
+        require(dL_alpha.buffer != VK_NULL_HANDLE && dL_alpha.bytes >= alpha_bytes,
+                "device dL_alpha is too small");
+        require(packed_model_gradients.buffer != VK_NULL_HANDLE &&
+                    packed_model_gradients.bytes >= model_bytes,
+                "device packed_model_gradients is too small");
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+        const std::uint64_t alignment = std::max<std::uint64_t>(
+            4, properties.limits.minStorageBufferOffsetAlignment);
+        require(dL_color.offset % alignment == 0 && dL_alpha.offset % alignment == 0 &&
+                    packed_model_gradients.offset % alignment == 0,
+                "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
+
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& blend_gradient = grow(blend_grad_, blend_bytes);
+        begin_batch();
+        vkCmdFillBuffer(command_, blend_gradient.handle, 0, blend_bytes, 0u);
+        VkBufferMemoryBarrier fill_barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        fill_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        fill_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        fill_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        fill_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        fill_barrier.buffer = blend_gradient.handle;
+        fill_barrier.offset = 0;
+        fill_barrier.size = blend_bytes;
+        vkCmdPipelineBarrier(
+            command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 1, &fill_barrier, 0, nullptr);
+
+        Push blend_push{};
+        blend_push.u[0] = last_width_;
+        blend_push.u[1] = last_height_;
+        blend_push.u[2] = last_grid_x_;
+        blend_push.u[3] = last_mode_;
+        blend_push.u[4] = static_cast<std::uint32_t>(last_wrap_width_);
+        blend_push.u[5] = count_;
+        blend_push.u[6] = last_pixels_;
+        blend_push.u[7] = last_tiles_;
+        blend_push.u[8] = last_bucket_limit_;
+        set_float(blend_push, 9, last_background_[0]);
+        set_float(blend_push, 10, last_background_[1]);
+        set_float(blend_push, 11, last_background_[2]);
+        std::vector<VkDescriptorBufferInfo> blend_infos{
+            descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
+            descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
+            {dL_color.buffer, dL_color.offset, color_bytes},
+            {dL_alpha.buffer, dL_alpha.offset, alpha_bytes}, descriptor(blend_gradient)};
+        dispatch_infos(
+            blend_backward_, blend_infos, blend_push, div_up(last_bucket_limit_, 8));
+
+        Push project_push{};
+        project_push.u[0] = count_;
+        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
+                            (raw_chain_ ? 4u : 0u);
+        project_push.u[2] = last_mode_;
+        project_push.u[3] = last_width_;
+        project_push.u[4] = last_height_;
+        project_push.u[5] = sh_degree_;
+        project_push.u[6] = sh_bases_;
+        set_float(project_push, 7, last_fx_);
+        set_float(project_push, 8, last_fy_);
+        set_float(project_push, 9, last_cx_);
+        set_float(project_push, 10, last_cy_);
+        set_float(project_push, 11, last_k1_);
+        set_float(project_push, 12, last_k2_);
+        set_float(project_push, 13, last_k3_);
+        set_float(project_push, 14, last_k4_);
+        set_float(project_push, 15, last_kernel_size_);
+        set_float(project_push, 16, last_scale_modifier_);
+        std::vector<VkDescriptorBufferInfo> project_infos{
+            descriptor(means_), descriptor(opacities_), descriptor(scales_), descriptor(rotations_),
+            descriptor(covariances_), descriptor(colors_), descriptor(camera_), descriptor(gauss_f_),
+            descriptor(gauss_u_), descriptor(blend_gradient), descriptor(raw_log_scales_),
+            descriptor(raw_rotations_), descriptor(opacity_logits_), descriptor(filter_3d_),
+            {packed_model_gradients.buffer, packed_model_gradients.offset, model_bytes}};
+        dispatch_infos(
+            project_backward_, project_infos, project_push, div_up(count_, 256));
+        flush_batch();
+    }
+
     SplatRgbaImage render_rgba_device(const SplatCamera& camera, SplatSettings settings) {
         settings.need_depth = false;
         settings.pixel_snapshots = false;
@@ -430,7 +767,13 @@ private:
     // PCIe. Only the tiny per-frame control blocks stay host visible.
     Buffer alloc(
         VkDeviceSize bytes, const BufferMemory memory = BufferMemory::device_local,
-        const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) const {
+        VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) const {
+        // Device-local buffers are uploaded/read/cleared through the transfer
+        // path as well as bound as storage. Declaring both capabilities keeps
+        // those operations valid under Vulkan validation.
+        if (memory == BufferMemory::device_local) {
+            usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        }
         return context_.create_buffer(std::max<VkDeviceSize>(bytes, 4), usage, memory);
     }
 
@@ -486,6 +829,14 @@ private:
 
     void dispatch(const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers, const Push& push,
                   std::uint32_t groups_x, std::uint32_t groups_y = 1) {
+        std::vector<VkDescriptorBufferInfo> infos;
+        infos.reserve(buffers.size());
+        for (const Buffer* buffer : buffers) infos.push_back(descriptor(*buffer));
+        dispatch_infos(pipeline, infos, push, groups_x, groups_y);
+    }
+
+    void dispatch_infos(const ComputePipeline& pipeline, const std::vector<VkDescriptorBufferInfo>& infos,
+                        const Push& push, std::uint32_t groups_x, std::uint32_t groups_y = 1) {
         if (groups_x == 0 || groups_y == 0) return;
         begin_batch();
         VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -497,11 +848,8 @@ private:
             throw std::runtime_error("vkAllocateDescriptorSets failed");
         }
         pending_sets_.push_back(descriptor_set);
-        std::vector<VkDescriptorBufferInfo> infos;
-        std::vector<VkWriteDescriptorSet> writes(buffers.size());
-        infos.reserve(buffers.size());
-        for (const Buffer* buffer : buffers) infos.push_back(descriptor(*buffer));
-        for (std::uint32_t i = 0; i < buffers.size(); ++i) {
+        std::vector<VkWriteDescriptorSet> writes(infos.size());
+        for (std::uint32_t i = 0; i < infos.size(); ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = descriptor_set;
             writes[i].dstBinding = i;
@@ -599,6 +947,9 @@ private:
     ComputePipeline scatter_;
     ComputePipeline ranges_;
     ComputePipeline blend_;
+    ComputePipeline blend_backward_;
+    ComputePipeline project_backward_;
+    ComputePipeline clear_;
     ComputePipeline pack_;
     VkCommandBuffer command_{};
     std::vector<VkDescriptorSet> pending_sets_;
@@ -606,6 +957,7 @@ private:
     bool model_ready_{};
     bool has_sh_{};
     bool has_scales_{true};
+    bool raw_chain_{};
     std::uint32_t count_{};
     std::uint32_t sh_degree_{};
     std::uint32_t sh_bases_{};
@@ -615,6 +967,10 @@ private:
     Buffer rotations_;
     Buffer covariances_;
     Buffer colors_;
+    Buffer raw_log_scales_;
+    Buffer raw_rotations_;
+    Buffer opacity_logits_;
+    Buffer filter_3d_;
     Buffer camera_;
     Buffer gauss_f_;
     Buffer gauss_u_;
@@ -633,6 +989,31 @@ private:
     Buffer out_u_;
     Buffer snap_;
     Buffer rgba_;
+    Buffer loss_color_;
+    Buffer loss_alpha_;
+    Buffer blend_grad_;
+    Buffer model_grad_;
+    bool last_frame_has_snapshots_{};
+    Buffer* last_instance_values_ = &dummy_;
+    std::uint32_t last_width_{};
+    std::uint32_t last_height_{};
+    std::uint32_t last_grid_x_{};
+    std::uint32_t last_tiles_{};
+    std::uint32_t last_pixels_{};
+    std::uint32_t last_bucket_limit_{};
+    std::uint32_t last_mode_{};
+    int last_wrap_width_{};
+    float last_background_[3]{};
+    float last_fx_{};
+    float last_fy_{};
+    float last_cx_{};
+    float last_cy_{};
+    float last_k1_{};
+    float last_k2_{};
+    float last_k3_{};
+    float last_k4_{};
+    float last_kernel_size_{};
+    float last_scale_modifier_{1.0F};
 };
 
 SplatRasterizer::SplatRasterizer(Context& context) : impl_(std::make_unique<Impl>(*context.impl_)) {}
@@ -658,6 +1039,36 @@ bool SplatRasterizer::has_model() const noexcept { return impl_->has_model(); }
 
 SplatForwardOutput SplatRasterizer::render(const SplatCamera& camera, const SplatSettings& settings) {
     return impl_->render(camera, settings);
+}
+
+SplatBlendGradients SplatRasterizer::backward_blend(
+    const std::span<const float> dL_color, const std::span<const float> dL_alpha) {
+    return impl_->backward_blend(dL_color, dL_alpha);
+}
+
+SplatModelGradients SplatRasterizer::backward(
+    const std::span<const float> dL_color, const std::span<const float> dL_alpha) {
+    return impl_->backward(dL_color, dL_alpha);
+}
+
+void SplatRasterizer::backward_blend_device(
+    const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+    const SplatBufferView& packed_gradients) {
+    impl_->backward_blend_device(dL_color, dL_alpha, packed_gradients);
+}
+
+std::uint64_t SplatRasterizer::blend_gradient_float_count() const noexcept {
+    return impl_->blend_gradient_float_count();
+}
+
+void SplatRasterizer::backward_device(
+    const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+    const SplatBufferView& packed_model_gradients) {
+    impl_->backward_device(dL_color, dL_alpha, packed_model_gradients);
+}
+
+std::uint64_t SplatRasterizer::model_gradient_float_count() const noexcept {
+    return impl_->model_gradient_float_count();
 }
 
 void SplatRasterizer::render_rgba(

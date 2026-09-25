@@ -47,6 +47,14 @@ struct SplatGaussians {
     std::span<const float> scales;
     std::span<const float> rotations;
     std::span<const float> covariances;
+    // Optional pre-activation parameters used by the training backward pass.
+    // When all three are supplied, gradients are also propagated through
+    // exp/filter_3d, quaternion normalization, and sigmoid/determinant scaling.
+    std::span<const float> log_scales;
+    std::span<const float> raw_rotations;
+    std::span<const float> opacity_logits;
+    // Per-Gaussian isotropic 3D filter radius. Empty means zero.
+    std::span<const float> filter_3d;
     std::uint32_t sh_degree = 0;
     std::uint32_t sh_bases = 0;
 };
@@ -75,6 +83,42 @@ struct SplatForwardOutput {
     std::vector<float> normal;
     std::vector<float> visibility;
     std::vector<int> radii;
+};
+
+// Intermediate gradients produced by the alpha-compositing backward pass.
+// These are the inputs to the projection/SH parameter backward pass: mean2d
+// is [N,3] (xy gradient plus the densification magnitude), conic_opacity is
+// [N,4], and colors is [N,3].
+struct SplatBlendGradients {
+    std::vector<float> mean2d;
+    std::vector<float> conic_opacity;
+    std::vector<float> colors;
+};
+
+// Gradients of every model input consumed by the forward pass. Activated
+// gradients match splat_drender::ModelGradients directly. The final three
+// arrays are populated when SplatGaussians supplied the corresponding raw
+// parameters, and include the complete activation chain used by training.
+struct SplatModelGradients {
+    std::vector<float> means;
+    std::vector<float> sh;
+    std::vector<float> colors;
+    std::vector<float> opacities;
+    std::vector<float> scales;
+    std::vector<float> rotations;
+    std::vector<float> covariances;
+    std::vector<float> log_scales;
+    std::vector<float> raw_rotations;
+    std::vector<float> opacity_logits;
+};
+
+// Non-owning storage-buffer slice for zero-copy interop (for example with a
+// TinyTensor Vulkan tensor). The caller owns the buffer and must synchronize
+// any earlier writes before calling the rasterizer.
+struct SplatBufferView {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    std::uint64_t offset = 0;
+    std::uint64_t bytes = 0;
 };
 
 // 8-bit RGBA frame that stayed on the device. The buffer is owned by the
@@ -176,6 +220,29 @@ public:
 
     [[nodiscard]] SplatForwardOutput render(
         const SplatCamera& camera, const SplatSettings& settings);
+    // Consumes the most recent render() made with pixel_snapshots=true.
+    // Loss images are channel-major: color [3,H,W], alpha [H,W].
+    [[nodiscard]] SplatBlendGradients backward_blend(
+        std::span<const float> dL_color, std::span<const float> dL_alpha);
+    // Full color/alpha backward through compositing, projection/covariance,
+    // SH, and (when supplied at upload) the model activation chain.
+    [[nodiscard]] SplatModelGradients backward(
+        std::span<const float> dL_color, std::span<const float> dL_alpha);
+    // Device-resident form of backward_blend. `packed_gradients` contains
+    // [mean2d:3*N, conic_opacity:4*N, colors:3*N] Float32 values and is zeroed
+    // before accumulation. All buffers must belong to this Context's VkDevice.
+    void backward_blend_device(
+        const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+        const SplatBufferView& packed_gradients);
+    [[nodiscard]] std::uint64_t blend_gradient_float_count() const noexcept;
+    // Fully device-resident color/alpha backward. The output layout is
+    // [means, SH-or-colors, opacities, scales, rotations, covariances,
+    //  log_scales, raw_rotations, opacity_logits]. Slots that do not apply to
+    // the uploaded representation remain zero, preserving one stable layout.
+    void backward_device(
+        const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
+        const SplatBufferView& packed_model_gradients);
+    [[nodiscard]] std::uint64_t model_gradient_float_count() const noexcept;
     // Same frame as render() with need_depth off, but the color stays on the
     // device as RGBA8: no float readback and no host-side quantization.
     [[nodiscard]] SplatRgbaImage render_rgba_device(

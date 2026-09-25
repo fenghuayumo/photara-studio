@@ -12,8 +12,11 @@
 #include <vector>
 
 #include "splat_blend.hlsl.embedded.hpp"
+#include "splat_blend_backward.hlsl.embedded.hpp"
+#include "splat_clear.hlsl.embedded.hpp"
 #include "splat_emit.hlsl.embedded.hpp"
 #include "splat_pack_rgba.hlsl.embedded.hpp"
+#include "splat_project_backward.hlsl.embedded.hpp"
 #include "splat_preprocess.hlsl.embedded.hpp"
 #include "splat_radix_hist.hlsl.embedded.hpp"
 #include "splat_radix_scatter.hlsl.embedded.hpp"
@@ -132,8 +135,17 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     if (shader_name == "splat_blend.hlsl.spv") {
         return std::as_bytes(std::span{splat_blend_hlsl_spv});
     }
+    if (shader_name == "splat_blend_backward.hlsl.spv") {
+        return std::as_bytes(std::span{splat_blend_backward_hlsl_spv});
+    }
+    if (shader_name == "splat_clear.hlsl.spv") {
+        return std::as_bytes(std::span{splat_clear_hlsl_spv});
+    }
     if (shader_name == "splat_pack_rgba.hlsl.spv") {
         return std::as_bytes(std::span{splat_pack_rgba_hlsl_spv});
+    }
+    if (shader_name == "splat_project_backward.hlsl.spv") {
+        return std::as_bytes(std::span{splat_project_backward_hlsl_spv});
     }
     throw std::invalid_argument("Unknown embedded shader: " + shader_name);
 }
