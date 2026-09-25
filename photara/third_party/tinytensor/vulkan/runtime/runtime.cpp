@@ -36,6 +36,21 @@ namespace {
 
 constexpr std::size_t kMinBufferBytes = 16;
 
+// A batch submits once it has this many recorded commands, so one submission
+// stays small and a caller that never reads back still makes progress. It sits
+// far above the op count of a real step.
+constexpr std::uint32_t kMaxCommandsPerBatch = 4096;
+
+// Recycled buffers are kept up to this budget, because a workload with moving
+// tensor shapes must not grow VRAM without bound.
+constexpr std::size_t kDefaultPoolBudgetBytes = 1ULL << 30;
+
+// Matches the rounding Buffer's constructor applies, so the pool is keyed by
+// the size an allocation actually has.
+VkDeviceSize pooled_size_of(VkDeviceSize bytes) {
+    return (std::max<VkDeviceSize>(bytes, kMinBufferBytes) + 3U) & ~VkDeviceSize{3};
+}
+
 std::optional<std::uint32_t> env_u32(const char* name) {
 #ifdef _WIN32
     char* raw = nullptr;
@@ -204,7 +219,8 @@ std::mutex& singleton_mutex() {
 
 } // namespace
 
-Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes, bool host_visible)
+Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes,
+               const MemoryKind kind)
     : device_(logical),
       size_((std::max<VkDeviceSize>(bytes, kMinBufferBytes) + 3u) & ~VkDeviceSize{3}) {
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -220,18 +236,46 @@ Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes, 
     allocation.allocationSize = requirements.size;
     const VkMemoryPropertyFlags host_flags =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    if (host_visible) {
-        allocation.memoryTypeIndex = find_memory_type(physical, requirements.memoryTypeBits, host_flags);
-    } else {
+    switch (kind) {
+    case MemoryKind::host_cached:
+        // A readback is bounded by how fast the CPU can read the staging
+        // memory, and write-combined memory is an order of magnitude slower to
+        // read than cached memory.
+        allocation.memoryTypeIndex =
+            try_find_memory_type(physical, requirements.memoryTypeBits,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                     VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                .value_or(try_find_memory_type(physical, requirements.memoryTypeBits,
+                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                   VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+                              .value_or(find_memory_type(physical, requirements.memoryTypeBits,
+                                                         host_flags)));
+        break;
+    case MemoryKind::host_visible:
+        allocation.memoryTypeIndex =
+            find_memory_type(physical, requirements.memoryTypeBits, host_flags);
+        break;
+    case MemoryKind::device_local:
+    default:
         const auto device_local = try_find_memory_type(
             physical, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         allocation.memoryTypeIndex = device_local.value_or(
             find_memory_type(physical, requirements.memoryTypeBits, host_flags));
+        break;
     }
     check(vkAllocateMemory(device_, &allocation, nullptr, &memory_), "vkAllocateMemory");
     check(vkBindBufferMemory(device_, handle_, memory_, 0), "vkBindBufferMemory");
-    if (host_visible) {
+    if (kind != MemoryKind::device_local) {
         check(vkMapMemory(device_, memory_, 0, size_, 0, &mapped_), "vkMapMemory");
+        VkPhysicalDeviceMemoryProperties properties{};
+        vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+        coherent_ = (properties.memoryTypes[allocation.memoryTypeIndex].propertyFlags &
+                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+        VkPhysicalDeviceProperties limits{};
+        vkGetPhysicalDeviceProperties(physical, &limits);
+        non_coherent_atom_size_ =
+            std::max<VkDeviceSize>(limits.limits.nonCoherentAtomSize, 1);
     }
 }
 
@@ -261,6 +305,8 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
         std::swap(memory_, other.memory_);
         std::swap(size_, other.size_);
         std::swap(mapped_, other.mapped_);
+        std::swap(coherent_, other.coherent_);
+        std::swap(non_coherent_atom_size_, other.non_coherent_atom_size_);
     }
     return *this;
 }
@@ -303,7 +349,13 @@ Context::Context() {
     pick_device();
     create_device();
     create_pools();
-    dummy_ = std::make_unique<Buffer>(physical_, device_, kMinBufferBytes, false);
+    // Recycled buffers are held up to this budget; override with
+    // TINYTENSOR_VULKAN_POOL_BYTES for a workload with much larger tensors.
+    const std::uint32_t pool_budget_override = env_u32("TINYTENSOR_VULKAN_POOL_BYTES").value_or(0);
+    pool_budget_bytes_ =
+        pool_budget_override != 0 ? static_cast<std::size_t>(pool_budget_override)
+                                  : kDefaultPoolBudgetBytes;
+    dummy_ = std::make_unique<Buffer>(physical_, device_, kMinBufferBytes, MemoryKind::device_local);
     create_pipelines();
 }
 
@@ -529,10 +581,32 @@ void Context::create_pipelines() {
 
 void Context::destroy() {
     if (device_ != VK_NULL_HANDLE) {
+        // Retire the open batch before anything it references is destroyed.
+        // Teardown runs from a destructor, so a device that is already lost
+        // must not turn into a thrown exception here.
+        if (recording_) {
+            vkEndCommandBuffer(command_);
+            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &command_;
+            if (vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS) {
+                vkQueueWaitIdle(queue_);
+            }
+        }
+        recording_ = false;
         vkDeviceWaitIdle(device_);
     }
+    alive_ = false;
+    for (auto& entry : free_buffers_) {
+        for (Buffer* buffer : entry.second) {
+            delete buffer;
+        }
+    }
+    free_buffers_.clear();
+    pooled_bytes_ = 0;
     dummy_.reset();
     staging_.reset();
+    readback_staging_.reset();
     for (Pipeline& pipeline : pipelines_) {
         if (pipeline.handle != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_, pipeline.handle, nullptr);
@@ -547,6 +621,10 @@ void Context::destroy() {
     }
     if (descriptor_pool_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+    }
+    if (command_ != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(device_, command_pool_, 1, &command_);
+        command_ = VK_NULL_HANDLE;
     }
     if (command_pool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, command_pool_, nullptr);
@@ -570,7 +648,60 @@ void Context::destroy() {
 
 std::shared_ptr<Buffer> Context::alloc(std::size_t bytes) {
     std::scoped_lock lock(mutex_);
-    return std::make_shared<Buffer>(physical_, device_, static_cast<VkDeviceSize>(bytes), false);
+    return acquire_buffer_locked(bytes);
+}
+
+std::shared_ptr<Buffer> Context::acquire_buffer_locked(const std::size_t bytes) {
+    // A released Buffer comes back through this deleter instead of being
+    // destroyed, which is what stops a repeated shape from paying
+    // vkCreateBuffer/vkAllocateMemory/vkBindBufferMemory on every step.
+    const auto release = [this](Buffer* buffer) {
+        std::scoped_lock lock(mutex_);
+        if (!alive_) {
+            // The device is already gone; touching the handle would be worse
+            // than leaking it at process exit.
+            return;
+        }
+        recycle_locked(buffer);
+    };
+    const VkDeviceSize size = pooled_size_of(static_cast<VkDeviceSize>(bytes));
+    auto& free_list = free_buffers_[static_cast<std::size_t>(size)];
+    if (!free_list.empty()) {
+        Buffer* buffer = free_list.back();
+        free_list.pop_back();
+        pooled_bytes_ -= static_cast<std::size_t>(buffer->size());
+        return std::shared_ptr<Buffer>(buffer, release);
+    }
+    return std::shared_ptr<Buffer>(new Buffer(physical_, device_, size, MemoryKind::device_local),
+                                   release);
+}
+
+void Context::recycle_locked(Buffer* buffer) {
+    pooled_bytes_ += static_cast<std::size_t>(buffer->size());
+    free_buffers_[static_cast<std::size_t>(buffer->size())].push_back(buffer);
+    if (!recording_) {
+        // A buffer can only be destroyed while no batch is recording: a
+        // recorded command still holds the handle even though no tensor does.
+        trim_pool_locked();
+    }
+}
+
+void Context::trim_pool_locked() {
+    if (recording_ || pooled_bytes_ <= pool_budget_bytes_) {
+        return;
+    }
+    for (auto& entry : free_buffers_) {
+        std::vector<Buffer*>& list = entry.second;
+        while (pooled_bytes_ > pool_budget_bytes_ && !list.empty()) {
+            Buffer* buffer = list.back();
+            list.pop_back();
+            pooled_bytes_ -= static_cast<std::size_t>(buffer->size());
+            delete buffer;
+        }
+        if (pooled_bytes_ <= pool_budget_bytes_) {
+            break;
+        }
+    }
 }
 
 Buffer& Context::dummy() {
@@ -581,30 +712,101 @@ void Context::ensure_staging(std::size_t bytes) {
     if (staging_ && staging_->size() >= bytes) {
         return;
     }
-    staging_ = std::make_unique<Buffer>(physical_, device_, static_cast<VkDeviceSize>(bytes), true);
+    staging_ = std::make_unique<Buffer>(physical_, device_, static_cast<VkDeviceSize>(bytes),
+                                        MemoryKind::host_visible);
+    staging_cursor_ = 0;
 }
 
-VkCommandBuffer Context::begin_commands() {
-    VkCommandBufferAllocateInfo alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    alloc.commandPool = command_pool_;
-    alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    alloc.commandBufferCount = 1;
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    check(vkAllocateCommandBuffers(device_, &alloc, &cmd), "vkAllocateCommandBuffers");
+// Cached host memory, because pulling a render target back to the host is
+// bound by the CPU read of the staging buffer.
+void Context::ensure_readback_staging(std::size_t bytes) {
+    if (readback_staging_ && readback_staging_->size() >= bytes) {
+        return;
+    }
+    readback_staging_ = std::make_unique<Buffer>(
+        physical_, device_, static_cast<VkDeviceSize>(bytes), MemoryKind::host_cached);
+}
+
+// One command buffer is recorded into and submitted once per flush, instead of
+// a fresh command buffer and a queue drain per op. The command buffer is kept
+// alive across flushes; only its contents are reset.
+void Context::begin_batch_locked() {
+    if (recording_) {
+        return;
+    }
+    if (command_ == VK_NULL_HANDLE) {
+        VkCommandBufferAllocateInfo alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        alloc.commandPool = command_pool_;
+        alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc.commandBufferCount = 1;
+        check(vkAllocateCommandBuffers(device_, &alloc, &command_), "vkAllocateCommandBuffers");
+    }
+    check(vkResetCommandBuffer(command_, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
-    return cmd;
+    check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer");
+    recording_ = true;
+    batch_commands_ = 0;
+    staging_cursor_ = 0;
 }
 
-void Context::submit(VkCommandBuffer cmd) {
-    check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
+void Context::flush_locked() {
+    if (!recording_) {
+        // Nothing is pending, so nothing references the staging buffer and the
+        // cursor starts clean for the next batch.
+        staging_cursor_ = 0;
+        return;
+    }
+    check(vkEndCommandBuffer(command_), "vkEndCommandBuffer");
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
+    submit.pCommandBuffers = &command_;
     check(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
     check(vkQueueWaitIdle(queue_), "vkQueueWaitIdle");
-    vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
+    recording_ = false;
+    batch_commands_ = 0;
+    // Every descriptor set the batch allocated is dead once the queue is idle,
+    // so the arena is recycled with one reset instead of a free per op.
+    staging_cursor_ = 0;
+    check(vkResetDescriptorPool(device_, descriptor_pool_, 0), "vkResetDescriptorPool");
+    trim_pool_locked();
+}
+
+void Context::flush() {
+    std::scoped_lock lock(mutex_);
+    flush_locked();
+}
+
+// Dispatches used to be separated by a queue submission, and that is what made
+// one op's writes visible to the next. In a single command buffer the
+// dependency has to be explicit.
+void Context::record_barrier_locked() {
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(command_,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                         &barrier, 0, nullptr, 0, nullptr);
+}
+
+VkDescriptorSet Context::acquire_descriptor_locked(const VkDescriptorSetLayout layout) {
+    VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    set_info.descriptorPool = descriptor_pool_;
+    set_info.descriptorSetCount = 1;
+    set_info.pSetLayouts = &layout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkResult result = vkAllocateDescriptorSets(device_, &set_info, &set);
+    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+        // The arena is exhausted: retire the batch (which is what makes the
+        // pool reset legal) and start a new one.
+        flush_locked();
+        begin_batch_locked();
+        result = vkAllocateDescriptorSets(device_, &set_info, &set);
+    }
+    check(result, "vkAllocateDescriptorSets");
+    return set;
 }
 
 void Context::barrier_buffer(VkCommandBuffer cmd, VkBuffer buffer, VkAccessFlags src_access,
@@ -637,13 +839,15 @@ void Context::fill_zero(Buffer& buffer, std::size_t offset, std::size_t bytes) {
     if (aligned_size == 0) {
         return;
     }
-    VkCommandBuffer cmd = begin_commands();
-    vkCmdFillBuffer(cmd, buffer.handle(), aligned_offset, aligned_size, 0);
-    barrier_buffer(cmd, buffer.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+    begin_batch_locked();
+    vkCmdFillBuffer(command_, buffer.handle(), aligned_offset, aligned_size, 0);
+    barrier_buffer(command_, buffer.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT,
                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
-    submit(cmd);
+    if (++batch_commands_ >= kMaxCommandsPerBatch) {
+        flush_locked();
+    }
 }
 
 void Context::copy(Buffer& dst, std::size_t dst_offset, const Buffer& src, std::size_t src_offset,
@@ -652,17 +856,19 @@ void Context::copy(Buffer& dst, std::size_t dst_offset, const Buffer& src, std::
         return;
     }
     std::scoped_lock lock(mutex_);
-    VkCommandBuffer cmd = begin_commands();
+    begin_batch_locked();
     VkBufferCopy region{};
     region.srcOffset = src_offset;
     region.dstOffset = dst_offset;
     region.size = bytes;
-    vkCmdCopyBuffer(cmd, src.handle(), dst.handle(), 1, &region);
-    barrier_buffer(cmd, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+    vkCmdCopyBuffer(command_, src.handle(), dst.handle(), 1, &region);
+    barrier_buffer(command_, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT,
                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
-    submit(cmd);
+    if (++batch_commands_ >= kMaxCommandsPerBatch) {
+        flush_locked();
+    }
 }
 
 void Context::upload(Buffer& dst, std::size_t dst_offset, const void* data, std::size_t bytes) {
@@ -670,18 +876,30 @@ void Context::upload(Buffer& dst, std::size_t dst_offset, const void* data, std:
         return;
     }
     std::scoped_lock lock(mutex_);
-    ensure_staging(bytes);
-    std::memcpy(staging_->mapped(), data, bytes);
-    VkCommandBuffer cmd = begin_commands();
+    // The staging buffer is shared by every recorded copy, so writing the same
+    // bytes again has to wait for the batch that already read them, and growing
+    // the staging buffer may not free memory a recorded copy still reads.
+    const std::size_t aligned = (bytes + 3U) & ~std::size_t{3};
+    if (staging_ == nullptr || staging_cursor_ + aligned > staging_->size()) {
+        flush_locked();
+        if (staging_ == nullptr || staging_->size() < aligned) {
+            ensure_staging(aligned);
+        }
+    }
+    begin_batch_locked();
+    std::memcpy(static_cast<char*>(staging_->mapped()) + staging_cursor_, data, bytes);
     VkBufferCopy region{};
-    region.srcOffset = 0;
+    region.srcOffset = staging_cursor_;
     region.dstOffset = dst_offset;
     region.size = bytes;
-    vkCmdCopyBuffer(cmd, staging_->handle(), dst.handle(), 1, &region);
-    barrier_buffer(cmd, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+    vkCmdCopyBuffer(command_, staging_->handle(), dst.handle(), 1, &region);
+    barrier_buffer(command_, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    submit(cmd);
+    staging_cursor_ += aligned;
+    if (++batch_commands_ >= kMaxCommandsPerBatch) {
+        flush_locked();
+    }
 }
 
 void Context::download(const Buffer& src, std::size_t src_offset, void* data, std::size_t bytes) {
@@ -689,17 +907,43 @@ void Context::download(const Buffer& src, std::size_t src_offset, void* data, st
         return;
     }
     std::scoped_lock lock(mutex_);
-    ensure_staging(bytes);
-    VkCommandBuffer cmd = begin_commands();
-    barrier_buffer(cmd, src.handle(), VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+    // The copy joins the open batch instead of forcing it to retire first, so a
+    // readback costs one submission and one wait instead of two. The readback
+    // buffer is a different buffer from the upload staging, and every readback
+    // ends by retiring the batch, so the queue is idle again by the time the
+    // host reads and offset zero is free for the next one.
+    const std::size_t aligned = (bytes + 3U) & ~std::size_t{3};
+    if (readback_staging_ == nullptr || readback_staging_->size() < aligned) {
+        flush_locked();
+        ensure_readback_staging(aligned);
+    }
+    begin_batch_locked();
+    barrier_buffer(command_, src.handle(), VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferCopy region{};
     region.srcOffset = src_offset;
     region.dstOffset = 0;
     region.size = bytes;
-    vkCmdCopyBuffer(cmd, src.handle(), staging_->handle(), 1, &region);
-    submit(cmd);
-    std::memcpy(data, staging_->mapped(), bytes);
+    vkCmdCopyBuffer(command_, src.handle(), readback_staging_->handle(), 1, &region);
+    barrier_buffer(command_, readback_staging_->handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_HOST_BIT);
+    flush_locked();
+    char* source = static_cast<char*>(readback_staging_->mapped());
+    if (!readback_staging_->coherent()) {
+        // The device wrote the staging buffer, so the host has to invalidate the
+        // range (rounded out to whole atoms) before reading it.
+        const VkDeviceSize atom = readback_staging_->non_coherent_atom_size();
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = readback_staging_->memory();
+        range.offset = 0;
+        const VkDeviceSize end = aligned;
+        range.size =
+            std::min<VkDeviceSize>((end + atom - 1) & ~(atom - 1), readback_staging_->size());
+        check(vkInvalidateMappedMemoryRanges(device_, 1, &range),
+              "vkInvalidateMappedMemoryRanges");
+    }
+    std::memcpy(data, source, bytes);
 }
 
 void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
@@ -714,20 +958,15 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
         throw std::invalid_argument("Vulkan dispatch binding count mismatch");
     }
 
-    VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    set_info.descriptorPool = descriptor_pool_;
-    set_info.descriptorSetCount = 1;
-    set_info.pSetLayouts = &pipeline.set_layout;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    VkResult alloc_result = vkAllocateDescriptorSets(device_, &set_info, &set);
-    if (alloc_result == VK_ERROR_OUT_OF_POOL_MEMORY || alloc_result == VK_ERROR_FRAGMENTED_POOL) {
-        check(vkResetDescriptorPool(device_, descriptor_pool_, 0), "vkResetDescriptorPool");
-        alloc_result = vkAllocateDescriptorSets(device_, &set_info, &set);
-    }
-    check(alloc_result, "vkAllocateDescriptorSets");
+    begin_batch_locked();
+    const VkDescriptorSet set = acquire_descriptor_locked(pipeline.set_layout);
 
-    std::vector<VkDescriptorBufferInfo> infos(bindings.size());
-    std::vector<VkWriteDescriptorSet> writes(bindings.size());
+    // Per-dispatch scratch kept off the heap: this runs once per op, so two
+    // vector allocations per op add up over a step.
+    descriptor_infos_.resize(bindings.size());
+    descriptor_writes_.resize(bindings.size());
+    std::vector<VkDescriptorBufferInfo>& infos = descriptor_infos_;
+    std::vector<VkWriteDescriptorSet>& writes = descriptor_writes_;
     for (std::uint32_t i = 0; i < bindings.size(); ++i) {
         infos[i].buffer = bindings[i].buffer;
         infos[i].offset = bindings[i].offset;
@@ -741,15 +980,19 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
     }
     vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
-    VkCommandBuffer cmd = begin_commands();
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &set, 0, nullptr);
+    vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
+    vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &set, 0,
+                            nullptr);
     if (push_bytes != 0 && push_constants != nullptr) {
-        vkCmdPushConstants(cmd, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push_constants);
+        vkCmdPushConstants(command_, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes,
+                           push_constants);
     }
-    vkCmdDispatch(cmd, groups_x, groups_y, groups_z);
-    submit(cmd);
-    vkFreeDescriptorSets(device_, descriptor_pool_, 1, &set);
+    vkCmdDispatch(command_, groups_x, groups_y, groups_z);
+    // The next dispatch in this batch reads what this one wrote.
+    record_barrier_locked();
+    if (++batch_commands_ >= kMaxCommandsPerBatch) {
+        flush_locked();
+    }
 }
 
 } // namespace tinytensor::vulkan::runtime

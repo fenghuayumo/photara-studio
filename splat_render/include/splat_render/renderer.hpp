@@ -18,8 +18,8 @@ inline constexpr std::uint32_t k_camera_orthographic = 1;
 inline constexpr std::uint32_t k_camera_fisheye = 2;
 inline constexpr std::uint32_t k_camera_equirectangular = 3;
 
-// gaussian is the 3DGUT ray kernel. rings is the projected ellipse: a faint
-// disc plus the SuperSplat rim, drawn from the same sorted Gaussians.
+// gaussian is the training EWA forward from photara_drender. rings is the
+// projected ellipse: a faint disc plus the SuperSplat rim.
 enum class Shading : std::uint32_t { gaussian = 0, rings = 1 };
 
 struct Camera {
@@ -69,14 +69,14 @@ struct Device {
     std::uint32_t queue_family{VK_QUEUE_FAMILY_IGNORED};
 };
 
-// Vulkan 3DGUT forward rasterizer. Attributes stay in storage buffers so a
-// later editor can change them and redraw without a CUDA preview process.
+// Vulkan splat preview. Gaussian shading uses the photara_drender EWA forward
+// so it matches training. Rings stay on this device.
 class Renderer {
 public:
     Renderer() = default;
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
-    ~Renderer() { reset(); }
+    ~Renderer();
 
     void attach(const Device& device);
     [[nodiscard]] bool attached() const noexcept { return device_ != VK_NULL_HANDLE; }
@@ -113,6 +113,7 @@ private:
         VkSampler sampler{};
         std::uint32_t width{};
         std::uint32_t height{};
+        bool sampled{};
     };
     struct FrameData {
         float world_to_camera[16]{};
@@ -128,6 +129,8 @@ private:
 
     bool ensure_device();
     bool ensure_frames(std::uint32_t width, std::uint32_t height);
+    bool draw_ewa(const Camera& camera, const FrameData& frame, FrameTarget& target);
+    void sync_ewa(const GaussianCloud& cloud);
     void destroy_storage(Storage& storage);
     void destroy_frames();
     void destroy_device_objects();
@@ -163,10 +166,12 @@ private:
     VkPipeline hist_pipeline_{};
     VkPipeline scan_pipeline_{};
     VkPipeline scatter_pipeline_{};
-    VkPipeline prepare_pipeline_{};
     VkPipeline ring_prepare_pipeline_{};
-    VkPipeline draw_pipeline_{};
     VkPipeline ring_pipeline_{};
+    // Owned here and deleted only in renderer.cpp, where the type is complete.
+    struct EwaPreview;
+    EwaPreview* ewa_{};
+    Storage rgba_staging_{};
     VkCommandPool command_pool_{};
     VkCommandBuffer command_{};
     VkFence fence_{};

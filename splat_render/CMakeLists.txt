@@ -14,9 +14,6 @@ set(_splat_render_shaders
     "${_splat_render_shader_dir}/gut_hist.comp"
     "${_splat_render_shader_dir}/gut_scan.comp"
     "${_splat_render_shader_dir}/gut_scatter.comp"
-    "${_splat_render_shader_dir}/gut_prepare.comp"
-    "${_splat_render_shader_dir}/gut_splat.vert"
-    "${_splat_render_shader_dir}/gut_splat.frag"
     "${_splat_render_shader_dir}/ring_prepare.cs.hlsl"
     "${_splat_render_shader_dir}/ring_draw.vs.hlsl"
     "${_splat_render_shader_dir}/ring_draw.ps.hlsl")
@@ -45,6 +42,10 @@ target_include_directories(splat_render
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
     PRIVATE "${_splat_render_generated}")
 target_link_libraries(splat_render PUBLIC Vulkan::Vulkan)
+if(TARGET splat_drender::vulkan)
+    target_link_libraries(splat_render PUBLIC splat_drender::vulkan)
+    target_compile_definitions(splat_render PRIVATE SPLAT_DRENDER_HAS_VULKAN=1)
+endif()
 target_compile_features(splat_render PUBLIC cxx_std_20)
 if(MSVC)
     target_compile_options(splat_render PRIVATE /utf-8)

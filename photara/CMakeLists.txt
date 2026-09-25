@@ -850,6 +850,32 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
         target_link_libraries(photara_splat_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.rasterizer COMMAND photara_splat_test)
+        if(TARGET splat_drender::vulkan)
+            # Vulkan backend of splat_drender against the CUDA backend it mirrors.
+            add_executable(photara_splat_vulkan_forward_test
+                "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/splat_drender/tests/vulkan_forward_compare.cpp")
+            target_link_libraries(photara_splat_vulkan_forward_test PRIVATE Photara::Splat splat_drender::vulkan)
+            if(WIN32)
+                add_custom_command(TARGET photara_splat_vulkan_forward_test POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:photara_splat_vulkan_forward_test>
+                        $<TARGET_FILE_DIR:photara_splat_vulkan_forward_test>
+                    COMMAND_EXPAND_LISTS)
+            endif()
+            add_test(NAME photara.splat.vulkan_forward COMMAND photara_splat_vulkan_forward_test)
+            # Manual verification tool (not a ctest entry): renders a trained
+            # model through both forward rasterizers and reports the per-channel
+            # deltas plus side-by-side images.
+            add_executable(photara_splat_vulkan_parity src/tools/splat_vulkan_parity.cpp)
+            target_link_libraries(photara_splat_vulkan_parity PRIVATE Photara::Splat splat_drender::vulkan)
+            if(WIN32)
+                add_custom_command(TARGET photara_splat_vulkan_parity POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:photara_splat_vulkan_parity>
+                        $<TARGET_FILE_DIR:photara_splat_vulkan_parity>
+                    COMMAND_EXPAND_LISTS)
+            endif()
+        endif()
     endif()
     if(TARGET tinytensor AND TINYTENSOR_HAS_VULKAN_BACKEND)
         add_executable(photara_tinytensor_vulkan_test tests/tinytensor_vulkan_test.cpp)
@@ -857,6 +883,12 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_include_directories(photara_tinytensor_vulkan_test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytensor)
         add_test(NAME photara.tinytensor.vulkan COMMAND photara_tinytensor_vulkan_test)
+        # Manual verification tool (not a ctest entry): per-op cost of the
+        # tinytensor Vulkan backend.
+        add_executable(photara_tinytensor_vulkan_bench src/tools/tinytensor_vulkan_bench.cpp)
+        target_link_libraries(photara_tinytensor_vulkan_bench PRIVATE tinytensor::tinytensor)
+        target_include_directories(photara_tinytensor_vulkan_bench PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytensor)
     endif()
     if(TARGET photara_features)
         add_executable(photara_features_test tests/features_test.cpp)
@@ -924,6 +956,8 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         photara_logging_test
         photara_splat_test
         photara_splat_quality_eval
+        photara_splat_vulkan_forward_test
+        photara_splat_vulkan_parity
         photara_tinytensor_vulkan_test
         photara_features_test
         photara_video_frames_test

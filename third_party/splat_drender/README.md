@@ -1,11 +1,49 @@
 # splat_drender
 
-Standalone CUDA backend for differentiable 3D Gaussian splatting, built for
-Photara. It renders RGB, alpha, accumulated surface normals and median
-depth, and provides analytically matching backward gradients for all of
-them, including the median-depth bisection chain (T_p vacancy products,
-dT/dtm accumulation, dL/dt_peak, dL/drsigma), which is the most
+Differentiable 3D Gaussian splatting backends, built for Photara: a CUDA
+backend for training and a Vulkan backend for drawing a trained model without a
+CUDA context.
+
+Both forward paths render RGB, alpha, accumulated surface normals and median
+depth. The CUDA backend also provides analytically matching backward gradients
+for all of them, including the median-depth bisection chain (T_p vacancy
+products, dT/dtm accumulation, dL/dt_peak, dL/drsigma), which is the most
 error-prone part of the GGGS-style geometry losses.
+
+`splat_drender::splat_drender` is the CUDA library; `splat_drender::vulkan` is
+the Vulkan one (built when a Vulkan SDK and dxc are found, see
+`SPLAT_DRENDER_ENABLE_VULKAN`). The Vulkan backend runs the same EWA forward as
+compute passes and shares the CUDA numerics deliberately: tile size,
+opacity-aware AccuTile enumeration, alpha/transmittance thresholds, the 131072
+single-sort crossover, median-depth bisection and the camera models.
+`tests/vulkan_forward_compare.cpp` asserts that parity channel by channel
+against the CUDA backend. The per-Gaussian state, the sorted instances and the
+pixel snapshots of the last forward stay resident, which is where the
+differentiable Vulkan pass will attach.
+
+### Vulkan frame cost
+
+The working set (Gaussian state, keys, values, the blended image and the
+snapshots) lives in device memory; the host only touches it through the
+context's staging buffer. Per-pixel bucket snapshots are off unless
+`SplatSettings::pixel_snapshots` asks for them, because only the backward pass
+reads them and at a million instances they are hundreds of megabytes per frame.
+The radix sort sizes its passes from the meaningful key bits and builds its
+histogram with one thread per key instead of one thread per digit.
+
+Measured on an RTX 5090 at 1000x1000 with a 213k-Gaussian model (997k
+instances), median of 20 frames:
+
+| pass | Vulkan | CUDA |
+|---|---:|---:|
+| preview frame (RGBA8, stays on device) | 1.5 ms | - |
+| preview frame (RGBA8 to host) | 2.5 ms | 4.1 ms |
+| color + full channel readback | 5.7 ms | 0.75 ms |
+| color, alpha, depth and normals | 12.2 ms | 3.6 ms |
+
+The device-resident preview is the path the editor uses: it uploads nothing
+back to the host and copies the RGBA buffer straight into its own image on the
+shared device (`SplatRasterizer::render_rgba_device`).
 
 ## Scope
 
@@ -23,10 +61,11 @@ error-prone part of the GGGS-style geometry losses.
 
 ```text
 include/splat_drender/
-  api.h       public entry points and POD parameter views
-  buffers.h   workspace pool layouts (explicit, no pointer arenas)
-  camera.h    projection models + analytic Jacobians + pixel rays
-  config.h    compile-time numerics (tile size, bisection, thresholds)
+  api.h          public entry points and POD parameter views (CUDA)
+  buffers.h      workspace pool layouts (explicit, no pointer arenas)
+  camera.h       projection models + analytic Jacobians + pixel rays
+  config.h       compile-time numerics (tile size, bisection, thresholds)
+  vulkan_api.h   public Vulkan context and forward rasterizer
 src/
   device/     device-only headers
     matrix.cuh    row-major Mat3 (+ glm-style at(col,row) accessor)
@@ -38,6 +77,20 @@ src/
   render_backward.cu  bucket-parallel backward + fused per-Gaussian backward
   point_sampling.cu   unified point evaluation (occupancy / median depth)
   pipeline.cu         host orchestration
+  vulkan/
+    context_internal.hpp  mapped buffer, compute pipeline, device owner
+    context.cpp           instance/device/queue and embedded SPIR-V lookup
+    splat_rasterizer.cpp  Vulkan equivalent of render_forward.cu
+shaders/
+  splat_math.hlsli        projection, EWA, SH and camera math
+  splat_enum.hlsli        opacity-aware tile walk
+  splat_preprocess.hlsl   per-Gaussian state
+  splat_scan.hlsl         block scan for instance offsets
+  splat_emit.hlsl         instance keys in depth order
+  splat_radix_hist.hlsl   radix histogram
+  splat_radix_scatter.hlsl  stable radix scatter
+  splat_ranges.hlsl       per-tile instance ranges
+  splat_blend.hlsl        tile blender (color, alpha, depth, normals)
 ```
 
 ## Performance design (FasterGS-derived, order preserving)

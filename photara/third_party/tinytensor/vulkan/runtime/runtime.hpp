@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -41,10 +42,21 @@ struct BufferBinding {
     VkDeviceSize range = VK_WHOLE_SIZE;
 };
 
+// Where a buffer lives. The upload staging buffer is written by the CPU and
+// read by the GPU, so plain host-visible (write-combined) memory is right for
+// it; a readback buffer is read back by the CPU, where cached host memory is
+// an order of magnitude faster to read.
+enum class MemoryKind {
+    device_local,
+    host_visible,
+    host_cached,
+};
+
 class Buffer {
 public:
     Buffer() = default;
-    Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes, bool host_visible);
+    Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes,
+           MemoryKind kind = MemoryKind::device_local);
     ~Buffer();
     Buffer(Buffer&& other) noexcept;
     Buffer& operator=(Buffer&& other) noexcept;
@@ -52,9 +64,14 @@ public:
     Buffer& operator=(const Buffer&) = delete;
 
     [[nodiscard]] VkBuffer handle() const { return handle_; }
+    [[nodiscard]] VkDeviceMemory memory() const { return memory_; }
     [[nodiscard]] VkDeviceSize size() const { return size_; }
     [[nodiscard]] bool host_visible() const { return mapped_ != nullptr; }
     [[nodiscard]] void* mapped() const { return mapped_; }
+    [[nodiscard]] bool coherent() const { return coherent_; }
+    // Non-coherent mapped memory has to be invalidated in whole atoms before
+    // the host may read what the device wrote.
+    [[nodiscard]] VkDeviceSize non_coherent_atom_size() const { return non_coherent_atom_size_; }
     [[nodiscard]] BufferBinding binding(VkDeviceSize offset = 0,
                                         VkDeviceSize range = VK_WHOLE_SIZE) const;
 
@@ -64,6 +81,8 @@ private:
     VkDeviceMemory memory_ = VK_NULL_HANDLE;
     VkDeviceSize size_ = 0;
     void* mapped_ = nullptr;
+    bool coherent_ = true;
+    VkDeviceSize non_coherent_atom_size_ = 1;
 };
 
 class Context {
@@ -94,6 +113,12 @@ public:
                   std::uint32_t groups_y = 1,
                   std::uint32_t groups_z = 1);
 
+    // Submits every command recorded so far and waits for the queue to drain.
+    // Ops record into one command buffer and submit once per flush instead of
+    // once per op; a host readback (download) and shutdown flush implicitly.
+    // Call it explicitly to bound how much work one submission carries.
+    void flush();
+
     [[nodiscard]] Buffer& dummy();
 
 private:
@@ -105,9 +130,23 @@ private:
     void create_pools();
     void create_pipelines();
     void destroy();
-    void submit(VkCommandBuffer cmd);
-    [[nodiscard]] VkCommandBuffer begin_commands();
+
+    // Batch recording. flush_locked() is the only place that submits.
+    void begin_batch_locked();
+    void flush_locked();
+    void record_barrier_locked();
+    [[nodiscard]] VkDescriptorSet acquire_descriptor_locked(VkDescriptorSetLayout layout);
+
+    // Buffer reuse: a released Buffer goes back to the pool instead of being
+    // destroyed, so a repeated shape stops paying vkCreateBuffer and
+    // vkAllocateMemory. Buffers are only destroyed while no batch is recording,
+    // because a recorded command still holds their handle.
+    [[nodiscard]] std::shared_ptr<Buffer> acquire_buffer_locked(std::size_t bytes);
+    void recycle_locked(Buffer* buffer);
+    void trim_pool_locked();
+
     void ensure_staging(std::size_t bytes);
+    void ensure_readback_staging(std::size_t bytes);
     void barrier_buffer(VkCommandBuffer cmd, VkBuffer buffer,
                         VkAccessFlags src_access, VkAccessFlags dst_access,
                         VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage);
@@ -132,7 +171,20 @@ private:
     };
     Pipeline pipelines_[static_cast<std::size_t>(ShaderId::Count)]{};
 
+    std::unordered_map<std::size_t, std::vector<Buffer*>> free_buffers_;
+    std::size_t pooled_bytes_ = 0;
+    std::size_t pool_budget_bytes_ = 0;
+    VkCommandBuffer command_ = VK_NULL_HANDLE;
+    bool recording_ = false;
+    std::uint32_t batch_commands_ = 0;
+    std::size_t staging_cursor_ = 0;
+    std::vector<VkDescriptorBufferInfo> descriptor_infos_;
+    std::vector<VkWriteDescriptorSet> descriptor_writes_;
+    // Cleared by destroy(). A tensor that outlives the context then leaks its
+    // buffer instead of touching a dead device.
+    bool alive_ = true;
     std::unique_ptr<Buffer> staging_;
+    std::unique_ptr<Buffer> readback_staging_;
     std::unique_ptr<Buffer> dummy_;
     std::mutex mutex_;
 };
