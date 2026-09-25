@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace tinytensor {
@@ -111,6 +112,8 @@ Tensor where(const Tensor& cond, const Tensor& x, const Tensor& y);
 Tensor elementwise_unary(const Tensor& src, ElementwiseOp op);
 Tensor elementwise_binary(const Tensor& a, const Tensor& b, ElementwiseOp op);
 Tensor elementwise_scalar(const Tensor& a, float scalar, ElementwiseOp op, float scalar2 = 0.0F);
+Tensor fused_pointwise(const Tensor& src, std::span<const std::uint32_t> kinds,
+                       std::span<const float> scalars);
 Tensor clamp(const Tensor& src, float lo, float hi);
 Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, ReduceKind kind);
 Tensor matmul(const Tensor& a, const Tensor& b, bool transpose_b, std::size_t batch);

@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include <cuda_runtime_api.h>
+
 // Manual verification tool (not a ctest entry): measures what one tensor op
 // costs on the tinytensor Vulkan backend, split into the per-op fixed cost and
 // the per-element cost. Both matter: the runtime submits and waits per op, so
@@ -59,17 +61,72 @@ double chain_ms(const std::size_t count, const int ops, const int repeats, const
 
 // Same chain, but flushed explicitly instead of read back, so the measured
 // time is the GPU work and the submission, not the device-to-host copy.
-double chain_flush_ms(const std::size_t count, const int ops, const int repeats) {
-    auto a = Tensor::from_vector(std::vector<float>(count, 0.5F), {count}, Device::Vulkan);
-    auto b = Tensor::from_vector(std::vector<float>(count, 1.25F), {count}, Device::Vulkan);
-    auto& context = tinytensor::vulkan::runtime::Context::get();
+double chain_sync_ms(const std::size_t count, const int ops, const int repeats,
+                     const Device device) {
+    auto a = Tensor::from_vector(std::vector<float>(count, 0.5F), {count}, device);
+    auto b = Tensor::from_vector(std::vector<float>(count, 1.25F), {count}, device);
     const auto body = [&] {
         Tensor c = a;
         for (int i = 0; i < ops; ++i) c = c.add(b);
-        // No readback: the flush is what runs the chain, so the time is the GPU
-        // work plus one submission.
-        context.flush();
+        // Force both backends to finish without charging either one for a
+        // device-to-host copy.  CUDA launches are asynchronous, while Vulkan
+        // records the whole chain and submits it here.
+        if (device == Device::Vulkan) {
+            tinytensor::vulkan::runtime::Context::get().flush();
+        } else {
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("cudaDeviceSynchronize failed");
+        }
         return static_cast<float>(c.numel());
+    };
+    return median_ms(body, repeats);
+}
+
+// A tensor-level Adam expression representative of an unfused optimizer.  The
+// production splat optimizer should eventually be one fused Vulkan shader, but
+// this exposes runtime overhead and Float32 elementwise throughput while that
+// kernel is being built.
+double adam_expression_ms(const std::size_t count, const int repeats, const Device device) {
+    auto parameter = Tensor::from_vector(std::vector<float>(count, 0.25F), {count}, device);
+    auto gradient = Tensor::from_vector(std::vector<float>(count, 0.01F), {count}, device);
+    auto first = Tensor::from_vector(std::vector<float>(count, 0.0F), {count}, device);
+    auto second = Tensor::from_vector(std::vector<float>(count, 0.0F), {count}, device);
+    const auto body = [&] {
+        Tensor next_first = first.mul(0.9F).add(gradient.mul(0.1F));
+        Tensor next_second = second.mul(0.999F).add(gradient.square().mul(0.001F));
+        Tensor update = next_first.div(next_second.sqrt().add(1e-8F)).mul(1e-3F);
+        Tensor next_parameter = parameter.sub(update);
+        if (device == Device::Vulkan) {
+            tinytensor::vulkan::synchronize();
+        } else if (cudaDeviceSynchronize() != cudaSuccess) {
+            throw std::runtime_error("cudaDeviceSynchronize failed");
+        }
+        return static_cast<float>(next_parameter.numel());
+    };
+    return median_ms(body, repeats);
+}
+
+double adam_fused_vulkan_ms(const std::size_t count, const int repeats) {
+    auto parameter = Tensor::from_vector(std::vector<float>(count, 0.25F), {count}, Device::Vulkan);
+    auto gradient = Tensor::from_vector(std::vector<float>(count, 0.01F), {count}, Device::Vulkan);
+    auto first = Tensor::from_vector(std::vector<float>(count, 0.0F), {count}, Device::Vulkan);
+    auto second = Tensor::from_vector(std::vector<float>(count, 0.0F), {count}, Device::Vulkan);
+    tinytensor::vulkan::AdamStepOptions options;
+    options.correction1 = 0.1F;
+    options.correction2 = 0.001F;
+    return median_ms([&] {
+        tinytensor::vulkan::adam_step(parameter, gradient, first, second, options);
+        tinytensor::vulkan::synchronize();
+        return static_cast<float>(parameter.numel());
+    }, repeats);
+}
+
+double full_reduce_ms(const std::size_t count, const int repeats, const Device device,
+                      const bool mean) {
+    auto input = Tensor::from_vector(std::vector<float>(count, 1.0F), {count}, device);
+    const auto body = [&] {
+        Tensor result = mean ? input.mean() : input.sum();
+        return result.to_vector()[0];
     };
     return median_ms(body, repeats);
 }
@@ -88,8 +145,8 @@ int main(int argc, char** argv) {
             throw std::runtime_error("the tinytensor Vulkan backend is not available");
         const int repeats = argc > 1 ? std::stoi(argv[1]) : 15;
         const auto& info = tinytensor::vulkan::device_info();
-        std::printf("device=%s api=%u subgroup=%u\n", info.name.c_str(), info.api_version,
-                    info.subgroup_size);
+        std::printf("device=%s api=%u subgroup=%u push_descriptors=%s\n", info.name.c_str(),
+                    info.api_version, info.subgroup_size, info.push_descriptors ? "yes" : "no");
 
         // Which elementwise ops actually run on the Vulkan backend. A failure
         // here is a coverage gap, not a timing result, so probe before timing.
@@ -156,17 +213,46 @@ int main(int argc, char** argv) {
                     "us/op", "GB/s", "readback_ms", "cuda_ms");
         for (const std::size_t count : {std::size_t{1} << 12, std::size_t{1} << 16,
                                         std::size_t{1} << 20, std::size_t{1} << 22}) {
-            const double one_op = chain_flush_ms(count, 1, repeats);
-            const double many_ops = chain_flush_ms(count, k_sweep_ops, repeats);
+            const double one_op = chain_sync_ms(count, 1, repeats, Device::Vulkan);
+            const double many_ops = chain_sync_ms(count, k_sweep_ops, repeats, Device::Vulkan);
             const double readback = readback_ms(count, repeats);
-            const double cuda = chain_ms(count, k_sweep_ops, repeats, Device::CUDA);
+            const double cuda = chain_sync_ms(count, k_sweep_ops, repeats, Device::CUDA);
             const double bytes = static_cast<double>(k_sweep_ops) * static_cast<double>(count) * 12.0;
             std::printf("%12llu %11.4f %11.4f %11.4f %11.2f %12.4f %11.4f\n",
                         static_cast<unsigned long long>(count), one_op, many_ops,
                         many_ops / k_sweep_ops * 1000.0, bytes / (many_ops * 1.0e6), readback, cuda);
         }
 
-        // 3. Correctness under the new batching and pooling: chains of varying
+        // 3. Training-critical primitives. Full image reductions used to run
+        // in one Vulkan thread; the hierarchical path should now be close to
+        // CUDA. The Adam rows use an explicit synchronization without host
+        // readback and show the generic expression next to the fused Vulkan
+        // primitive intended for the training backend.
+        std::printf("\n=== training primitives (matched synchronization) ===\n");
+        std::printf("%12s %12s %12s %9s %12s %12s %9s\n", "elements", "vk_sum_ms",
+                    "cuda_sum_ms", "sum_ratio", "vk_mean_ms", "cuda_mean_ms", "mean_ratio");
+        for (const std::size_t count : {std::size_t{197311}, std::size_t{1} << 20,
+                                        std::size_t{1} << 22}) {
+            const double vk_sum = full_reduce_ms(count, repeats, Device::Vulkan, false);
+            const double cu_sum = full_reduce_ms(count, repeats, Device::CUDA, false);
+            const double vk_mean = full_reduce_ms(count, repeats, Device::Vulkan, true);
+            const double cu_mean = full_reduce_ms(count, repeats, Device::CUDA, true);
+            std::printf("%12llu %12.4f %12.4f %8.2fx %12.4f %12.4f %8.2fx\n",
+                        static_cast<unsigned long long>(count), vk_sum, cu_sum, vk_sum / cu_sum,
+                        vk_mean, cu_mean, vk_mean / cu_mean);
+        }
+        std::printf("\n%12s %12s %12s %12s %10s %10s\n", "adam_elems", "vk_expr_ms",
+                    "vk_fused_ms", "cuda_expr_ms", "expr_ratio", "fused_ratio");
+        for (const std::size_t count : {std::size_t{197311}, std::size_t{197311} * 16}) {
+            const double vulkan_expr = adam_expression_ms(count, repeats, Device::Vulkan);
+            const double vulkan_fused = adam_fused_vulkan_ms(count, repeats);
+            const double cuda_expr = adam_expression_ms(count, repeats, Device::CUDA);
+            std::printf("%12llu %12.4f %12.4f %12.4f %9.2fx %9.2fx\n",
+                        static_cast<unsigned long long>(count), vulkan_expr, vulkan_fused,
+                        cuda_expr, vulkan_expr / cuda_expr, vulkan_fused / cuda_expr);
+        }
+
+        // 4. Correctness under the new batching and pooling: chains of varying
         // length, shapes that change between rounds, and readbacks interleaved
         // with the chain (which is what forces a flush mid-sequence). Every
         // result is checked against the same chain on the CPU.
@@ -216,7 +302,7 @@ int main(int argc, char** argv) {
         std::printf("%zu rounds checked against the CPU reference: %s\n", rounds_checked,
                     stress_ok ? "all match" : "FAILED");
 
-        // 4. Focused repro of the failing pattern: a readback in the middle of
+        // 5. Focused repro of the failing pattern: a readback in the middle of
         // a chain, which is what splits it into two batches.
         for (const int mid_readback : {0, 1}) {
             const std::size_t count = 4096;

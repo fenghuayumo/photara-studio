@@ -116,7 +116,9 @@ endif()
 if(TINYTENSOR_ENABLE_VULKAN)
     set(TINYTENSOR_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/shaders")
     set(TINYTENSOR_SHADER_SOURCES
+        adam_f32.hlsl
         elementwise.hlsl
+        fused_pointwise.hlsl
         strided_copy.hlsl
         index_select.hlsl
         index_fill.hlsl
@@ -126,6 +128,7 @@ if(TINYTENSOR_ENABLE_VULKAN)
         compact.hlsl
         multinomial.hlsl
         reduce.hlsl
+        reduce_all_f32.hlsl
         matmul.hlsl
         random.hlsl
         cumsum.hlsl

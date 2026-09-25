@@ -13,10 +13,12 @@
 #include <stdlib.h>
 #endif
 
+#include "adam_f32.hlsl.embedded.hpp"
 #include "cat.hlsl.embedded.hpp"
 #include "compact.hlsl.embedded.hpp"
 #include "cumsum.hlsl.embedded.hpp"
 #include "elementwise.hlsl.embedded.hpp"
+#include "fused_pointwise.hlsl.embedded.hpp"
 #include "index_fill.hlsl.embedded.hpp"
 #include "index_select.hlsl.embedded.hpp"
 #include "mask_flags.hlsl.embedded.hpp"
@@ -25,6 +27,7 @@
 #include "pool.hlsl.embedded.hpp"
 #include "random.hlsl.embedded.hpp"
 #include "reduce.hlsl.embedded.hpp"
+#include "reduce_all_f32.hlsl.embedded.hpp"
 #include "scan_add.hlsl.embedded.hpp"
 #include "scan_block.hlsl.embedded.hpp"
 #include "scatter.hlsl.embedded.hpp"
@@ -179,7 +182,9 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
     using std::as_bytes;
     using std::span;
     return {{
+        {ShaderId::AdamF32, as_bytes(span{adam_f32_hlsl_spv}), 4, 60},
         {ShaderId::Elementwise, as_bytes(span{elementwise_hlsl_spv}), 4, 72},
+        {ShaderId::FusedPointwise, as_bytes(span{fused_pointwise_hlsl_spv}), 3, 16},
         {ShaderId::StridedCopy, as_bytes(span{strided_copy_hlsl_spv}), 2, 96},
         {ShaderId::IndexSelect, as_bytes(span{index_select_hlsl_spv}), 3, 40},
         {ShaderId::IndexFill, as_bytes(span{index_fill_hlsl_spv}), 2, 40},
@@ -189,6 +194,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::Compact, as_bytes(span{compact_hlsl_spv}), 3, 52},
         {ShaderId::Multinomial, as_bytes(span{multinomial_hlsl_spv}), 3, 32},
         {ShaderId::Reduce, as_bytes(span{reduce_hlsl_spv}), 3, 40},
+        {ShaderId::ReduceAllF32, as_bytes(span{reduce_all_f32_hlsl_spv}), 2, 24},
         {ShaderId::Matmul, as_bytes(span{matmul_hlsl_spv}), 3, 56},
         {ShaderId::Random, as_bytes(span{random_hlsl_spv}), 2, 44},
         {ShaderId::Cumsum, as_bytes(span{cumsum_hlsl_spv}), 2, 28},
@@ -494,6 +500,18 @@ void Context::create_device() {
     queue_info.pQueuePriorities = &priority;
 
     std::vector<const char*> extensions;
+#ifdef VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME
+    // Push descriptors remove one descriptor-set allocation and one set update
+    // from every tensor op.  This matters much more than shader time for the
+    // small, numerous elementwise ops in an optimizer/backward pass.  Keep the
+    // descriptor-pool path below as a portability fallback and as an A/B knob.
+    push_descriptors_ =
+        !env_flag("TINYTENSOR_VULKAN_DISABLE_PUSH_DESCRIPTORS") &&
+        has_device_extension(physical_, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    if (push_descriptors_) {
+        extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    }
+#endif
 #ifdef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
     if (has_device_extension(physical_, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
         extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
@@ -507,6 +525,17 @@ void Context::create_device() {
     create.ppEnabledExtensionNames = extensions.data();
     check(vkCreateDevice(physical_, &create, nullptr, &device_), "vkCreateDevice");
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
+#ifdef VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME
+    if (push_descriptors_) {
+        cmd_push_descriptor_ = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
+            vkGetDeviceProcAddr(device_, "vkCmdPushDescriptorSetKHR"));
+        if (cmd_push_descriptor_ == nullptr) {
+            throw std::runtime_error(
+                "VK_KHR_push_descriptor was enabled but vkCmdPushDescriptorSetKHR is missing");
+        }
+    }
+#endif
+    info_.push_descriptors = push_descriptors_;
 }
 
 void Context::create_pools() {
@@ -514,6 +543,9 @@ void Context::create_pools() {
     command_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     command_pool.queueFamilyIndex = queue_family_;
     check(vkCreateCommandPool(device_, &command_pool, nullptr, &command_pool_), "vkCreateCommandPool");
+
+    VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    check(vkCreateFence(device_, &fence, nullptr, &completion_fence_), "vkCreateFence");
 
     VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -538,6 +570,9 @@ void Context::create_pipelines() {
             bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
         VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        if (push_descriptors_) {
+            layout_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+        }
         layout_info.bindingCount = blob.bindings;
         layout_info.pBindings = bindings.data();
         check(vkCreateDescriptorSetLayout(device_, &layout_info, nullptr, &pipeline.set_layout),
@@ -628,6 +663,10 @@ void Context::destroy() {
     }
     if (command_pool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, command_pool_, nullptr);
+    }
+    if (completion_fence_ != VK_NULL_HANDLE) {
+        vkDestroyFence(device_, completion_fence_, nullptr);
+        completion_fence_ = VK_NULL_HANDLE;
     }
     if (device_ != VK_NULL_HANDLE) {
         vkDestroyDevice(device_, nullptr);
@@ -761,8 +800,10 @@ void Context::flush_locked() {
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
-    check(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
-    check(vkQueueWaitIdle(queue_), "vkQueueWaitIdle");
+    check(vkQueueSubmit(queue_, 1, &submit, completion_fence_), "vkQueueSubmit");
+    check(vkWaitForFences(device_, 1, &completion_fence_, VK_TRUE, UINT64_MAX),
+          "vkWaitForFences");
+    check(vkResetFences(device_, 1, &completion_fence_), "vkResetFences");
     recording_ = false;
     batch_commands_ = 0;
     // Every descriptor set the batch allocated is dead once the queue is idle,
@@ -782,7 +823,13 @@ void Context::flush() {
 // dependency has to be explicit.
 void Context::record_barrier_locked() {
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    // Tensor temporaries may return to the buffer pool immediately after their
+    // dispatch is recorded.  A later op can therefore reuse a previously read
+    // input as its output before this batch is submitted.  Include shader reads
+    // in the source scope so that reuse has a real read-to-write (WAR) ordering
+    // dependency instead of relying on the driver's incidental execution order.
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                            VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
                             VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
     vkCmdPipelineBarrier(command_,
@@ -959,7 +1006,10 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
     }
 
     begin_batch_locked();
-    const VkDescriptorSet set = acquire_descriptor_locked(pipeline.set_layout);
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (!push_descriptors_) {
+        set = acquire_descriptor_locked(pipeline.set_layout);
+    }
 
     // Per-dispatch scratch kept off the heap: this runs once per op, so two
     // vector allocations per op add up over a step.
@@ -972,17 +1022,27 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
         infos[i].offset = bindings[i].offset;
         infos[i].range = bindings[i].range;
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        // dstSet is ignored by vkCmdPushDescriptorSetKHR.  Keeping it null in
+        // the push path also prevents accidentally retaining a stale set.
         writes[i].dstSet = set;
         writes[i].dstBinding = i;
         writes[i].descriptorCount = 1;
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[i].pBufferInfo = &infos[i];
     }
-    vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    if (push_descriptors_) {
+        cmd_push_descriptor_(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0,
+                             static_cast<std::uint32_t>(writes.size()), writes.data());
+    } else {
+        vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
+                               nullptr);
+    }
 
     vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
-    vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &set, 0,
-                            nullptr);
+    if (!push_descriptors_) {
+        vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1,
+                                &set, 0, nullptr);
+    }
     if (push_bytes != 0 && push_constants != nullptr) {
         vkCmdPushConstants(command_, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes,
                            push_constants);
@@ -1005,6 +1065,16 @@ bool available() {
 
 const DeviceInfo& device_info() {
     return runtime::Context::get().info();
+}
+
+DeviceHandles device_handles() {
+    const auto& context = runtime::Context::get();
+    return {context.instance(), context.physical_device(), context.device(), context.queue(),
+            context.queue_family()};
+}
+
+void synchronize() {
+    runtime::Context::get().flush();
 }
 
 void shutdown() {

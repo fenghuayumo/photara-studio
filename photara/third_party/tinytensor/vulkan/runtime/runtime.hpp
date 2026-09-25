@@ -16,7 +16,9 @@
 namespace tinytensor::vulkan::runtime {
 
 enum class ShaderId : std::uint32_t {
-    Elementwise = 0,
+    AdamF32 = 0,
+    Elementwise,
+    FusedPointwise,
     StridedCopy,
     IndexSelect,
     IndexFill,
@@ -26,6 +28,7 @@ enum class ShaderId : std::uint32_t {
     Compact,
     Multinomial,
     Reduce,
+    ReduceAllF32,
     Matmul,
     Random,
     Cumsum,
@@ -96,7 +99,11 @@ public:
     ~Context();
 
     [[nodiscard]] const DeviceInfo& info() const { return info_; }
+    [[nodiscard]] VkInstance instance() const { return instance_; }
+    [[nodiscard]] VkPhysicalDevice physical_device() const { return physical_; }
     [[nodiscard]] VkDevice device() const { return device_; }
+    [[nodiscard]] VkQueue queue() const { return queue_; }
+    [[nodiscard]] std::uint32_t queue_family() const { return queue_family_; }
 
     [[nodiscard]] std::shared_ptr<Buffer> alloc(std::size_t bytes);
     void fill_zero(Buffer& buffer, std::size_t offset, std::size_t bytes);
@@ -158,9 +165,12 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     std::uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    VkFence completion_fence_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+    PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor_ = nullptr;
     VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
     bool validation_ = false;
+    bool push_descriptors_ = false;
 
     struct Pipeline {
         VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;

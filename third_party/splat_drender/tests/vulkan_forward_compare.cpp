@@ -407,8 +407,18 @@ void smoke_case() {
     require(std::abs(output.color[center] - (output.alpha[center] + 0.05F * (1.0F - output.alpha[center]))) < 0.05F,
             "Centered Gaussian did not contribute red");
     require(output.alpha[0] < 0.05F, "Splat coverage reached the far corner");
+
+    // Snapshot generation is the forward half of the future Vulkan backward
+    // pass. It must preserve the normal render while building its bucket
+    // prefix and per-pixel transmittance state entirely on the GPU.
+    scene.settings.pixel_snapshots = true;
+    const auto snapshot_output = rasterizer.forward(scene.gaussians, scene.camera, scene.settings);
+    require(snapshot_output.color == output.color, "Enabling snapshots changed the forward color");
+    require(snapshot_output.alpha == output.alpha, "Enabling snapshots changed the forward alpha");
+    require(snapshot_output.median_depth == output.median_depth, "Enabling snapshots changed the forward depth");
+    require(snapshot_output.instance_count == output.instance_count, "Enabling snapshots changed the instance count");
     std::cout << "single-gaussian smoke: instances=" << output.instance_count
-              << " center_alpha=" << output.alpha[center] << '\n';
+              << " center_alpha=" << output.alpha[center] << " snapshots=ok\n";
 }
 
 // A Context may adopt a device the caller already owns. It then creates no

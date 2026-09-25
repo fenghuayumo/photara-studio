@@ -1,6 +1,7 @@
 #include "vulkan/ops.hpp"
 
 #include "internal/tensor_impl.hpp"
+#include "vulkan/backend.hpp"
 #include "vulkan/runtime/runtime.hpp"
 
 #include <algorithm>
@@ -21,6 +22,10 @@ using runtime::kGroupSize;
 using runtime::ShaderId;
 
 runtime::Buffer& buffer_of(const Tensor& tensor) {
+    // This is also the materialization boundary for a deferred Vulkan tensor.
+    // storage_ptr() is valid for externally owned storage and, unlike ptr(),
+    // deliberately does not expose a host-dereferenceable Vulkan address.
+    (void)tensor.storage_ptr();
     auto owner = tensor.external_storage_owner();
     if (!owner) {
         throw std::runtime_error("Vulkan tensor is missing its buffer owner");
@@ -189,6 +194,45 @@ Tensor TensorStorage::alias(const Tensor& source, TensorShape shape, std::size_t
 
 bool is_vulkan_tensor(const Tensor& tensor) {
     return tensor.device() == Device::Vulkan;
+}
+
+BufferView buffer_view(const Tensor& tensor) {
+    if (!is_vulkan_tensor(tensor))
+        throw std::invalid_argument("buffer_view requires a Vulkan tensor");
+    Buffer& buffer = buffer_of(tensor);
+    return {buffer.handle(), static_cast<VkDeviceSize>(byte_offset(tensor)),
+            static_cast<VkDeviceSize>(tensor.bytes())};
+}
+
+void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor& second,
+               const AdamStepOptions& options) {
+    const auto valid = [&](const Tensor& tensor) {
+        return is_vulkan_tensor(tensor) && tensor.dtype() == DataType::Float32 &&
+               tensor.is_contiguous() && tensor.numel() == parameter.numel();
+    };
+    if (!parameter.is_valid() || !valid(parameter) || !valid(gradient) || !valid(first) ||
+        !valid(second))
+        throw std::invalid_argument(
+            "Vulkan Adam requires equal-size contiguous Float32 Vulkan tensors");
+    if (parameter.numel() == 0) return;
+    if (!(options.correction1 > 0.0F) || !(options.correction2 > 0.0F) ||
+        options.clamp_min > options.clamp_max)
+        throw std::invalid_argument("Vulkan Adam received invalid correction or clamp bounds");
+    struct Push {
+        std::uint32_t count, parameter_offset, gradient_offset, first_offset, second_offset;
+        float learning_rate, secondary_learning_rate;
+        std::uint32_t group_stride;
+        float beta1, beta2, correction1, correction2, epsilon, clamp_min, clamp_max;
+    } push{u32(parameter.numel()), u32(byte_offset(parameter)), u32(byte_offset(gradient)),
+           u32(byte_offset(first)), u32(byte_offset(second)), options.learning_rate,
+           options.secondary_learning_rate, options.group_stride, options.beta1, options.beta2,
+           options.correction1, options.correction2, options.epsilon, options.clamp_min,
+           options.clamp_max};
+    static_assert(sizeof(Push) == 60);
+    std::array<BufferBinding, 4> bindings{
+        bind(parameter), bind(gradient), bind(first), bind(second)};
+    Context::get().dispatch(
+        ShaderId::AdamF32, bindings, &push, sizeof(push), groups_for(parameter.numel()));
 }
 
 void fill(Tensor& tensor, float value) {
@@ -714,6 +758,31 @@ Tensor elementwise_scalar(const Tensor& a, float scalar, ElementwiseOp op, float
     return out;
 }
 
+Tensor fused_pointwise(const Tensor& src, std::span<const std::uint32_t> kinds,
+                       std::span<const float> scalars) {
+    if (kinds.empty() || kinds.size() != scalars.size() || kinds.size() > 16)
+        throw std::invalid_argument("Vulkan fused pointwise recipe must contain 1..16 ops");
+    Tensor input = prepared(src);
+    if (input.dtype() != DataType::Float32)
+        throw std::invalid_argument("Vulkan fused pointwise requires Float32");
+    Tensor out = TensorStorage::empty(input.shape(), DataType::Float32);
+    struct RecipeOp {
+        std::uint32_t kind;
+        float scalar;
+    };
+    std::array<RecipeOp, 16> recipe{};
+    for (std::size_t i = 0; i < kinds.size(); ++i) recipe[i] = {kinds[i], scalars[i]};
+    auto& ctx = Context::get();
+    auto recipe_buffer = ctx.alloc(kinds.size() * sizeof(RecipeOp));
+    ctx.upload(*recipe_buffer, 0, recipe.data(), kinds.size() * sizeof(RecipeOp));
+    struct Push {
+        std::uint32_t count, src_offset, dst_offset, num_ops;
+    } push{u32(input.numel()), u32(byte_offset(input)), u32(byte_offset(out)), u32(kinds.size())};
+    std::array<BufferBinding, 3> bindings{bind(input), bind(out), recipe_buffer->binding()};
+    ctx.dispatch(ShaderId::FusedPointwise, bindings, &push, sizeof(push), groups_for(input.numel()));
+    return out;
+}
+
 Tensor clamp(const Tensor& src, float lo, float hi) {
     return elementwise_scalar(src, lo, ElementwiseOp::Clamp, hi);
 }
@@ -755,6 +824,59 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
         if (kind == ReduceKind::Max) identity = -std::numeric_limits<float>::infinity();
         if (kind == ReduceKind::Min) identity = std::numeric_limits<float>::infinity();
         fill(out, identity);
+        return out;
+    }
+
+    // Scalar Float32 reductions dominate image losses and optimizer metrics.
+    // The generic shader assigns one thread to each output, so a full reduce
+    // would otherwise run serially in a single thread.  Record a tree of
+    // 256-thread, four-items-per-lane reductions instead.  All intermediate
+    // buffers stay device-local and all passes remain in the current batch.
+    const bool all_axes = axes.empty() ||
+        std::all_of(reduced.begin(), reduced.begin() + input.ndim(), [](bool value) {
+            return value;
+        });
+    if (all_axes && input.dtype() == DataType::Float32 && out_dtype == DataType::Float32 &&
+        (kind == ReduceKind::Sum || kind == ReduceKind::Mean ||
+         kind == ReduceKind::Max || kind == ReduceKind::Min)) {
+        constexpr std::uint32_t items_per_group = kGroupSize * 4U;
+        struct FastPush {
+            std::uint32_t count, op, src_offset, dst_offset, original_count, final_pass;
+        } push{};
+        static_assert(sizeof(push) == 24);
+        push.op = static_cast<std::uint32_t>(kind);
+        push.original_count = u32(input.numel());
+
+        auto& ctx = Context::get();
+        Buffer* current = &buffer_of(input);
+        std::uint32_t current_offset = u32(byte_offset(input));
+        std::uint32_t current_count = u32(input.numel());
+        std::vector<std::shared_ptr<Buffer>> partials;
+        while (true) {
+            const std::uint32_t groups = std::max(1U, ceil_div(current_count, items_per_group));
+            const bool final_pass = groups == 1U;
+            std::shared_ptr<Buffer> partial;
+            Buffer* destination = nullptr;
+            std::uint32_t destination_offset = 0;
+            if (final_pass) {
+                destination = &buffer_of(out);
+                destination_offset = u32(byte_offset(out));
+            } else {
+                partial = ctx.alloc(static_cast<std::size_t>(groups) * sizeof(float));
+                destination = partial.get();
+            }
+            push.count = current_count;
+            push.src_offset = current_offset;
+            push.dst_offset = destination_offset;
+            push.final_pass = final_pass ? 1U : 0U;
+            std::array<BufferBinding, 2> bindings{current->binding(), destination->binding()};
+            ctx.dispatch(ShaderId::ReduceAllF32, bindings, &push, sizeof(push), groups);
+            if (final_pass) break;
+            partials.push_back(std::move(partial));
+            current = partials.back().get();
+            current_offset = 0;
+            current_count = groups;
+        }
         return out;
     }
 

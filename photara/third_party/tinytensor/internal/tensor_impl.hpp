@@ -1319,7 +1319,10 @@ namespace tinytensor {
                 return Tensor();                                                          \
             return Tensor::empty(shape_, device_, dtype_);                                \
         }                                                                                 \
-        LFS_VULKAN_UNARY(vulkan_op)                                                       \
+        if (device_ == Device::Vulkan &&                                                 \
+            (dtype_ != DataType::Float32 || !is_contiguous() || bytes() < (1U << 20) ||  \
+             !internal::lazy_size_heuristic_should_defer(bytes())))                      \
+            return vulkan::elementwise_unary(*this, vulkan::ElementwiseOp::vulkan_op);   \
         Tensor result = UnaryExpr<TensorLeaf, ops::op_type>(                              \
             TensorLeaf(*this), ops::op_type{}, shape_, device_, dtype_);                  \
         link_deferred_result_to_inputs(result, {lazy_expr_id()});                         \
@@ -1469,7 +1472,11 @@ namespace tinytensor {
             return Tensor::empty(shape_, device_, dtype_);                                \
         }                                                                                 \
         const float scalar_value = static_cast<float>(other);                             \
-        LFS_VULKAN_SCALAR(vulkan_op, scalar_value)                                        \
+        if (device_ == Device::Vulkan &&                                                  \
+            (dtype_ != DataType::Float32 || !is_contiguous() || bytes() < (1U << 20) ||   \
+             !internal::lazy_size_heuristic_should_defer(bytes())))                       \
+            return vulkan::elementwise_scalar(                                            \
+                *this, scalar_value, vulkan::ElementwiseOp::vulkan_op);                   \
         Tensor result = UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::op_type, float>>( \
             TensorLeaf(*this), ops::scalar_right_op<ops::op_type, float>(scalar_value),   \
             shape_, device_, dtype_);                                                     \

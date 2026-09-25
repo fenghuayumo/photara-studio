@@ -23,6 +23,7 @@ constexpr std::uint32_t k_flag_sh = 1;
 constexpr std::uint32_t k_flag_scales = 2;
 constexpr std::uint32_t k_flag_geometry = 4;
 constexpr std::uint32_t k_flag_snapshot = 8;
+constexpr std::uint32_t k_flag_stats = 16;
 
 struct Push {
     std::uint32_t u[k_push_uints]{};
@@ -52,12 +53,6 @@ VkDescriptorBufferInfo descriptor(const Buffer& buffer) {
 void clear_buffer(Buffer& buffer) {
     if (!buffer.host_visible()) return;
     std::memset(buffer.mapped, 0, static_cast<std::size_t>(buffer.size));
-}
-
-std::uint32_t read_uint(Context::Impl& context, const Buffer& buffer, std::uint32_t index) {
-    std::uint32_t value = 0;
-    context.read_buffer(buffer, &value, sizeof(value), static_cast<std::size_t>(index) * 4);
-    return value;
 }
 
 template <typename T>
@@ -237,9 +232,18 @@ public:
 
         inclusive_scan(gauss_u, 0, 4 * count, count, k_streams * count);
         inclusive_scan(gauss_u, count, 5 * count, count, k_streams * count);
+        Buffer& frame_counts = grow(
+            frame_counts_, 2 * sizeof(std::uint32_t), BufferMemory::host_visible);
+        Push counts_push = emit_constants(1, 4, grid_x, grid_y, wrap_width, count);
+        dispatch(
+            emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts,
+                    &dummy_, &dummy_},
+            counts_push, 1);
         flush_batch();
-        const std::uint32_t instances = read_uint(context_, gauss_u, 4 * count + count - 1);
-        const std::uint32_t visible = read_uint(context_, gauss_u, 5 * count + count - 1);
+        std::uint32_t frame_count_values[2]{};
+        frame_counts.download(frame_count_values, sizeof(frame_count_values));
+        const std::uint32_t instances = frame_count_values[0];
+        const std::uint32_t visible = frame_count_values[1];
 
         Buffer* instance_values = &dummy_;
         Buffer* range_lo = &dummy_;
@@ -270,22 +274,20 @@ public:
                 Push depth_push = emit_constants(count, 1, grid_x, grid_y, wrap_width, count);
                 dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, depth_push, div_up(count, 256));
                 radix_sort(false, visible, lo0, hi0, val0, lo1, hi1, val1, hist, 256 * div_up(visible, 1024));
-                flush_batch();
-                Buffer& sorted_ids = grow(sorted_ids_, static_cast<std::uint64_t>(visible) * sizeof(std::uint32_t));
-                context_.copy_buffer(val0, sorted_ids, static_cast<std::size_t>(visible) * sizeof(std::uint32_t));
                 Buffer& compact = grow(compact_, static_cast<std::uint64_t>(visible + scan_scratch_uints(visible)) * sizeof(std::uint32_t));
                 Push gather_push = emit_constants(visible, 2, grid_x, grid_y, wrap_width, count);
-                dispatch(emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &sorted_ids, &dummy_},
+                dispatch(emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0, &dummy_},
                          gather_push, div_up(visible, 256));
                 inclusive_scan(compact, 0, 0, visible, visible);
-                flush_batch();
-                if (read_uint(context_, compact, visible - 1) != instances) {
-                    throw std::runtime_error("Vulkan splat instance count changed between preprocessing and emission");
-                }
                 Push tile_push = emit_constants(visible, 3, grid_x, grid_y, wrap_width, count);
-                dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &sorted_ids, &compact},
+                dispatch(emit_, {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0, &compact},
                          tile_push, div_up(visible, 256));
-                radix_sort(false, instances, lo0, hi0, val0, lo1, hi1, val1, hist, hist_n);
+                radix_sort(
+                    false, instances, lo1, hi1, val1, lo0, hi0, val0,
+                    hist, hist_n, tile_bits);
+                instance_values = &val1;
+                range_lo = &lo1;
+                range_hi = &hi1;
             }
             Push range_push{};
             range_push.u[0] = instances;
@@ -293,41 +295,49 @@ public:
             dispatch(ranges_, {range_lo, range_hi, &tile_ranges}, range_push, div_up(instances, 256));
         }
 
-        flush_batch();
         const std::uint32_t bucket_limit = instances == 0
             ? 0u
             : static_cast<std::uint32_t>((static_cast<std::uint64_t>(instances) + 31ull * tiles) / 32ull + 1ull);
-        // A few kilobytes of bucket offsets, rewritten and re-read every frame.
-        Buffer& bucket_offsets = grow(
-            bucket_offsets_, static_cast<std::uint64_t>(tiles) * sizeof(std::uint32_t), BufferMemory::host_visible);
-        auto host_ranges = download_vector<std::uint32_t>(context_, tile_ranges, static_cast<std::size_t>(tiles) * 2);
-        std::vector<std::uint32_t> host_buckets(tiles, 0);
-        std::uint32_t carry = 0;
-        for (std::uint32_t tile = 0; tile < tiles; ++tile) {
-            const std::uint32_t begin = host_ranges[static_cast<std::size_t>(tile) * 2];
-            const std::uint32_t end = host_ranges[static_cast<std::size_t>(tile) * 2 + 1];
-            carry += (end - begin + 31u) >> 5;
-            host_buckets[tile] = carry;
+        Buffer* bucket_offsets = &dummy_;
+        if (settings.pixel_snapshots) {
+            // Backward snapshots index their variable number of per-tile
+            // buckets through this inclusive prefix. Generate and scan it on
+            // the GPU so a training forward does not synchronize with the CPU.
+            bucket_offsets = &grow(
+                bucket_offsets_,
+                static_cast<std::uint64_t>(tiles + scan_scratch_uints(tiles)) * sizeof(std::uint32_t));
+            Push bucket_push = emit_constants(tiles, 5, grid_x, grid_y, wrap_width, count);
+            dispatch(
+                emit_, {&dummy_, &dummy_, &tile_ranges, &dummy_, bucket_offsets, &dummy_, &dummy_},
+                bucket_push, div_up(tiles, 256));
+            inclusive_scan(*bucket_offsets, 0, 0, tiles, tiles);
         }
-        bucket_offsets.upload(host_buckets.data(), host_buckets.size() * sizeof(std::uint32_t));
 
         const std::uint32_t snap_buckets = std::max(bucket_limit, 1u);
-        Buffer& out_f = grow(out_f_, static_cast<std::uint64_t>(pixels) * 11 * sizeof(float));
-        Buffer& out_u = grow(out_u_, static_cast<std::uint64_t>(count + pixels + tiles + snap_buckets) * sizeof(std::uint32_t));
+        Buffer& out_f = grow(
+            out_f_, static_cast<std::uint64_t>(pixels) * (pack_rgba ? 4u : 11u) * sizeof(float));
+        Buffer* out_u = pack_rgba
+            ? &dummy_
+            : &grow(
+                  out_u_, static_cast<std::uint64_t>(count + pixels + tiles +
+                                                     (settings.pixel_snapshots ? snap_buckets : 1u)) *
+                              sizeof(std::uint32_t));
         // The per-pixel bucket snapshots only exist for the backward pass: a
         // forward frame neither writes nor reads them (at a million instances
         // the buffer is hundreds of megabytes of pure overhead).
         Buffer& snap = settings.pixel_snapshots
             ? grow(snap_, static_cast<std::uint64_t>(snap_buckets) * 256ull * 2ull * sizeof(float) * 4)
             : dummy_;
-        zero_buffer(context_, out_u, static_cast<std::size_t>(count) * sizeof(std::uint32_t));
+        if (!pack_rgba)
+            zero_buffer(context_, *out_u, static_cast<std::size_t>(count) * sizeof(std::uint32_t));
 
         Push blend_push{};
         blend_push.u[0] = camera.width;
         blend_push.u[1] = camera.height;
         blend_push.u[2] = grid_x;
         blend_push.u[3] = (settings.need_depth ? k_flag_geometry : 0u) |
-                          (settings.pixel_snapshots ? k_flag_snapshot : 0u);
+                          (settings.pixel_snapshots ? k_flag_snapshot : 0u) |
+                          (!pack_rgba ? k_flag_stats : 0u);
         blend_push.u[4] = camera.mode;
         blend_push.u[5] = static_cast<std::uint32_t>(wrap_width);
         set_float(blend_push, 6, camera.fx);
@@ -344,7 +354,7 @@ public:
         blend_push.u[17] = count;
         blend_push.u[18] = pixels;
         blend_push.u[19] = snap_buckets;
-        dispatch(blend_, {&tile_ranges, instance_values, &gauss_f, &out_f, &out_u, &bucket_offsets, &snap},
+        dispatch(blend_, {&tile_ranges, instance_values, &gauss_f, &out_f, out_u, bucket_offsets, &snap},
                  blend_push, grid_x, grid_y);
         if (pack_rgba) {
             Buffer& rgba = grow(
@@ -614,8 +624,8 @@ private:
     Buffer hi1_;
     Buffer val0_;
     Buffer val1_;
+    Buffer frame_counts_;
     Buffer hist_space_;
-    Buffer sorted_ids_;
     Buffer compact_;
     Buffer tile_ranges_;
     Buffer bucket_offsets_;

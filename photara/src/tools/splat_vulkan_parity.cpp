@@ -438,6 +438,8 @@ int run_benchmark(int argc, char** argv) {
     with_geometry.require_depth = true;
     splat_drender::vulkan::SplatSettings vulkan_color;
     vulkan_color.need_depth = false;
+    splat_drender::vulkan::SplatSettings vulkan_training = vulkan_color;
+    vulkan_training.pixel_snapshots = true;
     splat_drender::vulkan::SplatSettings vulkan_geometry;
     vulkan_geometry.need_depth = true;
 
@@ -491,6 +493,12 @@ int run_benchmark(int argc, char** argv) {
         },
         3, iterations);
     row("vulkan render (color, need_depth=0)", vk_color, cuda_color);
+    row("vulkan render (training snapshots)", time_ms(
+            [&] {
+                const auto result = vulkan.render(vulkan_camera, vulkan_training);
+                sink += result.color[0];
+            },
+            3, iterations), cuda_color);
     row("vulkan render_rgba (editor path)", time_ms(
             [&] {
                 std::vector<std::uint8_t> rgba;

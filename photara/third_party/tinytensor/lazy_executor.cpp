@@ -5,8 +5,12 @@
 #include "internal/lazy_config.hpp"
 #include "internal/lazy_ir.hpp"
 #include "internal/tensor_impl.hpp"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "vulkan/ops.hpp"
+#endif
 #include "internal/tensor_ops.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cctype>
@@ -14,6 +18,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -486,10 +491,6 @@ namespace tinytensor::internal {
                 return false;
             }
 
-            if (recipe.ops.size() > tensor_ops::FUSED_POINTWISE_MAX_OPS) {
-                return false;
-            }
-
             Tensor source = recipe.source;
             if (!source.is_valid() ||
                 source.dtype() != DataType::Float32 ||
@@ -499,6 +500,32 @@ namespace tinytensor::internal {
 
             const size_t n = source.numel();
             const bool pure_scalar = is_pure_scalar_chain(recipe.ops);
+
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (source.device() == Device::Vulkan) {
+                std::array<std::uint32_t, tensor_ops::FUSED_POINTWISE_MAX_OPS> kinds{};
+                std::array<float, tensor_ops::FUSED_POINTWISE_MAX_OPS> scalars{};
+                Tensor current = source;
+                for (std::size_t first = 0; first < recipe.ops.size();
+                     first += tensor_ops::FUSED_POINTWISE_MAX_OPS) {
+                    const std::size_t count = std::min<std::size_t>(
+                        tensor_ops::FUSED_POINTWISE_MAX_OPS, recipe.ops.size() - first);
+                    for (std::size_t i = 0; i < count; ++i) {
+                        kinds[i] = static_cast<std::uint32_t>(recipe.ops[first + i].kind);
+                        scalars[i] = recipe.ops[first + i].scalar;
+                    }
+                    current = vulkan::fused_pointwise(
+                        current, std::span<const std::uint32_t>(kinds.data(), count),
+                        std::span<const float>(scalars.data(), count));
+                }
+                materialized = std::move(current);
+                return materialized.is_valid();
+            }
+#endif
+
+            if (recipe.ops.size() > tensor_ops::FUSED_POINTWISE_MAX_OPS) {
+                return false;
+            }
 
             if (pure_scalar) {
                 const auto [a, b] = fold_affine(recipe.ops);

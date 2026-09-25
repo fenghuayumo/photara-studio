@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -47,6 +48,14 @@ void test_factory_and_roundtrip() {
     const std::vector<float> host{1.F, 2.F, 3.F, 4.F, 5.F, 6.F};
     auto tensor = Tensor::from_vector(host, {2, 3}, Device::Vulkan);
     require(tensor.to_vector() == host, "from_vector roundtrip");
+    const auto handles = vulkan::device_handles();
+    require(handles.instance != VK_NULL_HANDLE && handles.physical_device != VK_NULL_HANDLE &&
+                handles.device != VK_NULL_HANDLE && handles.queue != VK_NULL_HANDLE &&
+                handles.queue_family != VK_QUEUE_FAMILY_IGNORED,
+            "Vulkan device interop handles");
+    const auto view = vulkan::buffer_view(tensor);
+    require(view.buffer != VK_NULL_HANDLE && view.offset == 0 && view.bytes == host.size() * 4,
+            "Vulkan tensor buffer view");
 
     auto cloned = tensor.clone();
     require(cloned.to_vector() == host, "clone");
@@ -155,6 +164,67 @@ void test_reduce_and_cumsum() {
     require_vector_near(empty.sum(0).to_vector(), {0.F, 0.F, 0.F}, 1e-5F, "empty sum");
     auto scalar = Tensor::from_vector(std::vector<float>{7.F}, {}, Device::Vulkan);
     require_vector_near(scalar.sum().to_vector(), {7.F}, 1e-5F, "scalar sum");
+
+    constexpr std::size_t large_count = 1U << 20;
+    auto large = Tensor::from_vector(std::vector<float>(large_count, 1.F), {large_count},
+                                     Device::Vulkan);
+    require_near(large.sum().to_vector()[0], static_cast<float>(large_count), 1e-3F,
+                 "hierarchical full sum");
+    require_near(large.mean().to_vector()[0], 1.F, 1e-6F, "hierarchical full mean");
+}
+
+void test_fused_pointwise() {
+    using namespace tinytensor;
+    constexpr std::size_t count = 300000;
+    Tensor value = Tensor::from_vector(std::vector<float>(count, 2.F), {count}, Device::Vulkan);
+    float expected = 2.F;
+    // More than one 16-op recipe chunk verifies the long-chain path as well as
+    // the ordinary single-dispatch fusion path.
+    for (int i = 0; i < 20; ++i) {
+        value = value.add(1.F).mul(0.5F);
+        expected = (expected + 1.F) * 0.5F;
+    }
+    const auto result = value.to_vector();
+    require_near(result.front(), expected, 1e-5F, "fused pointwise first");
+    require_near(result.back(), expected, 1e-5F, "fused pointwise last");
+}
+
+void test_fused_adam() {
+    using namespace tinytensor;
+    auto parameter = Tensor::from_vector(std::vector<float>{1.F, 1.F, 1.F, 1.F}, {4}, Device::Vulkan);
+    auto gradient = Tensor::from_vector(std::vector<float>{0.5F, 0.5F, 0.5F, 0.5F}, {4}, Device::Vulkan);
+    auto first = Tensor::zeros({4}, Device::Vulkan);
+    auto second = Tensor::zeros({4}, Device::Vulkan);
+    vulkan::AdamStepOptions options;
+    options.learning_rate = 0.01F;
+    options.secondary_learning_rate = 0.02F;
+    options.group_stride = 4;
+    options.correction1 = 0.1F;
+    options.correction2 = 0.001F;
+    vulkan::adam_step(parameter, gradient, first, second, options);
+    require_vector_near(parameter.to_vector(), {0.99F, 0.99F, 0.99F, 0.98F}, 2e-5F,
+                        "fused Adam parameter");
+    require_vector_near(first.to_vector(), {0.05F, 0.05F, 0.05F, 0.05F}, 1e-6F,
+                        "fused Adam first moment");
+    require_vector_near(second.to_vector(), {0.00025F, 0.00025F, 0.00025F, 0.00025F}, 1e-7F,
+                        "fused Adam second moment");
+
+    auto bad_parameter = Tensor::from_vector(
+        std::vector<float>{std::numeric_limits<float>::quiet_NaN(), 2.F}, {2}, Device::Vulkan);
+    auto bad_gradient = Tensor::from_vector(
+        std::vector<float>{1.F, std::numeric_limits<float>::infinity()}, {2}, Device::Vulkan);
+    auto bad_first = Tensor::from_vector(std::vector<float>{3.F, 3.F}, {2}, Device::Vulkan);
+    auto bad_second = Tensor::from_vector(std::vector<float>{4.F, 4.F}, {2}, Device::Vulkan);
+    options.group_stride = 0;
+    options.clamp_min = -1.F;
+    options.clamp_max = 1.F;
+    vulkan::adam_step(bad_parameter, bad_gradient, bad_first, bad_second, options);
+    require_vector_near(bad_parameter.to_vector(), {0.F, 1.F}, 1e-6F,
+                        "fused Adam non-finite parameter guard");
+    require_vector_near(bad_first.to_vector(), {0.F, 0.F}, 1e-6F,
+                        "fused Adam non-finite first guard");
+    require_vector_near(bad_second.to_vector(), {0.F, 0.F}, 1e-6F,
+                        "fused Adam non-finite second guard");
 }
 
 void test_matmul_cat_and_indexing() {
@@ -236,6 +306,8 @@ int main() {
         run("multinomial", test_multinomial);
         run("elementwise_and_where", test_elementwise_and_where);
         run("reduce_and_cumsum", test_reduce_and_cumsum);
+        run("fused_pointwise", test_fused_pointwise);
+        run("fused_adam", test_fused_adam);
         run("matmul_cat_and_indexing", test_matmul_cat_and_indexing);
         run("mask_factory_and_pool", test_mask_factory_and_pool);
         std::cout << "tinytensor vulkan tests passed\n";

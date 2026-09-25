@@ -24,6 +24,7 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
     uint tiles_x = pc.u2;
     bool geometry = (pc.u3 & 4u) != 0;
     bool snapshots = (pc.u3 & 8u) != 0;
+    bool stats = (pc.u3 & 16u) != 0;
     uint mode = pc.u4;
     int wrap_width = int(pc.u5);
     float fx = asfloat(pc.u6);
@@ -51,10 +52,12 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
     uint range_end = ranges[tile_id * 2 + 1];
     uint todo = range_end - range_begin;
     uint rounds = (todo + 255u) >> 8;
-    uint bucket_base = tile_id == 0 ? 0u : bucket_offset[tile_id - 1];
-    uint bucket_count = (todo + 31u) >> 5;
-    for (uint bucket = rank; bucket < bucket_count; bucket += 256u) {
-        out_u[gaussian_count + pixel_count + (height + 15u) / 16u * tiles_x + bucket_base + bucket] = tile_id;
+    uint bucket_base = snapshots && tile_id != 0 ? bucket_offset[tile_id - 1] : 0u;
+    if (snapshots) {
+        uint bucket_count = (todo + 31u) >> 5;
+        for (uint bucket = rank; bucket < bucket_count; bucket += 256u) {
+            out_u[gaussian_count + pixel_count + (height + 15u) / 16u * tiles_x + bucket_base + bucket] = tile_id;
+        }
     }
 
     float transmittance = 1.0f;
@@ -114,7 +117,7 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
                     continue;
                 }
                 float weight = alpha * transmittance;
-                InterlockedOr(out_u[sid[j]], 1u);
+                if (stats) InterlockedOr(out_u[sid[j]], 1u);
                 color0 += srgb[j].x * weight;
                 color1 += srgb[j].y * weight;
                 color2 += srgb[j].z * weight;
@@ -126,19 +129,22 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
                     depth_seed = transmittance > 0.5f ? depth : depth_seed;
                 }
                 transmittance = test_t;
-                last_contributor = contributor;
+                if (geometry || stats) last_contributor = contributor;
             }
         }
     }
 
-    red[rank] = last_contributor;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint stride = 128u; stride > 0u; stride >>= 1) {
-        if (rank < stride) red[rank] = max(red[rank], red[rank + stride]);
+    uint block_max = 0;
+    if (geometry || stats) {
+        red[rank] = last_contributor;
         GroupMemoryBarrierWithGroupSync();
+        [unroll] for (uint stride = 128u; stride > 0u; stride >>= 1) {
+            if (rank < stride) red[rank] = max(red[rank], red[rank + stride]);
+            GroupMemoryBarrierWithGroupSync();
+        }
+        block_max = red[0];
+        if (stats && rank == 0) out_u[gaussian_count + pixel_count + tile_id] = block_max;
     }
-    uint block_max = red[0];
-    if (rank == 0) out_u[gaussian_count + pixel_count + tile_id] = block_max;
 
     float median = 0.0f;
     bool in_range = transmittance <= kDepthMinTransmittance;
@@ -214,10 +220,12 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
     }
 
     if (inside) {
-        out_u[gaussian_count + pix] = last_contributor;
-        out_f[8u * pixel_count + pix] = color0;
-        out_f[8u * pixel_count + pixel_count + pix] = color1;
-        out_f[8u * pixel_count + 2u * pixel_count + pix] = color2;
+        if (stats) {
+            out_u[gaussian_count + pix] = last_contributor;
+            out_f[8u * pixel_count + pix] = color0;
+            out_f[8u * pixel_count + pixel_count + pix] = color1;
+            out_f[8u * pixel_count + 2u * pixel_count + pix] = color2;
+        }
         out_f[pix] = color0 + transmittance * bg0;
         out_f[pixel_count + pix] = color1 + transmittance * bg1;
         out_f[2u * pixel_count + pix] = color2 + transmittance * bg2;
