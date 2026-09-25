@@ -82,7 +82,11 @@ public:
           scatter_(context.create_pipeline("splat_radix_scatter.hlsl.spv", 8, sizeof(Push))),
           ranges_(context.create_pipeline("splat_ranges.hlsl.spv", 3, sizeof(Push))),
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
-          blend_backward_(context.create_pipeline("splat_blend_backward.hlsl.spv", 10, sizeof(Push))),
+          median_backward_(context.create_pipeline("splat_median_backward.hlsl.spv", 7, sizeof(Push))),
+          blend_backward_(context.create_pipeline("splat_blend_backward.hlsl.spv", 12, sizeof(Push))),
+          sample_depth_(context.create_pipeline("splat_sample_depth.hlsl.spv", 7, sizeof(Push))),
+          sample_depth_backward_(context.create_pipeline("splat_sample_depth_backward.hlsl.spv", 10, sizeof(Push))),
+          multi_view_(context.create_pipeline("splat_multi_view.hlsl.spv", 10, sizeof(Push))),
           project_backward_(context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))) {
@@ -201,7 +205,12 @@ public:
         last_frame_has_snapshots_ = false;
     }
 
-    void clear_model() { model_ready_ = false; count_ = 0; last_frame_has_snapshots_ = false; }
+    void clear_model() {
+        model_ready_ = false;
+        count_ = 0;
+        last_frame_has_snapshots_ = false;
+        sample_live_ = false;
+    }
     bool has_model() const noexcept { return model_ready_; }
 
     struct FrameCounts {
@@ -213,6 +222,7 @@ public:
     // the 8-bit conversion to the same command batch, which is what the editor
     // preview hands to its own image.
     FrameCounts record_frame(const SplatCamera& camera, const SplatSettings& settings, const bool pack_rgba) {
+        sample_live_ = false;
         require(model_ready_, "no Gaussian model is loaded");
         require(camera.width > 0 && camera.height > 0, "camera width and height must be positive");
         require(camera.mode == 0 || camera.mode == 1 || camera.mode == 3 || camera.mode == 4,
@@ -410,6 +420,7 @@ public:
         }
         flush_batch();
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
+        last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
         last_instance_values_ = instance_values;
         last_width_ = camera.width;
         last_height_ = camera.height;
@@ -472,21 +483,67 @@ public:
         return collect(camera, settings, counts, gauss_u_, out_f_, out_u_);
     }
 
+    void dispatch_median_backward_info(
+        const VkDescriptorBufferInfo& loss_depth, Buffer& median_state) {
+        Push push{};
+        push.u[0] = last_width_;
+        push.u[1] = last_height_;
+        push.u[2] = last_grid_x_;
+        push.u[3] = last_mode_;
+        push.u[4] = static_cast<std::uint32_t>(last_wrap_width_);
+        push.u[5] = count_;
+        push.u[6] = last_pixels_;
+        set_float(push, 7, last_fx_);
+        set_float(push, 8, last_fy_);
+        set_float(push, 9, last_cx_);
+        set_float(push, 10, last_cy_);
+        set_float(push, 11, last_k1_);
+        set_float(push, 12, last_k2_);
+        set_float(push, 13, last_k3_);
+        set_float(push, 14, last_k4_);
+        dispatch_infos(
+            median_backward_,
+            {descriptor(tile_ranges_), descriptor(*last_instance_values_),
+             descriptor(gauss_f_), descriptor(out_f_), descriptor(out_u_),
+             loss_depth, descriptor(median_state)},
+            push, last_grid_x_, div_up(last_height_, k_tile));
+    }
+
+    void dispatch_median_backward(Buffer& loss_depth, Buffer& median_state) {
+        dispatch_median_backward_info(descriptor(loss_depth), median_state);
+    }
+
     SplatBlendGradients backward_blend(
-        const std::span<const float> dL_color, const std::span<const float> dL_alpha) {
+        const std::span<const float> dL_color, const std::span<const float> dL_alpha,
+        const std::span<const float> dL_depth, const std::span<const float> dL_normal) {
         require(last_frame_has_snapshots_,
                 "backward_blend requires the latest render to use pixel_snapshots=true");
         require(dL_color.size() == static_cast<std::size_t>(last_pixels_) * 3,
                 "dL_color must have shape [3,H,W]");
         require(dL_alpha.size() == last_pixels_, "dL_alpha must have shape [H,W]");
+        require(dL_depth.empty() || (last_frame_has_geometry_ && dL_depth.size() == last_pixels_),
+                "dL_median_depth must be empty or have shape [H,W] after a geometry forward");
+        require(dL_normal.empty() ||
+                    (last_frame_has_geometry_ && dL_normal.size() == static_cast<std::size_t>(last_pixels_) * 3),
+                "dL_normal must be empty or have shape [3,H,W] after a geometry forward");
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& loss_color = grow(loss_color_, dL_color.size_bytes());
         Buffer& loss_alpha = grow(loss_alpha_, dL_alpha.size_bytes());
-        const std::size_t grad_count = static_cast<std::size_t>(count_) * 10;
+        Buffer& loss_depth = grow(loss_depth_, static_cast<std::size_t>(last_pixels_) * sizeof(float));
+        Buffer& loss_normal = grow(loss_normal_, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float));
+        Buffer& median_state = grow(median_state_, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float));
+        const std::size_t grad_count = static_cast<std::size_t>(count_) * 17;
         Buffer& grad = grow(blend_grad_, grad_count * sizeof(float));
         context_.write_buffer(loss_color, dL_color.data(), dL_color.size_bytes());
         context_.write_buffer(loss_alpha, dL_alpha.data(), dL_alpha.size_bytes());
+        if (dL_depth.empty()) zero_buffer(context_, loss_depth, static_cast<std::size_t>(last_pixels_) * sizeof(float));
+        else context_.write_buffer(loss_depth, dL_depth.data(), dL_depth.size_bytes());
+        if (dL_normal.empty()) zero_buffer(context_, loss_normal, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float));
+        else context_.write_buffer(loss_normal, dL_normal.data(), dL_normal.size_bytes());
+        zero_buffer(context_, median_state, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float));
         zero_buffer(context_, grad, grad_count * sizeof(float));
+
+        if (last_frame_has_geometry_) dispatch_median_backward(loss_depth, median_state);
 
         Push push{};
         push.u[0] = last_width_;
@@ -501,10 +558,12 @@ public:
         set_float(push, 9, last_background_[0]);
         set_float(push, 10, last_background_[1]);
         set_float(push, 11, last_background_[2]);
+        push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
         dispatch(
             blend_backward_,
             {&tile_ranges_, last_instance_values_, &gauss_f_, &out_f_, &out_u_,
-             &bucket_offsets_, &snap_, &loss_color, &loss_alpha, &grad},
+             &bucket_offsets_, &snap_, &loss_color, &loss_alpha, &loss_normal,
+             &median_state, &grad},
             push, div_up(last_bucket_limit_, 8));
         flush_batch();
 
@@ -515,17 +574,24 @@ public:
             packed.begin() + static_cast<std::ptrdiff_t>(count_) * 3,
             packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7);
         output.colors.assign(
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7, packed.end());
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 7,
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 10);
+        output.ray_plane.assign(
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 10,
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14);
+        output.normal.assign(
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14, packed.end());
         return output;
     }
 
     SplatModelGradients backward(
-        const std::span<const float> dL_color, const std::span<const float> dL_alpha) {
+        const std::span<const float> dL_color, const std::span<const float> dL_alpha,
+        const std::span<const float> dL_depth, const std::span<const float> dL_normal) {
         // This also leaves the packed blend gradients resident for the model
         // pass below. Keeping this path simple makes the public CPU API useful
         // for parity tests; the device-resident training API can fuse the two
         // submissions without changing either shader.
-        (void)backward_blend(dL_color, dL_alpha);
+        (void)backward_blend(dL_color, dL_alpha, dL_depth, dL_normal);
         const std::scoped_lock lock(context_.dispatch_mutex);
         const std::size_t feature_count = has_sh_
             ? static_cast<std::size_t>(count_) * sh_bases_ * 3
@@ -590,27 +656,51 @@ public:
 
     void backward_blend_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-        const SplatBufferView& packed_gradients) {
+        const SplatBufferView& packed_gradients,
+        const SplatBufferView& dL_depth, const SplatBufferView& dL_normal) {
         require(last_frame_has_snapshots_,
                 "backward_blend_device requires the latest render to use pixel_snapshots=true");
         const std::uint64_t color_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
         const std::uint64_t alpha_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
-        const std::uint64_t gradient_bytes = static_cast<std::uint64_t>(count_) * 10 * sizeof(float);
+        const std::uint64_t depth_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
+        const std::uint64_t normal_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
+        const std::uint64_t gradient_bytes = static_cast<std::uint64_t>(count_) * 17 * sizeof(float);
         require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
                 "device dL_color is too small");
         require(dL_alpha.buffer != VK_NULL_HANDLE && dL_alpha.bytes >= alpha_bytes,
                 "device dL_alpha is too small");
         require(packed_gradients.buffer != VK_NULL_HANDLE && packed_gradients.bytes >= gradient_bytes,
                 "device packed_gradients is too small");
+        require(dL_depth.buffer == VK_NULL_HANDLE ||
+                    (last_frame_has_geometry_ && dL_depth.bytes >= depth_bytes),
+                "device dL_median_depth is too small or the forward had no geometry");
+        require(dL_normal.buffer == VK_NULL_HANDLE ||
+                    (last_frame_has_geometry_ && dL_normal.bytes >= normal_bytes),
+                "device dL_normal is too small or the forward had no geometry");
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
         const std::uint64_t alignment = std::max<std::uint64_t>(
             4, properties.limits.minStorageBufferOffsetAlignment);
         require(dL_color.offset % alignment == 0 && dL_alpha.offset % alignment == 0 &&
-                    packed_gradients.offset % alignment == 0,
+                    packed_gradients.offset % alignment == 0 &&
+                    (dL_depth.buffer == VK_NULL_HANDLE || dL_depth.offset % alignment == 0) &&
+                    (dL_normal.buffer == VK_NULL_HANDLE || dL_normal.offset % alignment == 0),
                 "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
 
         const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& zero_depth = grow(loss_depth_, depth_bytes);
+        Buffer& zero_normal = grow(loss_normal_, normal_bytes);
+        Buffer& median_state = grow(median_state_, depth_bytes * 2);
+        if (dL_depth.buffer == VK_NULL_HANDLE) zero_buffer(context_, zero_depth, depth_bytes);
+        if (dL_normal.buffer == VK_NULL_HANDLE) zero_buffer(context_, zero_normal, normal_bytes);
+        zero_buffer(context_, median_state, depth_bytes * 2);
+        const VkDescriptorBufferInfo depth_info = dL_depth.buffer == VK_NULL_HANDLE
+            ? descriptor(zero_depth)
+            : VkDescriptorBufferInfo{dL_depth.buffer, dL_depth.offset, depth_bytes};
+        const VkDescriptorBufferInfo normal_info = dL_normal.buffer == VK_NULL_HANDLE
+            ? descriptor(zero_normal)
+            : VkDescriptorBufferInfo{dL_normal.buffer, dL_normal.offset, normal_bytes};
+        if (last_frame_has_geometry_) dispatch_median_backward_info(depth_info, median_state);
         Push clear_push{};
         clear_push.u[0] = static_cast<std::uint32_t>(gradient_bytes / sizeof(float));
         dispatch_infos(
@@ -630,18 +720,20 @@ public:
         set_float(push, 9, last_background_[0]);
         set_float(push, 10, last_background_[1]);
         set_float(push, 11, last_background_[2]);
+        push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
         std::vector<VkDescriptorBufferInfo> infos{
             descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
             descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
             {dL_color.buffer, dL_color.offset, color_bytes},
             {dL_alpha.buffer, dL_alpha.offset, alpha_bytes},
+            normal_info, descriptor(median_state),
             {packed_gradients.buffer, packed_gradients.offset, gradient_bytes}};
         dispatch_infos(blend_backward_, infos, push, div_up(last_bucket_limit_, 8));
         flush_batch();
     }
 
     std::uint64_t blend_gradient_float_count() const noexcept {
-        return static_cast<std::uint64_t>(count_) * 10;
+        return static_cast<std::uint64_t>(count_) * 17;
     }
 
     std::uint64_t model_gradient_float_count() const noexcept {
@@ -651,13 +743,303 @@ public:
         return feature_count + static_cast<std::uint64_t>(count_) * 25;
     }
 
+    SplatDepthSamples sample_depth(
+        const std::span<const float> world_points, const SplatCamera& camera,
+        SplatSettings settings) {
+        require(!world_points.empty() && world_points.size() % 3 == 0,
+                "sample_depth world_points must have shape [P,3]");
+        settings.need_depth = true;
+        settings.pixel_snapshots = false;
+        (void)record_frame(camera, settings, false);
+        const auto point_count = static_cast<std::uint32_t>(world_points.size() / 3);
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& points = grow(sample_points_, world_points.size_bytes());
+        Buffer& output_f = grow(
+            sample_f_, static_cast<std::uint64_t>(point_count) * 4 * sizeof(float));
+        Buffer& output_u = grow(
+            sample_u_, static_cast<std::uint64_t>(point_count) * 2 * sizeof(std::uint32_t));
+        context_.write_buffer(points, world_points.data(), world_points.size_bytes());
+        zero_buffer(context_, output_f, static_cast<std::size_t>(point_count) * 4 * sizeof(float));
+        zero_buffer(context_, output_u, static_cast<std::size_t>(point_count) * 2 * sizeof(std::uint32_t));
+        Push push{};
+        push.u[0] = point_count;
+        push.u[1] = last_width_;
+        push.u[2] = last_height_;
+        push.u[3] = last_grid_x_;
+        push.u[4] = last_mode_;
+        push.u[5] = count_;
+        set_float(push, 6, last_fx_); set_float(push, 7, last_fy_);
+        set_float(push, 8, last_cx_); set_float(push, 9, last_cy_);
+        set_float(push, 10, last_k1_); set_float(push, 11, last_k2_);
+        set_float(push, 12, last_k3_); set_float(push, 13, last_k4_);
+        set_float(push, 14, settings.point_depth_bracket);
+        set_float(push, 15, settings.point_depth_tolerance);
+        dispatch(
+            sample_depth_,
+            {&tile_ranges_, last_instance_values_, &gauss_f_, &camera_, &points,
+             &output_f, &output_u},
+            push, div_up(point_count, 256));
+        flush_batch();
+        const auto packed_f = download_vector<float>(
+            context_, output_f, static_cast<std::size_t>(point_count) * 4);
+        const auto packed_u = download_vector<std::uint32_t>(
+            context_, output_u, static_cast<std::size_t>(point_count) * 2);
+        SplatDepthSamples output;
+        output.camera_points.assign(
+            packed_f.begin(), packed_f.begin() + static_cast<std::ptrdiff_t>(point_count) * 3);
+        output.median_depth.assign(
+            packed_f.begin() + static_cast<std::ptrdiff_t>(point_count) * 3, packed_f.end());
+        output.n_contrib.assign(
+            packed_u.begin(), packed_u.begin() + static_cast<std::ptrdiff_t>(point_count));
+        output.inside.assign(
+            packed_u.begin() + static_cast<std::ptrdiff_t>(point_count), packed_u.end());
+        sample_point_count_ = point_count;
+        sample_live_ = true;
+        return output;
+    }
+
+    SplatDepthSampleGradients sample_depth_backward(
+        const std::span<const float> dL_camera_points) {
+        require(sample_live_, "sample_depth_backward requires a live sample_depth result");
+        require(dL_camera_points.size() == static_cast<std::size_t>(sample_point_count_) * 3,
+                "dL_camera_points must have shape [P,3]");
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& loss = grow(sample_loss_, dL_camera_points.size_bytes());
+        Buffer& point_gradient = grow(
+            sample_point_grad_, static_cast<std::uint64_t>(sample_point_count_) * 3 * sizeof(float));
+        Buffer& blend_gradient = grow(
+            blend_grad_, blend_gradient_float_count() * sizeof(float));
+        context_.write_buffer(loss, dL_camera_points.data(), dL_camera_points.size_bytes());
+        zero_buffer(context_, point_gradient,
+                    static_cast<std::size_t>(sample_point_count_) * 3 * sizeof(float));
+        zero_buffer(context_, blend_gradient,
+                    static_cast<std::size_t>(blend_gradient_float_count()) * sizeof(float));
+        Push sample_push{};
+        sample_push.u[0] = sample_point_count_;
+        sample_push.u[1] = last_width_; sample_push.u[2] = last_height_;
+        sample_push.u[3] = last_grid_x_; sample_push.u[4] = last_mode_;
+        sample_push.u[5] = count_;
+        set_float(sample_push, 6, last_fx_); set_float(sample_push, 7, last_fy_);
+        set_float(sample_push, 8, last_cx_); set_float(sample_push, 9, last_cy_);
+        set_float(sample_push, 10, last_k1_); set_float(sample_push, 11, last_k2_);
+        set_float(sample_push, 12, last_k3_); set_float(sample_push, 13, last_k4_);
+        dispatch(
+            sample_depth_backward_,
+            {&tile_ranges_, last_instance_values_, &gauss_f_, &camera_, &sample_points_,
+             &sample_f_, &sample_u_, &loss, &blend_gradient, &point_gradient},
+            sample_push, div_up(sample_point_count_, 256));
+
+        const std::size_t total_count = static_cast<std::size_t>(model_gradient_float_count());
+        Buffer& gradient = grow(model_grad_, total_count * sizeof(float));
+        Push project_push{};
+        project_push.u[0] = count_;
+        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
+                            (raw_chain_ ? 4u : 0u);
+        project_push.u[2] = last_mode_; project_push.u[3] = last_width_;
+        project_push.u[4] = last_height_; project_push.u[5] = sh_degree_;
+        project_push.u[6] = sh_bases_;
+        set_float(project_push, 7, last_fx_); set_float(project_push, 8, last_fy_);
+        set_float(project_push, 9, last_cx_); set_float(project_push, 10, last_cy_);
+        set_float(project_push, 11, last_k1_); set_float(project_push, 12, last_k2_);
+        set_float(project_push, 13, last_k3_); set_float(project_push, 14, last_k4_);
+        set_float(project_push, 15, last_kernel_size_);
+        set_float(project_push, 16, last_scale_modifier_);
+        dispatch(
+            project_backward_,
+            {&means_, &opacities_, &scales_, &rotations_, &covariances_, &colors_,
+             &camera_, &gauss_f_, &gauss_u_, &blend_gradient, &raw_log_scales_,
+             &raw_rotations_, &opacity_logits_, &filter_3d_, &gradient},
+            project_push, div_up(count_, 256));
+        flush_batch();
+
+        const auto packed = download_vector<float>(context_, gradient, total_count);
+        SplatDepthSampleGradients result;
+        result.points = download_vector<float>(
+            context_, point_gradient, static_cast<std::size_t>(sample_point_count_) * 3);
+        std::size_t offset = 0;
+        const auto take = [&](std::vector<float>& destination, const std::size_t size) {
+            destination.assign(packed.begin() + static_cast<std::ptrdiff_t>(offset),
+                               packed.begin() + static_cast<std::ptrdiff_t>(offset + size));
+            offset += size;
+        };
+        take(result.model.means, static_cast<std::size_t>(count_) * 3);
+        const std::size_t feature_count = has_sh_
+            ? static_cast<std::size_t>(count_) * sh_bases_ * 3
+            : static_cast<std::size_t>(count_) * 3;
+        if (has_sh_) take(result.model.sh, feature_count);
+        else take(result.model.colors, feature_count);
+        take(result.model.opacities, count_);
+        if (has_scales_) {
+            take(result.model.scales, static_cast<std::size_t>(count_) * 3);
+            take(result.model.rotations, static_cast<std::size_t>(count_) * 4);
+            offset += static_cast<std::size_t>(count_) * 6;
+        } else {
+            offset += static_cast<std::size_t>(count_) * 7;
+            take(result.model.covariances, static_cast<std::size_t>(count_) * 6);
+        }
+        if (raw_chain_) {
+            take(result.model.log_scales, static_cast<std::size_t>(count_) * 3);
+            take(result.model.raw_rotations, static_cast<std::size_t>(count_) * 4);
+            take(result.model.opacity_logits, count_);
+        }
+        sample_live_ = false;
+        return result;
+    }
+
+    SplatMultiViewOutput multi_view_loss(const SplatMultiViewInput& input) {
+        const auto& reference = input.reference_camera;
+        const auto& neighbour = input.neighbour_camera;
+        require(reference.mode == 0 && neighbour.mode == 0,
+                "multi_view_loss matches the CUDA pinhole-only training path");
+        require(reference.width > 0 && reference.height > 0 &&
+                    neighbour.width > 0 && neighbour.height > 0,
+                "multi_view_loss camera dimensions must be positive");
+        require(reference.world_to_camera.size() == 16 &&
+                    neighbour.world_to_camera.size() == 16,
+                "multi_view_loss camera transforms must contain 16 floats");
+        const std::size_t pixels =
+            static_cast<std::size_t>(reference.width) * reference.height;
+        const std::size_t neighbour_pixels =
+            static_cast<std::size_t>(neighbour.width) * neighbour.height;
+        require(input.reference_depth.size() == pixels,
+                "multi_view_loss reference_depth must have shape [H,W]");
+        require(input.reference_normal.size() == 3 * pixels,
+                "multi_view_loss reference_normal must have shape [3,H,W]");
+        require(input.sampled_neighbour_points.size() == 3 * pixels,
+                "multi_view_loss sampled_neighbour_points must have shape [H,W,3]");
+        require(input.sampled_inside.size() == pixels,
+                "multi_view_loss sampled_inside must have shape [H,W]");
+        const bool enable_ncc = input.ncc_weight > 0.0F;
+        require(!enable_ncc || (input.reference_gray.size() == pixels &&
+                    input.neighbour_gray.size() == neighbour_pixels),
+                "multi_view_loss NCC images have the wrong shape");
+        require(input.reference_mask.empty() || input.reference_mask.size() == pixels,
+                "multi_view_loss reference_mask has the wrong shape");
+        require(input.neighbour_mask.empty() ||
+                    input.neighbour_mask.size() == neighbour_pixels,
+                "multi_view_loss neighbour_mask has the wrong shape");
+        require(input.geometry_weight >= 0.0F && input.ncc_weight >= 0.0F,
+                "multi_view_loss weights must be non-negative");
+
+        float rr[9]{};
+        float rn[9]{};
+        float tr[3]{};
+        float tn[3]{};
+        for (int row = 0; row < 3; ++row) {
+            tr[row] = reference.world_to_camera[12 + row];
+            tn[row] = neighbour.world_to_camera[12 + row];
+            for (int column = 0; column < 3; ++column) {
+                rr[3 * row + column] = reference.world_to_camera[4 * column + row];
+                rn[3 * row + column] = neighbour.world_to_camera[4 * column + row];
+            }
+        }
+        float transform[12]{};
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                for (int k = 0; k < 3; ++k)
+                    transform[3 * row + column] +=
+                        rn[3 * row + k] * rr[3 * column + k];
+            }
+            transform[9 + row] = tn[row];
+            for (int column = 0; column < 3; ++column)
+                transform[9 + row] -=
+                    transform[3 * row + column] * tr[column];
+        }
+
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& depth = grow(multi_depth_, pixels * sizeof(float));
+        Buffer& normal = grow(multi_normal_, 3 * pixels * sizeof(float));
+        Buffer& reference_gray = grow(multi_reference_gray_, pixels * sizeof(float));
+        Buffer& sampled = grow(multi_sampled_, 3 * pixels * sizeof(float));
+        Buffer& inside = grow(multi_inside_, pixels * sizeof(std::uint32_t));
+        Buffer& neighbour_gray = grow(
+            multi_neighbour_gray_, neighbour_pixels * sizeof(float));
+        Buffer& transform_buffer = grow(multi_transform_, sizeof(transform));
+        Buffer& reference_mask = grow(multi_reference_mask_, pixels * sizeof(float));
+        Buffer& neighbour_mask = grow(
+            multi_neighbour_mask_, neighbour_pixels * sizeof(float));
+        const std::size_t output_count = 7 * pixels + 5;
+        Buffer& output = grow(multi_output_, output_count * sizeof(float));
+        context_.write_buffer(depth, input.reference_depth.data(), input.reference_depth.size_bytes());
+        context_.write_buffer(normal, input.reference_normal.data(), input.reference_normal.size_bytes());
+        context_.write_buffer(sampled, input.sampled_neighbour_points.data(),
+                              input.sampled_neighbour_points.size_bytes());
+        context_.write_buffer(inside, input.sampled_inside.data(), input.sampled_inside.size_bytes());
+        context_.write_buffer(transform_buffer, transform, sizeof(transform));
+        if (enable_ncc) {
+            context_.write_buffer(reference_gray, input.reference_gray.data(),
+                                  input.reference_gray.size_bytes());
+            context_.write_buffer(neighbour_gray, input.neighbour_gray.data(),
+                                  input.neighbour_gray.size_bytes());
+        }
+        if (!input.reference_mask.empty())
+            context_.write_buffer(reference_mask, input.reference_mask.data(),
+                                  input.reference_mask.size_bytes());
+        if (!input.neighbour_mask.empty())
+            context_.write_buffer(neighbour_mask, input.neighbour_mask.data(),
+                                  input.neighbour_mask.size_bytes());
+        zero_buffer(context_, output, output_count * sizeof(float));
+
+        Push push{};
+        push.u[0] = reference.width;
+        push.u[1] = reference.height;
+        push.u[2] = neighbour.width;
+        push.u[3] = neighbour.height;
+        set_float(push, 4, reference.fx); set_float(push, 5, reference.fy);
+        set_float(push, 6, reference.cx); set_float(push, 7, reference.cy);
+        set_float(push, 8, neighbour.fx); set_float(push, 9, neighbour.fy);
+        set_float(push, 10, neighbour.cx); set_float(push, 11, neighbour.cy);
+        set_float(push, 12, input.pixel_noise_threshold);
+        push.u[13] = (!input.reference_mask.empty() ? 1u : 0u) |
+                     (!input.neighbour_mask.empty() ? 2u : 0u) |
+                     (input.robust_ncc ? 4u : 0u) |
+                     (enable_ncc ? 8u : 0u);
+        set_float(push, 14, input.geometry_weight);
+        set_float(push, 15, input.ncc_weight);
+        set_float(push, 16, input.ncc_lambda_reference);
+        set_float(push, 17, input.ncc_sharpness);
+        set_float(push, 18, std::clamp(input.ncc_min_weight, 0.0F, 1.0F));
+        const std::vector<Buffer*> buffers{
+            &depth, &normal, &reference_gray, &sampled, &inside,
+            &neighbour_gray, &transform_buffer, &reference_mask,
+            &neighbour_mask, &output};
+        dispatch(multi_view_, buffers, push, div_up(reference.width, 16),
+                 div_up(reference.height, 16));
+        push.u[13] |= 0x80000000u;
+        dispatch(multi_view_, buffers, push, div_up(reference.width, 16),
+                 div_up(reference.height, 16));
+        flush_batch();
+
+        const auto packed = download_vector<float>(context_, output, output_count);
+        SplatMultiViewOutput result;
+        result.reference_depth_gradient.assign(
+            packed.begin(), packed.begin() + static_cast<std::ptrdiff_t>(pixels));
+        result.reference_normal_gradient.assign(
+            packed.begin() + static_cast<std::ptrdiff_t>(pixels),
+            packed.begin() + static_cast<std::ptrdiff_t>(4 * pixels));
+        result.sampled_point_gradient.assign(
+            packed.begin() + static_cast<std::ptrdiff_t>(4 * pixels),
+            packed.begin() + static_cast<std::ptrdiff_t>(7 * pixels));
+        const float* terms = packed.data() + 7 * pixels;
+        result.geometry_pixels = static_cast<std::uint64_t>(terms[1]);
+        result.geometry_candidates = static_cast<std::uint64_t>(terms[4]);
+        result.ncc_pixels = static_cast<std::uint64_t>(terms[3]);
+        result.geometry = result.geometry_pixels != 0
+            ? terms[0] / terms[1] : 0.0F;
+        result.ncc = result.ncc_pixels != 0 ? terms[2] / terms[3] : 0.0F;
+        return result;
+    }
+
     void backward_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-        const SplatBufferView& packed_model_gradients) {
+        const SplatBufferView& packed_model_gradients,
+        const SplatBufferView& dL_depth, const SplatBufferView& dL_normal) {
         require(last_frame_has_snapshots_,
                 "backward_device requires the latest render to use pixel_snapshots=true");
         const std::uint64_t color_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
         const std::uint64_t alpha_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
+        const std::uint64_t depth_bytes = alpha_bytes;
+        const std::uint64_t normal_bytes = color_bytes;
         const std::uint64_t blend_bytes = blend_gradient_float_count() * sizeof(float);
         const std::uint64_t model_bytes = model_gradient_float_count() * sizeof(float);
         require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
@@ -667,16 +1049,37 @@ public:
         require(packed_model_gradients.buffer != VK_NULL_HANDLE &&
                     packed_model_gradients.bytes >= model_bytes,
                 "device packed_model_gradients is too small");
+        require(dL_depth.buffer == VK_NULL_HANDLE ||
+                    (last_frame_has_geometry_ && dL_depth.bytes >= depth_bytes),
+                "device dL_median_depth is too small or the forward had no geometry");
+        require(dL_normal.buffer == VK_NULL_HANDLE ||
+                    (last_frame_has_geometry_ && dL_normal.bytes >= normal_bytes),
+                "device dL_normal is too small or the forward had no geometry");
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
         const std::uint64_t alignment = std::max<std::uint64_t>(
             4, properties.limits.minStorageBufferOffsetAlignment);
         require(dL_color.offset % alignment == 0 && dL_alpha.offset % alignment == 0 &&
-                    packed_model_gradients.offset % alignment == 0,
+                    packed_model_gradients.offset % alignment == 0 &&
+                    (dL_depth.buffer == VK_NULL_HANDLE || dL_depth.offset % alignment == 0) &&
+                    (dL_normal.buffer == VK_NULL_HANDLE || dL_normal.offset % alignment == 0),
                 "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
 
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& blend_gradient = grow(blend_grad_, blend_bytes);
+        Buffer& zero_depth = grow(loss_depth_, depth_bytes);
+        Buffer& zero_normal = grow(loss_normal_, normal_bytes);
+        Buffer& median_state = grow(median_state_, depth_bytes * 2);
+        if (dL_depth.buffer == VK_NULL_HANDLE) zero_buffer(context_, zero_depth, depth_bytes);
+        if (dL_normal.buffer == VK_NULL_HANDLE) zero_buffer(context_, zero_normal, normal_bytes);
+        zero_buffer(context_, median_state, depth_bytes * 2);
+        const VkDescriptorBufferInfo depth_info = dL_depth.buffer == VK_NULL_HANDLE
+            ? descriptor(zero_depth)
+            : VkDescriptorBufferInfo{dL_depth.buffer, dL_depth.offset, depth_bytes};
+        const VkDescriptorBufferInfo normal_info = dL_normal.buffer == VK_NULL_HANDLE
+            ? descriptor(zero_normal)
+            : VkDescriptorBufferInfo{dL_normal.buffer, dL_normal.offset, normal_bytes};
+        if (last_frame_has_geometry_) dispatch_median_backward_info(depth_info, median_state);
         begin_batch();
         vkCmdFillBuffer(command_, blend_gradient.handle, 0, blend_bytes, 0u);
         VkBufferMemoryBarrier fill_barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
@@ -704,11 +1107,13 @@ public:
         set_float(blend_push, 9, last_background_[0]);
         set_float(blend_push, 10, last_background_[1]);
         set_float(blend_push, 11, last_background_[2]);
+        blend_push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
         std::vector<VkDescriptorBufferInfo> blend_infos{
             descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
             descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
             {dL_color.buffer, dL_color.offset, color_bytes},
-            {dL_alpha.buffer, dL_alpha.offset, alpha_bytes}, descriptor(blend_gradient)};
+            {dL_alpha.buffer, dL_alpha.offset, alpha_bytes}, normal_info,
+            descriptor(median_state), descriptor(blend_gradient)};
         dispatch_infos(
             blend_backward_, blend_infos, blend_push, div_up(last_bucket_limit_, 8));
 
@@ -947,7 +1352,11 @@ private:
     ComputePipeline scatter_;
     ComputePipeline ranges_;
     ComputePipeline blend_;
+    ComputePipeline median_backward_;
     ComputePipeline blend_backward_;
+    ComputePipeline sample_depth_;
+    ComputePipeline sample_depth_backward_;
+    ComputePipeline multi_view_;
     ComputePipeline project_backward_;
     ComputePipeline clear_;
     ComputePipeline pack_;
@@ -991,9 +1400,30 @@ private:
     Buffer rgba_;
     Buffer loss_color_;
     Buffer loss_alpha_;
+    Buffer loss_depth_;
+    Buffer loss_normal_;
+    Buffer median_state_;
     Buffer blend_grad_;
     Buffer model_grad_;
+    Buffer sample_points_;
+    Buffer sample_f_;
+    Buffer sample_u_;
+    Buffer sample_loss_;
+    Buffer sample_point_grad_;
+    Buffer multi_depth_;
+    Buffer multi_normal_;
+    Buffer multi_reference_gray_;
+    Buffer multi_sampled_;
+    Buffer multi_inside_;
+    Buffer multi_neighbour_gray_;
+    Buffer multi_transform_;
+    Buffer multi_reference_mask_;
+    Buffer multi_neighbour_mask_;
+    Buffer multi_output_;
     bool last_frame_has_snapshots_{};
+    bool last_frame_has_geometry_{};
+    bool sample_live_{};
+    std::uint32_t sample_point_count_{};
     Buffer* last_instance_values_ = &dummy_;
     std::uint32_t last_width_{};
     std::uint32_t last_height_{};
@@ -1042,19 +1472,25 @@ SplatForwardOutput SplatRasterizer::render(const SplatCamera& camera, const Spla
 }
 
 SplatBlendGradients SplatRasterizer::backward_blend(
-    const std::span<const float> dL_color, const std::span<const float> dL_alpha) {
-    return impl_->backward_blend(dL_color, dL_alpha);
+    const std::span<const float> dL_color, const std::span<const float> dL_alpha,
+    const std::span<const float> dL_median_depth,
+    const std::span<const float> dL_normal) {
+    return impl_->backward_blend(dL_color, dL_alpha, dL_median_depth, dL_normal);
 }
 
 SplatModelGradients SplatRasterizer::backward(
-    const std::span<const float> dL_color, const std::span<const float> dL_alpha) {
-    return impl_->backward(dL_color, dL_alpha);
+    const std::span<const float> dL_color, const std::span<const float> dL_alpha,
+    const std::span<const float> dL_median_depth,
+    const std::span<const float> dL_normal) {
+    return impl_->backward(dL_color, dL_alpha, dL_median_depth, dL_normal);
 }
 
 void SplatRasterizer::backward_blend_device(
     const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-    const SplatBufferView& packed_gradients) {
-    impl_->backward_blend_device(dL_color, dL_alpha, packed_gradients);
+    const SplatBufferView& packed_gradients,
+    const SplatBufferView& dL_median_depth, const SplatBufferView& dL_normal) {
+    impl_->backward_blend_device(
+        dL_color, dL_alpha, packed_gradients, dL_median_depth, dL_normal);
 }
 
 std::uint64_t SplatRasterizer::blend_gradient_float_count() const noexcept {
@@ -1063,12 +1499,30 @@ std::uint64_t SplatRasterizer::blend_gradient_float_count() const noexcept {
 
 void SplatRasterizer::backward_device(
     const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-    const SplatBufferView& packed_model_gradients) {
-    impl_->backward_device(dL_color, dL_alpha, packed_model_gradients);
+    const SplatBufferView& packed_model_gradients,
+    const SplatBufferView& dL_median_depth, const SplatBufferView& dL_normal) {
+    impl_->backward_device(
+        dL_color, dL_alpha, packed_model_gradients, dL_median_depth, dL_normal);
 }
 
 std::uint64_t SplatRasterizer::model_gradient_float_count() const noexcept {
     return impl_->model_gradient_float_count();
+}
+
+SplatDepthSamples SplatRasterizer::sample_depth(
+    const std::span<const float> world_points, const SplatCamera& camera,
+    const SplatSettings& settings) {
+    return impl_->sample_depth(world_points, camera, settings);
+}
+
+SplatDepthSampleGradients SplatRasterizer::sample_depth_backward(
+    const std::span<const float> dL_camera_points) {
+    return impl_->sample_depth_backward(dL_camera_points);
+}
+
+SplatMultiViewOutput SplatRasterizer::multi_view_loss(
+    const SplatMultiViewInput& input) {
+    return impl_->multi_view_loss(input);
 }
 
 void SplatRasterizer::render_rgba(

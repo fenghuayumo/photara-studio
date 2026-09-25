@@ -13,6 +13,8 @@
 
 #include "splat_blend.hlsl.embedded.hpp"
 #include "splat_blend_backward.hlsl.embedded.hpp"
+#include "splat_median_backward.hlsl.embedded.hpp"
+#include "splat_multi_view.hlsl.embedded.hpp"
 #include "splat_clear.hlsl.embedded.hpp"
 #include "splat_emit.hlsl.embedded.hpp"
 #include "splat_pack_rgba.hlsl.embedded.hpp"
@@ -21,6 +23,8 @@
 #include "splat_radix_hist.hlsl.embedded.hpp"
 #include "splat_radix_scatter.hlsl.embedded.hpp"
 #include "splat_ranges.hlsl.embedded.hpp"
+#include "splat_sample_depth.hlsl.embedded.hpp"
+#include "splat_sample_depth_backward.hlsl.embedded.hpp"
 #include "splat_scan.hlsl.embedded.hpp"
 
 namespace splat_drender::vulkan {
@@ -137,6 +141,18 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     }
     if (shader_name == "splat_blend_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_blend_backward_hlsl_spv});
+    }
+    if (shader_name == "splat_median_backward.hlsl.spv") {
+        return std::as_bytes(std::span{splat_median_backward_hlsl_spv});
+    }
+    if (shader_name == "splat_sample_depth.hlsl.spv") {
+        return std::as_bytes(std::span{splat_sample_depth_hlsl_spv});
+    }
+    if (shader_name == "splat_sample_depth_backward.hlsl.spv") {
+        return std::as_bytes(std::span{splat_sample_depth_backward_hlsl_spv});
+    }
+    if (shader_name == "splat_multi_view.hlsl.spv") {
+        return std::as_bytes(std::span{splat_multi_view_hlsl_spv});
     }
     if (shader_name == "splat_clear.hlsl.spv") {
         return std::as_bytes(std::span{splat_clear_hlsl_spv});

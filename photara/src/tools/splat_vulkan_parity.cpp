@@ -688,11 +688,170 @@ int run_benchmark(int argc, char** argv) {
     return 0;
 }
 
+// A deliberately small optimizer smoke test over one real training image.
+// It keeps the full Gaussian model and CUDA-compatible Vulkan backward, but
+// updates only activated opacity. Backtracking makes this a deterministic test
+// of gradient direction rather than a learning-rate tuning benchmark.
+int run_train_smoke(int argc, char** argv) {
+    require(argc >= 6,
+            "Usage: photara_splat_vulkan_parity --train-smoke MODEL IMAGES OUTPUT SFM [ITERS]");
+    const std::filesystem::path model_path(argv[2]);
+    const std::filesystem::path images(argv[3]);
+    const std::filesystem::path output(argv[4]);
+    const std::filesystem::path sfm(argv[5]);
+    const int iterations = argc >= 7 ? std::max(1, std::stoi(argv[6])) : 5;
+    std::filesystem::create_directories(output);
+
+    const auto views = load_views(images, sfm);
+    require(!views.empty(), "no registered views were found");
+    auto model = photara::splat::load_gaussians(model_path);
+    photara::splat::TrainingOptions options;
+    options.use_mask = false;
+    options.use_source_resolution = true;
+    options.ignore_undistortion_border = true;
+    options.progressive_resolution = false;
+    const auto view = photara::splat::make_training_view(views.front(), options);
+    const photara::splat::Camera camera = view.camera;
+    require(camera.model == photara::CameraModel::pinhole,
+            "Vulkan train smoke follows the pinhole-only training path");
+    const std::size_t pixels =
+        static_cast<std::size_t>(camera.width) * camera.height;
+    const std::vector<float> target = view.rgb.to_vector();
+    require(target.size() == 3 * pixels, "training target has the wrong shape");
+
+    const std::size_t count = model.size();
+    std::vector<float> means = model.means.to_vector();
+    std::vector<float> sh = model.sh.to_vector();
+    std::vector<float> log_scales = model.log_scales.to_vector();
+    std::vector<float> raw_quaternions = model.quaternions.to_vector();
+    std::vector<float> opacity_logits = model.opacity_logits.to_vector();
+    std::vector<float> filter_3d = model.filter_3d.is_valid()
+        ? model.filter_3d.to_vector() : std::vector<float>{};
+    const std::size_t bases = sh.size() / (count * 3U);
+    std::vector<float> scales(count * 3U);
+    std::vector<float> quaternions(count * 4U);
+    std::vector<float> opacities(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const float filter_squared = filter_3d.empty()
+            ? 0.0F : filter_3d[i] * filter_3d[i];
+        float determinant_ratio = 1.0F;
+        for (std::size_t axis = 0; axis < 3U; ++axis) {
+            const float raw = std::exp(log_scales[3U * i + axis]);
+            const float filtered = std::sqrt(raw * raw + filter_squared);
+            scales[3U * i + axis] = filtered;
+            determinant_ratio *= raw / filtered;
+        }
+        const float w = raw_quaternions[4U * i];
+        const float x = raw_quaternions[4U * i + 1U];
+        const float y = raw_quaternions[4U * i + 2U];
+        const float z = raw_quaternions[4U * i + 3U];
+        const float inverse_norm = 1.0F / std::sqrt(
+            std::max(w * w + x * x + y * y + z * z, 1e-20F));
+        quaternions[4U * i] = w * inverse_norm;
+        quaternions[4U * i + 1U] = x * inverse_norm;
+        quaternions[4U * i + 2U] = y * inverse_norm;
+        quaternions[4U * i + 3U] = z * inverse_norm;
+        opacities[i] =
+            (1.0F / (1.0F + std::exp(-opacity_logits[i]))) *
+            determinant_ratio;
+    }
+
+    splat_drender::vulkan::Context context;
+    splat_drender::vulkan::SplatRasterizer rasterizer(context);
+    splat_drender::vulkan::SplatGaussians gaussians;
+    gaussians.means = means;
+    gaussians.sh = sh;
+    gaussians.opacities = opacities;
+    gaussians.scales = scales;
+    gaussians.rotations = quaternions;
+    gaussians.sh_degree = model.sh_degree;
+    gaussians.sh_bases = static_cast<std::uint32_t>(bases);
+    rasterizer.upload_model(gaussians);
+    const auto vk_camera = to_vulkan_camera(camera);
+    splat_drender::vulkan::SplatSettings training_settings;
+    training_settings.need_depth = false;
+    training_settings.pixel_snapshots = true;
+    splat_drender::vulkan::SplatSettings evaluation_settings = training_settings;
+    evaluation_settings.pixel_snapshots = false;
+    const std::vector<float> zero_alpha(pixels, 0.0F);
+
+    const auto objective = [&](const std::vector<float>& color,
+                               std::vector<float>* gradient) {
+        double sum = 0.0;
+        if (gradient != nullptr) gradient->resize(3 * pixels);
+        const float inverse = 1.0F / static_cast<float>(3 * pixels);
+        for (std::size_t i = 0; i < 3 * pixels; ++i) {
+            const float difference = color[i] - target[i];
+            sum += static_cast<double>(difference) * difference;
+            if (gradient != nullptr) (*gradient)[i] = 2.0F * difference * inverse;
+        }
+        return static_cast<float>(sum * inverse);
+    };
+
+    float first_loss = -1.0F;
+    float current_loss = std::numeric_limits<float>::infinity();
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        const auto frame = rasterizer.render(vk_camera, training_settings);
+        std::vector<float> color_gradient;
+        current_loss = objective(frame.color, &color_gradient);
+        if (iteration == 0) first_loss = current_loss;
+        const auto gradients = rasterizer.backward(color_gradient, zero_alpha);
+        require(gradients.opacities.size() == count,
+                "Vulkan train smoke returned the wrong opacity gradient shape");
+        float maximum_gradient = 0.0F;
+        for (float value : gradients.opacities) {
+            require(std::isfinite(value),
+                    "Vulkan train smoke produced a non-finite gradient");
+            maximum_gradient = std::max(maximum_gradient, std::abs(value));
+        }
+        require(maximum_gradient > 0.0F,
+                "Vulkan train smoke produced a zero gradient");
+        const std::vector<float> base = opacities;
+        float step = 0.02F / maximum_gradient;
+        bool accepted = false;
+        float accepted_loss = current_loss;
+        for (int trial = 0; trial < 12; ++trial) {
+            for (std::size_t i = 0; i < count; ++i)
+                opacities[i] = std::clamp(
+                    base[i] - step * gradients.opacities[i], 1.0e-5F, 0.999F);
+            rasterizer.update_means_and_opacities(means, opacities);
+            const auto candidate = rasterizer.render(vk_camera, evaluation_settings);
+            accepted_loss = objective(candidate.color, nullptr);
+            if (std::isfinite(accepted_loss) && accepted_loss < current_loss) {
+                accepted = true;
+                break;
+            }
+            step *= 0.5F;
+        }
+        require(accepted, "Vulkan train smoke could not find a descending step");
+        current_loss = accepted_loss;
+        std::cout << "vulkan train iteration=" << iteration + 1 << '/' << iterations
+                  << " mse=" << current_loss << " step=" << step
+                  << " max_grad=" << maximum_gradient << '\n';
+    }
+    require(current_loss < first_loss,
+            "Vulkan train smoke did not reduce the real-image objective");
+    std::ofstream report(output / "vulkan_train_smoke.txt");
+    report << "model=" << model_path.string() << '\n'
+           << "view=" << views.front().path.string() << '\n'
+           << "gaussians=" << count << '\n'
+           << "size=" << camera.width << 'x' << camera.height << '\n'
+           << "iterations=" << iterations << '\n'
+           << "initial_mse=" << first_loss << '\n'
+           << "final_mse=" << current_loss << '\n';
+    std::cout << "Vulkan real-data train smoke: " << first_loss << " -> "
+              << current_loss << " report="
+              << (output / "vulkan_train_smoke.txt").string() << '\n';
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--bench") return run_benchmark(argc, argv);
+        if (argc > 1 && std::string(argv[1]) == "--train-smoke")
+            return run_train_smoke(argc, argv);
         if (argc < 4 || argc > 12)
             throw std::runtime_error(
                 "Usage: photara_splat_vulkan_parity MODEL IMAGES OUTPUT_DIR [STRIDE] [SFM]"

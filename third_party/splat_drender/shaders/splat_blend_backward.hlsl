@@ -9,9 +9,10 @@
 [[vk::binding(6, 0)]] StructuredBuffer<float4> snap;
 [[vk::binding(7, 0)]] StructuredBuffer<float> loss_color;
 [[vk::binding(8, 0)]] StructuredBuffer<float> loss_alpha;
-// IEEE-754 bits are used so this works on Vulkan 1.2 devices without the
-// optional shaderBufferFloat32AtomicAdd feature.
-[[vk::binding(9, 0)]] RWStructuredBuffer<uint> grad_values;
+[[vk::binding(9, 0)]] StructuredBuffer<float> loss_normal;
+[[vk::binding(10, 0)]] StructuredBuffer<float2> median_state;
+// IEEE-754 bits are used so Vulkan 1.2 does not require float atomics.
+[[vk::binding(11, 0)]] RWStructuredBuffer<uint> grad_values;
 
 void atomic_add_f32(uint index, float value) {
     if (value == 0.0f || isnan(value) || isinf(value)) return;
@@ -25,311 +26,145 @@ void atomic_add_f32(uint index, float value) {
     }
 }
 
-groupshared float4 wave_state[256];
-groupshared float4 wave_loss[256];
-groupshared float4 wave_final[256];
-groupshared uint wave_last[256];
-
-void commit_gradient(
-    uint gaussian, uint gaussian_count, float3 acc_mean,
-    float4 acc_conic, float3 acc_color) {
+void commit_gradient(uint gaussian, uint count, float3 acc_mean,
+                     float4 acc_conic, float3 acc_color, float4 acc_plane,
+                     float3 acc_normal) {
     uint mean_base = gaussian * 3u;
-    uint conic_base = gaussian_count * 3u + gaussian * 4u;
-    uint color_base = gaussian_count * 7u + gaussian * 3u;
+    uint conic_base = count * 3u + gaussian * 4u;
+    uint color_base = count * 7u + gaussian * 3u;
+    uint plane_base = count * 10u + gaussian * 4u;
+    uint normal_base = count * 14u + gaussian * 3u;
     atomic_add_f32(mean_base, acc_mean.x);
     atomic_add_f32(mean_base + 1u, acc_mean.y);
     atomic_add_f32(mean_base + 2u, acc_mean.z);
-    atomic_add_f32(conic_base, acc_conic.x);
-    atomic_add_f32(conic_base + 1u, acc_conic.y);
-    atomic_add_f32(conic_base + 2u, acc_conic.z);
-    atomic_add_f32(conic_base + 3u, acc_conic.w);
-    atomic_add_f32(color_base, acc_color.x);
-    atomic_add_f32(color_base + 1u, acc_color.y);
-    atomic_add_f32(color_base + 2u, acc_color.z);
+    [unroll] for (uint i = 0u; i < 4u; ++i) atomic_add_f32(conic_base + i, acc_conic[i]);
+    [unroll] for (uint c = 0u; c < 3u; ++c) atomic_add_f32(color_base + c, acc_color[c]);
+    [unroll] for (uint p = 0u; p < 4u; ++p) atomic_add_f32(plane_base + p, acc_plane[p]);
+    [unroll] for (uint n = 0u; n < 3u; ++n) atomic_add_f32(normal_base + n, acc_normal[n]);
 }
 
-// NVIDIA and other wave32 devices can run the same diagonal wavefront as the
-// CUDA FasterGS kernel: pixel state enters lane 0 and advances one Gaussian
-// per lane. This removes the portable path's replay of preceding bucket lanes.
-void wave32_main(uint3 group_id, uint group_thread) {
-    uint lane = group_thread & 31u;
-    uint warp = group_thread >> 5u;
-    uint bucket_idx = group_id.x * 8u + warp;
-    uint bucket_limit = pc.u8;
-    bool bucket_active = bucket_idx < bucket_limit;
-
-    uint width = pc.u0;
-    uint height = pc.u1;
-    uint tiles_x = pc.u2;
-    uint mode = pc.u3;
-    int wrap_width = int(pc.u4);
-    uint gaussian_count = pc.u5;
-    uint pixel_count = pc.u6;
-    uint tile_count = pc.u7;
-    float3 background = float3(asfloat(pc.u9), asfloat(pc.u10), asfloat(pc.u11));
-
-    uint tile_id = bucket_active
-        ? out_u[gaussian_count + pixel_count + tile_count + bucket_idx]
-        : 0u;
-    bucket_active = bucket_active && tile_id < tile_count;
-    uint range_begin = bucket_active ? ranges[tile_id * 2u] : 0u;
-    uint range_end = bucket_active ? ranges[tile_id * 2u + 1u] : 0u;
-    uint tile_first = bucket_active && tile_id != 0u ? bucket_offset[tile_id - 1u] : 0u;
-    bucket_active = bucket_active && bucket_idx >= tile_first;
-    uint tile_bucket = bucket_active ? bucket_idx - tile_first : 0u;
-    uint tile_max = bucket_active ? out_u[gaussian_count + pixel_count + tile_id] : 0u;
-    bucket_active = bucket_active && tile_bucket * 32u < tile_max;
-    uint tile_n = range_end - range_begin;
-    uint pos = tile_bucket * 32u + lane;
-    bool valid_instance = bucket_active && pos < tile_n;
-
-    uint gaussian = valid_instance ? instances[range_begin + pos] : 0u;
-    float2 mean = valid_instance ? gauss_f[gaussian * 8u].xy : 0.0f;
-    float4 conic = valid_instance ? gauss_f[gaussian * 8u + 1u] : 0.0f;
-    float3 color = valid_instance ? gauss_f[gaussian * 8u + 2u].xyz : 0.0f;
-    uint4 bounds = valid_instance ? asuint(gauss_f[gaussian * 8u + 5u]) : 0u;
-    uint pix_min_x = (tile_id % tiles_x) * 16u;
-    uint pix_min_y = (tile_id / tiles_x) * 16u;
-
-    float3 acc_color = 0.0f;
-    float3 acc_mean = 0.0f;
-    float4 acc_conic = 0.0f;
-    float3 color_after = 0.0f;
-    float3 pixel_grad = 0.0f;
-    float transmittance = 0.0f;
-    float final_t = 0.0f;
-    float d_final_t = 0.0f;
-    uint last_contributor = 0u;
-
-    [loop] for (uint i = 0u; i < 287u; ++i) {
-        if ((i & 31u) == 0u) {
-            uint local = i + lane;
-            float4 initial_state = float4(0.0f, 0.0f, 0.0f, 1.0f);
-            float4 initial_loss = 0.0f;
-            float4 initial_final = 0.0f;
-            uint initial_last = 0u;
-            if (bucket_active && local < 256u) {
-                uint px = pix_min_x + (local & 15u);
-                uint py = pix_min_y + (local >> 4u);
-                if (px < width && py < height) {
-                    uint pix = py * width + px;
-                    float4 snapshot = snap[bucket_idx * 256u + local];
-                    float3 total = float3(
-                        out_f[8u * pixel_count + pix],
-                        out_f[9u * pixel_count + pix],
-                        out_f[10u * pixel_count + pix]);
-                    float3 loss = float3(
-                        loss_color[pix], loss_color[pixel_count + pix],
-                        loss_color[2u * pixel_count + pix]);
-                    float alpha_final = out_f[3u * pixel_count + pix];
-                    float final_loss = dot(background, loss) - loss_alpha[pix];
-                    initial_state = float4(total - snapshot.xyz, snapshot.w);
-                    initial_loss = float4(loss, final_loss);
-                    initial_final = float4(1.0f - alpha_final, 0.0f, 0.0f, 0.0f);
-                    initial_last = out_u[gaussian_count + pix];
-                }
-            }
-            uint shared_index = warp * 32u + lane;
-            wave_state[shared_index] = initial_state;
-            wave_loss[shared_index] = initial_loss;
-            wave_final[shared_index] = initial_final;
-            wave_last[shared_index] = initial_last;
-            GroupMemoryBarrierWithGroupSync();
-        }
-
-        if (i > 0u) {
-            uint source_lane = lane == 0u ? 0u : lane - 1u;
-            color_after.x = WaveReadLaneAt(color_after.x, source_lane);
-            color_after.y = WaveReadLaneAt(color_after.y, source_lane);
-            color_after.z = WaveReadLaneAt(color_after.z, source_lane);
-            pixel_grad.x = WaveReadLaneAt(pixel_grad.x, source_lane);
-            pixel_grad.y = WaveReadLaneAt(pixel_grad.y, source_lane);
-            pixel_grad.z = WaveReadLaneAt(pixel_grad.z, source_lane);
-            transmittance = WaveReadLaneAt(transmittance, source_lane);
-            final_t = WaveReadLaneAt(final_t, source_lane);
-            d_final_t = WaveReadLaneAt(d_final_t, source_lane);
-            last_contributor = WaveReadLaneAt(last_contributor, source_lane);
-        }
-
-        int idx = int(i) - int(lane);
-        if (lane == 0u && idx >= 0 && idx < 256) {
-            uint shared_index = warp * 32u + (uint(idx) & 31u);
-            float4 initial_state = wave_state[shared_index];
-            float4 initial_loss = wave_loss[shared_index];
-            color_after = initial_state.xyz;
-            transmittance = initial_state.w;
-            pixel_grad = initial_loss.xyz;
-            d_final_t = initial_loss.w;
-            final_t = wave_final[shared_index].x;
-            last_contributor = wave_last[shared_index];
-        }
-        if (idx < 0 || idx >= 256 || !valid_instance || pos >= last_contributor) continue;
-
-        uint px = pix_min_x + (uint(idx) & 15u);
-        uint py = pix_min_y + (uint(idx) >> 4u);
-        if (px >= width || py >= height) continue;
-        if (wrap_width == 0 &&
-            (px < bounds.x || px >= bounds.y || py < bounds.z || py >= bounds.w)) continue;
-        float2 delta = float2(
-            wrap_dx(mean.x - float(px), wrap_width, mode), mean.y - float(py));
-        float power = gaussian_power(conic, delta.x, delta.y);
-        if (power > 0.0f) continue;
-        float G = exp(power);
-        float alpha = min(kAlphaClip, conic.w * G);
-        if (alpha < kAlphaFloor) continue;
-
-        float blend_weight = alpha * transmittance;
-        float inv_1ma = 1.0f / (1.0f - alpha);
-        color_after -= blend_weight * color;
-        float d_opacity = transmittance * dot(color, pixel_grad) -
-                          dot(color_after, pixel_grad) * inv_1ma -
-                          final_t * inv_1ma * d_final_t;
-        if (mode == kModeFisheye && conic.w * G >= kAlphaClip) d_opacity = 0.0f;
-        acc_color += blend_weight * pixel_grad;
-        float dG = conic.w * d_opacity;
-        float gdx = G * delta.x;
-        float gdy = G * delta.y;
-        float d_del_x = dG * (-gdx * conic.x - gdy * conic.y);
-        float d_del_y = dG * (-gdy * conic.z - gdx * conic.y);
-        acc_mean += float3(d_del_x, d_del_y, abs(d_del_x) + abs(d_del_y));
-        acc_conic += float4(
-            -0.5f * gdx * delta.x * dG,
-            -0.5f * gdx * delta.y * dG,
-            -0.5f * gdy * delta.y * dG,
-            G * d_opacity);
-        transmittance *= 1.0f - alpha;
-    }
-    if (valid_instance) commit_gradient(gaussian, gaussian_count, acc_mean, acc_conic, acc_color);
-}
-
-// Eight 32-thread logical buckets per workgroup, matching the CUDA launch.
-// This first portable implementation deliberately avoids subgroup operations:
-// every lane reconstructs at most the 31 preceding splats from the bucket
-// snapshot. A later subgroup-specialized path can replace that local replay
-// without changing the saved-state or public gradient ABI.
-void portable_main(uint3 group_id, uint group_thread) {
+// One logical bucket lane owns one Gaussian and replays at most the preceding
+// 31 entries for each pixel. This portable form follows the CUDA state-after
+// equations exactly and works for any Vulkan subgroup width.
+[numthreads(256, 1, 1)]
+void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
     uint lane = group_thread & 31u;
     uint bucket_idx = group_id.x * 8u + (group_thread >> 5u);
     uint bucket_limit = pc.u8;
     if (bucket_idx >= bucket_limit) return;
 
-    uint width = pc.u0;
-    uint height = pc.u1;
-    uint tiles_x = pc.u2;
-    uint mode = pc.u3;
+    uint width = pc.u0, height = pc.u1, tiles_x = pc.u2, mode = pc.u3;
     int wrap_width = int(pc.u4);
-    uint gaussian_count = pc.u5;
-    uint pixel_count = pc.u6;
-    uint tile_count = pc.u7;
+    uint count = pc.u5, pixel_count = pc.u6, tile_count = pc.u7;
     float3 background = float3(asfloat(pc.u9), asfloat(pc.u10), asfloat(pc.u11));
+    bool geometry = pc.u12 != 0u;
 
-    uint tile_id = out_u[gaussian_count + pixel_count + tile_count + bucket_idx];
+    uint tile_id = out_u[count + pixel_count + tile_count + bucket_idx];
     if (tile_id >= tile_count) return;
-    uint range_begin = ranges[tile_id * 2u];
-    uint range_end = ranges[tile_id * 2u + 1u];
+    uint range_begin = ranges[tile_id * 2u], range_end = ranges[tile_id * 2u + 1u];
     uint tile_first = tile_id == 0u ? 0u : bucket_offset[tile_id - 1u];
     if (bucket_idx < tile_first) return;
     uint tile_bucket = bucket_idx - tile_first;
-    uint tile_max = out_u[gaussian_count + pixel_count + tile_id];
+    uint tile_max = out_u[count + pixel_count + tile_id];
     if (tile_bucket * 32u >= tile_max) return;
-
     uint tile_n = range_end - range_begin;
     uint pos = tile_bucket * 32u + lane;
     if (pos >= tile_n) return;
+
     uint gaussian = instances[range_begin + pos];
     float2 mean = gauss_f[gaussian * 8u].xy;
     float4 conic = gauss_f[gaussian * 8u + 1u];
     float3 color = gauss_f[gaussian * 8u + 2u].xyz;
+    float4 ray_plane = geometry ? gauss_f[gaussian * 8u + 3u] : 0.0f;
+    float3 gaussian_normal = geometry ? gauss_f[gaussian * 8u + 4u].xyz : 0.0f;
     uint4 bounds = asuint(gauss_f[gaussian * 8u + 5u]);
-
-    float3 acc_color = 0.0f;
-    float3 acc_mean = 0.0f;
-    float4 acc_conic = 0.0f;
     uint pix_min_x = (tile_id % tiles_x) * 16u;
     uint pix_min_y = (tile_id / tiles_x) * 16u;
 
+    float3 acc_color = 0.0f, acc_mean = 0.0f, acc_normal = 0.0f;
+    float4 acc_conic = 0.0f, acc_plane = 0.0f;
+    uint normal_snap_base = bucket_limit * 256u;
     [loop] for (uint local = 0u; local < 256u; ++local) {
-        uint px = pix_min_x + (local & 15u);
-        uint py = pix_min_y + (local >> 4u);
+        uint px = pix_min_x + (local & 15u), py = pix_min_y + (local >> 4u);
         if (px >= width || py >= height) continue;
-        uint pix = py * width + px;
-        uint last_contributor = out_u[gaussian_count + pix];
-        if (pos >= last_contributor) continue;
-        if (wrap_width == 0 &&
-            (px < bounds.x || px >= bounds.y || py < bounds.z || py >= bounds.w)) continue;
+        uint pixel = py * width + px;
+        uint last = out_u[count + pixel];
+        if (pos >= last) continue;
+        if (wrap_width == 0 && (px < bounds.x || px >= bounds.y || py < bounds.z || py >= bounds.w)) continue;
 
-        float4 state = snap[bucket_idx * 256u + local];
-        float3 color_after = float3(
-            out_f[8u * pixel_count + pix],
-            out_f[9u * pixel_count + pix],
-            out_f[10u * pixel_count + pix]) - state.xyz;
-        float transmittance = state.w;
-        float G = 0.0f;
-        float alpha = 0.0f;
+        uint snap_index = bucket_idx * 256u + local;
+        float4 state = snap[snap_index];
+        float3 color_after = float3(out_f[8u * pixel_count + pixel],
+            out_f[9u * pixel_count + pixel], out_f[10u * pixel_count + pixel]) - state.xyz;
+        float alpha_final = out_f[3u * pixel_count + pixel], final_t = 1.0f - alpha_final;
+        float3 normal_out = geometry ? float3(out_f[4u * pixel_count + pixel],
+            out_f[5u * pixel_count + pixel], out_f[6u * pixel_count + pixel]) : 0.0f;
+        float3 normal_after = geometry
+            ? normal_out * alpha_final - snap[normal_snap_base + snap_index].xyz : 0.0f;
+        float transmittance = state.w, G = 0.0f, alpha = 0.0f;
         float2 delta = 0.0f;
         bool accepted = false;
 
-        // Replay this bucket through this lane. color_after starts as all
-        // contributions after the snapshot and is reduced to contributions
-        // strictly after this lane, exactly as in the CUDA reverse wavefront.
         [loop] for (uint k = 0u; k <= lane; ++k) {
             uint qpos = tile_bucket * 32u + k;
-            if (qpos >= tile_n || qpos >= last_contributor) break;
+            if (qpos >= tile_n || qpos >= last) break;
             uint q = instances[range_begin + qpos];
             float2 qmean = gauss_f[q * 8u].xy;
             float4 qconic = gauss_f[q * 8u + 1u];
-            float2 qdelta = float2(
-                wrap_dx(qmean.x - float(px), wrap_width, mode),
-                qmean.y - float(py));
+            float2 qdelta = float2(wrap_dx(qmean.x - float(px), wrap_width, mode), qmean.y - float(py));
             float power = gaussian_power(qconic, qdelta.x, qdelta.y);
             if (power > 0.0f) continue;
-            float qG = exp(power);
-            float qalpha = min(kAlphaClip, qconic.w * qG);
+            float qG = exp(power), qalpha = min(kAlphaClip, qconic.w * qG);
             if (qalpha < kAlphaFloor) continue;
             float weight = qalpha * transmittance;
             color_after -= weight * gauss_f[q * 8u + 2u].xyz;
-            if (k == lane) {
-                G = qG;
-                alpha = qalpha;
-                delta = qdelta;
-                accepted = true;
-                break;
-            }
+            if (geometry) normal_after -= weight * gauss_f[q * 8u + 4u].xyz;
+            if (k == lane) { G = qG; alpha = qalpha; delta = qdelta; accepted = true; break; }
             transmittance *= 1.0f - qalpha;
         }
         if (!accepted) continue;
 
-        float3 pixel_grad = float3(
-            loss_color[pix], loss_color[pixel_count + pix],
-            loss_color[2u * pixel_count + pix]);
-        float final_t = 1.0f - out_f[3u * pixel_count + pix];
+        float3 pixel_grad = float3(loss_color[pixel], loss_color[pixel_count + pixel],
+                                   loss_color[2u * pixel_count + pixel]);
+        float d_final_t_render = dot(background, pixel_grad) - loss_alpha[pixel];
+        float d_final_t = d_final_t_render;
+        float3 normal_grad = 0.0f;
+        if (geometry && alpha_final > 0.0f) {
+            normal_grad = float3(loss_normal[pixel], loss_normal[pixel_count + pixel],
+                                 loss_normal[2u * pixel_count + pixel]) / alpha_final;
+            d_final_t += dot(normal_grad, normal_out);
+        }
         float inv_1ma = 1.0f / (1.0f - alpha);
-        float d_final_t = dot(background, pixel_grad) - loss_alpha[pix];
-        float d_opacity = transmittance * dot(color, pixel_grad) -
-                          dot(color_after, pixel_grad) * inv_1ma -
-                          final_t * inv_1ma * d_final_t;
-        if (mode == kModeFisheye && conic.w * G >= kAlphaClip) d_opacity = 0.0f;
+        float d_opacity_render = transmittance * dot(color, pixel_grad) - dot(color_after, pixel_grad) * inv_1ma;
+        float d_opacity = d_opacity_render, d_peak = 0.0f;
+        if (geometry) {
+            d_opacity += transmittance * dot(gaussian_normal, normal_grad) - dot(normal_after, normal_grad) * inv_1ma;
+            acc_normal += alpha * transmittance * normal_grad;
+            float2 ms = median_state[pixel];
+            float peak = ray_plane.x * delta.x + ray_plane.y * delta.y + ray_plane.z;
+            float td = (ms.x - peak) * ray_plane.w;
+            float ge = exp(-0.5f * td * td), gt = alpha * ge;
+            float d_gt = ms.y * 0.25f / (1.0f - gt);
+            d_gt = ms.x > peak ? d_gt : -d_gt;
+            d_gt = ray_plane.w > 0.0f ? d_gt : 0.0f;
+            d_opacity += d_gt * ge - ms.y * (td > 0.0f ? 0.5f * inv_1ma : 0.0f);
+            float d_delta = -d_gt * gt * td;
+            acc_plane.w += d_delta * (ms.x - peak);
+            d_peak = -d_delta * ray_plane.w;
+            acc_plane.xyz += float3(d_peak * delta.x, d_peak * delta.y, d_peak);
+        }
+        d_opacity_render -= final_t * inv_1ma * d_final_t_render;
+        d_opacity -= final_t * inv_1ma * d_final_t;
+        if (mode == kModeFisheye && conic.w * G >= kAlphaClip) { d_opacity = 0.0f; d_opacity_render = 0.0f; }
 
         float blend_weight = alpha * transmittance;
         acc_color += blend_weight * pixel_grad;
-        float dG = conic.w * d_opacity;
-        float gdx = G * delta.x;
-        float gdy = G * delta.y;
-        float d_del_x = dG * (-gdx * conic.x - gdy * conic.y);
-        float d_del_y = dG * (-gdy * conic.z - gdx * conic.y);
+        float dG = conic.w * d_opacity, gdx = G * delta.x, gdy = G * delta.y;
+        float d_del_x = dG * (-gdx * conic.x - gdy * conic.y) + d_peak * ray_plane.x;
+        float d_del_y = dG * (-gdy * conic.z - gdx * conic.y) + d_peak * ray_plane.y;
         acc_mean += float3(d_del_x, d_del_y, abs(d_del_x) + abs(d_del_y));
-        acc_conic += float4(
-            -0.5f * gdx * delta.x * dG,
-            -0.5f * gdx * delta.y * dG,
-            -0.5f * gdy * delta.y * dG,
-            G * d_opacity);
+        acc_conic += float4(-0.5f * gdx * delta.x * dG, -0.5f * gdx * delta.y * dG,
+                            -0.5f * gdy * delta.y * dG, G * d_opacity);
     }
-
-    commit_gradient(gaussian, gaussian_count, acc_mean, acc_conic, acc_color);
-}
-
-[numthreads(256, 1, 1)]
-void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
-    if (WaveGetLaneCount() == 32u) wave32_main(group_id, group_thread);
-    else portable_main(group_id, group_thread);
+    commit_gradient(gaussian, count, acc_mean, acc_conic, acc_color, acc_plane, acc_normal);
 }

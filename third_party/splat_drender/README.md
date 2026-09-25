@@ -1,14 +1,16 @@
 # splat_drender
 
-Differentiable 3D Gaussian splatting backends, built for Photara: a CUDA
-backend for training and a Vulkan backend for drawing a trained model without a
-CUDA context.
+Differentiable 3D Gaussian splatting backends, built for Photara. CUDA and
+Vulkan both implement the training-critical forward/backward path; Vulkan can
+also draw a trained model without creating a CUDA context.
 
-Both forward paths render RGB, alpha, accumulated surface normals and median
-depth. The CUDA backend also provides analytically matching backward gradients
-for all of them, including the median-depth bisection chain (T_p vacancy
-products, dT/dtm accumulation, dL/dt_peak, dL/drsigma), which is the most
-error-prone part of the GGGS-style geometry losses.
+Both paths render RGB, alpha, accumulated surface normals and median depth and
+propagate their gradients through compositing, median-depth bisection,
+projection, covariance/scale/rotation, opacity activation and SH. Vulkan also
+implements median-depth point sampling and its backward pass plus the GGGS
+multi-view round-trip and planar-NCC loss. These are tested directly against
+the CUDA backend, including the T_p vacancy products, dT/dtm accumulation,
+dL/dt_peak and dL/drsigma chain.
 
 `splat_drender::splat_drender` is the CUDA library; `splat_drender::vulkan` is
 the Vulkan one (built when a Vulkan SDK and dxc are found, see
@@ -16,10 +18,13 @@ the Vulkan one (built when a Vulkan SDK and dxc are found, see
 compute passes and shares the CUDA numerics deliberately: tile size,
 opacity-aware AccuTile enumeration, alpha/transmittance thresholds, the 131072
 single-sort crossover, median-depth bisection and the camera models.
-`tests/vulkan_forward_compare.cpp` asserts that parity channel by channel
-against the CUDA backend. The per-Gaussian state, the sorted instances and the
-pixel snapshots of the last forward stay resident, which is where the
-differentiable Vulkan pass will attach.
+`tests/vulkan_forward_compare.cpp` asserts forward and gradient parity channel
+by channel against CUDA, checks the complete multi-view loss gradients, and
+runs an actual depth optimization loop. The per-Gaussian state, sorted
+instances and pixel snapshots of the last forward stay resident for backward.
+For a real registered dataset, `photara_splat_vulkan_parity --train-smoke`
+runs render, image loss, full Vulkan backward and a backtracking parameter
+update, failing on non-finite gradients or a non-descending objective.
 
 ### Vulkan frame cost
 
@@ -53,6 +58,9 @@ shared device (`SplatRasterizer::render_rgba_device`).
   forward-mode dual-number backward), equirectangular (with seam wrap).
 - Loss channels exposed by backward(): RGB, alpha, median depth, normals,
   plus a Brush-style refine_weight densification signal.
+- Multi-view geometry/NCC follows Photara's training gate and is pinhole-only;
+  non-pinhole cameras remain available for rendering and their supported
+  per-pixel backward channels.
 - World-space point queries: median-depth sampling (sample_depth /
   sample_depth_backward) and ray occupancy (evaluate_occupancy) used by the
   multi-view geometry/photometric losses.
@@ -91,6 +99,11 @@ shaders/
   splat_radix_scatter.hlsl  stable radix scatter
   splat_ranges.hlsl       per-tile instance ranges
   splat_blend.hlsl        tile blender (color, alpha, depth, normals)
+  splat_median_backward.hlsl  median-depth implicit backward
+  splat_blend_backward.hlsl   RGB/alpha/depth/normal compositing backward
+  splat_project_backward.hlsl projection, geometry, SH and activation backward
+  splat_sample_depth*.hlsl    multi-view point-depth forward/backward
+  splat_multi_view.hlsl       round-trip geometry and planar-NCC loss
 ```
 
 ## Performance design (FasterGS-derived, order preserving)

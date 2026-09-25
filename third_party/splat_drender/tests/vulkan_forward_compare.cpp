@@ -2,6 +2,7 @@
 
 #include <splat_drender/vulkan_api.h>
 #include <splat_drender/api.h>
+#include "../../../photara/src/splat/cuda_ops.hpp"
 #include "internal/tensor_impl.hpp"
 #include "vulkan/backend.hpp"
 
@@ -9,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -380,13 +382,27 @@ void compare_case(const Scene& scene) {
     if (scene.check_backward) {
         std::vector<float> loss_color(pixels * 3);
         std::vector<float> loss_alpha(pixels);
+        std::vector<float> loss_depth;
+        std::vector<float> loss_normal;
         for (std::size_t i = 0; i < loss_color.size(); ++i) {
             loss_color[i] = 0.3F * std::sin(static_cast<float>(i) * 0.013F) + 0.05F;
         }
         for (std::size_t i = 0; i < loss_alpha.size(); ++i) {
             loss_alpha[i] = 0.2F * std::cos(static_cast<float>(i) * 0.017F) - 0.03F;
         }
-        const auto vulkan_grad = rasterizer.backward(loss_color, loss_alpha);
+        if (scene.need_depth) {
+            loss_depth.resize(pixels);
+            loss_normal.resize(pixels * 3);
+            // Photara enables depth/MV training for pinhole cameras only.
+            // Equirect still exercises its normal and RGB geometry paths.
+            for (std::size_t i = 0; i < pixels; ++i)
+                loss_depth[i] = scene.mode == 3 ? 0.0F :
+                    0.04F * std::sin(static_cast<float>(i) * 0.019F);
+            for (std::size_t i = 0; i < loss_normal.size(); ++i)
+                loss_normal[i] = 0.03F * std::cos(static_cast<float>(i) * 0.023F);
+        }
+        const auto vulkan_grad = rasterizer.backward(
+            loss_color, loss_alpha, loss_depth, loss_normal);
 
         CudaBuffer loss_color_dev, loss_alpha_dev, loss_depth_dev, loss_normal_dev;
         CudaBuffer grad_means, grad_features, grad_opacity, grad_scales, grad_rotations, grad_covariance;
@@ -401,8 +417,8 @@ void compare_case(const Scene& scene) {
         cuda_loss.color = loss_color_dev.upload(loss_color);
         cuda_loss.alpha = loss_alpha_dev.upload(loss_alpha);
         if (scene.need_depth) {
-            cuda_loss.median_depth = loss_depth_dev.zeros<float>(pixels);
-            cuda_loss.normal = loss_normal_dev.zeros<float>(pixels * 3);
+            cuda_loss.median_depth = loss_depth_dev.upload(loss_depth);
+            cuda_loss.normal = loss_normal_dev.upload(loss_normal);
         }
         splat_drender::ModelGradients cuda_grad;
         cuda_grad.means = grad_means.zeros<float>(static_cast<std::size_t>(count) * 3);
@@ -593,6 +609,309 @@ void smoke_case() {
               << " center_alpha=" << output.alpha[center] << " snapshots=ok\n";
 }
 
+void sample_depth_case() {
+    SingleGaussianScene scene;
+    scene.settings.point_depth_bracket = 0.8F;
+    scene.settings.point_depth_tolerance = 1.0e-5F;
+    const std::vector<float> points{0.0F, 0.0F, 2.0F, 0.015F, -0.01F, 2.0F};
+    splat_drender::vulkan::Context context;
+    splat_drender::vulkan::SplatRasterizer vulkan(context);
+    vulkan.upload_model(scene.gaussians);
+    const auto got = vulkan.sample_depth(points, scene.camera, scene.settings);
+
+    CudaBuffer means, colors, opacity, scales, rotations, view, center, point_dev;
+    CudaBuffer out_points, out_depth, out_contrib, out_inside;
+    CudaBuffer pool_g, pool_grad, pool_i, pool_p, pool_t, pool_point;
+    splat_drender::Gaussians g;
+    g.count = 1;
+    g.means = means.upload(scene.means); g.colors = colors.upload(scene.colors);
+    g.opacities = opacity.upload(scene.opacity); g.scales = scales.upload(scene.scales);
+    g.rotations = rotations.upload(scene.rotation);
+    splat_drender::CameraView camera;
+    camera.width = static_cast<int>(scene.camera.width); camera.height = static_cast<int>(scene.camera.height);
+    camera.fx = scene.camera.fx; camera.fy = scene.camera.fy; camera.cx = scene.camera.cx; camera.cy = scene.camera.cy;
+    camera.world_to_camera = view.upload(scene.identity); camera.center = center.upload(scene.origin);
+    splat_drender::RenderSettings settings;
+    settings.need_depth = true; settings.point_depth_bracket = 0.8F;
+    settings.point_depth_tolerance = 1.0e-5F;
+    splat_drender::WorkspacePools pools;
+    pools.gaussian=[&](std::size_t n){return static_cast<char*>(pool_g.ensure(n));};
+    pools.grad=[&](std::size_t n){return static_cast<char*>(pool_grad.ensure(n));};
+    pools.instance=[&](std::size_t n){return static_cast<char*>(pool_i.ensure(n));};
+    pools.pixel=[&](std::size_t n){return static_cast<char*>(pool_p.ensure(n));};
+    pools.tile=[&](std::size_t n){return static_cast<char*>(pool_t.ensure(n));};
+    pools.point=[&](std::size_t n){return static_cast<char*>(pool_point.ensure(n));};
+    splat_drender::SampleOutputs out;
+    out.ray_points = out_points.zeros<float3>(2); out.median_depth = out_depth.zeros<float>(2);
+    out.n_contrib = out_contrib.zeros<unsigned>(2); out.inside = out_inside.zeros<bool>(2);
+    const auto counts = splat_drender::Rasterizer::sample_depth(
+        pools, g, camera, settings, point_dev.upload(points), 2, out);
+    check_cuda(cudaDeviceSynchronize(), "sample depth synchronize");
+    const auto expected_points = out_points.download<float>(6);
+    const auto expected_depth = out_depth.download<float>(2);
+    require(rel_l2(got.camera_points, expected_points) < 2e-4,
+            "Vulkan sample_depth camera points differ from CUDA");
+    require(rel_l2(got.median_depth, expected_depth) < 2e-4,
+            "Vulkan sample_depth median differs from CUDA");
+
+    const std::vector<float> upstream{0.2F,-0.1F,0.3F,-0.15F,0.25F,0.1F};
+    const auto got_grad = vulkan.sample_depth_backward(upstream);
+    CudaBuffer upstream_dev, grad_points, grad_means, grad_colors, grad_opacity, grad_scales, grad_rotations;
+    splat_drender::SampleOutputsView fwd;
+    fwd.median_depth = static_cast<const float*>(out_depth.ptr);
+    fwd.n_contrib = static_cast<const unsigned*>(out_contrib.ptr);
+    fwd.inside = static_cast<const bool*>(out_inside.ptr);
+    splat_drender::SampleGradients point_grads;
+    point_grads.points = grad_points.zeros<float3>(2);
+    splat_drender::ModelGradients model_grads;
+    model_grads.means=grad_means.zeros<float>(3); model_grads.colors=grad_colors.zeros<float>(3);
+    model_grads.opacities=grad_opacity.zeros<float>(1); model_grads.scales=grad_scales.zeros<float>(3);
+    model_grads.rotations=grad_rotations.zeros<float>(4);
+    splat_drender::Rasterizer::sample_depth_backward(
+        pools,g,camera,settings,static_cast<const float*>(point_dev.ptr),2,counts,fwd,
+        reinterpret_cast<const float3*>(upstream_dev.upload(upstream)),point_grads,model_grads);
+    check_cuda(cudaDeviceSynchronize(), "sample depth backward synchronize");
+    require(rel_l2(got_grad.points, grad_points.download<float>(6)) < 2e-4,
+            "Vulkan sample_depth point gradients differ from CUDA");
+    require(rel_l2(got_grad.model.means, grad_means.download<float>(3)) < 2e-3,
+            "Vulkan sample_depth mean gradients differ from CUDA");
+    require(rel_l2(got_grad.model.opacities, grad_opacity.download<float>(1)) < 2e-3,
+            "Vulkan sample_depth opacity gradients differ from CUDA");
+    require(rel_l2(got_grad.model.scales, grad_scales.download<float>(3)) < 2e-3,
+            "Vulkan sample_depth scale gradients differ from CUDA");
+    require(rel_l2(got_grad.model.rotations, grad_rotations.download<float>(4)) < 2e-3,
+            "Vulkan sample_depth rotation gradients differ from CUDA");
+    std::cout << "sample-depth forward/backward: depth=" << got.median_depth[0]
+              << " mean_grad_rel_l2=" << rel_l2(got_grad.model.means, grad_means.download<float>(3)) << '\n';
+}
+
+void multi_view_loss_case() {
+    using photara::splat::Camera;
+    using photara::splat::RenderResult;
+    using photara::splat::TrainingOptions;
+    using photara::splat::TrainingView;
+    namespace detail = photara::splat::detail;
+    constexpr std::uint32_t width = 32;
+    constexpr std::uint32_t height = 32;
+    constexpr std::size_t pixels = width * height;
+    const auto make_camera = [](float center_x) {
+        Camera camera;
+        camera.world_to_camera[0] = 1.0F;
+        camera.world_to_camera[5] = 1.0F;
+        camera.world_to_camera[10] = 1.0F;
+        camera.world_to_camera[15] = 1.0F;
+        camera.world_to_camera[12] = -center_x;
+        camera.position[0] = center_x;
+        camera.fx = camera.fy = 40.0F;
+        camera.cx = camera.cy = 15.5F;
+        camera.width = width;
+        camera.height = height;
+        return camera;
+    };
+    TrainingView reference;
+    TrainingView neighbour;
+    reference.camera = make_camera(0.0F);
+    neighbour.camera = make_camera(0.1F);
+    std::vector<float> reference_gray(pixels);
+    std::vector<float> neighbour_gray(pixels);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
+            reference_gray[pixel] = 0.5F + 0.22F * std::sin(0.37F * x) +
+                                    0.18F * std::cos(0.29F * y);
+            neighbour_gray[pixel] = 0.5F +
+                0.22F * std::sin(0.37F * (static_cast<float>(x) + 2.0F)) +
+                0.18F * std::cos(0.29F * y);
+        }
+    }
+    // Keep the sampled neighbour surface at z=2 but perturb the reference
+    // depth so the NCC derivative is well-conditioned rather than ~0 at the
+    // exact optimum.
+    const std::vector<float> depths(pixels, 2.08F);
+    std::vector<float> normals(3 * pixels, 0.0F);
+    std::fill(normals.begin() + 2 * pixels, normals.end(), 1.0F);
+    std::vector<float> sampled_points(3 * pixels);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
+            sampled_points[3 * pixel] =
+                (static_cast<float>(x) - 15.5F) / 40.0F * 2.0F - 0.1F;
+            sampled_points[3 * pixel + 1] =
+                (static_cast<float>(y) - 15.5F) / 40.0F * 2.0F;
+            sampled_points[3 * pixel + 2] = 2.0F;
+        }
+    }
+
+    reference.gray = tinytensor::Tensor::from_vector(
+        reference_gray, {height, width}, tinytensor::Device::CUDA);
+    neighbour.gray = tinytensor::Tensor::from_vector(
+        neighbour_gray, {height, width}, tinytensor::Device::CUDA);
+    RenderResult reference_render;
+    reference_render.median_depth = tinytensor::Tensor::from_vector(
+        depths, {height, width}, tinytensor::Device::CUDA);
+    reference_render.normal = tinytensor::Tensor::from_vector(
+        normals, {3, height, width}, tinytensor::Device::CUDA);
+    const auto cuda_sampled = tinytensor::Tensor::from_vector(
+        sampled_points, {pixels, std::size_t{3}}, tinytensor::Device::CUDA);
+    const auto cuda_inside = tinytensor::Tensor::ones_bool(
+        {pixels}, tinytensor::Device::CUDA);
+    detail::LossGradients cuda_gradients;
+    cuda_gradients.depth = tinytensor::Tensor::zeros(
+        {height, width}, tinytensor::Device::CUDA);
+    cuda_gradients.normal = tinytensor::Tensor::zeros(
+        {3, height, width}, tinytensor::Device::CUDA);
+    TrainingOptions options;
+    options.multi_view_geo_weight = 0.02F;
+    options.multi_view_ncc_weight = 0.6F;
+    tinytensor::Tensor cuda_sampled_gradient;
+    const auto cuda_loss = detail::add_multi_view_loss(
+        cuda_sampled, cuda_inside, reference_render, reference, neighbour,
+        options, cuda_gradients, cuda_sampled_gradient, true);
+
+    const auto make_vk_camera = [](const Camera& camera) {
+        splat_drender::vulkan::SplatCamera result;
+        result.width = camera.width;
+        result.height = camera.height;
+        result.fx = camera.fx; result.fy = camera.fy;
+        result.cx = camera.cx; result.cy = camera.cy;
+        result.world_to_camera = camera.world_to_camera;
+        result.center = camera.position;
+        return result;
+    };
+    std::vector<std::uint32_t> inside(pixels, 1u);
+    splat_drender::vulkan::SplatMultiViewInput input;
+    input.reference_camera = make_vk_camera(reference.camera);
+    input.neighbour_camera = make_vk_camera(neighbour.camera);
+    input.reference_depth = depths;
+    input.reference_normal = normals;
+    input.reference_gray = reference_gray;
+    input.neighbour_gray = neighbour_gray;
+    input.sampled_neighbour_points = sampled_points;
+    input.sampled_inside = inside;
+    input.geometry_weight = options.multi_view_geo_weight;
+    input.ncc_weight = options.multi_view_ncc_weight;
+    input.pixel_noise_threshold = options.multi_view_pixel_noise_threshold;
+    input.robust_ncc = options.multi_view_robust_ncc;
+    input.ncc_lambda_reference = options.multi_view_ncc_lambda_reference;
+    input.ncc_sharpness = options.multi_view_ncc_sharpness;
+    input.ncc_min_weight = options.multi_view_ncc_min_weight;
+    splat_drender::vulkan::Context context;
+    splat_drender::vulkan::SplatRasterizer vulkan(context);
+    const auto got = vulkan.multi_view_loss(input);
+
+    require(got.geometry_pixels == cuda_loss.geometry_pixels &&
+                got.geometry_candidates == cuda_loss.geometry_candidates &&
+                got.ncc_pixels == cuda_loss.ncc_pixels,
+            "Vulkan multi-view accepted-pixel counts differ from CUDA");
+    require(std::abs(got.geometry - cuda_loss.geometry) < 2.0e-5F,
+            "Vulkan multi-view geometry loss differs from CUDA");
+    require(std::abs(got.ncc - cuda_loss.ncc) < 2.0e-4F,
+            "Vulkan multi-view NCC loss differs from CUDA");
+    const auto cuda_depth_gradient = cuda_gradients.depth.to_vector();
+    const auto cuda_normal_gradient = cuda_gradients.normal.to_vector();
+    const auto cuda_point_gradient = cuda_sampled_gradient.to_vector();
+    const double depth_gradient_error =
+        rel_l2(got.reference_depth_gradient, cuda_depth_gradient);
+    const double normal_gradient_error =
+        rel_l2(got.reference_normal_gradient, cuda_normal_gradient);
+    const double point_gradient_error =
+        rel_l2(got.sampled_point_gradient, cuda_point_gradient);
+    const auto norm = [](const std::vector<float>& values) {
+        double sum = 0.0;
+        for (float value : values) sum += static_cast<double>(value) * value;
+        return std::sqrt(sum);
+    };
+    std::cout << "multi-view raw parity: counts=" << got.geometry_pixels
+              << '/' << got.geometry_candidates << '/' << got.ncc_pixels
+              << " cuda=" << cuda_loss.geometry_pixels << '/'
+              << cuda_loss.geometry_candidates << '/' << cuda_loss.ncc_pixels
+              << " grad_rel_l2=" << depth_gradient_error << '/'
+              << normal_gradient_error << '/' << point_gradient_error
+              << " norms=" << norm(got.reference_depth_gradient) << '/'
+              << norm(cuda_depth_gradient) << ','
+              << norm(got.reference_normal_gradient) << '/'
+              << norm(cuda_normal_gradient) << '\n';
+    require(depth_gradient_error < 2.0e-3,
+            "Vulkan multi-view depth gradient differs from CUDA");
+    require(normal_gradient_error < 3.0e-3,
+            "Vulkan multi-view normal gradient differs from CUDA");
+    require(point_gradient_error < 2.0e-3,
+            "Vulkan multi-view point gradient differs from CUDA");
+    std::cout << "multi-view geometry/NCC: geo=" << got.geometry
+              << " ncc=" << got.ncc
+              << " depth_grad_rel_l2="
+              << depth_gradient_error
+              << '\n';
+    const std::vector<float> empty_reference_mask(pixels, 0.0F);
+    const std::vector<float> full_neighbour_mask(pixels, 1.0F);
+    input.reference_mask = empty_reference_mask;
+    input.neighbour_mask = full_neighbour_mask;
+    const auto masked = vulkan.multi_view_loss(input);
+    require(masked.geometry_pixels == 0 && masked.geometry_candidates == 0 &&
+                masked.ncc_pixels == 0,
+            "Vulkan multi-view loss ignored the foreground masks");
+}
+
+void geometry_gradient_descent_case() {
+    SingleGaussianScene scene;
+    scene.settings.need_depth = true;
+    scene.settings.pixel_snapshots = true;
+    splat_drender::vulkan::Context context;
+    splat_drender::vulkan::SplatRasterizer rasterizer(context);
+    const auto target = rasterizer.forward(
+        scene.gaussians, scene.camera, scene.settings);
+    std::vector<float> means{0.0F, 0.0F, 2.35F};
+    splat_drender::vulkan::SplatGaussians trainable = scene.gaussians;
+    trainable.means = means;
+    const std::size_t pixels =
+        static_cast<std::size_t>(scene.camera.width) * scene.camera.height;
+    const std::vector<float> zero_color(3 * pixels, 0.0F);
+    const std::vector<float> zero_alpha(pixels, 0.0F);
+    const std::vector<float> zero_normal(3 * pixels, 0.0F);
+    float first_loss = -1.0F;
+    float previous_loss = std::numeric_limits<float>::infinity();
+    float final_loss = previous_loss;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        const auto rendered = rasterizer.forward(
+            trainable, scene.camera, scene.settings);
+        std::vector<float> depth_gradient(pixels, 0.0F);
+        float loss = 0.0F;
+        std::size_t valid = 0;
+        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+            if (!(target.median_depth[pixel] > 0.0F) ||
+                !(rendered.median_depth[pixel] > 0.0F))
+                continue;
+            const float difference =
+                rendered.median_depth[pixel] - target.median_depth[pixel];
+            loss += 0.5F * difference * difference;
+            depth_gradient[pixel] = difference;
+            ++valid;
+        }
+        require(valid != 0, "Vulkan geometry descent found no valid depth pixels");
+        loss /= static_cast<float>(valid);
+        for (float& gradient : depth_gradient)
+            gradient /= static_cast<float>(valid);
+        if (iteration == 0) first_loss = loss;
+        require(loss <= previous_loss * 1.001F,
+                "Vulkan geometry gradient descent increased the depth loss");
+        previous_loss = loss;
+        final_loss = loss;
+        const auto gradients = rasterizer.backward(
+            zero_color, zero_alpha, depth_gradient, zero_normal);
+        require(gradients.means.size() == 3 &&
+                    std::isfinite(gradients.means[2]),
+                "Vulkan geometry descent produced a non-finite mean gradient");
+        means[2] -= 0.5F * gradients.means[2];
+        trainable.means = means;
+    }
+    require(final_loss < first_loss * 0.02F,
+            "Vulkan geometry gradients did not minimize the depth objective");
+    require(std::abs(means[2] - 2.0F) < 0.06F,
+            "Vulkan geometry descent did not recover the target surface");
+    std::cout << "geometry gradient descent: loss=" << first_loss << " -> "
+              << final_loss << " z=" << means[2] << '\n';
+}
+
 // TinyTensor owns the device and all loss/gradient storage; splat_drender
 // adopts that device and binds the tensor buffers directly. This is the path
 // training will use, and catches accidental host staging or cross-device use.
@@ -643,6 +962,8 @@ void tinytensor_interop_case() {
     reference.insert(reference.end(), expected.mean2d.begin(), expected.mean2d.end());
     reference.insert(reference.end(), expected.conic_opacity.begin(), expected.conic_opacity.end());
     reference.insert(reference.end(), expected.colors.begin(), expected.colors.end());
+    reference.insert(reference.end(), expected.ray_plane.begin(), expected.ray_plane.end());
+    reference.insert(reference.end(), expected.normal.begin(), expected.normal.end());
     require(rel_l2(got, reference) < 1e-6, "TinyTensor zero-copy blend gradients differ");
     auto device_model_gradient = tinytensor::Tensor::zeros(
         {static_cast<std::size_t>(rasterizer.model_gradient_float_count())},
@@ -724,6 +1045,9 @@ int main() {
     try {
         check_cuda(cudaSetDevice(0), "cudaSetDevice");
         smoke_case();
+        sample_depth_case();
+        multi_view_loss_case();
+        geometry_gradient_descent_case();
         tinytensor_interop_case();
         adopted_device_case();
         auto color_backward = pinhole_scene("pinhole-color", 24, 0.08F, false);

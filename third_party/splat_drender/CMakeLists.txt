@@ -59,7 +59,11 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_radix_scatter.hlsl
             shaders/splat_ranges.hlsl
             shaders/splat_blend.hlsl
+            shaders/splat_median_backward.hlsl
             shaders/splat_blend_backward.hlsl
+            shaders/splat_sample_depth.hlsl
+            shaders/splat_sample_depth_backward.hlsl
+            shaders/splat_multi_view.hlsl
             shaders/splat_clear.hlsl
             shaders/splat_project_backward.hlsl
             shaders/splat_pack_rgba.hlsl)

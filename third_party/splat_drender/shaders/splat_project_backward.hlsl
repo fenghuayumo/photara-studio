@@ -225,6 +225,119 @@ float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 cent
     return (direction_grad - dir * dot(dir, direction_grad)) * inv;
 }
 
+SplatGeom geometry_eval(
+    float3 mean, bool has_scales, float3 scale, float4 rotation,
+    float c0, float c1, float c2, float c3, float c4, float c5,
+    uint mode, int width, int height, float fx, float fy, float cx, float cy,
+    float k1, float k2, float k3, float k4, float kernel,
+    float scale_modifier) {
+    return project_splat(
+        mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
+        camera[8], camera[9], camera[10], camera[12], camera[13], camera[14],
+        mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4, kernel,
+        scale_modifier, has_scales, scale, rotation, c0, c1, c2, c3, c4, c5);
+}
+
+float geometry_loss(SplatGeom value, float4 d_plane, float3 d_normal) {
+    if (!value.ok) return 0.0f;
+    return dot(value.ray_plane, d_plane) + dot(value.normal, d_normal);
+}
+
+void generic_geometry_backward(
+    float3 t, Mat3 W, Mat3 V, bool has_scales, float3 scale_local,
+    float4 d_plane_raw, float3 d_normal, float fx, float fy,
+    out Mat3 dV, out float3 dt) {
+    dV = mat_zero();
+    dt = 0.0f;
+    float4 d_plane = d_plane_raw;
+    d_plane.x /= fx;
+    d_plane.y /= fy;
+    float inv_len = rsqrt(dot(t, t));
+    float3 dt_center = t * inv_len * d_plane.z;
+    float u = t.x / max(t.z, 1.0e-6f);
+    float v = t.y / max(t.z, 1.0e-6f);
+    float3 uvh = float3(u, v, 1.0f);
+
+    Mat3 V_inv = mat_zero();
+    bool well = true;
+    if (has_scales) {
+        Mat3 Sinv = mat_diag(1.0f / scale_local.x, 1.0f / scale_local.y, 1.0f / scale_local.z);
+        // V = R^T S^2 R, hence V^-1 = (S^-1 R)^T(S^-1 R).
+        // Recovering R from V is not stable, so callers replace this matrix
+        // below for the scale representation.
+    } else {
+        Mat3 eig_in = V;
+        float e0, e1, e2;
+        Mat3 vecs;
+        sym_eig3(eig_in, e0, e1, e2, vecs);
+        well = min(e0, min(e1, e2)) > 1.0e-8f;
+        if (well) V_inv = mat_mul(mat_mul(vecs, mat_diag(1.0f/e0,1.0f/e1,1.0f/e2)), mat_transpose(vecs));
+    }
+    // The scale path supplies V as positive definite. Its inverse can be
+    // formed directly; this also avoids quaternion convention ambiguity.
+    if (has_scales) {
+        float a=V.m[0][0],b=V.m[0][1],c=V.m[0][2],d=V.m[1][1],e=V.m[1][2],f=V.m[2][2];
+        float det=a*(d*f-e*e)-b*(b*f-c*e)+c*(b*e-c*d);
+        V_inv.m[0][0]=(d*f-e*e)/det; V_inv.m[0][1]=(c*e-b*f)/det; V_inv.m[0][2]=(b*e-c*d)/det;
+        V_inv.m[1][0]=V_inv.m[0][1]; V_inv.m[1][1]=(a*f-c*c)/det; V_inv.m[1][2]=(b*c-a*e)/det;
+        V_inv.m[2][0]=V_inv.m[0][2]; V_inv.m[2][1]=V_inv.m[1][2]; V_inv.m[2][2]=(a*d-b*b)/det;
+    }
+    Mat3 cov_cam_inv = mat_mul(mat_mul(mat_transpose(W), V_inv), W);
+    float3 uvh_m = mat_mul_vec(cov_cam_inv, uvh);
+    float vb = dot(uvh_m, uvh), clamp_vb = max(vb, 1.0e-7f);
+    float ray_len2 = u*u + v*v + 1.0f, ray_len_inv = rsqrt(ray_len2);
+    float length_t = sqrt(dot(t,t)), factor = length_t / ray_len2;
+    Mat3 nJinv = mat_zero();
+    nJinv.m[0][0]=v*v+1.0f; nJinv.m[0][1]=-u*v; nJinv.m[0][2]=-u;
+    nJinv.m[1][0]=-u*v; nJinv.m[1][1]=u*u+1.0f; nJinv.m[1][2]=-v;
+    float3 uvh_m_vb = uvh_m / clamp_vb;
+    float3 plane = mat_mul_vec(nJinv, uvh_m_vb);
+    float3 ray_normal = float3(-plane.x*factor,-plane.y*factor,-1.0f);
+    Mat3 nJ=mat_zero();float iz=1.0f/t.z;
+    nJ.m[0][0]=iz;nJ.m[0][2]=t.x/length_t;nJ.m[1][1]=iz;nJ.m[1][2]=t.y/length_t;
+    nJ.m[2][0]=-t.x*iz*iz;nJ.m[2][1]=-t.y*iz*iz;nJ.m[2][2]=t.z/length_t;
+    float3 cam_normal=mat_mul_vec(nJ,ray_normal);
+    float3 nrm=cam_normal*rsqrt(dot(cam_normal,cam_normal));
+    // Deliberately match the CUDA/reference convention: the normalization
+    // Jacobian is evaluated on the already-normalized vector (factor one).
+    float3 d_cam_normal=d_normal-nrm*dot(nrm,d_normal);
+    float3 d_ray_normal=mat_mul_vec(mat_transpose(nJ),d_cam_normal);
+    Mat3 d_nJ=mat_outer(d_cam_normal,ray_normal);
+    float d_factor=plane.x*(-d_ray_normal.x+d_plane.x)+plane.y*(-d_ray_normal.y+d_plane.y);
+    float d_plane_x=(-d_ray_normal.x+d_plane.x)*factor;
+    float d_plane_y=(-d_ray_normal.y+d_plane.y)*factor;
+    float3 d_plane3=float3(d_plane_x,d_plane_y,0.0f);
+    float aux=d_plane_x*plane.x+d_plane_y*plane.y;
+    float3 W_uvh=mat_mul_vec(W,uvh);
+    float3 tmp=mat_mul_vec(mat_transpose(nJinv),d_plane3);
+    float3 numerator=mat_mul_vec(cov_cam_inv,tmp)/clamp_vb;
+    float3 d_uvh_plane=-2.0f*aux*uvh_m_vb+numerator;
+    float rsigma=sqrt(vb/ray_len2);
+    float d_len2_x2=-d_plane.w*rsigma/ray_len2;
+    float d_u_sigma=d_len2_x2*u,d_v_sigma=d_len2_x2*v;
+    float aux_nJ=(-mat_at(d_nJ,2,0)*u-mat_at(d_nJ,2,1)*v-mat_at(d_nJ,2,2))/ray_len2*ray_len_inv;
+    float d_u_nJ=-mat_at(d_nJ,0,2)/t.z+mat_at(d_nJ,2,0)*ray_len_inv+aux_nJ*u;
+    float d_v_nJ=-mat_at(d_nJ,1,2)/t.z+mat_at(d_nJ,2,1)*ray_len_inv+aux_nJ*v;
+    float d_z_nJ=(mat_at(d_nJ,0,0)+mat_at(d_nJ,1,1)-mat_at(d_nJ,0,2)*u-mat_at(d_nJ,1,2)*v)/(-t.z*t.z);
+    Mat3 d_nJinv=mat_outer(d_plane3,uvh_m_vb);
+    float d_u_plane=d_uvh_plane.x+(mat_at(d_nJinv,0,1)+mat_at(d_nJinv,1,0))*(-v)+2.0f*mat_at(d_nJinv,1,1)*u-mat_at(d_nJinv,2,0);
+    float d_v_plane=d_uvh_plane.y+(mat_at(d_nJinv,0,1)+mat_at(d_nJinv,1,0))*(-u)+2.0f*mat_at(d_nJinv,0,0)*v-mat_at(d_nJinv,2,1);
+    float aux_factor=d_factor*(-t.z/ray_len2*ray_len_inv);
+    float d_u=d_u_nJ+d_u_plane+aux_factor*u+d_u_sigma;
+    float d_v=d_v_nJ+d_v_plane+aux_factor*v+d_v_sigma;
+    float d_z=d_z_nJ+d_factor*ray_len_inv;
+    float d_vb_xvb=-aux+d_plane.w*0.5f*rsigma;
+    if (well) {
+        float3 rhs=mat_mul_vec(W,tmp)+W_uvh*d_vb_xvb;
+        float3 lhs=mat_mul_vec(V_inv,W_uvh);
+        float3 vr=mat_mul_vec(V_inv,rhs);
+        dV=mat_outer(lhs,-vr);
+        [unroll]for(int rr=0;rr<3;++rr)[unroll]for(int cc=0;cc<3;++cc)dV.m[rr][cc]/=vb;
+    }
+    float rz=1.0f/t.z;
+    dt=float3(d_u*rz,d_v*rz,-(d_u*t.x+d_v*t.y)*rz*rz+d_z)+dt_center;
+}
+
 [numthreads(256, 1, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint count=pc.u0,index=dispatch_id.x;
@@ -271,18 +384,23 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     J.m[2][0]=dual.j02.v;J.m[2][1]=dual.j12.v;
     Mat3 T=mat_mul(W,J),V=mat_zero(),R=mat_zero();
     float3 scale=0.0f,scale_local=0.0f;float4 rotation=0.0f;
+    float cv0=0.0f,cv1=0.0f,cv2=0.0f,cv3=0.0f,cv4=0.0f,cv5=0.0f;
     if(has_scales){
         scale=float3(scales[3u*index],scales[3u*index+1u],scales[3u*index+2u]);
         scale_local=scale_modifier*scale;
         rotation=float4(rotations[4u*index],rotations[4u*index+1u],rotations[4u*index+2u],rotations[4u*index+3u]);
         R=quat_rotation(rotation);Mat3 SR=mat_mul(mat_diag(scale_local.x,scale_local.y,scale_local.z),R);V=mat_mul(mat_transpose(SR),SR);
     }else{
-        uint cb=6u*index;float c0=covariances[cb],c1v=covariances[cb+1u],c2v=covariances[cb+2u],c3v=covariances[cb+3u],c4v=covariances[cb+4u],c5v=covariances[cb+5u];
-        V.m[0][0]=c0;V.m[0][1]=c1v;V.m[0][2]=c2v;V.m[1][0]=c1v;V.m[1][1]=c3v;V.m[1][2]=c4v;V.m[2][0]=c2v;V.m[2][1]=c4v;V.m[2][2]=c5v;
+        uint cb=6u*index;cv0=covariances[cb];cv1=covariances[cb+1u];cv2=covariances[cb+2u];cv3=covariances[cb+3u];cv4=covariances[cb+4u];cv5=covariances[cb+5u];
+        V.m[0][0]=cv0;V.m[0][1]=cv1;V.m[0][2]=cv2;V.m[1][0]=cv1;V.m[1][1]=cv3;V.m[1][2]=cv4;V.m[2][0]=cv2;V.m[2][1]=cv4;V.m[2][2]=cv5;
     }
     Mat3 cov=mat_mul(mat_transpose(T),mat_mul(V,T));
     uint conic_base=3u*count+4u*index;
     float4 gc=float4(blend_grad[conic_base],blend_grad[conic_base+1u],blend_grad[conic_base+2u],blend_grad[conic_base+3u]);
+    uint plane_grad_base=10u*count+4u*index;
+    uint normal_grad_base=14u*count+3u*index;
+    float4 gplane=float4(blend_grad[plane_grad_base],blend_grad[plane_grad_base+1u],blend_grad[plane_grad_base+2u],blend_grad[plane_grad_base+3u]);
+    float3 gnormal=float3(blend_grad[normal_grad_base],blend_grad[normal_grad_base+1u],blend_grad[normal_grad_base+2u]);
     float a0=cov.m[0][0],b=cov.m[0][1],c0v=cov.m[1][1],a=a0+kernel,c=c0v+kernel;
     float denom=a*c-b*b,denom2inv=1.0f/(denom*denom+1.0e-7f);
     float ga=denom2inv*(-c*c*gc.x+2.0f*b*c*gc.y+(denom-a*c)*gc.z);
@@ -297,12 +415,18 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     model_grad[opacity_base+index]=gc.w*coef;
     Mat3 G=mat_zero();G.m[0][0]=ga;G.m[0][1]=G.m[1][0]=0.5f*gb;G.m[1][1]=gcc;
     Mat3 dV=mat_mul(mat_mul(T,G),mat_transpose(T));
+    float3 geometry_dt=0.0f;
+    if(mode!=kModeFisheye&&(any(gplane!=0.0f)||any(gnormal!=0.0f))){
+        Mat3 geometry_dV;
+        generic_geometry_backward(t,W,V,has_scales,scale_local,gplane,gnormal,fx,fy,geometry_dV,geometry_dt);
+        dV=mat_add(dV,geometry_dV);
+    }
     float gv0=dV.m[0][0],gv1=dV.m[0][1]+dV.m[1][0],gv2=dV.m[0][2]+dV.m[2][0],gv3=dV.m[1][1],gv4=dV.m[1][2]+dV.m[2][1],gv5=dV.m[2][2];
     if(has_scales){float3 gs;float4 gr;cov3d_backward(scale_local,rotation,R,gv0,gv1,gv2,gv3,gv4,gv5,gs,gr);gs*=scale_modifier;model_grad[scale_base+3u*index]=gs.x;model_grad[scale_base+3u*index+1u]=gs.y;model_grad[scale_base+3u*index+2u]=gs.z;[unroll]for(uint q=0u;q<4u;++q)model_grad[rotation_base+4u*index+q]=gr[q];}
     else{uint o=covariance_base+6u*index;model_grad[o]=gv0;model_grad[o+1u]=gv1;model_grad[o+2u]=gv2;model_grad[o+3u]=gv3;model_grad[o+4u]=gv4;model_grad[o+5u]=gv5;}
     Mat3 dT=mat_mul(mat_mul(V,T),G);[unroll]for(int rr=0;rr<3;++rr)[unroll]for(int cc=0;cc<3;++cc)dT.m[rr][cc]*=2.0f;
     Mat3 dJ=mat_mul(mat_transpose(W),dT);
-    float3 gt=dJ.m[0][0]*dual.j00.d+dJ.m[1][0]*dual.j01.d+dJ.m[2][0]*dual.j02.d+dJ.m[0][1]*dual.j10.d+dJ.m[1][1]*dual.j11.d+dJ.m[2][1]*dual.j12.d;
+    float3 gt=dJ.m[0][0]*dual.j00.d+dJ.m[1][0]*dual.j01.d+dJ.m[2][0]*dual.j02.d+dJ.m[0][1]*dual.j10.d+dJ.m[1][1]*dual.j11.d+dJ.m[2][1]*dual.j12.d+geometry_dt;
     uint mean2base=3u*index;float2 gm2=float2(blend_grad[mean2base],blend_grad[mean2base+1u]);
     Projection projected;
     if(mode==kModeOrtho) projected=project_ortho(t,fx,fy,cx,cy);
@@ -314,6 +438,37 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     if(has_sh)gm+=sh_backward(index,degree,bases,mean,float3(camera[16],camera[17],camera[18]),gcolor,gauss_f[8u*index+6u].xyz,feature_base);
     else{uint fo=feature_base+3u*index;model_grad[fo]=gcolor.x;model_grad[fo+1u]=gcolor.y;model_grad[fo+2u]=gcolor.z;}
     model_grad[3u*index]=gm.x;model_grad[3u*index+1u]=gm.y;model_grad[3u*index+2u]=gm.z;
+    if(mode==kModeFisheye&&(any(gplane!=0.0f)||any(gnormal!=0.0f))){
+        [unroll]for(uint axis=0u;axis<3u;++axis){
+            float eps=1.0e-3f*max(1.0f,abs(mean[axis]));
+            float3 mp=mean,mm=mean;mp[axis]+=eps;mm[axis]-=eps;
+            SplatGeom gp=geometry_eval(mp,has_scales,scale,rotation,cv0,cv1,cv2,cv3,cv4,cv5,mode,int(width),int(height),fx,fy,cx,cy,k1,k2,k3,k4,kernel,scale_modifier);
+            SplatGeom gn=geometry_eval(mm,has_scales,scale,rotation,cv0,cv1,cv2,cv3,cv4,cv5,mode,int(width),int(height),fx,fy,cx,cy,k1,k2,k3,k4,kernel,scale_modifier);
+            model_grad[3u*index+axis]+=(geometry_loss(gp,gplane,gnormal)-geometry_loss(gn,gplane,gnormal))/(2.0f*eps);
+        }
+        if(has_scales){
+            [unroll]for(uint axis2=0u;axis2<3u;++axis2){
+                float eps=1.0e-3f*max(0.1f,abs(scale[axis2]));float3 sp=scale,sm=scale;sp[axis2]+=eps;sm[axis2]-=eps;
+                SplatGeom gp=geometry_eval(mean,true,sp,rotation,cv0,cv1,cv2,cv3,cv4,cv5,mode,int(width),int(height),fx,fy,cx,cy,k1,k2,k3,k4,kernel,scale_modifier);
+                SplatGeom gn=geometry_eval(mean,true,sm,rotation,cv0,cv1,cv2,cv3,cv4,cv5,mode,int(width),int(height),fx,fy,cx,cy,k1,k2,k3,k4,kernel,scale_modifier);
+                model_grad[scale_base+3u*index+axis2]+=(geometry_loss(gp,gplane,gnormal)-geometry_loss(gn,gplane,gnormal))/(2.0f*eps);
+            }
+            [unroll]for(uint qi=0u;qi<4u;++qi){
+                float eps=1.0e-3f;float4 qp=rotation,qm=rotation;qp[qi]+=eps;qm[qi]-=eps;
+                SplatGeom gp=geometry_eval(mean,true,scale,qp,cv0,cv1,cv2,cv3,cv4,cv5,mode,int(width),int(height),fx,fy,cx,cy,k1,k2,k3,k4,kernel,scale_modifier);
+                SplatGeom gn=geometry_eval(mean,true,scale,qm,cv0,cv1,cv2,cv3,cv4,cv5,mode,int(width),int(height),fx,fy,cx,cy,k1,k2,k3,k4,kernel,scale_modifier);
+                model_grad[rotation_base+4u*index+qi]+=(geometry_loss(gp,gplane,gnormal)-geometry_loss(gn,gplane,gnormal))/(2.0f*eps);
+            }
+        }else{
+            float cv[6]={cv0,cv1,cv2,cv3,cv4,cv5};
+            [unroll]for(uint ci=0u;ci<6u;++ci){
+                float eps=1.0e-3f*max(0.01f,abs(cv[ci]));float cp[6]={cv0,cv1,cv2,cv3,cv4,cv5};float cm[6]={cv0,cv1,cv2,cv3,cv4,cv5};cp[ci]+=eps;cm[ci]-=eps;
+                SplatGeom gp=geometry_eval(mean,false,scale,rotation,cp[0],cp[1],cp[2],cp[3],cp[4],cp[5],mode,int(width),int(height),fx,fy,cx,cy,k1,k2,k3,k4,kernel,scale_modifier);
+                SplatGeom gn=geometry_eval(mean,false,scale,rotation,cm[0],cm[1],cm[2],cm[3],cm[4],cm[5],mode,int(width),int(height),fx,fy,cx,cy,k1,k2,k3,k4,kernel,scale_modifier);
+                model_grad[covariance_base+6u*index+ci]+=(geometry_loss(gp,gplane,gnormal)-geometry_loss(gn,gplane,gnormal))/(2.0f*eps);
+            }
+        }
+    }
     if(raw_chain&&has_scales){
         float f=filter_3d[index],f2=f*f,gop=model_grad[opacity_base+index];
         [unroll]for(uint ax=0u;ax<3u;++ax){uint o=3u*index+ax;float raw=exp(raw_log_scales[o]),fs=scales[o];model_grad[log_scale_base+o]=model_grad[scale_base+o]*raw*raw/fs+gop*opacities[index]*f2/(fs*fs);}

@@ -1,11 +1,9 @@
 #pragma once
 
-// Vulkan backend of splat_drender: the same EWA forward the CUDA backend
-// implements, expressed as Vulkan compute passes. It renders a trained model
-// without a CUDA context, which is what the editor preview needs, and it is the
-// base for the differentiable Vulkan pass that follows: the per-Gaussian state,
-// the sorted instances and the pixel snapshots of the last forward() all stay
-// alive on the device.
+// Vulkan backend of splat_drender: CUDA-equivalent EWA forward, complete
+// differentiable geometry/RGB backward, and multi-view sampling/loss compute
+// passes. It also renders a trained model without a CUDA context. Per-Gaussian
+// state, sorted instances and pixel snapshots stay alive on the device.
 
 #include <cstdint>
 #include <memory>
@@ -68,6 +66,8 @@ struct SplatSettings {
     // forward-only caller (the editor preview) leaves it off: at a million
     // instances the buffer is hundreds of megabytes of unused writes.
     bool pixel_snapshots = false;
+    float point_depth_bracket = 0.0F;
+    float point_depth_tolerance = 0.0F;
 };
 
 // Channel-major images: color and normal are [3, H, W], alpha and median depth are [H, W].
@@ -93,6 +93,8 @@ struct SplatBlendGradients {
     std::vector<float> mean2d;
     std::vector<float> conic_opacity;
     std::vector<float> colors;
+    std::vector<float> ray_plane;
+    std::vector<float> normal;
 };
 
 // Gradients of every model input consumed by the forward pass. Activated
@@ -110,6 +112,55 @@ struct SplatModelGradients {
     std::vector<float> log_scales;
     std::vector<float> raw_rotations;
     std::vector<float> opacity_logits;
+};
+
+struct SplatDepthSamples {
+    std::vector<float> camera_points;  // [P,3]
+    std::vector<float> median_depth;   // [P], ray length
+    std::vector<std::uint32_t> n_contrib;
+    std::vector<std::uint32_t> inside;
+};
+
+struct SplatDepthSampleGradients {
+    SplatModelGradients model;
+    std::vector<float> points;  // [P,3] world-space query-point gradient
+};
+
+// Inputs and weights for the GGGS multi-view round-trip and planar-NCC loss.
+// Both cameras must be pinhole, matching the CUDA training path. Images are
+// channel-major where applicable; sampled_neighbour_points are interleaved
+// [P,3] camera-space points returned by sample_depth().
+struct SplatMultiViewInput {
+    SplatCamera reference_camera;
+    SplatCamera neighbour_camera;
+    std::span<const float> reference_depth;   // [P]
+    std::span<const float> reference_normal;  // [3,P]
+    std::span<const float> reference_gray;    // [P]
+    std::span<const float> neighbour_gray;    // [Hn,Wn]
+    std::span<const float> sampled_neighbour_points;  // [P,3]
+    std::span<const std::uint32_t> sampled_inside;    // [P]
+    std::span<const float> reference_mask;    // optional [P]
+    std::span<const float> neighbour_mask;    // optional [Hn,Wn]
+    float geometry_weight = 0.0F;
+    float ncc_weight = 0.0F;
+    float pixel_noise_threshold = 1.0F;
+    bool robust_ncc = true;
+    float ncc_lambda_reference = 0.2F;
+    float ncc_sharpness = 10.0F;
+    float ncc_min_weight = 0.0F;
+};
+
+struct SplatMultiViewOutput {
+    float geometry = 0.0F;
+    float ncc = 0.0F;
+    std::uint64_t geometry_pixels = 0;
+    std::uint64_t geometry_candidates = 0;
+    std::uint64_t ncc_pixels = 0;
+    // Already multiplied by geometry_weight / ncc_weight and normalized by
+    // their respective accepted-pixel counts, exactly like CUDA.
+    std::vector<float> reference_depth_gradient;   // [P]
+    std::vector<float> reference_normal_gradient;  // [3,P]
+    std::vector<float> sampled_point_gradient;     // [P,3]
 };
 
 // Non-owning storage-buffer slice for zero-copy interop (for example with a
@@ -221,19 +272,28 @@ public:
     [[nodiscard]] SplatForwardOutput render(
         const SplatCamera& camera, const SplatSettings& settings);
     // Consumes the most recent render() made with pixel_snapshots=true.
-    // Loss images are channel-major: color [3,H,W], alpha [H,W].
+    // Loss images are channel-major: color/normal [3,H,W], alpha/depth [H,W].
+    // The geometry losses may be empty only when the matching forward used
+    // need_depth=false; otherwise an empty span means a zero upstream gradient.
     [[nodiscard]] SplatBlendGradients backward_blend(
-        std::span<const float> dL_color, std::span<const float> dL_alpha);
-    // Full color/alpha backward through compositing, projection/covariance,
-    // SH, and (when supplied at upload) the model activation chain.
+        std::span<const float> dL_color, std::span<const float> dL_alpha,
+        std::span<const float> dL_median_depth = {},
+        std::span<const float> dL_normal = {});
+    // Full RGB/alpha/depth/normal backward through compositing,
+    // projection/covariance, SH, and the optional model activation chain.
     [[nodiscard]] SplatModelGradients backward(
-        std::span<const float> dL_color, std::span<const float> dL_alpha);
+        std::span<const float> dL_color, std::span<const float> dL_alpha,
+        std::span<const float> dL_median_depth = {},
+        std::span<const float> dL_normal = {});
     // Device-resident form of backward_blend. `packed_gradients` contains
-    // [mean2d:3*N, conic_opacity:4*N, colors:3*N] Float32 values and is zeroed
-    // before accumulation. All buffers must belong to this Context's VkDevice.
+    // [mean2d:3*N, conic_opacity:4*N, colors:3*N, ray_plane:4*N, normal:3*N]
+    // Float32 values and is zeroed before accumulation. All buffers must belong
+    // to this Context's VkDevice.
     void backward_blend_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-        const SplatBufferView& packed_gradients);
+        const SplatBufferView& packed_gradients,
+        const SplatBufferView& dL_median_depth = {},
+        const SplatBufferView& dL_normal = {});
     [[nodiscard]] std::uint64_t blend_gradient_float_count() const noexcept;
     // Fully device-resident color/alpha backward. The output layout is
     // [means, SH-or-colors, opacities, scales, rotations, covariances,
@@ -241,8 +301,22 @@ public:
     // the uploaded representation remain zero, preserving one stable layout.
     void backward_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
-        const SplatBufferView& packed_model_gradients);
+        const SplatBufferView& packed_model_gradients,
+        const SplatBufferView& dL_median_depth = {},
+        const SplatBufferView& dL_normal = {});
     [[nodiscard]] std::uint64_t model_gradient_float_count() const noexcept;
+    // GGGS multi-view median-depth query and its complete backward pass.
+    // sample_depth_backward consumes the most recent sample_depth call.
+    [[nodiscard]] SplatDepthSamples sample_depth(
+        std::span<const float> world_points, const SplatCamera& camera,
+        const SplatSettings& settings = {});
+    [[nodiscard]] SplatDepthSampleGradients sample_depth_backward(
+        std::span<const float> dL_camera_points);
+    // CUDA-equivalent multi-view loss stage. Feed sampled_point_gradient to
+    // sample_depth_backward(); add that result's point gradient through the
+    // reference unprojection, and feed the reference gradients to backward().
+    [[nodiscard]] SplatMultiViewOutput multi_view_loss(
+        const SplatMultiViewInput& input);
     // Same frame as render() with need_depth off, but the color stays on the
     // device as RGBA8: no float readback and no host-side quantization.
     [[nodiscard]] SplatRgbaImage render_rgba_device(
