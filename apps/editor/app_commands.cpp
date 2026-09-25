@@ -3246,6 +3246,10 @@ bool ensure_splat_renderer(App& app) {
         const auto opacity = model.opacity_logits.to_vector();
         const auto sh =
             model.sh.is_valid() ? model.sh.to_vector() : std::vector<float>{};
+        const auto filter = model.filter_3d.is_valid() &&
+                                    model.filter_3d.numel() == count
+                                ? model.filter_3d.to_vector()
+                                : std::vector<float>{};
         std::uint32_t bases = 1;
         if (model.sh.is_valid() && model.sh.shape().rank() >= 2)
             bases = static_cast<std::uint32_t>(model.sh.shape()[1]);
@@ -3265,6 +3269,7 @@ bool ensure_splat_renderer(App& app) {
         cloud.quaternions = quaternions.empty() ? nullptr : quaternions.data();
         cloud.opacity_logits = opacity.empty() ? nullptr : opacity.data();
         cloud.sh = sh.empty() ? nullptr : sh.data();
+        cloud.filter_3d = filter.empty() ? nullptr : filter.data();
         if (!app.splat_renderer.upload(cloud, key)) {
             app.splat_load_failed_key = key;
             if (!app.splat_renderer.failure().empty())
@@ -3286,10 +3291,6 @@ bool ensure_splat_renderer(App& app) {
                                          static_cast<std::size_t>(count) * 4U
                                  ? model.normal_features.to_vector()
                                  : std::vector<float>{};
-        const auto filter = model.filter_3d.is_valid() &&
-                                    model.filter_3d.numel() == count
-                                ? model.filter_3d.to_vector()
-                                : std::vector<float>{};
         host.normals = normals.empty() ? nullptr : normals.data();
         host.filter_3d = filter.empty() ? nullptr : filter.data();
         app.splat_edit.sync(key, host);

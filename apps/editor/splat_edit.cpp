@@ -1051,6 +1051,7 @@ void SplatEdit::upload_model(App& app) {
     cloud.quaternions = count_ == 0 ? nullptr : quaternions_.data();
     cloud.opacity_logits = count_ == 0 ? nullptr : opacity_.data();
     cloud.sh = sh_.empty() ? nullptr : sh_.data();
+    cloud.filter_3d = filter_.size() == count_ ? filter_.data() : nullptr;
     if (!app.splat_renderer.upload(cloud, key_)) {
         if (!app.splat_renderer.failure().empty())
             set_message(app, app.splat_renderer.failure(), theme::danger);

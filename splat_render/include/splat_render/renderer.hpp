@@ -41,7 +41,9 @@ struct Camera {
 };
 
 // Host Gaussian attributes. Scales are log-space and opacity is a logit.
-// Quaternions are scalar-first. sh is [count, sh_bases, 3] in INRIA order.
+// Quaternions are raw scalar-first values and are normalized before rendering.
+// sh is [count, sh_bases, 3] in INRIA order. filter_3d is the optional
+// Mip-Splatting world-space radius used by the CUDA training forward.
 struct GaussianCloud {
     std::uint32_t count{};
     std::uint32_t sh_degree{};
@@ -51,6 +53,7 @@ struct GaussianCloud {
     const float* quaternions{};
     const float* opacity_logits{};
     const float* sh{};
+    const float* filter_3d{};
 };
 
 struct FrameTarget {
@@ -172,6 +175,9 @@ private:
     struct EwaPreview;
     EwaPreview* ewa_{};
     Storage rgba_staging_{};
+    // Density-preserving opacity multiplier introduced by filter_3d. Center
+    // edits provide the base sigmoid opacity and must retain this multiplier.
+    std::vector<float> ewa_opacity_factors_;
     VkCommandPool command_pool_{};
     VkCommandBuffer command_{};
     VkFence fence_{};

@@ -42,6 +42,39 @@ float activated_scale(const float log_scale) {
     return std::exp(std::clamp(log_scale, -20.F, 20.F));
 }
 
+struct ActivatedGaussian {
+    float scales[3]{};
+    float rotation[4]{};
+    float opacity{};
+    float opacity_factor{1.F};
+};
+
+ActivatedGaussian activate_gaussian(
+    const GaussianCloud& cloud, const std::size_t index) {
+    ActivatedGaussian activated;
+    const float filter = cloud.filter_3d == nullptr ? 0.F : cloud.filter_3d[index];
+    const float filter_squared = filter * filter;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const float raw = activated_scale(cloud.log_scales[index * 3U + axis]);
+        const float filtered = std::sqrt(raw * raw + filter_squared);
+        activated.scales[axis] = filtered;
+        activated.opacity_factor *= raw / filtered;
+    }
+
+    float norm_squared = 0.F;
+    for (std::size_t component = 0; component < 4; ++component) {
+        const float value = cloud.quaternions[index * 4U + component];
+        activated.rotation[component] = value;
+        norm_squared += value * value;
+    }
+    const float inverse_norm =
+        1.F / std::sqrt(std::max(norm_squared, 1e-20F));
+    for (float& component : activated.rotation) component *= inverse_norm;
+    activated.opacity =
+        activated_opacity(cloud.opacity_logits[index]) * activated.opacity_factor;
+    return activated;
+}
+
 struct Push {
     std::uint32_t count{};
     std::uint32_t groups{};
@@ -96,6 +129,7 @@ void Renderer::reset() {
     delete ewa_;
 #endif
     ewa_ = nullptr;
+    ewa_opacity_factors_.clear();
     if (device_ == VK_NULL_HANDLE) {
         ready_ = false;
         count_ = 0;
@@ -561,6 +595,7 @@ void Renderer::clear_model() {
     count_ = 0;
     source_key_.clear();
     cache_valid_ = false;
+    ewa_opacity_factors_.clear();
     ++generation_;
 #if SPLAT_DRENDER_HAS_VULKAN
     if (ewa_) ewa_->rasterizer.clear_model();
@@ -596,17 +631,18 @@ bool Renderer::upload(const GaussianCloud& cloud, const std::string_view source_
     std::vector<float> rotations(count * 4U);
     std::vector<float> harmonics(count * bases * 3U, 0.F);
     for (std::size_t index = 0; index < count; ++index) {
+        const ActivatedGaussian activated = activate_gaussian(cloud, index);
         centers[index * 4U] = cloud.means[index * 3U];
         centers[index * 4U + 1U] = cloud.means[index * 3U + 1U];
         centers[index * 4U + 2U] = cloud.means[index * 3U + 2U];
-        centers[index * 4U + 3U] = activated_opacity(cloud.opacity_logits[index]);
-        scales[index * 4U] = activated_scale(cloud.log_scales[index * 3U]);
-        scales[index * 4U + 1U] = activated_scale(cloud.log_scales[index * 3U + 1U]);
-        scales[index * 4U + 2U] = activated_scale(cloud.log_scales[index * 3U + 2U]);
-        rotations[index * 4U] = cloud.quaternions[index * 4U];
-        rotations[index * 4U + 1U] = cloud.quaternions[index * 4U + 1U];
-        rotations[index * 4U + 2U] = cloud.quaternions[index * 4U + 2U];
-        rotations[index * 4U + 3U] = cloud.quaternions[index * 4U + 3U];
+        centers[index * 4U + 3U] = activated.opacity;
+        scales[index * 4U] = activated.scales[0];
+        scales[index * 4U + 1U] = activated.scales[1];
+        scales[index * 4U + 2U] = activated.scales[2];
+        rotations[index * 4U] = activated.rotation[0];
+        rotations[index * 4U + 1U] = activated.rotation[1];
+        rotations[index * 4U + 2U] = activated.rotation[2];
+        rotations[index * 4U + 3U] = activated.rotation[3];
         if (cloud.sh != nullptr) {
             const std::uint32_t src_bases = std::max(cloud.sh_bases, bases);
             const std::size_t src = index * src_bases * 3U;
@@ -678,7 +714,16 @@ bool Renderer::update_centers(const float* centers, const std::uint32_t count) {
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     void* mapped{};
     check(vkMapMemory(device_, staging.memory, 0, bytes, 0, &mapped), "vkMapMemory");
-    std::memcpy(mapped, centers, static_cast<std::size_t>(bytes));
+    std::vector<float> activated_centers(
+        centers, centers + static_cast<std::size_t>(count) * 4U);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const float factor = index < ewa_opacity_factors_.size()
+            ? ewa_opacity_factors_[index]
+            : 1.F;
+        activated_centers[static_cast<std::size_t>(index) * 4U + 3U] *= factor;
+    }
+    std::memcpy(
+        mapped, activated_centers.data(), static_cast<std::size_t>(bytes));
     vkUnmapMemory(device_, staging.memory);
     wait_gpu();
     check(vkResetFences(device_, 1, &fence_), "vkResetFences");
@@ -716,7 +761,8 @@ bool Renderer::update_centers(const float* centers, const std::uint32_t count) {
             means[static_cast<std::size_t>(index) * 3U] = centers[index * 4U];
             means[static_cast<std::size_t>(index) * 3U + 1U] = centers[index * 4U + 1U];
             means[static_cast<std::size_t>(index) * 3U + 2U] = centers[index * 4U + 2U];
-            opacities[index] = centers[index * 4U + 3U];
+            opacities[index] =
+                activated_centers[static_cast<std::size_t>(index) * 4U + 3U];
         }
         try {
             ewa_->rasterizer.update_means_and_opacities(means, opacities);
@@ -922,6 +968,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
 void Renderer::sync_ewa(const GaussianCloud& cloud) {
 #if SPLAT_DRENDER_HAS_VULKAN
     if (cloud.count == 0) {
+        ewa_opacity_factors_.clear();
         if (ewa_) ewa_->rasterizer.clear_model();
         return;
     }
@@ -956,18 +1003,21 @@ void Renderer::sync_ewa(const GaussianCloud& cloud) {
     std::vector<float> scales(static_cast<std::size_t>(count) * 3U);
     std::vector<float> rotations(static_cast<std::size_t>(count) * 4U);
     std::vector<float> harmonics(static_cast<std::size_t>(count) * bases * 3U, 0.0F);
+    ewa_opacity_factors_.resize(count);
     for (std::uint32_t index = 0; index < count; ++index) {
+        const ActivatedGaussian activated = activate_gaussian(cloud, index);
         means[static_cast<std::size_t>(index) * 3U] = cloud.means[index * 3U];
         means[static_cast<std::size_t>(index) * 3U + 1U] = cloud.means[index * 3U + 1U];
         means[static_cast<std::size_t>(index) * 3U + 2U] = cloud.means[index * 3U + 2U];
-        opacities[index] = activated_opacity(cloud.opacity_logits[index]);
-        scales[static_cast<std::size_t>(index) * 3U] = activated_scale(cloud.log_scales[index * 3U]);
-        scales[static_cast<std::size_t>(index) * 3U + 1U] = activated_scale(cloud.log_scales[index * 3U + 1U]);
-        scales[static_cast<std::size_t>(index) * 3U + 2U] = activated_scale(cloud.log_scales[index * 3U + 2U]);
-        rotations[static_cast<std::size_t>(index) * 4U] = cloud.quaternions[index * 4U];
-        rotations[static_cast<std::size_t>(index) * 4U + 1U] = cloud.quaternions[index * 4U + 1U];
-        rotations[static_cast<std::size_t>(index) * 4U + 2U] = cloud.quaternions[index * 4U + 2U];
-        rotations[static_cast<std::size_t>(index) * 4U + 3U] = cloud.quaternions[index * 4U + 3U];
+        opacities[index] = activated.opacity;
+        ewa_opacity_factors_[index] = activated.opacity_factor;
+        scales[static_cast<std::size_t>(index) * 3U] = activated.scales[0];
+        scales[static_cast<std::size_t>(index) * 3U + 1U] = activated.scales[1];
+        scales[static_cast<std::size_t>(index) * 3U + 2U] = activated.scales[2];
+        rotations[static_cast<std::size_t>(index) * 4U] = activated.rotation[0];
+        rotations[static_cast<std::size_t>(index) * 4U + 1U] = activated.rotation[1];
+        rotations[static_cast<std::size_t>(index) * 4U + 2U] = activated.rotation[2];
+        rotations[static_cast<std::size_t>(index) * 4U + 3U] = activated.rotation[3];
         if (cloud.sh == nullptr) continue;
         std::memcpy(
             harmonics.data() + static_cast<std::size_t>(index) * bases * 3U,
