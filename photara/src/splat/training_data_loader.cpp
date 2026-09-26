@@ -9,6 +9,7 @@
 #include <cuda_runtime_api.h>
 #include "internal/cuda_stream_context.hpp"
 #include "core/vram_profiler.hpp"
+#include "vulkan/ops.hpp"
 
 #include <Eigen/Geometry>
 
@@ -871,49 +872,42 @@ TrainingView upload_training_view(
     result.camera = host.camera;
     const bool decode_gray = options.multi_view_ncc_weight > 0.F;
     if (options.backend == TrainingBackend::vulkan) {
+        // The packed image is uploaded as-is and expanded into the planar float
+        // planes by the device. Converting on the host cost a scalar loop over
+        // every pixel and tripled the staging copy (three float planes instead
+        // of the packed words), which dominated the Vulkan step time.
+        const std::size_t height = host.camera.height;
+        const std::size_t width = host.camera.width;
         const std::size_t pixels = host.rgba.size();
-        std::vector<float> rgb(3 * pixels);
-        std::vector<float> gray(decode_gray ? pixels : 0);
-        std::vector<float> mask(host.has_mask ? pixels : 0);
-        constexpr float inverse_255 = 1.F / 255.F;
-        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-            const std::uint32_t value = std::bit_cast<std::uint32_t>(
-                host.rgba[pixel]);
-            const float red = float(value & 0xffU) * inverse_255;
-            const float green = float((value >> 8U) & 0xffU) * inverse_255;
-            const float blue = float((value >> 16U) & 0xffU) * inverse_255;
-            rgb[pixel] = red;
-            rgb[pixels + pixel] = green;
-            rgb[2 * pixels + pixel] = blue;
-            if (decode_gray)
-                gray[pixel] = 0.299F * red + 0.587F * green + 0.114F * blue;
-            if (host.has_mask)
-                mask[pixel] = float((value >> 24U) & 0xffU) * inverse_255;
-        }
-        result.rgb = tinytensor::Tensor::from_vector(
-            rgb, {std::size_t{3}, host.camera.height, host.camera.width},
-            tinytensor::Device::Vulkan);
+        if (pixels != height * width)
+            throw std::invalid_argument(
+                "GGGS packed training image size does not match camera");
+        const auto packed = tinytensor::Tensor::from_vector(
+            host.rgba, {height, width}, tinytensor::Device::Vulkan);
+        result.rgb = tinytensor::Tensor::empty(
+            {std::size_t{3}, height, width}, tinytensor::Device::Vulkan);
         result.gray = decode_gray
-            ? tinytensor::Tensor::from_vector(
-                  gray, {host.camera.height, host.camera.width},
-                  tinytensor::Device::Vulkan)
+            ? tinytensor::Tensor::empty(
+                  {height, width}, tinytensor::Device::Vulkan)
             : tinytensor::Tensor::zeros(
                   {std::size_t{1}}, tinytensor::Device::Vulkan);
         result.mask = host.has_mask
-            ? tinytensor::Tensor::from_vector(
-                  mask, {host.camera.height, host.camera.width},
-                  tinytensor::Device::Vulkan)
+            ? tinytensor::Tensor::empty(
+                  {height, width}, tinytensor::Device::Vulkan)
             : tinytensor::Tensor::zeros(
                   {std::size_t{1}}, tinytensor::Device::Vulkan);
+        tinytensor::vulkan::unpack_training_pixels(
+            packed, result.rgb, decode_gray ? &result.gray : nullptr,
+            host.has_mask ? &result.mask : nullptr);
         result.depth = host.depth.empty()
             ? tinytensor::Tensor::zeros({1}, tinytensor::Device::Vulkan)
             : tinytensor::Tensor::from_vector(
-                  host.depth, {host.camera.height, host.camera.width},
+                  host.depth, {height, width},
                   tinytensor::Device::Vulkan);
         result.normal = host.normal.empty()
             ? tinytensor::Tensor::zeros({1}, tinytensor::Device::Vulkan)
             : tinytensor::Tensor::from_vector(
-                  host.normal, {3, host.camera.height, host.camera.width},
+                  host.normal, {3, height, width},
                   tinytensor::Device::Vulkan);
         result.has_mask = host.has_mask;
         result.mask_is_validity = host.mask_is_validity;

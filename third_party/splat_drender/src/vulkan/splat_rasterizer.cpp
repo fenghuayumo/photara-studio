@@ -141,6 +141,7 @@ public:
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))) {
         clear_buffer(dummy_);
         create_backward_timestamp_profiler();
+        create_forward_timestamp_profiler();
         query_subgroup_properties();
     }
 
@@ -420,6 +421,7 @@ public:
         const auto gauss_u_count = k_streams * count + scan_scratch_uints(count);
         Buffer& gauss_f = grow(gauss_f_, static_cast<std::uint64_t>(count) * k_gauss_slots * sizeof(float) * 4);
         Buffer& gauss_u = grow(gauss_u_, static_cast<std::uint64_t>(gauss_u_count) * sizeof(std::uint32_t));
+        write_forward_timestamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
 
         Push prep{};
         prep.u[0] = count;
@@ -462,6 +464,7 @@ public:
             emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts,
                     &dummy_, &dummy_},
             counts_push, 1);
+        write_forward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         flush_batch();
         std::uint32_t frame_count_values[2]{};
         frame_counts.download(frame_count_values, sizeof(frame_count_values));
@@ -537,6 +540,7 @@ public:
                 bucket_push, div_up(tiles, 256));
             inclusive_scan(*bucket_offsets, 0, 0, tiles, tiles);
         }
+        write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         const std::uint32_t snap_buckets = std::max(bucket_limit, 1u);
         Buffer& out_f = grow(
@@ -615,7 +619,9 @@ public:
             source.height = camera.height;
             record_copy_frame_device(source, *destination);
         }
+        write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         flush_batch();
+        collect_forward_timestamps();
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
         last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
         last_instance_values_ = instance_values;
@@ -625,6 +631,7 @@ public:
         last_tiles_ = tiles;
         last_pixels_ = pixels;
         last_bucket_limit_ = snap_buckets;
+        last_instances_ = instances;
         last_mode_ = camera.mode;
         last_wrap_width_ = wrap_width;
         last_fx_ = camera.fx;
@@ -1740,36 +1747,104 @@ private:
         backward_profile_interval_ = environment_interval(
             "SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL", 100);
         if (!backward_profile_enabled_) return;
+        if (!create_timestamp_query_pool(
+                backward_timestamp_pool_,
+                "splat_vulkan_backward_profile"))
+            backward_profile_enabled_ = false;
+    }
 
-        std::uint32_t family_count = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(
-            context_.physical_device, &family_count, nullptr);
-        std::vector<VkQueueFamilyProperties> families(family_count);
-        vkGetPhysicalDeviceQueueFamilyProperties(
-            context_.physical_device, &family_count, families.data());
-        backward_timestamp_valid_bits_ =
-            context_.queue_family_index < families.size()
-                ? families[context_.queue_family_index].timestampValidBits
-                : 0;
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
-        backward_timestamp_period_ = properties.limits.timestampPeriod;
-        if (backward_timestamp_valid_bits_ == 0) {
+    // The forward profiler follows the same contract as the backward one: the
+    // timestamps split the frame into the count pass (preprocess + per-Gaussian
+    // scans + the instance tally), the tile sort, and the blend.
+    void create_forward_timestamp_profiler() {
+        forward_profile_enabled_ = environment_flag("SPLAT_DRENDER_PROFILE_FORWARD");
+        forward_profile_interval_ = environment_interval(
+            "SPLAT_DRENDER_PROFILE_FORWARD_INTERVAL", 100);
+        if (!forward_profile_enabled_) return;
+        if (!create_timestamp_query_pool(
+                forward_timestamp_pool_, "splat_vulkan_forward_profile"))
+            forward_profile_enabled_ = false;
+    }
+
+    bool create_timestamp_query_pool(
+        VkQueryPool& pool, const char* label) {
+        if (!timestamp_properties_queried_) {
+            timestamp_properties_queried_ = true;
+            std::uint32_t family_count = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(
+                context_.physical_device, &family_count, nullptr);
+            std::vector<VkQueueFamilyProperties> families(family_count);
+            vkGetPhysicalDeviceQueueFamilyProperties(
+                context_.physical_device, &family_count, families.data());
+            timestamp_valid_bits_ =
+                context_.queue_family_index < families.size()
+                    ? families[context_.queue_family_index].timestampValidBits
+                    : 0;
+            VkPhysicalDeviceProperties properties{};
+            vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+            timestamp_period_ = properties.limits.timestampPeriod;
+        }
+        if (timestamp_valid_bits_ == 0) {
             std::fprintf(
                 stderr,
-                "splat_vulkan_backward_profile disabled: queue has timestampValidBits=0\n");
-            backward_profile_enabled_ = false;
-            return;
+                "%s disabled: queue has timestampValidBits=0\n", label);
+            return false;
         }
-
+        if (pool != VK_NULL_HANDLE) return true;
         VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
         info.queryCount = 4;
-        if (vkCreateQueryPool(context_.device, &info, nullptr,
-                              &backward_timestamp_pool_) != VK_SUCCESS) {
-            throw std::runtime_error(
-                "vkCreateQueryPool failed for backward profiling");
+        if (vkCreateQueryPool(context_.device, &info, nullptr, &pool) != VK_SUCCESS)
+            throw std::runtime_error("vkCreateQueryPool failed for stage profiling");
+        return true;
+    }
+
+    void write_forward_timestamp(
+        const std::uint32_t index, const VkPipelineStageFlagBits stage) {
+        if (!forward_profile_enabled_) return;
+        begin_batch();
+        if (index == 0) {
+            vkCmdResetQueryPool(command_, forward_timestamp_pool_, 0, 4);
         }
+        vkCmdWriteTimestamp(command_, stage, forward_timestamp_pool_, index);
+    }
+
+    void collect_forward_timestamps() {
+        if (!forward_profile_enabled_) return;
+        std::array<std::uint64_t, 4> timestamps{};
+        if (vkGetQueryPoolResults(
+                context_.device, forward_timestamp_pool_, 0, 4,
+                sizeof(timestamps), timestamps.data(), sizeof(std::uint64_t),
+                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+            return;
+        const double ticks_to_ms =
+            static_cast<double>(timestamp_period_) / 1.0e6;
+        const double counts_ms = static_cast<double>(timestamp_delta(
+            timestamps[0], timestamps[1], timestamp_valid_bits_)) * ticks_to_ms;
+        const double sort_ms = static_cast<double>(timestamp_delta(
+            timestamps[1], timestamps[2], timestamp_valid_bits_)) * ticks_to_ms;
+        const double blend_ms = static_cast<double>(timestamp_delta(
+            timestamps[2], timestamps[3], timestamp_valid_bits_)) * ticks_to_ms;
+        forward_counts_total_ms_ += counts_ms;
+        forward_sort_total_ms_ += sort_ms;
+        forward_blend_total_ms_ += blend_ms;
+        ++forward_profile_samples_;
+        if (forward_profile_samples_ < forward_profile_interval_) return;
+        const double samples = static_cast<double>(forward_profile_samples_);
+        std::fprintf(
+            stderr,
+            "splat_vulkan_forward_profile samples=%u gaussians=%u instances=%u "
+            "counts_avg_ms=%.4f sort_avg_ms=%.4f blend_avg_ms=%.4f "
+            "total_avg_ms=%.4f\n",
+            forward_profile_samples_, count_, last_instances_,
+            forward_counts_total_ms_ / samples, forward_sort_total_ms_ / samples,
+            forward_blend_total_ms_ / samples,
+            (forward_counts_total_ms_ + forward_sort_total_ms_ +
+             forward_blend_total_ms_) / samples);
+        forward_profile_samples_ = 0;
+        forward_counts_total_ms_ = 0.0;
+        forward_sort_total_ms_ = 0.0;
+        forward_blend_total_ms_ = 0.0;
     }
 
     void write_backward_timestamp(
@@ -1810,15 +1885,15 @@ private:
         }
 
         const double ticks_to_ms =
-            static_cast<double>(backward_timestamp_period_) / 1.0e6;
+            static_cast<double>(timestamp_period_) / 1.0e6;
         const double fill_ms = static_cast<double>(timestamp_delta(
-            timestamps[0], timestamps[1], backward_timestamp_valid_bits_)) *
+            timestamps[0], timestamps[1], timestamp_valid_bits_)) *
             ticks_to_ms;
         const double blend_ms = static_cast<double>(timestamp_delta(
-            timestamps[1], timestamps[2], backward_timestamp_valid_bits_)) *
+            timestamps[1], timestamps[2], timestamp_valid_bits_)) *
             ticks_to_ms;
         const double project_ms = static_cast<double>(timestamp_delta(
-            timestamps[2], timestamps[3], backward_timestamp_valid_bits_)) *
+            timestamps[2], timestamps[3], timestamp_valid_bits_)) *
             ticks_to_ms;
         backward_fill_total_ms_ += fill_ms;
         backward_blend_total_ms_ += blend_ms;
@@ -1923,30 +1998,39 @@ private:
                         std::uint32_t groups_z = 1) {
         if (groups_x == 0 || groups_y == 0 || groups_z == 0) return;
         begin_batch();
-        VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        set_info.descriptorPool = context_.descriptor_pool;
-        set_info.descriptorSetCount = 1;
-        set_info.pSetLayouts = &pipeline.descriptor_set_layout;
-        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-        if (vkAllocateDescriptorSets(context_.device, &set_info, &descriptor_set) != VK_SUCCESS) {
-            throw std::runtime_error("vkAllocateDescriptorSets failed");
-        }
-        pending_sets_.push_back(descriptor_set);
         std::vector<VkWriteDescriptorSet> writes(infos.size());
         for (std::uint32_t i = 0; i < infos.size(); ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = descriptor_set;
             writes[i].dstBinding = i;
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &infos[i];
         }
-        vkUpdateDescriptorSets(
-            context_.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
         vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
-        vkCmdBindDescriptorSets(
-            command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline_layout, 0, 1,
-            &descriptor_set, 0, nullptr);
+        if (context_.push_descriptors) {
+            // The bindings live in the command buffer, so a later dispatch in
+            // the same batch cannot rewrite what an earlier one reads.
+            context_.cmd_push_descriptor(
+                command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline_layout, 0,
+                static_cast<std::uint32_t>(writes.size()), writes.data());
+        } else {
+            VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            set_info.descriptorPool = context_.descriptor_pool;
+            set_info.descriptorSetCount = 1;
+            set_info.pSetLayouts = &pipeline.descriptor_set_layout;
+            VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+            if (vkAllocateDescriptorSets(context_.device, &set_info, &descriptor_set) != VK_SUCCESS) {
+                throw std::runtime_error("vkAllocateDescriptorSets failed");
+            }
+            pending_sets_.push_back(descriptor_set);
+            for (VkWriteDescriptorSet& write : writes) write.dstSet = descriptor_set;
+            vkUpdateDescriptorSets(
+                context_.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
+                nullptr);
+            vkCmdBindDescriptorSets(
+                command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline_layout, 0, 1,
+                &descriptor_set, 0, nullptr);
+        }
         vkCmdPushConstants(
             command_, pipeline.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &push);
         vkCmdDispatch(command_, groups_x, groups_y, groups_z);
@@ -1992,11 +2076,17 @@ private:
     // has 32 depth bits plus the tile bits, and every bit above them is zero,
     // so those passes sort nothing. The count must stay even: the sort has to
     // end back in buffer 0.
+    //
+    // A 32-bit key follows the same rule. The two-phase instance sort keys by
+    // tile id alone and relies on radix stability to keep the depth order that
+    // the emitter produced, so a 13-bit tile field needs two 8-bit passes
+    // instead of four; the two all-zero digit passes it used to run were pure
+    // histogram, scan and scatter traffic over every instance.
     void radix_sort(bool key_is_64, std::uint32_t count, Buffer& lo0, Buffer& hi0, Buffer& val0, Buffer& lo1, Buffer& hi1,
                     Buffer& val1, Buffer& hist, std::uint32_t hist_n, std::uint32_t key_bits = 32) {
         if (count == 0) return;
         const std::uint32_t blocks = div_up(count, 1024);
-        const std::uint32_t needed = key_is_64 ? (key_bits + 7u) / 8u : 4u;
+        const std::uint32_t needed = (key_bits + 7u) / 8u;
         const std::uint32_t passes = std::min(8u, (needed + 1u) & ~1u);
         bool source_is_zero = true;
         for (std::uint32_t pass = 0; pass < passes; ++pass) {
@@ -2050,8 +2140,17 @@ private:
     std::uint32_t subgroup_size_{};
     std::uint32_t backward_profile_interval_{100};
     std::uint32_t backward_profile_samples_{};
-    std::uint32_t backward_timestamp_valid_bits_{};
-    float backward_timestamp_period_{};
+    // Queue timestamp support, queried once for whichever stage profiler is on.
+    bool timestamp_properties_queried_{};
+    std::uint32_t timestamp_valid_bits_{};
+    float timestamp_period_{};
+    VkQueryPool forward_timestamp_pool_{VK_NULL_HANDLE};
+    bool forward_profile_enabled_{};
+    std::uint32_t forward_profile_interval_{100};
+    std::uint32_t forward_profile_samples_{};
+    double forward_counts_total_ms_{};
+    double forward_sort_total_ms_{};
+    double forward_blend_total_ms_{};
     double backward_fill_total_ms_{};
     double backward_blend_total_ms_{};
     double backward_project_total_ms_{};
@@ -2140,6 +2239,7 @@ private:
     std::uint32_t last_tiles_{};
     std::uint32_t last_pixels_{};
     std::uint32_t last_bucket_limit_{};
+    std::uint32_t last_instances_{};
     std::uint32_t last_mode_{};
     int last_wrap_width_{};
     float last_background_[3]{};

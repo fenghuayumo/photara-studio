@@ -33,6 +33,7 @@
 #include "scatter.hlsl.embedded.hpp"
 #include "select_compact.hlsl.embedded.hpp"
 #include "strided_copy.hlsl.embedded.hpp"
+#include "unpack_rgba.hlsl.embedded.hpp"
 
 namespace tinytensor::vulkan::runtime {
 namespace {
@@ -76,6 +77,36 @@ std::optional<std::uint32_t> env_u32(const char* name) {
 bool env_flag(const char* name) {
     const auto value = env_u32(name);
     return value.has_value() && *value != 0;
+}
+
+std::uint32_t env_u32_or(const char* name, const std::uint32_t fallback) {
+    const auto value = env_u32(name);
+    return value.has_value() ? *value : fallback;
+}
+
+const char* shader_name(const ShaderId shader) {
+    static constexpr std::array<const char*, static_cast<std::size_t>(ShaderId::Count)> names{
+        "adam_f32",    "elementwise", "fused_pointwise", "strided_copy", "index_select",
+        "index_fill",  "mask_flags",  "scan_block",      "scan_add",     "compact",
+        "multinomial", "reduce",      "reduce_all_f32",  "matmul",       "random",
+        "cumsum",      "pool",        "scatter",         "select_compact",
+        "cat",         "unpack_rgba"};
+    const std::size_t index = static_cast<std::size_t>(shader);
+    return index < names.size() ? names[index] : "unknown";
+}
+
+// Timestamps are a fixed-width counter; a queue may expose fewer than 64 valid
+// bits, and the delta has to wrap at that width.
+std::uint64_t timestamp_delta(
+    const std::uint64_t begin, const std::uint64_t end,
+    const std::uint32_t valid_bits) {
+    if (valid_bits >= 64) return end - begin;
+    const std::uint64_t mask = (std::uint64_t{1} << valid_bits) - 1;
+    const std::uint64_t masked_begin = begin & mask;
+    const std::uint64_t masked_end = end & mask;
+    return masked_end >= masked_begin
+        ? masked_end - masked_begin
+        : ((mask - masked_begin + 1) + masked_end) & mask;
 }
 
 bool has_instance_extension(const char* name) {
@@ -202,6 +233,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::Scatter, as_bytes(span{scatter_hlsl_spv}), 3, 44},
         {ShaderId::SelectCompact, as_bytes(span{select_compact_hlsl_spv}), 4, 28},
         {ShaderId::Cat, as_bytes(span{cat_hlsl_spv}), 3, 24},
+        {ShaderId::UnpackRgba, as_bytes(span{unpack_rgba_hlsl_spv}), 4, 24},
     }};
 }
 
@@ -363,6 +395,12 @@ Context::Context() {
                                   : kDefaultPoolBudgetBytes;
     dummy_ = std::make_unique<Buffer>(physical_, device_, kMinBufferBytes, MemoryKind::device_local);
     create_pipelines();
+    op_profile_.enabled = env_flag("TINYTENSOR_VULKAN_PROFILE_OPS");
+    if (op_profile_.enabled) {
+        op_profile_.interval =
+            std::max(1U, env_u32_or("TINYTENSOR_VULKAN_PROFILE_OPS_INTERVAL", 200));
+        create_op_profile_locked();
+    }
 }
 
 Context::~Context() {
@@ -631,6 +669,16 @@ void Context::destroy() {
         recording_ = false;
         vkDeviceWaitIdle(device_);
     }
+    if (op_profile_.enabled) {
+        // Report the run total before the pool goes away: a training run ends
+        // long before the next aggregation window would have fired.
+        if (op_profile_.flushes != 0) report_op_profile_locked();
+        if (op_profile_.pool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(device_, op_profile_.pool, nullptr);
+            op_profile_.pool = VK_NULL_HANDLE;
+        }
+        op_profile_.enabled = false;
+    }
     alive_ = false;
     for (auto& entry : free_buffers_) {
         for (Buffer* buffer : entry.second) {
@@ -787,6 +835,13 @@ void Context::begin_batch_locked() {
     recording_ = true;
     batch_commands_ = 0;
     staging_cursor_ = 0;
+    if (op_profile_.enabled && !op_profile_.order.empty()) {
+        // Retire the previous batch's timestamp range before reusing indices.
+        vkCmdResetQueryPool(
+            command_, op_profile_.pool, 0,
+            static_cast<std::uint32_t>(op_profile_.order.size()) * 2);
+        op_profile_.order.clear();
+    }
 }
 
 void Context::flush_locked() {
@@ -804,6 +859,8 @@ void Context::flush_locked() {
     check(vkWaitForFences(device_, 1, &completion_fence_, VK_TRUE, UINT64_MAX),
           "vkWaitForFences");
     check(vkResetFences(device_, 1, &completion_fence_), "vkResetFences");
+    // The queue is idle, so the batch's timestamp pairs are readable.
+    if (op_profile_.enabled) collect_op_profile_locked();
     recording_ = false;
     batch_commands_ = 0;
     // Every descriptor set the batch allocated is dead once the queue is idle,
@@ -811,6 +868,109 @@ void Context::flush_locked() {
     staging_cursor_ = 0;
     check(vkResetDescriptorPool(device_, descriptor_pool_, 0), "vkResetDescriptorPool");
     trim_pool_locked();
+}
+
+// One timestamp pair per recorded dispatch, accumulated per shader. The pool is
+// created once and re-reset inside each batch, which is where the reset has to
+// be recorded for the next batch's timestamps to land in order.
+void Context::create_op_profile_locked() {
+    std::uint32_t family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(family_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, families.data());
+    op_profile_.valid_bits = queue_family_ < families.size()
+        ? families[queue_family_].timestampValidBits
+        : 0;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(physical_, &properties);
+    op_profile_.period = properties.limits.timestampPeriod;
+    if (op_profile_.valid_bits == 0) {
+        std::fprintf(
+            stderr,
+            "tinytensor_vulkan_op_profile disabled: queue has timestampValidBits=0\n");
+        op_profile_.enabled = false;
+        return;
+    }
+    VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    info.queryCount = 2 * kMaxCommandsPerBatch;
+    check(vkCreateQueryPool(device_, &info, nullptr, &op_profile_.pool),
+          "vkCreateQueryPool");
+    const std::size_t slots = static_cast<std::size_t>(ShaderId::Count) *
+        OpProfile::kElementBuckets;
+    op_profile_.calls.assign(slots, 0);
+    op_profile_.total_ms.assign(slots, 0.0);
+    op_profile_.order.reserve(kMaxCommandsPerBatch);
+}
+
+void Context::collect_op_profile_locked() {
+    const std::uint32_t pairs = op_profile_.recorded;
+    op_profile_.recorded = 0;
+    if (pairs == 0) return;
+    std::vector<std::uint64_t> stamps(static_cast<std::size_t>(pairs) * 2);
+    const VkResult result = vkGetQueryPoolResults(
+        device_, op_profile_.pool, 0, pairs * 2, stamps.size() * sizeof(std::uint64_t),
+        stamps.data(), sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (result != VK_SUCCESS) {
+        op_profile_.order.clear();
+        return;
+    }
+    const double ticks_to_ms = static_cast<double>(op_profile_.period) / 1.0e6;
+    for (std::uint32_t pair = 0; pair < pairs; ++pair) {
+        const std::size_t slot = op_profile_.order[pair];
+        const std::uint64_t ticks = timestamp_delta(
+            stamps[2 * pair], stamps[2 * pair + 1], op_profile_.valid_bits);
+        op_profile_.total_ms[slot] += static_cast<double>(ticks) * ticks_to_ms;
+        ++op_profile_.calls[slot];
+    }
+    op_profile_.order.clear();
+    ++op_profile_.flushes;
+    if (op_profile_.flushes % op_profile_.interval == 0) report_op_profile_locked();
+}
+
+void Context::report_op_profile_locked() {
+    const std::uint32_t flushes = op_profile_.flushes;
+    std::fprintf(
+        stderr, "tinytensor_vulkan_op_profile flushes=%u cumulative_from_start=1\n",
+        flushes);
+    const std::size_t slots = op_profile_.calls.size();
+    double total_ms = 0.0;
+    for (std::size_t slot = 0; slot < slots; ++slot)
+        total_ms += op_profile_.total_ms[slot];
+    for (std::size_t slot = 0; slot < slots; ++slot) {
+        if (op_profile_.calls[slot] == 0) continue;
+        const std::size_t shader = slot / OpProfile::kElementBuckets;
+        const std::uint32_t bucket =
+            static_cast<std::uint32_t>(slot % OpProfile::kElementBuckets);
+        std::fprintf(
+            stderr,
+            "  %-16s elems<=%-10llu calls=%-7llu total_ms=%-9.4f "
+            "per_call_ms=%-8.4f per_flush_ms=%-7.4f share_pct=%.2f\n",
+            shader_name(static_cast<ShaderId>(shader)),
+            // The bucket is the last power of two below the covered count, so
+            // the printed bound is the one above it.
+            static_cast<unsigned long long>(std::uint64_t{1} << (bucket + 1)),
+            static_cast<unsigned long long>(op_profile_.calls[slot]),
+            op_profile_.total_ms[slot],
+            op_profile_.total_ms[slot] / static_cast<double>(op_profile_.calls[slot]),
+            op_profile_.total_ms[slot] / static_cast<double>(flushes),
+            total_ms > 0.0 ? 100.0 * op_profile_.total_ms[slot] / total_ms : 0.0);
+    }
+    std::fprintf(stderr, "  %-16s calls=%-8s total_ms=%-9.4f\n", "TOTAL", "-", total_ms);
+}
+
+std::vector<Context::OpProfileEntry> Context::op_profile() const {
+    std::vector<OpProfileEntry> entries;
+    const std::size_t slots = op_profile_.calls.size();
+    for (std::size_t slot = 0; slot < slots; ++slot) {
+        if (op_profile_.calls[slot] == 0) continue;
+        const std::size_t shader = slot / OpProfile::kElementBuckets;
+        entries.push_back(
+            {shader_name(static_cast<ShaderId>(shader)),
+             std::uint64_t{1} << (slot % OpProfile::kElementBuckets),
+             op_profile_.calls[slot], op_profile_.total_ms[slot]});
+    }
+    return entries;
 }
 
 void Context::flush() {
@@ -1047,7 +1207,30 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
         vkCmdPushConstants(command_, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes,
                            push_constants);
     }
+    const bool profile = op_profile_.enabled &&
+        op_profile_.recorded < kMaxCommandsPerBatch;
+    if (profile) {
+        vkCmdWriteTimestamp(
+            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, op_profile_.pool,
+            op_profile_.recorded * 2);
+    }
     vkCmdDispatch(command_, groups_x, groups_y, groups_z);
+    if (profile) {
+        vkCmdWriteTimestamp(
+            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, op_profile_.pool,
+            op_profile_.recorded * 2 + 1);
+        // The dispatch grid says how much work the op covers; bucketing it to
+        // the next power of two separates a 630k-parameter update from a 10M
+        // spherical-harmonic one without threading a label through every op.
+        const std::uint64_t covered = std::uint64_t{groups_x} * 256u * groups_y * groups_z;
+        std::uint32_t bucket = 0;
+        while (bucket + 1 < OpProfile::kElementBuckets &&
+               (std::uint64_t{1} << (bucket + 1)) < covered)
+            ++bucket;
+        op_profile_.order.push_back(
+            static_cast<std::uint32_t>(shader) * OpProfile::kElementBuckets + bucket);
+        ++op_profile_.recorded;
+    }
     // The next dispatch in this batch reads what this one wrote.
     record_barrier_locked();
     if (++batch_commands_ >= kMaxCommandsPerBatch) {

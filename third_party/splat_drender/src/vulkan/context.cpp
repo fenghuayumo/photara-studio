@@ -407,7 +407,8 @@ ComputePipeline::ComputePipeline(
     VkDevice logical_device,
     std::span<const std::byte> spir_v_bytes,
     std::uint32_t storage_buffer_count,
-    std::uint32_t push_constant_size)
+    std::uint32_t push_constant_size,
+    const bool push_descriptors)
     : device(logical_device), binding_count(storage_buffer_count) {
     std::vector<VkDescriptorSetLayoutBinding> bindings(storage_buffer_count);
     for (std::uint32_t i = 0; i < storage_buffer_count; ++i) {
@@ -418,6 +419,10 @@ ComputePipeline::ComputePipeline(
     }
 
     VkDescriptorSetLayoutCreateInfo descriptor_layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    if (push_descriptors) {
+        descriptor_layout_info.flags =
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    }
     descriptor_layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
     descriptor_layout_info.pBindings = bindings.data();
     check_vk(
@@ -487,6 +492,15 @@ Context::Impl::Impl(const ContextOptions& options) {
     } else {
         create_instance_and_device(options);
     }
+    // Push descriptors are a device capability the rasterizer prefers: one
+    // recorded call replaces a descriptor-set allocation, an update and a
+    // bind per dispatch. An adopted device only offers them when its creator
+    // enabled the extension, and the entry point decides either way.
+    if (push_descriptors) {
+        cmd_push_descriptor = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
+            vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR"));
+        push_descriptors = cmd_push_descriptor != nullptr;
+    }
     create_pools();
 }
 
@@ -508,6 +522,7 @@ void Context::Impl::adopt_external_device(const ExternalDevice& external) {
     device = external.device;
     queue = external.queue;
     queue_family_index = external.queue_family;
+    push_descriptors = external.push_descriptors;
     device_info = make_device_info(physical_device);
 }
 
@@ -590,6 +605,12 @@ void Context::Impl::create_instance_and_device(const ContextOptions& options) {
 #ifdef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
     if (has_device_extension(physical_device, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
         device_extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    }
+#endif
+#ifdef VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME
+    push_descriptors = has_device_extension(physical_device, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    if (push_descriptors) {
+        device_extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     }
 #endif
     device_create_info.enabledExtensionCount = static_cast<std::uint32_t>(device_extensions.size());
@@ -744,9 +765,13 @@ ComputePipeline Context::Impl::create_pipeline(
     std::uint32_t push_constant_size) const {
     if (const auto override_directory = shader_directory_override()) {
         const auto bytes = read_spir_v(*override_directory / shader_name);
-        return ComputePipeline(device, bytes, storage_buffer_count, push_constant_size);
+        return ComputePipeline(
+            device, bytes, storage_buffer_count, push_constant_size,
+            push_descriptors && cmd_push_descriptor != nullptr);
     }
-    return ComputePipeline(device, embedded_shader(shader_name), storage_buffer_count, push_constant_size);
+    return ComputePipeline(
+        device, embedded_shader(shader_name), storage_buffer_count,
+        push_constant_size, push_descriptors && cmd_push_descriptor != nullptr);
 }
 
 Context::Context(const ContextOptions& options) : impl_(std::make_unique<Impl>(options)) {}

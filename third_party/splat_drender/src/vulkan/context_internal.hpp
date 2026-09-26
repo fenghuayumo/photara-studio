@@ -67,7 +67,8 @@ struct ComputePipeline {
         VkDevice logical_device,
         std::span<const std::byte> spir_v_bytes,
         std::uint32_t storage_buffer_count,
-        std::uint32_t push_constant_size);
+        std::uint32_t push_constant_size,
+        bool push_descriptors = false);
     ~ComputePipeline();
     ComputePipeline(ComputePipeline&& other) noexcept;
     ComputePipeline& operator=(ComputePipeline&& other) noexcept;
@@ -116,6 +117,10 @@ public:
     VkCommandPool command_pool = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
+    // VK_KHR_push_descriptor is usable on this device; the rasterizer records
+    // its bindings into the command buffer instead of using descriptor sets.
+    bool push_descriptors = false;
+    PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor = nullptr;
     // An adopted instance/device belongs to the caller and must survive us.
     bool owns_instance = false;
     bool owns_device = false;

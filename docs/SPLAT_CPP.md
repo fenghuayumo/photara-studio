@@ -279,11 +279,46 @@ build\photara\Release\photara.exe `
 - Keep Vulkan contribution flags on the device, defer non-reporting loss scalar
   reads to log iterations, and retain materialized Vulkan supervision tensors in
   a bounded LRU instead of re-uploading every host-cached view.
+- Upload Vulkan training images in their packed RGBA form and expand them into
+  the planar float planes on the device (`unpack_rgba.hlsl` in the TinyTensor
+  Vulkan backend, called from `upload_training_view`). The host conversion it
+  replaces was a scalar loop over every pixel and tripled the staging copy:
+  a 1080x1920 view uploaded 24.9 MB of float planes instead of 8.3 MB of packed
+  words. The CUDA path always worked this way, so the two backends now share the
+  same decode semantics (`rgb`/`gray`/`mask` planes, `1/255` scaling, BT.601
+  luma). The regular render API is unchanged; only the training loader uses it.
+- Radix passes follow the caller's meaningful key bits. The two-phase instance
+  sort keys by tile id alone and relies on radix stability to keep the depth
+  order the emitter produced, so a 13-bit tile field needs two 8-bit passes
+  instead of four; the extra two passes were histogram, scan and scatter traffic
+  over every instance that could never move a key.
+- Prefer `VK_KHR_push_descriptor` in `splat_drender` when the device has it
+  (TinyTensor enables the extension on the device it shares with the
+  rasterizer). Every dispatch records its storage buffers into the command
+  buffer instead of allocating, updating and binding a descriptor set, which is
+  the per-dispatch host cost that dominates a Vulkan frame with dozens of small
+  compute passes. Descriptor-set binding remains the fallback for devices
+  without the extension.
 - Use `SPLAT_DRENDER_PROFILE_BACKWARD=1` to collect Vulkan timestamp-query
   averages for the backward gradient fill, blend backward, and projection
   backward kernels; `SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL` selects the
   aggregation window (default 100 iterations). Profiling is disabled by
   default because timestamp queries add measurable overhead.
+- Use `SPLAT_DRENDER_PROFILE_FORWARD=1` (with
+  `SPLAT_DRENDER_PROFILE_FORWARD_INTERVAL`, default 100 frames) for the matching
+  forward split: the count pass (preprocess, the per-Gaussian scans and the
+  instance tally), the tile sort, and the blend.
+- Compare the Vulkan host-side stage totals with `SPLAT_VULKAN_PROFILE_STAGES=1`
+  and the `--splat-profile-cuda` per-stage timeline. A stage whose host time
+  exceeds its GPU time is a host-side recording cost, not a kernel.
+- Use `TINYTENSOR_VULKAN_PROFILE_OPS=1` for the compute the TinyTensor queue
+  carries (parameter Adam, the training-image unpack, densification statistics):
+  every recorded dispatch gets a timestamp pair, accumulated per shader and per
+  element-count bucket and printed every
+  `TINYTENSOR_VULKAN_PROFILE_OPS_INTERVAL` flushes plus once at shutdown. Those
+  dispatches are submitted inside a later stage's host wait, so read their
+  totals per flush window / per iteration rather than adding them to the
+  `SPLAT_VULKAN_PROFILE_STAGES` numbers.
 - Treat GPU model, driver/toolkit, build type, image resolution, Gaussian
   count, strategy, and iteration schedule as part of every benchmark.
 

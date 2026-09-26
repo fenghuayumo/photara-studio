@@ -306,6 +306,40 @@ void download(const Tensor& src, void* data, std::size_t bytes) {
     Context::get().download(buffer_of(src), byte_offset(src), data, bytes);
 }
 
+void unpack_training_pixels(
+    const Tensor& packed, Tensor& rgb, Tensor* gray, Tensor* mask) {
+    const std::size_t pixels = packed.numel();
+    if (pixels == 0) {
+        return;
+    }
+    struct Push {
+        std::uint32_t pixels;
+        std::uint32_t flags;
+        std::uint32_t packed_offset;
+        std::uint32_t rgb_offset;
+        std::uint32_t gray_offset;
+        std::uint32_t mask_offset;
+    } push{};
+    static_assert(sizeof(push) == 24);
+    push.pixels = u32(pixels);
+    // The optional planes stay bound to the dummy buffer when the caller does
+    // not ask for them; the flag keeps the kernel from writing there.
+    if (gray != nullptr) push.flags |= 1U;
+    if (mask != nullptr) push.flags |= 2U;
+    push.packed_offset = u32(byte_offset(packed));
+    push.rgb_offset = u32(byte_offset(rgb));
+    if (gray != nullptr) push.gray_offset = u32(byte_offset(*gray));
+    if (mask != nullptr) push.mask_offset = u32(byte_offset(*mask));
+    std::array<BufferBinding, 4> bindings{
+        bind(packed),
+        bind(rgb),
+        gray != nullptr ? bind(*gray) : dummy_binding(),
+        mask != nullptr ? bind(*mask) : dummy_binding(),
+    };
+    Context::get().dispatch(
+        ShaderId::UnpackRgba, bindings, &push, sizeof(push), groups_for(pixels));
+}
+
 Tensor convert(const Tensor& src, DataType dtype) {
     Tensor input = prepared(src);
     Tensor out = TensorStorage::empty(input.shape(), dtype, input.capacity());

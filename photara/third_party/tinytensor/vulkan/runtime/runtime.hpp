@@ -36,6 +36,7 @@ enum class ShaderId : std::uint32_t {
     Scatter,
     SelectCompact,
     Cat,
+    UnpackRgba,
     Count
 };
 
@@ -126,6 +127,24 @@ public:
     // Call it explicitly to bound how much work one submission carries.
     void flush();
 
+    // Per-op GPU timing. Enabled with TINYTENSOR_VULKAN_PROFILE_OPS=1: every
+    // recorded dispatch gets a timestamp pair, the deltas are accumulated per
+    // shader and per element-count bucket (a shader run over 630k parameters
+    // and one over 10M spherical-harmonic values are different costs), and a
+    // table is printed to stderr every
+    // TINYTENSOR_VULKAN_PROFILE_OPS_INTERVAL flushes (default 200). A flush
+    // window is what a caller's synchronize() sees, so one window is normally
+    // one training stage. Disabled by default: two timestamp writes per op are
+    // not free.
+    struct OpProfileEntry {
+        const char* name = "";
+        std::uint64_t element_bucket = 0;
+        std::uint64_t calls = 0;
+        double total_ms = 0.0;
+    };
+    [[nodiscard]] std::vector<OpProfileEntry> op_profile() const;
+    [[nodiscard]] std::uint32_t op_profile_flushes() const { return op_profile_.flushes; }
+
     [[nodiscard]] Buffer& dummy();
 
 private:
@@ -157,6 +176,9 @@ private:
     void barrier_buffer(VkCommandBuffer cmd, VkBuffer buffer,
                         VkAccessFlags src_access, VkAccessFlags dst_access,
                         VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage);
+    void create_op_profile_locked();
+    void collect_op_profile_locked();
+    void report_op_profile_locked();
 
     DeviceInfo info_{};
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -196,6 +218,24 @@ private:
     std::unique_ptr<Buffer> staging_;
     std::unique_ptr<Buffer> readback_staging_;
     std::unique_ptr<Buffer> dummy_;
+
+    struct OpProfile {
+        // Element-count buckets are powers of two: one entry per shader and
+        // size class keeps the table readable.
+        static constexpr std::uint32_t kElementBuckets = 26;
+        bool enabled = false;
+        VkQueryPool pool = VK_NULL_HANDLE;
+        std::uint32_t interval = 200;
+        std::uint32_t flushes = 0;
+        // Timestamp pairs recorded into the batch that is currently open.
+        std::uint32_t recorded = 0;
+        std::vector<std::uint32_t> order;
+        std::vector<std::uint64_t> calls;
+        std::vector<double> total_ms;
+        float period = 0.0F;
+        std::uint32_t valid_bits = 0;
+    };
+    OpProfile op_profile_;
     std::mutex mutex_;
 };
 

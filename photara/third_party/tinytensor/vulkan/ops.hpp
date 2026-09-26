@@ -93,6 +93,11 @@ public:
 
 bool is_vulkan_tensor(const Tensor& tensor);
 void fill(Tensor& tensor, float value);
+// Expands a packed [H, W] Int32 RGBA image (r | g << 8 | b << 16 | a << 24)
+// into a planar [3, H, W] Float32 RGB tensor scaled to [0, 1]. `gray` receives
+// the luma plane and `mask` the alpha plane when the pointers are non-null.
+void unpack_training_pixels(const Tensor& packed, Tensor& rgb, Tensor* gray,
+                            Tensor* mask);
 void copy_same_layout(Tensor& dst, const Tensor& src);
 void upload(Tensor& dst, const void* data, std::size_t bytes);
 void download(const Tensor& src, void* data, std::size_t bytes);

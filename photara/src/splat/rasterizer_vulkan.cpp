@@ -80,6 +80,11 @@ struct VulkanRasterBackend {
               options.external_device.device = handles.device;
               options.external_device.queue = handles.queue;
               options.external_device.queue_family = handles.queue_family;
+              // TinyTensor creates the shared device and enables push
+              // descriptors on it; the rasterizer records the same way when the
+              // device really has them.
+              options.external_device.push_descriptors =
+                  tinytensor::vulkan::device_info().push_descriptors;
               return options;
           }()),
           rasterizer(context), profile_stages(

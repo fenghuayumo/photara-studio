@@ -245,6 +245,12 @@ struct ExternalDevice {
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queue_family = VK_QUEUE_FAMILY_IGNORED;
+    // Set when the caller created the device with VK_KHR_push_descriptor
+    // enabled. Every dispatch then records its storage buffers directly into
+    // the command buffer instead of allocating, updating and binding a
+    // descriptor set, which is the per-dispatch host cost that dominates a
+    // frame with a hundred small compute passes.
+    bool push_descriptors = false;
 
     [[nodiscard]] bool valid() const noexcept { return device != VK_NULL_HANDLE; }
 };

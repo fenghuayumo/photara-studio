@@ -135,7 +135,8 @@ if(TINYTENSOR_ENABLE_VULKAN)
         pool.hlsl
         scatter.hlsl
         select_compact.hlsl
-        cat.hlsl)
+        cat.hlsl
+        unpack_rgba.hlsl)
     set(TINYTENSOR_SHADER_BINARIES)
     set(TINYTENSOR_SHADER_EMBEDDED_HEADERS)
     foreach(shader IN LISTS TINYTENSOR_SHADER_SOURCES)

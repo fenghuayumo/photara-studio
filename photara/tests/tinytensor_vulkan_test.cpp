@@ -1,5 +1,6 @@
 #include "internal/tensor_impl.hpp"
 #include "vulkan/backend.hpp"
+#include "vulkan/ops.hpp"
 
 #include <array>
 #include <cmath>
@@ -108,6 +109,49 @@ void test_mask_and_convert() {
     require(values.gt(0.F).to_vector_bool() ==
                 std::vector<bool>({false, true, true, false, true}),
             "gt scalar");
+}
+
+// The packed RGBA expander is the Vulkan counterpart of the CUDA training-image
+// decode: the loader uploads the packed words and the device writes the planar
+// float planes, so both the value scaling and the optional gray/mask outputs
+// have to match the host conversion exactly.
+void test_unpack_training_pixels() {
+    using namespace tinytensor;
+    constexpr std::uint32_t pixels = 5;
+    const std::vector<int> packed{
+        static_cast<int>(0xFF000000u),  // r=0,   g=0,   b=0,   a=1
+        static_cast<int>(0x00FF8040u),  // r=64,  g=128, b=255, a=0
+        static_cast<int>(0xFFFFFFFFu),  // r=g=b=a=1
+        static_cast<int>(0x00000000u),  // all zero
+        static_cast<int>(0x7F0101FEu)}; // r=254, g=1,   b=1,   a=0.498
+    auto device_packed = Tensor::from_vector(
+        packed, {std::size_t{1}, pixels}, Device::Vulkan);
+    auto rgb = Tensor::empty({std::size_t{3}, std::size_t{1}, pixels}, Device::Vulkan);
+    auto gray = Tensor::empty({std::size_t{1}, pixels}, Device::Vulkan);
+    auto mask = Tensor::empty({std::size_t{1}, pixels}, Device::Vulkan);
+    vulkan::unpack_training_pixels(device_packed, rgb, &gray, &mask);
+
+    constexpr float inverse_255 = 1.F / 255.F;
+    const std::vector<float> expected_rgb{
+        0.F, 64.F * inverse_255, 1.F, 0.F, 254.F * inverse_255,
+        0.F, 128.F * inverse_255, 1.F, 0.F, 1.F * inverse_255,
+        0.F, 255.F * inverse_255, 1.F, 0.F, 1.F * inverse_255};
+    const std::vector<float> expected_mask{
+        1.F, 0.F, 1.F, 0.F, float(0x7F) * inverse_255};
+    const std::vector<float> expected_gray{
+        0.F,
+        0.299F * 64.F * inverse_255 + 0.587F * 128.F * inverse_255 + 0.114F,
+        1.F, 0.F,
+        0.299F * 254.F * inverse_255 + 0.587F * inverse_255 + 0.114F * inverse_255};
+    require_vector_near(rgb.to_vector(), expected_rgb, 1e-6F, "unpack rgb");
+    require_vector_near(mask.to_vector(), expected_mask, 1e-6F, "unpack mask");
+    require_vector_near(gray.to_vector(), expected_gray, 1e-5F, "unpack gray");
+
+    // The optional planes stay unwritten when the caller does not ask for them.
+    auto rgb_only =
+        Tensor::empty({std::size_t{3}, std::size_t{1}, pixels}, Device::Vulkan);
+    vulkan::unpack_training_pixels(device_packed, rgb_only, nullptr, nullptr);
+    require_vector_near(rgb_only.to_vector(), expected_rgb, 1e-6F, "unpack rgb only");
 }
 
 void test_multinomial() {
@@ -336,6 +380,7 @@ int main() {
         run("factory_and_roundtrip", test_factory_and_roundtrip);
         run("cat_index_squeeze", test_cat_index_squeeze);
         run("mask_and_convert", test_mask_and_convert);
+        run("unpack_training_pixels", test_unpack_training_pixels);
         run("multinomial", test_multinomial);
         run("elementwise_and_where", test_elementwise_and_where);
         run("reduce_and_cumsum", test_reduce_and_cumsum);
