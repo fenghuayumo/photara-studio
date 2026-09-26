@@ -22,12 +22,17 @@
 #include "splat_multi_view.hlsl.embedded.hpp"
 #include "splat_clear.hlsl.embedded.hpp"
 #include "splat_emit.hlsl.embedded.hpp"
+#include "splat_emit_indirect.hlsl.embedded.hpp"
+#include "splat_indirect_control.hlsl.embedded.hpp"
 #include "splat_pack_rgba.hlsl.embedded.hpp"
 #include "splat_project_backward.hlsl.embedded.hpp"
 #include "splat_preprocess.hlsl.embedded.hpp"
 #include "splat_radix_hist.hlsl.embedded.hpp"
+#include "splat_radix_hist_indirect.hlsl.embedded.hpp"
 #include "splat_radix_scatter.hlsl.embedded.hpp"
+#include "splat_radix_scatter_indirect.hlsl.embedded.hpp"
 #include "splat_ranges.hlsl.embedded.hpp"
+#include "splat_ranges_indirect.hlsl.embedded.hpp"
 #include "splat_sample_depth.hlsl.embedded.hpp"
 #include "splat_sample_depth_backward.hlsl.embedded.hpp"
 #include "splat_scan.hlsl.embedded.hpp"
@@ -134,14 +139,29 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     if (shader_name == "splat_emit.hlsl.spv") {
         return std::as_bytes(std::span{splat_emit_hlsl_spv});
     }
+    if (shader_name == "splat_emit_indirect.hlsl.spv") {
+        return std::as_bytes(std::span{splat_emit_indirect_hlsl_spv});
+    }
+    if (shader_name == "splat_indirect_control.hlsl.spv") {
+        return std::as_bytes(std::span{splat_indirect_control_hlsl_spv});
+    }
     if (shader_name == "splat_radix_hist.hlsl.spv") {
         return std::as_bytes(std::span{splat_radix_hist_hlsl_spv});
+    }
+    if (shader_name == "splat_radix_hist_indirect.hlsl.spv") {
+        return std::as_bytes(std::span{splat_radix_hist_indirect_hlsl_spv});
     }
     if (shader_name == "splat_radix_scatter.hlsl.spv") {
         return std::as_bytes(std::span{splat_radix_scatter_hlsl_spv});
     }
+    if (shader_name == "splat_radix_scatter_indirect.hlsl.spv") {
+        return std::as_bytes(std::span{splat_radix_scatter_indirect_hlsl_spv});
+    }
     if (shader_name == "splat_ranges.hlsl.spv") {
         return std::as_bytes(std::span{splat_ranges_hlsl_spv});
+    }
+    if (shader_name == "splat_ranges_indirect.hlsl.spv") {
+        return std::as_bytes(std::span{splat_ranges_indirect_hlsl_spv});
     }
     if (shader_name == "splat_blend.hlsl.spv") {
         return std::as_bytes(std::span{splat_blend_hlsl_spv});

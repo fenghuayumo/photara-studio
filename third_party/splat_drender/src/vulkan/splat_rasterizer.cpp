@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -123,6 +124,7 @@ public:
         bool in_flight = false;
     };
     static constexpr std::uint32_t k_batch_slots = 4;
+    static constexpr std::uint32_t k_count_mirror_words = 4;
 
     explicit Impl(Context::Impl& context)
         : context_(context),
@@ -130,9 +132,14 @@ public:
           preprocess_(context.create_pipeline("splat_preprocess.hlsl.spv", 12, sizeof(Push))),
           scan_(context.create_pipeline("splat_scan.hlsl.spv", 1, sizeof(Push))),
           emit_(context.create_pipeline("splat_emit.hlsl.spv", 7, sizeof(Push))),
+          indirect_control_(context.create_pipeline("splat_indirect_control.hlsl.spv", 3, sizeof(Push))),
+          emit_indirect_(context.create_pipeline("splat_emit_indirect.hlsl.spv", 8, sizeof(Push))),
           hist_(context.create_pipeline("splat_radix_hist.hlsl.spv", 3, sizeof(Push))),
+          hist_indirect_(context.create_pipeline("splat_radix_hist_indirect.hlsl.spv", 4, sizeof(Push))),
           scatter_(context.create_pipeline("splat_radix_scatter.hlsl.spv", 8, sizeof(Push))),
+          scatter_indirect_(context.create_pipeline("splat_radix_scatter_indirect.hlsl.spv", 9, sizeof(Push))),
           ranges_(context.create_pipeline("splat_ranges.hlsl.spv", 3, sizeof(Push))),
+          ranges_indirect_(context.create_pipeline("splat_ranges_indirect.hlsl.spv", 4, sizeof(Push))),
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
           blend_no_geometry_(context.create_pipeline("splat_blend_no_geometry.hlsl.spv", 7, sizeof(Push))),
           blend_training_(context.create_pipeline("splat_blend_training.hlsl.spv", 7, sizeof(Push))),
@@ -440,6 +447,12 @@ public:
         const std::uint32_t count = count_;
         const bool has_sh = has_sh_;
         const bool has_scales = has_scales_;
+        // Publish the real visible/instance counts of every retired frame from
+        // its per-slot mirror. This never waits: frames that already finished
+        // feed the reported counts and the capacity watermark with a lag
+        // bounded by the command-buffer ring, so GPU-driven frames no longer
+        // report one frozen measurement forever.
+        harvest_ready_count_mirrors();
         // 76 bytes of per-frame constants: the one buffer worth keeping mapped.
         // Two slots: with the previous frame's dispatches still queued, writing
         // the camera for this frame into the same memory would race with them.
@@ -501,19 +514,64 @@ public:
 
         inclusive_scan(gauss_u, 0, 4 * count, count, k_streams * count);
         inclusive_scan(gauss_u, count, 5 * count, count, k_streams * count);
+        // Sort dispatches read the visible and instance counts on the device.
+        // A new Gaussian count or image size re-seeds the capacity once with
+        // 2x headroom over that frame's measurement; afterwards only a frame
+        // that actually overflowed (harvested from its mirror) raises it, so
+        // the steady state keeps the sort sized to the seeded capacity instead
+        // of growing with every peak view.
+        if (count != capacity_count_ || tiles != capacity_tiles_) {
+            instance_capacity_ = 0;
+            capacity_count_ = count;
+            capacity_tiles_ = tiles;
+        }
+        const bool use_gpu_driven = instance_capacity_ != 0;
         Buffer& frame_counts = grow(
-            frame_counts_, 2 * sizeof(std::uint32_t), BufferMemory::host_visible);
-        Push counts_push = emit_constants(1, 4, grid_x, grid_y, wrap_width, count, gauss_slots);
-        dispatch(
-            emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts,
-                    &dummy_, &dummy_},
-            counts_push, 1);
+            frame_counts_, 19 * sizeof(std::uint32_t),
+            BufferMemory::host_visible,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+        Buffer& count_mirrors = grow(
+            count_mirrors_,
+            k_batch_slots * k_count_mirror_words * sizeof(std::uint32_t),
+            BufferMemory::host_visible);
+        if (use_gpu_driven) {
+            Push control_push{};
+            control_push.u[0] = count;
+            control_push.u[1] = instance_capacity_;
+            control_push.u[2] = batch_slot_ * k_count_mirror_words;
+            dispatch(
+                indirect_control_, {&gauss_u, &frame_counts, &count_mirrors},
+                control_push, 1);
+            // The control shader publishes this frame's counts into the
+            // batch slot's mirror word; the fence that retires this submission
+            // is what makes the host read safe.
+            mirror_recorded_ = true;
+        } else {
+            Push counts_push = emit_constants(
+                1, 4, grid_x, grid_y, wrap_width, count, gauss_slots);
+            dispatch(
+                emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts,
+                        &dummy_, &dummy_},
+                counts_push, 1);
+        }
         write_forward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        flush_batch();
         std::uint32_t frame_count_values[2]{};
-        frame_counts.download(frame_count_values, sizeof(frame_count_values));
-        const std::uint32_t instances = frame_count_values[0];
-        const std::uint32_t visible = frame_count_values[1];
+        if (!use_gpu_driven) {
+            flush_batch();
+            frame_counts.download(frame_count_values, sizeof(frame_count_values));
+            reported_instances_ = frame_count_values[0];
+            reported_visible_ = frame_count_values[1];
+            // The one synchronous frame seeds the capacity; later frames only
+            // raise it when a retired mirror reports an actual overflow.
+            instance_capacity_ = instance_capacity_for(frame_count_values[0]);
+        }
+        const std::uint32_t instances = use_gpu_driven
+            ? instance_capacity_
+            : frame_count_values[0];
+        const std::uint32_t visible = use_gpu_driven
+            ? count
+            : frame_count_values[1];
 
         Buffer* instance_values = &dummy_;
         Buffer* range_lo = &dummy_;
@@ -522,9 +580,10 @@ public:
         zero_buffer(
             context_, tile_ranges,
             static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
-        const bool single_sort = instances <= k_single_sort_limit;
+        const bool single_sort = !use_gpu_driven && instances <= k_single_sort_limit;
         if (instances > 0) {
-            if (visible == 0) throw std::runtime_error("Vulkan splat preprocessing produced instances without visible Gaussians");
+            if (!use_gpu_driven && visible == 0)
+                throw std::runtime_error("Vulkan splat preprocessing produced instances without visible Gaussians");
             const auto key_bytes = static_cast<std::uint64_t>(instances) * sizeof(std::uint32_t);
             Buffer& lo0 = grow(lo0_, key_bytes);
             Buffer& lo1 = grow(lo1_, key_bytes);
@@ -535,10 +594,55 @@ public:
             instance_values = &val0;
             range_lo = &lo0;
             range_hi = &hi0;
-            const std::uint32_t hist_blocks = div_up(instances, 1024);
+            const std::uint32_t hist_blocks = std::max(
+                div_up(instances, 1024), div_up(count, 1024));
             const std::uint32_t hist_n = 256 * hist_blocks;
             Buffer& hist = grow(hist_space_, static_cast<std::uint64_t>(2 * hist_n + scan_scratch_uints(hist_n)) * sizeof(std::uint32_t));
-            if (single_sort) {
+            if (use_gpu_driven) {
+                Push depth_push = emit_constants(
+                    count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
+                dispatch(
+                    emit_indirect_,
+                    {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_,
+                     &dummy_, &frame_counts},
+                    depth_push, div_up(count, 256));
+                const std::uint32_t depth_hist_n =
+                    256 * div_up(count, 1024);
+                radix_sort_indirect(
+                    false, count, 1u, 10u * sizeof(std::uint32_t),
+                    lo0, hi0, val0, lo1, hi1, val1, hist, depth_hist_n, 32u);
+                write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                Buffer& compact = grow(
+                    compact_,
+                    static_cast<std::uint64_t>(
+                        count + scan_scratch_uints(count)) *
+                        sizeof(std::uint32_t));
+                Push gather_push = emit_constants(
+                    count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
+                dispatch_indirect(
+                    emit_indirect_,
+                    {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0,
+                     &dummy_, &frame_counts},
+                    gather_push, frame_counts, 4u * sizeof(std::uint32_t));
+                inclusive_scan(compact, 0, 0, count, count);
+                Push tile_push = emit_constants(
+                    count, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
+                dispatch_indirect(
+                    emit_indirect_,
+                    {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0,
+                     &compact, &frame_counts},
+                    tile_push, frame_counts, 7u * sizeof(std::uint32_t));
+                write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                const std::uint32_t tile_hist_n =
+                    256 * div_up(instances, 1024);
+                radix_sort_indirect(
+                    false, instances, 0u, 13u * sizeof(std::uint32_t),
+                    lo1, hi1, val1, lo0, hi0, val0, hist, tile_hist_n,
+                    tile_bits);
+                instance_values = &val1;
+                range_lo = &lo1;
+                range_hi = &hi1;
+            } else if (single_sort) {
                 Push emit_push = emit_constants(count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
                 dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, emit_push, div_up(count, 256));
                 radix_sort(true, instances, lo0, hi0, val0, lo1, hi1, val1, hist, hist_n, 32u + tile_bits);
@@ -566,9 +670,19 @@ public:
                 range_hi = &hi1;
             }
             Push range_push{};
-            range_push.u[0] = instances;
-            range_push.u[1] = single_sort ? 1u : 0u;
-            dispatch(ranges_, {range_lo, range_hi, &tile_ranges}, range_push, div_up(instances, 256));
+            if (use_gpu_driven) {
+                dispatch_indirect(
+                    ranges_indirect_,
+                    {range_lo, range_hi, &tile_ranges, &frame_counts},
+                    range_push, frame_counts,
+                    16u * sizeof(std::uint32_t));
+            } else {
+                range_push.u[0] = instances;
+                range_push.u[1] = single_sort ? 1u : 0u;
+                dispatch(
+                    ranges_, {range_lo, range_hi, &tile_ranges}, range_push,
+                    div_up(instances, 256));
+            }
         }
 
         const std::uint32_t bucket_limit = instances == 0
@@ -703,7 +817,11 @@ public:
         last_background_[0] = settings.background[0];
         last_background_[1] = settings.background[1];
         last_background_[2] = settings.background[2];
-        return {instances, visible};
+        // GPU-driven frames report the newest real counts harvested from
+        // retired frames (the sync path just absorbed its own measurement), so
+        // callers see live per-view numbers with a small ring-depth lag
+        // instead of the first frame's pair frozen forever.
+        return FrameCounts{reported_instances_, reported_visible_};
     }
 
     SplatForwardOutput collect(
@@ -2083,6 +2201,10 @@ private:
         recording_ = false;
         slot.in_flight = true;
         command_ = VK_NULL_HANDLE;
+        if (mirror_recorded_) {
+            mirror_pending_[batch_slot_] = true;
+            mirror_recorded_ = false;
+        }
         if (wait) {
             if (vkWaitForFences(context_.device, 1, &slot.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
                 vkResetFences(context_.device, 1, &slot.fence) != VK_SUCCESS) {
@@ -2092,6 +2214,52 @@ private:
             release_sets(slot);
         }
         batch_slot_ = (batch_slot_ + 1U) % k_batch_slots;
+    }
+
+    // Twice the measured instances, clamped to uint32, with a floor of one so
+    // even a first view that sees nothing leaves room for later frames.
+    static std::uint32_t instance_capacity_for(const std::uint32_t instances) {
+        const std::uint64_t padded = std::max<std::uint64_t>(instances, 1u) * 2u;
+        return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            padded, std::numeric_limits<std::uint32_t>::max()));
+    }
+
+    // The first control words are [instances, visible, overflow, capacity].
+    // Keep the newest measurement for callers. Only an overflowing frame
+    // raises the capacity: its word 0 still holds the true demand, so one
+    // harvested frame is enough for the next submission to recover, while the
+    // steady state keeps the capacity (and the capacity-sized sort passes)
+    // that the synchronous seeding frame measured.
+    void absorb_frame_counts(const std::uint32_t (&words)[k_count_mirror_words]) {
+        reported_instances_ = words[0];
+        reported_visible_ = words[1];
+        if (words[2] != 0u) {
+            const std::uint32_t wanted = instance_capacity_for(words[0]);
+            if (wanted > instance_capacity_) instance_capacity_ = wanted;
+        }
+    }
+
+    void harvest_count_mirror(const std::uint32_t slot) {
+        if (!mirror_pending_[slot]) return;
+        mirror_pending_[slot] = false;
+        if (count_mirrors_.handle == VK_NULL_HANDLE) return;
+        std::uint32_t words[k_count_mirror_words]{};
+        count_mirrors_.download(
+            words, sizeof(words), slot * k_count_mirror_words * sizeof(std::uint32_t));
+        absorb_frame_counts(words);
+    }
+
+    // Non-blocking poll at frame start: every frame whose submission fence has
+    // signaled publishes its counts. Together with the ring depth this bounds
+    // the reported-count lag to a few frames without a single host wait.
+    void harvest_ready_count_mirrors() {
+        for (std::uint32_t slot = 0; slot < k_batch_slots; ++slot) {
+            if (!mirror_pending_[slot]) continue;
+            if (!batch_slots_[slot].in_flight ||
+                vkGetFenceStatus(context_.device, batch_slots_[slot].fence) == VK_SUCCESS) {
+                harvest_count_mirror(slot);
+            }
+        }
     }
 
     // Descriptor sets only exist on the fallback path (devices without
@@ -2164,9 +2332,80 @@ private:
         vkCmdDispatch(command_, groups_x, groups_y, groups_z);
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        // Dispatch parameter words are regular shader writes (the GPU-driven
+        // control block), so every dispatch must also publish its writes to
+        // the stage that fetches vkCmdDispatchIndirect arguments. Without the
+        // DRAW_INDIRECT dependency the front end can fetch stale grid sizes.
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                VK_ACCESS_SHADER_WRITE_BIT |
+                                VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
         vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+
+    void dispatch_indirect(
+        const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers,
+        const Push& push, const Buffer& indirect, const VkDeviceSize offset) {
+        std::vector<VkDescriptorBufferInfo> infos;
+        infos.reserve(buffers.size());
+        for (const Buffer* buffer : buffers) infos.push_back(descriptor(*buffer));
+        begin_batch();
+        std::vector<VkWriteDescriptorSet> writes(infos.size());
+        for (std::uint32_t i = 0; i < infos.size(); ++i) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &infos[i];
+        }
+        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
+        if (context_.push_descriptors) {
+            context_.cmd_push_descriptor(
+                command_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                pipeline.pipeline_layout, 0,
+                static_cast<std::uint32_t>(writes.size()), writes.data());
+        } else {
+            VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            set_info.descriptorPool = context_.descriptor_pool;
+            set_info.descriptorSetCount = 1;
+            set_info.pSetLayouts = &pipeline.descriptor_set_layout;
+            VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+            if (vkAllocateDescriptorSets(
+                    context_.device, &set_info, &descriptor_set) != VK_SUCCESS)
+                throw std::runtime_error("vkAllocateDescriptorSets failed");
+            batch_slots_[batch_slot_].pending_sets.push_back(descriptor_set);
+            for (VkWriteDescriptorSet& write : writes) write.dstSet = descriptor_set;
+            vkUpdateDescriptorSets(
+                context_.device, static_cast<std::uint32_t>(writes.size()),
+                writes.data(), 0, nullptr);
+            vkCmdBindDescriptorSets(
+                command_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                pipeline.pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
+        }
+        vkCmdPushConstants(
+            command_, pipeline.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(Push), &push);
+        // The group counts were written by a compute dispatch. A compute-to-
+        // compute barrier does not make them visible to vkCmdDispatchIndirect.
+        VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        before.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        vkCmdPipelineBarrier(
+            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            0, 1, &before, 0, nullptr, 0, nullptr);
+        vkCmdDispatchIndirect(command_, indirect.handle, offset);
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                VK_ACCESS_SHADER_WRITE_BIT |
+                                VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        vkCmdPipelineBarrier(
+            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
             0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
 
@@ -2242,14 +2481,58 @@ private:
         }
     }
 
+    void radix_sort_indirect(
+        const bool key_is_64, const std::uint32_t capacity,
+        const std::uint32_t count_word, const VkDeviceSize dispatch_offset,
+        Buffer& lo0, Buffer& hi0, Buffer& val0, Buffer& lo1, Buffer& hi1,
+        Buffer& val1, Buffer& hist, const std::uint32_t hist_n,
+        const std::uint32_t key_bits) {
+        const std::uint32_t blocks = div_up(capacity, 1024);
+        const std::uint32_t needed = (key_bits + 7u) / 8u;
+        const std::uint32_t passes = std::min(8u, (needed + 1u) & ~1u);
+        bool source_is_zero = true;
+        for (std::uint32_t pass = 0; pass < passes; ++pass) {
+            Buffer& in_lo = source_is_zero ? lo0 : lo1;
+            Buffer& in_hi = source_is_zero ? hi0 : hi1;
+            Buffer& in_val = source_is_zero ? val0 : val1;
+            Buffer& out_lo = source_is_zero ? lo1 : lo0;
+            Buffer& out_hi = source_is_zero ? hi1 : hi0;
+            Buffer& out_val = source_is_zero ? val1 : val0;
+            Push push{};
+            push.u[1] = blocks;
+            push.u[2] = pass * 8u;
+            push.u[3] = key_is_64 ? 1u : 0u;
+            push.u[5] = count_word;
+            dispatch(
+                hist_indirect_, {&in_lo, &in_hi, &hist, &frame_counts_},
+                push, blocks);
+            inclusive_scan(hist, 0, hist_n, hist_n, 2 * hist_n);
+            push.u[4] = hist_n;
+            dispatch_indirect(
+                scatter_indirect_,
+                {&in_lo, &in_hi, &in_val, &out_lo, &out_hi, &out_val,
+                 &hist, &hist, &frame_counts_},
+                push, frame_counts_, dispatch_offset);
+            source_is_zero = !source_is_zero;
+        }
+        if (!source_is_zero)
+            throw std::logic_error(
+                "radix sort pass count must be even so the result stays in buffer 0");
+    }
+
     Context::Impl& context_;
     Buffer dummy_;
     ComputePipeline preprocess_;
     ComputePipeline scan_;
     ComputePipeline emit_;
+    ComputePipeline indirect_control_;
+    ComputePipeline emit_indirect_;
     ComputePipeline hist_;
+    ComputePipeline hist_indirect_;
     ComputePipeline scatter_;
+    ComputePipeline scatter_indirect_;
     ComputePipeline ranges_;
+    ComputePipeline ranges_indirect_;
     ComputePipeline blend_;
     ComputePipeline blend_no_geometry_;
     ComputePipeline blend_training_;
@@ -2329,6 +2612,12 @@ private:
     Buffer val0_;
     Buffer val1_;
     Buffer frame_counts_;
+    // Four words of counts per command-buffer slot. The control shader writes
+    // them directly (no transfer barrier), and a slot's fence gates the host
+    // read, so publishing real counts never drains the queue.
+    Buffer count_mirrors_;
+    bool mirror_pending_[k_batch_slots]{};
+    bool mirror_recorded_{};
     Buffer hist_space_;
     Buffer compact_;
     Buffer tile_ranges_;
@@ -2384,6 +2673,16 @@ private:
     std::uint32_t last_pixels_{};
     std::uint32_t last_bucket_limit_{};
     std::uint32_t last_instances_{};
+    // High-water instance capacity behind the GPU-driven sort dispatches. It
+    // is re-seeded by one synchronous frame whenever the Gaussian count or
+    // image size changes, then raised asynchronously from retired frames'
+    // measured counts, so an overflow frame recovers on the next submission.
+    std::uint32_t instance_capacity_{};
+    std::uint32_t capacity_count_{};
+    std::uint32_t capacity_tiles_{};
+    // Newest real counts published by a retired frame.
+    std::uint32_t reported_instances_{};
+    std::uint32_t reported_visible_{};
     std::uint32_t last_mode_{};
     int last_wrap_width_{};
     float last_background_[3]{};

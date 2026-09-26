@@ -55,9 +55,14 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_preprocess.hlsl
             shaders/splat_scan.hlsl
             shaders/splat_emit.hlsl
+            shaders/splat_indirect_control.hlsl
+            shaders/splat_emit_indirect.hlsl
             shaders/splat_radix_hist.hlsl
+            shaders/splat_radix_hist_indirect.hlsl
             shaders/splat_radix_scatter.hlsl
+            shaders/splat_radix_scatter_indirect.hlsl
             shaders/splat_ranges.hlsl
+            shaders/splat_ranges_indirect.hlsl
             shaders/splat_blend.hlsl
             shaders/splat_blend_no_geometry.hlsl
             shaders/splat_blend_training.hlsl
