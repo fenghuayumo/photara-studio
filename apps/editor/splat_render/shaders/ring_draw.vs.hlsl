@@ -1,7 +1,7 @@
 #include "ring_math.hlsl"
 
 cbuffer FrameBlock : register(b0) {
-    GutFrame frame;
+    SplatFrame frame;
 };
 
 StructuredBuffer<float4> quads : register(t5);

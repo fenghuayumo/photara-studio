@@ -18,8 +18,8 @@ inline constexpr std::uint32_t k_camera_orthographic = 1;
 inline constexpr std::uint32_t k_camera_fisheye = 2;
 inline constexpr std::uint32_t k_camera_equirectangular = 3;
 
-// gaussian is the training EWA forward from photara_drender. rings is the
-// projected ellipse: a faint disc plus the SuperSplat rim.
+// gaussian is the splat_drender EWA forward. rings draws that same screen
+// covariance out to the alpha = 1/255 contour.
 enum class Shading : std::uint32_t { gaussian = 0, rings = 1 };
 
 struct Camera {
@@ -36,7 +36,7 @@ struct Camera {
     std::uint32_t width{1};
     std::uint32_t height{1};
     std::uint32_t model{};
-    // Rings contour in projected sigmas. 0 selects 2*sqrt(2), the exp(-4) edge.
+    // Unused by the trained rings. Those follow the rasterizer cutoff.
     float ring_sigma{};
 };
 

@@ -1,6 +1,5 @@
-// SuperSplat rings: the quad edge is the exp(-4) contour. The interior is the
-// renormalized Gaussian, floored so a faint splat still reads as a disc, and
-// the outer band is a flat rim (view.ringSize 4 * 0.01).
+// The quad edge is the splat_drender alpha = 1/255 contour. The interior is a
+// disc with a flat outer rim so the outline stays readable on top of the splat.
 struct PsIn {
     float4 position : SV_Position;
     nointerpolation float4 color : COLOR0;

@@ -1043,17 +1043,17 @@ Action draw_inspector(App& app) {
                 ImGui::SliderInt(
                     "##ring_budget", &app.view_options.ring_budget, 1'000, 40'000,
                     "%d");
+                theme::caption("Ring radius");
+                ImGui::SetNextItemWidth(-1.F);
+                if (ImGui::SliderFloat(
+                        "##ring_scale", &app.view_options.ring_scale, 1.F, 4.F,
+                        "%.2f σ") &&
+                    live_preview_active(app))
+                    publish_preview_vis(app);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Ellipse size in projected sigmas. 2.83 matches SuperSplat's ring contour.");
             }
-            theme::caption("Ring radius");
-            ImGui::SetNextItemWidth(-1.F);
-            if (ImGui::SliderFloat(
-                    "##ring_scale", &app.view_options.ring_scale, 1.F, 4.F,
-                    "%.2f σ") &&
-                live_preview_active(app))
-                publish_preview_vis(app);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Ellipse size in projected sigmas. 2.83 matches SuperSplat's ring contour.");
         }
         theme::caption("Camera marker size");
         ImGui::SetNextItemWidth(-1.F);

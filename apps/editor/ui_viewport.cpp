@@ -658,7 +658,7 @@ void draw_viewport_overlay(
         theme::u32(theme::text_bright), label);
 }
 
-splat_render::Camera gut_camera_for_orbit(
+splat_render::Camera preview_camera_for_orbit(
     const SplatPreviewCamera& preview, const OrbitCamera& orbit);
 
 void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
@@ -758,7 +758,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
             1, static_cast<std::uint32_t>(std::lround(max.x - min.x)));
         const auto view_h = std::max<std::uint32_t>(
             1, static_cast<std::uint32_t>(std::lround(max.y - min.y)));
-        ring_camera = gut_camera_for_orbit(
+        ring_camera = preview_camera_for_orbit(
             make_preview_camera(app.camera, view_w, view_h), app.camera);
         app.splat_edit.draw_overlay(draw, min, max, ring_camera);
     }
@@ -1072,7 +1072,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
     }
 }
 
-std::uint32_t gut_projection(const EditorProjection projection) {
+std::uint32_t preview_projection(const EditorProjection projection) {
     switch (projection) {
         case EditorProjection::orthographic:
             return splat_render::k_camera_orthographic;
@@ -1086,7 +1086,7 @@ std::uint32_t gut_projection(const EditorProjection projection) {
     }
 }
 
-std::uint32_t gut_projection(const photara::CameraModel model) {
+std::uint32_t preview_projection(const photara::CameraModel model) {
     switch (model) {
         case photara::CameraModel::opencv_fisheye:
             return splat_render::k_camera_fisheye;
@@ -1099,7 +1099,7 @@ std::uint32_t gut_projection(const photara::CameraModel model) {
     }
 }
 
-splat_render::Camera gut_camera_from(const SplatPreviewCamera& preview) {
+splat_render::Camera preview_camera_from(const SplatPreviewCamera& preview) {
     splat_render::Camera camera;
     camera.world_to_camera = preview.world_to_camera;
     camera.position = preview.position;
@@ -1113,7 +1113,7 @@ splat_render::Camera gut_camera_from(const SplatPreviewCamera& preview) {
     camera.k4 = preview.k4;
     camera.width = preview.width;
     camera.height = preview.height;
-    camera.model = gut_projection(preview.model);
+    camera.model = preview_projection(preview.model);
     return camera;
 }
 
@@ -1148,10 +1148,10 @@ void release_splat_preview(App& app) {
     app.splat_renderer.reset();
 }
 
-splat_render::Camera gut_camera_for_orbit(
+splat_render::Camera preview_camera_for_orbit(
     const SplatPreviewCamera& preview, const OrbitCamera& orbit) {
-    splat_render::Camera camera = gut_camera_from(preview);
-    camera.model = gut_projection(orbit.projection);
+    splat_render::Camera camera = preview_camera_from(preview);
+    camera.model = preview_projection(orbit.projection);
     if (orbit.projection != EditorProjection::orthographic) return camera;
     const float height = std::max(1.F, static_cast<float>(camera.height));
     const float pixels_per_unit =
@@ -1164,14 +1164,14 @@ splat_render::Camera gut_camera_for_orbit(
     return camera;
 }
 
-bool draw_gut_image(
+bool draw_splat_image(
     App& app, const SplatPreviewCamera& preview, ImTextureID& texture,
     const OrbitCamera* orbit = nullptr, const bool rings = false) {
     texture = ImTextureID{};
     if (!ensure_splat_renderer(app)) return false;
     splat_render::Camera camera = orbit == nullptr
-        ? gut_camera_from(preview)
-        : gut_camera_for_orbit(preview, *orbit);
+        ? preview_camera_from(preview)
+        : preview_camera_for_orbit(preview, *orbit);
     if (rings) camera.ring_sigma = app.view_options.ring_scale;
     splat_render::FrameTarget target;
     if (!app.splat_renderer.draw(
@@ -1218,7 +1218,7 @@ void draw_splat_render_tab(
     ImGui::SetCursorScreenPos(min);
     ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton(
-        "##gut_view",
+        "##splat_view",
         {std::max(1.F, max.x - min.x), std::max(1.F, max.y - min.y)},
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
             ImGuiButtonFlags_MouseButtonMiddle);
@@ -1231,9 +1231,9 @@ void draw_splat_render_tab(
     fit_preview_raster(max.x - min.x, max.y - min.y, false, raster_w, raster_h);
     const SplatPreviewCamera preview =
         make_preview_camera(app.camera, raster_w, raster_h);
-    const splat_render::Camera gut_camera = gut_camera_for_orbit(preview, app.camera);
+    const splat_render::Camera preview_camera = preview_camera_for_orbit(preview, app.camera);
     ImTextureID texture{};
-    const bool shown = draw_gut_image(app, preview, texture, &app.camera, rings);
+    const bool shown = draw_splat_image(app, preview, texture, &app.camera, rings);
     if (shown) draw->AddImage(texture, min, max);
     else {
         const std::string& failure = app.splat_renderer.failure();
@@ -1254,7 +1254,7 @@ void draw_splat_render_tab(
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
     app.splat_edit.note_view(rings, app.view_options.ring_scale);
-    app.splat_edit.draw_overlay(draw, min, max, gut_camera);
+    app.splat_edit.draw_overlay(draw, min, max, preview_camera);
     const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max);
     const bool viewport_input = hovered && !gizmo_captures && !over_toolbar;
     if (app.splat_edit.consume_alt_wheel(viewport_input))
@@ -1271,7 +1271,7 @@ void draw_splat_render_tab(
         ImGui::IsKeyPressed(ImGuiKey_F, false))
         frame_reconstruction(app);
     app.splat_edit.handle_pointer(
-        app, min, max, gut_camera, hovered && !gizmo_captures, over_toolbar);
+        app, min, max, preview_camera, hovered && !gizmo_captures, over_toolbar);
     if (app.camera.interacting ||
         (viewport_input && ImGui::GetIO().MouseWheel != 0.F))
         app.preview_follow_view = false;
@@ -1392,23 +1392,23 @@ void draw_viewport_panel(App& app) {
         const int previous = app.image_qa.selected;
         const bool training_now =
             app.job.running() && app.active_job == JobKind::train;
-        ImTextureID gut_texture{};
-        bool gut_ready = false;
+        ImTextureID splat_texture{};
+        bool splat_ready = false;
         if (!training_now && image_qa_needs_render(app.image_qa.mode) &&
             app.has_model) {
             SplatPreviewCamera qa_camera;
             if (qa_preview_camera(app, qa_camera))
-                gut_ready = draw_gut_image(app, qa_camera, gut_texture);
+                splat_ready = draw_splat_image(app, qa_camera, splat_texture);
         }
         ImageQaDrawInput input;
         input.scene = &app.scene;
         input.photos = &app.photos;
-        input.render = gut_ready
-            ? gut_texture
+        input.render = splat_ready
+            ? splat_texture
             : (app.preview.display.descriptor
                    ? reinterpret_cast<ImTextureID>(app.preview.display.descriptor)
                    : ImTextureID{});
-        input.has_render = gut_ready ||
+        input.has_render = splat_ready ||
                            (app.preview.display.descriptor &&
                             qa_capture_frame_ready(app));
         input.render_live = training_now && live_preview_active(app);

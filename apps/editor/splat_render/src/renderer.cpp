@@ -1,6 +1,6 @@
 #include "splat_render/renderer.hpp"
 
-#include "gut_spv.hpp"
+#include "preview_spv.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -458,13 +458,16 @@ bool Renderer::ensure_device() {
         vkDestroyShaderModule(device_, module, nullptr);
         return pipeline;
     };
-    keys_pipeline_ = make_compute(gut_spv::gut_keys_comp, std::size(gut_spv::gut_keys_comp));
-    hist_pipeline_ = make_compute(gut_spv::gut_hist_comp, std::size(gut_spv::gut_hist_comp));
-    scan_pipeline_ = make_compute(gut_spv::gut_scan_comp, std::size(gut_spv::gut_scan_comp));
+    keys_pipeline_ = make_compute(
+        preview_spv::sort_keys_cs_hlsl, std::size(preview_spv::sort_keys_cs_hlsl));
+    hist_pipeline_ = make_compute(
+        preview_spv::sort_hist_cs_hlsl, std::size(preview_spv::sort_hist_cs_hlsl));
+    scan_pipeline_ = make_compute(
+        preview_spv::sort_scan_cs_hlsl, std::size(preview_spv::sort_scan_cs_hlsl));
     scatter_pipeline_ = make_compute(
-        gut_spv::gut_scatter_comp, std::size(gut_spv::gut_scatter_comp));
+        preview_spv::sort_scatter_cs_hlsl, std::size(preview_spv::sort_scatter_cs_hlsl));
     ring_prepare_pipeline_ = make_compute(
-        gut_spv::ring_prepare_cs_hlsl, std::size(gut_spv::ring_prepare_cs_hlsl));
+        preview_spv::ring_prepare_cs_hlsl, std::size(preview_spv::ring_prepare_cs_hlsl));
 
     const auto make_graphics = [&](const std::uint32_t* vert_words, std::size_t vert_count,
                                    const std::uint32_t* frag_words, std::size_t frag_count) {
@@ -537,8 +540,8 @@ bool Renderer::ensure_device() {
         return pipeline;
     };
     ring_pipeline_ = make_graphics(
-        gut_spv::ring_draw_vs_hlsl, std::size(gut_spv::ring_draw_vs_hlsl),
-        gut_spv::ring_draw_ps_hlsl, std::size(gut_spv::ring_draw_ps_hlsl));
+        preview_spv::ring_draw_vs_hlsl, std::size(preview_spv::ring_draw_vs_hlsl),
+        preview_spv::ring_draw_ps_hlsl, std::size(preview_spv::ring_draw_ps_hlsl));
 
     VkCommandPoolCreateInfo command_pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     command_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;

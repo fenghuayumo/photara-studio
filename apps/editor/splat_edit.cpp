@@ -44,55 +44,128 @@ struct RayHit {
     bool valid{};
 };
 
+// Camera-space projection shared with the ring shader and splat_drender.
+// du/dv are derivatives of the pixel with respect to the camera axes.
+struct ScreenBasis {
+    float u{};
+    float v{};
+    float depth{};
+    float du[3]{};
+    float dv[3]{};
+    bool valid{};
+};
+
+ScreenBasis screen_basis(
+    const splat_render::Camera& camera, const float x, const float y, const float z) {
+    ScreenBasis basis;
+    basis.depth = z;
+    const float width = static_cast<float>(std::max(1U, camera.width));
+    const float height = static_cast<float>(std::max(1U, camera.height));
+    if (camera.model == splat_render::k_camera_orthographic) {
+        if (!(z > 0.2F)) return basis;
+        basis.u = camera.fx * x + camera.cx;
+        basis.v = camera.fy * y + camera.cy;
+        basis.du[0] = camera.fx;
+        basis.dv[1] = camera.fy;
+        basis.valid = true;
+        return basis;
+    }
+    if (camera.model == splat_render::k_camera_pinhole) {
+        if (!(z > 0.2F)) return basis;
+        const float iz = 1.F / z;
+        basis.u = x * iz * camera.fx + camera.cx;
+        basis.v = y * iz * camera.fy + camera.cy;
+        const float limx = 1.3F * width / (2.F * camera.fx);
+        const float limy = 1.3F * height / (2.F * camera.fy);
+        const float clamped_x = std::clamp(x * iz, -limx, limx) * z;
+        const float clamped_y = std::clamp(y * iz, -limy, limy) * z;
+        const float iz2 = iz * iz;
+        basis.du[0] = camera.fx * iz;
+        basis.du[2] = -(camera.fx * clamped_x) * iz2;
+        basis.dv[1] = camera.fy * iz;
+        basis.dv[2] = -(camera.fy * clamped_y) * iz2;
+        basis.valid = true;
+        return basis;
+    }
+    if (camera.model == splat_render::k_camera_equirectangular) {
+        const float len = std::sqrt(x * x + y * y + z * z);
+        const float horiz = std::sqrt(x * x + z * z);
+        if (!(len > 1e-6F) || !(horiz > 1e-5F)) return basis;
+        const float azimuth = std::atan2(x, z);
+        const float elevation = std::atan2(y, horiz);
+        basis.u = (azimuth / (2.F * k_pi) + 0.5F) * width;
+        basis.v = (elevation / k_pi + 0.5F) * height;
+        basis.depth = len;
+        const float len2 = len * len;
+        const float horiz2 = horiz * horiz;
+        const float su = width / (2.F * k_pi);
+        const float sv = height / k_pi;
+        basis.du[0] = su * z / horiz2;
+        basis.du[2] = su * (-x) / horiz2;
+        basis.dv[0] = sv * (-y * x) / (horiz * len2);
+        basis.dv[1] = sv * horiz / len2;
+        basis.dv[2] = sv * (-y * z) / (horiz * len2);
+        basis.valid = true;
+        return basis;
+    }
+    if (!(z > 1e-6F)) return basis;
+    const float radius = std::sqrt(x * x + y * y);
+    const float theta = std::atan2(radius, z);
+    if (!(theta < 1.57079632679F)) return basis;
+    const float theta2 = theta * theta;
+    const float poly =
+        1.F + theta2 * (camera.k1 + theta2 * (camera.k2 + theta2 * (camera.k3 + theta2 * camera.k4)));
+    const float theta_d = theta * poly;
+    if (!(theta_d >= 0.F)) return basis;
+    const float radius2 = x * x + y * y;
+    const float len2 = radius2 + z * z;
+    if (radius2 < 1e-6F * z * z) {
+        const float iz = 1.F / z;
+        const float q = radius2 * iz * iz;
+        const float series_a = camera.k1 - 1.F / 3.F;
+        const float series_b = camera.k2 - camera.k1 + 1.F / 5.F;
+        const float radial = iz * (1.F + series_a * q + series_b * q * q);
+        basis.u = camera.cx + camera.fx * x * radial;
+        basis.v = camera.cy + camera.fy * y * radial;
+        const float ds = 2.F * iz * iz * iz * (series_a + 2.F * series_b * q);
+        const float dz = -iz * iz * (1.F + 3.F * series_a * q + 5.F * series_b * q * q);
+        basis.du[0] = camera.fx * (radial + x * x * ds);
+        basis.du[1] = camera.fx * x * y * ds;
+        basis.du[2] = camera.fx * x * dz;
+        basis.dv[0] = camera.fy * x * y * ds;
+        basis.dv[1] = camera.fy * (radial + y * y * ds);
+        basis.dv[2] = camera.fy * y * dz;
+        basis.valid = true;
+        return basis;
+    }
+    const float rho = theta_d / radius;
+    basis.u = camera.fx * rho * x + camera.cx;
+    basis.v = camera.fy * rho * y + camera.cy;
+    const float dtheta =
+        1.F + theta2 * (3.F * camera.k1 + theta2 * (5.F * camera.k2 + theta2 * (7.F * camera.k3 + theta2 * 9.F * camera.k4)));
+    const float ds = (dtheta * z / len2 - rho) / radius2;
+    basis.du[0] = camera.fx * (rho + x * x * ds);
+    basis.du[1] = camera.fx * x * y * ds;
+    basis.du[2] = -camera.fx * dtheta * x / len2;
+    basis.dv[0] = camera.fy * x * y * ds;
+    basis.dv[1] = camera.fy * (rho + y * y * ds);
+    basis.dv[2] = -camera.fy * dtheta * y / len2;
+    basis.valid = true;
+    return basis;
+}
+
 RayHit project_center(
     const splat_render::Camera& camera, const float x, const float y, const float z) {
     const float* m = camera.world_to_camera.data();
     const float cx = m[0] * x + m[4] * y + m[8] * z + m[12];
     const float cy = m[1] * x + m[5] * y + m[9] * z + m[13];
     const float cz = m[2] * x + m[6] * y + m[10] * z + m[14];
+    const ScreenBasis basis = screen_basis(camera, cx, cy, cz);
     RayHit hit;
-    hit.depth = cz;
-    if (camera.model == splat_render::k_camera_equirectangular) {
-        const float len = std::sqrt(cx * cx + cy * cy + cz * cz);
-        if (!(len > 1e-8F)) return hit;
-        const float azimuth = std::atan2(cx, cz);
-        const float elevation = std::asin(std::clamp(cy / len, -1.F, 1.F));
-        hit.u = (azimuth / (2.F * k_pi) + 0.5F) * static_cast<float>(camera.width);
-        hit.v = (elevation / k_pi + 0.5F) * static_cast<float>(camera.height);
-        hit.depth = len;
-        hit.valid = true;
-        return hit;
-    }
-    if (camera.model == splat_render::k_camera_orthographic) {
-        if (!(cz > 1e-4F)) return hit;
-        hit.u = camera.fx * cx + camera.cx;
-        hit.v = camera.fy * cy + camera.cy;
-        hit.valid = true;
-        return hit;
-    }
-    if (camera.model == splat_render::k_camera_fisheye) {
-        if (!(cz > 1e-8F)) return hit;
-        const float radius = std::sqrt(cx * cx + cy * cy);
-        const float theta = std::atan2(radius, cz);
-        const float t2 = theta * theta;
-        const float poly = 1.F + t2 * (camera.k1 + t2 * (camera.k2 + t2 * (camera.k3 + t2 * camera.k4)));
-        const float theta_d = theta * poly;
-        if (theta_d < 0.F) return hit;
-        if (radius < 1e-12F) {
-            hit.u = camera.cx;
-            hit.v = camera.cy;
-        } else {
-            const float scale = theta_d / radius;
-            hit.u = camera.fx * scale * cx + camera.cx;
-            hit.v = camera.fy * scale * cy + camera.cy;
-        }
-        hit.valid = true;
-        return hit;
-    }
-    if (!(cz > 1e-4F)) return hit;
-    hit.u = camera.fx * cx / cz + camera.cx;
-    hit.v = camera.fy * cy / cz + camera.cy;
-    hit.valid = true;
+    hit.u = basis.u;
+    hit.v = basis.v;
+    hit.depth = basis.depth;
+    hit.valid = basis.valid;
     return hit;
 }
 
@@ -588,15 +661,20 @@ float SplatEdit::ellipse_reach(
     const std::uint32_t index) const {
     if (!rings_ready()) return 0.F;
     const float* scale = log_scales_.data() + static_cast<std::size_t>(index) * 3U;
-    const float sigma = std::exp(std::min(8.F, std::max(scale[0], std::max(scale[1], scale[2]))));
+    const float filter = index < filter_.size() ? filter_[index] : 0.F;
+    const float sigma = std::sqrt(
+        std::exp(2.F * std::min(8.F, std::max(scale[0], std::max(scale[1], scale[2])))) +
+        filter * filter);
     const float focal = std::max(camera.fx, camera.fy);
-    float reach = 1024.F;
+    // Opaque cutoff is sqrt(2*ln(255)) projected sigmas. The broad phase stays
+    // outside that so a visible splat is not skipped before the exact test.
+    constexpr float k_opaque_cutoff = 3.329F;
+    float reach = 8192.F;
     if (camera.model == splat_render::k_camera_orthographic)
-        reach = sigma * focal * ring_sigma_;
+        reach = sigma * focal * k_opaque_cutoff;
     else if (camera.model != splat_render::k_camera_equirectangular)
-        reach = sigma * focal / std::max(depth, 1e-3F) * ring_sigma_;
-    // One axis underestimates the screen-edge Jacobian. Dilation adds a couple of pixels.
-    reach = std::min(1024.F, reach * 2.F + ring_sigma_ * 2.F);
+        reach = sigma * focal / std::max(depth, 1e-3F) * k_opaque_cutoff;
+    reach = std::min(8192.F, reach * 2.F + 4.F);
     return std::max(6.F, reach);
 }
 
@@ -610,9 +688,20 @@ bool SplatEdit::project_ellipse(
     if (!origin.valid) return false;
     const float* scale = log_scales_.data() + static_cast<std::size_t>(index) * 3U;
     const float* rotation = quaternions_.data() + static_cast<std::size_t>(index) * 4U;
-    const float sx = std::exp(std::clamp(scale[0], -12.F, 8.F));
-    const float sy = std::exp(std::clamp(scale[1], -12.F, 8.F));
-    const float sz = std::exp(std::clamp(scale[2], -12.F, 8.F));
+    const float filter = index < filter_.size() ? filter_[index] : 0.F;
+    const float filter_squared = filter * filter;
+    float opacity_factor = 1.F;
+    const auto activated_axis = [&](const float log_scale) {
+        const float raw = std::exp(std::clamp(log_scale, -20.F, 20.F));
+        const float filtered = std::sqrt(raw * raw + filter_squared);
+        opacity_factor *= raw / std::max(filtered, 1e-8F);
+        return filtered;
+    };
+    const float sx = activated_axis(scale[0]);
+    const float sy = activated_axis(scale[1]);
+    const float sz = activated_axis(scale[2]);
+    const float opacity = std::min(
+        1.F, activate_opacity(opacity_[index]) * opacity_factor);
     float qw = rotation[0];
     float qx = rotation[1];
     float qy = rotation[2];
@@ -639,78 +728,45 @@ bool SplatEdit::project_ellipse(
     const float axis_z[3] = {
         (2.F * (xz + wy)) * sz, (2.F * (yz - wx)) * sz, (1.F - 2.F * (xx + yy)) * sz};
 
+    if (!(opacity > k_min_opacity)) return false;
     const float* m = camera.world_to_camera.data();
     const float cam_x = m[0] * center[0] + m[4] * center[1] + m[8] * center[2] + m[12];
     const float cam_y = m[1] * center[0] + m[5] * center[1] + m[9] * center[2] + m[13];
     const float cam_z = m[2] * center[0] + m[6] * center[1] + m[10] * center[2] + m[14];
+    const ScreenBasis basis = screen_basis(camera, cam_x, cam_y, cam_z);
+    if (!basis.valid) return false;
     float px[3]{};
     float py[3]{};
     const float* axes[3] = {axis_x, axis_y, axis_z};
-    const bool linear = camera.model == splat_render::k_camera_pinhole ||
-                        camera.model == splat_render::k_camera_orthographic;
-    if (linear && cam_z > 1e-4F) {
-        const float inv_z = 1.F / cam_z;
-        const float inv_z2 = inv_z * inv_z;
-        for (int axis = 0; axis < 3; ++axis) {
-            const float ax = m[0] * axes[axis][0] + m[4] * axes[axis][1] + m[8] * axes[axis][2];
-            const float ay = m[1] * axes[axis][0] + m[5] * axes[axis][1] + m[9] * axes[axis][2];
-            const float az = m[2] * axes[axis][0] + m[6] * axes[axis][1] + m[10] * axes[axis][2];
-            if (camera.model == splat_render::k_camera_orthographic) {
-                px[axis] = camera.fx * ax;
-                py[axis] = camera.fy * ay;
-            } else {
-                px[axis] = camera.fx * inv_z * ax - camera.fx * cam_x * inv_z2 * az;
-                py[axis] = camera.fy * inv_z * ay - camera.fy * cam_y * inv_z2 * az;
-            }
-        }
-    } else {
-        const float width = static_cast<float>(std::max(1U, camera.width));
-        for (int axis = 0; axis < 3; ++axis) {
-            const RayHit end = project_center(
-                camera, center[0] + axes[axis][0], center[1] + axes[axis][1],
-                center[2] + axes[axis][2]);
-            if (!end.valid) continue;
-            float du = end.u - origin.u;
-            float dv = end.v - origin.v;
-            if (camera.model == splat_render::k_camera_equirectangular) {
-                if (du > width * 0.5F) du -= width;
-                if (du < -width * 0.5F) du += width;
-            }
-            px[axis] = du;
-            py[axis] = dv;
-        }
+    for (int axis = 0; axis < 3; ++axis) {
+        const float ax = m[0] * axes[axis][0] + m[4] * axes[axis][1] + m[8] * axes[axis][2];
+        const float ay = m[1] * axes[axis][0] + m[5] * axes[axis][1] + m[9] * axes[axis][2];
+        const float az = m[2] * axes[axis][0] + m[6] * axes[axis][1] + m[10] * axes[axis][2];
+        px[axis] = basis.du[0] * ax + basis.du[1] * ay + basis.du[2] * az;
+        py[axis] = basis.dv[0] * ax + basis.dv[1] * ay + basis.dv[2] * az;
     }
 
-    // Same contour as ring_prepare.cs.hlsl: 0.3px dilation, minor-axis floor,
-    // and a uniform cap so a long splat keeps its shape.
-    const float a = px[0] * px[0] + px[1] * px[1] + px[2] * px[2] + 0.3F;
+    // Same 2D covariance and 1/255 contour as the ring shader and the EWA forward.
+    const float a = px[0] * px[0] + px[1] * px[1] + px[2] * px[2];
     const float b = px[0] * py[0] + px[1] * py[1] + px[2] * py[2];
-    const float c = py[0] * py[0] + py[1] * py[1] + py[2] * py[2] + 0.3F;
+    const float c = py[0] * py[0] + py[1] * py[1] + py[2] * py[2];
     const float mid = 0.5F * (a + c);
     const float extent =
         0.5F * std::sqrt(std::max(0.F, (a - c) * (a - c) + 4.F * b * b));
     const float lambda1 = std::max(0.F, mid + extent);
-    const float lambda2 = std::max(0.1F, mid - extent);
-    float rx = ring_sigma_ * std::sqrt(lambda1);
-    float ry = ring_sigma_ * std::sqrt(lambda2);
-    const float cap = std::min(
-        1024.F, std::min(
-                    static_cast<float>(std::max(1U, camera.width)),
-                    static_cast<float>(std::max(1U, camera.height))));
-    const float major = std::max(rx, ry);
-    if (major > cap && major > 1e-4F) {
-        const float fit = cap / major;
-        rx *= fit;
-        ry *= fit;
-    }
-    ellipse.u = origin.u;
-    ellipse.v = origin.v;
-    ellipse.depth = origin.depth;
+    const float lambda2 = std::max(0.F, mid - extent);
+    const float cutoff = std::sqrt(2.F * std::log(opacity / k_min_opacity));
+    const float rx = cutoff * std::sqrt(lambda1);
+    const float ry = cutoff * std::sqrt(lambda2);
+    if (!(rx > 1e-4F) || !(rx < 1e6F)) return false;
+    ellipse.u = basis.u;
+    ellipse.v = basis.v;
+    ellipse.depth = basis.depth;
     ellipse.rx = rx;
     ellipse.ry = ry;
     ellipse.rotation = 0.5F * std::atan2(2.F * b, a - c);
-    ellipse.valid = major >= 0.5F;
-    return ellipse.valid;
+    ellipse.valid = true;
+    return true;
 }
 
 bool SplatEdit::ellipse_contains(const ScreenEllipse& ellipse, const float x, const float y) {
@@ -2005,10 +2061,22 @@ void SplatEdit::apply_volume(const VolumeOp op) {
         const float lx = dot3(toward, gaussian[0]);
         const float ly = dot3(toward, gaussian[1]);
         const float lz = dot3(toward, gaussian[2]);
-        const float sx = std::exp(std::clamp(log_scale[0], -12.F, 8.F));
-        const float sy = std::exp(std::clamp(log_scale[1], -12.F, 8.F));
-        const float sz = std::exp(std::clamp(log_scale[2], -12.F, 8.F));
-        const float support = ring_sigma_ * std::sqrt(
+        const float filter = index < filter_.size() ? filter_[index] : 0.F;
+        const float filter_squared = filter * filter;
+        float opacity_factor = 1.F;
+        const auto activated_axis = [&](const float log_scale_axis) {
+            const float raw = std::exp(std::clamp(log_scale_axis, -20.F, 20.F));
+            const float filtered = std::sqrt(raw * raw + filter_squared);
+            opacity_factor *= raw / std::max(filtered, 1e-8F);
+            return filtered;
+        };
+        const float sx = activated_axis(log_scale[0]);
+        const float sy = activated_axis(log_scale[1]);
+        const float sz = activated_axis(log_scale[2]);
+        const float opacity = activate_opacity(opacity_[index]) * opacity_factor;
+        if (!(opacity > k_min_opacity)) return false;
+        const float cutoff = std::sqrt(2.F * std::log(opacity / k_min_opacity));
+        const float support = cutoff * std::sqrt(
             sx * lx * sx * lx + sy * ly * sy * ly + sz * lz * sz * lz);
         return distance <= support;
     };

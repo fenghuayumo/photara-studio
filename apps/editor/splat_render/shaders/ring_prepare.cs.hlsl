@@ -1,7 +1,7 @@
 #include "ring_math.hlsl"
 
 cbuffer FrameBlock : register(b0) {
-    GutFrame frame;
+    SplatFrame frame;
 };
 
 StructuredBuffer<float4> centers : register(t1);
@@ -73,13 +73,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float3 row2 = float3(2.0 * (xz + ry), 2.0 * (yz - rx), 1.0 - 2.0 * (xx + yy));
 
     float2 pixel;
-    if (!project_pixel(frame, center, pixel)) {
-        store_hidden(slot);
-        return;
-    }
     float2 axis1;
     float2 axis2;
-    if (!project_axes(frame, center, row0, row1, row2, scale, pixel, axis1, axis2)) {
+    if (!project_axes(frame, center, row0, row1, row2, scale, opacity, pixel, axis1, axis2)) {
         store_hidden(slot);
         return;
     }
