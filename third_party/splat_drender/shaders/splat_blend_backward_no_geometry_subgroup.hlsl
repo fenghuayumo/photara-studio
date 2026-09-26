@@ -89,10 +89,10 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
     uint gaussian = 0;
     if (bucket_active && pos < tile_n) {
         gaussian = instances[range_begin + pos];
-        gs_mean[group_thread] = gauss_f[gaussian * 8u].xy;
-        gs_conic[group_thread] = gauss_f[gaussian * 8u + 1u];
-        gs_color[group_thread] = gauss_f[gaussian * 8u + 2u].xyz;
-        gs_bounds[group_thread] = gauss_f[gaussian * 8u + 5u];
+        gs_mean[group_thread] = gauss_f[gaussian * 5u].xy;
+        gs_conic[group_thread] = gauss_f[gaussian * 5u + 1u];
+        gs_color[group_thread] = gauss_f[gaussian * 5u + 2u].xyz;
+        gs_bounds[group_thread] = gauss_f[gaussian * 5u + 3u];
     }
     GroupMemoryBarrierWithGroupSync();
     if (!bucket_active) return;

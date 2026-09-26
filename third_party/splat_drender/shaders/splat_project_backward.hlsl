@@ -430,6 +430,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     // without scale/rotation parameters. The host/debug path keeps the stable
     // legacy layout so its download adapter remains unchanged.
     bool compact_raw_gradients = (flags & 8u) != 0u;
+    bool geometry = (flags & 16u) != 0u;
     uint width = pc.u3;
     uint height = pc.u4;
     uint degree = pc.u5;
@@ -670,7 +671,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         gm += sh_backward(
             index, degree, bases, mean,
             float3(camera[16], camera[17], camera[18]),
-            gcolor, gauss_f[8u * index + 6u].xyz, feature_base);
+            gcolor, gauss_f[(geometry ? 7u : 5u) * index + (geometry ? 6u : 4u)].xyz, feature_base);
     } else {
         uint fo = feature_base + 3u * index;
         model_grad[fo] = gcolor.x;

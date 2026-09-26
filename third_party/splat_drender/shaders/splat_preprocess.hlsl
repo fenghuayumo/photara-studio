@@ -44,6 +44,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint flags = pc.u3;
     bool has_sh = (flags & 1u) != 0;
     bool has_scales = (flags & 2u) != 0;
+    bool geometry = (flags & 4u) != 0;
     bool raw_parameters = (flags & 32u) != 0;
 
     float3 mean = float3(means[3 * index], means[3 * index + 1], means[3 * index + 2]);
@@ -123,11 +124,15 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
 
     float depth = sqrt(dot(t, t));
     uint depth_key = asuint(depth);
-    gauss_f[index * 8 + 0] = float4(projected.pixel_x, projected.pixel_y, asfloat(depth_key), asfloat(uint(radius)));
-    gauss_f[index * 8 + 1] = conic;
-    gauss_f[index * 8 + 2] = float4(rgb, 0.0f);
-    gauss_f[index * 8 + 3] = geom.ray_plane;
-    gauss_f[index * 8 + 4] = float4(geom.normal, 0.0f);
+    uint gaussian_slots = geometry ? 7u : 5u;
+    uint gaussian_base = index * gaussian_slots;
+    gauss_f[gaussian_base] = float4(projected.pixel_x, projected.pixel_y, asfloat(depth_key), asfloat(uint(radius)));
+    gauss_f[gaussian_base + 1u] = conic;
+    gauss_f[gaussian_base + 2u] = float4(rgb, 0.0f);
+    if (geometry) {
+        gauss_f[gaussian_base + 3u] = geom.ray_plane;
+        gauss_f[gaussian_base + 4u] = float4(geom.normal, 0.0f);
+    }
     float threshold = 2.0f * log(conic.w / kAlphaFloor);
     float ex = sqrt(max(0.0f, threshold * geom.cov0));
     float ey = sqrt(max(0.0f, threshold * geom.cov2));
@@ -135,9 +140,9 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint x1 = uint(max(0.0f, min(65535.0f, floor(projected.pixel_x + ex) + 1.0f)));
     uint y0 = uint(max(0.0f, min(65535.0f, floor(projected.pixel_y - ey))));
     uint y1 = uint(max(0.0f, min(65535.0f, floor(projected.pixel_y + ey) + 1.0f)));
-    gauss_f[index * 8 + 5] = float4(asfloat(x0), asfloat(x1), asfloat(y0), asfloat(y1));
-    gauss_f[index * 8 + 6] = float4(clamped0, clamped1, clamped2, 0.0f);
-    gauss_f[index * 8 + 7] = float4(geom.cov0, geom.cov1, geom.cov2, geom.coef);
+    uint bounds_slot = geometry ? 5u : 3u;
+    gauss_f[gaussian_base + bounds_slot] = float4(asfloat(x0), asfloat(x1), asfloat(y0), asfloat(y1));
+    gauss_f[gaussian_base + bounds_slot + 1u] = float4(clamped0, clamped1, clamped2, 0.0f);
 
     gauss_u[index] = touched;
     gauss_u[count + index] = 1;

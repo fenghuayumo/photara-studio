@@ -64,15 +64,15 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     [loop] for (uint at = begin; at < end; ++at) {
         ++contributor;
         uint g = instances[at];
-        float2 d = gauss_f[8u * g].xy - float2(pr.pixel_x, pr.pixel_y);
-        float4 co = gauss_f[8u * g + 1u];
+        float2 d = gauss_f[7u * g].xy - float2(pr.pixel_x, pr.pixel_y);
+        float4 co = gauss_f[7u * g + 1u];
         float power = gaussian_power(co, d.x, d.y);
         if (power > 0.0f) continue;
         float alpha = min(kAlphaClip, co.w * exp(power));
         if (alpha < kAlphaFloor) continue;
         float test_t = T * (1.0f - alpha);
         if (test_t < kTransmittanceFloor) break;
-        float4 rp = gauss_f[8u * g + 3u];
+        float4 rp = gauss_f[7u * g + 3u];
         float peak = rp.x * d.x + rp.y * d.y + rp.z;
         if (T > 0.5f) seed = peak;
         T = test_t;
@@ -94,13 +94,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         [loop] for (uint at2 = begin; at2 < end && used < last; ++at2) {
             ++used;
             uint g = instances[at2];
-            float2 d = gauss_f[8u * g].xy - float2(pr.pixel_x, pr.pixel_y);
-            float4 co = gauss_f[8u * g + 1u];
+            float2 d = gauss_f[7u * g].xy - float2(pr.pixel_x, pr.pixel_y);
+            float4 co = gauss_f[7u * g + 1u];
             float power = gaussian_power(co, d.x, d.y);
             if (power > 0.0f) continue;
             float alpha = min(kAlphaClip, co.w * exp(power));
             if (alpha < kAlphaFloor) continue;
-            float4 rp = gauss_f[8u * g + 3u];
+            float4 rp = gauss_f[7u * g + 3u];
             float peak = rp.x * d.x + rp.y * d.y + rp.z;
             [unroll] for (uint s2 = sb; s2 < se; ++s2) {
                 float ts = lo + interval * float(s2);

@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "splat_blend.hlsl.embedded.hpp"
+#include "splat_blend_no_geometry.hlsl.embedded.hpp"
+#include "splat_blend_training.hlsl.embedded.hpp"
 #include "splat_blend_backward.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry_subgroup.hlsl.embedded.hpp"
@@ -143,6 +145,12 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     }
     if (shader_name == "splat_blend.hlsl.spv") {
         return std::as_bytes(std::span{splat_blend_hlsl_spv});
+    }
+    if (shader_name == "splat_blend_no_geometry.hlsl.spv") {
+        return std::as_bytes(std::span{splat_blend_no_geometry_hlsl_spv});
+    }
+    if (shader_name == "splat_blend_training.hlsl.spv") {
+        return std::as_bytes(std::span{splat_blend_training_hlsl_spv});
     }
     if (shader_name == "splat_blend_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_blend_backward_hlsl_spv});

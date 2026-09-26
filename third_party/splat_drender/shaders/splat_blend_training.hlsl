@@ -1,0 +1,5 @@
+#define SPLAT_BLEND_NO_GEOMETRY 1
+#define SPLAT_BLEND_GAUSS_SLOTS 5u
+#define SPLAT_BLEND_FORCE_SNAPSHOTS 1
+#define SPLAT_BLEND_FORCE_STATS 1
+#include "splat_blend.hlsl"

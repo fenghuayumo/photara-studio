@@ -2,8 +2,12 @@
 
 #ifdef SPLAT_BLEND_BACKWARD_NO_GEOMETRY
 #define SPLAT_BLEND_BACKWARD_GEOMETRY 0
+#define SPLAT_BLEND_BACKWARD_GAUSS_SLOTS 5u
+#define SPLAT_BLEND_BACKWARD_BOUNDS_SLOT 3u
 #else
 #define SPLAT_BLEND_BACKWARD_GEOMETRY 1
+#define SPLAT_BLEND_BACKWARD_GAUSS_SLOTS 7u
+#define SPLAT_BLEND_BACKWARD_BOUNDS_SLOT 5u
 #endif
 
 [[vk::binding(0, 0)]] StructuredBuffer<uint> ranges;
@@ -86,14 +90,14 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
     if (pos >= tile_n) return;
 
     uint gaussian = instances[range_begin + pos];
-    float2 mean = gauss_f[gaussian * 8u].xy;
-    float4 conic = gauss_f[gaussian * 8u + 1u];
-    float3 color = gauss_f[gaussian * 8u + 2u].xyz;
+    float2 mean = gauss_f[gaussian * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS].xy;
+    float4 conic = gauss_f[gaussian * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS + 1u];
+    float3 color = gauss_f[gaussian * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS + 2u].xyz;
 #if SPLAT_BLEND_BACKWARD_GEOMETRY
-    float4 ray_plane = geometry ? gauss_f[gaussian * 8u + 3u] : 0.0f;
-    float3 gaussian_normal = geometry ? gauss_f[gaussian * 8u + 4u].xyz : 0.0f;
+    float4 ray_plane = geometry ? gauss_f[gaussian * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS + 3u] : 0.0f;
+    float3 gaussian_normal = geometry ? gauss_f[gaussian * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS + 4u].xyz : 0.0f;
 #endif
-    uint4 bounds = asuint(gauss_f[gaussian * 8u + 5u]);
+    uint4 bounds = asuint(gauss_f[gaussian * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS + SPLAT_BLEND_BACKWARD_BOUNDS_SLOT]);
     uint pix_min_x = (tile_id % tiles_x) * 16u;
     uint pix_min_y = (tile_id / tiles_x) * 16u;
 
@@ -135,17 +139,17 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             uint qpos = tile_bucket * 32u + k;
             if (qpos >= tile_n || qpos >= last) break;
             uint q = instances[range_begin + qpos];
-            float2 qmean = gauss_f[q * 8u].xy;
-            float4 qconic = gauss_f[q * 8u + 1u];
+            float2 qmean = gauss_f[q * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS].xy;
+            float4 qconic = gauss_f[q * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS + 1u];
             float2 qdelta = float2(wrap_dx(qmean.x - float(px), wrap_width, mode), qmean.y - float(py));
             float power = gaussian_power(qconic, qdelta.x, qdelta.y);
             if (power > 0.0f) continue;
             float qG = exp(power), qalpha = min(kAlphaClip, qconic.w * qG);
             if (qalpha < kAlphaFloor) continue;
             float weight = qalpha * transmittance;
-            color_after -= weight * gauss_f[q * 8u + 2u].xyz;
+            color_after -= weight * gauss_f[q * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS + 2u].xyz;
 #if SPLAT_BLEND_BACKWARD_GEOMETRY
-            if (geometry) normal_after -= weight * gauss_f[q * 8u + 4u].xyz;
+            if (geometry) normal_after -= weight * gauss_f[q * SPLAT_BLEND_BACKWARD_GAUSS_SLOTS + 4u].xyz;
 #endif
             if (k == lane) { G = qG; alpha = qalpha; delta = qdelta; accepted = true; break; }
             transmittance *= 1.0f - qalpha;

@@ -83,13 +83,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float dT = 0.0f;
     [loop] for (uint p = 0u; p < last; ++p) {
         uint g = instances[begin + p];
-        float2 d = gauss_f[8u * g].xy - float2(pr.pixel_x, pr.pixel_y);
-        float4 co = gauss_f[8u * g + 1u];
+        float2 d = gauss_f[7u * g].xy - float2(pr.pixel_x, pr.pixel_y);
+        float4 co = gauss_f[7u * g + 1u];
         float power = gaussian_power(co, d.x, d.y);
         if (power > 0.0f) continue;
         float alpha = min(kAlphaClip, co.w * exp(power));
         if (alpha < kAlphaFloor) continue;
-        float4 rp = gauss_f[8u * g + 3u];
+        float4 rp = gauss_f[7u * g + 3u];
         float peak = rp.x * d.x + rp.y * d.y + rp.z;
         float td = (median - peak) * rp.w;
         float gt = alpha * exp(-0.5f * td * td);
@@ -98,15 +98,15 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float scale = d_depth / max(-dT, 1.0e-7f);
     [loop] for (uint rev = last; rev > 0u; --rev) {
         uint g = instances[begin + rev - 1u];
-        float2 d = gauss_f[8u * g].xy - float2(pr.pixel_x, pr.pixel_y);
-        float4 co = gauss_f[8u * g + 1u];
+        float2 d = gauss_f[7u * g].xy - float2(pr.pixel_x, pr.pixel_y);
+        float4 co = gauss_f[7u * g + 1u];
         float power = gaussian_power(co, d.x, d.y);
         if (power > 0.0f) continue;
         float G = exp(power);
         float raw = co.w * G;
         if (raw < kAlphaFloor) continue;
         float alpha = min(kAlphaClip, raw);
-        float4 rp = gauss_f[8u * g + 3u];
+        float4 rp = gauss_f[7u * g + 3u];
         float peak = rp.x * d.x + rp.y * d.y + rp.z;
         float td = (median - peak) * rp.w;
         float ge = exp(-0.5f * td * td);

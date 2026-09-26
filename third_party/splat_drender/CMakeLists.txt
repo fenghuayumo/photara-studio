@@ -59,6 +59,8 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_radix_scatter.hlsl
             shaders/splat_ranges.hlsl
             shaders/splat_blend.hlsl
+            shaders/splat_blend_no_geometry.hlsl
+            shaders/splat_blend_training.hlsl
             shaders/splat_median_backward.hlsl
             shaders/splat_blend_backward.hlsl
             shaders/splat_blend_backward_no_geometry.hlsl
@@ -96,6 +98,11 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             if(shader_name STREQUAL "splat_blend_backward_no_geometry.hlsl")
                 list(APPEND shader_dependencies
                      "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl")
+            endif()
+            if(shader_name STREQUAL "splat_blend_no_geometry.hlsl" OR
+               shader_name STREQUAL "splat_blend_training.hlsl")
+                list(APPEND shader_dependencies
+                     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend.hlsl")
             endif()
             set(shader_binary "${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader_name}.spv")
             add_custom_command(

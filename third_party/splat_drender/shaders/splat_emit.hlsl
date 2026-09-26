@@ -20,6 +20,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     int grid_y = int(pc.u3);
     int wrap_width = int(pc.u4);
     uint gaussian_count = pc.u5;
+    uint gaussian_slots = pc.u6;
 
     // Convert the per-tile [begin, end) instance ranges into bucket counts.
     // The caller scans values in-place afterwards, producing the inclusive
@@ -63,8 +64,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     } else {
         exclusive = index == 0 ? 0 : compact[index - 1];
     }
-    float4 mean_depth = gauss_f[gaussian * 8];
-    float4 conic = gauss_f[gaussian * 8 + 1];
+    float4 mean_depth = gauss_f[gaussian * gaussian_slots];
+    float4 conic = gauss_f[gaussian * gaussian_slots + 1u];
     uint depth = gauss_u[2 * gaussian_count + gaussian];
     enumerate_tiles(mean_depth.xy, conic, grid_x, grid_y, gaussian, exclusive, wrap_width, depth,
                     mode == 0 ? 2u : 1u);

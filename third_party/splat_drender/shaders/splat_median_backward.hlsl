@@ -45,15 +45,15 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID) {
     float dT_dmedian = 0.0f;
     [loop] for (uint at = begin; at < finish; ++at) {
         uint gaussian = instances[at];
-        float2 mean = gauss_f[8u * gaussian].xy;
-        float4 conic = gauss_f[8u * gaussian + 1u];
+        float2 mean = gauss_f[7u * gaussian].xy;
+        float4 conic = gauss_f[7u * gaussian + 1u];
         float2 delta = float2(
             wrap_dx(mean.x - float(px), wrap_width, mode), mean.y - float(py));
         float power = gaussian_power(conic, delta.x, delta.y);
         if (power > 0.0f) continue;
         float alpha = min(kAlphaClip, conic.w * exp(power));
         if (alpha < kAlphaFloor) continue;
-        float4 plane = gauss_f[8u * gaussian + 3u];
+        float4 plane = gauss_f[7u * gaussian + 3u];
         float peak = plane.x * delta.x + plane.y * delta.y + plane.z;
         float td = (median - peak) * plane.w;
         float gt = alpha * exp(-0.5f * td * td);

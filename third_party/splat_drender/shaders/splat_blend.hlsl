@@ -1,5 +1,9 @@
 #include "splat_math.hlsli"
 
+#if !defined(SPLAT_BLEND_GAUSS_SLOTS)
+#define SPLAT_BLEND_GAUSS_SLOTS 7u
+#endif
+
 [[vk::binding(0, 0)]] StructuredBuffer<uint> ranges;
 [[vk::binding(1, 0)]] StructuredBuffer<uint> instances;
 [[vk::binding(2, 0)]] StructuredBuffer<float4> gauss_f;
@@ -22,9 +26,21 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
     uint width = pc.u0;
     uint height = pc.u1;
     uint tiles_x = pc.u2;
+#if defined(SPLAT_BLEND_NO_GEOMETRY)
+    static const bool geometry = false;
+#else
     bool geometry = (pc.u3 & 4u) != 0;
+#endif
+#if defined(SPLAT_BLEND_FORCE_SNAPSHOTS)
+    static const bool snapshots = true;
+#else
     bool snapshots = (pc.u3 & 8u) != 0;
+#endif
+#if defined(SPLAT_BLEND_FORCE_STATS)
+    static const bool stats = true;
+#else
     bool stats = (pc.u3 & 16u) != 0;
+#endif
     uint mode = pc.u4;
     int wrap_width = int(pc.u5);
     float fx = asfloat(pc.u6);
@@ -83,12 +99,12 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
         if (range_begin + progress < range_end) {
             uint gaussian = instances[range_begin + progress];
             sid[rank] = gaussian;
-            sxy[rank] = gauss_f[gaussian * 8].xy;
-            sconic[rank] = gauss_f[gaussian * 8 + 1];
-            srgb[rank] = gauss_f[gaussian * 8 + 2].xyz;
+            sxy[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS].xy;
+            sconic[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 1u];
+            srgb[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 2u].xyz;
             if (geometry) {
-                splane[rank] = gauss_f[gaussian * 8 + 3];
-                snormal[rank] = gauss_f[gaussian * 8 + 4].xyz;
+                splane[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 3u];
+                snormal[rank] = gauss_f[gaussian * SPLAT_BLEND_GAUSS_SLOTS + 4u].xyz;
             }
         }
         GroupMemoryBarrierWithGroupSync();
@@ -174,9 +190,9 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
                 uint depth_progress = depth_round * 256u + rank;
                 if (depth_progress < block_max) {
                     uint gaussian_depth = instances[range_begin + depth_progress];
-                    sxy[rank] = gauss_f[gaussian_depth * 8].xy;
-                    sconic[rank] = gauss_f[gaussian_depth * 8 + 1];
-                    splane[rank] = gauss_f[gaussian_depth * 8 + 3];
+                    sxy[rank] = gauss_f[gaussian_depth * SPLAT_BLEND_GAUSS_SLOTS].xy;
+                    sconic[rank] = gauss_f[gaussian_depth * SPLAT_BLEND_GAUSS_SLOTS + 1u];
+                    splane[rank] = gauss_f[gaussian_depth * SPLAT_BLEND_GAUSS_SLOTS + 3u];
                 }
                 GroupMemoryBarrierWithGroupSync();
                 uint depth_remaining = todo_depth - depth_round * 256u;

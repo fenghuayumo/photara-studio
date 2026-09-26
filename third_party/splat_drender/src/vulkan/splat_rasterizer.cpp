@@ -18,7 +18,8 @@ namespace splat_drender::vulkan {
 namespace {
 
 constexpr std::uint32_t k_tile = 16;
-constexpr std::uint32_t k_gauss_slots = 8;
+constexpr std::uint32_t k_gauss_slots_geometry = 7;
+constexpr std::uint32_t k_gauss_slots_color = 5;
 constexpr std::uint32_t k_streams = 6;
 constexpr std::uint32_t k_single_sort_limit = 131072;
 constexpr std::uint32_t k_push_uints = 20;
@@ -133,6 +134,8 @@ public:
           scatter_(context.create_pipeline("splat_radix_scatter.hlsl.spv", 8, sizeof(Push))),
           ranges_(context.create_pipeline("splat_ranges.hlsl.spv", 3, sizeof(Push))),
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
+          blend_no_geometry_(context.create_pipeline("splat_blend_no_geometry.hlsl.spv", 7, sizeof(Push))),
+          blend_training_(context.create_pipeline("splat_blend_training.hlsl.spv", 7, sizeof(Push))),
           median_backward_(context.create_pipeline("splat_median_backward.hlsl.spv", 7, sizeof(Push))),
           blend_backward_(context.create_pipeline("splat_blend_backward.hlsl.spv", 12, sizeof(Push))),
           blend_backward_no_geometry_(
@@ -456,7 +459,11 @@ public:
         camera_buffer.upload(camera_pack, sizeof(camera_pack));
 
         const auto gauss_u_count = k_streams * count + scan_scratch_uints(count);
-        Buffer& gauss_f = grow(gauss_f_, static_cast<std::uint64_t>(count) * k_gauss_slots * sizeof(float) * 4);
+        const std::uint32_t gauss_slots = settings.need_depth
+            ? k_gauss_slots_geometry
+            : k_gauss_slots_color;
+        Buffer& gauss_f = grow(
+            gauss_f_, static_cast<std::uint64_t>(count) * gauss_slots * sizeof(float) * 4);
         Buffer& gauss_u = grow(gauss_u_, static_cast<std::uint64_t>(gauss_u_count) * sizeof(std::uint32_t));
         write_forward_timestamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
 
@@ -496,7 +503,7 @@ public:
         inclusive_scan(gauss_u, count, 5 * count, count, k_streams * count);
         Buffer& frame_counts = grow(
             frame_counts_, 2 * sizeof(std::uint32_t), BufferMemory::host_visible);
-        Push counts_push = emit_constants(1, 4, grid_x, grid_y, wrap_width, count);
+        Push counts_push = emit_constants(1, 4, grid_x, grid_y, wrap_width, count, gauss_slots);
         dispatch(
             emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &frame_counts,
                     &dummy_, &dummy_},
@@ -532,21 +539,25 @@ public:
             const std::uint32_t hist_n = 256 * hist_blocks;
             Buffer& hist = grow(hist_space_, static_cast<std::uint64_t>(2 * hist_n + scan_scratch_uints(hist_n)) * sizeof(std::uint32_t));
             if (single_sort) {
-                Push emit_push = emit_constants(count, 0, grid_x, grid_y, wrap_width, count);
+                Push emit_push = emit_constants(count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
                 dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, emit_push, div_up(count, 256));
                 radix_sort(true, instances, lo0, hi0, val0, lo1, hi1, val1, hist, hist_n, 32u + tile_bits);
+                write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
             } else {
-                Push depth_push = emit_constants(count, 1, grid_x, grid_y, wrap_width, count);
+                Push depth_push = emit_constants(count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
                 dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, depth_push, div_up(count, 256));
                 radix_sort(false, visible, lo0, hi0, val0, lo1, hi1, val1, hist, 256 * div_up(visible, 1024));
+                write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                 Buffer& compact = grow(compact_, static_cast<std::uint64_t>(visible + scan_scratch_uints(visible)) * sizeof(std::uint32_t));
-                Push gather_push = emit_constants(visible, 2, grid_x, grid_y, wrap_width, count);
+                Push gather_push = emit_constants(visible, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
                 dispatch(emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0, &dummy_},
                          gather_push, div_up(visible, 256));
                 inclusive_scan(compact, 0, 0, visible, visible);
-                Push tile_push = emit_constants(visible, 3, grid_x, grid_y, wrap_width, count);
+                Push tile_push = emit_constants(visible, 3, grid_x, grid_y, wrap_width, count, gauss_slots);
                 dispatch(emit_, {&gauss_f, &gauss_u, &lo1, &hi1, &val1, &val0, &compact},
                          tile_push, div_up(visible, 256));
+                write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
                 radix_sort(
                     false, instances, lo1, hi1, val1, lo0, hi0, val0,
                     hist, hist_n, tile_bits);
@@ -571,13 +582,13 @@ public:
             bucket_offsets = &grow(
                 bucket_offsets_,
                 static_cast<std::uint64_t>(tiles + scan_scratch_uints(tiles)) * sizeof(std::uint32_t));
-            Push bucket_push = emit_constants(tiles, 5, grid_x, grid_y, wrap_width, count);
+            Push bucket_push = emit_constants(tiles, 5, grid_x, grid_y, wrap_width, count, gauss_slots);
             dispatch(
                 emit_, {&dummy_, &dummy_, &tile_ranges, &dummy_, bucket_offsets, &dummy_, &dummy_},
                 bucket_push, div_up(tiles, 256));
             inclusive_scan(*bucket_offsets, 0, 0, tiles, tiles);
         }
-        write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        write_forward_timestamp(4, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         const std::uint32_t snap_buckets = std::max(bucket_limit, 1u);
         Buffer& out_f = grow(
@@ -626,7 +637,10 @@ public:
         blend_push.u[17] = count;
         blend_push.u[18] = pixels;
         blend_push.u[19] = snap_buckets;
-        dispatch(blend_, {&tile_ranges, instance_values, &gauss_f, &out_f, out_u, bucket_offsets, &snap},
+        const ComputePipeline& blend_pipeline = settings.need_depth
+            ? blend_
+            : (settings.pixel_snapshots && !pack_rgba ? blend_training_ : blend_no_geometry_);
+        dispatch(blend_pipeline, {&tile_ranges, instance_values, &gauss_f, &out_f, out_u, bucket_offsets, &snap},
                  blend_push, grid_x, grid_y);
         if (pack_rgba) {
             Buffer& rgba = grow(
@@ -656,11 +670,13 @@ public:
             source.height = camera.height;
             record_copy_frame_device(source, *destination);
         }
-        write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        write_forward_timestamp(5, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         // Nothing on the host reads this frame, and the fused loss and the
         // backward are queued behind it on the same queue, so the host can
         // record them (and the next view's upload) while the blend still runs.
-        submit_batch(false);
+        // Profiling needs completed timestamp queries before reading them.
+        // Normal rendering keeps the asynchronous submission path.
+        submit_batch(forward_profile_enabled_);
         collect_forward_timestamps();
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
         last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
@@ -858,7 +874,7 @@ public:
         push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
         push.u[13] = !dL_alpha.empty() ? 1u : 0u;
         dispatch(
-            blend_backward_,
+            backward_blend_pipeline(),
             {&tile_ranges_, last_instance_values_, &gauss_f_, &out_f_, &out_u_,
              &bucket_offsets_, &snap_, &loss_color, &loss_alpha, &loss_normal,
              &median_state, &grad},
@@ -901,7 +917,8 @@ public:
         Push push{};
         push.u[0] = count_;
         push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
-                    (raw_chain_ ? 4u : 0u);
+                    (raw_chain_ ? 4u : 0u) |
+                    (last_frame_has_geometry_ ? 16u : 0u);
         push.u[2] = last_mode_;
         push.u[3] = last_width_;
         push.u[4] = last_height_;
@@ -1145,7 +1162,8 @@ public:
         Push project_push{};
         project_push.u[0] = count_;
         project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
-                            (raw_chain_ ? 4u : 0u);
+                            (raw_chain_ ? 4u : 0u) |
+                            (last_frame_has_geometry_ ? 16u : 0u);
         project_push.u[2] = last_mode_; project_push.u[3] = last_width_;
         project_push.u[4] = last_height_; project_push.u[5] = sh_degree_;
         project_push.u[6] = sh_bases_;
@@ -1636,7 +1654,8 @@ public:
         Push project_push{};
         project_push.u[0] = count_;
         project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
-                            (raw_chain_ ? 4u : 0u) | (has_scales_ ? 8u : 0u);
+                            (raw_chain_ ? 4u : 0u) | (has_scales_ ? 8u : 0u) |
+                            (last_frame_has_geometry_ ? 16u : 0u);
         project_push.u[2] = last_mode_;
         project_push.u[3] = last_width_;
         project_push.u[4] = last_height_;
@@ -1835,7 +1854,7 @@ private:
         if (pool != VK_NULL_HANDLE) return true;
         VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        info.queryCount = 4;
+        info.queryCount = 6;
         if (vkCreateQueryPool(context_.device, &info, nullptr, &pool) != VK_SUCCESS)
             throw std::runtime_error("vkCreateQueryPool failed for stage profiling");
         return true;
@@ -1846,16 +1865,16 @@ private:
         if (!forward_profile_enabled_) return;
         begin_batch();
         if (index == 0) {
-            vkCmdResetQueryPool(command_, forward_timestamp_pool_, 0, 4);
+            vkCmdResetQueryPool(command_, forward_timestamp_pool_, 0, 6);
         }
         vkCmdWriteTimestamp(command_, stage, forward_timestamp_pool_, index);
     }
 
     void collect_forward_timestamps() {
         if (!forward_profile_enabled_) return;
-        std::array<std::uint64_t, 4> timestamps{};
+        std::array<std::uint64_t, 6> timestamps{};
         if (vkGetQueryPoolResults(
-                context_.device, forward_timestamp_pool_, 0, 4,
+                context_.device, forward_timestamp_pool_, 0, 6,
                 sizeof(timestamps), timestamps.data(), sizeof(std::uint64_t),
                 VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
             return;
@@ -1863,12 +1882,18 @@ private:
             static_cast<double>(timestamp_period_) / 1.0e6;
         const double counts_ms = static_cast<double>(timestamp_delta(
             timestamps[0], timestamps[1], timestamp_valid_bits_)) * ticks_to_ms;
-        const double sort_ms = static_cast<double>(timestamp_delta(
+        const double depth_sort_ms = static_cast<double>(timestamp_delta(
             timestamps[1], timestamps[2], timestamp_valid_bits_)) * ticks_to_ms;
-        const double blend_ms = static_cast<double>(timestamp_delta(
+        const double expand_ms = static_cast<double>(timestamp_delta(
             timestamps[2], timestamps[3], timestamp_valid_bits_)) * ticks_to_ms;
+        const double tile_sort_ms = static_cast<double>(timestamp_delta(
+            timestamps[3], timestamps[4], timestamp_valid_bits_)) * ticks_to_ms;
+        const double blend_ms = static_cast<double>(timestamp_delta(
+            timestamps[4], timestamps[5], timestamp_valid_bits_)) * ticks_to_ms;
         forward_counts_total_ms_ += counts_ms;
-        forward_sort_total_ms_ += sort_ms;
+        forward_depth_sort_total_ms_ += depth_sort_ms;
+        forward_expand_total_ms_ += expand_ms;
+        forward_tile_sort_total_ms_ += tile_sort_ms;
         forward_blend_total_ms_ += blend_ms;
         ++forward_profile_samples_;
         if (forward_profile_samples_ < forward_profile_interval_) return;
@@ -1876,16 +1901,23 @@ private:
         std::fprintf(
             stderr,
             "splat_vulkan_forward_profile samples=%u gaussians=%u instances=%u "
-            "counts_avg_ms=%.4f sort_avg_ms=%.4f blend_avg_ms=%.4f "
+            "counts_avg_ms=%.4f depth_sort_avg_ms=%.4f expand_avg_ms=%.4f "
+            "tile_sort_avg_ms=%.4f blend_avg_ms=%.4f "
             "total_avg_ms=%.4f\n",
             forward_profile_samples_, count_, last_instances_,
-            forward_counts_total_ms_ / samples, forward_sort_total_ms_ / samples,
+            forward_counts_total_ms_ / samples,
+            forward_depth_sort_total_ms_ / samples,
+            forward_expand_total_ms_ / samples,
+            forward_tile_sort_total_ms_ / samples,
             forward_blend_total_ms_ / samples,
-            (forward_counts_total_ms_ + forward_sort_total_ms_ +
+            (forward_counts_total_ms_ + forward_depth_sort_total_ms_ +
+             forward_expand_total_ms_ + forward_tile_sort_total_ms_ +
              forward_blend_total_ms_) / samples);
         forward_profile_samples_ = 0;
         forward_counts_total_ms_ = 0.0;
-        forward_sort_total_ms_ = 0.0;
+        forward_depth_sort_total_ms_ = 0.0;
+        forward_expand_total_ms_ = 0.0;
+        forward_tile_sort_total_ms_ = 0.0;
         forward_blend_total_ms_ = 0.0;
     }
 
@@ -2157,7 +2189,8 @@ private:
     }
 
     static Push emit_constants(std::uint32_t count, std::uint32_t mode, std::uint32_t grid_x, std::uint32_t grid_y,
-                               int wrap_width, std::uint32_t gaussian_count) {
+                               int wrap_width, std::uint32_t gaussian_count,
+                               std::uint32_t gaussian_slots) {
         Push push{};
         push.u[0] = count;
         push.u[1] = mode;
@@ -2165,6 +2198,7 @@ private:
         push.u[3] = grid_y;
         push.u[4] = static_cast<std::uint32_t>(wrap_width);
         push.u[5] = gaussian_count;
+        push.u[6] = gaussian_slots;
         return push;
     }
 
@@ -2217,6 +2251,8 @@ private:
     ComputePipeline scatter_;
     ComputePipeline ranges_;
     ComputePipeline blend_;
+    ComputePipeline blend_no_geometry_;
+    ComputePipeline blend_training_;
     ComputePipeline median_backward_;
     ComputePipeline blend_backward_;
     ComputePipeline blend_backward_no_geometry_;
@@ -2252,7 +2288,9 @@ private:
     std::uint32_t forward_profile_interval_{100};
     std::uint32_t forward_profile_samples_{};
     double forward_counts_total_ms_{};
-    double forward_sort_total_ms_{};
+    double forward_depth_sort_total_ms_{};
+    double forward_expand_total_ms_{};
+    double forward_tile_sort_total_ms_{};
     double forward_blend_total_ms_{};
     double backward_fill_total_ms_{};
     double backward_blend_total_ms_{};
