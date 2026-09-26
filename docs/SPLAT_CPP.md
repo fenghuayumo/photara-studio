@@ -271,6 +271,67 @@ build\photara\Release\photara.exe `
   and use subgroup prefix products/sums instead of replaying the preceding 31
   entries independently in every lane. Set
   `SPLAT_DRENDER_DISABLE_SUBGROUP_BACKWARD=1` to force the portable fallback.
+- Stage the backward's per-pixel constants 32 pixels at a time, one per lane,
+  instead of having lane 0 load one pixel and the subgroup broadcast it. That
+  tail of the kernel is memory-latency bound: a lane 0 load plus six
+  broadcasts pays a full round trip per pixel and reads one element per
+  transaction, while 32 lane-parallel loads pay one round trip per 32 pixels
+  and read out_u/out_f/loss_color contiguously. Lane j's staged values reach
+  the rest of the subgroup through the same `WaveReadLaneAt` broadcast, so the
+  arithmetic is unchanged. On the glass dataset this cuts the blend backward
+  from 2.90 ms to 2.33 ms per iteration.
+- Do not chase Vulkan forward dispatch count as a proxy for host cost: removing
+  22 dispatches per frame (a single-block scan for the radix histograms) moved
+  neither the host-side stage time nor the step time, so a dispatch is worth
+  about a microsecond, not the ten a per-dispatch model would predict. Measure
+  the stage, not the op count.
+- Do not drain the Vulkan queue at the end of a stage that only feeds later GPU
+  work. The queue is in order, so the next stage already sees the previous one's
+  writes; draining there only stops the host from recording the next stage (and
+  from uploading the next view) while the GPU is still busy. `flush_batch()` is
+  now `submit_batch(true)` and the forward, the fused loss and the backward
+  submit with `wait=false`; the count pass, a loss scalar read and every
+  download still drain, which is also what bounds how far the host can run
+  ahead of the GPU.
+- Anything shared with an in-flight submission has to respect that: the
+  rasterizer keeps a command buffer / fence ring (a submission no longer frees
+  its command buffer to be reset), double buffers the per-frame camera
+  constants, and a growth that replaces a live buffer waits for the queue
+  first. Remeasured drain cost (`splat_vulkan_flush_profile`, temporary
+  instrumentation): 1.19 ms per flush at four flushes per iteration, so the
+  serialization was worth more than the drain call itself.
+- The backward blend's cost was never its subgroup math: disabling only the
+  gradient commit measured 0.08 ms of blend at the glass training scale, so
+  of the 2.2 ms kernel about 2.1 ms was the CAS retry loop in
+  `commit_gradient` - 18M highly contended compare-exchanges per iteration
+  across instances of the same Gaussian. When the device enables
+  `VK_EXT_shader_atomic_float` with `shaderBufferFloat32AtomicAdd` (both the
+  TinyTensor shared device and splat_drender's own device do so when
+  available), the `splat_blend_backward_no_geometry_atomic.hlsl` variant
+  replaces the loop with one `OpAtomicFAddEXT`, emitted through
+  `[[vk::ext_extension("SPV_EXT_shader_atomic_float_add")]]` +
+  `[[vk::ext_capability(6033)]]` + `[[vk::ext_instruction(6035)]]` (the value
+  operands must not be `[[vk::ext_reference]]`, which passes variable ids
+  where the instruction needs constant ids). Blend backward drops 2.19 ->
+  1.66 ms and the whole backward (fill+blend+project) reaches CUDA's number,
+  1.89 vs 1.86-1.90 ms, where CUDA's figure also carries its fused SH Adam.
+  Devices without the extension keep the CAS subgroup shader as fallback.
+- CUDA's diagonal-wavefront backward blend was ported correctly and is not
+  worth landing: `WavePrefixProduct/Sum` lower to single hardware
+  `OpGroupNonUniformF* ExclusiveScan` instructions, so the broadcast+prefix
+  form costs about as many warp instructions as the wavefront's eleven
+  shuffles per step, and the wavefront's serial per-bucket dependency chain
+  gives back what the shuffle count saves. Measured on glass at training
+  scale: 2.42 ms with a correct subgroup-scoped control barrier, 3.3 ms with
+  a workgroup barrier (single- or two-subgroup workgroups), against 2.19 ms
+  for the prefix form. A subgroup-scoped barrier IS spellable in DXC -
+  `OpControlBarrier` via `[[vk::ext_instruction(224)]]` with plain value
+  parameters for scope (3 = Subgroup) and semantics (0x108) - the earlier
+  failed attempt passed them as `[[vk::ext_reference]]` variable ids. Two
+  further reductions did not pay either: folding the staged constants from 13
+  scalar broadcasts into two float4 ones changed nothing (the subgroup math
+  is not the bound), and re-reading the riding constants from L1 per step
+  instead was slower.
 - Record needed Vulkan frame-to-tensor attachment copies in the same command
   buffer as the final blend dispatch, with buffer-scoped compute-to-transfer
   barriers. RGB/alpha copies are skipped for Vulkan training views because the

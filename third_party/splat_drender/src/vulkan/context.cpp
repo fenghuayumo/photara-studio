@@ -15,6 +15,7 @@
 #include "splat_blend_backward.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry.hlsl.embedded.hpp"
 #include "splat_blend_backward_no_geometry_subgroup.hlsl.embedded.hpp"
+#include "splat_blend_backward_no_geometry_atomic.hlsl.embedded.hpp"
 #include "splat_median_backward.hlsl.embedded.hpp"
 #include "splat_multi_view.hlsl.embedded.hpp"
 #include "splat_clear.hlsl.embedded.hpp"
@@ -152,6 +153,10 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     if (shader_name == "splat_blend_backward_no_geometry_subgroup.hlsl.spv") {
         return std::as_bytes(
             std::span{splat_blend_backward_no_geometry_subgroup_hlsl_spv});
+    }
+    if (shader_name == "splat_blend_backward_no_geometry_atomic.hlsl.spv") {
+        return std::as_bytes(
+            std::span{splat_blend_backward_no_geometry_atomic_hlsl_spv});
     }
     if (shader_name == "splat_median_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_median_backward_hlsl_spv});
@@ -523,6 +528,7 @@ void Context::Impl::adopt_external_device(const ExternalDevice& external) {
     queue = external.queue;
     queue_family_index = external.queue_family;
     push_descriptors = external.push_descriptors;
+    buffer_float32_atomic_add = external.buffer_float32_atomic_add;
     device_info = make_device_info(physical_device);
 }
 
@@ -611,6 +617,23 @@ void Context::Impl::create_instance_and_device(const ContextOptions& options) {
     push_descriptors = has_device_extension(physical_device, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     if (push_descriptors) {
         device_extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    }
+#endif
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_enable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
+#ifdef VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME
+    if (has_device_extension(physical_device, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)) {
+        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_query{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 atomic_query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        atomic_query.pNext = &atomic_float_query;
+        vkGetPhysicalDeviceFeatures2(physical_device, &atomic_query);
+        if (atomic_float_query.shaderBufferFloat32AtomicAdd) {
+            device_extensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
+            atomic_float_enable.shaderBufferFloat32AtomicAdd = VK_TRUE;
+            device_create_info.pNext = &atomic_float_enable;
+            buffer_float32_atomic_add = true;
+        }
     }
 #endif
     device_create_info.enabledExtensionCount = static_cast<std::uint32_t>(device_extensions.size());

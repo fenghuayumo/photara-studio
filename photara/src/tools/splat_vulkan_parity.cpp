@@ -451,6 +451,10 @@ int run_benchmark(int argc, char** argv) {
     context_options.external_device.device = tensor_device.device;
     context_options.external_device.queue = tensor_device.queue;
     context_options.external_device.queue_family = tensor_device.queue_family;
+    context_options.external_device.push_descriptors =
+        tinytensor::vulkan::device_info().push_descriptors;
+    context_options.external_device.buffer_float32_atomic_add =
+        tinytensor::vulkan::device_info().buffer_atomic_f32;
     splat_drender::vulkan::Context context(context_options);
     splat_drender::vulkan::SplatRasterizer vulkan(context);
     splat_drender::vulkan::SplatGaussians vulkan_gaussians;

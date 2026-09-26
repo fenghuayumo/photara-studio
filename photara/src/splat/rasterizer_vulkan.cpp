@@ -80,12 +80,16 @@ struct VulkanRasterBackend {
               options.external_device.device = handles.device;
               options.external_device.queue = handles.queue;
               options.external_device.queue_family = handles.queue_family;
-              // TinyTensor creates the shared device and enables push
-              // descriptors on it; the rasterizer records the same way when the
-              // device really has them.
-              options.external_device.push_descriptors =
-                  tinytensor::vulkan::device_info().push_descriptors;
-              return options;
+            // TinyTensor creates the shared device and enables push
+            // descriptors on it; the rasterizer records the same way when the
+            // device really has them.
+            options.external_device.push_descriptors =
+                tinytensor::vulkan::device_info().push_descriptors;
+            // Same for buffer float32 atomic adds: TinyTensor enables the
+            // extension on the shared device when the hardware has it.
+            options.external_device.buffer_float32_atomic_add =
+                tinytensor::vulkan::device_info().buffer_atomic_f32;
+            return options;
           }()),
           rasterizer(context), profile_stages(
               environment_flag("SPLAT_VULKAN_PROFILE_STAGES")) {}

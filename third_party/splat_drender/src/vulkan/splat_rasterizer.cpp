@@ -112,6 +112,17 @@ std::uint32_t environment_interval(
 
 class SplatRasterizer::Impl {
 public:
+    // Command buffer / fence ring: a submission no longer drains the queue, so
+    // the host must not reset a command buffer that is still executing, and the
+    // descriptor sets of the fallback path stay alive until their batch retires.
+    struct BatchSlot {
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        std::vector<VkDescriptorSet> pending_sets;
+        bool in_flight = false;
+    };
+    static constexpr std::uint32_t k_batch_slots = 4;
+
     explicit Impl(Context::Impl& context)
         : context_(context),
           dummy_(context.create_buffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)),
@@ -140,23 +151,31 @@ public:
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))) {
         clear_buffer(dummy_);
+        if (context_.buffer_float32_atomic_add &&
+            !environment_flag("SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD")) {
+            blend_backward_no_geometry_atomic_ = context.create_pipeline(
+                "splat_blend_backward_no_geometry_atomic.hlsl.spv",
+                12, sizeof(Push));
+        }
         create_backward_timestamp_profiler();
         create_forward_timestamp_profiler();
         query_subgroup_properties();
     }
 
     ~Impl() {
-        if (recording_ && command_ != VK_NULL_HANDLE) {
-            vkEndCommandBuffer(command_);
-            recording_ = false;
-        }
-        if (!pending_sets_.empty()) {
-            vkFreeDescriptorSets(
-                context_.device, context_.descriptor_pool,
-                static_cast<std::uint32_t>(pending_sets_.size()), pending_sets_.data());
-        }
-        if (command_ != VK_NULL_HANDLE) {
-            vkFreeCommandBuffers(context_.device, context_.command_pool, 1, &command_);
+        // Pending submissions may still reference these command buffers, their
+        // descriptor sets and the buffers they bound.
+        if (context_.device != VK_NULL_HANDLE) vkDeviceWaitIdle(context_.device);
+        for (BatchSlot& slot : batch_slots_) {
+            release_sets(slot);
+            if (slot.fence != VK_NULL_HANDLE) {
+                vkDestroyFence(context_.device, slot.fence, nullptr);
+                slot.fence = VK_NULL_HANDLE;
+            }
+            if (slot.command != VK_NULL_HANDLE) {
+                vkFreeCommandBuffers(context_.device, context_.command_pool, 1, &slot.command);
+                slot.command = VK_NULL_HANDLE;
+            }
         }
         if (backward_timestamp_pool_ != VK_NULL_HANDLE) {
             vkDestroyQueryPool(context_.device, backward_timestamp_pool_, nullptr);
@@ -388,6 +407,19 @@ public:
         std::uint32_t visible = 0;
     };
 
+    // Hardware float atomics replace the gradient commit's CAS retry loop,
+    // which under per-Gaussian contention costs far more than the blend math
+    // itself; the subgroup CAS and portable forms stay as fallbacks.
+    const ComputePipeline& backward_blend_pipeline() const {
+        if (last_frame_has_geometry_) return blend_backward_;
+        if (subgroup_backward_supported_ && subgroup_size_ == 32u) {
+            return blend_backward_no_geometry_atomic_.handle != VK_NULL_HANDLE
+                ? blend_backward_no_geometry_atomic_
+                : blend_backward_no_geometry_subgroup_;
+        }
+        return blend_backward_no_geometry_;
+    }
+
     // Everything the frame computes, up to the blended image. `pack_rgba` adds
     // the 8-bit conversion to the same command batch, which is what the editor
     // preview hands to its own image.
@@ -406,7 +438,12 @@ public:
         const bool has_sh = has_sh_;
         const bool has_scales = has_scales_;
         // 76 bytes of per-frame constants: the one buffer worth keeping mapped.
-        Buffer& camera_buffer = grow(camera_, 19 * sizeof(float), BufferMemory::host_visible);
+        // Two slots: with the previous frame's dispatches still queued, writing
+        // the camera for this frame into the same memory would race with them.
+        camera_slot_ ^= 1U;
+        frame_camera_ = &camera_[camera_slot_];
+        Buffer& camera_buffer =
+            grow(*frame_camera_, 19 * sizeof(float), BufferMemory::host_visible);
         const std::uint32_t grid_x = div_up(camera.width, k_tile);
         const std::uint32_t grid_y = div_up(camera.height, k_tile);
         const std::uint32_t tiles = grid_x * grid_y;
@@ -620,7 +657,10 @@ public:
             record_copy_frame_device(source, *destination);
         }
         write_forward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        flush_batch();
+        // Nothing on the host reads this frame, and the fused loss and the
+        // backward are queued behind it on the same queue, so the host can
+        // record them (and the next view's upload) while the blend still runs.
+        submit_batch(false);
         collect_forward_timestamps();
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
         last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
@@ -881,7 +921,7 @@ public:
             project_backward_,
             {model_means(), model_opacities(), model_scales(),
              model_rotations(), model_covariances(), model_colors(),
-             descriptor(camera_), descriptor(gauss_f_), descriptor(gauss_u_),
+             descriptor(*frame_camera_), descriptor(gauss_f_), descriptor(gauss_u_),
              descriptor(blend_grad_), model_log_scales(),
              model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
              descriptor(gradient)},
@@ -995,11 +1035,8 @@ public:
             normal_info, descriptor(median_state),
             {packed_gradients.buffer, packed_gradients.offset, gradient_bytes}};
         dispatch_infos(
-            last_frame_has_geometry_ ? blend_backward_
-                                     : (subgroup_backward_supported_ && subgroup_size_ == 32u
-                                            ? blend_backward_no_geometry_subgroup_
-                                            : blend_backward_no_geometry_),
-            infos, push, div_up(last_bucket_limit_, 8));
+            backward_blend_pipeline(), infos, push,
+            div_up(last_bucket_limit_, 8));
         flush_batch();
     }
 
@@ -1047,7 +1084,7 @@ public:
         set_float(push, 15, settings.point_depth_tolerance);
         dispatch(
             sample_depth_,
-            {&tile_ranges_, last_instance_values_, &gauss_f_, &camera_, &points,
+            {&tile_ranges_, last_instance_values_, &gauss_f_, frame_camera_, &points,
              &output_f, &output_u},
             push, div_up(point_count, 256));
         flush_batch();
@@ -1096,7 +1133,7 @@ public:
         set_float(sample_push, 12, last_k3_); set_float(sample_push, 13, last_k4_);
         dispatch(
             sample_depth_backward_,
-            {&tile_ranges_, last_instance_values_, &gauss_f_, &camera_, &sample_points_,
+            {&tile_ranges_, last_instance_values_, &gauss_f_, frame_camera_, &sample_points_,
              &sample_f_, &sample_u_, &loss, &blend_gradient, &point_gradient},
             sample_push, div_up(sample_point_count_, 256));
 
@@ -1119,7 +1156,7 @@ public:
             project_backward_,
             {model_means(), model_opacities(), model_scales(),
              model_rotations(), model_covariances(), model_colors(),
-             descriptor(camera_), descriptor(gauss_f_), descriptor(gauss_u_),
+             descriptor(*frame_camera_), descriptor(gauss_f_), descriptor(gauss_u_),
              descriptor(blend_gradient), model_log_scales(),
              model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
              descriptor(gradient)},
@@ -1462,7 +1499,10 @@ public:
                 : VkDescriptorBufferInfo{mask.buffer, mask.offset, mask_bytes},
             mask.buffer != VK_NULL_HANDLE, width, height,
             ssim_weight, photometric_weight);
-        flush_batch();
+        // The color gradient is consumed by the backward on the same queue, and
+        // read_photometric_loss drains through the context's read path before it
+        // touches the host, so the loss stage does not have to stop here either.
+        submit_batch(false);
         return result;
     }
 
@@ -1584,11 +1624,7 @@ public:
             {dL_color.buffer, dL_color.offset, color_bytes},
             alpha_info, normal_info,
             descriptor(median_state), descriptor(blend_gradient)};
-        const ComputePipeline& blend_pipeline = last_frame_has_geometry_
-            ? blend_backward_
-            : (subgroup_backward_supported_ && subgroup_size_ == 32u
-                   ? blend_backward_no_geometry_subgroup_
-                   : blend_backward_no_geometry_);
+        const ComputePipeline& blend_pipeline = backward_blend_pipeline();
         dispatch_infos(
             blend_pipeline, blend_infos, blend_push,
             div_up(last_bucket_limit_, 8));
@@ -1615,14 +1651,17 @@ public:
         set_float(project_push, 16, last_scale_modifier_);
         std::vector<VkDescriptorBufferInfo> project_infos{
             model_means(), model_opacities(), model_scales(), model_rotations(),
-            model_covariances(), model_colors(), descriptor(camera_), descriptor(gauss_f_),
+            model_covariances(), model_colors(), descriptor(*frame_camera_), descriptor(gauss_f_),
             descriptor(gauss_u_), descriptor(blend_gradient), model_log_scales(),
             model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
             {packed_model_gradients.buffer, packed_model_gradients.offset, model_bytes}};
         dispatch_infos(
             project_backward_, project_infos, project_push, div_up(count_, 256));
         write_backward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        flush_batch();
+        // The packed gradients feed TinyTensor's optimizer batch, which is
+        // queued after this submit; only collect_backward_timestamps (a query
+        // read, gated on its own profiling switch) needs the queue idle.
+        submit_batch(backward_profile_enabled_);
         collect_backward_timestamps();
     }
 
@@ -1937,21 +1976,42 @@ private:
     Buffer& grow(
         Buffer& buffer, VkDeviceSize bytes, const BufferMemory memory = BufferMemory::device_local,
         const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
-        if (buffer.device == VK_NULL_HANDLE || buffer.size < bytes) buffer = alloc(bytes, memory, usage);
+        if (buffer.size < bytes) {
+            drain_before_replace(buffer);
+            buffer = alloc(bytes, memory, usage);
+        }
         return buffer;
     }
 
     void begin_batch() {
         if (recording_) return;
-        if (command_ == VK_NULL_HANDLE) {
+        BatchSlot& slot = batch_slots_[batch_slot_];
+        if (slot.command == VK_NULL_HANDLE) {
             VkCommandBufferAllocateInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
             info.commandPool = context_.command_pool;
             info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
             info.commandBufferCount = 1;
-            if (vkAllocateCommandBuffers(context_.device, &info, &command_) != VK_SUCCESS) {
+            if (vkAllocateCommandBuffers(context_.device, &info, &slot.command) != VK_SUCCESS) {
                 throw std::runtime_error("vkAllocateCommandBuffers failed");
             }
+            VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            if (vkCreateFence(context_.device, &fence_info, nullptr, &slot.fence) != VK_SUCCESS) {
+                throw std::runtime_error("vkCreateFence failed");
+            }
         }
+        // Submissions no longer drain the queue, so a slot may still be running
+        // from kBatchSlots submissions ago. Waiting on its own fence is normally
+        // free: the TinyTensor synchronization each iteration bounds how far the
+        // host can run ahead of the GPU.
+        if (slot.in_flight) {
+            if (vkWaitForFences(context_.device, 1, &slot.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
+                vkResetFences(context_.device, 1, &slot.fence) != VK_SUCCESS) {
+                throw std::runtime_error("Vulkan splat fence wait failed");
+            }
+            slot.in_flight = false;
+            release_sets(slot);
+        }
+        command_ = slot.command;
         if (vkResetCommandBuffer(command_, 0) != VK_SUCCESS) {
             throw std::runtime_error("vkResetCommandBuffer failed");
         }
@@ -1964,24 +2024,57 @@ private:
     }
 
     void flush_batch() {
+        submit_batch(true);
+    }
+
+    // Stages that only feed later GPU work submit without draining: the queue is
+    // in order, so the next stage sees the previous one's writes without the
+    // host stopping to wait for them. That is what lets the next iteration's
+    // host work (image upload, dispatch recording, TinyTensor enqueues) overlap
+    // with the GPU still running the previous stage. A stage whose result the
+    // host reads (the frame counts, a loss scalar, a download) keeps draining.
+    void submit_batch(const bool wait) {
         if (!recording_) return;
+        BatchSlot& slot = batch_slots_[batch_slot_];
         if (vkEndCommandBuffer(command_) != VK_SUCCESS) {
             throw std::runtime_error("vkEndCommandBuffer failed");
         }
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &command_;
-        if (vkQueueSubmit(context_.queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS ||
-            vkQueueWaitIdle(context_.queue) != VK_SUCCESS) {
+        if (vkQueueSubmit(context_.queue, 1, &submit, slot.fence) != VK_SUCCESS) {
             throw std::runtime_error("Vulkan splat submit failed");
         }
-        if (!pending_sets_.empty()) {
-            vkFreeDescriptorSets(
-                context_.device, context_.descriptor_pool,
-                static_cast<std::uint32_t>(pending_sets_.size()), pending_sets_.data());
-            pending_sets_.clear();
-        }
         recording_ = false;
+        slot.in_flight = true;
+        command_ = VK_NULL_HANDLE;
+        if (wait) {
+            if (vkWaitForFences(context_.device, 1, &slot.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
+                vkResetFences(context_.device, 1, &slot.fence) != VK_SUCCESS) {
+                throw std::runtime_error("Vulkan splat fence wait failed");
+            }
+            slot.in_flight = false;
+            release_sets(slot);
+        }
+        batch_slot_ = (batch_slot_ + 1U) % k_batch_slots;
+    }
+
+    // Descriptor sets only exist on the fallback path (devices without
+    // VK_KHR_push_descriptor); they are freed once the batch that used them has
+    // retired.
+    void release_sets(BatchSlot& slot) {
+        if (slot.pending_sets.empty()) return;
+        vkFreeDescriptorSets(
+            context_.device, context_.descriptor_pool,
+            static_cast<std::uint32_t>(slot.pending_sets.size()), slot.pending_sets.data());
+        slot.pending_sets.clear();
+    }
+
+    // Deferred destruction: a recorded batch still holds every buffer handle it
+    // referenced, so a buffer that has to be replaced waits for the queue first.
+    // Only the growth path (warmup, topology changes) pays this.
+    void drain_before_replace(const Buffer& buffer) const {
+        if (buffer.handle != VK_NULL_HANDLE) vkQueueWaitIdle(context_.queue);
     }
 
     void dispatch(const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers, const Push& push,
@@ -2022,7 +2115,7 @@ private:
             if (vkAllocateDescriptorSets(context_.device, &set_info, &descriptor_set) != VK_SUCCESS) {
                 throw std::runtime_error("vkAllocateDescriptorSets failed");
             }
-            pending_sets_.push_back(descriptor_set);
+            batch_slots_[batch_slot_].pending_sets.push_back(descriptor_set);
             for (VkWriteDescriptorSet& write : writes) write.dstSet = descriptor_set;
             vkUpdateDescriptorSets(
                 context_.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
@@ -2125,6 +2218,11 @@ private:
     ComputePipeline blend_backward_;
     ComputePipeline blend_backward_no_geometry_;
     ComputePipeline blend_backward_no_geometry_subgroup_;
+    // Same kernel as the subgroup variant with OpAtomicFAddEXT commits.
+    // Created only when the device enabled VK_EXT_shader_atomic_float with
+    // shaderBufferFloat32AtomicAdd; loading the SPIR-V elsewhere would fail
+    // pipeline creation on the missing capability.
+    ComputePipeline blend_backward_no_geometry_atomic_;
     ComputePipeline sample_depth_;
     ComputePipeline sample_depth_backward_;
     ComputePipeline multi_view_;
@@ -2134,6 +2232,8 @@ private:
     ComputePipeline clear_;
     ComputePipeline pack_;
     VkCommandBuffer command_{};
+    std::array<BatchSlot, k_batch_slots> batch_slots_{};
+    std::uint32_t batch_slot_{};
     VkQueryPool backward_timestamp_pool_{};
     bool backward_profile_enabled_{};
     bool subgroup_backward_supported_{};
@@ -2154,7 +2254,6 @@ private:
     double backward_fill_total_ms_{};
     double backward_blend_total_ms_{};
     double backward_project_total_ms_{};
-    std::vector<VkDescriptorSet> pending_sets_;
     bool recording_{};
     bool model_ready_{};
     bool has_sh_{};
@@ -2175,7 +2274,11 @@ private:
     Buffer filter_3d_;
     SplatDeviceGaussians device_model_{};
     bool device_model_bound_ = false;
-    Buffer camera_;
+    // Per-frame camera constants, double buffered so a frame can be recorded
+    // while the previous one is still queued.
+    Buffer camera_[2];
+    Buffer* frame_camera_ = &camera_[0];
+    std::uint32_t camera_slot_{};
     Buffer gauss_f_;
     Buffer gauss_u_;
     Buffer lo0_;

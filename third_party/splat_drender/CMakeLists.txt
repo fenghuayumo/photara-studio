@@ -63,6 +63,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_blend_backward.hlsl
             shaders/splat_blend_backward_no_geometry.hlsl
             shaders/splat_blend_backward_no_geometry_subgroup.hlsl
+            shaders/splat_blend_backward_no_geometry_atomic.hlsl
             shaders/splat_sample_depth.hlsl
             shaders/splat_sample_depth_backward.hlsl
             shaders/splat_multi_view.hlsl

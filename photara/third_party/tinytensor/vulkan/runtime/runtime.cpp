@@ -559,6 +559,20 @@ void Context::create_device() {
     VkDeviceCreateInfo create{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     create.queueCreateInfoCount = 1;
     create.pQueueCreateInfos = &queue_info;
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_enable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
+#ifdef VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME
+    // Buffer float32 atomic adds let adopted compute libraries (the splat
+    // rasterizer's gradient commit) replace CAS retry loops with one hardware
+    // atomic. info_.buffer_atomic_f32 records support; enabling it here is
+    // what makes the feature legal on the shared device.
+    if (info_.buffer_atomic_f32 &&
+        has_device_extension(physical_, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)) {
+        extensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
+        atomic_float_enable.shaderBufferFloat32AtomicAdd = VK_TRUE;
+        create.pNext = &atomic_float_enable;
+    }
+#endif
     create.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
     create.ppEnabledExtensionNames = extensions.data();
     check(vkCreateDevice(physical_, &create, nullptr, &device_), "vkCreateDevice");

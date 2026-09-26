@@ -251,6 +251,10 @@ struct ExternalDevice {
     // descriptor set, which is the per-dispatch host cost that dominates a
     // frame with a hundred small compute passes.
     bool push_descriptors = false;
+    // Set when the caller created the device with VK_EXT_shader_atomic_float
+    // and shaderBufferFloat32AtomicAdd enabled, so the backward can commit
+    // gradients with hardware float atomics instead of a CAS retry loop.
+    bool buffer_float32_atomic_add = false;
 
     [[nodiscard]] bool valid() const noexcept { return device != VK_NULL_HANDLE; }
 };

@@ -120,6 +120,9 @@ public:
     // VK_KHR_push_descriptor is usable on this device; the rasterizer records
     // its bindings into the command buffer instead of using descriptor sets.
     bool push_descriptors = false;
+    // VK_EXT_shader_atomic_float is enabled with shaderBufferFloat32AtomicAdd,
+    // so the backward blend can commit float gradients with OpAtomicFAddEXT.
+    bool buffer_float32_atomic_add = false;
     PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor = nullptr;
     // An adopted instance/device belongs to the caller and must survive us.
     bool owns_instance = false;
