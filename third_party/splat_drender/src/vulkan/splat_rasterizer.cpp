@@ -1048,7 +1048,10 @@ public:
         const std::uint64_t feature_count = has_sh_
             ? static_cast<std::uint64_t>(count_) * sh_bases_ * 3
             : static_cast<std::uint64_t>(count_) * 3;
-        return feature_count + static_cast<std::uint64_t>(count_) * 26;
+        // Raw scale/rotation models never consume covariance gradients. The
+        // device training layout omits those six zero-only floats per row.
+        return feature_count + static_cast<std::uint64_t>(count_) *
+            (has_scales_ ? 20 : 26);
     }
 
     SplatDepthSamples sample_depth(
@@ -1633,7 +1636,7 @@ public:
         Push project_push{};
         project_push.u[0] = count_;
         project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
-                            (raw_chain_ ? 4u : 0u);
+                            (raw_chain_ ? 4u : 0u) | (has_scales_ ? 8u : 0u);
         project_push.u[2] = last_mode_;
         project_push.u[3] = last_width_;
         project_push.u[4] = last_height_;

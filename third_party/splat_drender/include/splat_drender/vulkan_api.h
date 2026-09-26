@@ -375,9 +375,11 @@ public:
         const SplatBufferView& dL_normal = {});
     [[nodiscard]] std::uint64_t blend_gradient_float_count() const noexcept;
     // Fully device-resident color/alpha backward. The output layout is
-    // [means, SH-or-colors, opacities, scales, rotations, covariances,
-    //  log_scales, raw_rotations, opacity_logits, refine_weight]. Slots that do not apply to
-    // the uploaded representation remain zero, preserving one stable layout.
+    // [means, SH-or-colors, opacities, scales, rotations,
+    //  log_scales, raw_rotations, opacity_logits, refine_weight] for the normal
+    // scale/rotation representation. Covariance-only models retain six
+    // covariance slots between rotations and log_scales. Slots that do not
+    // apply to the uploaded representation remain zero.
     void backward_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
         const SplatBufferView& packed_model_gradients,

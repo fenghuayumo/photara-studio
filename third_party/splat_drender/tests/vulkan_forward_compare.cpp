@@ -1178,7 +1178,6 @@ void tinytensor_interop_case() {
     append(expected_model.opacities);
     append(expected_model.scales);
     append(expected_model.rotations);
-    model_reference.insert(model_reference.end(), 6, 0.0F);
     model_reference.insert(model_reference.end(), 8, 0.0F);
     append(expected_model.refine_weight);
     require(got_model.size() == model_reference.size(), "TinyTensor model gradient layout differs");
@@ -1232,7 +1231,6 @@ void tinytensor_interop_case() {
     append_photo(expected_photo_model.opacities);
     append_photo(expected_photo_model.scales);
     append_photo(expected_photo_model.rotations);
-    photo_model_reference.insert(photo_model_reference.end(), 6, 0.0F);
     photo_model_reference.insert(photo_model_reference.end(), 8, 0.0F);
     append_photo(expected_photo_model.refine_weight);
     require(rel_l2(got_photo_model, photo_model_reference) < 3.0e-4,

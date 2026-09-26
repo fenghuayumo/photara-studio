@@ -621,31 +621,39 @@ int run_benchmark(int argc, char** argv) {
     const std::size_t opacity_offset = feature_offset + feature_count;
     const std::size_t scale_offset = opacity_offset + count;
     const std::size_t rotation_offset = scale_offset + count * 3U;
-    const std::size_t covariance_offset = rotation_offset + count * 4U;
-    const std::size_t log_scale_offset = covariance_offset + count * 6U;
+    const std::size_t log_scale_offset = rotation_offset + count * 4U;
     const std::size_t raw_rotation_offset = log_scale_offset + count * 3U;
     const std::size_t logit_offset = raw_rotation_offset + count * 4U;
-    std::cout << "gradient rel_l2: mean="
-              << relative_l2_slice(
-                     packed_model_gradients, mean_offset,
-                     cuda_reference_gradients.means.to_vector())
-              << " sh="
-              << relative_l2_slice(
-                     packed_model_gradients, feature_offset,
-                     cuda_reference_gradients.sh.to_vector())
-              << " log_scale="
-              << relative_l2_slice(
-                     packed_model_gradients, log_scale_offset,
-                     cuda_reference_gradients.log_scales.to_vector())
-              << " quaternion="
-              << relative_l2_slice(
-                     packed_model_gradients, raw_rotation_offset,
-                     cuda_reference_gradients.quaternions.to_vector())
-              << " opacity_logit="
-              << relative_l2_slice(
-                     packed_model_gradients, logit_offset,
-                     cuda_reference_gradients.opacity_logits.to_vector())
-              << '\n';
+    const double mean_gradient_error = relative_l2_slice(
+        packed_model_gradients, mean_offset,
+        cuda_reference_gradients.means.to_vector());
+    const double sh_gradient_error = relative_l2_slice(
+        packed_model_gradients, feature_offset,
+        cuda_reference_gradients.sh.to_vector());
+    const double scale_gradient_error = relative_l2_slice(
+        packed_model_gradients, log_scale_offset,
+        cuda_reference_gradients.log_scales.to_vector());
+    const double rotation_gradient_error = relative_l2_slice(
+        packed_model_gradients, raw_rotation_offset,
+        cuda_reference_gradients.quaternions.to_vector());
+    const double opacity_gradient_error = relative_l2_slice(
+        packed_model_gradients, logit_offset,
+        cuda_reference_gradients.opacity_logits.to_vector());
+    std::cout << "gradient rel_l2: mean=" << mean_gradient_error
+              << " sh=" << sh_gradient_error
+              << " log_scale=" << scale_gradient_error
+              << " quaternion=" << rotation_gradient_error
+              << " opacity_logit=" << opacity_gradient_error << '\n';
+    // A performance benchmark is also the real-data numerical gate. Mean
+    // has a larger cross-API fast-math error than the other groups; these
+    // limits remain tight enough to catch shader/layout regressions.
+    require(mean_gradient_error < 1.0e-3,
+            "Vulkan mean gradients exceed the CUDA parity tolerance");
+    require(sh_gradient_error < 1.0e-4 &&
+                scale_gradient_error < 1.0e-4 &&
+                rotation_gradient_error < 1.0e-4 &&
+                opacity_gradient_error < 1.0e-4,
+            "Vulkan model gradients exceed the CUDA parity tolerance");
     row("vulkan render_rgba (editor path)", time_ms(
             [&] {
                 std::vector<std::uint8_t> rgba;

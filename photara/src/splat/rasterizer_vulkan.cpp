@@ -311,7 +311,6 @@ ModelGradients vulkan_raster_backward(
     offset += count;       // activated opacity
     offset += count * 3U;  // activated scale
     offset += count * 4U;  // normalized rotation
-    offset += count * 6U;  // covariance
     gradients.log_scales = packed.slice(
         0, offset, offset + count * 3U).reshape(
             tinytensor::TensorShape{count, std::size_t{3}});

@@ -425,6 +425,11 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     bool has_sh = (flags & 1u) != 0u;
     bool has_scales = (flags & 2u) != 0u;
     bool raw_chain = (flags & 4u) != 0u;
+    // Device-resident training consumes raw parameter gradients only. Its
+    // packed output omits the six covariance slots that only apply to models
+    // without scale/rotation parameters. The host/debug path keeps the stable
+    // legacy layout so its download adapter remains unchanged.
+    bool compact_raw_gradients = (flags & 8u) != 0u;
     uint width = pc.u3;
     uint height = pc.u4;
     uint degree = pc.u5;
@@ -445,7 +450,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint scale_base = opacity_base + count;
     uint rotation_base = scale_base + 3u * count;
     uint covariance_base = rotation_base + 4u * count;
-    uint log_scale_base = covariance_base + 6u * count;
+    uint log_scale_base = covariance_base +
+        ((compact_raw_gradients && has_scales) ? 0u : 6u * count);
     uint raw_rotation_base = log_scale_base + 3u * count;
     uint logit_base = raw_rotation_base + 4u * count;
     uint refine_base = logit_base + count;
@@ -464,8 +470,10 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         model_grad[rotation_base + 4u * index + rotation_component] = 0.0f;
         model_grad[raw_rotation_base + 4u * index + rotation_component] = 0.0f;
     }
-    [unroll] for (uint covariance_component = 0u; covariance_component < 6u; ++covariance_component)
-        model_grad[covariance_base + 6u * index + covariance_component] = 0.0f;
+    if (!(compact_raw_gradients && has_scales)) {
+        [unroll] for (uint covariance_component = 0u; covariance_component < 6u; ++covariance_component)
+            model_grad[covariance_base + 6u * index + covariance_component] = 0.0f;
+    }
     model_grad[logit_base + index] = 0.0f;
     model_grad[refine_base + index] = blend_grad[17u * count + index];
     if (gauss_u[3u * count + index] == 0u) return;
