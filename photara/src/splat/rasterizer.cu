@@ -1,6 +1,7 @@
 #include "splat/rasterizer.hpp"
 
 #include "cuda_ops.hpp"
+#include "rasterizer_vulkan.hpp"
 #include "core/vram_profiler.hpp"
 
 #include "splat_drender/api.h"
@@ -230,6 +231,9 @@ void validate_model(
 RenderResult Rasterizer::forward(
     const GaussianModel& model, const Camera& camera,
     const RasterizeOptions& requested_options) const {
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return detail::vulkan_raster_forward(
+            backend_, model, camera, requested_options);
     validate_model(model, requested_options);
     if (camera.width == 0 || camera.height == 0)
         throw std::invalid_argument("Splat camera dimensions must be positive");
@@ -284,6 +288,15 @@ RenderResult Rasterizer::forward(
     return result;
 }
 
+float Rasterizer::photometric_loss(
+    const RenderResult& rendered, const tinytensor::Tensor& target,
+    const tinytensor::Tensor& mask, const bool mask_enabled,
+    const float ssim_weight, const float photometric_weight) const {
+    return detail::vulkan_photometric_loss(
+        rendered, target, mask, mask_enabled,
+        ssim_weight, photometric_weight);
+}
+
 ModelGradients Rasterizer::backward(
     const GaussianModel& model, const RenderResult& rendered,
     const tinytensor::Tensor& grad_color,
@@ -291,6 +304,10 @@ ModelGradients Rasterizer::backward(
     const tinytensor::Tensor& grad_depth,
     const tinytensor::Tensor& grad_normal,
     const tinytensor::Tensor& densify_map, const SHAdamUpdate* sh_adam) const {
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return detail::vulkan_raster_backward(
+            model, rendered, grad_color, grad_alpha, grad_depth, grad_normal,
+            densify_map, sh_adam);
     if (!rendered.context.impl)
         throw std::invalid_argument("Splat backward requires a live forward context");
     const auto& context = *rendered.context.impl;

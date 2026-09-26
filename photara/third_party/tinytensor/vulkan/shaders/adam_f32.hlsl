@@ -12,6 +12,7 @@ struct PushConstants
     float learning_rate;
     float secondary_learning_rate;
     uint group_stride;
+    uint active_row_stride;
     float beta1;
     float beta2;
     float correction1;
@@ -19,6 +20,7 @@ struct PushConstants
     float epsilon;
     float clamp_min;
     float clamp_max;
+    float grouped_rest_regularization;
 };
 
 [[vk::binding(0, 0)]] RWByteAddressBuffer parameter;
@@ -32,12 +34,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
 {
     const uint index = dtid.x;
     if (index >= pc.count) return;
+    if (pc.active_row_stride != 0u &&
+        index % pc.group_stride >= pc.active_row_stride) return;
     const uint p_address = pc.parameter_offset + index * 4u;
     const uint g_address = pc.gradient_offset + index * 4u;
     const uint m_address = pc.first_offset + index * 4u;
     const uint v_address = pc.second_offset + index * 4u;
     const float previous = asfloat(parameter.Load(p_address));
-    const float grad = asfloat(gradient.Load(g_address));
+    float grad = asfloat(gradient.Load(g_address));
+    if (pc.group_stride != 0u && index % pc.group_stride >= 3u)
+        grad += pc.grouped_rest_regularization * previous;
     if (!isfinite(previous) || !isfinite(grad))
     {
         first.Store(m_address, asuint(0.0f));

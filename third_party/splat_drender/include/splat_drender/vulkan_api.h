@@ -112,6 +112,9 @@ struct SplatModelGradients {
     std::vector<float> log_scales;
     std::vector<float> raw_rotations;
     std::vector<float> opacity_logits;
+    // Screen-space projected-mean gradient magnitude used by the shared
+    // densification policy.
+    std::vector<float> refine_weight;
 };
 
 struct SplatDepthSamples {
@@ -163,6 +166,11 @@ struct SplatMultiViewOutput {
     std::vector<float> sampled_point_gradient;     // [P,3]
 };
 
+struct SplatPhotometricOutput {
+    float loss = 0.0F;
+    std::vector<float> gradient;  // [3,H,W]
+};
+
 // Non-owning storage-buffer slice for zero-copy interop (for example with a
 // TinyTensor Vulkan tensor). The caller owns the buffer and must synchronize
 // any earlier writes before calling the rasterizer.
@@ -170,6 +178,48 @@ struct SplatBufferView {
     VkBuffer buffer = VK_NULL_HANDLE;
     std::uint64_t offset = 0;
     std::uint64_t bytes = 0;
+};
+
+// Float32 CHW render attachments that remain in device-local memory. The
+// slices are owned by the rasterizer and remain valid until its next render.
+// Empty geometry slices mean the render used need_depth=false.
+struct SplatDeviceFrame {
+    SplatBufferView color;         // [3,H,W]
+    SplatBufferView alpha;         // [H,W]
+    SplatBufferView normal;        // [3,H,W], optional
+    SplatBufferView median_depth;  // [H,W], optional
+    SplatBufferView radii;         // [N], int32
+    // Raw uint32 contribution flags. A non-zero value means visible.
+    SplatBufferView visibility_bits; // [N], uint32
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    int instance_count = 0;
+    int visible_count = 0;
+};
+
+// Fused L1+SSIM output kept on the Vulkan device. `gradient` is consumed
+// directly by backward_device(); `loss_scalar` contains one reduced float and
+// is intended for the occasional logging readback only.
+struct SplatDevicePhotometricOutput {
+    SplatBufferView gradient;     // [3,H,W]
+    SplatBufferView loss_map;     // [3,H,W]
+    SplatBufferView loss_scalar;  // [1]
+};
+
+// Raw trainable Gaussian parameters owned by the caller. This is the Vulkan
+// counterpart of photara::splat::GaussianModel: activation (exp scales,
+// quaternion normalization and filtered sigmoid opacity) happens in the
+// raster shaders, so Adam can update these exact buffers in place.
+struct SplatDeviceGaussians {
+    SplatBufferView means;           // [N,3]
+    SplatBufferView sh;              // [N,B,3]
+    SplatBufferView log_scales;      // [N,3]
+    SplatBufferView raw_rotations;   // [N,4]
+    SplatBufferView opacity_logits;  // [N]
+    SplatBufferView filter_3d;       // [N]
+    std::uint32_t count = 0;
+    std::uint32_t sh_degree = 0;
+    std::uint32_t sh_bases = 0;
 };
 
 // 8-bit RGBA frame that stayed on the device. The buffer is owned by the
@@ -264,6 +314,9 @@ public:
     // Keeps the activated Gaussian attributes on the device. render() and
     // render_rgba() reuse them until the next upload or clear.
     void upload_model(const SplatGaussians& gaussians);
+    // Zero-copy training model. The caller retains ownership and must keep all
+    // views alive until another model is bound or clear_model() is called.
+    void bind_model_device(const SplatDeviceGaussians& gaussians);
     void update_means_and_opacities(
         std::span<const float> means, std::span<const float> opacities);
     void clear_model();
@@ -271,6 +324,16 @@ public:
 
     [[nodiscard]] SplatForwardOutput render(
         const SplatCamera& camera, const SplatSettings& settings);
+    // Render without downloading color, alpha, depth, normals, visibility or
+    // radii. The returned attachments can feed loss/backward passes directly.
+    [[nodiscard]] SplatDeviceFrame render_device(
+        const SplatCamera& camera, const SplatSettings& settings);
+    // Copies selected attachments into caller-owned VkBuffer slices on the
+    // adopted device. Empty destination slices are skipped. This is the bridge
+    // used by backend-neutral tensor code without staging through the CPU.
+    void copy_frame_device(
+        const SplatDeviceFrame& source,
+        const SplatDeviceFrame& destination);
     // Consumes the most recent render() made with pixel_snapshots=true.
     // Loss images are channel-major: color/normal [3,H,W], alpha/depth [H,W].
     // The geometry losses may be empty only when the matching forward used
@@ -297,7 +360,7 @@ public:
     [[nodiscard]] std::uint64_t blend_gradient_float_count() const noexcept;
     // Fully device-resident color/alpha backward. The output layout is
     // [means, SH-or-colors, opacities, scales, rotations, covariances,
-    //  log_scales, raw_rotations, opacity_logits]. Slots that do not apply to
+    //  log_scales, raw_rotations, opacity_logits, refine_weight]. Slots that do not apply to
     // the uploaded representation remain zero, preserving one stable layout.
     void backward_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
@@ -317,6 +380,26 @@ public:
     // reference unprojection, and feed the reference gradients to backward().
     [[nodiscard]] SplatMultiViewOutput multi_view_loss(
         const SplatMultiViewInput& input);
+    // Host parity/debug adapter. It uploads both images and downloads the
+    // gradient, so training code must use photara/splat/photometric_loss and
+    // fused_l1_ssim_device() instead. Statistics use the CUDA-compatible
+    // zero-padded 11x11 Gaussian window and valid 5-pixel reduction crop.
+    [[nodiscard]] SplatPhotometricOutput photometric_loss(
+        std::span<const float> prediction, std::span<const float> target,
+        std::uint32_t width, std::uint32_t height, float ssim_weight = 0.2F,
+        float photometric_weight = 1.0F,
+        std::span<const float> mask = {});
+    // Low-level device primitive used by photara/splat/photometric_loss. All
+    // views must belong to this Context's VkDevice. No image or gradient is
+    // copied to the host.
+    [[nodiscard]] SplatDevicePhotometricOutput fused_l1_ssim_device(
+        const SplatBufferView& prediction, const SplatBufferView& target,
+        std::uint32_t width, std::uint32_t height, float ssim_weight = 0.2F,
+        float photometric_weight = 1.0F,
+        const SplatBufferView& mask = {});
+    // Reads exactly one float from the most recent device loss result.
+    [[nodiscard]] float read_photometric_loss(
+        const SplatDevicePhotometricOutput& output);
     // Same frame as render() with need_depth off, but the color stays on the
     // device as RGBA8: no float readback and no host-side quantization.
     [[nodiscard]] SplatRgbaImage render_rgba_device(

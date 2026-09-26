@@ -407,6 +407,7 @@ if(PHOTARA_ENABLE_FEATURES)
         add_library(photara_splat_cuda STATIC
             src/splat/rasterizer.cu
             src/splat/cuda_ops.cu
+            src/splat/optimizer.cpp
             src/splat/bilateral_grid.cu
             src/splat/ppisp.cu
             src/splat/cuda_vulkan_preview.cu
@@ -462,6 +463,17 @@ if(PHOTARA_ENABLE_FEATURES)
             ZLIB::ZLIB
             zstd::libzstd)
         target_compile_definitions(photara_splat PUBLIC PHOTARA_HAS_SPLAT=1)
+        if(TARGET splat_drender::vulkan)
+            target_sources(photara_splat_cuda PRIVATE
+                src/splat/optimizer_vulkan.cpp
+                src/splat/rasterizer_vulkan.cpp)
+            target_link_libraries(photara_splat_cuda PUBLIC
+                splat_drender::vulkan)
+            target_compile_definitions(photara_splat_cuda PUBLIC
+                TINYTENSOR_HAS_VULKAN=1)
+            target_sources(photara_splat PRIVATE src/splat/photometric_loss.cpp)
+            target_link_libraries(photara_splat PUBLIC splat_drender::vulkan)
+        endif()
         if(OpenMP_CXX_FOUND)
             target_link_libraries(photara_splat PUBLIC OpenMP::OpenMP_CXX)
             target_compile_definitions(photara_splat PUBLIC PHOTARA_HAS_OPENMP=1)

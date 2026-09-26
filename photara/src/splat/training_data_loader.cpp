@@ -866,9 +866,59 @@ HostTrainingView load_host_training_view(
 }
 
 TrainingView upload_training_view(
-    const HostTrainingView& host, const bool decode_gray) {
+    const HostTrainingView& host, const TrainingOptions& options) {
     TrainingView result;
     result.camera = host.camera;
+    const bool decode_gray = options.multi_view_ncc_weight > 0.F;
+    if (options.backend == TrainingBackend::vulkan) {
+        const std::size_t pixels = host.rgba.size();
+        std::vector<float> rgb(3 * pixels);
+        std::vector<float> gray(decode_gray ? pixels : 0);
+        std::vector<float> mask(host.has_mask ? pixels : 0);
+        constexpr float inverse_255 = 1.F / 255.F;
+        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+            const std::uint32_t value = std::bit_cast<std::uint32_t>(
+                host.rgba[pixel]);
+            const float red = float(value & 0xffU) * inverse_255;
+            const float green = float((value >> 8U) & 0xffU) * inverse_255;
+            const float blue = float((value >> 16U) & 0xffU) * inverse_255;
+            rgb[pixel] = red;
+            rgb[pixels + pixel] = green;
+            rgb[2 * pixels + pixel] = blue;
+            if (decode_gray)
+                gray[pixel] = 0.299F * red + 0.587F * green + 0.114F * blue;
+            if (host.has_mask)
+                mask[pixel] = float((value >> 24U) & 0xffU) * inverse_255;
+        }
+        result.rgb = tinytensor::Tensor::from_vector(
+            rgb, {std::size_t{3}, host.camera.height, host.camera.width},
+            tinytensor::Device::Vulkan);
+        result.gray = decode_gray
+            ? tinytensor::Tensor::from_vector(
+                  gray, {host.camera.height, host.camera.width},
+                  tinytensor::Device::Vulkan)
+            : tinytensor::Tensor::zeros(
+                  {std::size_t{1}}, tinytensor::Device::Vulkan);
+        result.mask = host.has_mask
+            ? tinytensor::Tensor::from_vector(
+                  mask, {host.camera.height, host.camera.width},
+                  tinytensor::Device::Vulkan)
+            : tinytensor::Tensor::zeros(
+                  {std::size_t{1}}, tinytensor::Device::Vulkan);
+        result.depth = host.depth.empty()
+            ? tinytensor::Tensor::zeros({1}, tinytensor::Device::Vulkan)
+            : tinytensor::Tensor::from_vector(
+                  host.depth, {host.camera.height, host.camera.width},
+                  tinytensor::Device::Vulkan);
+        result.normal = host.normal.empty()
+            ? tinytensor::Tensor::zeros({1}, tinytensor::Device::Vulkan)
+            : tinytensor::Tensor::from_vector(
+                  host.normal, {3, host.camera.height, host.camera.width},
+                  tinytensor::Device::Vulkan);
+        result.has_mask = host.has_mask;
+        result.mask_is_validity = host.mask_is_validity;
+        return result;
+    }
     auto decoded = detail::upload_packed_training_pixels(
         host.rgba, host.camera.width, host.camera.height, host.has_mask,
         decode_gray);
@@ -904,7 +954,8 @@ struct TrainingDataLoader::Impl {
                   ? std::size_t{0}
                   : options.training_view_cache_bytes),
           resolution_scale_(resolution_scale) {
-        if (options_.training_async_upload &&
+        if (options_.backend == TrainingBackend::cuda &&
+            options_.training_async_upload &&
             options_.training_device_cache_bytes != 0) {
             const cudaError_t error = cudaStreamCreateWithFlags(
                 &copy_stream_, cudaStreamNonBlocking);
@@ -957,6 +1008,13 @@ struct TrainingDataLoader::Impl {
         ++requests_;
         note_request_cadence();
         collect_ready_host_prefetches();
+        if (options_.backend == TrainingBackend::vulkan) {
+            const bool host_resident = lookup_.contains(index);
+            const HostTrainingView& host = host_view(index);
+            if (host_resident) ++host_hits_;
+            uploaded_bytes_ += packed_host_bytes(host);
+            return upload_training_view(host, options_);
+        }
         const auto found = device_lookup_.find(index);
         if (found != device_lookup_.end()) {
             ++device_hits_;
@@ -993,11 +1051,9 @@ struct TrainingDataLoader::Impl {
             sizeof(float) * (host.depth.size() + host.normal.size());
         uploaded_bytes_ += bytes;
         if (device_capacity_bytes_ == 0 || bytes > device_capacity_bytes_)
-            return upload_training_view(
-                host, options_.multi_view_ncc_weight > 0.F);
+            return upload_training_view(host, options_);
         if (!make_room_for_device_bytes(bytes))
-            return upload_training_view(
-                host, options_.multi_view_ncc_weight > 0.F);
+            return upload_training_view(host, options_);
         DeviceEntry entry = allocate_device_entry(
             index, host.camera, host.has_mask, host.mask_is_validity,
             !host.depth.empty(), !host.normal.empty());
@@ -1119,6 +1175,7 @@ struct TrainingDataLoader::Impl {
     }
 
     void ensure_device_headroom(const std::size_t bytes) {
+        if (options_.backend == TrainingBackend::vulkan) return;
         if (bytes == 0) return;
         std::size_t free_bytes{}, total_bytes{};
         if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess ||
@@ -1908,6 +1965,16 @@ private:
                     view, options_, resolution_scale_));
         }
 
+        // Vulkan views are uploaded as ordinary TinyTensor tensors on demand.
+        // The host cache and prefetch policy stay shared; the CUDA-only packed
+        // image cache/stream is deliberately bypassed.
+        if (options_.backend == TrainingBackend::vulkan) {
+            capacity_bytes_ = options_.training_view_cache_bytes;
+            device_capacity_bytes_ = 0;
+            device_ceiling_bytes_ = 0;
+            return;
+        }
+
         if (!options_.adaptive_training_cache) {
             capacity_bytes_ = options_.training_view_cache_bytes;
             device_capacity_bytes_ = 0;
@@ -2066,8 +2133,7 @@ Camera camera_from_mvs_view(const mvs::MvsView& view) {
 TrainingView make_training_view(
     const mvs::MvsView& view, const TrainingOptions& options) {
     return upload_training_view(
-        load_host_training_view(view, options, 1.F),
-        options.multi_view_ncc_weight > 0.F);
+        load_host_training_view(view, options, 1.F), options);
 }
 
 }  // namespace photara::splat

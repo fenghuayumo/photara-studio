@@ -225,6 +225,39 @@ void test_fused_adam() {
                         "fused Adam non-finite first guard");
     require_vector_near(bad_second.to_vector(), {0.F, 0.F}, 1e-6F,
                         "fused Adam non-finite second guard");
+
+    auto prefix_parameter = Tensor::from_vector(
+        std::vector<float>{1.F, 2.F, 3.F, 4.F, 5.F, 6.F,
+                           7.F, 8.F, 9.F, 10.F, 11.F, 12.F},
+        {2, 6}, Device::Vulkan);
+    auto prefix_gradient = Tensor::from_vector(
+        std::vector<float>(12, 0.5F), {2, 6}, Device::Vulkan);
+    auto prefix_first = Tensor::zeros({2, 6}, Device::Vulkan);
+    auto prefix_second = Tensor::zeros({2, 6}, Device::Vulkan);
+    vulkan::AdamStepOptions prefix_options;
+    prefix_options.learning_rate = 0.01F;
+    prefix_options.secondary_learning_rate = 0.02F;
+    prefix_options.group_stride = 6;
+    prefix_options.active_row_stride = 3;
+    prefix_options.correction1 = 0.1F;
+    prefix_options.correction2 = 0.001F;
+    vulkan::adam_step(prefix_parameter, prefix_gradient, prefix_first,
+                      prefix_second, prefix_options);
+    require_vector_near(
+        prefix_parameter.to_vector(),
+        {0.99F, 1.99F, 2.99F, 4.F, 5.F, 6.F,
+         6.99F, 7.99F, 8.99F, 10.F, 11.F, 12.F},
+        2e-5F, "active-prefix Adam parameter");
+    require_vector_near(
+        prefix_first.to_vector(),
+        {0.05F, 0.05F, 0.05F, 0.F, 0.F, 0.F,
+         0.05F, 0.05F, 0.05F, 0.F, 0.F, 0.F},
+        1e-6F, "active-prefix Adam first moment");
+    require_vector_near(
+        prefix_second.to_vector(),
+        {0.00025F, 0.00025F, 0.00025F, 0.F, 0.F, 0.F,
+         0.00025F, 0.00025F, 0.00025F, 0.F, 0.F, 0.F},
+        1e-7F, "active-prefix Adam second moment");
 }
 
 void test_matmul_cat_and_indexing() {

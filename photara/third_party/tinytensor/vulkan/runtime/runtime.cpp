@@ -182,7 +182,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
     using std::as_bytes;
     using std::span;
     return {{
-        {ShaderId::AdamF32, as_bytes(span{adam_f32_hlsl_spv}), 4, 60},
+        {ShaderId::AdamF32, as_bytes(span{adam_f32_hlsl_spv}), 4, 64},
         {ShaderId::Elementwise, as_bytes(span{elementwise_hlsl_spv}), 4, 72},
         {ShaderId::FusedPointwise, as_bytes(span{fused_pointwise_hlsl_spv}), 3, 16},
         {ShaderId::StridedCopy, as_bytes(span{strided_copy_hlsl_spv}), 2, 96},

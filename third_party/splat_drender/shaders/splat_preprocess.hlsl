@@ -44,6 +44,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint flags = pc.u3;
     bool has_sh = (flags & 1u) != 0;
     bool has_scales = (flags & 2u) != 0;
+    bool raw_parameters = (flags & 32u) != 0;
 
     float3 mean = float3(means[3 * index], means[3 * index + 1], means[3 * index + 2]);
     float3 t = xform_point(mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
@@ -53,9 +54,27 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float3 scale = 0.0f;
     float4 rotation = float4(1.0f, 0.0f, 0.0f, 0.0f);
     float c0 = 0.0f, c1 = 0.0f, c2 = 0.0f, c3 = 0.0f, c4 = 0.0f, c5 = 0.0f;
+    float opacity = opacities[index];
     if (has_scales) {
-        scale = float3(scales[3 * index], scales[3 * index + 1], scales[3 * index + 2]);
-        rotation = float4(rotations[4 * index], rotations[4 * index + 1], rotations[4 * index + 2], rotations[4 * index + 3]);
+        if (raw_parameters) {
+            float filter_squared = covariances[index] * covariances[index];
+            float determinant_ratio = 1.0f;
+            [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
+                uint offset = 3u * index + axis;
+                float raw_scale = exp(scales[offset]);
+                float filtered_scale = sqrt(raw_scale * raw_scale + filter_squared);
+                scale[axis] = filtered_scale;
+                determinant_ratio *= raw_scale / filtered_scale;
+            }
+            rotation = float4(
+                rotations[4u * index], rotations[4u * index + 1u],
+                rotations[4u * index + 2u], rotations[4u * index + 3u]);
+            rotation *= rsqrt(max(dot(rotation, rotation), 1.0e-20f));
+            opacity = (1.0f / (1.0f + exp(-opacity))) * determinant_ratio;
+        } else {
+            scale = float3(scales[3 * index], scales[3 * index + 1], scales[3 * index + 2]);
+            rotation = float4(rotations[4 * index], rotations[4 * index + 1], rotations[4 * index + 2], rotations[4 * index + 3]);
+        }
     } else {
         uint base = 6 * index;
         c0 = covariances[base];
@@ -82,7 +101,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     if (det == 0.0f) return;
     float det_inv = 1.0f / det;
     float4 conic = float4(geom.cov2 * det_inv, -geom.cov1 * det_inv, geom.cov0 * det_inv,
-                          opacities[index] * geom.coef);
+                          opacity * geom.coef);
     float mid = 0.5f * (geom.cov0 + geom.cov2);
     float root = sqrt(max(0.1f, mid * mid - det));
     float radius = ceil(3.0f * sqrt(max(mid + root, mid - root)));

@@ -1935,16 +1935,16 @@ namespace tinytensor {
                 }
             }
 
-            LOG_DEBUG("  ← Returning IN-PLACE result: id={}, data_ptr={}, capacity={}",
-                      result.id_, result.data_ptr(), result.capacity());
+            LOG_DEBUG("  ← Returning IN-PLACE result: id={}, storage={}, capacity={}",
+                      result.id_, result.data_, result.capacity());
             return result;
         }
 
         // ============= FALLBACK: Standard allocation path =============
         LOG_DEBUG("  → SLOW PATH: Allocating new buffer");
         auto result = Tensor::empty(TensorShape(result_dims), first_device, first_dtype);
-        LOG_DEBUG("  Created new tensor: id={}, data_ptr={}, capacity={}",
-                  result.id_, result.data_ptr(), result.capacity());
+        LOG_DEBUG("  Created new tensor: id={}, storage={}, capacity={}",
+                  result.id_, result.data_, result.capacity());
 
 #ifdef TINYTENSOR_HAS_VULKAN
         if (first_device == Device::Vulkan) {

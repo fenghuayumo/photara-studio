@@ -85,6 +85,10 @@ struct RasterContextImpl;
 
 struct RasterContext {
     std::shared_ptr<RasterContextImpl> impl;
+    // Backend-owned opaque state. CUDA continues to use impl; Vulkan keeps
+    // its device frame/loss state here without leaking Vulkan types into the
+    // public model and trainer API.
+    std::shared_ptr<void> backend_impl;
 };
 
 struct RenderResult {

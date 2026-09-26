@@ -2,6 +2,7 @@
 
 #include "splat/options.hpp"
 #include "splat/types.hpp"
+#include "optimizer.hpp"
 
 #include <array>
 #include <cstdint>
@@ -32,11 +33,6 @@ struct DecodedTrainingPixels {
     tinytensor::Tensor rgb;
     tinytensor::Tensor gray;
     tinytensor::Tensor mask;
-};
-
-struct AdamState {
-    tinytensor::Tensor first;
-    tinytensor::Tensor second;
 };
 
 struct DensificationStats {
@@ -211,47 +207,9 @@ void add_model_gradients(
     const ModelGradients& source, ModelGradients& destination,
     bool include_refine_weight = false);
 
-AdamState make_adam_state(const tinytensor::Tensor& parameter);
-
-// Keep a full first moment but only one second-moment scalar per row. This is
-// the storage layout used by Brush's AdamScaled for SH coefficients.
-AdamState make_reduced_second_adam_state(
-    const tinytensor::Tensor& parameter);
-
-void adam_step(
-    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
-    AdamState& state, float learning_rate, unsigned step,
-    const TrainingOptions& options, std::size_t group_stride = 0,
-    float secondary_learning_rate = 0.F,
-    float clamp_min = -std::numeric_limits<float>::infinity(),
-    float clamp_max = std::numeric_limits<float>::infinity());
-
-// Update independent structure groups and project the scale ratio in one launch.
-void adam_step_structure(GaussianModel& model, const ModelGradients& gradient,
-    AdamState& means, AdamState& scales, AdamState& rotations, AdamState& opacity,
-    float means_lr, unsigned step, const TrainingOptions& options,
-    float minimum_log_scale, float maximum_log_scale);
-
-// brush AdamScaled shares the second moment across every trailing SH
-// coefficient of a Gaussian while retaining a per-coefficient first moment.
-void adam_step_reduced_second(
-    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
-    AdamState& state, float learning_rate, unsigned step,
-    const TrainingOptions& options, std::size_t row_stride,
-    float secondary_learning_rate);
-
-// Update only the leading active_row_stride values of each logical row.
-// This avoids reading and writing inactive higher-order SH coefficients.
-void adam_step_active_prefix(
-    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
-    AdamState& state, float learning_rate, unsigned step,
-    const TrainingOptions& options, std::size_t full_row_stride,
-    std::size_t active_row_stride, float secondary_learning_rate);
-
-void constrain_scale_ratio(
-    tinytensor::Tensor& log_scales, float maximum_ratio);
-
-DensificationStats make_densification_stats(std::size_t count);
+DensificationStats make_densification_stats(
+    std::size_t count,
+    tinytensor::Device device = tinytensor::Device::CUDA);
 
 void add_sh_regularization(const tinytensor::Tensor& sh,
     tinytensor::Tensor& gradient, float weight);

@@ -132,6 +132,7 @@ struct ReconstructCli {
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
     std::filesystem::path dense_ply;
+    std::string backend{"cuda"};
     unsigned splat_iterations{10'000};
     unsigned splat_log_interval{100};
     unsigned splat_preview_interval{0};
@@ -654,8 +655,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false"))
         ("dense", "Run Fast MVS densify after SfM",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("splat", "Train CUDA Gaussian splats directly from SfM sparse points",
+        ("splat", "Train Gaussian splats directly from SfM sparse points",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("backend", "Splat training GPU backend: cuda or vulkan",
+         cxxopts::value<std::string>()->default_value("cuda"))
         ("splat-view",
          "Orbit-preview a trained splat from --splat-preview-camera-file",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -1207,6 +1210,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.lightglue_cpu = result["lightglue-cpu"].as<bool>();
     cli.dense = result["dense"].as<bool>();
     cli.splat = result["splat"].as<bool>();
+    cli.backend = result["backend"].as<std::string>();
+    if (cli.backend != "cuda" && cli.backend != "vulkan")
+        throw std::invalid_argument("--backend must be cuda or vulkan");
     cli.splat_view = result["splat-view"].as<bool>();
     cli.splat_mesh_only = result["splat-mesh-only"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
@@ -2955,6 +2961,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     if (cli.splat_mesh_only)
         photara::core::Logger::instance().info("splat_mesh_only=1");
     photara::splat::TrainingOptions options;
+    options.backend = cli.backend == "vulkan"
+        ? photara::splat::TrainingBackend::vulkan
+        : photara::splat::TrainingBackend::cuda;
     options.iterations = cli.splat_iterations;
     options.log_interval = cli.splat_log_interval;
     options.preview_interval = cli.splat_preview_interval;

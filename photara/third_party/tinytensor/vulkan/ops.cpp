@@ -218,17 +218,23 @@ void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor&
     if (!(options.correction1 > 0.0F) || !(options.correction2 > 0.0F) ||
         options.clamp_min > options.clamp_max)
         throw std::invalid_argument("Vulkan Adam received invalid correction or clamp bounds");
+    if (options.active_row_stride != 0 &&
+        (options.group_stride == 0 ||
+         options.active_row_stride > options.group_stride))
+        throw std::invalid_argument("Vulkan Adam received invalid active row stride");
     struct Push {
         std::uint32_t count, parameter_offset, gradient_offset, first_offset, second_offset;
         float learning_rate, secondary_learning_rate;
-        std::uint32_t group_stride;
+        std::uint32_t group_stride, active_row_stride;
         float beta1, beta2, correction1, correction2, epsilon, clamp_min, clamp_max;
+        float grouped_rest_regularization;
     } push{u32(parameter.numel()), u32(byte_offset(parameter)), u32(byte_offset(gradient)),
            u32(byte_offset(first)), u32(byte_offset(second)), options.learning_rate,
-           options.secondary_learning_rate, options.group_stride, options.beta1, options.beta2,
+           options.secondary_learning_rate, options.group_stride,
+           options.active_row_stride, options.beta1, options.beta2,
            options.correction1, options.correction2, options.epsilon, options.clamp_min,
-           options.clamp_max};
-    static_assert(sizeof(Push) == 60);
+           options.clamp_max, options.grouped_rest_regularization};
+    static_assert(sizeof(Push) == 68);
     std::array<BufferBinding, 4> bindings{
         bind(parameter), bind(gradient), bind(first), bind(second)};
     Context::get().dispatch(

@@ -4,6 +4,10 @@
 #include "splat/formats.hpp"
 #include "splat/rasterizer.hpp"
 #include "splat/trainer.hpp"
+#include "../splat/optimizer.hpp"
+#include "../splat/photometric_loss.hpp"
+#include "../splat/training_data_loader.hpp"
+#include "../splat/densification.hpp"
 #include "sfm/asfm.hpp"
 
 #include "splat_drender/vulkan_api.h"
@@ -20,6 +24,7 @@
 #include <fstream>
 #include <iostream>
 #include <numeric>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -40,6 +45,8 @@
 // COLMAP dataset next to IMAGES is used.
 
 namespace {
+
+void require(bool condition, const std::string& message);
 
 struct Image {
     std::uint32_t width = 0;
@@ -756,7 +763,16 @@ int run_train_smoke(int argc, char** argv) {
             determinant_ratio;
     }
 
-    splat_drender::vulkan::Context context;
+    require(tinytensor::vulkan::available(),
+            "TinyTensor Vulkan backend is unavailable");
+    const auto handles = tinytensor::vulkan::device_handles();
+    splat_drender::vulkan::ContextOptions context_options;
+    context_options.external_device.instance = handles.instance;
+    context_options.external_device.physical_device = handles.physical_device;
+    context_options.external_device.device = handles.device;
+    context_options.external_device.queue = handles.queue;
+    context_options.external_device.queue_family = handles.queue_family;
+    splat_drender::vulkan::Context context(context_options);
     splat_drender::vulkan::SplatRasterizer rasterizer(context);
     splat_drender::vulkan::SplatGaussians gaussians;
     gaussians.means = means;
@@ -844,6 +860,7 @@ int run_train_smoke(int argc, char** argv) {
               << (output / "vulkan_train_smoke.txt").string() << '\n';
     return 0;
 }
+
 
 }  // namespace
 

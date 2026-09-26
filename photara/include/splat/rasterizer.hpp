@@ -35,6 +35,16 @@ public:
         const GaussianModel& model, const Camera& camera,
         const RasterizeOptions& options = {}) const;
 
+    // Fused training objective primitive. The Vulkan implementation keeps the
+    // image gradient in its render context for backward(); CUDA training keeps
+    // using the existing fused loss path.
+    float photometric_loss(
+        const RenderResult& rendered,
+        const tinytensor::Tensor& target,
+        const tinytensor::Tensor& mask,
+        bool mask_enabled, float ssim_weight,
+        float photometric_weight) const;
+
     ModelGradients backward(
         const GaussianModel& model, const RenderResult& rendered,
         const tinytensor::Tensor& grad_color,
@@ -60,6 +70,9 @@ public:
 
     // Packed [N,2] xy pixel centres from the last forward, or null.
     const float* projected_mean2d(const RenderResult& rendered) const;
+
+private:
+    mutable std::shared_ptr<void> backend_;
 };
 
 }  // namespace photara::splat

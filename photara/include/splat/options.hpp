@@ -7,6 +7,11 @@
 
 namespace photara::splat {
 
+enum class TrainingBackend {
+    cuda,
+    vulkan,
+};
+
 enum class AlphaMode {
     masked,
     transparent,
@@ -50,6 +55,9 @@ enum class PpispParamType {
 }
 
 struct TrainingOptions {
+    // The orchestration, schedules and optimizer policy are shared. Only GPU
+    // primitives (upload/raster/loss/backward/Adam) dispatch on this value.
+    TrainingBackend backend{TrainingBackend::cuda};
     unsigned iterations{10'000};
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};

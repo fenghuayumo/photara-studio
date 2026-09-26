@@ -46,6 +46,9 @@ struct AdamStepOptions {
     float learning_rate = 1e-3F;
     float secondary_learning_rate = 0.0F;
     std::uint32_t group_stride = 0;
+    // When non-zero, indices whose column within group_stride is outside this
+    // prefix are left completely untouched, including both moments.
+    std::uint32_t active_row_stride = 0;
     float beta1 = 0.9F;
     float beta2 = 0.999F;
     float correction1 = 1.0F;
@@ -53,6 +56,9 @@ struct AdamStepOptions {
     float epsilon = 1e-8F;
     float clamp_min = -std::numeric_limits<float>::infinity();
     float clamp_max = std::numeric_limits<float>::infinity();
+    // Optional L2 gradient applied to non-DC columns (column >= 3) of each
+    // group. Used by shared 3DGS SH regularization without a temporary tensor.
+    float grouped_rest_regularization = 0.0F;
 };
 
 // True when the library was built with TINYTENSOR_HAS_VULKAN and a compute

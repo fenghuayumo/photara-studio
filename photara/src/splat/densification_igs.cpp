@@ -31,6 +31,32 @@ float positive_upper_median(
     return value.empty() ? 0.F : value.front();
 }
 
+tinytensor::Tensor weighted_gumbel_sample(
+    const tinytensor::Tensor& weights, const std::size_t requested,
+    std::mt19937& random) {
+    if (requested == 0 || weights.numel() == 0) return {};
+    const auto values = weights.to_vector();
+    std::uniform_real_distribution<float> uniform(1e-7F, 1.F - 1e-7F);
+    std::vector<std::pair<float, int>> scores;
+    scores.reserve(values.size());
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        const float weight = values[index];
+        if (!std::isfinite(weight) || !(weight > 0.F)) continue;
+        const float u = uniform(random);
+        scores.emplace_back(
+            std::log(weight) - std::log(-std::log(u)),
+            static_cast<int>(index));
+    }
+    const std::size_t count = std::min(requested, scores.size());
+    if (count == 0) return {};
+    std::partial_sort(scores.begin(), scores.begin() +
+        static_cast<std::ptrdiff_t>(count), scores.end(), std::greater<>());
+    std::vector<int> indices(count);
+    for (std::size_t i = 0; i < count; ++i) indices[i] = scores[i].second;
+    return tinytensor::Tensor::from_vector(
+        indices, {count}, weights.device());
+}
+
 }  // namespace
 
 IgsSelection select_igs_parents(
@@ -38,12 +64,16 @@ IgsSelection select_igs_parents(
     const tinytensor::Tensor& oversize_scores,
     const tinytensor::Tensor& growth_weights,
     const std::size_t replacement_slots, const std::size_t desired_growth,
-    const std::size_t capacity) {
+    const std::size_t capacity, std::mt19937* random) {
     IgsSelection result;
+    const auto device = replacement_weights.device();
+    std::mt19937 fallback_random(0);
+    std::mt19937& selection_random = random ? *random : fallback_random;
     auto chosen = tinytensor::Tensor::zeros_bool(
-        {replacement_weights.numel()}, tinytensor::Device::CUDA);
-    const auto replacement = gpu_detail::weighted_sample_without_replacement(
-        replacement_weights, std::min(replacement_slots, capacity));
+        {replacement_weights.numel()}, device);
+    const auto replacement = weighted_gumbel_sample(
+        replacement_weights, std::min(replacement_slots, capacity),
+        selection_random);
     result.replacement = replacement.numel();
     if (result.replacement) chosen.index_fill_(0, replacement, 1.F);
     std::size_t remaining = capacity - result.replacement;
@@ -63,9 +93,9 @@ IgsSelection select_igs_parents(
         }
     }
     if (remaining && desired_growth && growth_weights.is_valid()) {
-        const auto growth = gpu_detail::weighted_sample_without_replacement(
+        const auto growth = weighted_gumbel_sample(
             growth_weights.masked_fill(chosen, 0.F),
-            std::min(remaining, desired_growth));
+            std::min(remaining, desired_growth), selection_random);
         result.growth = growth.numel();
         if (result.growth) chosen.index_fill_(0, growth, 1.F);
     }
@@ -117,7 +147,7 @@ RefinementCounts IgsStrategy::refine(
                 std::numeric_limits<float>::infinity());
             auto sorted = ranked.sort(0, false);
             auto recycled = tinytensor::Tensor::zeros_bool(
-                {old_count}, tinytensor::Device::CUDA);
+                {old_count}, model.means.device());
             recycled.index_fill_(
                 0,
                 sorted.second.slice(0, 0, drop).to(
@@ -138,7 +168,7 @@ RefinementCounts IgsStrategy::refine(
         .nonzero().squeeze(1).slice(0, 0, 1)
         .to(tinytensor::DataType::Int32);
     auto best_mask = tinytensor::Tensor::zeros_bool(
-        {old_count}, tinytensor::Device::CUDA);
+        {old_count}, model.means.device());
     if (best.numel() != 0) best_mask.index_fill_(0, best, 1.F);
     keep = keep.logical_or(best_mask.logical_and(masks.hard.logical_not()));
 
@@ -156,7 +186,7 @@ RefinementCounts IgsStrategy::refine(
                 std::numeric_limits<float>::infinity());
             auto sorted = ranked.sort(0, false);
             auto clamped = tinytensor::Tensor::zeros_bool(
-                {old_count}, tinytensor::Device::CUDA);
+                {old_count}, model.means.device());
             clamped.index_fill_(
                 0,
                 sorted.second.slice(0, 0, remove).to(
@@ -191,7 +221,8 @@ RefinementCounts IgsStrategy::refine(
     };
     if (capacity == 0) {
         decay_adc();
-        stats = detail::make_densification_stats(model.size());
+        stats = detail::make_densification_stats(
+            model.size(), model.means.device());
         return {0, pruned};
     }
 
@@ -224,18 +255,20 @@ RefinementCounts IgsStrategy::refine(
 
     tinytensor::Tensor growth_weights;
     std::size_t desired_growth = 0;
+    std::size_t growth_candidates = 0;
     if (allow_growth) {
         const auto growth_mask = candidate.logical_and(
             retained_gradient.gt(options.densify_gradient_threshold));
+        growth_candidates = growth_mask.count_nonzero();
         // On-screen oversize rows are sampled twice as often as the rest.
         const auto screen_factor = tinytensor::Tensor::full(
-            {retained}, 1.F, tinytensor::Device::CUDA)
+            {retained}, 1.F, model.means.device())
             .masked_fill(oversized, 2.F);
         growth_weights = retained_gradient.mul(edge_factor)
             .mul(screen_factor)
             .masked_fill(growth_mask.logical_not(), 0.F);
         desired_growth = static_cast<std::size_t>(std::llround(
-            static_cast<double>(growth_mask.count_nonzero()) *
+            static_cast<double>(growth_candidates) *
             static_cast<double>(options.densify_select_fraction)));
     }
 
@@ -245,13 +278,15 @@ RefinementCounts IgsStrategy::refine(
         ? retained_screen.mul(edge_factor).masked_fill(oversized.logical_not(), 0.F)
         : tinytensor::Tensor{};
     const auto selection = select_igs_parents(replacement_weights,
-        oversize_scores, growth_weights, pruned, desired_growth, capacity);
+        oversize_scores, growth_weights, pruned, desired_growth, capacity,
+        &random);
     const auto& split_parents = selection.parents;
     const std::size_t grown = split_parents.numel();
     gpu_detail::grow_igs_random_gpu(
         model, split_parents, retained_screen, options, random, states);
     decay_adc();
-    stats = detail::make_densification_stats(model.size());
+    stats = detail::make_densification_stats(
+        model.size(), model.means.device());
 
     core::Logger::instance().info(
         "igs_refine iteration=", iteration,
@@ -261,6 +296,8 @@ RefinementCounts IgsStrategy::refine(
         " replacement_selected=", selection.replacement,
         " oversized_candidates=", oversized_count,
         " oversized_selected=", selection.oversized,
+        " growth_candidates=", growth_candidates,
+        " gradient_threshold=", options.densify_gradient_threshold,
         " growth_selected=", selection.growth,
         " grown=", grown,
         " capacity=", capacity,

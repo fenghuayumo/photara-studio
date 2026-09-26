@@ -3,6 +3,8 @@
 #include <splat_drender/vulkan_api.h>
 #include <splat_drender/api.h>
 #include "../../../photara/src/splat/cuda_ops.hpp"
+#include "../../../photara/src/splat/optimizer.hpp"
+#include "../../../photara/src/splat/photometric_loss.hpp"
 #include "internal/tensor_impl.hpp"
 #include "vulkan/backend.hpp"
 
@@ -852,6 +854,48 @@ void multi_view_loss_case() {
             "Vulkan multi-view loss ignored the foreground masks");
 }
 
+void ssim_loss_case() {
+    constexpr std::uint32_t width = 37;
+    constexpr std::uint32_t height = 29;
+    constexpr std::size_t pixels = width * height;
+    Rng random{0x5a17c9e3u};
+    std::vector<float> prediction(3 * pixels);
+    std::vector<float> target(3 * pixels);
+    std::vector<float> mask(pixels, 1.0F);
+    for (std::size_t i = 0; i < prediction.size(); ++i) {
+        prediction[i] = random.next();
+        target[i] = random.next();
+    }
+    for (std::uint32_t y = 0; y < height; ++y)
+        for (std::uint32_t x = 0; x < width; ++x)
+            if ((x + 2 * y) % 11 == 0) mask[static_cast<std::size_t>(y) * width + x] = 0.0F;
+    const auto cuda_prediction = tinytensor::Tensor::from_vector(
+        prediction, {3U, height, width}, tinytensor::Device::CUDA);
+    const auto cuda_target = tinytensor::Tensor::from_vector(
+        target, {3U, height, width}, tinytensor::Device::CUDA);
+    const auto cuda_mask = tinytensor::Tensor::from_vector(
+        mask, {height, width}, tinytensor::Device::CUDA);
+    for (int masked = 0; masked < 2; ++masked) {
+        auto cuda_gradient = tinytensor::Tensor::zeros(
+            {3U, height, width}, tinytensor::Device::CUDA);
+        photara::splat::detail::photometric_loss(
+            cuda_prediction, cuda_target, cuda_mask, masked != 0,
+            cuda_gradient, nullptr, width, height);
+        splat_drender::vulkan::Context context;
+        splat_drender::vulkan::SplatRasterizer vulkan(context);
+        const auto got = vulkan.photometric_loss(
+            prediction, target, width, height, 0.2F, 1.0F,
+            masked != 0 ? std::span<const float>(mask) : std::span<const float>{});
+        const double error = rel_l2(got.gradient, cuda_gradient.to_vector());
+        std::cout << "SSIM gradient parity mask=" << masked
+                  << " rel_l2=" << error << " loss=" << got.loss << '\n';
+        require(error < 3.0e-4,
+                "Vulkan fused L1+SSIM gradient differs from CUDA");
+        require(std::isfinite(got.loss) && got.loss >= 0.0F,
+                "Vulkan fused L1+SSIM returned an invalid loss");
+    }
+}
+
 void geometry_gradient_descent_case() {
     SingleGaussianScene scene;
     scene.settings.need_depth = true;
@@ -912,6 +956,152 @@ void geometry_gradient_descent_case() {
               << final_loss << " z=" << means[2] << '\n';
 }
 
+// Adam is the last stage of the training chain.  A forward/backward match is
+// insufficient if bias correction, grouped SH learning rates, inactive SH
+// bands, or parameter clamps drift after repeated updates.  Exercise the same
+// public optimizer dispatch on CUDA and Vulkan and compare the complete
+// parameter/moment trajectory after several non-identical gradients.
+void optimizer_parity_case() {
+    namespace detail = photara::splat::detail;
+    using tinytensor::Device;
+    using tinytensor::Tensor;
+
+    photara::splat::TrainingOptions options;
+    options.beta1 = 0.9F;
+    options.beta2 = 0.999F;
+    options.adam_epsilon = 1.0e-15F;
+
+    constexpr std::size_t rows = 5;
+    constexpr std::size_t stride = 12;
+    std::vector<float> initial(rows * stride);
+    std::vector<float> gradient(rows * stride);
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        initial[i] = -0.35F + 0.013F * static_cast<float>(i);
+        gradient[i] = 0.025F * std::sin(0.37F * static_cast<float>(i + 1));
+    }
+    auto cuda_parameter = Tensor::from_vector(
+        initial, {rows, stride}, Device::CUDA);
+    auto vulkan_parameter = Tensor::from_vector(
+        initial, {rows, stride}, Device::Vulkan);
+    auto cuda_state = detail::make_adam_state(cuda_parameter);
+    auto vulkan_state = detail::make_adam_state(vulkan_parameter);
+
+    for (unsigned step = 1; step <= 9; ++step) {
+        std::vector<float> step_gradient = gradient;
+        for (std::size_t i = 0; i < step_gradient.size(); ++i)
+            step_gradient[i] *= 0.7F + 0.03F * static_cast<float>(step) +
+                0.01F * static_cast<float>(i % 5);
+        const auto cuda_gradient = Tensor::from_vector(
+            step_gradient, {rows, stride}, Device::CUDA);
+        const auto vulkan_gradient = Tensor::from_vector(
+            step_gradient, {rows, stride}, Device::Vulkan);
+        // Three RGB DC values use the primary rate; the rest of each SH row
+        // uses the secondary rate.  Keep the last basis inactive.
+        detail::adam_step_active_prefix(
+            cuda_parameter, cuda_gradient, cuda_state, 2.5e-3F, step,
+            options, stride, 9, 1.25e-4F);
+        detail::adam_step_active_prefix(
+            vulkan_parameter, vulkan_gradient, vulkan_state, 2.5e-3F, step,
+            options, stride, 9, 1.25e-4F);
+    }
+
+    const double parameter_error = rel_l2(
+        vulkan_parameter.to_vector(), cuda_parameter.to_vector());
+    const double first_error = rel_l2(
+        vulkan_state.first.to_vector(), cuda_state.first.to_vector());
+    const double second_error = rel_l2(
+        vulkan_state.second.to_vector(), cuda_state.second.to_vector());
+    std::cout << "optimizer grouped trajectory: parameter=" << parameter_error
+              << " moments=" << first_error << '/' << second_error << '\n';
+    // The second moment is around 1e-6 here, so a few last-bit differences in
+    // fused multiply/add order produce a larger relative error than they do in
+    // either the parameter or first moment.
+    require(parameter_error < 3.0e-6 && first_error < 3.0e-6 &&
+                second_error < 2.0e-5,
+            "Vulkan grouped/active-prefix Adam trajectory differs from CUDA");
+
+    // Structure parameters cover independent learning rates and the scale and
+    // opacity clamps used by real training.
+    const std::vector<float> means{
+        -0.2F, 0.1F, 1.8F, 0.3F, -0.15F, 2.2F,
+        0.05F, 0.25F, 2.7F, -0.4F, -0.2F, 3.1F,
+        0.45F, 0.05F, 1.5F};
+    const std::vector<float> scales{
+        -2.0F, -2.1F, -2.2F, -1.8F, -1.9F, -2.0F,
+        -2.4F, -2.3F, -2.2F, -1.6F, -1.7F, -1.8F,
+        -2.05F, -2.0F, -1.95F};
+    const std::vector<float> rotations{
+        1.F, 0.1F, -0.05F, 0.02F, 0.9F, -0.15F, 0.08F, 0.03F,
+        1.1F, 0.04F, 0.02F, -0.09F, 0.95F, 0.12F, -0.07F, 0.05F,
+        1.05F, -0.03F, 0.06F, 0.11F};
+    const std::vector<float> opacity{-1.8F, -2.1F, -1.5F, -2.4F, -1.9F};
+    const auto make_model = [&](Device device) {
+        photara::splat::GaussianModel model;
+        model.means = Tensor::from_vector(means, {rows, 3}, device);
+        model.log_scales = Tensor::from_vector(scales, {rows, 3}, device);
+        model.quaternions = Tensor::from_vector(rotations, {rows, 4}, device);
+        model.opacity_logits = Tensor::from_vector(opacity, {rows, 1}, device);
+        return model;
+    };
+    auto cuda_model = make_model(Device::CUDA);
+    auto vulkan_model = make_model(Device::Vulkan);
+    auto cuda_means_state = detail::make_adam_state(cuda_model.means);
+    auto cuda_scales_state = detail::make_adam_state(cuda_model.log_scales);
+    auto cuda_rotations_state = detail::make_adam_state(cuda_model.quaternions);
+    auto cuda_opacity_state = detail::make_adam_state(cuda_model.opacity_logits);
+    auto vk_means_state = detail::make_adam_state(vulkan_model.means);
+    auto vk_scales_state = detail::make_adam_state(vulkan_model.log_scales);
+    auto vk_rotations_state = detail::make_adam_state(vulkan_model.quaternions);
+    auto vk_opacity_state = detail::make_adam_state(vulkan_model.opacity_logits);
+    for (unsigned step = 1; step <= 7; ++step) {
+        const auto make_gradient = [&](Device device) {
+            photara::splat::ModelGradients result;
+            const float factor = 0.4F + 0.09F * static_cast<float>(step);
+            std::vector<float> gm(means.size()), gs(scales.size());
+            std::vector<float> gr(rotations.size()), go(opacity.size());
+            for (std::size_t i = 0; i < gm.size(); ++i) {
+                gm[i] = factor * 0.03F * std::cos(0.23F * static_cast<float>(i + step));
+                gs[i] = factor * 0.04F * std::sin(0.19F * static_cast<float>(i + 2 * step));
+            }
+            for (std::size_t i = 0; i < gr.size(); ++i)
+                gr[i] = factor * 0.02F * std::cos(0.17F * static_cast<float>(i + step));
+            for (std::size_t i = 0; i < go.size(); ++i)
+                go[i] = factor * 0.05F * std::sin(0.31F * static_cast<float>(i + step));
+            result.means = Tensor::from_vector(gm, {rows, 3}, device);
+            result.log_scales = Tensor::from_vector(gs, {rows, 3}, device);
+            result.quaternions = Tensor::from_vector(gr, {rows, 4}, device);
+            result.opacity_logits = Tensor::from_vector(go, {rows, 1}, device);
+            return result;
+        };
+        const auto cuda_gradient = make_gradient(Device::CUDA);
+        const auto vulkan_gradient = make_gradient(Device::Vulkan);
+        detail::adam_step_structure(
+            cuda_model, cuda_gradient, cuda_means_state, cuda_scales_state,
+            cuda_rotations_state, cuda_opacity_state, 1.6e-4F, step,
+            options, -2.35F, -1.65F);
+        detail::adam_step_structure(
+            vulkan_model, vulkan_gradient, vk_means_state, vk_scales_state,
+            vk_rotations_state, vk_opacity_state, 1.6e-4F, step,
+            options, -2.35F, -1.65F);
+    }
+    const double means_error = rel_l2(
+        vulkan_model.means.to_vector(), cuda_model.means.to_vector());
+    const double scales_error = rel_l2(
+        vulkan_model.log_scales.to_vector(), cuda_model.log_scales.to_vector());
+    const double rotations_error = rel_l2(
+        vulkan_model.quaternions.to_vector(), cuda_model.quaternions.to_vector());
+    const double opacity_error = rel_l2(
+        vulkan_model.opacity_logits.to_vector(),
+        cuda_model.opacity_logits.to_vector());
+    require(means_error < 3.0e-6 && scales_error < 3.0e-6 &&
+                rotations_error < 3.0e-6 && opacity_error < 3.0e-6,
+            "Vulkan structure Adam trajectory differs from CUDA");
+    std::cout << "optimizer trajectory parity: grouped=" << parameter_error
+              << " moments=" << first_error << '/' << second_error
+              << " structure=" << means_error << '/' << scales_error << '/'
+              << rotations_error << '/' << opacity_error << '\n';
+}
+
 // TinyTensor owns the device and all loss/gradient storage; splat_drender
 // adopts that device and binds the tensor buffers directly. This is the path
 // training will use, and catches accidental host staging or cross-device use.
@@ -964,6 +1154,8 @@ void tinytensor_interop_case() {
     reference.insert(reference.end(), expected.colors.begin(), expected.colors.end());
     reference.insert(reference.end(), expected.ray_plane.begin(), expected.ray_plane.end());
     reference.insert(reference.end(), expected.normal.begin(), expected.normal.end());
+    reference.insert(reference.end(), expected_model.refine_weight.begin(),
+                     expected_model.refine_weight.end());
     require(rel_l2(got, reference) < 1e-6, "TinyTensor zero-copy blend gradients differ");
     auto device_model_gradient = tinytensor::Tensor::zeros(
         {static_cast<std::size_t>(rasterizer.model_gradient_float_count())},
@@ -988,12 +1180,120 @@ void tinytensor_interop_case() {
     append(expected_model.rotations);
     model_reference.insert(model_reference.end(), 6, 0.0F);
     model_reference.insert(model_reference.end(), 8, 0.0F);
+    append(expected_model.refine_weight);
     require(got_model.size() == model_reference.size(), "TinyTensor model gradient layout differs");
     require(rel_l2(got_model, model_reference) < 1e-6,
             "TinyTensor zero-copy model gradients differ");
+
+    // Full training chain: render color -> fused L1+SSIM -> raster backward.
+    // Only the final packed model gradient and one logging scalar cross to the
+    // host; the image-sized photometric gradient is never downloaded.
+    std::vector<float> photo_target = forward.color;
+    for (std::size_t i = 0; i < photo_target.size(); ++i)
+        photo_target[i] = std::clamp(
+            photo_target[i] + 0.03F * std::sin(static_cast<float>(i) * 0.17F),
+            0.0F, 1.0F);
+    const auto expected_photo = rasterizer.photometric_loss(
+        forward.color, photo_target, scene.camera.width, scene.camera.height);
+    const std::vector<float> zero_alpha(pixels, 0.0F);
+    const auto expected_photo_model = rasterizer.backward(
+        expected_photo.gradient, zero_alpha);
+
+    const auto device_frame = rasterizer.render_device(scene.camera, scene.settings);
+    auto device_target = tinytensor::Tensor::from_vector(
+        photo_target, {photo_target.size()}, tinytensor::Device::Vulkan);
+    auto device_zero_alpha = tinytensor::Tensor::zeros(
+        {pixels}, tinytensor::Device::Vulkan, tinytensor::DataType::Float32);
+    auto device_photo_model_gradient = tinytensor::Tensor::zeros(
+        {static_cast<std::size_t>(rasterizer.model_gradient_float_count())},
+        tinytensor::Device::Vulkan, tinytensor::DataType::Float32);
+    tinytensor::vulkan::synchronize();
+    const auto target_view = tinytensor::vulkan::buffer_view(device_target);
+    const auto zero_alpha_view = tinytensor::vulkan::buffer_view(device_zero_alpha);
+    const auto photo_model_view =
+        tinytensor::vulkan::buffer_view(device_photo_model_gradient);
+    const auto device_photo = photara::splat::detail::photometric_loss(
+        rasterizer, device_frame,
+        {target_view.buffer, target_view.offset, target_view.bytes});
+    const float device_photo_scalar =
+        photara::splat::detail::photometric_loss_scalar(rasterizer, device_photo);
+    rasterizer.backward_device(
+        device_photo.gradient,
+        {zero_alpha_view.buffer, zero_alpha_view.offset, zero_alpha_view.bytes},
+        {photo_model_view.buffer, photo_model_view.offset, photo_model_view.bytes});
+    const auto got_photo_model = device_photo_model_gradient.to_vector();
+    std::vector<float> photo_model_reference;
+    const auto append_photo = [&](const std::vector<float>& values) {
+        photo_model_reference.insert(
+            photo_model_reference.end(), values.begin(), values.end());
+    };
+    append_photo(expected_photo_model.means);
+    append_photo(expected_photo_model.colors);
+    append_photo(expected_photo_model.opacities);
+    append_photo(expected_photo_model.scales);
+    append_photo(expected_photo_model.rotations);
+    photo_model_reference.insert(photo_model_reference.end(), 6, 0.0F);
+    photo_model_reference.insert(photo_model_reference.end(), 8, 0.0F);
+    append_photo(expected_photo_model.refine_weight);
+    require(rel_l2(got_photo_model, photo_model_reference) < 3.0e-4,
+            "device-resident photometric/backward chain differs");
+    require(std::abs(device_photo_scalar - expected_photo.loss) < 2.0e-5F,
+            "device photometric scalar reduction differs");
+
+    // Bind the trainable raw tensors themselves. This is the optimizer-facing
+    // path: preprocessing activates exp(scale), normalized quaternion and
+    // sigmoid(opacity) directly from the same storage Adam updates in place.
+    constexpr float sh_c0 = 0.28209479177387814F;
+    auto raw_means = tinytensor::Tensor::from_vector(
+        scene.means, {1, 3}, tinytensor::Device::Vulkan);
+    auto raw_sh = tinytensor::Tensor::from_vector(
+        std::vector<float>{
+            (scene.colors[0] - 0.5F) / sh_c0,
+            (scene.colors[1] - 0.5F) / sh_c0,
+            (scene.colors[2] - 0.5F) / sh_c0},
+        {1, 1, 3}, tinytensor::Device::Vulkan);
+    auto raw_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{
+            std::log(scene.scales[0]), std::log(scene.scales[1]),
+            std::log(scene.scales[2])},
+        {1, 3}, tinytensor::Device::Vulkan);
+    auto raw_rotations = tinytensor::Tensor::from_vector(
+        scene.rotation, {1, 4}, tinytensor::Device::Vulkan);
+    auto raw_opacity = tinytensor::Tensor::from_vector(
+        std::vector<float>{std::log(scene.opacity[0] / (1.0F - scene.opacity[0]))},
+        {1}, tinytensor::Device::Vulkan);
+    auto raw_filter = tinytensor::Tensor::zeros(
+        {1}, tinytensor::Device::Vulkan, tinytensor::DataType::Float32);
+    tinytensor::vulkan::synchronize();
+    const auto splat_view = [](const tinytensor::Tensor& tensor) {
+        const auto view = tinytensor::vulkan::buffer_view(tensor);
+        return splat_drender::vulkan::SplatBufferView{
+            view.buffer, view.offset, view.bytes};
+    };
+    splat_drender::vulkan::SplatDeviceGaussians raw_model;
+    raw_model.means = splat_view(raw_means);
+    raw_model.sh = splat_view(raw_sh);
+    raw_model.log_scales = splat_view(raw_scales);
+    raw_model.raw_rotations = splat_view(raw_rotations);
+    raw_model.opacity_logits = splat_view(raw_opacity);
+    raw_model.filter_3d = splat_view(raw_filter);
+    raw_model.count = 1;
+    raw_model.sh_degree = 0;
+    raw_model.sh_bases = 1;
+    rasterizer.bind_model_device(raw_model);
+    const auto raw_forward = rasterizer.render(scene.camera, scene.settings);
+    require(raw_forward.instance_count == forward.instance_count,
+            "raw device model changed the projected instance count");
+    require(rel_l2(raw_forward.color, forward.color) < 2.0e-6 &&
+                rel_l2(raw_forward.alpha, forward.alpha) < 2.0e-6 &&
+                rel_l2(raw_forward.median_depth, forward.median_depth) < 2.0e-6,
+            "raw device model activation differs from the uploaded model");
     std::cout << "tinytensor zero-copy backward: device=" << context.device_info().name
               << " gradients=" << got.size() << " rel_l2=" << rel_l2(got, reference)
               << " model_rel_l2=" << rel_l2(got_model, model_reference)
+              << " photo_model_rel_l2="
+              << rel_l2(got_photo_model, photo_model_reference)
+              << " raw_model_rel_l2=" << rel_l2(raw_forward.color, forward.color)
               << " instances=" << forward.instance_count << '\n';
 }
 
@@ -1047,7 +1347,9 @@ int main() {
         smoke_case();
         sample_depth_case();
         multi_view_loss_case();
+        ssim_loss_case();
         geometry_gradient_descent_case();
+        optimizer_parity_case();
         tinytensor_interop_case();
         adopted_device_case();
         auto color_backward = pinhole_scene("pinhole-color", 24, 0.08F, false);

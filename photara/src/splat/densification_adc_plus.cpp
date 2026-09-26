@@ -55,7 +55,7 @@ void append_zero_adam(detail::AdamState& state, const std::size_t count) {
         tensor = tinytensor::Tensor::cat(
             {tensor, tinytensor::Tensor::zeros(
                          tinytensor::TensorShape(dimensions),
-                         tinytensor::Device::CUDA)},
+                         tensor.device())},
             0);
     };
     append_zeros(state.first);
@@ -99,7 +99,7 @@ void grow_igs_random_gpu(
     std::normal_distribution<float> normal(0.F, 1.F);
     for (float& value : samples) value = normal(random);
     const auto random_tensor = tinytensor::Tensor::from_vector(
-        samples, {count, std::size_t{3}}, tinytensor::Device::CUDA);
+        samples, {count, std::size_t{3}}, model.means.device());
     grow_parents_gpu(
         model, parents, screen_sizes, detail::SplitMode::igs_random,
         random_tensor, options.prune_opacity, 0.F, false, states);
@@ -117,7 +117,7 @@ void grow_parents_gpu(
     const auto split_samples = samples.is_valid()
         ? samples
         : tinytensor::Tensor::zeros(
-              {count, std::size_t{3}}, tinytensor::Device::CUDA);
+              {count, std::size_t{3}}, model.means.device());
     const auto selected_screen = screen_sizes.index_select(0, parents);
     detail::split_gaussians(
         model, children, parents, split_samples, selected_screen, mode,
@@ -204,7 +204,7 @@ RefinementCounts AdcPlusStrategy::refine(
     const std::size_t capacity =
         growth_cap > retained ? growth_cap - retained : 0;
     auto selected = tinytensor::Tensor::zeros_bool(
-        {retained}, tinytensor::Device::CUDA);
+        {retained}, model.means.device());
     std::size_t selected_count = 0;
     std::size_t replacement_selected = 0;
     std::size_t oversized_selected_count = 0;
@@ -342,7 +342,8 @@ RefinementCounts AdcPlusStrategy::refine(
         // optional scale factor defaults to zero (matching Brush).
         options.opacity_decay * std::max(remaining_progress, 0.F),
         options.scale_decay * std::max(remaining_progress, 0.F));
-    stats = detail::make_densification_stats(model.size());
+    stats = detail::make_densification_stats(
+        model.size(), model.means.device());
     photara::core::Logger::instance().info(
         name(), "_refine iteration=", iteration,
         " gaussians=", model.size(),

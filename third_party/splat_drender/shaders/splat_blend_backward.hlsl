@@ -28,12 +28,13 @@ void atomic_add_f32(uint index, float value) {
 
 void commit_gradient(uint gaussian, uint count, float3 acc_mean,
                      float4 acc_conic, float3 acc_color, float4 acc_plane,
-                     float3 acc_normal) {
+                     float3 acc_normal, float acc_refine) {
     uint mean_base = gaussian * 3u;
     uint conic_base = count * 3u + gaussian * 4u;
     uint color_base = count * 7u + gaussian * 3u;
     uint plane_base = count * 10u + gaussian * 4u;
     uint normal_base = count * 14u + gaussian * 3u;
+    uint refine_base = count * 17u + gaussian;
     atomic_add_f32(mean_base, acc_mean.x);
     atomic_add_f32(mean_base + 1u, acc_mean.y);
     atomic_add_f32(mean_base + 2u, acc_mean.z);
@@ -41,6 +42,7 @@ void commit_gradient(uint gaussian, uint count, float3 acc_mean,
     [unroll] for (uint c = 0u; c < 3u; ++c) atomic_add_f32(color_base + c, acc_color[c]);
     [unroll] for (uint p = 0u; p < 4u; ++p) atomic_add_f32(plane_base + p, acc_plane[p]);
     [unroll] for (uint n = 0u; n < 3u; ++n) atomic_add_f32(normal_base + n, acc_normal[n]);
+    atomic_add_f32(refine_base, acc_refine);
 }
 
 // One logical bucket lane owns one Gaussian and replays at most the preceding
@@ -83,6 +85,7 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
 
     float3 acc_color = 0.0f, acc_mean = 0.0f, acc_normal = 0.0f;
     float4 acc_conic = 0.0f, acc_plane = 0.0f;
+    float acc_refine = 0.0f;
     uint normal_snap_base = bucket_limit * 256u;
     [loop] for (uint local = 0u; local < 256u; ++local) {
         uint px = pix_min_x + (local & 15u), py = pix_min_y + (local >> 4u);
@@ -159,12 +162,19 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
 
         float blend_weight = alpha * transmittance;
         acc_color += blend_weight * pixel_grad;
-        float dG = conic.w * d_opacity, gdx = G * delta.x, gdy = G * delta.y;
+        float dG = conic.w * d_opacity;
+        float dG_render = conic.w * d_opacity_render;
+        float gdx = G * delta.x, gdy = G * delta.y;
         float d_del_x = dG * (-gdx * conic.x - gdy * conic.y) + d_peak * ray_plane.x;
         float d_del_y = dG * (-gdy * conic.z - gdx * conic.y) + d_peak * ray_plane.y;
         acc_mean += float3(d_del_x, d_del_y, abs(d_del_x) + abs(d_del_y));
+        float refine_x = dG_render * (-gdx * conic.x - gdy * conic.y) * float(width);
+        float refine_y = dG_render * (-gdy * conic.z - gdx * conic.y) * float(height);
+        acc_refine += length(float2(refine_x, refine_y)) /
+                      max(1.0f - final_t, 1.0e-5f);
         acc_conic += float4(-0.5f * gdx * delta.x * dG, -0.5f * gdx * delta.y * dG,
                             -0.5f * gdy * delta.y * dG, G * d_opacity);
     }
-    commit_gradient(gaussian, count, acc_mean, acc_conic, acc_color, acc_plane, acc_normal);
+    commit_gradient(gaussian, count, acc_mean, acc_conic, acc_color, acc_plane,
+                    acc_normal, acc_refine);
 }

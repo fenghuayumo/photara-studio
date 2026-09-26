@@ -507,6 +507,18 @@ namespace tinytensor {
         auto sorted = clone();
         auto indices = Tensor::empty(shape_, device_, DataType::Int64);
 
+#ifdef TINYTENSOR_HAS_VULKAN
+        // Sorting is a topology/refinement operation rather than a per-step
+        // training primitive.  Keep the public Tensor operation backend
+        // neutral and use a deterministic host ordering until the Vulkan
+        // radix-sort kernel lands.
+        if (device_ == Device::Vulkan) {
+            auto host = to(Device::CPU).sort(dim, descending);
+            return {host.first.to(Device::Vulkan),
+                    host.second.to(Device::Vulkan)};
+        }
+#endif
+
         // 1D case - optimized path
         if (ndim() == 1 && dim == 0) {
             if (device_ == Device::CUDA) {

@@ -1,6 +1,7 @@
 #include "splat_drender/vulkan_api.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -24,6 +25,7 @@ constexpr std::uint32_t k_flag_scales = 2;
 constexpr std::uint32_t k_flag_geometry = 4;
 constexpr std::uint32_t k_flag_snapshot = 8;
 constexpr std::uint32_t k_flag_stats = 16;
+constexpr std::uint32_t k_flag_raw_parameters = 32;
 
 struct Push {
     std::uint32_t u[k_push_uints]{};
@@ -48,6 +50,11 @@ void require(bool condition, const char* message) {
 
 VkDescriptorBufferInfo descriptor(const Buffer& buffer) {
     return {buffer.handle, 0, buffer.size};
+}
+
+VkDescriptorBufferInfo descriptor(
+    const SplatBufferView& view, const std::uint64_t required_bytes) {
+    return {view.buffer, view.offset, required_bytes};
 }
 
 void clear_buffer(Buffer& buffer) {
@@ -87,6 +94,8 @@ public:
           sample_depth_(context.create_pipeline("splat_sample_depth.hlsl.spv", 7, sizeof(Push))),
           sample_depth_backward_(context.create_pipeline("splat_sample_depth_backward.hlsl.spv", 10, sizeof(Push))),
           multi_view_(context.create_pipeline("splat_multi_view.hlsl.spv", 10, sizeof(Push))),
+          ssim_(context.create_pipeline("splat_ssim.hlsl.spv", 12, sizeof(Push))),
+          loss_reduce_(context.create_pipeline("splat_loss_reduce.hlsl.spv", 2, sizeof(Push))),
           project_backward_(context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))) {
@@ -191,12 +200,63 @@ public:
         count_ = count;
         sh_degree_ = gaussians.sh_degree;
         sh_bases_ = gaussians.sh_bases;
+        device_model_bound_ = false;
         model_ready_ = true;
         last_frame_has_snapshots_ = false;
     }
 
+    void bind_model_device(const SplatDeviceGaussians& gaussians) {
+        require(gaussians.count > 0, "device Gaussian count must be positive");
+        require(gaussians.sh_degree <= 3 &&
+                    gaussians.sh_bases >=
+                        (gaussians.sh_degree + 1) * (gaussians.sh_degree + 1),
+                "device sh_bases does not cover sh_degree");
+        const std::uint64_t count = gaussians.count;
+        const auto valid = [](const SplatBufferView& view,
+                              const std::uint64_t bytes) {
+            return view.buffer != VK_NULL_HANDLE && view.bytes >= bytes;
+        };
+        require(valid(gaussians.means, count * 3 * sizeof(float)),
+                "device means must have shape [N,3]");
+        require(valid(gaussians.sh,
+                      count * gaussians.sh_bases * 3 * sizeof(float)),
+                "device SH must have shape [N,B,3]");
+        require(valid(gaussians.log_scales, count * 3 * sizeof(float)),
+                "device log scales must have shape [N,3]");
+        require(valid(gaussians.raw_rotations, count * 4 * sizeof(float)),
+                "device rotations must have shape [N,4]");
+        require(valid(gaussians.opacity_logits, count * sizeof(float)),
+                "device opacity logits must have shape [N]");
+        require(valid(gaussians.filter_3d, count * sizeof(float)),
+                "device filter_3d must have shape [N]");
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+        const std::uint64_t alignment = std::max<std::uint64_t>(
+            4, properties.limits.minStorageBufferOffsetAlignment);
+        require(gaussians.means.offset % alignment == 0 &&
+                    gaussians.sh.offset % alignment == 0 &&
+                    gaussians.log_scales.offset % alignment == 0 &&
+                    gaussians.raw_rotations.offset % alignment == 0 &&
+                    gaussians.opacity_logits.offset % alignment == 0 &&
+                    gaussians.filter_3d.offset % alignment == 0,
+                "device model offsets do not satisfy minStorageBufferOffsetAlignment");
+        device_model_ = gaussians;
+        device_model_bound_ = true;
+        has_sh_ = true;
+        has_scales_ = true;
+        raw_chain_ = true;
+        count_ = gaussians.count;
+        sh_degree_ = gaussians.sh_degree;
+        sh_bases_ = gaussians.sh_bases;
+        model_ready_ = true;
+        last_frame_has_snapshots_ = false;
+        sample_live_ = false;
+    }
+
     void update_means_and_opacities(std::span<const float> means, std::span<const float> opacities) {
         require(model_ready_, "no Gaussian model is loaded");
+        require(!device_model_bound_,
+                "host model updates are invalid while a device model is bound");
         require(means.size() == static_cast<std::size_t>(count_) * 3, "means must have shape [N, 3]");
         require(opacities.size() == count_, "opacities must have shape [N]");
         const std::scoped_lock lock(context_.dispatch_mutex);
@@ -207,11 +267,75 @@ public:
 
     void clear_model() {
         model_ready_ = false;
+        device_model_bound_ = false;
+        device_model_ = {};
         count_ = 0;
         last_frame_has_snapshots_ = false;
         sample_live_ = false;
     }
     bool has_model() const noexcept { return model_ready_; }
+
+    VkDescriptorBufferInfo model_means() const {
+        return device_model_bound_
+            ? descriptor(device_model_.means,
+                         static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
+            : descriptor(means_);
+    }
+    VkDescriptorBufferInfo model_opacities() const {
+        return device_model_bound_
+            ? descriptor(device_model_.opacity_logits,
+                         static_cast<std::uint64_t>(count_) * sizeof(float))
+            : descriptor(opacities_);
+    }
+    VkDescriptorBufferInfo model_scales() const {
+        return device_model_bound_
+            ? descriptor(device_model_.log_scales,
+                         static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
+            : descriptor(scales_);
+    }
+    VkDescriptorBufferInfo model_rotations() const {
+        return device_model_bound_
+            ? descriptor(device_model_.raw_rotations,
+                         static_cast<std::uint64_t>(count_) * 4 * sizeof(float))
+            : descriptor(rotations_);
+    }
+    VkDescriptorBufferInfo model_covariances() const {
+        return device_model_bound_
+            ? descriptor(device_model_.filter_3d,
+                         static_cast<std::uint64_t>(count_) * sizeof(float))
+            : descriptor(covariances_);
+    }
+    VkDescriptorBufferInfo model_colors() const {
+        return device_model_bound_
+            ? descriptor(device_model_.sh,
+                         static_cast<std::uint64_t>(count_) * sh_bases_ * 3 *
+                             sizeof(float))
+            : descriptor(colors_);
+    }
+    VkDescriptorBufferInfo model_log_scales() const {
+        return device_model_bound_
+            ? descriptor(device_model_.log_scales,
+                         static_cast<std::uint64_t>(count_) * 3 * sizeof(float))
+            : descriptor(raw_log_scales_);
+    }
+    VkDescriptorBufferInfo model_raw_rotations() const {
+        return device_model_bound_
+            ? descriptor(device_model_.raw_rotations,
+                         static_cast<std::uint64_t>(count_) * 4 * sizeof(float))
+            : descriptor(raw_rotations_);
+    }
+    VkDescriptorBufferInfo model_opacity_logits() const {
+        return device_model_bound_
+            ? descriptor(device_model_.opacity_logits,
+                         static_cast<std::uint64_t>(count_) * sizeof(float))
+            : descriptor(opacity_logits_);
+    }
+    VkDescriptorBufferInfo model_filter_3d() const {
+        return device_model_bound_
+            ? descriptor(device_model_.filter_3d,
+                         static_cast<std::uint64_t>(count_) * sizeof(float))
+            : descriptor(filter_3d_);
+    }
 
     struct FrameCounts {
         std::uint32_t instances = 0;
@@ -232,12 +356,6 @@ public:
         const std::uint32_t count = count_;
         const bool has_sh = has_sh_;
         const bool has_scales = has_scales_;
-        Buffer& means = means_;
-        Buffer& opacities = opacities_;
-        Buffer& scales = scales_;
-        Buffer& rotations = rotations_;
-        Buffer& covariances = covariances_;
-        Buffer& colors = colors_;
         // 76 bytes of per-frame constants: the one buffer worth keeping mapped.
         Buffer& camera_buffer = grow(camera_, 19 * sizeof(float), BufferMemory::host_visible);
         const std::uint32_t grid_x = div_up(camera.width, k_tile);
@@ -259,7 +377,10 @@ public:
         prep.u[0] = count;
         prep.u[1] = sh_degree_;
         prep.u[2] = sh_bases_;
-        prep.u[3] = (has_sh ? k_flag_sh : 0) | (has_scales ? k_flag_scales : 0) | (settings.need_depth ? k_flag_geometry : 0);
+        prep.u[3] = (has_sh ? k_flag_sh : 0) |
+                    (has_scales ? k_flag_scales : 0) |
+                    (settings.need_depth ? k_flag_geometry : 0) |
+                    (device_model_bound_ ? k_flag_raw_parameters : 0);
         prep.u[4] = camera.width;
         prep.u[5] = camera.height;
         prep.u[6] = grid_x;
@@ -276,9 +397,13 @@ public:
         set_float(prep, 17, settings.kernel_size);
         set_float(prep, 18, settings.scale_modifier);
         prep.u[19] = static_cast<std::uint32_t>(wrap_width);
-        dispatch(preprocess_, {&means, &opacities, &scales, &rotations, &covariances, &colors, &camera_buffer,
-                               &gauss_f, &gauss_u, &dummy_, &dummy_, &dummy_},
-                 prep, div_up(count, 256));
+        dispatch_infos(
+            preprocess_,
+            {model_means(), model_opacities(), model_scales(),
+             model_rotations(), model_covariances(), model_colors(),
+             descriptor(camera_buffer), descriptor(gauss_f), descriptor(gauss_u),
+             descriptor(dummy_), descriptor(dummy_), descriptor(dummy_)},
+            prep, div_up(count, 256));
 
         inclusive_scan(gauss_u, 0, 4 * count, count, k_streams * count);
         inclusive_scan(gauss_u, count, 5 * count, count, k_streams * count);
@@ -483,6 +608,100 @@ public:
         return collect(camera, settings, counts, gauss_u_, out_f_, out_u_);
     }
 
+    SplatDeviceFrame render_device(
+        const SplatCamera& camera, const SplatSettings& settings) {
+        const FrameCounts counts = record_frame(camera, settings, false);
+        const std::uint64_t pixels =
+            static_cast<std::uint64_t>(camera.width) * camera.height;
+        const std::uint64_t plane_bytes = pixels * sizeof(float);
+        SplatDeviceFrame frame;
+        frame.color = {out_f_.handle, 0, 3 * plane_bytes};
+        frame.alpha = {out_f_.handle, 3 * plane_bytes, plane_bytes};
+        if (settings.need_depth) {
+            frame.normal = {out_f_.handle, 4 * plane_bytes, 3 * plane_bytes};
+            frame.median_depth = {out_f_.handle, 7 * plane_bytes, plane_bytes};
+        }
+        frame.radii = {
+            gauss_u_.handle,
+            static_cast<std::uint64_t>(3) * count_ * sizeof(std::uint32_t),
+            static_cast<std::uint64_t>(count_) * sizeof(std::uint32_t)};
+        frame.visibility_bits = {
+            out_u_.handle, 0,
+            static_cast<std::uint64_t>(count_) * sizeof(std::uint32_t)};
+        frame.width = camera.width;
+        frame.height = camera.height;
+        frame.instance_count = static_cast<int>(counts.instances);
+        frame.visible_count = static_cast<int>(counts.visible);
+        return frame;
+    }
+
+    void copy_frame_device(
+        const SplatDeviceFrame& source,
+        const SplatDeviceFrame& destination) {
+        require(source.width == destination.width &&
+                    source.height == destination.height,
+                "copy_frame_device requires matching image extents");
+        struct CopyPair {
+            SplatBufferView source;
+            SplatBufferView destination;
+        };
+        const std::array<CopyPair, 6> pairs{{
+            {source.color, destination.color},
+            {source.alpha, destination.alpha},
+            {source.normal, destination.normal},
+            {source.median_depth, destination.median_depth},
+            {source.radii, destination.radii},
+            {source.visibility_bits, destination.visibility_bits},
+        }};
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        flush_batch();
+        const auto check = [](const VkResult result, const char* action) {
+            if (result != VK_SUCCESS)
+                throw std::runtime_error(
+                    std::string(action) + " failed with VkResult " +
+                    std::to_string(static_cast<int>(result)));
+        };
+        VkCommandBufferAllocateInfo allocate{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        allocate.commandPool = context_.command_pool;
+        allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocate.commandBufferCount = 1;
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        check(vkAllocateCommandBuffers(
+            context_.device, &allocate, &command),
+            "vkAllocateCommandBuffers(copy frame)");
+        VkCommandBufferBeginInfo begin{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check(vkBeginCommandBuffer(command, &begin),
+                 "vkBeginCommandBuffer(copy frame)");
+        for (const CopyPair& pair : pairs) {
+            if (pair.destination.buffer == VK_NULL_HANDLE) continue;
+            require(pair.source.buffer != VK_NULL_HANDLE &&
+                        pair.destination.bytes >= pair.source.bytes,
+                    "copy_frame_device destination is too small");
+            VkBufferCopy region{};
+            region.srcOffset = pair.source.offset;
+            region.dstOffset = pair.destination.offset;
+            region.size = pair.source.bytes;
+            vkCmdCopyBuffer(
+                command, pair.source.buffer, pair.destination.buffer,
+                1, &region);
+        }
+        check(vkEndCommandBuffer(command),
+                 "vkEndCommandBuffer(copy frame)");
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &command;
+        check(vkQueueSubmit(
+            context_.queue, 1, &submit, VK_NULL_HANDLE),
+            "vkQueueSubmit(copy frame)");
+        check(vkQueueWaitIdle(context_.queue),
+                 "vkQueueWaitIdle(copy frame)");
+        vkFreeCommandBuffers(
+            context_.device, context_.command_pool, 1, &command);
+    }
+
     void dispatch_median_backward_info(
         const VkDescriptorBufferInfo& loss_depth, Buffer& median_state) {
         Push push{};
@@ -532,7 +751,7 @@ public:
         Buffer& loss_depth = grow(loss_depth_, static_cast<std::size_t>(last_pixels_) * sizeof(float));
         Buffer& loss_normal = grow(loss_normal_, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float));
         Buffer& median_state = grow(median_state_, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float));
-        const std::size_t grad_count = static_cast<std::size_t>(count_) * 17;
+        const std::size_t grad_count = static_cast<std::size_t>(count_) * 18;
         Buffer& grad = grow(blend_grad_, grad_count * sizeof(float));
         context_.write_buffer(loss_color, dL_color.data(), dL_color.size_bytes());
         context_.write_buffer(loss_alpha, dL_alpha.data(), dL_alpha.size_bytes());
@@ -580,7 +799,8 @@ public:
             packed.begin() + static_cast<std::ptrdiff_t>(count_) * 10,
             packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14);
         output.normal.assign(
-            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14, packed.end());
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 14,
+            packed.begin() + static_cast<std::ptrdiff_t>(count_) * 17);
         return output;
     }
 
@@ -596,7 +816,7 @@ public:
         const std::size_t feature_count = has_sh_
             ? static_cast<std::size_t>(count_) * sh_bases_ * 3
             : static_cast<std::size_t>(count_) * 3;
-        const std::size_t total_count = feature_count + static_cast<std::size_t>(count_) * 25;
+        const std::size_t total_count = feature_count + static_cast<std::size_t>(count_) * 26;
         Buffer& gradient = grow(model_grad_, total_count * sizeof(float));
 
         Push push{};
@@ -618,11 +838,14 @@ public:
         set_float(push, 14, last_k4_);
         set_float(push, 15, last_kernel_size_);
         set_float(push, 16, last_scale_modifier_);
-        dispatch(
+        dispatch_infos(
             project_backward_,
-            {&means_, &opacities_, &scales_, &rotations_, &covariances_, &colors_,
-             &camera_, &gauss_f_, &gauss_u_, &blend_grad_, &raw_log_scales_,
-             &raw_rotations_, &opacity_logits_, &filter_3d_, &gradient},
+            {model_means(), model_opacities(), model_scales(),
+             model_rotations(), model_covariances(), model_colors(),
+             descriptor(camera_), descriptor(gauss_f_), descriptor(gauss_u_),
+             descriptor(blend_grad_), model_log_scales(),
+             model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
+             descriptor(gradient)},
             push, div_up(count_, 256));
         flush_batch();
 
@@ -650,7 +873,10 @@ public:
             take(output.log_scales, static_cast<std::size_t>(count_) * 3);
             take(output.raw_rotations, static_cast<std::size_t>(count_) * 4);
             take(output.opacity_logits, count_);
+        } else {
+            offset += static_cast<std::size_t>(count_) * 8;
         }
+        take(output.refine_weight, count_);
         return output;
     }
 
@@ -664,7 +890,7 @@ public:
         const std::uint64_t alpha_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
         const std::uint64_t depth_bytes = static_cast<std::uint64_t>(last_pixels_) * sizeof(float);
         const std::uint64_t normal_bytes = static_cast<std::uint64_t>(last_pixels_) * 3 * sizeof(float);
-        const std::uint64_t gradient_bytes = static_cast<std::uint64_t>(count_) * 17 * sizeof(float);
+        const std::uint64_t gradient_bytes = static_cast<std::uint64_t>(count_) * 18 * sizeof(float);
         require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
                 "device dL_color is too small");
         require(dL_alpha.buffer != VK_NULL_HANDLE && dL_alpha.bytes >= alpha_bytes,
@@ -733,14 +959,14 @@ public:
     }
 
     std::uint64_t blend_gradient_float_count() const noexcept {
-        return static_cast<std::uint64_t>(count_) * 17;
+        return static_cast<std::uint64_t>(count_) * 18;
     }
 
     std::uint64_t model_gradient_float_count() const noexcept {
         const std::uint64_t feature_count = has_sh_
             ? static_cast<std::uint64_t>(count_) * sh_bases_ * 3
             : static_cast<std::uint64_t>(count_) * 3;
-        return feature_count + static_cast<std::uint64_t>(count_) * 25;
+        return feature_count + static_cast<std::uint64_t>(count_) * 26;
     }
 
     SplatDepthSamples sample_depth(
@@ -844,11 +1070,14 @@ public:
         set_float(project_push, 13, last_k3_); set_float(project_push, 14, last_k4_);
         set_float(project_push, 15, last_kernel_size_);
         set_float(project_push, 16, last_scale_modifier_);
-        dispatch(
+        dispatch_infos(
             project_backward_,
-            {&means_, &opacities_, &scales_, &rotations_, &covariances_, &colors_,
-             &camera_, &gauss_f_, &gauss_u_, &blend_gradient, &raw_log_scales_,
-             &raw_rotations_, &opacity_logits_, &filter_3d_, &gradient},
+            {model_means(), model_opacities(), model_scales(),
+             model_rotations(), model_covariances(), model_colors(),
+             descriptor(camera_), descriptor(gauss_f_), descriptor(gauss_u_),
+             descriptor(blend_gradient), model_log_scales(),
+             model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
+             descriptor(gradient)},
             project_push, div_up(count_, 256));
         flush_batch();
 
@@ -1030,6 +1259,160 @@ public:
         return result;
     }
 
+    SplatDevicePhotometricOutput dispatch_photometric_locked(
+        const VkDescriptorBufferInfo& prediction,
+        const VkDescriptorBufferInfo& target,
+        const VkDescriptorBufferInfo& mask,
+        const bool mask_enabled,
+        const std::uint32_t width, const std::uint32_t height,
+        const float ssim_weight, const float photometric_weight) {
+        const std::size_t pixels = static_cast<std::size_t>(width) * height;
+        const std::size_t count = 3 * pixels;
+        Buffer& work0 = grow(ssim_work0_, count * sizeof(float));
+        Buffer& work1 = grow(ssim_work1_, count * sizeof(float));
+        Buffer& work2 = grow(ssim_work2_, count * sizeof(float));
+        Buffer& work3 = grow(ssim_work3_, count * sizeof(float));
+        Buffer& work4 = grow(ssim_work4_, count * sizeof(float));
+        Buffer& dmu = grow(ssim_dmu_, count * sizeof(float));
+        Buffer& dvariance = grow(ssim_dvariance_, count * sizeof(float));
+        Buffer& dcovariance = grow(ssim_dcovariance_, count * sizeof(float));
+        Buffer& output = grow(ssim_output_, 2 * count * sizeof(float));
+        const std::uint32_t reduction_groups =
+            div_up(static_cast<std::uint32_t>(count), 256);
+        Buffer& reduction = grow(
+            ssim_reduction_, static_cast<std::size_t>(reduction_groups) * sizeof(float));
+        zero_buffer(context_, output, 2 * count * sizeof(float));
+
+        Push push{};
+        push.u[0] = width;
+        push.u[1] = height;
+        set_float(push, 2, ssim_weight);
+        push.u[3] = mask_enabled ? 1u : 0u;
+        const float normalization = photometric_weight /
+            static_cast<float>(3U * (width - 10U) * (height - 10U));
+        set_float(push, 4, normalization);
+        push.u[5] = 0u;
+        const std::vector<VkDescriptorBufferInfo> buffers{
+            prediction, target, mask,
+            descriptor(work0), descriptor(work1), descriptor(work2),
+            descriptor(work3), descriptor(work4), descriptor(dmu),
+            descriptor(dvariance), descriptor(dcovariance), descriptor(output)};
+        dispatch_infos(
+            ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        push.u[5] = 1u;
+        dispatch_infos(
+            ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        push.u[5] = 2u;
+        dispatch_infos(
+            ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+        push.u[5] = 3u;
+        dispatch_infos(
+            ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
+
+        Push reduce_push{};
+        reduce_push.u[0] = width;
+        reduce_push.u[1] = height;
+        reduce_push.u[2] = 0u;
+        reduce_push.u[3] = reduction_groups;
+        set_float(reduce_push, 4, normalization);
+        const std::vector<VkDescriptorBufferInfo> reduce_buffers{
+            descriptor(output), descriptor(reduction)};
+        dispatch_infos(loss_reduce_, reduce_buffers, reduce_push, reduction_groups);
+        reduce_push.u[2] = 1u;
+        dispatch_infos(loss_reduce_, reduce_buffers, reduce_push, 1);
+
+        return {
+            {output.handle, 0, count * sizeof(float)},
+            {output.handle, count * sizeof(float), count * sizeof(float)},
+            {reduction.handle, 0, sizeof(float)}};
+    }
+
+    SplatPhotometricOutput photometric_loss(
+        const std::span<const float> prediction,
+        const std::span<const float> target,
+        const std::uint32_t width, const std::uint32_t height,
+        const float ssim_weight, const float photometric_weight,
+        const std::span<const float> mask) {
+        require(width > 10 && height > 10,
+                "photometric_loss requires width and height > 10");
+        const std::size_t pixels = static_cast<std::size_t>(width) * height;
+        const std::size_t count = 3 * pixels;
+        require(prediction.size() == count && target.size() == count,
+                "photometric_loss images must have shape [3,H,W]");
+        require(mask.empty() || mask.size() == pixels,
+                "photometric_loss mask must have shape [H,W]");
+        require(ssim_weight >= 0.0F && ssim_weight <= 1.0F &&
+                    photometric_weight >= 0.0F,
+                "photometric_loss weights are out of range");
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& prediction_buffer = grow(ssim_prediction_, count * sizeof(float));
+        Buffer& target_buffer = grow(ssim_target_, count * sizeof(float));
+        Buffer& mask_buffer = grow(ssim_mask_, pixels * sizeof(float));
+        context_.write_buffer(prediction_buffer, prediction.data(), prediction.size_bytes());
+        context_.write_buffer(target_buffer, target.data(), target.size_bytes());
+        if (!mask.empty())
+            context_.write_buffer(mask_buffer, mask.data(), mask.size_bytes());
+        (void)dispatch_photometric_locked(
+            descriptor(prediction_buffer), descriptor(target_buffer),
+            mask.empty() ? descriptor(dummy_) : descriptor(mask_buffer),
+            !mask.empty(), width, height, ssim_weight, photometric_weight);
+        flush_batch();
+        SplatPhotometricOutput result;
+        result.gradient = download_vector<float>(context_, ssim_output_, count);
+        context_.read_buffer(ssim_reduction_, &result.loss, sizeof(float));
+        return result;
+    }
+
+    SplatDevicePhotometricOutput fused_l1_ssim_device(
+        const SplatBufferView& prediction, const SplatBufferView& target,
+        const std::uint32_t width, const std::uint32_t height,
+        const float ssim_weight, const float photometric_weight,
+        const SplatBufferView& mask) {
+        require(width > 10 && height > 10,
+                "fused_l1_ssim_device requires width and height > 10");
+        const std::uint64_t pixels = static_cast<std::uint64_t>(width) * height;
+        const std::uint64_t image_bytes = 3 * pixels * sizeof(float);
+        const std::uint64_t mask_bytes = pixels * sizeof(float);
+        require(prediction.buffer != VK_NULL_HANDLE && prediction.bytes >= image_bytes,
+                "device prediction is too small");
+        require(target.buffer != VK_NULL_HANDLE && target.bytes >= image_bytes,
+                "device target is too small");
+        require(mask.buffer == VK_NULL_HANDLE || mask.bytes >= mask_bytes,
+                "device mask is too small");
+        require(ssim_weight >= 0.0F && ssim_weight <= 1.0F &&
+                    photometric_weight >= 0.0F,
+                "photometric_loss weights are out of range");
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+        const std::uint64_t alignment = std::max<std::uint64_t>(
+            4, properties.limits.minStorageBufferOffsetAlignment);
+        require(prediction.offset % alignment == 0 && target.offset % alignment == 0 &&
+                    (mask.buffer == VK_NULL_HANDLE || mask.offset % alignment == 0),
+                "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        const auto result = dispatch_photometric_locked(
+            {prediction.buffer, prediction.offset, image_bytes},
+            {target.buffer, target.offset, image_bytes},
+            mask.buffer == VK_NULL_HANDLE
+                ? descriptor(dummy_)
+                : VkDescriptorBufferInfo{mask.buffer, mask.offset, mask_bytes},
+            mask.buffer != VK_NULL_HANDLE, width, height,
+            ssim_weight, photometric_weight);
+        flush_batch();
+        return result;
+    }
+
+    float read_photometric_loss(const SplatDevicePhotometricOutput& output) {
+        require(output.loss_scalar.buffer == ssim_reduction_.handle &&
+                    output.loss_scalar.offset == 0 &&
+                    output.loss_scalar.bytes >= sizeof(float),
+                "photometric output is not owned by this rasterizer");
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        float value = 0.0F;
+        context_.read_buffer(ssim_reduction_, &value, sizeof(float));
+        return value;
+    }
+
     void backward_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
         const SplatBufferView& packed_model_gradients,
@@ -1137,10 +1520,10 @@ public:
         set_float(project_push, 15, last_kernel_size_);
         set_float(project_push, 16, last_scale_modifier_);
         std::vector<VkDescriptorBufferInfo> project_infos{
-            descriptor(means_), descriptor(opacities_), descriptor(scales_), descriptor(rotations_),
-            descriptor(covariances_), descriptor(colors_), descriptor(camera_), descriptor(gauss_f_),
-            descriptor(gauss_u_), descriptor(blend_gradient), descriptor(raw_log_scales_),
-            descriptor(raw_rotations_), descriptor(opacity_logits_), descriptor(filter_3d_),
+            model_means(), model_opacities(), model_scales(), model_rotations(),
+            model_covariances(), model_colors(), descriptor(camera_), descriptor(gauss_f_),
+            descriptor(gauss_u_), descriptor(blend_gradient), model_log_scales(),
+            model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
             {packed_model_gradients.buffer, packed_model_gradients.offset, model_bytes}};
         dispatch_infos(
             project_backward_, project_infos, project_push, div_up(count_, 256));
@@ -1233,16 +1616,18 @@ private:
     }
 
     void dispatch(const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers, const Push& push,
-                  std::uint32_t groups_x, std::uint32_t groups_y = 1) {
+                  std::uint32_t groups_x, std::uint32_t groups_y = 1,
+                  std::uint32_t groups_z = 1) {
         std::vector<VkDescriptorBufferInfo> infos;
         infos.reserve(buffers.size());
         for (const Buffer* buffer : buffers) infos.push_back(descriptor(*buffer));
-        dispatch_infos(pipeline, infos, push, groups_x, groups_y);
+        dispatch_infos(pipeline, infos, push, groups_x, groups_y, groups_z);
     }
 
     void dispatch_infos(const ComputePipeline& pipeline, const std::vector<VkDescriptorBufferInfo>& infos,
-                        const Push& push, std::uint32_t groups_x, std::uint32_t groups_y = 1) {
-        if (groups_x == 0 || groups_y == 0) return;
+                        const Push& push, std::uint32_t groups_x, std::uint32_t groups_y = 1,
+                        std::uint32_t groups_z = 1) {
+        if (groups_x == 0 || groups_y == 0 || groups_z == 0) return;
         begin_batch();
         VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         set_info.descriptorPool = context_.descriptor_pool;
@@ -1270,7 +1655,7 @@ private:
             &descriptor_set, 0, nullptr);
         vkCmdPushConstants(
             command_, pipeline.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &push);
-        vkCmdDispatch(command_, groups_x, groups_y, 1);
+        vkCmdDispatch(command_, groups_x, groups_y, groups_z);
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -1357,6 +1742,8 @@ private:
     ComputePipeline sample_depth_;
     ComputePipeline sample_depth_backward_;
     ComputePipeline multi_view_;
+    ComputePipeline ssim_;
+    ComputePipeline loss_reduce_;
     ComputePipeline project_backward_;
     ComputePipeline clear_;
     ComputePipeline pack_;
@@ -1380,6 +1767,8 @@ private:
     Buffer raw_rotations_;
     Buffer opacity_logits_;
     Buffer filter_3d_;
+    SplatDeviceGaussians device_model_{};
+    bool device_model_bound_ = false;
     Buffer camera_;
     Buffer gauss_f_;
     Buffer gauss_u_;
@@ -1398,6 +1787,19 @@ private:
     Buffer out_u_;
     Buffer snap_;
     Buffer rgba_;
+    Buffer ssim_prediction_;
+    Buffer ssim_target_;
+    Buffer ssim_mask_;
+    Buffer ssim_work0_;
+    Buffer ssim_work1_;
+    Buffer ssim_work2_;
+    Buffer ssim_work3_;
+    Buffer ssim_work4_;
+    Buffer ssim_dmu_;
+    Buffer ssim_dvariance_;
+    Buffer ssim_dcovariance_;
+    Buffer ssim_output_;
+    Buffer ssim_reduction_;
     Buffer loss_color_;
     Buffer loss_alpha_;
     Buffer loss_depth_;
@@ -1459,6 +1861,10 @@ SplatForwardOutput SplatRasterizer::forward(const SplatGaussians& gaussians, con
 
 void SplatRasterizer::upload_model(const SplatGaussians& gaussians) { impl_->upload_model(gaussians); }
 
+void SplatRasterizer::bind_model_device(const SplatDeviceGaussians& gaussians) {
+    impl_->bind_model_device(gaussians);
+}
+
 void SplatRasterizer::update_means_and_opacities(
     const std::span<const float> means, const std::span<const float> opacities) {
     impl_->update_means_and_opacities(means, opacities);
@@ -1483,6 +1889,17 @@ SplatModelGradients SplatRasterizer::backward(
     const std::span<const float> dL_median_depth,
     const std::span<const float> dL_normal) {
     return impl_->backward(dL_color, dL_alpha, dL_median_depth, dL_normal);
+}
+
+SplatDeviceFrame SplatRasterizer::render_device(
+    const SplatCamera& camera, const SplatSettings& settings) {
+    return impl_->render_device(camera, settings);
+}
+
+void SplatRasterizer::copy_frame_device(
+    const SplatDeviceFrame& source,
+    const SplatDeviceFrame& destination) {
+    impl_->copy_frame_device(source, destination);
 }
 
 void SplatRasterizer::backward_blend_device(
@@ -1523,6 +1940,32 @@ SplatDepthSampleGradients SplatRasterizer::sample_depth_backward(
 SplatMultiViewOutput SplatRasterizer::multi_view_loss(
     const SplatMultiViewInput& input) {
     return impl_->multi_view_loss(input);
+}
+
+SplatPhotometricOutput SplatRasterizer::photometric_loss(
+    const std::span<const float> prediction,
+    const std::span<const float> target,
+    const std::uint32_t width, const std::uint32_t height,
+    const float ssim_weight, const float photometric_weight,
+    const std::span<const float> mask) {
+    return impl_->photometric_loss(
+        prediction, target, width, height, ssim_weight,
+        photometric_weight, mask);
+}
+
+SplatDevicePhotometricOutput SplatRasterizer::fused_l1_ssim_device(
+    const SplatBufferView& prediction, const SplatBufferView& target,
+    const std::uint32_t width, const std::uint32_t height,
+    const float ssim_weight, const float photometric_weight,
+    const SplatBufferView& mask) {
+    return impl_->fused_l1_ssim_device(
+        prediction, target, width, height, ssim_weight,
+        photometric_weight, mask);
+}
+
+float SplatRasterizer::read_photometric_loss(
+    const SplatDevicePhotometricOutput& output) {
+    return impl_->read_photometric_loss(output);
 }
 
 void SplatRasterizer::render_rgba(

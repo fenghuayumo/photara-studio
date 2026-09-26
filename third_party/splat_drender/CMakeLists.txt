@@ -67,10 +67,24 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_clear.hlsl
             shaders/splat_project_backward.hlsl
             shaders/splat_pack_rgba.hlsl)
+        # Photometric training shaders belong to Photara's splat backend, not
+        # the reusable rasterizer source tree. They are still embedded in the
+        # Vulkan library because its command recorder owns these pipelines.
+        set(SPLAT_DRENDER_PHOTARA_SHADER_DIR
+            "${CMAKE_CURRENT_LIST_DIR}/../../photara/src/splat"
+            CACHE PATH "Photara splat training shader directory")
+        list(APPEND SPLAT_DRENDER_VULKAN_SHADERS
+            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_ssim.hlsl"
+            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_loss_reduce.hlsl")
 
         set(SPLAT_DRENDER_SHADER_BINARIES)
         set(SPLAT_DRENDER_SHADER_HEADERS)
         foreach(shader IN LISTS SPLAT_DRENDER_VULKAN_SHADERS)
+            if(IS_ABSOLUTE "${shader}")
+                set(shader_source "${shader}")
+            else()
+                set(shader_source "${CMAKE_CURRENT_SOURCE_DIR}/${shader}")
+            endif()
             get_filename_component(shader_name "${shader}" NAME)
             set(shader_binary "${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader_name}.spv")
             add_custom_command(
@@ -81,9 +95,9 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                         -fspv-target-env=vulkan1.2
                         -fvk-use-dx-layout
                         -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
-                        "${CMAKE_CURRENT_SOURCE_DIR}/${shader}"
+                        "${shader_source}"
                         -Fo "${shader_binary}"
-                DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${shader}"
+                DEPENDS "${shader_source}"
                         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
                         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli"
                 VERBATIM)

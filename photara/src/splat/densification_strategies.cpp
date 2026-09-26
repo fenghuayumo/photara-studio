@@ -371,7 +371,8 @@ RefinementCounts refine_emc(
         }
     }
 
-    stats = detail::make_densification_stats(model.size());
+    stats = detail::make_densification_stats(
+        model.size(), model.means.device());
     core::Logger::instance().info(
         "emc_refine iteration=", iteration,
         " split_k=", split_k,
@@ -525,7 +526,8 @@ RefinementCounts refine_gaussians(
         ? options.densification_cap - model.size()
         : 0;
     if (capacity == 0) {
-        stats = detail::make_densification_stats(model.size());
+        stats = detail::make_densification_stats(
+            model.size(), model.means.device());
         return {0, pruned};
     }
 
@@ -583,7 +585,8 @@ RefinementCounts refine_gaussians(
     grow_training_model(
         model, split_parents, detail::SplitMode::dense_tangent, options,
         random, states, retained_screen);
-    stats = detail::make_densification_stats(model.size());
+    stats = detail::make_densification_stats(
+        model.size(), model.means.device());
     return {split_parents.size(), pruned};
 }
 

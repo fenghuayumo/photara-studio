@@ -14,6 +14,7 @@
 #include "training_data_loader.hpp"
 #include "core/vram_profiler.hpp"
 #include "internal/memory_pool.hpp"
+#include "vulkan/backend.hpp"
 
 #include <cuda_runtime.h>
 
@@ -37,6 +38,12 @@
 
 namespace photara::splat {
 namespace {
+
+tinytensor::Device training_device(const TrainingOptions& options) {
+    return options.backend == TrainingBackend::vulkan
+        ? tinytensor::Device::Vulkan
+        : tinytensor::Device::CUDA;
+}
 
 namespace data = training_data;
 namespace refine = densification;
@@ -729,6 +736,18 @@ float percentile_median_size(
 
 template <typename T>
 std::vector<T> download(const tinytensor::Tensor& tensor) {
+    if (tensor.device() == tinytensor::Device::Vulkan) {
+        static_assert(std::is_same_v<T, float>,
+                      "Vulkan splat serialization currently downloads float tensors only");
+        if (!tensor.is_contiguous())
+            throw std::runtime_error(
+                "Vulkan splat serialization requires contiguous model tensors");
+        std::vector<T> values(tensor.numel());
+        if (!values.empty())
+            tinytensor::vulkan::download(
+                tensor, values.data(), values.size() * sizeof(T));
+        return values;
+    }
     std::vector<T> values(tensor.numel());
     if (!values.empty()) {
         const cudaError_t error = cudaMemcpy(
@@ -772,8 +791,7 @@ tinytensor::Tensor normal_features_from_smallest_axis(
         features[4 * index + 3] = 0.F;
     }
     return tinytensor::Tensor::from_vector(
-        features, {model.size(), std::size_t{4}},
-        tinytensor::Device::CUDA);
+        features, {model.size(), std::size_t{4}}, model.means.device());
 }
 
 
@@ -950,19 +968,20 @@ GaussianModel initialize_from_dense_cloud(
                 (std::clamp(point.color(channel), 0.F, 1.F) - 0.5F) / k_sh0;
     }
 
+    const tinytensor::Device device = training_device(options);
     GaussianModel model;
     model.means = tinytensor::Tensor::from_vector(
-        means, {count, 3}, tinytensor::Device::CUDA);
+        means, {count, 3}, device);
     model.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3}, tinytensor::Device::CUDA);
+        scales, {count, 3}, device);
     model.quaternions = tinytensor::Tensor::from_vector(
-        quaternions, {count, 4}, tinytensor::Device::CUDA);
+        quaternions, {count, 4}, device);
     model.opacity_logits = tinytensor::Tensor::from_vector(
-        opacities, {count, 1}, tinytensor::Device::CUDA);
+        opacities, {count, 1}, device);
     model.sh = tinytensor::Tensor::from_vector(
-        sh, {count, bases, 3}, tinytensor::Device::CUDA);
+        sh, {count, bases, 3}, device);
     model.normal_features = tinytensor::Tensor::from_vector(
-        normal_features, {count, 4}, tinytensor::Device::CUDA);
+        normal_features, {count, 4}, device);
     model.sh_degree = options.sh_degree;
     return model;
 }
@@ -984,6 +1003,35 @@ GaussianModel Trainer::train(
     tinytensor::VramScope training_scope("splat_training");
     if (scene.views.empty())
         throw std::invalid_argument("Splat training requires at least one MVS view");
+    const bool vulkan_backend = options_.backend == TrainingBackend::vulkan;
+    if (vulkan_backend) {
+        if (options_.enable_densification &&
+            options_.densification_strategy != DensificationStrategy::adc_igs)
+            throw std::invalid_argument(
+                "Vulkan densification currently supports the shared ADC-IGS "
+                "strategy only");
+        if (options_.densify_revised_noise)
+            throw std::invalid_argument(
+                "Vulkan ADC-IGS revised noise is not implemented yet");
+        if (options_.use_bilateral_grid || options_.use_ppisp ||
+            options_.use_depth_normal_loss || options_.use_normal_field ||
+            options_.use_mvs_depth || options_.use_mvs_normals ||
+            options_.multi_view_geo_weight > 0.F ||
+            options_.multi_view_ncc_weight > 0.F ||
+            options_.alpha_mode == AlphaMode::transparent)
+            throw std::invalid_argument(
+                "The Vulkan backend currently supports the shared masked "
+                "L1+SSIM path with optional ADC-IGS densification");
+        if (device_preview)
+            throw std::invalid_argument(
+                "CUDA/Vulkan external-memory preview is unavailable while "
+                "training on the Vulkan backend");
+        core::Logger::instance().info(
+            "splat training backend=vulkan orchestration=shared");
+    } else {
+        core::Logger::instance().info(
+            "splat training backend=cuda orchestration=shared");
+    }
     GaussianModel model = [&] {
         tinytensor::VramScope scope("model.initialize");
         return initialize_from_dense_cloud(scene, options_);
@@ -1106,7 +1154,7 @@ GaussianModel Trainer::train(
     TrainingOptions adaptive_multi_view_options = options_;
     auto multi_view_stability_accumulator = adaptive_multi_view
         ? tinytensor::Tensor::zeros(
-              {std::size_t{3}}, tinytensor::Device::CUDA)
+              {std::size_t{3}}, training_device(options_))
         : tinytensor::Tensor{};
     const auto multi_view_neighbours = use_multi_view
         ? data::compute_multi_view_neighbours(
@@ -1170,8 +1218,9 @@ GaussianModel Trainer::train(
             " growth_reserve=0.5 initial_growth_cap=",
             refine::panorama_progressive_growth_cap(
                 initial_gaussian_count, 1, options_));
-    detail::DensificationStats densification_stats =
-        detail::make_densification_stats(model.size());
+    detail::DensificationStats densification_stats = densification_enabled
+        ? detail::make_densification_stats(model.size(), model.means.device())
+        : detail::DensificationStats{};
     refine::RefinementCounts latest_refinement;
     Rasterizer rasterizer;
     CudaTrainingProfiler cuda_profiler(options_);
@@ -1192,7 +1241,9 @@ GaussianModel Trainer::train(
         (!options_.input_is_dense &&
             is_adc_strategy(options_.densification_strategy));
     if (splat_mean_lr_scale) {
-        refinement_geometry = refine::splat_scene_geometry_cuda(model.means);
+        refinement_geometry = vulkan_backend
+            ? refine::splat_scene_geometry(model.means.to_vector())
+            : refine::splat_scene_geometry_cuda(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
     }
     const float minimum_log_scale = options_.constrain_scale_range
@@ -1555,9 +1606,19 @@ GaussianModel Trainer::train(
         // buckets, which hid their cost.
         cuda_profiler.mark(CudaTrainingStage::colour_forward);
         loss_render.color = *photo_color;
-        detail::LossGradients loss = detail::compute_training_loss(
-            loss_render, target, options_, report_progress,
-            depth_normal_active, allocate_geometry_gradients);
+        detail::LossGradients loss;
+        if (vulkan_backend) {
+            const bool mask_enabled = target.has_mask &&
+                (options_.use_mask || target.mask_is_validity);
+            loss.total = loss.rgb = rasterizer.photometric_loss(
+                loss_render, target.rgb, target.mask, mask_enabled,
+                options_.ssim_weight, options_.photometric_weight);
+            loss.alpha = tinytensor::Tensor::zeros_like(rendered.alpha);
+        } else {
+            loss = detail::compute_training_loss(
+                loss_render, target, options_, report_progress,
+                depth_normal_active, allocate_geometry_gradients);
+        }
         RenderResult normal_field_render;
         detail::LossGradients normal_field_loss;
         ModelGradients normal_field_gradients;
@@ -1697,7 +1758,8 @@ GaussianModel Trainer::train(
         cuda_profiler.mark(CudaTrainingStage::colour_backward);
         // Auxiliary normal-field merges retain the general gradient path.
         // Empty renders also use the standalone optimizer (zero-gradient decay).
-        const bool fused_sh = options_.fuse_sh_adam && !normal_field_active &&
+        const bool fused_sh = !vulkan_backend && options_.fuse_sh_adam &&
+            !normal_field_active &&
             rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
         SHAdamUpdate sh_update{sh_state.first, sh_state.second,
             options_.sh0_lr, options_.sh_rest_lr, options_.beta1, options_.beta2,
@@ -1820,8 +1882,17 @@ GaussianModel Trainer::train(
         }
         const std::size_t full_sh_stride = model.sh.shape()[1] * 3;
         if (!fused_sh) {
-            detail::add_sh_regularization(
-                model.sh, gradients.sh, options_.sh_regularization_weight);
+            const float vulkan_sh_regularization =
+                vulkan_backend && full_sh_stride > 3 &&
+                        options_.sh_regularization_weight > 0.F
+                    ? 2.F * options_.sh_regularization_weight /
+                          static_cast<float>(
+                              model.size() * (full_sh_stride - 3))
+                    : 0.F;
+            if (!vulkan_backend)
+                detail::add_sh_regularization(
+                    model.sh, gradients.sh,
+                    options_.sh_regularization_weight);
             const std::size_t active_sh_stride =
                 static_cast<std::size_t>(active_sh_degree + 1) *
                 (active_sh_degree + 1) * 3;
@@ -1829,7 +1900,7 @@ GaussianModel Trainer::train(
                 detail::adam_step_active_prefix(
                     model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
                     options_, full_sh_stride, active_sh_stride,
-                    options_.sh_rest_lr);
+                    options_.sh_rest_lr, vulkan_sh_regularization);
             else if (options_.densification_strategy == DensificationStrategy::adc_plus)
                 detail::adam_step_reduced_second(
                     model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
@@ -1837,7 +1908,10 @@ GaussianModel Trainer::train(
             else
                 detail::adam_step(
                     model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
-                    options_, full_sh_stride, options_.sh_rest_lr);
+                    options_, full_sh_stride, options_.sh_rest_lr,
+                    -std::numeric_limits<float>::infinity(),
+                    std::numeric_limits<float>::infinity(),
+                    vulkan_sh_regularization);
         }
         if (normal_field_active)
             detail::adam_step(
@@ -1881,7 +1955,7 @@ GaussianModel Trainer::train(
         // Reduce opacity stats before densify remaps rows. Gradients still
         // match the pre-refinement model; a later download would not.
         detail::OpacityProgressStats opacity_stats{};
-        if (report_progress)
+        if (report_progress && !vulkan_backend)
             opacity_stats = detail::summarize_opacity_progress(
                 model.opacity_logits, gradients.opacity_logits);
 
@@ -1917,8 +1991,9 @@ GaussianModel Trainer::train(
             refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
             if (refinement_happened && splat_mean_lr_scale) {
-                refinement_geometry =
-                    refine::splat_scene_geometry_cuda(model.means);
+                refinement_geometry = vulkan_backend
+                    ? refine::splat_scene_geometry(model.means.to_vector())
+                    : refine::splat_scene_geometry_cuda(model.means);
                 means_learning_rate_scale = refinement_geometry.scale;
             }
             if (refinement_happened && report_progress) {
@@ -2123,11 +2198,15 @@ GaussianModel Trainer::train(
             " step_mean_ms=", cache.step_mean_ms);
     }
     finish_evaluation();
-    const cudaError_t error = cudaDeviceSynchronize();
-    if (error != cudaSuccess)
-        throw std::runtime_error(
-            std::string("Splat training synchronization failed: ") +
-            cudaGetErrorString(error));
+    if (vulkan_backend) {
+        tinytensor::vulkan::synchronize();
+    } else {
+        const cudaError_t error = cudaDeviceSynchronize();
+        if (error != cudaSuccess)
+            throw std::runtime_error(
+                std::string("Splat training synchronization failed: ") +
+                cudaGetErrorString(error));
+    }
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, full_resolution_filter_cameras,
@@ -2144,11 +2223,16 @@ RenderMetrics render_evaluation_png(
     options.kernel_size = training_options.kernel_size;
     options.scale_modifier = training_options.scale_modifier;
     options.require_depth = false;
-    const RenderResult rendered = Rasterizer().forward(
+    Rasterizer rasterizer;
+    const RenderResult rendered = rasterizer.forward(
         model, target.camera, options);
-    const float ssim = detail::fused_ssim_metric(
-        rendered.color, target.rgb, target.mask, target.has_mask,
-        target.camera.width, target.camera.height);
+    const float ssim = model.means.device() == tinytensor::Device::Vulkan
+        ? 1.F - rasterizer.photometric_loss(
+              rendered, target.rgb, target.mask, target.has_mask,
+              1.F, 1.F)
+        : detail::fused_ssim_metric(
+              rendered.color, target.rgb, target.mask, target.has_mask,
+              target.camera.width, target.camera.height);
     const std::vector<float> color = download<float>(rendered.color);
     const std::vector<float> alpha = download<float>(rendered.alpha);
     const std::vector<float> target_rgb = download<float>(target.rgb);
