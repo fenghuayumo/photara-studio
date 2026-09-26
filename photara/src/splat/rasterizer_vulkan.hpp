@@ -11,7 +11,7 @@ RenderResult vulkan_raster_forward(
 float vulkan_photometric_loss(
     const RenderResult& rendered, const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask, bool mask_enabled,
-    float ssim_weight, float photometric_weight);
+    float ssim_weight, float photometric_weight, bool read_loss_value);
 
 ModelGradients vulkan_raster_backward(
     const GaussianModel& model, const RenderResult& rendered,
@@ -21,5 +21,7 @@ ModelGradients vulkan_raster_backward(
     const tinytensor::Tensor& grad_normal,
     const tinytensor::Tensor& densify_map,
     const SHAdamUpdate* sh_adam);
+
+void vulkan_materialize_visibility(RenderResult& rendered);
 
 }  // namespace photara::splat::detail

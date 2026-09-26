@@ -4,6 +4,8 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -75,6 +77,37 @@ void zero_buffer(Context::Impl& context, Buffer& buffer, const std::size_t bytes
     context.fill_buffer(buffer, 0, bytes);
 }
 
+bool environment_flag(const char* name) {
+#ifdef _WIN32
+    char* raw_value = nullptr;
+    std::size_t value_size = 0;
+    if (_dupenv_s(&raw_value, &value_size, name) != 0 || raw_value == nullptr)
+        return false;
+    const bool enabled = raw_value[0] == '1';
+    std::free(raw_value);
+    return enabled;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] == '1';
+#endif
+}
+
+std::uint32_t environment_interval(
+    const char* name, const std::uint32_t default_value) {
+#ifdef _WIN32
+    char* raw_value = nullptr;
+    std::size_t value_size = 0;
+    if (_dupenv_s(&raw_value, &value_size, name) != 0 || raw_value == nullptr)
+        return default_value;
+    const int parsed = std::atoi(raw_value);
+    std::free(raw_value);
+#else
+    const char* value = std::getenv(name);
+    const int parsed = value == nullptr ? 0 : std::atoi(value);
+#endif
+    return parsed > 0 ? static_cast<std::uint32_t>(parsed) : default_value;
+}
+
 } // namespace
 
 class SplatRasterizer::Impl {
@@ -91,6 +124,13 @@ public:
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
           median_backward_(context.create_pipeline("splat_median_backward.hlsl.spv", 7, sizeof(Push))),
           blend_backward_(context.create_pipeline("splat_blend_backward.hlsl.spv", 12, sizeof(Push))),
+          blend_backward_no_geometry_(
+              context.create_pipeline(
+                  "splat_blend_backward_no_geometry.hlsl.spv", 12, sizeof(Push))),
+          blend_backward_no_geometry_subgroup_(
+              context.create_pipeline(
+                  "splat_blend_backward_no_geometry_subgroup.hlsl.spv",
+                  12, sizeof(Push))),
           sample_depth_(context.create_pipeline("splat_sample_depth.hlsl.spv", 7, sizeof(Push))),
           sample_depth_backward_(context.create_pipeline("splat_sample_depth_backward.hlsl.spv", 10, sizeof(Push))),
           multi_view_(context.create_pipeline("splat_multi_view.hlsl.spv", 10, sizeof(Push))),
@@ -100,6 +140,8 @@ public:
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))) {
         clear_buffer(dummy_);
+        create_backward_timestamp_profiler();
+        query_subgroup_properties();
     }
 
     ~Impl() {
@@ -114,6 +156,9 @@ public:
         }
         if (command_ != VK_NULL_HANDLE) {
             vkFreeCommandBuffers(context_.device, context_.command_pool, 1, &command_);
+        }
+        if (backward_timestamp_pool_ != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(context_.device, backward_timestamp_pool_, nullptr);
         }
     }
 
@@ -345,7 +390,10 @@ public:
     // Everything the frame computes, up to the blended image. `pack_rgba` adds
     // the 8-bit conversion to the same command batch, which is what the editor
     // preview hands to its own image.
-    FrameCounts record_frame(const SplatCamera& camera, const SplatSettings& settings, const bool pack_rgba) {
+    FrameCounts record_frame(
+        const SplatCamera& camera, const SplatSettings& settings,
+        const bool pack_rgba,
+        const SplatDeviceFrame* destination = nullptr) {
         sample_live_ = false;
         require(model_ready_, "no Gaussian model is loaded");
         require(camera.width > 0 && camera.height > 0, "camera width and height must be positive");
@@ -424,7 +472,9 @@ public:
         Buffer* range_lo = &dummy_;
         Buffer* range_hi = &dummy_;
         Buffer& tile_ranges = grow(tile_ranges_, static_cast<std::uint64_t>(tiles) * 2 * sizeof(std::uint32_t));
-        zero_buffer(context_, tile_ranges, static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
+        zero_buffer(
+            context_, tile_ranges,
+            static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
         const bool single_sort = instances <= k_single_sort_limit;
         if (instances > 0) {
             if (visible == 0) throw std::runtime_error("Vulkan splat preprocessing produced instances without visible Gaussians");
@@ -507,7 +557,9 @@ public:
             const std::size_t clear_uints = settings.pixel_snapshots
                 ? static_cast<std::size_t>(count) + pixels + tiles + snap_buckets
                 : count;
-            zero_buffer(context_, *out_u, clear_uints * sizeof(std::uint32_t));
+            zero_buffer(
+                context_, *out_u,
+                clear_uints * sizeof(std::uint32_t));
         }
 
         Push blend_push{};
@@ -542,6 +594,26 @@ public:
             Push pack_push{};
             pack_push.u[0] = pixels;
             dispatch(pack_, {&out_f, &rgba}, pack_push, div_up(pixels, 256));
+        }
+        if (destination != nullptr) {
+            const std::uint64_t plane_bytes = pixels * sizeof(float);
+            SplatDeviceFrame source;
+            source.color = {out_f.handle, 0, 3 * plane_bytes};
+            source.alpha = {out_f.handle, 3 * plane_bytes, plane_bytes};
+            if (settings.need_depth) {
+                source.normal = {out_f.handle, 4 * plane_bytes, 3 * plane_bytes};
+                source.median_depth = {out_f.handle, 7 * plane_bytes, plane_bytes};
+            }
+            source.radii = {
+                gauss_u.handle,
+                static_cast<std::uint64_t>(3) * count * sizeof(std::uint32_t),
+                static_cast<std::uint64_t>(count) * sizeof(std::uint32_t)};
+            source.visibility_bits = {
+                out_u->handle, 0,
+                static_cast<std::uint64_t>(count) * sizeof(std::uint32_t)};
+            source.width = camera.width;
+            source.height = camera.height;
+            record_copy_frame_device(source, *destination);
         }
         flush_batch();
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
@@ -611,6 +683,20 @@ public:
     SplatDeviceFrame render_device(
         const SplatCamera& camera, const SplatSettings& settings) {
         const FrameCounts counts = record_frame(camera, settings, false);
+        return make_device_frame(camera, settings, counts);
+    }
+
+    SplatDeviceFrame render_device_copy(
+        const SplatCamera& camera, const SplatSettings& settings,
+        const SplatDeviceFrame& destination) {
+        const FrameCounts counts =
+            record_frame(camera, settings, false, &destination);
+        return make_device_frame(camera, settings, counts);
+    }
+
+    [[nodiscard]] SplatDeviceFrame make_device_frame(
+        const SplatCamera& camera, const SplatSettings& settings,
+        const FrameCounts counts) const {
         const std::uint64_t pixels =
             static_cast<std::uint64_t>(camera.width) * camera.height;
         const std::uint64_t plane_bytes = pixels * sizeof(float);
@@ -641,65 +727,10 @@ public:
         require(source.width == destination.width &&
                     source.height == destination.height,
                 "copy_frame_device requires matching image extents");
-        struct CopyPair {
-            SplatBufferView source;
-            SplatBufferView destination;
-        };
-        const std::array<CopyPair, 6> pairs{{
-            {source.color, destination.color},
-            {source.alpha, destination.alpha},
-            {source.normal, destination.normal},
-            {source.median_depth, destination.median_depth},
-            {source.radii, destination.radii},
-            {source.visibility_bits, destination.visibility_bits},
-        }};
         const std::scoped_lock lock(context_.dispatch_mutex);
+        begin_batch();
+        record_copy_frame_device(source, destination);
         flush_batch();
-        const auto check = [](const VkResult result, const char* action) {
-            if (result != VK_SUCCESS)
-                throw std::runtime_error(
-                    std::string(action) + " failed with VkResult " +
-                    std::to_string(static_cast<int>(result)));
-        };
-        VkCommandBufferAllocateInfo allocate{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        allocate.commandPool = context_.command_pool;
-        allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocate.commandBufferCount = 1;
-        VkCommandBuffer command = VK_NULL_HANDLE;
-        check(vkAllocateCommandBuffers(
-            context_.device, &allocate, &command),
-            "vkAllocateCommandBuffers(copy frame)");
-        VkCommandBufferBeginInfo begin{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(vkBeginCommandBuffer(command, &begin),
-                 "vkBeginCommandBuffer(copy frame)");
-        for (const CopyPair& pair : pairs) {
-            if (pair.destination.buffer == VK_NULL_HANDLE) continue;
-            require(pair.source.buffer != VK_NULL_HANDLE &&
-                        pair.destination.bytes >= pair.source.bytes,
-                    "copy_frame_device destination is too small");
-            VkBufferCopy region{};
-            region.srcOffset = pair.source.offset;
-            region.dstOffset = pair.destination.offset;
-            region.size = pair.source.bytes;
-            vkCmdCopyBuffer(
-                command, pair.source.buffer, pair.destination.buffer,
-                1, &region);
-        }
-        check(vkEndCommandBuffer(command),
-                 "vkEndCommandBuffer(copy frame)");
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &command;
-        check(vkQueueSubmit(
-            context_.queue, 1, &submit, VK_NULL_HANDLE),
-            "vkQueueSubmit(copy frame)");
-        check(vkQueueWaitIdle(context_.queue),
-                 "vkQueueWaitIdle(copy frame)");
-        vkFreeCommandBuffers(
-            context_.device, context_.command_pool, 1, &command);
     }
 
     void dispatch_median_backward_info(
@@ -778,6 +809,7 @@ public:
         set_float(push, 10, last_background_[1]);
         set_float(push, 11, last_background_[2]);
         push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
+        push.u[13] = !dL_alpha.empty() ? 1u : 0u;
         dispatch(
             blend_backward_,
             {&tile_ranges_, last_instance_values_, &gauss_f_, &out_f_, &out_u_,
@@ -893,7 +925,7 @@ public:
         const std::uint64_t gradient_bytes = static_cast<std::uint64_t>(count_) * 18 * sizeof(float);
         require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
                 "device dL_color is too small");
-        require(dL_alpha.buffer != VK_NULL_HANDLE && dL_alpha.bytes >= alpha_bytes,
+        require(dL_alpha.buffer == VK_NULL_HANDLE || dL_alpha.bytes >= alpha_bytes,
                 "device dL_alpha is too small");
         require(packed_gradients.buffer != VK_NULL_HANDLE && packed_gradients.bytes >= gradient_bytes,
                 "device packed_gradients is too small");
@@ -947,6 +979,7 @@ public:
         set_float(push, 10, last_background_[1]);
         set_float(push, 11, last_background_[2]);
         push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
+        push.u[13] = dL_alpha.buffer != VK_NULL_HANDLE ? 1u : 0u;
         std::vector<VkDescriptorBufferInfo> infos{
             descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
             descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
@@ -954,7 +987,12 @@ public:
             {dL_alpha.buffer, dL_alpha.offset, alpha_bytes},
             normal_info, descriptor(median_state),
             {packed_gradients.buffer, packed_gradients.offset, gradient_bytes}};
-        dispatch_infos(blend_backward_, infos, push, div_up(last_bucket_limit_, 8));
+        dispatch_infos(
+            last_frame_has_geometry_ ? blend_backward_
+                                     : (subgroup_backward_supported_ && subgroup_size_ == 32u
+                                            ? blend_backward_no_geometry_subgroup_
+                                            : blend_backward_no_geometry_),
+            infos, push, div_up(last_bucket_limit_, 8));
         flush_batch();
     }
 
@@ -1281,7 +1319,26 @@ public:
             div_up(static_cast<std::uint32_t>(count), 256);
         Buffer& reduction = grow(
             ssim_reduction_, static_cast<std::size_t>(reduction_groups) * sizeof(float));
-        zero_buffer(context_, output, 2 * count * sizeof(float));
+        // The loss output is consumed by the following compute dispatches, so
+        // record its clear in their batch instead of paying a standalone
+        // transfer submission and queue wait every training step.
+        begin_batch();
+        const VkDeviceSize output_bytes = 2 * count * sizeof(float);
+        vkCmdFillBuffer(command_, output.handle, 0, output_bytes, 0u);
+        VkBufferMemoryBarrier output_fill_barrier{
+            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        output_fill_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        output_fill_barrier.dstAccessMask =
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        output_fill_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        output_fill_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        output_fill_barrier.buffer = output.handle;
+        output_fill_barrier.offset = 0;
+        output_fill_barrier.size = output_bytes;
+        vkCmdPipelineBarrier(
+            command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1,
+            &output_fill_barrier, 0, nullptr);
 
         Push push{};
         push.u[0] = width;
@@ -1427,7 +1484,7 @@ public:
         const std::uint64_t model_bytes = model_gradient_float_count() * sizeof(float);
         require(dL_color.buffer != VK_NULL_HANDLE && dL_color.bytes >= color_bytes,
                 "device dL_color is too small");
-        require(dL_alpha.buffer != VK_NULL_HANDLE && dL_alpha.bytes >= alpha_bytes,
+        require(dL_alpha.buffer == VK_NULL_HANDLE || dL_alpha.bytes >= alpha_bytes,
                 "device dL_alpha is too small");
         require(packed_model_gradients.buffer != VK_NULL_HANDLE &&
                     packed_model_gradients.bytes >= model_bytes,
@@ -1442,7 +1499,9 @@ public:
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
         const std::uint64_t alignment = std::max<std::uint64_t>(
             4, properties.limits.minStorageBufferOffsetAlignment);
-        require(dL_color.offset % alignment == 0 && dL_alpha.offset % alignment == 0 &&
+        require(dL_color.offset % alignment == 0 &&
+                    (dL_alpha.buffer == VK_NULL_HANDLE ||
+                     dL_alpha.offset % alignment == 0) &&
                     packed_model_gradients.offset % alignment == 0 &&
                     (dL_depth.buffer == VK_NULL_HANDLE || dL_depth.offset % alignment == 0) &&
                     (dL_normal.buffer == VK_NULL_HANDLE || dL_normal.offset % alignment == 0),
@@ -1450,12 +1509,28 @@ public:
 
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& blend_gradient = grow(blend_grad_, blend_bytes);
-        Buffer& zero_depth = grow(loss_depth_, depth_bytes);
-        Buffer& zero_normal = grow(loss_normal_, normal_bytes);
-        Buffer& median_state = grow(median_state_, depth_bytes * 2);
-        if (dL_depth.buffer == VK_NULL_HANDLE) zero_buffer(context_, zero_depth, depth_bytes);
-        if (dL_normal.buffer == VK_NULL_HANDLE) zero_buffer(context_, zero_normal, normal_bytes);
-        zero_buffer(context_, median_state, depth_bytes * 2);
+        // All backward shaders use pc.u13 to avoid touching the alpha-gradient
+        // descriptor when no alpha objective is active. Binding the tiny dummy
+        // buffer removes an image-sized clear and its queue drain.
+        Buffer& zero_depth = last_frame_has_geometry_
+            ? grow(loss_depth_, depth_bytes)
+            : dummy_;
+        Buffer& zero_normal = last_frame_has_geometry_
+            ? grow(loss_normal_, normal_bytes)
+            : dummy_;
+        Buffer& median_state = last_frame_has_geometry_
+            ? grow(median_state_, depth_bytes * 2)
+            : dummy_;
+        if (last_frame_has_geometry_) {
+            if (dL_depth.buffer == VK_NULL_HANDLE)
+                zero_buffer(context_, zero_depth, depth_bytes);
+            if (dL_normal.buffer == VK_NULL_HANDLE)
+                zero_buffer(context_, zero_normal, normal_bytes);
+            zero_buffer(context_, median_state, depth_bytes * 2);
+        }
+        const VkDescriptorBufferInfo alpha_info = dL_alpha.buffer == VK_NULL_HANDLE
+            ? descriptor(dummy_)
+            : VkDescriptorBufferInfo{dL_alpha.buffer, dL_alpha.offset, alpha_bytes};
         const VkDescriptorBufferInfo depth_info = dL_depth.buffer == VK_NULL_HANDLE
             ? descriptor(zero_depth)
             : VkDescriptorBufferInfo{dL_depth.buffer, dL_depth.offset, depth_bytes};
@@ -1464,10 +1539,13 @@ public:
             : VkDescriptorBufferInfo{dL_normal.buffer, dL_normal.offset, normal_bytes};
         if (last_frame_has_geometry_) dispatch_median_backward_info(depth_info, median_state);
         begin_batch();
+        write_backward_timestamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
         vkCmdFillBuffer(command_, blend_gradient.handle, 0, blend_bytes, 0u);
-        VkBufferMemoryBarrier fill_barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        VkBufferMemoryBarrier fill_barrier{
+            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         fill_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        fill_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        fill_barrier.dstAccessMask =
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         fill_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         fill_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         fill_barrier.buffer = blend_gradient.handle;
@@ -1476,6 +1554,7 @@ public:
         vkCmdPipelineBarrier(
             command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 0, nullptr, 1, &fill_barrier, 0, nullptr);
+        write_backward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         Push blend_push{};
         blend_push.u[0] = last_width_;
@@ -1491,14 +1570,22 @@ public:
         set_float(blend_push, 10, last_background_[1]);
         set_float(blend_push, 11, last_background_[2]);
         blend_push.u[12] = last_frame_has_geometry_ ? 1u : 0u;
+        blend_push.u[13] = dL_alpha.buffer != VK_NULL_HANDLE ? 1u : 0u;
         std::vector<VkDescriptorBufferInfo> blend_infos{
             descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
             descriptor(out_f_), descriptor(out_u_), descriptor(bucket_offsets_), descriptor(snap_),
             {dL_color.buffer, dL_color.offset, color_bytes},
-            {dL_alpha.buffer, dL_alpha.offset, alpha_bytes}, normal_info,
+            alpha_info, normal_info,
             descriptor(median_state), descriptor(blend_gradient)};
+        const ComputePipeline& blend_pipeline = last_frame_has_geometry_
+            ? blend_backward_
+            : (subgroup_backward_supported_ && subgroup_size_ == 32u
+                   ? blend_backward_no_geometry_subgroup_
+                   : blend_backward_no_geometry_);
         dispatch_infos(
-            blend_backward_, blend_infos, blend_push, div_up(last_bucket_limit_, 8));
+            blend_pipeline, blend_infos, blend_push,
+            div_up(last_bucket_limit_, 8));
+        write_backward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         Push project_push{};
         project_push.u[0] = count_;
@@ -1527,7 +1614,9 @@ public:
             {packed_model_gradients.buffer, packed_model_gradients.offset, model_bytes}};
         dispatch_infos(
             project_backward_, project_infos, project_push, div_up(count_, 256));
+        write_backward_timestamp(3, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         flush_batch();
+        collect_backward_timestamps();
     }
 
     SplatRgbaImage render_rgba_device(const SplatCamera& camera, SplatSettings settings) {
@@ -1550,6 +1639,211 @@ public:
     }
 
 private:
+    void record_copy_frame_device(
+        const SplatDeviceFrame& source,
+        const SplatDeviceFrame& destination) {
+        require(recording_, "frame copies require an active command batch");
+        require(source.width == destination.width &&
+                    source.height == destination.height,
+                "copy_frame_device requires matching image extents");
+        struct CopyPair {
+            SplatBufferView source;
+            SplatBufferView destination;
+        };
+        const std::array<CopyPair, 6> pairs{{
+            {source.color, destination.color},
+            {source.alpha, destination.alpha},
+            {source.normal, destination.normal},
+            {source.median_depth, destination.median_depth},
+            {source.radii, destination.radii},
+            {source.visibility_bits, destination.visibility_bits},
+        }};
+
+        // The final blend dispatch ends with a compute-to-compute barrier.
+        // Buffer copies additionally need the three source buffers made
+        // available to transfer. Scope those dependencies to the copied ranges
+        // rather than flushing every compute write in the frame batch.
+        const auto source_barrier = [](const SplatBufferView& source) {
+            VkBufferMemoryBarrier barrier{
+                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.buffer = source.buffer;
+            barrier.offset = source.offset;
+            barrier.size = source.bytes;
+            return barrier;
+        };
+        std::array<VkBufferMemoryBarrier, 3> barriers{
+            VkBufferMemoryBarrier{}, VkBufferMemoryBarrier{},
+            VkBufferMemoryBarrier{}};
+        std::uint32_t barrier_count = 0;
+        SplatBufferView color_dependency = source.color;
+        color_dependency.bytes = 0;
+        const auto extend_color = [&](const SplatBufferView& value) {
+            if (value.buffer == VK_NULL_HANDLE) return;
+            color_dependency.bytes = std::max(
+                color_dependency.bytes,
+                value.offset + value.bytes - color_dependency.offset);
+        };
+        if (destination.color.buffer != VK_NULL_HANDLE)
+            extend_color(source.color);
+        if (destination.alpha.buffer != VK_NULL_HANDLE)
+            extend_color(source.alpha);
+        if (destination.normal.buffer != VK_NULL_HANDLE)
+            extend_color(source.normal);
+        if (destination.median_depth.buffer != VK_NULL_HANDLE)
+            extend_color(source.median_depth);
+        if (color_dependency.bytes != 0)
+            barriers[barrier_count++] = source_barrier(color_dependency);
+        if (destination.radii.buffer != VK_NULL_HANDLE)
+            barriers[barrier_count++] = source_barrier(source.radii);
+        if (destination.visibility_bits.buffer != VK_NULL_HANDLE)
+            barriers[barrier_count++] = source_barrier(source.visibility_bits);
+        vkCmdPipelineBarrier(
+            command_,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, barrier_count, barriers.data(), 0, nullptr);
+        for (const CopyPair& pair : pairs) {
+            if (pair.destination.buffer == VK_NULL_HANDLE) continue;
+            require(pair.source.buffer != VK_NULL_HANDLE &&
+                        pair.destination.bytes >= pair.source.bytes,
+                    "copy_frame_device destination is too small");
+            VkBufferCopy region{};
+            region.srcOffset = pair.source.offset;
+            region.dstOffset = pair.destination.offset;
+            region.size = pair.source.bytes;
+            vkCmdCopyBuffer(
+                command_, pair.source.buffer, pair.destination.buffer,
+                1, &region);
+        }
+    }
+
+    void query_subgroup_properties() {
+        VkPhysicalDeviceSubgroupProperties subgroup{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+        VkPhysicalDeviceProperties2 properties{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &subgroup};
+        vkGetPhysicalDeviceProperties2(context_.physical_device, &properties);
+        subgroup_size_ = subgroup.subgroupSize;
+        subgroup_backward_supported_ =
+            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0 &&
+            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
+        subgroup_backward_supported_ &=
+            !environment_flag("SPLAT_DRENDER_DISABLE_SUBGROUP_BACKWARD");
+    }
+
+    void create_backward_timestamp_profiler() {
+        backward_profile_enabled_ = environment_flag("SPLAT_DRENDER_PROFILE_BACKWARD");
+        backward_profile_interval_ = environment_interval(
+            "SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL", 100);
+        if (!backward_profile_enabled_) return;
+
+        std::uint32_t family_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(
+            context_.physical_device, &family_count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(
+            context_.physical_device, &family_count, families.data());
+        backward_timestamp_valid_bits_ =
+            context_.queue_family_index < families.size()
+                ? families[context_.queue_family_index].timestampValidBits
+                : 0;
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+        backward_timestamp_period_ = properties.limits.timestampPeriod;
+        if (backward_timestamp_valid_bits_ == 0) {
+            std::fprintf(
+                stderr,
+                "splat_vulkan_backward_profile disabled: queue has timestampValidBits=0\n");
+            backward_profile_enabled_ = false;
+            return;
+        }
+
+        VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        info.queryCount = 4;
+        if (vkCreateQueryPool(context_.device, &info, nullptr,
+                              &backward_timestamp_pool_) != VK_SUCCESS) {
+            throw std::runtime_error(
+                "vkCreateQueryPool failed for backward profiling");
+        }
+    }
+
+    void write_backward_timestamp(
+        const std::uint32_t index, const VkPipelineStageFlagBits stage) {
+        if (!backward_profile_enabled_) return;
+        if (index == 0) {
+            vkCmdResetQueryPool(
+                command_, backward_timestamp_pool_, 0, 4);
+        }
+        vkCmdWriteTimestamp(command_, stage, backward_timestamp_pool_, index);
+    }
+
+    [[nodiscard]] static std::uint64_t timestamp_delta(
+        const std::uint64_t begin, const std::uint64_t end,
+        const std::uint32_t valid_bits) {
+        if (valid_bits >= 64) return end - begin;
+        const std::uint64_t mask = (std::uint64_t{1} << valid_bits) - 1;
+        const std::uint64_t masked_begin = begin & mask;
+        const std::uint64_t masked_end = end & mask;
+        return masked_end >= masked_begin
+            ? masked_end - masked_begin
+            : ((mask - masked_begin + 1) + masked_end) & mask;
+    }
+
+    void collect_backward_timestamps() {
+        if (!backward_profile_enabled_) return;
+        std::array<std::uint64_t, 4> timestamps{};
+        const VkResult result = vkGetQueryPoolResults(
+            context_.device, backward_timestamp_pool_, 0, 4,
+            sizeof(timestamps), timestamps.data(), sizeof(std::uint64_t),
+            VK_QUERY_RESULT_64_BIT);
+        if (result != VK_SUCCESS) {
+            std::fprintf(
+                stderr,
+                "splat_vulkan_backward_profile query result failed: %d\n",
+                static_cast<int>(result));
+            return;
+        }
+
+        const double ticks_to_ms =
+            static_cast<double>(backward_timestamp_period_) / 1.0e6;
+        const double fill_ms = static_cast<double>(timestamp_delta(
+            timestamps[0], timestamps[1], backward_timestamp_valid_bits_)) *
+            ticks_to_ms;
+        const double blend_ms = static_cast<double>(timestamp_delta(
+            timestamps[1], timestamps[2], backward_timestamp_valid_bits_)) *
+            ticks_to_ms;
+        const double project_ms = static_cast<double>(timestamp_delta(
+            timestamps[2], timestamps[3], backward_timestamp_valid_bits_)) *
+            ticks_to_ms;
+        backward_fill_total_ms_ += fill_ms;
+        backward_blend_total_ms_ += blend_ms;
+        backward_project_total_ms_ += project_ms;
+        ++backward_profile_samples_;
+
+        if (backward_profile_samples_ < backward_profile_interval_) return;
+        const double samples = static_cast<double>(backward_profile_samples_);
+        std::fprintf(
+            stderr,
+            "splat_vulkan_backward_profile samples=%u gaussians=%u buckets=%u "
+            "pixels=%u fill_avg_ms=%.4f blend_avg_ms=%.4f project_avg_ms=%.4f "
+            "total_avg_ms=%.4f\n",
+            backward_profile_samples_, count_, last_bucket_limit_, last_pixels_,
+            backward_fill_total_ms_ / samples,
+            backward_blend_total_ms_ / samples,
+            backward_project_total_ms_ / samples,
+            (backward_fill_total_ms_ + backward_blend_total_ms_ +
+             backward_project_total_ms_) / samples);
+        backward_profile_samples_ = 0;
+        backward_fill_total_ms_ = 0.0;
+        backward_blend_total_ms_ = 0.0;
+        backward_project_total_ms_ = 0.0;
+    }
+
     // Every buffer the shaders touch lives in device memory: an unmapped buffer
     // keeps the GPU at VRAM bandwidth instead of running the whole forward over
     // PCIe. Only the tiny per-frame control blocks stay host visible.
@@ -1739,6 +2033,8 @@ private:
     ComputePipeline blend_;
     ComputePipeline median_backward_;
     ComputePipeline blend_backward_;
+    ComputePipeline blend_backward_no_geometry_;
+    ComputePipeline blend_backward_no_geometry_subgroup_;
     ComputePipeline sample_depth_;
     ComputePipeline sample_depth_backward_;
     ComputePipeline multi_view_;
@@ -1748,6 +2044,17 @@ private:
     ComputePipeline clear_;
     ComputePipeline pack_;
     VkCommandBuffer command_{};
+    VkQueryPool backward_timestamp_pool_{};
+    bool backward_profile_enabled_{};
+    bool subgroup_backward_supported_{};
+    std::uint32_t subgroup_size_{};
+    std::uint32_t backward_profile_interval_{100};
+    std::uint32_t backward_profile_samples_{};
+    std::uint32_t backward_timestamp_valid_bits_{};
+    float backward_timestamp_period_{};
+    double backward_fill_total_ms_{};
+    double backward_blend_total_ms_{};
+    double backward_project_total_ms_{};
     std::vector<VkDescriptorSet> pending_sets_;
     bool recording_{};
     bool model_ready_{};
@@ -1894,6 +2201,12 @@ SplatModelGradients SplatRasterizer::backward(
 SplatDeviceFrame SplatRasterizer::render_device(
     const SplatCamera& camera, const SplatSettings& settings) {
     return impl_->render_device(camera, settings);
+}
+
+SplatDeviceFrame SplatRasterizer::render_device_copy(
+    const SplatCamera& camera, const SplatSettings& settings,
+    const SplatDeviceFrame& destination) {
+    return impl_->render_device_copy(camera, settings, destination);
 }
 
 void SplatRasterizer::copy_frame_device(

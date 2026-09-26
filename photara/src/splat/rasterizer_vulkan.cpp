@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 
@@ -12,6 +15,26 @@ namespace photara::splat::detail {
 namespace {
 
 using splat_drender::vulkan::SplatBufferView;
+
+bool environment_flag(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr)
+        return false;
+    const bool enabled = value[0] == '1';
+    std::free(value);
+    return enabled;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] == '1';
+#endif
+}
+
+double elapsed_ms(const std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+}
 
 SplatBufferView buffer_view(const tinytensor::Tensor& tensor) {
     if (!tensor.is_valid()) return {};
@@ -40,6 +63,10 @@ splat_drender::vulkan::SplatCamera camera_view(const Camera& camera) {
 struct VulkanRasterBackend {
     splat_drender::vulkan::Context context;
     splat_drender::vulkan::SplatRasterizer rasterizer;
+    // Models without the optional 3D filter still need a valid device binding.
+    // Keep one read-only zero buffer across frames instead of allocating and
+    // clearing O(gaussians) storage on every training iteration.
+    tinytensor::Tensor zero_filter;
 
     VulkanRasterBackend()
         : context([] {
@@ -55,12 +82,41 @@ struct VulkanRasterBackend {
               options.external_device.queue_family = handles.queue_family;
               return options;
           }()),
-          rasterizer(context) {}
+          rasterizer(context), profile_stages(
+              environment_flag("SPLAT_VULKAN_PROFILE_STAGES")) {}
+
+    void record_forward(const double value) {
+        if (profile_stages) forward_ms += value;
+    }
+    void record_loss(const double value) {
+        if (profile_stages) loss_ms += value;
+    }
+    void record_backward(const double value) {
+        if (!profile_stages) return;
+        backward_ms += value;
+        if (++profile_samples < 100) return;
+        const double inverse = 1.0 / static_cast<double>(profile_samples);
+        std::fprintf(
+            stderr,
+            "splat_vulkan_stage_profile samples=%u forward_avg_ms=%.4f "
+            "loss_avg_ms=%.4f backward_avg_ms=%.4f raster_total_avg_ms=%.4f\n",
+            profile_samples, forward_ms * inverse, loss_ms * inverse,
+            backward_ms * inverse,
+            (forward_ms + loss_ms + backward_ms) * inverse);
+        profile_samples = 0;
+        forward_ms = loss_ms = backward_ms = 0.0;
+    }
+
+    bool profile_stages{};
+    std::uint32_t profile_samples{};
+    double forward_ms{};
+    double loss_ms{};
+    double backward_ms{};
 };
 
 struct VulkanForwardContext {
     std::shared_ptr<VulkanRasterBackend> backend;
-    tinytensor::Tensor zero_filter;
+    tinytensor::Tensor visibility_bits;
     splat_drender::vulkan::SplatDeviceFrame frame;
     splat_drender::vulkan::SplatDevicePhotometricOutput photometric;
     bool has_photometric{};
@@ -96,8 +152,10 @@ RenderResult vulkan_raster_forward(
     const auto backend = get_backend(backend_value);
     auto context = std::make_shared<VulkanForwardContext>();
     context->backend = backend;
-    if (!model.filter_3d.is_valid())
-        context->zero_filter = tinytensor::Tensor::zeros(
+    if (!model.filter_3d.is_valid() &&
+        (!backend->zero_filter.is_valid() ||
+         backend->zero_filter.numel() < model.size()))
+        backend->zero_filter = tinytensor::Tensor::zeros(
             {model.size()}, tinytensor::Device::Vulkan);
     splat_drender::vulkan::SplatDeviceGaussians gaussians;
     gaussians.means = buffer_view(model.means);
@@ -106,7 +164,7 @@ RenderResult vulkan_raster_forward(
     gaussians.raw_rotations = buffer_view(model.quaternions);
     gaussians.opacity_logits = buffer_view(model.opacity_logits);
     gaussians.filter_3d = buffer_view(
-        model.filter_3d.is_valid() ? model.filter_3d : context->zero_filter);
+        model.filter_3d.is_valid() ? model.filter_3d : backend->zero_filter);
     gaussians.count = static_cast<std::uint32_t>(model.size());
     gaussians.sh_degree = std::min(
         requested_options.active_sh_degree, model.sh_degree);
@@ -123,17 +181,14 @@ RenderResult vulkan_raster_forward(
     settings.point_depth_bracket = requested_options.point_depth_bracket;
     settings.point_depth_tolerance = requested_options.point_depth_tolerance;
 
-    tinytensor::vulkan::synchronize();
-    backend->rasterizer.bind_model_device(gaussians);
-    context->frame = backend->rasterizer.render_device(
-        camera_view(camera), settings);
-
     RenderResult result;
-    result.color = tinytensor::Tensor::empty(
-        {std::size_t{3}, camera.height, camera.width},
-        tinytensor::Device::Vulkan);
-    result.alpha = tinytensor::Tensor::empty(
-        {camera.height, camera.width}, tinytensor::Device::Vulkan);
+    if (requested_options.copy_attachments) {
+        result.color = tinytensor::Tensor::empty(
+            {std::size_t{3}, camera.height, camera.width},
+            tinytensor::Device::Vulkan);
+        result.alpha = tinytensor::Tensor::empty(
+            {camera.height, camera.width}, tinytensor::Device::Vulkan);
+    }
     if (settings.need_depth) {
         result.normal = tinytensor::Tensor::empty(
             {std::size_t{3}, camera.height, camera.width},
@@ -145,30 +200,32 @@ RenderResult vulkan_raster_forward(
         {model.size()}, tinytensor::Device::Vulkan,
         tinytensor::DataType::Int32);
     // splat_drender stores contribution visibility as uint32 flags.
-    auto visibility_bits = tinytensor::Tensor::empty(
+    context->visibility_bits = tinytensor::Tensor::empty(
         {model.size()}, tinytensor::Device::Vulkan,
         tinytensor::DataType::Int32);
-
     splat_drender::vulkan::SplatDeviceFrame destination;
     destination.color = buffer_view(result.color);
     destination.alpha = buffer_view(result.alpha);
     destination.normal = buffer_view(result.normal);
     destination.median_depth = buffer_view(result.median_depth);
     destination.radii = buffer_view(result.radii);
-    destination.visibility_bits = buffer_view(visibility_bits);
+    destination.visibility_bits = buffer_view(context->visibility_bits);
     destination.width = camera.width;
     destination.height = camera.height;
-    backend->rasterizer.copy_frame_device(context->frame, destination);
-    // TinyTensor's current Vulkan int32->float cast rounds these 0/1 flags to
-    // zero. Convert the small per-Gaussian flag vector explicitly; render
-    // attachments and all image-sized training data remain device-resident.
-    const auto raw_visibility = visibility_bits.to_vector_int();
-    std::vector<float> visibility(raw_visibility.size());
-    std::transform(raw_visibility.begin(), raw_visibility.end(),
-        visibility.begin(), [](const int value) { return value == 0 ? 0.F : 1.F; });
-    result.visibility = tinytensor::Tensor::from_vector(
-        visibility, {visibility.size()}, tinytensor::Device::Vulkan);
+
+    const auto profile_start = std::chrono::steady_clock::now();
+    tinytensor::vulkan::synchronize();
+    backend->rasterizer.bind_model_device(gaussians);
+    context->frame = backend->rasterizer.render_device_copy(
+        camera_view(camera), settings, destination);
+    // Keep the per-Gaussian contribution flags device-resident. The 0/1
+    // int32-to-float conversion is a single TinyTensor compute dispatch and
+    // avoids a full device -> host -> device round trip for every frame.
+    if (!requested_options.defer_visibility)
+        result.visibility = context->visibility_bits.to(
+            tinytensor::DataType::Float32);
     result.rendered_instances = context->frame.instance_count;
+    backend->record_forward(elapsed_ms(profile_start));
     result.context.backend_impl = std::move(context);
     return result;
 }
@@ -176,8 +233,10 @@ RenderResult vulkan_raster_forward(
 float vulkan_photometric_loss(
     const RenderResult& rendered, const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask, const bool mask_enabled,
-    const float ssim_weight, const float photometric_weight) {
+    const float ssim_weight, const float photometric_weight,
+    const bool read_loss_value) {
     auto context = get_context(rendered);
+    const auto profile_start = std::chrono::steady_clock::now();
     if (target.device() != tinytensor::Device::Vulkan)
         throw std::invalid_argument(
             "Vulkan photometric target must be a Vulkan tensor");
@@ -187,8 +246,12 @@ float vulkan_photometric_loss(
         context->frame.height, ssim_weight, photometric_weight,
         mask_enabled ? buffer_view(mask) : SplatBufferView{});
     context->has_photometric = true;
-    return context->backend->rasterizer.read_photometric_loss(
-        context->photometric);
+    float value = 0.0F;
+    if (read_loss_value)
+        value = context->backend->rasterizer.read_photometric_loss(
+            context->photometric);
+    context->backend->record_loss(elapsed_ms(profile_start));
+    return value;
 }
 
 ModelGradients vulkan_raster_backward(
@@ -200,6 +263,7 @@ ModelGradients vulkan_raster_backward(
     const tinytensor::Tensor& densify_map,
     const SHAdamUpdate* sh_adam) {
     auto context = get_context(rendered);
+    const auto profile_start = std::chrono::steady_clock::now();
     if (sh_adam != nullptr)
         throw std::invalid_argument(
             "Fused SH Adam is not supported by the Vulkan raster primitive");
@@ -217,7 +281,10 @@ ModelGradients vulkan_raster_backward(
 
     const std::size_t count = model.size();
     const std::size_t sh_values = model.sh.numel();
-    auto packed = tinytensor::Tensor::zeros(
+    // splat_project_backward writes every packed slot for every Gaussian,
+    // including zeroing inactive/culled entries and unused SH coefficients.
+    // Avoid a redundant ~60 MB device clear and its TinyTensor queue drain.
+    auto packed = tinytensor::Tensor::empty(
         {sh_values + count * 26U}, tinytensor::Device::Vulkan);
     tinytensor::vulkan::synchronize();
     context->backend->rasterizer.backward_device(
@@ -249,7 +316,15 @@ ModelGradients vulkan_raster_backward(
             tinytensor::TensorShape{count, std::size_t{1}});
     offset += count;
     gradients.refine_weight = packed.slice(0, offset, offset + count);
+    context->backend->record_backward(elapsed_ms(profile_start));
     return gradients;
+}
+
+void vulkan_materialize_visibility(RenderResult& rendered) {
+    if (rendered.visibility.is_valid()) return;
+    auto context = get_context(rendered);
+    rendered.visibility = context->visibility_bits.to(
+        tinytensor::DataType::Float32);
 }
 
 }  // namespace photara::splat::detail

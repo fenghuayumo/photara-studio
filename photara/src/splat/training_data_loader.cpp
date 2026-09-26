@@ -1009,11 +1009,24 @@ struct TrainingDataLoader::Impl {
         note_request_cadence();
         collect_ready_host_prefetches();
         if (options_.backend == TrainingBackend::vulkan) {
+            const auto cached = vulkan_lookup_.find(index);
+            if (cached != vulkan_lookup_.end()) {
+                ++device_hits_;
+                device_hit_rate_ = static_cast<double>(device_hits_) /
+                    static_cast<double>(requests_);
+                vulkan_entries_.splice(
+                    vulkan_entries_.begin(), vulkan_entries_, cached->second);
+                return vulkan_entries_.front().view;
+            }
             const bool host_resident = lookup_.contains(index);
             const HostTrainingView& host = host_view(index);
             if (host_resident) ++host_hits_;
+            TrainingView view = upload_training_view(host, options_);
             uploaded_bytes_ += packed_host_bytes(host);
-            return upload_training_view(host, options_);
+            device_hit_rate_ = static_cast<double>(device_hits_) /
+                static_cast<double>(requests_);
+            insert_vulkan_entry(index, view);
+            return view;
         }
         const auto found = device_lookup_.find(index);
         if (found != device_lookup_.end()) {
@@ -1133,6 +1146,8 @@ struct TrainingDataLoader::Impl {
         device_lookup_.clear();
         device_entries_.clear();
         device_cached_bytes_ = 0;
+        vulkan_lookup_.clear();
+        vulkan_entries_.clear();
         // Budget feedback starts over at the new scale.
         device_budget_window_requests_ = 0;
         device_budget_window_hits_ = 0;
@@ -1243,6 +1258,13 @@ private:
     };
     using DeviceEntries = std::list<DeviceEntry>;
 
+    struct VulkanDeviceEntry {
+        std::size_t index{};
+        std::size_t bytes{};
+        TrainingView view;
+    };
+    using VulkanDeviceEntries = std::list<VulkanDeviceEntry>;
+
     struct PendingDeviceUpload {
         std::size_t bytes{};
         Camera camera;
@@ -1263,6 +1285,41 @@ private:
         const HostTrainingView& host) {
         return sizeof(int) * host.rgba.size() +
             sizeof(float) * (host.depth.size() + host.normal.size());
+    }
+
+    [[nodiscard]] static std::size_t vulkan_view_bytes(
+        const TrainingView& view) {
+        return saturate_add(
+            view.rgb.bytes(),
+            saturate_add(
+                view.gray.bytes(),
+                saturate_add(
+                    view.mask.bytes(),
+                    saturate_add(view.depth.bytes(), view.normal.bytes()))));
+    }
+
+    bool make_room_for_vulkan_bytes(const std::size_t bytes) {
+        if (bytes > device_capacity_bytes_) return false;
+        while (!vulkan_entries_.empty() &&
+               device_cached_bytes_ + bytes > device_capacity_bytes_) {
+            const auto evicted = select_eviction_victim(vulkan_entries_);
+            device_cached_bytes_ -= evicted->bytes;
+            vulkan_lookup_.erase(evicted->index);
+            vulkan_entries_.erase(evicted);
+        }
+        return device_cached_bytes_ + bytes <= device_capacity_bytes_;
+    }
+
+    void insert_vulkan_entry(
+        const std::size_t index, const TrainingView& view) {
+        VulkanDeviceEntry entry;
+        entry.index = index;
+        entry.bytes = vulkan_view_bytes(view);
+        entry.view = view;
+        if (!make_room_for_vulkan_bytes(entry.bytes)) return;
+        vulkan_entries_.push_front(std::move(entry));
+        vulkan_lookup_[index] = vulkan_entries_.begin();
+        device_cached_bytes_ += vulkan_entries_.front().bytes;
     }
 
     // Diagnostic switch (SPLAT_VERIFY_UPLOAD=1): compare the packed bytes a
@@ -1699,6 +1756,9 @@ private:
     bool has_last_request_time_{false};
     DeviceEntries device_entries_;
     std::unordered_map<std::size_t, DeviceEntries::iterator> device_lookup_;
+    VulkanDeviceEntries vulkan_entries_;
+    std::unordered_map<std::size_t, VulkanDeviceEntries::iterator>
+        vulkan_lookup_;
     std::unordered_map<std::size_t, PendingDeviceUpload> device_uploads_;
     float resolution_scale_{1.F};
     Entries entries_;
@@ -1965,12 +2025,13 @@ private:
                     view, options_, resolution_scale_));
         }
 
-        // Vulkan views are uploaded as ordinary TinyTensor tensors on demand.
-        // The host cache and prefetch policy stay shared; the CUDA-only packed
-        // image cache/stream is deliberately bypassed.
+        // Vulkan views are materialized as ordinary TinyTensor tensors, then
+        // retained in a simple LRU. The CUDA packed-image layout and async
+        // copy stream remain separate because their representation is not
+        // shared by the Vulkan tensor runtime.
         if (options_.backend == TrainingBackend::vulkan) {
             capacity_bytes_ = options_.training_view_cache_bytes;
-            device_capacity_bytes_ = 0;
+            device_capacity_bytes_ = options_.training_device_cache_bytes;
             device_ceiling_bytes_ = 0;
             return;
         }

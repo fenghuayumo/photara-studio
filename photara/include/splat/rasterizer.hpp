@@ -10,6 +10,14 @@ struct RasterizeOptions {
     float kernel_size{0.F};
     float scale_modifier{1.F};
     bool require_depth{true};
+    // Vulkan keeps its live render frame in the backend context. Training can
+    // skip color/alpha materialization unless a host preview needs the copies.
+    bool copy_attachments{true};
+    // Vulkan training consumes contribution visibility only after backward.
+    // Deferring its uint32-to-float conversion lets that dispatch join the
+    // densification/optimizer batch instead of forcing a queue hand-off before
+    // the photometric loss. Regular render callers keep the eager default.
+    bool defer_visibility{false};
     bool debug{false};
     // Multi-view point queries (sample_depth): median-depth seed window in
     // world units, and the bracket width at which refinement stops. Zero keeps
@@ -43,7 +51,7 @@ public:
         const tinytensor::Tensor& target,
         const tinytensor::Tensor& mask,
         bool mask_enabled, float ssim_weight,
-        float photometric_weight) const;
+        float photometric_weight, bool read_loss_value = true) const;
 
     ModelGradients backward(
         const GaussianModel& model, const RenderResult& rendered,
@@ -53,6 +61,10 @@ public:
         const tinytensor::Tensor& grad_normal,
         const tinytensor::Tensor& densify_map = {},
         const SHAdamUpdate* sh_adam = nullptr) const;
+
+    // Materialize a deferred Vulkan contribution-visibility tensor. This is a
+    // no-op when forward() already returned the regular Float32 visibility.
+    void materialize_visibility(RenderResult& rendered) const;
 
     DepthSampleResult sample_depth(
         const GaussianModel& model, const tinytensor::Tensor& world_points,

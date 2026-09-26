@@ -61,6 +61,8 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_blend.hlsl
             shaders/splat_median_backward.hlsl
             shaders/splat_blend_backward.hlsl
+            shaders/splat_blend_backward_no_geometry.hlsl
+            shaders/splat_blend_backward_no_geometry_subgroup.hlsl
             shaders/splat_sample_depth.hlsl
             shaders/splat_sample_depth_backward.hlsl
             shaders/splat_multi_view.hlsl
@@ -86,6 +88,14 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                 set(shader_source "${CMAKE_CURRENT_SOURCE_DIR}/${shader}")
             endif()
             get_filename_component(shader_name "${shader}" NAME)
+            set(shader_dependencies
+                "${shader_source}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli")
+            if(shader_name STREQUAL "splat_blend_backward_no_geometry.hlsl")
+                list(APPEND shader_dependencies
+                     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl")
+            endif()
             set(shader_binary "${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader_name}.spv")
             add_custom_command(
                 OUTPUT "${shader_binary}"
@@ -97,9 +107,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                         -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
                         "${shader_source}"
                         -Fo "${shader_binary}"
-                DEPENDS "${shader_source}"
-                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
-                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli"
+                DEPENDS ${shader_dependencies}
                 VERBATIM)
             list(APPEND SPLAT_DRENDER_SHADER_BINARIES "${shader_binary}")
             string(MAKE_C_IDENTIFIER "${shader_name}_spv" shader_variable)

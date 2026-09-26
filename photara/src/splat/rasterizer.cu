@@ -291,10 +291,11 @@ RenderResult Rasterizer::forward(
 float Rasterizer::photometric_loss(
     const RenderResult& rendered, const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask, const bool mask_enabled,
-    const float ssim_weight, const float photometric_weight) const {
+    const float ssim_weight, const float photometric_weight,
+    const bool read_loss_value) const {
     return detail::vulkan_photometric_loss(
         rendered, target, mask, mask_enabled,
-        ssim_weight, photometric_weight);
+        ssim_weight, photometric_weight, read_loss_value);
 }
 
 ModelGradients Rasterizer::backward(
@@ -433,6 +434,16 @@ ModelGradients Rasterizer::backward(
         }
     }
     return gradients;
+}
+
+void Rasterizer::materialize_visibility(RenderResult& rendered) const {
+    if (rendered.visibility.is_valid()) return;
+    if (rendered.context.backend_impl) {
+        detail::vulkan_materialize_visibility(rendered);
+        return;
+    }
+    throw std::invalid_argument(
+        "Deferred visibility requires a live Vulkan forward context");
 }
 
 const float* Rasterizer::projected_mean2d(const RenderResult& rendered) const {

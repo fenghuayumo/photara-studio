@@ -265,6 +265,25 @@ build\photara\Release\photara.exe `
 - Prefetch and upload asynchronously.
 - Reuse temporary storage and avoid per-iteration allocation.
 - Use CUDA events and profiler categories for stage timing.
+- Prefer a compile-time no-geometry blend-backward pipeline for RGB/alpha
+  training. When the device has one 32-lane subgroup and the required
+  nonuniform arithmetic operations, stage one snapshot bucket in group memory
+  and use subgroup prefix products/sums instead of replaying the preceding 31
+  entries independently in every lane. Set
+  `SPLAT_DRENDER_DISABLE_SUBGROUP_BACKWARD=1` to force the portable fallback.
+- Record needed Vulkan frame-to-tensor attachment copies in the same command
+  buffer as the final blend dispatch, with buffer-scoped compute-to-transfer
+  barriers. RGB/alpha copies are skipped for Vulkan training views because the
+  live backend frame already feeds the fused loss; live previews use their own
+  explicitly rendered camera instead of the training-view attachments.
+- Keep Vulkan contribution flags on the device, defer non-reporting loss scalar
+  reads to log iterations, and retain materialized Vulkan supervision tensors in
+  a bounded LRU instead of re-uploading every host-cached view.
+- Use `SPLAT_DRENDER_PROFILE_BACKWARD=1` to collect Vulkan timestamp-query
+  averages for the backward gradient fill, blend backward, and projection
+  backward kernels; `SPLAT_DRENDER_PROFILE_BACKWARD_INTERVAL` selects the
+  aggregation window (default 100 iterations). Profiling is disabled by
+  default because timestamp queries add measurable overhead.
 - Treat GPU model, driver/toolkit, build type, image resolution, Gaussian
   count, strategy, and iteration schedule as part of every benchmark.
 

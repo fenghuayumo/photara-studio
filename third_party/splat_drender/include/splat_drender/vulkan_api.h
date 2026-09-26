@@ -328,6 +328,12 @@ public:
     // radii. The returned attachments can feed loss/backward passes directly.
     [[nodiscard]] SplatDeviceFrame render_device(
         const SplatCamera& camera, const SplatSettings& settings);
+    // Same as render_device(), but records the selected attachment copies into
+    // the frame's final command buffer. The caller preallocates destination
+    // buffers and retains them until the call returns.
+    [[nodiscard]] SplatDeviceFrame render_device_copy(
+        const SplatCamera& camera, const SplatSettings& settings,
+        const SplatDeviceFrame& destination);
     // Copies selected attachments into caller-owned VkBuffer slices on the
     // adopted device. Empty destination slices are skipped. This is the bridge
     // used by backend-neutral tensor code without staging through the CPU.

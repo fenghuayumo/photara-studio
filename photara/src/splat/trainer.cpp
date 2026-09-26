@@ -1172,6 +1172,15 @@ GaussianModel Trainer::train(
                 snapshot.filter_3d = detail::compute_3d_filter(
                     snapshot.means, full_resolution_filter_cameras,
                     filter_3d_factor, splat_filter);
+            // The Vulkan path shares one logical device/queue and has stateful
+            // process-wide tensor and raster runtime state. An evaluation
+            // thread can therefore race the next training submission even when
+            // individual tensor operations are serialized. CUDA evaluation
+            // stays overlapped; Vulkan evaluation runs on the training thread.
+            if (vulkan_backend) {
+                evaluate(iteration, snapshot);
+                return;
+            }
             evaluation_future = std::async(
                 std::launch::async,
                 [evaluate, iteration,
@@ -1414,6 +1423,11 @@ GaussianModel Trainer::train(
                                             normal_field_active ||
                                             multi_view_active;
         raster_options.require_depth = need_geometry_channels;
+        // Vulkan previews render their own requested camera below; they never
+        // consume the current training view's copied RGB/alpha tensors. Keep
+        // the fused-loss frame backend-resident even when live preview is on.
+        raster_options.copy_attachments = !vulkan_backend;
+        raster_options.defer_visibility = vulkan_backend;
         // Environment override for measurement (see
         // PHOTARA_SPLAT_FORCE_GEOMETRY_WORKSPACE in the rasterizer): keep
         // the older "always allocate the geometry gradient images" behavior so
@@ -1612,8 +1626,11 @@ GaussianModel Trainer::train(
                 (options_.use_mask || target.mask_is_validity);
             loss.total = loss.rgb = rasterizer.photometric_loss(
                 loss_render, target.rgb, target.mask, mask_enabled,
-                options_.ssim_weight, options_.photometric_weight);
-            loss.alpha = tinytensor::Tensor::zeros_like(rendered.alpha);
+                options_.ssim_weight, options_.photometric_weight,
+                report_progress);
+            loss.alpha = rendered.alpha.is_valid()
+                ? tinytensor::Tensor::zeros_like(rendered.alpha)
+                : tinytensor::Tensor{};
         } else {
             loss = detail::compute_training_loss(
                 loss_render, target, options_, report_progress,
@@ -1778,6 +1795,7 @@ GaussianModel Trainer::train(
                 multi_view_sample_gradients, gradients);
         cuda_profiler.mark(CudaTrainingStage::multi_view_gradient_merge);
         if (densification_enabled) {
+            rasterizer.materialize_visibility(rendered);
             tinytensor::Tensor image_error;
             tinytensor::Tensor normalized_size;
             if (panorama_adc && target.camera.model == CameraModel::equirectangular) {

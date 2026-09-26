@@ -1,5 +1,11 @@
 #include "splat_math.hlsli"
 
+#ifdef SPLAT_BLEND_BACKWARD_NO_GEOMETRY
+#define SPLAT_BLEND_BACKWARD_GEOMETRY 0
+#else
+#define SPLAT_BLEND_BACKWARD_GEOMETRY 1
+#endif
+
 [[vk::binding(0, 0)]] StructuredBuffer<uint> ranges;
 [[vk::binding(1, 0)]] StructuredBuffer<uint> instances;
 [[vk::binding(2, 0)]] StructuredBuffer<float4> gauss_f;
@@ -32,16 +38,20 @@ void commit_gradient(uint gaussian, uint count, float3 acc_mean,
     uint mean_base = gaussian * 3u;
     uint conic_base = count * 3u + gaussian * 4u;
     uint color_base = count * 7u + gaussian * 3u;
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
     uint plane_base = count * 10u + gaussian * 4u;
     uint normal_base = count * 14u + gaussian * 3u;
+#endif
     uint refine_base = count * 17u + gaussian;
     atomic_add_f32(mean_base, acc_mean.x);
     atomic_add_f32(mean_base + 1u, acc_mean.y);
     atomic_add_f32(mean_base + 2u, acc_mean.z);
     [unroll] for (uint i = 0u; i < 4u; ++i) atomic_add_f32(conic_base + i, acc_conic[i]);
     [unroll] for (uint c = 0u; c < 3u; ++c) atomic_add_f32(color_base + c, acc_color[c]);
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
     [unroll] for (uint p = 0u; p < 4u; ++p) atomic_add_f32(plane_base + p, acc_plane[p]);
     [unroll] for (uint n = 0u; n < 3u; ++n) atomic_add_f32(normal_base + n, acc_normal[n]);
+#endif
     atomic_add_f32(refine_base, acc_refine);
 }
 
@@ -59,7 +69,9 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
     int wrap_width = int(pc.u4);
     uint count = pc.u5, pixel_count = pc.u6, tile_count = pc.u7;
     float3 background = float3(asfloat(pc.u9), asfloat(pc.u10), asfloat(pc.u11));
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
     bool geometry = pc.u12 != 0u;
+#endif
 
     uint tile_id = out_u[count + pixel_count + tile_count + bucket_idx];
     if (tile_id >= tile_count) return;
@@ -77,16 +89,25 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
     float2 mean = gauss_f[gaussian * 8u].xy;
     float4 conic = gauss_f[gaussian * 8u + 1u];
     float3 color = gauss_f[gaussian * 8u + 2u].xyz;
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
     float4 ray_plane = geometry ? gauss_f[gaussian * 8u + 3u] : 0.0f;
     float3 gaussian_normal = geometry ? gauss_f[gaussian * 8u + 4u].xyz : 0.0f;
+#endif
     uint4 bounds = asuint(gauss_f[gaussian * 8u + 5u]);
     uint pix_min_x = (tile_id % tiles_x) * 16u;
     uint pix_min_y = (tile_id / tiles_x) * 16u;
 
-    float3 acc_color = 0.0f, acc_mean = 0.0f, acc_normal = 0.0f;
-    float4 acc_conic = 0.0f, acc_plane = 0.0f;
+    float3 acc_color = 0.0f, acc_mean = 0.0f;
+    float4 acc_conic = 0.0f;
     float acc_refine = 0.0f;
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
+    float3 acc_normal = 0.0f;
+    float4 acc_plane = 0.0f;
     uint normal_snap_base = bucket_limit * 256u;
+#else
+    float3 acc_normal = 0.0f;
+    float4 acc_plane = 0.0f;
+#endif
     [loop] for (uint local = 0u; local < 256u; ++local) {
         uint px = pix_min_x + (local & 15u), py = pix_min_y + (local >> 4u);
         if (px >= width || py >= height) continue;
@@ -100,10 +121,12 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         float3 color_after = float3(out_f[8u * pixel_count + pixel],
             out_f[9u * pixel_count + pixel], out_f[10u * pixel_count + pixel]) - state.xyz;
         float alpha_final = out_f[3u * pixel_count + pixel], final_t = 1.0f - alpha_final;
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
         float3 normal_out = geometry ? float3(out_f[4u * pixel_count + pixel],
             out_f[5u * pixel_count + pixel], out_f[6u * pixel_count + pixel]) : 0.0f;
         float3 normal_after = geometry
             ? normal_out * alpha_final - snap[normal_snap_base + snap_index].xyz : 0.0f;
+#endif
         float transmittance = state.w, G = 0.0f, alpha = 0.0f;
         float2 delta = 0.0f;
         bool accepted = false;
@@ -121,7 +144,9 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             if (qalpha < kAlphaFloor) continue;
             float weight = qalpha * transmittance;
             color_after -= weight * gauss_f[q * 8u + 2u].xyz;
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
             if (geometry) normal_after -= weight * gauss_f[q * 8u + 4u].xyz;
+#endif
             if (k == lane) { G = qG; alpha = qalpha; delta = qdelta; accepted = true; break; }
             transmittance *= 1.0f - qalpha;
         }
@@ -129,17 +154,21 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
 
         float3 pixel_grad = float3(loss_color[pixel], loss_color[pixel_count + pixel],
                                    loss_color[2u * pixel_count + pixel]);
-        float d_final_t_render = dot(background, pixel_grad) - loss_alpha[pixel];
+        float d_final_t_render = dot(background, pixel_grad) -
+            (pc.u13 != 0u ? loss_alpha[pixel] : 0.0f);
         float d_final_t = d_final_t_render;
         float3 normal_grad = 0.0f;
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
         if (geometry && alpha_final > 0.0f) {
             normal_grad = float3(loss_normal[pixel], loss_normal[pixel_count + pixel],
                                  loss_normal[2u * pixel_count + pixel]) / alpha_final;
             d_final_t += dot(normal_grad, normal_out);
         }
+#endif
         float inv_1ma = 1.0f / (1.0f - alpha);
         float d_opacity_render = transmittance * dot(color, pixel_grad) - dot(color_after, pixel_grad) * inv_1ma;
         float d_opacity = d_opacity_render, d_peak = 0.0f;
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
         if (geometry) {
             d_opacity += transmittance * dot(gaussian_normal, normal_grad) - dot(normal_after, normal_grad) * inv_1ma;
             acc_normal += alpha * transmittance * normal_grad;
@@ -156,6 +185,7 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
             d_peak = -d_delta * ray_plane.w;
             acc_plane.xyz += float3(d_peak * delta.x, d_peak * delta.y, d_peak);
         }
+#endif
         d_opacity_render -= final_t * inv_1ma * d_final_t_render;
         d_opacity -= final_t * inv_1ma * d_final_t;
         if (mode == kModeFisheye && conic.w * G >= kAlphaClip) { d_opacity = 0.0f; d_opacity_render = 0.0f; }
@@ -165,8 +195,12 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         float dG = conic.w * d_opacity;
         float dG_render = conic.w * d_opacity_render;
         float gdx = G * delta.x, gdy = G * delta.y;
-        float d_del_x = dG * (-gdx * conic.x - gdy * conic.y) + d_peak * ray_plane.x;
-        float d_del_y = dG * (-gdy * conic.z - gdx * conic.y) + d_peak * ray_plane.y;
+        float d_del_x = dG * (-gdx * conic.x - gdy * conic.y);
+        float d_del_y = dG * (-gdy * conic.z - gdx * conic.y);
+#if SPLAT_BLEND_BACKWARD_GEOMETRY
+        d_del_x += d_peak * ray_plane.x;
+        d_del_y += d_peak * ray_plane.y;
+#endif
         acc_mean += float3(d_del_x, d_del_y, abs(d_del_x) + abs(d_del_y));
         float refine_x = dG_render * (-gdx * conic.x - gdy * conic.y) * float(width);
         float refine_y = dG_render * (-gdy * conic.z - gdx * conic.y) * float(height);
