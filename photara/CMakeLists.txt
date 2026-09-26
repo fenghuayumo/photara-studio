@@ -676,7 +676,7 @@ if(TARGET photara_features)
             set(PHOTARA_STUDIO_DIR
                 "${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor")
             add_subdirectory(
-                "${CMAKE_CURRENT_SOURCE_DIR}/../splat_render"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../apps/editor/splat_render"
                 "${CMAKE_CURRENT_BINARY_DIR}/splat_render")
             add_executable(photara_studio
                 ${PHOTARA_STUDIO_DIR}/app_commands.cpp
