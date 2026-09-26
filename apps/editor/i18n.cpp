@@ -636,39 +636,39 @@ constexpr Entry k_entries[] = {
      "끄면 처음부터 최대 해상도를 사용합니다."},
     {"Foreground mask training", "前景蒙版训练", "前景マスク学習", "전경 마스크 학습"},
     {"Uses each view's mask or source alpha during 3DGS training.\n"
-     "A mask is required for every training image. Choose below\n"
-     "whether masked pixels are ignored or trained as transparent.",
+     "A mask is required for every training image.\n"
+     "Choose masked or transparent below.",
      "在 3DGS 训练中使用每个视图的蒙版或源图像 Alpha。\n"
-     "每张训练图像都必须有蒙版。请在下方选择将蒙版像素\n"
-     "忽略，还是将其训练为透明。",
+     "每张训练图像都必须有蒙版。请在下方选择\n"
+     "masked 或 transparent。",
      "3DGS 学習で各ビューのマスクまたは入力アルファを使用します。\n"
-     "すべての学習画像にマスクが必要です。マスク画素を無視するか、\n"
-     "透明として学習するかを下で選択します。",
+     "すべての学習画像にマスクが必要です。下で\n"
+     "masked か transparent を選びます。",
      "3DGS 학습에서 각 뷰의 마스크 또는 원본 알파를 사용합니다.\n"
-     "모든 학습 이미지에 마스크가 필요합니다. 마스크 픽셀을 무시할지,\n"
-     "투명하게 학습할지 아래에서 선택하세요."},
+     "모든 학습 이미지에 마스크가 필요합니다. 아래에서\n"
+     "masked 또는 transparent 를 선택하세요."},
     {"Mask mode", "蒙版模式", "マスクモード", "마스크 모드"},
-    {"Ignore masked pixels", "忽略被遮挡像素", "マスク外を無視", "가려진 픽셀 무시"},
-    {"Train output alpha", "训练输出透明度", "出力アルファを学習", "출력 알파 학습"},
-    {"Ignore masked pixels: those rays are missing observations.\n"
+    {"masked", "masked", "masked", "masked"},
+    {"transparent", "transparent", "transparent", "transparent"},
+    {"masked: those rays are missing observations.\n"
      "Colour is trained only where the mask is valid, and alpha is left alone.\n"
      "Use this when a moving person hides static geometry.\n"
-     "Train output alpha: the mask is the target opacity.\n"
+     "transparent: the mask is the target opacity.\n"
      "Valid pixels stay opaque and masked pixels become transparent.",
-     "忽略被遮挡像素：这些射线当作没有观测。\n"
+     "masked：这些射线当作没有观测。\n"
      "只在蒙版有效处训练颜色，不约束透明度。\n"
      "拍摄者在走动、挡住静止背景时用这个。\n"
-     "训练输出透明度：蒙版就是目标不透明度。\n"
+     "transparent：蒙版就是目标不透明度。\n"
      "有效区域保持不透明，被遮挡区域训练成透明。",
-     "マスク外を無視：その光線は観測なしとして扱います。\n"
+     "masked：その光線は観測なしとして扱います。\n"
      "色はマスクが有効な場所だけ学習し、アルファは拘束しません。\n"
      "動く人が静止した背景を隠すときに使います。\n"
-     "出力アルファを学習：マスクが目標の不透明度です。\n"
+     "transparent：マスクが目標の不透明度です。\n"
      "有効領域は不透明のまま、隠れた領域は透明へ学習します。",
-     "가려진 픽셀 무시: 그 광선은 관측이 없는 것으로 봅니다.\n"
+     "masked: 그 광선은 관측이 없는 것으로 봅니다.\n"
      "색은 마스크가 유효한 곳만 학습하고 알파는 제약하지 않습니다.\n"
      "움직이는 사람이 정적인 배경을 가릴 때 사용합니다.\n"
-     "출력 알파 학습: 마스크가 목표 불투명도입니다.\n"
+     "transparent: 마스크가 목표 불투명도입니다.\n"
      "유효 영역은 불투명하게 두고, 가려진 영역은 투명하게 학습합니다."},
     {"SAM3 masks", "SAM3 蒙版", "SAM3 マスク", "SAM3 마스크"},
     {"Generate SAM3 masks", "生成 SAM3 蒙版", "SAM3 マスクを生成", "SAM3 마스크 생성"},

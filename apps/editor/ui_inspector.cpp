@@ -546,24 +546,24 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", tr(
                 "Uses each view's mask or source alpha during 3DGS training.\n"
-                "A mask is required for every training image. Choose below\n"
-                "whether masked pixels are ignored or trained as transparent."));
+                "A mask is required for every training image.\n"
+                "Choose masked or transparent below."));
         if (app.settings.use_mask || app.settings.sam_masks) {
             theme::caption(tr("Mask mode"));
             ImGui::SetNextItemWidth(-1.F);
             const char* mask_modes[] = {
-                tr("Ignore masked pixels"),
-                tr("Train output alpha"),
+                tr("masked"),
+                tr("transparent"),
             };
             int mask_mode = app.settings.mask_mode == 1 ? 1 : 0;
             if (ImGui::Combo("##mask_mode", &mask_mode, mask_modes, 2))
                 app.settings.mask_mode = mask_mode;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", tr(
-                    "Ignore masked pixels: those rays are missing observations.\n"
+                    "masked: those rays are missing observations.\n"
                     "Colour is trained only where the mask is valid, and alpha is left alone.\n"
                     "Use this when a moving person hides static geometry.\n"
-                    "Train output alpha: the mask is the target opacity.\n"
+                    "transparent: the mask is the target opacity.\n"
                     "Valid pixels stay opaque and masked pixels become transparent."));
         }
         ImGui::Checkbox(tr("Normal field"), &app.settings.normal_field);
