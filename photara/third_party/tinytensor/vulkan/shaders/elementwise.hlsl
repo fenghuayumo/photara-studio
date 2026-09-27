@@ -135,6 +135,41 @@ float apply_unary(uint op, float a, float lo, float hi)
     return a;
 }
 
+// The fmod intrinsic returns the dividend for an integer ratio. A slightly
+// short division also leaves a remainder outside (-|b|, |b|). CUDA fmodf
+// stays inside that range and takes the sign of the dividend.
+float float_mod(float a, float b)
+{
+    if (b == 0.0f)
+    {
+        return asfloat(0x7fc00000u);
+    }
+    const float quot = trunc(a / b);
+    float rem = a - b * quot;
+    const float bound = abs(b);
+    [unroll]
+    for (int step = 0; step < 3; ++step)
+    {
+        if (a >= 0.0f)
+        {
+            if (rem < 0.0f) rem += bound;
+            else if (rem >= bound) rem -= bound;
+            else break;
+        }
+        else
+        {
+            if (rem > 0.0f) rem -= bound;
+            else if (rem <= -bound) rem += bound;
+            else break;
+        }
+    }
+    if (!(abs(rem) < bound))
+    {
+        rem = a < 0.0f ? -0.0f : 0.0f;
+    }
+    return rem;
+}
+
 float apply_binary(uint op, float a, float b)
 {
     if (op == kOpAdd) return a + b;
@@ -146,7 +181,7 @@ float apply_binary(uint op, float a, float b)
         if (b == 2.0f) return a * a;
         return pow(a, b);
     }
-    if (op == kOpMod) return fmod(a, b);
+    if (op == kOpMod) return float_mod(a, b);
     if (op == kOpMaximum) return max(a, b);
     if (op == kOpMinimum) return min(a, b);
     return a;

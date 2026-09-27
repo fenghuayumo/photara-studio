@@ -918,6 +918,14 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(photara_tinytensor_vulkan_bench PRIVATE tinytensor::tinytensor)
         target_include_directories(photara_tinytensor_vulkan_bench PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytensor)
+        # The radix selection against a host sort of the same masked rows: the
+        # IGS refinement replaced a sort with it, so this is what pins the two
+        # to the same answer.
+        add_executable(photara_select_check src/tools/select_check.cpp)
+        target_link_libraries(photara_select_check PRIVATE tinytensor::tinytensor)
+        target_include_directories(photara_select_check PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytensor)
+        add_test(NAME photara.tinytensor.select COMMAND photara_select_check)
     endif()
     if(TARGET photara_features)
         add_executable(photara_features_test tests/features_test.cpp)

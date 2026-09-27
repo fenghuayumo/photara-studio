@@ -108,7 +108,11 @@ void cat_dim0_into(Tensor& dst, const std::vector<Tensor>& tensors, std::size_t 
 void cat_along(Tensor& dst, const std::vector<Tensor>& tensors, int dim);
 void index_select_into(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int mode);
 void index_fill(Tensor& dst, const Tensor& indices, float value, int dim);
-void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, bool accumulate);
+void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, bool accumulate,
+             bool wrap_negative = true);
+// indices has the same rank as src. Each output element copies src at the
+// output coordinate with axis `dim` replaced by indices[element].
+void gather(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int mode);
 // Fused ADC prune sweep (the Vulkan twin of the CUDA adc_plus_prune_kernel):
 // one dispatch over all Gaussian rows writes the keep/hard masks and sigmoid
 // opacities without any host round trip. Every tensor must be contiguous with
@@ -145,6 +149,26 @@ void max_pool2d(const Tensor& src, Tensor& dst, int kernel, int stride, int padd
 void adaptive_avg_pool2d(const Tensor& src, Tensor& dst, int h_out, int w_out);
 Tensor multinomial(const Tensor& weights, int num_samples, bool replacement);
 std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending);
+
+// Exact order statistics over a Float32 array, restricted to the rows `mask`
+// selects (a Bool array of the same length, or an invalid tensor for "all
+// rows"). Both are the device form of sorting a masked copy and taking the
+// front of it, but they cost two histogram passes and one emit pass instead of
+// a full bitonic sort's log2(n)^2 dispatches.
+//
+// `rank` is 1-based: select_nth_value writes the exact `rank`-th value in the
+// requested direction and returns false when nothing qualifies.
+bool select_nth_value(const Tensor& values, const Tensor& mask,
+                      std::uint32_t rank, bool descending, float* value);
+
+// Device form of "sort `values` descending, keep the front `count` indices".
+// Returns Int32 row indices of the `count` selected rows; when the mask
+// selects fewer than `count` rows the result is that shorter prefix, so the
+// caller never needs a separate count. `emitted` receives the number of rows
+// the emit pass actually wrote.
+Tensor select_topk_indices(const Tensor& values, const Tensor& mask,
+                           std::uint32_t count, bool descending,
+                           std::uint32_t* emitted = nullptr);
 
 } // namespace vulkan
 } // namespace tinytensor

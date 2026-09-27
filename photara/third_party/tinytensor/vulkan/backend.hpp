@@ -73,6 +73,17 @@ void synchronize();
 // Submit pending work for a subsequent compute stage on the same Vulkan queue.
 // Unlike synchronize(), this does not wait for GPU completion.
 void submit_async();
+// Cumulative host-side counters, independent of the timestamp profiler:
+// wall milliseconds spent blocked in vkWaitForFences, and the number of
+// dispatches recorded. Use the difference between two samples to attribute a
+// phase: a phase whose wall time is mostly wait_ms is stalled on earlier work.
+double device_wait_ms();
+std::uint64_t dispatch_count();
+// Device busy milliseconds accumulated by the timestamp profiler. Only moves
+// when TINYTENSOR_VULKAN_PROFILE_OPS is on; a phase whose wall time is not
+// covered by wait_ms or busy_ms is spending it on the host, in allocation or
+// in command recording rather than in the GPU or the fence.
+double device_busy_ms();
 void shutdown();
 
 } // namespace vulkan

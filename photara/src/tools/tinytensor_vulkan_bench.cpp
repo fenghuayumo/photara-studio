@@ -3,12 +3,15 @@
 #include "vulkan/runtime/runtime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -21,18 +24,43 @@
 // the per-element cost. Both matter: the runtime submits and waits per op, so
 // the fixed part is a function of the op count, not of the tensor size.
 //
-// Usage: photara_tinytensor_vulkan_bench [REPEATS | --million [REPEATS]]
+// Usage: photara_tinytensor_vulkan_bench [REPEATS | --million [REPEATS] |
+//                                        --densify [COUNT] | --ops [REPEATS]]
 
 namespace {
 
 using tinytensor::DataType;
 using tinytensor::Device;
+using tinytensor::ScatterMode;
 using tinytensor::Tensor;
 
 double median(std::vector<double>& samples) {
     if (samples.empty()) return 0.0;
     std::sort(samples.begin(), samples.end());
     return samples[samples.size() / 2];
+}
+
+void sync_device(const Device device) {
+    if (device == Device::Vulkan) {
+        tinytensor::vulkan::synchronize();
+        return;
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess)
+        throw std::runtime_error("cudaDeviceSynchronize failed");
+}
+
+template <typename Body>
+double time_call(Body&& body, const int repeats) {
+    body();
+    std::vector<double> samples;
+    samples.reserve(static_cast<std::size_t>(repeats));
+    for (int i = 0; i < repeats; ++i) {
+        const auto start = std::chrono::steady_clock::now();
+        body();
+        const auto finish = std::chrono::steady_clock::now();
+        samples.push_back(std::chrono::duration<double, std::milli>(finish - start).count());
+    }
+    return median(samples);
 }
 
 template <typename Body>
@@ -494,12 +522,703 @@ void densify_benchmark(const std::size_t count, const int repeats) {
     }
 }
 
+constexpr std::size_t k_ops_count = 1000000;
+constexpr std::size_t k_ops_rows = 1000;
+constexpr std::size_t k_ops_cols = 1000;
+constexpr std::size_t k_ops_prod_rows = 100000;
+constexpr std::size_t k_ops_prod_cols = 10;
+constexpr std::size_t k_ops_mm = 1024;
+constexpr std::size_t k_ops_small = 4096;
+constexpr std::size_t k_ops_fill = 64;
+constexpr double k_transcendental_atol = 1e-5;
+constexpr double k_transcendental_rtol = 2e-5;
+
+enum class OpKind { Float, Bool, Index, Count, SortAsc, SortDesc, SortRows };
+
+struct Diff {
+    bool pass = false;
+    std::size_t bad = 0;
+    double max_abs = 0.0;
+    double max_rel = 0.0;
+    std::string detail;
+};
+
+struct Side {
+    Device device = Device::CPU;
+    Tensor a, b, u, special, divisor;
+    Tensor grid, prod, mm_a, mm_b, row, col, keys;
+    Tensor mask, mask2, mask_all, mask_grid;
+    Tensor perm, row_perm, idx_small, col_idx, gather_idx;
+    Tensor scatter_dst, scatter_add, row_dst, row_add, fill_dst, mask_dst;
+};
+
+struct Spec {
+    const char* group = "";
+    const char* name = "";
+    OpKind kind = OpKind::Float;
+    double atol = 0.0;
+    double rtol = 0.0;
+    std::function<Tensor(const Side&)> eval;
+    std::function<std::size_t(const Side&)> count;
+    std::function<void(Side&)> bench;
+};
+
+Tensor prepare(const Tensor& tensor) {
+    Tensor prepared = tensor.contiguous();
+    sync_device(prepared.device());
+    return prepared;
+}
+
+std::string device_problem(const Tensor& vulkan, const Tensor& cuda) {
+    if (!vulkan.is_valid() || !cuda.is_valid()) return "invalid result";
+    if (vulkan.device() != Device::Vulkan) return "Vulkan op left Device::Vulkan";
+    if (cuda.device() != Device::CUDA) return "CUDA op left Device::CUDA";
+    if (vulkan.dtype() != cuda.dtype()) return "dtype mismatch";
+    if (vulkan.shape() != cuda.shape())
+        return "shape " + vulkan.shape().str() + " vs " + cuda.shape().str();
+    return {};
+}
+
+bool near_float(const float got, const float expected, const double atol, const double rtol) {
+    if (std::isnan(got) && std::isnan(expected)) return true;
+    if (std::isinf(got) && std::isinf(expected) && std::signbit(got) == std::signbit(expected))
+        return true;
+    if (!std::isfinite(got) || !std::isfinite(expected)) return false;
+    const double absolute = std::abs(static_cast<double>(got) - static_cast<double>(expected));
+    return absolute <= atol + rtol * std::abs(static_cast<double>(expected));
+}
+
+void note_first(Diff& diff, const std::size_t index, const std::string& text) {
+    if (!diff.detail.empty()) return;
+    diff.detail = "first[" + std::to_string(index) + "] " + text;
+}
+
+Diff compare_float(const Tensor& vulkan, const Tensor& cuda, const double atol, const double rtol) {
+    Diff diff;
+    diff.detail = device_problem(vulkan, cuda);
+    if (!diff.detail.empty()) return diff;
+    const auto got = prepare(vulkan).to_vector();
+    const auto expected = prepare(cuda).to_vector();
+    if (got.size() != expected.size() || got.empty()) {
+        diff.detail = "downloaded " + std::to_string(got.size()) + " vs " +
+                      std::to_string(expected.size());
+        diff.bad = std::max(got.size(), expected.size());
+        return diff;
+    }
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        const double absolute = std::abs(static_cast<double>(got[i]) - static_cast<double>(expected[i]));
+        const double relative = absolute / std::max(1.0, std::abs(static_cast<double>(expected[i])));
+        if (std::isfinite(absolute)) diff.max_abs = std::max(diff.max_abs, absolute);
+        if (std::isfinite(relative)) diff.max_rel = std::max(diff.max_rel, relative);
+        if (!near_float(got[i], expected[i], atol, rtol)) {
+            ++diff.bad;
+            char text[160];
+            std::snprintf(text, sizeof(text), "vk=%.9g cu=%.9g", got[i], expected[i]);
+            note_first(diff, i, text);
+        }
+    }
+    diff.pass = diff.bad == 0;
+    if (diff.pass) diff.detail.clear();
+    return diff;
+}
+
+Diff compare_bool(const Tensor& vulkan, const Tensor& cuda) {
+    Diff diff;
+    diff.detail = device_problem(vulkan, cuda);
+    if (!diff.detail.empty()) return diff;
+    const auto got = prepare(vulkan).to_vector_bool();
+    const auto expected = prepare(cuda).to_vector_bool();
+    if (got.size() != expected.size() || got.empty()) {
+        diff.detail = "downloaded " + std::to_string(got.size()) + " vs " +
+                      std::to_string(expected.size());
+        diff.bad = std::max(got.size(), expected.size());
+        return diff;
+    }
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        if (static_cast<bool>(got[i]) == static_cast<bool>(expected[i])) continue;
+        ++diff.bad;
+        diff.max_abs = 1.0;
+        note_first(diff, i, std::string("vk=") + (got[i] ? "1" : "0") +
+                                 " cu=" + (expected[i] ? "1" : "0"));
+    }
+    diff.pass = diff.bad == 0;
+    if (diff.pass) diff.detail.clear();
+    return diff;
+}
+
+Diff compare_index(const Tensor& vulkan, const Tensor& cuda) {
+    Diff diff;
+    diff.detail = device_problem(vulkan, cuda);
+    if (!diff.detail.empty()) return diff;
+    const auto got = prepare(vulkan).to_vector_int64();
+    const auto expected = prepare(cuda).to_vector_int64();
+    if (got.size() != expected.size() || got.empty()) {
+        diff.detail = "downloaded " + std::to_string(got.size()) + " vs " +
+                      std::to_string(expected.size());
+        diff.bad = std::max(got.size(), expected.size());
+        return diff;
+    }
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        const double absolute = std::abs(static_cast<double>(got[i] - expected[i]));
+        diff.max_abs = std::max(diff.max_abs, absolute);
+        if (got[i] == expected[i]) continue;
+        ++diff.bad;
+        note_first(diff, i, "vk=" + std::to_string(got[i]) + " cu=" + std::to_string(expected[i]));
+    }
+    diff.pass = diff.bad == 0;
+    if (diff.pass) diff.detail.clear();
+    return diff;
+}
+
+bool sort_self_ok(const std::vector<float>& values, const std::vector<std::int64_t>& order,
+                  const std::vector<float>& keys, const bool descending, std::string& why) {
+    if (values.size() != keys.size() || order.size() != keys.size()) {
+        why = "size";
+        return false;
+    }
+    std::vector<unsigned char> seen(keys.size(), 0);
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        const std::int64_t index = order[i];
+        if (index < 0 || static_cast<std::size_t>(index) >= keys.size() ||
+            seen[static_cast<std::size_t>(index)] != 0) {
+            why = "index";
+            return false;
+        }
+        seen[static_cast<std::size_t>(index)] = 1;
+        if (values[i] != keys[static_cast<std::size_t>(index)]) {
+            why = "value";
+            return false;
+        }
+        if (i > 0) {
+            const bool ordered = descending ? values[i - 1] >= values[i] : values[i - 1] <= values[i];
+            if (!ordered) {
+                why = "order";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+std::vector<int> permute_indices(const std::size_t count, std::uint32_t rng) {
+    std::vector<int> values(count);
+    std::iota(values.begin(), values.end(), 0);
+    for (std::size_t i = count; i > 1; --i) {
+        rng = rng * 1664525u + 1013904223u;
+        std::swap(values[i - 1], values[rng % static_cast<std::uint32_t>(i)]);
+    }
+    return values;
+}
+
+void print_op_row(const char* name, const char* status, const Diff& diff,
+                  const double vulkan_ms, const double cuda_ms) {
+    char ratio[16] = "n/a";
+    if (vulkan_ms >= 0.0 && cuda_ms > 1e-9)
+        std::snprintf(ratio, sizeof(ratio), "%.2fx", vulkan_ms / cuda_ms);
+    else if (vulkan_ms < 0.0 || cuda_ms < 0.0)
+        std::snprintf(ratio, sizeof(ratio), "err");
+    std::printf("%-34s %-4s %8llu %12.4g %12.4g %10.4f %10.4f %8s\n", name, status,
+                static_cast<unsigned long long>(diff.bad), diff.max_abs, diff.max_rel,
+                std::max(0.0, vulkan_ms), std::max(0.0, cuda_ms), ratio);
+    if (std::string(status) != "OK" && !diff.detail.empty())
+        std::printf("    %s\n", diff.detail.c_str());
+    std::fflush(stdout);
+}
+
+Diff check_sort(const Side& vulkan, const Side& cuda, const std::vector<float>& keys,
+                const OpKind kind) {
+    const bool rows = kind == OpKind::SortRows;
+    const bool descending = kind == OpKind::SortDesc;
+    const auto vk_sorted = rows ? vulkan.grid.sort(1, false) : vulkan.keys.sort(0, descending);
+    const auto cu_sorted = rows ? cuda.grid.sort(1, false) : cuda.keys.sort(0, descending);
+    Diff values = compare_float(vk_sorted.first, cu_sorted.first, 0.0, 0.0);
+    Diff indices = compare_index(vk_sorted.second, cu_sorted.second);
+    Diff merged;
+    merged.max_abs = values.max_abs;
+    merged.max_rel = values.max_rel;
+    merged.bad = values.bad + indices.bad;
+    merged.pass = values.pass && indices.pass;
+    if (!values.pass) merged.detail = "values " + values.detail;
+    if (!indices.pass) {
+        if (!merged.detail.empty()) merged.detail += "; ";
+        merged.detail += "indices " + indices.detail;
+    }
+    if (!rows && values.detail.find("left") == std::string::npos &&
+        values.detail.find("invalid") == std::string::npos) {
+        std::string why;
+        const bool self_ok = sort_self_ok(prepare(vk_sorted.first).to_vector(),
+                                           prepare(vk_sorted.second).to_vector_int64(), keys,
+                                           descending, why);
+        if (!self_ok) {
+            merged.pass = false;
+            ++merged.bad;
+            if (!merged.detail.empty()) merged.detail += "; ";
+            merged.detail += "vulkan self-check " + why;
+        }
+    }
+    return merged;
+}
+
+int ops_sweep(const int repeats) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto& info = tinytensor::vulkan::device_info();
+    cudaDeviceProp prop{};
+    const char* cuda_name = "unknown";
+    if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess) cuda_name = prop.name;
+    std::printf("=== tinytensor ops: %llu float32 elements, %d repeats ===\n",
+                static_cast<unsigned long long>(k_ops_count), repeats);
+    std::printf("vulkan=%s cuda=%s\n", info.name.c_str(), cuda_name);
+    std::printf("time is the median wall ms of the call plus device sync, without copying\n");
+    std::printf("the full result back. CUDA lazy unary ops are materialized before the sync.\n");
+    std::printf("correctness compares Vulkan with CUDA. max_abs/max_rel are the observed gap.\n");
+    std::printf("sort dim1 is the host fallback; sort asc/desc are the 1d device kernels.\n");
+    std::fflush(stdout);
+
+    std::vector<float> host_a(k_ops_count), host_b(k_ops_count), host_u(k_ops_count);
+    for (std::size_t i = 0; i < k_ops_count; ++i) {
+        host_a[i] = -1.5F + static_cast<float>(i % 1000) * 0.003F;
+        host_b[i] = 0.35F + static_cast<float>(i % 251) * 0.01F;
+        host_u[i] = -0.99F + static_cast<float>(i % 199) * 0.01F;
+    }
+    std::vector<float> host_divisor(k_ops_count);
+    for (std::size_t i = 0; i < k_ops_count; ++i)
+        host_divisor[i] = std::abs(host_u[i]) + 0.3F;
+    std::vector<float> host_special = host_b;
+    host_special[0] = std::numeric_limits<float>::quiet_NaN();
+    host_special[1] = std::numeric_limits<float>::infinity();
+    host_special[2] = -std::numeric_limits<float>::infinity();
+    host_special[10] = std::numeric_limits<float>::quiet_NaN();
+
+    std::vector<float> host_grid(k_ops_rows * k_ops_cols);
+    std::vector<bool> host_mask_grid(k_ops_rows * k_ops_cols);
+    for (std::size_t row = 0; row < k_ops_rows; ++row) {
+        for (std::size_t col = 0; col < k_ops_cols; ++col) {
+            const std::size_t index = row * k_ops_cols + col;
+            host_grid[index] = static_cast<float>((col + row * 17) % 1000) +
+                               static_cast<float>(row) * 1000.F;
+            host_mask_grid[index] = ((row + col) % 3) != 0;
+        }
+    }
+    std::vector<float> host_prod(k_ops_prod_rows * k_ops_prod_cols);
+    for (std::size_t i = 0; i < host_prod.size(); ++i)
+        host_prod[i] = 0.92F + static_cast<float>(i % 5) * 0.03F;
+    std::vector<float> host_mm_a(k_ops_mm * k_ops_mm), host_mm_b(k_ops_mm * k_ops_mm);
+    for (std::size_t i = 0; i < host_mm_a.size(); ++i) {
+        host_mm_a[i] = (static_cast<float>(i % 32) - 16.F) * 0.01F;
+        host_mm_b[i] = (static_cast<float>((i * 3) % 32) - 16.F) * 0.01F;
+    }
+    std::vector<float> host_row(k_ops_cols), host_col(k_ops_rows);
+    for (std::size_t i = 0; i < k_ops_cols; ++i)
+        host_row[i] = 0.02F * static_cast<float>(i % 11);
+    for (std::size_t i = 0; i < k_ops_rows; ++i)
+        host_col[i] = 0.1F * static_cast<float>(i % 7);
+
+    const std::vector<int> host_perm = permute_indices(k_ops_count, 0x12345678u);
+    const std::vector<int> host_row_perm = permute_indices(k_ops_rows, 0x89abcdefu);
+    const std::vector<int> host_small(host_perm.begin(), host_perm.begin() +
+                                                             static_cast<std::ptrdiff_t>(k_ops_small));
+    const std::vector<int> host_fill(host_row_perm.begin(),
+                                     host_row_perm.begin() + static_cast<std::ptrdiff_t>(k_ops_fill));
+    std::vector<int> host_gather(k_ops_rows * k_ops_cols);
+    for (std::size_t row = 0; row < k_ops_rows; ++row) {
+        for (std::size_t col = 0; col < k_ops_cols; ++col) {
+            host_gather[row * k_ops_cols + col] =
+                static_cast<int>((col * 17 + row) % k_ops_cols);
+        }
+    }
+    std::vector<float> host_keys(k_ops_count);
+    for (std::size_t i = 0; i < k_ops_count; ++i)
+        host_keys[i] = static_cast<float>(host_perm[i]);
+    std::vector<bool> host_mask(k_ops_count), host_mask2(k_ops_count), host_mask_all(k_ops_count, true);
+    for (std::size_t i = 0; i < k_ops_count; ++i) {
+        host_mask[i] = (i % 3) == 0;
+        host_mask2[i] = (i % 5) == 0;
+    }
+
+    std::printf("uploading tensors...\n");
+    std::fflush(stdout);
+    const auto upload = [&](const Device device) {
+        Side side;
+        side.device = device;
+        side.a = Tensor::from_vector(host_a, {k_ops_count}, device);
+        side.b = Tensor::from_vector(host_b, {k_ops_count}, device);
+        side.u = Tensor::from_vector(host_u, {k_ops_count}, device);
+        side.special = Tensor::from_vector(host_special, {k_ops_count}, device);
+        side.divisor = Tensor::from_vector(host_divisor, {k_ops_count}, device);
+        side.grid = Tensor::from_vector(host_grid, {k_ops_rows, k_ops_cols}, device);
+        side.prod = Tensor::from_vector(host_prod, {k_ops_prod_rows, k_ops_prod_cols}, device);
+        side.mm_a = Tensor::from_vector(host_mm_a, {k_ops_mm, k_ops_mm}, device);
+        side.mm_b = Tensor::from_vector(host_mm_b, {k_ops_mm, k_ops_mm}, device);
+        side.row = Tensor::from_vector(host_row, {k_ops_cols}, device);
+        side.col = Tensor::from_vector(host_col, {k_ops_rows, std::size_t{1}}, device);
+        side.keys = Tensor::from_vector(host_keys, {k_ops_count}, device);
+        side.mask = Tensor::from_vector(host_mask, {k_ops_count}, device);
+        side.mask2 = Tensor::from_vector(host_mask2, {k_ops_count}, device);
+        side.mask_all = Tensor::from_vector(host_mask_all, {k_ops_count}, device);
+        side.mask_grid = Tensor::from_vector(host_mask_grid, {k_ops_rows, k_ops_cols}, device);
+        side.perm = Tensor::from_vector(host_perm, {k_ops_count}, device);
+        side.row_perm = Tensor::from_vector(host_row_perm, {k_ops_rows}, device);
+        side.idx_small = Tensor::from_vector(host_small, {k_ops_small}, device);
+        side.col_idx = Tensor::from_vector(host_fill, {k_ops_fill}, device);
+        side.gather_idx = Tensor::from_vector(host_gather, {k_ops_rows, k_ops_cols}, device);
+        side.scatter_dst = Tensor::zeros({k_ops_count}, device);
+        side.scatter_add = Tensor::ones({k_ops_count}, device);
+        side.row_dst = Tensor::zeros({k_ops_rows, k_ops_cols}, device);
+        side.row_add = Tensor::ones({k_ops_rows, k_ops_cols}, device);
+        side.fill_dst = Tensor::zeros({k_ops_rows, k_ops_cols}, device);
+        side.mask_dst = side.a.clone();
+        return side;
+    };
+    Side vk = upload(Device::Vulkan);
+    Side cu = upload(Device::CUDA);
+    std::printf("upload done\n");
+    std::fflush(stdout);
+
+    std::vector<Spec> specs;
+    const auto add = [&](const char* group, const char* name, const OpKind kind, const double atol,
+                         const double rtol, std::function<Tensor(const Side&)> eval,
+                         std::function<void(Side&)> bench = {}) {
+        Spec spec;
+        spec.group = group;
+        spec.name = name;
+        spec.kind = kind;
+        spec.atol = atol;
+        spec.rtol = rtol;
+        spec.eval = std::move(eval);
+        spec.bench = std::move(bench);
+        specs.push_back(std::move(spec));
+    };
+    const auto add_count = [&](const char* name, std::function<std::size_t(const Side&)> count) {
+        Spec spec;
+        spec.group = "reduce";
+        spec.name = name;
+        spec.kind = OpKind::Count;
+        spec.count = std::move(count);
+        specs.push_back(std::move(spec));
+    };
+    const auto add_sort = [&](const char* name, const OpKind kind) {
+        Spec spec;
+        spec.group = "sort";
+        spec.name = name;
+        spec.kind = kind;
+        specs.push_back(std::move(spec));
+    };
+
+    const double trans_atol = k_transcendental_atol;
+    const double trans_rtol = k_transcendental_rtol;
+    add("unary", "neg", OpKind::Float, 0, 0, [](const Side& s) { return s.a.neg(); });
+    add("unary", "abs", OpKind::Float, 0, 0, [](const Side& s) { return s.a.abs(); });
+    add("unary", "sign", OpKind::Float, 0, 0, [](const Side& s) { return s.a.sign(); });
+    add("unary", "square", OpKind::Float, 0, 0, [](const Side& s) { return s.a.square(); });
+    add("unary", "floor", OpKind::Float, 0, 0, [](const Side& s) { return s.a.floor(); });
+    add("unary", "ceil", OpKind::Float, 0, 0, [](const Side& s) { return s.a.ceil(); });
+    add("unary", "round", OpKind::Float, 0, 0, [](const Side& s) { return s.a.round(); });
+    add("unary", "trunc", OpKind::Float, 0, 0, [](const Side& s) { return s.a.trunc(); });
+    add("unary", "relu", OpKind::Float, 0, 0, [](const Side& s) { return s.a.relu(); });
+    add("unary", "exp", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.exp(); });
+    add("unary", "exp2", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.exp2(); });
+    add("unary", "sin", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.sin(); });
+    add("unary", "cos", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.cos(); });
+    add("unary", "tan", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.tan(); });
+    add("unary", "atan", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.atan(); });
+    add("unary", "sinh", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.sinh(); });
+    add("unary", "cosh", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.cosh(); });
+    add("unary", "tanh", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.tanh(); });
+    add("unary", "sigmoid", OpKind::Float, trans_atol, trans_rtol,
+        [](const Side& s) { return s.a.sigmoid(); });
+    add("unary", "gelu", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.gelu(); });
+    add("unary", "swish", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.a.swish(); });
+    add("unary", "reciprocal", OpKind::Float, 1e-6, 1e-6, [](const Side& s) { return s.b.reciprocal(); });
+    add("unary", "sqrt", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.b.sqrt(); });
+    add("unary", "rsqrt", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.b.rsqrt(); });
+    add("unary", "log", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.b.log(); });
+    add("unary", "log2", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.b.log2(); });
+    add("unary", "log10", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.b.log10(); });
+    add("unary", "asin", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.u.asin(); });
+    add("unary", "acos", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.u.acos(); });
+    add("unary", "log1p", OpKind::Float, trans_atol, trans_rtol, [](const Side& s) { return s.u.log1p(); });
+    add("unary", "isnan", OpKind::Bool, 0, 0, [](const Side& s) { return s.special.isnan(); });
+    add("unary", "isinf", OpKind::Bool, 0, 0, [](const Side& s) { return s.special.isinf(); });
+    add("unary", "isfinite", OpKind::Bool, 0, 0, [](const Side& s) { return s.special.isfinite(); });
+
+    add("binary", "add", OpKind::Float, 0, 0, [](const Side& s) { return s.a.add(s.b); });
+    add("binary", "sub", OpKind::Float, 0, 0, [](const Side& s) { return s.a.sub(s.b); });
+    add("binary", "mul", OpKind::Float, 0, 0, [](const Side& s) { return s.a.mul(s.b); });
+    add("binary", "div", OpKind::Float, 1e-6, 1e-6, [](const Side& s) { return s.a.div(s.b); });
+    add("binary", "maximum", OpKind::Float, 0, 0, [](const Side& s) { return s.a.maximum(s.b); });
+    add("binary", "minimum", OpKind::Float, 0, 0, [](const Side& s) { return s.a.minimum(s.b); });
+    add("binary", "pow", OpKind::Float, 1e-5, 1e-4, [](const Side& s) { return s.b.pow(s.u); });
+    add("binary", "mod", OpKind::Float, 1e-5, 1e-5, [](const Side& s) { return s.b.mod(s.divisor); });
+    add("binary", "add scalar", OpKind::Float, 0, 0, [](const Side& s) { return s.a.add(0.5F); });
+    add("binary", "sub scalar", OpKind::Float, 0, 0, [](const Side& s) { return s.a.sub(0.25F); });
+    add("binary", "mul scalar", OpKind::Float, 0, 0, [](const Side& s) { return s.a.mul(1.5F); });
+    add("binary", "div scalar", OpKind::Float, 1e-6, 1e-6, [](const Side& s) { return s.b.div(1.25F); });
+    add("binary", "pow scalar", OpKind::Float, 1e-5, 1e-4, [](const Side& s) { return s.b.pow(1.7F); });
+    add("binary", "clamp", OpKind::Float, 0, 0, [](const Side& s) { return s.a.clamp(-0.4F, 0.6F); });
+    add("binary", "broadcast row", OpKind::Float, 0, 0, [](const Side& s) { return s.grid.add(s.row); });
+    add("binary", "broadcast col", OpKind::Float, 0, 0, [](const Side& s) { return s.grid.add(s.col); });
+
+    add("compare", "eq", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.eq(s.b); });
+    add("compare", "ne", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.ne(s.b); });
+    add("compare", "lt", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.lt(s.b); });
+    add("compare", "le", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.le(s.b); });
+    add("compare", "gt", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.gt(s.b); });
+    add("compare", "ge", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.ge(s.b); });
+    add("compare", "gt scalar", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.gt(0.F); });
+    add("compare", "le scalar", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.le(0.5F); });
+    add("compare", "eq self", OpKind::Bool, 0, 0, [](const Side& s) { return s.a.eq(s.a); });
+    add("compare", "logical_not", OpKind::Bool, 0, 0, [](const Side& s) { return s.mask.logical_not(); });
+    add("compare", "logical_and", OpKind::Bool, 0, 0,
+        [](const Side& s) { return s.mask.logical_and(s.mask2); });
+    add("compare", "logical_or", OpKind::Bool, 0, 0,
+        [](const Side& s) { return s.mask.logical_or(s.mask2); });
+    add("compare", "logical_xor", OpKind::Bool, 0, 0,
+        [](const Side& s) { return s.mask.logical_xor(s.mask2); });
+
+    add("reduce", "sum", OpKind::Float, 1e-2, 1e-4, [](const Side& s) { return s.a.sum(); });
+    add("reduce", "mean", OpKind::Float, 1e-2, 1e-4, [](const Side& s) { return s.a.mean(); });
+    add("reduce", "max", OpKind::Float, 0, 0, [](const Side& s) { return s.a.max(); });
+    add("reduce", "min", OpKind::Float, 0, 0, [](const Side& s) { return s.a.min(); });
+    add("reduce", "argmax", OpKind::Index, 0, 0, [](const Side& s) { return s.a.argmax(); });
+    add("reduce", "argmin", OpKind::Index, 0, 0, [](const Side& s) { return s.a.argmin(); });
+    add("reduce", "grid sum", OpKind::Float, 1.0, 1e-4, [](const Side& s) { return s.grid.sum(); });
+    add("reduce", "grid mean", OpKind::Float, 1e-2, 1e-4, [](const Side& s) { return s.grid.mean(); });
+    add("reduce", "grid max", OpKind::Float, 0, 0, [](const Side& s) { return s.grid.max(); });
+    add("reduce", "grid min", OpKind::Float, 0, 0, [](const Side& s) { return s.grid.min(); });
+    add("reduce", "sum dim0", OpKind::Float, 1.0, 1e-4, [](const Side& s) { return s.grid.sum(0); });
+    add("reduce", "sum dim1", OpKind::Float, 1.0, 1e-4, [](const Side& s) { return s.grid.sum(1); });
+    add("reduce", "mean dim0", OpKind::Float, 1e-2, 1e-4, [](const Side& s) { return s.grid.mean(0); });
+    add("reduce", "mean dim1", OpKind::Float, 1e-2, 1e-4, [](const Side& s) { return s.grid.mean(1); });
+    add("reduce", "max dim0", OpKind::Float, 0, 0, [](const Side& s) { return s.grid.max(0); });
+    add("reduce", "max dim1", OpKind::Float, 0, 0, [](const Side& s) { return s.grid.max(1); });
+    add("reduce", "min dim0", OpKind::Float, 0, 0, [](const Side& s) { return s.grid.min(0); });
+    add("reduce", "min dim1", OpKind::Float, 0, 0, [](const Side& s) { return s.grid.min(1); });
+    add("reduce", "argmax dim0", OpKind::Index, 0, 0,
+        [](const Side& s) { return s.grid.argmax(std::array<int, 1>{0}); });
+    add("reduce", "argmax dim1", OpKind::Index, 0, 0,
+        [](const Side& s) { return s.grid.argmax(std::array<int, 1>{1}); });
+    add("reduce", "argmin dim0", OpKind::Index, 0, 0,
+        [](const Side& s) { return s.grid.argmin(std::array<int, 1>{0}); });
+    add("reduce", "argmin dim1", OpKind::Index, 0, 0,
+        [](const Side& s) { return s.grid.argmin(std::array<int, 1>{1}); });
+    add("reduce", "var dim1", OpKind::Float, 1e-2, 1e-4, [](const Side& s) { return s.grid.var(1); });
+    add("reduce", "std dim1", OpKind::Float, 1e-3, 1e-4, [](const Side& s) { return s.grid.std(1); });
+    add("reduce", "prod dim1", OpKind::Float, 1e-5, 1e-5, [](const Side& s) { return s.prod.prod(1); });
+    add("reduce", "cumsum", OpKind::Float, 1e-2, 1e-3, [](const Side& s) { return s.a.cumsum(0); });
+    add("reduce", "cumsum dim1", OpKind::Float, 1.0, 1e-4, [](const Side& s) { return s.grid.cumsum(1); });
+    add("reduce", "any", OpKind::Bool, 0, 0, [](const Side& s) { return s.mask.any(); });
+    add("reduce", "all", OpKind::Bool, 0, 0, [](const Side& s) { return s.mask.all(); });
+    add("reduce", "any all-true", OpKind::Bool, 0, 0, [](const Side& s) { return s.mask_all.any(); });
+    add("reduce", "all all-true", OpKind::Bool, 0, 0, [](const Side& s) { return s.mask_all.all(); });
+    add("reduce", "any dim1", OpKind::Bool, 0, 0, [](const Side& s) { return s.mask_grid.any(1); });
+    add("reduce", "all dim1", OpKind::Bool, 0, 0, [](const Side& s) { return s.mask_grid.all(1); });
+    add_count("count_nonzero", [](const Side& s) { return s.mask.count_nonzero(); });
+    add_count("count_nonzero all", [](const Side& s) { return s.mask_all.count_nonzero(); });
+    add_count("count_nonzero grid", [](const Side& s) { return s.mask_grid.count_nonzero(); });
+
+    add_sort("sort asc", OpKind::SortAsc);
+    add_sort("sort desc", OpKind::SortDesc);
+    add_sort("sort dim1 host", OpKind::SortRows);
+
+    add("index", "gather 1d", OpKind::Float, 0, 0,
+        [](const Side& s) { return s.b.gather(0, s.perm); });
+    add("index", "gather rows", OpKind::Float, 0, 0,
+        [](const Side& s) { return s.grid.gather(0, s.row_perm); });
+    add("index", "gather dim1", OpKind::Float, 0, 0,
+        [](const Side& s) { return s.grid.gather(1, s.gather_idx); });
+    add("index", "index_copy 1d", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::zeros({k_ops_count}, s.device);
+            out.index_copy_(0, s.perm, s.b);
+            return out;
+        },
+        [](Side& s) { s.scatter_dst.index_copy_(0, s.perm, s.b); });
+    add("index", "index_add 1d", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::ones({k_ops_count}, s.device);
+            out.index_add_(0, s.perm, s.b);
+            return out;
+        },
+        [](Side& s) { s.scatter_add.index_add_(0, s.perm, s.b); });
+    add("index", "index_copy rows", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::zeros({k_ops_rows, k_ops_cols}, s.device);
+            out.index_copy_(0, s.row_perm, s.grid);
+            return out;
+        },
+        [](Side& s) { s.row_dst.index_copy_(0, s.row_perm, s.grid); });
+    add("index", "index_add rows", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::ones({k_ops_rows, k_ops_cols}, s.device);
+            out.index_add_(0, s.row_perm, s.grid);
+            return out;
+        },
+        [](Side& s) { s.row_add.index_add_(0, s.row_perm, s.grid); });
+    add("index", "index_select 4096", OpKind::Float, 0, 0,
+        [](const Side& s) { return s.b.index_select(0, s.idx_small); });
+    add("index", "index_select 1d", OpKind::Float, 0, 0,
+        [](const Side& s) { return s.b.index_select(0, s.perm); });
+    add("index", "index_select rows", OpKind::Float, 0, 0,
+        [](const Side& s) { return s.grid.index_select(0, s.row_perm); });
+    add("index", "scatter replace 1d", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::zeros({k_ops_count}, s.device);
+            out.scatter_(0, s.perm, s.b, ScatterMode::None);
+            return out;
+        },
+        [](Side& s) { s.scatter_dst.scatter_(0, s.perm, s.b, ScatterMode::None); });
+    add("index", "scatter add 1d", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::ones({k_ops_count}, s.device);
+            out.scatter_(0, s.perm, s.b, ScatterMode::Add);
+            return out;
+        },
+        [](Side& s) { s.scatter_add.scatter_(0, s.perm, s.b, ScatterMode::Add); });
+    add("index", "scatter replace rows", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::zeros({k_ops_rows, k_ops_cols}, s.device);
+            out.scatter_(0, s.row_perm, s.grid, ScatterMode::None);
+            return out;
+        },
+        [](Side& s) { s.row_dst.scatter_(0, s.row_perm, s.grid, ScatterMode::None); });
+    add("index", "scatter add rows", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::ones({k_ops_rows, k_ops_cols}, s.device);
+            out.scatter_(0, s.row_perm, s.grid, ScatterMode::Add);
+            return out;
+        },
+        [](Side& s) { s.row_add.scatter_(0, s.row_perm, s.grid, ScatterMode::Add); });
+    add("index", "index_fill cols", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = Tensor::zeros({k_ops_rows, k_ops_cols}, s.device);
+            out.index_fill_(1, s.col_idx, 3.5F);
+            return out;
+        },
+        [](Side& s) { s.fill_dst.index_fill_(1, s.col_idx, 3.5F); });
+    add("index", "masked_select", OpKind::Float, 0, 0,
+        [](const Side& s) { return s.b.masked_select(s.mask); });
+    add("index", "masked_fill", OpKind::Float, 0, 0,
+        [](const Side& s) {
+            auto out = s.a.clone();
+            out.masked_fill_(s.mask, -3.F);
+            return out;
+        },
+        [](Side& s) { s.mask_dst.masked_fill_(s.mask, -3.F); });
+    add("index", "where", OpKind::Float, 0, 0,
+        [](const Side& s) { return Tensor::where(s.mask, s.a, s.b); });
+    add("index", "nonzero", OpKind::Index, 0, 0,
+        [](const Side& s) { return s.mask.nonzero().squeeze(1); });
+    add("index", "cat halves", OpKind::Float, 0, 0, [](const Side& s) {
+        return Tensor::cat({s.a.slice(0, 0, k_ops_count / 2), s.a.slice(0, k_ops_count / 2, k_ops_count)},
+                           0);
+    });
+    add("index", "mm 1024", OpKind::Float, 1e-4, 1e-3, [](const Side& s) { return s.mm_a.mm(s.mm_b); });
+
+    std::printf("\n%-34s %-4s %8s %12s %12s %10s %10s %8s\n", "operation", "status", "bad",
+                "max_abs", "max_rel", "vulkan_ms", "cuda_ms", "vk/cuda");
+    const char* current_group = "";
+    int failed = 0;
+    for (const Spec& spec : specs) {
+        if (std::string(spec.group) != current_group) {
+            current_group = spec.group;
+            std::printf("-- %s --\n", current_group);
+        }
+        Diff diff;
+        const char* status = "OK";
+        try {
+            if (spec.kind == OpKind::Count) {
+                const std::size_t vulkan_count = spec.count(vk);
+                const std::size_t cuda_count = spec.count(cu);
+                diff.bad = vulkan_count == cuda_count ? 0 : 1;
+                diff.max_abs = std::abs(static_cast<double>(vulkan_count) -
+                                        static_cast<double>(cuda_count));
+                diff.pass = diff.bad == 0;
+                if (!diff.pass)
+                    diff.detail = "vk=" + std::to_string(vulkan_count) +
+                                  " cu=" + std::to_string(cuda_count);
+            } else if (spec.kind == OpKind::SortAsc || spec.kind == OpKind::SortDesc ||
+                       spec.kind == OpKind::SortRows) {
+                diff = check_sort(vk, cu, host_keys, spec.kind);
+            } else {
+                const Tensor vulkan = spec.eval(vk);
+                const Tensor cuda = spec.eval(cu);
+                if (spec.kind == OpKind::Bool) diff = compare_bool(vulkan, cuda);
+                else if (spec.kind == OpKind::Index) diff = compare_index(vulkan, cuda);
+                else diff = compare_float(vulkan, cuda, spec.atol, spec.rtol);
+            }
+            if (!diff.pass) status = "FAIL";
+        } catch (const std::exception& error) {
+            status = "ERR";
+            diff.detail = error.what();
+        }
+
+        const auto time_one = [&](Side& side) {
+            if (spec.kind == OpKind::Count) {
+                (void)spec.count(side);
+                sync_device(side.device);
+                return;
+            }
+            if (spec.kind == OpKind::SortAsc || spec.kind == OpKind::SortDesc) {
+                auto sorted = side.keys.sort(0, spec.kind == OpKind::SortDesc);
+                sync_device(side.device);
+                if (!sorted.first.is_valid() || !sorted.second.is_valid())
+                    throw std::runtime_error("sort returned an invalid tensor");
+                return;
+            }
+            if (spec.kind == OpKind::SortRows) {
+                auto sorted = side.grid.sort(1, false);
+                sync_device(side.device);
+                if (!sorted.first.is_valid() || !sorted.second.is_valid())
+                    throw std::runtime_error("sort returned an invalid tensor");
+                return;
+            }
+            if (spec.bench) {
+                spec.bench(side);
+                sync_device(side.device);
+                return;
+            }
+            Tensor out = spec.eval(side);
+            if (!out.is_valid()) throw std::runtime_error("op returned an invalid tensor");
+            if (out.has_lazy_expr()) out = out.contiguous();
+            sync_device(side.device);
+        };
+        double vulkan_ms = -1.0;
+        double cuda_ms = -1.0;
+        try {
+            vulkan_ms = time_call([&] { time_one(vk); }, repeats);
+        } catch (const std::exception& error) {
+            status = "ERR";
+            if (!diff.detail.empty()) diff.detail += "; ";
+            diff.detail += std::string("vulkan timing: ") + error.what();
+        }
+        try {
+            cuda_ms = time_call([&] { time_one(cu); }, repeats);
+        } catch (const std::exception& error) {
+            status = "ERR";
+            if (!diff.detail.empty()) diff.detail += "; ";
+            diff.detail += std::string("cuda timing: ") + error.what();
+        }
+        if (std::string(status) != "OK") ++failed;
+        print_op_row(spec.name, status, diff, vulkan_ms, cuda_ms);
+    }
+
+    const double seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    std::printf("\n%d ops, %d failed, %.1f s\n", static_cast<int>(specs.size()), failed, seconds);
+    return failed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
         if (!tinytensor::vulkan::available())
             throw std::runtime_error("the tinytensor Vulkan backend is not available");
+        if (argc > 1 && std::string(argv[1]) == "--ops") {
+            const int ops_repeats = argc > 2 ? std::stoi(argv[2]) : 5;
+            if (ops_repeats < 1) throw std::runtime_error("repeats must be positive");
+            return ops_sweep(ops_repeats) == 0 ? 0 : 1;
+        }
         const bool million_only = argc > 1 && std::string(argv[1]) == "--million";
         const bool densify_only = argc > 1 && std::string(argv[1]) == "--densify";
         const std::size_t densify_count = densify_only && argc > 2

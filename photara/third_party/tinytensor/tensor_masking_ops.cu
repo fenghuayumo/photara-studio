@@ -928,17 +928,45 @@ namespace tinytensor::tensor_ops {
     }
 
     template <typename T>
+    __global__ void index_fill_kernel(T* out, const int* idx, T value, size_t outer, size_t dim_sz,
+                                      size_t inner, size_t idx_sz) {
+        const size_t block_id = static_cast<size_t>(blockIdx.y) * gridDim.x + blockIdx.x;
+        const size_t tid = block_id * blockDim.x + threadIdx.x;
+        const size_t n = outer * idx_sz * inner;
+        if (tid >= n) return;
+        const size_t inner_idx = tid % inner;
+        const size_t tmp = tid / inner;
+        const size_t idx_pos = tmp % idx_sz;
+        const size_t outer_idx = tmp / idx_sz;
+        int sel = idx[idx_pos];
+        const int dim = static_cast<int>(dim_sz);
+        if (sel < 0) sel += dim;
+        if (sel < 0 || sel >= dim) return;
+        out[(outer_idx * dim_sz + static_cast<size_t>(sel)) * inner + inner_idx] = value;
+    }
+
+    template <typename T>
     void launch_index_fill(T* data, const int* idx, T val,
                            const size_t* shape, size_t rank, int dim,
                            size_t n_idx, cudaStream_t stream) {
-        CudaDeviceMemory<T> val_buffer(n_idx);
-        auto val_ptr = thrust::device_pointer_cast(val_buffer.get());
-        thrust::fill(thrust::cuda::par.on(stream), val_ptr, val_ptr + n_idx, val);
-
-        size_t in_shape[10] = {0};
-        std::copy(shape, shape + rank, in_shape);
-        in_shape[dim] = n_idx;
-        launch_scatter<T>(data, idx, val_buffer.get(), shape, in_shape, rank, dim, n_idx, 0, stream);
+        size_t outer = 1;
+        size_t inner = 1;
+        for (int axis = 0; axis < dim; ++axis) outer *= shape[axis];
+        for (size_t axis = static_cast<size_t>(dim) + 1; axis < rank; ++axis) inner *= shape[axis];
+        const size_t total = outer * n_idx * inner;
+        if (total == 0) return;
+        constexpr size_t threads = 256;
+        const size_t blocks = (total + threads - 1) / threads;
+        constexpr size_t max_blocks_x = 65535;
+        if (blocks <= max_blocks_x) {
+            index_fill_kernel<T><<<static_cast<unsigned>(blocks), threads, 0, stream>>>(
+                data, idx, val, outer, shape[dim], inner, n_idx);
+        } else {
+            const dim3 grid(static_cast<unsigned>(std::min(blocks, max_blocks_x)),
+                            static_cast<unsigned>((blocks + max_blocks_x - 1) / max_blocks_x));
+            index_fill_kernel<T><<<grid, threads, 0, stream>>>(
+                data, idx, val, outer, shape[dim], inner, n_idx);
+        }
     }
 
     template <typename T>
