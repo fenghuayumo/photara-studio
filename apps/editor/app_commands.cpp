@@ -756,13 +756,19 @@ bool alignment_job_running(const App& app) {
 void new_project(App& app) {
     if (app.job.running() || app.loading_scene) return;
     clear_loaded_result(app);
-    // The cache root and its retention policy are editor-wide settings, not
-    // part of the project.
+    // The cache root, retention policy, and compute choices are editor-wide
+    // settings, not part of the project.
     const auto cache_dir = app.settings.cache_dir;
     const int cache_retention_days = app.settings.cache_retention_days;
+    const int training_backend = app.settings.training_backend;
+    const int alignment_backend = app.settings.alignment_backend;
+    const int sam_backend = app.settings.sam_backend;
     app.settings = {};
     app.settings.cache_dir = cache_dir;
     app.settings.cache_retention_days = cache_retention_days;
+    app.settings.training_backend = training_backend;
+    app.settings.alignment_backend = alignment_backend;
+    app.settings.sam_backend = sam_backend;
     app.layout = {};
     app.has_sparse = false;
     app.has_asfm = false;
@@ -844,6 +850,70 @@ void load_editor_cache_dir(App& app) {
             }
         }
     }
+}
+
+std::filesystem::path editor_prefs_file() {
+    return resolve_editor_ini().parent_path() / "editor.prefs";
+}
+
+int preference_choice(
+    const std::string& value, const char* const* tokens, const int count) {
+    for (int index = 0; index < count; ++index)
+        if (value == tokens[index]) return index;
+    return -1;
+}
+
+void load_editor_preferences(App& app) {
+    std::ifstream input(editor_prefs_file(), std::ios::binary);
+    if (!input) return;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::size_t equals = line.find('=');
+        if (equals == std::string::npos) continue;
+        const std::string key = line.substr(0, equals);
+        const std::string value = line.substr(equals + 1);
+        if (key == "training") {
+            static const char* tokens[] = {"cuda", "vulkan"};
+            const int choice = preference_choice(value, tokens, 2);
+            if (choice >= 0) app.settings.training_backend = choice;
+        } else if (key == "alignment") {
+            static const char* tokens[] = {"automatic", "cpu", "cuda"};
+            const int choice = preference_choice(value, tokens, 3);
+            if (choice >= 0) app.settings.alignment_backend = choice;
+        } else if (key == "sam") {
+            static const char* tokens[] = {"auto", "cuda", "vulkan"};
+            const int choice = preference_choice(value, tokens, 3);
+            if (choice >= 0) app.settings.sam_backend = choice;
+        }
+    }
+    // Keep the file so a later build can still honour a choice this binary
+    // cannot run. The session itself uses the fallback.
+    if (!studio_vulkan_training()) app.settings.training_backend = 0;
+    if (!studio_ba_cuda() && app.settings.alignment_backend == 2)
+        app.settings.alignment_backend = 0;
+    if (!studio_sam_cuda() && app.settings.sam_backend == 1)
+        app.settings.sam_backend = 0;
+    if (!studio_sam_vulkan() && app.settings.sam_backend == 2)
+        app.settings.sam_backend = 0;
+}
+
+void store_editor_preferences(const App& app) {
+    const auto path = editor_prefs_file();
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return;
+    const char* training = app.settings.training_backend == 1 ? "vulkan" : "cuda";
+    const char* alignment = app.settings.alignment_backend == 1
+        ? "cpu"
+        : app.settings.alignment_backend == 2 ? "cuda" : "automatic";
+    const char* sam = app.settings.sam_backend == 1
+        ? "cuda"
+        : app.settings.sam_backend == 2 ? "vulkan" : "auto";
+    output << "training=" << training << '\n'
+           << "alignment=" << alignment << '\n'
+           << "sam=" << sam << '\n';
 }
 
 void store_editor_cache_dir(const App& app) {

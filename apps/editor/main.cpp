@@ -40,6 +40,7 @@ int main(const int argc, char** argv) {
         editor::i18n::load(
             editor::resolve_editor_ini().parent_path() / "editor.language");
     if (!app.smoke_mode) editor::load_editor_cache_dir(app);
+    if (!app.smoke_mode) editor::load_editor_preferences(app);
 
     if (app.smoke_mode) {
         std::snprintf(
@@ -289,6 +290,7 @@ int main(const int argc, char** argv) {
 
         editor::draw_controls_window(app);
         editor::draw_about_window(app);
+        editor::draw_preferences_window(app);
         editor::draw_mesh_export_modal(app);
         editor::draw_alignment_export_modal(app);
         editor::draw_splat_export_modal(app);

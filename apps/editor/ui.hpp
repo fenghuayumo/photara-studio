@@ -11,9 +11,14 @@ void build_dock_space(App& app);
 void draw_scene_panel(App& app);
 void draw_viewport_panel(App& app);
 void draw_console_panel(App& app);
-void draw_status_bar(const App& app);
+void draw_status_bar(App& app);
 void draw_controls_window(App& app);
 void draw_about_window(App& app);
+// page 0 Compute, 1 Language, 2 Storage. Any other page keeps the current one.
+void open_preferences(App& app, int page);
+void draw_preferences_window(App& app);
+void draw_training_compute_link(App& app);
+void draw_cache_folder_link(App& app);
 void draw_mesh_export_modal(App& app);
 void draw_alignment_export_modal(App& app);
 void draw_splat_export_modal(App& app);

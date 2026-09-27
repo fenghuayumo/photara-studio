@@ -220,6 +220,9 @@ Action draw_menu_bar(App& app) {
     if (!io.WantTextInput && !io.KeyCtrl && !io.KeyAlt &&
         ImGui::IsKeyPressed(ImGuiKey_2))
         set_viewport_workspace(app, ViewportWorkspace::image_2d);
+    if (!io.WantTextInput && io.KeyCtrl && !io.KeyShift && !io.KeyAlt &&
+        ImGui::IsKeyPressed(ImGuiKey_Comma))
+        open_preferences(app, -1);
     if (!io.WantTextInput && !io.KeyCtrl && !io.KeyAlt &&
         ImGui::IsKeyPressed(ImGuiKey_3))
         set_viewport_workspace(app, ViewportWorkspace::scene_3d);
@@ -266,6 +269,8 @@ Action draw_menu_bar(App& app) {
                 app.layout.root.has_filename()))
             action = Action::reveal;
         ImGui::Separator();
+        if (ImGui::MenuItem(tr("Preferences..."), "Ctrl+,"))
+            open_preferences(app, -1);
         if (ImGui::MenuItem(tr("Exit"), "Alt+F4")) app.close_requested = true;
         ImGui::EndMenu();
     }
@@ -353,21 +358,6 @@ Action draw_menu_bar(App& app) {
         ImGui::MenuItem(
             tr("Show Reconstruction Region"), nullptr,
             &app.view_options.show_region);
-        ImGui::Separator();
-        if (ImGui::BeginMenu(tr("Language"))) {
-            for (int i = 0; i < 4; ++i) {
-                const auto lang = static_cast<i18n::Language>(i);
-                if (ImGui::MenuItem(
-                        i18n::native_name(lang), nullptr,
-                        i18n::language() == lang)) {
-                    i18n::set_language(lang);
-                    if (GLFWwindow* window = glfwGetCurrentContext())
-                        glfwSetWindowTitle(
-                            window, tr("Photara Studio"));
-                }
-            }
-            ImGui::EndMenu();
-        }
         ImGui::Separator();
         if (ImGui::MenuItem(tr("Reset Layout"))) {
             app.show_scene = true;
@@ -777,7 +767,7 @@ void draw_status_separator(const float x, const float height) {
         theme::u32(theme::border, 0.8F));
 }
 
-void draw_status_bar(const App& app) {
+void draw_status_bar(App& app) {
     if (!app.show_status_bar) return;
 
     const bool busy = app.job.running();
@@ -853,13 +843,38 @@ void draw_status_bar(const App& app) {
     ImGui::TextUnformatted(tag);
     ImGui::PopStyleColor();
 
-    const char* backend = "CUDA / Vulkan";
+    const char* device =
+        app.settings.training_backend == 1 ? "Vulkan" : "CUDA";
+    char backend[64];
+    std::snprintf(
+        backend, sizeof(backend), "%s  \xC2\xB7  %s", tr("Train"), device);
     const float backend_width = status_segment_width(backend);
     right -= backend_width + 22.F;
     draw_status_separator(right + backend_width + 11.F, height);
-    draw_status_segment(
-        right, centre_y, icons::Icon::gpu, backend,
-        busy ? theme::text_bright : theme::text_muted);
+    ImGui::SetCursorPos({right, 0.F});
+    ImGui::InvisibleButton("##open_training_compute", {backend_width, height});
+    const bool backend_hovered = ImGui::IsItemHovered();
+    const bool backend_clicked = ImGui::IsItemClicked();
+    const ImVec4 backend_colour =
+        busy || backend_hovered ? theme::text_bright : theme::text_muted;
+    const ImVec2 origin = ImGui::GetWindowPos();
+    const float line = ImGui::GetTextLineHeight();
+    constexpr float icon_size = 15.F;
+    const float icon_y = origin.y + centre_y + (line - icon_size) * 0.5F;
+    icons::draw(
+        ImGui::GetWindowDrawList(), icons::Icon::gpu,
+        {origin.x + right, icon_y},
+        {origin.x + right + icon_size, icon_y + icon_size},
+        theme::u32(backend_colour));
+    ImGui::GetWindowDrawList()->AddText(
+        {origin.x + right + icon_size + 6.F, origin.y + centre_y},
+        theme::u32(backend_colour), backend);
+    if (backend_hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip(
+            "%s", tr("Training compute. Click to open Preferences."));
+    }
+    if (backend_clicked) open_preferences(app, 0);
 
     const double elapsed = app.monitor.elapsed_seconds();
     if (elapsed >= 0.0) {

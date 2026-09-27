@@ -156,6 +156,9 @@ struct App {
     bool close_requested{};
     bool show_controls{};
     bool show_about{};
+    bool show_preferences{};
+    bool preferences_raise{};
+    int preferences_page{};
     bool show_sam_license{};
     bool sam_license_tick{};
     SamModelDownload sam_download;
@@ -235,6 +238,10 @@ std::filesystem::path resolve_editor_ini();
 // Editor-level cache root override, persisted next to editor.ini.
 void load_editor_cache_dir(App& app);
 void store_editor_cache_dir(const App& app);
+// Compute choices in editor.prefs, beside editor.ini. Language stays in
+// editor.language and the cache root stays in editor.cache.
+void load_editor_preferences(App& app);
+void store_editor_preferences(const App& app);
 void select_cache_folder(App& app);
 // Handshake-file folder for this process: created at startup, removed on exit.
 void prepare_cache_session(const App& app);

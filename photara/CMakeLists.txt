@@ -696,6 +696,7 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR}/ui_chrome.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_export.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_inspector.cpp
+                ${PHOTARA_STUDIO_DIR}/ui_preferences.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_scene.cpp
                 ${PHOTARA_STUDIO_DIR}/ui_viewport.cpp
                 ${PHOTARA_STUDIO_DIR}/viewport_gizmo.cpp
@@ -737,6 +738,22 @@ if(TARGET photara_features)
             endif()
             if(PHOTARA_HAS_SAM)
                 target_compile_definitions(photara_studio PRIVATE PHOTARA_HAS_SAM=1)
+            endif()
+            if(PHOTARA_ENABLE_CUDA)
+                target_compile_definitions(photara_studio PRIVATE
+                    PHOTARA_STUDIO_BA_CUDA=1)
+            endif()
+            if(TARGET splat_drender::vulkan)
+                target_compile_definitions(photara_studio PRIVATE
+                    PHOTARA_STUDIO_VULKAN_TRAINING=1)
+            endif()
+            if(PHOTARA_HAS_SAM AND GGML_CUDA)
+                target_compile_definitions(photara_studio PRIVATE
+                    PHOTARA_STUDIO_SAM_CUDA=1)
+            endif()
+            if(PHOTARA_HAS_SAM AND GGML_VULKAN)
+                target_compile_definitions(photara_studio PRIVATE
+                    PHOTARA_STUDIO_SAM_VULKAN=1)
             endif()
             target_compile_definitions(photara_studio PRIVATE
                 PHOTARA_CLI_PATH="$<TARGET_FILE:photara>")

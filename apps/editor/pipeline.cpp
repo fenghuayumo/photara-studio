@@ -207,6 +207,29 @@ std::string quote_text(const char* text) {
     return out;
 }
 
+const char* training_backend_flag(const ProjectSettings& settings) {
+    return settings.training_backend == 1 && studio_vulkan_training()
+        ? "vulkan"
+        : "cuda";
+}
+
+const char* alignment_backend_flag(const ProjectSettings& settings) {
+    if (settings.alignment_backend == 1) return "cpu";
+    if (settings.alignment_backend == 2 && studio_ba_cuda()) return "cuda";
+    return "automatic";
+}
+
+const char* sam_backend_flag(const ProjectSettings& settings) {
+    if (settings.sam_backend == 1 && studio_sam_cuda()) return "cuda";
+    if (settings.sam_backend == 2 && studio_sam_vulkan()) return "vulkan";
+    return "auto";
+}
+
+void append_ba_backend(
+    std::ostringstream& command, const ProjectSettings& settings) {
+    command << " --ba-backend " << alignment_backend_flag(settings);
+}
+
 void append_sam_flags(
     std::ostringstream& command, const ProjectSettings& settings,
     const bool refresh) {
@@ -220,7 +243,8 @@ void append_sam_flags(
         path_from_utf8_field(settings.sam_model.data());
     if (model.empty()) model = photara::sam::locate_model();
     if (!model.empty()) command << " --sam-model " << quote(model);
-    command << " --sam-text " << quote_text(settings.sam_text.data());
+    command << " --sam-backend " << sam_backend_flag(settings)
+            << " --sam-text " << quote_text(settings.sam_text.data());
     if (settings.sam_negative_text[0] != '\0')
         command << " --sam-neg-text "
                 << quote_text(settings.sam_negative_text.data());
@@ -1195,6 +1219,7 @@ std::string build_align_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, true);
     append_gui_flags(command, layout);
+    append_ba_backend(command, settings);
     return command.str();
 }
 
@@ -1222,7 +1247,8 @@ std::string build_train_command(
                     << quote(settings.dataset_initial_cloud.data());
     }
 
-    command << " --splat --capture-mode "
+    command << " --splat --backend " << training_backend_flag(settings)
+            << " --capture-mode "
             << (settings.scene_mode ? "scene" : "object");
     if (!settings.scene_mode) {
         std::error_code bounds_error;
@@ -1290,6 +1316,7 @@ std::string build_train_command(
                 << " --splat-preview-vk-device-node-mask "
                 << preview.device_node_mask;
     }
+    append_ba_backend(command, settings);
     return command.str();
 }
 
@@ -1331,6 +1358,7 @@ std::string build_splat_mesh_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout, splat_model);
+    append_ba_backend(command, settings);
     return command.str();
 }
 
@@ -1378,6 +1406,7 @@ std::string build_dense_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
+    append_ba_backend(command, settings);
     return command.str();
 }
 
@@ -1415,6 +1444,7 @@ std::string build_texture_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
+    append_ba_backend(command, settings);
     return command.str();
 }
 
@@ -1435,6 +1465,7 @@ std::string build_export_sfm_command(
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout);
+    append_ba_backend(command, settings);
     return command.str();
 }
 

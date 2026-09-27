@@ -248,6 +248,13 @@ struct ProjectSettings {
     // 0 disables the automatic sweep of cache folders that no project has
     // touched for this many days.
     int cache_retention_days = 0;
+    // Machine-level compute policy. Stored in editor.prefs, never in .ascan.
+    // training_backend: 0 cuda, 1 vulkan.
+    // alignment_backend: 0 automatic, 1 cpu, 2 cuda (--ba-backend).
+    // sam_backend: 0 auto, 1 cuda, 2 vulkan (--sam-backend).
+    int training_backend = 0;
+    int alignment_backend = 0;
+    int sam_backend = 0;
     int max_features = 27'000;
 
     // Video capture. images_dir may be a video file; these knobs control the
@@ -354,6 +361,48 @@ struct ProjectLayout {
     std::filesystem::path working_texture;
     std::filesystem::path texture_log;
 };
+
+// These follow the Studio build, not the project. A saved choice the binary
+// cannot run falls back when the command is assembled.
+inline bool studio_vulkan_training() {
+#if defined(PHOTARA_STUDIO_VULKAN_TRAINING)
+    return true;
+#else
+    return false;
+#endif
+}
+
+inline bool studio_ba_cuda() {
+#if defined(PHOTARA_STUDIO_BA_CUDA)
+    return true;
+#else
+    return false;
+#endif
+}
+
+inline bool studio_has_sam() {
+#if defined(PHOTARA_HAS_SAM)
+    return true;
+#else
+    return false;
+#endif
+}
+
+inline bool studio_sam_cuda() {
+#if defined(PHOTARA_STUDIO_SAM_CUDA)
+    return true;
+#else
+    return false;
+#endif
+}
+
+inline bool studio_sam_vulkan() {
+#if defined(PHOTARA_STUDIO_SAM_VULKAN)
+    return true;
+#else
+    return false;
+#endif
+}
 
 ProjectLayout resolve_layout(const ProjectSettings& settings);
 
