@@ -1,4 +1,5 @@
 #include "splat/trainer.hpp"
+#include "splat/device.hpp"
 #include "splat/visualize.hpp"
 
 #include "bilateral_grid.hpp"
@@ -38,12 +39,6 @@
 
 namespace photara::splat {
 namespace {
-
-tinytensor::Device training_device(const TrainingOptions& options) {
-    return options.backend == TrainingBackend::vulkan
-        ? tinytensor::Device::Vulkan
-        : tinytensor::Device::CUDA;
-}
 
 namespace data = training_data;
 namespace refine = densification;
@@ -2409,7 +2404,8 @@ void save_gaussians_ply(
     if (!output) throw std::runtime_error("Failed while writing Gaussian PLY: " + path.string());
 }
 
-GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
+GaussianModel load_gaussians_ply(
+    const std::filesystem::path& path, const tinytensor::Device device) {
     std::ifstream input(path, std::ios::binary);
     if (!input)
         throw std::runtime_error(
@@ -2600,20 +2596,20 @@ GaussianModel load_gaussians_ply(const std::filesystem::path& path) {
 
     GaussianModel model;
     model.means = tinytensor::Tensor::from_vector(
-        means, {count, 3U}, tinytensor::Device::CUDA);
+        means, {count, 3U}, device);
     model.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3U}, tinytensor::Device::CUDA);
+        scales, {count, 3U}, device);
     model.quaternions = tinytensor::Tensor::from_vector(
-        rotations, {count, 4U}, tinytensor::Device::CUDA);
+        rotations, {count, 4U}, device);
     model.opacity_logits = tinytensor::Tensor::from_vector(
-        opacities, {count, 1U}, tinytensor::Device::CUDA);
+        opacities, {count, 1U}, device);
     model.sh = tinytensor::Tensor::from_vector(
-        sh, {count, bases, 3U}, tinytensor::Device::CUDA);
+        sh, {count, bases, 3U}, device);
     model.normal_features = tinytensor::Tensor::from_vector(
-        normal_features, {count, 4U}, tinytensor::Device::CUDA);
+        normal_features, {count, 4U}, device);
     if (!filter.empty())
         model.filter_3d = tinytensor::Tensor::from_vector(
-            filter, {count, 1U}, tinytensor::Device::CUDA);
+            filter, {count, 1U}, device);
     model.sh_degree = degree;
     core::Logger::instance().info(
         "loaded splat PLY=", path, " gaussians=", count,
@@ -2686,7 +2682,9 @@ std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model) {
     return bytes;
 }
 
-GaussianModel decode_gaussians(const std::span<const std::uint8_t> bytes) {
+GaussianModel decode_gaussians(
+    const std::span<const std::uint8_t> bytes,
+    const tinytensor::Device device) {
     if (bytes.size() < 4 + 8 + 4 + 4)
         throw std::runtime_error("Gaussian chunk is too small");
     const std::uint8_t* cursor = bytes.data();
@@ -2740,21 +2738,21 @@ GaussianModel decode_gaussians(const std::span<const std::uint8_t> bytes) {
     GaussianModel model;
     if (count == 0) return model;
     model.means = tinytensor::Tensor::from_vector(
-        means, {count, 3U}, tinytensor::Device::CUDA);
+        means, {count, 3U}, device);
     model.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3U}, tinytensor::Device::CUDA);
+        scales, {count, 3U}, device);
     model.quaternions = tinytensor::Tensor::from_vector(
-        rotations, {count, 4U}, tinytensor::Device::CUDA);
+        rotations, {count, 4U}, device);
     model.opacity_logits = tinytensor::Tensor::from_vector(
-        opacities, {count, 1U}, tinytensor::Device::CUDA);
+        opacities, {count, 1U}, device);
     model.sh = tinytensor::Tensor::from_vector(
-        sh, {count, bases, 3U}, tinytensor::Device::CUDA);
+        sh, {count, bases, 3U}, device);
     if (has_normal_features)
         model.normal_features = tinytensor::Tensor::from_vector(
-            normal_features, {count, 4U}, tinytensor::Device::CUDA);
+            normal_features, {count, 4U}, device);
     if (has_filter)
         model.filter_3d = tinytensor::Tensor::from_vector(
-            filter, {count, 1U}, tinytensor::Device::CUDA);
+            filter, {count, 1U}, device);
     model.sh_degree = sh_degree;
     return model;
 }

@@ -31,9 +31,10 @@ std::vector<T> download(const tinytensor::Tensor& tensor) {
     return values;
 }
 
-tinytensor::Tensor index_tensor(const std::vector<int>& indices) {
+tinytensor::Tensor index_tensor(
+    const std::vector<int>& indices, const tinytensor::Device device) {
     return tinytensor::Tensor::from_vector(
-        indices, {indices.size()}, tinytensor::Device::CUDA);
+        indices, {indices.size()}, device);
 }
 
 GaussianModel select_model_rows(
@@ -80,7 +81,7 @@ void append_zero_adam(detail::AdamState& state, const std::size_t count) {
         tensor = tinytensor::Tensor::cat(
             {tensor, tinytensor::Tensor::zeros(
                          tinytensor::TensorShape(dimensions),
-                         tinytensor::Device::CUDA)},
+                         tensor.device())},
             0);
     };
     append_zeros(state.first);
@@ -88,16 +89,17 @@ void append_zero_adam(detail::AdamState& state, const std::size_t count) {
 }
 
 void zero_adam_rows(
-    const std::vector<int>& rows, const AdamStates& states) {
+    const std::vector<int>& rows, const AdamStates& states,
+    const tinytensor::Device device) {
     if (rows.empty()) return;
-    const auto indices = index_tensor(rows);
+    const auto indices = index_tensor(rows, device);
     detail::zero_adam_rows(indices, states);
 }
 
 void select_training_rows(
     GaussianModel& model, const std::vector<int>& keep,
     const AdamStates& states) {
-    const auto indices = index_tensor(keep);
+    const auto indices = index_tensor(keep, model.means.device());
     model = select_model_rows(model, indices);
     for (detail::AdamState* state : states) select_adam_rows(*state, indices);
 }
@@ -109,7 +111,8 @@ void grow_training_model(
     const std::vector<float>& screen_sizes,
     const float split_opacity_k = 0.5F) {
     if (parents.empty()) return;
-    const auto indices = index_tensor(parents);
+    const auto device = model.means.device();
+    const auto indices = index_tensor(parents, device);
     GaussianModel children = select_model_rows(model, indices);
     std::vector<float> samples(3 * parents.size());
     std::normal_distribution<float> normal(0.F, 1.F);
@@ -120,9 +123,9 @@ void grow_training_model(
             selected_screen_sizes[index] =
                 screen_sizes[static_cast<std::size_t>(parents[index])];
     auto random_tensor = tinytensor::Tensor::from_vector(
-        samples, {parents.size(), 3}, tinytensor::Device::CUDA);
+        samples, {parents.size(), 3}, device);
     auto screen_tensor = tinytensor::Tensor::from_vector(
-        selected_screen_sizes, {parents.size()}, tinytensor::Device::CUDA);
+        selected_screen_sizes, {parents.size()}, device);
     detail::split_gaussians(
         model, children, indices, random_tensor, screen_tensor,
         split_mode,
@@ -133,7 +136,7 @@ void grow_training_model(
         split_opacity_k);
     // Splitting mutates the retained parent as well as creating a child.
     // Both are new primitives and must start with clean optimizer moments.
-    zero_adam_rows(parents, states);
+    zero_adam_rows(parents, states, device);
     append_model(model, children);
     for (detail::AdamState* state : states)
         append_zero_adam(*state, parents.size());
@@ -287,9 +290,10 @@ RefinementCounts refine_emc(
                 destination_rows.push_back(static_cast<int>(destination));
             }
             if (!parent_rows.empty()) {
-                const auto parent_tensor = index_tensor(parent_rows);
+                const auto parent_tensor = index_tensor(
+                    parent_rows, model.means.device());
                 const auto destination_tensor =
-                    index_tensor(destination_rows);
+                    index_tensor(destination_rows, model.means.device());
                 model.sh.index_copy_(
                     0, destination_tensor,
                     model.sh.index_select(0, parent_tensor));
@@ -300,7 +304,8 @@ RefinementCounts refine_emc(
                             0, parent_tensor));
                 detail::relocate_long_axis(
                     model, parent_tensor, destination_tensor, split_k);
-                zero_adam_rows(destination_rows, states);
+                zero_adam_rows(
+                    destination_rows, states, model.means.device());
             }
         }
     }
