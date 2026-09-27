@@ -94,8 +94,15 @@ struct VulkanRasterBackend {
           rasterizer(context), profile_stages(
               environment_flag("SPLAT_VULKAN_PROFILE_STAGES")) {}
 
-    void record_forward(const double value) {
-        if (profile_stages) forward_ms += value;
+    void record_forward(const double value, const double sync,
+                        const double bind, const double render,
+                        const double visibility) {
+        if (!profile_stages) return;
+        forward_ms += value;
+        forward_sync_ms += sync;
+        forward_bind_ms += bind;
+        forward_render_ms += render;
+        forward_visibility_ms += visibility;
     }
     void record_loss(const double value) {
         if (profile_stages) loss_ms += value;
@@ -108,17 +115,28 @@ struct VulkanRasterBackend {
         std::fprintf(
             stderr,
             "splat_vulkan_stage_profile samples=%u forward_avg_ms=%.4f "
-            "loss_avg_ms=%.4f backward_avg_ms=%.4f raster_total_avg_ms=%.4f\n",
+            "loss_avg_ms=%.4f backward_avg_ms=%.4f raster_total_avg_ms=%.4f "
+            "forward_sync_avg_ms=%.4f forward_bind_avg_ms=%.4f "
+            "forward_render_avg_ms=%.4f forward_visibility_avg_ms=%.4f\n",
             profile_samples, forward_ms * inverse, loss_ms * inverse,
             backward_ms * inverse,
-            (forward_ms + loss_ms + backward_ms) * inverse);
+            (forward_ms + loss_ms + backward_ms) * inverse,
+            forward_sync_ms * inverse, forward_bind_ms * inverse,
+            forward_render_ms * inverse, forward_visibility_ms * inverse);
+        std::fflush(stderr);
         profile_samples = 0;
         forward_ms = loss_ms = backward_ms = 0.0;
+        forward_sync_ms = forward_bind_ms = forward_render_ms =
+            forward_visibility_ms = 0.0;
     }
 
     bool profile_stages{};
     std::uint32_t profile_samples{};
     double forward_ms{};
+    double forward_sync_ms{};
+    double forward_bind_ms{};
+    double forward_render_ms{};
+    double forward_visibility_ms{};
     double loss_ms{};
     double backward_ms{};
 };
@@ -223,10 +241,13 @@ RenderResult vulkan_raster_forward(
     destination.height = camera.height;
 
     const auto profile_start = std::chrono::steady_clock::now();
-    tinytensor::vulkan::synchronize();
+    tinytensor::vulkan::submit_async();
+    const double sync_ms = elapsed_ms(profile_start);
     backend->rasterizer.bind_model_device(gaussians);
+    const double bind_ms = elapsed_ms(profile_start) - sync_ms;
     context->frame = backend->rasterizer.render_device_copy(
         camera_view(camera), settings, destination);
+    const double render_ms = elapsed_ms(profile_start) - sync_ms - bind_ms;
     // Keep the per-Gaussian contribution flags device-resident. The 0/1
     // int32-to-float conversion is a single TinyTensor compute dispatch and
     // avoids a full device -> host -> device round trip for every frame.
@@ -234,7 +255,9 @@ RenderResult vulkan_raster_forward(
         result.visibility = context->visibility_bits.to(
             tinytensor::DataType::Float32);
     result.rendered_instances = context->frame.instance_count;
-    backend->record_forward(elapsed_ms(profile_start));
+    const double total_ms = elapsed_ms(profile_start);
+    backend->record_forward(total_ms, sync_ms, bind_ms, render_ms,
+                            total_ms - sync_ms - bind_ms - render_ms);
     result.context.backend_impl = std::move(context);
     return result;
 }
@@ -249,7 +272,7 @@ float vulkan_photometric_loss(
     if (target.device() != tinytensor::Device::Vulkan)
         throw std::invalid_argument(
             "Vulkan photometric target must be a Vulkan tensor");
-    tinytensor::vulkan::synchronize();
+    tinytensor::vulkan::submit_async();
     context->photometric = context->backend->rasterizer.fused_l1_ssim_device(
         context->frame.color, buffer_view(target), context->frame.width,
         context->frame.height, ssim_weight, photometric_weight,
@@ -295,7 +318,7 @@ ModelGradients vulkan_raster_backward(
     // Avoid a redundant ~60 MB device clear and its TinyTensor queue drain.
     auto packed = tinytensor::Tensor::empty(
         {sh_values + count * 26U}, tinytensor::Device::Vulkan);
-    tinytensor::vulkan::synchronize();
+    tinytensor::vulkan::submit_async();
     context->backend->rasterizer.backward_device(
         color_gradient, buffer_view(grad_alpha), buffer_view(packed),
         buffer_view(grad_depth), buffer_view(grad_normal));
