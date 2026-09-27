@@ -56,11 +56,44 @@ constexpr std::uint32_t kMaxCommandsPerBatch = 4096;
 // Recycled buffers are kept up to this budget, because a workload with moving
 // tensor shapes must not grow VRAM without bound.
 constexpr std::size_t kDefaultPoolBudgetBytes = 1ULL << 30;
+// Upper bound for the adaptive budget, so a very large card does not hold a
+// quarter of its memory in recycled buffers.
+constexpr std::size_t kMaxPoolBudgetBytes = 8ULL << 30;
 
-// Matches the rounding Buffer's constructor applies, so the pool is keyed by
-// the size an allocation actually has.
+// Pool key for a request. Snapping to 1/16 of the request's magnitude - a
+// constant within each power-of-two band - is what makes the pool reusable at
+// all: a refinement re-allocates its whole working set every event and its row
+// count moves by a few thousand between events, so a key on the exact byte
+// size missed for every tensor and asked the driver for the working set again,
+// about 1.5 GiB per event on the glass scene. The cost is at most 6% of
+// over-allocation, and the buffer's own size rounds the same way, so the key
+// a released buffer lands under is the one its next request computes.
 VkDeviceSize pooled_size_of(VkDeviceSize bytes) {
-    return (std::max<VkDeviceSize>(bytes, kMinBufferBytes) + 3U) & ~VkDeviceSize{3};
+    constexpr VkDeviceSize kExactBelow = 1ULL << 16;
+    VkDeviceSize size = std::max<VkDeviceSize>(bytes, kMinBufferBytes);
+    if (size > kExactBelow) {
+        VkDeviceSize magnitude = kExactBelow;
+        while (magnitude * 2 <= size) magnitude *= 2;
+        const VkDeviceSize granule = magnitude / 16;
+        size = ((size + granule - 1) / granule) * granule;
+    }
+    return (size + 3U) & ~VkDeviceSize{3};
+}
+
+// The budget a settled pool needs is proportional to the tensors a refinement
+// cycles through, which scales with the model, not with a fixed number of
+// bytes: at a million rows the working set is about 1.5 GiB, so a 1 GiB budget
+// trimmed it away between refinements and the churn came straight back.
+VkDeviceSize device_local_heap_bytes(VkPhysicalDevice physical) {
+    VkPhysicalDeviceMemoryProperties properties{};
+    vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+    VkDeviceSize total = 0;
+    for (std::uint32_t heap = 0; heap < properties.memoryHeapCount; ++heap) {
+        if ((properties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
+            total += properties.memoryHeaps[heap].size;
+        }
+    }
+    return total;
 }
 
 std::optional<std::uint32_t> env_u32(const char* name) {
@@ -406,9 +439,13 @@ Context::Context() {
     // Recycled buffers are held up to this budget; override with
     // TINYTENSOR_VULKAN_POOL_BYTES for a workload with much larger tensors.
     const std::uint32_t pool_budget_override = env_u32("TINYTENSOR_VULKAN_POOL_BYTES").value_or(0);
-    pool_budget_bytes_ =
-        pool_budget_override != 0 ? static_cast<std::size_t>(pool_budget_override)
-                                  : kDefaultPoolBudgetBytes;
+    const std::size_t adaptive_budget = static_cast<std::size_t>(
+        std::min<VkDeviceSize>(device_local_heap_bytes(physical_) / 8,
+                               kMaxPoolBudgetBytes));
+    pool_budget_bytes_ = pool_budget_override != 0
+        ? static_cast<std::size_t>(pool_budget_override)
+        : std::clamp<std::size_t>(adaptive_budget, kDefaultPoolBudgetBytes,
+                                  kMaxPoolBudgetBytes);
     dummy_ = std::make_unique<Buffer>(physical_, device_, kMinBufferBytes, MemoryKind::device_local);
     create_pipelines();
     op_profile_.enabled = env_flag("TINYTENSOR_VULKAN_PROFILE_OPS");
@@ -805,8 +842,11 @@ std::shared_ptr<Buffer> Context::acquire_buffer_locked(const std::size_t bytes) 
         Buffer* buffer = free_list.back();
         free_list.pop_back();
         pooled_bytes_ -= static_cast<std::size_t>(buffer->size());
+        ++op_profile_.pool_hits;
         return std::shared_ptr<Buffer>(buffer, release);
     }
+    ++op_profile_.pool_misses;
+    op_profile_.pool_miss_bytes += static_cast<std::uint64_t>(size);
     return std::shared_ptr<Buffer>(new Buffer(physical_, device_, size, MemoryKind::device_local),
                                    release);
 }
@@ -831,6 +871,8 @@ void Context::trim_pool_locked() {
             Buffer* buffer = list.back();
             list.pop_back();
             pooled_bytes_ -= static_cast<std::size_t>(buffer->size());
+            ++op_profile_.pool_drops;
+            op_profile_.pool_drop_bytes += static_cast<std::uint64_t>(buffer->size());
             delete buffer;
         }
         if (pooled_bytes_ <= pool_budget_bytes_) {
@@ -1352,6 +1394,11 @@ std::uint64_t dispatch_count() {
 
 double device_busy_ms() {
     return runtime::Context::get().device_busy_ms();
+}
+
+BufferPoolStats buffer_pool_stats() {
+    const auto stats = runtime::Context::get().pool_stats();
+    return {stats.hits, stats.misses, stats.miss_bytes, stats.drops, stats.drop_bytes};
 }
 
 void shutdown() {

@@ -84,6 +84,18 @@ std::uint64_t dispatch_count();
 // covered by wait_ms or busy_ms is spending it on the host, in allocation or
 // in command recording rather than in the GPU or the fence.
 double device_busy_ms();
+// Buffer pool traffic since startup: reuse, fresh allocation (with the bytes
+// it asked the driver for) and teardown. A phase whose wall time is host-heavy
+// while its miss bytes grow by the size of its working set is churning
+// allocations rather than reusing them.
+struct BufferPoolStats {
+    std::uint64_t hits = 0;
+    std::uint64_t misses = 0;
+    std::uint64_t miss_bytes = 0;
+    std::uint64_t drops = 0;
+    std::uint64_t drop_bytes = 0;
+};
+BufferPoolStats buffer_pool_stats();
 void shutdown();
 
 } // namespace vulkan
