@@ -164,11 +164,15 @@ private:
 
 void save_gaussians_ply(
     const GaussianModel& model, const std::filesystem::path& path);
-GaussianModel load_gaussians_ply(const std::filesystem::path& path);
+GaussianModel load_gaussians_ply(
+    const std::filesystem::path& path,
+    tinytensor::Device device = tinytensor::Device::CUDA);
 
 inline constexpr std::uint32_t k_gaussian_chunk_version = 1;
 std::vector<std::uint8_t> encode_gaussians(const GaussianModel& model);
-GaussianModel decode_gaussians(std::span<const std::uint8_t> bytes);
+GaussianModel decode_gaussians(
+    std::span<const std::uint8_t> bytes,
+    tinytensor::Device device = tinytensor::Device::CUDA);
 
 // Blocks until the process is killed. Renders whenever the orbit-camera
 // sidecar revision changes, and submits the CUDA color tensor to the

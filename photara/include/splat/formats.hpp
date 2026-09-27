@@ -32,6 +32,12 @@ void restrict_sh_degree(GaussianModel& model, unsigned degree);
 
 GaussianModel load_gaussians(
     const std::filesystem::path& path,
-    GaussianFormat format = GaussianFormat::auto_detect);
+    GaussianFormat format = GaussianFormat::auto_detect,
+    tinytensor::Device device = tinytensor::Device::CUDA);
+
+inline GaussianModel load_gaussians(
+    const std::filesystem::path& path, const tinytensor::Device device) {
+    return load_gaussians(path, GaussianFormat::auto_detect, device);
+}
 
 }  // namespace photara::splat

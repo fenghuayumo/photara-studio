@@ -486,7 +486,7 @@ void append_json_float_array(
     const std::size_t count, const unsigned degree,
     const std::vector<float>& means, const std::vector<float>& scales,
     const std::vector<float>& rotations, const std::vector<float>& opacities,
-    const std::vector<float>& sh) {
+    const std::vector<float>& sh, const tinytensor::Device device) {
     if (count == 0 || degree > 3)
         throw std::runtime_error("Splat model has an unsupported point count or SH degree");
     const auto bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
@@ -504,15 +504,15 @@ void append_json_float_array(
 
     GaussianModel model;
     model.means = tinytensor::Tensor::from_vector(
-        means, {count, 3U}, tinytensor::Device::CUDA);
+        means, {count, 3U}, device);
     model.log_scales = tinytensor::Tensor::from_vector(
-        scales, {count, 3U}, tinytensor::Device::CUDA);
+        scales, {count, 3U}, device);
     model.quaternions = tinytensor::Tensor::from_vector(
-        rotations, {count, 4U}, tinytensor::Device::CUDA);
+        rotations, {count, 4U}, device);
     model.opacity_logits = tinytensor::Tensor::from_vector(
-        opacities, {count, 1U}, tinytensor::Device::CUDA);
+        opacities, {count, 1U}, device);
     model.sh = tinytensor::Tensor::from_vector(
-        sh, {count, bases, 3U}, tinytensor::Device::CUDA);
+        sh, {count, bases, 3U}, device);
     model.sh_degree = degree;
     // SOG/SPZ do not carry Photara's optional normal field. Seed it from the
     // thinnest Gaussian axis so a subsequently extracted surface remains usable.
@@ -545,7 +545,7 @@ void append_json_float_array(
         normal_features[4U * index + 3U] = 1.F;
     }
     model.normal_features = tinytensor::Tensor::from_vector(
-        normal_features, {count, 4U}, tinytensor::Device::CUDA);
+        normal_features, {count, 4U}, device);
     return model;
 }
 
@@ -565,7 +565,8 @@ void validate_model_shape(
         throw std::runtime_error("Gaussian model has unsupported tensor shapes");
 }
 
-[[nodiscard]] GaussianModel load_sog(const std::filesystem::path& path) {
+[[nodiscard]] GaussianModel load_sog(
+    const std::filesystem::path& path, const tinytensor::Device device) {
     const SogAssets assets = read_sog_assets(path);
     std::istringstream json(assets.meta);
     ptree meta;
@@ -701,7 +702,7 @@ void validate_model_shape(
             }
         }
     }
-    return make_model(count, degree, means, log_scales, rotations, opacities, sh);
+    return make_model(count, degree, means, log_scales, rotations, opacities, sh, device);
 }
 
 [[nodiscard]] std::uint8_t spz_quantize_sh(
@@ -994,7 +995,8 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     const std::uint32_t version, const std::uint32_t count,
     const unsigned degree, const unsigned fractional_bits,
     const Bytes& positions, const Bytes& alphas, const Bytes& colors,
-    const Bytes& scales, const Bytes& rotations, const Bytes& sh) {
+    const Bytes& scales, const Bytes& rotations, const Bytes& sh,
+    const tinytensor::Device device) {
     if (count == 0 || degree > 3 || fractional_bits > 23)
         throw std::runtime_error("Unsupported SPZ point count, degree, or precision");
     const auto bases = static_cast<std::size_t>(degree + 1U) * (degree + 1U);
@@ -1080,10 +1082,11 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
                     k_rdf_to_rub_sh_signs[coefficient];
             }
     }
-    return make_model(count, degree, means, log_scales, model_rotations, opacities, model_sh);
+    return make_model(count, degree, means, log_scales, model_rotations, opacities, model_sh, device);
 }
 
-[[nodiscard]] GaussianModel load_spz(const std::filesystem::path& path) {
+[[nodiscard]] GaussianModel load_spz(
+    const std::filesystem::path& path, const tinytensor::Device device) {
     const Bytes file = read_file(path);
     if (file.size() < 2) throw std::runtime_error("SPZ file is truncated");
     const std::uint32_t magic = file.size() >= 4 ? read_u32(file, 0) : 0;
@@ -1135,7 +1138,8 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
             throw std::runtime_error("SPZ v4 has trailing bytes");
         return decode_spz_packed(
             version, count, degree, fractional_bits,
-            streams[0], streams[1], streams[2], streams[3], streams[4], streams[5]);
+            streams[0], streams[1], streams[2], streams[3], streams[4], streams[5],
+            device);
     }
     if (file[0] != 0x1fU || file[1] != 0x8bU)
         throw std::runtime_error("Unrecognized SPZ file");
@@ -1175,7 +1179,8 @@ void append_bytes(Bytes& target, const std::uint8_t* source, const std::size_t c
     }
     return decode_spz_packed(
         version, count, degree, fractional_bits,
-        streams[0], streams[1], streams[2], streams[3], streams[4], streams[5]);
+        streams[0], streams[1], streams[2], streams[3], streams[4], streams[5],
+        device);
 }
 
 [[nodiscard]] Bytes save_sog(const GaussianModel& model) {
@@ -1467,22 +1472,23 @@ void save_gaussians(
 }
 
 GaussianModel load_gaussians(
-    const std::filesystem::path& path, GaussianFormat format) {
+    const std::filesystem::path& path, GaussianFormat format,
+    const tinytensor::Device device) {
     if (format == GaussianFormat::auto_detect) {
         format = std::filesystem::is_directory(path)
             ? GaussianFormat::sog
             : gaussian_format_from_path(path);
     }
     switch (format) {
-        case GaussianFormat::ply: return load_gaussians_ply(path);
-        case GaussianFormat::sog: return load_sog(path);
-        case GaussianFormat::spz: return load_spz(path);
+        case GaussianFormat::ply: return load_gaussians_ply(path, device);
+        case GaussianFormat::sog: return load_sog(path, device);
+        case GaussianFormat::spz: return load_spz(path, device);
         case GaussianFormat::glb: {
             auto decoded = detail::load_glb(path);
             return make_model(
                 decoded.count, decoded.degree, decoded.means,
                 decoded.log_scales, decoded.rotations,
-                decoded.opacity_logits, decoded.sh);
+                decoded.opacity_logits, decoded.sh, device);
         }
         case GaussianFormat::auto_detect: break;
     }

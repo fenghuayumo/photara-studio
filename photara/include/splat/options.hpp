@@ -55,8 +55,8 @@ enum class PpispParamType {
 }
 
 struct TrainingOptions {
-    // The orchestration, schedules and optimizer policy are shared. Only GPU
-    // primitives (upload/raster/loss/backward/Adam) dispatch on this value.
+    // The orchestration, schedules and optimizer policy are shared. This
+    // selects the device for training tensors and backend GPU primitives.
     TrainingBackend backend{TrainingBackend::cuda};
     unsigned iterations{10'000};
     unsigned sh_degree{3};

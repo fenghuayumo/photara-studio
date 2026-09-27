@@ -1,4 +1,5 @@
 #include "training_data_loader.hpp"
+#include "splat/device.hpp"
 
 #include "core/camera_projection.hpp"
 #include "io/image.hpp"
@@ -871,6 +872,7 @@ TrainingView upload_training_view(
     TrainingView result;
     result.camera = host.camera;
     const bool decode_gray = options.multi_view_ncc_weight > 0.F;
+    const auto device = training_device(options);
     if (options.backend == TrainingBackend::vulkan) {
         // The packed image is uploaded as-is and expanded into the planar float
         // planes by the device. Converting on the host cost a scalar loop over
@@ -883,52 +885,40 @@ TrainingView upload_training_view(
             throw std::invalid_argument(
                 "GGGS packed training image size does not match camera");
         const auto packed = tinytensor::Tensor::from_vector(
-            host.rgba, {height, width}, tinytensor::Device::Vulkan);
+            host.rgba, {height, width}, device);
         result.rgb = tinytensor::Tensor::empty(
-            {std::size_t{3}, height, width}, tinytensor::Device::Vulkan);
+            {std::size_t{3}, height, width}, device);
         result.gray = decode_gray
             ? tinytensor::Tensor::empty(
-                  {height, width}, tinytensor::Device::Vulkan)
+                  {height, width}, device)
             : tinytensor::Tensor::zeros(
-                  {std::size_t{1}}, tinytensor::Device::Vulkan);
+                  {std::size_t{1}}, device);
         result.mask = host.has_mask
             ? tinytensor::Tensor::empty(
-                  {height, width}, tinytensor::Device::Vulkan)
+                  {height, width}, device)
             : tinytensor::Tensor::zeros(
-                  {std::size_t{1}}, tinytensor::Device::Vulkan);
+                  {std::size_t{1}}, device);
         tinytensor::vulkan::unpack_training_pixels(
             packed, result.rgb, decode_gray ? &result.gray : nullptr,
             host.has_mask ? &result.mask : nullptr);
-        result.depth = host.depth.empty()
-            ? tinytensor::Tensor::zeros({1}, tinytensor::Device::Vulkan)
-            : tinytensor::Tensor::from_vector(
-                  host.depth, {height, width},
-                  tinytensor::Device::Vulkan);
-        result.normal = host.normal.empty()
-            ? tinytensor::Tensor::zeros({1}, tinytensor::Device::Vulkan)
-            : tinytensor::Tensor::from_vector(
-                  host.normal, {3, height, width},
-                  tinytensor::Device::Vulkan);
-        result.has_mask = host.has_mask;
-        result.mask_is_validity = host.mask_is_validity;
-        return result;
+    } else {
+        auto decoded = detail::upload_packed_training_pixels(
+            host.rgba, host.camera.width, host.camera.height, host.has_mask,
+            decode_gray);
+        result.rgb = std::move(decoded.rgb);
+        result.gray = std::move(decoded.gray);
+        result.mask = std::move(decoded.mask);
     }
-    auto decoded = detail::upload_packed_training_pixels(
-        host.rgba, host.camera.width, host.camera.height, host.has_mask,
-        decode_gray);
-    result.rgb = std::move(decoded.rgb);
-    result.gray = std::move(decoded.gray);
     result.depth = host.depth.empty()
-        ? tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA)
+        ? tinytensor::Tensor::zeros({1}, device)
         : tinytensor::Tensor::from_vector(
               host.depth, {host.camera.height, host.camera.width},
-              tinytensor::Device::CUDA);
+              device);
     result.normal = host.normal.empty()
-        ? tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA)
+        ? tinytensor::Tensor::zeros({1}, device)
         : tinytensor::Tensor::from_vector(
               host.normal, {3, host.camera.height, host.camera.width},
-              tinytensor::Device::CUDA);
-    result.mask = std::move(decoded.mask);
+              device);
     result.has_mask = host.has_mask;
     result.mask_is_validity = host.mask_is_validity;
     return result;
@@ -1621,10 +1611,11 @@ private:
         result.mask = std::move(decoded.mask);
         // Own the returned supervision tensors independently of the LRU:
         // callers may retain a reference view while loading a neighbour.
+        const auto device = entry.rgba.device();
         result.depth = entry.depth.is_valid() ? entry.depth
-            : tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
+            : tinytensor::Tensor::zeros({1}, device);
         result.normal = entry.normal.is_valid() ? entry.normal
-            : tinytensor::Tensor::zeros({1}, tinytensor::Device::CUDA);
+            : tinytensor::Tensor::zeros({1}, device);
         return result;
     }
 
