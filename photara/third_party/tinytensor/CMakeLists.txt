@@ -137,6 +137,8 @@ if(TINYTENSOR_ENABLE_VULKAN)
         select_compact.hlsl
         cat.hlsl
         unpack_rgba.hlsl)
+    list(APPEND TINYTENSOR_SHADER_SOURCES sort_bitonic.hlsl)
+    list(APPEND TINYTENSOR_SHADER_SOURCES prune.hlsl)
     set(TINYTENSOR_SHADER_BINARIES)
     set(TINYTENSOR_SHADER_EMBEDDED_HEADERS)
     foreach(shader IN LISTS TINYTENSOR_SHADER_SOURCES)

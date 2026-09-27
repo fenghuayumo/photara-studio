@@ -4,7 +4,9 @@
 #include "densification_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -35,6 +37,20 @@ tinytensor::Tensor weighted_gumbel_sample(
     const tinytensor::Tensor& weights, const std::size_t requested,
     std::mt19937& random) {
     if (requested == 0 || weights.numel() == 0) return {};
+    if (weights.device() == tinytensor::Device::Vulkan) {
+        // Keep the million-row selection on the GPU. Downloading all weights
+        // for a host partial_sort left the queue idle at every IGS refinement.
+        const auto eligible = weights.isfinite().logical_and(weights.gt(0.F));
+        const std::size_t count = std::min(requested, eligible.count_nonzero());
+        if (count == 0) return {};
+        const auto uniform = tinytensor::Tensor::rand(
+            weights.shape(), weights.device()).clamp_min(1e-7F).clamp_max(1.F - 1e-7F);
+        auto scores = weights.log().sub(uniform.log().mul(-1.F).log());
+        scores.masked_fill_(eligible.logical_not(),
+                            -std::numeric_limits<float>::infinity());
+        return scores.sort(0, true).second.slice(0, 0, count)
+            .to(tinytensor::DataType::Int32);
+    }
     const auto values = weights.to_vector();
     std::uniform_real_distribution<float> uniform(1e-7F, 1.F - 1e-7F);
     std::vector<std::pair<float, int>> scores;
@@ -111,6 +127,15 @@ RefinementCounts IgsStrategy::refine(
     const std::size_t old_count = model.size();
     if (!is_refinement_iteration(iteration, options) || old_count == 0)
         return {};
+    const bool profile_refine = std::getenv("SPLAT_IGS_PROFILE") != nullptr;
+    auto phase_started = std::chrono::steady_clock::now();
+    const auto phase_ms = [&phase_started]() {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double, std::milli>(
+            now - phase_started).count();
+        phase_started = now;
+        return elapsed;
+    };
 
     // The host path clips oversize splats before it reads any statistics, so
     // the mask below already sees the clipped scales.
@@ -202,7 +227,9 @@ RefinementCounts IgsStrategy::refine(
     const std::size_t pruned = old_count - retained;
     const auto retained_screen =
         stats.max_screen_radius.index_select(0, keep_indices);
+    const double prune_ms = profile_refine ? phase_ms() : 0.0;
     gpu_detail::select_training_rows_gpu(model, keep_indices, states);
+    const double remap_ms = profile_refine ? phase_ms() : 0.0;
 
     const std::size_t growth_cap = stats.growth_cap == 0
         ? options.densification_cap
@@ -282,11 +309,22 @@ RefinementCounts IgsStrategy::refine(
         &random);
     const auto& split_parents = selection.parents;
     const std::size_t grown = split_parents.numel();
+    const double selection_ms = profile_refine ? phase_ms() : 0.0;
     gpu_detail::grow_igs_random_gpu(
         model, split_parents, retained_screen, options, random, states);
     decay_adc();
     stats = detail::make_densification_stats(
         model.size(), model.means.device());
+    const double growth_ms = profile_refine ? phase_ms() : 0.0;
+
+    if (profile_refine) {
+        core::Logger::instance().info(
+            "igs_profile iteration=", iteration,
+            " prune_ms=", prune_ms,
+            " remap_ms=", remap_ms,
+            " selection_ms=", selection_ms,
+            " growth_ms=", growth_ms);
+    }
 
     core::Logger::instance().info(
         "igs_refine iteration=", iteration,

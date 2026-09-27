@@ -1,6 +1,9 @@
 #include "core/logger.hpp"
 #include "internal/tensor_impl.hpp"
 #include "internal/tensor_ops.hpp"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "vulkan/ops.hpp"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -502,6 +505,15 @@ namespace tinytensor {
             LOG_ERROR("Invalid dimension for sort: {}", dim);
             return {Tensor(), Tensor()};
         }
+
+        // Keep the million-row refinement order on the Vulkan queue. The
+        // generic host fallback below remains for other layouts and dtypes.
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan && ndim() == 1 && dim == 0 &&
+            dtype_ == DataType::Float32 && is_contiguous()) {
+            return vulkan::sort_1d_f32(*this, descending);
+        }
+#endif
 
         // Create output tensors on same device
         auto sorted = clone();

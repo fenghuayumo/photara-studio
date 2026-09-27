@@ -3106,7 +3106,7 @@ void test_splat_quantile_selection() {
                         (1.F + p) * 0.5F * static_cast<float>(sorted.size())))];
             }
             const auto actual = splat::densification::splat_scene_geometry(xyz, p);
-            const auto device = splat::densification::splat_scene_geometry_cuda(
+            const auto device = splat::densification::splat_scene_geometry_device(
                 tinytensor::Tensor::from_vector(
                     xyz, {count, 3}, tinytensor::Device::CUDA), p);
             require(actual.center == device.center && actual.scale == device.scale &&
@@ -3124,7 +3124,7 @@ void test_splat_quantile_selection() {
     for (const std::vector<float>& xyz : {
              std::vector<float>{},
              std::vector<float>{std::numeric_limits<float>::infinity(), 1.F, 2.F}}) {
-        const auto actual = splat::densification::splat_scene_geometry_cuda(
+        const auto actual = splat::densification::splat_scene_geometry_device(
             tinytensor::Tensor::from_vector(
                 xyz, {xyz.size() / 3, 3}, tinytensor::Device::CUDA));
         require(actual.center.isZero() && actual.scale == 2.F &&

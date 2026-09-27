@@ -25,6 +25,7 @@
 #include "matmul.hlsl.embedded.hpp"
 #include "multinomial.hlsl.embedded.hpp"
 #include "pool.hlsl.embedded.hpp"
+#include "prune.hlsl.embedded.hpp"
 #include "random.hlsl.embedded.hpp"
 #include "reduce.hlsl.embedded.hpp"
 #include "reduce_all_f32.hlsl.embedded.hpp"
@@ -32,6 +33,7 @@
 #include "scan_block.hlsl.embedded.hpp"
 #include "scatter.hlsl.embedded.hpp"
 #include "select_compact.hlsl.embedded.hpp"
+#include "sort_bitonic.hlsl.embedded.hpp"
 #include "strided_copy.hlsl.embedded.hpp"
 #include "unpack_rgba.hlsl.embedded.hpp"
 
@@ -90,7 +92,7 @@ const char* shader_name(const ShaderId shader) {
         "index_fill",  "mask_flags",  "scan_block",      "scan_add",     "compact",
         "multinomial", "reduce",      "reduce_all_f32",  "matmul",       "random",
         "cumsum",      "pool",        "scatter",         "select_compact",
-        "cat",         "unpack_rgba"};
+        "cat",         "unpack_rgba", "sort_bitonic"};
     const std::size_t index = static_cast<std::size_t>(shader);
     return index < names.size() ? names[index] : "unknown";
 }
@@ -213,7 +215,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
     using std::as_bytes;
     using std::span;
     return {{
-        {ShaderId::AdamF32, as_bytes(span{adam_f32_hlsl_spv}), 4, 64},
+        {ShaderId::AdamF32, as_bytes(span{adam_f32_hlsl_spv}), 4, 68},
         {ShaderId::Elementwise, as_bytes(span{elementwise_hlsl_spv}), 4, 72},
         {ShaderId::FusedPointwise, as_bytes(span{fused_pointwise_hlsl_spv}), 3, 16},
         {ShaderId::StridedCopy, as_bytes(span{strided_copy_hlsl_spv}), 2, 96},
@@ -234,6 +236,8 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::SelectCompact, as_bytes(span{select_compact_hlsl_spv}), 4, 28},
         {ShaderId::Cat, as_bytes(span{cat_hlsl_spv}), 3, 24},
         {ShaderId::UnpackRgba, as_bytes(span{unpack_rgba_hlsl_spv}), 4, 24},
+        {ShaderId::SortBitonic, as_bytes(span{sort_bitonic_hlsl_spv}), 4, 28},
+        {ShaderId::Prune, as_bytes(span{prune_hlsl_spv}), 8, 44},
     }};
 }
 
@@ -698,6 +702,8 @@ void Context::destroy() {
         }
         recording_ = false;
         vkDeviceWaitIdle(device_);
+        if (in_flight_ && op_profile_.enabled) collect_op_profile_locked();
+        in_flight_ = false;
     }
     if (op_profile_.enabled) {
         // Report the run total before the pool goes away: a training run ends
@@ -796,15 +802,15 @@ std::shared_ptr<Buffer> Context::acquire_buffer_locked(const std::size_t bytes) 
 void Context::recycle_locked(Buffer* buffer) {
     pooled_bytes_ += static_cast<std::size_t>(buffer->size());
     free_buffers_[static_cast<std::size_t>(buffer->size())].push_back(buffer);
-    if (!recording_) {
-        // A buffer can only be destroyed while no batch is recording: a
-        // recorded command still holds the handle even though no tensor does.
+    if (!recording_ && !in_flight_) {
+        // A recorded or submitted command may still hold this handle even
+        // after the last tensor owner releases it.
         trim_pool_locked();
     }
 }
 
 void Context::trim_pool_locked() {
-    if (recording_ || pooled_bytes_ <= pool_budget_bytes_) {
+    if (recording_ || in_flight_ || pooled_bytes_ <= pool_budget_bytes_) {
         return;
     }
     for (auto& entry : free_buffers_) {
@@ -851,6 +857,7 @@ void Context::begin_batch_locked() {
     if (recording_) {
         return;
     }
+    retire_async_locked();
     if (command_ == VK_NULL_HANDLE) {
         VkCommandBufferAllocateInfo alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         alloc.commandPool = command_pool_;
@@ -874,30 +881,43 @@ void Context::begin_batch_locked() {
     }
 }
 
-void Context::flush_locked() {
-    if (!recording_) {
-        // Nothing is pending, so nothing references the staging buffer and the
-        // cursor starts clean for the next batch.
-        staging_cursor_ = 0;
-        return;
-    }
+void Context::submit_async_locked() {
+    if (!recording_) return;
+    // Publish writes to later compute and transfer commands on this queue,
+    // including the splat rasterizer's submissions through the shared device.
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(command_,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 1, &barrier, 0, nullptr, 0, nullptr);
     check(vkEndCommandBuffer(command_), "vkEndCommandBuffer");
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
     check(vkQueueSubmit(queue_, 1, &submit, completion_fence_), "vkQueueSubmit");
+    recording_ = false;
+    in_flight_ = true;
+    batch_commands_ = 0;
+}
+
+void Context::retire_async_locked() {
+    if (!in_flight_) return;
     check(vkWaitForFences(device_, 1, &completion_fence_, VK_TRUE, UINT64_MAX),
           "vkWaitForFences");
     check(vkResetFences(device_, 1, &completion_fence_), "vkResetFences");
-    // The queue is idle, so the batch's timestamp pairs are readable.
+    in_flight_ = false;
     if (op_profile_.enabled) collect_op_profile_locked();
-    recording_ = false;
-    batch_commands_ = 0;
-    // Every descriptor set the batch allocated is dead once the queue is idle,
-    // so the arena is recycled with one reset instead of a free per op.
     staging_cursor_ = 0;
     check(vkResetDescriptorPool(device_, descriptor_pool_, 0), "vkResetDescriptorPool");
     trim_pool_locked();
+}
+
+void Context::flush_locked() {
+    submit_async_locked();
+    retire_async_locked();
 }
 
 // One timestamp pair per recorded dispatch, accumulated per shader. The pool is
@@ -1006,6 +1026,11 @@ std::vector<Context::OpProfileEntry> Context::op_profile() const {
 void Context::flush() {
     std::scoped_lock lock(mutex_);
     flush_locked();
+}
+
+void Context::submit_async() {
+    std::scoped_lock lock(mutex_);
+    submit_async_locked();
 }
 
 // Dispatches used to be separated by a queue submission, and that is what made
@@ -1288,6 +1313,10 @@ DeviceHandles device_handles() {
 
 void synchronize() {
     runtime::Context::get().flush();
+}
+
+void submit_async() {
+    runtime::Context::get().submit_async();
 }
 
 void shutdown() {

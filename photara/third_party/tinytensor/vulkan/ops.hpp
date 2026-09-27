@@ -109,6 +109,16 @@ void cat_along(Tensor& dst, const std::vector<Tensor>& tensors, int dim);
 void index_select_into(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int mode);
 void index_fill(Tensor& dst, const Tensor& indices, float value, int dim);
 void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, bool accumulate);
+// Fused ADC prune sweep (the Vulkan twin of the CUDA adc_plus_prune_kernel):
+// one dispatch over all Gaussian rows writes the keep/hard masks and sigmoid
+// opacities without any host round trip. Every tensor must be contiguous with
+// dim0 == count; per-row strides are derived from numel / count.
+void prune_masks(const Tensor& means, const Tensor& log_scales,
+                 const Tensor& quaternions, const Tensor& opacity_logits,
+                 const Tensor& sh, Tensor& keep, Tensor& hard,
+                 Tensor& opacities, float minimum_opacity,
+                 float maximum_bounds, float center_x, float center_y,
+                 float center_z);
 std::size_t count_nonzero(const Tensor& src);
 Tensor nonzero(const Tensor& src);
 Tensor masked_select(const Tensor& src, const Tensor& mask);
@@ -134,6 +144,7 @@ void max_pool2d(const Tensor& src, Tensor& dst, int kernel, int stride, int padd
                 int h_out, int w_out);
 void adaptive_avg_pool2d(const Tensor& src, Tensor& dst, int h_out, int w_out);
 Tensor multinomial(const Tensor& weights, int num_samples, bool replacement);
+std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending);
 
 } // namespace vulkan
 } // namespace tinytensor

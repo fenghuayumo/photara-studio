@@ -103,7 +103,7 @@ SceneGeometry splat_scene_geometry(
         extents[2]};
 }
 
-SceneGeometry splat_scene_geometry_cuda(
+SceneGeometry splat_scene_geometry_device(
     const tinytensor::Tensor& means, const float percentile) {
     const auto bounds = detail::percentile_bounds(means, percentile);
     const mvs::Vec3f minimum(bounds[0], bounds[1], bounds[2]);
