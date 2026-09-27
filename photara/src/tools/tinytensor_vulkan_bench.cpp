@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -16,7 +18,7 @@
 // the per-element cost. Both matter: the runtime submits and waits per op, so
 // the fixed part is a function of the op count, not of the tensor size.
 //
-// Usage: photara_tinytensor_vulkan_bench [REPEATS]
+// Usage: photara_tinytensor_vulkan_bench [REPEATS | --million [REPEATS]]
 
 namespace {
 
@@ -137,16 +139,146 @@ double readback_ms(const std::size_t count, const int repeats) {
     return median_ms([&] { return tensor.to_vector()[0]; }, repeats);
 }
 
+bool million_correctness(const std::size_t count) {
+    std::vector<float> host_a(count), host_b(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        host_a[i] = 0.25F + static_cast<float>(i % 1009) * 0.001F;
+        host_b[i] = 0.5F + static_cast<float>(i % 127) * 0.002F;
+    }
+    auto vk_a = Tensor::from_vector(host_a, {count}, Device::Vulkan);
+    auto vk_b = Tensor::from_vector(host_b, {count}, Device::Vulkan);
+    auto cu_a = Tensor::from_vector(host_a, {count}, Device::CUDA);
+    auto cu_b = Tensor::from_vector(host_b, {count}, Device::CUDA);
+
+    const char* profile_env = std::getenv("TINYTENSOR_VULKAN_PROFILE_OPS");
+    const bool profile = profile_env != nullptr && std::strtoul(profile_env, nullptr, 10) != 0;
+    const auto dispatches = [](const char* shader) {
+        std::uint64_t total = 0;
+        for (const auto& entry : tinytensor::vulkan::runtime::Context::get().op_profile())
+            if (std::string(entry.name) == shader) total += entry.calls;
+        return total;
+    };
+    const auto compare = [&](const char* name, const auto& vk_op, const auto& cu_op,
+                             const float tolerance, const char* shader,
+                             const std::uint64_t min_dispatches) {
+        const auto before = profile ? dispatches(shader) : 0;
+        const Tensor vk = vk_op();
+        const Tensor cu = cu_op();
+        if (vk.device() != Device::Vulkan || cu.device() != Device::CUDA)
+            throw std::runtime_error(std::string(name) + " result device mismatch");
+        const auto actual = vk.to_vector();
+        const auto expected = cu.to_vector();
+        const auto vk_dispatches = profile ? dispatches(shader) - before : 0;
+        if (actual.size() != expected.size())
+            throw std::runtime_error(std::string(name) + " output size mismatch");
+        float max_abs = 0.0F, max_rel = 0.0F;
+        std::size_t bad = 0;
+        for (std::size_t i = 0; i < actual.size(); ++i) {
+            const float abs_error = std::abs(actual[i] - expected[i]);
+            const float rel_error = abs_error / std::max(1.0F, std::abs(expected[i]));
+            if (!std::isfinite(actual[i]) || !std::isfinite(expected[i]) ||
+                abs_error > tolerance * std::max(1.0F, std::abs(expected[i]))) ++bad;
+            max_abs = std::max(max_abs, abs_error);
+            max_rel = std::max(max_rel, rel_error);
+        }
+        std::printf("%-12s count=%llu max_abs=%.9g max_rel=%.9g mismatches=%llu",
+                    name, static_cast<unsigned long long>(actual.size()), max_abs, max_rel,
+                    static_cast<unsigned long long>(bad));
+        if (profile) std::printf(" vk_%s_dispatches=%llu", shader,
+                                 static_cast<unsigned long long>(vk_dispatches));
+        std::printf("\n");
+        return bad == 0 && (!profile || vk_dispatches >= min_dispatches);
+    };
+
+    bool ok = compare("roundtrip", [&] { return vk_a; }, [&] { return cu_a; }, 0.0F,
+                      "elementwise", 0);
+    ok = compare("add", [&] { return vk_a.add(vk_b); }, [&] { return cu_a.add(cu_b); },
+                 1e-5F, "elementwise", 1) && ok;
+    ok = compare("mul", [&] { return vk_a.mul(vk_b); }, [&] { return cu_a.mul(cu_b); },
+                 1e-5F, "elementwise", 1) && ok;
+    ok = compare("sub", [&] { return vk_a.sub(vk_b); }, [&] { return cu_a.sub(cu_b); },
+                 1e-5F, "elementwise", 1) && ok;
+    ok = compare("div", [&] { return vk_a.div(vk_b); }, [&] { return cu_a.div(cu_b); },
+                 1e-5F, "elementwise", 1) && ok;
+    ok = compare("relu", [&] { return vk_a.sub(vk_b).relu(); },
+                 [&] { return cu_a.sub(cu_b).relu(); },
+                 1e-5F, "elementwise", 2) && ok;
+    ok = compare("sqrt", [&] { return vk_a.sqrt(); }, [&] { return cu_a.sqrt(); },
+                 1e-5F, "elementwise", 1) && ok;
+    ok = compare("exp", [&] { return vk_a.exp(); }, [&] { return cu_a.exp(); },
+                 2e-5F, "elementwise", 1) && ok;
+    ok = compare("sigmoid", [&] { return vk_a.sigmoid(); }, [&] { return cu_a.sigmoid(); },
+                 2e-5F, "elementwise", 1) && ok;
+    ok = compare("tanh", [&] { return vk_a.tanh(); }, [&] { return cu_a.tanh(); },
+                 2e-5F, "elementwise", 1) && ok;
+    ok = compare("neg", [&] { return vk_a.neg(); }, [&] { return cu_a.neg(); },
+                 1e-5F, "elementwise", 1) && ok;
+    ok = compare("20-add chain", [&] {
+        Tensor value = vk_a;
+        for (int i = 0; i < 20; ++i) value = value.add(vk_b);
+        return value;
+    }, [&] {
+        Tensor value = cu_a;
+        for (int i = 0; i < 20; ++i) value = value.add(cu_b);
+        return value;
+    }, 2e-5F, "elementwise", 20) && ok;
+    ok = compare("scalar chain", [&] {
+        Tensor value = vk_a;
+        for (int i = 0; i < 20; ++i) value = value.add(1.0F).mul(0.5F);
+        return value;
+    }, [&] {
+        Tensor value = cu_a;
+        for (int i = 0; i < 20; ++i) value = value.add(1.0F).mul(0.5F);
+        return value;
+    }, 2e-5F, "elementwise", 40) && ok;
+    ok = compare("sum", [&] { return vk_a.sum(); }, [&] { return cu_a.sum(); },
+                 1e-4F, "reduce_all_f32", 1) && ok;
+    ok = compare("mean", [&] { return vk_a.mean(); }, [&] { return cu_a.mean(); },
+                 1e-4F, "reduce_all_f32", 1) && ok;
+    return ok;
+}
+
+void million_benchmark(const int repeats) {
+    constexpr std::size_t count = 1U << 20;
+    std::printf("=== CUDA/Vulkan comparison: %llu elements, %d repeats, median wall ms ===\n",
+                static_cast<unsigned long long>(count), repeats);
+    if (!million_correctness(count))
+        throw std::runtime_error("million-element CUDA/Vulkan correctness comparison failed");
+    std::printf("\n%-20s %12s %12s %10s\n", "operation", "vulkan_ms", "cuda_ms", "vk/cuda");
+    const auto row = [](const char* name, const double vk, const double cu) {
+        std::printf("%-20s %12.4f %12.4f %9.2fx\n", name, vk, cu, vk / cu);
+    };
+    row("1 add, sync", chain_sync_ms(count, 1, repeats, Device::Vulkan),
+        chain_sync_ms(count, 1, repeats, Device::CUDA));
+    row("20 adds, sync", chain_sync_ms(count, 20, repeats, Device::Vulkan),
+        chain_sync_ms(count, 20, repeats, Device::CUDA));
+    row("sum + readback", full_reduce_ms(count, repeats, Device::Vulkan, false),
+        full_reduce_ms(count, repeats, Device::CUDA, false));
+    row("mean + readback", full_reduce_ms(count, repeats, Device::Vulkan, true),
+        full_reduce_ms(count, repeats, Device::CUDA, true));
+    row("Adam expression", adam_expression_ms(count, repeats, Device::Vulkan),
+        adam_expression_ms(count, repeats, Device::CUDA));
+    std::printf("%-20s %12.4f %12s %10s\n", "Vulkan fused Adam",
+                adam_fused_vulkan_ms(count, repeats), "n/a", "n/a");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
         if (!tinytensor::vulkan::available())
             throw std::runtime_error("the tinytensor Vulkan backend is not available");
-        const int repeats = argc > 1 ? std::stoi(argv[1]) : 15;
+        const bool million_only = argc > 1 && std::string(argv[1]) == "--million";
+        const int repeats = argc > (million_only ? 2 : 1)
+                                ? std::stoi(argv[million_only ? 2 : 1]) : 15;
+        if (repeats < 1) throw std::runtime_error("repeats must be positive");
         const auto& info = tinytensor::vulkan::device_info();
         std::printf("device=%s api=%u subgroup=%u push_descriptors=%s\n", info.name.c_str(),
                     info.api_version, info.subgroup_size, info.push_descriptors ? "yes" : "no");
+        if (million_only) {
+            million_benchmark(repeats);
+            return 0;
+        }
 
         // Which elementwise ops actually run on the Vulkan backend. A failure
         // here is a coverage gap, not a timing result, so probe before timing.

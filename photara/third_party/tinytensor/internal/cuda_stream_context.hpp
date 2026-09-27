@@ -9,7 +9,7 @@
 namespace tinytensor {
 
     // Thread-local current CUDA stream (PyTorch-style).
-    // Exported from lfs_core so the singleton is shared across DSO boundaries.
+    // Exported from photara_core so the singleton is shared across DSO boundaries.
     PHOTARA_CORE_API cudaStream_t getCurrentCUDAStream();
     PHOTARA_CORE_API void setCurrentCUDAStream(cudaStream_t stream);
 

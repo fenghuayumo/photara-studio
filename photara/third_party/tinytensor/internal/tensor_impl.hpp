@@ -1290,39 +1290,36 @@ namespace tinytensor {
         // ============= UNARY OPERATIONS (LAZY EVALUATION) =============
         // Macro to define unary operations with lazy evaluation via expression templates
 #ifdef TINYTENSOR_HAS_VULKAN
-#define LFS_VULKAN_UNARY(vulkan_op)                                     \
+#define PHOTARA_VULKAN_UNARY(vulkan_op)                                     \
         if (device_ == Device::Vulkan)                                  \
             return vulkan::elementwise_unary(                           \
                 *this, vulkan::ElementwiseOp::vulkan_op);
 #else
-#define LFS_VULKAN_UNARY(vulkan_op)
+#define PHOTARA_VULKAN_UNARY(vulkan_op)
 #endif
 
-#define LFS_DEFINE_UNARY_OP(name, op_type, vulkan_op)                    \
+#define PHOTARA_DEFINE_UNARY_OP(name, op_type, vulkan_op)                    \
     Tensor name() const {                                                \
         if (!is_valid() || numel() == 0) {                               \
             if (!is_valid())                                             \
                 return Tensor();                                         \
             return Tensor::empty(shape_, device_, dtype_);               \
         }                                                                \
-        LFS_VULKAN_UNARY(vulkan_op)                                      \
+        PHOTARA_VULKAN_UNARY(vulkan_op)                                      \
         Tensor result = UnaryExpr<TensorLeaf, ops::op_type>(             \
             TensorLeaf(*this), ops::op_type{}, shape_, device_, dtype_); \
         link_deferred_result_to_inputs(result, {lazy_expr_id()});        \
         return result;                                                   \
     }
 
-#define LFS_DEFINE_UNARY_OP_FUSABLE(name, op_type, fusion_kind, vulkan_op)                \
+#define PHOTARA_DEFINE_UNARY_OP_FUSABLE(name, op_type, fusion_kind, vulkan_op)                \
     Tensor name() const {                                                                 \
         if (!is_valid() || numel() == 0) {                                                \
             if (!is_valid())                                                              \
                 return Tensor();                                                          \
             return Tensor::empty(shape_, device_, dtype_);                                \
         }                                                                                 \
-        if (device_ == Device::Vulkan &&                                                 \
-            (dtype_ != DataType::Float32 || !is_contiguous() || bytes() < (1U << 20) ||  \
-             !internal::lazy_size_heuristic_should_defer(bytes())))                      \
-            return vulkan::elementwise_unary(*this, vulkan::ElementwiseOp::vulkan_op);   \
+        PHOTARA_VULKAN_UNARY(vulkan_op)                                                    \
         Tensor result = UnaryExpr<TensorLeaf, ops::op_type>(                              \
             TensorLeaf(*this), ops::op_type{}, shape_, device_, dtype_);                  \
         link_deferred_result_to_inputs(result, {lazy_expr_id()});                         \
@@ -1343,14 +1340,14 @@ namespace tinytensor {
     }
 
         // Macro for unary ops that return Bool dtype (isnan, isinf, etc.)
-#define LFS_DEFINE_UNARY_OP_BOOL(name, op_type, vulkan_op)                       \
+#define PHOTARA_DEFINE_UNARY_OP_BOOL(name, op_type, vulkan_op)                       \
     Tensor name() const {                                                        \
         if (!is_valid() || numel() == 0) {                                       \
             if (!is_valid())                                                     \
                 return Tensor();                                                 \
             return Tensor::empty(shape_, device_, DataType::Bool);               \
         }                                                                        \
-        LFS_VULKAN_UNARY(vulkan_op)                                              \
+        PHOTARA_VULKAN_UNARY(vulkan_op)                                              \
         Tensor result = UnaryExpr<TensorLeaf, ops::op_type>(                     \
             TensorLeaf(*this), ops::op_type{}, shape_, device_, DataType::Bool); \
         link_deferred_result_to_inputs(result, {lazy_expr_id()});                \
@@ -1358,59 +1355,59 @@ namespace tinytensor {
     }
 
         // Arithmetic unary operations
-        LFS_DEFINE_UNARY_OP_FUSABLE(neg, neg_op, Neg, Neg)
-        LFS_DEFINE_UNARY_OP_FUSABLE(abs, abs_op, Abs, Abs)
-        LFS_DEFINE_UNARY_OP_FUSABLE(sign, sign_op, Sign, Sign)
-        LFS_DEFINE_UNARY_OP_FUSABLE(reciprocal, reciprocal_op, Reciprocal, Reciprocal)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(neg, neg_op, Neg, Neg)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(abs, abs_op, Abs, Abs)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(sign, sign_op, Sign, Sign)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(reciprocal, reciprocal_op, Reciprocal, Reciprocal)
 
         // Exponential and logarithmic
-        LFS_DEFINE_UNARY_OP_FUSABLE(exp, exp_op, Exp, Exp)
-        LFS_DEFINE_UNARY_OP(exp2, exp2_op, Exp2)
-        LFS_DEFINE_UNARY_OP_FUSABLE(log, log_op, Log, Log)
-        LFS_DEFINE_UNARY_OP(log2, log2_op, Log2)
-        LFS_DEFINE_UNARY_OP(log10, log10_op, Log10)
-        LFS_DEFINE_UNARY_OP(log1p, log1p_op, Log1p)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(exp, exp_op, Exp, Exp)
+        PHOTARA_DEFINE_UNARY_OP(exp2, exp2_op, Exp2)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(log, log_op, Log, Log)
+        PHOTARA_DEFINE_UNARY_OP(log2, log2_op, Log2)
+        PHOTARA_DEFINE_UNARY_OP(log10, log10_op, Log10)
+        PHOTARA_DEFINE_UNARY_OP(log1p, log1p_op, Log1p)
 
         // Power and roots
-        LFS_DEFINE_UNARY_OP_FUSABLE(sqrt, sqrt_op, Sqrt, Sqrt)
-        LFS_DEFINE_UNARY_OP_FUSABLE(rsqrt, rsqrt_op, Rsqrt, Rsqrt)
-        LFS_DEFINE_UNARY_OP_FUSABLE(square, square_op, Square, Square)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(sqrt, sqrt_op, Sqrt, Sqrt)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(rsqrt, rsqrt_op, Rsqrt, Rsqrt)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(square, square_op, Square, Square)
 
         // Trigonometric
-        LFS_DEFINE_UNARY_OP(sin, sin_op, Sin)
-        LFS_DEFINE_UNARY_OP(cos, cos_op, Cos)
-        LFS_DEFINE_UNARY_OP(tan, tan_op, Tan)
-        LFS_DEFINE_UNARY_OP(asin, asin_op, Asin)
-        LFS_DEFINE_UNARY_OP(acos, acos_op, Acos)
-        LFS_DEFINE_UNARY_OP(atan, atan_op, Atan)
+        PHOTARA_DEFINE_UNARY_OP(sin, sin_op, Sin)
+        PHOTARA_DEFINE_UNARY_OP(cos, cos_op, Cos)
+        PHOTARA_DEFINE_UNARY_OP(tan, tan_op, Tan)
+        PHOTARA_DEFINE_UNARY_OP(asin, asin_op, Asin)
+        PHOTARA_DEFINE_UNARY_OP(acos, acos_op, Acos)
+        PHOTARA_DEFINE_UNARY_OP(atan, atan_op, Atan)
 
         // Hyperbolic
-        LFS_DEFINE_UNARY_OP(sinh, sinh_op, Sinh)
-        LFS_DEFINE_UNARY_OP(cosh, cosh_op, Cosh)
-        LFS_DEFINE_UNARY_OP_FUSABLE(tanh, tanh_op, Tanh, Tanh)
+        PHOTARA_DEFINE_UNARY_OP(sinh, sinh_op, Sinh)
+        PHOTARA_DEFINE_UNARY_OP(cosh, cosh_op, Cosh)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(tanh, tanh_op, Tanh, Tanh)
 
         // Activation functions
-        LFS_DEFINE_UNARY_OP_FUSABLE(sigmoid, sigmoid_op, Sigmoid, Sigmoid)
-        LFS_DEFINE_UNARY_OP_FUSABLE(relu, relu_op, Relu, Relu)
-        LFS_DEFINE_UNARY_OP(gelu, gelu_op, Gelu)
-        LFS_DEFINE_UNARY_OP(swish, swish_op, Swish)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(sigmoid, sigmoid_op, Sigmoid, Sigmoid)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(relu, relu_op, Relu, Relu)
+        PHOTARA_DEFINE_UNARY_OP(gelu, gelu_op, Gelu)
+        PHOTARA_DEFINE_UNARY_OP(swish, swish_op, Swish)
 
         // Rounding
-        LFS_DEFINE_UNARY_OP_FUSABLE(floor, floor_op, Floor, Floor)
-        LFS_DEFINE_UNARY_OP_FUSABLE(ceil, ceil_op, Ceil, Ceil)
-        LFS_DEFINE_UNARY_OP_FUSABLE(round, round_op, Round, Round)
-        LFS_DEFINE_UNARY_OP(trunc, trunc_op, Trunc)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(floor, floor_op, Floor, Floor)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(ceil, ceil_op, Ceil, Ceil)
+        PHOTARA_DEFINE_UNARY_OP_FUSABLE(round, round_op, Round, Round)
+        PHOTARA_DEFINE_UNARY_OP(trunc, trunc_op, Trunc)
 
         // Boolean predicates (return Bool dtype)
-        LFS_DEFINE_UNARY_OP_BOOL(isnan, isnan_op, IsNan)
-        LFS_DEFINE_UNARY_OP_BOOL(isinf, isinf_op, IsInf)
-        LFS_DEFINE_UNARY_OP_BOOL(isfinite, isfinite_op, IsFinite)
+        PHOTARA_DEFINE_UNARY_OP_BOOL(isnan, isnan_op, IsNan)
+        PHOTARA_DEFINE_UNARY_OP_BOOL(isinf, isinf_op, IsInf)
+        PHOTARA_DEFINE_UNARY_OP_BOOL(isfinite, isfinite_op, IsFinite)
         Tensor logical_not() const;
 
-#undef LFS_DEFINE_UNARY_OP
-#undef LFS_DEFINE_UNARY_OP_FUSABLE
-#undef LFS_DEFINE_UNARY_OP_BOOL
-#undef LFS_VULKAN_UNARY
+#undef PHOTARA_DEFINE_UNARY_OP
+#undef PHOTARA_DEFINE_UNARY_OP_FUSABLE
+#undef PHOTARA_DEFINE_UNARY_OP_BOOL
+#undef PHOTARA_VULKAN_UNARY
 
         Tensor normalize(int dim = -1, float eps = 1e-12f) const;
         Tensor logit(float eps = 1e-7f) const;
@@ -1455,15 +1452,15 @@ namespace tinytensor {
 
         // Macro for scalar binary operations (lazy evaluation with scalar_right_op)
 #ifdef TINYTENSOR_HAS_VULKAN
-#define LFS_VULKAN_SCALAR(vulkan_op, scalar_value)                        \
+#define PHOTARA_VULKAN_SCALAR(vulkan_op, scalar_value)                        \
         if (device_ == Device::Vulkan)                                    \
             return vulkan::elementwise_scalar(                            \
                 *this, scalar_value, vulkan::ElementwiseOp::vulkan_op);
 #else
-#define LFS_VULKAN_SCALAR(vulkan_op, scalar_value)
+#define PHOTARA_VULKAN_SCALAR(vulkan_op, scalar_value)
 #endif
 
-#define LFS_DEFINE_SCALAR_BINARY_OP_FUSABLE(name, op_type, fusion_kind, vulkan_op)        \
+#define PHOTARA_DEFINE_SCALAR_BINARY_OP_FUSABLE(name, op_type, fusion_kind, vulkan_op)        \
     template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>           \
     Tensor name(const T& other) const {                                                   \
         if (!is_valid() || numel() == 0) {                                                \
@@ -1472,11 +1469,7 @@ namespace tinytensor {
             return Tensor::empty(shape_, device_, dtype_);                                \
         }                                                                                 \
         const float scalar_value = static_cast<float>(other);                             \
-        if (device_ == Device::Vulkan &&                                                  \
-            (dtype_ != DataType::Float32 || !is_contiguous() || bytes() < (1U << 20) ||   \
-             !internal::lazy_size_heuristic_should_defer(bytes())))                       \
-            return vulkan::elementwise_scalar(                                            \
-                *this, scalar_value, vulkan::ElementwiseOp::vulkan_op);                   \
+        PHOTARA_VULKAN_SCALAR(vulkan_op, scalar_value)                                    \
         Tensor result = UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::op_type, float>>( \
             TensorLeaf(*this), ops::scalar_right_op<ops::op_type, float>(scalar_value),   \
             shape_, device_, dtype_);                                                     \
@@ -1497,7 +1490,7 @@ namespace tinytensor {
         return result;                                                                    \
     }
 
-#define LFS_DEFINE_SCALAR_BINARY_OP(name, op_type, vulkan_op)                                       \
+#define PHOTARA_DEFINE_SCALAR_BINARY_OP(name, op_type, vulkan_op)                                       \
     template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>                      \
     Tensor name(const T& other) const {                                                              \
         if (!is_valid() || numel() == 0) {                                                           \
@@ -1506,7 +1499,7 @@ namespace tinytensor {
             return Tensor::empty(shape_, device_, dtype_);                                           \
         }                                                                                            \
         const float scalar_value = static_cast<float>(other);                                       \
-        LFS_VULKAN_SCALAR(vulkan_op, scalar_value)                                                   \
+        PHOTARA_VULKAN_SCALAR(vulkan_op, scalar_value)                                                   \
         Tensor result = UnaryExpr<TensorLeaf, ops::scalar_right_op<ops::op_type, float>>(            \
             TensorLeaf(*this), ops::scalar_right_op<ops::op_type, float>(static_cast<float>(other)), \
             shape_, device_, dtype_);                                                                \
@@ -1514,18 +1507,18 @@ namespace tinytensor {
         return result;                                                                               \
     }
 
-        LFS_DEFINE_SCALAR_BINARY_OP_FUSABLE(add, add_op, AddScalar, Add)
-        LFS_DEFINE_SCALAR_BINARY_OP_FUSABLE(sub, sub_op, SubScalar, Sub)
-        LFS_DEFINE_SCALAR_BINARY_OP_FUSABLE(mul, mul_op, MulScalar, Mul)
-        LFS_DEFINE_SCALAR_BINARY_OP_FUSABLE(div, div_op, DivScalar, Div)
-        LFS_DEFINE_SCALAR_BINARY_OP(pow, pow_op, Pow)
-        LFS_DEFINE_SCALAR_BINARY_OP(mod, mod_op, Mod)
-        LFS_DEFINE_SCALAR_BINARY_OP(maximum, maximum_op, Maximum)
-        LFS_DEFINE_SCALAR_BINARY_OP(minimum, minimum_op, Minimum)
+        PHOTARA_DEFINE_SCALAR_BINARY_OP_FUSABLE(add, add_op, AddScalar, Add)
+        PHOTARA_DEFINE_SCALAR_BINARY_OP_FUSABLE(sub, sub_op, SubScalar, Sub)
+        PHOTARA_DEFINE_SCALAR_BINARY_OP_FUSABLE(mul, mul_op, MulScalar, Mul)
+        PHOTARA_DEFINE_SCALAR_BINARY_OP_FUSABLE(div, div_op, DivScalar, Div)
+        PHOTARA_DEFINE_SCALAR_BINARY_OP(pow, pow_op, Pow)
+        PHOTARA_DEFINE_SCALAR_BINARY_OP(mod, mod_op, Mod)
+        PHOTARA_DEFINE_SCALAR_BINARY_OP(maximum, maximum_op, Maximum)
+        PHOTARA_DEFINE_SCALAR_BINARY_OP(minimum, minimum_op, Minimum)
 
-#undef LFS_DEFINE_SCALAR_BINARY_OP
-#undef LFS_DEFINE_SCALAR_BINARY_OP_FUSABLE
-#undef LFS_VULKAN_SCALAR
+#undef PHOTARA_DEFINE_SCALAR_BINARY_OP
+#undef PHOTARA_DEFINE_SCALAR_BINARY_OP_FUSABLE
+#undef PHOTARA_VULKAN_SCALAR
 
         // Comparison operations (return Bool tensors)
 
@@ -1539,7 +1532,7 @@ namespace tinytensor {
 
         // Macro for scalar comparison operations (return Bool dtype)
 #ifdef TINYTENSOR_HAS_VULKAN
-#define LFS_DEFINE_SCALAR_CMP_OP(name, op_type, vulkan_op)                                           \
+#define PHOTARA_DEFINE_SCALAR_CMP_OP(name, op_type, vulkan_op)                                           \
     template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>                      \
     Tensor name(const T& other) const {                                                              \
         if (!is_valid() || numel() == 0) {                                                           \
@@ -1556,7 +1549,7 @@ namespace tinytensor {
             shape_, device_, DataType::Bool);                                                        \
     }
 #else
-#define LFS_DEFINE_SCALAR_CMP_OP(name, op_type, vulkan_op)                                           \
+#define PHOTARA_DEFINE_SCALAR_CMP_OP(name, op_type, vulkan_op)                                           \
     template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>                      \
     Tensor name(const T& other) const {                                                              \
         if (!is_valid() || numel() == 0) {                                                           \
@@ -1570,14 +1563,14 @@ namespace tinytensor {
     }
 #endif
 
-        LFS_DEFINE_SCALAR_CMP_OP(eq, equal_op, Eq)
-        LFS_DEFINE_SCALAR_CMP_OP(ne, not_equal_op, Ne)
-        LFS_DEFINE_SCALAR_CMP_OP(lt, less_op, Lt)
-        LFS_DEFINE_SCALAR_CMP_OP(le, less_equal_op, Le)
-        LFS_DEFINE_SCALAR_CMP_OP(gt, greater_op, Gt)
-        LFS_DEFINE_SCALAR_CMP_OP(ge, greater_equal_op, Ge)
+        PHOTARA_DEFINE_SCALAR_CMP_OP(eq, equal_op, Eq)
+        PHOTARA_DEFINE_SCALAR_CMP_OP(ne, not_equal_op, Ne)
+        PHOTARA_DEFINE_SCALAR_CMP_OP(lt, less_op, Lt)
+        PHOTARA_DEFINE_SCALAR_CMP_OP(le, less_equal_op, Le)
+        PHOTARA_DEFINE_SCALAR_CMP_OP(gt, greater_op, Gt)
+        PHOTARA_DEFINE_SCALAR_CMP_OP(ge, greater_equal_op, Ge)
 
-#undef LFS_DEFINE_SCALAR_CMP_OP
+#undef PHOTARA_DEFINE_SCALAR_CMP_OP
 
         Tensor logical_and(const Tensor& other) const;
         Tensor logical_or(const Tensor& other) const;

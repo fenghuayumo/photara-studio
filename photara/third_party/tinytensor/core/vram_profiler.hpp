@@ -350,4 +350,4 @@ namespace tinytensor {
 // For compatibility with original code
 #define VRAM_PROFILER_RECORD_ALLOC(size, type) do { (void)(size); (void)(type); } while(0)
 #define VRAM_PROFILER_RECORD_FREE(size, type) do { (void)(size); (void)(type); } while(0)
-#define LFS_COUNTER_ADD(name, value) do { (void)(name); (void)(value); } while(0)
+#define PHOTARA_COUNTER_ADD(name, value) do { (void)(name); (void)(value); } while(0)

@@ -155,7 +155,7 @@ namespace tinytensor {
                     stats_.cached_bytes -= size;
                     stats_.cache_hits++;
                     tinytensor::VramProfiler::instance().setPinnedHostUsed(stats_.allocated_bytes);
-                    LFS_COUNTER_ADD("io.pinned_host.cache_hit", 1);
+                    PHOTARA_COUNTER_ADD("io.pinned_host.cache_hit", 1);
 
                     return ptr;
                 } else if (status != cudaErrorNotReady) {
@@ -190,7 +190,7 @@ namespace tinytensor {
         stats_.num_allocs++;
         stats_.cache_misses++;
         tinytensor::VramProfiler::instance().setPinnedHostUsed(stats_.allocated_bytes);
-        LFS_COUNTER_ADD("io.pinned_host.cache_miss", 1);
+        PHOTARA_COUNTER_ADD("io.pinned_host.cache_miss", 1);
 
         LOG_TRACE("Pinned memory allocated: {} bytes (total: {} MB, {} allocs)",
                   bytes, stats_.allocated_bytes / (1024.0 * 1024.0), stats_.num_allocs);
