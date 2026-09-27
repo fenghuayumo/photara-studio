@@ -7,8 +7,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime_api.h>
@@ -262,6 +265,235 @@ void million_benchmark(const int repeats) {
                 adam_fused_vulkan_ms(count, repeats), "n/a", "n/a");
 }
 
+// The ADC-IGS refinement is built from a handful of tensor primitives that
+// all have a host-visible result: masks are counted, indices are compacted,
+// selections are sorted. This isolates each one on both backends at the sizes
+// the glass scene actually reaches during refinement.
+void densify_benchmark(const std::size_t count, const int repeats) {
+    std::printf("=== densification primitives: %llu elements, %d repeats, median wall ms ===\n",
+                static_cast<unsigned long long>(count), repeats);
+    std::printf("%-28s %12s %12s %10s\n", "operation", "vulkan_ms", "cuda_ms", "vk/cuda");
+    const auto row = [](const char* name, const double vk, const double cu) {
+        if (cu > 0.0)
+            std::printf("%-28s %12.4f %12.4f %9.2fx\n", name, vk, cu, vk / cu);
+        else
+            std::printf("%-28s %12.4f %12s %10s\n", name, vk, "n/a", "n/a");
+    };
+
+    std::vector<float> host_values(count);
+    std::vector<bool> host_mask(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        host_values[i] = static_cast<float>((i * 2654435761u) % 1000u) / 1000.0F;
+        host_mask[i] = (i % 3u) == 0u ? 1 : 0;
+    }
+
+    const auto make_bool = [&](const Device device) {
+        return Tensor::from_vector(host_mask, {count}, device);
+    };
+    const auto make_values = [&](const Device device) {
+        return Tensor::from_vector(host_values, {count}, device);
+    };
+
+    row("count_nonzero(bool)",
+        median_ms([&] { return static_cast<float>(make_bool(Device::Vulkan).count_nonzero()); }, 1),
+        median_ms([&] { return static_cast<float>(make_bool(Device::CUDA).count_nonzero()); }, 1));
+
+    {
+        // Broadcast probe: [N,3] - [1,3] must stay row-wise on Vulkan. A
+        // regression here would silently corrupt device-side prune masks.
+        const std::size_t rows = count / 3;
+        std::vector<float> host_rows(3 * rows);
+        for (std::size_t i = 0; i < 3 * rows; ++i) host_rows[i] = host_values[i];
+        auto values = Tensor::from_vector(
+            host_rows, {rows, 3}, Device::Vulkan);
+        auto center = Tensor::from_vector(
+            std::vector<float>{0.25F, 0.5F, 0.75F}, {1, 3}, Device::Vulkan);
+        const auto shifted = values.sub(center).abs();
+        const auto host = shifted.to_vector();
+        double worst = 0.0;
+        for (std::size_t i = 0; i < 3 * rows; ++i) {
+            const double expected = std::abs(host_values[i] -
+                (i % 3 == 0 ? 0.25F : i % 3 == 1 ? 0.5F : 0.75F));
+            worst = std::max(worst, std::abs(static_cast<double>(host[i]) - expected));
+        }
+        std::printf("broadcast [N,3]-[1,3] max_abs_error=%g\n", worst);
+        auto finite_rows = values.isfinite().all(1);
+        std::printf("all(dim=1) finite_rows=%lld/%llu\n",
+            static_cast<long long>(finite_rows.count_nonzero()),
+            static_cast<unsigned long long>(rows));
+    }
+
+    {
+        // Replay of the device-side prune_masks composition at the glass
+        // scene's initial size. This isolates any pathological op from the
+        // full trainer.
+        const std::size_t rows = count;
+        std::vector<float> means(3 * rows), scales(3 * rows),
+            rotations(4 * rows), logits(rows), sh(48 * rows);
+        for (std::size_t i = 0; i < sh.size(); ++i) sh[i] = 0.5F;
+        for (std::size_t i = 0; i < logits.size(); ++i) logits[i] = 0.25F;
+        auto model_means = Tensor::from_vector(means, {rows, 3}, Device::Vulkan);
+        auto model_scales = Tensor::from_vector(scales, {rows, 3}, Device::Vulkan);
+        auto model_rotations = Tensor::from_vector(rotations, {rows, 4}, Device::Vulkan);
+        auto model_logits = Tensor::from_vector(logits, {rows}, Device::Vulkan);
+        auto model_sh = Tensor::from_vector(sh, {rows, 48}, Device::Vulkan);
+        auto keep = Tensor::zeros_bool({rows}, Device::Vulkan);
+        auto hard = Tensor::zeros_bool({rows}, Device::Vulkan);
+        auto opacities = Tensor::empty({rows}, Device::Vulkan);
+        const auto run = [&] {
+            tinytensor::vulkan::prune_masks(
+                model_means, model_scales, model_rotations, model_logits,
+                model_sh, keep, hard, opacities, 0.01F, 1000.F, 0.F, 0.F, 0.F);
+            return keep;
+        };
+        auto result = run();
+        std::printf("prune replay hard=%lld keep=%lld\n",
+            static_cast<long long>(result.logical_not().count_nonzero()),
+            static_cast<long long>(result.count_nonzero()));
+        std::fflush(stdout);
+        {
+            // Poison representative rows and compare against the reference
+            // sweep the fused shader replaced.
+            auto host_means = model_means.to_vector();
+            auto host_scales = model_scales.to_vector();
+            auto host_rotations = model_rotations.to_vector();
+            auto host_logits = model_logits.to_vector();
+            auto host_sh = model_sh.to_vector();
+            const auto poison = [](std::vector<float>& values,
+                                   const std::size_t row, const float value) {
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    values[3 * row + axis] = value;
+            };
+            poison(host_means, 1, std::numeric_limits<float>::quiet_NaN());
+            host_sh[48 * 2 + 7] = std::numeric_limits<float>::quiet_NaN();
+            poison(host_means, 3, 5000.F);
+            host_scales[3 * 4 + 1] = 12.F;
+            host_logits[5] = -12.F;
+            host_rotations[4 * 6 + 2] = std::numeric_limits<float>::quiet_NaN();
+            model_means = Tensor::from_vector(host_means, model_means.shape(), Device::Vulkan);
+            model_scales = Tensor::from_vector(host_scales, model_scales.shape(), Device::Vulkan);
+            model_rotations = Tensor::from_vector(host_rotations, model_rotations.shape(), Device::Vulkan);
+            model_logits = Tensor::from_vector(host_logits, model_logits.shape(), Device::Vulkan);
+            model_sh = Tensor::from_vector(host_sh, model_sh.shape(), Device::Vulkan);
+            run();
+            const auto keep_host = keep.to_vector_bool();
+            const auto hard_host = hard.to_vector_bool();
+            const auto opacity_host = opacities.to_vector();
+            std::size_t mismatches = 0;
+            for (std::size_t row = 0; row < rows; ++row) {
+                const float opacity = 1.F / (1.F + std::exp(-host_logits[row]));
+                bool bad = !std::isfinite(host_logits[row]);
+                float maximum_scale = 0.F;
+                bool outside = false;
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    const float mean = host_means[3 * row + axis];
+                    const float scale = host_scales[3 * row + axis];
+                    bad = bad || !std::isfinite(mean) || !std::isfinite(scale);
+                    if (std::isfinite(scale))
+                        maximum_scale = std::max(maximum_scale, std::exp(scale));
+                    outside = outside || std::abs(mean) > 1000.F;
+                }
+                for (std::size_t component = 0; component < 4; ++component)
+                    bad = bad || !std::isfinite(host_rotations[4 * row + component]);
+                for (std::size_t component = 0; component < 48; ++component)
+                    bad = bad || !std::isfinite(host_sh[48 * row + component]);
+                const bool hard_row = bad || outside || maximum_scale > 1000.F;
+                const bool keep_row = !hard_row && opacity >= 0.01F;
+                if (keep_host[row] != keep_row ||
+                    hard_host[row] != hard_row ||
+                    std::abs(opacity_host[row] - opacity) > 1e-6F)
+                    ++mismatches;
+            }
+            std::printf("prune parity poisoned_mismatches=%llu (rows 1-6 expected hard)\n",
+                static_cast<unsigned long long>(mismatches));
+        }
+        std::printf("prune replay ms=%.4f\n",
+            median_ms([&] { run(); return 1.0F; }, 3));
+    }
+
+    {
+        auto vk_mask = make_bool(Device::Vulkan);
+        auto cu_mask = make_bool(Device::CUDA);
+        row("nonzero",
+            median_ms([&] { return static_cast<float>(vk_mask.nonzero().numel()); }, repeats),
+            median_ms([&] { return static_cast<float>(cu_mask.nonzero().numel()); }, repeats));
+    }
+
+    {
+        auto vk_values = make_values(Device::Vulkan);
+        auto cu_values = make_values(Device::CUDA);
+        row("sort descending",
+            median_ms([&] { return static_cast<float>(vk_values.sort(0, true).second.numel()); },
+                      repeats),
+            median_ms([&] { return static_cast<float>(cu_values.sort(0, true).second.numel()); },
+                      repeats));
+    }
+
+    {
+        auto vk_values = make_values(Device::Vulkan);
+        auto cu_values = make_values(Device::CUDA);
+        row("max + readback",
+            median_ms([&] { return vk_values.max().to_vector().front(); }, repeats),
+            median_ms([&] { return cu_values.max().to_vector().front(); }, repeats));
+    }
+
+    {
+        auto vk_values = make_values(Device::Vulkan);
+        auto cu_values = make_values(Device::CUDA);
+        const std::vector<int> index_host(64);
+        std::vector<int> indices(64);
+        for (std::size_t i = 0; i < indices.size(); ++i)
+            indices[i] = static_cast<int>((i * 7919u) % count);
+        auto vk_indices = Tensor::from_vector(indices, {indices.size()}, Device::Vulkan);
+        auto cu_indices = Tensor::from_vector(indices, {indices.size()}, Device::CUDA);
+        row("index_select(64)",
+            median_ms([&] { return static_cast<float>(
+                vk_values.index_select(0, vk_indices).numel()); }, repeats),
+            median_ms([&] { return static_cast<float>(
+                cu_values.index_select(0, cu_indices).numel()); }, repeats));
+    }
+
+    // The two forms of the Gumbel top-k used by IGS selection: the device
+    // form the Vulkan backend now takes, and the host partial_sort the CUDA
+    // backend has always taken.
+    const std::size_t requested = 4096;
+    {
+        auto weights = make_values(Device::Vulkan).clamp_min(1e-7F);
+        row("gumbel device sort",
+            median_ms([&] {
+                const auto eligible = weights.isfinite().logical_and(weights.gt(0.F));
+                const auto uniform = Tensor::rand(weights.shape(), weights.device())
+                    .clamp_min(1e-7F).clamp_max(1.F - 1e-7F);
+                auto scores = weights.log().sub(uniform.log().mul(-1.F).log());
+                scores.masked_fill_(eligible.logical_not(),
+                                    -std::numeric_limits<float>::infinity());
+                return static_cast<float>(scores.sort(0, true).second
+                    .slice(0, 0, requested).to(DataType::Int32).numel());
+            }, repeats), -1.0);
+    }
+    {
+        auto weights = make_values(Device::CUDA).clamp_min(1e-7F);
+        row("gumbel host partial_sort",
+            median_ms([&] {
+                const auto values = weights.to_vector();
+                std::vector<std::pair<float, int>> scores;
+                scores.reserve(values.size());
+                for (std::size_t i = 0; i < values.size(); ++i) {
+                    const float u = 1e-7F + (1.F - 2e-7F) *
+                        static_cast<float>((i * 48271u) % 100003u) / 100003.0F;
+                    scores.emplace_back(
+                        std::log(values[i]) - std::log(-std::log(u)), static_cast<int>(i));
+                }
+                std::partial_sort(scores.begin(), scores.begin() +
+                    static_cast<std::ptrdiff_t>(requested), scores.end(), std::greater<>());
+                std::vector<int> picked(requested);
+                for (std::size_t i = 0; i < requested; ++i) picked[i] = scores[i].second;
+                return static_cast<float>(Tensor::from_vector(
+                    picked, {requested}, Device::CUDA).numel());
+            }, repeats), -1.0);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -269,14 +501,21 @@ int main(int argc, char** argv) {
         if (!tinytensor::vulkan::available())
             throw std::runtime_error("the tinytensor Vulkan backend is not available");
         const bool million_only = argc > 1 && std::string(argv[1]) == "--million";
-        const int repeats = argc > (million_only ? 2 : 1)
-                                ? std::stoi(argv[million_only ? 2 : 1]) : 15;
+        const bool densify_only = argc > 1 && std::string(argv[1]) == "--densify";
+        const std::size_t densify_count = densify_only && argc > 2
+            ? static_cast<std::size_t>(std::stoull(argv[2])) : std::size_t{271862};
+        const int repeats = million_only || densify_only ? 15 :
+            (argc > 1 ? std::stoi(argv[1]) : 15);
         if (repeats < 1) throw std::runtime_error("repeats must be positive");
         const auto& info = tinytensor::vulkan::device_info();
         std::printf("device=%s api=%u subgroup=%u push_descriptors=%s\n", info.name.c_str(),
                     info.api_version, info.subgroup_size, info.push_descriptors ? "yes" : "no");
         if (million_only) {
             million_benchmark(repeats);
+            return 0;
+        }
+        if (densify_only) {
+            densify_benchmark(densify_count, 5);
             return 0;
         }
 

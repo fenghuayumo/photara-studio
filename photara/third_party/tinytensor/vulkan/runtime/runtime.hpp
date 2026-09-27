@@ -37,6 +37,8 @@ enum class ShaderId : std::uint32_t {
     SelectCompact,
     Cat,
     UnpackRgba,
+    SortBitonic,
+    Prune,
     Count
 };
 
@@ -126,16 +128,18 @@ public:
     // once per op; a host readback (download) and shutdown flush implicitly.
     // Call it explicitly to bound how much work one submission carries.
     void flush();
+    // Submit the current batch on the shared queue without blocking the host.
+    // The next TinyTensor batch or blocking flush retires its fence before
+    // reusing the command buffer, descriptor arena, and upload staging.
+    void submit_async();
 
     // Per-op GPU timing. Enabled with TINYTENSOR_VULKAN_PROFILE_OPS=1: every
     // recorded dispatch gets a timestamp pair, the deltas are accumulated per
     // shader and per element-count bucket (a shader run over 630k parameters
     // and one over 10M spherical-harmonic values are different costs), and a
     // table is printed to stderr every
-    // TINYTENSOR_VULKAN_PROFILE_OPS_INTERVAL flushes (default 200). A flush
-    // window is what a caller's synchronize() sees, so one window is normally
-    // one training stage. Disabled by default: two timestamp writes per op are
-    // not free.
+    // TINYTENSOR_VULKAN_PROFILE_OPS_INTERVAL retired batches (default 200).
+    // Disabled by default: two timestamp writes per op are not free.
     struct OpProfileEntry {
         const char* name = "";
         std::uint64_t element_bucket = 0;
@@ -157,9 +161,11 @@ private:
     void create_pipelines();
     void destroy();
 
-    // Batch recording. flush_locked() is the only place that submits.
+    // Batch recording and fence retirement for blocking and interop submits.
     void begin_batch_locked();
     void flush_locked();
+    void submit_async_locked();
+    void retire_async_locked();
     void record_barrier_locked();
     [[nodiscard]] VkDescriptorSet acquire_descriptor_locked(VkDescriptorSetLayout layout);
 
@@ -208,6 +214,7 @@ private:
     std::size_t pool_budget_bytes_ = 0;
     VkCommandBuffer command_ = VK_NULL_HANDLE;
     bool recording_ = false;
+    bool in_flight_ = false;
     std::uint32_t batch_commands_ = 0;
     std::size_t staging_cursor_ = 0;
     std::vector<VkDescriptorBufferInfo> descriptor_infos_;

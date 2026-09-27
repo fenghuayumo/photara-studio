@@ -41,7 +41,7 @@ using AdamStates = std::array<detail::AdamState*, 6>;
 // maximum_extent is the largest half-extent used by its out-of-bounds prune.
 [[nodiscard]] SceneGeometry splat_scene_geometry(
     const std::vector<float>& xyz, float percentile = 0.8F);
-[[nodiscard]] SceneGeometry splat_scene_geometry_cuda(
+[[nodiscard]] SceneGeometry splat_scene_geometry_device(
     const tinytensor::Tensor& means, float percentile = 0.8F);
 
 [[nodiscard]] StrategySchedule strategy_schedule(

@@ -624,6 +624,62 @@ void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, boo
                             groups_for(outer * idx.numel() * inner));
 }
 
+void prune_masks(const Tensor& means, const Tensor& log_scales,
+                 const Tensor& quaternions, const Tensor& opacity_logits,
+                 const Tensor& sh, Tensor& keep, Tensor& hard,
+                 Tensor& opacities, const float minimum_opacity,
+                 const float maximum_bounds, const float center_x,
+                 const float center_y, const float center_z) {
+    const std::size_t count = static_cast<std::size_t>(means.shape()[0]);
+    if (count == 0) return;
+    const auto prepared_rows = [count](const Tensor& tensor) {
+        if (tensor.device() != Device::Vulkan ||
+            tensor.dtype() != DataType::Float32 || !tensor.is_contiguous() ||
+            tensor.storage_offset() != 0 || tensor.shape()[0] != count)
+            throw std::runtime_error(
+                "Vulkan prune expects contiguous float32 rows sharing dim0");
+        return tensor;
+    };
+    const auto row_means = prepared_rows(means);
+    const auto row_scales = prepared_rows(log_scales);
+    const auto row_rotations = prepared_rows(quaternions);
+    const auto row_logits = prepared_rows(opacity_logits);
+    const auto row_sh = prepared_rows(sh);
+    for (const Tensor* mask : {&keep, &hard}) {
+        if (mask->dtype() != DataType::Bool || !mask->is_contiguous() ||
+            mask->numel() != count)
+            throw std::runtime_error("Vulkan prune expects Bool [N] masks");
+    }
+    if (opacities.dtype() != DataType::Float32 || !opacities.is_contiguous() ||
+        opacities.numel() != count)
+        throw std::runtime_error("Vulkan prune expects a Float32 [N] output");
+
+    struct Push {
+        std::uint32_t count, mean_stride, scale_stride, rotation_stride;
+        std::uint32_t opacity_stride, sh_stride;
+        float minimum_opacity, maximum_bounds;
+        float center_x, center_y, center_z;
+    } push{};
+    static_assert(sizeof(push) == 44);
+    push.count = u32(count);
+    push.mean_stride = u32(row_means.numel() / count);
+    push.scale_stride = u32(row_scales.numel() / count);
+    push.rotation_stride = u32(row_rotations.numel() / count);
+    push.opacity_stride = u32(row_logits.numel() / count);
+    push.sh_stride = u32(row_sh.numel() / count);
+    push.minimum_opacity = minimum_opacity;
+    push.maximum_bounds = maximum_bounds;
+    push.center_x = center_x;
+    push.center_y = center_y;
+    push.center_z = center_z;
+    std::array<BufferBinding, 8> bindings{
+        bind(row_means), bind(row_scales), bind(row_rotations),
+        bind(row_logits), bind(row_sh), bind(keep), bind(hard),
+        bind(opacities)};
+    Context::get().dispatch(ShaderId::Prune, bindings, &push, sizeof(push),
+                            groups_for(count));
+}
+
 std::size_t count_nonzero(const Tensor& src) {
     Tensor input = prepared(src);
     if (input.numel() == 0) {
@@ -1119,6 +1175,66 @@ Tensor multinomial(const Tensor& weights, int num_samples, bool replacement) {
         ctx.dispatch(ShaderId::Multinomial, argmax_bindings, &push, sizeof(push), 1);
     }
     return out;
+}
+
+std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending) {
+    const std::size_t count = values.numel();
+    if (count == 0) {
+        return {Tensor::empty({0}, Device::Vulkan, DataType::Float32),
+                Tensor::empty({0}, Device::Vulkan, DataType::Int64)};
+    }
+    if (count == 1) {
+        return {values.clone(), Tensor::zeros({1}, Device::Vulkan, DataType::Int64)};
+    }
+    std::size_t padded = 1;
+    while (padded < count) padded <<= 1;
+    if (padded > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("Vulkan sort exceeds 32-bit indexing");
+    }
+    auto a_values = Tensor::empty({padded}, Device::Vulkan, DataType::Float32);
+    auto a_indices = Tensor::empty({padded}, Device::Vulkan, DataType::Int64);
+    auto b_values = Tensor::empty({padded}, Device::Vulkan, DataType::Float32);
+    auto b_indices = Tensor::empty({padded}, Device::Vulkan, DataType::Int64);
+    auto current_values = values;
+    Tensor current_indices;
+    bool write_a = true;
+    bool first_pass = true;
+    struct Push {
+        std::uint32_t count;
+        std::uint32_t padded;
+        std::uint32_t merge_size;
+        std::uint32_t compare_distance;
+        std::uint32_t descending;
+        std::uint32_t first_pass;
+        std::uint32_t src_offset;
+    } push{};
+    static_assert(sizeof(push) == 28);
+    push.count = u32(count);
+    push.padded = u32(padded);
+    push.descending = descending ? 1U : 0U;
+    auto& ctx = Context::get();
+    for (std::size_t merge = 2; merge <= padded; merge <<= 1) {
+        push.merge_size = u32(merge);
+        for (std::size_t distance = merge >> 1; distance != 0; distance >>= 1) {
+            push.compare_distance = u32(distance);
+            push.first_pass = first_pass ? 1U : 0U;
+            push.src_offset = first_pass ? u32(byte_offset(values)) : 0U;
+            auto& dst_values = write_a ? a_values : b_values;
+            auto& dst_indices = write_a ? a_indices : b_indices;
+            std::array<BufferBinding, 4> bindings{
+                bind(current_values),
+                first_pass ? dummy_binding() : bind(current_indices),
+                bind(dst_values), bind(dst_indices)};
+            ctx.dispatch(ShaderId::SortBitonic, bindings, &push, sizeof(push),
+                         groups_for(padded / 2));
+            current_values = dst_values;
+            current_indices = dst_indices;
+            write_a = !write_a;
+            first_pass = false;
+        }
+    }
+    return {current_values.slice(0, 0, count),
+            current_indices.slice(0, 0, count)};
 }
 
 } // namespace tinytensor::vulkan

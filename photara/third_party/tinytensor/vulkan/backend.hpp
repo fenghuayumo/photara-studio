@@ -70,6 +70,9 @@ BufferView buffer_view(const Tensor& tensor);
 void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor& second,
                const AdamStepOptions& options);
 void synchronize();
+// Submit pending work for a subsequent compute stage on the same Vulkan queue.
+// Unlike synchronize(), this does not wait for GPU completion.
+void submit_async();
 void shutdown();
 
 } // namespace vulkan

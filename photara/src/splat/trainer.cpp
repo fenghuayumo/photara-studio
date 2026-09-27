@@ -1250,9 +1250,8 @@ GaussianModel Trainer::train(
         (!options_.input_is_dense &&
             is_adc_strategy(options_.densification_strategy));
     if (splat_mean_lr_scale) {
-        refinement_geometry = vulkan_backend
-            ? refine::splat_scene_geometry(model.means.to_vector())
-            : refine::splat_scene_geometry_cuda(model.means);
+        refinement_geometry =
+            refine::splat_scene_geometry_device(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
     }
     const float minimum_log_scale = options_.constrain_scale_range
@@ -2008,9 +2007,8 @@ GaussianModel Trainer::train(
             refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
             if (refinement_happened && splat_mean_lr_scale) {
-                refinement_geometry = vulkan_backend
-                    ? refine::splat_scene_geometry(model.means.to_vector())
-                    : refine::splat_scene_geometry_cuda(model.means);
+                refinement_geometry =
+                    refine::splat_scene_geometry_device(model.means);
                 means_learning_rate_scale = refinement_geometry.scale;
             }
             if (refinement_happened && report_progress) {

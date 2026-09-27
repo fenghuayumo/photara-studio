@@ -2094,14 +2094,73 @@ DecodedTrainingPixels decode_packed_training_pixels(
 
 std::array<float, 6> percentile_bounds(
     const tinytensor::Tensor& means, const float percentile) {
-    if (!means.is_valid() || means.device() != tinytensor::Device::CUDA ||
+    if (!means.is_valid() ||
+        (means.device() != tinytensor::Device::CUDA &&
+         means.device() != tinytensor::Device::Vulkan) ||
         means.dtype() != tinytensor::DataType::Float32 ||
         !means.is_contiguous() || means.shape().rank() != 2 ||
         means.shape()[1] != 3 ||
         means.shape()[0] > static_cast<std::size_t>(INT_MAX))
-        throw std::invalid_argument("Percentile bounds require CUDA float32 [N,3]");
+        throw std::invalid_argument(
+            "Percentile bounds require a device float32 [N,3] means tensor");
     const std::size_t count = means.shape()[0];
     if (count == 0) return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
+    if (means.device() == tinytensor::Device::Vulkan) {
+        // Finite coordinates sort ahead of the +inf padding, so two small
+        // readbacks (three finite counts and six quantiles) replace the full
+        // means download plus three host nth_element sweeps the Vulkan
+        // trainer used to pay after every refinement.
+        const float p = std::clamp(percentile, 0.F, 1.F);
+        const auto device = tinytensor::Device::Vulkan;
+        std::array<tinytensor::Tensor, 3> sorted_axes{};
+        std::array<tinytensor::Tensor, 3> finite_counts{};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const auto column = means.slice(
+                1, static_cast<int>(axis), static_cast<int>(axis) + 1)
+                .reshape({static_cast<int>(count)});
+            const auto finite = column.isfinite();
+            finite_counts[axis] = finite
+                .to(tinytensor::DataType::Float32).sum(0, true);
+            sorted_axes[axis] = column.masked_fill(
+                finite.logical_not(),
+                std::numeric_limits<float>::infinity())
+                .sort(0, false).first;
+        }
+        const auto host_counts = tinytensor::Tensor::cat(
+            {finite_counts[0], finite_counts[1], finite_counts[2]}, 0)
+            .to_vector();
+        std::array<std::size_t, 3> sizes{};
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            sizes[axis] = host_counts.size() > axis
+                ? static_cast<std::size_t>(host_counts[axis]) : 0;
+        if (sizes[0] == 0 || sizes[1] == 0 || sizes[2] == 0)
+            return {-1.F, -1.F, -1.F, 1.F, 1.F, 1.F};
+        std::vector<int> picks;
+        picks.reserve(6);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const std::size_t size = sizes[axis];
+            const std::size_t low = static_cast<std::size_t>(
+                (1.F - p) * 0.5F * static_cast<float>(size));
+            const std::size_t high_candidate = static_cast<std::size_t>(
+                (1.F + p) * 0.5F * static_cast<float>(size));
+            const std::size_t high =
+                high_candidate < size ? high_candidate : size - 1;
+            picks.push_back(static_cast<int>(low));
+            picks.push_back(static_cast<int>(high));
+        }
+        auto gathered = tinytensor::Tensor::cat({
+            sorted_axes[0].index_select(0, tinytensor::Tensor::from_vector(
+                std::vector<int>{picks[0], picks[1]}, {std::size_t{2}}, device)),
+            sorted_axes[1].index_select(0, tinytensor::Tensor::from_vector(
+                std::vector<int>{picks[2], picks[3]}, {std::size_t{2}}, device)),
+            sorted_axes[2].index_select(0, tinytensor::Tensor::from_vector(
+                std::vector<int>{picks[4], picks[5]}, {std::size_t{2}}, device))}, 0);
+        const auto host_bounds = gathered.to_vector();
+        std::array<float, 6> result{};
+        for (std::size_t index = 0; index < result.size(); ++index)
+            result[index] = index < host_bounds.size() ? host_bounds[index] : 0.F;
+        return result;
+    }
     auto axes = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
     auto sorted = tinytensor::Tensor::empty({3, count}, tinytensor::Device::CUDA);
     auto bounds = tinytensor::Tensor::empty({6}, tinytensor::Device::CUDA);
@@ -2287,39 +2346,16 @@ PruneMasks prune_masks(
         tinytensor::Tensor::empty({count}, device)};
     if (count == 0) return masks;
     if (device == tinytensor::Device::Vulkan) {
-        const auto means = model.means.to_vector();
-        const auto scales = model.log_scales.to_vector();
-        const auto rotations = model.quaternions.to_vector();
-        const auto logits = model.opacity_logits.to_vector();
-        const auto sh = model.sh.to_vector();
-        const std::size_t sh_stride = model.sh.numel() / count;
-        std::vector<bool> keep(count, false), hard(count, false);
-        std::vector<float> opacities(count, 0.F);
-        for (std::size_t index = 0; index < count; ++index) {
-            const float opacity = 1.F / (1.F + std::exp(-logits[index]));
-            opacities[index] = opacity;
-            bool bad = !std::isfinite(logits[index]);
-            float maximum_scale = 0.F;
-            bool outside = false;
-            for (int axis = 0; axis < 3; ++axis) {
-                const float mean = means[3 * index + axis];
-                const float log_scale = scales[3 * index + axis];
-                bad = bad || !std::isfinite(mean) || !std::isfinite(log_scale);
-                maximum_scale = std::max(maximum_scale, std::exp(log_scale));
-                outside = outside ||
-                    std::abs(mean - scene_center[axis]) > maximum_bounds;
-            }
-            for (int component = 0; component < 4; ++component)
-                bad = bad || !std::isfinite(rotations[4 * index + component]);
-            for (std::size_t component = 0; component < sh_stride; ++component)
-                bad = bad || !std::isfinite(sh[index * sh_stride + component]);
-            hard[index] = bad || outside || maximum_scale > maximum_bounds;
-            keep[index] = !hard[index] && opacity >= minimum_opacity;
-        }
-        masks.keep = tinytensor::Tensor::from_vector(keep, {count}, device);
-        masks.hard = tinytensor::Tensor::from_vector(hard, {count}, device);
-        masks.opacities = tinytensor::Tensor::from_vector(
-            opacities, {count}, device);
+        // One fused dispatch, the twin of the CUDA kernel below. The first
+        // version of this port composed ~30 TinyTensor ops; besides paying a
+        // barrier per dispatch it also tripped the [N] x [N, 3] broadcast
+        // outer-product quirk (a 41 GB request). Row-local logic belongs in
+        // one shader.
+        tinytensor::vulkan::prune_masks(
+            model.means, model.log_scales, model.quaternions,
+            model.opacity_logits, model.sh, masks.keep, masks.hard,
+            masks.opacities, minimum_opacity, maximum_bounds,
+            scene_center[0], scene_center[1], scene_center[2]);
         return masks;
     }
     adc_plus_prune_kernel<<<
@@ -3119,17 +3155,22 @@ void split_gaussians(
         if (mode != SplitMode::igs_random)
             throw std::invalid_argument(
                 "Vulkan split primitive currently supports ADC-IGS only");
-        auto parent_means = parents.means.to_vector();
-        auto parent_scales = parents.log_scales.to_vector();
-        auto parent_opacity = parents.opacity_logits.to_vector();
-        const auto parent_rotations = parents.quaternions.to_vector();
+        // `children` already holds a copy of every selected parent row, so
+        // the row math only needs the selection. The previous path downloaded
+        // and re-uploaded every full-model tensor at each refinement; the
+        // mutated parent rows now go back through a device-side scatter.
+        auto parent_means = children.means.to_vector();
+        auto parent_scales = children.log_scales.to_vector();
+        auto parent_opacity = children.opacity_logits.to_vector();
+        const auto parent_rotations = children.quaternions.to_vector();
         auto child_means = children.means.to_vector();
         auto child_scales = children.log_scales.to_vector();
         auto child_opacity = children.opacity_logits.to_vector();
         const auto indices = parent_indices.to_vector_int();
         const auto samples = random_samples.to_vector();
         for (std::size_t child = 0; child < count; ++child) {
-            const std::size_t parent = static_cast<std::size_t>(indices[child]);
+            // Both sides are row-local copies of the same parent row.
+            const std::size_t parent = child;
             int largest = 0;
             if (parent_scales[3 * parent + 1] >
                 parent_scales[3 * parent + largest]) largest = 1;
@@ -3174,18 +3215,24 @@ void split_gaussians(
             child_opacity[child] = logit;
         }
         const auto device = tinytensor::Device::Vulkan;
-        parents.means = tinytensor::Tensor::from_vector(
-            parent_means, parents.means.shape(), device);
-        parents.log_scales = tinytensor::Tensor::from_vector(
-            parent_scales, parents.log_scales.shape(), device);
-        parents.opacity_logits = tinytensor::Tensor::from_vector(
-            parent_opacity, parents.opacity_logits.shape(), device);
         children.means = tinytensor::Tensor::from_vector(
             child_means, children.means.shape(), device);
         children.log_scales = tinytensor::Tensor::from_vector(
             child_scales, children.log_scales.shape(), device);
         children.opacity_logits = tinytensor::Tensor::from_vector(
             child_opacity, children.opacity_logits.shape(), device);
+        tinytensor::vulkan::scatter(
+            parents.means, parent_indices,
+            tinytensor::Tensor::from_vector(parent_means, {count, std::size_t{3}}, device),
+            0, false);
+        tinytensor::vulkan::scatter(
+            parents.log_scales, parent_indices,
+            tinytensor::Tensor::from_vector(parent_scales, {count, std::size_t{3}}, device),
+            0, false);
+        tinytensor::vulkan::scatter(
+            parents.opacity_logits, parent_indices,
+            tinytensor::Tensor::from_vector(parent_opacity, {count}, device),
+            0, false);
         return;
     }
     split_gaussians_kernel<<<

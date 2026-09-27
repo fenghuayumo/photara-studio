@@ -3,6 +3,7 @@
 #include "vulkan/ops.hpp"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -360,6 +361,55 @@ void test_mask_factory_and_pool() {
                         "adaptive_avg_pool2d");
 }
 
+void test_sort_1d() {
+    using namespace tinytensor;
+    const std::vector<float> input{3.F, -2.F, 3.F, 0.F, 8.F, -1.F, 5.F};
+    const auto tensor = Tensor::from_vector(input, {input.size()}, Device::Vulkan);
+    for (bool descending : {false, true}) {
+        const auto [sorted, indices] = tensor.sort(0, descending);
+        require(sorted.device() == Device::Vulkan && indices.device() == Device::Vulkan,
+                "sort stays on Vulkan");
+        const auto values = sorted.to_vector();
+        const auto order = indices.to_vector_int64();
+        require(values.size() == input.size() && order.size() == input.size(), "sort size");
+        for (std::size_t i = 0; i < input.size(); ++i) {
+            require(values[i] == input[static_cast<std::size_t>(order[i])], "sort index");
+            if (i > 0) {
+                require(descending ? values[i - 1] >= values[i] : values[i - 1] <= values[i],
+                        "sort order");
+            }
+        }
+    }
+    const auto padded = Tensor::from_vector(
+        std::vector<float>{9.F, 4.F, 1.F, 7.F, 3.F}, {5}, Device::Vulkan);
+    const auto [values, indices] = padded.sort(0, false);
+    require_vector_near(values.to_vector(), {1.F, 3.F, 4.F, 7.F, 9.F}, 0.F,
+                        "sort power-of-two padding");
+    require(indices.to_vector_int64() == std::vector<int64_t>({2, 4, 1, 3, 0}),
+            "sort padded indices");
+
+    constexpr std::size_t million = 1'000'003;
+    std::vector<float> large(million);
+    for (std::size_t i = 0; i < million; ++i) {
+        large[i] = static_cast<float>((i * 48271U) % 2'147'483'647U);
+    }
+    const auto large_tensor = Tensor::from_vector(large, {million}, Device::Vulkan);
+    const auto started = std::chrono::steady_clock::now();
+    const auto [large_sorted, large_indices] = large_tensor.sort(0, false);
+    const auto sorted_values = large_sorted.to_vector();
+    const auto sorted_indices = large_indices.to_vector_int64();
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    for (std::size_t i = 0; i < million; ++i) {
+        require(sorted_indices[i] >= 0 && static_cast<std::size_t>(sorted_indices[i]) < million,
+                "million sort index bounds");
+        require(sorted_values[i] == large[static_cast<std::size_t>(sorted_indices[i])],
+                "million sort index value");
+        if (i > 0) require(sorted_values[i - 1] <= sorted_values[i], "million sort order");
+    }
+    std::cout << "    million_sort_ms=" << elapsed << "\n";
+}
+
 } // namespace
 
 int main() {
@@ -388,6 +438,7 @@ int main() {
         run("fused_adam", test_fused_adam);
         run("matmul_cat_and_indexing", test_matmul_cat_and_indexing);
         run("mask_factory_and_pool", test_mask_factory_and_pool);
+        run("sort_1d", test_sort_1d);
         std::cout << "tinytensor vulkan tests passed\n";
         tinytensor::vulkan::shutdown();
         return 0;
