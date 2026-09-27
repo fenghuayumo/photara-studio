@@ -133,9 +133,10 @@ using ProgressCallback = std::function<bool(const TrainingProgress&)>;
 using EvaluationCallback =
     std::function<void(unsigned iteration, const GaussianModel& model)>;
 using PreviewCallback = std::function<void(TrainingPreview)>;
-// Called while the raster color tensor is still resident on CUDA. The tensor
-// is planar float RGB [3,H,W] and is valid only for the duration of the call.
-// This is the zero-copy hook used by CUDA/Vulkan external-memory interop.
+// Called while the raster color tensor is still resident on the training
+// device. The tensor is planar float RGB [3,H,W] and is valid only for the
+// duration of the call. CUDA training fills the editor image through CUDA
+// interop; Vulkan training copies this tensor into the same image.
 using DevicePreviewCallback = std::function<void(
     unsigned iteration, std::size_t view_index, const Camera& camera,
     const tinytensor::Tensor& color)>;

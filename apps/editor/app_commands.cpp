@@ -1880,7 +1880,11 @@ void show_mesh_view(App& app, const bool frame_when_ready) {
 
 photara::splat::VisualizeOptions editor_visualize_options(const App& app) {
     photara::splat::VisualizeOptions options;
-    options.mode = app.view_mode == VisualizationMode::points
+    const bool vulkan_training = live_preview_active(app) &&
+                                 app.settings.training_backend == 1;
+    options.mode = vulkan_training
+        ? photara::splat::VisualizationMode::splat
+        : app.view_mode == VisualizationMode::points
         ? photara::splat::VisualizationMode::points
         : app.view_mode == VisualizationMode::rings
             ? photara::splat::VisualizationMode::rings
@@ -2920,7 +2924,11 @@ void start_train(App& app, const bool smoke) {
             << app.layout.model_output.string()
             << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
             << " --splat-use-mask false"
-            << " --splat --splat-strategy adc_plus --splat-iterations "
+            << " --splat --backend "
+            << (app.settings.training_backend == 1 ? "vulkan" : "cuda")
+            << " --splat-strategy "
+            << (app.settings.training_backend == 1 ? "adc_igs" : "adc_plus")
+            << " --splat-iterations "
             << app.settings.iterations << " --splat-preview-interval "
             << app.settings.preview_interval
             << " --splat-preview-view 0 --splat-preview-view-file \""

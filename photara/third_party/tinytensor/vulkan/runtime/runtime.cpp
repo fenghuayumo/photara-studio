@@ -555,6 +555,22 @@ void Context::create_device() {
         extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     }
 #endif
+#if defined(_WIN32)
+    // The editor exports its preview image with Win32 opaque handles. Training
+    // on this device has to import them, which these extensions make legal.
+    // Vulkan 1.2 already includes timeline semaphores.
+    const char* external_extensions[] = {
+        "VK_KHR_external_memory",
+        "VK_KHR_external_memory_win32",
+        "VK_KHR_external_semaphore",
+        "VK_KHR_external_semaphore_win32",
+    };
+    for (const char* extension : external_extensions) {
+        if (has_device_extension(physical_, extension)) {
+            extensions.push_back(extension);
+        }
+    }
+#endif
 
     VkDeviceCreateInfo create{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     create.queueCreateInfoCount = 1;

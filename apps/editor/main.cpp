@@ -35,7 +35,9 @@ std::string g_editor_ini;
 
 int main(const int argc, char** argv) {
     App app;
-    app.smoke_mode = argc > 1 && std::string_view(argv[1]) == "--interop-smoke";
+    const std::string_view smoke_arg = argc > 1 ? argv[1] : "";
+    app.smoke_mode = smoke_arg == "--interop-smoke" ||
+                     smoke_arg == "--interop-smoke-vulkan";
     if (!app.smoke_mode)
         editor::i18n::load(
             editor::resolve_editor_ini().parent_path() / "editor.language");
@@ -50,6 +52,8 @@ int main(const int argc, char** argv) {
             app.settings.project_dir.data(), app.settings.project_dir.size(),
             "D:\\ProgramCode\\C++\\3dgs\\Photara\\artifacts\\cuda_vulkan_smoke");
         app.settings.iterations = 100;
+        if (smoke_arg == "--interop-smoke-vulkan")
+            app.settings.training_backend = 1;
     }
 
     glfwSetErrorCallback([](const int code, const char* text) {

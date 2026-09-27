@@ -23,6 +23,10 @@
 #include "splat/formats.hpp"
 #include "splat/trainer.hpp"
 #endif
+#if defined(PHOTARA_HAS_SPLAT) && defined(TINYTENSOR_HAS_VULKAN)
+#include "splat_drender/vulkan_api.h"
+#include "vulkan/backend.hpp"
+#endif
 #if defined(PHOTARA_HAS_TEXTURE)
 #include "texture/bake.hpp"
 #include "texture/export.hpp"
@@ -3378,35 +3382,84 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     const auto started = std::chrono::steady_clock::now();
     photara::splat::PreviewCallback preview;
     photara::splat::DevicePreviewCallback device_preview;
-    std::unique_ptr<photara::splat::CudaVulkanPreview> vulkan_preview;
+    std::unique_ptr<photara::splat::CudaVulkanPreview> cuda_preview;
+#if defined(TINYTENSOR_HAS_VULKAN)
+    std::unique_ptr<splat_drender::vulkan::ExternalImagePreview> vulkan_preview;
+#endif
     const bool has_vulkan_preview =
         cli.splat_preview_vk_memory_handle != 0 &&
         cli.splat_preview_vk_semaphore_handle != 0 &&
         cli.splat_preview_vk_allocation_size != 0 &&
         cli.splat_preview_vk_width != 0 &&
         cli.splat_preview_vk_height != 0;
-    if (options.preview_interval != 0 && has_vulkan_preview) {
+    const auto preview_handles = photara::splat::CudaVulkanPreviewOptions{
+        cli.splat_preview_vk_memory_handle,
+        cli.splat_preview_vk_semaphore_handle,
+        cli.splat_preview_vk_allocation_size,
+        cli.splat_preview_vk_width,
+        cli.splat_preview_vk_height,
+        cli.splat_preview_vk_device_luid,
+        cli.splat_preview_vk_device_node_mask};
+    if (options.preview_interval != 0 && has_vulkan_preview &&
+        options.backend == photara::splat::TrainingBackend::vulkan) {
+#if !defined(TINYTENSOR_HAS_VULKAN)
+        throw std::runtime_error(
+            "Vulkan training preview requires the Vulkan compute backend");
+#else
+        const auto handles = tinytensor::vulkan::device_handles();
         vulkan_preview =
-            std::make_unique<photara::splat::CudaVulkanPreview>(
-                photara::splat::CudaVulkanPreviewOptions{
-                    cli.splat_preview_vk_memory_handle,
-                    cli.splat_preview_vk_semaphore_handle,
-                    cli.splat_preview_vk_allocation_size,
-                    cli.splat_preview_vk_width,
-                    cli.splat_preview_vk_height,
-                    cli.splat_preview_vk_device_luid,
-                    cli.splat_preview_vk_device_node_mask});
+            std::make_unique<splat_drender::vulkan::ExternalImagePreview>(
+                splat_drender::vulkan::PreviewDevice{
+                    handles.instance, handles.physical_device, handles.device,
+                    handles.queue, handles.queue_family},
+                splat_drender::vulkan::ExternalPreviewOptions{
+                    preview_handles.memory_handle,
+                    preview_handles.semaphore_handle,
+                    preview_handles.allocation_size,
+                    preview_handles.width,
+                    preview_handles.height,
+                    preview_handles.device_luid,
+                    preview_handles.device_node_mask});
         device_preview = [&vulkan_preview](
                              const unsigned iteration,
                              const std::size_t view_index,
                              const photara::splat::Camera& camera,
                              const tinytensor::Tensor& color) {
-            vulkan_preview->submit(color, camera.width, camera.height);
+            if (color.device() != tinytensor::Device::Vulkan)
+                throw std::runtime_error(
+                    "Vulkan training preview only supports the splat view");
+            const auto view = tinytensor::vulkan::buffer_view(color);
+            vulkan_preview->submit(
+                {view.buffer, view.offset, view.bytes}, camera.width,
+                camera.height);
+            photara::core::Logger::instance().debug(
+                "splat_preview_iteration=", iteration,
+                " view=", view_index,
+                " transport=vulkan_external_memory",
+                " timeline_value=", 2 * vulkan_preview->frame_count() - 1);
+        };
+        photara::core::Logger::instance().info(
+            "splat_preview_transport=vulkan_external_memory extent=",
+            cli.splat_preview_vk_width, 'x',
+            cli.splat_preview_vk_height);
+        if (!cli.splat_preview_ack_file.empty())
+            photara::core::Logger::instance().info(
+                "splat_preview_ack_file=\"", cli.splat_preview_ack_file, '"');
+#endif
+    } else if (options.preview_interval != 0 && has_vulkan_preview) {
+        cuda_preview =
+            std::make_unique<photara::splat::CudaVulkanPreview>(preview_handles);
+        device_preview = [&cuda_preview](
+                             const unsigned iteration,
+                             const std::size_t view_index,
+                             const photara::splat::Camera& camera,
+                             const tinytensor::Tensor& color) {
+            cuda_preview->submit(color, camera.width, camera.height);
             photara::core::Logger::instance().debug(
                 "splat_preview_iteration=", iteration,
                 " view=", view_index,
                 " transport=cuda_vulkan_external_memory",
-                " timeline_value=", 2 * vulkan_preview->frame_count() - 1);
+                " timeline_value=", 2 * cuda_preview->frame_count() - 1);
         };
         photara::core::Logger::instance().info(
             "splat_preview_transport=cuda_vulkan_external_memory extent=",

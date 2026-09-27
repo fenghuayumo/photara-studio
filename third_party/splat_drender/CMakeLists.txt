@@ -85,7 +85,8 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             CACHE PATH "Photara splat training shader directory")
         list(APPEND SPLAT_DRENDER_VULKAN_SHADERS
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_ssim.hlsl"
-            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_loss_reduce.hlsl")
+            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_loss_reduce.hlsl"
+            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_preview_pack.hlsl")
 
         set(SPLAT_DRENDER_SHADER_BINARIES)
         set(SPLAT_DRENDER_SHADER_HEADERS)
@@ -143,6 +144,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
 
         add_library(splat_drender_vulkan STATIC
             src/vulkan/context.cpp
+            src/vulkan/external_preview.cpp
             src/vulkan/splat_rasterizer.cpp)
         add_library(splat_drender::vulkan ALIAS splat_drender_vulkan)
         add_dependencies(splat_drender_vulkan splat_drender_shaders)

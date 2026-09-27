@@ -165,6 +165,10 @@ tinytensor::Tensor render_preview_color(
     vis.kernel_size = options.kernel_size;
     vis.scale_modifier = options.scale_modifier;
     load_visualization_sidecar(options.preview_vis_file, vis, vis_revision);
+    // The points/rings overlay in visualize() is a CUDA kernel. Vulkan
+    // training can still render the requested camera through its rasterizer.
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        vis.mode = VisualizationMode::splat;
     return visualize(model, camera, vis);
 }
 
@@ -1022,10 +1026,6 @@ GaussianModel Trainer::train(
             throw std::invalid_argument(
                 "The Vulkan backend currently supports the shared masked "
                 "L1+SSIM path with optional ADC-IGS densification");
-        if (device_preview)
-            throw std::invalid_argument(
-                "CUDA/Vulkan external-memory preview is unavailable while "
-                "training on the Vulkan backend");
         core::Logger::instance().info(
             "splat training backend=vulkan orchestration=shared");
     } else {
@@ -1976,7 +1976,6 @@ GaussianModel Trainer::train(
         if (report_progress && !vulkan_backend)
             opacity_stats = detail::summarize_opacity_progress(
                 model.opacity_logits, gradients.opacity_logits);
-
         latest_refinement = {};
         bool refinement_happened = false;
         if (densification_enabled) {
@@ -2132,7 +2131,6 @@ GaussianModel Trainer::train(
             static_cast<std::size_t>(rendered.rendered_instances),
             depth_normal_active, multi_view_active, refinement_happened,
             filter_refreshed);
-
         bool continue_training = true;
         if (report_progress) {
             const auto now = std::chrono::steady_clock::now();

@@ -431,5 +431,50 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Device the preview importer records on. It must be the same physical device
+// that exported the shared image, and it must have been created with the
+// Win32 external-memory and external-semaphore extensions enabled.
+struct PreviewDevice {
+    VkInstance instance = VK_NULL_HANDLE;
+    VkPhysicalDevice physical_device = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkQueue queue = VK_NULL_HANDLE;
+    std::uint32_t queue_family = VK_QUEUE_FAMILY_IGNORED;
+};
+
+// Editor-owned RGBA8 image and timeline semaphore, passed across the process
+// boundary as inheritable Win32 handles. Frame f is announced by signalling
+// 2f-1 and may be overwritten only after the editor answers with 2f.
+struct ExternalPreviewOptions {
+    std::uint64_t memory_handle = 0;
+    std::uint64_t semaphore_handle = 0;
+    std::uint64_t allocation_size = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint64_t device_luid = 0;
+    std::uint32_t device_node_mask = 0;
+};
+
+// Copies a device-resident planar float RGB buffer into the editor's shared
+// preview image. The source buffer has to stay alive through submit(); the
+// call waits until the copy has finished.
+class ExternalImagePreview {
+public:
+    ExternalImagePreview(
+        const PreviewDevice& device, const ExternalPreviewOptions& options);
+    ~ExternalImagePreview();
+    ExternalImagePreview(const ExternalImagePreview&) = delete;
+    ExternalImagePreview& operator=(const ExternalImagePreview&) = delete;
+
+    void submit(
+        const SplatBufferView& color, std::uint32_t source_width,
+        std::uint32_t source_height);
+    [[nodiscard]] std::uint64_t frame_count() const noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 }  // namespace vulkan
 }  // namespace splat_drender

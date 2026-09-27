@@ -106,8 +106,9 @@ bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
 
     const bool training =
         app.job.running() && app.active_job == JobKind::train;
+    const bool vulkan_training = training && app.settings.training_backend == 1;
     const bool splat_ok = app.has_model || training;
-    const bool rings_ok = app.has_model || training;
+    const bool rings_ok = !vulkan_training && (app.has_model || training);
 
     struct RailItem {
         const char* id;
@@ -124,7 +125,9 @@ bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
          splat_ok ? tr("Splat") : tr("Train 3DGS to view the splat")},
         {"##viz_rings", icons::Icon::rings, VisualizationMode::rings, rings_ok,
          rings_ok ? tr("Rings")
-                  : tr("Available while training or after a Gaussian model exists")},
+                  : vulkan_training
+                      ? tr("Available after Vulkan training finishes")
+                      : tr("Available while training or after a Gaussian model exists")},
         {"##viz_mesh", icons::Icon::cube, VisualizationMode::mesh, mesh_ok,
          mesh_ok ? tr("Mesh")
                  : tr("Build a mesh to inspect the reconstructed surface")},
@@ -1446,6 +1449,12 @@ void draw_viewport_panel(App& app) {
                !live_preview_active(app)) {
         draw_splat_render_tab(
             app, view_min, view_max, app.view_mode == VisualizationMode::rings);
+        draw_view_mode_rail(app, view_min);
+        draw_scene_toggle_rail(app, view_min);
+    } else if (live_preview_active(app) &&
+               app.settings.training_backend == 1 &&
+               app.view_mode == VisualizationMode::points) {
+        draw_sparse_tab(app, view_min, view_max);
         draw_view_mode_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if (live_preview_active(app) && !waiting_for_train_preview(app)) {
