@@ -1053,10 +1053,10 @@ constexpr Entry k_entries[] = {
     {"Show reconstruction region", "显示重建区域", "再構成領域を表示", "재구성 영역 표시"},
     {"Splat object-mode SubjectBounds / focus region.\n"
      "Drag the center arrows to move the box, or a face dot\n"
-     "to resize. Object training and mesh extraction use this volume.",
-     "溅射物体模式的 SubjectBounds / 焦点区域。\n拖动中心箭头移动包围盒，或拖动面点缩放。物体训练与网格提取使用该体积。",
-     "スプラット物体モードの SubjectBounds / 焦点領域。\n中央矢印で移動、面の点でリサイズ。物体学習とメッシュ抽出がこの体積を使います。",
-     "스플랫 오브젝트 모드 SubjectBounds / 초점 영역.\n가운데 화살표로 이동, 면 점으로 크기 조절. 오브젝트 학습과 메시 추출이 이 볼륨을 사용합니다."},
+     "to resize. Object training follows this volume live.",
+     "溅射物体模式的 SubjectBounds / 焦点区域。\n拖动中心箭头移动包围盒，或拖动面点缩放。物体训练会实时跟随该区域。",
+     "スプラット物体モードの SubjectBounds / 焦点領域。\n中央矢印で移動、面の点でリサイズ。物体学習はこの領域にリアルタイムで追従します。",
+     "스플랫 오브젝트 모드 SubjectBounds / 초점 영역.\n가운데 화살표로 이동, 면 점으로 크기 조절. 오브젝트 학습이 이 영역을 실시간으로 따릅니다."},
     {"Fit Region to Cloud", "使区域贴合点云", "領域を点群に合わせる", "영역을 클라우드에 맞추기"},
     {"Reset to the SfM SubjectBounds used by Splat object mode.",
      "重置为溅射物体模式使用的 SfM SubjectBounds。",

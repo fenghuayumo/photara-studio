@@ -3194,6 +3194,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.preview_camera_file = cli.splat_preview_camera_file;
     options.preview_vis_file = cli.splat_preview_vis_file;
     options.preview_ack_file = cli.splat_preview_ack_file;
+    if (cli.gui && cli.capture_mode == "object")
+        options.live_subject_bounds_file = cli.subject_bounds;
     options.sh_degree = cli.splat_sh_degree;
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;

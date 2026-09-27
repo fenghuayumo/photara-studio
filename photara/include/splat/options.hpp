@@ -404,6 +404,9 @@ struct TrainingOptions {
     // trainer drops a preview instead of waiting for the editor, so a busy
     // editor can never stall the optimizer.
     std::filesystem::path preview_ack_file;
+    // Studio updates this SubjectBounds file while object-mode training runs.
+    // An empty path keeps the scene's initial bounds fixed.
+    std::filesystem::path live_subject_bounds_file;
 };
 
 // Strategy-specific defaults for shared densification knobs. The CLI applies

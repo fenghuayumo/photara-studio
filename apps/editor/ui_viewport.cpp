@@ -797,6 +797,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    write_working_subject_bounds(app);
     const bool ring_edit =
         app.view_mode == VisualizationMode::rings && ensure_splat_renderer(app) &&
         app.splat_edit.bound_to(app.splat_renderer.source_key());
@@ -1045,6 +1046,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    write_working_subject_bounds(app);
     const bool viewport_input = hovered && !gizmo_captures;
     const bool used_double_click = handle_viewport_double_click(
         app, viewport_input, overlay_stats, min, max);
@@ -1317,6 +1319,7 @@ void draw_splat_render_tab(
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    write_working_subject_bounds(app);
     app.splat_edit.note_view(rings, app.view_options.ring_scale);
     app.splat_edit.draw_overlay(draw, min, max, preview_camera);
     const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max);

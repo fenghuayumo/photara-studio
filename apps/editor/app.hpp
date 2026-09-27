@@ -98,6 +98,8 @@ struct App {
     ViewOptions view_options;
     ViewportGizmoState gizmo;
     ReconstructionBox reconstruction_box;
+    ReconstructionBox published_reconstruction_box;
+    std::filesystem::path published_subject_bounds_path;
     SceneRenderer renderer;
     std::future<SceneLoad> pending_load;
     std::future<SceneLoad> alignment_preview_load;

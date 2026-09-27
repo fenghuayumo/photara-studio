@@ -92,8 +92,20 @@ void ensure_reconstruction_box(App& app) {
 void write_working_subject_bounds(App& app) {
     ensure_reconstruction_box(app);
     if (app.settings.scene_mode || !app.reconstruction_box.valid) return;
-    write_reconstruction_box(
-        app.reconstruction_box, app.layout.working_subject_bounds);
+    const ReconstructionBox& box = app.reconstruction_box;
+    const ReconstructionBox& previous = app.published_reconstruction_box;
+    std::error_code bounds_error;
+    if (app.published_subject_bounds_path == app.layout.working_subject_bounds &&
+        std::filesystem::exists(app.layout.working_subject_bounds, bounds_error) &&
+        previous.valid && previous.min.x == box.min.x &&
+        previous.min.y == box.min.y && previous.min.z == box.min.z &&
+        previous.max.x == box.max.x && previous.max.y == box.max.y &&
+        previous.max.z == box.max.z)
+        return;
+    if (write_reconstruction_box(box, app.layout.working_subject_bounds)) {
+        app.published_reconstruction_box = box;
+        app.published_subject_bounds_path = app.layout.working_subject_bounds;
+    }
 }
 
 void frame_reconstruction(App& app) {

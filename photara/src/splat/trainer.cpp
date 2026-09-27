@@ -10,6 +10,8 @@
 #include "core/camera_projection.hpp"
 #include "core/logging.hpp"
 #include "densification.hpp"
+#include "densification_internal.hpp"
+#include "mvs/export.hpp"
 #include "io/format_version.hpp"
 #include "io/image.hpp"
 #include "multi_view_scheduler.hpp"
@@ -46,6 +48,96 @@ namespace data = training_data;
 namespace refine = densification;
 
 constexpr float k_sh0 = 0.28209479177387814F;
+
+refine::SceneGeometry focus_scene_geometry(
+    const mvs::OrientedBoundingBox& bounds) {
+    return {
+        std::max(2.F * bounds.half_extent.norm(), 1e-6F),
+        bounds.center,
+        bounds.half_extent.maxCoeff()};
+}
+
+tinytensor::Tensor focus_keep_indices(
+    const GaussianModel& model, const mvs::OrientedBoundingBox& bounds) {
+    tinytensor::Tensor inside;
+    for (int axis = 0; axis < 3; ++axis) {
+        tinytensor::Tensor coordinate;
+        for (int component = 0; component < 3; ++component) {
+            auto term = model.means.slice(
+                1, static_cast<std::size_t>(component),
+                static_cast<std::size_t>(component + 1))
+                .sub(bounds.center(component))
+                .mul(bounds.axes(component, axis));
+            coordinate = coordinate.is_valid() ? coordinate.add(term) : term;
+        }
+        auto axis_inside = coordinate.abs().le(bounds.half_extent(axis));
+        inside = inside.is_valid()
+            ? inside.logical_and(axis_inside) : axis_inside;
+    }
+    return inside.reshape({static_cast<int>(model.size())}).nonzero().squeeze(1)
+        .to(tinytensor::DataType::Int32);
+}
+
+bool ray_hits_focus_box(
+    const mvs::Vec3f& origin, const mvs::Vec3f& direction,
+    const mvs::Vec3f& half_extent) {
+    float near = 0.F;
+    float far = std::numeric_limits<float>::infinity();
+    for (int axis = 0; axis < 3; ++axis) {
+        if (std::abs(direction(axis)) < 1e-9F) {
+            if (std::abs(origin(axis)) > half_extent(axis)) return false;
+            continue;
+        }
+        float enter = (-half_extent(axis) - origin(axis)) / direction(axis);
+        float exit = (half_extent(axis) - origin(axis)) / direction(axis);
+        if (enter > exit) std::swap(enter, exit);
+        near = std::max(near, enter);
+        far = std::min(far, exit);
+        if (far < near) return false;
+    }
+    return far >= 0.F;
+}
+
+tinytensor::Tensor focus_view_mask(
+    const Camera& camera, const mvs::OrientedBoundingBox& bounds,
+    const tinytensor::Device device) {
+    const mvs::Vec3f origin = bounds.local(mvs::Vec3f(
+        camera.position[0], camera.position[1], camera.position[2]));
+    mvs::Mat3f camera_to_world;
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            camera_to_world(row, column) = camera.world_to_camera[
+                static_cast<std::size_t>(row) * 4 + column];
+    const mvs::Mat3f camera_to_box = bounds.axes.transpose() * camera_to_world;
+    std::vector<float> mask(
+        static_cast<std::size_t>(camera.width) * camera.height, 0.F);
+    for (std::uint32_t y = 0; y < camera.height; ++y)
+        for (std::uint32_t x = 0; x < camera.width; ++x) {
+            CameraRay ray{};
+            if (camera.model == CameraModel::opencv_fisheye)
+                ray = unproject_fisheye_camera(
+                    x, y, camera.fx, camera.fy, camera.cx, camera.cy,
+                    camera.k1, camera.k2, camera.k3, camera.k4);
+            else if (camera.model == CameraModel::equirectangular)
+                ray = unproject_equirectangular_camera(
+                    x, y, static_cast<int>(camera.width),
+                    static_cast<int>(camera.height));
+            else
+                ray = CameraRay{
+                    (static_cast<double>(x) - camera.cx) / camera.fx,
+                    (static_cast<double>(y) - camera.cy) / camera.fy,
+                    1.0, true};
+            if (!ray.valid) continue;
+            const mvs::Vec3f direction = camera_to_box * mvs::Vec3f(
+                static_cast<float>(ray.x), static_cast<float>(ray.y),
+                static_cast<float>(ray.z));
+            mask[static_cast<std::size_t>(y) * camera.width + x] =
+                ray_hits_focus_box(origin, direction, bounds.half_extent)
+                ? 1.F : 0.F;
+        }
+    return tinytensor::Tensor::from_vector(
+        mask, {camera.height, camera.width}, device);
+}
 
 // Logging iterations also run densify / live preview / a full GPU sync, so a
 // single step's wall time is a poor ETA rate. Smooth the mean ms/iter over
@@ -852,26 +944,42 @@ tinytensor::Tensor normal_features_from_smallest_axis(
 }  // namespace
 
 GaussianModel initialize_from_dense_cloud(
-    const mvs::MvsScene& scene, const TrainingOptions& options) {
+    const mvs::MvsScene& scene, const TrainingOptions& options,
+    const mvs::OrientedBoundingBox* focus_override) {
     if (scene.dense_cloud.points.empty())
         throw std::invalid_argument("Splat initialization requires a non-empty dense cloud");
     if (options.sh_degree > 3)
         throw std::invalid_argument("The current splat CUDA backend supports SH degree <= 3");
-    const std::size_t source_count = scene.dense_cloud.points.size();
+    std::vector<std::size_t> selection;
+    const auto& initial_bounds = focus_override != nullptr
+        ? *focus_override : scene.subject_bounds;
+    if (initial_bounds.valid) {
+        selection.reserve(scene.dense_cloud.points.size());
+        for (std::size_t index = 0; index < scene.dense_cloud.points.size(); ++index)
+            if (initial_bounds.contains(
+                    scene.dense_cloud.points[index].position))
+                selection.push_back(index);
+        if (selection.empty())
+            throw std::invalid_argument(
+                "Focus region contains no initialization points; enlarge the Box");
+    }
+    const std::size_t source_count = selection.empty()
+        ? scene.dense_cloud.points.size() : selection.size();
     // Deterministic uniform subsample when the input cloud is larger than the
     // requested initialization budget. Selection has to happen before the
     // growth ceiling is reached, otherwise the first refinement step prunes
     // the cloud back to the cap and IGS never gets capacity again.
-    std::vector<std::size_t> selection;
     const std::size_t count =
         options.initial_point_budget != 0 &&
                 options.initial_point_budget < source_count
             ? options.initial_point_budget
             : source_count;
     if (count != source_count) {
-        selection.resize(source_count);
-        for (std::size_t index = 0; index < source_count; ++index)
-            selection[index] = index;
+        if (selection.empty()) {
+            selection.resize(source_count);
+            for (std::size_t index = 0; index < source_count; ++index)
+                selection[index] = index;
+        }
         std::mt19937 selection_random(options.seed);
         std::shuffle(selection.begin(), selection.end(), selection_random);
         selection.resize(count);
@@ -905,8 +1013,9 @@ GaussianModel initialize_from_dense_cloud(
         initialization_extent = std::max(
             (maximum - minimum).norm(), 1e-6F);
     } else {
-        initialization_extent =
-            refine::training_scene_geometry(scene, false).scale;
+        initialization_extent = initial_bounds.valid
+            ? focus_scene_geometry(initial_bounds).scale
+            : refine::training_scene_geometry(scene, false).scale;
     }
     const float fallback_scale = std::max(
         initialization_extent /
@@ -1281,7 +1390,7 @@ GaussianModel Trainer::train(
         std::any_of(all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
             return camera.model == CameraModel::equirectangular;
         });
-    const std::size_t initial_gaussian_count = model.size();
+    std::size_t initial_gaussian_count = model.size();
     if (panorama_adc)
         core::Logger::instance().info("adc_panorama angular_threshold_degrees=30",
             " growth_reserve=0.5 initial_growth_cap=",
@@ -1290,6 +1399,68 @@ GaussianModel Trainer::train(
     detail::DensificationStats densification_stats = densification_enabled
         ? detail::make_densification_stats(model.size(), model.means.device())
         : detail::DensificationStats{};
+    mvs::OrientedBoundingBox focus_bounds = scene.subject_bounds;
+    std::filesystem::file_time_type focus_file_stamp{};
+    bool has_focus_file_stamp = false;
+    std::unordered_map<std::size_t, tinytensor::Tensor> focus_view_masks;
+    std::size_t focus_mask_cache_bytes = 0;
+    constexpr std::size_t max_focus_mask_cache_bytes = 128ULL * 1024 * 1024;
+    const auto prune_to_focus = [&](const mvs::OrientedBoundingBox& bounds,
+                                    const unsigned iteration) {
+        if (!bounds.valid || model.size() == 0) return true;
+        const auto keep = focus_keep_indices(model, bounds);
+        if (keep.numel() == 0) {
+            core::Logger::instance().warning(
+                "splat focus region has no current Gaussians at iteration=",
+                iteration);
+            return false;
+        }
+        if (keep.numel() == model.size()) return true;
+        const std::size_t removed = model.size() - keep.numel();
+        refine::gpu_detail::select_training_rows_gpu(model, keep, adam_states);
+        if (use_3d_filter)
+            model.filter_3d = detail::compute_3d_filter(
+                model.means, filter_cameras, filter_3d_factor, splat_filter);
+        if (densification_enabled)
+            densification_stats = detail::make_densification_stats(
+                model.size(), model.means.device());
+        core::Logger::instance().info(
+            "splat focus region iteration=", iteration,
+            " removed=", removed, " gaussians=", model.size());
+        return true;
+    };
+    const auto reseed_focus = [&](const mvs::OrientedBoundingBox& bounds,
+                                  const unsigned iteration) {
+        try {
+            model = initialize_from_dense_cloud(scene, options_, &bounds);
+            means_state = detail::make_adam_state(model.means);
+            scales_state = detail::make_adam_state(model.log_scales);
+            rotations_state = detail::make_adam_state(model.quaternions);
+            opacity_state = detail::make_adam_state(model.opacity_logits);
+            sh_state = options_.densification_strategy ==
+                    DensificationStrategy::adc_plus
+                ? detail::make_reduced_second_adam_state(model.sh)
+                : detail::make_adam_state(model.sh);
+            normal_features_state = detail::make_adam_state(
+                model.normal_features);
+            if (use_3d_filter)
+                model.filter_3d = detail::compute_3d_filter(
+                    model.means, filter_cameras,
+                    filter_3d_factor, splat_filter);
+            if (densification_enabled)
+                densification_stats = detail::make_densification_stats(
+                    model.size(), model.means.device());
+            initial_gaussian_count = model.size();
+            core::Logger::instance().info(
+                "splat focus region reseeded iteration=", iteration,
+                " gaussians=", model.size());
+            return true;
+        } catch (const std::invalid_argument& failure) {
+            core::Logger::instance().warning(
+                "splat focus region ignored: ", failure.what());
+            return false;
+        }
+    };
     refine::RefinementCounts latest_refinement;
     Rasterizer rasterizer;
     CudaTrainingProfiler cuda_profiler(options_);
@@ -1298,10 +1469,11 @@ GaussianModel Trainer::train(
         std::numeric_limits<std::uint64_t>::max();
     std::uint64_t last_preview_vis_revision =
         std::numeric_limits<std::uint64_t>::max();
-    const refine::SceneGeometry scene_geometry =
-        refine::training_scene_geometry(scene, options_.input_is_dense);
-    const float scene_extent = scene_geometry.scale;
-    const mvs::Vec3f scene_center = scene_geometry.center;
+    refine::SceneGeometry scene_geometry = focus_bounds.valid
+        ? focus_scene_geometry(focus_bounds)
+        : refine::training_scene_geometry(scene, options_.input_is_dense);
+    float scene_extent = scene_geometry.scale;
+    mvs::Vec3f scene_center = scene_geometry.center;
     float means_learning_rate_scale = scene_extent;
     refine::SceneGeometry refinement_geometry = scene_geometry;
     const bool splat_mean_lr_scale =
@@ -1314,7 +1486,7 @@ GaussianModel Trainer::train(
             refine::splat_scene_geometry_device(model.means);
         means_learning_rate_scale = refinement_geometry.scale;
     }
-    const float minimum_log_scale = options_.constrain_scale_range
+    float minimum_log_scale = options_.constrain_scale_range
         ? std::log(
               scene_extent *
               std::max(options_.minimum_scale_fraction, 1e-8F))
@@ -1331,7 +1503,7 @@ GaussianModel Trainer::train(
             : std::max(
                   options_.maximum_scale_fraction,
                   options_.minimum_scale_fraction);
-    const float maximum_log_scale =
+    float maximum_log_scale =
         options_.constrain_scale_range && !densification_enabled
             ? std::log(std::max(
                   fixed_maximum_scale_fraction * scene_extent, 1e-6F))
@@ -1346,7 +1518,7 @@ GaussianModel Trainer::train(
     bool has_last_preview_camera = false;
     // Interactive previews are gated on the pivot's screen shift, so the pivot
     // is the scene centre the reconstruction is framed around.
-    const std::array<float, 3> preview_pivot{
+    std::array<float, 3> preview_pivot{
         scene_center.x(), scene_center.y(), scene_center.z()};
     auto next_pose_hold = std::chrono::steady_clock::time_point::min();
     // Preview frames handed to the device transport; the editor acknowledges
@@ -1364,6 +1536,55 @@ GaussianModel Trainer::train(
 
     for (unsigned iteration = 1; iteration <= options_.iterations; ++iteration) {
         cuda_profiler.begin_iteration(iteration, model.size());
+        if (!options_.live_subject_bounds_file.empty()) {
+            std::error_code stamp_error;
+            const auto stamp = std::filesystem::last_write_time(
+                options_.live_subject_bounds_file, stamp_error);
+            if (!stamp_error &&
+                (!has_focus_file_stamp || stamp != focus_file_stamp)) {
+                mvs::OrientedBoundingBox updated;
+                if (mvs::load_subject_bounds(
+                        updated, options_.live_subject_bounds_file)) {
+                    has_focus_file_stamp = true;
+                    focus_file_stamp = stamp;
+                    const bool accepted = prune_to_focus(updated, iteration) ||
+                        reseed_focus(updated, iteration);
+                    if (accepted) {
+                        focus_bounds = updated;
+                        scene_geometry = focus_scene_geometry(focus_bounds);
+                        scene_extent = scene_geometry.scale;
+                        scene_center = scene_geometry.center;
+                        refinement_geometry = splat_mean_lr_scale
+                            ? refine::splat_scene_geometry_device(model.means)
+                            : scene_geometry;
+                        means_learning_rate_scale = splat_mean_lr_scale
+                            ? refinement_geometry.scale : scene_extent;
+                        if (options_.constrain_scale_range) {
+                            minimum_log_scale = std::log(
+                                scene_extent * std::max(
+                                    options_.minimum_scale_fraction, 1e-8F));
+                            if (!densification_enabled)
+                                maximum_log_scale = std::log(std::max(
+                                    fixed_maximum_scale_fraction * scene_extent,
+                                    1e-6F));
+                        }
+                        preview_pivot = {
+                            scene_center.x(), scene_center.y(), scene_center.z()};
+                        focus_view_masks.clear();
+                        focus_mask_cache_bytes = 0;
+                        core::Logger::instance().info(
+                            "splat focus region updated iteration=", iteration,
+                            " center=", focus_bounds.center.transpose(),
+                            " half_extent=", focus_bounds.half_extent.transpose());
+                    }
+                }
+            }
+        }
+        if (focus_bounds.valid && iteration % 50 == 0 &&
+            !refine::is_refinement_iteration(iteration, options_)) {
+            if (!prune_to_focus(focus_bounds, iteration))
+                reseed_focus(focus_bounds, iteration);
+        }
         const float requested_resolution_scale =
             data::progressive_resolution_scale(iteration, options_);
         if (std::abs(
@@ -1371,6 +1592,8 @@ GaussianModel Trainer::train(
                 active_resolution_scale) > 1e-6F) {
             active_resolution_scale = requested_resolution_scale;
             view_cache.set_resolution_scale(active_resolution_scale);
+            focus_view_masks.clear();
+            focus_mask_cache_bytes = 0;
             all_cameras.clear();
             for (const mvs::MvsView& view : scene.views)
                 all_cameras.push_back(data::training_camera(
@@ -1403,7 +1626,32 @@ GaussianModel Trainer::train(
             view_cache.prefetch(shuffled_views[cursor]);
         const std::size_t view_index =
             shuffled_views[shuffled_view_cursor++];
-        const TrainingView target = view_cache.get(view_index);
+        TrainingView target = view_cache.get(view_index);
+        if (focus_bounds.valid) {
+            auto found = focus_view_masks.find(view_index);
+            if (found == focus_view_masks.end()) {
+                auto mask = focus_view_mask(
+                    target.camera, focus_bounds, model.means.device());
+                const std::size_t bytes = mask.numel() * sizeof(float);
+                while (!focus_view_masks.empty() &&
+                       focus_mask_cache_bytes + bytes >
+                           max_focus_mask_cache_bytes) {
+                    auto evicted = focus_view_masks.begin();
+                    focus_mask_cache_bytes -= evicted->second.numel() * sizeof(float);
+                    focus_view_masks.erase(evicted);
+                }
+                focus_mask_cache_bytes += bytes;
+                found = focus_view_masks.emplace(
+                    view_index, std::move(mask)).first;
+            }
+            if (target.has_mask &&
+                (options_.use_mask || target.mask_is_validity))
+                target.mask = target.mask.mul(found->second);
+            else
+                target.mask = found->second;
+            target.has_mask = true;
+            target.mask_is_validity = true;
+        }
         cuda_profiler.mark(CudaTrainingStage::data_load);
         RasterizeOptions raster_options;
         const unsigned active_sh_degree = std::min(
@@ -2138,6 +2386,10 @@ GaussianModel Trainer::train(
             if (refinement_happened)
                 detail::constrain_scale_ratio(
                     model.log_scales, options_.max_scale_ratio);
+            if (refinement_happened && focus_bounds.valid) {
+                if (!prune_to_focus(focus_bounds, iteration))
+                    reseed_focus(focus_bounds, iteration);
+            }
             if (refinement_happened && splat_mean_lr_scale) {
                 refinement_geometry =
                     refine::splat_scene_geometry_device(model.means);
@@ -2370,6 +2622,10 @@ GaussianModel Trainer::train(
             throw std::runtime_error(
                 std::string("Splat training synchronization failed: ") +
                 cudaGetErrorString(error));
+    }
+    if (focus_bounds.valid) {
+        if (!prune_to_focus(focus_bounds, options_.iterations))
+            reseed_focus(focus_bounds, options_.iterations);
     }
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(

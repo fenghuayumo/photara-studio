@@ -800,7 +800,7 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip(
                 "Splat object-mode SubjectBounds / focus region.\n"
                 "Drag the center arrows to move the box, or a face dot\n"
-                "to resize. Object training and mesh extraction use this volume.");
+                "to resize. Object training follows this volume live.");
         if (app.reconstruction_box.valid) {
             const Vec3 size = app.reconstruction_box.size();
             ImGui::Text("Size  %.3f × %.3f × %.3f", size.x, size.y, size.z);
@@ -811,6 +811,7 @@ Action draw_inspector(App& app) {
                 app.gizmo.box = {};
                 invalidate_reconstruction_box(app.reconstruction_box);
                 ensure_reconstruction_box(app);
+                write_working_subject_bounds(app);
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
