@@ -44,13 +44,23 @@ private:
 struct DeviceCounters {
     double wait_ms{};
     std::uint64_t dispatches{};
+    // Buffer pool traffic, in the same sample: a refine that allocates its
+    // whole working set again every event shows up here, not in the wait.
+    std::uint64_t pool_hits{};
+    std::uint64_t pool_misses{};
+    std::uint64_t pool_miss_bytes{};
+    std::uint64_t pool_drops{};
+    std::uint64_t pool_drop_bytes{};
 };
 
 DeviceCounters device_counters() {
 #ifdef TINYTENSOR_HAS_VULKAN
-    if (tinytensor::vulkan::available())
+    if (tinytensor::vulkan::available()) {
+        const auto pool = tinytensor::vulkan::buffer_pool_stats();
         return {tinytensor::vulkan::device_wait_ms(),
-                tinytensor::vulkan::dispatch_count()};
+                tinytensor::vulkan::dispatch_count(), pool.hits, pool.misses,
+                pool.miss_bytes, pool.drops, pool.drop_bytes};
+    }
 #endif
     return {};
 }
@@ -454,10 +464,20 @@ RefinementCounts IgsStrategy::refine(
 
     if (profile_refine) {
         const DeviceCounters end_counters = device_counters();
+        const double mib = 1024.0 * 1024.0;
         core::Logger::instance().info(
             "igs_profile iteration=", iteration,
             " wait_ms=", end_counters.wait_ms - refine_start_counters.wait_ms,
             " dispatches=", end_counters.dispatches - refine_start_counters.dispatches,
+            " pool_hit=", end_counters.pool_hits - refine_start_counters.pool_hits,
+            " pool_miss=", end_counters.pool_misses - refine_start_counters.pool_misses,
+            " pool_miss_mib=",
+            static_cast<double>(end_counters.pool_miss_bytes -
+                                refine_start_counters.pool_miss_bytes) / mib,
+            " pool_drop=", end_counters.pool_drops - refine_start_counters.pool_drops,
+            " pool_drop_mib=",
+            static_cast<double>(end_counters.pool_drop_bytes -
+                                refine_start_counters.pool_drop_bytes) / mib,
             " masks_ms=", masks_ms,
             " recycle_ms=", recycle_ms,
             " prune_ms=", prune_ms,
