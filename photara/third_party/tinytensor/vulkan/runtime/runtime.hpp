@@ -166,6 +166,18 @@ public:
         for (const double value : op_profile_.total_ms) total += value;
         return total;
     }
+    struct PoolStats {
+        std::uint64_t hits = 0;
+        std::uint64_t misses = 0;
+        std::uint64_t miss_bytes = 0;
+        std::uint64_t drops = 0;
+        std::uint64_t drop_bytes = 0;
+    };
+    [[nodiscard]] PoolStats pool_stats() const {
+        return {op_profile_.pool_hits, op_profile_.pool_misses,
+                op_profile_.pool_miss_bytes, op_profile_.pool_drops,
+                op_profile_.pool_drop_bytes};
+    }
 
     [[nodiscard]] Buffer& dummy();
 
@@ -256,6 +268,15 @@ private:
         std::uint64_t dispatches = 0;
         std::uint64_t batches = 0;
         double wait_ms = 0.0;
+        // Buffer pool traffic. A miss is a vkCreateBuffer + vkAllocateMemory +
+        // vkBindBufferMemory on the host, a drop is the matching teardown, so
+        // the pair says whether a phase is re-allocating its working set every
+        // time instead of reusing it.
+        std::uint64_t pool_hits = 0;
+        std::uint64_t pool_misses = 0;
+        std::uint64_t pool_miss_bytes = 0;
+        std::uint64_t pool_drops = 0;
+        std::uint64_t pool_drop_bytes = 0;
         VkQueryPool pool = VK_NULL_HANDLE;
         std::uint32_t interval = 200;
         std::uint32_t flushes = 0;
