@@ -84,6 +84,28 @@ double relative_l2_slice(
                                : std::sqrt(numerator);
 }
 
+void print_gradient_detail(const char* name, const std::vector<float>& packed,
+                           const std::size_t offset,
+                           const std::vector<float>& reference) {
+    double error2 = 0.0, reference2 = 0.0;
+    float max_abs = 0.0f;
+    std::size_t worst = 0, over_1e3 = 0;
+    for (std::size_t i = 0; i < reference.size(); ++i) {
+        const float error = packed[offset + i] - reference[i];
+        const float absolute = std::abs(error);
+        error2 += double(error) * error;
+        reference2 += double(reference[i]) * reference[i];
+        if (absolute > max_abs) { max_abs = absolute; worst = i; }
+        if (absolute > 1.0e-3f) ++over_1e3;
+    }
+    std::cout << "gradient detail " << name << " l2=" << std::sqrt(error2)
+              << " ref_l2=" << std::sqrt(reference2)
+              << " max_abs=" << max_abs << " worst_index=" << worst
+              << " vk=" << packed[offset + worst]
+              << " cuda=" << reference[worst]
+              << " abs_over_1e-3=" << over_1e3 << '/' << reference.size() << '\n';
+}
+
 Image to_image(const std::vector<float>& planar, const std::uint32_t width, const std::uint32_t height) {
     Image image;
     image.width = width;
@@ -644,6 +666,16 @@ int run_benchmark(int argc, char** argv) {
               << " log_scale=" << scale_gradient_error
               << " quaternion=" << rotation_gradient_error
               << " opacity_logit=" << opacity_gradient_error << '\n';
+    if (mean_gradient_error >= 1.0e-3 || scale_gradient_error >= 1.0e-4 ||
+        rotation_gradient_error >= 1.0e-4) {
+        const auto cuda_means = cuda_reference_gradients.means.to_vector();
+        const auto cuda_scales = cuda_reference_gradients.log_scales.to_vector();
+        const auto cuda_rotations = cuda_reference_gradients.quaternions.to_vector();
+        print_gradient_detail("mean", packed_model_gradients, mean_offset, cuda_means);
+        print_gradient_detail("log_scale", packed_model_gradients, log_scale_offset, cuda_scales);
+        print_gradient_detail("quaternion", packed_model_gradients, raw_rotation_offset,
+                              cuda_rotations);
+    }
     // A performance benchmark is also the real-data numerical gate. Mean
     // has a larger cross-API fast-math error than the other groups; these
     // limits remain tight enough to catch shader/layout regressions.

@@ -340,6 +340,10 @@ build\photara\Release\photara.exe `
 - Keep Vulkan contribution flags on the device, defer non-reporting loss scalar
   reads to log iterations, and retain materialized Vulkan supervision tensors in
   a bounded LRU instead of re-uploading every host-cached view.
+- Size backward snapshot storage for the channels the frame records. The
+  color-only path writes one float4 per bucket/pixel; the geometry path also
+  writes a second float4 for normals. Allocating the second plane for ordinary
+  training added hundreds of MiB to the live workspace on 1080p glass views.
 - Upload Vulkan training images in their packed RGBA form and expand them into
   the planar float planes on the device (`unpack_rgba.hlsl` in the TinyTensor
   Vulkan backend, called from `upload_training_view`). The host conversion it

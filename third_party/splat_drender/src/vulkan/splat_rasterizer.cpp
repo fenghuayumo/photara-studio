@@ -717,7 +717,8 @@ public:
         // forward frame neither writes nor reads them (at a million instances
         // the buffer is hundreds of megabytes of pure overhead).
         Buffer& snap = settings.pixel_snapshots
-            ? grow(snap_, static_cast<std::uint64_t>(snap_buckets) * 256ull * 2ull * sizeof(float) * 4)
+            ? grow(snap_, static_cast<std::uint64_t>(snap_buckets) * 256ull *
+                              (settings.need_depth ? 2ull : 1ull) * sizeof(float) * 4)
             : dummy_;
         if (!pack_rgba) {
             const std::size_t clear_uints = settings.pixel_snapshots
@@ -2153,9 +2154,8 @@ private:
             }
         }
         // Submissions no longer drain the queue, so a slot may still be running
-        // from kBatchSlots submissions ago. Waiting on its own fence is normally
-        // free: the TinyTensor synchronization each iteration bounds how far the
-        // host can run ahead of the GPU.
+        // from kBatchSlots submissions ago. Its fence bounds how far the host
+        // can record ahead while TinyTensor and raster work share this queue.
         if (slot.in_flight) {
             if (vkWaitForFences(context_.device, 1, &slot.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
                 vkResetFences(context_.device, 1, &slot.fence) != VK_SUCCESS) {
