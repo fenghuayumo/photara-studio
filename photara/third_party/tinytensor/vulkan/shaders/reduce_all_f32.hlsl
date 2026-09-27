@@ -1,7 +1,8 @@
-// Fast contiguous Float32 full reduction.  The generic reduce shader maps one
-// output to one thread, which is appropriate for short reduced dimensions but
-// makes a scalar sum/mean serial.  This pass emits one partial per workgroup;
-// the host records the same pass recursively until one value remains.
+#include "common.hlsli"
+
+// Full reduction in workgroup-sized passes. Each pass emits one partial per
+// group; the host repeats it until a single value remains. Sum/mean/max/min
+// stay Float32. Any/all collapse to 0/1 and the last pass writes one byte.
 
 struct PushConstants
 {
@@ -11,6 +12,7 @@ struct PushConstants
     uint dst_offset;
     uint original_count;
     uint final_pass;
+    uint src_elem;
 };
 
 [[vk::binding(0, 0)]] RWByteAddressBuffer src;
@@ -23,6 +25,8 @@ static const uint kSum = 0u;
 static const uint kMean = 1u;
 static const uint kMax = 2u;
 static const uint kMin = 3u;
+static const uint kAny = 5u;
+static const uint kAll = 6u;
 
 groupshared float partial[kGroupSize];
 
@@ -30,6 +34,7 @@ float identity_value()
 {
     if (pc.op == kMax) return -3.402823466e+38f;
     if (pc.op == kMin) return 3.402823466e+38f;
+    if (pc.op == kAll) return 1.0f;
     return 0.0f;
 }
 
@@ -37,7 +42,24 @@ float combine(float left, float right)
 {
     if (pc.op == kMax) return max(left, right);
     if (pc.op == kMin) return min(left, right);
+    if (pc.op == kAny) return (left != 0.0f || right != 0.0f) ? 1.0f : 0.0f;
+    if (pc.op == kAll) return (left != 0.0f && right != 0.0f) ? 1.0f : 0.0f;
     return left + right;
+}
+
+float load_item(uint index)
+{
+    const uint addr = pc.src_offset + index * pc.src_elem;
+    if (pc.src_elem == 1u)
+    {
+        return load_u8(src, addr) != 0u ? 1.0f : 0.0f;
+    }
+    const float value = asfloat(src.Load(addr));
+    if (pc.op == kAny || pc.op == kAll)
+    {
+        return value != 0.0f ? 1.0f : 0.0f;
+    }
+    return value;
 }
 
 [numthreads(kGroupSize, 1, 1)]
@@ -52,7 +74,7 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID)
         const uint index = first + item * kGroupSize;
         if (index < pc.count)
         {
-            value = combine(value, asfloat(src.Load(pc.src_offset + index * 4u)));
+            value = combine(value, load_item(index));
         }
     }
     partial[lane] = value;
@@ -74,6 +96,11 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID)
         if (pc.final_pass != 0u && pc.op == kMean && pc.original_count != 0u)
         {
             result /= float(pc.original_count);
+        }
+        if (pc.final_pass != 0u && (pc.op == kAny || pc.op == kAll))
+        {
+            store_u8(dst, pc.dst_offset, result != 0.0f ? 1u : 0u);
+            return;
         }
         dst.Store(pc.dst_offset + group_id.x * 4u, asuint(result));
     }

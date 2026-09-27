@@ -13,6 +13,7 @@ struct PushConstants
     uint idx_offset;
     uint idx_is_i64;
     uint dtype;
+    uint wrap;
 };
 
 [[vk::binding(0, 0)]] RWByteAddressBuffer src;
@@ -65,7 +66,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
     const uint i = tmp % n_indices;
     const uint o = tmp / n_indices;
     int sel = read_index(i);
-    if (sel < 0) sel += int(pc.dim_size);
+    if (pc.wrap != 0 && sel < 0)
+    {
+        sel += int(pc.dim_size);
+    }
     if (sel < 0 || sel >= int(pc.dim_size)) return;
 
     const uint src_elem = (o * n_indices + i) * inner + j;

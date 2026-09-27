@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -19,6 +20,7 @@
 #include "cumsum.hlsl.embedded.hpp"
 #include "elementwise.hlsl.embedded.hpp"
 #include "fused_pointwise.hlsl.embedded.hpp"
+#include "gather.hlsl.embedded.hpp"
 #include "index_fill.hlsl.embedded.hpp"
 #include "index_select.hlsl.embedded.hpp"
 #include "mask_flags.hlsl.embedded.hpp"
@@ -28,10 +30,14 @@
 #include "prune.hlsl.embedded.hpp"
 #include "random.hlsl.embedded.hpp"
 #include "reduce.hlsl.embedded.hpp"
+#include "cumsum_scan.hlsl.embedded.hpp"
+#include "reduce_all_arg.hlsl.embedded.hpp"
 #include "reduce_all_f32.hlsl.embedded.hpp"
+#include "reduce_axis.hlsl.embedded.hpp"
 #include "scan_add.hlsl.embedded.hpp"
 #include "scan_block.hlsl.embedded.hpp"
 #include "scatter.hlsl.embedded.hpp"
+#include "select.hlsl.embedded.hpp"
 #include "select_compact.hlsl.embedded.hpp"
 #include "sort_bitonic.hlsl.embedded.hpp"
 #include "strided_copy.hlsl.embedded.hpp"
@@ -92,7 +98,8 @@ const char* shader_name(const ShaderId shader) {
         "index_fill",  "mask_flags",  "scan_block",      "scan_add",     "compact",
         "multinomial", "reduce",      "reduce_all_f32",  "matmul",       "random",
         "cumsum",      "pool",        "scatter",         "select_compact",
-        "cat",         "unpack_rgba", "sort_bitonic"};
+        "cat",         "unpack_rgba", "sort_bitonic", "prune",        "select",
+        "gather",      "reduce_all_arg", "reduce_axis",  "cumsum_scan"};
     const std::size_t index = static_cast<std::size_t>(shader);
     return index < names.size() ? names[index] : "unknown";
 }
@@ -227,17 +234,22 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::Compact, as_bytes(span{compact_hlsl_spv}), 3, 52},
         {ShaderId::Multinomial, as_bytes(span{multinomial_hlsl_spv}), 3, 32},
         {ShaderId::Reduce, as_bytes(span{reduce_hlsl_spv}), 3, 40},
-        {ShaderId::ReduceAllF32, as_bytes(span{reduce_all_f32_hlsl_spv}), 2, 24},
+        {ShaderId::ReduceAllF32, as_bytes(span{reduce_all_f32_hlsl_spv}), 2, 28},
         {ShaderId::Matmul, as_bytes(span{matmul_hlsl_spv}), 3, 56},
         {ShaderId::Random, as_bytes(span{random_hlsl_spv}), 2, 44},
         {ShaderId::Cumsum, as_bytes(span{cumsum_hlsl_spv}), 2, 28},
         {ShaderId::Pool, as_bytes(span{pool_hlsl_spv}), 2, 48},
-        {ShaderId::Scatter, as_bytes(span{scatter_hlsl_spv}), 3, 44},
+        {ShaderId::Scatter, as_bytes(span{scatter_hlsl_spv}), 3, 48},
         {ShaderId::SelectCompact, as_bytes(span{select_compact_hlsl_spv}), 4, 28},
         {ShaderId::Cat, as_bytes(span{cat_hlsl_spv}), 3, 24},
         {ShaderId::UnpackRgba, as_bytes(span{unpack_rgba_hlsl_spv}), 4, 24},
         {ShaderId::SortBitonic, as_bytes(span{sort_bitonic_hlsl_spv}), 4, 28},
         {ShaderId::Prune, as_bytes(span{prune_hlsl_spv}), 8, 44},
+        {ShaderId::Select, as_bytes(span{select_hlsl_spv}), 4, 48},
+        {ShaderId::Gather, as_bytes(span{gather_hlsl_spv}), 3, 104},
+        {ShaderId::ReduceAllArg, as_bytes(span{reduce_all_arg_hlsl_spv}), 2, 24},
+        {ShaderId::ReduceAxis, as_bytes(span{reduce_axis_hlsl_spv}), 2, 44},
+        {ShaderId::CumsumScan, as_bytes(span{cumsum_scan_hlsl_spv}), 3, 32},
     }};
 }
 
@@ -905,8 +917,12 @@ void Context::submit_async_locked() {
 
 void Context::retire_async_locked() {
     if (!in_flight_) return;
+    const auto wait_started = std::chrono::steady_clock::now();
     check(vkWaitForFences(device_, 1, &completion_fence_, VK_TRUE, UINT64_MAX),
           "vkWaitForFences");
+    op_profile_.wait_ms += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - wait_started).count();
+    ++op_profile_.batches;
     check(vkResetFences(device_, 1, &completion_fence_), "vkResetFences");
     in_flight_ = false;
     if (op_profile_.enabled) collect_op_profile_locked();
@@ -1007,6 +1023,12 @@ void Context::report_op_profile_locked() {
             total_ms > 0.0 ? 100.0 * op_profile_.total_ms[slot] / total_ms : 0.0);
     }
     std::fprintf(stderr, "  %-16s calls=%-8s total_ms=%-9.4f\n", "TOTAL", "-", total_ms);
+    std::fprintf(stderr,
+                 "tinytensor_vulkan_batches batches=%llu dispatches=%llu "
+                 "gpu_busy_ms=%.1f fence_wait_ms=%.1f\n",
+                 static_cast<unsigned long long>(op_profile_.batches),
+                 static_cast<unsigned long long>(op_profile_.dispatches),
+                 total_ms, op_profile_.wait_ms);
 }
 
 std::vector<Context::OpProfileEntry> Context::op_profile() const {
@@ -1270,6 +1292,7 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
             op_profile_.recorded * 2);
     }
     vkCmdDispatch(command_, groups_x, groups_y, groups_z);
+    ++op_profile_.dispatches;
     if (profile) {
         vkCmdWriteTimestamp(
             command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, op_profile_.pool,
@@ -1317,6 +1340,18 @@ void synchronize() {
 
 void submit_async() {
     runtime::Context::get().submit_async();
+}
+
+double device_wait_ms() {
+    return runtime::Context::get().device_wait_ms();
+}
+
+std::uint64_t dispatch_count() {
+    return runtime::Context::get().dispatch_count();
+}
+
+double device_busy_ms() {
+    return runtime::Context::get().device_busy_ms();
 }
 
 void shutdown() {

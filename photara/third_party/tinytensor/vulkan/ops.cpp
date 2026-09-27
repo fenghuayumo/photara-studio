@@ -595,7 +595,8 @@ void index_fill(Tensor& dst, const Tensor& indices, float value, int dim) {
                             groups_for(outer * idx.numel() * inner));
 }
 
-void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, bool accumulate) {
+void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, bool accumulate,
+             bool wrap_negative) {
     Tensor idx = prepared(indices);
     Tensor values = prepared(src);
     std::size_t outer = 1;
@@ -605,9 +606,9 @@ void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, boo
         inner *= dst.size(axis);
     struct Push {
         std::uint32_t op, outer, dim_size, inner, n_indices, elem_size;
-        std::uint32_t src_offset, dst_offset, idx_offset, idx_is_i64, dtype;
+        std::uint32_t src_offset, dst_offset, idx_offset, idx_is_i64, dtype, wrap;
     } push{};
-    static_assert(sizeof(push) == 44);
+    static_assert(sizeof(push) == 48);
     push.op = accumulate ? 1U : 0U;
     push.outer = u32(outer);
     push.dim_size = u32(dst.size(static_cast<std::size_t>(dim)));
@@ -619,9 +620,52 @@ void scatter(Tensor& dst, const Tensor& indices, const Tensor& src, int dim, boo
     push.idx_offset = u32(byte_offset(idx));
     push.idx_is_i64 = idx.dtype() == DataType::Int64 ? 1U : 0U;
     push.dtype = static_cast<std::uint32_t>(dst.dtype());
+    push.wrap = wrap_negative ? 1U : 0U;
     std::array<BufferBinding, 3> bindings{bind(values), bind(idx), bind(dst)};
     Context::get().dispatch(ShaderId::Scatter, bindings, &push, sizeof(push),
                             groups_for(outer * idx.numel() * inner));
+}
+
+void gather(const Tensor& src, const Tensor& indices, Tensor& out, int dim, int mode) {
+    if (src.ndim() > 8 || indices.ndim() > 8) {
+        throw std::runtime_error("Vulkan gather supports rank <= 8");
+    }
+    if (out.numel() == 0) return;
+    Tensor input = prepared(src);
+    Tensor idx = prepared(indices);
+    struct Push {
+        std::uint32_t rank;
+        std::uint32_t dim;
+        std::uint32_t count;
+        std::uint32_t mode;
+        std::uint32_t elem_size;
+        std::uint32_t src_offset;
+        std::uint32_t dst_offset;
+        std::uint32_t idx_offset;
+        std::uint32_t idx_is_i64;
+        std::uint32_t idx_rank;
+        std::uint32_t src_shape[8];
+        std::uint32_t idx_shape[8];
+    } push{};
+    static_assert(sizeof(push) == 104);
+    push.rank = u32(input.ndim());
+    push.dim = u32(static_cast<std::size_t>(dim));
+    push.count = u32(out.numel());
+    push.mode = static_cast<std::uint32_t>(mode);
+    push.elem_size = u32(dtype_size(input.dtype()));
+    push.src_offset = u32(byte_offset(input));
+    push.dst_offset = u32(byte_offset(out));
+    push.idx_offset = u32(byte_offset(idx));
+    push.idx_is_i64 = idx.dtype() == DataType::Int64 ? 1U : 0U;
+    push.idx_rank = u32(idx.ndim());
+    for (std::size_t axis = 0; axis < input.ndim() && axis < 8; ++axis) {
+        push.src_shape[axis] = u32(input.size(axis));
+    }
+    for (std::size_t axis = 0; axis < idx.ndim() && axis < 8; ++axis) {
+        push.idx_shape[axis] = u32(idx.size(axis));
+    }
+    std::array<BufferBinding, 3> bindings{bind(input), bind(idx), bind(out)};
+    Context::get().dispatch(ShaderId::Gather, bindings, &push, sizeof(push), groups_for(out.numel()));
 }
 
 void prune_masks(const Tensor& means, const Tensor& log_scales,
@@ -923,25 +967,31 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
         return out;
     }
 
-    // Scalar Float32 reductions dominate image losses and optimizer metrics.
-    // The generic shader assigns one thread to each output, so a full reduce
-    // would otherwise run serially in a single thread.  Record a tree of
-    // 256-thread, four-items-per-lane reductions instead.  All intermediate
-    // buffers stay device-local and all passes remain in the current batch.
+    // The generic shader assigns one thread to each output and walks the whole
+    // reduced axis. A full reduction is then a single thread, and a long
+    // contiguous row is a long serial loop. Workgroup trees and one group per
+    // row cover those cases. Intermediate buffers stay alive until this call
+    // returns; the context keeps recorded batches from recycling them.
     const bool all_axes = axes.empty() ||
         std::all_of(reduced.begin(), reduced.begin() + input.ndim(), [](bool value) {
             return value;
         });
-    if (all_axes && input.dtype() == DataType::Float32 && out_dtype == DataType::Float32 &&
-        (kind == ReduceKind::Sum || kind == ReduceKind::Mean ||
-         kind == ReduceKind::Max || kind == ReduceKind::Min)) {
+    const bool scalar_float = all_axes && input.dtype() == DataType::Float32 &&
+                              out_dtype == DataType::Float32 &&
+                              (kind == ReduceKind::Sum || kind == ReduceKind::Mean ||
+                               kind == ReduceKind::Max || kind == ReduceKind::Min);
+    const bool scalar_mask = all_axes &&
+                             (kind == ReduceKind::Any || kind == ReduceKind::All) &&
+                             (input.dtype() == DataType::Bool || input.dtype() == DataType::Float32);
+    if (scalar_float || scalar_mask) {
         constexpr std::uint32_t items_per_group = kGroupSize * 4U;
         struct FastPush {
-            std::uint32_t count, op, src_offset, dst_offset, original_count, final_pass;
+            std::uint32_t count, op, src_offset, dst_offset, original_count, final_pass, src_elem;
         } push{};
-        static_assert(sizeof(push) == 24);
+        static_assert(sizeof(push) == 28);
         push.op = static_cast<std::uint32_t>(kind);
         push.original_count = u32(input.numel());
+        std::uint32_t src_elem = scalar_mask ? u32(dtype_size(input.dtype())) : 4U;
 
         auto& ctx = Context::get();
         Buffer* current = &buffer_of(input);
@@ -965,6 +1015,7 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
             push.src_offset = current_offset;
             push.dst_offset = destination_offset;
             push.final_pass = final_pass ? 1U : 0U;
+            push.src_elem = src_elem;
             std::array<BufferBinding, 2> bindings{current->binding(), destination->binding()};
             ctx.dispatch(ShaderId::ReduceAllF32, bindings, &push, sizeof(push), groups);
             if (final_pass) break;
@@ -972,8 +1023,97 @@ Tensor reduce(const Tensor& src, const std::vector<int>& axes, bool keepdim, Red
             current = partials.back().get();
             current_offset = 0;
             current_count = groups;
+            src_elem = 4U;
         }
         return out;
+    }
+    if (all_axes && input.dtype() == DataType::Float32 &&
+        (kind == ReduceKind::Argmax || kind == ReduceKind::Argmin)) {
+        constexpr std::uint32_t items_per_group = kGroupSize * 4U;
+        struct ArgPush {
+            std::uint32_t count, argmax, src_offset, dst_offset, src_is_pair, final_pass;
+        } push{};
+        static_assert(sizeof(push) == 24);
+        push.argmax = kind == ReduceKind::Argmax ? 1U : 0U;
+        auto& ctx = Context::get();
+        Buffer* current = &buffer_of(input);
+        std::uint32_t current_offset = u32(byte_offset(input));
+        std::uint32_t current_count = u32(input.numel());
+        std::uint32_t src_is_pair = 0;
+        std::vector<std::shared_ptr<Buffer>> partials;
+        while (true) {
+            const std::uint32_t groups = std::max(1U, ceil_div(current_count, items_per_group));
+            const bool final_pass = groups == 1U;
+            std::shared_ptr<Buffer> partial;
+            Buffer* destination = nullptr;
+            std::uint32_t destination_offset = 0;
+            if (final_pass) {
+                destination = &buffer_of(out);
+                destination_offset = u32(byte_offset(out));
+            } else {
+                partial = ctx.alloc(static_cast<std::size_t>(groups) * sizeof(float) * 2U);
+                destination = partial.get();
+            }
+            push.count = current_count;
+            push.src_offset = current_offset;
+            push.dst_offset = destination_offset;
+            push.src_is_pair = src_is_pair;
+            push.final_pass = final_pass ? 1U : 0U;
+            std::array<BufferBinding, 2> bindings{current->binding(), destination->binding()};
+            ctx.dispatch(ShaderId::ReduceAllArg, bindings, &push, sizeof(push), groups);
+            if (final_pass) break;
+            partials.push_back(std::move(partial));
+            current = partials.back().get();
+            current_offset = 0;
+            current_count = groups;
+            src_is_pair = 1U;
+        }
+        return out;
+    }
+    int reduced_axis = -1;
+    int reduced_axes = 0;
+    for (std::size_t axis = 0; axis < input.ndim(); ++axis) {
+        if (!reduced[axis]) continue;
+        reduced_axis = static_cast<int>(axis);
+        ++reduced_axes;
+    }
+    if (reduced_axes == 1 && input.is_contiguous() &&
+        (input.dtype() == DataType::Float32 || input.dtype() == DataType::Bool)) {
+        std::size_t outer = 1;
+        std::size_t inner = 1;
+        for (int axis = 0; axis < reduced_axis; ++axis) outer *= input.size(static_cast<std::size_t>(axis));
+        for (std::size_t axis = static_cast<std::size_t>(reduced_axis) + 1; axis < input.ndim(); ++axis)
+            inner *= input.size(axis);
+        const std::size_t reduce_n = input.size(static_cast<std::size_t>(reduced_axis));
+        const bool supported =
+            kind == ReduceKind::Sum || kind == ReduceKind::Mean || kind == ReduceKind::Max ||
+            kind == ReduceKind::Min || kind == ReduceKind::Prod || kind == ReduceKind::Any ||
+            kind == ReduceKind::All || kind == ReduceKind::Argmax || kind == ReduceKind::Argmin;
+        if (supported && outer * std::max<std::size_t>(inner, 1) > 1) {
+            struct AxisPush {
+                std::uint32_t mode, outer, reduce, inner, op;
+                std::uint32_t src_offset, dst_offset, elem_in, elem_out, dtype_in, dtype_out;
+            } push{};
+            static_assert(sizeof(push) == 44);
+            const bool contiguous_row = inner == 1 && reduce_n >= 64;
+            push.mode = contiguous_row ? 1U : 0U;
+            push.outer = u32(outer);
+            push.reduce = u32(reduce_n);
+            push.inner = u32(std::max<std::size_t>(inner, 1));
+            push.op = static_cast<std::uint32_t>(kind);
+            push.src_offset = u32(byte_offset(input));
+            push.dst_offset = u32(byte_offset(out));
+            push.elem_in = u32(dtype_size(input.dtype()));
+            push.elem_out = u32(dtype_size(out.dtype()));
+            push.dtype_in = static_cast<std::uint32_t>(input.dtype());
+            push.dtype_out = static_cast<std::uint32_t>(out_dtype);
+            std::array<BufferBinding, 2> bindings{bind(input), bind(out)};
+            const std::uint32_t groups = contiguous_row
+                                             ? std::max(1U, push.outer)
+                                             : groups_for(outer * std::max<std::size_t>(inner, 1));
+            Context::get().dispatch(ShaderId::ReduceAxis, bindings, &push, sizeof(push), groups);
+            return out;
+        }
     }
 
     std::array<std::uint32_t, 24> metadata{};
@@ -1038,9 +1178,51 @@ Tensor cumsum(const Tensor& src, int dim) {
     for (int axis = 0; axis < dim; ++axis) outer *= input.size(static_cast<std::size_t>(axis));
     for (std::size_t axis = static_cast<std::size_t>(dim) + 1; axis < input.ndim(); ++axis)
         inner *= input.size(axis);
+    const std::size_t length = input.size(static_cast<std::size_t>(dim));
+    // A single thread walking a million-element line dominates the step.
+    // Contiguous Float32 lines of at least 4096 elements scan in 1024-wide
+    // chunks, then one group turns the chunk totals into exclusive prefixes.
+    constexpr std::uint32_t kChunk = 1024;
+    const std::uint32_t chunks = length == 0 ? 0U : ceil_div(u32(length), kChunk);
+    if (input.dtype() == DataType::Float32 && inner == 1 && length >= 4096 && chunks <= kChunk &&
+        outer > 0) {
+        auto& ctx = Context::get();
+        auto sums = ctx.alloc(outer * static_cast<std::size_t>(chunks) * sizeof(float));
+        struct ScanPush {
+            std::uint32_t mode, rows, length, num_chunks, src_offset, dst_offset, sums_offset, chunk;
+        } scan{};
+        static_assert(sizeof(scan) == 32);
+        scan.rows = u32(outer);
+        scan.length = u32(length);
+        scan.num_chunks = chunks;
+        scan.chunk = kChunk;
+        scan.sums_offset = 0;
+        std::array<BufferBinding, 3> bindings{bind(input), bind(out), sums->binding()};
+        scan.mode = 0;
+        scan.src_offset = u32(byte_offset(input));
+        scan.dst_offset = u32(byte_offset(out));
+        ctx.dispatch(ShaderId::CumsumScan, bindings, &scan, sizeof(scan),
+                     std::max(1U, scan.rows * chunks));
+        if (chunks > 1U) {
+            scan.mode = 1;
+            scan.src_offset = 0;
+            scan.dst_offset = 0;
+            scan.length = chunks;
+            std::array<BufferBinding, 3> sum_bindings{sums->binding(), sums->binding(), sums->binding()};
+            ctx.dispatch(ShaderId::CumsumScan, sum_bindings, &scan, sizeof(scan), scan.rows);
+            scan.mode = 2;
+            scan.length = u32(length);
+            scan.src_offset = u32(byte_offset(out));
+            scan.dst_offset = u32(byte_offset(out));
+            std::array<BufferBinding, 3> add_bindings{bind(out), bind(out), sums->binding()};
+            ctx.dispatch(ShaderId::CumsumScan, add_bindings, &scan, sizeof(scan),
+                         groups_for(outer * length));
+        }
+        return out;
+    }
     struct Push {
         std::uint32_t outer, dim_size, inner, src_offset, dst_offset, dtype, elem_size;
-    } push{u32(outer), u32(input.size(static_cast<std::size_t>(dim))), u32(inner),
+    } push{u32(outer), u32(length), u32(inner),
            u32(byte_offset(input)), u32(byte_offset(out)),
            static_cast<std::uint32_t>(input.dtype()), u32(dtype_size(input.dtype()))};
     std::array<BufferBinding, 2> bindings{bind(input), bind(out)};
@@ -1235,6 +1417,208 @@ std::pair<Tensor, Tensor> sort_1d_f32(const Tensor& values, bool descending) {
     }
     return {current_values.slice(0, 0, count),
             current_indices.slice(0, 0, count)};
+}
+
+namespace {
+
+// Two 16-bit digits cover the whole 32-bit key, so a selection costs two
+// histogram passes and one emit pass no matter how large the row count is.
+// The bins stay device-local; only the 256 KiB histogram crosses to the host.
+constexpr std::uint32_t kSelectBinCount = 1U << 16;
+
+struct SelectPush {
+    std::uint32_t count;
+    std::uint32_t src_offset;
+    std::uint32_t mask_offset;
+    std::uint32_t has_mask;
+    std::uint32_t bins_offset;
+    std::uint32_t dst_offset;
+    std::uint32_t prefix_hi;
+    std::uint32_t prefix_lo;
+    std::uint32_t prefix_bits;
+    std::uint32_t limit;
+    std::uint32_t descending;
+    std::uint32_t mode;
+    std::uint32_t threshold_hi;
+    std::uint32_t threshold_lo;
+};
+static_assert(sizeof(SelectPush) == 56);
+
+// Host twin of the shader's key transform, used to turn the resolved key back
+// into the value it came from without a third pass.
+float value_of_select_key(std::uint32_t select_key, bool descending) {
+    const std::uint32_t ordered = descending ? ~select_key : select_key;
+    const std::uint32_t bits =
+        (ordered & 0x80000000U) != 0U ? (ordered & 0x7FFFFFFFU) : ~ordered;
+    float value = 0.0F;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+// Resolves the exact key of the `rank`-th row (1-based) in the requested
+// direction among the rows `mask` selects, and reports how many rows hold a
+// strictly smaller key. The key is 64 bits wide in effect - the value's
+// transform in the high half, the row index in the low half - which is what
+// makes ties resolve by row index exactly as the sort did.
+bool select_resolve_rank(const Tensor& values, Buffer& bins, const Tensor& mask,
+                         const std::uint32_t rank, const bool descending,
+                         std::uint32_t* key_hi, std::uint32_t* key_lo,
+                         std::uint64_t* below) {
+    const std::size_t rows = values.numel();
+    if (rows == 0 || rank == 0) {
+        return false;
+    }
+    const bool masked = mask.is_valid();
+    if (masked && mask.numel() != rows) {
+        throw std::invalid_argument("Vulkan select mask must match the values");
+    }
+    auto& ctx = Context::get();
+    std::array<BufferBinding, 4> bindings{
+        bind(values), masked ? bind(mask) : dummy_binding(), bins.binding(),
+        dummy_binding()};
+    SelectPush push{};
+    push.count = u32(rows);
+    push.src_offset = u32(byte_offset(values));
+    push.mask_offset = masked ? u32(byte_offset(mask)) : 0U;
+    push.has_mask = masked ? 1U : 0U;
+    push.bins_offset = 0U;
+    push.descending = descending ? 1U : 0U;
+    push.mode = 0U;
+
+    std::vector<std::uint32_t> histogram(kSelectBinCount);
+    std::uint32_t prefix_hi = 0;
+    std::uint32_t prefix_lo = 0;
+    std::uint64_t below_total = 0;
+    std::uint64_t remaining = rank;
+    for (std::uint32_t pass = 0; pass < 4U; ++pass) {
+        ctx.fill_zero(bins, 0, kSelectBinCount * sizeof(std::uint32_t));
+        push.prefix_hi = prefix_hi;
+        push.prefix_lo = prefix_lo;
+        push.prefix_bits = pass * 16U;
+        ctx.dispatch(ShaderId::Select, bindings, &push, sizeof(push), groups_for(rows));
+        ctx.download(bins, 0, histogram.data(), kSelectBinCount * sizeof(std::uint32_t));
+
+        // Ascending walk: the first bin whose running total reaches the
+        // remaining rank holds the answer, and every row counted before it
+        // sorts strictly below the answer.
+        std::uint32_t chosen = 0;
+        bool found = false;
+        std::uint64_t running = 0;
+        for (std::uint32_t bin = 0; bin < kSelectBinCount; ++bin) {
+            const std::uint64_t next = running + histogram[bin];
+            if (next >= remaining) {
+                chosen = bin;
+                found = true;
+                break;
+            }
+            running = next;
+        }
+        if (!found) {
+            // Fewer rows qualify than the caller asked for. Taking the
+            // highest key instead of the rank-th gives the caller exactly
+            // those rows, which is what a sort-and-truncate would have
+            // returned; only an empty selection is a genuine failure.
+            if (running == 0) {
+                return false;
+            }
+            remaining = running;
+            for (std::uint32_t bin = kSelectBinCount; bin-- > 0;) {
+                if (histogram[bin] != 0) {
+                    chosen = bin;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                return false;
+            }
+            running -= histogram[chosen];
+        }
+        below_total += running;
+        remaining -= running;
+        if (pass < 2U) {
+            prefix_hi = (prefix_hi << 16U) | chosen;
+        } else {
+            prefix_lo = (prefix_lo << 16U) | chosen;
+        }
+    }
+    *key_hi = prefix_hi;
+    *key_lo = prefix_lo;
+    *below = below_total;
+    return true;
+}
+
+}  // namespace
+
+bool select_nth_value(const Tensor& values, const Tensor& mask, const std::uint32_t rank,
+                      const bool descending, float* value) {
+    if (value == nullptr) {
+        return false;
+    }
+    Tensor input = prepared(values);
+    Tensor selector = mask.is_valid() ? prepared(mask) : Tensor{};
+    auto bins = Context::get().alloc(kSelectBinCount * sizeof(std::uint32_t));
+    std::uint32_t key_hi = 0;
+    std::uint32_t key_lo = 0;
+    std::uint64_t below = 0;
+    if (!select_resolve_rank(input, *bins, selector, rank, descending, &key_hi, &key_lo,
+                             &below)) {
+        return false;
+    }
+    *value = value_of_select_key(key_hi, descending);
+    return true;
+}
+
+Tensor select_topk_indices(const Tensor& values, const Tensor& mask, const std::uint32_t count,
+                           const bool descending, std::uint32_t* emitted) {
+    if (emitted != nullptr) {
+        *emitted = 0;
+    }
+    if (count == 0) {
+        return {};
+    }
+    Tensor input = prepared(values);
+    Tensor selector = mask.is_valid() ? prepared(mask) : Tensor{};
+    auto& ctx = Context::get();
+    auto bins = ctx.alloc(kSelectBinCount * sizeof(std::uint32_t));
+    std::uint32_t key_hi = 0;
+    std::uint32_t key_lo = 0;
+    std::uint64_t below = 0;
+    if (!select_resolve_rank(input, *bins, selector, count, descending, &key_hi, &key_lo,
+                             &below)) {
+        return {};
+    }
+    // The histogram passes are done with the bins; the first one becomes the
+    // emit ticket, which is also where the caller reads the written count.
+    Tensor out = TensorStorage::empty(TensorShape{count}, DataType::Int32);
+    const bool masked = selector.is_valid();
+    ctx.fill_zero(*bins, 0, sizeof(std::uint32_t));
+    SelectPush push{};
+    push.count = u32(input.numel());
+    push.src_offset = u32(byte_offset(input));
+    push.mask_offset = masked ? u32(byte_offset(selector)) : 0U;
+    push.has_mask = masked ? 1U : 0U;
+    push.bins_offset = 0U;
+    push.dst_offset = u32(byte_offset(out));
+    push.limit = count;
+    push.descending = descending ? 1U : 0U;
+    push.mode = 1U;
+    push.threshold_hi = key_hi;
+    push.threshold_lo = key_lo;
+    std::array<BufferBinding, 4> bindings{
+        bind(input), masked ? bind(selector) : dummy_binding(), bins->binding(), bind(out)};
+    ctx.dispatch(ShaderId::Select, bindings, &push, sizeof(push),
+                 groups_for(input.numel()));
+    std::uint32_t written = 0;
+    ctx.download(*bins, 0, &written, sizeof(written));
+    if (written == 0) {
+        return {};
+    }
+    const std::size_t keep = std::min<std::size_t>(written, count);
+    if (emitted != nullptr) {
+        *emitted = u32(keep);
+    }
+    return out.slice(0, 0, keep);
 }
 
 } // namespace tinytensor::vulkan

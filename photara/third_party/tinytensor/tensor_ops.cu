@@ -633,10 +633,171 @@ namespace tinytensor::tensor_ops {
 
     // ============= MAIN REDUCE OPERATION DISPATCH =============
 
+    __global__ void store_cub_arg_index(const cub::KeyValuePair<int, float>* pair, int64_t* out) {
+        out[0] = static_cast<int64_t>(pair->key);
+    }
+
+    // One output per (outer, inner) position. The stored index is along the
+    // reduced axis, and the first extreme wins, matching the Vulkan reduce.
+    struct ArgLayout {
+        int rank;
+        int argmax;
+        unsigned long long reduce_count;
+        unsigned long long output_count;
+        unsigned long long shape[8];
+        unsigned char reduced[8];
+    };
+
+    __global__ void arg_subspace_kernel(const float* input, int64_t* output, ArgLayout layout) {
+        const unsigned long long tid =
+            static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+        if (tid >= layout.output_count) return;
+        unsigned long long coords[8] = {};
+        unsigned long long remaining = tid;
+        for (int axis = layout.rank - 1; axis >= 0; --axis) {
+            if (layout.reduced[axis]) continue;
+            const unsigned long long dim = layout.shape[axis];
+            coords[axis] = remaining % dim;
+            remaining /= dim;
+        }
+        float best = 0.0f;
+        unsigned long long best_index = 0;
+        bool have = false;
+        for (unsigned long long r = 0; r < layout.reduce_count; ++r) {
+            unsigned long long reduced_remaining = r;
+            unsigned long long full[8];
+            for (int axis = 0; axis < layout.rank; ++axis) full[axis] = coords[axis];
+            for (int axis = layout.rank - 1; axis >= 0; --axis) {
+                if (!layout.reduced[axis]) continue;
+                const unsigned long long dim = layout.shape[axis];
+                full[axis] = reduced_remaining % dim;
+                reduced_remaining /= dim;
+            }
+            unsigned long long linear = 0;
+            unsigned long long stride = 1;
+            for (int axis = layout.rank - 1; axis >= 0; --axis) {
+                linear += full[axis] * stride;
+                stride *= layout.shape[axis];
+            }
+            const float value = input[linear];
+            const bool better = !have || (layout.argmax ? value > best : value < best);
+            if (better) {
+                best = value;
+                best_index = r;
+                have = true;
+            }
+        }
+        output[tid] = static_cast<int64_t>(best_index);
+    }
+
+    __global__ void arg_axis_kernel(const float* input, int64_t* output, size_t outer,
+                                    size_t reduce, size_t inner, int argmax) {
+        const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+        const size_t outputs = outer * inner;
+        if (tid >= outputs || reduce == 0) return;
+        const size_t outer_i = tid / inner;
+        const size_t inner_i = tid - outer_i * inner;
+        const size_t base = outer_i * reduce * inner + inner_i;
+        float best = input[base];
+        size_t best_index = 0;
+        for (size_t r = 1; r < reduce; ++r) {
+            const float value = input[base + r * inner];
+            const bool better = argmax ? value > best : value < best;
+            if (better) {
+                best = value;
+                best_index = r;
+            }
+        }
+        output[tid] = static_cast<int64_t>(best_index);
+    }
+
+    void launch_arg_reduce(const float* input, int64_t* output, const size_t* shape, size_t rank,
+                           const int* axes, size_t num_axes, ReduceOp op, cudaStream_t stream) {
+        size_t n = 1;
+        for (size_t i = 0; i < rank; ++i) n *= shape[i];
+        if (n == 0) return;
+        const bool argmax = op == ReduceOp::Argmax;
+        const bool full = num_axes == 0 || num_axes == rank;
+        if (full) {
+            if (n > static_cast<size_t>(std::numeric_limits<int>::max())) {
+                throw std::runtime_error("argmax/argmin exceeds 32-bit indexing");
+            }
+            const int count = static_cast<int>(n);
+            cub::KeyValuePair<int, float>* pair = nullptr;
+            if (cudaMallocAsync(reinterpret_cast<void**>(&pair), sizeof(*pair), stream) != cudaSuccess) {
+                throw std::runtime_error("argmax/argmin allocation failed");
+            }
+            size_t temp_bytes = 0;
+            if (argmax) {
+                cub::DeviceReduce::ArgMax(nullptr, temp_bytes, input, pair, count, stream);
+            } else {
+                cub::DeviceReduce::ArgMin(nullptr, temp_bytes, input, pair, count, stream);
+            }
+            void* temp = get_cub_temp_storage(temp_bytes, stream);
+            if (argmax) {
+                cub::DeviceReduce::ArgMax(temp, temp_bytes, input, pair, count, stream);
+            } else {
+                cub::DeviceReduce::ArgMin(temp, temp_bytes, input, pair, count, stream);
+            }
+            store_cub_arg_index<<<1, 1, 0, stream>>>(pair, output);
+            cudaFreeAsync(pair, stream);
+            return;
+        }
+
+        if (num_axes == 1) {
+            int axis = axes[0];
+            if (axis < 0) axis += static_cast<int>(rank);
+            size_t outer = 1;
+            size_t inner = 1;
+            for (int i = 0; i < axis; ++i) outer *= shape[i];
+            for (size_t i = static_cast<size_t>(axis) + 1; i < rank; ++i) inner *= shape[i];
+            const size_t outputs = outer * inner;
+            const int threads = 256;
+            const int blocks = static_cast<int>((outputs + threads - 1) / threads);
+            if (blocks > 0) {
+                arg_axis_kernel<<<blocks, threads, 0, stream>>>(
+                    input, output, outer, shape[axis], inner, argmax ? 1 : 0);
+            }
+            return;
+        }
+
+        // Several axes, but not the whole tensor. The index is the offset inside
+        // the reduced subspace, with the last reduced axis varying fastest.
+        std::vector<char> reduced(rank, 0);
+        size_t reduce_count = 1;
+        for (size_t i = 0; i < num_axes; ++i) {
+            int axis = axes[i];
+            if (axis < 0) axis += static_cast<int>(rank);
+            if (axis < 0 || static_cast<size_t>(axis) >= rank || reduced[axis]) continue;
+            reduced[axis] = 1;
+            reduce_count *= shape[axis];
+        }
+        const size_t outputs = n / std::max<size_t>(reduce_count, 1);
+        const int threads = 256;
+        const int blocks = static_cast<int>((outputs + threads - 1) / threads);
+        ArgLayout layout{};
+        layout.rank = static_cast<int>(std::min<size_t>(rank, 8));
+        layout.argmax = argmax ? 1 : 0;
+        layout.reduce_count = reduce_count;
+        layout.output_count = outputs;
+        for (size_t i = 0; i < static_cast<size_t>(layout.rank); ++i) {
+            layout.shape[i] = shape[i];
+            layout.reduced[i] = reduced[i] ? 1 : 0;
+        }
+        if (blocks > 0) {
+            arg_subspace_kernel<<<blocks, threads, 0, stream>>>(input, output, layout);
+        }
+    }
+
     // Internal Float32 implementation (original)
     void launch_reduce_op_float32(const void* input, void* output, const size_t* shape, size_t rank,
                                   const int* axes, size_t num_axes, bool keepdim, ReduceOp op,
                                   cudaStream_t stream) {
+        if (op == ReduceOp::Argmax || op == ReduceOp::Argmin) {
+            launch_arg_reduce(static_cast<const float*>(input), static_cast<int64_t*>(output),
+                              shape, rank, axes, num_axes, op, stream);
+            return;
+        }
 
         size_t n = 1;
         for (size_t i = 0; i < rank; ++i)

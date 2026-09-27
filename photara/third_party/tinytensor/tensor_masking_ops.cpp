@@ -364,6 +364,14 @@ namespace tinytensor {
 
             auto indices_same_device = ensure_same_device(indices);
 
+#ifdef TINYTENSOR_HAS_VULKAN
+            if (device_ == Device::Vulkan) {
+                vulkan::index_select_into(*this, indices_same_device, result, dim,
+                                          static_cast<int>(mode));
+                return result;
+            }
+#endif
+
             // Handle Int64 indices properly
             bool is_int64 = indices_same_device.dtype() == DataType::Int64;
             Tensor indices_int32;
@@ -376,15 +384,18 @@ namespace tinytensor {
 
                 // Dispatch based on source tensor dtype
                 if (dtype_ == DataType::Float32) {
-                    tensor_ops::launch_gather(ptr<float>(), idx_ptr,
-                                              result.ptr<float>(), shape_.dims().data(),
-                                              indices.shape().dims().data(), shape_.rank(), dim,
-                                              result.numel(), static_cast<int>(mode), stream());
+                    // 1D indices select along `dim`. launch_gather expects the
+                    // index tensor to have the same rank as the input and reads
+                    // past a 1-element shape, so use the same kernel as index_select.
+                    tensor_ops::launch_index_select(ptr<float>(), idx_ptr, result.ptr<float>(),
+                                                    shape_.dims().data(), shape_.rank(), dim,
+                                                    indices.numel(), static_cast<int>(mode),
+                                                    stream());
                 } else if (dtype_ == DataType::Int64) {
-                    tensor_ops::launch_gather(ptr<int64_t>(), idx_ptr,
-                                              result.ptr<int64_t>(), shape_.dims().data(),
-                                              indices.shape().dims().data(), shape_.rank(), dim,
-                                              result.numel(), static_cast<int>(mode), stream());
+                    tensor_ops::launch_index_select(ptr<int64_t>(), idx_ptr, result.ptr<int64_t>(),
+                                                    shape_.dims().data(), shape_.rank(), dim,
+                                                    indices.numel(), static_cast<int>(mode),
+                                                    stream());
                 } else {
                     throw std::runtime_error("gather: unsupported dtype for CUDA");
                 }
@@ -448,6 +459,13 @@ namespace tinytensor {
 
         auto result = zeros(indices.shape(), device_, dtype_);
         auto indices_same_device = ensure_same_device(indices);
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            vulkan::gather(*this, indices_same_device, result, dim, static_cast<int>(mode));
+            return result;
+        }
+#endif
 
         if (device_ == Device::CUDA) {
             result.set_stream(stream());
@@ -775,14 +793,69 @@ namespace tinytensor {
     }
 
     Tensor& Tensor::index_fill_(int dim, const Tensor& idx, float val) {
+        materialize_if_deferred();
+        if (!is_valid() || !idx.is_valid() || idx.numel() == 0) return *this;
+        dim = resolve_dim(dim);
+        if (dim < 0 || dim >= static_cast<int>(shape_.rank())) return *this;
+
 #ifdef TINYTENSOR_HAS_VULKAN
         if (device_ == Device::Vulkan) {
-            dim = resolve_dim(dim);
             vulkan::index_fill(*this, idx, val, dim);
             return *this;
         }
 #endif
-        return scatter_(dim, idx, val, ScatterMode::None);
+        if (device_ == Device::CUDA) {
+            auto indices_same_device = ensure_same_device(idx);
+            Tensor indices_int32 = indices_same_device.dtype() == DataType::Int64
+                                       ? indices_same_device.to(DataType::Int32)
+                                       : indices_same_device;
+            const int* idx_ptr = indices_int32.ptr<int>();
+            const size_t* shape = shape_.dims().data();
+            if (dtype_ == DataType::Float32) {
+                tensor_ops::launch_index_fill(ptr<float>(), idx_ptr, val, shape, shape_.rank(), dim,
+                                              idx.numel(), stream());
+            } else if (dtype_ == DataType::Int32) {
+                tensor_ops::launch_index_fill(ptr<int>(), idx_ptr, static_cast<int>(val), shape,
+                                              shape_.rank(), dim, idx.numel(), stream());
+            } else if (dtype_ == DataType::Bool || dtype_ == DataType::UInt8) {
+                tensor_ops::launch_index_fill(ptr<uint8_t>(), idx_ptr, static_cast<uint8_t>(val),
+                                              shape, shape_.rank(), dim, idx.numel(), stream());
+            } else {
+                LOG_ERROR("index_fill_ unsupported dtype {} for CUDA", static_cast<int>(dtype_));
+            }
+            return *this;
+        }
+
+        size_t outer = 1;
+        size_t inner = 1;
+        for (int axis = 0; axis < dim; ++axis) outer *= shape_[axis];
+        for (size_t axis = static_cast<size_t>(dim) + 1; axis < shape_.rank(); ++axis)
+            inner *= shape_[axis];
+        auto indices_same_device = ensure_same_device(idx);
+        const auto fill_cpu = [&](auto* data, auto fill_value, const auto* indices) {
+            for (size_t o = 0; o < outer; ++o) {
+                for (size_t i = 0; i < idx.numel(); ++i) {
+                    auto sel = indices[i];
+                    if (sel < 0) sel += static_cast<decltype(sel)>(shape_[dim]);
+                    if (sel < 0 || sel >= static_cast<decltype(sel)>(shape_[dim])) continue;
+                    for (size_t j = 0; j < inner; ++j) {
+                        data[(o * shape_[dim] + static_cast<size_t>(sel)) * inner + j] = fill_value;
+                    }
+                }
+            }
+        };
+        if (indices_same_device.dtype() == DataType::Int64) {
+            const int64_t* indices = indices_same_device.ptr<int64_t>();
+            if (dtype_ == DataType::Float32) fill_cpu(ptr<float>(), val, indices);
+            else if (dtype_ == DataType::Int32) fill_cpu(ptr<int>(), static_cast<int>(val), indices);
+        } else {
+            const int* indices = indices_same_device.ptr<int>();
+            if (dtype_ == DataType::Float32) fill_cpu(ptr<float>(), val, indices);
+            else if (dtype_ == DataType::Int32) fill_cpu(ptr<int>(), static_cast<int>(val), indices);
+            else if (dtype_ == DataType::Bool || dtype_ == DataType::UInt8)
+                fill_cpu(ptr<unsigned char>(), static_cast<unsigned char>(val), indices);
+        }
+        return *this;
     }
 
     Tensor& Tensor::index_copy_(int dim, const Tensor& idx, const Tensor& src) {
@@ -806,6 +879,13 @@ namespace tinytensor {
             LOG_ERROR("Source tensor has wrong shape for index_copy_");
             return *this;
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            vulkan::scatter(*this, idx, src, dim, false, false);
+            return *this;
+        }
+#endif
 
         auto idx_same_device = ensure_same_device(idx);
         auto src_same_device = ensure_same_device(src);
@@ -892,6 +972,27 @@ namespace tinytensor {
             LOG_ERROR("index_add_ requires 1D index tensor");
             return *this;
         }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (device_ == Device::Vulkan) {
+            std::vector<size_t> expected = shape_.dims();
+            expected[static_cast<size_t>(dim)] = idx.numel();
+            const bool shape_ok = shape_.rank() == 1
+                                      ? src.ndim() == 1 && src.numel() == idx.numel()
+                                      : src.shape() == TensorShape(expected);
+            if (!shape_ok) {
+                LOG_ERROR("Source shape mismatch in index_add_");
+                return *this;
+            }
+            if (dtype_ != DataType::Float32 && dtype_ != DataType::Int32) {
+                LOG_ERROR("index_add_ only supports Float32 and Int32 types, got {}",
+                          static_cast<int>(dtype_));
+                return *this;
+            }
+            vulkan::scatter(*this, idx, src, dim, true, false);
+            return *this;
+        }
+#endif
 
         if (shape_.rank() == 1 && dim == 0) {
             if (src.ndim() != 1 || src.numel() != idx.numel()) {

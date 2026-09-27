@@ -39,6 +39,11 @@ enum class ShaderId : std::uint32_t {
     UnpackRgba,
     SortBitonic,
     Prune,
+    Select,
+    Gather,
+    ReduceAllArg,
+    ReduceAxis,
+    CumsumScan,
     Count
 };
 
@@ -148,6 +153,19 @@ public:
     };
     [[nodiscard]] std::vector<OpProfileEntry> op_profile() const;
     [[nodiscard]] std::uint32_t op_profile_flushes() const { return op_profile_.flushes; }
+    // Cumulative, always-on diagnostics: wall time the host spent blocked in
+    // vkWaitForFences and the number of recorded dispatches. Cheap enough for
+    // production runs and the only way to tell a GPU-bound phase from a
+    // synchronization-bound one.
+    [[nodiscard]] double device_wait_ms() const { return op_profile_.wait_ms; }
+    [[nodiscard]] std::uint64_t dispatch_count() const { return op_profile_.dispatches; }
+    // Sum of every shader's accumulated timestamp delta. Zero unless the
+    // timestamp profiler is enabled, because that is what fills it.
+    [[nodiscard]] double device_busy_ms() const {
+        double total = 0.0;
+        for (const double value : op_profile_.total_ms) total += value;
+        return total;
+    }
 
     [[nodiscard]] Buffer& dummy();
 
@@ -231,6 +249,13 @@ private:
         // size class keeps the table readable.
         static constexpr std::uint32_t kElementBuckets = 26;
         bool enabled = false;
+        // Always-on batch counters. The timestamp table needs the profile
+        // switch, but the dispatch count and the time the host spends inside
+        // vkWaitForFences are cheap enough to keep for every run: together
+        // they separate "the GPU is behind" from "the CPU is behind".
+        std::uint64_t dispatches = 0;
+        std::uint64_t batches = 0;
+        double wait_ms = 0.0;
         VkQueryPool pool = VK_NULL_HANDLE;
         std::uint32_t interval = 200;
         std::uint32_t flushes = 0;
