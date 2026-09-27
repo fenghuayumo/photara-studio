@@ -11,13 +11,29 @@ struct IgsSelection {
     std::size_t replacement{}, oversized{}, growth{};
 };
 
+// Optional per-stage wall time for select_igs_parents, filled only when the
+// caller passes a pointer (the SPLAT_IGS_PROFILE run). Wall time is the right
+// unit here: each stage ends in a host readback, so it carries the queue drain
+// as well as the dispatch recording.
+struct IgsSelectionProfile {
+    double replacement_gumbel_ms{};
+    double replacement_count_ms{};
+    double replacement_sort_ms{};
+    double oversized_rank_ms{};
+    double growth_gumbel_ms{};
+    double growth_count_ms{};
+    double growth_sort_ms{};
+    double compact_ms{};
+};
+
 // Allocate disjoint sets before their union, preserving replacement priority.
 IgsSelection select_igs_parents(
     const tinytensor::Tensor& replacement_weights,
     const tinytensor::Tensor& oversize_scores,
     const tinytensor::Tensor& growth_weights,
     std::size_t replacement_slots, std::size_t desired_growth,
-    std::size_t capacity, std::mt19937* random = nullptr);
+    std::size_t capacity, std::mt19937* random = nullptr,
+    IgsSelectionProfile* profile = nullptr);
 
 // ADC-IGS refinement. Every decision - prune masks, candidate scores and
 // weights, replacement and growth sampling, which parents split - is shared
