@@ -353,9 +353,11 @@ struct TrainingOptions {
     // critical path, and at 2MP/1M Gaussians they are already hidden behind
     // compute, so the VRAM is better left to the training state.
     std::size_t training_device_cache_max_bytes{0};
-    // Upload already-decoded future views on a non-blocking CUDA copy stream.
-    // CUDA allocation and enqueue remain on the training thread; each in-flight
-    // transfer owns its pinned staging storage until its completion event fires.
+    // Upload decoded views without blocking the training thread. CUDA uses a
+    // non-blocking copy stream; Vulkan immediately submits packed-image copies
+    // through a mapped staging ring before recording the device unpack.
+    // Allocation and enqueue remain on the training thread. Each in-flight
+    // transfer owns its staging storage until its completion fence fires.
     // The copy engine only ever writes loader-owned device staging; the packed
     // view is hopped into the cache entry on the compute stream, because pool
     // memory must not be touched by a transfer from another stream (the pool

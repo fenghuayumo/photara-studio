@@ -884,8 +884,17 @@ TrainingView upload_training_view(
         if (pixels != height * width)
             throw std::invalid_argument(
                 "GGGS packed training image size does not match camera");
-        const auto packed = tinytensor::Tensor::from_vector(
-            host.rgba, {height, width}, device);
+        tinytensor::Tensor packed;
+        if (options.training_async_upload) {
+            packed = tinytensor::Tensor::empty(
+                {height, width}, device, tinytensor::DataType::Int32);
+            tinytensor::vulkan::upload_async(
+                packed, host.rgba.data(),
+                host.rgba.size() * sizeof(host.rgba.front()));
+        } else {
+            packed = tinytensor::Tensor::from_vector(
+                host.rgba, {height, width}, device);
+        }
         result.rgb = tinytensor::Tensor::empty(
             {std::size_t{3}, height, width}, device);
         result.gray = decode_gray

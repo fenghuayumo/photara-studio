@@ -3,6 +3,7 @@
 #include "vulkan/backend.hpp"
 #include "vulkan/runtime/check.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -120,6 +121,11 @@ public:
     void copy(Buffer& dst, std::size_t dst_offset, const Buffer& src, std::size_t src_offset,
               std::size_t bytes);
     void upload(Buffer& dst, std::size_t dst_offset, const void* data, std::size_t bytes);
+    // Submit one host-to-device copy immediately without draining the compute
+    // batch. Intended for new, independent buffers whose first consumer is
+    // recorded after this call (for example a packed training image).
+    void upload_async(Buffer& dst, std::size_t dst_offset, const void* data,
+                      std::size_t bytes);
     void download(const Buffer& src, std::size_t src_offset, void* data, std::size_t bytes);
 
     void dispatch(ShaderId shader,
@@ -211,6 +217,7 @@ private:
 
     void ensure_staging(std::size_t bytes);
     void ensure_readback_staging(std::size_t bytes);
+    void retire_upload_slot_locked(std::size_t slot);
     void barrier_buffer(VkCommandBuffer cmd, VkBuffer buffer,
                         VkAccessFlags src_access, VkAccessFlags dst_access,
                         VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage);
@@ -225,6 +232,7 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     std::uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    VkCommandPool upload_command_pool_ = VK_NULL_HANDLE;
     VkFence completion_fence_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor_ = nullptr;
@@ -257,6 +265,16 @@ private:
     std::unique_ptr<Buffer> staging_;
     std::unique_ptr<Buffer> readback_staging_;
     std::unique_ptr<Buffer> dummy_;
+
+    struct UploadSlot {
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        std::unique_ptr<Buffer> staging;
+        bool in_flight = false;
+    };
+    static constexpr std::size_t kUploadSlotCount = 2;
+    std::array<UploadSlot, kUploadSlotCount> upload_slots_{};
+    std::size_t next_upload_slot_ = 0;
 
     struct OpProfile {
         // Element-count buckets are powers of two: one entry per shader and
