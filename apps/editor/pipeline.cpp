@@ -1261,8 +1261,11 @@ std::string build_train_command(
     command << " --splat-strategy " << strategy_flag(settings.strategy)
             << " --splat-iterations " << settings.iterations
             << " --splat-densification-cap "
-            << std::max(1, settings.densification_cap)
-            << " --splat-sh-degree "
+            << std::max(1, settings.densification_cap);
+    if (settings.max_scale_ratio >= 1.F)
+        command << " --splat-max-scale-ratio "
+                << settings.max_scale_ratio;
+    command << " --splat-sh-degree "
             << std::clamp(settings.sh_degree, 0, 3)
             << " --splat-preview-interval " << settings.preview_interval
             << " --splat-preview-view 0"

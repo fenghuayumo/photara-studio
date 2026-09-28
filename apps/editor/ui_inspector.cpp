@@ -437,6 +437,37 @@ Action draw_inspector(App& app) {
                 "Maximum Gaussian count during densification.\n"
                 "Initialization uses the full source cloud.\n"
                 "Default 1,000,000."));
+        bool limit_axis_ratio = app.settings.max_scale_ratio >= 1.F;
+        if (ImGui::Checkbox(
+                tr("Limit Gaussian axis ratio"), &limit_axis_ratio))
+            app.settings.max_scale_ratio = limit_axis_ratio ? 100.F : 0.F;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr(
+                "Clamps each Gaussian's longest/shortest scale ratio.\n"
+                "Prevents extreme needle/pancake Gaussians that amplify "
+                "float gradients and hurt rendering.\n"
+                "Typical values: 20-160."));
+        if (limit_axis_ratio) {
+            theme::caption("Max axis ratio");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::InputFloat(
+                "##max_scale_ratio", &app.settings.max_scale_ratio, 10.F,
+                100.F, "%.0f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr(
+                    "Hard upper bound for longest/shortest axis ratio.\n"
+                    "Must be at least 1."));
+            app.settings.max_scale_ratio =
+                std::max(app.settings.max_scale_ratio, 1.F);
+            if (app.settings.training_backend == 1) {
+                ImGui::PushTextWrapPos(0.F);
+                ImGui::TextColored(
+                    theme::warning, "%s", tr(
+                        "Scale-ratio limiting requires the CUDA training "
+                        "backend."));
+                ImGui::PopTextWrapPos();
+            }
+        }
         theme::caption("SH degree");
         ImGui::SetNextItemWidth(-1.F);
         const char* sh_degrees[] = {"0", "1", "2", "3"};
