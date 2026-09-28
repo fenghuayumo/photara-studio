@@ -913,9 +913,20 @@ void Context::recycle_locked(Buffer* buffer) {
 }
 
 void Context::trim_pool_locked() {
-    const bool upload_in_flight = std::any_of(
-        upload_slots_.begin(), upload_slots_.end(),
-        [](const UploadSlot& slot) { return slot.in_flight; });
+    bool upload_in_flight = false;
+    for (UploadSlot& slot : upload_slots_) {
+        if (!slot.in_flight) continue;
+        const VkResult status = vkGetFenceStatus(device_, slot.fence);
+        if (status == VK_SUCCESS) {
+            check(vkResetFences(device_, 1, &slot.fence),
+                  "vkResetFences(upload poll)");
+            slot.in_flight = false;
+        } else if (status == VK_NOT_READY) {
+            upload_in_flight = true;
+        } else {
+            check(status, "vkGetFenceStatus(upload)");
+        }
+    }
     if (recording_ || in_flight_ || upload_in_flight ||
         pooled_bytes_ <= pool_budget_bytes_) {
         return;
