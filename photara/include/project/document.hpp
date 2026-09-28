@@ -47,6 +47,9 @@ struct Settings {
     int preview_interval = 50;
     // 0=adc_igs, 1=adc_plus, 2=dense_adaptive.
     int strategy = 0;
+    // Hard clamp on the per-Gaussian longest/shortest scale ratio.
+    // 0 disables the clamp (training default); values must be >= 1.
+    float max_scale_ratio = 0.F;
     int max_resolution = 1'920;
     bool progressive_resolution = true;
     bool use_mask = false;
