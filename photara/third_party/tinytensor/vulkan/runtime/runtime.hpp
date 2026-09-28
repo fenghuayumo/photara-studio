@@ -39,6 +39,7 @@ enum class ShaderId : std::uint32_t {
     UnpackRgba,
     SortBitonic,
     Prune,
+    PanoramaSizes,
     Select,
     Gather,
     ReduceAllArg,

@@ -28,6 +28,7 @@
 #include "multinomial.hlsl.embedded.hpp"
 #include "pool.hlsl.embedded.hpp"
 #include "prune.hlsl.embedded.hpp"
+#include "panorama_sizes.hlsl.embedded.hpp"
 #include "random.hlsl.embedded.hpp"
 #include "reduce.hlsl.embedded.hpp"
 #include "cumsum_scan.hlsl.embedded.hpp"
@@ -131,7 +132,7 @@ const char* shader_name(const ShaderId shader) {
         "index_fill",  "mask_flags",  "scan_block",      "scan_add",     "compact",
         "multinomial", "reduce",      "reduce_all_f32",  "matmul",       "random",
         "cumsum",      "pool",        "scatter",         "select_compact",
-        "cat",         "unpack_rgba", "sort_bitonic", "prune",        "select",
+        "cat",         "unpack_rgba", "sort_bitonic", "prune",        "panorama_sizes", "select",
         "gather",      "reduce_all_arg", "reduce_axis",  "cumsum_scan"};
     const std::size_t index = static_cast<std::size_t>(shader);
     return index < names.size() ? names[index] : "unknown";
@@ -278,6 +279,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::UnpackRgba, as_bytes(span{unpack_rgba_hlsl_spv}), 4, 24},
         {ShaderId::SortBitonic, as_bytes(span{sort_bitonic_hlsl_spv}), 4, 28},
         {ShaderId::Prune, as_bytes(span{prune_hlsl_spv}), 8, 44},
+        {ShaderId::PanoramaSizes, as_bytes(span{panorama_sizes_hlsl_spv}), 4, 24},
         {ShaderId::Select, as_bytes(span{select_hlsl_spv}), 4, 48},
         {ShaderId::Gather, as_bytes(span{gather_hlsl_spv}), 3, 104},
         {ShaderId::ReduceAllArg, as_bytes(span{reduce_all_arg_hlsl_spv}), 2, 24},
