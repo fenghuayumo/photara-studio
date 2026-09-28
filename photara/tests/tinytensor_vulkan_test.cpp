@@ -155,6 +155,45 @@ void test_unpack_training_pixels() {
     require_vector_near(rgb_only.to_vector(), expected_rgb, 1e-6F, "unpack rgb only");
 }
 
+void test_async_upload_ring() {
+    using namespace tinytensor;
+    const std::array<std::vector<int>, 3> host{{
+        {static_cast<int>(0xFF0000FFu), static_cast<int>(0xFF00FF00u)},
+        {static_cast<int>(0xFFFF0000u), static_cast<int>(0xFFFFFFFFu)},
+        {static_cast<int>(0xFF332211u), static_cast<int>(0xFF665544u)},
+    }};
+    std::array<Tensor, 3> packed;
+    std::array<Tensor, 3> rgb;
+    for (std::size_t index = 0; index < packed.size(); ++index) {
+        packed[index] = Tensor::empty(
+            {std::size_t{1}, std::size_t{2}}, Device::Vulkan,
+            DataType::Int32);
+        vulkan::upload_async(
+            packed[index], host[index].data(),
+            host[index].size() * sizeof(int));
+        rgb[index] = Tensor::empty(
+            {std::size_t{3}, std::size_t{1}, std::size_t{2}},
+            Device::Vulkan);
+        vulkan::unpack_training_pixels(
+            packed[index], rgb[index], nullptr, nullptr);
+    }
+    constexpr float inverse_255 = 1.F / 255.F;
+    require_vector_near(
+        rgb[0].to_vector(),
+        {1.F, 0.F, 0.F, 1.F, 0.F, 0.F},
+        1e-6F, "async upload slot 0");
+    require_vector_near(
+        rgb[1].to_vector(),
+        {0.F, 1.F, 0.F, 1.F, 1.F, 1.F},
+        1e-6F, "async upload slot 1");
+    require_vector_near(
+        rgb[2].to_vector(),
+        {17.F * inverse_255, 68.F * inverse_255,
+         34.F * inverse_255, 85.F * inverse_255,
+         51.F * inverse_255, 102.F * inverse_255},
+        1e-6F, "async upload slot reuse");
+}
+
 void test_multinomial() {
     using namespace tinytensor;
     auto weights = Tensor::from_vector(std::vector<float>{0.F, 1.F, 0.F, 0.F}, {4}, Device::Vulkan);
@@ -511,6 +550,7 @@ int main() {
         run("cat_index_squeeze", test_cat_index_squeeze);
         run("mask_and_convert", test_mask_and_convert);
         run("unpack_training_pixels", test_unpack_training_pixels);
+        run("async_upload_ring", test_async_upload_ring);
         run("multinomial", test_multinomial);
         run("elementwise_and_where", test_elementwise_and_where);
         run("reduce_and_cumsum", test_reduce_and_cumsum);

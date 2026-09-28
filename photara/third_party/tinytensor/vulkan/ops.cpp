@@ -309,6 +309,15 @@ void upload(Tensor& dst, const void* data, std::size_t bytes) {
     Context::get().upload(buffer_of(dst), byte_offset(dst), data, bytes);
 }
 
+void upload_async(Tensor& dst, const void* data, std::size_t bytes) {
+    if (bytes == 0) return;
+    if (bytes > dst.bytes())
+        throw std::invalid_argument(
+            "Vulkan asynchronous upload exceeds the destination tensor");
+    Context::get().upload_async(
+        buffer_of(dst), byte_offset(dst), data, bytes);
+}
+
 void download(const Tensor& src, void* data, std::size_t bytes) {
     if (bytes == 0) {
         return;

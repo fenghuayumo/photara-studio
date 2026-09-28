@@ -100,6 +100,10 @@ void unpack_training_pixels(const Tensor& packed, Tensor& rgb, Tensor* gray,
                             Tensor* mask);
 void copy_same_layout(Tensor& dst, const Tensor& src);
 void upload(Tensor& dst, const void* data, std::size_t bytes);
+// Immediate non-blocking upload for a newly allocated tensor. Its first GPU
+// consumer must be recorded after this call so queue submission order provides
+// the dependency.
+void upload_async(Tensor& dst, const void* data, std::size_t bytes);
 void download(const Tensor& src, void* data, std::size_t bytes);
 Tensor convert(const Tensor& src, DataType dtype);
 Tensor make_contiguous(const Tensor& src);

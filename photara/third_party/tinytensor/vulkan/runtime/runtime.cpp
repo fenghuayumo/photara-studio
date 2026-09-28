@@ -678,8 +678,33 @@ void Context::create_pools() {
     command_pool.queueFamilyIndex = queue_family_;
     check(vkCreateCommandPool(device_, &command_pool, nullptr, &command_pool_), "vkCreateCommandPool");
 
+    VkCommandPoolCreateInfo upload_pool{
+        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    upload_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    upload_pool.queueFamilyIndex = queue_family_;
+    check(vkCreateCommandPool(
+              device_, &upload_pool, nullptr, &upload_command_pool_),
+          "vkCreateCommandPool(upload)");
+
+    std::array<VkCommandBuffer, kUploadSlotCount> upload_commands{};
+    VkCommandBufferAllocateInfo upload_alloc{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    upload_alloc.commandPool = upload_command_pool_;
+    upload_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    upload_alloc.commandBufferCount =
+        static_cast<std::uint32_t>(upload_commands.size());
+    check(vkAllocateCommandBuffers(
+              device_, &upload_alloc, upload_commands.data()),
+          "vkAllocateCommandBuffers(upload)");
+
     VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     check(vkCreateFence(device_, &fence, nullptr, &completion_fence_), "vkCreateFence");
+    for (std::size_t index = 0; index < upload_slots_.size(); ++index) {
+        upload_slots_[index].command = upload_commands[index];
+        check(vkCreateFence(
+                  device_, &fence, nullptr, &upload_slots_[index].fence),
+              "vkCreateFence(upload)");
+    }
 
     VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -788,6 +813,15 @@ void Context::destroy() {
     dummy_.reset();
     staging_.reset();
     readback_staging_.reset();
+    for (UploadSlot& slot : upload_slots_) {
+        slot.staging.reset();
+        slot.in_flight = false;
+        if (slot.fence != VK_NULL_HANDLE) {
+            vkDestroyFence(device_, slot.fence, nullptr);
+            slot.fence = VK_NULL_HANDLE;
+        }
+        slot.command = VK_NULL_HANDLE;
+    }
     for (Pipeline& pipeline : pipelines_) {
         if (pipeline.handle != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_, pipeline.handle, nullptr);
@@ -813,6 +847,10 @@ void Context::destroy() {
     if (completion_fence_ != VK_NULL_HANDLE) {
         vkDestroyFence(device_, completion_fence_, nullptr);
         completion_fence_ = VK_NULL_HANDLE;
+    }
+    if (upload_command_pool_ != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(device_, upload_command_pool_, nullptr);
+        upload_command_pool_ = VK_NULL_HANDLE;
     }
     if (device_ != VK_NULL_HANDLE) {
         vkDestroyDevice(device_, nullptr);
@@ -875,7 +913,11 @@ void Context::recycle_locked(Buffer* buffer) {
 }
 
 void Context::trim_pool_locked() {
-    if (recording_ || in_flight_ || pooled_bytes_ <= pool_budget_bytes_) {
+    const bool upload_in_flight = std::any_of(
+        upload_slots_.begin(), upload_slots_.end(),
+        [](const UploadSlot& slot) { return slot.in_flight; });
+    if (recording_ || in_flight_ || upload_in_flight ||
+        pooled_bytes_ <= pool_budget_bytes_) {
         return;
     }
     // Largest size classes first: the small buffers are the per-step
@@ -1248,6 +1290,58 @@ void Context::upload(Buffer& dst, std::size_t dst_offset, const void* data, std:
     if (++batch_commands_ >= kMaxCommandsPerBatch) {
         flush_locked();
     }
+}
+
+void Context::retire_upload_slot_locked(const std::size_t index) {
+    UploadSlot& slot = upload_slots_[index];
+    if (!slot.in_flight) return;
+    check(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX),
+          "vkWaitForFences(upload)");
+    check(vkResetFences(device_, 1, &slot.fence),
+          "vkResetFences(upload)");
+    slot.in_flight = false;
+}
+
+void Context::upload_async(
+    Buffer& dst, const std::size_t dst_offset, const void* data,
+    const std::size_t bytes) {
+    if (bytes == 0) return;
+    std::scoped_lock lock(mutex_);
+    const std::size_t slot_index = next_upload_slot_;
+    next_upload_slot_ = (next_upload_slot_ + 1) % upload_slots_.size();
+    retire_upload_slot_locked(slot_index);
+    UploadSlot& slot = upload_slots_[slot_index];
+    const std::size_t aligned = (bytes + 3U) & ~std::size_t{3};
+    if (slot.staging == nullptr || slot.staging->size() < aligned) {
+        slot.staging = std::make_unique<Buffer>(
+            physical_, device_, static_cast<VkDeviceSize>(aligned),
+            MemoryKind::host_visible);
+    }
+    std::memcpy(slot.staging->mapped(), data, bytes);
+    check(vkResetCommandBuffer(slot.command, 0),
+          "vkResetCommandBuffer(upload)");
+    VkCommandBufferBeginInfo begin{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check(vkBeginCommandBuffer(slot.command, &begin),
+          "vkBeginCommandBuffer(upload)");
+    VkBufferCopy region{};
+    region.dstOffset = dst_offset;
+    region.size = bytes;
+    vkCmdCopyBuffer(
+        slot.command, slot.staging->handle(), dst.handle(), 1, &region);
+    barrier_buffer(
+        slot.command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    check(vkEndCommandBuffer(slot.command),
+          "vkEndCommandBuffer(upload)");
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &slot.command;
+    check(vkQueueSubmit(queue_, 1, &submit, slot.fence),
+          "vkQueueSubmit(upload)");
+    slot.in_flight = true;
 }
 
 void Context::download(const Buffer& src, std::size_t src_offset, void* data, std::size_t bytes) {

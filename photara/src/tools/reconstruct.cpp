@@ -401,7 +401,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-device-cache-mb N  packed CUDA image cache budget (default 512, 0 disables)\n"
               << "  --splat-device-cache-max-mb N  ceiling for the adaptive device cache\n"
               << "                              (default 0 = keep --splat-device-cache-mb)\n"
-              << "  --splat-async-upload BOOL  overlap future packed-view H2D copies (default true)\n"
+              << "  --splat-async-upload BOOL  submit packed-view H2D copies without blocking (default true)\n"
               << "  --splat-cache-auto BOOL  grow cache budgets safely for large datasets (default true)\n"
         << "  --splat-prefetch-views N  minimum concurrent host image prefetch count (default 4)\n"
         << "  --splat-prefetch-adaptive BOOL  grow the prefetch lookahead from the measured\n"
@@ -757,7 +757,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Ceiling the adaptive splat CUDA-view cache may grow to (0 = no growth)",
          cxxopts::value<std::uint64_t>()->default_value("0"))
         ("splat-async-upload",
-         "Upload decoded future splat views on a non-blocking CUDA copy stream",
+         "Upload decoded splat views without blocking the training thread",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-fuse-sh-adam", "Fuse SH projection gradients into Adam",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
