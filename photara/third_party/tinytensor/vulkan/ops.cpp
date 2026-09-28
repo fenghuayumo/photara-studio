@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -222,23 +223,32 @@ void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor&
         (options.group_stride == 0 ||
          options.active_row_stride > options.group_stride))
         throw std::invalid_argument("Vulkan Adam received invalid active row stride");
+    const bool project_scales = options.max_scale_ratio > 1.F;
+    if (project_scales &&
+        (parameter.shape().rank() != 2 || parameter.shape()[1] != 3 ||
+         options.group_stride != 0 || options.active_row_stride != 0))
+        throw std::invalid_argument(
+            "Vulkan scale-ratio Adam requires [N,3] log scales");
     struct Push {
         std::uint32_t count, parameter_offset, gradient_offset, first_offset, second_offset;
         float learning_rate, secondary_learning_rate;
         std::uint32_t group_stride, active_row_stride;
         float beta1, beta2, correction1, correction2, epsilon, clamp_min, clamp_max;
         float grouped_rest_regularization;
+        float maximum_log_ratio;
     } push{u32(parameter.numel()), u32(byte_offset(parameter)), u32(byte_offset(gradient)),
            u32(byte_offset(first)), u32(byte_offset(second)), options.learning_rate,
            options.secondary_learning_rate, options.group_stride,
            options.active_row_stride, options.beta1, options.beta2,
            options.correction1, options.correction2, options.epsilon, options.clamp_min,
-           options.clamp_max, options.grouped_rest_regularization};
-    static_assert(sizeof(Push) == 68);
+           options.clamp_max, options.grouped_rest_regularization,
+           project_scales ? std::log(options.max_scale_ratio) : 0.F};
+    static_assert(sizeof(Push) == 72);
     std::array<BufferBinding, 4> bindings{
         bind(parameter), bind(gradient), bind(first), bind(second)};
     Context::get().dispatch(
-        ShaderId::AdamF32, bindings, &push, sizeof(push), groups_for(parameter.numel()));
+        ShaderId::AdamF32, bindings, &push, sizeof(push),
+        groups_for(project_scales ? parameter.numel() / 3 : parameter.numel()));
 }
 
 void fill(Tensor& tensor, float value) {
@@ -760,6 +770,29 @@ void panorama_sizes(const Tensor& means, const Tensor& log_scales,
     std::array<BufferBinding, 4> bindings{
         bind(means), bind(log_scales), bind(quaternions), bind(sizes)};
     Context::get().dispatch(ShaderId::PanoramaSizes, bindings,
+                            &push, sizeof(push), groups_for(count));
+}
+
+void constrain_scale_ratio(Tensor& log_scales, const float maximum_ratio) {
+    if (!(maximum_ratio > 1.F) || log_scales.numel() == 0) return;
+    if (log_scales.device() != Device::Vulkan ||
+        log_scales.dtype() != DataType::Float32 ||
+        !log_scales.is_contiguous() ||
+        log_scales.storage_offset() != 0 ||
+        log_scales.shape().rank() != 2 ||
+        log_scales.shape()[1] != 3)
+        throw std::invalid_argument(
+            "Vulkan scale-ratio projection requires a contiguous float32 "
+            "[N,3] log-scale tensor");
+    const std::size_t count = log_scales.shape()[0];
+    if (count == 0) return;
+    struct Push {
+        std::uint32_t count;
+        float maximum_log_ratio;
+    } push{u32(count), std::log(maximum_ratio)};
+    static_assert(sizeof(push) == 8);
+    std::array<BufferBinding, 1> bindings{bind(log_scales)};
+    Context::get().dispatch(ShaderId::ConstrainScaleRatio, bindings,
                             &push, sizeof(push), groups_for(count));
 }
 

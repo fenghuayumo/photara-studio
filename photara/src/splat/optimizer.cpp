@@ -101,8 +101,8 @@ void constrain_scale_ratio(
     tinytensor::Tensor& log_scales, const float maximum_ratio) {
     if (log_scales.device() == tinytensor::Device::Vulkan) {
         if (maximum_ratio > 1.F)
-            throw std::invalid_argument(
-                "scale-ratio projection is not supported by Vulkan yet");
+            tinytensor::vulkan::constrain_scale_ratio(
+                log_scales, maximum_ratio);
         return;
     }
     constrain_scale_ratio_cuda(log_scales, maximum_ratio);

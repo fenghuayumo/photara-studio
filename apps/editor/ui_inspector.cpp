@@ -459,14 +459,6 @@ Action draw_inspector(App& app) {
                     "Must be at least 1."));
             app.settings.max_scale_ratio =
                 std::max(app.settings.max_scale_ratio, 1.F);
-            if (app.settings.training_backend == 1) {
-                ImGui::PushTextWrapPos(0.F);
-                ImGui::TextColored(
-                    theme::warning, "%s", tr(
-                        "Scale-ratio limiting requires the CUDA training "
-                        "backend."));
-                ImGui::PopTextWrapPos();
-            }
         }
         theme::caption("SH degree");
         ImGui::SetNextItemWidth(-1.F);

@@ -687,10 +687,6 @@ constexpr Entry k_entries[] = {
      "最长/最短轴比的硬上界。\n最小值为 1。",
      "最長/最短軸比の上限。\n最小値は 1 です。",
      "최장/최단 축비의 상한.\n최소값은 1입니다."},
-    {"Scale-ratio limiting requires the CUDA training backend.",
-     "长短轴比限制需要 CUDA 训练后端。",
-     "軸比制限には CUDA 学習バックエンドが必要です。",
-     "축비 제한에는 CUDA 학습 백엔드가 필요합니다."},
     {"Spherical-harmonic colour bands.\n"
      "0 is diffuse only. 3 is the training default.",
      "球谐颜色阶。\n0 仅为漫反射。3 为训练默认。",
