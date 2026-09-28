@@ -382,6 +382,10 @@ namespace tinytensor {
         if (this == &other) {
             return *this;
         }
+        const std::size_t previous_capacity =
+            state_ ? state_->capacity : 0;
+        const std::size_t previous_logical_size =
+            state_ ? state_->logical_size : 0;
         // PyTorch semantics: slice/view assignment does deep copy, regular assignment does shallow copy
         // Example: t1[0:5] = t2  -> deep copy into the slice
         //          t1 = t2        -> shallow copy (both point to same data)
@@ -437,11 +441,18 @@ namespace tinytensor {
 #ifndef NDEBUG
         view_generation_snapshot_ = other.view_generation_snapshot_;
 #endif
-        if (state_ && other.state_ &&
-            state_->capacity != other.state_->capacity &&
-            state_->capacity > 1000000) {
-            LOG_WARN("Assignment operator: LOSING CAPACITY! this.capacity={} → other.capacity={}, this.data_={}, other.data_={}",
-                     state_->capacity, other.state_->capacity, data_, other.data_);
+        // Vulkan records the allocated first dimension as capacity even when
+        // there is no spare reservation. Large ordinary tensors therefore
+        // used to trip this diagnostic on every shallow assignment. Capacity
+        // is only being lost when the old tensor actually had reserved rows
+        // beyond its logical size and the replacement has fewer of them.
+        if (other.state_ && previous_capacity > previous_logical_size &&
+            other.state_->capacity < previous_capacity &&
+            previous_capacity > 1'000'000) {
+            LOG_DEBUG(std::format(
+                "Assignment releases reserved rows: capacity {} -> {}, logical size {}",
+                previous_capacity, other.state_->capacity,
+                previous_logical_size));
         }
         state_ = std::make_shared<TensorState>(*other.state_);
         id_ = next_id_++;
