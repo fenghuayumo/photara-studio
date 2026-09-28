@@ -104,25 +104,34 @@ __global__ void tiles(const unsigned* query, const unsigned* train,
         cols[blockIdx.y*nt+blockIdx.x*32+lane] = best;
     }
 }
-__global__ void reduce(const int3* partial, int n, int chunks, float ratio, int* result) {
+__device__ int accepted_match(const int3& best, float ratio) {
+    // Match SiftGPU's double-precision acos followed by float rounding.
+    const float d = static_cast<float>(acos(fmin(best.x * (1.0/262144.0), 1.0)));
+    const float second = static_cast<float>(acos(fmin(best.z * (1.0/262144.0), 1.0)));
+    return d < .7f && d < ratio*second ? best.y : -1;
+}
+__global__ void finish_matches(const int3* rows, const int3* cols,
+                               int nq, int nt, int row_chunks, int col_chunks,
+                               float ratio, bool mutual, int* result) {
     const int i = blockIdx.x*blockDim.x+threadIdx.x;
-    if (i >= n) return;
+    if (i >= nq) return;
     int3 best = make_int3(0, -1, 0);
-    for (int j = 0; j < chunks; ++j) {
-        const int3 candidate = partial[j*n+i];
+    for (int j = 0; j < row_chunks; ++j) {
+        const int3 candidate = rows[j*nq+i];
         insert(candidate.x, candidate.y, best);
         best.z = max(best.z, candidate.z);
     }
-    // Keep SiftGPU's angular distance and ratio test in BOTH directions.
-    // SiftGPU promotes the clamped dot to double for acos, then rounds to
-    // float. acosf can differ by one ULP and flip an exact 0.8 boundary.
-    const float d = static_cast<float>(acos(fmin(best.x * (1.0/262144.0), 1.0)));
-    const float second = static_cast<float>(acos(fmin(best.z * (1.0/262144.0), 1.0)));
-    result[i] = d < .7f && d < ratio*second ? best.y : -1;
-}
-__global__ void cross_check(int* rows, const int* cols, int n) {
-    const int i = blockIdx.x*blockDim.x+threadIdx.x;
-    if (i < n && rows[i] >= 0 && cols[rows[i]] != i) rows[i] = -1;
+    int match = accepted_match(best, ratio);
+    if (mutual && match >= 0) {
+        int3 reverse = make_int3(0, -1, 0);
+        for (int j = 0; j < col_chunks; ++j) {
+            const int3 candidate = cols[j*nt+match];
+            insert(candidate.x, candidate.y, reverse);
+            reverse.z = max(reverse.z, candidate.z);
+        }
+        if (accepted_match(reverse, ratio) != i) match = -1;
+    }
+    result[i] = match;
 }
 
 class NativeMatcher final : public FeatureMatcher {
@@ -131,7 +140,7 @@ class NativeMatcher final : public FeatureMatcher {
     std::thread::id owner_{std::this_thread::get_id()};
     mutable Buffer<unsigned> descriptors_;
     mutable Buffer<int3> row_partial_, col_partial_;
-    mutable Buffer<int> output_, reverse_;
+    mutable Buffer<int> output_;
     mutable std::unordered_map<std::uint64_t, Entry> cache_;
     mutable std::size_t used_{};
     std::size_t budget_{};
@@ -196,7 +205,7 @@ public:
                 batch_bytes+=bytes; ++batch_count;
             }
             const auto batch = pairs.subspan(begin, batch_count);
-            std::size_t outputs=0, row_size=0, col_size=0, max_train=0, upload_bytes=0;
+            std::size_t outputs=0, row_size=0, col_size=0, upload_bytes=0;
             for (const auto& [q,t] : batch) {
                 for (const auto* f : {q,t}) {
                     f->validate();
@@ -209,13 +218,12 @@ public:
                 outputs += nq;
                 row_size = std::max(row_size, nq*((nt+31)/32));
                 col_size = std::max(col_size, nt*((nq+31)/32));
-                max_train = std::max(max_train, nt);
             }
             // Recycle only at a completed submission boundary; queued kernels
             // never observe overwritten descriptor storage.
             if (used_+upload_bytes > budget_) { cache_.clear(); used_=0; }
             row_partial_.reserve(row_size);
-            if (options_.mutual_check) { col_partial_.reserve(col_size); reverse_.reserve(max_train); }
+            if (options_.mutual_check) col_partial_.reserve(col_size);
             output_.reserve(outputs);
             if (outputs > host_capacity_) {
                 if (host_) { check(cudaFreeHost(host_)); host_=nullptr; host_capacity_=0; }
@@ -230,13 +238,9 @@ public:
                         const auto* dq=upload(*q); const auto* dt=upload(*t);
                         tiles<<<dim3((nt+31)/32,(nq+31)/32),256,0,stream_>>>(
                             dq,dt,nq,nt,row_partial_.data,col_partial_.data,options_.mutual_check);
-                        reduce<<<(nq+255)/256,256,0,stream_>>>(row_partial_.data,nq,(nt+31)/32,
-                            options_.ratio_threshold,output_.data+offset);
-                        if (options_.mutual_check) {
-                            reduce<<<(nt+255)/256,256,0,stream_>>>(col_partial_.data,nt,(nq+31)/32,
-                                options_.ratio_threshold,reverse_.data);
-                            cross_check<<<(nq+255)/256,256,0,stream_>>>(output_.data+offset,reverse_.data,nq);
-                        }
+                        finish_matches<<<(nq+255)/256,256,0,stream_>>>(
+                            row_partial_.data,col_partial_.data,nq,nt,(nt+31)/32,(nq+31)/32,
+                            options_.ratio_threshold,options_.mutual_check,output_.data+offset);
                     } else if (nq) check(cudaMemsetAsync(output_.data+offset,255,nq*sizeof(int),stream_));
                     offset+=nq;
                 }
