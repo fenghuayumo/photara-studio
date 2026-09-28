@@ -90,7 +90,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         mean, camera[0], camera[1], camera[2], camera[4], camera[5], camera[6],
         camera[8], camera[9], camera[10], camera[12], camera[13], camera[14],
         mode, width, height, fx, fy, cx, cy, k1, k2, k3, k4, kernel, scale_modifier,
-        has_scales, scale, rotation, c0, c1, c2, c3, c4, c5);
+        has_scales, scale, rotation, c0, c1, c2, c3, c4, c5, geometry);
     if (!geom.ok) return;
 
     Projection projected;

@@ -410,6 +410,32 @@ void test_sort_1d() {
     std::cout << "    million_sort_ms=" << elapsed << "\n";
 }
 
+void test_panorama_sizes() {
+    using namespace tinytensor;
+    const auto means = Tensor::from_vector(
+        std::vector<float>{0.F, 0.F, 2.F, 2.F, 0.F, 0.F, 0.F, 0.F, 0.F},
+        {3, 3}, Device::Vulkan);
+    const auto scales = Tensor::from_vector(
+        std::vector<float>{std::log(0.1F), std::log(0.2F), std::log(0.3F),
+                           std::log(0.1F), std::log(0.2F), std::log(0.3F),
+                           0.F, 0.F, 0.F},
+        {3, 3}, Device::Vulkan);
+    const auto rotations = Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F,
+                           2.F, 0.F, 0.F, 0.F,
+                           1.F, 0.F, 0.F, 0.F},
+        {3, 4}, Device::Vulkan);
+    auto result = Tensor::empty({3}, Device::Vulkan);
+    vulkan::panorama_sizes(means, scales, rotations, result,
+                           0.F, 0.F, 0.F, 2.F, 1.F);
+    const auto values = result.to_vector();
+    require(std::abs(values[0] - 2.F*std::atan2(0.6F, 2.F)) < 1e-5F,
+            "panorama forward tangent size");
+    require(std::abs(values[1] - 2.F*std::atan2(0.9F, 2.F)) < 1e-5F,
+            "panorama side tangent size");
+    require(values[2] == 0.F, "panorama camera-center guard");
+}
+
 } // namespace
 
 int main() {
@@ -439,6 +465,7 @@ int main() {
         run("matmul_cat_and_indexing", test_matmul_cat_and_indexing);
         run("mask_factory_and_pool", test_mask_factory_and_pool);
         run("sort_1d", test_sort_1d);
+        run("panorama_sizes", test_panorama_sizes);
         std::cout << "tinytensor vulkan tests passed\n";
         tinytensor::vulkan::shutdown();
         return 0;

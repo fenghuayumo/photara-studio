@@ -123,6 +123,11 @@ void prune_masks(const Tensor& means, const Tensor& log_scales,
                  Tensor& opacities, float minimum_opacity,
                  float maximum_bounds, float center_x, float center_y,
                  float center_z);
+// Exact angular size of the projected 3D Gaussian in a panorama tangent plane.
+void panorama_sizes(const Tensor& means, const Tensor& log_scales,
+                    const Tensor& quaternions, Tensor& sizes,
+                    float camera_x, float camera_y, float camera_z,
+                    float angular_normalization, float scale_modifier);
 std::size_t count_nonzero(const Tensor& src);
 Tensor nonzero(const Tensor& src);
 Tensor masked_select(const Tensor& src, const Tensor& mask);

@@ -3126,9 +3126,17 @@ void accumulate_densification_stats(
 tinytensor::Tensor panorama_densification_sizes(
     const GaussianModel& model, const std::array<float, 3>& camera_position,
     const float screen_threshold, const float scale_modifier) {
-    auto sizes = tinytensor::Tensor::empty({model.size()}, tinytensor::Device::CUDA);
+    const auto device = model.means.device();
+    auto sizes = tinytensor::Tensor::empty({model.size()}, device);
     if (model.size() == 0) return sizes;
     constexpr float k_angular_threshold_radians = 30.F * CUDART_PI_F / 180.F;
+    if (device == tinytensor::Device::Vulkan) {
+        tinytensor::vulkan::panorama_sizes(
+            model.means, model.log_scales, model.quaternions, sizes,
+            camera_position[0], camera_position[1], camera_position[2],
+            screen_threshold / k_angular_threshold_radians, scale_modifier);
+        return sizes;
+    }
     panorama_sizes_kernel<<<(model.size() + k_threads - 1) / k_threads, k_threads>>>(
         model.means.ptr<float>(), model.log_scales.ptr<float>(),
         model.quaternions.ptr<float>(), sizes.ptr<float>(), model.size(),

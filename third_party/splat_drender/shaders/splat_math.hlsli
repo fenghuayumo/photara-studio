@@ -431,7 +431,8 @@ struct FishResult {
 };
 
 FishResult fisheye_evaluate(float3 t, float c0, float c1, float c2, float c3, float c4, float c5,
-                            Mat3 W, float fx, float fy, float k1, float k2, float k3, float k4, float kernel) {
+                            Mat3 W, float fx, float fy, float k1, float k2, float k3, float k4, float kernel,
+                            bool need_geometry) {
     FishResult built;
     built.cov0 = 0.0f;
     built.cov1 = 0.0f;
@@ -512,6 +513,11 @@ FishResult fisheye_evaluate(float3 t, float c0, float c1, float c2, float c3, fl
     built.cov2 = c;
     built.coef = sqrt(det0 / max(det, 1.0e-6f));
 
+    if (!need_geometry) {
+        built.ok = true;
+        return built;
+    }
+
     float A[3][3];
     A[0][0] = C[1][1] * C[2][2] - C[1][2] * C[2][1];
     A[0][1] = C[0][2] * C[2][1] - C[0][1] * C[2][2];
@@ -560,7 +566,7 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
                         uint mode, int width, int height, float fx, float fy, float cx, float cy,
                         float k1, float k2, float k3, float k4, float kernel, float scale_modifier,
                         bool has_scales, float3 scale, float4 rotation, float c0, float c1, float c2,
-                        float c3, float c4, float c5) {
+                        float c3, float c4, float c5, bool need_geometry) {
     SplatGeom built;
     built.cov0 = 0.0f;
     built.cov1 = 0.0f;
@@ -572,6 +578,39 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
 
     float3 t = xform_point(mean, v0, v1, v2, v4, v5, v6, v8, v9, v10, v12, v13, v14);
     float tc = sqrt(dot(t, t));
+    if (mode == kModeFisheye) {
+        if (!project_camera(t, mode, width, height, fx, fy, cx, cy,
+                            k1, k2, k3, k4).valid) return built;
+        Mat3 W = world_rotation_transposed(v0, v1, v2, v4, v5, v6, v8, v9, v10);
+        Mat3 Vrk = mat_zero();
+        if (has_scales) {
+            float3 sl = scale_modifier * scale;
+            Mat3 SR = mat_mul(mat_diag(sl.x, sl.y, sl.z), quat_rotation(rotation));
+            Vrk = mat_mul(mat_transpose(SR), SR);
+        } else {
+            Vrk.m[0][0] = c0; Vrk.m[0][1] = c1; Vrk.m[0][2] = c2;
+            Vrk.m[1][0] = c1; Vrk.m[1][1] = c3; Vrk.m[1][2] = c4;
+            Vrk.m[2][0] = c2; Vrk.m[2][1] = c4; Vrk.m[2][2] = c5;
+        }
+        FishResult native = fisheye_evaluate(
+            t, Vrk.m[0][0], Vrk.m[0][1], Vrk.m[0][2],
+            Vrk.m[1][1], Vrk.m[1][2], Vrk.m[2][2],
+            W, fx, fy, k1, k2, k3, k4, kernel, need_geometry);
+        if (!native.ok || !finite1(native.cov0) || !finite1(native.cov1) ||
+            !finite1(native.cov2) || !finite1(native.coef) ||
+            !(native.cov0 * native.cov2 > native.cov1 * native.cov1)) return built;
+        if (need_geometry && (!finite3(native.normal) ||
+            !finite1(native.plane.x) || !finite1(native.plane.y) ||
+            !finite1(native.plane.z) || !finite1(native.plane.w))) return built;
+        built.cov0 = native.cov0;
+        built.cov1 = native.cov1;
+        built.cov2 = native.cov2;
+        built.coef = native.coef;
+        built.ray_plane = native.plane;
+        built.normal = native.normal;
+        built.ok = true;
+        return built;
+    }
     float u = 0.0f;
     float v = 0.0f;
     Mat3 J = mat_zero();
@@ -657,26 +696,6 @@ SplatGeom project_splat(float3 mean, float v0, float v1, float v2, float v4, flo
             Vrk_inv = mat_outer(evec, evec);
         }
         cov_cam_inv = mat_mul(mat_mul(mat_transpose(W), Vrk_inv), W);
-    }
-
-    if (mode == kModeFisheye) {
-        FishResult native = fisheye_evaluate(
-            t, Vrk.m[0][0], Vrk.m[0][1], Vrk.m[0][2], Vrk.m[1][1], Vrk.m[1][2], Vrk.m[2][2],
-            W, fx, fy, k1, k2, k3, k4, kernel);
-        if (!native.ok) return built;
-        if (!finite1(native.cov0) || !finite1(native.cov1) || !finite1(native.cov2)) return built;
-        if (!finite3(native.normal)) return built;
-        if (!finite1(native.plane.x) || !finite1(native.plane.y) || !finite1(native.plane.z) ||
-            !finite1(native.plane.w) || !finite1(native.coef)) return built;
-        if (!(native.cov0 * native.cov2 > native.cov1 * native.cov1)) return built;
-        built.cov0 = native.cov0;
-        built.cov1 = native.cov1;
-        built.cov2 = native.cov2;
-        built.coef = native.coef;
-        built.ray_plane = native.plane;
-        built.normal = native.normal;
-        built.ok = true;
-        return built;
     }
 
     built.cov0 = cov.m[0][0] + kernel;

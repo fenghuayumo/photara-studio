@@ -1389,6 +1389,9 @@ int main() {
         fisheye.fy = 30;
         fisheye.check_backward = true;
         compare_case(fisheye);
+        fisheye.name = "fisheye-color-only";
+        fisheye.need_depth = false;
+        compare_case(fisheye);
 
         Scene equirect;
         equirect.name = "equirect";

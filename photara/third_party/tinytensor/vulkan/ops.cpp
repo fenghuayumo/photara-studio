@@ -724,6 +724,45 @@ void prune_masks(const Tensor& means, const Tensor& log_scales,
                             groups_for(count));
 }
 
+void panorama_sizes(const Tensor& means, const Tensor& log_scales,
+                    const Tensor& quaternions, Tensor& sizes,
+                    const float camera_x, const float camera_y,
+                    const float camera_z, const float angular_normalization,
+                    const float scale_modifier) {
+    const std::size_t count = means.shape()[0];
+    if (means.device() != Device::Vulkan ||
+        log_scales.device() != Device::Vulkan ||
+        quaternions.device() != Device::Vulkan ||
+        sizes.device() != Device::Vulkan ||
+        means.dtype() != DataType::Float32 ||
+        log_scales.dtype() != DataType::Float32 ||
+        quaternions.dtype() != DataType::Float32 ||
+        sizes.dtype() != DataType::Float32 ||
+        !means.is_contiguous() || !log_scales.is_contiguous() ||
+        !quaternions.is_contiguous() || !sizes.is_contiguous() ||
+        means.storage_offset() != 0 || log_scales.storage_offset() != 0 ||
+        quaternions.storage_offset() != 0 || sizes.storage_offset() != 0 ||
+        means.shape().rank() != 2 || means.shape()[1] != 3 ||
+        log_scales.shape().rank() != 2 || log_scales.shape()[0] != count ||
+        log_scales.shape()[1] != 3 ||
+        quaternions.shape().rank() != 2 || quaternions.shape()[0] != count ||
+        quaternions.shape()[1] != 4 || sizes.numel() != count)
+        throw std::invalid_argument(
+            "Vulkan panorama sizes require contiguous float32 [N,3], [N,3], [N,4], [N] tensors");
+    if (count == 0) return;
+    struct Push {
+        std::uint32_t count;
+        float camera_x, camera_y, camera_z;
+        float angular_normalization, scale_modifier;
+    } push{u32(count), camera_x, camera_y, camera_z,
+           angular_normalization, scale_modifier};
+    static_assert(sizeof(push) == 24);
+    std::array<BufferBinding, 4> bindings{
+        bind(means), bind(log_scales), bind(quaternions), bind(sizes)};
+    Context::get().dispatch(ShaderId::PanoramaSizes, bindings,
+                            &push, sizeof(push), groups_for(count));
+}
+
 std::size_t count_nonzero(const Tensor& src) {
     Tensor input = prepared(src);
     if (input.numel() == 0) {
