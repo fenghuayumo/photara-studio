@@ -128,6 +128,10 @@ void panorama_sizes(const Tensor& means, const Tensor& log_scales,
                     const Tensor& quaternions, Tensor& sizes,
                     float camera_x, float camera_y, float camera_z,
                     float angular_normalization, float scale_modifier);
+// Projects each Gaussian's [N,3] log scales into a maximum longest/shortest
+// axis ratio, preserving the row's log-scale midpoint. maximum_ratio must
+// exceed 1; rows already inside the bound are left untouched.
+void constrain_scale_ratio(Tensor& log_scales, float maximum_ratio);
 std::size_t count_nonzero(const Tensor& src);
 Tensor nonzero(const Tensor& src);
 Tensor masked_select(const Tensor& src, const Tensor& mask);

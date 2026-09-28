@@ -59,6 +59,8 @@ struct AdamStepOptions {
     // Optional L2 gradient applied to non-DC columns (column >= 3) of each
     // group. Used by shared 3DGS SH regularization without a temporary tensor.
     float grouped_rest_regularization = 0.0F;
+    // For [N,3] log scales, update one row and project it in the same dispatch.
+    float max_scale_ratio = 0.0F;
 };
 
 // True when the library was built with TINYTENSOR_HAS_VULKAN and a compute
@@ -69,6 +71,9 @@ DeviceHandles device_handles();
 BufferView buffer_view(const Tensor& tensor);
 void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor& second,
                const AdamStepOptions& options);
+// Projects each Gaussian's [N,3] log scales so the longest/shortest axis
+// ratio stays within maximum_ratio (> 1). No-op for compliant rows.
+void constrain_scale_ratio(Tensor& log_scales, float maximum_ratio);
 void synchronize();
 // Submit pending work for a subsequent compute stage on the same Vulkan queue.
 // Unlike synchronize(), this does not wait for GPU completion.

@@ -1997,10 +1997,13 @@ GaussianModel Trainer::train(
                 adc_plus ? refinement_geometry.maximum_extent : scene_extent,
                 adc_plus ? refinement_geometry.center : scene_center,
                 options_, random, adam_states);
-            detail::constrain_scale_ratio(
-                model.log_scales, options_.max_scale_ratio);
             refinement_happened =
                 refine::is_refinement_iteration(iteration, options_);
+            // The optimizer projects existing rows when structure is active.
+            // Refinement can introduce new rows or alter scales afterward.
+            if (refinement_happened)
+                detail::constrain_scale_ratio(
+                    model.log_scales, options_.max_scale_ratio);
             if (refinement_happened && splat_mean_lr_scale) {
                 refinement_geometry =
                     refine::splat_scene_geometry_device(model.means);

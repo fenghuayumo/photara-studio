@@ -15,7 +15,8 @@ void adam_step_vulkan(
     const TrainingOptions& options, const std::size_t group_stride,
     const float secondary_learning_rate, const float clamp_min,
     const float clamp_max, const std::size_t active_row_stride,
-    const float grouped_rest_regularization) {
+    const float grouped_rest_regularization,
+    const float max_scale_ratio) {
     if (parameter.numel() == 0) return;
     if (state.first.numel() != parameter.numel() ||
         state.second.numel() != parameter.numel())
@@ -40,6 +41,7 @@ void adam_step_vulkan(
     backend.clamp_min = clamp_min;
     backend.clamp_max = clamp_max;
     backend.grouped_rest_regularization = grouped_rest_regularization;
+    backend.max_scale_ratio = max_scale_ratio;
     tinytensor::vulkan::adam_step(
         parameter, gradient, state.first, state.second, backend);
 }
@@ -50,15 +52,12 @@ void adam_step_structure_vulkan(
     AdamState& opacity, const float means_lr, const unsigned step,
     const TrainingOptions& options, const float minimum_log_scale,
     const float maximum_log_scale) {
-    if (options.max_scale_ratio > 1.F)
-        throw std::invalid_argument(
-            "Vulkan structure Adam does not yet support max_scale_ratio");
     adam_step_vulkan(model.means, gradient.means, means, means_lr, step,
         options, 0, 0.F, -std::numeric_limits<float>::infinity(),
         std::numeric_limits<float>::infinity());
     adam_step_vulkan(model.log_scales, gradient.log_scales, scales,
         options.scales_lr, step, options, 0, 0.F, minimum_log_scale,
-        maximum_log_scale);
+        maximum_log_scale, 0, 0.F, options.max_scale_ratio);
     adam_step_vulkan(model.quaternions, gradient.quaternions, rotations,
         options.quaternions_lr, step, options, 0, 0.F,
         -std::numeric_limits<float>::infinity(),

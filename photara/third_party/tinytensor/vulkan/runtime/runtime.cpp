@@ -17,6 +17,7 @@
 #include "adam_f32.hlsl.embedded.hpp"
 #include "cat.hlsl.embedded.hpp"
 #include "compact.hlsl.embedded.hpp"
+#include "constrain_scale_ratio.hlsl.embedded.hpp"
 #include "cumsum.hlsl.embedded.hpp"
 #include "elementwise.hlsl.embedded.hpp"
 #include "fused_pointwise.hlsl.embedded.hpp"
@@ -140,7 +141,8 @@ const char* shader_name(const ShaderId shader) {
         "multinomial", "reduce",      "reduce_all_f32",  "matmul",       "random",
         "cumsum",      "pool",        "scatter",         "select_compact",
         "cat",         "unpack_rgba", "sort_bitonic", "prune",        "panorama_sizes", "select",
-        "gather",      "reduce_all_arg", "reduce_axis",  "cumsum_scan"};
+        "gather",      "reduce_all_arg", "reduce_axis",  "cumsum_scan",
+        "constrain_scale_ratio"};
     const std::size_t index = static_cast<std::size_t>(shader);
     return index < names.size() ? names[index] : "unknown";
 }
@@ -263,7 +265,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
     using std::as_bytes;
     using std::span;
     return {{
-        {ShaderId::AdamF32, as_bytes(span{adam_f32_hlsl_spv}), 4, 68},
+        {ShaderId::AdamF32, as_bytes(span{adam_f32_hlsl_spv}), 4, 72},
         {ShaderId::Elementwise, as_bytes(span{elementwise_hlsl_spv}), 4, 72},
         {ShaderId::FusedPointwise, as_bytes(span{fused_pointwise_hlsl_spv}), 3, 16},
         {ShaderId::StridedCopy, as_bytes(span{strided_copy_hlsl_spv}), 2, 96},
@@ -292,6 +294,8 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::ReduceAllArg, as_bytes(span{reduce_all_arg_hlsl_spv}), 2, 24},
         {ShaderId::ReduceAxis, as_bytes(span{reduce_axis_hlsl_spv}), 2, 44},
         {ShaderId::CumsumScan, as_bytes(span{cumsum_scan_hlsl_spv}), 3, 32},
+        {ShaderId::ConstrainScaleRatio,
+         as_bytes(span{constrain_scale_ratio_hlsl_spv}), 1, 8},
     }};
 }
 

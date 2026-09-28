@@ -436,6 +436,60 @@ void test_panorama_sizes() {
     require(values[2] == 0.F, "panorama camera-center guard");
 }
 
+void test_constrain_scale_ratio() {
+    using namespace tinytensor;
+    auto log_scales = Tensor::from_vector(
+        std::vector<float>{
+            // Ratio 1000: both clamp-band edges must land exactly on the
+            // bound around the preserved (min+max)/2 midpoint.
+            std::log(0.001F), std::log(1.F), std::log(1.F),
+            // Already inside the bound: must stay bit-identical.
+            std::log(0.5F), std::log(0.7F), std::log(1.2F)},
+        {2, 3}, Device::Vulkan);
+    vulkan::constrain_scale_ratio(log_scales, 10.F);
+    const auto values = log_scales.to_vector();
+    const float ratio = std::exp(values[2] - values[0]);
+    require(ratio <= 10.0001F, "scale-ratio projection bound");
+    require(std::abs(0.5F * (values[0] + values[2]) -
+                     0.5F * (std::log(0.001F) + std::log(1.F))) < 1e-6F,
+            "scale-ratio projection midpoint");
+    // Both max-equal axes clamp to the band's upper edge: the whole row
+    // moves into [midpoint - ln(R)/2, midpoint + ln(R)/2], exactly like
+    // the CUDA kernel.
+    const float upper = 0.5F * std::log(0.001F) + 0.5F * std::log(10.F);
+    require(std::abs(values[1] - upper) < 1e-6F &&
+                std::abs(values[2] - upper) < 1e-6F,
+            "scale-ratio projection band edges");
+    require(values[3] == std::log(0.5F) && values[4] == std::log(0.7F) &&
+                values[5] == std::log(1.2F),
+            "scale-ratio projection leaves compliant rows untouched");
+}
+
+void test_fused_scale_ratio_adam() {
+    using namespace tinytensor;
+    const std::vector<float> initial{
+        std::log(0.001F), 0.F, 0.F,
+        std::log(0.5F), std::log(0.7F), std::log(1.2F)};
+    auto parameter = Tensor::from_vector(initial, {2, 3}, Device::Vulkan);
+    auto gradient = Tensor::from_vector(
+        std::vector<float>(6, 0.5F), {2, 3}, Device::Vulkan);
+    auto first = Tensor::zeros({2, 3}, Device::Vulkan);
+    auto second = Tensor::zeros({2, 3}, Device::Vulkan);
+    vulkan::AdamStepOptions options;
+    options.learning_rate = 0.01F;
+    options.correction1 = 0.1F;
+    options.correction2 = 0.001F;
+    options.max_scale_ratio = 10.F;
+    vulkan::adam_step(parameter, gradient, first, second, options);
+    const auto values = parameter.to_vector();
+    require(std::exp(values[2] - values[0]) <= 10.0001F,
+            "fused scale Adam enforces the ratio");
+    require_near(values[3], initial[3] - 0.01F, 2e-5F,
+                 "fused scale Adam updates a compliant row");
+    require_vector_near(first.to_vector(), std::vector<float>(6, 0.05F),
+                        1e-6F, "fused scale Adam first moments");
+}
+
 } // namespace
 
 int main() {
@@ -466,6 +520,8 @@ int main() {
         run("mask_factory_and_pool", test_mask_factory_and_pool);
         run("sort_1d", test_sort_1d);
         run("panorama_sizes", test_panorama_sizes);
+        run("constrain_scale_ratio", test_constrain_scale_ratio);
+        run("fused_scale_ratio_adam", test_fused_scale_ratio_adam);
         std::cout << "tinytensor vulkan tests passed\n";
         tinytensor::vulkan::shutdown();
         return 0;
