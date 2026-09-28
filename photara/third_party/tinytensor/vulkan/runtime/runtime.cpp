@@ -55,11 +55,15 @@ constexpr std::size_t kMinBufferBytes = 16;
 constexpr std::uint32_t kMaxCommandsPerBatch = 4096;
 
 // Recycled buffers are kept up to this budget, because a workload with moving
-// tensor shapes must not grow VRAM without bound.
-constexpr std::size_t kDefaultPoolBudgetBytes = 1ULL << 30;
-// Upper bound for the adaptive budget, so a very large card does not hold a
-// quarter of its memory in recycled buffers.
-constexpr std::size_t kMaxPoolBudgetBytes = 8ULL << 30;
+// tensor shapes must not grow VRAM without bound. The floor/cap track the CUDA
+// SizeBucketedPool cache (total/96 clamped to [64 MiB, 256 MiB]) with a
+// somewhat larger allowance: vkAllocateMemory churn is paid on the host, so
+// the hot per-step intermediates deserve more headroom than CUDA needs.
+constexpr std::size_t kDefaultPoolBudgetBytes = 256ULL << 20;
+// Upper bound for the adaptive budget. The previous heap/8 policy (up to
+// 8 GiB) held ~3 GiB of freed device buffers in steady state on a 24 GiB card
+// and showed up as Vulkan using 1-3 GiB more VRAM than the CUDA backend.
+constexpr std::size_t kMaxPoolBudgetBytes = 1ULL << 30;
 
 // Pool key for a request. Snapping to 1/16 of the request's magnitude - a
 // constant within each power-of-two band - is what makes the pool reusable at
@@ -81,10 +85,13 @@ VkDeviceSize pooled_size_of(VkDeviceSize bytes) {
     return (size + 3U) & ~VkDeviceSize{3};
 }
 
-// The budget a settled pool needs is proportional to the tensors a refinement
-// cycles through, which scales with the model, not with a fixed number of
-// bytes: at a million rows the working set is about 1.5 GiB, so a 1 GiB budget
-// trimmed it away between refinements and the churn came straight back.
+// The budget a settled pool needs is proportional to the tensors the step
+// loop cycles through, which scales with the model, not with a fixed number
+// of bytes. Keeping the transient refinement working set (about 1.5 GiB at a
+// million rows) fully warm cost more VRAM than it saved: measured on the
+// alameda scene, re-allocating it per refinement event added ~0.24 s per
+// event at a 64 MiB budget, while the default heap/8 retention held ~2.9 GiB
+// of device memory for the whole run.
 VkDeviceSize device_local_heap_bytes(VkPhysicalDevice physical) {
     VkPhysicalDeviceMemoryProperties properties{};
     vkGetPhysicalDeviceMemoryProperties(physical, &properties);
@@ -442,7 +449,7 @@ Context::Context() {
     // TINYTENSOR_VULKAN_POOL_BYTES for a workload with much larger tensors.
     const std::uint32_t pool_budget_override = env_u32("TINYTENSOR_VULKAN_POOL_BYTES").value_or(0);
     const std::size_t adaptive_budget = static_cast<std::size_t>(
-        std::min<VkDeviceSize>(device_local_heap_bytes(physical_) / 8,
+        std::min<VkDeviceSize>(device_local_heap_bytes(physical_) / 32,
                                kMaxPoolBudgetBytes));
     pool_budget_bytes_ = pool_budget_override != 0
         ? static_cast<std::size_t>(pool_budget_override)
@@ -867,8 +874,17 @@ void Context::trim_pool_locked() {
     if (recording_ || in_flight_ || pooled_bytes_ <= pool_budget_bytes_) {
         return;
     }
-    for (auto& entry : free_buffers_) {
-        std::vector<Buffer*>& list = entry.second;
+    // Largest size classes first: the small buffers are the per-step
+    // intermediates that will be requested again within one iteration, while
+    // the largest ones are transient refinement/selection working sets whose
+    // reuse horizon is a whole refinement interval.
+    std::vector<std::size_t> sizes;
+    sizes.reserve(free_buffers_.size());
+    for (const auto& entry : free_buffers_) sizes.push_back(entry.first);
+    std::sort(sizes.begin(), sizes.end(),
+              [](std::size_t left, std::size_t right) { return left > right; });
+    for (const std::size_t size : sizes) {
+        std::vector<Buffer*>& list = free_buffers_[size];
         while (pooled_bytes_ > pool_budget_bytes_ && !list.empty()) {
             Buffer* buffer = list.back();
             list.pop_back();

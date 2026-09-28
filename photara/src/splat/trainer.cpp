@@ -2209,6 +2209,15 @@ GaussianModel Trainer::train(
     finish_evaluation();
     if (vulkan_backend) {
         tinytensor::vulkan::synchronize();
+        const auto pool = tinytensor::vulkan::buffer_pool_stats();
+        core::Logger::instance().info(
+            "splat_vulkan_buffer_pool hits=", pool.hits,
+            " misses=", pool.misses,
+            " miss_bytes=", pool.miss_bytes,
+            " drops=", pool.drops,
+            " drop_bytes=", pool.drop_bytes,
+            " retained_bytes=", pool.miss_bytes > pool.drop_bytes
+                ? pool.miss_bytes - pool.drop_bytes : 0);
     } else {
         const cudaError_t error = cudaDeviceSynchronize();
         if (error != cudaSuccess)
