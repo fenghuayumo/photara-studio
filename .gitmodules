@@ -1,3 +1,6 @@
 [submodule "third_party/photara_drender"]
 	path = third_party/photara_drender
 	url = https://github.com/fenghuayumo/photara_drender.git
+[submodule "third_party/photara_vk"]
+	path = third_party/photara_vk
+	url = https://github.com/fenghuayumo/photara_vk.git
