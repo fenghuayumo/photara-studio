@@ -318,7 +318,6 @@ constexpr Entry k_entries[] = {
     {"Pause", "暂停", "一時停止", "일시 중지"},
     {"Stop", "停止", "停止", "중지"},
     {"Continue the paused reconstruction.", "继续已暂停的重建。", "一時停止した再構成を続行します。", "일시 중지된 재구성을 계속합니다."},
-    {"CUDA / Vulkan  |  external memory", "CUDA / Vulkan  |  外部内存", "CUDA / Vulkan  |  外部メモリ", "CUDA / Vulkan  |  외부 메모리"},
 
     // Scene panel
     {"SCENE", "场景", "シーン", "장면"},
