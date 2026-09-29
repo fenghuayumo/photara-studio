@@ -57,10 +57,22 @@ constexpr std::size_t k_min_device_growth = std::size_t{256} * k_mib;
 constexpr double k_device_hit_rate_target = 0.5;
 constexpr double k_device_cache_max_share = 0.4;
 constexpr std::size_t k_max_pending_device_uploads = 2;
+// Training visits views in a per-epoch random order, so a resident view is
+// reused only when the shuffle walks back to it before the LRU evicts it. The
+// expected hit rate is therefore bounded by the fraction of the epoch the
+// cache can hold: with 8.4 MiB packed views and 512 MiB of VRAM, London's
+// 1,874-view epoch tops out near 3% expected hits (measured: 0.24%). Below
+// this share the cache pays full VRAM and upload traffic for nothing.
+constexpr double k_min_useful_device_view_share = 0.08;
 // A larger cache has to recover at least this much iteration time during the
 // following observation window. Smaller changes are indistinguishable from
 // normal training noise and do not justify retaining the extra VRAM.
 constexpr double k_device_step_improvement = 0.01;
+// Floor the CUDA packed cache keeps when its LRU bulk cannot pay for itself:
+// the copy-stream prefetch pipeline only needs the in-flight uploads plus a
+// couple of resident views (measured on London: 32 MiB matched the 512 MiB
+// cache's async-upload coverage while using 771 MiB less peak VRAM).
+constexpr std::size_t k_min_device_async_floor = std::size_t{32} * k_mib;
 
 std::size_t saturate_add(
     const std::size_t left, const std::size_t right) noexcept {
@@ -1791,7 +1803,9 @@ private:
     }
 
     // A host load must be started far enough ahead of its use to cover one
-    // decode plus one iteration of slack. Measured decode and iteration times
+    // decode plus slack for decode-time variance and cold-file I/O: the mean
+    // alone left ~2% of London gets blocking on their future (~16 ms each,
+    // visible as GPU idle bubbles). Measured decode and iteration times
     // replace the previous fixed view count, bounded by a fixed share of host
     // memory for the in-flight packed views.
     [[nodiscard]] std::size_t prefetch_limit() const {
@@ -1812,8 +1826,8 @@ private:
                 std::max<std::size_t>(in_flight_budget / mean_view_bytes, 8));
         }
         if (ceiling <= configured) return configured;
-        const double lookahead =
-            host_load_mean_ms_ / std::max(step_mean_ms_, 1.0) + 1.0;
+        const double lookahead = 2.0 * host_load_mean_ms_ /
+            std::max(step_mean_ms_, 1.0) + 1.0;
         return std::clamp<std::size_t>(
             static_cast<std::size_t>(std::ceil(lookahead)), configured,
             ceiling);
@@ -2019,6 +2033,38 @@ private:
                     view, options_, resolution_scale_));
         }
 
+        // A random per-epoch view order bounds the best possible device-cache
+        // hit rate by the resident fraction of the epoch. Datasets such as
+        // London (15.7 GiB packed) cannot buy hits with the default 512 MiB.
+        // This only justifies disabling the Vulkan LRU: its uploads go through
+        // an independent asynchronous staging ring either way. The CUDA packed
+        // cache is different — a positive budget also enables the copy-stream
+        // prefetch pipeline (measured on London: get() wall 8.9 s -> 2.7 s,
+        // ~4% end-to-end, at 9 device hits), so its useless LRU bulk is demoted
+        // to the small async floor instead of being disabled outright.
+        const auto device_cache_useless = [this](const std::size_t budget) {
+            // Degenerate explicit budgets are already effectively disabled;
+            // only real budgets justify overriding the configured value.
+            if (budget == 0 || source_.empty()) return false;
+            if (budget < k_min_device_budget) return false;
+            const std::size_t mean_view_bytes =
+                dataset_packed_bytes_ / source_.size();
+            if (mean_view_bytes == 0) return false;
+            const double resident_share =
+                static_cast<double>(budget / mean_view_bytes) /
+                static_cast<double>(source_.size());
+            return resident_share < k_min_useful_device_view_share;
+        };
+        const auto log_device_cache_disabled =
+            [this](const std::size_t budget) {
+                core::Logger::instance().info(
+                    "splat_data_cache device_budget_disabled budget_bytes=",
+                    budget, " dataset_packed_bytes=", dataset_packed_bytes_,
+                    " views=", source_.size(),
+                    " resident_view_share_below=",
+                    k_min_useful_device_view_share);
+            };
+
         // Vulkan views are materialized as ordinary TinyTensor tensors, then
         // retained in a simple LRU. The CUDA packed-image layout and async
         // copy stream remain separate because their representation is not
@@ -2027,6 +2073,14 @@ private:
             capacity_bytes_ = options_.training_view_cache_bytes;
             device_capacity_bytes_ = options_.training_device_cache_bytes;
             device_ceiling_bytes_ = 0;
+            // Unlike CUDA there is no adaptive growth path here (the ceiling
+            // stays zero), so the static budget is also the maximum the cache
+            // could ever reach.
+            if (options_.adaptive_training_cache &&
+                device_cache_useless(device_capacity_bytes_)) {
+                log_device_cache_disabled(device_capacity_bytes_);
+                device_capacity_bytes_ = 0;
+            }
             return;
         }
 
@@ -2130,6 +2184,33 @@ private:
                         static_cast<double>(total_bytes) *
                         k_device_cache_max_share))));
         device_ceiling_bytes_ = std::max(device_ceiling_bytes_, budget);
+        if (device_cache_useless(budget)) {
+            // Keep only the copy-stream prefetch footprint: the LRU bulk
+            // cannot pay for itself at this resident share, but a positive
+            // budget is what activates the asynchronous upload pipeline.
+            // Growth cannot help either (the hit-rate bound stays low), so
+            // the tuner stops here instead of cycling grow/rollback.
+            const std::size_t mean_view_bytes = source_.empty()
+                ? 0
+                : dataset_packed_bytes_ / source_.size();
+            const std::size_t ring_floor = mean_view_bytes == 0
+                ? k_min_device_async_floor
+                : std::max<std::size_t>(
+                      k_min_device_async_floor, 4 * mean_view_bytes);
+            const std::size_t demoted =
+                std::min(std::max(ring_floor, k_min_device_budget), budget);
+            device_capacity_bytes_ = demoted;
+            device_floor_bytes_ = demoted;
+            device_ceiling_bytes_ = demoted;
+            device_budget_saturated_ = true;
+            core::Logger::instance().info(
+                "splat_data_cache device_budget_demoted budget_bytes=", demoted,
+                " previous_budget_bytes=", budget,
+                " dataset_packed_bytes=", dataset_packed_bytes_,
+                " views=", source_.size(),
+                " resident_view_share_below=",
+                k_min_useful_device_view_share);
+        }
     }
 };
 

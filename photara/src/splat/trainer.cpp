@@ -1425,6 +1425,8 @@ GaussianModel Trainer::train(
         // the fused-loss frame backend-resident even when live preview is on.
         raster_options.copy_attachments =
             !vulkan_backend || ppisp_enabled || bilagrid_enabled;
+        raster_options.copy_color_only =
+            vulkan_backend && (ppisp_enabled || bilagrid_enabled);
         raster_options.defer_visibility = vulkan_backend;
         // Environment override for measurement (see
         // PHOTARA_SPLAT_FORCE_GEOMETRY_WORKSPACE in the rasterizer): keep
@@ -1631,10 +1633,23 @@ GaussianModel Trainer::train(
         // buckets, which hid their cost.
         cuda_profiler.mark(CudaTrainingStage::colour_forward);
         loss_render.color = *photo_color;
+        tinytensor::Tensor densify_map;
+        const bool needs_emc_map = densification_enabled &&
+            options_.densification_strategy == DensificationStrategy::emc;
+        if (vulkan_backend && (ppisp_enabled || bilagrid_enabled) &&
+            needs_emc_map) {
+            const bool mask_enabled = target.has_mask &&
+                (options_.use_mask || target.mask_is_validity);
+            densify_map = detail::compute_ssim_cs_error_map(
+                loss_render.color, target.rgb, target.mask, mask_enabled,
+                options_.densify_loss_map_power);
+        }
         detail::LossGradients loss;
         if (vulkan_backend) {
             const bool mask_enabled = target.has_mask &&
                 (options_.use_mask || target.mask_is_validity);
+            if (ppisp_enabled || bilagrid_enabled)
+                loss.color = *photo_color;
             loss.total = loss.rgb = rasterizer.photometric_loss(
                 loss_render, target.rgb, target.mask, mask_enabled,
                 options_.ssim_weight, options_.photometric_weight,
@@ -1736,9 +1751,7 @@ GaussianModel Trainer::train(
             cuda_profiler.mark(
                 CudaTrainingStage::multi_view_sample_backward);
         }
-        tinytensor::Tensor densify_map;
-        if (densification_enabled &&
-            options_.densification_strategy == DensificationStrategy::emc) {
+        if (needs_emc_map && !densify_map.is_valid()) {
             const bool mask_enabled =
                 target.has_mask && (options_.use_mask || target.mask_is_validity);
             densify_map = detail::compute_ssim_cs_error_map(
@@ -1792,7 +1805,7 @@ GaussianModel Trainer::train(
             }
             photo_grad = &ppisp_state.input_grad;
         }
-        if (ppisp_enabled && report_progress) {
+        if (ppisp_enabled && report_progress && !vulkan_backend) {
             // How much exposure / white-balance drift the capture carried.
             // The layout decides which parameters are gains.
             const std::array<float, 2> deviation =
@@ -2222,7 +2235,7 @@ GaussianModel Trainer::train(
             " editor_ack_frames=", preview_ack_frames,
             " acknowledged=", has_preview_ack ? 1 : 0);
     }
-    if (options_.profile_cuda || vulkan_backend) {
+    if (options_.profile_cuda) {
         const auto cache = view_cache.stats();
         core::Logger::instance().info(
             "splat_data_cache requests=", cache.requests,
@@ -2259,10 +2272,15 @@ GaussianModel Trainer::train(
             " miss_bytes=", pool.miss_bytes,
             " drops=", pool.drops,
             " drop_bytes=", pool.drop_bytes,
+            // Live/free attribution for the retained pool memory: free blocks
+            // are reclaimable in principle (a smaller budget) while live bytes
+            // are tensors the training state still owns.
             " reserved_bytes=", pool.reserved_bytes,
-            " free_bytes=", pool.free_bytes,
             " live_bytes=", pool.live_bytes,
-            " budget_bytes=", pool.budget_bytes);
+            " free_bytes=", pool.free_bytes,
+            " budget_bytes=", pool.budget_bytes,
+            " retained_bytes=", pool.miss_bytes > pool.drop_bytes
+                ? pool.miss_bytes - pool.drop_bytes : 0);
     } else {
         const cudaError_t error = cudaDeviceSynchronize();
         if (error != cudaSuccess)

@@ -315,17 +315,6 @@ private:
 // pixel snapshots from the latest forward() stay alive for a later backward pass.
 class SplatRasterizer {
 public:
-    struct WorkspaceStats {
-        std::uint64_t total_bytes{};
-        std::uint64_t model_bytes{};
-        std::uint64_t sort_bytes{};
-        std::uint64_t frame_bytes{};
-        std::uint64_t ssim_bytes{};
-        std::uint64_t other_bytes{};
-        std::uint64_t snapshot_bytes{};
-        std::uint64_t output_bytes{};
-    };
-
     explicit SplatRasterizer(Context& context);
     ~SplatRasterizer();
 
@@ -349,8 +338,6 @@ public:
         std::span<const float> means, std::span<const float> opacities);
     void clear_model();
     [[nodiscard]] bool has_model() const noexcept;
-    [[nodiscard]] WorkspaceStats workspace_stats() const;
-
     [[nodiscard]] SplatForwardOutput render(
         const SplatCamera& camera, const SplatSettings& settings);
     // Render without downloading color, alpha, depth, normals, visibility or

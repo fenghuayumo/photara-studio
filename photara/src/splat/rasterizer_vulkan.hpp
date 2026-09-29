@@ -2,6 +2,12 @@
 
 #include "splat/rasterizer.hpp"
 
+#include <span>
+
+namespace splat_drender::vulkan {
+struct SplatColorCorrectionCommand;
+}
+
 namespace photara::splat::detail {
 
 RenderResult vulkan_raster_forward(
@@ -24,5 +30,10 @@ ModelGradients vulkan_raster_backward(
     const SHAdamUpdate* sh_adam);
 
 void vulkan_materialize_visibility(RenderResult& rendered);
+
+// Reuse the rasterizer that owns the current training frame so colour
+// correction does not construct a duplicate Vulkan pipeline set.
+bool vulkan_dispatch_color_correction(
+    std::span<const splat_drender::vulkan::SplatColorCorrectionCommand> commands);
 
 }  // namespace photara::splat::detail

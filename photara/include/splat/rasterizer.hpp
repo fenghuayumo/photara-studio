@@ -13,6 +13,9 @@ struct RasterizeOptions {
     // Vulkan keeps its live render frame in the backend context. Training can
     // skip color/alpha materialization unless a host preview needs the copies.
     bool copy_attachments{true};
+    // Vulkan colour correction only needs an owned RGB tensor. Skipping the
+    // alpha copy also avoids allocating a matching zero-gradient tensor.
+    bool copy_color_only{false};
     // Vulkan training consumes contribution visibility only after backward.
     // Deferring its uint32-to-float conversion lets that dispatch join the
     // densification/optimizer batch instead of forcing a queue hand-off before

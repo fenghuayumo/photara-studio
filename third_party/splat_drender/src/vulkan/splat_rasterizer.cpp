@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -54,7 +53,7 @@ void require(bool condition, const char* message) {
 }
 
 VkDescriptorBufferInfo descriptor(const Buffer& buffer) {
-    return {buffer.handle, 0, buffer.size};
+    return {buffer.handle, buffer.offset, buffer.size};
 }
 
 VkDescriptorBufferInfo descriptor(
@@ -64,7 +63,8 @@ VkDescriptorBufferInfo descriptor(
 
 void clear_buffer(Buffer& buffer) {
     if (!buffer.host_visible()) return;
-    std::memset(buffer.mapped, 0, static_cast<std::size_t>(buffer.size));
+    std::memset(static_cast<std::byte*>(buffer.mapped) + buffer.offset, 0,
+                static_cast<std::size_t>(buffer.size));
 }
 
 template <typename T>
@@ -73,11 +73,6 @@ std::vector<T> download_vector(
     std::vector<T> values(count);
     if (count != 0) context.read_buffer(buffer, values.data(), count * sizeof(T), offset_bytes);
     return values;
-}
-
-void zero_buffer(Context::Impl& context, Buffer& buffer, const std::size_t bytes) {
-    if (bytes == 0) return;
-    context.fill_buffer(buffer, 0, bytes);
 }
 
 bool environment_flag(const char* name) {
@@ -115,39 +110,6 @@ std::uint32_t environment_interval(
 
 class SplatRasterizer::Impl {
 public:
-    [[nodiscard]] WorkspaceStats workspace_stats() const {
-        const std::scoped_lock lock(context_.dispatch_mutex);
-        const auto bytes = [](std::initializer_list<const Buffer*> buffers) {
-            std::uint64_t total = 0;
-            for (const Buffer* buffer : buffers) total += buffer->size;
-            return total;
-        };
-        WorkspaceStats stats;
-        stats.model_bytes = bytes({&means_, &opacities_, &scales_, &rotations_,
-            &covariances_, &colors_, &raw_log_scales_, &raw_rotations_,
-            &opacity_logits_, &filter_3d_, &camera_[0], &camera_[1]});
-        stats.sort_bytes = bytes({&gauss_f_, &gauss_u_, &lo0_, &lo1_,
-            &hi0_, &hi1_, &val0_, &val1_, &frame_counts_, &count_mirrors_,
-            &hist_space_, &compact_, &tile_ranges_, &bucket_offsets_});
-        stats.frame_bytes = bytes({&out_f_, &out_u_, &snap_, &rgba_,
-            &loss_color_, &loss_alpha_, &loss_depth_, &loss_normal_,
-            &median_state_, &blend_grad_, &model_grad_});
-        stats.ssim_bytes = bytes({&ssim_prediction_, &ssim_target_, &ssim_mask_,
-            &ssim_work0_, &ssim_work1_, &ssim_work2_, &ssim_work3_,
-            &ssim_dmu_, &ssim_dvariance_, &ssim_dcovariance_,
-            &ssim_output_, &ssim_reduction_});
-        stats.other_bytes = bytes({&dummy_, &sample_points_, &sample_f_,
-            &sample_u_, &sample_loss_, &sample_point_grad_, &multi_depth_,
-            &multi_normal_, &multi_reference_gray_, &multi_sampled_,
-            &multi_inside_, &multi_neighbour_gray_, &multi_transform_,
-            &multi_reference_mask_, &multi_neighbour_mask_, &multi_output_});
-        stats.snapshot_bytes = snap_.size;
-        stats.output_bytes = out_f_.size;
-        stats.total_bytes = stats.model_bytes + stats.sort_bytes +
-            stats.frame_bytes + stats.ssim_bytes + stats.other_bytes;
-        return stats;
-    }
-
     // Command buffer / fence ring: a submission no longer drains the queue, so
     // the host must not reset a command buffer that is still executing, and the
     // descriptor sets of the fallback path stay alive until their batch retires.
@@ -208,6 +170,10 @@ public:
         create_backward_timestamp_profiler();
         create_forward_timestamp_profiler();
         query_subgroup_properties();
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+        phase_alignment_ = std::max<VkDeviceSize>(
+            256, properties.limits.minStorageBufferOffsetAlignment);
     }
 
     ~Impl() {
@@ -302,7 +268,7 @@ public:
             context_.write_buffer(raw_rotations, gaussians.raw_rotations.data(), gaussians.raw_rotations.size_bytes());
             context_.write_buffer(opacity_logits, gaussians.opacity_logits.data(), gaussians.opacity_logits.size_bytes());
             if (gaussians.filter_3d.empty()) {
-                zero_buffer(context_, filter_3d, static_cast<std::size_t>(count) * sizeof(float));
+                zero_buffer(filter_3d, static_cast<std::size_t>(count) * sizeof(float));
             } else {
                 context_.write_buffer(filter_3d, gaussians.filter_3d.data(), gaussians.filter_3d.size_bytes());
             }
@@ -616,26 +582,48 @@ public:
         Buffer* range_hi = &dummy_;
         Buffer& tile_ranges = grow(tile_ranges_, static_cast<std::uint64_t>(tiles) * 2 * sizeof(std::uint32_t));
         zero_buffer(
-            context_, tile_ranges,
+            tile_ranges,
             static_cast<std::size_t>(tiles) * 2 * sizeof(std::uint32_t));
         const bool single_sort = !use_gpu_driven && instances <= k_single_sort_limit;
         if (instances > 0) {
             if (!use_gpu_driven && visible == 0)
                 throw std::runtime_error("Vulkan splat preprocessing produced instances without visible Gaussians");
             const auto key_bytes = static_cast<std::uint64_t>(instances) * sizeof(std::uint32_t);
-            Buffer& lo0 = grow(lo0_, key_bytes);
-            Buffer& lo1 = grow(lo1_, key_bytes);
-            Buffer& hi0 = grow(hi0_, key_bytes);
-            Buffer& hi1 = grow(hi1_, key_bytes);
-            Buffer& val0 = grow(val0_, key_bytes);
-            Buffer& val1 = grow(val1_, key_bytes);
-            instance_values = &val0;
-            range_lo = &lo0;
-            range_hi = &hi0;
             const std::uint32_t hist_blocks = std::max(
                 div_up(instances, 1024), div_up(count, 1024));
             const std::uint32_t hist_n = 256 * hist_blocks;
-            Buffer& hist = grow(hist_space_, static_cast<std::uint64_t>(2 * hist_n + scan_scratch_uints(hist_n)) * sizeof(std::uint32_t));
+            const std::uint64_t hist_bytes =
+                static_cast<std::uint64_t>(2 * hist_n + scan_scratch_uints(hist_n)) *
+                sizeof(std::uint32_t);
+            const std::uint32_t compact_count = use_gpu_driven ? count : visible;
+            const std::uint64_t compact_bytes =
+                static_cast<std::uint64_t>(compact_count + scan_scratch_uints(compact_count)) *
+                sizeof(std::uint32_t);
+            const auto phase_aligned = [this](const VkDeviceSize bytes) {
+                return (bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1);
+            };
+            // The final instance values survive into backward, so whichever
+            // half the sort ends in stays standalone; the other five key
+            // buffers, the histogram and the compact scratch only live inside
+            // this forward and share the phase arena.
+            const bool survivor_is_zero = !use_gpu_driven && single_sort;
+            phase_begin(phase_aligned(key_bytes) * 5 +
+                        phase_aligned(hist_bytes) + phase_aligned(compact_bytes));
+            Buffer& lo0 = phase_slot(lo0_, key_bytes);
+            Buffer& lo1 = phase_slot(lo1_, key_bytes);
+            Buffer& hi0 = phase_slot(hi0_, key_bytes);
+            Buffer& hi1 = phase_slot(hi1_, key_bytes);
+            Buffer& val0 = survivor_is_zero
+                ? grow(val0_, key_bytes)
+                : phase_slot(val0_, key_bytes);
+            Buffer& val1 = survivor_is_zero
+                ? phase_slot(val1_, key_bytes)
+                : grow(val1_, key_bytes);
+            Buffer& hist = phase_slot(hist_space_, hist_bytes);
+            Buffer& compact = phase_slot(compact_, compact_bytes);
+            instance_values = &val0;
+            range_lo = &lo0;
+            range_hi = &hi0;
             if (use_gpu_driven) {
                 Push depth_push = emit_constants(
                     count, 0, grid_x, grid_y, wrap_width, count, gauss_slots);
@@ -650,11 +638,6 @@ public:
                     false, count, 1u, 10u * sizeof(std::uint32_t),
                     lo0, hi0, val0, lo1, hi1, val1, hist, depth_hist_n, 32u);
                 write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                Buffer& compact = grow(
-                    compact_,
-                    static_cast<std::uint64_t>(
-                        count + scan_scratch_uints(count)) *
-                        sizeof(std::uint32_t));
                 Push gather_push = emit_constants(
                     count, 1, grid_x, grid_y, wrap_width, count, gauss_slots);
                 dispatch_indirect(
@@ -691,7 +674,6 @@ public:
                 dispatch(emit_, {&gauss_f, &gauss_u, &lo0, &hi0, &val0, &dummy_, &dummy_}, depth_push, div_up(count, 256));
                 radix_sort(false, visible, lo0, hi0, val0, lo1, hi1, val1, hist, 256 * div_up(visible, 1024));
                 write_forward_timestamp(2, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-                Buffer& compact = grow(compact_, static_cast<std::uint64_t>(visible + scan_scratch_uints(visible)) * sizeof(std::uint32_t));
                 Push gather_push = emit_constants(visible, 2, grid_x, grid_y, wrap_width, count, gauss_slots);
                 dispatch(emit_, {&gauss_f, &gauss_u, &dummy_, &dummy_, &compact, &val0, &dummy_},
                          gather_push, div_up(visible, 256));
@@ -764,7 +746,7 @@ public:
                 ? static_cast<std::size_t>(count) + pixels + tiles + snap_buckets
                 : count;
             zero_buffer(
-                context_, *out_u,
+                *out_u,
                 clear_uints * sizeof(std::uint32_t));
         }
 
@@ -1000,19 +982,31 @@ public:
         const std::scoped_lock lock(context_.dispatch_mutex);
         Buffer& loss_color = grow(loss_color_, dL_color.size_bytes());
         Buffer& loss_alpha = grow(loss_alpha_, dL_alpha.size_bytes());
-        Buffer& loss_depth = grow(loss_depth_, static_cast<std::size_t>(last_pixels_) * sizeof(float));
-        Buffer& loss_normal = grow(loss_normal_, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float));
-        Buffer& median_state = grow(median_state_, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float));
+        Buffer& loss_depth = last_frame_has_geometry_
+            ? grow(loss_depth_, static_cast<std::size_t>(last_pixels_) * sizeof(float))
+            : dummy_;
+        Buffer& loss_normal = last_frame_has_geometry_
+            ? grow(loss_normal_, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float))
+            : dummy_;
+        Buffer& median_state = last_frame_has_geometry_
+            ? grow(median_state_, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float))
+            : dummy_;
         const std::size_t grad_count = static_cast<std::size_t>(count_) * 18;
         Buffer& grad = grow(blend_grad_, grad_count * sizeof(float));
         context_.write_buffer(loss_color, dL_color.data(), dL_color.size_bytes());
         context_.write_buffer(loss_alpha, dL_alpha.data(), dL_alpha.size_bytes());
-        if (dL_depth.empty()) zero_buffer(context_, loss_depth, static_cast<std::size_t>(last_pixels_) * sizeof(float));
-        else context_.write_buffer(loss_depth, dL_depth.data(), dL_depth.size_bytes());
-        if (dL_normal.empty()) zero_buffer(context_, loss_normal, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float));
-        else context_.write_buffer(loss_normal, dL_normal.data(), dL_normal.size_bytes());
-        zero_buffer(context_, median_state, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float));
-        zero_buffer(context_, grad, grad_count * sizeof(float));
+        if (last_frame_has_geometry_) {
+            if (dL_depth.empty())
+                zero_buffer(loss_depth, static_cast<std::size_t>(last_pixels_) * sizeof(float));
+            else
+                context_.write_buffer(loss_depth, dL_depth.data(), dL_depth.size_bytes());
+            if (dL_normal.empty())
+                zero_buffer(loss_normal, static_cast<std::size_t>(last_pixels_) * 3 * sizeof(float));
+            else
+                context_.write_buffer(loss_normal, dL_normal.data(), dL_normal.size_bytes());
+            zero_buffer(median_state, static_cast<std::size_t>(last_pixels_) * 2 * sizeof(float));
+        }
+        zero_buffer(grad, grad_count * sizeof(float));
 
         if (last_frame_has_geometry_) dispatch_median_backward(loss_depth, median_state);
 
@@ -1168,12 +1162,20 @@ public:
                 "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
 
         const std::scoped_lock lock(context_.dispatch_mutex);
-        Buffer& zero_depth = grow(loss_depth_, depth_bytes);
-        Buffer& zero_normal = grow(loss_normal_, normal_bytes);
-        Buffer& median_state = grow(median_state_, depth_bytes * 2);
-        if (dL_depth.buffer == VK_NULL_HANDLE) zero_buffer(context_, zero_depth, depth_bytes);
-        if (dL_normal.buffer == VK_NULL_HANDLE) zero_buffer(context_, zero_normal, normal_bytes);
-        zero_buffer(context_, median_state, depth_bytes * 2);
+        Buffer& zero_depth = last_frame_has_geometry_
+            ? grow(loss_depth_, depth_bytes)
+            : dummy_;
+        Buffer& zero_normal = last_frame_has_geometry_
+            ? grow(loss_normal_, normal_bytes)
+            : dummy_;
+        Buffer& median_state = last_frame_has_geometry_
+            ? grow(median_state_, depth_bytes * 2)
+            : dummy_;
+        if (last_frame_has_geometry_) {
+            if (dL_depth.buffer == VK_NULL_HANDLE) zero_buffer(zero_depth, depth_bytes);
+            if (dL_normal.buffer == VK_NULL_HANDLE) zero_buffer(zero_normal, normal_bytes);
+            zero_buffer(median_state, depth_bytes * 2);
+        }
         const VkDescriptorBufferInfo depth_info = dL_depth.buffer == VK_NULL_HANDLE
             ? descriptor(zero_depth)
             : VkDescriptorBufferInfo{dL_depth.buffer, dL_depth.offset, depth_bytes};
@@ -1245,8 +1247,8 @@ public:
         Buffer& output_u = grow(
             sample_u_, static_cast<std::uint64_t>(point_count) * 2 * sizeof(std::uint32_t));
         context_.write_buffer(points, world_points.data(), world_points.size_bytes());
-        zero_buffer(context_, output_f, static_cast<std::size_t>(point_count) * 4 * sizeof(float));
-        zero_buffer(context_, output_u, static_cast<std::size_t>(point_count) * 2 * sizeof(std::uint32_t));
+        zero_buffer(output_f, static_cast<std::size_t>(point_count) * 4 * sizeof(float));
+        zero_buffer(output_u, static_cast<std::size_t>(point_count) * 2 * sizeof(std::uint32_t));
         Push push{};
         push.u[0] = point_count;
         push.u[1] = last_width_;
@@ -1293,12 +1295,16 @@ public:
         Buffer& loss = grow(sample_loss_, dL_camera_points.size_bytes());
         Buffer& point_gradient = grow(
             sample_point_grad_, static_cast<std::uint64_t>(sample_point_count_) * 3 * sizeof(float));
-        Buffer& blend_gradient = grow(
-            blend_grad_, blend_gradient_float_count() * sizeof(float));
+        const auto sample_blend_bytes =
+            static_cast<VkDeviceSize>(blend_gradient_float_count()) * sizeof(float);
+        const VkDeviceSize sample_blend_aligned =
+            (sample_blend_bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1);
+        phase_begin(sample_blend_aligned);
+        Buffer& blend_gradient = phase_slot(blend_grad_, sample_blend_bytes);
         context_.write_buffer(loss, dL_camera_points.data(), dL_camera_points.size_bytes());
-        zero_buffer(context_, point_gradient,
+        zero_buffer(point_gradient,
                     static_cast<std::size_t>(sample_point_count_) * 3 * sizeof(float));
-        zero_buffer(context_, blend_gradient,
+        zero_buffer(blend_gradient,
                     static_cast<std::size_t>(blend_gradient_float_count()) * sizeof(float));
         Push sample_push{};
         sample_push.u[0] = sample_point_count_;
@@ -1468,7 +1474,7 @@ public:
         if (!input.neighbour_mask.empty())
             context_.write_buffer(neighbour_mask, input.neighbour_mask.data(),
                                   input.neighbour_mask.size_bytes());
-        zero_buffer(context_, output, output_count * sizeof(float));
+        zero_buffer(output, output_count * sizeof(float));
 
         Push push{};
         push.u[0] = reference.width;
@@ -1529,13 +1535,21 @@ public:
         const float ssim_weight, const float photometric_weight) {
         const std::size_t pixels = static_cast<std::size_t>(width) * height;
         const std::size_t count = 3 * pixels;
-        Buffer& work0 = grow(ssim_work0_, count * sizeof(float));
-        Buffer& work1 = grow(ssim_work1_, count * sizeof(float));
-        Buffer& work2 = grow(ssim_work2_, count * sizeof(float));
-        Buffer& work3 = grow(ssim_work3_, count * sizeof(float));
-        Buffer& dmu = grow(ssim_dmu_, count * sizeof(float));
-        Buffer& dvariance = grow(ssim_dvariance_, count * sizeof(float));
-        Buffer& dcovariance = grow(ssim_dcovariance_, count * sizeof(float));
+        // The seven per-plane SSIM scratch buffers only live between the
+        // forward and the backward; share them with the forward sort scratch
+        // through the phase arena instead of summing both footprints.
+        const std::size_t work_bytes = count * sizeof(float);
+        const std::size_t work_aligned =
+            (work_bytes + static_cast<std::size_t>(phase_alignment_) - 1) &
+            ~(static_cast<std::size_t>(phase_alignment_) - 1);
+        phase_begin(7 * work_aligned);
+        Buffer& work0 = phase_slot(ssim_work0_, work_bytes);
+        Buffer& work1 = phase_slot(ssim_work1_, work_bytes);
+        Buffer& work2 = phase_slot(ssim_work2_, work_bytes);
+        Buffer& work3 = phase_slot(ssim_work3_, work_bytes);
+        Buffer& dmu = phase_slot(ssim_dmu_, work_bytes);
+        Buffer& dvariance = phase_slot(ssim_dvariance_, work_bytes);
+        Buffer& dcovariance = phase_slot(ssim_dcovariance_, work_bytes);
         Buffer& output = grow(ssim_output_, 2 * count * sizeof(float));
         // Passes 0/1 use work4 only until the loss map is written. The
         // gradient half of output is first written by pass 3, so it can hold
@@ -1592,7 +1606,6 @@ public:
         push.u[5] = 3u;
         dispatch_infos(
             ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
-
         Push reduce_push{};
         reduce_push.u[0] = width;
         reduce_push.u[1] = height;
@@ -1789,25 +1802,36 @@ public:
                 "device buffer offsets do not satisfy minStorageBufferOffsetAlignment");
 
         const std::scoped_lock lock(context_.dispatch_mutex);
-        Buffer& blend_gradient = grow(blend_grad_, blend_bytes);
+        // Backward-only scratch joins the phase arena; the blend gradient is
+        // per-Gaussian and the geometry loss scratch is per-pixel, and none of
+        // it outlives this pass.
+        const auto phase_aligned = [this](const VkDeviceSize bytes) {
+            return (bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1);
+        };
+        phase_begin(phase_aligned(blend_bytes) +
+                    (last_frame_has_geometry_
+                         ? phase_aligned(depth_bytes) + phase_aligned(normal_bytes) +
+                               phase_aligned(depth_bytes * 2)
+                         : 0));
+        Buffer& blend_gradient = phase_slot(blend_grad_, blend_bytes);
         // All backward shaders use pc.u13 to avoid touching the alpha-gradient
         // descriptor when no alpha objective is active. Binding the tiny dummy
         // buffer removes an image-sized clear and its queue drain.
         Buffer& zero_depth = last_frame_has_geometry_
-            ? grow(loss_depth_, depth_bytes)
+            ? phase_slot(loss_depth_, depth_bytes)
             : dummy_;
         Buffer& zero_normal = last_frame_has_geometry_
-            ? grow(loss_normal_, normal_bytes)
+            ? phase_slot(loss_normal_, normal_bytes)
             : dummy_;
         Buffer& median_state = last_frame_has_geometry_
-            ? grow(median_state_, depth_bytes * 2)
+            ? phase_slot(median_state_, depth_bytes * 2)
             : dummy_;
         if (last_frame_has_geometry_) {
             if (dL_depth.buffer == VK_NULL_HANDLE)
-                zero_buffer(context_, zero_depth, depth_bytes);
+                zero_buffer(zero_depth, depth_bytes);
             if (dL_normal.buffer == VK_NULL_HANDLE)
-                zero_buffer(context_, zero_normal, normal_bytes);
-            zero_buffer(context_, median_state, depth_bytes * 2);
+                zero_buffer(zero_normal, normal_bytes);
+            zero_buffer(median_state, depth_bytes * 2);
         }
         const VkDescriptorBufferInfo alpha_info = dL_alpha.buffer == VK_NULL_HANDLE
             ? descriptor(dummy_)
@@ -1821,20 +1845,27 @@ public:
         if (last_frame_has_geometry_) dispatch_median_backward_info(depth_info, median_state);
         begin_batch();
         write_backward_timestamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
-        vkCmdFillBuffer(command_, blend_gradient.handle, 0, blend_bytes, 0u);
-        VkBufferMemoryBarrier fill_barrier{
-            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        // The gradient scratch can sit over the loss phase's SSIM workspace
+        // in the arena, so bracket the fill with global barriers rather than
+        // buffer-scoped ones.
+        VkMemoryBarrier fill_before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        fill_before.srcAccessMask =
+            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        fill_before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &fill_before, 0, nullptr,
+            0, nullptr);
+        vkCmdFillBuffer(
+            command_, blend_gradient.handle, blend_gradient.offset,
+            blend_bytes, 0u);
+        VkMemoryBarrier fill_barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         fill_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         fill_barrier.dstAccessMask =
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        fill_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        fill_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        fill_barrier.buffer = blend_gradient.handle;
-        fill_barrier.offset = 0;
-        fill_barrier.size = blend_bytes;
         vkCmdPipelineBarrier(
             command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, nullptr, 1, &fill_barrier, 0, nullptr);
+            0, 1, &fill_barrier, 0, nullptr, 0, nullptr);
         write_backward_timestamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         Push blend_push{};
@@ -2225,34 +2256,92 @@ private:
         Buffer& buffer, VkDeviceSize bytes, const BufferMemory memory = BufferMemory::device_local,
         const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
         if (buffer.size < bytes) {
-            const VkDeviceSize previous = buffer.size;
-            const auto started = std::chrono::steady_clock::now();
             drain_before_replace(buffer);
-            const auto drained = std::chrono::steady_clock::now();
             buffer = alloc(bytes, memory, usage);
-            if (profile_growth_ && bytes >= (1u << 20)) {
-                const auto allocated = std::chrono::steady_clock::now();
-                const char* group = &buffer == &snap_ ? "snapshot"
-                    : &buffer == &out_f_ ? "output"
-                    : (&buffer == &lo0_ || &buffer == &lo1_ ||
-                       &buffer == &hi0_ || &buffer == &hi1_ ||
-                       &buffer == &val0_ || &buffer == &val1_)
-                        ? "sort" : "other";
-                const auto milliseconds = [](const auto left, const auto right) {
-                    return std::chrono::duration<double, std::milli>(right - left).count();
-                };
-                std::fprintf(stderr,
-                    "splat_vulkan_growth group=%s old=%llu new=%llu "
-                    "wait_ms=%.4f alloc_ms=%.4f gaussians=%u "
-                    "instance_capacity=%u reported_instances=%u pixels=%u\n",
-                    group, static_cast<unsigned long long>(previous),
-                    static_cast<unsigned long long>(buffer.size),
-                    milliseconds(started, drained),
-                    milliseconds(drained, allocated), count_,
-                    instance_capacity_, reported_instances_, last_pixels_);
-            }
         }
         return buffer;
+    }
+
+    // Lifetime-disjoint per-step phases share one arena allocation:
+    //   forward  — radix-sort scratch (five of the six lo/hi/val ping-pong
+    //              buffers, histogram, compact scratch); the surviving value
+    //              buffer that backward re-reads stays standalone,
+    //   loss     — the fused SSIM workspace,
+    //   backward — the per-Gaussian blend gradient and geometry loss scratch.
+    // Phases never carry data between each other, every dispatch is separated
+    // by a global memory barrier, and all work shares one queue, so binding
+    // their buffers as offset views replaces sum(phase footprints) with
+    // max(phase footprints). At London scale that is roughly the SSIM
+    // workspace plus the sort scratch, both hundreds of MiB.
+    Buffer phase_arena_;
+    // Previous arena allocations awaiting a safe free. The batch ring keeps
+    // completed-but-unreset command buffers around for k_batch_slots
+    // submissions; immediately freeing memory those dormant buffers still
+    // reference tripped a device loss on Windows/WDDM right after a capacity
+    // reseed (measured: grow -> one submit ok -> next submit -4). Retiring an
+    // old arena until the ring has fully rotated past it is bounded by a
+    // handful of allocations.
+    std::vector<std::pair<Buffer, std::uint32_t>> retired_arenas_;
+    VkDeviceSize phase_offset_{};
+    VkDeviceSize phase_alignment_{256};
+    void phase_begin(const VkDeviceSize bytes) {
+        phase_offset_ = 0;
+        if (phase_arena_.size >= bytes) return;
+        // Grow once per phase before any view is recorded: a mid-phase grow
+        // would free memory that pending dispatches still reference.
+        drain_before_replace(phase_arena_);
+        retired_arenas_.emplace_back(std::move(phase_arena_), 0);
+        phase_arena_ = alloc(bytes);
+    }
+
+    Buffer& phase_slot(Buffer& view, const VkDeviceSize bytes) {
+        if (view.owning && view.handle != VK_NULL_HANDLE) {
+            // A member that still owns its standalone allocation (host-API
+            // paths) must release it before becoming an arena view.
+            drain_before_replace(view);
+            view.destroy_owned();
+        }
+        const VkDeviceSize aligned =
+            (bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1);
+        require(phase_offset_ + aligned <= phase_arena_.size,
+                "Vulkan splat phase arena layout overflow");
+        view.bind_view(phase_arena_, phase_offset_, bytes);
+        phase_offset_ += aligned;
+        return view;
+    }
+
+    void zero_buffer(Buffer& buffer, const std::size_t bytes) {
+        if (bytes == 0) return;
+        require(bytes <= buffer.size && bytes % 4 == 0,
+                "Vulkan splat clear exceeds the buffer or is unaligned");
+        if (buffer.host_visible()) {
+            std::memset(static_cast<std::byte*>(buffer.mapped) + buffer.offset, 0, bytes);
+            return;
+        }
+        // Keep the clear in the raster command batch. A one-shot fill with
+        // vkQueueWaitIdle here used to drain the shared queue twice per frame.
+        // The barriers are global (not buffer-scoped) because phase-arena
+        // views can sit over memory a different logical buffer last touched:
+        // a buffer-scoped dependency would miss those writes.
+        begin_batch();
+        VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        before.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr,
+            0, nullptr);
+        vkCmdFillBuffer(command_, buffer.handle, buffer.offset, bytes, 0u);
+        VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                              VK_ACCESS_SHADER_WRITE_BIT |
+                              VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(
+            command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 1, &after, 0, nullptr, 0, nullptr);
     }
 
     void begin_batch() {
@@ -2313,8 +2402,22 @@ private:
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &command_;
-        if (vkQueueSubmit(context_.queue, 1, &submit, slot.fence) != VK_SUCCESS) {
-            throw std::runtime_error("Vulkan splat submit failed");
+        const VkResult submit_result =
+            vkQueueSubmit(context_.queue, 1, &submit, slot.fence);
+        // A retired arena becomes freeable once k_batch_slots further
+        // submissions have rotated the ring past every dormant command buffer
+        // that referenced it.
+        for (auto it = retired_arenas_.begin();
+             it != retired_arenas_.end();) {
+            if (++it->second > k_batch_slots)
+                it = retired_arenas_.erase(it);
+            else
+                ++it;
+        }
+        if (submit_result != VK_SUCCESS) {
+            throw std::runtime_error(
+                std::string("Vulkan splat submit failed: ") +
+                std::to_string(static_cast<int>(submit_result)));
         }
         recording_ = false;
         slot.in_flight = true;
@@ -2334,10 +2437,12 @@ private:
         batch_slot_ = (batch_slot_ + 1U) % k_batch_slots;
     }
 
-    // Twice the measured instances, clamped to uint32, with a floor of one so
-    // even a first view that sees nothing leaves room for later frames.
+    // Twice the measured instances, clamped to uint32, with
+    // a floor of one so even a first view that sees nothing leaves room for
+    // later frames.
     static std::uint32_t instance_capacity_for(const std::uint32_t instances) {
-        const std::uint64_t padded = std::max<std::uint64_t>(instances, 1u) * 2u;
+        const std::uint64_t padded = static_cast<std::uint64_t>(
+            std::max<std::uint64_t>(instances, 1u) * 2u);
         return static_cast<std::uint32_t>(std::min<std::uint64_t>(
             padded, std::numeric_limits<std::uint32_t>::max()));
     }
@@ -2354,11 +2459,6 @@ private:
         if (words[2] != 0u) {
             const std::uint32_t wanted = instance_capacity_for(words[0]);
             if (wanted > instance_capacity_) {
-                if (profile_growth_)
-                    std::fprintf(stderr,
-                        "splat_vulkan_capacity_growth old=%u new=%u "
-                        "reported_instances=%u gaussians=%u\n",
-                        instance_capacity_, wanted, words[0], count_);
                 instance_capacity_ = wanted;
             }
         }
@@ -2706,7 +2806,6 @@ private:
     double backward_blend_total_ms_{};
     double backward_project_total_ms_{};
     bool recording_{};
-    bool profile_growth_ = environment_flag("SPLAT_DRENDER_PROFILE_GROWTH");
     bool model_ready_{};
     bool has_sh_{};
     bool has_scales_{true};
@@ -2849,10 +2948,6 @@ void SplatRasterizer::update_means_and_opacities(
 
 void SplatRasterizer::clear_model() { impl_->clear_model(); }
 bool SplatRasterizer::has_model() const noexcept { return impl_->has_model(); }
-SplatRasterizer::WorkspaceStats SplatRasterizer::workspace_stats() const {
-    return impl_->workspace_stats();
-}
-
 SplatForwardOutput SplatRasterizer::render(const SplatCamera& camera, const SplatSettings& settings) {
     return impl_->render(camera, settings);
 }
