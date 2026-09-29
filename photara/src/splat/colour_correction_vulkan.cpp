@@ -1,6 +1,7 @@
 #include "ppisp.hpp"
 #include "bilateral_grid.hpp"
 #include "optimizer.hpp"
+#include "rasterizer_vulkan.hpp"
 
 #include "splat_drender/vulkan_api.h"
 #include "vulkan/backend.hpp"
@@ -62,7 +63,9 @@ void launch(std::uint32_t mode, const Buffers& buffers, Push push,
             std::uint32_t group_count) {
     push[7] = mode;
     tinytensor::vulkan::submit_async();
-    backend().dispatcher.color_correction_device(buffers, push, group_count);
+    const std::array commands{Command{buffers, push, group_count}};
+    if (!vulkan_dispatch_color_correction(commands))
+        backend().dispatcher.color_correction_batch_device(commands);
 }
 
 Command command(std::uint32_t mode, const Buffers& buffers, Push push,
@@ -73,7 +76,8 @@ Command command(std::uint32_t mode, const Buffers& buffers, Push push,
 
 void launch_batch(std::span<const Command> commands) {
     tinytensor::vulkan::submit_async();
-    backend().dispatcher.color_correction_batch_device(commands);
+    if (!vulkan_dispatch_color_correction(commands))
+        backend().dispatcher.color_correction_batch_device(commands);
 }
 
 void image_shape(const tinytensor::Tensor& color) {

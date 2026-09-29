@@ -33,9 +33,15 @@ struct Buffer {
     VkBuffer handle = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize size = 0;
+    // Byte offset of this buffer's data inside its VkDeviceMemory. Owning
+    // buffers are bound at zero; lifetime-disjoint scratch buffers alias one
+    // arena allocation through bind_view() and carry a nonzero offset.
+    VkDeviceSize offset = 0;
     void* mapped = nullptr;
     bool coherent = true;
     VkDeviceSize non_coherent_atom_size = 1;
+    // Views reference memory owned by another Buffer and must not free it.
+    bool owning = true;
 
     Buffer() = default;
     Buffer(
@@ -51,6 +57,38 @@ struct Buffer {
     Buffer& operator=(const Buffer&) = delete;
 
     [[nodiscard]] bool host_visible() const noexcept { return mapped != nullptr; }
+    // Destroy an owning allocation before this member is rebound as a view.
+    // The caller must first guarantee no queued work still references it.
+    void destroy_owned() noexcept {
+        if (!owning || device == VK_NULL_HANDLE || memory == VK_NULL_HANDLE)
+            return;
+        if (mapped != nullptr) {
+            vkUnmapMemory(device, memory);
+            mapped = nullptr;
+        }
+        vkDestroyBuffer(device, handle, nullptr);
+        vkFreeMemory(device, memory, nullptr);
+        handle = VK_NULL_HANDLE;
+        memory = VK_NULL_HANDLE;
+        size = 0;
+        offset = 0;
+        owning = true;
+    }
+    // Rebind this Buffer as a non-owning view into an owning arena buffer.
+    // Only valid for device-local scratch whose whole lifetime is bracketed by
+    // the arena's phase barriers.
+    void bind_view(const Buffer& owner, const VkDeviceSize view_offset,
+                   const VkDeviceSize view_size) noexcept {
+        device = owner.device;
+        handle = owner.handle;
+        memory = owner.memory;
+        offset = view_offset;
+        size = view_size;
+        mapped = nullptr;
+        coherent = true;
+        non_coherent_atom_size = 1;
+        owning = false;
+    }
     void upload(const void* source, std::size_t byte_size, std::size_t offset = 0) const;
     void download(void* destination, std::size_t byte_size, std::size_t offset = 0) const;
 };

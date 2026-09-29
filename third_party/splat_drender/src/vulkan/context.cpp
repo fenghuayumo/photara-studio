@@ -371,7 +371,7 @@ Buffer::Buffer(
 }
 
 Buffer::~Buffer() {
-    if (device != VK_NULL_HANDLE && memory != VK_NULL_HANDLE) {
+    if (owning && device != VK_NULL_HANDLE && memory != VK_NULL_HANDLE) {
         if (mapped != nullptr) {
             vkUnmapMemory(device, memory);
         }
@@ -390,9 +390,11 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
         std::swap(handle, other.handle);
         std::swap(memory, other.memory);
         std::swap(size, other.size);
+        std::swap(offset, other.offset);
         std::swap(mapped, other.mapped);
         std::swap(coherent, other.coherent);
         std::swap(non_coherent_atom_size, other.non_coherent_atom_size);
+        std::swap(owning, other.owning);
     }
     return *this;
 }
@@ -418,13 +420,15 @@ void Buffer::upload(const void* source, std::size_t byte_size, std::size_t offse
     if (mapped == nullptr) {
         throw std::logic_error("Buffer is device-local; upload through the Context staging path");
     }
-    if (offset + byte_size > size) {
+    const std::size_t view_offset = offset + static_cast<std::size_t>(this->offset);
+    if (view_offset + byte_size > size + this->offset) {
         throw std::out_of_range("Buffer upload exceeds allocation");
     }
     if (byte_size != 0) {
-        std::memcpy(static_cast<std::byte*>(mapped) + offset, source, byte_size);
+        std::memcpy(static_cast<std::byte*>(mapped) + view_offset, source, byte_size);
         if (!coherent) {
-            flush_range(device, memory, non_coherent_atom_size, offset, byte_size, size, false);
+            flush_range(device, memory, non_coherent_atom_size, view_offset, byte_size,
+                        size + static_cast<std::size_t>(this->offset), false);
         }
     }
 }
@@ -433,14 +437,16 @@ void Buffer::download(void* destination, std::size_t byte_size, std::size_t offs
     if (mapped == nullptr) {
         throw std::logic_error("Buffer is device-local; download through the Context staging path");
     }
-    if (offset + byte_size > size) {
+    const std::size_t view_offset = offset + static_cast<std::size_t>(this->offset);
+    if (view_offset + byte_size > size + this->offset) {
         throw std::out_of_range("Buffer download exceeds allocation");
     }
     if (byte_size != 0) {
         if (!coherent) {
-            flush_range(device, memory, non_coherent_atom_size, offset, byte_size, size, true);
+            flush_range(device, memory, non_coherent_atom_size, view_offset, byte_size,
+                        size + static_cast<std::size_t>(this->offset), true);
         }
-        std::memcpy(destination, static_cast<const std::byte*>(mapped) + offset, byte_size);
+        std::memcpy(destination, static_cast<const std::byte*>(mapped) + view_offset, byte_size);
     }
 }
 
@@ -772,7 +778,8 @@ void Context::Impl::write_buffer(
     }
     ensure_staging(byte_size);
     staging_.upload(source, byte_size);
-    copy_between(staging_, 0, destination, offset, byte_size);
+    copy_between(staging_, 0, destination,
+                 offset + static_cast<std::size_t>(destination.offset), byte_size);
 }
 
 void Context::Impl::read_buffer(
@@ -783,14 +790,16 @@ void Context::Impl::read_buffer(
         return;
     }
     ensure_staging(byte_size);
-    copy_between(source, offset, staging_, 0, byte_size);
+    copy_between(source, offset + static_cast<std::size_t>(source.offset),
+                 staging_, 0, byte_size);
     staging_.download(destination, byte_size);
 }
 
 void Context::Impl::fill_buffer(const Buffer& destination, const std::uint32_t value, const std::size_t byte_size) {
     if (byte_size == 0) return;
     if (destination.host_visible()) {
-        std::memset(destination.mapped, value & 0xFFU, byte_size);
+        std::memset(static_cast<std::byte*>(destination.mapped) + destination.offset,
+                    value & 0xFFU, byte_size);
         return;
     }
     VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -802,7 +811,8 @@ void Context::Impl::fill_buffer(const Buffer& destination, const std::uint32_t v
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check_vk(vkBeginCommandBuffer(command, &begin), "vkBeginCommandBuffer");
-    vkCmdFillBuffer(command, destination.handle, 0, static_cast<VkDeviceSize>(byte_size), value);
+    vkCmdFillBuffer(command, destination.handle, destination.offset,
+                    static_cast<VkDeviceSize>(byte_size), value);
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;

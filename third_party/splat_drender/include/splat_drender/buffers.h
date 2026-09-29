@@ -197,8 +197,10 @@ struct PixelState {
         return align_up(pixels * sizeof(unsigned)) +
                align_up(pixels * 3 * sizeof(float)) +
                align_up(snap) +
-               (geometry ? align_up(snap) : 0) +
-               align_up(pixels * sizeof(float)) + kAlign;
+               (geometry ? align_up(snap) +
+                               align_up(pixels * sizeof(float))
+                         : 0) +
+               kAlign;
     }
 
     static PixelState from_pool(char* base, std::size_t pixels,
@@ -210,7 +212,8 @@ struct PixelState {
         s.snap_ct = reinterpret_cast<float4*>(take(c, buckets * 256 * sizeof(float4)));
         if (geometry)
             s.snap_normal = reinterpret_cast<float4*>(take(c, buckets * 256 * sizeof(float4)));
-        s.dL_dmt = reinterpret_cast<float*>(take(c, pixels * sizeof(float)));
+        if (geometry)
+            s.dL_dmt = reinterpret_cast<float*>(take(c, pixels * sizeof(float)));
         return s;
     }
 };

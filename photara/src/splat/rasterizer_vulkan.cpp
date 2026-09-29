@@ -92,8 +92,7 @@ struct VulkanRasterBackend {
             return options;
           }()),
           rasterizer(context), profile_stages(
-              environment_flag("SPLAT_VULKAN_PROFILE_STAGES")),
-          profile_memory(environment_flag("SPLAT_VULKAN_PROFILE_MEMORY")) {}
+              environment_flag("SPLAT_VULKAN_PROFILE_STAGES")) {}
 
     void record_forward(const double value, const double sync,
                         const double bind, const double render,
@@ -109,29 +108,6 @@ struct VulkanRasterBackend {
         if (profile_stages) loss_ms += value;
     }
     void record_backward(const double value) {
-        if (profile_memory && ++memory_samples % 100 == 0) {
-            const auto workspace = rasterizer.workspace_stats();
-            const auto pool = tinytensor::vulkan::buffer_pool_stats();
-            std::fprintf(stderr,
-                "splat_vulkan_memory sample=%u raster_total=%llu raster_model=%llu "
-                "raster_sort=%llu raster_frame=%llu raster_ssim=%llu "
-                "raster_other=%llu raster_snapshot=%llu raster_output=%llu "
-                "pool_reserved=%llu pool_live=%llu pool_free=%llu pool_budget=%llu\n",
-                memory_samples,
-                static_cast<unsigned long long>(workspace.total_bytes),
-                static_cast<unsigned long long>(workspace.model_bytes),
-                static_cast<unsigned long long>(workspace.sort_bytes),
-                static_cast<unsigned long long>(workspace.frame_bytes),
-                static_cast<unsigned long long>(workspace.ssim_bytes),
-                static_cast<unsigned long long>(workspace.other_bytes),
-                static_cast<unsigned long long>(workspace.snapshot_bytes),
-                static_cast<unsigned long long>(workspace.output_bytes),
-                static_cast<unsigned long long>(pool.reserved_bytes),
-                static_cast<unsigned long long>(pool.live_bytes),
-                static_cast<unsigned long long>(pool.free_bytes),
-                static_cast<unsigned long long>(pool.budget_bytes));
-            std::fflush(stderr);
-        }
         if (!profile_stages) return;
         backward_ms += value;
         if (++profile_samples < 100) return;
@@ -155,8 +131,6 @@ struct VulkanRasterBackend {
     }
 
     bool profile_stages{};
-    bool profile_memory{};
-    std::uint32_t memory_samples{};
     std::uint32_t profile_samples{};
     double forward_ms{};
     double forward_sync_ms{};
@@ -174,6 +148,8 @@ struct VulkanForwardContext {
     splat_drender::vulkan::SplatDevicePhotometricOutput photometric;
     bool has_photometric{};
 };
+
+thread_local std::weak_ptr<VulkanRasterBackend> active_training_backend;
 
 std::shared_ptr<VulkanRasterBackend> get_backend(std::shared_ptr<void>& value) {
     if (!value) value = std::make_shared<VulkanRasterBackend>();
@@ -203,6 +179,7 @@ RenderResult vulkan_raster_forward(
             "Vulkan precomputed-color rasterization is not implemented yet");
 
     const auto backend = get_backend(backend_value);
+    active_training_backend = backend;
     auto context = std::make_shared<VulkanForwardContext>();
     context->backend = backend;
     if (!model.filter_3d.is_valid() &&
@@ -239,8 +216,9 @@ RenderResult vulkan_raster_forward(
         result.color = tinytensor::Tensor::empty(
             {std::size_t{3}, camera.height, camera.width},
             tinytensor::Device::Vulkan);
-        result.alpha = tinytensor::Tensor::empty(
-            {camera.height, camera.width}, tinytensor::Device::Vulkan);
+        if (!requested_options.copy_color_only)
+            result.alpha = tinytensor::Tensor::empty(
+                {camera.height, camera.width}, tinytensor::Device::Vulkan);
     }
     if (settings.need_depth) {
         result.normal = tinytensor::Tensor::empty(
@@ -266,14 +244,19 @@ RenderResult vulkan_raster_forward(
     destination.width = camera.width;
     destination.height = camera.height;
 
-    const auto profile_start = std::chrono::steady_clock::now();
+    const auto profile_start = backend->profile_stages
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     tinytensor::vulkan::submit_async();
-    const double sync_ms = elapsed_ms(profile_start);
+    const double sync_ms = backend->profile_stages
+        ? elapsed_ms(profile_start) : 0.0;
     backend->rasterizer.bind_model_device(gaussians);
-    const double bind_ms = elapsed_ms(profile_start) - sync_ms;
+    const double bind_ms = backend->profile_stages
+        ? elapsed_ms(profile_start) - sync_ms : 0.0;
     context->frame = backend->rasterizer.render_device_copy(
         camera_view(camera), settings, destination);
-    const double render_ms = elapsed_ms(profile_start) - sync_ms - bind_ms;
+    const double render_ms = backend->profile_stages
+        ? elapsed_ms(profile_start) - sync_ms - bind_ms : 0.0;
     // Keep the per-Gaussian contribution flags device-resident. The 0/1
     // int32-to-float conversion is a single TinyTensor compute dispatch and
     // avoids a full device -> host -> device round trip for every frame.
@@ -281,11 +264,22 @@ RenderResult vulkan_raster_forward(
         result.visibility = context->visibility_bits.to(
             tinytensor::DataType::Float32);
     result.rendered_instances = context->frame.instance_count;
-    const double total_ms = elapsed_ms(profile_start);
-    backend->record_forward(total_ms, sync_ms, bind_ms, render_ms,
-                            total_ms - sync_ms - bind_ms - render_ms);
+    if (backend->profile_stages) {
+        const double total_ms = elapsed_ms(profile_start);
+        backend->record_forward(total_ms, sync_ms, bind_ms, render_ms,
+                                total_ms - sync_ms - bind_ms - render_ms);
+    }
     result.context.backend_impl = std::move(context);
     return result;
+}
+
+bool vulkan_dispatch_color_correction(
+    const std::span<const splat_drender::vulkan::SplatColorCorrectionCommand>
+        commands) {
+    const auto backend = active_training_backend.lock();
+    if (!backend) return false;
+    backend->rasterizer.color_correction_batch_device(commands);
+    return true;
 }
 
 float vulkan_photometric_loss(
@@ -295,14 +289,21 @@ float vulkan_photometric_loss(
     const bool read_loss_value,
     tinytensor::Tensor* color_gradient) {
     auto context = get_context(rendered);
-    const auto profile_start = std::chrono::steady_clock::now();
+    const auto profile_start = context->backend->profile_stages
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     if (target.device() != tinytensor::Device::Vulkan)
         throw std::invalid_argument(
             "Vulkan photometric target must be a Vulkan tensor");
-    if (color_gradient != nullptr)
-        *color_gradient = tinytensor::Tensor::empty(
-            {std::size_t{3}, context->frame.height, context->frame.width},
-            tinytensor::Device::Vulkan);
+    if (color_gradient != nullptr) {
+        const tinytensor::TensorShape gradient_shape{
+            std::size_t{3}, context->frame.height, context->frame.width};
+        if (!color_gradient->is_valid() ||
+            color_gradient->shape() != gradient_shape ||
+            color_gradient->device() != tinytensor::Device::Vulkan)
+            *color_gradient = tinytensor::Tensor::empty(
+                gradient_shape, tinytensor::Device::Vulkan);
+    }
     tinytensor::vulkan::submit_async();
     context->photometric = context->backend->rasterizer.fused_l1_ssim_device(
         rendered.color.is_valid() ? buffer_view(rendered.color)
@@ -317,7 +318,8 @@ float vulkan_photometric_loss(
     if (read_loss_value)
         value = context->backend->rasterizer.read_photometric_loss(
             context->photometric);
-    context->backend->record_loss(elapsed_ms(profile_start));
+    if (context->backend->profile_stages)
+        context->backend->record_loss(elapsed_ms(profile_start));
     return value;
 }
 
@@ -330,7 +332,9 @@ ModelGradients vulkan_raster_backward(
     const tinytensor::Tensor& densify_map,
     const SHAdamUpdate* sh_adam) {
     auto context = get_context(rendered);
-    const auto profile_start = std::chrono::steady_clock::now();
+    const auto profile_start = context->backend->profile_stages
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     if (sh_adam != nullptr)
         throw std::invalid_argument(
             "Fused SH Adam is not supported by the Vulkan raster primitive");
@@ -382,7 +386,8 @@ ModelGradients vulkan_raster_backward(
             tinytensor::TensorShape{count, std::size_t{1}});
     offset += count;
     gradients.refine_weight = packed.slice(0, offset, offset + count);
-    context->backend->record_backward(elapsed_ms(profile_start));
+    if (context->backend->profile_stages)
+        context->backend->record_backward(elapsed_ms(profile_start));
     return gradients;
 }
 
