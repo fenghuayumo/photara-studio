@@ -56,6 +56,14 @@ VkDescriptorBufferInfo descriptor(const Buffer& buffer) {
     return {buffer.handle, buffer.offset, buffer.size};
 }
 
+photara::vk::BufferBinding to_binding(const Buffer& buffer) {
+    return {buffer.handle, buffer.offset, buffer.size};
+}
+
+photara::vk::BufferBinding to_binding(const VkDescriptorBufferInfo& info) {
+    return photara::vk::binding(info);
+}
+
 VkDescriptorBufferInfo descriptor(
     const SplatBufferView& view, const std::uint64_t required_bytes) {
     return {view.buffer, view.offset, required_bytes};
@@ -110,15 +118,6 @@ std::uint32_t environment_interval(
 
 class SplatRasterizer::Impl {
 public:
-    // Command buffer / fence ring: a submission no longer drains the queue, so
-    // the host must not reset a command buffer that is still executing, and the
-    // descriptor sets of the fallback path stay alive until their batch retires.
-    struct BatchSlot {
-        VkCommandBuffer command = VK_NULL_HANDLE;
-        VkFence fence = VK_NULL_HANDLE;
-        std::vector<VkDescriptorSet> pending_sets;
-        bool in_flight = false;
-    };
     static constexpr std::uint32_t k_batch_slots = 4;
     static constexpr std::uint32_t k_count_mirror_words = 4;
 
@@ -157,7 +156,10 @@ public:
               "splat_color_correction.hlsl.spv", 6, sizeof(Push))),
           project_backward_(context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
-          pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))) {
+          pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))),
+          encoder_ring_(
+              context.runtime, k_batch_slots,
+              photara::vk::BarrierPolicy::after_compute_indirect) {
         clear_buffer(dummy_);
         if (context_.buffer_float32_atomic_add &&
             !environment_flag("SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD")) {
@@ -180,19 +182,11 @@ public:
         // Pending submissions may still reference these command buffers, their
         // descriptor sets and the buffers they bound.
         if (context_.device != VK_NULL_HANDLE) vkDeviceWaitIdle(context_.device);
-        for (BatchSlot& slot : batch_slots_) {
-            release_sets(slot);
-            if (slot.fence != VK_NULL_HANDLE) {
-                vkDestroyFence(context_.device, slot.fence, nullptr);
-                slot.fence = VK_NULL_HANDLE;
-            }
-            if (slot.command != VK_NULL_HANDLE) {
-                vkFreeCommandBuffers(context_.device, context_.command_pool, 1, &slot.command);
-                slot.command = VK_NULL_HANDLE;
-            }
-        }
         if (backward_timestamp_pool_ != VK_NULL_HANDLE) {
             vkDestroyQueryPool(context_.device, backward_timestamp_pool_, nullptr);
+        }
+        if (forward_timestamp_pool_ != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(context_.device, forward_timestamp_pool_, nullptr);
         }
     }
 
@@ -427,7 +421,7 @@ public:
     const ComputePipeline& backward_blend_pipeline() const {
         if (last_frame_has_geometry_) return blend_backward_;
         if (subgroup_backward_supported_ && subgroup_size_ == 32u) {
-            return blend_backward_no_geometry_atomic_.handle != VK_NULL_HANDLE
+            return blend_backward_no_geometry_atomic_.valid()
                 ? blend_backward_no_geometry_atomic_
                 : blend_backward_no_geometry_subgroup_;
         }
@@ -543,7 +537,7 @@ public:
             Push control_push{};
             control_push.u[0] = count;
             control_push.u[1] = instance_capacity_;
-            control_push.u[2] = batch_slot_ * k_count_mirror_words;
+            control_push.u[2] = encoder_ring_.index() * k_count_mirror_words;
             dispatch(
                 indirect_control_, {&gauss_u, &frame_counts, &count_mirrors},
                 control_push, 1);
@@ -1746,7 +1740,7 @@ public:
                     : descriptor(buffer, buffer.bytes));
             Push push{};
             std::copy(command.push_words.begin(), command.push_words.end(), push.u);
-            dispatch_infos(color_correction_atomic_.handle != VK_NULL_HANDLE
+            dispatch_infos(color_correction_atomic_.valid()
                                ? color_correction_atomic_ : color_correction_,
                            infos, push, command.groups_x);
         }
@@ -2346,40 +2340,7 @@ private:
 
     void begin_batch() {
         if (recording_) return;
-        BatchSlot& slot = batch_slots_[batch_slot_];
-        if (slot.command == VK_NULL_HANDLE) {
-            VkCommandBufferAllocateInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-            info.commandPool = context_.command_pool;
-            info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            info.commandBufferCount = 1;
-            if (vkAllocateCommandBuffers(context_.device, &info, &slot.command) != VK_SUCCESS) {
-                throw std::runtime_error("vkAllocateCommandBuffers failed");
-            }
-            VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-            if (vkCreateFence(context_.device, &fence_info, nullptr, &slot.fence) != VK_SUCCESS) {
-                throw std::runtime_error("vkCreateFence failed");
-            }
-        }
-        // Submissions no longer drain the queue, so a slot may still be running
-        // from kBatchSlots submissions ago. Its fence bounds how far the host
-        // can record ahead while TinyTensor and raster work share this queue.
-        if (slot.in_flight) {
-            if (vkWaitForFences(context_.device, 1, &slot.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
-                vkResetFences(context_.device, 1, &slot.fence) != VK_SUCCESS) {
-                throw std::runtime_error("Vulkan splat fence wait failed");
-            }
-            slot.in_flight = false;
-            release_sets(slot);
-        }
-        command_ = slot.command;
-        if (vkResetCommandBuffer(command_, 0) != VK_SUCCESS) {
-            throw std::runtime_error("vkResetCommandBuffer failed");
-        }
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(command_, &begin) != VK_SUCCESS) {
-            throw std::runtime_error("vkBeginCommandBuffer failed");
-        }
+        command_ = encoder_ring_.acquire().native();
         recording_ = true;
     }
 
@@ -2395,15 +2356,7 @@ private:
     // host reads (the frame counts, a loss scalar, a download) keeps draining.
     void submit_batch(const bool wait) {
         if (!recording_) return;
-        BatchSlot& slot = batch_slots_[batch_slot_];
-        if (vkEndCommandBuffer(command_) != VK_SUCCESS) {
-            throw std::runtime_error("vkEndCommandBuffer failed");
-        }
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &command_;
-        const VkResult submit_result =
-            vkQueueSubmit(context_.queue, 1, &submit, slot.fence);
+        const std::uint32_t submitted = encoder_ring_.index();
         // A retired arena becomes freeable once k_batch_slots further
         // submissions have rotated the ring past every dormant command buffer
         // that referenced it.
@@ -2414,27 +2367,14 @@ private:
             else
                 ++it;
         }
-        if (submit_result != VK_SUCCESS) {
-            throw std::runtime_error(
-                std::string("Vulkan splat submit failed: ") +
-                std::to_string(static_cast<int>(submit_result)));
-        }
+        if (wait) encoder_ring_.submit_wait();
+        else encoder_ring_.submit();
         recording_ = false;
-        slot.in_flight = true;
         command_ = VK_NULL_HANDLE;
         if (mirror_recorded_) {
-            mirror_pending_[batch_slot_] = true;
+            mirror_pending_[submitted] = true;
             mirror_recorded_ = false;
         }
-        if (wait) {
-            if (vkWaitForFences(context_.device, 1, &slot.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
-                vkResetFences(context_.device, 1, &slot.fence) != VK_SUCCESS) {
-                throw std::runtime_error("Vulkan splat fence wait failed");
-            }
-            slot.in_flight = false;
-            release_sets(slot);
-        }
-        batch_slot_ = (batch_slot_ + 1U) % k_batch_slots;
     }
 
     // Twice the measured instances, clamped to uint32, with
@@ -2480,22 +2420,12 @@ private:
     void harvest_ready_count_mirrors() {
         for (std::uint32_t slot = 0; slot < k_batch_slots; ++slot) {
             if (!mirror_pending_[slot]) continue;
-            if (!batch_slots_[slot].in_flight ||
-                vkGetFenceStatus(context_.device, batch_slots_[slot].fence) == VK_SUCCESS) {
+            const photara::vk::CommandEncoder& encoder = encoder_ring_.at(slot);
+            if (!encoder.in_flight() ||
+                vkGetFenceStatus(context_.device, encoder.fence()) == VK_SUCCESS) {
                 harvest_count_mirror(slot);
             }
         }
-    }
-
-    // Descriptor sets only exist on the fallback path (devices without
-    // VK_KHR_push_descriptor); they are freed once the batch that used them has
-    // retired.
-    void release_sets(BatchSlot& slot) {
-        if (slot.pending_sets.empty()) return;
-        vkFreeDescriptorSets(
-            context_.device, context_.descriptor_pool,
-            static_cast<std::uint32_t>(slot.pending_sets.size()), slot.pending_sets.data());
-        slot.pending_sets.clear();
     }
 
     // Deferred destruction: a recorded batch still holds every buffer handle it
@@ -2519,119 +2449,23 @@ private:
                         std::uint32_t groups_z = 1) {
         if (groups_x == 0 || groups_y == 0 || groups_z == 0) return;
         begin_batch();
-        std::vector<VkWriteDescriptorSet> writes(infos.size());
-        for (std::uint32_t i = 0; i < infos.size(); ++i) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstBinding = i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &infos[i];
-        }
-        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
-        if (context_.push_descriptors) {
-            // The bindings live in the command buffer, so a later dispatch in
-            // the same batch cannot rewrite what an earlier one reads.
-            context_.cmd_push_descriptor(
-                command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline_layout, 0,
-                static_cast<std::uint32_t>(writes.size()), writes.data());
-        } else {
-            VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            set_info.descriptorPool = context_.descriptor_pool;
-            set_info.descriptorSetCount = 1;
-            set_info.pSetLayouts = &pipeline.descriptor_set_layout;
-            VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-            if (vkAllocateDescriptorSets(context_.device, &set_info, &descriptor_set) != VK_SUCCESS) {
-                throw std::runtime_error("vkAllocateDescriptorSets failed");
-            }
-            batch_slots_[batch_slot_].pending_sets.push_back(descriptor_set);
-            for (VkWriteDescriptorSet& write : writes) write.dstSet = descriptor_set;
-            vkUpdateDescriptorSets(
-                context_.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
-                nullptr);
-            vkCmdBindDescriptorSets(
-                command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline_layout, 0, 1,
-                &descriptor_set, 0, nullptr);
-        }
-        vkCmdPushConstants(
-            command_, pipeline.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &push);
-        vkCmdDispatch(command_, groups_x, groups_y, groups_z);
-        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        // Dispatch parameter words are regular shader writes (the GPU-driven
-        // control block), so every dispatch must also publish its writes to
-        // the stage that fetches vkCmdDispatchIndirect arguments. Without the
-        // DRAW_INDIRECT dependency the front end can fetch stale grid sizes.
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                VK_ACCESS_SHADER_WRITE_BIT |
-                                VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-        vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-            0, 1, &barrier, 0, nullptr, 0, nullptr);
+        std::vector<photara::vk::BufferBinding> bindings(infos.size());
+        for (std::uint32_t i = 0; i < infos.size(); ++i) bindings[i] = to_binding(infos[i]);
+        encoder_ring_.acquire().dispatch(
+            pipeline, bindings, &push, sizeof(push), groups_x, groups_y, groups_z);
     }
 
     void dispatch_indirect(
         const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers,
         const Push& push, const Buffer& indirect, const VkDeviceSize offset) {
-        std::vector<VkDescriptorBufferInfo> infos;
-        infos.reserve(buffers.size());
-        for (const Buffer* buffer : buffers) infos.push_back(descriptor(*buffer));
+        std::vector<photara::vk::BufferBinding> bindings;
+        bindings.reserve(buffers.size());
+        for (const Buffer* buffer : buffers) bindings.push_back(to_binding(*buffer));
         begin_batch();
-        std::vector<VkWriteDescriptorSet> writes(infos.size());
-        for (std::uint32_t i = 0; i < infos.size(); ++i) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstBinding = i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &infos[i];
-        }
-        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
-        if (context_.push_descriptors) {
-            context_.cmd_push_descriptor(
-                command_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                pipeline.pipeline_layout, 0,
-                static_cast<std::uint32_t>(writes.size()), writes.data());
-        } else {
-            VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            set_info.descriptorPool = context_.descriptor_pool;
-            set_info.descriptorSetCount = 1;
-            set_info.pSetLayouts = &pipeline.descriptor_set_layout;
-            VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-            if (vkAllocateDescriptorSets(
-                    context_.device, &set_info, &descriptor_set) != VK_SUCCESS)
-                throw std::runtime_error("vkAllocateDescriptorSets failed");
-            batch_slots_[batch_slot_].pending_sets.push_back(descriptor_set);
-            for (VkWriteDescriptorSet& write : writes) write.dstSet = descriptor_set;
-            vkUpdateDescriptorSets(
-                context_.device, static_cast<std::uint32_t>(writes.size()),
-                writes.data(), 0, nullptr);
-            vkCmdBindDescriptorSets(
-                command_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                pipeline.pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
-        }
-        vkCmdPushConstants(
-            command_, pipeline.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
-            0, sizeof(Push), &push);
-        // The group counts were written by a compute dispatch. A compute-to-
-        // compute barrier does not make them visible to vkCmdDispatchIndirect.
-        VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        before.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-        vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-            0, 1, &before, 0, nullptr, 0, nullptr);
-        vkCmdDispatchIndirect(command_, indirect.handle, offset);
-        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                VK_ACCESS_SHADER_WRITE_BIT |
-                                VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-        vkCmdPipelineBarrier(
-            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-            0, 1, &barrier, 0, nullptr, 0, nullptr);
+        encoder_ring_.acquire().dispatch_indirect(
+            pipeline, bindings, &push, sizeof(push),
+            photara::vk::BufferBinding{
+                indirect.handle, offset, sizeof(VkDispatchIndirectCommand)});
     }
 
     void inclusive_scan(Buffer& buffer, std::uint32_t src, std::uint32_t dst, std::uint32_t count,
@@ -2780,9 +2614,8 @@ private:
     ComputePipeline project_backward_;
     ComputePipeline clear_;
     ComputePipeline pack_;
+    photara::vk::EncoderRing encoder_ring_;
     VkCommandBuffer command_{};
-    std::array<BatchSlot, k_batch_slots> batch_slots_{};
-    std::uint32_t batch_slot_{};
     VkQueryPool backward_timestamp_pool_{};
     bool backward_profile_enabled_{};
     bool subgroup_backward_supported_{};

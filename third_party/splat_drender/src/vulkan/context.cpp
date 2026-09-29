@@ -450,89 +450,6 @@ void Buffer::download(void* destination, std::size_t byte_size, std::size_t offs
     }
 }
 
-ComputePipeline::ComputePipeline(
-    VkDevice logical_device,
-    std::span<const std::byte> spir_v_bytes,
-    std::uint32_t storage_buffer_count,
-    std::uint32_t push_constant_size,
-    const bool push_descriptors)
-    : device(logical_device), binding_count(storage_buffer_count) {
-    std::vector<VkDescriptorSetLayoutBinding> bindings(storage_buffer_count);
-    for (std::uint32_t i = 0; i < storage_buffer_count; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-
-    VkDescriptorSetLayoutCreateInfo descriptor_layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    if (push_descriptors) {
-        descriptor_layout_info.flags =
-            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-    }
-    descriptor_layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
-    descriptor_layout_info.pBindings = bindings.data();
-    check_vk(
-        vkCreateDescriptorSetLayout(device, &descriptor_layout_info, nullptr, &descriptor_set_layout),
-        "vkCreateDescriptorSetLayout");
-
-    VkPushConstantRange push_range{};
-    push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    push_range.offset = 0;
-    push_range.size = push_constant_size;
-    VkPipelineLayoutCreateInfo pipeline_layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pipeline_layout_info.setLayoutCount = 1;
-    pipeline_layout_info.pSetLayouts = &descriptor_set_layout;
-    pipeline_layout_info.pushConstantRangeCount = push_constant_size == 0 ? 0U : 1U;
-    pipeline_layout_info.pPushConstantRanges = push_constant_size == 0 ? nullptr : &push_range;
-    check_vk(vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &pipeline_layout), "vkCreatePipelineLayout");
-
-    if (spir_v_bytes.empty() || spir_v_bytes.size() % sizeof(std::uint32_t) != 0) {
-        throw std::runtime_error("Invalid embedded SPIR-V bytecode");
-    }
-    std::vector<std::uint32_t> spir_v(spir_v_bytes.size() / sizeof(std::uint32_t));
-    std::memcpy(spir_v.data(), spir_v_bytes.data(), spir_v_bytes.size());
-    VkShaderModuleCreateInfo shader_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    shader_info.codeSize = spir_v.size() * sizeof(std::uint32_t);
-    shader_info.pCode = spir_v.data();
-    VkShaderModule shader_module = VK_NULL_HANDLE;
-    check_vk(vkCreateShaderModule(device, &shader_info, nullptr, &shader_module), "vkCreateShaderModule");
-
-    VkPipelineShaderStageCreateInfo stage_info{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage_info.module = shader_module;
-    stage_info.pName = "main";
-    VkComputePipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    pipeline_info.stage = stage_info;
-    pipeline_info.layout = pipeline_layout;
-    const VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &handle);
-    vkDestroyShaderModule(device, shader_module, nullptr);
-    check_vk(result, "vkCreateComputePipelines");
-}
-
-ComputePipeline::~ComputePipeline() {
-    if (device != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device, handle, nullptr);
-        vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
-        vkDestroyDescriptorSetLayout(device, descriptor_set_layout, nullptr);
-    }
-}
-
-ComputePipeline::ComputePipeline(ComputePipeline&& other) noexcept {
-    *this = std::move(other);
-}
-
-ComputePipeline& ComputePipeline::operator=(ComputePipeline&& other) noexcept {
-    if (this != &other) {
-        std::swap(device, other.device);
-        std::swap(descriptor_set_layout, other.descriptor_set_layout);
-        std::swap(pipeline_layout, other.pipeline_layout);
-        std::swap(handle, other.handle);
-        std::swap(binding_count, other.binding_count);
-    }
-    return *this;
-}
-
 Context::Impl::Impl(const ContextOptions& options) {
     if (options.external_device.valid()) {
         adopt_external_device(options.external_device);
@@ -701,6 +618,16 @@ void Context::Impl::create_pools() {
     pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
     pool_info.pPoolSizes = pool_sizes.data();
     check_vk(vkCreateDescriptorPool(device, &pool_info, nullptr, &descriptor_pool), "vkCreateDescriptorPool");
+
+    photara::vk::ExternalDevice external;
+    external.instance = instance;
+    external.physical = physical_device;
+    external.device = device;
+    external.queue = queue;
+    external.queue_family = queue_family_index;
+    external.enabled.push_descriptors = push_descriptors;
+    external.enabled.buffer_atomic_f32 = buffer_float32_atomic_add;
+    runtime = photara::vk::Device::adopt(external);
 }
 
 Context::Impl::~Impl() {
@@ -709,6 +636,7 @@ Context::Impl::~Impl() {
         // Members outlive this body: release the staging buffer while the
         // device it was allocated from still exists.
         staging_ = Buffer{};
+        runtime = {};
         vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
         vkDestroyCommandPool(device, command_pool, nullptr);
         if (owns_device) {
@@ -834,13 +762,10 @@ ComputePipeline Context::Impl::create_pipeline(
     std::uint32_t push_constant_size) const {
     if (const auto override_directory = shader_directory_override()) {
         const auto bytes = read_spir_v(*override_directory / shader_name);
-        return ComputePipeline(
-            device, bytes, storage_buffer_count, push_constant_size,
-            push_descriptors && cmd_push_descriptor != nullptr);
+        return runtime.create_compute(bytes, storage_buffer_count, push_constant_size);
     }
-    return ComputePipeline(
-        device, embedded_shader(shader_name), storage_buffer_count,
-        push_constant_size, push_descriptors && cmd_push_descriptor != nullptr);
+    return runtime.create_compute(
+        embedded_shader(shader_name), storage_buffer_count, push_constant_size);
 }
 
 Context::Context(const ContextOptions& options) : impl_(std::make_unique<Impl>(options)) {}

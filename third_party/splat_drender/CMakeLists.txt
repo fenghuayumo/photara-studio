@@ -163,7 +163,12 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                 $<INSTALL_INTERFACE:include>)
         target_compile_features(splat_drender_vulkan PUBLIC cxx_std_20)
-        target_link_libraries(splat_drender_vulkan PUBLIC Vulkan::Vulkan)
+        if(NOT TARGET photara_vk::photara_vk)
+            add_subdirectory(
+                "${CMAKE_CURRENT_SOURCE_DIR}/../photara_vk"
+                "${CMAKE_CURRENT_BINARY_DIR}/photara_vk")
+        endif()
+        target_link_libraries(splat_drender_vulkan PUBLIC Vulkan::Vulkan photara_vk::photara_vk)
         target_compile_definitions(splat_drender_vulkan
             PRIVATE SPLAT_DRENDER_ENABLE_VALIDATION=$<BOOL:${SPLAT_DRENDER_ENABLE_VALIDATION}>)
         if(MSVC)

@@ -10,6 +10,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "photara_vk/photara_vk.hpp"
 #include "splat_drender/vulkan_api.h"
 
 namespace splat_drender::vulkan {
@@ -93,26 +94,7 @@ struct Buffer {
     void download(void* destination, std::size_t byte_size, std::size_t offset = 0) const;
 };
 
-struct ComputePipeline {
-    VkDevice device = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
-    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
-    VkPipeline handle = VK_NULL_HANDLE;
-    std::uint32_t binding_count = 0;
-
-    ComputePipeline() = default;
-    ComputePipeline(
-        VkDevice logical_device,
-        std::span<const std::byte> spir_v_bytes,
-        std::uint32_t storage_buffer_count,
-        std::uint32_t push_constant_size,
-        bool push_descriptors = false);
-    ~ComputePipeline();
-    ComputePipeline(ComputePipeline&& other) noexcept;
-    ComputePipeline& operator=(ComputePipeline&& other) noexcept;
-    ComputePipeline(const ComputePipeline&) = delete;
-    ComputePipeline& operator=(const ComputePipeline&) = delete;
-};
+using ComputePipeline = photara::vk::ComputePipeline;
 
 class Context::Impl {
 public:
@@ -166,6 +148,7 @@ public:
     bool owns_instance = false;
     bool owns_device = false;
     mutable std::mutex dispatch_mutex;
+    photara::vk::Device runtime;
 
 private:
     void create_instance_and_device(const ContextOptions& options);
