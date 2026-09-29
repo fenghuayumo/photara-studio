@@ -7,6 +7,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -88,38 +89,44 @@ public:
         std::size_t next = capacity != 0 ? capacity : initial_capacity;
         const std::size_t needed = used + bytes;
         while (next < needed) next = std::min<std::size_t>(budget, next * 2);
-        BufferRef grown = context->allocate(next, true);
-        if (descriptors.valid() && used > 0) {
-            std::memcpy(grown->mapped_host(), descriptors->mapped_host(), used);
-            grown->flush(0, used);
+        BufferRef grown_staging = context->allocate(next, true);
+        BufferRef grown_device = context->allocate(next, false);
+        if (staging.valid() && used > 0) {
+            std::memcpy(grown_staging->mapped_host(), staging->mapped_host(), used);
+            grown_staging->flush(0, used);
         }
-        descriptors = std::move(grown);
+        staging = std::move(grown_staging);
+        descriptors = std::move(grown_device);
+        pending_prefix_upload = used;
         capacity = next;
     }
 
-    // Reserves (or reuses) a padded device range for one FeatureSet and copies
-    // its descriptors into the host-visible mirror buffer.
-    std::size_t reserve(const FeatureSet& features) {
+    struct Reservation {
+        std::size_t offset{};
+    };
+
+    // Reserves (or reuses) a padded device range for one FeatureSet and stages
+    // new descriptors for a transfer into the device-local cache.
+    Reservation reserve(const FeatureSet& features) {
         const auto found = cache.find(features.descriptor_identity);
         if (found != cache.end() &&
             found->second.generation == features.descriptor_generation &&
             found->second.bytes == features.descriptors_u8.size())
-            return found->second.offset;
+            return {found->second.offset};
         const std::size_t bytes = padded(features.keypoints.size()) * 128;
-        if (!descriptors.valid() || used + bytes > capacity)
+        if (!staging.valid() || !descriptors.valid() || used + bytes > capacity)
             throw std::logic_error("Vulkan descriptor mirror is too small");
         const std::size_t offset = used;
         std::uint8_t* destination =
-            static_cast<std::uint8_t*>(descriptors->mapped_host()) + offset;
+            static_cast<std::uint8_t*>(staging->mapped_host()) + offset;
         std::memset(destination, 0, bytes);
         std::memcpy(destination, features.descriptors_u8.data(),
                     features.descriptors_u8.size());
-        descriptors->flush(offset, bytes);
         cache[features.descriptor_identity] =
             Entry{offset, features.descriptors_u8.size(),
                   features.descriptor_generation};
         used += bytes;
-        return offset;
+        return {offset};
     }
 
     VulkanMutualRatioMatcherOptions options;
@@ -130,6 +137,8 @@ public:
     mutable std::mutex mutex;
     mutable std::unordered_map<std::uint64_t, Entry> cache;
     mutable std::size_t used{};
+    mutable std::size_t pending_prefix_upload{};
+    mutable BufferRef staging;
     mutable BufferRef descriptors;
 };
 
@@ -157,6 +166,7 @@ void VulkanMutualRatioMatcher::clear_prepared() {
     std::lock_guard lock(impl_->mutex);
     impl_->cache.clear();
     impl_->used = 0;
+    impl_->pending_prefix_upload = 0;
 }
 
 MatchSet VulkanMutualRatioMatcher::match(
@@ -171,6 +181,18 @@ std::vector<MatchSet> VulkanMutualRatioMatcher::match_batch(
     if (pairs.empty()) return result;
 
     Context& context = *impl_->context;
+    const Context::TilePlan plan = context.descriptor_tile_plan();
+    // Size the descriptor cache once for the whole call. SfM submits a long
+    // adjacency batch, and growing 16 -> 32 -> 64 -> 128 MiB would repeatedly
+    // allocate and recopy the already prepared prefix.
+    std::size_t call_bytes = 0;
+    std::unordered_set<std::uint64_t> call_descriptors;
+    for (const auto& [query, train] : pairs) {
+        for (const auto* features : {query, train}) {
+            if (call_descriptors.insert(features->descriptor_identity).second)
+                call_bytes += padded(features->keypoints.size()) * 128;
+        }
+    }
     for (std::size_t begin = 0; begin < pairs.size();) {
         std::size_t batch_count = 0;
         std::size_t batch_bytes = 0;
@@ -210,7 +232,10 @@ std::vector<MatchSet> VulkanMutualRatioMatcher::match_batch(
         std::lock_guard lock(impl_->mutex);
         // Grow before recording: the previous batch was synchronized, so no
         // queued work can still reference the old mirror.
-        impl_->ensure_capacity(batch_bytes);
+        impl_->ensure_capacity(begin == 0 && impl_->used == 0 &&
+                                       call_bytes <= impl_->budget
+                                   ? call_bytes
+                                   : batch_bytes);
 
         BufferRef row_partials = context.allocate(row_size * 12, false);
         BufferRef col_partials =
@@ -219,31 +244,58 @@ std::vector<MatchSet> VulkanMutualRatioMatcher::match_batch(
         BufferRef output = context.allocate(outputs * 4 + 4, false);
         BufferRef readback = context.allocate(outputs * 4 + 4, true, true);
 
+        struct PairReservations {
+            Impl::Reservation query;
+            Impl::Reservation train;
+        };
+        std::vector<PairReservations> reservations(batch.size());
+        const std::size_t new_upload_begin = impl_->used;
+        for (std::size_t i = 0; i < batch.size(); ++i) {
+            const auto& [query, train] = batch[i];
+            if (!query->keypoints.empty() && !train->keypoints.empty()) {
+                reservations[i].query = impl_->reserve(*query);
+                reservations[i].train = impl_->reserve(*train);
+            }
+        }
+        const bool upload_whole_prefix = impl_->pending_prefix_upload > 0;
+        const std::size_t upload_offset =
+            upload_whole_prefix ? 0 : new_upload_begin;
+        const std::size_t upload_bytes = impl_->used - upload_offset;
+        if (upload_bytes > 0) impl_->staging->flush(upload_offset, upload_bytes);
+
         context.begin();
         if (outputs > 0)
             context.fill_u32(*output, 0, outputs * 4, 0xFFFFFFFFU);
+        if (upload_bytes > 0)
+            context.queue_upload(*impl_->staging, upload_offset, upload_bytes,
+                                 *impl_->descriptors, upload_offset);
+        impl_->pending_prefix_upload = 0;
 
         std::size_t output_offset = 0;
-        for (const auto& [query, train] : batch) {
+        for (std::size_t pair_index = 0; pair_index < batch.size(); ++pair_index) {
+            const auto& [query, train] = batch[pair_index];
             const auto query_count = query->keypoints.size();
             const auto train_count = train->keypoints.size();
             if (query_count > 0 && train_count > 0) {
-                const std::size_t query_offset = impl_->reserve(*query);
-                const std::size_t train_offset = impl_->reserve(*train);
+                const auto& query_reservation = reservations[pair_index].query;
+                const auto& train_reservation = reservations[pair_index].train;
 
                 const TilesPush tiles_push{
                     static_cast<std::uint32_t>(query_count),
                     static_cast<std::uint32_t>(train_count),
                     impl_->options.mutual_check ? 1U : 0U, 0U};
                 const std::array<BufferBinding, 4> tiles_bindings{
-                    binding(impl_->descriptors, query_offset),
-                    binding(impl_->descriptors, train_offset),
+                    binding(impl_->descriptors, query_reservation.offset),
+                    binding(impl_->descriptors, train_reservation.offset),
                     binding(row_partials),
                     binding(col_partials.valid() ? col_partials : row_partials)};
-                context.dispatch(Shader::MatchTiles, tiles_bindings, &tiles_push,
+                // Every tile variant computes the same integers; the plan only
+                // trades shared memory for fewer, fuller tiles.
+                context.dispatch(plan.shader, tiles_bindings, &tiles_push,
                                  sizeof(tiles_push),
                                  static_cast<std::uint32_t>((train_count + 31) / 32),
-                                 static_cast<std::uint32_t>((query_count + 31) / 32));
+                                 static_cast<std::uint32_t>(
+                                     (query_count + plan.rows - 1) / plan.rows));
 
                 const FinishPush finish_push{
                     static_cast<std::uint32_t>(query_count),

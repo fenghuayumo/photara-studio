@@ -24,6 +24,12 @@ extern "C" {
 #include "sift_descriptor.hlsl.embedded.hpp"
 #include "sift_descriptor_norm.hlsl.embedded.hpp"
 #include "sift_match_tiles.hlsl.embedded.hpp"
+#include "sift_match_tiles_64.hlsl.embedded.hpp"
+#include "sift_match_tiles_160.hlsl.embedded.hpp"
+#include "sift_match_tiles_dp4a_64.hlsl.embedded.hpp"
+#include "sift_match_tiles_dp4a_128.hlsl.embedded.hpp"
+#include "sift_match_tiles_dp4a_160.hlsl.embedded.hpp"
+#include "sift_match_wave_dp4a.hlsl.embedded.hpp"
 #include "sift_match_finish.hlsl.embedded.hpp"
 }
 
@@ -74,6 +80,30 @@ ShaderInfo shader_info(Shader shader) {
             return {SpirVBytes{sift_descriptor_norm_hlsl_spv, sizeof(sift_descriptor_norm_hlsl_spv)}, 1, 8};
         case Shader::MatchTiles:
             return {SpirVBytes{sift_match_tiles_hlsl_spv, sizeof(sift_match_tiles_hlsl_spv)}, 4, 16};
+        case Shader::MatchTiles64:
+            return {SpirVBytes{sift_match_tiles_64_hlsl_spv,
+                               sizeof(sift_match_tiles_64_hlsl_spv)},
+                    4, 16};
+        case Shader::MatchTiles160:
+            return {SpirVBytes{sift_match_tiles_160_hlsl_spv,
+                               sizeof(sift_match_tiles_160_hlsl_spv)},
+                    4, 16};
+        case Shader::MatchTilesDp4a64:
+            return {SpirVBytes{sift_match_tiles_dp4a_64_hlsl_spv,
+                               sizeof(sift_match_tiles_dp4a_64_hlsl_spv)},
+                    4, 16};
+        case Shader::MatchTilesDp4a128:
+            return {SpirVBytes{sift_match_tiles_dp4a_128_hlsl_spv,
+                               sizeof(sift_match_tiles_dp4a_128_hlsl_spv)},
+                    4, 16};
+        case Shader::MatchTilesDp4a160:
+            return {SpirVBytes{sift_match_tiles_dp4a_160_hlsl_spv,
+                               sizeof(sift_match_tiles_dp4a_160_hlsl_spv)},
+                    4, 16};
+        case Shader::MatchWaveDp4a:
+            return {SpirVBytes{sift_match_wave_dp4a_hlsl_spv,
+                               sizeof(sift_match_wave_dp4a_hlsl_spv)},
+                    4, 16};
         case Shader::MatchFinish:
             return {SpirVBytes{sift_match_finish_hlsl_spv, sizeof(sift_match_finish_hlsl_spv)}, 3, 32};
         default: break;
@@ -135,7 +165,8 @@ Buffer::Buffer(VkPhysicalDevice physical, VkDevice logical, VkDeviceSize bytes,
         const auto flags = properties.memoryTypes[index].propertyFlags;
         if ((flags & required) != required) continue;
         const auto bonus = flags & preferred;
-        const auto bonus_count = std::popcount(static_cast<std::uint32_t>(bonus));
+        const auto bonus_count = static_cast<std::uint32_t>(
+            std::popcount(static_cast<std::uint32_t>(bonus)));
         if (!best || bonus_count > best->second) best = std::make_pair(index, bonus_count);
     }
     if (!best)
@@ -284,6 +315,14 @@ Context::Context() {
     application.pEngineName = "Photara";
     application.engineVersion = VK_MAKE_VERSION(1, 0, 0);
     application.apiVersion = VK_API_VERSION_1_1;
+    // Promoting to 1.3 when the loader allows it keeps the (promoted) feature
+    // structures used for device creation legal.
+    {
+        std::uint32_t loader_version = 0;
+        if (vkEnumerateInstanceVersion(&loader_version) == VK_SUCCESS &&
+            loader_version > application.apiVersion)
+            application.apiVersion = std::min(loader_version, VK_API_VERSION_1_3);
+    }
 
     VkInstanceCreateInfo create{};
     create.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -327,6 +366,54 @@ Context::Context() {
     if (!queue_found)
         throw std::runtime_error("Vulkan feature backend: no compute queue");
 
+    // Integer dot product (dp4a) lets the descriptor matcher consume four
+    // descriptor bytes per instruction. The SPIR-V variant is 1.5, so it is only
+    // taken on devices that report the feature and support Vulkan 1.2 or newer.
+    std::vector<VkExtensionProperties> device_extensions;
+    {
+        std::uint32_t count = 0;
+        if (vkEnumerateDeviceExtensionProperties(physical_, nullptr, &count, nullptr) ==
+                VK_SUCCESS &&
+            count > 0) {
+            device_extensions.resize(count);
+            if (vkEnumerateDeviceExtensionProperties(physical_, nullptr, &count,
+                                                     device_extensions.data()) !=
+                VK_SUCCESS)
+                device_extensions.clear();
+        }
+    }
+    const bool has_dot_extension = std::any_of(
+        device_extensions.begin(), device_extensions.end(),
+        [](const VkExtensionProperties& extension) {
+            return std::strcmp(extension.extensionName,
+                               VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME) == 0;
+        });
+    VkPhysicalDeviceShaderIntegerDotProductFeatures dot_features{};
+    dot_features.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+    std::uint32_t device_api_version = VK_API_VERSION_1_0;
+    {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physical_, &properties);
+        device_api_version = properties.apiVersion;
+        max_shared_bytes_ = properties.limits.maxComputeSharedMemorySize;
+        VkPhysicalDeviceSubgroupProperties subgroup{};
+        subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+        VkPhysicalDeviceProperties2 properties2{};
+        properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties2.pNext = &subgroup;
+        vkGetPhysicalDeviceProperties2(physical_, &properties2);
+        subgroup_size_ = subgroup.subgroupSize;
+    }
+    if (has_dot_extension || device_api_version >= VK_API_VERSION_1_3) {
+        VkPhysicalDeviceFeatures2 query{};
+        query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        query.pNext = &dot_features;
+        vkGetPhysicalDeviceFeatures2(physical_, &query);
+    }
+    const bool use_dot_product = dot_features.shaderIntegerDotProduct != 0 &&
+                                 device_api_version >= VK_API_VERSION_1_2;
+
     const float priority = 1.0F;
     VkDeviceQueueCreateInfo queue_create{};
     queue_create.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -337,8 +424,21 @@ Context::Context() {
     device_create.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_create.queueCreateInfoCount = 1;
     device_create.pQueueCreateInfos = &queue_create;
+    std::array<const char*, 1> enabled_extensions{};
+    if (use_dot_product) {
+        dot_features.shaderIntegerDotProduct = VK_TRUE;
+        device_create.pNext = &dot_features;
+        if (has_dot_extension) {
+            enabled_extensions[0] =
+                VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME;
+            device_create.enabledExtensionCount =
+                static_cast<std::uint32_t>(enabled_extensions.size());
+            device_create.ppEnabledExtensionNames = enabled_extensions.data();
+        }
+    }
     check(vkCreateDevice(physical_, &device_create, nullptr, &device_),
           "vkCreateDevice");
+    integer_dot_product_ = use_dot_product;
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 
     vkGetPhysicalDeviceMemoryProperties(physical_, &memory_properties_);
@@ -433,6 +533,26 @@ void Context::destroy_session(Session& session) noexcept {
 
 VkPhysicalDeviceMemoryProperties Context::memory_properties() const {
     return memory_properties_;
+}
+
+Context::TilePlan Context::descriptor_tile_plan() const noexcept {
+    // Shared memory per block is the query tile (rows * 128 B) plus the train
+    // tile (4 KB) and the dot matrix (rows * 128 B). Taller tiles amortize the
+    // fixed per-block work, which is what the matcher is bound by, so the host
+    // picks the tallest tile the device's limit allows.
+    const auto fits = [&](std::uint32_t rows) {
+        return static_cast<std::uint64_t>(rows) * 256 + 4096 <= max_shared_bytes_;
+    };
+    if (integer_dot_product_) {
+        if (subgroup_size_ == 32)
+            return TilePlan{Shader::MatchWaveDp4a, 512};
+        if (fits(160)) return TilePlan{Shader::MatchTilesDp4a160, 160};
+        if (fits(128)) return TilePlan{Shader::MatchTilesDp4a128, 128};
+        if (fits(64)) return TilePlan{Shader::MatchTilesDp4a64, 64};
+    }
+    if (fits(160)) return TilePlan{Shader::MatchTiles160, 160};
+    if (fits(64)) return TilePlan{Shader::MatchTiles64, 64};
+    return TilePlan{Shader::MatchTiles, 32};
 }
 
 void Context::acquire_device_budget(std::uint64_t bytes) {
@@ -730,6 +850,26 @@ void Context::queue_download(const Buffer& source, VkDeviceSize source_offset,
                          0, 1, &barrier, 0, nullptr, 0, nullptr);
     session.downloads.push_back({&source, source_offset, bytes, &destination,
                                  destination_offset});
+}
+
+void Context::queue_upload(const Buffer& source, VkDeviceSize source_offset,
+                           VkDeviceSize bytes, const Buffer& destination,
+                           VkDeviceSize destination_offset) {
+    Session& session = this->session();
+    std::lock_guard lock(mutex_);
+    if (!session.recording)
+        throw std::logic_error("queue_upload() called without begin()");
+    if (bytes == 0) return;
+    const VkBufferCopy region{source_offset, destination_offset, bytes};
+    vkCmdCopyBuffer(session.command, source.handle(), destination.handle(), 1,
+                    &region);
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(session.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
 }
 
 void Context::fill_u32(const Buffer& destination, VkDeviceSize offset,

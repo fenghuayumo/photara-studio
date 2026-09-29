@@ -36,7 +36,16 @@ enum class Shader : std::uint32_t {
     Orientation,
     Descriptor,
     DescriptorNorm,
-    MatchTiles,
+    // Descriptor-tile matcher variants: the host picks the tallest tile the
+    // device's shared-memory limit allows, using the dp4a shaders when the
+    // device reports shaderIntegerDotProduct.
+    MatchTiles,       // 32 query rows, scalar byte dot product
+    MatchTiles64,     // 64 query rows, scalar
+    MatchTiles160,    // 160 query rows, scalar (48 KiB shared-memory devices)
+    MatchTilesDp4a64,  // 64 query rows, integer dot product
+    MatchTilesDp4a128, // 128 query rows, integer dot product
+    MatchTilesDp4a160, // 160 query rows, integer dot product
+    MatchWaveDp4a,     // 512 query rows, 32-lane wave reductions
     MatchFinish,
     Count
 };
@@ -112,6 +121,18 @@ public:
 
     [[nodiscard]] std::uint32_t device_index() const noexcept { return device_index_; }
     [[nodiscard]] VkPhysicalDeviceMemoryProperties memory_properties() const;
+    // True when the device enabled shaderIntegerDotProduct and can load the
+    // SPIR-V 1.5 variant of the descriptor matcher.
+    [[nodiscard]] bool integer_dot_product() const noexcept {
+        return integer_dot_product_;
+    }
+    // Tile height and shader to use for the descriptor matcher, chosen from the
+    // device's shared-memory limit and dot-product support.
+    struct TilePlan {
+        Shader shader = Shader::MatchTiles;
+        std::uint32_t rows = 32;
+    };
+    [[nodiscard]] TilePlan descriptor_tile_plan() const noexcept;
 
     // Pooled allocation. host_visible buffers are directly mappable;
     // device-local buffers are recycled the same way.
@@ -147,6 +168,11 @@ public:
     void queue_download(const Buffer& source, VkDeviceSize source_offset,
                         VkDeviceSize bytes, const Buffer& destination,
                         VkDeviceSize destination_offset);
+    // Records a host-visible staging to device-local copy. Later compute
+    // dispatches in the same command buffer see the copied bytes.
+    void queue_upload(const Buffer& source, VkDeviceSize source_offset,
+                      VkDeviceSize bytes, const Buffer& destination,
+                      VkDeviceSize destination_offset);
     void submit_and_wait();
 
 private:
@@ -228,6 +254,9 @@ private:
     std::vector<PoolBucket> host_pools_;
 
     bool alive_ = true;
+    bool integer_dot_product_ = false;
+    std::uint32_t max_shared_bytes_ = 0;
+    std::uint32_t subgroup_size_ = 0;
 
     std::mutex budget_mutex_;
     std::condition_variable budget_condition_;

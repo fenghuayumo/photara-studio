@@ -175,10 +175,30 @@ if(PHOTARA_ENABLE_FEATURES)
             sift_descriptor.hlsl
             sift_descriptor_norm.hlsl
             sift_match_tiles.hlsl
+            sift_match_tiles_64.hlsl
+            sift_match_tiles_160.hlsl
+            sift_match_tiles_dp4a_64.hlsl
+            sift_match_tiles_dp4a_128.hlsl
+            sift_match_tiles_dp4a_160.hlsl
+            sift_match_wave_dp4a.hlsl
             sift_match_finish.hlsl)
         set(PHOTARA_FEATURE_SHADER_BINARIES)
         set(PHOTARA_FEATURE_SHADER_HEADERS)
+        # Every shader includes sift_common.hlsli, and the dp4a variant includes
+        # sift_match_tiles.hlsl; track them all so a shared-file edit rebuilds
+        # the binaries that include it.
+        file(GLOB PHOTARA_FEATURE_SHADER_DEPENDS
+            "${PHOTARA_FEATURE_SHADER_DIR}/*.hlsl"
+            "${PHOTARA_FEATURE_SHADER_DIR}/*.hlsli")
         foreach(shader IN LISTS PHOTARA_FEATURE_SHADER_SOURCES)
+            # The integer-dot-product variants need SM 6.4 and emit SPIR-V 1.5,
+            # which the host only selects on devices that support it.
+            set(PHOTARA_FEATURE_SHADER_PROFILE cs_6_0)
+            set(PHOTARA_FEATURE_SHADER_ENV vulkan1.1)
+            if(shader MATCHES "dp4a")
+                set(PHOTARA_FEATURE_SHADER_PROFILE cs_6_4)
+                set(PHOTARA_FEATURE_SHADER_ENV vulkan1.2)
+            endif()
             set(shader_binary
                 "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan/${shader}.spv")
             set(shader_header
@@ -189,15 +209,15 @@ if(PHOTARA_ENABLE_FEATURES)
                 COMMAND "${CMAKE_COMMAND}" -E make_directory
                         "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan"
                 COMMAND "${PHOTARA_FEATURES_DXC_EXECUTABLE}"
-                        -spirv -T cs_6_0 -E main -O3
-                        -fspv-target-env=vulkan1.1
+                        -spirv -T ${PHOTARA_FEATURE_SHADER_PROFILE} -E main -O3
+                        -fspv-target-env=${PHOTARA_FEATURE_SHADER_ENV}
                         -fvk-use-dx-layout
                         -I "${PHOTARA_FEATURE_SHADER_DIR}"
                         "${PHOTARA_FEATURE_SHADER_DIR}/${shader}"
                         -Fo "${shader_binary}"
                 DEPENDS
                     "${PHOTARA_FEATURE_SHADER_DIR}/${shader}"
-                    "${PHOTARA_FEATURE_SHADER_DIR}/sift_common.hlsli"
+                    ${PHOTARA_FEATURE_SHADER_DEPENDS}
                 VERBATIM)
             add_custom_command(
                 OUTPUT "${shader_header}"

@@ -7,6 +7,7 @@
 //   photara_vulkan_features_parity [width height runs] [scene|noise]
 #include "features/features.hpp"
 #include "features/vulkan_features.hpp"
+#include "io/image.hpp"
 
 #include <atomic>
 #include <memory>
@@ -14,9 +15,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <random>
 #include <string>
 #include <vector>
@@ -143,9 +146,143 @@ double seconds_since(std::chrono::steady_clock::time_point start) {
                .count();
 }
 
+int run_dataset(const std::filesystem::path& directory) {
+    std::vector<std::filesystem::path> paths;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (!entry.is_regular_file()) continue;
+        std::string extension = entry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension == ".jpg" || extension == ".jpeg" || extension == ".png" ||
+            extension == ".tif" || extension == ".tiff" || extension == ".bmp")
+            paths.push_back(entry.path());
+    }
+    std::sort(paths.begin(), paths.end());
+    if (paths.size() < 2) {
+        std::fprintf(stderr, "dataset needs at least two images: %s\n",
+                     directory.string().c_str());
+        return 2;
+    }
+
+    SiftGpuExtractor cuda{SiftGpuOptions{}};
+    SiftVulkanExtractor vulkan{SiftVulkanOptions{}};
+    if (!cuda.is_available() || !vulkan.is_available()) {
+        std::fprintf(stderr, "both siftgpu and vulkan_sift are required\n");
+        return 2;
+    }
+
+    // Decode each image once and feed the same pixels to both backends. This
+    // keeps JPEG I/O and the OS file cache out of the GPU comparison.
+    std::vector<FeatureSet> vulkan_features;
+    vulkan_features.reserve(paths.size());
+    double decode_ms = 0.0, cuda_ms = 0.0, vulkan_ms = 0.0;
+    std::size_t cuda_feature_count = 0, vulkan_feature_count = 0;
+    std::size_t count_mismatches = 0;
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        auto start = std::chrono::steady_clock::now();
+        const auto image = photara::io::load_gray(paths[i]);
+        decode_ms += seconds_since(start);
+
+        // Alternate launch order to avoid consistently assigning the warmer
+        // GPU/cache state to one backend.
+        FeatureSet cuda_set, vulkan_set;
+        if ((i & 1U) == 0U) {
+            start = std::chrono::steady_clock::now();
+            cuda_set = cuda.extract_gray(image.pixels, image.width, image.height);
+            cuda_ms += seconds_since(start);
+            start = std::chrono::steady_clock::now();
+            vulkan_set = vulkan.extract_gray(image.pixels, image.width, image.height);
+            vulkan_ms += seconds_since(start);
+        } else {
+            start = std::chrono::steady_clock::now();
+            vulkan_set = vulkan.extract_gray(image.pixels, image.width, image.height);
+            vulkan_ms += seconds_since(start);
+            start = std::chrono::steady_clock::now();
+            cuda_set = cuda.extract_gray(image.pixels, image.width, image.height);
+            cuda_ms += seconds_since(start);
+        }
+        cuda_feature_count += cuda_set.keypoints.size();
+        vulkan_feature_count += vulkan_set.keypoints.size();
+        count_mismatches += cuda_set.keypoints.size() != vulkan_set.keypoints.size();
+        vulkan_set.compress_descriptors_u8();
+        vulkan_features.push_back(std::move(vulkan_set));
+    }
+
+    std::vector<FeatureMatcher::Pair> pairs;
+    pairs.reserve(vulkan_features.size() - 1);
+    for (std::size_t i = 1; i < vulkan_features.size(); ++i)
+        pairs.push_back({&vulkan_features[i - 1], &vulkan_features[i]});
+
+    VulkanMutualRatioMatcher vulkan_matcher{VulkanMutualRatioMatcherOptions{}};
+    SiftGpuMatcher cuda_matcher{SiftGpuMatcherOptions{}};
+    const std::span<const FeatureMatcher::Pair> warm_pair(pairs.data(), 1);
+    (void)vulkan_matcher.match_batch(warm_pair);
+    (void)cuda_matcher.match_batch(warm_pair);
+    vulkan_matcher.clear_prepared();
+    cuda_matcher.clear_prepared();
+
+    auto start = std::chrono::steady_clock::now();
+    const auto vulkan_matches = vulkan_matcher.match_batch(pairs);
+    const double vulkan_match_ms = seconds_since(start);
+    start = std::chrono::steady_clock::now();
+    const auto cuda_matches = cuda_matcher.match_batch(pairs);
+    const double cuda_match_ms = seconds_since(start);
+    start = std::chrono::steady_clock::now();
+    (void)vulkan_matcher.match_batch(pairs);
+    const double vulkan_cached_match_ms = seconds_since(start);
+    start = std::chrono::steady_clock::now();
+    (void)cuda_matcher.match_batch(pairs);
+    const double cuda_cached_match_ms = seconds_since(start);
+
+    std::size_t identical_pairs = 0, vulkan_match_count = 0, cuda_match_count = 0;
+    for (std::size_t i = 0; i < pairs.size(); ++i) {
+        vulkan_match_count += vulkan_matches[i].matches.size();
+        cuda_match_count += cuda_matches[i].matches.size();
+        if (vulkan_matches[i].matches.size() != cuda_matches[i].matches.size()) continue;
+        bool identical = true;
+        for (std::size_t j = 0; j < vulkan_matches[i].matches.size(); ++j) {
+            identical &= vulkan_matches[i].matches[j].query ==
+                             cuda_matches[i].matches[j].query &&
+                         vulkan_matches[i].matches[j].train ==
+                             cuda_matches[i].matches[j].train;
+        }
+        identical_pairs += identical;
+    }
+
+    const double image_count = static_cast<double>(paths.size());
+    std::printf("dataset: %s (%zu images, %u x %u)\n",
+                directory.string().c_str(), paths.size(),
+                vulkan_features.front().image_width,
+                vulkan_features.front().image_height);
+    std::printf("decode: %.1f ms total (%.2f ms/image)\n", decode_ms,
+                decode_ms / image_count);
+    std::printf(
+        "extraction: vulkan %.1f ms (%.2f/image, %zu features), siftgpu %.1f ms "
+        "(%.2f/image, %zu features), vulkan/cuda %.2fx, count mismatches %zu/%zu\n",
+        vulkan_ms, vulkan_ms / image_count, vulkan_feature_count, cuda_ms,
+        cuda_ms / image_count, cuda_feature_count, vulkan_ms / cuda_ms,
+        count_mismatches, paths.size());
+    std::printf(
+        "adjacent matching: %zu pairs, vulkan %.1f ms (%.2f/pair), cuda %.1f ms "
+        "(%.2f/pair), vulkan/cuda %.2fx, matches %zu/%zu, identical %zu/%zu\n",
+        pairs.size(), vulkan_match_ms, vulkan_match_ms / pairs.size(),
+        cuda_match_ms, cuda_match_ms / pairs.size(),
+        vulkan_match_ms / cuda_match_ms, vulkan_match_count, cuda_match_count,
+        identical_pairs, pairs.size());
+    std::printf(
+        "adjacent matching (descriptor cache warm): vulkan %.1f ms (%.2f/pair), "
+        "cuda %.1f ms (%.2f/pair), vulkan/cuda %.2fx\n",
+        vulkan_cached_match_ms, vulkan_cached_match_ms / pairs.size(),
+        cuda_cached_match_ms, cuda_cached_match_ms / pairs.size(),
+        vulkan_cached_match_ms / cuda_cached_match_ms);
+    return identical_pairs == pairs.size() ? 0 : 3;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::filesystem::is_directory(argv[1]))
+        return run_dataset(argv[1]);
     std::uint32_t width = 640, height = 480;
     int runs = 3;
     std::string kind = "scene";
@@ -392,6 +529,48 @@ int main(int argc, char** argv) {
             static_cast<long long>(vulkan_failures.load()),
             double(cuda_us.load()) / (kWorkers * kPairsPerWorker),
             static_cast<long long>(cuda_failures.load()));
+    }
+    {
+        // Large-feature isolation: the dataset matches ~12k x 12k descriptor
+        // pairs, which is where the two matchers diverge. Synthetic descriptors
+        // with the same shape keep this independent of the extractor.
+        constexpr std::size_t kLarge = 12000;
+        std::mt19937 random(7);
+        auto make = [&]() {
+            FeatureSet set;
+            set.image_width = 1000;
+            set.image_height = 1000;
+            set.descriptor_dimension = 128;
+            set.metric = DescriptorMetric::l2_root;
+            set.storage = DescriptorStorage::uint8;
+            set.keypoints.resize(kLarge);
+            set.descriptors_u8.resize(kLarge * 128);
+            for (std::size_t i = 0; i < set.descriptors_u8.size(); ++i)
+                set.descriptors_u8[i] = static_cast<std::uint8_t>(random() & 0xffU);
+            set.mark_descriptors_modified();
+            return set;
+        };
+        FeatureSet large_a, large_b;
+        large_a = make();  // move-assignment gives each set a fresh identity
+        large_b = make();
+        const std::vector<FeatureMatcher::Pair> large_pair{{&large_a, &large_b}};
+        VulkanMutualRatioMatcher large_vulkan{VulkanMutualRatioMatcherOptions{}};
+        SiftGpuMatcher large_cuda{SiftGpuMatcherOptions{}};
+        auto time_one = [&](FeatureMatcher& matcher) {
+            const auto start = std::chrono::steady_clock::now();
+            const auto matches = matcher.match_batch(large_pair);
+            const double ms = seconds_since(start);
+            return std::make_pair(ms, matches.front().matches.size());
+        };
+        (void)time_one(large_vulkan);  // warm
+        (void)time_one(large_cuda);
+        const auto vulkan_large = time_one(large_vulkan);
+        const auto cuda_large = time_one(large_cuda);
+        std::printf(
+            "large pair (%zu x %zu descriptors): vulkan %.1f ms (%zu matches), "
+            "siftgpu %.1f ms (%zu matches)\n",
+            kLarge, kLarge, vulkan_large.first, vulkan_large.second,
+            cuda_large.first, cuda_large.second);
     }
     return 0;
 }
