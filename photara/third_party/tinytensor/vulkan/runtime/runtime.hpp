@@ -180,11 +180,19 @@ public:
         std::uint64_t miss_bytes = 0;
         std::uint64_t drops = 0;
         std::uint64_t drop_bytes = 0;
+        std::uint64_t reserved_bytes = 0;
+        std::uint64_t free_bytes = 0;
+        std::uint64_t live_bytes = 0;
+        std::uint64_t budget_bytes = 0;
     };
     [[nodiscard]] PoolStats pool_stats() const {
+        std::scoped_lock lock(mutex_);
+        const auto reserved = op_profile_.pool_miss_bytes - op_profile_.pool_drop_bytes;
+        const auto free = static_cast<std::uint64_t>(pooled_bytes_);
         return {op_profile_.pool_hits, op_profile_.pool_misses,
                 op_profile_.pool_miss_bytes, op_profile_.pool_drops,
-                op_profile_.pool_drop_bytes};
+                op_profile_.pool_drop_bytes, reserved, free,
+                reserved - free, static_cast<std::uint64_t>(pool_budget_bytes_)};
     }
 
     [[nodiscard]] Buffer& dummy();
@@ -218,6 +226,8 @@ private:
     void ensure_staging(std::size_t bytes);
     void ensure_readback_staging(std::size_t bytes);
     void retire_upload_slot_locked(std::size_t slot);
+    void finalize_upload_slot_locked(std::size_t slot);
+    void report_upload_profile_locked();
     void barrier_buffer(VkCommandBuffer cmd, VkBuffer buffer,
                         VkAccessFlags src_access, VkAccessFlags dst_access,
                         VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage);
@@ -271,10 +281,22 @@ private:
         VkFence fence = VK_NULL_HANDLE;
         std::unique_ptr<Buffer> staging;
         bool in_flight = false;
+        std::size_t bytes = 0;
     };
     static constexpr std::size_t kUploadSlotCount = 2;
     std::array<UploadSlot, kUploadSlotCount> upload_slots_{};
     std::size_t next_upload_slot_ = 0;
+    struct UploadProfile {
+        VkQueryPool pool = VK_NULL_HANDLE;
+        std::uint32_t valid_bits = 0;
+        float period_ns = 0.0F;
+        std::uint32_t samples = 0;
+        std::uint64_t bytes = 0;
+        double gpu_ms = 0.0;
+        double host_wait_ms = 0.0;
+        double host_copy_ms = 0.0;
+        double host_submit_ms = 0.0;
+    } upload_profile_;
 
     struct OpProfile {
         // Element-count buckets are powers of two: one entry per shader and
@@ -309,7 +331,7 @@ private:
         std::uint32_t valid_bits = 0;
     };
     OpProfile op_profile_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 };
 
 } // namespace tinytensor::vulkan::runtime

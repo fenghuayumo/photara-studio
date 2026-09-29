@@ -238,9 +238,14 @@ void main(uint3 group_id : SV_GroupID, uint3 group_thread : SV_GroupThreadID, ui
     if (inside) {
         if (stats) {
             out_u[gaussian_count + pix] = last_contributor;
-            out_f[8u * pixel_count + pix] = color0;
-            out_f[8u * pixel_count + pixel_count + pix] = color1;
-            out_f[8u * pixel_count + 2u * pixel_count + pix] = color2;
+#if defined(SPLAT_BLEND_NO_GEOMETRY)
+            const uint stats_base = 4u * pixel_count;
+#else
+            const uint stats_base = 8u * pixel_count;
+#endif
+            out_f[stats_base + pix] = color0;
+            out_f[stats_base + pixel_count + pix] = color1;
+            out_f[stats_base + 2u * pixel_count + pix] = color2;
         }
         out_f[pix] = color0 + transmittance * bg0;
         out_f[pixel_count + pix] = color1 + transmittance * bg1;

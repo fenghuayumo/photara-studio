@@ -19,6 +19,7 @@ struct BilateralGridState {
     AdamState adam;
     tinytensor::Tensor output;      // [3, H, W]
     tinytensor::Tensor input_grad;  // [3, H, W]
+    tinytensor::Tensor projection_means;  // Vulkan scratch, [rows, 12]
     // True when every view shares the first grid row: the grid can then only
     // learn appearance variation that is consistent across views.
     bool shared{true};
@@ -33,8 +34,13 @@ struct BilateralGridState {
 
 BilateralGridState make_bilateral_grid_state(
     std::size_t views, const TrainingOptions& options);
+BilateralGridState make_bilateral_grid_state_vulkan(
+    std::size_t views, const TrainingOptions& options);
 
 void apply_bilateral_grid(
+    const tinytensor::Tensor& color, BilateralGridState& state,
+    std::size_t view, bool wrap_horizontal = false);
+void apply_bilateral_grid_vulkan(
     const tinytensor::Tensor& color, BilateralGridState& state,
     std::size_t view, bool wrap_horizontal = false);
 
@@ -42,8 +48,15 @@ void backward_bilateral_grid(
     BilateralGridState& state, const tinytensor::Tensor& color,
     const tinytensor::Tensor& output_gradient, std::size_t view,
     bool wrap_horizontal = false);
+void backward_bilateral_grid_vulkan(
+    BilateralGridState& state, const tinytensor::Tensor& color,
+    const tinytensor::Tensor& output_gradient, std::size_t view,
+    bool wrap_horizontal = false);
 
 void step_bilateral_grid(
+    BilateralGridState& state, const TrainingOptions& options,
+    unsigned iteration, bool wrap_horizontal = false);
+void step_bilateral_grid_vulkan(
     BilateralGridState& state, const TrainingOptions& options,
     unsigned iteration, bool wrap_horizontal = false);
 

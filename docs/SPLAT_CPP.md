@@ -107,6 +107,11 @@ variation while PPISP handles global exposure. For equirectangular cameras its
 horizontal lookup and total variation wrap across the panorama seam. When both
 are enabled, PPISP is applied first.
 
+The Vulkan training backend accepts both corrections, including all three
+PPISP layouts and per-view or shared bilateral grids. Their forward, backward,
+regularization and constraint stages run as HLSL compute shaders on Vulkan
+buffers. The trained Gaussian colour remains canonical.
+
 ## 6. Geometry supervision
 
 Mesh-oriented training can enable:

@@ -5,6 +5,7 @@
 // passes. It also renders a trained model without a CUDA context. Per-Gaussian
 // state, sorted instances and pixel snapshots stay alive on the device.
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -180,6 +181,12 @@ struct SplatBufferView {
     std::uint64_t bytes = 0;
 };
 
+struct SplatColorCorrectionCommand {
+    std::array<SplatBufferView, 6> buffers;
+    std::array<std::uint32_t, 20> push_words;
+    std::uint32_t groups_x = 0;
+};
+
 // Float32 CHW render attachments that remain in device-local memory. The
 // slices are owned by the rasterizer and remain valid until its next render.
 // Empty geometry slices mean the render used need_depth=false.
@@ -308,6 +315,17 @@ private:
 // pixel snapshots from the latest forward() stay alive for a later backward pass.
 class SplatRasterizer {
 public:
+    struct WorkspaceStats {
+        std::uint64_t total_bytes{};
+        std::uint64_t model_bytes{};
+        std::uint64_t sort_bytes{};
+        std::uint64_t frame_bytes{};
+        std::uint64_t ssim_bytes{};
+        std::uint64_t other_bytes{};
+        std::uint64_t snapshot_bytes{};
+        std::uint64_t output_bytes{};
+    };
+
     explicit SplatRasterizer(Context& context);
     ~SplatRasterizer();
 
@@ -331,6 +349,7 @@ public:
         std::span<const float> means, std::span<const float> opacities);
     void clear_model();
     [[nodiscard]] bool has_model() const noexcept;
+    [[nodiscard]] WorkspaceStats workspace_stats() const;
 
     [[nodiscard]] SplatForwardOutput render(
         const SplatCamera& camera, const SplatSettings& settings);
@@ -414,7 +433,16 @@ public:
         const SplatBufferView& prediction, const SplatBufferView& target,
         std::uint32_t width, std::uint32_t height, float ssim_weight = 0.2F,
         float photometric_weight = 1.0F,
-        const SplatBufferView& mask = {});
+        const SplatBufferView& mask = {},
+        const SplatBufferView& gradient_destination = {});
+    // Dispatch Photara's training-only PPISP/bilateral-grid compute kernel.
+    // All buffers remain on the adopted Vulkan device.
+    void color_correction_device(
+        const std::array<SplatBufferView, 6>& buffers,
+        const std::array<std::uint32_t, 20>& push_words,
+        std::uint32_t groups_x);
+    void color_correction_batch_device(
+        std::span<const SplatColorCorrectionCommand> commands);
     // Reads exactly one float from the most recent device loss result.
     [[nodiscard]] float read_photometric_loss(
         const SplatDevicePhotometricOutput& output);

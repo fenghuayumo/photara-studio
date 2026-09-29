@@ -51,7 +51,8 @@ public:
         const tinytensor::Tensor& target,
         const tinytensor::Tensor& mask,
         bool mask_enabled, float ssim_weight,
-        float photometric_weight, bool read_loss_value = true) const;
+        float photometric_weight, bool read_loss_value = true,
+        tinytensor::Tensor* color_gradient = nullptr) const;
 
     ModelGradients backward(
         const GaussianModel& model, const RenderResult& rendered,

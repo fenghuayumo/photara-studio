@@ -466,6 +466,7 @@ if(PHOTARA_ENABLE_FEATURES)
         if(TARGET splat_drender::vulkan)
             target_sources(photara_splat_cuda PRIVATE
                 src/splat/optimizer_vulkan.cpp
+                src/splat/colour_correction_vulkan.cpp
                 src/splat/rasterizer_vulkan.cpp)
             target_link_libraries(photara_splat_cuda PUBLIC
                 splat_drender::vulkan)

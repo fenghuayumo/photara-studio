@@ -92,7 +92,8 @@ struct VulkanRasterBackend {
             return options;
           }()),
           rasterizer(context), profile_stages(
-              environment_flag("SPLAT_VULKAN_PROFILE_STAGES")) {}
+              environment_flag("SPLAT_VULKAN_PROFILE_STAGES")),
+          profile_memory(environment_flag("SPLAT_VULKAN_PROFILE_MEMORY")) {}
 
     void record_forward(const double value, const double sync,
                         const double bind, const double render,
@@ -108,6 +109,29 @@ struct VulkanRasterBackend {
         if (profile_stages) loss_ms += value;
     }
     void record_backward(const double value) {
+        if (profile_memory && ++memory_samples % 100 == 0) {
+            const auto workspace = rasterizer.workspace_stats();
+            const auto pool = tinytensor::vulkan::buffer_pool_stats();
+            std::fprintf(stderr,
+                "splat_vulkan_memory sample=%u raster_total=%llu raster_model=%llu "
+                "raster_sort=%llu raster_frame=%llu raster_ssim=%llu "
+                "raster_other=%llu raster_snapshot=%llu raster_output=%llu "
+                "pool_reserved=%llu pool_live=%llu pool_free=%llu pool_budget=%llu\n",
+                memory_samples,
+                static_cast<unsigned long long>(workspace.total_bytes),
+                static_cast<unsigned long long>(workspace.model_bytes),
+                static_cast<unsigned long long>(workspace.sort_bytes),
+                static_cast<unsigned long long>(workspace.frame_bytes),
+                static_cast<unsigned long long>(workspace.ssim_bytes),
+                static_cast<unsigned long long>(workspace.other_bytes),
+                static_cast<unsigned long long>(workspace.snapshot_bytes),
+                static_cast<unsigned long long>(workspace.output_bytes),
+                static_cast<unsigned long long>(pool.reserved_bytes),
+                static_cast<unsigned long long>(pool.live_bytes),
+                static_cast<unsigned long long>(pool.free_bytes),
+                static_cast<unsigned long long>(pool.budget_bytes));
+            std::fflush(stderr);
+        }
         if (!profile_stages) return;
         backward_ms += value;
         if (++profile_samples < 100) return;
@@ -131,6 +155,8 @@ struct VulkanRasterBackend {
     }
 
     bool profile_stages{};
+    bool profile_memory{};
+    std::uint32_t memory_samples{};
     std::uint32_t profile_samples{};
     double forward_ms{};
     double forward_sync_ms{};
@@ -266,17 +292,26 @@ float vulkan_photometric_loss(
     const RenderResult& rendered, const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask, const bool mask_enabled,
     const float ssim_weight, const float photometric_weight,
-    const bool read_loss_value) {
+    const bool read_loss_value,
+    tinytensor::Tensor* color_gradient) {
     auto context = get_context(rendered);
     const auto profile_start = std::chrono::steady_clock::now();
     if (target.device() != tinytensor::Device::Vulkan)
         throw std::invalid_argument(
             "Vulkan photometric target must be a Vulkan tensor");
+    if (color_gradient != nullptr)
+        *color_gradient = tinytensor::Tensor::empty(
+            {std::size_t{3}, context->frame.height, context->frame.width},
+            tinytensor::Device::Vulkan);
     tinytensor::vulkan::submit_async();
     context->photometric = context->backend->rasterizer.fused_l1_ssim_device(
-        context->frame.color, buffer_view(target), context->frame.width,
+        rendered.color.is_valid() ? buffer_view(rendered.color)
+                                  : context->frame.color,
+        buffer_view(target), context->frame.width,
         context->frame.height, ssim_weight, photometric_weight,
-        mask_enabled ? buffer_view(mask) : SplatBufferView{});
+        mask_enabled ? buffer_view(mask) : SplatBufferView{},
+        color_gradient != nullptr ? buffer_view(*color_gradient)
+                                  : SplatBufferView{});
     context->has_photometric = true;
     float value = 0.0F;
     if (read_loss_value)

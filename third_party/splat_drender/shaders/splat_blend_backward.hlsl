@@ -4,10 +4,12 @@
 #define SPLAT_BLEND_BACKWARD_GEOMETRY 0
 #define SPLAT_BLEND_BACKWARD_GAUSS_SLOTS 5u
 #define SPLAT_BLEND_BACKWARD_BOUNDS_SLOT 3u
+#define SPLAT_BLEND_BACKWARD_STATS_BASE 4u
 #else
 #define SPLAT_BLEND_BACKWARD_GEOMETRY 1
 #define SPLAT_BLEND_BACKWARD_GAUSS_SLOTS 7u
 #define SPLAT_BLEND_BACKWARD_BOUNDS_SLOT 5u
+#define SPLAT_BLEND_BACKWARD_STATS_BASE 8u
 #endif
 
 [[vk::binding(0, 0)]] StructuredBuffer<uint> ranges;
@@ -122,8 +124,9 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
 
         uint snap_index = bucket_idx * 256u + local;
         float4 state = snap[snap_index];
-        float3 color_after = float3(out_f[8u * pixel_count + pixel],
-            out_f[9u * pixel_count + pixel], out_f[10u * pixel_count + pixel]) - state.xyz;
+        float3 color_after = float3(out_f[SPLAT_BLEND_BACKWARD_STATS_BASE * pixel_count + pixel],
+            out_f[(SPLAT_BLEND_BACKWARD_STATS_BASE + 1u) * pixel_count + pixel],
+            out_f[(SPLAT_BLEND_BACKWARD_STATS_BASE + 2u) * pixel_count + pixel]) - state.xyz;
         float alpha_final = out_f[3u * pixel_count + pixel], final_t = 1.0f - alpha_final;
 #if SPLAT_BLEND_BACKWARD_GEOMETRY
         float3 normal_out = geometry ? float3(out_f[4u * pixel_count + pixel],

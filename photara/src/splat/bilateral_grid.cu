@@ -263,7 +263,7 @@ __device__ __forceinline__ bool bilateral_pixel_geometry(
 
 // Scatter of a single pixel: one visit per trilinear neighbour, both the grid
 // gradient and the input-colour gradient out of the same pass.
-template <bool k_vectorized>
+template <bool k_vectorized, bool k_write_grid = true>
 __device__ __forceinline__ void bilateral_backward_pixel(
     const BilateralPixel& geometry, const float* __restrict__ grids,
     float* __restrict__ grid_grad, float* __restrict__ input_grad,
@@ -302,8 +302,6 @@ __device__ __forceinline__ void bilateral_backward_pixel(
                 const int cell = (z * grid_h + cell_y) * grid_w + cell_x;
                 const float* cell_in =
                     grids + row_base + cell * k_affine_channels;
-                float* cell_out =
-                    grid_grad + row_base + cell * k_affine_channels;
                 float4 c0;
                 float4 c1;
                 float4 c2;
@@ -335,32 +333,36 @@ __device__ __forceinline__ void bilateral_backward_pixel(
                 // its gradient only flows through the fractional z weight.
                 gz_grad += wx[cx] * wy[cy] * (cz == 0 ? -1.F : 1.F) *
                     luma_scale * (p0 * sr + p1 * sg + p2 * sb + p3);
-                const float4 g0 = make_float4(
-                    weight * dr * sr, weight * dr * sg, weight * dr * sb,
-                    weight * dr);
-                const float4 g1 = make_float4(
-                    weight * dg * sr, weight * dg * sg, weight * dg * sb,
-                    weight * dg);
-                const float4 g2 = make_float4(
-                    weight * db * sr, weight * db * sg, weight * db * sb,
-                    weight * db);
-                if constexpr (k_vectorized) {
-                    red_add4(cell_out, g0);
-                    red_add4(cell_out + 4, g1);
-                    red_add4(cell_out + 8, g2);
-                } else {
-                    atomicAdd(cell_out + 0, g0.x);
-                    atomicAdd(cell_out + 1, g0.y);
-                    atomicAdd(cell_out + 2, g0.z);
-                    atomicAdd(cell_out + 3, g0.w);
-                    atomicAdd(cell_out + 4, g1.x);
-                    atomicAdd(cell_out + 5, g1.y);
-                    atomicAdd(cell_out + 6, g1.z);
-                    atomicAdd(cell_out + 7, g1.w);
-                    atomicAdd(cell_out + 8, g2.x);
-                    atomicAdd(cell_out + 9, g2.y);
-                    atomicAdd(cell_out + 10, g2.z);
-                    atomicAdd(cell_out + 11, g2.w);
+                if constexpr (k_write_grid) {
+                    float* cell_out =
+                        grid_grad + row_base + cell * k_affine_channels;
+                    const float4 g0 = make_float4(
+                        weight * dr * sr, weight * dr * sg, weight * dr * sb,
+                        weight * dr);
+                    const float4 g1 = make_float4(
+                        weight * dg * sr, weight * dg * sg, weight * dg * sb,
+                        weight * dg);
+                    const float4 g2 = make_float4(
+                        weight * db * sr, weight * db * sg, weight * db * sb,
+                        weight * db);
+                    if constexpr (k_vectorized) {
+                        red_add4(cell_out, g0);
+                        red_add4(cell_out + 4, g1);
+                        red_add4(cell_out + 8, g2);
+                    } else {
+                        atomicAdd(cell_out + 0, g0.x);
+                        atomicAdd(cell_out + 1, g0.y);
+                        atomicAdd(cell_out + 2, g0.z);
+                        atomicAdd(cell_out + 3, g0.w);
+                        atomicAdd(cell_out + 4, g1.x);
+                        atomicAdd(cell_out + 5, g1.y);
+                        atomicAdd(cell_out + 6, g1.z);
+                        atomicAdd(cell_out + 7, g1.w);
+                        atomicAdd(cell_out + 8, g2.x);
+                        atomicAdd(cell_out + 9, g2.y);
+                        atomicAdd(cell_out + 10, g2.z);
+                        atomicAdd(cell_out + 11, g2.w);
+                    }
                 }
             }
         }
@@ -568,6 +570,114 @@ __global__ void bilateral_backward_kernel(
     }
 }
 
+// A cell owns its gradient, so textured pixels do not contend on global
+// atomics. Each block scans only the image rectangle covered by its cell.
+__global__ void bilateral_grid_gather_kernel(
+    const float* __restrict__ color, const float* __restrict__ output_grad,
+    float* __restrict__ grid_grad, const int view, const int luma,
+    const int grid_h, const int grid_w, const int height, const int width,
+    const bool wrap_horizontal) {
+    const int cells_per_row = luma * grid_h * grid_w;
+    const int global_cell = blockIdx.x;
+    const int cell = global_cell % cells_per_row;
+    if (global_cell / cells_per_row != view) {
+        if (threadIdx.x < k_affine_channels)
+            grid_grad[static_cast<long long>(global_cell) *
+                      k_affine_channels + threadIdx.x] = 0.F;
+        return;
+    }
+    const int cx = cell % grid_w;
+    const int cy = (cell / grid_w) % grid_h;
+    const int cz = cell / (grid_w * grid_h);
+    const int pixels = height * width;
+    const float xfactor = width > 1
+        ? static_cast<float>(wrap_horizontal ? grid_w : grid_w - 1) /
+            static_cast<float>(wrap_horizontal ? width : width - 1)
+        : 0.F;
+    const float yfactor = height > 1
+        ? static_cast<float>(grid_h - 1) / static_cast<float>(height - 1)
+        : 0.F;
+    int xbegin = 0, xend = width;
+    if (!wrap_horizontal && grid_w > 1 && width > 1) {
+        xbegin = max(0, static_cast<int>(ceilf((cx - 1.F) / xfactor)));
+        xend = min(width, static_cast<int>(floorf((cx + 1.F) / xfactor)) + 1);
+    }
+    const int ybegin = grid_h > 1 && height > 1
+        ? max(0, static_cast<int>(ceilf((cy - 1.F) / yfactor))) : 0;
+    const int yend = grid_h > 1 && height > 1
+        ? min(height, static_cast<int>(floorf((cy + 1.F) / yfactor)) + 1)
+        : height;
+    float sums[k_affine_channels] = {};
+    const int span_x = xend - xbegin;
+    const int span_y = yend - ybegin;
+    if (span_x > 0 && span_y > 0) {
+        for (int i = threadIdx.x; i < span_x * span_y; i += blockDim.x) {
+            const int x = xbegin + i % span_x;
+            const int y = ybegin + i / span_x;
+            const float wy = grid_h == 1 ? 1.F
+                : fmaxf(1.F - fabsf(y * yfactor - cy), 0.F);
+            if (wy == 0.F) continue;
+            float distance = fabsf(x * xfactor - cx);
+            if (wrap_horizontal && grid_w > 1)
+                distance = fminf(distance, grid_w - distance);
+            const float wx = grid_w == 1 ? 1.F
+                : fmaxf(1.F - distance, 0.F);
+            if (wx == 0.F) continue;
+            const int pixel = y * width + x;
+            const float sr = color[pixel];
+            const float sg = color[pixels + pixel];
+            const float sb = color[2 * pixels + pixel];
+            const float luma_value = fminf(fmaxf(
+                k_c2g_r * sr + k_c2g_g * sg + k_c2g_b * sb, 0.F), 1.F);
+            const float wz = luma == 1 ? 1.F
+                : fmaxf(1.F - fabsf(luma_value * (luma - 1) - cz), 0.F);
+            const float weight = wx * wy * wz;
+            if (weight == 0.F) continue;
+#pragma unroll
+            for (int channel = 0; channel < 3; ++channel) {
+                const float go = output_grad[channel * pixels + pixel] * weight;
+                sums[4 * channel] += go * sr;
+                sums[4 * channel + 1] += go * sg;
+                sums[4 * channel + 2] += go * sb;
+                sums[4 * channel + 3] += go;
+            }
+        }
+    }
+    __shared__ float partials[k_affine_channels][64];
+#pragma unroll
+    for (int channel = 0; channel < k_affine_channels; ++channel)
+        partials[channel][threadIdx.x] = sums[channel];
+    __syncthreads();
+    if (threadIdx.x < k_affine_channels) {
+        float sum = 0.F;
+#pragma unroll
+        for (int lane = 0; lane < 64; ++lane)
+            sum += partials[threadIdx.x][lane];
+        grid_grad[static_cast<long long>(global_cell) * k_affine_channels +
+                  threadIdx.x] = sum;
+    }
+}
+
+template <bool k_vectorized>
+__global__ void bilateral_input_backward_kernel(
+    const float* __restrict__ color, const float* __restrict__ grids,
+    const float* __restrict__ output_grad, float* __restrict__ input_grad,
+    const int view, const int luma, const int grid_h, const int grid_w,
+    const int height, const int width, const bool wrap_horizontal) {
+    const int pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    const int pixels = height * width;
+    if (pixel >= pixels) return;
+    BilateralPixel geometry;
+    const bool active = bilateral_pixel_geometry<k_vectorized>(
+        color, output_grad, luma, grid_h, grid_w, height, width, pixels,
+        pixel, wrap_horizontal, geometry);
+    const long long row_base = static_cast<long long>(view) *
+        luma * grid_h * grid_w * k_affine_channels;
+    bilateral_backward_pixel<k_vectorized, false>(
+        geometry, grids, nullptr, input_grad, row_base, luma, grid_h,
+        grid_w, pixels, active);
+}
+
 __global__ void bilateral_tv_backward_kernel(
     const float* grids, float* grads, const int views, const int luma,
     const int grid_h, const int grid_w, const float tv_weight,
@@ -702,7 +812,6 @@ void backward_bilateral_grid(
     const int width = static_cast<int>(color.shape()[2]);
     const int pixels = height * width;
     if (pixels == 0) return;
-    state.gradient.zero_();
     if (!state.shared && view >= state.grids.shape()[0])
         throw std::invalid_argument("bilateral grid view index is out of range");
     const int row = state.shared ? 0 : static_cast<int>(view);
@@ -715,6 +824,34 @@ void backward_bilateral_grid(
     };
     const bool vectorized = aligned(state.grids.ptr<float>()) &&
         aligned(state.gradient.ptr<float>());
+    // Gathering is useful once the grid is fine enough that each cell covers
+    // a small image rectangle; coarse grids keep the run-based scatter path.
+    if (pixels >= 1'000'000 &&
+        state.luma * state.grid_height * state.grid_width >= 1'024) {
+        const unsigned cells = static_cast<unsigned>(state.grids.numel() / 12);
+        bilateral_grid_gather_kernel<<<cells, 64>>>(
+            color.ptr<float>(), output_gradient.ptr<float>(),
+            state.gradient.ptr<float>(), row, state.luma, state.grid_height,
+            state.grid_width, height, width, wrap_horizontal);
+        const unsigned blocks =
+            (static_cast<unsigned>(pixels) + k_cuda_threads - 1) /
+            k_cuda_threads;
+        if (vectorized)
+            bilateral_input_backward_kernel<true><<<blocks, k_cuda_threads>>>(
+                color.ptr<float>(), state.grids.ptr<float>(),
+                output_gradient.ptr<float>(), state.input_grad.ptr<float>(),
+                row, state.luma, state.grid_height, state.grid_width,
+                height, width, wrap_horizontal);
+        else
+            bilateral_input_backward_kernel<false><<<blocks, k_cuda_threads>>>(
+                color.ptr<float>(), state.grids.ptr<float>(),
+                output_gradient.ptr<float>(), state.input_grad.ptr<float>(),
+                row, state.luma, state.grid_height, state.grid_width,
+                height, width, wrap_horizontal);
+        check_cuda(cudaGetLastError(), "backward bilateral grid colour correction");
+        return;
+    }
+    state.gradient.zero_();
     // One thread walks a run of pixels and folds the run into a single set of
     // grid reductions whenever the run shares its eight trilinear neighbours.
     // A wide run wins on large views (the reductions, not the arithmetic, set
