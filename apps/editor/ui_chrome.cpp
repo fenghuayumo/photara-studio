@@ -727,13 +727,6 @@ Action draw_toolbar(App& app) {
             action = Action::stop;
     }
 
-    const char* transport = "CUDA / Vulkan  |  external memory";
-    const float transport_width = ImGui::CalcTextSize(transport).x;
-    ImGui::SameLine(
-        std::max(0.F, ImGui::GetWindowWidth() - transport_width - 16.F));
-    ImGui::SetCursorPosY(18.F);
-    theme::caption(transport);
-
     ImGui::End();
     ImGui::PopStyleColor();
     return action;
