@@ -1,8 +1,12 @@
-# In-tree SAM 3 on ggml. Runtime selection prefers CUDA, then Vulkan, then
-# Metal, and falls back to CPU.
+# In-tree SAM 3 on ggml. The default GPU backend is Vulkan (no extra runtime
+# DLLs beyond the system Vulkan loader). CUDA stays opt-in because the ggml
+# CUDA backend drags in cuBLAS (~770 MB) for the CLI worker. Runtime
+# selection prefers whatever GPU backends were built and falls back to CPU.
 
 option(PHOTARA_ENABLE_SAM "Build in-process SAM 3 mask generation" ON)
 option(PHOTARA_ENABLE_SAM_VULKAN "Build the SAM 3 ggml Vulkan backend" ON)
+option(PHOTARA_ENABLE_SAM_CUDA
+    "Build the SAM 3 ggml CUDA backend (adds cuBLAS to the release)" OFF)
 
 set(PHOTARA_HAS_SAM OFF)
 
@@ -26,7 +30,7 @@ if(PHOTARA_ENABLE_SAM)
         set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
     endif()
     set(GGML_BLAS OFF CACHE BOOL "" FORCE)
-    if(PHOTARA_ENABLE_CUDA)
+    if(PHOTARA_ENABLE_CUDA AND PHOTARA_ENABLE_SAM_CUDA)
         include(CheckLanguage)
         check_language(CUDA)
         if(CMAKE_CUDA_COMPILER)
@@ -38,7 +42,7 @@ if(PHOTARA_ENABLE_SAM)
             set(GGML_CUDA ON CACHE BOOL "" FORCE)
         else()
             message(WARNING
-                "PHOTARA_ENABLE_SAM: CUDA compiler not found; "
+                "PHOTARA_ENABLE_SAM_CUDA: CUDA compiler not found; "
                 "SAM 3 will use the ggml CPU backend")
             set(GGML_CUDA OFF CACHE BOOL "" FORCE)
         endif()
