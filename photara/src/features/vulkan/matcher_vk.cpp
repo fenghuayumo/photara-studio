@@ -61,6 +61,8 @@ public:
         const std::uint64_t minimum = 2ULL * padded(options.maximum_features) * 128;
         if (budget < minimum)
             throw std::runtime_error("Insufficient Vulkan descriptor cache memory");
+        initial_capacity = std::min<std::uint64_t>(
+            budget, std::max<std::uint64_t>(minimum, 4ULL << 20));
     }
 
     struct Entry {
@@ -69,9 +71,34 @@ public:
         std::uint64_t generation;
     };
 
+    // Grows the host-visible descriptor mirror so that `bytes` more descriptors
+    // fit. Growth copies the used prefix, keeping every cached offset valid, and
+    // happens before a batch is recorded, where the queue is idle. Allocating
+    // the whole budget up front would reserve hundreds of megabytes per matcher
+    // clone, and the SfM frontend creates one clone per worker thread.
+    void ensure_capacity(std::size_t bytes) {
+        if (descriptors.valid() && used + bytes <= capacity) return;
+        if (used + bytes > budget) {
+            cache.clear();
+            used = 0;
+        }
+        if (used + bytes > budget)
+            throw std::invalid_argument(
+                "Vulkan matching pair exceeds descriptor budget");
+        std::size_t next = capacity != 0 ? capacity : initial_capacity;
+        const std::size_t needed = used + bytes;
+        while (next < needed) next = std::min<std::size_t>(budget, next * 2);
+        BufferRef grown = context->allocate(next, true);
+        if (descriptors.valid() && used > 0) {
+            std::memcpy(grown->mapped_host(), descriptors->mapped_host(), used);
+            grown->flush(0, used);
+        }
+        descriptors = std::move(grown);
+        capacity = next;
+    }
+
     // Reserves (or reuses) a padded device range for one FeatureSet and copies
-    // its descriptors into the host-visible mirror buffer. The device buffer
-    // is allocated once at the full budget so cached offsets stay stable.
+    // its descriptors into the host-visible mirror buffer.
     std::size_t reserve(const FeatureSet& features) {
         const auto found = cache.find(features.descriptor_identity);
         if (found != cache.end() &&
@@ -79,10 +106,8 @@ public:
             found->second.bytes == features.descriptors_u8.size())
             return found->second.offset;
         const std::size_t bytes = padded(features.keypoints.size()) * 128;
-        if (used + bytes > budget) {
-            cache.clear();
-            used = 0;
-        }
+        if (!descriptors.valid() || used + bytes > capacity)
+            throw std::logic_error("Vulkan descriptor mirror is too small");
         const std::size_t offset = used;
         std::uint8_t* destination =
             static_cast<std::uint8_t*>(descriptors->mapped_host()) + offset;
@@ -100,6 +125,8 @@ public:
     VulkanMutualRatioMatcherOptions options;
     Context* context{};
     std::uint64_t budget{};
+    std::uint64_t initial_capacity{};
+    std::size_t capacity{};
     mutable std::mutex mutex;
     mutable std::unordered_map<std::uint64_t, Entry> cache;
     mutable std::size_t used{};
@@ -181,8 +208,9 @@ std::vector<MatchSet> VulkanMutualRatioMatcher::match_batch(
         }
 
         std::lock_guard lock(impl_->mutex);
-        if (!impl_->descriptors.valid())
-            impl_->descriptors = context.allocate(impl_->budget, true);
+        // Grow before recording: the previous batch was synchronized, so no
+        // queued work can still reference the old mirror.
+        impl_->ensure_capacity(batch_bytes);
 
         BufferRef row_partials = context.allocate(row_size * 12, false);
         BufferRef col_partials =

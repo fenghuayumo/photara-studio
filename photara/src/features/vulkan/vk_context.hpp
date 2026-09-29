@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -117,6 +118,14 @@ public:
     [[nodiscard]] BufferRef allocate(VkDeviceSize bytes, bool host_visible,
                                      bool host_cached = false);
 
+    // Soft device-memory budget for concurrent feature work. One SIFT pyramid
+    // keeps a few hundred megabytes alive in the buffer pool, so the SfM
+    // frontend's per-worker extractor clones would otherwise exhaust the device
+    // (vkAllocateMemory returns VK_ERROR_OUT_OF_DEVICE_MEMORY). Callers reserve
+    // an estimate for the duration of one extraction.
+    void acquire_device_budget(std::uint64_t bytes);
+    void release_device_budget(std::uint64_t bytes);
+
     // ---- recording session -------------------------------------------------
     // begin() starts the calling thread's command buffer; dispatch() appends a
     // compute dispatch (a full compute-stage memory barrier separates every
@@ -158,7 +167,6 @@ private:
         std::uint32_t type_bits,
         VkMemoryPropertyFlags required) const;
 
-    [[nodiscard]] VkDescriptorSet acquire_set(const Pipeline& pipeline);
     void write_set(VkDescriptorSet set, const Pipeline& pipeline,
                    std::span<const BufferBinding> bindings);
 
@@ -176,11 +184,22 @@ private:
         VkCommandBuffer command = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         bool recording = false;
+        // Descriptor sets come from pools owned by the session: extraction
+        // records hundreds of dispatches per image, and one pool per worker
+        // thread keeps parallel extractions independent. Pools are reset
+        // between submissions, so nothing is freed while a batch is in flight.
+        std::vector<VkDescriptorPool> pools;
+        std::vector<std::uint32_t> pool_capacities;
+        std::size_t sets_in_active_pool = 0;
         std::vector<VkDescriptorSet> sets;
         std::vector<Download> downloads;
     };
 
     [[nodiscard]] Session& session();
+    [[nodiscard]] VkDescriptorSet acquire_set(const Pipeline& pipeline,
+                                              Session& session);
+    void reset_session_pools(Session& session);
+    void grow_session_pool(Session& session);
     void destroy_session(Session& session) noexcept;
 
     static VkDeviceSize pooled_size(VkDeviceSize bytes);
@@ -196,7 +215,6 @@ private:
     std::uint32_t device_index_ = 0;
     VkPhysicalDeviceMemoryProperties memory_properties_{};
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
-    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
 
     Pipeline pipelines_[static_cast<std::size_t>(Shader::Count)]{};
 
@@ -210,6 +228,11 @@ private:
     std::vector<PoolBucket> host_pools_;
 
     bool alive_ = true;
+
+    std::mutex budget_mutex_;
+    std::condition_variable budget_condition_;
+    std::uint64_t budget_bytes_{0};
+    std::uint64_t budget_in_use_{0};
 };
 
 }  // namespace photara::features::vulkan_backend

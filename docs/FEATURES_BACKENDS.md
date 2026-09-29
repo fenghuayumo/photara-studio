@@ -49,9 +49,7 @@ record the canonicalized backend names.
 The Vulkan matcher keeps the CUDA matcher's integer top-two reductions exact;
 accepted matches can differ only at `acos` rounding boundaries. On the pairs
 measured by `photara_vulkan_features_parity` it returns *identical* match sets
-to the native CUDA matcher, and it is roughly an order of magnitude faster for
-small to mid feature counts because it keeps the whole batch resident on the
-device instead of round-tripping per pair.
+to the native CUDA matcher.
 
 The Vulkan extractor reproduces the SiftGPU CUDA pipeline step for step: the
 same Gaussian pyramid (2x bilinear upsampling, truncated-width input rows,
@@ -62,19 +60,53 @@ two backends return the same feature counts and the same keypoint positions
 (1 px / 2% scale agreement is 97-100% with a mean offset of ~0.0002 px; the
 `photara.features.vulkan` test asserts count parity plus 80%+ position
 agreement, and `photara_vulkan_features_parity` prints the full comparison).
-Extraction timing is comparable (the Vulkan backend is ~0.6-0.7x of SiftGPU's
-per-image cost on the harness images), and on real photo pairs the frontend
-reports identical feature, raw-match, inlier and track counts for
-`vulkan_sift` × `vulkan_mutual_ratio` and the default CUDA pair.
+
+End-to-end agreement was checked on a 72-frame 1080x1920 scan video
+(`photara --images ... --max-features 12000 --window 3 --export-colmap ...`).
+The default CUDA pair and `vulkan_sift` × `vulkan_mutual_ratio` both register
+72/72 images with 100% of the reconstructed points in front of their cameras,
+and after a similarity alignment their camera centres agree with the CUDA
+baseline to 0.007-0.062% of the trajectory extent with rotations within
+0.05 degrees (the residual is the usual SIFT feature jitter, not a systematic
+difference).
+
+Two Vulkan-side defects surfaced on that run and are fixed here:
+
+- descriptor sets came from one 1024-set pool shared by every worker, so
+  parallel extraction, which records a few hundred dispatches per image,
+  exhausted it. Each recording session now owns growable pools that are reset
+  between submissions;
+- parallel extraction of 1080x1920 frames (one worker per thread, each holding
+  ~600 MB of pyramid buffers) failed with `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
+  Extractions now reserve their estimated bytes against a device-memory budget
+  before allocating, and the matcher's descriptor mirror grows on demand instead
+  of reserving its whole 768 MB budget per clone.
+
+The CUDA path is deliberately left as it was: the baseline `siftgpu` ×
+`gpu_mutual_ratio` behaviour is the reference these numbers are compared
+against, and the measurements below show nothing on the CUDA side that the
+dataset justifies changing.
+
+Performance on that dataset: extraction is 2x faster on Vulkan (1.16 s vs
+2.30 s) because whole images are extracted in parallel, while matching is much
+faster on CUDA (1.34 s vs 42.6 s for 1978 pairs) because the native matcher uses
+int8 tensor cores while the Vulkan shader evaluates byte dot products scalar.
+That dot product is the remaining gap for large feature counts; small feature
+counts are dominated by host round trips instead, where the two are within a
+factor of two (`photara_vulkan_features_parity` reports both). Everything else
+on the CUDA side is untouched: reverting the intermediate experiment reproduces
+the baseline frontend statistics exactly (features 880167, raw matches 291303,
+tracks 83917, 72/72 registered, reprojection 0.413002 px).
 
 Two caveats:
 
 - SiftGPU's upsampling pass indexes slightly past its own textures, so its
-  pyramid border is undefined and its keypoint set is not run-to-run
-  reproducible there (~1% of the features on textured images, ~10% on
-  synthetic noise). The Vulkan translation returns the zero tex1Dfetch
-  documents for those reads, matches the CUDA result on reproducible inputs,
-  and is deterministic.
+  pyramid border reads undefined memory and its output is *not* run-to-run
+  reproducible: on one real photo pair `photara --images` reported 7877-8296
+  features and 317-489 raw matches across three runs, while the Vulkan backend
+  reported the same 8526 features / 616 matches / 594 inliers every time. The
+  Vulkan translation returns the zero that tex1Dfetch documents for those
+  reads, matches the CUDA result on reproducible inputs, and is deterministic.
 - SiftGPU truncates the input width to a multiple of four before building the
   pyramid (`TruncateWidthCU`); the Vulkan backend does the same, so up to three
   trailing columns never contribute.

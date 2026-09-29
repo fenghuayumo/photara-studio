@@ -342,6 +342,14 @@ Context::Context() {
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 
     vkGetPhysicalDeviceMemoryProperties(physical_, &memory_properties_);
+    {
+        std::uint64_t device_local = 0;
+        for (std::uint32_t heap = 0; heap < memory_properties_.memoryHeapCount; ++heap)
+            if ((memory_properties_.memoryHeaps[heap].flags &
+                 VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0)
+                device_local += memory_properties_.memoryHeaps[heap].size;
+        budget_bytes_ = std::max<std::uint64_t>(256ULL << 20, device_local / 3);
+    }
 
     VkCommandPoolCreateInfo pool_create{};
     pool_create.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -349,18 +357,6 @@ Context::Context() {
     pool_create.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     check(vkCreateCommandPool(device_, &pool_create, nullptr, &command_pool_),
           "vkCreateCommandPool");
-
-    VkDescriptorPoolSize pool_size{};
-    pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = 8192;
-    VkDescriptorPoolCreateInfo descriptor_create{};
-    descriptor_create.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    descriptor_create.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    descriptor_create.maxSets = 1024;
-    descriptor_create.poolSizeCount = 1;
-    descriptor_create.pPoolSizes = &pool_size;
-    check(vkCreateDescriptorPool(device_, &descriptor_create, nullptr, &descriptor_pool_),
-          "vkCreateDescriptorPool");
 
     device_pools_.resize(48);
     host_pools_.resize(48);
@@ -381,8 +377,6 @@ Context::~Context() {
     for (auto& session : sessions)
         if (session != nullptr) destroy_session(*session);
     for (auto& pipeline : pipelines_) destroy_pipeline(pipeline);
-    if (descriptor_pool_ != VK_NULL_HANDLE)
-        vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
     if (command_pool_ != VK_NULL_HANDLE)
         vkDestroyCommandPool(device_, command_pool_, nullptr);
     vkDestroyDevice(device_, nullptr);
@@ -423,6 +417,10 @@ Context::Session& Context::session() {
 
 void Context::destroy_session(Session& session) noexcept {
     if (device_ == VK_NULL_HANDLE) return;
+    for (const auto pool : session.pools)
+        if (pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, pool, nullptr);
+    session.pools.clear();
+    session.pool_capacities.clear();
     if (command_pool_ != VK_NULL_HANDLE)
         vkFreeCommandBuffers(device_, command_pool_, 1, &session.command);
     if (session.command != VK_NULL_HANDLE)
@@ -435,6 +433,20 @@ void Context::destroy_session(Session& session) noexcept {
 
 VkPhysicalDeviceMemoryProperties Context::memory_properties() const {
     return memory_properties_;
+}
+
+void Context::acquire_device_budget(std::uint64_t bytes) {
+    std::unique_lock lock(budget_mutex_);
+    budget_condition_.wait(lock, [&] {
+        return budget_in_use_ == 0 || budget_in_use_ + bytes <= budget_bytes_;
+    });
+    budget_in_use_ += bytes;
+}
+
+void Context::release_device_budget(std::uint64_t bytes) {
+    std::lock_guard lock(budget_mutex_);
+    budget_in_use_ = budget_in_use_ > bytes ? budget_in_use_ - bytes : 0;
+    budget_condition_.notify_all();
 }
 
 VkDeviceSize Context::pooled_size(VkDeviceSize bytes) {
@@ -547,16 +559,60 @@ void Context::destroy_pipeline(Pipeline& entry) noexcept {
     entry = {};
 }
 
-VkDescriptorSet Context::acquire_set(const Pipeline& entry) {
+VkDescriptorSet Context::acquire_set(const Pipeline& entry, Session& session) {
+    if (session.pools.empty() || session.sets_in_active_pool >= session.pool_capacities.back())
+        grow_session_pool(session);
     VkDescriptorSetAllocateInfo allocation{};
     allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocation.descriptorPool = descriptor_pool_;
+    allocation.descriptorPool = session.pools.back();
     allocation.descriptorSetCount = 1;
     allocation.pSetLayouts = &entry.set_layout;
     VkDescriptorSet set = VK_NULL_HANDLE;
     check(vkAllocateDescriptorSets(device_, &allocation, &set),
           "vkAllocateDescriptorSets");
+    ++session.sets_in_active_pool;
     return set;
+}
+
+// A session allocates descriptor sets between submissions only: one image of
+// the SIFT pipeline records a few hundred dispatches, and parallel extractions
+// (one session per worker thread) must not share a pool or run out of it.
+void Context::grow_session_pool(Session& session) {
+    const std::uint32_t capacity =
+        std::max<std::uint32_t>(512U, session.pool_capacities.empty()
+                                          ? 0U
+                                          : session.pool_capacities.back() * 2U);
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    pool_size.descriptorCount = capacity * kMaxShaderBindings;
+    VkDescriptorPoolCreateInfo create{};
+    create.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    create.maxSets = capacity;
+    create.poolSizeCount = 1;
+    create.pPoolSizes = &pool_size;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    check(vkCreateDescriptorPool(device_, &create, nullptr, &pool),
+          "vkCreateDescriptorPool");
+    session.pools.push_back(pool);
+    session.pool_capacities.push_back(capacity);
+    session.sets_in_active_pool = 0;
+}
+
+// Called between submissions, when no recorded command can still reference a
+// descriptor set: every pool is reset and the smaller ones are retired.
+void Context::reset_session_pools(Session& session) {
+    if (session.pools.empty()) return;
+    const std::size_t keep = session.pool_capacities.size() - 1;
+    for (std::size_t index = 0; index < session.pools.size(); ++index) {
+        if (index == keep) continue;
+        vkDestroyDescriptorPool(device_, session.pools[index], nullptr);
+    }
+    const VkDescriptorPool active = session.pools[keep];
+    const std::uint32_t capacity = session.pool_capacities[keep];
+    session.pools.assign(1, active);
+    session.pool_capacities.assign(1, capacity);
+    check(vkResetDescriptorPool(device_, active, 0), "vkResetDescriptorPool");
+    session.sets_in_active_pool = 0;
 }
 
 void Context::write_set(VkDescriptorSet set, const Pipeline& entry,
@@ -599,6 +655,7 @@ void Context::begin() {
                   "vkCreateFence");
         }
         check(vkResetCommandBuffer(session.command, 0), "vkResetCommandBuffer");
+        reset_session_pools(session);
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -623,7 +680,7 @@ void Context::dispatch(Shader shader, std::span<const BufferBinding> bindings,
     if (push_bytes != entry.push_bytes)
         throw std::logic_error("Push constant size mismatch for shader " +
                                std::to_string(static_cast<std::uint32_t>(shader)));
-    VkDescriptorSet set = acquire_set(entry);
+    VkDescriptorSet set = acquire_set(entry, session);
     session.sets.push_back(set);
     write_set(set, entry, bindings);
 
@@ -710,18 +767,14 @@ void Context::submit_and_wait() {
         check(vkResetFences(device_, 1, &session.fence), "vkResetFences");
         check(vkQueueSubmit(queue_, 1, &submit, session.fence), "vkQueueSubmit");
         session.recording = false;
-        sets = std::move(session.sets);
         session.sets.clear();
     }
 
     check(vkWaitForFences(device_, 1, &session.fence, VK_TRUE, UINT64_MAX),
           "vkWaitForFences");
 
-    if (!sets.empty()) {
-        std::lock_guard lock(mutex_);
-        vkFreeDescriptorSets(device_, descriptor_pool_,
-                             static_cast<std::uint32_t>(sets.size()), sets.data());
-    }
+    // The descriptor sets stay allocated from the session's pool until the next
+    // begin() resets it, which happens after this wait.
     for (const auto& download : session.downloads)
         download.destination->invalidate();
     session.downloads.clear();

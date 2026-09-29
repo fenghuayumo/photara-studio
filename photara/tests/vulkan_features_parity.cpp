@@ -8,6 +8,9 @@
 #include "features/features.hpp"
 #include "features/vulkan_features.hpp"
 
+#include <atomic>
+#include <memory>
+#include <thread>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -217,10 +220,19 @@ int main(int argc, char** argv) {
     descriptor_agreement(vulkan_first, cuda_second, "vulkan vs siftgpu descriptors");
 
     double cuda_ms = 0.0, vulkan_ms = 0.0;
+    double cuda_deferred_ms = 0.0, cuda_finalize_ms = 0.0;
     for (int i = 0; i < runs; ++i) {
         auto start = std::chrono::steady_clock::now();
         const auto warm_cuda = cuda.extract_gray(first, width, height);
         cuda_ms += seconds_since(start);
+        // Split the SiftGPU path so the host-side descriptor post-processing it
+        // shares with the caller can be attributed separately.
+        start = std::chrono::steady_clock::now();
+        auto deferred = cuda.extract_gray_deferred(first, width, height);
+        cuda_deferred_ms += seconds_since(start);
+        start = std::chrono::steady_clock::now();
+        cuda.finalize_descriptors(deferred);
+        cuda_finalize_ms += seconds_since(start);
         start = std::chrono::steady_clock::now();
         const auto warm_vulkan = vulkan.extract_gray(first, width, height);
         vulkan_ms += seconds_since(start);
@@ -258,6 +270,9 @@ int main(int argc, char** argv) {
     std::printf("extraction over %d runs: siftgpu %.2f ms, vulkan %.2f ms (%.2fx)\n",
                 runs, cuda_ms / runs, vulkan_ms / runs,
                 cuda_ms > 0.0 ? vulkan_ms / cuda_ms : 0.0);
+    std::printf("siftgpu split: SiftGPU pipeline + download %.2f ms, host RootSIFT "
+                "%.2f ms\n",
+                cuda_deferred_ms / runs, cuda_finalize_ms / runs);
 
     FeatureSet cuda_u8 = cuda_first, vulkan_u8 = vulkan_first;
     cuda_u8.compress_descriptors_u8();
@@ -275,11 +290,29 @@ int main(int argc, char** argv) {
         return true;
     };
     VulkanMutualRatioMatcher matcher{VulkanMutualRatioMatcherOptions{}};
-    auto start = std::chrono::steady_clock::now();
-    const auto matches = matcher.match_batch(pairs);
-    const double vulkan_match_ms = seconds_since(start);
+    // The SiftGPU matcher keeps its CUDA context on the constructing thread
+    // (the frontend runs it on the owner thread), so the fan-out below reports
+    // rejected calls for the SiftGPU side instead of a parallel throughput.
     SiftGpuMatcher reference{SiftGpuMatcherOptions{}};
     if (reference.is_available()) {
+        // First-call cost: descriptor caches, pinned output and pipelines are
+        // created lazily, so this is what a short run used to pay for.
+        SiftGpuMatcher cold_reference{SiftGpuMatcherOptions{}};
+        VulkanMutualRatioMatcher cold_matcher{VulkanMutualRatioMatcherOptions{}};
+        auto cold_start = std::chrono::steady_clock::now();
+        (void)cold_reference.match_batch(pairs);
+        const double cold_cuda_ms = seconds_since(cold_start);
+        cold_start = std::chrono::steady_clock::now();
+        (void)cold_matcher.match_batch(pairs);
+        const double cold_vulkan_ms = seconds_since(cold_start);
+        std::printf("first batch (cold): vulkan %.3f ms, siftgpu %.3f ms\n",
+                    cold_vulkan_ms, cold_cuda_ms);
+        // Warm both matchers before timing the steady state.
+        const auto warm_vulkan = matcher.match_batch(pairs);
+        const auto warm_cuda = reference.match_batch(pairs);
+        auto start = std::chrono::steady_clock::now();
+        const auto matches = matcher.match_batch(pairs);
+        const double vulkan_match_ms = seconds_since(start);
         start = std::chrono::steady_clock::now();
         const auto reference_matches = reference.match_batch(pairs);
         const double cuda_match_ms = seconds_since(start);
@@ -287,12 +320,78 @@ int main(int argc, char** argv) {
         for (std::size_t i = 0; i < matches.size(); ++i)
             identical += same_matches(matches[i], reference_matches[i]) ? 1 : 0;
         std::printf(
-            "matching %d pairs of %zu x %zu descriptors: vulkan %.2f ms, "
-            "siftgpu %.2f ms (%.2fx), identical result sets %zu/%d\n",
+            "matching %d pairs of %zu x %zu descriptors (one batch): vulkan %.3f ms, "
+            "siftgpu %.3f ms (%.2fx), identical result sets %zu/%d\n",
             kPairCount, vulkan_u8.keypoints.size(), cuda_u8.keypoints.size(),
             vulkan_match_ms, cuda_match_ms,
             cuda_match_ms > 0.0 ? vulkan_match_ms / cuda_match_ms : 0.0, identical,
             kPairCount);
+        // Per-call latency: the frontend matches pairs from a worker pool, so
+        // the single-pair round trip is what parallel matching pays.
+        constexpr int kSingleCalls = 32;
+        const std::vector<FeatureMatcher::Pair> single{pairs[0]};
+        start = std::chrono::steady_clock::now();
+        for (int i = 0; i < kSingleCalls; ++i) (void)matcher.match_batch(single);
+        const double vulkan_single_ms = seconds_since(start) / kSingleCalls;
+        start = std::chrono::steady_clock::now();
+        for (int i = 0; i < kSingleCalls; ++i) (void)reference.match_batch(single);
+        const double cuda_single_ms = seconds_since(start) / kSingleCalls;
+        std::printf(
+            "single-pair calls (%zu x %zu): vulkan %.3f ms, siftgpu %.3f ms "
+            "(%.2fx)\n",
+            vulkan_u8.keypoints.size(), cuda_u8.keypoints.size(), vulkan_single_ms,
+            cuda_single_ms,
+            cuda_single_ms > 0.0 ? vulkan_single_ms / cuda_single_ms : 0.0);
+        (void)warm_vulkan;
+        (void)warm_cuda;
+    }
+    {
+        // Frontend pattern: one matcher clone per worker thread, each used from
+        // its own thread. This is where per-clone setup costs show up.
+        constexpr unsigned kWorkers = 8;
+        constexpr int kPairsPerWorker = 4;
+        auto fan_out = [&](FeatureMatcher& base, std::vector<std::unique_ptr<FeatureMatcher>>& clones,
+                           std::atomic<long long>& micros,
+                           std::atomic<long long>& failures) {
+            clones.reserve(kWorkers);
+            for (unsigned t = 0; t < kWorkers; ++t) clones.push_back(base.clone());
+            // Warm each clone so the measurement shows steady-state throughput
+            // instead of per-clone initialization.
+            for (auto& clone : clones) {
+                const std::vector<FeatureMatcher::Pair> one{pairs[0]};
+                (void)clone->match_batch(one);
+            }
+            std::vector<std::thread> workers;
+            workers.reserve(kWorkers);
+            const auto start = std::chrono::steady_clock::now();
+            for (unsigned t = 0; t < kWorkers; ++t)
+                workers.emplace_back([&, t] {
+                    for (int i = 0; i < kPairsPerWorker; ++i) {
+                        const std::vector<FeatureMatcher::Pair> one{pairs[0]};
+                        try {
+                            (void)clones[t]->match_batch(one);
+                        } catch (const std::exception&) {
+                            ++failures;
+                        }
+                    }
+                });
+            for (auto& worker : workers) worker.join();
+            micros.store(static_cast<long long>(seconds_since(start) * 1000.0));
+        };
+        std::vector<std::unique_ptr<FeatureMatcher>> vulkan_clones, cuda_clones;
+        std::atomic<long long> vulkan_us{0}, cuda_us{0}, vulkan_failures{0},
+            cuda_failures{0};
+        fan_out(matcher, vulkan_clones, vulkan_us, vulkan_failures);
+        fan_out(reference, cuda_clones, cuda_us, cuda_failures);
+        std::printf(
+            "clone fan-out (%u threads x %d pairs): vulkan %.0f us/pair (%lld "
+            "failures), siftgpu %.0f us/pair (%lld failures; non-zero means the "
+            "matcher is owner-thread bound)\n",
+            kWorkers, kPairsPerWorker,
+            double(vulkan_us.load()) / (kWorkers * kPairsPerWorker),
+            static_cast<long long>(vulkan_failures.load()),
+            double(cuda_us.load()) / (kWorkers * kPairsPerWorker),
+            static_cast<long long>(cuda_failures.load()));
     }
     return 0;
 }

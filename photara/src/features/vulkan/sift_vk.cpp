@@ -331,6 +331,25 @@ FeatureSet SiftVulkanExtractor::extract_gray(
         }
     }
 
+    // One pyramid per concurrent extraction: keep the device-memory budget in
+    // mind before allocating, so parallel worker clones queue instead of
+    // exhausting the device.
+    std::uint64_t estimated_bytes = 0;
+    for (const auto& shape : shapes) {
+        estimated_bytes += static_cast<std::uint64_t>(shape.pixels) * 4 *
+                           (level_count + dog_count);
+        estimated_bytes += static_cast<std::uint64_t>(shape.pixels) * 8 * dog_level_count;
+        estimated_bytes += static_cast<std::uint64_t>(shape.pixels) * 16 * dog_level_count;
+    }
+    estimated_bytes +=
+        static_cast<std::uint64_t>(shapes.front().pixels) * 4 * 3;  // scratch + input
+    context.acquire_device_budget(estimated_bytes);
+    struct BudgetRelease {
+        Context* context;
+        std::uint64_t bytes;
+        ~BudgetRelease() { context->release_device_budget(bytes); }
+    } budget_release{&context, estimated_bytes};
+
     BufferRef input_bytes =
         context.allocate(static_cast<VkDeviceSize>(width) * height, true);
     BufferRef input_float = context.allocate(
