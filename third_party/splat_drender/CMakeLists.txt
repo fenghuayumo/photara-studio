@@ -86,6 +86,8 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
         list(APPEND SPLAT_DRENDER_VULKAN_SHADERS
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_ssim.hlsl"
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_loss_reduce.hlsl"
+            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl"
+            "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction_atomic.hlsl"
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_preview_pack.hlsl")
 
         set(SPLAT_DRENDER_SHADER_BINARIES)
@@ -104,6 +106,10 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             if(shader_name STREQUAL "splat_blend_backward_no_geometry.hlsl")
                 list(APPEND shader_dependencies
                      "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl")
+            endif()
+            if(shader_name STREQUAL "splat_color_correction_atomic.hlsl")
+                list(APPEND shader_dependencies
+                    "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl")
             endif()
             if(shader_name STREQUAL "splat_blend_no_geometry.hlsl" OR
                shader_name STREQUAL "splat_blend_training.hlsl")

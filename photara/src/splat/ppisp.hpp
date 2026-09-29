@@ -21,11 +21,10 @@ struct PpispState {
     AdamState adam;
     tinytensor::Tensor output;      // [3, H, W]
     tinytensor::Tensor input_grad;  // [3, H, W]
-    tinytensor::Tensor raw_sums;    // regularization scratch
-    // Per-view sum of the colour homography's nine-element pull-back. The
-    // eight colour gradients are contracted from it once per view instead of
-    // once per pixel.
-    tinytensor::Tensor colour_pullback;  // [views, 9]
+    tinytensor::Tensor raw_sums;    // CUDA regularization / Vulkan reduction scratch
+    // CUDA stores a [views, 9] colour pull-back. Vulkan stores the active
+    // view's homography and 8x9 Jacobian here for its HLSL backward pass.
+    tinytensor::Tensor colour_pullback;
     PpispParamType type{PpispParamType::no_crf_no_vig};
     int num_params{9};
     bool clamp_output{false};
@@ -37,8 +36,13 @@ struct PpispState {
 
 PpispState make_ppisp_state(
     std::size_t views, const TrainingOptions& options);
+PpispState make_ppisp_state_vulkan(
+    std::size_t views, const TrainingOptions& options);
 
 void apply_ppisp(
+    const tinytensor::Tensor& color, PpispState& state, const Camera& camera,
+    std::size_t view);
+void apply_ppisp_vulkan(
     const tinytensor::Tensor& color, PpispState& state, const Camera& camera,
     std::size_t view);
 
@@ -46,8 +50,14 @@ void backward_ppisp(
     PpispState& state, const tinytensor::Tensor& color,
     const tinytensor::Tensor& output_gradient, const Camera& camera,
     std::size_t view);
+void backward_ppisp_vulkan(
+    PpispState& state, const tinytensor::Tensor& color,
+    const tinytensor::Tensor& output_gradient, const Camera& camera,
+    std::size_t view);
 
 void step_ppisp(
+    PpispState& state, const TrainingOptions& options, unsigned iteration);
+void step_ppisp_vulkan(
     PpispState& state, const TrainingOptions& options, unsigned iteration);
 
 // Diagnostics for the training log: mean and maximum |2^exposure - 1|

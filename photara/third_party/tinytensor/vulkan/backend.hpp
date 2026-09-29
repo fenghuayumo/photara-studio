@@ -99,6 +99,11 @@ struct BufferPoolStats {
     std::uint64_t miss_bytes = 0;
     std::uint64_t drops = 0;
     std::uint64_t drop_bytes = 0;
+    // Current allocation ownership, in physical Vulkan buffer bytes.
+    std::uint64_t reserved_bytes = 0;
+    std::uint64_t free_bytes = 0;
+    std::uint64_t live_bytes = 0;
+    std::uint64_t budget_bytes = 0;
 };
 BufferPoolStats buffer_pool_stats();
 void shutdown();

@@ -15,6 +15,9 @@
 #include "../src/splat/training_data_loader.hpp"
 #include "io/image.hpp"
 #include "sfm/export_mvs.hpp"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "vulkan/backend.hpp"
+#endif
 
 #include <FreeImage.h>
 
@@ -2392,6 +2395,622 @@ void test_photometric_colour_correction_identity() {
             "identity bilateral grid backward did not pass the colour "
             "gradient through");
 }
+
+#ifdef TINYTENSOR_HAS_VULKAN
+void test_vulkan_colour_correction() {
+    if (!tinytensor::vulkan::available()) {
+        std::cout << "Vulkan colour correction test skipped (unavailable)\n";
+        return;
+    }
+    using namespace photara::splat;
+    TrainingOptions options;
+    constexpr std::size_t width = 4, height = 3, pixels = width * height;
+    std::vector<float> rgb(3 * pixels);
+    for (std::size_t i = 0; i < rgb.size(); ++i)
+        rgb[i] = 0.15F + static_cast<float>(i % 9) * 0.06F;
+    const auto image = tinytensor::Tensor::from_vector(
+        rgb, {3, height, width}, tinytensor::Device::Vulkan);
+    const auto ones = tinytensor::Tensor::from_vector(
+        std::vector<float>(rgb.size(), 1.F), image.shape(),
+        tinytensor::Device::Vulkan);
+    Camera camera;
+    camera.width = static_cast<std::uint32_t>(width);
+    camera.height = static_cast<std::uint32_t>(height);
+    camera.cx = 2.F;
+    camera.cy = 1.5F;
+    for (const auto type : {PpispParamType::no_crf_no_vig,
+                            PpispParamType::no_crf,
+                            PpispParamType::original}) {
+        options.ppisp_type = type;
+        auto state = detail::make_ppisp_state_vulkan(2, options);
+        detail::apply_ppisp_vulkan(image, state, camera, 1);
+        const auto out = state.output.to_vector();
+        for (std::size_t i = 0; i < out.size(); ++i)
+            require(std::abs(out[i] - rgb[i]) < 3.e-4F,
+                    "Vulkan PPISP identity changed the image");
+        auto params = state.parameters.to_vector();
+        params[state.num_params] = 0.5F;
+        state.parameters = tinytensor::Tensor::from_vector(
+            params, state.parameters.shape(), tinytensor::Device::Vulkan);
+        detail::apply_ppisp_vulkan(image, state, camera, 1);
+        const auto exposed = state.output.to_vector();
+        if (type != PpispParamType::original)
+            for (std::size_t i = 0; i < exposed.size(); ++i)
+                require(std::abs(exposed[i] - rgb[i] * std::exp2(0.5F)) < 1.e-3F,
+                        "Vulkan PPISP exposure differs");
+        state.parameters = tinytensor::Tensor::from_vector(
+            std::vector<float>(params.size(), 0.F),
+            state.parameters.shape(), tinytensor::Device::Vulkan);
+        if (type == PpispParamType::original)
+            state = detail::make_ppisp_state_vulkan(2, options);
+        detail::backward_ppisp_vulkan(state, image, ones, camera, 1);
+        const auto input_grad = state.input_grad.to_vector();
+        for (float value : input_grad)
+            require(std::abs(value - 1.F) < 5.e-3F,
+                    "Vulkan PPISP identity gradient differs");
+        detail::step_ppisp_vulkan(state, options, 1);
+        for (float value : state.parameters.to_vector())
+            require(std::isfinite(value), "Vulkan PPISP step is non-finite");
+        auto cuda_state = detail::make_ppisp_state(2, options);
+        auto parity_params = cuda_state.parameters.to_vector();
+        parity_params[cuda_state.num_params] = 0.35F;
+        parity_params[cuda_state.num_params +
+            (cuda_state.num_params == 9 ? 1 : 16)] = 0.2F;
+        if (cuda_state.num_params >= 24)
+            parity_params[cuda_state.num_params + 3] = -0.25F;
+        cuda_state.parameters = tinytensor::Tensor::from_vector(
+            parity_params, cuda_state.parameters.shape(),
+            tinytensor::Device::CUDA);
+        state.parameters = tinytensor::Tensor::from_vector(
+            parity_params, state.parameters.shape(),
+            tinytensor::Device::Vulkan);
+        const auto cuda_image = tinytensor::Tensor::from_vector(
+            rgb, image.shape(), tinytensor::Device::CUDA);
+        const auto cuda_ones = tinytensor::Tensor::from_vector(
+            std::vector<float>(rgb.size(), 1.F), image.shape(),
+            tinytensor::Device::CUDA);
+        detail::apply_ppisp(cuda_image, cuda_state, camera, 1);
+        detail::apply_ppisp_vulkan(image, state, camera, 1);
+        const auto cuda_output = cuda_state.output.to_vector();
+        const auto vulkan_output = state.output.to_vector();
+        for (std::size_t i = 0; i < cuda_output.size(); ++i)
+            require(std::abs(cuda_output[i] - vulkan_output[i]) < 2.e-3F,
+                    "Vulkan PPISP output differs from CUDA");
+        detail::backward_ppisp(cuda_state, cuda_image, cuda_ones, camera, 1);
+        detail::backward_ppisp_vulkan(state, image, ones, camera, 1);
+        const auto cuda_input_grad = cuda_state.input_grad.to_vector();
+        const auto vulkan_input_grad = state.input_grad.to_vector();
+        for (std::size_t i = 0; i < cuda_input_grad.size(); ++i)
+            require(std::abs(cuda_input_grad[i] - vulkan_input_grad[i]) < 1.e-2F,
+                    "Vulkan PPISP input gradient differs from CUDA");
+        const auto cuda_param_grad = cuda_state.gradient.to_vector();
+        const auto vulkan_param_grad = state.gradient.to_vector();
+        for (std::size_t i = 0; i < cuda_param_grad.size(); ++i)
+            if (std::abs(cuda_param_grad[i] - vulkan_param_grad[i]) >= 5.e-2F)
+                std::cout << "PPISP parity layout=" << state.num_params
+                          << " index=" << i << " CUDA=" << cuda_param_grad[i]
+                          << " Vulkan=" << vulkan_param_grad[i] << '\n';
+        for (std::size_t i = 0; i < cuda_param_grad.size(); ++i)
+            require(std::abs(cuda_param_grad[i] - vulkan_param_grad[i]) < 5.e-2F,
+                    "Vulkan PPISP parameter gradient differs from CUDA");
+    }
+    auto grid = detail::make_bilateral_grid_state_vulkan(2, options);
+    detail::apply_bilateral_grid_vulkan(image, grid, 1);
+    const auto out = grid.output.to_vector();
+    for (std::size_t i = 0; i < out.size(); ++i)
+        require(std::abs(out[i] - rgb[i]) < 1.e-4F,
+                "Vulkan bilateral grid identity changed the image");
+    detail::backward_bilateral_grid_vulkan(grid, image, ones, 1);
+    for (float value : grid.input_grad.to_vector())
+        require(std::abs(value - 1.F) < 2.e-3F,
+                "Vulkan bilateral grid identity gradient differs");
+    auto coefficients = grid.grids.to_vector();
+    const std::size_t coefficient_index =
+        2 * options.bilateral_grid_height * options.bilateral_grid_width * 12;
+    coefficients[coefficient_index] += 0.2F;
+    grid.grids = tinytensor::Tensor::from_vector(
+        coefficients, grid.grids.shape(), tinytensor::Device::Vulkan);
+    detail::backward_bilateral_grid_vulkan(grid, image, ones, 1);
+    const float analytic = grid.gradient.to_vector()[coefficient_index];
+    const auto sum_output = [&](const std::vector<float>& values) {
+        grid.grids = tinytensor::Tensor::from_vector(
+            values, grid.grids.shape(), tinytensor::Device::Vulkan);
+        detail::apply_bilateral_grid_vulkan(image, grid, 1);
+        const auto corrected = grid.output.to_vector();
+        return std::accumulate(corrected.begin(), corrected.end(), 0.F);
+    };
+    auto plus = coefficients, minus = coefficients;
+    plus[coefficient_index] += 1.e-3F;
+    minus[coefficient_index] -= 1.e-3F;
+    const float numeric = (sum_output(plus) - sum_output(minus)) / 2.e-3F;
+    require(std::abs(analytic - numeric) < 2.e-3F,
+            "Vulkan bilateral grid coefficient gradient differs");
+    grid.grids = tinytensor::Tensor::from_vector(
+        coefficients, grid.grids.shape(), tinytensor::Device::Vulkan);
+    const auto cuda_image = tinytensor::Tensor::from_vector(
+        rgb, image.shape(), tinytensor::Device::CUDA);
+    const auto cuda_ones = tinytensor::Tensor::from_vector(
+        std::vector<float>(rgb.size(), 1.F), image.shape(),
+        tinytensor::Device::CUDA);
+    auto cuda_grid = detail::make_bilateral_grid_state(2, options);
+    cuda_grid.grids = tinytensor::Tensor::from_vector(
+        coefficients, cuda_grid.grids.shape(), tinytensor::Device::CUDA);
+    detail::apply_bilateral_grid(cuda_image, cuda_grid, 1);
+    detail::apply_bilateral_grid_vulkan(image, grid, 1);
+    const auto cuda_grid_output = cuda_grid.output.to_vector();
+    const auto vulkan_grid_output = grid.output.to_vector();
+    for (std::size_t i = 0; i < cuda_grid_output.size(); ++i)
+        require(std::abs(cuda_grid_output[i] - vulkan_grid_output[i]) < 1.e-4F,
+                "Vulkan bilateral grid output differs from CUDA");
+    detail::backward_bilateral_grid(cuda_grid, cuda_image, cuda_ones, 1);
+    detail::backward_bilateral_grid_vulkan(grid, image, ones, 1);
+    const auto cuda_grid_input_grad = cuda_grid.input_grad.to_vector();
+    const auto vulkan_grid_input_grad = grid.input_grad.to_vector();
+    for (std::size_t i = 0; i < cuda_grid_input_grad.size(); ++i)
+        require(std::abs(cuda_grid_input_grad[i] - vulkan_grid_input_grad[i]) < 2.e-3F,
+                "Vulkan bilateral grid input gradient differs from CUDA");
+    detail::step_bilateral_grid_vulkan(grid, options, 1);
+    for (float value : grid.grids.to_vector())
+        require(std::isfinite(value), "Vulkan bilateral grid step is non-finite");
+    std::cout << "Vulkan colour correction tests passed\n";
+}
+
+void test_vulkan_large_grid_backward() {
+    if (!tinytensor::vulkan::available()) return;
+    using namespace photara::splat;
+    constexpr std::size_t side = 512, pixels = side * side;
+    std::vector<float> rgb(3 * pixels), upstream(3 * pixels);
+    for (std::size_t i = 0; i < rgb.size(); ++i) {
+        rgb[i] = 0.1F + 0.7F * static_cast<float>(i % 31) / 30.F;
+        upstream[i] = 0.2F + 0.3F * static_cast<float>(i % 17) / 16.F;
+    }
+    TrainingOptions options;
+    options.bilateral_grid_width = 4;
+    options.bilateral_grid_height = 3;
+    options.bilateral_grid_luma = 2;
+    for (const bool wrap : {false, true}) {
+        options.bilateral_grid_shared = wrap;
+        const std::size_t view = wrap ? 0 : 1;
+        auto cuda_state = detail::make_bilateral_grid_state(2, options);
+        auto vulkan_state = detail::make_bilateral_grid_state_vulkan(2, options);
+        auto coefficients = cuda_state.grids.to_vector();
+        for (std::size_t i = 0; i < coefficients.size(); ++i)
+            coefficients[i] += 0.02F * static_cast<float>(i % 7);
+        cuda_state.grids = tinytensor::Tensor::from_vector(
+            coefficients, cuda_state.grids.shape(), tinytensor::Device::CUDA);
+        vulkan_state.grids = tinytensor::Tensor::from_vector(
+            coefficients, vulkan_state.grids.shape(), tinytensor::Device::Vulkan);
+        const auto cuda_image = tinytensor::Tensor::from_vector(
+            rgb, {3, side, side}, tinytensor::Device::CUDA);
+        const auto vulkan_image = tinytensor::Tensor::from_vector(
+            rgb, {3, side, side}, tinytensor::Device::Vulkan);
+        const auto cuda_upstream = tinytensor::Tensor::from_vector(
+            upstream, {3, side, side}, tinytensor::Device::CUDA);
+        const auto vulkan_upstream = tinytensor::Tensor::from_vector(
+            upstream, {3, side, side}, tinytensor::Device::Vulkan);
+        detail::backward_bilateral_grid(
+            cuda_state, cuda_image, cuda_upstream, view, wrap);
+        detail::backward_bilateral_grid_vulkan(
+            vulkan_state, vulkan_image, vulkan_upstream, view, wrap);
+        const auto expected = cuda_state.gradient.to_vector();
+        const auto actual = vulkan_state.gradient.to_vector();
+        for (std::size_t i = 0; i < expected.size(); ++i)
+            require(std::abs(actual[i] - expected[i]) <
+                        0.02F + 0.005F * std::abs(expected[i]),
+                    "Vulkan large grid gradient differs from CUDA");
+    }
+    // Exercise the large-image CUDA gather path with a full-size grid and
+    // compare both outputs against the independently implemented Vulkan path.
+    constexpr std::size_t large_side = 1024;
+    std::vector<float> large_rgb(3 * large_side * large_side);
+    std::vector<float> large_upstream(large_rgb.size());
+    for (std::size_t i = 0; i < large_rgb.size(); ++i) {
+        large_rgb[i] = 0.05F + 0.85F * static_cast<float>((i * 23) % 97) / 96.F;
+        large_upstream[i] = static_cast<float>((i * 11) % 29) / 29.F;
+    }
+    options.bilateral_grid_width = 16;
+    options.bilateral_grid_height = 16;
+    options.bilateral_grid_luma = 8;
+    for (const bool wrap : {false, true}) {
+        options.bilateral_grid_shared = wrap;
+        const std::size_t view = wrap ? 0 : 1;
+        auto cuda_state = detail::make_bilateral_grid_state(2, options);
+        auto vulkan_state = detail::make_bilateral_grid_state_vulkan(2, options);
+        const auto cuda_image = tinytensor::Tensor::from_vector(
+            large_rgb, {3, large_side, large_side}, tinytensor::Device::CUDA);
+        const auto vulkan_image = tinytensor::Tensor::from_vector(
+            large_rgb, {3, large_side, large_side}, tinytensor::Device::Vulkan);
+        const auto cuda_upstream = tinytensor::Tensor::from_vector(
+            large_upstream, {3, large_side, large_side}, tinytensor::Device::CUDA);
+        const auto vulkan_upstream = tinytensor::Tensor::from_vector(
+            large_upstream, {3, large_side, large_side}, tinytensor::Device::Vulkan);
+        detail::backward_bilateral_grid(
+            cuda_state, cuda_image, cuda_upstream, view, wrap);
+        detail::backward_bilateral_grid_vulkan(
+            vulkan_state, vulkan_image, vulkan_upstream, view, wrap);
+        const auto cuda_gradient = cuda_state.gradient.to_vector();
+        const auto vulkan_gradient = vulkan_state.gradient.to_vector();
+        for (std::size_t i = 0; i < cuda_gradient.size(); ++i)
+            require(std::abs(cuda_gradient[i] - vulkan_gradient[i]) <
+                        0.02F + 0.005F * std::abs(vulkan_gradient[i]),
+                    "CUDA gathered grid gradient differs from Vulkan");
+        const auto cuda_input = cuda_state.input_grad.to_vector();
+        const auto vulkan_input = vulkan_state.input_grad.to_vector();
+        for (std::size_t i = 0; i < cuda_input.size(); ++i)
+            require(std::abs(cuda_input[i] - vulkan_input[i]) < 1.e-3F,
+                    "CUDA gathered grid input gradient differs from Vulkan");
+    }
+}
+
+void test_vulkan_ppisp_analytic_gradients() {
+    if (!tinytensor::vulkan::available()) return;
+    using namespace photara::splat;
+    constexpr std::size_t width = 32, height = 24, pixels = width * height;
+    std::vector<float> rgb(3 * pixels), upstream(3 * pixels);
+    for (std::size_t i = 0; i < rgb.size(); ++i) {
+        rgb[i] = 0.05F + 0.85F * static_cast<float>(i % 37) / 36.F;
+        upstream[i] = (static_cast<float>(i % 19) - 7.F) /
+            static_cast<float>(pixels);
+    }
+    Camera camera;
+    camera.width = static_cast<std::uint32_t>(width);
+    camera.height = static_cast<std::uint32_t>(height);
+    camera.cx = 15.5F;
+    camera.cy = 11.5F;
+    for (const auto type : {PpispParamType::no_crf, PpispParamType::original})
+        for (const bool clamp : {false, true}) {
+            TrainingOptions options;
+            options.ppisp_type = type;
+            options.ppisp_clamp_output = clamp;
+            auto cuda_state = detail::make_ppisp_state(2, options);
+            auto vulkan_state = detail::make_ppisp_state_vulkan(2, options);
+            auto parameters = cuda_state.parameters.to_vector();
+            const std::size_t base = cuda_state.num_params;
+            parameters[base] = 0.2F;
+            for (std::size_t c = 0; c < 3; ++c) {
+                const std::size_t q = base + 1 + c * 5;
+                parameters[q] = 0.01F * static_cast<float>(c + 1);
+                parameters[q + 1] = -0.015F * static_cast<float>(c + 1);
+                parameters[q + 2] = -0.25F - 0.05F * static_cast<float>(c);
+                parameters[q + 3] = -0.08F;
+                parameters[q + 4] = -0.03F;
+            }
+            for (std::size_t k = 0; k < 8; ++k)
+                parameters[base + 16 + k] =
+                    0.1F * static_cast<float>(static_cast<int>(k % 3) - 1);
+            if (type == PpispParamType::original)
+                for (std::size_t k = 0; k < 12; ++k)
+                    parameters[base + 24 + k] +=
+                        0.08F * static_cast<float>(static_cast<int>(k % 5) - 2);
+            cuda_state.parameters = tinytensor::Tensor::from_vector(
+                parameters, cuda_state.parameters.shape(), tinytensor::Device::CUDA);
+            vulkan_state.parameters = tinytensor::Tensor::from_vector(
+                parameters, vulkan_state.parameters.shape(), tinytensor::Device::Vulkan);
+            const auto cuda_image = tinytensor::Tensor::from_vector(
+                rgb, {3, height, width}, tinytensor::Device::CUDA);
+            const auto vulkan_image = tinytensor::Tensor::from_vector(
+                rgb, {3, height, width}, tinytensor::Device::Vulkan);
+            const auto cuda_upstream = tinytensor::Tensor::from_vector(
+                upstream, {3, height, width}, tinytensor::Device::CUDA);
+            const auto vulkan_upstream = tinytensor::Tensor::from_vector(
+                upstream, {3, height, width}, tinytensor::Device::Vulkan);
+            detail::apply_ppisp(cuda_image, cuda_state, camera, 1);
+            detail::apply_ppisp_vulkan(vulkan_image, vulkan_state, camera, 1);
+            const auto cuda_output = cuda_state.output.to_vector();
+            const auto vulkan_output = vulkan_state.output.to_vector();
+            for (std::size_t i = 0; i < cuda_output.size(); ++i)
+                require(std::abs(cuda_output[i] - vulkan_output[i]) < 2.e-3F,
+                        "Vulkan analytic PPISP output differs from CUDA");
+            detail::backward_ppisp(
+                cuda_state, cuda_image, cuda_upstream, camera, 1);
+            detail::backward_ppisp_vulkan(
+                vulkan_state, vulkan_image, vulkan_upstream, camera, 1);
+            const auto cuda_input = cuda_state.input_grad.to_vector();
+            const auto vulkan_input = vulkan_state.input_grad.to_vector();
+            for (std::size_t i = 0; i < cuda_input.size(); ++i)
+                require(std::abs(cuda_input[i] - vulkan_input[i]) < 5.e-4F,
+                        "Vulkan analytic PPISP input gradient differs from CUDA");
+            const auto cuda_gradient = cuda_state.gradient.to_vector();
+            const auto vulkan_gradient = vulkan_state.gradient.to_vector();
+            for (std::size_t i = 0; i < cuda_gradient.size(); ++i)
+                require(std::abs(cuda_gradient[i] - vulkan_gradient[i]) <
+                            0.01F + 0.01F * std::abs(cuda_gradient[i]),
+                        "Vulkan analytic PPISP parameter gradient differs from CUDA");
+        }
+}
+
+void test_vulkan_corrected_photometric_loss() {
+    if (!tinytensor::vulkan::available()) return;
+    using namespace photara::splat;
+    const auto device = tinytensor::Device::Vulkan;
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(
+        std::vector<float>{0.F, 0.F, 2.F}, {1, 3}, device);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>{-1.4F, -1.4F, -2.F}, {1, 3}, device);
+    model.quaternions = tinytensor::Tensor::from_vector(
+        std::vector<float>{1.F, 0.F, 0.F, 0.F}, {1, 4}, device);
+    model.opacity_logits = tinytensor::Tensor::from_vector(
+        std::vector<float>{3.F}, {1, 1}, device);
+    model.sh = tinytensor::Tensor::zeros({1, 1, 3}, device);
+    model.sh_degree = 0;
+    Camera camera;
+    camera.world_to_camera[0] = 1.F;
+    camera.world_to_camera[5] = 1.F;
+    camera.world_to_camera[10] = 1.F;
+    camera.world_to_camera[15] = 1.F;
+    camera.fx = camera.fy = 32.F;
+    camera.cx = camera.cy = 15.5F;
+    camera.width = camera.height = 32;
+    RasterizeOptions raster_options;
+    raster_options.require_depth = false;
+    raster_options.copy_attachments = true;
+    raster_options.background = {0.2F, 0.2F, 0.2F};
+    Rasterizer rasterizer;
+    auto rendered = rasterizer.forward(model, camera, raster_options);
+    const auto target = tinytensor::Tensor::zeros(
+        {3, 32, 32}, device);
+    const float raw_loss = rasterizer.photometric_loss(
+        rendered, target, {}, false, 0.F, 1.F);
+    TrainingOptions options;
+    auto ppisp = detail::make_ppisp_state_vulkan(2, options);
+    auto parameters = ppisp.parameters.to_vector();
+    parameters[ppisp.num_params] = 1.F;
+    ppisp.parameters = tinytensor::Tensor::from_vector(
+        parameters, ppisp.parameters.shape(), device);
+    detail::apply_ppisp_vulkan(rendered.color, ppisp, camera, 1);
+    auto corrected = rendered;
+    corrected.color = ppisp.output;
+    tinytensor::Tensor gradient;
+    const float corrected_loss = rasterizer.photometric_loss(
+        corrected, target, {}, false, 0.F, 1.F, true, &gradient);
+    require(corrected_loss > raw_loss + 0.01F,
+            "Vulkan loss ignored corrected colour");
+    require(gradient.is_valid() && gradient.numel() == rendered.color.numel(),
+            "Vulkan corrected loss did not return a colour gradient");
+    detail::backward_ppisp_vulkan(ppisp, rendered.color, gradient, camera, 1);
+    float magnitude = 0.F;
+    for (float value : ppisp.input_grad.to_vector()) magnitude += std::abs(value);
+    require(magnitude > 0.F, "Vulkan corrected gradient did not reach raster colour");
+}
+
+void test_vulkan_colour_steps_match_cuda() {
+    if (!tinytensor::vulkan::available()) return;
+    using namespace photara::splat;
+    TrainingOptions options;
+    for (const auto type : {PpispParamType::no_crf_no_vig,
+                            PpispParamType::no_crf,
+                            PpispParamType::original}) {
+        options.ppisp_type = type;
+        auto cuda_state = detail::make_ppisp_state(3, options);
+        auto vulkan_state = detail::make_ppisp_state_vulkan(3, options);
+        auto values = cuda_state.parameters.to_vector();
+        std::vector<float> gradient(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] += 0.03F * std::sin(static_cast<float>(i) * 0.7F);
+            gradient[i] = 0.1F * std::cos(static_cast<float>(i) * 0.31F);
+        }
+        cuda_state.parameters = tinytensor::Tensor::from_vector(
+            values, cuda_state.parameters.shape(), tinytensor::Device::CUDA);
+        vulkan_state.parameters = tinytensor::Tensor::from_vector(
+            values, vulkan_state.parameters.shape(), tinytensor::Device::Vulkan);
+        cuda_state.gradient = tinytensor::Tensor::from_vector(
+            gradient, cuda_state.gradient.shape(), tinytensor::Device::CUDA);
+        vulkan_state.gradient = tinytensor::Tensor::from_vector(
+            gradient, vulkan_state.gradient.shape(), tinytensor::Device::Vulkan);
+        detail::step_ppisp(cuda_state, options, 1);
+        detail::step_ppisp_vulkan(vulkan_state, options, 1);
+        const auto expected = cuda_state.parameters.to_vector();
+        const auto got = vulkan_state.parameters.to_vector();
+        for (std::size_t i = 0; i < expected.size(); ++i)
+            require(std::abs(expected[i] - got[i]) < 2.e-4F,
+                    "Vulkan PPISP step differs from CUDA");
+        const std::size_t large_views =
+            (std::size_t{256} / cuda_state.num_params) + 1;
+        auto cuda_large = detail::make_ppisp_state(large_views, options);
+        auto vulkan_large = detail::make_ppisp_state_vulkan(large_views, options);
+        auto large_values = cuda_large.parameters.to_vector();
+        std::vector<float> large_gradient(large_values.size());
+        for (std::size_t i = 0; i < large_values.size(); ++i) {
+            large_values[i] += 0.02F * std::sin(static_cast<float>(i) * 0.13F);
+            large_gradient[i] = 0.1F * std::cos(static_cast<float>(i) * 0.19F);
+        }
+        cuda_large.parameters = tinytensor::Tensor::from_vector(
+            large_values, cuda_large.parameters.shape(), tinytensor::Device::CUDA);
+        vulkan_large.parameters = tinytensor::Tensor::from_vector(
+            large_values, vulkan_large.parameters.shape(), tinytensor::Device::Vulkan);
+        cuda_large.gradient = tinytensor::Tensor::from_vector(
+            large_gradient, cuda_large.gradient.shape(), tinytensor::Device::CUDA);
+        vulkan_large.gradient = tinytensor::Tensor::from_vector(
+            large_gradient, vulkan_large.gradient.shape(), tinytensor::Device::Vulkan);
+        detail::step_ppisp(cuda_large, options, 1);
+        detail::step_ppisp_vulkan(vulkan_large, options, 1);
+        const auto expected_large = cuda_large.parameters.to_vector();
+        const auto got_large = vulkan_large.parameters.to_vector();
+        for (std::size_t i = 0; i < expected_large.size(); ++i)
+            require(std::abs(expected_large[i] - got_large[i]) < 2.e-4F,
+                    "Vulkan large PPISP step differs from CUDA");
+    }
+    options.bilateral_grid_width = 4;
+    options.bilateral_grid_height = 3;
+    options.bilateral_grid_luma = 2;
+    for (bool shared : {false, true})
+        for (bool wrap : {false, true}) {
+            options.bilateral_grid_shared = shared;
+            auto cuda_state = detail::make_bilateral_grid_state(3, options);
+            auto vulkan_state = detail::make_bilateral_grid_state_vulkan(3, options);
+            auto values = cuda_state.grids.to_vector();
+            std::vector<float> gradient(values.size());
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                values[i] += 0.05F * std::sin(static_cast<float>(i) * 0.17F);
+                gradient[i] = 0.02F * std::cos(static_cast<float>(i) * 0.23F);
+            }
+            cuda_state.grids = tinytensor::Tensor::from_vector(
+                values, cuda_state.grids.shape(), tinytensor::Device::CUDA);
+            vulkan_state.grids = tinytensor::Tensor::from_vector(
+                values, vulkan_state.grids.shape(), tinytensor::Device::Vulkan);
+            cuda_state.gradient = tinytensor::Tensor::from_vector(
+                gradient, cuda_state.gradient.shape(), tinytensor::Device::CUDA);
+            vulkan_state.gradient = tinytensor::Tensor::from_vector(
+                gradient, vulkan_state.gradient.shape(), tinytensor::Device::Vulkan);
+            detail::step_bilateral_grid(cuda_state, options, 1, wrap);
+            detail::step_bilateral_grid_vulkan(vulkan_state, options, 1, wrap);
+            const auto expected = cuda_state.grids.to_vector();
+            const auto got = vulkan_state.grids.to_vector();
+            for (std::size_t i = 0; i < expected.size(); ++i)
+                require(std::abs(expected[i] - got[i]) < 2.e-4F,
+                        "Vulkan bilateral grid step differs from CUDA");
+        }
+    options.bilateral_grid_width = 16;
+    options.bilateral_grid_height = 16;
+    options.bilateral_grid_luma = 8;
+    options.bilateral_grid_shared = false;
+    for (const bool projection : {false, true}) {
+        options.bilateral_grid_identity_projection = projection;
+        auto cuda_state = detail::make_bilateral_grid_state(3, options);
+        auto vulkan_state = detail::make_bilateral_grid_state_vulkan(3, options);
+        auto values = cuda_state.grids.to_vector();
+        std::vector<float> gradient(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] += 0.04F * std::sin(static_cast<float>(i) * 0.17F);
+            gradient[i] = 0.02F * std::cos(static_cast<float>(i) * 0.23F);
+        }
+        cuda_state.grids = tinytensor::Tensor::from_vector(
+            values, cuda_state.grids.shape(), tinytensor::Device::CUDA);
+        vulkan_state.grids = tinytensor::Tensor::from_vector(
+            values, vulkan_state.grids.shape(), tinytensor::Device::Vulkan);
+        cuda_state.gradient = tinytensor::Tensor::from_vector(
+            gradient, cuda_state.gradient.shape(), tinytensor::Device::CUDA);
+        vulkan_state.gradient = tinytensor::Tensor::from_vector(
+            gradient, vulkan_state.gradient.shape(), tinytensor::Device::Vulkan);
+        detail::step_bilateral_grid(cuda_state, options, 1);
+        detail::step_bilateral_grid_vulkan(vulkan_state, options, 1);
+        const auto expected = cuda_state.grids.to_vector();
+        const auto got = vulkan_state.grids.to_vector();
+        for (std::size_t i = 0; i < expected.size(); ++i)
+            require(std::abs(expected[i] - got[i]) < 2.e-4F,
+                    "Vulkan default-size bilateral grid step differs from CUDA");
+    }
+}
+
+void benchmark_vulkan_colour_correction(
+    std::size_t side, photara::splat::PpispParamType ppisp_type,
+    bool profile_stages, bool patterned_image) {
+    if (!tinytensor::vulkan::available()) return;
+    using namespace photara::splat;
+    require(side >= 16 && side <= 2048, "colour benchmark side out of range");
+    std::vector<float> rgb(3 * side * side, 0.4F);
+    std::vector<float> ones(rgb.size(), 1.F / static_cast<float>(rgb.size()));
+    if (patterned_image)
+        for (std::size_t i = 0; i < rgb.size(); ++i) {
+            rgb[i] = 0.05F + 0.85F * static_cast<float>((i * 23) % 97) / 96.F;
+            ones[i] *= 0.5F + static_cast<float>((i * 11) % 29) / 29.F;
+        }
+    Camera camera;
+    camera.width = camera.height = static_cast<std::uint32_t>(side);
+    camera.cx = camera.cy = static_cast<float>(side) / 2.F;
+    TrainingOptions options;
+    options.ppisp_type = ppisp_type;
+    auto cuda_image = tinytensor::Tensor::from_vector(
+        rgb, {3, side, side}, tinytensor::Device::CUDA);
+    auto cuda_grad = tinytensor::Tensor::from_vector(
+        ones, cuda_image.shape(), tinytensor::Device::CUDA);
+    auto vulkan_image = tinytensor::Tensor::from_vector(
+        rgb, cuda_image.shape(), tinytensor::Device::Vulkan);
+    auto vulkan_grad = tinytensor::Tensor::from_vector(
+        ones, cuda_image.shape(), tinytensor::Device::Vulkan);
+    const auto measure = [](auto&& run, auto&& sync) {
+        for (int i = 0; i < 3; ++i) run();
+        sync();
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 20; ++i) run();
+        sync();
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count() / 20.0;
+    };
+    auto cpp = detail::make_ppisp_state(2, options);
+    auto vpp = detail::make_ppisp_state_vulkan(2, options);
+    unsigned cpp_step = 0, vpp_step = 0;
+    const auto cpp_run = [&] {
+        detail::apply_ppisp(cuda_image, cpp, camera, 1);
+        detail::backward_ppisp(cpp, cuda_image, cuda_grad, camera, 1);
+        detail::step_ppisp(cpp, options, ++cpp_step);
+    };
+    const auto vpp_run = [&] {
+        detail::apply_ppisp_vulkan(vulkan_image, vpp, camera, 1);
+        detail::backward_ppisp_vulkan(vpp, vulkan_image, vulkan_grad, camera, 1);
+        detail::step_ppisp_vulkan(vpp, options, ++vpp_step);
+    };
+    const double cpp_ms = measure(cpp_run, [] { cudaDeviceSynchronize(); });
+    const double vpp_ms = measure(vpp_run, [] { tinytensor::vulkan::synchronize(); });
+    if (profile_stages) {
+        const auto sync = [] { tinytensor::vulkan::synchronize(); };
+        const double forward_ms = measure([&] {
+            detail::apply_ppisp_vulkan(vulkan_image, vpp, camera, 1);
+        }, sync);
+        const double backward_ms = measure([&] {
+            detail::backward_ppisp_vulkan(vpp, vulkan_image, vulkan_grad,
+                                          camera, 1);
+        }, sync);
+        const double step_ms = measure([&] {
+            detail::step_ppisp_vulkan(vpp, options, ++vpp_step);
+        }, sync);
+        std::cout << "Vulkan PPISP stages ms: forward=" << forward_ms
+                  << " backward=" << backward_ms << " step=" << step_ms
+                  << '\n';
+    }
+    auto cbg = detail::make_bilateral_grid_state(2, options);
+    auto vbg = detail::make_bilateral_grid_state_vulkan(2, options);
+    unsigned cbg_step = 0, vbg_step = 0;
+    const auto cbg_run = [&] {
+        detail::apply_bilateral_grid(cuda_image, cbg, 1);
+        detail::backward_bilateral_grid(cbg, cuda_image, cuda_grad, 1);
+        detail::step_bilateral_grid(cbg, options, ++cbg_step);
+    };
+    const auto vbg_run = [&] {
+        detail::apply_bilateral_grid_vulkan(vulkan_image, vbg, 1);
+        detail::backward_bilateral_grid_vulkan(vbg, vulkan_image, vulkan_grad, 1);
+        detail::step_bilateral_grid_vulkan(vbg, options, ++vbg_step);
+    };
+    const double cbg_ms = measure(cbg_run, [] { cudaDeviceSynchronize(); });
+    const double vbg_ms = measure(vbg_run, [] { tinytensor::vulkan::synchronize(); });
+    if (profile_stages) {
+        const auto cuda_sync = [] { cudaDeviceSynchronize(); };
+        const double cuda_forward_ms = measure([&] {
+            detail::apply_bilateral_grid(cuda_image, cbg, 1);
+        }, cuda_sync);
+        const double cuda_backward_ms = measure([&] {
+            detail::backward_bilateral_grid(cbg, cuda_image, cuda_grad, 1);
+        }, cuda_sync);
+        const double cuda_step_ms = measure([&] {
+            detail::step_bilateral_grid(cbg, options, ++cbg_step);
+        }, cuda_sync);
+        std::cout << "CUDA grid stages ms: forward=" << cuda_forward_ms
+                  << " backward=" << cuda_backward_ms << " step="
+                  << cuda_step_ms << '\n';
+        const auto sync = [] { tinytensor::vulkan::synchronize(); };
+        const double forward_ms = measure([&] {
+            detail::apply_bilateral_grid_vulkan(vulkan_image, vbg, 1);
+        }, sync);
+        const double backward_ms = measure([&] {
+            detail::backward_bilateral_grid_vulkan(
+                vbg, vulkan_image, vulkan_grad, 1);
+        }, sync);
+        const double step_ms = measure([&] {
+            detail::step_bilateral_grid_vulkan(vbg, options, ++vbg_step);
+        }, sync);
+        std::cout << "Vulkan grid stages ms: forward=" << forward_ms
+                  << " backward=" << backward_ms << " step=" << step_ms
+                  << '\n';
+    }
+    std::cout << "colour benchmark " << side << 'x' << side
+              << (patterned_image ? " patterned" : " uniform")
+              << " layout=" << static_cast<int>(ppisp_type)
+              << " forward+backward+step ms: PPISP CUDA="
+              << cpp_ms << " Vulkan-GPU=" << vpp_ms
+              << "; grid CUDA=" << cbg_ms << " Vulkan-GPU=" << vbg_ms << '\n';
+}
+#endif
 
 void test_panorama_bilateral_grid_wraps_horizontal_seam() {
     using namespace photara::splat;
@@ -5224,6 +5843,20 @@ int main(int argc, char** argv) {
             std::cout << "SKIP: no CUDA device\n";
             return 0;
         }
+#ifdef TINYTENSOR_HAS_VULKAN
+        if (argc > 1 && std::string(argv[1]) == "--colour-bench") {
+            const auto type = argc > 3 && std::string(argv[3]) == "original"
+                ? photara::splat::PpispParamType::original
+                : argc > 3 && std::string(argv[3]) == "no-crf"
+                    ? photara::splat::PpispParamType::no_crf
+                    : photara::splat::PpispParamType::no_crf_no_vig;
+            benchmark_vulkan_colour_correction(
+                argc > 2 ? std::stoul(argv[2]) : std::size_t{256}, type,
+                argc > 4 && std::string(argv[4]) == "profile",
+                argc > 5 && std::string(argv[5]) == "pattern");
+            return 0;
+        }
+#endif
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
             test_fused_sh_adam();
             test_training_device_cache();
@@ -5279,6 +5912,13 @@ int main(int argc, char** argv) {
         test_photometric_colour_correction_identity();
         test_bilateral_grid_finite_differences();
         test_ppisp_finite_differences();
+#ifdef TINYTENSOR_HAS_VULKAN
+        test_vulkan_colour_correction();
+        test_vulkan_ppisp_analytic_gradients();
+        test_vulkan_large_grid_backward();
+        test_vulkan_corrected_photometric_loss();
+        test_vulkan_colour_steps_match_cuda();
+#endif
         test_panorama_bilateral_grid_wraps_horizontal_seam();
         test_ppisp_identity_projection_and_bounds();
         test_adam_rejects_non_finite_gradients();

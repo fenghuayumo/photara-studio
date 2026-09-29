@@ -38,6 +38,8 @@
 #include "splat_scan.hlsl.embedded.hpp"
 #include "splat_ssim.hlsl.embedded.hpp"
 #include "splat_loss_reduce.hlsl.embedded.hpp"
+#include "splat_color_correction.hlsl.embedded.hpp"
+#include "splat_color_correction_atomic.hlsl.embedded.hpp"
 
 namespace splat_drender::vulkan {
 namespace {
@@ -203,6 +205,12 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     }
     if (shader_name == "splat_loss_reduce.hlsl.spv") {
         return std::as_bytes(std::span{splat_loss_reduce_hlsl_spv});
+    }
+    if (shader_name == "splat_color_correction.hlsl.spv") {
+        return std::as_bytes(std::span{splat_color_correction_hlsl_spv});
+    }
+    if (shader_name == "splat_color_correction_atomic.hlsl.spv") {
+        return std::as_bytes(std::span{splat_color_correction_atomic_hlsl_spv});
     }
     if (shader_name == "splat_clear.hlsl.spv") {
         return std::as_bytes(std::span{splat_clear_hlsl_spv});

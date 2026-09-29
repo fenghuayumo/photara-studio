@@ -705,6 +705,30 @@ void Context::create_pools() {
                   device_, &fence, nullptr, &upload_slots_[index].fence),
               "vkCreateFence(upload)");
     }
+    if (env_flag("TINYTENSOR_VULKAN_PROFILE_UPLOAD")) {
+        std::uint32_t family_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(
+            physical_, &family_count, families.data());
+        if (queue_family_ < families.size())
+            upload_profile_.valid_bits = families[queue_family_].timestampValidBits;
+        if (upload_profile_.valid_bits != 0) {
+            VkPhysicalDeviceProperties properties{};
+            vkGetPhysicalDeviceProperties(physical_, &properties);
+            upload_profile_.period_ns = properties.limits.timestampPeriod;
+            VkQueryPoolCreateInfo query{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            query.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            query.queryCount = 2 * static_cast<std::uint32_t>(kUploadSlotCount);
+            check(vkCreateQueryPool(
+                      device_, &query, nullptr, &upload_profile_.pool),
+                  "vkCreateQueryPool(upload)");
+        }
+        std::fprintf(stderr,
+            "tinytensor_vulkan_upload_profile_init valid_bits=%u enabled=%u\n",
+            upload_profile_.valid_bits,
+            upload_profile_.pool != VK_NULL_HANDLE ? 1u : 0u);
+    }
 
     VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -814,6 +838,10 @@ void Context::destroy() {
     staging_.reset();
     readback_staging_.reset();
     for (UploadSlot& slot : upload_slots_) {
+        if (slot.in_flight) {
+            retire_upload_slot_locked(
+                static_cast<std::size_t>(&slot - upload_slots_.data()));
+        }
         slot.staging.reset();
         slot.in_flight = false;
         if (slot.fence != VK_NULL_HANDLE) {
@@ -821,6 +849,11 @@ void Context::destroy() {
             slot.fence = VK_NULL_HANDLE;
         }
         slot.command = VK_NULL_HANDLE;
+    }
+    if (upload_profile_.pool != VK_NULL_HANDLE) {
+        if (upload_profile_.samples != 0) report_upload_profile_locked();
+        vkDestroyQueryPool(device_, upload_profile_.pool, nullptr);
+        upload_profile_.pool = VK_NULL_HANDLE;
     }
     for (Pipeline& pipeline : pipelines_) {
         if (pipeline.handle != VK_NULL_HANDLE) {
@@ -914,13 +947,12 @@ void Context::recycle_locked(Buffer* buffer) {
 
 void Context::trim_pool_locked() {
     bool upload_in_flight = false;
-    for (UploadSlot& slot : upload_slots_) {
+    for (std::size_t index = 0; index < upload_slots_.size(); ++index) {
+        UploadSlot& slot = upload_slots_[index];
         if (!slot.in_flight) continue;
         const VkResult status = vkGetFenceStatus(device_, slot.fence);
         if (status == VK_SUCCESS) {
-            check(vkResetFences(device_, 1, &slot.fence),
-                  "vkResetFences(upload poll)");
-            slot.in_flight = false;
+            finalize_upload_slot_locked(index);
         } else if (status == VK_NOT_READY) {
             upload_in_flight = true;
         } else {
@@ -1306,11 +1338,51 @@ void Context::upload(Buffer& dst, std::size_t dst_offset, const void* data, std:
 void Context::retire_upload_slot_locked(const std::size_t index) {
     UploadSlot& slot = upload_slots_[index];
     if (!slot.in_flight) return;
+    const auto wait_started = std::chrono::steady_clock::now();
     check(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX),
           "vkWaitForFences(upload)");
+    if (upload_profile_.pool != VK_NULL_HANDLE) {
+        upload_profile_.host_wait_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - wait_started).count();
+    }
+    finalize_upload_slot_locked(index);
+}
+
+void Context::finalize_upload_slot_locked(const std::size_t index) {
+    UploadSlot& slot = upload_slots_[index];
+    if (upload_profile_.pool != VK_NULL_HANDLE) {
+        std::uint64_t timestamps[2]{};
+        check(vkGetQueryPoolResults(device_, upload_profile_.pool,
+                  static_cast<std::uint32_t>(2 * index), 2,
+                  sizeof(timestamps), timestamps, sizeof(timestamps[0]),
+                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
+              "vkGetQueryPoolResults(upload)");
+        const std::uint64_t mask = upload_profile_.valid_bits == 64
+            ? UINT64_MAX : ((std::uint64_t{1} << upload_profile_.valid_bits) - 1);
+        const std::uint64_t ticks = (timestamps[1] - timestamps[0]) & mask;
+        upload_profile_.gpu_ms +=
+            static_cast<double>(ticks) * upload_profile_.period_ns / 1e6;
+        upload_profile_.bytes += slot.bytes;
+        if (++upload_profile_.samples == 100) report_upload_profile_locked();
+    }
     check(vkResetFences(device_, 1, &slot.fence),
           "vkResetFences(upload)");
     slot.in_flight = false;
+}
+
+void Context::report_upload_profile_locked() {
+    const auto& profile = upload_profile_;
+    std::fprintf(stderr,
+        "tinytensor_vulkan_upload_profile samples=%u bytes=%llu "
+        "gpu_total_ms=%.4f gpu_avg_ms=%.4f host_wait_ms=%.4f "
+        "host_copy_ms=%.4f host_submit_ms=%.4f\n",
+        profile.samples, static_cast<unsigned long long>(profile.bytes),
+        profile.gpu_ms, profile.gpu_ms / profile.samples,
+        profile.host_wait_ms, profile.host_copy_ms, profile.host_submit_ms);
+    upload_profile_.samples = 0;
+    upload_profile_.bytes = 0;
+    upload_profile_.gpu_ms = upload_profile_.host_wait_ms =
+        upload_profile_.host_copy_ms = upload_profile_.host_submit_ms = 0.0;
 }
 
 void Context::upload_async(
@@ -1328,7 +1400,11 @@ void Context::upload_async(
             physical_, device_, static_cast<VkDeviceSize>(aligned),
             MemoryKind::host_visible);
     }
+    const auto copy_started = std::chrono::steady_clock::now();
     std::memcpy(slot.staging->mapped(), data, bytes);
+    if (upload_profile_.pool != VK_NULL_HANDLE)
+        upload_profile_.host_copy_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - copy_started).count();
     check(vkResetCommandBuffer(slot.command, 0),
           "vkResetCommandBuffer(upload)");
     VkCommandBufferBeginInfo begin{
@@ -1336,6 +1412,12 @@ void Context::upload_async(
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check(vkBeginCommandBuffer(slot.command, &begin),
           "vkBeginCommandBuffer(upload)");
+    if (upload_profile_.pool != VK_NULL_HANDLE) {
+        const auto query = static_cast<std::uint32_t>(2 * slot_index);
+        vkCmdResetQueryPool(slot.command, upload_profile_.pool, query, 2);
+        vkCmdWriteTimestamp(slot.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            upload_profile_.pool, query);
+    }
     VkBufferCopy region{};
     region.dstOffset = dst_offset;
     region.size = bytes;
@@ -1345,14 +1427,23 @@ void Context::upload_async(
         slot.command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    if (upload_profile_.pool != VK_NULL_HANDLE)
+        vkCmdWriteTimestamp(slot.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            upload_profile_.pool,
+                            static_cast<std::uint32_t>(2 * slot_index + 1));
     check(vkEndCommandBuffer(slot.command),
           "vkEndCommandBuffer(upload)");
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &slot.command;
+    const auto submit_started = std::chrono::steady_clock::now();
     check(vkQueueSubmit(queue_, 1, &submit, slot.fence),
           "vkQueueSubmit(upload)");
+    if (upload_profile_.pool != VK_NULL_HANDLE)
+        upload_profile_.host_submit_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - submit_started).count();
     slot.in_flight = true;
+    slot.bytes = bytes;
 }
 
 void Context::download(const Buffer& src, std::size_t src_offset, void* data, std::size_t bytes) {
@@ -1525,7 +1616,9 @@ double device_busy_ms() {
 
 BufferPoolStats buffer_pool_stats() {
     const auto stats = runtime::Context::get().pool_stats();
-    return {stats.hits, stats.misses, stats.miss_bytes, stats.drops, stats.drop_bytes};
+    return {stats.hits, stats.misses, stats.miss_bytes, stats.drops,
+            stats.drop_bytes, stats.reserved_bytes, stats.free_bytes,
+            stats.live_bytes, stats.budget_bytes};
 }
 
 void shutdown() {

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -114,6 +115,39 @@ std::uint32_t environment_interval(
 
 class SplatRasterizer::Impl {
 public:
+    [[nodiscard]] WorkspaceStats workspace_stats() const {
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        const auto bytes = [](std::initializer_list<const Buffer*> buffers) {
+            std::uint64_t total = 0;
+            for (const Buffer* buffer : buffers) total += buffer->size;
+            return total;
+        };
+        WorkspaceStats stats;
+        stats.model_bytes = bytes({&means_, &opacities_, &scales_, &rotations_,
+            &covariances_, &colors_, &raw_log_scales_, &raw_rotations_,
+            &opacity_logits_, &filter_3d_, &camera_[0], &camera_[1]});
+        stats.sort_bytes = bytes({&gauss_f_, &gauss_u_, &lo0_, &lo1_,
+            &hi0_, &hi1_, &val0_, &val1_, &frame_counts_, &count_mirrors_,
+            &hist_space_, &compact_, &tile_ranges_, &bucket_offsets_});
+        stats.frame_bytes = bytes({&out_f_, &out_u_, &snap_, &rgba_,
+            &loss_color_, &loss_alpha_, &loss_depth_, &loss_normal_,
+            &median_state_, &blend_grad_, &model_grad_});
+        stats.ssim_bytes = bytes({&ssim_prediction_, &ssim_target_, &ssim_mask_,
+            &ssim_work0_, &ssim_work1_, &ssim_work2_, &ssim_work3_,
+            &ssim_dmu_, &ssim_dvariance_, &ssim_dcovariance_,
+            &ssim_output_, &ssim_reduction_});
+        stats.other_bytes = bytes({&dummy_, &sample_points_, &sample_f_,
+            &sample_u_, &sample_loss_, &sample_point_grad_, &multi_depth_,
+            &multi_normal_, &multi_reference_gray_, &multi_sampled_,
+            &multi_inside_, &multi_neighbour_gray_, &multi_transform_,
+            &multi_reference_mask_, &multi_neighbour_mask_, &multi_output_});
+        stats.snapshot_bytes = snap_.size;
+        stats.output_bytes = out_f_.size;
+        stats.total_bytes = stats.model_bytes + stats.sort_bytes +
+            stats.frame_bytes + stats.ssim_bytes + stats.other_bytes;
+        return stats;
+    }
+
     // Command buffer / fence ring: a submission no longer drains the queue, so
     // the host must not reset a command buffer that is still executing, and the
     // descriptor sets of the fallback path stay alive until their batch retires.
@@ -157,12 +191,16 @@ public:
           multi_view_(context.create_pipeline("splat_multi_view.hlsl.spv", 10, sizeof(Push))),
           ssim_(context.create_pipeline("splat_ssim.hlsl.spv", 12, sizeof(Push))),
           loss_reduce_(context.create_pipeline("splat_loss_reduce.hlsl.spv", 2, sizeof(Push))),
+          color_correction_(context.create_pipeline(
+              "splat_color_correction.hlsl.spv", 6, sizeof(Push))),
           project_backward_(context.create_pipeline("splat_project_backward.hlsl.spv", 15, sizeof(Push))),
           clear_(context.create_pipeline("splat_clear.hlsl.spv", 1, sizeof(Push))),
           pack_(context.create_pipeline("splat_pack_rgba.hlsl.spv", 2, sizeof(Push))) {
         clear_buffer(dummy_);
         if (context_.buffer_float32_atomic_add &&
             !environment_flag("SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD")) {
+            color_correction_atomic_ = context.create_pipeline(
+                "splat_color_correction_atomic.hlsl.spv", 6, sizeof(Push));
             blend_backward_no_geometry_atomic_ = context.create_pipeline(
                 "splat_blend_backward_no_geometry_atomic.hlsl.spv",
                 12, sizeof(Push));
@@ -706,7 +744,8 @@ public:
 
         const std::uint32_t snap_buckets = std::max(bucket_limit, 1u);
         Buffer& out_f = grow(
-            out_f_, static_cast<std::uint64_t>(pixels) * (pack_rgba ? 4u : 11u) * sizeof(float));
+            out_f_, static_cast<std::uint64_t>(pixels) *
+                (pack_rgba ? 4u : (settings.need_depth ? 11u : 7u)) * sizeof(float));
         Buffer* out_u = pack_rgba
             ? &dummy_
             : &grow(
@@ -1494,11 +1533,15 @@ public:
         Buffer& work1 = grow(ssim_work1_, count * sizeof(float));
         Buffer& work2 = grow(ssim_work2_, count * sizeof(float));
         Buffer& work3 = grow(ssim_work3_, count * sizeof(float));
-        Buffer& work4 = grow(ssim_work4_, count * sizeof(float));
         Buffer& dmu = grow(ssim_dmu_, count * sizeof(float));
         Buffer& dvariance = grow(ssim_dvariance_, count * sizeof(float));
         Buffer& dcovariance = grow(ssim_dcovariance_, count * sizeof(float));
         Buffer& output = grow(ssim_output_, 2 * count * sizeof(float));
+        // Passes 0/1 use work4 only until the loss map is written. The
+        // gradient half of output is first written by pass 3, so it can hold
+        // work4 without any overlapping read/write within a dispatch.
+        const VkDescriptorBufferInfo work4_view{
+            output.handle, 0, count * sizeof(float)};
         const std::uint32_t reduction_groups =
             div_up(static_cast<std::uint32_t>(count), 256);
         Buffer& reduction = grow(
@@ -1536,7 +1579,7 @@ public:
         const std::vector<VkDescriptorBufferInfo> buffers{
             prediction, target, mask,
             descriptor(work0), descriptor(work1), descriptor(work2),
-            descriptor(work3), descriptor(work4), descriptor(dmu),
+            descriptor(work3), work4_view, descriptor(dmu),
             descriptor(dvariance), descriptor(dcovariance), descriptor(output)};
         dispatch_infos(
             ssim_, buffers, push, div_up(width, 16), div_up(height, 16), 3);
@@ -1608,7 +1651,8 @@ public:
         const SplatBufferView& prediction, const SplatBufferView& target,
         const std::uint32_t width, const std::uint32_t height,
         const float ssim_weight, const float photometric_weight,
-        const SplatBufferView& mask) {
+        const SplatBufferView& mask,
+        const SplatBufferView& gradient_destination) {
         require(width > 10 && height > 10,
                 "fused_l1_ssim_device requires width and height > 10");
         const std::uint64_t pixels = static_cast<std::uint64_t>(width) * height;
@@ -1639,11 +1683,61 @@ public:
                 : VkDescriptorBufferInfo{mask.buffer, mask.offset, mask_bytes},
             mask.buffer != VK_NULL_HANDLE, width, height,
             ssim_weight, photometric_weight);
+        if (gradient_destination.buffer != VK_NULL_HANDLE) {
+            require(gradient_destination.bytes >= image_bytes,
+                    "photometric gradient destination is too small");
+            VkBufferMemoryBarrier source_barrier{
+                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            source_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            source_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            source_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            source_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            source_barrier.buffer = result.gradient.buffer;
+            source_barrier.offset = result.gradient.offset;
+            source_barrier.size = result.gradient.bytes;
+            vkCmdPipelineBarrier(command_,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1,
+                &source_barrier, 0, nullptr);
+            const VkBufferCopy region{
+                result.gradient.offset, gradient_destination.offset,
+                image_bytes};
+            vkCmdCopyBuffer(command_, result.gradient.buffer,
+                gradient_destination.buffer, 1, &region);
+        }
         // The color gradient is consumed by the backward on the same queue, and
         // read_photometric_loss drains through the context's read path before it
         // touches the host, so the loss stage does not have to stop here either.
         submit_batch(false);
         return result;
+    }
+
+    void color_correction_device(
+        const std::array<SplatBufferView, 6>& buffers,
+        const std::array<std::uint32_t, 20>& push_words,
+        std::uint32_t groups_x) {
+        const std::array commands{SplatColorCorrectionCommand{
+            buffers, push_words, groups_x}};
+        color_correction_batch_device(commands);
+    }
+
+    void color_correction_batch_device(
+        std::span<const SplatColorCorrectionCommand> commands) {
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        for (const auto& command : commands) {
+            std::vector<VkDescriptorBufferInfo> infos;
+            infos.reserve(command.buffers.size());
+            for (const auto& buffer : command.buffers)
+                infos.push_back(buffer.buffer == VK_NULL_HANDLE
+                    ? descriptor(dummy_)
+                    : descriptor(buffer, buffer.bytes));
+            Push push{};
+            std::copy(command.push_words.begin(), command.push_words.end(), push.u);
+            dispatch_infos(color_correction_atomic_.handle != VK_NULL_HANDLE
+                               ? color_correction_atomic_ : color_correction_,
+                           infos, push, command.groups_x);
+        }
+        submit_batch(false);
     }
 
     float read_photometric_loss(const SplatDevicePhotometricOutput& output) {
@@ -2131,8 +2225,32 @@ private:
         Buffer& buffer, VkDeviceSize bytes, const BufferMemory memory = BufferMemory::device_local,
         const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
         if (buffer.size < bytes) {
+            const VkDeviceSize previous = buffer.size;
+            const auto started = std::chrono::steady_clock::now();
             drain_before_replace(buffer);
+            const auto drained = std::chrono::steady_clock::now();
             buffer = alloc(bytes, memory, usage);
+            if (profile_growth_ && bytes >= (1u << 20)) {
+                const auto allocated = std::chrono::steady_clock::now();
+                const char* group = &buffer == &snap_ ? "snapshot"
+                    : &buffer == &out_f_ ? "output"
+                    : (&buffer == &lo0_ || &buffer == &lo1_ ||
+                       &buffer == &hi0_ || &buffer == &hi1_ ||
+                       &buffer == &val0_ || &buffer == &val1_)
+                        ? "sort" : "other";
+                const auto milliseconds = [](const auto left, const auto right) {
+                    return std::chrono::duration<double, std::milli>(right - left).count();
+                };
+                std::fprintf(stderr,
+                    "splat_vulkan_growth group=%s old=%llu new=%llu "
+                    "wait_ms=%.4f alloc_ms=%.4f gaussians=%u "
+                    "instance_capacity=%u reported_instances=%u pixels=%u\n",
+                    group, static_cast<unsigned long long>(previous),
+                    static_cast<unsigned long long>(buffer.size),
+                    milliseconds(started, drained),
+                    milliseconds(drained, allocated), count_,
+                    instance_capacity_, reported_instances_, last_pixels_);
+            }
         }
         return buffer;
     }
@@ -2235,7 +2353,14 @@ private:
         reported_visible_ = words[1];
         if (words[2] != 0u) {
             const std::uint32_t wanted = instance_capacity_for(words[0]);
-            if (wanted > instance_capacity_) instance_capacity_ = wanted;
+            if (wanted > instance_capacity_) {
+                if (profile_growth_)
+                    std::fprintf(stderr,
+                        "splat_vulkan_capacity_growth old=%u new=%u "
+                        "reported_instances=%u gaussians=%u\n",
+                        instance_capacity_, wanted, words[0], count_);
+                instance_capacity_ = wanted;
+            }
         }
     }
 
@@ -2550,6 +2675,8 @@ private:
     ComputePipeline multi_view_;
     ComputePipeline ssim_;
     ComputePipeline loss_reduce_;
+    ComputePipeline color_correction_;
+    ComputePipeline color_correction_atomic_;
     ComputePipeline project_backward_;
     ComputePipeline clear_;
     ComputePipeline pack_;
@@ -2579,6 +2706,7 @@ private:
     double backward_blend_total_ms_{};
     double backward_project_total_ms_{};
     bool recording_{};
+    bool profile_growth_ = environment_flag("SPLAT_DRENDER_PROFILE_GROWTH");
     bool model_ready_{};
     bool has_sh_{};
     bool has_scales_{true};
@@ -2633,7 +2761,6 @@ private:
     Buffer ssim_work1_;
     Buffer ssim_work2_;
     Buffer ssim_work3_;
-    Buffer ssim_work4_;
     Buffer ssim_dmu_;
     Buffer ssim_dvariance_;
     Buffer ssim_dcovariance_;
@@ -2722,6 +2849,9 @@ void SplatRasterizer::update_means_and_opacities(
 
 void SplatRasterizer::clear_model() { impl_->clear_model(); }
 bool SplatRasterizer::has_model() const noexcept { return impl_->has_model(); }
+SplatRasterizer::WorkspaceStats SplatRasterizer::workspace_stats() const {
+    return impl_->workspace_stats();
+}
 
 SplatForwardOutput SplatRasterizer::render(const SplatCamera& camera, const SplatSettings& settings) {
     return impl_->render(camera, settings);
@@ -2813,10 +2943,23 @@ SplatDevicePhotometricOutput SplatRasterizer::fused_l1_ssim_device(
     const SplatBufferView& prediction, const SplatBufferView& target,
     const std::uint32_t width, const std::uint32_t height,
     const float ssim_weight, const float photometric_weight,
-    const SplatBufferView& mask) {
+    const SplatBufferView& mask,
+    const SplatBufferView& gradient_destination) {
     return impl_->fused_l1_ssim_device(
         prediction, target, width, height, ssim_weight,
-        photometric_weight, mask);
+        photometric_weight, mask, gradient_destination);
+}
+
+void SplatRasterizer::color_correction_device(
+    const std::array<SplatBufferView, 6>& buffers,
+    const std::array<std::uint32_t, 20>& push_words,
+    std::uint32_t groups_x) {
+    impl_->color_correction_device(buffers, push_words, groups_x);
+}
+
+void SplatRasterizer::color_correction_batch_device(
+    std::span<const SplatColorCorrectionCommand> commands) {
+    impl_->color_correction_batch_device(commands);
 }
 
 float SplatRasterizer::read_photometric_loss(

@@ -132,9 +132,9 @@ void main(uint3 group_id : SV_GroupID, uint group_thread : SV_GroupIndex) {
         if (staged_in_image) {
             stage_last = out_u[count + staged_pixel];
             stage_state = snap[bucket_idx * 256u + staged_local];
-            stage_final = float3(out_f[8u * pixel_count + staged_pixel],
-                out_f[9u * pixel_count + staged_pixel],
-                out_f[10u * pixel_count + staged_pixel]);
+            stage_final = float3(out_f[4u * pixel_count + staged_pixel],
+                out_f[5u * pixel_count + staged_pixel],
+                out_f[6u * pixel_count + staged_pixel]);
             stage_alpha = out_f[3u * pixel_count + staged_pixel];
             stage_grad = float3(loss_color[staged_pixel],
                                 loss_color[pixel_count + staged_pixel],
