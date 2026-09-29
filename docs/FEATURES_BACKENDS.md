@@ -21,13 +21,63 @@ Optional:  --pipeline <fused recipe>   (mutually exclusive with composition)
 ## Built-in names
 
 ```text
-extractors:  siftgpu (default) | sift | superpoint | disk | aliked
-matchers:    gpu_mutual_ratio (default) | mutual_ratio | lightglue | hybrid_lightglue
+extractors:  siftgpu (default) | vulkan_sift | sift | superpoint | disk | aliked
+matchers:    gpu_mutual_ratio (default) | vulkan_mutual_ratio | mutual_ratio | lightglue | hybrid_lightglue
 pipelines:   none (default) | lightglue_end2end
 ```
 
 Default behavior is unchanged: `siftgpu` × `gpu_mutual_ratio`
 (`--matcher siftgpu` is a legacy alias for `gpu_mutual_ratio`).
+
+## Vulkan translation of the default path
+
+`vulkan_sift` × `vulkan_mutual_ratio` is a Vulkan compute (HLSL/SPIR-V)
+translation of the same algorithms the default path runs on CUDA: the SiftGPU
+SIFT pipeline (Gaussian pyramid with 2x upsampling, DoG, histogram-pyramid
+keypoint compaction, multi-orientation, UBC descriptors) and photara's native
+CUDA mutual-ratio matcher (32x32 descriptor dot-product tiles, angular
+distance `acos(dot / 262144) < 0.7`, ratio test, mutual check). Parameters
+map one-to-one (`--max-features`, `--sift-contrast-threshold`,
+`--match-ratio`, `--no-mutual-check`).
+
+When SiftGPU cannot create its CUDA context but a Vulkan compute device is
+available, the frontend canonicalizes the default `siftgpu` ×
+`gpu_mutual_ratio` selection to `vulkan_sift` × `vulkan_mutual_ratio`, so the
+reconstruction workflow runs end to end on machines without CUDA. Checkpoints
+record the canonicalized backend names.
+
+The Vulkan matcher keeps the CUDA matcher's integer top-two reductions exact;
+accepted matches can differ only at `acos` rounding boundaries. On the pairs
+measured by `photara_vulkan_features_parity` it returns *identical* match sets
+to the native CUDA matcher, and it is roughly an order of magnitude faster for
+small to mid feature counts because it keeps the whole batch resident on the
+device instead of round-tripping per pair.
+
+The Vulkan extractor reproduces the SiftGPU CUDA pipeline step for step: the
+same Gaussian pyramid (2x bilinear upsampling, truncated-width input rows,
+separably filtered levels), the same DoG extrema test with the partial-pivot
+sub-pixel solve, the same histogram-pyramid keypoint compaction, the same
+multi-orientation split and UBC/RootSIFT descriptors. On identical inputs the
+two backends return the same feature counts and the same keypoint positions
+(1 px / 2% scale agreement is 97-100% with a mean offset of ~0.0002 px; the
+`photara.features.vulkan` test asserts count parity plus 80%+ position
+agreement, and `photara_vulkan_features_parity` prints the full comparison).
+Extraction timing is comparable (the Vulkan backend is ~0.6-0.7x of SiftGPU's
+per-image cost on the harness images), and on real photo pairs the frontend
+reports identical feature, raw-match, inlier and track counts for
+`vulkan_sift` × `vulkan_mutual_ratio` and the default CUDA pair.
+
+Two caveats:
+
+- SiftGPU's upsampling pass indexes slightly past its own textures, so its
+  pyramid border is undefined and its keypoint set is not run-to-run
+  reproducible there (~1% of the features on textured images, ~10% on
+  synthetic noise). The Vulkan translation returns the zero tex1Dfetch
+  documents for those reads, matches the CUDA result on reproducible inputs,
+  and is deterministic.
+- SiftGPU truncates the input width to a multiple of four before building the
+  pyramid (`TruncateWidthCU`); the Vulkan backend does the same, so up to three
+  trailing columns never contribute.
 
 ## SfM valid-region masks
 
@@ -64,6 +114,7 @@ therefore support SfM masks:
 | extractor | mask-aware matchers |
 |-----------|---------------------|
 | `siftgpu` | `gpu_mutual_ratio`, `mutual_ratio`, `lightglue`, `hybrid_lightglue` |
+| `vulkan_sift` | `vulkan_mutual_ratio`, `mutual_ratio`, `lightglue` |
 | `sift` | `gpu_mutual_ratio`, `mutual_ratio`, `lightglue` |
 | `superpoint`, `disk`, `aliked` | `lightglue` |
 
@@ -118,6 +169,7 @@ Compatibility today (extend in `compat.hpp`):
 | extractor | matcher |
 |-----------|---------|
 | siftgpu | gpu_mutual_ratio / mutual_ratio / lightglue / hybrid_lightglue |
+| vulkan_sift | vulkan_mutual_ratio / mutual_ratio / lightglue |
 | sift | gpu_mutual_ratio / mutual_ratio / lightglue |
 | superpoint / disk / aliked | lightglue |
 

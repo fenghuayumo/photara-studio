@@ -1,4 +1,5 @@
 #include "features/registry.hpp"
+#include "features/vulkan_features.hpp"
 
 #include <algorithm>
 #include <mutex>
@@ -137,6 +138,7 @@ void ensure_builtin_feature_backends() {
     std::call_once(once, [] {
         register_sift_feature_backends();
         register_siftgpu_feature_backends();
+        register_vulkan_feature_backends();
         register_superpoint_feature_backends();
         register_disk_feature_backends();
         register_aliked_feature_backends();
@@ -144,5 +146,18 @@ void ensure_builtin_feature_backends() {
         register_lightglue_matcher_backend();
     });
 }
+
+#if !defined(PHOTARA_HAS_VULKAN_FEATURES)
+void register_vulkan_feature_backends() {}
+std::unique_ptr<FeatureExtractor> make_vulkan_sift_extractor(
+    const SiftVulkanOptions&) {
+    return nullptr;
+}
+std::unique_ptr<FeatureMatcher> make_vulkan_mutual_ratio_matcher(
+    const VulkanMutualRatioMatcherOptions&) {
+    return nullptr;
+}
+bool vulkan_feature_backend_available() { return false; }
+#endif
 
 }  // namespace photara::features

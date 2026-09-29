@@ -21,7 +21,8 @@ inline constexpr std::string_view kLightGlueEnd2EndPipeline = "lightglue_end2end
 [[nodiscard]] inline bool matcher_accepts_metric(
     std::string_view matcher, DescriptorMetric metric) noexcept {
     if (matcher == "gpu_mutual_ratio" || matcher == "hybrid_lightglue" ||
-        matcher == "siftgpu" || matcher == "mutual_ratio")
+        matcher == "siftgpu" || matcher == "mutual_ratio" ||
+        matcher == "vulkan_mutual_ratio")
         return metric == DescriptorMetric::l2 ||
                metric == DescriptorMetric::l2_root;
     if (matcher == "lightglue")
@@ -38,6 +39,9 @@ inline constexpr std::string_view kLightGlueEnd2EndPipeline = "lightglue_end2end
     if (matcher == "gpu_mutual_ratio" || matcher == "siftgpu" ||
         matcher == "mutual_ratio")
         return extractor == "siftgpu" || extractor == "sift";
+    if (matcher == "vulkan_mutual_ratio")
+        return extractor == "vulkan_sift" || extractor == "siftgpu" ||
+               extractor == "sift";
     if (matcher == "hybrid_lightglue")
         return extractor == "siftgpu";
     if (matcher == "lightglue")

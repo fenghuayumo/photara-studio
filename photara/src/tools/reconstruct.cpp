@@ -615,10 +615,11 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("positioning-cuda", "Use CUDA for supported global bearing positioning solves (default: true)",
          cxxopts::value<bool>()->default_value("true"))
         ("extractor",
-         "Feature extractor: siftgpu (default), sift, superpoint, disk, aliked",
+         "Feature extractor: siftgpu (default), vulkan_sift, sift, superpoint, "
+         "disk, aliked",
          cxxopts::value<std::string>()->default_value("siftgpu"))
         ("matcher",
-         "Feature matcher: gpu_mutual_ratio (default), mutual_ratio, "
+         "Feature matcher: gpu_mutual_ratio (default), vulkan_mutual_ratio, mutual_ratio, "
          "lightglue, hybrid_lightglue. "
          "Legacy alias: siftgpu→gpu_mutual_ratio",
          cxxopts::value<std::string>()->default_value("gpu_mutual_ratio"))
@@ -1823,10 +1824,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.matcher == "lightglue") {
         if (cli.extractor != "superpoint" && cli.extractor != "disk" &&
             cli.extractor != "aliked" && cli.extractor != "sift" &&
-            cli.extractor != "siftgpu")
+            cli.extractor != "siftgpu" && cli.extractor != "vulkan_sift")
             throw std::invalid_argument(
                 "--matcher lightglue accepts superpoint, disk, aliked, sift, "
-                "or siftgpu descriptors");
+                "siftgpu, or vulkan_sift descriptors");
         if ((cli.extractor == "superpoint" || cli.extractor == "disk" ||
              cli.extractor == "aliked") && cli.extractor_model.empty())
             throw std::invalid_argument(

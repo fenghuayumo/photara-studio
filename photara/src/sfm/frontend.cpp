@@ -4,6 +4,7 @@
 #include "features/compat.hpp"
 #include "features/features.hpp"
 #include "features/registry.hpp"
+#include "features/vulkan_features.hpp"
 #include "io/image.hpp"
 #include "parallel/thread_pool.hpp"
 #include "sfm/tracks.hpp"
@@ -155,6 +156,25 @@ void normalize_feature_selection(FrontEndOptions& options) {
     // Legacy: --matcher siftgpu meant GPU descriptor mutual-ratio, not "SIFT match".
     if (options.matcher == "siftgpu")
         options.matcher = "gpu_mutual_ratio";
+
+    // The default GPU feature path is SiftGPU (CUDA/OpenGL). On machines
+    // without CUDA, the Vulkan translation of the same SIFT +
+    // mutual-ratio algorithms keeps the default workflow usable. Canonicalize
+    // the names here so feature/match checkpoints record the backend that
+    // actually produced them.
+    if (features::vulkan_feature_backend_available()) {
+        const bool siftgpu_available = [&] {
+            if (!features::SiftGpuExtractor::is_built()) return false;
+            features::SiftGpuExtractor probe;
+            return probe.is_available();
+        }();
+        if (!siftgpu_available) {
+            if (options.extractor == "siftgpu")
+                options.extractor = "vulkan_sift";
+            if (options.matcher == "gpu_mutual_ratio")
+                options.matcher = "vulkan_mutual_ratio";
+        }
+    }
 
     if (options.pipeline.empty()) {
         if (options.matcher == "lightglue" ||
@@ -1605,6 +1625,19 @@ std::unique_ptr<features::FeatureExtractor> make_frontend_extractor(
                 "SiftGPU extractor requested but CUDA context is unavailable");
         return extractor;
     }
+    if (options.extractor == "vulkan_sift") {
+        features::SiftVulkanOptions vulkan_options;
+        vulkan_options.peak_threshold =
+            static_cast<float>(options.sift_contrast_threshold);
+        if (options.max_features > 0)
+            vulkan_options.maximum_features = options.max_features;
+        auto extractor = features::make_vulkan_sift_extractor(vulkan_options);
+        if (extractor == nullptr)
+            throw std::runtime_error(
+                "vulkan_sift requires a build with PHOTARA_ENABLE_VULKAN_FEATURES "
+                "and an available Vulkan compute device");
+        return extractor;
+    }
     if (options.extractor == "superpoint") {
         if (options.extractor_model_path.empty())
             throw std::runtime_error(
@@ -1717,6 +1750,21 @@ std::unique_ptr<features::FeatureMatcher> make_frontend_matcher(
             throw std::runtime_error(
                 "gpu_mutual_ratio matcher requested but CUDA context is "
                 "unavailable");
+        return matcher;
+    }
+    if (options.matcher == "vulkan_mutual_ratio") {
+        features::VulkanMutualRatioMatcherOptions matcher_options;
+        matcher_options.ratio_threshold = options.match_ratio;
+        matcher_options.mutual_check = options.mutual_check;
+        matcher_options.maximum_features =
+            std::max<std::size_t>(32768, options.max_features);
+        auto matcher =
+            features::make_vulkan_mutual_ratio_matcher(matcher_options);
+        if (matcher == nullptr)
+            throw std::runtime_error(
+                "vulkan_mutual_ratio requires a build with "
+                "PHOTARA_ENABLE_VULKAN_FEATURES and an available Vulkan compute "
+                "device");
         return matcher;
     }
     if (options.matcher == "lightglue")
@@ -2402,7 +2450,8 @@ FrontEndResult run_frontend(
 
     const bool can_expand_progressively =
         runtime_options.progressive_pair_expansion &&
-        runtime_options.matcher == "gpu_mutual_ratio" &&
+        (runtime_options.matcher == "gpu_mutual_ratio" ||
+         runtime_options.matcher == "vulkan_mutual_ratio") &&
         runtime_options.neighbor_window + 1 < scene.images.size();
     if (can_expand_progressively) {
         std::vector<unsigned> verified_degree(scene.images.size(), 0U);
@@ -2441,18 +2490,37 @@ FrontEndResult run_frontend(
         }
 
         std::vector<std::uint8_t> augmented(scene.images.size(), 0);
-        if (weak_images > 0 && runtime_options.extractor == "siftgpu" &&
+        if (weak_images > 0 &&
+            (runtime_options.extractor == "siftgpu" ||
+             runtime_options.extractor == "vulkan_sift") &&
             runtime_options.progressive_rescue_max_features >
                 runtime_options.max_features) {
-            features::SiftGpuOptions extraction_options;
-            extraction_options.peak_threshold = static_cast<float>(
-                runtime_options.sift_contrast_threshold);
-            extraction_options.maximum_features =
-                runtime_options.progressive_rescue_max_features;
-            features::SiftGpuExtractor rescue_extractor(extraction_options);
-            if (!rescue_extractor.is_available())
-                throw std::runtime_error(
-                    "Weak-view SiftGPU augmentation is unavailable");
+            std::unique_ptr<features::FeatureExtractor> rescue_extractor;
+            if (runtime_options.extractor == "vulkan_sift") {
+                features::SiftVulkanOptions extraction_options;
+                extraction_options.peak_threshold = static_cast<float>(
+                    runtime_options.sift_contrast_threshold);
+                extraction_options.maximum_features =
+                    runtime_options.progressive_rescue_max_features;
+                auto extractor =
+                    features::make_vulkan_sift_extractor(extraction_options);
+                if (extractor == nullptr)
+                    throw std::runtime_error(
+                        "Weak-view Vulkan SIFT augmentation is unavailable");
+                rescue_extractor = std::move(extractor);
+            } else {
+                features::SiftGpuOptions extraction_options;
+                extraction_options.peak_threshold = static_cast<float>(
+                    runtime_options.sift_contrast_threshold);
+                extraction_options.maximum_features =
+                    runtime_options.progressive_rescue_max_features;
+                auto extractor = std::make_unique<features::SiftGpuExtractor>(
+                    extraction_options);
+                if (!extractor->is_available())
+                    throw std::runtime_error(
+                        "Weak-view SiftGPU augmentation is unavailable");
+                rescue_extractor = std::move(extractor);
+            }
             std::size_t appended_features = 0;
             core::ProgressReporter augmentation_progress(
                 "augment weak image features", weak_images);
@@ -2460,7 +2528,7 @@ FrontEndResult run_frontend(
                 if (!weak[image_id]) continue;
                 const io::GrayImage gray = io::load_gray(image_paths[image_id]);
                 features::FeatureSet additional =
-                    rescue_extractor.extract_gray(
+                    rescue_extractor->extract_gray(
                         gray.pixels, gray.width, gray.height);
                 additional = apply_feature_mask(
                     std::move(additional), feature_masks.paths[image_id]);

@@ -144,6 +144,116 @@ if(PHOTARA_ENABLE_FEATURES)
         src/features/lightglue_matcher.cpp
         src/features/lightglue_pipeline.cpp)
     add_library(Photara::Features ALIAS photara_features)
+    option(PHOTARA_ENABLE_VULKAN_FEATURES
+        "Vulkan compute feature extraction/matching (HLSL/DXC)" ON)
+    if(PHOTARA_ENABLE_VULKAN_FEATURES)
+        find_package(Vulkan 1.1 QUIET)
+        find_program(PHOTARA_FEATURES_DXC_EXECUTABLE
+            NAMES dxc
+            HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+        if(NOT Vulkan_FOUND OR NOT PHOTARA_FEATURES_DXC_EXECUTABLE)
+            message(STATUS
+                "PHOTARA_ENABLE_VULKAN_FEATURES=ON but Vulkan SDK 1.1+ or dxc "
+                "was not found; the Vulkan feature backend is disabled")
+            set(PHOTARA_ENABLE_VULKAN_FEATURES OFF)
+        endif()
+    endif()
+    if(PHOTARA_ENABLE_VULKAN_FEATURES)
+        set(PHOTARA_FEATURE_SHADER_DIR
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/features/vulkan/shaders")
+        set(PHOTARA_FEATURE_SHADER_SOURCES
+            sift_convert.hlsl
+            sift_upsample.hlsl
+            sift_downsample.hlsl
+            sift_blur.hlsl
+            sift_dog.hlsl
+            sift_key.hlsl
+            sift_hist_init.hlsl
+            sift_hist_reduce.hlsl
+            sift_list_gen.hlsl
+            sift_orientation.hlsl
+            sift_descriptor.hlsl
+            sift_descriptor_norm.hlsl
+            sift_match_tiles.hlsl
+            sift_match_finish.hlsl)
+        set(PHOTARA_FEATURE_SHADER_BINARIES)
+        set(PHOTARA_FEATURE_SHADER_HEADERS)
+        foreach(shader IN LISTS PHOTARA_FEATURE_SHADER_SOURCES)
+            set(shader_binary
+                "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan/${shader}.spv")
+            set(shader_header
+                "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan/${shader}.embedded.hpp")
+            string(MAKE_C_IDENTIFIER "${shader}_spv" shader_variable)
+            add_custom_command(
+                OUTPUT "${shader_binary}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory
+                        "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan"
+                COMMAND "${PHOTARA_FEATURES_DXC_EXECUTABLE}"
+                        -spirv -T cs_6_0 -E main -O3
+                        -fspv-target-env=vulkan1.1
+                        -fvk-use-dx-layout
+                        -I "${PHOTARA_FEATURE_SHADER_DIR}"
+                        "${PHOTARA_FEATURE_SHADER_DIR}/${shader}"
+                        -Fo "${shader_binary}"
+                DEPENDS
+                    "${PHOTARA_FEATURE_SHADER_DIR}/${shader}"
+                    "${PHOTARA_FEATURE_SHADER_DIR}/sift_common.hlsli"
+                VERBATIM)
+            add_custom_command(
+                OUTPUT "${shader_header}"
+                COMMAND "${CMAKE_COMMAND}"
+                        -DINPUT_FILE=${shader_binary}
+                        -DOUTPUT_FILE=${shader_header}
+                        -DVARIABLE_NAME=${shader_variable}
+                        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spir_v.cmake"
+                DEPENDS
+                    "${shader_binary}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spir_v.cmake"
+                VERBATIM)
+            list(APPEND PHOTARA_FEATURE_SHADER_BINARIES "${shader_binary}")
+            list(APPEND PHOTARA_FEATURE_SHADER_HEADERS "${shader_header}")
+        endforeach()
+        add_custom_target(photara_feature_shaders
+            DEPENDS ${PHOTARA_FEATURE_SHADER_BINARIES}
+                    ${PHOTARA_FEATURE_SHADER_HEADERS})
+        target_sources(photara_features PRIVATE
+            src/features/vulkan/vk_context.cpp
+            src/features/vulkan/sift_vk.cpp
+            src/features/vulkan/matcher_vk.cpp)
+        add_dependencies(photara_features photara_feature_shaders)
+        target_include_directories(photara_features PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan")
+        target_link_libraries(photara_features PRIVATE Vulkan::Vulkan)
+        target_compile_definitions(photara_features PRIVATE
+            PHOTARA_HAS_VULKAN_FEATURES=1)
+        message(STATUS "Photara Vulkan feature backend: ON "
+            "(dxc=${PHOTARA_FEATURES_DXC_EXECUTABLE})")
+        add_executable(photara_vulkan_features_test tests/vulkan_features_test.cpp)
+        target_link_libraries(photara_vulkan_features_test PRIVATE Photara::Features)
+        target_compile_features(photara_vulkan_features_test PRIVATE cxx_std_20)
+        if(WIN32)
+            add_custom_command(TARGET photara_vulkan_features_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_vulkan_features_test>
+                    $<TARGET_FILE_DIR:photara_vulkan_features_test>
+                COMMAND_EXPAND_LISTS)
+        endif()
+        add_test(NAME photara.features.vulkan COMMAND photara_vulkan_features_test)
+        # Manual parity/performance harness (not a ctest entry): compares the
+        # Vulkan SIFT translation and matcher against the SiftGPU CUDA path.
+        add_executable(photara_vulkan_features_parity
+            tests/vulkan_features_parity.cpp)
+        target_link_libraries(photara_vulkan_features_parity
+            PRIVATE Photara::Features)
+        target_compile_features(photara_vulkan_features_parity PRIVATE cxx_std_20)
+        if(WIN32)
+            add_custom_command(TARGET photara_vulkan_features_parity POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_vulkan_features_parity>
+                    $<TARGET_FILE_DIR:photara_vulkan_features_parity>
+                COMMAND_EXPAND_LISTS)
+        endif()
+    endif()
     if(PHOTARA_ENABLE_CUDA)
         add_library(photara_match_cuda STATIC src/features/matcher_cuda.cu)
         target_include_directories(photara_match_cuda PRIVATE include)
