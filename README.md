@@ -131,6 +131,14 @@ build/photara/Release/photara.exe
 build/photara/Release/photara_studio.exe
 ```
 
+### Windows packaging
+
+The repository includes a repeatable Windows release script that gathers the
+Studio executable, CLI worker, app-local DLLs, FFmpeg, and notices, then builds
+both a portable ZIP and an Inno Setup installer. See
+[`docs/PACKAGING_WINDOWS.md`](docs/PACKAGING_WINDOWS.md) for prerequisites and
+the release command.
+
 Paths vary with the generator and platform. With a single-config generator,
 the executables normally appear directly below `build/photara/`.
 
