@@ -15,7 +15,6 @@
 #include <cmath>
 #include <cstring>
 #include <cuda_runtime.h>
-#include <curand.h>
 #include <format>
 #include <numeric>
 #include <optional>
@@ -438,17 +437,11 @@ namespace tinytensor {
 #endif
 
             if (result.device_ == Device::CUDA) {
-                // Use Philox RNG without resetting offset (stateful like PyTorch - much faster!)
-                curandGenerator_t* gen = static_cast<curandGenerator_t*>(
-                    RandomGenerator::instance().get_generator(Device::CUDA));
-
-                size_t n = result.numel();
-                if (n % 2 == 1) {
-                    curandGenerateNormal(*gen, result.ptr<float>(), n + 1, mean, std);
-                } else {
-                    curandGenerateNormal(*gen, result.ptr<float>(), n, mean, std);
-                }
-                // curandGenerateNormal is blocking, no need for explicit sync
+                tensor_ops::launch_normal(result.ptr<float>(), result.numel(),
+                                          mean, std,
+                                          RandomGenerator::instance().get_next_cuda_seed(),
+                                          result.stream());
+                // No sync - tensor operation
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
                     RandomGenerator::instance().get_generator(Device::CPU));

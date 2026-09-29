@@ -1,6 +1,5 @@
 #include "ba/bearing_cuda.hpp"
 #include <cuda_runtime.h>
-#include <cusolverDn.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -12,7 +11,6 @@
 namespace photara::ba {
 namespace {
 void check(cudaError_t e) { if(e!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(e)); }
-void check(cusolverStatus_t e) { if(e!=CUSOLVER_STATUS_SUCCESS) throw std::runtime_error("Bearing cuSolver error "+std::to_string(int(e))); }
 template<class T> struct Buffer {
     T* p{}; std::size_t n{};
     Buffer()=default;
@@ -27,6 +25,59 @@ template<class T> struct Buffer {
 struct Obs {unsigned camera,point; double d[3];};
 struct Linear {double h[9],b[3];};
 unsigned blocks(std::size_t n){return static_cast<unsigned>((n+255)/256);}
+
+// Dense Cholesky for the small reduced camera system (nc*3)^2, replacing the
+// cusolverDn dependency and its ~1.4 GB cublas/cusparse/cusolver DLL chain.
+// The matrix is column-major with the lower triangle filled; info semantics
+// follow potrf: a positive info means the leading minor at that 1-based row
+// was not positive definite.
+// Pure right-looking Cholesky, one column per step: finalize the pivot,
+// scale the column below it, then apply the rank-1 update to the remaining
+// submatrix. n <= 6000, so the 2n tiny launches stay far below the cost of
+// the cublas/cusolver DLL chain this replaces.
+__global__ void chol_pivot(double* a,int n,int c,int* info){
+    if(blockIdx.x||threadIdx.x)return;
+    double p=a[c+c*n];
+    if(!(p>0.0)||!isfinite(p)){if(!*info)*info=c+1;return;}
+    p=sqrt(p);a[c+c*n]=p;
+    for(int j=c+1;j<n;++j)a[j+c*n]/=p;
+}
+__global__ void chol_rank1(double* a,int n,int c){
+    const int j0=c+1,q=n-j0,total=q*q;
+    for(int t=blockIdx.x*blockDim.x+threadIdx.x;t<total;t+=gridDim.x*blockDim.x){
+        const int s=j0+t/q,r=j0+t%q;
+        if(r<s)continue;
+        double v=a[r+s*n];
+        v-=a[r+c*n]*a[s+c*n];
+        a[r+s*n]=v;
+    }
+}
+__global__ void chol_forward(const double* a,int n,double* x){
+    __shared__ double part[256],result;
+    for(int j=0;j<n;++j){
+        double v=0;
+        for(int c=threadIdx.x;c<j;c+=blockDim.x)v+=a[j+c*n]*x[c];
+        part[threadIdx.x]=v;__syncthreads();
+        for(int s=128;s;s>>=1){if(threadIdx.x<s)part[threadIdx.x]+=part[threadIdx.x+s];__syncthreads();}
+        if(!threadIdx.x)result=(x[j]-part[0])/a[j+j*n];
+        __syncthreads();
+        x[j]=result;
+        __syncthreads();
+    }
+}
+__global__ void chol_backward(const double* a,int n,double* x){
+    __shared__ double part[256],result;
+    for(int j=n-1;j>=0;--j){
+        double v=0;
+        for(int c=j+1+threadIdx.x;c<n;c+=blockDim.x)v+=a[c+j*n]*x[c];
+        part[threadIdx.x]=v;__syncthreads();
+        for(int s=128;s;s>>=1){if(threadIdx.x<s)part[threadIdx.x]+=part[threadIdx.x+s];__syncthreads();}
+        if(!threadIdx.x)result=(x[j]-part[0])/a[j+j*n];
+        __syncthreads();
+        x[j]=result;
+        __syncthreads();
+    }
+}
 
 __global__ void linearize(const double* cameras,const double* points,const Obs* obs,
     const double* weights,int n,double huber,Linear* lin,double* costs) {
@@ -173,11 +224,9 @@ __global__ void sum_model(const double* values,int n,const double* cameras,
 }
 class CudaBearingOptimizer::Impl {
 public:
-    int nc{},np{},no{},workspace_size{};unsigned anchor{},first{},second{};double baseline{},huber{};
-    cusolverDnHandle_t solver{};
-    Buffer<double> cameras,points,candidate_cameras,candidate_points,weights,costs,total,inverse,pb,e,matrix,rhs,workspace,camera_scale,point_scale;
+    int nc{},np{},no{};unsigned anchor{},first{},second{};double baseline{},huber{};
+    Buffer<double> cameras,points,candidate_cameras,candidate_points,weights,costs,total,inverse,pb,e,matrix,rhs,camera_scale,point_scale;
     Buffer<Obs> obs; Buffer<Linear> lin;Buffer<unsigned> po,pi,co,ci;Buffer<int> info;
-    ~Impl(){if(solver)cusolverDnDestroy(solver);}
     double cost(bool candidate,bool derivatives){
         const auto* c=candidate?candidate_cameras.p:cameras.p;const auto* p=candidate?candidate_points.p:points.p;
         linearize<<<blocks(no),256>>>(c,p,obs.p,weights.p,no,huber,derivatives?lin.p:nullptr,costs.p);
@@ -207,9 +256,7 @@ CudaBearingOptimizer::CudaBearingOptimizer(const BearingProblem& p):impl_(std::m
     d.candidate_cameras.resize(d.nc*3);d.candidate_points.resize(d.np*3);d.lin.resize(d.no);d.costs.resize(d.no);d.total.resize(1);
     d.camera_scale.resize(d.nc*3);d.point_scale.resize(d.np*3);
     d.inverse.resize(d.np*9);d.pb.resize(d.np*3);d.e.resize(d.no*9);d.rhs.resize(d.nc*3);d.info.resize(2);
-    d.matrix.resize(std::size_t(d.nc*3)*(d.nc*3));check(cusolverDnCreate(&d.solver));
-    check(cusolverDnDpotrf_bufferSize(d.solver,CUBLAS_FILL_MODE_LOWER,d.nc*3,d.matrix.p,d.nc*3,&d.workspace_size));
-    d.workspace.resize(d.workspace_size);
+    d.matrix.resize(std::size_t(d.nc*3)*(d.nc*3));
 }
 CudaBearingOptimizer::~CudaBearingOptimizer()=default;
 void CudaBearingOptimizer::download(BearingProblem& p)const{
@@ -236,11 +283,22 @@ BearingSolveSummary CudaBearingOptimizer::solve(const std::vector<double>& weigh
         schur<<<d.np,256>>>(d.lin.p,d.obs.p,d.e.p,d.po.p,d.pi.p,d.nc,d.matrix.p);
         baseline_gauge<<<1,1>>>(d.cameras.p,d.nc,d.anchor,d.first,d.second,d.baseline,d.matrix.p,d.rhs.p);
         check(cudaGetLastError());
-        check(cusolverDnDpotrf(d.solver,CUBLAS_FILL_MODE_LOWER,d.nc*3,d.matrix.p,d.nc*3,d.workspace.p,d.workspace_size,d.info.p));
+        const int n=d.nc*3;
+        for(int c=0;c<n;++c){
+            chol_pivot<<<1,1>>>(d.matrix.p,n,c,d.info.p);
+            if(c+1<n){
+                const int q=n-c-1;
+                const int grid=std::min((q*q+255)/256,8192);
+                chol_rank1<<<grid,256>>>(d.matrix.p,n,c);
+            }
+        }
+        check(cudaGetLastError());
         int info[2]{};d.info.download(info);++result.iterations;
         if(info[0]<0)throw std::runtime_error("CUDA bearing factorization argument error");
         if(info[0]||info[1]){lambda*=rejection_factor;rejection_factor*=2;if(lambda>1e16){result.usable=false;break;}continue;}
-        check(cusolverDnDpotrs(d.solver,CUBLAS_FILL_MODE_LOWER,d.nc*3,1,d.matrix.p,d.nc*3,d.rhs.p,d.nc*3,d.info.p));
+        chol_forward<<<1,256>>>(d.matrix.p,n,d.rhs.p);
+        chol_backward<<<1,256>>>(d.matrix.p,n,d.rhs.p);
+        check(cudaGetLastError());
         d.info.download(info);if(info[0])throw std::runtime_error("CUDA bearing triangular solve failed");
         update_cameras<<<blocks(d.nc*3),256>>>(d.cameras.p,d.rhs.p,d.nc*3,d.candidate_cameras.p);
         update_points<<<blocks(d.np),256>>>(d.lin.p,d.obs.p,d.po.p,d.pi.p,d.inverse.p,d.pb.p,d.rhs.p,d.points.p,d.np,d.candidate_points.p);
