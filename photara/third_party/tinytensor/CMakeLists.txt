@@ -80,8 +80,9 @@ add_library(tinytensor STATIC $<TARGET_OBJECTS:tinytensor_cuda> $<TARGET_OBJECTS
 # Include directories
 target_include_directories(tinytensor PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Link CUDA runtime
-target_link_libraries(tinytensor PUBLIC CUDA::cudart CUDA::curand)
+# Link CUDA runtime (RNG is the in-house Philox in philox_rng.cuh, so no
+# curand dependency is needed)
+target_link_libraries(tinytensor PUBLIC CUDA::cudart)
 
 # Set CUDA properties
 set_target_properties(tinytensor PROPERTIES FOLDER "external")

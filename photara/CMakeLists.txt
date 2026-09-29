@@ -49,7 +49,7 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 if(PHOTARA_ENABLE_CUDA)
-    target_link_libraries(photara_ba PUBLIC CUDA::cudart CUDA::cusolver)
+    target_link_libraries(photara_ba PUBLIC CUDA::cudart)
     target_compile_definitions(photara_ba PUBLIC PHOTARA_HAS_CUDA=1)
     set_target_properties(photara_ba PROPERTIES
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"

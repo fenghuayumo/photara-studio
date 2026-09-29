@@ -1,7 +1,7 @@
 #include "internal/tensor_functors.hpp"
 #include "internal/tensor_ops.hpp"
 #include <cuda_runtime.h>
-#include <curand_kernel.h>
+#include "philox_rng.cuh"
 
 // Thrust headers for multinomial without replacement
 #include <thrust/copy.h>
@@ -23,9 +23,9 @@ namespace tinytensor::tensor_ops {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
         if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
-            float val = curand_uniform(&state);
+            PhiloxState state;
+            philox_init(seed, idx, 0, &state);
+            float val = philox_uniform(&state);
             data[idx] = val * (high - low) + low;
         }
     }
@@ -36,9 +36,9 @@ namespace tinytensor::tensor_ops {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
         if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
-            data[idx] = curand_normal(&state) * std + mean;
+            PhiloxState state;
+            philox_init(seed, idx, 0, &state);
+            data[idx] = philox_normal(&state) * std + mean;
         }
     }
 
@@ -48,9 +48,9 @@ namespace tinytensor::tensor_ops {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
         if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
-            float val = curand_uniform(&state);
+            PhiloxState state;
+            philox_init(seed, idx, 0, &state);
+            float val = philox_uniform(&state);
             data[idx] = (val < p) ? 1.0f : 0.0f;
         }
     }
@@ -61,10 +61,10 @@ namespace tinytensor::tensor_ops {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
         if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
+            PhiloxState state;
+            philox_init(seed, idx, 0, &state);
 
-            float val = curand_uniform(&state);
+            float val = philox_uniform(&state);
             int range = high - low;
 
             int result = low + static_cast<int>(val * range);
@@ -87,10 +87,10 @@ namespace tinytensor::tensor_ops {
         if (idx >= num_samples)
             return;
 
-        curandState state;
-        curand_init(seed, idx, 0, &state);
+        PhiloxState state;
+        philox_init(seed, idx, 0, &state);
 
-        float u = curand_uniform(&state) * sum;
+        float u = philox_uniform(&state) * sum;
 
         float cumsum = 0.0f;
         for (unsigned long i = 0; i < n; ++i) {
@@ -112,10 +112,10 @@ namespace tinytensor::tensor_ops {
         if (idx >= n)
             return;
 
-        curandState state;
-        curand_init(seed, idx, 0, &state);
+        PhiloxState state;
+        philox_init(seed, idx, 0, &state);
 
-        float u = curand_uniform(&state);
+        float u = philox_uniform(&state);
 
         u = fmaxf(u, 1e-10f);
         u = fminf(u, 1.0f - 1e-10f);
