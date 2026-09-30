@@ -78,6 +78,7 @@ constexpr Band k_align_bands[] = {
     {"build tracks", Stage::tracks, 0.72F, 0.78F},
     {"sfm.retrieve_image_pairs", Stage::matching, 0.38F, 0.40F},
     {"register images", Stage::mapping, 0.78F, 0.96F},
+    {"refine sam masks", Stage::masking, 0.96F, 0.99F},
 };
 
 constexpr Band k_dense_bands[] = {
@@ -110,6 +111,7 @@ constexpr Band k_train_bands[] = {
     {"verify pair geometry", Stage::matching, 0.07F, 0.08F},
     {"build tracks", Stage::tracks, 0.08F, 0.09F},
     {"register images", Stage::mapping, 0.09F, 0.11F},
+    {"refine sam masks", Stage::masking, 0.11F, 0.12F},
     {"mvs.load_images", Stage::meshing, 0.88F, 0.90F},
     {"mvs.estimate_depth", Stage::dense, 0.12F, 0.40F},
     {"mvs.geometric_consistency", Stage::dense, 0.40F, 0.50F},

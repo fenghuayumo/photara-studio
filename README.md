@@ -49,8 +49,9 @@ The implementation currently includes:
   GaussianWrapping-inspired PAM path;
 - optional Instant Meshes remeshing, CGAL repair/decimation, UVAtlas unwrap,
   Vulkan texture baking, and ONNX-based intrinsic-image delighting;
-- SAM 3 text-prompted masks and video mask propagation when the bundled SAM
-  component and a compatible checkpoint are available;
+- SAM 3 text-prompted masks, video propagation, and SfM sparse-point-guided
+  instance selection when the bundled SAM component and a compatible
+  checkpoint are available;
 - `.ascan` project archives and exports for OpenMVS, COLMAP, Nerfstudio, PLY,
   OBJ, GLB, SOG, and SPZ, depending on the selected stage.
 
@@ -266,6 +267,32 @@ before interpreting failures in MVS or splat training as dense-stage problems.
 The CLI extracts frames with FFmpeg. `--video-max-frames`, `--video-quality`,
 `--video-scale`, `--video-rotate`, `--video-frames-dir`, and `--video-redo`
 control frame generation.
+
+### SfM-guided SAM 3 masks
+
+```powershell
+.\build\photara\Release\photara.exe `
+  --images D:\captures\object\images `
+  --output object.ascan `
+  --sam-text "transparent glass cup" `
+  --sam-backend vulkan
+```
+
+Mask generation is entirely native C++/ggml and does not require Python,
+PyTorch, OpenCV, or NumPy. A first text/video pass supplies coarse masks to
+alignment. After SfM succeeds, the default `--sam-sfm-guided=true` pass finds
+the sparse points nearest the registered-camera centroid, projects them into
+each view, and uses their location to select and clean the matching SAM 3
+instance. Projected point pixels are guidance only; the final silhouette still
+comes from SAM 3.
+
+This central-point prior is intended for orbit/turntable object captures. For
+a general scene or an off-centre subject, disable it with
+`--sam-sfm-guided=false`. `--sam-sfm-point-fraction` (default `0.01`),
+`--sam-min-area`, `--sam-max-area`, `--sam-guided-threshold` (default `0.2`),
+and `--sam-close-kernel` expose the main selection and cleanup controls.
+Existing mask directories are still preserved unless `--sam-refresh` is
+requested.
 
 ### Dense MVS and mesh reconstruction
 

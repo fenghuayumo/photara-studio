@@ -9,6 +9,10 @@
 #include <string>
 #include <vector>
 
+namespace photara::sfm {
+struct Scene;
+}
+
 namespace photara::sam {
 
 struct GenerateOptions {
@@ -28,11 +32,24 @@ struct GenerateOptions {
     int max_size = 0;
     float threshold = 0.5F;
     float nms = 0.1F;
+    // Optional sparse reconstruction used to keep the prompted instance
+    // consistent across an orbit. The closest central_fraction of
+    // triangulated points to the registered-camera centroid are projected
+    // into every image and used only as SAM location/selection guidance.
+    // Their pixels are never copied into the output mask.
+    const sfm::Scene* sparse_scene = nullptr;
+    float central_fraction = 0.01F;
+    float min_area_fraction = 0.001F;
+    float max_area_fraction = 0.65F;
+    int close_kernel = 5;
+    bool fill_holes = true;
 };
 
 struct GenerateResult {
     std::size_t written{};
     std::size_t skipped{};
+    std::size_t geometry_guided{};
+    std::size_t empty{};
 };
 
 [[nodiscard]] bool built_with_sam();

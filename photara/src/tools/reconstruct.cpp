@@ -272,6 +272,15 @@ struct ReconstructCli {
     bool sam_video{true};
     int sam_max_size{0};
     bool sam_refresh{false};
+    bool sam_sfm_guided{true};
+    float sam_sfm_point_fraction{0.01F};
+    float sam_min_area{0.001F};
+    float sam_max_area{0.65F};
+    float sam_threshold{0.5F};
+    float sam_guided_threshold{0.2F};
+    float sam_nms{0.1F};
+    int sam_close_kernel{5};
+    bool sam_generated_this_run{false};
     bool texture{false};
     bool delight{false};
     // Unset keeps the default atlas size (kDefaultAtlasResolution).
@@ -1090,6 +1099,25 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("sam-refresh",
          "Regenerate SAM masks even when the mask directory already has files",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("sam-sfm-guided",
+         "After SfM, refine SAM instance selection with projected central sparse points",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("sam-sfm-point-fraction",
+         "Fraction of sparse points nearest the camera-ring centre used as SAM guidance",
+         cxxopts::value<float>()->default_value("0.01"))
+        ("sam-min-area", "Minimum accepted SAM instance area / image area",
+         cxxopts::value<float>()->default_value("0.001"))
+        ("sam-max-area", "Maximum accepted SAM instance area / image area",
+         cxxopts::value<float>()->default_value("0.65"))
+        ("sam-threshold", "SAM instance score threshold for the coarse pass",
+         cxxopts::value<float>()->default_value("0.5"))
+        ("sam-guided-threshold",
+         "SAM instance score threshold for SfM-guided candidate selection",
+         cxxopts::value<float>()->default_value("0.2"))
+        ("sam-nms", "SAM detection box NMS IoU threshold",
+         cxxopts::value<float>()->default_value("0.1"))
+        ("sam-close-kernel", "Odd binary closing kernel used on guided SAM masks",
+         cxxopts::value<int>()->default_value("5"))
         ("texture",
          "UV unwrap + projective texture bake. Implies --mesh unless "
          "--working-mesh is set without --dense/--splat",
@@ -1580,8 +1608,33 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.sam_video = result["sam-video"].as<bool>();
     cli.sam_max_size = result["sam-max-size"].as<int>();
     cli.sam_refresh = result["sam-refresh"].as<bool>();
+    cli.sam_sfm_guided = result["sam-sfm-guided"].as<bool>();
+    cli.sam_sfm_point_fraction = result["sam-sfm-point-fraction"].as<float>();
+    cli.sam_min_area = result["sam-min-area"].as<float>();
+    cli.sam_max_area = result["sam-max-area"].as<float>();
+    cli.sam_threshold = result["sam-threshold"].as<float>();
+    cli.sam_guided_threshold = result["sam-guided-threshold"].as<float>();
+    cli.sam_nms = result["sam-nms"].as<float>();
+    cli.sam_close_kernel = result["sam-close-kernel"].as<int>();
     if (cli.sam_max_size < 0)
         throw std::invalid_argument("--sam-max-size must be non-negative");
+    if (!(cli.sam_sfm_point_fraction > 0.F &&
+          cli.sam_sfm_point_fraction <= 1.F))
+        throw std::invalid_argument(
+            "--sam-sfm-point-fraction must be in (0, 1]");
+    if (!(cli.sam_min_area >= 0.F && cli.sam_min_area < cli.sam_max_area &&
+          cli.sam_max_area <= 1.F))
+        throw std::invalid_argument(
+            "--sam-min-area/--sam-max-area require 0 <= min < max <= 1");
+    if (!(cli.sam_threshold >= 0.F && cli.sam_threshold <= 1.F &&
+          cli.sam_guided_threshold >= 0.F &&
+          cli.sam_guided_threshold <= 1.F && cli.sam_nms >= 0.F &&
+          cli.sam_nms <= 1.F))
+        throw std::invalid_argument(
+            "SAM score and NMS thresholds must be in [0, 1]");
+    if (cli.sam_close_kernel < 1 || cli.sam_close_kernel % 2 == 0)
+        throw std::invalid_argument(
+            "--sam-close-kernel must be a positive odd number");
     if (cli.delight) cli.texture = true;
     const bool have_existing_mesh =
         !cli.working_mesh.empty() || !cli.mask_mesh.empty();
@@ -2104,7 +2157,49 @@ std::vector<std::filesystem::path> list_still_images(
             continue;
         files.push_back(entry.path());
     }
-    std::sort(files.begin(), files.end());
+    const auto natural_less = [](const std::filesystem::path& left,
+                                 const std::filesystem::path& right) {
+        const std::string a = left.filename().string();
+        const std::string b = right.filename().string();
+        std::size_t i = 0, j = 0;
+        while (i < a.size() && j < b.size()) {
+            const bool digit_a = std::isdigit(static_cast<unsigned char>(a[i])) != 0;
+            const bool digit_b = std::isdigit(static_cast<unsigned char>(b[j])) != 0;
+            if (digit_a && digit_b) {
+                std::size_t end_a = i, end_b = j;
+                while (end_a < a.size() &&
+                       std::isdigit(static_cast<unsigned char>(a[end_a])))
+                    ++end_a;
+                while (end_b < b.size() &&
+                       std::isdigit(static_cast<unsigned char>(b[end_b])))
+                    ++end_b;
+                std::size_t significant_a = i, significant_b = j;
+                while (significant_a + 1 < end_a && a[significant_a] == '0')
+                    ++significant_a;
+                while (significant_b + 1 < end_b && b[significant_b] == '0')
+                    ++significant_b;
+                const std::size_t length_a = end_a - significant_a;
+                const std::size_t length_b = end_b - significant_b;
+                if (length_a != length_b) return length_a < length_b;
+                const int number_order = a.compare(
+                    significant_a, length_a, b, significant_b, length_b);
+                if (number_order != 0) return number_order < 0;
+                if (end_a - i != end_b - j) return end_a - i < end_b - j;
+                i = end_a;
+                j = end_b;
+                continue;
+            }
+            const unsigned char ca = static_cast<unsigned char>(
+                std::tolower(static_cast<unsigned char>(a[i])));
+            const unsigned char cb = static_cast<unsigned char>(
+                std::tolower(static_cast<unsigned char>(b[j])));
+            if (ca != cb) return ca < cb;
+            ++i;
+            ++j;
+        }
+        return a.size() < b.size();
+    };
+    std::sort(files.begin(), files.end(), natural_less);
     return files;
 }
 
@@ -2130,12 +2225,14 @@ void refresh_auto_masks(ReconstructCli& cli) {
         cli.masks_dir = candidate;
 }
 
-void ensure_sam_masks(ReconstructCli& cli) {
+void ensure_sam_masks(
+    ReconstructCli& cli, const photara::sfm::Scene* sparse_scene = nullptr,
+    const bool force = false) {
     if (cli.sam_text.empty()) return;
     auto output = cli.masks_dir.empty()
         ? cli.images_dir.parent_path() / "masks"
         : cli.masks_dir;
-    if (!cli.sam_refresh && directory_has_mask(output)) {
+    if (!force && !cli.sam_refresh && directory_has_mask(output)) {
         cli.masks_dir = output;
         photara::core::Logger::instance().info(
             "sam_masks=reused dir=", output);
@@ -2151,11 +2248,21 @@ void ensure_sam_masks(ReconstructCli& cli) {
     options.keep_prompted = cli.sam_keep_prompted;
     options.video = cli.sam_video;
     options.max_size = cli.sam_max_size;
+    options.sparse_scene = sparse_scene;
+    options.central_fraction = cli.sam_sfm_point_fraction;
+    options.min_area_fraction = cli.sam_min_area;
+    options.max_area_fraction = cli.sam_max_area;
+    options.threshold = sparse_scene
+        ? cli.sam_guided_threshold
+        : cli.sam_threshold;
+    options.nms = cli.sam_nms;
+    options.close_kernel = cli.sam_close_kernel;
     if (options.images.size() < 1)
         throw std::runtime_error(
             "SAM mask generation needs images in " + cli.images_dir.string());
     photara::sam::generate_masks(options);
     cli.masks_dir = output;
+    cli.sam_generated_this_run = true;
 }
 
 void ensure_video_frames(ReconstructCli& cli, const bool preserve_cameras) {
@@ -4200,6 +4307,18 @@ int main(int argc, char** argv) {
         }
 
         save_working_sfm(cli, scene);
+
+        // The first SAM pass supplies a coarse validity mask to SfM. Once the
+        // camera ring and sparse cloud exist, repeat instance selection with
+        // projected central points. This mirrors the proven maskgen workflow
+        // without copying the coarse point silhouette into the final mask.
+        if (cli.sam_sfm_guided && cli.sam_generated_this_run &&
+            scene.registered_count() >= 2) {
+            photara::core::Logger::instance().info(
+                "sam_sfm_refine=true registered=", scene.registered_count(),
+                " tracks=", scene.tracks.size());
+            ensure_sam_masks(cli, &scene, true);
+        }
 
         if (!cli.export_colmap_dir.empty() && scene.registered_count() >= 2) {
             // Diagnostics-grade export: cameras, poses and the sparse cloud in
