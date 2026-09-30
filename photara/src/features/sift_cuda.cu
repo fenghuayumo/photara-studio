@@ -264,7 +264,8 @@ __global__ void dog_kernel(
 }
 
 __global__ void gradient_kernel(
-    const float* image, float2* gradient, int width, int height) {
+    const float* image, float* gradient_magnitude, float* gradient_orientation,
+    int width, int height) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
@@ -276,7 +277,8 @@ __global__ void gradient_kernel(
                      sift_fetch(image, index - width, count);
     const float magnitude = 0.5F * sqrtf(dx * dx + dy * dy);
     const float rotation = magnitude == 0.0F ? 0.0F : atan2f(dy, dx);
-    gradient[index] = make_float2(magnitude, rotation);
+    gradient_magnitude[index] = magnitude;
+    gradient_orientation[index] = rotation;
 }
 
 // DoG extremum with the same partial-pivot sub-pixel solve as sift_key.hlsl.
@@ -435,7 +437,8 @@ __global__ void detect_kernel(
 }
 
 __device__ float2 sample_gradient(
-    const float2* gradient, int width, int height, float x, float y) {
+    const float* magnitude, const float* orientation, int width, int height,
+    float x, float y) {
     const float fx = x - 0.5F;
     const float fy = y - 0.5F;
     const int ix = static_cast<int>(floorf(fx));
@@ -446,19 +449,24 @@ __device__ float2 sample_gradient(
     const int x1 = sift_clampi(ix + 1, 0, width - 1);
     const int y0 = sift_clampi(iy, 0, height - 1);
     const int y1 = sift_clampi(iy + 1, 0, height - 1);
-    const float2 a = gradient[y0 * width + x0];
-    const float2 b = gradient[y0 * width + x1];
-    const float2 c = gradient[y1 * width + x0];
-    const float2 d = gradient[y1 * width + x1];
+    const int a_index = y0 * width + x0;
+    const int b_index = y0 * width + x1;
+    const int c_index = y1 * width + x0;
+    const int d_index = y1 * width + x1;
+    const float2 a = make_float2(magnitude[a_index], orientation[a_index]);
+    const float2 b = make_float2(magnitude[b_index], orientation[b_index]);
+    const float2 c = make_float2(magnitude[c_index], orientation[c_index]);
+    const float2 d = make_float2(magnitude[d_index], orientation[d_index]);
     const float2 ab = make_float2(a.x + (b.x - a.x) * tx, a.y + (b.y - a.y) * tx);
     const float2 cd = make_float2(c.x + (d.x - c.x) * tx, c.y + (d.y - c.y) * tx);
     return make_float2(ab.x + (cd.x - ab.x) * ty, ab.y + (cd.y - ab.y) * ty);
 }
 
 __global__ void orientation_kernel(
-    const DetKey* keys, int count, const float2* gradient, int width, int height,
-    unsigned num_orientation, float sigma, float sigma_step, float gaussian_factor,
-    float sample_factor, float* packed_out) {
+    const DetKey* keys, int count, const float* gradient_magnitude,
+    const float* gradient_orientation, int width, int height,
+    unsigned num_orientation, float sigma, float sigma_step,
+    float gaussian_factor, float sample_factor, float* packed_out) {
     constexpr float kTenDegrees = 5.7295779513082320876798154814105F;
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
@@ -491,7 +499,8 @@ __global__ void orientation_kernel(
             const float ddy = sy - y;
             const float squared = ddx * ddx + ddy * ddy;
             if (squared >= dist_threshold) continue;
-            const float2 sample = sample_gradient(gradient, width, height, sx, sy);
+            const float2 sample = sample_gradient(
+                gradient_magnitude, gradient_orientation, width, height, sx, sy);
             const float weight = sample.x * expf(squared * factor);
             int bin = static_cast<int>(floorf(sample.y * kTenDegrees));
             if (bin < 0) bin += 36;
@@ -576,8 +585,9 @@ __global__ void orientation_kernel(
 }
 
 __global__ void descriptor_kernel(
-    const float* keys, int count, const float2* gradient, int width, int height,
-    float window_factor, float* descriptors) {
+    const float* keys, int count, const float* gradient_magnitude,
+    const float* gradient_orientation, int width, int height, float window_factor,
+    float* descriptors) {
     constexpr float kPi = 3.14159265358979323846F;
     constexpr float kTwo = 6.28318530717958647692F;
     constexpr float kBinScale = 4.0F / 3.14159265358979323846F;
@@ -623,7 +633,8 @@ __global__ void descriptor_kernel(
             const float ax = fabsf(nx);
             const float ay = fabsf(ny);
             if (ax < 1.0F && ay < 1.0F) {
-                const float2 sample = sample_gradient(gradient, width, height, sx, sy);
+                const float2 sample = sample_gradient(
+                    gradient_magnitude, gradient_orientation, width, height, sx, sy);
                 const float dnx = nx + offset_x;
                 const float dny = ny + offset_y;
                 const float weight = expf(-0.125F * (dnx * dnx + dny * dny)) *
@@ -788,7 +799,6 @@ struct SiftCudaEngine::Impl {
     Buffer kernel;
     Buffer counter;
     Buffer packed;
-    Buffer gradient;
     Buffer descriptor_keys;
     Buffer descriptors;
     std::vector<Buffer> gauss;
@@ -1136,17 +1146,20 @@ struct SiftCudaEngine::Impl {
                     static_cast<std::size_t>(selected - kept.begin())];
                 const dim3 block(16, 16);
                 const dim3 grid((w + 15) / 16, (h + 15) / 16);
-                float2* gradient_device =
-                    gradient.as<float2>(shape.pixels);
+                // Detection is complete before this second pyramid pass, so two
+                // DoG ring buffers can hold the gradient planes without adding a
+                // separate two-float allocation for every pixel.
+                float* gradient_magnitude = dogs[0].get<float>();
+                float* gradient_orientation = dogs[1].get<float>();
                 gradient_kernel<<<grid, block, 0, stream>>>(
-                    gaussian, gradient_device, w, h);
+                    gaussian, gradient_magnitude, gradient_orientation, w, h);
 
                 const int count = slot->count;
                 float* packed_device = packed.as<float>(
                     static_cast<std::size_t>(count) * 4);
                 orientation_kernel<<<(count + 63) / 64, 64, 0, stream>>>(
-                    slot->keys.get<DetKey>(), count, gradient_device, w, h,
-                    options.maximum_orientations,
+                    slot->keys.get<DetKey>(), count, gradient_magnitude,
+                    gradient_orientation, w, h, options.maximum_orientations,
                     pyramid.level_sigma[
                         static_cast<std::size_t>(feature_level + 1)],
                     pyramid.sigma_step, 1.5F, 3.0F, packed_device);
@@ -1191,8 +1204,8 @@ struct SiftCudaEngine::Impl {
                     static_cast<std::size_t>(oriented_count) * 128);
                 const int threads = oriented_count * 16;
                 descriptor_kernel<<<(threads + 63) / 64, 64, 0, stream>>>(
-                    key_device, oriented_count, gradient_device, w, h, 3.0F,
-                    descriptor_device);
+                    key_device, oriented_count, gradient_magnitude,
+                    gradient_orientation, w, h, 3.0F, descriptor_device);
                 normalize_kernel<<<(oriented_count + 63) / 64, 64, 0, stream>>>(
                     descriptor_device, oriented_count);
                 output.descriptors.resize(
