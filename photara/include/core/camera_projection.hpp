@@ -36,6 +36,16 @@ PHOTARA_CAMERA_HD [[nodiscard]] constexpr bool uses_bearing_projection(
 
 inline constexpr double k_pi = 3.14159265358979323846;
 
+// Host uses std::isfinite; CUDA device code uses the CUDA math free function.
+template <class T>
+PHOTARA_CAMERA_HD [[nodiscard]] inline bool photara_isfinite(T value) noexcept {
+#if defined(__CUDA_ARCH__)
+    return isfinite(value);
+#else
+    return std::isfinite(value);
+#endif
+}
+
 // Angular tightening applied when a *pixel* budget is converted into an angular
 // tolerance for an equirectangular camera. A sphere chart covers 2 pi radians
 // across the same number of pixels a rectilinear lens spends on its (much
@@ -277,7 +287,7 @@ PHOTARA_CAMERA_HD inline EquirectLocalReprojection equirect_local_reprojection(
     out.valid = false;
     if (!basis.valid) return out;
     const double length = ::sqrt(px * px + py * py + pz * pz);
-    if (!(length > 1e-12) || !::isfinite(length)) return out;
+    if (!(length > 1e-12) || !photara_isfinite(length)) return out;
     const double inv_length = 1.0 / length;
     const double bx = px * inv_length;
     const double by = py * inv_length;
@@ -306,9 +316,10 @@ PHOTARA_CAMERA_HD inline EquirectLocalReprojection equirect_local_reprojection(
     out.j10 = basis.scale_y * (basis.t2x * d00 + basis.t2y * d10 + basis.t2z * d20);
     out.j11 = basis.scale_y * (basis.t2x * d01 + basis.t2y * d11 + basis.t2z * d21);
     out.j12 = basis.scale_y * (basis.t2x * d02 + basis.t2y * d12 + basis.t2z * d22);
-    out.valid = ::isfinite(out.residual_x) && ::isfinite(out.residual_y) &&
-                ::isfinite(out.j00) && ::isfinite(out.j01) && ::isfinite(out.j02) &&
-                ::isfinite(out.j10) && ::isfinite(out.j11) && ::isfinite(out.j12);
+    out.valid = photara_isfinite(out.residual_x) && photara_isfinite(out.residual_y) &&
+                photara_isfinite(out.j00) && photara_isfinite(out.j01) &&
+                photara_isfinite(out.j02) && photara_isfinite(out.j10) &&
+                photara_isfinite(out.j11) && photara_isfinite(out.j12);
     return out;
 }
 

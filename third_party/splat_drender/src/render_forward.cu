@@ -123,10 +123,10 @@ __global__ void preprocess_gaussians(
     const float ex = sqrtf(fmaxf(0.f, threshold * splat.cov2d[0]));
     const float ey = sqrtf(fmaxf(0.f, threshold * splat.cov2d[2]));
     st.screen_bounds[i] = make_ushort4(
-        unsigned short(fmaxf(0.f, fminf(65535.f, floorf(p.pixel_x - ex)))),
-        unsigned short(fmaxf(0.f, fminf(65535.f, floorf(p.pixel_x + ex) + 1.f))),
-        unsigned short(fmaxf(0.f, fminf(65535.f, floorf(p.pixel_y - ey)))),
-        unsigned short(fmaxf(0.f, fminf(65535.f, floorf(p.pixel_y + ey) + 1.f))));
+        static_cast<unsigned short>(fmaxf(0.f, fminf(65535.f, floorf(p.pixel_x - ex)))),
+        static_cast<unsigned short>(fmaxf(0.f, fminf(65535.f, floorf(p.pixel_x + ex) + 1.f))),
+        static_cast<unsigned short>(fmaxf(0.f, fminf(65535.f, floorf(p.pixel_y - ey)))),
+        static_cast<unsigned short>(fmaxf(0.f, fminf(65535.f, floorf(p.pixel_y + ey) + 1.f))));
 }
 
 // Emits (depth key, gaussian id) pairs in gaussian-index order; the stable
