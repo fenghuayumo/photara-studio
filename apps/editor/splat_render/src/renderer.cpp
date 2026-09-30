@@ -30,6 +30,13 @@ VkShaderModule shader_module(VkDevice device, const std::uint32_t* words, std::s
     return module;
 }
 
+void submit_queue(
+    const photara::vk::Device& runtime, const VkQueue queue,
+    const VkSubmitInfo& submit, const VkFence fence) {
+    photara::vk::QueueLock lock(runtime);
+    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
+}
+
 float activated_opacity(const float logit) {
     if (logit >= 0.F) {
         const float z = std::exp(-logit);
@@ -109,18 +116,21 @@ struct Renderer::EwaPreview {
 
 Renderer::~Renderer() { reset(); }
 
-void Renderer::attach(const Device& device) {
-    if (device_ == device.device && device_ != VK_NULL_HANDLE) {
-        physical_ = device.physical;
-        queue_ = device.queue;
-        family_ = device.queue_family;
+void Renderer::attach(const photara::vk::Device& runtime) {
+    if (!runtime.valid()) return;
+    if (device_ == runtime.handle() && runtime_.valid()) {
+        runtime_ = runtime;
+        physical_ = runtime.physical();
+        queue_ = runtime.queue();
+        family_ = runtime.queue_family();
         return;
     }
     reset();
-    physical_ = device.physical;
-    device_ = device.device;
-    queue_ = device.queue;
-    family_ = device.queue_family;
+    runtime_ = runtime;
+    physical_ = runtime.physical();
+    device_ = runtime.handle();
+    queue_ = runtime.queue();
+    family_ = runtime.queue_family();
     supported_ = true;
     failure_.clear();
 }
@@ -139,7 +149,15 @@ void Renderer::reset() {
         frame_mapped_ = nullptr;
         return;
     }
-    vkDeviceWaitIdle(device_);
+    if (runtime_.valid()) {
+        photara::vk::QueueLock lock(runtime_);
+        vkDeviceWaitIdle(device_);
+    } else if (queue_ != VK_NULL_HANDLE) {
+        photara::vk::QueueLock lock(queue_);
+        vkDeviceWaitIdle(device_);
+    } else {
+        vkDeviceWaitIdle(device_);
+    }
     destroy_frames();
     destroy_storage(centers_);
     destroy_storage(scales_);
@@ -307,7 +325,7 @@ void Renderer::upload_storage(
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
-    check(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit");
+    submit_queue(runtime_, queue_, submit, fence_);
     wait_gpu();
     destroy_storage(staging);
 }
@@ -336,19 +354,7 @@ void Renderer::write_descriptors() {
     vkUpdateDescriptorSets(device_, 15, writes, 0, nullptr);
 }
 
-bool Renderer::ensure_runtime() {
-    if (runtime_.valid()) return true;
-    if (device_ == VK_NULL_HANDLE || physical_ == VK_NULL_HANDLE || queue_ == VK_NULL_HANDLE)
-        return false;
-    photara::vk::ExternalDevice external;
-    external.physical = physical_;
-    external.device = device_;
-    external.queue = queue_;
-    external.queue_family = family_;
-    external.enabled.graphics = true;
-    runtime_ = photara::vk::Device::adopt(external);
-    return runtime_.valid();
-}
+bool Renderer::ensure_runtime() { return runtime_.valid(); }
 
 bool Renderer::ensure_device() {
     if (device_ == VK_NULL_HANDLE) {
@@ -691,7 +697,7 @@ bool Renderer::update_centers(const float* centers, const std::uint32_t count) {
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
-    check(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit");
+    submit_queue(runtime_, queue_, submit, fence_);
     wait_gpu();
     destroy_storage(staging);
     cache_valid_ = false;
@@ -870,7 +876,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
-    check(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit");
+    submit_queue(runtime_, queue_, submit, fence_);
 
     display_ = write_;
     write_ = (write_ + 1) % k_frames;
@@ -1083,7 +1089,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
-    check(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit");
+    submit_queue(runtime_, queue_, submit, fence_);
 
     image.sampled = true;
     display_ = write_;
@@ -1158,7 +1164,7 @@ bool Renderer::download_rgb(
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
-    check(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit");
+    submit_queue(runtime_, queue_, submit, fence_);
     wait_gpu();
 
     void* mapped{};

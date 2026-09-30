@@ -21,6 +21,7 @@ VkPhysicalDevice g_physical_device{};
 VkDevice g_device{};
 std::uint32_t g_queue_family = UINT32_MAX;
 VkQueue g_queue{};
+photara::vk::Device g_runtime;
 VkDescriptorPool g_descriptor_pool{};
 ImGui_ImplVulkanH_Window g_window{};
 bool g_rebuild_swapchain{};
@@ -38,6 +39,16 @@ std::uint64_t g_consumed_value{};
 // Preview frames copied out of the shared image. Published to the trainer so it
 // can skip a preview instead of waiting for the editor to catch up.
 std::uint64_t g_copied_frames{};
+
+void idle_queue() {
+    if (g_device == VK_NULL_HANDLE) return;
+    if (g_queue == VK_NULL_HANDLE) {
+        check(vkDeviceWaitIdle(g_device));
+        return;
+    }
+    photara::vk::QueueLock lock(g_queue);
+    check(vkDeviceWaitIdle(g_device));
+}
 
 bool has_extension(
     const ImVector<VkExtensionProperties>& properties, const char* name) {
@@ -115,7 +126,10 @@ void record_shared_copy(VkCommandBuffer command) {
 class OneShotRecorder {
 public:
     OneShotRecorder() {
-        check(vkQueueWaitIdle(g_queue));
+        {
+            photara::vk::QueueLock lock(g_queue);
+            check(vkQueueWaitIdle(g_queue));
+        }
         VkCommandPoolCreateInfo pool_info{
             VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pool_info.queueFamilyIndex = g_queue_family;
@@ -146,8 +160,11 @@ public:
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &command_;
-        check(vkQueueSubmit(g_queue, 1, &submit, {}));
-        check(vkQueueWaitIdle(g_queue));
+        {
+            photara::vk::QueueLock lock(g_queue);
+            check(vkQueueSubmit(g_queue, 1, &submit, {}));
+            check(vkQueueWaitIdle(g_queue));
+        }
         vkDestroyCommandPool(g_device, pool_, nullptr);
         pool_ = {};
         command_ = {};
@@ -172,6 +189,8 @@ VkPhysicalDevice physical_device() { return g_physical_device; }
 VkDevice device() { return g_device; }
 std::uint32_t queue_family() { return g_queue_family; }
 VkQueue queue() { return g_queue; }
+const photara::vk::Device& runtime() { return g_runtime; }
+void wait_idle() { idle_queue(); }
 VkDescriptorPool descriptor_pool() { return g_descriptor_pool; }
 ImGui_ImplVulkanH_Window& window() { return g_window; }
 std::uint64_t device_luid() { return g_device_luid; }
@@ -262,6 +281,42 @@ void create_context(ImVector<const char*> extensions) {
     pool.pPoolSizes = sizes.data();
     check(vkCreateDescriptorPool(
         g_device, &pool, nullptr, &g_descriptor_pool));
+
+    photara::vk::ExternalDevice external;
+    external.instance = g_instance;
+    external.physical = g_physical_device;
+    external.device = g_device;
+    external.queue = g_queue;
+    external.queue_family = g_queue_family;
+    external.enabled.present = true;
+    external.enabled.timeline_semaphore = true;
+#if defined(_WIN32)
+    external.enabled.external_memory_win32 = true;
+    external.enabled.external_semaphore_win32 = true;
+#endif
+    std::uint32_t family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(
+        g_physical_device, &family_count, nullptr);
+    if (g_queue_family < family_count) {
+        std::vector<VkQueueFamilyProperties> families(family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(
+            g_physical_device, &family_count, families.data());
+        external.enabled.graphics =
+            (families[g_queue_family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+    }
+    try {
+        g_runtime = photara::vk::Device::adopt(external);
+    } catch (...) {
+        vkDestroyDescriptorPool(g_device, g_descriptor_pool, nullptr);
+        g_descriptor_pool = {};
+        vkDestroyDevice(g_device, nullptr);
+        g_device = {};
+        g_queue = {};
+        vkDestroyInstance(g_instance, nullptr);
+        g_instance = {};
+        g_physical_device = {};
+        throw;
+    }
 }
 
 void create_window(VkSurfaceKHR surface, const int width, const int height) {
@@ -295,11 +350,24 @@ void resize_window(const int width, const int height) {
 
 void destroy_context() {
     ImGui_ImplVulkanH_DestroyWindow(g_instance, g_device, &g_window, nullptr);
-    vkDestroyDescriptorPool(g_device, g_descriptor_pool, nullptr);
-    vkDestroyDevice(g_device, nullptr);
-    vkDestroyInstance(g_instance, nullptr);
+    if (g_device != VK_NULL_HANDLE && g_descriptor_pool != VK_NULL_HANDLE)
+        vkDestroyDescriptorPool(g_device, g_descriptor_pool, nullptr);
+    g_descriptor_pool = {};
+    // The adopted runtime may own a command pool. Drop it while VkDevice lives.
+    g_runtime = {};
+    if (g_device != VK_NULL_HANDLE) {
+        if (g_queue != VK_NULL_HANDLE) {
+            photara::vk::QueueLock lock(g_queue);
+            vkDestroyDevice(g_device, nullptr);
+        } else {
+            vkDestroyDevice(g_device, nullptr);
+        }
+    }
     g_device = {};
+    g_queue = {};
+    if (g_instance != VK_NULL_HANDLE) vkDestroyInstance(g_instance, nullptr);
     g_instance = {};
+    g_physical_device = {};
 }
 
 void present(ImDrawData* draw, const ImVec4& clear_colour) {
@@ -369,19 +437,22 @@ void present(ImDrawData* draw, const ImVec4& clear_colour) {
     submit.pCommandBuffers = &frame.CommandBuffer;
     submit.signalSemaphoreCount = copy_shared ? 2U : 1U;
     submit.pSignalSemaphores = signals.data();
-    check(vkQueueSubmit(g_queue, 1, &submit, frame.Fence));
-    if (copy_shared) {
-        g_consumed_value = g_ready_value;
-        ++g_copied_frames;
-    }
+    {
+        photara::vk::QueueLock lock(g_queue);
+        check(vkQueueSubmit(g_queue, 1, &submit, frame.Fence));
+        if (copy_shared) {
+            g_consumed_value = g_ready_value;
+            ++g_copied_frames;
+        }
 
-    VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-    info.waitSemaphoreCount = 1;
-    info.pWaitSemaphores = &complete;
-    info.swapchainCount = 1;
-    info.pSwapchains = &wd.Swapchain;
-    info.pImageIndices = &wd.FrameIndex;
-    result = vkQueuePresentKHR(g_queue, &info);
+        VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        info.waitSemaphoreCount = 1;
+        info.pWaitSemaphores = &complete;
+        info.swapchainCount = 1;
+        info.pSwapchains = &wd.Swapchain;
+        info.pImageIndices = &wd.FrameIndex;
+        result = vkQueuePresentKHR(g_queue, &info);
+    }
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
         g_rebuild_swapchain = true;
     else
@@ -402,7 +473,7 @@ std::uint32_t memory_type(
 
 void PreviewTexture::reset() {
     if (!g_device) return;
-    vkDeviceWaitIdle(g_device);
+    idle_queue();
     if (descriptor) ImGui_ImplVulkan_RemoveTexture(descriptor);
     if (sampler) vkDestroySampler(g_device, sampler, nullptr);
     if (view) vkDestroyImageView(g_device, view, nullptr);
@@ -889,7 +960,7 @@ void ExternalPreview::consume_without_present() {
 
 void ExternalPreview::reset() {
     if (!g_device) return;
-    vkDeviceWaitIdle(g_device);
+    idle_queue();
     g_external_image = {};
     g_display_image = {};
     g_external_timeline = {};
@@ -1119,8 +1190,11 @@ bool create_buffer_with_data(
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command;
-    check(vkQueueSubmit(g_queue, 1, &submit, {}));
-    check(vkQueueWaitIdle(g_queue));
+    {
+        photara::vk::QueueLock lock(g_queue);
+        check(vkQueueSubmit(g_queue, 1, &submit, {}));
+        check(vkQueueWaitIdle(g_queue));
+    }
     vkDestroyCommandPool(g_device, pool, nullptr);
     vkDestroyBuffer(g_device, staging, nullptr);
     vkFreeMemory(g_device, staging_memory, nullptr);
@@ -1238,8 +1312,11 @@ void upload_sampled_image(
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command;
-    check(vkQueueSubmit(g_queue, 1, &submit, {}));
-    check(vkQueueWaitIdle(g_queue));
+    {
+        photara::vk::QueueLock lock(g_queue);
+        check(vkQueueSubmit(g_queue, 1, &submit, {}));
+        check(vkQueueWaitIdle(g_queue));
+    }
     vkDestroyCommandPool(g_device, pool, nullptr);
     vkDestroyBuffer(g_device, staging, nullptr);
     vkFreeMemory(g_device, staging_memory, nullptr);
@@ -1259,7 +1336,7 @@ void MeshPreviewRenderer::destroy_mesh_buffers() {
         edge_count_ = 0;
         return;
     }
-    vkDeviceWaitIdle(g_device);
+    idle_queue();
     destroy_buffer(vertex_buffer_, vertex_memory_);
     destroy_buffer(index_buffer_, index_memory_);
     destroy_buffer(edge_buffer_, edge_memory_);
@@ -1276,7 +1353,7 @@ void MeshPreviewRenderer::destroy_frames() {
         write_ = 0;
         return;
     }
-    vkDeviceWaitIdle(g_device);
+    idle_queue();
     for (Frame& frame : frames_) {
         if (frame.descriptor)
             ImGui_ImplVulkan_RemoveTexture(frame.descriptor);
@@ -1305,7 +1382,7 @@ void MeshPreviewRenderer::destroy_albedo() {
         albedo_height_ = 0;
         return;
     }
-    vkDeviceWaitIdle(g_device);
+    idle_queue();
     if (albedo_view_) vkDestroyImageView(g_device, albedo_view_, nullptr);
     if (albedo_image_) vkDestroyImage(g_device, albedo_image_, nullptr);
     if (albedo_memory_) vkFreeMemory(g_device, albedo_memory_, nullptr);
@@ -1332,7 +1409,7 @@ void MeshPreviewRenderer::destroy_pipeline() {
         command_pool_ = {};
         return;
     }
-    vkDeviceWaitIdle(g_device);
+    idle_queue();
     // The wire pipeline borrows the fill pipeline's layout.
     wire_pipeline_ = {};
     fill_pipeline_ = {};
@@ -1352,16 +1429,9 @@ void MeshPreviewRenderer::reset() {
 
 bool MeshPreviewRenderer::ensure_runtime() {
     if (runtime_.valid()) return true;
-    if (!g_device || !g_physical_device || !g_queue) return false;
-    photara::vk::ExternalDevice external;
-    external.instance = g_instance;
-    external.physical = g_physical_device;
-    external.device = g_device;
-    external.queue = g_queue;
-    external.queue_family = g_queue_family;
-    external.enabled.graphics = true;
-    runtime_ = photara::vk::Device::adopt(external);
-    return runtime_.valid();
+    if (!g_runtime.valid()) return false;
+    runtime_ = g_runtime;
+    return true;
 }
 
 bool MeshPreviewRenderer::ensure_pipeline() {
@@ -1510,7 +1580,7 @@ void MeshPreviewRenderer::set_albedo(const photara::io::RgbImage& atlas) {
     if (atlas.width == 0 || atlas.height == 0 || atlas.pixels.size() <
             static_cast<std::size_t>(atlas.width) * atlas.height * 3U) {
         if (albedo_width_ != 1 || albedo_height_ != 1) {
-            vkDeviceWaitIdle(g_device);
+            idle_queue();
             const std::uint8_t white[4] = {255, 255, 255, 255};
             create_sampled_image(
                 albedo_image_, albedo_memory_, albedo_view_, 1, 1);
@@ -1521,7 +1591,7 @@ void MeshPreviewRenderer::set_albedo(const photara::io::RgbImage& atlas) {
         }
         return;
     }
-    vkDeviceWaitIdle(g_device);
+    idle_queue();
     create_sampled_image(
         albedo_image_, albedo_memory_, albedo_view_, atlas.width, atlas.height);
     std::vector<std::uint8_t> rgba(
@@ -1738,7 +1808,10 @@ bool MeshPreviewRenderer::draw(
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &frame.command;
-    check(vkQueueSubmit(g_queue, 1, &submit, frame.fence));
+    {
+        photara::vk::QueueLock lock(g_queue);
+        check(vkQueueSubmit(g_queue, 1, &submit, frame.fence));
+    }
     display_ = write_;
     write_ = (write_ + 1) % k_frames;
     return frame.descriptor != VK_NULL_HANDLE;

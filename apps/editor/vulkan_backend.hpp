@@ -40,6 +40,10 @@ VkPhysicalDevice physical_device();
 VkDevice device();
 std::uint32_t queue_family();
 VkQueue queue();
+// Editor device view. Copies share its queue gate and do not own VkDevice.
+// Valid after create_context until destroy_context.
+[[nodiscard]] const photara::vk::Device& runtime();
+void wait_idle();
 VkDescriptorPool descriptor_pool();
 ImGui_ImplVulkanH_Window& window();
 
@@ -204,8 +208,8 @@ private:
     bool ensure_frames(std::uint32_t width, std::uint32_t height);
     void bind_albedo_view(VkImageView view);
 
-    // Adopted view of the editor device. It does not own VkDevice. Drop it
-    // after the images and pipelines, and before the editor destroys g_device.
+    // Copy of editor::gpu::runtime(). It does not own VkDevice. Drop it after
+    // the images and pipelines, and before destroy_context.
     photara::vk::Device runtime_;
     photara::vk::RenderPass render_pass_;
     photara::vk::GraphicsPipeline fill_pipeline_;

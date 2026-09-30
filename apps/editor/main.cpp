@@ -332,7 +332,7 @@ int main(const int argc, char** argv) {
 
     if (app.job.running()) app.job.stop();
     editor::cleanup_cache_session(app);
-    vkDeviceWaitIdle(editor::gpu::device());
+    editor::gpu::wait_idle();
     app.image_qa_session.clear();
     app.photos.clear();
     app.atlas_preview.reset();

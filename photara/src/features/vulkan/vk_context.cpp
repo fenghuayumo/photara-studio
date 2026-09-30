@@ -478,7 +478,15 @@ Context::~Context() {
         if (instance_ != VK_NULL_HANDLE) vkDestroyInstance(instance_, nullptr);
         return;
     }
-    vkDeviceWaitIdle(device_);
+    if (runtime_.valid()) {
+        photara::vk::QueueLock lock(runtime_);
+        vkDeviceWaitIdle(device_);
+    } else if (queue_ != VK_NULL_HANDLE) {
+        photara::vk::QueueLock lock(queue_);
+        vkDeviceWaitIdle(device_);
+    } else {
+        vkDeviceWaitIdle(device_);
+    }
     sessions.clear();
     for (photara::vk::ComputePipeline& pipeline : pipelines_) pipeline = {};
     runtime_ = {};

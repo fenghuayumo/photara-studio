@@ -181,7 +181,17 @@ public:
     ~Impl() {
         // Pending submissions may still reference these command buffers, their
         // descriptor sets and the buffers they bound.
-        if (context_.device != VK_NULL_HANDLE) vkDeviceWaitIdle(context_.device);
+        if (context_.device != VK_NULL_HANDLE) {
+            if (context_.runtime.valid()) {
+                photara::vk::QueueLock lock(context_.runtime);
+                vkDeviceWaitIdle(context_.device);
+            } else if (context_.queue != VK_NULL_HANDLE) {
+                photara::vk::QueueLock lock(context_.queue);
+                vkDeviceWaitIdle(context_.device);
+            } else {
+                vkDeviceWaitIdle(context_.device);
+            }
+        }
         if (backward_timestamp_pool_ != VK_NULL_HANDLE) {
             vkDestroyQueryPool(context_.device, backward_timestamp_pool_, nullptr);
         }
@@ -2432,7 +2442,14 @@ private:
     // referenced, so a buffer that has to be replaced waits for the queue first.
     // Only the growth path (warmup, topology changes) pays this.
     void drain_before_replace(const Buffer& buffer) const {
-        if (buffer.handle != VK_NULL_HANDLE) vkQueueWaitIdle(context_.queue);
+        if (buffer.handle != VK_NULL_HANDLE) {
+            if (context_.runtime.valid()) {
+                photara::vk::QueueLock lock(context_.runtime);
+                vkQueueWaitIdle(context_.queue);
+            } else {
+                vkQueueWaitIdle(context_.queue);
+            }
+        }
     }
 
     void dispatch(const ComputePipeline& pipeline, const std::vector<Buffer*>& buffers, const Push& push,

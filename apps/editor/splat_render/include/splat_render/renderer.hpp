@@ -67,13 +67,6 @@ struct FrameTarget {
     std::uint32_t height{};
 };
 
-struct Device {
-    VkPhysicalDevice physical{};
-    VkDevice device{};
-    VkQueue queue{};
-    std::uint32_t queue_family{VK_QUEUE_FAMILY_IGNORED};
-};
-
 // Vulkan splat preview. Gaussian shading uses the photara_drender EWA forward
 // so it matches training. Rings stay on this device.
 class Renderer {
@@ -83,7 +76,7 @@ public:
     Renderer& operator=(const Renderer&) = delete;
     ~Renderer();
 
-    void attach(const Device& device);
+    void attach(const photara::vk::Device& runtime);
     [[nodiscard]] bool attached() const noexcept { return device_ != VK_NULL_HANDLE; }
 
     bool upload(const GaussianCloud& cloud, std::string_view source_key);
@@ -151,8 +144,7 @@ private:
     VkDevice device_{};
     VkQueue queue_{};
     std::uint32_t family_{VK_QUEUE_FAMILY_IGNORED};
-    // Adopted view of device_. It does not own the VkDevice. Drop it while
-    // device_ is still alive.
+    // Copy of the editor device. It does not own VkDevice.
     photara::vk::Device runtime_;
 
     std::string source_key_;

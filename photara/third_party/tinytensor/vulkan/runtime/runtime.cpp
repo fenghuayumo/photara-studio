@@ -289,7 +289,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::SortBitonic, as_bytes(span{sort_bitonic_hlsl_spv}), 4, 28},
         {ShaderId::Prune, as_bytes(span{prune_hlsl_spv}), 8, 44},
         {ShaderId::PanoramaSizes, as_bytes(span{panorama_sizes_hlsl_spv}), 4, 24},
-        {ShaderId::Select, as_bytes(span{select_hlsl_spv}), 4, 48},
+        {ShaderId::Select, as_bytes(span{select_hlsl_spv}), 4, 56},
         {ShaderId::Gather, as_bytes(span{gather_hlsl_spv}), 3, 104},
         {ShaderId::ReduceAllArg, as_bytes(span{reduce_all_arg_hlsl_spv}), 2, 24},
         {ShaderId::ReduceAxis, as_bytes(span{reduce_axis_hlsl_spv}), 2, 44},
@@ -740,7 +740,15 @@ void Context::destroy() {
             }
         } catch (...) {
         }
-        vkDeviceWaitIdle(device_);
+        if (runtime_.valid()) {
+            photara::vk::QueueLock lock(runtime_);
+            vkDeviceWaitIdle(device_);
+        } else if (queue_ != VK_NULL_HANDLE) {
+            photara::vk::QueueLock lock(queue_);
+            vkDeviceWaitIdle(device_);
+        } else {
+            vkDeviceWaitIdle(device_);
+        }
     }
     if (op_profile_.enabled) {
         // Report the run total before the pool goes away: a training run ends
@@ -1237,8 +1245,11 @@ void Context::upload_async(
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &slot.command;
-    check(vkQueueSubmit(queue_, 1, &submit, slot.fence),
-          "vkQueueSubmit(upload)");
+    {
+        photara::vk::QueueLock lock(runtime_.valid() ? runtime_.queue() : queue_);
+        check(vkQueueSubmit(queue_, 1, &submit, slot.fence),
+              "vkQueueSubmit(upload)");
+    }
     slot.in_flight = true;
 }
 

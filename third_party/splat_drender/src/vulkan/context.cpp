@@ -632,9 +632,18 @@ void Context::Impl::create_pools() {
 
 Context::Impl::~Impl() {
     if (device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(device);
+        if (runtime.valid()) {
+            photara::vk::QueueLock lock(runtime);
+            vkDeviceWaitIdle(device);
+        } else if (queue != VK_NULL_HANDLE) {
+            photara::vk::QueueLock lock(queue);
+            vkDeviceWaitIdle(device);
+        } else {
+            vkDeviceWaitIdle(device);
+        }
         // Members outlive this body: release the staging buffer while the
-        // device it was allocated from still exists.
+        // device it was allocated from still exists. Drop the adopted runtime
+        // before vkDestroyDevice so its command pool goes first.
         staging_ = Buffer{};
         runtime = {};
         vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
@@ -668,8 +677,8 @@ void Context::Impl::ensure_staging(const VkDeviceSize bytes) {
                              BufferMemory::host_visible);
 }
 
-// One-shot copy on the compute queue. Callers hold dispatch_mutex, so the
-// queue is ours for the length of the submit.
+// One-shot copy on the compute queue. Callers hold dispatch_mutex. The queue
+// lock is the same gate photara_vk uses, taken only around the submit.
 void Context::Impl::copy_between(
     const Buffer& source, const std::size_t source_offset, const Buffer& destination,
     const std::size_t destination_offset, const std::size_t byte_size) {
@@ -692,8 +701,11 @@ void Context::Impl::copy_between(
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command;
-    check_vk(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
-    check_vk(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
+    {
+        photara::vk::QueueLock lock(runtime);
+        check_vk(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
+        check_vk(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
+    }
     vkFreeCommandBuffers(device, command_pool, 1, &command);
 }
 
@@ -751,8 +763,11 @@ void Context::Impl::fill_buffer(const Buffer& destination, const std::uint32_t v
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command;
-    check_vk(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
-    check_vk(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
+    {
+        photara::vk::QueueLock lock(runtime);
+        check_vk(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
+        check_vk(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
+    }
     vkFreeCommandBuffers(device, command_pool, 1, &command);
 }
 

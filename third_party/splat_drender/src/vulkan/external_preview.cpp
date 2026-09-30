@@ -10,6 +10,8 @@
 
 #include "splat_drender/vulkan_api.h"
 
+#include "photara_vk/device.hpp"
+
 #include "splat_preview_pack.hlsl.embedded.hpp"
 
 #include <array>
@@ -70,6 +72,9 @@ struct ExternalImagePreview::Impl {
 
     ~Impl() {
         if (device.device == VK_NULL_HANDLE) return;
+        std::unique_ptr<photara::vk::QueueLock> queue_lock;
+        if (device.queue != VK_NULL_HANDLE)
+            queue_lock = std::make_unique<photara::vk::QueueLock>(device.queue);
         vkDeviceWaitIdle(device.device);
         if (command_pool != VK_NULL_HANDLE)
             vkDestroyCommandPool(device.device, command_pool, nullptr);
@@ -319,9 +324,10 @@ void ExternalImagePreview::submit(
         source_height == 0) {
         throw std::invalid_argument("Vulkan preview requires a device RGB buffer");
     }
-    // The rasterizer submitted the color write without waiting. Drain that
-    // queue before this buffer is read, then wait again after the copy so the
-    // caller's tensor can be released.
+    // The rasterizer submitted the color write without waiting. Hold the queue
+    // gate from that drain through the copy so another submit cannot land
+    // between them. The caller's tensor is released only after the second wait.
+    photara::vk::QueueLock lock(impl_->device.queue);
     check(vkQueueWaitIdle(impl_->device.queue), "wait for the preview source");
 
     VkDescriptorBufferInfo source{};

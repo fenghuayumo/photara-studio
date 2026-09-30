@@ -3282,9 +3282,7 @@ bool ensure_splat_renderer(App& app) {
     // The CUDA live preview owns the viewport while it streams.
     if (live_preview_active(app)) return false;
     if (!app.splat_renderer.attached()) {
-        app.splat_renderer.attach(splat_render::Device{
-            gpu::physical_device(), gpu::device(), gpu::queue(),
-            gpu::queue_family()});
+        app.splat_renderer.attach(gpu::runtime());
     }
     std::string key;
     try {
