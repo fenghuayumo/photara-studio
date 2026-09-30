@@ -56,8 +56,7 @@ The implementation currently includes:
 
 OpenCV is intentionally not part of the default dependency graph. JPEG and PNG
 use their native libraries, FreeImage handles the remaining supported image
-formats, the built-in SIFT path uses the vendored VLFeat sources, and the core
-geometry code uses Eigen, PoseLib, and Ceres.
+formats, and the core geometry code uses Eigen, PoseLib, and Ceres.
 
 ## Repository layout
 
@@ -69,7 +68,7 @@ geometry code uses Eigen, PoseLib, and Ceres.
 │   ├── include/                 Public C++ headers
 │   ├── src/                     BA, features, SfM, MVS, splat, texture, and tools
 │   ├── tests/                   Correctness and regression tests
-│   └── third_party/             Small source dependencies such as VLFeat
+│   └── third_party/             Small source dependencies
 ├── python/                      nanobind module, utilities, and experiments
 ├── third_party/
 │   ├── photara_drender/         Texture and mesh-processing submodule
@@ -100,11 +99,6 @@ Optional or feature-specific requirements are:
 - ONNX Runtime for learned feature backends, LightGlue, and delighting;
 - FFmpeg on `PATH`, or an explicit `--ffmpeg` executable, for video input;
 - a DXC-capable Vulkan SDK when the TinyTensor Vulkan compute backend is used.
-
-The intrinsic/delight model weights have their own licensing boundary; see
-[`docs/LICENSE-Intrinsic.md`](docs/LICENSE-Intrinsic.md). The default CUDA
-SIFT extractor is project code. CPU SIFT still uses the vendored VLFeat
-sources.
 
 ## Build
 
@@ -427,6 +421,6 @@ Photara's own source in this repository is licensed under the Apache License,
 Version 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
 
 Third-party code, optional backends, and model weights keep their upstream
-terms. Delight/Intrinsic weights are documented in
-[`docs/LICENSE-Intrinsic.md`](docs/LICENSE-Intrinsic.md). Review every enabled
-optional dependency before distribution.
+terms. The intrinsic/delight model weights have their own licensing boundary;
+see [`docs/LICENSE-Intrinsic.md`](docs/LICENSE-Intrinsic.md). Review every
+enabled optional dependency before distribution.
