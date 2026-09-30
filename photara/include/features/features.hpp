@@ -58,7 +58,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// ---- Optional SiftGPU -----------------------------------------------------------
+// ---- CUDA SIFT (the default "siftgpu" extractor) ----------------------------
 
 struct SiftGpuOptions {
     std::size_t maximum_features{8192};
@@ -72,8 +72,8 @@ struct SiftGpuOptions {
     bool root_sift{true};
 };
 
-// Optional adapter around Changchang Wu's SiftGPU. Upstream license is
-// non-commercial; never enabled by default. Context/thread-affine.
+// Native CUDA SIFT. The name stays "siftgpu" so existing frontends keep the
+// same default. One owner thread owns the reusable device buffers.
 class SiftGpuExtractor final : public FeatureExtractor {
 public:
     explicit SiftGpuExtractor(SiftGpuOptions options = {});
@@ -116,8 +116,9 @@ struct SiftGpuMatcherOptions {
     bool native_cuda{true};
 };
 
-// SiftMatchGPU CUDA matcher. The underlying context is thread-affine, so
-// callers must submit pairs from the thread that constructs this matcher.
+// Native CUDA mutual-ratio matcher. Callers submit pairs from the thread that
+// constructed the matcher. Float descriptors are quantized to the uint8
+// matcher input without modifying the caller's feature set.
 class SiftGpuMatcher final : public FeatureMatcher {
 public:
     explicit SiftGpuMatcher(SiftGpuMatcherOptions options = {});

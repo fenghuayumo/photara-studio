@@ -57,7 +57,7 @@ Entry point: `sfm::run_frontend` in `src/sfm/frontend.cpp`, logged as stage
 
 | Backend | Description |
 |---|---|
-| `siftgpu` (default) | CUDA SiftGPU; `--sift-contrast` controls the peak threshold |
+| `siftgpu` (default) | Native CUDA SIFT; `--sift-contrast` controls the peak threshold |
 | `sift` | Built-in VLFeat SIFT/RootSIFT fallback |
 | `superpoint`, `disk`, `aliked` | ONNX extractors configured by `--extractor-model` |
 

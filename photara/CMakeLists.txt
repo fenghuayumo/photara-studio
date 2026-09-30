@@ -343,7 +343,9 @@ if(PHOTARA_ENABLE_FEATURES)
         endif()
     endif()
     if(PHOTARA_ENABLE_CUDA)
-        add_library(photara_match_cuda STATIC src/features/matcher_cuda.cu)
+        add_library(photara_match_cuda STATIC
+            src/features/matcher_cuda.cu
+            src/features/sift_cuda.cu)
         target_include_directories(photara_match_cuda PRIVATE include)
         target_compile_features(photara_match_cuda PUBLIC cxx_std_20)
         target_link_libraries(photara_match_cuda PUBLIC CUDA::cudart)
@@ -374,17 +376,6 @@ if(PHOTARA_ENABLE_FEATURES)
         target_compile_options(photara_features PRIVATE /arch:AVX2)
     elseif(PHOTARA_ENABLE_NATIVE_ARCH)
         target_compile_options(photara_features PRIVATE -march=native)
-    endif()
-    if(PHOTARA_ENABLE_SIFTGPU)
-        find_package(siftgpu CONFIG REQUIRED)
-        target_link_libraries(photara_features PRIVATE siftgpu::siftgpu)
-        target_compile_definitions(photara_features PRIVATE PHOTARA_HAS_SIFTGPU=1)
-        if(WIN32)
-            add_custom_command(TARGET photara_features POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "$<TARGET_FILE:siftgpu::siftgpu>"
-                    "$<TARGET_FILE_DIR:photara_features>")
-        endif()
     endif()
     if(PHOTARA_HAS_ONNXRUNTIME AND TARGET onnxruntime::onnxruntime)
         target_link_libraries(photara_features PRIVATE onnxruntime::onnxruntime)
@@ -482,7 +473,7 @@ if(PHOTARA_ENABLE_FEATURES)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         ${PHOTARA_FRONTEND_CACHE_ID_FILES} ${PHOTARA_RECONSTRUCTION_CACHE_ID_FILES})
     set(_photara_cache_build_options
-        "cuda=${PHOTARA_ENABLE_CUDA};siftgpu=${PHOTARA_ENABLE_SIFTGPU};onnx=${PHOTARA_HAS_ONNXRUNTIME}\n")
+        "cuda=${PHOTARA_ENABLE_CUDA};onnx=${PHOTARA_HAS_ONNXRUNTIME}\n")
     function(photara_source_fingerprint output files_variable)
         set(_material "${_photara_cache_build_options}")
         foreach(_cache_id_file IN LISTS ${files_variable})
@@ -998,6 +989,12 @@ if(PHOTARA_BUILD_BENCHMARKS)
     if(TARGET photara_features)
         add_executable(photara_features_match src/tools/features_match.cpp)
         target_link_libraries(photara_features_match PRIVATE Photara::Features)
+        if(PHOTARA_ENABLE_CUDA)
+            add_executable(photara_cuda_sift_benchmark
+                src/tools/cuda_sift_benchmark.cpp)
+            target_link_libraries(photara_cuda_sift_benchmark PRIVATE
+                Photara::Features CUDA::cudart)
+        endif()
         if(WIN32)
             add_custom_command(TARGET photara_features_match POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -1009,6 +1006,15 @@ if(PHOTARA_BUILD_BENCHMARKS)
         add_executable(photara_sfm_realign src/tools/sfm_realign.cpp)
         add_executable(photara_sfm_match_benchmark src/tools/sfm_match_benchmark.cpp)
         add_executable(photara_sfm_positioning_benchmark src/tools/sfm_positioning_benchmark.cpp)
+        add_executable(photara_sfm_feature_compare
+            src/tools/sfm_feature_compare.cpp)
+        target_link_libraries(photara_sfm_feature_compare PRIVATE Photara::SfM)
+        if(TARGET photara_splat)
+            add_executable(photara_sfm_reference_eval
+                src/tools/sfm_reference_eval.cpp)
+            target_link_libraries(photara_sfm_reference_eval PRIVATE
+                Photara::SfM Photara::Splat)
+        endif()
         target_link_libraries(photara_sfm_positioning_benchmark PRIVATE Photara::SfM)
         if(WIN32)
             add_custom_command(TARGET photara_sfm_positioning_benchmark POST_BUILD
@@ -1064,10 +1070,13 @@ if(PHOTARA_BUILD_BENCHMARKS)
         photara_ba_benchmark
         photara_bearing_backend_benchmark
         photara_features_match
+        photara_cuda_sift_benchmark
         photara_pair_verify
         photara_sfm_realign
         photara_sfm_match_benchmark
         photara_sfm_positioning_benchmark
+        photara_sfm_feature_compare
+        photara_sfm_reference_eval
         photara_triangulation_benchmark
         photara_mvs_compare)
 endif()

@@ -32,19 +32,19 @@ Default behavior is unchanged: `siftgpu` × `gpu_mutual_ratio`
 ## Vulkan translation of the default path
 
 `vulkan_sift` × `vulkan_mutual_ratio` is a Vulkan compute (HLSL/SPIR-V)
-translation of the same algorithms the default path runs on CUDA: the SiftGPU
-SIFT pipeline (Gaussian pyramid with 2x upsampling, DoG, histogram-pyramid
-keypoint compaction, multi-orientation, UBC descriptors) and photara's native
-CUDA mutual-ratio matcher (32x32 descriptor dot-product tiles, angular
-distance `acos(dot / 262144) < 0.7`, ratio test, mutual check). Parameters
-map one-to-one (`--max-features`, `--sift-contrast-threshold`,
+translation of the same algorithms the default path runs on CUDA. The default
+`siftgpu` extractor is Photara's CUDA implementation of that pipeline
+(Gaussian pyramid with 2x upsampling, DoG, sub-pixel extrema, multi-orientation,
+UBC descriptors). It does not link an external SiftGPU library. Matching stays
+on photara's CUDA mutual-ratio matcher (32x32 descriptor dot-product tiles,
+angular distance `acos(dot / 262144) < 0.7`, ratio test, mutual check).
+Parameters map one-to-one (`--max-features`, `--sift-contrast-threshold`,
 `--match-ratio`, `--no-mutual-check`).
 
-When SiftGPU cannot create its CUDA context but a Vulkan compute device is
-available, the frontend canonicalizes the default `siftgpu` ×
-`gpu_mutual_ratio` selection to `vulkan_sift` × `vulkan_mutual_ratio`, so the
-reconstruction workflow runs end to end on machines without CUDA. Checkpoints
-record the canonicalized backend names.
+When CUDA is unavailable but a Vulkan compute device is available, the
+frontend canonicalizes the default `siftgpu` × `gpu_mutual_ratio` selection
+to `vulkan_sift` × `vulkan_mutual_ratio`, so reconstruction still runs.
+Checkpoints record the canonicalized backend names.
 
 The Vulkan matcher keeps the CUDA matcher's integer top-two reductions exact;
 accepted matches can differ only at `acos` rounding boundaries. On the pairs

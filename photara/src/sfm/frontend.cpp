@@ -157,11 +157,10 @@ void normalize_feature_selection(FrontEndOptions& options) {
     if (options.matcher == "siftgpu")
         options.matcher = "gpu_mutual_ratio";
 
-    // The default GPU feature path is SiftGPU (CUDA/OpenGL). On machines
-    // without CUDA, the Vulkan translation of the same SIFT +
-    // mutual-ratio algorithms keeps the default workflow usable. Canonicalize
-    // the names here so feature/match checkpoints record the backend that
-    // actually produced them.
+    // The default GPU feature path is native CUDA SIFT plus the CUDA
+    // mutual-ratio matcher. On machines without CUDA, the Vulkan translation
+    // of the same algorithms keeps the workflow usable. Canonicalize the names
+    // here so feature/match checkpoints record the backend that ran.
     if (features::vulkan_feature_backend_available()) {
         const bool siftgpu_available = [&] {
             if (!features::SiftGpuExtractor::is_built()) return false;
@@ -1622,7 +1621,7 @@ std::unique_ptr<features::FeatureExtractor> make_frontend_extractor(
             std::make_unique<features::SiftGpuExtractor>(siftgpu_options);
         if (!extractor->is_available())
             throw std::runtime_error(
-                "SiftGPU extractor requested but CUDA context is unavailable");
+                "siftgpu extractor requested but CUDA is unavailable");
         return extractor;
     }
     if (options.extractor == "vulkan_sift") {

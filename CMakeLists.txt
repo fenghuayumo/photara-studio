@@ -68,7 +68,6 @@ option(PHOTARA_ENABLE_ACCUTILE
     "Use opacity-aware SnugBox/AccuTile Gaussian-to-tile enumeration" ON)
 option(PHOTARA_ENABLE_NATIVE_ARCH "Optimize CPU code for the build host" ON)
 option(PHOTARA_ENABLE_FEATURES "Build image feature extraction and matching" ON)
-option(PHOTARA_ENABLE_SIFTGPU "Enable the optional non-commercial SiftGPU adapter" ON)
 # COLMAP-style ONNX gate (LightGlue). Off by default; turn on to compile
 # learned matchers. With FETCH_ONNX=ON, CMake downloads the official SDK.
 option(PHOTARA_ENABLE_ONNX

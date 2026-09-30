@@ -433,7 +433,6 @@ quality thresholds, and resumable warmup/mask/final-training stages.
   licensed under Apache-2.0. See [LICENSE](../LICENSE) and [NOTICE](../NOTICE).
 - TinyTensor is derived from LichtFeld Studio and is GPL-3.0-or-later. It is
   linked when splat training is enabled.
-- SiftGPU has upstream non-commercial restrictions and is optional.
 - Delight/Intrinsic model weights are not distributed here and have a
   separate academic/non-commercial boundary; see
   [LICENSE-Intrinsic.md](LICENSE-Intrinsic.md).

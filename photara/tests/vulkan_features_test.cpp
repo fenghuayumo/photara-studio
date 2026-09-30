@@ -380,24 +380,60 @@ void test_against_siftgpu() {
                 }
             }
         }
-        const double count_ratio = counts(vulkan_textured, cuda_textured);
+        const auto again = cuda_extractor.extract_gray(textured, width, height);
+        if (again.keypoints.size() != cuda_textured.keypoints.size() ||
+            again.descriptors != cuda_textured.descriptors)
+            throw std::runtime_error("CUDA SIFT extraction is not deterministic");
+        for (std::size_t i = 0; i < again.keypoints.size(); ++i) {
+            const auto& a = again.keypoints[i];
+            const auto& b = cuda_textured.keypoints[i];
+            if (a.x != b.x || a.y != b.y || a.scale != b.scale ||
+                a.orientation != b.orientation)
+                throw std::runtime_error("CUDA SIFT keypoints are not deterministic");
+        }
+        if (cuda_textured.keypoints.size() != vulkan_textured.keypoints.size() ||
+            cuda_textured.descriptors.size() != vulkan_textured.descriptors.size())
+            throw std::runtime_error("CUDA SIFT feature count differs from Vulkan SIFT");
+        std::size_t close = 0;
+        double cosine_sum = 0.0;
+        double worst_position = 0.0;
+        for (std::size_t i = 0; i < vulkan_textured.keypoints.size(); ++i) {
+            const auto& key = vulkan_textured.keypoints[i];
+            const auto& other = cuda_textured.keypoints[i];
+            const double dx = std::abs(other.x - key.x);
+            const double dy = std::abs(other.y - key.y);
+            worst_position = std::max(worst_position, std::max(dx, dy));
+            const bool scale_ok =
+                std::abs(other.scale - key.scale) <= 0.02F * std::abs(key.scale);
+            if (dx <= 0.01 && dy <= 0.01 && scale_ok) ++close;
+            double dot = 0.0, na = 0.0, nb = 0.0;
+            const float* da = vulkan_textured.descriptors.data() + i * 128;
+            const float* db = cuda_textured.descriptors.data() + i * 128;
+            for (int column = 0; column < 128; ++column) {
+                dot += static_cast<double>(da[column]) * db[column];
+                na += static_cast<double>(da[column]) * da[column];
+                nb += static_cast<double>(db[column]) * db[column];
+            }
+            cosine_sum += dot / std::sqrt(std::max(na * nb, 1e-24));
+        }
         const double position_ratio =
-            double(reproduced) / double((std::max)(std::size_t{1},
-                                                   vulkan_textured.keypoints.size()));
-        std::cout << "keypoint parity (textured): siftgpu "
+            double(close) / double((std::max)(std::size_t{1},
+                                              vulkan_textured.keypoints.size()));
+        const double mean_cosine =
+            cosine_sum / double((std::max)(std::size_t{1}, vulkan_textured.keypoints.size()));
+        const double count_ratio = counts(vulkan_textured, cuda_textured);
+        std::cout << "keypoint parity (textured): cuda "
                   << cuda_textured.keypoints.size() << " vulkan "
                   << vulkan_textured.keypoints.size() << ", count ratio "
                   << count_ratio << ", position agreement " << position_ratio
-                  << '\n';
-        if (count_ratio < 0.95)
-            throw std::runtime_error("vulkan_sift feature count differs from SiftGPU");
-        // SiftGPU's keypoint set also depends on its call history (pyramid and
-        // scratch reuse), which moves a few percent of the border keypoints
-        // around, so this guards against real divergence (the ported pipeline
-        // mismatches at <= 10%) rather than exact set equality.
-        if (position_ratio < 0.8)
+                  << ", mean cosine " << mean_cosine
+                  << ", worst position " << worst_position << '\n';
+        if (position_ratio < 0.99)
             throw std::runtime_error(
-                "vulkan_sift keypoint positions differ from SiftGPU");
+                "CUDA SIFT keypoint positions differ from Vulkan SIFT");
+        if (mean_cosine < 0.999)
+            throw std::runtime_error(
+                "CUDA SIFT descriptors differ from Vulkan SIFT");
     }
 
     // Cross-backend matching: vulkan features of the reference against siftgpu

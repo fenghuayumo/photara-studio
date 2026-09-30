@@ -17,7 +17,6 @@ is never bundled.
 | Component | License | How it enters a build | Notes |
 |---|---|---|---|
 | TinyTensor (`photara/third_party/tinytensor`) | GPL-3.0-or-later (LichtFeld Studio) | Linked when `PHOTARA_ENABLE_SPLAT=ON` | Extracted from LichtFeld Studio (`lfs::core`). `core/vram_profiler.*` still carry that SPDX header. OffsetAllocator inside TinyTensor is separately MIT (Sebastian Aaltonen, 2023). |
-| SiftGPU | University of North Carolina non-commercial / non-profit license | Default `PHOTARA_ENABLE_SIFTGPU=ON` | GPU SIFT by Changchang Wu. Commercial use needs a separate arrangement with UNC. Disable the option and use CPU VLFeat SIFT (`--extractor sift`) for a non-SiftGPU build. |
 | CGAL | GPL-3.0-or-later, or a CGAL commercial license | Delaunay / PAM meshing, and `PHOTARA_ENABLE_MESH_TOOLS` | The MIT `photara_drender` library does not link CGAL. Mesh repair/decimation tools do. |
 | GNU MP (GMP) | LGPL-3.0-or-later or GPL-2.0-or-later | Copied beside Windows CGAL mesh tools | Only when those tools are enabled. |
 | FreeImage | GPL-2.0, GPL-3.0, or FreeImage Public License (FIPL) | Feature I/O fallback (`find_package(freeimage)`) | JPEG/PNG go through libjpeg and libpng. FreeImage covers the remaining formats. Redistribution must ship the chosen FreeImage license text and the upstream acknowledgement. |
@@ -28,10 +27,11 @@ is never bundled.
 | oneTBB (vendored with Instant Meshes) | Apache-2.0 | Same Instant Meshes fetch | |
 | FFmpeg | Typically LGPL-2.1+ (build-dependent; GPL if `--enable-gpl`) | External executable on `PATH` | Photara calls FFmpeg; it does not vendor or statically link it. |
 
-A default CUDA Studio build currently turns on SiftGPU and, when Vulkan and
-the submodule are present, texture/mesh tools. Splat training additionally
-links TinyTensor. Turn those options off if the corresponding terms do not
-fit the intended distribution.
+A default CUDA Studio build, when Vulkan and the submodule are present,
+links texture/mesh tools. Splat training additionally links TinyTensor. The
+default SIFT extractor is Photara's own CUDA implementation and does not link
+Changchang Wu's SiftGPU. Turn the remaining options off if the corresponding
+terms do not fit the intended distribution.
 
 ## Photara-owned trees in this repository
 
@@ -111,8 +111,8 @@ FreeImage requires an acknowledgement when it is used, for example:
 > This software uses the FreeImage open source image library.
 > See http://freeimage.sourceforge.net for details.
 
-SiftGPU, CGAL, TinyTensor/LichtFeld Studio, SAM 3, SuperPoint, and Intrinsic
-each keep their own notices in addition to this file.
+CGAL, TinyTensor/LichtFeld Studio, SAM 3, SuperPoint, and Intrinsic each keep
+their own notices in addition to this file.
 
 Full texts for some nested components live next to those trees:
 

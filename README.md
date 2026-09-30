@@ -36,7 +36,7 @@ The implementation currently includes:
 - Eigen/PoseLib multi-view geometry, including E/F/H estimation, PnP, and
   triangulation;
 - robust bundle adjustment with CPU and CUDA backends;
-- SIFT/RootSIFT and SiftGPU, plus optional DISK, SuperPoint, ALIKED, and
+- SIFT/RootSIFT, including a native CUDA SIFT extractor, plus optional DISK, SuperPoint, ALIKED, and
   LightGlue inference through ONNX Runtime;
 - CPU and CUDA mutual-ratio feature matching, vocabulary-based retrieval, and
   a selective LightGlue rescue matcher;
@@ -101,11 +101,10 @@ Optional or feature-specific requirements are:
 - FFmpeg on `PATH`, or an explicit `--ffmpeg` executable, for video input;
 - a DXC-capable Vulkan SDK when the TinyTensor Vulkan compute backend is used.
 
-SiftGPU is enabled by default by the build configuration, but its upstream
-license has non-commercial restrictions. Review that license before
-distribution or commercial use. The intrinsic/delight model weights also have
-their own licensing boundary; see
-[`docs/LICENSE-Intrinsic.md`](docs/LICENSE-Intrinsic.md).
+The intrinsic/delight model weights have their own licensing boundary; see
+[`docs/LICENSE-Intrinsic.md`](docs/LICENSE-Intrinsic.md). The default CUDA
+SIFT extractor is project code. CPU SIFT still uses the vendored VLFeat
+sources.
 
 ## Build
 
@@ -198,7 +197,6 @@ ctest --test-dir build -C Release --output-on-failure
 | `PHOTARA_CUDA_ARCHITECTURES` | auto | CUDA targets; auto builds RTX 20/30/40 cubins, RTX 50 with CUDA 12.8+, and PTX fallback |
 | `PHOTARA_ENABLE_SPLAT` | `ON` | Build CUDA Gaussian training and extraction |
 | `PHOTARA_ENABLE_FEATURES` | `ON` | Build image features, SfM, MVS, and the CLI |
-| `PHOTARA_ENABLE_SIFTGPU` | `ON` | Enable the optional SiftGPU adapter |
 | `PHOTARA_ENABLE_SAM` | `ON` | Build in-process SAM 3 mask generation with ggml |
 | `PHOTARA_ENABLE_SAM_VULKAN` | `ON` | Build the ggml Vulkan backend when a Vulkan SDK with `glslc` is available |
 | `PHOTARA_ENABLE_ONNX` | `OFF` | Enable ONNX Runtime feature and delight models |
