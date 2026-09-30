@@ -2,14 +2,14 @@
 
 // Minimal Vulkan compute plumbing owned by the feature backends. One process
 // wide device is shared by every extractor/matcher clone, and recording is per
-// thread: backend clones driven from a worker pool each own a command buffer,
-// fence, descriptor set batch and download list, so parallel matching never
-// interleaves on shared state. Pipeline creation, descriptor allocation and
+// thread: each worker records through its own photara::vk::CommandEncoder, so
+// parallel matching never interleaves on shared state. Pipeline creation and
 // queue submission serialize on the context mutex. Host-visible scratch is
 // written directly through mapped memory; device-local work buffers are
 // recycled through a size-bucketed pool so repeated work does not keep asking
 // the driver for memory.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <condition_variable>
@@ -20,6 +20,8 @@
 #include <vector>
 
 #include <vulkan/vulkan.h>
+
+#include "photara_vk/photara_vk.hpp"
 
 namespace photara::features::vulkan_backend {
 
@@ -121,6 +123,9 @@ public:
 
     [[nodiscard]] std::uint32_t device_index() const noexcept { return device_index_; }
     [[nodiscard]] VkPhysicalDeviceMemoryProperties memory_properties() const;
+    [[nodiscard]] VkDeviceSize storage_buffer_offset_alignment() const noexcept {
+        return storage_buffer_offset_alignment_;
+    }
     // True when the device enabled shaderIntegerDotProduct and can load the
     // SPIR-V 1.5 variant of the descriptor matcher.
     [[nodiscard]] bool integer_dot_product() const noexcept {
@@ -178,23 +183,11 @@ public:
 private:
     Context();
 
-    struct Pipeline {
-        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-        VkPipelineLayout layout = VK_NULL_HANDLE;
-        VkPipeline handle = VK_NULL_HANDLE;
-        std::uint32_t binding_count = 0;
-        std::uint32_t push_bytes = 0;
-    };
-
-    [[nodiscard]] const Pipeline& pipeline(Shader shader);
-    void destroy_pipeline(Pipeline& pipeline) noexcept;
+    [[nodiscard]] const photara::vk::ComputePipeline& pipeline(Shader shader);
 
     [[nodiscard]] std::uint32_t find_memory_type(
         std::uint32_t type_bits,
         VkMemoryPropertyFlags required) const;
-
-    void write_set(VkDescriptorSet set, const Pipeline& pipeline,
-                   std::span<const BufferBinding> bindings);
 
     struct Download {
         const Buffer* source;
@@ -205,28 +198,15 @@ private:
     };
 
     // One recording session per thread. Sessions are owned by the context so
-    // their command buffers and fences outlive the threads that used them.
+    // their encoders outlive the threads that used them. The encoder keeps
+    // descriptor sets alive until its submission retires.
     struct Session {
-        VkCommandBuffer command = VK_NULL_HANDLE;
-        VkFence fence = VK_NULL_HANDLE;
-        bool recording = false;
-        // Descriptor sets come from pools owned by the session: extraction
-        // records hundreds of dispatches per image, and one pool per worker
-        // thread keeps parallel extractions independent. Pools are reset
-        // between submissions, so nothing is freed while a batch is in flight.
-        std::vector<VkDescriptorPool> pools;
-        std::vector<std::uint32_t> pool_capacities;
-        std::size_t sets_in_active_pool = 0;
-        std::vector<VkDescriptorSet> sets;
+        photara::vk::CommandEncoder encoder;
+        bool has_encoder = false;
         std::vector<Download> downloads;
     };
 
     [[nodiscard]] Session& session();
-    [[nodiscard]] VkDescriptorSet acquire_set(const Pipeline& pipeline,
-                                              Session& session);
-    void reset_session_pools(Session& session);
-    void grow_session_pool(Session& session);
-    void destroy_session(Session& session) noexcept;
 
     static VkDeviceSize pooled_size(VkDeviceSize bytes);
     void recycle(std::unique_ptr<Buffer> buffer, bool host_visible,
@@ -240,10 +220,13 @@ private:
     std::uint32_t queue_family_ = 0;
     std::uint32_t device_index_ = 0;
     VkPhysicalDeviceMemoryProperties memory_properties_{};
-    VkCommandPool command_pool_ = VK_NULL_HANDLE;
 
-    Pipeline pipelines_[static_cast<std::size_t>(Shader::Count)]{};
-
+    // runtime_ does not own VkDevice. sessions_ is declared after the pipelines
+    // so its encoders are destroyed first, while the pipelines and the adopted
+    // device still exist.
+    photara::vk::Device runtime_;
+    std::array<photara::vk::ComputePipeline, static_cast<std::size_t>(Shader::Count)>
+        pipelines_{};
     std::vector<std::unique_ptr<Session>> sessions_;
 
     struct PoolBucket {
@@ -257,6 +240,7 @@ private:
     bool integer_dot_product_ = false;
     std::uint32_t max_shared_bytes_ = 0;
     std::uint32_t subgroup_size_ = 0;
+    VkDeviceSize storage_buffer_offset_alignment_ = 1;
 
     std::mutex budget_mutex_;
     std::condition_variable budget_condition_;

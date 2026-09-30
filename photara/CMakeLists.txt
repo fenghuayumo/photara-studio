@@ -243,7 +243,12 @@ if(PHOTARA_ENABLE_FEATURES)
         add_dependencies(photara_features photara_feature_shaders)
         target_include_directories(photara_features PRIVATE
             "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan")
-        target_link_libraries(photara_features PRIVATE Vulkan::Vulkan)
+        if(NOT TARGET photara_vk::photara_vk)
+            add_subdirectory(
+                "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/photara_vk"
+                "${CMAKE_CURRENT_BINARY_DIR}/photara_vk")
+        endif()
+        target_link_libraries(photara_features PRIVATE Vulkan::Vulkan photara_vk::photara_vk)
         target_compile_definitions(photara_features PRIVATE
             PHOTARA_HAS_VULKAN_FEATURES=1)
         message(STATUS "Photara Vulkan feature backend: ON "

@@ -35,7 +35,7 @@ struct FinishPush {
     std::uint32_t col_chunks;
     float ratio;
     float mutual;
-    std::uint32_t pad0;
+    std::uint32_t output_offset;
     std::uint32_t pad1;
 };
 
@@ -304,12 +304,12 @@ std::vector<MatchSet> VulkanMutualRatioMatcher::match_batch(
                     static_cast<std::uint32_t>((query_count + 31) / 32),
                     impl_->options.ratio_threshold,
                     impl_->options.mutual_check ? 1.0F : 0.0F,
-                    0U,
+                    static_cast<std::uint32_t>(output_offset),
                     0U};
                 const std::array<BufferBinding, 3> finish_bindings{
                     binding(row_partials),
                     binding(col_partials.valid() ? col_partials : row_partials),
-                    binding(output, output_offset * 4)};
+                    binding(output)};
                 context.dispatch(Shader::MatchFinish, finish_bindings, &finish_push,
                                  sizeof(finish_push),
                                  static_cast<std::uint32_t>((query_count + 255) / 256));

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "photara_vk/photara_vk.hpp"
 #include "vulkan/backend.hpp"
 #include "vulkan/runtime/check.hpp"
 
@@ -208,12 +209,13 @@ private:
     void destroy();
 
     // Batch recording and fence retirement for blocking and interop submits.
+    void adopt_runtime();
     void begin_batch_locked();
     void flush_locked();
     void submit_async_locked();
     void retire_async_locked();
     void record_barrier_locked();
-    [[nodiscard]] VkDescriptorSet acquire_descriptor_locked(VkDescriptorSetLayout layout);
+    [[nodiscard]] VkCommandBuffer command_buffer();
 
     // Buffer reuse: a released Buffer goes back to the pool instead of being
     // destroyed, so a repeated shape stops paying vkCreateBuffer and
@@ -239,34 +241,24 @@ private:
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;
     std::uint32_t queue_family_ = 0;
-    VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkCommandPool upload_command_pool_ = VK_NULL_HANDLE;
-    VkFence completion_fence_ = VK_NULL_HANDLE;
-    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
-    PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor_ = nullptr;
     VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
     bool validation_ = false;
     bool push_descriptors_ = false;
 
-    struct Pipeline {
-        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-        VkPipelineLayout layout = VK_NULL_HANDLE;
-        VkPipeline handle = VK_NULL_HANDLE;
-        std::uint32_t binding_count = 0;
-        std::uint32_t push_size = 0;
-    };
-    Pipeline pipelines_[static_cast<std::size_t>(ShaderId::Count)]{};
+    // Declared before the encoder so the encoder is destroyed first if
+    // destroy() does not run. Pipelines stay alive while a recorded batch
+    // can still be submitted from the encoder destructor.
+    photara::vk::Device runtime_;
+    std::array<photara::vk::ComputePipeline, static_cast<std::size_t>(ShaderId::Count)>
+        pipelines_{};
+    photara::vk::CommandEncoder encoder_;
 
     std::unordered_map<std::size_t, std::vector<Buffer*>> free_buffers_;
     std::size_t pooled_bytes_ = 0;
     std::size_t pool_budget_bytes_ = 0;
-    VkCommandBuffer command_ = VK_NULL_HANDLE;
-    bool recording_ = false;
-    bool in_flight_ = false;
     std::uint32_t batch_commands_ = 0;
     std::size_t staging_cursor_ = 0;
-    std::vector<VkDescriptorBufferInfo> descriptor_infos_;
-    std::vector<VkWriteDescriptorSet> descriptor_writes_;
     // Cleared by destroy(). A tensor that outlives the context then leaks its
     // buffer instead of touching a dead device.
     bool alive_ = true;

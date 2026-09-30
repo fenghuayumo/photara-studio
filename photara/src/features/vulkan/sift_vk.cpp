@@ -361,7 +361,14 @@ FeatureSet SiftVulkanExtractor::extract_gray(
     // Every blur pass needs its own taps at execution time, so all kernels are
     // staged side by side and selected through the descriptor binding offset.
     constexpr std::size_t kKernelSlots = 8;
-    constexpr std::size_t kKernelStride = kKernelMaxWidth; // floats per slot
+    // Each slot is bound as a storage-buffer slice, so its byte stride must
+    // respect the selected device's minStorageBufferOffsetAlignment.
+    const VkDeviceSize kernel_alignment =
+        std::max<VkDeviceSize>(sizeof(float),
+                               context.storage_buffer_offset_alignment());
+    const std::size_t kKernelStride = static_cast<std::size_t>(
+        (kKernelMaxWidth * sizeof(float) + kernel_alignment - 1) /
+        kernel_alignment * kernel_alignment / sizeof(float));
     BufferRef kernel_weights =
         context.allocate(kKernelSlots * kKernelStride * 4, true);
     std::vector<float> kernel_slots(kKernelSlots * kKernelStride, 0.0F);

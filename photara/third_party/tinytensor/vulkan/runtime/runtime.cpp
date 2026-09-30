@@ -448,6 +448,7 @@ Context::Context() {
     create_instance();
     pick_device();
     create_device();
+    adopt_runtime();
     create_pools();
     // Recycled buffers are held up to this budget; override with
     // TINYTENSOR_VULKAN_POOL_BYTES for a workload with much larger tensors.
@@ -661,9 +662,9 @@ void Context::create_device() {
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 #ifdef VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME
     if (push_descriptors_) {
-        cmd_push_descriptor_ = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
+        const auto push = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
             vkGetDeviceProcAddr(device_, "vkCmdPushDescriptorSetKHR"));
-        if (cmd_push_descriptor_ == nullptr) {
+        if (push == nullptr) {
             throw std::runtime_error(
                 "VK_KHR_push_descriptor was enabled but vkCmdPushDescriptorSetKHR is missing");
         }
@@ -672,12 +673,22 @@ void Context::create_device() {
     info_.push_descriptors = push_descriptors_;
 }
 
-void Context::create_pools() {
-    VkCommandPoolCreateInfo command_pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-    command_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    command_pool.queueFamilyIndex = queue_family_;
-    check(vkCreateCommandPool(device_, &command_pool, nullptr, &command_pool_), "vkCreateCommandPool");
+void Context::adopt_runtime() {
+    photara::vk::ExternalDevice external;
+    external.instance = instance_;
+    external.physical = physical_;
+    external.device = device_;
+    external.queue = queue_;
+    external.queue_family = queue_family_;
+    external.enabled.push_descriptors = push_descriptors_;
+    external.enabled.buffer_atomic_f32 = info_.buffer_atomic_f32;
+    runtime_ = photara::vk::Device::adopt(external);
+    // none: the batch inserts its own read-after-write barrier, which also
+    // orders a pooled buffer reused as an output before the batch is submitted.
+    encoder_ = runtime_.encoder(photara::vk::BarrierPolicy::none);
+}
 
+void Context::create_pools() {
     VkCommandPoolCreateInfo upload_pool{
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     upload_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -698,77 +709,21 @@ void Context::create_pools() {
           "vkAllocateCommandBuffers(upload)");
 
     VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    check(vkCreateFence(device_, &fence, nullptr, &completion_fence_), "vkCreateFence");
     for (std::size_t index = 0; index < upload_slots_.size(); ++index) {
         upload_slots_[index].command = upload_commands[index];
         check(vkCreateFence(
                   device_, &fence, nullptr, &upload_slots_[index].fence),
               "vkCreateFence(upload)");
     }
-    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096};
-    VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pool.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool.maxSets = 1024;
-    pool.poolSizeCount = 1;
-    pool.pPoolSizes = &pool_size;
-    check(vkCreateDescriptorPool(device_, &pool, nullptr, &descriptor_pool_), "vkCreateDescriptorPool");
 }
 
 void Context::create_pipelines() {
     for (const ShaderBlob& blob : shader_blobs()) {
-        Pipeline& pipeline = pipelines_[static_cast<std::size_t>(blob.id)];
-        pipeline.binding_count = blob.bindings;
-        pipeline.push_size = blob.push_bytes;
-
-        std::vector<VkDescriptorSetLayoutBinding> bindings(blob.bindings);
-        for (std::uint32_t i = 0; i < blob.bindings; ++i) {
-            bindings[i].binding = i;
-            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            bindings[i].descriptorCount = 1;
-            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        }
-        VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        if (push_descriptors_) {
-            layout_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-        }
-        layout_info.bindingCount = blob.bindings;
-        layout_info.pBindings = bindings.data();
-        check(vkCreateDescriptorSetLayout(device_, &layout_info, nullptr, &pipeline.set_layout),
-              "vkCreateDescriptorSetLayout");
-
-        VkPushConstantRange push{};
-        push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        push.size = blob.push_bytes;
-        VkPipelineLayoutCreateInfo pipeline_layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        pipeline_layout.setLayoutCount = 1;
-        pipeline_layout.pSetLayouts = &pipeline.set_layout;
-        pipeline_layout.pushConstantRangeCount = blob.push_bytes == 0 ? 0U : 1U;
-        pipeline_layout.pPushConstantRanges = blob.push_bytes == 0 ? nullptr : &push;
-        check(vkCreatePipelineLayout(device_, &pipeline_layout, nullptr, &pipeline.layout),
-              "vkCreatePipelineLayout");
-
         if (blob.spirv.empty() || blob.spirv.size() % sizeof(std::uint32_t) != 0) {
             throw std::runtime_error("Invalid embedded SPIR-V");
         }
-        std::vector<std::uint32_t> words(blob.spirv.size() / sizeof(std::uint32_t));
-        std::memcpy(words.data(), blob.spirv.data(), blob.spirv.size());
-        VkShaderModuleCreateInfo shader_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        shader_info.codeSize = blob.spirv.size();
-        shader_info.pCode = words.data();
-        VkShaderModule module = VK_NULL_HANDLE;
-        check(vkCreateShaderModule(device_, &shader_info, nullptr, &module), "vkCreateShaderModule");
-
-        VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        stage.module = module;
-        stage.pName = "main";
-        VkComputePipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        pipeline_info.stage = stage;
-        pipeline_info.layout = pipeline.layout;
-        const VkResult result =
-            vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline.handle);
-        vkDestroyShaderModule(device_, module, nullptr);
-        check(result, "vkCreateComputePipelines");
+        pipelines_[static_cast<std::size_t>(blob.id)] = runtime_.create_compute(
+            blob.spirv, blob.bindings, blob.push_bytes);
     }
 }
 
@@ -777,19 +732,15 @@ void Context::destroy() {
         // Retire the open batch before anything it references is destroyed.
         // Teardown runs from a destructor, so a device that is already lost
         // must not turn into a thrown exception here.
-        if (recording_) {
-            vkEndCommandBuffer(command_);
-            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submit.commandBufferCount = 1;
-            submit.pCommandBuffers = &command_;
-            if (vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS) {
-                vkQueueWaitIdle(queue_);
+        try {
+            if (encoder_.recording()) encoder_.submit();
+            if (encoder_.in_flight()) {
+                encoder_.wait();
+                if (op_profile_.enabled) collect_op_profile_locked();
             }
+        } catch (...) {
         }
-        recording_ = false;
         vkDeviceWaitIdle(device_);
-        if (in_flight_ && op_profile_.enabled) collect_op_profile_locked();
-        in_flight_ = false;
     }
     if (op_profile_.enabled) {
         // Report the run total before the pool goes away: a training run ends
@@ -821,32 +772,11 @@ void Context::destroy() {
         }
         slot.command = VK_NULL_HANDLE;
     }
-    for (Pipeline& pipeline : pipelines_) {
-        if (pipeline.handle != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device_, pipeline.handle, nullptr);
-        }
-        if (pipeline.layout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device_, pipeline.layout, nullptr);
-        }
-        if (pipeline.set_layout != VK_NULL_HANDLE) {
-            vkDestroyDescriptorSetLayout(device_, pipeline.set_layout, nullptr);
-        }
-        pipeline = {};
-    }
-    if (descriptor_pool_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
-    }
-    if (command_ != VK_NULL_HANDLE) {
-        vkFreeCommandBuffers(device_, command_pool_, 1, &command_);
-        command_ = VK_NULL_HANDLE;
-    }
-    if (command_pool_ != VK_NULL_HANDLE) {
-        vkDestroyCommandPool(device_, command_pool_, nullptr);
-    }
-    if (completion_fence_ != VK_NULL_HANDLE) {
-        vkDestroyFence(device_, completion_fence_, nullptr);
-        completion_fence_ = VK_NULL_HANDLE;
-    }
+    // The encoder destructor may submit a leftover batch, so pipelines and the
+    // adopted device have to outlive it.
+    encoder_ = {};
+    for (photara::vk::ComputePipeline& pipeline : pipelines_) pipeline = {};
+    runtime_ = {};
     if (upload_command_pool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, upload_command_pool_, nullptr);
         upload_command_pool_ = VK_NULL_HANDLE;
@@ -904,7 +834,7 @@ std::shared_ptr<Buffer> Context::acquire_buffer_locked(const std::size_t bytes) 
 void Context::recycle_locked(Buffer* buffer) {
     pooled_bytes_ += static_cast<std::size_t>(buffer->size());
     free_buffers_[static_cast<std::size_t>(buffer->size())].push_back(buffer);
-    if (!recording_ && !in_flight_) {
+    if (!encoder_.recording() && !encoder_.in_flight()) {
         // A recorded or submitted command may still hold this handle even
         // after the last tensor owner releases it.
         trim_pool_locked();
@@ -926,7 +856,7 @@ void Context::trim_pool_locked() {
             check(status, "vkGetFenceStatus(upload)");
         }
     }
-    if (recording_ || in_flight_ || upload_in_flight ||
+    if (encoder_.recording() || encoder_.in_flight() || upload_in_flight ||
         pooled_bytes_ <= pool_budget_bytes_) {
         return;
     }
@@ -981,69 +911,45 @@ void Context::ensure_readback_staging(std::size_t bytes) {
 // One command buffer is recorded into and submitted once per flush, instead of
 // a fresh command buffer and a queue drain per op. The command buffer is kept
 // alive across flushes; only its contents are reset.
+VkCommandBuffer Context::command_buffer() {
+    return encoder_.native();
+}
+
 void Context::begin_batch_locked() {
-    if (recording_) {
+    if (encoder_.recording()) {
         return;
     }
     retire_async_locked();
-    if (command_ == VK_NULL_HANDLE) {
-        VkCommandBufferAllocateInfo alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        alloc.commandPool = command_pool_;
-        alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        alloc.commandBufferCount = 1;
-        check(vkAllocateCommandBuffers(device_, &alloc, &command_), "vkAllocateCommandBuffers");
-    }
-    check(vkResetCommandBuffer(command_, 0), "vkResetCommandBuffer");
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer");
-    recording_ = true;
+    const VkCommandBuffer command = command_buffer();
     batch_commands_ = 0;
     staging_cursor_ = 0;
     if (op_profile_.enabled && !op_profile_.order.empty()) {
         // Retire the previous batch's timestamp range before reusing indices.
         vkCmdResetQueryPool(
-            command_, op_profile_.pool, 0,
+            command, op_profile_.pool, 0,
             static_cast<std::uint32_t>(op_profile_.order.size()) * 2);
         op_profile_.order.clear();
     }
 }
 
 void Context::submit_async_locked() {
-    if (!recording_) return;
+    if (!encoder_.recording()) return;
     // Publish writes to later compute and transfer commands on this queue,
     // including the splat rasterizer's submissions through the shared device.
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(command_,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 1, &barrier, 0, nullptr, 0, nullptr);
-    check(vkEndCommandBuffer(command_), "vkEndCommandBuffer");
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &command_;
-    check(vkQueueSubmit(queue_, 1, &submit, completion_fence_), "vkQueueSubmit");
-    recording_ = false;
-    in_flight_ = true;
+    encoder_.barrier();
+    encoder_.submit();
     batch_commands_ = 0;
 }
 
 void Context::retire_async_locked() {
-    if (!in_flight_) return;
+    if (!encoder_.in_flight()) return;
     const auto wait_started = std::chrono::steady_clock::now();
-    check(vkWaitForFences(device_, 1, &completion_fence_, VK_TRUE, UINT64_MAX),
-          "vkWaitForFences");
+    encoder_.wait();
     op_profile_.wait_ms += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - wait_started).count();
     ++op_profile_.batches;
-    check(vkResetFences(device_, 1, &completion_fence_), "vkResetFences");
-    in_flight_ = false;
     if (op_profile_.enabled) collect_op_profile_locked();
     staging_cursor_ = 0;
-    check(vkResetDescriptorPool(device_, descriptor_pool_, 0), "vkResetDescriptorPool");
     trim_pool_locked();
 }
 
@@ -1175,38 +1081,17 @@ void Context::submit_async() {
 // one op's writes visible to the next. In a single command buffer the
 // dependency has to be explicit.
 void Context::record_barrier_locked() {
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     // Tensor temporaries may return to the buffer pool immediately after their
     // dispatch is recorded.  A later op can therefore reuse a previously read
     // input as its output before this batch is submitted.  Include shader reads
     // in the source scope so that reuse has a real read-to-write (WAR) ordering
     // dependency instead of relying on the driver's incidental execution order.
-    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                            VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(command_,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
-                         &barrier, 0, nullptr, 0, nullptr);
-}
-
-VkDescriptorSet Context::acquire_descriptor_locked(const VkDescriptorSetLayout layout) {
-    VkDescriptorSetAllocateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    set_info.descriptorPool = descriptor_pool_;
-    set_info.descriptorSetCount = 1;
-    set_info.pSetLayouts = &layout;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    VkResult result = vkAllocateDescriptorSets(device_, &set_info, &set);
-    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-        // The arena is exhausted: retire the batch (which is what makes the
-        // pool reset legal) and start a new one.
-        flush_locked();
-        begin_batch_locked();
-        result = vkAllocateDescriptorSets(device_, &set_info, &set);
-    }
-    check(result, "vkAllocateDescriptorSets");
-    return set;
+    encoder_.barrier(
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
 }
 
 void Context::barrier_buffer(VkCommandBuffer cmd, VkBuffer buffer, VkAccessFlags src_access,
@@ -1240,8 +1125,9 @@ void Context::fill_zero(Buffer& buffer, std::size_t offset, std::size_t bytes) {
         return;
     }
     begin_batch_locked();
-    vkCmdFillBuffer(command_, buffer.handle(), aligned_offset, aligned_size, 0);
-    barrier_buffer(command_, buffer.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+    const VkCommandBuffer command = command_buffer();
+    vkCmdFillBuffer(command, buffer.handle(), aligned_offset, aligned_size, 0);
+    barrier_buffer(command, buffer.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT,
                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -1257,12 +1143,13 @@ void Context::copy(Buffer& dst, std::size_t dst_offset, const Buffer& src, std::
     }
     std::scoped_lock lock(mutex_);
     begin_batch_locked();
+    const VkCommandBuffer command = command_buffer();
     VkBufferCopy region{};
     region.srcOffset = src_offset;
     region.dstOffset = dst_offset;
     region.size = bytes;
-    vkCmdCopyBuffer(command_, src.handle(), dst.handle(), 1, &region);
-    barrier_buffer(command_, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+    vkCmdCopyBuffer(command, src.handle(), dst.handle(), 1, &region);
+    barrier_buffer(command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT,
                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -1287,13 +1174,14 @@ void Context::upload(Buffer& dst, std::size_t dst_offset, const void* data, std:
         }
     }
     begin_batch_locked();
+    const VkCommandBuffer command = command_buffer();
     std::memcpy(static_cast<char*>(staging_->mapped()) + staging_cursor_, data, bytes);
     VkBufferCopy region{};
     region.srcOffset = staging_cursor_;
     region.dstOffset = dst_offset;
     region.size = bytes;
-    vkCmdCopyBuffer(command_, staging_->handle(), dst.handle(), 1, &region);
-    barrier_buffer(command_, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+    vkCmdCopyBuffer(command, staging_->handle(), dst.handle(), 1, &region);
+    barrier_buffer(command, dst.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     staging_cursor_ += aligned;
@@ -1370,14 +1258,15 @@ void Context::download(const Buffer& src, std::size_t src_offset, void* data, st
         ensure_readback_staging(aligned);
     }
     begin_batch_locked();
-    barrier_buffer(command_, src.handle(), VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+    const VkCommandBuffer command = command_buffer();
+    barrier_buffer(command, src.handle(), VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferCopy region{};
     region.srcOffset = src_offset;
     region.dstOffset = 0;
     region.size = bytes;
-    vkCmdCopyBuffer(command_, src.handle(), readback_staging_->handle(), 1, &region);
-    barrier_buffer(command_, readback_staging_->handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+    vkCmdCopyBuffer(command, src.handle(), readback_staging_->handle(), 1, &region);
+    barrier_buffer(command, readback_staging_->handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                    VK_PIPELINE_STAGE_HOST_BIT);
     flush_locked();
@@ -1405,65 +1294,41 @@ void Context::dispatch(ShaderId shader, std::span<const BufferBinding> bindings,
         return;
     }
     std::scoped_lock lock(mutex_);
-    Pipeline& pipeline = pipelines_[static_cast<std::size_t>(shader)];
-    if (bindings.size() != pipeline.binding_count) {
+    const photara::vk::ComputePipeline& pipeline =
+        pipelines_[static_cast<std::size_t>(shader)];
+    if (bindings.size() != pipeline.binding_count()) {
         throw std::invalid_argument("Vulkan dispatch binding count mismatch");
     }
 
     begin_batch_locked();
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (!push_descriptors_) {
-        set = acquire_descriptor_locked(pipeline.set_layout);
-    }
-
-    // Per-dispatch scratch kept off the heap: this runs once per op, so two
-    // vector allocations per op add up over a step.
-    descriptor_infos_.resize(bindings.size());
-    descriptor_writes_.resize(bindings.size());
-    std::vector<VkDescriptorBufferInfo>& infos = descriptor_infos_;
-    std::vector<VkWriteDescriptorSet>& writes = descriptor_writes_;
-    for (std::uint32_t i = 0; i < bindings.size(); ++i) {
-        infos[i].buffer = bindings[i].buffer;
-        infos[i].offset = bindings[i].offset;
-        infos[i].range = bindings[i].range;
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        // dstSet is ignored by vkCmdPushDescriptorSetKHR.  Keeping it null in
-        // the push path also prevents accidentally retaining a stale set.
-        writes[i].dstSet = set;
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[i].pBufferInfo = &infos[i];
-    }
-    if (push_descriptors_) {
-        cmd_push_descriptor_(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0,
-                             static_cast<std::uint32_t>(writes.size()), writes.data());
-    } else {
-        vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
-                               nullptr);
-    }
-
-    vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
-    if (!push_descriptors_) {
-        vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1,
-                                &set, 0, nullptr);
-    }
-    if (push_bytes != 0 && push_constants != nullptr) {
-        vkCmdPushConstants(command_, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes,
-                           push_constants);
-    }
     const bool profile = op_profile_.enabled &&
         op_profile_.recorded < kMaxCommandsPerBatch;
+    // Timestamps bracket the dispatch itself. The encoder's barrier policy is
+    // none, so the read-after-write barrier stays the explicit one below.
+    VkCommandBuffer command = VK_NULL_HANDLE;
     if (profile) {
+        command = command_buffer();
         vkCmdWriteTimestamp(
-            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, op_profile_.pool,
+            command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, op_profile_.pool,
             op_profile_.recorded * 2);
     }
-    vkCmdDispatch(command_, groups_x, groups_y, groups_z);
+    std::array<photara::vk::BufferBinding, 8> converted{};
+    if (bindings.size() > converted.size()) {
+        throw std::invalid_argument("Vulkan dispatch binding count mismatch");
+    }
+    for (std::size_t index = 0; index < bindings.size(); ++index) {
+        converted[index].buffer = bindings[index].buffer;
+        converted[index].offset = bindings[index].offset;
+        converted[index].range = bindings[index].range;
+    }
+    encoder_.dispatch(
+        pipeline,
+        std::span<const photara::vk::BufferBinding>{converted.data(), bindings.size()},
+        push_constants, push_bytes, groups_x, groups_y, groups_z);
     ++op_profile_.dispatches;
     if (profile) {
         vkCmdWriteTimestamp(
-            command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, op_profile_.pool,
+            command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, op_profile_.pool,
             op_profile_.recorded * 2 + 1);
         // The dispatch grid says how much work the op covers; bucketing it to
         // the next power of two separates a 630k-parameter update from a 10M

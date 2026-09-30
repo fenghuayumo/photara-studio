@@ -11,7 +11,7 @@ struct PushConstants
     uint col_chunks;
     float ratio;
     float mutual;
-    uint pad0;
+    uint output_offset;
     uint pad1;
 };
 
@@ -73,5 +73,5 @@ void main(uint3 dtid : SV_DispatchThreadID)
         }
         if (accepted_match(reverse, pc.ratio) != int(i)) match = -1;
     }
-    output.Store(i * 4u, asuint(match));
+    output.Store((pc.output_offset + i) * 4u, asuint(match));
 }

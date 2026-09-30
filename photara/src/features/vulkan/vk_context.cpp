@@ -397,6 +397,8 @@ Context::Context() {
         vkGetPhysicalDeviceProperties(physical_, &properties);
         device_api_version = properties.apiVersion;
         max_shared_bytes_ = properties.limits.maxComputeSharedMemorySize;
+        storage_buffer_offset_alignment_ =
+            properties.limits.minStorageBufferOffsetAlignment;
         VkPhysicalDeviceSubgroupProperties subgroup{};
         subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
         VkPhysicalDeviceProperties2 properties2{};
@@ -451,12 +453,15 @@ Context::Context() {
         budget_bytes_ = std::max<std::uint64_t>(256ULL << 20, device_local / 3);
     }
 
-    VkCommandPoolCreateInfo pool_create{};
-    pool_create.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    pool_create.queueFamilyIndex = queue_family_;
-    pool_create.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    check(vkCreateCommandPool(device_, &pool_create, nullptr, &command_pool_),
-          "vkCreateCommandPool");
+    photara::vk::ExternalDevice external;
+    external.instance = instance_;
+    external.physical = physical_;
+    external.device = device_;
+    external.queue = queue_;
+    external.queue_family = queue_family_;
+    external.enabled.push_descriptors = false;
+    external.enabled.integer_dot_product = use_dot_product;
+    runtime_ = photara::vk::Device::adopt(external);
 
     device_pools_.resize(48);
     host_pools_.resize(48);
@@ -474,11 +479,9 @@ Context::~Context() {
         return;
     }
     vkDeviceWaitIdle(device_);
-    for (auto& session : sessions)
-        if (session != nullptr) destroy_session(*session);
-    for (auto& pipeline : pipelines_) destroy_pipeline(pipeline);
-    if (command_pool_ != VK_NULL_HANDLE)
-        vkDestroyCommandPool(device_, command_pool_, nullptr);
+    sessions.clear();
+    for (photara::vk::ComputePipeline& pipeline : pipelines_) pipeline = {};
+    runtime_ = {};
     vkDestroyDevice(device_, nullptr);
     if (instance_ != VK_NULL_HANDLE) vkDestroyInstance(instance_, nullptr);
 }
@@ -513,22 +516,6 @@ Context::Session& Context::session() {
     sessions_.push_back(std::make_unique<Session>());
     cached = sessions_.back().get();
     return *cached;
-}
-
-void Context::destroy_session(Session& session) noexcept {
-    if (device_ == VK_NULL_HANDLE) return;
-    for (const auto pool : session.pools)
-        if (pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, pool, nullptr);
-    session.pools.clear();
-    session.pool_capacities.clear();
-    if (command_pool_ != VK_NULL_HANDLE)
-        vkFreeCommandBuffers(device_, command_pool_, 1, &session.command);
-    if (session.command != VK_NULL_HANDLE)
-        vkFreeCommandBuffers(device_, command_pool_, 1, &session.command);
-    if (session.fence != VK_NULL_HANDLE)
-        vkDestroyFence(device_, session.fence, nullptr);
-    session.command = VK_NULL_HANDLE;
-    session.fence = VK_NULL_HANDLE;
 }
 
 VkPhysicalDeviceMemoryProperties Context::memory_properties() const {
@@ -606,183 +593,29 @@ void Context::recycle(std::unique_ptr<Buffer> buffer, bool host_visible,
     pools[bucket].free_buffers.push_back(std::move(buffer));
 }
 
-const Context::Pipeline& Context::pipeline(Shader shader) {
+const photara::vk::ComputePipeline& Context::pipeline(Shader shader) {
     auto& entry = pipelines_[static_cast<std::size_t>(shader)];
-    if (entry.handle != VK_NULL_HANDLE) return entry;
+    if (entry.valid()) return entry;
 
     const auto info = shader_info(shader);
     if (info.bindings > kMaxShaderBindings)
         throw std::logic_error("Too many shader bindings");
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings;
-    bindings.reserve(info.bindings);
-    for (std::uint32_t index = 0; index < info.bindings; ++index) {
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = index;
-        binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings.push_back(binding);
-    }
-    VkDescriptorSetLayoutCreateInfo layout_create{};
-    layout_create.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_create.bindingCount = static_cast<std::uint32_t>(bindings.size());
-    layout_create.pBindings = bindings.data();
-    check(vkCreateDescriptorSetLayout(device_, &layout_create, nullptr,
-                                      &entry.set_layout),
-          "vkCreateDescriptorSetLayout");
-
-    VkPushConstantRange push{};
-    push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    push.offset = 0;
-    push.size = info.push_bytes;
-    VkPipelineLayoutCreateInfo pipeline_layout{};
-    pipeline_layout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipeline_layout.setLayoutCount = 1;
-    pipeline_layout.pSetLayouts = &entry.set_layout;
-    pipeline_layout.pushConstantRangeCount = 1;
-    pipeline_layout.pPushConstantRanges = &push;
-    check(vkCreatePipelineLayout(device_, &pipeline_layout, nullptr, &entry.layout),
-          "vkCreatePipelineLayout");
-
-    VkShaderModuleCreateInfo module_create{};
-    module_create.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    module_create.codeSize = info.spirv.size();
-    module_create.pCode = reinterpret_cast<const std::uint32_t*>(info.spirv.data());
-    VkShaderModule module = VK_NULL_HANDLE;
-    check(vkCreateShaderModule(device_, &module_create, nullptr, &module),
-          "vkCreateShaderModule");
-
-    VkComputePipelineCreateInfo compute{};
-    compute.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    compute.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    compute.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    compute.stage.module = module;
-    compute.stage.pName = "main";
-    compute.layout = entry.layout;
-    check(vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &compute, nullptr,
-                                   &entry.handle),
-          "vkCreateComputePipelines");
-    vkDestroyShaderModule(device_, module, nullptr);
-    entry.binding_count = info.bindings;
-    entry.push_bytes = info.push_bytes;
+    const auto* code = reinterpret_cast<const std::byte*>(info.spirv.data());
+    entry = runtime_.create_compute(
+        std::span<const std::byte>{code, info.spirv.size()}, info.bindings,
+        info.push_bytes);
     return entry;
-}
-
-void Context::destroy_pipeline(Pipeline& entry) noexcept {
-    if (entry.handle != VK_NULL_HANDLE)
-        vkDestroyPipeline(device_, entry.handle, nullptr);
-    if (entry.layout != VK_NULL_HANDLE)
-        vkDestroyPipelineLayout(device_, entry.layout, nullptr);
-    if (entry.set_layout != VK_NULL_HANDLE)
-        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
-    entry = {};
-}
-
-VkDescriptorSet Context::acquire_set(const Pipeline& entry, Session& session) {
-    if (session.pools.empty() || session.sets_in_active_pool >= session.pool_capacities.back())
-        grow_session_pool(session);
-    VkDescriptorSetAllocateInfo allocation{};
-    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocation.descriptorPool = session.pools.back();
-    allocation.descriptorSetCount = 1;
-    allocation.pSetLayouts = &entry.set_layout;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    check(vkAllocateDescriptorSets(device_, &allocation, &set),
-          "vkAllocateDescriptorSets");
-    ++session.sets_in_active_pool;
-    return set;
-}
-
-// A session allocates descriptor sets between submissions only: one image of
-// the SIFT pipeline records a few hundred dispatches, and parallel extractions
-// (one session per worker thread) must not share a pool or run out of it.
-void Context::grow_session_pool(Session& session) {
-    const std::uint32_t capacity =
-        std::max<std::uint32_t>(512U, session.pool_capacities.empty()
-                                          ? 0U
-                                          : session.pool_capacities.back() * 2U);
-    VkDescriptorPoolSize pool_size{};
-    pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = capacity * kMaxShaderBindings;
-    VkDescriptorPoolCreateInfo create{};
-    create.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    create.maxSets = capacity;
-    create.poolSizeCount = 1;
-    create.pPoolSizes = &pool_size;
-    VkDescriptorPool pool = VK_NULL_HANDLE;
-    check(vkCreateDescriptorPool(device_, &create, nullptr, &pool),
-          "vkCreateDescriptorPool");
-    session.pools.push_back(pool);
-    session.pool_capacities.push_back(capacity);
-    session.sets_in_active_pool = 0;
-}
-
-// Called between submissions, when no recorded command can still reference a
-// descriptor set: every pool is reset and the smaller ones are retired.
-void Context::reset_session_pools(Session& session) {
-    if (session.pools.empty()) return;
-    const std::size_t keep = session.pool_capacities.size() - 1;
-    for (std::size_t index = 0; index < session.pools.size(); ++index) {
-        if (index == keep) continue;
-        vkDestroyDescriptorPool(device_, session.pools[index], nullptr);
-    }
-    const VkDescriptorPool active = session.pools[keep];
-    const std::uint32_t capacity = session.pool_capacities[keep];
-    session.pools.assign(1, active);
-    session.pool_capacities.assign(1, capacity);
-    check(vkResetDescriptorPool(device_, active, 0), "vkResetDescriptorPool");
-    session.sets_in_active_pool = 0;
-}
-
-void Context::write_set(VkDescriptorSet set, const Pipeline& entry,
-                        std::span<const BufferBinding> bindings) {
-    if (bindings.size() != entry.binding_count)
-        throw std::logic_error("Descriptor binding count mismatch");
-    std::array<VkDescriptorBufferInfo, kMaxShaderBindings> infos{};
-    std::array<VkWriteDescriptorSet, kMaxShaderBindings> writes{};
-    for (std::uint32_t index = 0; index < entry.binding_count; ++index) {
-        infos[index].buffer = bindings[index].buffer;
-        infos[index].offset = bindings[index].offset;
-        infos[index].range = bindings[index].range;
-        writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[index].dstSet = set;
-        writes[index].dstBinding = index;
-        writes[index].descriptorCount = 1;
-        writes[index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[index].pBufferInfo = &infos[index];
-    }
-    vkUpdateDescriptorSets(device_, entry.binding_count, writes.data(), 0, nullptr);
 }
 
 void Context::begin() {
     Session& session = this->session();
     std::lock_guard lock(mutex_);
-    if (!session.recording) {
-        if (session.command == VK_NULL_HANDLE) {
-            VkCommandBufferAllocateInfo allocation{};
-            allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-            allocation.commandPool = command_pool_;
-            allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            allocation.commandBufferCount = 1;
-            check(vkAllocateCommandBuffers(device_, &allocation, &session.command),
-                  "vkAllocateCommandBuffers");
-        }
-        if (session.fence == VK_NULL_HANDLE) {
-            VkFenceCreateInfo fence_create{};
-            fence_create.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-            check(vkCreateFence(device_, &fence_create, nullptr, &session.fence),
-                  "vkCreateFence");
-        }
-        check(vkResetCommandBuffer(session.command, 0), "vkResetCommandBuffer");
-        reset_session_pools(session);
-        VkCommandBufferBeginInfo begin_info{};
-        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(vkBeginCommandBuffer(session.command, &begin_info),
-              "vkBeginCommandBuffer");
-        session.recording = true;
-        session.sets.clear();
+    if (!session.has_encoder) {
+        session.encoder = runtime_.encoder(photara::vk::BarrierPolicy::after_compute);
+        session.has_encoder = true;
+    }
+    if (!session.encoder.recording()) {
+        (void)session.encoder.native();
         session.downloads.clear();
     }
 }
@@ -793,38 +626,27 @@ void Context::dispatch(Shader shader, std::span<const BufferBinding> bindings,
                        std::uint32_t groups_z) {
     Session& session = this->session();
     std::lock_guard lock(mutex_);
-    if (!session.recording)
+    if (!session.has_encoder || !session.encoder.recording())
         throw std::logic_error("dispatch() called without begin()");
 
-    const Pipeline& entry = pipeline(shader);
-    if (push_bytes != entry.push_bytes)
+    const photara::vk::ComputePipeline& entry = pipeline(shader);
+    if (push_bytes != entry.push_bytes())
         throw std::logic_error("Push constant size mismatch for shader " +
                                std::to_string(static_cast<std::uint32_t>(shader)));
-    VkDescriptorSet set = acquire_set(entry, session);
-    session.sets.push_back(set);
-    write_set(set, entry, bindings);
-
-    vkCmdBindPipeline(session.command, VK_PIPELINE_BIND_POINT_COMPUTE, entry.handle);
-    vkCmdBindDescriptorSets(session.command, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout, 0,
-                            1, &set, 0, nullptr);
-    if (push_bytes > 0)
-        vkCmdPushConstants(session.command, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           push_bytes, push_constants);
-    vkCmdDispatch(session.command, groups_x, groups_y, groups_z);
-
-    // One conservative barrier per dispatch keeps every pass ordered without
-    // per-buffer dependency tracking; the SIFT pipeline is tens of dispatches
-    // per image, so the cost is negligible next to the kernels themselves.
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                            VK_ACCESS_SHADER_WRITE_BIT |
-                            VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(session.command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+    if (bindings.size() != entry.binding_count())
+        throw std::logic_error("Descriptor binding count mismatch");
+    std::array<photara::vk::BufferBinding, kMaxShaderBindings> converted{};
+    for (std::uint32_t index = 0; index < bindings.size(); ++index) {
+        converted[index].buffer = bindings[index].buffer;
+        converted[index].offset = bindings[index].offset;
+        converted[index].range = bindings[index].range;
+    }
+    // after_compute inserts the same compute-to-compute/transfer barrier the
+    // SIFT passes used to record after every dispatch.
+    session.encoder.dispatch(
+        entry,
+        std::span<const photara::vk::BufferBinding>{converted.data(), bindings.size()},
+        push_constants, push_bytes, groups_x, groups_y, groups_z);
 }
 
 void Context::queue_download(const Buffer& source, VkDeviceSize source_offset,
@@ -832,22 +654,19 @@ void Context::queue_download(const Buffer& source, VkDeviceSize source_offset,
                              VkDeviceSize destination_offset) {
     Session& session = this->session();
     std::lock_guard lock(mutex_);
-    if (!session.recording)
+    if (!session.has_encoder || !session.encoder.recording())
         throw std::logic_error("queue_download() called without begin()");
     if (bytes == 0) return;
+    const VkCommandBuffer command = session.encoder.native();
     const VkBufferCopy region{source_offset, destination_offset, bytes};
-    vkCmdCopyBuffer(session.command, source.handle(), destination.handle(), 1, &region);
-    // The conservative post-dispatch barrier covers compute->transfer, but a
-    // queued download can also directly follow another download.
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT |
-                            VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(session.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT |
-                             VK_PIPELINE_STAGE_HOST_BIT,
-                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+    vkCmdCopyBuffer(command, source.handle(), destination.handle(), 1, &region);
+    // The post-dispatch barrier covers compute->transfer, but a queued download
+    // can also directly follow another download.
+    session.encoder.barrier(
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
     session.downloads.push_back({&source, source_offset, bytes, &destination,
                                  destination_offset});
 }
@@ -857,64 +676,44 @@ void Context::queue_upload(const Buffer& source, VkDeviceSize source_offset,
                            VkDeviceSize destination_offset) {
     Session& session = this->session();
     std::lock_guard lock(mutex_);
-    if (!session.recording)
+    if (!session.has_encoder || !session.encoder.recording())
         throw std::logic_error("queue_upload() called without begin()");
     if (bytes == 0) return;
+    const VkCommandBuffer command = session.encoder.native();
     const VkBufferCopy region{source_offset, destination_offset, bytes};
-    vkCmdCopyBuffer(session.command, source.handle(), destination.handle(), 1,
-                    &region);
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(session.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
-                         0, nullptr, 0, nullptr);
+    vkCmdCopyBuffer(command, source.handle(), destination.handle(), 1, &region);
+    session.encoder.barrier(
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 }
 
 void Context::fill_u32(const Buffer& destination, VkDeviceSize offset,
                        VkDeviceSize bytes, std::uint32_t value) {
     Session& session = this->session();
     std::lock_guard lock(mutex_);
-    if (!session.recording)
+    if (!session.has_encoder || !session.encoder.recording())
         throw std::logic_error("fill_u32() called without begin()");
     if (bytes == 0) return;
-    vkCmdFillBuffer(session.command, destination.handle(), offset, bytes, value);
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                            VK_ACCESS_SHADER_WRITE_BIT |
-                            VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(session.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+    const VkCommandBuffer command = session.encoder.native();
+    vkCmdFillBuffer(command, destination.handle(), offset, bytes, value);
+    session.encoder.barrier(
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+            VK_ACCESS_TRANSFER_READ_BIT);
 }
 
 void Context::submit_and_wait() {
     Session& session = this->session();
-    std::vector<VkDescriptorSet> sets;
     {
         std::lock_guard lock(mutex_);
-        if (!session.recording)
+        if (!session.has_encoder || !session.encoder.recording())
             throw std::logic_error("submit_and_wait() called without begin()");
-        check(vkEndCommandBuffer(session.command), "vkEndCommandBuffer");
-        VkSubmitInfo submit{};
-        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &session.command;
-        check(vkResetFences(device_, 1, &session.fence), "vkResetFences");
-        check(vkQueueSubmit(queue_, 1, &submit, session.fence), "vkQueueSubmit");
-        session.recording = false;
-        session.sets.clear();
+        session.encoder.submit();
     }
-
-    check(vkWaitForFences(device_, 1, &session.fence, VK_TRUE, UINT64_MAX),
-          "vkWaitForFences");
-
-    // The descriptor sets stay allocated from the session's pool until the next
-    // begin() resets it, which happens after this wait.
+    // Wait outside the context mutex so another worker can record and submit.
+    session.encoder.wait();
     for (const auto& download : session.downloads)
         download.destination->invalidate();
     session.downloads.clear();
