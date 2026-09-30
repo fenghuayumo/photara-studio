@@ -65,10 +65,10 @@ PHOTARA_HD PHOTARA_FORCEINLINE void linearize_observation(
     if (equirect) {
         const double length2 = px * px + py * py + pz * pz;
         if (!(length2 > options.minimum_depth * options.minimum_depth) ||
-            !::isfinite(length2)) {
+            !photara_isfinite(length2)) {
             return;
         }
-    } else if (!(pz > options.minimum_depth) || !::isfinite(pz)) {
+    } else if (!(pz > options.minimum_depth) || !photara_isfinite(pz)) {
         return;
     }
 
@@ -117,7 +117,7 @@ PHOTARA_HD PHOTARA_FORCEINLINE void linearize_observation(
         j11 = intrinsics.fy * projection.yy * inv_z;
         j12 = -(j10 * px + j11 * py) * inv_z;
     }
-    if (!::isfinite(raw_rx) || !::isfinite(raw_ry)) {
+    if (!photara_isfinite(raw_rx) || !photara_isfinite(raw_ry)) {
         return;
     }
 

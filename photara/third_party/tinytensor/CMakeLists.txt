@@ -72,7 +72,16 @@ set_target_properties(tinytensor_cuda PROPERTIES
 # Create C++ static library
 add_library(tinytensor_cpp OBJECT ${TINYTENSOR_CPP_SOURCES})
 target_include_directories(tinytensor_cpp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# Headers under internal/ include cuda_runtime.h; propagate CUDA includes to
+# host C++ translation units (not only the final tinytensor archive).
+target_link_libraries(tinytensor_cpp PUBLIC CUDA::cudart)
+# OBJECT libraries do not always propagate INTERFACE include dirs to consumers
+# of the object files alone; set includes explicitly as well.
+target_include_directories(tinytensor_cpp PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 set_target_properties(tinytensor_cpp PROPERTIES FOLDER "external")
+
+target_link_libraries(tinytensor_cuda PUBLIC CUDA::cudart)
+target_include_directories(tinytensor_cuda PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 
 # Create the main static library that merges both
 add_library(tinytensor STATIC $<TARGET_OBJECTS:tinytensor_cuda> $<TARGET_OBJECTS:tinytensor_cpp>)
@@ -88,8 +97,11 @@ target_link_libraries(tinytensor PUBLIC CUDA::cudart)
 set_target_properties(tinytensor PROPERTIES FOLDER "external")
 
 # Compile options
+# Device lambdas and constexpr host math (e.g. numeric_limits::infinity) need
+# these nvcc flags on both MSVC and Linux toolchains.
+target_compile_options(tinytensor_cuda PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr>)
 if(MSVC)
-    target_compile_options(tinytensor_cuda PRIVATE --extended-lambda --expt-relaxed-constexpr)
     target_compile_options(tinytensor_cpp PRIVATE /EHsc /utf-8)
     target_compile_definitions(tinytensor_cuda PRIVATE FMT_UNICODE=0)
 endif()
@@ -175,7 +187,8 @@ if(TINYTENSOR_ENABLE_VULKAN)
         PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated)
     target_compile_features(tinytensor_vulkan PUBLIC cxx_std_20)
     target_compile_definitions(tinytensor_vulkan PUBLIC TINYTENSOR_HAS_VULKAN=1)
-    target_link_libraries(tinytensor_vulkan PUBLIC Vulkan::Vulkan photara_vk::photara_vk)
+    target_link_libraries(tinytensor_vulkan PUBLIC Vulkan::Vulkan photara_vk::photara_vk CUDA::cudart)
+    target_include_directories(tinytensor_vulkan PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
     set_target_properties(tinytensor_vulkan PROPERTIES FOLDER "external")
     if(MSVC)
         target_compile_options(tinytensor_vulkan PRIVATE /EHsc /utf-8)

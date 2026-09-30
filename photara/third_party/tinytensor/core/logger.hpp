@@ -3,16 +3,19 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <format>
 #include <iostream>
 #include <string>
+#include <utility>
 
 // TinyTensor Logger - Minimal logging for the standalone library
 //
 // Default level is info: LOG_DEBUG / LOG_TRACE are silent unless enabled via
 // TINYTENSOR_LOG_LEVEL (or PHOTARA_LOG_LEVEL) = debug|trace.
 //
-// Macros take a single streamable message (string / ostringstream / concat).
-// Keep this shape for CUDA/MSVC host compilation compatibility.
+// Call sites use either a single streamable message or fmt/std::format style:
+//   LOG_INFO("hello");
+//   LOG_INFO("count={}", n);
 namespace tinytensor {
 
 enum class LogLevel : int {
@@ -58,39 +61,62 @@ inline bool log_enabled(const LogLevel level) {
     return static_cast<int>(level) <= static_cast<int>(current_log_level());
 }
 
+// Single argument: stream as-is (supports pre-formatted std::string / literals).
+template <typename T>
+inline void log_write(std::ostream& os, T&& value) {
+    os << std::forward<T>(value);
+}
+
+// Two or more arguments: treat the first as a std::format format string.
+template <typename... Args>
+requires (sizeof...(Args) >= 1)
+inline void log_write(std::ostream& os, std::format_string<Args...> fmt, Args&&... args) {
+    os << std::format(fmt, std::forward<Args>(args)...);
+}
+
 } // namespace tinytensor
 
-#define LOG_INFO(msg) \
+#define LOG_INFO(...) \
     do { \
         if (::tinytensor::log_enabled(::tinytensor::LogLevel::info)) { \
-            std::cout << "[INFO] " << (msg) << std::endl; \
+            std::cout << "[INFO] "; \
+            ::tinytensor::log_write(std::cout, __VA_ARGS__); \
+            std::cout << std::endl; \
         } \
     } while (0)
 
-#define LOG_WARN(msg) \
+#define LOG_WARN(...) \
     do { \
         if (::tinytensor::log_enabled(::tinytensor::LogLevel::warn)) { \
-            std::cout << "[WARN] " << (msg) << std::endl; \
+            std::cout << "[WARN] "; \
+            ::tinytensor::log_write(std::cout, __VA_ARGS__); \
+            std::cout << std::endl; \
         } \
     } while (0)
 
-#define LOG_ERROR(msg) \
+#define LOG_ERROR(...) \
     do { \
         if (::tinytensor::log_enabled(::tinytensor::LogLevel::error)) { \
-            std::cerr << "[ERROR] " << (msg) << std::endl; \
+            std::cerr << "[ERROR] "; \
+            ::tinytensor::log_write(std::cerr, __VA_ARGS__); \
+            std::cerr << std::endl; \
         } \
     } while (0)
 
-#define LOG_DEBUG(msg) \
+#define LOG_DEBUG(...) \
     do { \
         if (::tinytensor::log_enabled(::tinytensor::LogLevel::debug)) { \
-            std::cout << "[DEBUG] " << (msg) << std::endl; \
+            std::cout << "[DEBUG] "; \
+            ::tinytensor::log_write(std::cout, __VA_ARGS__); \
+            std::cout << std::endl; \
         } \
     } while (0)
 
-#define LOG_TRACE(msg) \
+#define LOG_TRACE(...) \
     do { \
         if (::tinytensor::log_enabled(::tinytensor::LogLevel::trace)) { \
-            std::cout << "[TRACE] " << (msg) << std::endl; \
+            std::cout << "[TRACE] "; \
+            ::tinytensor::log_write(std::cout, __VA_ARGS__); \
+            std::cout << std::endl; \
         } \
     } while (0)

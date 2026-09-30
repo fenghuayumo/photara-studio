@@ -184,7 +184,7 @@ void draw_status_badge(const bool running, const Stage stage) {
         colour = theme::accent;
         label = i18n::tr("LIVE");
         const float pulse =
-            0.55F + 0.45F * (0.5F + 0.5F * std::sinf(
+            0.55F + 0.45F * (0.5F + 0.5F * std::sin(
                 static_cast<float>(ImGui::GetTime()) * 3.4F));
         colour = theme::fade(theme::accent, pulse);
     } else if (stage == Stage::failed) {

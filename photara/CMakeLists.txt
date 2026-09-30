@@ -77,22 +77,28 @@ endif()
 set_target_properties(photara_ba PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(PHOTARA_ENABLE_FEATURES)
-    find_package(freeimage CONFIG REQUIRED)
+    include(PhotaraFindDeps)
+    photara_find_freeimage()
     find_package(JPEG REQUIRED)
     find_package(PNG REQUIRED)
     find_package(Eigen3 CONFIG REQUIRED)
-    find_package(PoseLib CONFIG REQUIRED)
+    photara_find_poselib()
     # Some Ceres/glog vcpkg exports retain gflags::gflags in their link
-    # interface without declaring the dependency themselves.
-    set(GFLAGS_USE_TARGET_NAMESPACE TRUE)
+    # interface without declaring the dependency themselves. Ubuntu's Ceres
+    # instead expects the un-namespaced `gflags` imported target.
+    if(WIN32)
+        set(GFLAGS_USE_TARGET_NAMESPACE TRUE)
+    endif()
     find_package(gflags CONFIG REQUIRED)
+    # Ubuntu Ceres exports glog::glog on its link interface; resolve it first.
+    find_package(glog CONFIG REQUIRED)
     if(MSVC AND gflags_DIR)
         get_filename_component(_gflags_share_dir "${gflags_DIR}" DIRECTORY)
         get_filename_component(_gflags_prefix "${_gflags_share_dir}" DIRECTORY)
         link_directories("${_gflags_prefix}/lib")
     endif()
     find_package(Ceres CONFIG REQUIRED)
-    find_package(hnswlib CONFIG REQUIRED)
+    photara_find_hnswlib()
     find_package(Boost REQUIRED)
 
     set(PHOTARA_VLFEAT_SOURCES
@@ -508,9 +514,15 @@ if(PHOTARA_ENABLE_FEATURES)
     endif()
 
     if(PHOTARA_ENABLE_SPLAT AND PHOTARA_ENABLE_CUDA)
-        find_package(WebP CONFIG REQUIRED)
+        include(PhotaraFindDeps)
+        photara_find_webpzstd()
         find_package(ZLIB REQUIRED)
-        find_package(zstd CONFIG REQUIRED)
+        if(NOT TARGET zstd::libzstd AND NOT TARGET zstd::libzstd_shared AND NOT TARGET zstd::libzstd_static)
+            message(FATAL_ERROR "zstd target missing after photara_find_webpzstd()")
+        endif()
+        if(NOT TARGET WebP::webp)
+            message(FATAL_ERROR "WebP::webp target missing after photara_find_webpzstd()")
+        endif()
         if(PHOTARA_ENABLE_VULKAN_COMPUTE)
             set(TINYTENSOR_ENABLE_VULKAN ON CACHE BOOL
                 "Build the TinyTensor Vulkan compute backend" FORCE)
