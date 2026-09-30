@@ -108,6 +108,8 @@ Problem make_grouped_intrinsics_problem() {
 
 }  // namespace
 
+using namespace photara::ba;
+
 int main() {
     // Central differences independently check the full BA chain, including
     // four angular distortion coefficients and the optical-axis limit.
@@ -540,6 +542,122 @@ int main() {
             !gpu_rotations_unchanged) {
             std::cerr << "GPU translation-only BA modified rotations or failed to improve cost\n";
             return 12;
+        }
+    }
+#endif
+#if defined(PHOTARA_HAS_VULKAN_BA)
+    if (VulkanOptimizer::is_available()) {
+        OptimizerOptions joint_options = options;
+        joint_options.optimize_focal = true;
+        joint_options.optimize_aspect_ratio = true;
+        joint_options.optimize_principal_point = true;
+        joint_options.optimize_distortion = true;
+        joint_options.optimize_points = false;
+        joint_options.optimize_rotations = false;
+        joint_options.optimize_translations = false;
+        joint_options.focal_prior_weight = 0.0;
+        joint_options.maximum_pcg_iterations = 13;
+        VulkanOptimizer joint_optimizer(joint_options);
+        for (const bool shared : {true, false}) {
+            Problem joint = shared ? make_problem() : make_grouped_intrinsics_problem();
+            joint.pose_constant.clear();
+            joint.observations = Observations{};
+            for (std::size_t point = 0; point < joint.points.size(); ++point)
+                for (std::size_t camera = 0; camera < joint.poses.size(); ++camera) {
+                    auto truth = joint.intrinsics[joint.intrinsic_index(camera)];
+                    truth.fx *= 1.1;
+                    truth.fy *= 1.1;
+                    const auto [x, y] = project(
+                        joint.poses[camera], truth, joint.points[point]);
+                    joint.observations.push_back(
+                        static_cast<Index>(camera), static_cast<Index>(point), x, y);
+                }
+            const double joint_initial = evaluate_cost(joint, joint_options.huber_delta);
+            joint_optimizer.upload(joint);
+            const auto joint_summary = joint_optimizer.optimize();
+            joint_optimizer.download(joint);
+            const double joint_final = evaluate_cost(joint, joint_options.huber_delta);
+            if (!joint_summary.usable() || joint_final > joint_initial * 1e-3 ||
+                std::abs(joint_final - joint_summary.final_cost) > 1e-6) {
+                std::cerr << "Vulkan joint intrinsics regression: "
+                          << joint_summary.brief_report()
+                          << " independently evaluated=" << joint_final << '\n';
+                return 34;
+            }
+            for (const auto& iteration : joint_summary.iterations)
+                if (iteration.pcg_iterations > joint_options.maximum_pcg_iterations) {
+                    std::cerr << "Vulkan PCG exceeded its iteration budget\n";
+                    return 35;
+                }
+        }
+        Problem vulkan_problem = make_problem();
+        const double vulkan_initial = evaluate_cost(vulkan_problem);
+        const OptimizerSummary vulkan_summary = optimize_vulkan(vulkan_problem, options);
+        std::cout << "Vulkan " << vulkan_summary.brief_report() << '\n';
+        if (!vulkan_summary.usable() || vulkan_summary.successful_steps == 0 ||
+            !(vulkan_summary.final_cost < vulkan_initial * 1e-3)) {
+            std::cerr << "Vulkan optimizer failed to reduce synthetic reprojection cost\n";
+            return 30;
+        }
+        if (std::abs(vulkan_problem.poses.front().cx + 1.0) > 1e-15) {
+            std::cerr << "Vulkan optimizer modified the fixed gauge pose\n";
+            return 31;
+        }
+        Problem vulkan_fixed_point_problem = make_problem();
+        const std::vector<Point3> vulkan_fixed_points = vulkan_fixed_point_problem.points;
+        OptimizerOptions vulkan_fixed_options = options;
+        vulkan_fixed_options.optimize_points = false;
+        const double vulkan_fixed_initial = evaluate_cost(
+            vulkan_fixed_point_problem, vulkan_fixed_options.huber_delta,
+            vulkan_fixed_options.minimum_depth);
+        const OptimizerSummary vulkan_fixed_summary =
+            optimize_vulkan(vulkan_fixed_point_problem, vulkan_fixed_options);
+        bool vulkan_points_unchanged = true;
+        for (std::size_t point = 0; point < vulkan_fixed_points.size(); ++point) {
+            const Point3& before = vulkan_fixed_points[point];
+            const Point3& after = vulkan_fixed_point_problem.points[point];
+            vulkan_points_unchanged = vulkan_points_unchanged &&
+                before.x == after.x && before.y == after.y && before.z == after.z;
+        }
+        if (!vulkan_fixed_summary.usable() ||
+            !(vulkan_fixed_summary.final_cost < vulkan_fixed_initial) ||
+            !vulkan_points_unchanged) {
+            std::cerr << "Vulkan fixed-point BA modified landmarks or failed to improve cost\n";
+            return 32;
+        }
+        Problem vulkan_translation_only_problem = make_problem();
+        const std::vector<Pose> vulkan_translation_only_poses =
+            vulkan_translation_only_problem.poses;
+        OptimizerOptions vulkan_translation_only_options = options;
+        vulkan_translation_only_options.optimize_rotations = false;
+        const double vulkan_translation_only_initial = evaluate_cost(
+            vulkan_translation_only_problem,
+            vulkan_translation_only_options.huber_delta,
+            vulkan_translation_only_options.minimum_depth);
+        const OptimizerSummary vulkan_translation_only_summary = optimize_vulkan(
+            vulkan_translation_only_problem, vulkan_translation_only_options);
+        bool vulkan_rotations_unchanged = true;
+        for (std::size_t pose = 0;
+             pose < vulkan_translation_only_problem.poses.size(); ++pose) {
+            const Pose& before = vulkan_translation_only_poses[pose];
+            const Pose& after = vulkan_translation_only_problem.poses[pose];
+            vulkan_rotations_unchanged = vulkan_rotations_unchanged &&
+                before.qw == after.qw && before.qx == after.qx &&
+                before.qy == after.qy && before.qz == after.qz;
+        }
+        if (!vulkan_translation_only_summary.usable() ||
+            !(vulkan_translation_only_summary.final_cost <
+              vulkan_translation_only_initial) ||
+            !vulkan_rotations_unchanged) {
+            std::cerr << "Vulkan translation-only BA modified rotations or failed to improve cost\n";
+            return 33;
+        }
+        auto fish_vulkan = fish_original;
+        const auto fish_vulkan_summary = optimize_vulkan(fish_vulkan, fish_options);
+        if (!fish_vulkan_summary.usable() ||
+            fish_vulkan_summary.final_cost > fish_initial * 1e-3) {
+            std::cerr << "fisheye Vulkan BA failed to converge\n";
+            return 36;
         }
     }
 #endif

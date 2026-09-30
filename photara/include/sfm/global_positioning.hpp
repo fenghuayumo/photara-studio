@@ -11,10 +11,22 @@ enum class GlobalPositioningConstraint {
     points_and_cameras,
 };
 
+// automatic keeps the historical CUDA preference: prefer_cuda selects CUDA
+// when it is built and a device is present, otherwise the CPU. vulkan is
+// explicit and never replaces a CUDA-off automatic run.
+enum class PositioningBackend {
+    automatic,
+    cpu,
+    cuda,
+    vulkan,
+};
+
 struct GlobalPositioningOptions {
-    // Dense camera Schur system on CUDA for the fixed-rotation bearing solve.
+    // Dense camera Schur system for the fixed-rotation bearing solve.
     // Camera-only initialization and unsupported sizes retain the CPU path.
+    // prefer_cuda applies only when backend is automatic.
     bool prefer_cuda{true};
+    PositioningBackend backend{PositioningBackend::automatic};
     // Prefer longer tracks; 4–5 cuts short noisy constraints on real scenes
     // and avoids unconstrained short tracks in the selected subset.
     unsigned min_views_per_track{4};

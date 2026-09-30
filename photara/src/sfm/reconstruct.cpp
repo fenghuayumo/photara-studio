@@ -375,6 +375,9 @@ std::uint64_t reconstruction_key(
     key.append(static_cast<std::uint32_t>(_MSC_VER));
 #endif
     key.append(tracks_key);
+    // Backend selection is process-wide rather than part of ReconstructionConfig.
+    // Include it so CUDA/Vulkan A/B runs cannot reuse each other's checkpoint.
+    key.append(static_cast<std::uint32_t>(bundle_backend_preference()));
     key.append(static_cast<std::uint32_t>(config.mode));
     key.append(config.star.min_views);
     key.append(config.star.max_views);
@@ -415,6 +418,7 @@ std::uint64_t reconstruction_key(
     key.append(
         static_cast<std::uint32_t>(config.global_rotation.weight_type));
     key.append(config.global_positioning.prefer_cuda);
+    key.append(static_cast<std::uint32_t>(config.global_positioning.backend));
     key.append(config.global_positioning.min_views_per_track);
     key.append(config.global_positioning.min_tracks_for_positioning);
     key.append(config.global_positioning.tracks_per_registered_image);

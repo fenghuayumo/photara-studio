@@ -88,6 +88,8 @@ struct ReconstructCli {
     bool trust_focal{false};
     bool structural_pair_expansion{false};
     bool positioning_cuda{true};
+    photara::sfm::PositioningBackend positioning_backend{
+        photara::sfm::PositioningBackend::automatic};
     std::filesystem::path output;
     // Optional COLMAP text model written next to the native output, so the
     // alignment can be inspected by COLMAP-family tools (and by scripts that
@@ -630,10 +632,16 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("cache-dir", "Feature cache directory (- to disable)",
          cxxopts::value<std::string>()->default_value(""))
         ("ba-backend",
-         "Bundle adjustment backend: automatic (default), cpu, or cuda "
-         "(cuda warns when a solve falls back)",
+         "Bundle adjustment backend: automatic (default), cpu, cuda, or vulkan. "
+         "automatic follows the CUDA preference and does not select vulkan. "
+         "cuda and vulkan warn when a solve falls back to the CPU.",
          cxxopts::value<std::string>()->default_value("automatic"))
-        ("positioning-cuda", "Use CUDA for supported global bearing positioning solves (default: true)",
+        ("positioning-backend",
+         "Global bearing positioning backend: automatic (default), cpu, cuda, or vulkan. "
+         "automatic follows --positioning-cuda and does not select vulkan. "
+         "cuda and vulkan fall back to the CPU with a warning when the device or problem size is unsupported.",
+         cxxopts::value<std::string>()->default_value("automatic"))
+        ("positioning-cuda", "Use CUDA for supported global bearing positioning solves when --positioning-backend=automatic (default: true)",
          cxxopts::value<bool>()->default_value("true"))
         ("extractor",
          "Feature extractor: siftgpu (default), vulkan_sift, sift, superpoint, "
@@ -1163,6 +1171,18 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "--mode must be global, incremental, or hierarchical");
     const std::string ba_backend = result["ba-backend"].as<std::string>();
     cli.positioning_cuda = result["positioning-cuda"].as<bool>();
+    const std::string positioning_backend = result["positioning-backend"].as<std::string>();
+    if (positioning_backend == "automatic")
+        cli.positioning_backend = photara::sfm::PositioningBackend::automatic;
+    else if (positioning_backend == "cpu")
+        cli.positioning_backend = photara::sfm::PositioningBackend::cpu;
+    else if (positioning_backend == "cuda")
+        cli.positioning_backend = photara::sfm::PositioningBackend::cuda;
+    else if (positioning_backend == "vulkan")
+        cli.positioning_backend = photara::sfm::PositioningBackend::vulkan;
+    else
+        throw std::invalid_argument(
+            "--positioning-backend must be automatic, cpu, cuda, or vulkan");
     if (ba_backend == "automatic")
         photara::sfm::set_bundle_backend_preference(
             photara::sfm::BundleBackendPreference::automatic);
@@ -1172,9 +1192,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     else if (ba_backend == "cuda")
         photara::sfm::set_bundle_backend_preference(
             photara::sfm::BundleBackendPreference::cuda);
+    else if (ba_backend == "vulkan")
+        photara::sfm::set_bundle_backend_preference(
+            photara::sfm::BundleBackendPreference::vulkan);
     else
         throw std::invalid_argument(
-            "--ba-backend must be automatic, cpu, or cuda");
+            "--ba-backend must be automatic, cpu, cuda, or vulkan");
     cli.output = utf8_to_path(result["output"].as<std::string>());
     cli.gui = result["gui"].as<bool>();
     const std::string working_sfm_text =
@@ -4076,6 +4099,7 @@ int main(int argc, char** argv) {
 
         photara::sfm::ReconstructionConfig config;
         config.global_positioning.prefer_cuda = cli.positioning_cuda;
+        config.global_positioning.backend = cli.positioning_backend;
         std::chrono::steady_clock::time_point last_alignment_preview{};
         bool has_alignment_preview = false;
         if (!cli.working_sfm.empty()) {

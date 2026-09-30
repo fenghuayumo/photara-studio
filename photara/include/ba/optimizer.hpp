@@ -109,6 +109,35 @@ OptimizerSummary optimize_cuda(
     const OptimizerOptions& options = {});
 #endif
 
+#if defined(PHOTARA_HAS_VULKAN_BA)
+// Same joint Schur/PCG problem as CudaOptimizer. Vulkan is opt-in: automatic
+// bundle adjustment keeps the CUDA solver when CUDA is available.
+class VulkanOptimizer {
+public:
+    explicit VulkanOptimizer(OptimizerOptions options = {});
+    ~VulkanOptimizer();
+
+    VulkanOptimizer(VulkanOptimizer&&) noexcept;
+    VulkanOptimizer& operator=(VulkanOptimizer&&) noexcept;
+    VulkanOptimizer(const VulkanOptimizer&) = delete;
+    VulkanOptimizer& operator=(const VulkanOptimizer&) = delete;
+
+    [[nodiscard]] static bool is_available() noexcept;
+    [[nodiscard]] static std::string device_name();
+    void upload(const Problem& problem);
+    OptimizerSummary optimize();
+    void download(Problem& problem) const;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+OptimizerSummary optimize_vulkan(
+    Problem& problem,
+    const OptimizerOptions& options = {});
+#endif
+
 [[nodiscard]] double evaluate_cost(
     const Problem& problem,
     double huber_delta = 2.0,

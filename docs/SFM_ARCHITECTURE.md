@@ -213,11 +213,20 @@ All modes finish with a `ReconstructionSummary`, observability analysis, and
 Jacobians, Huber IRLS, Schur elimination, matrix-free Schur products,
 block-preconditioned PCG, gauge fixing, and independent intrinsic groups.
 
-`CudaOptimizer` keeps linearization, Schur assembly, preconditioning, PCG,
-state updates, and cost evaluation on the GPU. `sfm::run_bundle_adjustment`
-builds full and local problems, freezes poorly observable intrinsic groups,
-and falls back to CPU if CUDA fails. `--ba-backend automatic|cpu|cuda` selects
-the process-level preference.
+`CudaOptimizer` and `VulkanOptimizer` keep linearization, Schur assembly,
+preconditioning, PCG, state updates, and cost evaluation on the GPU. The
+Vulkan matrix-free Schur product uses observation-parallel point accumulation
+and workgroup-parallel camera/intrinsic reduction to avoid global atomic
+contention. `sfm::run_bundle_adjustment` builds full and local problems,
+freezes poorly observable intrinsic groups, and falls back to CPU if the
+requested GPU backend cannot solve the problem.
+
+`--ba-backend automatic|cpu|cuda|vulkan` selects the process-level preference;
+automatic retains the historical CUDA preference. Global positioning has the
+matching `--positioning-backend automatic|cpu|cuda|vulkan` selector. CUDA and
+Vulkan share the bearing-Schur formulation, robust IRLS passes, gauge
+constraints, and stopping rules so backend comparisons preserve the mapping
+semantics.
 
 ## 6. Outputs
 
@@ -234,7 +243,9 @@ the process-level preference.
 
 - `CheckpointStore` supports `features`, `matches`, `geometry`, `tracks`, and
   `reconstruction` stages.
-- Keys include build identity, frontend parameters, source images, and masks.
+- Keys include build identity, frontend parameters, source images, masks, and
+  the selected positioning/BA backend, so A/B runs do not reuse each other's
+  reconstruction checkpoint.
 - `--cache-dir` enables reuse; a tracks hit skips the entire frontend.
 - `--working-sfm` writes editor sidecars: `*.live` and periodic
   `*.preview.asfm` snapshots.
@@ -255,7 +266,8 @@ the process-level preference.
 | `--camera-model` | `auto` | See section 3.5 |
 | `--focal` | 0 | Automatic initial focal |
 | `--trust-focal` | false | Lock supplied intrinsics |
-| `--ba-backend` | `automatic` | May be forced to `cpu` or `cuda` |
+| `--positioning-backend` | `automatic` | May be forced to `cpu`, `cuda`, or `vulkan` |
+| `--ba-backend` | `automatic` | May be forced to `cpu`, `cuda`, or `vulkan` |
 | `--cache-dir` | empty | Enable checkpoints |
 
 ## 9. Tests

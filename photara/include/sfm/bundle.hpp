@@ -8,14 +8,17 @@ namespace photara::sfm {
 enum class BundleBackend {
     cpu,
     cuda,
+    vulkan,
 };
 
-// Process-wide backend override for A/B validation of the CUDA joint BA.
+// Process-wide backend override for A/B validation of the joint BA.
 // Set once from the CLI before reconstruction starts.
+// automatic keeps the historical CUDA preference and does not select Vulkan.
 enum class BundleBackendPreference {
     automatic,  // CUDA when supported, silent CPU fallback (default)
-    cpu,        // never use CUDA
+    cpu,        // never use a GPU solver
     cuda,       // prefer CUDA; warn when any solve falls back to CPU
+    vulkan,     // prefer Vulkan; warn and use CPU when it cannot run. Does not fall through to CUDA.
 };
 
 void set_bundle_backend_preference(BundleBackendPreference preference);
@@ -38,14 +41,12 @@ struct BundleOptions {
     bool gate_intrinsics_by_observability{true};
     unsigned min_views_for_intrinsics{3};
     float min_median_parallax_deg{1.0F};
-    // Use the CUDA Schur/PCG backend when the problem is large enough and the
-    // requested parameterization is supported. Partial pose locks (local BA
-    // with fixed boundary views) stay on the CPU without changing
-    // reconstruction semantics.
-    // Default on: the CUDA joint Schur/PCG backend supports shared intrinsic
-    // refinement and falls back to the CPU automatically when CUDA is
-    // unavailable or produces an unusable step.
+    // Use a GPU Schur/PCG backend when the problem is large enough and the
+    // requested parameterization is supported. The process-wide preference
+    // chooses CUDA or Vulkan; partial pose locks stay on the CPU.
+    // Default on: automatic selection keeps the historical CUDA preference.
     bool prefer_cuda{true};
+    // Shared CUDA/Vulkan threshold; the legacy name is kept for API stability.
     std::size_t cuda_min_observations{50'000};
 };
 

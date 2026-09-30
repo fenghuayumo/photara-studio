@@ -204,23 +204,46 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         }
     }
 
-    bool use_cuda = false;
-#if defined(PHOTARA_HAS_CUDA)
     const bool has_partial_pose_locks = std::any_of(
         problem.pose_constant.begin(), problem.pose_constant.end(),
         [](const std::uint8_t value) { return value != 0; });
-    // The CUDA joint Schur/PCG solver now estimates shared intrinsic groups
-    // (focal / aspect / principal point / distortion) together with poses and
-    // points. Partial pose locks (local BA with fixed boundary views) still
-    // use the CPU backend.
+    // Joint Schur/PCG estimates shared intrinsic groups together with poses
+    // and points. Partial pose locks stay on the CPU.
     const bool supported_parameterization =
         (opt.optimize_rotations || opt.optimize_translations) &&
         !has_partial_pose_locks;
     const BundleBackendPreference backend = bundle_backend_preference();
-    use_cuda = options.prefer_cuda && backend != BundleBackendPreference::cpu &&
-        supported_parameterization &&
+    const bool want_vulkan = backend == BundleBackendPreference::vulkan;
+    const bool want_cuda = options.prefer_cuda &&
+        backend != BundleBackendPreference::cpu &&
+        backend != BundleBackendPreference::vulkan;
+#if defined(PHOTARA_HAS_VULKAN_BA)
+    const bool use_vulkan = want_vulkan && supported_parameterization &&
+        problem.observations.size() >= options.cuda_min_observations &&
+        ba::VulkanOptimizer::is_available();
+#else
+    const bool use_vulkan = false;
+#endif
+#if defined(PHOTARA_HAS_CUDA)
+    const bool use_cuda = want_cuda && supported_parameterization &&
         problem.observations.size() >= options.cuda_min_observations &&
         ba::CudaOptimizer::is_available();
+#else
+    const bool use_cuda = false;
+#endif
+    if (want_vulkan && !use_vulkan && supported_parameterization) {
+        core::Logger::instance().warning(
+            "ba-backend=vulkan requested but this solve stays on the CPU: "
+            "observations=", problem.observations.size(),
+            " minimum=", options.cuda_min_observations,
+#if defined(PHOTARA_HAS_VULKAN_BA)
+            " vulkan_available=", ba::VulkanOptimizer::is_available() ? 1 : 0
+#else
+            " vulkan_available=0 solver was not built"
+#endif
+        );
+    }
+#if defined(PHOTARA_HAS_CUDA)
     if (backend == BundleBackendPreference::cuda && !use_cuda &&
         options.prefer_cuda && supported_parameterization) {
         core::Logger::instance().warning(
@@ -229,7 +252,31 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
             " minimum=", options.cuda_min_observations,
             " cuda_available=", ba::CudaOptimizer::is_available() ? 1 : 0);
     }
-    if (use_cuda) {
+#endif
+    bool solved = false;
+    if (use_vulkan) {
+#if defined(PHOTARA_HAS_VULKAN_BA)
+        try {
+            core::Logger::instance().info(
+                "bundle backend=vulkan device=", ba::VulkanOptimizer::device_name(),
+                " observations=", problem.observations.size());
+            summary.optimizer = ba::optimize_vulkan(problem, opt);
+            summary.backend = BundleBackend::vulkan;
+            if (!summary.optimizer.usable()) {
+                core::Logger::instance().warning(
+                    "Vulkan bundle adjustment produced an unusable step; "
+                    "continuing with CPU from the last accepted state");
+            } else {
+                solved = true;
+            }
+        } catch (const std::exception& error) {
+            core::Logger::instance().warning(
+                "Vulkan bundle adjustment unavailable at runtime; falling back "
+                "to CPU: ", error.what());
+        }
+#endif
+    } else if (use_cuda) {
+#if defined(PHOTARA_HAS_CUDA)
         try {
             core::Logger::instance().info(
                 "bundle backend=cuda device=", ba::CudaOptimizer::device_name(),
@@ -240,17 +287,17 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
                 core::Logger::instance().warning(
                     "CUDA bundle adjustment produced an unusable step; "
                     "continuing with CPU from the last accepted state");
-                use_cuda = false;
+            } else {
+                solved = true;
             }
         } catch (const std::exception& error) {
             core::Logger::instance().warning(
                 "CUDA bundle adjustment unavailable at runtime; falling back "
                 "to CPU: ", error.what());
-            use_cuda = false;
         }
-    }
 #endif
-    if (!use_cuda) {
+    }
+    if (!solved) {
         summary.optimizer = ba::optimize_cpu(problem, opt);
         summary.backend = BundleBackend::cpu;
     }
@@ -262,7 +309,9 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         "bundle adjustment: cameras=", summary.num_cameras,
         " points=", summary.num_points,
         " observations=", summary.num_observations,
-        " backend=", summary.backend == BundleBackend::cuda ? "cuda" : "cpu",
+        " backend=",
+        summary.backend == BundleBackend::cuda ? "cuda" :
+        summary.backend == BundleBackend::vulkan ? "vulkan" : "cpu",
         ' ',
         summary.optimizer.brief_report());
     if (!summary.success) return summary;

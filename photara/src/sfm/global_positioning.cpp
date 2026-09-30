@@ -4,6 +4,9 @@
 #include "ba/bearing_cuda.hpp"
 #include "ba/optimizer.hpp"
 #endif
+#if defined(PHOTARA_HAS_VULKAN_BA)
+#include "ba/bearing_vulkan.hpp"
+#endif
 
 #include <ceres/ceres.h>
 
@@ -1018,7 +1021,7 @@ GlobalPositioningSummary refine_only_points_bearings(
     std::vector<std::unique_ptr<AdaptiveHuberLoss>> losses;
     std::vector<PositioningResidual> residual_records;
     ceres::Problem problem(problem_options);
-#if defined(PHOTARA_HAS_CUDA)
+#if defined(PHOTARA_HAS_CUDA) || defined(PHOTARA_HAS_VULKAN_BA)
     ba::BearingProblem gpu_problem;
 #endif
     unsigned observations = 0;
@@ -1042,9 +1045,9 @@ GlobalPositioningSummary refine_only_points_bearings(
             residual_records.push_back({
                 residual_id, loss_ptr,
                 PositioningResidualType::camera_point});
-#if defined(PHOTARA_HAS_CUDA)
-            gpu_problem.observations.push_back({image.id,track_id,
-                {ray.direction.x(),ray.direction.y(),ray.direction.z()}});
+#if defined(PHOTARA_HAS_CUDA) || defined(PHOTARA_HAS_VULKAN_BA)
+            gpu_problem.observations.push_back({image.id, track_id,
+                {ray.direction.x(), ray.direction.y(), ray.direction.z()}});
 #endif
             ++observations;
         }
@@ -1098,33 +1101,108 @@ GlobalPositioningSummary refine_only_points_bearings(
     solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
     solver_options.linear_solver_ordering.reset(ordering);
 
-#if defined(PHOTARA_HAS_CUDA)
-    std::unique_ptr<ba::CudaBearingOptimizer> gpu;
-    std::vector<Index> gpu_cameras, gpu_tracks;
-    if (options.prefer_cuda && observations>=50000 && scene.registered_count()<=2000 &&
-        ba::CudaOptimizer::is_available()) {
-        try {
-            std::vector<Index> camera_map(scene.images.size(),k_invalid),track_map(scene.tracks.size(),k_invalid);
-            for (const auto& image:scene.images) if(problem.HasParameterBlock(image.pose.C.data())) {
-                camera_map[image.id]=static_cast<Index>(gpu_cameras.size());gpu_cameras.push_back(image.id);
-                gpu_problem.cameras.push_back({image.pose.C.x(),image.pose.C.y(),image.pose.C.z()});
-            }
-            for (Index id:selected_tracks) if(problem.HasParameterBlock(scene.tracks[id].position.data())) {
-                track_map[id]=static_cast<Index>(gpu_tracks.size());gpu_tracks.push_back(id);
-                const auto& p=scene.tracks[id].position;gpu_problem.points.push_back({p.x(),p.y(),p.z()});
-            }
-            for(auto& o:gpu_problem.observations){o.camera=camera_map[o.camera];o.point=track_map[o.point];}
-            gpu_problem.anchor=camera_map[center_anchor];gpu_problem.baseline_first=camera_map[baseline.first];
-            gpu_problem.baseline_second=camera_map[baseline.second];gpu_problem.baseline=baseline.length;
-            gpu_problem.huber=std::min(options.huber_threshold,0.03);
-            gpu=std::make_unique<ba::CudaBearingOptimizer>(gpu_problem);
-            core::Logger::instance().info("global positioning backend=cuda bearing_schur cameras=",
-                gpu_cameras.size()," points=",gpu_tracks.size()," observations=",observations);
-        } catch(const std::exception& error) {
-            core::Logger::instance().warning("CUDA bearing initialization failed; using CPU: ",error.what());
+    const bool want_vulkan = options.backend == PositioningBackend::vulkan;
+    const bool want_cuda =
+        options.backend == PositioningBackend::cuda ||
+        (options.backend == PositioningBackend::automatic && options.prefer_cuda);
+    const bool positioning_size_ok =
+        observations >= 50000 && scene.registered_count() <= 2000;
+#if defined(PHOTARA_HAS_CUDA) || defined(PHOTARA_HAS_VULKAN_BA)
+    std::vector<Index> gpu_cameras;
+    std::vector<Index> gpu_tracks;
+    const auto prepare_bearing = [&]() {
+        std::vector<Index> camera_map(scene.images.size(), k_invalid);
+        std::vector<Index> track_map(scene.tracks.size(), k_invalid);
+        for (const auto& image : scene.images) {
+            if (!problem.HasParameterBlock(image.pose.C.data())) continue;
+            camera_map[image.id] = static_cast<Index>(gpu_cameras.size());
+            gpu_cameras.push_back(image.id);
+            gpu_problem.cameras.push_back(
+                {image.pose.C.x(), image.pose.C.y(), image.pose.C.z()});
         }
-    }
+        for (Index id : selected_tracks) {
+            if (!problem.HasParameterBlock(scene.tracks[id].position.data())) continue;
+            track_map[id] = static_cast<Index>(gpu_tracks.size());
+            gpu_tracks.push_back(id);
+            const auto& position = scene.tracks[id].position;
+            gpu_problem.points.push_back({position.x(), position.y(), position.z()});
+        }
+        for (auto& observation : gpu_problem.observations) {
+            observation.camera = camera_map[observation.camera];
+            observation.point = track_map[observation.point];
+        }
+        gpu_problem.anchor = camera_map[center_anchor];
+        gpu_problem.baseline_first = camera_map[baseline.first];
+        gpu_problem.baseline_second = camera_map[baseline.second];
+        gpu_problem.baseline = baseline.length;
+        gpu_problem.huber = std::min(options.huber_threshold, 0.03);
+    };
 #endif
+#if defined(PHOTARA_HAS_VULKAN_BA)
+    std::unique_ptr<ba::VulkanBearingOptimizer> vulkan_solver;
+#endif
+#if defined(PHOTARA_HAS_CUDA)
+    std::unique_ptr<ba::CudaBearingOptimizer> cuda_solver;
+#endif
+    if (want_vulkan) {
+#if !defined(PHOTARA_HAS_VULKAN_BA)
+        core::Logger::instance().warning(
+            "positioning-backend=vulkan requested but this solve stays on the CPU: ",
+            "solver was not built");
+#else
+        if (!positioning_size_ok || !ba::VulkanBearingOptimizer::is_available()) {
+            core::Logger::instance().warning(
+                "positioning-backend=vulkan requested but this solve stays on the CPU: ",
+                "observations=", observations, " minimum=50000",
+                " cameras=", scene.registered_count(), " maximum=2000",
+                " vulkan_available=",
+                ba::VulkanBearingOptimizer::is_available() ? 1 : 0);
+        } else {
+            try {
+                prepare_bearing();
+                vulkan_solver = std::make_unique<ba::VulkanBearingOptimizer>(gpu_problem);
+                core::Logger::instance().info(
+                    "global positioning backend=vulkan bearing_schur cameras=",
+                    gpu_cameras.size(), " points=", gpu_tracks.size(),
+                    " observations=", observations);
+            } catch (const std::exception& error) {
+                core::Logger::instance().warning(
+                    "Vulkan bearing initialization failed; using CPU: ", error.what());
+            }
+        }
+#endif
+    } else if (want_cuda) {
+#if !defined(PHOTARA_HAS_CUDA)
+        if (options.backend == PositioningBackend::cuda) {
+            core::Logger::instance().warning(
+                "positioning-backend=cuda requested but this solve stays on the CPU: ",
+                "solver was not built");
+        }
+#else
+        const bool explicit_cuda = options.backend == PositioningBackend::cuda;
+        if (!positioning_size_ok || !ba::CudaOptimizer::is_available()) {
+            if (explicit_cuda) {
+                core::Logger::instance().warning(
+                    "positioning-backend=cuda requested but this solve stays on the CPU: ",
+                    "observations=", observations, " minimum=50000",
+                    " cameras=", scene.registered_count(), " maximum=2000",
+                    " cuda_available=", ba::CudaOptimizer::is_available() ? 1 : 0);
+            }
+        } else {
+            try {
+                prepare_bearing();
+                cuda_solver = std::make_unique<ba::CudaBearingOptimizer>(gpu_problem);
+                core::Logger::instance().info(
+                    "global positioning backend=cuda bearing_schur cameras=",
+                    gpu_cameras.size(), " points=", gpu_tracks.size(),
+                    " observations=", observations);
+            } catch (const std::exception& error) {
+                core::Logger::instance().warning(
+                    "CUDA bearing initialization failed; using CPU: ", error.what());
+            }
+        }
+#endif
+    }
 
     core::Logger::instance().info(
         "global positioning attempt: only_points/bearing_schur",
@@ -1159,32 +1237,74 @@ GlobalPositioningSummary refine_only_points_bearings(
             : std::max(1U, std::min(
                 options.irls_inner_iterations, options.max_num_iterations)));
         ceres::Solver::Summary pass_summary;
-        bool solved_on_gpu=false;
-#if defined(PHOTARA_HAS_CUDA)
-        if (gpu) {
+        bool solved_on_gpu = false;
+#if defined(PHOTARA_HAS_CUDA) || defined(PHOTARA_HAS_VULKAN_BA)
+        const auto apply_bearing_step = [&](const ba::BearingSolveSummary& step) {
+            for (std::size_t i = 0; i < gpu_cameras.size(); ++i) {
+                scene.images[gpu_cameras[i]].pose.C =
+                    Eigen::Map<const Vec3>(gpu_problem.cameras[i].data());
+            }
+            for (std::size_t i = 0; i < gpu_tracks.size(); ++i) {
+                scene.tracks[gpu_tracks[i]].position =
+                    Eigen::Map<const Vec3>(gpu_problem.points[i].data());
+            }
+            solved_on_gpu = true;
+            pass_summary.termination_type = ceres::NO_CONVERGENCE;
+            pass_summary.total_time_in_seconds = step.seconds;
+            pass_summary.initial_cost = step.initial_cost;
+            pass_summary.final_cost = step.final_cost;
+            pass_summary.num_successful_steps = 1;
+            pass_summary.iterations.resize(step.iterations);
+        };
+#endif
+#if defined(PHOTARA_HAS_VULKAN_BA)
+        if (vulkan_solver) {
             try {
-                std::vector<double> weights;weights.reserve(losses.size());
-                for(const auto& loss:losses)weights.push_back(loss->robust_weight());
-                const auto s=gpu->solve(weights,solver_options.max_num_iterations,
-                    options.function_tolerance,solver_options.max_solver_time_in_seconds);
-                if(!s.usable)throw std::runtime_error("unusable CUDA bearing solve");
-                gpu->download(gpu_problem);
-                for(std::size_t i=0;i<gpu_cameras.size();++i)
-                    scene.images[gpu_cameras[i]].pose.C=Eigen::Map<const Vec3>(gpu_problem.cameras[i].data());
-                for(std::size_t i=0;i<gpu_tracks.size();++i)
-                    scene.tracks[gpu_tracks[i]].position=Eigen::Map<const Vec3>(gpu_problem.points[i].data());
-                solved_on_gpu=true;pass_summary.termination_type=ceres::NO_CONVERGENCE;
-                pass_summary.total_time_in_seconds=s.seconds;pass_summary.initial_cost=s.initial_cost;
-                pass_summary.final_cost=s.final_cost;pass_summary.num_successful_steps=1;
-                pass_summary.iterations.resize(s.iterations);
-                core::Logger::instance().info("CUDA bearing pass=",pass," iterations=",s.iterations,
-                    " cost=",s.initial_cost," -> ",s.final_cost," seconds=",s.seconds);
-            } catch(const std::exception& error) {
-                core::Logger::instance().warning("CUDA bearing solve failed; using CPU: ",error.what());gpu.reset();
+                std::vector<double> weights;
+                weights.reserve(losses.size());
+                for (const auto& loss : losses) weights.push_back(loss->robust_weight());
+                const auto step = vulkan_solver->solve(
+                    weights, static_cast<unsigned>(solver_options.max_num_iterations),
+                    options.function_tolerance, solver_options.max_solver_time_in_seconds);
+                if (!step.usable) throw std::runtime_error("unusable Vulkan bearing solve");
+                vulkan_solver->download(gpu_problem);
+                apply_bearing_step(step);
+                core::Logger::instance().info(
+                    "Vulkan bearing pass=", pass, " iterations=", step.iterations,
+                    " cost=", step.initial_cost, " -> ", step.final_cost,
+                    " seconds=", step.seconds);
+            } catch (const std::exception& error) {
+                core::Logger::instance().warning(
+                    "Vulkan bearing solve failed; using CPU: ", error.what());
+                vulkan_solver.reset();
             }
         }
 #endif
-        if(!solved_on_gpu)ceres::Solve(solver_options, &problem, &pass_summary);
+#if defined(PHOTARA_HAS_CUDA)
+        if (!solved_on_gpu && cuda_solver) {
+            try {
+                std::vector<double> weights;
+                weights.reserve(losses.size());
+                for (const auto& loss : losses) weights.push_back(loss->robust_weight());
+                const auto step = cuda_solver->solve(
+                    weights, static_cast<unsigned>(solver_options.max_num_iterations),
+                    options.function_tolerance, solver_options.max_solver_time_in_seconds);
+                if (!step.usable) throw std::runtime_error("unusable CUDA bearing solve");
+                cuda_solver->download(gpu_problem);
+                apply_bearing_step(step);
+                core::Logger::instance().info(
+                    "CUDA bearing pass=", pass, " iterations=", step.iterations,
+                    " cost=", step.initial_cost, " -> ", step.final_cost,
+                    " seconds=", step.seconds);
+            } catch (const std::exception& error) {
+                core::Logger::instance().warning(
+                    "CUDA bearing solve failed; using CPU: ", error.what());
+                cuda_solver.reset();
+            }
+        }
+#endif
+        if (!solved_on_gpu)
+            ceres::Solve(solver_options, &problem, &pass_summary);
         total_solve_seconds += pass_summary.total_time_in_seconds;
         result.iterations +=
             static_cast<unsigned>(pass_summary.iterations.size());

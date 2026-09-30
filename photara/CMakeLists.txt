@@ -76,6 +76,86 @@ endif()
 
 set_target_properties(photara_ba PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+set(PHOTARA_HAS_VULKAN_BA FALSE)
+if(PHOTARA_ENABLE_VK AND TARGET photara_vk::photara_vk AND PHOTARA_VK_DXC)
+    set(PHOTARA_BEARING_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/ba/vulkan")
+    set(PHOTARA_BEARING_SHADERS
+        bearing_linearize.hlsl
+        bearing_sum_cost.hlsl
+        bearing_diagonal_scale.hlsl
+        bearing_points_inverse.hlsl
+        bearing_eliminate.hlsl
+        bearing_camera_blocks.hlsl
+        bearing_schur.hlsl
+        bearing_baseline_gauge.hlsl
+        bearing_chol_pivot.hlsl
+        bearing_chol_rank1.hlsl
+        bearing_chol_forward.hlsl
+        bearing_chol_backward.hlsl
+        bearing_update_points.hlsl
+        bearing_update_cameras.hlsl
+        bearing_model_decrease.hlsl
+        bearing_sum_model.hlsl)
+    set(PHOTARA_BA_OPTIMIZER_SHADERS
+        ba_linearize.hlsl
+        ba_assemble_points.hlsl
+        ba_assemble_cameras.hlsl
+        ba_damp_cameras.hlsl
+        ba_finalize_intrinsics.hlsl
+        ba_invert_points.hlsl
+        ba_reduced_rhs.hlsl
+        ba_schur_rhs.hlsl
+        ba_copy_intrinsic_rhs.hlsl
+        ba_intrinsic_schur.hlsl
+        ba_point_gather.hlsl
+        ba_point_reduce.hlsl
+        ba_camera_gather.hlsl
+        ba_camera_reduce.hlsl
+        ba_factor.hlsl
+        ba_precondition.hlsl
+        ba_dot.hlsl
+        ba_intrinsic_reduce.hlsl
+        ba_precondition_intrinsics.hlsl
+        ba_update_pcg.hlsl
+        ba_direction.hlsl
+        ba_alpha.hlsl
+        ba_beta.hlsl
+        ba_recover_points.hlsl
+        ba_update_poses.hlsl
+        ba_update_points.hlsl
+        ba_mask_intrinsics.hlsl
+        ba_update_intrinsics.hlsl
+        ba_prior_cost.hlsl
+        ba_linearized_cost.hlsl)
+    set(PHOTARA_BEARING_SHADER_PATHS)
+    foreach(shader IN LISTS PHOTARA_BEARING_SHADERS PHOTARA_BA_OPTIMIZER_SHADERS)
+        list(APPEND PHOTARA_BEARING_SHADER_PATHS
+            "${PHOTARA_BEARING_SHADER_DIR}/${shader}")
+    endforeach()
+    target_sources(photara_ba PRIVATE
+        src/ba/bearing_vulkan.cpp
+        src/ba/optimizer_vulkan.cpp)
+    include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
+    photara_vk_embed_hlsl(
+        TARGET photara_ba
+        SHADERS ${PHOTARA_BEARING_SHADER_PATHS}
+        PROFILE cs_6_0
+        ENV vulkan1.2
+        INCLUDE_DIR "${PHOTARA_BEARING_SHADER_DIR}"
+        OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/bearing_vulkan"
+        DEPENDS
+            "${PHOTARA_BEARING_SHADER_DIR}/bearing_common.hlsli"
+            "${PHOTARA_BEARING_SHADER_DIR}/ba_common.hlsli"
+            "${PHOTARA_BEARING_SHADER_DIR}/ba_atomic.hlsli"
+            "${PHOTARA_BEARING_SHADER_DIR}/ba_trig.hlsli")
+    target_link_libraries(photara_ba PRIVATE photara_vk::photara_vk)
+    target_compile_definitions(photara_ba PUBLIC PHOTARA_HAS_VULKAN_BA=1)
+    set(PHOTARA_HAS_VULKAN_BA TRUE)
+    message(STATUS "Photara Vulkan SfM solvers: ON")
+else()
+    message(STATUS "Photara Vulkan SfM solvers: OFF")
+endif()
+
 if(PHOTARA_ENABLE_FEATURES)
     find_package(freeimage CONFIG REQUIRED)
     find_package(JPEG REQUIRED)
@@ -908,6 +988,13 @@ endif()
 if(PHOTARA_BUILD_BENCHMARKS)
     add_executable(photara_ba_benchmark src/tools/ba_benchmark.cpp)
     target_link_libraries(photara_ba_benchmark PRIVATE Photara::BA)
+    if(PHOTARA_HAS_VULKAN_BA AND PHOTARA_ENABLE_CUDA)
+        add_executable(
+            photara_bearing_backend_benchmark
+            src/tools/bearing_backend_benchmark.cpp)
+        target_link_libraries(
+            photara_bearing_backend_benchmark PRIVATE Photara::BA)
+    endif()
     if(TARGET photara_features)
         add_executable(photara_features_match src/tools/features_match.cpp)
         target_link_libraries(photara_features_match PRIVATE Photara::Features)
@@ -975,6 +1062,7 @@ if(PHOTARA_BUILD_BENCHMARKS)
     endif()
     photara_exclude_from_default(
         photara_ba_benchmark
+        photara_bearing_backend_benchmark
         photara_features_match
         photara_pair_verify
         photara_sfm_realign
@@ -996,6 +1084,17 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
                     $<TARGET_FILE_DIR:photara_bearing_cuda_test> COMMAND_EXPAND_LISTS)
         endif()
         add_test(NAME photara.bearing_cuda COMMAND photara_bearing_cuda_test)
+    endif()
+    if(PHOTARA_HAS_VULKAN_BA AND TARGET Ceres::ceres)
+        add_executable(photara_bearing_vulkan_test tests/bearing_vulkan_test.cpp)
+        target_link_libraries(photara_bearing_vulkan_test PRIVATE Photara::BA Ceres::ceres)
+        if(WIN32)
+            add_custom_command(TARGET photara_bearing_vulkan_test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:photara_bearing_vulkan_test>
+                    $<TARGET_FILE_DIR:photara_bearing_vulkan_test> COMMAND_EXPAND_LISTS)
+        endif()
+        add_test(NAME photara.bearing.vulkan COMMAND photara_bearing_vulkan_test)
     endif()
     add_executable(photara_ba_test tests/ba_optimizer_test.cpp)
     target_link_libraries(photara_ba_test PRIVATE Photara::BA)
@@ -1121,6 +1220,7 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
     endif()
     set(_photara_test_targets
         photara_bearing_cuda_test
+        photara_bearing_vulkan_test
         photara_ba_test
         photara_thread_pool_test
         photara_logging_test

@@ -33,6 +33,8 @@ struct BenchmarkConfig {
     std::size_t iterations{20};
     std::size_t solver_iterations{0};
     std::size_t gpu_solver_iterations{0};
+    std::size_t vulkan_solver_iterations{0};
+    std::size_t pcg_iterations{100};
     bool gpu_intrinsics{false};
 };
 
@@ -58,6 +60,8 @@ BenchmarkConfig parse_arguments(const int argc, char** argv) {
                 << "  --iterations N              CUDA timed iterations (default 20)\n"
                 << "  --solver-iterations N       Run N CPU BA iterations (default disabled)\n"
                 << "  --gpu-solver-iterations N   Run N GPU BA iterations (default disabled)\n"
+                << "  --vulkan-solver-iterations N  Run N Vulkan BA iterations (default disabled)\n"
+                << "  --pcg-iterations N          Maximum PCG iterations (default 100)\n"
                 << "  --gpu-intrinsics N          1 = GPU solves shared focal/aspect/distortion (default 0)\n";
             std::exit(0);
         }
@@ -81,6 +85,11 @@ BenchmarkConfig parse_arguments(const int argc, char** argv) {
             config.solver_iterations = parse_size(value, "--solver-iterations");
         } else if (argument == "--gpu-solver-iterations") {
             config.gpu_solver_iterations = parse_size(value, "--gpu-solver-iterations");
+        } else if (argument == "--vulkan-solver-iterations") {
+            config.vulkan_solver_iterations =
+                parse_size(value, "--vulkan-solver-iterations");
+        } else if (argument == "--pcg-iterations") {
+            config.pcg_iterations = parse_size(value, "--pcg-iterations");
         } else if (argument == "--gpu-intrinsics") {
             config.gpu_intrinsics = parse_size(value, "--gpu-intrinsics") > 0;
         } else {
@@ -244,6 +253,7 @@ int main(int argc, char** argv) {
             Problem cpu_problem = problem;
             photara::ba::OptimizerOptions optimizer_options;
             optimizer_options.maximum_iterations = config.solver_iterations;
+            optimizer_options.maximum_pcg_iterations = config.pcg_iterations;
             const auto summary = photara::ba::optimize_cpu(cpu_problem, optimizer_options);
             std::cout << "CPU " << summary.brief_report() << '\n';
             std::size_t total_pcg = 0;
@@ -255,6 +265,7 @@ int main(int argc, char** argv) {
             Problem gpu_problem = problem;
             photara::ba::OptimizerOptions optimizer_options;
             optimizer_options.maximum_iterations = config.gpu_solver_iterations;
+            optimizer_options.maximum_pcg_iterations = config.pcg_iterations;
             if (config.gpu_intrinsics) {
                 optimizer_options.optimize_focal = true;
                 optimizer_options.optimize_aspect_ratio = true;
@@ -270,6 +281,31 @@ int main(int argc, char** argv) {
             std::size_t total_pcg = 0;
             for (const auto& iteration : summary.iterations) total_pcg += iteration.pcg_iterations;
             std::cout << "GPU PCG iterations: " << total_pcg << '\n';
+        }
+#endif
+#if defined(PHOTARA_HAS_VULKAN_BA)
+        if (config.vulkan_solver_iterations > 0) {
+            Problem vulkan_problem = problem;
+            photara::ba::OptimizerOptions optimizer_options;
+            optimizer_options.maximum_iterations = config.vulkan_solver_iterations;
+            optimizer_options.maximum_pcg_iterations = config.pcg_iterations;
+            if (config.gpu_intrinsics) {
+                optimizer_options.optimize_focal = true;
+                optimizer_options.optimize_aspect_ratio = true;
+                optimizer_options.optimize_distortion = true;
+            }
+            vulkan_problem.pose_intrinsic.assign(vulkan_problem.poses.size(), 0);
+            vulkan_problem.intrinsics.resize(1);
+            photara::ba::VulkanOptimizer optimizer(optimizer_options);
+            optimizer.upload(vulkan_problem);
+            const auto summary = optimizer.optimize();
+            optimizer.download(vulkan_problem);
+            std::cout << "Vulkan " << summary.brief_report()
+                      << " (upload/download excluded)\n";
+            std::size_t total_pcg = 0;
+            for (const auto& iteration : summary.iterations)
+                total_pcg += iteration.pcg_iterations;
+            std::cout << "Vulkan PCG iterations: " << total_pcg << '\n';
         }
 #endif
 
