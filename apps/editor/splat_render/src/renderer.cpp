@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -162,6 +163,7 @@ void Renderer::reset() {
     }
     destroy_storage(frame_ubo_);
     destroy_device_objects();
+    runtime_ = {};
     physical_ = {};
     device_ = {};
     queue_ = {};
@@ -192,10 +194,6 @@ void Renderer::destroy_frames() {
     }
     for (Frame& frame : frames_) {
         if (frame.sampler) vkDestroySampler(device_, frame.sampler, nullptr);
-        if (frame.framebuffer) vkDestroyFramebuffer(device_, frame.framebuffer, nullptr);
-        if (frame.view) vkDestroyImageView(device_, frame.view, nullptr);
-        if (frame.color) vkDestroyImage(device_, frame.color, nullptr);
-        if (frame.memory) vkFreeMemory(device_, frame.memory, nullptr);
         frame = {};
     }
     display_ = -1;
@@ -211,8 +209,8 @@ void Renderer::destroy_device_objects() {
     if (scan_pipeline_) vkDestroyPipeline(device_, scan_pipeline_, nullptr);
     if (scatter_pipeline_) vkDestroyPipeline(device_, scatter_pipeline_, nullptr);
     if (ring_prepare_pipeline_) vkDestroyPipeline(device_, ring_prepare_pipeline_, nullptr);
-    if (ring_pipeline_) vkDestroyPipeline(device_, ring_pipeline_, nullptr);
-    if (render_pass_) vkDestroyRenderPass(device_, render_pass_, nullptr);
+    ring_pipeline_ = {};
+    render_pass_ = {};
     if (pipeline_layout_) vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     if (set_layout_) vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
     if (pool_) vkDestroyDescriptorPool(device_, pool_, nullptr);
@@ -338,6 +336,20 @@ void Renderer::write_descriptors() {
     vkUpdateDescriptorSets(device_, 15, writes, 0, nullptr);
 }
 
+bool Renderer::ensure_runtime() {
+    if (runtime_.valid()) return true;
+    if (device_ == VK_NULL_HANDLE || physical_ == VK_NULL_HANDLE || queue_ == VK_NULL_HANDLE)
+        return false;
+    photara::vk::ExternalDevice external;
+    external.physical = physical_;
+    external.device = device_;
+    external.queue = queue_;
+    external.queue_family = family_;
+    external.enabled.graphics = true;
+    runtime_ = photara::vk::Device::adopt(external);
+    return runtime_.valid();
+}
+
 bool Renderer::ensure_device() {
     if (device_ == VK_NULL_HANDLE) {
         failure_ = "Vulkan device is not attached";
@@ -355,6 +367,11 @@ bool Renderer::ensure_device() {
         (families[family_].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
         supported_ = false;
         failure_ = "The Vulkan queue cannot run compute and graphics";
+        return false;
+    }
+    if (!ensure_runtime()) {
+        supported_ = false;
+        failure_ = "The editor Vulkan device could not be adopted";
         return false;
     }
 
@@ -405,42 +422,22 @@ bool Renderer::ensure_device() {
     allocate.pSetLayouts = &set_layout_;
     check(vkAllocateDescriptorSets(device_, &allocate, &set_), "vkAllocateDescriptorSets");
 
-    VkAttachmentDescription color{};
+    photara::vk::AttachmentDesc color;
     color.format = VK_FORMAT_R8G8B8A8_UNORM;
-    color.samples = VK_SAMPLE_COUNT_1_BIT;
-    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_ref;
-    VkSubpassDependency dependencies[2]{};
-    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[0].dstSubpass = 0;
-    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[1].srcSubpass = 0;
-    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    VkRenderPassCreateInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    pass.attachmentCount = 1;
-    pass.pAttachments = &color;
-    pass.subpassCount = 1;
-    pass.pSubpasses = &subpass;
-    pass.dependencyCount = 2;
-    pass.pDependencies = dependencies;
-    check(vkCreateRenderPass(device_, &pass, nullptr, &render_pass_), "vkCreateRenderPass");
+    photara::vk::SubpassDependencyDesc dependencies[2]{};
+    dependencies[0].src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    dependencies[0].dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].src_access = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[0].dst_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].src_subpass = 0;
+    dependencies[1].dst_subpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[1].dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dst_access = VK_ACCESS_SHADER_READ_BIT;
+    render_pass_ = runtime_.create_render_pass(
+        std::span<const photara::vk::AttachmentDesc>(&color, 1), dependencies);
 
     const auto make_compute = [&](const std::uint32_t* words, std::size_t count) {
         const VkShaderModule module = shader_module(device_, words, count);
@@ -469,79 +466,22 @@ bool Renderer::ensure_device() {
     ring_prepare_pipeline_ = make_compute(
         preview_spv::ring_prepare_cs_hlsl, std::size(preview_spv::ring_prepare_cs_hlsl));
 
-    const auto make_graphics = [&](const std::uint32_t* vert_words, std::size_t vert_count,
-                                   const std::uint32_t* frag_words, std::size_t frag_count) {
-        const VkShaderModule vert = shader_module(device_, vert_words, vert_count);
-        const VkShaderModule frag = shader_module(device_, frag_words, frag_count);
-        VkPipelineShaderStageCreateInfo stages[2]{};
-        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        stages[0].module = vert;
-        stages[0].pName = "main";
-        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        stages[1].module = frag;
-        stages[1].pName = "main";
-        VkPipelineVertexInputStateCreateInfo vertex{
-            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-        VkPipelineInputAssemblyStateCreateInfo assembly{
-            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        VkPipelineViewportStateCreateInfo viewport{
-            VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-        viewport.viewportCount = 1;
-        viewport.scissorCount = 1;
-        VkPipelineRasterizationStateCreateInfo raster{
-            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-        raster.polygonMode = VK_POLYGON_MODE_FILL;
-        raster.cullMode = VK_CULL_MODE_NONE;
-        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        raster.lineWidth = 1.F;
-        VkPipelineMultisampleStateCreateInfo multisample{
-            VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        VkPipelineColorBlendAttachmentState blend{};
-        blend.blendEnable = VK_TRUE;
-        blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        blend.colorBlendOp = VK_BLEND_OP_ADD;
-        blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        blend.alphaBlendOp = VK_BLEND_OP_ADD;
-        blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        VkPipelineColorBlendStateCreateInfo blending{
-            VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-        blending.attachmentCount = 1;
-        blending.pAttachments = &blend;
-        const VkDynamicState dynamic_states[] = {
-            VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamic{
-            VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-        dynamic.dynamicStateCount = 2;
-        dynamic.pDynamicStates = dynamic_states;
-        VkGraphicsPipelineCreateInfo graphics{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-        graphics.stageCount = 2;
-        graphics.pStages = stages;
-        graphics.pVertexInputState = &vertex;
-        graphics.pInputAssemblyState = &assembly;
-        graphics.pViewportState = &viewport;
-        graphics.pRasterizationState = &raster;
-        graphics.pMultisampleState = &multisample;
-        graphics.pColorBlendState = &blending;
-        graphics.pDynamicState = &dynamic;
-        graphics.layout = pipeline_layout_;
-        graphics.renderPass = render_pass_;
-        VkPipeline pipeline{};
-        check(vkCreateGraphicsPipelines(device_, {}, 1, &graphics, nullptr, &pipeline),
-              "vkCreateGraphicsPipelines");
-        vkDestroyShaderModule(device_, vert, nullptr);
-        vkDestroyShaderModule(device_, frag, nullptr);
-        return pipeline;
+    const auto shader_bytes = [](const std::uint32_t* words, const std::size_t count) {
+        return std::as_bytes(std::span<const std::uint32_t>(words, count));
     };
-    ring_pipeline_ = make_graphics(
-        preview_spv::ring_draw_vs_hlsl, std::size(preview_spv::ring_draw_vs_hlsl),
+    photara::vk::GraphicsDesc ring_desc;
+    ring_desc.vertex_spirv = shader_bytes(
+        preview_spv::ring_draw_vs_hlsl, std::size(preview_spv::ring_draw_vs_hlsl));
+    ring_desc.fragment_spirv = shader_bytes(
         preview_spv::ring_draw_ps_hlsl, std::size(preview_spv::ring_draw_ps_hlsl));
+    ring_desc.pipeline_layout = pipeline_layout_;
+    ring_desc.blend.enable = true;
+    ring_desc.blend.src_color = VK_BLEND_FACTOR_SRC_ALPHA;
+    ring_desc.blend.dst_color = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    ring_desc.blend.src_alpha = VK_BLEND_FACTOR_ONE;
+    ring_desc.blend.dst_alpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    ring_desc.render_pass = render_pass_.handle();
+    ring_pipeline_ = runtime_.create_graphics(ring_desc);
 
     VkCommandPoolCreateInfo command_pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     command_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -779,46 +719,24 @@ bool Renderer::update_centers(const float* centers, const std::uint32_t count) {
 }
 
 bool Renderer::ensure_frames(const std::uint32_t width, const std::uint32_t height) {
-    if (frames_[0].color && frames_[0].width == width && frames_[0].height == height)
+    if (frames_[0].color.valid() && frames_[0].width == width && frames_[0].height == height)
         return true;
     wait_gpu();
     destroy_frames();
+    if (!runtime_.valid()) return false;
     for (Frame& frame : frames_) {
-        VkImageCreateInfo image{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        image.imageType = VK_IMAGE_TYPE_2D;
+        photara::vk::ImageDesc image;
+        image.width = width;
+        image.height = height;
         image.format = VK_FORMAT_R8G8B8A8_UNORM;
-        image.extent = {width, height, 1};
-        image.mipLevels = 1;
-        image.arrayLayers = 1;
-        image.samples = VK_SAMPLE_COUNT_1_BIT;
-        image.tiling = VK_IMAGE_TILING_OPTIMAL;
         image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        image.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        check(vkCreateImage(device_, &image, nullptr, &frame.color), "vkCreateImage");
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(device_, frame.color, &requirements);
-        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = memory_type(
-            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        check(vkAllocateMemory(device_, &allocation, nullptr, &frame.memory), "vkAllocateMemory");
-        check(vkBindImageMemory(device_, frame.color, frame.memory, 0), "vkBindImageMemory");
-        VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        view.image = frame.color;
-        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view.format = VK_FORMAT_R8G8B8A8_UNORM;
-        view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        check(vkCreateImageView(device_, &view, nullptr, &frame.view), "vkCreateImageView");
-        VkFramebufferCreateInfo framebuffer{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        framebuffer.renderPass = render_pass_;
-        framebuffer.attachmentCount = 1;
-        framebuffer.pAttachments = &frame.view;
-        framebuffer.width = width;
-        framebuffer.height = height;
-        framebuffer.layers = 1;
-        check(vkCreateFramebuffer(device_, &framebuffer, nullptr, &frame.framebuffer),
-              "vkCreateFramebuffer");
+        frame.color = runtime_.create_image(image);
+        frame.view = runtime_.create_image_view(
+            frame.color.handle(), VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+        const VkImageView attachment = frame.view.handle();
+        frame.framebuffer = runtime_.create_framebuffer(
+            render_pass_, std::span<const VkImageView>(&attachment, 1), width, height);
         VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         sampler.magFilter = VK_FILTER_LINEAR;
         sampler.minFilter = VK_FILTER_LINEAR;
@@ -868,7 +786,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
         std::memcmp(&cached_, &frame, sizeof(frame)) == 0) {
         const Frame& shown = frames_[display_];
         target.slot = display_;
-        target.view = shown.view;
+        target.view = shown.view.handle();
         target.sampler = shown.sampler;
         target.width = shown.width;
         target.height = shown.height;
@@ -926,8 +844,8 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
         ? VkClearColorValue{{9.F / 255.F, 11.F / 255.F, 16.F / 255.F, 1.F}}
         : VkClearColorValue{{0.F, 0.F, 0.F, 1.F}};
     VkRenderPassBeginInfo render{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    render.renderPass = render_pass_;
-    render.framebuffer = image.framebuffer;
+    render.renderPass = render_pass_.handle();
+    render.framebuffer = image.framebuffer.handle();
     render.renderArea.extent = {width, height};
     render.clearValueCount = 1;
     render.pClearValues = &clear;
@@ -941,7 +859,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     vkCmdSetViewport(command_, 0, 1, &viewport);
     vkCmdSetScissor(command_, 0, 1, &scissor);
     if (count_ > 0) {
-        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, ring_pipeline_);
+        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, ring_pipeline_.handle());
         vkCmdBindDescriptorSets(
             command_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 1, &set_,
             0, nullptr);
@@ -961,7 +879,7 @@ bool Renderer::draw(const Camera& camera, FrameTarget& target, const Shading sha
     cached_generation_ = generation_;
     cache_valid_ = true;
     target.slot = display_;
-    target.view = image.view;
+    target.view = image.view.handle();
     target.sampler = image.sampler;
     target.width = width;
     target.height = height;
@@ -1128,7 +1046,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image.color;
+    barrier.image = image.color.handle();
     barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdPipelineBarrier(
         command_,
@@ -1153,7 +1071,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.imageExtent = {width, height, 1};
     vkCmdCopyBufferToImage(
-        command_, source, image.color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        command_, source, image.color.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1174,7 +1092,7 @@ bool Renderer::draw_ewa(const Camera& camera, const FrameData& frame, FrameTarge
     cached_generation_ = generation_;
     cache_valid_ = true;
     target.slot = display_;
-    target.view = image.view;
+    target.view = image.view.handle();
     target.sampler = image.sampler;
     target.width = width;
     target.height = height;
@@ -1187,7 +1105,7 @@ bool Renderer::download_rgb(
     rgb.clear();
     width = 0;
     height = 0;
-    if (display_ < 0 || !frames_[display_].color) return false;
+    if (display_ < 0 || !frames_[display_].color.valid()) return false;
     wait_gpu();
     const Frame& image = frames_[display_];
     std::uint32_t out_w = image.width;
@@ -1218,7 +1136,7 @@ bool Renderer::download_rgb(
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image.color;
+    barrier.image = image.color.handle();
     barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdPipelineBarrier(
         command_, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -1227,7 +1145,7 @@ bool Renderer::download_rgb(
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.imageExtent = {image.width, image.height, 1};
     vkCmdCopyImageToBuffer(
-        command_, image.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1,
+        command_, image.color.handle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1,
         &region);
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

@@ -122,6 +122,20 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(FetchOnnxRuntime)
 photara_setup_onnxruntime()
 
+# photara_drender and the editor adopt this target. Add it before those
+# directories so their fallback add_subdirectory does not configure it twice.
+option(PHOTARA_ENABLE_VK "Build the photara_vk compute runtime" ON)
+if(PHOTARA_ENABLE_VK)
+    find_package(Vulkan 1.2 QUIET)
+    if(NOT Vulkan_FOUND)
+        message(STATUS "photara_vk: Vulkan SDK 1.2+ not found; disabled")
+        set(PHOTARA_ENABLE_VK OFF)
+    else()
+        add_subdirectory(third_party/photara_vk)
+        message(STATUS "photara_vk: ON")
+    endif()
+endif()
+
 set(PHOTARA_HAS_TEXTURE OFF)
 if(PHOTARA_ENABLE_TEXTURE)
     photara_resolve_drender_root(_photara_drender_root)
@@ -167,18 +181,6 @@ endif()
 
 include(CTest)
 include(PhotaraSam)
-
-option(PHOTARA_ENABLE_VK "Build the photara_vk compute runtime" ON)
-if(PHOTARA_ENABLE_VK)
-    find_package(Vulkan 1.2 QUIET)
-    if(NOT Vulkan_FOUND)
-        message(STATUS "photara_vk: Vulkan SDK 1.2+ not found; disabled")
-        set(PHOTARA_ENABLE_VK OFF)
-    else()
-        add_subdirectory(third_party/photara_vk)
-        message(STATUS "photara_vk: ON")
-    endif()
-endif()
 
 add_subdirectory(photara)
 

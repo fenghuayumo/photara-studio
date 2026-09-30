@@ -12,6 +12,8 @@
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 
+#include "photara_vk/photara_vk.hpp"
+
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -181,13 +183,11 @@ private:
     static constexpr int k_frames = 3;
 
     struct Frame {
-        VkImage color{};
-        VkImage depth{};
-        VkDeviceMemory color_memory{};
-        VkDeviceMemory depth_memory{};
-        VkImageView color_view{};
-        VkImageView depth_view{};
-        VkFramebuffer framebuffer{};
+        photara::vk::Image color;
+        photara::vk::Image depth;
+        photara::vk::ImageView color_view;
+        photara::vk::ImageView depth_view;
+        photara::vk::Framebuffer framebuffer;
         VkSampler sampler{};
         VkDescriptorSet descriptor{};
         VkCommandBuffer command{};
@@ -198,15 +198,18 @@ private:
     void destroy_frames();
     void destroy_pipeline();
     void destroy_albedo();
+    bool ensure_runtime();
     bool ensure_pipeline();
     bool ensure_albedo();
     bool ensure_frames(std::uint32_t width, std::uint32_t height);
     void bind_albedo_view(VkImageView view);
 
-    VkRenderPass render_pass_{};
-    VkPipelineLayout pipeline_layout_{};
-    VkPipeline fill_pipeline_{};
-    VkPipeline wire_pipeline_{};
+    // Adopted view of the editor device. It does not own VkDevice. Drop it
+    // after the images and pipelines, and before the editor destroys g_device.
+    photara::vk::Device runtime_;
+    photara::vk::RenderPass render_pass_;
+    photara::vk::GraphicsPipeline fill_pipeline_;
+    photara::vk::GraphicsPipeline wire_pipeline_;
     VkCommandPool command_pool_{};
     VkDescriptorSetLayout albedo_layout_{};
     VkDescriptorPool albedo_pool_{};

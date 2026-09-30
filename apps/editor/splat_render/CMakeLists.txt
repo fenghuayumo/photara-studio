@@ -40,7 +40,12 @@ add_library(photara::splat_render ALIAS splat_render)
 target_include_directories(splat_render
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
     PRIVATE "${_splat_render_generated}")
-target_link_libraries(splat_render PUBLIC Vulkan::Vulkan)
+if(NOT TARGET photara_vk::photara_vk)
+    add_subdirectory(
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/photara_vk"
+        "${CMAKE_CURRENT_BINARY_DIR}/photara_vk")
+endif()
+target_link_libraries(splat_render PUBLIC Vulkan::Vulkan photara_vk::photara_vk)
 if(TARGET splat_drender::vulkan)
     target_link_libraries(splat_render PUBLIC splat_drender::vulkan)
     target_compile_definitions(splat_render PRIVATE SPLAT_DRENDER_HAS_VULKAN=1)

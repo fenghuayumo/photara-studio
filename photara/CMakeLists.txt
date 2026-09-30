@@ -857,7 +857,7 @@ if(TARGET photara_features)
                 ${PHOTARA_STUDIO_DIR})
             target_link_libraries(photara_studio PRIVATE
                 photara_imgui Photara::SfM Photara::Splat
-                photara::splat_render
+                photara::splat_render photara_vk::photara_vk
                 Vulkan::Vulkan glfw)
             if(PHOTARA_HAS_TEXTURE AND TARGET Photara::Texture)
                 target_link_libraries(photara_studio PRIVATE Photara::Texture)

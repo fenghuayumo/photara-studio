@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -1050,14 +1051,9 @@ VkFormat mesh_depth_format() {
     return VK_FORMAT_D32_SFLOAT;
 }
 
-VkShaderModule mesh_shader_module(
-    const std::uint32_t* words, const std::size_t word_count) {
-    VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    info.codeSize = word_count * sizeof(std::uint32_t);
-    info.pCode = words;
-    VkShaderModule module{};
-    check(vkCreateShaderModule(g_device, &info, nullptr, &module));
-    return module;
+[[nodiscard]] std::span<const std::byte> shader_bytes(
+    const std::uint32_t* words, const std::size_t count) {
+    return std::as_bytes(std::span<const std::uint32_t>(words, count));
 }
 
 void destroy_buffer(VkBuffer& buffer, VkDeviceMemory& memory) {
@@ -1249,104 +1245,6 @@ void upload_sampled_image(
     vkFreeMemory(g_device, staging_memory, nullptr);
 }
 
-VkPipeline create_mesh_pipeline(
-    VkRenderPass render_pass, VkPipelineLayout layout, VkShaderModule vert,
-    VkShaderModule frag, const VkPrimitiveTopology topology,
-    const bool depth_bias) {
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vert;
-    stages[0].pName = "main";
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = frag;
-    stages[1].pName = "main";
-
-    VkVertexInputBindingDescription binding{};
-    binding.stride = sizeof(MeshGpuVertex);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    VkVertexInputAttributeDescription attributes[4]{};
-    attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[1].location = 1;
-    attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[1].offset = 16;
-    attributes[2].location = 2;
-    attributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[2].offset = 32;
-    attributes[3].location = 3;
-    attributes[3].format = VK_FORMAT_R32G32_SFLOAT;
-    attributes[3].offset = 48;
-    VkPipelineVertexInputStateCreateInfo vertex{
-        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vertex.vertexBindingDescriptionCount = 1;
-    vertex.pVertexBindingDescriptions = &binding;
-    vertex.vertexAttributeDescriptionCount = 4;
-    vertex.pVertexAttributeDescriptions = attributes;
-
-    VkPipelineInputAssemblyStateCreateInfo assembly{
-        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    assembly.topology = topology;
-    VkPipelineViewportStateCreateInfo viewport{
-        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-    viewport.viewportCount = 1;
-    viewport.scissorCount = 1;
-    VkPipelineRasterizationStateCreateInfo raster{
-        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-    raster.polygonMode = VK_POLYGON_MODE_FILL;
-    raster.cullMode = VK_CULL_MODE_NONE;
-    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    raster.lineWidth = 1.F;
-    raster.depthBiasEnable = depth_bias ? VK_TRUE : VK_FALSE;
-    raster.depthBiasConstantFactor = depth_bias ? -1.F : 0.F;
-    raster.depthBiasSlopeFactor = depth_bias ? -1.F : 0.F;
-    VkPipelineMultisampleStateCreateInfo sample{
-        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    sample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    VkPipelineDepthStencilStateCreateInfo depth{
-        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    depth.depthTestEnable = VK_TRUE;
-    depth.depthWriteEnable = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
-        ? VK_TRUE
-        : VK_FALSE;
-    depth.depthCompareOp = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
-        ? VK_COMPARE_OP_LESS
-        : VK_COMPARE_OP_LESS_OR_EQUAL;
-    VkPipelineColorBlendAttachmentState blend_attachment{};
-    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
-                                      VK_COLOR_COMPONENT_G_BIT |
-                                      VK_COLOR_COMPONENT_B_BIT |
-                                      VK_COLOR_COMPONENT_A_BIT;
-    VkPipelineColorBlendStateCreateInfo blend{
-        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    blend.attachmentCount = 1;
-    blend.pAttachments = &blend_attachment;
-    const VkDynamicState dynamic_states[] = {
-        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynamic{
-        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dynamic.dynamicStateCount = 2;
-    dynamic.pDynamicStates = dynamic_states;
-    VkGraphicsPipelineCreateInfo info{
-        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    info.stageCount = 2;
-    info.pStages = stages;
-    info.pVertexInputState = &vertex;
-    info.pInputAssemblyState = &assembly;
-    info.pViewportState = &viewport;
-    info.pRasterizationState = &raster;
-    info.pMultisampleState = &sample;
-    info.pDepthStencilState = &depth;
-    info.pColorBlendState = &blend;
-    info.pDynamicState = &dynamic;
-    info.layout = layout;
-    info.renderPass = render_pass;
-    VkPipeline pipeline{};
-    check(vkCreateGraphicsPipelines(
-        g_device, {}, 1, &info, nullptr, &pipeline));
-    return pipeline;
-}
-
 }  // namespace
 
 void MeshPreviewRenderer::destroy_mesh_buffers() {
@@ -1383,18 +1281,6 @@ void MeshPreviewRenderer::destroy_frames() {
         if (frame.descriptor)
             ImGui_ImplVulkan_RemoveTexture(frame.descriptor);
         if (frame.sampler) vkDestroySampler(g_device, frame.sampler, nullptr);
-        if (frame.framebuffer)
-            vkDestroyFramebuffer(g_device, frame.framebuffer, nullptr);
-        if (frame.color_view)
-            vkDestroyImageView(g_device, frame.color_view, nullptr);
-        if (frame.depth_view)
-            vkDestroyImageView(g_device, frame.depth_view, nullptr);
-        if (frame.color) vkDestroyImage(g_device, frame.color, nullptr);
-        if (frame.depth) vkDestroyImage(g_device, frame.depth, nullptr);
-        if (frame.color_memory)
-            vkFreeMemory(g_device, frame.color_memory, nullptr);
-        if (frame.depth_memory)
-            vkFreeMemory(g_device, frame.depth_memory, nullptr);
         if (frame.command && command_pool_)
             vkFreeCommandBuffers(g_device, command_pool_, 1, &frame.command);
         if (frame.fence) vkDestroyFence(g_device, frame.fence, nullptr);
@@ -1440,27 +1326,19 @@ void MeshPreviewRenderer::destroy_albedo() {
 
 void MeshPreviewRenderer::destroy_pipeline() {
     if (!g_device) {
-        fill_pipeline_ = {};
         wire_pipeline_ = {};
-        pipeline_layout_ = {};
+        fill_pipeline_ = {};
         render_pass_ = {};
         command_pool_ = {};
         return;
     }
     vkDeviceWaitIdle(g_device);
-    if (fill_pipeline_)
-        vkDestroyPipeline(g_device, fill_pipeline_, nullptr);
-    if (wire_pipeline_)
-        vkDestroyPipeline(g_device, wire_pipeline_, nullptr);
-    if (pipeline_layout_)
-        vkDestroyPipelineLayout(g_device, pipeline_layout_, nullptr);
-    if (render_pass_) vkDestroyRenderPass(g_device, render_pass_, nullptr);
+    // The wire pipeline borrows the fill pipeline's layout.
+    wire_pipeline_ = {};
+    fill_pipeline_ = {};
+    render_pass_ = {};
     if (command_pool_)
         vkDestroyCommandPool(g_device, command_pool_, nullptr);
-    fill_pipeline_ = {};
-    wire_pipeline_ = {};
-    pipeline_layout_ = {};
-    render_pass_ = {};
     command_pool_ = {};
 }
 
@@ -1469,101 +1347,90 @@ void MeshPreviewRenderer::reset() {
     destroy_mesh_buffers();
     destroy_pipeline();
     destroy_albedo();
+    runtime_ = {};
+}
+
+bool MeshPreviewRenderer::ensure_runtime() {
+    if (runtime_.valid()) return true;
+    if (!g_device || !g_physical_device || !g_queue) return false;
+    photara::vk::ExternalDevice external;
+    external.instance = g_instance;
+    external.physical = g_physical_device;
+    external.device = g_device;
+    external.queue = g_queue;
+    external.queue_family = g_queue_family;
+    external.enabled.graphics = true;
+    runtime_ = photara::vk::Device::adopt(external);
+    return runtime_.valid();
 }
 
 bool MeshPreviewRenderer::ensure_pipeline() {
-    if (fill_pipeline_ && wire_pipeline_ && render_pass_) return true;
+    if (fill_pipeline_.valid() && wire_pipeline_.valid() && render_pass_.valid())
+        return true;
     destroy_pipeline();
+    if (!ensure_runtime()) return false;
 
-    const VkFormat color_format = VK_FORMAT_R8G8B8A8_UNORM;
     const VkFormat depth_format = mesh_depth_format();
-    VkAttachmentDescription attachments[2]{};
-    attachments[0].format = color_format;
-    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    photara::vk::AttachmentDesc attachments[2]{};
+    attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
     attachments[1].format = depth_format;
-    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depth_ref{
-        1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_ref;
-    subpass.pDepthStencilAttachment = &depth_ref;
-    VkSubpassDependency dependencies[2]{};
-    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[0].dstSubpass = 0;
-    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependencies[0].dstStageMask =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dependencies[1].srcSubpass = 0;
-    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[1].srcStageMask =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    VkRenderPassCreateInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    pass.attachmentCount = 2;
-    pass.pAttachments = attachments;
-    pass.subpassCount = 1;
-    pass.pSubpasses = &subpass;
-    pass.dependencyCount = 2;
-    pass.pDependencies = dependencies;
-    check(vkCreateRenderPass(g_device, &pass, nullptr, &render_pass_));
+    attachments[1].store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[1].final_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    attachments[1].depth = true;
+    photara::vk::SubpassDependencyDesc dependencies[2]{};
+    dependencies[0].src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[0].dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependencies[0].src_access = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[0].dst_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].src_subpass = 0;
+    dependencies[1].dst_subpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[1].dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dst_access = VK_ACCESS_SHADER_READ_BIT;
+    render_pass_ = runtime_.create_render_pass(attachments, dependencies);
 
     if (!ensure_albedo()) return false;
 
-    VkPushConstantRange push{};
-    push.stageFlags =
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    push.size = sizeof(MeshPush);
-    VkPipelineLayoutCreateInfo layout_info{
-        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    layout_info.setLayoutCount = 1;
-    layout_info.pSetLayouts = &albedo_layout_;
-    layout_info.pushConstantRangeCount = 1;
-    layout_info.pPushConstantRanges = &push;
-    check(vkCreatePipelineLayout(
-        g_device, &layout_info, nullptr, &pipeline_layout_));
+    const photara::vk::VertexAttribute attributes[] = {
+        {0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+        {1, VK_FORMAT_R32G32B32_SFLOAT, 16},
+        {2, VK_FORMAT_R32G32B32_SFLOAT, 32},
+        {3, VK_FORMAT_R32G32_SFLOAT, 48},
+    };
+    photara::vk::GraphicsDesc fill;
+    fill.vertex_spirv = shader_bytes(mesh_shaders::k_vert, std::size(mesh_shaders::k_vert));
+    fill.fragment_spirv = shader_bytes(mesh_shaders::k_frag, std::size(mesh_shaders::k_frag));
+    fill.set_layout = albedo_layout_;
+    fill.push_bytes = sizeof(MeshPush);
+    fill.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    fill.vertex_stride = sizeof(MeshGpuVertex);
+    fill.attributes = attributes;
+    fill.depth_test = true;
+    fill.depth_write = true;
+    fill.depth_compare = VK_COMPARE_OP_LESS;
+    fill.render_pass = render_pass_.handle();
+    fill_pipeline_ = runtime_.create_graphics(fill);
 
-    const VkShaderModule vert = mesh_shader_module(
-        mesh_shaders::k_vert, std::size(mesh_shaders::k_vert));
-    const VkShaderModule frag = mesh_shader_module(
-        mesh_shaders::k_frag, std::size(mesh_shaders::k_frag));
-    const VkShaderModule wire_frag = mesh_shader_module(
+    photara::vk::GraphicsDesc wire = fill;
+    wire.fragment_spirv = shader_bytes(
         mesh_shaders::k_wire_frag, std::size(mesh_shaders::k_wire_frag));
-    fill_pipeline_ = create_mesh_pipeline(
-        render_pass_, pipeline_layout_, vert, frag,
-        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false);
-    wire_pipeline_ = create_mesh_pipeline(
-        render_pass_, pipeline_layout_, vert, wire_frag,
-        VK_PRIMITIVE_TOPOLOGY_LINE_LIST, true);
-    vkDestroyShaderModule(g_device, vert, nullptr);
-    vkDestroyShaderModule(g_device, frag, nullptr);
-    vkDestroyShaderModule(g_device, wire_frag, nullptr);
+    wire.pipeline_layout = fill_pipeline_.layout();
+    wire.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    wire.depth_write = false;
+    wire.depth_compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    wire.depth_bias = true;
+    wire.depth_bias_constant = -1.F;
+    wire.depth_bias_slope = -1.F;
+    wire_pipeline_ = runtime_.create_graphics(wire);
 
     VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pool.queueFamilyIndex = g_queue_family;
     check(vkCreateCommandPool(g_device, &pool, nullptr, &command_pool_));
-    return fill_pipeline_ && wire_pipeline_;
+    return fill_pipeline_.valid() && wire_pipeline_.valid();
 }
 
 void MeshPreviewRenderer::bind_albedo_view(VkImageView view) {
@@ -1676,7 +1543,7 @@ void MeshPreviewRenderer::set_albedo(const photara::io::RgbImage& atlas) {
 
 bool MeshPreviewRenderer::ensure_frames(
     const std::uint32_t width, const std::uint32_t height) {
-    if (width_ == width && height_ == height && frames_[0].framebuffer)
+    if (width_ == width && height_ == height && frames_[0].framebuffer.valid())
         return true;
     destroy_frames();
     if (!ensure_pipeline()) return false;
@@ -1689,60 +1556,25 @@ bool MeshPreviewRenderer::ensure_frames(
     cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cmd_info.commandBufferCount = 1;
     for (Frame& frame : frames_) {
-        VkImageCreateInfo color_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        color_info.imageType = VK_IMAGE_TYPE_2D;
-        color_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-        color_info.extent = {width, height, 1};
-        color_info.mipLevels = 1;
-        color_info.arrayLayers = 1;
-        color_info.samples = VK_SAMPLE_COUNT_1_BIT;
-        color_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        color_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+        photara::vk::ImageDesc color_desc;
+        color_desc.width = width;
+        color_desc.height = height;
+        color_desc.format = VK_FORMAT_R8G8B8A8_UNORM;
+        color_desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                            VK_IMAGE_USAGE_SAMPLED_BIT;
-        color_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        check(vkCreateImage(g_device, &color_info, nullptr, &frame.color));
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(g_device, frame.color, &requirements);
-        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = memory_type(
-            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        check(vkAllocateMemory(
-            g_device, &allocation, nullptr, &frame.color_memory));
-        check(vkBindImageMemory(g_device, frame.color, frame.color_memory, 0));
-
-        VkImageCreateInfo depth_info = color_info;
-        depth_info.format = depth_format;
-        depth_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        check(vkCreateImage(g_device, &depth_info, nullptr, &frame.depth));
-        vkGetImageMemoryRequirements(g_device, frame.depth, &requirements);
-        allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = memory_type(
-            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        check(vkAllocateMemory(
-            g_device, &allocation, nullptr, &frame.depth_memory));
-        check(vkBindImageMemory(g_device, frame.depth, frame.depth_memory, 0));
-
-        VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        view.image = frame.color;
-        view.format = VK_FORMAT_R8G8B8A8_UNORM;
-        check(vkCreateImageView(g_device, &view, nullptr, &frame.color_view));
-        view.image = frame.depth;
-        view.format = depth_format;
-        view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        check(vkCreateImageView(g_device, &view, nullptr, &frame.depth_view));
-
-        const VkImageView fb_views[] = {frame.color_view, frame.depth_view};
-        VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        fb.renderPass = render_pass_;
-        fb.attachmentCount = 2;
-        fb.pAttachments = fb_views;
-        fb.width = width;
-        fb.height = height;
-        fb.layers = 1;
-        check(vkCreateFramebuffer(g_device, &fb, nullptr, &frame.framebuffer));
+        frame.color = runtime_.create_image(color_desc);
+        photara::vk::ImageDesc depth_desc = color_desc;
+        depth_desc.format = depth_format;
+        depth_desc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        frame.depth = runtime_.create_image(depth_desc);
+        frame.color_view = runtime_.create_image_view(
+            frame.color.handle(), VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+        frame.depth_view = runtime_.create_image_view(
+            frame.depth.handle(), depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+        const VkImageView fb_views[] = {
+            frame.color_view.handle(), frame.depth_view.handle()};
+        frame.framebuffer = runtime_.create_framebuffer(
+            render_pass_, fb_views, width, height);
 
         VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         sampler.magFilter = VK_FILTER_LINEAR;
@@ -1752,7 +1584,7 @@ bool MeshPreviewRenderer::ensure_frames(
         sampler.maxLod = 1.F;
         check(vkCreateSampler(g_device, &sampler, nullptr, &frame.sampler));
         frame.descriptor = ImGui_ImplVulkan_AddTexture(
-            frame.sampler, frame.color_view,
+            frame.sampler, frame.color_view.handle(),
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         check(vkAllocateCommandBuffers(g_device, &cmd_info, &frame.command));
@@ -1845,8 +1677,8 @@ bool MeshPreviewRenderer::draw(
         1.F}};
     clears[1].depthStencil = {1.F, 0};
     VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    pass.renderPass = render_pass_;
-    pass.framebuffer = frame.framebuffer;
+    pass.renderPass = render_pass_.handle();
+    pass.framebuffer = frame.framebuffer.handle();
     pass.renderArea.extent = {width, height};
     pass.clearValueCount = 2;
     pass.pClearValues = clears;
@@ -1879,12 +1711,12 @@ bool MeshPreviewRenderer::draw(
         ? 2.F
         : (uniforms.vertex_colour ? 1.F : 0.F);
     vkCmdPushConstants(
-        frame.command, pipeline_layout_,
+        frame.command, fill_pipeline_.layout(),
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
         sizeof(push), &push);
     if (albedo_set_)
         vkCmdBindDescriptorSets(
-            frame.command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_,
+            frame.command, VK_PIPELINE_BIND_POINT_GRAPHICS, fill_pipeline_.layout(),
             0, 1, &albedo_set_, 0, nullptr);
 
     const VkDeviceSize offset = 0;
@@ -1892,11 +1724,11 @@ bool MeshPreviewRenderer::draw(
     vkCmdBindIndexBuffer(
         frame.command, index_buffer_, 0, VK_INDEX_TYPE_UINT32);
     vkCmdBindPipeline(
-        frame.command, VK_PIPELINE_BIND_POINT_GRAPHICS, fill_pipeline_);
+        frame.command, VK_PIPELINE_BIND_POINT_GRAPHICS, fill_pipeline_.handle());
     vkCmdDrawIndexed(frame.command, index_count_, 1, 0, 0, 0);
     if (uniforms.wireframe && edge_count_ > 0) {
         vkCmdBindPipeline(
-            frame.command, VK_PIPELINE_BIND_POINT_GRAPHICS, wire_pipeline_);
+            frame.command, VK_PIPELINE_BIND_POINT_GRAPHICS, wire_pipeline_.handle());
         vkCmdBindIndexBuffer(
             frame.command, edge_buffer_, 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(frame.command, edge_count_, 1, 0, 0, 0);

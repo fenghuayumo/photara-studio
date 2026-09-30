@@ -2,6 +2,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include "photara_vk/photara_vk.hpp"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -109,10 +111,9 @@ private:
         VkDeviceSize size{};
     };
     struct Frame {
-        VkImage color{};
-        VkDeviceMemory memory{};
-        VkImageView view{};
-        VkFramebuffer framebuffer{};
+        photara::vk::Image color;
+        photara::vk::ImageView view;
+        photara::vk::Framebuffer framebuffer;
         VkSampler sampler{};
         std::uint32_t width{};
         std::uint32_t height{};
@@ -130,6 +131,7 @@ private:
         std::uint32_t reserved{};  // Shading: 0 gaussian, 1 rings
     };
 
+    bool ensure_runtime();
     bool ensure_device();
     bool ensure_frames(std::uint32_t width, std::uint32_t height);
     bool draw_ewa(const Camera& camera, const FrameData& frame, FrameTarget& target);
@@ -149,6 +151,9 @@ private:
     VkDevice device_{};
     VkQueue queue_{};
     std::uint32_t family_{VK_QUEUE_FAMILY_IGNORED};
+    // Adopted view of device_. It does not own the VkDevice. Drop it while
+    // device_ is still alive.
+    photara::vk::Device runtime_;
 
     std::string source_key_;
     std::string failure_;
@@ -164,13 +169,14 @@ private:
     VkPipelineLayout pipeline_layout_{};
     VkDescriptorPool pool_{};
     VkDescriptorSet set_{};
-    VkRenderPass render_pass_{};
+    photara::vk::RenderPass render_pass_;
     VkPipeline keys_pipeline_{};
     VkPipeline hist_pipeline_{};
     VkPipeline scan_pipeline_{};
     VkPipeline scatter_pipeline_{};
     VkPipeline ring_prepare_pipeline_{};
-    VkPipeline ring_pipeline_{};
+    // Borrows pipeline_layout_. Destroy this before that layout.
+    photara::vk::GraphicsPipeline ring_pipeline_;
     // Owned here and deleted only in renderer.cpp, where the type is complete.
     struct EwaPreview;
     EwaPreview* ewa_{};
