@@ -254,6 +254,7 @@ struct ProjectSettings {
     // Machine-level compute policy. Stored in editor.prefs, never in .ascan.
     // training_backend: 0 cuda, 1 vulkan.
     // alignment_backend: 0 automatic, 1 cpu, 2 cuda (--ba-backend).
+    // automatic uses CUDA when a device is present, otherwise Vulkan, then CPU.
     // sam_backend: 0 auto, 1 cuda, 2 vulkan (--sam-backend).
     int training_backend = 0;
     int alignment_backend = 0;

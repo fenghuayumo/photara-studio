@@ -13,12 +13,13 @@ enum class BundleBackend {
 
 // Process-wide backend override for A/B validation of the joint BA.
 // Set once from the CLI before reconstruction starts.
-// automatic keeps the historical CUDA preference and does not select Vulkan.
+// automatic prefers a GPU: CUDA when a device is present, otherwise Vulkan,
+// then CPU. Explicit cuda/vulkan do not fall through to the other GPU.
 enum class BundleBackendPreference {
-    automatic,  // CUDA when supported, silent CPU fallback (default)
+    automatic,  // CUDA, else Vulkan, else CPU (default)
     cpu,        // never use a GPU solver
     cuda,       // prefer CUDA; warn when any solve falls back to CPU
-    vulkan,     // prefer Vulkan; warn and use CPU when it cannot run. Does not fall through to CUDA.
+    vulkan,     // prefer Vulkan; warn and use CPU when it cannot run
 };
 
 void set_bundle_backend_preference(BundleBackendPreference preference);
@@ -44,7 +45,7 @@ struct BundleOptions {
     // Use a GPU Schur/PCG backend when the problem is large enough and the
     // requested parameterization is supported. The process-wide preference
     // chooses CUDA or Vulkan; partial pose locks stay on the CPU.
-    // Default on: automatic selection keeps the historical CUDA preference.
+    // Default on: automatic tries CUDA first, then Vulkan.
     bool prefer_cuda{true};
     // Shared CUDA/Vulkan threshold; the legacy name is kept for API stability.
     std::size_t cuda_min_observations{50'000};

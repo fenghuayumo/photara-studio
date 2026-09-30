@@ -633,12 +633,13 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("ba-backend",
          "Bundle adjustment backend: automatic (default), cpu, cuda, or vulkan. "
-         "automatic follows the CUDA preference and does not select vulkan. "
+         "automatic uses CUDA when a device is present, otherwise Vulkan, then CPU. "
          "cuda and vulkan warn when a solve falls back to the CPU.",
          cxxopts::value<std::string>()->default_value("automatic"))
         ("positioning-backend",
          "Global bearing positioning backend: automatic (default), cpu, cuda, or vulkan. "
-         "automatic follows --positioning-cuda and does not select vulkan. "
+         "automatic uses CUDA when --positioning-cuda is on and a device is present, "
+         "otherwise Vulkan, then CPU. "
          "cuda and vulkan fall back to the CPU with a warning when the device or problem size is unsupported.",
          cxxopts::value<std::string>()->default_value("automatic"))
         ("positioning-cuda", "Use CUDA for supported global bearing positioning solves when --positioning-backend=automatic (default: true)",

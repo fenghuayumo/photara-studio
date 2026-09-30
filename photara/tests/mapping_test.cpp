@@ -629,17 +629,18 @@ void test_local_ba_boundary_selection() {
     const BundleSummary global_summary =
         run_bundle_adjustment(global_scene, global_options);
     expect(global_summary.success, "automatic BA backend succeeds");
+    BundleBackend expected_backend = BundleBackend::cpu;
 #if defined(PHOTARA_HAS_CUDA)
-    const BundleBackend expected_backend =
-        photara::ba::CudaOptimizer::is_available()
-        ? BundleBackend::cuda
-        : BundleBackend::cpu;
-    expect(global_summary.backend == expected_backend,
-           "compatible global BA selects the available backend");
-#else
-    expect(global_summary.backend == BundleBackend::cpu,
-           "CPU-only build selects the CPU BA backend");
+    if (photara::ba::CudaOptimizer::is_available())
+        expected_backend = BundleBackend::cuda;
 #endif
+#if defined(PHOTARA_HAS_VULKAN_BA)
+    if (expected_backend == BundleBackend::cpu &&
+        photara::ba::VulkanOptimizer::is_available())
+        expected_backend = BundleBackend::vulkan;
+#endif
+    expect(global_summary.backend == expected_backend,
+           "automatic BA prefers CUDA, then Vulkan, then CPU");
 }
 
 void test_final_registration_audit_prunes_unsupported_pose() {

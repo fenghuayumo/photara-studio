@@ -222,8 +222,9 @@ freezes poorly observable intrinsic groups, and falls back to CPU if the
 requested GPU backend cannot solve the problem.
 
 `--ba-backend automatic|cpu|cuda|vulkan` selects the process-level preference;
-automatic retains the historical CUDA preference. Global positioning has the
-matching `--positioning-backend automatic|cpu|cuda|vulkan` selector. CUDA and
+automatic uses CUDA when a device is present, otherwise Vulkan, then CPU.
+Global positioning has the matching `--positioning-backend automatic|cpu|cuda|vulkan`
+selector. CUDA and
 Vulkan share the bearing-Schur formulation, robust IRLS passes, gauge
 constraints, and stopping rules so backend comparisons preserve the mapping
 semantics.

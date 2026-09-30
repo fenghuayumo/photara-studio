@@ -1101,16 +1101,21 @@ GlobalPositioningSummary refine_only_points_bearings(
     solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
     solver_options.linear_solver_ordering.reset(ordering);
 
-    const bool want_vulkan = options.backend == PositioningBackend::vulkan;
+    const bool automatic = options.backend == PositioningBackend::automatic;
+    const bool explicit_vulkan = options.backend == PositioningBackend::vulkan;
+    const bool explicit_cuda = options.backend == PositioningBackend::cuda;
     const bool want_cuda =
-        options.backend == PositioningBackend::cuda ||
-        (options.backend == PositioningBackend::automatic && options.prefer_cuda);
+        explicit_cuda || (automatic && options.prefer_cuda);
+    const bool want_vulkan = explicit_vulkan || automatic;
     const bool positioning_size_ok =
         observations >= 50000 && scene.registered_count() <= 2000;
 #if defined(PHOTARA_HAS_CUDA) || defined(PHOTARA_HAS_VULKAN_BA)
     std::vector<Index> gpu_cameras;
     std::vector<Index> gpu_tracks;
+    bool bearing_prepared = false;
     const auto prepare_bearing = [&]() {
+        if (bearing_prepared) return;
+        bearing_prepared = true;
         std::vector<Index> camera_map(scene.images.size(), k_invalid);
         std::vector<Index> track_map(scene.tracks.size(), k_invalid);
         for (const auto& image : scene.images) {
@@ -1144,42 +1149,15 @@ GlobalPositioningSummary refine_only_points_bearings(
 #if defined(PHOTARA_HAS_CUDA)
     std::unique_ptr<ba::CudaBearingOptimizer> cuda_solver;
 #endif
-    if (want_vulkan) {
-#if !defined(PHOTARA_HAS_VULKAN_BA)
-        core::Logger::instance().warning(
-            "positioning-backend=vulkan requested but this solve stays on the CPU: ",
-            "solver was not built");
-#else
-        if (!positioning_size_ok || !ba::VulkanBearingOptimizer::is_available()) {
-            core::Logger::instance().warning(
-                "positioning-backend=vulkan requested but this solve stays on the CPU: ",
-                "observations=", observations, " minimum=50000",
-                " cameras=", scene.registered_count(), " maximum=2000",
-                " vulkan_available=",
-                ba::VulkanBearingOptimizer::is_available() ? 1 : 0);
-        } else {
-            try {
-                prepare_bearing();
-                vulkan_solver = std::make_unique<ba::VulkanBearingOptimizer>(gpu_problem);
-                core::Logger::instance().info(
-                    "global positioning backend=vulkan bearing_schur cameras=",
-                    gpu_cameras.size(), " points=", gpu_tracks.size(),
-                    " observations=", observations);
-            } catch (const std::exception& error) {
-                core::Logger::instance().warning(
-                    "Vulkan bearing initialization failed; using CPU: ", error.what());
-            }
-        }
-#endif
-    } else if (want_cuda) {
+    bool have_gpu_solver = false;
+    if (want_cuda) {
 #if !defined(PHOTARA_HAS_CUDA)
-        if (options.backend == PositioningBackend::cuda) {
+        if (explicit_cuda) {
             core::Logger::instance().warning(
                 "positioning-backend=cuda requested but this solve stays on the CPU: ",
                 "solver was not built");
         }
 #else
-        const bool explicit_cuda = options.backend == PositioningBackend::cuda;
         if (!positioning_size_ok || !ba::CudaOptimizer::is_available()) {
             if (explicit_cuda) {
                 core::Logger::instance().warning(
@@ -1192,6 +1170,7 @@ GlobalPositioningSummary refine_only_points_bearings(
             try {
                 prepare_bearing();
                 cuda_solver = std::make_unique<ba::CudaBearingOptimizer>(gpu_problem);
+                have_gpu_solver = true;
                 core::Logger::instance().info(
                     "global positioning backend=cuda bearing_schur cameras=",
                     gpu_cameras.size(), " points=", gpu_tracks.size(),
@@ -1199,6 +1178,39 @@ GlobalPositioningSummary refine_only_points_bearings(
             } catch (const std::exception& error) {
                 core::Logger::instance().warning(
                     "CUDA bearing initialization failed; using CPU: ", error.what());
+            }
+        }
+#endif
+    }
+    if (!have_gpu_solver && want_vulkan) {
+#if !defined(PHOTARA_HAS_VULKAN_BA)
+        if (explicit_vulkan) {
+            core::Logger::instance().warning(
+                "positioning-backend=vulkan requested but this solve stays on the CPU: ",
+                "solver was not built");
+        }
+#else
+        if (!positioning_size_ok || !ba::VulkanBearingOptimizer::is_available()) {
+            if (explicit_vulkan) {
+                core::Logger::instance().warning(
+                    "positioning-backend=vulkan requested but this solve stays on the CPU: ",
+                    "observations=", observations, " minimum=50000",
+                    " cameras=", scene.registered_count(), " maximum=2000",
+                    " vulkan_available=",
+                    ba::VulkanBearingOptimizer::is_available() ? 1 : 0);
+            }
+        } else {
+            try {
+                prepare_bearing();
+                vulkan_solver = std::make_unique<ba::VulkanBearingOptimizer>(gpu_problem);
+                have_gpu_solver = true;
+                core::Logger::instance().info(
+                    "global positioning backend=vulkan bearing_schur cameras=",
+                    gpu_cameras.size(), " points=", gpu_tracks.size(),
+                    " observations=", observations);
+            } catch (const std::exception& error) {
+                core::Logger::instance().warning(
+                    "Vulkan bearing initialization failed; using CPU: ", error.what());
             }
         }
 #endif

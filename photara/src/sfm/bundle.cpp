@@ -213,17 +213,12 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         (opt.optimize_rotations || opt.optimize_translations) &&
         !has_partial_pose_locks;
     const BundleBackendPreference backend = bundle_backend_preference();
-    const bool want_vulkan = backend == BundleBackendPreference::vulkan;
-    const bool want_cuda = options.prefer_cuda &&
-        backend != BundleBackendPreference::cpu &&
-        backend != BundleBackendPreference::vulkan;
-#if defined(PHOTARA_HAS_VULKAN_BA)
-    const bool use_vulkan = want_vulkan && supported_parameterization &&
-        problem.observations.size() >= options.cuda_min_observations &&
-        ba::VulkanOptimizer::is_available();
-#else
-    const bool use_vulkan = false;
-#endif
+    const bool automatic = backend == BundleBackendPreference::automatic;
+    const bool want_cuda =
+        (automatic && options.prefer_cuda) ||
+        backend == BundleBackendPreference::cuda;
+    const bool want_vulkan =
+        automatic || backend == BundleBackendPreference::vulkan;
 #if defined(PHOTARA_HAS_CUDA)
     const bool use_cuda = want_cuda && supported_parameterization &&
         problem.observations.size() >= options.cuda_min_observations &&
@@ -231,7 +226,16 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
 #else
     const bool use_cuda = false;
 #endif
-    if (want_vulkan && !use_vulkan && supported_parameterization) {
+#if defined(PHOTARA_HAS_VULKAN_BA)
+    const bool use_vulkan = want_vulkan && !use_cuda &&
+        supported_parameterization &&
+        problem.observations.size() >= options.cuda_min_observations &&
+        ba::VulkanOptimizer::is_available();
+#else
+    const bool use_vulkan = false;
+#endif
+    if (backend == BundleBackendPreference::vulkan && !use_vulkan &&
+        supported_parameterization) {
         core::Logger::instance().warning(
             "ba-backend=vulkan requested but this solve stays on the CPU: "
             "observations=", problem.observations.size(),
@@ -254,28 +258,7 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
     }
 #endif
     bool solved = false;
-    if (use_vulkan) {
-#if defined(PHOTARA_HAS_VULKAN_BA)
-        try {
-            core::Logger::instance().info(
-                "bundle backend=vulkan device=", ba::VulkanOptimizer::device_name(),
-                " observations=", problem.observations.size());
-            summary.optimizer = ba::optimize_vulkan(problem, opt);
-            summary.backend = BundleBackend::vulkan;
-            if (!summary.optimizer.usable()) {
-                core::Logger::instance().warning(
-                    "Vulkan bundle adjustment produced an unusable step; "
-                    "continuing with CPU from the last accepted state");
-            } else {
-                solved = true;
-            }
-        } catch (const std::exception& error) {
-            core::Logger::instance().warning(
-                "Vulkan bundle adjustment unavailable at runtime; falling back "
-                "to CPU: ", error.what());
-        }
-#endif
-    } else if (use_cuda) {
+    if (use_cuda) {
 #if defined(PHOTARA_HAS_CUDA)
         try {
             core::Logger::instance().info(
@@ -293,6 +276,27 @@ BundleSummary run_bundle_adjustment(Scene& scene, const BundleOptions& options) 
         } catch (const std::exception& error) {
             core::Logger::instance().warning(
                 "CUDA bundle adjustment unavailable at runtime; falling back "
+                "to CPU: ", error.what());
+        }
+#endif
+    } else if (use_vulkan) {
+#if defined(PHOTARA_HAS_VULKAN_BA)
+        try {
+            core::Logger::instance().info(
+                "bundle backend=vulkan device=", ba::VulkanOptimizer::device_name(),
+                " observations=", problem.observations.size());
+            summary.optimizer = ba::optimize_vulkan(problem, opt);
+            summary.backend = BundleBackend::vulkan;
+            if (!summary.optimizer.usable()) {
+                core::Logger::instance().warning(
+                    "Vulkan bundle adjustment produced an unusable step; "
+                    "continuing with CPU from the last accepted state");
+            } else {
+                solved = true;
+            }
+        } catch (const std::exception& error) {
+            core::Logger::instance().warning(
+                "Vulkan bundle adjustment unavailable at runtime; falling back "
                 "to CPU: ", error.what());
         }
 #endif

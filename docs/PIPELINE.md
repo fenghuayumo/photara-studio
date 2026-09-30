@@ -114,7 +114,7 @@ Current constraints:
 - `--mesh-method pam` requires Splat training.
 - Texture is not yet available in the direct external-Splat path.
 - `--ba-backend automatic|cpu|cuda|vulkan` changes the BA solver, not reconstruction
-  semantics.
+  semantics. automatic uses CUDA when a device is present, otherwise Vulkan, then CPU.
 - `--splat` requires CUDA and `PHOTARA_ENABLE_SPLAT=ON`.
 - SAM preprocessing requires `PHOTARA_ENABLE_SAM=ON` and a local SAM 3 GGML
   checkpoint. Select `--sam-backend auto|cpu|cuda|vulkan|metal`; automatic

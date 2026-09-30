@@ -11,9 +11,9 @@ enum class GlobalPositioningConstraint {
     points_and_cameras,
 };
 
-// automatic keeps the historical CUDA preference: prefer_cuda selects CUDA
-// when it is built and a device is present, otherwise the CPU. vulkan is
-// explicit and never replaces a CUDA-off automatic run.
+// automatic prefers a GPU: CUDA when prefer_cuda and a device are present,
+// otherwise Vulkan, then CPU. Explicit vulkan/cuda do not fall through to
+// the other GPU.
 enum class PositioningBackend {
     automatic,
     cpu,
