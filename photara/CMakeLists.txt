@@ -778,7 +778,7 @@ if(PHOTARA_ENABLE_FEATURES)
             NB_STATIC
             src/python/bindings.cpp)
         set_target_properties(photara_python PROPERTIES
-            OUTPUT_NAME photara_native)
+            OUTPUT_NAME photara)
         target_link_libraries(photara_python PRIVATE
             Photara::SfM
             Photara::MVS

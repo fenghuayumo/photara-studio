@@ -30,7 +30,7 @@ function(photara_exclude_from_default)
 endfunction()
 
 option(PHOTARA_BUILD_PYTHON
-    "Build the nanobind Python experiment module" OFF)
+    "Build the nanobind Python module (`import photara`)" OFF)
 option(PHOTARA_ENABLE_CUDA "Build CUDA acceleration" ON)
 set(PHOTARA_CUDA_ARCHITECTURES "" CACHE STRING
     "CUDA architectures for Photara targets (empty = RTX 20+ release set)")

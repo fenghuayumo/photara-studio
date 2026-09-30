@@ -1,5 +1,10 @@
+#include "core/version.hpp"
+#include "features/registry.hpp"
 #include "mvs/densify.hpp"
 #include "mvs/export.hpp"
+#include "sfm/asfm.hpp"
+#include "sfm/bundle.hpp"
+#include "sfm/export_colmap.hpp"
 #include "sfm/export_mvs.hpp"
 #include "sfm/frontend.hpp"
 #include "sfm/reconstruct.hpp"
@@ -8,6 +13,7 @@
 #include "splat/trainer.hpp"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/array.h>
 #include <nanobind/stl/filesystem.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
@@ -30,10 +36,13 @@ namespace {
 namespace mvs = photara::mvs;
 namespace sfm = photara::sfm;
 namespace splat = photara::splat;
+namespace features = photara::features;
+namespace ba = photara::ba;
 
 struct SfmSceneHandle {
     sfm::Scene scene;
     sfm::ReconstructionSummary summary;
+    sfm::FrontEndTiming frontend_timing;
 };
 
 struct MvsSceneHandle {
@@ -105,23 +114,35 @@ struct MeshResultHandle {
     sfm::FrontEndResult frontend = sfm::run_frontend(image_paths, options);
     auto result = std::make_shared<SfmSceneHandle>();
     result->scene = std::move(frontend.scene);
+    result->frontend_timing = frontend.timing;
     return result;
 }
 
 sfm::ReconstructionSummary run_sfm_mapping(
-    SfmSceneHandle& handle, const sfm::ReconstructionMode mode) {
-    switch (mode) {
+    SfmSceneHandle& handle, const sfm::ReconstructionConfig& options) {
+    switch (options.mode) {
         case sfm::ReconstructionMode::incremental:
-            handle.summary = sfm::run_incremental_mapping(handle.scene);
+            handle.summary = sfm::run_incremental_mapping(
+                handle.scene, options.star, options.resection);
             break;
         case sfm::ReconstructionMode::hierarchical:
-            handle.summary = sfm::run_hierarchical_mapping(handle.scene);
+            handle.summary = sfm::run_hierarchical_mapping(
+                handle.scene, options.hierarchical);
             break;
         case sfm::ReconstructionMode::global:
-            handle.summary = sfm::run_global_mapping(handle.scene);
+            handle.summary = sfm::run_global_mapping(
+                handle.scene, options.global_rotation,
+                options.global_positioning, options.resection);
             break;
     }
     return handle.summary;
+}
+
+[[nodiscard]] std::shared_ptr<SfmSceneHandle> load_sfm_scene(
+    const std::filesystem::path& path, const sfm::AsfmOptions& options) {
+    auto result = std::make_shared<SfmSceneHandle>();
+    result->scene = sfm::load_asfm(path, options);
+    return result;
 }
 
 [[nodiscard]] std::shared_ptr<MvsSceneHandle> build_mvs_scene(
@@ -148,11 +169,17 @@ sfm::ReconstructionSummary run_sfm_mapping(
     return result;
 }
 
-[[nodiscard]] std::shared_ptr<GaussianModelHandle> train_3dgs(
-    const MvsSceneHandle& scene, const splat::TrainingOptions& options) {
-    auto result = std::make_shared<GaussianModelHandle>();
-    result->model = splat::Trainer(options).train(scene.scene);
-    return result;
+[[nodiscard]] splat::ProgressCallback make_progress_callback(
+    const nb::object& progress) {
+    if (progress.is_none())
+        return {};
+    return [progress](const splat::TrainingProgress& value) {
+        nb::gil_scoped_acquire acquire;
+        nb::object result = progress(value);
+        if (result.is_none())
+            return true;
+        return nb::cast<bool>(result);
+    };
 }
 
 [[nodiscard]] std::shared_ptr<GaussianModelHandle> load_3dgs(
@@ -195,9 +222,16 @@ sfm::ReconstructionSummary run_sfm_mapping(
 
 }  // namespace
 
-NB_MODULE(photara_native, module) {
+NB_MODULE(photara, module) {
     module.doc() =
-        "Nanobind experiment API for Photara SfM, MVS, 3DGS and TSDF";
+        "Native Python API for Photara SfM, MVS, 3DGS and meshing";
+    module.attr("__version__") = PHOTARA_VERSION;
+
+    nb::enum_<photara::CameraModel>(module, "CameraModel")
+        .value("PINHOLE", photara::CameraModel::pinhole)
+        .value("OPENCV_FISHEYE", photara::CameraModel::opencv_fisheye)
+        .value("AUTOMATIC", photara::CameraModel::automatic)
+        .value("EQUIRECTANGULAR", photara::CameraModel::equirectangular);
 
     nb::enum_<sfm::ReconstructionMode>(module, "ReconstructionMode")
         .value("INCREMENTAL", sfm::ReconstructionMode::incremental)
@@ -220,6 +254,13 @@ NB_MODULE(photara_native, module) {
         .value("REALITY_CAPTURE", splat::DatasetFormat::reality_capture)
         .value("OPENMVS", splat::DatasetFormat::openmvs);
 
+    nb::enum_<splat::GaussianFormat>(module, "GaussianFormat")
+        .value("AUTO", splat::GaussianFormat::auto_detect)
+        .value("PLY", splat::GaussianFormat::ply)
+        .value("SOG", splat::GaussianFormat::sog)
+        .value("SPZ", splat::GaussianFormat::spz)
+        .value("GLB", splat::GaussianFormat::glb);
+
     nb::enum_<splat::AlphaMode>(module, "AlphaMode")
         .value("MASKED", splat::AlphaMode::masked)
         .value("TRANSPARENT", splat::AlphaMode::transparent);
@@ -229,13 +270,334 @@ NB_MODULE(photara_native, module) {
         .value("NO_CRF", splat::PpispParamType::no_crf)
         .value("ORIGINAL", splat::PpispParamType::original);
 
+    nb::enum_<splat::TrainingBackend>(module, "TrainingBackend")
+        .value("CUDA", splat::TrainingBackend::cuda)
+        .value("VULKAN", splat::TrainingBackend::vulkan);
+
     nb::enum_<splat::DensificationStrategy>(
         module, "DensificationStrategy")
         .value("ADC_PLUS", splat::DensificationStrategy::adc_plus)
         .value("ADC_IGS", splat::DensificationStrategy::adc_igs)
+        .value(
+            "DENSE_ADAPTIVE",
+            splat::DensificationStrategy::dense_adaptive)
+        .value("EMC", splat::DensificationStrategy::emc);
+
+    nb::enum_<sfm::PositioningBackend>(module, "PositioningBackend")
+        .value("AUTOMATIC", sfm::PositioningBackend::automatic)
+        .value("CPU", sfm::PositioningBackend::cpu)
+        .value("CUDA", sfm::PositioningBackend::cuda)
+        .value("VULKAN", sfm::PositioningBackend::vulkan);
+
+    nb::enum_<sfm::BundleBackendPreference>(module, "BundleBackend")
+        .value("AUTOMATIC", sfm::BundleBackendPreference::automatic)
+        .value("CPU", sfm::BundleBackendPreference::cpu)
+        .value("CUDA", sfm::BundleBackendPreference::cuda)
+        .value("VULKAN", sfm::BundleBackendPreference::vulkan);
+
+    nb::enum_<sfm::BundleBackend>(module, "BundleBackendUsed")
+        .value("CPU", sfm::BundleBackend::cpu)
+        .value("CUDA", sfm::BundleBackend::cuda)
+        .value("VULKAN", sfm::BundleBackend::vulkan);
+
+    nb::enum_<ba::TerminationReason>(module, "TerminationReason")
+        .value("CONVERGED", ba::TerminationReason::converged)
+        .value("MAXIMUM_ITERATIONS", ba::TerminationReason::maximum_iterations)
+        .value("NUMERICAL_FAILURE", ba::TerminationReason::numerical_failure);
+
+    nb::enum_<sfm::GlobalPositioningConstraint>(
+        module, "GlobalPositioningConstraint")
+        .value("ONLY_POINTS", sfm::GlobalPositioningConstraint::only_points)
+        .value("ONLY_CAMERAS", sfm::GlobalPositioningConstraint::only_cameras)
+        .value(
+            "POINTS_AND_CAMERAS_BALANCED",
+            sfm::GlobalPositioningConstraint::points_and_cameras_balanced)
+        .value(
+            "POINTS_AND_CAMERAS",
+            sfm::GlobalPositioningConstraint::points_and_cameras);
+
+    nb::enum_<sfm::GlobalRotationOptions::WeightType>(
+        module, "GlobalRotationWeight")
+        .value(
+            "GEMAN_MCCLURE",
+            sfm::GlobalRotationOptions::WeightType::geman_mcclure)
+        .value("HALF_NORM", sfm::GlobalRotationOptions::WeightType::half_norm);
+
+#define PHOTARA_BIND_RW(binding, type, field) \
+    binding.def_rw(#field, &type::field)
+
+    auto optimizer_options =
+        nb::class_<ba::OptimizerOptions>(module, "OptimizerOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, maximum_iterations);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, maximum_pcg_iterations);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, huber_delta);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, minimum_depth);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, initial_damping);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, minimum_damping);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, maximum_damping);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, function_tolerance);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, step_tolerance);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, pcg_tolerance);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, fix_first_pose);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, fix_first_point);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, optimize_rotations);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, optimize_translations);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, optimize_points);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, optimize_focal);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, optimize_aspect_ratio);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, optimize_principal_point);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, optimize_distortion);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, focal_prior_weight);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, min_focal_ratio);
+    PHOTARA_BIND_RW(optimizer_options, ba::OptimizerOptions, max_focal_ratio);
+
+    nb::class_<ba::IterationSummary>(module, "OptimizerIterationSummary")
+        .def_ro("iteration", &ba::IterationSummary::iteration)
+        .def_ro("cost", &ba::IterationSummary::cost)
+        .def_ro("damping", &ba::IterationSummary::damping)
+        .def_ro("step_norm", &ba::IterationSummary::step_norm)
+        .def_ro("pcg_iterations", &ba::IterationSummary::pcg_iterations)
+        .def_ro("accepted", &ba::IterationSummary::accepted);
+
+    nb::class_<ba::OptimizerSummary>(module, "OptimizerSummary")
+        .def_ro("termination", &ba::OptimizerSummary::termination)
+        .def_ro("initial_cost", &ba::OptimizerSummary::initial_cost)
+        .def_ro("final_cost", &ba::OptimizerSummary::final_cost)
+        .def_ro("total_time_ms", &ba::OptimizerSummary::total_time_ms)
+        .def_ro("linearization_time_ms", &ba::OptimizerSummary::linearization_time_ms)
+        .def_ro("assembly_time_ms", &ba::OptimizerSummary::assembly_time_ms)
+        .def_ro("solve_time_ms", &ba::OptimizerSummary::solve_time_ms)
+        .def_ro("update_and_cost_time_ms", &ba::OptimizerSummary::update_and_cost_time_ms)
+        .def_ro("successful_steps", &ba::OptimizerSummary::successful_steps)
+        .def_ro("unsuccessful_steps", &ba::OptimizerSummary::unsuccessful_steps)
+        .def_ro("iterations", &ba::OptimizerSummary::iterations)
+        .def("brief_report", &ba::OptimizerSummary::brief_report);
+
+    auto bundle_options =
+        nb::class_<sfm::BundleOptions>(module, "BundleOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, optimizer);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, optimize_points);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, write_intrinsics);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, free_image_ids);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, fixed_image_ids);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, optimize_all_registered);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, gate_intrinsics_by_observability);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, min_views_for_intrinsics);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, min_median_parallax_deg);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, prefer_cuda);
+    PHOTARA_BIND_RW(bundle_options, sfm::BundleOptions, cuda_min_observations);
+
+    nb::class_<sfm::BundleSummary>(module, "BundleSummary")
+        .def_ro("success", &sfm::BundleSummary::success)
+        .def_ro("optimizer", &sfm::BundleSummary::optimizer)
+        .def_ro("num_cameras", &sfm::BundleSummary::num_cameras)
+        .def_ro("num_points", &sfm::BundleSummary::num_points)
+        .def_ro("num_observations", &sfm::BundleSummary::num_observations)
+        .def_ro("backend", &sfm::BundleSummary::backend);
+
+    auto relative_pose =
+        nb::class_<sfm::RelativePoseOptions>(module, "RelativePoseOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, max_epipolar_error_px);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, max_reproj_error_px);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, min_ray_angle_deg);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, epipole_filter_px);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, confidence);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, max_iterations);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, min_iterations);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, min_inliers);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, force_fundamental);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, force_shared_focal);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, decompose_fundamental);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, estimate_homography);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, homography_degeneracy_ratio);
+    PHOTARA_BIND_RW(relative_pose, sfm::RelativePoseOptions, degenerate_weight_scale);
+
+    auto absolute_pose =
+        nb::class_<sfm::AbsolutePoseOptions>(module, "AbsolutePoseOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(absolute_pose, sfm::AbsolutePoseOptions, max_reproj_error_px);
+    PHOTARA_BIND_RW(absolute_pose, sfm::AbsolutePoseOptions, confidence);
+    PHOTARA_BIND_RW(absolute_pose, sfm::AbsolutePoseOptions, max_iterations);
+    PHOTARA_BIND_RW(absolute_pose, sfm::AbsolutePoseOptions, min_iterations);
+    PHOTARA_BIND_RW(absolute_pose, sfm::AbsolutePoseOptions, min_inliers);
+
+    auto pair_weighting =
+        nb::class_<sfm::PairWeightingOptions>(module, "PairWeightingOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(pair_weighting, sfm::PairWeightingOptions, min_inliers);
+    PHOTARA_BIND_RW(pair_weighting, sfm::PairWeightingOptions, max_triplet_rotation_error_deg);
+    PHOTARA_BIND_RW(pair_weighting, sfm::PairWeightingOptions, triplet_saturation);
+    PHOTARA_BIND_RW(pair_weighting, sfm::PairWeightingOptions, min_triplets_for_penalty);
+    PHOTARA_BIND_RW(pair_weighting, sfm::PairWeightingOptions, max_inconsistent_triplet_ratio);
+    PHOTARA_BIND_RW(pair_weighting, sfm::PairWeightingOptions, inconsistent_triplet_scale);
+
+    auto vocabulary =
+        nb::class_<sfm::VocabularyConfig>(module, "VocabularyOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(vocabulary, sfm::VocabularyConfig, branching);
+    PHOTARA_BIND_RW(vocabulary, sfm::VocabularyConfig, depth);
+    PHOTARA_BIND_RW(vocabulary, sfm::VocabularyConfig, max_iterations);
+    PHOTARA_BIND_RW(vocabulary, sfm::VocabularyConfig, seed);
+    PHOTARA_BIND_RW(vocabulary, sfm::VocabularyConfig, max_descriptors_per_image);
+    PHOTARA_BIND_RW(vocabulary, sfm::VocabularyConfig, max_training_descriptors);
+    PHOTARA_BIND_RW(vocabulary, sfm::VocabularyConfig, sample_grid);
+
+    auto retrieval =
+        nb::class_<sfm::RetrievalOptions>(module, "RetrievalOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(retrieval, sfm::RetrievalOptions, top_k);
+    PHOTARA_BIND_RW(retrieval, sfm::RetrievalOptions, max_descriptors_per_image);
+    PHOTARA_BIND_RW(retrieval, sfm::RetrievalOptions, sample_grid);
+    PHOTARA_BIND_RW(retrieval, sfm::RetrievalOptions, stop_word_ratio);
+    PHOTARA_BIND_RW(retrieval, sfm::RetrievalOptions, max_posting_images);
+    PHOTARA_BIND_RW(retrieval, sfm::RetrievalOptions, vocabulary);
+    PHOTARA_BIND_RW(retrieval, sfm::RetrievalOptions, vocabulary_path);
+
+    auto checkpoint =
+        nb::class_<sfm::CheckpointOptions>(module, "CheckpointOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(checkpoint, sfm::CheckpointOptions, directory);
+    PHOTARA_BIND_RW(checkpoint, sfm::CheckpointOptions, read);
+    PHOTARA_BIND_RW(checkpoint, sfm::CheckpointOptions, write);
+    PHOTARA_BIND_RW(checkpoint, sfm::CheckpointOptions, reconstruction_interval);
+    PHOTARA_BIND_RW(checkpoint, sfm::CheckpointOptions, max_variants_per_stage);
+
+    auto star = nb::class_<sfm::StarInitConfig>(module, "StarInitOptions")
+                    .def(nb::init<>());
+    PHOTARA_BIND_RW(star, sfm::StarInitConfig, min_views);
+    PHOTARA_BIND_RW(star, sfm::StarInitConfig, max_views);
+    PHOTARA_BIND_RW(star, sfm::StarInitConfig, min_tracks_per_view);
+    PHOTARA_BIND_RW(star, sfm::StarInitConfig, max_reproj_error);
+    PHOTARA_BIND_RW(star, sfm::StarInitConfig, min_angle_deg);
+    PHOTARA_BIND_RW(star, sfm::StarInitConfig, min_initial_tracks);
+
+    auto resection =
+        nb::class_<sfm::ResectionConfig>(module, "ResectionOptions")
+            .def(nb::init<>());
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_correspondences);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_inliers);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, max_local_window);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, local_ba_every);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, max_pose_wave);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, full_ba_every);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, periodic_full_ba_probe_iterations);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, periodic_full_ba_tail_window);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, periodic_full_ba_tail_relative_improvement);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, final_ba_additional_iterations);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, final_ba_tail_window);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, final_ba_tail_relative_improvement);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_force_full_ba_samples);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_force_full_ba_interval);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, ratio_correspondences);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, avg_inliers_ratio_force_ba);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_inlier_ratio);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, inlier_grid_size);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_inlier_grid_cells);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, coverage_bypass_min_inliers);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, coverage_bypass_inlier_ratio);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, consistency_bypass_inlier_ratio);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_consistency_pair_weight);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_rotation_consistency_neighbors);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, max_median_rotation_error_deg);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_translation_consistency_neighbors);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, max_median_translation_error_deg);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, max_reproj_error);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, min_angle_deg);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, mult_depth_near);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, mult_depth_far);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, use_pair_match_correspondences);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, ransac);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, local_ba);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, full_ba);
+    PHOTARA_BIND_RW(resection, sfm::ResectionConfig, checkpoint_interval);
+
+    auto cluster = nb::class_<sfm::ClusterConfig>(module, "ClusterOptions")
+                       .def(nb::init<>());
+    PHOTARA_BIND_RW(cluster, sfm::ClusterConfig, max_views_per_cluster);
+    PHOTARA_BIND_RW(cluster, sfm::ClusterConfig, min_views_per_cluster);
+    PHOTARA_BIND_RW(cluster, sfm::ClusterConfig, max_over_capacity);
+    PHOTARA_BIND_RW(cluster, sfm::ClusterConfig, min_common_tracks);
+    PHOTARA_BIND_RW(cluster, sfm::ClusterConfig, min_pair_weight);
+    PHOTARA_BIND_RW(cluster, sfm::ClusterConfig, refine_weak_edges);
+    PHOTARA_BIND_RW(cluster, sfm::ClusterConfig, edge_weight_percentile);
+
+    auto alignment = nb::class_<sfm::GlobalAlignmentConfig>(
+                         module, "GlobalAlignmentOptions")
+                         .def(nb::init<>());
+    PHOTARA_BIND_RW(alignment, sfm::GlobalAlignmentConfig, min_pair_weight);
+    PHOTARA_BIND_RW(alignment, sfm::GlobalAlignmentConfig, min_common_tracks);
+    PHOTARA_BIND_RW(alignment, sfm::GlobalAlignmentConfig, merge_track_inliers_only);
+    PHOTARA_BIND_RW(alignment, sfm::GlobalAlignmentConfig, ransac_relative_threshold);
+    PHOTARA_BIND_RW(alignment, sfm::GlobalAlignmentConfig, minimum_inlier_ratio);
+    PHOTARA_BIND_RW(alignment, sfm::GlobalAlignmentConfig, merge_proximity_relative_threshold);
+    PHOTARA_BIND_RW(alignment, sfm::GlobalAlignmentConfig, ransac_iterations);
+    PHOTARA_BIND_RW(alignment, sfm::GlobalAlignmentConfig, random_seed);
+
+    auto hierarchical = nb::class_<sfm::HierarchicalConfig>(
+                            module, "HierarchicalOptions")
+                            .def(nb::init<>());
+    PHOTARA_BIND_RW(hierarchical, sfm::HierarchicalConfig, cluster);
+    PHOTARA_BIND_RW(hierarchical, sfm::HierarchicalConfig, alignment);
+    PHOTARA_BIND_RW(hierarchical, sfm::HierarchicalConfig, star);
+    PHOTARA_BIND_RW(hierarchical, sfm::HierarchicalConfig, resection);
+    PHOTARA_BIND_RW(hierarchical, sfm::HierarchicalConfig, final_bundle_adjustment);
+
+    auto global_rotation = nb::class_<sfm::GlobalRotationOptions>(
+                               module, "GlobalRotationOptions")
+                               .def(nb::init<>());
+    PHOTARA_BIND_RW(global_rotation, sfm::GlobalRotationOptions, max_l1_iterations);
+    PHOTARA_BIND_RW(global_rotation, sfm::GlobalRotationOptions, max_irls_iterations);
+    PHOTARA_BIND_RW(global_rotation, sfm::GlobalRotationOptions, step_convergence_threshold);
+    PHOTARA_BIND_RW(global_rotation, sfm::GlobalRotationOptions, irls_sigma_deg);
+    PHOTARA_BIND_RW(global_rotation, sfm::GlobalRotationOptions, max_relative_rotation_error_deg);
+    PHOTARA_BIND_RW(global_rotation, sfm::GlobalRotationOptions, use_pair_weights);
+    PHOTARA_BIND_RW(global_rotation, sfm::GlobalRotationOptions, reject_planar_pairs);
+    PHOTARA_BIND_RW(global_rotation, sfm::GlobalRotationOptions, weight_type);
+
+    auto global_positioning = nb::class_<sfm::GlobalPositioningOptions>(
+                                  module, "GlobalPositioningOptions")
+                                  .def(nb::init<>());
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, prefer_cuda);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, backend);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, min_views_per_track);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, min_tracks_for_positioning);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, tracks_per_registered_image);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, max_tracks_for_positioning);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, coverage_grid_size);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, max_irls_iterations);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, irls_inner_iterations);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, irls_tuning_constant);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, irls_min_weight);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, irls_quarantine_after);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, irls_weight_convergence);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, max_num_iterations);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, max_solver_time_sec);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, function_tolerance);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, huber_threshold);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, random_seed);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, generate_random_positions);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, generate_random_points);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, generate_scales);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, optimize_positions);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, optimize_points);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, optimize_scales);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, ray_initialize_points);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, camera_warm_start_first);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, camera_warm_start_min_images);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, constraint);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, constraint_reweight_scale);
+    PHOTARA_BIND_RW(global_positioning, sfm::GlobalPositioningOptions, regularize_complete_orbits);
+
+    auto asfm_options = nb::class_<sfm::AsfmOptions>(module, "AsfmOptions")
+                            .def(nb::init<>());
+    PHOTARA_BIND_RW(asfm_options, sfm::AsfmOptions, path_base);
 
     nb::class_<sfm::FrontEndOptions>(module, "FrontEndOptions")
         .def(nb::init<>())
+        .def_rw("camera_model", &sfm::FrontEndOptions::camera_model)
         .def_rw("focal_pixels", &sfm::FrontEndOptions::focal_pixels)
         .def_rw(
             "trust_focal_pixels",
@@ -284,11 +646,26 @@ NB_MODULE(photara_native, module) {
             "lightglue_min_score",
             &sfm::FrontEndOptions::lightglue_min_score)
         .def_rw(
+            "hybrid_lightglue_max_features",
+            &sfm::FrontEndOptions::hybrid_lightglue_max_features)
+        .def_rw(
             "lightglue_use_cuda",
             &sfm::FrontEndOptions::lightglue_use_cuda)
+        .def_rw("relative", &sfm::FrontEndOptions::relative)
+        .def_rw("min_pair_weight", &sfm::FrontEndOptions::min_pair_weight)
+        .def_rw("pair_weighting", &sfm::FrontEndOptions::pair_weighting)
+        .def_rw(
+            "retrieval_min_images",
+            &sfm::FrontEndOptions::retrieval_min_images)
+        .def_rw(
+            "augment_sequential_with_retrieval",
+            &sfm::FrontEndOptions::augment_sequential_with_retrieval)
         .def_rw(
             "progressive_pair_expansion",
             &sfm::FrontEndOptions::progressive_pair_expansion)
+        .def_rw(
+            "structural_pair_expansion",
+            &sfm::FrontEndOptions::structural_pair_expansion)
         .def_rw(
             "progressive_min_verified_degree",
             &sfm::FrontEndOptions::progressive_min_verified_degree)
@@ -298,6 +675,9 @@ NB_MODULE(photara_native, module) {
         .def_rw(
             "progressive_rescue_min_inliers",
             &sfm::FrontEndOptions::progressive_rescue_min_inliers)
+        .def_rw(
+            "progressive_max_images",
+            &sfm::FrontEndOptions::progressive_max_images)
         .def_rw(
             "progressive_rescue_neighbor_window",
             &sfm::FrontEndOptions::progressive_rescue_neighbor_window)
@@ -309,12 +689,20 @@ NB_MODULE(photara_native, module) {
             &sfm::FrontEndOptions::progressive_rescue_max_pairs_per_image)
         .def_rw(
             "progressive_rescue_max_features",
-            &sfm::FrontEndOptions::progressive_rescue_max_features);
+            &sfm::FrontEndOptions::progressive_rescue_max_features)
+        .def_rw(
+            "compress_descriptors_u8",
+            &sfm::FrontEndOptions::compress_descriptors_u8)
+        .def_rw("retrieval", &sfm::FrontEndOptions::retrieval)
+        .def_rw("checkpoint", &sfm::FrontEndOptions::checkpoint);
 
     nb::class_<sfm::ReconstructionConfig>(module, "SfmOptions")
         .def(nb::init<>())
         .def_rw("mode", &sfm::ReconstructionConfig::mode)
         .def_rw("frontend", &sfm::ReconstructionConfig::frontend)
+        .def_rw("star", &sfm::ReconstructionConfig::star)
+        .def_rw("resection", &sfm::ReconstructionConfig::resection)
+        .def_rw("hierarchical", &sfm::ReconstructionConfig::hierarchical)
         .def_rw(
             "incremental_hierarchical_rescue",
             &sfm::ReconstructionConfig::incremental_hierarchical_rescue)
@@ -325,7 +713,18 @@ NB_MODULE(photara_native, module) {
         .def_rw(
             "incremental_hierarchical_rescue_min_missing_ratio",
             &sfm::ReconstructionConfig::
-                incremental_hierarchical_rescue_min_missing_ratio);
+                incremental_hierarchical_rescue_min_missing_ratio)
+        .def_rw(
+            "minimum_final_observations_per_image",
+            &sfm::ReconstructionConfig::minimum_final_observations_per_image)
+        .def_rw(
+            "maximum_final_reprojection_error_pixels",
+            &sfm::ReconstructionConfig::maximum_final_reprojection_error_pixels)
+        .def_rw(
+            "global_rotation", &sfm::ReconstructionConfig::global_rotation)
+        .def_rw(
+            "global_positioning",
+            &sfm::ReconstructionConfig::global_positioning);
 
     nb::class_<sfm::ReconstructionSummary>(module, "SfmSummary")
         .def_ro("valid", &sfm::ReconstructionSummary::valid)
@@ -350,6 +749,36 @@ NB_MODULE(photara_native, module) {
         .def_ro(
             "rms_reprojection_error_pixels",
             &sfm::ReconstructionSummary::rms_reprojection_error_pixels);
+
+    nb::class_<sfm::FrontEndTiming>(module, "FrontEndTiming")
+        .def_ro("threads_used", &sfm::FrontEndTiming::threads_used)
+        .def_ro("extract_seconds", &sfm::FrontEndTiming::extract_seconds)
+        .def_ro(
+            "match_verify_seconds",
+            &sfm::FrontEndTiming::match_verify_seconds)
+        .def_ro("tracks_seconds", &sfm::FrontEndTiming::tracks_seconds);
+
+    nb::class_<sfm::GlobalRotationSummary>(module, "GlobalRotationSummary")
+        .def_ro("success", &sfm::GlobalRotationSummary::success)
+        .def_ro("estimated_images", &sfm::GlobalRotationSummary::estimated_images)
+        .def_ro("used_pairs", &sfm::GlobalRotationSummary::used_pairs)
+        .def_ro("filtered_pairs", &sfm::GlobalRotationSummary::filtered_pairs)
+        .def_ro("iterations", &sfm::GlobalRotationSummary::iterations)
+        .def_ro("fixed_image", &sfm::GlobalRotationSummary::fixed_image);
+
+    nb::class_<sfm::GlobalPositioningSummary>(
+        module, "GlobalPositioningSummary")
+        .def_ro("success", &sfm::GlobalPositioningSummary::success)
+        .def_ro("positioned_images", &sfm::GlobalPositioningSummary::positioned_images)
+        .def_ro("positioned_tracks", &sfm::GlobalPositioningSummary::positioned_tracks)
+        .def_ro("observations", &sfm::GlobalPositioningSummary::observations)
+        .def_ro("iterations", &sfm::GlobalPositioningSummary::iterations)
+        .def_ro("irls_iterations", &sfm::GlobalPositioningSummary::irls_iterations)
+        .def_ro("downweighted_constraints", &sfm::GlobalPositioningSummary::downweighted_constraints)
+        .def_ro("quarantined_constraints", &sfm::GlobalPositioningSummary::quarantined_constraints)
+        .def_ro("final_residual", &sfm::GlobalPositioningSummary::final_residual)
+        .def_ro("median_residual", &sfm::GlobalPositioningSummary::median_residual)
+        .def_ro("p90_residual", &sfm::GlobalPositioningSummary::p90_residual);
 
     nb::class_<mvs::DensifyOptions>(module, "MvsOptions")
         .def(nb::init<>())
@@ -448,10 +877,75 @@ NB_MODULE(photara_native, module) {
         .def_rw(
             "mesh_tsdf_smooth_mu",
             &mvs::DensifyOptions::mesh_tsdf_smooth_mu)
+        .def_rw(
+            "grazing_weight_floor",
+            &mvs::DensifyOptions::grazing_weight_floor)
+        .def_rw(
+            "mesh_smooth_iters",
+            &mvs::DensifyOptions::mesh_smooth_iters)
+        .def_rw(
+            "mesh_smooth_lambda",
+            &mvs::DensifyOptions::mesh_smooth_lambda)
+        .def_rw(
+            "mesh_dist_insert_px",
+            &mvs::DensifyOptions::mesh_dist_insert_px)
+        .def_rw("mesh_k_sigma", &mvs::DensifyOptions::mesh_k_sigma)
+        .def_rw(
+            "mesh_adaptive_sigma",
+            &mvs::DensifyOptions::mesh_adaptive_sigma)
+        .def_rw("mesh_k_qual", &mvs::DensifyOptions::mesh_k_qual)
+        .def_rw("mesh_k_behind", &mvs::DensifyOptions::mesh_k_behind)
+        .def_rw(
+            "mesh_use_free_space_support",
+            &mvs::DensifyOptions::mesh_use_free_space_support)
+        .def_rw(
+            "mesh_k_free_space_front",
+            &mvs::DensifyOptions::mesh_k_free_space_front)
+        .def_rw(
+            "mesh_k_free_space_back",
+            &mvs::DensifyOptions::mesh_k_free_space_back)
+        .def_rw(
+            "mesh_k_free_space_rel",
+            &mvs::DensifyOptions::mesh_k_free_space_rel)
+        .def_rw(
+            "mesh_k_free_space_abs",
+            &mvs::DensifyOptions::mesh_k_free_space_abs)
+        .def_rw(
+            "mesh_k_free_space_outlier",
+            &mvs::DensifyOptions::mesh_k_free_space_outlier)
+        .def_rw(
+            "mesh_k_free_space_calibration_quantile",
+            &mvs::DensifyOptions::mesh_k_free_space_calibration_quantile)
+        .def_rw("mesh_k_inf", &mvs::DensifyOptions::mesh_k_inf)
+        .def_rw(
+            "mesh_weld_pixel_fraction",
+            &mvs::DensifyOptions::mesh_weld_pixel_fraction)
+        .def_rw(
+            "mesh_max_edge_scale",
+            &mvs::DensifyOptions::mesh_max_edge_scale)
+        .def_rw(
+            "mesh_depth_diff_threshold",
+            &mvs::DensifyOptions::mesh_depth_diff_threshold)
+        .def_rw(
+            "mesh_min_component_faces",
+            &mvs::DensifyOptions::mesh_min_component_faces)
+        .def_rw(
+            "mesh_spurious_factor",
+            &mvs::DensifyOptions::mesh_spurious_factor)
+        .def_rw(
+            "mesh_remove_spikes",
+            &mvs::DensifyOptions::mesh_remove_spikes)
+        .def_rw(
+            "patchmatch_tile_rows",
+            &mvs::DensifyOptions::patchmatch_tile_rows)
+        .def_rw(
+            "patchmatch_concurrent_views",
+            &mvs::DensifyOptions::patchmatch_concurrent_views)
         .def_rw("thread_count", &mvs::DensifyOptions::thread_count);
 
     nb::class_<splat::TrainingOptions>(module, "TrainingOptions")
         .def(nb::init<>())
+        .def_rw("backend", &splat::TrainingOptions::backend)
         .def_rw("iterations", &splat::TrainingOptions::iterations)
         .def_rw("sh_degree", &splat::TrainingOptions::sh_degree)
         .def_rw(
@@ -661,7 +1155,84 @@ NB_MODULE(photara_native, module) {
             &splat::TrainingOptions::normal_field_from_iter)
         .def_rw(
             "normal_features_lr",
-            &splat::TrainingOptions::normal_features_lr);
+            &splat::TrainingOptions::normal_features_lr)
+        .def_rw("initial_point_budget", &splat::TrainingOptions::initial_point_budget)
+        .def_rw("refine_stop_num_iter", &splat::TrainingOptions::refine_stop_num_iter)
+        .def_rw("densify_score_power", &splat::TrainingOptions::densify_score_power)
+        .def_rw("densify_loss_map_power", &splat::TrainingOptions::densify_loss_map_power)
+        .def_rw("densify_growth_factor", &splat::TrainingOptions::densify_growth_factor)
+        .def_rw("shape_scale_reg", &splat::TrainingOptions::shape_scale_reg)
+        .def_rw("shape_scale_reg_decay_power", &splat::TrainingOptions::shape_scale_reg_decay_power)
+        .def_rw("shape_erank_reg", &splat::TrainingOptions::shape_erank_reg)
+        .def_rw("shape_erank_s3_reg", &splat::TrainingOptions::shape_erank_s3_reg)
+        .def_rw("shape_quat_norm_reg", &splat::TrainingOptions::shape_quat_norm_reg)
+        .def_rw("oversize_screen_limit", &splat::TrainingOptions::oversize_screen_limit)
+        .def_rw("oversize_penalty", &splat::TrainingOptions::oversize_penalty)
+        .def_rw("oversize_clip_hardness", &splat::TrainingOptions::oversize_clip_hardness)
+        .def_rw("densify_oversize_split_fraction", &splat::TrainingOptions::densify_oversize_split_fraction)
+        .def_rw("densify_oversize_score_blend", &splat::TrainingOptions::densify_oversize_score_blend)
+        .def_rw("densify_clip_screen_size", &splat::TrainingOptions::densify_clip_screen_size)
+        .def_rw("densify_screen_clip_hardness", &splat::TrainingOptions::densify_screen_clip_hardness)
+        .def_rw("densify_revised_noise", &splat::TrainingOptions::densify_revised_noise)
+        .def_rw("densify_relocate", &splat::TrainingOptions::densify_relocate)
+        .def_rw("densify_keep_parent_adam", &splat::TrainingOptions::densify_keep_parent_adam)
+        .def_rw("dense_recycle_fraction", &splat::TrainingOptions::dense_recycle_fraction)
+        .def_rw("dense_growth_fraction", &splat::TrainingOptions::dense_growth_fraction)
+        .def_rw("mean_noise_weight", &splat::TrainingOptions::mean_noise_weight)
+        .def_rw("initial_opacity", &splat::TrainingOptions::initial_opacity)
+        .def_rw("initial_scale", &splat::TrainingOptions::initial_scale)
+        .def_rw("dense_structure_freeze_iter", &splat::TrainingOptions::dense_structure_freeze_iter)
+        .def_rw("structure_freeze_iter", &splat::TrainingOptions::structure_freeze_iter)
+        .def_rw("sh_regularization_weight", &splat::TrainingOptions::sh_regularization_weight)
+        .def_rw("opacity_regularization_weight", &splat::TrainingOptions::opacity_regularization_weight)
+        .def_rw("log_scale_regularization_weight", &splat::TrainingOptions::log_scale_regularization_weight)
+        .def_rw("beta1", &splat::TrainingOptions::beta1)
+        .def_rw("beta2", &splat::TrainingOptions::beta2)
+        .def_rw("adam_epsilon", &splat::TrainingOptions::adam_epsilon)
+        .def_rw("bilateral_grid_shared", &splat::TrainingOptions::bilateral_grid_shared)
+        .def_rw("bilateral_grid_deviation_limit", &splat::TrainingOptions::bilateral_grid_deviation_limit)
+        .def_rw("bilateral_grid_identity_projection", &splat::TrainingOptions::bilateral_grid_identity_projection)
+        .def_rw("ppisp_identity_projection", &splat::TrainingOptions::ppisp_identity_projection)
+        .def_rw("ppisp_exposure_limit", &splat::TrainingOptions::ppisp_exposure_limit)
+        .def_rw("ppisp_color_limit", &splat::TrainingOptions::ppisp_color_limit)
+        .def_rw("ppisp_reg_vig_center", &splat::TrainingOptions::ppisp_reg_vig_center)
+        .def_rw("ppisp_reg_vig_non_pos", &splat::TrainingOptions::ppisp_reg_vig_non_pos)
+        .def_rw("ppisp_reg_vig_channel_var", &splat::TrainingOptions::ppisp_reg_vig_channel_var)
+        .def_rw("ppisp_reg_crf_channel_var", &splat::TrainingOptions::ppisp_reg_crf_channel_var)
+        .def_rw("depth_weight", &splat::TrainingOptions::depth_weight)
+        .def_rw("normal_weight", &splat::TrainingOptions::normal_weight)
+        .def_rw("filter_3d_update_interval", &splat::TrainingOptions::filter_3d_update_interval)
+        .def_rw("multi_view_depth_bracket", &splat::TrainingOptions::multi_view_depth_bracket)
+        .def_rw("multi_view_depth_tolerance", &splat::TrainingOptions::multi_view_depth_tolerance)
+        .def_rw("multi_view_max_angle", &splat::TrainingOptions::multi_view_max_angle)
+        .def_rw("multi_view_min_distance", &splat::TrainingOptions::multi_view_min_distance)
+        .def_rw("multi_view_max_distance", &splat::TrainingOptions::multi_view_max_distance)
+        .def_rw("multi_view_robust_ncc", &splat::TrainingOptions::multi_view_robust_ncc)
+        .def_rw("multi_view_ncc_lambda_reference", &splat::TrainingOptions::multi_view_ncc_lambda_reference)
+        .def_rw("multi_view_ncc_sharpness", &splat::TrainingOptions::multi_view_ncc_sharpness)
+        .def_rw("multi_view_ncc_min_weight", &splat::TrainingOptions::multi_view_ncc_min_weight)
+        .def_rw("geometry_epsilon", &splat::TrainingOptions::geometry_epsilon)
+        .def_rw("kernel_size", &splat::TrainingOptions::kernel_size)
+        .def_rw("scale_modifier", &splat::TrainingOptions::scale_modifier)
+        .def_rw("use_mvs_depth", &splat::TrainingOptions::use_mvs_depth)
+        .def_rw("use_mvs_normals", &splat::TrainingOptions::use_mvs_normals)
+        .def_rw("ignore_undistortion_border", &splat::TrainingOptions::ignore_undistortion_border)
+        .def_rw("adaptive_training_cache", &splat::TrainingOptions::adaptive_training_cache)
+        .def_rw("training_device_cache_bytes", &splat::TrainingOptions::training_device_cache_bytes)
+        .def_rw("evaluation_iterations", &splat::TrainingOptions::evaluation_iterations)
+        .def_rw("preview_interval", &splat::TrainingOptions::preview_interval)
+        .def_rw("preview_view_index", &splat::TrainingOptions::preview_view_index)
+        .def_rw("preview_view_file", &splat::TrainingOptions::preview_view_file)
+        .def_rw("preview_camera_file", &splat::TrainingOptions::preview_camera_file)
+        .def_rw("preview_vis_file", &splat::TrainingOptions::preview_vis_file)
+        .def_rw("preview_ack_file", &splat::TrainingOptions::preview_ack_file)
+        .def(
+            "apply_strategy_defaults",
+            [](splat::TrainingOptions& self) {
+                splat::apply_strategy_defaults(self);
+                return self;
+            },
+            nb::rv_policy::reference_internal);
 
     nb::class_<splat::DatasetLoadRequest>(module, "DatasetRequest")
         .def(nb::init<>())
@@ -744,6 +1315,9 @@ NB_MODULE(photara_native, module) {
             "summary",
             [](const SfmSceneHandle& self) { return self.summary; })
         .def_prop_ro(
+            "frontend_timing",
+            [](const SfmSceneHandle& self) { return self.frontend_timing; })
+        .def_prop_ro(
             "camera_count",
             [](const SfmSceneHandle& self) {
                 return self.scene.cameras.size();
@@ -768,6 +1342,35 @@ NB_MODULE(photara_native, module) {
             [](const SfmSceneHandle& self,
                const std::filesystem::path& path) {
                 sfm::export_openmvs_interface(self.scene, path);
+            },
+            nb::arg("path"),
+            nb::call_guard<nb::gil_scoped_release>())
+        .def(
+            "save_asfm",
+            [](const SfmSceneHandle& self,
+               const std::filesystem::path& path,
+               const sfm::AsfmOptions& options) {
+                sfm::save_asfm(self.scene, path, options);
+            },
+            nb::arg("path"), nb::arg("options") = sfm::AsfmOptions{},
+            nb::call_guard<nb::gil_scoped_release>())
+        .def(
+            "save_colmap",
+            [](const SfmSceneHandle& self,
+               const std::filesystem::path& directory,
+               const std::filesystem::path& image_path_base,
+               const bool write_points) {
+                sfm::save_colmap_text(
+                    self.scene, directory, image_path_base, write_points);
+            },
+            nb::arg("directory"), nb::arg("image_path_base") = "",
+            nb::arg("write_points") = true,
+            nb::call_guard<nb::gil_scoped_release>())
+        .def(
+            "save_sparse_ply",
+            [](const SfmSceneHandle& self,
+               const std::filesystem::path& path) {
+                sfm::save_sparse_ply(self.scene, path);
             },
             nb::arg("path"),
             nb::call_guard<nb::gil_scoped_release>());
@@ -832,10 +1435,12 @@ NB_MODULE(photara_native, module) {
         .def(
             "save",
             [](const GaussianModelHandle& self,
-               const std::filesystem::path& path) {
-                splat::save_gaussians(self.model, path);
+               const std::filesystem::path& path,
+               const splat::GaussianFormat format) {
+                splat::save_gaussians(self.model, path, format);
             },
             nb::arg("path"),
+            nb::arg("format") = splat::GaussianFormat::auto_detect,
             nb::call_guard<nb::gil_scoped_release>());
 
     nb::class_<MeshResultHandle>(module, "MeshResult")
@@ -880,6 +1485,43 @@ NB_MODULE(photara_native, module) {
             nb::arg("path"),
             nb::call_guard<nb::gil_scoped_release>());
 
+    module.def("available_extractors", [] {
+        features::ensure_builtin_feature_backends();
+        return features::list_extractors();
+    });
+    module.def("available_matchers", [] {
+        features::ensure_builtin_feature_backends();
+        return features::list_matchers();
+    });
+    module.def("available_pair_pipelines", [] {
+        features::ensure_builtin_feature_backends();
+        return features::list_pair_pipelines();
+    });
+    module.def("available_bundle_backends", [] {
+        std::vector<std::string> backends{"cpu"};
+#if defined(PHOTARA_HAS_CUDA)
+        if (ba::CudaOptimizer::is_available()) backends.emplace_back("cuda");
+#endif
+#if defined(PHOTARA_HAS_VULKAN_BA)
+        if (ba::VulkanOptimizer::is_available()) backends.emplace_back("vulkan");
+#endif
+        return backends;
+    });
+    module.def("compiled_training_backends", [] {
+        std::vector<std::string> backends{"cuda"};
+#if defined(TINYTENSOR_HAS_VULKAN)
+        backends.emplace_back("vulkan");
+#endif
+        return backends;
+    });
+    module.def(
+        "set_bundle_backend", &sfm::set_bundle_backend_preference,
+        nb::arg("backend"));
+    module.def("bundle_backend", &sfm::bundle_backend_preference);
+    module.def(
+        "load_sfm", &load_sfm_scene, nb::arg("path"),
+        nb::arg("options") = sfm::AsfmOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
     module.def(
         "discover_images", &discover_images, nb::arg("directory"),
         nb::call_guard<nb::gil_scoped_release>());
@@ -898,7 +1540,30 @@ NB_MODULE(photara_native, module) {
         nb::call_guard<nb::gil_scoped_release>());
     module.def(
         "run_sfm_mapping", &run_sfm_mapping, nb::arg("scene"),
-        nb::arg("mode") = sfm::ReconstructionMode::global,
+        nb::arg("options") = sfm::ReconstructionConfig{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "estimate_global_rotations",
+        [](SfmSceneHandle& scene, const sfm::GlobalRotationOptions& options) {
+            return sfm::estimate_global_rotations(scene.scene, options);
+        },
+        nb::arg("scene"), nb::arg("options") = sfm::GlobalRotationOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "solve_global_positions",
+        [](SfmSceneHandle& scene,
+           const sfm::GlobalPositioningOptions& options) {
+            return sfm::solve_global_positions(scene.scene, options);
+        },
+        nb::arg("scene"),
+        nb::arg("options") = sfm::GlobalPositioningOptions{},
+        nb::call_guard<nb::gil_scoped_release>());
+    module.def(
+        "bundle_adjust",
+        [](SfmSceneHandle& scene, const sfm::BundleOptions& options) {
+            return sfm::run_bundle_adjustment(scene.scene, options);
+        },
+        nb::arg("scene"), nb::arg("options") = sfm::BundleOptions{},
         nb::call_guard<nb::gil_scoped_release>());
     module.def(
         "build_mvs_scene", &build_mvs_scene, nb::arg("sfm_scene"),
@@ -936,13 +1601,87 @@ NB_MODULE(photara_native, module) {
         },
         nb::arg("scene"), nb::arg("options") = mvs::DensifyOptions{},
         nb::call_guard<nb::gil_scoped_release>());
+    nb::class_<splat::TrainingProgress>(module, "TrainingProgress")
+        .def_ro("iteration", &splat::TrainingProgress::iteration)
+        .def_ro(
+            "total_iterations",
+            &splat::TrainingProgress::total_iterations)
+        .def_ro("gaussian_count", &splat::TrainingProgress::gaussian_count)
+        .def_ro(
+            "rendered_instances",
+            &splat::TrainingProgress::rendered_instances)
+        .def_ro("view_index", &splat::TrainingProgress::view_index)
+        .def_ro("grown_count", &splat::TrainingProgress::grown_count)
+        .def_ro("pruned_count", &splat::TrainingProgress::pruned_count)
+        .def_ro("loss", &splat::TrainingProgress::loss)
+        .def_ro("rgb_loss", &splat::TrainingProgress::rgb_loss)
+        .def_ro("alpha_loss", &splat::TrainingProgress::alpha_loss)
+        .def_ro("depth_loss", &splat::TrainingProgress::depth_loss)
+        .def_ro("normal_loss", &splat::TrainingProgress::normal_loss)
+        .def_ro(
+            "opacity_gradient_mean",
+            &splat::TrainingProgress::opacity_gradient_mean)
+        .def_ro(
+            "opacity_gradient_positive_fraction",
+            &splat::TrainingProgress::opacity_gradient_positive_fraction)
+        .def_ro("opacity_mean", &splat::TrainingProgress::opacity_mean)
+        .def_ro("milliseconds", &splat::TrainingProgress::milliseconds)
+        .def_ro(
+            "multi_view_geometry_loss",
+            &splat::TrainingProgress::multi_view_geometry_loss)
+        .def_ro(
+            "multi_view_ncc_loss",
+            &splat::TrainingProgress::multi_view_ncc_loss)
+        .def_ro(
+            "multi_view_geometry_pixels",
+            &splat::TrainingProgress::multi_view_geometry_pixels)
+        .def_ro(
+            "multi_view_ncc_pixels",
+            &splat::TrainingProgress::multi_view_ncc_pixels)
+        .def_ro(
+            "resolution_scale",
+            &splat::TrainingProgress::resolution_scale)
+        .def_ro("image_width", &splat::TrainingProgress::image_width)
+        .def_ro("image_height", &splat::TrainingProgress::image_height)
+        .def_ro(
+            "active_sh_degree",
+            &splat::TrainingProgress::active_sh_degree)
+        .def_ro(
+            "multi_view_interval",
+            &splat::TrainingProgress::multi_view_interval)
+        .def_ro(
+            "multi_view_depth_consistency",
+            &splat::TrainingProgress::multi_view_depth_consistency);
+
     module.def(
         "load_dataset", &load_dataset, nb::arg("request"),
         nb::call_guard<nb::gil_scoped_release>());
     module.def(
-        "train_3dgs", &train_3dgs, nb::arg("scene"),
+        "apply_strategy_defaults",
+        [](splat::TrainingOptions& options) {
+            splat::apply_strategy_defaults(options);
+            return options;
+        },
+        nb::arg("options"),
+        nb::rv_policy::reference_internal);
+    module.def(
+        "train_3dgs",
+        [](const MvsSceneHandle& scene,
+           const splat::TrainingOptions& options,
+           nb::object progress) {
+            auto result = std::make_shared<GaussianModelHandle>();
+            if (progress.is_none()) {
+                nb::gil_scoped_release release;
+                result->model = splat::Trainer(options).train(scene.scene);
+            } else {
+                result->model = splat::Trainer(options).train(
+                    scene.scene, make_progress_callback(progress));
+            }
+            return result;
+        },
+        nb::arg("scene"),
         nb::arg("options") = splat::TrainingOptions{},
-        nb::call_guard<nb::gil_scoped_release>());
+        nb::arg("progress") = nb::none());
     module.def(
         "load_3dgs", &load_3dgs, nb::arg("path"),
         nb::call_guard<nb::gil_scoped_release>());
@@ -964,4 +1703,6 @@ NB_MODULE(photara_native, module) {
             mvs::apply_quality_preset(options, quality);
         },
         nb::arg("options"), nb::arg("quality"));
+
+#undef PHOTARA_BIND_RW
 }

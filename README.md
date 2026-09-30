@@ -193,7 +193,7 @@ ctest --test-dir build -C Release --output-on-failure
 | `PHOTARA_BUILD_STUDIO` | `ON` | Build the Vulkan/Dear ImGui desktop editor |
 | `PHOTARA_BUILD_TESTS` | `OFF` | Configure correctness and regression tests |
 | `PHOTARA_BUILD_BENCHMARKS` | `OFF` | Configure auxiliary tools and benchmarks |
-| `PHOTARA_BUILD_PYTHON` | `OFF` | Build the experimental nanobind module |
+| `PHOTARA_BUILD_PYTHON` | `OFF` | Build the nanobind Python module (`import photara`) |
 | `PHOTARA_ENABLE_CUDA` | `ON` | Enable CUDA BA and MVS acceleration |
 | `PHOTARA_CUDA_ARCHITECTURES` | auto | CUDA targets; auto builds RTX 20/30/40 cubins, RTX 50 with CUDA 12.8+, and PTX fallback |
 | `PHOTARA_ENABLE_SPLAT` | `ON` | Build CUDA Gaussian training and extraction |
@@ -387,10 +387,10 @@ output does **not** implicitly create an OpenMVS file; pass `--export-mvs`
 when both formats are required. `--export-colmap <directory>` writes a COLMAP
 text model.
 
-## Python experiments
+## Python API
 
-The optional nanobind module exposes SfM, MVS, splat training, and TSDF as
-separate calls:
+The optional nanobind module is imported as `photara`. It exposes SfM, MVS,
+splat training, and TSDF as separate calls:
 
 ```powershell
 python -m pip install nanobind
