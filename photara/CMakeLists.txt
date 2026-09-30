@@ -758,14 +758,28 @@ if(TARGET photara_features)
 
     if(PHOTARA_BUILD_STUDIO)
             find_package(Vulkan 1.2 REQUIRED)
-            find_package(glfw3 CONFIG REQUIRED)
+            find_package(glfw3 CONFIG QUIET)
+            if(NOT TARGET glfw)
+                find_package(PkgConfig REQUIRED)
+                pkg_check_modules(PHOTARA_GLFW IMPORTED_TARGET glfw3)
+                if(NOT TARGET PkgConfig::PHOTARA_GLFW)
+                    message(FATAL_ERROR
+                        "glfw3 was not found. Install the glfw3 development "
+                        "package (for example libglfw3-dev) or point CMake at "
+                        "a glfw3Config.cmake via CMAKE_PREFIX_PATH.")
+                endif()
+                add_library(glfw ALIAS PkgConfig::PHOTARA_GLFW)
+            endif()
             include(FetchContent)
-            get_filename_component(
-                _photara_vcpkg_root "${glfw3_DIR}/../../../.." ABSOLUTE)
-            # DockSpace / DockBuilder live on the docking branch. Prefer a local
-            # vcpkg docking tree when present so configure stays offline.
-            file(GLOB _photara_imgui_local
-                "${_photara_vcpkg_root}/buildtrees/imgui/src/*docking*.clean")
+            set(_photara_imgui_local)
+            if(glfw3_DIR)
+                get_filename_component(
+                    _photara_vcpkg_root "${glfw3_DIR}/../../../.." ABSOLUTE)
+                # DockSpace / DockBuilder live on the docking branch. Prefer a
+                # local vcpkg docking tree when present so configure stays offline.
+                file(GLOB _photara_imgui_local
+                    "${_photara_vcpkg_root}/buildtrees/imgui/src/*docking*.clean")
+            endif()
             if(_photara_imgui_local)
                 list(GET _photara_imgui_local 0 _photara_imgui_source)
                 FetchContent_Declare(photara_imgui

@@ -2,6 +2,7 @@
 
 #include "internal/tensor_impl.hpp"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 
@@ -15,6 +16,8 @@ struct CudaVulkanPreviewOptions {
     std::uint32_t height{};
     std::uint64_t device_luid{};
     std::uint32_t device_node_mask{};
+    std::array<std::uint8_t, 16> device_uuid{};
+    bool has_device_uuid{};
 };
 
 class CudaVulkanPreview {

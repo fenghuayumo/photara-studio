@@ -8,7 +8,7 @@ desktop editor.
 
 The project version has a single source of truth: [`VERSION`](VERSION). CMake,
 the command-line application, Photara Studio, and the Python module all read the
-same value. The current version is **0.3.0**.
+same value.
 
 ## What the code implements
 
@@ -130,6 +130,26 @@ The default build produces:
 build/photara/Release/photara.exe
 build/photara/Release/photara_studio.exe
 ```
+
+### Linux
+
+Studio uses GLFW, so the same target builds on Linux. Dependencies are a C++20
+compiler, CMake 3.28 or newer, the Vulkan SDK (`dxc` included), GLFW, and the
+same libraries the CLI already needs (Eigen, Ceres, FreeImage, and so on).
+GLFW may come from the system (`libglfw3-dev`) or from vcpkg. File dialogs use
+`zenity`, then `kdialog`. Live training preview needs a driver that can export
+Vulkan opaque file descriptors; CUDA training also needs CUDA external memory
+on that same GPU.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target photara_studio --parallel
+```
+
+Single-config generators write `build/photara/photara` and
+`build/photara/photara_studio`. Editor preferences, language, and the cache
+root are stored in `$XDG_CONFIG_HOME/Photara`, or `~/.config/Photara` when
+`XDG_CONFIG_HOME` is unset.
 
 ### Windows packaging
 

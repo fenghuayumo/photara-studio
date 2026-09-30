@@ -448,7 +448,8 @@ private:
 
 // Device the preview importer records on. It must be the same physical device
 // that exported the shared image, and it must have been created with the
-// Win32 external-memory and external-semaphore extensions enabled.
+// platform external-memory and external-semaphore extensions enabled
+// (Win32 handles, or opaque fds on Linux).
 struct PreviewDevice {
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device = VK_NULL_HANDLE;
@@ -457,9 +458,10 @@ struct PreviewDevice {
     std::uint32_t queue_family = VK_QUEUE_FAMILY_IGNORED;
 };
 
-// Editor-owned RGBA8 image and timeline semaphore, passed across the process
-// boundary as inheritable Win32 handles. Frame f is announced by signalling
-// 2f-1 and may be overwritten only after the editor answers with 2f.
+// Editor-owned RGBA8 image and timeline semaphore. Windows passes inheritable
+// Win32 handles; Linux passes opaque fds that the child inherited. Frame f is
+// announced by signalling 2f-1 and may be overwritten only after the editor
+// answers with 2f.
 struct ExternalPreviewOptions {
     std::uint64_t memory_handle = 0;
     std::uint64_t semaphore_handle = 0;
@@ -468,6 +470,8 @@ struct ExternalPreviewOptions {
     std::uint32_t height = 0;
     std::uint64_t device_luid = 0;
     std::uint32_t device_node_mask = 0;
+    std::array<std::uint8_t, 16> device_uuid{};
+    bool has_device_uuid = false;
 };
 
 // Copies a device-resident planar float RGB buffer into the editor's shared

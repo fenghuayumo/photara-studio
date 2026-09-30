@@ -12,6 +12,10 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace editor::gpu {
 namespace {
@@ -27,6 +31,8 @@ ImGui_ImplVulkanH_Window g_window{};
 bool g_rebuild_swapchain{};
 std::uint64_t g_device_luid{};
 std::uint32_t g_device_node_mask{};
+std::array<std::uint8_t, VK_UUID_SIZE> g_device_uuid{};
+bool g_device_uuid_valid{};
 
 // The active shared-image state consulted by present().
 VkImage g_external_image{};
@@ -195,6 +201,17 @@ VkDescriptorPool descriptor_pool() { return g_descriptor_pool; }
 ImGui_ImplVulkanH_Window& window() { return g_window; }
 std::uint64_t device_luid() { return g_device_luid; }
 std::uint32_t device_node_mask() { return g_device_node_mask; }
+
+std::string device_uuid_hex() {
+    if (!g_device_uuid_valid) return {};
+    static constexpr char k_hex[] = "0123456789abcdef";
+    std::string text(g_device_uuid.size() * 2, '0');
+    for (std::size_t i = 0; i < g_device_uuid.size(); ++i) {
+        text[i * 2] = k_hex[g_device_uuid[i] >> 4];
+        text[i * 2 + 1] = k_hex[g_device_uuid[i] & 0x0F];
+    }
+    return text;
+}
 bool swapchain_needs_rebuild() { return g_rebuild_swapchain; }
 void clear_swapchain_rebuild() { g_rebuild_swapchain = false; }
 std::uint64_t consumed_timeline_value() { return g_consumed_value; }
@@ -237,6 +254,9 @@ void create_context(ImVector<const char*> extensions) {
         std::memcpy(&g_device_luid, id.deviceLUID, sizeof(g_device_luid));
         g_device_node_mask = id.deviceNodeMask;
     }
+    static_assert(sizeof(id.deviceUUID) == g_device_uuid.size());
+    std::memcpy(g_device_uuid.data(), id.deviceUUID, g_device_uuid.size());
+    g_device_uuid_valid = true;
 
     const float priority = 1.F;
     VkDeviceQueueCreateInfo queue_info{
@@ -244,17 +264,53 @@ void create_context(ImVector<const char*> extensions) {
     queue_info.queueFamilyIndex = g_queue_family;
     queue_info.queueCount = 1;
     queue_info.pQueuePriorities = &priority;
+#if defined(_WIN32)
     const char* required_device_extensions[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-#if defined(_WIN32)
         VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
-#endif
         VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-#if defined(_WIN32)
         VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
-#endif
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME};
+    const std::uint32_t required_device_extension_count =
+        static_cast<std::uint32_t>(std::size(required_device_extensions));
+    const char* const* required_device_extension_names =
+        required_device_extensions;
+#else
+    std::uint32_t advertised_count = 0;
+    vkEnumerateDeviceExtensionProperties(
+        g_physical_device, nullptr, &advertised_count, nullptr);
+    std::vector<VkExtensionProperties> advertised(advertised_count);
+    if (advertised_count != 0) {
+        vkEnumerateDeviceExtensionProperties(
+            g_physical_device, nullptr, &advertised_count, advertised.data());
+    }
+    const auto advertised_has = [&](const char* name) {
+        for (const auto& property : advertised)
+            if (std::strcmp(property.extensionName, name) == 0) return true;
+        return false;
+    };
+    std::vector<const char*> required_device_extensions;
+    required_device_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    if (advertised_has(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME))
+        required_device_extensions.push_back(
+            VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+    if (advertised_has(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME))
+        required_device_extensions.push_back(
+            VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    if (advertised_has(VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME))
+        required_device_extensions.push_back(
+            VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
+    if (advertised_has(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
+        required_device_extensions.push_back(
+            VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    required_device_extensions.push_back(
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    const std::uint32_t required_device_extension_count =
+        static_cast<std::uint32_t>(required_device_extensions.size());
+    const char* const* required_device_extension_names =
+        required_device_extensions.data();
+#endif
     VkPhysicalDeviceTimelineSemaphoreFeatures timeline{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
     timeline.timelineSemaphore = VK_TRUE;
@@ -262,9 +318,8 @@ void create_context(ImVector<const char*> extensions) {
     device_info.pNext = &timeline;
     device_info.queueCreateInfoCount = 1;
     device_info.pQueueCreateInfos = &queue_info;
-    device_info.enabledExtensionCount =
-        static_cast<std::uint32_t>(std::size(required_device_extensions));
-    device_info.ppEnabledExtensionNames = required_device_extensions;
+    device_info.enabledExtensionCount = required_device_extension_count;
+    device_info.ppEnabledExtensionNames = required_device_extension_names;
     check(vkCreateDevice(
         g_physical_device, &device_info, nullptr, &g_device));
     vkGetDeviceQueue(g_device, g_queue_family, 0, &g_queue);
@@ -792,10 +847,17 @@ void ExternalPreview::create(
     g_display_image = display.image;
 
 #if defined(_WIN32)
+    constexpr auto k_memory_export = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    constexpr auto k_semaphore_export =
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#else
+    constexpr auto k_memory_export = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    constexpr auto k_semaphore_export =
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+#endif
     VkExternalMemoryImageCreateInfo external_image{
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
-    external_image.handleTypes =
-        VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    external_image.handleTypes = k_memory_export;
     VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     image_info.pNext = &external_image;
     image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -814,16 +876,19 @@ void ExternalPreview::create(
     vkGetImageMemoryRequirements(g_device, image, &requirements);
     allocation_size = requirements.size;
 
+#if defined(_WIN32)
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     VkExportMemoryWin32HandleInfoKHR win32_export{
         VK_STRUCTURE_TYPE_EXPORT_MEMORY_WIN32_HANDLE_INFO_KHR};
     win32_export.pAttributes = &security;
     win32_export.dwAccess = GENERIC_ALL;
+#endif
     VkExportMemoryAllocateInfo export_info{
         VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+#if defined(_WIN32)
     export_info.pNext = &win32_export;
-    export_info.handleTypes =
-        VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#endif
+    export_info.handleTypes = k_memory_export;
     VkMemoryDedicatedAllocateInfo dedicated{
         VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
     dedicated.pNext = &export_info;
@@ -836,15 +901,18 @@ void ExternalPreview::create(
     check(vkAllocateMemory(g_device, &allocation, nullptr, &memory));
     check(vkBindImageMemory(g_device, image, memory, 0));
 
+#if defined(_WIN32)
     VkExportSemaphoreWin32HandleInfoKHR semaphore_win32{
         VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR};
     semaphore_win32.pAttributes = &security;
     semaphore_win32.dwAccess = GENERIC_ALL;
+#endif
     VkExportSemaphoreCreateInfo semaphore_export{
         VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
+#if defined(_WIN32)
     semaphore_export.pNext = &semaphore_win32;
-    semaphore_export.handleTypes =
-        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#endif
+    semaphore_export.handleTypes = k_semaphore_export;
     VkSemaphoreTypeCreateInfo timeline_type{
         VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timeline_type.pNext = &semaphore_export;
@@ -879,12 +947,11 @@ void ExternalPreview::create(
     g_ready_value = 0;
     g_consumed_value = 0;
     g_copied_frames = 0;
-#endif
 }
 
 void ExternalPreview::renew_export_handles() {
-#if defined(_WIN32)
     close_export_handles();
+#if defined(_WIN32)
     const auto get_memory = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
         vkGetDeviceProcAddr(g_device, "vkGetMemoryWin32HandleKHR"));
     const auto get_semaphore =
@@ -904,6 +971,39 @@ void ExternalPreview::renew_export_handles() {
     timeline_info.handleType =
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
     check(get_semaphore(g_device, &timeline_info, &semaphore_handle));
+#else
+    const auto get_memory = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+        vkGetDeviceProcAddr(g_device, "vkGetMemoryFdKHR"));
+    const auto get_semaphore = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
+        vkGetDeviceProcAddr(g_device, "vkGetSemaphoreFdKHR"));
+    if (!get_memory || !get_semaphore)
+        throw std::runtime_error("Vulkan fd export functions missing");
+    VkMemoryGetFdInfoKHR memory_info{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
+    memory_info.memory = memory;
+    memory_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    int memory_fd = -1;
+    check(get_memory(g_device, &memory_info, &memory_fd));
+    VkSemaphoreGetFdInfoKHR timeline_info{
+        VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR};
+    timeline_info.semaphore = timeline;
+    timeline_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    int semaphore_fd = -1;
+    if (const VkResult semaphore_result =
+            get_semaphore(g_device, &timeline_info, &semaphore_fd);
+        semaphore_result != VK_SUCCESS) {
+        ::close(memory_fd);
+        check(semaphore_result);
+    }
+    // Vulkan exports these CLOEXEC. The trainer inherits the numbers, so the
+    // bit has to be clear before posix_spawn.
+    const auto inherit = [](const int fd) {
+        const int flags = ::fcntl(fd, F_GETFD);
+        if (flags >= 0) ::fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
+    };
+    inherit(memory_fd);
+    inherit(semaphore_fd);
+    memory_handle = memory_fd;
+    semaphore_handle = semaphore_fd;
 #endif
 }
 
@@ -912,6 +1012,9 @@ void ExternalPreview::close_export_handles() {
     if (memory_handle) CloseHandle(std::exchange(memory_handle, nullptr));
     if (semaphore_handle)
         CloseHandle(std::exchange(semaphore_handle, nullptr));
+#else
+    if (memory_handle >= 0) ::close(std::exchange(memory_handle, -1));
+    if (semaphore_handle >= 0) ::close(std::exchange(semaphore_handle, -1));
 #endif
 }
 

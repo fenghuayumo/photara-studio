@@ -46,7 +46,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#if defined(_WIN32)
 #include <crtdbg.h>
+#endif
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -153,6 +155,7 @@ struct ReconstructCli {
     unsigned splat_preview_vk_height{};
     std::uint64_t splat_preview_vk_device_luid{};
     unsigned splat_preview_vk_device_node_mask{};
+    std::string splat_preview_vk_device_uuid;
     bool splat_profile_cuda{false};
     bool splat_fuse_sh_adam{true};
     unsigned splat_profile_interval{100};
@@ -523,6 +526,24 @@ void print_help(const cxxopts::Options& options) {
               << "Log level: set PHOTARA_LOG_LEVEL=error|warning|info|debug|trace|off\n";
 }
 
+bool parse_device_uuid(
+    const std::string& text, std::array<std::uint8_t, 16>& out) {
+    if (text.size() != 32) return false;
+    const auto nibble = [](const char value) -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    for (std::size_t index = 0; index < out.size(); ++index) {
+        const int high = nibble(text[index * 2]);
+        const int low = nibble(text[index * 2 + 1]);
+        if (high < 0 || low < 0) return false;
+        out[index] = static_cast<std::uint8_t>((high << 4) | low);
+    }
+    return true;
+}
+
 ReconstructCli parse_cli(int argc, char** argv) {
     cxxopts::Options options(
         "photara", "High-performance Structure from Motion reconstruction");
@@ -723,6 +744,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::uint64_t>()->default_value("0"))
         ("splat-preview-vk-device-node-mask", "Vulkan device-node mask",
          cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-preview-vk-device-uuid",
+         "Vulkan physical-device UUID as 32 hex digits",
+         cxxopts::value<std::string>()->default_value(""))
         ("splat-profile-cuda",
          "Record windowed CUDA-event timings for splat training stages",
          cxxopts::value<bool>()->default_value("false")
@@ -1274,6 +1298,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-preview-vk-device-luid"].as<std::uint64_t>();
     cli.splat_preview_vk_device_node_mask =
         result["splat-preview-vk-device-node-mask"].as<unsigned>();
+    cli.splat_preview_vk_device_uuid =
+        result["splat-preview-vk-device-uuid"].as<std::string>();
+    if (!cli.splat_preview_vk_device_uuid.empty()) {
+        std::array<std::uint8_t, 16> parsed{};
+        if (!parse_device_uuid(cli.splat_preview_vk_device_uuid, parsed))
+            throw std::invalid_argument(
+                "--splat-preview-vk-device-uuid must be 32 hex digits");
+    }
     cli.splat_profile_cuda = result["splat-profile-cuda"].as<bool>();
     cli.splat_fuse_sh_adam = result["splat-fuse-sh-adam"].as<bool>();
     cli.splat_profile_interval =
@@ -1890,6 +1922,21 @@ void apply_cli_subject_bounds(
     if (cli.capture_mode == "scene") scene.subject_bounds = {};
 }
 
+photara::splat::CudaVulkanPreviewOptions make_preview_options(
+    const ReconstructCli& cli) {
+    photara::splat::CudaVulkanPreviewOptions options;
+    options.memory_handle = cli.splat_preview_vk_memory_handle;
+    options.semaphore_handle = cli.splat_preview_vk_semaphore_handle;
+    options.allocation_size = cli.splat_preview_vk_allocation_size;
+    options.width = cli.splat_preview_vk_width;
+    options.height = cli.splat_preview_vk_height;
+    options.device_luid = cli.splat_preview_vk_device_luid;
+    options.device_node_mask = cli.splat_preview_vk_device_node_mask;
+    options.has_device_uuid = parse_device_uuid(
+        cli.splat_preview_vk_device_uuid, options.device_uuid);
+    return options;
+}
+
 void run_splat_view(
     const ReconstructCli& cli, photara::project::Archive& archive) {
     const bool has_vulkan_preview =
@@ -1939,14 +1986,7 @@ void run_splat_view(
         throw std::runtime_error("--splat-view loaded an empty Gaussian model");
 
     auto vulkan_preview = std::make_unique<photara::splat::CudaVulkanPreview>(
-        photara::splat::CudaVulkanPreviewOptions{
-            cli.splat_preview_vk_memory_handle,
-            cli.splat_preview_vk_semaphore_handle,
-            cli.splat_preview_vk_allocation_size,
-            cli.splat_preview_vk_width,
-            cli.splat_preview_vk_height,
-            cli.splat_preview_vk_device_luid,
-            cli.splat_preview_vk_device_node_mask});
+        make_preview_options(cli));
     photara::core::Logger::instance().info(
         "splat_view_transport=cuda_vulkan_external_memory extent=",
         cli.splat_preview_vk_width, 'x', cli.splat_preview_vk_height);
@@ -3393,14 +3433,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         cli.splat_preview_vk_allocation_size != 0 &&
         cli.splat_preview_vk_width != 0 &&
         cli.splat_preview_vk_height != 0;
-    const auto preview_handles = photara::splat::CudaVulkanPreviewOptions{
-        cli.splat_preview_vk_memory_handle,
-        cli.splat_preview_vk_semaphore_handle,
-        cli.splat_preview_vk_allocation_size,
-        cli.splat_preview_vk_width,
-        cli.splat_preview_vk_height,
-        cli.splat_preview_vk_device_luid,
-        cli.splat_preview_vk_device_node_mask};
+    const auto preview_handles = make_preview_options(cli);
     if (options.preview_interval != 0 && has_vulkan_preview &&
         options.backend == photara::splat::TrainingBackend::vulkan) {
 #if !defined(TINYTENSOR_HAS_VULKAN)
@@ -3420,7 +3453,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                     preview_handles.width,
                     preview_handles.height,
                     preview_handles.device_luid,
-                    preview_handles.device_node_mask});
+                    preview_handles.device_node_mask,
+                    preview_handles.device_uuid,
+                    preview_handles.has_device_uuid});
         device_preview = [&vulkan_preview](
                              const unsigned iteration,
                              const std::size_t view_index,
@@ -3676,6 +3711,7 @@ int wmain(int argc, wchar_t** argv) {
 #else
 int main(int argc, char** argv) {
 #endif
+#if defined(_WIN32)
     // Report CRT parameter failures (which otherwise abort with no trace).
     _set_invalid_parameter_handler(
         [](const wchar_t* expression, const wchar_t* function,
@@ -3693,6 +3729,7 @@ int main(int argc, char** argv) {
                 " expression=", narrow(expression));
             std::_Exit(3);
         });
+#endif
     // A terminate from a worker thread or a destructor used to abort without
     // leaving any trace in the log; report what is known before aborting.
     std::set_terminate([] {
@@ -3718,6 +3755,16 @@ int main(int argc, char** argv) {
     try {
         Utf8Argv utf8_argv(argc, argv);
         ReconstructCli cli = parse_cli(utf8_argv.argc(), utf8_argv.argv());
+#if !defined(_WIN32)
+        if (!cli.splat_preview_vk_device_uuid.empty()) {
+            if (::setenv(
+                    "PHOTARA_VULKAN_DEVICE_UUID",
+                    cli.splat_preview_vk_device_uuid.c_str(), 1) != 0) {
+                throw std::runtime_error(
+                    "Failed to publish the Vulkan device UUID");
+            }
+        }
+#endif
 
         const char* configured_level = std::getenv("PHOTARA_LOG_LEVEL");
         const auto console_level = configured_level

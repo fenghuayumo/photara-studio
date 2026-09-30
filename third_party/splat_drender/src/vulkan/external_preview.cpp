@@ -20,9 +20,12 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace splat_drender::vulkan {
@@ -99,12 +102,6 @@ struct ExternalImagePreview::Impl {
 ExternalImagePreview::ExternalImagePreview(
     const PreviewDevice& device, const ExternalPreviewOptions& options)
     : impl_(std::make_unique<Impl>()) {
-#if !defined(_WIN32)
-    (void)device;
-    (void)options;
-    throw std::runtime_error(
-        "Vulkan external preview currently requires Win32 handles");
-#else
     if (device.device == VK_NULL_HANDLE || device.queue == VK_NULL_HANDLE ||
         !options.memory_handle || !options.semaphore_handle ||
         !options.allocation_size || !options.width || !options.height) {
@@ -114,13 +111,13 @@ ExternalImagePreview::ExternalImagePreview(
     impl_->width = options.width;
     impl_->height = options.height;
 
+    VkPhysicalDeviceIDProperties identity{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    properties.pNext = &identity;
+    vkGetPhysicalDeviceProperties2(device.physical_device, &properties);
     if (options.device_luid != 0) {
-        VkPhysicalDeviceIDProperties identity{
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
-        VkPhysicalDeviceProperties2 properties{
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-        properties.pNext = &identity;
-        vkGetPhysicalDeviceProperties2(device.physical_device, &properties);
         std::uint64_t luid = 0;
         static_assert(sizeof(luid) == sizeof(identity.deviceLUID));
         std::memcpy(&luid, identity.deviceLUID, sizeof(luid));
@@ -129,18 +126,50 @@ ExternalImagePreview::ExternalImagePreview(
             throw std::runtime_error(
                 "The Vulkan training device does not match the editor preview image");
         }
+    } else if (options.has_device_uuid &&
+               std::memcmp(
+                   identity.deviceUUID, options.device_uuid.data(),
+                   options.device_uuid.size()) != 0) {
+        throw std::runtime_error(
+            "The Vulkan training device does not match the editor preview image");
     }
 
-    auto close_imports = [&options]() {
-        CloseHandle(reinterpret_cast<HANDLE>(
-            static_cast<std::uintptr_t>(options.memory_handle)));
-        CloseHandle(reinterpret_cast<HANDLE>(
-            static_cast<std::uintptr_t>(options.semaphore_handle)));
+#if defined(_WIN32)
+    HANDLE memory_handle = reinterpret_cast<HANDLE>(
+        static_cast<std::uintptr_t>(options.memory_handle));
+    HANDLE semaphore_handle = reinterpret_cast<HANDLE>(
+        static_cast<std::uintptr_t>(options.semaphore_handle));
+    const auto close_imports = [&] {
+        if (memory_handle != nullptr)
+            CloseHandle(std::exchange(memory_handle, nullptr));
+        if (semaphore_handle != nullptr)
+            CloseHandle(std::exchange(semaphore_handle, nullptr));
     };
+#else
+    int memory_fd = static_cast<int>(options.memory_handle);
+    int semaphore_fd = static_cast<int>(options.semaphore_handle);
+    bool memory_consumed = false;
+    bool semaphore_consumed = false;
+    const auto close_imports = [&] {
+        if (!memory_consumed && memory_fd >= 0)
+            ::close(std::exchange(memory_fd, -1));
+        if (!semaphore_consumed && semaphore_fd >= 0)
+            ::close(std::exchange(semaphore_fd, -1));
+    };
+#endif
 
+#if defined(_WIN32)
+    constexpr auto k_memory_handle = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    constexpr auto k_semaphore_handle =
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#else
+    constexpr auto k_memory_handle = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    constexpr auto k_semaphore_handle =
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+#endif
     VkExternalMemoryImageCreateInfo external_image{
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
-    external_image.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    external_image.handleTypes = k_memory_handle;
     VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     image_info.pNext = &external_image;
     image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -157,11 +186,17 @@ ExternalImagePreview::ExternalImagePreview(
     try {
         check(vkCreateImage(device.device, &image_info, nullptr, &impl_->image),
               "create image");
+#if defined(_WIN32)
         VkImportMemoryWin32HandleInfoKHR import_memory{
             VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR};
-        import_memory.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-        import_memory.handle = reinterpret_cast<HANDLE>(
-            static_cast<std::uintptr_t>(options.memory_handle));
+        import_memory.handleType = k_memory_handle;
+        import_memory.handle = memory_handle;
+#else
+        VkImportMemoryFdInfoKHR import_memory{
+            VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+        import_memory.handleType = k_memory_handle;
+        import_memory.fd = memory_fd;
+#endif
         VkMemoryDedicatedAllocateInfo dedicated{
             VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
         dedicated.pNext = &import_memory;
@@ -175,15 +210,12 @@ ExternalImagePreview::ExternalImagePreview(
             memory_type(device.physical_device, requirements.memoryTypeBits);
         check(vkAllocateMemory(device.device, &allocation, nullptr, &impl_->memory),
               "import preview image");
+#if !defined(_WIN32)
+        memory_consumed = true;
+#endif
         check(vkBindImageMemory(device.device, impl_->image, impl_->memory, 0),
               "bind preview image");
 
-        VkImportSemaphoreWin32HandleInfoKHR import_semaphore{
-            VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR};
-        import_semaphore.handleType =
-            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-        import_semaphore.handle = reinterpret_cast<HANDLE>(
-            static_cast<std::uintptr_t>(options.semaphore_handle));
         VkSemaphoreTypeCreateInfo timeline_type{
             VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
         timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -194,6 +226,11 @@ ExternalImagePreview::ExternalImagePreview(
         check(vkCreateSemaphore(
                   device.device, &semaphore_info, nullptr, &impl_->timeline),
               "create preview semaphore");
+#if defined(_WIN32)
+        VkImportSemaphoreWin32HandleInfoKHR import_semaphore{
+            VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR};
+        import_semaphore.handleType = k_semaphore_handle;
+        import_semaphore.handle = semaphore_handle;
         import_semaphore.semaphore = impl_->timeline;
         const auto import_semaphore_handle =
             reinterpret_cast<PFN_vkImportSemaphoreWin32HandleKHR>(
@@ -204,6 +241,22 @@ ExternalImagePreview::ExternalImagePreview(
                 "Vulkan Win32 semaphore import function is unavailable");
         check(import_semaphore_handle(device.device, &import_semaphore),
               "import preview semaphore");
+#else
+        VkImportSemaphoreFdInfoKHR import_semaphore{
+            VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
+        import_semaphore.semaphore = impl_->timeline;
+        import_semaphore.handleType = k_semaphore_handle;
+        import_semaphore.fd = semaphore_fd;
+        const auto import_semaphore_handle =
+            reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+                vkGetDeviceProcAddr(device.device, "vkImportSemaphoreFdKHR"));
+        if (!import_semaphore_handle)
+            throw std::runtime_error(
+                "Vulkan fd semaphore import function is unavailable");
+        check(import_semaphore_handle(device.device, &import_semaphore),
+              "import preview semaphore");
+        semaphore_consumed = true;
+#endif
     } catch (...) {
         close_imports();
         throw;
@@ -312,7 +365,6 @@ ExternalImagePreview::ExternalImagePreview(
     check(vkAllocateCommandBuffers(
               device.device, &allocate_command, &impl_->command),
           "allocate preview command");
-#endif
 }
 
 ExternalImagePreview::~ExternalImagePreview() = default;

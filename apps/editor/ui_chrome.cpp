@@ -33,6 +33,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace editor {
@@ -452,6 +454,13 @@ std::filesystem::path studio_icon_path() {
     const DWORD n = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
     if (n > 0 && n < MAX_PATH)
         exe_dir = std::filesystem::path(buffer).parent_path();
+#else
+    char buffer[4096]{};
+    const ssize_t n = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (n > 0)
+        exe_dir = std::filesystem::path(
+                      std::string(buffer, buffer + n))
+                      .parent_path();
 #endif
     const std::filesystem::path candidates[] = {
         exe_dir / "icon.png",

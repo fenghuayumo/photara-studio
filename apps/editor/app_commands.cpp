@@ -126,6 +126,13 @@ std::filesystem::path resolve_editor_ini() {
 #if defined(_WIN32)
     if (const char* appdata = std::getenv("APPDATA"))
         return std::filesystem::path(appdata) / "Photara" / "editor.ini";
+#else
+    if (const char* config = std::getenv("XDG_CONFIG_HOME");
+        config != nullptr && config[0] != '\0')
+        return std::filesystem::path(config) / "Photara" / "editor.ini";
+    if (const char* home = std::getenv("HOME");
+        home != nullptr && home[0] != '\0')
+        return std::filesystem::path(home) / ".config" / "Photara" / "editor.ini";
 #endif
     return std::filesystem::current_path() / "photara_studio.ini";
 }
@@ -2909,15 +2916,24 @@ void start_train(App& app, const bool smoke) {
     // recreated per run: the timeline counter has to restart from zero.
     app.preview.create(k_preview_extent, k_preview_extent);
     PreviewHandles handles;
+#if defined(_WIN32)
     handles.memory =
         reinterpret_cast<std::uintptr_t>(app.preview.memory_handle);
     handles.semaphore =
         reinterpret_cast<std::uintptr_t>(app.preview.semaphore_handle);
+#else
+    if (app.preview.memory_handle >= 0)
+        handles.memory = static_cast<std::uint64_t>(app.preview.memory_handle);
+    if (app.preview.semaphore_handle >= 0)
+        handles.semaphore =
+            static_cast<std::uint64_t>(app.preview.semaphore_handle);
+#endif
     handles.allocation_size = app.preview.allocation_size;
     handles.width = app.preview.width;
     handles.height = app.preview.height;
     handles.device_luid = gpu::device_luid();
     handles.device_node_mask = gpu::device_node_mask();
+    handles.device_uuid = gpu::device_uuid_hex();
 
     std::string command;
     if (smoke) {
@@ -2952,6 +2968,9 @@ void start_train(App& app, const bool smoke) {
             << " --splat-preview-vk-device-luid " << handles.device_luid
             << " --splat-preview-vk-device-node-mask "
             << handles.device_node_mask;
+        if (!handles.device_uuid.empty())
+            smoke_command << " --splat-preview-vk-device-uuid "
+                          << handles.device_uuid;
         command = smoke_command.str();
     } else {
         command = build_train_command(

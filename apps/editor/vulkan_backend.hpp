@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace editor::gpu {
@@ -48,9 +49,12 @@ VkDescriptorPool descriptor_pool();
 ImGui_ImplVulkanH_Window& window();
 
 // Win32 LUID / node mask of the presenting adapter, forwarded to the trainer so
-// CUDA opens the shared allocation on the same GPU.
+// CUDA opens the shared allocation on the same GPU. On Linux the LUID is zero
+// and device_uuid_hex() is the match key.
 std::uint64_t device_luid();
 std::uint32_t device_node_mask();
+// 32 lowercase hex digits, or empty when the UUID was not queried.
+std::string device_uuid_hex();
 
 bool swapchain_needs_rebuild();
 void clear_swapchain_rebuild();
@@ -111,9 +115,10 @@ private:
     std::vector<ImTextureID> ids_;
 };
 
-// The CUDA-written image is exported as a Win32 handle and copied into a
-// sampled display image each frame, synchronised by a shared timeline
-// semaphore. The trainer signals odd values; the editor signals even ones.
+// The trainer writes this image through an inherited Win32 handle or, on
+// Linux, an opaque fd. The editor copies it into a sampled display image
+// each frame. The trainer signals odd timeline values; the editor signals
+// even ones.
 struct ExternalPreview {
     PreviewTexture display;
     VkImage image{};
@@ -123,8 +128,8 @@ struct ExternalPreview {
     HANDLE memory_handle{};
     HANDLE semaphore_handle{};
 #else
-    void* memory_handle{};
-    void* semaphore_handle{};
+    int memory_handle{-1};
+    int semaphore_handle{-1};
 #endif
     VkDeviceSize allocation_size{};
     std::uint32_t width{};

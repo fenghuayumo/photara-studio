@@ -531,6 +531,24 @@ void Context::create_instance() {
     }
 }
 
+bool parse_device_uuid(const char* text, std::uint8_t out[16]) {
+    if (text == nullptr) return false;
+    const auto nibble = [](const char value) -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    for (int index = 0; index < 16; ++index) {
+        if (text[index * 2] == '\0' || text[index * 2 + 1] == '\0') return false;
+        const int high = nibble(text[index * 2]);
+        const int low = nibble(text[index * 2 + 1]);
+        if (high < 0 || low < 0) return false;
+        out[index] = static_cast<std::uint8_t>((high << 4) | low);
+    }
+    return text[32] == '\0';
+}
+
 void Context::pick_device() {
     std::uint32_t count = 0;
     check(vkEnumeratePhysicalDevices(instance_, &count, nullptr), "vkEnumeratePhysicalDevices");
@@ -540,7 +558,30 @@ void Context::pick_device() {
     std::vector<VkPhysicalDevice> devices(count);
     check(vkEnumeratePhysicalDevices(instance_, &count, devices.data()), "vkEnumeratePhysicalDevices");
 
-    if (const auto index = env_u32("TINYTENSOR_VULKAN_DEVICE")) {
+    const char* device_uuid = std::getenv("PHOTARA_VULKAN_DEVICE_UUID");
+    if (device_uuid != nullptr && device_uuid[0] != '\0') {
+        std::uint8_t want[16]{};
+        if (!parse_device_uuid(device_uuid, want)) {
+            throw std::invalid_argument(
+                "PHOTARA_VULKAN_DEVICE_UUID must be 32 hex digits");
+        }
+        for (const VkPhysicalDevice candidate : devices) {
+            VkPhysicalDeviceIDProperties identity{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+            VkPhysicalDeviceProperties2 properties{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+            properties.pNext = &identity;
+            vkGetPhysicalDeviceProperties2(candidate, &properties);
+            if (std::memcmp(identity.deviceUUID, want, sizeof(want)) == 0) {
+                physical_ = candidate;
+                break;
+            }
+        }
+        if (physical_ == VK_NULL_HANDLE) {
+            throw std::runtime_error(
+                "No Vulkan device matches PHOTARA_VULKAN_DEVICE_UUID");
+        }
+    } else if (const auto index = env_u32("TINYTENSOR_VULKAN_DEVICE")) {
         if (*index >= count) {
             throw std::out_of_range("TINYTENSOR_VULKAN_DEVICE is out of range");
         }
@@ -632,12 +673,20 @@ void Context::create_device() {
         "VK_KHR_external_semaphore",
         "VK_KHR_external_semaphore_win32",
     };
+#else
+    // Linux exports the same image as an opaque fd.
+    const char* external_extensions[] = {
+        "VK_KHR_external_memory",
+        "VK_KHR_external_memory_fd",
+        "VK_KHR_external_semaphore",
+        "VK_KHR_external_semaphore_fd",
+    };
+#endif
     for (const char* extension : external_extensions) {
         if (has_device_extension(physical_, extension)) {
             extensions.push_back(extension);
         }
     }
-#endif
 
     VkDeviceCreateInfo create{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     create.queueCreateInfoCount = 1;

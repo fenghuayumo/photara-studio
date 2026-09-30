@@ -9,6 +9,7 @@
 #include "imgui.h"
 
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -22,6 +23,14 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
 #endif
 
 namespace editor {
@@ -63,6 +72,18 @@ bool open_license_url() {
 }
 #else
 bool open_license_url() {
+    const char* argv[] = {
+        "xdg-open", photara::sam::k_license_url, nullptr};
+    pid_t pid = -1;
+    const int spawned = ::posix_spawnp(
+        &pid, "xdg-open", nullptr, nullptr, const_cast<char**>(argv), environ);
+    int status = 1;
+    if (spawned == 0 && pid > 0) {
+        while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+    }
+    if (spawned == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return true;
     ImGui::SetClipboardText(photara::sam::k_license_url);
     return false;
 }
@@ -119,7 +140,98 @@ void SamModelDownload::run() {
     partial += ".part";
 
 #if !defined(_WIN32)
-    fail("SAM model download is implemented for Windows curl", State::failed);
+    int pipes[2]{};
+    if (::pipe(pipes) != 0) {
+        fail("Cannot capture curl output", State::failed);
+        return;
+    }
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, pipes[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, pipes[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pipes[0]);
+    posix_spawn_file_actions_addclose(&actions, pipes[1]);
+
+    const std::string output_path = partial.string();
+    const std::string url = photara::sam::k_model_url;
+    const char* argv[] = {
+        "curl", "-L", "-f", "--progress-bar", "-C", "-", "-o",
+        output_path.c_str(), url.c_str(), nullptr};
+    pid_t pid = -1;
+    const int spawned = ::posix_spawnp(
+        &pid, "curl", &actions, nullptr, const_cast<char**>(argv), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    ::close(pipes[1]);
+    if (spawned != 0 || pid <= 0) {
+        ::close(pipes[0]);
+        fail("curl was not found. Install curl or download the model by hand.",
+             State::failed);
+        return;
+    }
+    ::fcntl(pipes[0], F_SETFL, O_NONBLOCK);
+
+    std::string pending;
+    char buffer[256];
+    while (!cancel_) {
+        const ssize_t read = ::read(pipes[0], buffer, sizeof(buffer));
+        if (read > 0) {
+            pending.append(buffer, buffer + read);
+            for (;;) {
+                const auto mark = pending.find_first_of("\r\n");
+                if (mark == std::string::npos) break;
+                const std::string line = pending.substr(0, mark);
+                pending.erase(0, mark + 1);
+                const auto percent = line.find('%');
+                if (percent == std::string::npos) continue;
+                std::size_t start = percent;
+                while (start > 0 &&
+                       (std::isdigit(
+                            static_cast<unsigned char>(line[start - 1])) ||
+                        line[start - 1] == '.'))
+                    --start;
+                if (start >= percent) continue;
+                const float value = std::strtof(
+                    line.substr(start, percent - start).c_str(), nullptr);
+                progress_ = value / 100.F;
+                std::lock_guard lock(mutex_);
+                status_ =
+                    "Downloaded " + std::to_string(static_cast<int>(value)) +
+                    "%";
+            }
+            continue;
+        }
+        if (read == 0) break;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) break;
+        int status = 0;
+        if (::waitpid(pid, &status, WNOHANG) == pid) break;
+        ::usleep(50 * 1000);
+    }
+
+    if (cancel_) ::kill(pid, SIGTERM);
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    ::close(pipes[0]);
+    const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    if (cancel_) {
+        fail("Download cancelled", State::cancelled);
+        return;
+    }
+    if (code != 0) {
+        std::filesystem::remove(partial, error);
+        fail("Download failed (curl exit " + std::to_string(code) + ")",
+             State::failed);
+        return;
+    }
+    std::filesystem::remove(destination, error);
+    error.clear();
+    std::filesystem::rename(partial, destination, error);
+    if (error || !photara::sam::model_file_ready(destination)) {
+        fail("Downloaded file is incomplete", State::failed);
+        return;
+    }
+    progress_ = 1.F;
+    fail("SAM 3 model is ready", State::done);
     return;
 #else
     SECURITY_ATTRIBUTES security{};

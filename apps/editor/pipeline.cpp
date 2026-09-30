@@ -21,7 +21,14 @@
 #if defined(_WIN32)
 #include <tlhelp32.h>
 #else
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <unistd.h>
+extern char** environ;
 #endif
 
 namespace editor {
@@ -1007,10 +1014,46 @@ void ProcessJob::start(
     process_ = info.hProcess;
     CloseHandle(info.hThread);
 #else
-    static_cast<void>(command);
-    running_ = false;
-    throw std::runtime_error(
-        "External-memory editor launch is currently Win32-only");
+    const int log_fd = ::open(
+        log.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (log_fd < 0) {
+        running_ = false;
+        throw std::runtime_error("Cannot create reconstruction log");
+    }
+    const int devnull = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, log_fd, STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, log_fd, STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, log_fd);
+    if (devnull >= 0) {
+        posix_spawn_file_actions_adddup2(&actions, devnull, STDIN_FILENO);
+        posix_spawn_file_actions_addclose(&actions, devnull);
+    }
+
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    // The shell becomes its own group so stop/pause reach photara and ffmpeg
+    // without signalling the editor.
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+
+    const char* argv[] = {"/bin/sh", "-c", command.c_str(), nullptr};
+    pid_t pid = -1;
+    const int spawned = ::posix_spawn(
+        &pid, "/bin/sh", &actions, &attr, const_cast<char**>(argv), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
+    ::close(log_fd);
+    if (devnull >= 0) ::close(devnull);
+    if (spawned != 0 || pid <= 0) {
+        running_ = false;
+        throw std::runtime_error(
+            "posix_spawn failed: " + std::string(std::strerror(spawned)));
+    }
+    process_ = static_cast<int>(pid);
+    group_ = process_;
 #endif
 }
 
@@ -1026,6 +1069,25 @@ void ProcessJob::poll() {
         CloseHandle(std::exchange(process_, nullptr));
         if (job_) CloseHandle(std::exchange(job_, nullptr));
     }
+#else
+    if (!running_ || process_ <= 0) return;
+    int status = 0;
+    const pid_t result = ::waitpid(process_, &status, WNOHANG);
+    if (result == 0) return;
+    if (result < 0) {
+        if (errno == EINTR) return;
+        exit_code_ = 1;
+    } else if (WIFEXITED(status)) {
+        exit_code_ = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        exit_code_ = 128 + WTERMSIG(status);
+    } else {
+        return;
+    }
+    running_ = false;
+    paused_ = false;
+    completion_pending_ = true;
+    process_ = -1;
 #endif
 }
 
@@ -1034,6 +1096,10 @@ void ProcessJob::pause() {
     if (!running_ || paused_ || !process_) return;
     if (!set_job_tree_suspended(job_, process_, true)) return;
     paused_ = true;
+#else
+    if (!running_ || paused_ || group_ <= 0) return;
+    if (::kill(-group_, SIGSTOP) != 0) return;
+    paused_ = true;
 #endif
 }
 
@@ -1041,6 +1107,10 @@ void ProcessJob::resume() {
 #if defined(_WIN32)
     if (!running_ || !paused_ || !process_) return;
     if (!set_job_tree_suspended(job_, process_, false)) return;
+    paused_ = false;
+#else
+    if (!running_ || !paused_ || group_ <= 0) return;
+    if (::kill(-group_, SIGCONT) != 0) return;
     paused_ = false;
 #endif
 }
@@ -1055,6 +1125,19 @@ void ProcessJob::stop() {
         TerminateProcess(process_, 2);
         WaitForSingleObject(process_, INFINITE);
         CloseHandle(std::exchange(process_, nullptr));
+        exit_code_ = 2;
+        completion_pending_ = true;
+    }
+#else
+    if (group_ > 0) {
+        ::kill(-group_, SIGKILL);
+        group_ = -1;
+    }
+    if (process_ > 0) {
+        int status = 0;
+        while (::waitpid(process_, &status, 0) < 0 && errno == EINTR) {
+        }
+        process_ = -1;
         exit_code_ = 2;
         completion_pending_ = true;
     }
@@ -1318,6 +1401,9 @@ std::string build_train_command(
                 << preview.device_luid
                 << " --splat-preview-vk-device-node-mask "
                 << preview.device_node_mask;
+        if (!preview.device_uuid.empty())
+            command << " --splat-preview-vk-device-uuid "
+                    << preview.device_uuid;
     }
     append_ba_backend(command, settings);
     return command.str();

@@ -214,6 +214,9 @@ private:
 #if defined(_WIN32)
     HANDLE process_{};
     HANDLE job_{};
+#else
+    int process_{-1};
+    int group_{-1};
 #endif
 };
 
@@ -486,6 +489,10 @@ struct PreviewHandles {
     std::uint32_t height{};
     std::uint64_t device_luid{};
     std::uint32_t device_node_mask{};
+    // 32 lowercase hex digits of VkPhysicalDeviceIDProperties::deviceUUID.
+    // Empty when the editor could not read one. Linux uses it to pick the
+    // same GPU; Windows keeps matching on the LUID when that is non-zero.
+    std::string device_uuid;
 };
 
 std::string build_align_command(
