@@ -146,14 +146,33 @@ int main() {
     photara::features::SiftExtractor extractor(options);
     const auto features0 = extractor.extract_gray(first, width, height);
     const auto features1 = extractor.extract_gray(second, width, height);
+    if (features0.metric != extractor.info().metric ||
+        features0.metric != photara::features::DescriptorMetric::l2_root ||
+        features1.metric != features0.metric)
+        return 20;
     const auto matches = photara::features::match_descriptors(features0, features1);
     std::cout << "features=" << features0.keypoints.size() << ","
               << features1.keypoints.size() << " matches=" << matches.matches.size() << '\n';
     if (features0.keypoints.size() < 150 || features1.keypoints.size() < 150 ||
         matches.matches.size() < 80) return 1;
+    int shift_inliers = 0;
     for (const auto& match : matches.matches) {
         if (match.query >= features0.keypoints.size() || match.train >= features1.keypoints.size())
             return 2;
+        const auto& a = features0.keypoints[match.query];
+        const auto& b = features1.keypoints[match.train];
+        if (std::abs((b.x - a.x) - static_cast<float>(shift_x)) < 3.0F &&
+            std::abs((b.y - a.y) - static_cast<float>(shift_y)) < 3.0F)
+            ++shift_inliers;
+    }
+    std::cout << " cpu_shift_inliers=" << shift_inliers << "/"
+              << matches.matches.size() << '\n';
+    if (shift_inliers < 50) return 16;
+    {
+        const auto again = extractor.extract_gray(first, width, height);
+        if (again.keypoints.size() != features0.keypoints.size() ||
+            again.descriptors != features0.descriptors)
+            return 17;
     }
     photara::features::DescriptorMatcherOptions ann_options;
     ann_options.ann_min_features = 1;
@@ -208,6 +227,73 @@ int main() {
                 gpu_matches.matches.size() < 80)
                 return 4;
             check_native(gpu_features0,gpu_features1);
+
+            std::vector<std::uint8_t> textured(static_cast<std::size_t>(width) * height);
+            std::mt19937 textured_random(20260929);
+            std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+            for (std::uint32_t y = 0; y < height; ++y) {
+                for (std::uint32_t x = 0; x < width; ++x) {
+                    const float fx = static_cast<float>(x);
+                    const float fy = static_cast<float>(y);
+                    float value = 0.5F + 0.12F * std::sin(fx * 0.021F) * std::cos(fy * 0.017F) +
+                                  0.08F * std::sin((fx + fy) * 0.045F);
+                    value += ((static_cast<int>(x / 37) + static_cast<int>(y / 41)) & 1)
+                                 ? 0.08F
+                                 : -0.08F;
+                    value += (unit(textured_random) - 0.5F) * 0.02F;
+                    value = (std::min)(1.0F, (std::max)(0.0F, value));
+                    textured[static_cast<std::size_t>(y) * width + x] =
+                        static_cast<std::uint8_t>(value * 255.0F + 0.5F);
+                }
+            }
+            photara::features::SiftOptions cpu_options;
+            cpu_options.maximum_features = gpu_options.maximum_features;
+            cpu_options.contrast_threshold = gpu_options.peak_threshold;
+            cpu_options.edge_threshold = gpu_options.edge_threshold;
+            cpu_options.first_octave = gpu_options.first_octave;
+            cpu_options.octave_layers = gpu_options.octave_layers;
+            cpu_options.maximum_orientations = gpu_options.maximum_orientations;
+            cpu_options.maximum_image_dimension = gpu_options.maximum_image_dimension;
+            cpu_options.root_sift = gpu_options.root_sift;
+            photara::features::SiftExtractor cpu_extractor(cpu_options);
+            const auto cpu_textured = cpu_extractor.extract_gray(textured, width, height);
+            const auto gpu_textured = gpu_extractor.extract_gray(textured, width, height);
+            if (cpu_textured.metric != gpu_textured.metric ||
+                cpu_textured.metric != cpu_extractor.info().metric)
+                return 21;
+            std::size_t close = 0;
+            double cosine_sum = 0.0;
+            const std::size_t compared =
+                (std::min)(cpu_textured.keypoints.size(), gpu_textured.keypoints.size());
+            for (std::size_t i = 0; i < compared; ++i) {
+                const auto& cpu = cpu_textured.keypoints[i];
+                const auto& gpu = gpu_textured.keypoints[i];
+                const bool scale_ok =
+                    std::abs(gpu.scale - cpu.scale) <= 0.02F * std::abs(cpu.scale);
+                if (std::abs(gpu.x - cpu.x) <= 0.05F &&
+                    std::abs(gpu.y - cpu.y) <= 0.05F && scale_ok)
+                    ++close;
+                double dot = 0.0, na = 0.0, nb = 0.0;
+                const float* da = cpu_textured.descriptors.data() + i * 128;
+                const float* db = gpu_textured.descriptors.data() + i * 128;
+                for (int column = 0; column < 128; ++column) {
+                    dot += static_cast<double>(da[column]) * db[column];
+                    na += static_cast<double>(da[column]) * da[column];
+                    nb += static_cast<double>(db[column]) * db[column];
+                }
+                cosine_sum += dot / std::sqrt((std::max)(na * nb, 1e-24));
+            }
+            const double position_ratio =
+                static_cast<double>(close) /
+                static_cast<double>((std::max)(std::size_t{1}, compared));
+            const double mean_cosine =
+                cosine_sum / static_cast<double>((std::max)(std::size_t{1}, compared));
+            std::cout << " cpu vs cuda (textured): " << cpu_textured.keypoints.size()
+                      << " vs " << gpu_textured.keypoints.size() << " position "
+                      << position_ratio << " cosine " << mean_cosine << '\n';
+            if (cpu_textured.keypoints.size() != gpu_textured.keypoints.size())
+                return 18;
+            if (position_ratio < 0.95 || mean_cosine < 0.99) return 19;
         }
     }
     return 0;

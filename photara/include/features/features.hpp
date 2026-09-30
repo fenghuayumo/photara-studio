@@ -16,21 +16,16 @@
 
 namespace photara::features {
 
-// ---- VLFeat CPU SIFT ------------------------------------------------------------
+// ---- CPU SIFT (same numeric pipeline as CUDA / Vulkan) --------------------------
 
 struct SiftOptions {
     std::size_t maximum_features{27000};
     std::size_t octave_layers{3};
-    int first_octave{-1};  // Match OpenCV SIFT's doubled-image first octave.
-    // VLFeat peak = 255 * contrast / octave_layers (openMVG mapping).
+    int first_octave{-1};
     double contrast_threshold{0.005};
-    double edge_threshold{10.0};
-    double sigma{1.6};
-    std::size_t grid_size{3};
-    std::size_t min_features_per_cell{500};
-    std::size_t max_features_per_cell{3000};
-    std::size_t cell_border{64};
-    unsigned adaptive_retries{5};
+    double edge_threshold{20.0};
+    std::uint32_t maximum_orientations{2};
+    std::uint32_t maximum_image_dimension{5120};
     bool root_sift{true};
 };
 

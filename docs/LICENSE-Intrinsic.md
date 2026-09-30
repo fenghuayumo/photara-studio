@@ -24,6 +24,6 @@ the C++ ONNX Runtime path in `photara/src/texture/delight.cpp`.
   license boundaries of SfM, MVS, Splat, or `photara_drender` texture baking.
 - Exported albedo is influenced by these weights only when `--delight` is
   explicitly enabled.
-- Other third-party components, including VLFeat, cxxopts, TinyTensor, and the
+- Other third-party components, including cxxopts, TinyTensor, and the
   `photara_drender` submodule, retain their own licenses. See
   [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).

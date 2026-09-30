@@ -1600,15 +1600,8 @@ std::unique_ptr<features::FeatureExtractor> make_frontend_extractor(
     if (options.extractor == "sift") {
         features::SiftOptions sift_options;
         sift_options.contrast_threshold = options.sift_contrast_threshold;
-        if (options.max_features > 0) {
+        if (options.max_features > 0)
             sift_options.maximum_features = options.max_features;
-            sift_options.max_features_per_cell = (std::max)(
-                std::size_t{1},
-                static_cast<std::size_t>(options.max_features) / 9);
-            sift_options.min_features_per_cell = (std::min)(
-                sift_options.min_features_per_cell,
-                sift_options.max_features_per_cell);
-        }
         return std::make_unique<features::SiftExtractor>(sift_options);
     }
     if (options.extractor == "siftgpu") {

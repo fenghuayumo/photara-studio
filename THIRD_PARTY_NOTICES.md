@@ -45,7 +45,6 @@ terms do not fit the intended distribution.
 
 | Component | Path | License | Copyright / origin |
 |---|---|---|---|
-| VLFeat SIFT | `photara/third_party/vlfeat` | BSD | Andrea Vedaldi and Brian Fulkerson, 2007–2012 |
 | cxxopts | `photara/third_party/cxxopts` | MIT | Jarryd Beck, 2014–2022 |
 | TinyTensor | `photara/third_party/tinytensor` | GPL-3.0-or-later (see above) | LichtFeld Studio Authors |
 | OffsetAllocator | `photara/third_party/tinytensor/internal/offset_allocator.hpp` | MIT | Sebastian Aaltonen, 2023 |

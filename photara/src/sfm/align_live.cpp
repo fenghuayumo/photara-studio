@@ -97,8 +97,8 @@ std::vector<AlignLiveKeypoint> subsample_keypoints(
     }
 
     // Cover the frame instead of taking the first/highest-response slice.
-    // SiftGPU leaves response at 0 and VLFeat at 1, so a global top-K by
-    // response collapses to detection order (top of the image).
+    // Native SIFT leaves response at 0, so a global top-K by response
+    // collapses to detection order (top of the image).
     constexpr int k_grid = 16;
     const float cell_w = width / static_cast<float>(k_grid);
     const float cell_h = height / static_cast<float>(k_grid);

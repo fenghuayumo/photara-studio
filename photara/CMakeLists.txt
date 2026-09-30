@@ -181,48 +181,12 @@ if(PHOTARA_ENABLE_FEATURES)
     photara_find_hnswlib()
     find_package(Boost REQUIRED)
 
-    set(PHOTARA_VLFEAT_SOURCES
-        third_party/vlfeat/vl/generic.c
-        third_party/vlfeat/vl/host.c
-        third_party/vlfeat/vl/imopv.c
-        third_party/vlfeat/vl/mathop.c
-        third_party/vlfeat/vl/random.c
-        third_party/vlfeat/vl/sift.c)
-    set(PHOTARA_VLFEAT_HAS_SSE2 FALSE)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86)$")
-        list(APPEND PHOTARA_VLFEAT_SOURCES
-            third_party/vlfeat/vl/imopv_sse2.c
-            third_party/vlfeat/vl/mathop_sse2.c)
-        set(PHOTARA_VLFEAT_HAS_SSE2 TRUE)
-    endif()
-    add_library(photara_vlfeat STATIC ${PHOTARA_VLFEAT_SOURCES})
-    target_include_directories(photara_vlfeat PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vlfeat)
-    # Outer image-level parallelism owns threading; keep VLFeat itself serial.
-    target_compile_definitions(photara_vlfeat PUBLIC VL_DISABLE_THREADS)
-    if(PHOTARA_VLFEAT_HAS_SSE2)
-        # MSVC x64 always has SSE2 but does not define the GCC-style macro that
-        # VLFeat's SSE2 translation units require.
-        if(MSVC)
-            target_compile_definitions(photara_vlfeat PRIVATE __SSE2__)
-        endif()
-    else()
-        target_compile_definitions(photara_vlfeat PUBLIC VL_DISABLE_SSE2)
-    endif()
-    if(MSVC)
-        target_compile_definitions(photara_vlfeat PRIVATE _CRT_SECURE_NO_WARNINGS)
-        target_compile_options(photara_vlfeat PRIVATE /W1)
-    endif()
-    set_target_properties(photara_vlfeat PROPERTIES
-        C_STANDARD 99
-        POSITION_INDEPENDENT_CODE ON
-        LINKER_LANGUAGE C)
-
     add_library(photara_features
         src/io/image_freeimage.cpp
         src/io/video_frames.cpp
         src/features/extractor.cpp
         src/features/registry.cpp
+        src/features/sift_cpu.cpp
         src/features/sift_features.cpp
         src/features/siftgpu_features.cpp
         src/features/superpoint_extractor.cpp
@@ -371,8 +335,7 @@ if(PHOTARA_ENABLE_FEATURES)
         JPEG::JPEG
         PNG::PNG
         Eigen3::Eigen
-        hnswlib::hnswlib
-        photara_vlfeat)
+        hnswlib::hnswlib)
     target_compile_definitions(photara_features PUBLIC PHOTARA_HAS_FREEIMAGE=1)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(photara_features PUBLIC OpenMP::OpenMP_CXX)
@@ -1006,6 +969,16 @@ if(PHOTARA_BUILD_BENCHMARKS)
                 src/tools/cuda_sift_benchmark.cpp)
             target_link_libraries(photara_cuda_sift_benchmark PRIVATE
                 Photara::Features CUDA::cudart)
+            add_executable(photara_cpu_sift_parity tests/cpu_sift_parity.cpp)
+            target_link_libraries(photara_cpu_sift_parity PRIVATE Photara::Features)
+            target_compile_features(photara_cpu_sift_parity PRIVATE cxx_std_20)
+            if(WIN32)
+                add_custom_command(TARGET photara_cpu_sift_parity POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_RUNTIME_DLLS:photara_cpu_sift_parity>
+                        $<TARGET_FILE_DIR:photara_cpu_sift_parity>
+                    COMMAND_EXPAND_LISTS)
+            endif()
         endif()
         if(WIN32)
             add_custom_command(TARGET photara_features_match POST_BUILD
@@ -1083,6 +1056,7 @@ if(PHOTARA_BUILD_BENCHMARKS)
         photara_bearing_backend_benchmark
         photara_features_match
         photara_cuda_sift_benchmark
+        photara_cpu_sift_parity
         photara_pair_verify
         photara_sfm_realign
         photara_sfm_match_benchmark

@@ -1,4 +1,5 @@
 #include "features/features.hpp"
+#include "sift_cpu.hpp"
 
 #include "parallel/thread_pool.hpp"
 
@@ -7,10 +8,6 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-
-extern "C" {
-#include "vl/sift.h"
-}
 
 #include <algorithm>
 #include <cmath>
@@ -169,16 +166,6 @@ void apply_root_sift(FeatureSet& features) {
             descriptor[column] =
                 std::sqrt((std::max)(0.0F, descriptor[column]) * inverse);
     }
-}
-
-struct VlRuntime {
-    VlRuntime() { vl_constructor(); }
-    ~VlRuntime() { vl_destructor(); }
-};
-
-void ensure_vl() {
-    static VlRuntime runtime;
-    (void)runtime;
 }
 
 }  // namespace
@@ -393,14 +380,10 @@ void FeatureSet::release_descriptors() noexcept {
 
 class SiftExtractor::Impl {
 public:
-    explicit Impl(SiftOptions value) : options(value) {
-        if (value.maximum_features == 0 || value.octave_layers == 0 ||
-            value.grid_size == 0 || value.max_features_per_cell == 0 ||
-            value.min_features_per_cell > value.max_features_per_cell)
-            throw std::invalid_argument("SIFT feature limits must be positive");
-        ensure_vl();
-    }
+    explicit Impl(SiftOptions value)
+        : options(value), engine(value) {}
     SiftOptions options;
+    mutable SiftCpuEngine engine;
 };
 
 SiftExtractor::SiftExtractor(SiftOptions options) : impl_(std::make_unique<Impl>(options)) {}
@@ -426,156 +409,11 @@ std::unique_ptr<FeatureExtractor> SiftExtractor::clone() const {
 FeatureSet SiftExtractor::extract_gray(
     const std::span<const std::uint8_t> pixels, const std::uint32_t width,
     const std::uint32_t height, std::size_t row_stride) const {
-    if (row_stride == 0) row_stride = width;
-    if (width == 0 || height == 0 || row_stride < width ||
-        pixels.size() < row_stride * static_cast<std::size_t>(height))
-        throw std::invalid_argument("Invalid grayscale image view");
-
-    FeatureSet result;
-    result.image_width = width;
-    result.image_height = height;
-    result.descriptor_dimension = 128;
-    result.metric = info().metric;
+    FeatureSet result = impl_->engine.extract(pixels, width, height, row_stride);
     result.extractor_name = std::string(name());
-    result.keypoints.reserve(impl_->options.maximum_features);
-    result.descriptors.reserve(impl_->options.maximum_features * 128);
-
-    const auto extract_cell = [&](const std::uint32_t roi_x, const std::uint32_t roi_y,
-                                  const std::uint32_t roi_width,
-                                  const std::uint32_t roi_height,
-                                  const std::uint32_t core_x,
-                                  const std::uint32_t core_y,
-                                  const std::uint32_t core_width,
-                                  const std::uint32_t core_height,
-                                  const double contrast) {
-        FeatureSet cell;
-        cell.image_width = width;
-        cell.image_height = height;
-        cell.descriptor_dimension = 128;
-        cell.metric = result.metric;
-        cell.extractor_name = result.extractor_name;
-        cell.keypoints.reserve(impl_->options.max_features_per_cell);
-        cell.descriptors.reserve(impl_->options.max_features_per_cell * 128);
-
-        std::vector<float> float_image(static_cast<std::size_t>(roi_width) * roi_height);
-        for (std::uint32_t y = 0; y < roi_height; ++y) {
-            const std::uint8_t* source =
-                pixels.data() + static_cast<std::size_t>(roi_y + y) * row_stride + roi_x;
-            float* destination =
-                float_image.data() + static_cast<std::size_t>(y) * roi_width;
-            for (std::uint32_t x = 0; x < roi_width; ++x)
-                destination[x] = static_cast<float>(source[x]);
-        }
-
-        const int octaves = (std::max)(
-            1, static_cast<int>(std::floor(
-                   std::log2((std::min)(roi_width, roi_height)))) -
-                   3);
-        VlSiftFilt* filter = vl_sift_new(
-            static_cast<int>(roi_width), static_cast<int>(roi_height), octaves,
-            static_cast<int>(impl_->options.octave_layers),
-            impl_->options.first_octave);
-        if (!filter) throw std::runtime_error("Failed to create VLFeat SIFT filter");
-        vl_sift_set_edge_thresh(filter, impl_->options.edge_threshold);
-        vl_sift_set_peak_thresh(
-            filter, 255.0 * contrast /
-                        static_cast<double>(impl_->options.octave_layers));
-
-        const float local_core_x0 = static_cast<float>(core_x - roi_x);
-        const float local_core_y0 = static_cast<float>(core_y - roi_y);
-        const float local_core_x1 = local_core_x0 + static_cast<float>(core_width);
-        const float local_core_y1 = local_core_y0 + static_cast<float>(core_height);
-        vl_sift_pix descriptor[128];
-        if (vl_sift_process_first_octave(filter, float_image.data()) == 0) {
-            while (true) {
-                vl_sift_detect(filter);
-                const VlSiftKeypoint* keys = vl_sift_get_keypoints(filter);
-                const int key_count = vl_sift_get_nkeypoints(filter);
-                vl_sift_update_gradient(filter);
-                for (int index = 0; index < key_count; ++index) {
-                    if (cell.keypoints.size() >= impl_->options.max_features_per_cell)
-                        break;
-                    const VlSiftKeypoint& key = keys[index];
-                    if (key.x < local_core_x0 || key.x >= local_core_x1 ||
-                        key.y < local_core_y0 || key.y >= local_core_y1)
-                        continue;
-                    double angles[4] = {};
-                    const int angle_count =
-                        vl_sift_calc_keypoint_orientations(filter, angles, &key);
-                    for (int angle = 0; angle < angle_count; ++angle) {
-                        if (cell.keypoints.size() >=
-                            impl_->options.max_features_per_cell)
-                            break;
-                        vl_sift_calc_keypoint_descriptor(
-                            filter, descriptor, &key, angles[angle]);
-                        cell.keypoints.push_back(
-                            {key.x + static_cast<float>(roi_x),
-                             key.y + static_cast<float>(roi_y), key.sigma,
-                             static_cast<float>(angles[angle]), 1.0F});
-                        cell.descriptors.insert(
-                            cell.descriptors.end(), descriptor, descriptor + 128);
-                    }
-                }
-                if (cell.keypoints.size() >= impl_->options.max_features_per_cell ||
-                    vl_sift_process_next_octave(filter))
-                    break;
-            }
-        }
-        vl_sift_delete(filter);
-        return cell;
-    };
-
-    const std::size_t grid = impl_->options.grid_size;
-    const std::uint32_t cell_width = width / static_cast<std::uint32_t>(grid);
-    const std::uint32_t cell_height = height / static_cast<std::uint32_t>(grid);
-    const std::uint32_t border = static_cast<std::uint32_t>((std::min)(
-        impl_->options.cell_border,
-        static_cast<std::size_t>((std::min)(cell_width, cell_height) / 2)));
-    for (std::size_t row = 0; row < grid; ++row) {
-        for (std::size_t col = 0; col < grid; ++col) {
-            const std::uint32_t core_x =
-                static_cast<std::uint32_t>(col) * cell_width;
-            const std::uint32_t core_y =
-                static_cast<std::uint32_t>(row) * cell_height;
-            const std::uint32_t core_width =
-                col + 1 == grid ? width - core_x : cell_width;
-            const std::uint32_t core_height =
-                row + 1 == grid ? height - core_y : cell_height;
-            const std::uint32_t roi_x = core_x > border ? core_x - border : 0;
-            const std::uint32_t roi_y = core_y > border ? core_y - border : 0;
-            const std::uint32_t roi_x1 =
-                (std::min)(width, core_x + core_width + border);
-            const std::uint32_t roi_y1 =
-                (std::min)(height, core_y + core_height + border);
-
-            FeatureSet selected;
-            for (unsigned retry = 0; retry <= impl_->options.adaptive_retries; ++retry) {
-                const double contrast =
-                    impl_->options.contrast_threshold * std::pow(0.5, retry);
-                selected = extract_cell(
-                    roi_x, roi_y, roi_x1 - roi_x, roi_y1 - roi_y,
-                    core_x, core_y, core_width, core_height, contrast);
-                if (selected.keypoints.size() >=
-                        impl_->options.min_features_per_cell ||
-                    retry == impl_->options.adaptive_retries)
-                    break;
-            }
-            const std::size_t available =
-                impl_->options.maximum_features - result.keypoints.size();
-            const std::size_t count =
-                (std::min)(available, selected.keypoints.size());
-            result.keypoints.insert(
-                result.keypoints.end(), selected.keypoints.begin(),
-                selected.keypoints.begin() + static_cast<std::ptrdiff_t>(count));
-            result.descriptors.insert(
-                result.descriptors.end(), selected.descriptors.begin(),
-                selected.descriptors.begin() +
-                    static_cast<std::ptrdiff_t>(count * result.descriptor_dimension));
-            if (result.keypoints.size() >= impl_->options.maximum_features) break;
-        }
-        if (result.keypoints.size() >= impl_->options.maximum_features) break;
-    }
     if (impl_->options.root_sift) apply_root_sift(result);
+    result.metric =
+        impl_->options.root_sift ? DescriptorMetric::l2_root : DescriptorMetric::l2;
     return result;
 }
 

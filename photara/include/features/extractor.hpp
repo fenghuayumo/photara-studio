@@ -11,7 +11,7 @@
 namespace photara::features {
 
 // Backend-agnostic feature detector + descriptor.
-// Implementations: VLFeat SIFT, SiftGPU, SuperPoint, DISK, ALIKED, etc.
+// Implementations: native SIFT (CPU / CUDA / Vulkan), SuperPoint, DISK, ALIKED.
 class FeatureExtractor {
 public:
     virtual ~FeatureExtractor() = default;

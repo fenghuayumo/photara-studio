@@ -436,7 +436,7 @@ quality thresholds, and resumable warmup/mask/final-training stages.
 - Delight/Intrinsic model weights are not distributed here and have a
   separate academic/non-commercial boundary; see
   [LICENSE-Intrinsic.md](LICENSE-Intrinsic.md).
-- CUDA, ONNX Runtime, CGAL, FreeImage, VLFeat, cxxopts, and
+- CUDA, ONNX Runtime, CGAL, FreeImage, cxxopts, and
   `photara_drender` retain their respective upstream licenses.
 - The full inventory is [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 - Before commercial distribution, review every enabled optional dependency and

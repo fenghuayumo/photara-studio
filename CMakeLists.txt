@@ -79,8 +79,8 @@ set(PHOTARA_ONNX_VERSION "1.20.1" CACHE STRING
 set(PHOTARA_ONNXRUNTIME_ROOT "" CACHE PATH
     "Optional local ONNX Runtime SDK root (skips FetchContent when valid)")
 # OpenCV is intentionally not a dependency. JPEG/PNG decoding uses libjpeg and
-# libpng directly; FreeImage remains the fallback for other formats; SIFT uses
-# vendored VLFeat; multi-view geometry uses Eigen.
+# libpng directly; FreeImage remains the fallback for other formats; SIFT is
+# project code; multi-view geometry uses Eigen.
 
 # Texture baking (photara_drender / UVAtlas / Vulkan) + optional Intrinsic delight.
 # Default source is the git submodule at third_party/photara_drender, which

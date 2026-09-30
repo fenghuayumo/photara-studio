@@ -58,12 +58,11 @@ Entry point: `sfm::run_frontend` in `src/sfm/frontend.cpp`, logged as stage
 | Backend | Description |
 |---|---|
 | `siftgpu` (default) | Native CUDA SIFT; `--sift-contrast` controls the peak threshold |
-| `sift` | Built-in VLFeat SIFT/RootSIFT fallback |
+| `sift` | Native CPU SIFT/RootSIFT (same pipeline as CUDA / Vulkan) |
 | `superpoint`, `disk`, `aliked` | ONNX extractors configured by `--extractor-model` |
 
-`--max-features` defaults to 27,000. A 3×3 grid selection prevents features
-from concentrating in a small image region. Descriptors are compressed to
-`uint8` by default. SiftGPU uses a thread-affine coordinator; other extractors
+`--max-features` defaults to 27,000. Descriptors are compressed to `uint8` by
+default. The CUDA extractor uses a thread-affine coordinator; other extractors
 are cloned per worker when required.
 
 #### SfM valid-region masks
