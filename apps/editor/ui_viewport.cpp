@@ -1167,6 +1167,14 @@ splat_render::Camera preview_camera_from(const SplatPreviewCamera& preview) {
 }
 
 void release_splat_preview_sets(App& app) {
+    bool any = false;
+    for (const VkDescriptorSet set : app.splat_preview_sets) {
+        if (set) {
+            any = true;
+            break;
+        }
+    }
+    if (any) gpu::wait_idle();
     for (VkDescriptorSet& set : app.splat_preview_sets) {
         if (set) ImGui_ImplVulkan_RemoveTexture(set);
         set = VK_NULL_HANDLE;
@@ -1222,6 +1230,13 @@ bool draw_splat_image(
         ? preview_camera_from(preview)
         : preview_camera_for_orbit(preview, *orbit);
     if (rings) camera.ring_sigma = app.view_options.ring_scale;
+    const std::uint32_t width = std::max(1U, camera.width);
+    const std::uint32_t height = std::max(1U, camera.height);
+    if (!app.splat_renderer.has_frame_size(width, height)) {
+        gpu::wait_idle();
+        release_splat_preview_sets(app);
+        app.splat_frames_epoch = app.splat_renderer.frames_epoch();
+    }
     splat_render::FrameTarget target;
     if (!app.splat_renderer.draw(
             camera, target,

@@ -149,15 +149,7 @@ void Renderer::reset() {
         frame_mapped_ = nullptr;
         return;
     }
-    if (runtime_.valid()) {
-        photara::vk::QueueLock lock(runtime_);
-        vkDeviceWaitIdle(device_);
-    } else if (queue_ != VK_NULL_HANDLE) {
-        photara::vk::QueueLock lock(queue_);
-        vkDeviceWaitIdle(device_);
-    } else {
-        vkDeviceWaitIdle(device_);
-    }
+    wait_device();
     destroy_frames();
     destroy_storage(centers_);
     destroy_storage(scales_);
@@ -284,6 +276,26 @@ void Renderer::create_storage(
 void Renderer::wait_gpu() {
     if (fence_)
         check(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+}
+
+void Renderer::wait_device() {
+    wait_gpu();
+    if (device_ == VK_NULL_HANDLE) return;
+    if (runtime_.valid()) {
+        photara::vk::QueueLock lock(runtime_);
+        vkDeviceWaitIdle(device_);
+    } else if (queue_ != VK_NULL_HANDLE) {
+        photara::vk::QueueLock lock(queue_);
+        vkDeviceWaitIdle(device_);
+    } else {
+        vkDeviceWaitIdle(device_);
+    }
+}
+
+bool Renderer::has_frame_size(
+    const std::uint32_t width, const std::uint32_t height) const noexcept {
+    return frames_[0].color.valid() && frames_[0].width == width &&
+           frames_[0].height == height;
 }
 
 void Renderer::upload_storage(
@@ -727,7 +739,9 @@ bool Renderer::update_centers(const float* centers, const std::uint32_t count) {
 bool Renderer::ensure_frames(const std::uint32_t width, const std::uint32_t height) {
     if (frames_[0].color.valid() && frames_[0].width == width && frames_[0].height == height)
         return true;
-    wait_gpu();
+    // ImGui present still samples the previous images. The renderer fence only
+    // covers this copy, so wait the whole device before tearing the frames down.
+    wait_device();
     destroy_frames();
     if (!runtime_.valid()) return false;
     for (Frame& frame : frames_) {

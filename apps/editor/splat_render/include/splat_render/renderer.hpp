@@ -95,6 +95,8 @@ public:
     [[nodiscard]] std::uint32_t splat_count() const noexcept { return count_; }
     [[nodiscard]] bool supported() const noexcept { return supported_; }
     [[nodiscard]] std::uint64_t frames_epoch() const noexcept { return frames_epoch_; }
+    [[nodiscard]] bool has_frame_size(
+        std::uint32_t width, std::uint32_t height) const noexcept;
     void reset();
 
 private:
@@ -138,6 +140,7 @@ private:
     void upload_storage(Storage& storage, const void* data, VkDeviceSize size);
     void write_descriptors();
     void wait_gpu();
+    void wait_device();
     std::uint32_t memory_type(std::uint32_t bits, VkMemoryPropertyFlags flags) const;
 
     VkPhysicalDevice physical_{};
