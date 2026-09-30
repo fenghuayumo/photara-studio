@@ -539,6 +539,8 @@ void SplatEdit::clear() {
     volume_gesture_ = VolumeGesture::move;
     volume_quat_[0] = 1.F;
     volume_quat_[1] = volume_quat_[2] = volume_quat_[3] = 0.F;
+    tools_open_ = false;
+    toolbar_visible_ = false;
 }
 
 void SplatEdit::sync(const std::string& key, const Host& host) {
@@ -1290,6 +1292,18 @@ void SplatEdit::set_tool(App& app, const Tool tool) {
         if (tool == Tool::sphere && volume_gesture_ == VolumeGesture::rotate)
             volume_gesture_ = VolumeGesture::move;
     }
+    if (tool != Tool::none) tools_open_ = true;
+}
+
+void SplatEdit::set_tools_open(App& app, const bool open) {
+    if (open == tools_open_) return;
+    if (!open) {
+        if (stroking_) abort_stroke(app);
+        polygon_.clear();
+        tool_ = Tool::none;
+        volume_drag_ = -1;
+    }
+    tools_open_ = open;
 }
 
 void SplatEdit::toggle_tool(App& app, const Tool tool) {
@@ -1373,7 +1387,14 @@ void SplatEdit::handle_keys(App& app) {
             tool_ = Tool::none;
             return;
         }
-        clear_selection();
+        if (selected_count_ > 0) {
+            clear_selection();
+            return;
+        }
+        if (tools_open_) {
+            tools_open_ = false;
+            return;
+        }
         return;
     }
 
@@ -1486,6 +1507,11 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
     if (tool_ == Tool::none) {
         const char* orbit = tr(
             "LMB orbit  |  MMB pan  |  RMB + WASD/QE fly  |  F frame  |  double-click focus");
+        if (!tools_open_) {
+            std::snprintf(
+                buffer, size, "%s  |  %s", orbit, tr("Click Edit to select Gaussians"));
+            return;
+        }
         if (selected_count_ > 0)
             std::snprintf(
                 buffer, size, "%s  |  %s  |  %s", orbit,
@@ -1531,7 +1557,7 @@ void SplatEdit::write_status(char* buffer, const std::size_t size) const {
 
 bool SplatEdit::draw_toolbar(App& app, const ImVec2 view_min, const ImVec2 view_max) {
     toolbar_visible_ = false;
-    if (!synced_) return false;
+    if (!synced_ || !tools_open_) return false;
     struct Item {
         icons::Icon icon;
         const char* id;
@@ -1727,7 +1753,7 @@ void SplatEdit::draw_overlay(
     // Left mode rail: pad 10, top 52, 44px wide, through the scene toggle.
     const bool over_rail = mouse.x <= view_min.x + 62.F &&
                            mouse.y >= view_min.y + 48.F &&
-                           mouse.y <= view_min.y + 340.F;
+                           mouse.y <= view_min.y + 400.F;
     const ImU32 stroke = gesture_stroke();
     const ImU32 fill = gesture_fill();
     const bool show_cursor = tool_ != Tool::none && !volume_tool() && in_view &&

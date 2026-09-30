@@ -50,6 +50,7 @@ enum class Icon {
     depth_through,
     box_select,
     sphere_select,
+    edit,
 };
 
 enum class ButtonStyle { normal, primary, danger };

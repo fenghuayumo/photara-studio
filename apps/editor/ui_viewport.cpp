@@ -25,6 +25,8 @@ constexpr float k_view_rail_pad = 10.F;
 constexpr float k_view_rail_top = 52.F;
 constexpr float k_view_rail_width = 44.F;
 constexpr float k_view_rail_height = 156.F;
+constexpr float k_edit_rail_gap = 8.F;
+constexpr float k_edit_rail_height = 44.F;
 constexpr float k_scene_toggle_gap = 8.F;
 constexpr float k_scene_toggle_height = 116.F;
 
@@ -36,10 +38,20 @@ ImRect view_mode_rail_rect(const ImVec2 view_min) {
         origin.y + k_view_rail_height};
 }
 
+ImRect edit_rail_rect(const ImVec2 view_min) {
+    const ImVec2 origin{
+        view_min.x + k_view_rail_pad,
+        view_min.y + k_view_rail_top + k_view_rail_height + k_edit_rail_gap};
+    return {
+        origin.x, origin.y, origin.x + k_view_rail_width,
+        origin.y + k_edit_rail_height};
+}
+
 ImRect scene_toggle_rail_rect(const ImVec2 view_min) {
     const ImVec2 origin{
         view_min.x + k_view_rail_pad,
-        view_min.y + k_view_rail_top + k_view_rail_height + k_scene_toggle_gap};
+        view_min.y + k_view_rail_top + k_view_rail_height + k_edit_rail_gap +
+            k_edit_rail_height + k_scene_toggle_gap};
     return {
         origin.x, origin.y, origin.x + k_view_rail_width,
         origin.y + k_scene_toggle_height};
@@ -47,6 +59,7 @@ ImRect scene_toggle_rail_rect(const ImVec2 view_min) {
 
 bool view_mode_rail_contains(const ImVec2 view_min, const ImVec2 mouse) {
     return view_mode_rail_rect(view_min).Contains(mouse) ||
+           edit_rail_rect(view_min).Contains(mouse) ||
            scene_toggle_rail_rect(view_min).Contains(mouse);
 }
 
@@ -147,6 +160,39 @@ bool draw_view_mode_rail(App& app, const ImVec2 view_min) {
     }
     ImGui::PopStyleVar();
     return hovered;
+}
+
+bool draw_edit_rail(App& app, const ImVec2 view_min) {
+    const ImRect rail = edit_rail_rect(view_min);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(rail.Min, rail.Max, IM_COL32(16, 18, 23, 214), 8.F);
+    draw->AddRect(rail.Min, rail.Max, theme::u32(theme::border, 0.7F), 8.F);
+
+    constexpr float k_btn = 32.F;
+    constexpr float k_inner = 6.F;
+    const ImVec2 button_min{rail.Min.x + k_inner, rail.Min.y + k_inner};
+    const bool training =
+        app.job.running() && app.active_job == JobKind::train;
+    const bool can_edit = !training && app.has_model;
+    const bool open = can_edit && app.splat_edit.tools_open();
+    const char* tooltip = training
+        ? tr("Available after training finishes")
+        : (can_edit
+               ? (open ? tr("Hide edit tools") : tr("Edit Gaussians"))
+               : tr("Train 3DGS to edit Gaussians"));
+    if (rail_icon_button(
+            "##viz_edit", icons::Icon::edit, button_min, {k_btn, k_btn}, open,
+            can_edit, tooltip)) {
+        if (open) {
+            app.splat_edit.set_tools_open(app, false);
+        } else {
+            if (app.view_mode != VisualizationMode::splat &&
+                app.view_mode != VisualizationMode::rings)
+                set_visualization_mode(app, VisualizationMode::splat);
+            app.splat_edit.set_tools_open(app, true);
+        }
+    }
+    return ImGui::IsItemHovered();
 }
 
 bool draw_scene_toggle_rail(App& app, const ImVec2 view_min) {
@@ -1442,6 +1488,7 @@ void draw_viewport_panel(App& app) {
     } else if (app.view_mode == VisualizationMode::mesh) {
         draw_sparse_tab(app, view_min, view_max);
         draw_view_mode_rail(app, view_min);
+        draw_edit_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if ((app.view_mode == VisualizationMode::splat ||
                 app.view_mode == VisualizationMode::rings) &&
@@ -1450,16 +1497,19 @@ void draw_viewport_panel(App& app) {
         draw_splat_render_tab(
             app, view_min, view_max, app.view_mode == VisualizationMode::rings);
         draw_view_mode_rail(app, view_min);
+        draw_edit_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if (live_preview_active(app) &&
                app.settings.training_backend == 1 &&
                app.view_mode == VisualizationMode::points) {
         draw_sparse_tab(app, view_min, view_max);
         draw_view_mode_rail(app, view_min);
+        draw_edit_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else if (live_preview_active(app) && !waiting_for_train_preview(app)) {
         draw_training_tab(app, view_min, view_max);
         draw_view_mode_rail(app, view_min);
+        draw_edit_rail(app, view_min);
         draw_scene_toggle_rail(app, view_min);
     } else {
         draw_sparse_tab(app, view_min, view_max);
@@ -1467,6 +1517,7 @@ void draw_viewport_panel(App& app) {
             alignment_job_running(app) && !app.scene.has_points();
         if (!align_waiting) {
             draw_view_mode_rail(app, view_min);
+            draw_edit_rail(app, view_min);
             draw_scene_toggle_rail(app, view_min);
         }
     }

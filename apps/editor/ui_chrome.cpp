@@ -3,6 +3,7 @@
 #include "file_dialogs.hpp"
 #include "i18n.hpp"
 #include "icons.hpp"
+#include "vulkan_backend.hpp"
 #include "core/version.hpp"
 
 #include "imgui_internal.h"
@@ -877,6 +878,85 @@ void draw_status_bar(App& app) {
             "%s", tr("Training compute. Click to open Preferences."));
     }
     if (backend_clicked) open_preferences(app, 0);
+
+    std::uint64_t vram_used = 0;
+    std::uint64_t vram_total = 0;
+    if (gpu::query_vram(vram_used, vram_total) && vram_total > 0) {
+        const auto format_gb = [](const std::uint64_t bytes) {
+            char buf[24];
+            std::snprintf(
+                buf, sizeof(buf), "%.1f GB",
+                static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+            return std::string(buf);
+        };
+        const std::string used_gb = format_gb(vram_used);
+        const std::string total_gb = format_gb(vram_total);
+        const std::string free_gb = format_gb(vram_total - vram_used);
+        const double pct = 100.0 * static_cast<double>(vram_used) /
+                           static_cast<double>(vram_total);
+        const float fraction = static_cast<float>(
+            std::clamp(vram_used / static_cast<double>(vram_total), 0.0, 1.0));
+        char vram_text[80];
+        std::snprintf(
+            vram_text, sizeof(vram_text), tr("VRAM %s / %s  %.0f%%"),
+            used_gb.c_str(), total_gb.c_str(), pct);
+        constexpr float k_vram_icon = 15.F;
+        constexpr float k_vram_gap = 6.F;
+        constexpr float k_vram_bar_w = 84.F;
+        constexpr float k_vram_bar_h = 8.F;
+        const float vram_width =
+            k_vram_icon + k_vram_gap + k_vram_bar_w + k_vram_gap +
+            ImGui::CalcTextSize(vram_text).x;
+        right -= vram_width + 22.F;
+        if (right > 240.F) {
+            draw_status_separator(right + vram_width + 11.F, height);
+            ImGui::SetCursorPos({right, 0.F});
+            ImGui::InvisibleButton("##vram_status", {vram_width, height});
+            if (ImGui::IsItemHovered()) {
+                char tip[128];
+                std::snprintf(
+                    tip, sizeof(tip), tr("Used %s  ·  Free %s  ·  %s total"),
+                    used_gb.c_str(), free_gb.c_str(), total_gb.c_str());
+                ImGui::SetTooltip("%s", tip);
+            }
+            const ImVec4 fill = pct >= 90.0
+                ? theme::danger
+                : (pct >= 75.0 ? theme::warning : theme::accent);
+            const ImVec4 vram_colour = pct >= 90.0
+                ? theme::danger
+                : (pct >= 75.0 ? theme::warning
+                               : (busy ? theme::text_bright : theme::text_muted));
+            ImGui::SetCursorPos({right, centre_y});
+            icons::inline_icon(
+                icons::Icon::gpu, theme::u32(vram_colour), k_vram_icon);
+            const ImVec2 origin = ImGui::GetWindowPos();
+            const float bar_x = origin.x + right + k_vram_icon + k_vram_gap;
+            const float bar_y = origin.y + (height - k_vram_bar_h) * 0.5F;
+            const ImVec2 bar_min{bar_x, bar_y};
+            const ImVec2 bar_max{bar_x + k_vram_bar_w, bar_y + k_vram_bar_h};
+            const float rounding = k_vram_bar_h * 0.5F;
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(
+                bar_min, bar_max, IM_COL32(255, 255, 255, 22), rounding);
+            draw->AddRect(
+                bar_min, bar_max, theme::u32(theme::border, 0.95F), rounding);
+            if (fraction > 0.F) {
+                const float filled = std::max(
+                    k_vram_bar_h, k_vram_bar_w * fraction);
+                draw->PushClipRect(bar_min, bar_max, true);
+                draw->AddRectFilled(
+                    bar_min, {bar_min.x + filled, bar_max.y}, theme::u32(fill),
+                    rounding);
+                draw->PopClipRect();
+            }
+            ImGui::SetCursorPos(
+                {right + k_vram_icon + k_vram_gap + k_vram_bar_w + k_vram_gap,
+                 centre_y});
+            ImGui::PushStyleColor(ImGuiCol_Text, vram_colour);
+            ImGui::TextUnformatted(vram_text);
+            ImGui::PopStyleColor();
+        }
+    }
 
     const double elapsed = app.monitor.elapsed_seconds();
     if (elapsed >= 0.0) {

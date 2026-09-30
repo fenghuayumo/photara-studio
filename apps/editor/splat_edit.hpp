@@ -61,6 +61,9 @@ public:
         return count_ > 0 && tool_ != Tool::none;
     }
     [[nodiscard]] bool front_only() const noexcept { return front_only_; }
+    // Top-of-viewport selection tools. Off by default after a model loads.
+    [[nodiscard]] bool tools_open() const noexcept { return tools_open_; }
+    void set_tools_open(App& app, bool open);
 
     // Alt+wheel over the brush resizes it. True when the wheel should not zoom.
     bool consume_alt_wheel(bool pointer_in_view);
@@ -221,6 +224,7 @@ private:
     ImVec2 toolbar_min_{};
     ImVec2 toolbar_max_{};
     bool toolbar_visible_{};
+    bool tools_open_{};
 };
 
 }  // namespace editor

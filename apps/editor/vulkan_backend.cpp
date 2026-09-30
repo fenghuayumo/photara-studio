@@ -33,6 +33,7 @@ std::uint64_t g_device_luid{};
 std::uint32_t g_device_node_mask{};
 std::array<std::uint8_t, VK_UUID_SIZE> g_device_uuid{};
 bool g_device_uuid_valid{};
+bool g_memory_budget{};
 
 // The active shared-image state consulted by present().
 VkImage g_external_image{};
@@ -202,6 +203,54 @@ ImGui_ImplVulkanH_Window& window() { return g_window; }
 std::uint64_t device_luid() { return g_device_luid; }
 std::uint32_t device_node_mask() { return g_device_node_mask; }
 
+bool query_vram(std::uint64_t& used, std::uint64_t& total) {
+    if (g_physical_device == VK_NULL_HANDLE || !g_memory_budget) return false;
+
+    static std::uint64_t cached_used{};
+    static std::uint64_t cached_total{};
+    static bool cached_ok{};
+    static auto cached_at = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (cached_ok && now - cached_at < std::chrono::milliseconds(250)) {
+        used = cached_used;
+        total = cached_total;
+        return true;
+    }
+
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    properties.pNext = &budget;
+    vkGetPhysicalDeviceMemoryProperties2(g_physical_device, &properties);
+
+    std::uint32_t best = UINT32_MAX;
+    VkDeviceSize best_budget = 0;
+    const VkPhysicalDeviceMemoryProperties& heaps = properties.memoryProperties;
+    for (std::uint32_t i = 0; i < heaps.memoryHeapCount; ++i) {
+        if ((heaps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0)
+            continue;
+        if (budget.heapBudget[i] > best_budget) {
+            best_budget = budget.heapBudget[i];
+            best = i;
+        }
+    }
+    if (best == UINT32_MAX || best_budget == 0) {
+        cached_ok = false;
+        return false;
+    }
+
+    cached_used = budget.heapUsage[best];
+    cached_total = budget.heapBudget[best];
+    if (cached_used > cached_total) cached_used = cached_total;
+    cached_ok = cached_total > 0;
+    cached_at = now;
+    if (!cached_ok) return false;
+    used = cached_used;
+    total = cached_total;
+    return true;
+}
+
 std::string device_uuid_hex() {
     if (!g_device_uuid_valid) return {};
     static constexpr char k_hex[] = "0123456789abcdef";
@@ -264,19 +313,7 @@ void create_context(ImVector<const char*> extensions) {
     queue_info.queueFamilyIndex = g_queue_family;
     queue_info.queueCount = 1;
     queue_info.pQueuePriorities = &priority;
-#if defined(_WIN32)
-    const char* required_device_extensions[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
-        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME};
-    const std::uint32_t required_device_extension_count =
-        static_cast<std::uint32_t>(std::size(required_device_extensions));
-    const char* const* required_device_extension_names =
-        required_device_extensions;
-#else
+
     std::uint32_t advertised_count = 0;
     vkEnumerateDeviceExtensionProperties(
         g_physical_device, nullptr, &advertised_count, nullptr);
@@ -290,8 +327,18 @@ void create_context(ImVector<const char*> extensions) {
             if (std::strcmp(property.extensionName, name) == 0) return true;
         return false;
     };
+
     std::vector<const char*> required_device_extensions;
     required_device_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+#if defined(_WIN32)
+    required_device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+    required_device_extensions.push_back(
+        VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+    required_device_extensions.push_back(
+        VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
+    required_device_extensions.push_back(
+        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+#else
     if (advertised_has(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME))
         required_device_extensions.push_back(
             VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
@@ -304,13 +351,14 @@ void create_context(ImVector<const char*> extensions) {
     if (advertised_has(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
         required_device_extensions.push_back(
             VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+#endif
     required_device_extensions.push_back(
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
-    const std::uint32_t required_device_extension_count =
-        static_cast<std::uint32_t>(required_device_extensions.size());
-    const char* const* required_device_extension_names =
-        required_device_extensions.data();
-#endif
+    g_memory_budget = advertised_has(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    if (g_memory_budget)
+        required_device_extensions.push_back(
+            VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+
     VkPhysicalDeviceTimelineSemaphoreFeatures timeline{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
     timeline.timelineSemaphore = VK_TRUE;
@@ -318,8 +366,9 @@ void create_context(ImVector<const char*> extensions) {
     device_info.pNext = &timeline;
     device_info.queueCreateInfoCount = 1;
     device_info.pQueueCreateInfos = &queue_info;
-    device_info.enabledExtensionCount = required_device_extension_count;
-    device_info.ppEnabledExtensionNames = required_device_extension_names;
+    device_info.enabledExtensionCount =
+        static_cast<std::uint32_t>(required_device_extensions.size());
+    device_info.ppEnabledExtensionNames = required_device_extensions.data();
     check(vkCreateDevice(
         g_physical_device, &device_info, nullptr, &g_device));
     vkGetDeviceQueue(g_device, g_queue_family, 0, &g_queue);
@@ -423,6 +472,7 @@ void destroy_context() {
     if (g_instance != VK_NULL_HANDLE) vkDestroyInstance(g_instance, nullptr);
     g_instance = {};
     g_physical_device = {};
+    g_memory_budget = false;
 }
 
 void present(ImDrawData* draw, const ImVec4& clear_colour) {

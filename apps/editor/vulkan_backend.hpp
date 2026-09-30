@@ -62,6 +62,10 @@ void present(ImDrawData* draw, const ImVec4& clear_colour);
 
 std::uint32_t memory_type(std::uint32_t bits, VkMemoryPropertyFlags flags);
 
+// Device-local heap usage from VK_EXT_memory_budget. False when the adapter
+// does not report a budget; used/total stay unchanged.
+bool query_vram(std::uint64_t& used, std::uint64_t& total);
+
 // A sampled RGBA8 image plus its ImGui descriptor.
 struct PreviewTexture {
     VkImage image{};

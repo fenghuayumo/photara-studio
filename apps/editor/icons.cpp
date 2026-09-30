@@ -662,6 +662,25 @@ void draw(
                 thickness);
             break;
         }
+        case Icon::edit: {
+            const ImVec2 tip = point(min, max, 0.80F, 0.20F);
+            const ImVec2 neck_a = point(min, max, 0.64F, 0.24F);
+            const ImVec2 neck_b = point(min, max, 0.76F, 0.36F);
+            const ImVec2 back_a = point(min, max, 0.22F, 0.66F);
+            const ImVec2 back_b = point(min, max, 0.34F, 0.78F);
+            const ImVec2 eraser_a = point(min, max, 0.16F, 0.72F);
+            const ImVec2 eraser_b = point(min, max, 0.28F, 0.84F);
+            draw_list->AddTriangleFilled(tip, neck_a, neck_b, colour);
+            draw_list->AddLine(neck_a, back_a, colour, thickness);
+            draw_list->AddLine(neck_b, back_b, colour, thickness);
+            draw_list->AddLine(back_a, back_b, colour, thickness);
+            draw_list->AddLine(eraser_a, back_a, colour, thickness);
+            draw_list->AddLine(eraser_b, back_b, colour, thickness);
+            draw_list->AddLine(eraser_a, eraser_b, colour, thickness);
+            line(draw_list, min, max, 0.58F, 0.30F, 0.70F, 0.42F, colour,
+                 thickness);
+            break;
+        }
     }
 }
 
