@@ -182,72 +182,55 @@ if(PHOTARA_ENABLE_FEATURES)
             sift_match_tiles_dp4a_160.hlsl
             sift_match_wave_dp4a.hlsl
             sift_match_finish.hlsl)
-        set(PHOTARA_FEATURE_SHADER_BINARIES)
-        set(PHOTARA_FEATURE_SHADER_HEADERS)
         # Every shader includes sift_common.hlsli, and the dp4a variant includes
         # sift_match_tiles.hlsl; track them all so a shared-file edit rebuilds
-        # the binaries that include it.
+        # the binaries that include it. Integer-dot-product variants need SM 6.4
+        # and emit SPIR-V 1.5, which the host only selects when the device has it.
         file(GLOB PHOTARA_FEATURE_SHADER_DEPENDS
             "${PHOTARA_FEATURE_SHADER_DIR}/*.hlsl"
             "${PHOTARA_FEATURE_SHADER_DIR}/*.hlsli")
+        set(PHOTARA_FEATURE_SHADER_CS60)
+        set(PHOTARA_FEATURE_SHADER_DP4A)
         foreach(shader IN LISTS PHOTARA_FEATURE_SHADER_SOURCES)
-            # The integer-dot-product variants need SM 6.4 and emit SPIR-V 1.5,
-            # which the host only selects on devices that support it.
-            set(PHOTARA_FEATURE_SHADER_PROFILE cs_6_0)
-            set(PHOTARA_FEATURE_SHADER_ENV vulkan1.1)
             if(shader MATCHES "dp4a")
-                set(PHOTARA_FEATURE_SHADER_PROFILE cs_6_4)
-                set(PHOTARA_FEATURE_SHADER_ENV vulkan1.2)
+                list(APPEND PHOTARA_FEATURE_SHADER_DP4A
+                    "${PHOTARA_FEATURE_SHADER_DIR}/${shader}")
+            else()
+                list(APPEND PHOTARA_FEATURE_SHADER_CS60
+                    "${PHOTARA_FEATURE_SHADER_DIR}/${shader}")
             endif()
-            set(shader_binary
-                "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan/${shader}.spv")
-            set(shader_header
-                "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan/${shader}.embedded.hpp")
-            string(MAKE_C_IDENTIFIER "${shader}_spv" shader_variable)
-            add_custom_command(
-                OUTPUT "${shader_binary}"
-                COMMAND "${CMAKE_COMMAND}" -E make_directory
-                        "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan"
-                COMMAND "${PHOTARA_FEATURES_DXC_EXECUTABLE}"
-                        -spirv -T ${PHOTARA_FEATURE_SHADER_PROFILE} -E main -O3
-                        -fspv-target-env=${PHOTARA_FEATURE_SHADER_ENV}
-                        -fvk-use-dx-layout
-                        -I "${PHOTARA_FEATURE_SHADER_DIR}"
-                        "${PHOTARA_FEATURE_SHADER_DIR}/${shader}"
-                        -Fo "${shader_binary}"
-                DEPENDS
-                    "${PHOTARA_FEATURE_SHADER_DIR}/${shader}"
-                    ${PHOTARA_FEATURE_SHADER_DEPENDS}
-                VERBATIM)
-            add_custom_command(
-                OUTPUT "${shader_header}"
-                COMMAND "${CMAKE_COMMAND}"
-                        -DINPUT_FILE=${shader_binary}
-                        -DOUTPUT_FILE=${shader_header}
-                        -DVARIABLE_NAME=${shader_variable}
-                        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spir_v.cmake"
-                DEPENDS
-                    "${shader_binary}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spir_v.cmake"
-                VERBATIM)
-            list(APPEND PHOTARA_FEATURE_SHADER_BINARIES "${shader_binary}")
-            list(APPEND PHOTARA_FEATURE_SHADER_HEADERS "${shader_header}")
         endforeach()
-        add_custom_target(photara_feature_shaders
-            DEPENDS ${PHOTARA_FEATURE_SHADER_BINARIES}
-                    ${PHOTARA_FEATURE_SHADER_HEADERS})
-        target_sources(photara_features PRIVATE
-            src/features/vulkan/vk_context.cpp
-            src/features/vulkan/sift_vk.cpp
-            src/features/vulkan/matcher_vk.cpp)
-        add_dependencies(photara_features photara_feature_shaders)
-        target_include_directories(photara_features PRIVATE
-            "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan")
         if(NOT TARGET photara_vk::photara_vk)
             add_subdirectory(
                 "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/photara_vk"
                 "${CMAKE_CURRENT_BINARY_DIR}/photara_vk")
         endif()
+        if(NOT PHOTARA_VK_DXC)
+            set(PHOTARA_VK_DXC "${PHOTARA_FEATURES_DXC_EXECUTABLE}")
+        endif()
+        include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
+        target_sources(photara_features PRIVATE
+            src/features/vulkan/vk_context.cpp
+            src/features/vulkan/sift_vk.cpp
+            src/features/vulkan/matcher_vk.cpp)
+        photara_vk_embed_hlsl(
+            TARGET photara_features
+            SHADERS ${PHOTARA_FEATURE_SHADER_CS60}
+            PROFILE cs_6_0
+            ENV vulkan1.1
+            INCLUDE_DIR "${PHOTARA_FEATURE_SHADER_DIR}"
+            OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan"
+            DEPENDS ${PHOTARA_FEATURE_SHADER_DEPENDS})
+        photara_vk_embed_hlsl(
+            TARGET photara_features
+            SHADERS ${PHOTARA_FEATURE_SHADER_DP4A}
+            PROFILE cs_6_4
+            ENV vulkan1.2
+            INCLUDE_DIR "${PHOTARA_FEATURE_SHADER_DIR}"
+            OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan"
+            DEPENDS ${PHOTARA_FEATURE_SHADER_DEPENDS})
+        target_include_directories(photara_features PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}/features_vulkan")
         target_link_libraries(photara_features PRIVATE Vulkan::Vulkan photara_vk::photara_vk)
         target_compile_definitions(photara_features PRIVATE
             PHOTARA_HAS_VULKAN_FEATURES=1)

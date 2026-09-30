@@ -90,70 +90,32 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction_atomic.hlsl"
             "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_preview_pack.hlsl")
 
-        set(SPLAT_DRENDER_SHADER_BINARIES)
-        set(SPLAT_DRENDER_SHADER_HEADERS)
-        foreach(shader IN LISTS SPLAT_DRENDER_VULKAN_SHADERS)
-            if(IS_ABSOLUTE "${shader}")
-                set(shader_source "${shader}")
-            else()
-                set(shader_source "${CMAKE_CURRENT_SOURCE_DIR}/${shader}")
-            endif()
-            get_filename_component(shader_name "${shader}" NAME)
-            set(shader_dependencies
-                "${shader_source}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
-                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli")
-            if(shader_name STREQUAL "splat_blend_backward_no_geometry.hlsl")
-                list(APPEND shader_dependencies
-                     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl")
-            endif()
-            if(shader_name STREQUAL "splat_color_correction_atomic.hlsl")
-                list(APPEND shader_dependencies
-                    "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl")
-            endif()
-            if(shader_name STREQUAL "splat_blend_no_geometry.hlsl" OR
-               shader_name STREQUAL "splat_blend_training.hlsl")
-                list(APPEND shader_dependencies
-                     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend.hlsl")
-            endif()
-            set(shader_binary "${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader_name}.spv")
-            add_custom_command(
-                OUTPUT "${shader_binary}"
-                COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders"
-                COMMAND "${SPLAT_DRENDER_DXC_EXECUTABLE}"
-                        -spirv -T cs_6_0 -E main -O3
-                        -fspv-target-env=vulkan1.2
-                        -fvk-use-dx-layout
-                        -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
-                        "${shader_source}"
-                        -Fo "${shader_binary}"
-                DEPENDS ${shader_dependencies}
-                VERBATIM)
-            list(APPEND SPLAT_DRENDER_SHADER_BINARIES "${shader_binary}")
-            string(MAKE_C_IDENTIFIER "${shader_name}_spv" shader_variable)
-            set(shader_embedded_header "${CMAKE_CURRENT_BINARY_DIR}/generated/${shader_name}.embedded.hpp")
-            add_custom_command(
-                OUTPUT "${shader_embedded_header}"
-                COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated"
-                COMMAND "${CMAKE_COMMAND}"
-                        -DINPUT_FILE=${shader_binary}
-                        -DOUTPUT_FILE=${shader_embedded_header}
-                        -DVARIABLE_NAME=${shader_variable}
-                        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spir_v.cmake"
-                DEPENDS "${shader_binary}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spir_v.cmake"
-                VERBATIM)
-            list(APPEND SPLAT_DRENDER_SHADER_HEADERS "${shader_embedded_header}")
-        endforeach()
-
-        add_custom_target(splat_drender_shaders
-            DEPENDS ${SPLAT_DRENDER_SHADER_BINARIES} ${SPLAT_DRENDER_SHADER_HEADERS})
+        if(NOT TARGET photara_vk::photara_vk)
+            add_subdirectory(
+                "${CMAKE_CURRENT_SOURCE_DIR}/../photara_vk"
+                "${CMAKE_CURRENT_BINARY_DIR}/photara_vk")
+        endif()
+        if(NOT PHOTARA_VK_DXC)
+            set(PHOTARA_VK_DXC "${SPLAT_DRENDER_DXC_EXECUTABLE}")
+        endif()
+        include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
 
         add_library(splat_drender_vulkan STATIC
             src/vulkan/context.cpp
             src/vulkan/external_preview.cpp
             src/vulkan/splat_rasterizer.cpp)
         add_library(splat_drender::vulkan ALIAS splat_drender_vulkan)
-        add_dependencies(splat_drender_vulkan splat_drender_shaders)
+        photara_vk_embed_hlsl(
+            TARGET splat_drender_vulkan
+            SHADERS ${SPLAT_DRENDER_VULKAN_SHADERS}
+            INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+            OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated"
+            DEPENDS
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl"
+                "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl")
 
         target_include_directories(splat_drender_vulkan
             PRIVATE
@@ -163,11 +125,6 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                 $<INSTALL_INTERFACE:include>)
         target_compile_features(splat_drender_vulkan PUBLIC cxx_std_20)
-        if(NOT TARGET photara_vk::photara_vk)
-            add_subdirectory(
-                "${CMAKE_CURRENT_SOURCE_DIR}/../photara_vk"
-                "${CMAKE_CURRENT_BINARY_DIR}/photara_vk")
-        endif()
         target_link_libraries(splat_drender_vulkan PUBLIC Vulkan::Vulkan photara_vk::photara_vk)
         target_compile_definitions(splat_drender_vulkan
             PRIVATE SPLAT_DRENDER_ENABLE_VALIDATION=$<BOOL:${SPLAT_DRENDER_ENABLE_VALIDATION}>)

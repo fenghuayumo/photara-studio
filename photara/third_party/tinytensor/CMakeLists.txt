@@ -147,61 +147,34 @@ if(TINYTENSOR_ENABLE_VULKAN)
     list(APPEND TINYTENSOR_SHADER_SOURCES reduce_axis.hlsl)
     list(APPEND TINYTENSOR_SHADER_SOURCES cumsum_scan.hlsl)
     list(APPEND TINYTENSOR_SHADER_SOURCES constrain_scale_ratio.hlsl)
-    set(TINYTENSOR_SHADER_BINARIES)
-    set(TINYTENSOR_SHADER_EMBEDDED_HEADERS)
+    set(TINYTENSOR_SHADER_PATHS)
     foreach(shader IN LISTS TINYTENSOR_SHADER_SOURCES)
-        set(shader_binary "${CMAKE_CURRENT_BINARY_DIR}/vulkan/shaders/${shader}.spv")
-        set(shader_embedded "${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated/${shader}.embedded.hpp")
-        string(MAKE_C_IDENTIFIER "${shader}_spv" shader_variable)
-        add_custom_command(
-            OUTPUT "${shader_binary}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory
-                    "${CMAKE_CURRENT_BINARY_DIR}/vulkan/shaders"
-            COMMAND "${TINYTENSOR_DXC_EXECUTABLE}"
-                    -spirv -T cs_6_0 -E main -O3
-                    -fspv-target-env=vulkan1.2
-                    -fvk-use-dx-layout
-                    -I "${TINYTENSOR_SHADER_DIR}"
-                    "${TINYTENSOR_SHADER_DIR}/${shader}"
-                    -Fo "${shader_binary}"
-            DEPENDS
-                "${TINYTENSOR_SHADER_DIR}/${shader}"
-                "${TINYTENSOR_SHADER_DIR}/common.hlsli"
-            VERBATIM)
-        add_custom_command(
-            OUTPUT "${shader_embedded}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory
-                    "${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated"
-            COMMAND "${CMAKE_COMMAND}"
-                    -DINPUT_FILE=${shader_binary}
-                    -DOUTPUT_FILE=${shader_embedded}
-                    -DVARIABLE_NAME=${shader_variable}
-                    -P "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/cmake/embed_spir_v.cmake"
-            DEPENDS
-                "${shader_binary}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/cmake/embed_spir_v.cmake"
-            VERBATIM)
-        list(APPEND TINYTENSOR_SHADER_BINARIES "${shader_binary}")
-        list(APPEND TINYTENSOR_SHADER_EMBEDDED_HEADERS "${shader_embedded}")
+        list(APPEND TINYTENSOR_SHADER_PATHS "${TINYTENSOR_SHADER_DIR}/${shader}")
     endforeach()
-
-    add_custom_target(tinytensor_shaders
-        DEPENDS ${TINYTENSOR_SHADER_BINARIES} ${TINYTENSOR_SHADER_EMBEDDED_HEADERS})
-
-    add_library(tinytensor_vulkan OBJECT
-        vulkan/runtime/runtime.cpp
-        vulkan/ops.cpp)
-    add_dependencies(tinytensor_vulkan tinytensor_shaders)
-    target_include_directories(tinytensor_vulkan
-        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-        PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated)
-    target_compile_features(tinytensor_vulkan PUBLIC cxx_std_20)
-    target_compile_definitions(tinytensor_vulkan PUBLIC TINYTENSOR_HAS_VULKAN=1)
     if(NOT TARGET photara_vk::photara_vk)
         add_subdirectory(
             "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/photara_vk"
             "${CMAKE_CURRENT_BINARY_DIR}/photara_vk")
     endif()
+    if(NOT PHOTARA_VK_DXC)
+        set(PHOTARA_VK_DXC "${TINYTENSOR_DXC_EXECUTABLE}")
+    endif()
+    include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
+
+    add_library(tinytensor_vulkan OBJECT
+        vulkan/runtime/runtime.cpp
+        vulkan/ops.cpp)
+    photara_vk_embed_hlsl(
+        TARGET tinytensor_vulkan
+        SHADERS ${TINYTENSOR_SHADER_PATHS}
+        INCLUDE_DIR "${TINYTENSOR_SHADER_DIR}"
+        OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated"
+        DEPENDS "${TINYTENSOR_SHADER_DIR}/common.hlsli")
+    target_include_directories(tinytensor_vulkan
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+        PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan/generated)
+    target_compile_features(tinytensor_vulkan PUBLIC cxx_std_20)
+    target_compile_definitions(tinytensor_vulkan PUBLIC TINYTENSOR_HAS_VULKAN=1)
     target_link_libraries(tinytensor_vulkan PUBLIC Vulkan::Vulkan photara_vk::photara_vk)
     set_target_properties(tinytensor_vulkan PROPERTIES FOLDER "external")
     if(MSVC)
