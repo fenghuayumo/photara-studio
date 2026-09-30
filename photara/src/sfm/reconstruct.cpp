@@ -1304,6 +1304,8 @@ unsigned prune_unsupported_registrations(
     const double threshold =
         std::max(maximum_reprojection_error_pixels, 0.0);
     std::vector<unsigned> support(scene.images.size(), 0);
+    std::vector<std::unordered_set<unsigned>> support_cells(scene.images.size());
+    std::vector<std::vector<Vec3>> support_points(scene.images.size());
     for (const Track& track : scene.tracks) {
         if (!track.is_triangulated() || !track.position.allFinite()) continue;
         const std::size_t inlier_count = std::min<std::size_t>(
@@ -1323,10 +1325,56 @@ unsigned prune_unsupported_registrations(
             const auto& feature = image.features.keypoints[observation.feature_id];
             const double error =
                 (projected - Vec2(feature.x, feature.y)).norm();
-            if (std::isfinite(error) && error <= threshold)
+            if (std::isfinite(error) && error <= threshold) {
                 ++support[observation.image_id];
+                const unsigned x = static_cast<unsigned>(std::clamp(
+                    4.F * feature.x / std::max(1U, scene.cameras[image.camera_id].width),
+                    0.F, 3.F));
+                const unsigned y = static_cast<unsigned>(std::clamp(
+                    4.F * feature.y / std::max(1U, scene.cameras[image.camera_id].height),
+                    0.F, 3.F));
+                support_cells[observation.image_id].insert(y * 4 + x);
+                support_points[observation.image_id].push_back(track.position);
+            }
         }
     }
+
+    std::vector<unsigned> sequential_rotation_witnesses(scene.images.size(), 0);
+    const auto pair_rotation_error = [&](const ImagePair& pair) {
+        const Mat3 actual = scene.images[pair.id2].pose.R *
+            scene.images[pair.id1].pose.R.transpose();
+        const Mat3 delta = actual * pair.relative_pose->R.transpose();
+        const double cosine = std::clamp(
+            (delta.trace() - 1.0) * 0.5, -1.0, 1.0);
+        return std::acos(cosine) * 180.0 / std::numbers::pi;
+    };
+    const auto nearby = [](const Index first, const Index second) {
+        return (first > second ? first - second : second - first) <= 4;
+    };
+    for (const ImagePair& pair : scene.pairs) {
+        if (!pair.active || !pair.relative_pose || pair.num_inliers() < 30 ||
+            pair.id1 >= scene.images.size() || pair.id2 >= scene.images.size() ||
+            !scene.images[pair.id1].registered ||
+            !scene.images[pair.id2].registered ||
+            !nearby(pair.id1, pair.id2) || pair_rotation_error(pair) > 5.0)
+            continue;
+        ++sequential_rotation_witnesses[pair.id1];
+        ++sequential_rotation_witnesses[pair.id2];
+    }
+    const auto well_conditioned = [&](const std::size_t image_id) {
+        if (support_points[image_id].size() < 3) return false;
+        Vec3 mean = Vec3::Zero();
+        for (const Vec3& point : support_points[image_id]) mean += point;
+        mean /= static_cast<double>(support_points[image_id].size());
+        Mat3 scatter = Mat3::Zero();
+        for (const Vec3& point : support_points[image_id])
+            scatter += (point - mean) * (point - mean).transpose();
+        const Eigen::SelfAdjointEigenSolver<Mat3> solver(scatter);
+        return solver.info() == Eigen::Success &&
+            solver.eigenvalues().allFinite() &&
+            solver.eigenvalues()[2] > 0.0 &&
+            solver.eigenvalues()[1] > 1e-4 * solver.eigenvalues()[2];
+    };
 
     std::vector<std::uint8_t> removed(scene.images.size(), 0);
     unsigned invalidated = 0;
@@ -1334,6 +1382,48 @@ unsigned prune_unsupported_registrations(
         Image& image = scene.images[image_id];
         if (!image.registered || support[image_id] >= minimum_observations)
             continue;
+        const bool spatially_supported =
+            support[image_id] >= std::max(20U, minimum_observations * 2U / 3U) &&
+            support_cells[image_id].size() >= 3 &&
+            well_conditioned(image_id);
+        if (spatially_supported) {
+            core::Logger::instance().info(
+                "final registration audit: retained spatially supported image=",
+                image.path.filename(), " support=", support[image_id],
+                " cells=", support_cells[image_id].size());
+            continue;
+        }
+        bool sequentially_supported =
+            support[image_id] >= 8 && support_cells[image_id].size() >= 2 &&
+            well_conditioned(image_id) &&
+            sequential_rotation_witnesses[image_id] >= 2;
+        if (!sequentially_supported && support[image_id] >= 8 &&
+            support_cells[image_id].size() >= 2 && well_conditioned(image_id)) {
+            for (const ImagePair& pair : scene.pairs) {
+                if (!pair.active || !pair.relative_pose ||
+                    pair.num_inliers() < 100 || pair.id1 >= scene.images.size() ||
+                    pair.id2 >= scene.images.size())
+                    continue;
+                const Index other = pair.id1 == image_id ? pair.id2 :
+                    (pair.id2 == image_id ? pair.id1 : k_invalid);
+                if (other == k_invalid || !scene.images[other].registered ||
+                    !nearby(static_cast<Index>(image_id), other) ||
+                    sequential_rotation_witnesses[other] < 2 ||
+                    pair_rotation_error(pair) > 2.0)
+                    continue;
+                sequentially_supported = true;
+                break;
+            }
+        }
+        if (sequentially_supported) {
+            core::Logger::instance().info(
+                "final registration audit: retained sequential branch image=",
+                image.path.filename(), " support=", support[image_id],
+                " cells=", support_cells[image_id].size(),
+                " rotation_witnesses=",
+                sequential_rotation_witnesses[image_id]);
+            continue;
+        }
         removed[image_id] = 1;
         image.registered = false;
         image.pose = Pose3D::identity();

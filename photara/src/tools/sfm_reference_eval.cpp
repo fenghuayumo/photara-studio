@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -80,6 +81,33 @@ int main(int argc, char** argv) {
         for (std::size_t i = 0; i < reference.scene.views.size(); ++i)
             reference_by_name.emplace(image_key(reference.scene.views[i].path), i);
 
+        std::unordered_set<std::string> reconstruction_names;
+        std::vector<std::string> reference_missing;
+        std::vector<std::string> reconstruction_missing;
+        std::vector<std::string> reconstruction_missing_from_reference;
+        for (const auto& image : reconstruction.images) {
+            const std::string key = image_key(image.path);
+            reconstruction_names.insert(key);
+            if (!image.registered) {
+                reconstruction_missing.push_back(image.path.filename().string());
+                if (reference_by_name.contains(key))
+                    reconstruction_missing_from_reference.push_back(
+                        image.path.filename().string());
+            }
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(argv[2])) {
+            if (!entry.is_regular_file()) continue;
+            const std::string key = image_key(entry.path());
+            if (reconstruction_names.contains(key) &&
+                !reference_by_name.contains(key))
+                reference_missing.push_back(entry.path().filename().string());
+        }
+        std::sort(reference_missing.begin(), reference_missing.end());
+        std::sort(reconstruction_missing.begin(), reconstruction_missing.end());
+        std::sort(
+            reconstruction_missing_from_reference.begin(),
+            reconstruction_missing_from_reference.end());
+
         std::vector<Correspondence> common;
         for (const auto& image : reconstruction.images) {
             if (!image.registered || image.camera_id >= reconstruction.cameras.size())
@@ -142,6 +170,7 @@ int main(int argc, char** argv) {
         std::vector<double> centers;
         std::vector<double> rotations;
         std::vector<double> focal_relative;
+        std::vector<std::pair<double, std::string>> worst_centers;
         std::vector<std::pair<double, std::string>> worst_rotations;
         centers.reserve(common.size());
         rotations.reserve(common.size());
@@ -151,6 +180,7 @@ int main(int argc, char** argv) {
                 (alignment.apply(common[i].source_center) -
                  common[i].reference_center).norm() /
                 step_median);
+            worst_centers.emplace_back(centers.back(), common[i].name);
             const Mat3 aligned_rotation =
                 common[i].source_rotation * alignment.R.transpose();
             rotations.push_back(rotation_error_deg(
@@ -165,6 +195,9 @@ int main(int argc, char** argv) {
 
         std::size_t triangulated = 0;
         std::size_t observations = 0;
+        std::size_t reference_observations = 0;
+        for (const auto& point : reference.scene.sparse_points)
+            reference_observations += point.view_ids.size();
         for (const auto& track : reconstruction.tracks) {
             if (!track.is_triangulated()) continue;
             ++triangulated;
@@ -174,6 +207,8 @@ int main(int argc, char** argv) {
 
         std::cout << std::setprecision(10)
                   << "reference_views=" << reference.scene.views.size() << '\n'
+                  << "reference_points=" << reference.scene.sparse_points.size() << '\n'
+                  << "reference_observations=" << reference_observations << '\n'
                   << "registered_views=" << reconstruction.registered_count() << '\n'
                   << "common_views=" << common.size() << '\n'
                   << "alignment_inliers=" << inlier_count << '\n'
@@ -189,11 +224,26 @@ int main(int argc, char** argv) {
                   << "focal_relative_error_median=" << percentile(focal_relative, 0.5) << '\n'
                   << "triangulated_tracks=" << triangulated << '\n'
                   << "triangulated_observations=" << observations << '\n';
+        std::sort(worst_centers.begin(), worst_centers.end(), std::greater<>());
+        for (std::size_t i = 0; i < std::min<std::size_t>(10, worst_centers.size()); ++i)
+            std::cout << "worst_center[" << i << "]="
+                      << worst_centers[i].second << ',' << worst_centers[i].first
+                      << '\n';
         std::sort(worst_rotations.begin(), worst_rotations.end(), std::greater<>());
         for (std::size_t i = 0; i < std::min<std::size_t>(10, worst_rotations.size()); ++i)
             std::cout << "worst_rotation[" << i << "]="
                       << worst_rotations[i].second << ',' << worst_rotations[i].first
                       << '\n';
+        for (std::size_t i = 0; i < reference_missing.size(); ++i)
+            std::cout << "reference_unregistered[" << i << "]="
+                      << reference_missing[i] << '\n';
+        for (std::size_t i = 0; i < reconstruction_missing.size(); ++i)
+            std::cout << "reconstruction_unregistered[" << i << "]="
+                      << reconstruction_missing[i] << '\n';
+        for (std::size_t i = 0;
+             i < reconstruction_missing_from_reference.size(); ++i)
+            std::cout << "missing_relative_to_reference[" << i << "]="
+                      << reconstruction_missing_from_reference[i] << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "sfm reference evaluation failed: " << error.what() << '\n';

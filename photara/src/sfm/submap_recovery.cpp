@@ -48,6 +48,12 @@ bool supports(const Scene& scene, const Observation& obs, const Vec3& point,
     const auto& measured = image.features.keypoints[obs.feature_id];
     return (pixel - Vec2(measured.x, measured.y)).norm() <= threshold;
 }
+
+double rotation_error_degrees(const Mat3& first, const Mat3& second) {
+    const Mat3 delta = first * second.transpose();
+    const double cosine = std::clamp((delta.trace() - 1.0) * 0.5, -1.0, 1.0);
+    return std::acos(cosine) * 180.0 / std::numbers::pi;
+}
 }  // namespace
 
 std::vector<std::uint8_t> find_structural_pair_risks(const Scene& scene) {
@@ -111,6 +117,65 @@ unsigned recover_weakly_connected_views(Scene& scene) {
     core::Logger::instance().info("weak branch audit: candidates=",candidates," anchors=",anchors);
     std::vector<std::uint8_t> originally_registered;
     for (const auto& im:scene.images) originally_registered.push_back(im.registered);
+    // Low-parallax sequential captures can be separated from the main graph
+    // solely by planar edges, so no independently triangulated depths cross
+    // the boundary. Preserve such a branch only when one view has two nearby
+    // stable rotation witnesses, then extend through a much stronger nearby
+    // pair. The image-order gate deliberately prevents a distant loop closure
+    // from making the whole weak clique self-certifying.
+    const auto rotation_error = [&](const ImagePair& pair) {
+        const Mat3 actual = scene.images[pair.id2].pose.R *
+            scene.images[pair.id1].pose.R.transpose();
+        return rotation_error_degrees(actual, pair.relative_pose->R);
+    };
+    const auto nearby = [](const Index first, const Index second) {
+        return (first > second ? first - second : second - first) <= 4;
+    };
+    unsigned pair_certified = 0;
+    for (Index id = 0; id < scene.images.size(); ++id) {
+        if (!originally_registered[id] || stable[id]) continue;
+        std::set<Index> witnesses;
+        for (const auto& pair : scene.pairs) {
+            if (!eligible(pair) || pair.num_inliers() < 30) continue;
+            const Index other = pair.id1 == id ? pair.id2 :
+                (pair.id2 == id ? pair.id1 : k_invalid);
+            if (other == k_invalid || !stable[other] ||
+                !nearby(id, other) || rotation_error(pair) > 5.0)
+                continue;
+            witnesses.insert(other);
+        }
+        if (witnesses.size() < 2) continue;
+        stable[id] = 1;
+        ++pair_certified;
+        core::Logger::instance().info(
+            "weak branch rotation-certified: image=",
+            scene.images[id].path.filename(),
+            " stable_witnesses=", witnesses.size());
+    }
+    for (unsigned pass = 0; pass < 4; ++pass) {
+        std::vector<Index> accepted;
+        for (Index id = 0; id < scene.images.size(); ++id) {
+            if (!originally_registered[id] || stable[id]) continue;
+            for (const auto& pair : scene.pairs) {
+                if (!eligible(pair) || pair.num_inliers() < 100) continue;
+                const Index other = pair.id1 == id ? pair.id2 :
+                    (pair.id2 == id ? pair.id1 : k_invalid);
+                if (other == k_invalid || !stable[other] ||
+                    !nearby(id, other) || rotation_error(pair) > 2.0)
+                    continue;
+                accepted.push_back(id);
+                break;
+            }
+        }
+        if (accepted.empty()) break;
+        for (const Index id : accepted) {
+            stable[id] = 1;
+            ++pair_certified;
+            core::Logger::instance().info(
+                "weak branch sequentially certified: image=",
+                scene.images[id].path.filename());
+        }
+    }
     unsigned recovered_count=0;
     std::vector<std::uint8_t> recovered(scene.images.size(),0);
     const auto propagate=[&]() {
@@ -152,6 +217,27 @@ unsigned recover_weakly_connected_views(Scene& scene) {
         ++rejected;
         core::Logger::instance().warning("weak branch pose withheld: image=",
             scene.images[i].path.filename()," reason=independent_validation_failed");
+    }
+    if (rejected > 0) {
+        // A withheld loop-closure view can dominate feature unions even after
+        // its pose is disabled. Remove its pair edges and rebuild once so the
+        // retained sequential branch receives the weaker cross-boundary
+        // tracks that actually anchor it to the stable reconstruction.
+        unsigned disabled_pairs = 0;
+        for (ImagePair& pair : scene.pairs) {
+            if (!pair.active || pair.id1 >= scene.images.size() ||
+                pair.id2 >= scene.images.size())
+                continue;
+            if (scene.images[pair.id1].registered &&
+                scene.images[pair.id2].registered)
+                continue;
+            pair.active = false;
+            ++disabled_pairs;
+        }
+        core::Logger::instance().info(
+            "weak branch cleanup: disabled_pairs=", disabled_pairs);
+        build_tracks(scene);
+        triangulate_tracks(scene, false, 2.F, 1.F);
     }
     prune_unsupported_registrations(scene);
     // Independent 2D-3D recovery places the weak branch, but a locally rigid
@@ -195,7 +281,9 @@ unsigned recover_weakly_connected_views(Scene& scene) {
             triangulate_tracks(scene,false,2.F,1.F);
         }
     }
-    core::Logger::instance().info("weak branch recovery: recovered=",recovered_count," withheld=",rejected);
+    core::Logger::instance().info(
+        "weak branch recovery: recovered=",recovered_count,
+        " pair_certified=", pair_certified, " withheld=",rejected);
     return recovered_count+rejected;
 }
 
