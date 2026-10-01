@@ -5,6 +5,7 @@
 #include "icons.hpp"
 #include "vulkan_backend.hpp"
 #include "core/version.hpp"
+#include "io/image.hpp"
 
 #include "imgui_internal.h"
 
@@ -474,6 +475,35 @@ std::filesystem::path studio_icon_path() {
             return path;
     }
     return {};
+}
+
+void apply_studio_window_icon(GLFWwindow* window) {
+    if (window == nullptr) return;
+    const auto path = studio_icon_path();
+    if (path.empty()) return;
+    photara::io::RgbImage image;
+    try {
+        image = photara::io::load_rgb(path);
+    } catch (const std::exception&) {
+        return;
+    }
+    const std::size_t count =
+        static_cast<std::size_t>(image.width) * image.height;
+    if (image.width == 0 || image.height == 0 ||
+        image.pixels.size() < count * 3)
+        return;
+    std::vector<unsigned char> rgba(count * 4);
+    for (std::size_t i = 0; i < count; ++i) {
+        rgba[i * 4] = image.pixels[i * 3];
+        rgba[i * 4 + 1] = image.pixels[i * 3 + 1];
+        rgba[i * 4 + 2] = image.pixels[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+    }
+    GLFWimage icon{};
+    icon.width = static_cast<int>(image.width);
+    icon.height = static_cast<int>(image.height);
+    icon.pixels = rgba.data();
+    glfwSetWindowIcon(window, 1, &icon);
 }
 
 void ensure_about_icon(App& app) {

@@ -63,6 +63,7 @@ int main(const int argc, char** argv) {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(
         1600, 940, tr("Photara Studio"), nullptr, nullptr);
+    editor::apply_studio_window_icon(window);
     glfwSetWindowUserPointer(window, &app);
     glfwSetDropCallback(
         window, [](GLFWwindow* handle, const int count, const char** paths) {

@@ -2,6 +2,8 @@
 
 #include "app.hpp"
 
+struct GLFWwindow;
+
 namespace editor {
 
 Action draw_menu_bar(App& app);
@@ -14,6 +16,7 @@ void draw_console_panel(App& app);
 void draw_status_bar(App& app);
 void draw_controls_window(App& app);
 void draw_about_window(App& app);
+void apply_studio_window_icon(GLFWwindow* window);
 // page 0 Compute, 1 Language, 2 Storage. Any other page keeps the current one.
 void open_preferences(App& app, int page);
 void draw_preferences_window(App& app);
