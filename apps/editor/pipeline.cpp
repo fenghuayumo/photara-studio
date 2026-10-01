@@ -261,6 +261,8 @@ void append_sam_flags(
             << (settings.sam_keep_prompted ? "true" : "false")
             << " --sam-video=" << (settings.sam_video ? "true" : "false")
             << " --sam-max-size " << std::max(0, settings.sam_max_size)
+            << " --sam-use-mask-for-sfm="
+            << (settings.sam_use_mask_for_sfm ? "true" : "false")
             << " --sam-refresh=" << (refresh ? "true" : "false");
 }
 

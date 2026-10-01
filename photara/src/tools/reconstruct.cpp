@@ -273,6 +273,7 @@ struct ReconstructCli {
     bool sam_video{true};
     int sam_max_size{0};
     bool sam_refresh{false};
+    bool sam_use_mask_for_sfm{false};
     bool sam_sfm_guided{true};
     float sam_sfm_point_fraction{0.01F};
     float sam_min_area{0.001F};
@@ -1076,8 +1077,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "--dense-quality",
          cxxopts::value<unsigned>())
         ("masks",
-         "Valid-region mask directory; black pixels are ignored by default SfM and "
-         "downstream stages (auto, - to disable, or explicit path)",
+         "Valid-region mask directory for downstream stages and SfM; SAM masks "
+         "are excluded from SfM unless opted in (auto, - to disable, or explicit path)",
          cxxopts::value<std::string>()->default_value("auto"))
         ("sam-model",
          "SAM 3 GGML checkpoint. Empty uses the Photara model cache",
@@ -1103,6 +1104,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<int>()->default_value("0"))
         ("sam-refresh",
          "Regenerate SAM masks even when the mask directory already has files",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("sam-use-mask-for-sfm",
+         "Use first-pass SAM masks to restrict camera-alignment features (default off); "
+         "does not change downstream mask use or SfM-guided refinement",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("sam-sfm-guided",
          "After SfM, refine SAM instance selection with projected central sparse points",
@@ -1614,6 +1619,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.sam_video = result["sam-video"].as<bool>();
     cli.sam_max_size = result["sam-max-size"].as<int>();
     cli.sam_refresh = result["sam-refresh"].as<bool>();
+    cli.sam_use_mask_for_sfm = result["sam-use-mask-for-sfm"].as<bool>();
     cli.sam_sfm_guided = result["sam-sfm-guided"].as<bool>();
     cli.sam_sfm_point_fraction = result["sam-sfm-point-fraction"].as<float>();
     cli.sam_min_area = result["sam-min-area"].as<float>();
@@ -2332,6 +2338,15 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.progressive_resolution = cli.splat_progressive_resolution;
     settings.use_mask = cli.splat_use_mask;
     settings.mask_mode = cli.splat_alpha_mode == "transparent" ? 1 : 0;
+    settings.sam_masks = !cli.sam_text.empty();
+    settings.sam_use_mask_for_sfm = cli.sam_use_mask_for_sfm;
+    const auto sam_model_utf8 = cli.sam_model.generic_u8string();
+    settings.sam_model.assign(sam_model_utf8.begin(), sam_model_utf8.end());
+    settings.sam_text = cli.sam_text;
+    settings.sam_negative_text = cli.sam_negative_text;
+    settings.sam_keep_prompted = cli.sam_keep_prompted;
+    settings.sam_video = cli.sam_video;
+    settings.sam_max_size = cli.sam_max_size;
     settings.build_mesh = cli.mesh;
     settings.mesh_source = (cli.dense && cli.mesh && !cli.splat) ? 1 : 0;
     if (cli.mesh_method == "tsdf") settings.mesh_method = 1;
@@ -4258,7 +4273,14 @@ int main(int argc, char** argv) {
         config.frontend.camera_model = cli.camera_model;
         config.frontend.focal_pixels = cli.focal_pixels;
         config.frontend.trust_focal_pixels = cli.trust_focal;
-        config.frontend.mask_dir = cli.masks_dir;
+        // Keep coarse SAM masks for downstream processing while retaining all
+        // alignment features by default. Explicit non-SAM mask inputs retain
+        // their existing behaviour.
+        if (cli.sam_text.empty() || cli.sam_use_mask_for_sfm)
+            config.frontend.mask_dir = cli.masks_dir;
+        photara::core::Logger::instance().info(
+            "sfm_masking=", !config.frontend.mask_dir.empty(),
+            " sam_use_mask_for_sfm=", cli.sam_use_mask_for_sfm);
         config.frontend.structural_pair_expansion = cli.structural_pair_expansion;
         config.frontend.neighbor_window = cli.neighbor_window;
         config.frontend.sift_contrast_threshold = cli.sift_contrast;
@@ -4327,8 +4349,8 @@ int main(int argc, char** argv) {
 
         save_working_sfm(cli, scene);
 
-        // The first SAM pass supplies a coarse validity mask to SfM. Once the
-        // camera ring and sparse cloud exist, repeat instance selection with
+        // The first SAM pass creates coarse masks; using them for alignment
+        // is opt-in. Once the camera ring and sparse cloud exist, repeat selection with
         // projected central points. This mirrors the proven maskgen workflow
         // without copying the coarse point silhouette into the final mask.
         if (cli.sam_sfm_guided && cli.sam_generated_this_run &&

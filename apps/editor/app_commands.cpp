@@ -401,6 +401,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.use_mask = app.settings.use_mask;
     settings.mask_mode = app.settings.mask_mode == 1 ? 1 : 0;
     settings.sam_masks = app.settings.sam_masks;
+    settings.sam_use_mask_for_sfm = app.settings.sam_use_mask_for_sfm;
     settings.sam_model = app.settings.sam_model.data();
     settings.sam_text = app.settings.sam_text.data();
     settings.sam_negative_text = app.settings.sam_negative_text.data();
@@ -469,6 +470,7 @@ void apply_project_settings(
     app.settings.use_mask = settings.use_mask;
     app.settings.mask_mode = settings.mask_mode == 1 ? 1 : 0;
     app.settings.sam_masks = settings.sam_masks;
+    app.settings.sam_use_mask_for_sfm = settings.sam_use_mask_for_sfm;
     store_path_field(
         app.settings.sam_model,
         path_from_utf8_field(settings.sam_model.c_str()));

@@ -289,6 +289,7 @@ struct ProjectSettings {
     // 1 = transparent (the mask is the target output alpha).
     int mask_mode = 0;
     bool sam_masks = false;
+    bool sam_use_mask_for_sfm = false;
     std::array<char, 1024> sam_model{};
     std::array<char, 512> sam_text{};
     std::array<char, 512> sam_negative_text{};

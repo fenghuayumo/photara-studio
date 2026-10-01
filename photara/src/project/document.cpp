@@ -110,6 +110,7 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(static_cast<std::int32_t>(settings.mask_mode == 1 ? 1 : 0));
     writer.value(static_cast<std::uint8_t>(settings.texture_blend_linear));
     writer.value(settings.max_scale_ratio);
+    writer.value(static_cast<std::uint8_t>(settings.sam_use_mask_for_sfm));
     return writer.take();
 }
 
@@ -212,6 +213,8 @@ Settings decode_settings(
         settings.max_scale_ratio = reader.value<float>();
     if (!(settings.max_scale_ratio == 0.F || settings.max_scale_ratio >= 1.F))
         settings.max_scale_ratio = 0.F;
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.sam_use_mask_for_sfm = reader.value<std::uint8_t>() != 0;
     return settings;
 }
 

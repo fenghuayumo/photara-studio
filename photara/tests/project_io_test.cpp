@@ -184,6 +184,7 @@ int main() {
            "asfm pinhole default");
 
     Settings settings;
+    expect(!settings.sam_use_mask_for_sfm, "SAM alignment masks default off");
     settings.name = "demo";
     settings.image_directory = dir / "images";
     settings.dataset_source = dir / "colmap";
@@ -212,6 +213,9 @@ int main() {
     settings.texture_optimize = false;
     settings.texture_blend_linear = true;
     settings.mask_mode = 1;
+    settings.sam_masks = true;
+    settings.sam_text = "glass cup";
+    settings.sam_use_mask_for_sfm = true;
 
     Archive archive = Archive::create();
     replace_sfm_stage(archive, source, settings, ascan_path);
@@ -255,6 +259,9 @@ int main() {
         "settings densification cap");
     expect(round_trip.sh_degree == 2, "settings SH degree");
     expect(round_trip.mask_mode == 1, "settings mask mode");
+    expect(round_trip.sam_use_mask_for_sfm, "SAM alignment mask opt-in round trip");
+    expect(round_trip.sam_masks && round_trip.sam_text == "glass cup",
+           "SAM generation settings preserved with alignment opt-in");
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");
@@ -300,6 +307,20 @@ int main() {
         "ascan min reader version");
 
     auto settings_bytes = encode_settings(updated, ascan_path);
+    {
+        auto legacy_bytes = settings_bytes;
+        legacy_bytes.pop_back();  // Previous settings prefix, without this opt-in.
+        const Settings legacy = decode_settings(legacy_bytes, ascan_path);
+        expect(!legacy.sam_use_mask_for_sfm,
+               "old projects default to full-image alignment");
+        expect(legacy.sam_masks && legacy.sam_text == "glass cup",
+               "old projects preserve SAM generation and training masks");
+        Settings disabled = updated;
+        disabled.sam_use_mask_for_sfm = false;
+        expect(!decode_settings(encode_settings(disabled, ascan_path), ascan_path)
+                    .sam_use_mask_for_sfm,
+               "SAM alignment mask opt-out round trip");
+    }
     settings_bytes.insert(settings_bytes.end(), {0x11, 0x22, 0x33, 0x44});
     const Settings additive = decode_settings(settings_bytes, ascan_path);
     expect(additive.name == "demo", "settings ignore trailing fields");

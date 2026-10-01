@@ -279,8 +279,13 @@ control frame generation.
 ```
 
 Mask generation is entirely native C++/ggml and does not require Python,
-PyTorch, OpenCV, or NumPy. A first text/video pass supplies coarse masks to
-alignment. After SfM succeeds, the default `--sam-sfm-guided=true` pass finds
+PyTorch, OpenCV, or NumPy. A first text/video pass creates coarse masks, but
+camera alignment uses full-image features by default. Opt in with
+`--sam-use-mask-for-sfm=true` to restrict alignment to those masks. In Studio,
+enable **Generate SAM3 masks**, then use **Camera Alignment → Use SAM3 masks
+for alignment** (off by default). This setting is saved with the project and
+does not change downstream mask use. After SfM succeeds, the default
+`--sam-sfm-guided=true` pass finds
 the sparse points nearest the registered-camera centroid, projects them into
 each view, and uses their location to select and clean the matching SAM 3
 instance. Projected point pixels are guidance only; the final silhouette still

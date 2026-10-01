@@ -59,6 +59,8 @@ struct Settings {
     // SAM 3 masks generated before alignment. The checkpoint itself is not
     // stored in the project; only the prompt and whether generation is on.
     bool sam_masks = false;
+    // Opt-in: coarse SAM masks may discard useful alignment features.
+    bool sam_use_mask_for_sfm = false;
     std::string sam_model;
     std::string sam_text;
     std::string sam_negative_text;

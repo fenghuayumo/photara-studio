@@ -760,17 +760,51 @@ constexpr Entry k_entries[] = {
      "유효 영역은 불투명하게 두고, 가려진 영역은 투명하게 학습합니다."},
     {"SAM3 masks", "SAM3 蒙版", "SAM3 マスク", "SAM3 마스크"},
     {"Generate SAM3 masks", "生成 SAM3 蒙版", "SAM3 マスクを生成", "SAM3 마스크 생성"},
+    {"Alignment masks", "对齐蒙版", "アライメント用マスク", "정렬 마스크"},
+    {"Use SAM3 masks for alignment", "使用 SAM3 蒙版对齐", "SAM3 マスクでアライメント", "정렬에 SAM3 마스크 사용"},
+    {"Off (recommended): align using the full image, including background features.\n"
+     "On: ignore features outside the first-pass SAM3 masks.\n"
+     "Useful for moving backgrounds; small or incomplete masks can reduce alignment quality.\n"
+     "Applies to the next alignment. 3DGS training and mask refinement are unchanged.",
+     "关闭（推荐）：使用完整图像对齐，保留背景特征。\n"
+     "开启：仅使用第一阶段 SAM3 蒙版内的特征。\n"
+     "适合背景有运动干扰的拍摄；蒙版过小或不完整可能降低对齐质量。\n"
+     "下次对齐时生效，不影响 3DGS 训练和蒙版精修。",
+     "オフ（推奨）：背景の特徴も含め、画像全体でアライメントします。\n"
+     "オン：最初の SAM3 マスクの外側にある特徴を除外します。\n"
+     "動く背景に有効ですが、小さい・不完全なマスクは精度を下げる場合があります。\n"
+     "次のアライメントに適用。3DGS 学習とマスクの精修には影響しません。",
+     "끄기（권장）: 배경 특징을 포함한 전체 이미지로 정렬합니다.\n"
+     "켜기: 첫 단계 SAM3 마스크 밖의 특징을 제외합니다.\n"
+     "움직이는 배경에 유용하지만 작거나 불완전한 마스크는 정렬 품질을 낮출 수 있습니다.\n"
+     "다음 정렬부터 적용됩니다. 3DGS 학습과 마스크 개선에는 영향을 주지 않습니다."},
+    {"Recommended: full-image features improve camera alignment. Masks remain enabled for training.",
+     "推荐使用完整图像的特征进行相机对齐，训练仍使用蒙版。",
+     "推奨：画像全体の特徴でアライメント。学習ではマスクを使用します。",
+     "권장: 전체 이미지 특징으로 카메라를 정렬합니다. 학습에는 마스크를 계속 사용합니다."},
+    {"Only masked regions contribute features. Small or incomplete masks may weaken alignment.",
+     "仅使用蒙版有效区域的特征。蒙版过小或不完整可能影响对齐。",
+     "マスクの有効領域の特徴のみを使用。小さい・不完全なマスクは精度を下げる場合があります。",
+     "마스크 유효 영역의 특징만 사용합니다. 작거나 불완전한 마스크는 정렬에 영향을 줄 수 있습니다."},
+    {"Imported cameras are used directly; alignment masks do not apply.",
+     "当前直接使用导入的相机，对齐蒙版不生效。",
+     "インポートしたカメラを直接使用するため、アライメント用マスクは適用されません。",
+     "가져온 카메라를 직접 사용하므로 정렬 마스크는 적용되지 않습니다."},
     {"SAM 3 segments a text prompt into a foreground mask before alignment.\n"
-     "The same masks are used for camera alignment and 3DGS training.\n"
+     "Masks are used for 3DGS training and refined after alignment.\n"
+     "Using masks for alignment is optional in Camera Alignment.\n"
      "The model is Meta's and is downloaded only after you accept its licence.",
      "SAM 3 在对齐前把文字提示分成前景蒙版。\n"
-     "同一份蒙版用于相机对齐和 3DGS 训练。\n"
+     "蒙版用于 3DGS 训练，并在对齐后精修。\n"
+     "可在「相机对齐」中选择是否使用蒙版对齐。\n"
      "模型属于 Meta，只有在你接受其许可协议后才会下载。",
      "SAM 3 はアライメント前にテキストから前景マスクを作ります。\n"
-     "同じマスクをカメラアライメントと 3DGS 学習に使います。\n"
+     "マスクは 3DGS 学習に使用し、アライメント後に精修します。\n"
+     "アライメントで使うかは「カメラアライメント」で選択できます。\n"
      "モデルは Meta のもので、ライセンスに同意したあとだけダウンロードします。",
      "SAM 3는 정렬 전에 텍스트 프롬프트로 전경 마스크를 만듭니다.\n"
-     "같은 마스크를 카메라 정렬과 3DGS 학습에 사용합니다.\n"
+     "마스크는 3DGS 학습에 사용하며 정렬 후 개선됩니다.\n"
+     "「카메라 정렬」에서 정렬에 마스크를 사용할지 선택할 수 있습니다.\n"
      "모델은 Meta의 것이며, 라이선스에 동의한 뒤에만 다운로드합니다."},
     {"Prompt", "提示词", "プロンプト", "프롬프트"},
     {"Several phrases, separated by semicolons.",

@@ -161,7 +161,8 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", tr(
                 "SAM 3 segments a text prompt into a foreground mask before alignment.\n"
-                "The same masks are used for camera alignment and 3DGS training.\n"
+                "Masks are used for 3DGS training and refined after alignment.\n"
+                "Using masks for alignment is optional in Camera Alignment.\n"
                 "The model is Meta's and is downloaded only after you accept its licence."));
         if (app.settings.sam_masks) {
             theme::caption(tr("Prompt"));
@@ -344,6 +345,32 @@ Action draw_inspector(App& app) {
         theme::caption("Max features per image");
         ImGui::SetNextItemWidth(-1.F);
         ImGui::InputInt("##max_features", &app.settings.max_features, 1000, 5000);
+#if defined(PHOTARA_HAS_SAM)
+        if (app.settings.sam_masks) {
+            ImGui::Spacing();
+            theme::caption(tr("Alignment masks"));
+            ImGui::BeginDisabled(has_external_dataset(app));
+            ImGui::Checkbox(
+                tr("Use SAM3 masks for alignment"),
+                &app.settings.sam_use_mask_for_sfm);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", tr(
+                    "Off (recommended): align using the full image, including background features.\n"
+                    "On: ignore features outside the first-pass SAM3 masks.\n"
+                    "Useful for moving backgrounds; small or incomplete masks can reduce alignment quality.\n"
+                    "Applies to the next alignment. 3DGS training and mask refinement are unchanged."));
+            ImGui::EndDisabled();
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::text_muted);
+            ImGui::TextWrapped("%s", tr(
+                has_external_dataset(app)
+                    ? "Imported cameras are used directly; alignment masks do not apply."
+                    : app.settings.sam_use_mask_for_sfm
+                        ? "Only masked regions contribute features. Small or incomplete masks may weaken alignment."
+                        : "Recommended: full-image features improve camera alignment. Masks remain enabled for training."));
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+        }
+#endif
         ImGui::Checkbox(tr("Reuse cached alignment"), &app.settings.reuse_cache);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
