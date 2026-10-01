@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cuda_ops.hpp"
+#include "sh_adam_quant.hpp"
 #include "mvs/types.hpp"
 #include "splat/options.hpp"
 #include "splat/types.hpp"
@@ -31,7 +32,28 @@ struct SceneGeometry {
     float maximum_extent{1.F};
 };
 
-using AdamStates = std::array<detail::AdamState*, 6>;
+struct AdamStates {
+    std::array<detail::AdamState*, 6> values{};
+    detail::ShAdamQuant* sh_quant{};
+
+    AdamStates() = default;
+    AdamStates(detail::AdamState* means, detail::AdamState* scales,
+        detail::AdamState* rotations, detail::AdamState* opacity,
+        detail::AdamState* sh, detail::AdamState* normals,
+        detail::ShAdamQuant* quant = nullptr)
+        : values{means, scales, rotations, opacity, sh, normals},
+          sh_quant(quant) {}
+
+    auto begin() { return values.begin(); }
+    auto end() { return values.end(); }
+    auto begin() const { return values.begin(); }
+    auto end() const { return values.end(); }
+    std::size_t size() const { return values.size(); }
+    detail::AdamState*& operator[](std::size_t index) { return values[index]; }
+    detail::AdamState* const& operator[](std::size_t index) const {
+        return values[index];
+    }
+};
 
 [[nodiscard]] SceneGeometry training_scene_geometry(
     const mvs::MvsScene& scene, bool dense_input);

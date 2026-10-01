@@ -7,6 +7,8 @@
 #include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/densification.hpp"
+#include "../src/splat/densification_internal.hpp"
+#include "../src/splat/sh_adam_quant.hpp"
 #include "../src/splat/densification_igs.hpp"
 #include "../src/splat/densification_adc_plus.hpp"
 #include "../src/splat/fused_ssim.hpp"
@@ -1352,6 +1354,525 @@ void test_fused_sh_adam() {
             compare(state.first, fused_state.first, "Fused SH first moment parity");
             compare(state.second, fused_state.second, "Fused SH second moment parity");
         }
+    }
+}
+
+void cpu_sh_adam_quant_step(
+    std::vector<float>& parameter, const std::vector<float>& gradient,
+    std::vector<float>& first, std::vector<std::uint8_t>& packed,
+    std::vector<float>& bounds, int rows, int stride, int active,
+    float learning_rate, float rest_learning_rate, float beta1, float beta2,
+    float correction1, float correction2, float adam_epsilon) {
+    constexpr float eps = 1e-15F;
+    constexpr float qmax = 255.F;
+    const auto dequant = [](float code, float lo, float hi) {
+        return lo + (hi - lo) * (code / qmax);
+    };
+    const auto enquant = [](float value, float lo, float hi) {
+        const float range = std::max(hi - lo, eps);
+        return static_cast<std::uint8_t>(std::lround(std::min(
+            std::max(qmax * (value - lo) / range, 0.F), qmax)));
+    };
+    for (int row = 0; row < rows; ++row) {
+        float old_bounds[4];
+        for (int value = 0; value < 4; ++value)
+            old_bounds[value] = bounds[row * 4 + value];
+        for (int group = 0; group < 2; ++group) {
+            const int offset = group * 2;
+            if (!std::isfinite(old_bounds[offset]) ||
+                !std::isfinite(old_bounds[offset + 1]))
+                old_bounds[offset] = old_bounds[offset + 1] = 0.F;
+        }
+        std::vector<float> s_out(stride);
+        float new_bounds[4] = {1e30F, -1e30F, 1e30F, -1e30F};
+        for (int col = 0; col < stride; ++col) {
+            const int index = row * stride + col;
+            const int offset = col < 3 ? 0 : 2;
+            float log_s = dequant(
+                packed[index], old_bounds[offset], old_bounds[offset + 1]);
+            if (col < active) {
+                const float grad = gradient[index];
+                const float previous = parameter[index];
+                if (!std::isfinite(previous) || !std::isfinite(grad)) {
+                    first[index] = 0.F;
+                    log_s = 0.F;
+                    parameter[index] = std::isfinite(previous) ? previous : 0.F;
+                } else {
+                    const float sqrt_g2 = eps * std::expm1(log_s);
+                    const float g2 = sqrt_g2 * sqrt_g2;
+                    const float m = beta1 * first[index] + (1.F - beta1) * grad;
+                    const float v = beta2 * g2 + (1.F - beta2) * grad * grad;
+                    if (!std::isfinite(m) || !std::isfinite(v)) {
+                        first[index] = 0.F;
+                        log_s = 0.F;
+                    } else {
+                        const float lr = col >= 3 ? rest_learning_rate : learning_rate;
+                        const float candidate = previous - lr * (m / correction1) /
+                            (std::sqrt(v / correction2) + adam_epsilon);
+                        parameter[index] = std::isfinite(candidate) ? candidate : previous;
+                        first[index] = m;
+                        const float sqrt_v = std::sqrt(std::max(v, 0.F));
+                        log_s = std::log1p(sqrt_v / eps);
+                        if (!std::isfinite(log_s)) log_s = 0.F;
+                    }
+                }
+            } else {
+                if (!std::isfinite(first[index])) first[index] = 0.F;
+                if (!std::isfinite(log_s)) log_s = 0.F;
+            }
+            s_out[col] = log_s;
+            new_bounds[offset] = std::min(new_bounds[offset], log_s);
+            new_bounds[offset + 1] = std::max(new_bounds[offset + 1], log_s);
+        }
+        if (stride <= 3)
+            new_bounds[2] = new_bounds[3] = 0.F;
+        for (int value = 0; value < 4; ++value)
+            bounds[row * 4 + value] = new_bounds[value];
+        for (int col = 0; col < stride; ++col) {
+            const int index = row * stride + col;
+            const int offset = col < 3 ? 0 : 2;
+            packed[index] = enquant(
+                s_out[col], new_bounds[offset], new_bounds[offset + 1]);
+        }
+    }
+}
+
+void test_sh_adam_quant() {
+    using namespace photara::splat;
+    using photara::CameraModel;
+    using tinytensor::Tensor;
+    constexpr auto device = tinytensor::Device::CUDA;
+    const auto compare = [](const std::vector<float>& reference,
+                            const std::vector<float>& actual, float abs_tol,
+                            float rel_tol, const char* message) {
+        require(reference.size() == actual.size(), message);
+        for (std::size_t i = 0; i < reference.size(); ++i) {
+            const float scale = std::max(
+                std::abs(reference[i]), std::abs(actual[i]));
+            if (!std::isfinite(actual[i]) ||
+                std::abs(reference[i] - actual[i]) > abs_tol + rel_tol * scale) {
+                std::cerr << message << " index=" << i
+                          << " reference=" << reference[i]
+                          << " actual=" << actual[i] << '\n';
+                require(false, message);
+            }
+        }
+    };
+
+    constexpr int rows = 17;
+    constexpr int stride = 48;
+    constexpr int active = 12;
+
+    // Quantized topology state is owned explicitly by each trainer. There is
+    // no process- or thread-global slot for concurrent runs to overwrite.
+    detail::ShAdamQuant binding_a, binding_b;
+    densification::AdamStates topology_a{
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &binding_a};
+    densification::AdamStates topology_b{
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &binding_b};
+    require(topology_a.sh_quant == &binding_a &&
+            topology_b.sh_quant == &binding_b &&
+            topology_a.sh_quant != topology_b.sh_quant,
+        "concurrent trainers did not retain independent quantized topology state");
+    std::vector<float> parameter(rows * stride), gradient(rows * stride);
+    for (int i = 0; i < rows * stride; ++i) {
+        parameter[i] = 0.05F * std::sin(0.17F * float(i));
+        gradient[i] = 0.02F * std::cos(0.11F * float(i + 3));
+    }
+    for (int col = 0; col < stride; ++col) gradient[(rows - 1) * stride + col] = 0.F;
+    TrainingOptions options;
+    constexpr unsigned step = 3;
+    const float correction1 = 1.F - std::pow(options.beta1, float(step));
+    const float correction2 = 1.F - std::pow(options.beta2, float(step));
+    auto param_fp = Tensor::from_vector(
+        parameter, {std::size_t(rows), 16, 3}, device);
+    auto param_q = Tensor::from_vector(
+        parameter, {std::size_t(rows), 16, 3}, device);
+    const auto grad = Tensor::from_vector(
+        gradient, {std::size_t(rows), 16, 3}, device);
+    auto fp_state = detail::make_adam_state(param_fp);
+    auto quant = detail::make_sh_adam_quant(rows, stride, device);
+    const auto packed_init = quant.packed.to_vector_uint8();
+    require(std::all_of(packed_init.begin(), packed_init.end(),
+                [](std::uint8_t byte) { return byte == 0; }),
+        "zero packed SH Adam did not start at zero");
+    detail::adam_step_active_prefix(
+        param_fp, grad, fp_state, options.sh0_lr, step, options, stride, active,
+        options.sh_rest_lr);
+    detail::sh_adam_quant_step(
+        param_q, grad, quant, active, options.sh0_lr, options.sh_rest_lr,
+        options.beta1, options.beta2, correction1, correction2,
+        options.adam_epsilon, 0.F);
+    compare(param_fp.to_vector(), param_q.to_vector(), 2e-6F, 3e-4F,
+        "first quantized SH step diverged from FP32 Adam");
+    const auto packed_step = quant.packed.to_vector_uint8();
+    require(std::any_of(packed_step.begin(), packed_step.end(),
+                [](std::uint8_t byte) { return byte != 0; }),
+        "quantized SH Adam step left every code at zero");
+    const auto split_bounds = quant.bounds.to_vector();
+    require(split_bounds.size() == std::size_t(rows) * 4,
+        "quantized SH Adam did not allocate DC/non-DC bounds");
+    bool groups_differ = false;
+    for (int row = 0; row < rows; ++row)
+        for (int value = 0; value < 2; ++value)
+            groups_differ = groups_differ ||
+                split_bounds[row * 4 + value] !=
+                    split_bounds[row * 4 + 2 + value];
+    require(groups_differ,
+        "quantized SH Adam collapsed DC and non-DC bounds");
+    const auto quant_param = param_q.to_vector();
+    for (int row = 0; row < rows; ++row)
+        for (int col = active; col < stride; ++col)
+            require(quant_param[row * stride + col] == parameter[row * stride + col],
+                "inactive SH coefficient was updated");
+    std::vector<float> second_gradient = gradient;
+    for (float& value : second_gradient) value = 0.7F * value + 0.001F;
+    for (int col = 0; col < stride; ++col)
+        second_gradient[(rows - 1) * stride + col] = 0.F;
+    auto host_param = quant_param;
+    auto host_first = quant.first.to(tinytensor::DataType::Float32).to_vector();
+    auto host_packed = packed_step;
+    auto host_bounds = quant.bounds.to_vector();
+    const float correction1_b = 1.F - std::pow(options.beta1, float(step + 1));
+    const float correction2_b = 1.F - std::pow(options.beta2, float(step + 1));
+    cpu_sh_adam_quant_step(
+        host_param, second_gradient, host_first, host_packed, host_bounds, rows,
+        stride, active, options.sh0_lr, options.sh_rest_lr, options.beta1,
+        options.beta2, correction1_b, correction2_b, options.adam_epsilon);
+    const auto grad2 = Tensor::from_vector(
+        second_gradient, {std::size_t(rows), 16, 3}, device);
+    detail::sh_adam_quant_step(
+        param_q, grad2, quant, active, options.sh0_lr, options.sh_rest_lr,
+        options.beta1, options.beta2, correction1_b, correction2_b,
+        options.adam_epsilon, 0.F);
+    compare(host_param, param_q.to_vector(), 2e-4F, 2e-3F,
+        "second quantized SH step diverged from the host codec");
+
+    // Exercise the actual training schedule on one persistent quantized state:
+    // degree 0 -> 1 -> 2 -> 3. A degree transition may only start changing
+    // the newly activated prefix; higher coefficients must remain untouched.
+    auto progressive_parameter = Tensor::from_vector(
+        parameter, {std::size_t(rows), 16, 3}, device);
+    const auto progressive_gradient = Tensor::from_vector(
+        gradient, {std::size_t(rows), 16, 3}, device);
+    auto progressive_quant = detail::make_sh_adam_quant(rows, stride, device);
+    int previous_active = 0;
+    for (unsigned degree = 0; degree <= 3; ++degree) {
+        const int degree_active =
+            int(degree + 1) * int(degree + 1) * 3;
+        const auto before = progressive_parameter.to_vector();
+        const unsigned iteration = degree + 1;
+        detail::sh_adam_quant_step(
+            progressive_parameter, progressive_gradient, progressive_quant,
+            degree_active, options.sh0_lr, options.sh_rest_lr, options.beta1,
+            options.beta2,
+            1.F - std::pow(options.beta1, float(iteration)),
+            1.F - std::pow(options.beta2, float(iteration)),
+            options.adam_epsilon, 0.F);
+        const auto after = progressive_parameter.to_vector();
+        bool newly_active_changed = false;
+        for (int row = 0; row < rows; ++row) {
+            for (int col = degree_active; col < stride; ++col)
+                require(after[row * stride + col] == before[row * stride + col],
+                    "progressive SH activation updated a future degree");
+            for (int col = previous_active; col < degree_active; ++col)
+                newly_active_changed = newly_active_changed ||
+                    after[row * stride + col] != before[row * stride + col];
+        }
+        require(newly_active_changed,
+            "progressive SH activation did not update the newly enabled degree");
+        previous_active = degree_active;
+    }
+
+    std::vector<int> keep{1, 4, rows - 1};
+    const auto kept_first = quant.first.to(tinytensor::DataType::Float32).to_vector();
+    const auto kept_packed = quant.packed.to_vector_uint8();
+    const auto kept_bounds = quant.bounds.to_vector();
+    GaussianModel model;
+    model.means = Tensor::zeros({std::size_t(rows), 3}, device);
+    model.log_scales = Tensor::zeros({std::size_t(rows), 3}, device);
+    model.quaternions = Tensor::zeros({std::size_t(rows), 4}, device);
+    model.opacity_logits = Tensor::zeros({std::size_t(rows), 1}, device);
+    model.sh = param_q;
+    model.sh_degree = 3;
+    auto means = detail::make_adam_state(model.means);
+    auto scales = detail::make_adam_state(model.log_scales);
+    auto rotations = detail::make_adam_state(model.quaternions);
+    auto opacity = detail::make_adam_state(model.opacity_logits);
+    detail::AdamState sh_empty;
+    detail::AdamState normals;
+    const auto indices = Tensor::from_vector(keep, {keep.size()}, device);
+    densification::gpu_detail::select_training_rows_gpu(
+        model, indices,
+        {&means, &scales, &rotations, &opacity, &sh_empty, &normals, &quant});
+    densification::gpu_detail::select_adam_rows(sh_empty, indices);
+    densification::gpu_detail::append_zero_adam(sh_empty, 2);
+    require(model.size() == keep.size(), "quant densify did not compact the model");
+    require(quant.packed.shape()[0] == keep.size(),
+        "quant densify did not compact packed moments");
+    const auto selected_first =
+        quant.first.to(tinytensor::DataType::Float32).to_vector();
+    const auto selected_packed = quant.packed.to_vector_uint8();
+    const auto selected_bounds = quant.bounds.to_vector();
+    for (std::size_t row = 0; row < keep.size(); ++row) {
+        const int source = keep[row];
+        require(std::equal(
+                    selected_first.begin() + row * stride,
+                    selected_first.begin() + (row + 1) * stride,
+                    kept_first.begin() + source * stride),
+            "quant row select changed FP16 first moments");
+        require(std::equal(
+                    selected_packed.begin() + row * stride,
+                    selected_packed.begin() + (row + 1) * stride,
+                    kept_packed.begin() + source * stride),
+            "quant row select changed packed bytes");
+        for (int lane = 0; lane < 4; ++lane)
+            require(selected_bounds[row * 4 + lane] == kept_bounds[source * 4 + lane],
+                "quant row select changed bounds");
+    }
+    const auto zero_index = Tensor::from_vector(std::vector<int>{0}, {1}, device);
+    detail::sh_adam_quant_zero_rows(quant, zero_index);
+    const auto zeroed_first =
+        quant.first.to(tinytensor::DataType::Float32).to_vector();
+    const auto zeroed_packed = quant.packed.to_vector_uint8();
+    const auto zeroed_bounds = quant.bounds.to_vector();
+    require(std::all_of(zeroed_first.begin(), zeroed_first.begin() + stride,
+                [](float value) { return value == 0.F; }),
+        "zeroed quant row kept FP16 first moments");
+    require(std::all_of(zeroed_packed.begin(), zeroed_packed.begin() + stride,
+                [](std::uint8_t byte) { return byte == 0; }),
+        "zeroed quant row kept packed codes");
+    for (int lane = 0; lane < 4; ++lane)
+        require(zeroed_bounds[lane] == 0.F, "zeroed quant row kept bounds");
+    require(std::equal(zeroed_packed.begin() + stride, zeroed_packed.end(),
+                selected_packed.begin() + stride),
+        "zeroing one quant row changed another row");
+    detail::sh_adam_quant_append_zeros(quant, 2);
+    require(quant.packed.shape()[0] == keep.size() + 2,
+        "quant append did not grow the packed rows");
+    const auto appended_first =
+        quant.first.to(tinytensor::DataType::Float32).to_vector();
+    const auto appended = quant.packed.to_vector_uint8();
+    require(std::equal(appended.begin(), appended.begin() + zeroed_packed.size(),
+                zeroed_packed.begin()),
+        "quant append changed existing rows");
+    require(std::all_of(appended.begin() + zeroed_packed.size(), appended.end(),
+                [](std::uint8_t byte) { return byte == 0; }),
+        "appended quant rows were not zero");
+    require(std::all_of(
+                appended_first.begin() + zeroed_first.size(),
+                appended_first.end(), [](float value) { return value == 0.F; }),
+        "appended FP16 first moments were not zero");
+
+    constexpr std::size_t n = 33;
+    std::vector<float> means_v(n * 3), rotation_values(n * 4), coefficients(n * 48);
+    for (std::size_t i = 0; i < n; ++i) {
+        means_v[i * 3] = .02F * float(int(i % 11) - 5);
+        means_v[i * 3 + 1] = .02F * float(int(i % 7) - 3);
+        means_v[i * 3 + 2] = 2.F + .001F * i;
+        rotation_values[i * 4] = 1.F;
+        for (std::size_t j = 0; j < 48; ++j)
+            coefficients[i * 48 + j] = .04F * std::sin(float(i + j));
+    }
+    means_v[(n - 1) * 3 + 2] = -2.F;
+    Camera camera;
+    camera.width = 37;
+    camera.height = 29;
+    camera.fx = 25;
+    camera.fy = 25;
+    camera.cx = 18;
+    camera.cy = 14;
+    camera.model = CameraModel::pinhole;
+    camera.world_to_camera = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const std::size_t pixels = camera.width * camera.height;
+    std::vector<float> probe(pixels * 3);
+    for (std::size_t i = 0; i < probe.size(); ++i)
+        probe[i] = .001F * std::cos(float(i));
+    const auto color_grad = Tensor::from_vector(
+        probe, {3, camera.height, camera.width}, device);
+    const auto alpha_grad = Tensor::from_vector(
+        std::vector<float>(pixels, .001F), {camera.height, camera.width}, device);
+    Rasterizer rasterizer;
+    TrainingOptions training;
+    training.sh_regularization_weight = .03F;
+    for (unsigned degree : {0U, 1U, 2U, 3U}) {
+        GaussianModel reference;
+        reference.means = Tensor::from_vector(means_v, {n, 3}, device);
+        reference.log_scales = Tensor::from_vector(
+            std::vector<float>(n * 3, -.7F), {n, 3}, device);
+        reference.quaternions = Tensor::from_vector(rotation_values, {n, 4}, device);
+        reference.opacity_logits = Tensor::from_vector(
+            std::vector<float>(n, -3.F), {n, 1}, device);
+        reference.sh = Tensor::from_vector(coefficients, {n, 16, 3}, device);
+        reference.sh_degree = 3;
+        auto fused = reference;
+        fused.means = reference.means.clone();
+        fused.log_scales = reference.log_scales.clone();
+        fused.quaternions = reference.quaternions.clone();
+        fused.opacity_logits = reference.opacity_logits.clone();
+        fused.sh = reference.sh.clone();
+        auto reference_quant = detail::make_sh_adam_quant(n, 48, device);
+        auto fused_quant = detail::make_sh_adam_quant(n, 48, device);
+        RasterizeOptions raster_options;
+        raster_options.active_sh_degree = degree;
+        raster_options.require_depth = false;
+        const int active_stride = int(degree + 1) * int(degree + 1) * 3;
+        for (unsigned iteration : {4U, 5U}) {
+            const auto ref_render = rasterizer.forward(
+                reference, camera, raster_options);
+            const auto fused_render = rasterizer.forward(
+                fused, camera, raster_options);
+            auto grads = rasterizer.backward(
+                reference, ref_render, color_grad, alpha_grad, {}, {});
+            detail::add_sh_regularization(
+                reference.sh, grads.sh, training.sh_regularization_weight);
+            const float c1 = 1.F - std::pow(training.beta1, float(iteration));
+            const float c2 = 1.F - std::pow(training.beta2, float(iteration));
+            detail::sh_adam_quant_step(
+                reference.sh, grads.sh, reference_quant, active_stride,
+                training.sh0_lr, training.sh_rest_lr, training.beta1,
+                training.beta2, c1, c2, training.adam_epsilon, 0.F);
+            SHAdamUpdate update;
+            update.first = fused_quant.first;
+            update.packed = fused_quant.packed;
+            update.bounds = fused_quant.bounds;
+            update.lr = training.sh0_lr;
+            update.rest_lr = training.sh_rest_lr;
+            update.beta1 = training.beta1;
+            update.beta2 = training.beta2;
+            update.correction1 = c1;
+            update.correction2 = c2;
+            update.epsilon = training.adam_epsilon;
+            update.regularization_weight = training.sh_regularization_weight;
+            const auto fused_grads = rasterizer.backward(
+                fused, fused_render, color_grad, alpha_grad, {}, {}, {},
+                &update);
+            require(!fused_grads.sh.is_valid(),
+                "quantized fused SH backward kept a gradient buffer");
+            compare(reference.sh.to_vector(), fused.sh.to_vector(), 2e-5F, 1e-4F,
+                "fused quant SH degree diverged from the standalone kernel");
+        }
+    }
+}
+
+void test_fused_structure_adam() {
+    using namespace photara::splat;
+    using photara::CameraModel;
+    using tinytensor::Tensor;
+    constexpr auto device = tinytensor::Device::CUDA;
+    constexpr std::size_t n = 257;
+    std::vector<float> means(n * 3), rotations(n * 4), log_scales(n * 3),
+        logits(n), coefficients(n * 12);
+    for (std::size_t i = 0; i < n; ++i) {
+        means[i * 3] = .02F * float(int(i % 11) - 5);
+        means[i * 3 + 1] = .02F * float(int(i % 7) - 3);
+        means[i * 3 + 2] = 2.F + .001F * i;
+        rotations[i * 4] = 1.F;
+        log_scales[i * 3] = -.7F;
+        log_scales[i * 3 + 1] = -.5F;
+        log_scales[i * 3 + 2] = -.9F;
+        logits[i] = -3.F + .01F * float(i % 17);
+        for (std::size_t j = 0; j < 12; ++j)
+            coefficients[i * 12 + j] = .04F * std::sin(float(i + j));
+    }
+    means[(n - 1) * 3 + 2] = -2.F;
+    GaussianModel model;
+    model.means = Tensor::from_vector(means, {n, 3}, device);
+    model.log_scales = Tensor::from_vector(log_scales, {n, 3}, device);
+    model.quaternions = Tensor::from_vector(rotations, {n, 4}, device);
+    model.opacity_logits = Tensor::from_vector(logits, {n, 1}, device);
+    model.sh = Tensor::from_vector(coefficients, {n, 4, 3}, device);
+    model.sh_degree = 1;
+    Camera camera;
+    camera.width = 37; camera.height = 29; camera.fx = 25; camera.fy = 25;
+    camera.cx = 18; camera.cy = 14;
+    camera.world_to_camera = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    const std::size_t pixels = camera.width * camera.height;
+    std::vector<float> probe(pixels * 3);
+    for (std::size_t i = 0; i < probe.size(); ++i) probe[i] = .001F * std::cos(float(i));
+    const auto color_grad = Tensor::from_vector(probe, {3, camera.height, camera.width}, device);
+    const auto alpha_grad = Tensor::from_vector(std::vector<float>(pixels, .001F), {camera.height, camera.width}, device);
+    const auto compare = [](const Tensor& a, const Tensor& b, const char* message) {
+        const auto x = a.to_vector(), y = b.to_vector();
+        require(x.size() == y.size(), message);
+        for (std::size_t i = 0; i < x.size(); ++i)
+            if (!std::isfinite(y[i]) || std::abs(x[i] - y[i]) > 2e-6F + 3e-4F * std::abs(x[i])) {
+                std::cerr << message << " index=" << i << " reference=" << x[i] << " actual=" << y[i] << '\n';
+                require(false, message);
+            }
+    };
+    Rasterizer rasterizer;
+    camera.model = CameraModel::pinhole;
+    auto fused_model = model;
+    fused_model.means = Tensor::from_vector(means, {n, 3}, device);
+    fused_model.log_scales = Tensor::from_vector(log_scales, {n, 3}, device);
+    fused_model.quaternions = Tensor::from_vector(rotations, {n, 4}, device);
+    fused_model.opacity_logits = Tensor::from_vector(logits, {n, 1}, device);
+    fused_model.sh = Tensor::from_vector(coefficients, {n, 4, 3}, device);
+    fused_model.sh_degree = 1;
+    auto means_state = detail::make_adam_state(model.means);
+    auto scales_state = detail::make_adam_state(model.log_scales);
+    auto rotations_state = detail::make_adam_state(model.quaternions);
+    auto opacity_state = detail::make_adam_state(model.opacity_logits);
+    auto fused_means = detail::make_adam_state(fused_model.means);
+    auto fused_scales = detail::make_adam_state(fused_model.log_scales);
+    auto fused_rotations = detail::make_adam_state(fused_model.quaternions);
+    auto fused_opacity = detail::make_adam_state(fused_model.opacity_logits);
+    const std::vector<float> moment(n * 3, .002F);
+    means_state.first = Tensor::from_vector(moment, {n, 3}, device);
+    fused_means.first = Tensor::from_vector(moment, {n, 3}, device);
+    RasterizeOptions options;
+    options.active_sh_degree = 1;
+    options.require_depth = false;
+    TrainingOptions training;
+    training.opacity_regularization_weight = .02F;
+    training.log_scale_regularization_weight = .03F;
+    training.max_scale_ratio = 4.F;
+    training.adam_epsilon = 1e-15F;
+    for (unsigned step : {7U, 8U, 9U}) {
+        const auto ref = rasterizer.forward(model, camera, options);
+        const auto fused = rasterizer.forward(fused_model, camera, options);
+        auto g = rasterizer.backward(model, ref, color_grad, alpha_grad, {}, {});
+        const float inverse = 1.F / float(n);
+        StructureAdamUpdate update{
+            fused_means.first, fused_means.second, fused_scales.first,
+            fused_scales.second, fused_rotations.first, fused_rotations.second,
+            fused_opacity.first, fused_opacity.second, 0.01F,
+            training.scales_lr, training.quaternions_lr, training.opacities_lr,
+            training.beta1, training.beta2,
+            1.F - std::pow(training.beta1, float(step)),
+            1.F - std::pow(training.beta2, float(step)),
+            training.adam_epsilon, -8.F, 2.F, std::log(training.max_scale_ratio),
+            training.opacity_regularization_weight * inverse,
+            training.log_scale_regularization_weight * inverse / 3.F,
+            0.F, 0.F, 0.F, 0.F, true};
+        const auto fg = rasterizer.backward(
+            fused_model, fused, color_grad, alpha_grad, {}, {}, {}, nullptr, &update);
+        require(!fg.means.is_valid(), "Fused structure backward retained mean gradients");
+        require(!fg.log_scales.is_valid(),
+            "Fused structure backward retained scale gradients");
+        detail::add_geometry_regularization(
+            model, g, training.opacity_regularization_weight,
+            training.log_scale_regularization_weight);
+        require(fg.opacity_logits.is_valid(),
+            "Fused structure diagnostics dropped opacity gradients");
+        compare(g.opacity_logits, fg.opacity_logits,
+            "Fused structure opacity diagnostic parity");
+        detail::adam_step_structure(
+            model, g, means_state, scales_state, rotations_state, opacity_state,
+            0.01F, step, training, -8.F, 2.F);
+        compare(model.means, fused_model.means, "Fused structure mean parity");
+        compare(model.log_scales, fused_model.log_scales,
+            "Fused structure scale parity");
+        compare(model.quaternions, fused_model.quaternions,
+            "Fused structure quaternion parity");
+        compare(model.opacity_logits, fused_model.opacity_logits,
+            "Fused structure opacity parity");
+        compare(means_state.first, fused_means.first, "Fused structure mean m parity");
+        compare(scales_state.second, fused_scales.second,
+            "Fused structure scale v parity");
+        compare(opacity_state.first, fused_opacity.first,
+            "Fused structure opacity m parity");
     }
 }
 
@@ -5728,6 +6249,8 @@ int main(int argc, char** argv) {
         }
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
             test_fused_sh_adam();
+            test_sh_adam_quant();
+            test_fused_structure_adam();
             test_training_device_cache();
             std::cout << "Memory optimization tests passed\n";
             return 0;
@@ -5772,6 +6295,8 @@ int main(int argc, char** argv) {
         test_geometry_stability_scheduler();
         test_forward_backward();
         test_fused_sh_adam();
+        test_sh_adam_quant();
+        test_fused_structure_adam();
         test_normal_field_parameterization_and_occupancy();
         test_gaussian_format_roundtrip();
         test_pam_smoke();

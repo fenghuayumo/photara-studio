@@ -2,6 +2,7 @@
 
 #include "core/logging.hpp"
 #include "densification_internal.hpp"
+#include "sh_adam_quant.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -43,12 +44,14 @@ void append_model(GaussianModel& model, const GaussianModel& added) {
 
 void select_adam_rows(
     detail::AdamState& state, const tinytensor::Tensor& indices) {
+    if (!state.first.is_valid() || !state.second.is_valid()) return;
     state.first = state.first.index_select(0, indices);
     state.second = state.second.index_select(0, indices);
 }
 
 void append_zero_adam(detail::AdamState& state, const std::size_t count) {
-    if (count == 0) return;
+    if (count == 0 || !state.first.is_valid() || !state.second.is_valid())
+        return;
     const auto append_zeros = [count](tinytensor::Tensor& tensor) {
         std::vector<std::size_t> dimensions = tensor.shape().dims();
         dimensions[0] = count;
@@ -68,6 +71,8 @@ void select_training_rows_gpu(
     model = select_model_rows(model, indices);
     for (detail::AdamState* state : states)
         select_adam_rows(*state, indices);
+    if (states.sh_quant)
+        detail::sh_adam_quant_select_rows(*states.sh_quant, indices);
 }
 
 tinytensor::Tensor weighted_sample_without_replacement(
@@ -124,10 +129,16 @@ void grow_parents_gpu(
         minimum_opacity, split_at_screen_size);
     // Splitting mutates the retained parent as well as creating a child, so
     // both rows start with clean optimizer moments.
-    if (!keep_parent_adam) detail::zero_adam_rows(parents, states);
+    if (!keep_parent_adam) {
+        detail::zero_adam_rows(parents, states.values);
+        if (states.sh_quant)
+            detail::sh_adam_quant_zero_rows(*states.sh_quant, parents);
+    }
     append_model(model, children);
     for (detail::AdamState* state : states)
         append_zero_adam(*state, count);
+    if (states.sh_quant)
+        detail::sh_adam_quant_append_zeros(*states.sh_quant, count);
 }
 
 }  // namespace gpu_detail

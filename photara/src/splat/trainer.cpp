@@ -5,6 +5,7 @@
 #include "bilateral_grid.hpp"
 #include "cuda_ops.hpp"
 #include "fused_ssim.hpp"
+#include "sh_adam_quant.hpp"
 #include "ppisp.hpp"
 #include "core/camera_projection.hpp"
 #include "core/logging.hpp"
@@ -588,7 +589,8 @@ struct ModelMemoryBudget {
 };
 
 ModelMemoryBudget model_memory_budget(
-    const GaussianModel& model, const refine::AdamStates& states) {
+    const GaussianModel& model, const refine::AdamStates& states,
+    const detail::ShAdamQuant* sh_quant = nullptr) {
     ModelMemoryBudget budget;
     budget.gaussians = model.size();
     const auto add = [](std::size_t& total, const tinytensor::Tensor& tensor) {
@@ -605,6 +607,11 @@ ModelMemoryBudget model_memory_budget(
         if (state == nullptr) continue;
         add(budget.optimizer_bytes, state->first);
         add(budget.optimizer_bytes, state->second);
+    }
+    if (sh_quant != nullptr && sh_quant->active()) {
+        budget.optimizer_bytes += sh_quant->first.bytes();
+        budget.optimizer_bytes += sh_quant->packed.bytes();
+        budget.optimizer_bytes += sh_quant->bounds.bytes();
     }
     return budget;
 }
@@ -986,7 +993,10 @@ GaussianModel initialize_from_dense_cloud(
 }
 
 
-Trainer::Trainer(TrainingOptions options) : options_(std::move(options)) {}
+Trainer::Trainer(TrainingOptions options, const bool fuse_structure_adam,
+    const bool quantize_sh_adam)
+    : options_(std::move(options)), fuse_structure_adam_(fuse_structure_adam),
+      quantize_sh_adam_(quantize_sh_adam) {}
 
 GaussianModel Trainer::train(
     const mvs::MvsScene& scene, ProgressCallback progress,
@@ -1187,16 +1197,36 @@ GaussianModel Trainer::train(
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
     detail::AdamState rotations_state = detail::make_adam_state(model.quaternions);
     detail::AdamState opacity_state = detail::make_adam_state(model.opacity_logits);
-    detail::AdamState sh_state =
-        options_.densification_strategy ==
+    const bool quantize_sh = quantize_sh_adam_ && !vulkan_backend &&
+        options_.densification_strategy != DensificationStrategy::adc_plus;
+    detail::ShAdamQuant sh_quant;
+    detail::AdamState sh_state;
+    if (quantize_sh) {
+        const int sh_stride = static_cast<int>(model.sh.shape()[1] * 3);
+        sh_quant = detail::make_sh_adam_quant(
+            model.size(), sh_stride, model.sh.device());
+    } else {
+        sh_state = options_.densification_strategy ==
                 DensificationStrategy::adc_plus
             ? detail::make_reduced_second_adam_state(model.sh)
             : detail::make_adam_state(model.sh);
+    }
+    if (quantize_sh_adam_ && !quantize_sh) {
+        core::Logger::instance().info(
+            vulkan_backend
+                ? "sh_adam_quant skipped: Vulkan keeps FP32 SH Adam"
+                : "sh_adam_quant skipped: adc_plus keeps reduced-second FP32 SH Adam");
+    } else if (quantize_sh) {
+        core::Logger::instance().info(
+            "sh_adam_quant=fp16_m_logq8_v block=per_gaussian stride=",
+            sh_quant.stride, " groups=dc,rest bytes_per_gaussian=",
+            sh_quant.stride * 3 + 16);
+    }
     detail::AdamState normal_features_state =
         detail::make_adam_state(model.normal_features);
     const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
-        &sh_state, &normal_features_state};
+        &sh_state, &normal_features_state, quantize_sh ? &sh_quant : nullptr};
     // Per-view photometric compensation. State is indexed by the source view,
     // so it survives densification: rows change, cameras do not. PPISP owns
     // exposure and white-balance; the bilateral grid adds spatial variation.
@@ -1820,19 +1850,96 @@ GaussianModel Trainer::train(
         // correction backward and its optimizer step; what follows the next
         // mark is the rasterizer's own backward.
         cuda_profiler.mark(CudaTrainingStage::colour_backward);
-        // Auxiliary normal-field merges retain the general gradient path.
-        // Empty renders also use the standalone optimizer (zero-gradient decay).
+        // Dense MVS already provides accurate surface positions. Decaying the
+        // position LR across the full 10k run keeps large geometric updates
+        // active for too long and destroys that initialization. Match the
+        // stable short-run trajectory, then retain the 1% tail for refinement.
+        const unsigned means_decay_steps = options_.input_is_dense
+            ? std::min(options_.iterations, 1'500U)
+            : options_.iterations;
+        const float progress_fraction = std::min(
+            static_cast<float>(iteration - 1) /
+                std::max(1U, means_decay_steps),
+            1.F);
+        const float means_lr = options_.means_lr *
+                               means_learning_rate_scale *
+                               std::pow(0.01F, progress_fraction);
+        const bool global_structure_active =
+            options_.structure_freeze_iter == 0 ||
+            iteration <= options_.structure_freeze_iter;
+        const bool dense_structure_active = !options_.input_is_dense ||
+            options_.dense_structure_freeze_iter == 0 ||
+            iteration <= options_.dense_structure_freeze_iter;
+        const bool update_structure = global_structure_active &&
+            dense_structure_active;
+        const float remaining = std::max(0.F, 1.F -
+            static_cast<float>(iteration) / std::max(1U, options_.iterations));
+        const float inverse_count =
+            1.F / static_cast<float>(std::max<std::size_t>(model.size(), 1));
+        const float shape_progress = std::min(
+            static_cast<float>(iteration - 1) /
+                std::max(1U, options_.iterations),
+            1.F);
+        const float shape_power =
+            std::max(options_.shape_scale_reg_decay_power, 0.F);
+        const float shape_decay =
+            (shape_power + 1.F) * std::pow(1.F - shape_progress, shape_power);
+        // Auxiliary normal-field / multi-view merges retain the resident
+        // gradient path. Empty renders also use the standalone optimizer
+        // (zero-gradient decay). fuse_structure_adam=false keeps the previous
+        // dL_d* tensors for A/B comparison.
         const bool fused_sh = !vulkan_backend && options_.fuse_sh_adam &&
             !normal_field_active &&
             rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
-        SHAdamUpdate sh_update{sh_state.first, sh_state.second,
-            options_.sh0_lr, options_.sh_rest_lr, options_.beta1, options_.beta2,
+        const bool fused_structure = !vulkan_backend &&
+            fuse_structure_adam_ && !normal_field_active &&
+            !has_multi_view_sample_gradients && update_structure &&
+            rendered.rendered_instances > 0;
+        SHAdamUpdate sh_update;
+        sh_update.lr = options_.sh0_lr;
+        sh_update.rest_lr = options_.sh_rest_lr;
+        sh_update.beta1 = options_.beta1;
+        sh_update.beta2 = options_.beta2;
+        sh_update.correction1 =
+            1.F - std::pow(options_.beta1, static_cast<float>(iteration));
+        sh_update.correction2 =
+            1.F - std::pow(options_.beta2, static_cast<float>(iteration));
+        sh_update.epsilon = options_.adam_epsilon;
+        sh_update.regularization_weight = options_.sh_regularization_weight;
+        if (quantize_sh) {
+            sh_update.first = sh_quant.first;
+            sh_update.packed = sh_quant.packed;
+            sh_update.bounds = sh_quant.bounds;
+        } else {
+            sh_update.first = sh_state.first;
+            sh_update.second = sh_state.second;
+        }
+        StructureAdamUpdate structure_update{
+            means_state.first, means_state.second, scales_state.first,
+            scales_state.second, rotations_state.first, rotations_state.second,
+            opacity_state.first, opacity_state.second, means_lr,
+            options_.scales_lr, options_.quaternions_lr, options_.opacities_lr,
+            options_.beta1, options_.beta2,
             1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
             1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
-            options_.adam_epsilon, options_.sh_regularization_weight};
+            options_.adam_epsilon, minimum_log_scale, maximum_log_scale,
+            options_.max_scale_ratio > 1.F
+                ? std::log(options_.max_scale_ratio) : 0.F,
+            std::max(options_.opacity_regularization_weight * remaining, 0.F) *
+                inverse_count,
+            std::max(options_.log_scale_regularization_weight *
+                         std::pow(remaining, 0.4F),
+                0.F) *
+                inverse_count / 3.F,
+            options_.shape_scale_reg * shape_decay * inverse_count,
+            options_.shape_erank_reg * inverse_count,
+            options_.shape_erank_s3_reg * inverse_count,
+            options_.shape_quat_norm_reg * inverse_count,
+            report_progress};
         ModelGradients gradients = rasterizer.backward(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
-            densify_map, fused_sh ? &sh_update : nullptr);
+            densify_map, fused_sh ? &sh_update : nullptr,
+            fused_structure ? &structure_update : nullptr);
         if (normal_field_active)
             detail::add_model_gradients(
                 normal_field_gradients, gradients, false);
@@ -1874,31 +1981,7 @@ GaussianModel Trainer::train(
         }
         cuda_profiler.mark(CudaTrainingStage::densification_stats);
 
-        // Dense MVS already provides accurate surface positions. Decaying the
-        // position LR across the full 10k run keeps large geometric updates
-        // active for too long and destroys that initialization. Match the
-        // stable short-run trajectory, then retain the 1% tail for refinement.
-        const unsigned means_decay_steps = options_.input_is_dense
-            ? std::min(options_.iterations, 1'500U)
-            : options_.iterations;
-        const float progress_fraction = std::min(
-            static_cast<float>(iteration - 1) /
-                std::max(1U, means_decay_steps),
-            1.F);
-        const float means_lr = options_.means_lr *
-                               means_learning_rate_scale *
-                               std::pow(0.01F, progress_fraction);
-        const bool global_structure_active =
-            options_.structure_freeze_iter == 0 ||
-            iteration <= options_.structure_freeze_iter;
-        const bool dense_structure_active = !options_.input_is_dense ||
-            options_.dense_structure_freeze_iter == 0 ||
-            iteration <= options_.dense_structure_freeze_iter;
-        const bool update_structure = global_structure_active &&
-            dense_structure_active;
-        if (update_structure) {
-            const float remaining = std::max(0.F, 1.F -
-                static_cast<float>(iteration) / std::max(1U, options_.iterations));
+        if (update_structure && !fused_structure) {
             detail::add_geometry_regularization(model, gradients,
                 options_.opacity_regularization_weight * remaining,
                 options_.log_scale_regularization_weight *
@@ -1907,23 +1990,9 @@ GaussianModel Trainer::train(
                 options_.shape_erank_reg > 0.F ||
                 options_.shape_erank_s3_reg > 0.F ||
                 options_.shape_quat_norm_reg > 0.F) {
-                // Strategy-neutral per-splat shape priors: the scale weight
-                // follows the front-loaded (p+1)(1-t)^p schedule with unit
-                // run integral; every weight is averaged over the splats.
-                const float progress = std::min(
-                    static_cast<float>(iteration - 1) /
-                        std::max(1U, options_.iterations),
-                    1.F);
-                const float power = std::max(
-                    options_.shape_scale_reg_decay_power, 0.F);
-                const float decay =
-                    (power + 1.F) * std::pow(1.F - progress, power);
-                const float inverse_count =
-                    1.F / static_cast<float>(std::max<std::size_t>(
-                              model.size(), 1));
                 detail::apply_shape_regularizers(
                     model, gradients,
-                    options_.shape_scale_reg * decay * inverse_count,
+                    options_.shape_scale_reg * shape_decay * inverse_count,
                     options_.shape_erank_reg * inverse_count,
                     options_.shape_erank_s3_reg * inverse_count,
                     options_.shape_quat_norm_reg * inverse_count);
@@ -1961,7 +2030,15 @@ GaussianModel Trainer::train(
             const std::size_t active_sh_stride =
                 static_cast<std::size_t>(active_sh_degree + 1) *
                 (active_sh_degree + 1) * 3;
-            if (active_sh_stride < full_sh_stride)
+            if (quantize_sh)
+                detail::sh_adam_quant_step(
+                    model.sh, gradients.sh, sh_quant,
+                    static_cast<int>(active_sh_stride), options_.sh0_lr,
+                    options_.sh_rest_lr, options_.beta1, options_.beta2,
+                    1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
+                    1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
+                    options_.adam_epsilon, 0.F);
+            else if (active_sh_stride < full_sh_stride)
                 detail::adam_step_active_prefix(
                     model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
                     options_, full_sh_stride, active_sh_stride,
@@ -2063,8 +2140,8 @@ GaussianModel Trainer::train(
                 means_learning_rate_scale = refinement_geometry.scale;
             }
             if (refinement_happened && report_progress) {
-                const ModelMemoryBudget budget =
-                    model_memory_budget(model, adam_states);
+                const ModelMemoryBudget budget = model_memory_budget(
+                    model, adam_states, quantize_sh ? &sh_quant : nullptr);
                 core::Logger::instance().info(
                     "splat_memory iteration=", iteration,
                     " gaussians=", budget.gaussians,

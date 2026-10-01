@@ -364,7 +364,8 @@ void run_gaussian_backward(const Gaussians& g, const CameraView& cam,
                               s.kernel_size, s.scale_modifier, radius,
                               gst.clamped, gst, gs, grads.means, grads.sh,
                               grads.colors, grads.opacities, grads.scales,
-                              grads.rotations, grads.covariances, grads.sh_adam);
+                              grads.rotations, grads.covariances, grads.sh_adam,
+                              grads.structure_adam);
     check_cuda(cudaGetLastError(), "gaussian_backward");
 }
 

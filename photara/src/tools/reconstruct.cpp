@@ -160,6 +160,8 @@ struct ReconstructCli {
     std::string splat_preview_vk_device_uuid;
     bool splat_profile_cuda{false};
     bool splat_fuse_sh_adam{true};
+    bool splat_fuse_structure_adam{true};
+    bool splat_sh_adam_quant{true};
     unsigned splat_profile_interval{100};
     unsigned splat_sh_degree{3};
     unsigned splat_max_resolution{1'920};
@@ -224,6 +226,7 @@ struct ReconstructCli {
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
     std::uint64_t splat_densification_cap{1'000'000};
+    unsigned splat_grow_stop_iter{0};
     std::uint64_t splat_init_point_budget{0};
     bool mesh{false};
     bool mvs_mesh_only{false};
@@ -460,6 +463,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
               << "  --splat-densification-cap N  densify growth ceiling (default 1000000)\n"
+              << "  --splat-grow-stop N  stop adding Gaussians at N (default 0 = half of iterations)\n"
               << "  --splat-growth-factor W  EMC per-refine count multiplier; 0 keeps the strategy preset\n"
               << "  --splat-init-point-budget N  cap the initialization cloud (default 0 = keep all)\n"
               << "  --mesh       also build a surface mesh -> mesh.ply\n"
@@ -804,6 +808,15 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-fuse-sh-adam", "Fuse SH projection gradients into Adam",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("splat-fuse-structure-adam",
+         "Fuse structure projection gradients into Adam on CUDA. "
+         "False keeps the previous resident dL_d* path for comparison",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("splat-sh-adam-quant",
+         "Store SH Adam first moments as FP16 and second moments as log-uint8, "
+         "with separate DC/non-DC ranges per Gaussian. "
+         "False keeps FP32 moments for comparison",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-cache-auto",
          "Grow host cache; shrink CUDA cache within its explicit budget and VRAM safety limits",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -938,6 +951,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("0"))
         ("splat-densification-cap", "Densify growth ceiling",
          cxxopts::value<std::uint64_t>()->default_value("1000000"))
+        ("splat-grow-stop",
+         "Stop adding Gaussians at this iteration (0 keeps half of iterations)",
+         cxxopts::value<unsigned>()->default_value("0"))
         ("splat-init-point-budget",
          "Cap on the initialization Gaussians built from the input cloud "
          "(0 keeps every point)",
@@ -1360,6 +1376,9 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     cli.splat_profile_cuda = result["splat-profile-cuda"].as<bool>();
     cli.splat_fuse_sh_adam = result["splat-fuse-sh-adam"].as<bool>();
+    cli.splat_fuse_structure_adam =
+        result["splat-fuse-structure-adam"].as<bool>();
+    cli.splat_sh_adam_quant = result["splat-sh-adam-quant"].as<bool>();
     cli.splat_profile_interval =
         result["splat-profile-interval"].as<unsigned>();
     if (cli.splat_profile_interval == 0 ||
@@ -1477,6 +1496,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["splat-structure-freeze-iter"].as<unsigned>();
     cli.splat_densification_cap =
         result["splat-densification-cap"].as<std::uint64_t>();
+    cli.splat_grow_stop_iter = result["splat-grow-stop"].as<unsigned>();
     cli.splat_init_point_budget =
         result["splat-init-point-budget"].as<std::uint64_t>();
     cli.mesh = result["mesh"].as<bool>();
@@ -3220,6 +3240,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     // ADC+ and ADC-IGS share the Brush learning rates, initial opacity and
     // growth thresholds. Apply user overrides after the strategy preset.
     photara::splat::apply_strategy_defaults(options);
+    if (cli.splat_grow_stop_iter != 0)
+        options.grow_stop_iter = cli.splat_grow_stop_iter;
     if (cli.splat_growth_factor > 0.F)
         options.densify_growth_factor = cli.splat_growth_factor;
     options.seed = cli.splat_seed;
@@ -3426,6 +3448,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " background_noise=", options.background_noise_strength,
         " cuda_profile=", options.profile_cuda,
         " cuda_profile_interval=", options.cuda_profile_interval,
+        " fuse_sh_adam=", options.fuse_sh_adam,
+        " fuse_structure_adam=", cli.splat_fuse_structure_adam,
+        " sh_adam_quant=", cli.splat_sh_adam_quant,
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
         " source_resolution=", options.use_source_resolution,
         " max_image_dimension=", options.max_image_dimension,
@@ -3668,7 +3693,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         gaussians = load_trained_gaussians(cli, project_archive);
     } else {
     gaussians =
-        photara::splat::Trainer(options).train(
+        photara::splat::Trainer(
+            options, cli.splat_fuse_structure_adam, cli.splat_sh_adam_quant)
+            .train(
             scene,
             [](const photara::splat::TrainingProgress& progress) {
                 std::ostringstream line;
@@ -3694,6 +3721,11 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                      << progress.image_height
                      << " instances=" << progress.rendered_instances
                      << " sh_degree=" << progress.active_sh_degree
+                     << " opacity_grad_mean="
+                     << progress.opacity_gradient_mean
+                     << " opacity_grad_positive="
+                     << progress.opacity_gradient_positive_fraction
+                     << " opacity_mean=" << progress.opacity_mean
                      << " step_ms=" << progress.milliseconds;
                 photara::core::Logger::instance().info(line.str());
                 return true;

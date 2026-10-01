@@ -6,8 +6,10 @@
 
 #include "splat_drender/api.h"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <cstdint>
 #include <fstream>
 #include <cstdlib>
 #include <algorithm>
@@ -305,11 +307,12 @@ ModelGradients Rasterizer::backward(
     const tinytensor::Tensor& grad_alpha,
     const tinytensor::Tensor& grad_depth,
     const tinytensor::Tensor& grad_normal,
-    const tinytensor::Tensor& densify_map, const SHAdamUpdate* sh_adam) const {
+    const tinytensor::Tensor& densify_map, const SHAdamUpdate* sh_adam,
+    const StructureAdamUpdate* structure_adam) const {
     if (model.means.device() == tinytensor::Device::Vulkan)
         return detail::vulkan_raster_backward(
             model, rendered, grad_color, grad_alpha, grad_depth, grad_normal,
-            densify_map, sh_adam);
+            densify_map, sh_adam, structure_adam);
     if (!rendered.context.impl)
         throw std::invalid_argument("Splat backward requires a live forward context");
     const auto& context = *rendered.context.impl;
@@ -326,20 +329,50 @@ ModelGradients Rasterizer::backward(
     const auto count = model.size();
 
     ModelGradients gradients;
-    gradients.means = tinytensor::Tensor::zeros_like(model.means);
+    const bool quant_sh = sh_adam && sh_adam->packed.is_valid();
     if (sh_adam && (context.colors_precomp.is_valid() ||
         context.forward.instance_count <= 0 || model.sh.shape()[1] > 16 ||
-        sh_adam->first.numel() != model.sh.numel() ||
-        (sh_adam->second.numel() != model.size() &&
-         sh_adam->second.numel() != model.sh.numel())))
+        (quant_sh
+            ? (sh_adam->first.numel() != model.sh.numel() ||
+               sh_adam->first.dtype() != tinytensor::DataType::Float16 ||
+               sh_adam->packed.numel() != model.sh.numel() ||
+               sh_adam->packed.dtype() != tinytensor::DataType::UInt8 ||
+               !sh_adam->bounds.is_valid() ||
+               sh_adam->bounds.numel() != count * 4)
+            : (sh_adam->first.numel() != model.sh.numel() ||
+               (sh_adam->second.numel() != model.size() &&
+                sh_adam->second.numel() != model.sh.numel())))))
         throw std::invalid_argument("Incompatible fused SH Adam context/state");
+    if (structure_adam && (context.colors_precomp.is_valid() ||
+        context.forward.instance_count <= 0 ||
+        structure_adam->means_first.numel() != model.means.numel() ||
+        structure_adam->means_second.numel() != model.means.numel() ||
+        structure_adam->scales_first.numel() != model.log_scales.numel() ||
+        structure_adam->scales_second.numel() != model.log_scales.numel() ||
+        structure_adam->rotations_first.numel() != model.quaternions.numel() ||
+        structure_adam->rotations_second.numel() != model.quaternions.numel() ||
+        structure_adam->opacity_first.numel() != model.opacity_logits.numel() ||
+        structure_adam->opacity_second.numel() != model.opacity_logits.numel()))
+        throw std::invalid_argument(
+            "Incompatible fused structure Adam context/state");
+    const bool fuse_structure = structure_adam != nullptr;
+    if (!fuse_structure)
+        gradients.means = tinytensor::Tensor::zeros_like(model.means);
     if (!sh_adam) gradients.sh = tinytensor::Tensor::zeros_like(model.sh);
-    auto grad_opacities = tinytensor::Tensor::zeros(
-        {count, 1}, tinytensor::Device::CUDA);
-    auto grad_scales = tinytensor::Tensor::zeros(
-        {count, 3}, tinytensor::Device::CUDA);
-    auto grad_quaternions = tinytensor::Tensor::zeros(
-        {count, 4}, tinytensor::Device::CUDA);
+    tinytensor::Tensor grad_opacities;
+    tinytensor::Tensor grad_scales;
+    tinytensor::Tensor grad_quaternions;
+    if (!fuse_structure) {
+        grad_opacities = tinytensor::Tensor::zeros(
+            {count, 1}, tinytensor::Device::CUDA);
+        grad_scales = tinytensor::Tensor::zeros(
+            {count, 3}, tinytensor::Device::CUDA);
+        grad_quaternions = tinytensor::Tensor::zeros(
+            {count, 4}, tinytensor::Device::CUDA);
+    } else if (structure_adam->capture_opacity_gradient) {
+        gradients.opacity_logits = tinytensor::Tensor::zeros(
+            {count, 1}, tinytensor::Device::CUDA);
+    }
     auto refine_weight = tinytensor::Tensor::zeros(
         {count}, tinytensor::Device::CUDA);
     tinytensor::Tensor densify_weight;
@@ -372,25 +405,78 @@ ModelGradients Rasterizer::backward(
         splat_drender::ModelGradients grads;
         if (sh_adam) {
             const auto stride = model.sh.shape()[1] * 3;
+            const float regularization =
+                stride > 3 && sh_adam->regularization_weight > 0.F
+                    ? 2.F * sh_adam->regularization_weight /
+                          float(count * (stride - 3))
+                    : 0.F;
             // Tensor copies share storage; this opt-in backward owns the SH update.
             auto parameter = model.sh;
-            auto first = sh_adam->first;
-            auto second = sh_adam->second;
-            grads.sh_adam = {parameter.ptr<float>(), first.ptr<float>(),
-                second.ptr<float>(), sh_adam->second.numel() == count,
-                sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
-                sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon,
-                stride > 3 && sh_adam->regularization_weight > 0.F
-                    ? 2.F * sh_adam->regularization_weight / float(count * (stride - 3)) : 0.F};
+            if (quant_sh) {
+                auto first = sh_adam->first;
+                auto packed = sh_adam->packed;
+                auto bounds = sh_adam->bounds;
+                grads.sh_adam = {parameter.ptr<float>(), nullptr, nullptr, false,
+                    sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
+                    sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon,
+                    regularization, first.ptr<__half>(), packed.ptr<std::uint8_t>(),
+                    bounds.ptr<float>(), static_cast<int>(stride)};
+            } else {
+                auto first = sh_adam->first;
+                auto second = sh_adam->second;
+                grads.sh_adam = {parameter.ptr<float>(), first.ptr<float>(),
+                    second.ptr<float>(), sh_adam->second.numel() == count,
+                    sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
+                    sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon,
+                    regularization};
+            }
         }
-        grads.means = gradients.means.ptr<float>();
+        if (structure_adam) {
+            auto means = model.means;
+            auto log_scales = model.log_scales;
+            auto quaternions = model.quaternions;
+            auto opacity_logits = model.opacity_logits;
+            auto means_first = structure_adam->means_first;
+            auto means_second = structure_adam->means_second;
+            auto scales_first = structure_adam->scales_first;
+            auto scales_second = structure_adam->scales_second;
+            auto rotations_first = structure_adam->rotations_first;
+            auto rotations_second = structure_adam->rotations_second;
+            auto opacity_first = structure_adam->opacity_first;
+            auto opacity_second = structure_adam->opacity_second;
+            grads.structure_adam = {
+                means.ptr<float>(), log_scales.ptr<float>(),
+                quaternions.ptr<float>(), opacity_logits.ptr<float>(),
+                means_first.ptr<float>(), means_second.ptr<float>(),
+                scales_first.ptr<float>(), scales_second.ptr<float>(),
+                rotations_first.ptr<float>(), rotations_second.ptr<float>(),
+                opacity_first.ptr<float>(), opacity_second.ptr<float>(),
+                model.filter_3d.is_valid() ? model.filter_3d.ptr<float>()
+                                           : nullptr,
+                structure_adam->means_lr, structure_adam->scales_lr,
+                structure_adam->quaternions_lr, structure_adam->opacities_lr,
+                structure_adam->beta1, structure_adam->beta2,
+                structure_adam->correction1, structure_adam->correction2,
+                structure_adam->epsilon, structure_adam->minimum_log_scale,
+                structure_adam->maximum_log_scale,
+                structure_adam->max_log_scale_ratio,
+                structure_adam->opacity_reg, structure_adam->log_scale_reg,
+                structure_adam->shape_scale_reg, structure_adam->shape_erank_reg,
+                structure_adam->shape_erank_s3_reg,
+                structure_adam->shape_quat_norm_reg,
+                gradients.opacity_logits.is_valid()
+                    ? gradients.opacity_logits.ptr<float>() : nullptr};
+        }
+        grads.means = fuse_structure ? nullptr : gradients.means.ptr<float>();
         grads.sh = context.colors_precomp.is_valid()
             ? nullptr
-            : gradients.sh.ptr<float>();
+            : (gradients.sh.is_valid() ? gradients.sh.ptr<float>() : nullptr);
         grads.colors = grad_colors.is_valid() ? grad_colors.ptr<float>() : nullptr;
-        grads.opacities = grad_opacities.ptr<float>();
-        grads.scales = grad_scales.ptr<float>();
-        grads.rotations = grad_quaternions.ptr<float>();
+        grads.opacities =
+            fuse_structure ? nullptr : grad_opacities.ptr<float>();
+        grads.scales = fuse_structure ? nullptr : grad_scales.ptr<float>();
+        grads.rotations =
+            fuse_structure ? nullptr : grad_quaternions.ptr<float>();
         grads.refine_weight = refine_weight.ptr<float>();
         grads.densify_weight =
             scatter_densify ? densify_weight.ptr<float>() : nullptr;
@@ -403,9 +489,10 @@ ModelGradients Rasterizer::backward(
             camera_view_of(context.camera, context.constants),
             settings_of(context.options), context.forward, fwd_out, dL, grads);
     }
-    detail::chain_parameter_gradients(
-        model, context.activated, grad_scales, grad_quaternions,
-        grad_opacities, gradients);
+    if (!fuse_structure)
+        detail::chain_parameter_gradients(
+            model, context.activated, grad_scales, grad_quaternions,
+            grad_opacities, gradients);
     gradients.refine_weight = std::move(refine_weight);
     gradients.densify_weight = std::move(densify_weight);
     gradients.densify_weight_den = std::move(densify_weight_den);

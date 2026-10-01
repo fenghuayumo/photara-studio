@@ -2,6 +2,7 @@
 
 #include "densification_adc_plus.hpp"
 #include "densification_igs.hpp"
+#include "sh_adam_quant.hpp"
 #include "core/logging.hpp"
 
 #include <cuda_runtime.h>
@@ -69,12 +70,14 @@ void append_model(GaussianModel& model, const GaussianModel& added) {
 
 void select_adam_rows(
     detail::AdamState& state, const tinytensor::Tensor& indices) {
+    if (!state.first.is_valid() || !state.second.is_valid()) return;
     state.first = state.first.index_select(0, indices);
     state.second = state.second.index_select(0, indices);
 }
 
 void append_zero_adam(detail::AdamState& state, const std::size_t count) {
-    if (count == 0) return;
+    if (count == 0 || !state.first.is_valid() || !state.second.is_valid())
+        return;
     const auto append_zeros = [count](tinytensor::Tensor& tensor) {
         std::vector<std::size_t> dimensions = tensor.shape().dims();
         dimensions[0] = count;
@@ -93,7 +96,9 @@ void zero_adam_rows(
     const tinytensor::Device device) {
     if (rows.empty()) return;
     const auto indices = index_tensor(rows, device);
-    detail::zero_adam_rows(indices, states);
+    detail::zero_adam_rows(indices, states.values);
+    if (states.sh_quant)
+        detail::sh_adam_quant_zero_rows(*states.sh_quant, indices);
 }
 
 void select_training_rows(
@@ -102,6 +107,8 @@ void select_training_rows(
     const auto indices = index_tensor(keep, model.means.device());
     model = select_model_rows(model, indices);
     for (detail::AdamState* state : states) select_adam_rows(*state, indices);
+    if (states.sh_quant)
+        detail::sh_adam_quant_select_rows(*states.sh_quant, indices);
 }
 
 void grow_training_model(
@@ -140,6 +147,8 @@ void grow_training_model(
     append_model(model, children);
     for (detail::AdamState* state : states)
         append_zero_adam(*state, parents.size());
+    if (states.sh_quant)
+        detail::sh_adam_quant_append_zeros(*states.sh_quant, parents.size());
 }
 
 std::vector<std::size_t> weighted_unique_sample(

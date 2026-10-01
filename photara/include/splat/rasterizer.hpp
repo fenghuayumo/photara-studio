@@ -2,6 +2,8 @@
 
 #include "splat/types.hpp"
 
+#include <limits>
+
 namespace photara::splat {
 
 struct RasterizeOptions {
@@ -38,6 +40,32 @@ struct SHAdamUpdate {
     float lr{}, rest_lr{}, beta1{.9F}, beta2{.999F};
     float correction1{1.F}, correction2{1.F}, epsilon{1e-8F};
     float regularization_weight{};
+    // Hybrid moments. A valid packed tensor uses FP16 `first`, uint8 log-second
+    // `packed`, and per-group bounds instead of the FP32 first/second pair.
+    tinytensor::Tensor packed;
+    tinytensor::Tensor bounds;
+};
+
+struct StructureAdamUpdate {
+    tinytensor::Tensor means_first, means_second;
+    tinytensor::Tensor scales_first, scales_second;
+    tinytensor::Tensor rotations_first, rotations_second;
+    tinytensor::Tensor opacity_first, opacity_second;
+    float means_lr{}, scales_lr{}, quaternions_lr{}, opacities_lr{};
+    float beta1{.9F}, beta2{.999F};
+    float correction1{1.F}, correction2{1.F}, epsilon{1e-15F};
+    float minimum_log_scale{-std::numeric_limits<float>::infinity()};
+    float maximum_log_scale{std::numeric_limits<float>::infinity()};
+    float max_log_scale_ratio{};
+    float opacity_reg{};
+    float log_scale_reg{};
+    float shape_scale_reg{};
+    float shape_erank_reg{};
+    float shape_erank_s3_reg{};
+    float shape_quat_norm_reg{};
+    // Logging-only: retain the fused opacity-logit gradient without bringing
+    // back the other structure-gradient tensors.
+    bool capture_opacity_gradient{};
 };
 
 class Rasterizer {
@@ -64,7 +92,8 @@ public:
         const tinytensor::Tensor& grad_depth,
         const tinytensor::Tensor& grad_normal,
         const tinytensor::Tensor& densify_map = {},
-        const SHAdamUpdate* sh_adam = nullptr) const;
+        const SHAdamUpdate* sh_adam = nullptr,
+        const StructureAdamUpdate* structure_adam = nullptr) const;
 
     // Materialize a deferred Vulkan contribution-visibility tensor. This is a
     // no-op when forward() already returned the regular Float32 visibility.

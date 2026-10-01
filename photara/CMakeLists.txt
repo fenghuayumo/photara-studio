@@ -570,6 +570,7 @@ if(PHOTARA_ENABLE_FEATURES)
 
         add_library(photara_splat_cuda STATIC
             src/splat/rasterizer.cu
+            src/splat/sh_adam_quant.cu
             src/splat/cuda_ops.cu
             src/splat/optimizer.cpp
             src/splat/bilateral_grid.cu

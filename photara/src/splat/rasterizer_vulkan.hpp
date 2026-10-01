@@ -27,7 +27,8 @@ ModelGradients vulkan_raster_backward(
     const tinytensor::Tensor& grad_depth,
     const tinytensor::Tensor& grad_normal,
     const tinytensor::Tensor& densify_map,
-    const SHAdamUpdate* sh_adam);
+    const SHAdamUpdate* sh_adam,
+    const StructureAdamUpdate* structure_adam = nullptr);
 
 void vulkan_materialize_visibility(RenderResult& rendered);
 

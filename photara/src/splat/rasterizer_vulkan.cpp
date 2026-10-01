@@ -330,7 +330,8 @@ ModelGradients vulkan_raster_backward(
     const tinytensor::Tensor& grad_depth,
     const tinytensor::Tensor& grad_normal,
     const tinytensor::Tensor& densify_map,
-    const SHAdamUpdate* sh_adam) {
+    const SHAdamUpdate* sh_adam,
+    const StructureAdamUpdate* structure_adam) {
     auto context = get_context(rendered);
     const auto profile_start = context->backend->profile_stages
         ? std::chrono::steady_clock::now()
@@ -338,6 +339,9 @@ ModelGradients vulkan_raster_backward(
     if (sh_adam != nullptr)
         throw std::invalid_argument(
             "Fused SH Adam is not supported by the Vulkan raster primitive");
+    if (structure_adam != nullptr)
+        throw std::invalid_argument(
+            "Fused structure Adam is not supported by the Vulkan raster primitive");
     if (densify_map.is_valid() && densify_map.numel() != 0)
         throw std::invalid_argument(
             "Vulkan EMC densify-map backward is not implemented yet");

@@ -9,6 +9,7 @@
 #include "splat_drender/camera.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 
 namespace splat_drender {
@@ -102,10 +103,50 @@ struct SHAdam {
     float beta1 = .9f, beta2 = .999f;
     float correction1 = 1.f, correction2 = 1.f, epsilon = 1e-8f;
     float regularization_factor = 0.f;
+    // FP16 first moment + uint8 log-second moment. quant_stride > 0 ignores
+    // the FP32 first/second pointers. packed is [N, quant_stride], bounds is
+    // [N, 4]: DC and non-DC each own (log_s_min, log_s_max).
+    void* quant_first = nullptr;
+    std::uint8_t* packed = nullptr;
+    float* bounds = nullptr;
+    int quant_stride = 0;
+};
+
+// Optional structure Adam after the projection derivative has consumed the
+// activated scale/quaternion/opacity. No global structure gradient buffers
+// are needed. The previous resident-gradient path remains when this is empty.
+struct StructureAdam {
+    float* means = nullptr;
+    float* log_scales = nullptr;
+    float* quaternions = nullptr;
+    float* opacity_logits = nullptr;
+    float* means_first = nullptr;
+    float* means_second = nullptr;
+    float* scales_first = nullptr;
+    float* scales_second = nullptr;
+    float* rotations_first = nullptr;
+    float* rotations_second = nullptr;
+    float* opacity_first = nullptr;
+    float* opacity_second = nullptr;
+    const float* filter_3d = nullptr;
+    float means_lr = 0.f, scales_lr = 0.f, quaternions_lr = 0.f,
+          opacities_lr = 0.f;
+    float beta1 = .9f, beta2 = .999f;
+    float correction1 = 1.f, correction2 = 1.f, epsilon = 1e-15f;
+    float minimum_log_scale = -1.e30f, maximum_log_scale = 1.e30f;
+    float max_log_scale_ratio = 0.f;
+    float opacity_reg = 0.f;
+    float log_scale_reg = 0.f;
+    float shape_scale_reg = 0.f;
+    float shape_erank_reg = 0.f;
+    float shape_erank_s3_reg = 0.f;
+    float shape_quat_norm_reg = 0.f;
+    float* opacity_gradient = nullptr;
 };
 
 struct ModelGradients {
     SHAdam sh_adam{};
+    StructureAdam structure_adam{};
     float* means = nullptr;        // [N,3]
     float* sh = nullptr;           // [N,sh_bases,3]
     float* colors = nullptr;       // [N,3]

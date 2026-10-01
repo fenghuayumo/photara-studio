@@ -17,6 +17,7 @@
 #include "device/geometry.cuh"
 #include "kernels.h"
 #include "splat_drender/buffers.h"
+#include "splat_drender/sh_adam_quant.cuh"
 
 #include <cooperative_groups.h>
 #include <type_traits>
@@ -650,8 +651,204 @@ __device__ inline void update_sh_adam_rows(
     }
 }
 
-template <bool HasSH, bool HasCov, bool FusedSH>
-__global__ void __launch_bounds__(cfg::kGaussianBlock, FusedSH ? 2 : 1)
+__device__ inline float structure_sigmoid(float x) {
+    return 1.f / (1.f + expf(-x));
+}
+
+__device__ inline void adam_scalar(
+    float* parameter, int index, float grad, float* first, float* second,
+    float lr, float beta1, float beta2, float correction1, float correction2,
+    float epsilon, float clamp_min, float clamp_max) {
+    const float previous = parameter[index];
+    if (!isfinite(previous) || !isfinite(grad)) {
+        first[index] = 0.f;
+        second[index] = 0.f;
+        parameter[index] = isfinite(previous)
+            ? fminf(fmaxf(previous, clamp_min), clamp_max)
+            : fminf(fmaxf(0.f, clamp_min), clamp_max);
+        return;
+    }
+    const float m = beta1 * first[index] + (1.f - beta1) * grad;
+    const float v = beta2 * second[index] + (1.f - beta2) * grad * grad;
+    if (!isfinite(m) || !isfinite(v)) {
+        first[index] = 0.f;
+        second[index] = 0.f;
+        parameter[index] = fminf(fmaxf(previous, clamp_min), clamp_max);
+        return;
+    }
+    first[index] = m;
+    second[index] = v;
+    const float candidate =
+        previous - lr * (m / correction1) / (sqrtf(v / correction2) + epsilon);
+    const float updated = isfinite(candidate) ? candidate : previous;
+    parameter[index] = fminf(fmaxf(updated, clamp_min), clamp_max);
+}
+
+__device__ inline void add_shape_regularizer_grads(
+    const float* log_scales, const float* quaternions, int i,
+    float* grad_log, float* grad_quat, const StructureAdam& a) {
+    if (a.shape_scale_reg > 0.f)
+        for (int axis = 0; axis < 3; ++axis)
+            if (log_scales[3 * i + axis] > -40.f)
+                grad_log[axis] += a.shape_scale_reg / 3.f;
+    if (a.shape_quat_norm_reg > 0.f) {
+        const float ns =
+            quaternions[4 * i] * quaternions[4 * i] +
+            quaternions[4 * i + 1] * quaternions[4 * i + 1] +
+            quaternions[4 * i + 2] * quaternions[4 * i + 2] +
+            quaternions[4 * i + 3] * quaternions[4 * i + 3];
+        if (ns > 1e-20f) {
+            const float n = sqrtf(ns);
+            const float factor = a.shape_quat_norm_reg * (n - 1.f) / ns;
+            for (int c = 0; c < 4; ++c)
+                grad_quat[c] += factor * quaternions[4 * i + c];
+        }
+    }
+    if (a.shape_erank_reg <= 0.f && a.shape_erank_s3_reg <= 0.f) return;
+    float log_scale[3]{};
+    int largest = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        log_scale[axis] = log_scales[3 * i + axis];
+        if (!(log_scale[axis] > -1e4f)) log_scale[axis] = -1e4f;
+        if (axis > 0 && log_scale[axis] > log_scale[largest]) largest = axis;
+    }
+    float x[3]{};
+    for (int axis = 0; axis < 3; ++axis)
+        x[axis] = expf(2.f * (log_scale[axis] - log_scale[largest]));
+    const float sum = x[0] + x[1] + x[2];
+    if (!(sum > 0.f)) return;
+    int smallest = 0;
+    for (int axis = 1; axis < 3; ++axis)
+        if (x[axis] < x[smallest]) smallest = axis;
+    const float share_largest = x[largest] / sum;
+    const float raw_share_smallest = x[smallest] / sum;
+    const bool smallest_clamped = !(raw_share_smallest > 1e-30f);
+    const float share_smallest =
+        smallest_clamped ? 1e-30f : raw_share_smallest;
+    const float middle_complement = 1.f - share_largest - share_smallest;
+    const bool middle_clamped = !(middle_complement > 1e-30f);
+    const float share_middle = middle_clamped ? 1e-30f : middle_complement;
+    const float entropy = -(
+        share_largest * logf(share_largest) +
+        share_middle * logf(share_middle) +
+        share_smallest * logf(share_smallest));
+    const float rank = expf(entropy);
+    float dreg_dshare[3]{};
+    if (a.shape_erank_reg > 0.f && rank - 0.99999f < 1.f) {
+        const float shares[3]{share_largest, share_middle, share_smallest};
+        for (int k = 0; k < 3; ++k)
+            dreg_dshare[k] = rank * (logf(shares[k]) + 1.f) / (rank - 0.99999f);
+    }
+    const float dloss_dshare_smallest = dreg_dshare[2] + a.shape_erank_s3_reg;
+    float dloss_dx[3]{};
+    for (int axis = 0; axis < 3; ++axis) {
+        float d_largest = axis == largest ? (1.f - share_largest) / sum
+                                          : -share_largest / sum;
+        float d_smallest = 0.f;
+        if (axis == smallest) {
+            if (!smallest_clamped)
+                d_smallest = (1.f - share_smallest) / sum;
+        } else {
+            d_smallest = -share_smallest / sum;
+        }
+        const float d_middle =
+            middle_clamped ? 0.f : -(d_largest + d_smallest);
+        dloss_dx[axis] = dreg_dshare[0] * d_largest +
+                         dreg_dshare[1] * d_middle +
+                         dloss_dshare_smallest * d_smallest;
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        if (axis == largest) {
+            float pull = 0.f;
+            for (int other = 0; other < 3; ++other)
+                if (other != largest) pull += dloss_dx[other] * x[other];
+            grad_log[axis] += a.shape_erank_reg * (-2.f * pull);
+        } else {
+            grad_log[axis] += a.shape_erank_reg * dloss_dx[axis] * 2.f * x[axis];
+        }
+    }
+}
+
+__device__ inline void update_structure_adam_row(
+    int i, float3 d_mean, float3 d_scale, float4 d_rot, float d_opacity,
+    const float* __restrict__ activated_scales,
+    const float* __restrict__ activated_opacities, const StructureAdam& a) {
+    const float filter_squared =
+        a.filter_3d != nullptr ? a.filter_3d[i] * a.filter_3d[i] : 0.f;
+    const float activated_opacity = activated_opacities[i];
+    float grad_log[3];
+    for (int axis = 0; axis < 3; ++axis) {
+        const int offset = 3 * i + axis;
+        const float raw_scale = expf(a.log_scales[offset]);
+        const float filtered_scale = activated_scales[offset];
+        const float scale_grad =
+            axis == 0 ? d_scale.x : axis == 1 ? d_scale.y : d_scale.z;
+        grad_log[axis] =
+            scale_grad * raw_scale * raw_scale / filtered_scale +
+            d_opacity * activated_opacity * filter_squared /
+                (filtered_scale * filtered_scale);
+    }
+    const float rw = a.quaternions[4 * i];
+    const float rx = a.quaternions[4 * i + 1];
+    const float ry = a.quaternions[4 * i + 2];
+    const float rz = a.quaternions[4 * i + 3];
+    const float inverse_norm =
+        rsqrtf(fmaxf(rw * rw + rx * rx + ry * ry + rz * rz, 1e-20f));
+    const float q[4] = {rw * inverse_norm, rx * inverse_norm, ry * inverse_norm,
+                        rz * inverse_norm};
+    const float rot[4] = {d_rot.x, d_rot.y, d_rot.z, d_rot.w};
+    const float qdot = q[0] * rot[0] + q[1] * rot[1] + q[2] * rot[2] + q[3] * rot[3];
+    float grad_quat[4];
+    for (int c = 0; c < 4; ++c)
+        grad_quat[c] = inverse_norm * (rot[c] - q[c] * qdot);
+    const float opacity = structure_sigmoid(a.opacity_logits[i]);
+    float grad_logit = d_opacity * activated_opacity * (1.f - opacity);
+    if (isfinite(a.opacity_logits[i]) && a.opacity_reg > 0.f)
+        grad_logit += a.opacity_reg * opacity * (1.f - opacity);
+    if (a.log_scale_reg > 0.f)
+        for (int axis = 0; axis < 3; ++axis) {
+            const float log_scale = a.log_scales[3 * i + axis];
+            if (isfinite(log_scale) && log_scale > -40.f)
+                grad_log[axis] += a.log_scale_reg * expf(log_scale);
+        }
+    add_shape_regularizer_grads(
+        a.log_scales, a.quaternions, i, grad_log, grad_quat, a);
+    if (a.opacity_gradient) a.opacity_gradient[i] = grad_logit;
+    const float inf = 1.e30f;
+    for (int c = 0; c < 3; ++c) {
+        const int mi = 3 * i + c;
+        const float mg = c == 0 ? d_mean.x : c == 1 ? d_mean.y : d_mean.z;
+        adam_scalar(a.means, mi, mg, a.means_first, a.means_second, a.means_lr,
+                    a.beta1, a.beta2, a.correction1, a.correction2, a.epsilon,
+                    -inf, inf);
+        adam_scalar(a.log_scales, mi, grad_log[c], a.scales_first, a.scales_second,
+                    a.scales_lr, a.beta1, a.beta2, a.correction1, a.correction2,
+                    a.epsilon, a.minimum_log_scale, a.maximum_log_scale);
+    }
+    if (a.max_log_scale_ratio > 0.f) {
+        float* v = a.log_scales + 3 * i;
+        const float minimum = fminf(v[0], fminf(v[1], v[2]));
+        const float maximum = fmaxf(v[0], fmaxf(v[1], v[2]));
+        if (maximum - minimum > a.max_log_scale_ratio) {
+            const float midpoint = 0.5f * (minimum + maximum);
+            const float half_range = 0.5f * a.max_log_scale_ratio;
+            for (int c = 0; c < 3; ++c)
+                v[c] = fminf(fmaxf(v[c], midpoint - half_range),
+                             midpoint + half_range);
+        }
+    }
+    for (int c = 0; c < 4; ++c)
+        adam_scalar(a.quaternions, 4 * i + c, grad_quat[c], a.rotations_first,
+                    a.rotations_second, a.quaternions_lr, a.beta1, a.beta2,
+                    a.correction1, a.correction2, a.epsilon, -inf, inf);
+    adam_scalar(a.opacity_logits, i, grad_logit, a.opacity_first, a.opacity_second,
+                a.opacities_lr, a.beta1, a.beta2, a.correction1, a.correction2,
+                a.epsilon, -12.f, 12.f);
+}
+
+template <bool HasSH, bool HasCov, bool FusedSH, bool QuantSH>
+__global__ void __launch_bounds__(
+    cfg::kGaussianBlock, (FusedSH && !QuantSH) ? 2 : 1)
 gaussian_backward(
     const int count, const int sh_degree, const int sh_bases,
     const float* __restrict__ means,
@@ -664,7 +861,8 @@ gaussian_backward(
     ws::GaussianState st, ws::GradState gs, float* __restrict__ grad_mean,
     float* __restrict__ grad_sh, float* __restrict__ grad_colors,
     float* __restrict__ grad_opacity, float* __restrict__ grad_scale,
-    float* __restrict__ grad_rotation, float* __restrict__ grad_cov, SHAdam sh_adam) {
+    float* __restrict__ grad_rotation, float* __restrict__ grad_cov, SHAdam sh_adam,
+    StructureAdam structure_adam) {
     // Fused SH keeps the coefficients of this thread's Gaussian in a shared
     // tile instead of a 48-register row: the warp then updates all 32 rows it
     // owns with one lane per column, which is the coalesced pattern the
@@ -682,8 +880,12 @@ gaussian_backward(
             sh_tile[threadIdx.x * cfg::kShRowWords + k] =
                 make_float4(0.f, 0.f, 0.f, 0.f);
     }
-    // Culled rows keep their zeroed shared row: their Adam moments still decay,
-    // exactly as the standalone optimizer did on zeroed gradients.
+    float3 d_mean = make_float3(0.f, 0.f, 0.f);
+    float3 d_scale = make_float3(0.f, 0.f, 0.f);
+    float4 d_rot = make_float4(0.f, 0.f, 0.f, 0.f);
+    float d_opacity = 0.f;
+    // Culled rows keep zero grads: Adam moments still decay, matching the
+    // standalone optimizer on a zeroed gradient buffer.
     if (i < count && radius[i] > 0) {
 
         geo::SplatBackward io;
@@ -709,21 +911,16 @@ gaussian_backward(
         io.cov6 = HasCov ? cov6 + 6 * i : nullptr;
         io.opacity = opacities[i];
         geo::splat_backward(io);
-        grad_mean[3 * i + 0] += io.grad_mean.x;
-        grad_mean[3 * i + 1] += io.grad_mean.y;
-        grad_mean[3 * i + 2] += io.grad_mean.z;
-        grad_opacity[i] += io.grad_opacity;
+        d_mean = io.grad_mean;
+        d_opacity = io.grad_opacity;
         if (HasCov) {
-    #pragma unroll
-            for (int k = 0; k < 6; ++k) grad_cov[6 * i + k] += io.grad_cov6[k];
+            if (grad_cov) {
+#pragma unroll
+                for (int k = 0; k < 6; ++k) grad_cov[6 * i + k] += io.grad_cov6[k];
+            }
         } else {
-            grad_scale[3 * i + 0] += io.grad_scale.x;
-            grad_scale[3 * i + 1] += io.grad_scale.y;
-            grad_scale[3 * i + 2] += io.grad_scale.z;
-            grad_rotation[4 * i + 0] += io.grad_rotation.x;
-            grad_rotation[4 * i + 1] += io.grad_rotation.y;
-            grad_rotation[4 * i + 2] += io.grad_rotation.z;
-            grad_rotation[4 * i + 3] += io.grad_rotation.w;
+            d_scale = io.grad_scale;
+            d_rot = io.grad_rotation;
         }
 
         if (HasSH) {
@@ -737,24 +934,71 @@ gaussian_backward(
                          make_float3(camera_center[0], camera_center[1],
                                      camera_center[2]),
                          sh, st.clamped, gs.d_color, bwd);
-            grad_mean[3 * i + 0] += bwd.grad_mean.x;
-            grad_mean[3 * i + 1] += bwd.grad_mean.y;
-            grad_mean[3 * i + 2] += bwd.grad_mean.z;
+            d_mean.x += bwd.grad_mean.x;
+            d_mean.y += bwd.grad_mean.y;
+            d_mean.z += bwd.grad_mean.z;
         } else if (grad_colors) {
             grad_colors[3 * i + 0] += gs.d_color[i].x;
             grad_colors[3 * i + 1] += gs.d_color[i].y;
             grad_colors[3 * i + 2] += gs.d_color[i].z;
+        }
+        if (!structure_adam.means) {
+            if (grad_mean) {
+                grad_mean[3 * i + 0] += d_mean.x;
+                grad_mean[3 * i + 1] += d_mean.y;
+                grad_mean[3 * i + 2] += d_mean.z;
+            }
+            if (grad_opacity) grad_opacity[i] += d_opacity;
+            if constexpr (!HasCov) {
+                if (grad_scale) {
+                    grad_scale[3 * i + 0] += d_scale.x;
+                    grad_scale[3 * i + 1] += d_scale.y;
+                    grad_scale[3 * i + 2] += d_scale.z;
+                }
+                if (grad_rotation) {
+                    grad_rotation[4 * i + 0] += d_rot.x;
+                    grad_rotation[4 * i + 1] += d_rot.y;
+                    grad_rotation[4 * i + 2] += d_rot.z;
+                    grad_rotation[4 * i + 3] += d_rot.w;
+                }
+            }
         }
     }
     if constexpr (FusedSH) {
         __syncthreads();
         const int warp_thread0 = (int(threadIdx.x) >> 5) * 32;
         const int warp_row0 = int(blockIdx.x) * int(blockDim.x) + warp_thread0;
-        update_sh_adam_rows(warp_row0, 32, count, sh_bases, sh_degree,
-                            reinterpret_cast<float*>(sh_tile) +
-                                std::size_t(warp_thread0) *
-                                    cfg::kShRowStride,
-                            sh_adam);
+        float* warp_tile = reinterpret_cast<float*>(sh_tile) +
+            std::size_t(warp_thread0) * cfg::kShRowStride;
+        if constexpr (QuantSH) {
+            const int active = (sh_degree + 1) * (sh_degree + 1) * 3;
+            for (int r = 0; r < 32; ++r) {
+                const int row = warp_row0 + r;
+                if (row >= count) break;
+                sh_adam_quant_warp_row(
+                    sh_adam.quant_stride, active,
+                    sh_adam.parameter +
+                        std::size_t(row) * sh_adam.quant_stride,
+                    warp_tile + r * cfg::kShRowStride,
+                    reinterpret_cast<__half*>(sh_adam.quant_first) +
+                        std::size_t(row) * sh_adam.quant_stride,
+                    sh_adam.packed +
+                        std::size_t(row) * sh_adam.quant_stride,
+                    sh_adam.bounds + std::size_t(row) * 4, sh_adam.lr,
+                    sh_adam.rest_lr, sh_adam.beta1, sh_adam.beta2,
+                    sh_adam.correction1, sh_adam.correction2, sh_adam.epsilon,
+                    sh_adam.regularization_factor);
+            }
+        } else {
+            update_sh_adam_rows(warp_row0, 32, count, sh_bases, sh_degree,
+                                warp_tile, sh_adam);
+        }
+    }
+    if constexpr (!HasCov) {
+        if (structure_adam.means && i < count)
+            update_structure_adam_row(
+                i, d_mean, d_scale, d_rot, d_opacity, scales, opacities,
+                structure_adam);
     }
 }
 
@@ -833,31 +1077,38 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
                        ws::GaussianState st, ws::GradState gs, float* grad_mean,
                        float* grad_sh, float* grad_colors, float* grad_opacity,
                        float* grad_scale, float* grad_rotation,
-                       float* grad_cov, SHAdam sh_adam) {
-    auto dispatch = [&](auto sh_c, auto cov_c, auto fused_c) {
+                       float* grad_cov, SHAdam sh_adam,
+                       StructureAdam structure_adam) {
+    auto dispatch = [&](auto sh_c, auto cov_c, auto fused_c, auto quant_c) {
         constexpr bool kSH = decltype(sh_c)::value;
         constexpr bool kCov = decltype(cov_c)::value;
         constexpr bool kFused = decltype(fused_c)::value;
-        kernels::gaussian_backward<kSH, kCov, kFused>
+        constexpr bool kQuant = decltype(quant_c)::value;
+        kernels::gaussian_backward<kSH, kCov, kFused, kQuant>
             <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
                 cfg::kGaussianBlock>>>(
                 count, sh_degree, sh_bases, means, sh, opacities, scales,
                 rotations, cov6, view, camera_center, K, width, height,
                 kernel_size, scale_modifier, radius, clamped, st, gs, grad_mean,
                 grad_sh, grad_colors, grad_opacity, grad_scale, grad_rotation,
-                grad_cov, sh_adam);
+                grad_cov, sh_adam, structure_adam);
     };
+    const auto off = std::false_type{};
+    const auto on = std::true_type{};
     if (has_sh) {
-        if (sh_adam.parameter) {
-            if (has_cov) dispatch(std::true_type{}, std::true_type{}, std::true_type{});
-            else dispatch(std::true_type{}, std::false_type{}, std::true_type{});
+        if (sh_adam.parameter && sh_adam.quant_stride > 0) {
+            if (has_cov) dispatch(on, on, on, on);
+            else dispatch(on, off, on, on);
+        } else if (sh_adam.parameter) {
+            if (has_cov) dispatch(on, on, on, off);
+            else dispatch(on, off, on, off);
         } else {
-            if (has_cov) dispatch(std::true_type{}, std::true_type{}, std::false_type{});
-            else dispatch(std::true_type{}, std::false_type{}, std::false_type{});
+            if (has_cov) dispatch(on, on, off, off);
+            else dispatch(on, off, off, off);
         }
     } else {
-        if (has_cov) dispatch(std::false_type{}, std::true_type{}, std::false_type{});
-        else dispatch(std::false_type{}, std::false_type{}, std::false_type{});
+        if (has_cov) dispatch(off, on, off, off);
+        else dispatch(off, off, off, off);
     }
 }
 
