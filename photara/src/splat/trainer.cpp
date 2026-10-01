@@ -4,6 +4,8 @@
 
 #include "bilateral_grid.hpp"
 #include "cuda_ops.hpp"
+#include "focus_mask.hpp"
+#include "focus_mask_frame.hpp"
 #include "fused_ssim.hpp"
 #include "sh_adam_quant.hpp"
 #include "ppisp.hpp"
@@ -78,66 +80,7 @@ tinytensor::Tensor focus_keep_indices(
         .to(tinytensor::DataType::Int32);
 }
 
-bool ray_hits_focus_box(
-    const mvs::Vec3f& origin, const mvs::Vec3f& direction,
-    const mvs::Vec3f& half_extent) {
-    float near = 0.F;
-    float far = std::numeric_limits<float>::infinity();
-    for (int axis = 0; axis < 3; ++axis) {
-        if (std::abs(direction(axis)) < 1e-9F) {
-            if (std::abs(origin(axis)) > half_extent(axis)) return false;
-            continue;
-        }
-        float enter = (-half_extent(axis) - origin(axis)) / direction(axis);
-        float exit = (half_extent(axis) - origin(axis)) / direction(axis);
-        if (enter > exit) std::swap(enter, exit);
-        near = std::max(near, enter);
-        far = std::min(far, exit);
-        if (far < near) return false;
-    }
-    return far >= 0.F;
-}
 
-tinytensor::Tensor focus_view_mask(
-    const Camera& camera, const mvs::OrientedBoundingBox& bounds,
-    const tinytensor::Device device) {
-    const mvs::Vec3f origin = bounds.local(mvs::Vec3f(
-        camera.position[0], camera.position[1], camera.position[2]));
-    mvs::Mat3f camera_to_world;
-    for (int row = 0; row < 3; ++row)
-        for (int column = 0; column < 3; ++column)
-            camera_to_world(row, column) = camera.world_to_camera[
-                static_cast<std::size_t>(row) * 4 + column];
-    const mvs::Mat3f camera_to_box = bounds.axes.transpose() * camera_to_world;
-    std::vector<float> mask(
-        static_cast<std::size_t>(camera.width) * camera.height, 0.F);
-    for (std::uint32_t y = 0; y < camera.height; ++y)
-        for (std::uint32_t x = 0; x < camera.width; ++x) {
-            CameraRay ray{};
-            if (camera.model == CameraModel::opencv_fisheye)
-                ray = unproject_fisheye_camera(
-                    x, y, camera.fx, camera.fy, camera.cx, camera.cy,
-                    camera.k1, camera.k2, camera.k3, camera.k4);
-            else if (camera.model == CameraModel::equirectangular)
-                ray = unproject_equirectangular_camera(
-                    x, y, static_cast<int>(camera.width),
-                    static_cast<int>(camera.height));
-            else
-                ray = CameraRay{
-                    (static_cast<double>(x) - camera.cx) / camera.fx,
-                    (static_cast<double>(y) - camera.cy) / camera.fy,
-                    1.0, true};
-            if (!ray.valid) continue;
-            const mvs::Vec3f direction = camera_to_box * mvs::Vec3f(
-                static_cast<float>(ray.x), static_cast<float>(ray.y),
-                static_cast<float>(ray.z));
-            mask[static_cast<std::size_t>(y) * camera.width + x] =
-                ray_hits_focus_box(origin, direction, bounds.half_extent)
-                ? 1.F : 0.F;
-        }
-    return tinytensor::Tensor::from_vector(
-        mask, {camera.height, camera.width}, device);
-}
 
 // Logging iterations also run densify / live preview / a full GPU sync, so a
 // single step's wall time is a poor ETA rate. Smooth the mean ms/iter over
@@ -1628,27 +1571,40 @@ GaussianModel Trainer::train(
             shuffled_views[shuffled_view_cursor++];
         TrainingView target = view_cache.get(view_index);
         if (focus_bounds.valid) {
-            auto found = focus_view_masks.find(view_index);
-            if (found == focus_view_masks.end()) {
-                auto mask = focus_view_mask(
-                    target.camera, focus_bounds, model.means.device());
-                const std::size_t bytes = mask.numel() * sizeof(float);
-                while (!focus_view_masks.empty() &&
-                       focus_mask_cache_bytes + bytes >
-                           max_focus_mask_cache_bytes) {
-                    auto evicted = focus_view_masks.begin();
-                    focus_mask_cache_bytes -= evicted->second.numel() * sizeof(float);
-                    focus_view_masks.erase(evicted);
+            const bool focus_on_device =
+                model.means.device() == tinytensor::Device::CUDA;
+            tinytensor::Tensor focus_mask;
+            const auto focus_frame =
+                detail::make_focus_mask_frame(target.camera, focus_bounds);
+            if (focus_on_device) {
+                focus_mask = detail::focus_view_mask_cuda(focus_frame);
+            } else {
+                auto found = focus_view_masks.find(view_index);
+                if (found == focus_view_masks.end()) {
+                    auto mask = detail::focus_view_mask_cpu(
+                        focus_frame, model.means.device());
+                    const std::size_t bytes = mask.numel() * sizeof(float);
+                    while (!focus_view_masks.empty() &&
+                           focus_mask_cache_bytes + bytes >
+                               max_focus_mask_cache_bytes) {
+                        auto evicted = focus_view_masks.begin();
+                        focus_mask_cache_bytes -=
+                            evicted->second.numel() * sizeof(float);
+                        focus_view_masks.erase(evicted);
+                    }
+                    focus_mask_cache_bytes += bytes;
+                    found = focus_view_masks.emplace(
+                        view_index, std::move(mask)).first;
                 }
-                focus_mask_cache_bytes += bytes;
-                found = focus_view_masks.emplace(
-                    view_index, std::move(mask)).first;
+                focus_mask = found->second;
             }
             if (target.has_mask &&
                 (options_.use_mask || target.mask_is_validity))
-                target.mask = target.mask.mul(found->second);
+                target.mask = target.mask.mul(focus_mask);
+            else if (focus_on_device)
+                target.mask = std::move(focus_mask);
             else
-                target.mask = found->second;
+                target.mask = focus_mask;
             target.has_mask = true;
             target.mask_is_validity = true;
         }

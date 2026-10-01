@@ -578,6 +578,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/ppisp.cu
             src/splat/cuda_vulkan_preview.cu
             src/splat/fused_ssim.cu
+            src/splat/focus_mask.cu
             src/splat/visualize.cu)
         target_include_directories(photara_splat_cuda
             PUBLIC

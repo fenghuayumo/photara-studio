@@ -7,6 +7,8 @@
 #include "splat/formats.hpp"
 #include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/focus_mask.hpp"
+#include "../src/splat/focus_mask_frame.hpp"
 #include "../src/splat/pam_cuda.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/densification_internal.hpp"
@@ -7090,6 +7092,55 @@ void test_densification_strategies_and_dense_bypass() {
 
 }  // namespace
 
+void test_focus_view_mask_cuda() {
+    using namespace photara;
+    auto camera_for = [](const CameraModel model) {
+        splat::Camera camera;
+        camera.world_to_camera = {
+            1.F, 0.F, 0.F, 0.F,
+            0.F, 1.F, 0.F, 0.F,
+            0.F, 0.F, 1.F, 0.F,
+            0.F, 0.F, 0.F, 1.F};
+        camera.position = {0.F, 0.F, 0.F};
+        camera.fx = 8.F;
+        camera.fy = 8.F;
+        camera.cx = 7.5F;
+        camera.cy = 5.5F;
+        camera.width = 16;
+        camera.height = 12;
+        camera.model = model;
+        camera.k1 = model == CameraModel::opencv_fisheye ? -0.15F : 0.F;
+        camera.k2 = model == CameraModel::opencv_fisheye ? 0.02F : 0.F;
+        return camera;
+    };
+    mvs::OrientedBoundingBox bounds;
+    bounds.valid = true;
+    bounds.center = mvs::Vec3f(0.F, 0.F, 2.F);
+    bounds.axes = mvs::Mat3f::Identity();
+    bounds.half_extent = mvs::Vec3f(0.3F, 0.3F, 0.5F);
+    const splat::Camera cameras[] = {
+        camera_for(CameraModel::pinhole),
+        camera_for(CameraModel::opencv_fisheye),
+        camera_for(CameraModel::equirectangular)};
+    for (const splat::Camera& camera : cameras) {
+        const auto frame = splat::detail::make_focus_mask_frame(camera, bounds);
+        const auto cpu = splat::detail::focus_view_mask_cpu(
+            frame, tinytensor::Device::CPU);
+        const auto gpu = splat::detail::focus_view_mask_cuda(frame);
+        const auto cpu_values = cpu.to_vector();
+        const auto gpu_values = gpu.to_vector();
+        require(cpu_values.size() == gpu_values.size() &&
+                    cpu_values == gpu_values,
+                "CUDA focus mask diverges from the CPU ray test");
+        const std::size_t center =
+            static_cast<std::size_t>(6) * camera.width + 8;
+        require(gpu_values[center] == 1.F,
+                "Focus mask missed the ray through the box center");
+        require(gpu_values.front() == 0.F,
+                "Focus mask kept a ray outside the box");
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         int device_count = 0;
@@ -7243,6 +7294,11 @@ int main(int argc, char** argv) {
                     << " saved_bytes=" << original_live - inference_memory.accounted_live_bytes
                     << " backward_workspace_live=" << backward_live << " geometry_exact=1\n" << std::flush;
             }
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--focus-mask-only") {
+            test_focus_view_mask_cuda();
+            std::cout << "Focus mask tests passed\n";
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--pam-only") {
