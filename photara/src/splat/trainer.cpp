@@ -1652,6 +1652,10 @@ GaussianModel Trainer::train(
         // Previews, held-out evaluation and exported models keep the canonical
         // appearance, so these transforms never leave training.
         RenderResult loss_render = rendered;
+        // CUDA losses consume owned attachments, not the forward workspace.
+        // Keeping this alias would retain all bucket snapshots after the main
+        // render releases its context before normal-field supervision.
+        loss_render.context.impl.reset();
         const tinytensor::Tensor* photo_color = &rendered.color;
         const tinytensor::Tensor* ppisp_input = nullptr;
         const tinytensor::Tensor* bilagrid_input = nullptr;
@@ -1941,7 +1945,10 @@ GaussianModel Trainer::train(
             // Normal-field supervision uses the same unchanged model, but its
             // render need not overlap the main render's bucket snapshots. Keep
             // owned outputs (radii/visibility) for ADC; only release CUDA state.
+            const std::weak_ptr<RasterContextImpl> primary_context = rendered.context.impl;
             rendered.context.impl.reset();
+            if (!primary_context.expired())
+                throw std::logic_error("Normal-field render still retains the primary CUDA workspace");
             RasterizeOptions normal_options = raster_options;
             normal_options.colors_precomp =
                 detail::normal_features_to_normals(model.normal_features);
