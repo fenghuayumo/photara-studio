@@ -7138,6 +7138,18 @@ void test_focus_view_mask_cuda() {
                 "Focus mask missed the ray through the box center");
         require(gpu_values.front() == 0.F,
                 "Focus mask kept a ray outside the box");
+#if defined(TINYTENSOR_HAS_VULKAN)
+        if (tinytensor::vulkan::available()) {
+            const auto vk_mask = splat::detail::focus_view_mask_vulkan(frame);
+            const auto vk_values = vk_mask.to_vector();
+            require(vk_values.size() == gpu_values.size() &&
+                        vk_values[center] == 1.F && vk_values.front() == 0.F,
+                    "Vulkan focus mask missed the box center or kept a miss ray");
+            if (camera.model == CameraModel::pinhole)
+                require(vk_values == cpu_values,
+                        "Vulkan pinhole focus mask diverges from the CPU ray test");
+        }
+#endif
     }
 }
 

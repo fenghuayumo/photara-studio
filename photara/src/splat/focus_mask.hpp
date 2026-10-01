@@ -32,5 +32,8 @@ struct FocusMaskFrame {
 tinytensor::Tensor focus_view_mask_cuda(const FocusMaskFrame& frame);
 tinytensor::Tensor focus_view_mask_cpu(
     const FocusMaskFrame& frame, tinytensor::Device device);
+#if defined(TINYTENSOR_HAS_VULKAN)
+tinytensor::Tensor focus_view_mask_vulkan(const FocusMaskFrame& frame);
+#endif
 
 }  // namespace photara::splat::detail

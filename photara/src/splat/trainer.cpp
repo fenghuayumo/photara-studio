@@ -1571,13 +1571,24 @@ GaussianModel Trainer::train(
             shuffled_views[shuffled_view_cursor++];
         TrainingView target = view_cache.get(view_index);
         if (focus_bounds.valid) {
-            const bool focus_on_device =
+            const bool focus_on_cuda =
                 model.means.device() == tinytensor::Device::CUDA;
+#if defined(TINYTENSOR_HAS_VULKAN)
+            const bool focus_on_vulkan =
+                model.means.device() == tinytensor::Device::Vulkan;
+#else
+            const bool focus_on_vulkan = false;
+#endif
+            const bool focus_on_device = focus_on_cuda || focus_on_vulkan;
             tinytensor::Tensor focus_mask;
             const auto focus_frame =
                 detail::make_focus_mask_frame(target.camera, focus_bounds);
-            if (focus_on_device) {
+            if (focus_on_cuda) {
                 focus_mask = detail::focus_view_mask_cuda(focus_frame);
+#if defined(TINYTENSOR_HAS_VULKAN)
+            } else if (focus_on_vulkan) {
+                focus_mask = detail::focus_view_mask_vulkan(focus_frame);
+#endif
             } else {
                 auto found = focus_view_masks.find(view_index);
                 if (found == focus_view_masks.end()) {

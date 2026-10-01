@@ -637,11 +637,22 @@ if(PHOTARA_ENABLE_FEATURES)
             target_sources(photara_splat_cuda PRIVATE
                 src/splat/optimizer_vulkan.cpp
                 src/splat/colour_correction_vulkan.cpp
-                src/splat/rasterizer_vulkan.cpp)
+                src/splat/rasterizer_vulkan.cpp
+                src/splat/focus_mask_vulkan.cpp)
             target_link_libraries(photara_splat_cuda PUBLIC
                 splat_drender::vulkan)
             target_compile_definitions(photara_splat_cuda PUBLIC
                 TINYTENSOR_HAS_VULKAN=1)
+            if(PHOTARA_VK_DXC AND PHOTARA_VK_CMAKE_DIR)
+                include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
+                photara_vk_embed_hlsl(
+                    TARGET photara_splat_cuda
+                    SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
+                    PROFILE cs_6_0
+                    ENV vulkan1.2
+                    INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/splat"
+                    OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/splat_vulkan")
+            endif()
             target_sources(photara_splat PRIVATE src/splat/photometric_loss.cpp)
             target_link_libraries(photara_splat PUBLIC splat_drender::vulkan)
         endif()
