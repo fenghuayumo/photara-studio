@@ -1084,9 +1084,6 @@ GaussianModel Trainer::train(
         tinytensor::VramScope scope("model.initialize");
         return initialize_from_dense_cloud(scene, options_);
     }();
-    const bool use_3d_filter =
-        options_.use_depth_normal_loss &&
-        options_.depth_normal_weight > 0.F;
     std::vector<std::size_t> view_indices;
     view_indices.reserve(scene.views.size());
     for (std::size_t index = 0; index < scene.views.size(); ++index)
@@ -1130,6 +1127,16 @@ GaussianModel Trainer::train(
     for (const mvs::MvsView& view : scene.views)
         all_cameras.push_back(data::training_camera(
             view, options_, active_resolution_scale));
+    const bool native_non_pinhole = std::any_of(
+        all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
+            return uses_native_splat_projection(camera.model);
+        });
+    // Native projections disable the pinhole geometry losses below. Keep
+    // their geometry-only Mip filter disabled as well: otherwise every
+    // refresh scans all Gaussian/camera pairs without active supervision.
+    const bool use_3d_filter = !native_non_pinhole &&
+        options_.use_depth_normal_loss &&
+        options_.depth_normal_weight > 0.F;
     std::vector<Camera> filter_cameras;
     std::vector<Camera> full_resolution_filter_cameras;
     if (use_3d_filter) {
@@ -1155,10 +1162,6 @@ GaussianModel Trainer::train(
     if (use_3d_filter)
         model.filter_3d = detail::compute_3d_filter(
             model.means, filter_cameras, filter_3d_factor, splat_filter);
-    const bool native_non_pinhole = std::any_of(
-        all_cameras.begin(), all_cameras.end(), [](const Camera& camera) {
-            return uses_native_splat_projection(camera.model);
-        });
     if (native_non_pinhole) {
         // Panorama and fisheye training rasterize the source projection
         // directly; state which models are in play so a run that silently fell
