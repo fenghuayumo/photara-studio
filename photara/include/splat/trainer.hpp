@@ -124,7 +124,8 @@ struct PamMeshOptions {
     float minimum_gradient_norm_squared{0.5F};
     float refinement_step{0.5F};
     float mask_background_threshold{0.01F};
-    std::size_t occupancy_chunk_size{250'000};
+    // Amortize per-camera Gaussian preparation without reducing samples.
+    std::size_t occupancy_chunk_size{4'000'000};
     unsigned seed{0};
 };
 

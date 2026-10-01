@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <cfloat>
 #include <stdexcept>
 #include <string>
 
@@ -30,7 +31,7 @@ __device__ void sift_down(float* distances, int* indices, int count) {
 }
 
 __device__ float3 field_gradient(
-    const int* nodes, const float* values, int root,
+    const int* nodes, const float* values, const float* bounds, int root,
     float3 query, int neighbors) {
     float distances[pam_gpu_max_neighbors];
     int indices[pam_gpu_max_neighbors];
@@ -45,6 +46,17 @@ __device__ float3 field_gradient(
         --size;
         const int node = pending[size];
         if (node < 0 || (count == neighbors && planes[size] > distances[0])) continue;
+        if (count == neighbors) {
+            const float* box = bounds + 6 * node;
+            const float bx = fmaxf(fmaxf(box[0] - query.x, query.x - box[3]), 0.F);
+            const float by = fmaxf(fmaxf(box[1] - query.y, query.y - box[4]), 0.F);
+            const float bz = fmaxf(fmaxf(box[2] - query.z, query.z - box[5]), 0.F);
+            // Conservative tolerance prevents rounding at box boundaries from
+            // dropping a neighbor visited by the CPU reference.
+            const float lower_bound = bx * bx + (by * by + bz * bz);
+            if (lower_bound > distances[0] + 16.F * FLT_EPSILON * (1.F + distances[0]))
+                continue;
+        }
         const int* entry = nodes + 4 * node;
         const int point = entry[0];
         const float* g = values + 19 * point;
@@ -103,22 +115,22 @@ __device__ float3 field_gradient(
 }
 
 __global__ void gradient_kernel(
-    const int* nodes, const float* values, int root, const float* points,
+    const int* nodes, const float* values, const float* bounds, int root, const float* points,
     float* gradients, std::size_t count, int neighbors) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
-    const float3 g = field_gradient(nodes, values, root,
+    const float3 g = field_gradient(nodes, values, bounds, root,
         make_float3(points[3*i], points[3*i+1], points[3*i+2]), neighbors);
     gradients[3*i] = g.x; gradients[3*i+1] = g.y; gradients[3*i+2] = g.z;
 }
 
 __global__ void refine_kernel(
-    const int* nodes, const float* values, int root, float* points,
+    const int* nodes, const float* values, const float* bounds, int root, float* points,
     const float* occupancy, std::size_t count, int neighbors,
     float iso_value, float minimum_norm_squared, float step) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
-    const float3 g = field_gradient(nodes, values, root,
+    const float3 g = field_gradient(nodes, values, bounds, root,
         make_float3(points[3*i], points[3*i+1], points[3*i+2]), neighbors);
     const float norm = g.x*g.x + (g.y*g.y + g.z*g.z);
     if (!(norm > minimum_norm_squared)) return;
@@ -137,7 +149,7 @@ int validate(const PamGpuField& field, const tinytensor::Tensor& points, unsigne
     if (!points.is_valid() || points.device() != tinytensor::Device::CUDA ||
         !points.is_contiguous() || points.dtype() != tinytensor::DataType::Float32 ||
         points.shape().rank() != 2 || points.shape()[1] != 3 ||
-        field.root < 0 || !field.nodes.is_valid() || !field.values.is_valid() ||
+        field.root < 0 || !field.nodes.is_valid() || !field.values.is_valid() || !field.bounds.is_valid() ||
         neighbors == 0 || neighbors > pam_gpu_max_neighbors)
         throw std::invalid_argument("Invalid PAM CUDA field query");
     return static_cast<int>(std::min<std::size_t>(neighbors, field.values.shape()[0]));
@@ -153,7 +165,7 @@ tinytensor::Tensor pam_field_gradients(
     for (std::size_t begin = 0; begin < count; begin += query_chunk) {
         const std::size_t size = std::min(query_chunk, count - begin);
         gradient_kernel<<<(size + block_size - 1) / block_size, block_size>>>(
-            field.nodes.ptr<int>(), field.values.ptr<float>(), field.root,
+            field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(), field.root,
             points.ptr<float>() + 3*begin, gradients.ptr<float>() + 3*begin, size, k);
         check(cudaGetLastError());
     }
@@ -173,7 +185,7 @@ void pam_refine_points(
     for (std::size_t begin = 0; begin < count; begin += query_chunk) {
         const std::size_t size = std::min(query_chunk, count - begin);
         refine_kernel<<<(size + block_size - 1) / block_size, block_size>>>(
-            field.nodes.ptr<int>(), field.values.ptr<float>(), field.root,
+            field.nodes.ptr<int>(), field.values.ptr<float>(), field.bounds.ptr<float>(), field.root,
             points.ptr<float>() + 3*begin, occupancy.ptr<float>() + begin, size, k,
             iso_value, minimum_gradient_norm_squared, step);
         check(cudaGetLastError());

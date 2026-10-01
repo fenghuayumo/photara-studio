@@ -71,6 +71,7 @@ struct Settings {
     // 0 = extract from geometry-supervised 3DGS, 1 = photogrammetry (MVS).
     int mesh_source = 0;
     int mesh_method = 0;
+    int mesh_quality = 1; // 0 Fast, 1 Standard, 2 High.
     // Texture bake after mesh: 0 Fast, 1 Standard, 2 High.
     int texture_quality = 1;
     int atlas_resolution = 2048;

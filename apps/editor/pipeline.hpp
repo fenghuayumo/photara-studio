@@ -302,6 +302,7 @@ struct ProjectSettings {
     bool build_mesh = false;
     int mesh_source = 0;
     int mesh_method = 0;  // auto, tsdf, delaunay, pam
+    int mesh_quality = 1; // 0 Fast, 1 Standard, 2 High; extraction only.
     float depth_normal_weight = 0.05F;
     float multi_view_geo_weight = 0.02F;
     float multi_view_ncc_weight = 0.6F;
@@ -427,6 +428,21 @@ inline int gaussian_mesh_method(const ProjectSettings& settings) {
     return settings.mesh_method == 0
         ? (settings.normal_field ? 3 : 1)
         : settings.mesh_method;
+}
+
+struct MeshQualityPreset {
+    int pam_points, pam_pivots, pam_steps, pam_neighbors, pam_cell_samples;
+    float tsdf_voxel_scale;
+    int tsdf_pixel_step, mesh_points;
+    const char* dense_quality;
+};
+
+inline MeshQualityPreset mesh_quality_preset(const int quality) {
+    if (quality == 0)
+        return {500'000, 500'000, 6, 24, 6, 2.F, 8, 1'000'000, "preview"};
+    if (quality == 2)
+        return {2'000'000, 2'000'000, 15, 48, 16, 0.5F, 1, 4'000'000, "high"};
+    return {1'000'000, 1'000'000, 10, 32, 10, 1.F, 4, 2'000'000, "default"};
 }
 
 inline bool mesh_from_mvs(const ProjectSettings& settings) {

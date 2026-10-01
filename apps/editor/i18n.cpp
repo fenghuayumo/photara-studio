@@ -910,6 +910,13 @@ constexpr Entry k_entries[] = {
      "정렬된 카메라로 PatchMatch 스테레오를 한 뒤 밀집 포인트 클라우드에서 메시를 융합합니다. 3DGS는 외형만 담당합니다."},
     {"Surface", "表面", "サーフェス", "표면"},
     {"Mesh algorithm", "网格算法", "メッシュアルゴリズム", "메시 알고리즘"},
+    {"Mesh quality", "网格质量", "メッシュ品質", "메시 품질"},
+    {"Fast prioritizes speed and may lose small details.\n"
+     "Standard balances detail and time. High uses more samples and refinement.\n"
+     "Mesh quality does not change 3DGS training settings.",
+     "快速优先速度，可能损失细小结构。\n标准兼顾细节和耗时；高质量增加采样和细化预算。\n网格质量不会修改 3DGS 训练设置。",
+     "高速は速度を優先し、細部が失われる場合があります。\n標準は細部と時間を両立。高品質はサンプルと細分化を増やします。\nメッシュ品質は 3DGS の学習設定を変更しません。",
+     "빠름은 속도를 우선하며 작은 디테일이 손실될 수 있습니다.\n표준은 디테일과 시간을 균형 있게, 높음은 샘플과 정제를 늘립니다.\n메시 품질은 3DGS 학습 설정을 변경하지 않습니다."},
     {"Auto: PAM", "自动：PAM", "自動: PAM", "자동: PAM"},
     {"Auto: TSDF", "自动：TSDF", "自動: TSDF", "자동: TSDF"},
     {"Auto uses PAM with Normal field enabled, otherwise TSDF.\n"

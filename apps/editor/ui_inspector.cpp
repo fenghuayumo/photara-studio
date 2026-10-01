@@ -624,6 +624,16 @@ Action draw_inspector(App& app) {
                     ImGui::SetTooltip(
                         "How MVS depth maps are fused into triangles.");
             }
+            ImGui::Spacing();
+            theme::caption("Mesh quality");
+            ImGui::SetNextItemWidth(-1.F);
+            const char* mesh_qualities[] = {tr("Fast"), tr("Standard"), tr("High")};
+            ImGui::Combo("##mesh_quality", &app.settings.mesh_quality, mesh_qualities, 3);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tr(
+                    "Fast prioritizes speed and may lose small details.\n"
+                    "Standard balances detail and time. High uses more samples and refinement.\n"
+                    "Mesh quality does not change 3DGS training settings."));
             if (mesh_from_gaussians(app.settings) &&
                 ImGui::TreeNodeEx(
                     tr("Geometry training"), ImGuiTreeNodeFlags_SpanAvailWidth)) {

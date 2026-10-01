@@ -66,12 +66,24 @@ public:
 
     [[nodiscard]] int root() const { return root_; }
 
+    [[nodiscard]] tinytensor::Tensor upload_bounds() const {
+        std::vector<float> packed;
+        packed.reserve(nodes_.size() * 6);
+        for (const auto& node : nodes_) {
+            packed.insert(packed.end(), node.minimum.data(), node.minimum.data() + 3);
+            packed.insert(packed.end(), node.maximum.data(), node.maximum.data() + 3);
+        }
+        return tinytensor::Tensor::from_vector(
+            packed, {nodes_.size(), std::size_t{6}}, tinytensor::Device::CUDA);
+    }
+
 private:
     struct Node {
         std::size_t point{};
         int left{-1};
         int right{-1};
         std::uint8_t axis{};
+        mvs::Vec3f minimum, maximum;
     };
 
     int build(const std::size_t begin, const std::size_t end) {
@@ -94,7 +106,7 @@ private:
             });
         const int node = static_cast<int>(nodes_.size());
         nodes_.push_back({
-            order_[middle], -1, -1, static_cast<std::uint8_t>(axis)});
+            order_[middle], -1, -1, static_cast<std::uint8_t>(axis), minimum, maximum});
         nodes_[static_cast<std::size_t>(node)].left = build(begin, middle);
         nodes_[static_cast<std::size_t>(node)].right =
             build(middle + 1, end);
@@ -207,7 +219,8 @@ struct HostGaussianField {
             packed.push_back(opacities[i]);
         }
         return {tree.upload_nodes(), tinytensor::Tensor::from_vector(
-            packed, {means.size(), std::size_t{19}}, tinytensor::Device::CUDA), tree.root()};
+            packed, {means.size(), std::size_t{19}}, tinytensor::Device::CUDA),
+            tree.root(), tree.upload_bounds()};
     }
 
 private:
@@ -724,6 +737,7 @@ PamMeshResult extract_pam_mesh(
     const auto refine_and_append =
         [&](std::vector<mvs::Vec3f> sampled) {
             if (sampled.empty()) return;
+            core::StageScope refinement_stage("splat.pam.refinement");
             if (use_gpu) {
                 auto points = upload_points(sampled);
                 for (unsigned step = 0; step < options.refinement_steps; ++step) {
@@ -831,7 +845,11 @@ PamMeshResult extract_pam_mesh(
                 candidates[index].x(), candidates[index].y(),
                 candidates[index].z()),
             index);
-    Delaunay triangulation(insertion.begin(), insertion.end());
+    Delaunay triangulation;
+    {
+        core::StageScope triangulation_stage("splat.pam.delaunay");
+        triangulation.insert(insertion.begin(), insertion.end());
+    }
     if (!triangulation.is_valid() || triangulation.dimension() != 3)
         throw std::runtime_error("PAM Delaunay triangulation failed");
 
@@ -842,55 +860,58 @@ PamMeshResult extract_pam_mesh(
         1, options.occupancy_chunk_size /
                options.points_per_tetrahedron);
     std::size_t occupied_count = 0;
-    for (auto begin = triangulation.finite_cells_begin();
-         begin != triangulation.finite_cells_end();) {
-        cells.clear();
-        std::vector<mvs::Vec3f> queries;
-        queries.reserve(cell_chunk * options.points_per_tetrahedron);
-        for (; begin != triangulation.finite_cells_end() &&
-               cells.size() < cell_chunk;
-             ++begin) {
-            Delaunay::Cell_handle cell = begin;
-            cells.push_back(cell);
-            std::array<mvs::Vec3f, 4> vertices;
-            for (int corner = 0; corner < 4; ++corner)
-                vertices[static_cast<std::size_t>(corner)] =
-                    candidates[cell->vertex(corner)->info()];
-            for (unsigned sample = 0;
-                 sample < options.points_per_tetrahedron; ++sample) {
-                if (options.points_per_tetrahedron == 1) {
-                    queries.push_back(
-                        0.25F * (vertices[0] + vertices[1] + vertices[2] +
-                                 vertices[3]));
-                } else {
-                    std::array<float, 4> weights{
-                        uniform(random), uniform(random), uniform(random),
-                        uniform(random)};
-                    const float sum = std::accumulate(
-                        weights.begin(), weights.end(), 0.F);
-                    mvs::Vec3f query = mvs::Vec3f::Zero();
-                    for (int corner = 0; corner < 4; ++corner)
-                        query += weights[static_cast<std::size_t>(corner)] /
-                                 sum * vertices[static_cast<std::size_t>(corner)];
-                    queries.push_back(query);
+    {
+        core::StageScope occupancy_stage("splat.pam.cell_occupancy");
+        for (auto begin = triangulation.finite_cells_begin();
+             begin != triangulation.finite_cells_end();) {
+            cells.clear();
+            std::vector<mvs::Vec3f> queries;
+            queries.reserve(cell_chunk * options.points_per_tetrahedron);
+            for (; begin != triangulation.finite_cells_end() &&
+                   cells.size() < cell_chunk;
+                 ++begin) {
+                Delaunay::Cell_handle cell = begin;
+                cells.push_back(cell);
+                std::array<mvs::Vec3f, 4> vertices;
+                for (int corner = 0; corner < 4; ++corner)
+                    vertices[static_cast<std::size_t>(corner)] =
+                        candidates[cell->vertex(corner)->info()];
+                for (unsigned sample = 0;
+                     sample < options.points_per_tetrahedron; ++sample) {
+                    if (options.points_per_tetrahedron == 1) {
+                        queries.push_back(
+                            0.25F * (vertices[0] + vertices[1] + vertices[2] +
+                                     vertices[3]));
+                    } else {
+                        std::array<float, 4> weights{
+                            uniform(random), uniform(random), uniform(random),
+                            uniform(random)};
+                        const float sum = std::accumulate(
+                            weights.begin(), weights.end(), 0.F);
+                        mvs::Vec3f query = mvs::Vec3f::Zero();
+                        for (int corner = 0; corner < 4; ++corner)
+                            query += weights[static_cast<std::size_t>(corner)] /
+                                     sum * vertices[static_cast<std::size_t>(corner)];
+                        queries.push_back(query);
+                    }
                 }
             }
-        }
-        const std::vector<float> occupancy = evaluate_global_occupancy(
-            model, scene, queries, training_options,
-            options.occupancy_chunk_size,
-            options.mask_background_threshold);
-        for (std::size_t cell_index = 0; cell_index < cells.size();
-             ++cell_index) {
-            float mean = 0.F;
-            for (unsigned sample = 0;
-                 sample < options.points_per_tetrahedron; ++sample)
-                mean += occupancy[
-                    cell_index * options.points_per_tetrahedron + sample];
-            mean /= static_cast<float>(options.points_per_tetrahedron);
-            cells[cell_index]->info() =
-                mean > options.occupancy_iso_value ? 1U : 0U;
-            occupied_count += cells[cell_index]->info() != 0U;
+            const std::vector<float> occupancy = evaluate_global_occupancy(
+                model, scene, queries, training_options,
+                options.occupancy_chunk_size,
+                options.mask_background_threshold);
+            for (std::size_t cell_index = 0; cell_index < cells.size();
+                 ++cell_index) {
+                float mean = 0.F;
+                for (unsigned sample = 0;
+                     sample < options.points_per_tetrahedron; ++sample)
+                    mean += occupancy[
+                        cell_index * options.points_per_tetrahedron + sample];
+                mean /= static_cast<float>(options.points_per_tetrahedron);
+                cells[cell_index]->info() =
+                    mean > options.occupancy_iso_value ? 1U : 0U;
+                occupied_count += cells[cell_index]->info() != 0U;
+            }
         }
     }
 

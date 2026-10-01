@@ -11,6 +11,7 @@ struct PamGpuField {
     tinytensor::Tensor nodes;
     tinytensor::Tensor values;
     int root{-1};
+    tinytensor::Tensor bounds; // Per-node subtree bounds: minimum(3), maximum(3).
 };
 
 inline constexpr unsigned pam_gpu_max_neighbors = 64;

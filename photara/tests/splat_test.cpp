@@ -2654,6 +2654,25 @@ void test_pam_cuda_field() {
             require(std::abs(actual[3*i+axis] - expected[axis]) <= 2e-5F,
                 "PAM CUDA chunked point update differs from CPU");
     }
+    // Wide Gaussians keep distant queries' gradients nonzero, so pruning
+    // beyond the root bounding box is checked against actual field values.
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>(count * 3, std::log(3.F)),
+        {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    const auto wide_field = detail::make_pam_gpu_field(model);
+    std::vector<float> distant_queries;
+    for (int i = 0; i < 159; ++i)
+        distant_queries.insert(distant_queries.end(), {
+            3.F + 0.7F * static_cast<float>(i % 17), -3.F, 1.F});
+    const auto distant_points = tinytensor::Tensor::from_vector(distant_queries,
+        {distant_queries.size()/3, std::size_t{3}}, tinytensor::Device::CUDA);
+    for (unsigned neighbors : {1U, 32U, 64U}) {
+        const auto cpu = detail::pam_field_gradients_reference(model, distant_queries, neighbors);
+        const auto gpu = detail::pam_field_gradients(wide_field, distant_points, neighbors).to_vector();
+        for (std::size_t i = 0; i < cpu.size(); ++i)
+            require(std::abs(gpu[i] - cpu[i]) <= 2e-5F * (1.F + std::abs(cpu[i])),
+                "PAM subtree bounding-box pruning changed distant field values");
+    }
 }
 
 void test_pam_smoke() {

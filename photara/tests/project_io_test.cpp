@@ -206,6 +206,7 @@ int main() {
     settings.sfm_mode = 2;
     settings.max_features = 4096;
     settings.build_mesh = true;
+    settings.mesh_quality = 2;
     settings.mesh_source = 1;
     settings.texture_quality = 2;
     settings.atlas_resolution = 4096;
@@ -265,6 +266,17 @@ int main() {
     expect(round_trip.sfm_mode == 2, "settings sfm mode");
     expect(round_trip.max_features == 4096, "settings max features");
     expect(round_trip.build_mesh, "settings build mesh");
+    expect(round_trip.mesh_quality == 2, "settings mesh quality");
+    auto legacy_settings = encode_settings(settings, ascan_path);
+    legacy_settings.resize(legacy_settings.size() - sizeof(std::int32_t));
+    expect(decode_settings(legacy_settings, ascan_path).mesh_quality == 1,
+           "legacy project defaults to standard mesh quality");
+    for (int quality : {0, 1, 2}) {
+        auto selected = settings;
+        selected.mesh_quality = quality;
+        expect(decode_settings(encode_settings(selected, ascan_path), ascan_path).mesh_quality == quality,
+               "mesh quality modes survive project roundtrip");
+    }
     expect(round_trip.mesh_source == 1, "settings mesh source");
     expect(round_trip.texture_quality == 2, "settings texture quality");
     expect(round_trip.atlas_resolution == 4096, "settings atlas resolution");
@@ -309,7 +321,8 @@ int main() {
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto legacy_bytes = settings_bytes;
-        legacy_bytes.pop_back();  // Previous settings prefix, without this opt-in.
+        // Remove the appended quality and the earlier SAM alignment opt-in.
+        legacy_bytes.resize(legacy_bytes.size() - sizeof(std::int32_t) - sizeof(std::uint8_t));
         const Settings legacy = decode_settings(legacy_bytes, ascan_path);
         expect(!legacy.sam_use_mask_for_sfm,
                "old projects default to full-image alignment");

@@ -450,6 +450,27 @@ const char* mesh_method_flag(const int index) {
     }
 }
 
+void append_mesh_quality_flags(
+    std::ostringstream& command, const ProjectSettings& settings,
+    const int method, const bool from_mvs = false) {
+    const auto preset = mesh_quality_preset(settings.mesh_quality);
+    if (from_mvs)
+        command << " --dense-quality " << preset.dense_quality;
+    if (method == 3 && !from_mvs) {
+        command << " --pam-max-points " << preset.pam_points
+                << " --pam-pivot-max-points " << preset.pam_pivots
+                << " --pam-refinement-steps " << preset.pam_steps
+                << " --pam-neighbors " << preset.pam_neighbors
+                << " --pam-points-per-tetrahedron " << preset.pam_cell_samples
+                << " --pam-gpu-refinement=true --pam-occupancy-chunk-size 4000000";
+    } else {
+        command << " --mesh-max-points " << preset.mesh_points;
+        if (method != 2)
+            command << " --mesh-tsdf-voxel-scale " << preset.tsdf_voxel_scale
+                    << " --mesh-tsdf-pixel-step " << preset.tsdf_pixel_step;
+    }
+}
+
 const char* sfm_mode_flag(const int index) {
     switch (index) {
         case 1: return "incremental";
@@ -1403,6 +1424,7 @@ std::string build_train_command(
                 << settings.multi_view_ncc_weight
                 << " --splat-geometry-from-iter "
                 << settings.geometry_from_iter;
+        append_mesh_quality_flags(command, settings, gaussian_mesh_method(settings));
     }
 
     if (preview.memory && preview.semaphore) {
@@ -1458,6 +1480,7 @@ std::string build_splat_mesh_command(
             << " --splat-max-resolution " << settings.max_resolution
             << " --splat-use-mask="
             << ((settings.use_mask || settings.sam_masks) ? "true" : "false");
+    append_mesh_quality_flags(command, settings, gaussian_mesh_method(settings));
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);
     append_gui_flags(command, layout, splat_model);
@@ -1505,6 +1528,7 @@ std::string build_dense_command(
         const int method =
             settings.mesh_method == 3 ? 0 : settings.mesh_method;
         command << " --mesh-method " << mesh_method_flag(method);
+        append_mesh_quality_flags(command, settings, method, true);
     }
     append_video_extract_flags(command, settings);
     append_sam_flags(command, settings, false);

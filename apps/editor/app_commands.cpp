@@ -411,6 +411,7 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.build_mesh = app.settings.build_mesh;
     settings.mesh_source = app.settings.mesh_source;
     settings.mesh_method = app.settings.mesh_method;
+    settings.mesh_quality = app.settings.mesh_quality;
     settings.depth_normal_weight = app.settings.depth_normal_weight;
     settings.multi_view_geo_weight = app.settings.multi_view_geo_weight;
     settings.multi_view_ncc_weight = app.settings.multi_view_ncc_weight;
@@ -487,6 +488,7 @@ void apply_project_settings(
     app.settings.build_mesh = settings.build_mesh;
     app.settings.mesh_source = settings.mesh_source == 1 ? 1 : 0;
     app.settings.mesh_method = settings.mesh_method;
+    app.settings.mesh_quality = settings.mesh_quality;
     app.settings.depth_normal_weight = settings.depth_normal_weight;
     app.settings.multi_view_geo_weight = settings.multi_view_geo_weight;
     app.settings.multi_view_ncc_weight = settings.multi_view_ncc_weight;

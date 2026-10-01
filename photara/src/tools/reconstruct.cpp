@@ -254,6 +254,7 @@ struct ReconstructCli {
     unsigned pam_refinement_steps{10};
     unsigned pam_neighbors{32};
     bool pam_gpu_refinement{true};
+    std::uint64_t pam_occupancy_chunk_size{4'000'000};
     unsigned pam_points_per_tetrahedron{10};
     float pam_occupancy_iso_value{0.5F};
     float pam_vacancy_threshold{0.1F};
@@ -980,6 +981,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("32"))
         ("pam-gpu-refinement", "Use exact CUDA nearest-neighbor field refinement (up to 64 neighbors)",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
+        ("pam-occupancy-chunk-size", "PAM query batch size; larger batches amortize camera preparation",
+         cxxopts::value<std::uint64_t>()->default_value("4000000"))
         ("pam-points-per-tetrahedron", "PAM occupancy samples per tetrahedron",
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-occupancy-iso-value",
@@ -1543,6 +1546,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
         result["pam-refinement-steps"].as<unsigned>();
     cli.pam_neighbors = result["pam-neighbors"].as<unsigned>();
     cli.pam_gpu_refinement = result["pam-gpu-refinement"].as<bool>();
+    cli.pam_occupancy_chunk_size = result["pam-occupancy-chunk-size"].as<std::uint64_t>();
     cli.pam_points_per_tetrahedron =
         result["pam-points-per-tetrahedron"].as<unsigned>();
     cli.pam_occupancy_iso_value =
@@ -1840,6 +1844,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
             "--mesh-method pam requires splat training");
     if (cli.pam_max_points < 4 || cli.pam_pivot_max_points < 4 ||
         cli.pam_neighbors == 0 ||
+        cli.pam_occupancy_chunk_size == 0 ||
+        cli.pam_occupancy_chunk_size > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()) ||
         cli.pam_points_per_tetrahedron == 0 ||
         !std::isfinite(cli.pam_pivot_std_factor) ||
         !(cli.pam_pivot_std_factor > 0.F) ||
@@ -2355,8 +2361,22 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.build_mesh = cli.mesh;
     settings.mesh_source = (cli.dense && cli.mesh && !cli.splat) ? 1 : 0;
     if (cli.mesh_method == "tsdf") settings.mesh_method = 1;
-    else if (cli.mesh_method == "pam") settings.mesh_method = 2;
+    else if (cli.mesh_method == "delaunay") settings.mesh_method = 2;
+    else if (cli.mesh_method == "pam") settings.mesh_method = 3;
     else settings.mesh_method = 0;
+    if (settings.mesh_source == 1) {
+        settings.mesh_quality = cli.dense_quality == photara::mvs::DensifyQuality::preview
+            ? 0 : cli.dense_quality == photara::mvs::DensifyQuality::high ? 2 : 1;
+    } else if (settings.mesh_method == 3) {
+        settings.mesh_quality = cli.pam_max_points <= 500'000 ? 0
+            : cli.pam_max_points >= 2'000'000 ? 2 : 1;
+    } else if (settings.mesh_method == 2) {
+        settings.mesh_quality = cli.mesh_max_points <= 1'000'000 ? 0
+            : cli.mesh_max_points >= 4'000'000 ? 2 : 1;
+    } else {
+        settings.mesh_quality = cli.mesh_tsdf_voxel_scale >= 2.F ? 0
+            : cli.mesh_tsdf_voxel_scale > 0.F && cli.mesh_tsdf_voxel_scale <= 0.5F ? 2 : 1;
+    }
     settings.depth_normal_weight = cli.splat_depth_normal_weight;
     settings.multi_view_geo_weight = cli.splat_multi_view_geo_weight;
     settings.multi_view_ncc_weight = cli.splat_multi_view_ncc_weight;
@@ -3804,6 +3824,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         pam_options.refinement_steps = cli.pam_refinement_steps;
         pam_options.vector_field_neighbors = cli.pam_neighbors;
         pam_options.gpu_refinement = cli.pam_gpu_refinement;
+        pam_options.occupancy_chunk_size = static_cast<std::size_t>(cli.pam_occupancy_chunk_size);
         pam_options.points_per_tetrahedron =
             cli.pam_points_per_tetrahedron;
         pam_options.occupancy_iso_value =
