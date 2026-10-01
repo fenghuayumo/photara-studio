@@ -2368,13 +2368,13 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
         settings.mesh_quality = cli.dense_quality == photara::mvs::DensifyQuality::preview
             ? 0 : cli.dense_quality == photara::mvs::DensifyQuality::high ? 2 : 1;
     } else if (settings.mesh_method == 3) {
-        settings.mesh_quality = cli.pam_max_points <= 500'000 ? 0
+        settings.mesh_quality = cli.pam_max_points <= 750'000 ? 0
             : cli.pam_max_points >= 2'000'000 ? 2 : 1;
     } else if (settings.mesh_method == 2) {
-        settings.mesh_quality = cli.mesh_max_points <= 1'000'000 ? 0
+        settings.mesh_quality = cli.mesh_max_points <= 1'500'000 ? 0
             : cli.mesh_max_points >= 4'000'000 ? 2 : 1;
     } else {
-        settings.mesh_quality = cli.mesh_tsdf_voxel_scale >= 2.F ? 0
+        settings.mesh_quality = cli.mesh_tsdf_voxel_scale >= 1.5F ? 0
             : cli.mesh_tsdf_voxel_scale > 0.F && cli.mesh_tsdf_voxel_scale <= 0.5F ? 2 : 1;
     }
     settings.depth_normal_weight = cli.splat_depth_normal_weight;

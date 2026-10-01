@@ -68,6 +68,16 @@ struct StructureAdamUpdate {
     bool capture_opacity_gradient{};
 };
 
+// An extraction-local snapshot for immutable Gaussians/cameras. Recreate this
+// cache after changing the model; never reuse it across training updates.
+struct OccupancyCache {
+    std::shared_ptr<void> state;
+};
+
+struct OccupancyCacheStats {
+    std::size_t prepared_views{}, queries{}, device_bytes{}, host_bytes{};
+};
+
 class Rasterizer {
 public:
     RenderResult forward(
@@ -112,6 +122,17 @@ public:
         const GaussianModel& model, const tinytensor::Tensor& world_points,
         const Camera& camera,
         const RasterizeOptions& options = {}) const;
+
+    // The budget limits resident draw lists; overflow is cached in host memory.
+    // Zero selects a budget from currently available VRAM; SIZE_MAX forces host
+    // storage (useful for verifying the spill path).
+    OccupancyCache prepare_occupancy_cache(
+        const GaussianModel& model, const std::vector<Camera>& cameras,
+        const RasterizeOptions& options = {}, std::size_t device_budget = 0) const;
+    OccupancyResult evaluate_occupancy(
+        OccupancyCache& cache, std::size_t camera_index,
+        const tinytensor::Tensor& world_points) const;
+    OccupancyCacheStats occupancy_cache_stats(const OccupancyCache& cache) const;
 
     // Packed [N,2] xy pixel centres from the last forward, or null.
     const float* projected_mean2d(const RenderResult& rendered) const;

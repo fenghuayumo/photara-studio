@@ -251,6 +251,31 @@ inline std::size_t bucket_upper_bound(std::size_t instances, std::size_t tiles) 
     return (instances + 31 * tiles) / 32 + 1;
 }
 
+// Only the arrays consumed by occupancy queries, indexed by visible Gaussian.
+struct OccupancyState {
+    float2* mean2d;
+    float4* conic_opacity;
+    float4* ray_plane;
+    unsigned* instances;
+    uint2* ranges;
+    static std::size_t bytes(std::size_t visible, std::size_t instances,
+                             std::size_t tiles) {
+        return align_up(visible * sizeof(float2)) +
+               2 * align_up(visible * sizeof(float4)) +
+               align_up(instances * sizeof(unsigned)) +
+               align_up(tiles * sizeof(uint2)) + kAlign;
+    }
+    static OccupancyState from_pool(char* base, std::size_t visible,
+                                    std::size_t instances, std::size_t tiles) {
+        char* c = base;
+        return {reinterpret_cast<float2*>(take(c, visible * sizeof(float2))),
+                reinterpret_cast<float4*>(take(c, visible * sizeof(float4))),
+                reinterpret_cast<float4*>(take(c, visible * sizeof(float4))),
+                reinterpret_cast<unsigned*>(take(c, instances * sizeof(unsigned))),
+                reinterpret_cast<uint2*>(take(c, tiles * sizeof(uint2)))};
+    }
+};
+
 // ------------------------------------------------------------------ point --
 // Each visible query point lands in exactly one tile, so the instance
 // arrays are sized to `points` (not a runtime instance count). That keeps

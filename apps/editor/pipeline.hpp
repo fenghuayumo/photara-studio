@@ -439,7 +439,7 @@ struct MeshQualityPreset {
 
 inline MeshQualityPreset mesh_quality_preset(const int quality) {
     if (quality == 0)
-        return {500'000, 500'000, 6, 24, 6, 2.F, 8, 1'000'000, "preview"};
+        return {750'000, 750'000, 8, 32, 8, 1.5F, 4, 1'500'000, "preview"};
     if (quality == 2)
         return {2'000'000, 2'000'000, 15, 48, 16, 0.5F, 1, 4'000'000, "high"};
     return {1'000'000, 1'000'000, 10, 32, 10, 1.F, 4, 2'000'000, "default"};

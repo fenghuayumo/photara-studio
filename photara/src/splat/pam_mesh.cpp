@@ -249,7 +249,8 @@ tinytensor::Tensor evaluate_global_occupancy_device(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const tinytensor::Tensor& points,
     const TrainingOptions& training_options,
-    const std::size_t chunk_size, const float mask_background_threshold) {
+    const std::size_t chunk_size, const float mask_background_threshold,
+    OccupancyCache* cache = nullptr) {
     const std::size_t point_count = points.shape()[0];
     auto result = tinytensor::Tensor::empty({point_count}, tinytensor::Device::CUDA);
     Rasterizer rasterizer;
@@ -266,9 +267,12 @@ tinytensor::Tensor evaluate_global_occupancy_device(
         auto observed = tinytensor::Tensor::zeros(
             {count}, tinytensor::Device::CUDA,
             tinytensor::DataType::Bool);
-        for (const mvs::MvsView& view : scene.views) {
-            const OccupancyResult view_result = rasterizer.evaluate_occupancy(
-                model, query, camera_from_mvs_view(view), raster_options);
+        for (std::size_t view_index = 0; view_index < scene.views.size(); ++view_index) {
+            const mvs::MvsView& view = scene.views[view_index];
+            const OccupancyResult view_result = cache
+                ? rasterizer.evaluate_occupancy(*cache, view_index, query)
+                : rasterizer.evaluate_occupancy(
+                    model, query, camera_from_mvs_view(view), raster_options);
             tinytensor::Tensor possibly_foreground = view_result.inside;
             tinytensor::Tensor definitely_background =
                 tinytensor::Tensor::zeros_like(view_result.inside);
@@ -342,9 +346,10 @@ std::vector<float> evaluate_global_occupancy(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const std::vector<mvs::Vec3f>& points,
     const TrainingOptions& training_options,
-    const std::size_t chunk_size, const float mask_background_threshold) {
+    const std::size_t chunk_size, const float mask_background_threshold,
+    OccupancyCache* cache = nullptr) {
     return evaluate_global_occupancy_device(model, scene, upload_points(points),
-        training_options, chunk_size, mask_background_threshold).to_vector();
+        training_options, chunk_size, mask_background_threshold, cache).to_vector();
 }
 
 bool in_camera_frustum(
@@ -524,7 +529,7 @@ struct PivotEdgeHash {
 mvs::Mesh build_gaussian_pivot_seed_mesh(
     const GaussianModel& model, const mvs::MvsScene& scene,
     const TrainingOptions& training_options, const HostGaussianField& field,
-    const PamMeshOptions& options, std::mt19937& random) {
+    const PamMeshOptions& options, std::mt19937& random, OccupancyCache* cache) {
     const std::size_t gaussian_budget = std::max<std::size_t>(
         options.pivot_max_points / 2, 2);
     const std::vector<std::size_t> selected = sample_gaussian_indices(
@@ -555,7 +560,7 @@ mvs::Mesh build_gaussian_pivot_seed_mesh(
 
     const std::vector<float> occupancy = evaluate_global_occupancy(
         model, scene, pivots, training_options,
-        options.occupancy_chunk_size, options.mask_background_threshold);
+        options.occupancy_chunk_size, options.mask_background_threshold, cache);
 
     using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
     using VertexBase =
@@ -724,12 +729,21 @@ PamMeshResult extract_pam_mesh(
         options.vector_field_neighbors <= detail::pam_gpu_max_neighbors;
     const detail::PamGpuField gpu_field = use_gpu ? field.upload() : detail::PamGpuField{};
     core::Logger::instance().info("splat PAM field backend=", use_gpu ? "cuda" : "cpu");
+    std::vector<Camera> occupancy_cameras;
+    occupancy_cameras.reserve(scene.views.size());
+    for (const auto& view : scene.views)
+        occupancy_cameras.push_back(camera_from_mvs_view(view));
+    RasterizeOptions occupancy_options;
+    occupancy_options.kernel_size = training_options.kernel_size;
+    occupancy_options.scale_modifier = training_options.scale_modifier;
+    auto occupancy_cache = Rasterizer().prepare_occupancy_cache(
+        model, occupancy_cameras, occupancy_options);
     std::mt19937 random(options.seed);
     mvs::Mesh generated_seed_mesh;
     const mvs::Mesh* active_seed_mesh = &seed_mesh;
     if (seed_mesh.vertices.empty()) {
         generated_seed_mesh = build_gaussian_pivot_seed_mesh(
-            model, scene, training_options, field, options, random);
+            model, scene, training_options, field, options, random, &occupancy_cache);
         active_seed_mesh = &generated_seed_mesh;
     }
     std::vector<mvs::Vec3f> candidates;
@@ -746,14 +760,14 @@ PamMeshResult extract_pam_mesh(
                         " samples=", sampled.size(), " backend=cuda");
                     const auto occupancy = evaluate_global_occupancy_device(
                         model, scene, points, training_options, options.occupancy_chunk_size,
-                        options.mask_background_threshold);
+                        options.mask_background_threshold, &occupancy_cache);
                     detail::pam_refine_points(gpu_field, points, occupancy,
                         options.vector_field_neighbors, options.occupancy_iso_value,
                         options.minimum_gradient_norm_squared, options.refinement_step);
                 }
                 const auto occupancy = evaluate_global_occupancy_device(
                     model, scene, points, training_options, options.occupancy_chunk_size,
-                    options.mask_background_threshold).to_vector();
+                    options.mask_background_threshold, &occupancy_cache).to_vector();
                 const auto host_points = points.to_vector();
                 for (std::size_t i = 0; i < sampled.size() && candidates.size() < options.max_points; ++i)
                     if (std::abs(occupancy[i] - options.occupancy_iso_value) <= options.vacancy_threshold)
@@ -768,7 +782,7 @@ PamMeshResult extract_pam_mesh(
                 const std::vector<float> occupancy = evaluate_global_occupancy(
                     model, scene, sampled, training_options,
                     options.occupancy_chunk_size,
-                    options.mask_background_threshold);
+                    options.mask_background_threshold, &occupancy_cache);
 #if defined(PHOTARA_HAS_OPENMP)
 #pragma omp parallel for schedule(dynamic, 256) if(sample_count >= 1024)
 #endif
@@ -790,7 +804,7 @@ PamMeshResult extract_pam_mesh(
             const std::vector<float> occupancy = evaluate_global_occupancy(
                 model, scene, sampled, training_options,
                 options.occupancy_chunk_size,
-                options.mask_background_threshold);
+                options.mask_background_threshold, &occupancy_cache);
             for (std::size_t index = 0;
                  index < sampled.size() &&
                  candidates.size() < options.max_points;
@@ -899,7 +913,7 @@ PamMeshResult extract_pam_mesh(
             const std::vector<float> occupancy = evaluate_global_occupancy(
                 model, scene, queries, training_options,
                 options.occupancy_chunk_size,
-                options.mask_background_threshold);
+                options.mask_background_threshold, &occupancy_cache);
             for (std::size_t cell_index = 0; cell_index < cells.size();
                  ++cell_index) {
                 float mean = 0.F;
@@ -1019,6 +1033,12 @@ PamMeshResult extract_pam_mesh(
         " vertices=", result.mesh.vertices.size(),
         " faces=", result.mesh.faces.size(),
         " topology_duplicated_vertices=", topology_duplicated_vertices);
+    const auto cache_stats = Rasterizer().occupancy_cache_stats(occupancy_cache);
+    core::Logger::instance().info(
+        "splat PAM occupancy cache: prepared_views=", cache_stats.prepared_views,
+        " queries=", cache_stats.queries,
+        " device_bytes=", cache_stats.device_bytes,
+        " host_bytes=", cache_stats.host_bytes);
     stage.finish();
     return result;
 #endif

@@ -22,6 +22,23 @@ using ws::InstanceState;
 using ws::PixelState;
 using ws::TileState;
 
+__global__ void compact_occupancy_gaussians(int n, GaussianState source,
+                                           ws::OccupancyState target) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || !source.visible_flag[i]) return;
+    const unsigned j = source.visible_offset[i] - 1;
+    target.mean2d[j] = source.mean2d[i];
+    target.conic_opacity[j] = source.conic_opacity[i];
+    target.ray_plane[j] = source.ray_plane[i];
+}
+
+__global__ void compact_occupancy_instances(int n, const unsigned* source,
+                                           const unsigned* offsets,
+                                           unsigned* target) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) target[i] = offsets[source[i]] - 1;
+}
+
 CameraIntrinsics intrinsics_of(const CameraView& cam) {
     CameraIntrinsics k;
     k.fx = cam.fx;
@@ -605,6 +622,71 @@ void Rasterizer::sample_depth_backward(
 
     run_gaussian_backward(colorless(g), cam, s, gst, gs, grads, gst.radius,
                           false);
+}
+
+OccupancyDrawList Rasterizer::prepare_occupancy(
+    const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
+    const RenderSettings& s) {
+    check(g.count > 0, "empty occupancy model");
+    const int grid_x = (cam.width + cfg::kTileWidth - 1) / cfg::kTileWidth;
+    const int grid_y = (cam.height + cfg::kTileHeight - 1) / cfg::kTileHeight;
+    const int tiles = grid_x * grid_y;
+    GaussianState gst;
+    TileState tst;
+    InstanceState ist;
+    const SortCounts counts = build_draw_lists(
+        pools, colorless(g), cam, s, grid_x, grid_y, tiles,
+        is_equirect(cam.mode) ? cam.width : 0, true, gst, tst, ist, nullptr);
+    OccupancyDrawList result;
+    result.visible = counts.visible;
+    result.instances = counts.instances;
+    result.bytes = ws::OccupancyState::bytes(counts.visible, counts.instances, tiles);
+    result.storage = pools.pixel(result.bytes);
+    const auto compact = ws::OccupancyState::from_pool(
+        result.storage, counts.visible, counts.instances, tiles);
+    // The small packed-sort path uses visible_offset for tile counts. Rebuild
+    // the visible mapping for both sort paths without changing instance order.
+    check_cuda(cub::DeviceScan::InclusiveSum(gst.scan_scratch, gst.scan_bytes,
+                   gst.visible_flag, gst.visible_offset, g.count), "cache visible scan");
+    compact_occupancy_gaussians<<<(g.count + 255) / 256, 256>>>(g.count, gst, compact);
+    check_cuda(cudaGetLastError(), "compact occupancy Gaussians");
+    if (counts.instances > 0) {
+        compact_occupancy_instances<<<(counts.instances + 255) / 256, 256>>>(
+            counts.instances, ist.instance_value[counts.instance_selector],
+            gst.visible_offset, compact.instances);
+        check_cuda(cudaGetLastError(), "compact occupancy instances");
+    }
+    check_cuda(cudaMemcpyAsync(compact.ranges, tst.range, tiles * sizeof(uint2),
+                               cudaMemcpyDeviceToDevice), "cache tile ranges");
+    return result;
+}
+
+void Rasterizer::evaluate_prepared_occupancy(
+    const WorkspacePools& pools, const OccupancyDrawList& prepared,
+    const CameraView& cam, const RenderSettings& s,
+    const float* world_points, int point_count, const OccupancyOutputs& out) {
+    check(point_count > 0 && prepared.storage, "empty prepared occupancy inputs");
+    check(out.occupancy && out.inside, "occupancy outputs required");
+    check_cuda(cudaMemsetAsync(out.occupancy, 0, point_count * sizeof(float)),
+               "prepared occupancy memset");
+    check_cuda(cudaMemsetAsync(out.inside, 0, point_count * sizeof(bool)),
+               "prepared inside memset");
+    const int grid_x = (cam.width + cfg::kTileWidth - 1) / cfg::kTileWidth;
+    const int grid_y = (cam.height + cfg::kTileHeight - 1) / cfg::kTileHeight;
+    const int tiles = grid_x * grid_y;
+    const auto compact = ws::OccupancyState::from_pool(
+        prepared.storage, prepared.visible, prepared.instances, tiles);
+    ws::PointState ps;
+    const auto points = build_point_lists(pools, point_count, world_points, cam,
+                                         grid_x, grid_y, tiles, ps, s.device_point_lists);
+    launch::evaluate_points(false, compact.ranges, compact.instances,
+                            ps.point_range, ps.point_value[points.selector],
+                            cam.width, cam.height, intrinsics_of(cam), ps.point2d,
+                            ps.point_t, compact.mean2d, compact.conic_opacity,
+                            compact.ray_plane, s.point_depth_bracket,
+                            s.point_depth_tolerance, out.occupancy, nullptr, nullptr,
+                            nullptr, out.inside, tiles);
+    check_cuda(cudaGetLastError(), "evaluate prepared occupancy");
 }
 
 void Rasterizer::evaluate_occupancy(

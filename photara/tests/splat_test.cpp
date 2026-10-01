@@ -2438,6 +2438,70 @@ void test_normal_field_parameterization_and_occupancy() {
             occupancy.occupancy.to_vector()[0] > 0.5F,
         "PAM integrated occupancy did not classify a Gaussian center");
 
+    // Repeated queries must preserve exact values, including the host-spill
+    // path and empty draw lists, without keeping mutable training state.
+    Camera outside_camera = camera;
+    outside_camera.world_to_camera[14] = -20.F;
+    const std::vector<Camera> cache_cameras{camera, outside_camera};
+    for (const auto budget : {std::size_t{1} << 28,
+                             std::numeric_limits<std::size_t>::max()}) {
+        Rasterizer rasterizer;
+        auto cache = rasterizer.prepare_occupancy_cache(model, cache_cameras, {}, budget);
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            const auto queries = tinytensor::Tensor::from_vector(
+                std::vector<float>{0.F, 0.F, 2.F, .02F * repeat, 0.F, 2.1F,
+                                   100.F, 0.F, 2.F, 0.F, 0.F, -2.F},
+                {4, 3}, tinytensor::Device::CUDA);
+            for (std::size_t view = 0; view < cache_cameras.size(); ++view) {
+                const auto reference = rasterizer.evaluate_occupancy(model, queries, cache_cameras[view]);
+                const auto cached = rasterizer.evaluate_occupancy(cache, view, queries);
+                require(reference.occupancy.to_vector() == cached.occupancy.to_vector() &&
+                        reference.inside.to_vector_bool() == cached.inside.to_vector_bool(),
+                        "PAM cached occupancy differs from uncached query");
+            }
+        }
+        const auto stats = rasterizer.occupancy_cache_stats(cache);
+        require(stats.prepared_views == 2 && stats.queries == 6,
+                "PAM occupancy cache repeated draw preparation");
+        require(budget == std::numeric_limits<std::size_t>::max()
+                    ? stats.host_bytes > 0 && stats.device_bytes == 0
+                    : stats.device_bytes > 0 && stats.host_bytes == 0,
+                "PAM occupancy cache did not respect residency budget");
+    }
+
+    // Enough overlapping footprints to exercise depth-sort + stable tile-sort,
+    // with tied depths and a culled Gaussian between visible source indices.
+    GaussianModel crowded;
+    const std::size_t crowded_count = 12000;
+    std::vector<float> crowded_means(crowded_count * 3, 0.F);
+    std::vector<float> crowded_rotations(crowded_count * 4, 0.F);
+    for (std::size_t i = 0; i < crowded_count; ++i) {
+        crowded_means[3 * i + 2] = i % 7 == 0 ? -2.F : 2.F;
+        crowded_rotations[4 * i] = 1.F;
+    }
+    crowded.means = tinytensor::Tensor::from_vector(
+        crowded_means, {crowded_count, 3}, tinytensor::Device::CUDA);
+    crowded.quaternions = tinytensor::Tensor::from_vector(
+        crowded_rotations, {crowded_count, 4}, tinytensor::Device::CUDA);
+    crowded.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>(crowded_count * 3, std::log(.5F)),
+        {crowded_count, 3}, tinytensor::Device::CUDA);
+    crowded.opacity_logits = tinytensor::Tensor::from_vector(
+        std::vector<float>(crowded_count, -4.F), {crowded_count, 1}, tinytensor::Device::CUDA);
+    crowded.sh = tinytensor::Tensor::zeros({crowded_count, 1, 3}, tinytensor::Device::CUDA);
+    crowded.sh_degree = 0;
+    Camera crowded_camera = camera;
+    crowded_camera.width = crowded_camera.height = 128;
+    crowded_camera.fx = crowded_camera.fy = 80.F;
+    crowded_camera.cx = crowded_camera.cy = 63.5F;
+    Rasterizer crowded_rasterizer;
+    auto crowded_cache = crowded_rasterizer.prepare_occupancy_cache(crowded, {crowded_camera});
+    const auto crowded_reference = crowded_rasterizer.evaluate_occupancy(crowded, query, crowded_camera);
+    const auto crowded_cached = crowded_rasterizer.evaluate_occupancy(crowded_cache, 0, query);
+    require(crowded_reference.occupancy.to_vector() == crowded_cached.occupancy.to_vector() &&
+            crowded_reference.inside.to_vector_bool() == crowded_cached.inside.to_vector_bool(),
+            "PAM cached double-sort occupancy differs for tied depths/culled indices");
+
     const auto ply = std::filesystem::temp_directory_path() /
         "photara_normal_field_roundtrip.ply";
     save_gaussians_ply(model, ply);

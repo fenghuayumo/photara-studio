@@ -55,6 +55,23 @@ struct DepthSampleContextImpl {
     splat_drender::Rasterizer::SampleCounts counts{};
 };
 
+struct OccupancyCacheImpl {
+    struct View {
+        Camera camera;
+        RasterCameraConstants constants;
+        tinytensor::Tensor storage;
+        splat_drender::OccupancyDrawList draw;
+    };
+    GaussianModel model;
+    detail::ActivatedParameters activated;
+    RasterizeOptions options;
+    std::vector<View> views;
+    tinytensor::Tensor gaussian_buffer, instance_buffer, tile_buffer, point_buffer;
+    tinytensor::Tensor upload_buffer;
+    std::size_t device_budget{}, device_bytes{};
+    OccupancyCacheStats stats;
+};
+
 namespace {
 
 struct HostCameraConstants { float values[19]; };
@@ -626,6 +643,101 @@ DepthSampleGradients Rasterizer::sample_depth_backward(
         model, context.activated, grad_scales, grad_quaternions,
         grad_opacities, result.model);
     return result;
+}
+
+OccupancyCache Rasterizer::prepare_occupancy_cache(
+    const GaussianModel& model, const std::vector<Camera>& cameras,
+    const RasterizeOptions& requested_options, std::size_t device_budget) const {
+    validate_model(model, requested_options);
+    if (model.size() == 0 || cameras.empty())
+        throw std::invalid_argument("occupancy cache requires Gaussians and cameras");
+    auto context = std::make_shared<OccupancyCacheImpl>();
+    context->model = model;
+    context->activated = detail::activate_parameters(model);
+    context->options = requested_options;
+    context->options.active_sh_degree = std::min(requested_options.active_sh_degree, model.sh_degree);
+    if (device_budget == 0) {
+        std::size_t available{}, total{};
+        if (cudaMemGetInfo(&available, &total) != cudaSuccess)
+            throw std::runtime_error("unable to query occupancy cache VRAM budget");
+        // Leave at least half the available VRAM for point queries, the PAM
+        // field and other applications. Preparation also needs transient pools.
+        device_budget = std::min<std::size_t>(available / 2, std::size_t{8} << 30);
+    } else if (device_budget == std::numeric_limits<std::size_t>::max()) {
+        device_budget = 0;
+    }
+    context->device_budget = device_budget;
+    for (const auto& camera : cameras) {
+        if (!camera.width || !camera.height)
+            throw std::invalid_argument("occupancy camera dimensions must be positive");
+        OccupancyCacheImpl::View view;
+        view.camera = camera;
+        view.constants = prepare_camera_constants(camera);
+        context->views.push_back(std::move(view));
+    }
+    return {context};
+}
+
+OccupancyResult Rasterizer::evaluate_occupancy(
+    OccupancyCache& cache, std::size_t camera_index,
+    const tinytensor::Tensor& world_points) const {
+    require_cuda_float_contiguous(world_points, "world_points");
+    if (!cache.state || world_points.shape().rank() != 2 ||
+        world_points.shape()[1] != 3 || world_points.shape()[0] == 0 ||
+        world_points.shape()[0] > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("invalid cached occupancy query");
+    auto& context = *std::static_pointer_cast<OccupancyCacheImpl>(cache.state);
+    if (camera_index >= context.views.size())
+        throw std::out_of_range("occupancy cache camera index");
+    auto& view = context.views[camera_index];
+    splat_drender::WorkspacePools pools;
+    pools.gaussian = resize_buffer(context.gaussian_buffer, "occupancy.prepare.gaussian");
+    pools.instance = resize_buffer(context.instance_buffer, "occupancy.prepare.instance");
+    pools.tile = resize_buffer(context.tile_buffer, "occupancy.prepare.tile");
+    pools.point = resize_buffer(context.point_buffer, "occupancy.point");
+    if (!view.storage.is_valid()) {
+        pools.pixel = resize_buffer(view.storage, "occupancy.cache");
+        view.draw = splat_drender::Rasterizer::prepare_occupancy(
+            pools, gaussians_of(context.model, context.activated, context.options, {}),
+            camera_view_of(view.camera, view.constants), settings_of(context.options));
+        if (view.draw.bytes <= context.device_budget - context.device_bytes) {
+            context.device_bytes += view.draw.bytes;
+            context.stats.device_bytes += view.draw.bytes;
+        } else {
+            view.storage = view.storage.to(tinytensor::Device::CPU);
+            view.draw.storage = nullptr;
+            context.stats.host_bytes += view.draw.bytes;
+        }
+        ++context.stats.prepared_views;
+    }
+    auto draw = view.draw;
+    if (view.storage.device() == tinytensor::Device::CPU) {
+        const auto upload = resize_buffer(context.upload_buffer, "occupancy.cache.upload");
+        draw.storage = upload(draw.bytes);
+        if (cudaMemcpyAsync(draw.storage, view.storage.data_ptr(), draw.bytes,
+                            cudaMemcpyHostToDevice) != cudaSuccess)
+            throw std::runtime_error("unable to upload cached occupancy draw list");
+    } else {
+        draw.storage = static_cast<char*>(view.storage.data_ptr());
+    }
+    const std::size_t count = world_points.shape()[0];
+    OccupancyResult result;
+    result.occupancy = tinytensor::Tensor::empty({count}, tinytensor::Device::CUDA);
+    result.inside = tinytensor::Tensor::empty(
+        {count}, tinytensor::Device::CUDA, tinytensor::DataType::Bool);
+    splat_drender::OccupancyOutputs out;
+    out.occupancy = result.occupancy.ptr<float>();
+    out.inside = result.inside.ptr<bool>();
+    splat_drender::Rasterizer::evaluate_prepared_occupancy(
+        pools, draw, camera_view_of(view.camera, view.constants), settings_of(context.options),
+        world_points.ptr<float>(), static_cast<int>(count), out);
+    ++context.stats.queries;
+    return result;
+}
+
+OccupancyCacheStats Rasterizer::occupancy_cache_stats(const OccupancyCache& cache) const {
+    if (!cache.state) return {};
+    return std::static_pointer_cast<OccupancyCacheImpl>(cache.state)->stats;
 }
 
 OccupancyResult Rasterizer::evaluate_occupancy(

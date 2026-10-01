@@ -184,6 +184,14 @@ struct OccupancyOutputs {
     bool* inside = nullptr;      // [P]
 };
 
+// Compact immutable draw list. Storage is supplied by pools.pixel and must
+// outlive queries; no Gaussian model or preparation scratch is retained.
+struct OccupancyDrawList {
+    char* storage = nullptr;
+    std::size_t bytes = 0;
+    int visible = 0, instances = 0;
+};
+
 struct SampleGradients {
     float3* points = nullptr;  // [P] dL/d(world query point)
 };
@@ -242,6 +250,14 @@ public:
         const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
         const RenderSettings& s, const float* world_points, int point_count,
         const OccupancyOutputs& out);
+
+    static OccupancyDrawList prepare_occupancy(
+        const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,
+        const RenderSettings& s);
+    static void evaluate_prepared_occupancy(
+        const WorkspacePools& pools, const OccupancyDrawList& prepared,
+        const CameraView& cam, const RenderSettings& s,
+        const float* world_points, int point_count, const OccupancyOutputs& out);
 };
 
 }  // namespace splat_drender
