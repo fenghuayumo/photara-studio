@@ -251,6 +251,45 @@ void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor&
         groups_for(project_scales ? parameter.numel() / 3 : parameter.numel()));
 }
 
+void sh_adam_quant_step(Tensor& parameter, const Tensor& gradient, Tensor& first,
+                        Tensor& packed, Tensor& bounds,
+                        const AdamStepOptions& options) {
+    const auto valid = [](const Tensor& tensor, DataType dtype, std::size_t count) {
+        return is_vulkan_tensor(tensor) && tensor.dtype() == dtype &&
+               tensor.is_contiguous() && tensor.numel() == count;
+    };
+    const std::size_t count = parameter.numel();
+    const std::uint32_t stride = options.group_stride;
+    const std::uint32_t active = options.active_row_stride;
+    if (stride == 0 || stride > 64 || active == 0 || active > stride || count % stride != 0)
+        throw std::invalid_argument("Vulkan quantized SH Adam received invalid row strides");
+    const std::size_t rows = count / stride;
+    if (!valid(parameter, DataType::Float32, count) ||
+        !valid(gradient, DataType::Float32, count) ||
+        !valid(first, DataType::Float16, count) ||
+        !valid(packed, DataType::UInt8, count) ||
+        !valid(bounds, DataType::Float32, rows * 4))
+        throw std::invalid_argument("Vulkan quantized SH Adam storage does not match the parameter");
+    if (count == 0) return;
+    struct Push {
+        std::uint32_t rows, stride, active;
+        std::uint32_t parameter_offset, gradient_offset, first_offset, packed_offset, bounds_offset;
+        float dc_lr, rest_lr, beta1, beta2, correction1, correction2, epsilon, regularization;
+        std::uint32_t groups_x;
+    } push{u32(rows), stride, active, u32(byte_offset(parameter)),
+           u32(byte_offset(gradient)), u32(byte_offset(first)),
+           u32(byte_offset(packed)), u32(byte_offset(bounds)),
+           options.learning_rate, options.secondary_learning_rate,
+           options.beta1, options.beta2, options.correction1, options.correction2,
+           options.epsilon, options.grouped_rest_regularization,
+           u32(std::min<std::size_t>(rows, 65535))};
+    static_assert(sizeof(Push) == 68);
+    std::array<BufferBinding, 5> bindings{
+        bind(parameter), bind(gradient), bind(first), bind(packed), bind(bounds)};
+    Context::get().dispatch(ShaderId::ShAdamQuant, bindings, &push, sizeof(push),
+                           push.groups_x, ceil_div(u32(rows), push.groups_x));
+}
+
 void fill(Tensor& tensor, float value) {
     if (!tensor.is_valid() || tensor.numel() == 0) {
         return;

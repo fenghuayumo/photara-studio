@@ -15,6 +15,7 @@
 #endif
 
 #include "adam_f32.hlsl.embedded.hpp"
+#include "sh_adam_quant.hlsl.embedded.hpp"
 #include "cat.hlsl.embedded.hpp"
 #include "compact.hlsl.embedded.hpp"
 #include "constrain_scale_ratio.hlsl.embedded.hpp"
@@ -142,7 +143,7 @@ const char* shader_name(const ShaderId shader) {
         "cumsum",      "pool",        "scatter",         "select_compact",
         "cat",         "unpack_rgba", "sort_bitonic", "prune",        "panorama_sizes", "select",
         "gather",      "reduce_all_arg", "reduce_axis",  "cumsum_scan",
-        "constrain_scale_ratio"};
+        "constrain_scale_ratio", "sh_adam_quant"};
     const std::size_t index = static_cast<std::size_t>(shader);
     return index < names.size() ? names[index] : "unknown";
 }
@@ -296,6 +297,7 @@ std::array<ShaderBlob, static_cast<std::size_t>(ShaderId::Count)> shader_blobs()
         {ShaderId::CumsumScan, as_bytes(span{cumsum_scan_hlsl_spv}), 3, 32},
         {ShaderId::ConstrainScaleRatio,
          as_bytes(span{constrain_scale_ratio_hlsl_spv}), 1, 8},
+        {ShaderId::ShAdamQuant, as_bytes(span{sh_adam_quant_hlsl_spv}), 5, 68},
     }};
 }
 

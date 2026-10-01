@@ -1195,33 +1195,20 @@ GaussianModel Trainer::train(
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
     detail::AdamState rotations_state = detail::make_adam_state(model.quaternions);
     detail::AdamState opacity_state = detail::make_adam_state(model.opacity_logits);
-    // CUDA has one SH optimizer representation: FP16 normalized update plus
-    // log-uint8 second moment. Vulkan retains its backend-local FP32 optimizer
-    // until the quantized CUDA kernel has a Vulkan implementation.
-    const bool cuda_sh_quant = !vulkan_backend;
-    detail::ShAdamQuant sh_quant;
+    // Both backends use the same SH optimizer codec; structural Adam stays FP32.
+    const int sh_stride = static_cast<int>(model.sh.shape()[1] * 3);
+    detail::ShAdamQuant sh_quant = detail::make_sh_adam_quant(
+        model.size(), sh_stride, model.sh.device());
     detail::AdamState sh_state;
-    if (cuda_sh_quant) {
-        const int sh_stride = static_cast<int>(model.sh.shape()[1] * 3);
-        sh_quant = detail::make_sh_adam_quant(
-            model.size(), sh_stride, model.sh.device());
-    } else {
-        sh_state = detail::make_adam_state(model.sh);
-    }
-    if (vulkan_backend) {
-        core::Logger::instance().info(
-            "sh_adam=fp32 backend=vulkan");
-    } else {
-        core::Logger::instance().info(
-            "sh_adam=fp16_u_logq8_v block=per_gaussian stride=",
-            sh_quant.stride, " groups=dc,rest bytes_per_gaussian=",
-            sh_quant.stride * 3 + 16);
-    }
+    core::Logger::instance().info(
+        "sh_adam=fp16_u_logq8_v backend=", vulkan_backend ? "vulkan" : "cuda",
+        " block=per_gaussian stride=", sh_quant.stride,
+        " groups=dc,rest bytes_per_gaussian=", sh_quant.stride * 3 + 16);
     detail::AdamState normal_features_state =
         detail::make_adam_state(model.normal_features);
     const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
-        &sh_state, &normal_features_state, cuda_sh_quant ? &sh_quant : nullptr};
+        &sh_state, &normal_features_state, &sh_quant};
     // Per-view photometric compensation. State is indexed by the source view,
     // so it survives densification: rows change, cameras do not. PPISP owns
     // exposure and white-balance; the bilateral grid adds spatial variation.
@@ -1899,11 +1886,9 @@ GaussianModel Trainer::train(
             1.F - std::pow(options_.beta2, static_cast<float>(iteration));
         sh_update.epsilon = options_.adam_epsilon;
         sh_update.regularization_weight = options_.sh_regularization_weight;
-        if (cuda_sh_quant) {
-            sh_update.first = sh_quant.first;
-            sh_update.packed = sh_quant.packed;
-            sh_update.bounds = sh_quant.bounds;
-        }
+        sh_update.first = sh_quant.first;
+        sh_update.packed = sh_quant.packed;
+        sh_update.bounds = sh_quant.bounds;
         StructureAdamUpdate structure_update{
             means_state.first, means_state.second, scales_state.first,
             scales_state.second, rotations_state.first, rotations_state.second,
@@ -2020,26 +2005,13 @@ GaussianModel Trainer::train(
             const std::size_t active_sh_stride =
                 static_cast<std::size_t>(active_sh_degree + 1) *
                 (active_sh_degree + 1) * 3;
-            if (cuda_sh_quant)
-                detail::sh_adam_quant_step(
-                    model.sh, gradients.sh, sh_quant,
-                    static_cast<int>(active_sh_stride), options_.sh0_lr,
-                    options_.sh_rest_lr, options_.beta1, options_.beta2,
-                    1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
-                    1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
-                    options_.adam_epsilon, 0.F);
-            else if (active_sh_stride < full_sh_stride)
-                detail::adam_step_active_prefix(
-                    model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
-                    options_, full_sh_stride, active_sh_stride,
-                    options_.sh_rest_lr, vulkan_sh_regularization);
-            else
-                detail::adam_step(
-                    model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
-                    options_, full_sh_stride, options_.sh_rest_lr,
-                    -std::numeric_limits<float>::infinity(),
-                    std::numeric_limits<float>::infinity(),
-                    vulkan_sh_regularization);
+            detail::sh_adam_quant_step(
+                model.sh, gradients.sh, sh_quant,
+                static_cast<int>(active_sh_stride), options_.sh0_lr,
+                options_.sh_rest_lr, options_.beta1, options_.beta2,
+                1.F - std::pow(options_.beta1, static_cast<float>(iteration)),
+                1.F - std::pow(options_.beta2, static_cast<float>(iteration)),
+                options_.adam_epsilon, vulkan_sh_regularization);
         }
         if (normal_field_active)
             detail::adam_step(
@@ -2127,7 +2099,7 @@ GaussianModel Trainer::train(
             }
             if (refinement_happened && report_progress) {
                 const ModelMemoryBudget budget = model_memory_budget(
-                    model, adam_states, cuda_sh_quant ? &sh_quant : nullptr);
+                    model, adam_states, &sh_quant);
                 core::Logger::instance().info(
                     "splat_memory iteration=", iteration,
                     " gaussians=", budget.gaussians,

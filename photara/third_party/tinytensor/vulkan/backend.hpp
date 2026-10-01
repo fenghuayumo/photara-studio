@@ -71,6 +71,11 @@ DeviceHandles device_handles();
 BufferView buffer_view(const Tensor& tensor);
 void adam_step(Tensor& parameter, const Tensor& gradient, Tensor& first, Tensor& second,
                const AdamStepOptions& options);
+// SH Adam codec shared with splat_drender CUDA: FP16 normalized update,
+// uint8 log-second moment, and FP32 [N,4] DC/rest bounds. Arithmetic is FP32.
+void sh_adam_quant_step(Tensor& parameter, const Tensor& gradient, Tensor& first,
+                        Tensor& packed, Tensor& bounds,
+                        const AdamStepOptions& options);
 // Projects each Gaussian's [N,3] log scales so the longest/shortest axis
 // ratio stays within maximum_ratio (> 1). No-op for compliant rows.
 void constrain_scale_ratio(Tensor& log_scales, float maximum_ratio);

@@ -1,8 +1,7 @@
 #pragma once
 
-// Quantized SH Adam lives beside AdamState. zero_adam_rows and the CUDA
-// optimizer are float-only, and the headers they include cannot change
-// without rebuilding cuda_ops.cu. Densify consults the bound state.
+// Shared CUDA/Vulkan SH optimizer representation. Densify remaps the bound
+// state separately from the FP32 AdamState used by structural parameters.
 
 #include "splat/types.hpp"
 

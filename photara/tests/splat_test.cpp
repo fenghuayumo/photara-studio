@@ -1378,6 +1378,217 @@ void cpu_sh_adam_quant_step(
     }
 }
 
+void test_vulkan_sh_adam_quant() {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using tinytensor::Tensor;
+    using tinytensor::Device;
+    if (!tinytensor::vulkan::available()) {
+        std::cout << "SKIP: no Vulkan device for quantized SH Adam\n";
+        return;
+    }
+    const auto compare = [](const std::vector<float>& a, const std::vector<float>& b,
+                            float atol, float rtol, const char* message) {
+        require(a.size() == b.size(), message);
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            if (!std::isfinite(b[i]) || std::abs(a[i] - b[i]) >
+                atol + rtol * std::max(std::abs(a[i]), std::abs(b[i]))) {
+                std::cerr << message << " index=" << i << " cuda=" << a[i]
+                          << " vulkan=" << b[i] << '\n';
+                require(false, message);
+            }
+        }
+    };
+    // Odd row sizes exercise shared-word masked writes; 48/64 exercise both
+    // coefficients owned by a lane and full-word packing. Degree transitions
+    // and a temporarily inactive prefix must preserve future parameters.
+    for (int stride : {3, 12, 27, 48, 64}) {
+        constexpr std::size_t rows = 17;
+        const std::size_t count = rows * stride;
+        for (float epsilon : {1e-8F, 1e-15F}) {
+            std::vector<float> values(count);
+            for (std::size_t i = 0; i < count; ++i)
+                values[i] = .05F * std::sin(.17F * float(i));
+            auto cuda_parameter = Tensor::from_vector(values, {rows, std::size_t(stride)}, Device::CUDA);
+            auto vk_parameter = cuda_parameter.to(Device::Vulkan);
+            auto cuda_state = detail::make_sh_adam_quant(rows, stride, Device::CUDA);
+            auto vk_state = detail::make_sh_adam_quant(rows, stride, Device::Vulkan);
+            require(vk_state.first.bytes() + vk_state.packed.bytes() + vk_state.bounds.bytes() ==
+                    rows * (stride * 3 + 16), "Vulkan SH state lost its compact layout");
+            for (unsigned step = 1; step <= 24; ++step) {
+                const int active = step <= 3 || step == 15 ? 3 :
+                    step <= 6 ? std::min(stride, 12) :
+                    step <= 9 ? std::min(stride, 27) : stride;
+                std::vector<float> gradient(count);
+                for (std::size_t i = 0; i < count; ++i) {
+                    const float scale = std::pow(10.F, -2.F - float(i % 9));
+                    gradient[i] = scale * std::cos(.11F * float(i + step * 7));
+                    if (i >= count - stride || step == 13) gradient[i] = 0.F;
+                }
+                if (step == 17) {
+                    gradient[0] = std::numeric_limits<float>::quiet_NaN();
+                    gradient[stride + 1] = std::numeric_limits<float>::infinity();
+                }
+                const auto before = vk_parameter.to_vector();
+                const auto cuda_gradient = Tensor::from_vector(gradient, {rows, std::size_t(stride)}, Device::CUDA);
+                const auto vk_gradient = cuda_gradient.to(Device::Vulkan);
+                const float c1 = 1.F - std::pow(.9F, float(step));
+                const float c2 = 1.F - std::pow(.999F, float(step));
+                // Apply L2 inside the optimizer, as the Vulkan trainer does.
+                for (auto device : {Device::CUDA, Device::Vulkan}) {
+                    auto& p = device == Device::CUDA ? cuda_parameter : vk_parameter;
+                    auto& state = device == Device::CUDA ? cuda_state : vk_state;
+                    const auto& g = device == Device::CUDA ? cuda_gradient : vk_gradient;
+                    detail::sh_adam_quant_step(p, g, state, active, .0025F, .000125F,
+                        .9F, .999F, c1, c2, epsilon, step > 18 ? .003F : 0.F);
+                }
+                const auto after = vk_parameter.to_vector();
+                compare(cuda_parameter.to_vector(), after, 2e-5F, 2e-3F,
+                    "Vulkan quantized SH parameter trajectory differs from CUDA");
+                // Across eight gradient orders of magnitude, last-bit math
+                // differences can cross a Q8 rounding boundary. Repeated
+                // decode/re-encode amplifies differences in internal u/v;
+                // compare the actual parameter trajectory, not raw state.
+                const auto updates = vk_state.first.to(tinytensor::DataType::Float32).to_vector();
+                const auto codec_bounds = vk_state.bounds.to_vector();
+                require(std::all_of(updates.begin(), updates.end(), [](float x) { return std::isfinite(x); }) &&
+                        std::all_of(codec_bounds.begin(), codec_bounds.end(), [](float x) { return std::isfinite(x); }),
+                    "Vulkan SH codec produced non-finite state");
+                if (step == 1) {
+                    compare(cuda_state.first.to(tinytensor::DataType::Float32).to_vector(),
+                        updates, 1e-5F, 1e-3F, "Vulkan SH first update differs from CUDA");
+                    compare(cuda_state.bounds.to_vector(), codec_bounds, 2e-5F, 2e-6F,
+                        "Vulkan SH first codec bounds differ from CUDA");
+                }
+                for (std::size_t row = 0; row < rows; ++row)
+                    for (int col = active; col < stride; ++col)
+                        require(after[row * stride + col] == before[row * stride + col],
+                            "Vulkan quantized Adam changed an inactive SH parameter");
+            }
+            // Topology remapping must be bit-preserving, including odd row
+            // strides, reordered/duplicated parents and CPU Int64 indices.
+            const auto old_first = vk_state.first.to(tinytensor::DataType::Float32).to_vector();
+            const auto old_packed = vk_state.packed.to_vector_uint8();
+            const auto old_bounds = vk_state.bounds.to_vector();
+            const std::vector<int> keep{16, 1, 4, 1};
+            const auto indices = Tensor::from_vector(keep, {keep.size()}, Device::CPU)
+                .to(tinytensor::DataType::Int64);
+            detail::sh_adam_quant_select_rows(vk_state, indices);
+            const auto selected_first = vk_state.first.to(tinytensor::DataType::Float32).to_vector();
+            const auto selected_packed = vk_state.packed.to_vector_uint8();
+            const auto selected_bounds = vk_state.bounds.to_vector();
+            for (std::size_t row = 0; row < keep.size(); ++row) {
+                for (int col = 0; col < stride; ++col) {
+                    require(selected_first[row * stride + col] == old_first[keep[row] * stride + col],
+                        "Vulkan SH row selection changed half values");
+                    require(selected_packed[row * stride + col] == old_packed[keep[row] * stride + col],
+                        "Vulkan SH row selection changed codes");
+                }
+                for (int col = 0; col < 4; ++col)
+                    require(selected_bounds[row * 4 + col] == old_bounds[keep[row] * 4 + col],
+                        "Vulkan SH row selection changed bounds");
+            }
+            detail::sh_adam_quant_zero_rows(vk_state,
+                Tensor::from_vector(std::vector<int>{1, 1}, {2}, Device::CPU));
+            detail::sh_adam_quant_append_zeros(vk_state, 3);
+            const auto final_first = vk_state.first.to(tinytensor::DataType::Float32).to_vector();
+            const auto final_packed = vk_state.packed.to_vector_uint8();
+            const auto final_bounds = vk_state.bounds.to_vector();
+            require(final_first.size() == 7 * stride, "Vulkan SH append lost rows");
+            for (std::size_t row = 0; row < 7; ++row) {
+                const bool zero = row == 1 || row >= 4;
+                for (int col = 0; col < stride; ++col) {
+                    require(final_first[row * stride + col] == (zero ? 0.F : selected_first[row * stride + col]),
+                        "Vulkan SH topology changed half state");
+                    require(final_packed[row * stride + col] == (zero ? 0 : selected_packed[row * stride + col]),
+                        "Vulkan SH topology changed packed state");
+                }
+                for (int col = 0; col < 4; ++col)
+                    require(final_bounds[row * 4 + col] == (zero ? 0.F : selected_bounds[row * 4 + col]),
+                        "Vulkan SH topology changed bounds");
+            }
+            detail::sh_adam_quant_select_rows(vk_state, Tensor{});
+            require(vk_state.first.numel() == 0 && vk_state.packed.numel() == 0 &&
+                vk_state.bounds.numel() == 0, "Vulkan SH empty selection retained state");
+            detail::sh_adam_quant_append_zeros(vk_state, 2);
+            auto empty_parameter = Tensor::zeros({0, std::size_t(stride)}, Device::Vulkan);
+            auto empty_state = detail::make_sh_adam_quant(0, stride, Device::Vulkan);
+            detail::sh_adam_quant_step(empty_parameter, empty_parameter, empty_state,
+                stride, .0025F, .000125F, .9F, .999F, .1F, .001F, epsilon, 0.F);
+        }
+    }
+    // Vulkan guarantees only 65535 workgroups per dimension; the second
+    // dispatch row and its padded tail must be covered safely.
+    constexpr std::size_t large_rows = 65537;
+    auto large_parameter = Tensor::zeros({large_rows, 3}, Device::Vulkan);
+    const auto large_gradient = Tensor::full({large_rows, 3}, .01F, Device::Vulkan);
+    auto large_state = detail::make_sh_adam_quant(large_rows, 3, Device::Vulkan);
+    detail::sh_adam_quant_step(large_parameter, large_gradient, large_state, 3,
+        .0025F, .000125F, .9F, .999F, 1.F - .9F, 1.F - .999F, 1e-15F, 0.F);
+    for (float value : large_parameter.to_vector())
+        require(std::isfinite(value) && std::abs(value + .0025F) < 1e-6F,
+            "Vulkan SH dispatch did not update every row across the 65535 boundary");
+
+    // Exercise the trainer wiring: raster gradient slices, SH regularization,
+    // degree 0 -> 3, and ADC-IGS densification on the resident Vulkan state.
+    const auto root = std::filesystem::temp_directory_path() / "photara_vulkan_sh_quant_smoke";
+    std::filesystem::create_directories(root);
+    const auto image_path = root / "frame.png";
+    photara::io::save_rgb_png(
+        photara::io::RgbImage{32, 32, std::vector<std::uint8_t>(32 * 32 * 3, 128)}, image_path);
+    photara::mvs::MvsScene scene;
+    photara::mvs::MvsView view;
+    view.path = image_path;
+    view.width = view.src_width = view.height = view.src_height = 32;
+    view.fx = view.fy = view.src_fx = view.src_fy = 20.F;
+    view.cx = view.cy = view.src_cx = view.src_cy = 15.5F;
+    scene.views.push_back(view);
+    view.id = 1;
+    view.pose.C.x() = 0.1;
+    scene.views.push_back(view);
+    for (float x : {-0.5F, 0.5F}) {
+        photara::mvs::DensePoint point;
+        point.position = photara::mvs::Vec3f(x, 0.F, 2.F);
+        point.normal = photara::mvs::Vec3f::UnitZ();
+        point.color = photara::mvs::Vec3f::Constant(0.5F);
+        point.views = {0};
+        scene.dense_cloud.points.push_back(point);
+    }
+    TrainingOptions training;
+    training.backend = TrainingBackend::vulkan;
+    training.iterations = 6;
+    training.sh_degree = 3;
+    training.sh_degree_interval = 1;
+    training.input_is_dense = false;
+    training.maximum_scale_fraction = 1.F;
+    training.densification_cap = 8;
+    training.refine_start_iter = 1;
+    training.refine_stop_iter = training.grow_stop_iter = 5;
+    training.refine_every = 2;
+    training.densify_gradient_threshold = -1.F;
+    training.densify_select_fraction = 1.F;
+    training.mean_noise_weight = 0.F;
+    training.log_interval = 1;
+    training.sh_regularization_weight = .03F;
+    unsigned completed = 0;
+    const auto trained = Trainer(training).train(scene, [&](const TrainingProgress& p) {
+        ++completed;
+        require(std::isfinite(p.loss), "Vulkan quantized trainer loss is non-finite");
+        return true;
+    });
+    require(completed == training.iterations && trained.size() > scene.dense_cloud.points.size(),
+        "Vulkan quantized trainer did not complete training with densification");
+    require(trained.sh.device() == Device::Vulkan && trained.sh.dtype() == tinytensor::DataType::Float32,
+        "Vulkan quantized trainer changed SH parameter storage");
+    const auto trained_sh = trained.sh.to_vector();
+    require(std::all_of(trained_sh.begin(), trained_sh.end(), [](float x) { return std::isfinite(x); }),
+        "Vulkan quantized trainer produced non-finite SH parameters");
+    std::filesystem::remove(image_path);
+    std::filesystem::remove(root);
+    std::cout << "Vulkan quantized SH Adam parity and topology tests passed\n";
+#endif
+}
+
 void test_sh_adam_quant() {
     using namespace photara::splat;
     using photara::CameraModel;
@@ -6186,9 +6397,15 @@ int main(int argc, char** argv) {
         }
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
             test_sh_adam_quant();
+            test_vulkan_sh_adam_quant();
             test_fused_structure_adam();
             test_training_device_cache();
             std::cout << "Memory optimization tests passed\n";
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--sh-quant-only") {
+            test_sh_adam_quant();
+            test_vulkan_sh_adam_quant();
             return 0;
         }
         test_thin_splat_rgb_backward();
@@ -6231,6 +6448,7 @@ int main(int argc, char** argv) {
         test_geometry_stability_scheduler();
         test_forward_backward();
         test_sh_adam_quant();
+        test_vulkan_sh_adam_quant();
         test_fused_structure_adam();
         test_normal_field_parameterization_and_occupancy();
         test_gaussian_format_roundtrip();

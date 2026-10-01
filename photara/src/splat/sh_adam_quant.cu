@@ -3,6 +3,9 @@
 #include "cuda_common.hpp"
 #include "core/vram_profiler.hpp"
 #include "splat_drender/sh_adam_quant.cuh"
+#ifdef TINYTENSOR_HAS_VULKAN
+#include "vulkan/backend.hpp"
+#endif
 
 #include <stdexcept>
 
@@ -93,6 +96,14 @@ void sh_adam_quant_select_rows(
         ? indices
         : indices.to(tinytensor::DataType::Int32);
     if (index.device() != device) index = index.to(device);
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (device == tinytensor::Device::Vulkan) {
+        state.first = state.first.index_select(0, index);
+        state.packed = state.packed.index_select(0, index);
+        state.bounds = state.bounds.index_select(0, index);
+        return;
+    }
+#endif
     const int rows = static_cast<int>(index.numel());
     tinytensor::Tensor selected_first = tinytensor::Tensor::empty(
         {static_cast<std::size_t>(rows),
@@ -116,6 +127,14 @@ void sh_adam_quant_zero_rows(
         : indices.to(tinytensor::DataType::Int32);
     if (index.device() != state.first.device())
         index = index.to(state.first.device());
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (state.first.device() == tinytensor::Device::Vulkan) {
+        state.first.index_fill_(0, index, 0.F);
+        state.packed.index_fill_(0, index, 0.F);
+        state.bounds.index_fill_(0, index, 0.F);
+        return;
+    }
+#endif
     const int count = static_cast<int>(index.numel());
     sh_adam_quant_zero_rows_kernel<<<(count + 255) / 256, 256>>>(
         index.ptr<int>(), count, state.stride, state.first.ptr<__half>(),
@@ -159,10 +178,14 @@ void sh_adam_quant_step(
             "quantized SH Adam parameter is not a whole number of rows");
     const int rows = static_cast<int>(
         count / static_cast<std::size_t>(state.stride));
-    if (gradient.numel() != count ||
+    if (parameter.dtype() != tinytensor::DataType::Float32 ||
+        gradient.dtype() != tinytensor::DataType::Float32 ||
+        gradient.numel() != count ||
         state.first.numel() != static_cast<std::size_t>(rows) * state.stride ||
         state.first.dtype() != tinytensor::DataType::Float16 ||
         state.packed.numel() != static_cast<std::size_t>(rows) * state.stride ||
+        state.packed.dtype() != tinytensor::DataType::UInt8 ||
+        state.bounds.dtype() != tinytensor::DataType::Float32 ||
         state.bounds.numel() != static_cast<std::size_t>(rows) * 4)
         throw std::invalid_argument(
             "quantized SH Adam storage does not match the parameter");
@@ -170,14 +193,33 @@ void sh_adam_quant_step(
         !state.packed.is_contiguous() || !state.bounds.is_contiguous())
         throw std::invalid_argument(
             "quantized SH Adam tensors must be contiguous");
-    if (parameter.device() != tinytensor::Device::CUDA ||
-        gradient.device() != tinytensor::Device::CUDA ||
-        state.first.device() != tinytensor::Device::CUDA ||
-        state.packed.device() != tinytensor::Device::CUDA)
-        throw std::invalid_argument("quantized SH Adam step is CUDA-only");
+    const auto device = parameter.device();
+    if (gradient.device() != device || state.first.device() != device ||
+        state.packed.device() != device || state.bounds.device() != device)
+        throw std::invalid_argument("quantized SH Adam tensors must share a device");
     const tinytensor::Tensor gradient_storage = gradient.is_contiguous()
         ? gradient
         : gradient.contiguous();
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (device == tinytensor::Device::Vulkan) {
+        tinytensor::vulkan::AdamStepOptions options;
+        options.group_stride = static_cast<std::uint32_t>(state.stride);
+        options.active_row_stride = static_cast<std::uint32_t>(active_stride);
+        options.learning_rate = learning_rate;
+        options.secondary_learning_rate = rest_learning_rate;
+        options.beta1 = beta1;
+        options.beta2 = beta2;
+        options.correction1 = correction1;
+        options.correction2 = correction2;
+        options.epsilon = adam_epsilon;
+        options.grouped_rest_regularization = regularization_factor;
+        tinytensor::vulkan::sh_adam_quant_step(parameter, gradient_storage,
+            state.first, state.packed, state.bounds, options);
+        return;
+    }
+#endif
+    if (device != tinytensor::Device::CUDA)
+        throw std::invalid_argument("quantized SH Adam requires CUDA or Vulkan");
     constexpr int k_threads = 128;
     const int blocks = (rows + k_threads / 32 - 1) / (k_threads / 32);
     sh_adam_quant_rows_kernel<<<blocks, k_threads>>>(
