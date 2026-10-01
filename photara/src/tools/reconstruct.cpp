@@ -3711,6 +3711,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
                      << progress.opacity_gradient_positive_fraction
                      << " opacity_mean=" << progress.opacity_mean
                      << " step_ms=" << progress.milliseconds;
+                if (progress.vram_total_bytes > 0)
+                    line << " vram=" << progress.vram_used_bytes << '/'
+                         << progress.vram_total_bytes;
                 photara::core::Logger::instance().info(line.str());
                 return true;
             },

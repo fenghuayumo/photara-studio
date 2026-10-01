@@ -765,6 +765,7 @@ void RunMonitor::consume(const std::string& line) {
                 line, " resolution_scale=", training_.resolution_scale);
             number_after(line, " sh_degree=", training_.sh_degree);
             number_after(line, " step_ms=", training_.step_milliseconds);
+            ratio_after(line, "vram=", training_.vram_used, training_.vram_total);
             enter_stage(Stage::training, k_training_band_begin);
             const float iteration_ratio = std::clamp(
                 static_cast<float>(training_.iteration) /

@@ -210,6 +210,58 @@ std::string cuda_training_stage_list() {
     return joined;
 }
 
+struct DeviceVramSample {
+    std::uint64_t used{};
+    std::uint64_t total{};
+};
+
+// CUDA: device-wide used/total from cudaMemGetInfo (nvidia-smi / Task Manager
+// dedicated memory). Vulkan: this process's device-local heap from
+// VK_EXT_memory_budget. Do not call cudaMemGetInfo on the Vulkan path: that
+// can create a CUDA context beside the compute device.
+DeviceVramSample sample_device_vram(const bool vulkan_backend) {
+    DeviceVramSample sample;
+    if (!vulkan_backend) {
+        std::size_t free_bytes = 0;
+        std::size_t total_bytes = 0;
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess &&
+            total_bytes >= free_bytes && total_bytes > 0) {
+            sample.used = total_bytes - free_bytes;
+            sample.total = total_bytes;
+            return sample;
+        }
+        cudaGetLastError();
+    }
+#ifdef TINYTENSOR_HAS_VULKAN
+    if (!tinytensor::vulkan::available()) return sample;
+    const auto handles = tinytensor::vulkan::device_handles();
+    if (handles.physical_device == VK_NULL_HANDLE) return sample;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    properties.pNext = &budget;
+    vkGetPhysicalDeviceMemoryProperties2(
+        handles.physical_device, &properties);
+    std::uint32_t best = UINT32_MAX;
+    VkDeviceSize best_budget = 0;
+    const VkPhysicalDeviceMemoryProperties& heaps = properties.memoryProperties;
+    for (std::uint32_t i = 0; i < heaps.memoryHeapCount; ++i) {
+        if ((heaps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0)
+            continue;
+        if (budget.heapBudget[i] > best_budget) {
+            best_budget = budget.heapBudget[i];
+            best = i;
+        }
+    }
+    if (best == UINT32_MAX || best_budget == 0) return sample;
+    sample.used = budget.heapUsage[best];
+    sample.total = best_budget;
+    if (sample.used > sample.total) sample.used = sample.total;
+#endif
+    return sample;
+}
+
 // Device-wide memory in use, i.e. the number nvidia-smi reports. It includes
 // the allocator cache and the CUDA async pool (so it shows what training
 // actually holds, not only what is live), but it also includes every other
@@ -217,13 +269,7 @@ std::string cuda_training_stage_list() {
 // per-stage deltas for attribution. Only queried for the first step of each
 // profile window.
 std::size_t query_vram_used_bytes() {
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
-    if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
-        cudaGetLastError();  // clear a sticky error; the probe is advisory
-        return 0;
-    }
-    return total_bytes - free_bytes;
+    return static_cast<std::size_t>(sample_device_vram(false).used);
 }
 
 void check_profile_cuda(const cudaError_t error, const char* operation) {
@@ -2232,6 +2278,7 @@ GaussianModel Trainer::train(
                           (1.0 - k_step_time_ema) * mean_ms;
                 milliseconds = ema_step_ms;
             }
+            const DeviceVramSample vram = sample_device_vram(vulkan_backend);
             continue_training = progress({
                 iteration, options_.iterations, model.size(),
                 static_cast<std::size_t>(rendered.rendered_instances),
@@ -2251,7 +2298,8 @@ GaussianModel Trainer::train(
                           multi_view_loss.geometry_pixels) /
                           static_cast<float>(
                               multi_view_loss.geometry_candidates)
-                    : 0.F});
+                    : 0.F,
+                vram.used, vram.total});
             interval_started = now;
             last_progress_iteration = iteration;
         }

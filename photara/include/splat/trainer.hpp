@@ -40,6 +40,10 @@ struct TrainingProgress {
     unsigned active_sh_degree{};
     unsigned multi_view_interval{1};
     float multi_view_depth_consistency{};
+    // Device-wide dedicated VRAM at this sample (cudaMemGetInfo on CUDA,
+    // VK_EXT_memory_budget on Vulkan). Zero total means the probe failed.
+    std::uint64_t vram_used_bytes{};
+    std::uint64_t vram_total_bytes{};
 };
 
 struct RenderMetrics {

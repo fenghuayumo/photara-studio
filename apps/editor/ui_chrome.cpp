@@ -881,7 +881,16 @@ void draw_status_bar(App& app) {
 
     std::uint64_t vram_used = 0;
     std::uint64_t vram_total = 0;
-    if (gpu::query_vram(vram_used, vram_total) && vram_total > 0) {
+    const TrainingStats& train_stats = app.monitor.training();
+    const bool training_vram = busy && app.active_job == JobKind::train &&
+        train_stats.vram_total > 0;
+    if (training_vram) {
+        vram_used = train_stats.vram_used;
+        vram_total = train_stats.vram_total;
+    } else {
+        gpu::query_vram(vram_used, vram_total);
+    }
+    if (vram_total > 0) {
         const auto format_gb = [](const std::uint64_t bytes) {
             char buf[24];
             std::snprintf(

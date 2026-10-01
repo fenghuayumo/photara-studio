@@ -1651,7 +1651,13 @@ NB_MODULE(photara, module) {
             &splat::TrainingProgress::multi_view_interval)
         .def_ro(
             "multi_view_depth_consistency",
-            &splat::TrainingProgress::multi_view_depth_consistency);
+            &splat::TrainingProgress::multi_view_depth_consistency)
+        .def_ro(
+            "vram_used_bytes",
+            &splat::TrainingProgress::vram_used_bytes)
+        .def_ro(
+            "vram_total_bytes",
+            &splat::TrainingProgress::vram_total_bytes);
 
     module.def(
         "load_dataset", &load_dataset, nb::arg("request"),

@@ -70,6 +70,8 @@ struct TrainingStats {
     float resolution_scale{1.F};
     unsigned sh_degree{};
     double step_milliseconds{};
+    std::uint64_t vram_used{};
+    std::uint64_t vram_total{};
     bool valid{};
 };
 
