@@ -813,7 +813,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "False keeps the previous resident dL_d* path for comparison",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-sh-adam-quant",
-         "Store SH Adam first moments as FP16 and second moments as log-uint8, "
+         "Store the normalized SH Adam update as FP16 and v as log-uint8, "
          "with separate DC/non-DC ranges per Gaussian. "
          "False keeps FP32 moments for comparison",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))

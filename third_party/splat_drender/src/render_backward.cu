@@ -975,19 +975,20 @@ gaussian_backward(
             for (int r = 0; r < 32; ++r) {
                 const int row = warp_row0 + r;
                 if (row >= count) break;
+                float* parameter = sh_adam.parameter +
+                    std::size_t(row) * sh_adam.quant_stride;
+                __half* first = reinterpret_cast<__half*>(sh_adam.quant_first) +
+                    std::size_t(row) * sh_adam.quant_stride;
                 sh_adam_quant_warp_row(
-                    sh_adam.quant_stride, active,
-                    sh_adam.parameter +
-                        std::size_t(row) * sh_adam.quant_stride,
-                    warp_tile + r * cfg::kShRowStride,
-                    reinterpret_cast<__half*>(sh_adam.quant_first) +
-                        std::size_t(row) * sh_adam.quant_stride,
+                    sh_adam.quant_stride, active, parameter,
+                    warp_tile + r * cfg::kShRowStride, first,
                     sh_adam.packed +
                         std::size_t(row) * sh_adam.quant_stride,
                     sh_adam.bounds + std::size_t(row) * 4, sh_adam.lr,
                     sh_adam.rest_lr, sh_adam.beta1, sh_adam.beta2,
-                    sh_adam.correction1, sh_adam.correction2, sh_adam.epsilon,
-                    sh_adam.regularization_factor);
+                    sh_adam.correction1, sh_adam.correction2,
+                    sh_adam.epsilon, sh_adam.regularization_factor,
+                    sh_adam.quant_normalized_first);
             }
         } else {
             update_sh_adam_rows(warp_row0, 32, count, sh_bases, sh_degree,

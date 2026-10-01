@@ -13,7 +13,8 @@ __global__ void sh_adam_quant_rows_kernel(
     int rows, int stride, int active, float* parameter, const float* gradient,
     __half* first, std::uint8_t* packed, float* bounds, float dc_lr,
     float rest_lr, float beta1, float beta2, float correction1,
-    float correction2, float adam_epsilon, float regularization) {
+    float correction2, float adam_epsilon, float regularization,
+    bool normalized_first) {
     const int row = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
     if (row >= rows) return;
     splat_drender::sh_adam_quant_warp_row(
@@ -22,7 +23,8 @@ __global__ void sh_adam_quant_rows_kernel(
         first + static_cast<std::size_t>(row) * stride,
         packed + static_cast<std::size_t>(row) * stride,
         bounds + static_cast<std::size_t>(row) * 4, dc_lr, rest_lr, beta1,
-        beta2, correction1, correction2, adam_epsilon, regularization);
+        beta2, correction1, correction2, adam_epsilon, regularization,
+        normalized_first);
 }
 
 __global__ void sh_adam_quant_zero_rows_kernel(
@@ -56,13 +58,15 @@ __global__ void sh_adam_quant_select_first_kernel(
 }  // namespace
 
 ShAdamQuant make_sh_adam_quant(
-    const std::size_t rows, const int stride, const tinytensor::Device device) {
+    const std::size_t rows, const int stride, const tinytensor::Device device,
+    const ShAdamQuantFormat format) {
     if (stride <= 0 || stride > 64)
         throw std::invalid_argument(
             "quantized SH Adam stride must be in [1, 64]");
     tinytensor::VramScope scope("optimizer.state");
     ShAdamQuant state;
     state.stride = stride;
+    state.format = format;
     state.first = tinytensor::Tensor::zeros(
         {rows, static_cast<std::size_t>(stride)}, device,
         tinytensor::DataType::Float16);
@@ -77,7 +81,7 @@ ShAdamQuant make_sh_adam_quant(
 void sh_adam_quant_select_rows(
     ShAdamQuant& state, const tinytensor::Tensor& indices) {
     if (!state.active()) return;
-    const auto device = state.packed.device();
+    const auto device = state.first.device();
     if (!indices.is_valid() || indices.numel() == 0) {
         state.first = tinytensor::Tensor::zeros(
             {std::size_t{0}, static_cast<std::size_t>(state.stride)}, device,
@@ -114,8 +118,8 @@ void sh_adam_quant_zero_rows(
     tinytensor::Tensor index = indices.dtype() == tinytensor::DataType::Int32
         ? indices
         : indices.to(tinytensor::DataType::Int32);
-    if (index.device() != state.packed.device())
-        index = index.to(state.packed.device());
+    if (index.device() != state.first.device())
+        index = index.to(state.first.device());
     const int count = static_cast<int>(index.numel());
     sh_adam_quant_zero_rows_kernel<<<(count + 255) / 256, 256>>>(
         index.ptr<int>(), count, state.stride, state.first.ptr<__half>(),
@@ -125,7 +129,7 @@ void sh_adam_quant_zero_rows(
 
 void sh_adam_quant_append_zeros(ShAdamQuant& state, const std::size_t count) {
     if (!state.active() || count == 0) return;
-    const auto device = state.packed.device();
+    const auto device = state.first.device();
     state.first = tinytensor::Tensor::cat(
         {state.first, tinytensor::Tensor::zeros(
              {count, static_cast<std::size_t>(state.stride)}, device,
@@ -134,11 +138,10 @@ void sh_adam_quant_append_zeros(ShAdamQuant& state, const std::size_t count) {
     state.packed = tinytensor::Tensor::cat(
         {state.packed, tinytensor::Tensor::zeros(
              {count, static_cast<std::size_t>(state.stride)}, device,
-             tinytensor::DataType::UInt8)},
-        0);
+             tinytensor::DataType::UInt8)}, 0);
     state.bounds = tinytensor::Tensor::cat(
-        {state.bounds, tinytensor::Tensor::zeros({count, std::size_t{4}}, device)},
-        0);
+        {state.bounds, tinytensor::Tensor::zeros(
+             {count, std::size_t{4}}, device)}, 0);
 }
 
 void sh_adam_quant_step(
@@ -168,8 +171,7 @@ void sh_adam_quant_step(
         throw std::invalid_argument(
             "quantized SH Adam storage does not match the parameter");
     if (!parameter.is_contiguous() || !state.first.is_contiguous() ||
-        !state.packed.is_contiguous() ||
-        !state.bounds.is_contiguous())
+        !state.packed.is_contiguous() || !state.bounds.is_contiguous())
         throw std::invalid_argument(
             "quantized SH Adam tensors must be contiguous");
     if (parameter.device() != tinytensor::Device::CUDA ||
@@ -187,7 +189,8 @@ void sh_adam_quant_step(
         gradient_storage.ptr<float>(), state.first.ptr<__half>(),
         state.packed.ptr<std::uint8_t>(), state.bounds.ptr<float>(),
         learning_rate, rest_learning_rate, beta1, beta2, correction1,
-        correction2, adam_epsilon, regularization_factor);
+        correction2, adam_epsilon, regularization_factor,
+        state.format == ShAdamQuantFormat::fp16_u_logq8_v);
     check_cuda(cudaGetLastError(), "quantized SH Adam step");
 }
 

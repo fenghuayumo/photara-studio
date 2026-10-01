@@ -103,13 +103,14 @@ struct SHAdam {
     float beta1 = .9f, beta2 = .999f;
     float correction1 = 1.f, correction2 = 1.f, epsilon = 1e-8f;
     float regularization_factor = 0.f;
-    // FP16 first moment + uint8 log-second moment. quant_stride > 0 ignores
-    // the FP32 first/second pointers. packed is [N, quant_stride], bounds is
-    // [N, 4]: DC and non-DC each own (log_s_min, log_s_max).
+    // Quantized moment storage. quant_stride > 0 ignores the FP32
+    // first/second pointers. quant_first stores either raw m or the normalized
+    // Adam update u; packed/bounds store the uint8 log-second moment.
     void* quant_first = nullptr;
     std::uint8_t* packed = nullptr;
     float* bounds = nullptr;
     int quant_stride = 0;
+    bool quant_normalized_first = false;
 };
 
 // Optional structure Adam after the projection derivative has consumed the

@@ -1491,7 +1491,9 @@ void test_sh_adam_quant() {
     const auto grad = Tensor::from_vector(
         gradient, {std::size_t(rows), 16, 3}, device);
     auto fp_state = detail::make_adam_state(param_fp);
-    auto quant = detail::make_sh_adam_quant(rows, stride, device);
+    auto quant = detail::make_sh_adam_quant(
+        rows, stride, device,
+        detail::ShAdamQuantFormat::fp16_m_logq8_v);
     const auto packed_init = quant.packed.to_vector_uint8();
     require(std::all_of(packed_init.begin(), packed_init.end(),
                 [](std::uint8_t byte) { return byte == 0; }),
@@ -1548,20 +1550,68 @@ void test_sh_adam_quant() {
     compare(host_param, param_q.to_vector(), 2e-4F, 2e-3F,
         "second quantized SH step diverged from the host codec");
 
+    // Preferred codec: FP16 stores the normalized update u, not raw m. Run a
+    // multi-step comparison with the 1e-15 epsilon used by ADC-IGS so the
+    // test exercises the small-gradient regime that raw FP16 m cannot retain.
+    auto normalized_param = Tensor::from_vector(
+        parameter, {std::size_t(rows), 16, 3}, device);
+    auto normalized_reference = Tensor::from_vector(
+        parameter, {std::size_t(rows), 16, 3}, device);
+    auto normalized_state = detail::make_sh_adam_quant(rows, stride, device);
+    auto normalized_fp_state = detail::make_adam_state(normalized_reference);
+    TrainingOptions normalized_options = options;
+    normalized_options.adam_epsilon = 1.e-15F;
+    for (unsigned iteration = 1; iteration <= 8; ++iteration) {
+        std::vector<float> step_gradient(rows * stride);
+        for (int i = 0; i < rows * stride; ++i)
+            step_gradient[i] = 2.e-6F * std::cos(
+                .07F * float(i + 5 * int(iteration)));
+        const auto step_grad = Tensor::from_vector(
+            step_gradient, {std::size_t(rows), 16, 3}, device);
+        detail::adam_step_active_prefix(
+            normalized_reference, step_grad, normalized_fp_state,
+            normalized_options.sh0_lr, iteration, normalized_options, stride,
+            stride, normalized_options.sh_rest_lr);
+        detail::sh_adam_quant_step(
+            normalized_param, step_grad, normalized_state, stride,
+            normalized_options.sh0_lr, normalized_options.sh_rest_lr,
+            normalized_options.beta1, normalized_options.beta2,
+            1.F - std::pow(normalized_options.beta1, float(iteration)),
+            1.F - std::pow(normalized_options.beta2, float(iteration)),
+            normalized_options.adam_epsilon, 0.F);
+    }
+    compare(normalized_reference.to_vector(), normalized_param.to_vector(),
+        3e-5F, 5e-3F,
+        "FP16 normalized-update codec diverged from FP32 Adam");
+    const auto stored_u = normalized_state.first
+        .to(tinytensor::DataType::Float32).to_vector();
+    require(std::all_of(stored_u.begin(), stored_u.end(),
+                [](float value) { return std::isfinite(value); }) &&
+            std::any_of(stored_u.begin(), stored_u.end(),
+                [](float value) { return value != 0.F; }),
+        "FP16 normalized updates were non-finite or collapsed to zero");
+
     // Exercise the actual training schedule on one persistent quantized state:
     // degree 0 -> 1 -> 2 -> 3. A degree transition may only start changing
     // the newly activated prefix; higher coefficients must remain untouched.
     auto progressive_parameter = Tensor::from_vector(
         parameter, {std::size_t(rows), 16, 3}, device);
+    auto progressive_reference = Tensor::from_vector(
+        parameter, {std::size_t(rows), 16, 3}, device);
     const auto progressive_gradient = Tensor::from_vector(
         gradient, {std::size_t(rows), 16, 3}, device);
     auto progressive_quant = detail::make_sh_adam_quant(rows, stride, device);
+    auto progressive_fp_state = detail::make_adam_state(progressive_reference);
     int previous_active = 0;
     for (unsigned degree = 0; degree <= 3; ++degree) {
         const int degree_active =
             int(degree + 1) * int(degree + 1) * 3;
         const auto before = progressive_parameter.to_vector();
         const unsigned iteration = degree + 1;
+        detail::adam_step_active_prefix(
+            progressive_reference, progressive_gradient, progressive_fp_state,
+            options.sh0_lr, iteration, options, stride, degree_active,
+            options.sh_rest_lr);
         detail::sh_adam_quant_step(
             progressive_parameter, progressive_gradient, progressive_quant,
             degree_active, options.sh0_lr, options.sh_rest_lr, options.beta1,
@@ -1581,8 +1631,30 @@ void test_sh_adam_quant() {
         }
         require(newly_active_changed,
             "progressive SH activation did not update the newly enabled degree");
+        compare(progressive_reference.to_vector(), after, 3e-5F, 5e-3F,
+            "progressive SH activation diverged from FP32 Adam");
         previous_active = degree_active;
     }
+
+    // Storing normalized u rather than raw m must retain useful Adam updates
+    // when the raw first moment is below the FP16 subnormal boundary.
+    std::vector<float> tiny_parameter(stride, 0.F);
+    std::vector<float> tiny_gradient(stride, 1.e-6F);
+    auto tiny_param = Tensor::from_vector(
+        tiny_parameter, {std::size_t{1}, 16, 3}, device);
+    const auto tiny_grad = Tensor::from_vector(
+        tiny_gradient, {std::size_t{1}, 16, 3}, device);
+    auto tiny_quant = detail::make_sh_adam_quant(1, stride, device);
+    for (unsigned iteration = 1; iteration <= 4; ++iteration)
+        detail::sh_adam_quant_step(
+            tiny_param, tiny_grad, tiny_quant, stride, options.sh0_lr,
+            options.sh_rest_lr, options.beta1, options.beta2,
+            1.F - std::pow(options.beta1, float(iteration)),
+            1.F - std::pow(options.beta2, float(iteration)),
+            options.adam_epsilon, 0.F);
+    for (float value : tiny_param.to_vector())
+        require(std::isfinite(value) && std::abs(value) < .1F,
+            "FP16 normalized update destabilized a tiny-gradient Adam step");
 
     std::vector<int> keep{1, 4, rows - 1};
     const auto kept_first = quant.first.to(tinytensor::DataType::Float32).to_vector();
@@ -1736,6 +1808,7 @@ void test_sh_adam_quant() {
             update.first = fused_quant.first;
             update.packed = fused_quant.packed;
             update.bounds = fused_quant.bounds;
+            update.normalized_first = true;
             update.lr = training.sh0_lr;
             update.rest_lr = training.sh_rest_lr;
             update.beta1 = training.beta1;

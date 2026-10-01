@@ -40,10 +40,11 @@ struct SHAdamUpdate {
     float lr{}, rest_lr{}, beta1{.9F}, beta2{.999F};
     float correction1{1.F}, correction2{1.F}, epsilon{1e-8F};
     float regularization_weight{};
-    // Hybrid moments. A valid packed tensor uses FP16 `first`, uint8 log-second
-    // `packed`, and per-group bounds instead of the FP32 first/second pair.
+    // Hybrid moments. `first` stores FP16 raw m or normalized update u;
+    // packed/bounds store uint8 log-second state.
     tinytensor::Tensor packed;
     tinytensor::Tensor bounds;
+    bool normalized_first{};
 };
 
 struct StructureAdamUpdate {

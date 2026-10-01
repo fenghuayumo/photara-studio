@@ -416,11 +416,21 @@ ModelGradients Rasterizer::backward(
                 auto first = sh_adam->first;
                 auto packed = sh_adam->packed;
                 auto bounds = sh_adam->bounds;
-                grads.sh_adam = {parameter.ptr<float>(), nullptr, nullptr, false,
-                    sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
-                    sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon,
-                    regularization, first.ptr<__half>(), packed.ptr<std::uint8_t>(),
-                    bounds.ptr<float>(), static_cast<int>(stride)};
+                grads.sh_adam.parameter = parameter.ptr<float>();
+                grads.sh_adam.lr = sh_adam->lr;
+                grads.sh_adam.rest_lr = sh_adam->rest_lr;
+                grads.sh_adam.beta1 = sh_adam->beta1;
+                grads.sh_adam.beta2 = sh_adam->beta2;
+                grads.sh_adam.correction1 = sh_adam->correction1;
+                grads.sh_adam.correction2 = sh_adam->correction2;
+                grads.sh_adam.epsilon = sh_adam->epsilon;
+                grads.sh_adam.regularization_factor = regularization;
+                grads.sh_adam.quant_first = first.ptr<__half>();
+                grads.sh_adam.packed = packed.ptr<std::uint8_t>();
+                grads.sh_adam.bounds = bounds.ptr<float>();
+                grads.sh_adam.quant_stride = static_cast<int>(stride);
+                grads.sh_adam.quant_normalized_first =
+                    sh_adam->normalized_first;
             } else {
                 auto first = sh_adam->first;
                 auto second = sh_adam->second;

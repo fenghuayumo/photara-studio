@@ -1217,10 +1217,16 @@ GaussianModel Trainer::train(
                 ? "sh_adam_quant skipped: Vulkan keeps FP32 SH Adam"
                 : "sh_adam_quant skipped: adc_plus keeps reduced-second FP32 SH Adam");
     } else if (quantize_sh) {
-        core::Logger::instance().info(
-            "sh_adam_quant=fp16_m_logq8_v block=per_gaussian stride=",
-            sh_quant.stride, " groups=dc,rest bytes_per_gaussian=",
-            sh_quant.stride * 3 + 16);
+        if (sh_quant.format == detail::ShAdamQuantFormat::fp16_u_logq8_v)
+            core::Logger::instance().info(
+                "sh_adam_quant=fp16_u_logq8_v block=per_gaussian stride=",
+                sh_quant.stride, " groups=dc,rest bytes_per_gaussian=",
+                sh_quant.stride * 3 + 16);
+        else
+            core::Logger::instance().info(
+                "sh_adam_quant=fp16_m_logq8_v block=per_gaussian stride=",
+                sh_quant.stride, " groups=dc,rest bytes_per_gaussian=",
+                sh_quant.stride * 3 + 16);
     }
     detail::AdamState normal_features_state =
         detail::make_adam_state(model.normal_features);
@@ -1910,6 +1916,8 @@ GaussianModel Trainer::train(
             sh_update.first = sh_quant.first;
             sh_update.packed = sh_quant.packed;
             sh_update.bounds = sh_quant.bounds;
+            sh_update.normalized_first =
+                sh_quant.format == detail::ShAdamQuantFormat::fp16_u_logq8_v;
         } else {
             sh_update.first = sh_state.first;
             sh_update.second = sh_state.second;
