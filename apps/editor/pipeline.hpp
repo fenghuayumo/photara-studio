@@ -421,6 +421,14 @@ inline bool mesh_from_gaussians(const ProjectSettings& settings) {
     return settings.build_mesh && settings.mesh_source == 0;
 }
 
+// Resolve Auto for both training-time and standalone Gaussian mesh extraction.
+// Explicit selections take precedence over the normal-field training setting.
+inline int gaussian_mesh_method(const ProjectSettings& settings) {
+    return settings.mesh_method == 0
+        ? (settings.normal_field ? 3 : 1)
+        : settings.mesh_method;
+}
+
 inline bool mesh_from_mvs(const ProjectSettings& settings) {
     return settings.build_mesh && settings.mesh_source == 1;
 }

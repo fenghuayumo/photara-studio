@@ -538,7 +538,8 @@ Action draw_inspector(App& app) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", tr(
                 "3DGS's learned normal field.\n"
-                "Off (default) trains the GGGS path."));
+                "Off (default) trains the GGGS path.\n"
+                "Auto mesh uses PAM when enabled, TSDF when disabled."));
         bool ppisp_enabled = app.settings.ppisp_layout != 0;
         if (ImGui::Checkbox(tr("PPISP colour correction"), &ppisp_enabled))
             app.settings.ppisp_layout = ppisp_enabled ? 1 : 0;
@@ -599,16 +600,20 @@ Action draw_inspector(App& app) {
                 "from the dense cloud. 3DGS stays appearance-only.");
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
-            theme::caption("Surface");
+            theme::caption("Mesh algorithm");
             ImGui::SetNextItemWidth(-1.F);
             if (mesh_from_gaussians(app.settings)) {
-                const char* methods[] = {tr("Auto"), "TSDF", tr("Delaunay"), "PAM"};
+                const char* methods[] = {
+                    tr(app.settings.normal_field
+                           ? "Auto: PAM" : "Auto: TSDF"),
+                    "TSDF", tr("Delaunay"), "PAM"};
                 ImGui::Combo(
                     "##mesh_method", &app.settings.mesh_method, methods, 4);
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(
-                        "How depth is fused into triangles.\n"
-                        "PAM is 3DGS occupancy meshing.");
+                    ImGui::SetTooltip("%s", tr(
+                        "Auto uses PAM with Normal field enabled, otherwise TSDF.\n"
+                        "Select an algorithm to override Auto.\n"
+                        "PAM requires a model trained with Normal field."));
             } else {
                 if (app.settings.mesh_method == 3)
                     app.settings.mesh_method = 0;

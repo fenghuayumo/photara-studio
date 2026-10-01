@@ -859,6 +859,12 @@ constexpr Entry k_entries[] = {
      "이 빌드에는 SAM 마스크 생성이 포함되어 있지 않습니다."},
     {"Normal field", "法向场", "法線場", "법선 필드"},
     {"3DGS's learned normal field.\n"
+     "Off (default) trains the GGGS path.\n"
+     "Auto mesh uses PAM when enabled, TSDF when disabled.",
+     "3DGS 学习的法向场。\n关闭（默认）走 GGGS 路径。\n自动网格算法：开启时使用 PAM，关闭时使用 TSDF。",
+     "3DGS の学習法線場。\nオフ（既定）は GGGS 経路で学習。\n自動メッシュは有効時に PAM、無効時に TSDF を使用します。",
+     "3DGS의 학습 법선 필드.\n끄기(기본값)는 GGGS 경로로 학습합니다.\n자동 메시는 켜면 PAM, 끄면 TSDF를 사용합니다."},
+    {"3DGS's learned normal field.\n"
      "Off (default) trains the GGGS path.",
      "3DGS 学习的法向场。\n关闭（默认）走 GGGS 路径。",
      "3DGS の学習法線場。\nオフ（既定）は GGGS 経路で学習。",
@@ -903,6 +909,15 @@ constexpr Entry k_entries[] = {
      "アライメント済みカメラから PatchMatch ステレオ後、密な点群からメッシュを融合。3DGS は見た目のみ。",
      "정렬된 카메라로 PatchMatch 스테레오를 한 뒤 밀집 포인트 클라우드에서 메시를 융합합니다. 3DGS는 외형만 담당합니다."},
     {"Surface", "表面", "サーフェス", "표면"},
+    {"Mesh algorithm", "网格算法", "メッシュアルゴリズム", "메시 알고리즘"},
+    {"Auto: PAM", "自动：PAM", "自動: PAM", "자동: PAM"},
+    {"Auto: TSDF", "自动：TSDF", "自動: TSDF", "자동: TSDF"},
+    {"Auto uses PAM with Normal field enabled, otherwise TSDF.\n"
+     "Select an algorithm to override Auto.\n"
+     "PAM requires a model trained with Normal field.",
+     "自动模式：开启法向场时使用 PAM，否则使用 TSDF。\n手动选择算法可覆盖自动模式。\nPAM 需要使用法向场训练的模型。",
+     "自動モードは法線場が有効なら PAM、それ以外は TSDF を使用します。\nアルゴリズムを選択すると自動モードより優先されます。\nPAM には法線場で学習したモデルが必要です。",
+     "자동 모드는 법선 필드가 켜져 있으면 PAM, 아니면 TSDF를 사용합니다.\n알고리즘을 선택하면 자동 모드보다 우선합니다.\nPAM에는 법선 필드로 학습한 모델이 필요합니다."},
     {"TSDF", "TSDF", "TSDF", "TSDF"},
     {"Delaunay", "Delaunay", "ドロネー", "들로네"},
     {"PAM", "PAM", "PAM", "PAM"},

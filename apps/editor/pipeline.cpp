@@ -1396,7 +1396,7 @@ std::string build_train_command(
     const bool gaussian_mesh = mesh_from_gaussians(settings);
     command << " --mesh=" << (gaussian_mesh ? "true" : "false");
     if (gaussian_mesh) {
-        command << " --mesh-method " << mesh_method_flag(settings.mesh_method)
+        command << " --mesh-method " << mesh_method_flag(gaussian_mesh_method(settings))
                 << " --splat-depth-normal-weight "
                 << settings.depth_normal_weight << " --splat-mv-geo-weight "
                 << settings.multi_view_geo_weight << " --splat-mv-ncc-weight "
@@ -1453,7 +1453,7 @@ std::string build_splat_mesh_command(
             command << " --subject-bounds "
                     << quote(layout.working_subject_bounds);
     }
-    command << " --mesh-method " << mesh_method_flag(settings.mesh_method)
+    command << " --mesh-method " << mesh_method_flag(gaussian_mesh_method(settings))
             << " --splat-preview-interval 0"
             << " --splat-max-resolution " << settings.max_resolution
             << " --splat-use-mask="
