@@ -13,19 +13,6 @@ AdamState make_adam_state(const tinytensor::Tensor& parameter) {
             tinytensor::Tensor::zeros_like(parameter)};
 }
 
-AdamState make_reduced_second_adam_state(
-    const tinytensor::Tensor& parameter) {
-    tinytensor::VramScope scope("optimizer.state.reduced_second");
-    const auto dimensions = parameter.shape().dims();
-    if (dimensions.empty())
-        throw std::invalid_argument(
-            "reduced-second Adam requires at least one parameter dimension");
-    return {
-        tinytensor::Tensor::zeros_like(parameter),
-        tinytensor::Tensor::zeros(
-            {dimensions.front()}, parameter.device())};
-}
-
 void adam_step(
     tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
     AdamState& state, const float learning_rate, const unsigned step,
@@ -61,18 +48,6 @@ void adam_step_structure(
     adam_step_structure_cuda(model, gradient, means, scales, rotations,
         opacity, means_lr, step, options, minimum_log_scale,
         maximum_log_scale);
-}
-
-void adam_step_reduced_second(
-    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
-    AdamState& state, const float learning_rate, const unsigned step,
-    const TrainingOptions& options, const std::size_t row_stride,
-    const float secondary_learning_rate) {
-    if (parameter.device() == tinytensor::Device::Vulkan)
-        throw std::invalid_argument(
-            "reduced-second Adam is not supported by the Vulkan backend");
-    adam_step_reduced_second_cuda(parameter, gradient, state, learning_rate,
-        step, options, row_stride, secondary_learning_rate);
 }
 
 void adam_step_active_prefix(

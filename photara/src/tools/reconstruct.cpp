@@ -160,8 +160,6 @@ struct ReconstructCli {
     std::string splat_preview_vk_device_uuid;
     bool splat_profile_cuda{false};
     bool splat_fuse_sh_adam{true};
-    bool splat_fuse_structure_adam{true};
-    bool splat_sh_adam_quant{true};
     unsigned splat_profile_interval{100};
     unsigned splat_sh_degree{3};
     unsigned splat_max_resolution{1'920};
@@ -808,15 +806,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-fuse-sh-adam", "Fuse SH projection gradients into Adam",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("splat-fuse-structure-adam",
-         "Fuse structure projection gradients into Adam on CUDA. "
-         "False keeps the previous resident dL_d* path for comparison",
-         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
-        ("splat-sh-adam-quant",
-         "Store the normalized SH Adam update as FP16 and v as log-uint8, "
-         "with separate DC/non-DC ranges per Gaussian. "
-         "False keeps FP32 moments for comparison",
-         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-cache-auto",
          "Grow host cache; shrink CUDA cache within its explicit budget and VRAM safety limits",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
@@ -1376,9 +1365,6 @@ ReconstructCli parse_cli(int argc, char** argv) {
     }
     cli.splat_profile_cuda = result["splat-profile-cuda"].as<bool>();
     cli.splat_fuse_sh_adam = result["splat-fuse-sh-adam"].as<bool>();
-    cli.splat_fuse_structure_adam =
-        result["splat-fuse-structure-adam"].as<bool>();
-    cli.splat_sh_adam_quant = result["splat-sh-adam-quant"].as<bool>();
     cli.splat_profile_interval =
         result["splat-profile-interval"].as<unsigned>();
     if (cli.splat_profile_interval == 0 ||
@@ -3275,8 +3261,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         options.sh_rest_lr = 2e-4F;
         options.beta1 = 0.9F;
         options.beta2 = 0.999F;
-        // Brush explicitly constructs AdamScaled with epsilon=1e-15; the
-        // means scheduler decays by 100x to 2e-7 over the configured run.
+        // Retain the tested ADC epsilon; the normalized-u SH representation
+        // avoids the raw FP16 first-moment underflow this value would expose.
+        // The means scheduler decays by 100x to 2e-7 over the configured run.
         options.adam_epsilon = 1e-15F;
         // Keep Brush's SH schedule. Both strategies honor the same explicit
         // progressive-resolution settings loaded from the CLI above.
@@ -3449,8 +3436,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         " cuda_profile=", options.profile_cuda,
         " cuda_profile_interval=", options.cuda_profile_interval,
         " fuse_sh_adam=", options.fuse_sh_adam,
-        " fuse_structure_adam=", cli.splat_fuse_structure_adam,
-        " sh_adam_quant=", cli.splat_sh_adam_quant,
+        " fuse_structure_adam=auto",
+        " sh_adam=fp16_u_logq8_v",
         " ssim=fused_11x11_valid weight=", options.ssim_weight,
         " source_resolution=", options.use_source_resolution,
         " max_image_dimension=", options.max_image_dimension,
@@ -3692,10 +3679,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     if (cli.splat_mesh_only) {
         gaussians = load_trained_gaussians(cli, project_archive);
     } else {
-    gaussians =
-        photara::splat::Trainer(
-            options, cli.splat_fuse_structure_adam, cli.splat_sh_adam_quant)
-            .train(
+    gaussians = photara::splat::Trainer(options).train(
             scene,
             [](const photara::splat::TrainingProgress& progress) {
                 std::ostringstream line;

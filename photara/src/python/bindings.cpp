@@ -1668,20 +1668,14 @@ NB_MODULE(photara, module) {
         "train_3dgs",
         [](const MvsSceneHandle& scene,
            const splat::TrainingOptions& options,
-           nb::object progress,
-           bool fuse_structure_adam,
-           bool quantize_sh_adam) {
+           nb::object progress) {
             auto result = std::make_shared<GaussianModelHandle>();
             if (progress.is_none()) {
                 nb::gil_scoped_release release;
-                result->model = splat::Trainer(
-                                     options, fuse_structure_adam,
-                                     quantize_sh_adam)
+                result->model = splat::Trainer(options)
                                     .train(scene.scene);
             } else {
-                result->model = splat::Trainer(
-                                     options, fuse_structure_adam,
-                                     quantize_sh_adam)
+                result->model = splat::Trainer(options)
                                     .train(
                     scene.scene, make_progress_callback(progress));
             }
@@ -1689,9 +1683,7 @@ NB_MODULE(photara, module) {
         },
         nb::arg("scene"),
         nb::arg("options") = splat::TrainingOptions{},
-        nb::arg("progress") = nb::none(),
-        nb::arg("fuse_structure_adam") = true,
-        nb::arg("quantize_sh_adam") = true);
+        nb::arg("progress") = nb::none());
     module.def(
         "load_3dgs", &load_3dgs, nb::arg("path"),
         nb::call_guard<nb::gil_scoped_release>());

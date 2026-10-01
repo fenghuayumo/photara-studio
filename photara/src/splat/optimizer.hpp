@@ -17,11 +17,6 @@ struct AdamState {
 
 AdamState make_adam_state(const tinytensor::Tensor& parameter);
 
-// Keep a full first moment but only one second-moment scalar per row. This is
-// the storage layout used by Brush's AdamScaled for SH coefficients.
-AdamState make_reduced_second_adam_state(
-    const tinytensor::Tensor& parameter);
-
 void adam_step(
     tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
     AdamState& state, float learning_rate, unsigned step,
@@ -37,12 +32,6 @@ void adam_step_structure(GaussianModel& model, const ModelGradients& gradient,
     AdamState& means, AdamState& scales, AdamState& rotations, AdamState& opacity,
     float means_lr, unsigned step, const TrainingOptions& options,
     float minimum_log_scale, float maximum_log_scale);
-
-void adam_step_reduced_second(
-    tinytensor::Tensor& parameter, const tinytensor::Tensor& gradient,
-    AdamState& state, float learning_rate, unsigned step,
-    const TrainingOptions& options, std::size_t row_stride,
-    float secondary_learning_rate);
 
 // Leave inactive higher-order SH coefficients and both moments untouched.
 void adam_step_active_prefix(

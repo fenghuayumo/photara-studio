@@ -993,10 +993,8 @@ GaussianModel initialize_from_dense_cloud(
 }
 
 
-Trainer::Trainer(TrainingOptions options, const bool fuse_structure_adam,
-    const bool quantize_sh_adam)
-    : options_(std::move(options)), fuse_structure_adam_(fuse_structure_adam),
-      quantize_sh_adam_(quantize_sh_adam) {}
+Trainer::Trainer(TrainingOptions options)
+    : options_(std::move(options)) {}
 
 GaussianModel Trainer::train(
     const mvs::MvsScene& scene, ProgressCallback progress,
@@ -1197,42 +1195,33 @@ GaussianModel Trainer::train(
     detail::AdamState scales_state = detail::make_adam_state(model.log_scales);
     detail::AdamState rotations_state = detail::make_adam_state(model.quaternions);
     detail::AdamState opacity_state = detail::make_adam_state(model.opacity_logits);
-    const bool quantize_sh = quantize_sh_adam_ && !vulkan_backend &&
-        options_.densification_strategy != DensificationStrategy::adc_plus;
+    // CUDA has one SH optimizer representation: FP16 normalized update plus
+    // log-uint8 second moment. Vulkan retains its backend-local FP32 optimizer
+    // until the quantized CUDA kernel has a Vulkan implementation.
+    const bool cuda_sh_quant = !vulkan_backend;
     detail::ShAdamQuant sh_quant;
     detail::AdamState sh_state;
-    if (quantize_sh) {
+    if (cuda_sh_quant) {
         const int sh_stride = static_cast<int>(model.sh.shape()[1] * 3);
         sh_quant = detail::make_sh_adam_quant(
             model.size(), sh_stride, model.sh.device());
     } else {
-        sh_state = options_.densification_strategy ==
-                DensificationStrategy::adc_plus
-            ? detail::make_reduced_second_adam_state(model.sh)
-            : detail::make_adam_state(model.sh);
+        sh_state = detail::make_adam_state(model.sh);
     }
-    if (quantize_sh_adam_ && !quantize_sh) {
+    if (vulkan_backend) {
         core::Logger::instance().info(
-            vulkan_backend
-                ? "sh_adam_quant skipped: Vulkan keeps FP32 SH Adam"
-                : "sh_adam_quant skipped: adc_plus keeps reduced-second FP32 SH Adam");
-    } else if (quantize_sh) {
-        if (sh_quant.format == detail::ShAdamQuantFormat::fp16_u_logq8_v)
-            core::Logger::instance().info(
-                "sh_adam_quant=fp16_u_logq8_v block=per_gaussian stride=",
-                sh_quant.stride, " groups=dc,rest bytes_per_gaussian=",
-                sh_quant.stride * 3 + 16);
-        else
-            core::Logger::instance().info(
-                "sh_adam_quant=fp16_m_logq8_v block=per_gaussian stride=",
-                sh_quant.stride, " groups=dc,rest bytes_per_gaussian=",
-                sh_quant.stride * 3 + 16);
+            "sh_adam=fp32 backend=vulkan");
+    } else {
+        core::Logger::instance().info(
+            "sh_adam=fp16_u_logq8_v block=per_gaussian stride=",
+            sh_quant.stride, " groups=dc,rest bytes_per_gaussian=",
+            sh_quant.stride * 3 + 16);
     }
     detail::AdamState normal_features_state =
         detail::make_adam_state(model.normal_features);
     const refine::AdamStates adam_states{
         &means_state, &scales_state, &rotations_state, &opacity_state,
-        &sh_state, &normal_features_state, quantize_sh ? &sh_quant : nullptr};
+        &sh_state, &normal_features_state, cuda_sh_quant ? &sh_quant : nullptr};
     // Per-view photometric compensation. State is indexed by the source view,
     // so it survives densification: rows change, cameras do not. PPISP owns
     // exposure and white-balance; the bilateral grid adds spatial variation.
@@ -1892,13 +1881,11 @@ GaussianModel Trainer::train(
             (shape_power + 1.F) * std::pow(1.F - shape_progress, shape_power);
         // Auxiliary normal-field / multi-view merges retain the resident
         // gradient path. Empty renders also use the standalone optimizer
-        // (zero-gradient decay). fuse_structure_adam=false keeps the previous
-        // dL_d* tensors for A/B comparison.
+        // for zero-gradient decay.
         const bool fused_sh = !vulkan_backend && options_.fuse_sh_adam &&
             !normal_field_active &&
             rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
-        const bool fused_structure = !vulkan_backend &&
-            fuse_structure_adam_ && !normal_field_active &&
+        const bool fused_structure = !vulkan_backend && !normal_field_active &&
             !has_multi_view_sample_gradients && update_structure &&
             rendered.rendered_instances > 0;
         SHAdamUpdate sh_update;
@@ -1912,15 +1899,10 @@ GaussianModel Trainer::train(
             1.F - std::pow(options_.beta2, static_cast<float>(iteration));
         sh_update.epsilon = options_.adam_epsilon;
         sh_update.regularization_weight = options_.sh_regularization_weight;
-        if (quantize_sh) {
+        if (cuda_sh_quant) {
             sh_update.first = sh_quant.first;
             sh_update.packed = sh_quant.packed;
             sh_update.bounds = sh_quant.bounds;
-            sh_update.normalized_first =
-                sh_quant.format == detail::ShAdamQuantFormat::fp16_u_logq8_v;
-        } else {
-            sh_update.first = sh_state.first;
-            sh_update.second = sh_state.second;
         }
         StructureAdamUpdate structure_update{
             means_state.first, means_state.second, scales_state.first,
@@ -2038,7 +2020,7 @@ GaussianModel Trainer::train(
             const std::size_t active_sh_stride =
                 static_cast<std::size_t>(active_sh_degree + 1) *
                 (active_sh_degree + 1) * 3;
-            if (quantize_sh)
+            if (cuda_sh_quant)
                 detail::sh_adam_quant_step(
                     model.sh, gradients.sh, sh_quant,
                     static_cast<int>(active_sh_stride), options_.sh0_lr,
@@ -2051,10 +2033,6 @@ GaussianModel Trainer::train(
                     model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
                     options_, full_sh_stride, active_sh_stride,
                     options_.sh_rest_lr, vulkan_sh_regularization);
-            else if (options_.densification_strategy == DensificationStrategy::adc_plus)
-                detail::adam_step_reduced_second(
-                    model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
-                    options_, full_sh_stride, options_.sh_rest_lr);
             else
                 detail::adam_step(
                     model.sh, gradients.sh, sh_state, options_.sh0_lr, iteration,
@@ -2149,7 +2127,7 @@ GaussianModel Trainer::train(
             }
             if (refinement_happened && report_progress) {
                 const ModelMemoryBudget budget = model_memory_budget(
-                    model, adam_states, quantize_sh ? &sh_quant : nullptr);
+                    model, adam_states, cuda_sh_quant ? &sh_quant : nullptr);
                 core::Logger::instance().info(
                     "splat_memory iteration=", iteration,
                     " gaussians=", budget.gaussians,

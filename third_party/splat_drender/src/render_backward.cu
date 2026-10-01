@@ -549,108 +549,6 @@ blend_bucket_backward(const uint2* __restrict__ tile_range,
     }
 }
 
-// Warp-cooperative SH Adam for the fused path. The projection backward leaves
-// each Gaussian's coefficients in a shared tile, then one warp per 32 rows
-// updates them with lane l owning columns l and l+32 of the row in flight.
-//
-// Two reasons this is not the per-thread form it replaces: the per-thread row
-// cost 48 registers per thread, and the parameter/first/second accesses of
-// adjacent lanes were a row stride (192 B) apart, so every load fetched 32
-// separate 32-byte sectors. Lane-per-column makes those accesses contiguous,
-// exactly like the standalone optimizer kernels, and it also reproduces their
-// two-tree reduction for the reduced second moment - so the update matches the
-// unfused pipeline element for element.
-__device__ inline void update_sh_adam_rows(
-    int row0, int rows, int count, int bases, int degree,
-    float* __restrict__ warp_tile, const SHAdam& a) {
-    const int lane = threadIdx.x & 31;
-    const int active = (degree + 1) * (degree + 1) * 3;
-    const float regularization = a.regularization_factor;
-    for (int r = 0; r < rows; ++r) {
-        const int row = row0 + r;
-        if (row >= count) break;
-        float* g = warp_tile + r * cfg::kShRowStride;
-        const int base = row * bases * 3;
-        // Fold the SH regularization in first, where the unfused pipeline adds
-        // it to the gradient buffer.
-        if (regularization > 0.f) {
-            for (int j = 3 + lane; j < active; j += 32)
-                if (isfinite(a.parameter[base + j]))
-                    g[j] += regularization * a.parameter[base + j];
-        }
-        float denominator = 1.f;
-        bool row_valid = true;
-        if (a.reduced_second) {
-            float square0 = 0.f, square1 = 0.f;
-            for (int j = lane; j < active; j += 64) {
-                const float value = g[j];
-                if (isfinite(value)) square0 += value * value;
-            }
-            for (int j = lane + 32; j < active; j += 64) {
-                const float value = g[j];
-                if (isfinite(value)) square1 += value * value;
-            }
-            for (unsigned offset = 16; offset > 0; offset >>= 1) {
-                square0 += __shfl_down_sync(0xffffffffu, square0, offset);
-                square1 += __shfl_down_sync(0xffffffffu, square1, offset);
-            }
-            if (lane == 0) {
-                const float v = a.beta2 * a.second[row] + (1.f - a.beta2) *
-                    ((square0 + square1) / float(active));
-                row_valid = isfinite(v);
-                if (row_valid) {
-                    a.second[row] = v;
-                    denominator = sqrtf(v / a.correction2) + a.epsilon;
-                    row_valid = isfinite(denominator) && denominator > 0.f;
-                }
-                if (!row_valid) {
-                    a.second[row] = 0.f;
-                    denominator = 1.f;
-                }
-            }
-            denominator = __shfl_sync(0xffffffffu, denominator, 0);
-            row_valid = __shfl_sync(0xffffffffu, unsigned(row_valid), 0) != 0u;
-        }
-        for (int j = lane; j < active; j += 32) {
-            const int index = base + j;
-            const float previous = a.parameter[index];
-            const float grad = g[j];
-            if (!row_valid) {
-                a.first[index] = 0.f;
-                continue;
-            }
-            if (!isfinite(previous) || !isfinite(grad)) {
-                a.first[index] = 0.f;
-                if (!a.reduced_second) a.second[index] = 0.f;
-                a.parameter[index] = isfinite(previous) ? previous : 0.f;
-                continue;
-            }
-            const float m = a.beta1 * a.first[index] + (1.f - a.beta1) * grad;
-            if (a.reduced_second) {
-                if (!isfinite(m)) {
-                    a.first[index] = 0.f;
-                    continue;
-                }
-            } else {
-                const float v =
-                    a.beta2 * a.second[index] + (1.f - a.beta2) * grad * grad;
-                if (!isfinite(m) || !isfinite(v)) {
-                    a.first[index] = 0.f;
-                    a.second[index] = 0.f;
-                    continue;
-                }
-                a.second[index] = v;
-                denominator = sqrtf(v / a.correction2) + a.epsilon;
-            }
-            a.first[index] = m;
-            const float lr = j >= 3 ? a.rest_lr : a.lr;
-            const float candidate =
-                previous - lr * (m / a.correction1) / denominator;
-            a.parameter[index] = isfinite(candidate) ? candidate : previous;
-        }
-    }
-}
-
 __device__ inline float structure_sigmoid(float x) {
     return 1.f / (1.f + expf(-x));
 }
@@ -846,9 +744,8 @@ __device__ inline void update_structure_adam_row(
                 a.epsilon, -12.f, 12.f);
 }
 
-template <bool HasSH, bool HasCov, bool FusedSH, bool QuantSH>
-__global__ void __launch_bounds__(
-    cfg::kGaussianBlock, (FusedSH && !QuantSH) ? 2 : 1)
+template <bool HasSH, bool HasCov, bool FusedSH>
+__global__ void __launch_bounds__(cfg::kGaussianBlock, 1)
 gaussian_backward(
     const int count, const int sh_degree, const int sh_bases,
     const float* __restrict__ means,
@@ -970,29 +867,22 @@ gaussian_backward(
         const int warp_row0 = int(blockIdx.x) * int(blockDim.x) + warp_thread0;
         float* warp_tile = reinterpret_cast<float*>(sh_tile) +
             std::size_t(warp_thread0) * cfg::kShRowStride;
-        if constexpr (QuantSH) {
-            const int active = (sh_degree + 1) * (sh_degree + 1) * 3;
-            for (int r = 0; r < 32; ++r) {
-                const int row = warp_row0 + r;
-                if (row >= count) break;
-                float* parameter = sh_adam.parameter +
-                    std::size_t(row) * sh_adam.quant_stride;
-                __half* first = reinterpret_cast<__half*>(sh_adam.quant_first) +
-                    std::size_t(row) * sh_adam.quant_stride;
-                sh_adam_quant_warp_row(
-                    sh_adam.quant_stride, active, parameter,
-                    warp_tile + r * cfg::kShRowStride, first,
-                    sh_adam.packed +
-                        std::size_t(row) * sh_adam.quant_stride,
-                    sh_adam.bounds + std::size_t(row) * 4, sh_adam.lr,
-                    sh_adam.rest_lr, sh_adam.beta1, sh_adam.beta2,
-                    sh_adam.correction1, sh_adam.correction2,
-                    sh_adam.epsilon, sh_adam.regularization_factor,
-                    sh_adam.quant_normalized_first);
-            }
-        } else {
-            update_sh_adam_rows(warp_row0, 32, count, sh_bases, sh_degree,
-                                warp_tile, sh_adam);
+        const int active = (sh_degree + 1) * (sh_degree + 1) * 3;
+        for (int r = 0; r < 32; ++r) {
+            const int row = warp_row0 + r;
+            if (row >= count) break;
+            float* parameter = sh_adam.parameter +
+                std::size_t(row) * sh_adam.stride;
+            __half* first = reinterpret_cast<__half*>(sh_adam.first) +
+                std::size_t(row) * sh_adam.stride;
+            sh_adam_quant_warp_row(
+                sh_adam.stride, active, parameter,
+                warp_tile + r * cfg::kShRowStride, first,
+                sh_adam.packed + std::size_t(row) * sh_adam.stride,
+                sh_adam.bounds + std::size_t(row) * 4, sh_adam.lr,
+                sh_adam.rest_lr, sh_adam.beta1, sh_adam.beta2,
+                sh_adam.correction1, sh_adam.correction2,
+                sh_adam.epsilon, sh_adam.regularization_factor);
         }
     }
     if constexpr (!HasCov) {
@@ -1080,12 +970,11 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
                        float* grad_scale, float* grad_rotation,
                        float* grad_cov, SHAdam sh_adam,
                        StructureAdam structure_adam) {
-    auto dispatch = [&](auto sh_c, auto cov_c, auto fused_c, auto quant_c) {
+    auto dispatch = [&](auto sh_c, auto cov_c, auto fused_c) {
         constexpr bool kSH = decltype(sh_c)::value;
         constexpr bool kCov = decltype(cov_c)::value;
         constexpr bool kFused = decltype(fused_c)::value;
-        constexpr bool kQuant = decltype(quant_c)::value;
-        kernels::gaussian_backward<kSH, kCov, kFused, kQuant>
+        kernels::gaussian_backward<kSH, kCov, kFused>
             <<<(count + cfg::kGaussianBlock - 1) / cfg::kGaussianBlock,
                 cfg::kGaussianBlock>>>(
                 count, sh_degree, sh_bases, means, sh, opacities, scales,
@@ -1097,19 +986,16 @@ void gaussian_backward(bool has_sh, bool has_cov, int count, int sh_degree,
     const auto off = std::false_type{};
     const auto on = std::true_type{};
     if (has_sh) {
-        if (sh_adam.parameter && sh_adam.quant_stride > 0) {
-            if (has_cov) dispatch(on, on, on, on);
-            else dispatch(on, off, on, on);
-        } else if (sh_adam.parameter) {
-            if (has_cov) dispatch(on, on, on, off);
-            else dispatch(on, off, on, off);
+        if (sh_adam.parameter) {
+            if (has_cov) dispatch(on, on, on);
+            else dispatch(on, off, on);
         } else {
-            if (has_cov) dispatch(on, on, off, off);
-            else dispatch(on, off, off, off);
+            if (has_cov) dispatch(on, on, off);
+            else dispatch(on, off, off);
         }
     } else {
-        if (has_cov) dispatch(off, on, off, off);
-        else dispatch(off, off, off, off);
+        if (has_cov) dispatch(off, on, off);
+        else dispatch(off, off, off);
     }
 }
 

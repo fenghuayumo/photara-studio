@@ -13,8 +13,7 @@ __global__ void sh_adam_quant_rows_kernel(
     int rows, int stride, int active, float* parameter, const float* gradient,
     __half* first, std::uint8_t* packed, float* bounds, float dc_lr,
     float rest_lr, float beta1, float beta2, float correction1,
-    float correction2, float adam_epsilon, float regularization,
-    bool normalized_first) {
+    float correction2, float adam_epsilon, float regularization) {
     const int row = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
     if (row >= rows) return;
     splat_drender::sh_adam_quant_warp_row(
@@ -23,8 +22,7 @@ __global__ void sh_adam_quant_rows_kernel(
         first + static_cast<std::size_t>(row) * stride,
         packed + static_cast<std::size_t>(row) * stride,
         bounds + static_cast<std::size_t>(row) * 4, dc_lr, rest_lr, beta1,
-        beta2, correction1, correction2, adam_epsilon, regularization,
-        normalized_first);
+        beta2, correction1, correction2, adam_epsilon, regularization);
 }
 
 __global__ void sh_adam_quant_zero_rows_kernel(
@@ -58,15 +56,13 @@ __global__ void sh_adam_quant_select_first_kernel(
 }  // namespace
 
 ShAdamQuant make_sh_adam_quant(
-    const std::size_t rows, const int stride, const tinytensor::Device device,
-    const ShAdamQuantFormat format) {
+    const std::size_t rows, const int stride, const tinytensor::Device device) {
     if (stride <= 0 || stride > 64)
         throw std::invalid_argument(
             "quantized SH Adam stride must be in [1, 64]");
     tinytensor::VramScope scope("optimizer.state");
     ShAdamQuant state;
     state.stride = stride;
-    state.format = format;
     state.first = tinytensor::Tensor::zeros(
         {rows, static_cast<std::size_t>(stride)}, device,
         tinytensor::DataType::Float16);
@@ -189,8 +185,7 @@ void sh_adam_quant_step(
         gradient_storage.ptr<float>(), state.first.ptr<__half>(),
         state.packed.ptr<std::uint8_t>(), state.bounds.ptr<float>(),
         learning_rate, rest_learning_rate, beta1, beta2, correction1,
-        correction2, adam_epsilon, regularization_factor,
-        state.format == ShAdamQuantFormat::fp16_u_logq8_v);
+        correction2, adam_epsilon, regularization_factor);
     check_cuda(cudaGetLastError(), "quantized SH Adam step");
 }
 

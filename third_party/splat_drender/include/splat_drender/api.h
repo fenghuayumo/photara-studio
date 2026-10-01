@@ -96,21 +96,16 @@ struct LossGradients {
 // the original coefficients. No global SH gradient buffer is needed.
 struct SHAdam {
     float* parameter = nullptr;
-    float* first = nullptr;
-    float* second = nullptr;
-    bool reduced_second = false;
     float lr = 0.f, rest_lr = 0.f;
     float beta1 = .9f, beta2 = .999f;
     float correction1 = 1.f, correction2 = 1.f, epsilon = 1e-8f;
     float regularization_factor = 0.f;
-    // Quantized moment storage. quant_stride > 0 ignores the FP32
-    // first/second pointers. quant_first stores either raw m or the normalized
-    // Adam update u; packed/bounds store the uint8 log-second moment.
-    void* quant_first = nullptr;
+    // first stores the FP16 normalized Adam update u; packed/bounds store the
+    // uint8 log-second moment.
+    void* first = nullptr;
     std::uint8_t* packed = nullptr;
     float* bounds = nullptr;
-    int quant_stride = 0;
-    bool quant_normalized_first = false;
+    int stride = 0;
 };
 
 // Optional structure Adam after the projection derivative has consumed the

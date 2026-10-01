@@ -10,27 +10,19 @@
 
 namespace photara::splat::detail {
 
-enum class ShAdamQuantFormat {
-    fp16_m_logq8_v,
-    fp16_u_logq8_v,
-};
-
 struct ShAdamQuant {
-    // float16 [N, stride] signed first moment.
+    // float16 [N, stride] normalized Adam update.
     tinytensor::Tensor first;
     // uint8 [N, stride] log_s code for the second moment.
     tinytensor::Tensor packed;
     // float [N, 4]: DC and non-DC each own (log_s_min, log_s_max).
     tinytensor::Tensor bounds;
     int stride = 0;
-    ShAdamQuantFormat format{ShAdamQuantFormat::fp16_u_logq8_v};
-
     [[nodiscard]] bool active() const { return first.is_valid(); }
 };
 
 [[nodiscard]] ShAdamQuant make_sh_adam_quant(
-    std::size_t rows, int stride, tinytensor::Device device,
-    ShAdamQuantFormat format = ShAdamQuantFormat::fp16_u_logq8_v);
+    std::size_t rows, int stride, tinytensor::Device device);
 
 void sh_adam_quant_select_rows(
     ShAdamQuant& state, const tinytensor::Tensor& indices);

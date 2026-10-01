@@ -151,12 +151,7 @@ TrainingView make_training_view(
 
 class Trainer {
 public:
-    // These switches live on Trainer rather than TrainingOptions so CUDA
-    // files that include options.hpp do not rebuild when they change.
-    // fuse_structure_adam false keeps the resident dL_d* path.
-    // quantize_sh_adam false keeps FP32 SH Adam moments.
-    explicit Trainer(TrainingOptions options = {},
-        bool fuse_structure_adam = true, bool quantize_sh_adam = true);
+    explicit Trainer(TrainingOptions options = {});
 
     GaussianModel train(
         const mvs::MvsScene& scene, ProgressCallback progress = {},
@@ -165,8 +160,6 @@ public:
 
 private:
     TrainingOptions options_;
-    bool fuse_structure_adam_{true};
-    bool quantize_sh_adam_{true};
 };
 
 void save_gaussians_ply(

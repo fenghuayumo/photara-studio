@@ -329,19 +329,14 @@ ModelGradients Rasterizer::backward(
     const auto count = model.size();
 
     ModelGradients gradients;
-    const bool quant_sh = sh_adam && sh_adam->packed.is_valid();
     if (sh_adam && (context.colors_precomp.is_valid() ||
         context.forward.instance_count <= 0 || model.sh.shape()[1] > 16 ||
-        (quant_sh
-            ? (sh_adam->first.numel() != model.sh.numel() ||
-               sh_adam->first.dtype() != tinytensor::DataType::Float16 ||
-               sh_adam->packed.numel() != model.sh.numel() ||
-               sh_adam->packed.dtype() != tinytensor::DataType::UInt8 ||
-               !sh_adam->bounds.is_valid() ||
-               sh_adam->bounds.numel() != count * 4)
-            : (sh_adam->first.numel() != model.sh.numel() ||
-               (sh_adam->second.numel() != model.size() &&
-                sh_adam->second.numel() != model.sh.numel())))))
+        sh_adam->first.numel() != model.sh.numel() ||
+        sh_adam->first.dtype() != tinytensor::DataType::Float16 ||
+        sh_adam->packed.numel() != model.sh.numel() ||
+        sh_adam->packed.dtype() != tinytensor::DataType::UInt8 ||
+        !sh_adam->bounds.is_valid() ||
+        sh_adam->bounds.numel() != count * 4))
         throw std::invalid_argument("Incompatible fused SH Adam context/state");
     if (structure_adam && (context.colors_precomp.is_valid() ||
         context.forward.instance_count <= 0 ||
@@ -412,34 +407,22 @@ ModelGradients Rasterizer::backward(
                     : 0.F;
             // Tensor copies share storage; this opt-in backward owns the SH update.
             auto parameter = model.sh;
-            if (quant_sh) {
-                auto first = sh_adam->first;
-                auto packed = sh_adam->packed;
-                auto bounds = sh_adam->bounds;
-                grads.sh_adam.parameter = parameter.ptr<float>();
-                grads.sh_adam.lr = sh_adam->lr;
-                grads.sh_adam.rest_lr = sh_adam->rest_lr;
-                grads.sh_adam.beta1 = sh_adam->beta1;
-                grads.sh_adam.beta2 = sh_adam->beta2;
-                grads.sh_adam.correction1 = sh_adam->correction1;
-                grads.sh_adam.correction2 = sh_adam->correction2;
-                grads.sh_adam.epsilon = sh_adam->epsilon;
-                grads.sh_adam.regularization_factor = regularization;
-                grads.sh_adam.quant_first = first.ptr<__half>();
-                grads.sh_adam.packed = packed.ptr<std::uint8_t>();
-                grads.sh_adam.bounds = bounds.ptr<float>();
-                grads.sh_adam.quant_stride = static_cast<int>(stride);
-                grads.sh_adam.quant_normalized_first =
-                    sh_adam->normalized_first;
-            } else {
-                auto first = sh_adam->first;
-                auto second = sh_adam->second;
-                grads.sh_adam = {parameter.ptr<float>(), first.ptr<float>(),
-                    second.ptr<float>(), sh_adam->second.numel() == count,
-                    sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
-                    sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon,
-                    regularization};
-            }
+            auto first = sh_adam->first;
+            auto packed = sh_adam->packed;
+            auto bounds = sh_adam->bounds;
+            grads.sh_adam.parameter = parameter.ptr<float>();
+            grads.sh_adam.lr = sh_adam->lr;
+            grads.sh_adam.rest_lr = sh_adam->rest_lr;
+            grads.sh_adam.beta1 = sh_adam->beta1;
+            grads.sh_adam.beta2 = sh_adam->beta2;
+            grads.sh_adam.correction1 = sh_adam->correction1;
+            grads.sh_adam.correction2 = sh_adam->correction2;
+            grads.sh_adam.epsilon = sh_adam->epsilon;
+            grads.sh_adam.regularization_factor = regularization;
+            grads.sh_adam.first = first.ptr<__half>();
+            grads.sh_adam.packed = packed.ptr<std::uint8_t>();
+            grads.sh_adam.bounds = bounds.ptr<float>();
+            grads.sh_adam.stride = static_cast<int>(stride);
         }
         if (structure_adam) {
             auto means = model.means;

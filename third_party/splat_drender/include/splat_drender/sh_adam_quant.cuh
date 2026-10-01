@@ -1,8 +1,8 @@
 // Hybrid Adam state for one SH row.
 //
-// The preferred format stores the normalized Adam update
+// Store the normalized Adam update
 //   u = (m / correction1) / (sqrt(v / correction2) + adam_epsilon)
-// in FP16. The legacy comparison format stores raw m in FP16. In both cases v uses
+// in FP16. The second moment uses
 //   log_s = log1p(sqrt(g2) / 1e-15)
 // with endpoint-exact uint8 codes. Columns [0, 3) (DC RGB) and [3, stride)
 // (non-DC) each own (log_s_min, log_s_max). The 1e-15 here is the codec
@@ -94,7 +94,7 @@ __device__ __forceinline__ void sh_adam_quant_column(
     __half* first, const std::uint8_t* packed, float bound_s_min,
     float bound_s_max, float dc_lr, float rest_lr, float beta1, float beta2,
     float correction1, float correction2, float adam_epsilon,
-    float regularization, bool normalized_first, float& log_s) {
+    float regularization, float& log_s) {
     log_s = sh_adam_dequant(
         static_cast<float>(packed[col]), bound_s_min, bound_s_max);
     const float g2 = sh_adam_log_to_second(log_s);
@@ -103,22 +103,18 @@ __device__ __forceinline__ void sh_adam_quant_column(
         correction1, beta1);
     const float previous_correction2 = sh_adam_previous_correction(
         correction2, beta2);
-    float g1 = normalized_first
-        ? sh_adam_normalized_to_first(
-              stored_first, g2, previous_correction1,
-              previous_correction2, adam_epsilon)
-        : stored_first;
+    float g1 = sh_adam_normalized_to_first(
+        stored_first, g2, previous_correction1,
+        previous_correction2, adam_epsilon);
     if (col >= active) {
         if (!isfinite(g1)) g1 = 0.f;
         if (!isfinite(log_s)) {
             log_s = 0.f;
             g1 = 0.f;
         }
-        const float encoded_first = normalized_first
-            ? sh_adam_first_to_normalized(
-                  g1, sh_adam_log_to_second(log_s), correction1,
-                  correction2, adam_epsilon)
-            : g1;
+        const float encoded_first = sh_adam_first_to_normalized(
+            g1, sh_adam_log_to_second(log_s), correction1,
+            correction2, adam_epsilon);
         first[col] = __float2half_rn(
             isfinite(encoded_first) ? encoded_first : 0.f);
         return;
@@ -145,7 +141,7 @@ __device__ __forceinline__ void sh_adam_quant_column(
         m, v, correction1, correction2, adam_epsilon);
     const float candidate = previous - learning_rate * normalized;
     parameter[col] = isfinite(candidate) ? candidate : previous;
-    first[col] = __float2half_rn(normalized_first ? normalized : m);
+    first[col] = __float2half_rn(normalized);
     log_s = sh_adam_second_to_log(v);
     if (!isfinite(log_s)) log_s = 0.f;
 }
@@ -160,8 +156,7 @@ __device__ __forceinline__ void sh_adam_quant_warp_row(
     const float* __restrict__ gradient, __half* __restrict__ first,
     std::uint8_t* __restrict__ packed, float* __restrict__ bounds,
     float dc_lr, float rest_lr, float beta1, float beta2, float correction1,
-    float correction2, float adam_epsilon, float regularization,
-    bool normalized_first) {
+    float correction2, float adam_epsilon, float regularization) {
     const int lane = threadIdx.x & 31;
     float dc_s_min = 0.f, dc_s_max = 0.f;
     float rest_s_min = 0.f, rest_s_max = 0.f;
@@ -195,7 +190,7 @@ __device__ __forceinline__ void sh_adam_quant_warp_row(
             col0, active, parameter, gradient, first, packed,
             dc ? dc_s_min : rest_s_min, dc ? dc_s_max : rest_s_max, dc_lr,
             rest_lr, beta1, beta2, correction1, correction2, adam_epsilon,
-            regularization, normalized_first, s0);
+            regularization, s0);
     }
     if (own1) {
         const bool dc = col1 < 3;
@@ -203,7 +198,7 @@ __device__ __forceinline__ void sh_adam_quant_warp_row(
             col1, active, parameter, gradient, first, packed,
             dc ? dc_s_min : rest_s_min, dc ? dc_s_max : rest_s_max, dc_lr,
             rest_lr, beta1, beta2, correction1, correction2, adam_epsilon,
-            regularization, normalized_first, s1);
+            regularization, s1);
     }
 
     const bool dc0 = own0 && col0 < 3;

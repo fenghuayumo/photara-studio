@@ -1276,87 +1276,6 @@ void test_colmap_fisheye_and_equirect_loading() {
     std::filesystem::remove_all(root);
 }
 
-void test_fused_sh_adam() {
-    using namespace photara::splat;
-    using photara::CameraModel;
-    using tinytensor::Tensor;
-    constexpr auto device = tinytensor::Device::CUDA;
-    constexpr std::size_t n = 257;
-    std::vector<float> means(n * 3), rotations(n * 4), coefficients(n * 48);
-    for (std::size_t i = 0; i < n; ++i) {
-        means[i * 3] = .02F * float(int(i % 11) - 5);
-        means[i * 3 + 1] = .02F * float(int(i % 7) - 3);
-        means[i * 3 + 2] = 2.F + .001F * i;
-        rotations[i * 4] = 1.F;
-        for (std::size_t j = 0; j < 48; ++j)
-            coefficients[i * 48 + j] = .04F * std::sin(float(i + j));
-        if (i % 5 == 0) coefficients[i * 48] = -3.F; // clamped red
-    }
-    means[(n - 1) * 3 + 2] = -2.F; // culled row, with nonzero Adam moments
-    GaussianModel model;
-    model.means = Tensor::from_vector(means, {n, 3}, device);
-    model.log_scales = Tensor::from_vector(std::vector<float>(n * 3, -.7F), {n, 3}, device);
-    model.quaternions = Tensor::from_vector(rotations, {n, 4}, device);
-    model.opacity_logits = Tensor::from_vector(std::vector<float>(n, -3.F), {n, 1}, device);
-    model.sh = Tensor::from_vector(coefficients, {n, 16, 3}, device);
-    model.sh_degree = 3;
-    Camera camera;
-    camera.width = 37; camera.height = 29; camera.fx = 25; camera.fy = 25;
-    camera.cx = 18; camera.cy = 14;
-    camera.world_to_camera = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    const std::size_t pixels = camera.width * camera.height;
-    std::vector<float> probe(pixels * 3);
-    for (std::size_t i = 0; i < probe.size(); ++i) probe[i] = .001F * std::cos(float(i));
-    const auto color_grad = Tensor::from_vector(probe, {3, camera.height, camera.width}, device);
-    const auto alpha_grad = Tensor::from_vector(std::vector<float>(pixels, .001F), {camera.height, camera.width}, device);
-    const auto compare = [](const Tensor& a, const Tensor& b, const char* message) {
-        const auto x = a.to_vector(), y = b.to_vector();
-        require(x.size() == y.size(), message);
-        for (std::size_t i = 0; i < x.size(); ++i)
-            if (!std::isfinite(y[i]) || std::abs(x[i] - y[i]) > 2e-6F + 3e-4F * std::abs(x[i])) {
-                std::cerr << message << " index=" << i << " reference=" << x[i] << " actual=" << y[i] << '\n';
-                require(false, message);
-            }
-    };
-    Rasterizer rasterizer;
-    camera.model = CameraModel::pinhole;
-    for (bool reduced : {false, true}) for (unsigned degree : {0U, 1U, 2U, 3U}) {
-        model.sh = Tensor::from_vector(coefficients, {n, 16, 3}, device);
-        auto fused_model = model;
-        fused_model.sh = Tensor::from_vector(coefficients, {n, 16, 3}, device);
-        auto state = reduced ? detail::make_reduced_second_adam_state(model.sh) : detail::make_adam_state(model.sh);
-        auto fused_state = reduced ? detail::make_reduced_second_adam_state(model.sh) : detail::make_adam_state(model.sh);
-        state.first = Tensor::from_vector(std::vector<float>(n * 48, .002F), {n,16,3}, device);
-        fused_state.first = Tensor::from_vector(std::vector<float>(n * 48, .002F), {n,16,3}, device);
-        const std::size_t second_size = reduced ? n : n * 48;
-        state.second = Tensor::from_vector(std::vector<float>(second_size, .0003F), {second_size}, device);
-        fused_state.second = Tensor::from_vector(std::vector<float>(second_size, .0003F), {second_size}, device);
-        RasterizeOptions options;
-        options.active_sh_degree = degree;
-        options.require_depth = false;
-        TrainingOptions training;
-        training.sh_regularization_weight = .03F;
-        for (unsigned step : {7U, 8U, 9U}) {
-            const auto ref = rasterizer.forward(model, camera, options);
-            const auto fused = rasterizer.forward(fused_model, camera, options);
-            auto g = rasterizer.backward(model, ref, color_grad, alpha_grad, {}, {});
-            SHAdamUpdate update{fused_state.first, fused_state.second,
-                training.sh0_lr, training.sh_rest_lr, training.beta1, training.beta2,
-                1.F - std::pow(training.beta1, float(step)), 1.F - std::pow(training.beta2, float(step)),
-                training.adam_epsilon, training.sh_regularization_weight};
-            const auto fg = rasterizer.backward(fused_model, fused, color_grad, alpha_grad, {}, {}, {}, &update);
-            require(!fg.sh.is_valid(), "Fused SH backward retained a full gradient buffer");
-            compare(g.means, fg.means, "Fused SH changed projection mean gradient");
-            detail::add_sh_regularization(model.sh, g.sh, training.sh_regularization_weight);
-            detail::adam_step_active_prefix(model.sh, g.sh, state, training.sh0_lr, step,
-                training, 48, (degree + 1) * (degree + 1) * 3, training.sh_rest_lr);
-            compare(model.sh, fused_model.sh, "Fused SH parameter parity");
-            compare(state.first, fused_state.first, "Fused SH first moment parity");
-            compare(state.second, fused_state.second, "Fused SH second moment parity");
-        }
-    }
-}
-
 void cpu_sh_adam_quant_step(
     std::vector<float>& parameter, const std::vector<float>& gradient,
     std::vector<float>& first, std::vector<std::uint8_t>& packed,
@@ -1373,6 +1292,15 @@ void cpu_sh_adam_quant_step(
         return static_cast<std::uint8_t>(std::lround(std::min(
             std::max(qmax * (value - lo) / range, 0.F), qmax)));
     };
+    const auto previous_correction = [](float correction, float beta) {
+        return beta > 0.F
+            ? std::max((correction - (1.F - beta)) / beta, 0.F)
+            : 0.F;
+    };
+    const float previous_correction1 =
+        previous_correction(correction1, beta1);
+    const float previous_correction2 =
+        previous_correction(correction2, beta2);
     for (int row = 0; row < rows; ++row) {
         float old_bounds[4];
         for (int value = 0; value < 4; ++value)
@@ -1390,6 +1318,15 @@ void cpu_sh_adam_quant_step(
             const int offset = col < 3 ? 0 : 2;
             float log_s = dequant(
                 packed[index], old_bounds[offset], old_bounds[offset + 1]);
+            const float previous_sqrt_v = eps * std::expm1(log_s);
+            const float previous_v = previous_sqrt_v * previous_sqrt_v;
+            const float previous_m =
+                previous_correction1 > 0.F && previous_correction2 > 0.F
+                ? first[index] *
+                      (std::sqrt(previous_v / previous_correction2) +
+                          adam_epsilon) *
+                      previous_correction1
+                : 0.F;
             if (col < active) {
                 const float grad = gradient[index];
                 const float previous = parameter[index];
@@ -1398,27 +1335,31 @@ void cpu_sh_adam_quant_step(
                     log_s = 0.F;
                     parameter[index] = std::isfinite(previous) ? previous : 0.F;
                 } else {
-                    const float sqrt_g2 = eps * std::expm1(log_s);
-                    const float g2 = sqrt_g2 * sqrt_g2;
-                    const float m = beta1 * first[index] + (1.F - beta1) * grad;
-                    const float v = beta2 * g2 + (1.F - beta2) * grad * grad;
+                    const float m = beta1 * previous_m + (1.F - beta1) * grad;
+                    const float v =
+                        beta2 * previous_v + (1.F - beta2) * grad * grad;
                     if (!std::isfinite(m) || !std::isfinite(v)) {
                         first[index] = 0.F;
                         log_s = 0.F;
                     } else {
                         const float lr = col >= 3 ? rest_learning_rate : learning_rate;
-                        const float candidate = previous - lr * (m / correction1) /
+                        const float normalized = (m / correction1) /
                             (std::sqrt(v / correction2) + adam_epsilon);
+                        const float candidate = previous - lr * normalized;
                         parameter[index] = std::isfinite(candidate) ? candidate : previous;
-                        first[index] = m;
+                        first[index] = normalized;
                         const float sqrt_v = std::sqrt(std::max(v, 0.F));
                         log_s = std::log1p(sqrt_v / eps);
                         if (!std::isfinite(log_s)) log_s = 0.F;
                     }
                 }
             } else {
-                if (!std::isfinite(first[index])) first[index] = 0.F;
                 if (!std::isfinite(log_s)) log_s = 0.F;
+                first[index] = correction1 > 0.F && correction2 > 0.F
+                    ? (previous_m / correction1) /
+                          (std::sqrt(previous_v / correction2) + adam_epsilon)
+                    : 0.F;
+                if (!std::isfinite(first[index])) first[index] = 0.F;
             }
             s_out[col] = log_s;
             new_bounds[offset] = std::min(new_bounds[offset], log_s);
@@ -1491,9 +1432,7 @@ void test_sh_adam_quant() {
     const auto grad = Tensor::from_vector(
         gradient, {std::size_t(rows), 16, 3}, device);
     auto fp_state = detail::make_adam_state(param_fp);
-    auto quant = detail::make_sh_adam_quant(
-        rows, stride, device,
-        detail::ShAdamQuantFormat::fp16_m_logq8_v);
+    auto quant = detail::make_sh_adam_quant(rows, stride, device);
     const auto packed_init = quant.packed.to_vector_uint8();
     require(std::all_of(packed_init.begin(), packed_init.end(),
                 [](std::uint8_t byte) { return byte == 0; }),
@@ -1808,7 +1747,6 @@ void test_sh_adam_quant() {
             update.first = fused_quant.first;
             update.packed = fused_quant.packed;
             update.bounds = fused_quant.bounds;
-            update.normalized_first = true;
             update.lr = training.sh0_lr;
             update.rest_lr = training.sh_rest_lr;
             update.beta1 = training.beta1;
@@ -3658,83 +3596,6 @@ void test_structure_adam_parity() {
     }
 }
 
-void test_reduced_second_sh_adam() {
-    using namespace photara::splat;
-    auto parameter = tinytensor::Tensor::zeros(
-        {2, 2, 3}, tinytensor::Device::CUDA);
-    const std::vector<float> gradient_values{
-        1.F, 2.F, 3.F, 4.F, 5.F, 6.F,
-        2.F, 2.F, 2.F, 2.F, 2.F, 2.F};
-    const auto gradient = tinytensor::Tensor::from_vector(
-        gradient_values, {2, 2, 3}, tinytensor::Device::CUDA);
-    auto state = detail::make_reduced_second_adam_state(parameter);
-    require(
-        state.first.numel() == parameter.numel() &&
-            state.second.numel() == 2,
-        "reduced-second Adam did not compact its second moment per row");
-
-    TrainingOptions options;
-    options.adam_epsilon = 1e-15F;
-    constexpr float primary_lr = 1e-3F;
-    constexpr float secondary_lr = 1e-4F;
-    detail::adam_step_reduced_second(
-        parameter, gradient, state, primary_lr, 1, options, 6,
-        secondary_lr);
-
-    const auto values = parameter.to_vector();
-    const auto first = state.first.to_vector();
-    const auto second = state.second.to_vector();
-    const std::array<float, 2> square_means{91.F / 6.F, 4.F};
-    for (std::size_t row = 0; row < 2; ++row) {
-        require(
-            std::abs(
-                second[row] -
-                (1.F - options.beta2) * square_means[row]) < 1e-7F,
-            "reduced-second Adam stored the wrong row moment");
-        for (std::size_t column = 0; column < 6; ++column) {
-            const std::size_t index = row * 6 + column;
-            const float lr = column < 3 ? primary_lr : secondary_lr;
-            const float expected =
-                -lr * gradient_values[index] /
-                std::sqrt(square_means[row]);
-            require(
-                std::abs(values[index] - expected) < 1e-6F &&
-                    std::abs(
-                        first[index] -
-                        (1.F - options.beta1) *
-                            gradient_values[index]) < 1e-6F,
-                "reduced-second Adam differs from row-reduced AdamScaled");
-        }
-    }
-
-    auto prefix_parameter = tinytensor::Tensor::zeros(
-        {2, 4, 3}, tinytensor::Device::CUDA);
-    const auto prefix_gradient = tinytensor::Tensor::from_vector(
-        std::vector<float>(24, 0.25F), {2, 4, 3},
-        tinytensor::Device::CUDA);
-    auto prefix_state =
-        detail::make_reduced_second_adam_state(prefix_parameter);
-    detail::adam_step_active_prefix(
-        prefix_parameter, prefix_gradient, prefix_state, primary_lr, 1,
-        options, 12, 3, secondary_lr);
-    const auto prefix_values = prefix_parameter.to_vector();
-    const auto prefix_first = prefix_state.first.to_vector();
-    const auto prefix_second = prefix_state.second.to_vector();
-    require(
-        prefix_second.size() == 2,
-        "active-prefix Adam expanded the compact second moment");
-    for (std::size_t index = 0; index < prefix_values.size(); ++index) {
-        const bool active = index < 3 || (index >= 12 && index < 15);
-        require(
-            active
-                ? std::abs(prefix_values[index] + primary_lr) < 1e-6F &&
-                      std::abs(prefix_first[index] - 0.025F) < 1e-6F
-                : prefix_values[index] == 0.F &&
-                      prefix_first[index] == 0.F,
-            "active-prefix reduced-second Adam touched the wrong SH band");
-    }
-}
-
 void test_adam_warp_rows_and_reset() {
     using namespace photara::splat;
     constexpr std::size_t rows = 9, stride = 48;
@@ -3742,9 +3603,9 @@ void test_adam_warp_rows_and_reset() {
     std::vector<float> values(rows * stride);
     for (std::size_t i = 0; i < values.size(); ++i) values[i] = float(i % 13 + 1) * 0.01F;
     auto g = tinytensor::Tensor::from_vector(values, {rows, 16, 3}, tinytensor::Device::CUDA);
-    auto state = detail::make_reduced_second_adam_state(p);
+    auto state = detail::make_adam_state(p);
     TrainingOptions options;
-    std::vector<float> expected(rows, 0.F);
+    std::vector<float> expected(rows * stride, 0.F);
     unsigned step = 0;
     for (std::size_t active : {3U, 12U, 27U, 48U}) {
         ++step;
@@ -3753,11 +3614,13 @@ void test_adam_warp_rows_and_reset() {
         const auto actual = state.second.to_vector();
         const auto after = p.to_vector();
         for (std::size_t row = 0; row < rows; ++row) {
-            float squares = 0.F;
-            for (std::size_t c = 0; c < active; ++c) squares += values[row * stride + c] * values[row * stride + c];
-            expected[row] = options.beta2 * expected[row] + (1.F - options.beta2) * squares / float(active);
-            require(std::abs(actual[row] - expected[row]) < 1e-8F,
-                "Warp Adam mixed rows or SH bands in second moment");
+            for (std::size_t c = 0; c < active; ++c) {
+                const auto index = row * stride + c;
+                expected[index] = options.beta2 * expected[index] +
+                    (1.F - options.beta2) * values[index] * values[index];
+                require(std::abs(actual[index] - expected[index]) < 1e-8F,
+                    "active-prefix Adam mixed rows or SH bands");
+            }
             for (std::size_t c = active; c < stride; ++c)
                 require(before[row * stride + c] == after[row * stride + c], "Warp Adam updated inactive SH bands");
         }
@@ -3774,10 +3637,11 @@ void test_adam_warp_rows_and_reset() {
     const auto dense_after = dense.first.to_vector();
     for (std::size_t row = 0; row < rows; ++row) {
         const bool reset = row == 1 || row == 8;
-        require(second_after[row] == (reset ? 0.F : second_before[row]), "Parent reset changed wrong reduced moment row");
         for (std::size_t c = 0; c < stride; ++c) {
             const auto i = row * stride + c;
-            require(first_after[i] == (reset ? 0.F : first_before[i]) && dense_after[i] == (reset ? 0.F : dense_before[i]),
+            require(first_after[i] == (reset ? 0.F : first_before[i]) &&
+                    second_after[i] == (reset ? 0.F : second_before[i]) &&
+                    dense_after[i] == (reset ? 0.F : dense_before[i]),
                 "Parent reset changed wrong dense moment row");
         }
     }
@@ -5078,7 +4942,7 @@ RefineHarness make_refine_harness(photara::splat::GaussianModel model) {
         harness.model.quaternions);
     harness.opacity = photara::splat::detail::make_adam_state(
         harness.model.opacity_logits);
-    harness.sh = photara::splat::detail::make_reduced_second_adam_state(
+    harness.sh = photara::splat::detail::make_adam_state(
         harness.model.sh);
     harness.normals = photara::splat::detail::make_adam_state(
         harness.model.normal_features.is_valid()
@@ -6321,7 +6185,6 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
-            test_fused_sh_adam();
             test_sh_adam_quant();
             test_fused_structure_adam();
             test_training_device_cache();
@@ -6367,7 +6230,6 @@ int main(int argc, char** argv) {
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();
         test_forward_backward();
-        test_fused_sh_adam();
         test_sh_adam_quant();
         test_fused_structure_adam();
         test_normal_field_parameterization_and_occupancy();
@@ -6391,7 +6253,6 @@ int main(int argc, char** argv) {
         test_adam_rejects_non_finite_gradients();
         test_fused_adam_parity();
         test_structure_adam_parity();
-        test_reduced_second_sh_adam();
         test_active_sh_prefix_adam();
         test_adam_warp_rows_and_reset();
         test_mask_loading();
