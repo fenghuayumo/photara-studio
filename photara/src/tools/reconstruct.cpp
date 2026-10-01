@@ -253,6 +253,7 @@ struct ReconstructCli {
     float pam_gaussian_seed_fraction{0.F};
     unsigned pam_refinement_steps{10};
     unsigned pam_neighbors{32};
+    bool pam_gpu_refinement{true};
     unsigned pam_points_per_tetrahedron{10};
     float pam_occupancy_iso_value{0.5F};
     float pam_vacancy_threshold{0.1F};
@@ -977,6 +978,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-neighbors", "Nearest Gaussians used by the PAM vector field",
          cxxopts::value<unsigned>()->default_value("32"))
+        ("pam-gpu-refinement", "Use exact CUDA nearest-neighbor field refinement (up to 64 neighbors)",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("pam-points-per-tetrahedron", "PAM occupancy samples per tetrahedron",
          cxxopts::value<unsigned>()->default_value("10"))
         ("pam-occupancy-iso-value",
@@ -1539,6 +1542,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
     cli.pam_refinement_steps =
         result["pam-refinement-steps"].as<unsigned>();
     cli.pam_neighbors = result["pam-neighbors"].as<unsigned>();
+    cli.pam_gpu_refinement = result["pam-gpu-refinement"].as<bool>();
     cli.pam_points_per_tetrahedron =
         result["pam-points-per-tetrahedron"].as<unsigned>();
     cli.pam_occupancy_iso_value =
@@ -3799,6 +3803,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
             cli.pam_gaussian_seed_fraction;
         pam_options.refinement_steps = cli.pam_refinement_steps;
         pam_options.vector_field_neighbors = cli.pam_neighbors;
+        pam_options.gpu_refinement = cli.pam_gpu_refinement;
         pam_options.points_per_tetrahedron =
             cli.pam_points_per_tetrahedron;
         pam_options.occupancy_iso_value =

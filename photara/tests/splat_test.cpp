@@ -6,6 +6,7 @@
 #include "splat/formats.hpp"
 #include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/pam_cuda.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/densification_internal.hpp"
 #include "../src/splat/sh_adam_quant.hpp"
@@ -38,6 +39,10 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+
+#if defined(PHOTARA_HAS_OPENMP)
+#include <omp.h>
+#endif
 
 namespace {
 
@@ -1221,6 +1226,24 @@ void test_fisheye_filter_and_supervision() {
     const auto pinhole=make_training_view(view,options);
     require(pinhole.depth.numel()==256 && pinhole.normal.numel()==768,
         "Pinhole working camera lost its matching MVS geometry");
+    mvs::MvsScene scene;
+    scene.views = {view, view};
+    scene.views.back().pose.C.x() = .1;
+    scene.dense_cloud.points.push_back({mvs::Vec3f(0.F, 0.F, 2.F),
+        mvs::Vec3f(0.F, 0.F, 1.F), mvs::Vec3f::Constant(.5F)});
+    options.iterations = 2;
+    options.enable_densification = false;
+    options.progressive_resolution = false;
+    options.use_depth_normal_loss = true;
+    options.depth_normal_from_iter = 1;
+    options.undistort_to_pinhole = false;
+    const auto native_model = Trainer(options).train(scene);
+    require(!native_model.filter_3d.is_valid(),
+        "Native fisheye retained the geometry-only filter with supervision disabled");
+    options.undistort_to_pinhole = true;
+    const auto pinhole_model = Trainer(options).train(scene);
+    require(pinhole_model.filter_3d.is_valid(),
+        "Pinhole geometry training lost its Mip filter");
     std::filesystem::remove(view.path);
 }
 
@@ -2547,6 +2570,92 @@ void test_gaussian_format_roundtrip() {
         truncated.sh.shape()[1] == 1, "PLY export kept extra SH bands");
 }
 
+void test_pam_cuda_field() {
+    using namespace photara::splat;
+    GaussianModel model;
+    constexpr std::size_t count = 130;
+    std::vector<float> means, scales, rotations, features;
+    for (std::size_t i = 0; i < count; ++i) {
+        // Duplicate centers exercise equal-distance heap ordering; rotated,
+        // anisotropic covariances exercise the full field transform.
+        const float x = static_cast<float>(i / 2 % 7) * 0.3F;
+        const float y = static_cast<float>(i / 14 % 5) * 0.2F;
+        const float z = static_cast<float>(i / 70) * 0.4F;
+        means.insert(means.end(), {x, y, z});
+        scales.insert(scales.end(), {std::log(0.11F), std::log(0.27F), std::log(0.43F)});
+        const float angle = static_cast<float>(i) * 0.02F;
+        rotations.insert(rotations.end(), {std::cos(angle), 0.F, 0.F, std::sin(angle)});
+        features.insert(features.end(), {0.3F, -0.2F, 0.8F, i % 2 ? -2.F : 2.F});
+    }
+    model.means = tinytensor::Tensor::from_vector(means, {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(scales, {count, std::size_t{3}}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(rotations, {count, std::size_t{4}}, tinytensor::Device::CUDA);
+    model.normal_features = tinytensor::Tensor::from_vector(features, {count, std::size_t{4}}, tinytensor::Device::CUDA);
+    model.opacity_logits = tinytensor::Tensor::from_vector(std::vector<float>(count, 1.1F),
+        {count, std::size_t{1}}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::zeros({count, std::size_t{1}, std::size_t{3}}, tinytensor::Device::CUDA);
+    const auto field = detail::make_pam_gpu_field(model);
+    std::vector<float> queries;
+    for (int i = 0; i < 1031; ++i)
+        queries.insert(queries.end(), {static_cast<float>(i % 37) * 0.053F,
+            static_cast<float>(i % 19) * 0.047F, static_cast<float>(i % 11) * 0.061F});
+    const auto points = tinytensor::Tensor::from_vector(queries,
+        {queries.size()/3, std::size_t{3}}, tinytensor::Device::CUDA);
+    for (unsigned neighbors : {1U, 4U, 32U, 64U}) {
+        const auto reference = detail::pam_field_gradients_reference(model, queries, neighbors);
+        const auto gpu = detail::pam_field_gradients(field, points, neighbors).to_vector();
+        for (std::size_t i = 0; i < gpu.size(); ++i) {
+            if (std::abs(gpu[i] - reference[i]) > 2e-4F * (1.F + std::abs(reference[i])))
+                std::cerr << "PAM field mismatch: k=" << neighbors << " component=" << i
+                          << " gpu=" << gpu[i] << " cpu=" << reference[i] << '\n';
+            require(std::abs(gpu[i] - reference[i]) <= 2e-4F * (1.F + std::abs(reference[i])),
+                "PAM CUDA exact-neighbor field differs from CPU");
+        }
+        auto updated = points.clone();
+        const std::vector<float> occupancy(queries.size()/3, 0.7F);
+        detail::pam_refine_points(field, updated, tinytensor::Tensor::from_vector(
+            occupancy, {occupancy.size()}, tinytensor::Device::CUDA), neighbors, 0.5F, 0.5F, 0.5F);
+        const auto actual = updated.to_vector();
+        for (std::size_t i = 0; i < occupancy.size(); ++i) {
+            const Eigen::Vector3f g(reference[3*i], reference[3*i+1], reference[3*i+2]);
+            Eigen::Vector3f expected(queries[3*i], queries[3*i+1], queries[3*i+2]);
+            if (g.squaredNorm() > 0.5F)
+                expected += 0.5F * std::clamp(0.2F/g.squaredNorm(), -1.F, 1.F) * g;
+            for (int axis = 0; axis < 3; ++axis)
+                require(std::abs(actual[3*i+axis] - expected[axis]) <= 2e-5F,
+                    "PAM CUDA fused point update differs from CPU");
+        }
+    }
+    // Cross the launch chunk boundary without a second large CPU search.
+    constexpr std::size_t large_count = 65537;
+    std::vector<float> large_queries(large_count * 3);
+    for (std::size_t i = 0; i < large_queries.size(); ++i)
+        large_queries[i] = queries[i % queries.size()];
+    const auto reference = detail::pam_field_gradients_reference(model, queries, 32);
+    const auto large_points = tinytensor::Tensor::from_vector(large_queries,
+        {large_count, std::size_t{3}}, tinytensor::Device::CUDA);
+    const auto large_gradients = detail::pam_field_gradients(field, large_points, 32).to_vector();
+    for (std::size_t i = 0; i < large_gradients.size(); ++i)
+        require(std::abs(large_gradients[i] - reference[i % reference.size()]) <=
+                2e-4F * (1.F + std::abs(reference[i % reference.size()])),
+            "PAM CUDA chunked field differs from CPU");
+    auto large_updated = large_points.clone();
+    detail::pam_refine_points(field, large_updated, tinytensor::Tensor::from_vector(
+        std::vector<float>(large_count, 0.7F), {large_count}, tinytensor::Device::CUDA),
+        32, 0.5F, 0.5F, 0.5F);
+    const auto actual = large_updated.to_vector();
+    for (std::size_t i = 0; i < large_count; ++i) {
+        const std::size_t offset = 3 * (i % (queries.size()/3));
+        const Eigen::Vector3f g(reference[offset], reference[offset+1], reference[offset+2]);
+        Eigen::Vector3f expected(queries[offset], queries[offset+1], queries[offset+2]);
+        if (g.squaredNorm() > 0.5F)
+            expected += 0.5F * std::clamp(0.2F/g.squaredNorm(), -1.F, 1.F) * g;
+        for (int axis = 0; axis < 3; ++axis)
+            require(std::abs(actual[3*i+axis] - expected[axis]) <= 2e-5F,
+                "PAM CUDA chunked point update differs from CPU");
+    }
+}
+
 void test_pam_smoke() {
 #if defined(PHOTARA_HAS_CGAL)
     namespace mvs = photara::mvs;
@@ -2607,6 +2716,7 @@ void test_pam_smoke() {
     options.occupancy_iso_value = 0.05F;
     options.vacancy_threshold = 1.F;
     options.occupancy_chunk_size = 512;
+    options.gpu_refinement = false;
     const auto result = splat::extract_pam_mesh(
         model, scene, seed, splat::TrainingOptions{}, options);
     require(
@@ -2634,6 +2744,76 @@ void test_pam_smoke() {
             "PAM topology orientation retained a non-manifold edge");
         begin = end;
     }
+#if defined(PHOTARA_HAS_OPENMP)
+    // Exercise both parallel loops and ensure scheduling does not change the
+    // random surface sampling or the per-point refinement result.
+    auto parallel_seed = seed;
+    for (int level = 0; level < 5; ++level) {
+        std::vector<Eigen::Vector3i> faces;
+        for (const auto& face : parallel_seed.faces) {
+            const int first = static_cast<int>(parallel_seed.vertices.size());
+            const mvs::Vec3f a = parallel_seed.vertices[face[0]];
+            const mvs::Vec3f b = parallel_seed.vertices[face[1]];
+            const mvs::Vec3f c = parallel_seed.vertices[face[2]];
+            parallel_seed.vertices.push_back(0.5F * (a + b));
+            parallel_seed.vertices.push_back(0.5F * (b + c));
+            parallel_seed.vertices.push_back(0.5F * (c + a));
+            faces.emplace_back(face[0], first, first + 2);
+            faces.emplace_back(first, face[1], first + 1);
+            faces.emplace_back(first + 2, first + 1, face[2]);
+            faces.emplace_back(first, first + 1, first + 2);
+        }
+        parallel_seed.faces = std::move(faces);
+    }
+    options.oversampling_factor = 32;
+    options.refinement_steps = 1;
+    const int previous_threads = omp_get_max_threads();
+    omp_set_num_threads(1);
+    const auto serial = splat::extract_pam_mesh(
+        model, scene, parallel_seed, splat::TrainingOptions{}, options);
+    omp_set_num_threads(4);
+    const auto parallel = splat::extract_pam_mesh(
+        model, scene, parallel_seed, splat::TrainingOptions{}, options);
+    omp_set_num_threads(previous_threads);
+    require(serial.candidate_cloud.points.size() == parallel.candidate_cloud.points.size(),
+            "PAM parallel refinement changed candidate count");
+    for (std::size_t i = 0; i < serial.candidate_cloud.points.size(); ++i)
+        require((serial.candidate_cloud.points[i].position.array() ==
+                 parallel.candidate_cloud.points[i].position.array()).all(),
+                "PAM parallel refinement changed candidate positions");
+    require(serial.mesh.vertices.size() == parallel.mesh.vertices.size() &&
+                serial.mesh.faces.size() == parallel.mesh.faces.size(),
+            "PAM parallel refinement changed mesh topology size");
+    options.gpu_refinement = true;
+    const auto gpu = splat::extract_pam_mesh(
+        model, scene, parallel_seed, splat::TrainingOptions{}, options);
+    require(gpu.candidate_cloud.points.size() == serial.candidate_cloud.points.size(),
+        "PAM CUDA extraction changed candidate count");
+    for (std::size_t i = 0; i < serial.candidate_cloud.points.size(); ++i)
+        require((serial.candidate_cloud.points[i].position -
+                 gpu.candidate_cloud.points[i].position).norm() < 2e-5F,
+            "PAM CUDA extraction changed refined candidate geometry");
+    // Cover device slices, accumulated updates and the CPU mask projection.
+    scene.views[0].foreground_mask.assign(64 * 64, 255);
+    for (std::size_t y = 0; y < 64; ++y)
+        for (std::size_t x = 0; x < 24; ++x)
+            scene.views[0].foreground_mask[64*y+x] = 0;
+    options.refinement_steps = 3;
+    options.occupancy_chunk_size = 257;
+    options.gpu_refinement = false;
+    const auto masked_cpu = splat::extract_pam_mesh(
+        model, scene, parallel_seed, splat::TrainingOptions{}, options);
+    options.gpu_refinement = true;
+    const auto masked_gpu = splat::extract_pam_mesh(
+        model, scene, parallel_seed, splat::TrainingOptions{}, options);
+    require(!masked_cpu.candidate_cloud.points.empty() &&
+            masked_cpu.candidate_cloud.points.size() == masked_gpu.candidate_cloud.points.size(),
+        "PAM masked CUDA extraction changed candidate count");
+    for (std::size_t i = 0; i < masked_cpu.candidate_cloud.points.size(); ++i)
+        require((masked_cpu.candidate_cloud.points[i].position -
+                 masked_gpu.candidate_cloud.points[i].position).norm() < 2e-5F,
+            "PAM masked CUDA extraction changed refined candidate geometry");
+#endif
 #endif
 }
 
@@ -6524,6 +6704,13 @@ int main(int argc, char** argv) {
             std::cout << "SKIP: no CUDA device\n";
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "--pam-only") {
+            test_pam_cuda_field();
+            test_normal_field_parameterization_and_occupancy();
+            test_pam_smoke();
+            std::cout << "PAM tests passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
             test_sh_adam_quant();
             test_vulkan_sh_adam_quant();
@@ -6585,6 +6772,7 @@ int main(int argc, char** argv) {
         test_normal_field_parameterization_and_occupancy();
         test_gaussian_format_roundtrip();
         test_pam_smoke();
+        test_pam_cuda_field();
         test_sample_depth_batch_boundary();
         test_contribution_visibility_rejects_occluded_gaussians();
         test_alpha_parameter_gradients();

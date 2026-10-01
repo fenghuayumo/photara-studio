@@ -570,6 +570,7 @@ if(PHOTARA_ENABLE_FEATURES)
 
         add_library(photara_splat_cuda STATIC
             src/splat/rasterizer.cu
+            src/splat/pam_cuda.cu
             src/splat/sh_adam_quant.cu
             src/splat/cuda_ops.cu
             src/splat/optimizer.cpp
@@ -592,6 +593,9 @@ if(PHOTARA_ENABLE_FEATURES)
         target_compile_definitions(photara_splat_cuda PUBLIC PHOTARA_HAS_SPLAT=1)
         target_compile_options(photara_splat_cuda PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda --expt-relaxed-constexpr -use_fast_math>)
+        # Match CPU nearest-neighbor distance ordering and field arithmetic.
+        set_source_files_properties(src/splat/pam_cuda.cu PROPERTIES
+            COMPILE_OPTIONS "--fmad=false;--prec-div=true;--prec-sqrt=true;--ftz=false")
         set_target_properties(photara_splat_cuda PROPERTIES
             CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
             CUDA_SEPARABLE_COMPILATION OFF

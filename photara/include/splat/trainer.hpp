@@ -115,6 +115,9 @@ struct PamMeshOptions {
     unsigned max_resample_rounds{4};
     unsigned refinement_steps{10};
     unsigned vector_field_neighbors{32};
+    // Exact CUDA KD-tree queries and device-resident refinement. CPU is kept
+    // as a reference and for neighbor counts exceeding the CUDA limit (64).
+    bool gpu_refinement{true};
     unsigned points_per_tetrahedron{10};
     float occupancy_iso_value{0.5F};
     float vacancy_threshold{0.1F};
