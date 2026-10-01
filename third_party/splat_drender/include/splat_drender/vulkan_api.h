@@ -311,6 +311,13 @@ private:
     friend class SplatRasterizer;
 };
 
+// Optional fused SH update. Buffer views start at aligned descriptor offsets;
+// first/packed views include the final word padding for half/byte accesses.
+struct SplatSHAdamUpdate {
+    SplatBufferView parameter, first, packed, bounds;
+    std::array<float, 8> settings{}; // DC/rest LR, beta1/2, corrections1/2, epsilon, regularization
+};
+
 // Vulkan EWA forward rasterizer. The per-Gaussian state, sorted instances, and
 // pixel snapshots from the latest forward() stay alive for a later backward pass.
 class SplatRasterizer {
@@ -385,12 +392,14 @@ public:
     //  log_scales, raw_rotations, opacity_logits, refine_weight] for the normal
     // scale/rotation representation. Covariance-only models retain six
     // covariance slots between rotations and log_scales. Slots that do not
-    // apply to the uploaded representation remain zero.
+    // apply to the uploaded representation remain zero. With sh_adam, the SH
+    // slots are omitted and parameters/state are updated directly in backward.
     void backward_device(
         const SplatBufferView& dL_color, const SplatBufferView& dL_alpha,
         const SplatBufferView& packed_model_gradients,
         const SplatBufferView& dL_median_depth = {},
-        const SplatBufferView& dL_normal = {});
+        const SplatBufferView& dL_normal = {},
+        const SplatSHAdamUpdate* sh_adam = nullptr);
     [[nodiscard]] std::uint64_t model_gradient_float_count() const noexcept;
     // GGGS multi-view median-depth query and its complete backward pass.
     // sample_depth_backward consumes the most recent sample_depth call.

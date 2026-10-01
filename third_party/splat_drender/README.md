@@ -102,6 +102,7 @@ shaders/
   splat_median_backward.hlsl  median-depth implicit backward
   splat_blend_backward.hlsl   RGB/alpha/depth/normal compositing backward
   splat_project_backward.hlsl projection, geometry, SH and activation backward
+  splat_project_backward_sh_adam.hlsl fused quantized SH Adam (no SH gradient buffer)
   splat_sample_depth*.hlsl    multi-view point-depth forward/backward
   splat_multi_view.hlsl       round-trip geometry and planar-NCC loss
 ```

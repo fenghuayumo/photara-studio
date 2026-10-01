@@ -336,9 +336,6 @@ ModelGradients vulkan_raster_backward(
     const auto profile_start = context->backend->profile_stages
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    if (sh_adam != nullptr)
-        throw std::invalid_argument(
-            "Fused SH Adam is not supported by the Vulkan raster primitive");
     if (structure_adam != nullptr)
         throw std::invalid_argument(
             "Fused structure Adam is not supported by the Vulkan raster primitive");
@@ -355,24 +352,50 @@ ModelGradients vulkan_raster_backward(
             "Vulkan backward requires a photometric color gradient");
 
     const std::size_t count = model.size();
-    const std::size_t sh_values = model.sh.numel();
+    const std::size_t sh_values = sh_adam ? 0 : model.sh.numel();
     // splat_project_backward writes every packed slot for every Gaussian,
     // including zeroing inactive/culled entries and unused SH coefficients.
     // Avoid a redundant ~60 MB device clear and its TinyTensor queue drain.
     auto packed = tinytensor::Tensor::empty(
-        {sh_values + count * 26U}, tinytensor::Device::Vulkan);
+        {context->backend->rasterizer.model_gradient_float_count() -
+            (sh_adam ? model.sh.numel() : 0)}, tinytensor::Device::Vulkan);
+    splat_drender::vulkan::SplatSHAdamUpdate update;
+    if (sh_adam) {
+        if (sh_adam->first.dtype() != tinytensor::DataType::Float16 ||
+            sh_adam->packed.dtype() != tinytensor::DataType::UInt8 ||
+            sh_adam->bounds.dtype() != tinytensor::DataType::Float32 ||
+            sh_adam->first.numel() != model.sh.numel() ||
+            sh_adam->packed.numel() != model.sh.numel() ||
+            sh_adam->bounds.numel() != count * 4)
+            throw std::invalid_argument("Vulkan fused SH Adam requires quantized state");
+        update.parameter = buffer_view(model.sh);
+        update.first = buffer_view(sh_adam->first);
+        update.packed = buffer_view(sh_adam->packed);
+        update.bounds = buffer_view(sh_adam->bounds);
+        // TinyTensor allocations are word-padded; byte/halfword codecs access
+        // complete words even when the last degree 0/2 row ends mid-word.
+        update.first.bytes = (update.first.bytes + 3) & ~VkDeviceSize{3};
+        update.packed.bytes = (update.packed.bytes + 3) & ~VkDeviceSize{3};
+        const std::size_t stride = model.sh.shape()[1] * 3;
+        const float regularization = stride > 3 && sh_adam->regularization_weight > 0.F
+            ? 2.F * sh_adam->regularization_weight / static_cast<float>(count * (stride - 3))
+            : 0.F;
+        update.settings = {sh_adam->lr, sh_adam->rest_lr, sh_adam->beta1, sh_adam->beta2,
+            sh_adam->correction1, sh_adam->correction2, sh_adam->epsilon, regularization};
+    }
     tinytensor::vulkan::submit_async();
     context->backend->rasterizer.backward_device(
         color_gradient, buffer_view(grad_alpha), buffer_view(packed),
-        buffer_view(grad_depth), buffer_view(grad_normal));
+        buffer_view(grad_depth), buffer_view(grad_normal), sh_adam ? &update : nullptr);
 
     std::size_t offset = 0;
     ModelGradients gradients;
     gradients.means = packed.slice(0, offset, offset + count * 3U)
         .reshape(tinytensor::TensorShape{count, std::size_t{3}});
     offset += count * 3U;
-    gradients.sh = packed.slice(0, offset, offset + sh_values)
-        .reshape(model.sh.shape());
+    if (!sh_adam)
+        gradients.sh = packed.slice(0, offset, offset + sh_values)
+            .reshape(model.sh.shape());
     offset += sh_values;
     offset += count;       // activated opacity
     offset += count * 3U;  // activated scale

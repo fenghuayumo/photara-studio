@@ -16,6 +16,17 @@
 [[vk::binding(13, 0)]] StructuredBuffer<float> filter_3d;
 [[vk::binding(14, 0)]] RWStructuredBuffer<float> model_grad;
 
+#ifdef SPLAT_FUSED_SH_ADAM
+#include "splat_sh_adam_fused.hlsli"
+#endif
+void write_sh_gradient(uint offset, float value) {
+#ifdef SPLAT_FUSED_SH_ADAM
+    sh_gradient[offset % (pc.u6 * 3u)] = value;
+#else
+    model_grad[3u * pc.u0 + offset] = value;
+#endif
+}
+
 struct D3 {
     float v;
     float3 d;
@@ -188,18 +199,18 @@ float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 cent
     float3 dir = original * inv;
     float3 dl = color_grad * float3(clamped.x == 0.0f, clamped.y == 0.0f, clamped.z == 0.0f);
     uint source = index * bases * 3u;
-    model_grad[feature_base + source] = C0 * dl.x;
-    model_grad[feature_base + source + 1u] = C0 * dl.y;
-    model_grad[feature_base + source + 2u] = C0 * dl.z;
+    write_sh_gradient(source, C0 * dl.x);
+    write_sh_gradient(source + 1u, C0 * dl.y);
+    write_sh_gradient(source + 2u, C0 * dl.z);
     float3 dx = 0.0f, dy = 0.0f, dz = 0.0f;
     float x = dir.x, y = dir.y, z = dir.z;
     if (degree > 0u) {
         float e[3] = {-C1 * y, C1 * z, -C1 * x};
         [unroll] for (uint b = 0u; b < 3u; ++b) {
             uint o = feature_base + source + (b + 1u) * 3u;
-            model_grad[o] = e[b] * dl.x;
-            model_grad[o + 1u] = e[b] * dl.y;
-            model_grad[o + 2u] = e[b] * dl.z;
+            write_sh_gradient(o - feature_base, e[b] * dl.x);
+            write_sh_gradient(o + 1u - feature_base, e[b] * dl.y);
+            write_sh_gradient(o + 2u - feature_base, e[b] * dl.z);
         }
         float3 c1 = float3(color_src[source + 3u], color_src[source + 4u], color_src[source + 5u]);
         float3 c2v = float3(color_src[source + 6u], color_src[source + 7u], color_src[source + 8u]);
@@ -219,9 +230,9 @@ float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 cent
                 uint so = source + (4u + j) * 3u;
                 uint go = feature_base + so;
                 float3 c = float3(color_src[so], color_src[so + 1u], color_src[so + 2u]);
-                model_grad[go] = C2[j] * q[j] * dl.x;
-                model_grad[go + 1u] = C2[j] * q[j] * dl.y;
-                model_grad[go + 2u] = C2[j] * q[j] * dl.z;
+                write_sh_gradient(go - feature_base, C2[j] * q[j] * dl.x);
+                write_sh_gradient(go + 1u - feature_base, C2[j] * q[j] * dl.y);
+                write_sh_gradient(go + 2u - feature_base, C2[j] * q[j] * dl.z);
                 dx += C2[j] * qx[j] * c;
                 dy += C2[j] * qy[j] * c;
                 dz += C2[j] * qz[j] * c;
@@ -245,9 +256,9 @@ float3 sh_backward(uint index, uint degree, uint bases, float3 mean, float3 cent
                     uint go3 = feature_base + so3;
                     float3 cc = float3(
                         color_src[so3], color_src[so3 + 1u], color_src[so3 + 2u]);
-                    model_grad[go3] = C3[j3] * q3[j3] * dl.x;
-                    model_grad[go3 + 1u] = C3[j3] * q3[j3] * dl.y;
-                    model_grad[go3 + 2u] = C3[j3] * q3[j3] * dl.z;
+                    write_sh_gradient(go3 - feature_base, C3[j3] * q3[j3] * dl.x);
+                    write_sh_gradient(go3 + 1u - feature_base, C3[j3] * q3[j3] * dl.y);
+                    write_sh_gradient(go3 + 2u - feature_base, C3[j3] * q3[j3] * dl.z);
                     dx += C3[j3] * qx3[j3] * cc;
                     dy += C3[j3] * qy3[j3] * cc;
                     dz += C3[j3] * qz3[j3] * cc;
@@ -415,8 +426,7 @@ void generic_geometry_backward(
     dt = float3(d_u * rz, d_v * rz, -(d_u * t.x + d_v * t.y) * rz * rz + d_z) + dt_center;
 }
 
-[numthreads(256, 1, 1)]
-void main(uint3 dispatch_id : SV_DispatchThreadID) {
+void project_backward(uint3 dispatch_id) {
     uint count = pc.u0;
     uint index = dispatch_id.x;
     if (index >= count) return;
@@ -446,6 +456,9 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float kernel = asfloat(pc.u15);
     float scale_modifier = asfloat(pc.u16);
     uint feature_count = has_sh ? count * bases * 3u : count * 3u;
+#ifdef SPLAT_FUSED_SH_ADAM
+    feature_count = 0u;
+#endif
     uint feature_base = 3u * count;
     uint opacity_base = feature_base + feature_count;
     uint scale_base = opacity_base + count;
@@ -461,7 +474,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         model_grad[3u * index + component] = 0.0f;
     uint feature_components = has_sh ? bases * 3u : 3u;
     for (uint feature = 0u; feature < feature_components; ++feature)
-        model_grad[feature_base + index * feature_components + feature] = 0.0f;
+        write_sh_gradient(index * feature_components + feature, 0.0f);
     model_grad[opacity_base + index] = 0.0f;
     [unroll] for (uint scale_component = 0u; scale_component < 3u; ++scale_component) {
         model_grad[scale_base + 3u * index + scale_component] = 0.0f;
@@ -789,4 +802,15 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         model_grad[logit_base + index] =
             gop * activated_opacity * (1.0f - opa);
     }
+}
+
+[numthreads(256, 1, 1)]
+void main(uint3 dispatch_id : SV_DispatchThreadID) {
+    if (dispatch_id.x >= pc.u0) return;
+    project_backward(dispatch_id);
+#ifdef SPLAT_FUSED_SH_ADAM
+    // Even culled rows decay their active state. All reads of the old SH
+    // coefficients (including the mean gradient) finish before updating them.
+    update_sh_row(dispatch_id.x);
+#endif
 }

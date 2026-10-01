@@ -26,6 +26,7 @@
 #include "splat_indirect_control.hlsl.embedded.hpp"
 #include "splat_pack_rgba.hlsl.embedded.hpp"
 #include "splat_project_backward.hlsl.embedded.hpp"
+#include "splat_project_backward_sh_adam.hlsl.embedded.hpp"
 #include "splat_preprocess.hlsl.embedded.hpp"
 #include "splat_radix_hist.hlsl.embedded.hpp"
 #include "splat_radix_hist_indirect.hlsl.embedded.hpp"
@@ -217,6 +218,9 @@ std::span<const std::byte> embedded_shader(const std::string& shader_name) {
     }
     if (shader_name == "splat_pack_rgba.hlsl.spv") {
         return std::as_bytes(std::span{splat_pack_rgba_hlsl_spv});
+    }
+    if (shader_name == "splat_project_backward_sh_adam.hlsl.spv") {
+        return std::as_bytes(std::span{splat_project_backward_sh_adam_hlsl_spv});
     }
     if (shader_name == "splat_project_backward.hlsl.spv") {
         return std::as_bytes(std::span{splat_project_backward_hlsl_spv});

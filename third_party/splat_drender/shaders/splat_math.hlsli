@@ -38,6 +38,9 @@ struct PushConstants {
     uint u17;
     uint u18;
     uint u19;
+#ifdef SPLAT_FUSED_SH_ADAM
+    float dc_lr, rest_lr, beta1, beta2, correction1, correction2, epsilon, regularization;
+#endif
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pc;

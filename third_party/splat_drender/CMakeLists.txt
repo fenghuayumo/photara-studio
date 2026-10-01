@@ -76,6 +76,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_multi_view.hlsl
             shaders/splat_clear.hlsl
             shaders/splat_project_backward.hlsl
+            shaders/splat_project_backward_sh_adam.hlsl
             shaders/splat_pack_rgba.hlsl)
         # Photometric training shaders belong to Photara's splat backend, not
         # the reusable rasterizer source tree. They are still embedded in the
@@ -112,6 +113,8 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated"
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_math.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_project_backward.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sh_adam_fused.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl"

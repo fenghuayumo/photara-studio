@@ -1977,6 +1977,135 @@ void test_sh_adam_quant() {
     }
 }
 
+void test_vulkan_fused_sh_adam() {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using photara::CameraModel;
+    using tinytensor::Tensor;
+    constexpr auto device = tinytensor::Device::Vulkan;
+    if (!tinytensor::vulkan::available()) return;
+    const auto compare = [](const std::vector<float>& reference,
+                            const std::vector<float>& actual, float abs_tol,
+                            float rel_tol, const char* message) {
+        require(reference.size() == actual.size(), message);
+        for (std::size_t i = 0; i < reference.size(); ++i) {
+            if (!std::isfinite(actual[i]) || std::abs(reference[i] - actual[i]) >
+                abs_tol + rel_tol * std::max(std::abs(reference[i]), std::abs(actual[i]))) {
+                std::cerr << message << " index=" << i << " reference=" << reference[i]
+                          << " actual=" << actual[i] << '\n';
+                require(false, message);
+            }
+        }
+    };
+    constexpr std::size_t n = 33;
+    std::vector<float> means_v(n * 3), rotation_values(n * 4), coefficients(n * 48);
+    for (std::size_t i = 0; i < n; ++i) {
+        means_v[i * 3] = .02F * float(int(i % 11) - 5);
+        means_v[i * 3 + 1] = .02F * float(int(i % 7) - 3);
+        means_v[i * 3 + 2] = 2.F + .001F * i;
+        rotation_values[i * 4] = 1.F;
+        for (std::size_t j = 0; j < 48; ++j)
+            coefficients[i * 48 + j] = .04F * std::sin(float(i + j));
+    }
+    means_v[(n - 1) * 3 + 2] = -2.F;
+    Camera camera;
+    camera.width = 37;
+    camera.height = 29;
+    camera.fx = 25;
+    camera.fy = 25;
+    camera.cx = 18;
+    camera.cy = 14;
+    camera.model = CameraModel::pinhole;
+    camera.world_to_camera = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const std::size_t pixels = camera.width * camera.height;
+    std::vector<float> probe(pixels * 3);
+    for (std::size_t i = 0; i < probe.size(); ++i)
+        probe[i] = .001F * std::cos(float(i));
+    const auto color_grad = Tensor::from_vector(
+        probe, {3, camera.height, camera.width}, device);
+    const auto alpha_grad = Tensor::from_vector(
+        std::vector<float>(pixels, .001F), {camera.height, camera.width}, device);
+    Rasterizer rasterizer, fused_rasterizer;
+    TrainingOptions training;
+    training.sh_regularization_weight = .03F;
+    for (bool geometry : {false, true}) {
+    for (unsigned bases : {1U, 4U, 9U, 16U}) {
+    for (unsigned degree = 0; (degree + 1) * (degree + 1) <= bases; ++degree) {
+        GaussianModel reference;
+        reference.means = Tensor::from_vector(means_v, {n, 3}, device);
+        reference.log_scales = Tensor::from_vector(
+            std::vector<float>(n * 3, -.7F), {n, 3}, device);
+        reference.quaternions = Tensor::from_vector(rotation_values, {n, 4}, device);
+        reference.opacity_logits = Tensor::from_vector(
+            std::vector<float>(n, -3.F), {n, 1}, device);
+        reference.sh = Tensor::from_vector(std::vector<float>(coefficients.begin(), coefficients.begin() + n * bases * 3), {n, bases, 3}, device);
+        reference.sh_degree = unsigned(std::sqrt(float(bases))) - 1;
+        auto fused = reference;
+        fused.means = reference.means.clone();
+        fused.log_scales = reference.log_scales.clone();
+        fused.quaternions = reference.quaternions.clone();
+        fused.opacity_logits = reference.opacity_logits.clone();
+        fused.sh = reference.sh.clone();
+        auto reference_quant = detail::make_sh_adam_quant(n, int(bases * 3), device);
+        auto fused_quant = detail::make_sh_adam_quant(n, int(bases * 3), device);
+        RasterizeOptions raster_options;
+        raster_options.active_sh_degree = degree;
+        raster_options.require_depth = geometry;
+        const int active_stride = int(degree + 1) * int(degree + 1) * 3;
+        for (unsigned iteration = 1; iteration <= 24; ++iteration) {
+            const auto ref_render = rasterizer.forward(
+                reference, camera, raster_options);
+            const auto fused_render = fused_rasterizer.forward(
+                fused, camera, raster_options);
+            auto grads = rasterizer.backward(
+                reference, ref_render, color_grad, alpha_grad, {}, {});
+            const float c1 = 1.F - std::pow(training.beta1, float(iteration));
+            const float c2 = 1.F - std::pow(training.beta2, float(iteration));
+            detail::sh_adam_quant_step(
+                reference.sh, grads.sh, reference_quant, active_stride,
+                training.sh0_lr, training.sh_rest_lr, training.beta1,
+                training.beta2, c1, c2, training.adam_epsilon,
+                bases > 1 ? 2.F * training.sh_regularization_weight / float(n * (bases * 3 - 3)) : 0.F);
+            SHAdamUpdate update;
+            update.first = fused_quant.first;
+            update.packed = fused_quant.packed;
+            update.bounds = fused_quant.bounds;
+            update.lr = training.sh0_lr;
+            update.rest_lr = training.sh_rest_lr;
+            update.beta1 = training.beta1;
+            update.beta2 = training.beta2;
+            update.correction1 = c1;
+            update.correction2 = c2;
+            update.epsilon = training.adam_epsilon;
+            update.regularization_weight = training.sh_regularization_weight;
+            const auto fused_grads = fused_rasterizer.backward(
+                fused, fused_render, color_grad, alpha_grad, {}, {}, {},
+                &update);
+            require(!fused_grads.sh.is_valid(),
+                "quantized fused SH backward kept a gradient buffer");
+            compare(reference.sh.to_vector(), fused.sh.to_vector(), 2e-5F, 1e-4F,
+                "fused quant SH degree diverged from the standalone kernel");
+            compare(grads.means.to_vector(), fused_grads.means.to_vector(), 2e-6F, 1e-4F,
+                "fused SH changed the mean gradient");
+            compare(grads.opacity_logits.to_vector(), fused_grads.opacity_logits.to_vector(), 2e-6F, 1e-4F,
+                "fused SH changed the opacity gradient layout");
+            compare(grads.log_scales.to_vector(), fused_grads.log_scales.to_vector(), 2e-6F, 1e-4F,
+                "fused SH changed the scale gradient layout");
+            compare(grads.quaternions.to_vector(), fused_grads.quaternions.to_vector(), 2e-6F, 1e-4F,
+                "fused SH changed the rotation gradient layout");
+            compare(reference_quant.first.to(tinytensor::DataType::Float32).to_vector(),
+                fused_quant.first.to(tinytensor::DataType::Float32).to_vector(), 2e-3F, 2e-3F,
+                "fused SH first state diverged");
+            compare(reference_quant.bounds.to_vector(), fused_quant.bounds.to_vector(), 2e-4F, 1e-4F,
+                "fused SH bounds diverged");
+        }
+    }
+    }
+    }
+    std::cout << "Vulkan fused SH Adam trajectory and gradient layout tests passed\n";
+#endif
+}
+
 void test_fused_structure_adam() {
     using namespace photara::splat;
     using photara::CameraModel;
@@ -6398,6 +6527,7 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
             test_sh_adam_quant();
             test_vulkan_sh_adam_quant();
+            test_vulkan_fused_sh_adam();
             test_fused_structure_adam();
             test_training_device_cache();
             std::cout << "Memory optimization tests passed\n";
@@ -6406,6 +6536,7 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string(argv[1]) == "--sh-quant-only") {
             test_sh_adam_quant();
             test_vulkan_sh_adam_quant();
+            test_vulkan_fused_sh_adam();
             return 0;
         }
         test_thin_splat_rgb_backward();
@@ -6449,6 +6580,7 @@ int main(int argc, char** argv) {
         test_forward_backward();
         test_sh_adam_quant();
         test_vulkan_sh_adam_quant();
+        test_vulkan_fused_sh_adam();
         test_fused_structure_adam();
         test_normal_field_parameterization_and_occupancy();
         test_gaussian_format_roundtrip();

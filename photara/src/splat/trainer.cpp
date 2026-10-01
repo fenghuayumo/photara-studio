@@ -1915,7 +1915,7 @@ GaussianModel Trainer::train(
         // Auxiliary normal-field / multi-view merges retain the resident
         // gradient path. Empty renders also use the standalone optimizer
         // for zero-gradient decay.
-        const bool fused_sh = !vulkan_backend && options_.fuse_sh_adam &&
+        const bool fused_sh = options_.fuse_sh_adam &&
             !normal_field_active &&
             rendered.rendered_instances > 0 && model.sh.shape()[1] <= 16;
         const bool fused_structure = !vulkan_backend && !normal_field_active &&
