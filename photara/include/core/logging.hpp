@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdint>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -19,6 +20,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace photara::core {
 
@@ -96,6 +98,48 @@ public:
         return path_;
     }
 
+    void set_crash_directory(const std::filesystem::path& directory) {
+        std::lock_guard lock(mutex_);
+        crash_directory_ = directory;
+    }
+
+    // Recent lines plus a crash stamp. Empty path means the dump could not
+    // be created. Safe to call from terminate / unhandled-exception paths.
+    std::filesystem::path dump_crash_log() {
+        std::vector<std::string> snapshot;
+        std::filesystem::path directory;
+        {
+            std::lock_guard lock(mutex_);
+            snapshot.assign(ring_.begin(), ring_.end());
+            directory = crash_directory_;
+        }
+        std::error_code error;
+        if (directory.empty()) {
+            directory = std::filesystem::temp_directory_path(error) /
+                "Photara" / "crashes";
+            if (error) directory = std::filesystem::path("photara_crashes");
+        }
+        std::filesystem::create_directories(directory, error);
+        if (error) return {};
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t time = std::chrono::system_clock::to_time_t(now);
+        const std::tm tm = local_time(time);
+        const auto milliseconds = std::chrono::duration_cast<
+            std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+        std::ostringstream name;
+        name << "photara-crash-" << std::put_time(&tm, "%Y%m%d-%H%M%S") << '-'
+             << std::setfill('0') << std::setw(3) << milliseconds.count()
+             << ".log";
+        const std::filesystem::path path = directory / name.str();
+        std::ofstream out(path, std::ios::out | std::ios::trunc);
+        if (!out) return {};
+        if (snapshot.empty())
+            out << "no buffered log lines\n";
+        else
+            for (const std::string& line : snapshot) out << line;
+        return path;
+    }
+
     void set_levels(const LogLevel console_level, const LogLevel file_level) {
         std::lock_guard lock(mutex_);
         console_level_ = console_level;
@@ -160,13 +204,19 @@ private:
             file_ << line.str();
             file_.flush();
         }
+        ring_.push_back(line.str());
+        while (ring_.size() > k_ring_lines) ring_.pop_front();
     }
+
+    static constexpr std::size_t k_ring_lines = 512;
 
     mutable std::mutex mutex_;
     std::atomic<LogLevel> console_level_{LogLevel::warning};
     std::atomic<LogLevel> file_level_{LogLevel::off};
     std::ofstream file_;
     std::filesystem::path path_;
+    std::filesystem::path crash_directory_;
+    std::deque<std::string> ring_;
 };
 
 class StageScope {

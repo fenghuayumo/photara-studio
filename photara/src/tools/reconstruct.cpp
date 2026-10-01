@@ -517,7 +517,7 @@ void print_help(const cxxopts::Options& options) {
               << "  .sog/.spz/.glb  trained Gaussian file (format from the suffix)\n"
               << "  .mvs    OpenMVS Interface (interop export)\n"
               << "  --export-mvs [path]  also write OpenMVS Interface after SfM\n"
-              << "  --gui  editor: no ascan/asfm/PLY sidecars, eval PNG, extra log\n"
+              << "  --gui  editor: no ascan/asfm/PLY sidecars, eval PNG\n"
               << "  --working-sfm PATH  compact SfM working copy for --gui\n"
               << "  --working-splat PATH  trained Gaussian working copy for --gui\n"
               << "  --working-mesh PATH  mesh working copy for --gui\n"
@@ -537,7 +537,8 @@ void print_help(const cxxopts::Options& options) {
               << "  --video-redo  ignore a previous extract and write frames again\n"
               << "  with --dense: also writes dense.ply next to --output\n"
               << "  with --texture: also writes *_textured.obj/.mtl/_albedo.png\n"
-              << "Log level: set PHOTARA_LOG_LEVEL=error|warning|info|debug|trace|off\n";
+              << "Log: console only. Uncaught failures write photara-crash-*.log next to --output.\n"
+                 "PHOTARA_LOG_LEVEL=error|warning|info|debug|trace|off\n";
 }
 
 bool parse_device_uuid(
@@ -605,7 +606,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          "Output path (.ascan, .asfm, .ply, .mvs, or .sog/.spz/.glb for Gaussians)",
          cxxopts::value<std::string>())
         ("gui",
-         "Editor run: skip ascan/asfm/PLY sidecars, eval dumps, and extra log file",
+         "Editor run: skip ascan/asfm/PLY sidecars and eval dumps",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("working-sfm",
          "Compact SfM working copy used by --gui (read on --splat, write after SfM)",
@@ -3869,6 +3870,22 @@ std::optional<photara::mvs::Mesh> run_splat_training(
 }
 #endif
 
+void write_crash_log() noexcept {
+    try {
+        const auto path = photara::core::Logger::instance().dump_crash_log();
+        if (!path.empty())
+            std::cerr << "crash log: " << path.string() << '\n';
+    } catch (...) {
+    }
+}
+
+#if defined(_WIN32)
+LONG WINAPI unhandled_crash(EXCEPTION_POINTERS*) {
+    write_crash_log();
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 }  // namespace
 
 #if defined(_WIN32)
@@ -3892,8 +3909,10 @@ int main(int argc, char** argv) {
                 "invalid_parameter function=", narrow(function),
                 " file=", narrow(file), " line=", line,
                 " expression=", narrow(expression));
+            write_crash_log();
             std::_Exit(3);
         });
+    SetUnhandledExceptionFilter(unhandled_crash);
 #endif
     // A terminate from a worker thread or a destructor used to abort without
     // leaving any trace in the log; report what is known before aborting.
@@ -3915,6 +3934,7 @@ int main(int argc, char** argv) {
             }
         } catch (...) {
         }
+        write_crash_log();
         std::abort();
     });
     try {
@@ -3936,18 +3956,15 @@ int main(int argc, char** argv) {
             ? photara::core::parse_log_level(
                   configured_level, photara::core::LogLevel::info)
             : photara::core::LogLevel::info;
-        std::filesystem::path log_directory = cli.output.parent_path();
-        if (log_directory.empty()) log_directory = std::filesystem::current_path();
-        const std::filesystem::path log_path =
-            photara::core::Logger::instance().configure(
-                cli.gui ? std::filesystem::path{} : log_directory,
-                "photara", console_level,
-                cli.gui ? photara::core::LogLevel::off
-                        : photara::core::LogLevel::trace);
+        std::filesystem::path crash_directory = cli.output.parent_path();
+        if (crash_directory.empty())
+            crash_directory = std::filesystem::current_path();
+        photara::core::Logger::instance().configure(
+            {}, "photara", console_level, photara::core::LogLevel::off);
+        photara::core::Logger::instance().set_crash_directory(crash_directory);
         photara::core::Logger::instance().info(
             PHOTARA_VERSION_STRING, " started: mode=", cli.mode,
-            " images_dir=", cli.images_dir, " output=", cli.output,
-            " log=", log_path);
+            " images_dir=", cli.images_dir, " output=", cli.output);
 
         const auto output_ext = lower_extension(cli.output);
         const bool project_output = output_ext == ".ascan";
@@ -4711,7 +4728,7 @@ int main(int argc, char** argv) {
             " peak_working_set_mb=",
             static_cast<double>(peak_working_set_bytes()) / (1024.0 * 1024.0),
             " failed=", summary.failed_views, " elapsed_s=", elapsed,
-            " output=", cli.output, " log=", log_path);
+            " output=", cli.output);
         return summary.valid ? 0 : 2;
     } catch (const std::exception& error) {
         photara::core::Logger::instance().error("error: ", error.what());

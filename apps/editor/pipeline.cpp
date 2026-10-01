@@ -972,6 +972,10 @@ void ProcessJob::start(
     exit_code_ = -1;
     completion_pending_ = false;
 #if defined(_WIN32)
+    if (!log.parent_path().empty()) {
+        std::error_code directory_error;
+        std::filesystem::create_directories(log.parent_path(), directory_error);
+    }
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE log_handle = CreateFileW(
         log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -1019,6 +1023,10 @@ void ProcessJob::start(
     process_ = info.hProcess;
     CloseHandle(info.hThread);
 #else
+    if (!log.parent_path().empty()) {
+        std::error_code directory_error;
+        std::filesystem::create_directories(log.parent_path(), directory_error);
+    }
     const int log_fd = ::open(
         log.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (log_fd < 0) {
@@ -1203,11 +1211,6 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.mvs_mesh_ply = with_suffix("_mesh.ply");
     layout.mvs_raw_mesh_ply = with_suffix("_mvs_mesh.ply");
     layout.dense_ply = with_suffix("_dense.ply");
-    layout.align_log = with_suffix("_align.log");
-    layout.train_log = with_suffix("_train.log");
-    layout.dense_log = with_suffix("_dense.log");
-    layout.texture_log = with_suffix("_texture.log");
-    layout.export_log = with_suffix("_export.log");
     // Working copies (sfm.bin, splat.ply, mesh/dense, preview sidecars) sit
     // next to the project by default so a dataset on a data drive cannot fill
     // the system drive with multi-GB caches. A configured cache folder
@@ -1251,6 +1254,12 @@ ProjectLayout resolve_layout(const ProjectSettings& settings) {
     layout.align_live = layout.session_dir / "align.live";
     layout.align_preview = layout.session_dir / "align.preview.asfm";
     layout.working_subject_bounds = layout.session_dir / "subject_bounds.txt";
+    // Job stdout for the Console panel. Session temp, not the dataset folder.
+    layout.align_log = layout.session_dir / "align.log";
+    layout.train_log = layout.session_dir / "train.log";
+    layout.dense_log = layout.session_dir / "dense.log";
+    layout.texture_log = layout.session_dir / "texture.log";
+    layout.export_log = layout.session_dir / "export.log";
     return layout;
 }
 

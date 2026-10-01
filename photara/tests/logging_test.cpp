@@ -39,9 +39,18 @@ int main() {
         contents.find("[trace] trace-message") != std::string::npos &&
         contents.find("progress finished: parallel-work completed=400/400") !=
             std::string::npos;
+    Logger::instance().set_crash_directory(directory);
+    const fs::path crash_path = Logger::instance().dump_crash_log();
+    std::ifstream crash_input(crash_path);
+    const std::string crash_contents{
+        std::istreambuf_iterator<char>(crash_input),
+        std::istreambuf_iterator<char>()};
+    const bool crash_valid =
+        !crash_path.empty() &&
+        crash_contents.find("[error] error-message") != std::string::npos;
     Logger::instance().configure({}, "logging-test", LogLevel::off, LogLevel::off);
     fs::remove_all(directory, ignored);
-    if (!valid) {
+    if (!valid || !crash_valid) {
         std::cerr << "logger/progress output validation failed\n";
         return 1;
     }

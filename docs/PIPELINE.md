@@ -140,8 +140,9 @@ Artifacts use the stem and parent directory of `--output`.
 | `*_textured.obj/.mtl/_albedo.png` | `--texture` | textured mesh and albedo |
 | depth/normal/alpha PNGs | diagnostics enabled | intermediate visualizations |
 
-GUI mode keeps working copies and logs but skips ordinary sidecar exports and
-evaluation PNGs.
+GUI mode keeps working copies but skips ordinary sidecar exports and
+evaluation PNGs. Reconstruction logs stay on the console (CLI) or the Studio
+Console panel. Uncaught failures dump `photara-crash-*.log` next to `--output`.
 
 ## 6. Invariants and boundaries
 
