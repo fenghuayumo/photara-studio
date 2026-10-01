@@ -1724,44 +1724,12 @@ GaussianModel Trainer::train(
                 loss_render, target, options_, report_progress,
                 depth_normal_active, allocate_geometry_gradients);
         }
-        RenderResult normal_field_render;
-        detail::LossGradients normal_field_loss;
-        ModelGradients normal_field_gradients;
         if (options_.use_normal_field &&
             iteration == std::max(options_.normal_field_from_iter, 1U)) {
             model.normal_features =
                 normal_features_from_smallest_axis(model);
             normal_features_state =
                 detail::make_adam_state(model.normal_features);
-        }
-        if (normal_field_active) {
-            RasterizeOptions normal_options = raster_options;
-            normal_options.colors_precomp =
-                detail::normal_features_to_normals(model.normal_features);
-            normal_options.require_depth = true;
-            normal_field_render = rasterizer.forward(
-                model, target.camera, normal_options);
-            normal_field_loss = detail::compute_normal_field_loss(
-                normal_field_render, target.camera,
-                options_.normal_field_weight *
-                    options_.normal_field_depth_ratio,
-                report_progress);
-            normal_field_gradients = rasterizer.backward(
-                model, normal_field_render, normal_field_loss.color,
-                normal_field_loss.alpha, normal_field_loss.depth,
-                normal_field_loss.normal);
-            normal_field_gradients.normal_features =
-                detail::normal_features_backward(
-                    model.normal_features,
-                    normal_field_gradients.colors_precomp);
-            if (report_progress) {
-                loss.total += normal_field_loss.total;
-                loss.normal_value += normal_field_loss.normal_value;
-            }
-            // All normal-field backward work is queued on the same stream.
-            // Its gradients own their storage, so release the completed render
-            // before allocating multi-view workspaces and the main backward.
-            normal_field_render = {};
         }
         cuda_profiler.mark(CudaTrainingStage::training_loss);
         detail::MultiViewLoss multi_view_loss;
@@ -1968,9 +1936,35 @@ GaussianModel Trainer::train(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
             densify_map, fused_sh ? &sh_update : nullptr,
             fused_structure ? &structure_update : nullptr);
-        if (normal_field_active)
+        ModelGradients normal_field_gradients;
+        if (normal_field_active) {
+            // Normal-field supervision uses the same unchanged model, but its
+            // render need not overlap the main render's bucket snapshots. Keep
+            // owned outputs (radii/visibility) for ADC; only release CUDA state.
+            rendered.context.impl.reset();
+            RasterizeOptions normal_options = raster_options;
+            normal_options.colors_precomp =
+                detail::normal_features_to_normals(model.normal_features);
+            normal_options.require_depth = true;
+            const RenderResult normal_field_render = rasterizer.forward(
+                model, target.camera, normal_options);
+            const auto normal_field_loss = detail::compute_normal_field_loss(
+                normal_field_render, target.camera,
+                options_.normal_field_weight * options_.normal_field_depth_ratio,
+                report_progress);
+            normal_field_gradients = rasterizer.backward(
+                model, normal_field_render, normal_field_loss.color,
+                normal_field_loss.alpha, normal_field_loss.depth,
+                normal_field_loss.normal);
+            normal_field_gradients.normal_features = detail::normal_features_backward(
+                model.normal_features, normal_field_gradients.colors_precomp);
+            if (report_progress) {
+                loss.total += normal_field_loss.total;
+                loss.normal_value += normal_field_loss.normal_value;
+            }
             detail::add_model_gradients(
                 normal_field_gradients, gradients, false);
+        }
         cuda_profiler.mark(CudaTrainingStage::raster_backward);
         if (has_multi_view_sample_gradients)
             detail::add_sample_depth_model_gradients(
