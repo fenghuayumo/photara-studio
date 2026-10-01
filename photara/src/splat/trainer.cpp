@@ -1758,6 +1758,10 @@ GaussianModel Trainer::train(
                 loss.total += normal_field_loss.total;
                 loss.normal_value += normal_field_loss.normal_value;
             }
+            // All normal-field backward work is queued on the same stream.
+            // Its gradients own their storage, so release the completed render
+            // before allocating multi-view workspaces and the main backward.
+            normal_field_render = {};
         }
         cuda_profiler.mark(CudaTrainingStage::training_loss);
         detail::MultiViewLoss multi_view_loss;

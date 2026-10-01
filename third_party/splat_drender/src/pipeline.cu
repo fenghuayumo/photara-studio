@@ -257,7 +257,7 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
                    const CameraView& cam, int visible, int instances,
                    bool pixel_geometry, bool gaussian_geometry,
                    GaussianState& gst, InstanceState& ist, TileState& tst,
-                   PixelState& pst) {
+                   PixelState& pst, bool pixel_workspace = true) {
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,
                                              (unsigned*)nullptr,
@@ -281,6 +281,9 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
     char* tpool = pools.tile(TileState::bytes(tiles, buckets_ub));
     tst = TileState::from_pool(tpool, tiles, buckets_ub);
 
+    // Point-depth backward consumes draw lists and point state only. Allocating
+    // raster bucket snapshots here can waste several GiB on dense models.
+    if (!pixel_workspace) return;
     const std::size_t pixels = std::size_t(cam.width) * cam.height;
     char* ppool =
         pools.pixel(PixelState::bytes(pixels, buckets_ub, pixel_geometry));
@@ -585,7 +588,7 @@ void Rasterizer::sample_depth_backward(
     TileState tst;
     PixelState pst;
     rebuild_views(pools, g, cam, counts.visible_count, counts.gaussian_instances,
-                  false, true, gst, ist, tst, pst);
+                  false, true, gst, ist, tst, pst, false);
 
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,

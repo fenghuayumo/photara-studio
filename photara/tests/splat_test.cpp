@@ -1,4 +1,5 @@
 #include "core/camera_projection.hpp"
+#include "core/vram_profiler.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
 #include "splat/colmap.hpp"
@@ -2902,6 +2903,19 @@ void test_pam_smoke() {
 
 void test_sample_depth_batch_boundary() {
     using namespace photara::splat;
+    auto& profiler = tinytensor::VramProfiler::instance();
+    struct RestoreProfiler {
+        tinytensor::VramProfiler& profiler;
+        bool enabled;
+        ~RestoreProfiler() { profiler.setEnabled(enabled); }
+    } restore_profiler{profiler, profiler.enabled()};
+    profiler.setEnabled(true);
+    const auto pixel_allocated_bytes = [&]() {
+        std::uint64_t bytes = 0;
+        for (const auto& row : profiler.snapshot().rows)
+            if (row.scope.ends_with("workspace.pixel")) bytes += row.allocated_bytes;
+        return bytes;
+    };
     GaussianModel model;
     model.means = tinytensor::Tensor::from_vector(
         std::vector<float>{0.F, 0.F, 2.F}, {1, 3},
@@ -2946,11 +2960,14 @@ void test_sample_depth_batch_boundary() {
         for (std::size_t index = 0; index < count; ++index)
             output_gradient[3 * index + 2] =
                 1.F / static_cast<float>(count);
+        const auto pixel_bytes_before = pixel_allocated_bytes();
         const auto gradients = rasterizer.sample_depth_backward(
             model, sampled,
             tinytensor::Tensor::from_vector(
                 output_gradient, {count, std::size_t{3}},
                 tinytensor::Device::CUDA));
+        require(pixel_allocated_bytes() == pixel_bytes_before,
+                "Point-depth backward allocated unused raster pixel snapshots");
         require_finite(
             gradients.points,
             "Non-finite sample-depth point gradient at tail boundary");
@@ -6792,6 +6809,16 @@ int main(int argc, char** argv) {
             test_normal_field_parameterization_and_occupancy();
             test_pam_smoke();
             std::cout << "PAM tests passed\n";
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--geometry-only") {
+            test_pinhole_geometry_finite_differences();
+            test_gggs_multi_view_geometry_and_ncc();
+            test_sample_depth_batch_boundary();
+            test_gggs_depth_normal_consistency();
+            test_gggs_depth_normal_parameter_gradients();
+            test_densification_strategies_and_dense_bypass();
+            std::cout << "Geometry tests passed\n";
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--memory-only") {
