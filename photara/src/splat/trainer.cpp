@@ -1940,15 +1940,18 @@ GaussianModel Trainer::train(
             model, rendered, *photo_grad, loss.alpha, loss.depth, loss.normal,
             densify_map, fused_sh ? &sh_update : nullptr,
             fused_structure ? &structure_update : nullptr);
+        // Backward has consumed CUDA projection/sort/snapshot state. Keep the
+        // owned radii/visibility outputs for ADC, without retaining old model
+        // storage during optimizer/refinement or an auxiliary render.
+        const std::weak_ptr<RasterContextImpl> primary_context = rendered.context.impl;
+        rendered.context.impl.reset();
+        if (!primary_context.expired())
+            throw std::logic_error("Training still retains the primary CUDA workspace");
         ModelGradients normal_field_gradients;
         if (normal_field_active) {
             // Normal-field supervision uses the same unchanged model, but its
             // render need not overlap the main render's bucket snapshots. Keep
             // owned outputs (radii/visibility) for ADC; only release CUDA state.
-            const std::weak_ptr<RasterContextImpl> primary_context = rendered.context.impl;
-            rendered.context.impl.reset();
-            if (!primary_context.expired())
-                throw std::logic_error("Normal-field render still retains the primary CUDA workspace");
             RasterizeOptions normal_options = raster_options;
             normal_options.colors_precomp =
                 detail::normal_features_to_normals(model.normal_features);
@@ -1971,6 +1974,11 @@ GaussianModel Trainer::train(
             }
             detail::add_model_gradients(
                 normal_field_gradients, gradients, false);
+            // Only the feature gradient is needed by the remaining optimizer.
+            // Auxiliary render gradients have already been consumed.
+            auto feature_gradient = std::move(normal_field_gradients.normal_features);
+            normal_field_gradients = {};
+            normal_field_gradients.normal_features = std::move(feature_gradient);
         }
         cuda_profiler.mark(CudaTrainingStage::raster_backward);
         if (has_multi_view_sample_gradients)
@@ -2395,9 +2403,11 @@ RenderMetrics render_evaluation_png(
     options.kernel_size = training_options.kernel_size;
     options.scale_modifier = training_options.scale_modifier;
     options.require_depth = false;
+    options.record_backward_state = false;
     Rasterizer rasterizer;
-    const RenderResult rendered = rasterizer.forward(
+    RenderResult rendered = rasterizer.forward(
         model, target.camera, options);
+    rendered.context.impl.reset();
     const float ssim = model.means.device() == tinytensor::Device::Vulkan
         ? 1.F - rasterizer.photometric_loss(
               rendered, target.rgb, target.mask, target.has_mask,

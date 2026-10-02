@@ -438,6 +438,7 @@ tinytensor::Tensor visualize(
         raster.kernel_size = options.kernel_size;
         raster.scale_modifier = options.scale_modifier;
         raster.require_depth = false;
+        raster.record_backward_state = false;
         return rasterizer.forward(model, camera, raster).color;
     }
     return render_debug_overlay(model, camera, options);

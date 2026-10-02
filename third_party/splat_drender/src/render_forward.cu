@@ -217,7 +217,8 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets,
                                       const uint2* __restrict__ range,
                                       unsigned* __restrict__ bucket_count,
                                       unsigned* __restrict__ bucket_offset,
-                                      unsigned* __restrict__ bucket_tile) {
+                                      unsigned* __restrict__ bucket_tile,
+                                      const unsigned* __restrict__ max_contributor) {
     using Scan = cub::BlockScan<unsigned, cfg::kTileThreads>;
     __shared__ Scan::TempStorage scan;
     const int tid = threadIdx.x;
@@ -226,7 +227,8 @@ __global__ void bucket_offsets_kernel(int tiles, int buckets,
         const int t = base + tid;
         unsigned v = 0;
         if (t < tiles) {
-            v = (range[t].y - range[t].x + 31u) >> 5;
+            v = ((max_contributor ? max_contributor[t] :
+                  range[t].y - range[t].x) + 31u) >> 5;
             bucket_count[t] = v;
         }
         // CUB preserves the inclusive integer offsets without the eight
@@ -279,14 +281,19 @@ blend_tile(const uint2* __restrict__ tile_range,
     const float2 pixf = make_float2(float(pix_x), float(pix_y));
 
     const uint2 range = tile_range[tile_id];
-    const int todo = range.y - range.x;
+    const unsigned bucket_end = pst.snap_ct ? bucket_offset[tile_id] : 0u;
+    const unsigned bucket_begin =
+        pst.snap_ct && tile_id > 0 ? bucket_offset[tile_id - 1] : 0u;
+    const int todo = pst.snap_ct
+        ? min(int(range.y - range.x), int(bucket_end - bucket_begin) * 32)
+        : int(range.y - range.x);
     const int rounds = (todo + cfg::kTileThreads - 1) / cfg::kTileThreads;
+    const bool color_needed = out_color || pst.snap_ct;
     // Global index of this tile's first bucket; every 32 instances of the
     // sorted list form one bucket whose 256-pixel state snapshot the
     // backward pass restarts from.
-    const unsigned bucket_base =
-        tile_id == 0 ? 0u : bucket_offset[tile_id - 1];
-    for (int b = block.thread_rank(); b < (todo + 31) / 32;
+    const unsigned bucket_base = bucket_begin;
+    for (int b = block.thread_rank(); pst.snap_ct && b < (todo + 31) / 32;
          b += cfg::kTileThreads)
         bucket_tile[bucket_base + b] = tile_id;
 
@@ -315,8 +322,9 @@ blend_tile(const uint2* __restrict__ tile_range,
             sid[block.thread_rank()] = g;
             sxy[block.thread_rank()] = mean2d[g];
             sconic[block.thread_rank()] = conic_opacity[g];
-            srgb[block.thread_rank()] =
-                colors ? reinterpret_cast<const float3*>(colors)[g] : rgb[g];
+            if (color_needed)
+                srgb[block.thread_rank()] =
+                    colors ? reinterpret_cast<const float3*>(colors)[g] : rgb[g];
             if constexpr (GEOMETRY) {
                 splane[block.thread_rank()] = ray_plane[g];
                 snormal[block.thread_rank()] = normal[g];
@@ -328,7 +336,7 @@ blend_tile(const uint2* __restrict__ tile_range,
         for (int sub = 0; sub < n_sub; ++sub) {
             // Snapshot live pixel state at every 32-instance boundary; done
             // pixels terminated earlier never read their snapshot back.
-            if (!done) {
+            if (!done && pst.snap_ct) {
                 const std::size_t slot =
                     (std::size_t(bucket_base + round * 8 + sub) << 8) +
                     block.thread_rank();
@@ -360,10 +368,12 @@ blend_tile(const uint2* __restrict__ tile_range,
                 }
 
                 const float a_t = alpha * transmittance;
-                visibility[sid[j]] = 1.f;  // ADC+ observed flag, benign repeats
-                color[0] += srgb[j].x * a_t;
-                color[1] += srgb[j].y * a_t;
-                color[2] += srgb[j].z * a_t;
+                if (visibility) visibility[sid[j]] = 1.f;
+                if (color_needed) {
+                    color[0] += srgb[j].x * a_t;
+                    color[1] += srgb[j].y * a_t;
+                    color[2] += srgb[j].z * a_t;
+                }
                 if constexpr (GEOMETRY) {
                     const float4 rp = splane[j];
                     const float3 n = snormal[j];
@@ -468,18 +478,19 @@ blend_tile(const uint2* __restrict__ tile_range,
     }
 
     if (inside) {
-        n_contrib[pix_id] = last_contributor;
+        if (n_contrib) n_contrib[pix_id] = last_contributor;
         // Keep the no-background accumulated color so the bucket backward
         // can rebuild its "color after" state without the rendered image.
 #pragma unroll
         for (int ch = 0; ch < 3; ++ch)
-            pst.total_color[ch * width * height + pix_id] = color[ch];
+            if (pst.total_color)
+                pst.total_color[ch * width * height + pix_id] = color[ch];
 #pragma unroll
         for (int ch = 0; ch < 3; ++ch)
-            out_color[ch * width * height + pix_id] =
+            if (out_color) out_color[ch * width * height + pix_id] =
                 color[ch] + transmittance *
                     (ch == 0 ? background.x : ch == 1 ? background.y : background.z);
-        out_alpha[pix_id] = 1.f - transmittance;
+        if (out_alpha) out_alpha[pix_id] = 1.f - transmittance;
         if constexpr (GEOMETRY) {
             const float rln = pixel_ray_z(pixf.x, pixf.y, K);
             out_median_depth[pix_id] = median_depth * rln;
@@ -569,9 +580,10 @@ void extract_ranges(int instance_count, const unsigned* tile_key,
 
 void bucket_offsets(int tiles, int buckets, const uint2* range,
                     unsigned* bucket_count, unsigned* bucket_offset,
-                    unsigned* bucket_tile) {
+                    unsigned* bucket_tile, const unsigned* max_contributor) {
     kernels::bucket_offsets_kernel<<<1, cfg::kTileThreads>>>(
-        tiles, buckets, range, bucket_count, bucket_offset, bucket_tile);
+        tiles, buckets, range, bucket_count, bucket_offset, bucket_tile,
+        max_contributor);
 }
 
 void blend(bool need_depth, const uint2* tile_range,

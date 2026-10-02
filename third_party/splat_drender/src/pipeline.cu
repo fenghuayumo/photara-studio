@@ -110,6 +110,16 @@ struct SortCounts {
     int instance_selector = 0;
 };
 
+bool compact_draw_indices(const WorkspacePools& pools, const InstanceState& ist,
+                          const SortCounts& counts) {
+    if (!pools.compact_instance || counts.instances <= 0) return false;
+    const std::size_t bytes = std::size_t(counts.instances) * sizeof(unsigned);
+    char* destination = pools.compact_instance(bytes);
+    check_cuda(cudaMemcpyAsync(destination, ist.instance_value[counts.instance_selector],
+                               bytes, cudaMemcpyDeviceToDevice), "compact draw indices");
+    return true;
+}
+
 // Per-Gaussian geometry scratch (ray plane + footprint normal, and their
 // gradient counterparts) is allocated when the render produces depth or
 // normals; RenderSettings::force_geometry_workspace restores the older
@@ -257,7 +267,8 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
                    const CameraView& cam, int visible, int instances,
                    bool pixel_geometry, bool gaussian_geometry,
                    GaussianState& gst, InstanceState& ist, TileState& tst,
-                   PixelState& pst, bool pixel_workspace = true) {
+                   PixelState& pst, bool pixel_workspace = true,
+                   int snapshot_buckets = -1, bool compact_instances = false) {
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,
                                              (unsigned*)nullptr,
@@ -268,11 +279,14 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
     gst = GaussianState::from_pool(gpool, g.count, scan_bytes,
                                    gaussian_geometry);
 
-    const std::size_t sort_bytes =
-        instance_sort_bytes(visible, instances);
-    char* ipool =
-        pools.instance(InstanceState::bytes(visible, instances, sort_bytes));
-    ist = InstanceState::from_pool(ipool, visible, instances, sort_bytes);
+    if (compact_instances) {
+        ist.instance_value[0] = reinterpret_cast<unsigned*>(
+            pools.compact_instance(std::size_t(instances) * sizeof(unsigned)));
+    } else {
+        const std::size_t sort_bytes = instance_sort_bytes(visible, instances);
+        char* ipool = pools.instance(InstanceState::bytes(visible, instances, sort_bytes));
+        ist = InstanceState::from_pool(ipool, visible, instances, sort_bytes);
+    }
 
     const int grid_x = (cam.width + cfg::kTileWidth - 1) / cfg::kTileWidth;
     const int grid_y = (cam.height + cfg::kTileHeight - 1) / cfg::kTileHeight;
@@ -285,9 +299,11 @@ void rebuild_views(const WorkspacePools& pools, const Gaussians& g,
     // raster bucket snapshots here can waste several GiB on dense models.
     if (!pixel_workspace) return;
     const std::size_t pixels = std::size_t(cam.width) * cam.height;
+    const std::size_t pixel_buckets = snapshot_buckets >= 0
+        ? std::size_t(snapshot_buckets) : buckets_ub;
     char* ppool =
-        pools.pixel(PixelState::bytes(pixels, buckets_ub, pixel_geometry));
-    pst = PixelState::from_pool(ppool, pixels, buckets_ub, pixel_geometry);
+        pools.pixel(PixelState::bytes(pixels, pixel_buckets, pixel_geometry));
+    pst = PixelState::from_pool(ppool, pixels, pixel_buckets, pixel_geometry);
 }
 
 struct PointListCounts {
@@ -432,18 +448,47 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
     // tail entries park at tile 0 and are rejected by the range test.
     const std::size_t buckets_ub =
         bucket_upper_bound(counts.instances, tiles);
-    if (buckets_ub > 0) {
+    const std::size_t pixels = std::size_t(cam.width) * cam.height;
+    std::size_t snapshot_buckets = buckets_ub;
+    const bool compact_snapshots = s.record_backward_state && s.compact_pixel_snapshots &&
+        PixelState::bytes(pixels, buckets_ub, s.need_depth) >
+            s.snapshot_compaction_threshold && buckets_ub > 0;
+    if (compact_snapshots) {
+        // Contributor-only prepass uses the identical alpha/termination
+        // calculation, without color, depth refinement or pixel storage.
+        PixelState pre;
+        launch::blend(false, tst.range,
+            ist.instance_value[counts.instance_selector], cam.width, cam.height,
+            K, wrap_width, gst.mean2d, gst.conic_opacity, gst.rgb, g.colors,
+            gst.ray_plane, gst.normal, gst.screen_bounds, pre.n_contrib,
+            tst.max_contributor, tst.bucket_offset, tst.bucket_tile, pre,
+            make_float3(s.background[0], s.background[1], s.background[2]),
+            nullptr, nullptr, nullptr, nullptr, nullptr,
+            dim3(grid_x, grid_y));
+        check_cuda(cudaGetLastError(), "snapshot contributor prepass");
+    }
+    if (s.record_backward_state && buckets_ub > 0) {
         launch::bucket_offsets(tiles, int(buckets_ub), tst.range,
                                tst.bucket_count, tst.bucket_offset,
-                               tst.bucket_tile);
+                               tst.bucket_tile, compact_snapshots
+                                   ? tst.max_contributor : nullptr);
         check_cuda(cudaGetLastError(), "bucket_offsets");
     }
+    if (compact_snapshots) {
+        unsigned exact_buckets = 0;
+        check_cuda(cudaMemcpy(&exact_buckets, tst.bucket_offset + tiles - 1,
+                              sizeof(exact_buckets), cudaMemcpyDeviceToHost),
+                   "snapshot bucket count readback");
+        snapshot_buckets = exact_buckets;
+    }
 
-    const std::size_t pixels = std::size_t(cam.width) * cam.height;
-    char* ppool =
-        pools.pixel(PixelState::bytes(pixels, buckets_ub, s.need_depth));
-    PixelState pst = PixelState::from_pool(ppool, pixels, buckets_ub,
-                                           s.need_depth);
+    PixelState pst;
+    if (s.record_backward_state) {
+        char* ppool = pools.pixel(PixelState::bytes(pixels, snapshot_buckets, s.need_depth));
+        pst = PixelState::from_pool(ppool, pixels, snapshot_buckets, s.need_depth);
+    } else {
+        snapshot_buckets = 0;
+    }
 
     launch::blend(
         s.need_depth, tst.range, ist.instance_value[counts.instance_selector],
@@ -460,6 +505,9 @@ ForwardResult Rasterizer::forward(const WorkspacePools& pools,
     r.instance_count = counts.instances;
     r.visible_count = counts.visible;
     r.instance_selector = counts.instance_selector;
+    r.snapshot_buckets = int(snapshot_buckets);
+    r.compact_instances = s.record_backward_state && compact_draw_indices(pools, ist, counts);
+    if (r.compact_instances) r.instance_selector = 0;
     return r;
 }
 
@@ -468,6 +516,8 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
                           const ForwardResult& fwd,
                           const ForwardOutputsView& fo,
                           const LossGradients& dL, const ModelGradients& grads) {
+    if (!s.record_backward_state)
+        throw std::logic_error("Cannot backpropagate an inference-only render");
     if (fwd.instance_count <= 0 || g.count <= 0) return;
     check(dL.color, "color gradient required");
     check(dL.alpha, "alpha gradient required");
@@ -485,7 +535,8 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
     const bool geometry_workspace =
         gaussian_workspace_geometry(s, s.need_depth);
     rebuild_views(pools, g, cam, fwd.visible_count, fwd.instance_count,
-                  s.need_depth, geometry_workspace, gst, ist, tst, pst);
+                  s.need_depth, geometry_workspace, gst, ist, tst, pst,
+                  true, fwd.snapshot_buckets, fwd.compact_instances);
 
     GradState gs = zero_grad_state(pools, g.count, geometry_workspace);
 
@@ -510,7 +561,7 @@ void Rasterizer::backward(const WorkspacePools& pools, const Gaussians& g,
         pst, dL.color, dL.median_depth, dL.alpha, dL.normal, gs,
         reinterpret_cast<float*>(gs.d_color), grads.refine_weight,
         dL.densify_map, grads.densify_weight, grads.densify_weight_den,
-        int(bucket_upper_bound(fwd.instance_count, grid_x * grid_y)));
+        fwd.snapshot_buckets);
     check_cuda(cudaGetLastError(), "blend_bucket_backward");
 
     run_gaussian_backward(g, cam, s, gst, gs, grads, fo.radii, g.sh != nullptr);
@@ -568,6 +619,8 @@ Rasterizer::SampleCounts Rasterizer::sample_depth(
     c.tile_blocks = tiles;
     c.instance_selector = counts.instance_selector;
     c.point_selector = point_counts.selector;
+    c.compact_instances = compact_draw_indices(pools, ist, counts);
+    if (c.compact_instances) c.instance_selector = 0;
     return c;
 }
 
@@ -588,7 +641,7 @@ void Rasterizer::sample_depth_backward(
     TileState tst;
     PixelState pst;
     rebuild_views(pools, g, cam, counts.visible_count, counts.gaussian_instances,
-                  false, true, gst, ist, tst, pst, false);
+                  false, true, gst, ist, tst, pst, false, -1, counts.compact_instances);
 
     std::size_t scan_bytes = 0;
     check_cuda(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes,

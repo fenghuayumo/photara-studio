@@ -63,6 +63,11 @@ struct RenderSettings {
     // eliminating the point-count host readback. SampleCounts::point_instances
     // is -1 (not collected) on this path; per-tile ranges remain exact.
     bool device_point_lists = false;
+    // Bound snapshot storage by contributors actually reached before opacity
+    // termination. The prepass preserves blending and gradient arithmetic.
+    bool compact_pixel_snapshots = true;
+    bool record_backward_state = true;
+    std::size_t snapshot_compaction_threshold = 512ULL * 1024 * 1024;
 };
 
 struct RenderOutputs {
@@ -163,6 +168,8 @@ struct ForwardResult {
     int visible_count = 0;
     // CUB DoubleBuffer selector after the tile-id sort (0 or 1).
     int instance_selector = 0;
+    int snapshot_buckets = 0;
+    bool compact_instances = false;
 };
 
 struct SampleOutputs {
@@ -205,6 +212,9 @@ struct WorkspacePools {
     std::function<char*(std::size_t)> pixel;     // per-pixel forward state
     std::function<char*(std::size_t)> tile;      // per-tile state
     std::function<char*(std::size_t)> point;     // point-query state
+    // Optional final draw indices; lets callers release sort preparation pools
+    // after forward/sample_depth without retaining them through backward.
+    std::function<char*(std::size_t)> compact_instance;
 };
 
 class Rasterizer {
@@ -232,6 +242,7 @@ public:
         int tile_blocks = 0;
         int instance_selector = 0;
         int point_selector = 0;
+        bool compact_instances = false;
     };
     static SampleCounts sample_depth(
         const WorkspacePools& pools, const Gaussians& g, const CameraView& cam,

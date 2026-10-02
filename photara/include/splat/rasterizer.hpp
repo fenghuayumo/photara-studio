@@ -24,6 +24,11 @@ struct RasterizeOptions {
     // the photometric loss. Regular render callers keep the eager default.
     bool defer_visibility{false};
     bool debug{false};
+    // CUDA inference/preview callers can omit all backward-only pixel state.
+    bool record_backward_state{true};
+    bool compact_pixel_snapshots{true};
+    bool compact_instance_storage{true};
+    std::size_t snapshot_compaction_threshold{512ULL * 1024 * 1024};
     // Multi-view point queries (sample_depth): median-depth seed window in
     // world units, and the bracket width at which refinement stops. Zero keeps
     // the wide default search (+/-200 with 8 refinements), which is far more
@@ -76,6 +81,7 @@ struct OccupancyCache {
 
 struct OccupancyCacheStats {
     std::size_t prepared_views{}, queries{}, device_bytes{}, host_bytes{};
+    std::size_t preparations{};
 };
 
 class Rasterizer {
@@ -123,12 +129,14 @@ public:
         const Camera& camera,
         const RasterizeOptions& options = {}) const;
 
-    // The budget limits resident draw lists; overflow is cached in host memory.
+    // Budgets bound resident draw lists on both devices. Views exceeding both
+    // budgets are prepared on demand, with identical query results.
     // Zero selects a budget from currently available VRAM; SIZE_MAX forces host
     // storage (useful for verifying the spill path).
     OccupancyCache prepare_occupancy_cache(
         const GaussianModel& model, const std::vector<Camera>& cameras,
-        const RasterizeOptions& options = {}, std::size_t device_budget = 0) const;
+        const RasterizeOptions& options = {}, std::size_t device_budget = 0,
+        std::size_t host_budget = std::size_t{4} << 30) const;
     OccupancyResult evaluate_occupancy(
         OccupancyCache& cache, std::size_t camera_index,
         const tinytensor::Tensor& world_points) const;

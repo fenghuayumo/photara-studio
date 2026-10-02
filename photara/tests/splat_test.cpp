@@ -904,6 +904,8 @@ void test_thin_splat_rgb_backward() {
         require(sample != 0 || expected > 0.01,
             "Thin splat fixture must contribute to an image pixel");
         const auto colors = gradients.colors_precomp.to_vector();
+        require(!gradients.sh.is_valid(),
+            "Precomputed colors allocated unused SH gradients");
         require(std::abs(colors[0] - expected) < 2e-6 * std::max(expected, 1.0),
             "Thin splat color backward must use the forward alpha");
         for (const Tensor* tensor : {&gradients.means, &gradients.log_scales,
@@ -2455,7 +2457,13 @@ void test_normal_field_parameterization_and_occupancy() {
                 {4, 3}, tinytensor::Device::CUDA);
             for (std::size_t view = 0; view < cache_cameras.size(); ++view) {
                 const auto reference = rasterizer.evaluate_occupancy(model, queries, cache_cameras[view]);
+                const auto pinned_before = tinytensor::VramProfiler::instance().snapshot().process.pinned_host_used;
                 const auto cached = rasterizer.evaluate_occupancy(cache, view, queries);
+                for (const auto& row : tinytensor::VramProfiler::instance().snapshot().rows)
+                    if (row.scope.starts_with("occupancy.prepare."))
+                        require(row.live_bytes == 0, "PAM query retained preparation scratch");
+                require(tinytensor::VramProfiler::instance().snapshot().process.pinned_host_used == pinned_before,
+                    "PAM host cache retained pinned memory");
                 require(reference.occupancy.to_vector() == cached.occupancy.to_vector() &&
                         reference.inside.to_vector_bool() == cached.inside.to_vector_bool(),
                         "PAM cached occupancy differs from uncached query");
@@ -2468,6 +2476,27 @@ void test_normal_field_parameterization_and_occupancy() {
                     ? stats.host_bytes > 0 && stats.device_bytes == 0
                     : stats.device_bytes > 0 && stats.host_bytes == 0,
                 "PAM occupancy cache did not respect residency budget");
+    }
+
+    {
+        Rasterizer rasterizer;
+        auto cache = rasterizer.prepare_occupancy_cache(
+            model, cache_cameras, {}, std::numeric_limits<std::size_t>::max(), 0);
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            const auto queries = tinytensor::Tensor::from_vector(
+                std::vector<float>{0.F, 0.F, 2.F, .02F * repeat, 0.F, 2.1F},
+                {2, 3}, tinytensor::Device::CUDA);
+            for (std::size_t view = 0; view < cache_cameras.size(); ++view) {
+                const auto reference = rasterizer.evaluate_occupancy(model, queries, cache_cameras[view]);
+                const auto cached = rasterizer.evaluate_occupancy(cache, view, queries);
+                require(reference.occupancy.to_vector() == cached.occupancy.to_vector(),
+                    "PAM bounded cache changed occupancy");
+            }
+        }
+        const auto stats = rasterizer.occupancy_cache_stats(cache);
+        require(stats.host_bytes == 0 && stats.device_bytes == 0 &&
+                stats.prepared_views == 2 && stats.preparations == 6,
+            "PAM cache exceeded residency budgets");
     }
 
     // Enough overlapping footprints to exercise depth-sort + stable tile-sort,
@@ -3068,6 +3097,147 @@ void test_contribution_visibility_rejects_occluded_gaussians() {
     require(
         visibility.front() == 1.F && visibility.back() == 0.F,
         "Projected-but-occluded Gaussian was incorrectly marked visible");
+}
+
+void test_compact_pixel_snapshots() {
+    using namespace photara::splat;
+    constexpr std::size_t count = 256;
+    GaussianModel model;
+    std::vector<float> means(count * 3, 0.F), rotations(count * 4, 0.F);
+    for (std::size_t i = 0; i < count; ++i) {
+        means[3 * i + 2] = 2.F + float(i) * 0.001F;
+        rotations[4 * i] = 1.F;
+    }
+    model.means = tinytensor::Tensor::from_vector(means, {count, 3}, tinytensor::Device::CUDA);
+    model.quaternions = tinytensor::Tensor::from_vector(rotations, {count, 4}, tinytensor::Device::CUDA);
+    model.log_scales = tinytensor::Tensor::from_vector(
+        std::vector<float>(count * 3, std::log(1.5F)), {count, 3}, tinytensor::Device::CUDA);
+    model.sh = tinytensor::Tensor::from_vector(
+        std::vector<float>(count * 3, 0.25F), {count, 1, 3}, tinytensor::Device::CUDA);
+    model.sh_degree = 0;
+    Camera camera;
+    camera.world_to_camera[0] = camera.world_to_camera[5] =
+        camera.world_to_camera[10] = camera.world_to_camera[15] = 1.F;
+    camera.fx = camera.fy = 40.F;
+    camera.cx = 23.5F; camera.cy = 15.5F;
+    camera.width = 48; camera.height = 32;
+    Rasterizer rasterizer;
+    auto& profiler = tinytensor::VramProfiler::instance();
+    struct RestoreProfiler {
+        tinytensor::VramProfiler& profiler;
+        bool enabled;
+        ~RestoreProfiler() { profiler.setEnabled(enabled); }
+    } restore{profiler, profiler.enabled()};
+    profiler.setEnabled(true);
+    const auto pixel_bytes = [&]() {
+        std::size_t bytes = 0;
+        for (const auto& row : profiler.snapshot().rows)
+            if (row.scope.ends_with("workspace.pixel")) bytes += row.allocated_bytes;
+        return bytes;
+    };
+    const auto instance_live_bytes = [&]() {
+        std::size_t bytes = 0;
+        for (const auto& row : profiler.snapshot().rows)
+            if (row.scope.ends_with("workspace.instance")) bytes += row.live_bytes;
+        return bytes;
+    };
+    // Occluded tails, contributors spanning several buckets, and zero accepted
+    // contributors exercise the shortened lists and empty backward grid.
+    for (float opacity : {12.F, -2.F, -20.F}) {
+        model.opacity_logits = tinytensor::Tensor::from_vector(
+            std::vector<float>(count, opacity), {count, 1}, tinytensor::Device::CUDA);
+        for (bool geometry : {false, true}) {
+            RasterizeOptions options;
+            options.require_depth = geometry;
+            options.compact_pixel_snapshots = false;
+            options.compact_instance_storage = false;
+            const auto before = pixel_bytes();
+            const auto original = rasterizer.forward(model, camera, options);
+            const auto original_bytes = pixel_bytes() - before;
+            options.compact_pixel_snapshots = true;
+            options.compact_instance_storage = true;
+            options.snapshot_compaction_threshold = 0;
+            const auto compact_before = pixel_bytes();
+            const auto instance_before = instance_live_bytes();
+            const auto compact = rasterizer.forward(model, camera, options);
+            require(instance_live_bytes() == instance_before,
+                "Compact render retained sort preparation storage");
+            const auto compact_bytes = pixel_bytes() - compact_before;
+            if (opacity == 12.F)
+                require(compact_bytes < original_bytes / 2,
+                    "Snapshot compaction retained occluded tail storage");
+            for (const auto& pair : {
+                     std::pair{original.color, compact.color},
+                     std::pair{original.alpha, compact.alpha},
+                     std::pair{original.visibility, compact.visibility}})
+                require(pair.first.to_vector() == pair.second.to_vector(),
+                    "Snapshot compaction changed render outputs");
+            if (geometry) {
+                require(original.median_depth.to_vector() == compact.median_depth.to_vector(),
+                    "Snapshot compaction changed depth");
+                require(original.normal.to_vector() == compact.normal.to_vector(),
+                    "Snapshot compaction changed normals");
+            }
+            options.record_backward_state = false;
+            const auto inference_before = pixel_bytes();
+            const auto inference = rasterizer.forward(model, camera, options);
+            require(pixel_bytes() == inference_before,
+                "Inference-only render allocated backward pixel state");
+            require(inference.color.to_vector() == original.color.to_vector() &&
+                    inference.alpha.to_vector() == original.alpha.to_vector() &&
+                    inference.visibility.to_vector() == original.visibility.to_vector(),
+                "Inference-only render changed outputs");
+            if (geometry)
+                require(inference.median_depth.to_vector() == original.median_depth.to_vector() &&
+                        inference.normal.to_vector() == original.normal.to_vector(),
+                    "Inference-only render changed geometry");
+            const auto gc = tinytensor::Tensor::full({3, camera.height, camera.width},
+                0.01F, tinytensor::Device::CUDA);
+            const auto ga = tinytensor::Tensor::full({camera.height, camera.width},
+                0.02F, tinytensor::Device::CUDA);
+            const auto gd = tinytensor::Tensor::full({camera.height, camera.width},
+                0.03F, tinytensor::Device::CUDA);
+            const auto gn = tinytensor::Tensor::full({3, camera.height, camera.width},
+                0.04F, tinytensor::Device::CUDA);
+            bool inference_rejected = false;
+            try { rasterizer.backward(model, inference, gc, ga, gd, gn); }
+            catch (const std::logic_error&) { inference_rejected = true; }
+            require(inference_rejected,
+                "Inference-only render allowed backward without snapshots");
+            const auto a = rasterizer.backward(model, original, gc, ga, gd, gn);
+            const auto b = rasterizer.backward(model, compact, gc, ga, gd, gn);
+            float max_relative_delta = 0.F;
+            for (const auto& pair : {
+                     std::pair{a.means, b.means},
+                     std::pair{a.log_scales, b.log_scales},
+                     std::pair{a.quaternions, b.quaternions},
+                     std::pair{a.opacity_logits, b.opacity_logits},
+                     std::pair{a.sh, b.sh}}) {
+                const auto av = pair.first.to_vector(), bv = pair.second.to_vector();
+                require(av.size() == bv.size(), "Snapshot gradient shape mismatch");
+                // Compacting the grid changes inter-tile atomic addition order.
+                // Scale by the vector norm: nearly cancelling components in
+                // the opaque depth fixture sit beside gradients of order 1e7.
+                float norm = 1.F;
+                for (float value : av) norm = std::max(norm, std::abs(value));
+                for (std::size_t i = 0; i < av.size(); ++i)
+                {
+                    max_relative_delta = std::max(max_relative_delta,
+                        std::abs(av[i] - bv[i]) / norm);
+                    require(std::isfinite(av[i]) && std::isfinite(bv[i]) &&
+                        std::abs(av[i] - bv[i]) <= 1e-6F * norm,
+                        ("Snapshot compaction changed parameter gradients: opacity=" +
+                        std::to_string(opacity) + " geometry=" + std::to_string(geometry) +
+                        " index=" + std::to_string(i) + " original=" +
+                        std::to_string(av[i]) + " compact=" + std::to_string(bv[i])).c_str());
+                }
+            }
+            std::cerr << "snapshot parity opacity=" << opacity << " geometry=" << geometry
+                << " pixel_bytes_original=" << original_bytes
+                << " pixel_bytes_compact=" << compact_bytes
+                << " max_gradient_relative_delta=" << max_relative_delta << '\n';
+        }
+    }
 }
 
 void test_alpha_parameter_gradients() {
@@ -6804,6 +6974,154 @@ int main(int argc, char** argv) {
             std::cout << "SKIP: no CUDA device\n";
             return 0;
         }
+        if (argc == 5 && std::string(argv[1]) == "--occupancy-memory-bench") {
+            using namespace photara::splat;
+            auto& profiler = tinytensor::VramProfiler::instance();
+            profiler.setEnabled(true);
+            const auto model = load_gaussians_ply(argv[2]);
+            const auto dataset = load_colmap_scene(argv[3], argv[4]);
+            std::vector<Camera> cameras;
+            for (std::size_t index : {56U, 180U, 185U})
+                if (index < dataset.scene.views.size())
+                    cameras.push_back(camera_from_mvs_view(dataset.scene.views[index]));
+            const auto query = model.means.slice(0, 0, std::min<std::size_t>(8192, model.size())).contiguous();
+            Rasterizer rasterizer;
+            constexpr std::size_t gpu_budget = std::size_t{2} << 30;
+            constexpr std::size_t host_budget = std::size_t{1} << 30;
+            auto cache = rasterizer.prepare_occupancy_cache(model, cameras, {}, gpu_budget, host_budget);
+            for (std::size_t view = 0; view < cameras.size(); ++view) {
+                const auto reference = rasterizer.evaluate_occupancy(model, query, cameras[view]);
+                const auto expected = reference.occupancy.to_vector();
+                const auto inside = reference.inside.to_vector_bool();
+                for (int repeat = 0; repeat < 2; ++repeat) {
+                    const auto actual = rasterizer.evaluate_occupancy(cache, view, query);
+                    require(actual.occupancy.to_vector() == expected && actual.inside.to_vector_bool() == inside,
+                        "Real-scene cache changed occupancy");
+                    const auto memory = profiler.snapshot();
+                    std::size_t scratch_live = 0, scratch_peak = 0;
+                    for (const auto& row : memory.rows)
+                        if (row.scope.starts_with("occupancy.prepare.")) {
+                            scratch_live += row.live_bytes;
+                            scratch_peak += row.peak_bytes;
+                        }
+                    require(scratch_live == 0, "Real-scene query retained preparation scratch");
+                    const auto stats = rasterizer.occupancy_cache_stats(cache);
+                    require(stats.device_bytes <= gpu_budget && stats.host_bytes <= host_budget,
+                        "Real-scene cache exceeded residency budgets");
+                    std::cout << "occupancy_memory gaussians=" << model.size() << " view=" << view
+                        << " resolution=" << cameras[view].width << 'x' << cameras[view].height
+                        << " repeat=" << repeat << " live_bytes=" << memory.accounted_live_bytes
+                        << " preparation_scratch_live=" << scratch_live
+                        << " preparation_scratch_peak=" << scratch_peak
+                        << " cache_gpu_bytes=" << stats.device_bytes << " cache_host_bytes=" << stats.host_bytes
+                        << " occupancy_exact=1\n" << std::flush;
+                }
+            }
+            return 0;
+        }
+        if (argc == 5 && std::string(argv[1]) == "--raster-memory-bench") {
+            // Read-only real-scene comparison of retained sort storage.
+            using namespace photara::splat;
+            auto& profiler = tinytensor::VramProfiler::instance();
+            profiler.setEnabled(true);
+            const auto model = load_gaussians_ply(argv[2]);
+            const auto dataset = load_colmap_scene(argv[3], argv[4]);
+            TrainingOptions training;
+            training.use_mask = false;
+            training.max_image_dimension = 1920;
+            for (std::size_t view_index : {56U, 180U, 185U}) {
+                if (view_index >= dataset.scene.views.size()) continue;
+                const auto target = make_training_view(dataset.scene.views[view_index], training);
+                std::vector<float> reference_color, reference_mean_gradient;
+                std::vector<float> reference_depth, reference_normal, reference_alpha;
+                std::uint64_t original_live = 0;
+                float baseline_repeat_relative_delta = 0.F;
+                for (bool compact : {false, true}) {
+                    RasterizeOptions options;
+                    options.active_sh_degree = model.sh_degree;
+                    options.compact_instance_storage = compact;
+                    const auto rendered = Rasterizer().forward(model, target.camera, options);
+                    require(cudaDeviceSynchronize() == cudaSuccess, "Benchmark forward failed");
+                    const auto memory = profiler.snapshot();
+                    std::uint64_t sort_live = 0, draw_live = 0;
+                    for (const auto& row : memory.rows) {
+                        if (row.scope.ends_with("workspace.instance")) sort_live += row.live_bytes;
+                        if (row.scope.ends_with("workspace.draw_indices")) draw_live += row.live_bytes;
+                    }
+                    if (!compact) original_live = memory.accounted_live_bytes;
+                    std::cout << "raster_memory gaussians=" << model.size()
+                        << " view=" << view_index << " instances=" << rendered.rendered_instances
+                        << " compact=" << compact << " live_bytes=" << memory.accounted_live_bytes
+                        << " sort_live_bytes=" << sort_live << " draw_live_bytes=" << draw_live
+                        << " saved_bytes=" << (compact ? original_live - memory.accounted_live_bytes : 0)
+                        << '\n';
+                    const auto gc = tinytensor::Tensor::full(rendered.color.shape(), .01F, tinytensor::Device::CUDA);
+                    const auto ga = tinytensor::Tensor::zeros_like(rendered.alpha);
+                    const auto gd = tinytensor::Tensor::full(rendered.median_depth.shape(), .001F, tinytensor::Device::CUDA);
+                    const auto gn = tinytensor::Tensor::full(rendered.normal.shape(), .002F, tinytensor::Device::CUDA);
+                    const auto gradients = Rasterizer().backward(model, rendered, gc, ga, gd, gn);
+                    const auto color = rendered.color.to_vector();
+                    const auto mean_gradient = gradients.means.to_vector();
+                    if (!compact) {
+                        reference_color = color;
+                        reference_depth = rendered.median_depth.to_vector();
+                        reference_normal = rendered.normal.to_vector();
+                        reference_alpha = rendered.alpha.to_vector();
+                        reference_mean_gradient = mean_gradient;
+                        float repeat_norm = 1.F, repeat_delta = 0.F;
+                        // Atomic accumulation is nondeterministic even for
+                        // identical backward calls on this dense scene. Measure
+                        // that noise before comparing the storage layouts.
+                        for (int repeat = 0; repeat < 4; ++repeat) {
+                            const auto repeated = Rasterizer().backward(model, rendered, gc, ga, gd, gn).means.to_vector();
+                            for (std::size_t i = 0; i < repeated.size(); ++i) {
+                                repeat_norm = std::max(repeat_norm, std::abs(mean_gradient[i]));
+                                repeat_delta = std::max(repeat_delta, std::abs(repeated[i] - mean_gradient[i]));
+                            }
+                        }
+                        baseline_repeat_relative_delta = repeat_delta / repeat_norm;
+                        std::cout << "raster_repeat view=" << view_index
+                            << " mean_gradient_relative_delta=" << repeat_delta / repeat_norm << '\n';
+                    } else {
+                        require(color == reference_color, "Compact indices changed real-scene color");
+                        float norm = 1.F, delta = 0.F;
+                        for (std::size_t i = 0; i < mean_gradient.size(); ++i) {
+                            require(std::isfinite(mean_gradient[i]) && std::isfinite(reference_mean_gradient[i]),
+                                "Non-finite real-scene gradient");
+                            norm = std::max(norm, std::abs(reference_mean_gradient[i]));
+                            delta = std::max(delta, std::abs(mean_gradient[i] - reference_mean_gradient[i]));
+                        }
+                        std::cout << "raster_parity view=" << view_index << " color_exact=1 mean_gradient_relative_delta="
+                            << delta / norm << '\n';
+                        require(delta / norm <= std::max(1e-4F, 2.F * baseline_repeat_relative_delta),
+                            "Compact indices changed real-scene gradient beyond baseline atomic variation");
+                    }
+                }
+                RasterizeOptions inference_options;
+                inference_options.active_sh_degree = model.sh_degree;
+                inference_options.record_backward_state = false;
+                auto inference = Rasterizer().forward(model, target.camera, inference_options);
+                inference.context.impl.reset();
+                require(inference.color.to_vector() == reference_color &&
+                        inference.median_depth.to_vector() == reference_depth &&
+                        inference.normal.to_vector() == reference_normal &&
+                        inference.alpha.to_vector() == reference_alpha,
+                    "Mesh inference changed real-scene depth/normal/alpha/color");
+                const auto inference_memory = profiler.snapshot();
+                std::size_t backward_live = 0;
+                for (const auto& row : inference_memory.rows)
+                    if (row.scope.ends_with("workspace.pixel") ||
+                        row.scope.ends_with("workspace.instance") ||
+                        row.scope.ends_with("workspace.draw_indices"))
+                        backward_live += row.live_bytes;
+                require(backward_live == 0, "Mesh inference retained backward workspace");
+                std::cout << "mesh_inference_memory view=" << view_index
+                    << " live_bytes=" << inference_memory.accounted_live_bytes
+                    << " saved_bytes=" << original_live - inference_memory.accounted_live_bytes
+                    << " backward_workspace_live=" << backward_live << " geometry_exact=1\n" << std::flush;
+            }
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--pam-only") {
             test_pam_cuda_field();
             test_normal_field_parameterization_and_occupancy();
@@ -6812,9 +7130,14 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--geometry-only") {
+            test_compact_pixel_snapshots();
+            std::cerr << "geometry: pinhole finite differences\n";
             test_pinhole_geometry_finite_differences();
+            std::cerr << "geometry: multi view\n";
             test_gggs_multi_view_geometry_and_ncc();
+            std::cerr << "geometry: sample depth\n";
             test_sample_depth_batch_boundary();
+            std::cerr << "geometry: depth normal\n";
             test_gggs_depth_normal_consistency();
             test_gggs_depth_normal_parameter_gradients();
             test_densification_strategies_and_dense_bypass();
@@ -6875,6 +7198,7 @@ int main(int argc, char** argv) {
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();
         test_forward_backward();
+        test_compact_pixel_snapshots();
         test_sh_adam_quant();
         test_vulkan_sh_adam_quant();
         test_vulkan_fused_sh_adam();

@@ -112,7 +112,9 @@ struct PamMeshOptions {
     // structures a chance to enter the Delaunay complex.
     float gaussian_seed_fraction{0.F};
     unsigned oversampling_factor{2};
-    unsigned max_resample_rounds{4};
+    // max_points is an output cap. Accept a smaller converged cloud rather
+    // than repeating the entire refinement just to fill that cap.
+    unsigned max_resample_rounds{1};
     unsigned refinement_steps{10};
     unsigned vector_field_neighbors{32};
     // Exact CUDA KD-tree queries and device-resident refinement. CPU is kept

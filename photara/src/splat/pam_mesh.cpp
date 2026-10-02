@@ -13,6 +13,7 @@
 #include <numeric>
 #include <queue>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -236,7 +237,7 @@ private:
     }
 };
 
-tinytensor::Tensor upload_points(const std::vector<mvs::Vec3f>& points) {
+tinytensor::Tensor upload_points(std::span<const mvs::Vec3f> points) {
     std::vector<float> packed;
     packed.reserve(points.size() * 3);
     for (const auto& point : points)
@@ -348,8 +349,20 @@ std::vector<float> evaluate_global_occupancy(
     const TrainingOptions& training_options,
     const std::size_t chunk_size, const float mask_background_threshold,
     OccupancyCache* cache = nullptr) {
-    return evaluate_global_occupancy_device(model, scene, upload_points(points),
-        training_options, chunk_size, mask_background_threshold, cache).to_vector();
+    // CPU callers can have tens of millions of tetrahedral samples. Stream
+    // the same query chunks instead of uploading a second full-size copy and
+    // staging it through a power-of-two pinned host allocation.
+    std::vector<float> result(points.size());
+    const std::size_t capacity = std::max<std::size_t>(chunk_size, 1);
+    const std::span<const mvs::Vec3f> all_points(points);
+    for (std::size_t begin = 0; begin < points.size(); begin += capacity) {
+        const std::size_t count = std::min(capacity, points.size() - begin);
+        const auto values = evaluate_global_occupancy_device(
+            model, scene, upload_points(all_points.subspan(begin, count)),
+            training_options, chunk_size, mask_background_threshold, cache).to_vector();
+        std::copy(values.begin(), values.end(), result.begin() + begin);
+    }
+    return result;
 }
 
 bool in_camera_frustum(
@@ -827,6 +840,10 @@ PamMeshResult extract_pam_mesh(
     const unsigned rounds = std::max(options.max_resample_rounds, 1U);
     for (unsigned round = 0;
          round < rounds && candidates.size() < options.max_points; ++round) {
+        core::Logger::instance().info(
+            "splat PAM sampling: round=", round + 1, '/', rounds,
+            " candidate_cap=", options.max_points,
+            " accepted=", candidates.size());
         const std::size_t missing = options.max_points - candidates.size();
         const std::size_t sample_count = missing *
             std::max(options.oversampling_factor, 1U);
@@ -1039,6 +1056,8 @@ PamMeshResult extract_pam_mesh(
         " queries=", cache_stats.queries,
         " device_bytes=", cache_stats.device_bytes,
         " host_bytes=", cache_stats.host_bytes);
+    core::Logger::instance().info(
+        "splat PAM occupancy preparations=", cache_stats.preparations);
     stage.finish();
     return result;
 #endif
