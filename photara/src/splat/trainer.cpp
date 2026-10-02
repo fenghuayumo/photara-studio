@@ -13,6 +13,7 @@
 #include "io/format_version.hpp"
 #include "io/image.hpp"
 #include "multi_view_scheduler.hpp"
+#include "point_query_options.hpp"
 #include "training_data_loader.hpp"
 #include "core/vram_profiler.hpp"
 #include "internal/memory_pool.hpp"
@@ -1420,27 +1421,10 @@ GaussianModel Trainer::train(
         }
         raster_options.kernel_size = options_.kernel_size;
         raster_options.scale_modifier = options_.scale_modifier;
-        // Multi-view point queries only feed a depth-consistency loss: it needs
-        // the neighbour median depth to a fraction of the scene extent, not to
-        // the wide +/-200 window refined eight times. Narrowing the seed
-        // window and stopping once the bracket is 0.2% of the scene cuts the
-        // point-query kernel's traversals from nine to five. A negative option
-        // keeps the wide default search for quality baselines.
-        const float point_query_extent = std::max(scene_extent, 1.0e-3F);
-        const float point_query_bracket =
-            options_.multi_view_depth_bracket > 0.F
-                ? options_.multi_view_depth_bracket
-                : options_.multi_view_depth_bracket == 0.F
-                      ? 4.F * point_query_extent
-                      : 0.F;
-        const float point_query_tolerance =
-            options_.multi_view_depth_tolerance > 0.F
-                ? options_.multi_view_depth_tolerance
-                : options_.multi_view_depth_tolerance == 0.F
-                      ? 2.0e-3F * point_query_extent
-                      : 0.F;
-        raster_options.point_depth_bracket = point_query_bracket;
-        raster_options.point_depth_tolerance = point_query_tolerance;
+        const auto point_query = detail::multi_view_depth_query_options(
+            options_, scene_extent);
+        raster_options.point_depth_bracket = point_query.bracket;
+        raster_options.point_depth_tolerance = point_query.tolerance;
         const bool depth_normal_active = !native_non_pinhole &&
             options_.use_depth_normal_loss &&
             options_.depth_normal_weight > 0.F &&

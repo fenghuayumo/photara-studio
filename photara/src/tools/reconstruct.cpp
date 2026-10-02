@@ -856,7 +856,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0"))
         ("splat-mv-depth-tolerance",
          "Multi-view point-query depth precision in world units "
-         "(0 = derive from the scene extent, < 0 = reference 8 refinements)",
+         "(<= 0 = full 8 refinements; > 0 explicitly enables early stopping)",
          cxxopts::value<float>()->default_value("0"))
         ("splat-mv-ncc-weight", "Multi-view plane-warp NCC loss weight",
          cxxopts::value<float>()->default_value("0.6"))

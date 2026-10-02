@@ -16,6 +16,7 @@
 #include "../src/splat/fused_ssim.hpp"
 #include "../src/splat/ppisp.hpp"
 #include "../src/splat/multi_view_scheduler.hpp"
+#include "../src/splat/point_query_options.hpp"
 #include "../src/splat/training_data_loader.hpp"
 #include "io/image.hpp"
 #include "sfm/export_mvs.hpp"
@@ -2928,6 +2929,128 @@ void test_pam_smoke() {
             "PAM masked CUDA extraction changed refined candidate geometry");
 #endif
 #endif
+}
+
+void test_geometry_loss_buffer_finite_differences() {
+    using namespace photara::splat;
+    constexpr std::size_t side = 7, pixels = side * side;
+    const auto tensor = [](const std::vector<float>& values, tinytensor::TensorShape shape) {
+        return tinytensor::Tensor::from_vector(values, shape, tinytensor::Device::CUDA);
+    };
+    std::vector<float> depth(pixels), normals(3 * pixels);
+    for (std::size_t y = 0; y < side; ++y) for (std::size_t x = 0; x < side; ++x) {
+        const auto i = y * side + x;
+        depth[i] = 2.F + 0.03F * x + 0.02F * y + 0.004F * x * y;
+        normals[i] = 0.2F + 0.01F * x;
+        normals[pixels + i] = -0.3F + 0.015F * y;
+        normals[2 * pixels + i] = -0.7F;
+    }
+    RenderResult rendered;
+    rendered.color = tensor(normals, {3, side, side});
+    rendered.normal = tensor(normals, {3, side, side});
+    rendered.median_depth = tensor(depth, {side, side});
+    rendered.alpha = tinytensor::Tensor::zeros({side, side}, tinytensor::Device::CUDA);
+    TrainingView target;
+    target.camera.width = target.camera.height = side;
+    target.camera.fx = 5.F; target.camera.fy = 6.F;
+    target.camera.cx = 3.F; target.camera.cy = 3.F;
+    const float c = std::cos(0.37F), a = std::sin(0.37F);
+    target.camera.world_to_camera = {c, 0.F, -a, 0.F, 0.F, 1.F, 0.F, 0.F,
+                                    a, 0.F, c, 0.F, 0.F, 0.F, 0.F, 1.F};
+    target.rgb = tinytensor::Tensor::zeros_like(rendered.color);
+    target.depth = tinytensor::Tensor::zeros_like(rendered.median_depth);
+    target.normal = tinytensor::Tensor::zeros_like(rendered.normal);
+    target.mask = tensor(std::vector<float>(pixels, 1.F), {side, side});
+    TrainingOptions options;
+    options.photometric_weight = 0.F;
+    options.use_mask = false;
+    options.use_depth_normal_loss = true;
+    options.depth_normal_weight = 0.05F;
+    for (const bool field : {false, true}) {
+        const auto evaluate = [&]() {
+            return field ? detail::compute_normal_field_loss(rendered, target.camera, 0.05F, true)
+                         : detail::compute_training_loss(rendered, target, options, true, true);
+        };
+        const auto loss = evaluate();
+        const auto depth_gradient = loss.depth.to_vector();
+        const auto normal_gradient = (field ? loss.color : loss.normal).to_vector();
+        double max_error = 0;
+        for (const bool perturb_depth : {true, false}) {
+            auto& values = perturb_depth ? depth : normals;
+            auto& parameter = perturb_depth ? rendered.median_depth
+                                            : field ? rendered.color : rendered.normal;
+            const auto& analytical = perturb_depth ? depth_gradient : normal_gradient;
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                const float plus = values[i] + 0.002F, minus = values[i] - 0.002F;
+                require(cudaMemcpy(parameter.ptr<float>() + i, &plus, sizeof(float),
+                                   cudaMemcpyHostToDevice) == cudaSuccess, "Loss FD upload failed");
+                const double upper = evaluate().normal_value;
+                require(cudaMemcpy(parameter.ptr<float>() + i, &minus, sizeof(float),
+                                   cudaMemcpyHostToDevice) == cudaSuccess, "Loss FD upload failed");
+                const double lower = evaluate().normal_value;
+                require(cudaMemcpy(parameter.ptr<float>() + i, &values[i], sizeof(float),
+                                   cudaMemcpyHostToDevice) == cudaSuccess, "Loss FD restore failed");
+                const double numerical = (upper - lower) / (double(plus) - minus);
+                const double error = std::abs(numerical - analytical[i]);
+                max_error = std::max(max_error, error);
+                require(std::isfinite(analytical[i]) && error < 4e-6 + 0.005 * std::abs(numerical),
+                        "Geometry loss buffer gradient disagrees with finite differences");
+            }
+        }
+        std::cerr << (field ? "normal-field" : "depth-normal")
+                  << " buffer FD maximum absolute error: " << max_error << '\n';
+    }
+}
+
+void test_default_multiview_thin_depth_gradient() {
+    using namespace photara::splat;
+    const auto tensor = [](std::vector<float> values, tinytensor::TensorShape shape) {
+        return tinytensor::Tensor::from_vector(values, shape, tinytensor::Device::CUDA);
+    };
+    Camera camera;
+    camera.width = camera.height = 32;
+    camera.fx = camera.fy = 25.F;
+    camera.cx = camera.cy = 16.F;
+    for (int i = 0; i < 4; ++i) camera.world_to_camera[i * 5] = 1.F;
+    const auto points = tensor({0.F, 0.F, 4.F}, {1, 3});
+    const auto upstream = tensor({0.F, 0.F, 1.F}, {1, 3});
+    const auto query = detail::multi_view_depth_query_options(TrainingOptions{}, 4.9829F);
+    RasterizeOptions options;
+    options.require_depth = true;
+    options.point_depth_bracket = query.bracket;
+    options.point_depth_tolerance = query.tolerance;
+    Rasterizer rasterizer;
+    for (const float sigma : {0.0002F, 0.002F, 0.02F}) {
+        GaussianModel model;
+        model.means = tensor({0.01F, 0.F, 4.F}, {1, 3});
+        model.log_scales = tensor(
+            {std::log(0.03F), std::log(0.03F), std::log(sigma)}, {1, 3});
+        model.quaternions = tensor({1.F, 0.F, 0.F, 0.F}, {1, 4});
+        model.opacity_logits = tensor({std::log(4.F)}, {1, 1});
+        model.sh = tinytensor::Tensor::zeros({1, 1, 3}, tinytensor::Device::CUDA);
+        model.sh_degree = 0;
+        const auto sample = rasterizer.sample_depth(model, points, camera, options);
+        require(sample.inside.to_vector_bool()[0], "Thin-Gaussian depth query missed surface");
+        // Identity camera: sampled camera coordinates are also world coordinates.
+        const float occupancy = rasterizer.evaluate_occupancy(
+            model, sample.camera_points, camera, options).occupancy.to_vector()[0];
+        require(std::abs(occupancy - 0.5F) < 0.001F,
+                "Default multiview query stopped before the thin-Gaussian median root");
+        const auto gradient = rasterizer.sample_depth_backward(model, sample, upstream);
+        const float analytical = gradient.model.means.to_vector()[2];
+        constexpr float plus = 4.F + 0.0001F, minus = 4.F - 0.0001F;
+        require(cudaMemcpy(model.means.ptr<float>() + 2, &plus, sizeof(float),
+                           cudaMemcpyHostToDevice) == cudaSuccess, "Depth FD upload failed");
+        const float upper = rasterizer.sample_depth(model, points, camera, options)
+                                .camera_points.to_vector()[2];
+        require(cudaMemcpy(model.means.ptr<float>() + 2, &minus, sizeof(float),
+                           cudaMemcpyHostToDevice) == cudaSuccess, "Depth FD upload failed");
+        const float lower = rasterizer.sample_depth(model, points, camera, options)
+                                .camera_points.to_vector()[2];
+        const double numerical = (double(upper) - lower) / (double(plus) - minus);
+        require(std::isfinite(analytical) && std::abs(analytical - numerical) < 0.005,
+                "Default thin-Gaussian depth backward disagrees with finite differences");
+    }
 }
 
 void test_sample_depth_batch_boundary() {
@@ -7136,6 +7259,8 @@ int main(int argc, char** argv) {
             std::cerr << "geometry: multi view\n";
             test_gggs_multi_view_geometry_and_ncc();
             std::cerr << "geometry: sample depth\n";
+            test_geometry_loss_buffer_finite_differences();
+            test_default_multiview_thin_depth_gradient();
             test_sample_depth_batch_boundary();
             std::cerr << "geometry: depth normal\n";
             test_gggs_depth_normal_consistency();
@@ -7207,6 +7332,8 @@ int main(int argc, char** argv) {
         test_gaussian_format_roundtrip();
         test_pam_smoke();
         test_pam_cuda_field();
+        test_geometry_loss_buffer_finite_differences();
+        test_default_multiview_thin_depth_gradient();
         test_sample_depth_batch_boundary();
         test_contribution_visibility_rejects_occluded_gaussians();
         test_alpha_parameter_gradients();

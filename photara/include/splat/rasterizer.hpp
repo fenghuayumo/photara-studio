@@ -31,8 +31,8 @@ struct RasterizeOptions {
     std::size_t snapshot_compaction_threshold{512ULL * 1024 * 1024};
     // Multi-view point queries (sample_depth): median-depth seed window in
     // world units, and the bracket width at which refinement stops. Zero keeps
-    // the wide default search (+/-200 with 8 refinements), which is far more
-    // precision than a depth-consistency loss can use.
+    // the wide default search (+/-200 with 8 refinements). Thin surfaces need
+    // accurate roots for the implicit median-depth backward pass.
     float point_depth_bracket{0.F};
     float point_depth_tolerance{0.F};
     // Optional [N,3] world-space feature colors. When present, SH evaluation

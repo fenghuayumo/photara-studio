@@ -259,10 +259,11 @@ struct TrainingOptions {
     // plane-induced homography and the original image pair.
     float multi_view_geo_weight{0.F};
     float multi_view_ncc_weight{0.F};
-    // Multi-view point-query median-depth search. > 0 overrides the
-    // scene-derived default, 0 derives it from the scene extent, < 0 keeps the
-    // wide default search (+/-200 window, eight refinements).
+    // Multi-view point-query median-depth seed window. > 0 overrides it,
+    // 0 derives it from the scene extent, < 0 keeps the wide +/-200 window.
     float multi_view_depth_bracket{0.F};
+    // Refinement stops early only for an explicit positive tolerance. The
+    // default (<= 0) uses all eight refinements to preserve median gradients.
     float multi_view_depth_tolerance{0.F};
     unsigned multi_view_num{8};
     // Subsample the expensive multi-view objective after ADC growth stops.
