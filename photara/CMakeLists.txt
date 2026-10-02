@@ -940,7 +940,7 @@ if(TARGET photara_features)
                     PHOTARA_STUDIO_SAM_VULKAN=1)
             endif()
             target_compile_definitions(photara_studio PRIVATE
-                PHOTARA_CLI_PATH="$<TARGET_FILE:photara>")
+                PHOTARA_CLI_FILENAME="$<TARGET_FILE_NAME:photara>")
             add_dependencies(photara_studio photara)
             add_custom_command(TARGET photara_studio POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different

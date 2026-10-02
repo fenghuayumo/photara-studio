@@ -80,6 +80,12 @@ function(photara_find_poselib)
 endfunction()
 
 function(photara_find_webpzstd)
+    # vcpkg's exported targets select the matching Debug/Release binaries.
+    # A plain find_library can pick debug/lib first and use it for all configs.
+    if(WIN32)
+        find_package(WebP CONFIG QUIET)
+        find_package(zstd CONFIG QUIET)
+    endif()
     # Prefer distro libs over conda CONFIG packages that can poison the link
     # line (mismatched libtiff/libjpeg).
     set(_photara_webp_hints /usr/lib/x86_64-linux-gnu /usr/lib)
@@ -120,13 +126,13 @@ function(photara_find_webpzstd)
         endif()
     endif()
 
-    find_path(PHOTARA_ZSTD_INCLUDE zstd.h
-        HINTS /usr/include
-        NO_CMAKE_ENVIRONMENT_PATH NO_SYSTEM_ENVIRONMENT_PATH)
-    find_library(PHOTARA_ZSTD_LIBRARY NAMES zstd
-        HINTS ${_photara_zstd_hints}
-        NO_CMAKE_ENVIRONMENT_PATH NO_SYSTEM_ENVIRONMENT_PATH)
     if(NOT TARGET zstd::libzstd AND NOT TARGET zstd::libzstd_shared AND NOT TARGET zstd::libzstd_static)
+        find_path(PHOTARA_ZSTD_INCLUDE zstd.h
+            HINTS /usr/include
+            NO_CMAKE_ENVIRONMENT_PATH NO_SYSTEM_ENVIRONMENT_PATH)
+        find_library(PHOTARA_ZSTD_LIBRARY NAMES zstd
+            HINTS ${_photara_zstd_hints}
+            NO_CMAKE_ENVIRONMENT_PATH NO_SYSTEM_ENVIRONMENT_PATH)
         if(NOT PHOTARA_ZSTD_INCLUDE OR NOT PHOTARA_ZSTD_LIBRARY)
             find_package(zstd CONFIG QUIET)
         endif()

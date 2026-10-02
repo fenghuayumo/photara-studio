@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#if defined(TINYTENSOR_USE_FMT_LOGGING)
+#include <fmt/format.h>
+#else
 #include <format>
+#endif
 #include <iostream>
 #include <string>
 #include <utility>
@@ -70,9 +74,17 @@ inline void log_write(std::ostream& os, T&& value) {
 // Two or more arguments: treat the first as a std::format format string.
 template <typename... Args>
 requires (sizeof...(Args) >= 1)
+#if defined(TINYTENSOR_USE_FMT_LOGGING)
+// Avoid CUDA 12.8's internal compiler error in MSVC std::format when
+// --expt-relaxed-constexpr is enabled; retain the same formatting syntax.
+inline void log_write(std::ostream& os, fmt::format_string<Args...> pattern, Args&&... args) {
+    os << fmt::format(pattern, std::forward<Args>(args)...);
+}
+#else
 inline void log_write(std::ostream& os, std::format_string<Args...> fmt, Args&&... args) {
     os << std::format(fmt, std::forward<Args>(args)...);
 }
+#endif
 
 } // namespace tinytensor
 

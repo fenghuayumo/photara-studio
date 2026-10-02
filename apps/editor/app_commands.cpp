@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "cli_path.hpp"
 #include "file_dialogs.hpp"
 
 #include "i18n.hpp"
@@ -34,10 +35,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#ifndef PHOTARA_CLI_PATH
-#define PHOTARA_CLI_PATH "photara"
-#endif
 
 namespace editor {
 using i18n::tr;
@@ -2510,7 +2507,7 @@ void start_align(App& app) {
         app.log.open(app.layout.align_log);
         app.job.start(
             build_align_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout),
+                cli_path().c_str(), app.settings, app.layout),
             app.layout.align_log);
         app.active_job = JobKind::align;
         // Drop the previous cloud so the next frame only shows this run.
@@ -2646,7 +2643,7 @@ void start_export_sfm(App& app) {
         app.log.open(app.layout.export_log);
         app.job.start(
             build_export_sfm_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout),
+                cli_path().c_str(), app.settings, app.layout),
             app.layout.export_log);
         app.active_job = JobKind::export_sfm;
         set_message(app, "Exporting SfM alignment...", theme::accent);
@@ -2939,49 +2936,49 @@ void start_train(App& app, const bool smoke) {
     handles.device_node_mask = gpu::device_node_mask();
     handles.device_uuid = gpu::device_uuid_hex();
 
-    std::string command;
-    if (smoke) {
-        // Fixed COLMAP dataset used only by --interop-smoke.
-        std::ostringstream smoke_command;
-        smoke_command
-            << '"' << PHOTARA_CLI_PATH << "\" --images \""
-            << app.settings.images_dir.data() << "\" --output \""
-            << app.layout.model_output.string()
-            << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
-            << " --splat-use-mask false"
-            << " --splat --backend "
-            << (app.settings.training_backend == 1 ? "vulkan" : "cuda")
-            << " --splat-strategy "
-            << (app.settings.training_backend == 1 ? "adc_igs" : "adc_plus")
-            << " --splat-iterations "
-            << app.settings.iterations << " --splat-preview-interval "
-            << app.settings.preview_interval
-            << " --splat-preview-view 0 --splat-preview-view-file \""
-            << app.layout.preview_view_file.string() << '"'
-            << " --splat-preview-camera-file \""
-            << app.layout.preview_camera_file.string() << '"'
-            << " --splat-preview-vis-file \""
-            << app.layout.preview_vis_file.string() << '"'
-            << " --splat-preview-ack-file \""
-            << app.layout.preview_ack_file.string() << '"'
-            << " --splat-preview-vk-memory-handle " << handles.memory
-            << " --splat-preview-vk-semaphore-handle " << handles.semaphore
-            << " --splat-preview-vk-allocation-size " << handles.allocation_size
-            << " --splat-preview-vk-width " << handles.width
-            << " --splat-preview-vk-height " << handles.height
-            << " --splat-preview-vk-device-luid " << handles.device_luid
-            << " --splat-preview-vk-device-node-mask "
-            << handles.device_node_mask;
-        if (!handles.device_uuid.empty())
-            smoke_command << " --splat-preview-vk-device-uuid "
-                          << handles.device_uuid;
-        command = smoke_command.str();
-    } else {
-        command = build_train_command(
-            PHOTARA_CLI_PATH, app.settings, app.layout, handles);
-    }
-
     try {
+        std::string command;
+        if (smoke) {
+            // Fixed COLMAP dataset used only by --interop-smoke.
+            std::ostringstream smoke_command;
+            smoke_command
+                << '"' << cli_path().c_str() << "\" --images \""
+                << app.settings.images_dir.data() << "\" --output \""
+                << app.layout.model_output.string()
+                << "\" --splat-dataset \"D:\\ScanVideo\\ori_img\""
+                << " --splat-use-mask false"
+                << " --splat --backend "
+                << (app.settings.training_backend == 1 ? "vulkan" : "cuda")
+                << " --splat-strategy "
+                << (app.settings.training_backend == 1 ? "adc_igs" : "adc_plus")
+                << " --splat-iterations "
+                << app.settings.iterations << " --splat-preview-interval "
+                << app.settings.preview_interval
+                << " --splat-preview-view 0 --splat-preview-view-file \""
+                << app.layout.preview_view_file.string() << '"'
+                << " --splat-preview-camera-file \""
+                << app.layout.preview_camera_file.string() << '"'
+                << " --splat-preview-vis-file \""
+                << app.layout.preview_vis_file.string() << '"'
+                << " --splat-preview-ack-file \""
+                << app.layout.preview_ack_file.string() << '"'
+                << " --splat-preview-vk-memory-handle " << handles.memory
+                << " --splat-preview-vk-semaphore-handle " << handles.semaphore
+                << " --splat-preview-vk-allocation-size " << handles.allocation_size
+                << " --splat-preview-vk-width " << handles.width
+                << " --splat-preview-vk-height " << handles.height
+                << " --splat-preview-vk-device-luid " << handles.device_luid
+                << " --splat-preview-vk-device-node-mask "
+                << handles.device_node_mask;
+            if (!handles.device_uuid.empty())
+                smoke_command << " --splat-preview-vk-device-uuid "
+                              << handles.device_uuid;
+            command = smoke_command.str();
+        } else {
+            command = build_train_command(
+                cli_path().c_str(), app.settings, app.layout, handles);
+        }
+
         app.monitor.begin(JobKind::train);
         app.log.open(app.layout.train_log);
         app.job.start(command, app.layout.train_log);
@@ -3039,7 +3036,7 @@ void start_splat_mesh(App& app) {
         app.log.open(app.layout.dense_log);
         app.job.start(
             build_splat_mesh_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout, model),
+                cli_path().c_str(), app.settings, app.layout, model),
             app.layout.dense_log);
         app.active_job = JobKind::dense;
         set_message(
@@ -3097,7 +3094,7 @@ void start_dense(App& app) {
         app.log.open(app.layout.dense_log);
         app.job.start(
             build_dense_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout),
+                cli_path().c_str(), app.settings, app.layout),
             app.layout.dense_log);
         app.active_job = JobKind::dense;
         set_message(
@@ -3166,7 +3163,7 @@ void start_texture(App& app) {
         app.log.open(app.layout.texture_log);
         app.job.start(
             build_texture_command(
-                PHOTARA_CLI_PATH, app.settings, app.layout),
+                cli_path().c_str(), app.settings, app.layout),
             app.layout.texture_log);
         app.active_job = JobKind::texture;
         set_message(

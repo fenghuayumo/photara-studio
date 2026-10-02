@@ -19,10 +19,6 @@
 #include <string>
 #include <vector>
 
-#ifndef PHOTARA_CLI_PATH
-#define PHOTARA_CLI_PATH "photara"
-#endif
-
 namespace editor {
 using i18n::tr;
 
