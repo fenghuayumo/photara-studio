@@ -12,6 +12,12 @@ extern "C" {
 
 // backend API
 GGML_BACKEND_API ggml_backend_t ggml_backend_vk_init(size_t dev_num);
+// Image-model policy: prefer unmapped device-local buffers on Windows NVIDIA
+// discrete GPUs. Other devices retain their default policy. Existing GGML_VK
+// memory environment settings take precedence; no environment is modified.
+// Buffer policy is shared by backends on the same device in this process.
+// Call before allocating image-model tensors; existing buffers are unchanged.
+GGML_BACKEND_API ggml_backend_t ggml_backend_vk_init_for_image_model(size_t dev_num);
 
 GGML_BACKEND_API bool ggml_backend_is_vk(ggml_backend_t backend);
 GGML_BACKEND_API int  ggml_backend_vk_get_device_count(void);

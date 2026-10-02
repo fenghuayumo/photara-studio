@@ -103,6 +103,9 @@ struct sam3_result {
 struct sam3_params {
     std::string model_path;
     int         n_threads       = 4;
+    // Vulkan defaults to device-local memory on Windows NVIDIA discrete GPUs.
+    // Set SAM3_VULKAN_HOST_VISIBLE_VIDMEM=1 before the first model load to opt
+    // out; explicit GGML_VK memory settings take precedence over this default.
     sam3_backend backend        = SAM3_BACKEND_AUTO;
     // Kept for source compatibility. AUTO uses CPU only when this is false.
     bool        use_gpu         = true;

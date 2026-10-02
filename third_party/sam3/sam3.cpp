@@ -1019,7 +1019,7 @@ static struct ggml_tensor* sam3_attention(
         struct ggml_context* ctx, struct ggml_tensor* q,
         struct ggml_tensor* k, struct ggml_tensor* v,
         struct ggml_tensor* mask, float scale, float max_bias,
-        float logit_softcap);
+        float logit_softcap, ggml_backend_t backend = nullptr);
 
 // ggml building blocks
 static struct ggml_tensor* sam3_layer_norm(struct ggml_context* ctx,
@@ -1140,8 +1140,16 @@ static struct ggml_tensor* sam3_attention(
         struct ggml_context* ctx, struct ggml_tensor* q,
         struct ggml_tensor* k, struct ggml_tensor* v,
         struct ggml_tensor* mask, float scale, float max_bias,
-        float logit_softcap) {
+        float logit_softcap, ggml_backend_t backend) {
     GGML_ASSERT(logit_softcap == 0.0f);
+    if (backend && !mask && max_bias == 0.0f && q->ne[0] == 64 &&
+        q->type == GGML_TYPE_F32 && k->type == v->type &&
+        q->ne[3] == k->ne[3] && q->ne[3] == v->ne[3]) {
+        auto* flash = ggml_flash_attn_ext(
+            ctx, q, k, v, nullptr, scale, max_bias, logit_softcap);
+        ggml_flash_attn_ext_set_prec(flash, GGML_PREC_F32);
+        if (ggml_backend_supports_op(backend, flash)) return flash;
+    }
     struct ggml_tensor* scores = ggml_mul_mat(ctx, k, q);
     scores = ggml_soft_max_ext(ctx, scores, mask, scale, max_bias);
 
@@ -3425,8 +3433,14 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
 #ifdef GGML_USE_VULKAN
     if (!model->backend &&
         (params.backend == SAM3_BACKEND_VULKAN || try_gpu)) {
-        if (ggml_backend_vk_get_device_count() > 0)
-            model->backend = ggml_backend_vk_init(0);
+        if (ggml_backend_vk_get_device_count() > 0) {
+            // An explicit opt-out keeps the original backend memory policy.
+            // GGML_VK memory settings are also respected by the image policy.
+            const char * host_visible = getenv("SAM3_VULKAN_HOST_VISIBLE_VIDMEM");
+            const bool use_default_memory = host_visible && strcmp(host_visible, "1") == 0;
+            model->backend = use_default_memory ? ggml_backend_vk_init(0)
+                                               : ggml_backend_vk_init_for_image_model(0);
+        }
         if (!model->backend && params.backend == SAM3_BACKEND_VULKAN) {
             fprintf(stderr, "%s: requested Vulkan backend failed to initialise\n", __func__);
             return nullptr;
@@ -3903,7 +3917,8 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
                                                   struct ggml_tensor* x,
                                                   const sam3_vit_block& blk,
                                                   const sam3_hparams& hp,
-                                                  int block_idx) {
+                                                  int block_idx,
+                                                  ggml_backend_t backend) {
     const int E = hp.vit_embed_dim;     // 1024
     const int NH = hp.vit_num_heads;    // 16
     const int HD = hp.vit_head_dim();   // 64
@@ -3963,7 +3978,7 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
         K = ggml_reshape_4d(ctx, K, HD, W_cur * H_cur, NH, B_cur);
 
         float scale = 1.0f / sqrtf((float)HD);
-        auto* attn_out = sam3_attention(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+        auto* attn_out = sam3_attention(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f, backend);
         // flash_attn_ext returns [HD, NH, N, B_cur] — HD and NH adjacent,
         // so reshaping directly to [E, W, H, B] is correct.
         x = ggml_reshape_4d(ctx, attn_out, E, W_cur, H_cur, B_cur);
@@ -4033,7 +4048,7 @@ static struct ggml_tensor* sam3_build_vit_graph(struct ggml_context* ctx,
 
     // ── 32 transformer blocks ─────────────────────────────────────────────
     for (int i = 0; i < hp.vit_depth; ++i) {
-        x = sam3_vit_block_forward(ctx, x, model.vit.blocks[i], hp, i);
+        x = sam3_vit_block_forward(ctx, x, model.vit.blocks[i], hp, i, model.backend);
     }
 
     // Output: [E, W, H, 1] = [1024, 72, 72, 1]
@@ -10083,11 +10098,39 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     float presence_prob = 1.0f / (1.0f + expf(-presence_logit));
 
     SAM3_LOG(2, "%s: DETR decoder done\n", __func__);
+    std::vector<sam3_detection> dets;
+    std::vector<int> query_ids;
+    for (int q = 0; q < NQ; ++q) {
+        const float class_prob = 1.0f / (1.0f + expf(-scores_data[q]));
+        const float score = class_prob * presence_prob;
+        if (score < params.score_threshold) continue;
+        sam3_detection det;
+        det.box = sam3_cxcywh_to_xyxy(
+            boxes_data[q * 4], boxes_data[q * 4 + 1],
+            boxes_data[q * 4 + 2], boxes_data[q * 4 + 3],
+            state.orig_width, state.orig_height);
+        det.score = score;
+        dets.push_back(std::move(det));
+        query_ids.push_back(q);
+    }
+    const auto keep = sam3_nms(dets, params.nms_threshold);
+    const int n_selected = static_cast<int>(keep.size());
+    SAM3_LOG(1, "%s: decoding %d/%d masks after threshold and NMS\n",
+             __func__, n_selected, NQ);
+    if (keep.empty()) return result;
+
+    std::vector<float> selected_queries(static_cast<size_t>(D) * n_selected);
+    for (int i = 0; i < n_selected; ++i) {
+        const int q = query_ids[keep[i]];
+        memcpy(selected_queries.data() + static_cast<size_t>(i) * D,
+               queries_data.data() + static_cast<size_t>(q + 1) * D,
+               D * sizeof(float));
+    }
     /*
     ** ── SUB-GRAPH 5: Segmentation Head ───────────────────────────────
     */
     const int mask_hw = H * 4;  // 288 for SAM3
-    std::vector<float> all_masks(NQ * mask_hw * mask_hw);
+    std::vector<float> all_masks(static_cast<size_t>(n_selected) * mask_hw * mask_hw);
     {
         const size_t sz = ggml_tensor_overhead() * 16384 + ggml_graph_overhead() * 2;
         struct ggml_init_params gp = {sz, nullptr, true};
@@ -10111,8 +10154,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         ggml_set_input(fpn2);
         struct ggml_tensor* fpn_feats[3] = {fpn0, fpn1, fpn2};
 
-        // Object queries (skip presence token at index 0 → start at index 1)
-        auto* oq = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, NQ, 1);
+        auto* oq = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, n_selected, 1);
         ggml_set_name(oq, "seg_queries");
         ggml_set_input(oq);
 
@@ -10151,10 +10193,8 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         if (state.neck_det[2] && state.neck_det[2]->buffer && fpn2->buffer)
             sam3_copy_backend_tensor(state.neck_det[2], fpn2);
 
-        // Object queries: extract from DETR queries (skip presence token at slot 0)
-        // queries_data is flat [D * 201], presence token is at positions [0..D-1]
-        // Object queries start at position [D..D*(NQ+1)-1]
-        ggml_backend_tensor_set(oq, queries_data.data() + D, 0, D * NQ * sizeof(float));
+        ggml_backend_tensor_set(oq, selected_queries.data(), 0,
+                                selected_queries.size() * sizeof(float));
 
         ggml_backend_tensor_set(txt, combined_prompt_cpu.data(), 0, D * T * sizeof(float));
         ggml_backend_tensor_set(tab, combined_bias_cpu.data(), 0, T * sizeof(float));
@@ -10166,24 +10206,11 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     }
 
     /*
-    ** ── Post-processing: thresholding + NMS + mask resize ────────────
+    ** ── Post-processing: selected mask resize ──────────────────────
     */
-    std::vector<sam3_detection> dets;
-    for (int q = 0; q < NQ; ++q) {
-        float class_prob = 1.0f / (1.0f + expf(-scores_data[q]));
-        float score = class_prob * presence_prob;
-        if (score < params.score_threshold) continue;
-
-        sam3_detection det;
-        float cx = boxes_data[0 + q * 4];
-        float cy = boxes_data[1 + q * 4];
-        float bw = boxes_data[2 + q * 4];
-        float bh = boxes_data[3 + q * 4];
-
-        det.box = sam3_cxcywh_to_xyxy(cx, cy, bw, bh, state.orig_width, state.orig_height);
-        det.score = score;
-
-        const float* mask_ptr = all_masks.data() + q * mask_hw * mask_hw;
+    for (int i = 0; i < n_selected; ++i) {
+        auto& det = dets[keep[i]];
+        const float* mask_ptr = all_masks.data() + static_cast<size_t>(i) * mask_hw * mask_hw;
         auto mask_resized = sam3_bilinear_interpolate(mask_ptr, mask_hw, mask_hw,
                                                       state.orig_width, state.orig_height);
         det.mask.width = state.orig_width;
@@ -10191,18 +10218,9 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         det.mask.data.resize(state.orig_width * state.orig_height);
         for (int i = 0; i < (int)mask_resized.size(); ++i)
             det.mask.data[i] = (mask_resized[i] > 0.0f) ? 255 : 0;
-        det.mask.iou_score = score;
-
-        dets.push_back(std::move(det));
-    }
-
-    SAM3_LOG(2, "%s: %zu detections above threshold %.2f (presence=%.3f, logit=%.3f)\n",
-             __func__, dets.size(), params.score_threshold, presence_prob, presence_logit);
-
-    auto keep = sam3_nms(dets, params.nms_threshold);
-    for (int i = 0; i < (int)keep.size(); ++i) {
-        dets[keep[i]].instance_id = i + 1;
-        result.detections.push_back(std::move(dets[keep[i]]));
+        det.mask.iou_score = det.score;
+        det.instance_id = i + 1;
+        result.detections.push_back(std::move(det));
     }
 
     SAM3_LOG(2, "%s: %zu detections after NMS\n", __func__, result.detections.size());
