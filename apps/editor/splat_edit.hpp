@@ -53,6 +53,11 @@ public:
     void clear_selection();
     void invert_selection();
     void delete_selected(App& app);
+    // Replace the loaded Gaussians (NanoGS simplify). Undo restores the previous set.
+    void replace_from_model(
+        App& app, const photara::splat::GaussianModel& model,
+        bool record_undo = true);
+    void undo_edit(App& app);
     // Rings view selects by the covariance ellipse until the user picks a mode.
     void note_view(bool rings_view, float ring_scale = 2.828427F);
     [[nodiscard]] Tool tool() const noexcept { return tool_; }
@@ -81,12 +86,15 @@ public:
 
 private:
     struct Snapshot {
-        enum class Kind { selection, deletion, volume };
+        enum class Kind { selection, deletion, volume, replace };
         Kind kind{Kind::selection};
         std::vector<std::uint8_t> selected;
         float volume_center[3]{};
         float volume_quat[4]{1.F, 0.F, 0.F, 0.F};
         float volume_size[3]{1.F, 1.F, 1.F};
+        std::uint32_t count{};
+        std::uint32_t sh_degree{};
+        std::uint32_t sh_bases{1};
         std::vector<float> xyz;
         // Indices into the model from before this deletion, ascending.
         std::vector<std::uint32_t> removed_index;
@@ -101,6 +109,8 @@ private:
 
     void push_undo(Snapshot snapshot);
     void restore(App& app, const Snapshot& snapshot);
+    void capture_replace(Snapshot& snap) const;
+    void apply_replace(const Snapshot& snap);
     void begin_stroke(bool capture_positions);
     void end_stroke(App& app);
     void select_at(

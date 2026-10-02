@@ -21,6 +21,7 @@
 #include "splat/dataset.hpp"
 #include "splat/cuda_vulkan_preview.hpp"
 #include "splat/formats.hpp"
+#include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
 #endif
 #if defined(PHOTARA_HAS_SPLAT) && defined(TINYTENSOR_HAS_VULKAN)
@@ -136,6 +137,12 @@ struct ReconstructCli {
     bool splat{false};
     bool splat_view{false};
     bool splat_mesh_only{false};
+    std::filesystem::path splat_simplify;
+    float splat_simplify_keep{0.8F};
+    unsigned splat_simplify_knn{16};
+    float splat_simplify_opacity{0.10F};
+    float splat_simplify_merge_cap{0.5F};
+    int splat_simplify_sh{-1};
     std::string capture_mode{"object"};
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
@@ -402,6 +409,10 @@ void print_help(const cxxopts::Options& options) {
               << "               (does not train splats unless --splat is also set)\n"
               << "  --splat       train CUDA Gaussian splats -> *_splat.ply, or --output .sog/.spz/.glb\n"
               << "  --splat-view  orbit-preview a trained splat from the camera sidecar\n"
+              << "  --splat-simplify PATH  NanoGS post-training simplify; writes --output\n"
+              << "  --splat-simplify-keep R  keep ratio (0-1, default 0.8)\n"
+              << "  --splat-simplify-opacity T  drop Gaussians below this opacity (default 0.1)\n"
+              << "  --splat-simplify-knn K  merge-neighbour count (default 16)\n"
               << "  --splat-mesh-only  mesh an existing trained splat; does not run the optimizer\n"
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
@@ -712,6 +723,24 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-view",
          "Orbit-preview a trained splat from --splat-preview-camera-file",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-simplify",
+         "NanoGS post-training simplify of a Gaussian file (PLY/SOG/SPZ/GLB)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-simplify-keep",
+         "Fraction of Gaussians to keep (default 0.8)",
+         cxxopts::value<float>()->default_value("0.8"))
+        ("splat-simplify-opacity",
+         "Drop Gaussians below this opacity before merging (default 0.1)",
+         cxxopts::value<float>()->default_value("0.1"))
+        ("splat-simplify-knn",
+         "kNN neighbours per Gaussian for merge candidates (default 16)",
+         cxxopts::value<unsigned>()->default_value("16"))
+        ("splat-simplify-merge-cap",
+         "Max fraction merged in one pass (default 0.5)",
+         cxxopts::value<float>()->default_value("0.5"))
+        ("splat-simplify-sh",
+         "Output SH degree 0-3; -1 keeps the source degree",
+         cxxopts::value<int>()->default_value("-1"))
         ("splat-mesh-only",
          "Extract a mesh from an existing trained splat without running the optimizer",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -1158,13 +1187,20 @@ ReconstructCli parse_cli(int argc, char** argv) {
         std::exit(0);
     }
 
-    if (!result.count("images") || !result.count("output")) {
+    const bool splat_simplify_only = result.count("splat-simplify") &&
+        !result["splat-simplify"].as<std::string>().empty();
+    if (splat_simplify_only) {
+        if (!result.count("output"))
+            throw std::invalid_argument(
+                "Missing required option: --output");
+    } else if (!result.count("images") || !result.count("output")) {
         throw std::invalid_argument(
             "Missing required options: --images, --output");
     }
 
     ReconstructCli cli;
-    cli.images_dir = utf8_to_path(result["images"].as<std::string>());
+    if (result.count("images"))
+        cli.images_dir = utf8_to_path(result["images"].as<std::string>());
     cli.video_fps = result["video-fps"].as<float>();
     cli.video_sharp_window = result["video-sharp-window"].as<int>();
     cli.video_max_frames = result["video-max-frames"].as<int>();
@@ -1312,6 +1348,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.backend != "cuda" && cli.backend != "vulkan")
         throw std::invalid_argument("--backend must be cuda or vulkan");
     cli.splat_view = result["splat-view"].as<bool>();
+    cli.splat_simplify = utf8_to_path(result["splat-simplify"].as<std::string>());
+    cli.splat_simplify_keep = result["splat-simplify-keep"].as<float>();
+    cli.splat_simplify_opacity = result["splat-simplify-opacity"].as<float>();
+    cli.splat_simplify_knn = result["splat-simplify-knn"].as<unsigned>();
+    cli.splat_simplify_merge_cap = result["splat-simplify-merge-cap"].as<float>();
+    cli.splat_simplify_sh = result["splat-simplify-sh"].as<int>();
     cli.splat_mesh_only = result["splat-mesh-only"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")
@@ -4012,6 +4054,26 @@ int main(int argc, char** argv) {
         }
 
 #if defined(PHOTARA_HAS_SPLAT)
+        if (!cli.splat_simplify.empty()) {
+            auto model = photara::splat::load_gaussians(
+                cli.splat_simplify, photara::splat::GaussianFormat::auto_detect,
+                tinytensor::Device::CPU);
+            photara::core::Logger::instance().info(
+                "splat simplify input=", cli.splat_simplify,
+                " gaussians=", model.size());
+            photara::splat::SimplifyOptions options;
+            options.keep_ratio = cli.splat_simplify_keep;
+            options.min_opacity = cli.splat_simplify_opacity;
+            options.knn = cli.splat_simplify_knn;
+            options.merge_cap = cli.splat_simplify_merge_cap;
+            options.sh_degree = cli.splat_simplify_sh;
+            model = photara::splat::simplify_gaussians(model, options);
+            photara::splat::save_gaussians(model, cli.output);
+            photara::core::Logger::instance().info(
+                "splat simplify output=", cli.output,
+                " gaussians=", model.size());
+            return 0;
+        }
         if (cli.splat_view) {
             run_splat_view(cli, archive);
             return 0;

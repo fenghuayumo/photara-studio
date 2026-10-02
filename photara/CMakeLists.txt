@@ -614,6 +614,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/densification_strategies.cpp
             src/splat/formats.cpp
             src/splat/formats_glb.cpp
+            src/splat/simplify.cpp
             src/splat/mesh.cpp
             src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp

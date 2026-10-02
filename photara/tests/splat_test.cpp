@@ -9,6 +9,7 @@
 #include "../src/splat/cuda_ops.hpp"
 #include "../src/splat/focus_mask.hpp"
 #include "../src/splat/focus_mask_frame.hpp"
+#include "splat/simplify.hpp"
 #include "../src/splat/pam_cuda.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/densification_internal.hpp"
@@ -7092,6 +7093,62 @@ void test_densification_strategies_and_dense_bypass() {
 
 }  // namespace
 
+void test_nanogs_simplify() {
+    using namespace photara::splat;
+    GaussianModel model;
+    constexpr std::size_t n = 12;
+    std::vector<float> means(n * 3, 0.F);
+    std::vector<float> logs(n * 3, std::log(0.04F));
+    std::vector<float> quats(n * 4, 0.F);
+    std::vector<float> logits(n, 2.F);
+    std::vector<float> sh(n * 3, 0.2F);
+    for (std::size_t i = 0; i < n; ++i) {
+        means[i * 3] = 0.02F * static_cast<float>(i);
+        quats[i * 4] = 1.F;
+    }
+    logits[0] = -10.F;
+    const auto cpu = tinytensor::Device::CPU;
+    model.means = tinytensor::Tensor::from_vector(means, {n, 3}, cpu);
+    model.log_scales = tinytensor::Tensor::from_vector(logs, {n, 3}, cpu);
+    model.quaternions = tinytensor::Tensor::from_vector(quats, {n, 4}, cpu);
+    model.opacity_logits = tinytensor::Tensor::from_vector(logits, {n, 1}, cpu);
+    model.sh = tinytensor::Tensor::from_vector(sh, {n, 1, 3}, cpu);
+    model.sh_degree = 0;
+    SimplifyOptions options;
+    options.keep_ratio = 0.5F;
+    options.min_opacity = 0.05F;
+    options.knn = 4;
+    options.merge_cap = 0.5F;
+    const auto out = simplify_gaussians(model, options);
+    require(out.size() < n, "NanoGS simplify should reduce the Gaussian count");
+    require(out.size() >= 1, "NanoGS simplify should keep at least one Gaussian");
+
+    GaussianModel pair;
+    constexpr std::size_t pair_n = 2;
+    std::vector<float> pair_means(pair_n * 3, 0.F);
+    std::vector<float> pair_logs(pair_n * 3, std::log(0.05F));
+    std::vector<float> pair_quats(pair_n * 4, 0.F);
+    std::vector<float> pair_logits(pair_n, 1.5F);
+    std::vector<float> pair_sh(pair_n * 3, 0.1F);
+    pair_quats[0] = pair_quats[4] = 1.F;
+    pair_means[3] = 0.2F;
+    pair.means = tinytensor::Tensor::from_vector(pair_means, {pair_n, 3}, cpu);
+    pair.log_scales = tinytensor::Tensor::from_vector(pair_logs, {pair_n, 3}, cpu);
+    pair.quaternions = tinytensor::Tensor::from_vector(pair_quats, {pair_n, 4}, cpu);
+    pair.opacity_logits = tinytensor::Tensor::from_vector(pair_logits, {pair_n, 1}, cpu);
+    pair.sh = tinytensor::Tensor::from_vector(pair_sh, {pair_n, 1, 3}, cpu);
+    pair.sh_degree = 0;
+    SimplifyOptions pair_options;
+    pair_options.keep_ratio = 0.5F;
+    pair_options.min_opacity = 0.F;
+    pair_options.knn = 1;
+    const auto merged = simplify_gaussians(pair, pair_options);
+    require(merged.size() == 1, "Two Gaussians should merge into one");
+    const float merged_logit = merged.opacity_logits.to_vector().front();
+    require(std::abs(merged_logit - 1.5F) < 0.05F,
+            "Merged opacity must stay a weighted blend, not mass divided by volume");
+}
+
 void test_focus_view_mask_cuda() {
     using namespace photara;
     auto camera_for = [](const CameraModel model) {
@@ -7306,6 +7363,11 @@ int main(int argc, char** argv) {
                     << " saved_bytes=" << original_live - inference_memory.accounted_live_bytes
                     << " backward_workspace_live=" << backward_live << " geometry_exact=1\n" << std::flush;
             }
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--simplify-only") {
+            test_nanogs_simplify();
+            std::cout << "Simplify tests passed\n";
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--focus-mask-only") {

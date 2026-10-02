@@ -552,6 +552,63 @@ Action draw_inspector(App& app) {
                 "Spatially varying affine colour correction (lens shading and\n"
                 "vignetting). Pairs with PPISP, which owns the global exposure."));
         ImGui::EndDisabled();
+        const bool simplify_open = app.splat_simplify.show;
+        if (theme::toolbar_button(
+                tr("Simplify"), {-1.F, 28.F},
+                !busy && can_export_model(app), simplify_open))
+            app.splat_simplify.show = !app.splat_simplify.show;
+        if (app.splat_simplify.show && !app.splat_simplify.running &&
+            !app.splat_simplify.has_baseline)
+            app.splat_simplify.source_count = app.splat_edit.gaussian_count();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr(
+                "Reduce Gaussian count after training. Nearby splats are merged.\n"
+                "Does not retrain. Undo restores the previous model."));
+        if (app.splat_simplify.show && can_export_model(app)) {
+            ImGui::Spacing();
+            const bool simplifying = app.splat_simplify.running;
+            const std::uint32_t source = app.splat_simplify.source_count
+                ? app.splat_simplify.source_count
+                : app.splat_edit.gaussian_count();
+            ImGui::BeginDisabled(simplifying);
+            theme::caption("Keep");
+            float keep_percent = app.splat_simplify.keep_ratio * 100.F;
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::SliderFloat(
+                    "##simplify_keep", &keep_percent, 10.F, 100.F, "%.0f%%"))
+                app.splat_simplify.keep_ratio = keep_percent / 100.F;
+            theme::caption("Opacity floor");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::SliderFloat(
+                "##simplify_opacity", &app.splat_simplify.min_opacity,
+                0.F, 0.3F, "%.2f");
+            ImGui::EndDisabled();
+            const auto target = static_cast<std::uint32_t>(std::llround(
+                static_cast<double>(source) *
+                static_cast<double>(app.splat_simplify.keep_ratio)));
+            char change[96];
+            std::snprintf(
+                change, sizeof(change), "%s  →  %s",
+                format_count(source).c_str(), format_count(target).c_str());
+            theme::metric("Gaussians", change);
+            if (simplifying) {
+                theme::progress_track(
+                    {-1.F, 6.F}, app.splat_simplify.progress, theme::accent);
+                if (theme::toolbar_button(tr("Cancel"), {-1.F, 28.F})) {
+                    if (app.splat_simplify.cancel)
+                        app.splat_simplify.cancel->store(true);
+                }
+            } else if (theme::primary_button(
+                           tr("Apply"), {-1.F, 30.F}, source > 0 && !busy)) {
+                start_splat_simplify(app);
+            }
+            if (!app.splat_simplify.error.empty()) {
+                ImGui::PushTextWrapPos(0.F);
+                ImGui::TextColored(
+                    theme::danger, "%s", app.splat_simplify.error.c_str());
+                ImGui::PopTextWrapPos();
+            }
+        }
         if (theme::toolbar_button(
                 tr("Export Splat"), {-1.F, 28.F},
                 !busy && can_export_model(app)))
