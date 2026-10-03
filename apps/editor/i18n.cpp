@@ -711,13 +711,29 @@ constexpr Entry k_entries[] = {
     {"ADC IGS", "ADC IGS", "ADC IGS", "ADC IGS"},
     {"ADC Plus", "ADC Plus", "ADC Plus", "ADC Plus"},
     {"Iterations", "迭代次数", "イテレーション", "반복"},
+    {"Training mode", "训练模式", "学習モード", "학습 모드"},
+    {"High quality", "高质量", "高品質", "고품질"},
+    {"Custom", "自定义", "カスタム", "사용자 지정"},
+    {"Pruning", "剪枝", "剪定", "가지치기"},
+    {"Fast: 30,000 steps, 1M Gaussians, pruning (CUDA).\n"
+     "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
+     "High quality: 50,000 steps, 5M Gaussians, no pruning.",
+     "快速：30,000 步，100 万高斯，开启剪枝（CUDA）。\n标准：30,000 步，300 万高斯，关闭剪枝。\n高质量：50,000 步，500 万高斯，关闭剪枝。",
+     "高速：30,000 ステップ、100万ガウシアン、剪定（CUDA）。\n標準：30,000 ステップ、300万ガウシアン、剪定なし。\n高品質：50,000 ステップ、500万ガウシアン、剪定なし。",
+     "빠르게: 30,000회, 100만 가우시안, 가지치기(CUDA).\n표준: 30,000회, 300만 가우시안, 가지치기 없음.\n고품질: 50,000회, 500만 가우시안, 가지치기 없음."},
+    {"CUDA only. Prune 30% during growth and 20% after growth.\n"
+     "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
+     "Requires full training resolution.",
+     "仅支持 CUDA。增长期间每次剪枝 30%，增长结束后每次剪枝 20%。\n首次在 9,000 步执行，随后每隔 3,000 步执行，30,000 步停止。\n只在全分辨率训练时执行。",
+     "CUDA のみ。成長中は30%、成長後は20%を剪定。\n9,000ステップから3,000ステップごと、30,000未満。\nフル解像度が必要です。",
+     "CUDA 전용. 성장 중 30%, 성장 후 20% 가지치기.\n9,000회부터 3,000회 간격, 30,000회 미만.\n전체 해상도에서 실행."},
     {"Densification cap", "致密化上限", "稠密化上限", "밀집화 상한"},
     {"Maximum Gaussian count during densification.\n"
      "Initialization uses the full source cloud.\n"
-     "Default 1,000,000.",
-     "致密化过程中的高斯数量上限。\n初始化使用全部源点云。\n默认 1,000,000。",
-     "稠密化中のガウシアン数上限。\n初期化は入力点群をすべて使います。\n既定 1,000,000。",
-     "밀집화 중 가우시안 수 상한.\n초기화는 원본 점군을 전부 사용합니다.\n기본 1,000,000."},
+     "Default 3,000,000.",
+     "致密化过程中的高斯数量上限。\n初始化使用全部源点云。\n默认 3,000,000。",
+     "稠密化中のガウシアン数上限。\n初期化は入力点群をすべて使います。\n既定 3,000,000。",
+     "밀집화 중 가우시안 수 상한.\n초기화는 원본 점군을 전부 사용합니다.\n기본 3,000,000."},
     {"Max axis ratio", "最大长短轴比", "最大軸比", "최대 축비"},
     {"Limit Gaussian axis ratio", "限制高斯长短轴比", "ガウシアンの軸比を制限", "가우시안 축비 제한"},
     {"Clamps each Gaussian's longest/shortest scale ratio.\n"

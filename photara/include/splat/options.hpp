@@ -58,7 +58,7 @@ struct TrainingOptions {
     // The orchestration, schedules and optimizer policy are shared. This
     // selects the device for training tensors and backend GPU primitives.
     TrainingBackend backend{TrainingBackend::cuda};
-    unsigned iterations{10'000};
+    unsigned iterations{30'000};
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
@@ -91,7 +91,7 @@ struct TrainingOptions {
         DensificationStrategy::adc_igs};
     // Growth ceiling while densify is enabled. Initialization uses the full
     // source cloud unless initial_point_budget asks for a subset.
-    std::size_t densification_cap{1'000'000};
+    std::size_t densification_cap{3'000'000};
     // Upper bound on the Gaussians built from the input point cloud. Sparse
     // SfM clouds regularly outnumber the growth ceiling, and an initialization
     // already sitting on it leaves IGS no room to refine anything: every later

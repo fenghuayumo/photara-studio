@@ -402,6 +402,8 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.scene_mode = app.settings.scene_mode;
     settings.iterations = app.settings.iterations;
     settings.densification_cap = app.settings.densification_cap;
+    settings.training_mode = app.settings.training_mode;
+    settings.speedy_pruning = app.settings.speedy_pruning;
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
@@ -469,6 +471,8 @@ void apply_project_settings(
     app.settings.scene_mode = settings.scene_mode;
     app.settings.iterations = settings.iterations;
     app.settings.densification_cap = settings.densification_cap;
+    app.settings.training_mode = settings.training_mode;
+    app.settings.speedy_pruning = settings.speedy_pruning;
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;

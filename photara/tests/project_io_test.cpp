@@ -5,6 +5,7 @@
 #include "sfm/export_colmap.hpp"
 #include "sfm/export_nerfstudio.hpp"
 #include "sfm/scene.hpp"
+#include "splat/training_preset.hpp"
 
 #include <cstring>
 #include <cstdint>
@@ -184,6 +185,9 @@ int main() {
            "asfm pinhole default");
 
     Settings settings;
+    expect(settings.iterations == 30'000 && settings.densification_cap == 3'000'000 &&
+           settings.training_mode == 1 && !settings.speedy_pruning,
+           "new projects default to standard 3DGS training");
     expect(!settings.sam_use_mask_for_sfm, "SAM alignment masks default off");
     settings.name = "demo";
     settings.image_directory = dir / "images";
@@ -202,6 +206,8 @@ int main() {
     settings.camera_model = 2;
     settings.strategy = 1;
     settings.densification_cap = 2'500'000;
+    settings.training_mode = 0;
+    settings.speedy_pruning = true;
     settings.sh_degree = 2;
     settings.sfm_mode = 2;
     settings.max_features = 4096;
@@ -259,6 +265,8 @@ int main() {
         round_trip.densification_cap == 2'500'000,
         "settings densification cap");
     expect(round_trip.sh_degree == 2, "settings SH degree");
+    expect(round_trip.training_mode == 0 && round_trip.speedy_pruning,
+           "training mode and pruning survive project roundtrip");
     expect(round_trip.mask_mode == 1, "settings mask mode");
     expect(round_trip.sam_use_mask_for_sfm, "SAM alignment mask opt-in round trip");
     expect(round_trip.sam_masks && round_trip.sam_text == "glass cup",
@@ -268,7 +276,7 @@ int main() {
     expect(round_trip.build_mesh, "settings build mesh");
     expect(round_trip.mesh_quality == 2, "settings mesh quality");
     auto legacy_settings = encode_settings(settings, ascan_path);
-    legacy_settings.resize(legacy_settings.size() - sizeof(std::int32_t));
+    legacy_settings.resize(legacy_settings.size() - 2 * sizeof(std::int32_t) - sizeof(std::uint8_t));
     expect(decode_settings(legacy_settings, ascan_path).mesh_quality == 1,
            "legacy project defaults to standard mesh quality");
     for (int quality : {0, 1, 2}) {
@@ -277,6 +285,25 @@ int main() {
         expect(decode_settings(encode_settings(selected, ascan_path), ascan_path).mesh_quality == quality,
                "mesh quality modes survive project roundtrip");
     }
+    for (int mode : {0, 1, 2}) {
+        const auto preset = photara::splat::training_preset(
+            static_cast<photara::splat::TrainingMode>(mode));
+        auto selected = settings;
+        selected.training_mode = mode;
+        selected.iterations = static_cast<int>(preset.iterations);
+        selected.densification_cap = static_cast<int>(preset.gaussian_cap);
+        selected.speedy_pruning = preset.speedy_pruning;
+        const auto restored = decode_settings(encode_settings(selected, ascan_path), ascan_path);
+        expect(restored.training_mode == mode && restored.iterations == selected.iterations &&
+               restored.densification_cap == selected.densification_cap &&
+               restored.speedy_pruning == selected.speedy_pruning,
+               "3DGS presets survive project roundtrip");
+    }
+    auto old_training = encode_settings(settings, ascan_path);
+    old_training.resize(old_training.size() - sizeof(std::int32_t) - sizeof(std::uint8_t));
+    const auto old_restored = decode_settings(old_training, ascan_path);
+    expect(!old_restored.speedy_pruning && old_restored.densification_cap == 2'500'000,
+           "legacy projects preserve their cap without enabling Speedy pruning");
     expect(round_trip.mesh_source == 1, "settings mesh source");
     expect(round_trip.texture_quality == 2, "settings texture quality");
     expect(round_trip.atlas_resolution == 4096, "settings atlas resolution");
@@ -321,8 +348,8 @@ int main() {
     auto settings_bytes = encode_settings(updated, ascan_path);
     {
         auto legacy_bytes = settings_bytes;
-        // Remove the appended quality and the earlier SAM alignment opt-in.
-        legacy_bytes.resize(legacy_bytes.size() - sizeof(std::int32_t) - sizeof(std::uint8_t));
+        // Remove training mode/pruning, mesh quality and SAM alignment opt-in.
+        legacy_bytes.resize(legacy_bytes.size() - 2 * sizeof(std::int32_t) - 2 * sizeof(std::uint8_t));
         const Settings legacy = decode_settings(legacy_bytes, ascan_path);
         expect(!legacy.sam_use_mask_for_sfm,
                "old projects default to full-image alignment");
