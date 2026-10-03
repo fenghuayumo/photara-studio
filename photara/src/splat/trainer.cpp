@@ -1093,7 +1093,19 @@ GaussianModel initialize_from_dense_cloud(
 
 
 Trainer::Trainer(TrainingOptions options)
-    : options_(std::move(options)) {}
+    : options_(std::move(options)) {
+    if (options_.speedy_pruning) {
+        if (options_.backend != TrainingBackend::cuda)
+            throw std::invalid_argument("Speedy-Splat pruning currently requires CUDA");
+        if (options_.speedy_every == 0 || options_.speedy_start == 0 ||
+            options_.speedy_stop < options_.speedy_start ||
+            !std::isfinite(options_.speedy_soft_ratio) ||
+            !std::isfinite(options_.speedy_hard_ratio) ||
+            options_.speedy_soft_ratio < 0.F || options_.speedy_soft_ratio >= 1.F ||
+            options_.speedy_hard_ratio < 0.F || options_.speedy_hard_ratio >= 1.F)
+            throw std::invalid_argument("Invalid Speedy-Splat pruning schedule or ratios (require [0,1))");
+    }
+}
 
 GaussianModel Trainer::train(
     const mvs::MvsScene& scene, ProgressCallback progress,
@@ -1453,6 +1465,7 @@ GaussianModel Trainer::train(
             : std::numeric_limits<float>::infinity();
 
     auto interval_started = std::chrono::steady_clock::now();
+    const auto optimization_started = interval_started;
     unsigned last_progress_iteration = 0;
     double ema_step_ms = 0.0;
     auto next_preview_poll = std::chrono::steady_clock::time_point::min();
@@ -2374,6 +2387,70 @@ GaussianModel Trainer::train(
                     budget.state_bytes_per_gaussian());
             }
         }
+        // Progressive training changes the pixels used by the sensitivity
+        // score. Wait for the complete target resolution before sparsifying.
+        // With quarter/half stages of 3000 steps, the 6000 event is skipped
+        // and the default schedule first prunes at 9000.
+        if (options_.speedy_pruning && active_resolution_scale >= 1.F &&
+            iteration >= options_.speedy_start &&
+            iteration < options_.speedy_stop &&
+            (iteration - options_.speedy_start) % options_.speedy_every == 0) {
+            const auto score_start = std::chrono::steady_clock::now();
+            const bool soft = densification_enabled && iteration < grow_stop_iteration(options_);
+            const float ratio = soft ? options_.speedy_soft_ratio : options_.speedy_hard_ratio;
+            if (ratio > 0.F && model.size() > 1) {
+                auto scores = tinytensor::Tensor::zeros({model.size()}, model.means.device());
+                const std::size_t views = options_.speedy_score_views == 0
+                    ? view_indices.size() : std::min(view_indices.size(), std::size_t(options_.speedy_score_views));
+                auto score_options = raster_options;
+                score_options.background = {0.F, 0.F, 0.F};
+                for (std::size_t v = 0; v < views; ++v) {
+                    // Evenly spaced deterministic training-only cameras. A
+                    // view subset is an explicit approximation of full scores.
+                    const auto score_view = view_cache.get(view_indices[v * view_indices.size() / views]);
+                    scores = scores.add(rasterizer.pruning_scores(model, score_view.camera, score_options));
+                }
+                const auto values = scores.to_vector();
+                if (!std::all_of(values.begin(), values.end(), [](float x) { return std::isfinite(x) && x >= 0.F; }))
+                    throw std::runtime_error("Non-finite Speedy-Splat sensitivity scores");
+                std::vector<int> order(model.size());
+                std::iota(order.begin(), order.end(), 0);
+                const std::size_t remove = std::min(model.size() - 1,
+                    static_cast<std::size_t>(ratio * static_cast<double>(model.size())));
+                // Fixed count and index tie-break prevent all-zero scores from
+                // deleting the entire model (reference threshold pruning can).
+                std::partial_sort(order.begin(), order.begin() + remove, order.end(),
+                    [&](int a, int b) { return values[a] != values[b] ? values[a] < values[b] : a < b; });
+                std::vector<bool> dropped(model.size(), false);
+                for (std::size_t k = 0; k < remove; ++k) dropped[order[k]] = true;
+                std::vector<int> keep;
+                for (std::size_t k = 0; k < model.size(); ++k) if (!dropped[k]) keep.push_back(int(k));
+                const auto keep_indices = tinytensor::Tensor::from_vector(
+                    keep, {keep.size()}, model.means.device());
+                refine::gpu_detail::select_training_rows_gpu(model, keep_indices, adam_states);
+                if (densification_enabled) {
+                    // Preserve the surviving rows' evidence when pruning falls
+                    // between refinement steps. Clearing the whole window can
+                    // suppress regrowth with a custom pruning interval.
+                    for (auto* stat : {&densification_stats.gradient,
+                                       &densification_stats.count,
+                                       &densification_stats.max_screen_radius,
+                                       &densification_stats.priority,
+                                       &densification_stats.geometry_gradient,
+                                       &densification_stats.first_view,
+                                       &densification_stats.view_support,
+                                       &densification_stats.image_error})
+                        *stat = stat->index_select(0, keep_indices);
+                }
+                latest_refinement.pruned += remove;
+                refinement_happened = true;
+                core::Logger::instance().info("Speedy-Splat prune iteration=", iteration, " phase=", soft ? "soft" : "hard",
+                    " views=", views, " pruned=", remove, " remaining=", model.size(),
+                    " overhead_ms=", std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - score_start).count());
+            }
+        }
+
         if (adaptive_multi_view && refinement_happened) {
             const std::vector<float> window =
                 multi_view_stability_accumulator.to_vector();
@@ -2530,6 +2607,9 @@ GaussianModel Trainer::train(
                 iteration) != options_.evaluation_iterations.end())
             launch_evaluation(iteration, model);
     }
+    if (!vulkan_backend) cudaDeviceSynchronize();
+    core::Logger::instance().info("splat_optimization_s=",
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - optimization_started).count());
     cuda_profiler.flush();
     if (device_preview) {
         core::Logger::instance().info(

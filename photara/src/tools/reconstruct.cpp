@@ -150,6 +150,7 @@ struct ReconstructCli {
     std::string backend{"cuda"};
     unsigned splat_iterations{10'000};
     unsigned splat_log_interval{100};
+    bool splat_eval_checkpoints{true};
     unsigned splat_preview_interval{0};
     unsigned splat_preview_view{0};
     std::filesystem::path splat_preview_view_file;
@@ -228,6 +229,11 @@ struct ReconstructCli {
     std::string splat_strategy{"adc_igs"};
     float splat_growth_factor{0.F};
     unsigned splat_seed{42};
+    struct {
+        bool speedy_pruning{false};
+        unsigned speedy_start{6000}, speedy_every{3000}, speedy_stop{30000}, speedy_score_views{0};
+        float speedy_soft_ratio{0.3F}, speedy_hard_ratio{0.2F};
+    } speedy_options;
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
     std::uint64_t splat_densification_cap{1'000'000};
@@ -851,6 +857,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-eval-split-every",
          "Hold out every Nth view for PSNR/SSIM evaluation (0 = train all)",
          cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-eval-checkpoints", "Render evaluation checkpoints during optimization",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-use-mask", "Enable mask-aware training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-alpha-mode",
@@ -969,6 +977,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0"))
         ("splat-seed", "Splat training RNG seed",
          cxxopts::value<unsigned>()->default_value("42"))
+        ("splat-speedy-pruning", "Enable CUDA Speedy-Splat sensitivity pruning",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-speedy-start", "First pruning iteration", cxxopts::value<unsigned>()->default_value("6000"))
+        ("splat-speedy-every", "Pruning interval", cxxopts::value<unsigned>()->default_value("3000"))
+        ("splat-speedy-stop", "Exclusive pruning stop", cxxopts::value<unsigned>()->default_value("30000"))
+        ("splat-speedy-views", "Scoring cameras (0 = all training views)", cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-speedy-soft-ratio", "Fraction pruned during growth", cxxopts::value<float>()->default_value("0.3"))
+        ("splat-speedy-hard-ratio", "Fraction pruned after growth", cxxopts::value<float>()->default_value("0.2"))
         ("splat-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
         ("splat-densification-cap", "Densify growth ceiling",
@@ -1532,6 +1548,14 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!std::isfinite(cli.splat_growth_factor) || cli.splat_growth_factor < 0.F)
         throw std::invalid_argument("--splat-growth-factor must be finite and >= 0");
     cli.splat_seed = result["splat-seed"].as<unsigned>();
+    cli.splat_eval_checkpoints = result["splat-eval-checkpoints"].as<bool>();
+    cli.speedy_options.speedy_pruning = result["splat-speedy-pruning"].as<bool>();
+    cli.speedy_options.speedy_start = result["splat-speedy-start"].as<unsigned>();
+    cli.speedy_options.speedy_every = result["splat-speedy-every"].as<unsigned>();
+    cli.speedy_options.speedy_stop = result["splat-speedy-stop"].as<unsigned>();
+    cli.speedy_options.speedy_score_views = result["splat-speedy-views"].as<unsigned>();
+    cli.speedy_options.speedy_soft_ratio = result["splat-speedy-soft-ratio"].as<float>();
+    cli.speedy_options.speedy_hard_ratio = result["splat-speedy-hard-ratio"].as<float>();
     cli.splat_structure_freeze_iter =
         result["splat-structure-freeze-iter"].as<unsigned>();
     cli.splat_densification_cap =
@@ -3279,7 +3303,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.adaptive_training_cache = cli.splat_cache_auto;
     options.training_prefetch_views = cli.splat_prefetch_views;
     options.training_prefetch_adaptive = cli.splat_prefetch_adaptive;
-    if (!cli.gui) {
+    if (!cli.gui && cli.splat_eval_checkpoints) {
         for (const unsigned milestone :
              {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
             if (milestone < options.iterations)
@@ -3315,6 +3339,13 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     if (cli.splat_growth_factor > 0.F)
         options.densify_growth_factor = cli.splat_growth_factor;
     options.seed = cli.splat_seed;
+    options.speedy_pruning = cli.speedy_options.speedy_pruning;
+    options.speedy_start = cli.speedy_options.speedy_start;
+    options.speedy_every = cli.speedy_options.speedy_every;
+    options.speedy_stop = cli.speedy_options.speedy_stop;
+    options.speedy_score_views = cli.speedy_options.speedy_score_views;
+    options.speedy_soft_ratio = cli.speedy_options.speedy_soft_ratio;
+    options.speedy_hard_ratio = cli.speedy_options.speedy_hard_ratio;
     options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;
     options.use_bilateral_grid = cli.splat_bilateral_grid;

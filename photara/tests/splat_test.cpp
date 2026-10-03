@@ -2309,6 +2309,42 @@ void test_forward_backward() {
     const auto colored = rasterizer.forward(model, camera, colored_background);
     const auto black_rgb = rendered.color.to_vector();
     const auto colored_rgb = colored.color.to_vector();
+    // Independent closed form: one unclipped primitive on a constant
+    // background has d(sum RGB)/d Gaussian = opacity * sum(colour-bg)
+    // at every supported pixel. Check both draw-list storage layouts.
+    const float opacity = 1.F / (1.F + std::exp(-2.F));
+    const float colour_sum = 1.5F + 0.2820947918F * (0.5F + 0.25F + 0.1F);
+    const auto supported = std::count_if(alpha.begin(), alpha.end(), [](float a) { return a > 0.F; });
+    const float contrast = colour_sum - 1.1F;
+    const float expected_score = supported * opacity * opacity * contrast * contrast;
+    for (bool compact : {false, true}) {
+        auto score_options = colored_background;
+        score_options.compact_instance_storage = compact;
+        const auto scores = rasterizer.pruning_scores(model, camera, score_options).to_vector();
+        require(scores.size() == 1 && std::abs(scores[0] - expected_score) < expected_score * 2e-4F,
+            "Speedy-Splat sensitivity differs from single-primitive analytic score");
+    }
+    auto rear = densification::clone_model(model);
+    rear.means = tinytensor::Tensor::from_vector(std::vector<float>{0.5F, 0.F, 2.2F}, {1,3}, tinytensor::Device::CUDA);
+    rear.sh = tinytensor::Tensor::zeros({1,1,3}, tinytensor::Device::CUDA);
+    const auto rear_alpha = rasterizer.forward(rear, camera).alpha.to_vector();
+    auto pair = densification::clone_model(model);
+    densification::gpu_detail::append_model(pair, rear);
+    double front_score = 0, rear_score = 0;
+    for (std::size_t p = 0; p < pixels; ++p) {
+        if (alpha[p] > 0.F) {
+            const double d = opacity * (colour_sum - (rear_alpha[p] * 1.5F + (1.F-rear_alpha[p]) * 1.1F));
+            front_score += d*d;
+        }
+        if (rear_alpha[p] > 0.F) {
+            const double d = opacity * (1.F-alpha[p]) * (1.5F-1.1F);
+            rear_score += d*d;
+        }
+    }
+    const auto pair_score = rasterizer.pruning_scores(pair, camera, colored_background).to_vector();
+    require(std::abs(pair_score[0]-front_score) < front_score*2e-4 &&
+            std::abs(pair_score[1]-rear_score) < rear_score*2e-4,
+        "Speedy-Splat sensitivity ignores occlusion or background");
     for (std::size_t channel = 0; channel < 3; ++channel)
         for (std::size_t pixel = 0; pixel < pixels; ++pixel)
             require(std::abs(colored_rgb[channel * pixels + pixel] -
@@ -7210,6 +7246,99 @@ void test_focus_view_mask_cuda() {
     }
 }
 
+// Independent reverse compositing oracle, following the official Speedy-Splat
+// backward recurrence rather than the forward residual walk used in our scorer.
+// Isolated alpha images supply projected coverage, so this checks the score
+// calculation without duplicating our projection or draw-list implementation.
+void test_speedy_reverse_compositing_oracle() {
+    using namespace photara::splat;
+    constexpr std::size_t count = 32;
+    constexpr float sh0 = 0.2820947918F;
+    const auto device = tinytensor::Device::CUDA;
+    std::vector<float> means, scales, rotations, logits, coefficients, opacity;
+    std::vector<std::array<float,3>> colours;
+    for (std::size_t g = 0; g < count; ++g) {
+        means.insert(means.end(), {0.F, 0.F, 2.F + float(g)*0.08F});
+        scales.insert(scales.end(), 3, std::log(0.25F));
+        rotations.insert(rotations.end(), {1.F,0.F,0.F,0.F});
+        const float o = g % 6 == 0 ? 0.995F : g % 3 == 0 ? 0.08F : 0.65F;
+        logits.push_back(std::log(o/(1.F-o)));
+        opacity.push_back(1.F/(1.F+std::exp(-logits.back())));
+        std::array<float,3> rgb{0.05F+0.13F*(g%6), 0.1F+0.11F*(g%5), 0.12F+0.07F*(g%7)};
+        for (float& c : rgb) {
+            coefficients.push_back((c-0.5F)/sh0);
+            c = 0.5F + sh0*coefficients.back();
+        }
+        colours.push_back(rgb);
+    }
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(means, {count,3}, device);
+    model.log_scales = tinytensor::Tensor::from_vector(scales, {count,3}, device);
+    model.quaternions = tinytensor::Tensor::from_vector(rotations, {count,4}, device);
+    model.opacity_logits = tinytensor::Tensor::from_vector(logits, {count,1}, device);
+    model.sh = tinytensor::Tensor::from_vector(coefficients, {count,1,3}, device);
+    model.sh_degree = 0;
+    Camera camera;
+    camera.world_to_camera[0] = camera.world_to_camera[5] = camera.world_to_camera[10] = camera.world_to_camera[15] = 1.F;
+    camera.width = 48; camera.height = 32;
+    camera.fx = camera.fy = 40.F; camera.cx = 24.F; camera.cy = 16.F;
+    Rasterizer raster;
+    RasterizeOptions options;
+    options.require_depth = false;
+    options.background = {0.1F,0.3F,0.7F};
+    std::vector<std::vector<float>> alpha;
+    for (std::size_t g = 0; g < count; ++g) {
+        const auto index = tinytensor::Tensor::from_vector(std::vector<int>{int(g)}, {1}, device);
+        alpha.push_back(raster.forward(densification::gpu_detail::select_model_rows(model,index),camera,options).alpha.to_vector());
+    }
+    const auto pixels = std::size_t(camera.width)*camera.height;
+    const auto rendered = raster.forward(model,camera,options).color.to_vector();
+    std::vector<double> expected(count, 0.0);
+    unsigned early_stops = 0;
+    for (std::size_t p = 0; p < pixels; ++p) {
+        std::vector<std::size_t> accepted;
+        double final_t = 1.;
+        std::array<double,3> composite{};
+        for (std::size_t g = 0; g < count; ++g) {
+            const double a = alpha[g][p];
+            if (a == 0.) continue;
+            if (final_t*(1.-a) < 1e-4) { ++early_stops; break; }
+            for (unsigned ch = 0; ch < 3; ++ch) composite[ch] += final_t*a*colours[g][ch];
+            final_t *= 1.-a;
+            accepted.push_back(g);
+        }
+        for (unsigned ch = 0; ch < 3; ++ch)
+            require(std::abs(composite[ch]+final_t*options.background[ch]-rendered[ch*pixels+p]) < 3e-5,
+                "Reverse score oracle does not describe the forward compositing");
+        // Official backward starts from final T and reconstructs the colour
+        // behind each primitive while traversing accepted contributors backwards.
+        double t = final_t, last_alpha = 0.;
+        std::array<double,3> behind{}, last_colour{};
+        for (auto it = accepted.rbegin(); it != accepted.rend(); ++it) {
+            const auto g = *it;
+            const double a = alpha[g][p];
+            t /= 1.-a;
+            double derivative = 0.;
+            for (unsigned ch = 0; ch < 3; ++ch) {
+                behind[ch] = last_alpha*last_colour[ch]+(1.-last_alpha)*behind[ch];
+                derivative += t*(colours[g][ch]-behind[ch])-final_t/(1.-a)*options.background[ch];
+                last_colour[ch] = colours[g][ch];
+            }
+            last_alpha = a;
+            derivative *= opacity[g];
+            expected[g] += derivative*derivative;
+        }
+    }
+    require(early_stops > 0, "Reverse score oracle did not exercise transmittance early stopping");
+    for (bool compact : {false,true}) {
+        options.compact_instance_storage = compact;
+        const auto actual = raster.pruning_scores(model,camera,options).to_vector();
+        for (std::size_t g = 0; g < count; ++g)
+            require(std::abs(actual[g]-expected[g]) < 2e-4+expected[g]*3e-3,
+                "Speedy-Splat score differs from independent reverse compositing oracle");
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         int device_count = 0;
@@ -7412,6 +7541,19 @@ int main(int argc, char** argv) {
             test_sh_adam_quant();
             test_vulkan_sh_adam_quant();
             test_vulkan_fused_sh_adam();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--speedy-only") {
+            test_forward_backward();
+            test_speedy_reverse_compositing_oracle();
+            photara::splat::TrainingOptions invalid;
+            invalid.speedy_pruning = true;
+            invalid.speedy_every = 0;
+            bool rejected = false;
+            try { photara::splat::Trainer trainer(invalid); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected, "Speedy-Splat accepted a zero interval");
+            std::cout << "Speedy-Splat tests passed\n";
             return 0;
         }
         test_thin_splat_rgb_backward();

@@ -62,6 +62,16 @@ struct TrainingOptions {
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
+    // Speedy-Splat sensitivity pruning (CUDA). Absolute iteration schedule;
+    // zero score_views evaluates every training camera, never held-out views.
+    bool speedy_pruning{false};
+    unsigned speedy_start{6'000};
+    unsigned speedy_every{3'000};
+    unsigned speedy_stop{30'000};
+    unsigned speedy_score_views{0};
+    // ADC-IGS quality/speed preset; paper ratios 0.8/0.3 remain explicit options.
+    float speedy_soft_ratio{0.3F};
+    float speedy_hard_ratio{0.2F};
     // Console training stats every N steps. Zero logs only the first and last.
     unsigned log_interval{100};
     // Optional windowed CUDA-event timings for the GGGS training loop.
