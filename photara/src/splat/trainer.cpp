@@ -1380,10 +1380,10 @@ GaussianModel Trainer::train(
             scales_state = detail::make_adam_state(model.log_scales);
             rotations_state = detail::make_adam_state(model.quaternions);
             opacity_state = detail::make_adam_state(model.opacity_logits);
-            sh_state = options_.densification_strategy ==
-                    DensificationStrategy::adc_plus
-                ? detail::make_reduced_second_adam_state(model.sh)
-                : detail::make_adam_state(model.sh);
+            sh_state = {};
+            sh_quant = detail::make_sh_adam_quant(
+                model.size(), static_cast<int>(model.sh.shape()[1] * 3),
+                model.sh.device());
             normal_features_state = detail::make_adam_state(
                 model.normal_features);
             if (use_3d_filter)
