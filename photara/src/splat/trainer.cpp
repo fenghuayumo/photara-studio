@@ -4,6 +4,7 @@
 
 #include "bilateral_grid.hpp"
 #include "cuda_ops.hpp"
+#include "geometry_vulkan.hpp"
 #include "focus_mask.hpp"
 #include "focus_mask_frame.hpp"
 #include "fused_ssim.hpp"
@@ -1129,14 +1130,12 @@ GaussianModel Trainer::train(
         if (options_.densify_revised_noise)
             throw std::invalid_argument(
                 "Vulkan ADC-IGS revised noise is not implemented yet");
-        if (options_.use_depth_normal_loss || options_.use_normal_field ||
+        if (options_.use_normal_field ||
             options_.use_mvs_depth || options_.use_mvs_normals ||
-            options_.multi_view_geo_weight > 0.F ||
-            options_.multi_view_ncc_weight > 0.F ||
             options_.alpha_mode == AlphaMode::transparent)
             throw std::invalid_argument(
-                "The Vulkan backend currently supports the shared masked "
-                "L1+SSIM path with optional ADC-IGS densification");
+                "Vulkan training does not yet support normal fields, external "
+                "MVS depth/normal targets, or transparent alpha supervision");
         core::Logger::instance().info(
             "splat training backend=vulkan orchestration=shared");
     } else {
@@ -1933,6 +1932,10 @@ GaussianModel Trainer::train(
             loss.alpha = rendered.alpha.is_valid()
                 ? tinytensor::Tensor::zeros_like(rendered.alpha)
                 : tinytensor::Tensor{};
+            if (allocate_geometry_gradients)
+                detail::add_depth_normal_loss_vulkan(rendered, target.camera,
+                    depth_normal_active ? options_.depth_normal_weight : 0.F,
+                    loss, report_progress);
         } else {
             loss = detail::compute_training_loss(
                 loss_render, target, options_, report_progress,

@@ -1,4 +1,6 @@
 #include "cuda_ops.hpp"
+#include "geometry_vulkan.hpp"
+#include "rasterizer_vulkan.hpp"
 #include "fused_ssim.hpp"
 #include "optimizer_backends.hpp"
 #include "core/vram_profiler.hpp"
@@ -2375,6 +2377,8 @@ tinytensor::Tensor compute_3d_filter(
     const tinytensor::Tensor& means, const std::vector<Camera>& cameras,
     const float minimum_scale_factor,
     const bool all_camera_euclidean) {
+    if (means.device() == tinytensor::Device::Vulkan)
+        return compute_3d_filter_vulkan(means, cameras, minimum_scale_factor, all_camera_euclidean);
     if (!means.is_valid() || means.device() != tinytensor::Device::CUDA ||
         means.dtype() != tinytensor::DataType::Float32 ||
         means.shape().rank() != 2 || means.shape()[1] != 3)
@@ -2457,6 +2461,10 @@ MultiViewLoss add_multi_view_loss(
         (options.multi_view_geo_weight <= 0.F &&
          options.multi_view_ncc_weight <= 0.F))
         return {};
+    if (reference_render.median_depth.device() == tinytensor::Device::Vulkan)
+        return add_multi_view_loss_vulkan(sampled_neighbour_points, sampled_inside,
+            reference_render, reference, neighbour, options, gradients,
+            grad_sampled_points, collect_scalar_terms, stability_accumulator);
     // Row-major reference-camera -> neighbour-camera rigid transform.
     float rr[9], rn[9], tr[3], tn[3];
     for (int row = 0; row < 3; ++row) {
@@ -2556,6 +2564,8 @@ MultiViewLoss add_multi_view_loss(
 
 GeometryDistributionSummary summarize_geometry_distribution(
     const GaussianModel& model) {
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return summarize_geometry_distribution_vulkan(model);
     GeometryDistributionSummary summary;
     const std::size_t count = model.size();
     if (count == 0) return summary;
@@ -2630,6 +2640,8 @@ OpacityProgressStats summarize_opacity_progress(
 
 tinytensor::Tensor unproject_depth_to_world(
     const tinytensor::Tensor& depth, const Camera& camera) {
+    if (depth.device() == tinytensor::Device::Vulkan)
+        return unproject_depth_to_world_vulkan(depth, camera);
     const std::size_t pixels =
         static_cast<std::size_t>(camera.width) * camera.height;
     if (depth.numel() != pixels)
@@ -2648,6 +2660,10 @@ void add_sample_depth_point_gradients(
     const Camera& reference_camera,
     const tinytensor::Tensor& grad_world_points,
     LossGradients& image_gradients) {
+    if (grad_world_points.device() == tinytensor::Device::Vulkan) {
+        add_sample_depth_point_gradients_vulkan(reference_camera, grad_world_points, image_gradients);
+        return;
+    }
     const std::size_t pixels = static_cast<std::size_t>(
         reference_camera.width) * reference_camera.height;
     add_point_depth_gradients_kernel<<<
@@ -2661,6 +2677,16 @@ void add_sample_depth_point_gradients(
 void add_sample_depth_model_gradients(
     const DepthSampleGradients& sample_gradients,
     ModelGradients& model_gradients) {
+    if (model_gradients.means.device() == tinytensor::Device::Vulkan) {
+        // Raster gradients are slices of a packed device allocation. Generic
+        // Tensor view assignment uses host pointers; copy_from preserves the
+        // slice and records a Vulkan copy, including its byte offset.
+        model_gradients.means.copy_from(model_gradients.means.add(sample_gradients.model.means));
+        model_gradients.log_scales.copy_from(model_gradients.log_scales.add(sample_gradients.model.log_scales));
+        model_gradients.quaternions.copy_from(model_gradients.quaternions.add(sample_gradients.model.quaternions));
+        model_gradients.opacity_logits.copy_from(model_gradients.opacity_logits.add(sample_gradients.model.opacity_logits));
+        return;
+    }
     const auto add = [](tinytensor::Tensor& target,
                         const tinytensor::Tensor& source) {
         const std::size_t count = target.numel();
@@ -2729,6 +2755,26 @@ LossGradients compute_training_loss(
     const RenderResult& rendered, const TrainingView& target,
     const TrainingOptions& options, const bool collect_scalar_terms,
     const bool depth_normal_active, const bool need_geometry_gradients) {
+    if (rendered.median_depth.device() == tinytensor::Device::Vulkan ||
+        rendered.color.device() == tinytensor::Device::Vulkan) {
+        if (options.use_mvs_depth || options.use_mvs_normals || options.alpha_mode == AlphaMode::transparent)
+            throw std::invalid_argument("Vulkan training loss does not support external MVS/transparent alpha targets");
+        LossGradients result;
+        result.alpha = tinytensor::Tensor::zeros_like(rendered.alpha);
+        if (options.photometric_weight > 0.F) {
+            const bool mask = target.has_mask && (options.use_mask || target.mask_is_validity);
+            result.rgb = vulkan_photometric_loss(rendered, target.rgb, target.mask,
+                mask, options.ssim_weight, options.photometric_weight, collect_scalar_terms, &result.color);
+            result.total = result.rgb;
+        } else {
+            result.color = tinytensor::Tensor::zeros_like(rendered.color);
+        }
+        if (need_geometry_gradients)
+            add_depth_normal_loss_vulkan(rendered, target.camera,
+                depth_normal_active ? options.depth_normal_weight : 0.F,
+                result, collect_scalar_terms);
+        return result;
+    }
     const std::size_t pixels = static_cast<std::size_t>(target.camera.width) *
                                target.camera.height;
     // Depth and normal gradients exist only when the render carried those

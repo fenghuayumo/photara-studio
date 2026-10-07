@@ -67,6 +67,10 @@ struct VulkanRasterBackend {
     // Keep one read-only zero buffer across frames instead of allocating and
     // clearing O(gaussians) storage on every training iteration.
     tinytensor::Tensor zero_filter;
+    // Neighbour queries must never overwrite the reference frame's snapshots,
+    // phase arena, or fused photometric gradient.
+    std::shared_ptr<VulkanRasterBackend> sample_backend;
+    std::weak_ptr<void> latest_sample;
 
     VulkanRasterBackend()
         : context([] {
@@ -147,6 +151,12 @@ struct VulkanForwardContext {
     splat_drender::vulkan::SplatDeviceFrame frame;
     splat_drender::vulkan::SplatDevicePhotometricOutput photometric;
     bool has_photometric{};
+};
+
+struct VulkanSampleContext {
+    std::shared_ptr<VulkanRasterBackend> backend;
+    tinytensor::Tensor points;
+    bool consumed = false;
 };
 
 thread_local std::weak_ptr<VulkanRasterBackend> active_training_backend;
@@ -449,6 +459,82 @@ ModelGradients vulkan_raster_backward(
     if (context->backend->profile_stages)
         context->backend->record_backward(elapsed_ms(profile_start));
     return gradients;
+}
+
+DepthSampleResult vulkan_sample_depth(
+    std::shared_ptr<void>& backend_value, const GaussianModel& model,
+    const tinytensor::Tensor& points, const Camera& camera,
+    const RasterizeOptions& options) {
+    if (points.device() != tinytensor::Device::Vulkan ||
+        points.dtype() != tinytensor::DataType::Float32 ||
+        points.shape().rank() != 2 || points.shape()[1] != 3 || points.shape()[0] == 0 ||
+        model.size() == 0)
+        throw std::invalid_argument("Vulkan sample_depth requires float32 [P,3] points and Gaussians");
+    auto owner = get_backend(backend_value);
+    if (!owner->sample_backend) owner->sample_backend = std::make_shared<VulkanRasterBackend>();
+    auto backend = owner->sample_backend;
+    auto context = std::make_shared<VulkanSampleContext>();
+    context->backend = backend;
+    context->points = points;
+    DepthSampleResult result;
+    result.camera_points = tinytensor::Tensor::empty(points.shape(), tinytensor::Device::Vulkan);
+    result.inside = tinytensor::Tensor::empty({points.shape()[0]}, tinytensor::Device::Vulkan,
+        tinytensor::DataType::Int32);
+    tinytensor::vulkan::submit_async();
+    backend->rasterizer.bind_model_device(device_gaussians(backend, model, options));
+    backend->rasterizer.sample_depth_device(buffer_view(points),
+        static_cast<std::uint32_t>(points.shape()[0]), camera_view(camera), raster_settings(options),
+        buffer_view(result.camera_points), buffer_view(result.inside));
+    result.backend_impl = context;
+    backend->latest_sample = context;
+    return result;
+}
+
+DepthSampleGradients vulkan_sample_depth_backward(const GaussianModel& model,
+    const DepthSampleResult& sampled, const tinytensor::Tensor& gradient) {
+    auto context = std::static_pointer_cast<VulkanSampleContext>(sampled.backend_impl);
+    if (!context || context->consumed || context->backend->latest_sample.lock().get() != context.get())
+        throw std::invalid_argument("Vulkan sample backward requires the latest unconsumed query");
+    if (gradient.device() != tinytensor::Device::Vulkan ||
+        gradient.dtype() != tinytensor::DataType::Float32 || gradient.shape() != context->points.shape())
+        throw std::invalid_argument("Vulkan sample gradient must have shape [P,3]");
+    auto& rasterizer = context->backend->rasterizer;
+    auto packed = tinytensor::Tensor::empty(
+        {rasterizer.model_gradient_float_count()}, tinytensor::Device::Vulkan);
+    DepthSampleGradients result;
+    result.points = tinytensor::Tensor::empty(context->points.shape(), tinytensor::Device::Vulkan);
+    tinytensor::vulkan::submit_async();
+    rasterizer.sample_depth_backward_device(buffer_view(gradient), buffer_view(packed), buffer_view(result.points));
+    const auto count = model.size();
+    std::size_t offset = 0;
+    const auto take = [&](std::size_t size, const tinytensor::TensorShape& shape) {
+        auto value = packed.slice(0, offset, offset + size).reshape(shape);
+        offset += size;
+        return value;
+    };
+    result.model.means = take(count * 3, model.means.shape());
+    // The sample objective has no appearance derivative, but preserve the full
+    // public ModelGradients layout for callers and regression comparisons.
+    result.model.sh = take(model.sh.numel(), model.sh.shape());
+    offset += count * 8; // activated opacity, scales, and rotation
+    result.model.log_scales = take(count * 3, model.log_scales.shape());
+    result.model.quaternions = take(count * 4, model.quaternions.shape());
+    result.model.opacity_logits = take(count, model.opacity_logits.shape());
+    result.model.refine_weight = take(count, tinytensor::TensorShape{count});
+    context->consumed = true;
+    return result;
+}
+
+void vulkan_multi_view_loss(const RenderResult& rendered,
+    const splat_drender::vulkan::SplatDeviceMultiViewInput& input,
+    const splat_drender::vulkan::SplatDeviceMultiViewOutput& output) {
+    if (rendered.context.backend_impl) {
+        get_context(rendered)->backend->rasterizer.multi_view_loss_device(input, output);
+    } else {
+        // Synthetic loss tests may supply attachments without a raster context.
+        static thread_local std::shared_ptr<void> fallback;
+        get_backend(fallback)->rasterizer.multi_view_loss_device(input, output);
+    }
 }
 
 void vulkan_materialize_visibility(RenderResult& rendered) {

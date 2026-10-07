@@ -181,6 +181,24 @@ struct SplatBufferView {
     std::uint64_t bytes = 0;
 };
 
+struct SplatDeviceMultiViewInput {
+    SplatCamera reference_camera, neighbour_camera;
+    SplatBufferView reference_depth, reference_normal, reference_gray;
+    SplatBufferView neighbour_gray, sampled_neighbour_points, sampled_inside;
+    SplatBufferView reference_mask, neighbour_mask;
+    float geometry_weight = 0.F, ncc_weight = 0.F;
+    float pixel_noise_threshold = 1.F;
+    bool robust_ncc = true;
+    float ncc_lambda_reference = 0.45F, ncc_sharpness = 12.F, ncc_min_weight = 0.F;
+};
+
+// Caller-owned destinations. Terms contain [geo sum, geo count, NCC sum,
+// NCC count, geo candidates]; gradients already include weights/counts.
+struct SplatDeviceMultiViewOutput {
+    SplatBufferView reference_depth_gradient, reference_normal_gradient;
+    SplatBufferView sampled_point_gradient, terms;
+};
+
 struct SplatColorCorrectionCommand {
     std::array<SplatBufferView, 6> buffers;
     std::array<std::uint32_t, 20> push_words;
@@ -414,6 +432,19 @@ public:
         const SplatSettings& settings = {});
     [[nodiscard]] SplatDepthSampleGradients sample_depth_backward(
         std::span<const float> dL_camera_points);
+    // These calls retain their own latest query state, but render a neighbour
+    // frame internally. Use a separate rasterizer from the reference frame.
+    void sample_depth_device(
+        const SplatBufferView& world_points, std::uint32_t point_count,
+        const SplatCamera& camera, const SplatSettings& settings,
+        const SplatBufferView& camera_points, const SplatBufferView& inside);
+    void sample_depth_backward_device(
+        const SplatBufferView& dL_camera_points,
+        const SplatBufferView& packed_model_gradients,
+        const SplatBufferView& point_gradients);
+    void multi_view_loss_device(
+        const SplatDeviceMultiViewInput& input,
+        const SplatDeviceMultiViewOutput& output);
     // CUDA-equivalent multi-view loss stage. Feed sampled_point_gradient to
     // sample_depth_backward(); add that result's point gradient through the
     // reference unprojection, and feed the reference gradients to backward().

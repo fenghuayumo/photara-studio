@@ -1294,6 +1294,106 @@ public:
             (has_scales_ ? 20 : 26);
     }
 
+    void sample_depth_device(
+        const SplatBufferView& world_points, std::uint32_t point_count,
+        const SplatCamera& camera, SplatSettings settings,
+        const SplatBufferView& camera_points, const SplatBufferView& inside) {
+        require(point_count > 0 && world_points.buffer != VK_NULL_HANDLE &&
+                    world_points.bytes >= point_count * 12ull,
+                "device sample points must have shape [P,3]");
+        require(camera_points.buffer != VK_NULL_HANDLE && camera_points.bytes >= point_count * 12ull &&
+                    inside.buffer != VK_NULL_HANDLE && inside.bytes >= point_count * 4ull,
+                "device sample destinations are too small");
+        settings.need_depth = true;
+        settings.pixel_snapshots = false;
+        (void)record_frame(camera, settings, false);
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& output_f = grow(sample_f_, point_count * 16ull);
+        Buffer& output_u = grow(sample_u_, point_count * 8ull);
+        Push push{};
+        push.u[0] = point_count;
+        push.u[1] = last_width_;
+        push.u[2] = last_height_;
+        push.u[3] = last_grid_x_;
+        push.u[4] = last_mode_;
+        push.u[5] = count_;
+        set_float(push, 6, last_fx_); set_float(push, 7, last_fy_);
+        set_float(push, 8, last_cx_); set_float(push, 9, last_cy_);
+        set_float(push, 10, last_k1_); set_float(push, 11, last_k2_);
+        set_float(push, 12, last_k3_); set_float(push, 13, last_k4_);
+        set_float(push, 14, settings.point_depth_bracket);
+        set_float(push, 15, settings.point_depth_tolerance);
+        dispatch_infos(
+            sample_depth_,
+            {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
+             descriptor(*frame_camera_), descriptor(world_points, point_count * 12ull),
+             descriptor(output_f), descriptor(output_u)},
+            push, div_up(point_count, 256));
+        record_buffer_copy({output_f.handle, output_f.offset, point_count * 12ull}, camera_points);
+        record_buffer_copy({output_u.handle, output_u.offset + point_count * 4ull, point_count * 4ull}, inside);
+        sample_world_points_ = world_points;
+        sample_point_count_ = point_count;
+        sample_live_ = true;
+        submit_batch(false);
+    }
+
+    void sample_depth_backward_device(
+        const SplatBufferView& loss, const SplatBufferView& gradient,
+        const SplatBufferView& point_gradient) {
+        require(sample_live_, "device sample backward requires a live query");
+        require(loss.buffer != VK_NULL_HANDLE && loss.bytes >= sample_point_count_ * 12ull &&
+                    point_gradient.buffer != VK_NULL_HANDLE && point_gradient.bytes >= sample_point_count_ * 12ull &&
+                    gradient.buffer != VK_NULL_HANDLE && gradient.bytes >= model_gradient_float_count() * sizeof(float),
+                "device sample backward buffers are too small");
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        const auto bytes = blend_gradient_float_count() * sizeof(float);
+        phase_begin((bytes + phase_alignment_ - 1) & ~(phase_alignment_ - 1));
+        Buffer& blend_gradient = phase_slot(blend_grad_, bytes);
+        zero_buffer(blend_gradient, bytes);
+        Push sample_push{};
+        sample_push.u[0] = sample_point_count_;
+        sample_push.u[1] = last_width_; sample_push.u[2] = last_height_;
+        sample_push.u[3] = last_grid_x_; sample_push.u[4] = last_mode_;
+        sample_push.u[5] = count_;
+        set_float(sample_push, 6, last_fx_); set_float(sample_push, 7, last_fy_);
+        set_float(sample_push, 8, last_cx_); set_float(sample_push, 9, last_cy_);
+        set_float(sample_push, 10, last_k1_); set_float(sample_push, 11, last_k2_);
+        set_float(sample_push, 12, last_k3_); set_float(sample_push, 13, last_k4_);
+        dispatch_infos(
+            sample_depth_backward_,
+            {descriptor(tile_ranges_), descriptor(*last_instance_values_), descriptor(gauss_f_),
+             descriptor(*frame_camera_), descriptor(sample_world_points_, sample_point_count_ * 12ull),
+             descriptor(sample_f_), descriptor(sample_u_), descriptor(loss, sample_point_count_ * 12ull),
+             descriptor(blend_gradient), descriptor(point_gradient, sample_point_count_ * 12ull)},
+            sample_push, div_up(sample_point_count_, 256));
+
+        Push project_push{};
+        project_push.u[0] = count_;
+        project_push.u[1] = (has_sh_ ? 1u : 0u) | (has_scales_ ? 2u : 0u) |
+                            (raw_chain_ ? 4u : 0u) | (has_scales_ ? 8u : 0u) |
+                            (last_frame_has_geometry_ ? 16u : 0u);
+        project_push.u[2] = last_mode_; project_push.u[3] = last_width_;
+        project_push.u[4] = last_height_; project_push.u[5] = sh_degree_;
+        project_push.u[6] = sh_bases_;
+        set_float(project_push, 7, last_fx_); set_float(project_push, 8, last_fy_);
+        set_float(project_push, 9, last_cx_); set_float(project_push, 10, last_cy_);
+        set_float(project_push, 11, last_k1_); set_float(project_push, 12, last_k2_);
+        set_float(project_push, 13, last_k3_); set_float(project_push, 14, last_k4_);
+        set_float(project_push, 15, last_kernel_size_);
+        set_float(project_push, 16, last_scale_modifier_);
+        dispatch_infos(
+            project_backward_,
+            {model_means(), model_opacities(), model_scales(),
+             model_rotations(), model_covariances(), model_colors(),
+             descriptor(*frame_camera_), descriptor(gauss_f_), descriptor(gauss_u_),
+             descriptor(blend_gradient), model_log_scales(),
+             model_raw_rotations(), model_opacity_logits(), model_filter_3d(),
+             descriptor(gradient, model_gradient_float_count() * sizeof(float))},
+            project_push, div_up(count_, 256));
+        sample_live_ = false;
+        submit_batch(false);
+    }
+
     SplatDepthSamples sample_depth(
         const std::span<const float> world_points, const SplatCamera& camera,
         SplatSettings settings) {
@@ -1384,7 +1484,8 @@ public:
              &sample_f_, &sample_u_, &loss, &blend_gradient, &point_gradient},
             sample_push, div_up(sample_point_count_, 256));
 
-        const std::size_t total_count = static_cast<std::size_t>(model_gradient_float_count());
+        const std::size_t total_count = static_cast<std::size_t>(model_gradient_float_count()) +
+            (has_scales_ ? static_cast<std::size_t>(count_) * 6 : 0);
         Buffer& gradient = grow(model_grad_, total_count * sizeof(float));
         Push project_push{};
         project_push.u[0] = count_;
@@ -1443,6 +1544,92 @@ public:
         }
         sample_live_ = false;
         return result;
+    }
+
+    void multi_view_loss_device(
+        const SplatDeviceMultiViewInput& input, const SplatDeviceMultiViewOutput& destination) {
+        const auto& reference = input.reference_camera;
+        const auto& neighbour = input.neighbour_camera;
+        require(reference.mode == 0 && neighbour.mode == 0 &&
+                    reference.width > 0 && reference.height > 0 && neighbour.width > 0 && neighbour.height > 0 &&
+                    reference.world_to_camera.size() == 16 && neighbour.world_to_camera.size() == 16,
+                "device multi-view requires pinhole cameras and valid transforms");
+        require(input.geometry_weight >= 0.F && input.ncc_weight >= 0.F && input.pixel_noise_threshold > 0.F,
+                "invalid device multi-view weights/threshold");
+        const std::uint64_t pixels = static_cast<std::uint64_t>(reference.width) * reference.height;
+        const std::uint64_t neighbour_pixels = static_cast<std::uint64_t>(neighbour.width) * neighbour.height;
+        const bool enable_ncc = input.ncc_weight > 0.F;
+        const auto checked = [&](const SplatBufferView& view, std::uint64_t bytes) {
+            require(view.buffer != VK_NULL_HANDLE && view.bytes >= bytes, "device multi-view buffer is too small");
+            return descriptor(view, bytes);
+        };
+        float rr[9]{};
+        float rn[9]{};
+        float tr[3]{};
+        float tn[3]{};
+        for (int row = 0; row < 3; ++row) {
+            tr[row] = reference.world_to_camera[12 + row];
+            tn[row] = neighbour.world_to_camera[12 + row];
+            for (int column = 0; column < 3; ++column) {
+                rr[3 * row + column] = reference.world_to_camera[4 * column + row];
+                rn[3 * row + column] = neighbour.world_to_camera[4 * column + row];
+            }
+        }
+        float transform[12]{};
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                for (int k = 0; k < 3; ++k)
+                    transform[3 * row + column] +=
+                        rn[3 * row + k] * rr[3 * column + k];
+            }
+            transform[9 + row] = tn[row];
+            for (int column = 0; column < 3; ++column)
+                transform[9 + row] -=
+                    transform[3 * row + column] * tr[column];
+        }
+
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        Buffer& transform_buffer = grow(multi_transform_, sizeof(transform));
+        context_.write_buffer(transform_buffer, transform, sizeof(transform));
+        const auto output_count = 7 * pixels + 5;
+        Buffer& output = grow(multi_output_, output_count * sizeof(float));
+        zero_buffer(output, output_count * sizeof(float));
+        Push push{};
+        push.u[0] = reference.width;
+        push.u[1] = reference.height;
+        push.u[2] = neighbour.width;
+        push.u[3] = neighbour.height;
+        set_float(push, 4, reference.fx); set_float(push, 5, reference.fy);
+        set_float(push, 6, reference.cx); set_float(push, 7, reference.cy);
+        set_float(push, 8, neighbour.fx); set_float(push, 9, neighbour.fy);
+        set_float(push, 10, neighbour.cx); set_float(push, 11, neighbour.cy);
+        set_float(push, 12, input.pixel_noise_threshold);
+        push.u[13] = ((input.reference_mask.buffer != VK_NULL_HANDLE) ? 1u : 0u) |
+                     ((input.neighbour_mask.buffer != VK_NULL_HANDLE) ? 2u : 0u) |
+                     (input.robust_ncc ? 4u : 0u) |
+                     (enable_ncc ? 8u : 0u);
+        set_float(push, 14, input.geometry_weight);
+        set_float(push, 15, input.ncc_weight);
+        set_float(push, 16, input.ncc_lambda_reference);
+        set_float(push, 17, input.ncc_sharpness);
+        set_float(push, 18, std::clamp(input.ncc_min_weight, 0.0F, 1.0F));
+        const std::vector<VkDescriptorBufferInfo> buffers{
+            checked(input.reference_depth, pixels * 4), checked(input.reference_normal, pixels * 12),
+            enable_ncc ? checked(input.reference_gray, pixels * 4) : descriptor(dummy_),
+            checked(input.sampled_neighbour_points, pixels * 12), checked(input.sampled_inside, pixels * 4),
+            enable_ncc ? checked(input.neighbour_gray, neighbour_pixels * 4) : descriptor(dummy_),
+            descriptor(transform_buffer),
+            input.reference_mask.buffer != VK_NULL_HANDLE ? checked(input.reference_mask, pixels * 4) : descriptor(dummy_),
+            input.neighbour_mask.buffer != VK_NULL_HANDLE ? checked(input.neighbour_mask, neighbour_pixels * 4) : descriptor(dummy_),
+            descriptor(output)};
+        dispatch_infos(multi_view_, buffers, push, div_up(reference.width, 16), div_up(reference.height, 16));
+        push.u[13] |= 0x80000000u;
+        dispatch_infos(multi_view_, buffers, push, div_up(reference.width, 16), div_up(reference.height, 16));
+        record_buffer_copy({output.handle, output.offset, pixels * 4}, destination.reference_depth_gradient);
+        record_buffer_copy({output.handle, output.offset + pixels * 4, pixels * 12}, destination.reference_normal_gradient);
+        record_buffer_copy({output.handle, output.offset + pixels * 16, pixels * 12}, destination.sampled_point_gradient);
+        record_buffer_copy({output.handle, output.offset + pixels * 28, 20}, destination.terms);
+        submit_batch(false);
     }
 
     SplatMultiViewOutput multi_view_loss(const SplatMultiViewInput& input) {
@@ -2033,6 +2220,23 @@ public:
     }
 
 private:
+    void record_buffer_copy(const SplatBufferView& source, const SplatBufferView& destination) {
+        require(destination.buffer != VK_NULL_HANDLE && destination.bytes >= source.bytes,
+                "device copy destination is too small");
+        begin_batch();
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        const VkBufferCopy region{source.offset, destination.offset, source.bytes};
+        vkCmdCopyBuffer(command_, source.buffer, destination.buffer, 1, &region);
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+
     void record_copy_frame_device(
         const SplatDeviceFrame& source,
         const SplatDeviceFrame& destination) {
@@ -2812,6 +3016,7 @@ private:
     Buffer median_state_;
     Buffer blend_grad_;
     Buffer model_grad_;
+    SplatBufferView sample_world_points_;
     Buffer sample_points_;
     Buffer sample_f_;
     Buffer sample_u_;
@@ -2962,6 +3167,20 @@ SplatDepthSamples SplatRasterizer::sample_depth(
 SplatDepthSampleGradients SplatRasterizer::sample_depth_backward(
     const std::span<const float> dL_camera_points) {
     return impl_->sample_depth_backward(dL_camera_points);
+}
+
+void SplatRasterizer::sample_depth_device(
+    const SplatBufferView& points, std::uint32_t count, const SplatCamera& camera,
+    const SplatSettings& settings, const SplatBufferView& camera_points, const SplatBufferView& inside) {
+    impl_->sample_depth_device(points, count, camera, settings, camera_points, inside);
+}
+void SplatRasterizer::sample_depth_backward_device(
+    const SplatBufferView& loss, const SplatBufferView& model, const SplatBufferView& points) {
+    impl_->sample_depth_backward_device(loss, model, points);
+}
+void SplatRasterizer::multi_view_loss_device(
+    const SplatDeviceMultiViewInput& input, const SplatDeviceMultiViewOutput& output) {
+    impl_->multi_view_loss_device(input, output);
 }
 
 SplatMultiViewOutput SplatRasterizer::multi_view_loss(

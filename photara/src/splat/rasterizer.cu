@@ -659,6 +659,8 @@ const float* Rasterizer::projected_mean2d(const RenderResult& rendered) const {
 DepthSampleResult Rasterizer::sample_depth(
     const GaussianModel& model, const tinytensor::Tensor& world_points,
     const Camera& camera, const RasterizeOptions& requested_options) const {
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return detail::vulkan_sample_depth(backend_, model, world_points, camera, requested_options);
     require_cuda_float_contiguous(world_points, "world_points");
     if (world_points.shape().rank() != 2 || world_points.shape()[1] != 3)
         throw std::invalid_argument("sample_depth points must have shape [P,3]");
@@ -703,6 +705,8 @@ DepthSampleResult Rasterizer::sample_depth(
 DepthSampleGradients Rasterizer::sample_depth_backward(
     const GaussianModel& model, const DepthSampleResult& sampled,
     const tinytensor::Tensor& grad_camera_points) const {
+    if (sampled.backend_impl)
+        return detail::vulkan_sample_depth_backward(model, sampled, grad_camera_points);
     if (!sampled.context)
         throw std::invalid_argument(
             "sample_depth backward requires a live context");

@@ -639,6 +639,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 src/splat/optimizer_vulkan.cpp
                 src/splat/colour_correction_vulkan.cpp
                 src/splat/rasterizer_vulkan.cpp
+                src/splat/geometry_vulkan.cpp
                 src/splat/focus_mask_vulkan.cpp)
             target_link_libraries(photara_splat_cuda PUBLIC
                 splat_drender::vulkan)
@@ -649,6 +650,7 @@ if(PHOTARA_ENABLE_FEATURES)
                 photara_vk_embed_hlsl(
                     TARGET photara_splat_cuda
                     SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
                     PROFILE cs_6_0
                     ENV vulkan1.2
                     INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/splat"
@@ -1124,6 +1126,10 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
         target_link_libraries(photara_splat_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.rasterizer COMMAND photara_splat_test)
+        if(TARGET splat_drender::vulkan)
+            add_test(NAME photara.splat.vulkan_geometry
+                COMMAND photara_splat_test --vulkan-geometry-only)
+        endif()
         if(TARGET splat_drender::vulkan)
             # Vulkan backend of splat_drender against the CUDA backend it mirrors.
             add_executable(photara_splat_vulkan_forward_test

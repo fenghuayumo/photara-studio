@@ -246,7 +246,7 @@ void test_gggs_3d_filter() {
             "GGGS 3D-filter bake changed the rendered opacity");
 }
 
-void test_gggs_multi_view_geometry_and_ncc() {
+void test_gggs_multi_view_geometry_and_ncc(tinytensor::Device device = tinytensor::Device::CUDA) {
     using namespace photara::splat;
     constexpr std::uint32_t width = 32;
     constexpr std::uint32_t height = 32;
@@ -311,28 +311,28 @@ void test_gggs_multi_view_geometry_and_ncc() {
         }
     }
     reference.rgb = tinytensor::Tensor::from_vector(
-        reference_rgb, {3, height, width}, tinytensor::Device::CUDA);
+        reference_rgb, {3, height, width}, device);
     neighbour.rgb = tinytensor::Tensor::from_vector(
-        neighbour_rgb, {3, height, width}, tinytensor::Device::CUDA);
+        neighbour_rgb, {3, height, width}, device);
     reference.gray = tinytensor::Tensor::from_vector(
         reference_gray,
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     neighbour.gray = tinytensor::Tensor::from_vector(
         neighbour_gray,
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     RenderResult reference_render;
     reference_render.median_depth = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 2.F), {height, width},
-        tinytensor::Device::CUDA);
+        device);
     std::vector<float> normals(3 * pixels, 0.F);
     std::fill(normals.begin() + 2 * pixels, normals.end(), 1.F);
     reference_render.normal = tinytensor::Tensor::from_vector(
-        normals, {3, height, width}, tinytensor::Device::CUDA);
+        normals, {3, height, width}, device);
     detail::LossGradients gradients;
     gradients.depth = tinytensor::Tensor::zeros(
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     gradients.normal = tinytensor::Tensor::zeros(
-        {3, height, width}, tinytensor::Device::CUDA);
+        {3, height, width}, device);
     TrainingOptions options;
     options.multi_view_geo_weight = 0.02F;
     options.multi_view_ncc_weight = 0.6F;
@@ -348,11 +348,12 @@ void test_gggs_multi_view_geometry_and_ncc() {
         }
     }
     const auto sampled = tinytensor::Tensor::from_vector(
-        sampled_points, {pixels, std::size_t{3}}, tinytensor::Device::CUDA);
-    const auto inside = tinytensor::Tensor::ones_bool(
-        {pixels}, tinytensor::Device::CUDA);
+        sampled_points, {pixels, std::size_t{3}}, device);
+    const auto inside = device == tinytensor::Device::Vulkan
+        ? tinytensor::Tensor::full({pixels}, 1.F, device, tinytensor::DataType::Int32)
+        : tinytensor::Tensor::ones_bool({pixels}, device);
     auto stability_accumulator = tinytensor::Tensor::zeros(
-        {std::size_t{3}}, tinytensor::Device::CUDA);
+        {std::size_t{3}}, device);
     tinytensor::Tensor grad_sampled;
     const auto loss = detail::add_multi_view_loss(
         sampled, inside, reference_render, reference, neighbour,
@@ -381,9 +382,9 @@ void test_gggs_multi_view_geometry_and_ncc() {
     reference.has_mask = true;
     neighbour.has_mask = true;
     reference.mask = tinytensor::Tensor::zeros(
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     neighbour.mask = tinytensor::Tensor::ones(
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     tinytensor::Tensor masked_grad_sampled;
     const auto masked_loss = detail::add_multi_view_loss(
         sampled, inside, reference_render, reference, neighbour,
@@ -5717,40 +5718,41 @@ void test_ssim_loss_and_scale_constraint() {
         "Gaussian scale-ratio constraint was not applied");
 }
 
-void test_gggs_depth_normal_consistency() {
+void test_gggs_depth_normal_consistency(tinytensor::Device device = tinytensor::Device::CUDA) {
     using namespace photara::splat;
     constexpr std::size_t side = 5;
     constexpr std::size_t pixels = side * side;
     RenderResult rendered;
     rendered.color = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     rendered.alpha = tinytensor::Tensor::zeros(
-        {side, side}, tinytensor::Device::CUDA);
+        {side, side}, device);
     rendered.median_depth = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 1.F), {side, side},
-        tinytensor::Device::CUDA);
+        device);
     std::vector<float> raster_normals(3 * pixels, 0.F);
     std::fill(
         raster_normals.begin(), raster_normals.begin() + pixels, 1.F);
     rendered.normal = tinytensor::Tensor::from_vector(
-        raster_normals, {3, side, side}, tinytensor::Device::CUDA);
+        raster_normals, {3, side, side}, device);
 
     TrainingView target;
     target.camera.width = target.camera.height = side;
     target.camera.fx = target.camera.fy = 5.F;
     target.camera.cx = target.camera.cy = 2.F;
     target.rgb = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     target.depth = tinytensor::Tensor::zeros(
-        {side, side}, tinytensor::Device::CUDA);
+        {side, side}, device);
     target.normal = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     target.mask = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 1.F), {side, side},
-        tinytensor::Device::CUDA);
+        device);
 
     TrainingOptions options;
     options.ssim_weight = 0.F;
+    options.photometric_weight = 0.F;
     options.use_depth_normal_loss = true;
     options.depth_normal_weight = 0.05F;
     const auto loss = detail::compute_training_loss(
@@ -5774,33 +5776,33 @@ void test_gggs_depth_normal_consistency() {
         "GGGS median-depth gradient differs from Python autograd");
 }
 
-void test_gggs_depth_normal_parameter_gradients() {
+void test_gggs_depth_normal_parameter_gradients(tinytensor::Device device = tinytensor::Device::CUDA) {
     using namespace photara::splat;
     constexpr std::size_t side = 32;
     constexpr std::size_t pixels = side * side;
-    const auto make_model = [](const float z_offset) {
+    const auto make_model = [device](const float z_offset) {
         GaussianModel model;
         model.means = tinytensor::Tensor::from_vector(
             std::vector<float>{
                 -0.07F, -0.02F, 2.00F + z_offset,
                  0.08F,  0.03F, 2.08F},
-            {2, 3}, tinytensor::Device::CUDA);
+            {2, 3}, device);
         model.log_scales = tinytensor::Tensor::from_vector(
             std::vector<float>{
                 std::log(0.20F), std::log(0.16F), std::log(0.035F),
                 std::log(0.18F), std::log(0.15F), std::log(0.030F)},
-            {2, 3}, tinytensor::Device::CUDA);
+            {2, 3}, device);
         model.quaternions = tinytensor::Tensor::from_vector(
             std::vector<float>{
                 0.98480775F, 0.F, 0.17364818F, 0.F,
                 0.97629601F, -0.08583165F, -0.17298739F, 0.01513444F},
-            {2, 4}, tinytensor::Device::CUDA);
+            {2, 4}, device);
         model.opacity_logits = tinytensor::Tensor::from_vector(
             std::vector<float>{1.5F, 1.2F}, {2, 1},
-            tinytensor::Device::CUDA);
+            device);
         model.sh = tinytensor::Tensor::from_vector(
             std::vector<float>{0.4F, 0.3F, 0.2F, 0.2F, 0.3F, 0.4F},
-            {2, 1, 3}, tinytensor::Device::CUDA);
+            {2, 1, 3}, device);
         model.sh_degree = 0;
         return model;
     };
@@ -5817,14 +5819,14 @@ void test_gggs_depth_normal_parameter_gradients() {
     TrainingView target;
     target.camera = camera;
     target.rgb = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     target.depth = tinytensor::Tensor::zeros(
-        {side, side}, tinytensor::Device::CUDA);
+        {side, side}, device);
     target.normal = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     target.mask = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 1.F), {side, side},
-        tinytensor::Device::CUDA);
+        device);
 
     TrainingOptions options;
     options.photometric_weight = 0.F;
@@ -7625,8 +7627,24 @@ void benchmark_speedy_scores(const char* ply, const char* colmap, const char* im
 #endif
 }
 
+#include "splat_geometry_vulkan.hpp"
+
 int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string(argv[1]) == "--vulkan-geometry-only") {
+            std::cout << "Vulkan depth-normal oracle\n";
+            test_gggs_depth_normal_consistency(tinytensor::Device::Vulkan);
+            std::cout << "Vulkan depth-normal finite differences\n";
+            test_gggs_depth_normal_parameter_gradients(tinytensor::Device::Vulkan);
+            std::cout << "Vulkan planar MV oracle\n";
+            test_gggs_multi_view_geometry_and_ncc(tinytensor::Device::Vulkan);
+            std::cout << "Vulkan complete MV gradient chain\n";
+            test_vulkan_geometry_chain();
+            std::cout << "Vulkan geometry trainer and mesh\n";
+            test_vulkan_geometry_trainer();
+            std::cout << "Vulkan geometry tests passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--speedy-vulkan-only") {
             test_speedy_vulkan();
             return 0;
