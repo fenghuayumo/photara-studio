@@ -365,8 +365,10 @@ RenderResult Rasterizer::forward(
 
 tinytensor::Tensor Rasterizer::pruning_scores(
     const GaussianModel& model, const Camera& camera, RasterizeOptions options) const {
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return detail::vulkan_pruning_scores(backend_, model, camera, options);
     if (model.means.device() != tinytensor::Device::CUDA)
-        throw std::invalid_argument("Speedy-Splat pruning currently requires CUDA");
+        throw std::invalid_argument("Speedy-Splat pruning requires a CUDA or Vulkan model");
     options.require_depth = false;
     options.record_backward_state = true;
     options.colors_precomp = {};

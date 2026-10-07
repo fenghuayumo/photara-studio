@@ -363,6 +363,12 @@ public:
     void copy_frame_device(
         const SplatDeviceFrame& source,
         const SplatDeviceFrame& destination);
+    // Score the latest render()/render_device() frame. Clears and
+    // writes N Float32 values: sum_pixels (opacity * d(sum RGB)/d alpha)^2.
+    // Uses canonical rendered colour/background and never updates model/Adam
+    // state. The caller owns the destination on this Context's device and
+    // must keep it alive until the submitted GPU work completes.
+    void pruning_scores_device(const SplatBufferView& scores);
     // Consumes the most recent render() made with pixel_snapshots=true.
     // Loss images are channel-major: color/normal [3,H,W], alpha/depth [H,W].
     // The geometry losses may be empty only when the matching forward used

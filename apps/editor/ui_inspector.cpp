@@ -456,7 +456,7 @@ Action draw_inspector(App& app) {
             ImGui::EndCombo();
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr("Fast: 30,000 steps, 1M Gaussians, pruning (CUDA).\n"
+            ImGui::SetTooltip("%s", tr("Fast: 30,000 steps, 1M Gaussians, pruning.\n"
                 "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
                 "High quality: 50,000 steps, 5M Gaussians, no pruning."));
         theme::caption("Capture type");
@@ -490,11 +490,9 @@ Action draw_inspector(App& app) {
                 "Maximum Gaussian count during densification.\n"
                 "Initialization uses the full source cloud.\n"
                 "Default 3,000,000."));
-        ImGui::BeginDisabled(app.settings.training_backend == 1 && !app.settings.speedy_pruning);
         ImGui::Checkbox(tr("Pruning"), &app.settings.speedy_pruning);
-        ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tr("CUDA only. Prune 30% during growth and 20% after growth.\n"
+            ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
                 "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
                 "Requires full training resolution."));
         bool limit_axis_ratio = app.settings.max_scale_ratio >= 1.F;

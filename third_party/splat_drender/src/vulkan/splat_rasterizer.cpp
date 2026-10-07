@@ -138,6 +138,7 @@ public:
           blend_(context.create_pipeline("splat_blend.hlsl.spv", 7, sizeof(Push))),
           blend_no_geometry_(context.create_pipeline("splat_blend_no_geometry.hlsl.spv", 7, sizeof(Push))),
           blend_training_(context.create_pipeline("splat_blend_training.hlsl.spv", 7, sizeof(Push))),
+          pruning_scores_(context.create_pipeline("splat_pruning_scores.hlsl.spv", 6, sizeof(Push))),
           median_backward_(context.create_pipeline("splat_median_backward.hlsl.spv", 7, sizeof(Push))),
           blend_backward_(context.create_pipeline("splat_blend_backward.hlsl.spv", 12, sizeof(Push))),
           blend_backward_no_geometry_(
@@ -173,6 +174,14 @@ public:
         create_backward_timestamp_profiler();
         create_forward_timestamp_profiler();
         query_subgroup_properties();
+        if (subgroup_backward_supported_) {
+            pruning_scores_subgroup_ = context.create_pipeline(
+                "splat_pruning_scores_subgroup.hlsl.spv", 6, sizeof(Push));
+            if (context_.buffer_float32_atomic_add &&
+                !environment_flag("SPLAT_DRENDER_DISABLE_ATOMIC_BACKWARD"))
+                pruning_scores_atomic_ = context.create_pipeline(
+                    "splat_pruning_scores_atomic.hlsl.spv", 6, sizeof(Push));
+        }
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
         phase_alignment_ = std::max<VkDeviceSize>(
@@ -287,6 +296,7 @@ public:
         device_model_bound_ = false;
         model_ready_ = true;
         last_frame_has_snapshots_ = false;
+        last_frame_has_stats_ = false;
     }
 
     void bind_model_device(const SplatDeviceGaussians& gaussians) {
@@ -334,6 +344,7 @@ public:
         sh_bases_ = gaussians.sh_bases;
         model_ready_ = true;
         last_frame_has_snapshots_ = false;
+        last_frame_has_stats_ = false;
         sample_live_ = false;
     }
 
@@ -347,6 +358,7 @@ public:
         context_.write_buffer(means_, means.data(), means.size() * sizeof(float));
         context_.write_buffer(opacities_, opacities.data(), opacities.size() * sizeof(float));
         last_frame_has_snapshots_ = false;
+        last_frame_has_stats_ = false;
     }
 
     void clear_model() {
@@ -355,6 +367,7 @@ public:
         device_model_ = {};
         count_ = 0;
         last_frame_has_snapshots_ = false;
+        last_frame_has_stats_ = false;
         sample_live_ = false;
     }
     bool has_model() const noexcept { return model_ready_; }
@@ -456,6 +469,10 @@ public:
         const std::uint32_t count = count_;
         const bool has_sh = has_sh_;
         const bool has_scales = has_scales_;
+        // Retire the reused command slot before writing mapped camera data.
+        // Scoring queues two submissions per view, so the third/fourth view
+        // can reach a camera slot while its earlier preprocessing is pending.
+        begin_batch();
         // Publish the real visible/instance counts of every retired frame from
         // its per-slot mirror. This never waits: frames that already finished
         // feed the reported counts and the capacity watermark with a lag
@@ -820,6 +837,7 @@ public:
         submit_batch(forward_profile_enabled_);
         collect_forward_timestamps();
         last_frame_has_snapshots_ = settings.pixel_snapshots && !pack_rgba;
+        last_frame_has_stats_ = !pack_rgba;
         last_frame_has_geometry_ = settings.need_depth && !pack_rgba;
         last_instance_values_ = instance_values;
         last_width_ = camera.width;
@@ -939,6 +957,46 @@ public:
         begin_batch();
         record_copy_frame_device(source, destination);
         flush_batch();
+    }
+
+    void pruning_scores_device(const SplatBufferView& scores) {
+        require(last_frame_has_stats_,
+                "pruning_scores_device requires a latest render with contribution statistics");
+        const std::uint64_t bytes = static_cast<std::uint64_t>(count_) * sizeof(float);
+        require(scores.buffer != VK_NULL_HANDLE && scores.bytes >= bytes,
+                "device pruning scores buffer is too small");
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(context_.physical_device, &properties);
+        const std::uint64_t alignment = std::max<std::uint64_t>(
+            4, properties.limits.minStorageBufferOffsetAlignment);
+        require(scores.offset % alignment == 0,
+                "device pruning scores offset does not satisfy minStorageBufferOffsetAlignment");
+        const std::scoped_lock lock(context_.dispatch_mutex);
+        // A borrowed buffer view lets the regular clear record its transfer
+        // barriers in this batch without taking ownership of the destination.
+        Buffer destination;
+        destination.owning = false;
+        destination.handle = scores.buffer;
+        destination.offset = scores.offset;
+        destination.size = bytes;
+        zero_buffer(destination, bytes);
+        Push push{};
+        push.u[0] = last_width_;
+        push.u[1] = last_height_;
+        push.u[2] = last_grid_x_;
+        push.u[3] = last_mode_;
+        push.u[4] = static_cast<std::uint32_t>(last_wrap_width_);
+        push.u[5] = count_;
+        push.u[6] = last_pixels_;
+        push.u[7] = last_frame_has_geometry_ ? k_gauss_slots_geometry : k_gauss_slots_color;
+        const ComputePipeline& pipeline = pruning_scores_atomic_.valid()
+            ? pruning_scores_atomic_ : pruning_scores_subgroup_.valid()
+                ? pruning_scores_subgroup_ : pruning_scores_;
+        dispatch_infos(pipeline,
+            {descriptor(tile_ranges_), descriptor(*last_instance_values_),
+             descriptor(gauss_f_), descriptor(out_f_), descriptor(out_u_),
+             descriptor(scores, bytes)}, push, last_grid_x_, div_up(last_height_, k_tile));
+        submit_batch(false);
     }
 
     void dispatch_median_backward_info(
@@ -2640,6 +2698,9 @@ private:
     ComputePipeline blend_;
     ComputePipeline blend_no_geometry_;
     ComputePipeline blend_training_;
+    ComputePipeline pruning_scores_;
+    ComputePipeline pruning_scores_subgroup_;
+    ComputePipeline pruning_scores_atomic_;
     ComputePipeline median_backward_;
     ComputePipeline blend_backward_;
     ComputePipeline blend_backward_no_geometry_;
@@ -2767,6 +2828,7 @@ private:
     Buffer multi_neighbour_mask_;
     Buffer multi_output_;
     bool last_frame_has_snapshots_{};
+    bool last_frame_has_stats_{};
     bool last_frame_has_geometry_{};
     bool sample_live_{};
     std::uint32_t sample_point_count_{};
@@ -2848,6 +2910,10 @@ SplatModelGradients SplatRasterizer::backward(
 SplatDeviceFrame SplatRasterizer::render_device(
     const SplatCamera& camera, const SplatSettings& settings) {
     return impl_->render_device(camera, settings);
+}
+
+void SplatRasterizer::pruning_scores_device(const SplatBufferView& scores) {
+    impl_->pruning_scores_device(scores);
 }
 
 SplatDeviceFrame SplatRasterizer::render_device_copy(

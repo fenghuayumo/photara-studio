@@ -7250,15 +7250,19 @@ void test_focus_view_mask_cuda() {
 // backward recurrence rather than the forward residual walk used in our scorer.
 // Isolated alpha images supply projected coverage, so this checks the score
 // calculation without duplicating our projection or draw-list implementation.
-void test_speedy_reverse_compositing_oracle() {
+void test_speedy_reverse_compositing_oracle(
+    tinytensor::Device device = tinytensor::Device::CUDA,
+    photara::CameraModel mode = photara::CameraModel::pinhole) {
     using namespace photara::splat;
     constexpr std::size_t count = 32;
     constexpr float sh0 = 0.2820947918F;
-    const auto device = tinytensor::Device::CUDA;
     std::vector<float> means, scales, rotations, logits, coefficients, opacity;
     std::vector<std::array<float,3>> colours;
     for (std::size_t g = 0; g < count; ++g) {
-        means.insert(means.end(), {0.F, 0.F, 2.F + float(g)*0.08F});
+        const float depth = 2.F + float(g)*0.08F;
+        // Place panoramas at the horizontal seam to exercise wrapped deltas.
+        means.insert(means.end(), {0.F, 0.F,
+            mode == photara::CameraModel::equirectangular ? -depth : depth});
         scales.insert(scales.end(), 3, std::log(0.25F));
         rotations.insert(rotations.end(), {1.F,0.F,0.F,0.F});
         const float o = g % 6 == 0 ? 0.995F : g % 3 == 0 ? 0.08F : 0.65F;
@@ -7279,8 +7283,9 @@ void test_speedy_reverse_compositing_oracle() {
     model.sh = tinytensor::Tensor::from_vector(coefficients, {count,1,3}, device);
     model.sh_degree = 0;
     Camera camera;
+    camera.model = mode;
     camera.world_to_camera[0] = camera.world_to_camera[5] = camera.world_to_camera[10] = camera.world_to_camera[15] = 1.F;
-    camera.width = 48; camera.height = 32;
+    camera.width = 47; camera.height = 31;
     camera.fx = camera.fy = 40.F; camera.cx = 24.F; camera.cy = 16.F;
     Rasterizer raster;
     RasterizeOptions options;
@@ -7339,11 +7344,300 @@ void test_speedy_reverse_compositing_oracle() {
     }
 }
 
+void test_speedy_vulkan() {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using tinytensor::Device;
+    using tinytensor::Tensor;
+    if (!tinytensor::vulkan::available()) {
+        std::cout << "SKIP: no Vulkan device for Speedy-Splat\n";
+        return;
+    }
+    for (auto mode : {photara::CameraModel::pinhole,
+                      photara::CameraModel::opencv_fisheye,
+                      photara::CameraModel::equirectangular})
+        test_speedy_reverse_compositing_oracle(Device::Vulkan, mode);
+
+    // More than one staged batch, with varying SH, anisotropy, opacity,
+    // filtering and view direction. Compare per-row scores and prune order.
+    constexpr std::size_t count = 320;
+    std::vector<float> means, scales, rotations, logits, sh, filter;
+    for (std::size_t g = 0; g < count; ++g) {
+        means.insert(means.end(), {float(int(g % 13) - 6) * .025F,
+            float(int(g % 11) - 5) * .02F, 2.F + float(g) * .004F});
+        scales.insert(scales.end(), {std::log(.07F + .0002F * g), std::log(.05F), std::log(.03F)});
+        rotations.insert(rotations.end(), {1.F, .1F, .02F * float(g % 5), 0.F});
+        logits.push_back(-3.F + .013F * g);
+        filter.push_back(.001F * float(g % 4));
+        for (std::size_t c = 0; c < 48; ++c)
+            sh.push_back(c < 3 ? .2F + .01F * float(g % 17) : .015F * float(int((g+c) % 9)-4));
+    }
+    const auto make_model = [&](Device device) {
+        GaussianModel m;
+        m.means = Tensor::from_vector(means, {count,3}, device);
+        m.log_scales = Tensor::from_vector(scales, {count,3}, device);
+        m.quaternions = Tensor::from_vector(rotations, {count,4}, device);
+        m.opacity_logits = Tensor::from_vector(logits, {count,1}, device);
+        m.sh = Tensor::from_vector(sh, {count,16,3}, device);
+        m.filter_3d = Tensor::from_vector(filter, {count,1}, device);
+        m.sh_degree = 3;
+        return m;
+    };
+    auto vk_model = make_model(Device::Vulkan);
+    const auto original_sh = vk_model.sh.to_vector();
+    const auto original_opacity = vk_model.opacity_logits.to_vector();
+    Camera camera;
+    camera.world_to_camera[0] = camera.world_to_camera[5] = camera.world_to_camera[10] = camera.world_to_camera[15] = 1.F;
+    camera.width = 63; camera.height = 35;
+    camera.fx = camera.fy = 50.F; camera.cx = 31.F; camera.cy = 17.F;
+    RasterizeOptions options;
+    options.active_sh_degree = 3;
+    options.background = {.1F,.3F,.7F};
+    // Scoring must ignore precomputed features and attachment/backward flags.
+    options.colors_precomp = Tensor::zeros({count,3}, Device::Vulkan);
+    options.copy_attachments = false;
+    options.record_backward_state = false;
+    Rasterizer vk_raster;
+    int cuda_count = 0;
+    const bool has_cuda = cudaGetDeviceCount(&cuda_count) == cudaSuccess && cuda_count > 0;
+    double max_relative = 0.;
+    std::vector<float> reference;
+    std::array<std::vector<float>,3> per_view_reference;
+    for (int view = 0; view < 3; ++view) {
+        camera.position[0] = .1F * view;
+        camera.world_to_camera[12] = -camera.position[0];
+        const auto actual = vk_raster.pruning_scores(vk_model, camera, options).to_vector();
+        require(actual.size() == count, "Vulkan Speedy-Splat lost score rows");
+        for (float s : actual) require(std::isfinite(s) && s >= 0.F, "Invalid Vulkan pruning score");
+        if (view == 0) reference = actual;
+        per_view_reference[view] = actual;
+        if (has_cuda) {
+            const auto expected = Rasterizer().pruning_scores(make_model(Device::CUDA), camera, options).to_vector();
+            for (std::size_t g = 0; g < count; ++g) {
+                max_relative = std::max(max_relative, double(std::abs(actual[g]-expected[g]) / std::max(expected[g], 1e-5F)));
+                require(std::abs(actual[g]-expected[g]) < 2e-4F + expected[g]*3e-3F,
+                        "Vulkan Speedy-Splat score differs from CUDA");
+            }
+            const auto prune_rows = [&](const std::vector<float>& scores) {
+                std::vector<int> order(count);
+                std::iota(order.begin(), order.end(), 0);
+                std::sort(order.begin(), order.end(), [&](int a, int b) {
+                    return scores[a] != scores[b] ? scores[a] < scores[b] : a < b;
+                });
+                order.resize(count * 3 / 10);
+                std::sort(order.begin(), order.end());
+                return order;
+            };
+            require(prune_rows(actual) == prune_rows(expected), "Vulkan and CUDA selected different pruning rows");
+        }
+    }
+    camera.position[0] = 0.F;
+    camera.world_to_camera[12] = 0.F;
+    const auto repeated = vk_raster.pruning_scores(vk_model, camera, options).to_vector();
+    for (std::size_t g = 0; g < count; ++g)
+        require(std::abs(repeated[g]-reference[g]) < 2e-4F+reference[g]*1e-4F,
+                "Repeated Vulkan scoring reused stale accumulation");
+    auto accumulated = Tensor::zeros({count}, Device::Vulkan);
+    for (int v = 0; v < 12; ++v) {
+        camera.position[0] = .1F * (v % 3);
+        camera.world_to_camera[12] = -camera.position[0];
+        accumulated = accumulated.add(vk_raster.pruning_scores(vk_model, camera, options));
+    }
+    const auto accumulated_values = accumulated.to_vector();
+    for (std::size_t g = 0; g < count; ++g) {
+        const float expected = 4.F * (per_view_reference[0][g] + per_view_reference[1][g] + per_view_reference[2][g]);
+        require(std::abs(accumulated_values[g]-expected) < 2e-4F + expected*1e-4F,
+                "Asynchronous Vulkan multi-view scoring differs from synchronized scores");
+    }
+    camera.position[0] = camera.world_to_camera[12] = 0.F;
+    require(vk_model.sh.to_vector() == original_sh && vk_model.opacity_logits.to_vector() == original_opacity,
+            "Vulkan scoring mutated model parameters");
+    // Reuse a live rasterizer after an all-culled view, then shrink topology.
+    camera.world_to_camera[14] = -20.F;
+    const auto culled = vk_raster.pruning_scores(vk_model, camera, options).to_vector();
+    require(std::all_of(culled.begin(), culled.end(), [](float s) { return s == 0.F; }),
+            "Vulkan all-culled scoring retained stale scores");
+    camera.world_to_camera[14] = 0.F;
+    auto rows = Tensor::from_vector(std::vector<int>{0,7,23}, {3}, Device::Vulkan);
+    auto smaller = densification::gpu_detail::select_model_rows(vk_model, rows);
+    require(vk_raster.pruning_scores(smaller, camera, options).numel() == 3,
+            "Vulkan scoring failed after topology compaction");
+    std::cout << "Vulkan Speedy-Splat score/oracle/prune-row parity passed; max_relative=" << max_relative << '\n';
+
+    const auto root = std::filesystem::temp_directory_path() / "photara_speedy_vulkan_smoke";
+    std::filesystem::create_directories(root);
+    const auto image = root / "frame.png";
+    photara::io::save_rgb_png(photara::io::RgbImage{32,32,std::vector<std::uint8_t>(32*32*3,128)}, image);
+    photara::mvs::MvsScene scene;
+    photara::mvs::MvsView view;
+    view.path = image;
+    view.width = view.src_width = view.height = view.src_height = 32;
+    view.fx = view.fy = view.src_fx = view.src_fy = 20.F;
+    view.cx = view.cy = view.src_cx = view.src_cy = 15.5F;
+    scene.views.push_back(view);
+    view.id = 1; view.pose.C.x() = .1;
+    scene.views.push_back(view);
+    for (int g = 0; g < 8; ++g) {
+        photara::mvs::DensePoint point;
+        point.position = photara::mvs::Vec3f((g-4)*.1F, 0.F, 2.F);
+        point.normal = photara::mvs::Vec3f::UnitZ();
+        point.color = photara::mvs::Vec3f::Constant(.5F);
+        point.views = {0,1};
+        scene.dense_cloud.points.push_back(point);
+    }
+    for (bool dense : {true,false}) {
+        TrainingOptions training;
+        training.backend = TrainingBackend::vulkan;
+        training.iterations = 8;
+        training.input_is_dense = dense;
+        training.sh_degree = 3;
+        training.sh_degree_interval = 1;
+        training.maximum_scale_fraction = 1.F;
+        training.densification_cap = 32;
+        training.refine_start_iter = 1;
+        training.refine_stop_iter = 8;
+        training.grow_stop_iter = 6;
+        training.refine_every = 2;
+        training.densify_gradient_threshold = -1.F;
+        training.densify_select_fraction = 1.F;
+        training.mean_noise_weight = 0.F;
+        training.speedy_pruning = true;
+        training.speedy_start = 3;
+        training.speedy_every = 2;
+        training.speedy_stop = 8;
+        training.speedy_soft_ratio = training.speedy_hard_ratio = .5F;
+        training.sh_regularization_weight = .03F;
+        training.log_interval = 1;
+        unsigned completed = 0, pruning_events = 0;
+        const auto trained = Trainer(training).train(scene, [&](const TrainingProgress& p) {
+            ++completed;
+            require(std::isfinite(p.loss), "Non-finite Vulkan loss after Speedy-Splat compaction");
+            if (p.iteration == 3 || p.iteration == 5 || p.iteration == 7) {
+                require(p.pruned_count > 0, "Vulkan Speedy-Splat did not run at its scheduled step");
+                ++pruning_events;
+            }
+            return true;
+        });
+        require(completed == 8 && pruning_events == 3 && trained.size() > 0,
+                "Vulkan Speedy-Splat training did not finish after repeated compaction");
+        if (dense) require(trained.size() == 1, "Vulkan fixed-model pruning removed the wrong number of rows");
+        require_finite(trained.sh, "Non-finite SH after Vulkan pruning/Adam updates");
+        require_finite(trained.means, "Non-finite geometry after Vulkan pruning/Adam updates");
+    }
+    std::filesystem::remove(image);
+    std::filesystem::remove(root);
+    std::cout << "Vulkan Speedy-Splat dense and ADC-IGS training tests passed\n";
+#endif
+}
+
+void benchmark_speedy_scores(const char* ply, const char* colmap, const char* images,
+                            unsigned repeats) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using tinytensor::Device;
+    require(tinytensor::vulkan::available() && repeats > 0, "Speedy benchmark needs Vulkan and positive repeats");
+    const auto cuda_model = load_gaussians_ply(ply);
+    auto vk_model = cuda_model;
+    for (auto* tensor : {&vk_model.means, &vk_model.log_scales, &vk_model.quaternions,
+                         &vk_model.opacity_logits, &vk_model.sh, &vk_model.filter_3d,
+                         &vk_model.normal_features})
+        if (tensor->is_valid()) *tensor = tensor->to(Device::Vulkan);
+    const auto scene = load_colmap_scene(colmap, images).scene;
+    require(!scene.views.empty(), "Speedy benchmark has no cameras");
+    RasterizeOptions options;
+    options.active_sh_degree = cuda_model.sh_degree;
+    Rasterizer cuda_raster, vk_raster;
+    std::vector<Camera> cameras;
+    std::vector<std::vector<float>> vk_reference;
+    for (std::size_t v = 0; v < std::min<std::size_t>(3, scene.views.size()); ++v) {
+        auto camera = camera_from_mvs_view(scene.views[v * scene.views.size() / 3]);
+        const float scale = std::min(1.F, 960.F / std::max(camera.width, camera.height));
+        const auto width = std::max(1u, unsigned(std::round(camera.width * scale)));
+        const auto height = std::max(1u, unsigned(std::round(camera.height * scale)));
+        const float sx = float(width) / camera.width, sy = float(height) / camera.height;
+        camera.width = width; camera.height = height;
+        camera.fx *= sx; camera.cx *= sx; camera.fy *= sy; camera.cy *= sy;
+        cameras.push_back(camera);
+        std::vector<float> scores[2];
+        double ms[2]{};
+        for (unsigned backend = 0; backend < 2; ++backend) {
+            auto& raster = backend == 0 ? cuda_raster : vk_raster;
+            const auto& model = backend == 0 ? cuda_model : vk_model;
+            const auto sync = [&] {
+                if (backend == 0) require(cudaDeviceSynchronize() == cudaSuccess, "CUDA score benchmark failed");
+                else tinytensor::vulkan::synchronize();
+            };
+            for (unsigned warm = 0; warm < 3; ++warm) {
+                auto score = raster.pruning_scores(model, camera, options);
+                sync();
+            }
+            tinytensor::Tensor score;
+            const auto start = std::chrono::steady_clock::now();
+            for (unsigned i = 0; i < repeats; ++i) {
+                score = raster.pruning_scores(model, camera, options);
+                sync();
+            }
+            ms[backend] = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()/repeats;
+            scores[backend] = score.to_vector();
+        }
+        vk_reference.push_back(scores[1]);
+        double error = 0., magnitude = 0.;
+        for (std::size_t g = 0; g < cuda_model.size(); ++g) {
+            require(std::isfinite(scores[1][g]) && scores[1][g] >= 0.F, "Non-finite real-scene Vulkan score");
+            error += std::abs(scores[0][g]-scores[1][g]);
+            magnitude += scores[0][g];
+        }
+        const auto drops = [&](const std::vector<float>& s) {
+            std::vector<int> order(s.size());
+            std::iota(order.begin(), order.end(), 0);
+            const auto n = std::size_t(.3 * s.size());
+            std::partial_sort(order.begin(), order.begin()+n, order.end(), [&](int a, int b) {
+                return s[a] != s[b] ? s[a] < s[b] : a < b;
+            });
+            order.resize(n); std::sort(order.begin(), order.end());
+            return order;
+        };
+        const auto a = drops(scores[0]), b = drops(scores[1]);
+        std::vector<int> difference;
+        std::set_symmetric_difference(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(difference));
+        std::cout << "speedy_benchmark gaussians=" << cuda_model.size() << " view=" << v
+                  << " resolution=" << width << 'x' << height << " repeats=" << repeats
+                  << " cuda_ms=" << ms[0] << " vulkan_ms=" << ms[1]
+                  << " score_relative_l1=" << error/std::max(magnitude,1e-20)
+                  << " prune_rows_symmetric_difference=" << difference.size() << '\n' << std::flush;
+    }
+    auto accumulated = tinytensor::Tensor::zeros({vk_model.size()}, Device::Vulkan);
+    for (unsigned repeat = 0; repeat < 3; ++repeat)
+        for (const auto& camera : cameras)
+            accumulated = accumulated.add(vk_raster.pruning_scores(vk_model, camera, options));
+    const auto summed = accumulated.to_vector();
+    double error = 0., magnitude = 0.;
+    for (std::size_t g = 0; g < vk_model.size(); ++g) {
+        double expected = 0.;
+        for (const auto& score : vk_reference) expected += 3. * score[g];
+        error += std::abs(summed[g] - expected);
+        magnitude += expected;
+    }
+    const double relative_l1 = error / std::max(magnitude,1e-20);
+    require(relative_l1 < 1e-4, "Real-scene asynchronous multi-view scoring changed scores");
+    std::cout << "speedy_benchmark_async views=" << cameras.size()*3
+              << " score_relative_l1=" << relative_l1 << '\n';
+#endif
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string(argv[1]) == "--speedy-vulkan-only") {
+            test_speedy_vulkan();
+            return 0;
+        }
         int device_count = 0;
         if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
             std::cout << "SKIP: no CUDA device\n";
+            return 0;
+        }
+        if (argc == 6 && std::string(argv[1]) == "--speedy-bench") {
+            benchmark_speedy_scores(argv[2], argv[3], argv[4], unsigned(std::stoul(argv[5])));
             return 0;
         }
         if (argc == 5 && std::string(argv[1]) == "--occupancy-memory-bench") {
@@ -7546,13 +7840,17 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string(argv[1]) == "--speedy-only") {
             test_forward_backward();
             test_speedy_reverse_compositing_oracle();
-            photara::splat::TrainingOptions invalid;
-            invalid.speedy_pruning = true;
-            invalid.speedy_every = 0;
-            bool rejected = false;
-            try { photara::splat::Trainer trainer(invalid); }
-            catch (const std::invalid_argument&) { rejected = true; }
-            require(rejected, "Speedy-Splat accepted a zero interval");
+            test_speedy_vulkan();
+            for (auto backend : {photara::splat::TrainingBackend::cuda, photara::splat::TrainingBackend::vulkan}) {
+                photara::splat::TrainingOptions invalid;
+                invalid.backend = backend;
+                invalid.speedy_pruning = true;
+                invalid.speedy_every = 0;
+                bool rejected = false;
+                try { photara::splat::Trainer trainer(invalid); }
+                catch (const std::invalid_argument&) { rejected = true; }
+                require(rejected, "Speedy-Splat accepted a zero interval");
+            }
             std::cout << "Speedy-Splat tests passed\n";
             return 0;
         }
@@ -7595,6 +7893,8 @@ int main(int argc, char** argv) {
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();
         test_forward_backward();
+        test_speedy_reverse_compositing_oracle();
+        test_speedy_vulkan();
         test_compact_pixel_snapshots();
         test_sh_adam_quant();
         test_vulkan_sh_adam_quant();

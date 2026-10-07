@@ -1095,8 +1095,6 @@ GaussianModel initialize_from_dense_cloud(
 Trainer::Trainer(TrainingOptions options)
     : options_(std::move(options)) {
     if (options_.speedy_pruning) {
-        if (options_.backend != TrainingBackend::cuda)
-            throw std::invalid_argument("Speedy-Splat pruning currently requires CUDA");
         if (options_.speedy_every == 0 || options_.speedy_start == 0 ||
             options_.speedy_stop < options_.speedy_start ||
             !std::isfinite(options_.speedy_soft_ratio) ||

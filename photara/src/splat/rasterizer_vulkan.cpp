@@ -165,23 +165,9 @@ std::shared_ptr<VulkanForwardContext> get_context(
         rendered.context.backend_impl);
 }
 
-}  // namespace
-
-RenderResult vulkan_raster_forward(
-    std::shared_ptr<void>& backend_value, const GaussianModel& model,
-    const Camera& camera, const RasterizeOptions& requested_options) {
-    if (camera.width == 0 || camera.height == 0)
-        throw std::invalid_argument("Splat camera dimensions must be positive");
-    if (model.means.device() != tinytensor::Device::Vulkan)
-        throw std::invalid_argument("Vulkan rasterization requires a Vulkan model");
-    if (requested_options.colors_precomp.is_valid())
-        throw std::invalid_argument(
-            "Vulkan precomputed-color rasterization is not implemented yet");
-
-    const auto backend = get_backend(backend_value);
-    active_training_backend = backend;
-    auto context = std::make_shared<VulkanForwardContext>();
-    context->backend = backend;
+splat_drender::vulkan::SplatDeviceGaussians device_gaussians(
+    const std::shared_ptr<VulkanRasterBackend>& backend,
+    const GaussianModel& model, const RasterizeOptions& requested_options) {
     if (!model.filter_3d.is_valid() &&
         (!backend->zero_filter.is_valid() ||
          backend->zero_filter.numel() < model.size()))
@@ -199,6 +185,10 @@ RenderResult vulkan_raster_forward(
     gaussians.sh_degree = std::min(
         requested_options.active_sh_degree, model.sh_degree);
     gaussians.sh_bases = static_cast<std::uint32_t>(model.sh.shape()[1]);
+    return gaussians;
+}
+
+splat_drender::vulkan::SplatSettings raster_settings(const RasterizeOptions& requested_options) {
 
     splat_drender::vulkan::SplatSettings settings;
     std::copy(
@@ -207,9 +197,31 @@ RenderResult vulkan_raster_forward(
     settings.kernel_size = requested_options.kernel_size;
     settings.scale_modifier = requested_options.scale_modifier;
     settings.need_depth = requested_options.require_depth;
-    settings.pixel_snapshots = true;
+    settings.pixel_snapshots = requested_options.record_backward_state;
     settings.point_depth_bracket = requested_options.point_depth_bracket;
     settings.point_depth_tolerance = requested_options.point_depth_tolerance;
+    return settings;
+}
+
+}  // namespace
+
+RenderResult vulkan_raster_forward(
+    std::shared_ptr<void>& backend_value, const GaussianModel& model,
+    const Camera& camera, const RasterizeOptions& requested_options) {
+    if (camera.width == 0 || camera.height == 0)
+        throw std::invalid_argument("Splat camera dimensions must be positive");
+    if (model.means.device() != tinytensor::Device::Vulkan)
+        throw std::invalid_argument("Vulkan rasterization requires a Vulkan model");
+    if (requested_options.colors_precomp.is_valid())
+        throw std::invalid_argument(
+            "Vulkan precomputed-color rasterization is not implemented yet");
+
+    const auto backend = get_backend(backend_value);
+    active_training_backend = backend;
+    auto context = std::make_shared<VulkanForwardContext>();
+    context->backend = backend;
+    const auto gaussians = device_gaussians(backend, model, requested_options);
+    const auto settings = raster_settings(requested_options);
 
     RenderResult result;
     if (requested_options.copy_attachments) {
@@ -271,6 +283,27 @@ RenderResult vulkan_raster_forward(
     }
     result.context.backend_impl = std::move(context);
     return result;
+}
+
+tinytensor::Tensor vulkan_pruning_scores(
+    std::shared_ptr<void>& backend_value, const GaussianModel& model,
+    const Camera& camera, RasterizeOptions options) {
+    options.require_depth = false;
+    // Only final colour and contributor limits are needed; omit the large
+    // per-bucket backward snapshots and their prefix scan during scoring.
+    options.record_backward_state = false;
+    options.colors_precomp = {};
+    const auto backend = get_backend(backend_value);
+    const auto gaussians = device_gaussians(backend, model, options);
+    auto scores = tinytensor::Tensor::empty({model.size()}, tinytensor::Device::Vulkan);
+    tinytensor::vulkan::submit_async();
+    backend->rasterizer.bind_model_device(gaussians);
+    // Keep all frame attachments internal; scoring never needs owned copies of
+    // images, radii or visibility, nor a training context for backward.
+    const auto frame = backend->rasterizer.render_device(camera_view(camera), raster_settings(options));
+    (void)frame;
+    backend->rasterizer.pruning_scores_device(buffer_view(scores));
+    return scores;
 }
 
 bool vulkan_dispatch_color_correction(

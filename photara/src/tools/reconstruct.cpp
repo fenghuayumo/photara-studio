@@ -982,7 +982,7 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0"))
         ("splat-seed", "Splat training RNG seed",
          cxxopts::value<unsigned>()->default_value("42"))
-        ("splat-speedy-pruning", "Enable CUDA Speedy-Splat sensitivity pruning",
+        ("splat-speedy-pruning", "Enable CUDA/Vulkan Speedy-Splat sensitivity pruning",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("splat-speedy-start", "First pruning iteration", cxxopts::value<unsigned>()->default_value("6000"))
         ("splat-speedy-every", "Pruning interval", cxxopts::value<unsigned>()->default_value("3000"))

@@ -14,6 +14,10 @@ RenderResult vulkan_raster_forward(
     std::shared_ptr<void>& backend, const GaussianModel& model,
     const Camera& camera, const RasterizeOptions& options);
 
+tinytensor::Tensor vulkan_pruning_scores(
+    std::shared_ptr<void>& backend, const GaussianModel& model,
+    const Camera& camera, RasterizeOptions options);
+
 float vulkan_photometric_loss(
     const RenderResult& rendered, const tinytensor::Tensor& target,
     const tinytensor::Tensor& mask, bool mask_enabled,

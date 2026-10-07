@@ -62,7 +62,7 @@ struct TrainingOptions {
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
-    // Speedy-Splat sensitivity pruning (CUDA). Absolute iteration schedule;
+    // Speedy-Splat sensitivity pruning (CUDA/Vulkan). Absolute iteration schedule;
     // zero score_views evaluates every training camera, never held-out views.
     bool speedy_pruning{false};
     unsigned speedy_start{6'000};

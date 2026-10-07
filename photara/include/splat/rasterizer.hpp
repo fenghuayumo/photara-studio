@@ -24,7 +24,7 @@ struct RasterizeOptions {
     // the photometric loss. Regular render callers keep the eager default.
     bool defer_visibility{false};
     bool debug{false};
-    // CUDA inference/preview callers can omit all backward-only pixel state.
+    // Inference/preview callers can omit all backward-only pixel state.
     bool record_backward_state{true};
     bool compact_pixel_snapshots{true};
     bool compact_instance_storage{true};
