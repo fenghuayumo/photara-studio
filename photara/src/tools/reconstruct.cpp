@@ -8,6 +8,7 @@
 #include "sfm/export_colmap.hpp"
 #include "project/archive.hpp"
 #include "project/document.hpp"
+#include "splat/training_preset.hpp"
 #include "mvs/densify.hpp"
 #include "mvs/export.hpp"
 #include "mvs/internal.hpp"
@@ -21,6 +22,7 @@
 #include "splat/dataset.hpp"
 #include "splat/cuda_vulkan_preview.hpp"
 #include "splat/formats.hpp"
+#include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
 #endif
 #if defined(PHOTARA_HAS_SPLAT) && defined(TINYTENSOR_HAS_VULKAN)
@@ -136,13 +138,21 @@ struct ReconstructCli {
     bool splat{false};
     bool splat_view{false};
     bool splat_mesh_only{false};
+    std::filesystem::path splat_simplify;
+    float splat_simplify_keep{0.8F};
+    unsigned splat_simplify_knn{16};
+    float splat_simplify_opacity{0.10F};
+    float splat_simplify_merge_cap{0.5F};
+    int splat_simplify_sh{-1};
     std::string capture_mode{"object"};
     std::filesystem::path subject_bounds;
     std::filesystem::path splat_dataset;
     std::filesystem::path dense_ply;
     std::string backend{"cuda"};
-    unsigned splat_iterations{10'000};
+    unsigned splat_iterations{30'000};
+    photara::splat::TrainingMode splat_mode{photara::splat::TrainingMode::standard};
     unsigned splat_log_interval{100};
+    bool splat_eval_checkpoints{true};
     unsigned splat_preview_interval{0};
     unsigned splat_preview_view{0};
     std::filesystem::path splat_preview_view_file;
@@ -221,9 +231,14 @@ struct ReconstructCli {
     std::string splat_strategy{"adc_igs"};
     float splat_growth_factor{0.F};
     unsigned splat_seed{42};
+    struct {
+        bool speedy_pruning{false};
+        unsigned speedy_start{6000}, speedy_every{3000}, speedy_stop{30000}, speedy_score_views{0};
+        float speedy_soft_ratio{0.3F}, speedy_hard_ratio{0.2F};
+    } speedy_options;
     bool splat_densification{true};
     unsigned splat_structure_freeze_iter{0};
-    std::uint64_t splat_densification_cap{1'000'000};
+    std::uint64_t splat_densification_cap{3'000'000};
     unsigned splat_grow_stop_iter{0};
     std::uint64_t splat_init_point_budget{0};
     bool mesh{false};
@@ -402,10 +417,15 @@ void print_help(const cxxopts::Options& options) {
               << "               (does not train splats unless --splat is also set)\n"
               << "  --splat       train CUDA Gaussian splats -> *_splat.ply, or --output .sog/.spz/.glb\n"
               << "  --splat-view  orbit-preview a trained splat from the camera sidecar\n"
+              << "  --splat-simplify PATH  NanoGS post-training simplify; writes --output\n"
+              << "  --splat-simplify-keep R  keep ratio (0-1, default 0.8)\n"
+              << "  --splat-simplify-opacity T  drop Gaussians below this opacity (default 0.1)\n"
+              << "  --splat-simplify-knn K  merge-neighbour count (default 16)\n"
               << "  --splat-mesh-only  mesh an existing trained splat; does not run the optimizer\n"
               << "  --splat-dataset PATH  external COLMAP/RealityCapture/OpenMVS cameras (auto-detected)\n"
               << "  --dense-ply PATH  replace initial points; without camera data, use internal SfM\n"
-              << "  --splat-iterations N  splat optimizer steps (default 10000)\n"
+              << "  --splat-mode NAME  fast, standard (default), high-quality\n"
+              << "  --splat-iterations N  override preset optimizer steps (standard 30000)\n"
               << "  --splat-log-interval N  training-stat log every N steps (default 100, 0 = first/last)\n"
               << "  --splat-preview-interval N  emit a live preview every N steps (0 disables)\n"
               << "  --splat-preview-view N  camera index for live preview (default 0, first frame)\n"
@@ -463,7 +483,7 @@ void print_help(const cxxopts::Options& options) {
               << "  --splat-strategy adc_plus|adc_igs|emc\n"
               << "  --splat-densification=BOOL  enable split/prune (default true)\n"
               << "  --splat-structure-freeze-iter N  freeze geometry/opacity after N (default 0)\n"
-              << "  --splat-densification-cap N  densify growth ceiling (default 1000000)\n"
+              << "  --splat-densification-cap N  override preset growth ceiling (standard 3000000)\n"
               << "  --splat-grow-stop N  stop adding Gaussians at N (default 0 = half of iterations)\n"
               << "  --splat-growth-factor W  EMC per-refine count multiplier; 0 keeps the strategy preset\n"
               << "  --splat-init-point-budget N  cap the initialization cloud (default 0 = keep all)\n"
@@ -712,6 +732,24 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-view",
          "Orbit-preview a trained splat from --splat-preview-camera-file",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-simplify",
+         "NanoGS post-training simplify of a Gaussian file (PLY/SOG/SPZ/GLB)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("splat-simplify-keep",
+         "Fraction of Gaussians to keep (default 0.8)",
+         cxxopts::value<float>()->default_value("0.8"))
+        ("splat-simplify-opacity",
+         "Drop Gaussians below this opacity before merging (default 0.1)",
+         cxxopts::value<float>()->default_value("0.1"))
+        ("splat-simplify-knn",
+         "kNN neighbours per Gaussian for merge candidates (default 16)",
+         cxxopts::value<unsigned>()->default_value("16"))
+        ("splat-simplify-merge-cap",
+         "Max fraction merged in one pass (default 0.5)",
+         cxxopts::value<float>()->default_value("0.5"))
+        ("splat-simplify-sh",
+         "Output SH degree 0-3; -1 keeps the source degree",
+         cxxopts::value<int>()->default_value("-1"))
         ("splat-mesh-only",
          "Extract a mesh from an existing trained splat without running the optimizer",
          cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -726,8 +764,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))
         ("dense-ply", "Dense PLY initializer for external or internal-SfM cameras",
          cxxopts::value<std::string>()->default_value(""))
-        ("splat-iterations", "Splat optimizer iterations",
-         cxxopts::value<unsigned>()->default_value("10000"))
+        ("splat-mode", "Training preset: fast, standard, high-quality",
+         cxxopts::value<std::string>()->default_value("standard"))
+        ("splat-iterations", "Splat optimizer iterations (overrides preset)",
+         cxxopts::value<unsigned>()->default_value("30000"))
         ("splat-log-interval",
          "Log splat training stats every N iterations (0 = first and last only)",
          cxxopts::value<unsigned>()->default_value("100"))
@@ -822,6 +862,8 @@ ReconstructCli parse_cli(int argc, char** argv) {
         ("splat-eval-split-every",
          "Hold out every Nth view for PSNR/SSIM evaluation (0 = train all)",
          cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-eval-checkpoints", "Render evaluation checkpoints during optimization",
+         cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-use-mask", "Enable mask-aware training",
          cxxopts::value<bool>()->default_value("true")->implicit_value("true"))
         ("splat-alpha-mode",
@@ -940,10 +982,18 @@ ReconstructCli parse_cli(int argc, char** argv) {
          cxxopts::value<float>()->default_value("0"))
         ("splat-seed", "Splat training RNG seed",
          cxxopts::value<unsigned>()->default_value("42"))
+        ("splat-speedy-pruning", "Enable CUDA/Vulkan Speedy-Splat sensitivity pruning",
+         cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("splat-speedy-start", "First pruning iteration", cxxopts::value<unsigned>()->default_value("6000"))
+        ("splat-speedy-every", "Pruning interval", cxxopts::value<unsigned>()->default_value("3000"))
+        ("splat-speedy-stop", "Exclusive pruning stop", cxxopts::value<unsigned>()->default_value("30000"))
+        ("splat-speedy-views", "Scoring cameras (0 = all training views)", cxxopts::value<unsigned>()->default_value("0"))
+        ("splat-speedy-soft-ratio", "Fraction pruned during growth", cxxopts::value<float>()->default_value("0.3"))
+        ("splat-speedy-hard-ratio", "Fraction pruned after growth", cxxopts::value<float>()->default_value("0.2"))
         ("splat-structure-freeze-iter", "Freeze means/scale/quaternion/opacity after N",
          cxxopts::value<unsigned>()->default_value("0"))
         ("splat-densification-cap", "Densify growth ceiling",
-         cxxopts::value<std::uint64_t>()->default_value("1000000"))
+         cxxopts::value<std::uint64_t>()->default_value("3000000"))
         ("splat-grow-stop",
          "Stop adding Gaussians at this iteration (0 keeps half of iterations)",
          cxxopts::value<unsigned>()->default_value("0"))
@@ -1158,13 +1208,20 @@ ReconstructCli parse_cli(int argc, char** argv) {
         std::exit(0);
     }
 
-    if (!result.count("images") || !result.count("output")) {
+    const bool splat_simplify_only = result.count("splat-simplify") &&
+        !result["splat-simplify"].as<std::string>().empty();
+    if (splat_simplify_only) {
+        if (!result.count("output"))
+            throw std::invalid_argument(
+                "Missing required option: --output");
+    } else if (!result.count("images") || !result.count("output")) {
         throw std::invalid_argument(
             "Missing required options: --images, --output");
     }
 
     ReconstructCli cli;
-    cli.images_dir = utf8_to_path(result["images"].as<std::string>());
+    if (result.count("images"))
+        cli.images_dir = utf8_to_path(result["images"].as<std::string>());
     cli.video_fps = result["video-fps"].as<float>();
     cli.video_sharp_window = result["video-sharp-window"].as<int>();
     cli.video_max_frames = result["video-max-frames"].as<int>();
@@ -1312,6 +1369,12 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (cli.backend != "cuda" && cli.backend != "vulkan")
         throw std::invalid_argument("--backend must be cuda or vulkan");
     cli.splat_view = result["splat-view"].as<bool>();
+    cli.splat_simplify = utf8_to_path(result["splat-simplify"].as<std::string>());
+    cli.splat_simplify_keep = result["splat-simplify-keep"].as<float>();
+    cli.splat_simplify_opacity = result["splat-simplify-opacity"].as<float>();
+    cli.splat_simplify_knn = result["splat-simplify-knn"].as<unsigned>();
+    cli.splat_simplify_merge_cap = result["splat-simplify-merge-cap"].as<float>();
+    cli.splat_simplify_sh = result["splat-simplify-sh"].as<int>();
     cli.splat_mesh_only = result["splat-mesh-only"].as<bool>();
     cli.capture_mode = result["capture-mode"].as<std::string>();
     if (cli.capture_mode != "object" && cli.capture_mode != "scene")
@@ -1327,7 +1390,10 @@ ReconstructCli parse_cli(int argc, char** argv) {
         cli.splat_dataset = utf8_to_path(splat_dataset_text);
     const std::string dense_ply_text = result["dense-ply"].as<std::string>();
     if (!dense_ply_text.empty()) cli.dense_ply = utf8_to_path(dense_ply_text);
-    cli.splat_iterations = result["splat-iterations"].as<unsigned>();
+    cli.splat_mode = photara::splat::parse_training_mode(result["splat-mode"].as<std::string>());
+    const auto splat_preset = photara::splat::training_preset(cli.splat_mode);
+    cli.splat_iterations = result.count("splat-iterations")
+        ? result["splat-iterations"].as<unsigned>() : splat_preset.iterations;
     cli.splat_log_interval = result["splat-log-interval"].as<unsigned>();
     cli.splat_preview_interval =
         result["splat-preview-interval"].as<unsigned>();
@@ -1490,10 +1556,21 @@ ReconstructCli parse_cli(int argc, char** argv) {
     if (!std::isfinite(cli.splat_growth_factor) || cli.splat_growth_factor < 0.F)
         throw std::invalid_argument("--splat-growth-factor must be finite and >= 0");
     cli.splat_seed = result["splat-seed"].as<unsigned>();
+    cli.splat_eval_checkpoints = result["splat-eval-checkpoints"].as<bool>();
+    cli.speedy_options.speedy_pruning = result.count("splat-speedy-pruning")
+        ? result["splat-speedy-pruning"].as<bool>() : splat_preset.speedy_pruning;
+    cli.speedy_options.speedy_start = result["splat-speedy-start"].as<unsigned>();
+    if (cli.splat_mode == photara::splat::TrainingMode::fast && !result.count("splat-speedy-start"))
+        cli.speedy_options.speedy_start = 9000;
+    cli.speedy_options.speedy_every = result["splat-speedy-every"].as<unsigned>();
+    cli.speedy_options.speedy_stop = result["splat-speedy-stop"].as<unsigned>();
+    cli.speedy_options.speedy_score_views = result["splat-speedy-views"].as<unsigned>();
+    cli.speedy_options.speedy_soft_ratio = result["splat-speedy-soft-ratio"].as<float>();
+    cli.speedy_options.speedy_hard_ratio = result["splat-speedy-hard-ratio"].as<float>();
     cli.splat_structure_freeze_iter =
         result["splat-structure-freeze-iter"].as<unsigned>();
-    cli.splat_densification_cap =
-        result["splat-densification-cap"].as<std::uint64_t>();
+    cli.splat_densification_cap = result.count("splat-densification-cap")
+        ? result["splat-densification-cap"].as<std::uint64_t>() : splat_preset.gaussian_cap;
     cli.splat_grow_stop_iter = result["splat-grow-stop"].as<unsigned>();
     cli.splat_init_point_budget =
         result["splat-init-point-budget"].as<std::uint64_t>();
@@ -2342,6 +2419,9 @@ photara::project::Settings settings_from_cli(const ReconstructCli& cli) {
     settings.max_features = cli.max_features;
     settings.scene_mode = cli.capture_mode == "scene";
     settings.iterations = static_cast<int>(cli.splat_iterations);
+    settings.densification_cap = static_cast<int>(cli.splat_densification_cap);
+    settings.training_mode = static_cast<int>(cli.splat_mode);
+    settings.speedy_pruning = cli.speedy_options.speedy_pruning;
     settings.preview_interval = static_cast<int>(cli.splat_preview_interval);
     if (cli.splat_strategy == "adc_plus") settings.strategy = 1;
     else settings.strategy = 0;
@@ -3194,6 +3274,8 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.preview_camera_file = cli.splat_preview_camera_file;
     options.preview_vis_file = cli.splat_preview_vis_file;
     options.preview_ack_file = cli.splat_preview_ack_file;
+    if (cli.gui && cli.capture_mode == "object")
+        options.live_subject_bounds_file = cli.subject_bounds;
     options.sh_degree = cli.splat_sh_degree;
     options.input_is_dense = dense_input;
     options.initialize_scale_from_knn = true;
@@ -3235,7 +3317,7 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     options.adaptive_training_cache = cli.splat_cache_auto;
     options.training_prefetch_views = cli.splat_prefetch_views;
     options.training_prefetch_adaptive = cli.splat_prefetch_adaptive;
-    if (!cli.gui) {
+    if (!cli.gui && cli.splat_eval_checkpoints) {
         for (const unsigned milestone :
              {1'000U, 5'000U, 10'000U, 15'000U, 30'000U})
             if (milestone < options.iterations)
@@ -3271,6 +3353,13 @@ std::optional<photara::mvs::Mesh> run_splat_training(
     if (cli.splat_growth_factor > 0.F)
         options.densify_growth_factor = cli.splat_growth_factor;
     options.seed = cli.splat_seed;
+    options.speedy_pruning = cli.speedy_options.speedy_pruning;
+    options.speedy_start = cli.speedy_options.speedy_start;
+    options.speedy_every = cli.speedy_options.speedy_every;
+    options.speedy_stop = cli.speedy_options.speedy_stop;
+    options.speedy_score_views = cli.speedy_options.speedy_score_views;
+    options.speedy_soft_ratio = cli.speedy_options.speedy_soft_ratio;
+    options.speedy_hard_ratio = cli.speedy_options.speedy_hard_ratio;
     options.enable_densification = cli.splat_densification && !dense_input;
     options.structure_freeze_iter = cli.splat_structure_freeze_iter;
     options.use_bilateral_grid = cli.splat_bilateral_grid;
@@ -3434,6 +3523,9 @@ std::optional<photara::mvs::Mesh> run_splat_training(
         : cli.splat_strategy.c_str();
     photara::core::Logger::instance().info(
         "splat training: iterations=", options.iterations,
+        " mode=", static_cast<int>(cli.splat_mode),
+        " speedy_pruning=", options.speedy_pruning,
+        " speedy_start=", options.speedy_start,
         " log_interval=", options.log_interval,
         " input=", dense_input ? "dense_points" : "sparse_points",
         " input_points=", scene.dense_cloud.points.size(),
@@ -4010,6 +4102,26 @@ int main(int argc, char** argv) {
         }
 
 #if defined(PHOTARA_HAS_SPLAT)
+        if (!cli.splat_simplify.empty()) {
+            auto model = photara::splat::load_gaussians(
+                cli.splat_simplify, photara::splat::GaussianFormat::auto_detect,
+                tinytensor::Device::CPU);
+            photara::core::Logger::instance().info(
+                "splat simplify input=", cli.splat_simplify,
+                " gaussians=", model.size());
+            photara::splat::SimplifyOptions options;
+            options.keep_ratio = cli.splat_simplify_keep;
+            options.min_opacity = cli.splat_simplify_opacity;
+            options.knn = cli.splat_simplify_knn;
+            options.merge_cap = cli.splat_simplify_merge_cap;
+            options.sh_degree = cli.splat_simplify_sh;
+            model = photara::splat::simplify_gaussians(model, options);
+            photara::splat::save_gaussians(model, cli.output);
+            photara::core::Logger::instance().info(
+                "splat simplify output=", cli.output,
+                " gaussians=", model.size());
+            return 0;
+        }
         if (cli.splat_view) {
             run_splat_view(cli, archive);
             return 0;

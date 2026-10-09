@@ -15,6 +15,7 @@
 #include "sfm/export_mvs.hpp"
 #include "sfm/export_nerfstudio.hpp"
 #include "splat/formats.hpp"
+#include "splat/simplify.hpp"
 #include "splat/trainer.hpp"
 #include "splat/visualize.hpp"
 #if defined(PHOTARA_HAS_TEXTURE)
@@ -92,8 +93,20 @@ void ensure_reconstruction_box(App& app) {
 void write_working_subject_bounds(App& app) {
     ensure_reconstruction_box(app);
     if (app.settings.scene_mode || !app.reconstruction_box.valid) return;
-    write_reconstruction_box(
-        app.reconstruction_box, app.layout.working_subject_bounds);
+    const ReconstructionBox& box = app.reconstruction_box;
+    const ReconstructionBox& previous = app.published_reconstruction_box;
+    std::error_code bounds_error;
+    if (app.published_subject_bounds_path == app.layout.working_subject_bounds &&
+        std::filesystem::exists(app.layout.working_subject_bounds, bounds_error) &&
+        previous.valid && previous.min.x == box.min.x &&
+        previous.min.y == box.min.y && previous.min.z == box.min.z &&
+        previous.max.x == box.max.x && previous.max.y == box.max.y &&
+        previous.max.z == box.max.z)
+        return;
+    if (write_reconstruction_box(box, app.layout.working_subject_bounds)) {
+        app.published_reconstruction_box = box;
+        app.published_subject_bounds_path = app.layout.working_subject_bounds;
+    }
 }
 
 void frame_reconstruction(App& app) {
@@ -389,6 +402,8 @@ photara::project::Settings collect_project_settings(const App& app) {
     settings.scene_mode = app.settings.scene_mode;
     settings.iterations = app.settings.iterations;
     settings.densification_cap = app.settings.densification_cap;
+    settings.training_mode = app.settings.training_mode;
+    settings.speedy_pruning = app.settings.speedy_pruning;
     settings.sh_degree = app.settings.sh_degree;
     settings.preview_interval = app.settings.preview_interval;
     settings.strategy = app.settings.strategy;
@@ -456,6 +471,8 @@ void apply_project_settings(
     app.settings.scene_mode = settings.scene_mode;
     app.settings.iterations = settings.iterations;
     app.settings.densification_cap = settings.densification_cap;
+    app.settings.training_mode = settings.training_mode;
+    app.settings.speedy_pruning = settings.speedy_pruning;
     app.settings.sh_degree = settings.sh_degree;
     app.settings.preview_interval = settings.preview_interval;
     app.settings.strategy = settings.strategy;
@@ -1388,6 +1405,71 @@ bool browse_splat_export_path(App& app) {
     return pick_export_path(
         L"Export Splat", app.splat_export.path, FilePickKind::splat_model,
         name.c_str(), extension);
+}
+
+void start_splat_simplify(App& app) {
+    if (app.splat_simplify.running || app.job.running()) return;
+    if (!ensure_splat_renderer(app)) return;
+    if (!app.splat_simplify.has_baseline) {
+        if (!app.splat_edit.copy_model(app.splat_simplify.baseline) ||
+            app.splat_simplify.baseline.size() == 0) {
+            set_message(app, tr("Load a trained Gaussian model first."), theme::warning);
+            return;
+        }
+        app.splat_simplify.has_baseline = true;
+        app.splat_simplify.source_count =
+            static_cast<std::uint32_t>(app.splat_simplify.baseline.size());
+    }
+    photara::splat::GaussianModel model = app.splat_simplify.baseline;
+    auto progress = std::make_shared<std::atomic<float>>(0.F);
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    app.splat_simplify.progress_atom = progress;
+    app.splat_simplify.cancel = cancel;
+    app.splat_simplify.progress = 0.F;
+    app.splat_simplify.running = true;
+    app.splat_simplify.error.clear();
+    photara::splat::SimplifyOptions options;
+    options.keep_ratio = std::clamp(app.splat_simplify.keep_ratio, 0.05F, 1.F);
+    options.min_opacity = std::max(app.splat_simplify.min_opacity, 0.F);
+    options.progress = [progress](const float value) {
+        progress->store(value, std::memory_order_relaxed);
+    };
+    options.cancelled = [cancel]() {
+        return cancel->load(std::memory_order_relaxed);
+    };
+    app.splat_simplify.job = std::async(
+        std::launch::async,
+        [model = std::move(model), options = std::move(options)]() mutable {
+            return photara::splat::simplify_gaussians(model, options);
+        });
+}
+
+void poll_splat_simplify(App& app) {
+    if (app.splat_simplify.progress_atom)
+        app.splat_simplify.progress =
+            app.splat_simplify.progress_atom->load(std::memory_order_relaxed);
+    if (!app.splat_simplify.job.valid()) return;
+    if (app.splat_simplify.job.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::ready)
+        return;
+    app.splat_simplify.running = false;
+    app.splat_simplify.progress_atom.reset();
+    try {
+        auto model = app.splat_simplify.job.get();
+        if (app.splat_simplify.cancel &&
+            app.splat_simplify.cancel->load(std::memory_order_relaxed)) {
+            set_message(app, tr("Simplify cancelled"), theme::warning);
+            return;
+        }
+        const bool record_undo = !app.splat_simplify.applied;
+        app.splat_simplify.result_count =
+            static_cast<std::uint32_t>(model.size());
+        app.splat_edit.replace_from_model(app, model, record_undo);
+        app.splat_simplify.applied = true;
+    } catch (const std::exception& error) {
+        app.splat_simplify.error = error.what();
+        set_message(app, error.what(), theme::danger);
+    }
 }
 
 void open_splat_export_panel(App& app) {

@@ -24,7 +24,7 @@ struct RasterizeOptions {
     // the photometric loss. Regular render callers keep the eager default.
     bool defer_visibility{false};
     bool debug{false};
-    // CUDA inference/preview callers can omit all backward-only pixel state.
+    // Inference/preview callers can omit all backward-only pixel state.
     bool record_backward_state{true};
     bool compact_pixel_snapshots{true};
     bool compact_instance_storage{true};
@@ -86,6 +86,12 @@ struct OccupancyCacheStats {
 
 class Rasterizer {
 public:
+    // Sum over pixels of (opacity * d(sum RGB)/d alpha)^2, as in
+    // Faster-GS / Speedy-Splat. Evaluates canonical colours, independent of
+    // training residuals, and does not update parameters or Adam moments.
+    tinytensor::Tensor pruning_scores(
+        const GaussianModel& model, const Camera& camera,
+        RasterizeOptions options = {}) const;
     RenderResult forward(
         const GaussianModel& model, const Camera& camera,
         const RasterizeOptions& options = {}) const;

@@ -1041,6 +1041,15 @@ void SplatEdit::undo(App& app) {
         upload_model(app);
         return;
     }
+    if (step.kind == Snapshot::Kind::replace) {
+        Snapshot current;
+        capture_replace(current);
+        apply_replace(step);
+        redo_.push_back(std::move(current));
+        upload_model(app);
+        dirty_ = true;
+        return;
+    }
     if (step.kind == Snapshot::Kind::volume) {
         Snapshot current;
         current.kind = Snapshot::Kind::volume;
@@ -1067,6 +1076,15 @@ void SplatEdit::redo(App& app) {
     if (step.kind == Snapshot::Kind::deletion) {
         erase_recorded(step);
         undo_.push_back(std::move(step));
+        upload_model(app);
+        dirty_ = true;
+        return;
+    }
+    if (step.kind == Snapshot::Kind::replace) {
+        Snapshot current;
+        capture_replace(current);
+        apply_replace(step);
+        undo_.push_back(std::move(current));
         upload_model(app);
         dirty_ = true;
         return;
@@ -1162,6 +1180,104 @@ void SplatEdit::erase_recorded(const Snapshot& snapshot) {
     count_ = count_ - removed;
     selected_.assign(count_, 0);
     selected_count_ = 0;
+}
+
+void SplatEdit::capture_replace(Snapshot& snap) const {
+    snap.kind = Snapshot::Kind::replace;
+    snap.count = count_;
+    snap.sh_degree = sh_degree_;
+    snap.sh_bases = sh_bases_;
+    snap.removed_centers = centers_;
+    snap.removed_scales = log_scales_;
+    snap.removed_quats = quaternions_;
+    snap.removed_opacity = opacity_;
+    snap.removed_sh = sh_;
+    snap.removed_normals = normals_;
+    snap.removed_filter = filter_;
+}
+
+void SplatEdit::apply_replace(const Snapshot& snap) {
+    count_ = snap.count;
+    sh_degree_ = snap.sh_degree;
+    sh_bases_ = std::max(1U, snap.sh_bases);
+    centers_ = snap.removed_centers;
+    log_scales_ = snap.removed_scales;
+    quaternions_ = snap.removed_quats;
+    opacity_ = snap.removed_opacity;
+    sh_ = snap.removed_sh;
+    normals_ = snap.removed_normals;
+    filter_ = snap.removed_filter;
+    selected_.assign(count_, 0);
+    selected_count_ = 0;
+}
+
+void SplatEdit::undo_edit(App& app) { undo(app); }
+
+void SplatEdit::replace_from_model(
+    App& app, const photara::splat::GaussianModel& model,
+    const bool record_undo) {
+    if (!synced_) return;
+    Snapshot before;
+    capture_replace(before);
+    const auto count = static_cast<std::uint32_t>(model.size());
+    const auto means = model.means.to_vector();
+    const auto scales = model.log_scales.to_vector();
+    const auto quats = model.quaternions.to_vector();
+    const auto logits = model.opacity_logits.to_vector();
+    const auto sh = model.sh.is_valid() ? model.sh.to_vector() : std::vector<float>{};
+    std::uint32_t bases = 1;
+    if (model.sh.is_valid() && model.sh.shape().rank() >= 2)
+        bases = static_cast<std::uint32_t>(model.sh.shape()[1]);
+    count_ = count;
+    sh_degree_ = model.sh_degree;
+    sh_bases_ = std::max(1U, bases);
+    centers_.assign(static_cast<std::size_t>(count) * 4U, 0.F);
+    log_scales_ = scales;
+    quaternions_ = quats;
+    opacity_ = logits;
+    sh_ = sh;
+    if (model.normal_features.is_valid() &&
+        model.normal_features.numel() == static_cast<std::size_t>(count) * 4U)
+        normals_ = model.normal_features.to_vector();
+    else
+        normals_.clear();
+    if (model.filter_3d.is_valid() && model.filter_3d.numel() == count)
+        filter_ = model.filter_3d.to_vector();
+    else
+        filter_.clear();
+    selected_.assign(count, 0);
+    selected_count_ = 0;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        centers_[static_cast<std::size_t>(index) * 4U] = means[index * 3U];
+        centers_[static_cast<std::size_t>(index) * 4U + 1U] =
+            means[index * 3U + 1U];
+        centers_[static_cast<std::size_t>(index) * 4U + 2U] =
+            means[index * 3U + 2U];
+        centers_[static_cast<std::size_t>(index) * 4U + 3U] =
+            activate_opacity(logits[index]);
+    }
+    try {
+        upload_model(app);
+    } catch (const std::exception& failure) {
+        apply_replace(before);
+        try {
+            upload_model(app);
+        } catch (...) {
+        }
+        set_message(app, failure.what(), theme::danger);
+        return;
+    }
+    dirty_ = true;
+    if (app.scene.has_gaussians()) {
+        app.scene.points.clear();
+        app.scene.colours.clear();
+        app.scene.gaussians.clear();
+    }
+    if (record_undo) push_undo(std::move(before));
+    set_message(
+        app,
+        std::to_string(count) + " " + tr("gaussians after simplify"),
+        theme::success);
 }
 
 void SplatEdit::delete_selected(App& app) {

@@ -7,6 +7,7 @@
 #include "io/image.hpp"
 #include "io/video_frames.hpp"
 #include "sam/model_cache.hpp"
+#include "splat/training_preset.hpp"
 
 #include "imgui_internal.h"
 
@@ -429,6 +430,35 @@ Action draw_inspector(App& app) {
         draw_training_compute_link(app);
         ImGui::Spacing();
         ImGui::BeginDisabled(busy);
+        theme::caption("Training mode");
+        ImGui::SetNextItemWidth(-1.F);
+        const char* modes[] = {tr("Fast"), tr("Standard"), tr("High quality")};
+        const int mode = std::clamp(app.settings.training_mode, 0, 2);
+        const auto preset = photara::splat::training_preset(
+            static_cast<photara::splat::TrainingMode>(mode));
+        const bool customized = app.settings.iterations != static_cast<int>(preset.iterations) ||
+            app.settings.densification_cap != static_cast<int>(preset.gaussian_cap) ||
+            app.settings.speedy_pruning != preset.speedy_pruning;
+        if (ImGui::BeginCombo("##training_mode", customized ? tr("Custom") : modes[mode])) {
+            for (int index = 0; index < 3; ++index) {
+                // Sensitivity scoring currently requires the CUDA rasterizer.
+                ImGui::BeginDisabled(index == 0 && app.settings.training_backend == 1);
+                if (ImGui::Selectable(modes[index], !customized && mode == index)) {
+                    const auto selected = photara::splat::training_preset(
+                        static_cast<photara::splat::TrainingMode>(index));
+                    app.settings.training_mode = index;
+                    app.settings.iterations = static_cast<int>(selected.iterations);
+                    app.settings.densification_cap = static_cast<int>(selected.gaussian_cap);
+                    app.settings.speedy_pruning = selected.speedy_pruning;
+                }
+                ImGui::EndDisabled();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Fast: 30,000 steps, 1M Gaussians, pruning.\n"
+                "Standard: 30,000 steps, 3M Gaussians, no pruning.\n"
+                "High quality: 50,000 steps, 5M Gaussians, no pruning."));
         theme::caption("Capture type");
         ImGui::SetNextItemWidth(-1.F);
         const char* capture[] = {tr("Object"), tr("Scene")};
@@ -459,7 +489,12 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip("%s", tr(
                 "Maximum Gaussian count during densification.\n"
                 "Initialization uses the full source cloud.\n"
-                "Default 1,000,000."));
+                "Default 3,000,000."));
+        ImGui::Checkbox(tr("Pruning"), &app.settings.speedy_pruning);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr("Prune 30% during growth and 20% after growth.\n"
+                "First prune at step 9,000, then every 3,000 steps before 30,000.\n"
+                "Requires full training resolution."));
         bool limit_axis_ratio = app.settings.max_scale_ratio >= 1.F;
         if (ImGui::Checkbox(
                 tr("Limit Gaussian axis ratio"), &limit_axis_ratio))
@@ -552,6 +587,63 @@ Action draw_inspector(App& app) {
                 "Spatially varying affine colour correction (lens shading and\n"
                 "vignetting). Pairs with PPISP, which owns the global exposure."));
         ImGui::EndDisabled();
+        const bool simplify_open = app.splat_simplify.show;
+        if (theme::toolbar_button(
+                tr("Simplify"), {-1.F, 28.F},
+                !busy && can_export_model(app), simplify_open))
+            app.splat_simplify.show = !app.splat_simplify.show;
+        if (app.splat_simplify.show && !app.splat_simplify.running &&
+            !app.splat_simplify.has_baseline)
+            app.splat_simplify.source_count = app.splat_edit.gaussian_count();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", tr(
+                "Reduce Gaussian count after training. Nearby splats are merged.\n"
+                "Does not retrain. Undo restores the previous model."));
+        if (app.splat_simplify.show && can_export_model(app)) {
+            ImGui::Spacing();
+            const bool simplifying = app.splat_simplify.running;
+            const std::uint32_t source = app.splat_simplify.source_count
+                ? app.splat_simplify.source_count
+                : app.splat_edit.gaussian_count();
+            ImGui::BeginDisabled(simplifying);
+            theme::caption("Keep");
+            float keep_percent = app.splat_simplify.keep_ratio * 100.F;
+            ImGui::SetNextItemWidth(-1.F);
+            if (ImGui::SliderFloat(
+                    "##simplify_keep", &keep_percent, 10.F, 100.F, "%.0f%%"))
+                app.splat_simplify.keep_ratio = keep_percent / 100.F;
+            theme::caption("Opacity floor");
+            ImGui::SetNextItemWidth(-1.F);
+            ImGui::SliderFloat(
+                "##simplify_opacity", &app.splat_simplify.min_opacity,
+                0.F, 0.3F, "%.2f");
+            ImGui::EndDisabled();
+            const auto target = static_cast<std::uint32_t>(std::llround(
+                static_cast<double>(source) *
+                static_cast<double>(app.splat_simplify.keep_ratio)));
+            char change[96];
+            std::snprintf(
+                change, sizeof(change), "%s  →  %s",
+                format_count(source).c_str(), format_count(target).c_str());
+            theme::metric("Gaussians", change);
+            if (simplifying) {
+                theme::progress_track(
+                    {-1.F, 6.F}, app.splat_simplify.progress, theme::accent);
+                if (theme::toolbar_button(tr("Cancel"), {-1.F, 28.F})) {
+                    if (app.splat_simplify.cancel)
+                        app.splat_simplify.cancel->store(true);
+                }
+            } else if (theme::primary_button(
+                           tr("Apply"), {-1.F, 30.F}, source > 0 && !busy)) {
+                start_splat_simplify(app);
+            }
+            if (!app.splat_simplify.error.empty()) {
+                ImGui::PushTextWrapPos(0.F);
+                ImGui::TextColored(
+                    theme::danger, "%s", app.splat_simplify.error.c_str());
+                ImGui::PopTextWrapPos();
+            }
+        }
         if (theme::toolbar_button(
                 tr("Export Splat"), {-1.F, 28.F},
                 !busy && can_export_model(app)))
@@ -800,7 +892,7 @@ Action draw_inspector(App& app) {
             ImGui::SetTooltip(
                 "Splat object-mode SubjectBounds / focus region.\n"
                 "Drag the center arrows to move the box, or a face dot\n"
-                "to resize. Object training and mesh extraction use this volume.");
+                "to resize. Object training follows this volume live.");
         if (app.reconstruction_box.valid) {
             const Vec3 size = app.reconstruction_box.size();
             ImGui::Text("Size  %.3f × %.3f × %.3f", size.x, size.y, size.z);
@@ -811,6 +903,7 @@ Action draw_inspector(App& app) {
                 app.gizmo.box = {};
                 invalidate_reconstruction_box(app.reconstruction_box);
                 ensure_reconstruction_box(app);
+                write_working_subject_bounds(app);
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(

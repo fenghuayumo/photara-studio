@@ -66,6 +66,9 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
             shaders/splat_blend.hlsl
             shaders/splat_blend_no_geometry.hlsl
             shaders/splat_blend_training.hlsl
+            shaders/splat_pruning_scores.hlsl
+            shaders/splat_pruning_scores_subgroup.hlsl
+            shaders/splat_pruning_scores_atomic.hlsl
             shaders/splat_median_backward.hlsl
             shaders/splat_blend_backward.hlsl
             shaders/splat_blend_backward_no_geometry.hlsl
@@ -117,6 +120,7 @@ if(SPLAT_DRENDER_ENABLE_VULKAN)
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_sh_adam_fused.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_enum.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_pruning_scores.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_blend_backward.hlsl"
                 "${SPLAT_DRENDER_PHOTARA_SHADER_DIR}/splat_color_correction.hlsl")
 

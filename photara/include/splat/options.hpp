@@ -58,10 +58,20 @@ struct TrainingOptions {
     // The orchestration, schedules and optimizer policy are shared. This
     // selects the device for training tensors and backend GPU primitives.
     TrainingBackend backend{TrainingBackend::cuda};
-    unsigned iterations{10'000};
+    unsigned iterations{30'000};
     unsigned sh_degree{3};
     unsigned sh_degree_interval{1'000};
     unsigned seed{42};
+    // Speedy-Splat sensitivity pruning (CUDA/Vulkan). Absolute iteration schedule;
+    // zero score_views evaluates every training camera, never held-out views.
+    bool speedy_pruning{false};
+    unsigned speedy_start{6'000};
+    unsigned speedy_every{3'000};
+    unsigned speedy_stop{30'000};
+    unsigned speedy_score_views{0};
+    // ADC-IGS quality/speed preset; paper ratios 0.8/0.3 remain explicit options.
+    float speedy_soft_ratio{0.3F};
+    float speedy_hard_ratio{0.2F};
     // Console training stats every N steps. Zero logs only the first and last.
     unsigned log_interval{100};
     // Optional windowed CUDA-event timings for the GGGS training loop.
@@ -81,7 +91,7 @@ struct TrainingOptions {
         DensificationStrategy::adc_igs};
     // Growth ceiling while densify is enabled. Initialization uses the full
     // source cloud unless initial_point_budget asks for a subset.
-    std::size_t densification_cap{1'000'000};
+    std::size_t densification_cap{3'000'000};
     // Upper bound on the Gaussians built from the input point cloud. Sparse
     // SfM clouds regularly outnumber the growth ceiling, and an initialization
     // already sitting on it leaves IGS no room to refine anything: every later
@@ -404,6 +414,9 @@ struct TrainingOptions {
     // trainer drops a preview instead of waiting for the editor, so a busy
     // editor can never stall the optimizer.
     std::filesystem::path preview_ack_file;
+    // Studio updates this SubjectBounds file while object-mode training runs.
+    // An empty path keeps the scene's initial bounds fixed.
+    std::filesystem::path live_subject_bounds_file;
 };
 
 // Strategy-specific defaults for shared densification knobs. The CLI applies

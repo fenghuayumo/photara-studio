@@ -154,7 +154,8 @@ using DevicePreviewCallback = std::function<void(
 Camera camera_from_mvs_view(const mvs::MvsView& view);
 
 GaussianModel initialize_from_dense_cloud(
-    const mvs::MvsScene& scene, const TrainingOptions& options = {});
+    const mvs::MvsScene& scene, const TrainingOptions& options = {},
+    const mvs::OrientedBoundingBox* focus_override = nullptr);
 
 TrainingView make_training_view(
     const mvs::MvsView& view, const TrainingOptions& options = {});

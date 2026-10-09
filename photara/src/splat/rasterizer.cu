@@ -6,6 +6,8 @@
 #include "internal/size_bucketed_pool.hpp"
 
 #include "splat_drender/api.h"
+#include "splat_drender/buffers.h"
+#include "splat_drender/config.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -81,6 +83,40 @@ struct OccupancyCacheImpl {
 };
 
 namespace {
+
+__global__ void sensitivity_scores(
+    int width, int height, int wrap_width,
+    splat_drender::ws::GaussianState gs, const unsigned* ids,
+    const uint2* ranges, const unsigned* contributors,
+    const float* image, float* scores) {
+    const int x = blockIdx.x * 16 + threadIdx.x;
+    const int y = blockIdx.y * 16 + threadIdx.y;
+    if (x >= width || y >= height) return;
+    const int p = y * width + x, pixels = width * height;
+    const uint2 range = ranges[blockIdx.y * gridDim.x + blockIdx.x];
+    // Includes the final background contribution; subtracting the prefix
+    // leaves exactly the colour behind the current primitive.
+    float residual = image[p] + image[p + pixels] + image[p + 2 * pixels];
+    float transmittance = 1.F;
+    const unsigned limit = min(range.y - range.x, contributors[p]);
+    for (unsigned j = 0; j < limit; ++j) {
+        const unsigned g = ids[range.x + j];
+        float dx = gs.mean2d[g].x - x;
+        if (wrap_width) dx -= roundf(dx / wrap_width) * wrap_width;
+        const float dy = gs.mean2d[g].y - y;
+        const float4 co = gs.conic_opacity[g];
+        const float power = -.5F * (co.x * dx * dx + co.z * dy * dy) - co.y * dx * dy;
+        if (power > 0.F) continue;
+        const float alpha = fminf(splat_drender::cfg::kAlphaClip, co.w * expf(power));
+        if (alpha < splat_drender::cfg::kAlphaFloor) continue;
+        const float3 rgb = gs.rgb[g];
+        const float colour = rgb.x + rgb.y + rgb.z;
+        residual -= transmittance * alpha * colour;
+        const float derivative = co.w * (transmittance * colour - residual / (1.F - alpha));
+        atomicAdd(scores + g, derivative * derivative);
+        transmittance *= 1.F - alpha;
+    }
+}
 
 struct HostCameraConstants { float values[19]; };
 
@@ -325,6 +361,45 @@ RenderResult Rasterizer::forward(
         context->instance_buffer = {};
     result.context.impl = std::move(context);
     return result;
+}
+
+tinytensor::Tensor Rasterizer::pruning_scores(
+    const GaussianModel& model, const Camera& camera, RasterizeOptions options) const {
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return detail::vulkan_pruning_scores(backend_, model, camera, options);
+    if (model.means.device() != tinytensor::Device::CUDA)
+        throw std::invalid_argument("Speedy-Splat pruning requires a CUDA or Vulkan model");
+    options.require_depth = false;
+    options.record_backward_state = true;
+    options.colors_precomp = {};
+    const auto rendered = forward(model, camera, options);
+    auto scores = tinytensor::Tensor::zeros({model.size()}, model.means.device());
+    auto& ctx = *static_cast<RasterContextImpl*>(rendered.context.impl.get());
+    if (ctx.forward.instance_count == 0) return scores;
+    const auto gs = splat_drender::ws::GaussianState::from_pool(
+        reinterpret_cast<char*>(ctx.gaussian_buffer.data_ptr()), model.size(), 0, false);
+    const auto ts = splat_drender::ws::TileState::from_pool(
+        reinterpret_cast<char*>(ctx.tile_buffer.data_ptr()),
+        ((camera.width + 15) / 16) * ((camera.height + 15) / 16), 0);
+    const auto ps = splat_drender::ws::PixelState::from_pool(
+        reinterpret_cast<char*>(ctx.pixel_buffer.data_ptr()),
+        std::size_t(camera.width) * camera.height, 0, false);
+    const unsigned* ids;
+    if (ctx.forward.compact_instances)
+        ids = reinterpret_cast<const unsigned*>(ctx.compact_instance_buffer.data_ptr());
+    else {
+        const auto instances = splat_drender::ws::InstanceState::from_pool(
+            reinterpret_cast<char*>(ctx.instance_buffer.data_ptr()),
+            ctx.forward.visible_count, ctx.forward.instance_count, 0);
+        ids = instances.instance_value[ctx.forward.instance_selector];
+    }
+    sensitivity_scores<<<dim3((camera.width + 15) / 16, (camera.height + 15) / 16), dim3(16,16)>>>(
+        camera.width, camera.height,
+        camera.model == CameraModel::equirectangular ? int(camera.width) : 0,
+        gs, ids, ts.range, ps.n_contrib, rendered.color.ptr<float>(), scores.ptr<float>());
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    return scores;
 }
 
 float Rasterizer::photometric_loss(
@@ -584,6 +659,8 @@ const float* Rasterizer::projected_mean2d(const RenderResult& rendered) const {
 DepthSampleResult Rasterizer::sample_depth(
     const GaussianModel& model, const tinytensor::Tensor& world_points,
     const Camera& camera, const RasterizeOptions& requested_options) const {
+    if (model.means.device() == tinytensor::Device::Vulkan)
+        return detail::vulkan_sample_depth(backend_, model, world_points, camera, requested_options);
     require_cuda_float_contiguous(world_points, "world_points");
     if (world_points.shape().rank() != 2 || world_points.shape()[1] != 3)
         throw std::invalid_argument("sample_depth points must have shape [P,3]");
@@ -628,6 +705,8 @@ DepthSampleResult Rasterizer::sample_depth(
 DepthSampleGradients Rasterizer::sample_depth_backward(
     const GaussianModel& model, const DepthSampleResult& sampled,
     const tinytensor::Tensor& grad_camera_points) const {
+    if (sampled.backend_impl)
+        return detail::vulkan_sample_depth_backward(model, sampled, grad_camera_points);
     if (!sampled.context)
         throw std::invalid_argument(
             "sample_depth backward requires a live context");

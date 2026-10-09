@@ -14,14 +14,17 @@
 
 #include "sfm/align_live.hpp"
 #include "splat/visualize.hpp"
+#include "splat/types.hpp"
 
 #include "imgui.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <future>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -98,6 +101,8 @@ struct App {
     ViewOptions view_options;
     ViewportGizmoState gizmo;
     ReconstructionBox reconstruction_box;
+    ReconstructionBox published_reconstruction_box;
+    std::filesystem::path published_subject_bounds_path;
     SceneRenderer renderer;
     std::future<SceneLoad> pending_load;
     std::future<SceneLoad> alignment_preview_load;
@@ -201,6 +206,23 @@ struct App {
         std::array<char, 1024> path{};
     } splat_export;
 
+    struct SplatSimplifyState {
+        bool show{};
+        float keep_ratio{0.8F};
+        float min_opacity{0.10F};
+        bool running{};
+        float progress{};
+        std::uint32_t source_count{};
+        std::uint32_t result_count{};
+        bool has_baseline{};
+        bool applied{};
+        photara::splat::GaussianModel baseline;
+        std::shared_ptr<std::atomic<float>> progress_atom;
+        std::shared_ptr<std::atomic<bool>> cancel;
+        std::future<photara::splat::GaussianModel> job;
+        std::string error;
+    } splat_simplify;
+
     std::vector<std::string> dropped_paths;
     ImVec2 viewport_min{};
     ImVec2 viewport_max{};
@@ -276,6 +298,8 @@ void poll_mesh_load(App& app);
 void poll_alignment_preview(App& app);
 void poll_align_live(App& app);
 void poll_camera_photos(App& app);
+void poll_splat_simplify(App& app);
+void start_splat_simplify(App& app);
 
 bool ensure_splat_renderer(App& app);
 void release_splat_preview(App& app);

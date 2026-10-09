@@ -578,6 +578,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/ppisp.cu
             src/splat/cuda_vulkan_preview.cu
             src/splat/fused_ssim.cu
+            src/splat/focus_mask.cu
             src/splat/visualize.cu)
         target_include_directories(photara_splat_cuda
             PUBLIC
@@ -613,6 +614,7 @@ if(PHOTARA_ENABLE_FEATURES)
             src/splat/densification_strategies.cpp
             src/splat/formats.cpp
             src/splat/formats_glb.cpp
+            src/splat/simplify.cpp
             src/splat/mesh.cpp
             src/splat/pam_mesh.cpp
             src/splat/training_data_loader.cpp
@@ -636,11 +638,24 @@ if(PHOTARA_ENABLE_FEATURES)
             target_sources(photara_splat_cuda PRIVATE
                 src/splat/optimizer_vulkan.cpp
                 src/splat/colour_correction_vulkan.cpp
-                src/splat/rasterizer_vulkan.cpp)
+                src/splat/rasterizer_vulkan.cpp
+                src/splat/geometry_vulkan.cpp
+                src/splat/focus_mask_vulkan.cpp)
             target_link_libraries(photara_splat_cuda PUBLIC
                 splat_drender::vulkan)
             target_compile_definitions(photara_splat_cuda PUBLIC
                 TINYTENSOR_HAS_VULKAN=1)
+            if(PHOTARA_VK_DXC AND PHOTARA_VK_CMAKE_DIR)
+                include("${PHOTARA_VK_CMAKE_DIR}/PhotaraVkShaders.cmake")
+                photara_vk_embed_hlsl(
+                    TARGET photara_splat_cuda
+                    SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/focus_mask.hlsl"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/src/splat/splat_geometry.hlsl"
+                    PROFILE cs_6_0
+                    ENV vulkan1.2
+                    INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/splat"
+                    OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/splat_vulkan")
+            endif()
             target_sources(photara_splat PRIVATE src/splat/photometric_loss.cpp)
             target_link_libraries(photara_splat PUBLIC splat_drender::vulkan)
         endif()
@@ -1111,6 +1126,10 @@ if(PHOTARA_BUILD_TESTS AND BUILD_TESTING)
         target_link_libraries(photara_splat_quality_eval PRIVATE Photara::Splat)
         target_link_libraries(photara_splat_test PRIVATE Photara::Splat)
         add_test(NAME photara.splat.rasterizer COMMAND photara_splat_test)
+        if(TARGET splat_drender::vulkan)
+            add_test(NAME photara.splat.vulkan_geometry
+                COMMAND photara_splat_test --vulkan-geometry-only)
+        endif()
         if(TARGET splat_drender::vulkan)
             # Vulkan backend of splat_drender against the CUDA backend it mirrors.
             add_executable(photara_splat_vulkan_forward_test

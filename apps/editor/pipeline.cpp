@@ -1377,9 +1377,18 @@ std::string build_train_command(
                     << quote(layout.working_subject_bounds);
     }
     command << " --splat-strategy " << strategy_flag(settings.strategy)
+            << " --splat-mode "
+            << (settings.training_mode == 0 ? "fast" :
+                settings.training_mode == 2 ? "high-quality" : "standard")
             << " --splat-iterations " << settings.iterations
             << " --splat-densification-cap "
             << std::max(1, settings.densification_cap);
+    command << " --splat-speedy-pruning="
+            << (settings.speedy_pruning ? "true" : "false");
+    if (settings.speedy_pruning)
+        command << " --splat-speedy-start 9000 --splat-speedy-every 3000"
+                << " --splat-speedy-stop 30000 --splat-speedy-soft-ratio 0.3"
+                << " --splat-speedy-hard-ratio 0.2";
     if (settings.max_scale_ratio >= 1.F)
         command << " --splat-max-scale-ratio "
                 << settings.max_scale_ratio;

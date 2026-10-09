@@ -112,6 +112,8 @@ std::vector<std::uint8_t> encode_settings(
     writer.value(settings.max_scale_ratio);
     writer.value(static_cast<std::uint8_t>(settings.sam_use_mask_for_sfm));
     writer.value(static_cast<std::int32_t>(settings.mesh_quality));
+    writer.value(static_cast<std::int32_t>(settings.training_mode));
+    writer.value(static_cast<std::uint8_t>(settings.speedy_pruning));
     return writer.take();
 }
 
@@ -220,6 +222,12 @@ Settings decode_settings(
         settings.mesh_quality = reader.value<std::int32_t>();
     if (settings.mesh_quality < 0 || settings.mesh_quality > 2)
         settings.mesh_quality = 1;
+    if (reader.remaining() >= sizeof(std::int32_t))
+        settings.training_mode = reader.value<std::int32_t>();
+    if (settings.training_mode < 0 || settings.training_mode > 2)
+        settings.training_mode = 1;
+    if (reader.remaining() >= sizeof(std::uint8_t))
+        settings.speedy_pruning = reader.value<std::uint8_t>() != 0;
     return settings;
 }
 

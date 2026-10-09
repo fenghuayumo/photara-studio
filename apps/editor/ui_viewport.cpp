@@ -797,6 +797,7 @@ void draw_sparse_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    write_working_subject_bounds(app);
     const bool ring_edit =
         app.view_mode == VisualizationMode::rings && ensure_splat_renderer(app) &&
         app.splat_edit.bound_to(app.splat_renderer.source_key());
@@ -1045,6 +1046,7 @@ void draw_training_tab(App& app, const ImVec2 min, const ImVec2 max) {
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    write_working_subject_bounds(app);
     const bool viewport_input = hovered && !gizmo_captures;
     const bool used_double_click = handle_viewport_double_click(
         app, viewport_input, overlay_stats, min, max);
@@ -1317,6 +1319,7 @@ void draw_splat_render_tab(
         app.gizmo, app.camera, min, max, &app.reconstruction_box,
         app.view_options.show_region && app.reconstruction_box.valid,
         reconstruction_local_radius(app));
+    write_working_subject_bounds(app);
     app.splat_edit.note_view(rings, app.view_options.ring_scale);
     app.splat_edit.draw_overlay(draw, min, max, preview_camera);
     const bool over_toolbar = app.splat_edit.draw_toolbar(app, min, max);
@@ -1344,17 +1347,30 @@ void draw_splat_render_tab(
     draw_viewport_overlay(
         draw, min, rings ? tr("Gaussian Rings") : tr("Gaussian Splats"),
         shown ? theme::success : theme::warning);
-    char readout[160];
-    std::snprintf(
-        readout, sizeof(readout), "%s gaussians  |  %s %s  |  %u x %u",
-        format_count(app.splat_renderer.splat_count()).c_str(),
-        format_count(app.splat_edit.selected_count()).c_str(), tr("selected"),
-        preview.width, preview.height);
+    char readout[192];
+    const bool simplified = app.splat_simplify.applied &&
+        app.splat_simplify.result_count > 0 &&
+        app.splat_edit.gaussian_count() == app.splat_simplify.result_count &&
+        app.splat_simplify.source_count > app.splat_simplify.result_count;
+    if (simplified) {
+        std::snprintf(
+            readout, sizeof(readout), "%s gaussians   %s %s",
+            format_count(app.splat_simplify.result_count).c_str(),
+            tr("was"),
+            format_count(app.splat_simplify.source_count).c_str());
+    } else {
+        std::snprintf(
+            readout, sizeof(readout), "%s gaussians  |  %s %s  |  %u x %u",
+            format_count(app.splat_renderer.splat_count()).c_str(),
+            format_count(app.splat_edit.selected_count()).c_str(), tr("selected"),
+            preview.width, preview.height);
+    }
     char hint[384];
     app.splat_edit.write_status(hint, sizeof(hint));
     draw->PushClipRect(min, max, true);
     draw->AddText(
-        {min.x + 16.F, max.y - 42.F}, theme::u32(theme::text_muted), readout);
+        {min.x + 16.F, max.y - 42.F},
+        theme::u32(simplified ? theme::accent : theme::text_muted), readout);
     draw->AddText(
         {min.x + 16.F, max.y - 24.F}, theme::u32(theme::text_faint),
         hint[0] != '\0' ? hint

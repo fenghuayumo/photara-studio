@@ -7,6 +7,9 @@
 #include "splat/formats.hpp"
 #include "../src/splat/bilateral_grid.hpp"
 #include "../src/splat/cuda_ops.hpp"
+#include "../src/splat/focus_mask.hpp"
+#include "../src/splat/focus_mask_frame.hpp"
+#include "splat/simplify.hpp"
 #include "../src/splat/pam_cuda.hpp"
 #include "../src/splat/densification.hpp"
 #include "../src/splat/densification_internal.hpp"
@@ -243,7 +246,7 @@ void test_gggs_3d_filter() {
             "GGGS 3D-filter bake changed the rendered opacity");
 }
 
-void test_gggs_multi_view_geometry_and_ncc() {
+void test_gggs_multi_view_geometry_and_ncc(tinytensor::Device device = tinytensor::Device::CUDA) {
     using namespace photara::splat;
     constexpr std::uint32_t width = 32;
     constexpr std::uint32_t height = 32;
@@ -308,28 +311,28 @@ void test_gggs_multi_view_geometry_and_ncc() {
         }
     }
     reference.rgb = tinytensor::Tensor::from_vector(
-        reference_rgb, {3, height, width}, tinytensor::Device::CUDA);
+        reference_rgb, {3, height, width}, device);
     neighbour.rgb = tinytensor::Tensor::from_vector(
-        neighbour_rgb, {3, height, width}, tinytensor::Device::CUDA);
+        neighbour_rgb, {3, height, width}, device);
     reference.gray = tinytensor::Tensor::from_vector(
         reference_gray,
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     neighbour.gray = tinytensor::Tensor::from_vector(
         neighbour_gray,
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     RenderResult reference_render;
     reference_render.median_depth = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 2.F), {height, width},
-        tinytensor::Device::CUDA);
+        device);
     std::vector<float> normals(3 * pixels, 0.F);
     std::fill(normals.begin() + 2 * pixels, normals.end(), 1.F);
     reference_render.normal = tinytensor::Tensor::from_vector(
-        normals, {3, height, width}, tinytensor::Device::CUDA);
+        normals, {3, height, width}, device);
     detail::LossGradients gradients;
     gradients.depth = tinytensor::Tensor::zeros(
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     gradients.normal = tinytensor::Tensor::zeros(
-        {3, height, width}, tinytensor::Device::CUDA);
+        {3, height, width}, device);
     TrainingOptions options;
     options.multi_view_geo_weight = 0.02F;
     options.multi_view_ncc_weight = 0.6F;
@@ -345,11 +348,12 @@ void test_gggs_multi_view_geometry_and_ncc() {
         }
     }
     const auto sampled = tinytensor::Tensor::from_vector(
-        sampled_points, {pixels, std::size_t{3}}, tinytensor::Device::CUDA);
-    const auto inside = tinytensor::Tensor::ones_bool(
-        {pixels}, tinytensor::Device::CUDA);
+        sampled_points, {pixels, std::size_t{3}}, device);
+    const auto inside = device == tinytensor::Device::Vulkan
+        ? tinytensor::Tensor::full({pixels}, 1.F, device, tinytensor::DataType::Int32)
+        : tinytensor::Tensor::ones_bool({pixels}, device);
     auto stability_accumulator = tinytensor::Tensor::zeros(
-        {std::size_t{3}}, tinytensor::Device::CUDA);
+        {std::size_t{3}}, device);
     tinytensor::Tensor grad_sampled;
     const auto loss = detail::add_multi_view_loss(
         sampled, inside, reference_render, reference, neighbour,
@@ -378,9 +382,9 @@ void test_gggs_multi_view_geometry_and_ncc() {
     reference.has_mask = true;
     neighbour.has_mask = true;
     reference.mask = tinytensor::Tensor::zeros(
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     neighbour.mask = tinytensor::Tensor::ones(
-        {height, width}, tinytensor::Device::CUDA);
+        {height, width}, device);
     tinytensor::Tensor masked_grad_sampled;
     const auto masked_loss = detail::add_multi_view_loss(
         sampled, inside, reference_render, reference, neighbour,
@@ -2306,6 +2310,42 @@ void test_forward_backward() {
     const auto colored = rasterizer.forward(model, camera, colored_background);
     const auto black_rgb = rendered.color.to_vector();
     const auto colored_rgb = colored.color.to_vector();
+    // Independent closed form: one unclipped primitive on a constant
+    // background has d(sum RGB)/d Gaussian = opacity * sum(colour-bg)
+    // at every supported pixel. Check both draw-list storage layouts.
+    const float opacity = 1.F / (1.F + std::exp(-2.F));
+    const float colour_sum = 1.5F + 0.2820947918F * (0.5F + 0.25F + 0.1F);
+    const auto supported = std::count_if(alpha.begin(), alpha.end(), [](float a) { return a > 0.F; });
+    const float contrast = colour_sum - 1.1F;
+    const float expected_score = supported * opacity * opacity * contrast * contrast;
+    for (bool compact : {false, true}) {
+        auto score_options = colored_background;
+        score_options.compact_instance_storage = compact;
+        const auto scores = rasterizer.pruning_scores(model, camera, score_options).to_vector();
+        require(scores.size() == 1 && std::abs(scores[0] - expected_score) < expected_score * 2e-4F,
+            "Speedy-Splat sensitivity differs from single-primitive analytic score");
+    }
+    auto rear = densification::clone_model(model);
+    rear.means = tinytensor::Tensor::from_vector(std::vector<float>{0.5F, 0.F, 2.2F}, {1,3}, tinytensor::Device::CUDA);
+    rear.sh = tinytensor::Tensor::zeros({1,1,3}, tinytensor::Device::CUDA);
+    const auto rear_alpha = rasterizer.forward(rear, camera).alpha.to_vector();
+    auto pair = densification::clone_model(model);
+    densification::gpu_detail::append_model(pair, rear);
+    double front_score = 0, rear_score = 0;
+    for (std::size_t p = 0; p < pixels; ++p) {
+        if (alpha[p] > 0.F) {
+            const double d = opacity * (colour_sum - (rear_alpha[p] * 1.5F + (1.F-rear_alpha[p]) * 1.1F));
+            front_score += d*d;
+        }
+        if (rear_alpha[p] > 0.F) {
+            const double d = opacity * (1.F-alpha[p]) * (1.5F-1.1F);
+            rear_score += d*d;
+        }
+    }
+    const auto pair_score = rasterizer.pruning_scores(pair, camera, colored_background).to_vector();
+    require(std::abs(pair_score[0]-front_score) < front_score*2e-4 &&
+            std::abs(pair_score[1]-rear_score) < rear_score*2e-4,
+        "Speedy-Splat sensitivity ignores occlusion or background");
     for (std::size_t channel = 0; channel < 3; ++channel)
         for (std::size_t pixel = 0; pixel < pixels; ++pixel)
             require(std::abs(colored_rgb[channel * pixels + pixel] -
@@ -5678,40 +5718,41 @@ void test_ssim_loss_and_scale_constraint() {
         "Gaussian scale-ratio constraint was not applied");
 }
 
-void test_gggs_depth_normal_consistency() {
+void test_gggs_depth_normal_consistency(tinytensor::Device device = tinytensor::Device::CUDA) {
     using namespace photara::splat;
     constexpr std::size_t side = 5;
     constexpr std::size_t pixels = side * side;
     RenderResult rendered;
     rendered.color = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     rendered.alpha = tinytensor::Tensor::zeros(
-        {side, side}, tinytensor::Device::CUDA);
+        {side, side}, device);
     rendered.median_depth = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 1.F), {side, side},
-        tinytensor::Device::CUDA);
+        device);
     std::vector<float> raster_normals(3 * pixels, 0.F);
     std::fill(
         raster_normals.begin(), raster_normals.begin() + pixels, 1.F);
     rendered.normal = tinytensor::Tensor::from_vector(
-        raster_normals, {3, side, side}, tinytensor::Device::CUDA);
+        raster_normals, {3, side, side}, device);
 
     TrainingView target;
     target.camera.width = target.camera.height = side;
     target.camera.fx = target.camera.fy = 5.F;
     target.camera.cx = target.camera.cy = 2.F;
     target.rgb = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     target.depth = tinytensor::Tensor::zeros(
-        {side, side}, tinytensor::Device::CUDA);
+        {side, side}, device);
     target.normal = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     target.mask = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 1.F), {side, side},
-        tinytensor::Device::CUDA);
+        device);
 
     TrainingOptions options;
     options.ssim_weight = 0.F;
+    options.photometric_weight = 0.F;
     options.use_depth_normal_loss = true;
     options.depth_normal_weight = 0.05F;
     const auto loss = detail::compute_training_loss(
@@ -5735,33 +5776,33 @@ void test_gggs_depth_normal_consistency() {
         "GGGS median-depth gradient differs from Python autograd");
 }
 
-void test_gggs_depth_normal_parameter_gradients() {
+void test_gggs_depth_normal_parameter_gradients(tinytensor::Device device = tinytensor::Device::CUDA) {
     using namespace photara::splat;
     constexpr std::size_t side = 32;
     constexpr std::size_t pixels = side * side;
-    const auto make_model = [](const float z_offset) {
+    const auto make_model = [device](const float z_offset) {
         GaussianModel model;
         model.means = tinytensor::Tensor::from_vector(
             std::vector<float>{
                 -0.07F, -0.02F, 2.00F + z_offset,
                  0.08F,  0.03F, 2.08F},
-            {2, 3}, tinytensor::Device::CUDA);
+            {2, 3}, device);
         model.log_scales = tinytensor::Tensor::from_vector(
             std::vector<float>{
                 std::log(0.20F), std::log(0.16F), std::log(0.035F),
                 std::log(0.18F), std::log(0.15F), std::log(0.030F)},
-            {2, 3}, tinytensor::Device::CUDA);
+            {2, 3}, device);
         model.quaternions = tinytensor::Tensor::from_vector(
             std::vector<float>{
                 0.98480775F, 0.F, 0.17364818F, 0.F,
                 0.97629601F, -0.08583165F, -0.17298739F, 0.01513444F},
-            {2, 4}, tinytensor::Device::CUDA);
+            {2, 4}, device);
         model.opacity_logits = tinytensor::Tensor::from_vector(
             std::vector<float>{1.5F, 1.2F}, {2, 1},
-            tinytensor::Device::CUDA);
+            device);
         model.sh = tinytensor::Tensor::from_vector(
             std::vector<float>{0.4F, 0.3F, 0.2F, 0.2F, 0.3F, 0.4F},
-            {2, 1, 3}, tinytensor::Device::CUDA);
+            {2, 1, 3}, device);
         model.sh_degree = 0;
         return model;
     };
@@ -5778,14 +5819,14 @@ void test_gggs_depth_normal_parameter_gradients() {
     TrainingView target;
     target.camera = camera;
     target.rgb = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     target.depth = tinytensor::Tensor::zeros(
-        {side, side}, tinytensor::Device::CUDA);
+        {side, side}, device);
     target.normal = tinytensor::Tensor::zeros(
-        {3, side, side}, tinytensor::Device::CUDA);
+        {3, side, side}, device);
     target.mask = tinytensor::Tensor::from_vector(
         std::vector<float>(pixels, 1.F), {side, side},
-        tinytensor::Device::CUDA);
+        device);
 
     TrainingOptions options;
     options.photometric_weight = 0.F;
@@ -7090,11 +7131,531 @@ void test_densification_strategies_and_dense_bypass() {
 
 }  // namespace
 
+void test_nanogs_simplify() {
+    using namespace photara::splat;
+    GaussianModel model;
+    constexpr std::size_t n = 12;
+    std::vector<float> means(n * 3, 0.F);
+    std::vector<float> logs(n * 3, std::log(0.04F));
+    std::vector<float> quats(n * 4, 0.F);
+    std::vector<float> logits(n, 2.F);
+    std::vector<float> sh(n * 3, 0.2F);
+    for (std::size_t i = 0; i < n; ++i) {
+        means[i * 3] = 0.02F * static_cast<float>(i);
+        quats[i * 4] = 1.F;
+    }
+    logits[0] = -10.F;
+    const auto cpu = tinytensor::Device::CPU;
+    model.means = tinytensor::Tensor::from_vector(means, {n, 3}, cpu);
+    model.log_scales = tinytensor::Tensor::from_vector(logs, {n, 3}, cpu);
+    model.quaternions = tinytensor::Tensor::from_vector(quats, {n, 4}, cpu);
+    model.opacity_logits = tinytensor::Tensor::from_vector(logits, {n, 1}, cpu);
+    model.sh = tinytensor::Tensor::from_vector(sh, {n, 1, 3}, cpu);
+    model.sh_degree = 0;
+    SimplifyOptions options;
+    options.keep_ratio = 0.5F;
+    options.min_opacity = 0.05F;
+    options.knn = 4;
+    options.merge_cap = 0.5F;
+    const auto out = simplify_gaussians(model, options);
+    require(out.size() < n, "NanoGS simplify should reduce the Gaussian count");
+    require(out.size() >= 1, "NanoGS simplify should keep at least one Gaussian");
+
+    GaussianModel pair;
+    constexpr std::size_t pair_n = 2;
+    std::vector<float> pair_means(pair_n * 3, 0.F);
+    std::vector<float> pair_logs(pair_n * 3, std::log(0.05F));
+    std::vector<float> pair_quats(pair_n * 4, 0.F);
+    std::vector<float> pair_logits(pair_n, 1.5F);
+    std::vector<float> pair_sh(pair_n * 3, 0.1F);
+    pair_quats[0] = pair_quats[4] = 1.F;
+    pair_means[3] = 0.2F;
+    pair.means = tinytensor::Tensor::from_vector(pair_means, {pair_n, 3}, cpu);
+    pair.log_scales = tinytensor::Tensor::from_vector(pair_logs, {pair_n, 3}, cpu);
+    pair.quaternions = tinytensor::Tensor::from_vector(pair_quats, {pair_n, 4}, cpu);
+    pair.opacity_logits = tinytensor::Tensor::from_vector(pair_logits, {pair_n, 1}, cpu);
+    pair.sh = tinytensor::Tensor::from_vector(pair_sh, {pair_n, 1, 3}, cpu);
+    pair.sh_degree = 0;
+    SimplifyOptions pair_options;
+    pair_options.keep_ratio = 0.5F;
+    pair_options.min_opacity = 0.F;
+    pair_options.knn = 1;
+    const auto merged = simplify_gaussians(pair, pair_options);
+    require(merged.size() == 1, "Two Gaussians should merge into one");
+    const float merged_logit = merged.opacity_logits.to_vector().front();
+    require(std::abs(merged_logit - 1.5F) < 0.05F,
+            "Merged opacity must stay a weighted blend, not mass divided by volume");
+}
+
+void test_focus_view_mask_cuda() {
+    using namespace photara;
+    auto camera_for = [](const CameraModel model) {
+        splat::Camera camera;
+        camera.world_to_camera = {
+            1.F, 0.F, 0.F, 0.F,
+            0.F, 1.F, 0.F, 0.F,
+            0.F, 0.F, 1.F, 0.F,
+            0.F, 0.F, 0.F, 1.F};
+        camera.position = {0.F, 0.F, 0.F};
+        camera.fx = 8.F;
+        camera.fy = 8.F;
+        camera.cx = 7.5F;
+        camera.cy = 5.5F;
+        camera.width = 16;
+        camera.height = 12;
+        camera.model = model;
+        camera.k1 = model == CameraModel::opencv_fisheye ? -0.15F : 0.F;
+        camera.k2 = model == CameraModel::opencv_fisheye ? 0.02F : 0.F;
+        return camera;
+    };
+    mvs::OrientedBoundingBox bounds;
+    bounds.valid = true;
+    bounds.center = mvs::Vec3f(0.F, 0.F, 2.F);
+    bounds.axes = mvs::Mat3f::Identity();
+    bounds.half_extent = mvs::Vec3f(0.3F, 0.3F, 0.5F);
+    const splat::Camera cameras[] = {
+        camera_for(CameraModel::pinhole),
+        camera_for(CameraModel::opencv_fisheye),
+        camera_for(CameraModel::equirectangular)};
+    for (const splat::Camera& camera : cameras) {
+        const auto frame = splat::detail::make_focus_mask_frame(camera, bounds);
+        const auto cpu = splat::detail::focus_view_mask_cpu(
+            frame, tinytensor::Device::CPU);
+        const auto gpu = splat::detail::focus_view_mask_cuda(frame);
+        const auto cpu_values = cpu.to_vector();
+        const auto gpu_values = gpu.to_vector();
+        require(cpu_values.size() == gpu_values.size() &&
+                    cpu_values == gpu_values,
+                "CUDA focus mask diverges from the CPU ray test");
+        const std::size_t center =
+            static_cast<std::size_t>(6) * camera.width + 8;
+        require(gpu_values[center] == 1.F,
+                "Focus mask missed the ray through the box center");
+        require(gpu_values.front() == 0.F,
+                "Focus mask kept a ray outside the box");
+#if defined(TINYTENSOR_HAS_VULKAN)
+        if (tinytensor::vulkan::available()) {
+            const auto vk_mask = splat::detail::focus_view_mask_vulkan(frame);
+            const auto vk_values = vk_mask.to_vector();
+            require(vk_values.size() == gpu_values.size() &&
+                        vk_values[center] == 1.F && vk_values.front() == 0.F,
+                    "Vulkan focus mask missed the box center or kept a miss ray");
+            if (camera.model == CameraModel::pinhole)
+                require(vk_values == cpu_values,
+                        "Vulkan pinhole focus mask diverges from the CPU ray test");
+        }
+#endif
+    }
+}
+
+// Independent reverse compositing oracle, following the official Speedy-Splat
+// backward recurrence rather than the forward residual walk used in our scorer.
+// Isolated alpha images supply projected coverage, so this checks the score
+// calculation without duplicating our projection or draw-list implementation.
+void test_speedy_reverse_compositing_oracle(
+    tinytensor::Device device = tinytensor::Device::CUDA,
+    photara::CameraModel mode = photara::CameraModel::pinhole) {
+    using namespace photara::splat;
+    constexpr std::size_t count = 32;
+    constexpr float sh0 = 0.2820947918F;
+    std::vector<float> means, scales, rotations, logits, coefficients, opacity;
+    std::vector<std::array<float,3>> colours;
+    for (std::size_t g = 0; g < count; ++g) {
+        const float depth = 2.F + float(g)*0.08F;
+        // Place panoramas at the horizontal seam to exercise wrapped deltas.
+        means.insert(means.end(), {0.F, 0.F,
+            mode == photara::CameraModel::equirectangular ? -depth : depth});
+        scales.insert(scales.end(), 3, std::log(0.25F));
+        rotations.insert(rotations.end(), {1.F,0.F,0.F,0.F});
+        const float o = g % 6 == 0 ? 0.995F : g % 3 == 0 ? 0.08F : 0.65F;
+        logits.push_back(std::log(o/(1.F-o)));
+        opacity.push_back(1.F/(1.F+std::exp(-logits.back())));
+        std::array<float,3> rgb{0.05F+0.13F*(g%6), 0.1F+0.11F*(g%5), 0.12F+0.07F*(g%7)};
+        for (float& c : rgb) {
+            coefficients.push_back((c-0.5F)/sh0);
+            c = 0.5F + sh0*coefficients.back();
+        }
+        colours.push_back(rgb);
+    }
+    GaussianModel model;
+    model.means = tinytensor::Tensor::from_vector(means, {count,3}, device);
+    model.log_scales = tinytensor::Tensor::from_vector(scales, {count,3}, device);
+    model.quaternions = tinytensor::Tensor::from_vector(rotations, {count,4}, device);
+    model.opacity_logits = tinytensor::Tensor::from_vector(logits, {count,1}, device);
+    model.sh = tinytensor::Tensor::from_vector(coefficients, {count,1,3}, device);
+    model.sh_degree = 0;
+    Camera camera;
+    camera.model = mode;
+    camera.world_to_camera[0] = camera.world_to_camera[5] = camera.world_to_camera[10] = camera.world_to_camera[15] = 1.F;
+    camera.width = 47; camera.height = 31;
+    camera.fx = camera.fy = 40.F; camera.cx = 24.F; camera.cy = 16.F;
+    Rasterizer raster;
+    RasterizeOptions options;
+    options.require_depth = false;
+    options.background = {0.1F,0.3F,0.7F};
+    std::vector<std::vector<float>> alpha;
+    for (std::size_t g = 0; g < count; ++g) {
+        const auto index = tinytensor::Tensor::from_vector(std::vector<int>{int(g)}, {1}, device);
+        alpha.push_back(raster.forward(densification::gpu_detail::select_model_rows(model,index),camera,options).alpha.to_vector());
+    }
+    const auto pixels = std::size_t(camera.width)*camera.height;
+    const auto rendered = raster.forward(model,camera,options).color.to_vector();
+    std::vector<double> expected(count, 0.0);
+    unsigned early_stops = 0;
+    for (std::size_t p = 0; p < pixels; ++p) {
+        std::vector<std::size_t> accepted;
+        double final_t = 1.;
+        std::array<double,3> composite{};
+        for (std::size_t g = 0; g < count; ++g) {
+            const double a = alpha[g][p];
+            if (a == 0.) continue;
+            if (final_t*(1.-a) < 1e-4) { ++early_stops; break; }
+            for (unsigned ch = 0; ch < 3; ++ch) composite[ch] += final_t*a*colours[g][ch];
+            final_t *= 1.-a;
+            accepted.push_back(g);
+        }
+        for (unsigned ch = 0; ch < 3; ++ch)
+            require(std::abs(composite[ch]+final_t*options.background[ch]-rendered[ch*pixels+p]) < 3e-5,
+                "Reverse score oracle does not describe the forward compositing");
+        // Official backward starts from final T and reconstructs the colour
+        // behind each primitive while traversing accepted contributors backwards.
+        double t = final_t, last_alpha = 0.;
+        std::array<double,3> behind{}, last_colour{};
+        for (auto it = accepted.rbegin(); it != accepted.rend(); ++it) {
+            const auto g = *it;
+            const double a = alpha[g][p];
+            t /= 1.-a;
+            double derivative = 0.;
+            for (unsigned ch = 0; ch < 3; ++ch) {
+                behind[ch] = last_alpha*last_colour[ch]+(1.-last_alpha)*behind[ch];
+                derivative += t*(colours[g][ch]-behind[ch])-final_t/(1.-a)*options.background[ch];
+                last_colour[ch] = colours[g][ch];
+            }
+            last_alpha = a;
+            derivative *= opacity[g];
+            expected[g] += derivative*derivative;
+        }
+    }
+    require(early_stops > 0, "Reverse score oracle did not exercise transmittance early stopping");
+    for (bool compact : {false,true}) {
+        options.compact_instance_storage = compact;
+        const auto actual = raster.pruning_scores(model,camera,options).to_vector();
+        for (std::size_t g = 0; g < count; ++g)
+            require(std::abs(actual[g]-expected[g]) < 2e-4+expected[g]*3e-3,
+                "Speedy-Splat score differs from independent reverse compositing oracle");
+    }
+}
+
+void test_speedy_vulkan() {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using tinytensor::Device;
+    using tinytensor::Tensor;
+    if (!tinytensor::vulkan::available()) {
+        std::cout << "SKIP: no Vulkan device for Speedy-Splat\n";
+        return;
+    }
+    for (auto mode : {photara::CameraModel::pinhole,
+                      photara::CameraModel::opencv_fisheye,
+                      photara::CameraModel::equirectangular})
+        test_speedy_reverse_compositing_oracle(Device::Vulkan, mode);
+
+    // More than one staged batch, with varying SH, anisotropy, opacity,
+    // filtering and view direction. Compare per-row scores and prune order.
+    constexpr std::size_t count = 320;
+    std::vector<float> means, scales, rotations, logits, sh, filter;
+    for (std::size_t g = 0; g < count; ++g) {
+        means.insert(means.end(), {float(int(g % 13) - 6) * .025F,
+            float(int(g % 11) - 5) * .02F, 2.F + float(g) * .004F});
+        scales.insert(scales.end(), {std::log(.07F + .0002F * g), std::log(.05F), std::log(.03F)});
+        rotations.insert(rotations.end(), {1.F, .1F, .02F * float(g % 5), 0.F});
+        logits.push_back(-3.F + .013F * g);
+        filter.push_back(.001F * float(g % 4));
+        for (std::size_t c = 0; c < 48; ++c)
+            sh.push_back(c < 3 ? .2F + .01F * float(g % 17) : .015F * float(int((g+c) % 9)-4));
+    }
+    const auto make_model = [&](Device device) {
+        GaussianModel m;
+        m.means = Tensor::from_vector(means, {count,3}, device);
+        m.log_scales = Tensor::from_vector(scales, {count,3}, device);
+        m.quaternions = Tensor::from_vector(rotations, {count,4}, device);
+        m.opacity_logits = Tensor::from_vector(logits, {count,1}, device);
+        m.sh = Tensor::from_vector(sh, {count,16,3}, device);
+        m.filter_3d = Tensor::from_vector(filter, {count,1}, device);
+        m.sh_degree = 3;
+        return m;
+    };
+    auto vk_model = make_model(Device::Vulkan);
+    const auto original_sh = vk_model.sh.to_vector();
+    const auto original_opacity = vk_model.opacity_logits.to_vector();
+    Camera camera;
+    camera.world_to_camera[0] = camera.world_to_camera[5] = camera.world_to_camera[10] = camera.world_to_camera[15] = 1.F;
+    camera.width = 63; camera.height = 35;
+    camera.fx = camera.fy = 50.F; camera.cx = 31.F; camera.cy = 17.F;
+    RasterizeOptions options;
+    options.active_sh_degree = 3;
+    options.background = {.1F,.3F,.7F};
+    // Scoring must ignore precomputed features and attachment/backward flags.
+    options.colors_precomp = Tensor::zeros({count,3}, Device::Vulkan);
+    options.copy_attachments = false;
+    options.record_backward_state = false;
+    Rasterizer vk_raster;
+    int cuda_count = 0;
+    const bool has_cuda = cudaGetDeviceCount(&cuda_count) == cudaSuccess && cuda_count > 0;
+    double max_relative = 0.;
+    std::vector<float> reference;
+    std::array<std::vector<float>,3> per_view_reference;
+    for (int view = 0; view < 3; ++view) {
+        camera.position[0] = .1F * view;
+        camera.world_to_camera[12] = -camera.position[0];
+        const auto actual = vk_raster.pruning_scores(vk_model, camera, options).to_vector();
+        require(actual.size() == count, "Vulkan Speedy-Splat lost score rows");
+        for (float s : actual) require(std::isfinite(s) && s >= 0.F, "Invalid Vulkan pruning score");
+        if (view == 0) reference = actual;
+        per_view_reference[view] = actual;
+        if (has_cuda) {
+            const auto expected = Rasterizer().pruning_scores(make_model(Device::CUDA), camera, options).to_vector();
+            for (std::size_t g = 0; g < count; ++g) {
+                max_relative = std::max(max_relative, double(std::abs(actual[g]-expected[g]) / std::max(expected[g], 1e-5F)));
+                require(std::abs(actual[g]-expected[g]) < 2e-4F + expected[g]*3e-3F,
+                        "Vulkan Speedy-Splat score differs from CUDA");
+            }
+            const auto prune_rows = [&](const std::vector<float>& scores) {
+                std::vector<int> order(count);
+                std::iota(order.begin(), order.end(), 0);
+                std::sort(order.begin(), order.end(), [&](int a, int b) {
+                    return scores[a] != scores[b] ? scores[a] < scores[b] : a < b;
+                });
+                order.resize(count * 3 / 10);
+                std::sort(order.begin(), order.end());
+                return order;
+            };
+            require(prune_rows(actual) == prune_rows(expected), "Vulkan and CUDA selected different pruning rows");
+        }
+    }
+    camera.position[0] = 0.F;
+    camera.world_to_camera[12] = 0.F;
+    const auto repeated = vk_raster.pruning_scores(vk_model, camera, options).to_vector();
+    for (std::size_t g = 0; g < count; ++g)
+        require(std::abs(repeated[g]-reference[g]) < 2e-4F+reference[g]*1e-4F,
+                "Repeated Vulkan scoring reused stale accumulation");
+    auto accumulated = Tensor::zeros({count}, Device::Vulkan);
+    for (int v = 0; v < 12; ++v) {
+        camera.position[0] = .1F * (v % 3);
+        camera.world_to_camera[12] = -camera.position[0];
+        accumulated = accumulated.add(vk_raster.pruning_scores(vk_model, camera, options));
+    }
+    const auto accumulated_values = accumulated.to_vector();
+    for (std::size_t g = 0; g < count; ++g) {
+        const float expected = 4.F * (per_view_reference[0][g] + per_view_reference[1][g] + per_view_reference[2][g]);
+        require(std::abs(accumulated_values[g]-expected) < 2e-4F + expected*1e-4F,
+                "Asynchronous Vulkan multi-view scoring differs from synchronized scores");
+    }
+    camera.position[0] = camera.world_to_camera[12] = 0.F;
+    require(vk_model.sh.to_vector() == original_sh && vk_model.opacity_logits.to_vector() == original_opacity,
+            "Vulkan scoring mutated model parameters");
+    // Reuse a live rasterizer after an all-culled view, then shrink topology.
+    camera.world_to_camera[14] = -20.F;
+    const auto culled = vk_raster.pruning_scores(vk_model, camera, options).to_vector();
+    require(std::all_of(culled.begin(), culled.end(), [](float s) { return s == 0.F; }),
+            "Vulkan all-culled scoring retained stale scores");
+    camera.world_to_camera[14] = 0.F;
+    auto rows = Tensor::from_vector(std::vector<int>{0,7,23}, {3}, Device::Vulkan);
+    auto smaller = densification::gpu_detail::select_model_rows(vk_model, rows);
+    require(vk_raster.pruning_scores(smaller, camera, options).numel() == 3,
+            "Vulkan scoring failed after topology compaction");
+    std::cout << "Vulkan Speedy-Splat score/oracle/prune-row parity passed; max_relative=" << max_relative << '\n';
+
+    const auto root = std::filesystem::temp_directory_path() / "photara_speedy_vulkan_smoke";
+    std::filesystem::create_directories(root);
+    const auto image = root / "frame.png";
+    photara::io::save_rgb_png(photara::io::RgbImage{32,32,std::vector<std::uint8_t>(32*32*3,128)}, image);
+    photara::mvs::MvsScene scene;
+    photara::mvs::MvsView view;
+    view.path = image;
+    view.width = view.src_width = view.height = view.src_height = 32;
+    view.fx = view.fy = view.src_fx = view.src_fy = 20.F;
+    view.cx = view.cy = view.src_cx = view.src_cy = 15.5F;
+    scene.views.push_back(view);
+    view.id = 1; view.pose.C.x() = .1;
+    scene.views.push_back(view);
+    for (int g = 0; g < 8; ++g) {
+        photara::mvs::DensePoint point;
+        point.position = photara::mvs::Vec3f((g-4)*.1F, 0.F, 2.F);
+        point.normal = photara::mvs::Vec3f::UnitZ();
+        point.color = photara::mvs::Vec3f::Constant(.5F);
+        point.views = {0,1};
+        scene.dense_cloud.points.push_back(point);
+    }
+    for (bool dense : {true,false}) {
+        TrainingOptions training;
+        training.backend = TrainingBackend::vulkan;
+        training.iterations = 8;
+        training.input_is_dense = dense;
+        training.sh_degree = 3;
+        training.sh_degree_interval = 1;
+        training.maximum_scale_fraction = 1.F;
+        training.densification_cap = 32;
+        training.refine_start_iter = 1;
+        training.refine_stop_iter = 8;
+        training.grow_stop_iter = 6;
+        training.refine_every = 2;
+        training.densify_gradient_threshold = -1.F;
+        training.densify_select_fraction = 1.F;
+        training.mean_noise_weight = 0.F;
+        training.speedy_pruning = true;
+        training.speedy_start = 3;
+        training.speedy_every = 2;
+        training.speedy_stop = 8;
+        training.speedy_soft_ratio = training.speedy_hard_ratio = .5F;
+        training.sh_regularization_weight = .03F;
+        training.log_interval = 1;
+        unsigned completed = 0, pruning_events = 0;
+        const auto trained = Trainer(training).train(scene, [&](const TrainingProgress& p) {
+            ++completed;
+            require(std::isfinite(p.loss), "Non-finite Vulkan loss after Speedy-Splat compaction");
+            if (p.iteration == 3 || p.iteration == 5 || p.iteration == 7) {
+                require(p.pruned_count > 0, "Vulkan Speedy-Splat did not run at its scheduled step");
+                ++pruning_events;
+            }
+            return true;
+        });
+        require(completed == 8 && pruning_events == 3 && trained.size() > 0,
+                "Vulkan Speedy-Splat training did not finish after repeated compaction");
+        if (dense) require(trained.size() == 1, "Vulkan fixed-model pruning removed the wrong number of rows");
+        require_finite(trained.sh, "Non-finite SH after Vulkan pruning/Adam updates");
+        require_finite(trained.means, "Non-finite geometry after Vulkan pruning/Adam updates");
+    }
+    std::filesystem::remove(image);
+    std::filesystem::remove(root);
+    std::cout << "Vulkan Speedy-Splat dense and ADC-IGS training tests passed\n";
+#endif
+}
+
+void benchmark_speedy_scores(const char* ply, const char* colmap, const char* images,
+                            unsigned repeats) {
+#ifdef TINYTENSOR_HAS_VULKAN
+    using namespace photara::splat;
+    using tinytensor::Device;
+    require(tinytensor::vulkan::available() && repeats > 0, "Speedy benchmark needs Vulkan and positive repeats");
+    const auto cuda_model = load_gaussians_ply(ply);
+    auto vk_model = cuda_model;
+    for (auto* tensor : {&vk_model.means, &vk_model.log_scales, &vk_model.quaternions,
+                         &vk_model.opacity_logits, &vk_model.sh, &vk_model.filter_3d,
+                         &vk_model.normal_features})
+        if (tensor->is_valid()) *tensor = tensor->to(Device::Vulkan);
+    const auto scene = load_colmap_scene(colmap, images).scene;
+    require(!scene.views.empty(), "Speedy benchmark has no cameras");
+    RasterizeOptions options;
+    options.active_sh_degree = cuda_model.sh_degree;
+    Rasterizer cuda_raster, vk_raster;
+    std::vector<Camera> cameras;
+    std::vector<std::vector<float>> vk_reference;
+    for (std::size_t v = 0; v < std::min<std::size_t>(3, scene.views.size()); ++v) {
+        auto camera = camera_from_mvs_view(scene.views[v * scene.views.size() / 3]);
+        const float scale = std::min(1.F, 960.F / std::max(camera.width, camera.height));
+        const auto width = std::max(1u, unsigned(std::round(camera.width * scale)));
+        const auto height = std::max(1u, unsigned(std::round(camera.height * scale)));
+        const float sx = float(width) / camera.width, sy = float(height) / camera.height;
+        camera.width = width; camera.height = height;
+        camera.fx *= sx; camera.cx *= sx; camera.fy *= sy; camera.cy *= sy;
+        cameras.push_back(camera);
+        std::vector<float> scores[2];
+        double ms[2]{};
+        for (unsigned backend = 0; backend < 2; ++backend) {
+            auto& raster = backend == 0 ? cuda_raster : vk_raster;
+            const auto& model = backend == 0 ? cuda_model : vk_model;
+            const auto sync = [&] {
+                if (backend == 0) require(cudaDeviceSynchronize() == cudaSuccess, "CUDA score benchmark failed");
+                else tinytensor::vulkan::synchronize();
+            };
+            for (unsigned warm = 0; warm < 3; ++warm) {
+                auto score = raster.pruning_scores(model, camera, options);
+                sync();
+            }
+            tinytensor::Tensor score;
+            const auto start = std::chrono::steady_clock::now();
+            for (unsigned i = 0; i < repeats; ++i) {
+                score = raster.pruning_scores(model, camera, options);
+                sync();
+            }
+            ms[backend] = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()/repeats;
+            scores[backend] = score.to_vector();
+        }
+        vk_reference.push_back(scores[1]);
+        double error = 0., magnitude = 0.;
+        for (std::size_t g = 0; g < cuda_model.size(); ++g) {
+            require(std::isfinite(scores[1][g]) && scores[1][g] >= 0.F, "Non-finite real-scene Vulkan score");
+            error += std::abs(scores[0][g]-scores[1][g]);
+            magnitude += scores[0][g];
+        }
+        const auto drops = [&](const std::vector<float>& s) {
+            std::vector<int> order(s.size());
+            std::iota(order.begin(), order.end(), 0);
+            const auto n = std::size_t(.3 * s.size());
+            std::partial_sort(order.begin(), order.begin()+n, order.end(), [&](int a, int b) {
+                return s[a] != s[b] ? s[a] < s[b] : a < b;
+            });
+            order.resize(n); std::sort(order.begin(), order.end());
+            return order;
+        };
+        const auto a = drops(scores[0]), b = drops(scores[1]);
+        std::vector<int> difference;
+        std::set_symmetric_difference(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(difference));
+        std::cout << "speedy_benchmark gaussians=" << cuda_model.size() << " view=" << v
+                  << " resolution=" << width << 'x' << height << " repeats=" << repeats
+                  << " cuda_ms=" << ms[0] << " vulkan_ms=" << ms[1]
+                  << " score_relative_l1=" << error/std::max(magnitude,1e-20)
+                  << " prune_rows_symmetric_difference=" << difference.size() << '\n' << std::flush;
+    }
+    auto accumulated = tinytensor::Tensor::zeros({vk_model.size()}, Device::Vulkan);
+    for (unsigned repeat = 0; repeat < 3; ++repeat)
+        for (const auto& camera : cameras)
+            accumulated = accumulated.add(vk_raster.pruning_scores(vk_model, camera, options));
+    const auto summed = accumulated.to_vector();
+    double error = 0., magnitude = 0.;
+    for (std::size_t g = 0; g < vk_model.size(); ++g) {
+        double expected = 0.;
+        for (const auto& score : vk_reference) expected += 3. * score[g];
+        error += std::abs(summed[g] - expected);
+        magnitude += expected;
+    }
+    const double relative_l1 = error / std::max(magnitude,1e-20);
+    require(relative_l1 < 1e-4, "Real-scene asynchronous multi-view scoring changed scores");
+    std::cout << "speedy_benchmark_async views=" << cameras.size()*3
+              << " score_relative_l1=" << relative_l1 << '\n';
+#endif
+}
+
+#include "splat_geometry_vulkan.hpp"
+
 int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string(argv[1]) == "--vulkan-geometry-only") {
+            std::cout << "Vulkan depth-normal oracle\n";
+            test_gggs_depth_normal_consistency(tinytensor::Device::Vulkan);
+            std::cout << "Vulkan depth-normal finite differences\n";
+            test_gggs_depth_normal_parameter_gradients(tinytensor::Device::Vulkan);
+            std::cout << "Vulkan planar MV oracle\n";
+            test_gggs_multi_view_geometry_and_ncc(tinytensor::Device::Vulkan);
+            std::cout << "Vulkan complete MV gradient chain\n";
+            test_vulkan_geometry_chain();
+            std::cout << "Vulkan geometry trainer and mesh\n";
+            test_vulkan_geometry_trainer();
+            std::cout << "Vulkan geometry tests passed\n";
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--speedy-vulkan-only") {
+            test_speedy_vulkan();
+            return 0;
+        }
         int device_count = 0;
         if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
             std::cout << "SKIP: no CUDA device\n";
+            return 0;
+        }
+        if (argc == 6 && std::string(argv[1]) == "--speedy-bench") {
+            benchmark_speedy_scores(argv[2], argv[3], argv[4], unsigned(std::stoul(argv[5])));
             return 0;
         }
         if (argc == 5 && std::string(argv[1]) == "--occupancy-memory-bench") {
@@ -7245,6 +7806,16 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
+        if (argc > 1 && std::string(argv[1]) == "--simplify-only") {
+            test_nanogs_simplify();
+            std::cout << "Simplify tests passed\n";
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--focus-mask-only") {
+            test_focus_view_mask_cuda();
+            std::cout << "Focus mask tests passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--pam-only") {
             test_pam_cuda_field();
             test_normal_field_parameterization_and_occupancy();
@@ -7282,6 +7853,23 @@ int main(int argc, char** argv) {
             test_sh_adam_quant();
             test_vulkan_sh_adam_quant();
             test_vulkan_fused_sh_adam();
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--speedy-only") {
+            test_forward_backward();
+            test_speedy_reverse_compositing_oracle();
+            test_speedy_vulkan();
+            for (auto backend : {photara::splat::TrainingBackend::cuda, photara::splat::TrainingBackend::vulkan}) {
+                photara::splat::TrainingOptions invalid;
+                invalid.backend = backend;
+                invalid.speedy_pruning = true;
+                invalid.speedy_every = 0;
+                bool rejected = false;
+                try { photara::splat::Trainer trainer(invalid); }
+                catch (const std::invalid_argument&) { rejected = true; }
+                require(rejected, "Speedy-Splat accepted a zero interval");
+            }
+            std::cout << "Speedy-Splat tests passed\n";
             return 0;
         }
         test_thin_splat_rgb_backward();
@@ -7323,6 +7911,8 @@ int main(int argc, char** argv) {
         test_gggs_multi_view_geometry_and_ncc();
         test_geometry_stability_scheduler();
         test_forward_backward();
+        test_speedy_reverse_compositing_oracle();
+        test_speedy_vulkan();
         test_compact_pixel_snapshots();
         test_sh_adam_quant();
         test_vulkan_sh_adam_quant();
